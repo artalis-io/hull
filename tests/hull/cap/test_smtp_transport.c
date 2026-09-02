@@ -1568,4 +1568,102 @@ UTEST(smtp_tls, starttls_success)
     ASSERT_EQ(p.handshake_ok, 1);
 }
 
+/* After a failed handshake the transport must be fail-closed: TLS not active, and
+ * the stream is cancelled so NO plaintext read/write can proceed (no fallback),
+ * and free confirms teardown exactly once. Shared by the failure tests. */
+static void tls_assert_failed_closed(int *utest_result, HlSmtpTransport *t)
+{
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 500), -1);
+    ASSERT_EQ(hl_smtp_transport_write(t, "MAIL FROM:<a@b>\r\n", 16, 500), -1);
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);   /* teardown confirmed exactly once */
+}
+
+/* Hostname mismatch fails closed: the server leaf is CN=localhost, so verifying a
+ * different hostname rejects the handshake. No plaintext fallback.
+ * REVERT PROOF: verify "localhost" (the implicit_tls_success host) and it passes. */
+UTEST(smtp_tls, hostname_mismatch_fails_closed)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_implicit_tls(t, "smtp.wrong.example", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, -1);
+    tls_assert_failed_closed(utest_result, t);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+}
+
+/* Unknown CA fails closed: the client trusts CA2 but the server presents a leaf
+ * signed by CA1, so chain verification fails. No plaintext fallback.
+ * REVERT PROOF: trust HL_TLS_CA1_PEM and it passes. */
+UTEST(smtp_tls, unknown_ca_fails_closed)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA2_PEM, sizeof HL_TLS_CA2_PEM);
+    int rc = hl_smtp_transport_implicit_tls(t, "localhost", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, -1);
+    tls_assert_failed_closed(utest_result, t);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+}
+
+/* The TLS handshake respects the post-resolution operation deadline (Dop): the
+ * peer accepts but never answers the ClientHello, so the client handshake pump
+ * must terminate at Dop, NOT at implicit_tls's own (much larger) stage timeout.
+ * Connect with a 600 ms Dop; call implicit_tls with a 10 s stage budget; the
+ * handshake must fail in well under that.
+ * REVERT PROOF: if the pump did not clamp the stage to Dop, this would run ~10 s
+ * (the stage budget) and the elapsed bound below would fail. */
+UTEST(smtp_tls, handshake_timeout_respects_dop)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.stall_handshake = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    /* 600 ms connect timeout -> Dop = connect + 600 ms. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 600,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+
+    uint64_t t0 = kl_monotonic_ms();
+    int rc = hl_smtp_transport_implicit_tls(t, "localhost", &cfg, 10000); /* 10 s stage */
+    uint64_t elapsed = kl_monotonic_ms() - t0;
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_TRUE(elapsed < 3000);          /* bounded by the 600 ms Dop, not the 10 s stage */
+    tls_assert_failed_closed(utest_result, t);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+    ASSERT_EQ(p.reached_handshake, 1);    /* the client did send its ClientHello */
+}
+
 UTEST_MAIN()
