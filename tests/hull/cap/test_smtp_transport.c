@@ -33,6 +33,7 @@
 #include "hull/cap/smtp.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
@@ -1072,6 +1073,229 @@ UTEST(smtp_dop, cancellation_during_resolution_no_socket_attempt)
 
     ASSERT_TRUE(t == NULL);              /* cancelled -> NULL (connect_failed at the caller) */
     ASSERT_EQ(g_res_checkpoints, 0);     /* returned before any pump -> before any socket attempt */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Provider / attempt hook - deterministic pending-connect Dop and a real
+ *  Happy-Eyeballs stagger, with no environmental skip.
+ *
+ *  The fake provider (smtp_test_socket_provider) hands the connect op real fds
+ *  the event loop can watch, keeping ONE clock domain: a "pending" address is a
+ *  socketpair whose send buffer is filled so its fd is never write-ready (both
+ *  epoll and kqueue respect a full send buffer), so the attempt stays pending
+ *  under kernel semantics - not a timing hack. "succeed" / "fail" leave the fd
+ *  writable and let get_so_error report SO_ERROR. Attempts are recorded (address
+ *  index + monotonic timestamp) so the stagger can be observed.
+ * ════════════════════════════════════════════════════════════════════ */
+
+enum { FK_PENDING = 0, FK_SUCCEED = 1, FK_FAIL = 2 };
+
+typedef struct { int used; int a; int b; int disp; int idx; } FkSlot;
+static FkSlot   g_fk[32];
+static int      g_fk_disp[KL_CONNECT_MAX_ADDRS];  /* per-address disposition */
+static int      g_fk_order[KL_CONNECT_MAX_ADDRS]; /* attempt order (address index) */
+static uint64_t g_fk_ts[KL_CONNECT_MAX_ADDRS];    /* attempt timestamps (monotonic ms) */
+static int      g_fk_n;                            /* number of connect() attempts */
+static int      g_fk_succeeded_idx;               /* address index that read SO_ERROR==0, or -1 */
+
+static void fk_reset(void)
+{
+    memset(g_fk, 0, sizeof g_fk);
+    memset(g_fk_disp, 0, sizeof g_fk_disp);
+    memset(g_fk_order, 0, sizeof g_fk_order);
+    memset(g_fk_ts, 0, sizeof g_fk_ts);
+    g_fk_n = 0;
+    g_fk_succeeded_idx = -1;
+}
+
+static FkSlot *fk_slot_for(int a)
+{
+    for (size_t i = 0; i < sizeof g_fk / sizeof g_fk[0]; i++)
+        if (g_fk[i].used && g_fk[i].a == a) return &g_fk[i];
+    return NULL;
+}
+
+static KlSocketHandle fk_socket(void *c, int d, int ty, int p)
+{
+    (void)c; (void)d; (void)ty; (void)p;
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return KL_INVALID_SOCKET;
+    int small = 2048;
+    setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    for (size_t i = 0; i < sizeof g_fk / sizeof g_fk[0]; i++)
+        if (!g_fk[i].used) {
+            g_fk[i].used = 1; g_fk[i].a = sv[0]; g_fk[i].b = sv[1];
+            g_fk[i].disp = -1; g_fk[i].idx = -1;
+            return (KlSocketHandle)sv[0];
+        }
+    close(sv[0]); close(sv[1]);
+    return KL_INVALID_SOCKET;
+}
+static int  fk_set_nb(void *c, KlSocketHandle fd)
+{ (void)c; int a = (int)fd; int fl = fcntl(a, F_GETFL, 0); return fcntl(a, F_SETFL, fl | O_NONBLOCK); }
+static int  fk_set_int(void *c, KlSocketHandle fd, int on) { (void)c; (void)fd; (void)on; return 0; }
+static void fk_set_void(void *c, KlSocketHandle fd) { (void)c; (void)fd; }
+static int  fk_get_local(void *c, KlSocketHandle fd, KlSockAddr *out)
+{ (void)c; (void)fd; uint8_t ip[4] = {127,0,0,1}; return kl_sockaddr_from_ipv4(out, ip, 0); }
+
+static int fk_connect(void *c, KlSocketHandle fd, const KlSockAddr *addr)
+{
+    (void)c;
+    int a = (int)fd;
+    int idx = (addr->addr_len == 4) ? (addr->u.ip[3] - 1) : 0;
+    if (idx < 0 || idx >= KL_CONNECT_MAX_ADDRS) idx = 0;
+    int disp = g_fk_disp[idx];
+    if (g_fk_n < KL_CONNECT_MAX_ADDRS) {
+        g_fk_order[g_fk_n] = idx;
+        g_fk_ts[g_fk_n]    = kl_monotonic_ms();
+        g_fk_n++;
+    }
+    FkSlot *s = fk_slot_for(a);
+    if (s) { s->disp = disp; s->idx = idx; }
+    if (disp == FK_PENDING) {
+        /* Fill the send buffer so 'a' never becomes write-ready (the attempt stays
+         * pending under kernel semantics until the Dop / stagger timer fires). */
+        char buf[2048];
+        memset(buf, 'x', sizeof buf);
+        int fl = fcntl(a, F_GETFL, 0); fcntl(a, F_SETFL, fl | O_NONBLOCK);
+        while (write(a, buf, sizeof buf) > 0) { }
+    }
+    /* Report async-in-progress; a writable 'a' (succeed/fail) then drives
+     * co_connect_watcher -> get_so_error. */
+    errno = EINPROGRESS;
+    return -1;
+}
+static int fk_get_so_error(void *c, KlSocketHandle fd, int *out)
+{
+    (void)c;
+    FkSlot *s = fk_slot_for((int)fd);
+    if (s && s->disp == FK_FAIL) { *out = ECONNREFUSED; }
+    else { *out = 0; if (s) g_fk_succeeded_idx = s->idx; }
+    return 0;
+}
+static kl_ssize_t fk_send(void *c, KlSocketHandle fd, const void *b, size_t n)
+{ (void)c; return send((int)fd, b, n, 0); }
+static kl_ssize_t fk_recv(void *c, KlSocketHandle fd, void *b, size_t n)
+{ (void)c; return recv((int)fd, b, n, 0); }
+static kl_ssize_t fk_recv_peek(void *c, KlSocketHandle fd, void *b, size_t n)
+{ (void)c; return recv((int)fd, b, n, MSG_PEEK); }
+static int fk_close(void *c, KlSocketHandle fd)
+{
+    (void)c; int a = (int)fd;
+    FkSlot *s = fk_slot_for(a);
+    if (s) { close(s->b); s->used = 0; }
+    return close(a);
+}
+
+static const KlSocketOps FK_OPS = {
+    .set_nonblocking = fk_set_nb,
+    .set_blocking    = NULL,
+    .set_cloexec     = fk_set_void,
+    .set_nosigpipe   = fk_set_void,
+    .set_reuseaddr   = fk_set_int,
+    .set_reuseport   = fk_set_int,
+    .set_ipv6only    = fk_set_int,
+    .set_tcp_nodelay = fk_set_int,
+    .set_cork        = fk_set_int,
+    .socket          = fk_socket,
+    .connect         = fk_connect,
+    .close           = fk_close,
+    .get_local_addr  = fk_get_local,
+    .get_so_error    = fk_get_so_error,
+    .send            = fk_send,
+    .recv            = fk_recv,
+    .recv_peek       = fk_recv_peek,
+};
+static const KlSocketProvider FK_PROVIDER = { .ops = &FK_OPS, .context = NULL };
+
+/* Inject N addresses 10.11.12.(i+1) in order; disposition comes from g_fk_disp. */
+static int g_fk_naddr;
+static int fk_resolve(HlSmtpTransport *t, const char *host, int port)
+{
+    (void)host;
+    for (int i = 0; i < g_fk_naddr && i < KL_CONNECT_MAX_ADDRS; i++) {
+        uint8_t ip[4] = { 10, 11, 12, (uint8_t)(i + 1) };
+        if (kl_sockaddr_from_ipv4(&t->addrs[i], ip, (uint16_t)port) != 0) return i;
+    }
+    return g_fk_naddr;
+}
+
+/* Deterministic pending-connect Dop: one address, permanently pending (filled
+ * send buffer). The connect-deadline timer (armed with Dop-now) fires and the
+ * connect fails with deadline_expired set - no network, no environmental skip.
+ * REVERT PROOF: neuter the Dop classification (as in step 1) and dop_expired is
+ * lost; more directly, this can only pass because the pending fd never completes,
+ * which the filled-send-buffer guarantees on both epoll and kqueue. */
+UTEST(smtp_dop, pending_connect_dop_expires_deterministically)
+{
+    fk_reset();
+    g_fk_naddr   = 1;
+    g_fk_disp[0] = FK_PENDING;
+    smtp_test_resolve         = fk_resolve;
+    smtp_test_socket_provider = &FK_PROVIDER;
+
+    const unsigned watchdog_sec = 30;
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired);
+    alarm(watchdog_sec);
+
+    uint64_t t0 = kl_monotonic_ms();
+    int dop = 0;
+    /* 400 ms Dop: short, deterministic, well under the watchdog. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("mail.example.test", 25, 400,
+                                                   NULL, NULL, NULL, &dop);
+    uint64_t elapsed = kl_monotonic_ms() - t0;
+
+    alarm(0);
+    signal(SIGALRM, prev);
+    smtp_test_resolve         = NULL;
+    smtp_test_socket_provider = NULL;
+
+    ASSERT_TRUE(t == NULL);              /* connect failed */
+    ASSERT_EQ(dop, 1);                   /* by the post-resolution operation deadline */
+    ASSERT_GE(g_fk_n, 1);                /* at least one attempt was made */
+    ASSERT_TRUE(elapsed < 5000);         /* bounded by Dop, not the stage/OS default */
+}
+
+/* Real Happy-Eyeballs stagger: address 0 pending, address 1 succeeds. The RFC 8305
+ * Connection Attempt Delay timer (~250 ms) must fire and start address 1 while
+ * address 0 is still pending; address 1 then wins. Observed via attempt order +
+ * the inter-attempt gap (a real timer, on the real clock).
+ * REVERT PROOF: drop SMTP_CONNECT_ATTEMPT_DELAY_MS toward 0 and the gap assertion
+ * fails; make address 1 FK_FAIL and the winner assertion fails. */
+UTEST(smtp_dop, happy_eyeballs_stagger_starts_second_address)
+{
+    fk_reset();
+    g_fk_naddr   = 2;
+    g_fk_disp[0] = FK_PENDING;
+    g_fk_disp[1] = FK_SUCCEED;
+    smtp_test_resolve         = fk_resolve;
+    smtp_test_socket_provider = &FK_PROVIDER;
+
+    const unsigned watchdog_sec = 30;
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired);
+    alarm(watchdog_sec);
+
+    /* Generous Dop so the ~250 ms stagger (not the deadline) drives address 2. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("mail.example.test", 25, 5000,
+                                                   NULL, NULL, NULL, NULL);
+
+    alarm(0);
+    signal(SIGALRM, prev);
+    smtp_test_resolve         = NULL;
+    smtp_test_socket_provider = NULL;
+
+    ASSERT_TRUE(t != NULL);              /* address 1 won the race */
+    ASSERT_EQ(g_fk_n, 2);               /* both addresses were attempted */
+    ASSERT_EQ(g_fk_order[0], 0);        /* address 0 first */
+    ASSERT_EQ(g_fk_order[1], 1);        /* address 1 second */
+    ASSERT_EQ(g_fk_succeeded_idx, 1);   /* address 1 is the one that connected */
+    /* The stagger timer fired before address 1 started: the gap is around the
+     * ~250 ms Connection Attempt Delay (allow scheduling slack). */
+    uint64_t gap = g_fk_ts[1] - g_fk_ts[0];
+    ASSERT_GE(gap, (uint64_t)(SMTP_CONNECT_ATTEMPT_DELAY_MS - 50));
+
+    hl_smtp_transport_free(t);
 }
 
 UTEST_MAIN()

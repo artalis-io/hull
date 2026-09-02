@@ -83,20 +83,39 @@ static const KlSocketProvider *socket_provider(void)
     return g_sp;
 }
 
+#ifdef HL_SMTP_TEST_HOOKS
+/* Test-only fault-injection provider (compiled ONLY under -DHL_SMTP_TEST_HOOKS,
+ * absent from the production object). When non-NULL it REPLACES the POSIX provider
+ * for every sp_* op, so a test can drive connect attempts to pending / succeed /
+ * fail per address and observe attempt order + timestamps. It is a COHERENT socket
+ * seam: it hands the connect op real fds the event loop can watch, so the Happy-
+ * Eyeballs stagger timer and the Dop connect-deadline timer fire on the same real
+ * clock as production (never a divergent virtual clock). */
+const KlSocketProvider *smtp_test_socket_provider;
+#endif
+
+static const KlSocketProvider *active_sp(void)
+{
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_socket_provider) return smtp_test_socket_provider;
+#endif
+    return g_sp;
+}
+
 static KlSocketHandle sp_socket(int domain, int type, int protocol)
-{ return g_sp->ops->socket(g_sp->context, domain, type, protocol); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->socket(sp->context, domain, type, protocol); }
 static int sp_set_nonblocking(KlSocketHandle fd)
-{ return g_sp->ops->set_nonblocking(g_sp->context, fd); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->set_nonblocking(sp->context, fd); }
 static int sp_connect(KlSocketHandle fd, const KlSockAddr *a)
-{ return g_sp->ops->connect(g_sp->context, fd, a); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->connect(sp->context, fd, a); }
 static int sp_get_so_error(KlSocketHandle fd, int *out)
-{ return g_sp->ops->get_so_error(g_sp->context, fd, out); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->get_so_error(sp->context, fd, out); }
 static kl_ssize_t sp_send(KlSocketHandle fd, const void *b, size_t n)
-{ return g_sp->ops->send(g_sp->context, fd, b, n); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->send(sp->context, fd, b, n); }
 static kl_ssize_t sp_recv(KlSocketHandle fd, void *b, size_t n)
-{ return g_sp->ops->recv(g_sp->context, fd, b, n); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->recv(sp->context, fd, b, n); }
 static int sp_close(KlSocketHandle fd)
-{ return g_sp->ops->close(g_sp->context, fd); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->close(sp->context, fd); }
 
 static int errno_would_block(void) { return errno == EAGAIN || errno == EWOULDBLOCK; }
 
