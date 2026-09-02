@@ -594,6 +594,42 @@ cleanup:
     return ret;
 }
 
+/* Emit the single "denied" audit record for a host-allowlist rejection. Shared by
+ * the sync path (hl_cap_smtp_send) and the model-2 async binding so authorization
+ * is audited exactly once, on the submit side. */
+void hl_smtp_audit_denied(const HlSmtpMessage *msg)
+{
+    ShJsonWriter w = hl_audit_begin("smtp.send");
+    sh_json_write_kv_string(&w, "host", msg->host);
+    sh_json_write_kv_string(&w, "from", msg->from);
+    sh_json_write_kv_string(&w, "to", msg->to);
+    sh_json_write_kv_string(&w, "result", "denied");
+    hl_audit_end(&w);
+}
+
+/* Emit the single completion audit record. The FROZEN metadata (section 3):
+ * @p schedule (a scheduling-failure tag) and @p terminal (a cancel/deadline tag)
+ * are emitted ONLY when non-NULL; r->teardown_leaked adds teardown:leaked. Shared
+ * by the sync path, the async scheduling-failure path, and the async completion
+ * path so every send is audited exactly once. */
+void hl_smtp_audit_complete(const HlSmtpMessage *msg, const HlSmtpResult *r,
+                            const char *schedule, const char *terminal)
+{
+    ShJsonWriter w = hl_audit_begin("smtp.send");
+    sh_json_write_kv_string(&w, "host", msg->host);
+    sh_json_write_kv_string(&w, "from", msg->from);
+    sh_json_write_kv_string(&w, "to", msg->to);
+    sh_json_write_kv_string(&w, "subject", msg->subject);
+    sh_json_write_kv_int(&w, "result", r->rc);
+    if (schedule)
+        sh_json_write_kv_string(&w, "schedule", schedule);
+    if (terminal)
+        sh_json_write_kv_string(&w, "terminal", terminal);
+    if (r->teardown_leaked)
+        sh_json_write_kv_string(&w, "teardown", "leaked");
+    hl_audit_end(&w);
+}
+
 int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
                      const char **err_msg)
 {
@@ -612,12 +648,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     if (hl_smtp_check_host(cfg, msg->host) != 0) {
         log_warn("smtp: host '%s' not in allowlist", msg->host);
         if (err_msg) *err_msg = "host_not_allowed";
-        ShJsonWriter w = hl_audit_begin("smtp.send");
-        sh_json_write_kv_string(&w, "host", msg->host);
-        sh_json_write_kv_string(&w, "from", msg->from);
-        sh_json_write_kv_string(&w, "to", msg->to);
-        sh_json_write_kv_string(&w, "result", "denied");
-        hl_audit_end(&w);
+        hl_smtp_audit_denied(msg);
         return -1;
     }
 
@@ -632,16 +663,6 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         *err_msg = r.token;
 
     /* Completion phase (event-loop side in model 2): the single audit record. */
-    {
-        ShJsonWriter w = hl_audit_begin("smtp.send");
-        sh_json_write_kv_string(&w, "host", msg->host);
-        sh_json_write_kv_string(&w, "from", msg->from);
-        sh_json_write_kv_string(&w, "to", msg->to);
-        sh_json_write_kv_string(&w, "subject", msg->subject);
-        sh_json_write_kv_int(&w, "result", r.rc);
-        if (r.teardown_leaked)
-            sh_json_write_kv_string(&w, "teardown", "leaked");
-        hl_audit_end(&w);
-    }
+    hl_smtp_audit_complete(msg, &r, NULL, NULL);
     return r.rc;
 }

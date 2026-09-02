@@ -76,6 +76,18 @@ static void resolved_connect_failed(HlSmtpSubmitOutcome *out, HlSmtpSchedule sch
     out->ctx = NULL;
 }
 
+const char *hl_smtp_schedule_str(HlSmtpSchedule schedule)
+{
+    switch (schedule) {
+        case HL_SMTP_SCHED_POOL_UNAVAILABLE: return "pool_unavailable";
+        case HL_SMTP_SCHED_CAP_REACHED:      return "cap_reached";
+        case HL_SMTP_SCHED_QUEUE_FULL:       return "queue_full";
+        case HL_SMTP_SCHED_SUSPEND_FAILED:   return "suspend_failed";
+        case HL_SMTP_SCHED_NONE:             return NULL;
+    }
+    return NULL;
+}
+
 /* ── entry ───────────────────────────────────────────────────────────── */
 
 void hl_smtp_submit(const HlSmtpSubmitReq *req, HlSmtpSubmitOutcome *out)

@@ -87,6 +87,19 @@ typedef struct HlSmtpResult {
 int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
                     HlSmtpResult *out);
 
+/* ── Audit helpers (single record; shared sync + model-2 async) ──────── */
+
+/** Emit the "denied" audit record for a host-allowlist rejection (submit side). */
+void hl_smtp_audit_denied(const HlSmtpMessage *msg);
+
+/**
+ * Emit the single completion audit record. @p schedule (a scheduling-failure tag)
+ * and @p terminal (a cancel/deadline tag) are written only when non-NULL;
+ * r->teardown_leaked adds teardown:leaked. Audited exactly once per send.
+ */
+void hl_smtp_audit_complete(const HlSmtpMessage *msg, const HlSmtpResult *r,
+                            const char *schedule, const char *terminal);
+
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
 
 /** Base64-encode src into dst. Returns output length or -1 on error. */

@@ -122,6 +122,11 @@ typedef struct {
  * the transport itself. Always fills *out; takes ownership of req->inputs. */
 void hl_smtp_submit(const HlSmtpSubmitReq *req, HlSmtpSubmitOutcome *out);
 
+/* Map a scheduling failure to its FROZEN audit tag (section 3), or NULL for
+ * HL_SMTP_SCHED_NONE (a suspended op / internal failure emits no schedule tag).
+ * The returned string is a static literal. */
+const char *hl_smtp_schedule_str(HlSmtpSchedule schedule);
+
 /* ── caller-owned ctx handling (resume path + shutdown sweep) ─────────── */
 
 /* Read the worker op's published terminal (acquire). Returns 1 + fills *out iff
