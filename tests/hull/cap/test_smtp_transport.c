@@ -879,4 +879,138 @@ UTEST(smtp_connect, blackhole_timeout_detaches)
     ASSERT_TRUE(t == NULL);
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ *  Post-resolution operation deadline (Dop, section 8) - deterministic
+ *  deadline-versus-cancel precedence.
+ *
+ *  The frozen precedence (pump_check): a completed predicate, THEN an expired
+ *  Dop, THEN cancellation, THEN the stage budget. So when Dop and cancellation
+ *  are BOTH ready at one pump checkpoint, Dop wins and the terminal is tagged
+ *  post_resolution_deadline (never cancelled). These tests exercise that exact
+ *  same-checkpoint race deterministically, on ONE clock domain (the real
+ *  kl_monotonic_ms()): no virtual clock is advanced independently of Keel's
+ *  timers - the checkpoint is simply driven to a state where both conditions
+ *  hold at the identical evaluation.
+ *
+ *  REVERT PROOF for both: reorder pump_check so the cancel branch precedes the
+ *  Dop branch and both assertions on dop_expired==1 flip to failure (cancel
+ *  would win the race and the terminal would be mis-tagged terminal:cancelled).
+ * ════════════════════════════════════════════════════════════════════ */
+
+static int dop_never_done(HlSmtpTransport *t) { (void)t; return 0; }
+static int dop_always_cancel(void *user) { (void)user; return 1; }
+
+/* Deterministic core: call the frozen precedence classifier directly with Dop
+ * and cancellation BOTH ready at one checkpoint. No event loop, no sockets, no
+ * wall-clock dependence - the definitive same-checkpoint proof. */
+UTEST(smtp_dop, precedence_dop_beats_cancel_at_one_checkpoint)
+{
+    HlSmtpTransport t;
+    memset(&t, 0, sizeof t);
+    t.dop_ms      = kl_monotonic_ms();   /* already reached: pump_check re-reads now >= dop_ms */
+    t.cancel_poll = dop_always_cancel;   /* cancellation ALSO ready at this checkpoint */
+    t.cancel_user = NULL;
+
+    /* Stage budget far in the future so only Dop-vs-cancel can terminate. */
+    int c = pump_check(&t, dop_never_done, UINT64_MAX);
+
+    ASSERT_EQ(c, -1);                    /* terminate */
+    ASSERT_EQ(t.dop_expired, 1);         /* Dop classified - NOT cancellation */
+}
+
+/* Live-pump variant: the same race, but reached through the real pump loop via
+ * the checkpoint hook (which also validates the hook that the resolver/provider
+ * tests build on). A peer accepts then withholds the greeting, so read_reply
+ * pumps; the hook, once armed, expires Dop AND arms cancellation at the TOP of a
+ * single pump_check so both are ready at that one checkpoint. */
+static volatile int g_dop_live_arm;      /* test arms after connect completes */
+static volatile int g_dop_live_armed;    /* latch: the hook fires the race once */
+static volatile int g_dop_live_cancel;   /* what the transport's cancel_poll returns */
+static int          g_dop_live_armed_at; /* checkpoint index the hook armed at (observe) */
+
+static int dop_live_cancel_poll(void *user) { (void)user; return g_dop_live_cancel; }
+
+static void dop_live_checkpoint(HlSmtpTransport *t, unsigned idx)
+{
+    if (g_dop_live_arm && !g_dop_live_armed) {
+        /* Align both readiness conditions onto THIS checkpoint, on the real
+         * clock: overwrite Dop to now (expired - pump_check re-reads now >= dop_ms
+         * microseconds later) and make the pending cancel ready. */
+        g_dop_live_armed   = 1;
+        t->dop_ms          = kl_monotonic_ms();
+        g_dop_live_cancel  = 1;
+        g_dop_live_armed_at = (int)idx;
+    }
+}
+
+/* A peer that accepts and holds the connection open WITHOUT greeting, so the
+ * client's read_reply keeps pumping (giving the hook checkpoints to fire on). */
+static void *mp_accept_and_hold_thread(void *arg)
+{
+    MockPeer *m = arg;
+    int c = accept(m->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    m->accepted = 1;
+    /* Withhold the greeting; drain anything the client sends until it closes. */
+    char buf[4096];
+    for (;;) {
+        ssize_t n = read(c, buf, sizeof buf);
+        if (n <= 0) break;
+    }
+    close(c);
+    return NULL;
+}
+
+static void dop_live_watchdog_fired(int sig)
+{
+    (void)sig;
+    static const char msg[] =
+        "FATAL: precedence_dop_beats_cancel_live_pump watchdog fired - "
+        "read_reply did not return within the watchdog window\n";
+    ssize_t w = write(STDERR_FILENO, msg, sizeof msg - 1);
+    (void)w;
+    _exit(70);
+}
+
+UTEST(smtp_dop, precedence_dop_beats_cancel_live_pump)
+{
+    MockPeer m;
+    ASSERT_EQ(mp_start(&m, mp_accept_and_hold_thread), 0);
+
+    /* Generous connect/read timeout: the DEADLINE under test is Dop, armed by the
+     * hook, not this stage budget. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000,
+                                                   dop_live_cancel_poll, NULL,
+                                                   NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+
+    /* Arm the same-checkpoint race only now that connect is done. */
+    g_dop_live_armed    = 0;
+    g_dop_live_cancel   = 0;
+    g_dop_live_armed_at = -1;
+    smtp_test_checkpoint = dop_live_checkpoint;
+    g_dop_live_arm      = 1;
+
+    const unsigned watchdog_sec = 30;    /* finite backstop for a hanging regression */
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired);
+    alarm(watchdog_sec);
+
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    int code = hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000);
+
+    alarm(0);
+    signal(SIGALRM, prev);
+
+    /* Disarm the hook BEFORE any further pumps (shutdown/free pump too). */
+    smtp_test_checkpoint = NULL;
+    g_dop_live_arm       = 0;
+
+    ASSERT_EQ(code, -1);                 /* read terminated */
+    ASSERT_EQ(hl_smtp_transport_dop_expired(t), 1);  /* by Dop, not cancellation */
+    ASSERT_TRUE(g_dop_live_armed_at >= 0);           /* the hook did fire the race */
+
+    hl_smtp_transport_free(t);
+    mp_join(&m);
+}
+
 UTEST_MAIN()

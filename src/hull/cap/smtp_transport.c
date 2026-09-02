@@ -903,6 +903,24 @@ static const KlConnectOpHooks SMTP_CONNECT_HOOKS = {
 
 typedef int (*DonePred)(HlSmtpTransport *t);
 
+#ifdef HL_SMTP_TEST_HOOKS
+/* ── Test-only pump seam (compiled ONLY under -DHL_SMTP_TEST_HOOKS) ────────────
+ * ABSENT from the production object. It lets unit tests drive the connect state
+ * machine deterministically WITHOUT diverging from Keel's clock: every deadline
+ * here still reads the real kl_monotonic_ms() (ONE clock domain), and the hook
+ * only OBSERVES each pump checkpoint and/or ALIGNS two readiness conditions (Dop
+ * expiry + cancellation) onto a single checkpoint. It never advances a private
+ * clock (which would let a pump deadline expire while a Keel connect / Happy-
+ * Eyeballs timer, still on real time, never fires - an impossible runtime state).
+ *
+ * When non-NULL, smtp_test_checkpoint fires at the TOP of every pump_check with
+ * the transport and a monotonically-increasing checkpoint index, BEFORE the frozen
+ * precedence is evaluated - so a test can record attempt/timestamp state or arm a
+ * same-checkpoint deadline-vs-cancel race. */
+void (*smtp_test_checkpoint)(HlSmtpTransport *t, unsigned idx);
+static unsigned smtp_test_checkpoint_seq;
+#endif
+
 /* One classification pass at a pump check point, in the FROZEN precedence
  * (section 8):
  *   1. a completed predicate wins (deliver the stage result);
@@ -913,6 +931,10 @@ typedef int (*DonePred)(HlSmtpTransport *t);
  * Returns 1 = done (pump success), -1 = terminate, 0 = keep pumping. */
 static int pump_check(HlSmtpTransport *t, DonePred done, uint64_t deadline_ms)
 {
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_checkpoint)
+        smtp_test_checkpoint(t, smtp_test_checkpoint_seq++);
+#endif
     if (done(t))
         return 1;
     uint64_t now = kl_monotonic_ms();
