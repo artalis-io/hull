@@ -42,6 +42,7 @@ typedef struct HlFsConfig HlFsConfig;
 typedef struct HlEnvConfig HlEnvConfig;
 typedef struct HlHttpConfig HlHttpConfig;
 typedef struct HlSmtpConfig HlSmtpConfig;
+typedef struct HlSmtpServerCtx HlSmtpServerCtx;
 typedef struct HlManifest HlManifest;
 typedef struct HlResolvedModuleSet HlResolvedModuleSet;
 typedef struct HlVfs HlVfs;
@@ -174,6 +175,7 @@ struct HlRuntime {
     HlEnvConfig  *env_cfg;
     HlHttpConfig *http_cfg;
     HlSmtpConfig *smtp_cfg;
+    HlSmtpServerCtx *smtp_async;  /* model-2 async SMTP ctx (admission+registry+trust) */
     const char   *csp_policy;  /* CSP header value for HTML responses (NULL = none) */
     const HlVfs  *app_vfs;       /* app entries (embedded + dev fallback) */
     const HlVfs  *platform_vfs;  /* stdlib entries (always embedded) */
