@@ -1338,7 +1338,31 @@ typedef struct {
     int reached_handshake; /* the peer began driving a TLS handshake */
     int handshake_ok;      /* the server handshake returned OK */
     int post_fail_bytes;   /* bytes received from the client AFTER a rejected/aborted TLS */
+    char post_fail_buf[512];  /* those bytes, captured, so a test can prove no plaintext
+                               * credentials/body leaked (a TLS alert is ciphertext) */
 } TlsPeer;
+
+/* No plaintext SMTP secret (AUTH / MAIL / DATA / the credentials or body) appears in
+ * the post-failure bytes. A failed handshake may still emit a small TLS alert
+ * (ciphertext) - platform-dependent (macOS 0, Linux ~7) - which is NOT a leak, so we
+ * assert on CONTENT, not a zero byte count. */
+static int tls_bytes_contain(const char *hay, int hlen, const char *needle)
+{
+    int nlen = (int)strlen(needle);
+    for (int i = 0; i + nlen <= hlen; i++)
+        if (memcmp(hay + i, needle, (size_t)nlen) == 0) return 1;
+    return 0;
+}
+static int tls_post_fail_has_no_secret(const TlsPeer *p)
+{
+    static const char *marks[] = { "SECRETUSER", "SECRETPASS", "SECRETBODY",
+                                   "AUTH", "MAIL FROM", "DATA", "RCPT" };
+    int n = p->post_fail_bytes < (int)sizeof p->post_fail_buf
+              ? p->post_fail_bytes : (int)sizeof p->post_fail_buf;
+    for (size_t i = 0; i < sizeof marks / sizeof marks[0]; i++)
+        if (tls_bytes_contain(p->post_fail_buf, n, marks[i])) return 0;
+    return 1;
+}
 
 static int tls_peer_setup(TlsPeer *p)
 {
@@ -1388,6 +1412,22 @@ static int tls_peer_drain_briefly(int fd)
         total += (int)n;
     }
     return total;
+}
+
+/* Like tls_peer_drain_briefly, but CAPTURES the bytes into p->post_fail_buf so a
+ * test can inspect content (a TLS alert is fine; plaintext credentials/body are not). */
+static void tls_peer_capture_briefly(int fd, TlsPeer *p)
+{
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 300 * 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    p->post_fail_bytes = 0;
+    for (;;) {
+        int room = (int)sizeof p->post_fail_buf - p->post_fail_bytes;
+        if (room <= 0) { char sink[256]; if (read(fd, sink, sizeof sink) <= 0) break; continue; }
+        ssize_t n = read(fd, p->post_fail_buf + p->post_fail_bytes, (size_t)room);
+        if (n <= 0) break;
+        p->post_fail_bytes += (int)n;
+    }
 }
 
 /* Drive a server-side mbedTLS handshake to completion (poll-based, bounded). fd
@@ -1461,8 +1501,8 @@ static void *tls_peer_thread(void *arg)
     /* After a FAILED handshake, count any plaintext the client sends: a fail-closed
      * client sends NONE (no AUTH / MAIL / DATA, so no credentials or body). On
      * success, drain-and-discard (close_notify etc.). */
-    int drained = tls_peer_drain_briefly(c);
-    if (!p->handshake_ok) p->post_fail_bytes = drained;
+    if (!p->handshake_ok) tls_peer_capture_briefly(c, p);
+    else (void)tls_peer_drain_briefly(c);
 
     stls->destroy(stls);
     kl_tls_mbedtls_ctx_destroy(sctx);
@@ -1743,7 +1783,7 @@ UTEST(smtp_tls, execute_starttls_failure_sends_no_credentials_or_body)
     ASSERT_STREQ(r.token, "tls_handshake_failed");
     ASSERT_EQ(p.reached_handshake, 1);   /* the upgrade WAS attempted... */
     ASSERT_EQ(p.handshake_ok, 0);        /* ...and failed */
-    ASSERT_EQ(p.post_fail_bytes, 0);     /* ...and NOTHING was sent after (no AUTH/MAIL/DATA) */
+    ASSERT_TRUE(tls_post_fail_has_no_secret(&p));   /* no plaintext AUTH/MAIL/DATA/creds/body after TLS failure (a TLS alert is fine) */
 }
 
 /* Implicit-TLS handshake failure carries the same stable token and sends nothing:
@@ -1769,7 +1809,7 @@ UTEST(smtp_tls, execute_implicit_failure_token_and_no_bytes)
     ASSERT_EQ(rc, -1);
     ASSERT_STREQ(r.token, "tls_handshake_failed");
     ASSERT_EQ(p.handshake_ok, 0);
-    ASSERT_EQ(p.post_fail_bytes, 0);
+    ASSERT_TRUE(tls_post_fail_has_no_secret(&p));   /* no plaintext credentials/body after TLS failure */
 }
 
 /* End-to-end complement to smtp_starttls.unexpected_buffered_bytes_aborts (which
@@ -2029,7 +2069,7 @@ UTEST(smtp_cancel_state, during_write_and_data)
     char resp[HL_SMTP_RECV_BUF_SIZE];
     ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);   /* consume greeting */
     cx_arm(t);                                    /* isolate: cancel only during the write */
-    size_t n = 1u << 20;                          /* 1 MiB: exceeds the socket buffer -> backpressure */
+    size_t n = 32u << 20;                         /* 32 MiB: exceeds any socket buffer -> guaranteed backpressure */
     char *big = malloc(n); ASSERT_TRUE(big != NULL); memset(big, 'Z', n);
     int rc = hl_smtp_transport_write(t, big, n, 10000);
     free(big);
