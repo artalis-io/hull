@@ -64,7 +64,7 @@ app.get("/health", (_req, res) => {
 });
 
 // Send an email
-app.post("/send", (req, res) => {
+app.post("/send", async (req, res) => {
     let body;
     try { body = JSON.parse(req.body); } catch (_e) {
         return res.status(400).json({ error: "invalid JSON" });
@@ -102,7 +102,7 @@ app.post("/send", (req, res) => {
 
     let result;
     try {
-        result = smtp.send(msg);
+        result = await smtp.send(msg);
     } catch (e) {
         result = { ok: false, error: String(e) };
     }

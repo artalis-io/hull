@@ -50,12 +50,13 @@ function emailError(code, message) {
 // failure (delivery_failed / invalid_argument).
 const providers = {};
 
-providers.smtp = function(opts) {
-    // smtp.send is a thin C-cap binding that keeps its own {ok,error} shape;
-    // translate a failure (thrown or {ok:false}) into the email.send throw.
+providers.smtp = async function(opts) {
+    // smtp.send returns a Promise resolving to {ok,error} (model 2: it yields to
+    // the event loop while the worker runs the SMTP conversation). Translate a
+    // failure (thrown or {ok:false}) into the email.send throw.
     let result;
     try {
-        result = smtp.send({
+        result = await smtp.send({
             host: opts.smtp_host,
             port: opts.smtp_port || 587,
             username: opts.smtp_user,

@@ -285,6 +285,15 @@ static void hl_js_async_cancel(HlAsyncCont *self)
 static void hl_js_async_destroy(HlAsyncCont *self)
 {
     HlJsAsyncCont *jc = (HlJsAsyncCont *)self;
+    /* resume/cancel already resolved-or-freed and set these to UNDEFINED (so this
+     * is a no-op on those paths). When destroy runs WITHOUT a prior resume/cancel
+     * (e.g. an immediate scheduling-failure teardown, or a submit-failure cleanup),
+     * it is the sole owner of the resolve/reject capability values - free them here
+     * so they never leak. JS_FreeValue is a no-op on UNDEFINED. */
+    if (jc->js && jc->js->ctx) {
+        JS_FreeValue(jc->js->ctx, jc->resolve);
+        JS_FreeValue(jc->js->ctx, jc->reject);
+    }
     hl_alloc_free(jc->alloc, jc, sizeof(HlJsAsyncCont));
 }
 
