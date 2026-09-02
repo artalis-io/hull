@@ -66,6 +66,75 @@ e=$(nm "$WORK/mail/app" 2>/dev/null | grep -cE ' [Tt] _?hl_smtp_execute' || true
 [ "$a" -ge 1 ] || fail "SMTP app missing the audit writer (hl_smtp_audit_complete)"
 [ "$s" -ge 1 ] || fail "SMTP app missing the async server ctx (hl_smtp_server_ctx_init)"
 [ "$e" -ge 1 ] || fail "SMTP app missing the transport execute (hl_smtp_execute)"
-pass "SMTP app: async SMTP objects + audit writer all resolve"
+# STRONG-impl proof: the three hl_smtp_server_* resolved to cap/smtp_async.o's STRONG
+# definitions (composed via the http feature), NOT the base http_weakstub.o weak no-op
+# stubs. macOS nm -m marks a weak def "weak external"; GNU nm marks it "W".
+if nm -m "$WORK/mail/app" >/dev/null 2>&1; then
+    weak=$(nm -m "$WORK/mail/app" 2>/dev/null | grep -cE 'weak external _?hl_smtp_server_' || true)
+else
+    weak=$(nm "$WORK/mail/app" 2>/dev/null | grep -cE ' W _?hl_smtp_server_' || true)
+fi
+[ "$weak" = 0 ] || fail "SMTP app resolved hl_smtp_server_* to WEAK no-op stubs (got $weak), not the strong impls"
+pass "SMTP app: async objects + audit writer resolve to STRONG impls (not weak stubs)"
+
+# ── the COMPOSED binary completes a real async SMTP send ───────────────
+# Build + RUN a server app whose handler does an async smtp.send against a one-shot
+# mock peer. This proves the strong async SMTP objects are not merely linked but
+# EXECUTE end to end in the composed binary.
+if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+    read -r SMTP_PORT HTTP_PORT <<EOF2
+$(python3 -c 'import socket
+def p():
+    s=socket.socket(); s.bind(("127.0.0.1",0)); n=s.getsockname()[1]; s.close(); return n
+print(p(), p())')
+EOF2
+    cat > "$WORK/mock.py" <<PY
+import socket,sys
+port=int(sys.argv[1])
+srv=socket.socket(); srv.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+srv.bind(("127.0.0.1",port)); srv.listen(1)
+sys.stderr.write("ready\n"); sys.stderr.flush()
+c,_=srv.accept(); f=c.makefile("rwb",buffering=0); f.write(b"220 mock\r\n")
+indata=False
+while True:
+    line=f.readline()
+    if not line: break
+    if indata:
+        if line==b".\r\n": f.write(b"250 ok\r\n"); indata=False
+        continue
+    u=line.upper()
+    if u.startswith(b"DATA"): f.write(b"354 go\r\n"); indata=True
+    elif u.startswith(b"QUIT"): f.write(b"221 bye\r\n"); break
+    else: f.write(b"250 ok\r\n")
+c.close()
+PY
+    python3 "$WORK/mock.py" "$SMTP_PORT" 2>"$WORK/mock.err" &
+    MOCK=$!
+    for _ in $(seq 1 50); do grep -q ready "$WORK/mock.err" 2>/dev/null && break; sleep 0.1; done
+    mkdir -p "$WORK/srv"
+    cat > "$WORK/srv/app.lua" <<LUA
+local smtp = require("hull.smtp")
+app.manifest({ modules = { "hull/smtp@1", "hull/http-server@1" }, hosts = { "127.0.0.1" } })
+app.get("/", function(req, res) res:json({ ready = true }) end)
+app.get("/send", function(req, res)
+    res:json(smtp.send({ host = "127.0.0.1", port = $SMTP_PORT, from = "a@x",
+                         to = "b@y", subject = "s", body = "b" }))
+end)
+LUA
+    out=$("$HULL" build --no-verify-platform --compiler=system "$WORK/srv" -o "$WORK/srv/app" 2>&1) \
+        || { echo "$out"; kill "$MOCK" 2>/dev/null; fail "server+SMTP app must compose + link"; }
+    "$WORK/srv/app" -p "$HTTP_PORT" >/dev/null 2>&1 &
+    SRV=$!
+    for _ in $(seq 1 60); do curl -s "http://127.0.0.1:$HTTP_PORT/" 2>/dev/null | grep -q ready && break; sleep 0.2; done
+    R=$(curl -s --max-time 10 "http://127.0.0.1:$HTTP_PORT/send")
+    kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+    kill "$MOCK" 2>/dev/null; wait "$MOCK" 2>/dev/null || true
+    case "$R" in
+        *'"ok":true'*) pass "composed binary completes a real async SMTP send (strong impls execute): $R" ;;
+        *) fail "composed binary async SMTP send did not succeed (got: $R)" ;;
+    esac
+else
+    echo "  skip: real-async-send leg (python3/curl absent)"
+fi
 
 echo "PASS: e2e_smtp_link_seam"
