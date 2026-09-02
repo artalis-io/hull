@@ -842,7 +842,7 @@ msan:
 #     shared memory is the atomic stop flag; the concurrency is filesystem-level
 #     (mkdir/symlink/unlink vs openat resolution), which TSan tolerates. Proves
 #     the resolver's containment holds under a real thread race.
-TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity test_smtp_worker test_smtp_admit test_smtp_submit test_smtp_inflight test_smtp_async test_smtp_backend_poll
+TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity test_smtp_worker test_smtp_admit test_smtp_submit test_smtp_inflight test_smtp_async test_smtp_backend_poll test_smtp_saturation
 tsan:
 	$(MAKE) clean
 	$(MAKE) TSAN=1 $(addprefix $(BUILDDIR)/,$(TSAN_TESTS))
