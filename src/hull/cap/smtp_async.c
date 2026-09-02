@@ -18,6 +18,7 @@
 
 #include "hull/limits/core.h"           /* HL_SMTP_DEFAULT_TIMEOUT_MS */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -173,12 +174,27 @@ static int smtp_async_exec(const HlSmtpMessage *msg, int timeout_ms,
 
 /* ── submit ──────────────────────────────────────────────────────────── */
 
+/* Bounded snapshot of the four audited message fields. The submit layer takes +
+ * FREES the inputs on some scheduling-failure paths, so the immediate audit must
+ * not read the op's (freed) borrowed strings - copy them here, before submit. */
+typedef struct { char host[256], from[256], to[256], subject[256]; } SmtpAuditSnap;
+static void smtp_audit_snap(const HlSmtpMessage *m, SmtpAuditSnap *s)
+{
+    snprintf(s->host,    sizeof s->host,    "%s", m->host    ? m->host    : "");
+    snprintf(s->from,    sizeof s->from,    "%s", m->from    ? m->from    : "");
+    snprintf(s->to,      sizeof s->to,      "%s", m->to      ? m->to      : "");
+    snprintf(s->subject, sizeof s->subject, "%s", m->subject ? m->subject : "");
+}
+
 void hl_smtp_async_submit(const HlSmtpAsyncReq *req, HlSmtpAsyncOutcome *out)
 {
     memset(out, 0, sizeof *out);
 
-    /* Capture the audit fields BEFORE the submit layer takes / frees inputs. */
-    HlSmtpMessage msg; hl_smtp_op_message(req->inputs, &msg);
+    /* Snapshot the audit fields BEFORE the submit layer takes / frees inputs. */
+    HlSmtpMessage view; hl_smtp_op_message(req->inputs, &view);
+    SmtpAuditSnap snap; smtp_audit_snap(&view, &snap);
+    HlSmtpMessage msg = { .host = snap.host, .from = snap.from,
+                          .to = snap.to, .subject = snap.subject };
 
     HlSmtpAsyncOp *op = (HlSmtpAsyncOp *)ao_alloc(sizeof *op);
     if (!op) {
