@@ -45,13 +45,7 @@ static void hl_async_on_cancel(KlAsyncOp *op, void *user_data)
 {
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     (void)op;
-
-    ctx->cont->cancel(ctx->cont);
-
-    if (ctx->free_driver && ctx->driver)
-        ctx->free_driver(ctx->driver);
-    ctx->cont->destroy(ctx->cont);
-    hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
+    hl_async_ctx_cancel(ctx);
 }
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -110,6 +104,19 @@ void hl_async_ctx_resume_detached(HlAsyncCtx *ctx)
     if (ctx->free_driver && ctx->driver)
         ctx->free_driver(ctx->driver);
     ctx->cont->destroy(ctx->cont);
+    hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
+}
+
+void hl_async_ctx_cancel(HlAsyncCtx *ctx)
+{
+    if (!ctx) return;
+    if (ctx->cont)
+        ctx->cont->cancel(ctx->cont);
+
+    if (ctx->free_driver && ctx->driver)
+        ctx->free_driver(ctx->driver);
+    if (ctx->cont)
+        ctx->cont->destroy(ctx->cont);
     hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
 }
 

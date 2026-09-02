@@ -134,6 +134,17 @@ void hl_async_on_deadline_sleep(KlAsyncOp *op, void *user_data);
 void hl_async_ctx_resume_detached(HlAsyncCtx *ctx);
 
 /*
+ * Cancel an async context WITHOUT resuming the handler: cont->cancel, then free
+ * driver + cont, then free ctx. This is the exact body Keel's on_cancel path
+ * runs, exposed so a caller tearing down a still-suspended op itself (the SMTP
+ * shutdown sweep, for a DETACHED op that has no Keel async op to kl_async_cancel)
+ * gets identical, single-owner teardown. For an ATTACHED op prefer
+ * kl_async_cancel(server, &ctx->op) so Keel also retires the op from its active
+ * list; use this directly only for the detached (connectionless) case.
+ */
+void hl_async_ctx_cancel(HlAsyncCtx *ctx);
+
+/*
  * Timer callback for detached sleep: fires hl_async_ctx_resume_detached.
  * Used as the KlTimerFn for hull.sleep() in timer callbacks.
  */
