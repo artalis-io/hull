@@ -656,8 +656,23 @@ static int co_start_resolve(void *ctx);
 static void co_connect_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data);
 
 /* Resolve host:port into t->addrs via getaddrinfo. Returns naddrs (>=1) or 0. */
+#ifdef HL_SMTP_TEST_HOOKS
+/* Replaces the blocking getaddrinfo (compiled ONLY under -DHL_SMTP_TEST_HOOKS,
+ * absent from the production object). When non-NULL it fills t->addrs[] in EXACT
+ * injected order and returns the count (the addresses are value-copied into the
+ * transport-owned array, so their lifetime is the transport's - no dangling). It
+ * models the blocking-resolve RELEASE POINT: a test may observe/arm cancellation
+ * as it returns, to drive the post-DNS cancel path that must abort before any
+ * socket attempt. */
+int (*smtp_test_resolve)(HlSmtpTransport *t, const char *host, int port);
+#endif
+
 static int resolve_addrs(HlSmtpTransport *t, const char *host, int port)
 {
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_resolve)
+        return smtp_test_resolve(t, host, port);
+#endif
     char port_str[8];
     snprintf(port_str, sizeof port_str, "%d", port);
 
@@ -1040,6 +1055,15 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
      * for connect + every subsequent stage/retry. Set HERE, after the blocking
      * (non-interruptible) resolve, so DNS is outside the ceiling per section 8. */
     t->dop_ms = kl_monotonic_ms() + t->deadline_ms;
+
+    /* Cancellation observed during the blocking resolve is honored HERE, before the
+     * connect op is even initialized - so the post-DNS cancel path frees cleanly
+     * without any socket() attempt (section 13). dop_expired is 0 (this is a cancel,
+     * not a deadline); the op never started, so teardown cannot leak. */
+    if (t->cancel_poll && t->cancel_poll(t->cancel_user)) {
+        hl_smtp_transport_free(t);
+        return NULL;
+    }
 
     if (kl_connect_op_init(&t->connect_op, &SMTP_CONNECT_HOOKS, t) != 0) {
         hl_smtp_transport_free(t);

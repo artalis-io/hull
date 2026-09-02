@@ -1013,4 +1013,65 @@ UTEST(smtp_dop, precedence_dop_beats_cancel_live_pump)
     mp_join(&m);
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ *  Resolver hook - cancellation during resolution takes the post-DNS cancel
+ *  path BEFORE any socket attempt.
+ *
+ *  The injected resolver fills the address list in exact order and, at its
+ *  release point, arms cancellation (modeling a cancel that arrived during the
+ *  blocking resolve). hl_smtp_transport_connect must then abort before the
+ *  connect op is initialized - so the pump never runs and no socket() is called.
+ *  We observe "no pump ran" via a checkpoint counter that stays 0 (pump_check,
+ *  where socket attempts are driven, is never reached).
+ *
+ *  REVERT PROOF: delete the post-DNS cancel check in hl_smtp_transport_connect
+ *  and the connect op starts + pumps - the checkpoint counter goes non-zero and
+ *  this assertion flips to failure.
+ * ════════════════════════════════════════════════════════════════════ */
+
+static volatile int g_res_cancel;        /* what the transport's cancel_poll returns */
+static int          g_res_checkpoints;   /* pump_check invocations during the connect */
+
+static int res_cancel_poll(void *user) { (void)user; return g_res_cancel; }
+static void res_count_checkpoint(HlSmtpTransport *t, unsigned idx)
+{ (void)t; (void)idx; g_res_checkpoints++; }
+
+/* Inject one loopback address in exact order, then arm cancellation as the
+ * blocking resolve "returns" (its release point). */
+static int res_inject_then_cancel(HlSmtpTransport *t, const char *host, int port)
+{
+    (void)host;
+    uint8_t ip[4] = { 127, 0, 0, 1 };
+    if (kl_sockaddr_from_ipv4(&t->addrs[0], ip, (uint16_t)port) != 0)
+        return 0;
+    g_res_cancel = 1;   /* cancel observed during resolution */
+    return 1;
+}
+
+UTEST(smtp_dop, cancellation_during_resolution_no_socket_attempt)
+{
+    g_res_cancel      = 0;
+    g_res_checkpoints = 0;
+    smtp_test_resolve    = res_inject_then_cancel;
+    smtp_test_checkpoint = res_count_checkpoint;
+
+    const unsigned watchdog_sec = 30;
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired);
+    alarm(watchdog_sec);
+
+    /* Host is never really resolved (the hook replaces getaddrinfo); a bogus port
+     * target would still never be dialed because cancel aborts first. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("mail.example.test", 25, 5000,
+                                                   res_cancel_poll, NULL, NULL, NULL);
+
+    alarm(0);
+    signal(SIGALRM, prev);
+
+    smtp_test_resolve    = NULL;
+    smtp_test_checkpoint = NULL;
+
+    ASSERT_TRUE(t == NULL);              /* cancelled -> NULL (connect_failed at the caller) */
+    ASSERT_EQ(g_res_checkpoints, 0);     /* returned before any pump -> before any socket attempt */
+}
+
 UTEST_MAIN()
