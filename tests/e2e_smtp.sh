@@ -327,20 +327,26 @@ stop_mock
 DBG="${HULL_DEBUG_BIN:-}"
 if [ -n "$DBG" ] && [ -x "$DBG" ]; then
     log "--- clean shutdown under ASan ---"
-    for pair in "lua $APPDIR/app.lua" "js $APPDIR/app.js"; do
+    # Uses the db-enabled apps and drives BOTH async continuations before shutdown:
+    # a db.async that RESOLVES (freed on the resume path) and a held SMTP send that
+    # is CANCELLED at shutdown (freed on the sweep path). ASan proves each
+    # Promise/coroutine continuation storage is freed exactly once (no double-free /
+    # UAF / leak), for Lua and JS (the JS leg drives last_async_cont).
+    for pair in "lua $APPDIR/app_db.lua" "js $APPDIR/app_db.js"; do
         set -- $pair; RT="$1"; APP="$2"
         start_mock slow
-        "$DBG" "$APP" -p "$PORT_HTTP" --audit >"$APPDIR/asan.log" 2>&1 &
+        "$DBG" "$APP" -p "$PORT_HTTP" --audit -d "$APPDIR/asan_$RT.db" >"$APPDIR/asan.log" 2>&1 &
         HULL_PID=$!; PIDS="$PIDS $HULL_PID"
         for _ in $(seq 1 120); do curl -s "http://127.0.0.1:$PORT_HTTP/" 2>/dev/null | grep -q ready && break; sleep 0.2; done
+        curl -s --max-time 8 "http://127.0.0.1:$PORT_HTTP/db" >/dev/null 2>&1   # db.async resolves (continuation freed)
         ( curl -s --max-time 45 "http://127.0.0.1:$PORT_HTTP/send" >/dev/null 2>&1 & )
-        sleep 1.5; kill -INT "$HULL_PID"
+        sleep 1.5; kill -INT "$HULL_PID"                                        # held SMTP cancelled (continuation freed)
         for _ in $(seq 1 200); do kill -0 "$HULL_PID" 2>/dev/null || break; sleep 0.1; done
         kill -9 "$HULL_PID" 2>/dev/null
         if grep -qiE "runtime error|AddressSanitizer|use-after-free|double-free|SUMMARY: .*Sanitizer" "$APPDIR/asan.log"; then
             fail "$RT ASan error on shutdown-with-op-in-flight"; grep -iE "Sanitizer|use-after" "$APPDIR/asan.log" | head
         else
-            pass "$RT clean shutdown under ASan (op in flight)"
+            pass "$RT continuation freed once (db.async resolve + SMTP cancel, ASan clean)"
         fi
         stop_mock
     done
