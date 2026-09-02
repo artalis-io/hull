@@ -165,10 +165,36 @@ run_suite() { # <label> <appfile>
     [ "$SLEN" = "400" ] && pass "$RT audit subject exact (len $SLEN)" || fail "$RT audit subject len=$SLEN (want 400)"
     kill -INT "$HULL_PID" 2>/dev/null; wait "$HULL_PID" 2>/dev/null; stop_mock
 
+    # 4. TRUE saturation (W=2 -> cap 1): one admitted send is held on the slow
+    #    peer (occupying the single slot); a concurrent send overflows and must
+    #    resolve promptly as connect_failed / schedule:cap_reached. This is the
+    #    observable binding parity for real saturation (cap 1, not the cap-0
+    #    degenerate case above), asserted identically for Lua and JS.
+    start_mock slow; start_hull "$APP" --workers 2
+    # Held send: reserves the one slot and stalls in the greeting read on the slow
+    # peer. Backgrounded; its own result is irrelevant (we tear it down after).
+    curl -s --max-time 15 "http://127.0.0.1:$PORT_HTTP/send" >/dev/null 2>&1 &
+    HELD_CURL=$!
+    sleep 1   # let the held send reserve the slot + connect (>> reserve+connect)
+    T0=$(python3 -c "import time;print(time.time())")
+    R_SAT=$(curl -s --max-time 8 "http://127.0.0.1:$PORT_HTTP/send")
+    T1=$(python3 -c "import time;print(time.time())")
+    DT_SAT=$(python3 -c "print(int(($T1-$T0)*1000))")
+    case "$R_SAT" in *'"error":"connect_failed"'*) pass "$RT saturation overflow connect_failed: $R_SAT" ;;
+                     *) fail "$RT saturation overflow (got: $R_SAT)" ;; esac
+    [ "$DT_SAT" -lt 2000 ] && pass "$RT saturation overflow prompt (${DT_SAT}ms)" \
+                           || fail "$RT saturation overflow slow (${DT_SAT}ms)"
+    grep -q '"schedule":"cap_reached"' "$APPDIR/hull.log" \
+        && pass "$RT saturation audit schedule:cap_reached" \
+        || fail "$RT saturation audit missing schedule:cap_reached"
+    kill -INT "$HULL_PID" 2>/dev/null; wait "$HULL_PID" 2>/dev/null
+    kill "$HELD_CURL" 2>/dev/null; stop_mock
+
     # record canonicalised results for cross-runtime equivalence
     { printf '%s' "$R_SEND"   | norm;
       printf '%s' "$R_DENIED" | norm;
-      printf '%s' "$R_CAP"    | norm; } >"$APPDIR/res.$RT"
+      printf '%s' "$R_CAP"    | norm;
+      printf '%s' "$R_SAT"    | norm; } >"$APPDIR/res.$RT"
 }
 
 run_suite lua "$APPDIR/app.lua"
