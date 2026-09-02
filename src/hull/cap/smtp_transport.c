@@ -892,11 +892,13 @@ static const KlConnectOpHooks SMTP_CONNECT_HOOKS = {
  * drift. Each kl_event_ctx_run waits up to step_ms for readiness; the signature
  * is (ctx, max_events, timeout_ms) - max_events 64, timeout step_ms.
  *
- * This bounds ONE stage. The hard TOTAL-operation deadline ceiling (question 1
- * in the design record) is a deferred follow-up; only per-stage monotonic
- * deadlines land here. NOTE: getaddrinfo runs blocking on the calling thread
- * (see resolve_addrs); this per-stage deadline does NOT bound DNS resolution -
- * moving resolution off the calling thread is that same deferred follow-up.
+ * This bounds ONE stage, and each stage's deadline is itself clamped to the
+ * frozen post-resolution operation ceiling Dop (section 8), so no stage or retry
+ * can extend the operation - the total-operation deadline IS implemented (see
+ * pump_check + hl_smtp_transport_connect). NOTE: getaddrinfo runs blocking on the
+ * calling thread (see resolve_addrs); Dop is armed AFTER it returns, so DNS is
+ * outside the ceiling per section 8 (a bounded sandbox-safe resolver is a separate
+ * future item).
  * ────────────────────────────────────────────────────────────────────────── */
 
 typedef int (*DonePred)(HlSmtpTransport *t);
