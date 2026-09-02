@@ -85,6 +85,7 @@ typedef struct HlSmtpResult {
  * SMTP worker will run on a pool thread (model 2, docs/smtp_keel_slice2c_plan.md).
  */
 int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
+                    int (*cancel_poll)(void *), void *cancel_user,
                     HlSmtpResult *out);
 
 /* ── Audit helpers (single record; shared sync + model-2 async) ──────── */

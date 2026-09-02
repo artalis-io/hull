@@ -269,6 +269,15 @@ struct HlSmtpTransport {
     int           ev_ready;      /* 1 once kl_event_ctx_init succeeded */
     KlAllocator   alloc;         /* op-local write-queue allocator (loop lifetime) */
 
+    /* Cancellation predicate, checked by every pump before + after each event-loop
+     * run so a requested cancel (shutdown pass 1, per-request teardown, deadline)
+     * aborts the in-flight conversation into confirmed teardown within one step
+     * (~50 ms) instead of waiting for the stage timeout. Set once, after DNS, by
+     * hl_smtp_transport_connect; NULL on the sync no-loop path. Blocking DNS is the
+     * documented non-interruptible exception (it runs before this is set). */
+    int          (*cancel_poll)(void *user);
+    void          *cancel_user;
+
     KlConnectOp   connect_op;    /* embedded (connect_op_detail.h: storage only) */
     int           connect_started;  /* 1 once kl_connect_op_start succeeded */
     KlStream      stream;        /* embedded (stream_detail.h: storage only) */
@@ -879,8 +888,16 @@ static int pump_until_abs(HlSmtpTransport *t, DonePred done, uint64_t deadline_m
 {
     const int step_ms = 50;
     while (!done(t)) {
+        /* Prompt cancellation: abort BEFORE spending another step blocked on a
+         * peer that will never answer (e.g. a post-resolution stalled greeting). */
+        if (t->cancel_poll && t->cancel_poll(t->cancel_user))
+            return -1;   /* -> caller goto cleanup -> confirmed abortive teardown */
         int rc = kl_event_ctx_run(&t->ev, 64, step_ms);
         if (rc < 0)
+            return -1;
+        /* And AFTER the run, so a cancel that arrived during the step takes effect
+         * without waiting for the next iteration's readiness. */
+        if (t->cancel_poll && t->cancel_poll(t->cancel_user))
             return -1;
         if (kl_monotonic_ms() >= deadline_ms && !done(t))
             return -1;   /* deadline: caller maps to its per-stage token */
@@ -918,7 +935,10 @@ static int done_connect_detached(HlSmtpTransport *t)
  * ────────────────────────────────────────────────────────────────────────── */
 
 HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
-                                           int timeout_ms, int *out_teardown_leaked)
+                                           int timeout_ms,
+                                           int (*cancel_poll)(void *),
+                                           void *cancel_user,
+                                           int *out_teardown_leaked)
 {
     if (out_teardown_leaked)
         *out_teardown_leaked = 0;
@@ -945,8 +965,12 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
     }
     t->ev_ready = 1;
 
-    /* Sandbox-compatible blocking system resolve, inline before start. */
+    /* Sandbox-compatible blocking system resolve, inline before start. Blocking
+     * getaddrinfo is the documented non-interruptible exception; cancellation
+     * takes effect from HERE on (the connect pump below is the first to check). */
     t->naddrs = resolve_addrs(t, host, port);
+    t->cancel_poll = cancel_poll;
+    t->cancel_user = cancel_user;
 
     if (kl_connect_op_init(&t->connect_op, &SMTP_CONNECT_HOOKS, t) != 0) {
         hl_smtp_transport_free(t);
@@ -1133,6 +1157,10 @@ void hl_smtp_transport_shutdown(HlSmtpTransport *t)
 {
     if (!t || !t->stream_up || t->close_begun)
         return;
+    /* Teardown must run to CONFIRMED detachment (bounded by the grace below), so a
+     * still-pending cancel must NOT short-circuit these pumps - that would skip
+     * detachment and leak the fd/stream on every cancelled shutdown. Disarm it. */
+    t->cancel_poll = NULL;
     t->close_begun = 1;
     kl_stream_close_begin(&t->stream);
     /* Drive to confirmed detachment, but only for a SHORT grace, not the full
@@ -1149,6 +1177,10 @@ int hl_smtp_transport_free(HlSmtpTransport *t)
 {
     if (!t)
         return 0;
+
+    /* Abortive teardown must confirm detachment (fail-closed, no UAF), so its
+     * pumps ignore a pending cancel - disarm the poll before any of them run. */
+    t->cancel_poll = NULL;
 
     /* If a stream was brought up but not gracefully closed, cancel it and pump
      * to confirmed detachment so every op/watcher/fd retires exactly once. Apply

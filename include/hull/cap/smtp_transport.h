@@ -59,9 +59,19 @@ typedef struct HlSmtpTransport HlSmtpTransport;
  * reach confirmed detachment (see hl_smtp_transport_free): this is the most
  * plausible non-detach site, so the outcome is exposed here rather than lost, and
  * the capability layer records it in the audit. Set to 0 on every other path.
+ *
+ * @p cancel_poll (optional, may be NULL) is a predicate the transport pumps call
+ * before + after each event-loop step; a non-zero return aborts the in-flight
+ * conversation into confirmed teardown within one step (~50 ms). It is armed
+ * immediately AFTER the blocking DNS resolve (the sole non-interruptible stage),
+ * so a post-resolution stalled peer is abandoned promptly rather than at the
+ * stage timeout. NULL on the synchronous no-loop path.
  */
 HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
-                                           int timeout_ms, int *out_teardown_leaked);
+                                           int timeout_ms,
+                                           int (*cancel_poll)(void *),
+                                           void *cancel_user,
+                                           int *out_teardown_leaked);
 
 /**
  * Implicit-TLS (SMTPS) handshake BEFORE any application bytes are read.

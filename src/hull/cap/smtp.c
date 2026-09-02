@@ -384,6 +384,7 @@ cleanup:
  * safe on a worker thread. Authorization + audit + result construction are done
  * by hl_cap_smtp_send (the completion phase in model 2). */
 int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
+                    int (*cancel_poll)(void *), void *cancel_user,
                     HlSmtpResult *out)
 {
     out->rc = -1;
@@ -406,7 +407,8 @@ int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
      * Keel-primitive transport; NULL == resolve / connect / deadline failure).
      * out_teardown_leaked surfaces a connect-path teardown leak into the audit. */
     HlSmtpTransport *t = hl_smtp_transport_connect(msg->host, msg->port,
-                                                   timeout_ms, &teardown_leaked);
+                                                   timeout_ms, cancel_poll,
+                                                   cancel_user, &teardown_leaked);
     if (!t) {
         log_warn("smtp: connect to %s:%d failed", msg->host, msg->port);
         if (err_msg) *err_msg = "connect_failed";
@@ -656,9 +658,10 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
                                          : HL_SMTP_DEFAULT_TIMEOUT_MS;
 
     /* Execute-phase: inline on the calling thread here (the sync / no-loop
-     * path; the SMTP worker runs the same function in model 2). No audit. */
+     * path; the SMTP worker runs the same function in model 2). No cancel poll on
+     * the synchronous path (no other thread requests cancellation). No audit. */
     HlSmtpResult r;
-    hl_smtp_execute(msg, cfg->tls, timeout_ms, &r);
+    hl_smtp_execute(msg, cfg->tls, timeout_ms, NULL, NULL, &r);
     if (err_msg && r.token)
         *err_msg = r.token;
 

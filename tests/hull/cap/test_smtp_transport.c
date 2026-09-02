@@ -561,7 +561,7 @@ static void chunked_delivery_case(int *utest_result, size_t payload)
     MockPeer m;
     ASSERT_EQ(mp_start(&m, mp_sink_thread), 0);
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL);
     ASSERT_TRUE(t != NULL);
 
     /* Consume the 220 greeting the sink sends. */
@@ -605,7 +605,7 @@ UTEST(smtp_write, backpressure_drains)
     ASSERT_EQ(mp_start(&m, mp_sink_thread), 0);
     m.slow_reader = 1;
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL);
     ASSERT_TRUE(t != NULL);
     char resp[HL_SMTP_RECV_BUF_SIZE];
     ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
@@ -694,7 +694,7 @@ UTEST(smtp_write, write_deadline_is_one_absolute_bound)
     MockPeer m;
     ASSERT_EQ(mp_start(&m, mp_slow_drain_thread), 0);
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL);
     ASSERT_TRUE(t != NULL);
     char resp[HL_SMTP_RECV_BUF_SIZE];
     ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
@@ -746,7 +746,7 @@ static void drive_to_starttls(int *utest_result, MockPeer *m, int extra_junk,
     m->extra_after_220 = extra_junk;
     ASSERT_EQ_MSG(mp_spawn(m, mp_starttls_junk_thread), 0, "mp_spawn");
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m->port, 10000, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m->port, 10000, NULL, NULL, NULL);
     ASSERT_TRUE_MSG(t != NULL, "connect");
 
     char resp[HL_SMTP_RECV_BUF_SIZE];
@@ -872,7 +872,7 @@ UTEST(smtp_starttls, failing_set_hostname_rejected)
 UTEST(smtp_connect, blackhole_timeout_detaches)
 {
     /* 192.0.2.1 is reserved and unrouteable; the connect will not complete. */
-    HlSmtpTransport *t = hl_smtp_transport_connect("192.0.2.1", 25, 600, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("192.0.2.1", 25, 600, NULL, NULL, NULL);
     /* Bounded failure: NULL (connect / deadline). hl_smtp_transport_connect
      * cancels + waits for detachment internally before freeing, so a clean
      * return here already proves detachment did not hang. */

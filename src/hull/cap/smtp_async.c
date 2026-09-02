@@ -163,44 +163,59 @@ static int smtp_async_exec(const HlSmtpMessage *msg, int timeout_ms,
                            HlSmtpResult *out, HlSmtpCancelPollFn poll,
                            void *poll_user, void *exec_user)
 {
-    (void)poll; (void)poll_user;   /* mid-conversation cancel poll: deferred behavior #4 */
     HlSmtpServerCtx *server = (HlSmtpServerCtx *)exec_user;
     void *tls_ctx = server->trust.ca_buf ? hl_smtp_tls_ctx_for(&server->trust) : NULL;
     KlTlsConfig cfg;
     KlTlsConfig *cfgp = NULL;
     if (tls_ctx) { hl_tls_config_wire(&cfg, tls_ctx); cfgp = &cfg; }
-    return hl_smtp_execute(msg, cfgp, timeout_ms, out);
+    /* Thread the worker's cancel poll into the transport pumps so a requested
+     * cancel (shutdown pass 1 / per-request teardown) aborts the conversation
+     * within a pump step instead of at the stage timeout. */
+    return hl_smtp_execute(msg, cfgp, timeout_ms, poll, poll_user, out);
 }
 
 /* ── submit ──────────────────────────────────────────────────────────── */
 
-/* Bounded snapshot of the four audited message fields. The submit layer takes +
- * FREES the inputs on some scheduling-failure paths, so the immediate audit must
- * not read the op's (freed) borrowed strings - copy them here, before submit. */
-typedef struct { char host[256], from[256], to[256], subject[256]; } SmtpAuditSnap;
-static void smtp_audit_snap(const HlSmtpMessage *m, SmtpAuditSnap *s)
+/* EXACT owned snapshot of the four audited message fields. The submit layer takes
+ * + FREES the inputs on some scheduling-failure paths, so the immediate audit must
+ * not read the op's (freed) borrowed strings - own a full copy here, before
+ * submit. strdup, not a bounded buffer: audit content must be byte-identical to
+ * the sync/terminal audits, never silently truncated. */
+typedef struct { char *host, *from, *to, *subject; } SmtpAuditOwned;
+static char *audit_dup(const char *s) { return strdup(s ? s : ""); }
+static void audit_owned_take(const HlSmtpMessage *m, SmtpAuditOwned *o)
 {
-    snprintf(s->host,    sizeof s->host,    "%s", m->host    ? m->host    : "");
-    snprintf(s->from,    sizeof s->from,    "%s", m->from    ? m->from    : "");
-    snprintf(s->to,      sizeof s->to,      "%s", m->to      ? m->to      : "");
-    snprintf(s->subject, sizeof s->subject, "%s", m->subject ? m->subject : "");
+    o->host = audit_dup(m->host); o->from = audit_dup(m->from);
+    o->to = audit_dup(m->to);     o->subject = audit_dup(m->subject);
+}
+static void audit_owned_free(SmtpAuditOwned *o)
+{
+    free(o->host); free(o->from); free(o->to); free(o->subject);
+}
+/* Build an audit message from the owned copies (NULL-safe: a strdup OOM leaves ""
+ * so the field key is still emitted, matching the other audit paths). */
+static HlSmtpMessage audit_owned_msg(const SmtpAuditOwned *o)
+{
+    HlSmtpMessage m = { .host = o->host ? o->host : "", .from = o->from ? o->from : "",
+                        .to = o->to ? o->to : "", .subject = o->subject ? o->subject : "" };
+    return m;
 }
 
 void hl_smtp_async_submit(const HlSmtpAsyncReq *req, HlSmtpAsyncOutcome *out)
 {
     memset(out, 0, sizeof *out);
 
-    /* Snapshot the audit fields BEFORE the submit layer takes / frees inputs. */
+    /* Own an EXACT copy of the audit fields BEFORE the submit layer frees inputs. */
     HlSmtpMessage view; hl_smtp_op_message(req->inputs, &view);
-    SmtpAuditSnap snap; smtp_audit_snap(&view, &snap);
-    HlSmtpMessage msg = { .host = snap.host, .from = snap.from,
-                          .to = snap.to, .subject = snap.subject };
+    SmtpAuditOwned owned; audit_owned_take(&view, &owned);
+    HlSmtpMessage msg = audit_owned_msg(&owned);
 
     HlSmtpAsyncOp *op = (HlSmtpAsyncOp *)ao_alloc(sizeof *op);
     if (!op) {
         hl_smtp_op_free(req->inputs);
         /* Tear down the unparked continuation the binding created. */
         if (req->actx) { req->actx->cont->destroy(req->actx->cont); hl_async_ctx_free(req->actx); }
+        audit_owned_free(&owned);
         out->disposition = HL_SMTP_ASYNC_RESOLVED;
         out->result.rc = -1; out->result.token = "connect_failed";
         return;
@@ -235,6 +250,7 @@ void hl_smtp_async_submit(const HlSmtpAsyncReq *req, HlSmtpAsyncOutcome *out)
         op->sctx = so.ctx;   /* also set by the suspend seam; idempotent */
         hl_smtp_inflight_add(&req->server->inflight, &op->node, op,
                              smtp_async_sweep_release);
+        audit_owned_free(&owned);   /* completion audit reads the live op, not this */
         out->disposition = HL_SMTP_ASYNC_SUSPENDED;
         out->op = op;
         return;
@@ -260,6 +276,7 @@ void hl_smtp_async_submit(const HlSmtpAsyncReq *req, HlSmtpAsyncOutcome *out)
         }
         hl_smtp_inflight_add(&req->server->inflight, &op->node, op,
                              smtp_async_sweep_release);
+        audit_owned_free(&owned);
         /* Do NOT return op to the binding: it resolves immediately, no yield. */
         return;
     }
@@ -268,6 +285,7 @@ void hl_smtp_async_submit(const HlSmtpAsyncReq *req, HlSmtpAsyncOutcome *out)
      * the submit ctx + inputs. The continuation was never used - tear it down
      * (no cont->cancel: the binding returns a value, it did not yield). Audit once. */
     hl_smtp_audit_complete(&msg, &so.result, out->schedule, NULL);
+    audit_owned_free(&owned);
     if (op->actx) {
         op->actx->cont->destroy(op->actx->cont);
         hl_async_ctx_free(op->actx);
