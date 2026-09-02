@@ -1299,6 +1299,14 @@ e2e-compute: $(BUILDDIR)/hull
 e2e-smtp: $(BUILDDIR)/hull
 	sh tests/e2e_smtp.sh
 
+# The SMTP/HTTP-client feature composition boundary: the model-2 async SMTP objects
+# follow cap/smtp.c's feature gate (all in libhull_feature-http.a, none base-resident),
+# so a non-SMTP composed app links none of them (no dangling hl_smtp_audit_complete)
+# and an SMTP app composes the whole set. Runs after e2e-smtp so CI covers it too.
+.PHONY: e2e-smtp-link-seam
+e2e-smtp-link-seam: $(BUILDDIR)/hull
+	sh tests/e2e_smtp_link_seam.sh
+
 # Windowed fs.mmap({offset,length}) binding (mapped-spans, item A).
 .PHONY: e2e-spans-mmap
 e2e-spans-mmap: $(BUILDDIR)/hull
