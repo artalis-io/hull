@@ -128,4 +128,51 @@ UTEST(smtp_inflight, remove_head_and_tail_relink)
     ASSERT_EQ(g_last_released_id, 2);              /* only b swept */
 }
 
+/* ── pass 1: for_each visits all, registry-preserving ────────────────── */
+static int g_visited;
+static int g_visit_sum;
+static void visit_cb(void *owner, void *user)
+{
+    (void)user;
+    FakeOp *op = (FakeOp *)owner;
+    g_visited++;
+    g_visit_sum += op->id;
+}
+
+UTEST(smtp_inflight, for_each_visits_all_without_unlinking)
+{
+    g_visited = 0; g_visit_sum = 0; g_released = 0;
+    HlSmtpInflight r; hl_smtp_inflight_init(&r);
+    FakeOp *a = make_op(10), *b = make_op(20), *c = make_op(30);
+    hl_smtp_inflight_add(&r, &a->node, a, fake_release);
+    hl_smtp_inflight_add(&r, &b->node, b, fake_release);
+    hl_smtp_inflight_add(&r, &c->node, c, fake_release);
+
+    /* First shutdown pass: visit every op, registry-preserving. */
+    hl_smtp_inflight_for_each(&r, visit_cb, NULL);
+    ASSERT_EQ(g_visited, 3);
+    ASSERT_EQ(g_visit_sum, 60);                 /* all three seen */
+    ASSERT_EQ(hl_smtp_inflight_count(&r), 3);   /* nothing unlinked */
+    ASSERT_EQ(g_released, 0);                     /* nothing released */
+
+    /* for_each is idempotent (can run twice - e.g. re-entrant cancel). */
+    g_visited = 0;
+    hl_smtp_inflight_for_each(&r, visit_cb, NULL);
+    ASSERT_EQ(g_visited, 3);
+    ASSERT_EQ(hl_smtp_inflight_count(&r), 3);
+
+    /* Second pass: sweep releases each exactly once. */
+    ASSERT_EQ(hl_smtp_inflight_sweep(&r), 3);
+    ASSERT_EQ(g_released, 3);
+    ASSERT_EQ(hl_smtp_inflight_count(&r), 0);
+}
+
+UTEST(smtp_inflight, for_each_empty_is_noop)
+{
+    g_visited = 0;
+    HlSmtpInflight r; hl_smtp_inflight_init(&r);
+    hl_smtp_inflight_for_each(&r, visit_cb, NULL);
+    ASSERT_EQ(g_visited, 0);
+}
+
 UTEST_MAIN();

@@ -55,6 +55,20 @@ int hl_smtp_inflight_count(const HlSmtpInflight *r)
     return r->count;
 }
 
+void hl_smtp_inflight_for_each(HlSmtpInflight *r,
+                               void (*fn)(void *owner, void *user), void *user)
+{
+    /* Snapshot next before the callback so a (contract-violating) unlink of the
+     * current node cannot derail the walk; the contract is no mutation, this is
+     * just defensive. */
+    for (HlSmtpInflightNode *n = r->head.next; n != &r->head; ) {
+        HlSmtpInflightNode *next = n->next;
+        if (fn)
+            fn(n->owner, user);
+        n = next;
+    }
+}
+
 int hl_smtp_inflight_sweep(HlSmtpInflight *r)
 {
     int swept = 0;

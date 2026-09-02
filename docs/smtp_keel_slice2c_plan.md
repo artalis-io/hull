@@ -274,28 +274,46 @@ The CRITICAL ordering fact (verified in `serve.c`): `kl_http_server_free()` runs
 the FINAL `hl_serve_cleanup()`, i.e. AFTER `hl_serve_teardown_after_serve()` has
 already run `hl_app_context_free()` (the runtime is GONE). So SMTP must NOT lean on
 Keel's server-free cancel loop - by then `cont->cancel` would touch a freed
-coroutine/Promise. Instead the SMTP sweep drives cancellation itself, from
-`hl_serve_teardown_after_serve()` AFTER `pool_free()` (step 3) and BEFORE
-`hl_app_context_free()` (runtime still alive):
+coroutine/Promise. Instead SMTP drives retirement itself, in TWO distinct registry
+passes around `pool_free()` (step 3). Both are exposed as separate, idempotent
+server operations so the SAME lifecycle applies to `hl_serve_teardown_after_serve()`
+AND the partial-init `hl_serve_cleanup()`.
+
+PASS 1 - `hl_smtp_server_request_cancel_all()`, BEFORE `pool_free()` (step 2). Sets
+`shutting_down` (stop new submissions), then walks the registry WITHOUT unlinking
+(`hl_smtp_inflight_for_each`) and calls `hl_smtp_submit_ctx_cancel()` on every op.
+That marks each continuation NON-RESUMABLE and flips the worker op to
+`CANCEL_REQUESTED`, so a RUNNING transport observes the shutdown (its cancel poll)
+and detaches + terminates promptly instead of blocking the join for its full network
+deadline. Registry-preserving + idempotent: the ops stay tracked for pass 2, and a
+second call is a no-op. This pass is what makes shutdown BOUNDED; without it,
+cancellation would begin only after the join and a slow peer could stall teardown.
+
+PASS 2 - `hl_smtp_server_sweep()`, AFTER `pool_free()` (steps 4-5). Workers are
+joined and every terminal is published. For each still-registered op:
 
 ```
-for each still-registered in-flight op (event-loop thread):
-    unlink its registry node FIRST (single-owner transfer), then
-    ATTACHED (bound to a conn): kl_async_cancel(server, &actx->op)
-        -> on_cancel = hl_async_on_cancel -> cont->cancel + free_driver + destroy + free actx
-    DETACHED (timer, no conn):   hl_async_ctx_cancel(actx)   [the same body, no Keel op]
+unlink its registry node FIRST (single-owner transfer), then
+ATTACHED (bound to a conn): hl_net_op_cancel(net_ctx, &actx->op)  [seam -> kl_async_cancel]
+    -> on_cancel = hl_async_on_cancel -> cont->cancel + free_driver + destroy + free actx
+DETACHED (timer, no conn):  hl_async_ctx_cancel(actx)             [the same body, no net op]
 ```
 
 `free_driver` is the SMTP driver teardown: `registry_remove(node)` (a no-op - the
 sweep already unlinked) + `hl_smtp_submit_ctx_release(sctx)` (drops the ONE retained
 runtime ref) + free the driver/op shell. Because the sweep unlinks each node before
-triggering its release, and `kl_async_cancel` is idempotent, the retained runtime
-ref is released EXACTLY ONCE - by normal completion (`on_resume` -> `free_driver`,
-which `registry_remove`s first) OR by this sweep, never both. After the sweep every
-SMTP op is retired and off Keel's `async_ops` list, so `kl_http_server_free()`'s own
-loop finds nothing SMTP-owned to cancel. (This is strictly more correct than
-`db.async`, which has no sweep and would fire `on_cancel` post-runtime-free on a
-poll-backend shutdown with a still-suspended op; SMTP closes that window.)
+triggering its release, and `hl_net_op_cancel` / `kl_async_cancel` is idempotent, the
+retained runtime ref is released EXACTLY ONCE - by normal completion (`on_resume` ->
+`free_driver`, which `registry_remove`s first) OR by this sweep, never both. After
+the sweep every SMTP op is retired and off Keel's `async_ops` list, so
+`kl_http_server_free()`'s own loop finds nothing SMTP-owned to cancel. (This is
+strictly more correct than `db.async`, which has no sweep and would fire `on_cancel`
+post-runtime-free on a poll-backend shutdown with a still-suspended op; SMTP closes
+that window.)
+
+In `hl_serve_cleanup()` (partial init / error path) the same two-pass retirement runs
+while the runtime + net/server contexts are still valid, BEFORE `hl_app_context_free()`
+there too, regardless of whether Keel's server-free cancellation would also run.
 
 ## 11. TLS trust-material ownership
 

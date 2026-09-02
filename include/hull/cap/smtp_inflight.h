@@ -61,6 +61,15 @@ void hl_smtp_inflight_remove(HlSmtpInflightNode *n);
 /* Number of currently-tracked ops. */
 int hl_smtp_inflight_count(const HlSmtpInflight *r);
 
+/* Visit every tracked op WITHOUT unlinking (registry-preserving), calling
+ * @p fn(owner, user) for each. This is the FIRST shutdown pass: request
+ * cancellation of every in-flight op BEFORE pool_free() so a running worker
+ * transport observes the shutdown and terminates promptly (bounded shutdown),
+ * while the ops stay registered for the post-pool_free() sweep. @p fn MUST NOT
+ * add or remove registry nodes. */
+void hl_smtp_inflight_for_each(HlSmtpInflight *r,
+                               void (*fn)(void *owner, void *user), void *user);
+
 /* Drain the registry: unlink every node and invoke its release callback exactly
  * once (each node is unlinked BEFORE its release runs, so a release that frees the
  * node's storage is safe). Returns the number swept. Call AFTER pool_free(). */
