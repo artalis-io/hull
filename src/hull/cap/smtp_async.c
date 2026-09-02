@@ -76,8 +76,14 @@ static void smtp_async_audit_once(HlSmtpAsyncOp *op, const char *terminal)
         return;
     HlSmtpResult r; HlSmtpMessage msg;
     if (hl_smtp_submit_ctx_terminal(op->sctx, &r) &&
-        hl_smtp_submit_ctx_message(op->sctx, &msg))
-        hl_smtp_audit_complete(&msg, &r, NULL, terminal);
+        hl_smtp_submit_ctx_message(op->sctx, &msg)) {
+        /* A Dop expiry (section 8) always tags terminal:post_resolution_deadline,
+         * overriding the caller's tag (a raced external cancel would otherwise say
+         * "cancelled"); else the caller's tag ("cancelled" on the sweep path, NULL
+         * on normal completion). */
+        const char *tag = r.deadline_expired ? "post_resolution_deadline" : terminal;
+        hl_smtp_audit_complete(&msg, &r, NULL, tag);
+    }
     op->audited = 1;
 }
 

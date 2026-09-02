@@ -111,6 +111,11 @@ int hl_smtp_transport_starttls(HlSmtpTransport *t, const char *host,
 /** 1 if a verified TLS session is active on the transport, else 0. */
 int hl_smtp_transport_tls_active(const HlSmtpTransport *t);
 
+/** 1 if the frozen post-resolution operation deadline (Dop, section 8) fired on
+ * any pump; the caller keeps the connect_failed token but adds the audit tag
+ * terminal:post_resolution_deadline. */
+int hl_smtp_transport_dop_expired(const HlSmtpTransport *t);
+
 /**
  * Write @p len bytes, all-or-none, draining the write queue under backpressure.
  *

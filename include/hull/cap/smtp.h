@@ -73,6 +73,10 @@ typedef struct HlSmtpResult {
     const char *token;            /* stable error token, or NULL on success */
     int         teardown_leaked;  /* 1 if transport teardown could not confirm
                                      detachment (resources intentionally leaked) */
+    int         deadline_expired; /* 1 if the FROZEN post-resolution operation
+                                     deadline (Dop, section 8) fired; the public
+                                     token stays connect_failed, the audit adds
+                                     terminal:post_resolution_deadline */
 } HlSmtpResult;
 
 /**

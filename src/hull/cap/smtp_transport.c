@@ -304,6 +304,14 @@ struct HlSmtpTransport {
     uint64_t      deadline_ms;
     int           deadline_fired;
 
+    /* FROZEN post-resolution operation deadline (Dop, section 8): an ABSOLUTE
+     * monotonic instant set ONCE right after resolution. Every post-resolution
+     * stage bounds by Dstage = min(Dop, now + stage_budget), so no stage or retry
+     * can extend Dop. dop_expired is set by any pump that finds now >= Dop, so the
+     * caller can tag terminal:post_resolution_deadline (public token unchanged). */
+    uint64_t      dop_ms;
+    int           dop_expired;
+
     /* RFC 8305 Connection Attempt Delay timer (the Happy Eyeballs stagger). */
     int64_t       delay_timer;
 
@@ -815,7 +823,11 @@ static void co_cancel_delay(void *ctx)
 static int co_arm_deadline(void *ctx, int *out_err)
 {
     HlSmtpTransport *t = ctx;
-    t->deadline_timer = kl_timer_add(&t->ev, t->deadline_ms, co_on_deadline_fired, t);
+    /* Section 8: the connect-deadline timer receives Dop - now, NEVER a fresh full
+     * timeout, so connect shares the single post-resolution ceiling. */
+    uint64_t now = kl_monotonic_ms();
+    uint64_t delay = t->dop_ms > now ? t->dop_ms - now : 0;
+    t->deadline_timer = kl_timer_add(&t->ev, delay, co_on_deadline_fired, t);
     if (t->deadline_timer < 0) { *out_err = (int)KL_ERR_TIMEOUT; return -1; }
     return 0;
 }
@@ -899,17 +911,26 @@ static int pump_until_abs(HlSmtpTransport *t, DonePred done, uint64_t deadline_m
          * without waiting for the next iteration's readiness. */
         if (t->cancel_poll && t->cancel_poll(t->cancel_user))
             return -1;
-        if (kl_monotonic_ms() >= deadline_ms && !done(t))
-            return -1;   /* deadline: caller maps to its per-stage token */
+        if (kl_monotonic_ms() >= deadline_ms && !done(t)) {
+            /* Distinguish a Dop expiry from a mere stage-budget expiry so the
+             * caller can tag terminal:post_resolution_deadline. */
+            if (t->dop_ms && kl_monotonic_ms() >= t->dop_ms)
+                t->dop_expired = 1;
+            return -1;   /* deadline: caller maps to its token */
+        }
     }
     return 0;
 }
 
-/* One stage bounded by a fresh `timeout_ms` budget. */
+/* One stage bounded by Dstage = min(Dop, now + stage_budget) - so no stage or
+ * retry can extend the frozen post-resolution ceiling Dop (section 8). Dop is 0
+ * only on the pre-resolution paths (none pump); a set Dop always wins the min. */
 static int pump_until(HlSmtpTransport *t, DonePred done, int timeout_ms)
 {
     int budget = timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS;
-    return pump_until_abs(t, done, kl_monotonic_ms() + (uint64_t)budget);
+    uint64_t stage = kl_monotonic_ms() + (uint64_t)budget;
+    uint64_t dl = (t->dop_ms && t->dop_ms < stage) ? t->dop_ms : stage;
+    return pump_until_abs(t, done, dl);
 }
 
 /* Predicates. */
@@ -971,6 +992,11 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
     t->naddrs = resolve_addrs(t, host, port);
     t->cancel_poll = cancel_poll;
     t->cancel_user = cancel_user;
+
+    /* Freeze the post-resolution operation deadline (Dop): one absolute ceiling
+     * for connect + every subsequent stage/retry. Set HERE, after the blocking
+     * (non-interruptible) resolve, so DNS is outside the ceiling per section 8. */
+    t->dop_ms = kl_monotonic_ms() + t->deadline_ms;
 
     if (kl_connect_op_init(&t->connect_op, &SMTP_CONNECT_HOOKS, t) != 0) {
         hl_smtp_transport_free(t);
@@ -1086,13 +1112,14 @@ int hl_smtp_transport_write(HlSmtpTransport *t, const void *data, size_t len,
      * queued memory stays bounded (never the whole 10 MiB message). External
      * contract unchanged: 0 iff every byte is sent, -1 on error/timeout.
      *
-     * Round-2 fix: the WHOLE write stage shares ONE absolute deadline. Every
-     * chunk drain + WOULD_BLOCK retry pumps against the SAME `deadline`, so a
-     * slow peer cannot stretch one 10 MiB DATA write across N x timeout_ms
-     * (each pump_until would otherwise mint a fresh budget). The hard
-     * total-OPERATION ceiling across all stages is a deferred follow-up. */
+     * The WHOLE write stage shares ONE absolute deadline. Every chunk drain +
+     * WOULD_BLOCK retry pumps against the SAME `deadline`, so a slow peer cannot
+     * stretch one 10 MiB DATA write across N x timeout_ms. And that deadline is
+     * itself clamped to the frozen post-resolution ceiling Dop (section 8), so the
+     * write stage - like every other stage - can never extend the operation. */
     int budget = timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS;
-    uint64_t deadline = kl_monotonic_ms() + (uint64_t)budget;
+    uint64_t stage = kl_monotonic_ms() + (uint64_t)budget;
+    uint64_t deadline = (t->dop_ms && t->dop_ms < stage) ? t->dop_ms : stage;
 
     const char *p = (const char *)data;
     size_t remaining = len;
@@ -1153,6 +1180,11 @@ int hl_smtp_transport_read_reply(HlSmtpTransport *t, char *buf, int size,
     return -1;   /* EOF / parse error / timeout with no complete reply */
 }
 
+int hl_smtp_transport_dop_expired(const HlSmtpTransport *t)
+{
+    return t ? t->dop_expired : 0;
+}
+
 void hl_smtp_transport_shutdown(HlSmtpTransport *t)
 {
     if (!t || !t->stream_up || t->close_begun)
@@ -1179,8 +1211,12 @@ int hl_smtp_transport_free(HlSmtpTransport *t)
         return 0;
 
     /* Abortive teardown must confirm detachment (fail-closed, no UAF), so its
-     * pumps ignore a pending cancel - disarm the poll before any of them run. */
+     * pumps ignore a pending cancel AND the (possibly-exhausted) Dop - clear both
+     * before any of them run, else an expired Dop would clip the confirm and leak
+     * the fd/stream. The graceful close in _shutdown keeps its Dop bound (section
+     * 8); this last-resort teardown does not. */
     t->cancel_poll = NULL;
+    t->dop_ms = 0;
 
     /* If a stream was brought up but not gracefully closed, cancel it and pump
      * to confirmed detachment so every op/watcher/fd retires exactly once. Apply

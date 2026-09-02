@@ -14,6 +14,7 @@
 
 #include <netinet/in.h>
 #include <pthread.h>
+#include <time.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -41,6 +42,7 @@ typedef struct {
     /* Configurable behavior */
     int             reject_rcpt;
     int             require_auth;
+    int             withhold_greeting;  /* accept, then never send 220 (Dop test) */
 } MockSmtp;
 
 /* Read one CRLF-terminated line from the client */
@@ -75,6 +77,16 @@ static void *mock_smtp_thread(void *arg)
     int client = accept(m->listen_fd, NULL, NULL);
     if (client < 0)
         return NULL;
+
+    /* Dop test: a peer that accepted the TCP connection (so DNS + connect
+     * succeeded, i.e. we are POST-resolution) but withholds its 220 greeting, so
+     * the greeting-read stage runs until the frozen operation deadline Dop fires. */
+    if (m->withhold_greeting) {
+        struct timespec ts = { 1, 0 };   /* out-live the ~300ms Dop, keep the test fast */
+        nanosleep(&ts, NULL);
+        close(client);
+        return NULL;
+    }
 
     /* 220 greeting */
     mock_send(client, "220 mock.local ESMTP\r\n");
@@ -273,6 +285,41 @@ UTEST(smtp_e2e, plain_send)
     ASSERT_TRUE(strstr(m.data_buf, "Subject: Hello\r\n") != NULL);
     ASSERT_TRUE(strstr(m.data_buf, "Content-Type: text/plain") != NULL);
     ASSERT_TRUE(strstr(m.data_buf, "Hello, World!") != NULL);
+}
+
+/* FROZEN post-resolution operation deadline (Dop, section 8): a peer that accepts
+ * the connection (post-resolution) but withholds its greeting must trip Dop within
+ * the configured timeout. The public token stays connect_failed; deadline_expired
+ * is set so the audit can add terminal:post_resolution_deadline. Distinct from a
+ * pre-connection failure: the connect SUCCEEDED, only the operation clock fired. */
+UTEST(smtp_e2e, post_resolution_operation_deadline)
+{
+    MockSmtp m;
+    ASSERT_EQ(0, mock_smtp_start(&m));
+    m.withhold_greeting = 1;
+
+    HlSmtpMessage msg = {
+        .host = "127.0.0.1", .port = m.port, .use_tls = 0,
+        .from = "s@example.com", .to = "r@example.com",
+        .subject = "hi", .body = "b", .content_type = "text/plain",
+    };
+
+    struct timespec ts0, ts1;
+    clock_gettime(CLOCK_MONOTONIC, &ts0);
+    HlSmtpResult r;
+    /* Short Dop so the test does not wait the default timeout; the mock holds the
+     * connection open for ~1s, so ONLY Dop can end the greeting read. */
+    hl_smtp_execute(&msg, NULL, 300, NULL, NULL, &r);
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    long elapsed = (ts1.tv_sec - ts0.tv_sec) * 1000 +
+                   (ts1.tv_nsec - ts0.tv_nsec) / 1000000;
+
+    ASSERT_EQ(r.rc, -1);
+    ASSERT_TRUE(r.token != NULL);
+    ASSERT_STREQ(r.token, "connect_failed");   /* frozen public token on Dop expiry */
+    ASSERT_EQ(r.deadline_expired, 1);           /* Dop genuinely fired */
+    ASSERT_TRUE(elapsed < 2000);                /* bounded by Dop (~300ms), not the 5s peer */
+    mock_smtp_stop(&m);
 }
 
 /* ── 2. AUTH PLAIN rejected without TLS ──────────────────────────── */

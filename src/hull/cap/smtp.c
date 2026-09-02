@@ -390,6 +390,7 @@ int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
     out->rc = -1;
     out->token = NULL;
     out->teardown_leaked = 0;
+    out->deadline_expired = 0;
     /* The interior conversation writes its stable token through `err_msg`; alias
      * it onto out->token so the body below stays byte-identical to the prior
      * in-place send. */
@@ -586,13 +587,21 @@ cleanup:
      * rather than freed into a use-after-free; report it in the result. */
     if (ret == 0)
         hl_smtp_transport_shutdown(t);
+    /* Capture the Dop-expiry flag before free reclaims the transport. On Dop
+     * expiry the public token is FORCED to connect_failed (section 8); the stage
+     * that timed out (greeting_failed, ehlo_failed, ...) is not user-visible, only
+     * the terminal:post_resolution_deadline audit tag distinguishes it. */
+    int deadline_expired = hl_smtp_transport_dop_expired(t);
     teardown_leaked = teardown_leaked || (hl_smtp_transport_free(t) != 0);
     if (teardown_leaked)
         log_error("smtp: transport teardown failed (op/stream would not "
                   "detach); leaked transport resources for host '%s'", msg->host);
 
+    if (deadline_expired && err_msg)
+        *err_msg = "connect_failed";
     out->rc = ret;
     out->teardown_leaked = teardown_leaked;
+    out->deadline_expired = deadline_expired;
     return ret;
 }
 
@@ -665,7 +674,9 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     if (err_msg && r.token)
         *err_msg = r.token;
 
-    /* Completion phase (event-loop side in model 2): the single audit record. */
-    hl_smtp_audit_complete(msg, &r, NULL, NULL);
+    /* Completion phase (event-loop side in model 2): the single audit record. A
+     * Dop expiry adds terminal:post_resolution_deadline (section 8). */
+    hl_smtp_audit_complete(msg, &r, NULL,
+                           r.deadline_expired ? "post_resolution_deadline" : NULL);
     return r.rc;
 }
