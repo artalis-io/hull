@@ -316,6 +316,11 @@ T1=$(python3 -c "import time;print(time.time())"); DT=$(python3 -c "print(int($T
 if kill -0 "$HULL_PID" 2>/dev/null; then fail "shutdown hung with op in flight"; kill -9 "$HULL_PID" 2>/dev/null
 elif [ "$DT" -lt 15 ]; then pass "prompt cancellation: shutdown ~${DT}s (<< 30s SMTP timeout)"
 else fail "shutdown ~${DT}s (not well below the 30s timeout)"; fi
+# No duplicate audit: the one in-flight op is swept to a single terminal record in
+# the cancellation-vs-completion race (exactly one live terminal:cancelled).
+NC=$(grep -c '"terminal":"cancelled"' "$APPDIR/hull.log" 2>/dev/null || printf 0)
+[ "$NC" = "1" ] && pass "prompt cancellation: exactly one terminal:cancelled (no duplicate audit)" \
+                || fail "prompt cancellation: terminal:cancelled count=$NC (want 1)"
 stop_mock
 
 # ── clean shutdown with an op in flight, under ASan (both runtimes) ─────
