@@ -1951,4 +1951,141 @@ UTEST(smtp_live_audit, teardown_leaked_record_isolated_subprocess)
     ASSERT_EQ(audit_line_count(buf, "\"terminal\":\"cancelled\""), 0);  /* no spurious terminal */
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ *  Cancellation-state matrix: an EXTERNAL cancel firing mid-stage must abort
+ *  promptly and tear down exactly once (free() == 0), at each in-flight state.
+ *
+ *  Worker/submit states (queued, cancel-vs-completion, request_cancel_all) are
+ *  covered in test_smtp_worker / _submit / _async; resolving (post-DNS) and Dop
+ *  are covered above. This matrix fills the transport in-flight stages: a
+ *  cancel_poll (fires after N pump checks) is armed on t AFTER connect so each
+ *  stage is isolated. Every case carries a finite SIGALRM watchdog and asserts a
+ *  prompt terminal + single teardown; ASan proves no leak / double-free.
+ * ════════════════════════════════════════════════════════════════════ */
+
+static int g_cx_after;   /* fire the cancel on the Nth pump check of the stage */
+static int g_cx_calls;
+static int cx_cancel_after_n(void *u) { (void)u; return (++g_cx_calls >= g_cx_after) ? 1 : 0; }
+static void cx_arm(HlSmtpTransport *t) { g_cx_calls = 0; g_cx_after = 2; t->cancel_poll = cx_cancel_after_n; t->cancel_user = NULL; }
+
+/* Greet 220, then stall WITHOUT reading - so a subsequent client write backpressures
+ * (the send buffer fills and never drains). */
+static void *mp_greet_then_stall_thread(void *arg)
+{
+    MockPeer *m = arg;
+    int c = accept(m->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    m->accepted = 1;
+    mp_send(c, "220 stall ESMTP\r\n");
+    for (;;) { usleep(20 * 1000); if (m->slow_reader) break; }   /* hold; test sets slow_reader to release */
+    close(c);
+    return NULL;
+}
+
+/* Cancel while a connect attempt is still racing (fake provider keeps it pending). */
+UTEST(smtp_cancel_state, during_racing_connect)
+{
+    fk_reset();
+    g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;
+    smtp_test_resolve = fk_resolve; smtp_test_socket_provider = &FK_PROVIDER;
+    g_cx_calls = 0; g_cx_after = 3;
+
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+    HlSmtpTransport *t = hl_smtp_transport_connect("h.invalid", 25, 10000,
+                                                   cx_cancel_after_n, NULL, NULL, NULL);
+    alarm(0); signal(SIGALRM, prev);
+    smtp_test_resolve = NULL; smtp_test_socket_provider = NULL;
+
+    ASSERT_TRUE(t == NULL);   /* connect aborted by the cancel; storage freed on the failure path */
+}
+
+/* Cancel while reading a reply (peer withholds the greeting). */
+UTEST(smtp_cancel_state, during_read)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_accept_and_hold_thread), 0);
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    cx_arm(t);                                    /* isolate: cancel only during the read */
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    int code = hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+    ASSERT_EQ(code, -1);                          /* read aborted promptly */
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);      /* teardown exactly once */
+    mp_join(&m);
+}
+
+/* Cancel while writing (peer greets then stops reading -> backpressure). Also the
+ * DATA-body path: DATA is delivered through this same chunked write. */
+UTEST(smtp_cancel_state, during_write_and_data)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_greet_then_stall_thread), 0);
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);   /* consume greeting */
+    cx_arm(t);                                    /* isolate: cancel only during the write */
+    size_t n = 1u << 20;                          /* 1 MiB: exceeds the socket buffer -> backpressure */
+    char *big = malloc(n); ASSERT_TRUE(big != NULL); memset(big, 'Z', n);
+    int rc = hl_smtp_transport_write(t, big, n, 10000);
+    free(big);
+
+    alarm(0); signal(SIGALRM, prev);
+    ASSERT_EQ(rc, -1);                            /* write aborted promptly */
+    m.slow_reader = 1;                            /* release the peer thread */
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);      /* teardown exactly once */
+    mp_join(&m);
+}
+
+/* Cancel while the TLS handshake is in flight (peer never answers the ClientHello);
+ * fail closed, no plaintext, single teardown. */
+UTEST(smtp_cancel_state, during_tls_handshake)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.stall_handshake = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000, NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    cx_arm(t);                                    /* isolate: cancel only during the handshake */
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_implicit_tls(t, "localhost", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+    ASSERT_EQ(rc, -1);                            /* handshake aborted by the cancel */
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);/* fail closed, no plaintext */
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);      /* teardown exactly once */
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+}
+
+/* Graceful close then teardown: a normally-completed conversation shuts down and
+ * frees exactly once (the graceful-close state). */
+UTEST(smtp_cancel_state, graceful_close_teardown_once)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_full_smtp_thread), 0);
+    g_live_port = m.port;
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
+    ASSERT_EQ(hl_smtp_transport_write(t, "QUIT\r\n", 6, 10000), 0);
+    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 221);
+
+    hl_smtp_transport_shutdown(t);                /* graceful close */
+    int freed = hl_smtp_transport_free(t);
+
+    alarm(0); signal(SIGALRM, prev);
+    ASSERT_EQ(freed, 0);                          /* teardown exactly once, cleanly */
+    mp_join(&m);
+}
+
 UTEST_MAIN()
