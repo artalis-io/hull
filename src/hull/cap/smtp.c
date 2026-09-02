@@ -407,9 +407,11 @@ int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
     /* Connect to SMTP server (resolve + Happy-Eyeballs connect over the
      * Keel-primitive transport; NULL == resolve / connect / deadline failure).
      * out_teardown_leaked surfaces a connect-path teardown leak into the audit. */
+    int connect_dop = 0;
     HlSmtpTransport *t = hl_smtp_transport_connect(msg->host, msg->port,
                                                    timeout_ms, cancel_poll,
-                                                   cancel_user, &teardown_leaked);
+                                                   cancel_user, &teardown_leaked,
+                                                   &connect_dop);
     if (!t) {
         log_warn("smtp: connect to %s:%d failed", msg->host, msg->port);
         if (err_msg) *err_msg = "connect_failed";
@@ -591,7 +593,7 @@ cleanup:
      * expiry the public token is FORCED to connect_failed (section 8); the stage
      * that timed out (greeting_failed, ehlo_failed, ...) is not user-visible, only
      * the terminal:post_resolution_deadline audit tag distinguishes it. */
-    int deadline_expired = hl_smtp_transport_dop_expired(t);
+    int deadline_expired = connect_dop || hl_smtp_transport_dop_expired(t);
     teardown_leaked = teardown_leaked || (hl_smtp_transport_free(t) != 0);
     if (teardown_leaked)
         log_error("smtp: transport teardown failed (op/stream would not "

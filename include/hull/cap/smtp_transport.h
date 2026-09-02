@@ -66,12 +66,18 @@ typedef struct HlSmtpTransport HlSmtpTransport;
  * immediately AFTER the blocking DNS resolve (the sole non-interruptible stage),
  * so a post-resolution stalled peer is abandoned promptly rather than at the
  * stage timeout. NULL on the synchronous no-loop path.
+ *
+ * @p out_dop_expired (optional, may be NULL) is set to 1 if the connect phase
+ * reached the post-resolution operation deadline Dop (section 8), so the caller
+ * surfaces deadline_expired even though a failed connect returns NULL and frees
+ * the transport (mirrors @p out_teardown_leaked). 0 on every other path.
  */
 HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
                                            int timeout_ms,
                                            int (*cancel_poll)(void *),
                                            void *cancel_user,
-                                           int *out_teardown_leaked);
+                                           int *out_teardown_leaked,
+                                           int *out_dop_expired);
 
 /**
  * Implicit-TLS (SMTPS) handshake BEFORE any application bytes are read.

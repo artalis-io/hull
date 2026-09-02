@@ -15,6 +15,8 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <time.h>
+#include <errno.h>
+#include <stdint.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -82,8 +84,19 @@ static void *mock_smtp_thread(void *arg)
      * succeeded, i.e. we are POST-resolution) but withholds its 220 greeting, so
      * the greeting-read stage runs until the frozen operation deadline Dop fires. */
     if (m->withhold_greeting) {
-        struct timespec ts = { 1, 0 };   /* out-live the ~300ms Dop, keep the test fast */
-        nanosleep(&ts, NULL);
+        /* Never send 220. Block reading until the client (the transport) closes on
+         * its Dop expiry, so this thread exits promptly for a fast join while still
+         * having withheld the greeting for the entire pre-Dop window (the transport
+         * only reads in the greeting stage, so this read blocks until Dop fires and
+         * the abortive teardown closes the fd). A watchdog caps a stuck peer. */
+        char buf[64];
+        for (int i = 0; i < 400; i++) {         /* <= ~20s watchdog */
+            struct timeval tv = { 0, 50000 };   /* 50ms poll for close */
+            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+            ssize_t n = read(client, buf, sizeof buf);
+            if (n == 0) break;                  /* transport closed (Dop fired) */
+            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) break;
+        }
         close(client);
         return NULL;
     }
@@ -287,12 +300,27 @@ UTEST(smtp_e2e, plain_send)
     ASSERT_TRUE(strstr(m.data_buf, "Hello, World!") != NULL);
 }
 
-/* FROZEN post-resolution operation deadline (Dop, section 8): a peer that accepts
- * the connection (post-resolution) but withholds its greeting must trip Dop within
- * the configured timeout. The public token stays connect_failed; deadline_expired
- * is set so the audit can add terminal:post_resolution_deadline. Distinct from a
- * pre-connection failure: the connect SUCCEEDED, only the operation clock fired. */
-UTEST(smtp_e2e, post_resolution_operation_deadline)
+static long elapsed_ms(struct timespec *a, struct timespec *b)
+{ return (b->tv_sec - a->tv_sec) * 1000 + (b->tv_nsec - a->tv_nsec) / 1000000; }
+
+/* Cancel poll for the deadline-vs-cancel race: returns true once the elapsed time
+ * reaches Dop, so cancellation and Dop cross at the SAME pump check. */
+static struct timespec g_cancel_start;
+static int cancel_when_dop_would_fire(void *user)
+{
+    long dop_ms = (long)(intptr_t)user;
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    return elapsed_ms(&g_cancel_start, &now) >= dop_ms;
+}
+
+/* FROZEN post-resolution operation deadline (Dop, section 8), GREETING stage: a
+ * peer accepts the connection (post-resolution) but withholds its 220 greeting, so
+ * the greeting read runs until Dop. Public token stays connect_failed;
+ * deadline_expired is set (audit adds terminal:post_resolution_deadline).
+ * REVERT PROOF: remove the Dop classification and the greeting read ends on its
+ * stage budget with token "greeting_failed" and deadline_expired 0 - both asserts
+ * below flip. The peer holds until the transport closes, so only Dop ends it. */
+UTEST(smtp_e2e, post_resolution_deadline_greeting_stage)
 {
     MockSmtp m;
     ASSERT_EQ(0, mock_smtp_start(&m));
@@ -304,21 +332,76 @@ UTEST(smtp_e2e, post_resolution_operation_deadline)
         .subject = "hi", .body = "b", .content_type = "text/plain",
     };
 
-    struct timespec ts0, ts1;
-    clock_gettime(CLOCK_MONOTONIC, &ts0);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     HlSmtpResult r;
-    /* Short Dop so the test does not wait the default timeout; the mock holds the
-     * connection open for ~1s, so ONLY Dop can end the greeting read. */
-    hl_smtp_execute(&msg, NULL, 300, NULL, NULL, &r);
-    clock_gettime(CLOCK_MONOTONIC, &ts1);
-    long elapsed = (ts1.tv_sec - ts0.tv_sec) * 1000 +
-                   (ts1.tv_nsec - ts0.tv_nsec) / 1000000;
+    hl_smtp_execute(&msg, NULL, 300, NULL, NULL, &r);   /* Dop = 300ms */
+    clock_gettime(CLOCK_MONOTONIC, &t1);
 
     ASSERT_EQ(r.rc, -1);
-    ASSERT_TRUE(r.token != NULL);
-    ASSERT_STREQ(r.token, "connect_failed");   /* frozen public token on Dop expiry */
-    ASSERT_EQ(r.deadline_expired, 1);           /* Dop genuinely fired */
-    ASSERT_TRUE(elapsed < 2000);                /* bounded by Dop (~300ms), not the 5s peer */
+    ASSERT_STREQ(r.token, "connect_failed");    /* revert -> "greeting_failed" */
+    ASSERT_EQ(r.deadline_expired, 1);            /* revert -> 0 */
+    ASSERT_TRUE(elapsed_ms(&t0, &t1) < 1500);    /* ~Dop; watchdog vs an unbounded read */
+    mock_smtp_stop(&m);
+}
+
+/* Dop on the PENDING-CONNECT phase: a non-routable address (RFC 5737 TEST-NET-1)
+ * leaves the connect pending until Dop. The connect fails and the transport is
+ * FREED, yet deadline_expired must survive via out_dop_expired (blocker #1).
+ * REVERT PROOF: drop the connect-phase propagation and deadline_expired is 0 even
+ * though the operation clock fired. On a host that fast-rejects the address
+ * (no default route), the connect never reaches Dop - detected as elapsed << Dop -
+ * and the Dop assertion is skipped (the interesting path was not exercised). */
+UTEST(smtp_e2e, post_resolution_deadline_pending_connect)
+{
+    HlSmtpMessage msg = {
+        .host = "192.0.2.1", .port = 25, .use_tls = 0,   /* TEST-NET-1, blackholed */
+        .from = "s@example.com", .to = "r@example.com",
+        .subject = "hi", .body = "b", .content_type = "text/plain",
+    };
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    HlSmtpResult r;
+    hl_smtp_execute(&msg, NULL, 400, NULL, NULL, &r);   /* Dop = 400ms */
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long dt = elapsed_ms(&t0, &t1);
+
+    ASSERT_EQ(r.rc, -1);
+    ASSERT_STREQ(r.token, "connect_failed");
+    if (dt >= 250) {
+        /* The connect was genuinely pending and hit Dop. */
+        ASSERT_EQ(r.deadline_expired, 1);        /* survives connect-path teardown */
+        ASSERT_TRUE(dt < 2000);
+    }
+    /* else: environment fast-rejected TEST-NET-1; Dop path not exercised - skip. */
+}
+
+/* Dop OVERRIDES a raced cancellation (frozen precedence): the cancel poll fires at
+ * the same instant Dop expires. The classification order (Dop before cancel) must
+ * tag terminal:post_resolution_deadline, never terminal:cancelled.
+ * REVERT PROOF: check cancel before Dop and deadline_expired is 0 here. */
+UTEST(smtp_e2e, post_resolution_deadline_beats_cancel)
+{
+    MockSmtp m;
+    ASSERT_EQ(0, mock_smtp_start(&m));
+    m.withhold_greeting = 1;
+
+    HlSmtpMessage msg = {
+        .host = "127.0.0.1", .port = m.port, .use_tls = 0,
+        .from = "s@example.com", .to = "r@example.com",
+        .subject = "hi", .body = "b", .content_type = "text/plain",
+    };
+
+    clock_gettime(CLOCK_MONOTONIC, &g_cancel_start);
+    HlSmtpResult r;
+    /* Dop = 300ms; the cancel poll also flips true at ~300ms, so both fire at the
+     * same pump check. Dop wins per section 8. */
+    hl_smtp_execute(&msg, NULL, 300, cancel_when_dop_would_fire,
+                    (void *)(intptr_t)300, &r);
+
+    ASSERT_EQ(r.rc, -1);
+    ASSERT_EQ(r.deadline_expired, 1);            /* Dop wins the race; revert -> 0 */
     mock_smtp_stop(&m);
 }
 

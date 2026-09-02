@@ -788,6 +788,12 @@ static void co_on_deadline_fired(void *user_data)
     HlSmtpTransport *t = user_data;
     t->deadline_timer = -1;
     t->deadline_fired = 1;
+    /* The connect-deadline timer is armed with Dop - now (section 8, co_arm_
+     * deadline), so its firing IS a post-resolution deadline expiry. Classify it
+     * here: the connect pump exits via done_connect (connect failed), not the
+     * pump's own deadline branch, so this is where the connect-phase Dop is tagged
+     * (surfaced via out_dop_expired since a failed connect frees the transport). */
+    t->dop_expired = 1;
     kl_connect_op_on_deadline(&t->connect_op, (int)KL_ERR_TIMEOUT);
 }
 
@@ -895,31 +901,41 @@ static const KlConnectOpHooks SMTP_CONNECT_HOOKS = {
 
 typedef int (*DonePred)(HlSmtpTransport *t);
 
-/* Pump until done() or the ABSOLUTE monotonic instant `deadline_ms` passes. */
+/* One classification pass at a pump check point, in the FROZEN precedence
+ * (section 8):
+ *   1. a completed predicate wins (deliver the stage result);
+ *   2. THEN an expired Dop is classified (dop_expired set) - so a Dop-vs-cancel
+ *      race tags terminal:post_resolution_deadline, never terminal:cancelled;
+ *   3. THEN cancellation is honored (prompt abort of an in-flight conversation);
+ *   4. THEN the stage-only budget.
+ * Returns 1 = done (pump success), -1 = terminate, 0 = keep pumping. */
+static int pump_check(HlSmtpTransport *t, DonePred done, uint64_t deadline_ms)
+{
+    if (done(t))
+        return 1;
+    uint64_t now = kl_monotonic_ms();
+    if (t->dop_ms && now >= t->dop_ms) { t->dop_expired = 1; return -1; }
+    if (t->cancel_poll && t->cancel_poll(t->cancel_user))
+        return -1;
+    if (now >= deadline_ms)
+        return -1;
+    return 0;
+}
+
+/* Pump until done() or a terminate condition (Dop / cancel / stage deadline). The
+ * check runs BEFORE and AFTER each event-loop step, so a condition that arrives
+ * during the step takes effect within one step (~50 ms). */
 static int pump_until_abs(HlSmtpTransport *t, DonePred done, uint64_t deadline_ms)
 {
     const int step_ms = 50;
-    while (!done(t)) {
-        /* Prompt cancellation: abort BEFORE spending another step blocked on a
-         * peer that will never answer (e.g. a post-resolution stalled greeting). */
-        if (t->cancel_poll && t->cancel_poll(t->cancel_user))
-            return -1;   /* -> caller goto cleanup -> confirmed abortive teardown */
-        int rc = kl_event_ctx_run(&t->ev, 64, step_ms);
-        if (rc < 0)
+    for (;;) {
+        int c = pump_check(t, done, deadline_ms);
+        if (c) return c > 0 ? 0 : -1;
+        if (kl_event_ctx_run(&t->ev, 64, step_ms) < 0)
             return -1;
-        /* And AFTER the run, so a cancel that arrived during the step takes effect
-         * without waiting for the next iteration's readiness. */
-        if (t->cancel_poll && t->cancel_poll(t->cancel_user))
-            return -1;
-        if (kl_monotonic_ms() >= deadline_ms && !done(t)) {
-            /* Distinguish a Dop expiry from a mere stage-budget expiry so the
-             * caller can tag terminal:post_resolution_deadline. */
-            if (t->dop_ms && kl_monotonic_ms() >= t->dop_ms)
-                t->dop_expired = 1;
-            return -1;   /* deadline: caller maps to its token */
-        }
+        c = pump_check(t, done, deadline_ms);
+        if (c) return c > 0 ? 0 : -1;
     }
-    return 0;
 }
 
 /* One stage bounded by Dstage = min(Dop, now + stage_budget) - so no stage or
@@ -959,10 +975,13 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
                                            int timeout_ms,
                                            int (*cancel_poll)(void *),
                                            void *cancel_user,
-                                           int *out_teardown_leaked)
+                                           int *out_teardown_leaked,
+                                           int *out_dop_expired)
 {
     if (out_teardown_leaked)
         *out_teardown_leaked = 0;
+    if (out_dop_expired)
+        *out_dop_expired = 0;
     if (!host || port < 1 || port > 65535)
         return NULL;
     (void)socket_provider();   /* one-time init of g_sp */
@@ -1012,6 +1031,11 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
 
     if (pump_until(t, done_connect, timeout_ms) != 0 ||
         t->connect_result != KL_CONNECT_SUCCESS || !t->stream_up) {
+        /* Capture the connect-phase Dop expiry BEFORE free reclaims the transport,
+         * so a connect that reached Dop still surfaces deadline_expired (else the
+         * NULL return loses t->dop_expired) - mirrors out_teardown_leaked. */
+        if (out_dop_expired && t->dop_expired)
+            *out_dop_expired = 1;
         /* This is the most plausible non-detaching-op site (a connect that never
          * completed). Propagate the teardown outcome so hl_cap_smtp_send can
          * record "teardown":"leaked" in the audit rather than losing it. */
