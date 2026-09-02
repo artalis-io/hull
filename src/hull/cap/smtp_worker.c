@@ -64,10 +64,11 @@ static void wop_publish_and_done(HlSmtpWorkerOp *w, int cancelled,
      * observes DONE, so a consumer that sees DONE sees the full payload. */
     atomic_store_explicit(&w->state, HL_SMTP_ST_DONE, memory_order_release);
 
-    /* Worker-side terminal hook (lease release), after terminal publication and
-     * BEFORE the worker-ref drop. Runs on completion, cancel, and discard; this
-     * is where the admission lease is released, because the pool's later done
-     * callback is resume-only and may be dropped. */
+    /* Terminal hook (lease release), after terminal publication and BEFORE the
+     * worker-ref drop. Fires from whichever side PRODUCES the terminal - work_fn
+     * (worker thread) on completion or cancel, or discard (event-loop thread at
+     * pool shutdown, or the submit thread on queue rejection) - independent of the
+     * pool's done callback, which is resume-only and may be dropped. */
     if (w->on_terminal)
         w->on_terminal(w, w->on_terminal_user);
 

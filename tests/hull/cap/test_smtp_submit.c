@@ -21,11 +21,13 @@
 
 #include "utest.h"
 
-/* Direct-source include (compiled with -DHL_SMTP_TEST_HOOKS) for the ctx-alloc
- * seam; cap_smtp_submit.o is excluded from this test's link. */
+/* Direct-source includes (compiled with -DHL_SMTP_TEST_HOOKS). smtp_submit.c for
+ * the ctx-alloc seam; smtp_op.c for its alloc/free seam so we can prove owned
+ * inputs are freed on every path (a balanced alloc/free count). cap_smtp_submit.o
+ * and cap_smtp_op.o are both excluded from this test's link. */
 #include "../../../src/hull/cap/smtp_submit.c"
+#include "../../../src/hull/cap/smtp_op.c"
 
-#include "hull/cap/smtp_op.h"
 #include "hull/cap/smtp_admit.h"
 
 #include <stdlib.h>
@@ -79,14 +81,32 @@ static int g_ctx_allocs, g_ctx_frees, g_alloc_fail;
 static void *obs_alloc(size_t n) { if (g_alloc_fail) return NULL; g_ctx_allocs++; return malloc(n); }
 static void  obs_free(void *p)   { if (p) g_ctx_frees++; free(p); }
 
+/* ── op-alloc seam observation: proves owned inputs are freed on every path ── */
+static int g_op_allocs, g_op_frees;
+static void *op_obs_alloc(size_t n) { g_op_allocs++; return malloc(n); }
+static void  op_obs_free(void *p)   { if (p) g_op_frees++; free(p); }
+
 static void reset_all(void)
 {
     memset(&g_pool, 0, sizeof g_pool);
     g_suspend_rc = 0; g_suspend_calls = 0; g_resume_calls = 0; g_exec_calls = 0;
     g_ctx_allocs = 0; g_ctx_frees = 0; g_alloc_fail = 0;
+    g_op_allocs = 0; g_op_frees = 0;
     smtp_submit_test_alloc = obs_alloc;
     smtp_submit_test_free  = obs_free;
+    smtp_op_test_alloc = op_obs_alloc;
+    smtp_op_test_free  = op_obs_free;
 }
+
+/* Every test ends here: the owned HlSmtpOp is fully freed (balanced alloc/free),
+ * proving no input leak whether the op was freed by submit (failure paths) or by
+ * the worker op at ctx_release (async paths). A macro, not a function, so the
+ * utest ASSERT_* machinery (which references the UTEST body's utest_result) is
+ * in scope at the call site. */
+#define ASSERT_INPUTS_FREED() do {           \
+    ASSERT_TRUE(g_op_allocs > 0);            \
+    ASSERT_EQ(g_op_allocs, g_op_frees);      \
+} while (0)
 
 static HlSmtpOp *make_inputs(void)
 {
@@ -139,6 +159,7 @@ UTEST(smtp_submit, normal_completion_work_after_suspend)
     ASSERT_EQ(r.rc, 0);
     hl_smtp_submit_ctx_release(out.ctx);
     ASSERT_EQ(g_ctx_frees, 1);
+    ASSERT_INPUTS_FREED();
 }
 
 UTEST(smtp_submit, fast_completion_before_suspend_holds_done)
@@ -164,6 +185,7 @@ UTEST(smtp_submit, fast_completion_before_suspend_holds_done)
     ASSERT_EQ(r.rc, 0);
     hl_smtp_submit_ctx_release(out.ctx);
     ASSERT_EQ(g_ctx_frees, 1);
+    ASSERT_INPUTS_FREED();
 }
 
 UTEST(smtp_submit, submit_failure_queue_full)
@@ -183,6 +205,7 @@ UTEST(smtp_submit, submit_failure_queue_full)
     ASSERT_EQ(g_exec_calls, 0);                 /* discard opens no transport */
     ASSERT_EQ(hl_smtp_admission_inflight(&adm), 0);  /* lease released via discard */
     ASSERT_EQ(g_ctx_frees, 1);                  /* submit cleaned up its ctx */
+    ASSERT_INPUTS_FREED();
 }
 
 UTEST(smtp_submit, suspend_failure_resolves_and_retains_ctx)
@@ -214,6 +237,7 @@ UTEST(smtp_submit, suspend_failure_resolves_and_retains_ctx)
     ASSERT_EQ(r.rc, -1);                          /* cancelled terminal */
     hl_smtp_submit_ctx_release(out.ctx);          /* the shutdown sweep */
     ASSERT_EQ(g_ctx_frees, 1);
+    ASSERT_INPUTS_FREED();
 }
 
 UTEST(smtp_submit, queued_cancel_before_work_ran)
@@ -237,6 +261,7 @@ UTEST(smtp_submit, queued_cancel_before_work_ran)
     ASSERT_EQ(r.rc, -1);
     hl_smtp_submit_ctx_release(out.ctx);             /* the shutdown sweep */
     ASSERT_EQ(g_ctx_frees, 1);
+    ASSERT_INPUTS_FREED();
 }
 
 UTEST(smtp_submit, dropped_done_after_work_completed)
@@ -260,6 +285,7 @@ UTEST(smtp_submit, dropped_done_after_work_completed)
     hl_smtp_submit_ctx_release(out.ctx);
     ASSERT_EQ(g_ctx_frees, 1);
     ASSERT_EQ(g_resume_calls, 0);                /* still no resume: done was dropped */
+    ASSERT_INPUTS_FREED();
 }
 
 UTEST(smtp_submit, pool_unavailable)
@@ -277,6 +303,7 @@ UTEST(smtp_submit, pool_unavailable)
     ASSERT_EQ(g_pool.submits, 0);
     ASSERT_EQ(g_ctx_allocs, 0);                  /* no ctx allocated before the gate */
     ASSERT_EQ(g_ctx_frees, 0);
+    ASSERT_INPUTS_FREED();                       /* inputs freed at the pool gate */
 }
 
 UTEST(smtp_submit, cap_reached_admission_disabled)
@@ -294,6 +321,7 @@ UTEST(smtp_submit, cap_reached_admission_disabled)
     ASSERT_EQ(g_pool.submits, 0);                /* never submitted */
     ASSERT_EQ(hl_smtp_admission_inflight(&adm), 0);
     ASSERT_EQ(g_ctx_frees, 1);                   /* ctx allocated then freed */
+    ASSERT_INPUTS_FREED();
 }
 
 UTEST(smtp_submit, ctx_alloc_oom_resolves_without_sched_tag)
@@ -311,6 +339,66 @@ UTEST(smtp_submit, ctx_alloc_oom_resolves_without_sched_tag)
     ASSERT_EQ(out.result.rc, -1);
     ASSERT_EQ(g_pool.submits, 0);
     ASSERT_EQ(hl_smtp_admission_inflight(&adm), 0);
+    ASSERT_INPUTS_FREED();                       /* inputs freed on the OOM path */
+}
+
+/* ── mandatory-seam validation (fail closed before any reserve/submit) ── */
+
+/* A missing seam resolves immediately as connect_failed (schedule=NONE): no
+ * reservation, no submission, no ctx allocated (=> none escapes), no continuation
+ * suspended, and the owned inputs are freed. */
+static HlSmtpAdmission g_val_adm;
+#define ASSERT_MALFORMED_RESOLVED(outp) do {                          \
+    ASSERT_EQ((int)(outp)->disposition, (int)HL_SMTP_SUBMIT_RESOLVED);\
+    ASSERT_EQ((int)(outp)->schedule, (int)HL_SMTP_SCHED_NONE);        \
+    ASSERT_TRUE((outp)->ctx == NULL);       /* no submit context escapes */ \
+    ASSERT_EQ((outp)->result.rc, -1);                                \
+    ASSERT_EQ(g_pool.submits, 0);           /* no submission */       \
+    ASSERT_EQ(g_suspend_calls, 0);          /* no continuation suspended */ \
+    ASSERT_EQ(g_ctx_allocs, 0);             /* no reservation reached */ \
+    ASSERT_EQ(hl_smtp_admission_inflight(&g_val_adm), 0);  /* no slot reserved */ \
+} while (0)
+
+UTEST(smtp_submit, missing_admission_fails_closed)
+{
+    reset_all();
+    hl_smtp_admission_init(&g_val_adm, 4);
+    HlSmtpSubmitReq req = make_req(&g_val_adm, &g_pool);
+    req.admission = NULL;                        /* mandatory seam absent */
+    HlSmtpSubmitOutcome out;
+
+    hl_smtp_submit(&req, &out);
+    ASSERT_MALFORMED_RESOLVED(&out);
+    ASSERT_INPUTS_FREED();
+}
+
+UTEST(smtp_submit, missing_suspend_fails_closed)
+{
+    reset_all();
+    hl_smtp_admission_init(&g_val_adm, 4);
+    HlSmtpSubmitReq req = make_req(&g_val_adm, &g_pool);
+    req.suspend = NULL;                          /* mandatory seam absent */
+    HlSmtpSubmitOutcome out;
+
+    hl_smtp_submit(&req, &out);
+    ASSERT_MALFORMED_RESOLVED(&out);
+    ASSERT_INPUTS_FREED();
+}
+
+UTEST(smtp_submit, missing_resume_fails_closed)
+{
+    /* The dangerous one: without resume, a completed op would strand its
+     * continuation parked forever (submit_done becomes a no-op). So resume is
+     * mandatory up front - a missing resume must never reach SUSPENDED. */
+    reset_all();
+    hl_smtp_admission_init(&g_val_adm, 4);
+    HlSmtpSubmitReq req = make_req(&g_val_adm, &g_pool);
+    req.resume = NULL;                           /* mandatory seam absent */
+    HlSmtpSubmitOutcome out;
+
+    hl_smtp_submit(&req, &out);
+    ASSERT_MALFORMED_RESOLVED(&out);
+    ASSERT_INPUTS_FREED();
 }
 
 UTEST_MAIN();

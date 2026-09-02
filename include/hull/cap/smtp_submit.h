@@ -24,8 +24,9 @@
  *   - submit-then-suspend: the worker may finish before the continuation parks;
  *     the pool never resumes until its done callback fires, which the submit layer
  *     wires but never invokes;
- *   - the admission lease is released on the WORKER side (the terminal hook), not
- *     in done_fn (which is resume-only and may be dropped);
+ *   - the admission lease is released on the TERMINAL-PRODUCING side (the terminal
+ *     hook: work_fn, cancel_fn, or the submit-side discard), independent of done_fn
+ *     (which is resume-only and may be dropped);
  *   - a suspension setup that fails AFTER a successful submit marks the op
  *     non-resumable, requests cancellation, and resolves immediately; the retained
  *     runtime ref is dropped by the caller's shutdown sweep, not here.

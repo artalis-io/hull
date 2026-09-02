@@ -52,8 +52,11 @@ static void submit_done(void *u)
         c->resume(c->resume_user);
 }
 
-/* Worker-side terminal hook: release the admission lease exactly once, on the
- * worker thread, after terminal publication and before the worker-ref drop. */
+/* Terminal hook: release the admission lease exactly once, from whichever side
+ * PRODUCES the terminal - work_fn (worker thread), cancel_fn (event-loop thread
+ * at pool shutdown), or the submit-side discard (submit thread on queue
+ * rejection) - after terminal publication and before the worker-ref drop, and
+ * INDEPENDENT of the pool's done callback (which is resume-only and may drop). */
 static void submit_on_terminal(HlSmtpWorkerOp *w, void *u)
 {
     (void)w;
@@ -79,8 +82,15 @@ void hl_smtp_submit(const HlSmtpSubmitReq *req, HlSmtpSubmitOutcome *out)
 {
     memset(out, 0, sizeof *out);
 
-    /* Defensive: a malformed request resolves without touching the pool. */
-    if (!req || !req->execute || !req->inputs) {
+    /* Fail closed on a malformed request: the async path REQUIRES the transport
+     * execute-phase, the deep-copied inputs, the admission handle, and BOTH
+     * seam-B halves (suspend + resume). A missing admission would dereference
+     * NULL at reservation; a missing resume would strand a successfully-completed
+     * continuation parked forever (submit_done becomes a no-op). Resolve
+     * immediately as connect_failed (schedule=NONE) BEFORE any reservation or
+     * submission, freeing the owned inputs; no ctx is allocated, so none escapes. */
+    if (!req || !req->execute || !req->inputs ||
+        !req->admission || !req->suspend || !req->resume) {
         if (req && req->inputs)
             hl_smtp_op_free(req->inputs);
         resolved_connect_failed(out, HL_SMTP_SCHED_NONE);

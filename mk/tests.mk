@@ -193,16 +193,17 @@ $(BUILDDIR)/test_smtp_worker: $(TESTDIR)/hull/cap/test_smtp_worker.c \
     $(SRCDIR)/hull/cap/smtp_worker.c $(SMTP_WORKER_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_WORKER_TEST_LIBS) $(LDFLAGS)
 
-# SMTP submit/ordering layer: direct-includes src/hull/cap/smtp_submit.c under
-# -DHL_SMTP_TEST_HOOKS to drive its ctx-alloc seam and the injected pool + suspend
-# + resume seams (a fake backend that can hold or drop a completed done_fn).
-# cap_smtp_submit.o is excluded from this test's link (direct-included); it still
-# links cap_smtp_op.o / cap_smtp_worker.o / cap_smtp_admit.o for the composed
-# primitives.
-SMTP_SUBMIT_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_submit.o,$(TEST_COMMON_LIBS))
-SMTP_SUBMIT_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_submit.o,$(TEST_COMMON_DEPS))
+# SMTP submit/ordering layer: direct-includes src/hull/cap/smtp_submit.c AND
+# smtp_op.c under -DHL_SMTP_TEST_HOOKS - the former to drive its ctx-alloc seam
+# and the injected pool + suspend + resume seams (a fake backend that can hold or
+# drop a completed done_fn), the latter to drive the op alloc/free seam and prove
+# owned inputs are freed on every path (balanced alloc/free). cap_smtp_submit.o
+# AND cap_smtp_op.o are excluded from this test's link (both direct-included); it
+# still links cap_smtp_worker.o / cap_smtp_admit.o for the composed primitives.
+SMTP_SUBMIT_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_submit.o $(BUILDDIR)/cap_smtp_op.o,$(TEST_COMMON_LIBS))
+SMTP_SUBMIT_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_submit.o $(BUILDDIR)/cap_smtp_op.o,$(TEST_COMMON_DEPS))
 $(BUILDDIR)/test_smtp_submit: $(TESTDIR)/hull/cap/test_smtp_submit.c \
-    $(SRCDIR)/hull/cap/smtp_submit.c $(SMTP_SUBMIT_TEST_DEPS) | $(BUILDDIR)
+    $(SRCDIR)/hull/cap/smtp_submit.c $(SRCDIR)/hull/cap/smtp_op.c $(SMTP_SUBMIT_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_SUBMIT_TEST_LIBS) $(LDFLAGS)
 
 # SMTP per-worker TLS-context cache: direct-includes src/hull/cap/smtp_tls.c

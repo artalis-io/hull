@@ -59,11 +59,14 @@ typedef int (*HlSmtpExecFn)(const HlSmtpMessage *msg, int timeout_ms,
  * boundary is what makes fast-completion-before-suspend safe, so no done
  * callback lives in this unit. */
 
-/* Worker-side terminal hook, fired once on the worker thread right after
- * terminal publication (and, on the run path, confirmed teardown) and BEFORE the
- * worker-ref drop. This is where the admission lease is released: the pool's
- * later done callback is resume-only and may be dropped, so lease ownership lives
- * on the worker side. Keeps this unit admission-agnostic (a plain callback). */
+/* Terminal hook, fired exactly once by whichever side PRODUCES the terminal:
+ * work_fn (worker thread) on the run path, or discard (cancel_fn on the
+ * event-loop thread at pool shutdown, or the submit thread on queue rejection) -
+ * right after terminal publication (and, on the run path, confirmed teardown) and
+ * BEFORE the worker-ref drop, INDEPENDENT of the pool's done callback. This is
+ * where the admission lease is released: done_fn is resume-only and may be
+ * dropped, so lease ownership lives on the terminal-producing side, not in
+ * done_fn. Keeps this unit admission-agnostic (a plain callback). */
 typedef void (*HlSmtpTerminalFn)(HlSmtpWorkerOp *wop, void *user);
 
 /* Create a worker op that takes ownership of @p inputs. refcount = 2 (one worker
