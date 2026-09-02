@@ -30,6 +30,8 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db_registry.h"
+#include "hull/shared/async_backend.h"
+#include <stdatomic.h>
 #include "hull/cap/env.h"
 #include "quickjs.h"
 
@@ -4860,6 +4862,79 @@ UTEST(js_extract_liveness, valid_lenient_load_succeeds)
         "import { app } from 'hull:app';\n"
         "app.manifest({ modules: [] });\n";
     ASSERT_EQ(run_lenient_load(src), 0);
+}
+
+/* ── db.async submit-failure: the shared last_async_cont ownership fix ──────
+ * Forces the ACTUAL JS db.async binding down its pool-submit-failure path via a
+ * real, saturated poll pool (queue-saturation - no compiled-in production hook,
+ * so there is nothing to strip from shipped objects). The binding creates a
+ * Promise + continuation and registers it as js->last_async_cont, then the submit
+ * fails; the failure cleanup MUST destroy the continuation AND clear
+ * last_async_cont so a later dispatch cannot attach a handler promise to freed
+ * memory.
+ *
+ * Asserts the API contract (the call throws / rejects), last_async_cont is
+ * cleared, and - run under ASan/LSan - that the continuation + Promise are freed
+ * exactly once with no pending driver / pool item leaked.
+ *
+ * REVERT PROOF: drop `js->last_async_cont = NULL;` from mod_db.c's submit-failure
+ * path and the last_async_cont assertion below flips (it stays the dangling freed
+ * pointer), and ASan trips on the later use. */
+extern const HlAsyncBackend hl_async_backend_poll;
+
+static atomic_int g_dbsat_release;
+static atomic_int g_dbsat_running;
+static void dbsat_block(void *u) { (void)u; atomic_fetch_add(&g_dbsat_running, 1);
+    while (!atomic_load(&g_dbsat_release)) usleep(500); }
+static void dbsat_noop(void *u) { (void)u; }
+
+UTEST(js_db_async, submit_failure_clears_last_async_cont)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    HlAsyncBackendCtx  *actx = NULL;
+    ASSERT_EQ(hl_async_backend_poll.init(&actx, NULL), 0);
+    HlAsyncBackendPool *pool = NULL;
+    ASSERT_EQ(hl_async_backend_poll.pool_create(&pool, actx, 1, 1), 0);   /* 1 worker, queue 1 */
+    js.base.thread_pool = pool;
+    js.base.async_ctx   = actx;
+
+    /* Saturate: one job occupies the worker, one fills the queue -> the next
+     * submit (the db.async op) is rejected. */
+    atomic_store(&g_dbsat_release, 0);
+    atomic_store(&g_dbsat_running, 0);
+    ASSERT_EQ(hl_async_backend_poll.pool_submit(pool, dbsat_block, dbsat_noop, dbsat_noop, NULL), 0);
+    while (atomic_load(&g_dbsat_running) < 1) usleep(500);   /* worker busy */
+    ASSERT_EQ(hl_async_backend_poll.pool_submit(pool, dbsat_block, dbsat_noop, dbsat_noop, NULL), 0); /* queue full */
+
+    js.last_async_cont = NULL;   /* baseline: nothing registered before the call */
+
+    /* Drive the real binding: db is the default connection (install_test_js_globals). */
+    const char *src = "db.async.query('SELECT 1');";
+    JSValue rv = JS_Eval(js.ctx, src, strlen(src), "dbfail", JS_EVAL_TYPE_GLOBAL);
+
+    /* Contract: the submit failure surfaces as a thrown error (a rejected await
+     * in an async function). */
+    ASSERT_TRUE(JS_IsException(rv));
+    JSValue exc = JS_GetException(js.ctx);
+    const char *msg = JS_ToCString(js.ctx, exc);
+    ASSERT_TRUE(msg != NULL && strstr(msg, "thread pool") != NULL);   /* stable message */
+    JS_FreeCString(js.ctx, msg);
+    JS_FreeValue(js.ctx, exc);
+    JS_FreeValue(js.ctx, rv);
+
+    /* THE FIX: the destroyed continuation's registry pointer was cleared, so no
+     * dangling last_async_cont remains (no handler-promise attach to freed mem). */
+    ASSERT_TRUE(js.last_async_cont == NULL);
+
+    /* Release the saturating jobs and tear down. */
+    atomic_store(&g_dbsat_release, 1);
+    hl_async_backend_poll.pool_free(pool);
+    hl_async_backend_poll.free(actx);
+    js.base.thread_pool = NULL;
+    js.base.async_ctx   = NULL;
+    cleanup_js_caps();
 }
 
 UTEST_MAIN();

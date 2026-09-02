@@ -867,6 +867,11 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     /* Submit to thread pool */
     if (hl_worker_db_submit(js->base.thread_pool, op) != 0) {
         actx->cont->destroy(actx->cont);
+        /* hl_js_async_cont_create registered this cont as js->last_async_cont; it
+         * is freed now, so clear the dangling pointer (matches the mod_smtp.c
+         * scheduling-failure path). Otherwise the dispatch's pending-handler path
+         * would attach the outer handler promise to freed memory. */
+        js->last_async_cont = NULL;
         hl_worker_db_op_free(op);
         free(op);
         hl_async_ctx_free(actx);
@@ -881,6 +886,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;
+        js->last_async_cont = NULL;   /* freed cont: clear the dangling registry pointer */
         JS_FreeValue(ctx, promise);
         return JS_ThrowInternalError(ctx,
             "db.async: failed to suspend connection");
