@@ -44,6 +44,9 @@
 #include <arpa/inet.h>
 
 #include <keel/tls.h>   /* KlTls / KlTlsConfig: mock the TLS session seam */
+#include <keel/allocator.h>       /* kl_allocator_default (borrowed by the TLS ctx) */
+#include <keel_tls_mbedtls.h>     /* real in-process mbedTLS peer + client ctx */
+#include "smtp_tls_test_certs.h"  /* fixed test-only certs/keys (TEST-ONLY) */
 
 /* ════════════════════════════════════════════════════════════════════
  * Mock KlTls infrastructure (for the STARTTLS vtable-rejection tests).
@@ -1296,6 +1299,273 @@ UTEST(smtp_dop, happy_eyeballs_stagger_starts_second_address)
     ASSERT_GE(gap, (uint64_t)(SMTP_CONNECT_ATTEMPT_DELAY_MS - 50));
 
     hl_smtp_transport_free(t);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  In-process mbedTLS peer (real handshake, fixed test-only certs).
+ *
+ *  No external openssl process and no network: a background thread accepts a
+ *  loopback connection and drives a REAL mbedTLS server handshake with the
+ *  embedded server cert/key, while the SMTP transport drives the client
+ *  handshake through its event-loop pump. The client trusts CA1 (success) or an
+ *  unrelated CA2 (unknown-CA failure); the server leaf is CN=localhost, so a
+ *  verify hostname other than "localhost" is a mismatch failure. All TLS material
+ *  and every helper below is TEST-ONLY (smtp_tls_test_certs.h).
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* The TLS ctx borrows its allocator for its whole lifetime, so keep it static. */
+static KlAllocator g_tls_alloc;
+static int         g_tls_alloc_init;
+static KlAllocator *tls_alloc(void)
+{
+    if (!g_tls_alloc_init) { g_tls_alloc = kl_allocator_default(); g_tls_alloc_init = 1; }
+    return &g_tls_alloc;
+}
+
+typedef struct {
+    int       listen_fd;
+    int       port;
+    pthread_t tid;
+    /* knobs (set before spawn) */
+    int starttls;          /* 1 = plaintext SMTP prelude, then STARTTLS, then handshake */
+    int reject_starttls;   /* STARTTLS: reply 454 and never handshake */
+    int inject_after_220;  /* STARTTLS: append plaintext after the 220 go */
+    int stall_handshake;   /* never answer the ClientHello (drives the client to Dop) */
+    /* observed */
+    int accepted;
+    int reached_handshake; /* the peer began driving a TLS handshake */
+    int handshake_ok;      /* the server handshake returned OK */
+    int post_fail_bytes;   /* bytes received from the client AFTER a rejected/aborted TLS */
+} TlsPeer;
+
+static int tls_peer_setup(TlsPeer *p)
+{
+    memset(p, 0, sizeof *p);
+    p->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (p->listen_fd < 0) return -1;
+    int one = 1;
+    setsockopt(p->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0;
+    if (bind(p->listen_fd, (struct sockaddr *)&sa, sizeof sa) < 0) return -1;
+    socklen_t sl = sizeof sa;
+    if (getsockname(p->listen_fd, (struct sockaddr *)&sa, &sl) < 0) return -1;
+    p->port = ntohs(sa.sin_port);
+    return listen(p->listen_fd, 1);
+}
+
+static void tls_peer_send(int fd, const char *s)
+{ size_t n = strlen(s); ssize_t w = write(fd, s, n); (void)w; }
+
+static void tls_peer_read_line(int fd, char *buf, int cap)
+{
+    int i = 0;
+    while (i < cap - 1) {
+        char ch;
+        ssize_t n = read(fd, &ch, 1);
+        if (n <= 0) break;
+        buf[i++] = ch;
+        if (ch == '\n') break;
+    }
+    buf[i] = '\0';
+}
+
+/* Count bytes the client sends within a short window (used to prove it sent NO
+ * ClientHello after a rejected / aborted TLS). */
+static int tls_peer_drain_briefly(int fd)
+{
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 300 * 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    int total = 0; char buf[1024];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n <= 0) break;
+        total += (int)n;
+    }
+    return total;
+}
+
+/* Drive a server-side mbedTLS handshake to completion (poll-based, bounded). fd
+ * must be non-blocking. Mirrors shared/tls_client.c::tls_handshake_loop. */
+static int tls_peer_handshake(KlTls *tls, int fd, int timeout_ms)
+{
+    for (;;) {
+        KlTlsResult r = tls->handshake(tls, fd);
+        if (r == KL_TLS_OK)    return 0;
+        if (r == KL_TLS_ERROR) return -1;
+        short ev = (r == KL_TLS_WANT_READ) ? POLLIN : POLLOUT;
+        struct pollfd pfd = { .fd = fd, .events = ev, .revents = 0 };
+        if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
+    }
+}
+
+static void *tls_peer_thread(void *arg)
+{
+    TlsPeer *p = arg;
+    int c = accept(p->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    p->accepted = 1;
+
+    if (p->starttls) {
+        char line[512];
+        tls_peer_send(c, "220 test ESMTP\r\n");
+        tls_peer_read_line(c, line, sizeof line);            /* EHLO */
+        tls_peer_send(c, "250-test\r\n250 STARTTLS\r\n");
+        tls_peer_read_line(c, line, sizeof line);            /* STARTTLS */
+        if (p->reject_starttls) {
+            tls_peer_send(c, "454 TLS not available\r\n");
+            p->post_fail_bytes = tls_peer_drain_briefly(c);  /* must stay 0 */
+            close(c);
+            return NULL;
+        }
+        if (p->inject_after_220) {
+            /* 220 + injected plaintext in one write: the client must abort before
+             * the TLS factory and send NOTHING further. */
+            tls_peer_send(c, "220 go\r\nINJECTED-PLAINTEXT-AFTER-220\r\n");
+            p->post_fail_bytes = tls_peer_drain_briefly(c);  /* must stay 0 */
+            close(c);
+            return NULL;
+        }
+        tls_peer_send(c, "220 go\r\n");
+    }
+
+    /* Hand the fd to the TLS handshake drive (non-blocking for the WANT_* loop). */
+    int fl = fcntl(c, F_GETFL, 0); fcntl(c, F_SETFL, fl | O_NONBLOCK);
+
+    if (p->stall_handshake) {
+        /* Never answer the ClientHello: read + hold until the client closes on
+         * Dop. The client's first handshake flight arriving proves it reached
+         * the handshake. */
+        p->reached_handshake = 1;
+        char buf[1024];
+        for (;;) { ssize_t n = read(c, buf, sizeof buf); if (n == 0) break; if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) break; }
+        close(c);
+        return NULL;
+    }
+
+    KlTlsCtx *sctx = kl_tls_mbedtls_ctx_create_from_buf(
+        (const unsigned char *)HL_TLS_SRV_CRT, sizeof HL_TLS_SRV_CRT,
+        (const unsigned char *)HL_TLS_SRV_KEY, sizeof HL_TLS_SRV_KEY,
+        NULL, 0, KL_MTLS_NONE, tls_alloc());
+    if (!sctx) { close(c); return NULL; }
+    KlTls *stls = kl_tls_mbedtls_create(sctx, tls_alloc());
+    if (!stls) { kl_tls_mbedtls_ctx_destroy(sctx); close(c); return NULL; }
+
+    p->reached_handshake = 1;
+    p->handshake_ok = (tls_peer_handshake(stls, c, 10000) == 0);
+    /* Absorb whatever the client sends next (close_notify / SMTP) until it closes,
+     * so we can also count post-failure bytes on the caller side if needed. */
+    (void)tls_peer_drain_briefly(c);
+
+    stls->destroy(stls);
+    kl_tls_mbedtls_ctx_destroy(sctx);
+    close(c);
+    return NULL;
+}
+
+static void tls_peer_join(TlsPeer *p)
+{
+    pthread_join(p->tid, NULL);
+    close(p->listen_fd);
+}
+
+/* Build a client KlTlsConfig trusting @p ca_pem. The returned ctx is owned by the
+ * caller and freed with kl_tls_mbedtls_ctx_destroy. */
+static KlTlsConfig tls_client_cfg(KlTlsCtx **out_ctx, const char *ca_pem, size_t ca_len)
+{
+    KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+        (const unsigned char *)ca_pem, ca_len, tls_alloc());
+    *out_ctx = ctx;
+    KlTlsConfig cfg = { .ctx = ctx, .factory = kl_tls_mbedtls_create,
+                        .ctx_destroy = kl_tls_mbedtls_ctx_destroy };
+    return cfg;
+}
+
+/* Manually run the plaintext STARTTLS prelude on the transport, leaving it ready
+ * for hl_smtp_transport_starttls (greeting + EHLO/250 + STARTTLS/220 consumed). */
+static int tls_do_starttls_prelude(HlSmtpTransport *t)
+{
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    if (hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 5000) != 220) return -1;
+    if (hl_smtp_transport_write(t, "EHLO test\r\n", 11, 5000) != 0) return -1;
+    if (hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 5000) != 250) return -1;
+    if (hl_smtp_transport_write(t, "STARTTLS\r\n", 10, 5000) != 0) return -1;
+    if (hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 5000) != 220) return -1;
+    return 0;
+}
+
+static void tls_watchdog_fired(int sig)
+{
+    (void)sig;
+    static const char msg[] = "FATAL: TLS peer test watchdog fired\n";
+    ssize_t w = write(STDERR_FILENO, msg, sizeof msg - 1); (void)w;
+    _exit(70);
+}
+
+/* Implicit TLS (SMTPS): a real mbedTLS handshake completes against the peer and
+ * the transport reports an active TLS session.
+ * REVERT PROOF: give the client CA2 instead of CA1 (unknown-CA test) or a verify
+ * host other than "localhost" (hostname test) and this fails closed. */
+UTEST(smtp_tls, implicit_tls_success)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_implicit_tls(t, "localhost", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 1);
+
+    hl_smtp_transport_shutdown(t);
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);   /* teardown confirmed exactly once */
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+    ASSERT_EQ(p.handshake_ok, 1);
+}
+
+/* STARTTLS: after the plaintext prelude, the transport hands the socket to TLS
+ * BEFORE the ClientHello (plaintext parsing never consumes handshake bytes), and
+ * a real handshake completes. That the handshake succeeds is itself the proof the
+ * socket ownership transferred cleanly at the ciphertext boundary. */
+UTEST(smtp_tls, starttls_success)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.starttls = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    ASSERT_EQ(tls_do_starttls_prelude(t), 0);
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_starttls(t, "localhost", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 1);
+
+    hl_smtp_transport_shutdown(t);
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+    ASSERT_EQ(p.handshake_ok, 1);
 }
 
 UTEST_MAIN()
