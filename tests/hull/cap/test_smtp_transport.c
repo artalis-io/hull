@@ -1456,9 +1456,11 @@ static void *tls_peer_thread(void *arg)
 
     p->reached_handshake = 1;
     p->handshake_ok = (tls_peer_handshake(stls, c, 10000) == 0);
-    /* Absorb whatever the client sends next (close_notify / SMTP) until it closes,
-     * so we can also count post-failure bytes on the caller side if needed. */
-    (void)tls_peer_drain_briefly(c);
+    /* After a FAILED handshake, count any plaintext the client sends: a fail-closed
+     * client sends NONE (no AUTH / MAIL / DATA, so no credentials or body). On
+     * success, drain-and-discard (close_notify etc.). */
+    int drained = tls_peer_drain_briefly(c);
+    if (!p->handshake_ok) p->post_fail_bytes = drained;
 
     stls->destroy(stls);
     kl_tls_mbedtls_ctx_destroy(sctx);
@@ -1664,6 +1666,142 @@ UTEST(smtp_tls, handshake_timeout_respects_dop)
     kl_tls_mbedtls_ctx_destroy(cctx);
     tls_peer_join(&p);
     ASSERT_EQ(p.reached_handshake, 1);    /* the client did send its ClientHello */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Execute-level TLS behavior (hl_smtp_execute over the real peer): stable
+ *  public tokens, rejected STARTTLS never attempts TLS, and no credential/body
+ *  bytes after any TLS failure. host is "127.0.0.1" (the server leaf's IP SAN),
+ *  unambiguous for both connect and verification.
+ * ════════════════════════════════════════════════════════════════════ */
+
+static HlSmtpMessage tls_exec_msg(int port, int use_tls)
+{
+    HlSmtpMessage m;
+    memset(&m, 0, sizeof m);
+    m.host = "127.0.0.1"; m.port = port; m.use_tls = use_tls;
+    m.username = "SECRETUSER"; m.password = "SECRETPASS";   /* must never reach the peer */
+    m.from = "s@example.com"; m.to = "r@example.com";
+    m.subject = "hi"; m.body = "SECRETBODY"; m.content_type = "text/plain";
+    return m;
+}
+
+/* Rejected STARTTLS never attempts a TLS handshake: the peer answers the STARTTLS
+ * command with 454, so hl_smtp_execute stops with the stable token
+ * "starttls_rejected" and NEVER calls the TLS upgrade.
+ * REVERT PROOF: clear reject_starttls (peer sends 220 go) and reached_handshake
+ * becomes 1 / the token changes. */
+UTEST(smtp_tls, execute_rejected_starttls_never_attempts_tls)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.starttls = 1; p.reject_starttls = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    HlSmtpMessage msg = tls_exec_msg(p.port, 1);   /* STARTTLS */
+    HlSmtpResult r;
+    int rc = hl_smtp_execute(&msg, &cfg, 5000, NULL, NULL, &r);
+
+    alarm(0); signal(SIGALRM, prev);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_STREQ(r.token, "starttls_rejected");    /* stable public token */
+    ASSERT_EQ(p.reached_handshake, 0);             /* NO TLS handshake was attempted */
+}
+
+/* No credentials or body after a STARTTLS handshake failure: the client trusts an
+ * unrelated CA, so the upgrade fails; hl_smtp_execute stops with the stable token
+ * "tls_handshake_failed" and, being fail-closed, sends NO plaintext afterward - so
+ * AUTH (credentials) and MAIL/DATA (body) never reach the peer.
+ * REVERT PROOF: trust CA1 and the handshake succeeds (different token/path). */
+UTEST(smtp_tls, execute_starttls_failure_sends_no_credentials_or_body)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.starttls = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA2_PEM, sizeof HL_TLS_CA2_PEM); /* wrong CA */
+    HlSmtpMessage msg = tls_exec_msg(p.port, 1);
+    HlSmtpResult r;
+    int rc = hl_smtp_execute(&msg, &cfg, 5000, NULL, NULL, &r);
+
+    alarm(0); signal(SIGALRM, prev);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_STREQ(r.token, "tls_handshake_failed");
+    ASSERT_EQ(p.reached_handshake, 1);   /* the upgrade WAS attempted... */
+    ASSERT_EQ(p.handshake_ok, 0);        /* ...and failed */
+    ASSERT_EQ(p.post_fail_bytes, 0);     /* ...and NOTHING was sent after (no AUTH/MAIL/DATA) */
+}
+
+/* Implicit-TLS handshake failure carries the same stable token and sends nothing:
+ * with implicit TLS the whole SMTP conversation is gated behind the handshake, so
+ * a failure means no plaintext ever leaves the client. */
+UTEST(smtp_tls, execute_implicit_failure_token_and_no_bytes)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);   /* implicit: no starttls prelude */
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA2_PEM, sizeof HL_TLS_CA2_PEM); /* wrong CA */
+    HlSmtpMessage msg = tls_exec_msg(p.port, 2);   /* implicit TLS */
+    HlSmtpResult r;
+    int rc = hl_smtp_execute(&msg, &cfg, 5000, NULL, NULL, &r);
+
+    alarm(0); signal(SIGALRM, prev);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_STREQ(r.token, "tls_handshake_failed");
+    ASSERT_EQ(p.handshake_ok, 0);
+    ASSERT_EQ(p.post_fail_bytes, 0);
+}
+
+/* End-to-end complement to smtp_starttls.unexpected_buffered_bytes_aborts (which
+ * proves the abort happens BEFORE the TLS factory via g_mock_tls_factory_calls==0):
+ * with a REAL client config, injecting plaintext right after the 220 makes
+ * hl_smtp_transport_starttls abort on the non-empty read accumulator, so the peer
+ * never reaches the handshake and the client sends NO ClientHello.
+ * REVERT PROOF: clear inject_after_220 and the upgrade proceeds to a handshake. */
+UTEST(smtp_tls, starttls_buffered_bytes_abort_sends_no_clienthello)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.starttls = 1; p.inject_after_220 = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    ASSERT_EQ(tls_do_starttls_prelude(t), 0);   /* reads "220 go"; injected bytes land in acc */
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_starttls(t, "localhost", &cfg, 5000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, -1);                            /* aborted on buffered bytes */
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);      /* teardown confirmed exactly once */
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+    ASSERT_EQ(p.reached_handshake, 0);            /* peer never reached the handshake */
+    ASSERT_EQ(p.post_fail_bytes, 0);              /* client sent no ClientHello */
 }
 
 UTEST_MAIN()
