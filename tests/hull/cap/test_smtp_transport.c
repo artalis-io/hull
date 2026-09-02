@@ -39,8 +39,10 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <arpa/inet.h>
 
 #include <keel/tls.h>   /* KlTls / KlTlsConfig: mock the TLS session seam */
@@ -1802,6 +1804,151 @@ UTEST(smtp_tls, starttls_buffered_bytes_abort_sends_no_clienthello)
     tls_peer_join(&p);
     ASSERT_EQ(p.reached_handshake, 0);            /* peer never reached the handshake */
     ASSERT_EQ(p.post_fail_bytes, 0);              /* client sent no ClientHello */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Live terminal-audit integration (hl_cap_smtp_send emits the single record).
+ *  Uses test-only timeout/teardown injection, NOT a public per-send option:
+ *  the Dop record comes from a short cfg timeout against a stalling peer; the
+ *  teardown:leaked record comes from the smtp_test_force_teardown_leak seam,
+ *  driven in an isolated subprocess (it intentionally leaks the transport).
+ * ════════════════════════════════════════════════════════════════════ */
+
+extern int hl_audit_enabled;
+
+static int audit_line_count(const char *s, const char *needle)
+{
+    int n = 0; const char *p = s;
+    while ((p = strstr(p, needle)) != NULL) { n++; p += strlen(needle); }
+    return n;
+}
+
+/* Run @p fn with stderr captured to @p out (NUL-terminated), audit enabled. */
+static void with_audit_capture(void (*fn)(void), char *out, size_t cap)
+{
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    char tmpl[] = "/tmp/hull_smtp_live_audit_XXXXXX";
+    int fd = mkstemp(tmpl);
+    dup2(fd, STDERR_FILENO);
+    int prev = hl_audit_enabled; hl_audit_enabled = 1;
+    fn();
+    hl_audit_enabled = prev;
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO); close(saved);
+    lseek(fd, 0, SEEK_SET);
+    ssize_t n = read(fd, out, cap - 1); if (n < 0) n = 0; out[n] = '\0';
+    close(fd); unlink(tmpl);
+}
+
+static int g_live_port;
+
+/* A full SMTP responder: greet, 250 to EHLO/MAIL/RCPT, 354 to DATA, 250 after the
+ * body, 221 to QUIT - so hl_cap_smtp_send reaches a clean rc=0. */
+static void *mp_full_smtp_thread(void *arg)
+{
+    MockPeer *m = arg;
+    int c = accept(m->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    m->accepted = 1;
+    mp_send(c, "220 full ESMTP\r\n");
+    char line[1024];
+    int in_data = 0;
+    for (;;) {
+        ssize_t n = read(c, line, sizeof line - 1);
+        if (n <= 0) break;
+        line[n] = '\0';
+        if (in_data) { if (strstr(line, "\r\n.\r\n") || strncmp(line, ".\r\n", 3) == 0) { in_data = 0; mp_send(c, "250 ok\r\n"); } continue; }
+        if (strncasecmp(line, "DATA", 4) == 0)      { mp_send(c, "354 go\r\n"); in_data = 1; }
+        else if (strncasecmp(line, "QUIT", 4) == 0) { mp_send(c, "221 bye\r\n"); break; }
+        else                                         mp_send(c, "250 ok\r\n");
+    }
+    close(c);
+    return NULL;
+}
+
+static void live_deadline_send(void)
+{
+    HlSmtpConfig cfg; memset(&cfg, 0, sizeof cfg);
+    static const char *hosts[] = { "127.0.0.1" };
+    cfg.allowed_hosts = hosts; cfg.host_count = 1; cfg.timeout_ms = 300;   /* short Dop */
+    HlSmtpMessage m; memset(&m, 0, sizeof m);
+    m.host = "127.0.0.1"; m.port = g_live_port;
+    m.from = "s@example.com"; m.to = "r@example.com"; m.subject = "hi"; m.body = "b";
+    const char *err = NULL;
+    hl_cap_smtp_send(&cfg, &m, &err);   /* stalls in the greeting read -> Dop */
+}
+
+/* A real send driven to the post-resolution operation deadline emits EXACTLY ONE
+ * live terminal:post_resolution_deadline record and no other terminal. */
+UTEST(smtp_live_audit, deadline_expired_record)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_accept_and_hold_thread), 0);
+    g_live_port = m.port;
+
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+    char buf[2048]; with_audit_capture(live_deadline_send, buf, sizeof buf);
+    alarm(0); signal(SIGALRM, prev);
+    mp_join(&m);
+
+    ASSERT_EQ(audit_line_count(buf, "\"terminal\":\"post_resolution_deadline\""), 1);
+    ASSERT_EQ(audit_line_count(buf, "\"terminal\":\"cancelled\""), 0);   /* not mis-tagged */
+    ASSERT_EQ(audit_line_count(buf, "\"cap\":\"smtp.send\""), 1);        /* one record, no dup */
+}
+
+static void live_leak_send(void)
+{
+    HlSmtpConfig cfg; memset(&cfg, 0, sizeof cfg);
+    static const char *hosts[] = { "127.0.0.1" };
+    cfg.allowed_hosts = hosts; cfg.host_count = 1; cfg.timeout_ms = 5000;
+    HlSmtpMessage m; memset(&m, 0, sizeof m);
+    m.host = "127.0.0.1"; m.port = g_live_port;
+    m.from = "s@example.com"; m.to = "r@example.com"; m.subject = "hi"; m.body = "b";
+    const char *err = NULL;
+    smtp_test_force_teardown_leak = 1;      /* force the non-detaching teardown branch */
+    hl_cap_smtp_send(&cfg, &m, &err);
+    smtp_test_force_teardown_leak = 0;
+}
+
+/* Forcing the non-detaching teardown branch emits EXACTLY ONE teardown:leaked
+ * record and no duplicate terminal record. Because it intentionally leaks the
+ * transport (fd + event ctx), it runs in an ISOLATED subprocess that must exit
+ * cleanly; the parent captures the child's audit and asserts on it. */
+UTEST(smtp_live_audit, teardown_leaked_record_isolated_subprocess)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_full_smtp_thread), 0);
+    g_live_port = m.port;
+
+    char tmpl[] = "/tmp/hull_smtp_leak_audit_XXXXXX";
+    int fd = mkstemp(tmpl);
+    ASSERT_TRUE(fd >= 0);
+
+    pid_t pid = fork();
+    ASSERT_TRUE(pid >= 0);
+    if (pid == 0) {
+        /* Child: capture audit to the temp fd, run the leaking send, exit clean. */
+        signal(SIGALRM, SIG_DFL);
+        dup2(fd, STDERR_FILENO);
+        hl_audit_enabled = 1;
+        live_leak_send();
+        fflush(stderr);
+        _exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    mp_join(&m);
+
+    ASSERT_TRUE(WIFEXITED(status));        /* terminated safely, not by signal */
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+
+    char buf[2048];
+    lseek(fd, 0, SEEK_SET);
+    ssize_t n = read(fd, buf, sizeof buf - 1); if (n < 0) n = 0; buf[n] = '\0';
+    close(fd); unlink(tmpl);
+
+    ASSERT_EQ(audit_line_count(buf, "\"teardown\":\"leaked\""), 1);
+    ASSERT_EQ(audit_line_count(buf, "\"cap\":\"smtp.send\""), 1);        /* one record */
+    ASSERT_EQ(audit_line_count(buf, "\"terminal\":\"cancelled\""), 0);  /* no spurious terminal */
 }
 
 UTEST_MAIN()

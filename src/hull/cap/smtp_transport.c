@@ -92,6 +92,11 @@ static const KlSocketProvider *socket_provider(void)
  * Eyeballs stagger timer and the Dop connect-deadline timer fire on the same real
  * clock as production (never a divergent virtual clock). */
 const KlSocketProvider *smtp_test_socket_provider;
+
+/* Force the non-detaching teardown branch: hl_smtp_transport_free returns -1 (the
+ * op/stream would-not-detach path) so the caller records teardown:leaked. Leaks
+ * the transport storage intentionally - drive ONLY in an isolated subprocess. */
+int smtp_test_force_teardown_leak;
 #endif
 
 static const KlSocketProvider *active_sp(void)
@@ -1300,6 +1305,11 @@ int hl_smtp_transport_free(HlSmtpTransport *t)
 {
     if (!t)
         return 0;
+
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_force_teardown_leak)
+        return -1;   /* simulate non-detaching teardown (leaks t; subprocess only) */
+#endif
 
     /* Abortive teardown must confirm detachment (fail-closed, no UAF), so its
      * pumps ignore a pending cancel AND the (possibly-exhausted) Dop - clear both
