@@ -118,6 +118,11 @@ void hl_smtp_wop_runtime_release(HlSmtpWorkerOp *wop);
  * iff the op has reached DONE (payload fully visible), else 0. */
 int hl_smtp_wop_terminal(HlSmtpWorkerOp *wop, HlSmtpResult *out);
 
+/* Copy the op's borrowed message view (host/from/to/subject etc.) into *out, for
+ * the completion audit. Returns 1 (always succeeds for a live op). The strings
+ * borrow the owned inputs and stay valid until the last ref drops. */
+int hl_smtp_wop_message(HlSmtpWorkerOp *wop, HlSmtpMessage *out);
+
 /* Current state (acquire), for callers/tests. */
 HlSmtpState hl_smtp_wop_state(const HlSmtpWorkerOp *wop);
 

@@ -213,6 +213,12 @@ int hl_smtp_wop_terminal(HlSmtpWorkerOp *w, HlSmtpResult *out)
     return 1;
 }
 
+int hl_smtp_wop_message(HlSmtpWorkerOp *w, HlSmtpMessage *out)
+{
+    *out = w->msg_view;
+    return 1;
+}
+
 HlSmtpState hl_smtp_wop_state(const HlSmtpWorkerOp *w)
 {
     return (HlSmtpState)atomic_load_explicit(&w->state, memory_order_acquire);

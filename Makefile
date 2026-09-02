@@ -906,6 +906,7 @@ ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
       $(SRCDIR)/hull/cap/smtp_admit.c \
       $(SRCDIR)/hull/cap/smtp_submit.c \
       $(SRCDIR)/hull/cap/smtp_inflight.c \
+      $(SRCDIR)/hull/cap/smtp_async.c \
       $(SRCDIR)/hull/cap/smtp_transport.c, \
       $(CAP_SRCS))
 endif

@@ -206,6 +206,16 @@ $(BUILDDIR)/test_smtp_submit: $(TESTDIR)/hull/cap/test_smtp_submit.c \
     $(SRCDIR)/hull/cap/smtp_submit.c $(SRCDIR)/hull/cap/smtp_op.c $(SMTP_SUBMIT_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_SUBMIT_TEST_LIBS) $(LDFLAGS)
 
+# SMTP async orchestration (two-pass shutdown ownership): direct-includes
+# src/hull/cap/smtp_async.c under -DHL_SMTP_TEST_HOOKS for the op-alloc seam + the
+# static helpers; cap_smtp_async.o is excluded (direct-included). Links the other
+# smtp cap primitives + the base async/net stubs.
+SMTP_ASYNC_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_async.o,$(TEST_COMMON_LIBS))
+SMTP_ASYNC_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_async.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_async: $(TESTDIR)/hull/cap/test_smtp_async.c \
+    $(SRCDIR)/hull/cap/smtp_async.c $(SMTP_ASYNC_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_ASYNC_TEST_LIBS) $(LDFLAGS)
+
 # SMTP per-worker TLS-context cache: direct-includes src/hull/cap/smtp_tls.c
 # under -DHL_SMTP_TEST_HOOKS to substitute fake ctx create/destroy and exercise
 # the cache keying / lazy creation / destruction / failure paths without live
@@ -832,7 +842,7 @@ msan:
 #     shared memory is the atomic stop flag; the concurrency is filesystem-level
 #     (mkdir/symlink/unlink vs openat resolution), which TSan tolerates. Proves
 #     the resolver's containment holds under a real thread race.
-TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity test_smtp_worker test_smtp_admit test_smtp_submit test_smtp_inflight
+TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity test_smtp_worker test_smtp_admit test_smtp_submit test_smtp_inflight test_smtp_async
 tsan:
 	$(MAKE) clean
 	$(MAKE) TSAN=1 $(addprefix $(BUILDDIR)/,$(TSAN_TESTS))

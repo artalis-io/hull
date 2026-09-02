@@ -192,6 +192,11 @@ int hl_smtp_submit_ctx_terminal(HlSmtpSubmitCtx *ctx, HlSmtpResult *out)
     return hl_smtp_wop_terminal(ctx->wop, out);
 }
 
+int hl_smtp_submit_ctx_message(HlSmtpSubmitCtx *ctx, HlSmtpMessage *out)
+{
+    return hl_smtp_wop_message(ctx->wop, out);
+}
+
 int hl_smtp_submit_ctx_resumable(const HlSmtpSubmitCtx *ctx)
 {
     return hl_smtp_wop_is_resumable(ctx->wop);

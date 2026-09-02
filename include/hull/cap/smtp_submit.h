@@ -133,6 +133,10 @@ const char *hl_smtp_schedule_str(HlSmtpSchedule schedule);
  * the op reached DONE, else 0. Safe until ctx_release. */
 int  hl_smtp_submit_ctx_terminal(HlSmtpSubmitCtx *ctx, HlSmtpResult *out);
 
+/* Copy the op's borrowed message view (host/from/to/subject) into *out for the
+ * completion audit. Returns 1. Valid until ctx_release. */
+int  hl_smtp_submit_ctx_message(HlSmtpSubmitCtx *ctx, HlSmtpMessage *out);
+
 /* Whether the parked continuation may still be resumed (0 after a per-request
  * cancel or a suspension-setup failure). */
 int  hl_smtp_submit_ctx_resumable(const HlSmtpSubmitCtx *ctx);
