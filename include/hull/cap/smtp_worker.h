@@ -60,9 +60,9 @@ typedef int (*HlSmtpExecFn)(const HlSmtpMessage *msg, int timeout_ms,
  * callback lives in this unit. */
 
 /* Worker-side terminal hook, fired once on the worker thread right after
- * terminal publication (and, on the run path, confirmed teardown) and BEFORE
- * done_fn and the worker-ref drop. This is where the admission lease is
- * released: done_fn is resume-only and may be dropped, so lease ownership lives
+ * terminal publication (and, on the run path, confirmed teardown) and BEFORE the
+ * worker-ref drop. This is where the admission lease is released: the pool's
+ * later done callback is resume-only and may be dropped, so lease ownership lives
  * on the worker side. Keeps this unit admission-agnostic (a plain callback). */
 typedef void (*HlSmtpTerminalFn)(HlSmtpWorkerOp *wop, void *user);
 
