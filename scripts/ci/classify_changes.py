@@ -106,6 +106,7 @@ PLAN = [
 # later step.
 DB_POSTGRES_FILES = frozenset({
     "src/hull/cap/db_postgres.c", "src/hull/cap/pgwire.c", "src/hull/cap/pg_conn.c",
+    "src/hull/cap/pg_transport.c",
 })
 DB_MYSQL_FILES = frozenset({
     "src/hull/cap/db_mysql.c", "src/hull/cap/mysqlwire.c", "src/hull/cap/mysql_conn.c",

@@ -77,6 +77,8 @@ static int    g_fk_close_n;          /* total provider close() calls           *
 static int    g_fk_bogus_errno;      /* when 1, connect leaves errno = EPERM   */
 static KlIoStatus g_fk_io_status_val;/* value fk_io_status returns             */
 static int    g_fk_send_eintr_once;  /* when 1, first send reports INTERRUPTED  */
+static int    g_fk_send_max;         /* > 0 caps bytes per send (forces partial)*/
+static int    g_fk_send_n;           /* count of send() calls (partial-write proof) */
 
 static void fk_reset(void)
 {
@@ -92,6 +94,8 @@ static void fk_reset(void)
     g_fk_bogus_errno = 0;
     g_fk_io_status_val = KL_IO_OK;
     g_fk_send_eintr_once = 0;
+    g_fk_send_max = 0;
+    g_fk_send_n = 0;
     /* The checkpoint counter is a process-global static in pg_transport.c; reset it
      * per test so a "complete at checkpoint N" hook fires deterministically (a
      * prior test's checkpoints must not advance it past N). Visible because this
@@ -165,7 +169,9 @@ static int fk_get_so_error(void *c, KlSocketHandle fd, int *out)
 static kl_ssize_t fk_send(void *c, KlSocketHandle fd, const void *b, size_t n)
 {
     (void)c;
+    g_fk_send_n++;
     if (g_fk_send_eintr_once) { g_fk_send_eintr_once = 0; errno = 0; return -1; }
+    if (g_fk_send_max > 0 && n > (size_t)g_fk_send_max) n = (size_t)g_fk_send_max;
     return send((int)fd, b, n, 0);
 }
 static kl_ssize_t fk_recv(void *c, KlSocketHandle fd, void *b, size_t n)
@@ -506,6 +512,42 @@ UTEST(pg_transport_io, partial_recv_short_count)
     ssize_t n = hl_pg_transport_recv(t, buf, sizeof buf);  /* asked 16, gets 2 */
     ASSERT_EQ((int)n, 2);
     ASSERT_EQ(buf[0], 5); ASSERT_EQ(buf[1], 6);
+    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    close(sv[1]);
+    seam_clear(); tp_disarm_watchdog();
+}
+
+/* ── send_all completes over FORCED partial writes, preserving order ──
+ *    The provider caps every send() at 1 byte, so an 8-byte payload requires 8
+ *    send() calls: this proves hl_pg_transport_send_all loops over short writes
+ *    (advancing buf + remaining len each time) and that the bytes arrive in order.
+ *    The prior adopt roundtrip sent through the raw provider which completes in
+ *    one call, so it did not exercise the partial-write path. ─────────────────── */
+UTEST(pg_transport_io, send_all_completes_forced_partial_writes)
+{
+    fk_reset(); tp_arm_watchdog();
+    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    pg_test_socket_provider = &FK_PROVIDER;
+    PgTransport *t = hl_pg_transport_adopt(sv[0], &FK_PROVIDER, NULL, 0);
+    ASSERT_TRUE(t != NULL);
+
+    const uint8_t payload[8] = { 10, 20, 30, 40, 50, 60, 70, 80 };
+    g_fk_send_max = 1;                    /* 1 byte per send() -> forced partials */
+    g_fk_send_n   = 0;
+    ASSERT_EQ(hl_pg_transport_send_all(t, payload, sizeof payload), 0);   /* all sent */
+    ASSERT_EQ(g_fk_send_n, 8);            /* 8 short sends: the loop ran, not one call */
+
+    /* Read every byte back and assert order is preserved. */
+    uint8_t got[8] = {0};
+    size_t r = 0;
+    while (r < sizeof got) {
+        ssize_t k = recv(sv[1], got + r, sizeof got - r, 0);
+        if (k <= 0) break;
+        r += (size_t)k;
+    }
+    ASSERT_EQ((int)r, 8);
+    for (int i = 0; i < 8; i++) ASSERT_EQ(got[i], payload[i]);
+
     ASSERT_EQ(hl_pg_transport_close(t), 0);
     close(sv[1]);
     seam_clear(); tp_disarm_watchdog();

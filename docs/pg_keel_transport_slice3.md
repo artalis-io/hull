@@ -21,10 +21,14 @@ RFC 8305 Happy-Eyeballs racing, and a provider test seam for the DB client.
 
 Multi-address connection racing uses `KlConnectOp`. Socket creation, connect
 completion, blocking read/write, and close use the raw provider ops
-(`sp->ops->{socket,connect,close,send,recv,set_blocking,set_nonblocking,set_cloexec,set_nosigpipe,get_so_error}`,
-all in `keel/socket.h`). `KlStream` is not used: its queued-write, watcher, and
-lifecycle machinery serve an asynchronous client, and a synchronous PostgreSQL
-connection needs none of it.
+(`sp->ops->{socket,connect,close,send,recv,set_blocking,set_nonblocking,get_so_error}`,
+all in `keel/socket.h`), plus best-effort `set_nosigpipe` where the platform
+offers it. `set_cloexec` is deliberately NOT used: neither the current
+`pg_conn.c` nor the SMTP transport sets close-on-exec (the kernel sandbox blocks
+`exec` outright), so the transport does not require or call it and it is not part
+of the required provider surface. `KlStream` is not used either: its queued-write,
+watcher, and lifecycle machinery serve an asynchronous client, and a synchronous
+PostgreSQL connection needs none of it.
 
 `KlConnectOp` is asynchronous and needs an event loop to drive its attempts plus
 the stagger and deadline timers. The transport therefore owns a private
@@ -63,9 +67,13 @@ absolute connect deadline and gives its remaining budget to `KlConnectOp`'s
 timers must not refresh that deadline. When `timeout_ms <= 0` the transport arms
 no deadline, preserving today's unbounded-connect behavior. On terminal failure
 or timeout the transport calls `kl_connect_op_cancel` and pumps the private loop
-until confirmed detachment (`on_detach` sets `connect_detached`) before freeing
-embedded storage, honoring the "no reuse until confirmed detachment" invariant in
-`keel/connect_op_detail.h`.
+until confirmed detachment before freeing storage, honoring the "no reuse until
+confirmed detachment" invariant in `keel/connect_op_detail.h`. Detachment is
+observed by POLLING `kl_connect_op_is_detached` in the teardown pump; the
+transport installs no `on_detach` callback (the `KlConnectOpHooks.on_detach` slot
+is left NULL) and keeps no `connect_detached` field. The teardown detach pump is
+iteration-bounded and non-blocking, so a pathological op that will not detach is
+declared promptly (see Amendment 4 / Checkpoint 2 review).
 
 ## DNS: no async resolver in this slice (recorded honestly)
 
@@ -171,7 +179,9 @@ grant for a declared network DB. Identical rows, errors, and timeouts.
 - `hull/shared/tls_client.h`: `HlTlsClient` and the raw-fd `hl_tls_client_*`
   helpers.
 - Template: `src/hull/cap/smtp_transport.c` (blocking `getaddrinfo` adapter, a
-  private `KlEventCtx` connect pump, and `co_on_detach` confirmed detachment).
+  private `KlEventCtx` connect pump, confirmed detachment). PG diverges on the
+  last point: it confirms detachment by polling `kl_connect_op_is_detached` in the
+  teardown pump rather than installing the template's `on_detach` callback.
 
 ## Checkpoint 2 review refinements
 
