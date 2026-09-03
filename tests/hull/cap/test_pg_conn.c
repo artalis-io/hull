@@ -11,6 +11,7 @@
 
 #include "utest.h"
 #include "hull/cap/pg_conn.h"
+#include "hull/cap/pg_transport.h"
 #include "hull/cap/pgwire.h"
 
 #include <stdint.h>
@@ -296,7 +297,8 @@ UTEST(pg_query, select_rows_and_affected)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.fd = sv[1];
+    conn.transport = hl_pg_transport_adopt(sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    ASSERT_TRUE(conn.transport != NULL);
 
     struct qcollect co;
     memset(&co, 0, sizeof co);
@@ -347,7 +349,8 @@ UTEST(pg_query, exec_affected_count)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.fd = sv[1];
+    conn.transport = hl_pg_transport_adopt(sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    ASSERT_TRUE(conn.transport != NULL);
 
     int64_t affected = -1;
     ASSERT_EQ(0, hl_pg_query(&conn, "UPDATE t SET n=1 WHERE id > ?",
@@ -381,7 +384,8 @@ UTEST(pg_query, wait_notify)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.fd = sv[1];
+    conn.transport = hl_pg_transport_adopt(sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    ASSERT_TRUE(conn.transport != NULL);
 
     /* 1. A notification is queued -> 1. */
     ASSERT_EQ(1, hl_pg_wait_notify(&conn, 1000));
@@ -415,7 +419,8 @@ UTEST(pg_query, server_error_then_ready)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.fd = sv[1];
+    conn.transport = hl_pg_transport_adopt(sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    ASSERT_TRUE(conn.transport != NULL);
 
     HlPgParam p = { .text = "7", .len = 1 };
     ASSERT_EQ(-1, hl_pg_query(&conn, "SELECT ?", &p, 1, NULL, NULL, NULL, NULL));
@@ -445,7 +450,8 @@ UTEST(pg_exec_simple, multi_statement_ok)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.fd = sv[1];
+    conn.transport = hl_pg_transport_adopt(sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    ASSERT_TRUE(conn.transport != NULL);
 
     ASSERT_EQ(0, hl_pg_exec_simple(&conn,
         "CREATE TABLE t (id int); INSERT INTO t VALUES (1)"));
@@ -481,7 +487,8 @@ UTEST(pg_exec_simple, error_then_ready)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.fd = sv[1];
+    conn.transport = hl_pg_transport_adopt(sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    ASSERT_TRUE(conn.transport != NULL);
 
     ASSERT_EQ(-1, hl_pg_exec_simple(&conn, "CREATE TABLE t (id int)"));
     ASSERT_TRUE(strstr(conn.errmsg, "relation already exists") != NULL);

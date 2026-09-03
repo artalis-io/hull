@@ -42,9 +42,11 @@ int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen);
 /* Overwrite the password field with zeros (defense in depth). */
 void hl_pg_dsn_scrub(HlPgDsn *dsn);
 
+struct PgTransport;   /* cap/pg_transport.h: the owned byte transport */
+
 /* An open connection, ready for queries once hl_pg_conn_open returns 0. */
 typedef struct HlPgConn {
-    int      fd;
+    struct PgTransport *transport;  /* owned byte transport (bytes + optional TLS) */
     uint8_t *rbuf;        /* receive accumulation buffer                */
     size_t   rlen;        /* valid bytes in rbuf                        */
     size_t   rcap;        /* rbuf capacity                              */
@@ -54,7 +56,6 @@ typedef struct HlPgConn {
     int32_t  backend_key;
     int      tx_status;   /* latest ReadyForQuery status: 'I' / 'T' / 'E' */
     char     errmsg[256];
-    struct HlTlsClient *tls;  /* non-NULL once the TLS handshake completes */
 } HlPgConn;
 
 /*
