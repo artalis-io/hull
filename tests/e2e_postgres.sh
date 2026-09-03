@@ -5,10 +5,13 @@
 # and exercises the full path: postgres:// DSN -> backend selection -> connect
 # + startup handshake -> parameterized db.exec / db.query -> typed row decode.
 #
-# Auth is SCRAM-SHA-256 (Phase 3, the postgres:16 default). Two transports are
-# exercised: plaintext (sslmode=disable) and TLS (SSLRequest ->
-# mbedTLS handshake -> SCRAM over TLS, asserted via pg_stat_ssl). Skips cleanly
-# when Docker (or, for the TLS phase, openssl) is unavailable.
+# Auth is SCRAM-SHA-256 (Phase 3, the postgres:16 default). The sslmode matrix is
+# exercised: plaintext (sslmode=disable); TLS (sslmode=require: SSLRequest ->
+# mbedTLS handshake -> SCRAM over TLS, asserted via pg_stat_ssl); no plaintext
+# downgrade (sslmode=require against a non-TLS server hard-fails); and
+# sslmode=verify-full rejecting an untrusted self-signed cert (chain
+# verification). Skips cleanly when Docker (or, for the TLS phases, openssl) is
+# unavailable.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu
@@ -705,6 +708,44 @@ end)'
 echo "=== LISTEN reconnect after a dropped connection ==="
 check_reconnect "lua" "lua" "$LUA_RC_WORKER"
 
+# ── sslmode matrix: a connection that MUST be refused ─────────────────────
+# The default -d connection opens EAGERLY at app-context init, so a DSN that must
+# not connect makes `hull` exit at startup rather than serve. That startup failure
+# IS the proof the connection was refused: a silent success (e.g. a plaintext
+# downgrade, or verify-full accepting a bad cert) would instead leave the server
+# running. Assert the process exits and the log shows the connection failure.
+# $1 = label, $2 = DSN.
+assert_connect_refused() {
+    _lbl=$1; _dsn=$2
+    _d=$(mktemp -d)
+    printf 'app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })\nrequire("hull.db").default()\napp.get("/", function(req, res) res:json({ up = true }) end)\n' > "$_d/app.lua"
+    ./build/hull -d "$_dsn" -p "$PORT" "$_d/app.lua" >"$_d/serve.log" 2>&1 &
+    _pid=$!
+    _exited=0
+    for _ in $(seq 1 20); do
+        if ! kill -0 "$_pid" 2>/dev/null; then _exited=1; break; fi
+        sleep 0.5
+    done
+    if [ "$_exited" = 0 ]; then
+        kill "$_pid" 2>/dev/null || true; wait "$_pid" 2>/dev/null || true
+        echo "::error $_lbl: connection unexpectedly succeeded (server stayed up)"
+        cat "$_d/serve.log" 2>/dev/null || true; rm -rf "$_d"; exit 1
+    fi
+    wait "$_pid" 2>/dev/null || true
+    echo "--- $_lbl serve.log ---"; cat "$_d/serve.log" 2>/dev/null || true
+    if grep -qi 'failed to open database' "$_d/serve.log"; then
+        echo "PASS: $_lbl (connection refused, no silent success)"; rm -rf "$_d"
+    else
+        echo "::error $_lbl: expected a connection-failure log"; rm -rf "$_d"; exit 1
+    fi
+}
+
+# No plaintext downgrade: the container has no SSL yet, so it answers the
+# SSLRequest with 'N'; sslmode=require MUST hard-fail, not downgrade to plaintext.
+echo "=== sslmode=require against a non-TLS server must fail (no downgrade) ==="
+assert_connect_refused "no-downgrade (require vs non-TLS)" \
+    "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=require"
+
 # ── TLS phase ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.
@@ -766,3 +807,14 @@ else
     echo "--- server log ---"; cat "$APPDIR_TLS/serve.log" 2>/dev/null || true
     exit 1
 fi
+
+# ── sslmode matrix: verify-full rejects an untrusted certificate ──────────
+# The container now serves TLS with a self-signed cert that is NOT in the embedded
+# Mozilla CA bundle, so sslmode=verify-full must fail chain verification instead of
+# connecting. (verify-full SUCCESS against a private CA is not e2e-testable here:
+# Hull's pg TLS verify trusts only the embedded bundle; the chain + hostname
+# verification logic itself is covered by the shared tls_client live-peer unit
+# suite.)
+echo "=== sslmode=verify-full rejects the untrusted self-signed cert ==="
+assert_connect_refused "verify-full (untrusted self-signed cert)" \
+    "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=verify-full"

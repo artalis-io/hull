@@ -1849,6 +1849,33 @@ jobs:
         timeout-minutes: 15
         run: make e2e-postgres
 
+  # The PostgreSQL-over-Keel unit tests (cap/pg_transport.c AND cap/pg_conn.c,
+  # whose connection layer now drives through the transport) are
+  # HL_ENABLE_POSTGRES-gated, so the base `sanitizers` / `build` jobs do not build
+  # them. This standing leg builds + runs both under ASan+UBSan with LSan (on by
+  # default on Linux), giving durable coverage of the transport's
+  # allocation-preservation and descriptor-lifecycle behavior AND the pg_conn
+  # codec / handshake / adopt path so neither can silently regress.
+  pg-transport-sanitize:
+    needs: [classify]
+    if: needs.classify.outputs.run_db_postgres == 'true'
+    name: pg_transport ASan/LSan
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: build test_pg_transport + test_pg_conn under ASan+UBSan (+LSan), Postgres enabled
+        run: make DEBUG=1 HL_ENABLE_POSTGRES=1 build/test_pg_transport build/test_pg_conn
+
+      - name: run test_pg_transport (LSan leak detection on by default on Linux)
+        run: ASAN_OPTIONS=detect_leaks=1 ./build/test_pg_transport
+
+      - name: run test_pg_conn (LSan leak detection on by default on Linux)
+        run: ASAN_OPTIONS=detect_leaks=1 ./build/test_pg_conn
+
   # Real MySQL 8 in Docker: mysql:// DSN -> backend select -> handshake ->
   # parameterized db.exec / db.query (binary prepared statements) -> typed
   # decode; multi-statement migrations; db.async on a worker connection; the
@@ -2596,6 +2623,7 @@ jobs:
       - focused-js-frontend
       - focused-lua-frontend
       - postgres
+      - pg-transport-sanitize
       - mysql
       - valkey
       - analyze

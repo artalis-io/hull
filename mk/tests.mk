@@ -40,6 +40,24 @@ ifeq ($(HL_ENABLE_IMAGE),0)
   TEST_SRCS := $(filter-out %/test_image.c,$(TEST_SRCS))
 endif
 
+# The PostgreSQL-over-Keel transport test inherently needs KlConnectOp +
+# KlEventCtx + cap/pg_transport.c, none of which exist on a base (non-Postgres)
+# build - cap/pg_transport.c is filtered out of CAP_OBJS until HL_ENABLE_POSTGRES.
+# Unlike test_pg_conn (which source-compiles the codec free of Keel via
+# -DHL_PG_NO_TLS), the transport cannot avoid Keel, so gate its discovery on
+# HL_ENABLE_POSTGRES=1. The explicit rule below wires it.
+ifneq ($(HL_ENABLE_POSTGRES),1)
+  TEST_SRCS := $(filter-out %/test_pg_transport.c,$(TEST_SRCS))
+endif
+
+# test_pg_conn now drives hl_pg_conn_start through the PgTransport byte transport
+# (adopt path), so like test_pg_transport it needs KlConnectOp + KlEventCtx +
+# cap/pg_transport.c, none of which exist on a base (non-Postgres) build. Gate its
+# discovery on HL_ENABLE_POSTGRES=1; the explicit rule below wires it.
+ifneq ($(HL_ENABLE_POSTGRES),1)
+  TEST_SRCS := $(filter-out %/test_pg_conn.c,$(TEST_SRCS))
+endif
+
 # Under MSan, drop test_js_conformance. Its oracle calls raw JS_Eval on arbitrary JS
 # snippets (including destructuring) to get a ground-truth verdict, which trips a
 # use-of-uninitialized-value INSIDE vendored quickjs.c's js_parse_destructuring_element --
@@ -90,18 +108,44 @@ $(BUILDDIR)/test_pgwire: $(TESTDIR)/hull/cap/test_pgwire.c $(SRCDIR)/hull/cap/pg
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_pgwire.c $(SRCDIR)/hull/cap/pgwire.c $(LDFLAGS)
 
-# pgwire connection / DSN / handshake test: same rationale as test_pgwire.
-# pg_conn.c + pgwire.c are gated out of CAP_OBJS until HL_ENABLE_POSTGRES.
+# pgwire crypto objects, still used by the mysql tests below.
 PG_CRYPTO_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls.o \
                   $(BUILDDIR)/cap_crypto_asym_mbedtls.o $(MBEDTLS_OBJS) $(TWEETNACL_OBJ)
-# HL_PG_NO_TLS strips the Keel-dependent TLS transport: the tests drive the
-# handshake over a plaintext socketpair, so they need neither tls_client.o nor
-# Keel. sslmode parsing / SSLRequest negotiation stay covered (they are
-# TLS-transport-independent).
-$(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(PG_CRYPTO_OBJS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -DHL_PG_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
+
+# pgwire connection / DSN / handshake test. hl_pg_conn_start now rides the
+# PgTransport byte transport (Keel v3), so the test source-compiles pg_conn.c +
+# pgwire.c + pg_transport.c together and links TEST_COMMON_LIBS (which already
+# carries Keel, mbedTLS, tls_client, and the crypto SCRAM depends on), mirroring
+# test_pg_transport's direct-compile-plus-filter pattern. The three cap objects
+# are filtered OUT of the common link so the direct-included definitions do not
+# collide. -DHL_PG_NO_TLS is DROPPED (the connection layer + transport are now
+# linked) and HL_PG_NO_SCRAM stays off (the test exercises SCRAM). Only reached
+# under HL_ENABLE_POSTGRES=1. The socketpair handshake tests stay plaintext (the
+# adopt path drives the descriptor directly), so no TLS server is needed.
+PG_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_LIBS))
+PG_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c \
+    $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(SRCDIR)/hull/cap/pg_transport.c \
+    $(PG_CONN_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c \
-		$(PG_CRYPTO_OBJS) $(LDFLAGS)
+		$(SRCDIR)/hull/cap/pg_transport.c $(PG_CONN_TEST_LIBS) $(LDFLAGS)
+
+# PostgreSQL-over-Keel transport test: direct-includes src/hull/cap/pg_transport.c
+# (to unit-test its static helpers: the resolve adapter, the connect machinery,
+# the blocking send/recv path) under -DHL_PG_TEST_HOOKS, which compiles in the
+# gated provider / resolve / pump-checkpoint test seam (pg_test_socket_provider /
+# pg_test_resolve / pg_test_checkpoint). The seam is set ONLY on this compile
+# line, so the production object never sees it (nm-verified). cap_pg_transport.o
+# must be EXCLUDED from the common link, else the direct-included definitions
+# collide (mirrors test_smtp_transport). Everything else (Keel, mbedTLS, the
+# tls_client, the rest of the cap layer) comes from TEST_COMMON_LIBS. Only reached
+# under HL_ENABLE_POSTGRES=1 (Keel + cap_pg_transport.o present).
+PG_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_LIBS))
+PG_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_pg_transport: $(TESTDIR)/hull/cap/test_pg_transport.c \
+    $(SRCDIR)/hull/cap/pg_transport.c $(PG_TP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_PG_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(PG_TP_TEST_LIBS) $(LDFLAGS)
 
 # Valkey/Redis RESP2/3 codec test: respwire.c is a self-contained parser gated
 # out of CAP_OBJS until HL_ENABLE_VALKEY, so link it directly (explicit rule

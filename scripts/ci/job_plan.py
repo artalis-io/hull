@@ -90,6 +90,7 @@ GROUP = {
     # -- db subsystem (per-backend integrations) --
     "postgres": "db-postgres",
     "postgres-feature": "db-postgres",
+    "pg-transport-sanitize": "db-postgres",
     "mysql": "db-mysql",
     "mysql-feature": "db-mysql",
     "valkey": "db-valkey",
