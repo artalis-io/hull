@@ -97,6 +97,34 @@ OR `HL_MY_NO_TLS` (test_mysqlwire) is set, while the pure auth helpers stay unde
 `HL_MY_NO_AUTH` only (present for test_mysqlwire, absent for fuzz_mysql_dsn). The
 DSN parser + wire helpers stay outside both.
 
+## D6. Checkpoint 4 verification split - tests only, no production change
+
+The TLS security branches all exist and were approved at checkpoint 3
+(`my_start_over_transport`: `sslmode` parse-reject, `verify` flag on
+`HL_MY_SSL_VERIFY`, the fail-closed `"server does not support TLS but sslmode
+requires it"` branch). Checkpoint 4 VERIFIES them; it adds no production logic.
+Coverage mirrors PG across both levels but places each property where it is
+provable most cheaply:
+
+- **No-downgrade + parse-reject: unit level** (`test_mysql_conn`, now real-TLS
+  linked). The default socketpair handshake advertises no `CLIENT_SSL`, so
+  `sslmode=require` / `verify-full` deterministically hit the fail-closed branch,
+  and `sslmode=bogus` is rejected before any credential reaches the wire. This is
+  a stronger, deterministic proof than an e2e phase and needs no server.
+- **Verification-failure + encrypted-auth/query evidence: e2e** (`e2e_mysql`,
+  mysql:8 TLS leg). `sslmode=require` succeeds (encrypted, `caching_sha2` full
+  auth, non-empty `Ssl_cipher`); `sslmode=verify-ca` / `verify-full` must REJECT
+  MySQL 8's self-signed auto-cert (not in the embedded Mozilla bundle) via the
+  ported `assert_connect_refused` helper.
+
+PG's e2e no-downgrade phase was free because its container starts TLS-less;
+MySQL 8 ships TLS-on, so an e2e no-downgrade would need a second `--skip-ssl`
+container. The unit-level no-downgrade covers that property deterministically, so
+the fragile second container is deliberately not added. `verify-*` SUCCESS against
+a private CA stays untestable here (Hull's mysql TLS verify trusts only the
+embedded bundle); the chain + hostname logic is covered by the shared
+`tls_client` live-peer unit suite.
+
 ## Non-goals
 
 No wire-codec change (framing, `mysql_native_password` SHA-1 +

@@ -572,3 +572,55 @@ else
     echo "--- server log ---"; cat "$APPDIR_TLS/serve.log" 2>/dev/null || true
     exit 1
 fi
+
+# Free $PORT for the refusal phases below.
+kill "$SVR" 2>/dev/null || true; SVR=
+
+# ── sslmode security matrix: verify-* must reject an untrusted cert ────────
+# The default -d connection opens EAGERLY at app-context init, so a DSN that must
+# not connect makes `hull` exit at startup rather than serve. That startup failure
+# IS the proof the connection was refused: a silent success (a plaintext downgrade,
+# or verify-* accepting a bad cert) would instead leave the server running. Assert
+# the process exits and the log shows the connection failure. $1 = label, $2 = DSN.
+assert_connect_refused() {
+    _lbl=$1; _dsn=$2
+    _d=$(mktemp -d)
+    printf 'app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })\nrequire("hull.db").default()\napp.get("/", function(req, res) res:json({ up = true }) end)\n' > "$_d/app.lua"
+    ./build/hull -d "$_dsn" -p "$PORT" "$_d/app.lua" >"$_d/serve.log" 2>&1 &
+    _pid=$!
+    _exited=0
+    for _ in $(seq 1 20); do
+        if ! kill -0 "$_pid" 2>/dev/null; then _exited=1; break; fi
+        sleep 0.5
+    done
+    if [ "$_exited" = 0 ]; then
+        kill "$_pid" 2>/dev/null || true; wait "$_pid" 2>/dev/null || true
+        echo "::error $_lbl: connection unexpectedly succeeded (server stayed up)"
+        cat "$_d/serve.log" 2>/dev/null || true; rm -rf "$_d"; exit 1
+    fi
+    wait "$_pid" 2>/dev/null || true
+    echo "--- $_lbl serve.log ---"; cat "$_d/serve.log" 2>/dev/null || true
+    if grep -qi 'failed to open database' "$_d/serve.log"; then
+        echo "PASS: $_lbl (connection refused, no silent success)"; rm -rf "$_d"
+    else
+        echo "::error $_lbl: expected a connection-failure log"; rm -rf "$_d"; exit 1
+    fi
+}
+
+# MySQL 8 serves TLS with an auto-generated self-signed cert that is NOT in the
+# embedded Mozilla CA bundle, so sslmode=verify-ca (chain) and sslmode=verify-full
+# (chain + hostname) must fail verification instead of connecting. sslmode=require
+# (encryption without chain verification) SUCCEEDS above, so this isolates that the
+# verification path itself is real and fails closed. (verify-* SUCCESS against a
+# private CA is not e2e-testable here: Hull's mysql TLS verify trusts only the
+# embedded bundle; the chain + hostname logic is covered by the shared tls_client
+# live-peer unit suite, and the no-downgrade refusal by test_mysql_conn's
+# tls_require_no_downgrade / tls_verify_no_downgrade cases.)
+echo "=== sslmode=verify-ca rejects the untrusted self-signed cert ==="
+assert_connect_refused "verify-ca (untrusted self-signed cert)" \
+    "mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=verify-ca"
+echo "=== sslmode=verify-full rejects the untrusted self-signed cert ==="
+assert_connect_refused "verify-full (untrusted self-signed cert)" \
+    "mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=verify-full"
+
+echo "PASS: mysql TLS security matrix (verify-ca/verify-full reject the untrusted cert)"

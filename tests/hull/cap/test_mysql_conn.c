@@ -127,6 +127,63 @@ UTEST(mysql_conn, handshake_auth_error)
     close(sv[0]);   /* sv[1] already closed by the failed handshake */
 }
 
+/* ── TLS negotiation: fail closed, no silent downgrade ─────────────────
+ * The default server handshake (build_handshake) advertises no CLIENT_SSL.
+ * sslmode=prefer (handshake_native_ok) legitimately falls back to plaintext;
+ * sslmode=require / verify-* MUST refuse rather than continue unencrypted, and an
+ * unknown sslmode is rejected before any credential reaches the wire. Each case
+ * fails at the sslmode gate, before the client sends its HandshakeResponse41, so
+ * no OK/ERR reply needs to be queued.
+ *
+ * Drive hl_my_conn_start against the no-CLIENT_SSL handshake with @p dsn_str;
+ * return its rc and copy the resulting errmsg into @p out. */
+static int drive_sslmode(const char *dsn_str, char *out, size_t outsz)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -2;
+
+    HlMyWriter hs; hl_my_writer_init(&hs); build_handshake(&hs, 0);
+    ssize_t w = write(sv[0], hs.buf, hs.len); (void)w;
+
+    HlMyDsn dsn; char err[128];
+    if (hl_my_dsn_parse(dsn_str, &dsn, err, sizeof err) != 0) {
+        hl_my_writer_free(&hs); close(sv[0]); close(sv[1]); return -3;
+    }
+
+    HlMyConn conn;
+    int rc = hl_my_conn_start(&conn, sv[1], &dsn);
+    if (out && outsz) { strncpy(out, conn.errmsg, outsz - 1); out[outsz - 1] = 0; }
+    if (rc == 0) hl_my_conn_close(&conn);   /* not expected; retire the transport */
+
+    hl_my_writer_free(&hs);
+    close(sv[0]);   /* sv[1] is closed by the failed start */
+    return rc;
+}
+
+UTEST(mysql_conn, tls_require_no_downgrade)
+{
+    char e[128] = {0};
+    ASSERT_EQ(-1, drive_sslmode("mysql://a:pw@localhost/db?sslmode=require",
+                                e, sizeof e));
+    ASSERT_TRUE(strstr(e, "server does not support TLS") != NULL);
+}
+
+UTEST(mysql_conn, tls_verify_no_downgrade)
+{
+    char e[128] = {0};
+    ASSERT_EQ(-1, drive_sslmode("mysql://a:pw@localhost/db?sslmode=verify-full",
+                                e, sizeof e));
+    ASSERT_TRUE(strstr(e, "server does not support TLS") != NULL);
+}
+
+UTEST(mysql_conn, sslmode_unknown_rejected)
+{
+    char e[128] = {0};
+    ASSERT_EQ(-1, drive_sslmode("mysql://a:pw@localhost/db?sslmode=bogus",
+                                e, sizeof e));
+    ASSERT_TRUE(strstr(e, "unknown sslmode") != NULL);
+}
+
 /* caching_sha2_password fast path: server names the plugin, then sends an
  * AuthMoreData(fast_success) followed by OK. Asserts the client selected
  * caching_sha2 (32-byte auth response + plugin name in its response). */
