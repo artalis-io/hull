@@ -173,6 +173,44 @@ grant for a declared network DB. Identical rows, errors, and timeouts.
 - Template: `src/hull/cap/smtp_transport.c` (blocking `getaddrinfo` adapter, a
   private `KlEventCtx` connect pump, and `co_on_detach` confirmed detachment).
 
+## Checkpoint 2 review refinements
+
+Source review of the first Checkpoint 2 cut froze six additional correctness
+rules, now implemented:
+
+1. **Truly unbounded connect.** `timeout_ms <= 0` imposes NO total deadline and no
+   hidden ceiling: the connect pump loops in bounded `PG_PUMP_STEP_MS` increments
+   until the op completes (the `select(..., NULL)` contract). Only `timeout_ms > 0`
+   arms a deadline.
+2. **Provider error classification via `io_status`.** Connect / send / recv
+   classify would-block / pending / interrupted through the provider's
+   `ops->io_status` when it supplies one, falling back to hosted errno only when it
+   is absent. A mock that reports `io_status` while leaving errno irrelevant is
+   covered.
+3. **Required provider subset + capability, validated up front.** Before creating
+   anything, `validate_provider` requires
+   `socket`/`connect`/`close`/`send`/`recv`/`get_so_error`/`set_nonblocking`/`set_blocking`
+   and `KL_SOCK_CAP_NATIVE_FD` (the private event loop watches provider handles);
+   a missing op or capability fails closed. `set_blocking` is never assumed
+   present (a missing one no longer silently leaves the winner non-blocking).
+4. **Non-detachment is represented safely.** `connect_teardown` and
+   `hl_pg_transport_close` return status. When confirmed detachment fails the
+   ENTIRE heap allocation is PRESERVED (never freed under a live op) and reported:
+   `close` returns -1 without marking anything closed, so the owner may retry or
+   intentionally leak the whole block. This is why the transport is a
+   heap-allocated opaque handle (Amendment 1), not an embedded value.
+5. **One-shot fallible TLS attach.** `hl_pg_transport_attach_tls` requires a live
+   descriptor and a non-NULL session and rejects a second attachment, returning
+   status; an owned session is never silently dropped.
+6. **Tests.** The suite adds deterministic coverage for the connect deadline +
+   detachment, truly-unbounded mode via a controlled completion (no 30 s wait),
+   immediate `connect()` success (rc == 0), `io_status` with an irrelevant errno,
+   missing provider ops + missing native-FD capability, `set_blocking` failure,
+   partial receive, provider-observed close exactly once, TLS attach
+   rejection/replacement, and forced non-detachment proving the allocation is
+   preserved and close is retryable. Run under ASan/UBSan + TSan locally and
+   ASan/LSan in CI; the production-hook nm proof is retained.
+
 ## Checkpoints
 
 1. Decisions record (this document). Approved.

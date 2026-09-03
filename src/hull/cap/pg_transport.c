@@ -5,18 +5,22 @@
  *
  * This composes Keel's PUBLIC transport surface for the CONNECT phase only:
  * KlConnectOp (resolve + Happy-Eyeballs racing connect) driven on a PRIVATE,
- * operation-local KlEventCtx, plus the POSIX socket provider's public ops table.
- * The connect machinery is the reviewed cap/smtp_transport.c pattern (resolve
- * adapter + KlConnectOp hooks + private KlEventCtx pump + socket-provider
- * wrappers), MINUS the KlStream: a synchronous PostgreSQL connection needs no
- * queued-write / read pause-resume / graceful-close machinery. After the race is
- * won the winning fd is set_blocking()'d and every subsequent byte is plain
- * blocking recv / send with no event loop (design D1).
+ * operation-local KlEventCtx, plus a KlSocketProvider's public ops table. The
+ * connect machinery is the reviewed cap/smtp_transport.c pattern (resolve adapter
+ * + KlConnectOp hooks + private KlEventCtx pump + socket-provider wrappers), MINUS
+ * the KlStream: a synchronous PostgreSQL connection needs no queued-write /
+ * read pause-resume / graceful-close machinery. After the race is won the winning
+ * fd is set_blocking()'d and every subsequent byte is plain blocking recv / send
+ * with no event loop (design D1).
  *
  * TLS stays the shared hl_tls_client_* helpers layered over the blocking fd
  * (design D2). This transport only STORES the optional attached HlTlsClient and
  * routes send/recv through it; the SSLRequest negotiation + handshake belong to
  * the consumer (pg_conn.c), which hands the session here via attach_tls.
+ *
+ * The transport is a HEAP allocation reached through an opaque handle so the
+ * exceptional non-detachment path can drop the whole block intentionally and
+ * safely (a live op keeps referencing its own storage). See the header banner.
  *
  * NO vendor/keel/src header is used. keel/connect_op_detail.h + keel/event_ctx.h
  * are included solely so KlConnectOp / KlEventCtx can be EMBEDDED fields (storage
@@ -53,24 +57,66 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
-#include <stdlib.h>   /* atoi */
+#include <stdlib.h>   /* atoi, calloc, free */
 #include <string.h>
 
 #include "log.h"
 
+/* One connection's byte transport (opaque to consumers; defined here). Heap-
+ * allocated; the exceptional non-detachment path leaks the whole block. */
+struct PgTransport {
+    /* Borrowed, immutable, outlives the connection (Amendment 4). */
+    const KlSocketProvider *sp;
+
+    /* Owned: the private connect-time event context. Created only when a race is
+     * needed (hl_pg_transport_connect); the adopt path leaves it uninitialized. */
+    KlEventCtx  ev;
+    int         ev_ready;      /* 1 once kl_event_ctx_init succeeded            */
+    KlAllocator alloc;         /* event-ctx allocator (event-loop lifetime)     */
+
+    /* Owned: the embedded KlConnectOp and its resolved address set. */
+    KlConnectOp connect_op;       /* embedded (connect_op_detail.h: storage only) */
+    int         connect_started;  /* 1 once kl_connect_op_start succeeded        */
+    KlSockAddr  addrs[KL_CONNECT_MAX_ADDRS];
+    int         naddrs;
+    KlSocketHandle attempt_fd[KL_CONNECT_MAX_ADDRS]; /* in-flight racing fds     */
+    int         attempt_armed[KL_CONNECT_MAX_ADDRS]; /* 1 if a watcher is armed  */
+
+    /* Connect outcome. */
+    int             connect_done;      /* on_done fired                          */
+    KlConnectResult connect_result;
+    int             connect_error;
+
+    /* Overall connect deadline (TCP establishment only, design D3). */
+    int64_t   deadline_timer;   /* Keel timer id, or -1                          */
+    uint64_t  deadline_ms;      /* absolute monotonic instant, or 0 = unbounded  */
+    int       deadline_fired;
+
+    /* RFC 8305 Connection Attempt Delay timer (the Happy-Eyeballs stagger). */
+    int64_t   delay_timer;      /* Keel timer id, or -1                          */
+
+    /* The winning connected descriptor (blocking after connect). */
+    KlSocketHandle fd;
+
+    /* Owned: optional attached TLS session. When non-NULL, send/recv tunnel
+     * through it (design D2); the transport frees it in close. */
+    struct HlTlsClient *tls;
+};
+
 /* SIGPIPE suppression on send has parity with pg_conn.c: the winning / adopted fd
  * gets SO_NOSIGPIPE via the provider's set_nosigpipe hook where the platform
- * offers it, and the POSIX provider's send applies MSG_NOSIGNAL internally
- * (vendor/keel/src/socket_posix.c), so hl_pg_transport_send never emits SIGPIPE. */
+ * offers it, and the POSIX provider's send applies MSG_NOSIGNAL internally, so
+ * hl_pg_transport_send never emits SIGPIPE. */
 
-/* Default connect budget when the caller passes timeout_ms <= 0 is NONE: the
- * transport arms no deadline and the connect is unbounded, preserving
- * pg_connect's prior select(NULL) behavior. But the pump still needs a per-stage
- * step budget to bound one kl_event_ctx_run wait; a completed op / detachment is
- * the real terminal, so a generous fallback only caps how long one pump loop
- * blocks with no readiness. */
-#define PG_PUMP_STEP_MS   50
-#define PG_PUMP_FALLBACK_MS  30000   /* stage cap when timeout_ms <= 0 (unbounded op) */
+#define PG_PUMP_STEP_MS   50   /* one kl_event_ctx_run readiness wait (a bounded increment) */
+
+/* Teardown detachment confirm is ITERATION-bounded (deterministic), NOT
+ * wall-bounded: after cancel a well-behaved op retires everything synchronously
+ * and detaches within 0-1 steps, so this bound only decides when to declare a
+ * pathological non-detachment (fail closed, preserve storage). This is a teardown
+ * safety bound, never the connect operation's deadline (which stays select(NULL)
+ * unbounded when timeout_ms <= 0). */
+#define PG_DETACH_MAX_STEPS  256
 
 /* RFC 8305 Connection Attempt Delay: wait before starting the next address while
  * an earlier attempt is still in flight (the Happy-Eyeballs stagger). */
@@ -78,8 +124,8 @@
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Socket provider: an immutable process-wide ops table. We call its PUBLIC ops
- * directly, reading errno for would-block / EINPROGRESS classification (the
- * defined hosted-errno fallback on the POSIX provider).
+ * directly. Would-block / EINPROGRESS / EINTR classification prefers the
+ * provider's io_status op and falls back to hosted errno only when it is absent.
  * ────────────────────────────────────────────────────────────────────────── */
 
 static const KlSocketProvider *g_sp;
@@ -92,30 +138,21 @@ static const KlSocketProvider *default_provider(void)
 }
 
 #ifdef HL_PG_TEST_HOOKS
-/* Test-only fault-injection provider (compiled ONLY under -DHL_PG_TEST_HOOKS,
- * ABSENT from the production object). When non-NULL it REPLACES the default POSIX
- * provider for every sp_* op, so a test can drive connect attempts to
- * pending / succeed / fail per address and observe attempt order + timestamps. It
- * is a COHERENT socket seam: it hands the connect op real fds the event loop can
- * watch, so the Happy-Eyeballs stagger timer and the connect-deadline timer fire
- * on the same real clock as production (never a divergent virtual clock). */
+/* Test-only seam (compiled ONLY under -DHL_PG_TEST_HOOKS, ABSENT from the
+ * production object). pg_test_socket_provider REPLACES the default POSIX provider
+ * for every sp_* op; pg_test_resolve fills t->addrs in exact injected order;
+ * pg_test_checkpoint observes each pump checkpoint; pg_test_force_no_detach makes
+ * the detach-confirm predicate report "not detached" so a test can drive the
+ * pathological non-detachment path (preserve storage + retryable close). */
 const KlSocketProvider *pg_test_socket_provider;
-
-/* When non-NULL, fills t->addrs[] in EXACT injected order and returns the count
- * (value-copied into the transport-owned array, so no dangling), replacing the
- * blocking getaddrinfo. */
 int (*pg_test_resolve)(PgTransport *t, const char *host, int port);
-
-/* Fires at the TOP of every pump check with the transport and a monotonically-
- * increasing checkpoint index, so a test can observe pump progress without
- * diverging from Keel's clock. */
 void (*pg_test_checkpoint)(PgTransport *t, unsigned idx);
+int  pg_test_force_no_detach;
 static unsigned pg_test_checkpoint_seq;
 #endif
 
 /* The active provider: a test-supplied one when set, else the transport's own
- * borrowed reference (default POSIX). t->sp is set at connect / adopt time; the
- * connect hooks run while t->sp is live. */
+ * borrowed reference. */
 static const KlSocketProvider *active_sp(const PgTransport *t)
 {
 #ifdef HL_PG_TEST_HOOKS
@@ -124,12 +161,29 @@ static const KlSocketProvider *active_sp(const PgTransport *t)
     return t->sp ? t->sp : default_provider();
 }
 
+/* Required provider op subset + capability. Missing any is fail-closed: the
+ * private event loop watches provider handles (needs KL_SOCK_CAP_NATIVE_FD), and
+ * the connect / I/O / close paths dereference these ops. io_status and
+ * set_nosigpipe are OPTIONAL (documented hosted-errno / no-op fallbacks). */
+static int validate_provider(const KlSocketProvider *sp)
+{
+    if (!sp || !sp->ops)
+        return -1;
+    const KlSocketOps *o = sp->ops;
+    if (!o->socket || !o->connect || !o->close || !o->send || !o->recv ||
+        !o->get_so_error || !o->set_nonblocking || !o->set_blocking)
+        return -1;
+    if (!kl_socket_provider_has_cap(sp, KL_SOCK_CAP_NATIVE_FD))
+        return -1;
+    return 0;
+}
+
 static KlSocketHandle sp_socket(const PgTransport *t, int domain, int type, int protocol)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->socket(sp->context, domain, type, protocol); }
 static int sp_set_nonblocking(const PgTransport *t, KlSocketHandle fd)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->set_nonblocking(sp->context, fd); }
 static int sp_set_blocking(const PgTransport *t, KlSocketHandle fd)
-{ const KlSocketProvider *sp = active_sp(t); return sp->ops->set_blocking ? sp->ops->set_blocking(sp->context, fd) : 0; }
+{ const KlSocketProvider *sp = active_sp(t); return sp->ops->set_blocking(sp->context, fd); }
 static void sp_set_nosigpipe(const PgTransport *t, KlSocketHandle fd)
 { const KlSocketProvider *sp = active_sp(t); if (sp->ops->set_nosigpipe) sp->ops->set_nosigpipe(sp->context, fd); }
 static int sp_connect(const PgTransport *t, KlSocketHandle fd, const KlSockAddr *a)
@@ -142,6 +196,28 @@ static kl_ssize_t sp_recv(const PgTransport *t, KlSocketHandle fd, void *b, size
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->recv(sp->context, fd, b, n); }
 static int sp_close(const PgTransport *t, KlSocketHandle fd)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->close(sp->context, fd); }
+
+/* Classify the last op: prefer the provider's io_status, else hosted errno. */
+static KlIoStatus sp_io_status(const PgTransport *t)
+{
+    const KlSocketProvider *sp = active_sp(t);
+    if (sp->ops->io_status)
+        return sp->ops->io_status(sp->context);
+    switch (errno) {
+        case EINTR:       return KL_IO_INTERRUPTED;
+        case EINPROGRESS: return KL_IO_PENDING;
+#if EAGAIN != EWOULDBLOCK
+        case EAGAIN:      return KL_IO_PENDING;
+        case EWOULDBLOCK: return KL_IO_PENDING;
+#else
+        case EAGAIN:      return KL_IO_PENDING;
+#endif
+        case EPIPE:       return KL_IO_CLOSED;
+        case ECONNRESET:  return KL_IO_RESET;
+        case 0:           return KL_IO_OK;
+        default:          return KL_IO_FATAL;
+    }
+}
 
 static void set_err(char *dst, size_t cap, const char *msg)
 { if (dst && cap) snprintf(dst, cap, "%s", msg); }
@@ -228,8 +304,7 @@ static int co_start_attempt(void *ctx, int idx, int *out_err)
     sp_set_nosigpipe(t, fd);
 
     int rc = sp_connect(t, fd, &t->addrs[idx]);
-    int ce = errno;
-    if (rc < 0 && ce != EINPROGRESS) {
+    if (rc < 0 && sp_io_status(t) != KL_IO_PENDING) {
         sp_close(t, fd);
         *out_err = (int)KL_ERR_CONNECT;
         return -1;   /* hard local failure: advance to the next address */
@@ -363,8 +438,8 @@ static void co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd, int
     if (result == KL_CONNECT_SUCCESS) {
         /* The winning fd is non-blocking (created that way for the race). Restore
          * blocking so every subsequent recv / send is plain blocking I/O with no
-         * event loop (design D1). A set_blocking failure retires the fd + marks
-         * the op failed for the pump. */
+         * event loop (design D1). set_blocking is a validated-present required op;
+         * a failure retires the fd + marks the op failed for the pump. */
         if (sp_set_blocking(t, fd) < 0) {
             t->connect_result = KL_CONNECT_FAILED;
             sp_close(t, fd);
@@ -375,15 +450,10 @@ static void co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd, int
     }
 }
 
-static void co_on_detach(void *ctx)
-{
-    PgTransport *t = ctx;
-    t->connect_detached = 1;
-}
-
 /* Two hook tables: one WITH the deadline hooks (timeout_ms > 0), one WITHOUT (an
  * unbounded connect: no arm_deadline, so no deadline timer). The connect / delay
- * / dispose hooks are shared. */
+ * / dispose hooks are shared. on_detach is omitted: detachment is observed via
+ * kl_connect_op_is_detached (no per-transport flag needed). */
 static const KlConnectOpHooks PG_HOOKS_DEADLINE = {
     .start_resolve   = co_start_resolve,
     .cancel_resolve  = NULL,
@@ -395,7 +465,7 @@ static const KlConnectOpHooks PG_HOOKS_DEADLINE = {
     .arm_deadline    = co_arm_deadline,
     .cancel_deadline = co_cancel_deadline,
     .on_done         = co_on_done,
-    .on_detach       = co_on_detach,
+    .on_detach       = NULL,
 };
 static const KlConnectOpHooks PG_HOOKS_NO_DEADLINE = {
     .start_resolve   = co_start_resolve,
@@ -408,88 +478,86 @@ static const KlConnectOpHooks PG_HOOKS_NO_DEADLINE = {
     .arm_deadline    = NULL,
     .cancel_deadline = NULL,
     .on_done         = co_on_done,
-    .on_detach       = co_on_detach,
+    .on_detach       = NULL,
 };
 
 /* ────────────────────────────────────────────────────────────────────────────
- * Event-loop pump. Runs the private KlEventCtx until @p done() or the stage
- * deadline elapses so a dead peer cannot hang the synchronous caller.
- *
- * The deadline is a MONOTONIC ABSOLUTE instant (kl_monotonic_ms() + budget), NOT
- * an accumulation of assumed tick durations. Each kl_event_ctx_run waits up to
- * step_ms for readiness; the check runs BEFORE and AFTER each step, so a
- * condition that arrives during the step takes effect within one step (~50 ms).
+ * Event-loop pumps. The private KlEventCtx drives ONLY the connect phase.
  * ────────────────────────────────────────────────────────────────────────── */
 
-typedef int (*DonePred)(PgTransport *t);
+static int done_connect(PgTransport *t)
+{ return t->connect_done; }
 
-static int pump_check(PgTransport *t, DonePred done, uint64_t deadline_ms)
+static int done_connect_detached(PgTransport *t)
+{
+#ifdef HL_PG_TEST_HOOKS
+    if (pg_test_force_no_detach) return 0;
+#endif
+    return kl_connect_op_is_detached(&t->connect_op);
+}
+
+static void pump_checkpoint(PgTransport *t)
 {
 #ifdef HL_PG_TEST_HOOKS
     if (pg_test_checkpoint)
         pg_test_checkpoint(t, pg_test_checkpoint_seq++);
+#else
+    (void)t;
 #endif
-    if (done(t))
-        return 1;
-    if (deadline_ms && kl_monotonic_ms() >= deadline_ms)
-        return -1;
-    return 0;
 }
 
-static int pump_until_abs(PgTransport *t, DonePred done, uint64_t deadline_ms)
+/* Pump the connect op to its terminal (done_connect). When t->deadline_ms is set
+ * (timeout_ms > 0) the loop is bounded by that single absolute connect ceiling;
+ * when it is 0 (timeout_ms <= 0) the connect is TRULY UNBOUNDED - the loop pumps
+ * in bounded PG_PUMP_STEP_MS increments with NO total deadline, until the op
+ * completes (the select(..., NULL) contract, no hidden ceiling). Returns 0 when
+ * done, -1 on a deadline expiry or an event-loop error. */
+static int pump_connect(PgTransport *t)
 {
+    uint64_t dl = t->deadline_ms;   /* 0 == unbounded */
     for (;;) {
-        int c = pump_check(t, done, deadline_ms);
-        if (c) return c > 0 ? 0 : -1;
-        if (kl_event_ctx_run(&t->ev, 64, PG_PUMP_STEP_MS) < 0)
-            return -1;
-        c = pump_check(t, done, deadline_ms);
-        if (c) return c > 0 ? 0 : -1;
+        pump_checkpoint(t);
+        if (done_connect(t)) return 0;
+        if (dl && kl_monotonic_ms() >= dl) return -1;
+        if (kl_event_ctx_run(&t->ev, 64, PG_PUMP_STEP_MS) < 0) return -1;
+        if (done_connect(t)) return 0;
+        if (dl && kl_monotonic_ms() >= dl) return -1;
     }
 }
 
-/* One pump stage. When the op is bounded (t->deadline_ms != 0) the stage shares
- * that single connect ceiling; when unbounded, one pump loop is capped by the
- * fallback so a wedged loop cannot block forever, but a completed op / detachment
- * is the real terminal (done predicate). */
-static int pump_until(PgTransport *t, DonePred done)
+/* Confirm the op has detached, ITERATION-bounded (a teardown safety bound, not
+ * the connect deadline). Returns 0 detached, -1 if not within PG_DETACH_MAX_STEPS.
+ * After kl_connect_op_cancel a well-behaved op retires everything and detaches
+ * synchronously (or via queued work), so this returns at step 0-1. The pump is
+ * NON-BLOCKING (timeout 0): detachment is never fd-readiness-driven here, so a
+ * blocking wait would only stall the pathological non-detachment case; a bounded
+ * non-blocking spin declares it promptly instead. */
+static int pump_detach(PgTransport *t)
 {
-    uint64_t dl = t->deadline_ms;
-    if (!dl)
-        dl = kl_monotonic_ms() + PG_PUMP_FALLBACK_MS;
-    return pump_until_abs(t, done, dl);
+    for (int i = 0; i < PG_DETACH_MAX_STEPS; i++) {
+        if (done_connect_detached(t)) return 0;
+        if (kl_event_ctx_run(&t->ev, 64, 0 /* non-blocking poll */) < 0) return -1;
+        if (done_connect_detached(t)) return 0;
+    }
+    return -1;
 }
 
-/* Predicates. */
-static int done_connect(PgTransport *t)
-{ return t->connect_done; }
-static int done_connect_detached(PgTransport *t)
-{ return kl_connect_op_is_detached(&t->connect_op); }
-
 /* ────────────────────────────────────────────────────────────────────────────
- * Connect-time teardown: cancel a still-live op and pump to confirmed
- * detachment before releasing embedded storage (frozen rule 4). Also retire any
- * winning fd + racing fds + timers. Leaves the event ctx freed. Used on both the
- * connect-failure path and by hl_pg_transport_close for a raced connection.
+ * Connect-time teardown. Cancels a still-live op and confirms detachment before
+ * retiring embedded storage (frozen rule 4). Returns 0 when the transport is fully
+ * quiesced (event ctx freed, no live op) and the heap block may be freed; returns
+ * -1 iff the op will NOT confirm detachment - in which case NOTHING is freed (the
+ * live op still references its storage) and the caller must preserve or leak the
+ * whole allocation.
  * ────────────────────────────────────────────────────────────────────────── */
-static void connect_teardown(PgTransport *t)
+static int connect_teardown(PgTransport *t)
 {
-    /* If the op was started and has NOT yet reached confirmed detachment, cancel
-     * it (retiring every racing fd via cancel_attempt / dispose_fd and both timers
-     * via cancel_delay / cancel_deadline) and pump to detachment. Fail LOUDLY if
-     * it will not detach within the bound rather than free storage a live op still
-     * references. */
     if (t->connect_started && !kl_connect_op_is_detached(&t->connect_op)) {
         kl_connect_op_cancel(&t->connect_op);
-        /* This teardown ignores the (possibly-exhausted) deadline: clear it so an
-         * expired deadline cannot clip the detachment confirm. */
-        t->deadline_ms = 0;
-        if (pump_until(t, done_connect_detached) != 0 ||
-            !kl_connect_op_is_detached(&t->connect_op)) {
-            log_error("pg: connect op did not detach within the bound; leaking "
-                      "transport descriptors rather than freeing a live op");
-            /* Do not free the event ctx: the live op still references it. */
-            return;
+        if (pump_detach(t) != 0 || !kl_connect_op_is_detached(&t->connect_op)) {
+            log_error("pg: connect op did not confirm detachment; preserving the "
+                      "whole transport allocation (a live op still references it)");
+            return -1;   /* preserve: do NOT free the event ctx / the block */
         }
     }
 
@@ -519,102 +587,110 @@ static void connect_teardown(PgTransport *t)
         kl_event_ctx_free(&t->ev);
         t->ev_ready = 0;
     }
+    return 0;
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Public API.
  * ────────────────────────────────────────────────────────────────────────── */
 
-static void transport_zero(PgTransport *t)
+static PgTransport *transport_new(const KlSocketProvider *sp)
 {
-    memset(t, 0, sizeof *t);
+    PgTransport *t = calloc(1, sizeof *t);
+    if (!t) return NULL;
+    t->sp = sp;
     t->fd = KL_INVALID_SOCKET;
     t->deadline_timer = -1;
     t->delay_timer = -1;
     t->connect_result = KL_CONNECT_CANCELLED;
     for (int i = 0; i < KL_CONNECT_MAX_ADDRS; i++)
         t->attempt_fd[i] = KL_INVALID_SOCKET;
+    return t;
 }
 
-int hl_pg_transport_connect(PgTransport *t, const char *host, const char *port,
-                            int timeout_ms, const KlSocketProvider *sp_or_NULL,
-                            char *errbuf, size_t errlen)
+/* Fail a connect: tear down, then free the block iff fully quiesced; otherwise
+ * leak the whole allocation intentionally (a live op still references it). Always
+ * returns NULL. */
+static PgTransport *connect_fail(PgTransport *t, char *errbuf, size_t errlen,
+                                 const char *msg)
 {
-    if (!t || !host || !port) {
+    set_err(errbuf, errlen, msg);
+    if (connect_teardown(t) == 0)
+        free(t);
+    /* else: intentional safe leak - the op will not detach; never free under it. */
+    return NULL;
+}
+
+PgTransport *hl_pg_transport_connect(const char *host, const char *port,
+                                     int timeout_ms,
+                                     const KlSocketProvider *sp_or_NULL,
+                                     char *errbuf, size_t errlen)
+{
+    if (!host || !port) {
         set_err(errbuf, errlen, "invalid connect arguments");
-        return -1;
+        return NULL;
     }
     int port_n = atoi(port);
     if (port_n < 1 || port_n > 65535) {
         set_err(errbuf, errlen, "invalid port");
-        return -1;
+        return NULL;
+    }
+    const KlSocketProvider *sp = sp_or_NULL ? sp_or_NULL : default_provider();
+    if (validate_provider(sp) != 0) {
+        set_err(errbuf, errlen, "socket provider missing a required op or KL_SOCK_CAP_NATIVE_FD");
+        return NULL;
     }
 
-    transport_zero(t);
-    t->sp = sp_or_NULL ? sp_or_NULL : default_provider();
+    PgTransport *t = transport_new(sp);
+    if (!t) { set_err(errbuf, errlen, "out of memory"); return NULL; }
     t->alloc = kl_allocator_default();
-    /* timeout_ms > 0 bounds TCP establishment (design D3); <= 0 = unbounded (no
-     * deadline hooks, deadline_ms 0). */
-    t->deadline_ms = 0;
 
     if (kl_event_ctx_init(&t->ev, &t->alloc) != 0) {
         set_err(errbuf, errlen, "failed to init event context");
-        return -1;
+        free(t);
+        return NULL;
     }
     t->ev_ready = 1;
 
     /* Sandbox-compatible blocking system resolve (or IP-literal fast path),
      * inline before start. */
     t->naddrs = resolve_addrs(t, host, port_n);
-    if (t->naddrs < 1) {
-        set_err(errbuf, errlen, "could not resolve host");
-        connect_teardown(t);
-        return -1;
-    }
+    if (t->naddrs < 1)
+        return connect_fail(t, errbuf, errlen, "could not resolve host");
 
     /* Freeze the connect deadline AFTER the blocking resolve (DNS is outside the
-     * TCP-establishment bound, design D3). */
+     * TCP-establishment bound, design D3). timeout_ms <= 0 leaves deadline_ms 0
+     * (unbounded) and picks the no-deadline hook table. */
     const KlConnectOpHooks *hooks;
     if (timeout_ms > 0) {
         t->deadline_ms = kl_monotonic_ms() + (uint64_t)timeout_ms;
         hooks = &PG_HOOKS_DEADLINE;
     } else {
-        hooks = &PG_HOOKS_NO_DEADLINE;   /* unbounded connect: no deadline armed */
+        hooks = &PG_HOOKS_NO_DEADLINE;
     }
 
-    if (kl_connect_op_init(&t->connect_op, hooks, t) != 0) {
-        set_err(errbuf, errlen, "failed to init connect op");
-        connect_teardown(t);
-        return -1;
-    }
-    if (kl_connect_op_start(&t->connect_op) != 0) {
-        set_err(errbuf, errlen, "failed to start connect op");
-        connect_teardown(t);
-        return -1;
-    }
+    if (kl_connect_op_init(&t->connect_op, hooks, t) != 0)
+        return connect_fail(t, errbuf, errlen, "failed to init connect op");
+    if (kl_connect_op_start(&t->connect_op) != 0)
+        return connect_fail(t, errbuf, errlen, "failed to start connect op");
     t->connect_started = 1;
 
-    if (pump_until(t, done_connect) != 0 ||
-        t->connect_result != KL_CONNECT_SUCCESS || !kl_handle_valid(t->fd)) {
-        set_err(errbuf, errlen, "connection failed");
-        connect_teardown(t);
-        return -1;
-    }
+    if (pump_connect(t) != 0 ||
+        t->connect_result != KL_CONNECT_SUCCESS || !kl_handle_valid(t->fd))
+        return connect_fail(t, errbuf, errlen, "connection failed");
 
-    /* Connect succeeded: the op still needs confirmed detachment before its
-     * embedded storage is reusable, but the winning fd is already handed to us and
-     * blocking. Pump the op to detachment (it retires its own timers), then free
-     * the connect-only event ctx: post-connect I/O is pure blocking, no loop. */
+    /* Connect succeeded: the winning fd is already blocking and handed to us, but
+     * the op still needs confirmed detachment before its embedded storage is
+     * reusable. Confirm detachment, then free the connect-only event ctx: post-
+     * connect I/O is pure blocking, no loop. If it will not detach, fail closed
+     * (retire the fd) and leak the whole allocation - never free under a live op. */
     if (!kl_connect_op_is_detached(&t->connect_op)) {
-        if (pump_until(t, done_connect_detached) != 0 ||
-            !kl_connect_op_is_detached(&t->connect_op)) {
-            /* The op will not detach: we cannot free the event ctx it references.
-             * The fd is live and usable, but leaving a live op wedged is a hard
-             * failure - fail closed, retire the fd, and report. */
+        if (pump_detach(t) != 0 || !kl_connect_op_is_detached(&t->connect_op)) {
             set_err(errbuf, errlen, "connect op did not detach");
             if (kl_handle_valid(t->fd)) { sp_close(t, t->fd); t->fd = KL_INVALID_SOCKET; }
-            log_error("pg: connect op did not detach after success; failing closed");
-            return -1;
+            log_error("pg: connect op did not detach after success; leaking the "
+                      "transport allocation (a live op still references it)");
+            return NULL;   /* intentional safe leak */
         }
     }
     if (t->delay_timer >= 0) {
@@ -625,34 +701,40 @@ int hl_pg_transport_connect(PgTransport *t, const char *host, const char *port,
         kl_timer_cancel(&t->ev, t->deadline_timer);
         t->deadline_timer = -1;
     }
-    if (t->ev_ready) {
-        kl_event_ctx_free(&t->ev);
-        t->ev_ready = 0;
+    kl_event_ctx_free(&t->ev);
+    t->ev_ready = 0;
+    return t;
+}
+
+PgTransport *hl_pg_transport_adopt(int fd, const KlSocketProvider *sp_or_NULL,
+                                   char *errbuf, size_t errlen)
+{
+    if (fd < 0) {
+        set_err(errbuf, errlen, "invalid descriptor");
+        return NULL;
     }
-    return 0;
-}
-
-int hl_pg_transport_adopt(PgTransport *t, int fd,
-                          const KlSocketProvider *sp_or_NULL)
-{
-    if (!t || fd < 0)
-        return -1;
-    transport_zero(t);
-    t->sp = sp_or_NULL ? sp_or_NULL : default_provider();
+    const KlSocketProvider *sp = sp_or_NULL ? sp_or_NULL : default_provider();
+    if (validate_provider(sp) != 0) {
+        set_err(errbuf, errlen, "socket provider missing a required op or KL_SOCK_CAP_NATIVE_FD");
+        return NULL;
+    }
+    PgTransport *t = transport_new(sp);
+    if (!t) { set_err(errbuf, errlen, "out of memory"); return NULL; }
     t->fd = (KlSocketHandle)fd;
-    /* SIGPIPE suppression parity: adopt() takes a connected blocking fd and every
-     * subsequent write goes through hl_pg_transport_send (nosignal flag) plus
-     * this per-fd SO_NOSIGPIPE where the platform offers it. No event ctx, no
-     * resolution, no racing (design Amendment 2). */
+    /* SIGPIPE suppression parity: every subsequent write goes through
+     * hl_pg_transport_send (nosignal flag) plus this per-fd SO_NOSIGPIPE where the
+     * platform offers it. No event ctx, no resolution, no racing (Amendment 2). */
     sp_set_nosigpipe(t, t->fd);
-    return 0;
+    return t;
 }
 
-void hl_pg_transport_attach_tls(PgTransport *t, struct HlTlsClient *tls)
+int hl_pg_transport_attach_tls(PgTransport *t, struct HlTlsClient *tls)
 {
-    if (!t)
-        return;
+    if (!t || !tls)                    return -1;  /* one-shot + non-NULL required */
+    if (!kl_handle_valid(t->fd))       return -1;  /* require a live descriptor    */
+    if (t->tls)                        return -1;  /* reject a second attachment   */
     t->tls = tls;
+    return 0;
 }
 
 ssize_t hl_pg_transport_send(PgTransport *t, const uint8_t *buf, size_t len)
@@ -661,14 +743,12 @@ ssize_t hl_pg_transport_send(PgTransport *t, const uint8_t *buf, size_t len)
         return -1;
     if (t->tls)
         return hl_tls_client_write((int)t->fd, t->tls, buf, len);
-    /* SIGPIPE suppression + EINTR retry: the POSIX provider's send already applies
-     * MSG_NOSIGNAL and retries EINTR internally (socket_posix.c), and we set
-     * SO_NOSIGPIPE on the fd where the platform offers it (sp_set_nosigpipe at
-     * adopt / attempt). The extra EINTR guard here is defense in depth for a
-     * provider whose send does not retry (e.g. the test mock). */
+    /* EINTR retry classified via the provider's io_status (hosted-errno fallback
+     * when absent). SIGPIPE suppression is the fd's SO_NOSIGPIPE + the provider's
+     * internal nosignal send flag. */
     kl_ssize_t n;
     do { n = sp_send(t, t->fd, buf, len); }
-    while (n < 0 && errno == EINTR);
+    while (n < 0 && sp_io_status(t) == KL_IO_INTERRUPTED);
     return (ssize_t)n;
 }
 
@@ -680,7 +760,7 @@ ssize_t hl_pg_transport_recv(PgTransport *t, uint8_t *buf, size_t len)
         return hl_tls_client_read((int)t->fd, t->tls, buf, len);
     kl_ssize_t n;
     do { n = sp_recv(t, t->fd, buf, len); }
-    while (n < 0 && errno == EINTR);
+    while (n < 0 && sp_io_status(t) == KL_IO_INTERRUPTED);
     return (ssize_t)n;
 }
 
@@ -703,14 +783,14 @@ int hl_pg_transport_fd(const PgTransport *t)
     return (int)t->fd;
 }
 
-void hl_pg_transport_close(PgTransport *t)
+int hl_pg_transport_close(PgTransport *t)
 {
-    if (!t || t->closed)
-        return;
-    t->closed = 1;
+    if (!t)
+        return 0;
 
     /* One close path: TLS shutdown, then TLS free, then provider close (design
-     * Amendment 1). */
+     * Amendment 1). TLS teardown is idempotent (t->tls cleared), so a retry after
+     * a preserved non-detachment does not repeat it. */
     if (t->tls) {
         if (kl_handle_valid(t->fd))
             hl_tls_client_shutdown((int)t->fd, t->tls);
@@ -718,18 +798,23 @@ void hl_pg_transport_close(PgTransport *t)
         t->tls = NULL;
     }
 
-    /* A raced connection that never freed its event ctx (an error path returned
-     * before detachment, or a caller closes without a successful connect): drive
-     * the op to detachment and retire storage. On the common paths (successful
-     * connect freed the ev ctx, or an adopted fd never had one) this is a plain
-     * fd close. */
+    /* A raced connection whose event ctx is still live (a caller closing without a
+     * successful connect, or retrying after a preserved non-detachment): drive the
+     * op to detachment. On non-detachment PRESERVE the whole allocation (do not
+     * free) and report -1 so the owner can retry or intentionally leak. */
     if (t->connect_started && t->ev_ready) {
-        connect_teardown(t);   /* cancels + detaches + closes fd + frees ev ctx */
-        return;
+        if (connect_teardown(t) != 0)
+            return -1;   /* preserved: caller retries hl_pg_transport_close or leaks */
+        free(t);
+        return 0;
     }
 
+    /* Common paths: a successful connect already freed the ev ctx, or an adopted
+     * fd never had one. Plain provider close of the descriptor, then free. */
     if (kl_handle_valid(t->fd)) {
         sp_close(t, t->fd);
         t->fd = KL_INVALID_SOCKET;
     }
+    free(t);
+    return 0;
 }

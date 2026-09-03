@@ -4,14 +4,23 @@
  *
  * Hull-local adapter that composes Keel's public transport surface -
  * KlConnectOp (resolve + Happy-Eyeballs racing connect), a private KlEventCtx to
- * drive it, and the POSIX socket provider's raw ops - into the blocking byte
- * transport the synchronous PostgreSQL client (cap/pg_conn.c) drives.
+ * drive it, and a KlSocketProvider's raw ops - into the blocking byte transport
+ * the synchronous PostgreSQL client (cap/pg_conn.c) drives.
  *
  * Ownership split (docs/pg_keel_transport_slice3.md): pg_conn.c owns the wire
  * protocol (framing, SCRAM auth, the $n rewrite, typed decode, migrations, the
  * SSLRequest / sslmode negotiation, and the stable error tokens). This transport
  * owns only the bytes: name resolution, the connection race, blocking
  * reads/writes, an optional attached TLS session, and close.
+ *
+ * Heap-allocated + opaque (Amendment 1, refined at Checkpoint 2 review): the
+ * transport is a HEAP allocation reached through an opaque handle. pg_conn.c holds
+ * a PgTransport* in HlPgConn, never an embedded value. This is what lets the
+ * exceptional non-detachment path (a connect op that will not confirm detachment)
+ * leak the WHOLE allocation intentionally and safely - a live op keeps
+ * referencing its own storage, so the storage must never be freed under it, and
+ * only a separately-owned heap block can be dropped whole. Mirrors the SMTP
+ * transport.
  *
  * Scheduling model (design D1): KlConnectOp is asynchronous, so the transport
  * owns a PRIVATE, operation-local KlEventCtx used ONLY during connect
@@ -46,64 +55,18 @@
 #include <stdint.h>
 #include <sys/types.h>   /* ssize_t */
 
-#include <keel/connect_op.h>          /* KL_CONNECT_MAX_ADDRS, KlConnectResult */
-#include <keel/connect_op_detail.h>   /* opt-in layout: embed a KlConnectOp (storage only) */
-#include <keel/event_ctx.h>           /* KlEventCtx (embedded, connect-time only) */
-#include <keel/sockaddr.h>            /* KlSockAddr */
-#include <keel/socket.h>              /* KlSocketProvider, KlSocketHandle */
-#include <keel/allocator.h>           /* KlAllocator (event-ctx lifetime) */
+struct KlSocketProvider;  /* keel/socket.h; the borrowed provider (opaque here) */
+struct HlTlsClient;       /* shared/tls_client.h; the optional attached TLS session */
 
-struct HlTlsClient;   /* shared/tls_client.h; the optional attached TLS session */
-
-/* One connection's byte transport. Standalone storage: the future pg_conn.c
- * embeds or owns one of these. Fields are documented as owned vs borrowed in the
- * header banner above; the struct is exposed (not opaque) so pg_conn.c can embed
- * it by value in HlPgConn, exactly as the design's Amendment 1 anticipates. */
-typedef struct PgTransport {
-    /* Borrowed, immutable, outlives the connection (Amendment 4). */
-    const KlSocketProvider *sp;
-
-    /* Owned: the private connect-time event context. Created only when a race is
-     * needed (hl_pg_transport_connect); the adopt path leaves it uninitialized. */
-    KlEventCtx  ev;
-    int         ev_ready;      /* 1 once kl_event_ctx_init succeeded            */
-    KlAllocator alloc;         /* event-ctx allocator (event-loop lifetime)     */
-
-    /* Owned: the embedded KlConnectOp and its resolved address set. */
-    KlConnectOp connect_op;       /* embedded (connect_op_detail.h: storage only) */
-    int         connect_started;  /* 1 once kl_connect_op_start succeeded        */
-    KlSockAddr  addrs[KL_CONNECT_MAX_ADDRS];
-    int         naddrs;
-    KlSocketHandle attempt_fd[KL_CONNECT_MAX_ADDRS]; /* in-flight racing fds     */
-    int         attempt_armed[KL_CONNECT_MAX_ADDRS]; /* 1 if a watcher is armed  */
-
-    /* Connect outcome. */
-    int             connect_done;      /* on_done fired                          */
-    int             connect_detached;  /* on_detach fired                        */
-    KlConnectResult connect_result;
-    int             connect_error;
-
-    /* Overall connect deadline (TCP establishment only, design D3). */
-    int64_t   deadline_timer;   /* Keel timer id, or -1                          */
-    uint64_t  deadline_ms;      /* absolute monotonic instant, or 0 = unbounded  */
-    int       deadline_fired;
-
-    /* RFC 8305 Connection Attempt Delay timer (the Happy-Eyeballs stagger). */
-    int64_t   delay_timer;      /* Keel timer id, or -1                          */
-
-    /* The winning connected descriptor (blocking after connect). */
-    KlSocketHandle fd;
-
-    /* Owned: optional attached TLS session. When non-NULL, send/recv tunnel
-     * through it (design D2); the transport frees it in close. */
-    struct HlTlsClient *tls;
-
-    int closed;   /* 1 once hl_pg_transport_close has run (idempotency guard)    */
-} PgTransport;
+/* Opaque, heap-allocated. pg_conn.c stores a PgTransport* and reaches every field
+ * through the API below. The concrete struct is defined in pg_transport.c so the
+ * exceptional non-detachment path can drop the whole heap block (see the banner).
+ * The direct-include unit test sees the full definition for white-box checks. */
+typedef struct PgTransport PgTransport;
 
 /**
  * Resolve @p host / @p port, race the addresses through KlConnectOp on a private
- * event loop, and leave @p t holding the winning blocking descriptor.
+ * event loop, and return a transport holding the winning blocking descriptor.
  *
  * An IP-literal @p host is parsed directly via kl_sockaddr_parse (no DNS,
  * matching the IP-literal-only databases.dynamic CIDR gate); a hostname is
@@ -112,21 +75,27 @@ typedef struct PgTransport {
  *
  * @p timeout_ms > 0 bounds TCP establishment only (design D3): one absolute
  * connect deadline is armed after resolution, and the Happy-Eyeballs stagger does
- * not refresh it. @p timeout_ms <= 0 arms no deadline (unbounded connect,
- * preserving pg_connect's prior behavior).
+ * not refresh it. @p timeout_ms <= 0 is TRULY UNBOUNDED (no total deadline, no
+ * hidden ceiling): the loop pumps in bounded event-loop increments until the op
+ * completes, preserving pg_connect's prior select(..., NULL) contract.
  *
  * @p sp_or_NULL, when non-NULL, is a caller-supplied provider (the test seam);
  * NULL selects the default POSIX provider. The reference is borrowed and must
- * outlive @p t.
+ * outlive the returned transport. The provider MUST supply the required op subset
+ * (socket/connect/close/send/recv/get_so_error/set_nonblocking/set_blocking) and
+ * advertise KL_SOCK_CAP_NATIVE_FD (the private event loop watches its handles);
+ * otherwise this fails closed.
  *
- * On failure the transport cancels the op and pumps to confirmed detachment
- * before releasing embedded storage. Returns 0 on success (with @p t ready for
- * send/recv), or -1 with a message written to @p errbuf (which may be NULL),
- * mirroring pg_conn.c's set_err style. On failure @p t holds no live descriptor.
+ * Returns a non-NULL transport on success (ready for send/recv). On failure
+ * returns NULL and writes a message to @p errbuf (which may be NULL), mirroring
+ * pg_conn.c's set_err style; the allocation is either freed (op detached) or, if
+ * a live op will not confirm detachment, intentionally leaked (never freed under a
+ * live op).
  */
-int hl_pg_transport_connect(PgTransport *t, const char *host, const char *port,
-                            int timeout_ms, const KlSocketProvider *sp_or_NULL,
-                            char *errbuf, size_t errlen);
+PgTransport *hl_pg_transport_connect(const char *host, const char *port,
+                                     int timeout_ms,
+                                     const struct KlSocketProvider *sp_or_NULL,
+                                     char *errbuf, size_t errlen);
 
 /**
  * Adopt an already-connected, blocking descriptor @p fd (design Amendment 2).
@@ -135,19 +104,25 @@ int hl_pg_transport_connect(PgTransport *t, const char *host, const char *port,
  * default POSIX provider when NULL), and skips resolution, connection racing, and
  * event-context creation. Subsequent send/recv/close use the same path as a raced
  * connection. This backs the existing hl_pg_conn_start(conn, fd, dsn) test API.
+ * The provider is validated (required ops + KL_SOCK_CAP_NATIVE_FD) as in connect.
  *
- * Returns 0 on success, -1 on a bad argument.
+ * Returns a non-NULL transport on success, NULL on a bad argument / invalid
+ * provider (writing @p errbuf when provided). On NULL the caller still owns @p fd.
  */
-int hl_pg_transport_adopt(PgTransport *t, int fd,
-                          const KlSocketProvider *sp_or_NULL);
+PgTransport *hl_pg_transport_adopt(int fd,
+                                   const struct KlSocketProvider *sp_or_NULL,
+                                   char *errbuf, size_t errlen);
 
 /**
- * Attach an optional TLS session to route subsequent send/recv through (design
- * D2). @p tls is created and handshaked by the caller (pg_conn.c) over the
- * transport's blocking descriptor. Ownership transfers to the transport, which
- * frees it in hl_pg_transport_close. Passing NULL detaches (rarely used).
+ * Attach a TLS session to route subsequent send/recv through (design D2). ONE-SHOT
+ * and fallible: requires a live descriptor and a non-NULL @p tls, and rejects a
+ * second attachment (so an owned session is never silently dropped). @p tls is
+ * created and handshaked by the caller (pg_conn.c) over the transport's blocking
+ * descriptor; on success ownership transfers to the transport, which frees it in
+ * hl_pg_transport_close. Returns 0 on success, -1 on rejection (no descriptor,
+ * NULL session, or already attached) - on -1 the caller still owns @p tls.
  */
-void hl_pg_transport_attach_tls(PgTransport *t, struct HlTlsClient *tls);
+int hl_pg_transport_attach_tls(PgTransport *t, struct HlTlsClient *tls);
 
 /**
  * One blocking send / recv over the transport, EINTR-retried and TLS-aware.
@@ -155,9 +130,11 @@ void hl_pg_transport_attach_tls(PgTransport *t, struct HlTlsClient *tls);
  * When a TLS session is attached the bytes tunnel through hl_tls_client_write /
  * _read; otherwise the provider send / recv is used with SIGPIPE suppression
  * (set_nosigpipe on the fd plus the nosignal send flag where the platform has
- * one). These are SINGLE operations: the provider (or TLS) may return short, so
- * callers that need every byte use hl_pg_transport_send_all. Returns the byte
- * count (> 0), 0 on orderly close, or -1 on error.
+ * one). Interrupted-retry classification uses the provider's io_status when it
+ * supplies one, falling back to hosted errno only when absent. These are SINGLE
+ * operations: the provider (or TLS) may return short, so callers that need every
+ * byte use hl_pg_transport_send_all. Returns the byte count (> 0), 0 on orderly
+ * close, or -1 on error.
  */
 ssize_t hl_pg_transport_send(PgTransport *t, const uint8_t *buf, size_t len);
 ssize_t hl_pg_transport_recv(PgTransport *t, uint8_t *buf, size_t len);
@@ -177,12 +154,19 @@ int hl_pg_transport_send_all(PgTransport *t, const uint8_t *buf, size_t len);
 int hl_pg_transport_fd(const PgTransport *t);
 
 /**
- * Close the transport exactly once: TLS shutdown (if attached), TLS free, then
- * provider close of the winning descriptor. Idempotent and NULL-safe. Does NOT
- * free @p t itself (the storage is caller-owned / embedded); it only retires the
- * descriptor and TLS session. On a still-live (never-detached) connect op it
- * cancels and pumps to confirmed detachment before retiring storage.
+ * Close and free the transport. One close path: TLS shutdown (if attached), TLS
+ * free, then provider close of the winning descriptor. Drives a still-live raced
+ * connect op to confirmed detachment first (frozen rule 4).
+ *
+ * Returns 0 on full success: the descriptor is retired and the heap allocation is
+ * FREED - the caller MUST drop its pointer and never reuse it.
+ *
+ * Returns -1 iff a live connect op would NOT confirm detachment within the
+ * teardown bound. In that case the ENTIRE allocation is PRESERVED (not freed, not
+ * marked closed): the caller may retry hl_pg_transport_close later, or drop its
+ * pointer to intentionally leak the block safely. Freeing storage a live op still
+ * references is never done. NULL-safe (returns 0).
  */
-void hl_pg_transport_close(PgTransport *t);
+int hl_pg_transport_close(PgTransport *t);
 
 #endif /* HL_CAP_PG_TRANSPORT_H */
