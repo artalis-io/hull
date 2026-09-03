@@ -708,36 +708,43 @@ end)'
 echo "=== LISTEN reconnect after a dropped connection ==="
 check_reconnect "lua" "lua" "$LUA_RC_WORKER"
 
-# ── sslmode matrix: no plaintext downgrade ────────────────────────────────
-# The container has no SSL yet, so it answers the SSLRequest with 'N'.
-# sslmode=require MUST hard-fail rather than silently downgrade to plaintext.
-# The connection is lazy, so `/` (db-free) serves for readiness and `/db`
-# triggers the connect attempt.
+# ── sslmode matrix: a connection that MUST be refused ─────────────────────
+# The default -d connection opens EAGERLY at app-context init, so a DSN that must
+# not connect makes `hull` exit at startup rather than serve. That startup failure
+# IS the proof the connection was refused: a silent success (e.g. a plaintext
+# downgrade, or verify-full accepting a bad cert) would instead leave the server
+# running. Assert the process exits and the log shows the connection failure.
+# $1 = label, $2 = DSN.
+assert_connect_refused() {
+    _lbl=$1; _dsn=$2
+    _d=$(mktemp -d)
+    printf 'app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })\nrequire("hull.db").default()\napp.get("/", function(req, res) res:json({ up = true }) end)\n' > "$_d/app.lua"
+    ./build/hull -d "$_dsn" -p "$PORT" "$_d/app.lua" >"$_d/serve.log" 2>&1 &
+    _pid=$!
+    _exited=0
+    for _ in $(seq 1 20); do
+        if ! kill -0 "$_pid" 2>/dev/null; then _exited=1; break; fi
+        sleep 0.5
+    done
+    if [ "$_exited" = 0 ]; then
+        kill "$_pid" 2>/dev/null || true; wait "$_pid" 2>/dev/null || true
+        echo "::error $_lbl: connection unexpectedly succeeded (server stayed up)"
+        cat "$_d/serve.log" 2>/dev/null || true; rm -rf "$_d"; exit 1
+    fi
+    wait "$_pid" 2>/dev/null || true
+    echo "--- $_lbl serve.log ---"; cat "$_d/serve.log" 2>/dev/null || true
+    if grep -qi 'failed to open database' "$_d/serve.log"; then
+        echo "PASS: $_lbl (connection refused, no silent success)"; rm -rf "$_d"
+    else
+        echo "::error $_lbl: expected a connection-failure log"; rm -rf "$_d"; exit 1
+    fi
+}
+
+# No plaintext downgrade: the container has no SSL yet, so it answers the
+# SSLRequest with 'N'; sslmode=require MUST hard-fail, not downgrade to plaintext.
 echo "=== sslmode=require against a non-TLS server must fail (no downgrade) ==="
-APPDIR_ND=$(mktemp -d)
-cat > "$APPDIR_ND/app.lua" <<'LUA'
-app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })
-local db = require("hull.db").default()
-app.get("/", function(req, res) res:json({ ready = true }) end)
-app.get("/db", function(req, res)
-    local ok, r = pcall(function() return db.query("SELECT 1") end)
-    if ok and r then res:json({ connected = true })
-    else res:json({ error = tostring(r) }) end
-end)
-LUA
-./build/hull -d "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=require" \
-    -p "$PORT" "$APPDIR_ND/app.lua" >"$APPDIR_ND/serve.log" 2>&1 &
-SVR=$!
-wait_for_server "$APPDIR_ND/serve.log" || { echo "::error no-downgrade server did not start"; exit 1; }
-RESP_ND=$(curl -sS "http://127.0.0.1:${PORT}/db" 2>/dev/null || true)
-kill "$SVR" 2>/dev/null || true; SVR=
-echo "response: $RESP_ND"
-if echo "$RESP_ND" | grep -qi '"connected":true'; then
-    echo "::error sslmode=require silently downgraded to plaintext"; exit 1
-fi
-echo "$RESP_ND" | grep -qi 'error' || { echo "::error expected a require-vs-nonTLS failure: $RESP_ND"; exit 1; }
-echo "PASS: sslmode=require refuses a non-TLS server (no plaintext downgrade)"
-rm -rf "$APPDIR_ND"
+assert_connect_refused "no-downgrade (require vs non-TLS)" \
+    "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=require"
 
 # ── TLS phase ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
@@ -809,27 +816,5 @@ fi
 # verification logic itself is covered by the shared tls_client live-peer unit
 # suite.)
 echo "=== sslmode=verify-full rejects the untrusted self-signed cert ==="
-APPDIR_VF=$(mktemp -d)
-cat > "$APPDIR_VF/app.lua" <<'LUA'
-app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })
-local db = require("hull.db").default()
-app.get("/", function(req, res) res:json({ ready = true }) end)
-app.get("/db", function(req, res)
-    local ok, r = pcall(function() return db.query("SELECT 1") end)
-    if ok and r then res:json({ connected = true })
-    else res:json({ error = tostring(r) }) end
-end)
-LUA
-./build/hull -d "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=verify-full" \
-    -p "$PORT" "$APPDIR_VF/app.lua" >"$APPDIR_VF/serve.log" 2>&1 &
-SVR=$!
-wait_for_server "$APPDIR_VF/serve.log" || { echo "::error verify-full server did not start"; exit 1; }
-RESP_VF=$(curl -sS "http://127.0.0.1:${PORT}/db" 2>/dev/null || true)
-kill "$SVR" 2>/dev/null || true; SVR=
-echo "response: $RESP_VF"
-if echo "$RESP_VF" | grep -qi '"connected":true'; then
-    echo "::error verify-full accepted an untrusted self-signed cert"; exit 1
-fi
-echo "$RESP_VF" | grep -qi 'error' || { echo "::error expected a verify-full chain rejection: $RESP_VF"; exit 1; }
-echo "PASS: sslmode=verify-full rejects the untrusted self-signed cert (chain verification)"
-rm -rf "$APPDIR_VF"
+assert_connect_refused "verify-full (untrusted self-signed cert)" \
+    "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=verify-full"
