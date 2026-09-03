@@ -78,12 +78,20 @@ make HL_ENABLE_MYSQL=1 >/dev/null
 
 echo "=== starting mysql (native_password default for the plaintext phase) ==="
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+# --default-authentication-plugin is a MySQL-8-only mysqld option; MariaDB rejects
+# unknown options and exits, and it already defaults to mysql_native_password, so
+# omit the flag there. MariaDB images accept the MYSQL_* env vars as aliases.
+IMG="${MYSQL_IMAGE:-mysql:8.0}"
+SERVER_ARGS="--default-authentication-plugin=mysql_native_password"
+case "$IMG" in
+    mariadb*) SERVER_ARGS="" ;;
+esac
 docker run -d --name "$CONTAINER" \
     -e MYSQL_ROOT_PASSWORD=rootpw \
     -e MYSQL_DATABASE=hulldb \
     -e MYSQL_USER=hull -e MYSQL_PASSWORD=s3cretpw \
-    -p "${MYPORT}:3306" "${MYSQL_IMAGE:-mysql:8.0}" \
-    --default-authentication-plugin=mysql_native_password >/dev/null
+    -p "${MYPORT}:3306" "$IMG" \
+    $SERVER_ARGS >/dev/null
 
 echo "=== waiting for mysql ==="
 # The mysql:8 entrypoint runs init against a temporary socket-only server, then
