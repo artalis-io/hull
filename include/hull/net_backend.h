@@ -218,6 +218,14 @@ typedef struct HlNetBackend {
      * as KlAsyncOp*. Lifetime + memory ownership stays with the caller. */
     int    (*op_suspend) (HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *op);
     void   (*op_complete)(HlNetBackendCtx *ctx, HlSuspendOp *op);
+
+    /* Cancel a suspended op WITHOUT resuming: fire its on_cancel, retire it from
+     * the backend's active list, do NOT re-arm the fd or drive the state machine.
+     * Idempotent (a no-op on an already-retired op). The abnormal-termination
+     * terminal, used by a caller tearing down an in-flight op at shutdown (the
+     * SMTP sweep) so it never relies on the backend's own free-time cancel loop,
+     * which would run after the runtime is gone. */
+    void   (*op_cancel)  (HlNetBackendCtx *ctx, HlSuspendOp *op);
 } HlNetBackend;
 
 /* ── Convenience wrappers ─────────────────────────────────────────────
@@ -227,6 +235,7 @@ typedef struct HlNetBackend {
  */
 int  hl_net_op_suspend(HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *op);
 void hl_net_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op);
+void hl_net_op_cancel(HlNetBackendCtx *ctx, HlSuspendOp *op);
 
 /* ── Backend getter ────────────────────────────────────────────────── */
 

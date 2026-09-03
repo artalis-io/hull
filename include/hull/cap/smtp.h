@@ -60,6 +60,51 @@ typedef struct {
 int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
                      const char **err_msg);
 
+/* ── Execute-phase ───────────────────────────────────────────────── */
+
+/**
+ * Terminal result of the SMTP execute-phase. Carries only a stable outcome
+ * (a static string literal token, safe to cross a worker -> event-loop
+ * boundary) so the execute-phase can run on a worker thread without touching
+ * audit writers or runtime objects.
+ */
+typedef struct HlSmtpResult {
+    int         rc;               /* 0 = success, -1 = failure */
+    const char *token;            /* stable error token, or NULL on success */
+    int         teardown_leaked;  /* 1 if transport teardown could not confirm
+                                     detachment (resources intentionally leaked) */
+    int         deadline_expired; /* 1 if the FROZEN post-resolution operation
+                                     deadline (Dop, section 8) fired; the public
+                                     token stays connect_failed, the audit adds
+                                     terminal:post_resolution_deadline */
+} HlSmtpResult;
+
+/**
+ * Run the SMTP conversation (connect -> optional TLS -> greeting/EHLO/AUTH ->
+ * MAIL/RCPT/DATA -> QUIT -> confirmed teardown) to a terminal state against
+ * @p msg, using the opaque @p tls_cfg (KlTlsConfig*). Emits no audit and
+ * touches no runtime objects. Fills *out and returns out->rc.
+ *
+ * This is the phase hl_cap_smtp_send runs inline (sync / no-loop path) and the
+ * SMTP worker will run on a pool thread (model 2, docs/smtp_keel_slice2c_plan.md).
+ */
+int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
+                    int (*cancel_poll)(void *), void *cancel_user,
+                    HlSmtpResult *out);
+
+/* ── Audit helpers (single record; shared sync + model-2 async) ──────── */
+
+/** Emit the "denied" audit record for a host-allowlist rejection (submit side). */
+void hl_smtp_audit_denied(const HlSmtpMessage *msg);
+
+/**
+ * Emit the single completion audit record. @p schedule (a scheduling-failure tag)
+ * and @p terminal (a cancel/deadline tag) are written only when non-NULL;
+ * r->teardown_leaked adds teardown:leaked. Audited exactly once per send.
+ */
+void hl_smtp_audit_complete(const HlSmtpMessage *msg, const HlSmtpResult *r,
+                            const char *schedule, const char *terminal);
+
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
 
 /** Base64-encode src into dst. Returns output length or -1 on error. */

@@ -75,6 +75,46 @@ The manifest declares an allowlist of SMTP hosts: `localhost`, `127.0.0.1`, and 
 
 Required fields: `to`, `subject`, `body`. Everything else is optional.
 
+## `smtp.send` semantics
+
+`smtp.send(msg)` is Hull's outbound SMTP binding (module `hull/smtp`). Under a
+running server it uses the model-2 async path: the SMTP conversation runs on a
+worker thread while the request suspends, so a slow mail server never blocks the
+event loop.
+
+- **Lua** yields transparently - write it like a normal call and use the returned
+  table:
+
+  ```lua
+  local r = smtp.send(msg)          -- coroutine yields until delivery completes
+  if not r.ok then log.error(r.error) end
+  ```
+
+- **JavaScript** returns a `Promise` you must `await`:
+
+  ```js
+  const r = await smtp.send(msg);   // Promise<{ ok, error }>
+  if (!r.ok) log.error(r.error);
+  ```
+
+- **SMTP failures resolve, they do not reject.** Both runtimes return
+  `{ ok: false, error: "<token>" }` for any delivery failure (bad greeting, auth
+  failure, TLS failure, timeout). The JS Promise rejects only on a programming
+  error (a wrong argument type), never on an SMTP failure - so `if (!r.ok)` is the
+  correct failure check, not `try/catch`.
+- **Admission back-pressure surfaces as `connect_failed`.** Concurrent SMTP jobs
+  are capped so a burst of slow sends cannot starve the worker pool; a send that is
+  turned away resolves immediately (without touching the loop) with
+  `{ ok: false, error: "connect_failed" }`.
+- **TLS is fail-closed.** STARTTLS and implicit TLS verify the certificate chain and
+  hostname against the embedded Mozilla CA bundle; a verification or handshake
+  failure aborts the send (`{ ok: false, error: "tls_handshake_failed" }`) and never
+  falls back to sending in plaintext.
+
+The `hull/email` stdlib module wraps `smtp.send` (and the HTTPS providers) behind
+one `email.send(opts)` call with a throw-on-failure convention; use it when you want
+provider-agnostic delivery, or call `smtp.send` directly as this example does.
+
 ## Production Build
 
 ```bash

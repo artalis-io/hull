@@ -17,8 +17,23 @@
 # here (before PLATFORM_OBJS) so the native app base can filter them out - they
 # move into libhull_feature-http.a (issue #114) and are composed back at
 # `hull build`. The feature-http archive target below reuses this list.
+#
+# The model-2 async SMTP machinery (transport, worker, admission, submit, in-flight
+# registry, op, TLS) is part of the SAME SMTP/HTTP-client feature as cap_smtp.o and
+# MUST share its composition gate: cap_smtp_async.o references hl_smtp_audit_complete
+# (in cap_smtp.o), and serve.o (keel feature) references hl_smtp_server_ctx_init (in
+# cap_smtp_async.o). If any of these stayed base-resident they would be whole-archived
+# into a NON-SMTP composed app whose base then dangles hl_smtp_audit_complete (the
+# audit writer lives only in the http feature). Keeping the whole coherent set here
+# means a non-SMTP app links NONE of them (zero SMTP symbols) and an SMTP app composes
+# ALL of them together (audit writer included). Covered by tests/e2e_smtp_link_seam.sh.
+FEATURE_SMTP_OBJS := $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_smtp_transport.o \
+                     $(BUILDDIR)/cap_smtp_worker.o $(BUILDDIR)/cap_smtp_admit.o \
+                     $(BUILDDIR)/cap_smtp_submit.o $(BUILDDIR)/cap_smtp_inflight.o \
+                     $(BUILDDIR)/cap_smtp_op.o $(BUILDDIR)/cap_smtp_tls.o \
+                     $(BUILDDIR)/cap_smtp_async.o
 FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
-                     $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_body.o
+                     $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_body.o $(FEATURE_SMTP_OBJS)
 
 # libhull_feature-http.a: the runtime-agnostic HTTP CORE as a composable feature
 # archive (issue #114). Bundles the HTTP capability objects - client

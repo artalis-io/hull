@@ -83,20 +83,44 @@ static const KlSocketProvider *socket_provider(void)
     return g_sp;
 }
 
+#ifdef HL_SMTP_TEST_HOOKS
+/* Test-only fault-injection provider (compiled ONLY under -DHL_SMTP_TEST_HOOKS,
+ * absent from the production object). When non-NULL it REPLACES the POSIX provider
+ * for every sp_* op, so a test can drive connect attempts to pending / succeed /
+ * fail per address and observe attempt order + timestamps. It is a COHERENT socket
+ * seam: it hands the connect op real fds the event loop can watch, so the Happy-
+ * Eyeballs stagger timer and the Dop connect-deadline timer fire on the same real
+ * clock as production (never a divergent virtual clock). */
+const KlSocketProvider *smtp_test_socket_provider;
+
+/* Force the non-detaching teardown branch: hl_smtp_transport_free returns -1 (the
+ * op/stream would-not-detach path) so the caller records teardown:leaked. Leaks
+ * the transport storage intentionally - drive ONLY in an isolated subprocess. */
+int smtp_test_force_teardown_leak;
+#endif
+
+static const KlSocketProvider *active_sp(void)
+{
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_socket_provider) return smtp_test_socket_provider;
+#endif
+    return g_sp;
+}
+
 static KlSocketHandle sp_socket(int domain, int type, int protocol)
-{ return g_sp->ops->socket(g_sp->context, domain, type, protocol); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->socket(sp->context, domain, type, protocol); }
 static int sp_set_nonblocking(KlSocketHandle fd)
-{ return g_sp->ops->set_nonblocking(g_sp->context, fd); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->set_nonblocking(sp->context, fd); }
 static int sp_connect(KlSocketHandle fd, const KlSockAddr *a)
-{ return g_sp->ops->connect(g_sp->context, fd, a); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->connect(sp->context, fd, a); }
 static int sp_get_so_error(KlSocketHandle fd, int *out)
-{ return g_sp->ops->get_so_error(g_sp->context, fd, out); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->get_so_error(sp->context, fd, out); }
 static kl_ssize_t sp_send(KlSocketHandle fd, const void *b, size_t n)
-{ return g_sp->ops->send(g_sp->context, fd, b, n); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->send(sp->context, fd, b, n); }
 static kl_ssize_t sp_recv(KlSocketHandle fd, void *b, size_t n)
-{ return g_sp->ops->recv(g_sp->context, fd, b, n); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->recv(sp->context, fd, b, n); }
 static int sp_close(KlSocketHandle fd)
-{ return g_sp->ops->close(g_sp->context, fd); }
+{ const KlSocketProvider *sp = active_sp(); return sp->ops->close(sp->context, fd); }
 
 static int errno_would_block(void) { return errno == EAGAIN || errno == EWOULDBLOCK; }
 
@@ -269,6 +293,15 @@ struct HlSmtpTransport {
     int           ev_ready;      /* 1 once kl_event_ctx_init succeeded */
     KlAllocator   alloc;         /* op-local write-queue allocator (loop lifetime) */
 
+    /* Cancellation predicate, checked by every pump before + after each event-loop
+     * run so a requested cancel (shutdown pass 1, per-request teardown, deadline)
+     * aborts the in-flight conversation into confirmed teardown within one step
+     * (~50 ms) instead of waiting for the stage timeout. Set once, after DNS, by
+     * hl_smtp_transport_connect; NULL on the sync no-loop path. Blocking DNS is the
+     * documented non-interruptible exception (it runs before this is set). */
+    int          (*cancel_poll)(void *user);
+    void          *cancel_user;
+
     KlConnectOp   connect_op;    /* embedded (connect_op_detail.h: storage only) */
     int           connect_started;  /* 1 once kl_connect_op_start succeeded */
     KlStream      stream;        /* embedded (stream_detail.h: storage only) */
@@ -294,6 +327,14 @@ struct HlSmtpTransport {
     int64_t       deadline_timer;
     uint64_t      deadline_ms;
     int           deadline_fired;
+
+    /* FROZEN post-resolution operation deadline (Dop, section 8): an ABSOLUTE
+     * monotonic instant set ONCE right after resolution. Every post-resolution
+     * stage bounds by Dstage = min(Dop, now + stage_budget), so no stage or retry
+     * can extend Dop. dop_expired is set by any pump that finds now >= Dop, so the
+     * caller can tag terminal:post_resolution_deadline (public token unchanged). */
+    uint64_t      dop_ms;
+    int           dop_expired;
 
     /* RFC 8305 Connection Attempt Delay timer (the Happy Eyeballs stagger). */
     int64_t       delay_timer;
@@ -639,8 +680,23 @@ static int co_start_resolve(void *ctx);
 static void co_connect_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data);
 
 /* Resolve host:port into t->addrs via getaddrinfo. Returns naddrs (>=1) or 0. */
+#ifdef HL_SMTP_TEST_HOOKS
+/* Replaces the blocking getaddrinfo (compiled ONLY under -DHL_SMTP_TEST_HOOKS,
+ * absent from the production object). When non-NULL it fills t->addrs[] in EXACT
+ * injected order and returns the count (the addresses are value-copied into the
+ * transport-owned array, so their lifetime is the transport's - no dangling). It
+ * models the blocking-resolve RELEASE POINT: a test may observe/arm cancellation
+ * as it returns, to drive the post-DNS cancel path that must abort before any
+ * socket attempt. */
+int (*smtp_test_resolve)(HlSmtpTransport *t, const char *host, int port);
+#endif
+
 static int resolve_addrs(HlSmtpTransport *t, const char *host, int port)
 {
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_resolve)
+        return smtp_test_resolve(t, host, port);
+#endif
     char port_str[8];
     snprintf(port_str, sizeof port_str, "%d", port);
 
@@ -771,6 +827,12 @@ static void co_on_deadline_fired(void *user_data)
     HlSmtpTransport *t = user_data;
     t->deadline_timer = -1;
     t->deadline_fired = 1;
+    /* The connect-deadline timer is armed with Dop - now (section 8, co_arm_
+     * deadline), so its firing IS a post-resolution deadline expiry. Classify it
+     * here: the connect pump exits via done_connect (connect failed), not the
+     * pump's own deadline branch, so this is where the connect-phase Dop is tagged
+     * (surfaced via out_dop_expired since a failed connect frees the transport). */
+    t->dop_expired = 1;
     kl_connect_op_on_deadline(&t->connect_op, (int)KL_ERR_TIMEOUT);
 }
 
@@ -806,7 +868,11 @@ static void co_cancel_delay(void *ctx)
 static int co_arm_deadline(void *ctx, int *out_err)
 {
     HlSmtpTransport *t = ctx;
-    t->deadline_timer = kl_timer_add(&t->ev, t->deadline_ms, co_on_deadline_fired, t);
+    /* Section 8: the connect-deadline timer receives Dop - now, NEVER a fresh full
+     * timeout, so connect shares the single post-resolution ceiling. */
+    uint64_t now = kl_monotonic_ms();
+    uint64_t delay = t->dop_ms > now ? t->dop_ms - now : 0;
+    t->deadline_timer = kl_timer_add(&t->ev, delay, co_on_deadline_fired, t);
     if (t->deadline_timer < 0) { *out_err = (int)KL_ERR_TIMEOUT; return -1; }
     return 0;
 }
@@ -865,34 +931,85 @@ static const KlConnectOpHooks SMTP_CONNECT_HOOKS = {
  * drift. Each kl_event_ctx_run waits up to step_ms for readiness; the signature
  * is (ctx, max_events, timeout_ms) - max_events 64, timeout step_ms.
  *
- * This bounds ONE stage. The hard TOTAL-operation deadline ceiling (question 1
- * in the design record) is a deferred follow-up; only per-stage monotonic
- * deadlines land here. NOTE: getaddrinfo runs blocking on the calling thread
- * (see resolve_addrs); this per-stage deadline does NOT bound DNS resolution -
- * moving resolution off the calling thread is that same deferred follow-up.
+ * This bounds ONE stage, and each stage's deadline is itself clamped to the
+ * frozen post-resolution operation ceiling Dop (section 8), so no stage or retry
+ * can extend the operation - the total-operation deadline IS implemented (see
+ * pump_check + hl_smtp_transport_connect). NOTE: getaddrinfo runs blocking on the
+ * calling thread (see resolve_addrs); Dop is armed AFTER it returns, so DNS is
+ * outside the ceiling per section 8 (a bounded sandbox-safe resolver is a separate
+ * future item).
  * ────────────────────────────────────────────────────────────────────────── */
 
 typedef int (*DonePred)(HlSmtpTransport *t);
 
-/* Pump until done() or the ABSOLUTE monotonic instant `deadline_ms` passes. */
-static int pump_until_abs(HlSmtpTransport *t, DonePred done, uint64_t deadline_ms)
+#ifdef HL_SMTP_TEST_HOOKS
+/* ── Test-only pump seam (compiled ONLY under -DHL_SMTP_TEST_HOOKS) ────────────
+ * ABSENT from the production object. It lets unit tests drive the connect state
+ * machine deterministically WITHOUT diverging from Keel's clock: every deadline
+ * here still reads the real kl_monotonic_ms() (ONE clock domain), and the hook
+ * only OBSERVES each pump checkpoint and/or ALIGNS two readiness conditions (Dop
+ * expiry + cancellation) onto a single checkpoint. It never advances a private
+ * clock (which would let a pump deadline expire while a Keel connect / Happy-
+ * Eyeballs timer, still on real time, never fires - an impossible runtime state).
+ *
+ * When non-NULL, smtp_test_checkpoint fires at the TOP of every pump_check with
+ * the transport and a monotonically-increasing checkpoint index, BEFORE the frozen
+ * precedence is evaluated - so a test can record attempt/timestamp state or arm a
+ * same-checkpoint deadline-vs-cancel race. */
+void (*smtp_test_checkpoint)(HlSmtpTransport *t, unsigned idx);
+static unsigned smtp_test_checkpoint_seq;
+#endif
+
+/* One classification pass at a pump check point, in the FROZEN precedence
+ * (section 8):
+ *   1. a completed predicate wins (deliver the stage result);
+ *   2. THEN an expired Dop is classified (dop_expired set) - so a Dop-vs-cancel
+ *      race tags terminal:post_resolution_deadline, never terminal:cancelled;
+ *   3. THEN cancellation is honored (prompt abort of an in-flight conversation);
+ *   4. THEN the stage-only budget.
+ * Returns 1 = done (pump success), -1 = terminate, 0 = keep pumping. */
+static int pump_check(HlSmtpTransport *t, DonePred done, uint64_t deadline_ms)
 {
-    const int step_ms = 50;
-    while (!done(t)) {
-        int rc = kl_event_ctx_run(&t->ev, 64, step_ms);
-        if (rc < 0)
-            return -1;
-        if (kl_monotonic_ms() >= deadline_ms && !done(t))
-            return -1;   /* deadline: caller maps to its per-stage token */
-    }
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_checkpoint)
+        smtp_test_checkpoint(t, smtp_test_checkpoint_seq++);
+#endif
+    if (done(t))
+        return 1;
+    uint64_t now = kl_monotonic_ms();
+    if (t->dop_ms && now >= t->dop_ms) { t->dop_expired = 1; return -1; }
+    if (t->cancel_poll && t->cancel_poll(t->cancel_user))
+        return -1;
+    if (now >= deadline_ms)
+        return -1;
     return 0;
 }
 
-/* One stage bounded by a fresh `timeout_ms` budget. */
+/* Pump until done() or a terminate condition (Dop / cancel / stage deadline). The
+ * check runs BEFORE and AFTER each event-loop step, so a condition that arrives
+ * during the step takes effect within one step (~50 ms). */
+static int pump_until_abs(HlSmtpTransport *t, DonePred done, uint64_t deadline_ms)
+{
+    const int step_ms = 50;
+    for (;;) {
+        int c = pump_check(t, done, deadline_ms);
+        if (c) return c > 0 ? 0 : -1;
+        if (kl_event_ctx_run(&t->ev, 64, step_ms) < 0)
+            return -1;
+        c = pump_check(t, done, deadline_ms);
+        if (c) return c > 0 ? 0 : -1;
+    }
+}
+
+/* One stage bounded by Dstage = min(Dop, now + stage_budget) - so no stage or
+ * retry can extend the frozen post-resolution ceiling Dop (section 8). Dop is 0
+ * only on the pre-resolution paths (none pump); a set Dop always wins the min. */
 static int pump_until(HlSmtpTransport *t, DonePred done, int timeout_ms)
 {
     int budget = timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS;
-    return pump_until_abs(t, done, kl_monotonic_ms() + (uint64_t)budget);
+    uint64_t stage = kl_monotonic_ms() + (uint64_t)budget;
+    uint64_t dl = (t->dop_ms && t->dop_ms < stage) ? t->dop_ms : stage;
+    return pump_until_abs(t, done, dl);
 }
 
 /* Predicates. */
@@ -918,10 +1035,16 @@ static int done_connect_detached(HlSmtpTransport *t)
  * ────────────────────────────────────────────────────────────────────────── */
 
 HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
-                                           int timeout_ms, int *out_teardown_leaked)
+                                           int timeout_ms,
+                                           int (*cancel_poll)(void *),
+                                           void *cancel_user,
+                                           int *out_teardown_leaked,
+                                           int *out_dop_expired)
 {
     if (out_teardown_leaked)
         *out_teardown_leaked = 0;
+    if (out_dop_expired)
+        *out_dop_expired = 0;
     if (!host || port < 1 || port > 65535)
         return NULL;
     (void)socket_provider();   /* one-time init of g_sp */
@@ -945,8 +1068,26 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
     }
     t->ev_ready = 1;
 
-    /* Sandbox-compatible blocking system resolve, inline before start. */
+    /* Sandbox-compatible blocking system resolve, inline before start. Blocking
+     * getaddrinfo is the documented non-interruptible exception; cancellation
+     * takes effect from HERE on (the connect pump below is the first to check). */
     t->naddrs = resolve_addrs(t, host, port);
+    t->cancel_poll = cancel_poll;
+    t->cancel_user = cancel_user;
+
+    /* Freeze the post-resolution operation deadline (Dop): one absolute ceiling
+     * for connect + every subsequent stage/retry. Set HERE, after the blocking
+     * (non-interruptible) resolve, so DNS is outside the ceiling per section 8. */
+    t->dop_ms = kl_monotonic_ms() + t->deadline_ms;
+
+    /* Cancellation observed during the blocking resolve is honored HERE, before the
+     * connect op is even initialized - so the post-DNS cancel path frees cleanly
+     * without any socket() attempt (section 13). dop_expired is 0 (this is a cancel,
+     * not a deadline); the op never started, so teardown cannot leak. */
+    if (t->cancel_poll && t->cancel_poll(t->cancel_user)) {
+        hl_smtp_transport_free(t);
+        return NULL;
+    }
 
     if (kl_connect_op_init(&t->connect_op, &SMTP_CONNECT_HOOKS, t) != 0) {
         hl_smtp_transport_free(t);
@@ -962,6 +1103,11 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
 
     if (pump_until(t, done_connect, timeout_ms) != 0 ||
         t->connect_result != KL_CONNECT_SUCCESS || !t->stream_up) {
+        /* Capture the connect-phase Dop expiry BEFORE free reclaims the transport,
+         * so a connect that reached Dop still surfaces deadline_expired (else the
+         * NULL return loses t->dop_expired) - mirrors out_teardown_leaked. */
+        if (out_dop_expired && t->dop_expired)
+            *out_dop_expired = 1;
         /* This is the most plausible non-detaching-op site (a connect that never
          * completed). Propagate the teardown outcome so hl_cap_smtp_send can
          * record "teardown":"leaked" in the audit rather than losing it. */
@@ -1062,13 +1208,14 @@ int hl_smtp_transport_write(HlSmtpTransport *t, const void *data, size_t len,
      * queued memory stays bounded (never the whole 10 MiB message). External
      * contract unchanged: 0 iff every byte is sent, -1 on error/timeout.
      *
-     * Round-2 fix: the WHOLE write stage shares ONE absolute deadline. Every
-     * chunk drain + WOULD_BLOCK retry pumps against the SAME `deadline`, so a
-     * slow peer cannot stretch one 10 MiB DATA write across N x timeout_ms
-     * (each pump_until would otherwise mint a fresh budget). The hard
-     * total-OPERATION ceiling across all stages is a deferred follow-up. */
+     * The WHOLE write stage shares ONE absolute deadline. Every chunk drain +
+     * WOULD_BLOCK retry pumps against the SAME `deadline`, so a slow peer cannot
+     * stretch one 10 MiB DATA write across N x timeout_ms. And that deadline is
+     * itself clamped to the frozen post-resolution ceiling Dop (section 8), so the
+     * write stage - like every other stage - can never extend the operation. */
     int budget = timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS;
-    uint64_t deadline = kl_monotonic_ms() + (uint64_t)budget;
+    uint64_t stage = kl_monotonic_ms() + (uint64_t)budget;
+    uint64_t deadline = (t->dop_ms && t->dop_ms < stage) ? t->dop_ms : stage;
 
     const char *p = (const char *)data;
     size_t remaining = len;
@@ -1129,10 +1276,19 @@ int hl_smtp_transport_read_reply(HlSmtpTransport *t, char *buf, int size,
     return -1;   /* EOF / parse error / timeout with no complete reply */
 }
 
+int hl_smtp_transport_dop_expired(const HlSmtpTransport *t)
+{
+    return t ? t->dop_expired : 0;
+}
+
 void hl_smtp_transport_shutdown(HlSmtpTransport *t)
 {
     if (!t || !t->stream_up || t->close_begun)
         return;
+    /* Teardown must run to CONFIRMED detachment (bounded by the grace below), so a
+     * still-pending cancel must NOT short-circuit these pumps - that would skip
+     * detachment and leak the fd/stream on every cancelled shutdown. Disarm it. */
+    t->cancel_poll = NULL;
     t->close_begun = 1;
     kl_stream_close_begin(&t->stream);
     /* Drive to confirmed detachment, but only for a SHORT grace, not the full
@@ -1149,6 +1305,19 @@ int hl_smtp_transport_free(HlSmtpTransport *t)
 {
     if (!t)
         return 0;
+
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_force_teardown_leak)
+        return -1;   /* simulate non-detaching teardown (leaks t; subprocess only) */
+#endif
+
+    /* Abortive teardown must confirm detachment (fail-closed, no UAF), so its
+     * pumps ignore a pending cancel AND the (possibly-exhausted) Dop - clear both
+     * before any of them run, else an expired Dop would clip the confirm and leak
+     * the fd/stream. The graceful close in _shutdown keeps its Dop bound (section
+     * 8); this last-resort teardown does not. */
+    t->cancel_poll = NULL;
+    t->dop_ms = 0;
 
     /* If a stream was brought up but not gracefully closed, cancel it and pump
      * to confirmed detachment so every op/watcher/fd retires exactly once. Apply

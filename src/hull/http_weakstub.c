@@ -30,6 +30,28 @@
 
 #include <stdio.h>
 
+#ifdef HL_ENABLE_HTTP_CLIENT
+/* Weak defaults for serve.o's model-2 async SMTP wiring. The SMTP capability
+ * objects (cap/smtp*.o incl. smtp_async.o + the audit writer) moved into
+ * libhull_feature-http.a so they follow cap/smtp.c's HTTP-client feature gate -
+ * a non-SMTP app links NONE of them. On the default (non-SLIM) base serve.o is
+ * still whole-archived, so it needs these no-op link-satisfiers for its three
+ * hl_smtp_server_* references; an SMTP app composes the http feature, whose strong
+ * cap/smtp_async.o definitions win. This is the SAME base->feature seam as the web-
+ * binding weak stubs below - NOT the audit writer, which stays co-located with its
+ * sole consumer (smtp_async.o) inside the feature, needing no stub. serve.o never
+ * runs in a compute app (app.main goes through serve_cli.o), so these are pure link
+ * satisfiers, never executed. */
+#include "hull/cap/smtp_async.h"
+__attribute__((weak)) void hl_smtp_server_ctx_init(HlSmtpServerCtx *s, int workers,
+        const unsigned char *ca_buf, size_t ca_len, void *alloc)
+{ (void)s; (void)workers; (void)ca_buf; (void)ca_len; (void)alloc; }
+__attribute__((weak)) void hl_smtp_server_request_cancel_all(HlSmtpServerCtx *s)
+{ (void)s; }
+__attribute__((weak)) int hl_smtp_server_sweep(HlSmtpServerCtx *s)
+{ (void)s; return 0; }
+#endif
+
 /* Present in EVERY native base (not gated on HL_ENABLE_HTTP_SERVER): a reduced
  * flavor (client-only / pure-compute) drops the web bindings but a composed
  * runtime still references these symbols, so the base must carry the weak

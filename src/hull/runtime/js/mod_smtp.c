@@ -6,6 +6,10 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/smtp.h"
+#include "hull/cap/smtp_op.h"
+#include "hull/cap/smtp_async.h"
+#include "hull/shared/async.h"
+#include "hull/net_backend.h"
 
 #include <stdio.h>
 
@@ -55,6 +59,50 @@ static void js_free_string_array(JSContext *ctx, const char **strs, int count)
             JS_FreeCString(ctx, strs[i]);
     }
     js_free(ctx, strs);
+}
+
+/* Build the { ok, error? } SMTP result object. */
+static JSValue js_smtp_result_obj(JSContext *ctx, int ok, const char *err)
+{
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "ok", ok ? JS_TRUE : JS_FALSE);
+    if (!ok)
+        JS_SetPropertyStr(ctx, o, "error",
+                          JS_NewString(ctx, err ? err : "smtp send failed"));
+    return o;
+}
+
+/* Wrap @p value in an already-resolved Promise (consumes @p value). Every SMTP
+ * outcome - sync no-loop, immediate scheduling failure, validation failure - is
+ * returned this way so smtp.send ALWAYS returns a Promise resolving to {ok,error}.
+ * Returns JS_EXCEPTION only if the promise capability itself cannot be created. */
+static JSValue js_resolved_promise(JSContext *ctx, JSValue value)
+{
+    JSValue rf[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, rf);
+    if (JS_IsException(promise)) { JS_FreeValue(ctx, value); return JS_EXCEPTION; }
+    JSValue r = JS_Call(ctx, rf[0], JS_UNDEFINED, 1, (JSValueConst *)&value);
+    JS_FreeValue(ctx, r);
+    JS_FreeValue(ctx, value);
+    JS_FreeValue(ctx, rf[0]);
+    JS_FreeValue(ctx, rf[1]);
+    return promise;
+}
+
+static JSValue js_resolved_result(JSContext *ctx, int ok, const char *err)
+{
+    return js_resolved_promise(ctx, js_smtp_result_obj(ctx, ok, err));
+}
+
+/* Async resume push_result: read the published terminal (audit once) and produce
+ * the { ok, error } value the cont resolves the Promise with. driver is the
+ * HlSmtpAsyncOp. No JSValue/JSContext ever crosses to the worker; this runs on the
+ * event-loop thread at resume. */
+static JSValue js_push_smtp_result(JSContext *ctx, void *driver)
+{
+    HlSmtpResult r;
+    hl_smtp_async_finish((HlSmtpAsyncOp *)driver, &r);
+    return js_smtp_result_obj(ctx, r.rc == 0, r.token);
 }
 
 /* smtp.send(opts) */
@@ -128,17 +176,18 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, v_rto);
     JS_FreeValue(ctx, v_cc);
 
-    /* Build result early for validation errors */
+    /* smtp.send ALWAYS returns a Promise for SMTP outcomes (resolving to
+     * {ok,error}); it rejects/throws only for argument/type/binding failures. */
     JSValue result;
 
+    /* Missing required field: an SMTP-outcome-style {ok:false} (parity with Lua),
+     * returned as an already-resolved Promise - NOT a reject. */
     if (!host || !from || !to || !subject || !body) {
-        result = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, result, "ok", JS_FALSE);
         const char *missing = !host ? "host" : !from ? "from" :
                               !to ? "to" : !subject ? "subject" : "body";
         char errbuf[64];
         snprintf(errbuf, sizeof(errbuf), "%s required", missing);
-        JS_SetPropertyStr(ctx, result, "error", JS_NewString(ctx, errbuf));
+        result = js_resolved_result(ctx, 0, errbuf);
         goto cleanup;
     }
 
@@ -159,17 +208,96 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
         .content_type = content_type,
     };
 
-    const char *err_msg = NULL;
-    int rc = hl_cap_smtp_send(js->base.smtp_cfg, &msg, &err_msg);
+    /* No active event loop (app.main CLI / in-process test harness): synchronous
+     * model 1, returned as an already-resolved Promise. The ONLY sync path; we
+     * never fall back to it merely because admission or the pool is unavailable. */
+    if (!js->base.async_ctx || !js->base.smtp_async) {
+        const char *err_msg = NULL;
+        int rc = hl_cap_smtp_send(js->base.smtp_cfg, &msg, &err_msg);
+        result = js_resolved_result(ctx, rc == 0, err_msg);
+        goto cleanup;
+    }
 
-    result = JS_NewObject(ctx);
-    if (rc == 0) {
-        JS_SetPropertyStr(ctx, result, "ok", JS_TRUE);
-    } else {
-        JS_SetPropertyStr(ctx, result, "ok", JS_FALSE);
-        JS_SetPropertyStr(ctx, result, "error",
-                          JS_NewString(ctx, err_msg ? err_msg
-                                                    : "smtp send failed"));
+    /* Active loop: model 2 (regardless of cap). Authorize the host on the submit
+     * side (audited once here) before any reservation or worker submission. */
+    if (hl_smtp_check_host(js->base.smtp_cfg, msg.host) != 0) {
+        hl_smtp_audit_denied(&msg);
+        result = js_resolved_result(ctx, 0, "host_not_allowed");
+        goto cleanup;
+    }
+
+    /* Deep-copy the message into an owned op (crosses to the worker; no JS
+     * value/context ever does). */
+    int to_ms = js->base.smtp_cfg->timeout_ms > 0 ? js->base.smtp_cfg->timeout_ms : 0;
+    HlSmtpOp *op = hl_smtp_op_create(&msg, to_ms);
+    if (!op) { result = js_resolved_result(ctx, 0, "connect_failed"); goto cleanup; }
+
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx,
+                                           js->base.alloc);
+    if (!actx) { hl_smtp_op_free(op);
+                 result = js_resolved_result(ctx, 0, "connect_failed"); goto cleanup; }
+
+    /* One promise, created up front and returned; resolved either by the cont (on
+     * the async resume) or by us (on an immediate scheduling failure). We keep our
+     * OWN references to resolve/reject and hand DUPLICATES to the cont, so exactly
+     * one side resolves and both free their copies exactly once. */
+    JSValue rf[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, rf);
+    if (JS_IsException(promise)) {
+        hl_smtp_op_free(op); hl_async_ctx_free(actx);
+        result = JS_EXCEPTION;   /* binding failure -> reject */
+        goto cleanup;
+    }
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *, JSValue, JSValue,
+        HlAllocator *, JSValue (*)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js, JS_DupValue(ctx, rf[0]),
+                                                JS_DupValue(ctx, rf[1]),
+                                                js->base.alloc, js_push_smtp_result);
+    if (!cont) {
+        JS_FreeValue(ctx, rf[0]); JS_FreeValue(ctx, rf[1]);
+        JS_FreeValue(ctx, promise);
+        hl_smtp_op_free(op); hl_async_ctx_free(actx);
+        result = JS_ThrowInternalError(ctx, "smtp.send: out of memory");
+        goto cleanup;
+    }
+    actx->cont     = cont;
+    actx->detached = (js->active_conn == NULL);
+
+    HlSmtpAsyncReq areq = {
+        .server     = js->base.smtp_async,
+        .pool       = js->base.thread_pool,
+        .net_ctx    = js->base.net_ctx,
+        .actx       = actx,
+        .req_handle = js->active_conn,
+        .detached   = (js->active_conn == NULL),
+        .inputs     = op,
+    };
+    HlSmtpAsyncOutcome aout;
+    hl_smtp_async_submit(&areq, &aout);
+
+    if (aout.disposition == HL_SMTP_ASYNC_SUSPENDED) {
+        JS_FreeValue(ctx, rf[0]); JS_FreeValue(ctx, rf[1]);  /* cont resolves later */
+        result = promise;
+        goto cleanup;
+    }
+
+    /* RESOLVED: the immediate scheduling failure was audited once in the
+     * orchestration, which also tore down the unparked cont (freeing its dup of
+     * rf). hl_js_async_cont_create had registered that cont as js->last_async_cont;
+     * now that it is freed, clear the dangling pointer so the dispatch's
+     * pending-handler path does not attach the outer handler promise to freed
+     * memory (the handler's `await` on our resolved promise completes via the
+     * microtask pump, no cont needed). */
+    js->last_async_cont = NULL;
+
+    /* Resolve the promise ourselves via our own rf copies, then free them. */
+    {
+        JSValue rv = js_smtp_result_obj(ctx, 0,
+            aout.result.token ? aout.result.token : "connect_failed");
+        JSValue rr = JS_Call(ctx, rf[0], JS_UNDEFINED, 1, (JSValueConst *)&rv);
+        JS_FreeValue(ctx, rr); JS_FreeValue(ctx, rv);
+        JS_FreeValue(ctx, rf[0]); JS_FreeValue(ctx, rf[1]);
+        result = promise;
     }
 
 cleanup:

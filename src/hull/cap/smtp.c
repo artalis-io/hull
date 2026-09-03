@@ -379,38 +379,22 @@ cleanup:
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
-                     const char **err_msg)
+/* Execute-phase: runs the SMTP conversation to terminal and reports a stable
+ * outcome in *out, emitting NO audit and touching NO runtime objects, so it is
+ * safe on a worker thread. Authorization + audit + result construction are done
+ * by hl_cap_smtp_send (the completion phase in model 2). */
+int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
+                    int (*cancel_poll)(void *), void *cancel_user,
+                    HlSmtpResult *out)
 {
-    if (!cfg || !msg) {
-        if (err_msg) *err_msg = "invalid_args";
-        return -1;
-    }
-
-    /* Validate message fields */
-    if (smtp_validate_message(msg) != 0) {
-        if (err_msg) *err_msg = "validation_failed";
-        return -1;
-    }
-
-    /* Check host allowlist */
-    if (hl_smtp_check_host(cfg, msg->host) != 0) {
-        log_warn("smtp: host '%s' not in allowlist", msg->host);
-        if (err_msg) *err_msg = "host_not_allowed";
-        ShJsonWriter w = hl_audit_begin("smtp.send");
-        sh_json_write_kv_string(&w, "host", msg->host);
-        sh_json_write_kv_string(&w, "from", msg->from);
-        sh_json_write_kv_string(&w, "to", msg->to);
-        sh_json_write_kv_string(&w, "result", "denied");
-        hl_audit_end(&w);
-        return -1;
-    }
-
-    int timeout_ms = cfg->timeout_ms > 0 ? cfg->timeout_ms
-                                         : HL_SMTP_DEFAULT_TIMEOUT_MS;
-
-    /* TLS config (for STARTTLS or implicit TLS) */
-    void *tls_cfg = cfg->tls;   /* opaque KlTlsConfig *, passed to the helper */
+    out->rc = -1;
+    out->token = NULL;
+    out->teardown_leaked = 0;
+    out->deadline_expired = 0;
+    /* The interior conversation writes its stable token through `err_msg`; alias
+     * it onto out->token so the body below stays byte-identical to the prior
+     * in-place send. */
+    const char **err_msg = &out->token;
 
     /* Declared before the connect + before the `cleanup` label so the
      * connect-failure path can route through the one cleanup + audit block. */
@@ -423,11 +407,14 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     /* Connect to SMTP server (resolve + Happy-Eyeballs connect over the
      * Keel-primitive transport; NULL == resolve / connect / deadline failure).
      * out_teardown_leaked surfaces a connect-path teardown leak into the audit. */
+    int connect_dop = 0;
     HlSmtpTransport *t = hl_smtp_transport_connect(msg->host, msg->port,
-                                                   timeout_ms, &teardown_leaked);
+                                                   timeout_ms, cancel_poll,
+                                                   cancel_user, &teardown_leaked,
+                                                   &connect_dop);
     if (!t) {
         log_warn("smtp: connect to %s:%d failed", msg->host, msg->port);
-        if (err_msg) *err_msg = "connect_failed";
+        *err_msg = "connect_failed";
         goto cleanup;   /* unified cleanup + audit (t is NULL, all NULL-safe) */
     }
 
@@ -435,12 +422,12 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     if (msg->use_tls == 2) {
         if (!tls_cfg) {
             log_warn("smtp: implicit TLS requested but no TLS config");
-            if (err_msg) *err_msg = "tls_config_missing";
+            *err_msg = "tls_config_missing";
             goto cleanup;
         }
         if (hl_smtp_transport_implicit_tls(t, msg->host, tls_cfg, timeout_ms) != 0) {
             log_warn("smtp: implicit TLS handshake failed");
-            if (err_msg) *err_msg = "tls_handshake_failed";
+            *err_msg = "tls_handshake_failed";
             goto cleanup;
         }
     }
@@ -449,7 +436,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     int code = hl_smtp_transport_read_reply(t, resp, (int)sizeof(resp), timeout_ms);
     if (code != 220) {
         log_warn("smtp: expected 220 greeting, got %d", code);
-        if (err_msg) *err_msg = "greeting_failed";
+        *err_msg = "greeting_failed";
         goto cleanup;
     }
 
@@ -457,7 +444,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     snprintf(cmd, sizeof(cmd), "EHLO localhost\r\n");
     code = smtp_command(t, cmd, 250, timeout_ms);
     if (code < 0) {
-        if (err_msg) *err_msg = "ehlo_failed";
+        *err_msg = "ehlo_failed";
         goto cleanup;
     }
 
@@ -465,21 +452,21 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     if (msg->use_tls == 1 && !hl_smtp_transport_tls_active(t)) {
         if (!tls_cfg) {
             log_warn("smtp: STARTTLS requested but no TLS config");
-            if (err_msg) *err_msg = "tls_config_missing";
+            *err_msg = "tls_config_missing";
             goto cleanup;
         }
 
         code = smtp_command(t, "STARTTLS\r\n", 220, timeout_ms);
         if (code < 0) {
             log_warn("smtp: STARTTLS rejected");
-            if (err_msg) *err_msg = "starttls_rejected";
+            *err_msg = "starttls_rejected";
             goto cleanup;
         }
 
         /* In-place upgrade. NO plaintext fallback on failure. */
         if (hl_smtp_transport_starttls(t, msg->host, tls_cfg, timeout_ms) != 0) {
             log_warn("smtp: STARTTLS handshake failed");
-            if (err_msg) *err_msg = "tls_handshake_failed";
+            *err_msg = "tls_handshake_failed";
             goto cleanup;
         }
 
@@ -487,7 +474,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         snprintf(cmd, sizeof(cmd), "EHLO localhost\r\n");
         code = smtp_command(t, cmd, 250, timeout_ms);
         if (code < 0) {
-            if (err_msg) *err_msg = "ehlo_failed";
+            *err_msg = "ehlo_failed";
             goto cleanup;
         }
     }
@@ -498,7 +485,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         if (!hl_smtp_transport_tls_active(t)) {
             log_warn("smtp: AUTH PLAIN requires TLS - refusing to send "
                      "credentials in plaintext (set use_tls=1 or 2)");
-            if (err_msg) *err_msg = "auth_requires_tls";
+            *err_msg = "auth_requires_tls";
             goto cleanup;
         }
 
@@ -515,7 +502,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     snprintf(cmd, sizeof(cmd), "MAIL FROM:<%s>\r\n", msg->from);
     code = smtp_command(t, cmd, 250, timeout_ms);
     if (code < 0) {
-        if (err_msg) *err_msg = "mail_from_failed";
+        *err_msg = "mail_from_failed";
         goto cleanup;
     }
 
@@ -523,7 +510,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     snprintf(cmd, sizeof(cmd), "RCPT TO:<%s>\r\n", msg->to);
     code = smtp_command(t, cmd, 250, timeout_ms);
     if (code < 0) {
-        if (err_msg) *err_msg = "rcpt_to_failed";
+        *err_msg = "rcpt_to_failed";
         goto cleanup;
     }
 
@@ -533,7 +520,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
             snprintf(cmd, sizeof(cmd), "RCPT TO:<%s>\r\n", msg->cc[i]);
             code = smtp_command(t, cmd, 250, timeout_ms);
             if (code < 0) {
-                if (err_msg) *err_msg = "rcpt_to_failed";
+                *err_msg = "rcpt_to_failed";
                 goto cleanup;
             }
         }
@@ -542,7 +529,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     /* DATA */
     code = smtp_command(t, "DATA\r\n", 354, timeout_ms);
     if (code < 0) {
-        if (err_msg) *err_msg = "data_failed";
+        *err_msg = "data_failed";
         goto cleanup;
     }
 
@@ -558,7 +545,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         char *msg_buf = kl_malloc(&alloc, msg_size);
         if (!msg_buf) {
             log_warn("smtp: message buffer allocation failed");
-            if (err_msg) *err_msg = "alloc_failed";
+            *err_msg = "alloc_failed";
             goto cleanup;
         }
 
@@ -566,14 +553,14 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         if (msg_len < 0) {
             kl_free(&alloc, msg_buf, msg_size);
             log_warn("smtp: message formatting failed");
-            if (err_msg) *err_msg = "format_failed";
+            *err_msg = "format_failed";
             goto cleanup;
         }
 
         /* Send formatted message */
         if (hl_smtp_transport_write(t, msg_buf, (size_t)msg_len, timeout_ms) != 0) {
             kl_free(&alloc, msg_buf, msg_size);
-            if (err_msg) *err_msg = "send_failed";
+            *err_msg = "send_failed";
             goto cleanup;
         }
 
@@ -583,7 +570,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     /* End DATA with \r\n.\r\n */
     code = smtp_command(t, ".\r\n", 250, timeout_ms);
     if (code < 0) {
-        if (err_msg) *err_msg = "data_end_failed";
+        *err_msg = "data_end_failed";
         goto cleanup;
     }
 
@@ -593,34 +580,105 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     ret = 0;
 
 cleanup:
-    /* t is NULL on the connect-failure path (shutdown/free are NULL-safe); any
-     * connect-path teardown leak is already captured in teardown_leaked.
-     * Attempt a graceful close (close_notify + drain) ONLY on success, where the
-     * queue is already empty and the peer is alive so it completes instantly. On
-     * a failure path the send already aborted, so skip straight to the abortive
-     * free rather than trying to drain a possibly-stalled queue. */
+    /* Confirmed teardown (the fail-closed detachment discipline), on whatever
+     * thread runs the execute-phase (the worker in model 2). t is NULL on the
+     * connect-failure
+     * path (shutdown/free are NULL-safe). Graceful close only on success; a
+     * failed send goes straight to the abortive free. A -1 from free means the
+     * op/stream would not detach, so the transport was intentionally leaked
+     * rather than freed into a use-after-free; report it in the result. */
     if (ret == 0)
         hl_smtp_transport_shutdown(t);
-    /* Observe teardown: a -1 from free means the connect op or stream would not
-     * detach, so the transport was intentionally leaked (fd + event ctx +
-     * memory) rather than freed into a use-after-free. OR it with any
-     * connect-path leak and surface it at the capability boundary (log + audit)
-     * so it is not silently dropped. It does not change the send result. */
+    /* Capture the Dop-expiry flag before free reclaims the transport. On Dop
+     * expiry the public token is FORCED to connect_failed (section 8); the stage
+     * that timed out (greeting_failed, ehlo_failed, ...) is not user-visible, only
+     * the terminal:post_resolution_deadline audit tag distinguishes it. */
+    int deadline_expired = connect_dop || hl_smtp_transport_dop_expired(t);
     teardown_leaked = teardown_leaked || (hl_smtp_transport_free(t) != 0);
     if (teardown_leaked)
         log_error("smtp: transport teardown failed (op/stream would not "
                   "detach); leaked transport resources for host '%s'", msg->host);
 
-    {
-        ShJsonWriter w = hl_audit_begin("smtp.send");
-        sh_json_write_kv_string(&w, "host", msg->host);
-        sh_json_write_kv_string(&w, "from", msg->from);
-        sh_json_write_kv_string(&w, "to", msg->to);
-        sh_json_write_kv_string(&w, "subject", msg->subject);
-        sh_json_write_kv_int(&w, "result", ret);
-        if (teardown_leaked)
-            sh_json_write_kv_string(&w, "teardown", "leaked");
-        hl_audit_end(&w);
-    }
+    if (deadline_expired)
+        *err_msg = "connect_failed";
+    out->rc = ret;
+    out->teardown_leaked = teardown_leaked;
+    out->deadline_expired = deadline_expired;
     return ret;
+}
+
+/* Emit the single "denied" audit record for a host-allowlist rejection. Shared by
+ * the sync path (hl_cap_smtp_send) and the model-2 async binding so authorization
+ * is audited exactly once, on the submit side. */
+void hl_smtp_audit_denied(const HlSmtpMessage *msg)
+{
+    ShJsonWriter w = hl_audit_begin("smtp.send");
+    sh_json_write_kv_string(&w, "host", msg->host);
+    sh_json_write_kv_string(&w, "from", msg->from);
+    sh_json_write_kv_string(&w, "to", msg->to);
+    sh_json_write_kv_string(&w, "result", "denied");
+    hl_audit_end(&w);
+}
+
+/* Emit the single completion audit record. The FROZEN metadata (section 3):
+ * @p schedule (a scheduling-failure tag) and @p terminal (a cancel/deadline tag)
+ * are emitted ONLY when non-NULL; r->teardown_leaked adds teardown:leaked. Shared
+ * by the sync path, the async scheduling-failure path, and the async completion
+ * path so every send is audited exactly once. */
+void hl_smtp_audit_complete(const HlSmtpMessage *msg, const HlSmtpResult *r,
+                            const char *schedule, const char *terminal)
+{
+    ShJsonWriter w = hl_audit_begin("smtp.send");
+    sh_json_write_kv_string(&w, "host", msg->host);
+    sh_json_write_kv_string(&w, "from", msg->from);
+    sh_json_write_kv_string(&w, "to", msg->to);
+    sh_json_write_kv_string(&w, "subject", msg->subject);
+    sh_json_write_kv_int(&w, "result", r->rc);
+    if (schedule)
+        sh_json_write_kv_string(&w, "schedule", schedule);
+    if (terminal)
+        sh_json_write_kv_string(&w, "terminal", terminal);
+    if (r->teardown_leaked)
+        sh_json_write_kv_string(&w, "teardown", "leaked");
+    hl_audit_end(&w);
+}
+
+int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
+                     const char **err_msg)
+{
+    if (!cfg || !msg) {
+        if (err_msg) *err_msg = "invalid_args";
+        return -1;
+    }
+
+    /* Phase 1 (event-loop side in model 2): validate + authorize BEFORE any
+     * resolve or socket work. Authorization is against the declared hostname
+     * and never crosses to a worker. */
+    if (smtp_validate_message(msg) != 0) {
+        if (err_msg) *err_msg = "validation_failed";
+        return -1;
+    }
+    if (hl_smtp_check_host(cfg, msg->host) != 0) {
+        log_warn("smtp: host '%s' not in allowlist", msg->host);
+        if (err_msg) *err_msg = "host_not_allowed";
+        hl_smtp_audit_denied(msg);
+        return -1;
+    }
+
+    int timeout_ms = cfg->timeout_ms > 0 ? cfg->timeout_ms
+                                         : HL_SMTP_DEFAULT_TIMEOUT_MS;
+
+    /* Execute-phase: inline on the calling thread here (the sync / no-loop
+     * path; the SMTP worker runs the same function in model 2). No cancel poll on
+     * the synchronous path (no other thread requests cancellation). No audit. */
+    HlSmtpResult r;
+    hl_smtp_execute(msg, cfg->tls, timeout_ms, NULL, NULL, &r);
+    if (err_msg && r.token)
+        *err_msg = r.token;
+
+    /* Completion phase (event-loop side in model 2): the single audit record. A
+     * Dop expiry adds terminal:post_resolution_deadline (section 8). */
+    hl_smtp_audit_complete(msg, &r, NULL,
+                           r.deadline_expired ? "post_resolution_deadline" : NULL);
+    return r.rc;
 }

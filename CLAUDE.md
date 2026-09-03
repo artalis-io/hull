@@ -2355,6 +2355,39 @@ end)
 - **Session init at startup:** Call `session.init()` before registering routes. It creates the SQLite table.
 - **Lua vs JS differences:** The Lua and JS APIs are functionally equivalent but differ in naming conventions (snake_case vs camelCase) and some defaults. See the JS stdlib source for JS-specific option names.
 
+### Outbound SMTP (`smtp.send`, model-2 async)
+
+`smtp.send(msg)` delivers mail over the Keel-v3 transport. Under an active server
+event loop it runs the **model-2** path: the SMTP conversation executes on a bounded
+worker thread while the request coroutine/Promise suspends, so a slow peer never
+blocks the loop. Full design: [docs/smtp_keel_slice2c_plan.md](docs/smtp_keel_slice2c_plan.md).
+
+- **Lua:** `local r = smtp.send(msg)` yields transparently and resumes with the
+  `{ ok, error }` table. **JS:** `const r = await smtp.send(msg)` - it ALWAYS returns
+  a `Promise` resolving to `{ ok, error }` (including immediately-resolved
+  validation/admission failures); it rejects only on a programming error (bad
+  argument type), never on an SMTP failure. There is no `smtp.async.send`; `send`
+  IS the async entry. The stdlib `hull/email` provider `await`s it (see
+  `stdlib/js/hull/email.js`).
+- **No active loop** (`app.main` CLI, in-process test harness): the same call runs
+  synchronously on the calling thread (Lua returns the table; JS returns an
+  already-resolved Promise). This is the ONLY synchronous path; the runtime never
+  falls back to synchronous execution from an active loop.
+- **Admission cap.** Concurrent SMTP worker jobs are capped at `max(1, floor(W/2))`
+  for a pool of `W` workers (`--workers`), always leaving >= 1 worker for db /
+  compute. When the cap is reached, `send` resolves promptly (never runs on the loop
+  thread) with `{ ok = false, error = "connect_failed" }` and audits
+  `schedule:cap_reached`.
+- **Terminal audit tags** (with `--audit`): a post-resolution operation-deadline
+  expiry keeps the public `connect_failed` token but audits
+  `terminal:post_resolution_deadline`; a shutdown-swept in-flight op audits
+  `terminal:cancelled`; a transport that could not confirm detachment audits
+  `teardown:leaked`. Exactly one completion record per send.
+- **Host allowlist.** `msg.host` must be in `manifest.hosts` (same matcher as
+  `http.fetch` / `ws.connect`); a denied host is audited `result:denied` before any
+  submit. **STARTTLS/implicit TLS** verify the chain + hostname against the embedded
+  CA bundle and fail closed (no plaintext fallback).
+
 ### Background Timers
 
 `app.every()` and `app.daily()` register repeating timer callbacks that run on the event loop thread. Timer callbacks support the full async runtime (`hull.sleep()`, `http.fetch()`, `db.*`).

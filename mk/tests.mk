@@ -173,6 +173,59 @@ $(BUILDDIR)/test_smtp_transport: $(TESTDIR)/hull/cap/test_smtp_transport.c \
     $(SRCDIR)/hull/cap/smtp.c $(SRCDIR)/hull/cap/smtp_transport.c $(SMTP_TP_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_TP_TEST_LIBS) $(LDFLAGS)
 
+# SMTP op test: direct-includes src/hull/cap/smtp_op.c under -DHL_SMTP_TEST_HOOKS
+# to drive its allocation seam (the deterministic fail-after-N sweep + scrub
+# interposer). cap_smtp_op.o is EXCLUDED from this test's link so the
+# direct-included definitions do not collide (mirrors test_smtp_transport).
+SMTP_OP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_op.o,$(TEST_COMMON_LIBS))
+SMTP_OP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_op.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_op: $(TESTDIR)/hull/cap/test_smtp_op.c \
+    $(SRCDIR)/hull/cap/smtp_op.c $(SMTP_OP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_OP_TEST_LIBS) $(LDFLAGS)
+
+# SMTP worker-op ownership core: direct-includes src/hull/cap/smtp_worker.c under
+# -DHL_SMTP_TEST_HOOKS to drive the free-observer seam + the injectable execute.
+# cap_smtp_worker.o is excluded from this test's link (direct-included). It still
+# links cap_smtp_op.o for hl_smtp_op_* used to build inputs.
+SMTP_WORKER_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_worker.o,$(TEST_COMMON_LIBS))
+SMTP_WORKER_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_worker.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_worker: $(TESTDIR)/hull/cap/test_smtp_worker.c \
+    $(SRCDIR)/hull/cap/smtp_worker.c $(SMTP_WORKER_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_WORKER_TEST_LIBS) $(LDFLAGS)
+
+# SMTP submit/ordering layer: direct-includes src/hull/cap/smtp_submit.c AND
+# smtp_op.c under -DHL_SMTP_TEST_HOOKS - the former to drive its ctx-alloc seam
+# and the injected pool + suspend + resume seams (a fake backend that can hold or
+# drop a completed done_fn), the latter to drive the op alloc/free seam and prove
+# owned inputs are freed on every path (balanced alloc/free). cap_smtp_submit.o
+# AND cap_smtp_op.o are excluded from this test's link (both direct-included); it
+# still links cap_smtp_worker.o / cap_smtp_admit.o for the composed primitives.
+SMTP_SUBMIT_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_submit.o $(BUILDDIR)/cap_smtp_op.o,$(TEST_COMMON_LIBS))
+SMTP_SUBMIT_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_submit.o $(BUILDDIR)/cap_smtp_op.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_submit: $(TESTDIR)/hull/cap/test_smtp_submit.c \
+    $(SRCDIR)/hull/cap/smtp_submit.c $(SRCDIR)/hull/cap/smtp_op.c $(SMTP_SUBMIT_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_SUBMIT_TEST_LIBS) $(LDFLAGS)
+
+# SMTP async orchestration (two-pass shutdown ownership): direct-includes
+# src/hull/cap/smtp_async.c under -DHL_SMTP_TEST_HOOKS for the op-alloc seam + the
+# static helpers; cap_smtp_async.o is excluded (direct-included). Links the other
+# smtp cap primitives + the base async/net stubs.
+SMTP_ASYNC_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_async.o,$(TEST_COMMON_LIBS))
+SMTP_ASYNC_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_async.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_async: $(TESTDIR)/hull/cap/test_smtp_async.c \
+    $(SRCDIR)/hull/cap/smtp_async.c $(SMTP_ASYNC_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_ASYNC_TEST_LIBS) $(LDFLAGS)
+
+# SMTP per-worker TLS-context cache: direct-includes src/hull/cap/smtp_tls.c
+# under -DHL_SMTP_TEST_HOOKS to substitute fake ctx create/destroy and exercise
+# the cache keying / lazy creation / destruction / failure paths without live
+# mbedTLS. cap_smtp_tls.o is excluded from this test's link.
+SMTP_TLS_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_tls.o,$(TEST_COMMON_LIBS))
+SMTP_TLS_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_tls.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_tls: $(TESTDIR)/hull/cap/test_smtp_tls.c \
+    $(SRCDIR)/hull/cap/smtp_tls.c $(SMTP_TLS_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_TLS_TEST_LIBS) $(LDFLAGS)
+
 # TUI cap-layer tests: cap/tui.c + tui_input.c + tui_width.c are filtered out of
 # CAP_OBJS on the default (TUI-free) base - they live only in the composable
 # feature archive. These tests call hl_cap_tui_* directly, so link the three TUI
@@ -443,7 +496,7 @@ $(BUILDDIR)/test_manifest_seal: $(TESTDIR)/hull/test_manifest_seal.c $(BUILDDIR)
 # JS runtime test - needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
 $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(MODULE_OBJ) $(CAP_TEST_JS_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TEST_JS_OBJ) $(STDLIB_FEATURE_OBJ) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TEST_JS_OBJ) $(STDLIB_FEATURE_OBJ) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(QJS_OBJS) \
 		$(SH_SEAL_ARENA_OBJ) $(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Lua runtime test - needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
@@ -789,7 +842,7 @@ msan:
 #     shared memory is the atomic stop flag; the concurrency is filesystem-level
 #     (mkdir/symlink/unlink vs openat resolution), which TSan tolerates. Proves
 #     the resolver's containment holds under a real thread race.
-TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity
+TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity test_smtp_worker test_smtp_admit test_smtp_submit test_smtp_inflight test_smtp_async test_smtp_backend_poll test_smtp_saturation
 tsan:
 	$(MAKE) clean
 	$(MAKE) TSAN=1 $(addprefix $(BUILDDIR)/,$(TSAN_TESTS))
@@ -1237,6 +1290,22 @@ e2e-agent-api: $(BUILDDIR)/hull
 
 e2e-compute: $(BUILDDIR)/hull
 	sh tests/e2e_compute.sh
+
+# Model-2 async SMTP (Lua binding) end to end: async completion + registry-empty,
+# prompt post-resolution cancellation, cap-zero immediacy, exact audit metadata,
+# and a clean shutdown with an op in flight. Set HULL_DEBUG_BIN to a `make debug`
+# hull to also run the shutdown leg under ASan.
+.PHONY: e2e-smtp
+e2e-smtp: $(BUILDDIR)/hull
+	sh tests/e2e_smtp.sh
+
+# The SMTP/HTTP-client feature composition boundary: the model-2 async SMTP objects
+# follow cap/smtp.c's feature gate (all in libhull_feature-http.a, none base-resident),
+# so a non-SMTP composed app links none of them (no dangling hl_smtp_audit_complete)
+# and an SMTP app composes the whole set. Runs after e2e-smtp so CI covers it too.
+.PHONY: e2e-smtp-link-seam
+e2e-smtp-link-seam: $(BUILDDIR)/hull
+	sh tests/e2e_smtp_link_seam.sh
 
 # Windowed fs.mmap({offset,length}) binding (mapped-spans, item A).
 .PHONY: e2e-spans-mmap

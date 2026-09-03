@@ -33,16 +33,22 @@
 #include "hull/cap/smtp.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <arpa/inet.h>
 
 #include <keel/tls.h>   /* KlTls / KlTlsConfig: mock the TLS session seam */
+#include <keel/allocator.h>       /* kl_allocator_default (borrowed by the TLS ctx) */
+#include <keel_tls_mbedtls.h>     /* real in-process mbedTLS peer + client ctx */
+#include "smtp_tls_test_certs.h"  /* fixed test-only certs/keys (TEST-ONLY) */
 
 /* ════════════════════════════════════════════════════════════════════
  * Mock KlTls infrastructure (for the STARTTLS vtable-rejection tests).
@@ -561,7 +567,7 @@ static void chunked_delivery_case(int *utest_result, size_t payload)
     MockPeer m;
     ASSERT_EQ(mp_start(&m, mp_sink_thread), 0);
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL, NULL);
     ASSERT_TRUE(t != NULL);
 
     /* Consume the 220 greeting the sink sends. */
@@ -605,7 +611,7 @@ UTEST(smtp_write, backpressure_drains)
     ASSERT_EQ(mp_start(&m, mp_sink_thread), 0);
     m.slow_reader = 1;
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL, NULL);
     ASSERT_TRUE(t != NULL);
     char resp[HL_SMTP_RECV_BUF_SIZE];
     ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
@@ -694,7 +700,7 @@ UTEST(smtp_write, write_deadline_is_one_absolute_bound)
     MockPeer m;
     ASSERT_EQ(mp_start(&m, mp_slow_drain_thread), 0);
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL, NULL);
     ASSERT_TRUE(t != NULL);
     char resp[HL_SMTP_RECV_BUF_SIZE];
     ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
@@ -746,7 +752,7 @@ static void drive_to_starttls(int *utest_result, MockPeer *m, int extra_junk,
     m->extra_after_220 = extra_junk;
     ASSERT_EQ_MSG(mp_spawn(m, mp_starttls_junk_thread), 0, "mp_spawn");
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m->port, 10000, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m->port, 10000, NULL, NULL, NULL, NULL);
     ASSERT_TRUE_MSG(t != NULL, "connect");
 
     char resp[HL_SMTP_RECV_BUF_SIZE];
@@ -872,11 +878,1254 @@ UTEST(smtp_starttls, failing_set_hostname_rejected)
 UTEST(smtp_connect, blackhole_timeout_detaches)
 {
     /* 192.0.2.1 is reserved and unrouteable; the connect will not complete. */
-    HlSmtpTransport *t = hl_smtp_transport_connect("192.0.2.1", 25, 600, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("192.0.2.1", 25, 600, NULL, NULL, NULL, NULL);
     /* Bounded failure: NULL (connect / deadline). hl_smtp_transport_connect
      * cancels + waits for detachment internally before freeing, so a clean
      * return here already proves detachment did not hang. */
     ASSERT_TRUE(t == NULL);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Post-resolution operation deadline (Dop, section 8) - deterministic
+ *  deadline-versus-cancel precedence.
+ *
+ *  The frozen precedence (pump_check): a completed predicate, THEN an expired
+ *  Dop, THEN cancellation, THEN the stage budget. So when Dop and cancellation
+ *  are BOTH ready at one pump checkpoint, Dop wins and the terminal is tagged
+ *  post_resolution_deadline (never cancelled). These tests exercise that exact
+ *  same-checkpoint race deterministically, on ONE clock domain (the real
+ *  kl_monotonic_ms()): no virtual clock is advanced independently of Keel's
+ *  timers - the checkpoint is simply driven to a state where both conditions
+ *  hold at the identical evaluation.
+ *
+ *  REVERT PROOF for both: reorder pump_check so the cancel branch precedes the
+ *  Dop branch and both assertions on dop_expired==1 flip to failure (cancel
+ *  would win the race and the terminal would be mis-tagged terminal:cancelled).
+ * ════════════════════════════════════════════════════════════════════ */
+
+static int dop_never_done(HlSmtpTransport *t) { (void)t; return 0; }
+static int dop_always_cancel(void *user) { (void)user; return 1; }
+
+/* Deterministic core: call the frozen precedence classifier directly with Dop
+ * and cancellation BOTH ready at one checkpoint. No event loop, no sockets, no
+ * wall-clock dependence - the definitive same-checkpoint proof. */
+UTEST(smtp_dop, precedence_dop_beats_cancel_at_one_checkpoint)
+{
+    HlSmtpTransport t;
+    memset(&t, 0, sizeof t);
+    t.dop_ms      = kl_monotonic_ms();   /* already reached: pump_check re-reads now >= dop_ms */
+    t.cancel_poll = dop_always_cancel;   /* cancellation ALSO ready at this checkpoint */
+    t.cancel_user = NULL;
+
+    /* Stage budget far in the future so only Dop-vs-cancel can terminate. */
+    int c = pump_check(&t, dop_never_done, UINT64_MAX);
+
+    ASSERT_EQ(c, -1);                    /* terminate */
+    ASSERT_EQ(t.dop_expired, 1);         /* Dop classified - NOT cancellation */
+}
+
+/* Live-pump variant: the same race, but reached through the real pump loop via
+ * the checkpoint hook (which also validates the hook that the resolver/provider
+ * tests build on). A peer accepts then withholds the greeting, so read_reply
+ * pumps; the hook, once armed, expires Dop AND arms cancellation at the TOP of a
+ * single pump_check so both are ready at that one checkpoint. */
+static volatile int g_dop_live_arm;      /* test arms after connect completes */
+static volatile int g_dop_live_armed;    /* latch: the hook fires the race once */
+static volatile int g_dop_live_cancel;   /* what the transport's cancel_poll returns */
+static int          g_dop_live_armed_at; /* checkpoint index the hook armed at (observe) */
+
+static int dop_live_cancel_poll(void *user) { (void)user; return g_dop_live_cancel; }
+
+static void dop_live_checkpoint(HlSmtpTransport *t, unsigned idx)
+{
+    if (g_dop_live_arm && !g_dop_live_armed) {
+        /* Align both readiness conditions onto THIS checkpoint, on the real
+         * clock: overwrite Dop to now (expired - pump_check re-reads now >= dop_ms
+         * microseconds later) and make the pending cancel ready. */
+        g_dop_live_armed   = 1;
+        t->dop_ms          = kl_monotonic_ms();
+        g_dop_live_cancel  = 1;
+        g_dop_live_armed_at = (int)idx;
+    }
+}
+
+/* A peer that accepts and holds the connection open WITHOUT greeting, so the
+ * client's read_reply keeps pumping (giving the hook checkpoints to fire on). */
+static void *mp_accept_and_hold_thread(void *arg)
+{
+    MockPeer *m = arg;
+    int c = accept(m->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    m->accepted = 1;
+    /* Withhold the greeting; drain anything the client sends until it closes. */
+    char buf[4096];
+    for (;;) {
+        ssize_t n = read(c, buf, sizeof buf);
+        if (n <= 0) break;
+    }
+    close(c);
+    return NULL;
+}
+
+static void dop_live_watchdog_fired(int sig)
+{
+    (void)sig;
+    static const char msg[] =
+        "FATAL: precedence_dop_beats_cancel_live_pump watchdog fired - "
+        "read_reply did not return within the watchdog window\n";
+    ssize_t w = write(STDERR_FILENO, msg, sizeof msg - 1);
+    (void)w;
+    _exit(70);
+}
+
+UTEST(smtp_dop, precedence_dop_beats_cancel_live_pump)
+{
+    MockPeer m;
+    ASSERT_EQ(mp_start(&m, mp_accept_and_hold_thread), 0);
+
+    /* Generous connect/read timeout: the DEADLINE under test is Dop, armed by the
+     * hook, not this stage budget. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000,
+                                                   dop_live_cancel_poll, NULL,
+                                                   NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+
+    /* Arm the same-checkpoint race only now that connect is done. */
+    g_dop_live_armed    = 0;
+    g_dop_live_cancel   = 0;
+    g_dop_live_armed_at = -1;
+    smtp_test_checkpoint = dop_live_checkpoint;
+    g_dop_live_arm      = 1;
+
+    const unsigned watchdog_sec = 30;    /* finite backstop for a hanging regression */
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired);
+    alarm(watchdog_sec);
+
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    int code = hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000);
+
+    alarm(0);
+    signal(SIGALRM, prev);
+
+    /* Disarm the hook BEFORE any further pumps (shutdown/free pump too). */
+    smtp_test_checkpoint = NULL;
+    g_dop_live_arm       = 0;
+
+    ASSERT_EQ(code, -1);                 /* read terminated */
+    ASSERT_EQ(hl_smtp_transport_dop_expired(t), 1);  /* by Dop, not cancellation */
+    ASSERT_TRUE(g_dop_live_armed_at >= 0);           /* the hook did fire the race */
+
+    hl_smtp_transport_free(t);
+    mp_join(&m);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Resolver hook - cancellation during resolution takes the post-DNS cancel
+ *  path BEFORE any socket attempt.
+ *
+ *  The injected resolver fills the address list in exact order and, at its
+ *  release point, arms cancellation (modeling a cancel that arrived during the
+ *  blocking resolve). hl_smtp_transport_connect must then abort before the
+ *  connect op is initialized - so the pump never runs and no socket() is called.
+ *  We observe "no pump ran" via a checkpoint counter that stays 0 (pump_check,
+ *  where socket attempts are driven, is never reached).
+ *
+ *  REVERT PROOF: delete the post-DNS cancel check in hl_smtp_transport_connect
+ *  and the connect op starts + pumps - the checkpoint counter goes non-zero and
+ *  this assertion flips to failure.
+ * ════════════════════════════════════════════════════════════════════ */
+
+static volatile int g_res_cancel;        /* what the transport's cancel_poll returns */
+static int          g_res_checkpoints;   /* pump_check invocations during the connect */
+
+static int res_cancel_poll(void *user) { (void)user; return g_res_cancel; }
+static void res_count_checkpoint(HlSmtpTransport *t, unsigned idx)
+{ (void)t; (void)idx; g_res_checkpoints++; }
+
+/* Inject one loopback address in exact order, then arm cancellation as the
+ * blocking resolve "returns" (its release point). */
+static int res_inject_then_cancel(HlSmtpTransport *t, const char *host, int port)
+{
+    (void)host;
+    uint8_t ip[4] = { 127, 0, 0, 1 };
+    if (kl_sockaddr_from_ipv4(&t->addrs[0], ip, (uint16_t)port) != 0)
+        return 0;
+    g_res_cancel = 1;   /* cancel observed during resolution */
+    return 1;
+}
+
+UTEST(smtp_dop, cancellation_during_resolution_no_socket_attempt)
+{
+    g_res_cancel      = 0;
+    g_res_checkpoints = 0;
+    smtp_test_resolve    = res_inject_then_cancel;
+    smtp_test_checkpoint = res_count_checkpoint;
+
+    const unsigned watchdog_sec = 30;
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired);
+    alarm(watchdog_sec);
+
+    /* Host is never really resolved (the hook replaces getaddrinfo); a bogus port
+     * target would still never be dialed because cancel aborts first. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("mail.example.test", 25, 5000,
+                                                   res_cancel_poll, NULL, NULL, NULL);
+
+    alarm(0);
+    signal(SIGALRM, prev);
+
+    smtp_test_resolve    = NULL;
+    smtp_test_checkpoint = NULL;
+
+    ASSERT_TRUE(t == NULL);              /* cancelled -> NULL (connect_failed at the caller) */
+    ASSERT_EQ(g_res_checkpoints, 0);     /* returned before any pump -> before any socket attempt */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Provider / attempt hook - deterministic pending-connect Dop and a real
+ *  Happy-Eyeballs stagger, with no environmental skip.
+ *
+ *  The fake provider (smtp_test_socket_provider) hands the connect op real fds
+ *  the event loop can watch, keeping ONE clock domain: a "pending" address is a
+ *  socketpair whose send buffer is filled so its fd is never write-ready (both
+ *  epoll and kqueue respect a full send buffer), so the attempt stays pending
+ *  under kernel semantics - not a timing hack. "succeed" / "fail" leave the fd
+ *  writable and let get_so_error report SO_ERROR. Attempts are recorded (address
+ *  index + monotonic timestamp) so the stagger can be observed.
+ * ════════════════════════════════════════════════════════════════════ */
+
+enum { FK_PENDING = 0, FK_SUCCEED = 1, FK_FAIL = 2 };
+
+typedef struct { int used; int a; int b; int disp; int idx; } FkSlot;
+static FkSlot   g_fk[32];
+static int      g_fk_disp[KL_CONNECT_MAX_ADDRS];  /* per-address disposition */
+static int      g_fk_order[KL_CONNECT_MAX_ADDRS]; /* attempt order (address index) */
+static uint64_t g_fk_ts[KL_CONNECT_MAX_ADDRS];    /* attempt timestamps (monotonic ms) */
+static int      g_fk_n;                            /* number of connect() attempts */
+static int      g_fk_succeeded_idx;               /* address index that read SO_ERROR==0, or -1 */
+
+static void fk_reset(void)
+{
+    memset(g_fk, 0, sizeof g_fk);
+    memset(g_fk_disp, 0, sizeof g_fk_disp);
+    memset(g_fk_order, 0, sizeof g_fk_order);
+    memset(g_fk_ts, 0, sizeof g_fk_ts);
+    g_fk_n = 0;
+    g_fk_succeeded_idx = -1;
+}
+
+static FkSlot *fk_slot_for(int a)
+{
+    for (size_t i = 0; i < sizeof g_fk / sizeof g_fk[0]; i++)
+        if (g_fk[i].used && g_fk[i].a == a) return &g_fk[i];
+    return NULL;
+}
+
+static KlSocketHandle fk_socket(void *c, int d, int ty, int p)
+{
+    (void)c; (void)d; (void)ty; (void)p;
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return KL_INVALID_SOCKET;
+    int small = 2048;
+    setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    for (size_t i = 0; i < sizeof g_fk / sizeof g_fk[0]; i++)
+        if (!g_fk[i].used) {
+            g_fk[i].used = 1; g_fk[i].a = sv[0]; g_fk[i].b = sv[1];
+            g_fk[i].disp = -1; g_fk[i].idx = -1;
+            return (KlSocketHandle)sv[0];
+        }
+    close(sv[0]); close(sv[1]);
+    return KL_INVALID_SOCKET;
+}
+static int  fk_set_nb(void *c, KlSocketHandle fd)
+{ (void)c; int a = (int)fd; int fl = fcntl(a, F_GETFL, 0); return fcntl(a, F_SETFL, fl | O_NONBLOCK); }
+static int  fk_set_int(void *c, KlSocketHandle fd, int on) { (void)c; (void)fd; (void)on; return 0; }
+static void fk_set_void(void *c, KlSocketHandle fd) { (void)c; (void)fd; }
+static int  fk_get_local(void *c, KlSocketHandle fd, KlSockAddr *out)
+{ (void)c; (void)fd; uint8_t ip[4] = {127,0,0,1}; return kl_sockaddr_from_ipv4(out, ip, 0); }
+
+static int fk_connect(void *c, KlSocketHandle fd, const KlSockAddr *addr)
+{
+    (void)c;
+    int a = (int)fd;
+    int idx = (addr->addr_len == 4) ? (addr->u.ip[3] - 1) : 0;
+    if (idx < 0 || idx >= KL_CONNECT_MAX_ADDRS) idx = 0;
+    int disp = g_fk_disp[idx];
+    if (g_fk_n < KL_CONNECT_MAX_ADDRS) {
+        g_fk_order[g_fk_n] = idx;
+        g_fk_ts[g_fk_n]    = kl_monotonic_ms();
+        g_fk_n++;
+    }
+    FkSlot *s = fk_slot_for(a);
+    if (s) { s->disp = disp; s->idx = idx; }
+    if (disp == FK_PENDING) {
+        /* Fill the send buffer so 'a' never becomes write-ready (the attempt stays
+         * pending under kernel semantics until the Dop / stagger timer fires). */
+        char buf[2048];
+        memset(buf, 'x', sizeof buf);
+        int fl = fcntl(a, F_GETFL, 0); fcntl(a, F_SETFL, fl | O_NONBLOCK);
+        while (write(a, buf, sizeof buf) > 0) { }
+    }
+    /* Report async-in-progress; a writable 'a' (succeed/fail) then drives
+     * co_connect_watcher -> get_so_error. */
+    errno = EINPROGRESS;
+    return -1;
+}
+static int fk_get_so_error(void *c, KlSocketHandle fd, int *out)
+{
+    (void)c;
+    FkSlot *s = fk_slot_for((int)fd);
+    if (s && s->disp == FK_FAIL) { *out = ECONNREFUSED; }
+    else { *out = 0; if (s) g_fk_succeeded_idx = s->idx; }
+    return 0;
+}
+static kl_ssize_t fk_send(void *c, KlSocketHandle fd, const void *b, size_t n)
+{ (void)c; return send((int)fd, b, n, 0); }
+static kl_ssize_t fk_recv(void *c, KlSocketHandle fd, void *b, size_t n)
+{ (void)c; return recv((int)fd, b, n, 0); }
+static kl_ssize_t fk_recv_peek(void *c, KlSocketHandle fd, void *b, size_t n)
+{ (void)c; return recv((int)fd, b, n, MSG_PEEK); }
+static int fk_close(void *c, KlSocketHandle fd)
+{
+    (void)c; int a = (int)fd;
+    FkSlot *s = fk_slot_for(a);
+    if (s) { close(s->b); s->used = 0; }
+    return close(a);
+}
+
+static const KlSocketOps FK_OPS = {
+    .set_nonblocking = fk_set_nb,
+    .set_blocking    = NULL,
+    .set_cloexec     = fk_set_void,
+    .set_nosigpipe   = fk_set_void,
+    .set_reuseaddr   = fk_set_int,
+    .set_reuseport   = fk_set_int,
+    .set_ipv6only    = fk_set_int,
+    .set_tcp_nodelay = fk_set_int,
+    .set_cork        = fk_set_int,
+    .socket          = fk_socket,
+    .connect         = fk_connect,
+    .close           = fk_close,
+    .get_local_addr  = fk_get_local,
+    .get_so_error    = fk_get_so_error,
+    .send            = fk_send,
+    .recv            = fk_recv,
+    .recv_peek       = fk_recv_peek,
+};
+static const KlSocketProvider FK_PROVIDER = { .ops = &FK_OPS, .context = NULL };
+
+/* Inject N addresses 10.11.12.(i+1) in order; disposition comes from g_fk_disp. */
+static int g_fk_naddr;
+static int fk_resolve(HlSmtpTransport *t, const char *host, int port)
+{
+    (void)host;
+    for (int i = 0; i < g_fk_naddr && i < KL_CONNECT_MAX_ADDRS; i++) {
+        uint8_t ip[4] = { 10, 11, 12, (uint8_t)(i + 1) };
+        if (kl_sockaddr_from_ipv4(&t->addrs[i], ip, (uint16_t)port) != 0) return i;
+    }
+    return g_fk_naddr;
+}
+
+/* Deterministic pending-connect Dop: one address, permanently pending (filled
+ * send buffer). The connect-deadline timer (armed with Dop-now) fires and the
+ * connect fails with deadline_expired set - no network, no environmental skip.
+ * REVERT PROOF: neuter the Dop classification (as in step 1) and dop_expired is
+ * lost; more directly, this can only pass because the pending fd never completes,
+ * which the filled-send-buffer guarantees on both epoll and kqueue. */
+UTEST(smtp_dop, pending_connect_dop_expires_deterministically)
+{
+    fk_reset();
+    g_fk_naddr   = 1;
+    g_fk_disp[0] = FK_PENDING;
+    smtp_test_resolve         = fk_resolve;
+    smtp_test_socket_provider = &FK_PROVIDER;
+
+    const unsigned watchdog_sec = 30;
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired);
+    alarm(watchdog_sec);
+
+    uint64_t t0 = kl_monotonic_ms();
+    int dop = 0;
+    /* 400 ms Dop: short, deterministic, well under the watchdog. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("mail.example.test", 25, 400,
+                                                   NULL, NULL, NULL, &dop);
+    uint64_t elapsed = kl_monotonic_ms() - t0;
+
+    alarm(0);
+    signal(SIGALRM, prev);
+    smtp_test_resolve         = NULL;
+    smtp_test_socket_provider = NULL;
+
+    ASSERT_TRUE(t == NULL);              /* connect failed */
+    ASSERT_EQ(dop, 1);                   /* by the post-resolution operation deadline */
+    ASSERT_GE(g_fk_n, 1);                /* at least one attempt was made */
+    ASSERT_TRUE(elapsed < 5000);         /* bounded by Dop, not the stage/OS default */
+}
+
+/* Real Happy-Eyeballs stagger: address 0 pending, address 1 succeeds. The RFC 8305
+ * Connection Attempt Delay timer (~250 ms) must fire and start address 1 while
+ * address 0 is still pending; address 1 then wins. Observed via attempt order +
+ * the inter-attempt gap (a real timer, on the real clock).
+ * REVERT PROOF: drop SMTP_CONNECT_ATTEMPT_DELAY_MS toward 0 and the gap assertion
+ * fails; make address 1 FK_FAIL and the winner assertion fails. */
+UTEST(smtp_dop, happy_eyeballs_stagger_starts_second_address)
+{
+    fk_reset();
+    g_fk_naddr   = 2;
+    g_fk_disp[0] = FK_PENDING;
+    g_fk_disp[1] = FK_SUCCEED;
+    smtp_test_resolve         = fk_resolve;
+    smtp_test_socket_provider = &FK_PROVIDER;
+
+    const unsigned watchdog_sec = 30;
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired);
+    alarm(watchdog_sec);
+
+    /* Generous Dop so the ~250 ms stagger (not the deadline) drives address 2. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("mail.example.test", 25, 5000,
+                                                   NULL, NULL, NULL, NULL);
+
+    alarm(0);
+    signal(SIGALRM, prev);
+    smtp_test_resolve         = NULL;
+    smtp_test_socket_provider = NULL;
+
+    ASSERT_TRUE(t != NULL);              /* address 1 won the race */
+    ASSERT_EQ(g_fk_n, 2);               /* both addresses were attempted */
+    ASSERT_EQ(g_fk_order[0], 0);        /* address 0 first */
+    ASSERT_EQ(g_fk_order[1], 1);        /* address 1 second */
+    ASSERT_EQ(g_fk_succeeded_idx, 1);   /* address 1 is the one that connected */
+    /* The stagger timer fired before address 1 started: the gap is around the
+     * ~250 ms Connection Attempt Delay (allow scheduling slack). */
+    uint64_t gap = g_fk_ts[1] - g_fk_ts[0];
+    ASSERT_GE(gap, (uint64_t)(SMTP_CONNECT_ATTEMPT_DELAY_MS - 50));
+
+    hl_smtp_transport_free(t);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  In-process mbedTLS peer (real handshake, fixed test-only certs).
+ *
+ *  No external openssl process and no network: a background thread accepts a
+ *  loopback connection and drives a REAL mbedTLS server handshake with the
+ *  embedded server cert/key, while the SMTP transport drives the client
+ *  handshake through its event-loop pump. The client trusts CA1 (success) or an
+ *  unrelated CA2 (unknown-CA failure); the server leaf is CN=localhost, so a
+ *  verify hostname other than "localhost" is a mismatch failure. All TLS material
+ *  and every helper below is TEST-ONLY (smtp_tls_test_certs.h).
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* The TLS ctx borrows its allocator for its whole lifetime, so keep it static. */
+static KlAllocator g_tls_alloc;
+static int         g_tls_alloc_init;
+static KlAllocator *tls_alloc(void)
+{
+    if (!g_tls_alloc_init) { g_tls_alloc = kl_allocator_default(); g_tls_alloc_init = 1; }
+    return &g_tls_alloc;
+}
+
+typedef struct {
+    int       listen_fd;
+    int       port;
+    pthread_t tid;
+    /* knobs (set before spawn) */
+    int starttls;          /* 1 = plaintext SMTP prelude, then STARTTLS, then handshake */
+    int reject_starttls;   /* STARTTLS: reply 454 and never handshake */
+    int inject_after_220;  /* STARTTLS: append plaintext after the 220 go */
+    int stall_handshake;   /* never answer the ClientHello (drives the client to Dop) */
+    /* observed */
+    int accepted;
+    int reached_handshake; /* the peer began driving a TLS handshake */
+    int handshake_ok;      /* the server handshake returned OK */
+    int post_fail_bytes;   /* bytes received from the client AFTER a rejected/aborted TLS */
+    char post_fail_buf[512];  /* those bytes, captured, so a test can prove no plaintext
+                               * credentials/body leaked (a TLS alert is ciphertext) */
+} TlsPeer;
+
+/* No plaintext SMTP secret (AUTH / MAIL / DATA / the credentials or body) appears in
+ * the post-failure bytes. A failed handshake may still emit a small TLS alert
+ * (ciphertext) - platform-dependent (macOS 0, Linux ~7) - which is NOT a leak, so we
+ * assert on CONTENT, not a zero byte count. */
+static int tls_bytes_contain(const char *hay, int hlen, const char *needle)
+{
+    int nlen = (int)strlen(needle);
+    for (int i = 0; i + nlen <= hlen; i++)
+        if (memcmp(hay + i, needle, (size_t)nlen) == 0) return 1;
+    return 0;
+}
+static int tls_post_fail_has_no_secret(const TlsPeer *p)
+{
+    static const char *marks[] = { "SECRETUSER", "SECRETPASS", "SECRETBODY",
+                                   "AUTH", "MAIL FROM", "DATA", "RCPT" };
+    int n = p->post_fail_bytes < (int)sizeof p->post_fail_buf
+              ? p->post_fail_bytes : (int)sizeof p->post_fail_buf;
+    for (size_t i = 0; i < sizeof marks / sizeof marks[0]; i++)
+        if (tls_bytes_contain(p->post_fail_buf, n, marks[i])) return 0;
+    return 1;
+}
+
+static int tls_peer_setup(TlsPeer *p)
+{
+    memset(p, 0, sizeof *p);
+    p->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (p->listen_fd < 0) return -1;
+    int one = 1;
+    setsockopt(p->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0;
+    if (bind(p->listen_fd, (struct sockaddr *)&sa, sizeof sa) < 0) return -1;
+    socklen_t sl = sizeof sa;
+    if (getsockname(p->listen_fd, (struct sockaddr *)&sa, &sl) < 0) return -1;
+    p->port = ntohs(sa.sin_port);
+    return listen(p->listen_fd, 1);
+}
+
+static void tls_peer_send(int fd, const char *s)
+{ size_t n = strlen(s); ssize_t w = write(fd, s, n); (void)w; }
+
+static void tls_peer_read_line(int fd, char *buf, int cap)
+{
+    int i = 0;
+    while (i < cap - 1) {
+        char ch;
+        ssize_t n = read(fd, &ch, 1);
+        if (n <= 0) break;
+        buf[i++] = ch;
+        if (ch == '\n') break;
+    }
+    buf[i] = '\0';
+}
+
+/* Count bytes the client sends within a short window (used to prove it sent NO
+ * ClientHello after a rejected / aborted TLS). */
+static int tls_peer_drain_briefly(int fd)
+{
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 300 * 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    int total = 0; char buf[1024];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n <= 0) break;
+        total += (int)n;
+    }
+    return total;
+}
+
+/* Like tls_peer_drain_briefly, but CAPTURES the bytes into p->post_fail_buf so a
+ * test can inspect content (a TLS alert is fine; plaintext credentials/body are not). */
+static void tls_peer_capture_briefly(int fd, TlsPeer *p)
+{
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 300 * 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    p->post_fail_bytes = 0;
+    for (;;) {
+        int room = (int)sizeof p->post_fail_buf - p->post_fail_bytes;
+        if (room <= 0) { char sink[256]; if (read(fd, sink, sizeof sink) <= 0) break; continue; }
+        ssize_t n = read(fd, p->post_fail_buf + p->post_fail_bytes, (size_t)room);
+        if (n <= 0) break;
+        p->post_fail_bytes += (int)n;
+    }
+}
+
+/* Drive a server-side mbedTLS handshake to completion (poll-based, bounded). fd
+ * must be non-blocking. Mirrors shared/tls_client.c::tls_handshake_loop. */
+static int tls_peer_handshake(KlTls *tls, int fd, int timeout_ms)
+{
+    for (;;) {
+        KlTlsResult r = tls->handshake(tls, fd);
+        if (r == KL_TLS_OK)    return 0;
+        if (r == KL_TLS_ERROR) return -1;
+        short ev = (r == KL_TLS_WANT_READ) ? POLLIN : POLLOUT;
+        struct pollfd pfd = { .fd = fd, .events = ev, .revents = 0 };
+        if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
+    }
+}
+
+static void *tls_peer_thread(void *arg)
+{
+    TlsPeer *p = arg;
+    int c = accept(p->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    p->accepted = 1;
+
+    if (p->starttls) {
+        char line[512];
+        tls_peer_send(c, "220 test ESMTP\r\n");
+        tls_peer_read_line(c, line, sizeof line);            /* EHLO */
+        tls_peer_send(c, "250-test\r\n250 STARTTLS\r\n");
+        tls_peer_read_line(c, line, sizeof line);            /* STARTTLS */
+        if (p->reject_starttls) {
+            tls_peer_send(c, "454 TLS not available\r\n");
+            p->post_fail_bytes = tls_peer_drain_briefly(c);  /* must stay 0 */
+            close(c);
+            return NULL;
+        }
+        if (p->inject_after_220) {
+            /* 220 + injected plaintext in one write: the client must abort before
+             * the TLS factory and send NOTHING further. */
+            tls_peer_send(c, "220 go\r\nINJECTED-PLAINTEXT-AFTER-220\r\n");
+            p->post_fail_bytes = tls_peer_drain_briefly(c);  /* must stay 0 */
+            close(c);
+            return NULL;
+        }
+        tls_peer_send(c, "220 go\r\n");
+    }
+
+    /* Hand the fd to the TLS handshake drive (non-blocking for the WANT_* loop). */
+    int fl = fcntl(c, F_GETFL, 0); fcntl(c, F_SETFL, fl | O_NONBLOCK);
+
+    if (p->stall_handshake) {
+        /* Never answer the ClientHello: read + hold until the client closes on
+         * Dop. The client's first handshake flight arriving proves it reached
+         * the handshake. */
+        p->reached_handshake = 1;
+        char buf[1024];
+        for (;;) { ssize_t n = read(c, buf, sizeof buf); if (n == 0) break; if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) break; }
+        close(c);
+        return NULL;
+    }
+
+    KlTlsCtx *sctx = kl_tls_mbedtls_ctx_create_from_buf(
+        (const unsigned char *)HL_TLS_SRV_CRT, sizeof HL_TLS_SRV_CRT,
+        (const unsigned char *)HL_TLS_SRV_KEY, sizeof HL_TLS_SRV_KEY,
+        NULL, 0, KL_MTLS_NONE, tls_alloc());
+    if (!sctx) { close(c); return NULL; }
+    KlTls *stls = kl_tls_mbedtls_create(sctx, tls_alloc());
+    if (!stls) { kl_tls_mbedtls_ctx_destroy(sctx); close(c); return NULL; }
+
+    p->reached_handshake = 1;
+    p->handshake_ok = (tls_peer_handshake(stls, c, 10000) == 0);
+    /* After a FAILED handshake, count any plaintext the client sends: a fail-closed
+     * client sends NONE (no AUTH / MAIL / DATA, so no credentials or body). On
+     * success, drain-and-discard (close_notify etc.). */
+    if (!p->handshake_ok) tls_peer_capture_briefly(c, p);
+    else (void)tls_peer_drain_briefly(c);
+
+    stls->destroy(stls);
+    kl_tls_mbedtls_ctx_destroy(sctx);
+    close(c);
+    return NULL;
+}
+
+static void tls_peer_join(TlsPeer *p)
+{
+    pthread_join(p->tid, NULL);
+    close(p->listen_fd);
+}
+
+/* Build a client KlTlsConfig trusting @p ca_pem. The returned ctx is owned by the
+ * caller and freed with kl_tls_mbedtls_ctx_destroy. */
+static KlTlsConfig tls_client_cfg(KlTlsCtx **out_ctx, const char *ca_pem, size_t ca_len)
+{
+    KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+        (const unsigned char *)ca_pem, ca_len, tls_alloc());
+    *out_ctx = ctx;
+    KlTlsConfig cfg = { .ctx = ctx, .factory = kl_tls_mbedtls_create,
+                        .ctx_destroy = kl_tls_mbedtls_ctx_destroy };
+    return cfg;
+}
+
+/* Manually run the plaintext STARTTLS prelude on the transport, leaving it ready
+ * for hl_smtp_transport_starttls (greeting + EHLO/250 + STARTTLS/220 consumed). */
+static int tls_do_starttls_prelude(HlSmtpTransport *t)
+{
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    if (hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 5000) != 220) return -1;
+    if (hl_smtp_transport_write(t, "EHLO test\r\n", 11, 5000) != 0) return -1;
+    if (hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 5000) != 250) return -1;
+    if (hl_smtp_transport_write(t, "STARTTLS\r\n", 10, 5000) != 0) return -1;
+    if (hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 5000) != 220) return -1;
+    return 0;
+}
+
+static void tls_watchdog_fired(int sig)
+{
+    (void)sig;
+    static const char msg[] = "FATAL: TLS peer test watchdog fired\n";
+    ssize_t w = write(STDERR_FILENO, msg, sizeof msg - 1); (void)w;
+    _exit(70);
+}
+
+/* Implicit TLS (SMTPS): a real mbedTLS handshake completes against the peer and
+ * the transport reports an active TLS session.
+ * REVERT PROOF: give the client CA2 instead of CA1 (unknown-CA test) or a verify
+ * host other than "localhost" (hostname test) and this fails closed. */
+UTEST(smtp_tls, implicit_tls_success)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_implicit_tls(t, "localhost", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 1);
+
+    hl_smtp_transport_shutdown(t);
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);   /* teardown confirmed exactly once */
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+    ASSERT_EQ(p.handshake_ok, 1);
+}
+
+/* STARTTLS: after the plaintext prelude, the transport hands the socket to TLS
+ * BEFORE the ClientHello (plaintext parsing never consumes handshake bytes), and
+ * a real handshake completes. That the handshake succeeds is itself the proof the
+ * socket ownership transferred cleanly at the ciphertext boundary. */
+UTEST(smtp_tls, starttls_success)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.starttls = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    ASSERT_EQ(tls_do_starttls_prelude(t), 0);
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_starttls(t, "localhost", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 1);
+
+    hl_smtp_transport_shutdown(t);
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+    ASSERT_EQ(p.handshake_ok, 1);
+}
+
+/* After a failed handshake the transport must be fail-closed: TLS not active, and
+ * the stream is cancelled so NO plaintext read/write can proceed (no fallback),
+ * and free confirms teardown exactly once. Shared by the failure tests. */
+static void tls_assert_failed_closed(int *utest_result, HlSmtpTransport *t)
+{
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 500), -1);
+    ASSERT_EQ(hl_smtp_transport_write(t, "MAIL FROM:<a@b>\r\n", 16, 500), -1);
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);   /* teardown confirmed exactly once */
+}
+
+/* Hostname mismatch fails closed: the server leaf is CN=localhost, so verifying a
+ * different hostname rejects the handshake. No plaintext fallback.
+ * REVERT PROOF: verify "localhost" (the implicit_tls_success host) and it passes. */
+UTEST(smtp_tls, hostname_mismatch_fails_closed)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_implicit_tls(t, "smtp.wrong.example", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, -1);
+    tls_assert_failed_closed(utest_result, t);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+}
+
+/* Unknown CA fails closed: the client trusts CA2 but the server presents a leaf
+ * signed by CA1, so chain verification fails. No plaintext fallback.
+ * REVERT PROOF: trust HL_TLS_CA1_PEM and it passes. */
+UTEST(smtp_tls, unknown_ca_fails_closed)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA2_PEM, sizeof HL_TLS_CA2_PEM);
+    int rc = hl_smtp_transport_implicit_tls(t, "localhost", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, -1);
+    tls_assert_failed_closed(utest_result, t);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+}
+
+/* The TLS handshake respects the post-resolution operation deadline (Dop): the
+ * peer accepts but never answers the ClientHello, so the client handshake pump
+ * must terminate at Dop, NOT at implicit_tls's own (much larger) stage timeout.
+ * Connect with a 600 ms Dop; call implicit_tls with a 10 s stage budget; the
+ * handshake must fail in well under that.
+ * REVERT PROOF: if the pump did not clamp the stage to Dop, this would run ~10 s
+ * (the stage budget) and the elapsed bound below would fail. */
+UTEST(smtp_tls, handshake_timeout_respects_dop)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.stall_handshake = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    /* 600 ms connect timeout -> Dop = connect + 600 ms. */
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 600,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+
+    uint64_t t0 = kl_monotonic_ms();
+    int rc = hl_smtp_transport_implicit_tls(t, "localhost", &cfg, 10000); /* 10 s stage */
+    uint64_t elapsed = kl_monotonic_ms() - t0;
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_TRUE(elapsed < 3000);          /* bounded by the 600 ms Dop, not the 10 s stage */
+    tls_assert_failed_closed(utest_result, t);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+    ASSERT_EQ(p.reached_handshake, 1);    /* the client did send its ClientHello */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Execute-level TLS behavior (hl_smtp_execute over the real peer): stable
+ *  public tokens, rejected STARTTLS never attempts TLS, and no credential/body
+ *  bytes after any TLS failure. host is "127.0.0.1" (the server leaf's IP SAN),
+ *  unambiguous for both connect and verification.
+ * ════════════════════════════════════════════════════════════════════ */
+
+static HlSmtpMessage tls_exec_msg(int port, int use_tls)
+{
+    HlSmtpMessage m;
+    memset(&m, 0, sizeof m);
+    m.host = "127.0.0.1"; m.port = port; m.use_tls = use_tls;
+    m.username = "SECRETUSER"; m.password = "SECRETPASS";   /* must never reach the peer */
+    m.from = "s@example.com"; m.to = "r@example.com";
+    m.subject = "hi"; m.body = "SECRETBODY"; m.content_type = "text/plain";
+    return m;
+}
+
+/* Rejected STARTTLS never attempts a TLS handshake: the peer answers the STARTTLS
+ * command with 454, so hl_smtp_execute stops with the stable token
+ * "starttls_rejected" and NEVER calls the TLS upgrade.
+ * REVERT PROOF: clear reject_starttls (peer sends 220 go) and reached_handshake
+ * becomes 1 / the token changes. */
+UTEST(smtp_tls, execute_rejected_starttls_never_attempts_tls)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.starttls = 1; p.reject_starttls = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    HlSmtpMessage msg = tls_exec_msg(p.port, 1);   /* STARTTLS */
+    HlSmtpResult r;
+    int rc = hl_smtp_execute(&msg, &cfg, 5000, NULL, NULL, &r);
+
+    alarm(0); signal(SIGALRM, prev);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_STREQ(r.token, "starttls_rejected");    /* stable public token */
+    ASSERT_EQ(p.reached_handshake, 0);             /* NO TLS handshake was attempted */
+}
+
+/* No credentials or body after a STARTTLS handshake failure: the client trusts an
+ * unrelated CA, so the upgrade fails; hl_smtp_execute stops with the stable token
+ * "tls_handshake_failed" and, being fail-closed, sends NO plaintext afterward - so
+ * AUTH (credentials) and MAIL/DATA (body) never reach the peer.
+ * REVERT PROOF: trust CA1 and the handshake succeeds (different token/path). */
+UTEST(smtp_tls, execute_starttls_failure_sends_no_credentials_or_body)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.starttls = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA2_PEM, sizeof HL_TLS_CA2_PEM); /* wrong CA */
+    HlSmtpMessage msg = tls_exec_msg(p.port, 1);
+    HlSmtpResult r;
+    int rc = hl_smtp_execute(&msg, &cfg, 5000, NULL, NULL, &r);
+
+    alarm(0); signal(SIGALRM, prev);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_STREQ(r.token, "tls_handshake_failed");
+    ASSERT_EQ(p.reached_handshake, 1);   /* the upgrade WAS attempted... */
+    ASSERT_EQ(p.handshake_ok, 0);        /* ...and failed */
+    ASSERT_TRUE(tls_post_fail_has_no_secret(&p));   /* no plaintext AUTH/MAIL/DATA/creds/body after TLS failure (a TLS alert is fine) */
+}
+
+/* Implicit-TLS handshake failure carries the same stable token and sends nothing:
+ * with implicit TLS the whole SMTP conversation is gated behind the handshake, so
+ * a failure means no plaintext ever leaves the client. */
+UTEST(smtp_tls, execute_implicit_failure_token_and_no_bytes)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);   /* implicit: no starttls prelude */
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA2_PEM, sizeof HL_TLS_CA2_PEM); /* wrong CA */
+    HlSmtpMessage msg = tls_exec_msg(p.port, 2);   /* implicit TLS */
+    HlSmtpResult r;
+    int rc = hl_smtp_execute(&msg, &cfg, 5000, NULL, NULL, &r);
+
+    alarm(0); signal(SIGALRM, prev);
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_STREQ(r.token, "tls_handshake_failed");
+    ASSERT_EQ(p.handshake_ok, 0);
+    ASSERT_TRUE(tls_post_fail_has_no_secret(&p));   /* no plaintext credentials/body after TLS failure */
+}
+
+/* End-to-end complement to smtp_starttls.unexpected_buffered_bytes_aborts (which
+ * proves the abort happens BEFORE the TLS factory via g_mock_tls_factory_calls==0):
+ * with a REAL client config, injecting plaintext right after the 220 makes
+ * hl_smtp_transport_starttls abort on the non-empty read accumulator, so the peer
+ * never reaches the handshake and the client sends NO ClientHello.
+ * REVERT PROOF: clear inject_after_220 and the upgrade proceeds to a handshake. */
+UTEST(smtp_tls, starttls_buffered_bytes_abort_sends_no_clienthello)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.starttls = 1; p.inject_after_220 = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000,
+                                                   NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    ASSERT_EQ(tls_do_starttls_prelude(t), 0);   /* reads "220 go"; injected bytes land in acc */
+
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_starttls(t, "localhost", &cfg, 5000);
+
+    alarm(0); signal(SIGALRM, prev);
+
+    ASSERT_EQ(rc, -1);                            /* aborted on buffered bytes */
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);      /* teardown confirmed exactly once */
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+    ASSERT_EQ(p.reached_handshake, 0);            /* peer never reached the handshake */
+    ASSERT_EQ(p.post_fail_bytes, 0);              /* client sent no ClientHello */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Live terminal-audit integration (hl_cap_smtp_send emits the single record).
+ *  Uses test-only timeout/teardown injection, NOT a public per-send option:
+ *  the Dop record comes from a short cfg timeout against a stalling peer; the
+ *  teardown:leaked record comes from the smtp_test_force_teardown_leak seam,
+ *  driven in an isolated subprocess (it intentionally leaks the transport).
+ * ════════════════════════════════════════════════════════════════════ */
+
+extern int hl_audit_enabled;
+
+static int audit_line_count(const char *s, const char *needle)
+{
+    int n = 0; const char *p = s;
+    while ((p = strstr(p, needle)) != NULL) { n++; p += strlen(needle); }
+    return n;
+}
+
+/* Run @p fn with stderr captured to @p out (NUL-terminated), audit enabled. */
+static void with_audit_capture(void (*fn)(void), char *out, size_t cap)
+{
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    char tmpl[] = "/tmp/hull_smtp_live_audit_XXXXXX";
+    int fd = mkstemp(tmpl);
+    dup2(fd, STDERR_FILENO);
+    int prev = hl_audit_enabled; hl_audit_enabled = 1;
+    fn();
+    hl_audit_enabled = prev;
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO); close(saved);
+    lseek(fd, 0, SEEK_SET);
+    ssize_t n = read(fd, out, cap - 1); if (n < 0) n = 0; out[n] = '\0';
+    close(fd); unlink(tmpl);
+}
+
+static int g_live_port;
+
+/* A full SMTP responder: greet, 250 to EHLO/MAIL/RCPT, 354 to DATA, 250 after the
+ * body, 221 to QUIT - so hl_cap_smtp_send reaches a clean rc=0. */
+static void *mp_full_smtp_thread(void *arg)
+{
+    MockPeer *m = arg;
+    int c = accept(m->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    m->accepted = 1;
+    mp_send(c, "220 full ESMTP\r\n");
+    char line[1024];
+    int in_data = 0;
+    for (;;) {
+        ssize_t n = read(c, line, sizeof line - 1);
+        if (n <= 0) break;
+        line[n] = '\0';
+        if (in_data) { if (strstr(line, "\r\n.\r\n") || strncmp(line, ".\r\n", 3) == 0) { in_data = 0; mp_send(c, "250 ok\r\n"); } continue; }
+        if (strncasecmp(line, "DATA", 4) == 0)      { mp_send(c, "354 go\r\n"); in_data = 1; }
+        else if (strncasecmp(line, "QUIT", 4) == 0) { mp_send(c, "221 bye\r\n"); break; }
+        else                                         mp_send(c, "250 ok\r\n");
+    }
+    close(c);
+    return NULL;
+}
+
+static void live_deadline_send(void)
+{
+    HlSmtpConfig cfg; memset(&cfg, 0, sizeof cfg);
+    static const char *hosts[] = { "127.0.0.1" };
+    cfg.allowed_hosts = hosts; cfg.host_count = 1; cfg.timeout_ms = 300;   /* short Dop */
+    HlSmtpMessage m; memset(&m, 0, sizeof m);
+    m.host = "127.0.0.1"; m.port = g_live_port;
+    m.from = "s@example.com"; m.to = "r@example.com"; m.subject = "hi"; m.body = "b";
+    const char *err = NULL;
+    hl_cap_smtp_send(&cfg, &m, &err);   /* stalls in the greeting read -> Dop */
+}
+
+/* A real send driven to the post-resolution operation deadline emits EXACTLY ONE
+ * live terminal:post_resolution_deadline record and no other terminal. */
+UTEST(smtp_live_audit, deadline_expired_record)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_accept_and_hold_thread), 0);
+    g_live_port = m.port;
+
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+    char buf[2048]; with_audit_capture(live_deadline_send, buf, sizeof buf);
+    alarm(0); signal(SIGALRM, prev);
+    mp_join(&m);
+
+    ASSERT_EQ(audit_line_count(buf, "\"terminal\":\"post_resolution_deadline\""), 1);
+    ASSERT_EQ(audit_line_count(buf, "\"terminal\":\"cancelled\""), 0);   /* not mis-tagged */
+    ASSERT_EQ(audit_line_count(buf, "\"cap\":\"smtp.send\""), 1);        /* one record, no dup */
+}
+
+static void live_leak_send(void)
+{
+    HlSmtpConfig cfg; memset(&cfg, 0, sizeof cfg);
+    static const char *hosts[] = { "127.0.0.1" };
+    cfg.allowed_hosts = hosts; cfg.host_count = 1; cfg.timeout_ms = 5000;
+    HlSmtpMessage m; memset(&m, 0, sizeof m);
+    m.host = "127.0.0.1"; m.port = g_live_port;
+    m.from = "s@example.com"; m.to = "r@example.com"; m.subject = "hi"; m.body = "b";
+    const char *err = NULL;
+    smtp_test_force_teardown_leak = 1;      /* force the non-detaching teardown branch */
+    hl_cap_smtp_send(&cfg, &m, &err);
+    smtp_test_force_teardown_leak = 0;
+}
+
+/* Forcing the non-detaching teardown branch emits EXACTLY ONE teardown:leaked
+ * record and no duplicate terminal record. Because it intentionally leaks the
+ * transport (fd + event ctx), it runs in an ISOLATED subprocess that must exit
+ * cleanly; the parent captures the child's audit and asserts on it. */
+UTEST(smtp_live_audit, teardown_leaked_record_isolated_subprocess)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_full_smtp_thread), 0);
+    g_live_port = m.port;
+
+    char tmpl[] = "/tmp/hull_smtp_leak_audit_XXXXXX";
+    int fd = mkstemp(tmpl);
+    ASSERT_TRUE(fd >= 0);
+
+    pid_t pid = fork();
+    ASSERT_TRUE(pid >= 0);
+    if (pid == 0) {
+        /* Child: capture audit to the temp fd, run the leaking send, exit clean. */
+        signal(SIGALRM, SIG_DFL);
+        dup2(fd, STDERR_FILENO);
+        hl_audit_enabled = 1;
+        live_leak_send();
+        fflush(stderr);
+        _exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    mp_join(&m);
+
+    ASSERT_TRUE(WIFEXITED(status));        /* terminated safely, not by signal */
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+
+    char buf[2048];
+    lseek(fd, 0, SEEK_SET);
+    ssize_t n = read(fd, buf, sizeof buf - 1); if (n < 0) n = 0; buf[n] = '\0';
+    close(fd); unlink(tmpl);
+
+    ASSERT_EQ(audit_line_count(buf, "\"teardown\":\"leaked\""), 1);
+    ASSERT_EQ(audit_line_count(buf, "\"cap\":\"smtp.send\""), 1);        /* one record */
+    ASSERT_EQ(audit_line_count(buf, "\"terminal\":\"cancelled\""), 0);  /* no spurious terminal */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Cancellation-state matrix: an EXTERNAL cancel firing mid-stage must abort
+ *  promptly and tear down exactly once (free() == 0), at each in-flight state.
+ *
+ *  Worker/submit states (queued, cancel-vs-completion, request_cancel_all) are
+ *  covered in test_smtp_worker / _submit / _async; resolving (post-DNS) and Dop
+ *  are covered above. This matrix fills the transport in-flight stages: a
+ *  cancel_poll (fires after N pump checks) is armed on t AFTER connect so each
+ *  stage is isolated. Every case carries a finite SIGALRM watchdog and asserts a
+ *  prompt terminal + single teardown; ASan proves no leak / double-free.
+ * ════════════════════════════════════════════════════════════════════ */
+
+static int g_cx_after;   /* fire the cancel on the Nth pump check of the stage */
+static int g_cx_calls;
+static int cx_cancel_after_n(void *u) { (void)u; return (++g_cx_calls >= g_cx_after) ? 1 : 0; }
+static void cx_arm(HlSmtpTransport *t) { g_cx_calls = 0; g_cx_after = 2; t->cancel_poll = cx_cancel_after_n; t->cancel_user = NULL; }
+
+/* Greet 220, then stall WITHOUT reading - so a subsequent client write backpressures
+ * (the send buffer fills and never drains). */
+static void *mp_greet_then_stall_thread(void *arg)
+{
+    MockPeer *m = arg;
+    int c = accept(m->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    m->accepted = 1;
+    mp_send(c, "220 stall ESMTP\r\n");
+    for (;;) { usleep(20 * 1000); if (m->slow_reader) break; }   /* hold; test sets slow_reader to release */
+    close(c);
+    return NULL;
+}
+
+/* Cancel while a connect attempt is still racing (fake provider keeps it pending). */
+UTEST(smtp_cancel_state, during_racing_connect)
+{
+    fk_reset();
+    g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;
+    smtp_test_resolve = fk_resolve; smtp_test_socket_provider = &FK_PROVIDER;
+    g_cx_calls = 0; g_cx_after = 3;
+
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+    HlSmtpTransport *t = hl_smtp_transport_connect("h.invalid", 25, 10000,
+                                                   cx_cancel_after_n, NULL, NULL, NULL);
+    alarm(0); signal(SIGALRM, prev);
+    smtp_test_resolve = NULL; smtp_test_socket_provider = NULL;
+
+    ASSERT_TRUE(t == NULL);   /* connect aborted by the cancel; storage freed on the failure path */
+}
+
+/* Cancel while reading a reply (peer withholds the greeting). */
+UTEST(smtp_cancel_state, during_read)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_accept_and_hold_thread), 0);
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    cx_arm(t);                                    /* isolate: cancel only during the read */
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    int code = hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+    ASSERT_EQ(code, -1);                          /* read aborted promptly */
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);      /* teardown exactly once */
+    mp_join(&m);
+}
+
+/* Cancel while writing (peer greets then stops reading -> backpressure). Also the
+ * DATA-body path: DATA is delivered through this same chunked write. */
+UTEST(smtp_cancel_state, during_write_and_data)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_greet_then_stall_thread), 0);
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);   /* consume greeting */
+    cx_arm(t);                                    /* isolate: cancel only during the write */
+    size_t n = 32u << 20;                         /* 32 MiB: exceeds any socket buffer -> guaranteed backpressure */
+    char *big = malloc(n); ASSERT_TRUE(big != NULL); memset(big, 'Z', n);
+    int rc = hl_smtp_transport_write(t, big, n, 10000);
+    free(big);
+
+    alarm(0); signal(SIGALRM, prev);
+    ASSERT_EQ(rc, -1);                            /* write aborted promptly */
+    m.slow_reader = 1;                            /* release the peer thread */
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);      /* teardown exactly once */
+    mp_join(&m);
+}
+
+/* Cancel while the TLS handshake is in flight (peer never answers the ClientHello);
+ * fail closed, no plaintext, single teardown. */
+UTEST(smtp_cancel_state, during_tls_handshake)
+{
+    TlsPeer p; ASSERT_EQ(tls_peer_setup(&p), 0);
+    p.stall_handshake = 1;
+    ASSERT_EQ(pthread_create(&p.tid, NULL, tls_peer_thread, &p), 0);
+    void (*prev)(int) = signal(SIGALRM, tls_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", p.port, 10000, NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    cx_arm(t);                                    /* isolate: cancel only during the handshake */
+    KlTlsCtx *cctx = NULL;
+    KlTlsConfig cfg = tls_client_cfg(&cctx, HL_TLS_CA1_PEM, sizeof HL_TLS_CA1_PEM);
+    int rc = hl_smtp_transport_implicit_tls(t, "localhost", &cfg, 10000);
+
+    alarm(0); signal(SIGALRM, prev);
+    ASSERT_EQ(rc, -1);                            /* handshake aborted by the cancel */
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);/* fail closed, no plaintext */
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);      /* teardown exactly once */
+    kl_tls_mbedtls_ctx_destroy(cctx);
+    tls_peer_join(&p);
+}
+
+/* Graceful close then teardown: a normally-completed conversation shuts down and
+ * frees exactly once (the graceful-close state). */
+UTEST(smtp_cancel_state, graceful_close_teardown_once)
+{
+    MockPeer m; ASSERT_EQ(mp_start(&m, mp_full_smtp_thread), 0);
+    g_live_port = m.port;
+    void (*prev)(int) = signal(SIGALRM, dop_live_watchdog_fired); alarm(30);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL, NULL, NULL, NULL);
+    ASSERT_TRUE(t != NULL);
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
+    ASSERT_EQ(hl_smtp_transport_write(t, "QUIT\r\n", 6, 10000), 0);
+    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 221);
+
+    hl_smtp_transport_shutdown(t);                /* graceful close */
+    int freed = hl_smtp_transport_free(t);
+
+    alarm(0); signal(SIGALRM, prev);
+    ASSERT_EQ(freed, 0);                          /* teardown exactly once, cleanly */
+    mp_join(&m);
 }
 
 UTEST_MAIN()

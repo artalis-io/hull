@@ -54,6 +54,7 @@
 #include "sh_json.h"
 #include "hull/cap/http.h"
 #include "hull/cap/smtp.h"
+#include "hull/cap/smtp_async.h"
 
 #include <keel/http_client_pool.h>
 #include <compress_miniz.h>
@@ -699,6 +700,8 @@ typedef struct {
     HlEnvConfig          env_cfg_storage;
     HlHttpConfig         http_cfg_storage;
     HlSmtpConfig         smtp_cfg_storage;
+    HlSmtpServerCtx      smtp_async_storage;   /* model-2 async SMTP ctx */
+    int                  smtp_async_ok;        /* 1 once the registry is initialised */
     KlTlsConfig          client_tls_config;
     KlTlsCtx            *client_tls_ctx;
     const char           *ca_bundle_path;
@@ -1574,6 +1577,26 @@ static int hl_serve_wire_caps(HlServerState *s)
         rt->smtp_cfg = &s->smtp_cfg_storage;
     }
 
+    /* Model-2 async SMTP: admission cap from the pool worker count W (known at
+     * wiring), the in-flight registry, and the immutable CA trust for per-worker
+     * TLS. The CA bytes are the embedded Mozilla bundle - static .rodata, so they
+     * outlive pool_free() with no lifetime work; a plaintext-only build (no
+     * embedded bundle) leaves ca_buf NULL and the worker sends without TLS. */
+#ifdef HL_ENABLE_HTTP_CLIENT
+    {
+        int workers = s->cfg.num_workers > 0 ? s->cfg.num_workers
+                                             : HL_THREAD_POOL_WORKERS;
+        const unsigned char *ca_buf = NULL; size_t ca_len = 0;
+#ifdef HL_EMBED_CA_BUNDLE
+        hl_embedded_ca_bundle(&ca_buf, &ca_len);
+#endif
+        hl_smtp_server_ctx_init(&s->smtp_async_storage, workers,
+                                ca_buf, ca_len, &s->kl_alloc);
+        s->smtp_async_ok = 1;
+        rt->smtp_async = &s->smtp_async_storage;
+    }
+#endif
+
     return 0;
 }
 
@@ -1768,12 +1791,31 @@ static void hl_serve_run(HlServerState *s)
 /* Phase 5: tear down all resources after the event loop returns. */
 static void hl_serve_teardown_after_serve(HlServerState *s)
 {
+    /* Model-2 async SMTP shutdown, PASS 1 (before pool_free): stop new SMTP
+     * submissions and request cancellation of every in-flight op, so a running
+     * transport observes the shutdown and terminates promptly instead of blocking
+     * the join for its full network deadline. Registry-preserving. Runs while the
+     * runtime + net/server contexts are still valid. */
+#ifdef HL_ENABLE_HTTP_CLIENT
+    if (s->smtp_async_ok)
+        hl_smtp_server_request_cancel_all(&s->smtp_async_storage);
+#endif
+
     /* Free thread pool BEFORE server - join workers, drain queues while
      * server infrastructure (connections, event loop) is still valid. */
     if (s->thread_pool) {
         hl_async_backend()->pool_free(s->thread_pool);
         s->thread_pool = NULL;
     }
+
+    /* PASS 2 (after pool_free): workers are joined + terminals published. Unlink
+     * and release each remaining SMTP op exactly once (cancel the parked
+     * continuation via the net/async seam, drop the retained runtime ref). Still
+     * before hl_app_context_free below, so cont->cancel touches a live runtime. */
+#ifdef HL_ENABLE_HTTP_CLIENT
+    if (s->smtp_async_ok)
+        hl_smtp_server_sweep(&s->smtp_async_storage);
+#endif
 
     /* Free client connection pool (closes idle connections) */
     if (s->cpool_ok == 0) {
@@ -2011,11 +2053,26 @@ static void hl_serve_cleanup(HlServerState *s)
     if (s->manifest_extracted)
         hl_manifest_free(&s->manifest);
 
+    /* Model-2 async SMTP two-pass retirement around pool_free, guarded on the
+     * registry stage having been initialised (partial-init may reach cleanup
+     * before the async ctx was wired). Runs while the runtime + net/server
+     * contexts are still valid (hl_app_context_free is below), regardless of
+     * whether Keel's own server-free cancellation would also run. */
+#ifdef HL_ENABLE_HTTP_CLIENT
+    if (s->smtp_async_ok)
+        hl_smtp_server_request_cancel_all(&s->smtp_async_storage);
+#endif
+
     /* Free thread pool BEFORE server (via the backend vtable) */
     if (s->thread_pool) {
         hl_async_backend()->pool_free(s->thread_pool);
         s->thread_pool = NULL;
     }
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+    if (s->smtp_async_ok)
+        hl_smtp_server_sweep(&s->smtp_async_storage);
+#endif
 
     /* Free client connection pool */
     if (s->cpool_ok == 0)

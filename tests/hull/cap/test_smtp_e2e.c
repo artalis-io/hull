@@ -14,6 +14,9 @@
 
 #include <netinet/in.h>
 #include <pthread.h>
+#include <time.h>
+#include <errno.h>
+#include <stdint.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -41,6 +44,7 @@ typedef struct {
     /* Configurable behavior */
     int             reject_rcpt;
     int             require_auth;
+    int             withhold_greeting;  /* accept, then never send 220 (Dop test) */
 } MockSmtp;
 
 /* Read one CRLF-terminated line from the client */
@@ -75,6 +79,27 @@ static void *mock_smtp_thread(void *arg)
     int client = accept(m->listen_fd, NULL, NULL);
     if (client < 0)
         return NULL;
+
+    /* Dop test: a peer that accepted the TCP connection (so DNS + connect
+     * succeeded, i.e. we are POST-resolution) but withholds its 220 greeting, so
+     * the greeting-read stage runs until the frozen operation deadline Dop fires. */
+    if (m->withhold_greeting) {
+        /* Never send 220. Block reading until the client (the transport) closes on
+         * its Dop expiry, so this thread exits promptly for a fast join while still
+         * having withheld the greeting for the entire pre-Dop window (the transport
+         * only reads in the greeting stage, so this read blocks until Dop fires and
+         * the abortive teardown closes the fd). A watchdog caps a stuck peer. */
+        char buf[64];
+        for (int i = 0; i < 400; i++) {         /* <= ~20s watchdog */
+            struct timeval tv = { 0, 50000 };   /* 50ms poll for close */
+            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+            ssize_t n = read(client, buf, sizeof buf);
+            if (n == 0) break;                  /* transport closed (Dop fired) */
+            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) break;
+        }
+        close(client);
+        return NULL;
+    }
 
     /* 220 greeting */
     mock_send(client, "220 mock.local ESMTP\r\n");
@@ -274,6 +299,50 @@ UTEST(smtp_e2e, plain_send)
     ASSERT_TRUE(strstr(m.data_buf, "Content-Type: text/plain") != NULL);
     ASSERT_TRUE(strstr(m.data_buf, "Hello, World!") != NULL);
 }
+
+static long elapsed_ms(struct timespec *a, struct timespec *b)
+{ return (b->tv_sec - a->tv_sec) * 1000 + (b->tv_nsec - a->tv_nsec) / 1000000; }
+
+/* FROZEN post-resolution operation deadline (Dop, section 8), GREETING stage: a
+ * peer accepts the connection (post-resolution) but withholds its 220 greeting, so
+ * the greeting read runs until Dop. Public token stays connect_failed;
+ * deadline_expired is set (audit adds terminal:post_resolution_deadline).
+ * REVERT PROOF: remove the Dop classification and the greeting read ends on its
+ * stage budget with token "greeting_failed" and deadline_expired 0 - both asserts
+ * below flip. The peer holds until the transport closes, so only Dop ends it. */
+UTEST(smtp_e2e, post_resolution_deadline_greeting_stage)
+{
+    MockSmtp m;
+    ASSERT_EQ(0, mock_smtp_start(&m));
+    m.withhold_greeting = 1;
+
+    HlSmtpMessage msg = {
+        .host = "127.0.0.1", .port = m.port, .use_tls = 0,
+        .from = "s@example.com", .to = "r@example.com",
+        .subject = "hi", .body = "b", .content_type = "text/plain",
+    };
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    HlSmtpResult r;
+    hl_smtp_execute(&msg, NULL, 300, NULL, NULL, &r);   /* Dop = 300ms */
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    ASSERT_EQ(r.rc, -1);
+    ASSERT_STREQ(r.token, "connect_failed");    /* revert -> "greeting_failed" */
+    ASSERT_EQ(r.deadline_expired, 1);            /* revert -> 0 */
+    ASSERT_TRUE(elapsed_ms(&t0, &t1) < 1500);    /* ~Dop; watchdog vs an unbounded read */
+    mock_smtp_stop(&m);
+}
+
+/* The pending-connect Dop and the deadline-versus-cancel precedence are covered
+ * deterministically (injected resolver + fault-injection socket provider, no
+ * environmental skip) in tests/hull/cap/test_smtp_transport.c:
+ *   - pending_connect_dop_expires_deterministically
+ *   - precedence_dop_beats_cancel_at_one_checkpoint / _live_pump
+ * The earlier TEST-NET-1 blackhole probe (environment-skippable) and the
+ * before-DNS cancel-window race were superseded by those and removed. The
+ * greeting-stage Dop above stays as the live end-to-end variant. */
 
 /* ── 2. AUTH PLAIN rejected without TLS ──────────────────────────── */
 

@@ -5,6 +5,10 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/smtp.h"
+#include "hull/cap/smtp_op.h"
+#include "hull/cap/smtp_async.h"
+#include "hull/shared/async.h"
+#include "hull/net_backend.h"
 
 #include <sh_arena.h>
 #include <stdlib.h>
@@ -58,6 +62,31 @@ static int lua_get_string_array(lua_State *L, int idx,
     *out = arr;
     *out_count = count;
     return 0;
+}
+
+/* Push a { ok = false, error = "..." } failure table (leaves it on the stack). */
+static int lua_smtp_fail(lua_State *L, const char *err)
+{
+    lua_newtable(L);
+    lua_pushboolean(L, 0); lua_setfield(L, -2, "ok");
+    lua_pushstring(L, err ? err : "smtp send failed"); lua_setfield(L, -2, "error");
+    return 1;
+}
+
+/* Async resume push_result: read the published terminal (audit once) and push the
+ * { ok, error } result onto the resumed coroutine. driver is the HlSmtpAsyncOp. */
+static void lua_push_smtp_result(lua_State *L, void *driver)
+{
+    HlSmtpResult r;
+    hl_smtp_async_finish((HlSmtpAsyncOp *)driver, &r);
+    lua_newtable(L);
+    if (r.rc == 0) {
+        lua_pushboolean(L, 1); lua_setfield(L, -2, "ok");
+    } else {
+        lua_pushboolean(L, 0); lua_setfield(L, -2, "ok");
+        lua_pushstring(L, r.token ? r.token : "smtp send failed");
+        lua_setfield(L, -2, "error");
+    }
 }
 
 /* smtp.send(opts) */
@@ -152,22 +181,66 @@ static int lua_smtp_send(lua_State *L)
         .content_type = content_type,
     };
 
-    const char *err_msg = NULL;
-    int rc = hl_cap_smtp_send(lua->base.smtp_cfg, &msg, &err_msg);
-
-    /* Return { ok = true/false, error = "..." } */
-    lua_newtable(L);
-    if (rc == 0) {
-        lua_pushboolean(L, 1);
-        lua_setfield(L, -2, "ok");
-    } else {
-        lua_pushboolean(L, 0);
-        lua_setfield(L, -2, "ok");
-        lua_pushstring(L, err_msg ? err_msg : "smtp send failed");
-        lua_setfield(L, -2, "error");
+    /* No active event loop (app.main CLI / in-process test harness / direct C):
+     * synchronous model 1 on the calling thread. This is the ONLY sync path -
+     * we never fall back to it merely because admission or the pool is
+     * unavailable (that resolves as an async connect_failed below). */
+    if (!lua->base.async_ctx || !lua->base.smtp_async) {
+        const char *err_msg = NULL;
+        int rc = hl_cap_smtp_send(lua->base.smtp_cfg, &msg, &err_msg);
+        if (rc == 0) {
+            lua_newtable(L);
+            lua_pushboolean(L, 1); lua_setfield(L, -2, "ok");
+            return 1;
+        }
+        return lua_smtp_fail(L, err_msg);
     }
 
-    return 1;
+    /* Active event loop: model 2. Authorize the host on the submit side (audited
+     * exactly once here) BEFORE any reservation or worker submission. */
+    if (hl_smtp_check_host(lua->base.smtp_cfg, msg.host) != 0) {
+        hl_smtp_audit_denied(&msg);
+        return lua_smtp_fail(L, "host_not_allowed");
+    }
+
+    /* Deep-copy the message into an owned op (crosses to the worker thread). */
+    int timeout_ms = lua->base.smtp_cfg->timeout_ms > 0
+                         ? lua->base.smtp_cfg->timeout_ms : 0;
+    HlSmtpOp *op = hl_smtp_op_create(&msg, timeout_ms);
+    if (!op)
+        return lua_smtp_fail(L, "connect_failed");
+
+    /* Create the continuation vehicle (the runtime cont captures this coroutine). */
+    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.net_ctx,
+                                           lua->base.alloc);
+    if (!actx) { hl_smtp_op_free(op); return lua_smtp_fail(L, "connect_failed"); }
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
+                                                 HlLuaPushResultFn);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
+                                                 lua_push_smtp_result);
+    if (!cont) { hl_smtp_op_free(op); hl_async_ctx_free(actx);
+                 return lua_smtp_fail(L, "connect_failed"); }
+    actx->cont     = cont;
+    actx->detached = (lua->active_conn == NULL);
+
+    HlSmtpAsyncReq req = {
+        .server     = lua->base.smtp_async,
+        .pool       = lua->base.thread_pool,
+        .net_ctx    = lua->base.net_ctx,
+        .actx       = actx,
+        .req_handle = lua->active_conn,
+        .detached   = (lua->active_conn == NULL),
+        .inputs     = op,
+    };
+    HlSmtpAsyncOutcome out;
+    hl_smtp_async_submit(&req, &out);
+
+    if (out.disposition == HL_SMTP_ASYNC_SUSPENDED)
+        return lua_yieldk(L, 0, 0, NULL);   /* resumed by lua_push_smtp_result */
+
+    /* RESOLVED: an immediate scheduling failure (already audited once in the
+     * orchestration). The public token stays connect_failed; never blocks. */
+    return lua_smtp_fail(L, out.result.token ? out.result.token : "connect_failed");
 }
 
 static const luaL_Reg smtp_funcs[] = {

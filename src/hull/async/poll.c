@@ -919,4 +919,10 @@ void hl_net_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
 {
     (void)ctx; (void)op;
 }
+
+__attribute__((weak))
+void hl_net_op_cancel(HlNetBackendCtx *ctx, HlSuspendOp *op)
+{
+    (void)ctx; (void)op;
+}
 #endif

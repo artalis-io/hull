@@ -55,6 +55,15 @@ static void keel_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
     kl_async_complete(w->server, (KlAsyncOp *)op);
 }
 
+static void keel_op_cancel(HlNetBackendCtx *ctx, HlSuspendOp *op)
+{
+    if (!ctx || !op) return;
+    struct kl_wrap *w = (struct kl_wrap *)ctx;
+    /* Idempotent per Keel's exactly-one-terminal contract: safe even if the op
+     * already retired via kl_async_complete or a prior cancel. */
+    kl_async_cancel(w->server, (KlAsyncOp *)op);
+}
+
 /* ── Vtable + getter ───────────────────────────────────────────────── */
 
 /*
@@ -69,6 +78,7 @@ static const HlNetBackend keel_backend = {
     .name        = "keel",
     .op_suspend  = keel_op_suspend,
     .op_complete = keel_op_complete,
+    .op_cancel   = keel_op_cancel,
 };
 
 const HlNetBackend *hl_net_backend(void)
@@ -86,6 +96,11 @@ int hl_net_op_suspend(HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *op)
 void hl_net_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
 {
     keel_op_complete(ctx, op);
+}
+
+void hl_net_op_cancel(HlNetBackendCtx *ctx, HlSuspendOp *op)
+{
+    keel_op_cancel(ctx, op);
 }
 
 /* ── Wrap / unwrap ─────────────────────────────────────────────────── */
