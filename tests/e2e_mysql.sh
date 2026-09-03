@@ -93,6 +93,25 @@ docker run -d --name "$CONTAINER" \
     -p "${MYPORT}:3306" "$IMG" \
     $SERVER_ARGS >/dev/null
 
+# MariaDB 11 images dropped the historic `mysql` client symlink and ship the
+# client as `mariadb`; MySQL 8 ships it as `mysql`. Resolve whichever exists in
+# the running container so every docker-exec query below is client-name-agnostic.
+# Prefer `mariadb` (present only on MariaDB) so MySQL 8 falls through to `mysql`.
+MYSQL_CLI=""
+r=0
+while [ "$r" -lt 30 ]; do
+    if docker exec "$CONTAINER" sh -c 'command -v mariadb' >/dev/null 2>&1; then
+        MYSQL_CLI=mariadb
+        break
+    elif docker exec "$CONTAINER" sh -c 'command -v mysql' >/dev/null 2>&1; then
+        MYSQL_CLI=mysql
+        break
+    fi
+    sleep 1
+    r=$((r + 1))
+done
+[ -n "$MYSQL_CLI" ] || { echo "FAIL: no mysql/mariadb client binary in container"; exit 1; }
+
 echo "=== waiting for mysql ==="
 # The mysql:8 entrypoint runs init against a temporary socket-only server, then
 # restarts the real networked one. mysqladmin ping answers on the socket during
@@ -102,7 +121,7 @@ ready=0
 i=0
 while [ "$i" -lt 90 ]; do
     if docker exec "$CONTAINER" \
-        mysql -uhull -ps3cretpw -h127.0.0.1 --protocol=tcp hulldb \
+        "$MYSQL_CLI" -uhull -ps3cretpw -h127.0.0.1 --protocol=tcp hulldb \
         -e "SELECT 1" >/dev/null 2>&1; then
         ready=1
         break
@@ -384,7 +403,7 @@ app.main(function(ctx)
 end)
 LUA
 ./build/hull "$WFDIR/wf.lua" -d "$DSN" >/dev/null 2>&1 || true
-wfstat=$(docker exec "$CONTAINER" mysql -uhull -ps3cretpw hulldb -N -se \
+wfstat=$(docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -N -se \
   "SELECT CONCAT((SELECT status FROM _hull_jobs WHERE type='__wf:wfm' ORDER BY id DESC LIMIT 1),',',(SELECT COUNT(*) FROM _hull_workflow_steps),',',(SELECT COUNT(*) FROM _hull_job_attempts),',',CASE WHEN (SELECT MAX(finished_ms) FROM _hull_job_attempts)>1000000000000 THEN 'bigint' ELSE 'small' END)" 2>/dev/null)
 case "$wfstat" in
     done,*bigint)
@@ -401,7 +420,7 @@ esac
 # here. Each phase drops the jobs tables first (via mysql, to bypass the
 # _hull_* namespace guard) for a clean, deterministic slate.
 jobs_reset_my() {
-    docker exec "$CONTAINER" mysql -uhull -ps3cretpw hulldb -e \
+    docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -e \
       "SET FOREIGN_KEY_CHECKS=0; DROP TABLE IF EXISTS _hull_jobs, _hull_job_events, _hull_job_subscriptions, _hull_job_concurrency, _hull_job_attempts, _hull_workflow_steps; SET FOREIGN_KEY_CHECKS=1" \
       >/dev/null 2>&1 || true
 }
@@ -518,7 +537,7 @@ fi
 # caching_sha2_password so its cache is empty, then connect over TLS: the
 # full-auth path sends the cleartext password over the encrypted channel.
 echo "=== switching user to caching_sha2_password ==="
-docker exec "$CONTAINER" mysql -uroot -prootpw -e \
+docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e \
     "ALTER USER 'hull'@'%' IDENTIFIED WITH caching_sha2_password BY 's3cretpw';" >/dev/null 2>&1
 
 APPDIR_TLS=$(mktemp -d)
