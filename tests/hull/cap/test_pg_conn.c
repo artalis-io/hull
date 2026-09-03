@@ -517,10 +517,13 @@ static HlPgSslDecision negotiate_with(HlPgSslMode mode, int have_resp, char resp
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return HL_PG_SSL_FAIL;
     if (have_resp) { ssize_t w = write(sv[0], &resp, 1); (void)w; }
+    /* Negotiation now rides the transport: adopt the socketpair end and drive it. */
+    PgTransport *t = hl_pg_transport_adopt(sv[1], NULL, NULL, 0);
+    if (!t) { close(sv[0]); close(sv[1]); return HL_PG_SSL_FAIL; }
     char e[128] = {0};
-    HlPgSslDecision d = hl_pg_ssl_negotiate(sv[1], mode, e, sizeof e);
+    HlPgSslDecision d = hl_pg_ssl_negotiate(t, mode, e, sizeof e);
+    hl_pg_transport_close(t);   /* closes sv[1] */
     close(sv[0]);
-    close(sv[1]);
     return d;
 }
 

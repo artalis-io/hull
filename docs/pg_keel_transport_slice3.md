@@ -131,12 +131,33 @@ descriptor is closed exactly once (`pg_transport_adopt.alloc_failure_consumes_fd
 
 No second legacy raw-fd I/O path remains in `pg_conn.c`; the adopted descriptor
 and a raced-and-won descriptor converge on one send / receive / close
-implementation. One acknowledged exception, deferred to the sslmode/TLS
-checkpoint: the pre-TLS SSLRequest probe (`hl_pg_ssl_negotiate`) still does raw
-`send`/`recv` on the transport's descriptor (obtained via `hl_pg_transport_fd`),
-not `hl_pg_transport_send`/`_recv`. So checkpoint 3 does NOT claim every
-production I/O path is already behind the transport; the SSLRequest path moves
-behind it with the rest of the TLS work.
+implementation. The pre-TLS SSLRequest probe (`hl_pg_ssl_negotiate`) now also
+rides the transport: it takes a `PgTransport *` and uses
+`hl_pg_transport_send_all` / `hl_pg_transport_recv` (plaintext, before any TLS is
+attached), so every production PG I/O path is behind the transport. The only raw
+descriptor use left is handing `hl_pg_transport_fd` to `hl_tls_client_handshake`
+(which takes an int fd) for the TLS handshake itself.
+
+## sslmode matrix (verified)
+
+The complete DSN `sslmode` policy is exercised end to end (`tests/e2e_postgres.sh`,
+real Postgres 16 in Docker) plus the negotiation-decision unit matrix
+(`pg_ssl.negotiation_matrix`):
+
+- `disable` - plaintext, no SSLRequest sent.
+- `require` against a TLS server - SSLRequest -> mbedTLS handshake -> SCRAM over
+  TLS, asserted encrypted via `pg_stat_ssl`.
+- `require` against a NON-TLS server - the server answers `N`; the connection
+  HARD-FAILS with no silent plaintext downgrade.
+- `verify-full` against an untrusted self-signed cert - chain verification against
+  the embedded CA bundle REJECTS it (no connection).
+- `prefer`/`require` server-`S`/`N` decisions - covered by the unit matrix.
+
+`verify-full` SUCCESS against a private CA is not e2e-testable here because Hull's
+PG TLS verify trusts only the embedded Mozilla bundle (a private PG cert is never
+in it); the chain + hostname verification logic itself is the shared
+`shared/tls_client.c`, covered by the live-mbedTLS-peer unit suite
+(`test_smtp_tls`), which the PG path reuses unchanged.
 
 ## Amendment 3: blocking I/O contract
 

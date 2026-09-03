@@ -100,12 +100,13 @@ typedef enum HlPgSslDecision {
 int hl_pg_sslmode_parse(const char *s);
 
 /*
- * Send an SSLRequest on @p fd and read the one-byte server reply, then apply
- * the @p mode policy: DISABLE returns PLAINTEXT without sending anything; a
- * server 'S' returns USE_TLS; a server 'N' returns PLAINTEXT under PREFER and
- * FAIL under REQUIRE/VERIFY. Exposed for tests (socketpair-drivable).
+ * Send an SSLRequest over @p t (the pre-TLS plaintext probe rides the transport)
+ * and read the one-byte server reply, then apply the @p mode policy: DISABLE
+ * returns PLAINTEXT without sending anything; a server 'S' returns USE_TLS; a
+ * server 'N' returns PLAINTEXT under PREFER and FAIL under REQUIRE/VERIFY (no
+ * plaintext downgrade). Exposed for tests (drive it with an adopted socketpair).
  */
-HlPgSslDecision hl_pg_ssl_negotiate(int fd, HlPgSslMode mode,
+HlPgSslDecision hl_pg_ssl_negotiate(struct PgTransport *t, HlPgSslMode mode,
                                     char *errbuf, size_t errlen);
 
 /* ── SCRAM-SHA-256 primitives (exposed for tests) ─────────────────── */

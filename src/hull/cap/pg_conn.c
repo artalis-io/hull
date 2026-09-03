@@ -628,26 +628,23 @@ int hl_pg_sslmode_parse(const char *s)
 
 #ifndef HL_PG_NO_TLS
 
-HlPgSslDecision hl_pg_ssl_negotiate(int fd, HlPgSslMode mode,
+HlPgSslDecision hl_pg_ssl_negotiate(PgTransport *t, HlPgSslMode mode,
                                     char *errbuf, size_t errlen)
 {
     if (mode == HL_PG_SSLMODE_DISABLE) return HL_PG_SSL_PLAINTEXT;
 
-    /* SSLRequest: length(8) then request code 80877103 (0x04d2162f). */
+    /* SSLRequest: length(8) then request code 80877103 (0x04d2162f). This pre-TLS
+     * plaintext probe rides the transport (no TLS attached yet), so send_all / recv
+     * go through the provider - the same production I/O path as the rest of the
+     * protocol, not a separate raw send/recv. */
     static const uint8_t req[8] = { 0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f };
-    size_t sent = 0;
-    while (sent < sizeof req) {
-        ssize_t n;
-        do { n = send(fd, req + sent, sizeof req - sent, PG_SEND_FLAGS); }
-        while (n < 0 && errno == EINTR);
-        if (n <= 0) { set_err(errbuf, errlen, "failed to send SSLRequest");
-                      return HL_PG_SSL_FAIL; }
-        sent += (size_t)n;
+    if (hl_pg_transport_send_all(t, req, sizeof req) != 0) {
+        set_err(errbuf, errlen, "failed to send SSLRequest");
+        return HL_PG_SSL_FAIL;
     }
 
     uint8_t resp;
-    ssize_t n;
-    do { n = recv(fd, &resp, 1, 0); } while (n < 0 && errno == EINTR);
+    ssize_t n = hl_pg_transport_recv(t, &resp, 1);
     if (n <= 0) { set_err(errbuf, errlen, "no SSLRequest response from server");
                   return HL_PG_SSL_FAIL; }
 
@@ -687,10 +684,9 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
         return -1;
     }
     if (mode != HL_PG_SSLMODE_DISABLE) {
-        /* Negotiate SSLRequest pre-TLS on the transport's raw descriptor. */
-        int fd = hl_pg_transport_fd(t);
+        /* SSLRequest pre-TLS probe rides the transport (plaintext, no TLS yet). */
         char e[128] = {0};
-        HlPgSslDecision d = hl_pg_ssl_negotiate(fd, (HlPgSslMode)mode, e, sizeof e);
+        HlPgSslDecision d = hl_pg_ssl_negotiate(t, (HlPgSslMode)mode, e, sizeof e);
         if (d == HL_PG_SSL_FAIL) {
             memset(conn, 0, sizeof(*conn));
             conn->transport = NULL;
@@ -701,8 +697,10 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
         if (d == HL_PG_SSL_USE_TLS) {
             /* verify-ca / verify-full check the chain + hostname against the
              * embedded CA bundle; require / prefer take the session as-is. The
-             * handshake runs over the transport's fd, then the session is handed
-             * to the transport so subsequent bytes tunnel through it. */
+             * handshake needs the raw descriptor (hl_tls_client_handshake takes an
+             * int fd); the resulting session is then handed to the transport so
+             * subsequent bytes tunnel through it. */
+            int fd = hl_pg_transport_fd(t);
             int verify = (mode == HL_PG_SSLMODE_VERIFY);
             struct HlTlsClient *tls =
                 hl_tls_client_handshake(fd, dsn->host, verify, timeout_ms);

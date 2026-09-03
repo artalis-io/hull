@@ -5,10 +5,13 @@
 # and exercises the full path: postgres:// DSN -> backend selection -> connect
 # + startup handshake -> parameterized db.exec / db.query -> typed row decode.
 #
-# Auth is SCRAM-SHA-256 (Phase 3, the postgres:16 default). Two transports are
-# exercised: plaintext (sslmode=disable) and TLS (SSLRequest ->
-# mbedTLS handshake -> SCRAM over TLS, asserted via pg_stat_ssl). Skips cleanly
-# when Docker (or, for the TLS phase, openssl) is unavailable.
+# Auth is SCRAM-SHA-256 (Phase 3, the postgres:16 default). The sslmode matrix is
+# exercised: plaintext (sslmode=disable); TLS (sslmode=require: SSLRequest ->
+# mbedTLS handshake -> SCRAM over TLS, asserted via pg_stat_ssl); no plaintext
+# downgrade (sslmode=require against a non-TLS server hard-fails); and
+# sslmode=verify-full rejecting an untrusted self-signed cert (chain
+# verification). Skips cleanly when Docker (or, for the TLS phases, openssl) is
+# unavailable.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu
@@ -705,6 +708,37 @@ end)'
 echo "=== LISTEN reconnect after a dropped connection ==="
 check_reconnect "lua" "lua" "$LUA_RC_WORKER"
 
+# ── sslmode matrix: no plaintext downgrade ────────────────────────────────
+# The container has no SSL yet, so it answers the SSLRequest with 'N'.
+# sslmode=require MUST hard-fail rather than silently downgrade to plaintext.
+# The connection is lazy, so `/` (db-free) serves for readiness and `/db`
+# triggers the connect attempt.
+echo "=== sslmode=require against a non-TLS server must fail (no downgrade) ==="
+APPDIR_ND=$(mktemp -d)
+cat > "$APPDIR_ND/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })
+local db = require("hull.db").default()
+app.get("/", function(req, res) res:json({ ready = true }) end)
+app.get("/db", function(req, res)
+    local ok, r = pcall(function() return db.query("SELECT 1") end)
+    if ok and r then res:json({ connected = true })
+    else res:json({ error = tostring(r) }) end
+end)
+LUA
+./build/hull -d "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=require" \
+    -p "$PORT" "$APPDIR_ND/app.lua" >"$APPDIR_ND/serve.log" 2>&1 &
+SVR=$!
+wait_for_server "$APPDIR_ND/serve.log" || { echo "::error no-downgrade server did not start"; exit 1; }
+RESP_ND=$(curl -sS "http://127.0.0.1:${PORT}/db" 2>/dev/null || true)
+kill "$SVR" 2>/dev/null || true; SVR=
+echo "response: $RESP_ND"
+if echo "$RESP_ND" | grep -qi '"connected":true'; then
+    echo "::error sslmode=require silently downgraded to plaintext"; exit 1
+fi
+echo "$RESP_ND" | grep -qi 'error' || { echo "::error expected a require-vs-nonTLS failure: $RESP_ND"; exit 1; }
+echo "PASS: sslmode=require refuses a non-TLS server (no plaintext downgrade)"
+rm -rf "$APPDIR_ND"
+
 # ── TLS phase ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.
@@ -766,3 +800,36 @@ else
     echo "--- server log ---"; cat "$APPDIR_TLS/serve.log" 2>/dev/null || true
     exit 1
 fi
+
+# ── sslmode matrix: verify-full rejects an untrusted certificate ──────────
+# The container now serves TLS with a self-signed cert that is NOT in the embedded
+# Mozilla CA bundle, so sslmode=verify-full must fail chain verification instead of
+# connecting. (verify-full SUCCESS against a private CA is not e2e-testable here:
+# Hull's pg TLS verify trusts only the embedded bundle; the chain + hostname
+# verification logic itself is covered by the shared tls_client live-peer unit
+# suite.)
+echo "=== sslmode=verify-full rejects the untrusted self-signed cert ==="
+APPDIR_VF=$(mktemp -d)
+cat > "$APPDIR_VF/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })
+local db = require("hull.db").default()
+app.get("/", function(req, res) res:json({ ready = true }) end)
+app.get("/db", function(req, res)
+    local ok, r = pcall(function() return db.query("SELECT 1") end)
+    if ok and r then res:json({ connected = true })
+    else res:json({ error = tostring(r) }) end
+end)
+LUA
+./build/hull -d "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=verify-full" \
+    -p "$PORT" "$APPDIR_VF/app.lua" >"$APPDIR_VF/serve.log" 2>&1 &
+SVR=$!
+wait_for_server "$APPDIR_VF/serve.log" || { echo "::error verify-full server did not start"; exit 1; }
+RESP_VF=$(curl -sS "http://127.0.0.1:${PORT}/db" 2>/dev/null || true)
+kill "$SVR" 2>/dev/null || true; SVR=
+echo "response: $RESP_VF"
+if echo "$RESP_VF" | grep -qi '"connected":true'; then
+    echo "::error verify-full accepted an untrusted self-signed cert"; exit 1
+fi
+echo "$RESP_VF" | grep -qi 'error' || { echo "::error expected a verify-full chain rejection: $RESP_VF"; exit 1; }
+echo "PASS: sslmode=verify-full rejects the untrusted self-signed cert (chain verification)"
+rm -rf "$APPDIR_VF"
