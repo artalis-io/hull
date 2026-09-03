@@ -7,15 +7,16 @@
  * drive it, and a KlSocketProvider's raw ops - into the blocking byte transport
  * the synchronous MySQL/MariaDB client (cap/mysql_conn.c) drives.
  *
- * Ownership split (docs/pg_keel_transport_slice3.md): mysql_conn.c owns the wire
- * protocol (framing, SCRAM auth, the $n rewrite, typed decode, migrations, the
- * SSLRequest / sslmode negotiation, and the stable error tokens). This transport
- * owns only the bytes: name resolution, the connection race, blocking
- * reads/writes, an optional attached TLS session, and close.
+ * Ownership split (docs/mysql_keel_transport_slice4.md): mysql_conn.c owns the wire
+ * protocol (framing, mysql_native_password + caching_sha2_password auth, the binary
+ * prepared-statement protocol, typed decode, migrations, the interleaved SSLRequest
+ * packet / sslmode negotiation, and the stable error tokens). This transport owns
+ * only the bytes: name resolution, the connection race, blocking reads/writes, an
+ * optional attached TLS session, and close.
  *
- * Heap-allocated + opaque (Amendment 1, refined at Checkpoint 2 review): the
- * transport is a HEAP allocation reached through an opaque handle. mysql_conn.c holds
- * a MyTransport* in HlPgConn, never an embedded value. This is what lets the
+ * Heap-allocated + opaque (docs/mysql_keel_transport_slice4.md D1): the transport is
+ * a HEAP allocation reached through an opaque handle. mysql_conn.c holds a
+ * MyTransport* in HlMyConn, never an embedded value. This is what lets the
  * exceptional non-detachment path (a connect op that will not confirm detachment)
  * leak the WHOLE allocation intentionally and safely - a live op keeps
  * referencing its own storage, so the storage must never be freed under it, and
@@ -26,8 +27,8 @@
  * owns a PRIVATE, operation-local KlEventCtx used ONLY during connect
  * establishment. The transport pumps that loop to a terminal state, receives the
  * winning descriptor, and then set_blocking()s it. After that point there is no
- * event loop: startup, SCRAM auth, the TLS handshake, and every query are plain
- * blocking recv / send on the winning fd. Unlike the SMTP transport this uses no
+ * event loop: startup, native / caching_sha2 auth, the TLS handshake, and every
+ * query are plain blocking recv / send on the winning fd. Unlike the SMTP transport this uses no
  * KlStream and no post-connect event loop.
  *
  * TLS (design D2): TLS stays the shared hl_tls_client_* helpers layered over the
@@ -36,7 +37,7 @@
  * runs no handshake (mysql_conn.c owns the SSLRequest negotiation and hands the
  * resulting session here via hl_my_transport_attach_tls).
  *
- * Ownership (design Amendment 1 / Amendment 4 / frozen rules): the transport
+ * Ownership (docs/mysql_keel_transport_slice4.md D1 / frozen rules): the transport
  * retains a BORROWED immutable KlSocketProvider reference (the default POSIX
  * provider, or a test-supplied one) whose lifetime exceeds the connection, and it
  * OWNS the private KlEventCtx, the embedded KlConnectOp and its timers, the
@@ -98,7 +99,7 @@ MyTransport *hl_my_transport_connect(const char *host, const char *port,
                                      char *errbuf, size_t errlen);
 
 /**
- * Adopt an already-connected, blocking descriptor @p fd (design Amendment 2).
+ * Adopt an already-connected, blocking descriptor @p fd (docs/mysql_keel_transport_slice4.md D1, the adopt path).
  *
  * Takes ownership of @p fd exactly once, associates it with @p sp_or_NULL (or the
  * default POSIX provider when NULL), and skips resolution, connection racing, and

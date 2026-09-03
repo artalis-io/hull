@@ -1,6 +1,6 @@
 /*
- * test_mysql_transport.c - Focused tests for the MySQL/MariaDB-over-Keel-v3 transport
- * (Checkpoint 2 of docs/pg_keel_transport_slice3.md).
+ * test_mysql_transport.c - Focused contract tests for the MySQL/MariaDB-over-Keel-v3
+ * transport (cap/mysql_transport.c). See docs/mysql_keel_transport_slice4.md.
  *
  * These drive the transport's connect machinery + blocking I/O + lifecycle
  * through the -DHL_MY_TEST_HOOKS seam, WITHOUT any network or DNS. Coverage:

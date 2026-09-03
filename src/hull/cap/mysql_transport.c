@@ -65,7 +65,7 @@
 /* One connection's byte transport (opaque to consumers; defined here). Heap-
  * allocated; the exceptional non-detachment path leaks the whole block. */
 struct MyTransport {
-    /* Borrowed, immutable, outlives the connection (Amendment 4). */
+    /* Borrowed, immutable, outlives the connection (docs/mysql_keel_transport_slice4.md D1). */
     const KlSocketProvider *sp;
 
     /* Owned: the private connect-time event context. Created only when a race is
@@ -739,7 +739,8 @@ MyTransport *hl_my_transport_adopt(int fd, const KlSocketProvider *sp_or_NULL,
     t->fd = (KlSocketHandle)fd;
     /* SIGPIPE suppression parity: every subsequent write goes through
      * hl_my_transport_send (nosignal flag) plus this per-fd SO_NOSIGPIPE where the
-     * platform offers it. No event ctx, no resolution, no racing (Amendment 2). */
+     * platform offers it. No event ctx, no resolution, no racing (the adopt path,
+     * docs/mysql_keel_transport_slice4.md D1). */
     sp_set_nosigpipe(t, t->fd);
     return t;
 }
@@ -804,9 +805,9 @@ int hl_my_transport_close(MyTransport *t)
     if (!t)
         return 0;
 
-    /* One close path: TLS shutdown, then TLS free, then provider close (design
-     * Amendment 1). TLS teardown is idempotent (t->tls cleared), so a retry after
-     * a preserved non-detachment does not repeat it. */
+    /* One close path: TLS shutdown, then TLS free, then provider close
+     * (docs/mysql_keel_transport_slice4.md D1). TLS teardown is idempotent (t->tls
+     * cleared), so a retry after a preserved non-detachment does not repeat it. */
     if (t->tls) {
         if (kl_handle_valid(t->fd))
             hl_tls_client_shutdown((int)t->fd, t->tls);
