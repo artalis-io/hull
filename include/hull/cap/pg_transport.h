@@ -106,8 +106,15 @@ PgTransport *hl_pg_transport_connect(const char *host, const char *port,
  * connection. This backs the existing hl_pg_conn_start(conn, fd, dsn) test API.
  * The provider is validated (required ops + KL_SOCK_CAP_NATIVE_FD) as in connect.
  *
- * Returns a non-NULL transport on success, NULL on a bad argument / invalid
- * provider (writing @p errbuf when provided). On NULL the caller still owns @p fd.
+ * Returns a non-NULL transport on success. On failure returns NULL, and the
+ * descriptor is CONSUMED (closed exactly once through the provider) on every
+ * outcome where the provider can close it - i.e. an allocation failure after a
+ * valid provider was resolved - so the caller never leaks it. The ONLY
+ * non-consuming failures are an invalid @p fd (< 0, nothing to close) or an
+ * invalid provider (@p sp_or_NULL missing a required op / capability, so there is
+ * no way to close @p fd); in those two cases the caller still owns @p fd. This
+ * lets hl_pg_conn_start keep its "takes ownership of fd, closed on every failure"
+ * contract with a valid (default) provider.
  */
 PgTransport *hl_pg_transport_adopt(int fd,
                                    const struct KlSocketProvider *sp_or_NULL,

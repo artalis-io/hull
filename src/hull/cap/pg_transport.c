@@ -143,11 +143,14 @@ static const KlSocketProvider *default_provider(void)
  * for every sp_* op; pg_test_resolve fills t->addrs in exact injected order;
  * pg_test_checkpoint observes each pump checkpoint; pg_test_force_no_detach makes
  * the detach-confirm predicate report "not detached" so a test can drive the
- * pathological non-detachment path (preserve storage + retryable close). */
+ * pathological non-detachment path (preserve storage + retryable close);
+ * pg_test_force_alloc_fail makes transport_new return NULL so a test can drive the
+ * allocation-failure path (adopt must still consume the descriptor). */
 const KlSocketProvider *pg_test_socket_provider;
 int (*pg_test_resolve)(PgTransport *t, const char *host, int port);
 void (*pg_test_checkpoint)(PgTransport *t, unsigned idx);
 int  pg_test_force_no_detach;
+int  pg_test_force_alloc_fail;
 static unsigned pg_test_checkpoint_seq;
 #endif
 
@@ -596,6 +599,9 @@ static int connect_teardown(PgTransport *t)
 
 static PgTransport *transport_new(const KlSocketProvider *sp)
 {
+#ifdef HL_PG_TEST_HOOKS
+    if (pg_test_force_alloc_fail) return NULL;   /* simulate calloc failure */
+#endif
     PgTransport *t = calloc(1, sizeof *t);
     if (!t) return NULL;
     t->sp = sp;
@@ -715,11 +721,21 @@ PgTransport *hl_pg_transport_adopt(int fd, const KlSocketProvider *sp_or_NULL,
     }
     const KlSocketProvider *sp = sp_or_NULL ? sp_or_NULL : default_provider();
     if (validate_provider(sp) != 0) {
+        /* Invalid provider: we cannot know how to close @p fd, so leave it with
+         * the caller (the only non-consuming failure other than fd < 0). */
         set_err(errbuf, errlen, "socket provider missing a required op or KL_SOCK_CAP_NATIVE_FD");
         return NULL;
     }
     PgTransport *t = transport_new(sp);
-    if (!t) { set_err(errbuf, errlen, "out of memory"); return NULL; }
+    if (!t) {
+        /* CONSUME @p fd: the provider is valid, so close the descriptor through it
+         * rather than leaking it. This upholds hl_pg_conn_start's take-ownership
+         * contract (fd is closed on every failure once adoption has a valid
+         * provider), and closes it EXACTLY once. */
+        sp->ops->close(sp->context, (KlSocketHandle)fd);
+        set_err(errbuf, errlen, "out of memory");
+        return NULL;
+    }
     t->fd = (KlSocketHandle)fd;
     /* SIGPIPE suppression parity: every subsequent write goes through
      * hl_pg_transport_send (nosignal flag) plus this per-fd SO_NOSIGPIPE where the

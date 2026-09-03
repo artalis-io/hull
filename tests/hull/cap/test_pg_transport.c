@@ -224,6 +224,7 @@ static void seam_clear(void)
     pg_test_socket_provider = NULL;
     pg_test_checkpoint      = NULL;
     pg_test_force_no_detach = 0;
+    pg_test_force_alloc_fail = 0;
 }
 
 /* Proxy for "confirmed detachment retired everything": every mock socketpair was
@@ -497,6 +498,29 @@ UTEST(pg_transport_io, adopt_roundtrip_close_once)
     ASSERT_EQ(g_fk_close_n, 1);           /* the descriptor was closed exactly once */
     close(sv[1]);
     seam_clear(); tp_disarm_watchdog();
+}
+
+/* ── adopt allocation failure CONSUMES the descriptor (closed exactly once) ─
+ *    hl_pg_conn_start relies on adopt taking ownership of the fd and closing it on
+ *    every failure. Force transport_new() to fail (pg_test_force_alloc_fail): adopt
+ *    must return NULL AND close the descriptor through the provider exactly once,
+ *    so the caller never leaks it. ─────────────────────────────────────────────── */
+UTEST(pg_transport_adopt, alloc_failure_consumes_fd_once)
+{
+    fk_reset();
+    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    g_fk_close_n = 0;
+    pg_test_force_alloc_fail = 1;         /* transport_new() returns NULL */
+
+    char err[64] = {0};
+    PgTransport *t = hl_pg_transport_adopt(sv[0], &FK_PROVIDER, err, sizeof err);
+    ASSERT_TRUE(t == NULL);               /* allocation failed */
+    ASSERT_TRUE(err[0] != '\0');
+    ASSERT_EQ(g_fk_close_n, 1);           /* fd CONSUMED: closed exactly once via the provider */
+
+    /* sv[0] is closed by adopt; only the peer remains for the test to close. */
+    close(sv[1]);
+    seam_clear();
 }
 
 /* ── partial recv returns the short count ───────────────────────────── */

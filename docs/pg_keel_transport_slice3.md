@@ -119,9 +119,24 @@ an explicit transport-adopt operation. Adoption:
 - routes subsequent I/O and close through the same transport API as an ordinary
   connection.
 
+`hl_pg_conn_start`'s public contract is that it takes ownership of the fd and
+closes it on every failure. To keep that intact, `hl_pg_transport_adopt` CONSUMES
+the descriptor (closes it exactly once through the provider) on every failure
+outcome where the provider can close it - i.e. an allocation failure after a valid
+provider is resolved. The only non-consuming failures are an invalid fd (< 0) or
+an invalid provider (no way to close the fd); with the default provider (what
+`hl_pg_conn_start` uses) neither is reachable, so the fd is never leaked. Covered
+by a deterministic test that forces the allocation failure and asserts the
+descriptor is closed exactly once (`pg_transport_adopt.alloc_failure_consumes_fd_once`).
+
 No second legacy raw-fd I/O path remains in `pg_conn.c`; the adopted descriptor
 and a raced-and-won descriptor converge on one send / receive / close
-implementation.
+implementation. One acknowledged exception, deferred to the sslmode/TLS
+checkpoint: the pre-TLS SSLRequest probe (`hl_pg_ssl_negotiate`) still does raw
+`send`/`recv` on the transport's descriptor (obtained via `hl_pg_transport_fd`),
+not `hl_pg_transport_send`/`_recv`. So checkpoint 3 does NOT claim every
+production I/O path is already behind the transport; the SSLRequest path moves
+behind it with the rest of the TLS work.
 
 ## Amendment 3: blocking I/O contract
 
