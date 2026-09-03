@@ -850,10 +850,11 @@ ifneq ($(HL_ENABLE_SQLITE),1)
       $(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_POSTGRES),1)
-  # PostgreSQL wire backend: codec + connection + the vtable.
+  # PostgreSQL wire backend: codec + connection + transport + the vtable.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db_postgres.c \
       $(SRCDIR)/hull/cap/pg_conn.c \
+      $(SRCDIR)/hull/cap/pg_transport.c \
       $(SRCDIR)/hull/cap/pgwire.c, \
       $(CAP_SRCS))
 endif

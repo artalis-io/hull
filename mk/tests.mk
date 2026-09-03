@@ -40,6 +40,16 @@ ifeq ($(HL_ENABLE_IMAGE),0)
   TEST_SRCS := $(filter-out %/test_image.c,$(TEST_SRCS))
 endif
 
+# The PostgreSQL-over-Keel transport test inherently needs KlConnectOp +
+# KlEventCtx + cap/pg_transport.c, none of which exist on a base (non-Postgres)
+# build - cap/pg_transport.c is filtered out of CAP_OBJS until HL_ENABLE_POSTGRES.
+# Unlike test_pg_conn (which source-compiles the codec free of Keel via
+# -DHL_PG_NO_TLS), the transport cannot avoid Keel, so gate its discovery on
+# HL_ENABLE_POSTGRES=1. The explicit rule below wires it.
+ifneq ($(HL_ENABLE_POSTGRES),1)
+  TEST_SRCS := $(filter-out %/test_pg_transport.c,$(TEST_SRCS))
+endif
+
 # Under MSan, drop test_js_conformance. Its oracle calls raw JS_Eval on arbitrary JS
 # snippets (including destructuring) to get a ground-truth verdict, which trips a
 # use-of-uninitialized-value INSIDE vendored quickjs.c's js_parse_destructuring_element --
@@ -102,6 +112,22 @@ $(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/
 	$(CC) $(CFLAGS) -DHL_PG_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c \
 		$(PG_CRYPTO_OBJS) $(LDFLAGS)
+
+# PostgreSQL-over-Keel transport test: direct-includes src/hull/cap/pg_transport.c
+# (to unit-test its static helpers: the resolve adapter, the connect machinery,
+# the blocking send/recv path) under -DHL_PG_TEST_HOOKS, which compiles in the
+# gated provider / resolve / pump-checkpoint test seam (pg_test_socket_provider /
+# pg_test_resolve / pg_test_checkpoint). The seam is set ONLY on this compile
+# line, so the production object never sees it (nm-verified). cap_pg_transport.o
+# must be EXCLUDED from the common link, else the direct-included definitions
+# collide (mirrors test_smtp_transport). Everything else (Keel, mbedTLS, the
+# tls_client, the rest of the cap layer) comes from TEST_COMMON_LIBS. Only reached
+# under HL_ENABLE_POSTGRES=1 (Keel + cap_pg_transport.o present).
+PG_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_LIBS))
+PG_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_pg_transport: $(TESTDIR)/hull/cap/test_pg_transport.c \
+    $(SRCDIR)/hull/cap/pg_transport.c $(PG_TP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_PG_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(PG_TP_TEST_LIBS) $(LDFLAGS)
 
 # Valkey/Redis RESP2/3 codec test: respwire.c is a self-contained parser gated
 # out of CAP_OBJS until HL_ENABLE_VALKEY, so link it directly (explicit rule
