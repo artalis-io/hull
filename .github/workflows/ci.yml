@@ -1899,10 +1899,13 @@ jobs:
 
   # The MySQL-over-Keel transport unit test (cap/mysql_transport.c, an independent
   # copy of the PG transport) is HL_ENABLE_MYSQL-gated, so the base sanitizer /
-  # build jobs do not build it. This standing leg builds + runs it under ASan+UBSan
-  # with LSan (on by default on Linux), giving durable coverage of the transport's
-  # allocation-preservation and descriptor-lifecycle behavior so it cannot silently
-  # regress. Mirrors pg-transport-sanitize.
+  # build jobs do not build it. test_mysql_conn now also drives hl_my_conn_start
+  # through that transport (adopt path), so it is HL_ENABLE_MYSQL-gated too and
+  # would otherwise be orphaned from the base `make test`. This standing leg builds
+  # + runs BOTH under ASan+UBSan with LSan (on by default on Linux), giving durable
+  # coverage of the transport's allocation-preservation and descriptor-lifecycle
+  # behavior AND the mysql_conn codec / handshake / adopt path so neither can
+  # silently regress. Mirrors pg-transport-sanitize.
   mysql-transport-sanitize:
     needs: [classify]
     if: needs.classify.outputs.run_db_mysql == 'true'
@@ -1914,11 +1917,14 @@ jobs:
         with:
           submodules: true
 
-      - name: build test_mysql_transport under ASan+UBSan (+LSan), MySQL enabled
-        run: make DEBUG=1 HL_ENABLE_MYSQL=1 build/test_mysql_transport
+      - name: build test_mysql_transport + test_mysql_conn under ASan+UBSan (+LSan), MySQL enabled
+        run: make DEBUG=1 HL_ENABLE_MYSQL=1 build/test_mysql_transport build/test_mysql_conn
 
-      - name: run (LSan leak detection on by default on Linux)
+      - name: run test_mysql_transport (LSan leak detection on by default on Linux)
         run: ASAN_OPTIONS=detect_leaks=1 ./build/test_mysql_transport
+
+      - name: run test_mysql_conn (LSan leak detection on by default on Linux)
+        run: ASAN_OPTIONS=detect_leaks=1 ./build/test_mysql_conn
 
   # Real Valkey/Redis: kv.open{backend="valkey"} / cache.open over the RESP wire
   # -> get/set/del/exists/TTL/incr/CAS/scan/clear, the borrow-copy guard, and

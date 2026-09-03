@@ -171,25 +171,24 @@ void hl_my_dsn_scrub(HlMyDsn *dsn)
     for (size_t i = 0; i < sizeof dsn->password; i++) p[i] = 0;
 }
 
-/* ── Auth + connection (crypto + socket) ──────────────────────────── */
+/* ── Auth helpers (crypto; pure of socket/TLS/Keel) ───────────────── */
 #ifndef HL_MY_NO_AUTH
 #include "hull/cap/crypto.h"
 #include "hull/cap/mysqlwire.h"
-/* TLS transport. The pure-parser fuzzers define HL_MY_NO_TLS (and the unit
- * tests via the Makefile) to stay free of Keel; without it every byte still
- * flows over the raw socket. */
+
+/* The byte transport (Keel v3) + the TLS client. The pure-parser fuzzers define
+ * HL_MY_NO_AUTH (dropping this whole region) and the codec unit test defines
+ * HL_MY_NO_TLS (keeping the pure auth / DSN / sslmode helpers but omitting the
+ * transport-backed connection I/O below); both stay free of Keel. The
+ * transport-dependent connection layer is wrapped under HL_MY_NO_TLS guards. */
 #ifndef HL_MY_NO_TLS
+#include "hull/cap/mysql_transport.h"
 #include "hull/shared/tls_client.h"
 #endif
 
 /* TLS handshake timeout (blocking), distinct from the TCP connect timeout. */
 #define HL_MY_TLS_TIMEOUT_MS 10000
 
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <errno.h>
 #include <stdlib.h>
 
@@ -231,66 +230,32 @@ int hl_my_caching_sha2_scramble(const char *password,
     return D;
 }
 
-/* ── Blocking transport ───────────────────────────────────────────── */
+/* ── Connection layer (Keel v3 transport) ─────────────────────────────
+ * From here through hl_my_conn_close all bytes ride the MyTransport byte
+ * transport, which pulls in Keel + tls_client + mbedTLS. The pure-parser fuzzers
+ * set HL_MY_NO_AUTH (dropping the whole region) and the codec unit test sets
+ * HL_MY_NO_TLS to omit this transport-backed layer while keeping the pure auth
+ * scrambles + DSN parser outside these guards. conn_set_err and the sslmode /
+ * plugin-auth helpers are only reached from this layer, so they live under the
+ * guard too (they would be unused under HL_MY_NO_TLS otherwise). */
+#ifndef HL_MY_NO_TLS
 
 static void conn_set_err(HlMyConn *conn, const char *msg)
 {
     if (conn) snprintf(conn->errmsg, sizeof conn->errmsg, "%s", msg);
 }
 
-/* TCP connect with a bounded wait (non-blocking connect + select), mirroring
- * cap/pg_conn.c. Returns a blocking fd, or -1. */
-static int my_connect(const char *host, const char *port, int timeout_ms)
-{
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return -1;
-
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); return -1; }
-#ifdef SO_NOSIGPIPE
-    int on = 1;
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
-#endif
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
-    if (rc < 0 && errno == EINPROGRESS) {
-        fd_set wf; FD_ZERO(&wf); FD_SET(fd, &wf);
-        struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-        rc = select(fd + 1, NULL, &wf, NULL, timeout_ms > 0 ? &tv : NULL);
-        if (rc > 0) {
-            int soerr = 0; socklen_t l = sizeof soerr;
-            getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &l);
-            rc = soerr == 0 ? 0 : -1;
-        } else rc = -1;
-    }
-    freeaddrinfo(res);
-    if (rc < 0) { close(fd); return -1; }
-    fcntl(fd, F_SETFL, flags);   /* restore blocking */
-    return fd;
-}
-
-/* Raw byte I/O, tunnelled through TLS once conn->tls is attached. */
+/* Raw byte I/O over the owned transport, which routes through an attached TLS
+ * session when one has been handed to it (see hl_my_conn_start) or plain provider
+ * send/recv otherwise. */
 static ssize_t conn_write_raw(HlMyConn *conn, const uint8_t *buf, size_t len)
 {
-#ifndef HL_MY_NO_TLS
-    if (conn->tls) return hl_tls_client_write(conn->fd, conn->tls, buf, len);
-#endif
-    return send(conn->fd, buf, len, 0);
+    return hl_my_transport_send(conn->transport, buf, len);
 }
 
 static ssize_t conn_read_raw(HlMyConn *conn, uint8_t *buf, size_t len)
 {
-#ifndef HL_MY_NO_TLS
-    if (conn->tls) return hl_tls_client_read(conn->fd, conn->tls, buf, len);
-#endif
-    return recv(conn->fd, buf, len, 0);
+    return hl_my_transport_recv(conn->transport, buf, len);
 }
 
 static int conn_send(HlMyConn *conn, const uint8_t *buf, size_t len)
@@ -343,20 +308,18 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
 void hl_my_conn_close(HlMyConn *conn)
 {
     if (!conn) return;
-#ifndef HL_MY_NO_TLS
-    if (conn->tls) {
-        hl_tls_client_shutdown(conn->fd, conn->tls);
-        hl_tls_client_free(conn->tls);
-        conn->tls = NULL;
+    if (conn->transport) {
+        /* Best-effort Terminate-equivalent: MySQL has no explicit close packet,
+         * so just retire the transport. A -1 (a live connect op that will not
+         * confirm detachment) is an accepted rare intentional leak, the same
+         * contract as the transport. */
+        hl_my_transport_close(conn->transport);
+        conn->transport = NULL;
     }
-#endif
-    if (conn->fd >= 0) { close(conn->fd); conn->fd = -1; }
     free(conn->rbuf);
     conn->rbuf = NULL;
     conn->rlen = conn->rcap = conn->consumed = 0;
 }
-
-/* ── Handshake ────────────────────────────────────────────────────── */
 
 /* Send a bare auth-data packet (the AuthSwitch / AuthMoreData continuation). */
 static int send_auth_data(HlMyConn *conn, uint8_t seq,
@@ -370,6 +333,8 @@ static int send_auth_data(HlMyConn *conn, uint8_t seq,
     hl_my_writer_free(&w);
     return se ? -1 : 0;
 }
+
+/* ── Handshake ────────────────────────────────────────────────────── */
 
 /* sslmode -> policy (mirrors cap/pg_conn.c's names for cross-backend parity). */
 enum {
@@ -420,10 +385,16 @@ static void set_unsupported_plugin_err(HlMyConn *conn, const char *plugin)
                  plugin ? plugin : "?");
 }
 
-int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
+/* Run the handshake + auth exchange over @p t, which conn takes ownership of
+ * (freed by hl_my_conn_close on every exit path, success or failure). Shared by
+ * hl_my_conn_open (passing its connected transport) and hl_my_conn_start (passing
+ * an adopted fd's transport), mirroring cap/pg_conn.c's pg_start. */
+static int my_start_over_transport(HlMyConn *conn, MyTransport *t,
+                                   const HlMyDsn *dsn)
 {
     memset(conn, 0, sizeof *conn);
-    conn->fd = fd;
+    conn->transport = t;
+    int tls_active = 0;   /* set once the TLS session is attached to the transport */
 
     HlMyFrame f;
     if (conn_next_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
@@ -462,7 +433,6 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
     uint8_t resp_seq = (uint8_t)(f.seq + 1);
 
     if (sslmode != HL_MY_SSL_DISABLE && server_ssl) {
-#ifndef HL_MY_NO_TLS
         caps |= HL_MY_CLIENT_SSL;
         HlMyWriter sw; hl_my_writer_init(&sw);
         hl_my_build_ssl_request(&sw, (uint8_t)(f.seq + 1), caps, charset);
@@ -470,19 +440,27 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
         hl_my_writer_free(&sw);
         if (sse) { conn_set_err(conn, "failed to send SSLRequest");
                    hl_my_conn_close(conn); return -1; }
+        /* The TLS handshake needs the raw descriptor (hl_tls_client_handshake
+         * takes an int fd); the resulting session is then handed to the transport
+         * so the credentialed HandshakeResponse41 and every subsequent byte tunnel
+         * through it. */
+        int rawfd = hl_my_transport_fd(conn->transport);
         int verify = (sslmode == HL_MY_SSL_VERIFY);
-        conn->tls = hl_tls_client_handshake(conn->fd, dsn->host, verify,
-                                            HL_MY_TLS_TIMEOUT_MS);
-        if (!conn->tls) {
+        struct HlTlsClient *tls =
+            hl_tls_client_handshake(rawfd, dsn->host, verify, HL_MY_TLS_TIMEOUT_MS);
+        if (!tls) {
             snprintf(conn->errmsg, sizeof conn->errmsg,
                      "TLS handshake with %s failed", dsn->host);
             hl_my_conn_close(conn); return -1;
         }
+        if (hl_my_transport_attach_tls(conn->transport, tls) != 0) {
+            hl_tls_client_free(tls);
+            snprintf(conn->errmsg, sizeof conn->errmsg,
+                     "TLS handshake with %s failed", dsn->host);
+            hl_my_conn_close(conn); return -1;
+        }
+        tls_active = 1;
         resp_seq = (uint8_t)(f.seq + 2);   /* response follows the SSLRequest */
-#else
-        conn_set_err(conn, "TLS not available in this build");
-        hl_my_conn_close(conn); return -1;
-#endif
     } else if (sslmode >= HL_MY_SSL_REQUIRE) {
         conn_set_err(conn, "server does not support TLS but sslmode requires it");
         hl_my_conn_close(conn); return -1;
@@ -558,8 +536,7 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
             if (status == HL_MY_CACHING_SHA2_FAST_SUCCESS)
                 continue;                    /* cache hit; an OK packet follows */
             if (status == HL_MY_CACHING_SHA2_FULL_AUTH) {
-#ifndef HL_MY_NO_TLS
-                if (conn->tls) {
+                if (tls_active) {
                     /* Over TLS the password goes as cleartext, NUL-terminated.
                      * dsn->password is already NUL-terminated, so send strlen+1
                      * bytes directly (no plaintext copy on the heap). */
@@ -572,7 +549,6 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
                     }
                     continue;                /* read the OK / ERR result */
                 }
-#endif
                 conn_set_err(conn,
                     "caching_sha2_password full auth needs TLS: set sslmode=require "
                     "(RSA public-key exchange is not yet supported)");
@@ -587,17 +563,39 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
     }
 }
 
+int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
+{
+    /* Adopt takes ownership of fd on success; it CONSUMES the fd on failure with a
+     * valid (default) provider, so the caller never leaks it and we do not close
+     * it here. Save + restore the transport's message across the memset (mirrors
+     * cap/pg_conn.c's hl_pg_conn_start). */
+    MyTransport *t = hl_my_transport_adopt(fd, NULL, conn->errmsg, sizeof conn->errmsg);
+    if (!t) {
+        char saved[sizeof conn->errmsg];
+        snprintf(saved, sizeof saved, "%s", conn->errmsg);
+        memset(conn, 0, sizeof *conn);
+        snprintf(conn->errmsg, sizeof conn->errmsg, "%s", saved);
+        return -1;
+    }
+    /* On any handshake failure my_start_over_transport runs hl_my_conn_close,
+     * which closes the transport (and thus the adopted fd), matching the
+     * documented "closed on handshake failure" behavior without a double close. */
+    return my_start_over_transport(conn, t, dsn);
+}
+
 int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
 {
-    int fd = my_connect(dsn->host, dsn->port, timeout_ms);
-    if (fd < 0) {
+    MyTransport *t = hl_my_transport_connect(dsn->host, dsn->port, timeout_ms,
+                                             NULL, conn->errmsg, sizeof conn->errmsg);
+    if (!t) {
         memset(conn, 0, sizeof *conn);
-        conn->fd = -1;
+        conn->transport = NULL;
+        /* Overwrite the transport's message with the historical public token. */
         snprintf(conn->errmsg, sizeof conn->errmsg,
                  "could not connect to %s:%s", dsn->host, dsn->port);
         return -1;
     }
-    return hl_my_conn_start(conn, fd, dsn);
+    return my_start_over_transport(conn, t, dsn);
 }
 
 /* ── Queries (COM_QUERY text protocol) ────────────────────────────── */
@@ -1116,4 +1114,6 @@ int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql)
     }
     return 0;
 }
-#endif
+
+#endif /* HL_MY_NO_TLS: end of the transport-backed connection layer */
+#endif /* HL_MY_NO_AUTH */
