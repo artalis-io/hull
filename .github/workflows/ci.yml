@@ -1893,9 +1893,17 @@ jobs:
         with:
           submodules: true
 
-      - name: MySQL end-to-end
+      - name: MySQL end-to-end (mysql:8, plaintext + caching_sha2-over-TLS)
         timeout-minutes: 15
         run: make e2e-mysql
+
+      # MariaDB defaults to mysql_native_password; validate the plaintext path
+      # against a real MariaDB server (its TLS matrix is a later checkpoint, so
+      # SKIP_TLS=1). Sequential: e2e_mysql.sh's EXIT trap removes the shared
+      # container before this run recreates it.
+      - name: MariaDB end-to-end (plaintext)
+        timeout-minutes: 15
+        run: MYSQL_IMAGE=mariadb:11 SKIP_TLS=1 make e2e-mysql
 
   # The MySQL-over-Keel transport unit test (cap/mysql_transport.c, an independent
   # copy of the PG transport) is HL_ENABLE_MYSQL-gated, so the base sanitizer /

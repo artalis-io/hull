@@ -496,6 +496,15 @@ else
 fi
 jobs_reset_my   # clean slate for the following phases
 
+# The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
+# full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the
+# plaintext MariaDB run (MariaDB defaults to mysql_native_password; its TLS matrix
+# is a later checkpoint).
+if [ "${SKIP_TLS:-0}" = 1 ]; then
+    echo "PASS: mysql/mariadb plaintext end-to-end (SKIP_TLS set; TLS phase skipped)"
+    exit 0
+fi
+
 # ── TLS + caching_sha2_password phase ─────────────────────────────────
 # MySQL 8 ships TLS on by default (auto-generated certs). Switch the user to
 # caching_sha2_password so its cache is empty, then connect over TLS: the
