@@ -859,10 +859,11 @@ ifneq ($(HL_ENABLE_POSTGRES),1)
       $(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_MYSQL),1)
-  # MySQL / MariaDB wire backend: codec + connection + vtable. Off by default.
+  # MySQL / MariaDB wire backend: codec + connection + transport + vtable. Off by default.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db_mysql.c \
       $(SRCDIR)/hull/cap/mysql_conn.c \
+      $(SRCDIR)/hull/cap/mysql_transport.c \
       $(SRCDIR)/hull/cap/mysqlwire.c, \
       $(CAP_SRCS))
 endif

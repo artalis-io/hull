@@ -50,6 +50,15 @@ ifneq ($(HL_ENABLE_POSTGRES),1)
   TEST_SRCS := $(filter-out %/test_pg_transport.c,$(TEST_SRCS))
 endif
 
+# The MySQL-over-Keel transport test needs KlConnectOp + KlEventCtx +
+# cap/mysql_transport.c (an independent copy of the PG transport), filtered out of
+# CAP_OBJS until HL_ENABLE_MYSQL. Same rationale as test_pg_transport: the
+# transport cannot avoid Keel, so gate discovery on HL_ENABLE_MYSQL=1; the explicit
+# rule below wires it.
+ifneq ($(HL_ENABLE_MYSQL),1)
+  TEST_SRCS := $(filter-out %/test_mysql_transport.c,$(TEST_SRCS))
+endif
+
 # test_pg_conn now drives hl_pg_conn_start through the PgTransport byte transport
 # (adopt path), so like test_pg_transport it needs KlConnectOp + KlEventCtx +
 # cap/pg_transport.c, none of which exist on a base (non-Postgres) build. Gate its
@@ -146,6 +155,17 @@ PG_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_DEP
 $(BUILDDIR)/test_pg_transport: $(TESTDIR)/hull/cap/test_pg_transport.c \
     $(SRCDIR)/hull/cap/pg_transport.c $(PG_TP_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_PG_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(PG_TP_TEST_LIBS) $(LDFLAGS)
+
+# MySQL-over-Keel transport test: mirrors test_pg_transport exactly. Direct-compiles
+# the independent cap/mysql_transport.c under -DHL_MY_TEST_HOOKS (the gated provider
+# / resolve / pump-checkpoint / force-alloc-fail seam, absent from production), and
+# excludes cap_mysql_transport.o from the common link so the direct-included defs do
+# not collide. Only reached under HL_ENABLE_MYSQL=1.
+MY_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_LIBS))
+MY_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_mysql_transport: $(TESTDIR)/hull/cap/test_mysql_transport.c \
+    $(SRCDIR)/hull/cap/mysql_transport.c $(MY_TP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_MY_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MY_TP_TEST_LIBS) $(LDFLAGS)
 
 # Valkey/Redis RESP2/3 codec test: respwire.c is a self-contained parser gated
 # out of CAP_OBJS until HL_ENABLE_VALKEY, so link it directly (explicit rule

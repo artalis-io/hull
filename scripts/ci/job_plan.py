@@ -93,6 +93,7 @@ GROUP = {
     "pg-transport-sanitize": "db-postgres",
     "mysql": "db-mysql",
     "mysql-feature": "db-mysql",
+    "mysql-transport-sanitize": "db-mysql",
     "valkey": "db-valkey",
     "duckdb": "db-duckdb",
     "duckdb-feature": "db-duckdb",

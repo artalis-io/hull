@@ -110,6 +110,7 @@ DB_POSTGRES_FILES = frozenset({
 })
 DB_MYSQL_FILES = frozenset({
     "src/hull/cap/db_mysql.c", "src/hull/cap/mysqlwire.c", "src/hull/cap/mysql_conn.c",
+    "src/hull/cap/mysql_transport.c",
 })
 DB_VALKEY_FILES = frozenset({
     "src/hull/cap/valkey.c", "src/hull/cap/valkey_conn.c",
