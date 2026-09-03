@@ -322,13 +322,15 @@ UTEST(pg_transport_connect, deadline_fires_detaches)
 }
 
 /* ── truly unbounded (timeout_ms <= 0): NO hidden ceiling. A pending attempt is
- *    driven to completion by the test at pump checkpoint 3 (we drain the peer so
- *    the fd becomes writable), proving the loop pumps until completion and does
- *    not impose a 30 s (or any) total deadline. The 5 s watchdog would trip on a
- *    hang; success well under it is the proof. ─────────────────────────────── */
-static void tp_complete_pending_at_cp3(PgTransport *t, unsigned idx)
+ *    driven to completion by the test a few pump ticks in (the hook drains the
+ *    peer once the pump-tick counter reaches a small threshold, so the fd becomes
+ *    writable), proving the loop pumps until completion and does not impose a 30 s
+ *    (or any) total deadline. The 5 s watchdog would trip on a hang; success well
+ *    under it is the proof. ────────────────────────────────────────────────── */
+#define TP_COMPLETE_AT_TICK 3
+static void tp_complete_pending_at_tick(PgTransport *t, unsigned idx)
 {
-    if (idx != 3) return;
+    if (idx != TP_COMPLETE_AT_TICK) return;
     /* Drain the peer of the single in-flight attempt so its fd becomes writable. */
     for (int i = 0; i < t->naddrs; i++) {
         if (kl_handle_valid(t->attempt_fd[i])) {
@@ -342,7 +344,7 @@ UTEST(pg_transport_connect, unbounded_no_hidden_ceiling)
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;
     pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER;
-    pg_test_checkpoint = tp_complete_pending_at_cp3;
+    pg_test_checkpoint = tp_complete_pending_at_tick;
 
     PgTransport *t = hl_pg_transport_connect("h", "5432", 0 /* unbounded */,
                                              &FK_PROVIDER, NULL, 0);
@@ -363,7 +365,7 @@ UTEST(pg_transport_io, io_status_overrides_errno)
     g_fk_bogus_errno = 1;                 /* connect sets errno = EPERM */
     g_fk_io_status_val = KL_IO_PENDING;   /* but io_status says PENDING */
     pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER_IOS;
-    pg_test_checkpoint = tp_complete_pending_at_cp3;
+    pg_test_checkpoint = tp_complete_pending_at_tick;
 
     PgTransport *t = hl_pg_transport_connect("h", "5432", 0, &FK_PROVIDER_IOS, NULL, 0);
     /* On completion get_so_error reports 0 -> success, despite errno == EPERM. */
