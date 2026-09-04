@@ -240,6 +240,18 @@ $(BUILDDIR)/test_tls_client: $(TESTDIR)/hull/test_tls_client.c \
 	$(CC) $(CFLAGS) -DHL_TLS_CLIENT_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/test_tls_client.c $(TLS_CLIENT_TEST_LIBS) $(LDFLAGS)
 
+# agent TCP-connect liveness probe (`hull agent status`): white-box direct-include
+# of agent/probe.c under -DHL_AGENT_PROBE_TEST_HOOKS to drive immediate-success /
+# refusal / pending-timeout / pending-succeed / close-once through a fake
+# socketpair provider (the private KlEventCtx watches real fds). probe.c is NOT in
+# TEST_COMMON_LIBS (no agent_*.o there), so no symbol filter is needed; keel + libc
+# supply the rest. Not under tests/hull/cap/, so the generic pattern rule misses it
+# - this explicit rule builds it; it still runs in the default `make test`.
+$(BUILDDIR)/test_agent_probe: $(TESTDIR)/hull/agent/test_agent_probe.c \
+    $(SRCDIR)/hull/agent/probe.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_AGENT_PROBE_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/agent/test_agent_probe.c $(TEST_COMMON_LIBS) $(LDFLAGS)
+
 # MySQL/MariaDB codec + DSN test: mysqlwire.c + mysql_conn.c are
 # self-contained (no socket/TLS/crypto yet) and gated out of CAP_OBJS until
 # HL_ENABLE_MYSQL, so link them directly. Explicit rule wins over the pattern.

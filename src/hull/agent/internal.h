@@ -19,6 +19,14 @@ struct sqlite3;
 /* Emit {"error": msg} as JSON. Always returns -1. */
 int hl_agent_write_error(ShJsonBuf *out, const char *msg);
 
+/*
+ * Bounded TCP-connect liveness probe to 127.0.0.1:<port> through Keel's socket
+ * provider + a private KlEventCtx. Returns 1 iff a connection establishes
+ * within timeout_ms, 0 otherwise. Closes the descriptor exactly once.
+ * (agent/probe.c; used by hl_agent_status.)
+ */
+int hl_agent_tcp_probe(int port, int timeout_ms);
+
 #ifdef HL_ENABLE_DB
 /*
  * Open an app database for read-only introspection.

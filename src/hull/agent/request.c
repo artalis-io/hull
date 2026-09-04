@@ -9,21 +9,15 @@
 
 #include <sh_json.h>
 
-#include <errno.h>       /* EINPROGRESS classification in the connect probe */
 #include <limits.h>      /* PATH_MAX */
-#include <poll.h>        /* poll(): writability wait in the connect probe */
-#include <stdint.h>      /* uint8_t / uint16_t (KlSockAddr construction) */
+#include <stdint.h>      /* uint64_t (kl_monotonic_ms timing) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>  /* AF_INET / SOCK_STREAM ints for the provider socket() op */
 
 #include <keel/allocator.h>    /* kl_allocator_default */
 #include <keel/clock.h>        /* kl_monotonic_ms: request elapsed timing */
-#include <keel/handle.h>       /* KlSocketHandle, kl_handle_valid */
 #include <keel/http_client.h>  /* kl_http_client_request (sync HTTP client) */
-#include <keel/sockaddr.h>     /* kl_sockaddr_from_ipv4 */
-#include <keel/socket.h>       /* kl_socket_provider_posix + ops table */
 
 int hl_agent_request(const char *method, const char *path, int port,
                      const char *body, const char **headers, int nhdrs,
@@ -87,6 +81,11 @@ int hl_agent_request(const char *method, const char *path, int port,
                                     kh, nhdrs, body, body_len, &resp);
     long elapsed_ms = (long)(kl_monotonic_ms() - t0);
     if (rc != 0) {
+        /* Compatibility delta: the former raw-socket path emitted the
+         * connect-specific "cannot connect to 127.0.0.1:<port>". Keel's client
+         * folds connect/send/recv/parse into one rc, so the message is now the
+         * general "request to 127.0.0.1:<port> failed (error N)" - it retains
+         * the 127.0.0.1:<port> context and carries the KlError code. */
         char err[160];
         snprintf(err, sizeof(err),
                  "request to 127.0.0.1:%d failed (error %d)",
@@ -143,37 +142,10 @@ int hl_agent_status(const char *app_dir, int port, ShJsonBuf *out)
         }
     }
 
-    /* Pure TCP-connect liveness probe through Keel's socket provider (no app
-     * route or middleware invoked): a nonblocking connect + one writability
-     * wait + SO_ERROR, mirroring cap/db_transport.c's connect attempt. */
-    int running = 0;
-    const KlSocketProvider *sp = kl_socket_provider_posix();
-    if (sp && sp->ops && sp->ops->socket && sp->ops->connect &&
-        sp->ops->close && sp->ops->set_nonblocking && sp->ops->get_so_error) {
-        const KlSocketOps *ops = sp->ops;
-        void *sctx = sp->context;
-        KlSockAddr addr;
-        const uint8_t loopback[4] = { 127, 0, 0, 1 };
-        if (kl_sockaddr_from_ipv4(&addr, loopback, (uint16_t)port) == 0) {
-            KlSocketHandle fd = ops->socket(sctx, AF_INET, SOCK_STREAM, 0);
-            if (kl_handle_valid(fd)) {
-                if (ops->set_nonblocking(sctx, fd) == 0) {
-                    int cr = ops->connect(sctx, fd, &addr);
-                    if (cr == 0) {
-                        running = 1;                  /* loopback often connects at once */
-                    } else if (errno == EINPROGRESS) {
-                        struct pollfd pfd = { .fd = (int)fd, .events = POLLOUT, .revents = 0 };
-                        if (poll(&pfd, 1, 1000) > 0) {
-                            int soerr = 0;
-                            if (ops->get_so_error(sctx, fd, &soerr) == 0 && soerr == 0)
-                                running = 1;
-                        }
-                    }
-                }
-                ops->close(sctx, fd);
-            }
-        }
-    }
+    /* Pure TCP-connect liveness probe (no app route or middleware invoked),
+     * driven through Keel's socket provider + a private KlEventCtx watcher.
+     * See agent/probe.c. */
+    int running = hl_agent_tcp_probe(port, 1000);
 
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);
