@@ -1,9 +1,10 @@
 /*
- * test_pg_transport.c - Focused tests for the PostgreSQL-over-Keel-v3 transport
- * (Checkpoint 2 of docs/pg_keel_transport_slice3.md).
+ * test_pg_transport.c - Focused tests for the shared SQL-wire transport
+ * (cap/db_transport.c) driven through the PG seam. Retained as an independent
+ * parity guard after the extraction (docs/db_transport_extraction.md).
  *
  * These drive the transport's connect machinery + blocking I/O + lifecycle
- * through the -DHL_PG_TEST_HOOKS seam, WITHOUT any network or DNS. Coverage:
+ * through the -DHL_DB_TRANSPORT_TEST_HOOKS seam, WITHOUT any network or DNS. Coverage:
  *
  *   - pending -> succeed, and immediate connect() success (rc == 0);
  *   - RFC 8305 stagger: the second address wins;
@@ -22,7 +23,7 @@
  *   - forced non-detachment PRESERVES the whole allocation and close is retryable.
  *
  * The static helpers + the opaque struct are reached by direct-including the
- * capability .c; the Makefile rule for this binary EXCLUDES cap_pg_transport.o
+ * capability .c; the Makefile rule for this binary EXCLUDES cap_db_transport.o
  * from the common link (mirrors test_smtp_transport / test_pg_conn). This test
  * source is never in the shipped binary. Run under ASan/LSan + TSan in CI.
  *
@@ -34,7 +35,7 @@
 /* Direct-source include: the static helpers (resolve_addrs, the connect hooks,
  * the pumps, connect_teardown) plus the opaque struct + public API are under
  * test. */
-#include "../../../src/hull/cap/pg_transport.c"
+#include "../../../src/hull/cap/db_transport.c"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -96,11 +97,11 @@ static void fk_reset(void)
     g_fk_send_eintr_once = 0;
     g_fk_send_max = 0;
     g_fk_send_n = 0;
-    /* The checkpoint counter is a process-global static in pg_transport.c; reset it
+    /* The checkpoint counter is a process-global static in db_transport.c; reset it
      * per test so a "complete at checkpoint N" hook fires deterministically (a
      * prior test's checkpoints must not advance it past N). Visible because this
-     * test direct-includes the capability .c under -DHL_PG_TEST_HOOKS. */
-    pg_test_checkpoint_seq = 0;
+     * test direct-includes the capability .c under -DHL_DB_TRANSPORT_TEST_HOOKS. */
+    db_transport_test_checkpoint_seq = 0;
 }
 
 static FkSlot *fk_slot_for(int a)
@@ -207,7 +208,7 @@ static const KlSocketProvider FK_PROVIDER_IOS =
     { .ops = &FK_OPS_IOS, .context = NULL, .capabilities = KL_SOCK_CAP_NATIVE_FD };
 
 static int g_fk_resolve_called;
-static int fk_resolve(PgTransport *t, const char *host, int port)
+static int fk_resolve(HlDbTransport *t, const char *host, int port)
 {
     (void)host;
     g_fk_resolve_called++;
@@ -220,11 +221,11 @@ static int fk_resolve(PgTransport *t, const char *host, int port)
 
 static void seam_clear(void)
 {
-    pg_test_resolve         = NULL;
-    pg_test_socket_provider = NULL;
-    pg_test_checkpoint      = NULL;
-    pg_test_force_no_detach = 0;
-    pg_test_force_alloc_fail = 0;
+    db_transport_test_resolve         = NULL;
+    db_transport_test_socket_provider = NULL;
+    db_transport_test_checkpoint      = NULL;
+    db_transport_test_force_no_detach = 0;
+    db_transport_test_force_alloc_fail = 0;
 }
 
 /* Proxy for "confirmed detachment retired everything": every mock socketpair was
@@ -242,19 +243,19 @@ UTEST(pg_transport_connect, pending_then_succeed)
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 1; g_fk_disp[0] = FK_SUCCEED;
     g_fk_resolve_called = 0;
-    pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER;
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
-    PgTransport *t = hl_pg_transport_connect("db.example", "5432", 0, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", "db.example", "5432", 0, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t != NULL);
     ASSERT_GE(g_fk_n, 1);
     ASSERT_EQ(g_fk_succeeded_idx, 0);
     ASSERT_GE(g_fk_blocking_set, 1);              /* the winner was set_blocking()'d */
-    ASSERT_TRUE(hl_pg_transport_fd(t) >= 0);
+    ASSERT_TRUE(hl_db_transport_fd(t) >= 0);
     ASSERT_TRUE(kl_connect_op_is_detached(&t->connect_op));
     ASSERT_EQ(t->ev_ready, 0);                    /* connect-only ev ctx freed       */
 
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     seam_clear(); tp_disarm_watchdog();
 }
 
@@ -263,13 +264,13 @@ UTEST(pg_transport_connect, immediate_success_rc0)
 {
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 1; g_fk_disp[0] = FK_IMMEDIATE;
-    pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER;
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
-    PgTransport *t = hl_pg_transport_connect("h", "5432", 0, &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_GE(g_fk_blocking_set, 1);
-    ASSERT_TRUE(hl_pg_transport_fd(t) >= 0);
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_TRUE(hl_db_transport_fd(t) >= 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     seam_clear(); tp_disarm_watchdog();
 }
 
@@ -278,15 +279,15 @@ UTEST(pg_transport_connect, stagger_second_address_wins)
 {
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 2; g_fk_disp[0] = FK_PENDING; g_fk_disp[1] = FK_SUCCEED;
-    pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER;
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
-    PgTransport *t = hl_pg_transport_connect("h", "5432", 0, &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_n, 2);
     ASSERT_EQ(g_fk_order[0], 0);
     ASSERT_EQ(g_fk_order[1], 1);
     ASSERT_EQ(g_fk_succeeded_idx, 1);
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     seam_clear(); tp_disarm_watchdog();
 }
 
@@ -295,10 +296,10 @@ UTEST(pg_transport_connect, all_addresses_fail_detach)
 {
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 2; g_fk_disp[0] = FK_FAIL; g_fk_disp[1] = FK_FAIL;
-    pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER;
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
-    PgTransport *t = hl_pg_transport_connect("h", "5432", 0, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(err[0] != '\0');
     ASSERT_TRUE(fk_all_fds_closed());   /* teardown disposed every racing fd */
@@ -310,12 +311,12 @@ UTEST(pg_transport_connect, deadline_fires_detaches)
 {
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;   /* never completes on its own */
-    pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER;
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
     /* 150 ms TCP-establishment bound; the address stays pending, so the deadline
      * fires and the op fails + detaches. */
-    PgTransport *t = hl_pg_transport_connect("h", "5432", 150, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 150, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(err[0] != '\0');
     ASSERT_TRUE(fk_all_fds_closed());
@@ -329,7 +330,7 @@ UTEST(pg_transport_connect, deadline_fires_detaches)
  *    (or any) total deadline. The 5 s watchdog would trip on a hang; success well
  *    under it is the proof. ────────────────────────────────────────────────── */
 #define TP_COMPLETE_AT_TICK 3
-static void tp_complete_pending_at_tick(PgTransport *t, unsigned idx)
+static void tp_complete_pending_at_tick(HlDbTransport *t, unsigned idx)
 {
     if (idx != TP_COMPLETE_AT_TICK) return;
     /* Drain the peer of the single in-flight attempt so its fd becomes writable. */
@@ -344,14 +345,14 @@ UTEST(pg_transport_connect, unbounded_no_hidden_ceiling)
 {
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;
-    pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER;
-    pg_test_checkpoint = tp_complete_pending_at_tick;
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
+    db_transport_test_checkpoint = tp_complete_pending_at_tick;
 
-    PgTransport *t = hl_pg_transport_connect("h", "5432", 0 /* unbounded */,
+    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0 /* unbounded */,
                                              &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_succeeded_idx, 0);
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     seam_clear(); tp_disarm_watchdog();
 }
 
@@ -365,14 +366,14 @@ UTEST(pg_transport_io, io_status_overrides_errno)
     g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;
     g_fk_bogus_errno = 1;                 /* connect sets errno = EPERM */
     g_fk_io_status_val = KL_IO_PENDING;   /* but io_status says PENDING */
-    pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER_IOS;
-    pg_test_checkpoint = tp_complete_pending_at_tick;
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER_IOS;
+    db_transport_test_checkpoint = tp_complete_pending_at_tick;
 
-    PgTransport *t = hl_pg_transport_connect("h", "5432", 0, &FK_PROVIDER_IOS, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER_IOS, NULL, 0);
     /* On completion get_so_error reports 0 -> success, despite errno == EPERM. */
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_succeeded_idx, 0);
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     seam_clear(); tp_disarm_watchdog();
 }
 
@@ -381,9 +382,9 @@ UTEST(pg_transport_io, send_eintr_retry_via_io_status)
 {
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    pg_test_socket_provider = &FK_PROVIDER_IOS;
+    db_transport_test_socket_provider = &FK_PROVIDER_IOS;
     char err[64] = {0};
-    PgTransport *t = hl_pg_transport_adopt(sv[0], &FK_PROVIDER_IOS, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER_IOS, err, sizeof err);
     ASSERT_TRUE(t != NULL);
 
     /* First send() returns -1 with io_status INTERRUPTED (errno left 0); the retry
@@ -393,14 +394,14 @@ UTEST(pg_transport_io, send_eintr_retry_via_io_status)
     g_fk_send_eintr_once = 1;
     g_fk_io_status_val   = KL_IO_INTERRUPTED;
     const uint8_t msg[3] = { 1, 2, 3 };
-    ssize_t n = hl_pg_transport_send(t, msg, sizeof msg);
+    ssize_t n = hl_db_transport_send(t, msg, sizeof msg);
     ASSERT_EQ((int)n, 3);                 /* retried past the interrupt */
     /* Confirm the 3 bytes arrived after the retry. */
     uint8_t got[3] = {0};
     ssize_t r = recv(sv[1], got, sizeof got, 0);
     ASSERT_EQ((int)r, 3);
     ASSERT_EQ(got[0], 1); ASSERT_EQ(got[2], 3);
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     close(sv[1]);
     seam_clear(); tp_disarm_watchdog();
 }
@@ -416,7 +417,7 @@ UTEST(pg_transport_provider, missing_required_op_fails)
     prov.capabilities = KL_SOCK_CAP_NATIVE_FD;
 
     char err[128] = {0};
-    PgTransport *t = hl_pg_transport_connect("h", "5432", 0, &prov, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &prov, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(strstr(err, "provider") != NULL);
 }
@@ -429,11 +430,11 @@ UTEST(pg_transport_provider, missing_native_fd_cap_fails)
     prov.ops = &FK_OPS; prov.context = NULL; prov.capabilities = 0;   /* no NATIVE_FD */
 
     char err[128] = {0};
-    PgTransport *t = hl_pg_transport_connect("h", "5432", 0, &prov, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &prov, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     /* adopt validates too. */
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    PgTransport *ta = hl_pg_transport_adopt(sv[0], &prov, err, sizeof err);
+    HlDbTransport *ta = hl_db_transport_adopt("pg", sv[0], &prov, err, sizeof err);
     ASSERT_TRUE(ta == NULL);
     close(sv[0]); close(sv[1]);
 }
@@ -444,10 +445,10 @@ UTEST(pg_transport_connect, set_blocking_failure_fails)
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 1; g_fk_disp[0] = FK_SUCCEED;
     g_fk_blocking_fail = 1;               /* set_blocking returns -1 on the winner */
-    pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER;
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
-    PgTransport *t = hl_pg_transport_connect("h", "5432", 0, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(fk_all_fds_closed());     /* the winner was retired, not leaked */
     seam_clear(); tp_disarm_watchdog();
@@ -459,13 +460,13 @@ UTEST(pg_transport_resolve, ip_literal_no_dns)
     fk_reset(); tp_arm_watchdog();
     g_fk_disp[0] = FK_SUCCEED;
     g_fk_resolve_called = 0;
-    pg_test_resolve = NULL;               /* force the real resolve_addrs */
-    pg_test_socket_provider = &FK_PROVIDER;
+    db_transport_test_resolve = NULL;               /* force the real resolve_addrs */
+    db_transport_test_socket_provider = &FK_PROVIDER;
 
-    PgTransport *t = hl_pg_transport_connect("127.0.0.1", "5432", 0, &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("pg", "127.0.0.1", "5432", 0, &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_resolve_called, 0);    /* the DNS callback was never consulted */
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     seam_clear(); tp_disarm_watchdog();
 }
 
@@ -474,13 +475,13 @@ UTEST(pg_transport_io, adopt_roundtrip_close_once)
 {
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    pg_test_socket_provider = &FK_PROVIDER;
-    PgTransport *t = hl_pg_transport_adopt(sv[0], &FK_PROVIDER, NULL, 0);
+    db_transport_test_socket_provider = &FK_PROVIDER;
+    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
-    ASSERT_EQ(hl_pg_transport_fd(t), sv[0]);
+    ASSERT_EQ(hl_db_transport_fd(t), sv[0]);
 
     const uint8_t out[4] = { 9, 8, 7, 6 };
-    ASSERT_EQ(hl_pg_transport_send_all(t, out, sizeof out), 0);
+    ASSERT_EQ(hl_db_transport_send_all(t, out, sizeof out), 0);
     uint8_t got[4] = {0};
     ssize_t r = recv(sv[1], got, sizeof got, 0);
     ASSERT_EQ((int)r, 4);
@@ -490,11 +491,11 @@ UTEST(pg_transport_io, adopt_roundtrip_close_once)
     const uint8_t rep[2] = { 42, 43 };
     ASSERT_EQ((int)send(sv[1], rep, sizeof rep, 0), 2);
     uint8_t in[2] = {0};
-    ASSERT_EQ((int)hl_pg_transport_recv(t, in, sizeof in), 2);
+    ASSERT_EQ((int)hl_db_transport_recv(t, in, sizeof in), 2);
     ASSERT_EQ(in[0], 42); ASSERT_EQ(in[1], 43);
 
     g_fk_close_n = 0;
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     ASSERT_EQ(g_fk_close_n, 1);           /* the descriptor was closed exactly once */
     close(sv[1]);
     seam_clear(); tp_disarm_watchdog();
@@ -502,7 +503,7 @@ UTEST(pg_transport_io, adopt_roundtrip_close_once)
 
 /* ── adopt allocation failure CONSUMES the descriptor (closed exactly once) ─
  *    hl_pg_conn_start relies on adopt taking ownership of the fd and closing it on
- *    every failure. Force transport_new() to fail (pg_test_force_alloc_fail): adopt
+ *    every failure. Force transport_new() to fail (db_transport_test_force_alloc_fail): adopt
  *    must return NULL AND close the descriptor through the provider exactly once,
  *    so the caller never leaks it. ─────────────────────────────────────────────── */
 UTEST(pg_transport_adopt, alloc_failure_consumes_fd_once)
@@ -510,10 +511,10 @@ UTEST(pg_transport_adopt, alloc_failure_consumes_fd_once)
     fk_reset();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     g_fk_close_n = 0;
-    pg_test_force_alloc_fail = 1;         /* transport_new() returns NULL */
+    db_transport_test_force_alloc_fail = 1;         /* transport_new() returns NULL */
 
     char err[64] = {0};
-    PgTransport *t = hl_pg_transport_adopt(sv[0], &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);               /* allocation failed */
     ASSERT_TRUE(err[0] != '\0');
     ASSERT_EQ(g_fk_close_n, 1);           /* fd CONSUMED: closed exactly once via the provider */
@@ -528,24 +529,24 @@ UTEST(pg_transport_io, partial_recv_short_count)
 {
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    pg_test_socket_provider = &FK_PROVIDER;
-    PgTransport *t = hl_pg_transport_adopt(sv[0], &FK_PROVIDER, NULL, 0);
+    db_transport_test_socket_provider = &FK_PROVIDER;
+    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
 
     const uint8_t two[2] = { 5, 6 };
     ASSERT_EQ((int)send(sv[1], two, sizeof two, 0), 2);
     uint8_t buf[16] = {0};
-    ssize_t n = hl_pg_transport_recv(t, buf, sizeof buf);  /* asked 16, gets 2 */
+    ssize_t n = hl_db_transport_recv(t, buf, sizeof buf);  /* asked 16, gets 2 */
     ASSERT_EQ((int)n, 2);
     ASSERT_EQ(buf[0], 5); ASSERT_EQ(buf[1], 6);
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     close(sv[1]);
     seam_clear(); tp_disarm_watchdog();
 }
 
 /* ── send_all completes over FORCED partial writes, preserving order ──
  *    The provider caps every send() at 1 byte, so an 8-byte payload requires 8
- *    send() calls: this proves hl_pg_transport_send_all loops over short writes
+ *    send() calls: this proves hl_db_transport_send_all loops over short writes
  *    (advancing buf + remaining len each time) and that the bytes arrive in order.
  *    The prior adopt roundtrip sent through the raw provider which completes in
  *    one call, so it did not exercise the partial-write path. ─────────────────── */
@@ -553,14 +554,14 @@ UTEST(pg_transport_io, send_all_completes_forced_partial_writes)
 {
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    pg_test_socket_provider = &FK_PROVIDER;
-    PgTransport *t = hl_pg_transport_adopt(sv[0], &FK_PROVIDER, NULL, 0);
+    db_transport_test_socket_provider = &FK_PROVIDER;
+    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
 
     const uint8_t payload[8] = { 10, 20, 30, 40, 50, 60, 70, 80 };
     g_fk_send_max = 1;                    /* 1 byte per send() -> forced partials */
     g_fk_send_n   = 0;
-    ASSERT_EQ(hl_pg_transport_send_all(t, payload, sizeof payload), 0);   /* all sent */
+    ASSERT_EQ(hl_db_transport_send_all(t, payload, sizeof payload), 0);   /* all sent */
     ASSERT_EQ(g_fk_send_n, 8);            /* 8 short sends: the loop ran, not one call */
 
     /* Read every byte back and assert order is preserved. */
@@ -574,7 +575,7 @@ UTEST(pg_transport_io, send_all_completes_forced_partial_writes)
     ASSERT_EQ((int)r, 8);
     for (int i = 0; i < 8; i++) ASSERT_EQ(got[i], payload[i]);
 
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     close(sv[1]);
     seam_clear(); tp_disarm_watchdog();
 }
@@ -584,12 +585,12 @@ UTEST(pg_transport_tls, attach_one_shot_and_fallible)
 {
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    pg_test_socket_provider = &FK_PROVIDER;
-    PgTransport *t = hl_pg_transport_adopt(sv[0], &FK_PROVIDER, NULL, 0);
+    db_transport_test_socket_provider = &FK_PROVIDER;
+    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
 
     /* NULL session rejected. */
-    ASSERT_EQ(hl_pg_transport_attach_tls(t, NULL), -1);
+    ASSERT_EQ(hl_db_transport_attach_tls(t, NULL), -1);
     ASSERT_TRUE(t->tls == NULL);
 
     /* A non-NULL (opaque, never dereferenced here) session attaches once. We use a
@@ -597,15 +598,15 @@ UTEST(pg_transport_tls, attach_one_shot_and_fallible)
      * close so the transport does not shutdown/free the sentinel. This tests the
      * attach LOGIC (one-shot / non-NULL / live-fd), not a real TLS handshake. */
     struct HlTlsClient *sentinel = (struct HlTlsClient *)(void *)&sv;   /* any non-NULL */
-    ASSERT_EQ(hl_pg_transport_attach_tls(t, sentinel), 0);
+    ASSERT_EQ(hl_db_transport_attach_tls(t, sentinel), 0);
     ASSERT_TRUE(t->tls == sentinel);
     /* Second attach rejected; the first is NOT dropped. */
     struct HlTlsClient *other = (struct HlTlsClient *)(void *)&t;
-    ASSERT_EQ(hl_pg_transport_attach_tls(t, other), -1);
+    ASSERT_EQ(hl_db_transport_attach_tls(t, other), -1);
     ASSERT_TRUE(t->tls == sentinel);      /* unchanged: no silent drop */
 
     t->tls = NULL;                        /* white-box: do not free the sentinel */
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     close(sv[1]);
     seam_clear(); tp_disarm_watchdog();
 }
@@ -617,15 +618,15 @@ UTEST(pg_transport_tls, attach_requires_live_fd)
     /* An adopt with a real fd, then white-box drop the fd to INVALID and attempt
      * to attach: rejected because the descriptor is not live. */
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    pg_test_socket_provider = &FK_PROVIDER;
-    PgTransport *t = hl_pg_transport_adopt(sv[0], &FK_PROVIDER, NULL, 0);
+    db_transport_test_socket_provider = &FK_PROVIDER;
+    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     KlSocketHandle saved = t->fd;
     t->fd = KL_INVALID_SOCKET;
     struct HlTlsClient *sentinel = (struct HlTlsClient *)(void *)&sv;
-    ASSERT_EQ(hl_pg_transport_attach_tls(t, sentinel), -1);
+    ASSERT_EQ(hl_db_transport_attach_tls(t, sentinel), -1);
     t->fd = saved;
-    ASSERT_EQ(hl_pg_transport_close(t), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
     close(sv[1]);
     seam_clear();
 }
@@ -634,18 +635,18 @@ UTEST(pg_transport_tls, attach_requires_live_fd)
  * flight, ev ctx live), stopping before terminal - the exact state the preserve/
  * retry contract must handle. Returns the transport (caller drives close/teardown
  * + frees). */
-static PgTransport *tp_make_live_op(void)
+static HlDbTransport *tp_make_live_op(void)
 {
     g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;
-    pg_test_resolve = fk_resolve; pg_test_socket_provider = &FK_PROVIDER;
-    PgTransport *t = transport_new(&FK_PROVIDER);
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
+    HlDbTransport *t = transport_new(&FK_PROVIDER, "pg");
     if (!t) return NULL;
     t->alloc = kl_allocator_default();
     if (kl_event_ctx_init(&t->ev, &t->alloc) != 0) { free(t); return NULL; }
     t->ev_ready = 1;
     t->naddrs = resolve_addrs(t, "h", 5432);
     if (t->naddrs < 1) { kl_event_ctx_free(&t->ev); free(t); return NULL; }
-    if (kl_connect_op_init(&t->connect_op, &PG_HOOKS_NO_DEADLINE, t) != 0 ||
+    if (kl_connect_op_init(&t->connect_op, &DBTP_HOOKS_NO_DEADLINE, t) != 0 ||
         kl_connect_op_start(&t->connect_op) != 0) { kl_event_ctx_free(&t->ev); free(t); return NULL; }
     t->connect_started = 1;
     (void)kl_event_ctx_run(&t->ev, 64, 10);   /* let the attempt arm */
@@ -655,18 +656,18 @@ static PgTransport *tp_make_live_op(void)
 /* ── connect_teardown preserve/retry contract at the unit level ──────
  *    A live started op with force_no_detach set -> teardown returns -1 (preserve,
  *    frees nothing); clear -> teardown returns 0 (quiesce + free ev ctx). This is
- *    the exact contract hl_pg_transport_close relies on. ────────────────────────── */
+ *    the exact contract hl_db_transport_close relies on. ────────────────────────── */
 UTEST(pg_transport_close, teardown_returns_status)
 {
     fk_reset(); tp_arm_watchdog();
-    PgTransport *t = tp_make_live_op();
+    HlDbTransport *t = tp_make_live_op();
     ASSERT_TRUE(t != NULL);
 
-    pg_test_force_no_detach = 1;
+    db_transport_test_force_no_detach = 1;
     ASSERT_EQ(connect_teardown(t), -1);        /* PRESERVE */
     ASSERT_EQ(t->ev_ready, 1);                 /* ev ctx NOT freed */
 
-    pg_test_force_no_detach = 0;
+    db_transport_test_force_no_detach = 0;
     ASSERT_EQ(connect_teardown(t), 0);         /* quiesce + free ev ctx */
     ASSERT_EQ(t->ev_ready, 0);
     ASSERT_TRUE(fk_all_fds_closed());
@@ -674,25 +675,25 @@ UTEST(pg_transport_close, teardown_returns_status)
     seam_clear(); tp_disarm_watchdog();
 }
 
-/* ── forced non-detachment: hl_pg_transport_close PRESERVES the whole allocation
+/* ── forced non-detachment: hl_db_transport_close PRESERVES the whole allocation
  *    and is RETRYABLE. First close (force_no_detach) returns -1 without freeing
  *    (t stays valid); clearing the flag lets a retry detach + free cleanly, so
  *    LSan sees no leak. Proves both preservation and the retryable close. ──────── */
 UTEST(pg_transport_close, forced_non_detach_close_preserves_then_retry)
 {
     fk_reset(); tp_arm_watchdog();
-    PgTransport *t = tp_make_live_op();
+    HlDbTransport *t = tp_make_live_op();
     ASSERT_TRUE(t != NULL);
 
     /* First close cannot confirm detachment -> -1, allocation PRESERVED (t is
      * still a valid pointer; nothing freed). */
-    pg_test_force_no_detach = 1;
-    ASSERT_EQ(hl_pg_transport_close(t), -1);
+    db_transport_test_force_no_detach = 1;
+    ASSERT_EQ(hl_db_transport_close(t), -1);
     ASSERT_EQ(t->ev_ready, 1);                 /* not freed / not quiesced */
 
     /* Retry after clearing the forced state: detaches, frees, returns 0. */
-    pg_test_force_no_detach = 0;
-    ASSERT_EQ(hl_pg_transport_close(t), 0);    /* t freed here */
+    db_transport_test_force_no_detach = 0;
+    ASSERT_EQ(hl_db_transport_close(t), 0);    /* t freed here */
     seam_clear(); tp_disarm_watchdog();
 }
 

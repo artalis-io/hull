@@ -182,7 +182,7 @@ void hl_my_dsn_scrub(HlMyDsn *dsn)
  * transport-backed connection I/O below); both stay free of Keel. The
  * transport-dependent connection layer is wrapped under HL_MY_NO_TLS guards. */
 #ifndef HL_MY_NO_TLS
-#include "hull/cap/mysql_transport.h"
+#include "hull/cap/db_transport.h"
 #include "hull/shared/tls_client.h"
 #endif
 
@@ -231,7 +231,7 @@ int hl_my_caching_sha2_scramble(const char *password,
 }
 
 /* ── Connection layer (Keel v3 transport) ─────────────────────────────
- * From here through hl_my_conn_close all bytes ride the MyTransport byte
+ * From here through hl_my_conn_close all bytes ride the HlDbTransport byte
  * transport, which pulls in Keel + tls_client + mbedTLS. The pure-parser fuzzers
  * set HL_MY_NO_AUTH (dropping the whole region) and the codec unit test sets
  * HL_MY_NO_TLS to omit this transport-backed layer while keeping the pure auth
@@ -250,12 +250,12 @@ static void conn_set_err(HlMyConn *conn, const char *msg)
  * send/recv otherwise. */
 static ssize_t conn_write_raw(HlMyConn *conn, const uint8_t *buf, size_t len)
 {
-    return hl_my_transport_send(conn->transport, buf, len);
+    return hl_db_transport_send(conn->transport, buf, len);
 }
 
 static ssize_t conn_read_raw(HlMyConn *conn, uint8_t *buf, size_t len)
 {
-    return hl_my_transport_recv(conn->transport, buf, len);
+    return hl_db_transport_recv(conn->transport, buf, len);
 }
 
 static int conn_send(HlMyConn *conn, const uint8_t *buf, size_t len)
@@ -313,7 +313,7 @@ void hl_my_conn_close(HlMyConn *conn)
          * so just retire the transport. A -1 (a live connect op that will not
          * confirm detachment) is an accepted rare intentional leak, the same
          * contract as the transport. */
-        hl_my_transport_close(conn->transport);
+        hl_db_transport_close(conn->transport);
         conn->transport = NULL;
     }
     free(conn->rbuf);
@@ -389,7 +389,7 @@ static void set_unsupported_plugin_err(HlMyConn *conn, const char *plugin)
  * (freed by hl_my_conn_close on every exit path, success or failure). Shared by
  * hl_my_conn_open (passing its connected transport) and hl_my_conn_start (passing
  * an adopted fd's transport), mirroring cap/pg_conn.c's pg_start. */
-static int my_start_over_transport(HlMyConn *conn, MyTransport *t,
+static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
                                    const HlMyDsn *dsn)
 {
     memset(conn, 0, sizeof *conn);
@@ -444,7 +444,7 @@ static int my_start_over_transport(HlMyConn *conn, MyTransport *t,
          * takes an int fd); the resulting session is then handed to the transport
          * so the credentialed HandshakeResponse41 and every subsequent byte tunnel
          * through it. */
-        int rawfd = hl_my_transport_fd(conn->transport);
+        int rawfd = hl_db_transport_fd(conn->transport);
         int verify = (sslmode == HL_MY_SSL_VERIFY);
         struct HlTlsClient *tls =
             hl_tls_client_handshake(rawfd, dsn->host, verify, HL_MY_TLS_TIMEOUT_MS);
@@ -453,7 +453,7 @@ static int my_start_over_transport(HlMyConn *conn, MyTransport *t,
                      "TLS handshake with %s failed", dsn->host);
             hl_my_conn_close(conn); return -1;
         }
-        if (hl_my_transport_attach_tls(conn->transport, tls) != 0) {
+        if (hl_db_transport_attach_tls(conn->transport, tls) != 0) {
             hl_tls_client_free(tls);
             snprintf(conn->errmsg, sizeof conn->errmsg,
                      "TLS handshake with %s failed", dsn->host);
@@ -569,7 +569,7 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
      * valid (default) provider, so the caller never leaks it and we do not close
      * it here. Save + restore the transport's message across the memset (mirrors
      * cap/pg_conn.c's hl_pg_conn_start). */
-    MyTransport *t = hl_my_transport_adopt(fd, NULL, conn->errmsg, sizeof conn->errmsg);
+    HlDbTransport *t = hl_db_transport_adopt("mysql", fd, NULL, conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         char saved[sizeof conn->errmsg];
         snprintf(saved, sizeof saved, "%s", conn->errmsg);
@@ -585,7 +585,7 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
 
 int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
 {
-    MyTransport *t = hl_my_transport_connect(dsn->host, dsn->port, timeout_ms,
+    HlDbTransport *t = hl_db_transport_connect("mysql", dsn->host, dsn->port, timeout_ms,
                                              NULL, conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         memset(conn, 0, sizeof *conn);

@@ -91,6 +91,9 @@ GROUP = {
     "postgres": "db-postgres",
     "postgres-feature": "db-postgres",
     "pg-transport-sanitize": "db-postgres",
+    # The shared-transport both-features compose test; keyed to db-postgres because
+    # cap/db_transport.c is in both backend file sets (so it sets run_db_postgres).
+    "db-shared-feature": "db-postgres",
     "mysql": "db-mysql",
     "mysql-feature": "db-mysql",
     "mysql-transport-sanitize": "db-mysql",

@@ -1,14 +1,14 @@
 /*
- * mysql_transport.c: MySQL/MariaDB byte transport over Keel v3 public primitives.
+ * db_transport.c: shared SQL-wire byte transport over Keel v3 public primitives.
  *
- * See include/hull/cap/mysql_transport.h for the ownership split and the contract.
+ * See include/hull/cap/db_transport.h for the ownership split and the contract.
  *
  * This composes Keel's PUBLIC transport surface for the CONNECT phase only:
  * KlConnectOp (resolve + Happy-Eyeballs racing connect) driven on a PRIVATE,
  * operation-local KlEventCtx, plus a KlSocketProvider's public ops table. The
  * connect machinery is the reviewed cap/smtp_transport.c pattern (resolve adapter
  * + KlConnectOp hooks + private KlEventCtx pump + socket-provider wrappers), MINUS
- * the KlStream: a synchronous MySQL/MariaDB connection needs no queued-write /
+ * the KlStream: a synchronous SQL wire connection needs no queued-write /
  * read pause-resume / graceful-close machinery. After the race is won the winning
  * fd is set_blocking()'d and every subsequent byte is plain blocking recv / send
  * with no event loop (design D1).
@@ -16,7 +16,7 @@
  * TLS stays the shared hl_tls_client_* helpers layered over the blocking fd
  * (design D2). This transport only STORES the optional attached HlTlsClient and
  * routes send/recv through it; the SSLRequest negotiation + handshake belong to
- * the consumer (mysql_conn.c), which hands the session here via attach_tls.
+ * the wire client (pg_conn.c / mysql_conn.c), which hands the session here via attach_tls.
  *
  * The transport is a HEAP allocation reached through an opaque handle so the
  * exceptional non-detachment path can drop the whole block intentionally and
@@ -30,7 +30,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/cap/mysql_transport.h"
+#include "hull/cap/db_transport.h"
 #include "hull/shared/tls_client.h"   /* hl_tls_client_read/_write/_shutdown/_free */
 
 /* PUBLIC Keel headers only. */
@@ -47,8 +47,8 @@
 #include <keel/clock.h>   /* kl_monotonic_ms: monotonic connect deadline */
 
 /* Resolution is a sandbox-compatible BLOCKING getaddrinfo, kept out of
- * cap/mysql_conn.c (which the design keeps free of getaddrinfo/socket/poll/raw I/O).
- * This preserves the current MySQL behavior: /etc/hosts, search domains, and
+ * the wire client (which the design keeps free of getaddrinfo/socket/poll/raw I/O).
+ * This preserves the current resolver behavior: /etc/hosts, search domains, and
  * the OS resolver the kernel-sandbox network-outbound grant permits. */
 #include <netdb.h>
 #include <sys/socket.h>   /* AF_UNSPEC / AF_INET / AF_INET6 (cosmo needs it explicit) */
@@ -64,12 +64,17 @@
 
 /* One connection's byte transport (opaque to consumers; defined here). Heap-
  * allocated; the exceptional non-detachment path leaks the whole block. */
-struct MyTransport {
-    /* Borrowed, immutable, outlives the connection (docs/mysql_keel_transport_slice4.md D1). */
+struct HlDbTransport {
+    /* Borrowed, immutable, outlives the connection (docs/db_transport_extraction.md). */
     const KlSocketProvider *sp;
 
+    /* Stable backend label ("pg" / "mysql") for diagnostics only - used solely in
+     * the connect-op non-detachment log_error calls, never in behavior or a public
+     * error token. Points at a caller-supplied string literal. */
+    const char *tag;
+
     /* Owned: the private connect-time event context. Created only when a race is
-     * needed (hl_my_transport_connect); the adopt path leaves it uninitialized. */
+     * needed (hl_db_transport_connect); the adopt path leaves it uninitialized. */
     KlEventCtx  ev;
     int         ev_ready;      /* 1 once kl_event_ctx_init succeeded            */
     KlAllocator alloc;         /* event-ctx allocator (event-loop lifetime)     */
@@ -103,12 +108,12 @@ struct MyTransport {
     struct HlTlsClient *tls;
 };
 
-/* SIGPIPE suppression on send has parity with mysql_conn.c: the winning / adopted fd
+/* SIGPIPE suppression on send has parity with the wire client: the winning / adopted fd
  * gets SO_NOSIGPIPE via the provider's set_nosigpipe hook where the platform
  * offers it, and the POSIX provider's send applies MSG_NOSIGNAL internally, so
- * hl_my_transport_send never emits SIGPIPE. */
+ * hl_db_transport_send never emits SIGPIPE. */
 
-#define MY_PUMP_STEP_MS   50   /* one kl_event_ctx_run readiness wait (a bounded increment) */
+#define DBTP_PUMP_STEP_MS   50   /* one kl_event_ctx_run readiness wait (a bounded increment) */
 
 /* Teardown detachment confirm is ITERATION-bounded (deterministic), NOT
  * wall-bounded: after cancel a well-behaved op retires everything synchronously
@@ -116,11 +121,11 @@ struct MyTransport {
  * pathological non-detachment (fail closed, preserve storage). This is a teardown
  * safety bound, never the connect operation's deadline (which stays select(NULL)
  * unbounded when timeout_ms <= 0). */
-#define MY_DETACH_MAX_STEPS  256
+#define DBTP_DETACH_MAX_STEPS  256
 
 /* RFC 8305 Connection Attempt Delay: wait before starting the next address while
  * an earlier attempt is still in flight (the Happy-Eyeballs stagger). */
-#define MY_CONNECT_ATTEMPT_DELAY_MS  250
+#define DBTP_CONNECT_ATTEMPT_DELAY_MS  250
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Socket provider: an immutable process-wide ops table. We call its PUBLIC ops
@@ -137,29 +142,29 @@ static const KlSocketProvider *default_provider(void)
     return g_sp;
 }
 
-#ifdef HL_MY_TEST_HOOKS
-/* Test-only seam (compiled ONLY under -DHL_MY_TEST_HOOKS, ABSENT from the
- * production object). my_test_socket_provider REPLACES the default POSIX provider
- * for every sp_* op; my_test_resolve fills t->addrs in exact injected order;
- * my_test_checkpoint observes each pump checkpoint; my_test_force_no_detach makes
+#ifdef HL_DB_TRANSPORT_TEST_HOOKS
+/* Test-only seam (compiled ONLY under -DHL_DB_TRANSPORT_TEST_HOOKS, ABSENT from the
+ * production object). db_transport_test_socket_provider REPLACES the default POSIX provider
+ * for every sp_* op; db_transport_test_resolve fills t->addrs in exact injected order;
+ * db_transport_test_checkpoint observes each pump checkpoint; db_transport_test_force_no_detach makes
  * the detach-confirm predicate report "not detached" so a test can drive the
  * pathological non-detachment path (preserve storage + retryable close);
- * my_test_force_alloc_fail makes transport_new return NULL so a test can drive the
+ * db_transport_test_force_alloc_fail makes transport_new return NULL so a test can drive the
  * allocation-failure path (adopt must still consume the descriptor). */
-const KlSocketProvider *my_test_socket_provider;
-int (*my_test_resolve)(MyTransport *t, const char *host, int port);
-void (*my_test_checkpoint)(MyTransport *t, unsigned idx);
-int  my_test_force_no_detach;
-int  my_test_force_alloc_fail;
-static unsigned my_test_checkpoint_seq;
+const KlSocketProvider *db_transport_test_socket_provider;
+int (*db_transport_test_resolve)(HlDbTransport *t, const char *host, int port);
+void (*db_transport_test_checkpoint)(HlDbTransport *t, unsigned idx);
+int  db_transport_test_force_no_detach;
+int  db_transport_test_force_alloc_fail;
+static unsigned db_transport_test_checkpoint_seq;
 #endif
 
 /* The active provider: a test-supplied one when set, else the transport's own
  * borrowed reference. */
-static const KlSocketProvider *active_sp(const MyTransport *t)
+static const KlSocketProvider *active_sp(const HlDbTransport *t)
 {
-#ifdef HL_MY_TEST_HOOKS
-    if (my_test_socket_provider) return my_test_socket_provider;
+#ifdef HL_DB_TRANSPORT_TEST_HOOKS
+    if (db_transport_test_socket_provider) return db_transport_test_socket_provider;
 #endif
     return t->sp ? t->sp : default_provider();
 }
@@ -181,27 +186,27 @@ static int validate_provider(const KlSocketProvider *sp)
     return 0;
 }
 
-static KlSocketHandle sp_socket(const MyTransport *t, int domain, int type, int protocol)
+static KlSocketHandle sp_socket(const HlDbTransport *t, int domain, int type, int protocol)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->socket(sp->context, domain, type, protocol); }
-static int sp_set_nonblocking(const MyTransport *t, KlSocketHandle fd)
+static int sp_set_nonblocking(const HlDbTransport *t, KlSocketHandle fd)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->set_nonblocking(sp->context, fd); }
-static int sp_set_blocking(const MyTransport *t, KlSocketHandle fd)
+static int sp_set_blocking(const HlDbTransport *t, KlSocketHandle fd)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->set_blocking(sp->context, fd); }
-static void sp_set_nosigpipe(const MyTransport *t, KlSocketHandle fd)
+static void sp_set_nosigpipe(const HlDbTransport *t, KlSocketHandle fd)
 { const KlSocketProvider *sp = active_sp(t); if (sp->ops->set_nosigpipe) sp->ops->set_nosigpipe(sp->context, fd); }
-static int sp_connect(const MyTransport *t, KlSocketHandle fd, const KlSockAddr *a)
+static int sp_connect(const HlDbTransport *t, KlSocketHandle fd, const KlSockAddr *a)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->connect(sp->context, fd, a); }
-static int sp_get_so_error(const MyTransport *t, KlSocketHandle fd, int *out)
+static int sp_get_so_error(const HlDbTransport *t, KlSocketHandle fd, int *out)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->get_so_error(sp->context, fd, out); }
-static kl_ssize_t sp_send(const MyTransport *t, KlSocketHandle fd, const void *b, size_t n)
+static kl_ssize_t sp_send(const HlDbTransport *t, KlSocketHandle fd, const void *b, size_t n)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->send(sp->context, fd, b, n); }
-static kl_ssize_t sp_recv(const MyTransport *t, KlSocketHandle fd, void *b, size_t n)
+static kl_ssize_t sp_recv(const HlDbTransport *t, KlSocketHandle fd, void *b, size_t n)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->recv(sp->context, fd, b, n); }
-static int sp_close(const MyTransport *t, KlSocketHandle fd)
+static int sp_close(const HlDbTransport *t, KlSocketHandle fd)
 { const KlSocketProvider *sp = active_sp(t); return sp->ops->close(sp->context, fd); }
 
 /* Classify the last op: prefer the provider's io_status, else hosted errno. */
-static KlIoStatus sp_io_status(const MyTransport *t)
+static KlIoStatus sp_io_status(const HlDbTransport *t)
 {
     const KlSocketProvider *sp = active_sp(t);
     if (sp->ops->io_status)
@@ -238,11 +243,11 @@ static void co_connect_watcher(KlSocketHandle fd, KlEventMask ready, void *user_
 /* Resolve host:port into t->addrs. An IP-literal host takes the no-DNS
  * kl_sockaddr_parse fast path; a hostname goes through getaddrinfo. Returns
  * naddrs (>=1) or 0. */
-static int resolve_addrs(MyTransport *t, const char *host, int port)
+static int resolve_addrs(HlDbTransport *t, const char *host, int port)
 {
-#ifdef HL_MY_TEST_HOOKS
-    if (my_test_resolve)
-        return my_test_resolve(t, host, port);
+#ifdef HL_DB_TRANSPORT_TEST_HOOKS
+    if (db_transport_test_resolve)
+        return db_transport_test_resolve(t, host, port);
 #endif
     /* IP-literal fast path: kl_sockaddr_parse is numeric-only (no DNS), matching
      * the IP-literal-only databases.dynamic CIDR gate. */
@@ -284,7 +289,7 @@ static int resolve_addrs(MyTransport *t, const char *host, int port)
 
 static int co_start_resolve(void *ctx)
 {
-    MyTransport *t = ctx;
+    HlDbTransport *t = ctx;
     /* t->naddrs was filled by resolve_addrs before start (synchronous, inline). */
     if (t->naddrs < 1) {
         kl_connect_op_on_resolve_failed(&t->connect_op, (int)KL_ERR_DNS);
@@ -296,7 +301,7 @@ static int co_start_resolve(void *ctx)
 
 static int co_start_attempt(void *ctx, int idx, int *out_err)
 {
-    MyTransport *t = ctx;
+    HlDbTransport *t = ctx;
     if (idx < 0 || idx >= t->naddrs) { *out_err = (int)KL_ERR_CONNECT; return -1; }
 
     KlSocketHandle fd = sp_socket(t, t->addrs[idx].family == KL_AF_INET6 ? AF_INET6
@@ -331,7 +336,7 @@ static int co_start_attempt(void *ctx, int idx, int *out_err)
 
 static void co_connect_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
-    MyTransport *t = user_data;
+    HlDbTransport *t = user_data;
     (void)ready;
     int idx = -1;
     for (int i = 0; i < t->naddrs; i++)
@@ -354,7 +359,7 @@ static void co_connect_watcher(KlSocketHandle fd, KlEventMask ready, void *user_
 
 static void co_cancel_attempt(void *ctx, int idx)
 {
-    MyTransport *t = ctx;
+    HlDbTransport *t = ctx;
     if (idx >= 0 && idx < t->naddrs && kl_handle_valid(t->attempt_fd[idx])) {
         if (t->attempt_armed[idx]) {
             kl_watcher_del(&t->ev, t->attempt_fd[idx]);
@@ -368,14 +373,14 @@ static void co_cancel_attempt(void *ctx, int idx)
 
 static void co_dispose_fd(void *ctx, KlSocketHandle fd)
 {
-    MyTransport *t = ctx;
+    HlDbTransport *t = ctx;
     if (kl_handle_valid(fd))
         sp_close(t, fd);
 }
 
 static void co_on_deadline_fired(void *user_data)
 {
-    MyTransport *t = user_data;
+    HlDbTransport *t = user_data;
     t->deadline_timer = -1;
     t->deadline_fired = 1;
     kl_connect_op_on_deadline(&t->connect_op, (int)KL_ERR_TIMEOUT);
@@ -388,14 +393,14 @@ static void co_on_deadline_fired(void *user_data)
  * KlConnectOp contract requires it when arm_delay is set). */
 static void co_on_delay_fired(void *user_data)
 {
-    MyTransport *t = user_data;
+    HlDbTransport *t = user_data;
     t->delay_timer = -1;
     kl_connect_op_on_delay(&t->connect_op);
 }
 static int co_arm_delay(void *ctx)
 {
-    MyTransport *t = ctx;
-    t->delay_timer = kl_timer_add(&t->ev, MY_CONNECT_ATTEMPT_DELAY_MS,
+    HlDbTransport *t = ctx;
+    t->delay_timer = kl_timer_add(&t->ev, DBTP_CONNECT_ATTEMPT_DELAY_MS,
                                   co_on_delay_fired, t);
     if (t->delay_timer < 0)
         return -1;   /* arm failed: the machine fast-starts the next address */
@@ -403,7 +408,7 @@ static int co_arm_delay(void *ctx)
 }
 static void co_cancel_delay(void *ctx)
 {
-    MyTransport *t = ctx;
+    HlDbTransport *t = ctx;
     if (t->delay_timer >= 0) {
         kl_timer_cancel(&t->ev, t->delay_timer);
         t->delay_timer = -1;
@@ -416,7 +421,7 @@ static void co_cancel_delay(void *ctx)
  * the hooks table entirely (below), so the op has no deadline (unbounded). */
 static int co_arm_deadline(void *ctx, int *out_err)
 {
-    MyTransport *t = ctx;
+    HlDbTransport *t = ctx;
     uint64_t now = kl_monotonic_ms();
     uint64_t delay = t->deadline_ms > now ? t->deadline_ms - now : 0;
     t->deadline_timer = kl_timer_add(&t->ev, delay, co_on_deadline_fired, t);
@@ -425,7 +430,7 @@ static int co_arm_deadline(void *ctx, int *out_err)
 }
 static void co_cancel_deadline(void *ctx)
 {
-    MyTransport *t = ctx;
+    HlDbTransport *t = ctx;
     if (t->deadline_timer >= 0) {
         kl_timer_cancel(&t->ev, t->deadline_timer);
         t->deadline_timer = -1;
@@ -434,7 +439,7 @@ static void co_cancel_deadline(void *ctx)
 
 static void co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd, int error)
 {
-    MyTransport *t = ctx;
+    HlDbTransport *t = ctx;
     t->connect_done = 1;
     t->connect_result = result;
     t->connect_error = error;
@@ -457,7 +462,7 @@ static void co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd, int
  * unbounded connect: no arm_deadline, so no deadline timer). The connect / delay
  * / dispose hooks are shared. on_detach is omitted: detachment is observed via
  * kl_connect_op_is_detached (no per-transport flag needed). */
-static const KlConnectOpHooks PG_HOOKS_DEADLINE = {
+static const KlConnectOpHooks DBTP_HOOKS_DEADLINE = {
     .start_resolve   = co_start_resolve,
     .cancel_resolve  = NULL,
     .start_attempt   = co_start_attempt,
@@ -470,7 +475,7 @@ static const KlConnectOpHooks PG_HOOKS_DEADLINE = {
     .on_done         = co_on_done,
     .on_detach       = NULL,
 };
-static const KlConnectOpHooks PG_HOOKS_NO_DEADLINE = {
+static const KlConnectOpHooks DBTP_HOOKS_NO_DEADLINE = {
     .start_resolve   = co_start_resolve,
     .cancel_resolve  = NULL,
     .start_attempt   = co_start_attempt,
@@ -488,22 +493,22 @@ static const KlConnectOpHooks PG_HOOKS_NO_DEADLINE = {
  * Event-loop pumps. The private KlEventCtx drives ONLY the connect phase.
  * ────────────────────────────────────────────────────────────────────────── */
 
-static int done_connect(MyTransport *t)
+static int done_connect(HlDbTransport *t)
 { return t->connect_done; }
 
-static int done_connect_detached(MyTransport *t)
+static int done_connect_detached(HlDbTransport *t)
 {
-#ifdef HL_MY_TEST_HOOKS
-    if (my_test_force_no_detach) return 0;
+#ifdef HL_DB_TRANSPORT_TEST_HOOKS
+    if (db_transport_test_force_no_detach) return 0;
 #endif
     return kl_connect_op_is_detached(&t->connect_op);
 }
 
-static void pump_checkpoint(MyTransport *t)
+static void pump_checkpoint(HlDbTransport *t)
 {
-#ifdef HL_MY_TEST_HOOKS
-    if (my_test_checkpoint)
-        my_test_checkpoint(t, my_test_checkpoint_seq++);
+#ifdef HL_DB_TRANSPORT_TEST_HOOKS
+    if (db_transport_test_checkpoint)
+        db_transport_test_checkpoint(t, db_transport_test_checkpoint_seq++);
 #else
     (void)t;
 #endif
@@ -512,32 +517,32 @@ static void pump_checkpoint(MyTransport *t)
 /* Pump the connect op to its terminal (done_connect). When t->deadline_ms is set
  * (timeout_ms > 0) the loop is bounded by that single absolute connect ceiling;
  * when it is 0 (timeout_ms <= 0) the connect is TRULY UNBOUNDED - the loop pumps
- * in bounded MY_PUMP_STEP_MS increments with NO total deadline, until the op
+ * in bounded DBTP_PUMP_STEP_MS increments with NO total deadline, until the op
  * completes (the select(..., NULL) contract, no hidden ceiling). Returns 0 when
  * done, -1 on a deadline expiry or an event-loop error. */
-static int pump_connect(MyTransport *t)
+static int pump_connect(HlDbTransport *t)
 {
     uint64_t dl = t->deadline_ms;   /* 0 == unbounded */
     for (;;) {
         pump_checkpoint(t);
         if (done_connect(t)) return 0;
         if (dl && kl_monotonic_ms() >= dl) return -1;
-        if (kl_event_ctx_run(&t->ev, 64, MY_PUMP_STEP_MS) < 0) return -1;
+        if (kl_event_ctx_run(&t->ev, 64, DBTP_PUMP_STEP_MS) < 0) return -1;
         if (done_connect(t)) return 0;
         if (dl && kl_monotonic_ms() >= dl) return -1;
     }
 }
 
 /* Confirm the op has detached, ITERATION-bounded (a teardown safety bound, not
- * the connect deadline). Returns 0 detached, -1 if not within MY_DETACH_MAX_STEPS.
+ * the connect deadline). Returns 0 detached, -1 if not within DBTP_DETACH_MAX_STEPS.
  * After kl_connect_op_cancel a well-behaved op retires everything and detaches
  * synchronously (or via queued work), so this returns at step 0-1. The pump is
  * NON-BLOCKING (timeout 0): detachment is never fd-readiness-driven here, so a
  * blocking wait would only stall the pathological non-detachment case; a bounded
  * non-blocking spin declares it promptly instead. */
-static int pump_detach(MyTransport *t)
+static int pump_detach(HlDbTransport *t)
 {
-    for (int i = 0; i < MY_DETACH_MAX_STEPS; i++) {
+    for (int i = 0; i < DBTP_DETACH_MAX_STEPS; i++) {
         if (done_connect_detached(t)) return 0;
         if (kl_event_ctx_run(&t->ev, 64, 0 /* non-blocking poll */) < 0) return -1;
         if (done_connect_detached(t)) return 0;
@@ -553,13 +558,14 @@ static int pump_detach(MyTransport *t)
  * live op still references its storage) and the caller must preserve or leak the
  * whole allocation.
  * ────────────────────────────────────────────────────────────────────────── */
-static int connect_teardown(MyTransport *t)
+static int connect_teardown(HlDbTransport *t)
 {
     if (t->connect_started && !kl_connect_op_is_detached(&t->connect_op)) {
         kl_connect_op_cancel(&t->connect_op);
         if (pump_detach(t) != 0 || !kl_connect_op_is_detached(&t->connect_op)) {
-            log_error("mysql: connect op did not confirm detachment; preserving the "
-                      "whole transport allocation (a live op still references it)");
+            log_error("%s: connect op did not confirm detachment; preserving the "
+                      "whole transport allocation (a live op still references it)",
+                      t->tag);
             return -1;   /* preserve: do NOT free the event ctx / the block */
         }
     }
@@ -597,14 +603,15 @@ static int connect_teardown(MyTransport *t)
  * Public API.
  * ────────────────────────────────────────────────────────────────────────── */
 
-static MyTransport *transport_new(const KlSocketProvider *sp)
+static HlDbTransport *transport_new(const KlSocketProvider *sp, const char *tag)
 {
-#ifdef HL_MY_TEST_HOOKS
-    if (my_test_force_alloc_fail) return NULL;   /* simulate calloc failure */
+#ifdef HL_DB_TRANSPORT_TEST_HOOKS
+    if (db_transport_test_force_alloc_fail) return NULL;   /* simulate calloc failure */
 #endif
-    MyTransport *t = calloc(1, sizeof *t);
+    HlDbTransport *t = calloc(1, sizeof *t);
     if (!t) return NULL;
     t->sp = sp;
+    t->tag = tag ? tag : "db";
     t->fd = KL_INVALID_SOCKET;
     t->deadline_timer = -1;
     t->delay_timer = -1;
@@ -617,7 +624,7 @@ static MyTransport *transport_new(const KlSocketProvider *sp)
 /* Fail a connect: tear down, then free the block iff fully quiesced; otherwise
  * leak the whole allocation intentionally (a live op still references it). Always
  * returns NULL. */
-static MyTransport *connect_fail(MyTransport *t, char *errbuf, size_t errlen,
+static HlDbTransport *connect_fail(HlDbTransport *t, char *errbuf, size_t errlen,
                                  const char *msg)
 {
     set_err(errbuf, errlen, msg);
@@ -627,10 +634,11 @@ static MyTransport *connect_fail(MyTransport *t, char *errbuf, size_t errlen,
     return NULL;
 }
 
-MyTransport *hl_my_transport_connect(const char *host, const char *port,
-                                     int timeout_ms,
-                                     const KlSocketProvider *sp_or_NULL,
-                                     char *errbuf, size_t errlen)
+HlDbTransport *hl_db_transport_connect(const char *tag,
+                                       const char *host, const char *port,
+                                       int timeout_ms,
+                                       const KlSocketProvider *sp_or_NULL,
+                                       char *errbuf, size_t errlen)
 {
     if (!host || !port) {
         set_err(errbuf, errlen, "invalid connect arguments");
@@ -647,7 +655,7 @@ MyTransport *hl_my_transport_connect(const char *host, const char *port,
         return NULL;
     }
 
-    MyTransport *t = transport_new(sp);
+    HlDbTransport *t = transport_new(sp, tag);
     if (!t) { set_err(errbuf, errlen, "out of memory"); return NULL; }
     t->alloc = kl_allocator_default();
 
@@ -670,9 +678,9 @@ MyTransport *hl_my_transport_connect(const char *host, const char *port,
     const KlConnectOpHooks *hooks;
     if (timeout_ms > 0) {
         t->deadline_ms = kl_monotonic_ms() + (uint64_t)timeout_ms;
-        hooks = &PG_HOOKS_DEADLINE;
+        hooks = &DBTP_HOOKS_DEADLINE;
     } else {
-        hooks = &PG_HOOKS_NO_DEADLINE;
+        hooks = &DBTP_HOOKS_NO_DEADLINE;
     }
 
     if (kl_connect_op_init(&t->connect_op, hooks, t) != 0)
@@ -694,8 +702,9 @@ MyTransport *hl_my_transport_connect(const char *host, const char *port,
         if (pump_detach(t) != 0 || !kl_connect_op_is_detached(&t->connect_op)) {
             set_err(errbuf, errlen, "connect op did not detach");
             if (kl_handle_valid(t->fd)) { sp_close(t, t->fd); t->fd = KL_INVALID_SOCKET; }
-            log_error("mysql: connect op did not detach after success; leaking the "
-                      "transport allocation (a live op still references it)");
+            log_error("%s: connect op did not detach after success; leaking the "
+                      "transport allocation (a live op still references it)",
+                      t->tag);
             return NULL;   /* intentional safe leak */
         }
     }
@@ -712,8 +721,9 @@ MyTransport *hl_my_transport_connect(const char *host, const char *port,
     return t;
 }
 
-MyTransport *hl_my_transport_adopt(int fd, const KlSocketProvider *sp_or_NULL,
-                                   char *errbuf, size_t errlen)
+HlDbTransport *hl_db_transport_adopt(const char *tag, int fd,
+                                     const KlSocketProvider *sp_or_NULL,
+                                     char *errbuf, size_t errlen)
 {
     if (fd < 0) {
         set_err(errbuf, errlen, "invalid descriptor");
@@ -726,10 +736,10 @@ MyTransport *hl_my_transport_adopt(int fd, const KlSocketProvider *sp_or_NULL,
         set_err(errbuf, errlen, "socket provider missing a required op or KL_SOCK_CAP_NATIVE_FD");
         return NULL;
     }
-    MyTransport *t = transport_new(sp);
+    HlDbTransport *t = transport_new(sp, tag);
     if (!t) {
         /* CONSUME @p fd: the provider is valid, so close the descriptor through it
-         * rather than leaking it. This upholds hl_my_conn_start's take-ownership
+         * rather than leaking it. This upholds hl_{pg,my}_conn_start's take-ownership
          * contract (fd is closed on every failure once adoption has a valid
          * provider), and closes it EXACTLY once. */
         sp->ops->close(sp->context, (KlSocketHandle)fd);
@@ -738,14 +748,13 @@ MyTransport *hl_my_transport_adopt(int fd, const KlSocketProvider *sp_or_NULL,
     }
     t->fd = (KlSocketHandle)fd;
     /* SIGPIPE suppression parity: every subsequent write goes through
-     * hl_my_transport_send (nosignal flag) plus this per-fd SO_NOSIGPIPE where the
-     * platform offers it. No event ctx, no resolution, no racing (the adopt path,
-     * docs/mysql_keel_transport_slice4.md D1). */
+     * hl_db_transport_send (nosignal flag) plus this per-fd SO_NOSIGPIPE where the
+     * platform offers it. No event ctx, no resolution, no racing (the adopt path). */
     sp_set_nosigpipe(t, t->fd);
     return t;
 }
 
-int hl_my_transport_attach_tls(MyTransport *t, struct HlTlsClient *tls)
+int hl_db_transport_attach_tls(HlDbTransport *t, struct HlTlsClient *tls)
 {
     if (!t || !tls)                    return -1;  /* one-shot + non-NULL required */
     if (!kl_handle_valid(t->fd))       return -1;  /* require a live descriptor    */
@@ -754,7 +763,7 @@ int hl_my_transport_attach_tls(MyTransport *t, struct HlTlsClient *tls)
     return 0;
 }
 
-ssize_t hl_my_transport_send(MyTransport *t, const uint8_t *buf, size_t len)
+ssize_t hl_db_transport_send(HlDbTransport *t, const uint8_t *buf, size_t len)
 {
     if (!t || !kl_handle_valid(t->fd))
         return -1;
@@ -769,7 +778,7 @@ ssize_t hl_my_transport_send(MyTransport *t, const uint8_t *buf, size_t len)
     return (ssize_t)n;
 }
 
-ssize_t hl_my_transport_recv(MyTransport *t, uint8_t *buf, size_t len)
+ssize_t hl_db_transport_recv(HlDbTransport *t, uint8_t *buf, size_t len)
 {
     if (!t || !kl_handle_valid(t->fd))
         return -1;
@@ -781,11 +790,11 @@ ssize_t hl_my_transport_recv(MyTransport *t, uint8_t *buf, size_t len)
     return (ssize_t)n;
 }
 
-int hl_my_transport_send_all(MyTransport *t, const uint8_t *buf, size_t len)
+int hl_db_transport_send_all(HlDbTransport *t, const uint8_t *buf, size_t len)
 {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = hl_my_transport_send(t, buf + sent, len - sent);
+        ssize_t n = hl_db_transport_send(t, buf + sent, len - sent);
         if (n <= 0)
             return -1;
         sent += (size_t)n;
@@ -793,21 +802,21 @@ int hl_my_transport_send_all(MyTransport *t, const uint8_t *buf, size_t len)
     return 0;
 }
 
-int hl_my_transport_fd(const MyTransport *t)
+int hl_db_transport_fd(const HlDbTransport *t)
 {
     if (!t || !kl_handle_valid(t->fd))
         return -1;
     return (int)t->fd;
 }
 
-int hl_my_transport_close(MyTransport *t)
+int hl_db_transport_close(HlDbTransport *t)
 {
     if (!t)
         return 0;
 
-    /* One close path: TLS shutdown, then TLS free, then provider close
-     * (docs/mysql_keel_transport_slice4.md D1). TLS teardown is idempotent (t->tls
-     * cleared), so a retry after a preserved non-detachment does not repeat it. */
+    /* One close path: TLS shutdown, then TLS free, then provider close (the one
+     * documented close path). TLS teardown is idempotent (t->tls cleared), so a retry after
+     * a preserved non-detachment does not repeat it. */
     if (t->tls) {
         if (kl_handle_valid(t->fd))
             hl_tls_client_shutdown((int)t->fd, t->tls);
@@ -821,7 +830,7 @@ int hl_my_transport_close(MyTransport *t)
      * free) and report -1 so the owner can retry or intentionally leak. */
     if (t->connect_started && t->ev_ready) {
         if (connect_teardown(t) != 0)
-            return -1;   /* preserved: caller retries hl_my_transport_close or leaks */
+            return -1;   /* preserved: caller retries hl_db_transport_close or leaks */
         free(t);
         return 0;
     }

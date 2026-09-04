@@ -22,7 +22,7 @@
  * under the same guard, so those harnesses omit it and reach only the pure
  * functions (DSN parse / sslmode parse / base64 / SCRAM proof / SQL rewrite). */
 #ifndef HL_PG_NO_TLS
-#include "hull/cap/pg_transport.h"
+#include "hull/cap/db_transport.h"
 #include "hull/shared/tls_client.h"
 #endif
 
@@ -208,23 +208,23 @@ void hl_pg_dsn_scrub(HlPgDsn *dsn)
 
 /* ── Connection layer (Keel v3 transport) ─────────────────────────────
  * Everything from here to the end of hl_pg_conn_close (plus the query path and
- * hl_pg_wait_notify further down) rides the PgTransport byte transport, which
+ * hl_pg_wait_notify further down) rides the HlDbTransport byte transport, which
  * pulls in Keel + tls_client + mbedTLS. The pure-parser fuzzers set HL_PG_NO_TLS
  * to omit this whole layer and keep only the DSN parser, sslmode parser, base64,
  * SCRAM proof, and the SQL rewriter (all outside this guard). */
 #ifndef HL_PG_NO_TLS
 
-/* Transport helpers. All bytes go through the owned PgTransport, which routes
+/* Transport helpers. All bytes go through the owned HlDbTransport, which routes
  * through an attached TLS session when one has been handed to it (see
  * hl_pg_conn_open) or plain provider send/recv otherwise. */
 static ssize_t io_send(HlPgConn *conn, const uint8_t *buf, size_t len)
 {
-    return hl_pg_transport_send(conn->transport, buf, len);
+    return hl_db_transport_send(conn->transport, buf, len);
 }
 
 static ssize_t io_recv(HlPgConn *conn, uint8_t *buf, size_t len)
 {
-    return hl_pg_transport_recv(conn->transport, buf, len);
+    return hl_db_transport_recv(conn->transport, buf, len);
 }
 
 static int conn_send(HlPgConn *conn, const uint8_t *buf, size_t len)
@@ -293,7 +293,7 @@ static void conn_teardown(HlPgConn *conn)
      * descriptor. A -1 (a live connect op that will not confirm detachment) is an
      * accepted rare intentional leak, the same contract as the transport. */
     if (conn->transport) {
-        hl_pg_transport_close(conn->transport);
+        hl_db_transport_close(conn->transport);
         conn->transport = NULL;
     }
     free(conn->rbuf);
@@ -475,7 +475,7 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
  * attached the session to @p transport, so every byte tunnels through it
  * transparently. SIGPIPE suppression is the transport's job (adopt / connect set
  * SO_NOSIGPIPE on the descriptor). */
-static int pg_start(HlPgConn *conn, PgTransport *transport, const HlPgDsn *dsn)
+static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn)
 {
     memset(conn, 0, sizeof(*conn));
     conn->transport = transport;
@@ -595,7 +595,7 @@ int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
 {
     /* Adopt takes ownership of fd on success; on failure the caller still owns
      * fd (adopt contract), so do NOT close it here. */
-    PgTransport *t = hl_pg_transport_adopt(fd, NULL, conn->errmsg, sizeof conn->errmsg);
+    HlDbTransport *t = hl_db_transport_adopt("pg", fd, NULL, conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         char saved[sizeof conn->errmsg];
         snprintf(saved, sizeof saved, "%s", conn->errmsg);
@@ -628,7 +628,7 @@ int hl_pg_sslmode_parse(const char *s)
 
 #ifndef HL_PG_NO_TLS
 
-HlPgSslDecision hl_pg_ssl_negotiate(PgTransport *t, HlPgSslMode mode,
+HlPgSslDecision hl_pg_ssl_negotiate(HlDbTransport *t, HlPgSslMode mode,
                                     char *errbuf, size_t errlen)
 {
     if (mode == HL_PG_SSLMODE_DISABLE) return HL_PG_SSL_PLAINTEXT;
@@ -638,13 +638,13 @@ HlPgSslDecision hl_pg_ssl_negotiate(PgTransport *t, HlPgSslMode mode,
      * go through the provider - the same production I/O path as the rest of the
      * protocol, not a separate raw send/recv. */
     static const uint8_t req[8] = { 0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f };
-    if (hl_pg_transport_send_all(t, req, sizeof req) != 0) {
+    if (hl_db_transport_send_all(t, req, sizeof req) != 0) {
         set_err(errbuf, errlen, "failed to send SSLRequest");
         return HL_PG_SSL_FAIL;
     }
 
     uint8_t resp;
-    ssize_t n = hl_pg_transport_recv(t, &resp, 1);
+    ssize_t n = hl_db_transport_recv(t, &resp, 1);
     if (n <= 0) { set_err(errbuf, errlen, "no SSLRequest response from server");
                   return HL_PG_SSL_FAIL; }
 
@@ -663,7 +663,7 @@ HlPgSslDecision hl_pg_ssl_negotiate(PgTransport *t, HlPgSslMode mode,
 
 int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
 {
-    PgTransport *t = hl_pg_transport_connect(dsn->host, dsn->port, timeout_ms,
+    HlDbTransport *t = hl_db_transport_connect("pg", dsn->host, dsn->port, timeout_ms,
                                              NULL, conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         memset(conn, 0, sizeof(*conn));
@@ -680,7 +680,7 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
         conn->transport = NULL;
         snprintf(conn->errmsg, sizeof conn->errmsg,
                  "unknown sslmode: %s", dsn->sslmode);
-        hl_pg_transport_close(t);
+        hl_db_transport_close(t);
         return -1;
     }
     if (mode != HL_PG_SSLMODE_DISABLE) {
@@ -691,7 +691,7 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
             memset(conn, 0, sizeof(*conn));
             conn->transport = NULL;
             snprintf(conn->errmsg, sizeof conn->errmsg, "%s", e);
-            hl_pg_transport_close(t);
+            hl_db_transport_close(t);
             return -1;
         }
         if (d == HL_PG_SSL_USE_TLS) {
@@ -700,7 +700,7 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
              * handshake needs the raw descriptor (hl_tls_client_handshake takes an
              * int fd); the resulting session is then handed to the transport so
              * subsequent bytes tunnel through it. */
-            int fd = hl_pg_transport_fd(t);
+            int fd = hl_db_transport_fd(t);
             int verify = (mode == HL_PG_SSLMODE_VERIFY);
             struct HlTlsClient *tls =
                 hl_tls_client_handshake(fd, dsn->host, verify, timeout_ms);
@@ -709,16 +709,16 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
                 conn->transport = NULL;
                 snprintf(conn->errmsg, sizeof conn->errmsg,
                          "TLS handshake with %s failed", dsn->host);
-                hl_pg_transport_close(t);
+                hl_db_transport_close(t);
                 return -1;
             }
-            if (hl_pg_transport_attach_tls(t, tls) != 0) {
+            if (hl_db_transport_attach_tls(t, tls) != 0) {
                 hl_tls_client_free(tls);
                 memset(conn, 0, sizeof(*conn));
                 conn->transport = NULL;
                 snprintf(conn->errmsg, sizeof conn->errmsg,
                          "TLS handshake with %s failed", dsn->host);
-                hl_pg_transport_close(t);
+                hl_db_transport_close(t);
                 return -1;
             }
             return pg_start(conn, t, dsn);
@@ -1284,7 +1284,7 @@ static int64_t mono_ms(void)
 int hl_pg_wait_notify(HlPgConn *conn, int timeout_ms)
 {
     if (!conn || !conn->transport) return -1;
-    int fd = hl_pg_transport_fd(conn->transport);
+    int fd = hl_db_transport_fd(conn->transport);
     if (fd < 0) return -1;
     if (timeout_ms < 0) timeout_ms = 0;
     int64_t deadline = mono_ms() + timeout_ms;
