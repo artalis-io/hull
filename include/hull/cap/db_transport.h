@@ -62,6 +62,7 @@
 
 struct KlSocketProvider;  /* keel/socket.h; the borrowed provider (opaque here) */
 struct HlTlsClient;       /* shared/tls_client.h; the optional attached TLS session */
+struct HlAllocator;       /* hull/utils/alloc.h; the optional embedder allocator */
 
 /* Opaque, heap-allocated. The wire client stores an HlDbTransport* and reaches
  * every field through the API below. The concrete struct is defined in
@@ -74,8 +75,15 @@ typedef struct HlDbTransport HlDbTransport;
  * Resolve @p host / @p port, race the addresses through KlConnectOp on a private
  * event loop, and return a transport holding the winning blocking descriptor.
  *
- * @p tag is a stable backend label ("pg" / "mysql") used only in the connect-op
- * non-detachment log diagnostics; NULL is tolerated (a generic label is used).
+ * @p tag is a stable backend label ("pg" / "mysql" / "valkey") used only in the
+ * connect-op non-detachment log diagnostics; NULL is tolerated (a generic label).
+ *
+ * @p alloc, when non-NULL, is the embedder's HlAllocator: the transport's heap
+ * block AND the private connect-time KlEventCtx's scratch are allocated through
+ * it (so an embedder's allocator + limits apply), and it is RETAINED for the
+ * matching frees, including the intentional non-detachment leak path. It must
+ * outlive the transport. NULL selects libc malloc/free (PostgreSQL / MySQL pass
+ * NULL and are unaffected).
  *
  * An IP-literal @p host is parsed directly via kl_sockaddr_parse (no DNS,
  * matching the IP-literal-only databases.dynamic CIDR gate); a hostname is
@@ -102,7 +110,7 @@ typedef struct HlDbTransport HlDbTransport;
  * or, if a live op will not confirm detachment, intentionally leaked (never freed
  * under a live op).
  */
-HlDbTransport *hl_db_transport_connect(const char *tag,
+HlDbTransport *hl_db_transport_connect(const char *tag, struct HlAllocator *alloc,
                                        const char *host, const char *port,
                                        int timeout_ms,
                                        const struct KlSocketProvider *sp_or_NULL,
@@ -111,8 +119,8 @@ HlDbTransport *hl_db_transport_connect(const char *tag,
 /**
  * Adopt an already-connected, blocking descriptor @p fd.
  *
- * @p tag is the stable backend label ("pg" / "mysql"), as for connect. Takes
- * ownership of @p fd exactly once, associates it with @p sp_or_NULL (or the
+ * @p tag is the stable backend label, and @p alloc the optional embedder
+ * allocator, both exactly as for connect. Takes ownership of @p fd exactly once, associates it with @p sp_or_NULL (or the
  * default POSIX provider when NULL), and skips resolution, connection racing, and
  * event-context creation. Subsequent send/recv/close use the same path as a raced
  * connection. This backs the existing hl_{pg,my}_conn_start(conn, fd, dsn) test
@@ -129,7 +137,8 @@ HlDbTransport *hl_db_transport_connect(const char *tag,
  * lets hl_{pg,my}_conn_start keep its "takes ownership of fd, closed on every
  * failure" contract with a valid (default) provider.
  */
-HlDbTransport *hl_db_transport_adopt(const char *tag, int fd,
+HlDbTransport *hl_db_transport_adopt(const char *tag, struct HlAllocator *alloc,
+                                     int fd,
                                      const struct KlSocketProvider *sp_or_NULL,
                                      char *errbuf, size_t errlen);
 
@@ -172,6 +181,20 @@ int hl_db_transport_send_all(HlDbTransport *t, const uint8_t *buf, size_t len);
  * held.
  */
 int hl_db_transport_fd(const HlDbTransport *t);
+
+/**
+ * Best-effort per-operation blocking-I/O timeout: install @p ms on the winning
+ * descriptor so a wedged peer cannot stall a blocking send/recv forever. Sets BOTH
+ * SO_RCVTIMEO and SO_SNDTIMEO; one pair covers the plaintext provider send/recv AND
+ * the TLS hl_tls_client_read/write (same fd). @p ms <= 0 is a no-op (no timeout
+ * installed). Failures are IGNORED (best-effort, as the historic setsockopt was).
+ *
+ * This is an INTENTIONAL native-FD escape: it setsockopt()s the raw descriptor
+ * directly rather than through a provider op. Sound because the transport already
+ * REQUIRES KL_SOCK_CAP_NATIVE_FD (validated in connect/adopt), so the held handle
+ * is always a real POSIX fd. NULL-safe; no-op when no descriptor is held.
+ */
+void hl_db_transport_set_io_timeout(HlDbTransport *t, int ms);
 
 /**
  * Close and free the transport. One close path: TLS shutdown (if attached), TLS

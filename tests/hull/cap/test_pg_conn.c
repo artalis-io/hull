@@ -297,7 +297,7 @@ UTEST(pg_query, select_rows_and_affected)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.transport = hl_db_transport_adopt("pg", sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    conn.transport = hl_db_transport_adopt("pg", NULL, sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
     ASSERT_TRUE(conn.transport != NULL);
 
     struct qcollect co;
@@ -349,7 +349,7 @@ UTEST(pg_query, exec_affected_count)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.transport = hl_db_transport_adopt("pg", sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    conn.transport = hl_db_transport_adopt("pg", NULL, sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
     ASSERT_TRUE(conn.transport != NULL);
 
     int64_t affected = -1;
@@ -384,7 +384,7 @@ UTEST(pg_query, wait_notify)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.transport = hl_db_transport_adopt("pg", sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    conn.transport = hl_db_transport_adopt("pg", NULL, sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
     ASSERT_TRUE(conn.transport != NULL);
 
     /* 1. A notification is queued -> 1. */
@@ -419,7 +419,7 @@ UTEST(pg_query, server_error_then_ready)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.transport = hl_db_transport_adopt("pg", sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    conn.transport = hl_db_transport_adopt("pg", NULL, sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
     ASSERT_TRUE(conn.transport != NULL);
 
     HlPgParam p = { .text = "7", .len = 1 };
@@ -450,7 +450,7 @@ UTEST(pg_exec_simple, multi_statement_ok)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.transport = hl_db_transport_adopt("pg", sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    conn.transport = hl_db_transport_adopt("pg", NULL, sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
     ASSERT_TRUE(conn.transport != NULL);
 
     ASSERT_EQ(0, hl_pg_exec_simple(&conn,
@@ -487,7 +487,7 @@ UTEST(pg_exec_simple, error_then_ready)
 
     HlPgConn conn;
     memset(&conn, 0, sizeof conn);
-    conn.transport = hl_db_transport_adopt("pg", sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    conn.transport = hl_db_transport_adopt("pg", NULL, sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
     ASSERT_TRUE(conn.transport != NULL);
 
     ASSERT_EQ(-1, hl_pg_exec_simple(&conn, "CREATE TABLE t (id int)"));
@@ -518,7 +518,7 @@ static HlPgSslDecision negotiate_with(HlPgSslMode mode, int have_resp, char resp
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return HL_PG_SSL_FAIL;
     if (have_resp) { ssize_t w = write(sv[0], &resp, 1); (void)w; }
     /* Negotiation now rides the transport: adopt the socketpair end and drive it. */
-    HlDbTransport *t = hl_db_transport_adopt("pg", sv[1], NULL, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[1], NULL, NULL, 0);
     if (!t) { close(sv[0]); close(sv[1]); return HL_PG_SSL_FAIL; }
     char e[128] = {0};
     HlPgSslDecision d = hl_pg_ssl_negotiate(t, mode, e, sizeof e);

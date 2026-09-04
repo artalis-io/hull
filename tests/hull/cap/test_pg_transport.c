@@ -246,7 +246,7 @@ UTEST(pg_transport_connect, pending_then_succeed)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("pg", "db.example", "5432", 0, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "db.example", "5432", 0, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t != NULL);
     ASSERT_GE(g_fk_n, 1);
     ASSERT_EQ(g_fk_succeeded_idx, 0);
@@ -266,7 +266,7 @@ UTEST(pg_transport_connect, immediate_success_rc0)
     g_fk_naddr = 1; g_fk_disp[0] = FK_IMMEDIATE;
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
-    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", "5432", 0, &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_GE(g_fk_blocking_set, 1);
     ASSERT_TRUE(hl_db_transport_fd(t) >= 0);
@@ -281,7 +281,7 @@ UTEST(pg_transport_connect, stagger_second_address_wins)
     g_fk_naddr = 2; g_fk_disp[0] = FK_PENDING; g_fk_disp[1] = FK_SUCCEED;
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
-    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", "5432", 0, &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_n, 2);
     ASSERT_EQ(g_fk_order[0], 0);
@@ -299,7 +299,7 @@ UTEST(pg_transport_connect, all_addresses_fail_detach)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(err[0] != '\0');
     ASSERT_TRUE(fk_all_fds_closed());   /* teardown disposed every racing fd */
@@ -316,7 +316,7 @@ UTEST(pg_transport_connect, deadline_fires_detaches)
     char err[128] = {0};
     /* 150 ms TCP-establishment bound; the address stays pending, so the deadline
      * fires and the op fails + detaches. */
-    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 150, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", "5432", 150, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(err[0] != '\0');
     ASSERT_TRUE(fk_all_fds_closed());
@@ -348,7 +348,7 @@ UTEST(pg_transport_connect, unbounded_no_hidden_ceiling)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
     db_transport_test_checkpoint = tp_complete_pending_at_tick;
 
-    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0 /* unbounded */,
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", "5432", 0 /* unbounded */,
                                              &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_succeeded_idx, 0);
@@ -369,7 +369,7 @@ UTEST(pg_transport_io, io_status_overrides_errno)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER_IOS;
     db_transport_test_checkpoint = tp_complete_pending_at_tick;
 
-    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER_IOS, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", "5432", 0, &FK_PROVIDER_IOS, NULL, 0);
     /* On completion get_so_error reports 0 -> success, despite errno == EPERM. */
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_succeeded_idx, 0);
@@ -384,7 +384,7 @@ UTEST(pg_transport_io, send_eintr_retry_via_io_status)
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER_IOS;
     char err[64] = {0};
-    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER_IOS, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], &FK_PROVIDER_IOS, err, sizeof err);
     ASSERT_TRUE(t != NULL);
 
     /* First send() returns -1 with io_status INTERRUPTED (errno left 0); the retry
@@ -417,7 +417,7 @@ UTEST(pg_transport_provider, missing_required_op_fails)
     prov.capabilities = KL_SOCK_CAP_NATIVE_FD;
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &prov, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", "5432", 0, &prov, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(strstr(err, "provider") != NULL);
 }
@@ -430,11 +430,11 @@ UTEST(pg_transport_provider, missing_native_fd_cap_fails)
     prov.ops = &FK_OPS; prov.context = NULL; prov.capabilities = 0;   /* no NATIVE_FD */
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &prov, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", "5432", 0, &prov, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     /* adopt validates too. */
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    HlDbTransport *ta = hl_db_transport_adopt("pg", sv[0], &prov, err, sizeof err);
+    HlDbTransport *ta = hl_db_transport_adopt("pg", NULL, sv[0], &prov, err, sizeof err);
     ASSERT_TRUE(ta == NULL);
     close(sv[0]); close(sv[1]);
 }
@@ -448,7 +448,7 @@ UTEST(pg_transport_connect, set_blocking_failure_fails)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("pg", "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(fk_all_fds_closed());     /* the winner was retired, not leaked */
     seam_clear(); tp_disarm_watchdog();
@@ -463,7 +463,7 @@ UTEST(pg_transport_resolve, ip_literal_no_dns)
     db_transport_test_resolve = NULL;               /* force the real resolve_addrs */
     db_transport_test_socket_provider = &FK_PROVIDER;
 
-    HlDbTransport *t = hl_db_transport_connect("pg", "127.0.0.1", "5432", 0, &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, "127.0.0.1", "5432", 0, &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_resolve_called, 0);    /* the DNS callback was never consulted */
     ASSERT_EQ(hl_db_transport_close(t), 0);
@@ -476,7 +476,7 @@ UTEST(pg_transport_io, adopt_roundtrip_close_once)
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(hl_db_transport_fd(t), sv[0]);
 
@@ -514,7 +514,7 @@ UTEST(pg_transport_adopt, alloc_failure_consumes_fd_once)
     db_transport_test_force_alloc_fail = 1;         /* transport_new() returns NULL */
 
     char err[64] = {0};
-    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);               /* allocation failed */
     ASSERT_TRUE(err[0] != '\0');
     ASSERT_EQ(g_fk_close_n, 1);           /* fd CONSUMED: closed exactly once via the provider */
@@ -530,7 +530,7 @@ UTEST(pg_transport_io, partial_recv_short_count)
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
 
     const uint8_t two[2] = { 5, 6 };
@@ -555,7 +555,7 @@ UTEST(pg_transport_io, send_all_completes_forced_partial_writes)
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
 
     const uint8_t payload[8] = { 10, 20, 30, 40, 50, 60, 70, 80 };
@@ -586,7 +586,7 @@ UTEST(pg_transport_tls, attach_one_shot_and_fallible)
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
 
     /* NULL session rejected. */
@@ -619,7 +619,7 @@ UTEST(pg_transport_tls, attach_requires_live_fd)
      * to attach: rejected because the descriptor is not live. */
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("pg", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     KlSocketHandle saved = t->fd;
     t->fd = KL_INVALID_SOCKET;
@@ -639,7 +639,7 @@ static HlDbTransport *tp_make_live_op(void)
 {
     g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = transport_new(&FK_PROVIDER, "pg");
+    HlDbTransport *t = transport_new(&FK_PROVIDER, "pg", NULL);
     if (!t) return NULL;
     t->alloc = kl_allocator_default();
     if (kl_event_ctx_init(&t->ev, &t->alloc) != 0) { free(t); return NULL; }
@@ -694,6 +694,128 @@ UTEST(pg_transport_close, forced_non_detach_close_preserves_then_retry)
     /* Retry after clearing the forced state: detaches, frees, returns 0. */
     db_transport_test_force_no_detach = 0;
     ASSERT_EQ(hl_db_transport_close(t), 0);    /* t freed here */
+    seam_clear(); tp_disarm_watchdog();
+}
+
+/* ── Shared-transport additions: I/O timeout (D3) + embedder allocator (D6) ──
+ * docs/valkey_keel_transport_slice5.md. These adopt a REAL socketpair through the
+ * DEFAULT provider (NULL), so the held descriptor is a genuine POSIX fd that
+ * setsockopt/getsockopt and a bounded recv act on. */
+#include <sys/time.h>   /* struct timeval for the SO_*TIMEO readback */
+#include <time.h>       /* clock_gettime(CLOCK_MONOTONIC) for elapsed bounds */
+
+/* A 250 ms request must install SO_RCVTIMEO AND SO_SNDTIMEO, both close to 250 ms
+ * (bounded on BOTH sides, allowing only modest kernel rounding). */
+UTEST(db_transport_io_timeout, installs_both_options)
+{
+    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    char err[128] = {0};
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, err, sizeof err);
+    ASSERT_TRUE(t != NULL);
+    hl_db_transport_set_io_timeout(t, 250);
+    int fd = hl_db_transport_fd(t);
+    struct timeval rv = {0, 0}, sn = {0, 0}; socklen_t l = sizeof rv;
+    ASSERT_EQ(getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rv, &l), 0);
+    l = sizeof sn;
+    ASSERT_EQ(getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sn, &l), 0);
+    long rus = (long)rv.tv_sec * 1000000 + rv.tv_usec;
+    long sus = (long)sn.tv_sec * 1000000 + sn.tv_usec;
+    ASSERT_TRUE(rus >= 200000 && rus <= 300000);   /* ~250 ms, bounded both ways */
+    ASSERT_TRUE(sus >= 200000 && sus <= 300000);
+    hl_db_transport_close(t);
+    close(sv[1]);
+}
+
+UTEST(db_transport_io_timeout, zero_is_noop)
+{
+    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    char err[128] = {0};
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, err, sizeof err);
+    ASSERT_TRUE(t != NULL);
+    hl_db_transport_set_io_timeout(t, 0);   /* explicit no-op */
+    int fd = hl_db_transport_fd(t);
+    struct timeval rv = {0, 0}; socklen_t l = sizeof rv;
+    ASSERT_EQ(getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rv, &l), 0);
+    ASSERT_TRUE(rv.tv_sec == 0 && rv.tv_usec == 0);   /* unchanged: no timeout */
+    hl_db_transport_close(t);
+    close(sv[1]);
+}
+
+/* A 200 ms timeout must make a read against a silent peer EXPIRE - discriminated
+ * from an immediate error (elapsed lower bound), from a hang (SIGALRM watchdog +
+ * elapsed upper bound), and from any non-timeout failure (errno). */
+UTEST(db_transport_io_timeout, stalled_read_expires)
+{
+    tp_arm_watchdog();   /* alarm(5): a broken timeout can never hang past 5 s */
+    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    char err[128] = {0};
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, err, sizeof err);
+    ASSERT_TRUE(t != NULL);
+    hl_db_transport_set_io_timeout(t, 200);
+
+    uint8_t buf[16];
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    errno = 0;
+    ssize_t n = hl_db_transport_recv(t, buf, sizeof buf);   /* peer never writes */
+    int e = errno;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+
+    ASSERT_TRUE(n < 0);                                  /* a definite failure */
+    ASSERT_TRUE(e == EAGAIN || e == EWOULDBLOCK);        /* specifically a timeout */
+    ASSERT_TRUE(elapsed_ms >= 150);                      /* it actually WAITED */
+    ASSERT_TRUE(elapsed_ms <= 1500);                     /* and did not hang */
+
+    hl_db_transport_close(t);
+    close(sv[1]);
+    tp_disarm_watchdog();
+}
+
+UTEST(db_transport_alloc, block_from_embedder_allocator)
+{
+    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    HlAllocator a; hl_alloc_init(&a, 0);
+    char err[128] = {0};
+    HlDbTransport *t = hl_db_transport_adopt("pg", &a, sv[0], NULL, err, sizeof err);
+    ASSERT_TRUE(t != NULL);
+    ASSERT_TRUE(a.used > 0);                 /* the transport block came from &a */
+    ASSERT_EQ(hl_db_transport_close(t), 0);
+    ASSERT_EQ(a.used, (size_t)0);            /* the retained allocator freed it */
+    close(sv[1]);
+}
+
+/* The connect path additionally creates + pumps the private KlEventCtx (timers /
+ * watchers for the RFC 8305 stagger). Its scratch must ALSO come from the supplied
+ * allocator (D6). The event ctx is torn down during connect (so post-connect `used`
+ * is back to the bare block), hence the proof is on the high-water PEAK exceeding
+ * the block; and everything balances to zero after close. */
+UTEST(db_transport_alloc, connect_path_eventctx_balances)
+{
+    /* Baseline: an adopt allocates ONLY the transport block (no event ctx). */
+    int bp[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, bp), 0);
+    HlAllocator ab; hl_alloc_init(&ab, 0);
+    char err[128] = {0};
+    HlDbTransport *tb = hl_db_transport_adopt("pg", &ab, bp[0], NULL, err, sizeof err);
+    ASSERT_TRUE(tb != NULL);
+    size_t block_only = ab.used;
+    ASSERT_EQ(hl_db_transport_close(tb), 0);
+    ASSERT_EQ(ab.used, (size_t)0);
+    close(bp[1]);
+
+    /* Connect via the fake provider with a pending -> succeed stagger, which pumps
+     * the event loop (allocating timers + watchers through &ac). */
+    fk_reset(); tp_arm_watchdog();
+    g_fk_naddr = 2; g_fk_disp[0] = FK_PENDING; g_fk_disp[1] = FK_SUCCEED;
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
+
+    HlAllocator ac; hl_alloc_init(&ac, 0);
+    HlDbTransport *tc = hl_db_transport_connect("pg", &ac, "h", "5432", 0, &FK_PROVIDER, NULL, 0);
+    ASSERT_TRUE(tc != NULL);
+    ASSERT_GT(ac.peak, block_only);          /* event ctx scratch came from &ac too */
+    ASSERT_EQ(hl_db_transport_close(tc), 0);
+    ASSERT_EQ(ac.used, (size_t)0);           /* transport block + event ctx balanced */
+
     seam_clear(); tp_disarm_watchdog();
 }
 

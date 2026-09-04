@@ -20,8 +20,9 @@ cd "$(dirname "$0")/.."
 
 BASE=/tmp/hull_base_db_shared_e2e
 PGA=/tmp/libhull_feature-postgres_db_shared.a
+MYA=/tmp/libhull_feature-mysql_db_shared.a
 APP=$(mktemp -d)
-trap 'rm -rf "$APP" "$BASE" "$PGA"' EXIT
+trap 'rm -rf "$APP" "$BASE" "$PGA" "$MYA"' EXIT
 
 echo "=== build base hull (EMBED_PLATFORM=1; base has neither DB backend) ==="
 make EMBED_PLATFORM=1 >/dev/null
@@ -31,18 +32,24 @@ nm build/hull 2>/dev/null | grep -qE 'hl_db_transport_' \
     && { echo "FAIL: base hull contains hl_db_transport_* (should be composed-only)"; exit 1; }
 echo "ok  base is transport-free"
 
-echo "=== build both feature archives (each flag-flip cleans build/, so stash pg) ==="
+echo "=== build the postgres, mysql, AND valkey feature archives (each flag-flip"
+echo "    cleans build/, so stash pg + mysql and restore them alongside valkey) ==="
 make feature-postgres >/dev/null
 cp build/libhull_feature-postgres.a "$PGA"
 make feature-mysql >/dev/null
-# Restore the postgres archive alongside the mysql one so the compose resolver
-# (build/ first) finds BOTH.
+cp build/libhull_feature-mysql.a "$MYA"
+make feature-valkey >/dev/null          # valkey archive now in build/ (build/ was cleaned)
+# Restore pg + mysql alongside valkey so the compose resolver (build/ first) finds
+# all three.
 cp "$PGA" build/libhull_feature-postgres.a
-for a in postgres mysql; do
+cp "$MYA" build/libhull_feature-mysql.a
+# All three DB wire features carry cap_db_transport.o (pull-by-symbol: extracted
+# exactly once whichever combination is composed).
+for a in postgres mysql valkey; do
     ar t "build/libhull_feature-$a.a" | grep -q '^cap_db_transport.o$' \
         || { echo "FAIL: libhull_feature-$a.a lacks cap_db_transport.o"; exit 1; }
 done
-echo "ok  cap_db_transport.o present in both archives"
+echo "ok  cap_db_transport.o present in all three archives"
 
 cat > "$APP/app.lua" <<'LUA'
 app.manifest({ modules = { "hull/db@1" } })
@@ -74,4 +81,21 @@ OUTB=$("$BASE" build --compiler=system --with=mysql --with=postgres \
 assert_one_impl "$APP/binB" "order B"
 "$APP/binB" 2>&1 | grep -q "DB SHARED OK" || { echo "FAIL: order B binary did not run"; exit 1; }
 
-echo "PASS: shared db_transport composed once by both DB features in both --with orders"
+# Valkey fills a DIFFERENT base hook (hl_kv_feature_backends) than the SQL backends
+# (hl_db_feature_backends), yet shares cap/db_transport.c, so composing it with a
+# SQL backend must still resolve the transport exactly once, in either order.
+echo "=== compose order C: --with=valkey --with=postgres ==="
+OUTC=$("$BASE" build --compiler=system --with=valkey --with=postgres \
+        --no-verify-platform -o "$APP/binC" "$APP" 2>&1) || { echo "$OUTC"; echo "FAIL: order C build"; exit 1; }
+echo "$OUTC" | grep -q "composed feature 'valkey'"   || { echo "$OUTC"; echo "FAIL: valkey not composed (C)"; exit 1; }
+echo "$OUTC" | grep -q "composed feature 'postgres'" || { echo "$OUTC"; echo "FAIL: postgres not composed (C)"; exit 1; }
+assert_one_impl "$APP/binC" "order C (valkey+postgres)"
+"$APP/binC" 2>&1 | grep -q "DB SHARED OK" || { echo "FAIL: order C binary did not run"; exit 1; }
+
+echo "=== compose order D: --with=postgres --with=valkey (reversed) ==="
+OUTD=$("$BASE" build --compiler=system --with=postgres --with=valkey \
+        --no-verify-platform -o "$APP/binD" "$APP" 2>&1) || { echo "$OUTD"; echo "FAIL: order D build"; exit 1; }
+assert_one_impl "$APP/binD" "order D (postgres+valkey)"
+"$APP/binD" 2>&1 | grep -q "DB SHARED OK" || { echo "FAIL: order D binary did not run"; exit 1; }
+
+echo "PASS: shared db_transport composed once across postgres/mysql/valkey in both relevant orders"

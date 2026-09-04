@@ -72,6 +72,14 @@ ifneq ($(HL_ENABLE_MYSQL),1)
   TEST_SRCS := $(filter-out %/test_mysql_conn.c,$(TEST_SRCS))
 endif
 
+# test_valkey_conn / test_valkey_backend drive the connection layer, which now
+# rides the shared cap/db_transport.c (Keel v3) - absent on a base (non-Valkey)
+# build. Gate their discovery on HL_ENABLE_VALKEY=1 (they run under the valkey
+# sanitizer CI job); test_valkey_dsn + test_respwire stay Keel-free + ungated.
+ifneq ($(HL_ENABLE_VALKEY),1)
+  TEST_SRCS := $(filter-out %/test_valkey_conn.c %/test_valkey_backend.c,$(TEST_SRCS))
+endif
+
 # Under MSan, drop test_js_conformance. Its oracle calls raw JS_Eval on arbitrary JS
 # snippets (including destructuring) to get a ground-truth verdict, which trips a
 # use-of-uninitialized-value INSIDE vendored quickjs.c's js_parse_destructuring_element --
@@ -191,19 +199,46 @@ $(BUILDDIR)/test_valkey_dsn: $(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hul
 		$(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
 
 # Valkey/Redis connection: HELLO/AUTH handshake + RESP2 fallback + SELECT + a
-# command round-trip over a socketpair. -DHL_VALKEY_NO_TLS drives the plaintext
-# transport (no Keel/mbedTLS), mirroring test_pg_conn.
-$(BUILDDIR)/test_valkey_conn: $(TESTDIR)/hull/cap/test_valkey_conn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
+# command round-trip over a socketpair. Since the connection layer now rides the
+# shared cap/db_transport.c (Keel v3), -DHL_VALKEY_NO_TLS is DROPPED and the test
+# direct-compiles valkey_conn.c + respwire.c + db_transport.c and links
+# TEST_COMMON_LIBS (Keel, mbedTLS, tls_client, crypto), filtering the three direct
+# cap objects out of the common link - mirroring test_mysql_conn exactly. The
+# socketpair adopt path drives the descriptor directly, so it stays plaintext.
+# Only reached under HL_ENABLE_VALKEY=1.
+VK_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_valkey_conn.o $(BUILDDIR)/cap_respwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_LIBS))
+VK_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_valkey_conn.o $(BUILDDIR)/cap_respwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_valkey_conn: $(TESTDIR)/hull/cap/test_valkey_conn.c \
+    $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/cap/db_transport.c \
+    $(VK_CONN_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_valkey_conn.c $(SRCDIR)/hull/cap/valkey_conn.c \
-		$(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
+		$(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/cap/db_transport.c $(VK_CONN_TEST_LIBS) $(LDFLAGS)
 
 # Valkey/Redis HlKvBackend op->RESP mapping over a socketpair (valkey.c +
-# valkey_conn.c + respwire.c). -DHL_VALKEY_NO_TLS drives the plaintext transport.
-$(BUILDDIR)/test_valkey_backend: $(TESTDIR)/hull/cap/test_valkey_backend.c $(SRCDIR)/hull/cap/valkey.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
+# valkey_conn.c + respwire.c + db_transport.c). Same drop-NO_TLS + direct-compile
+# + TEST_COMMON_LIBS treatment as test_valkey_conn, plus valkey.c (the vtable).
+VK_BE_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_valkey.o $(BUILDDIR)/cap_valkey_conn.o $(BUILDDIR)/cap_respwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_LIBS))
+VK_BE_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_valkey.o $(BUILDDIR)/cap_valkey_conn.o $(BUILDDIR)/cap_respwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_valkey_backend: $(TESTDIR)/hull/cap/test_valkey_backend.c \
+    $(SRCDIR)/hull/cap/valkey.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/cap/db_transport.c \
+    $(VK_BE_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_valkey_backend.c $(SRCDIR)/hull/cap/valkey.c \
-		$(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
+		$(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/cap/db_transport.c $(VK_BE_TEST_LIBS) $(LDFLAGS)
+
+# Shared TLS-client handshake fd-mode helpers (docs/valkey_keel_transport_slice5.md):
+# white-box direct-include of shared/tls_client.c to unit-test tls_fd_set_nonblocking
+# / tls_fd_restore (success restoration + both fail-closed paths). TLS_CLIENT_OBJ is
+# filtered out of the common link so the direct-included definitions don't collide;
+# mbedTLS/keel stay for the symbols the rest of tls_client.c references. Ungated
+# (tls_client is always in the base), runs in the default `make test`.
+TLS_CLIENT_TEST_LIBS := $(filter-out $(TLS_CLIENT_OBJ),$(TEST_COMMON_LIBS))
+TLS_CLIENT_TEST_DEPS := $(filter-out $(TLS_CLIENT_OBJ),$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_tls_client: $(TESTDIR)/hull/test_tls_client.c \
+    $(SRCDIR)/hull/shared/tls_client.c $(TLS_CLIENT_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_TLS_CLIENT_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/test_tls_client.c $(TLS_CLIENT_TEST_LIBS) $(LDFLAGS)
 
 # MySQL/MariaDB codec + DSN test: mysqlwire.c + mysql_conn.c are
 # self-contained (no socket/TLS/crypto yet) and gated out of CAP_OBJS until

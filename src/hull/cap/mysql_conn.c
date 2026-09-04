@@ -569,7 +569,7 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
      * valid (default) provider, so the caller never leaks it and we do not close
      * it here. Save + restore the transport's message across the memset (mirrors
      * cap/pg_conn.c's hl_pg_conn_start). */
-    HlDbTransport *t = hl_db_transport_adopt("mysql", fd, NULL, conn->errmsg, sizeof conn->errmsg);
+    HlDbTransport *t = hl_db_transport_adopt("mysql", NULL, fd, NULL, conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         char saved[sizeof conn->errmsg];
         snprintf(saved, sizeof saved, "%s", conn->errmsg);
@@ -585,7 +585,7 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
 
 int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
 {
-    HlDbTransport *t = hl_db_transport_connect("mysql", dsn->host, dsn->port, timeout_ms,
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, dsn->host, dsn->port, timeout_ms,
                                              NULL, conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         memset(conn, 0, sizeof *conn);

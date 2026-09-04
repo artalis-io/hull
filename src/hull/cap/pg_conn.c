@@ -595,7 +595,7 @@ int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
 {
     /* Adopt takes ownership of fd on success; on failure the caller still owns
      * fd (adopt contract), so do NOT close it here. */
-    HlDbTransport *t = hl_db_transport_adopt("pg", fd, NULL, conn->errmsg, sizeof conn->errmsg);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, fd, NULL, conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         char saved[sizeof conn->errmsg];
         snprintf(saved, sizeof saved, "%s", conn->errmsg);
@@ -663,7 +663,7 @@ HlPgSslDecision hl_pg_ssl_negotiate(HlDbTransport *t, HlPgSslMode mode,
 
 int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
 {
-    HlDbTransport *t = hl_db_transport_connect("pg", dsn->host, dsn->port, timeout_ms,
+    HlDbTransport *t = hl_db_transport_connect("pg", NULL, dsn->host, dsn->port, timeout_ms,
                                              NULL, conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         memset(conn, 0, sizeof(*conn));

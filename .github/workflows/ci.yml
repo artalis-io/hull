@@ -1934,6 +1934,30 @@ jobs:
       - name: run test_mysql_conn (LSan leak detection on by default on Linux)
         run: ASAN_OPTIONS=detect_leaks=1 ./build/test_mysql_conn
 
+  # The Valkey RESP connection now rides the shared cap/db_transport.c (Keel v3;
+  # docs/valkey_keel_transport_slice5.md), so test_valkey_conn / test_valkey_backend
+  # are HL_ENABLE_VALKEY-gated (moved out of the default suite) - this job is their
+  # permanent ASan/LSan home, mirroring pg/mysql-transport-sanitize.
+  valkey-conn-sanitize:
+    needs: [classify]
+    if: needs.classify.outputs.run_db_valkey == 'true'
+    name: valkey_conn ASan/LSan
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: build test_valkey_conn + test_valkey_backend under ASan+UBSan (+LSan), Valkey enabled
+        run: make DEBUG=1 HL_ENABLE_VALKEY=1 build/test_valkey_conn build/test_valkey_backend
+
+      - name: run test_valkey_conn (LSan leak detection on by default on Linux)
+        run: ASAN_OPTIONS=detect_leaks=1 ./build/test_valkey_conn
+
+      - name: run test_valkey_backend (LSan leak detection on by default on Linux)
+        run: ASAN_OPTIONS=detect_leaks=1 ./build/test_valkey_backend
+
   # Real Valkey/Redis: kv.open{backend="valkey"} / cache.open over the RESP wire
   # -> get/set/del/exists/TTL/incr/CAS/scan/clear, the borrow-copy guard, and
   # kv/cache namespace isolation, in BOTH runtimes (e2e-valkey, a compiled-in
@@ -2682,6 +2706,7 @@ jobs:
       - mysql
       - mysql-transport-sanitize
       - valkey
+      - valkey-conn-sanitize
       - analyze
       - cosmo
       - gpu
