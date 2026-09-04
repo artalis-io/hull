@@ -50,12 +50,29 @@ ifneq ($(HL_ENABLE_POSTGRES),1)
   TEST_SRCS := $(filter-out %/test_pg_transport.c,$(TEST_SRCS))
 endif
 
+# The MySQL-over-Keel transport test needs KlConnectOp + KlEventCtx +
+# cap/mysql_transport.c (an independent copy of the PG transport), filtered out of
+# CAP_OBJS until HL_ENABLE_MYSQL. Same rationale as test_pg_transport: the
+# transport cannot avoid Keel, so gate discovery on HL_ENABLE_MYSQL=1; the explicit
+# rule below wires it.
+ifneq ($(HL_ENABLE_MYSQL),1)
+  TEST_SRCS := $(filter-out %/test_mysql_transport.c,$(TEST_SRCS))
+endif
+
 # test_pg_conn now drives hl_pg_conn_start through the PgTransport byte transport
 # (adopt path), so like test_pg_transport it needs KlConnectOp + KlEventCtx +
 # cap/pg_transport.c, none of which exist on a base (non-Postgres) build. Gate its
 # discovery on HL_ENABLE_POSTGRES=1; the explicit rule below wires it.
 ifneq ($(HL_ENABLE_POSTGRES),1)
   TEST_SRCS := $(filter-out %/test_pg_conn.c,$(TEST_SRCS))
+endif
+
+# test_mysql_conn now drives hl_my_conn_start through the MyTransport byte
+# transport (adopt path), so like test_mysql_transport it needs KlConnectOp +
+# KlEventCtx + cap/mysql_transport.c, none of which exist on a base (non-MySQL)
+# build. Gate its discovery on HL_ENABLE_MYSQL=1; the explicit rule below wires it.
+ifneq ($(HL_ENABLE_MYSQL),1)
+  TEST_SRCS := $(filter-out %/test_mysql_conn.c,$(TEST_SRCS))
 endif
 
 # Under MSan, drop test_js_conformance. Its oracle calls raw JS_Eval on arbitrary JS
@@ -147,6 +164,17 @@ $(BUILDDIR)/test_pg_transport: $(TESTDIR)/hull/cap/test_pg_transport.c \
     $(SRCDIR)/hull/cap/pg_transport.c $(PG_TP_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_PG_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(PG_TP_TEST_LIBS) $(LDFLAGS)
 
+# MySQL-over-Keel transport test: mirrors test_pg_transport exactly. Direct-compiles
+# the independent cap/mysql_transport.c under -DHL_MY_TEST_HOOKS (the gated provider
+# / resolve / pump-checkpoint / force-alloc-fail seam, absent from production), and
+# excludes cap_mysql_transport.o from the common link so the direct-included defs do
+# not collide. Only reached under HL_ENABLE_MYSQL=1.
+MY_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_LIBS))
+MY_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_mysql_transport: $(TESTDIR)/hull/cap/test_mysql_transport.c \
+    $(SRCDIR)/hull/cap/mysql_transport.c $(MY_TP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_MY_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MY_TP_TEST_LIBS) $(LDFLAGS)
+
 # Valkey/Redis RESP2/3 codec test: respwire.c is a self-contained parser gated
 # out of CAP_OBJS until HL_ENABLE_VALKEY, so link it directly (explicit rule
 # wins over the generic pattern rule).
@@ -192,13 +220,24 @@ $(BUILDDIR)/test_mysqlwire: $(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/
 		$(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c \
 		$(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) $(LDFLAGS)
 
-# mysql connection / handshake test: drives hl_my_conn_start over a socketpair.
-# Links mysql_conn.c (socket + native auth) + mysqlwire.c + the crypto objs.
-# -DHL_MY_NO_TLS: the socketpair harness is plaintext, so drop the Keel/TLS dep.
-$(BUILDDIR)/test_mysql_conn: $(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c $(PG_CRYPTO_OBJS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -DHL_MY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
-		$(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hull/cap/mysql_conn.c \
-		$(SRCDIR)/hull/cap/mysqlwire.c $(PG_CRYPTO_OBJS) $(LDFLAGS)
+# mysql connection / handshake test. hl_my_conn_start now rides the MyTransport
+# byte transport (Keel v3), so the test source-compiles mysql_conn.c + mysqlwire.c
+# + mysql_transport.c together and links TEST_COMMON_LIBS (which already carries
+# Keel, mbedTLS, tls_client, and the crypto the auth scrambles depend on),
+# mirroring test_pg_conn's direct-compile-plus-filter pattern. The three cap
+# objects are filtered OUT of the common link so the direct-included definitions
+# do not collide. -DHL_MY_NO_TLS is DROPPED (the connection layer + transport are
+# now linked). Only reached under HL_ENABLE_MYSQL=1. The socketpair handshake
+# tests stay plaintext (the adopt path drives the descriptor directly), so no TLS
+# server is needed.
+MY_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_LIBS))
+MY_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_mysql_conn: $(TESTDIR)/hull/cap/test_mysql_conn.c \
+    $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/cap/mysql_transport.c \
+    $(MY_CONN_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c \
+		$(SRCDIR)/hull/cap/mysql_transport.c $(MY_CONN_TEST_LIBS) $(LDFLAGS)
 
 # SMTP transport test: includes src/hull/cap/smtp.c + smtp_transport.c DIRECTLY
 # (to unit-test their static helpers: the incremental reply parser, the AUTH

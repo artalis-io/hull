@@ -78,12 +78,39 @@ make HL_ENABLE_MYSQL=1 >/dev/null
 
 echo "=== starting mysql (native_password default for the plaintext phase) ==="
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+# --default-authentication-plugin is a MySQL-8-only mysqld option; MariaDB rejects
+# unknown options and exits, and it already defaults to mysql_native_password, so
+# omit the flag there. MariaDB images accept the MYSQL_* env vars as aliases.
+IMG="${MYSQL_IMAGE:-mysql:8.0}"
+SERVER_ARGS="--default-authentication-plugin=mysql_native_password"
+case "$IMG" in
+    mariadb*) SERVER_ARGS="" ;;
+esac
 docker run -d --name "$CONTAINER" \
     -e MYSQL_ROOT_PASSWORD=rootpw \
     -e MYSQL_DATABASE=hulldb \
     -e MYSQL_USER=hull -e MYSQL_PASSWORD=s3cretpw \
-    -p "${MYPORT}:3306" "${MYSQL_IMAGE:-mysql:8.0}" \
-    --default-authentication-plugin=mysql_native_password >/dev/null
+    -p "${MYPORT}:3306" "$IMG" \
+    $SERVER_ARGS >/dev/null
+
+# MariaDB 11 images dropped the historic `mysql` client symlink and ship the
+# client as `mariadb`; MySQL 8 ships it as `mysql`. Resolve whichever exists in
+# the running container so every docker-exec query below is client-name-agnostic.
+# Prefer `mariadb` (present only on MariaDB) so MySQL 8 falls through to `mysql`.
+MYSQL_CLI=""
+r=0
+while [ "$r" -lt 30 ]; do
+    if docker exec "$CONTAINER" sh -c 'command -v mariadb' >/dev/null 2>&1; then
+        MYSQL_CLI=mariadb
+        break
+    elif docker exec "$CONTAINER" sh -c 'command -v mysql' >/dev/null 2>&1; then
+        MYSQL_CLI=mysql
+        break
+    fi
+    sleep 1
+    r=$((r + 1))
+done
+[ -n "$MYSQL_CLI" ] || { echo "FAIL: no mysql/mariadb client binary in container"; exit 1; }
 
 echo "=== waiting for mysql ==="
 # The mysql:8 entrypoint runs init against a temporary socket-only server, then
@@ -94,7 +121,7 @@ ready=0
 i=0
 while [ "$i" -lt 90 ]; do
     if docker exec "$CONTAINER" \
-        mysql -uhull -ps3cretpw -h127.0.0.1 --protocol=tcp hulldb \
+        "$MYSQL_CLI" -uhull -ps3cretpw -h127.0.0.1 --protocol=tcp hulldb \
         -e "SELECT 1" >/dev/null 2>&1; then
         ready=1
         break
@@ -376,7 +403,7 @@ app.main(function(ctx)
 end)
 LUA
 ./build/hull "$WFDIR/wf.lua" -d "$DSN" >/dev/null 2>&1 || true
-wfstat=$(docker exec "$CONTAINER" mysql -uhull -ps3cretpw hulldb -N -se \
+wfstat=$(docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -N -se \
   "SELECT CONCAT((SELECT status FROM _hull_jobs WHERE type='__wf:wfm' ORDER BY id DESC LIMIT 1),',',(SELECT COUNT(*) FROM _hull_workflow_steps),',',(SELECT COUNT(*) FROM _hull_job_attempts),',',CASE WHEN (SELECT MAX(finished_ms) FROM _hull_job_attempts)>1000000000000 THEN 'bigint' ELSE 'small' END)" 2>/dev/null)
 case "$wfstat" in
     done,*bigint)
@@ -393,7 +420,7 @@ esac
 # here. Each phase drops the jobs tables first (via mysql, to bypass the
 # _hull_* namespace guard) for a clean, deterministic slate.
 jobs_reset_my() {
-    docker exec "$CONTAINER" mysql -uhull -ps3cretpw hulldb -e \
+    docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -e \
       "SET FOREIGN_KEY_CHECKS=0; DROP TABLE IF EXISTS _hull_jobs, _hull_job_events, _hull_job_subscriptions, _hull_job_concurrency, _hull_job_attempts, _hull_workflow_steps; SET FOREIGN_KEY_CHECKS=1" \
       >/dev/null 2>&1 || true
 }
@@ -496,12 +523,21 @@ else
 fi
 jobs_reset_my   # clean slate for the following phases
 
+# The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
+# full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the
+# plaintext MariaDB run (MariaDB defaults to mysql_native_password; its TLS matrix
+# is a later checkpoint).
+if [ "${SKIP_TLS:-0}" = 1 ]; then
+    echo "PASS: mysql/mariadb plaintext end-to-end (SKIP_TLS set; TLS phase skipped)"
+    exit 0
+fi
+
 # ── TLS + caching_sha2_password phase ─────────────────────────────────
 # MySQL 8 ships TLS on by default (auto-generated certs). Switch the user to
 # caching_sha2_password so its cache is empty, then connect over TLS: the
 # full-auth path sends the cleartext password over the encrypted channel.
 echo "=== switching user to caching_sha2_password ==="
-docker exec "$CONTAINER" mysql -uroot -prootpw -e \
+docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e \
     "ALTER USER 'hull'@'%' IDENTIFIED WITH caching_sha2_password BY 's3cretpw';" >/dev/null 2>&1
 
 APPDIR_TLS=$(mktemp -d)
@@ -536,3 +572,55 @@ else
     echo "--- server log ---"; cat "$APPDIR_TLS/serve.log" 2>/dev/null || true
     exit 1
 fi
+
+# Free $PORT for the refusal phases below.
+kill "$SVR" 2>/dev/null || true; SVR=
+
+# ── sslmode security matrix: verify-* must reject an untrusted cert ────────
+# The default -d connection opens EAGERLY at app-context init, so a DSN that must
+# not connect makes `hull` exit at startup rather than serve. That startup failure
+# IS the proof the connection was refused: a silent success (a plaintext downgrade,
+# or verify-* accepting a bad cert) would instead leave the server running. Assert
+# the process exits and the log shows the connection failure. $1 = label, $2 = DSN.
+assert_connect_refused() {
+    _lbl=$1; _dsn=$2
+    _d=$(mktemp -d)
+    printf 'app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })\nrequire("hull.db").default()\napp.get("/", function(req, res) res:json({ up = true }) end)\n' > "$_d/app.lua"
+    ./build/hull -d "$_dsn" -p "$PORT" "$_d/app.lua" >"$_d/serve.log" 2>&1 &
+    _pid=$!
+    _exited=0
+    for _ in $(seq 1 20); do
+        if ! kill -0 "$_pid" 2>/dev/null; then _exited=1; break; fi
+        sleep 0.5
+    done
+    if [ "$_exited" = 0 ]; then
+        kill "$_pid" 2>/dev/null || true; wait "$_pid" 2>/dev/null || true
+        echo "::error $_lbl: connection unexpectedly succeeded (server stayed up)"
+        cat "$_d/serve.log" 2>/dev/null || true; rm -rf "$_d"; exit 1
+    fi
+    wait "$_pid" 2>/dev/null || true
+    echo "--- $_lbl serve.log ---"; cat "$_d/serve.log" 2>/dev/null || true
+    if grep -qi 'failed to open database' "$_d/serve.log"; then
+        echo "PASS: $_lbl (connection refused, no silent success)"; rm -rf "$_d"
+    else
+        echo "::error $_lbl: expected a connection-failure log"; rm -rf "$_d"; exit 1
+    fi
+}
+
+# MySQL 8 serves TLS with an auto-generated self-signed cert that is NOT in the
+# embedded Mozilla CA bundle, so sslmode=verify-ca (chain) and sslmode=verify-full
+# (chain + hostname) must fail verification instead of connecting. sslmode=require
+# (encryption without chain verification) SUCCEEDS above, so this isolates that the
+# verification path itself is real and fails closed. (verify-* SUCCESS against a
+# private CA is not e2e-testable here: Hull's mysql TLS verify trusts only the
+# embedded bundle; the chain + hostname logic is covered by the shared tls_client
+# live-peer unit suite, and the no-downgrade refusal by test_mysql_conn's
+# tls_require_no_downgrade / tls_verify_no_downgrade cases.)
+echo "=== sslmode=verify-ca rejects the untrusted self-signed cert ==="
+assert_connect_refused "verify-ca (untrusted self-signed cert)" \
+    "mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=verify-ca"
+echo "=== sslmode=verify-full rejects the untrusted self-signed cert ==="
+assert_connect_refused "verify-full (untrusted self-signed cert)" \
+    "mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=verify-full"
+
+echo "PASS: mysql TLS security matrix (verify-ca/verify-full reject the untrusted cert)"

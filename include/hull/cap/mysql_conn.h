@@ -73,13 +73,13 @@ int hl_my_caching_sha2_scramble(const char *password,
 #define HL_MY_ERRMSG_SIZE    256    /* connection error-message buffer */
 #define HL_MY_RECV_BUF_INIT  8192   /* initial receive-buffer capacity */
 
-/* Forward decl so the field exists even in HL_MY_NO_TLS builds (fuzz / tests). */
-struct HlTlsClient;
+struct MyTransport;   /* cap/mysql_transport.h: the owned byte transport */
 
 /* An open connection, authenticated + idle once hl_my_conn_open/start returns
- * 0. Owns fd (closed by hl_my_conn_close). */
+ * 0. Owns the byte transport (closed + freed by hl_my_conn_close), which owns
+ * the descriptor and any attached TLS session. */
 typedef struct HlMyConn {
-    int      fd;
+    struct MyTransport *transport;  /* owned byte transport (bytes + optional TLS) */
     uint8_t *rbuf;          /* receive accumulation buffer */
     size_t   rlen;          /* valid bytes in rbuf */
     size_t   rcap;          /* rbuf capacity */
@@ -87,7 +87,6 @@ typedef struct HlMyConn {
     uint32_t capabilities;  /* client capability flags used at handshake */
     uint8_t  seq;           /* next packet sequence to send in a command */
     uint64_t last_insert_id;/* from the most recent OK packet */
-    struct HlTlsClient *tls;/* non-NULL once TLS is active; then all I/O tunnels */
     char     errmsg[HL_MY_ERRMSG_SIZE];
 } HlMyConn;
 

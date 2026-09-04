@@ -1893,9 +1893,46 @@ jobs:
         with:
           submodules: true
 
-      - name: MySQL end-to-end
+      - name: MySQL end-to-end (mysql:8, plaintext + caching_sha2-over-TLS)
         timeout-minutes: 15
         run: make e2e-mysql
+
+      # MariaDB defaults to mysql_native_password; validate the plaintext path
+      # against a real MariaDB server (its TLS matrix is a later checkpoint, so
+      # SKIP_TLS=1). Sequential: e2e_mysql.sh's EXIT trap removes the shared
+      # container before this run recreates it.
+      - name: MariaDB end-to-end (plaintext)
+        timeout-minutes: 15
+        run: MYSQL_IMAGE=mariadb:11 SKIP_TLS=1 make e2e-mysql
+
+  # The MySQL-over-Keel transport unit test (cap/mysql_transport.c, an independent
+  # copy of the PG transport) is HL_ENABLE_MYSQL-gated, so the base sanitizer /
+  # build jobs do not build it. test_mysql_conn now also drives hl_my_conn_start
+  # through that transport (adopt path), so it is HL_ENABLE_MYSQL-gated too and
+  # would otherwise be orphaned from the base `make test`. This standing leg builds
+  # + runs BOTH under ASan+UBSan with LSan (on by default on Linux), giving durable
+  # coverage of the transport's allocation-preservation and descriptor-lifecycle
+  # behavior AND the mysql_conn codec / handshake / adopt path so neither can
+  # silently regress. Mirrors pg-transport-sanitize.
+  mysql-transport-sanitize:
+    needs: [classify]
+    if: needs.classify.outputs.run_db_mysql == 'true'
+    name: mysql_transport ASan/LSan
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: build test_mysql_transport + test_mysql_conn under ASan+UBSan (+LSan), MySQL enabled
+        run: make DEBUG=1 HL_ENABLE_MYSQL=1 build/test_mysql_transport build/test_mysql_conn
+
+      - name: run test_mysql_transport (LSan leak detection on by default on Linux)
+        run: ASAN_OPTIONS=detect_leaks=1 ./build/test_mysql_transport
+
+      - name: run test_mysql_conn (LSan leak detection on by default on Linux)
+        run: ASAN_OPTIONS=detect_leaks=1 ./build/test_mysql_conn
 
   # Real Valkey/Redis: kv.open{backend="valkey"} / cache.open over the RESP wire
   # -> get/set/del/exists/TTL/incr/CAS/scan/clear, the borrow-copy guard, and
@@ -2625,6 +2662,7 @@ jobs:
       - postgres
       - pg-transport-sanitize
       - mysql
+      - mysql-transport-sanitize
       - valkey
       - analyze
       - cosmo
