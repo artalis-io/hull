@@ -1357,10 +1357,12 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   # agent/request.c, agent/eval.c, agent/perf.c, agent/endpoint.c also
   # exercise HTTP routes. All server-only - the `hull agent` subcommands
   # that depend on a running server (test/request/eval/perf/endpoint)
-  # lose their backends.
+  # lose their backends. agent/probe.c is request.c's TCP-liveness helper
+  # (its sole consumer is hl_agent_status), so it drops with request.c.
   AGENT_LIB_SRCS := $(filter-out \
       $(SRCDIR)/hull/agent/test.c \
       $(SRCDIR)/hull/agent/request.c \
+      $(SRCDIR)/hull/agent/probe.c \
       $(SRCDIR)/hull/agent/eval.c \
       $(SRCDIR)/hull/agent/perf.c \
       $(SRCDIR)/hull/agent/endpoint.c, \

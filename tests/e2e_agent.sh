@@ -205,6 +205,9 @@ rm -rf "$TMPDIR_REQ"
 EXIT_CODE=0
 OUT=$($HULL agent request GET /health -p 39899 2>&1) || EXIT_CODE=$?
 check_contains "request no server error"   "$OUT" '"error"'
+# The failure message retains the 127.0.0.1:<port> context (error-shape delta:
+# the former "cannot connect to ..." is now "request to 127.0.0.1:<port> failed").
+check_contains "request no server host:port" "$OUT" '127.0.0.1:39899'
 check_exit     "request no server exit"    "$EXIT_CODE" "1"
 
 # ── status ────────────────────────────────────────────────────────────
