@@ -850,22 +850,29 @@ ifneq ($(HL_ENABLE_SQLITE),1)
       $(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_POSTGRES),1)
-  # PostgreSQL wire backend: codec + connection + transport + the vtable.
+  # PostgreSQL wire backend: codec + connection + the vtable (the byte transport
+  # is the shared cap/db_transport.c, gated separately below).
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db_postgres.c \
       $(SRCDIR)/hull/cap/pg_conn.c \
-      $(SRCDIR)/hull/cap/pg_transport.c \
       $(SRCDIR)/hull/cap/pgwire.c, \
       $(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_MYSQL),1)
-  # MySQL / MariaDB wire backend: codec + connection + transport + vtable. Off by default.
+  # MySQL / MariaDB wire backend: codec + connection + vtable. Off by default.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db_mysql.c \
       $(SRCDIR)/hull/cap/mysql_conn.c \
-      $(SRCDIR)/hull/cap/mysql_transport.c \
       $(SRCDIR)/hull/cap/mysqlwire.c, \
       $(CAP_SRCS))
+endif
+# Shared SQL-wire byte transport (cap/db_transport.c) over Keel v3 - backs BOTH
+# the Postgres and MySQL wire clients (extracted from the byte-identical
+# pg_transport.c / mysql_transport.c; docs/db_transport_extraction.md). Keep it
+# iff either wire backend is enabled; drop it when neither, so a base / sqlite-only
+# build carries zero hl_db_transport_* symbols and no new Keel references.
+ifeq ($(filter 1,$(HL_ENABLE_POSTGRES) $(HL_ENABLE_MYSQL)),)
+  CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/db_transport.c,$(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_VALKEY),1)
   # Valkey/Redis KV backend (the first NON-SQL connection feature): RESP codec +

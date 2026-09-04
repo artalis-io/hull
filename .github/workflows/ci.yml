@@ -1849,7 +1849,7 @@ jobs:
         timeout-minutes: 15
         run: make e2e-postgres
 
-  # The PostgreSQL-over-Keel unit tests (cap/pg_transport.c AND cap/pg_conn.c,
+  # The PostgreSQL-over-Keel unit tests (the shared cap/db_transport.c AND cap/pg_conn.c,
   # whose connection layer now drives through the transport) are
   # HL_ENABLE_POSTGRES-gated, so the base `sanitizers` / `build` jobs do not build
   # them. This standing leg builds + runs both under ASan+UBSan with LSan (on by
@@ -1905,8 +1905,8 @@ jobs:
         timeout-minutes: 15
         run: MYSQL_IMAGE=mariadb:11 SKIP_TLS=1 make e2e-mysql
 
-  # The MySQL-over-Keel transport unit test (cap/mysql_transport.c, an independent
-  # copy of the PG transport) is HL_ENABLE_MYSQL-gated, so the base sanitizer /
+  # The MySQL-over-Keel transport unit test (the shared cap/db_transport.c, driven
+  # through the MySQL seam) is HL_ENABLE_MYSQL-gated, so the base sanitizer /
   # build jobs do not build it. test_mysql_conn now also drives hl_my_conn_start
   # through that transport (adopt path), so it is HL_ENABLE_MYSQL-gated too and
   # would otherwise be orphaned from the base `make test`. This standing leg builds
@@ -2343,6 +2343,24 @@ jobs:
         timeout-minutes: 15
         run: sh tests/e2e_feature_mysql.sh
 
+  # The shared SQL-wire transport (cap/db_transport.c) composed by BOTH DB
+  # features at once, in both --with orders, resolving exactly one impl
+  # (docs/db_transport_extraction.md). Mapped to db-postgres: cap/db_transport.c
+  # is in DB_SHARED_FILES, which fans out to every DB backend fact (incl.
+  # db_postgres_changed), so a change to it sets run_db_postgres and triggers this.
+  db-shared-feature:
+    needs: [classify]
+    if: needs.classify.outputs.run_db_postgres == 'true'
+    name: Shared DB transport (both features)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Compose postgres + mysql together and assert one shared transport (e2e)
+        timeout-minutes: 20
+        run: sh tests/e2e_feature_db_shared.sh
+
   # The JS-less side of the project-discovery lifecycle, on its OWN clean
   # RUNTIME=lua build (QuickJS + the JS frontend dropped). The recipe pins HULL_E2E_EXPECT_JS=0,
   # so this job FAILS if JavaScript is somehow analyzable here - the JS-less branch can never
@@ -2673,6 +2691,7 @@ jobs:
       - tui-feature
       - postgres-feature
       - mysql-feature
+      - db-shared-feature
       - project-discovery-lua
       - coverage
       - lint

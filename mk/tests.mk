@@ -40,37 +40,34 @@ ifeq ($(HL_ENABLE_IMAGE),0)
   TEST_SRCS := $(filter-out %/test_image.c,$(TEST_SRCS))
 endif
 
-# The PostgreSQL-over-Keel transport test inherently needs KlConnectOp +
-# KlEventCtx + cap/pg_transport.c, none of which exist on a base (non-Postgres)
-# build - cap/pg_transport.c is filtered out of CAP_OBJS until HL_ENABLE_POSTGRES.
-# Unlike test_pg_conn (which source-compiles the codec free of Keel via
-# -DHL_PG_NO_TLS), the transport cannot avoid Keel, so gate its discovery on
-# HL_ENABLE_POSTGRES=1. The explicit rule below wires it.
+# The transport tests direct-compile the SHARED cap/db_transport.c (the extracted
+# byte transport backing both wire clients; docs/db_transport_extraction.md),
+# which inherently needs KlConnectOp + KlEventCtx - none of which exist on a base
+# build. cap/db_transport.c is filtered out of CAP_OBJS unless HL_ENABLE_POSTGRES
+# OR HL_ENABLE_MYSQL is set. Gate the PG seam suite on HL_ENABLE_POSTGRES=1; the
+# explicit rule below wires it.
 ifneq ($(HL_ENABLE_POSTGRES),1)
   TEST_SRCS := $(filter-out %/test_pg_transport.c,$(TEST_SRCS))
 endif
 
-# The MySQL-over-Keel transport test needs KlConnectOp + KlEventCtx +
-# cap/mysql_transport.c (an independent copy of the PG transport), filtered out of
-# CAP_OBJS until HL_ENABLE_MYSQL. Same rationale as test_pg_transport: the
-# transport cannot avoid Keel, so gate discovery on HL_ENABLE_MYSQL=1; the explicit
-# rule below wires it.
+# The MySQL seam suite drives the SAME shared cap/db_transport.c through the MySQL
+# tag; gate its discovery on HL_ENABLE_MYSQL=1 (the transport cannot avoid Keel).
 ifneq ($(HL_ENABLE_MYSQL),1)
   TEST_SRCS := $(filter-out %/test_mysql_transport.c,$(TEST_SRCS))
 endif
 
-# test_pg_conn now drives hl_pg_conn_start through the PgTransport byte transport
-# (adopt path), so like test_pg_transport it needs KlConnectOp + KlEventCtx +
-# cap/pg_transport.c, none of which exist on a base (non-Postgres) build. Gate its
+# test_pg_conn drives hl_pg_conn_start through the shared HlDbTransport byte
+# transport (adopt path), so like test_pg_transport it needs KlConnectOp +
+# KlEventCtx + cap/db_transport.c, absent on a base (non-Postgres) build. Gate its
 # discovery on HL_ENABLE_POSTGRES=1; the explicit rule below wires it.
 ifneq ($(HL_ENABLE_POSTGRES),1)
   TEST_SRCS := $(filter-out %/test_pg_conn.c,$(TEST_SRCS))
 endif
 
-# test_mysql_conn now drives hl_my_conn_start through the MyTransport byte
+# test_mysql_conn drives hl_my_conn_start through the shared HlDbTransport byte
 # transport (adopt path), so like test_mysql_transport it needs KlConnectOp +
-# KlEventCtx + cap/mysql_transport.c, none of which exist on a base (non-MySQL)
-# build. Gate its discovery on HL_ENABLE_MYSQL=1; the explicit rule below wires it.
+# KlEventCtx + cap/db_transport.c, absent on a base (non-MySQL) build. Gate its
+# discovery on HL_ENABLE_MYSQL=1; the explicit rule below wires it.
 ifneq ($(HL_ENABLE_MYSQL),1)
   TEST_SRCS := $(filter-out %/test_mysql_conn.c,$(TEST_SRCS))
 endif
@@ -129,9 +126,9 @@ $(BUILDDIR)/test_pgwire: $(TESTDIR)/hull/cap/test_pgwire.c $(SRCDIR)/hull/cap/pg
 PG_CRYPTO_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls.o \
                   $(BUILDDIR)/cap_crypto_asym_mbedtls.o $(MBEDTLS_OBJS) $(TWEETNACL_OBJ)
 
-# pgwire connection / DSN / handshake test. hl_pg_conn_start now rides the
-# PgTransport byte transport (Keel v3), so the test source-compiles pg_conn.c +
-# pgwire.c + pg_transport.c together and links TEST_COMMON_LIBS (which already
+# pgwire connection / DSN / handshake test. hl_pg_conn_start rides the shared
+# HlDbTransport byte transport (Keel v3; docs/db_transport_extraction.md), so the test source-compiles pg_conn.c +
+# pgwire.c + db_transport.c together and links TEST_COMMON_LIBS (which already
 # carries Keel, mbedTLS, tls_client, and the crypto SCRAM depends on), mirroring
 # test_pg_transport's direct-compile-plus-filter pattern. The three cap objects
 # are filtered OUT of the common link so the direct-included definitions do not
@@ -139,41 +136,41 @@ PG_CRYPTO_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls.o
 # linked) and HL_PG_NO_SCRAM stays off (the test exercises SCRAM). Only reached
 # under HL_ENABLE_POSTGRES=1. The socketpair handshake tests stay plaintext (the
 # adopt path drives the descriptor directly), so no TLS server is needed.
-PG_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_LIBS))
-PG_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_DEPS))
+PG_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_LIBS))
+PG_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_DEPS))
 $(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c \
-    $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(SRCDIR)/hull/cap/pg_transport.c \
+    $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(SRCDIR)/hull/cap/db_transport.c \
     $(PG_CONN_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c \
-		$(SRCDIR)/hull/cap/pg_transport.c $(PG_CONN_TEST_LIBS) $(LDFLAGS)
+		$(SRCDIR)/hull/cap/db_transport.c $(PG_CONN_TEST_LIBS) $(LDFLAGS)
 
-# PostgreSQL-over-Keel transport test: direct-includes src/hull/cap/pg_transport.c
+# PostgreSQL-over-Keel transport test: direct-includes src/hull/cap/db_transport.c
 # (to unit-test its static helpers: the resolve adapter, the connect machinery,
-# the blocking send/recv path) under -DHL_PG_TEST_HOOKS, which compiles in the
-# gated provider / resolve / pump-checkpoint test seam (pg_test_socket_provider /
-# pg_test_resolve / pg_test_checkpoint). The seam is set ONLY on this compile
-# line, so the production object never sees it (nm-verified). cap_pg_transport.o
+# the blocking send/recv path) under -DHL_DB_TRANSPORT_TEST_HOOKS, which compiles in the
+# gated provider / resolve / pump-checkpoint test seam
+# (db_transport_test_socket_provider / db_transport_test_resolve / db_transport_test_checkpoint). The seam is set ONLY on this compile
+# line, so the production object never sees it (nm-verified). cap_db_transport.o
 # must be EXCLUDED from the common link, else the direct-included definitions
 # collide (mirrors test_smtp_transport). Everything else (Keel, mbedTLS, the
 # tls_client, the rest of the cap layer) comes from TEST_COMMON_LIBS. Only reached
-# under HL_ENABLE_POSTGRES=1 (Keel + cap_pg_transport.o present).
-PG_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_LIBS))
-PG_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_pg_transport.o,$(TEST_COMMON_DEPS))
+# under HL_ENABLE_POSTGRES=1 (Keel + cap_db_transport.o present).
+PG_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_LIBS))
+PG_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_DEPS))
 $(BUILDDIR)/test_pg_transport: $(TESTDIR)/hull/cap/test_pg_transport.c \
-    $(SRCDIR)/hull/cap/pg_transport.c $(PG_TP_TEST_DEPS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -DHL_PG_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(PG_TP_TEST_LIBS) $(LDFLAGS)
+    $(SRCDIR)/hull/cap/db_transport.c $(PG_TP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_DB_TRANSPORT_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(PG_TP_TEST_LIBS) $(LDFLAGS)
 
-# MySQL-over-Keel transport test: mirrors test_pg_transport exactly. Direct-compiles
-# the independent cap/mysql_transport.c under -DHL_MY_TEST_HOOKS (the gated provider
+# MySQL seam of the shared-transport test: mirrors test_pg_transport. Direct-compiles
+# the independent cap/db_transport.c under -DHL_DB_TRANSPORT_TEST_HOOKS (the gated provider
 # / resolve / pump-checkpoint / force-alloc-fail seam, absent from production), and
-# excludes cap_mysql_transport.o from the common link so the direct-included defs do
+# excludes cap_db_transport.o from the common link so the direct-included defs do
 # not collide. Only reached under HL_ENABLE_MYSQL=1.
-MY_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_LIBS))
-MY_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_DEPS))
+MY_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_LIBS))
+MY_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_DEPS))
 $(BUILDDIR)/test_mysql_transport: $(TESTDIR)/hull/cap/test_mysql_transport.c \
-    $(SRCDIR)/hull/cap/mysql_transport.c $(MY_TP_TEST_DEPS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -DHL_MY_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MY_TP_TEST_LIBS) $(LDFLAGS)
+    $(SRCDIR)/hull/cap/db_transport.c $(MY_TP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_DB_TRANSPORT_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MY_TP_TEST_LIBS) $(LDFLAGS)
 
 # Valkey/Redis RESP2/3 codec test: respwire.c is a self-contained parser gated
 # out of CAP_OBJS until HL_ENABLE_VALKEY, so link it directly (explicit rule
@@ -220,9 +217,9 @@ $(BUILDDIR)/test_mysqlwire: $(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/
 		$(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c \
 		$(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) $(LDFLAGS)
 
-# mysql connection / handshake test. hl_my_conn_start now rides the MyTransport
+# mysql connection / handshake test. hl_my_conn_start rides the shared HlDbTransport
 # byte transport (Keel v3), so the test source-compiles mysql_conn.c + mysqlwire.c
-# + mysql_transport.c together and links TEST_COMMON_LIBS (which already carries
+# + db_transport.c together and links TEST_COMMON_LIBS (which already carries
 # Keel, mbedTLS, tls_client, and the crypto the auth scrambles depend on),
 # mirroring test_pg_conn's direct-compile-plus-filter pattern. The three cap
 # objects are filtered OUT of the common link so the direct-included definitions
@@ -230,14 +227,14 @@ $(BUILDDIR)/test_mysqlwire: $(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/
 # now linked). Only reached under HL_ENABLE_MYSQL=1. The socketpair handshake
 # tests stay plaintext (the adopt path drives the descriptor directly), so no TLS
 # server is needed.
-MY_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_LIBS))
-MY_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_mysql_transport.o,$(TEST_COMMON_DEPS))
+MY_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_LIBS))
+MY_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_DEPS))
 $(BUILDDIR)/test_mysql_conn: $(TESTDIR)/hull/cap/test_mysql_conn.c \
-    $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/cap/mysql_transport.c \
+    $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/cap/db_transport.c \
     $(MY_CONN_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c \
-		$(SRCDIR)/hull/cap/mysql_transport.c $(MY_CONN_TEST_LIBS) $(LDFLAGS)
+		$(SRCDIR)/hull/cap/db_transport.c $(MY_CONN_TEST_LIBS) $(LDFLAGS)
 
 # SMTP transport test: includes src/hull/cap/smtp.c + smtp_transport.c DIRECTLY
 # (to unit-test their static helpers: the incremental reply parser, the AUTH

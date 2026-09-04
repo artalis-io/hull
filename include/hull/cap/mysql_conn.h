@@ -73,13 +73,13 @@ int hl_my_caching_sha2_scramble(const char *password,
 #define HL_MY_ERRMSG_SIZE    256    /* connection error-message buffer */
 #define HL_MY_RECV_BUF_INIT  8192   /* initial receive-buffer capacity */
 
-struct MyTransport;   /* cap/mysql_transport.h: the owned byte transport */
+struct HlDbTransport;   /* cap/db_transport.h: the owned byte transport */
 
 /* An open connection, authenticated + idle once hl_my_conn_open/start returns
  * 0. Owns the byte transport (closed + freed by hl_my_conn_close), which owns
  * the descriptor and any attached TLS session. */
 typedef struct HlMyConn {
-    struct MyTransport *transport;  /* owned byte transport (bytes + optional TLS) */
+    struct HlDbTransport *transport;  /* owned byte transport (bytes + optional TLS) */
     uint8_t *rbuf;          /* receive accumulation buffer */
     size_t   rlen;          /* valid bytes in rbuf */
     size_t   rcap;          /* rbuf capacity */

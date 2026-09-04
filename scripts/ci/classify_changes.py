@@ -106,11 +106,9 @@ PLAN = [
 # later step.
 DB_POSTGRES_FILES = frozenset({
     "src/hull/cap/db_postgres.c", "src/hull/cap/pgwire.c", "src/hull/cap/pg_conn.c",
-    "src/hull/cap/pg_transport.c",
 })
 DB_MYSQL_FILES = frozenset({
     "src/hull/cap/db_mysql.c", "src/hull/cap/mysqlwire.c", "src/hull/cap/mysql_conn.c",
-    "src/hull/cap/mysql_transport.c",
 })
 DB_VALKEY_FILES = frozenset({
     "src/hull/cap/valkey.c", "src/hull/cap/valkey_conn.c",
@@ -119,10 +117,14 @@ DB_VALKEY_FILES = frozenset({
 DB_DUCKDB_FILES = frozenset({"src/hull/cap/db_duckdb.c"})
 # Shared DB core: on EVERY backend's link path (the db_select.c BACKENDS[] registry
 # + the shared cap/registry/dynamic/udf/kv files). A change here fans out to ALL
-# backends (constraint 3).
+# backends (constraint 3). db_transport.c is the shared SQL-wire byte transport
+# (docs/db_transport_extraction.md): it backs the postgres + mysql wire clients but
+# rides the all-backends fan-out as the nearest shared category (a change to it is
+# conservatively treated as affecting the whole DB subsystem).
 DB_SHARED_FILES = frozenset({
     "src/hull/cap/db.c", "src/hull/cap/db_common.c", "src/hull/cap/db_registry.c",
     "src/hull/cap/db_select.c", "src/hull/cap/db_dynamic.c", "src/hull/cap/db_udf.c",
+    "src/hull/cap/db_transport.c",
     "src/hull/cap/kv.c", "src/hull/cap/kv_dynamic.c", "src/hull/cap/kv_feature.c",
 })
 GPU_FILES = frozenset({
