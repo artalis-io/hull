@@ -32,6 +32,7 @@
 
 #include "hull/cap/db_transport.h"
 #include "hull/shared/tls_client.h"   /* hl_tls_client_read/_write/_shutdown/_free */
+#include "hull/utils/alloc.h"         /* optional embedder HlAllocator (D6) */
 
 /* PUBLIC Keel headers only. */
 #include <keel/connect_op.h>
@@ -52,6 +53,7 @@
  * the OS resolver the kernel-sandbox network-outbound grant permits. */
 #include <netdb.h>
 #include <sys/socket.h>   /* AF_UNSPEC / AF_INET / AF_INET6 (cosmo needs it explicit) */
+#include <sys/time.h>     /* struct timeval for SO_RCVTIMEO/SNDTIMEO (set_io_timeout) */
 #include <netinet/in.h>   /* struct sockaddr_in / sockaddr_in6 for the resolver */
 
 #include <errno.h>
@@ -68,10 +70,17 @@ struct HlDbTransport {
     /* Borrowed, immutable, outlives the connection (docs/db_transport_extraction.md). */
     const KlSocketProvider *sp;
 
-    /* Stable backend label ("pg" / "mysql") for diagnostics only - used solely in
-     * the connect-op non-detachment log_error calls, never in behavior or a public
-     * error token. Points at a caller-supplied string literal. */
+    /* Stable backend label ("pg" / "mysql" / "valkey") for diagnostics only - used
+     * solely in the connect-op non-detachment log_error calls, never in behavior or
+     * a public error token. Points at a caller-supplied string literal. */
     const char *tag;
+
+    /* Optional embedder allocator (D6). When non-NULL, this transport's heap block
+     * AND the KlEventCtx scratch come from it, and it is RETAINED here for the
+     * matching frees (including the non-detachment leak, where nothing is freed).
+     * NULL selects libc (pg/mysql). hl_alloc_* fall back to libc on NULL, so the
+     * allocation paths are unconditional. */
+    HlAllocator *hl_alloc;
 
     /* Owned: the private connect-time event context. Created only when a race is
      * needed (hl_db_transport_connect); the adopt path leaves it uninitialized. */
@@ -141,6 +150,7 @@ static const KlSocketProvider *default_provider(void)
     pthread_once(&g_sp_once, init_sp);
     return g_sp;
 }
+
 
 #ifdef HL_DB_TRANSPORT_TEST_HOOKS
 /* Test-only seam (compiled ONLY under -DHL_DB_TRANSPORT_TEST_HOOKS, ABSENT from the
@@ -603,15 +613,17 @@ static int connect_teardown(HlDbTransport *t)
  * Public API.
  * ────────────────────────────────────────────────────────────────────────── */
 
-static HlDbTransport *transport_new(const KlSocketProvider *sp, const char *tag)
+static HlDbTransport *transport_new(const KlSocketProvider *sp, const char *tag,
+                                    HlAllocator *hl_alloc)
 {
 #ifdef HL_DB_TRANSPORT_TEST_HOOKS
     if (db_transport_test_force_alloc_fail) return NULL;   /* simulate calloc failure */
 #endif
-    HlDbTransport *t = calloc(1, sizeof *t);
+    HlDbTransport *t = hl_alloc_calloc(hl_alloc, 1, sizeof *t);   /* NULL -> libc */
     if (!t) return NULL;
     t->sp = sp;
     t->tag = tag ? tag : "db";
+    t->hl_alloc = hl_alloc;
     t->fd = KL_INVALID_SOCKET;
     t->deadline_timer = -1;
     t->delay_timer = -1;
@@ -629,12 +641,12 @@ static HlDbTransport *connect_fail(HlDbTransport *t, char *errbuf, size_t errlen
 {
     set_err(errbuf, errlen, msg);
     if (connect_teardown(t) == 0)
-        free(t);
+        hl_alloc_free(t->hl_alloc, t, sizeof *t);
     /* else: intentional safe leak - the op will not detach; never free under it. */
     return NULL;
 }
 
-HlDbTransport *hl_db_transport_connect(const char *tag,
+HlDbTransport *hl_db_transport_connect(const char *tag, HlAllocator *alloc,
                                        const char *host, const char *port,
                                        int timeout_ms,
                                        const KlSocketProvider *sp_or_NULL,
@@ -655,13 +667,16 @@ HlDbTransport *hl_db_transport_connect(const char *tag,
         return NULL;
     }
 
-    HlDbTransport *t = transport_new(sp, tag);
+    HlDbTransport *t = transport_new(sp, tag, alloc);
     if (!t) { set_err(errbuf, errlen, "out of memory"); return NULL; }
-    t->alloc = kl_allocator_default();
+    /* Event-ctx scratch rides the embedder allocator (D6) via the canonical
+     * hl_alloc_kl adapter; hl_alloc_kl(NULL) delegates to libc, so pg/mysql keep
+     * their prior (libc) behavior. */
+    t->alloc = hl_alloc_kl(alloc);
 
     if (kl_event_ctx_init(&t->ev, &t->alloc) != 0) {
         set_err(errbuf, errlen, "failed to init event context");
-        free(t);
+        hl_alloc_free(t->hl_alloc, t, sizeof *t);
         return NULL;
     }
     t->ev_ready = 1;
@@ -721,7 +736,7 @@ HlDbTransport *hl_db_transport_connect(const char *tag,
     return t;
 }
 
-HlDbTransport *hl_db_transport_adopt(const char *tag, int fd,
+HlDbTransport *hl_db_transport_adopt(const char *tag, HlAllocator *alloc, int fd,
                                      const KlSocketProvider *sp_or_NULL,
                                      char *errbuf, size_t errlen)
 {
@@ -736,7 +751,7 @@ HlDbTransport *hl_db_transport_adopt(const char *tag, int fd,
         set_err(errbuf, errlen, "socket provider missing a required op or KL_SOCK_CAP_NATIVE_FD");
         return NULL;
     }
-    HlDbTransport *t = transport_new(sp, tag);
+    HlDbTransport *t = transport_new(sp, tag, alloc);
     if (!t) {
         /* CONSUME @p fd: the provider is valid, so close the descriptor through it
          * rather than leaking it. This upholds hl_{pg,my}_conn_start's take-ownership
@@ -809,6 +824,23 @@ int hl_db_transport_fd(const HlDbTransport *t)
     return (int)t->fd;
 }
 
+void hl_db_transport_set_io_timeout(HlDbTransport *t, int ms)
+{
+    if (!t || ms <= 0)
+        return;                              /* ms <= 0 is an explicit no-op (D3) */
+    int fd = hl_db_transport_fd(t);
+    if (fd < 0)
+        return;                              /* no descriptor held */
+    /* Intentional native-FD escape (KL_SOCK_CAP_NATIVE_FD guaranteed): best-effort,
+     * failures ignored, exactly as the historic Valkey setsockopt was. One pair
+     * bounds both the plaintext provider send/recv and the TLS read/write. */
+    struct timeval to;
+    to.tv_sec  = ms / 1000;
+    to.tv_usec = (ms % 1000) * 1000;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof to);
+}
+
 int hl_db_transport_close(HlDbTransport *t)
 {
     if (!t)
@@ -831,7 +863,7 @@ int hl_db_transport_close(HlDbTransport *t)
     if (t->connect_started && t->ev_ready) {
         if (connect_teardown(t) != 0)
             return -1;   /* preserved: caller retries hl_db_transport_close or leaks */
-        free(t);
+        hl_alloc_free(t->hl_alloc, t, sizeof *t);
         return 0;
     }
 
@@ -841,6 +873,6 @@ int hl_db_transport_close(HlDbTransport *t)
         sp_close(t, t->fd);
         t->fd = KL_INVALID_SOCKET;
     }
-    free(t);
+    hl_alloc_free(t->hl_alloc, t, sizeof *t);
     return 0;
 }

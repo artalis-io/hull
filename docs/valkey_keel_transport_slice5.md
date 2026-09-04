@@ -37,9 +37,11 @@ HL_VALKEY_NO_TLS`. The public token `"TLS handshake to %s failed"` is preserved.
 
 `vk_connect` sets `SO_RCVTIMEO` / `SO_SNDTIMEO` on the connected fd so a hung/slow
 server cannot stall the (event-loop-thread) blocking recv/send forever.
-`HlDbTransport` has NO per-op I/O timeout - pg_conn.c and mysql_conn.c dropped
-theirs on migration. A direct swap would silently REMOVE Valkey's read/write
-timeout, so it is preserved via an additive shared-transport method:
+`HlDbTransport` has NO per-op I/O timeout, and neither PostgreSQL nor MySQL ever
+installed one (they used plain blocking recv/send before and after their Keel
+migration); they remain opt-out and unchanged. Valkey is the only client that set
+`SO_*TIMEO`, so a direct swap would silently REMOVE its read/write timeout - it is
+preserved via an additive shared-transport method:
 
     void hl_db_transport_set_io_timeout(HlDbTransport *t, int ms);
 

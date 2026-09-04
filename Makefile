@@ -867,11 +867,12 @@ ifneq ($(HL_ENABLE_MYSQL),1)
       $(CAP_SRCS))
 endif
 # Shared SQL-wire byte transport (cap/db_transport.c) over Keel v3 - backs BOTH
-# the Postgres and MySQL wire clients (extracted from the byte-identical
-# pg_transport.c / mysql_transport.c; docs/db_transport_extraction.md). Keep it
-# iff either wire backend is enabled; drop it when neither, so a base / sqlite-only
-# build carries zero hl_db_transport_* symbols and no new Keel references.
-ifeq ($(filter 1,$(HL_ENABLE_POSTGRES) $(HL_ENABLE_MYSQL)),)
+# the Postgres, MySQL, and Valkey wire clients (extracted from the byte-identical
+# pg_transport.c / mysql_transport.c; docs/db_transport_extraction.md, and Valkey
+# routed onto it in docs/valkey_keel_transport_slice5.md). Keep it iff any of those
+# wire backends is enabled; drop it when none, so a base / sqlite-only build carries
+# zero hl_db_transport_* symbols and no new Keel references.
+ifeq ($(filter 1,$(HL_ENABLE_POSTGRES) $(HL_ENABLE_MYSQL) $(HL_ENABLE_VALKEY)),)
   CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/db_transport.c,$(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_VALKEY),1)

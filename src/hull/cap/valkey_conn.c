@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #ifndef HL_VALKEY_NO_TLS
+#include "hull/cap/db_transport.h"   /* shared Keel-v3 byte transport (bytes + TLS) */
 #include "hull/shared/tls_client.h"
 #endif
 
@@ -242,20 +243,24 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
  *
  * The connection owns a fixed-capacity sh_arena (allocated through Hull's
  * pluggable HlAllocator) for decoded aggregate item arrays, reset per reply.
- * ALL memory - the handle, the receive buffer, the arena - comes from
- * c->alloc, so an embedder's allocator and limits apply. */
+ * ALL memory - the handle, the receive buffer, the arena, AND the byte transport
+ * (docs/valkey_keel_transport_slice5.md D6) - comes from c->alloc, so an embedder's
+ * allocator and limits apply. */
+
+/* The whole connection layer rides the shared Keel-v3 byte transport
+ * (cap/db_transport.c) and therefore needs Keel; it is compiled out under
+ * HL_VALKEY_NO_TLS (the DSN-parser-only build for test_valkey_dsn / fuzz_valkey_dsn),
+ * mirroring MySQL's HL_MY_NO_TLS. The DSN parser above stays Keel-free. */
+#ifndef HL_VALKEY_NO_TLS
 
 struct HlValkeyConn {
     HlAllocator *alloc;
-    int      fd;
+    HlDbTransport *transport;   /* shared byte transport (bytes + optional TLS) */
     uint8_t *rbuf;
     size_t   rlen, rcap, consumed;
     SHArena *arena;          /* reply aggregate items; reset per reply */
     char     errmsg[HL_VALKEY_ERRMSG];
     int      resp3;
-#ifndef HL_VALKEY_NO_TLS
-    HlTlsClient *tls;
-#endif
 };
 
 HlAllocator *hl_valkey_conn_alloc(HlValkeyConn *c) { return c ? c->alloc : NULL; }
@@ -272,70 +277,15 @@ static void *reply_alloc(void *ctx, size_t n) {
     return sh_arena_alloc(c->arena, n);
 }
 
-/* TCP connect with a bounded wait (non-blocking connect + select), mirroring
- * cap/pg_conn.c. Returns a blocking fd, or -1. */
-static int vk_connect(const char *host, const char *port, int timeout_ms) {
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return -1;
-
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); return -1; }
-#ifdef SO_NOSIGPIPE
-    int on = 1;
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
-#endif
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
-    if (rc < 0 && errno == EINPROGRESS) {
-        fd_set wf; FD_ZERO(&wf); FD_SET(fd, &wf);
-        struct timeval tv;
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        rc = select(fd + 1, NULL, &wf, NULL, timeout_ms > 0 ? &tv : NULL);
-        if (rc > 0) {
-            int soerr = 0; socklen_t l = sizeof soerr;
-            getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &l);
-            rc = soerr == 0 ? 0 : -1;
-        } else rc = -1;
-    }
-    freeaddrinfo(res);
-    if (rc < 0) { close(fd); return -1; }
-    fcntl(fd, F_SETFL, flags);                    /* restore blocking */
-    /* Bound every blocking recv/send so a hung/slow server cannot stall the
-     * event loop forever (the connect wait above is separate). */
-    if (timeout_ms > 0) {
-        struct timeval to;
-        to.tv_sec = timeout_ms / 1000;
-        to.tv_usec = (timeout_ms % 1000) * 1000;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof to);
-    }
-    return fd;
-}
-
+/* All bytes ride the shared Keel-v3 byte transport, which is EINTR-retried,
+ * SIGPIPE-suppressed, and (when a TLS session is attached) TLS-aware internally -
+ * so these are thin single-op wrappers, one per direction. */
 static ssize_t io_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
-#ifndef HL_VALKEY_NO_TLS
-    if (c->tls) return hl_tls_client_write(c->fd, c->tls, buf, len);
-#endif
-    ssize_t n;
-    do { n = send(c->fd, buf, len, VK_SEND_FLAGS); } while (n < 0 && errno == EINTR);
-    return n;
+    return hl_db_transport_send(c->transport, buf, len);
 }
 
 static ssize_t io_recv(HlValkeyConn *c, uint8_t *buf, size_t len) {
-#ifndef HL_VALKEY_NO_TLS
-    if (c->tls) return hl_tls_client_read(c->fd, c->tls, buf, len);
-#endif
-    ssize_t n;
-    do { n = recv(c->fd, buf, len, 0); } while (n < 0 && errno == EINTR);
-    return n;
+    return hl_db_transport_recv(c->transport, buf, len);
 }
 
 static int conn_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
@@ -463,20 +413,29 @@ static int select_db(HlValkeyConn *c, const HlValkeyDsn *dsn) {
     return 0;
 }
 
-static HlValkeyConn *conn_new(HlAllocator *alloc, int fd) {
+static HlValkeyConn *conn_new(HlAllocator *alloc, HlDbTransport *transport) {
     HlValkeyConn *c = (HlValkeyConn *)hl_alloc_calloc(alloc, 1, sizeof *c);
     if (!c) return NULL;
     c->alloc = alloc;
-    c->fd = fd;
+    c->transport = transport;
     c->arena = hl_arena_create(alloc, HL_VALKEY_REPLY_ARENA_CAP);
     if (!c->arena) { hl_alloc_free(alloc, c, sizeof *c); return NULL; }
     return c;
 }
 
+/* Adopt an already-connected descriptor (embedder / socketpair-test path). No I/O
+ * timeout is installed here: the caller owns the socket and set none, matching the
+ * historic hl_valkey_conn_start which never touched SO_*TIMEO (D3). */
 int hl_valkey_conn_start(HlValkeyConn **out, int fd, const HlValkeyDsn *dsn,
                          HlAllocator *alloc, char *errbuf, size_t errlen) {
-    HlValkeyConn *c = conn_new(alloc, fd);
-    if (!c) { if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory"); return -1; }
+    HlDbTransport *t = hl_db_transport_adopt("valkey", alloc, fd, NULL, errbuf, errlen);
+    if (!t) return -1;   /* adopt sets errbuf and consumes fd on a closable failure */
+    HlValkeyConn *c = conn_new(alloc, t);
+    if (!c) {
+        hl_db_transport_close(t);
+        if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory");
+        return -1;
+    }
     if (handshake(c, dsn) != 0 || select_db(c, dsn) != 0) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "%s", c->errmsg);
         hl_valkey_conn_close(c);
@@ -488,31 +447,35 @@ int hl_valkey_conn_start(HlValkeyConn **out, int fd, const HlValkeyDsn *dsn,
 
 int hl_valkey_conn_open(HlValkeyConn **out, const HlValkeyDsn *dsn,
                         HlAllocator *alloc, char *errbuf, size_t errlen) {
-    int fd = vk_connect(dsn->host, dsn->port, dsn->connect_timeout_ms);
-    if (fd < 0) {
+    HlDbTransport *t = hl_db_transport_connect("valkey", alloc, dsn->host, dsn->port,
+                                               dsn->connect_timeout_ms, NULL, NULL, 0);
+    if (!t) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "connect to %s:%s failed", dsn->host, dsn->port);
         return -1;
     }
-    HlValkeyConn *c = conn_new(alloc, fd);
-    if (!c) { close(fd); if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory"); return -1; }
+    /* Preserve the historic bounded blocking recv/send (D3): connect path only,
+     * only when a positive timeout is configured (set_io_timeout no-ops on <= 0). */
+    hl_db_transport_set_io_timeout(t, dsn->connect_timeout_ms);
 
-#ifndef HL_VALKEY_NO_TLS
+    /* Implicit TLS (rediss / valkeys): handshake immediately, before any RESP byte,
+     * then hand the session to the transport so every subsequent byte tunnels it. */
     if (dsn->tls) {
-        c->tls = hl_tls_client_handshake(fd, dsn->host, dsn->verify, dsn->connect_timeout_ms);
-        if (!c->tls) {
+        HlTlsClient *tls = hl_tls_client_handshake(hl_db_transport_fd(t), dsn->host,
+                                                   dsn->verify, dsn->connect_timeout_ms);
+        if (!tls || hl_db_transport_attach_tls(t, tls) != 0) {
+            if (tls) hl_tls_client_free(tls);   /* attach rejected: we still own it */
             if (errbuf && errlen) snprintf(errbuf, errlen, "TLS handshake to %s failed", dsn->host);
-            hl_valkey_conn_close(c);
+            hl_db_transport_close(t);
             return -1;
         }
     }
-#else
-    if (dsn->tls) {
-        if (errbuf && errlen) snprintf(errbuf, errlen, "TLS not available in this build");
-        hl_valkey_conn_close(c);
+
+    HlValkeyConn *c = conn_new(alloc, t);
+    if (!c) {
+        hl_db_transport_close(t);
+        if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory");
         return -1;
     }
-#endif
-
     if (handshake(c, dsn) != 0 || select_db(c, dsn) != 0) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "%s", c->errmsg);
         hl_valkey_conn_close(c);
@@ -527,10 +490,7 @@ int hl_valkey_conn_is_resp3(HlValkeyConn *c) { return c ? c->resp3 : 0; }
 
 void hl_valkey_conn_close(HlValkeyConn *c) {
     if (!c) return;
-#ifndef HL_VALKEY_NO_TLS
-    if (c->tls) { hl_tls_client_shutdown(c->fd, c->tls); hl_tls_client_free(c->tls); c->tls = NULL; }
-#endif
-    if (c->fd >= 0) close(c->fd);
+    hl_db_transport_close(c->transport);   /* TLS shutdown/free + provider close + free */
     if (c->rbuf) {
         memset(c->rbuf, 0, c->rcap);                 /* scrub residual bytes */
         hl_alloc_free(c->alloc, c->rbuf, c->rcap);
@@ -538,3 +498,5 @@ void hl_valkey_conn_close(HlValkeyConn *c) {
     hl_arena_free(c->alloc, c->arena);
     hl_alloc_free(c->alloc, c, sizeof *c);
 }
+
+#endif /* HL_VALKEY_NO_TLS: the transport-backed connection layer */

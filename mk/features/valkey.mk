@@ -19,7 +19,7 @@ feature-valkey:
 	$(MAKE) $(BUILDDIR)/libhull_feature-valkey.a HL_ENABLE_VALKEY=1
 .PHONY: feature-valkey
 
-$(BUILDDIR)/libhull_feature-valkey.a: $(BUILDDIR)/cap_valkey.o $(BUILDDIR)/cap_valkey_conn.o $(BUILDDIR)/cap_respwire.o | $(BUILDDIR)
+$(BUILDDIR)/libhull_feature-valkey.a: $(BUILDDIR)/cap_valkey.o $(BUILDDIR)/cap_valkey_conn.o $(BUILDDIR)/cap_respwire.o $(BUILDDIR)/cap_db_transport.o | $(BUILDDIR)
 	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_valkey.o $(BUILDDIR)/cap_valkey_conn.o $(BUILDDIR)/cap_respwire.o
+	$(AR) rcs $@ $(BUILDDIR)/cap_valkey.o $(BUILDDIR)/cap_valkey_conn.o $(BUILDDIR)/cap_respwire.o $(BUILDDIR)/cap_db_transport.o
 	@echo "built $@ ($$(du -h $@ | cut -f1))"

@@ -246,7 +246,7 @@ UTEST(mysql_transport_connect, pending_then_succeed)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("mysql", "db.example", "5432", 0, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "db.example", "5432", 0, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t != NULL);
     ASSERT_GE(g_fk_n, 1);
     ASSERT_EQ(g_fk_succeeded_idx, 0);
@@ -266,7 +266,7 @@ UTEST(mysql_transport_connect, immediate_success_rc0)
     g_fk_naddr = 1; g_fk_disp[0] = FK_IMMEDIATE;
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
-    HlDbTransport *t = hl_db_transport_connect("mysql", "h", "5432", 0, &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "h", "5432", 0, &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_GE(g_fk_blocking_set, 1);
     ASSERT_TRUE(hl_db_transport_fd(t) >= 0);
@@ -281,7 +281,7 @@ UTEST(mysql_transport_connect, stagger_second_address_wins)
     g_fk_naddr = 2; g_fk_disp[0] = FK_PENDING; g_fk_disp[1] = FK_SUCCEED;
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
-    HlDbTransport *t = hl_db_transport_connect("mysql", "h", "5432", 0, &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "h", "5432", 0, &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_n, 2);
     ASSERT_EQ(g_fk_order[0], 0);
@@ -299,7 +299,7 @@ UTEST(mysql_transport_connect, all_addresses_fail_detach)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("mysql", "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(err[0] != '\0');
     ASSERT_TRUE(fk_all_fds_closed());   /* teardown disposed every racing fd */
@@ -316,7 +316,7 @@ UTEST(mysql_transport_connect, deadline_fires_detaches)
     char err[128] = {0};
     /* 150 ms TCP-establishment bound; the address stays pending, so the deadline
      * fires and the op fails + detaches. */
-    HlDbTransport *t = hl_db_transport_connect("mysql", "h", "5432", 150, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "h", "5432", 150, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(err[0] != '\0');
     ASSERT_TRUE(fk_all_fds_closed());
@@ -348,7 +348,7 @@ UTEST(mysql_transport_connect, unbounded_no_hidden_ceiling)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
     db_transport_test_checkpoint = tp_complete_pending_at_tick;
 
-    HlDbTransport *t = hl_db_transport_connect("mysql", "h", "5432", 0 /* unbounded */,
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "h", "5432", 0 /* unbounded */,
                                              &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_succeeded_idx, 0);
@@ -369,7 +369,7 @@ UTEST(mysql_transport_io, io_status_overrides_errno)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER_IOS;
     db_transport_test_checkpoint = tp_complete_pending_at_tick;
 
-    HlDbTransport *t = hl_db_transport_connect("mysql", "h", "5432", 0, &FK_PROVIDER_IOS, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "h", "5432", 0, &FK_PROVIDER_IOS, NULL, 0);
     /* On completion get_so_error reports 0 -> success, despite errno == EPERM. */
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_succeeded_idx, 0);
@@ -384,7 +384,7 @@ UTEST(mysql_transport_io, send_eintr_retry_via_io_status)
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER_IOS;
     char err[64] = {0};
-    HlDbTransport *t = hl_db_transport_adopt("mysql", sv[0], &FK_PROVIDER_IOS, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_adopt("mysql", NULL, sv[0], &FK_PROVIDER_IOS, err, sizeof err);
     ASSERT_TRUE(t != NULL);
 
     /* First send() returns -1 with io_status INTERRUPTED (errno left 0); the retry
@@ -417,7 +417,7 @@ UTEST(mysql_transport_provider, missing_required_op_fails)
     prov.capabilities = KL_SOCK_CAP_NATIVE_FD;
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("mysql", "h", "5432", 0, &prov, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "h", "5432", 0, &prov, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(strstr(err, "provider") != NULL);
 }
@@ -430,11 +430,11 @@ UTEST(mysql_transport_provider, missing_native_fd_cap_fails)
     prov.ops = &FK_OPS; prov.context = NULL; prov.capabilities = 0;   /* no NATIVE_FD */
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("mysql", "h", "5432", 0, &prov, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "h", "5432", 0, &prov, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     /* adopt validates too. */
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    HlDbTransport *ta = hl_db_transport_adopt("mysql", sv[0], &prov, err, sizeof err);
+    HlDbTransport *ta = hl_db_transport_adopt("mysql", NULL, sv[0], &prov, err, sizeof err);
     ASSERT_TRUE(ta == NULL);
     close(sv[0]); close(sv[1]);
 }
@@ -448,7 +448,7 @@ UTEST(mysql_transport_connect, set_blocking_failure_fails)
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
 
     char err[128] = {0};
-    HlDbTransport *t = hl_db_transport_connect("mysql", "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "h", "5432", 0, &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);
     ASSERT_TRUE(fk_all_fds_closed());     /* the winner was retired, not leaked */
     seam_clear(); tp_disarm_watchdog();
@@ -463,7 +463,7 @@ UTEST(mysql_transport_resolve, ip_literal_no_dns)
     db_transport_test_resolve = NULL;               /* force the real resolve_addrs */
     db_transport_test_socket_provider = &FK_PROVIDER;
 
-    HlDbTransport *t = hl_db_transport_connect("mysql", "127.0.0.1", "5432", 0, &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, "127.0.0.1", "5432", 0, &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(g_fk_resolve_called, 0);    /* the DNS callback was never consulted */
     ASSERT_EQ(hl_db_transport_close(t), 0);
@@ -476,7 +476,7 @@ UTEST(mysql_transport_io, adopt_roundtrip_close_once)
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("mysql", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("mysql", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     ASSERT_EQ(hl_db_transport_fd(t), sv[0]);
 
@@ -514,7 +514,7 @@ UTEST(mysql_transport_adopt, alloc_failure_consumes_fd_once)
     db_transport_test_force_alloc_fail = 1;         /* transport_new() returns NULL */
 
     char err[64] = {0};
-    HlDbTransport *t = hl_db_transport_adopt("mysql", sv[0], &FK_PROVIDER, err, sizeof err);
+    HlDbTransport *t = hl_db_transport_adopt("mysql", NULL, sv[0], &FK_PROVIDER, err, sizeof err);
     ASSERT_TRUE(t == NULL);               /* allocation failed */
     ASSERT_TRUE(err[0] != '\0');
     ASSERT_EQ(g_fk_close_n, 1);           /* fd CONSUMED: closed exactly once via the provider */
@@ -530,7 +530,7 @@ UTEST(mysql_transport_io, partial_recv_short_count)
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("mysql", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("mysql", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
 
     const uint8_t two[2] = { 5, 6 };
@@ -555,7 +555,7 @@ UTEST(mysql_transport_io, send_all_completes_forced_partial_writes)
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("mysql", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("mysql", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
 
     const uint8_t payload[8] = { 10, 20, 30, 40, 50, 60, 70, 80 };
@@ -586,7 +586,7 @@ UTEST(mysql_transport_tls, attach_one_shot_and_fallible)
     fk_reset(); tp_arm_watchdog();
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("mysql", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("mysql", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
 
     /* NULL session rejected. */
@@ -619,7 +619,7 @@ UTEST(mysql_transport_tls, attach_requires_live_fd)
      * to attach: rejected because the descriptor is not live. */
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = hl_db_transport_adopt("mysql", sv[0], &FK_PROVIDER, NULL, 0);
+    HlDbTransport *t = hl_db_transport_adopt("mysql", NULL, sv[0], &FK_PROVIDER, NULL, 0);
     ASSERT_TRUE(t != NULL);
     KlSocketHandle saved = t->fd;
     t->fd = KL_INVALID_SOCKET;
@@ -639,7 +639,7 @@ static HlDbTransport *tp_make_live_op(void)
 {
     g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
-    HlDbTransport *t = transport_new(&FK_PROVIDER, "mysql");
+    HlDbTransport *t = transport_new(&FK_PROVIDER, "mysql", NULL);
     if (!t) return NULL;
     t->alloc = kl_allocator_default();
     if (kl_event_ctx_init(&t->ev, &t->alloc) != 0) { free(t); return NULL; }
