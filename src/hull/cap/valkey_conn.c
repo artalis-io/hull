@@ -24,23 +24,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
+#include <sys/types.h>   /* ssize_t (io_send/io_recv) */
 
 #ifndef HL_VALKEY_NO_TLS
 #include "hull/cap/db_transport.h"   /* shared Keel-v3 byte transport (bytes + TLS) */
 #include "hull/shared/tls_client.h"
-#endif
-
-#ifdef MSG_NOSIGNAL
-#define VK_SEND_FLAGS MSG_NOSIGNAL
-#else
-#define VK_SEND_FLAGS 0
 #endif
 
 /* Cap the receive buffer so a hostile server can't force unbounded growth. */

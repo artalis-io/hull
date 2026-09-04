@@ -27,24 +27,14 @@
 #endif
 
 #include <ctype.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <poll.h>
+#include <errno.h>       /* EINTR in the notify-wait poll loop */
+#include <poll.h>        /* poll() in hl_pg_wait_notify */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <time.h>
+#include <time.h>        /* clock_gettime(CLOCK_MONOTONIC) */
 #include <unistd.h>
-
-#ifdef MSG_NOSIGNAL
-#define PG_SEND_FLAGS MSG_NOSIGNAL
-#else
-#define PG_SEND_FLAGS 0
-#endif
 
 /* Overwrite memory the optimizer cannot elide (secret scrub). */
 static void pg_secure_zero(void *p, size_t n)
