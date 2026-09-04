@@ -227,6 +227,19 @@ $(BUILDDIR)/test_valkey_backend: $(TESTDIR)/hull/cap/test_valkey_backend.c \
 		$(TESTDIR)/hull/cap/test_valkey_backend.c $(SRCDIR)/hull/cap/valkey.c \
 		$(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/cap/db_transport.c $(VK_BE_TEST_LIBS) $(LDFLAGS)
 
+# Shared TLS-client handshake fd-mode helpers (docs/valkey_keel_transport_slice5.md):
+# white-box direct-include of shared/tls_client.c to unit-test tls_fd_set_nonblocking
+# / tls_fd_restore (success restoration + both fail-closed paths). TLS_CLIENT_OBJ is
+# filtered out of the common link so the direct-included definitions don't collide;
+# mbedTLS/keel stay for the symbols the rest of tls_client.c references. Ungated
+# (tls_client is always in the base), runs in the default `make test`.
+TLS_CLIENT_TEST_LIBS := $(filter-out $(TLS_CLIENT_OBJ),$(TEST_COMMON_LIBS))
+TLS_CLIENT_TEST_DEPS := $(filter-out $(TLS_CLIENT_OBJ),$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_tls_client: $(TESTDIR)/hull/test_tls_client.c \
+    $(SRCDIR)/hull/shared/tls_client.c $(TLS_CLIENT_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_TLS_CLIENT_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/test_tls_client.c $(TLS_CLIENT_TEST_LIBS) $(LDFLAGS)
+
 # MySQL/MariaDB codec + DSN test: mysqlwire.c + mysql_conn.c are
 # self-contained (no socket/TLS/crypto yet) and gated out of CAP_OBJS until
 # HL_ENABLE_MYSQL, so link them directly. Explicit rule wins over the pattern.

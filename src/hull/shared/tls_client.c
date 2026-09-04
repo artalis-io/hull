@@ -12,9 +12,12 @@
 #include "hull/cacert.h"
 
 #include <keel/allocator.h>
+#include <keel/clock.h>   /* kl_monotonic_ms: one absolute handshake deadline */
 #include <keel/tls.h>
 #include <keel_tls_mbedtls.h>
 
+#include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -44,27 +47,101 @@ static KlAllocator *default_alloc(void)
     return &s_default_alloc;
 }
 
-/* Drive tls->handshake to completion with a poll-based blocking wait, bounded
- * by @p timeout_ms (<= 0 = wait indefinitely). 0 on success, -1 on error/timeout. */
+/* The poll-based handshake bound below only works if tls->handshake yields
+ * WANT_READ/WANT_WRITE instead of blocking in recv/send. The caller's fd is
+ * blocking (the transport set_blocking()s the winning descriptor for the
+ * post-handshake byte I/O), so a peer that never completes the handshake (a
+ * plaintext server answering a rediss:// ClientHello with nothing, or a hung TLS
+ * peer) would otherwise block here forever, defeating the timeout. So the fd is
+ * made non-blocking for the handshake and the caller's mode restored after.
+ *
+ * These two helpers manage that transition and FAIL CLOSED (they are separately
+ * unit-tested, incl. the failure paths). If the mode cannot be read or cleared,
+ * proceeding would risk the original infinite block; if it cannot be restored, a
+ * successfully-handshaked descriptor would be left non-blocking for the wire
+ * client's blocking I/O. Either way the handshake must fail. */
+
+#ifdef HL_TLS_CLIENT_TEST_HOOKS
+/* Test-only fcntl seam (compiled ONLY under -DHL_TLS_CLIENT_TEST_HOOKS, ABSENT
+ * from the production object; nm-verified). When set, replaces the fcntl the
+ * fd-mode helpers use, so a test can force F_GETFL, the enable-nonblocking
+ * F_SETFL, or the restore F_SETFL to fail and drive every fail-closed path. */
+int (*tls_test_fcntl)(int fd, int cmd, int arg);
+static int tls_fcntl(int fd, int cmd, int arg)
+{
+    if (tls_test_fcntl)
+        return tls_test_fcntl(fd, cmd, arg);
+    return fcntl(fd, cmd, arg);
+}
+#else
+static int tls_fcntl(int fd, int cmd, int arg) { return fcntl(fd, cmd, arg); }
+#endif
+
+/* Save the fd's flags into *saved and enable O_NONBLOCK. 0 on success; -1 if the
+ * flags cannot be read OR O_NONBLOCK cannot be set (fail closed). */
+static int tls_fd_set_nonblocking(int fd, int *saved)
+{
+    int flags = tls_fcntl(fd, F_GETFL, 0);
+    if (flags < 0)
+        return -1;                                  /* mode unknown -> fail closed */
+    *saved = flags;
+    if ((flags & O_NONBLOCK) == 0 && tls_fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        return -1;                                  /* cannot enable -> fail closed */
+    return 0;
+}
+
+/* Restore the fd's saved flags. 0 on success; -1 if they cannot be restored (the
+ * descriptor would be left non-blocking). */
+static int tls_fd_restore(int fd, int saved)
+{
+    if (tls_fcntl(fd, F_SETFL, saved) < 0)
+        return -1;
+    return 0;
+}
+
+/* Drive tls->handshake to completion, bounded by @p timeout_ms (<= 0 = wait
+ * indefinitely) against ONE monotonic absolute deadline. 0 on success, -1 on
+ * error / timeout / an fd-mode setup or restore failure. */
 static int tls_handshake_loop(KlTls *tls, int fd, int timeout_ms)
 {
-    int elapsed = 0;
-    const int step = 100;
-    for (;;) {
-        KlTlsResult r = tls->handshake(tls, fd);
-        if (r == KL_TLS_OK)
-            return 0;
-        if (r == KL_TLS_ERROR)
-            return -1;
+    int saved;
+    if (tls_fd_set_nonblocking(fd, &saved) != 0)
+        return -1;                                  /* blocker 1: setup fail closed */
 
+    const int step = 100;   /* max single poll wait (ms); the deadline is the bound */
+    uint64_t deadline = (timeout_ms > 0) ? kl_monotonic_ms() + (uint64_t)timeout_ms : 0;
+    int rc = -1;
+    for (;;) {
+        /* Check the absolute deadline BEFORE every handshake step: once it has
+         * passed no further step is attempted, so a would-be-successful post-expiry
+         * result is never accepted, and expiry takes precedence when readiness and
+         * expiry coincide (the prior loop checked only after the step). */
+        if (deadline && kl_monotonic_ms() >= deadline) { rc = -1; break; }
+
+        KlTlsResult r = tls->handshake(tls, fd);
+        if (r == KL_TLS_OK)    { rc = 0;  break; }
+        if (r == KL_TLS_ERROR) { rc = -1; break; }
+
+        int wait = step;
+        if (deadline) {
+            uint64_t now = kl_monotonic_ms();
+            uint64_t rem = (now < deadline) ? deadline - now : 0;   /* 0 -> poll returns at once */
+            if (rem < (uint64_t)step) wait = (int)rem;              /* min(remaining, step) */
+        }
         short events = (r == KL_TLS_WANT_READ) ? POLLIN : POLLOUT;
         struct pollfd pfd = { .fd = fd, .events = events, .revents = 0 };
-        if (poll(&pfd, 1, step) < 0)
-            return -1;
-        elapsed += step;
-        if (timeout_ms > 0 && elapsed >= timeout_ms)
-            return -1;
+        int pr = poll(&pfd, 1, wait);
+        if (pr < 0) {
+            if (errno == EINTR) continue;               /* retry; the clock decides */
+            rc = -1; break;
+        }
+        /* pr == 0 (poll timed out) or pr > 0 (ready): loop; the top-of-loop
+         * deadline check is the sole timeout authority. */
     }
+
+    if (tls_fd_restore(fd, saved) != 0)
+        rc = -1;   /* blocker 1: leaving the fd non-blocking must fail the handshake */
+    return rc;
 }
 
 /* Wrap an already-handshaked session. @p ctx is NULL when caller-owned. */

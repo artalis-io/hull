@@ -104,4 +104,64 @@ log "== Valkey/Redis KV E2E =="
 run_fixture "lua" "$FIX/valkey_kv_lua/app.lua"
 run_fixture "js"  "$FIX/valkey_kv_js/app.js"
 
+# ── Transport-on-Keel evidence (docs/valkey_keel_transport_slice5.md) ─────────
+# The connection now rides the shared cap/db_transport.c. Prove two properties
+# against the real server that the unit tests cannot: rediss:// fails CLOSED (no
+# plaintext fallback), and the connect timeout is live end-to-end.
+TDIR=$(mktemp -d)
+# A tiny app that just attempts one kv.open and reports OK/FAIL for a DSN arg.
+conn_probe_app() {   # $1 = scheme, $2 = allowed host  ->  writes $TDIR/probe.lua
+    cat > "$TDIR/probe.lua" <<LUA
+app.manifest({ modules = { "hull/kv@1" },
+    kv = { dynamic = { schemes = { "$1" }, hosts = { "$2" } } } })
+local kv = require("hull.kv")
+app.main(function(ctx)
+    local ok, res = pcall(function()
+        return kv.open({ backend = "valkey", dsn = ctx.args[1], namespace = "t" })
+    end)
+    if not ok or res == nil then print("CONN FAIL: " .. tostring(res)); return 0 end
+    print("CONN OK"); return 1
+end)
+LUA
+}
+
+# Bounded process control: the probes below MUST NOT hang - a revert of the
+# shared/tls_client.c non-blocking-handshake fix would block a rediss:// handshake
+# forever, and this watchdog turns that into a hard, fast test failure instead of
+# a stall until the outer CI-job timeout. Prefer timeout(1) / gtimeout; if neither
+# is present the assertions still run (the fix itself prevents the hang).
+WATCH=""
+command -v timeout  >/dev/null 2>&1 && WATCH="timeout 20"
+command -v gtimeout >/dev/null 2>&1 && WATCH="gtimeout 20"
+
+log "-- rediss:// against the plaintext port must fail closed, BOUNDED (a reverted"
+log "   tls_client non-blocking-handshake fix would hang and trip the watchdog) --"
+conn_probe_app "rediss" "127.0.0.1"
+# Capture status via if/else: under `set -e` a bare out="$(... exit 124 ...)" would
+# abort the script before the watchdog diagnostic below (an if-condition suspends -e).
+if out="$($WATCH "$HULL" "$TDIR/probe.lua" --no-sandbox -- "rediss://127.0.0.1:$PORT?connect_timeout=2000" 2>&1)"; then prc=0; else prc=$?; fi
+[ "$prc" != 124 ] \
+    || fail "rediss:// probe HUNG (watchdog fired) - the TLS handshake is not bounding (tls_client fix reverted?)"
+printf '%s\n' "$out" | grep -q "CONN FAIL" \
+    || { log "$out"; fail "rediss:// to a plaintext server should FAIL closed (no plaintext fallback)"; }
+printf '%s\n' "$out" | grep -qiE "tls|handshake" \
+    || { log "$out"; fail "rediss:// failure should cite the TLS handshake"; }
+log "  ok: rediss fail-closed, bounded ($(printf '%s' "$out" | grep -o 'CONN FAIL:.*'))"
+
+# Bounded-failure SMOKE (honest scope): an unreachable host makes the connect FAIL
+# within the watchdog. This does NOT by itself prove the connect DEADLINE fired -
+# an immediate routing rejection (no route to host) would also pass - so it is only
+# a "connect fails, bounded" smoke. The deterministic proof that the timeout is
+# installed + expires is the unit test (test_pg_transport: set_io_timeout installs
+# both options / a stalled read expires within the bound).
+log "-- connect bounded-failure smoke: unreachable host fails, watchdogged --"
+conn_probe_app "redis" "10.255.255.1"
+if out="$($WATCH "$HULL" "$TDIR/probe.lua" --no-sandbox -- "redis://10.255.255.1:6379?connect_timeout=800" 2>&1)"; then prc=0; else prc=$?; fi
+[ "$prc" != 124 ] \
+    || fail "connect probe HUNG (watchdog fired) - connect is not bounding"
+printf '%s\n' "$out" | grep -q "CONN FAIL" \
+    || { log "$out"; fail "unreachable-host connect should FAIL"; }
+log "  ok: connect fails, bounded"
+rm -rf "$TDIR"
+
 log "PASS ($PASS runtime(s))"

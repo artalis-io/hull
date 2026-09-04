@@ -98,6 +98,7 @@ GROUP = {
     "mysql-feature": "db-mysql",
     "mysql-transport-sanitize": "db-mysql",
     "valkey": "db-valkey",
+    "valkey-conn-sanitize": "db-valkey",
     "duckdb": "db-duckdb",
     "duckdb-feature": "db-duckdb",
     # the fuzz-db-wire umbrella (Amendment 1): one atomic job, group db-any =
