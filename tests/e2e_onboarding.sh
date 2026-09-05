@@ -36,6 +36,7 @@ SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 HULL="$SRCDIR/build/hull"
 PASS=0
 FAIL=0
+SKIP=0
 
 WORKDIR="$(mktemp -d -t hull-onboarding-e2e.XXXXXX)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -216,9 +217,21 @@ echo ""
 echo "── hull build: POSIX output naming is unchanged ──"
 BOUT=$("$HULL" build --no-verify-platform "$WORKDIR/app" 2>&1)
 BRC=$?
-if [ "$BRC" -ne 0 ]; then
-    echo "  SKIP build assertions (hull build unavailable here):"
+# A build failure is only a legitimate SKIP when this hull demonstrably cannot
+# link an app here - i.e. it has no platform library (a plain `make` with no
+# `make platform` and no embedded archive). Every OTHER non-zero exit is a
+# regression in the build path and must FAIL: treating all of them as "not
+# supported" is how a broken compile or manifest extraction would leave this
+# whole section green.
+if [ "$BRC" -ne 0 ] &&
+   echo "$BOUT" | grep -qE "cannot find (libhull_platform\.a|platform archives)"; then
+    echo "  SKIP build assertions (this hull has no platform library):"
     echo "$BOUT" | sed 's/^/      /'
+    SKIP=$((SKIP + 1))
+elif [ "$BRC" -ne 0 ]; then
+    echo "  FAIL hull build exited $BRC (not a known unsupported configuration)"
+    echo "$BOUT" | sed 's/^/      /'
+    FAIL=$((FAIL + 1))
 else
     # On every POSIX host the default artifact stays exactly `app_dir/app`.
     assert "default output is app_dir/app (no suffix on POSIX)" \
@@ -257,10 +270,21 @@ else
     RBOUT=$(cd "$WORKDIR" && "$HULL" build --no-verify-platform app 2>&1 || true)
     assert_contains "a relative app dir gets a ./ prefix" \
                     "$RBOUT" "run it with  ./app/app"
+
+    # The sidecar tidy-up moves only what the LINK produced. A same-named
+    # file that was already in the project - a developer's own `app.dbg`,
+    # which no native toolchain emits - must be left where they put it.
+    echo "not-a-build-artifact" > "$WORKDIR/app/app.dbg"
+    "$HULL" build --no-verify-platform "$WORKDIR/app" >/dev/null 2>&1 || true
+    assert "a pre-existing app.dbg is not relocated" \
+           [ -f "$WORKDIR/app/app.dbg" ]
+    assert "and its contents are untouched" \
+           [ "$(cat "$WORKDIR/app/app.dbg" 2>/dev/null)" = "not-a-build-artifact" ]
+    rm -f "$WORKDIR/app/app.dbg"
 fi
 
 echo ""
 echo "════════════════════════════════════════"
-echo "  passed: $PASS   failed: $FAIL"
+echo "  passed: $PASS   failed: $FAIL   skipped: $SKIP"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

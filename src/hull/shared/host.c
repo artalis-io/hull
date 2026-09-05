@@ -82,6 +82,29 @@ const char *hl_host_exe_suffix(void)
     return hl_host_is_windows() ? ".com" : "";
 }
 
+/* Would a shell need this rendering quoted to be runnable as one word?
+ *
+ * Conservative allowlist; anything outside it gets quoted. A space is the
+ * case that matters in practice - `C:\Users\Jane Doe\myapp\app.com` printed
+ * bare is not a command, it is two words. */
+static int host_exec_needs_quoting(const char *s)
+{
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9'))
+            continue;
+        switch (c) {
+        case '_': case '-': case '.': case '/': case '\\':
+        case ':': case '+': case '=': case '@': case ',': case '~':
+            continue;
+        default:
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int hl_host_render_exec(const char *path, char *out, size_t out_sz)
 {
     if (!out || out_sz == 0) return -1;
@@ -106,13 +129,46 @@ int hl_host_render_exec(const char *path, char *out, size_t out_sz)
     const char *prefix = "";
     if (!absolute && !has_prefix) prefix = win ? ".\\" : "./";
 
-    int n = snprintf(out, out_sz, "%s%s", prefix, path);
-    if (n < 0 || (size_t)n >= out_sz) { out[0] = '\0'; return -1; }
+    /* A path carrying a space (or any other shell-significant byte) is not a
+     * runnable instruction unquoted, so quote the whole rendering:
+     *
+     *   POSIX        '/home/jane doe/myapp/app'
+     *   PowerShell   & 'C:\Users\Jane Doe\myapp\app.com'
+     *
+     * PowerShell needs the call operator to execute a quoted string, and
+     * escapes an embedded single quote by doubling it; sh closes the quote,
+     * emits an escaped one, and reopens. */
+    int quote = host_exec_needs_quoting(path) || host_exec_needs_quoting(prefix);
 
-    if (win) {
-        for (char *p = out; *p; p++)
-            if (*p == '/') *p = '\\';
+    size_t n = 0;
+#define HOST_PUT(ch) do {                                       \
+        if (n + 1 >= out_sz) { out[0] = '\0'; return -1; }       \
+        out[n++] = (char)(ch);                                  \
+    } while (0)
+
+    if (quote) {
+        if (win) { HOST_PUT('&'); HOST_PUT(' '); }
+        HOST_PUT('\'');
     }
+    for (const char *p = prefix; *p; p++) HOST_PUT(*p);
+    for (const char *p = path; *p; p++) {
+        char c = *p;
+        if (win && c == '/') c = '\\';
+        if (quote && c == '\'') {
+            if (win) {
+                HOST_PUT('\'');        /* '' inside a PowerShell literal */
+            } else {
+                HOST_PUT('\'');        /* close  */
+                HOST_PUT('\\');        /* escape */
+                HOST_PUT('\'');        /* reopen */
+            }
+        }
+        HOST_PUT(c);
+    }
+    if (quote) HOST_PUT('\'');
+#undef HOST_PUT
+
+    out[n] = '\0';
     return 0;
 }
 

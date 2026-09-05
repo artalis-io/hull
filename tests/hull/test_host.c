@@ -145,6 +145,74 @@ UTEST(host, render_exec_rejects_bad_arguments)
     ASSERT_STREQ("", out);
 }
 
+UTEST(host, render_exec_quotes_a_path_with_spaces)
+{
+    /* REGRESSION: the rendering was printed bare, so a perfectly ordinary
+     * Windows home directory produced `C:\Users\Jane Doe\myapp\app.com` -
+     * which is not a command, it is two words. */
+    char out[256];
+    ASSERT_EQ(0, hl_host_render_exec("myapp/my app", out, sizeof(out)));
+    if (hl_host_is_windows())
+        /* PowerShell executes a quoted string only via the call operator. */
+        ASSERT_STREQ("& '.\\myapp\\my app'", out);
+    else
+        ASSERT_STREQ("'./myapp/my app'", out);
+}
+
+UTEST(host, render_exec_quotes_an_absolute_path_with_spaces)
+{
+    char out[256];
+    if (hl_host_is_windows()) {
+        ASSERT_EQ(0, hl_host_render_exec("C:/Users/Jane Doe/myapp/app.com",
+                                         out, sizeof(out)));
+        ASSERT_STREQ("& 'C:\\Users\\Jane Doe\\myapp\\app.com'", out);
+    } else {
+        ASSERT_EQ(0, hl_host_render_exec("/home/jane doe/myapp/app",
+                                         out, sizeof(out)));
+        ASSERT_STREQ("'/home/jane doe/myapp/app'", out);
+    }
+}
+
+UTEST(host, render_exec_escapes_an_embedded_quote)
+{
+    /* A single quote is legal in a filename on both hosts, and it is the one
+     * byte that could break OUT of the quoting we just added. */
+    char out[256];
+    ASSERT_EQ(0, hl_host_render_exec("o'brien/my app", out, sizeof(out)));
+    if (hl_host_is_windows())
+        ASSERT_STREQ("& '.\\o''brien\\my app'", out);   /* doubled */
+    else
+        ASSERT_STREQ("'./o'\\''brien/my app'", out);    /* close-escape-reopen */
+}
+
+UTEST(host, render_exec_leaves_ordinary_paths_unquoted)
+{
+    /* Quoting is only for paths that need it: the common case must stay
+     * exactly as it reads today, or every "run it with" line in the docs and
+     * the e2e assertions would change shape. */
+    static const char *inputs[] = {
+        "app", "app.com", "build/app", "firstrun/app.com",
+        "/tmp/hull-e2e.XYZ/app/app", "my-app_v2.0/app", NULL
+    };
+    for (const char **p = inputs; *p; p++) {
+        char out[256];
+        ASSERT_EQ(0, hl_host_render_exec(*p, out, sizeof(out)));
+        ASSERT_TRUE(strchr(out, '\'') == NULL);
+        ASSERT_TRUE(strchr(out, '&') == NULL);
+    }
+}
+
+UTEST(host, render_exec_reports_overflow_when_quoting)
+{
+    /* The quoted form is longer than the input, so the bound must be checked
+     * against what is actually emitted - never truncated into a command that
+     * names a different file (or has an unterminated quote). */
+    char out[12];
+    ASSERT_EQ(-1, hl_host_render_exec("a directory/with a long name/app",
+                                      out, sizeof(out)));
+    ASSERT_STREQ("", out);
+}
+
 /* ── PATH search ───────────────────────────────────────────────────── */
 
 UTEST(host, find_in_path_rejects_bad_arguments)

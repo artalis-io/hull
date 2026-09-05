@@ -76,6 +76,16 @@ const char *hl_host_exe_suffix(void);
  * '/' to '\'. This function does NOT append @ref hl_host_exe_suffix - the
  * caller passes the real artifact path, which already carries it.
  *
+ * A path carrying a space (or any other shell-significant byte) is QUOTED, so
+ * the result stays ONE runnable command rather than several words:
+ *
+ *   POSIX     '/home/jane doe/myapp/app'
+ *   Windows   & 'C:\Users\Jane Doe\myapp\app.com'
+ *
+ * PowerShell needs the call operator to execute a quoted string; an embedded
+ * quote is escaped the way the host's shell expects. The result is a string
+ * to PRINT, never a path to exec - callers that need the raw path have it.
+ *
  * @returns 0 on success, -1 on a NULL/oversized argument (in which case @p out
  *          is set to an empty string when it is non-NULL and non-zero-sized).
  */

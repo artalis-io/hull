@@ -191,7 +191,10 @@ end
 -- was the program, so they are moved under `<app_dir>/.hull/build/`.
 --
 -- Kept deliberately simple and non-destructive:
---   * only files this build just produced, derived from the output path;
+--   * only files this build just produced: the candidate paths are
+--     snapshotted before the link and a candidate is relocated only if
+--     it appeared, or its mtime advanced, across it - a pre-existing
+--     `app.dbg` a native build never touched is left alone;
 --   * a move failure is a warning, never a build failure (the shippable
 --     binary is already correct at that point);
 --   * `--keep-build-artifacts` restores the old layout for anyone whose
@@ -201,23 +204,57 @@ end
 -- `hull inspect` all address opts.output, which is untouched.
 local BUILD_ARTIFACT_SUFFIXES = { ".com.dbg", ".dbg", ".aarch64.elf" }
 
-local function relocate_build_artifacts(opts)
-    if opts.keep_build_artifacts then return nil end
-
-    -- cosmocc derives sidecar names from the output base with any trailing
-    -- ".com" removed, so `-o app` and `-o app.com` both yield `app.com.dbg`.
-    -- Probe both spellings rather than encoding a guess about the driver.
+-- Every path the linker COULD drop beside opts.output. cosmocc derives
+-- sidecar names from the output base with any trailing ".com" removed, so
+-- `-o app` and `-o app.com` both yield `app.com.dbg`; probe both spellings
+-- rather than encoding a guess about the driver.
+local function build_artifact_candidates(opts)
     local bases = { opts.output }
     if opts.output:sub(-4) == ".com" then
         bases[#bases + 1] = opts.output:sub(1, -5)
     end
-
-    local found, seen = {}, {}
+    local paths, seen = {}, {}
     for _, base in ipairs(bases) do
         for _, sfx in ipairs(BUILD_ARTIFACT_SUFFIXES) do
             local path = base .. sfx
-            if path ~= opts.output and not seen[path] and file_exists(path) then
+            if path ~= opts.output and not seen[path] then
                 seen[path] = true
+                paths[#paths + 1] = path
+            end
+        end
+    end
+    return paths
+end
+
+-- Snapshot the candidates BEFORE the link, so relocation can tell an artifact
+-- THIS invocation produced from a same-named file that was already sitting in
+-- the project. Without it, a native build (which emits no sidecars at all)
+-- would still relocate a developer's own `app.dbg`.
+local function snapshot_build_artifacts(opts)
+    local snap = {}
+    for _, path in ipairs(build_artifact_candidates(opts)) do
+        if file_exists(path) then
+            -- `false` records "existed, mtime unreadable": treated as
+            -- untouched unless it demonstrably changed.
+            snap[path] = tool.file_mtime(path) or false
+        end
+    end
+    return snap
+end
+
+local function relocate_build_artifacts(opts, snap)
+    if opts.keep_build_artifacts then return nil end
+    snap = snap or {}
+
+    local found = {}
+    for _, path in ipairs(build_artifact_candidates(opts)) do
+        if file_exists(path) then
+            local before = snap[path]
+            local now = tool.file_mtime(path)
+            -- Produced by this build if it was not there beforehand, or if it
+            -- was and the link rewrote it (mtime advanced). A pre-existing
+            -- file we cannot prove we touched stays where its owner put it.
+            if before == nil or (before and now and now > before) then
                 found[#found + 1] = path
             end
         end
@@ -2237,6 +2274,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
 
     -- Link
     print("hull build: linking...")
+    -- Record any same-named debug sidecars that were ALREADY present, so the
+    -- post-link tidy-up only ever moves what this link produced.
+    local artifact_snapshot = snapshot_build_artifacts(opts)
     local platform_a = tmpdir .. "/libhull_platform.a"
     local link_objs = {tmpdir .. "/app_main.o", tmpdir .. "/app_registry.o"}
     for _, o in ipairs(feature_objs) do link_objs[#link_objs + 1] = o end
@@ -2344,7 +2384,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     -- Tidy the debug sidecars away AFTER the nm check above (which reads the
     -- .dbg ELF in place) so the project root is left holding exactly one
     -- obvious, shippable executable.
-    local artifact_dir, artifact_n = relocate_build_artifacts(opts)
+    local artifact_dir, artifact_n = relocate_build_artifacts(opts, artifact_snapshot)
 
     print("hull build: wrote " .. opts.output)
     if artifact_dir then
