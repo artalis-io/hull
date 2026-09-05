@@ -18,7 +18,7 @@ QJS_OBJS := $(patsubst $(QJS_DIR)/%.c,$(BUILDDIR)/qjs_%.o,$(QJS_SRCS))
 QJS_VERSION := 2024-01-13
 
 # QuickJS compiled with relaxed warnings (vendored code)
-QJS_CFLAGS := -std=c11 -O2 -w -DCONFIG_VERSION=\"$(QJS_VERSION)\" \
+QJS_CFLAGS := -std=c11 $(HL_OPT) -w -DCONFIG_VERSION=\"$(QJS_VERSION)\" \
               -DCONFIG_BIGNUM -D_GNU_SOURCE
 
 # Hull-side code (bytecode/template caches) reads the same string via
