@@ -582,6 +582,21 @@ $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 $(BUILDDIR)/test_hex: $(TESTDIR)/hull/test_hex.c $(HEX_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HEX_OBJ)
 
+# Host facts + user-facing command rendering (src/hull/shared/host.c). Leaf
+# util, libc only - the artifact-suffix and PATH-split contracts that keep
+# Windows and POSIX output correct. No deps.
+$(BUILDDIR)/test_host: $(TESTDIR)/hull/test_host.c $(HOST_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HOST_OBJ)
+
+# CLI logging policy (src/hull/shared/cli_log.c). Needs the vendored log.c it
+# configures, and nothing else.
+# -DHL_CLI_LOG_TEST_HOOKS exposes the suspend-flag reset (production suspend is
+# one-way). cli_log.c is COMPILED INTO the test here rather than linking the
+# shared object, so the hook exists only in this binary - the platform lib and
+# the hull binary never carry it.
+$(BUILDDIR)/test_cli_log: $(TESTDIR)/hull/test_cli_log.c $(SRCDIR)/hull/shared/cli_log.c $(LOG_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_CLI_LOG_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SRCDIR)/hull/shared/cli_log.c $(LOG_OBJ)
+
 # Mapped-spans SDK header (templates/hull_span.h) - native decoder
 # / name-lookup / scratch-narrow tests. Freestanding header; the only extra
 # include path is -Itemplates for hull_span.h. No deps beyond libc.
@@ -1604,6 +1619,15 @@ e2e-update: $(BUILDDIR)/hull
 # Tools install (hermetic: HOME redirected, no network in fast path).
 e2e-tools: $(BUILDDIR)/hull
 	sh tests/e2e_tools.sh
+
+# First-run developer experience: doctor's state classification + platform-
+# aware advice, CLI logging hygiene (no internal src/hull/*.c coordinates by
+# default, restored under --verbose), and the POSIX half of the build-artifact
+# contract (default name unchanged, one shippable binary in the app root). The
+# Windows half runs on a real Windows runner in cosmocc-windows-e2e.yml.
+.PHONY: e2e-onboarding
+e2e-onboarding: $(BUILDDIR)/hull
+	sh tests/e2e_onboarding.sh
 
 # ── TUI e2e (smoke + interactive PTY-driven) ───────────────────────
 #
