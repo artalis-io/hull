@@ -27,6 +27,11 @@ on:
       - 'src/hull/runtime/lua/mod_tool.c'
       - 'src/hull/sandbox_tool.c'
       - 'src/hull/compiler.c'
+      - 'src/hull/commands/doctor.c'
+      - 'src/hull/commands/dispatch.c'
+      - 'src/hull/shared/host.c'
+      - 'src/hull/shared/cli_log.c'
+      - 'stdlib/cli/lua/hull/feature_compose.lua'
       - 'src/hull/cap/tar.c'
       - 'src/hull/cap/fs.c'
       - 'src/hull/sandbox.c'
@@ -254,6 +259,128 @@ jobs:
           if (Test-Path app.exe) { Copy-Item app.exe apes\main_windows.com -Force }
           if ($fail -ne 0) { Write-Host "PR#1 ACCEPTANCE FAIL: a produced cosmo HTTP app did not serve"; exit 1 }
           Write-Host "PR#1 ACCEPTANCE PASS: produced cosmo Lua+JS HTTP apps serve pong on Windows"
+
+      # The FIRST-RUN acceptance step: no `-o`, no rename, no prior knowledge
+      # of APE filename conventions. A developer on a clean Windows box types
+      # `hull build` and then runs what it tells them to run.
+      #
+      # Regression guard for the shipped defect: `hull build` defaulted to an
+      # extensionless `app`, which Windows cannot execute - the produced file
+      # only ran after a manual `mv app app.com`. Every existing test in this
+      # repo papered over it by passing `-o something.com`, so the product bug
+      # was invisible to CI. This step passes NO output flag on purpose.
+      - name: First-run flow - default `hull build` output is directly runnable
+        shell: pwsh
+        run: |
+          $fail = 0
+          New-Item -ItemType Directory -Force -Path firstrun | Out-Null
+          $src = "app.manifest({ modules = {} })`n" +
+                 "app.main(function(ctx) ctx.stdout:write('FIRSTRUN-OK\n'); return 0 end)"
+          Set-Content -NoNewline firstrun\app.lua -Value $src -Encoding ascii
+
+          $out = .\hull-cosmo.exe build firstrun --no-verify-platform 2>&1 | Out-String
+          Write-Host $out
+
+          # 1. The default artifact carries the Windows executable suffix.
+          if (Test-Path firstrun\app.com) { Write-Host "PASS default output is app.com" }
+          else { Write-Host "FAIL default output is not app.com"; $fail = 1 }
+
+          # 2. The extensionless form must NOT be what the user is handed.
+          if (Test-Path firstrun\app) { Write-Host "FAIL an extensionless 'app' was left behind"; $fail = 1 }
+          else { Write-Host "PASS no extensionless artifact" }
+
+          # 3. Build output must print a PowerShell-valid run command. `.\app.com`
+          #    - PowerShell does not search the current directory, so a bare
+          #    name would not be runnable.
+          if ($out -match [regex]::Escape('.\') + 'app\.com') { Write-Host "PASS printed a runnable .\app.com command" }
+          else { Write-Host "FAIL build did not print a runnable .\app.com command"; $fail = 1 }
+
+          # 4. Debug sidecars are tidied away: exactly one obvious executable
+          #    sits in the app root.
+          foreach ($stray in @('app.com.dbg', 'app.aarch64.elf', 'app.dbg')) {
+            if (Test-Path (Join-Path 'firstrun' $stray)) {
+              Write-Host "FAIL sidecar left in the app root: $stray"; $fail = 1
+            }
+          }
+          if (Test-Path firstrun\.hull\build) {
+            Write-Host ("PASS sidecars relocated: " +
+                        ((Get-ChildItem firstrun\.hull\build | ForEach-Object Name) -join ', '))
+          }
+
+          # 5. And it actually RUNS, unmodified, by the printed name.
+          Push-Location firstrun
+          $appout = & .\app.com 2>&1 | Out-String
+          $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+          Pop-Location
+          Write-Host "app.com output: [$appout] exit=$rc"
+          # The APE's real exit code is the HIGH byte on Windows.
+          $hi = ($rc -shr 8) -band 0xFF
+          if ($appout -match 'FIRSTRUN-OK' -and ($rc -eq 0 -or $hi -eq 0)) {
+            Write-Host "PASS .\app.com ran unmodified"
+          } else { Write-Host "FAIL .\app.com did not run"; $fail = 1 }
+
+          # 6. Default CLI output must not leak Hull's own C source
+          #    coordinates; --verbose must bring them back.
+          if ($out -match 'src/hull/.*\.c:\d+') {
+            Write-Host "FAIL default build output exposed internal source paths"; $fail = 1
+          } else { Write-Host "PASS no internal source paths in default output" }
+          $vout = .\hull-cosmo.exe build firstrun --verbose --no-verify-platform 2>&1 | Out-String
+          if ($vout -match 'src/hull/') { Write-Host "PASS --verbose restores diagnostics" }
+          else { Write-Host "FAIL --verbose did not restore diagnostics"; $fail = 1 }
+
+          # 7. An explicit -o is still honoured verbatim.
+          $null = .\hull-cosmo.exe build firstrun -o custom_name.com --no-verify-platform 2>&1
+          if (Test-Path custom_name.com) { Write-Host "PASS explicit -o honoured" }
+          else { Write-Host "FAIL explicit -o was not honoured"; $fail = 1 }
+
+          if ($fail -ne 0) { Write-Host "FIRST-RUN ACCEPTANCE FAIL"; exit 1 }
+          Write-Host "FIRST-RUN ACCEPTANCE PASS: default hull build on Windows produces a directly runnable app.com"
+
+      # `hull doctor` is the onboarding surface. On Windows it must recommend
+      # Hull's OWN toolchain bootstrap rather than sending the user to a
+      # package manager for gcc/clang (which cannot link a cosmo APE anyway),
+      # and must not present the absent system CA store as a failure.
+      - name: hull doctor gives Windows-correct guidance
+        shell: pwsh
+        run: |
+          $fail = 0
+          $doc = .\hull-cosmo.exe doctor 2>&1 | Out-String
+          Write-Host $doc
+          $docj = .\hull-cosmo.exe doctor --json 2>&1 | Out-String
+
+          if ($docj -match '"host_os":"windows"') { Write-Host "PASS doctor knows it is on Windows" }
+          else { Write-Host "FAIL doctor did not report host_os=windows"; $fail = 1 }
+          if ($docj -match '"exe_suffix":"\.com"') { Write-Host "PASS doctor reports the .com artifact suffix" }
+          else { Write-Host "FAIL doctor did not report exe_suffix=.com"; $fail = 1 }
+          if ($docj -match '"build_compiler_required":"cosmocc"') { Write-Host "PASS doctor requires cosmocc" }
+          else { Write-Host "FAIL doctor did not require cosmocc"; $fail = 1 }
+
+          # The absent system CA store must read as a working fallback.
+          if ($doc -match 'using the embedded bundle') { Write-Host "PASS absent system CA framed as a fallback" }
+          else { Write-Host "FAIL absent system CA not framed as a fallback"; $fail = 1 }
+          if ($docj -match '"ok":true') { Write-Host "PASS doctor reports HTTPS trust is OK" }
+          else { Write-Host "FAIL doctor did not report HTTPS trust OK"; $fail = 1 }
+
+          # Windows users must never be told to apt/brew a compiler.
+          if ($doc -match 'apt install clang lld' -and $doc -notmatch 'winget') {
+            Write-Host "FAIL doctor gave Linux-only toolchain advice on Windows"; $fail = 1
+          } else { Write-Host "PASS no Linux-only toolchain advice" }
+
+          # cosmocc IS installed by this point in the job, so doctor must say
+          # ready and exit 0; when it is not, it must name Hull's own fix.
+          .\hull-cosmo.exe doctor > $null 2>&1
+          $drc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+          if ($drc -eq 0) {
+            if ($doc -match 'hull build    ready') { Write-Host "PASS doctor reports build ready" }
+            else { Write-Host "FAIL doctor exited 0 without reporting ready"; $fail = 1 }
+          } elseif ($doc -match 'hull tools install cosmocc') {
+            Write-Host "PASS doctor recommends Hull's own toolchain bootstrap"
+          } else {
+            Write-Host "FAIL doctor neither ready nor recommending cosmocc"; $fail = 1
+          }
+
+          if ($fail -ne 0) { exit 1 }
+          Write-Host "DOCTOR-WINDOWS-PASS"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
