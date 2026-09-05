@@ -6,7 +6,11 @@
 --   --sign <key_file>      Sign with Ed25519 private key
 --   --compiler system|<path>  Opt into a system C compiler (default: NONE - the
 --                             compiler-free object emitter + linker; docs/compiler_free_build.md)
---   --output <path>        Output binary path (default: app_dir/app)
+--   --output <path>        Output binary path
+--                          (default: app_dir/app, or app_dir/app.com on
+--                           Windows - see host_exe_suffix below)
+--   --keep-build-artifacts Leave cosmocc's debug sidecars beside the binary
+--                          instead of moving them into .hull/build/
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -17,6 +21,33 @@ local fcompose = require("hull.feature_compose")
 -- hook, cxx, base_group, whole_archive, libs } per --with feature. Hoisted out
 -- of main() during the build modularization (docs/build_modularization.md).
 local FEATURE_SPECS = require("hull.feature_specs")
+
+-- ── Host-aware artifact naming + command rendering ───────────────────
+--
+-- The produced binary must be LAUNCHABLE on the host that produced it.
+-- On Windows that means it needs an executable extension: Windows will not
+-- run an extensionless file, so the APE `hull build` emitted as `app` could
+-- not be started at all (`.\app` did nothing; renaming it to `app.com` made
+-- it work). ".com" is the APE convention on Windows and is already how the
+-- installer names hull itself (hull.com).
+--
+-- These delegate to ONE C implementation (src/hull/shared/host.c), the same
+-- one `hull doctor` consults, rather than scattering per-platform string
+-- literals. On a build of hull that predates them, they degrade to POSIX
+-- behaviour, which is exactly the previous behaviour.
+local function host_exe_suffix()
+    if tool.exe_suffix then return tool.exe_suffix() end
+    return ""
+end
+
+-- "./app" on POSIX, ".\app.com" on Windows. NEITHER PowerShell NOR a POSIX
+-- shell searches the current directory, so a bare relative name is never a
+-- runnable instruction - every "now run it" line goes through this.
+local function render_exec(path)
+    if tool.render_exec then return tool.render_exec(path) end
+    if path:sub(1, 1) == "/" or path:sub(1, 2) == "./" then return path end
+    return "./" .. path
+end
 
 -- ── Argument parsing ─────────────────────────────────────────────────
 
@@ -93,6 +124,11 @@ local function parse_args()
             opts.cache = false
         elseif a == "--no-build-compute" then
             opts.build_compute = false
+        elseif a == "--keep-build-artifacts" then
+            -- Opt out of relocating cosmocc's debug sidecars (see
+            -- relocate_build_artifacts): leave them beside the binary the
+            -- way pre-0.14 builds did.
+            opts.keep_build_artifacts = true
         elseif a == "--no-compiler" then
             opts.no_compiler = true
         elseif a == "--target" then
@@ -121,7 +157,11 @@ local function parse_args()
     end
 
     if not opts.output then
-        opts.output = opts.app_dir .. "/app"
+        -- Host-aware DEFAULT only. An explicit --output/-o is honoured
+        -- verbatim (a user cross-producing an artifact for another host must
+        -- stay in control of its name), and on POSIX the suffix is "" so the
+        -- default remains exactly `app_dir/app` as it always was.
+        opts.output = opts.app_dir .. "/app" .. host_exe_suffix()
     end
 
     return opts
@@ -139,6 +179,76 @@ end
 
 local function file_exists(path)
     return tool.file_exists(path)
+end
+
+-- ── Build-artifact hygiene ───────────────────────────────────────────
+--
+-- cosmocc emits DEBUG SIDECARS beside the APE it links: an x86_64 ELF with
+-- symbols (`<base>.com.dbg`) and the aarch64 ELF (`<base>.aarch64.elf`).
+-- Neither is shippable and neither is read after the build - the only in-tree
+-- consumer is the post-link `nm` symbol check below, which runs BEFORE this.
+-- Leaving them in the project root made it ambiguous which of the three files
+-- was the program, so they are moved under `<app_dir>/.hull/build/`.
+--
+-- Kept deliberately simple and non-destructive:
+--   * only files this build just produced, derived from the output path;
+--   * a move failure is a warning, never a build failure (the shippable
+--     binary is already correct at that point);
+--   * `--keep-build-artifacts` restores the old layout for anyone whose
+--     packaging expects the sidecars in place.
+--
+-- The shippable binary itself never moves: signing, `hull verify`, and
+-- `hull inspect` all address opts.output, which is untouched.
+local BUILD_ARTIFACT_SUFFIXES = { ".com.dbg", ".dbg", ".aarch64.elf" }
+
+local function relocate_build_artifacts(opts)
+    if opts.keep_build_artifacts then return nil end
+
+    -- cosmocc derives sidecar names from the output base with any trailing
+    -- ".com" removed, so `-o app` and `-o app.com` both yield `app.com.dbg`.
+    -- Probe both spellings rather than encoding a guess about the driver.
+    local bases = { opts.output }
+    if opts.output:sub(-4) == ".com" then
+        bases[#bases + 1] = opts.output:sub(1, -5)
+    end
+
+    local found, seen = {}, {}
+    for _, base in ipairs(bases) do
+        for _, sfx in ipairs(BUILD_ARTIFACT_SUFFIXES) do
+            local path = base .. sfx
+            if path ~= opts.output and not seen[path] and file_exists(path) then
+                seen[path] = true
+                found[#found + 1] = path
+            end
+        end
+    end
+    if #found == 0 then return nil end
+
+    -- Keep the sidecars beside the thing they describe: the directory the
+    -- OUTPUT landed in, which is the app dir by default and the caller's
+    -- chosen directory under an explicit `-o`.
+    local out_dir = opts.output:match("^(.*)[/\\][^/\\]*$") or opts.app_dir
+    local dest_dir = out_dir .. "/.hull/build"
+    if not tool.mkdir(dest_dir) then
+        -- One warning, not one per file. Nothing is broken: the shippable
+        -- binary is already correct and the sidecars simply stay put.
+        tool.stderr("hull build: warning: could not create " .. dest_dir
+                    .. "; leaving debug artifacts in place\n")
+        return nil
+    end
+
+    local moved = 0
+    for _, path in ipairs(found) do
+        local name = path:match("([^/\\]+)$") or path
+        if tool.rename(path, dest_dir .. "/" .. name) then
+            moved = moved + 1
+        else
+            tool.stderr("hull build: warning: could not move " .. path
+                        .. " into " .. dest_dir .. "\n")
+        end
+    end
+    if moved == 0 then return nil end
+    return dest_dir, moved
 end
 
 -- List .lua files recursively in a directory (using tool.find_files)
@@ -1995,7 +2105,13 @@ local function main()
         if opts.with and next(opts.with) then
             fallback = "a --with feature (needs a generated feature registry)"
         elseif is_cosmo then
-            fallback = "a cosmo/APE target (dual-arch)"
+            -- Say WHICH layer is dual-arch. `hull doctor` separately reports
+            -- how many platform ARCHIVES this hull carries; this line is
+            -- about the LINK, which for an APE fuses an x86_64 and an aarch64
+            -- image into one file. Users read the two side by side and used to
+            -- conclude their install was inconsistent.
+            fallback = "a cosmo/APE target - the link fuses x86_64 + aarch64 "
+                    .. "into one portable binary"
         end
         if fallback then
             print("hull build: using the C compiler (" .. fallback .. ")")
@@ -2168,8 +2284,6 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         tool.exit(1)
     end
 
-    print("hull build: wrote " .. opts.output)
-
     -- Post-link verification (0.13.1 PR#1, defense in depth). The force-link
     -- anchor emitted in compose_features is the HARD guarantee (a missing bridge
     -- fails the link). This is a belt-and-suspenders symbol check that a produced
@@ -2226,6 +2340,21 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
         end
     end
+
+    -- Tidy the debug sidecars away AFTER the nm check above (which reads the
+    -- .dbg ELF in place) so the project root is left holding exactly one
+    -- obvious, shippable executable.
+    local artifact_dir, artifact_n = relocate_build_artifacts(opts)
+
+    print("hull build: wrote " .. opts.output)
+    if artifact_dir then
+        print("hull build: moved " .. artifact_n .. " debug artifact(s) to "
+              .. artifact_dir .. "/  (--keep-build-artifacts to disable)")
+    end
+    -- How to actually START it, spelled for THIS host. Neither PowerShell nor
+    -- a POSIX shell searches the current directory, so printing the bare path
+    -- would not be a runnable instruction.
+    print("hull build: run it with  " .. render_exec(opts.output))
 
     -- Sign if requested
     if opts.sign then
