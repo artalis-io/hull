@@ -60,6 +60,7 @@ Completions take effect immediately on a new shell.
 * `hull agent context --task=` → `auth`, `db`, `routing`, `middleware`, `testing`, …
 * `hull migrate <sub>` → `status`, `new`
 * `hull deploy <target>` → `dockerfile`, `systemd`, `fly`
-* `hull doctor`, `hull version` → `--json`
+* `hull doctor` → `--json`, `--tui`, `--fix`
+* `hull version` → `--json`
 * `hull dev` → `-p`, `-d`, `--agent`, `--no-migrate`, `--no-sandbox`, `--audit`
 * `hull build` → `-o`, `--cc`, `--compiler`, `--sign`, `--developer-key`, `--target`, `--no-aot`
