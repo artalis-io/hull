@@ -227,7 +227,13 @@ else
     assert_not_contains "no .com artifact on POSIX" "$(ls "$WORKDIR/app")" "app.com"
     assert_contains "reports where it wrote"  "$BOUT" "hull build: wrote"
     assert_contains "prints a runnable command" "$BOUT" "run it with"
-    assert_contains "the command has a ./ prefix" "$BOUT" "./"
+    # The app dir here is an absolute mktemp path, so the runnable command
+    # is the absolute artifact path verbatim: an absolute path needs no
+    # "current directory" prefix, and hl_host_render_exec deliberately omits
+    # one. The "./" prefix is asserted below, on the relative-path build -
+    # the only case where it is load-bearing.
+    assert_contains "names the artifact by its full path" \
+                    "$BOUT" "run it with  $WORKDIR/app/app"
 
     # One obvious shippable executable in the app root: no stray ELF/debug
     # sidecars left beside it.
@@ -243,6 +249,14 @@ else
     VB=$("$HULL" build --verbose --no-verify-platform "$WORKDIR/app" 2>&1 || true)
     assert_contains "--verbose attributes it to build-time evaluation" \
                     "$VB" "[build-eval]"
+
+    # A RELATIVE app dir is where the prefix matters: neither a POSIX shell
+    # nor PowerShell searches the current directory, so a bare "app/app"
+    # would not be a runnable instruction. POSIX half of the ".\app.com"
+    # assertion in .github/workflows/cosmocc-windows-e2e.yml.
+    RBOUT=$(cd "$WORKDIR" && "$HULL" build --no-verify-platform app 2>&1 || true)
+    assert_contains "a relative app dir gets a ./ prefix" \
+                    "$RBOUT" "run it with  ./app/app"
 fi
 
 echo ""
