@@ -78,7 +78,8 @@ int hl_build_extract_feature_image_rt(const char *dir, const char *rt);
 
 /*
  * Get the list of embedded platform archives (multi-arch builds).
- * Sets *out to the sentinel-terminated array.
+ * Sets *out to the sentinel-terminated array when `out` is non-NULL; pass
+ * NULL to ask only for the count (e.g. `hull doctor` probing arity).
  * Returns the count (excluding sentinel), or 0 if not multi-arch.
  */
 int hl_build_get_platforms(const HlEmbeddedPlatform **out);
