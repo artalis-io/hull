@@ -275,11 +275,21 @@ else
     # file that was already in the project - a developer's own `app.dbg`,
     # which no native toolchain emits - must be left where they put it.
     echo "not-a-build-artifact" > "$WORKDIR/app/app.dbg"
-    "$HULL" build --no-verify-platform "$WORKDIR/app" >/dev/null 2>&1 || true
-    assert "a pre-existing app.dbg is not relocated" \
-           [ -f "$WORKDIR/app/app.dbg" ]
-    assert "and its contents are untouched" \
-           [ "$(cat "$WORKDIR/app/app.dbg" 2>/dev/null)" = "not-a-build-artifact" ]
+    DBOUT=$("$HULL" build --no-verify-platform "$WORKDIR/app" 2>&1)
+    DRC=$?
+    # The rebuild MUST succeed, or the two assertions below are vacuous:
+    # a build that died before the cleanup ran would "preserve" the file
+    # by never reaching the code under test.
+    if [ "$DRC" -ne 0 ]; then
+        echo "  FAIL rebuild for the sidecar check exited $DRC"
+        echo "$DBOUT" | sed 's/^/      /'
+        FAIL=$((FAIL + 1))
+    else
+        assert "a pre-existing app.dbg is not relocated" \
+               [ -f "$WORKDIR/app/app.dbg" ]
+        assert "and its contents are untouched" \
+               [ "$(cat "$WORKDIR/app/app.dbg" 2>/dev/null)" = "not-a-build-artifact" ]
+    fi
     rm -f "$WORKDIR/app/app.dbg"
 fi
 
