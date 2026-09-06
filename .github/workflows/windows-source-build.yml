@@ -87,29 +87,36 @@ name: Windows source build (cosmocc, -O0)
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# TRIGGER: workflow_dispatch ONLY, deliberately, until this job goes green.
+# TRIGGER: path-filtered pull_request, plus manual dispatch.
 #
-# Still unproven until then: that cosmocc compiles all ~600 of Hull's TUs on
-# Windows without wedging. Wiring an unproven job to `pull_request` would make
-# its first red run indistinguishable from a real regression in the PR that
-# introduces it.
+# This was workflow_dispatch-only until the job had gone green end to end,
+# deliberately: an unproven job wired to `pull_request` makes its first red run
+# indistinguishable from a real regression in the PR that introduces it. It has
+# now passed (run 34038376368: build 2m33s, a runnable APE that self-reports
+# host_os=windows / exe_suffix=.com), so the filter below is live.
 #
-# Prove it by dispatching, THEN switch to the path-filtered pull_request
-# trigger below in a follow-up:
+# The path list is deliberately NARROW - the build system and the few TUs whose
+# breakage is Windows- or cosmo-specific. It is not "any src/ change": this job
+# exists to catch cosmocc-on-Windows source breakage, and running ~600 TUs on
+# every unrelated PR would be a poor trade for a non-required job. A change that
+# breaks the Windows build from outside this list is caught by the next
+# dispatch, or by widening the list when such a case actually shows up.
 #
-#   pull_request:
-#     paths:
-#       - 'Makefile'
-#       - 'mk/**'
-#       - 'src/hull/serve.c'
-#       - 'src/hull/serve_cli.c'
-#       - 'src/hull/wasm_weakstub.c'
-#       - 'src/hull/http_weakstub.c'
-#       - 'src/hull/image_weakstub.c'
-#       - 'src/hull/shared/host.c'
-#       - 'src/hull/shared/cli_log.c'
-#       - '.github/workflows/windows-source-build.yml'
+# workflow_dispatch stays so the job can still be run by hand against any ref -
+# which is how every diagnosis in this file's history was made.
 on:
+  pull_request:
+    paths:
+      - 'Makefile'
+      - 'mk/**'
+      - 'src/hull/serve.c'
+      - 'src/hull/serve_cli.c'
+      - 'src/hull/wasm_weakstub.c'
+      - 'src/hull/http_weakstub.c'
+      - 'src/hull/image_weakstub.c'
+      - 'src/hull/shared/host.c'
+      - 'src/hull/shared/cli_log.c'
+      - '.github/workflows/windows-source-build.yml'
   workflow_dispatch:
 
 permissions:
