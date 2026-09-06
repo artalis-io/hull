@@ -115,7 +115,7 @@ the escaping survives.
 
 The commands below mirror what CI actually builds and verifies
 (`.github/workflows/windows-source-build.yml`). Two of the flags are load-
-bearing and were not obvious — see the notes after the block.
+bearing and were not obvious; see the notes after the block.
 
 ```sh
 # From an MSYS2 shell (msys2.org), in the MSYS environment.
@@ -157,7 +157,7 @@ cd hull
 )
 ```
 
-The `PATH` above is scoped to that subshell, which is the point — but it means
+The `PATH` above is scoped to that subshell, which is the point, but it means
 a later rebuild needs it again:
 
 ```sh
@@ -171,15 +171,15 @@ observed to complete. It also means this build cannot catch bugs that only
 appear under optimization; those stay covered by the Linux and macOS CI jobs.
 
 **`HL_ENABLE_WASM=0`** matches CI. WAMR under cosmocc-on-Windows is unproven
-and untested on this path — building with WASM enabled here is not validated,
+and untested on this path. Building with WASM enabled here is not validated
 and is not the same configuration CI exercises.
 
-> **This build wedges intermittently — roughly 1 run in 3.** The compiler stops
+> **This build wedges intermittently, roughly 1 run in 3.** The compiler stops
 > emitting output and sits at ~0 CPU indefinitely. It is not a hang in *your*
 > setup and not something the flags above avoid: it is an open defect, tracked
 > in [#462](https://github.com/artalis-io/hull/issues/462), and it has been seen
 > on three different translation units. If a build goes silent for several
-> minutes, interrupt it and re-run — `make` resumes from the objects already
+> minutes, interrupt it and re-run. `make` resumes from the objects already
 > built, so a retry is cheap. CI catches this with a watchdog that fails after
 > five minutes of silence rather than waiting out the job timeout.
 
