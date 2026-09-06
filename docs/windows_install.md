@@ -106,14 +106,56 @@ rejects it. Measured: the same recipe line yields `argc=2` through a native make
 and `argc=8` through `sh -c`. An MSYS-native make execs `sh` with a real argv, so
 the escaping survives.
 
+The commands below mirror what CI actually builds and verifies
+(`.github/workflows/windows-source-build.yml`). Two of the flags are load-
+bearing and were not obvious — see the notes after the block.
+
 ```sh
-# from an MSYS2 shell (msys2.org), in the MSYS environment:
-pacman -S make binutils vim          # make, ar/nm, and xxd respectively
+# From an MSYS2 shell (msys2.org), in the MSYS environment.
+pacman -S make binutils vim diffutils git
+#          make  ar/nm     xxd  cmp       version stamp
+
 git clone --recursive https://github.com/artalis-io/hull
 cd hull
-make CC=cosmocc HL_OPT=-O0           # -O0: cosmocc's gcc wedges on Hull's
-                                     # largest TUs at higher levels on Windows
+
+# cosmocc, with the same version and SHA-256 CI pins. Verify it: this is a
+# compiler toolchain fetched over the network.
+curl -fsSLO https://cosmo.zip/pub/cosmocc/cosmocc-4.0.2.zip
+echo "85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44  cosmocc-4.0.2.zip"   | sha256sum -c
+mkdir -p cosmo && tar -xpf cosmocc-4.0.2.zip -C cosmo
+
+# HL_OPT does not reach Keel's sub-make (issue #461), so Keel would build at
+# its own hardcoded -O2 and wedge. Until that is fixed, shadow cosmocc with a
+# wrapper appending -O0; gcc honours the LAST -O. It MUST be named `cosmocc`:
+# Keel enables its dual-arch build only when CC is exactly that string.
+mkdir -p cosmo/wrap
+printf '#!/bin/sh\nexec "%s" "$@" -O0\n' "$PWD/cosmo/bin/cosmocc" > cosmo/wrap/cosmocc
+chmod +x cosmo/wrap/cosmocc
+
+# cosmo/wrap FIRST (the shim), cosmo/bin LAST: cosmo/bin ships its own `make`
+# which must not shadow MSYS2's.
+export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
+
+make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
 ```
+
+**`HL_OPT=-O0`** is not a preference. cosmocc's gcc wedges on Hull's largest
+translation units at higher levels on Windows, so `-O0` is the only level
+observed to complete. It also means this build cannot catch bugs that only
+appear under optimization; those stay covered by the Linux and macOS CI jobs.
+
+**`HL_ENABLE_WASM=0`** matches CI. WAMR under cosmocc-on-Windows is unproven
+and untested on this path — building with WASM enabled here is not validated,
+and is not the same configuration CI exercises.
+
+> **This build wedges intermittently — roughly 1 run in 3.** The compiler stops
+> emitting output and sits at ~0 CPU indefinitely. It is not a hang in *your*
+> setup and not something the flags above avoid: it is an open defect, tracked
+> in [#462](https://github.com/artalis-io/hull/issues/462), and it has been seen
+> on three different translation units. If a build goes silent for several
+> minutes, interrupt it and re-run — `make` resumes from the objects already
+> built, so a retry is cheap. CI catches this with a watchdog that fails after
+> five minutes of silence rather than waiting out the job timeout.
 
 This path is exercised in CI by `.github/workflows/windows-source-build.yml`,
 whose header carries the full evidence and history.
