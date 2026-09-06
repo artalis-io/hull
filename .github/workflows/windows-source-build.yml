@@ -1,7 +1,45 @@
 name: Windows source build (cosmocc, -O0)
 
-# Proves Hull can be BUILT FROM SOURCE on a stock Windows box with nothing but
-# the SHA-pinned cosmocc toolchain - no WSL, no Visual Studio, no MSYS2 install.
+# Proves Hull can be BUILT FROM SOURCE on Windows with the SHA-pinned cosmocc
+# toolchain, under MSYS2 - no WSL and no Visual Studio.
+#
+# WHAT NEEDS MSYS2, AND WHAT DOES NOT. This job builds HULL ITSELF from source,
+# and that is the ONLY thing here that needs MSYS2. Unchanged, and still true:
+#
+#   * INSTALLING Hull on Windows needs nothing but install.ps1 - see
+#     docs/windows_install.md. No MSYS2, no compiler, no toolchain.
+#   * BUILDING AN APP with the released `hull.com` needs nothing either:
+#     `hull build` is compiler-free by default, and the cosmo path it does use
+#     is `hull tools install cosmocc`. No MSYS2.
+#
+# WHY MSYS2 IS REQUIRED FOR A SOURCE BUILD. Hull's Makefile passes six version
+# macros as escaped-quote defines (-DHL_VERSION=\"...\", plus
+# HULL_VENDOR_KEEL_COMMIT / _WAMR_COMMIT / _KEEL_VERSION / _WAMR_VERSION and
+# HL_QJS_VERSION). A NATIVE Win32 make cannot deliver those to a POSIX shell:
+# it does not exec sh with an argv, it builds a WINDOWS COMMAND LINE, and MSYS
+# sh then re-parses that with Windows rules - so everything from the first \"
+# collapses into one argument. Measured three ways:
+#
+#   native make, recipe WITH  \"    -> argc=2   (all args become one string)
+#   native make, recipe WITHOUT \"  -> argc=7   (fine)
+#   the IDENTICAL line via `sh -c`  -> argc=8   (-DHL_VERSION="x" intact)
+#
+# and confirmed on the runner itself (run 34025202379) for BOTH native makes
+# available there - /c/mingw64/bin/make and Chocolatey's - which mangle it
+# identically. The recipe and the shell are both fine; the Windows
+# command-line hop is what destroys it, so this is a property of the make, not
+# something a PATH or shell fix can reach. An MSYS-native make execs sh with a
+# real argv and the escaping survives. The probe below tests this directly, so
+# if a future runner image regresses it, the job says so in one line instead of
+# failing 600 recipes later on a symptom.
+#
+# (History, so nobody re-litigates it: this job originally used Git Bash plus
+# `choco install make`. That fails for the reason above. Two earlier fixes -
+# a <drive>\bin junction so a native make could find /bin/sh and the POSIX
+# tools, and a wrapper keeping cosmocc's $0 POSIX - were each correct for the
+# problem they addressed and are both UNNECESSARY under MSYS2, which provides
+# /bin/sh natively and passes a POSIX $0. The probe asserts both properties
+# rather than assuming them.)
 #
 # WHAT THIS IS NOT: it does not produce a shippable artifact. Every released
 # `hull-cosmo` is built on Linux (release.yml `build-cosmo`, runs-on
@@ -20,25 +58,88 @@ name: Windows source build (cosmocc, -O0)
 #   It proves "the source compiles and links on Windows", nothing stronger.
 #   Optimized-build correctness stays covered by the Linux/macOS jobs in ci.yml.
 #
+#   HL_OPT DOES NOT REACH KEEL, which is why the probe installs an -O0 shim.
+#   mk/vendor/keel.mk hands Keel's sub-make CC, AR and the TLS/compress config
+#   and nothing else, so Keel compiles at its own hardcoded -O2 (its Makefile
+#   lines 32/34, plus VENDOR_CFLAGS for the miniz TUs). Run 34035825889 proved
+#   the cost: 427 TUs at -O0, 81 at -O2, then 41 minutes of silence with two
+#   -O2 miniz TUs in flight until the 45-minute cap. Two Hull-side follow-ups
+#   this exposes, both OUT OF SCOPE for this workflow but worth fixing:
+#     1. HL_OPT should propagate to the Keel sub-make rather than being forced
+#        by a CI-local shim.
+#     2. The KEEL_EXTRA_CFLAGS / KEEL_EXTRA_LDFLAGS that mk/vendor/keel.mk
+#        passes are not referenced ANYWHERE in Keel's tree, so Hull's LTO and
+#        CFI flags are silently discarded on EVERY platform, not just here.
+#     Keel exposes no opt or append hook today, so both need a Keel-side knob.
+#     Tracked in issue #461 - the -O0 shim below MUST stay until that lands.
+#
+#   READING THE LOG: Keel's compile lines still ECHO -O2, because make echoes
+#   the recipe and the shim appends -O0 at exec time. The effective level is
+#   -O0; `grep -c -- -O2` on the log is therefore NOT evidence the shim failed.
+#   The evidence that it worked is the build COMPLETING (~2.5 min in run
+#   34038376368) where it previously went silent for 41 minutes at the same
+#   miniz TUs.
+#
 # HL_ENABLE_WASM=0: WAMR under cosmocc-on-Windows is unproven and would make a
 # "quick" job slow and flaky. The WASM surface is covered on Linux in ci.yml.
 #
 # Non-required. If it proves flaky, move it to nightly.yml rather than letting
-# it block PRs - a hang-prone job on the PR path is worse than no job.
+# it block PRs - a hang-prone job on the PR path is worse than no job. That
+# clause has now been exercised: see HANG below.
+#
+# HANG - OPEN, INTERMITTENT, NOT UNDERSTOOD.
+#   The build wedges roughly 1 run in 4: the compiler stops emitting output
+#   entirely and accumulates no CPU. Three signatures captured so far, and they
+#   do NOT all share a cause:
+#
+#     a) miniz at -O2 (run 34035825889) - CAUSED by HL_OPT never reaching the
+#        Keel sub-make. Fixed by the -O0 shim in the probe step. Deterministic.
+#     b) build/stdlib_js_registry.c at -O0 (run 34040823575) - OPEN. Hull's own
+#        xxd-generated stdlib array, compiled at -O0, which takes <1s in a
+#        healthy run. Nothing to do with Keel or with -O2.
+#
+#   What the log comparison shows for (b): a successful run emits the last two
+#   registry TUs and then the link 0.9s later; the hung run emits the same two
+#   and never echoes the link line at all. make echoes a recipe BEFORE running
+#   it, so the link never started - one of those two -O0 compiles wedged.
+#
+#     c) vendor/sqlite/sqlite3.c for AARCH64 at -O0 (run 34045364219) - OPEN,
+#        and the first hang the watchdog caught with evidence:
+#
+#          pid=5648 cc1  cpu=5.09s  dcpu=0s   <- BLOCKED, not spinning
+#          cc1 ... vendor/sqlite/sqlite3.c -o <MSYS2 temp>/cchyv2rh.s
+#
+#   So the compiler accumulates NO CPU while wedged: this is an I/O block (a
+#   lock, a pipe, a temp file), not an optimizer blow-up. Three hangs now, three
+#   DIFFERENT TUs - miniz, a generated registry array, sqlite3 - all among the
+#   largest in the tree, with two large TUs in flight under -j2 each time. It is
+#   not a bad TU; it is size- or concurrency-dependent. Strongest lead: cc1 was
+#   blocked writing its .s output into MSYS2's temp dir.
+#
+#   Issue #462 carries the full evidence and the next experiments (relocate
+#   TMPDIR, -j1, whether it is always aarch64). Do NOT assume this is (a) - that
+#   one was deterministic, -O2-caused, and is fixed; cc1's own arguments in the
+#   capture above show -O0 reaching the compiler.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# TRIGGER: workflow_dispatch ONLY, deliberately, for its first landing.
+# TRIGGER: nightly schedule + manual dispatch. NOT pull_request - see below.
 #
-# Two of this job's assumptions cannot be verified without a GitHub runner:
-# that `choco install make` yields a make Git Bash can drive, and that Git
-# Bash's /bin/sh satisfies cosmocc's #!/bin/sh driver (it does under MSYS2
-# locally, which is suggestive, not proof). Wiring an unproven job to
-# `pull_request` would make its first red run indistinguishable from a real
-# regression in the PR that introduces it.
+# This briefly had a path-filtered `pull_request` trigger, once the job had
+# passed end to end. That was premature: the very first PR-triggered sequence
+# ran it three times and one of the three WEDGED for the full 45-minute cap
+# (runs 34040696437 ok 4m02s, 34040725482 ok 3m24s, 34040823575 hung 45m36s).
+# See the HANG section in the header for what is known about it.
 #
-# Prove it by dispatching, THEN switch to the path-filtered pull_request
-# trigger below in a follow-up:
+# A job that hangs ~1 run in 4, for 45 minutes, does not belong on the PR path -
+# it red-flags a quarter of qualifying PRs for a flake rather than a
+# regression, which is exactly the trade this file's own policy warns against.
+# So it runs nightly instead.
+#
+# THE SCHEDULE IS DAMAGE LIMITATION, NOT A FIX. The hang is the actual problem
+# and is tracked in issue #462; nightly just stops it costing other people's
+# time while it is diagnosed.
+# path-filtered pull_request trigger below is the intended end state:
 #
 #   pull_request:
 #     paths:
@@ -52,7 +153,14 @@ name: Windows source build (cosmocc, -O0)
 #       - 'src/hull/shared/host.c'
 #       - 'src/hull/shared/cli_log.c'
 #       - '.github/workflows/windows-source-build.yml'
+#
+# GitHub runs `schedule:` only on the default branch. 06:20 UTC keeps it clear
+# of nightly.yml's 07:00 slot so the two do not contend for Windows runners.
+# workflow_dispatch stays - every diagnosis in this file's history was made by
+# dispatching against a branch, and that is how the hang will be chased too.
 on:
+  schedule:
+    - cron: "20 6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -67,14 +175,43 @@ jobs:
   windows-source-build:
     name: build hull.com from source on Windows (cosmocc, HL_ENABLE_WASM=0)
     runs-on: windows-latest
-    # Hard cap: cosmocc CAN wedge with ~0 CPU (that is the whole reason for
-    # -O0). Without this a hang burns a runner for the full 6h default.
-    timeout-minutes: 45
+    # Backstop only. The build step's watchdog now catches a stall after 5
+    # minutes of silence (a healthy build finishes in ~3-4 min and never goes
+    # quiet for more than a fraction of a second), so this cap should not be
+    # what stops a hang any more - it is here in case the watchdog itself
+    # fails. Lowered from 45: two hangs each burned the full 45 and produced
+    # no evidence, which is precisely what the watchdog replaces.
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: recursive   # vendor/keel is required to link
+
+      # An MSYS-native make - the reason this job uses MSYS2 at all (see the
+      # header). The rest close gaps the MSYS base does NOT cover, each one
+      # confirmed by the probe's inventory in run 34035653293:
+      #   binutils  - ar/nm. Makefile:20's `AR ?= ar` needs a real ar.
+      #   vim       - xxd, which the Makefile shells out to ~54 times to embed
+      #               the stdlib and the CA bundle.
+      #   diffutils - cmp. Only `reproducible-check` uses it (Makefile:3104),
+      #               so it is not needed to build, but it is a one-word
+      #               install and its absence would confuse a later reader.
+      #   git       - the version stamp. Makefile:66-74 falls back VERSION
+      #               file -> `git describe` -> the literal "dev", so a
+      #               git-less build succeeds but stamps HL_VERSION=dev. A
+      #               source-build job should stamp the real revision.
+      # coreutils, findutils, grep, sed and gawk are all in the MSYS base.
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
+        with:
+          msystem: MSYS
+          update: false
+          install: >-
+            make
+            binutils
+            vim
+            diffutils
+            git
 
       # cosmocc ships as a zip of APEs; SHA-pinned, same acquisition as the
       # sibling cosmocc workflows.
@@ -88,23 +225,93 @@ jobs:
           tar.exe -xpf cosmocc.zip -C cosmo
           Write-Host "cosmocc extracted"
 
-      # windows-latest has no POSIX make. Git Bash (the `bash` shell below)
-      # supplies /bin/sh, which cosmocc's #!/bin/sh driver needs; make itself
-      # comes from Chocolatey, which is preinstalled on the runner image.
-      - name: Install GNU make
-        shell: pwsh
-        run: |
-          choco install make --no-progress -y | Out-Host
-          if ($LASTEXITCODE -ne 0) { throw "choco install make failed" }
-
       - name: Toolchain probe (fail early + leave evidence in the log)
-        shell: bash
+        shell: msys2 {0}
         run: |
           set -euo pipefail
-          export PATH="$PWD/cosmo/bin:$PATH"
-          echo "make    : $(command -v make || echo MISSING)"; make --version | head -1
+          # cosmo/bin APPENDED, never prepended: it ships its OWN `make` (an
+          # APE) which would shadow MSYS2's. That APE make also loses its exit
+          # status under a Windows shell - it printed "Error 127" and still
+          # returned 0 in run 34024210147 - so it must not be reachable as
+          # `make` here. cosmocc is unique to that directory, so appending
+          # costs nothing.
+          export PATH="$PATH:$PWD/cosmo/bin"
+
+          # FORCE THE OPT LEVEL ONTO KEEL TOO.
+          #
+          # HL_OPT=-O0 reaches Hull's own TUs and Hull's vendored ones, but NOT
+          # Keel: mk/vendor/keel.mk hands its sub-make CC, AR and the TLS /
+          # compress config, and nothing else, so Keel builds at its own
+          # hardcoded -O2 (Makefile lines 32/34, and VENDOR_CFLAGS for miniz).
+          # Run 34035825889 died exactly there - 427 TUs at -O0, 81 at -O2, then
+          # 41 minutes of total silence with two -O2 miniz TUs in flight
+          # (compress_miniz.c, decompress_miniz.c) until the 45-minute cap. That
+          # is the documented cosmocc wedge, and -O0 is the whole reason this
+          # job is viable, so Keel has to get it too.
+          #
+          # Keel exposes no opt knob and no append hook - the KEEL_EXTRA_CFLAGS
+          # Hull passes is not referenced anywhere in Keel's tree (issue #461,
+          # which is where this shim gets deleted) - and its
+          # CFLAGS/VENDOR_CFLAGS are plain `=`, so the only lever that does not
+          # mean restating all of Keel's flags is the compiler itself. gcc takes
+          # the LAST -O, so a wrapper appending ours after everything wins.
+          #
+          # It MUST be named `cosmocc`: Keel sets COSMO_FAT (the dual-arch
+          # .aarch64 build) only for `ifeq ($(CC),cosmocc)` exactly, so any
+          # other name silently drops half the fat APE. Hence a shadowing
+          # wrapper first on PATH rather than a differently-named CC.
+          mkdir -p "$PWD/cosmo/wrap"
+          { echo '#!/bin/sh'
+            echo "exec \"$PWD/cosmo/bin/cosmocc\" \"\$@\" -O0"
+          } > "$PWD/cosmo/wrap/cosmocc"
+          chmod +x "$PWD/cosmo/wrap/cosmocc"
+          export PATH="$PWD/cosmo/wrap:$PATH"
+          resolved=$(command -v cosmocc)
+          case "$resolved" in
+            */cosmo/wrap/cosmocc) echo "cosmocc -O0 shim active: $resolved" ;;
+            *) echo "FAIL cosmocc did not resolve to the -O0 shim: $resolved"; exit 1 ;;
+          esac
+
+          echo "make candidates:"; { type -a make 2>/dev/null || echo "(none)"; } | sed 's/^/  /'
+          MAKE_BIN=$(command -v make || true)
+          [ -n "$MAKE_BIN" ] || { echo "FAIL no make on PATH"; exit 1; }
+          case "$MAKE_BIN" in
+            */cosmo/bin/*|*cosmocc*)
+              echo "FAIL make resolved to cosmocc's bundled APE make ($MAKE_BIN)."
+              exit 1 ;;
+          esac
+          echo "make    : $MAKE_BIN"; "$MAKE_BIN" --version | head -1
           echo "sh      : $(command -v sh || echo MISSING)"
           echo "cosmocc : $(command -v cosmocc || echo MISSING)"; cosmocc --version | head -1
+          echo "MAKE_BIN=$MAKE_BIN" >> "$GITHUB_ENV"
+
+          # REGRESSION GUARD for the reason this job uses MSYS2. A native Win32
+          # make mangles escaped-quote defines into a single argument (see the
+          # header); Hull's Makefile has six of them, so a make that fails this
+          # cannot build Hull at all. Assert the property rather than assume the
+          # runner image keeps providing an MSYS-native make.
+          qdir=$(mktemp -d)
+          { echo '#!/bin/sh'
+            echo 'echo "argc=$#"'
+            echo 'i=0; for a in "$@"; do i=$((i+1)); echo "[$i]$a"; done'
+          } > "$qdir/argecho"
+          chmod +x "$qdir/argecho"
+          { echo 'all:'
+            printf '\targecho -std=c11 -DHL_VERSION=\\"abc123\\" -DHL_ENABLE_DB -Iinclude\n'
+          } > "$qdir/Makefile"
+          qout=$( cd "$qdir" && PATH="$qdir:$PATH" "$MAKE_BIN" 2>&1 || true )
+          if printf '%s' "$qout" | grep -qF '[2]-DHL_VERSION="abc123"' \
+             && printf '%s' "$qout" | grep -qF '[3]-DHL_ENABLE_DB'; then
+            echo "escaped quotes survive make -> argv: OK"
+          else
+            echo "FAIL this make mangles escaped-quote defines:"
+            printf '%s' "$qout" | sed 's/^/  /' | head -6
+            echo "     Hull's Makefile needs -DHL_VERSION=<escaped> intact."
+            echo "     This is what a NATIVE Win32 make gets wrong; an"
+            echo "     MSYS-native make (msys2/setup-msys2) is required."
+            exit 1
+          fi
+
           # cosmocc's driver is a #!/bin/sh script - prove it can actually run
           # and produce a working APE before committing to a 600-recipe build.
           printf '#include <stdio.h>\nint main(void){puts("APE-OK");return 0;}\n' > /tmp/h.c
@@ -112,22 +319,173 @@ jobs:
           test "$(/tmp/h.com)" = "APE-OK"
           echo "cosmocc produces a runnable APE on this host: OK"
 
+          # Every tool the build system shells out to (Makefile + mk/: sed x74,
+          # xxd x54, install x35, ar x22, find, sort, cut, nm, ...). Probing
+          # them as a set means ONE dispatch names every gap, instead of the
+          # build dying on them one rerun at a time.
+          echo "--- tool inventory ---"
+          missing=""
+          for t in sh uname mkdir find sed xxd install sort cut grep awk tr \
+                   basename printf ar; do
+            if p=$(command -v "$t" 2>/dev/null); then
+              printf '  ok      %-10s %s\n' "$t" "$p"
+            else
+              printf '  MISSING %-10s\n' "$t"; missing="$missing $t"
+            fi
+          done
+          # cmp is reached only by `reproducible-check` (Makefile:3104), and nm
+          # only by targets this job does not build - every nm call site is
+          # `nm ... 2>/dev/null` inside a conditional, so an absent nm degrades
+          # to a vacuously-passing check. An absent git is graceful too: the
+          # version stamp falls back to "dev" (Makefile:66-74). All are
+          # installed above; they are listed optional so a future image change
+          # reports rather than fails the build over something it never needs.
+          for t in cmp sha256sum shasum git nm; do
+            if p=$(command -v "$t" 2>/dev/null); then
+              printf '  ok      %-10s %s (optional)\n' "$t" "$p"
+            else
+              printf '  absent  %-10s (optional)\n' "$t"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "FAIL required build tools missing:$missing"
+            echo "     Add the providing package to setup-msys2's install list."
+            exit 1
+          fi
+
+          # `ar` comes from the binutils package installed above. The cosmocc
+          # cross ars are a fallback if a future image drops it; `cosmoar` stays
+          # LAST - CLAUDE.md records it breaking on Keel's recursive .aarch64/
+          # lookups.
+          ar_name=""
+          for cand in ar x86_64-unknown-cosmo-ar aarch64-unknown-cosmo-ar cosmoar; do
+            if p=$(command -v "$cand" 2>/dev/null); then
+              ar_name=$cand; echo "  ar resolved: $cand -> $p"; break
+            fi
+          done
+          [ -n "$ar_name" ] || { echo "FAIL no ar found"; exit 1; }
+          echo "AR=$ar_name" >> "$GITHUB_ENV"
+
+          # The decisive check: drive make over the paths the build depends on -
+          # a $(shell) at parse time, a recipe with a shell metacharacter, and a
+          # metacharacter-free line invoking cosmocc. That last one is why the
+          # Git-Bash attempt needed a wrapper: a native make handed cosmocc a
+          # BACKSLASH $0, so its POSIX ${0%/*} looked for
+          # ...\cosmo\bin\cosmocc/mktemper (run 34024658252). Under MSYS2 $0
+          # should stay POSIX with no wrapper - this asserts that it does.
+          probe=$(mktemp -d)
+          printf 'PARSE := $(shell uname -s)\n' >  "$probe/Makefile"
+          printf 'all:\n'                       >> "$probe/Makefile"
+          printf '\t@test -n "$(PARSE)" || { echo "FAIL parse-time uname empty"; exit 1; }\n' >> "$probe/Makefile"
+          printf '\t@echo "parse-time uname: $(PARSE)"\n' >> "$probe/Makefile"
+          printf '\techo via-shell | sed s/via-shell/shell-path-OK/\n' >> "$probe/Makefile"
+          printf '\tmkdir -p sub/dir\n'         >> "$probe/Makefile"
+          printf '\tfind sub -type d\n'         >> "$probe/Makefile"
+          printf '\tcosmocc -O0 -o probe.com /tmp/h.c\n' >> "$probe/Makefile"
+          printf '\t./probe.com\n'              >> "$probe/Makefile"
+
+          # Assert on OUTPUT MARKERS, not just on $?. A make whose exit status
+          # is lost (the cosmo APE did exactly that) must not be able to report
+          # success, so require positive evidence that both paths actually ran.
+          set +e
+          out=$( cd "$probe" && "$MAKE_BIN" 2>&1 ); rc=$?
+          set -e
+          echo "$out"
+          fail=0
+          [ "$rc" -eq 0 ] || { echo "FAIL make exited $rc"; fail=1; }
+          printf '%s' "$out" | grep -q 'shell-path-OK' || { echo "FAIL no shell-path-OK: the /bin/sh route did not run"; fail=1; }
+          printf '%s' "$out" | grep -q 'APE-OK'        || { echo "FAIL no APE-OK: make could not drive cosmocc"; fail=1; }
+          [ -f "$probe/probe.com" ]                    || { echo "FAIL probe.com was not produced"; fail=1; }
+          [ "$fail" -eq 0 ] || exit 1
+          echo "make drives /bin/sh + direct-exec tools + cosmocc, no wrappers: OK"
+
       - name: Build hull from source
-        shell: bash
+        shell: msys2 {0}
         run: |
           set -euo pipefail
-          export PATH="$PWD/cosmo/bin:$PATH"
+          # cosmo/wrap PREPENDED: it holds the -O0 shim the probe built (see
+          # there for why Keel needs it). cosmo/bin APPENDED so its bundled
+          # APE make cannot shadow MSYS2's.
+          export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
+          test -x cosmo/wrap/cosmocc || { echo "FAIL cosmocc -O0 shim missing"; exit 1; }
           # HL_OPT is the Makefile knob that routes the optimization level
           # through Hull's OWN TUs *and* every vendored one (quickjs/lua/sqlite
           # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
-          make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+          echo "using MAKE_BIN=${MAKE_BIN:-<unset>} AR=${AR:-<unset>}"
+
+          # WATCHDOG. This build wedges intermittently (~1 run in 4) with the
+          # compiler at ~0 CPU and no further output - see the HANG section in
+          # the header, and issue #462. Left to the job timeout, a hang costs
+          # 45 minutes and yields nothing but "cancelled" - which is how two
+          # hangs already went by without leaving any evidence.
+          #
+          # So: run make in the background and watch its output file. A healthy
+          # build emits a line every fraction of a second and finishes in ~3
+          # minutes, so several minutes of TOTAL silence is unambiguous. On a
+          # stall, dump the tail plus a process snapshot with command lines and
+          # CPU deltas (the one measurement that separates "blocked" from
+          # "spinning") and fail fast instead of burning the runner.
+          stall_limit=${HULL_STALL_LIMIT_SECS:-300}
+          poll=15
+          log=build-output.log
+
+          "$MAKE_BIN" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 > "$log" 2>&1 &
+          mk=$!
+
+          last_size=0
+          stalled=0
+          while kill -0 "$mk" 2>/dev/null; do
+            sleep "$poll"
+            size=$(wc -c < "$log" 2>/dev/null || echo 0)
+            if [ "$size" -eq "$last_size" ]; then
+              stalled=$((stalled + poll))
+            else
+              stalled=0
+              last_size=$size
+            fi
+            if [ "$stalled" -ge "$stall_limit" ]; then
+              echo ""
+              echo "=========================================================="
+              echo "BUILD STALLED: no output for ${stalled}s (limit ${stall_limit}s)"
+              echo "=========================================================="
+              echo "--- last 25 lines of build output ---"
+              tail -25 "$log" || true
+              echo ""
+              # PowerShell is the only thing here that can see a Windows
+              # process's command line and cumulative CPU.
+              powershell.exe -NoProfile -ExecutionPolicy Bypass \
+                -File "$(cygpath -w .github/scripts/dump-stuck-build.ps1)" \
+                -IntervalSeconds 5 || true
+              kill "$mk" 2>/dev/null || true
+              exit 1
+            fi
+          done
+
+          # `wait` reports the child's status; set -e must not pre-empt it.
+          set +e
+          wait "$mk"; rc=$?
+          set -e
+          cat "$log"
+          [ "$rc" -eq 0 ] || { echo "FAIL make exited $rc"; exit 1; }
+
+          # Never trust the exit status alone - assert the artifact.
+          test -f build/hull || { echo "FAIL build/hull was not produced"; exit 1; }
           ls -la build/hull
+
+      - name: Upload build output on failure (the stall evidence)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-windows-build-log
+          path: build-output.log
+          if-no-files-found: warn
+          retention-days: 14
 
       # Compiling is necessary but not sufficient - a binary that cannot run is
       # not a successful build. Assert it executes and reports Windows-correct
       # facts (these come from src/hull/shared/host.c).
       - name: Verify the produced binary runs and is Windows-aware
-        shell: bash
+        shell: msys2 {0}
         run: |
           set -euo pipefail
           ./build/hull version

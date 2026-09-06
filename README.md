@@ -67,6 +67,12 @@ make
 make test
 ```
 
+On **Windows**, building Hull *itself* from source additionally requires MSYS2 -
+a native Win32 make cannot pass the Makefile's escaped-quote version defines
+through to the compiler. See [Building Hull itself from
+source](docs/windows_install.md#building-hull-itself-from-source-needs-msys2).
+Installing Hull and building *apps* with the released `hull.com` need no MSYS2.
+
 ### Develop
 
 ```bash

@@ -13,8 +13,15 @@ For the design and the full trust model behind the installer, see
 irm https://gethull.dev/install.ps1 | iex
 ```
 
-Or download the script first and run it (recommended if you want to read it
-before running):
+That form executes the script straight from the network, unverified - the same
+bootstrap trust as `install.sh | sh` elsewhere. Worth being precise about what
+is and is not checked: **the installer script itself** arrives over HTTPS only,
+while **everything it goes on to download** - the `hull.com` binary - is checked
+against the Ed25519-signed `hull.sha256` manifest, and an upgrade additionally
+verifies that signature before replacing anything. See
+[Trust and verification](#trust-and-verification).
+
+To inspect the script before any of it runs, download it first:
 
 ```powershell
 Invoke-WebRequest https://gethull.dev/install.ps1 -OutFile install.ps1
@@ -89,6 +96,95 @@ That downloads a trimmed, signed cosmocc bundle (verified against the same
 Ed25519-signed `hull.sha256` manifest as every other Hull download) into
 `%USERPROFILE%\.hull\tools\`. It writes nothing outside `~\.hull`, needs no
 admin rights, and does not touch your `PATH`.
+
+### Building Hull itself from source (needs MSYS2)
+
+Everything above - installing Hull, and building **apps** with the released
+`hull.com` - needs no MSYS2, no Visual Studio, and no WSL. Building **Hull
+itself** from source on Windows is the one path that does need MSYS2, and it is
+a hard requirement rather than a preference.
+
+Hull's `Makefile` passes its version macros as escaped-quote defines
+(`-DHL_VERSION=\"...\"` and five siblings). A *native Win32* make - Chocolatey's,
+mingw64's, or any other - does not hand a POSIX shell an argv; it builds a
+**Windows command line**, which MSYS `sh` then re-parses under Windows rules, so
+everything from the first `\"` collapses into a single argument and the compiler
+rejects it. Measured: the same recipe line yields `argc=2` through a native make
+and `argc=8` through `sh -c`. An MSYS-native make execs `sh` with a real argv, so
+the escaping survives.
+
+The commands below mirror what CI actually builds and verifies
+(`.github/workflows/windows-source-build.yml`). Two of the flags are load-
+bearing and were not obvious; see the notes after the block.
+
+```sh
+# From an MSYS2 shell (msys2.org), in the MSYS environment.
+pacman -S make binutils vim diffutils git
+#          make  ar/nm     xxd  cmp       version stamp
+
+git clone --recursive https://github.com/artalis-io/hull
+cd hull
+
+# Everything below runs in ONE subshell under `set -e`, so a failed checksum
+# aborts the recipe. That matters when pasting: without it, `sha256sum -c`
+# would print FAILED and the very next line would extract and then RUN the
+# unverified toolchain anyway. A check that gates nothing is worse than no
+# check, because it reads as though it did. The subshell also means a failure
+# ends the recipe, not your shell session.
+(
+  set -euo pipefail
+
+  # cosmocc, at the version and SHA-256 CI pins. Verify it: this is a compiler
+  # toolchain fetched over the network.
+  curl -fsSLO https://cosmo.zip/pub/cosmocc/cosmocc-4.0.2.zip
+  echo "85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44  cosmocc-4.0.2.zip" \
+    | sha256sum -c
+  mkdir -p cosmo && tar -xpf cosmocc-4.0.2.zip -C cosmo
+
+  # HL_OPT does not reach Keel's sub-make (issue #461), so Keel would build at
+  # its own hardcoded -O2 and wedge. Until that is fixed, shadow cosmocc with a
+  # wrapper appending -O0; gcc honours the LAST -O. It MUST be named `cosmocc`:
+  # Keel enables its dual-arch build only when CC is exactly that string.
+  mkdir -p cosmo/wrap
+  printf '#!/bin/sh\nexec "%s" "$@" -O0\n' "$PWD/cosmo/bin/cosmocc" > cosmo/wrap/cosmocc
+  chmod +x cosmo/wrap/cosmocc
+
+  # cosmo/wrap FIRST (the shim), cosmo/bin LAST: cosmo/bin ships its own `make`
+  # which must not shadow MSYS2's.
+  export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
+
+  make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+)
+```
+
+The `PATH` above is scoped to that subshell, which is the point, but it means
+a later rebuild needs it again:
+
+```sh
+export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"   # from the repo root
+make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+```
+
+**`HL_OPT=-O0`** is not a preference. cosmocc's gcc wedges on Hull's largest
+translation units at higher levels on Windows, so `-O0` is the only level
+observed to complete. It also means this build cannot catch bugs that only
+appear under optimization; those stay covered by the Linux and macOS CI jobs.
+
+**`HL_ENABLE_WASM=0`** matches CI. WAMR under cosmocc-on-Windows is unproven
+and untested on this path. Building with WASM enabled here is not validated
+and is not the same configuration CI exercises.
+
+> **This build wedges intermittently, roughly 1 run in 3.** The compiler stops
+> emitting output and sits at ~0 CPU indefinitely. It is not a hang in *your*
+> setup and not something the flags above avoid: it is an open defect, tracked
+> in [#462](https://github.com/artalis-io/hull/issues/462), and it has been seen
+> on three different translation units. If a build goes silent for several
+> minutes, interrupt it and re-run. `make` resumes from the objects already
+> built, so a retry is cheap. CI catches this with a watchdog that fails after
+> five minutes of silence rather than waiting out the job timeout.
+
+This path is exercised in CI by `.github/workflows/windows-source-build.yml`,
+whose header carries the full evidence and history.
 
 ## What it does
 
