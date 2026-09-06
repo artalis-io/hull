@@ -13,8 +13,15 @@ For the design and the full trust model behind the installer, see
 irm https://gethull.dev/install.ps1 | iex
 ```
 
-Or download the script first and run it (recommended if you want to read it
-before running):
+That form executes the script straight from the network, unverified - the same
+bootstrap trust as `install.sh | sh` elsewhere. Worth being precise about what
+is and is not checked: **the installer script itself** arrives over HTTPS only,
+while **everything it goes on to download** - the `hull.com` binary - is checked
+against the Ed25519-signed `hull.sha256` manifest, and an upgrade additionally
+verifies that signature before replacing anything. See
+[Trust and verification](#trust-and-verification).
+
+To inspect the script before any of it runs, download it first:
 
 ```powershell
 Invoke-WebRequest https://gethull.dev/install.ps1 -OutFile install.ps1
