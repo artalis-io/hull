@@ -477,19 +477,44 @@ ifeq ($(HL_ENABLE_LTO),1)
         && echo "-flto"; rm -f "$$tmp")
   endif
   ifneq ($(HL_LTO_CFLAG),)
-    # LTO bitcode archives need a bitcode-aware ar (default GNU ar
-    # only indexes ELF symbols → libkeel.a's bitcode objects look
-    # unreachable to the linker).  Probe for llvm-ar / llvm-ar-N
-    # (Ubuntu installs the suffixed name in /usr/bin).  Apple's ar
-    # is already bitcode-aware via libtool so darwin doesn't need it.
-    HL_LTO_AR := $(or \
-        $(shell command -v llvm-ar 2>/dev/null),\
-        $(shell command -v llvm-ar-21 2>/dev/null),\
-        $(shell command -v llvm-ar-20 2>/dev/null),\
-        $(shell command -v llvm-ar-19 2>/dev/null),\
-        $(shell command -v llvm-ar-18 2>/dev/null),\
-        $(shell command -v llvm-ar-17 2>/dev/null),\
-        $(shell command -v llvm-ar-16 2>/dev/null))
+    # LTO bitcode archives need a bitcode-aware ar (default GNU ar only
+    # indexes ELF symbols, so bitcode objects look unreachable to the linker).
+    #
+    # It has to match the COMPILER, not merely be "bitcode-aware": the two
+    # formats are NOT interchangeable. llvm-ar cannot index GCC's LTO objects
+    # and gcc-ar cannot index LLVM's. This probe used to look only for
+    # llvm-ar - it assumed LTO implies clang - and so silently mismatched
+    # every gcc LTO build.
+    #
+    # That stayed invisible while the only archived objects were Hull's own
+    # plus a plain-ELF libkeel.a: llvm-ar indexes ELF perfectly well, so a gcc
+    # LTO build linked fine. Once Keel began receiving Hull's -flto too
+    # (hull#461) its objects became gcc bitcode, llvm-ar produced an archive
+    # with no usable index, and the link failed with 491 undefined kl_*
+    # symbols. The archiver was wrong all along; Keel's bitcode is just what
+    # made it matter.
+    #
+    # Apple's ar is bitcode-aware via libtool, so darwin needs neither probe;
+    # an empty result leaves AR alone, which is the correct fallback there.
+    HL_CC_IS_CLANG := $(shell $(CC) --version 2>/dev/null | head -1 | grep -qi clang && echo 1)
+    ifeq ($(HL_CC_IS_CLANG),1)
+      HL_LTO_AR := $(or \
+          $(shell command -v llvm-ar 2>/dev/null),\
+          $(shell command -v llvm-ar-21 2>/dev/null),\
+          $(shell command -v llvm-ar-20 2>/dev/null),\
+          $(shell command -v llvm-ar-19 2>/dev/null),\
+          $(shell command -v llvm-ar-18 2>/dev/null),\
+          $(shell command -v llvm-ar-17 2>/dev/null),\
+          $(shell command -v llvm-ar-16 2>/dev/null))
+    else
+      HL_LTO_AR := $(or \
+          $(shell command -v gcc-ar 2>/dev/null),\
+          $(shell command -v gcc-ar-15 2>/dev/null),\
+          $(shell command -v gcc-ar-14 2>/dev/null),\
+          $(shell command -v gcc-ar-13 2>/dev/null),\
+          $(shell command -v gcc-ar-12 2>/dev/null),\
+          $(shell command -v gcc-ar-11 2>/dev/null))
+    endif
     ifneq ($(HL_LTO_AR),)
       AR := $(HL_LTO_AR)
     endif
@@ -598,6 +623,31 @@ ifeq ($(HL_ENABLE_CFI),1)
     # opt out of CFI itself still need this flag.
     # -DHL_CFI_BUILD=1 is the compile-time signal the CFI death test
     # checks (clang's __has_feature(cfi_icall) is unreliable here).
+    # CFI needs lld. clang emits __typeid__* symbols for the icall checks and
+    # GNU ld cannot relocate them in a PIE, failing the whole link with
+    #   relocation R_X86_64_8 against hidden symbol `__typeid__...' can not be
+    #   used when making a PIE object
+    # That is a hard error at the very last step of the build, not a
+    # degradation, so probe for lld up front and refuse CFI without it rather
+    # than compiling everything only to fail at the link. Pre-existing: this
+    # reproduces on an unmodified tree (see hull#464), and went unnoticed
+    # because no workflow ever built with HL_ENABLE_CFI=1.
+    HL_CFI_LD := $(or \
+        $(shell command -v ld.lld 2>/dev/null),\
+        $(shell command -v ld.lld-21 2>/dev/null),\
+        $(shell command -v ld.lld-20 2>/dev/null),\
+        $(shell command -v ld.lld-19 2>/dev/null),\
+        $(shell command -v ld.lld-18 2>/dev/null),\
+        $(shell command -v ld.lld-17 2>/dev/null),\
+        $(shell command -v ld.lld-16 2>/dev/null))
+    ifeq ($(HL_CFI_LD),)
+      $(warning HL_ENABLE_CFI=1 but ld.lld was not found; clang CFI cannot link with GNU ld, building without CFI)
+      HL_CFI_CFLAG :=
+      HL_CFI_MODE :=
+    endif
+  endif
+  ifneq ($(HL_CFI_CFLAG),)
+    LDFLAGS          += -fuse-ld=lld
     CFLAGS           += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit -DHL_CFI_BUILD=1
     LDFLAGS          += $(HL_CFI_CFLAG) -fsplit-lto-unit
     LUA_CFLAGS       += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
