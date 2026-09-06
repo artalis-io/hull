@@ -84,40 +84,74 @@ name: Windows source build (cosmocc, -O0)
 # "quick" job slow and flaky. The WASM surface is covered on Linux in ci.yml.
 #
 # Non-required. If it proves flaky, move it to nightly.yml rather than letting
-# it block PRs - a hang-prone job on the PR path is worse than no job.
+# it block PRs - a hang-prone job on the PR path is worse than no job. That
+# clause has now been exercised: see HANG below.
+#
+# HANG - OPEN, INTERMITTENT, NOT UNDERSTOOD.
+#   The build wedges roughly 1 run in 4: the compiler stops emitting output
+#   entirely and sits at ~0 CPU until the job cap. Two signatures captured so
+#   far, and they do NOT share a cause:
+#
+#     a) miniz at -O2 (run 34035825889) - CAUSED by HL_OPT never reaching the
+#        Keel sub-make. Fixed by the -O0 shim in the probe step. Deterministic.
+#     b) build/stdlib_js_registry.c at -O0 (run 34040823575) - OPEN. Hull's own
+#        xxd-generated stdlib array, compiled at -O0, which takes <1s in a
+#        healthy run. Nothing to do with Keel or with -O2.
+#
+#   What the log comparison shows for (b): a successful run emits the last two
+#   registry TUs and then the link 0.9s later; the hung run emits the same two
+#   and never echoes the link line at all. make echoes a recipe BEFORE running
+#   it, so the link never started - one of those two -O0 compiles wedged.
+#
+#   A hypothesis worth testing, NOT a conclusion: an optimizer or codegen
+#   blow-up burns CPU, whereas ~0 CPU means BLOCKED - on a file lock, a pipe, or
+#   a temp file (cosmocc allocates temps via mktemper). The build step's
+#   watchdog exists to settle this: on a stall it captures each build process's
+#   command line and CPU delta, and a delta near zero on the stuck compiler
+#   confirms blocked over spinning. Until a hang is caught WITH that evidence,
+#   the cause is unknown - do not assume it is the same as (a).
+#   Tracked in issue #462, which carries the full log comparison.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# TRIGGER: path-filtered pull_request, plus manual dispatch.
+# TRIGGER: nightly schedule + manual dispatch. NOT pull_request - see below.
 #
-# This was workflow_dispatch-only until the job had gone green end to end,
-# deliberately: an unproven job wired to `pull_request` makes its first red run
-# indistinguishable from a real regression in the PR that introduces it. It has
-# now passed (run 34038376368: build 2m33s, a runnable APE that self-reports
-# host_os=windows / exe_suffix=.com), so the filter below is live.
+# This briefly had a path-filtered `pull_request` trigger, once the job had
+# passed end to end. That was premature: the very first PR-triggered sequence
+# ran it three times and one of the three WEDGED for the full 45-minute cap
+# (runs 34040696437 ok 4m02s, 34040725482 ok 3m24s, 34040823575 hung 45m36s).
+# See the HANG section in the header for what is known about it.
 #
-# The path list is deliberately NARROW - the build system and the few TUs whose
-# breakage is Windows- or cosmo-specific. It is not "any src/ change": this job
-# exists to catch cosmocc-on-Windows source breakage, and running ~600 TUs on
-# every unrelated PR would be a poor trade for a non-required job. A change that
-# breaks the Windows build from outside this list is caught by the next
-# dispatch, or by widening the list when such a case actually shows up.
+# A job that hangs ~1 run in 4, for 45 minutes, does not belong on the PR path -
+# it red-flags a quarter of qualifying PRs for a flake rather than a
+# regression, which is exactly the trade this file's own policy warns against.
+# So it runs nightly instead.
 #
-# workflow_dispatch stays so the job can still be run by hand against any ref -
-# which is how every diagnosis in this file's history was made.
+# THE SCHEDULE IS DAMAGE LIMITATION, NOT A FIX. The hang is the actual problem
+# and is tracked in issue #462; nightly just stops it costing other people's
+# time while it is diagnosed.
+# path-filtered pull_request trigger below is the intended end state:
+#
+#   pull_request:
+#     paths:
+#       - 'Makefile'
+#       - 'mk/**'
+#       - 'src/hull/serve.c'
+#       - 'src/hull/serve_cli.c'
+#       - 'src/hull/wasm_weakstub.c'
+#       - 'src/hull/http_weakstub.c'
+#       - 'src/hull/image_weakstub.c'
+#       - 'src/hull/shared/host.c'
+#       - 'src/hull/shared/cli_log.c'
+#       - '.github/workflows/windows-source-build.yml'
+#
+# GitHub runs `schedule:` only on the default branch. 06:20 UTC keeps it clear
+# of nightly.yml's 07:00 slot so the two do not contend for Windows runners.
+# workflow_dispatch stays - every diagnosis in this file's history was made by
+# dispatching against a branch, and that is how the hang will be chased too.
 on:
-  pull_request:
-    paths:
-      - 'Makefile'
-      - 'mk/**'
-      - 'src/hull/serve.c'
-      - 'src/hull/serve_cli.c'
-      - 'src/hull/wasm_weakstub.c'
-      - 'src/hull/http_weakstub.c'
-      - 'src/hull/image_weakstub.c'
-      - 'src/hull/shared/host.c'
-      - 'src/hull/shared/cli_log.c'
-      - '.github/workflows/windows-source-build.yml'
+  schedule:
+    - cron: "20 6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -132,9 +166,13 @@ jobs:
   windows-source-build:
     name: build hull.com from source on Windows (cosmocc, HL_ENABLE_WASM=0)
     runs-on: windows-latest
-    # Hard cap: cosmocc CAN wedge with ~0 CPU (that is the whole reason for
-    # -O0). Without this a hang burns a runner for the full 6h default.
-    timeout-minutes: 45
+    # Backstop only. The build step's watchdog now catches a stall after 5
+    # minutes of silence (a healthy build finishes in ~3-4 min and never goes
+    # quiet for more than a fraction of a second), so this cap should not be
+    # what stops a hang any more - it is here in case the watchdog itself
+    # fails. Lowered from 45: two hangs each burned the full 45 and produced
+    # no evidence, which is precisely what the watchdog replaces.
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -356,8 +394,6 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          # cosmo/bin APPENDED - see the probe step on why it must not shadow
-          # make. MAKE_BIN and AR both arrive from the probe via $GITHUB_ENV.
           # cosmo/wrap PREPENDED: it holds the -O0 shim the probe built (see
           # there for why Keel needs it). cosmo/bin APPENDED so its bundled
           # APE make cannot shadow MSYS2's.
@@ -367,10 +403,74 @@ jobs:
           # through Hull's OWN TUs *and* every vendored one (quickjs/lua/sqlite
           # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
           echo "using MAKE_BIN=${MAKE_BIN:-<unset>} AR=${AR:-<unset>}"
-          "$MAKE_BIN" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
-          # Never trust the exit status alone here - assert the artifact.
+
+          # WATCHDOG. This build wedges intermittently (~1 run in 4) with the
+          # compiler at ~0 CPU and no further output - see the HANG section in
+          # the header, and issue #462. Left to the job timeout, a hang costs
+          # 45 minutes and yields nothing but "cancelled" - which is how two
+          # hangs already went by without leaving any evidence.
+          #
+          # So: run make in the background and watch its output file. A healthy
+          # build emits a line every fraction of a second and finishes in ~3
+          # minutes, so several minutes of TOTAL silence is unambiguous. On a
+          # stall, dump the tail plus a process snapshot with command lines and
+          # CPU deltas (the one measurement that separates "blocked" from
+          # "spinning") and fail fast instead of burning the runner.
+          stall_limit=${HULL_STALL_LIMIT_SECS:-300}
+          poll=15
+          log=build-output.log
+
+          "$MAKE_BIN" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 > "$log" 2>&1 &
+          mk=$!
+
+          last_size=0
+          stalled=0
+          while kill -0 "$mk" 2>/dev/null; do
+            sleep "$poll"
+            size=$(wc -c < "$log" 2>/dev/null || echo 0)
+            if [ "$size" -eq "$last_size" ]; then
+              stalled=$((stalled + poll))
+            else
+              stalled=0
+              last_size=$size
+            fi
+            if [ "$stalled" -ge "$stall_limit" ]; then
+              echo ""
+              echo "=========================================================="
+              echo "BUILD STALLED: no output for ${stalled}s (limit ${stall_limit}s)"
+              echo "=========================================================="
+              echo "--- last 25 lines of build output ---"
+              tail -25 "$log" || true
+              echo ""
+              # PowerShell is the only thing here that can see a Windows
+              # process's command line and cumulative CPU.
+              powershell.exe -NoProfile -ExecutionPolicy Bypass \
+                -File "$(cygpath -w .github/scripts/dump-stuck-build.ps1)" \
+                -IntervalSeconds 5 || true
+              kill "$mk" 2>/dev/null || true
+              exit 1
+            fi
+          done
+
+          # `wait` reports the child's status; set -e must not pre-empt it.
+          set +e
+          wait "$mk"; rc=$?
+          set -e
+          cat "$log"
+          [ "$rc" -eq 0 ] || { echo "FAIL make exited $rc"; exit 1; }
+
+          # Never trust the exit status alone - assert the artifact.
           test -f build/hull || { echo "FAIL build/hull was not produced"; exit 1; }
           ls -la build/hull
+
+      - name: Upload build output on failure (the stall evidence)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-windows-build-log
+          path: build-output.log
+          if-no-files-found: warn
+          retention-days: 14
 
       # Compiling is necessary but not sufficient - a binary that cannot run is
       # not a successful build. Assert it executes and reports Windows-correct
