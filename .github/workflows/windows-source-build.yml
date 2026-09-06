@@ -103,14 +103,23 @@ name: Windows source build (cosmocc, -O0)
 #   and never echoes the link line at all. make echoes a recipe BEFORE running
 #   it, so the link never started - one of those two -O0 compiles wedged.
 #
-#   A hypothesis worth testing, NOT a conclusion: an optimizer or codegen
-#   blow-up burns CPU, whereas ~0 CPU means BLOCKED - on a file lock, a pipe, or
-#   a temp file (cosmocc allocates temps via mktemper). The build step's
-#   watchdog exists to settle this: on a stall it captures each build process's
-#   command line and CPU delta, and a delta near zero on the stuck compiler
-#   confirms blocked over spinning. Until a hang is caught WITH that evidence,
-#   the cause is unknown - do not assume it is the same as (a).
-#   Tracked in issue #462, which carries the full log comparison.
+#     c) vendor/sqlite/sqlite3.c for AARCH64 at -O0 (run 34045364219) - OPEN,
+#        and the first hang the watchdog caught with evidence:
+#
+#          pid=5648 cc1  cpu=5.09s  dcpu=0s   <- BLOCKED, not spinning
+#          cc1 ... vendor/sqlite/sqlite3.c -o D:\_temp\msys64	mp\cchyv2rh.s
+#
+#   So the compiler accumulates NO CPU while wedged: this is an I/O block (a
+#   lock, a pipe, a temp file), not an optimizer blow-up. Three hangs now, three
+#   DIFFERENT TUs - miniz, a generated registry array, sqlite3 - all among the
+#   largest in the tree, with two large TUs in flight under -j2 each time. It is
+#   not a bad TU; it is size- or concurrency-dependent. Strongest lead: cc1 was
+#   blocked writing its .s output into MSYS2's temp dir.
+#
+#   Issue #462 carries the full evidence and the next experiments (relocate
+#   TMPDIR, -j1, whether it is always aarch64). Do NOT assume this is (a) - that
+#   one was deterministic, -O2-caused, and is fixed; cc1's own arguments in the
+#   capture above show -O0 reaching the compiler.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
