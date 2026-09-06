@@ -167,7 +167,9 @@ jobs:
           set -euo pipefail
           export PATH="$PATH:$PWD/cosmo/bin"
 
-          echo "make candidates:"; command -v -a make | sed 's/^/  /'
+          # `type -a`, not `command -v -a`: the POSIX `command` builtin has
+          # no -a, and under `set -e` that usage error aborts the step.
+          echo "make candidates:"; { type -a make 2>/dev/null || echo "(none)"; } | sed 's/^/  /'
           MAKE_BIN=$(command -v make || true)
           [ -n "$MAKE_BIN" ] || { echo "FAIL no make on PATH"; exit 1; }
           case "$MAKE_BIN" in
