@@ -170,6 +170,13 @@ end
 --     parser (no ranges synthesized).
 --   * a `local_function` / `function` decl -> { form="function", is_method, is_vararg,
 --     params, body } where `params`/`body` are the parser's exact param/statement subtrees.
+-- READ-ONLY CONTRACT: `values` / `positional_value` / `params` / `body` are LIVE REFERENCES
+-- into this generation's parsed AST (deliberately NOT deep-copied -- so byte ranges stay
+-- exact and nothing is duplicated). A consumer MUST treat them as read-only: mutating a
+-- returned subtree corrupts this generation's AST (and any sibling decl that shares the same
+-- node -- every name of a multi-name `local` shares one node). This is trusted-consumer
+-- discipline: app code never reaches resolve_handle; only in-process build/tool lowerers do,
+-- and each analysis generation re-parses fresh, so a read-only lowerer is always safe.
 -- `err` (a Diagnostic-shaped table) is returned for any impossible/corrupt frontend state
 -- (missing `_node`, a node whose `.kind` does not match the declaration kind, a bad
 -- `_name_index`, a malformed values/params/body, or an unsupported kind) -- never for an
