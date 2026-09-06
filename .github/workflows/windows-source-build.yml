@@ -113,11 +113,19 @@ jobs:
           submodules: recursive   # vendor/keel is required to link
 
       # An MSYS-native make - the reason this job uses MSYS2 at all (see the
-      # header). `binutils` supplies ar/nm, which the MSYS base does not carry
-      # and which Makefile:20's `AR ?= ar` needs. `vim` is for xxd, which the
-      # Makefile shells out to ~54 times to embed the stdlib and CA bundle;
-      # everything else the build touches (coreutils, findutils, grep, sed,
-      # gawk, diffutils) is in the MSYS base.
+      # header). The rest close gaps the MSYS base does NOT cover, each one
+      # confirmed by the probe's inventory in run 34035653293:
+      #   binutils  - ar/nm. Makefile:20's `AR ?= ar` needs a real ar.
+      #   vim       - xxd, which the Makefile shells out to ~54 times to embed
+      #               the stdlib and the CA bundle.
+      #   diffutils - cmp. Only `reproducible-check` uses it (Makefile:3104),
+      #               so it is not needed to build, but it is a one-word
+      #               install and its absence would confuse a later reader.
+      #   git       - the version stamp. Makefile:66-74 falls back VERSION
+      #               file -> `git describe` -> the literal "dev", so a
+      #               git-less build succeeds but stamps HL_VERSION=dev. A
+      #               source-build job should stamp the real revision.
+      # coreutils, findutils, grep, sed and gawk are all in the MSYS base.
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
         with:
           msystem: MSYS
@@ -126,6 +134,8 @@ jobs:
             make
             binutils
             vim
+            diffutils
+            git
 
       # cosmocc ships as a zip of APEs; SHA-pinned, same acquisition as the
       # sibling cosmocc workflows.
@@ -205,14 +215,21 @@ jobs:
           echo "--- tool inventory ---"
           missing=""
           for t in sh uname mkdir find sed xxd install sort cut grep awk tr \
-                   basename printf cmp ar; do
+                   basename printf ar; do
             if p=$(command -v "$t" 2>/dev/null); then
               printf '  ok      %-10s %s\n' "$t" "$p"
             else
               printf '  MISSING %-10s\n' "$t"; missing="$missing $t"
             fi
           done
-          for t in sha256sum shasum git nm; do
+          # cmp is reached only by `reproducible-check` (Makefile:3104), and nm
+          # only by targets this job does not build - every nm call site is
+          # `nm ... 2>/dev/null` inside a conditional, so an absent nm degrades
+          # to a vacuously-passing check. An absent git is graceful too: the
+          # version stamp falls back to "dev" (Makefile:66-74). All are
+          # installed above; they are listed optional so a future image change
+          # reports rather than fails the build over something it never needs.
+          for t in cmp sha256sum shasum git nm; do
             if p=$(command -v "$t" 2>/dev/null); then
               printf '  ok      %-10s %s (optional)\n' "$t" "$p"
             else
@@ -237,10 +254,6 @@ jobs:
           done
           [ -n "$ar_name" ] || { echo "FAIL no ar found"; exit 1; }
           echo "AR=$ar_name" >> "$GITHUB_ENV"
-
-          # nm is only reached by targets this job does not build, and every
-          # call site is `nm ... 2>/dev/null` inside a conditional, so an absent
-          # nm degrades to a vacuously-passing check, not a build failure.
 
           # The decisive check: drive make over the paths the build depends on -
           # a $(shell) at parse time, a recipe with a shell metacharacter, and a
