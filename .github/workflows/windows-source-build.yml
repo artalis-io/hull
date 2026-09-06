@@ -145,14 +145,41 @@ jobs:
           }
           Write-Host "workspace $env:GITHUB_WORKSPACE (drive $wsDrive)"
 
+      # PATH ORDER IS LOAD-BEARING. cosmo/bin ships its OWN `make` (an APE), so
+      # prepending cosmo/bin - as this workflow did originally - silently
+      # shadowed the Chocolatey make installed above. Run 34024210147 proved
+      # `make` resolved to /d/a/hull/hull/cosmo/bin/make in BOTH failing runs,
+      # so choco's make was never actually exercised. That APE make is doubly
+      # unsuitable here:
+      #
+      #   * it does not resolve /bin/sh on Windows (the same Error 127), and
+      #   * its exit status does not survive Git Bash - it printed
+      #     "*** [Makefile:3: all] Error 127" and STILL returned 0, which is why
+      #     the probe's `|| { ...; exit 1; }` guard passed a failing build and
+      #     the step went green.
+      #
+      # So: APPEND cosmo/bin rather than prepend (cosmocc is unique to it; no
+      # other tool we need comes from there), pin the resolved make, and refuse
+      # to proceed if it is the cosmo one.
       - name: Toolchain probe (fail early + leave evidence in the log)
         shell: bash
         run: |
           set -euo pipefail
-          export PATH="$PWD/cosmo/bin:$PATH"
-          echo "make    : $(command -v make || echo MISSING)"; make --version | head -1
+          export PATH="$PATH:$PWD/cosmo/bin"
+
+          echo "make candidates:"; command -v -a make | sed 's/^/  /'
+          MAKE_BIN=$(command -v make || true)
+          [ -n "$MAKE_BIN" ] || { echo "FAIL no make on PATH"; exit 1; }
+          case "$MAKE_BIN" in
+            */cosmo/bin/*|*cosmocc*)
+              echo "FAIL make resolved to cosmocc's bundled APE make ($MAKE_BIN)."
+              echo "     cosmo/bin must not shadow the Chocolatey make."
+              exit 1 ;;
+          esac
+          echo "make    : $MAKE_BIN"; "$MAKE_BIN" --version | head -1
           echo "sh      : $(command -v sh || echo MISSING)"
           echo "cosmocc : $(command -v cosmocc || echo MISSING)"; cosmocc --version | head -1
+          echo "MAKE_BIN=$MAKE_BIN" >> "$GITHUB_ENV"
 
           # cosmocc's driver is a #!/bin/sh script - prove it can actually run
           # and produce a working APE before committing to a 600-recipe build.
@@ -187,15 +214,10 @@ jobs:
           fi
 
           # `ar` is BINUTILS, not part of Git for Windows' MSYS tool set, so the
-          # junction above does NOT supply it - and Makefile:20's `AR ?= ar`
-          # would resolve to nothing. cosmocc ships its own, so resolve one and
-          # pin it for the build step via $GITHUB_ENV. Preference order matters:
-          # a real binutils `ar` first, then the arch-prefixed cross ar (GNU ar
-          # is arch-agnostic for archiving, so the x86_64 one handles aarch64
-          # members fine), and `cosmoar` LAST - CLAUDE.md records that it breaks
-          # on Keel's recursive .aarch64/ lookups.
-          echo "--- cosmo/bin inventory ---"
-          ls cosmo/bin | tr '\n' ' '; echo
+          # junction does NOT supply it and Makefile:20's `AR ?= ar` would
+          # resolve to nothing. The runner's mingw64 provides one; cosmocc's
+          # arch-prefixed cross ars are the fallback. `cosmoar` stays LAST -
+          # CLAUDE.md records it breaking on Keel's recursive .aarch64/ lookups.
           ar_name=""
           for cand in ar x86_64-unknown-cosmo-ar aarch64-unknown-cosmo-ar cosmoar; do
             if p=$(command -v "$cand" 2>/dev/null); then
@@ -207,20 +229,19 @@ jobs:
             exit 1
           fi
           # Export the BARE NAME, not the resolved path: $p is a POSIX path
-          # (/d/a/.../ar) that a native make cannot exec. The name rides the
-          # same PATH that MSYS rewrites into Windows form when spawning make.
+          # (/c/mingw64/bin/ar) that a native make cannot exec. The name rides
+          # the same PATH that MSYS rewrites into Windows form for make.
           echo "AR=$ar_name" >> "$GITHUB_ENV"
 
-          # nm is only reached by targets this job does not build (the tls-less
-          # platform-lib assertion, mk/fetch.mk, mk/tests.mk) and every call
-          # site is `nm ... 2>/dev/null` inside a conditional, so an absent nm
-          # degrades to a vacuously-passing check rather than a build failure.
+          # nm is only reached by targets this job does not build, and every
+          # call site is `nm ... 2>/dev/null` inside a conditional, so an absent
+          # nm degrades to a vacuously-passing check, not a build failure.
 
-          # The decisive check. Everything above ran under BASH, which always
-          # has these tools - the previous failure was NATIVE MAKE not seeing
-          # them. So drive native make directly, exercising both broken paths:
-          # a $(shell) at parse time, a recipe with a metacharacter (routed
-          # through /bin/sh), and a bare recipe (direct CreateProcess).
+          # The decisive check: drive the REAL make over all three paths the
+          # build depends on - a $(shell) at parse time, a recipe with a shell
+          # metacharacter, and a metacharacter-free line invoking cosmocc (a
+          # #!/bin/sh script Windows cannot exec, so it only runs via make's
+          # fallback to the /bin/sh the junction provides).
           probe=$(mktemp -d)
           printf 'PARSE := $(shell uname -s)\n' >  "$probe/Makefile"
           printf 'all:\n'                       >> "$probe/Makefile"
@@ -229,34 +250,40 @@ jobs:
           printf '\techo via-shell | sed s/via-shell/shell-path-OK/\n' >> "$probe/Makefile"
           printf '\tmkdir -p sub/dir\n'         >> "$probe/Makefile"
           printf '\tfind sub -type d\n'         >> "$probe/Makefile"
-          # The case the real build actually rides on: a compile line with NO
-          # shell metacharacters, so make tries to CreateProcess cosmocc
-          # DIRECTLY - but cosmocc is a #!/bin/sh script, which Windows cannot
-          # exec. It works only because make falls back to SHELL, i.e. to the
-          # /bin/sh the junction just provided. If that fallback does not fire,
-          # every one of Hull's ~600 compile recipes fails - so prove it on one.
           printf '\tcosmocc -O0 -o probe.com /tmp/h.c\n' >> "$probe/Makefile"
           printf '\t./probe.com\n'              >> "$probe/Makefile"
-          ( cd "$probe" && make ) || { echo "FAIL native make cannot drive the POSIX tools / cosmocc"; exit 1; }
-          echo "native make drives /bin/sh + direct-exec tools + cosmocc: OK"
+
+          # Assert on OUTPUT MARKERS, not just on $?. A make whose exit status
+          # is lost (see the cosmo-APE note above) must not be able to report
+          # success, so require positive evidence that both paths actually ran.
+          set +e
+          out=$( cd "$probe" && "$MAKE_BIN" 2>&1 ); rc=$?
+          set -e
+          echo "$out"
+          fail=0
+          [ "$rc" -eq 0 ] || { echo "FAIL make exited $rc"; fail=1; }
+          printf '%s' "$out" | grep -q 'shell-path-OK' || { echo "FAIL no shell-path-OK: the /bin/sh route did not run"; fail=1; }
+          printf '%s' "$out" | grep -q 'APE-OK'        || { echo "FAIL no APE-OK: make could not drive cosmocc"; fail=1; }
+          [ -f "$probe/probe.com" ]                    || { echo "FAIL probe.com was not produced"; fail=1; }
+          [ "$fail" -eq 0 ] || exit 1
+          echo "real make drives /bin/sh + direct-exec tools + cosmocc: OK"
 
       - name: Build hull from source
         shell: bash
         run: |
           set -euo pipefail
-          export PATH="$PWD/cosmo/bin:$PATH"
+          # cosmo/bin APPENDED - see the probe step's comment on why it must not
+          # shadow make. MAKE_BIN and AR both arrive from the probe via
+          # $GITHUB_ENV.
+          export PATH="$PATH:$PWD/cosmo/bin"
           # HL_OPT is the Makefile knob that routes the optimization level
           # through Hull's OWN TUs *and* every vendored one (quickjs/lua/sqlite
           # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
-          # AR comes from the probe step via $GITHUB_ENV (Git for Windows
-          # ships no binutils, so Makefile:20's `AR ?= ar` needs a real value).
-          echo "using AR=${AR:-<unset>}"
-          make CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+          echo "using MAKE_BIN=${MAKE_BIN:-<unset>} AR=${AR:-<unset>}"
+          "$MAKE_BIN" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+          # Never trust the exit status alone here - assert the artifact.
+          test -f build/hull || { echo "FAIL build/hull was not produced"; exit 1; }
           ls -la build/hull
-
-      # Compiling is necessary but not sufficient - a binary that cannot run is
-      # not a successful build. Assert it executes and reports Windows-correct
-      # facts (these come from src/hull/shared/host.c).
       - name: Verify the produced binary runs and is Windows-aware
         shell: bash
         run: |
