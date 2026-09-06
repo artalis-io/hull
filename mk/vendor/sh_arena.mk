@@ -5,7 +5,7 @@
 
 SH_ARENA_DIR    := $(VENDDIR)/sh_arena
 SH_ARENA_OBJ    := $(BUILDDIR)/sh_arena.o
-SH_ARENA_CFLAGS := -std=c11 -O2 -w
+SH_ARENA_CFLAGS := -std=c11 $(HL_OPT) -w
 # Under ASan (`make debug`) instrument the arena TU so its manual ASan
 # poison/unpoison calls activate (dangling-into-arena reads in Hull code
 # become hard ASan errors). Other vendored TUs intentionally stay

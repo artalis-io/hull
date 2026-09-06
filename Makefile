@@ -139,6 +139,20 @@ endif
 endif
 endif
 
+# Optimization level for the RELEASE build (DEBUG/TSAN/COVERAGE pin their own).
+#
+# A knob rather than a literal because some toolchains cannot compile Hull's
+# largest translation units at -O2. Notably cosmocc's GCC HANGS (not ICEs -
+# ~0 CPU, indefinitely) on vendor/quickjs/quickjs.c and src/hull/serve.c when
+# run ON WINDOWS; at -O0 the same files compile in seconds. That makes
+# `make HL_OPT=-O0` the difference between "Hull can be built from source on
+# Windows" and "cannot". Releases are unaffected: every shipped cosmo artifact
+# is built on Linux at the -O2 default (see .github/workflows/release.yml).
+#
+# Applies to Hull's own TUs AND the vendored ones (which set their own CFLAGS
+# and would otherwise keep a hardcoded -O2, defeating the override).
+HL_OPT ?= -O2
+
 # Build mode
 ifdef DEBUG
 CFLAGS += -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -155,7 +169,7 @@ CFLAGS += -g -O1 -fsanitize=thread -fno-omit-frame-pointer
 LDFLAGS += -fsanitize=thread
 CFLAGS += -DHL_THREAD_AFFINITY_CHECKS
 else
-CFLAGS += -O2
+CFLAGS += $(HL_OPT)
 endif
 
 ifdef COVERAGE
@@ -960,6 +974,21 @@ CAP_OBJS += $(HOST_MATCH_OBJ)
 # verify_self/mod_tool) include it by relative path; it is not public API.
 HEX_OBJ := $(BUILDDIR)/hex.o
 CAP_OBJS += $(HEX_OBJ)
+# host is the domain-free leaf util (src/hull/shared/host.c) owning every
+# per-host fact a user-facing string depends on: the PATH list separator, the
+# executable suffix a produced artifact needs (".com" for an APE on Windows),
+# and how to spell "run this" in the host's shell. Like host_match/hex it rides
+# CAP_OBJS, so it reaches the platform lib (base + cosmo), the hull binary,
+# libhull, and every TEST_CAP_OBJS suite with one edit. libc-only.
+HOST_OBJ := $(BUILDDIR)/host.o
+CAP_OBJS += $(HOST_OBJ)
+# cli_log owns the LOGGING POLICY for `hull <subcommand>` (serve.c owns the
+# server's). Without it rxi/log.c's zero-initialized default applies and CLI
+# output carries internal `src/hull/x.c:NNN:` coordinates. Rides CAP_OBJS too;
+# every list carrying CAP_OBJS also carries LOG_OBJ (see TEST_COMMON_LIBS), so
+# the log.c dependency always resolves.
+CLI_LOG_OBJ := $(BUILDDIR)/cli_log.o
+CAP_OBJS += $(CLI_LOG_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -1755,15 +1784,15 @@ $(RUNTIME_TOOLCHAIN_REGISTRY_C): Makefile | $(BUILDDIR)
 	@echo "}" >> $@
 
 $(STDLIB_REGISTRY_O): $(STDLIB_REGISTRY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
+	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 $(STDLIB_LUA_REGISTRY_O): $(STDLIB_LUA_REGISTRY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
+	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 $(STDLIB_JS_REGISTRY_O): $(STDLIB_JS_REGISTRY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
+	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 $(STDLIB_TOOLCHAIN_REGISTRY_O): $(STDLIB_TOOLCHAIN_REGISTRY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
+	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 $(RUNTIME_TOOLCHAIN_REGISTRY_O): $(RUNTIME_TOOLCHAIN_REGISTRY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
+	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 
 # ── App code embedding (xxd) ─────────────────────────────────────────
 #
@@ -1917,14 +1946,14 @@ $(APP_REGISTRY_C): $(APP_ALL_XXD_HDRS) | $(BUILDDIR)
 	@echo "};" >> $@
 
 $(APP_REGISTRY_O): $(APP_REGISTRY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
+	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 
 APP_EXTRA_OBJS := $(APP_REGISTRY_O)
 endif
 
 # App entries default (empty array - used when no APP_DIR)
 $(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c $(INCDIR)/hull/entry.h | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(INCDIR) -c -o $@ $<
+	$(CC) -std=c11 $(HL_OPT) -w -I$(INCDIR) -c -o $@ $<
 
 # ── Include paths ───────────────────────────────────────────────────
 
@@ -2161,7 +2190,7 @@ $(CANARY_C): $(PLATFORM_OBJS) | $(BUILDDIR)
 	printf '/* Auto-generated platform canary - do not edit */\n#include <stdint.h>\nconst struct { char magic[24]; uint8_t integrity[32]; } hl_platform_canary = {\n    "HULL_PLATFORM_CANARY",\n    {%s}\n};\n' "$$bytes" > $@
 
 $(CANARY_OBJ): $(CANARY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -c -o $@ $<
+	$(CC) -std=c11 $(HL_OPT) -w -c -o $@ $<
 
 # When TRUST_PLATFORM_LIB=1, treat $(PLATFORM_LIB) as a pre-built
 # leaf - make doesn't re-link it from source prereqs. This is the
@@ -2673,7 +2702,7 @@ $(COMPRESS_OBJ): $(SRCDIR)/hull/utils/compress.c | $(BUILDDIR)
 MINIZ_HARDEN := $(if $(or $(HULL_DISABLE_HARDENING),$(COSMO)),,-fstack-protector-strong -fPIE)
 MINIZ_FORTIFY := $(if $(or $(HULL_DISABLE_HARDENING),$(COSMO),$(DEBUG)),,-D_FORTIFY_SOURCE=3)
 $(MINIZ_OBJ): $(MINIZ_DIR)/miniz.c | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO \
+	$(CC) -std=c11 $(HL_OPT) -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO \
 	    $(MINIZ_HARDEN) $(MINIZ_FORTIFY) $(HARDEN_CFLAGS) \
 	    -w $(DEPFLAGS) -c -o $@ $<
 
@@ -2957,6 +2986,12 @@ $(HOST_MATCH_OBJ): $(SRCDIR)/hull/utils/host_match.c $(INCDIR)/hull/host_match.h
 $(HEX_OBJ): $(SRCDIR)/hull/utils/hex.c $(SRCDIR)/hull/utils/hex.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
+$(HOST_OBJ): $(SRCDIR)/hull/shared/host.c $(INCDIR)/hull/shared/host.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(CLI_LOG_OBJ): $(SRCDIR)/hull/shared/cli_log.c $(INCDIR)/hull/shared/cli_log.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
 # QuickJS sources (relaxed warnings)
 $(BUILDDIR)/qjs_%.o: $(QJS_DIR)/%.c | $(BUILDDIR)
 	$(CC) $(QJS_CFLAGS) -I$(QJS_DIR) -c -o $@ $<
@@ -3108,6 +3143,7 @@ cppcheck:
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/agent/*.c \
 		--suppress=knownArgument:$(SRCDIR)/hull/agent/overview.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/commands/tools.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/commands/doctor.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/wasm.c \
 		--suppress=unusedStructMember:$(SRCDIR)/hull/agent/*.c \
 		--suppress=unusedVariable:$(SRCDIR)/hull/agent/*.c \

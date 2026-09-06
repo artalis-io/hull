@@ -27,6 +27,12 @@
 #include "hull/runtime/lua.h"
 #endif
 
+/* Unconditional: hl_serve_init_logging always hands logging ownership over
+ * from the CLI policy, on every runtime flavor. Must NOT sit inside a
+ * runtime #ifdef - under RUNTIME=lua / HL_ENABLE_JS=0 the declaration would
+ * disappear and the call become an implicit declaration (an error on GCC 14). */
+#include "hull/shared/cli_log.h"
+
 #include "hull/utils/alloc.h"
 #include "hull/app_context.h"
 #ifdef HL_ENABLE_DB
@@ -852,6 +858,15 @@ static int hl_serve_validate_config(HlServerState *s)
  * Depends on: parse_args (log_level, mem_limit). */
 static int hl_serve_init_logging(HlServerState *s)
 {
+    /* Take sole ownership of logging. A subcommand may reach hull_serve
+     * IN-PROCESS (`hull jobs worker`, commands/jobs.c), in which case the
+     * dispatcher already installed the CLI policy; log.c invokes EVERY
+     * registered callback and cannot unregister one, so without this each
+     * record would print twice in two formats. Must precede the
+     * make-threadsafe + pool_create below, so the flag is written while still
+     * single-threaded. */
+    hl_cli_log_suspend();
+
     hl_log_make_threadsafe();  /* workers (db/wasm/gpu) log concurrently */
     log_set_level(s->cfg.log_level);
     log_set_quiet(true);  /* suppress default stderr callback */

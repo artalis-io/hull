@@ -33,6 +33,46 @@ local function file_exists(p) return tool.file_exists(p) end
 -- cache). Both `hull build` and the mandatory-compose plan below read the
 -- manifest; centralizing avoids running the app twice and keeps one impl.
 --
+-- ── Why the app is EXECUTED at build time ────────────────────────────
+--
+-- Hull's manifest is a CALL, not data: `app.manifest({ modules = {...} })`.
+-- The resolved module set decides which feature archives get composed into
+-- the binary (runtime, http, keel, tls, sqlite, wasm, image), so `hull build`
+-- cannot produce a correct artifact without it, and it cannot be read
+-- statically today: the table can be built by arbitrary expressions, and the
+-- call can live behind a require in a modular app. Guessing instead would
+-- silently mis-compose the binary, which is worse than executing the entry.
+--
+-- What bounds that execution:
+--   * the KERNEL sandbox is already applied (hl_tool_sandbox_init: unveil +
+--     pledge "stdio rpath wpath cpath proc exec fattr"), so the app cannot
+--     reach outside the unveiled build region;
+--   * DYNAMIC CODE authority is removed for the window (load / loadfile /
+--     dofile / loadstring are nil'd across the pcall and restored on every
+--     exit path), matching the runtime sandbox;
+--   * capability modules with no tool-mode backing (db, compute, gpu,
+--     worker) resolve to no-op stubs, so top-level code touching them
+--     neither works nor escapes;
+--   * the BUILD-TOOL API (`tool`, a global in this VM: spawn / write_file /
+--     remove_file / rmdir / ...) is stripped for the window, the same way
+--     the loaders are - see the strip below for why that is safe;
+--   * ONLY top level runs - route handlers, timers and app.main are
+--     registered, never invoked;
+--   * it runs exactly ONCE per process (the cache above), so extraction is
+--     deterministic for a given app_dir.
+--
+-- What is NOT bounded: ordinary Lua computation, and anything reachable
+-- through the intrinsic `app` table. An app's top level can still loop, build
+-- tables, and call app.manifest/app.get/app.main. It cannot compile new code,
+-- cannot reach the build-tool API, and cannot reach a real db/compute/gpu
+-- capability. That is the same authority its top level has when the app
+-- actually RUNS - which is the property to preserve, since executing the entry
+-- is inherent to a manifest-as-call design and cannot be removed.
+--
+-- The app's own log output is attributed to this window (tool.log_app_phase)
+-- so it neither pollutes normal build output nor disappears without
+-- explanation under --verbose.
+--
 -- @param app_dir string
 -- @return table|nil  The captured manifest, or nil if extraction failed.
 local _manifest_cache = {}
@@ -84,7 +124,38 @@ function M.extract_manifest(app_dir)
             local sv_load, sv_loadfile = _G.load, _G.loadfile
             local sv_dofile, sv_loadstr = _G.dofile, _G.loadstring
             _G.load, _G.loadfile, _G.dofile, _G.loadstring = nil, nil, nil, nil
+
+            -- Remove the BUILD-TOOL API from the extraction window too.
+            --
+            -- mod_tool.c publishes `tool` as a GLOBAL in this VM, so without
+            -- this an app's top-level code reached tool.spawn (process
+            -- execution, bounded only by the compiler allowlist - which
+            -- includes `hull` itself), tool.write_file / remove_file / rmdir
+            -- (bounded only by the unveil set, which grants /tmp "rwcx" and
+            -- the output dir "rwc"), and the rest of the build surface. That
+            -- is strictly more authority than the loaders stripped above, so
+            -- stripping those while leaving this open was inconsistent.
+            --
+            -- Removing it costs nothing: `tool` does not exist in the RUNTIME
+            -- VM at all, so any app touching it would already fail when run,
+            -- and no user-facing stdlib module references it. This makes
+            -- extraction match runtime semantics instead of exceeding them.
+            --
+            -- The extraction machinery keeps its own capability by capturing
+            -- the function reference BEFORE the strip - a local binding is
+            -- unaffected by clearing the global.
+            local log_phase = tool.log_app_phase
+            local sv_tool = _G.tool
+            _G.tool = nil
+
+            -- Mark the window so the CLI log policy can attribute anything
+            -- the app logs to build-time extraction rather than letting it
+            -- appear as unexplained build output. Cleared on EVERY exit path
+            -- alongside the restores. No-op on a hull without it.
+            if log_phase then log_phase(true) end
             local ok, run_err = pcall(chunk)
+            if log_phase then log_phase(false) end
+            _G.tool = sv_tool
             _G.load, _G.loadfile = sv_load, sv_loadfile
             _G.dofile, _G.loadstring = sv_dofile, sv_loadstr
             -- Capture whatever app.manifest() declared, even if the chunk later
@@ -106,7 +177,13 @@ function M.extract_manifest(app_dir)
     elseif file_exists(js_entry) then
         local intends_manifest =
             (tool.read_file(js_entry) or ""):find("app%.manifest%s*%(") ~= nil
+        -- Same build-time app-evaluation window as the Lua branch above:
+        -- extract_manifest_js evaluates the app's top-level JS to reach
+        -- app.manifest(). Mark it so the app's own logging is attributed to
+        -- extraction rather than surfacing as build output.
+        if tool.log_app_phase then tool.log_app_phase(true) end
         local ok, js_json_or_err = pcall(tool.extract_manifest_js, js_entry)
+        if tool.log_app_phase then tool.log_app_phase(false) end
         if not ok then
             -- Same rule as the Lua branch: a load/import failure is fatal only
             -- when the app declares app.manifest (intended composition info).

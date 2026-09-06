@@ -5,4 +5,4 @@
 
 SH_JSON_DIR    := $(VENDDIR)/sh_json
 SH_JSON_OBJ    := $(BUILDDIR)/sh_json.o
-SH_JSON_CFLAGS := -std=c11 -O2 -w
+SH_JSON_CFLAGS := -std=c11 $(HL_OPT) -w

@@ -535,6 +535,9 @@ data.db-*
 *.key
 hull.sig
 build/
+/app
+/app.com
+/.hull/
 ]]
 
 -- ── Public API ───────────────────────────────────────────────────────

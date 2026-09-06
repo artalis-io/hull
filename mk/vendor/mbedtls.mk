@@ -20,7 +20,7 @@ MBEDTLS_OBJS   :=   # composed from libhull_feature-tls.a; not in the base objec
 else
 MBEDTLS_OBJS   := $(patsubst $(MBEDTLS_DIR)/library/%.c,$(BUILDDIR)/mbed_%.o,$(MBEDTLS_SRCS))
 endif
-MBEDTLS_CFLAGS := -std=c11 -O2 -w \
+MBEDTLS_CFLAGS := -std=c11 $(HL_OPT) -w \
 	-I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library -I$(MBEDTLS_DIR) \
 	-DMBEDTLS_CONFIG_FILE='"hull_config.h"'
 

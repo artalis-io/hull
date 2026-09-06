@@ -5,4 +5,4 @@
 
 LOG_DIR    := $(VENDDIR)/log.c
 LOG_OBJ    := $(BUILDDIR)/log.o
-LOG_CFLAGS := -std=c11 -O2 -w -DLOG_USE_COLOR
+LOG_CFLAGS := -std=c11 $(HL_OPT) -w -DLOG_USE_COLOR

@@ -259,6 +259,9 @@ js_files["tests/commands/test_count.js"] = [[test("count: smoke", () => {
 local gitignore = [[*.key
 hull.sig
 build/
+/app
+/app.com
+/.hull/
 ]]
 
 -- ── Public API ───────────────────────────────────────────────────────

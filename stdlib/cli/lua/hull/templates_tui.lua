@@ -186,6 +186,9 @@ end)
 local gitignore = [[*.key
 hull.sig
 build/
+/app
+/app.com
+/.hull/
 ]]
 
 -- ── Public API ───────────────────────────────────────────────────────

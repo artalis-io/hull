@@ -257,6 +257,8 @@ complete -c hull -n '__hull_subcommand deploy' -f -a fly        -d 'Generate fly
 # ── doctor / version ─────────────────────────────────────────────────
 
 complete -c hull -n '__hull_subcommand doctor'  -l json -d 'Machine-readable JSON output'
+complete -c hull -n '__hull_subcommand doctor'  -l tui  -d 'Interactive terminal UI'
+complete -c hull -n '__hull_subcommand doctor'  -l fix  -d 'Install missing Hull-managed prerequisites'
 complete -c hull -n '__hull_subcommand version' -l json -d 'Machine-readable JSON output'
 
 # ── update ───────────────────────────────────────────────────────────

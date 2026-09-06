@@ -73,9 +73,13 @@ static int write_blob(const char *path, const unsigned char *data, size_t len)
 int hl_build_get_platforms(const HlEmbeddedPlatform **out)
 {
 #ifdef HL_BUILD_EMBEDDED_MULTIARCH
-    if (!out)
-        return 0;
-    *out = hl_embedded_platforms;
+    /* `out` is OPTIONAL: callers that only need the COUNT (hull doctor asking
+     * "is this a multi-arch build?") pass NULL. Returning 0 for a NULL `out`
+     * made a genuine multi-arch cosmo build report as single-arch, which is
+     * what made `hull doctor` and `hull build` appear to disagree about the
+     * binary's arity. Count regardless; only the write-back is conditional. */
+    if (out)
+        *out = hl_embedded_platforms;
     /* Count entries (excluding sentinel) */
     int n = 0;
     while (hl_embedded_platforms[n].arch)

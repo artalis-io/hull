@@ -35,6 +35,8 @@
 #include "hull/embedded_platform_sig.h"
 #include "hull/platform_sig.h"
 #include "hull/release_io.h"
+#include "hull/shared/host.h"
+#include "hull/shared/cli_log.h"
 #include "hull/cap/crypto.h"
 #include "hull/signature.h"  /* HL_PLATFORM_PUBKEY_HEX */
 #include "hull/manifest_extract_file.h"  /* extract_manifest_js helper */
@@ -1463,6 +1465,67 @@ static int l_tool_platform_name(lua_State *L)
     return 1;
 }
 
+/* ── Host facts for the tool VM ────────────────────────────────────
+ *
+ * tool.platform_name() above answers "what BUILD is this hull?" and returns
+ * "cosmo" for every cosmo binary regardless of where it runs. The build tools
+ * additionally need "what HOST am I running on?", because that is what decides
+ * the produced artifact's name and how a runnable command is spelled. A cosmo
+ * hull is the same bytes on Linux, macOS and Windows, so this cannot be a
+ * build-time constant - it comes from the shared runtime detector in
+ * src/hull/shared/host.c, which is also what `hull doctor` consults, so the
+ * two surfaces can never disagree.
+ */
+
+/* tool.host_os() → "windows" | "darwin" | "linux" | "posix" */
+static int l_tool_host_os(lua_State *L)
+{
+    lua_pushstring(L, hl_host_os());
+    return 1;
+}
+
+/* tool.exe_suffix() → ".com" on Windows, "" elsewhere.
+ *
+ * The suffix a produced executable needs to be launchable on THIS host.
+ * Windows will not execute an extensionless file; ".com" is the APE
+ * convention (and how install.ps1 names hull itself). */
+static int l_tool_exe_suffix(lua_State *L)
+{
+    lua_pushstring(L, hl_host_exe_suffix());
+    return 1;
+}
+
+/* tool.render_exec(path) → the host-correct "run this" spelling.
+ *
+ * "./app" on POSIX, ".\app.com" on Windows. Neither PowerShell nor a POSIX
+ * shell searches the current directory, so a bare relative name is never a
+ * valid instruction; this is the ONE renderer every user-facing "now run it"
+ * string goes through. */
+static int l_tool_render_exec(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    char out[PATH_MAX];
+    if (hl_host_render_exec(path, out, sizeof(out)) != 0) {
+        lua_pushstring(L, path);   /* degrade to the raw path, never nil */
+        return 1;
+    }
+    lua_pushstring(L, out);
+    return 1;
+}
+
+/* tool.log_app_phase(on) - bracket execution of USER application code.
+ *
+ * `hull build` runs the app entry's top level to capture app.manifest(); the
+ * app's own log.info output is an artifact of that mechanism, not build
+ * output. Marking the window lets the CLI log policy suppress it by default
+ * and label it `[build-eval]` under --verbose, instead of it appearing
+ * unexplained in the middle of a build. See include/hull/shared/cli_log.h. */
+static int l_tool_log_app_phase(lua_State *L)
+{
+    hl_cli_log_set_app_phase(lua_toboolean(L, 1));
+    return 0;
+}
+
 /* ── tool.platform_sig_get() → table | nil ────────────────────────
  *
  * Returns the embedded signed platform manifest as a Lua table:
@@ -1705,6 +1768,10 @@ static const luaL_Reg tool_funcs[] = {
     { "blob_store_get_to",           l_tool_blob_store_get_to },
     { "blob_store_put_from",         l_tool_blob_store_put_from },
     { "platform_name",               l_tool_platform_name },
+    { "host_os",                     l_tool_host_os },
+    { "exe_suffix",                  l_tool_exe_suffix },
+    { "render_exec",                 l_tool_render_exec },
+    { "log_app_phase",               l_tool_log_app_phase },
     { "platform_sig_get",            l_tool_platform_sig_get },
     { "platform_sig_arch_hash",      l_tool_platform_sig_arch_hash },
     { "platform_pubkey",             l_tool_platform_pubkey },

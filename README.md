@@ -46,7 +46,17 @@ On **Windows** (PowerShell, no admin or Developer Mode needed):
 irm https://gethull.dev/install.ps1 | iex
 ```
 
-This installs `hull.com` to `%LOCALAPPDATA%\Programs\Hull` and adds it to your user `PATH`. See [Installing Hull on Windows](docs/windows_install.md) for options (`-Version` / `-Prefix` / `-Force` / `-DryRun` / `-NoPath` / `-Uninstall`), verification, and the one-time v0.13.0 -> v0.14.0 manual upgrade.
+This installs `hull.com` to `%LOCALAPPDATA%\Programs\Hull`, adds it to your user `PATH`, **and updates the PATH of the session you ran it in** - so with the `irm | iex` form above, `hull` works immediately, without opening a new terminal. Then:
+
+```powershell
+hull doctor          # what is ready, what is missing
+hull doctor --fix    # installs the missing Hull-managed toolchain (cosmocc)
+hull new hello; cd hello
+hull build           # produces .\app.com  (Windows needs an executable extension)
+.\app.com
+```
+
+See [Installing Hull on Windows](docs/windows_install.md) for the full five-minute path, options (`-Version` / `-Prefix` / `-Force` / `-DryRun` / `-NoPath` / `-Uninstall`), verification, and the one-time v0.13.0 -> v0.14.0 manual upgrade.
 
 Or build from source:
 

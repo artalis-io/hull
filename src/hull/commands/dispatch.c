@@ -5,12 +5,16 @@
  * means adding one line to the table and one .c/.h file.
  *
  * Global flags (--app-dir, --verbose, --json) are parsed before the
- * subcommand name and passed to handlers via HlCommandEnv.
+ * subcommand name and passed to handlers via HlCommandEnv. --verbose and
+ * --json are ALSO recognised after the subcommand, because `hull build
+ * --verbose` is what people actually type; they are detected (not consumed)
+ * so the handler still sees its own argv unchanged.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "hull/commands/dispatch.h"
+#include "hull/shared/cli_log.h"
 #include "hull/commands/keygen.h"
 #include "hull/commands/build.h"
 #include "hull/commands/verify.h"
@@ -133,10 +137,28 @@ int hl_command_dispatch(int argc, char **argv)
     if (cmd_idx >= argc)
         return -1;
 
+    /* `hull --verbose build` and `hull build --verbose` must behave the same.
+     * The pre-command scan above stops at the first non-flag, so also LOOK
+     * (without consuming) for the two global flags in the subcommand's own
+     * argv. Nothing is removed: every handler still receives the argv it
+     * always did, and the tool-mode Lua plugins already ignore unknown
+     * leading-dash arguments. */
+    for (int i = cmd_idx + 1; i < argc; i++) {
+        if (strcmp(argv[i], "--verbose") == 0)     env.verbose = 1;
+        else if (strcmp(argv[i], "--json") == 0)   env.json_output = 1;
+    }
+
     const char *name = argv[cmd_idx];
     for (const HlCommand *cmd = commands; cmd->name; cmd++) {
-        if (strcmp(name, cmd->name) == 0)
+        if (strcmp(name, cmd->name) == 0) {
+            /* CLI logging policy: terse by default (no internal file:line,
+             * no sub-WARN Hull chatter), full diagnostics under --verbose.
+             * Installed only on the SUBCOMMAND path - the `hull <app>` serve
+             * fall-through configures log.c itself in hl_serve_init_logging.
+             * See include/hull/shared/cli_log.h. */
+            hl_cli_log_init(env.verbose);
             return cmd->handler(argc - cmd_idx, argv + cmd_idx, &env);
+        }
     }
 
     return -1;

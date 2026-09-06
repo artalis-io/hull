@@ -4,7 +4,7 @@
 # ── stb_image (image decode/encode) ──────────────────────────────────
 
 STB_DIR     := $(VENDDIR)/stb
-STB_CFLAGS  := -std=c11 -O2 -w
+STB_CFLAGS  := -std=c11 $(HL_OPT) -w
 
 ifeq ($(HL_ENABLE_IMAGE),1)
 STB_OBJ     := $(BUILDDIR)/stb_impl.o
