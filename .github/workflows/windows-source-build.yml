@@ -89,8 +89,8 @@ name: Windows source build (cosmocc, -O0)
 #
 # HANG - OPEN, INTERMITTENT, NOT UNDERSTOOD.
 #   The build wedges roughly 1 run in 4: the compiler stops emitting output
-#   entirely and sits at ~0 CPU until the job cap. Two signatures captured so
-#   far, and they do NOT share a cause:
+#   entirely and accumulates no CPU. Three signatures captured so far, and they
+#   do NOT all share a cause:
 #
 #     a) miniz at -O2 (run 34035825889) - CAUSED by HL_OPT never reaching the
 #        Keel sub-make. Fixed by the -O0 shim in the probe step. Deterministic.
@@ -107,7 +107,7 @@ name: Windows source build (cosmocc, -O0)
 #        and the first hang the watchdog caught with evidence:
 #
 #          pid=5648 cc1  cpu=5.09s  dcpu=0s   <- BLOCKED, not spinning
-#          cc1 ... vendor/sqlite/sqlite3.c -o D:\_temp\msys64	mp\cchyv2rh.s
+#          cc1 ... vendor/sqlite/sqlite3.c -o <MSYS2 temp>/cchyv2rh.s
 #
 #   So the compiler accumulates NO CPU while wedged: this is an I/O block (a
 #   lock, a pipe, a temp file), not an optimizer blow-up. Three hangs now, three
