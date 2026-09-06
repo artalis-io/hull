@@ -58,6 +58,20 @@ name: Windows source build (cosmocc, -O0)
 #   It proves "the source compiles and links on Windows", nothing stronger.
 #   Optimized-build correctness stays covered by the Linux/macOS jobs in ci.yml.
 #
+#   HL_OPT DOES NOT REACH KEEL, which is why the probe installs an -O0 shim.
+#   mk/vendor/keel.mk hands Keel's sub-make CC, AR and the TLS/compress config
+#   and nothing else, so Keel compiles at its own hardcoded -O2 (its Makefile
+#   lines 32/34, plus VENDOR_CFLAGS for the miniz TUs). Run 34035825889 proved
+#   the cost: 427 TUs at -O0, 81 at -O2, then 41 minutes of silence with two
+#   -O2 miniz TUs in flight until the 45-minute cap. Two Hull-side follow-ups
+#   this exposes, both OUT OF SCOPE for this workflow but worth fixing:
+#     1. HL_OPT should propagate to the Keel sub-make rather than being forced
+#        by a CI-local shim.
+#     2. The KEEL_EXTRA_CFLAGS / KEEL_EXTRA_LDFLAGS that mk/vendor/keel.mk
+#        passes are not referenced ANYWHERE in Keel's tree, so Hull's LTO and
+#        CFI flags are silently discarded on EVERY platform, not just here.
+#     Keel exposes no opt or append hook today, so both need a Keel-side knob.
+#
 # HL_ENABLE_WASM=0: WAMR under cosmocc-on-Windows is unproven and would make a
 # "quick" job slow and flaky. The WASM surface is covered on Linux in ci.yml.
 #
@@ -160,6 +174,40 @@ jobs:
           # `make` here. cosmocc is unique to that directory, so appending
           # costs nothing.
           export PATH="$PATH:$PWD/cosmo/bin"
+
+          # FORCE THE OPT LEVEL ONTO KEEL TOO.
+          #
+          # HL_OPT=-O0 reaches Hull's own TUs and Hull's vendored ones, but NOT
+          # Keel: mk/vendor/keel.mk hands its sub-make CC, AR and the TLS /
+          # compress config, and nothing else, so Keel builds at its own
+          # hardcoded -O2 (Makefile lines 32/34, and VENDOR_CFLAGS for miniz).
+          # Run 34035825889 died exactly there - 427 TUs at -O0, 81 at -O2, then
+          # 41 minutes of total silence with two -O2 miniz TUs in flight
+          # (compress_miniz.c, decompress_miniz.c) until the 45-minute cap. That
+          # is the documented cosmocc wedge, and -O0 is the whole reason this
+          # job is viable, so Keel has to get it too.
+          #
+          # Keel exposes no opt knob and no append hook - the KEEL_EXTRA_CFLAGS
+          # Hull passes is not referenced anywhere in Keel's tree - and its
+          # CFLAGS/VENDOR_CFLAGS are plain `=`, so the only lever that does not
+          # mean restating all of Keel's flags is the compiler itself. gcc takes
+          # the LAST -O, so a wrapper appending ours after everything wins.
+          #
+          # It MUST be named `cosmocc`: Keel sets COSMO_FAT (the dual-arch
+          # .aarch64 build) only for `ifeq ($(CC),cosmocc)` exactly, so any
+          # other name silently drops half the fat APE. Hence a shadowing
+          # wrapper first on PATH rather than a differently-named CC.
+          mkdir -p "$PWD/cosmo/wrap"
+          { echo '#!/bin/sh'
+            echo "exec \"$PWD/cosmo/bin/cosmocc\" \"\$@\" -O0"
+          } > "$PWD/cosmo/wrap/cosmocc"
+          chmod +x "$PWD/cosmo/wrap/cosmocc"
+          export PATH="$PWD/cosmo/wrap:$PATH"
+          resolved=$(command -v cosmocc)
+          case "$resolved" in
+            */cosmo/wrap/cosmocc) echo "cosmocc -O0 shim active: $resolved" ;;
+            *) echo "FAIL cosmocc did not resolve to the -O0 shim: $resolved"; exit 1 ;;
+          esac
 
           echo "make candidates:"; { type -a make 2>/dev/null || echo "(none)"; } | sed 's/^/  /'
           MAKE_BIN=$(command -v make || true)
@@ -294,7 +342,11 @@ jobs:
           set -euo pipefail
           # cosmo/bin APPENDED - see the probe step on why it must not shadow
           # make. MAKE_BIN and AR both arrive from the probe via $GITHUB_ENV.
-          export PATH="$PATH:$PWD/cosmo/bin"
+          # cosmo/wrap PREPENDED: it holds the -O0 shim the probe built (see
+          # there for why Keel needs it). cosmo/bin APPENDED so its bundled
+          # APE make cannot shadow MSYS2's.
+          export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
+          test -x cosmo/wrap/cosmocc || { echo "FAIL cosmocc -O0 shim missing"; exit 1; }
           # HL_OPT is the Makefile knob that routes the optimization level
           # through Hull's OWN TUs *and* every vendored one (quickjs/lua/sqlite
           # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
