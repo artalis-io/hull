@@ -72,6 +72,13 @@ name: Windows source build (cosmocc, -O0)
 #        CFI flags are silently discarded on EVERY platform, not just here.
 #     Keel exposes no opt or append hook today, so both need a Keel-side knob.
 #
+#   READING THE LOG: Keel's compile lines still ECHO -O2, because make echoes
+#   the recipe and the shim appends -O0 at exec time. The effective level is
+#   -O0; `grep -c -- -O2` on the log is therefore NOT evidence the shim failed.
+#   The evidence that it worked is the build COMPLETING (~2.5 min in run
+#   34038376368) where it previously went silent for 41 minutes at the same
+#   miniz TUs.
+#
 # HL_ENABLE_WASM=0: WAMR under cosmocc-on-Windows is unproven and would make a
 # "quick" job slow and flaky. The WASM surface is covered on Linux in ci.yml.
 #
