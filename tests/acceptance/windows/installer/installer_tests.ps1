@@ -151,6 +151,93 @@ try {
         Check ((Get-HullUserPathRaw).Kind -eq $snap.Kind) "registry value kind preserved"
     } finally { Set-HullUserPathRaw $snap.Value $snap.Kind }
 
+    # --- CURRENT-SESSION PATH (regression) -----------------------------------
+    #
+    # Persisting HKCU\Environment only reaches FUTURE sessions: PowerShell
+    # reads its environment at start and ignores the WM_SETTINGCHANGE
+    # broadcast. Before this, `irm ... | iex` left `hull` unresolvable until
+    # the user opened a new terminal. These cover the process-PATH update in
+    # isolation - it is deliberately NOT part of the install transaction, so
+    # it must never touch the registry.
+    Note "## current-session PATH"
+    $psnap = Get-HullUserPathRaw
+    $savedEnvPath = $env:PATH
+    try {
+        $sdir = Join-Path $work 'sessiondir'
+        $env:PATH = 'C:\some\other\dir'
+
+        Check (-not (Test-HullInProcessPath $sdir)) "session PATH starts without the install dir"
+        Check (Update-HullSessionPath $sdir) "session update reports success"
+        Check (Test-HullInProcessPath $sdir) "install dir is on this process's PATH"
+        Check ($env:PATH.StartsWith('C:\some\other\dir')) "the pre-existing session PATH is preserved"
+
+        # Repeated installer runs must not grow PATH.
+        $before = $env:PATH
+        Check (Update-HullSessionPath $sdir) "a second update still reports success"
+        Check ($env:PATH -eq $before) "a second update adds no duplicate entry"
+
+        # Normalized dedup: an equivalent but differently-spelled entry counts
+        # as present (same rule as the persistent PATH).
+        $env:PATH = ($sdir.ToLower() -replace '\\', '/') + '\;C:\z'
+        Check (Test-HullInProcessPath $sdir) "an equivalent differently-spelled entry is recognised"
+        $before = $env:PATH
+        [void](Update-HullSessionPath $sdir)
+        Check ($env:PATH -eq $before) "no duplicate is added for an equivalent entry"
+
+        # Empty and malformed inputs.
+        $env:PATH = ''
+        Check (Update-HullSessionPath $sdir) "update succeeds against an empty PATH"
+        Check ($env:PATH -eq $sdir) "an empty PATH becomes exactly the install dir (no leading ;)"
+        Check (-not (Update-HullSessionPath '')) "an empty dir is refused"
+
+        # A path with spaces and non-ASCII characters round-trips.
+        $env:PATH = 'C:\a'
+        $uni = Join-Path $work 'ses sion dir'
+        Check (Update-HullSessionPath $uni) "a path with spaces is accepted"
+        Check (Test-HullInProcessPath $uni) "a path with spaces is found back"
+
+        # The session update must NOT write the registry: it is not part of
+        # the transactional install state.
+        Check (((Get-HullUserPathRaw).Value -ceq $psnap.Value) -and `
+               ((Get-HullUserPathRaw).Kind -eq $psnap.Kind)) `
+              "session PATH update leaves the persistent user PATH untouched"
+    } finally {
+        $env:PATH = $savedEnvPath
+        Set-HullUserPathRaw $psnap.Value $psnap.Kind
+    }
+
+    # --- session-PATH MESSAGING (must never over-claim) ----------------------
+    #
+    # `irm | iex` runs the script text in the caller's session, so the
+    # $env:PATH we set IS theirs and we can say so. Run from a FILE we cannot
+    # tell `.\install.ps1` (same process, propagates) from
+    # `powershell -File install.ps1` (separate process, does not) - verified:
+    # $PSCommandPath, $MyInvocation.MyCommand.Path and InvocationName are
+    # identical in both. So the from-file message must NOT claim the session is
+    # ready, and every non-certain path must print a pasteable command.
+    Note "## session PATH messaging"
+    $mdir = 'C:\Users\Someone\AppData\Local\Programs\Hull'
+    $expectCmd = '$env:PATH = "' + $mdir + ';$env:PATH"'
+
+    $m = (Show-HullPathResult $mdir $true $false $true  6>&1 | Out-String)
+    Check ($m -match 'ready in this PowerShell session') "caller-session mode confirms the session is ready"
+
+    $m = (Show-HullPathResult $mdir $true $false $false 6>&1 | Out-String)
+    Check ($m -notmatch 'ready in this PowerShell session') "from-file mode does NOT claim the session is ready"
+    Check ($m.Contains($expectCmd)) "from-file mode prints the exact pasteable command"
+
+    $m = (Show-HullPathResult $mdir $false $true $true   6>&1 | Out-String)
+    Check ($m -match 'NoPath') "-NoPath explains why PATH was untouched"
+    Check ($m.Contains($expectCmd)) "-NoPath still prints the exact command"
+
+    $m = (Show-HullPathResult $mdir $false $false $true  6>&1 | Out-String)
+    Check ($m.Contains($expectCmd)) "a failed session update prints the exact command"
+    Check ($m -notmatch 'restart your shell') "never falls back to 'restart your shell'"
+
+    # The detector itself: dot-sourced here, so $PSCommandPath is set and the
+    # answer must be the conservative one.
+    Check (($null -ne (Get-Command Test-HullInCallerSession -ErrorAction SilentlyContinue))) "the invocation-mode detector exists"
+
     # --- install transaction (binary + PATH + marker, all-or-nothing) ---------
     Note "## install transaction rollback"
     $tdir = Join-Path $work 'txn'; New-Item -ItemType Directory -Path $tdir -Force | Out-Null

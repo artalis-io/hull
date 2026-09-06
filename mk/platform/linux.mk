@@ -6,7 +6,7 @@
 # original ifeq(Linux)/ifndef(COSMO) guard is no longer needed here.
 
 PLEDGE_DIR := $(VENDDIR)/pledge
-PLEDGE_CFLAGS := -std=c11 -O2 -w -D_GNU_SOURCE -I$(PLEDGE_DIR) $(DEPFLAGS)
+PLEDGE_CFLAGS := -std=c11 $(HL_OPT) -w -D_GNU_SOURCE -I$(PLEDGE_DIR) $(DEPFLAGS)
 
 # musl (Alpine) omits the glibc-only __O_TMPFILE macro that pledge-linux.c
 # references - purely as the numeric seccomp-mask constant 020000000 (the

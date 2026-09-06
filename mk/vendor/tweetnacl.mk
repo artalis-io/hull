@@ -5,4 +5,4 @@
 
 TWEETNACL_DIR    := $(VENDDIR)/tweetnacl
 TWEETNACL_OBJ    := $(BUILDDIR)/tweetnacl.o
-TWEETNACL_CFLAGS := -std=c11 -O2 -w
+TWEETNACL_CFLAGS := -std=c11 $(HL_OPT) -w

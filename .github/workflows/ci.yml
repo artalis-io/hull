@@ -427,6 +427,15 @@ jobs:
         timeout-minutes: 2
         run: make e2e-ca-bundle
 
+      # First-run developer experience: doctor's state classification +
+      # platform-aware advice, CLI logging hygiene, and the POSIX half of the
+      # build-artifact contract (default output name unchanged, one shippable
+      # binary in the app root). The Windows half runs on a real Windows
+      # runner in cosmocc-windows-e2e.yml.
+      - name: Onboarding / first-run E2E tests
+        timeout-minutes: 3
+        run: make e2e-onboarding
+
       - name: Update E2E tests
         timeout-minutes: 2
         run: make e2e-update

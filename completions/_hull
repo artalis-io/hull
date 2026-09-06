@@ -261,7 +261,14 @@ _hull() {
                     fi
                     ;;
 
-                doctor|version)
+                doctor)
+                    _arguments \
+                        '--json[Machine-readable JSON output]' \
+                        '--tui[Interactive terminal UI]' \
+                        '--fix[Install missing Hull-managed prerequisites]'
+                    ;;
+
+                version)
                     _arguments '--json[Machine-readable JSON output]'
                     ;;
 

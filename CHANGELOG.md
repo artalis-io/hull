@@ -8,6 +8,95 @@ release-artifact layout).
 
 ## [Unreleased]
 
+Windows first-run developer experience. Installing Hull, scaffolding an app,
+building it, and launching the result now works end to end on a clean Windows
+box without knowing anything about PowerShell PATH refresh, Cosmopolitan
+toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
+
+### Added
+
+- **`hull doctor --fix`.** Installs the missing *Hull-managed* prerequisite
+  doctor just reported - on a cosmo build, `hull tools install cosmocc`. It only
+  ever runs a command doctor would have printed, through the ordinary
+  `hull tools install` path (same Ed25519-signed-manifest trust chain, same
+  `~/.hull/tools/` destination), never touches PATH / the registry / system
+  directories, and never installs optional capabilities. Mutually exclusive with
+  `--json`.
+- **`hull build --keep-build-artifacts`.** Leaves cosmocc's debug sidecars beside
+  the produced binary instead of relocating them (see below).
+- **Host-aware output rendering** (`src/hull/shared/host.c`, exposed to the tool
+  VM as `tool.host_os()` / `tool.exe_suffix()` / `tool.render_exec()`). One place
+  owns the executable suffix a host requires and how a runnable command is
+  spelled, instead of per-platform string literals scattered through the CLI.
+- **`hull doctor --json`** gains `host_os`, `exe_suffix`, `build_compiler`,
+  `build_compiler_required`, `fix_command`, and `ca_bundle.effective` /
+  `ca_bundle.ok`.
+
+### Changed
+
+- **`hull build` names the produced binary for the host that must run it.** The
+  default output is now `app.com` on Windows (`app` on Linux/macOS, unchanged).
+  Windows will not execute an extensionless file, so the APE previously written
+  as `app` could not be started at all until it was manually renamed. An explicit
+  `-o` / `--output` is still honoured verbatim.
+- **A normal build leaves one obvious shippable executable in the app root.**
+  cosmocc's debug sidecars (`<base>.com.dbg`, `<base>.aarch64.elf`) move to
+  `<output dir>/.hull/build/`. The move happens after the post-link symbol
+  verification and is non-fatal; signing, verification, and inspection all
+  address the output path and are unaffected.
+- **`hull build` prints how to start the binary**, spelled for the host
+  (`./app` / `.\app.com`) - neither PowerShell nor a POSIX shell searches the
+  current directory.
+- **`hull doctor` gives platform-aware, actionable guidance.** It distinguishes
+  required-and-missing from optional-and-absent from working-fallback, asks for
+  the compiler *this* binary can actually link with (cosmocc on a cosmo build,
+  cc/gcc/clang on a native one), recommends Hull's own toolchain bootstrap over
+  an external package manager where one exists, names a Windows route for the
+  optional WASM source toolchain, and presents composable features via
+  `hull feature install` rather than a Makefile. `make ...` now appears only
+  labelled as the developer/source-build route.
+- **An absent system CA store is no longer rendered as a failure** when the
+  embedded Mozilla bundle is present - that is the designed fallback and the
+  normal state on Windows.
+- **Default CLI output no longer exposes Hull's own C source coordinates.**
+  `hull new` / `hull build` and friends previously printed lines like
+  `INFO src/hull/sandbox_tool.c:243: [sandbox] tool mode applied`, because
+  nothing configured the logger on the CLI path. Warnings and errors still
+  print; `--verbose` restores every level plus `file:line`. `--verbose` and
+  `--json` are now recognised after the subcommand as well as before it.
+- **`install.ps1` updates the PATH of the session it runs in**, so `irm ... |
+  iex` leaves `hull` immediately resolvable with no new terminal. When the
+  installer cannot prove it reached the caller's shell (run from a file, where a
+  same-process `.\install.ps1` is indistinguishable from a separate-process
+  `powershell -File`), it prints the exact one-line command instead of advising
+  a restart.
+- Scaffolded `.gitignore` files now ignore the built binary (`/app`,
+  `/app.com`) and Hull's per-project scratch directory (`/.hull/`).
+
+### Fixed
+
+- **`hull doctor` could not find any compiler on Windows.** Its PATH search split
+  on `:` and joined with `/`, which shreds the drive letters in a `;`-separated
+  Windows PATH, so every probe reported "not found" regardless of what was
+  installed. It now splits on the host separator and also tries the `.exe` /
+  `.com` forms.
+- **`hull doctor` reported a multi-arch build as `single-arch`.**
+  `hl_build_get_platforms()` returned 0 whenever its optional out-parameter was
+  NULL, which is how doctor called it. This is what made doctor's "single-arch"
+  and `hull build`'s "dual-arch" look contradictory; both messages now also say
+  which layer they describe (platform archives vs. the APE link).
+- **`hull doctor` could report `hull build  ready` for a build that then failed
+  at the link step** - a cosmo hull with a stray gcc on PATH. Readiness now
+  requires the compiler that binary can actually link with, matching
+  `hl_driver_resolve_native()`.
+- **An app's own top-level logging no longer pollutes build output.**
+  `hull build` executes the app entry to capture `app.manifest()` (it is a call,
+  not static data, and it decides which feature archives get composed). That
+  window is now explicitly marked: the app's log output is suppressed by default
+  and labelled `[build-eval]` under `--verbose`. The window's existing bounds -
+  the kernel sandbox, stripped dynamic-code loaders, no-op capability stubs,
+  top-level only, once per process - are now documented at the call site.
+
 ## [0.14.0] - 2026-08-27
 
 Windows stabilization. A produced Cosmopolitan APE web app now serves on Windows

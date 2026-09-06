@@ -398,6 +398,12 @@ local function main()
     end
     out_name = out_name:gsub("[^%w._-]", "_")
     if out_name == "app" then out_name = "app_bin" end
+    -- The ejected Makefile links an APE with cosmocc, and Windows will not
+    -- execute an extensionless file - so the generated OUTPUT carries the
+    -- host's executable suffix (".com" on Windows, "" everywhere else, which
+    -- keeps the POSIX name byte-identical to before). Same single source of
+    -- truth as `hull build`: src/hull/shared/host.c.
+    if tool.exe_suffix then out_name = out_name .. tool.exe_suffix() end
 
     -- Create output structure
     local dir = opts.output
@@ -490,10 +496,15 @@ local function main()
         print("  " .. dir .. "/app/" .. rel)
     end
     print("")
+    -- Spell the run command for THIS host: "./x" on POSIX, ".\x.com" on
+    -- Windows. Neither shell searches the current directory, so a bare name
+    -- would not be a runnable instruction.
+    local run_cmd = tool.render_exec and tool.render_exec(out_name)
+                    or ("./" .. out_name)
     print("Next steps:")
     print("  cd " .. dir)
     print("  make")
-    print("  ./" .. out_name)
+    print("  " .. run_cmd)
 end
 
 -- The tool dispatcher (src/hull/tool.c) invokes the returned main() only when

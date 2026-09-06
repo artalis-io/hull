@@ -71,23 +71,27 @@ end
 
 -- Recommendation summary in the bottom-right based on ready state.
 local function ready_message(d)
-    -- d.compilers is an array of {name, path}; d.platform_embedded
-    -- is "multi-arch"/"single-arch"/"none". The hull binary returns
-    -- 0 if both (platform != none AND any compiler), per
-    -- doctor.c::hl_cmd_doctor.
-    local has_compiler = false
-    for _, c in ipairs(d.compilers or {}) do
-        if c.path then has_compiler = true; break end
-    end
-    local has_platform = d.platform_embedded and d.platform_embedded ~= "none"
-    if has_platform and has_compiler then
+    -- Read the verdict the C layer already computed (`hull_build`) rather than
+    -- re-deriving it. "Any compiler in PATH" is NOT the rule: a cosmo hull can
+    -- only link with cosmocc, so a stray gcc used to make this pane claim
+    -- "ready" for a build that then failed at the link step. doctor.c is the
+    -- single source of truth; `fix_command` carries the actionable next step
+    -- for the host we are actually on.
+    local state = d.hull_build or "ready"
+    if state == "ready" then
         return "ready", "hull build is ready end-to-end."
-    elseif not has_platform then
+    elseif state == "no-platform" then
         return "no-platform",
                "no embedded platform library. Build with `make EMBED_PLATFORM=1`."
     else
+        local need = d.build_compiler_required or "a C compiler"
+        if d.fix_command then
+            return "no-compiler",
+                   "no usable C compiler (needs " .. need .. "). Fix: "
+                   .. d.fix_command
+        end
         return "no-compiler",
-               "no C compiler in PATH. Install cc / gcc / clang or use the embedded TCC."
+               "no usable C compiler (needs " .. need .. ")."
     end
 end
 
@@ -162,7 +166,17 @@ local function render(t, d, last_action, palette)
     t:style({ bold = true }); t:print(1, y, "CA bundle"); t:style({})
     y = y + 1
     local cab = d.ca_bundle or {}
-    row(t, 3, y, "system", cab.system ~= nil, cab.system or "not found", palette)
+    -- An absent SYSTEM store is not a failure when the embedded bundle is
+    -- present - that is the designed fallback and the normal state on
+    -- Windows. Mark the row OK in that case and say which store is in use, so
+    -- a healthy install never renders as broken. `ok` is false only when
+    -- NEITHER store exists.
+    local sys_ok  = (cab.system ~= nil) or (cab.embedded and true or false)
+    local sys_txt = cab.system
+                    or (cab.embedded
+                        and "none on this host - using the embedded bundle"
+                        or "not found")
+    row(t, 3, y, "system", sys_ok, sys_txt, palette)
     y = y + 1
     row(t, 3, y, "embedded",
         cab.embedded,

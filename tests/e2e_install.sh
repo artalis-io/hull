@@ -101,6 +101,9 @@ BASH_OUT=$(bash -c '
     COMP_WORDS=(hull agent ""); COMP_CWORD=2; _hull; echo "agent=${COMPREPLY[*]}"
     # "hull deploy <TAB>"
     COMP_WORDS=(hull deploy ""); COMP_CWORD=2; _hull; echo "deploy=${COMPREPLY[*]}"
+    # "hull doctor <TAB>" - doctor grew --tui/--fix and split from version
+    COMP_WORDS=(hull doctor ""); COMP_CWORD=2; _hull; echo "doctor=${COMPREPLY[*]}"
+    COMP_WORDS=(hull version ""); COMP_CWORD=2; _hull; echo "version=${COMPREPLY[*]}"
 ')
 
 assert_contains "complete \"hull bu\" → build"            "$BASH_OUT" "bu=build"
@@ -108,6 +111,8 @@ assert_contains "complete \"hull build --com\" → --compiler" "$BASH_OUT" "com=
 assert_contains "complete \"hull build --compiler=t\" → tcc" "$BASH_OUT" "ctcc=tcc"
 assert_contains "complete \"hull agent \" → subcommands"   "$BASH_OUT" "agent=routes db request status errors test context migrate deploy"
 assert_contains "complete \"hull deploy \" → targets"      "$BASH_OUT" "deploy=dockerfile systemd fly"
+assert_contains "complete \"hull doctor \" → --json --tui --fix" "$BASH_OUT" "doctor=--json --tui --fix"
+assert_contains "complete \"hull version \" → --json only"       "$BASH_OUT" "version=--json"
 
 echo ""
 echo "── Summary ──"

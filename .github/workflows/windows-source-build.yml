@@ -1,0 +1,156 @@
+name: Windows source build (cosmocc, -O0)
+
+# Proves Hull can be BUILT FROM SOURCE on a stock Windows box with nothing but
+# the SHA-pinned cosmocc toolchain - no WSL, no Visual Studio, no MSYS2 install.
+#
+# WHAT THIS IS NOT: it does not produce a shippable artifact. Every released
+# `hull-cosmo` is built on Linux (release.yml `build-cosmo`, runs-on
+# ubuntu-24.04), and that stays true. This job exists to catch SOURCE-level
+# breakage that only shows up when cosmocc compiles Hull on Windows, which no
+# other job covers - `cosmocc-windows-e2e.yml` builds the hull binary on Linux
+# and only *consumes* it on Windows.
+#
+# WHY -O0 (HL_OPT=-O0), and what that costs:
+#   cosmocc's GCC HANGS on Windows compiling Hull's largest translation units -
+#   measured on vendor/quickjs/quickjs.c and src/hull/serve.c, ~0 CPU
+#   indefinitely, not an ICE. At -O0 quickjs.c compiles in ~3s. So -O0 is not a
+#   speed compromise here, it is the only level that completes at all.
+#   The tradeoff is real and worth stating: this job CANNOT catch bugs that
+#   only appear under optimization (strict aliasing, UB that manifests at -O2).
+#   It proves "the source compiles and links on Windows", nothing stronger.
+#   Optimized-build correctness stays covered by the Linux/macOS jobs in ci.yml.
+#
+# HL_ENABLE_WASM=0: WAMR under cosmocc-on-Windows is unproven and would make a
+# "quick" job slow and flaky. The WASM surface is covered on Linux in ci.yml.
+#
+# Non-required. If it proves flaky, move it to nightly.yml rather than letting
+# it block PRs - a hang-prone job on the PR path is worse than no job.
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# TRIGGER: workflow_dispatch ONLY, deliberately, for its first landing.
+#
+# Two of this job's assumptions cannot be verified without a GitHub runner:
+# that `choco install make` yields a make Git Bash can drive, and that Git
+# Bash's /bin/sh satisfies cosmocc's #!/bin/sh driver (it does under MSYS2
+# locally, which is suggestive, not proof). Wiring an unproven job to
+# `pull_request` would make its first red run indistinguishable from a real
+# regression in the PR that introduces it.
+#
+# Prove it by dispatching, THEN switch to the path-filtered pull_request
+# trigger below in a follow-up:
+#
+#   pull_request:
+#     paths:
+#       - 'Makefile'
+#       - 'mk/**'
+#       - 'src/hull/serve.c'
+#       - 'src/hull/serve_cli.c'
+#       - 'src/hull/wasm_weakstub.c'
+#       - 'src/hull/http_weakstub.c'
+#       - 'src/hull/image_weakstub.c'
+#       - 'src/hull/shared/host.c'
+#       - 'src/hull/shared/cli_log.c'
+#       - '.github/workflows/windows-source-build.yml'
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Same pin as cosmocc-bbox-probe.yml / cosmocc-windows-e2e.yml. Keep in step.
+  COSMOCC_VERSION: 4.0.2
+  COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+
+jobs:
+  windows-source-build:
+    name: build hull.com from source on Windows (cosmocc, HL_ENABLE_WASM=0)
+    runs-on: windows-latest
+    # Hard cap: cosmocc CAN wedge with ~0 CPU (that is the whole reason for
+    # -O0). Without this a hang burns a runner for the full 6h default.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: recursive   # vendor/keel is required to link
+
+      # cosmocc ships as a zip of APEs; SHA-pinned, same acquisition as the
+      # sibling cosmocc workflows.
+      - name: Fetch + verify cosmocc
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          $h = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: got $h" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo
+          Write-Host "cosmocc extracted"
+
+      # windows-latest has no POSIX make. Git Bash (the `bash` shell below)
+      # supplies /bin/sh, which cosmocc's #!/bin/sh driver needs; make itself
+      # comes from Chocolatey, which is preinstalled on the runner image.
+      - name: Install GNU make
+        shell: pwsh
+        run: |
+          choco install make --no-progress -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "choco install make failed" }
+
+      - name: Toolchain probe (fail early + leave evidence in the log)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/cosmo/bin:$PATH"
+          echo "make    : $(command -v make || echo MISSING)"; make --version | head -1
+          echo "sh      : $(command -v sh || echo MISSING)"
+          echo "cosmocc : $(command -v cosmocc || echo MISSING)"; cosmocc --version | head -1
+          # cosmocc's driver is a #!/bin/sh script - prove it can actually run
+          # and produce a working APE before committing to a 600-recipe build.
+          printf '#include <stdio.h>\nint main(void){puts("APE-OK");return 0;}\n' > /tmp/h.c
+          cosmocc -O0 -o /tmp/h.com /tmp/h.c
+          test "$(/tmp/h.com)" = "APE-OK"
+          echo "cosmocc produces a runnable APE on this host: OK"
+
+      - name: Build hull from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/cosmo/bin:$PATH"
+          # HL_OPT is the Makefile knob that routes the optimization level
+          # through Hull's OWN TUs *and* every vendored one (quickjs/lua/sqlite
+          # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
+          make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+          ls -la build/hull
+
+      # Compiling is necessary but not sufficient - a binary that cannot run is
+      # not a successful build. Assert it executes and reports Windows-correct
+      # facts (these come from src/hull/shared/host.c).
+      - name: Verify the produced binary runs and is Windows-aware
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/hull version
+          json=$(./build/hull doctor --json || true)
+          echo "$json"
+          for kv in '"host_os":"windows"' '"exe_suffix":".com"' '"build_compiler_required":"cosmocc"'; do
+            case "$json" in
+              *"$kv"*) echo "  ok  $kv" ;;
+              *)       echo "  FAIL expected $kv"; exit 1 ;;
+            esac
+          done
+          # An absent system CA store must NOT read as broken on Windows: the
+          # embedded Mozilla bundle is the designed fallback.
+          case "$json" in
+            *'"ok":true'*) echo "  ok  HTTPS trust store reported usable" ;;
+            *) echo "  FAIL doctor reports no usable HTTPS trust store"; exit 1 ;;
+          esac
+
+      - name: Upload the produced APE (diagnostic only, never released)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: hull-windows-source-build
+          path: build/hull
+          if-no-files-found: warn
+          retention-days: 7

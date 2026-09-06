@@ -1123,14 +1123,47 @@ Table-driven dispatcher in `src/hull/commands/dispatch.c`. 25 commands:
 ```
 hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | tools | flavor | feature | cache | sign-release | verify-release | help
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH
-Global flags: --version / -v (equivalent to hull version), --help / -h (equivalent to hull help)
+Global flags: --version / -v (equivalent to hull version), --help / -h (equivalent to hull help), --verbose, --json, --app-dir
 ```
+
+**Host-aware output (`src/hull/shared/host.c`).** One leaf module owns every
+per-host fact a user-facing string depends on: `hl_host_is_windows()` (compile-
+time on a native build; an environment probe on a cosmo APE, which is the only
+build that reaches Windows), `hl_host_exe_suffix()` (`".com"` on Windows, `""`
+elsewhere), `hl_host_render_exec()` (`./app` vs `.\app.com`), and
+`hl_host_find_in_path()` (splits PATH on the HOST separator - `;` on Windows -
+and tries the `.exe`/`.com` forms there). Exposed to the tool VM as
+`tool.host_os()` / `tool.exe_suffix()` / `tool.render_exec()`. Every "now run
+it" string routes through `render_exec` rather than hard-coding `./x`: neither
+PowerShell nor a POSIX shell searches the current directory, so a bare relative
+name is never a runnable instruction.
+
+**CLI logging (`src/hull/shared/cli_log.c`).** `hull <subcommand>` and the
+`hull <app>` serve path have different audiences, so they configure rxi/log.c
+separately. `hl_cli_log_init()` is installed by the dispatcher for subcommands
+only (serve.c owns its own callback in `hl_serve_init_logging`). Default
+policy: Hull-internal records (a C `__FILE__`) print only at WARN and above and
+never with `file:line`; script records (a `.lua`/`.js` chunk name) keep INFO so
+`hull test` still shows what the app logged; records emitted inside the
+build-time app-evaluation window are suppressed. `--verbose` restores every
+level, `file:line`, and tags app-phase records `[build-eval]`. `--verbose` and
+`--json` are recognised BOTH before and after the subcommand (`hull build
+--verbose` is what people type) and are detected without being consumed, so
+handlers still see their own argv unchanged.
 
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
 
 **`hull init [dir] [--runtime lua|js]`**. Initialize a hull project in-place. Like `git init`: creates missing files (`app.lua`, `tests/`, `migrations/`, `.gitignore`) without touching existing ones. Detects existing runtime from `app.lua`/`app.js` presence. Implemented as a Lua tool module (`stdlib/cli/lua/hull/init.lua`).
 
-**`hull doctor [--json]`**. Environment check for distribution readiness. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), which system C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH (used only for `--compiler=system`, `--with=` features, and cosmo/APE targets - the default `hull build` emit path needs no compiler), and a **Caches** section listing every registered cache kind with status / entries / size / on-disk path (sourced from `hl_cache_registry()` - the same registry that powers `hull cache list`, so doctor and the cache subcommand always agree). Surfaces an active `HULL_CACHE_DIR` override when set. Exits 0 only when `hull build` is fully ready (platform embedded AND at least one compiler available). Pure C implementation (`src/hull/commands/doctor.c`). `--json` includes a `"caches"` array and a `"hull_cache_dir"` field for machine-readable output.
+**`hull doctor [--json] [--tui] [--fix]`**. Environment check for distribution readiness, and Hull's ONBOARDING surface. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), which system C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH (used only for `--compiler=system`, `--with=` features, and cosmo/APE targets - the default `hull build` emit path needs no compiler), and a **Caches** section listing every registered cache kind with status / entries / size / on-disk path (sourced from `hl_cache_registry()` - the same registry that powers `hull cache list`, so doctor and the cache subcommand always agree). Surfaces an active `HULL_CACHE_DIR` override when set. Pure C implementation (`src/hull/commands/doctor.c`). `--json` includes a `"caches"` array and a `"hull_cache_dir"` field for machine-readable output.
+
+Doctor distinguishes **four** states rather than collapsing everything absent into a failure: `✓` present, `✗` REQUIRED and missing (has a fix), `○` optional and absent (nothing is broken), `↳` a system facility is absent but a working FALLBACK is active. The last one exists because an absent SYSTEM CA store is the normal, healthy state on Windows - the embedded Mozilla bundle is the designed fallback, so it is reported as such, and only "neither store" is an error.
+
+**Readiness is compiler-SPECIFIC, not "any compiler".** A cosmo hull (the build that reaches Windows) embeds cosmo-format platform archives, so only `cosmocc` links a working APE; `cc`/`gcc`/`clang` would emit ELF/Mach-O. A native hull is the mirror image. `doctor_build_compiler()` mirrors the preference order in `hl_driver_resolve_native()` (`src/hull/compiler.c`), so doctor's verdict and `hull build`'s behaviour agree; irrelevant compilers render as `○ not used by this hull` instead of three red crosses. Exit 0 iff the platform library is embedded AND the compiler THIS binary can link with is present.
+
+**Hints are platform-aware.** When a Hull-managed fix exists, doctor recommends it over an external package manager - on a cosmo hull that is `hull tools install cosmocc`, which is what makes Windows self-sufficient. `--fix` runs exactly that: it only ever executes a command doctor would have printed, through the ordinary `hull tools install` path (same Ed25519-signed-manifest trust chain, same `~/.hull/tools/` destination), never touches PATH/registry/system directories, and never installs OPTIONAL capabilities (wamrc, gpu) - those are choices, not repairs. `--fix` is mutually exclusive with `--json`. Optional features name Hull-native routes first (`hull feature install gpu` + `hull build --with=gpu`); a `make ...` line appears only labelled as the developer/source-build route, never as a release user's only instruction.
+
+`--json` additionally carries `host_os` (the host this binary is RUNNING on, distinct from `platform`, which is `"cosmo"` for every cosmo build), `exe_suffix`, `build_compiler`, `build_compiler_required`, `fix_command`, and `ca_bundle.effective` / `ca_bundle.ok`.
 
 **`hull build --compiler=<backend>`**. Select how `hull build` produces the app binary. **By default `hull build` is compiler-free**: it emits `app_registry.o` directly via the object emitter (`obj_emit`) and links, needing no C compiler at all. `--compiler=system` (or an explicit compiler path) opts into a system `cc`/`gcc`/`clang` instead; `--with=` features and cosmo/APE targets fall back to the system compiler automatically (they can't go through the emit path). Passing `--compiler=<name>` (e.g. `--compiler=tcc`) treats `<name>` as a plain system compiler resolved from `$PATH` - a user's own `tcc` on `$PATH` still works this way, but tcc is no longer a Hull-provided, vendored, or installable tool. The compiler abstraction uses `HlCompilerVtable` (`include/hull/compiler.h`); the system backend lives in `src/hull/compiler.c`.
 
@@ -1235,6 +1268,33 @@ bundled QuickJS tool session (never the app runtime), not in C. Tests:
 **`hull compute check <name>`**. Validate that `compute/<name>.wasm` has the correct WASM magic, has version 1, and actually loads in WAMR with a trivial input. The "yes, this module can run inside Hull" gate.
 
 **`hull compute refresh-header [name]`**. Overwrite the per-module `compute/<name>/hull_compute.h` with the canonical version embedded in the `hull` binary. With no name, refreshes every discovered module. Run after upgrading Hull when a new ABI helper has been added.
+
+### `hull build` output naming and artifact hygiene
+
+**The produced binary is named for the host that must run it.** The default
+output is `app_dir/app` + `hl_host_exe_suffix()`, i.e. `app` on Linux/macOS
+(unchanged) and **`app.com` on Windows**. Windows will not execute an
+extensionless file, and `.com` is the Cosmopolitan APE convention - the same
+reason `install.ps1` installs Hull itself as `hull.com`. An explicit `-o` /
+`--output` is honoured verbatim, so cross-producing an artifact for another
+host stays under the caller's control.
+
+**One obvious shippable executable in the app root.** cosmocc emits debug
+sidecars beside the APE (`<base>.com.dbg`, an x86_64 ELF with symbols, and
+`<base>.aarch64.elf`). Neither is shippable and nothing reads them after the
+build, so `hull build` moves them into `<app_dir>/.hull/build/`. The move runs
+AFTER the post-link `nm` symbol verification (which reads the `.dbg` ELF in
+place) and is non-fatal; `--keep-build-artifacts` restores the old layout. The
+shippable binary itself never moves, so signing, `hull verify` and `hull
+inspect` - all of which address the output path - are unaffected.
+
+**"dual-arch" vs "single-arch" name two different layers.** `hull doctor`'s
+*Platform library* line counts the platform ARCHIVES this hull carries to link
+apps against; `hull build`'s message describes the APE LINK, which fuses an
+x86_64 and an aarch64 image into one file. Both now say which layer they mean.
+(A related bug made them look contradictory: `hl_build_get_platforms(NULL)`
+returned 0 for a NULL `out`, so a genuine multi-arch cosmo build reported as
+`single-arch`. `out` is now optional and the count is always returned.)
 
 ### `hull build` and compute modules
 

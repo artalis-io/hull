@@ -174,6 +174,9 @@ data.db-*
 *.key
 hull.sig
 build/
+/app
+/app.com
+/.hull/
 ]]
 
 templates.migration_init = [[-- Migration: 001_init

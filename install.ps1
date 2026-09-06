@@ -239,6 +239,95 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     } catch { }
 }
 
+# ── Current-process PATH ─────────────────────────────────────────────────────
+#
+# Persisting to HKCU\Environment makes hull visible to FUTURE sessions only:
+# PowerShell reads its environment once at start and does NOT act on the
+# WM_SETTINGCHANGE broadcast above. That is why a fresh terminal used to be
+# required before `hull` resolved - pure friction, and avoidable.
+#
+# `irm ... | iex` executes in the CALLER's session scope, so assigning
+# $env:PATH here reaches the very shell the user typed into. Running the script
+# as a child process (.\install.ps1) cannot, by construction, mutate its
+# parent's environment - so the caller is told the exact one-line command
+# instead of a vague "restart your shell".
+#
+# Kept separate from the persistent path so a session update can never mutate
+# the registry, and so the transactional install/rollback above is unaffected:
+# process environment is not part of the all-or-nothing state.
+
+function Test-HullInProcessPath([string]$Dir) {
+    if ([string]::IsNullOrEmpty($env:PATH)) { return $false }
+    return (Test-HullPathContains $env:PATH $Dir)
+}
+
+function Update-HullSessionPath([string]$Dir) {
+    # Returns $true when this process's PATH now contains $Dir. Idempotent:
+    # a repeated install (or an install into an already-listed dir) never
+    # appends a duplicate. Comparison reuses ConvertTo-HullPathKey, so
+    # trailing separators, quoting, forward slashes, %VAR% forms and case all
+    # normalize the same way they do for the persistent PATH.
+    if ([string]::IsNullOrEmpty($Dir)) { return $false }
+    if (Test-HullInProcessPath $Dir) { return $true }
+    if ([string]::IsNullOrEmpty($env:PATH)) { $env:PATH = $Dir }
+    else { $env:PATH = ($env:PATH.TrimEnd(';') + ';' + $Dir) }
+    return (Test-HullInProcessPath $Dir)
+}
+
+# Was this script's TEXT executed in the caller's own session (irm | iex, or a
+# dot-source), as opposed to being run from a FILE?
+#
+# This is the difference between being able to PROVE the user's shell now has
+# hull on PATH and merely hoping so:
+#
+#   irm ... | iex          -> no $PSCommandPath. The text runs in the caller's
+#                             session, so the $env:PATH we just set IS theirs.
+#   .\install.ps1          -> a file. PowerShell runs it in a child SCOPE of
+#                             the same process, so $env:PATH does propagate...
+#   powershell -File ...   -> ...but so does this, and it is a separate PROCESS
+#                             where it does NOT. Both look identical from
+#                             inside the script (verified: $PSCommandPath,
+#                             $MyInvocation.MyCommand.Path and InvocationName
+#                             cannot separate them).
+#
+# So: claim success only when it is certain, and otherwise print the exact
+# command rather than guessing - or worse, telling the user to "restart your
+# shell" when they may not need to.
+function Test-HullInCallerSession {
+    return [string]::IsNullOrEmpty($PSCommandPath)
+}
+
+function Show-HullPathResult([string]$Dir, [bool]$SessionOk, [bool]$NoPath,
+                             [bool]$InCallerSession) {
+    $cmd = "  " + '$env:PATH' + " = `"$Dir;" + '$env:PATH' + "`""
+    Write-Host ""
+    if ($NoPath) {
+        Write-HullInfo "PATH was not modified (-NoPath). To use hull in this session:"
+        Write-Host $cmd
+        return
+    }
+    if (-not $SessionOk) {
+        # The process PATH could not be updated at all (an unset/locked
+        # environment). Nothing is lost - the persistent PATH is written, so
+        # new terminals work - but say exactly how to use it right now.
+        Write-HullWarn "could not update this process's PATH."
+        Write-Host    "New terminals will find hull. To use it in this one:"
+        Write-Host $cmd
+        return
+    }
+    if ($InCallerSession) {
+        Write-Host "Hull is ready in this PowerShell session." -ForegroundColor Green
+        return
+    }
+    # Ran from a file: this process's PATH is updated, which reaches the
+    # caller only if they invoked us in their own shell (.\install.ps1) rather
+    # than as a separate process (powershell -File). Cover both honestly.
+    Write-Host "Hull is on PATH for this process, and for new terminals."
+    Write-Host "If your shell still cannot find hull (you ran the installer as a"
+    Write-Host "separate process), run:"
+    Write-Host $cmd
+}
+
 function Add-HullToUserPath([string]$Dir, [bool]$DryRun) {
     # Normalized dedup PREVENTS adding an equivalent duplicate. Returns the exact
     # raw component added (recorded for ownership), or $null if nothing added.
@@ -545,6 +634,11 @@ function Invoke-HullInstall {
             if (Test-HullManagedHere $prefixDir) {
                 Invoke-HullReaffirm $prefixDir $installedVer $NoPath
                 Write-HullInfo "hull $installedVer already installed and managed at $dest"
+                # Re-running the installer is a common way to "fix my PATH",
+                # so make THIS session work too - not just future ones.
+                $sessionOk = $false
+                if (-not $NoPath) { $sessionOk = Update-HullSessionPath $prefixDir }
+                Show-HullPathResult $prefixDir $sessionOk $NoPath (Test-HullInCallerSession)
             } else {
                 Write-HullInfo "hull $installedVer is already present at $dest but was not installed by install.ps1; not adopting it. Use -Force to replace it with a managed install."
             }
@@ -589,9 +683,22 @@ function Invoke-HullInstall {
         Invoke-HullCommitInstall $asset $dest $prefixDir $wantVer $NoPath
         Write-HullInfo "installed hull: $dest"
 
+        # The persistent PATH above only reaches FUTURE sessions. Update this
+        # process too, so `hull` works immediately in the shell the user typed
+        # into. Deliberately AFTER the transactional commit: the process
+        # environment is not part of the all-or-nothing install state, and a
+        # failure here must never trigger a rollback of a good install.
+        $sessionOk = $false
+        if (-not $NoPath) { $sessionOk = Update-HullSessionPath $prefixDir }
+
+        Write-Host ""
+        Write-Host "Hull $wantVer installed." -ForegroundColor Green
+        Show-HullPathResult $prefixDir $sessionOk $NoPath (Test-HullInCallerSession)
+
         Write-Host ""
         Write-HullInfo "next steps:"
-        Write-Host "  hull doctor         . check the environment"
+        Write-Host "  hull doctor         . check the environment (--fix installs what is missing)"
+        Write-Host "  hull new myapp      . scaffold an app"
         Write-Host "  hull verify-release . verify a release manifest signature"
         Write-Host "  hull update         . install future releases"
         Write-Host ""

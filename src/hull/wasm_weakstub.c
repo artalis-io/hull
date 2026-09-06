@@ -41,6 +41,26 @@
 
 #include <stddef.h>
 
+/* ── Only meaningful on a WASM-CAPABLE base ──────────────────────────
+ *
+ * These stubs exist for the COMPOSABLE seam: the base is compiled WITH
+ * HL_ENABLE_WASM but WITHOUT the wasm cap objects, so the weak bodies satisfy
+ * the link and a composed libhull_feature-wasm.a strong-overrides them.
+ *
+ * `make HL_ENABLE_WASM=0` is the SUBTRACTIVE path instead - it drops WASM
+ * outright, and include/hull/cap/wasm.h then expands to nothing (its whole
+ * body sits behind `#ifdef HL_ENABLE_WASM`). The stub signatures reference
+ * HlWasmCache / HlWasmInstance / HlWasmCallOpts, so compiling this TU in that
+ * configuration fails on undeclared types - and there is nothing to satisfy
+ * anyway, because every consumer (db_udf / mod_buffer / mod_image / mod_gpu /
+ * app_context / serve) drops its wasm references in the same configuration.
+ *
+ * Guard the body the way http_weakstub.c guards its per-half sections. This
+ * TU is reached from PLATFORM_OBJS but NOT from HULL_LINK_OBJS, which is why
+ * `make HL_ENABLE_WASM=0` built the hull binary fine while
+ * `make HL_ENABLE_WASM=0 platform` failed. */
+#ifdef HL_ENABLE_WASM
+
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
 
@@ -140,3 +160,11 @@ HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
  * here: src/hull/runtime/{lua,js}/wasm_stub.c. Placing them where the VM is
  * linked lets lua_push_wasm_buffer push a balanced nil, and keeps the Lua stub
  * out of a JS-only app's link (this base TU is shared by both). */
+
+#else  /* !HL_ENABLE_WASM */
+
+/* WASM compiled out entirely: nothing to stub. ISO C forbids an empty
+ * translation unit, so leave one declaration behind. */
+typedef int hl_wasm_weakstub_not_needed;
+
+#endif /* HL_ENABLE_WASM */

@@ -204,7 +204,11 @@ _hull() {
             fi
             ;;
 
-        doctor|version)
+        doctor)
+            COMPREPLY=($(compgen -W "--json --tui --fix" -- "$cur"))
+            ;;
+
+        version)
             COMPREPLY=($(compgen -W "--json" -- "$cur"))
             ;;
 

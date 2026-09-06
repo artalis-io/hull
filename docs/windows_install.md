@@ -21,8 +21,74 @@ Invoke-WebRequest https://gethull.dev/install.ps1 -OutFile install.ps1
 .\install.ps1
 ```
 
-This installs `hull.com` to `%LOCALAPPDATA%\Programs\Hull` and adds that
-directory to your user `PATH`. Open a new terminal and run `hull doctor`.
+This installs `hull.com` to `%LOCALAPPDATA%\Programs\Hull`, adds that directory
+to your user `PATH` for future sessions, **and updates the PATH of the session
+you are in**, so `hull` works immediately - no new terminal.
+
+The current-session update requires the installer's code to run *in* your shell,
+which is exactly what `irm ... | iex` does - so that form always leaves `hull`
+resolvable immediately, and says so.
+
+Run from a downloaded **file** the picture is less certain: `.\install.ps1`
+executes in the same process (so the PATH update does reach your prompt), but
+`powershell -File install.ps1` is a separate process (so it cannot - Windows
+gives no way for a child process to change its parent's environment). Those two
+are indistinguishable from inside the script, so instead of guessing, the
+installer prints the exact one-line command to paste if your shell still cannot
+find `hull`:
+
+```powershell
+$env:PATH = "$env:LOCALAPPDATA\Programs\Hull;$env:PATH"
+```
+
+## Five-minute path
+
+Copy-paste this into a fresh PowerShell. Nothing else is required: no admin
+rights, no Developer Mode, no Visual Studio, no MSYS, no package manager, and no
+knowledge of Cosmopolitan or APE filename conventions.
+
+```powershell
+irm https://gethull.dev/install.ps1 | iex
+
+hull doctor                  # reports what is ready and what is missing
+hull doctor --fix            # installs the missing Hull-managed toolchain
+                             #   (equivalent to: hull tools install cosmocc)
+
+hull new hello
+cd hello
+hull app.lua                 # serves from source on http://127.0.0.1:3000
+                             #   (this one blocks - Ctrl+C before continuing)
+
+hull build                   # produces .\app.com
+.\app.com                    # the same app, now one portable binary
+```
+
+`hull build` names the produced binary `app.com` on Windows because Windows will
+not execute an extensionless file, and `.com` is the Cosmopolitan APE
+convention - the same reason Hull itself installs as `hull.com`. On Linux and
+macOS the same command still produces `app`. The build prints the exact command
+to start it, and leaves cosmocc's debug sidecars (`app.com.dbg`,
+`app.aarch64.elf`) under `.hull/build/` so the project root holds one obvious
+shippable executable. Pass `--keep-build-artifacts` to leave them in place.
+
+Note that `.\app.com` needs the leading `.\`: PowerShell, like a POSIX shell,
+does not search the current directory for executables.
+
+## Building an app: the toolchain
+
+`hull build` links a Cosmopolitan APE, so on Windows it needs **cosmocc** - not
+gcc or clang. A native C compiler cannot link Hull's cosmo-format platform
+archives into a portable APE, so `hull doctor` asks for cosmocc specifically and
+points at Hull's own signed bootstrap:
+
+```powershell
+hull tools install cosmocc   # or: hull doctor --fix
+```
+
+That downloads a trimmed, signed cosmocc bundle (verified against the same
+Ed25519-signed `hull.sha256` manifest as every other Hull download) into
+`%USERPROFILE%\.hull\tools\`. It writes nothing outside `~\.hull`, needs no
+admin rights, and does not touch your `PATH`.
 
 ## What it does
 

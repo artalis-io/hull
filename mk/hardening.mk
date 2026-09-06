@@ -37,12 +37,22 @@ ifndef COSMO
       LDFLAGS += -pie
     endif
 
+    # _FORTIFY_SOURCE needs OPTIMIZATION to do anything: its checks are built
+    # on __builtin_object_size, which folds to "unknown" at -O0, so the flag
+    # becomes a silent no-op (and gcc warns). Skip it wherever the build is
+    # unoptimized, so `make hardening` never advertises a protection the
+    # produced binary does not actually carry. THREE routes reach -O0/-O1:
+    #   - DEBUG / TSAN, which pin their own levels;
+    #   - HL_OPT=-O0, the Windows-from-source build (see the HL_OPT block in
+    #     the root Makefile: cosmocc cannot complete an optimized compile of
+    #     Hull's largest TUs on Windows at all).
     ifeq ($(DEBUG)$(TSAN),)
-      # _FORTIFY_SOURCE=3 requires glibc 2.34+ / gcc 12+ / clang 9+; on
-      # older toolchains it emits a noisy warning and behaves as =2.
-      # We intentionally leave the warning loud so stale CI is visible.
-      # Skipped under sanitizer builds (DEBUG/TSAN) which use -O0/-O1.
-      CFLAGS += -D_FORTIFY_SOURCE=3
+      ifneq ($(HL_OPT),-O0)
+        # _FORTIFY_SOURCE=3 requires glibc 2.34+ / gcc 12+ / clang 9+; on
+        # older toolchains it emits a noisy warning and behaves as =2.
+        # We intentionally leave the warning loud so stale CI is visible.
+        CFLAGS += -D_FORTIFY_SOURCE=3
+      endif
     endif
 
     # Probe macros. Echo the flag if accepted, empty otherwise.
