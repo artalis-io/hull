@@ -1,7 +1,45 @@
 name: Windows source build (cosmocc, -O0)
 
-# Proves Hull can be BUILT FROM SOURCE on a stock Windows box with nothing but
-# the SHA-pinned cosmocc toolchain - no WSL, no Visual Studio, no MSYS2 install.
+# Proves Hull can be BUILT FROM SOURCE on Windows with the SHA-pinned cosmocc
+# toolchain, under MSYS2 - no WSL and no Visual Studio.
+#
+# WHAT NEEDS MSYS2, AND WHAT DOES NOT. This job builds HULL ITSELF from source,
+# and that is the ONLY thing here that needs MSYS2. Unchanged, and still true:
+#
+#   * INSTALLING Hull on Windows needs nothing but install.ps1 - see
+#     docs/windows_install.md. No MSYS2, no compiler, no toolchain.
+#   * BUILDING AN APP with the released `hull.com` needs nothing either:
+#     `hull build` is compiler-free by default, and the cosmo path it does use
+#     is `hull tools install cosmocc`. No MSYS2.
+#
+# WHY MSYS2 IS REQUIRED FOR A SOURCE BUILD. Hull's Makefile passes six version
+# macros as escaped-quote defines (-DHL_VERSION=\"...\", plus
+# HULL_VENDOR_KEEL_COMMIT / _WAMR_COMMIT / _KEEL_VERSION / _WAMR_VERSION and
+# HL_QJS_VERSION). A NATIVE Win32 make cannot deliver those to a POSIX shell:
+# it does not exec sh with an argv, it builds a WINDOWS COMMAND LINE, and MSYS
+# sh then re-parses that with Windows rules - so everything from the first \"
+# collapses into one argument. Measured three ways:
+#
+#   native make, recipe WITH  \"    -> argc=2   (all args become one string)
+#   native make, recipe WITHOUT \"  -> argc=7   (fine)
+#   the IDENTICAL line via `sh -c`  -> argc=8   (-DHL_VERSION="x" intact)
+#
+# and confirmed on the runner itself (run 34025202379) for BOTH native makes
+# available there - /c/mingw64/bin/make and Chocolatey's - which mangle it
+# identically. The recipe and the shell are both fine; the Windows
+# command-line hop is what destroys it, so this is a property of the make, not
+# something a PATH or shell fix can reach. An MSYS-native make execs sh with a
+# real argv and the escaping survives. The probe below tests this directly, so
+# if a future runner image regresses it, the job says so in one line instead of
+# failing 600 recipes later on a symptom.
+#
+# (History, so nobody re-litigates it: this job originally used Git Bash plus
+# `choco install make`. That fails for the reason above. Two earlier fixes -
+# a <drive>\bin junction so a native make could find /bin/sh and the POSIX
+# tools, and a wrapper keeping cosmocc's $0 POSIX - were each correct for the
+# problem they addressed and are both UNNECESSARY under MSYS2, which provides
+# /bin/sh natively and passes a POSIX $0. The probe asserts both properties
+# rather than assuming them.)
 #
 # WHAT THIS IS NOT: it does not produce a shippable artifact. Every released
 # `hull-cosmo` is built on Linux (release.yml `build-cosmo`, runs-on
@@ -30,18 +68,10 @@ name: Windows source build (cosmocc, -O0)
 
 # TRIGGER: workflow_dispatch ONLY, deliberately, until this job goes green.
 #
-# The first dispatch (run 34022810727) failed exactly where this comment
-# predicted it might, and the reason is worth keeping: `choco install make`
-# yields a NATIVE Win32 make, which does NOT inherit Git Bash's POSIX tools -
-# it wants a literal /bin/sh on the current drive and CreateProcess()es bare
-# recipe commands against the WINDOWS PATH. Git Bash supplying /bin/sh to
-# BASH was never the same thing as supplying it to MAKE. The junction step
-# below closes that gap; see its comment for the full mechanism.
-#
-# Still unproven until a green run: that cosmocc compiles all ~600 of Hull's
-# TUs on Windows without wedging. Wiring an unproven job to `pull_request`
-# would make its first red run indistinguishable from a real regression in
-# the PR that introduces it.
+# Still unproven until then: that cosmocc compiles all ~600 of Hull's TUs on
+# Windows without wedging. Wiring an unproven job to `pull_request` would make
+# its first red run indistinguishable from a real regression in the PR that
+# introduces it.
 #
 # Prove it by dispatching, THEN switch to the path-filtered pull_request
 # trigger below in a follow-up:
@@ -82,6 +112,21 @@ jobs:
         with:
           submodules: recursive   # vendor/keel is required to link
 
+      # An MSYS-native make - the reason this job uses MSYS2 at all (see the
+      # header). `binutils` supplies ar/nm, which the MSYS base does not carry
+      # and which Makefile:20's `AR ?= ar` needs. `vim` is for xxd, which the
+      # Makefile shells out to ~54 times to embed the stdlib and CA bundle;
+      # everything else the build touches (coreutils, findutils, grep, sed,
+      # gawk, diffutils) is in the MSYS base.
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
+        with:
+          msystem: MSYS
+          update: false
+          install: >-
+            make
+            binutils
+            vim
+
       # cosmocc ships as a zip of APEs; SHA-pinned, same acquisition as the
       # sibling cosmocc workflows.
       - name: Fetch + verify cosmocc
@@ -94,125 +139,36 @@ jobs:
           tar.exe -xpf cosmocc.zip -C cosmo
           Write-Host "cosmocc extracted"
 
-      # windows-latest has no POSIX make; Chocolatey is preinstalled on the
-      # runner image and supplies one. Note what this step does NOT give us:
-      # choco's make is a native Win32 build, so it sees neither Git Bash's
-      # /bin/sh nor its POSIX tools. The next step is what makes it usable.
-      - name: Install GNU make
-        shell: pwsh
-        run: |
-          choco install make --no-progress -y | Out-Host
-          if ($LASTEXITCODE -ne 0) { throw "choco install make failed" }
-
-      # Chocolatey's make is a NATIVE Win32 GNU make, not an MSYS one. That has
-      # two consequences Git Bash alone cannot fix, both observed in run
-      # 34022810727:
-      #
-      #   1. It resolves its shell as the LITERAL path /bin/sh. On Windows a
-      #      root-relative path binds to the CURRENT DRIVE, and this runner's
-      #      workspace is on D:, so that is D:\bin\sh - which does not exist.
-      #   2. For a recipe with no shell metacharacters make skips the shell and
-      #      CreateProcess()es the tool directly, resolving it against the
-      #      WINDOWS PATH. Git's POSIX tools are not on it, so `uname`, `mkdir`
-      #      and `find` all came back "No such file or directory" - and since
-      #      Makefile:30 calls uname at PARSE time, the build died before
-      #      compiling a single translation unit.
-      #
-      # A directory junction fixes both at once: <drive>\bin points at Git's own
-      # usr\bin, so /bin/sh resolves AND every tool sits beside the msys-2.0.dll
-      # it links against (a plain copy would strand them). We create it on the
-      # workspace drive - the one make actually runs on - and on C: too when
-      # they differ, then put it on PATH for the direct-exec path. Junctions
-      # need no admin rights and no MSYS2 install, so the "stock Windows box"
-      # premise at the top of this file still holds.
-      - name: Expose Git's POSIX tools to native make (/bin/sh + PATH)
-        shell: pwsh
-        run: |
-          $gitBin = "C:\Program Files\Git\usr\bin"
-          if (-not (Test-Path $gitBin)) { throw "Git for Windows usr\bin not found at $gitBin" }
-
-          $wsDrive = [System.IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE).Substring(0,1)
-          $drives  = @($wsDrive, 'C') | Sort-Object -Unique
-          foreach ($d in $drives) {
-            $link = "${d}:\bin"
-            if (Test-Path $link) {
-              Write-Host "$link already exists - leaving it alone"
-            } else {
-              New-Item -ItemType Junction -Path $link -Target $gitBin | Out-Null
-              Write-Host "junction $link -> $gitBin"
-            }
-            $link | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          }
-          Write-Host "workspace $env:GITHUB_WORKSPACE (drive $wsDrive)"
-
-      # PATH ORDER IS LOAD-BEARING. cosmo/bin ships its OWN `make` (an APE), so
-      # prepending cosmo/bin - as this workflow did originally - silently
-      # shadowed the Chocolatey make installed above. Run 34024210147 proved
-      # `make` resolved to /d/a/hull/hull/cosmo/bin/make in BOTH failing runs,
-      # so choco's make was never actually exercised. That APE make is doubly
-      # unsuitable here:
-      #
-      #   * it does not resolve /bin/sh on Windows (the same Error 127), and
-      #   * its exit status does not survive Git Bash - it printed
-      #     "*** [Makefile:3: all] Error 127" and STILL returned 0, which is why
-      #     the probe's `|| { ...; exit 1; }` guard passed a failing build and
-      #     the step went green.
-      #
-      # So: APPEND cosmo/bin rather than prepend (cosmocc is unique to it; no
-      # other tool we need comes from there), pin the resolved make, and refuse
-      # to proceed if it is the cosmo one.
       - name: Toolchain probe (fail early + leave evidence in the log)
-        shell: bash
+        shell: msys2 {0}
         run: |
           set -euo pipefail
+          # cosmo/bin APPENDED, never prepended: it ships its OWN `make` (an
+          # APE) which would shadow MSYS2's. That APE make also loses its exit
+          # status under a Windows shell - it printed "Error 127" and still
+          # returned 0 in run 34024210147 - so it must not be reachable as
+          # `make` here. cosmocc is unique to that directory, so appending
+          # costs nothing.
           export PATH="$PATH:$PWD/cosmo/bin"
 
-          # cosmocc locates its helper tools (mktemper, fixupobj, apelink, ...)
-          # by deriving a directory from $0. A native make resolves `cosmocc`
-          # through the WINDOWS PATH and hands sh a BACKSLASH path, so cosmocc's
-          # POSIX ${0%/*} finds no "/", leaves the string whole, and looks for
-          #   D:\a\hull\hull\cosmo\bin\cosmocc/mktemper
-          # which is exactly what run 34024658252 died on. Invoking cosmocc from
-          # bash hides this (bash passes a POSIX $0), so it only bites under make.
-          #
-          # The wrapper never touches $0: it execs the real driver by absolute
-          # POSIX path, so cosmocc sees a sane $0 whatever form make used to
-          # reach the wrapper. It is named `cosmocc` and placed FIRST on PATH so
-          # CC stays literally "cosmocc" - Keel's Makefile keys COSMO_FAT off
-          # that exact value, so passing a full path would silently drop the
-          # .aarch64 half of the fat build.
-          real_cosmocc="$PWD/cosmo/bin/cosmocc"
-          test -x "$real_cosmocc" || { echo "FAIL $real_cosmocc missing"; exit 1; }
-          mkdir -p "$PWD/cosmo/wrap"
-          printf '#!/bin/sh\nexec "%s" "$@"\n' "$real_cosmocc" > "$PWD/cosmo/wrap/cosmocc"
-          chmod +x "$PWD/cosmo/wrap/cosmocc"
-          export PATH="$PWD/cosmo/wrap:$PATH"
-          echo "cosmocc wrapper: $PWD/cosmo/wrap/cosmocc -> $real_cosmocc"
-
-          # SELECT make EMPIRICALLY, on the one property Hull's Makefile needs.
-          #
-          # A native Win32 make cannot hand POSIX \" escaping to an MSYS shell
-          # script. It builds a WINDOWS command line, and MSYS sh re-parses that
-          # with Windows rules, so everything from the first \" collapses into a
-          # single argument. Run 34024882948 hit this on the first real TU:
-          #
-          #   cosmocc: fatal error: arguments containing spaces unsupported:
-          #     -DHL_VERSION=\0860e32" -DHULL_VENDOR_KEEL_COMMIT="54ad..." ...
-          #
-          # Reproduced locally against mingw32-make: argc=2 with escaped quotes,
-          # argc=7 without them, and argc=8 when the IDENTICAL recipe line is
-          # handed to a POSIX sh. So the recipe is fine; the Windows
-          # command-line hop is what destroys it. Hull's Makefile carries six
-          # such defines (HL_VERSION, HULL_VENDOR_KEEL_COMMIT, ...), so a make
-          # that mangles them cannot build Hull at all - this is not a detail to
-          # work around, it is a hard selection criterion.
-          #
-          # Rather than guess which make on this runner is MSYS-native, test
-          # each one and keep the first whose argv survives the round trip.
           echo "make candidates:"; { type -a make 2>/dev/null || echo "(none)"; } | sed 's/^/  /'
+          MAKE_BIN=$(command -v make || true)
+          [ -n "$MAKE_BIN" ] || { echo "FAIL no make on PATH"; exit 1; }
+          case "$MAKE_BIN" in
+            */cosmo/bin/*|*cosmocc*)
+              echo "FAIL make resolved to cosmocc's bundled APE make ($MAKE_BIN)."
+              exit 1 ;;
+          esac
+          echo "make    : $MAKE_BIN"; "$MAKE_BIN" --version | head -1
+          echo "sh      : $(command -v sh || echo MISSING)"
+          echo "cosmocc : $(command -v cosmocc || echo MISSING)"; cosmocc --version | head -1
+          echo "MAKE_BIN=$MAKE_BIN" >> "$GITHUB_ENV"
 
-          # Built with plain single-quoted echos: a heredoc terminator would
-          # have to sit at column 0, which closes this YAML block scalar.
+          # REGRESSION GUARD for the reason this job uses MSYS2. A native Win32
+          # make mangles escaped-quote defines into a single argument (see the
+          # header); Hull's Makefile has six of them, so a make that fails this
+          # cannot build Hull at all. Assert the property rather than assume the
+          # runner image keeps providing an MSYS-native make.
           qdir=$(mktemp -d)
           { echo '#!/bin/sh'
             echo 'echo "argc=$#"'
@@ -222,40 +178,18 @@ jobs:
           { echo 'all:'
             printf '\targecho -std=c11 -DHL_VERSION=\\"abc123\\" -DHL_ENABLE_DB -Iinclude\n'
           } > "$qdir/Makefile"
-
-          MAKE_BIN=""
-          for cand in $( { type -a make 2>/dev/null || true; } | sed 's/^make is //' ); do
-            case "$cand" in
-              */cosmo/bin/*|*cosmocc*)
-                echo "  skip $cand (cosmocc's APE make: loses its exit status under Git Bash)"
-                continue ;;
-            esac
-            [ -x "$cand" ] || continue
-            out=$( cd "$qdir" && PATH="$qdir:$PATH" "$cand" 2>&1 || true )
-            if printf '%s' "$out" | grep -qF '[2]-DHL_VERSION="abc123"' \
-               && printf '%s' "$out" | grep -qF '[3]-DHL_ENABLE_DB'; then
-              echo "  ok   $cand (escaped quotes survive through to argv)"
-              MAKE_BIN=$cand
-              break
-            fi
-            echo "  BAD  $cand (mangles escaped quotes):"
-            printf '%s' "$out" | sed 's/^/         /' | head -5
-          done
-
-          if [ -z "$MAKE_BIN" ]; then
-            echo ""
-            echo "FAIL no make on this runner passes POSIX escaped quotes to argv."
-            echo "     Every candidate is a native Win32 make, which re-parses the"
-            echo "     recipe as a Windows command line before MSYS sh sees it."
-            echo "     Hull's Makefile needs -DHL_VERSION=<escaped> to survive, so"
-            echo "     this job needs an MSYS-native make (msys2/setup-msys2 with"
-            echo "     'install: make'), not Git Bash plus choco make."
+          qout=$( cd "$qdir" && PATH="$qdir:$PATH" "$MAKE_BIN" 2>&1 || true )
+          if printf '%s' "$qout" | grep -qF '[2]-DHL_VERSION="abc123"' \
+             && printf '%s' "$qout" | grep -qF '[3]-DHL_ENABLE_DB'; then
+            echo "escaped quotes survive make -> argv: OK"
+          else
+            echo "FAIL this make mangles escaped-quote defines:"
+            printf '%s' "$qout" | sed 's/^/  /' | head -6
+            echo "     Hull's Makefile needs -DHL_VERSION=<escaped> intact."
+            echo "     This is what a NATIVE Win32 make gets wrong; an"
+            echo "     MSYS-native make (msys2/setup-msys2) is required."
             exit 1
           fi
-          echo "make    : $MAKE_BIN"; "$MAKE_BIN" --version | head -1
-          echo "sh      : $(command -v sh || echo MISSING)"
-          echo "cosmocc : $(command -v cosmocc || echo MISSING)"; cosmocc --version | head -1
-          echo "MAKE_BIN=$MAKE_BIN" >> "$GITHUB_ENV"
 
           # cosmocc's driver is a #!/bin/sh script - prove it can actually run
           # and produce a working APE before committing to a 600-recipe build.
@@ -271,7 +205,7 @@ jobs:
           echo "--- tool inventory ---"
           missing=""
           for t in sh uname mkdir find sed xxd install sort cut grep awk tr \
-                   basename printf cmp; do
+                   basename printf cmp ar; do
             if p=$(command -v "$t" 2>/dev/null); then
               printf '  ok      %-10s %s\n' "$t" "$p"
             else
@@ -286,38 +220,35 @@ jobs:
             fi
           done
           if [ -n "$missing" ]; then
-            echo "FAIL required build tools missing:$missing"; exit 1
+            echo "FAIL required build tools missing:$missing"
+            echo "     Add the providing package to setup-msys2's install list."
+            exit 1
           fi
 
-          # `ar` is BINUTILS, not part of Git for Windows' MSYS tool set, so the
-          # junction does NOT supply it and Makefile:20's `AR ?= ar` would
-          # resolve to nothing. The runner's mingw64 provides one; cosmocc's
-          # arch-prefixed cross ars are the fallback. `cosmoar` stays LAST -
-          # CLAUDE.md records it breaking on Keel's recursive .aarch64/ lookups.
+          # `ar` comes from the binutils package installed above. The cosmocc
+          # cross ars are a fallback if a future image drops it; `cosmoar` stays
+          # LAST - CLAUDE.md records it breaking on Keel's recursive .aarch64/
+          # lookups.
           ar_name=""
           for cand in ar x86_64-unknown-cosmo-ar aarch64-unknown-cosmo-ar cosmoar; do
             if p=$(command -v "$cand" 2>/dev/null); then
               ar_name=$cand; echo "  ar resolved: $cand -> $p"; break
             fi
           done
-          if [ -z "$ar_name" ]; then
-            echo "FAIL no ar found (tried: ar x86_64-unknown-cosmo-ar aarch64-unknown-cosmo-ar cosmoar)"
-            exit 1
-          fi
-          # Export the BARE NAME, not the resolved path: $p is a POSIX path
-          # (/c/mingw64/bin/ar) that a native make cannot exec. The name rides
-          # the same PATH that MSYS rewrites into Windows form for make.
+          [ -n "$ar_name" ] || { echo "FAIL no ar found"; exit 1; }
           echo "AR=$ar_name" >> "$GITHUB_ENV"
 
           # nm is only reached by targets this job does not build, and every
           # call site is `nm ... 2>/dev/null` inside a conditional, so an absent
           # nm degrades to a vacuously-passing check, not a build failure.
 
-          # The decisive check: drive the REAL make over all three paths the
-          # build depends on - a $(shell) at parse time, a recipe with a shell
-          # metacharacter, and a metacharacter-free line invoking cosmocc (a
-          # #!/bin/sh script Windows cannot exec, so it only runs via make's
-          # fallback to the /bin/sh the junction provides).
+          # The decisive check: drive make over the paths the build depends on -
+          # a $(shell) at parse time, a recipe with a shell metacharacter, and a
+          # metacharacter-free line invoking cosmocc. That last one is why the
+          # Git-Bash attempt needed a wrapper: a native make handed cosmocc a
+          # BACKSLASH $0, so its POSIX ${0%/*} looked for
+          # ...\cosmo\bin\cosmocc/mktemper (run 34024658252). Under MSYS2 $0
+          # should stay POSIX with no wrapper - this asserts that it does.
           probe=$(mktemp -d)
           printf 'PARSE := $(shell uname -s)\n' >  "$probe/Makefile"
           printf 'all:\n'                       >> "$probe/Makefile"
@@ -330,7 +261,7 @@ jobs:
           printf '\t./probe.com\n'              >> "$probe/Makefile"
 
           # Assert on OUTPUT MARKERS, not just on $?. A make whose exit status
-          # is lost (see the cosmo-APE note above) must not be able to report
+          # is lost (the cosmo APE did exactly that) must not be able to report
           # success, so require positive evidence that both paths actually ran.
           set +e
           out=$( cd "$probe" && "$MAKE_BIN" 2>&1 ); rc=$?
@@ -342,18 +273,15 @@ jobs:
           printf '%s' "$out" | grep -q 'APE-OK'        || { echo "FAIL no APE-OK: make could not drive cosmocc"; fail=1; }
           [ -f "$probe/probe.com" ]                    || { echo "FAIL probe.com was not produced"; fail=1; }
           [ "$fail" -eq 0 ] || exit 1
-          echo "real make drives /bin/sh + direct-exec tools + cosmocc: OK"
+          echo "make drives /bin/sh + direct-exec tools + cosmocc, no wrappers: OK"
 
       - name: Build hull from source
-        shell: bash
+        shell: msys2 {0}
         run: |
           set -euo pipefail
-          # cosmo/bin APPENDED - see the probe step's comment on why it must not
-          # shadow make. cosmo/wrap PREPENDED - it holds the cosmocc wrapper the
-          # probe built, which keeps cosmocc's $0 POSIX under a native make.
-          # MAKE_BIN and AR both arrive from the probe via $GITHUB_ENV.
-          export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
-          test -x cosmo/wrap/cosmocc || { echo "FAIL cosmocc wrapper missing"; exit 1; }
+          # cosmo/bin APPENDED - see the probe step on why it must not shadow
+          # make. MAKE_BIN and AR both arrive from the probe via $GITHUB_ENV.
+          export PATH="$PATH:$PWD/cosmo/bin"
           # HL_OPT is the Makefile knob that routes the optimization level
           # through Hull's OWN TUs *and* every vendored one (quickjs/lua/sqlite
           # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
@@ -362,8 +290,12 @@ jobs:
           # Never trust the exit status alone here - assert the artifact.
           test -f build/hull || { echo "FAIL build/hull was not produced"; exit 1; }
           ls -la build/hull
+
+      # Compiling is necessary but not sufficient - a binary that cannot run is
+      # not a successful build. Assert it executes and reports Windows-correct
+      # facts (these come from src/hull/shared/host.c).
       - name: Verify the produced binary runs and is Windows-aware
-        shell: bash
+        shell: msys2 {0}
         run: |
           set -euo pipefail
           ./build/hull version

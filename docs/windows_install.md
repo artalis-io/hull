@@ -90,6 +90,34 @@ Ed25519-signed `hull.sha256` manifest as every other Hull download) into
 `%USERPROFILE%\.hull\tools\`. It writes nothing outside `~\.hull`, needs no
 admin rights, and does not touch your `PATH`.
 
+### Building Hull itself from source (needs MSYS2)
+
+Everything above - installing Hull, and building **apps** with the released
+`hull.com` - needs no MSYS2, no Visual Studio, and no WSL. Building **Hull
+itself** from source on Windows is the one path that does need MSYS2, and it is
+a hard requirement rather than a preference.
+
+Hull's `Makefile` passes its version macros as escaped-quote defines
+(`-DHL_VERSION=\"...\"` and five siblings). A *native Win32* make - Chocolatey's,
+mingw64's, or any other - does not hand a POSIX shell an argv; it builds a
+**Windows command line**, which MSYS `sh` then re-parses under Windows rules, so
+everything from the first `\"` collapses into a single argument and the compiler
+rejects it. Measured: the same recipe line yields `argc=2` through a native make
+and `argc=8` through `sh -c`. An MSYS-native make execs `sh` with a real argv, so
+the escaping survives.
+
+```sh
+# from an MSYS2 shell (msys2.org), in the MSYS environment:
+pacman -S make binutils vim          # make, ar/nm, and xxd respectively
+git clone --recursive https://github.com/artalis-io/hull
+cd hull
+make CC=cosmocc HL_OPT=-O0           # -O0: cosmocc's gcc wedges on Hull's
+                                     # largest TUs at higher levels on Windows
+```
+
+This path is exercised in CI by `.github/workflows/windows-source-build.yml`,
+whose header carries the full evidence and history.
+
 ## What it does
 
 - Resolves the latest official stable release from `artalis-io/hull` (drafts and
