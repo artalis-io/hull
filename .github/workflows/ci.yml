@@ -1346,6 +1346,14 @@ jobs:
           # that stb is fully unlinked.
           - name: image-less (no image codecs)
             flags: HL_ENABLE_IMAGE=0
+          # EXPERIMENT (do not merge): does the LTO configuration fail on main,
+          # i.e. WITHOUT the Keel flag-propagation change in #463? Neither
+          # configuration has ever been built in CI, so "my change broke it"
+          # and "it was already broken" look identical from #463 alone.
+          - name: LTO
+            flags: HL_ENABLE_LTO=1
+          - name: LTO + CFI (clang)
+            flags: CC=clang HL_ENABLE_CFI=1
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
