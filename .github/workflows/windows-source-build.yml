@@ -189,17 +189,69 @@ jobs:
           export PATH="$PWD/cosmo/wrap:$PATH"
           echo "cosmocc wrapper: $PWD/cosmo/wrap/cosmocc -> $real_cosmocc"
 
-          # `type -a`, not `command -v -a`: the POSIX `command` builtin has
-          # no -a, and under `set -e` that usage error aborts the step.
+          # SELECT make EMPIRICALLY, on the one property Hull's Makefile needs.
+          #
+          # A native Win32 make cannot hand POSIX \" escaping to an MSYS shell
+          # script. It builds a WINDOWS command line, and MSYS sh re-parses that
+          # with Windows rules, so everything from the first \" collapses into a
+          # single argument. Run 34024882948 hit this on the first real TU:
+          #
+          #   cosmocc: fatal error: arguments containing spaces unsupported:
+          #     -DHL_VERSION=\0860e32" -DHULL_VENDOR_KEEL_COMMIT="54ad..." ...
+          #
+          # Reproduced locally against mingw32-make: argc=2 with escaped quotes,
+          # argc=7 without them, and argc=8 when the IDENTICAL recipe line is
+          # handed to a POSIX sh. So the recipe is fine; the Windows
+          # command-line hop is what destroys it. Hull's Makefile carries six
+          # such defines (HL_VERSION, HULL_VENDOR_KEEL_COMMIT, ...), so a make
+          # that mangles them cannot build Hull at all - this is not a detail to
+          # work around, it is a hard selection criterion.
+          #
+          # Rather than guess which make on this runner is MSYS-native, test
+          # each one and keep the first whose argv survives the round trip.
           echo "make candidates:"; { type -a make 2>/dev/null || echo "(none)"; } | sed 's/^/  /'
-          MAKE_BIN=$(command -v make || true)
-          [ -n "$MAKE_BIN" ] || { echo "FAIL no make on PATH"; exit 1; }
-          case "$MAKE_BIN" in
-            */cosmo/bin/*|*cosmocc*)
-              echo "FAIL make resolved to cosmocc's bundled APE make ($MAKE_BIN)."
-              echo "     cosmo/bin must not shadow the Chocolatey make."
-              exit 1 ;;
-          esac
+
+          # Built with plain single-quoted echos: a heredoc terminator would
+          # have to sit at column 0, which closes this YAML block scalar.
+          qdir=$(mktemp -d)
+          { echo '#!/bin/sh'
+            echo 'echo "argc=$#"'
+            echo 'i=0; for a in "$@"; do i=$((i+1)); echo "[$i]$a"; done'
+          } > "$qdir/argecho"
+          chmod +x "$qdir/argecho"
+          { echo 'all:'
+            printf '\targecho -std=c11 -DHL_VERSION=\\"abc123\\" -DHL_ENABLE_DB -Iinclude\n'
+          } > "$qdir/Makefile"
+
+          MAKE_BIN=""
+          for cand in $( { type -a make 2>/dev/null || true; } | sed 's/^make is //' ); do
+            case "$cand" in
+              */cosmo/bin/*|*cosmocc*)
+                echo "  skip $cand (cosmocc's APE make: loses its exit status under Git Bash)"
+                continue ;;
+            esac
+            [ -x "$cand" ] || continue
+            out=$( cd "$qdir" && PATH="$qdir:$PATH" "$cand" 2>&1 || true )
+            if printf '%s' "$out" | grep -qF '[2]-DHL_VERSION="abc123"' \
+               && printf '%s' "$out" | grep -qF '[3]-DHL_ENABLE_DB'; then
+              echo "  ok   $cand (escaped quotes survive through to argv)"
+              MAKE_BIN=$cand
+              break
+            fi
+            echo "  BAD  $cand (mangles escaped quotes):"
+            printf '%s' "$out" | sed 's/^/         /' | head -5
+          done
+
+          if [ -z "$MAKE_BIN" ]; then
+            echo ""
+            echo "FAIL no make on this runner passes POSIX escaped quotes to argv."
+            echo "     Every candidate is a native Win32 make, which re-parses the"
+            echo "     recipe as a Windows command line before MSYS sh sees it."
+            echo "     Hull's Makefile needs -DHL_VERSION=<escaped> to survive, so"
+            echo "     this job needs an MSYS-native make (msys2/setup-msys2 with"
+            echo "     'install: make'), not Git Bash plus choco make."
+            exit 1
+          fi
           echo "make    : $MAKE_BIN"; "$MAKE_BIN" --version | head -1
           echo "sh      : $(command -v sh || echo MISSING)"
           echo "cosmocc : $(command -v cosmocc || echo MISSING)"; cosmocc --version | head -1
