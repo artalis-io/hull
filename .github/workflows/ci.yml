@@ -1346,6 +1346,14 @@ jobs:
           # that stb is fully unlinked.
           - name: image-less (no image codecs)
             flags: HL_ENABLE_IMAGE=0
+          # Neither of the next two had ANY CI coverage before hull#461, which
+          # is precisely why Hull's LTO and CFI flags could stop at the Keel
+          # sub-make unnoticed. These build for real; the lint gate above only
+          # checks the flags are on the command lines.
+          - name: LTO
+            flags: HL_ENABLE_LTO=1
+          - name: LTO + CFI (clang)
+            flags: CC=clang HL_ENABLE_CFI=1
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -2487,6 +2495,16 @@ jobs:
 
       - name: No-new-milestone-narration self-test (negative)
         run: make check-no-milestone-narration-selftest
+
+      # Hull's HL_OPT / LTO / CFI flags must reach Keel's actual compiler
+      # command lines - passing a flag and having it applied are different
+      # things, and Keel referenced neither KEEL_EXTRA_* name for a long time,
+      # so those flags reached nothing and nothing failed. Dry-run, seconds.
+      - name: Keel flag-propagation gate (hull#461)
+        run: make check-keel-flags
+
+      - name: Keel flag-propagation self-test (negative)
+        run: make check-keel-flags-selftest
 
       - name: Site-consistency gate (version + install tabs)
         run: make check-site-consistency
