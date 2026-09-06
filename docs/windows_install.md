@@ -125,24 +125,43 @@ pacman -S make binutils vim diffutils git
 git clone --recursive https://github.com/artalis-io/hull
 cd hull
 
-# cosmocc, with the same version and SHA-256 CI pins. Verify it: this is a
-# compiler toolchain fetched over the network.
-curl -fsSLO https://cosmo.zip/pub/cosmocc/cosmocc-4.0.2.zip
-echo "85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44  cosmocc-4.0.2.zip"   | sha256sum -c
-mkdir -p cosmo && tar -xpf cosmocc-4.0.2.zip -C cosmo
+# Everything below runs in ONE subshell under `set -e`, so a failed checksum
+# aborts the recipe. That matters when pasting: without it, `sha256sum -c`
+# would print FAILED and the very next line would extract and then RUN the
+# unverified toolchain anyway. A check that gates nothing is worse than no
+# check, because it reads as though it did. The subshell also means a failure
+# ends the recipe, not your shell session.
+(
+  set -euo pipefail
 
-# HL_OPT does not reach Keel's sub-make (issue #461), so Keel would build at
-# its own hardcoded -O2 and wedge. Until that is fixed, shadow cosmocc with a
-# wrapper appending -O0; gcc honours the LAST -O. It MUST be named `cosmocc`:
-# Keel enables its dual-arch build only when CC is exactly that string.
-mkdir -p cosmo/wrap
-printf '#!/bin/sh\nexec "%s" "$@" -O0\n' "$PWD/cosmo/bin/cosmocc" > cosmo/wrap/cosmocc
-chmod +x cosmo/wrap/cosmocc
+  # cosmocc, at the version and SHA-256 CI pins. Verify it: this is a compiler
+  # toolchain fetched over the network.
+  curl -fsSLO https://cosmo.zip/pub/cosmocc/cosmocc-4.0.2.zip
+  echo "85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44  cosmocc-4.0.2.zip" \
+    | sha256sum -c
+  mkdir -p cosmo && tar -xpf cosmocc-4.0.2.zip -C cosmo
 
-# cosmo/wrap FIRST (the shim), cosmo/bin LAST: cosmo/bin ships its own `make`
-# which must not shadow MSYS2's.
-export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
+  # HL_OPT does not reach Keel's sub-make (issue #461), so Keel would build at
+  # its own hardcoded -O2 and wedge. Until that is fixed, shadow cosmocc with a
+  # wrapper appending -O0; gcc honours the LAST -O. It MUST be named `cosmocc`:
+  # Keel enables its dual-arch build only when CC is exactly that string.
+  mkdir -p cosmo/wrap
+  printf '#!/bin/sh\nexec "%s" "$@" -O0\n' "$PWD/cosmo/bin/cosmocc" > cosmo/wrap/cosmocc
+  chmod +x cosmo/wrap/cosmocc
 
+  # cosmo/wrap FIRST (the shim), cosmo/bin LAST: cosmo/bin ships its own `make`
+  # which must not shadow MSYS2's.
+  export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
+
+  make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+)
+```
+
+The `PATH` above is scoped to that subshell, which is the point — but it means
+a later rebuild needs it again:
+
+```sh
+export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"   # from the repo root
 make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
 ```
 
