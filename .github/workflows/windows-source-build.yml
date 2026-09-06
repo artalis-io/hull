@@ -71,6 +71,7 @@ name: Windows source build (cosmocc, -O0)
 #        passes are not referenced ANYWHERE in Keel's tree, so Hull's LTO and
 #        CFI flags are silently discarded on EVERY platform, not just here.
 #     Keel exposes no opt or append hook today, so both need a Keel-side knob.
+#     Tracked in issue #461 - the -O0 shim below MUST stay until that lands.
 #
 #   READING THE LOG: Keel's compile lines still ECHO -O2, because make echoes
 #   the recipe and the shim appends -O0 at exec time. The effective level is
@@ -202,7 +203,8 @@ jobs:
           # job is viable, so Keel has to get it too.
           #
           # Keel exposes no opt knob and no append hook - the KEEL_EXTRA_CFLAGS
-          # Hull passes is not referenced anywhere in Keel's tree - and its
+          # Hull passes is not referenced anywhere in Keel's tree (issue #461,
+          # which is where this shim gets deleted) - and its
           # CFLAGS/VENDOR_CFLAGS are plain `=`, so the only lever that does not
           # mean restating all of Keel's flags is the compiler itself. gcc takes
           # the LAST -O, so a wrapper appending ours after everything wins.
