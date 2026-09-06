@@ -167,6 +167,28 @@ jobs:
           set -euo pipefail
           export PATH="$PATH:$PWD/cosmo/bin"
 
+          # cosmocc locates its helper tools (mktemper, fixupobj, apelink, ...)
+          # by deriving a directory from $0. A native make resolves `cosmocc`
+          # through the WINDOWS PATH and hands sh a BACKSLASH path, so cosmocc's
+          # POSIX ${0%/*} finds no "/", leaves the string whole, and looks for
+          #   D:\a\hull\hull\cosmo\bin\cosmocc/mktemper
+          # which is exactly what run 34024658252 died on. Invoking cosmocc from
+          # bash hides this (bash passes a POSIX $0), so it only bites under make.
+          #
+          # The wrapper never touches $0: it execs the real driver by absolute
+          # POSIX path, so cosmocc sees a sane $0 whatever form make used to
+          # reach the wrapper. It is named `cosmocc` and placed FIRST on PATH so
+          # CC stays literally "cosmocc" - Keel's Makefile keys COSMO_FAT off
+          # that exact value, so passing a full path would silently drop the
+          # .aarch64 half of the fat build.
+          real_cosmocc="$PWD/cosmo/bin/cosmocc"
+          test -x "$real_cosmocc" || { echo "FAIL $real_cosmocc missing"; exit 1; }
+          mkdir -p "$PWD/cosmo/wrap"
+          printf '#!/bin/sh\nexec "%s" "$@"\n' "$real_cosmocc" > "$PWD/cosmo/wrap/cosmocc"
+          chmod +x "$PWD/cosmo/wrap/cosmocc"
+          export PATH="$PWD/cosmo/wrap:$PATH"
+          echo "cosmocc wrapper: $PWD/cosmo/wrap/cosmocc -> $real_cosmocc"
+
           # `type -a`, not `command -v -a`: the POSIX `command` builtin has
           # no -a, and under `set -e` that usage error aborts the step.
           echo "make candidates:"; { type -a make 2>/dev/null || echo "(none)"; } | sed 's/^/  /'
@@ -275,9 +297,11 @@ jobs:
         run: |
           set -euo pipefail
           # cosmo/bin APPENDED - see the probe step's comment on why it must not
-          # shadow make. MAKE_BIN and AR both arrive from the probe via
-          # $GITHUB_ENV.
-          export PATH="$PATH:$PWD/cosmo/bin"
+          # shadow make. cosmo/wrap PREPENDED - it holds the cosmocc wrapper the
+          # probe built, which keeps cosmocc's $0 POSIX under a native make.
+          # MAKE_BIN and AR both arrive from the probe via $GITHUB_ENV.
+          export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
+          test -x cosmo/wrap/cosmocc || { echo "FAIL cosmocc wrapper missing"; exit 1; }
           # HL_OPT is the Makefile knob that routes the optimization level
           # through Hull's OWN TUs *and* every vendored one (quickjs/lua/sqlite
           # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
