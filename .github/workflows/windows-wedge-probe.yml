@@ -45,9 +45,9 @@ on:
   workflow_dispatch:
     inputs:
       arms:
-        description: "Which arms to run (comma-separated: baseline,tmpdir)"
+        description: "Which arms to run (comma-separated: solo,full-j1)"
         type: string
-        default: "baseline,tmpdir"
+        default: "solo,full-j1"
 
 permissions:
   contents: read
@@ -67,7 +67,7 @@ jobs:
       fail-fast: false          # every sample matters; one wedge must not cancel the rest
       max-parallel: 10
       matrix:
-        arm: [baseline, tmpdir]
+        arm: [solo, full-j1]
         n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
     steps:
@@ -105,8 +105,6 @@ jobs:
             exit 0
           fi
 
-          # cosmo/bin APPENDED: it ships its own make, which must not shadow
-          # MSYS2's. Same ordering as windows-source-build.yml.
           export PATH="$PATH:$PWD/cosmo/bin"
           MAKE_BIN=$(command -v make)
           case "$MAKE_BIN" in
@@ -115,55 +113,91 @@ jobs:
           AR_NAME=ar
           command -v ar >/dev/null 2>&1 || AR_NAME=x86_64-unknown-cosmo-ar
 
-          # THE VARIABLE UNDER TEST. cc1 was observed blocked while writing its
-          # .s output into MSYS2's temp dir, so this arm moves temp off it (and,
-          # unavoidably, onto another drive - see the confound note in the
-          # header). TMP and TEMP are set alongside TMPDIR because gcc, the
-          # cosmocc driver and mktemper do not all read the same one.
-          if [ "${{ matrix.arm }}" = "tmpdir" ]; then
-            probe_tmp="/c/wedge-probe-tmp"
-            mkdir -p "$probe_tmp"
-            export TMPDIR="$probe_tmp" TMP="$probe_tmp" TEMP="$probe_tmp"
-          fi
-          echo "arm=${{ matrix.arm }} sample=${{ matrix.n }} TMPDIR=${TMPDIR:-<default>}"
+          # Run one command under a stall watchdog. $1 = seconds of silence that
+          # count as wedged, rest = the command. Returns 0 ok, 1 build failure,
+          # 2 WEDGED. Same detection as windows-source-build.yml, so a wedge
+          # here is the same event rather than a lookalike.
+          run_watched() {
+            _limit=$1; shift
+            _log=$(mktemp)
+            "$@" > "$_log" 2>&1 &
+            _pid=$!
+            _last=0; _stalled=0
+            while kill -0 "$_pid" 2>/dev/null; do
+              sleep 5
+              _size=$(wc -c < "$_log" 2>/dev/null || echo 0)
+              if [ "$_size" -eq "$_last" ]; then _stalled=$((_stalled+5)); else _stalled=0; _last=$_size; fi
+              if [ "$_stalled" -ge "$_limit" ]; then
+                echo "WEDGED after ${_stalled}s of silence"
+                tail -5 "$_log" || true
+                powershell.exe -NoProfile -ExecutionPolicy Bypass \
+                  -File "$(cygpath -w .github/scripts/dump-stuck-build.ps1)" -IntervalSeconds 5 || true
+                kill "$_pid" 2>/dev/null || true
+                return 2
+              fi
+            done
+            # Do NOT toggle errexit here. `set +e ... set -e` would leave
+            # errexit ON in the caller regardless of how the caller had it, and
+            # then returning non-zero from this function kills the shell before
+            # the call site can read $? - so the "build failed" branch would
+            # abort the job instead of being counted. `|| _rc=$?` is protected
+            # by the || and needs no toggling at all.
+            _rc=0
+            wait "$_pid" || _rc=$?
+            [ "$_rc" -eq 0 ] || { echo "build failed rc=$_rc"; tail -20 "$_log"; return 1; }
+            return 0
+          }
 
-          # Watchdog identical to windows-source-build.yml, so a wedge here is
-          # the same event with the same evidence rather than a lookalike.
-          stall_limit=300
-          poll=15
-          log=build-output.log
-
-          "$MAKE_BIN" CC=cosmocc AR="$AR_NAME" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 > "$log" 2>&1 &
-          mk=$!
-          last_size=0
-          stalled=0
-          while kill -0 "$mk" 2>/dev/null; do
-            sleep "$poll"
-            size=$(wc -c < "$log" 2>/dev/null || echo 0)
-            if [ "$size" -eq "$last_size" ]; then
-              stalled=$((stalled + poll))
-            else
-              stalled=0
-              last_size=$size
-            fi
-            if [ "$stalled" -ge "$stall_limit" ]; then
-              echo "WEDGED: no output for ${stalled}s (arm=${{ matrix.arm }} sample=${{ matrix.n }})"
-              echo "--- last 15 lines ---"
-              tail -15 "$log" || true
-              powershell.exe -NoProfile -ExecutionPolicy Bypass \
-                -File "$(cygpath -w .github/scripts/dump-stuck-build.ps1)" \
-                -IntervalSeconds 5 || true
-              kill "$mk" 2>/dev/null || true
-              exit 1
-            fi
-          done
-
-          set +e
-          wait "$mk"; rc=$?
-          set -e
-          [ "$rc" -eq 0 ] || { echo "build failed (rc=$rc), NOT a wedge:"; tail -25 "$log"; exit 1; }
-          test -f build/hull || { echo "no artifact"; exit 1; }
-          echo "OK arm=${{ matrix.arm }} sample=${{ matrix.n }}"
+          case "${{ matrix.arm }}" in
+          solo)
+            # THE ISOLATION TEST. Every wedge in run 34112570526 was
+            # vendor/sqlite/sqlite3.c, 6 for 6, on both architectures. Compile
+            # ONLY that TU, repeatedly, with nothing else running.
+            #
+            #   wedges here      -> a minimal reproducer; the TU alone is enough,
+            #                       and this is worth taking to cosmocc upstream.
+            #   never wedges     -> the TU alone is NOT enough, so the cause is
+            #                       context: concurrency, memory pressure, or
+            #                       state left by the preceding ~500 compiles.
+            #
+            # 25 iterations per job x 10 jobs = 250 samples. At the observed 30%
+            # per-build rate, zero wedges across 250 solo compiles would be a
+            # decisive negative rather than an absence of evidence.
+            iters=25
+            wedged=0
+            for i in $(seq 1 $iters); do
+              rm -f build/sqlite3.o
+              set +e
+              run_watched 120 "$MAKE_BIN" CC=cosmocc AR="$AR_NAME" HL_OPT=-O0 HL_ENABLE_WASM=0 build/sqlite3.o
+              rc=$?
+              set -e
+              if [ "$rc" -eq 2 ]; then
+                wedged=$((wedged+1))
+                echo "SOLO WEDGE at iteration $i"
+                break
+              elif [ "$rc" -ne 0 ]; then
+                echo "solo build error at iteration $i (not a wedge)"; exit 1
+              fi
+            done
+            echo "RESULT arm=solo sample=${{ matrix.n }} iterations=$iters wedges=$wedged"
+            [ "$wedged" -eq 0 ] || exit 1
+            ;;
+          full-j1)
+            # THE CONTENTION TEST. Every wedge so far happened under -j2, with a
+            # second large TU compiling alongside. Serialising the same full
+            # build tells us whether concurrency is required. This is a
+            # DIAGNOSTIC, not a proposed fix: -j1 roughly doubles the build.
+            set +e
+            run_watched 300 "$MAKE_BIN" CC=cosmocc AR="$AR_NAME" HL_OPT=-O0 HL_ENABLE_WASM=0 -j1
+            rc=$?
+            set -e
+            [ "$rc" -eq 0 ] || { echo "RESULT arm=full-j1 sample=${{ matrix.n }} WEDGED_OR_FAILED rc=$rc"; exit 1; }
+            test -f build/hull || { echo "no artifact"; exit 1; }
+            echo "RESULT arm=full-j1 sample=${{ matrix.n }} ok"
+            ;;
+          *)
+            echo "unknown arm '${{ matrix.arm }}'"; exit 1 ;;
+          esac
 
       - name: Upload the wedge evidence
         if: failure()
