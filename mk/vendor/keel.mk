@@ -30,10 +30,24 @@ ifneq ($(KEEL_LIB),)
 # docs/security.md § 4e for the security-posture note and the possible
 # Hull-side re-implementation (via hl_seal_arena) as a future follow-up.
 
+# KEEL_OPT / KEEL_EXTRA_CFLAGS / KEEL_EXTRA_LDFLAGS are Keel's embedder hooks
+# (keel >= 82affaa, artalis-io/keel#261). Before they existed Keel built at its
+# own hardcoded -O2 and IGNORED the KEEL_EXTRA_* below entirely - those names
+# were not referenced anywhere in Keel's tree - so Hull's optimization level,
+# LTO and CFI flags all stopped at this line and never reached a single Keel
+# TU, on any platform. See hull#461.
+#
+# KEEL_OPT is passed as $(HL_OPT) rather than Hull's EFFECTIVE level, which
+# leaves DEBUG and TSAN behaving exactly as they do today: those modes pin
+# their own -O in CFLAGS without touching HL_OPT, and Keel has never been
+# built with Hull's sanitizer flags (deliberately - vendored TUs stay
+# uninstrumented). What changes is only the case that was broken: a
+# `make HL_OPT=-O0` now reaches Keel too.
 $(KEEL_LIB): $(MBEDTLS_OBJS)
 	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR) \
 		KEEL_TLS=mbedtls MBEDTLS_DIR=$(abspath $(MBEDTLS_DIR)) MBEDTLS_CONFIG_FILE=hull_config.h \
 		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR) \
+		KEEL_OPT="$(HL_OPT)" \
 		KEEL_EXTRA_CFLAGS="$(HL_LTO_CFLAG) $(if $(HL_CFI_CFLAG),$(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit)" \
 		KEEL_EXTRA_LDFLAGS="$(HL_LTO_CFLAG) $(if $(HL_CFI_CFLAG),$(HL_CFI_CFLAG) -fsplit-lto-unit)"
 endif

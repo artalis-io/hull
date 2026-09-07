@@ -141,17 +141,8 @@ cd hull
     | sha256sum -c
   mkdir -p cosmo && tar -xpf cosmocc-4.0.2.zip -C cosmo
 
-  # HL_OPT does not reach Keel's sub-make (issue #461), so Keel would build at
-  # its own hardcoded -O2 and wedge. Until that is fixed, shadow cosmocc with a
-  # wrapper appending -O0; gcc honours the LAST -O. It MUST be named `cosmocc`:
-  # Keel enables its dual-arch build only when CC is exactly that string.
-  mkdir -p cosmo/wrap
-  printf '#!/bin/sh\nexec "%s" "$@" -O0\n' "$PWD/cosmo/bin/cosmocc" > cosmo/wrap/cosmocc
-  chmod +x cosmo/wrap/cosmocc
-
-  # cosmo/wrap FIRST (the shim), cosmo/bin LAST: cosmo/bin ships its own `make`
-  # which must not shadow MSYS2's.
-  export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
+  # cosmo/bin LAST: it ships its own `make`, which must not shadow MSYS2's.
+  export PATH="$PATH:$PWD/cosmo/bin"
 
   make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
 )
@@ -161,7 +152,7 @@ The `PATH` above is scoped to that subshell, which is the point, but it means
 a later rebuild needs it again:
 
 ```sh
-export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"   # from the repo root
+export PATH="$PATH:$PWD/cosmo/bin"   # from the repo root
 make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
 ```
 
