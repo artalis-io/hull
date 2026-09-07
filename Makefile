@@ -2130,9 +2130,44 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
     printf '%s\n' '$(BUILD_FINGERPRINT)' > $(BUILD_CONFIG_FILE); \
 })
 
+# ── Fat-cosmo object-pair repair ────────────────────────────────────
+#
+# cosmocc writes every object TWICE - `foo.o` and `.aarch64/foo.o` - but only
+# the first is a make target, so an interrupted build leaves a half-written
+# pair that make skips as up to date and the fat link then dies on, naming the
+# archive rather than the cause. It stays dead until `make clean`. That is the
+# exact state the Windows source build inherits whenever its watchdog kills a
+# wedged cc1, which is what stops its retry-after-stall mitigation from
+# working there (.github/workflows/windows-source-build.yml, HANG). The
+# failing messages and the full rationale are in the script.
+#
+# Parse-time on purpose, like the fingerprint purge above: the damage has to be
+# undone before make decides anything is up to date, and it decides that as it
+# walks. One consequence worth stating - `make -n` repairs too, so a dry run
+# over a corrupt tree describes the build that would actually happen.
+#
+# Two trees, because a fat build writes objects into exactly two: $(BUILDDIR)
+# (Hull's own objects plus every vendored one - mbedTLS, QuickJS, Lua, SQLite,
+# WAMR all land there) and Keel's, the one sub-make with its own object
+# directory. Pruning objects alone is not enough: make re-enters Keel's
+# sub-make only when libkeel.a is out of date, so a surviving half-paired
+# archive means the pruned objects are never rebuilt. The two paired ARCHIVES
+# are therefore named explicitly rather than swept - build/libhull_platform.a
+# is deliberately single-arch even under cosmocc, so a blanket `*.a` sweep
+# would delete it on every invocation and never converge.
+#
+# Gated on $(CC) being exactly `cosmocc`, the same test Keel uses to set
+# COSMO_FAT, so a single-arch cosmo build (x86_64-unknown-cosmo-cc) - where no
+# counterpart is ever expected and every object would look like an orphan - is
+# never touched. In steady state this is a no-op: a build that ran to
+# completion leaves no orphan.
+ifeq ($(CC),cosmocc)
+$(shell sh scripts/cosmo_fat_repair.sh $(BUILDDIR) $(KEEL_DIR) $(KEEL_LIB) $(BUILDDIR)/libhull.a >/dev/null)
+endif
+
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest check-no-emdash check-no-emdash-selftest check-no-milestone-narration check-no-milestone-narration-selftest check-keel-flags check-keel-flags-selftest check-site-consistency check-site-consistency-selftest platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest check-no-emdash check-no-emdash-selftest check-no-milestone-narration check-no-milestone-narration-selftest check-keel-flags check-keel-flags-selftest check-site-consistency check-site-consistency-selftest check-cosmo-fat-repair platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -3437,7 +3472,16 @@ check-site-consistency:
 check-site-consistency-selftest:
 	sh tests/check_site_consistency_selftest.sh
 
-lint: lint-lua lint-js check-sdk-headers check-docs-integrity check-no-emdash check-no-milestone-narration check-site-consistency check-keel-flags
+# Fat-cosmo pair-repair gate: scripts/cosmo_fat_repair.sh runs from a
+# parse-time $(shell) and DELETES build artifacts, so its blast radius has to
+# be pinned down. Over-reach means an artifact that legitimately has no aarch64
+# counterpart is deleted and rebuilt on every invocation and the build never
+# converges; a stray line on stdout is a syntax error in the middle of the
+# makefile. Synthetic trees, no compiler, under a second. See the script header.
+check-cosmo-fat-repair:
+	sh tests/check_cosmo_fat_repair.sh
+
+lint: lint-lua lint-js check-sdk-headers check-docs-integrity check-no-emdash check-no-milestone-narration check-site-consistency check-keel-flags check-cosmo-fat-repair
 
 # ── API documentation (two-tier: source comments + generated HTML) ──
 #

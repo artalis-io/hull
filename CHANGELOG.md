@@ -96,6 +96,18 @@ toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
   and labelled `[build-eval]` under `--verbose`. The window's existing bounds -
   the kernel sandbox, stripped dynamic-code loaders, no-op capability stubs,
   top-level only, once per process - are now documented at the call site.
+- **An interrupted cosmocc build could not be resumed, only `make clean`ed.**
+  cosmocc compiles every translation unit twice - `foo.o` beside
+  `.aarch64/foo.o` - and pairs the archives that collect them the same way, but
+  only the first of each pair is ever named as a make target. A build stopped
+  part-way (Ctrl-C, or the Windows source-build watchdog killing a wedged cc1)
+  therefore left a half-written pair that every later `make` skipped as up to
+  date, and the build died at the fat link on a message that named the archive
+  rather than the cause (`linker input missing concomitant
+  vendor/keel/.aarch64/libkeel.a file`). A parse-time repair now removes a
+  half-written pair so the ordinary rules rebuild both halves. This is also what
+  makes the Windows source build's retry-after-stall work: it resumes from the
+  objects already built, and one of those was the pair its own kill had broken.
 
 ## [0.14.0] - 2026-08-27
 

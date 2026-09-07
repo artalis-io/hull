@@ -424,6 +424,16 @@ jobs:
           # a retry costs a fraction of a build, and at ~30% per build three
           # attempts leave roughly 3% residual failure.
           #
+          # "Resumes from the objects already built" is only true because the
+          # Makefile now repairs the tree first. Killing a wedged cc1 lands
+          # mid-cosmocc, which compiles each TU twice: `foo.o` can exist while
+          # `.aarch64/foo.o` does not, and only the first is a make target, so
+          # every later make skipped the pair as up to date and the retry died
+          # at the fat link naming the archive rather than the cause - stuck
+          # until `make clean`. A parse-time repair (scripts/cosmo_fat_repair.sh)
+          # now deletes a half-written pair so the ordinary rules rebuild both
+          # halves, which is what makes retrying work at all here.
+          #
           # A retry is applied ONLY to a stall. A genuine compile error fails
           # immediately - retrying that would just hide it.
           stall_limit=${HULL_STALL_LIMIT_SECS:-300}

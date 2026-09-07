@@ -1417,6 +1417,18 @@ make CC=cosmocc
 - Sets `COSMO_FAT=1` only when `CC=cosmocc`: creates `.aarch64/libkeel.a` counterpart
 - Uses plain `ar` (not `cosmoar`. Cosmoar fails with recursive `.aarch64/` lookups)
 
+**Interrupted fat builds repair themselves.** Only the x86_64 half of each pair
+(`foo.o`, `libkeel.a`) is ever named as a make target - nothing names the
+`.aarch64/` counterpart - so make cannot tell that half a pair is missing. A
+build stopped part-way therefore used to leave an orphan that every later `make`
+skipped as up to date, dying at the fat link on `linker input missing
+concomitant .aarch64/libkeel.a` until someone ran `make clean`. When `CC` is
+exactly `cosmocc`, a parse-time hook runs `scripts/cosmo_fat_repair.sh` over
+`build/` and `vendor/keel/` (plus the two paired archives, named explicitly -
+`build/libhull_platform.a` is deliberately single-arch even under cosmocc) and
+deletes any orphan so the ordinary rules rebuild both halves. In steady state it
+is a no-op. Its blast radius is gated by `make check-cosmo-fat-repair`.
+
 **hull build with cosmo:**
 - `build.lua` detects `is_cosmo = cc:find("cosmocc")`
 - Searches for both arch-specific archives in `build/` or hull binary directory
