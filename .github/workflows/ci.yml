@@ -859,6 +859,21 @@ jobs:
           grep -q "e2e_modular_resolution: ALL PASS" modres.log \
             || { echo "::error::modular resolution e2e did not reach ALL PASS"; exit 1; }
 
+      - name: JS manifest-extraction isolation E2E (#427, must NOT skip)
+        timeout-minutes: 8
+        run: |
+          set -o pipefail
+          # Run the script DIRECTLY, not `make ...`: any bare `make` here trips
+          # the config sentinel and clobbers the embedded hull the build needs.
+          sh tests/e2e_manifest_extract_isolation.sh 2>&1 | tee mextract.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::manifest-extraction isolation e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' mextract.log; then
+            echo "::error::isolation e2e skipped - it must run on this JS-enabled build"; exit 1
+          fi
+          grep -q "e2e_manifest_extract_isolation: ALL PASS" mextract.log \
+            || { echo "::error::isolation e2e did not reach ALL PASS"; exit 1; }
+
       - name: Compute AOT shared-heap E2E (spans + segments, must NOT skip)
         timeout-minutes: 12
         run: |

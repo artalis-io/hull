@@ -1184,6 +1184,11 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(SRCDIR)/hull/commands/mcp.c, \
       $(CMD_SRCS))
 endif
+ifeq ($(HL_ENABLE_JS),0)
+  # `hull __extract-manifest-js` is the isolated child that reads a .js app's
+  # manifest (#427). Without a JS runtime there is nothing for it to run.
+  CMD_SRCS := $(filter-out $(SRCDIR)/hull/commands/extract_manifest_js.c,$(CMD_SRCS))
+endif
 CMD_OBJS := $(patsubst $(SRCDIR)/hull/commands/%.c,$(BUILDDIR)/cmd_%.o,$(CMD_SRCS))
 
 # Helpers shared by every runtime cache module (arch/endian tag,
@@ -2799,8 +2804,10 @@ $(BUILDDIR)/manifest_js.o: $(SRCDIR)/hull/manifest_js.c $(SRCDIR)/hull/manifest_
 # transient HlJS to read app.manifest({...}) from a .js entry point.
 # Lives outside the manifest_lua/manifest_js split because it ties the
 # JS extractor to a file-on-disk + transient-runtime workflow, not the
-# pre-existing "runtime is already running" extractor flow.
-$(BUILDDIR)/manifest_extract_file.o: $(SRCDIR)/hull/manifest_extract_file.c $(INCDIR)/hull/manifest_extract_file.h | $(BUILDDIR)
+# pre-existing "runtime is already running" extractor flow. Since #427 it
+# also owns the PARENT side of the isolated-child extraction, so it pulls in
+# cap/tool.h (spawn) and release_io.h (self-path).
+$(BUILDDIR)/manifest_extract_file.o: $(SRCDIR)/hull/manifest_extract_file.c $(INCDIR)/hull/manifest_extract_file.h $(INCDIR)/hull/cap/tool.h $(INCDIR)/hull/release_io.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Module registry - canonical sorted table of first-party modules

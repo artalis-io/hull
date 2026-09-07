@@ -24,14 +24,31 @@
 
 /**
  * @brief Load a `.js` app, JSON-stringify its declared manifest, and
- *        return a heap-allocated copy.
+ *        return a heap-allocated copy - in an ISOLATED CHILD PROCESS.
  *
- * Spins up a transient HlJS, runs the file (which triggers the app's
- * `app.manifest({...})` call), reads `globalThis.__hull_manifest`, and
- * serializes it via `JSON.stringify`. Tears the runtime down on every
- * exit path.
+ * Runs the extraction by re-execing `hull __extract-manifest-js` and
+ * reading the result back from a temp file. The isolation exists because
+ * a transient QuickJS runtime can abort the WHOLE PROCESS during teardown
+ * on an app that leaves a self-referential pending microtask: the cycle
+ * collector in `JS_FreeRuntime` double-frees the promise resolver and the
+ * allocator raises SIGABRT (issue #427). In-process that kills `hull build`
+ * with no diagnostic; in a child it is contained.
+ *
+ * The child writes its result BEFORE tearing its runtime down, so a
+ * teardown abort still yields a usable manifest and the build SUCCEEDS
+ * rather than merely failing cleanly.
+ *
+ * A child that cannot be launched at all (no resolvable `hull` path, spawn
+ * refused) falls back to running in-process, which is exactly the old
+ * behaviour - isolation is best-effort hardening, never a new way to fail.
+ * A child that DID launch is never retried in-process: that would re-run
+ * the very abort the isolation exists to contain.
  *
  * @param path         Filesystem path to the JS entry point.
+ * @param hull_exe     Path to the running `hull` binary, for the re-exec
+ *                     (the tool VM's `__hull_exe`). NULL is allowed and
+ *                     selects the in-process fallback when the platform
+ *                     cannot resolve its own path (cosmo has no /proc).
  * @param out_json     On success: receives a malloc'd UTF-8 JSON string.
  *                     Caller frees with `free()`. On "no manifest declared"
  *                     receives NULL with no allocation. On error, undefined.
@@ -48,8 +65,48 @@
  * macro themselves before invoking.
  */
 int hl_manifest_extract_js_from_file(const char *path,
+                                       const char *hull_exe,
                                        char **out_json,
                                        size_t *out_json_len,
                                        char **out_err);
+
+/**
+ * @brief The extraction itself, run IN THIS PROCESS.
+ *
+ * Same contract as hl_manifest_extract_js_from_file() minus @p hull_exe.
+ * This is the half that spins up the transient HlJS, and therefore the
+ * half that can abort during QuickJS teardown (issue #427).
+ *
+ * Two callers, both deliberate:
+ *   - `hull __extract-manifest-js` (the isolated child), and
+ *   - hl_manifest_extract_js_from_file()'s fallback when no child could
+ *     be launched.
+ * Everything else must go through hl_manifest_extract_js_from_file().
+ *
+ * @param early_result_path  When non-NULL, the outcome is written there via
+ *        hl_manifest_extract_write_result() BEFORE the JS runtime is torn
+ *        down. That ordering is the whole point: teardown is where QuickJS
+ *        aborts, and by then the manifest is already safely on disk. Pass
+ *        NULL when the caller consumes the return value directly.
+ */
+int hl_manifest_extract_js_in_process(const char *path,
+                                       const char *early_result_path,
+                                       char **out_json,
+                                       size_t *out_json_len,
+                                       char **out_err);
+
+/**
+ * @brief Write one extraction outcome to @p out_path.
+ *
+ * Format is a single header line then the payload verbatim:
+ *   "HULLMANIFEST1 <status>" then a newline then the payload; status is one
+ *   of `ok` / `none` / `err`.
+ * The magic lets the reader tell a real result from a file the child never
+ * finished writing.
+ *
+ * @return 0 on success; -1 on any write failure (the partial file is removed).
+ */
+int hl_manifest_extract_write_result(const char *out_path, const char *status,
+                                     const char *payload, size_t payload_len);
 
 #endif /* HL_MANIFEST_EXTRACT_FILE_H */

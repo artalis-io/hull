@@ -636,7 +636,16 @@ static int l_tool_extract_manifest_js(lua_State *L)
     size_t json_len = 0;
     char  *err  = NULL;
 
-    int rc = hl_manifest_extract_js_from_file(path, &json, &json_len, &err);
+    /* The extraction runs in a re-exec'd child (#427), so it needs a path to
+     * this binary. hl_release_io_self_path handles Linux/macOS; on cosmo it
+     * cannot, and __hull_exe (argv[0], set by hull_tool) is the only route. */
+    const char *hull_exe = NULL;
+    lua_getglobal(L, "__hull_exe");
+    if (lua_isstring(L, -1)) hull_exe = lua_tostring(L, -1);
+
+    int rc = hl_manifest_extract_js_from_file(path, hull_exe,
+                                              &json, &json_len, &err);
+    lua_pop(L, 1);   /* __hull_exe - popped only after the call, which borrows it */
     if (rc != 0) {
         char buf[256];
         snprintf(buf, sizeof(buf), "tool.extract_manifest_js: %s",

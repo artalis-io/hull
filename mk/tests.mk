@@ -1421,6 +1421,13 @@ e2e-validate-parity: $(BUILDDIR)/hull
 e2e-modular-resolution: $(BUILDDIR)/hull
 	sh tests/e2e_modular_resolution.sh
 
+# JS manifest extraction is isolated in a child process (#427): a QuickJS
+# teardown abort must not reach `hull build`. Needs an embedded hull, so CI
+# runs it in the same job as e2e-modular-resolution, after EMBED_PLATFORM=1.
+.PHONY: e2e-manifest-extract-isolation
+e2e-manifest-extract-isolation: $(BUILDDIR)/hull
+	sh tests/e2e_manifest_extract_isolation.sh
+
 .PHONY: e2e-path-parity
 e2e-path-parity: $(BUILDDIR)/hull
 	sh tests/e2e_path_parity.sh
