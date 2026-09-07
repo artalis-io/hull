@@ -16,8 +16,14 @@
 #   - uncaught -> a clean 500 (not a 000 hang, not a swallowed 200)
 #   - pcall / try-catch -> the handler recovers and responds 200
 #
-# Also asserts the SHARED js/async.c fix generalises beyond compute: a db.async
-# error (a throwing consumer, like compute/gpu) now rejects too (cross-consumer).
+# Also asserts the fix generalises beyond compute, in BOTH runtimes: a db.async
+# error surfaces rather than hanging or being swallowed (cross-consumer). JS got
+# that from the one shared js/async.c reject; Lua needed the same continuation
+# treatment per module, which #321 did for db.async.
+#
+# (gpu.async needs no such fix and never did, despite what #321 assumed: its
+# push_result callbacks return a { result } / { error } TABLE rather than
+# raising, so nothing can longjmp out of the resume there.)
 #
 # Persistent-instance async additionally depends on the busy-owner fix (#316,
 # landing via #313). On a base without #316 the first persistent async call is
@@ -139,17 +145,17 @@ run_rt() {
     else
         fail "${runtime} persistent async trap hung (000)"
     fi
-    # Cross-consumer proof for the SHARED js/async.c reject fix: db.async (another
-    # throwing consumer) error is catchable too. JS-only: the JS fix is shared
-    # across all consumers, so one fix covers compute+db+gpu. The Lua side is
-    # per-module (the #317 continuation only landed for compute); Lua db.async /
-    # gpu.async still hang on error -- tracked as #321, not #319.
-    if [ "$runtime" = "js" ]; then
-        case "$dberr" in
-            *'"ok":false'*) pass "${runtime} db.async error is catchable (cross-consumer)" ;;
-            *) fail "${runtime} db.async error catchable (got: $dberr)" ;;
-        esac
-    fi
+    # Cross-consumer proof: a db.async error is catchable too, in BOTH runtimes.
+    # JS got this from the shared js/async.c reject (#319 - one fix covers every
+    # consumer). Lua is per-module: #317/#320 gave compute.async its lua_yieldk
+    # continuation, and #321 gave db.async the same, which is what un-gated this
+    # assertion for Lua. Before that the Lua leg HUNG here (HTTP 000, empty
+    # body), so an empty $dberr is the specific regression this catches.
+    case "$dberr" in
+        *'"ok":false'*) pass "${runtime} db.async error is catchable (cross-consumer)" ;;
+        "")             fail "${runtime} db.async error HUNG (empty body - the #321 raise escaped lua_resume)" ;;
+        *)              fail "${runtime} db.async error catchable (got: $dberr)" ;;
+    esac
 }
 
 run_rt "lua" "lua"
