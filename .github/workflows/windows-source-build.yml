@@ -58,27 +58,18 @@ name: Windows source build (cosmocc, -O0)
 #   It proves "the source compiles and links on Windows", nothing stronger.
 #   Optimized-build correctness stays covered by the Linux/macOS jobs in ci.yml.
 #
-#   HL_OPT DOES NOT REACH KEEL, which is why the probe installs an -O0 shim.
-#   mk/vendor/keel.mk hands Keel's sub-make CC, AR and the TLS/compress config
-#   and nothing else, so Keel compiles at its own hardcoded -O2 (its Makefile
-#   lines 32/34, plus VENDOR_CFLAGS for the miniz TUs). Run 34035825889 proved
+#   HL_OPT REACHES KEEL DIRECTLY (since hull#461 / artalis-io/keel#261).
+#   It did not always. mk/vendor/keel.mk used to hand Keel's sub-make CC, AR
+#   and the TLS/compress config and nothing else, so Keel compiled at its own
+#   hardcoded -O2 while everything else honoured -O0. Run 34035825889 proved
 #   the cost: 427 TUs at -O0, 81 at -O2, then 41 minutes of silence with two
-#   -O2 miniz TUs in flight until the 45-minute cap. Two Hull-side follow-ups
-#   this exposes, both OUT OF SCOPE for this workflow but worth fixing:
-#     1. HL_OPT should propagate to the Keel sub-make rather than being forced
-#        by a CI-local shim.
-#     2. The KEEL_EXTRA_CFLAGS / KEEL_EXTRA_LDFLAGS that mk/vendor/keel.mk
-#        passes are not referenced ANYWHERE in Keel's tree, so Hull's LTO and
-#        CFI flags are silently discarded on EVERY platform, not just here.
-#     Keel exposes no opt or append hook today, so both need a Keel-side knob.
-#     Tracked in issue #461 - the -O0 shim below MUST stay until that lands.
+#   -O2 miniz TUs in flight until the 45-minute cap. This job worked around it
+#   with a cosmocc shim that appended -O0; Keel then gained a KEEL_OPT knob,
+#   Hull passes it, and the shim is gone.
 #
-#   READING THE LOG: Keel's compile lines still ECHO -O2, because make echoes
-#   the recipe and the shim appends -O0 at exec time. The effective level is
-#   -O0; `grep -c -- -O2` on the log is therefore NOT evidence the shim failed.
-#   The evidence that it worked is the build COMPLETING (~2.5 min in run
-#   34038376368) where it previously went silent for 41 minutes at the same
-#   miniz TUs.
+#   The probe ASSERTS the propagation rather than assuming it, because this is
+#   the only job where -O0 is load-bearing: if it ever regresses, the failure
+#   should be one line in the probe, not a 45-minute wedge on a -O2 TU.
 #
 # HL_ENABLE_WASM=0: WAMR under cosmocc-on-Windows is unproven and would make a
 # "quick" job slow and flaky. The WASM surface is covered on Linux in ci.yml.
@@ -93,7 +84,8 @@ name: Windows source build (cosmocc, -O0)
 #   do NOT all share a cause:
 #
 #     a) miniz at -O2 (run 34035825889) - CAUSED by HL_OPT never reaching the
-#        Keel sub-make. Fixed by the -O0 shim in the probe step. Deterministic.
+#        Keel sub-make. Deterministic. Fixed properly in hull#461: Keel now
+#        takes KEEL_OPT, so -O0 reaches it by the ordinary route.
 #     b) build/stdlib_js_registry.c at -O0 (run 34040823575) - OPEN. Hull's own
 #        xxd-generated stdlib array, compiled at -O0, which takes <1s in a
 #        healthy run. Nothing to do with Keel or with -O2.
@@ -237,41 +229,6 @@ jobs:
           # costs nothing.
           export PATH="$PATH:$PWD/cosmo/bin"
 
-          # FORCE THE OPT LEVEL ONTO KEEL TOO.
-          #
-          # HL_OPT=-O0 reaches Hull's own TUs and Hull's vendored ones, but NOT
-          # Keel: mk/vendor/keel.mk hands its sub-make CC, AR and the TLS /
-          # compress config, and nothing else, so Keel builds at its own
-          # hardcoded -O2 (Makefile lines 32/34, and VENDOR_CFLAGS for miniz).
-          # Run 34035825889 died exactly there - 427 TUs at -O0, 81 at -O2, then
-          # 41 minutes of total silence with two -O2 miniz TUs in flight
-          # (compress_miniz.c, decompress_miniz.c) until the 45-minute cap. That
-          # is the documented cosmocc wedge, and -O0 is the whole reason this
-          # job is viable, so Keel has to get it too.
-          #
-          # Keel exposes no opt knob and no append hook - the KEEL_EXTRA_CFLAGS
-          # Hull passes is not referenced anywhere in Keel's tree (issue #461,
-          # which is where this shim gets deleted) - and its
-          # CFLAGS/VENDOR_CFLAGS are plain `=`, so the only lever that does not
-          # mean restating all of Keel's flags is the compiler itself. gcc takes
-          # the LAST -O, so a wrapper appending ours after everything wins.
-          #
-          # It MUST be named `cosmocc`: Keel sets COSMO_FAT (the dual-arch
-          # .aarch64 build) only for `ifeq ($(CC),cosmocc)` exactly, so any
-          # other name silently drops half the fat APE. Hence a shadowing
-          # wrapper first on PATH rather than a differently-named CC.
-          mkdir -p "$PWD/cosmo/wrap"
-          { echo '#!/bin/sh'
-            echo "exec \"$PWD/cosmo/bin/cosmocc\" \"\$@\" -O0"
-          } > "$PWD/cosmo/wrap/cosmocc"
-          chmod +x "$PWD/cosmo/wrap/cosmocc"
-          export PATH="$PWD/cosmo/wrap:$PATH"
-          resolved=$(command -v cosmocc)
-          case "$resolved" in
-            */cosmo/wrap/cosmocc) echo "cosmocc -O0 shim active: $resolved" ;;
-            *) echo "FAIL cosmocc did not resolve to the -O0 shim: $resolved"; exit 1 ;;
-          esac
-
           echo "make candidates:"; { type -a make 2>/dev/null || echo "(none)"; } | sed 's/^/  /'
           MAKE_BIN=$(command -v make || true)
           [ -n "$MAKE_BIN" ] || { echo "FAIL no make on PATH"; exit 1; }
@@ -284,6 +241,35 @@ jobs:
           echo "sh      : $(command -v sh || echo MISSING)"
           echo "cosmocc : $(command -v cosmocc || echo MISSING)"; cosmocc --version | head -1
           echo "MAKE_BIN=$MAKE_BIN" >> "$GITHUB_ENV"
+
+          # KEEL GETS THE OPT LEVEL DIRECTLY NOW.
+          #
+          # This step used to shadow cosmocc with a wrapper that appended -O0,
+          # because HL_OPT reached Hull's own TUs but not Keel: mk/vendor/keel.mk
+          # handed the sub-make CC, AR and the TLS/compress config and nothing
+          # else, so Keel built at its own hardcoded -O2. Run 34035825889 died
+          # exactly there, wedging on two -O2 miniz TUs until the 45-minute cap.
+          #
+          # Keel now exposes KEEL_OPT (artalis-io/keel#261) and Hull passes it
+          # (hull#461), so the shim is gone and -O0 reaches Keel by the ordinary
+          # route. Assert that rather than assume it: this job is the only place
+          # the -O0 requirement is load-bearing, so if propagation ever breaks
+          # again it should say so here, in one line, instead of wedging for 45
+          # minutes on a -O2 TU.
+          echo "--- Keel receives the opt level directly ---"
+          keel_opt=$("$MAKE_BIN" -n HL_OPT=-O0 vendor/keel/libkeel.a 2>/dev/null \
+                     | grep -- ' -c -o src/' | grep -oE ' -O[0-9]' | sort -u | tr -d ' ' | tr '\n' ' ')
+          keel_vendor_opt=$("$MAKE_BIN" -n HL_OPT=-O0 vendor/keel/libkeel.a 2>/dev/null \
+                     | grep -- ' -c -o vendor/' | grep -oE ' -O[0-9]' | sort -u | tr -d ' ' | tr '\n' ' ')
+          echo "  keel core TUs   : ${keel_opt:-<none>}"
+          echo "  keel vendored   : ${keel_vendor_opt:-<none>}"
+          if [ "$(echo $keel_opt)" = "-O0" ] && [ "$(echo $keel_vendor_opt)" = "-O0" ]; then
+            echo "  ok: HL_OPT=-O0 reaches Keel, no shim needed"
+          else
+            echo "FAIL HL_OPT=-O0 does not reach Keel (core='$keel_opt' vendored='$keel_vendor_opt')."
+            echo "     That is the hull#461 regression; the build would wedge on a -O2 TU."
+            exit 1
+          fi
 
           # REGRESSION GUARD for the reason this job uses MSYS2. A native Win32
           # make mangles escaped-quote defines into a single argument (see the
@@ -403,11 +389,11 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          # cosmo/wrap PREPENDED: it holds the -O0 shim the probe built (see
-          # there for why Keel needs it). cosmo/bin APPENDED so its bundled
-          # APE make cannot shadow MSYS2's.
-          export PATH="$PWD/cosmo/wrap:$PATH:$PWD/cosmo/bin"
-          test -x cosmo/wrap/cosmocc || { echo "FAIL cosmocc -O0 shim missing"; exit 1; }
+          # cosmo/bin APPENDED so its bundled APE make cannot shadow MSYS2's.
+          # No cosmocc shim any more: Keel receives HL_OPT directly now
+          # (hull#461 / artalis-io/keel#261), and the probe asserts it.
+          # MAKE_BIN and AR both arrive from the probe via $GITHUB_ENV.
+          export PATH="$PATH:$PWD/cosmo/bin"
           # HL_OPT is the Makefile knob that routes the optimization level
           # through Hull's OWN TUs *and* every vendored one (quickjs/lua/sqlite
           # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
