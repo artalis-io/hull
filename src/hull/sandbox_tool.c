@@ -22,6 +22,7 @@
 #include "hull/sandbox.h"
 #include "hull/cap/tool.h"   /* hl_tool_cosmo_prepare_tmpdir / _tmpdir */
 #include "hull/shared/cache_dir.h"
+#include "hull/release_io.h"  /* hl_release_io_self_path */
 #include "log.h"
 
 #include <limits.h>
@@ -157,6 +158,25 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     /* Platform library + hull binary: read + execute */
     if (platform_dir)
         hl_tool_unveil_add(ctx, platform_dir, "rx");
+
+    /* hull re-execs ITSELF to isolate JS manifest extraction (issue #427), so
+     * the running binary has to stay executable under this sandbox.
+     * platform_dir covers it only when argv[0] carried a slash; the common
+     * `hull build myapp` off $PATH leaves it NULL, and an install prefix like
+     * ~/.local/bin is under none of the roots unveiled above. Resolve the real
+     * path and unveil its DIRECTORY (not $HOME, not "/"). Best-effort: cosmo
+     * has no self-path route, and the extraction falls back to in-process when
+     * the spawn is refused. */
+    {
+        char self[PATH_MAX];
+        if (hl_release_io_self_path(self, sizeof(self)) == 0) {
+            char *slash = strrchr(self, '/');
+            if (slash && slash != self) {   /* skip "/hull": never unveil "/" */
+                *slash = '\0';
+                hl_tool_unveil_add(ctx, self, "rx");
+            }
+        }
+    }
 
     /* Side-loaded tool assets: $HOME/.hull/tools holds tool binaries (wamrc,
      * lld) that get executed AND the libc-musl-<arch> floor bundle
