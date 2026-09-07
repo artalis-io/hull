@@ -592,18 +592,43 @@ static int lua_db_quote_identifier(lua_State *L)
 
 /* ── db.async.query / db.async.exec ─────────────────────────────────── */
 
+/* Continuation for db.async.query / .exec. Runs INSIDE lua_resume (Lua calls
+ * it when the yielded coroutine is resumed), so a raise here is a proper
+ * coroutine error - catchable by pcall, otherwise a 500 - rather than a
+ * longjmp out of the resume that leaves the connection suspended (#321).
+ *
+ * The op arrives as the yield's KContext and is still alive: both resume paths
+ * in shared/async.c call cont->resume BEFORE free_driver. Mirrors
+ * lua_compute_async_k (#320) and the JS side's promise reject (#319).
+ *
+ * On success lua_push_worker_db_result has already pushed the single result
+ * value; return it unchanged. */
+static int lua_db_async_k(lua_State *L, int status, lua_KContext kctx)
+{
+    (void)status;
+    HlWorkerDbOp *op = (HlWorkerDbOp *)kctx;
+    if (op && op->error)
+        return luaL_error(L, "db.async: %s", op->error_msg);
+    return 1;
+}
+
 /* push_result callback: convert HlWorkerDbOp result to Lua value.
- * On error, raises a Lua error (longjmps out of the resume continuation,
- * which propagates as a regular pcall failure in user code). Successful
- * exec returns { changes, last_id }; query returns rows array directly. */
+ * On error it pushes a NIL PLACEHOLDER and leaves the raising to
+ * lua_db_async_k - see there for why. Successful exec returns
+ * { changes, last_id }; query returns rows array directly. */
 static void lua_push_worker_db_result(lua_State *L, void *driver)
 {
     HlWorkerDbOp *op = (HlWorkerDbOp *)driver;
 
     if (op->error) {
-        /* luaL_error longjmps - caller's resume completes with an error */
-        luaL_error(L, "db.async: %s", op->error_msg);
-        return; /* unreachable */
+        /* Push a placeholder and let lua_db_async_k raise. Raising HERE would
+         * longjmp out of hl_async_on_resume, which runs BEFORE lua_resume - the
+         * error would escape the resume entirely and strand the suspended
+         * connection (issue #321: the request hangs at HTTP 000 instead of
+         * failing). The continuation raises from INSIDE lua_resume, where it
+         * becomes a proper coroutine error a pcall can catch. */
+        lua_pushnil(L);
+        return;
     }
 
     if (op->kind == HL_WORK_DB_WAIT_NOTIFY) {
@@ -792,7 +817,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         return luaL_error(L, "db.async: failed to suspend connection");
     }
 
-    return lua_yieldk(L, 0, 0, NULL);
+    return lua_yieldk(L, 0, (lua_KContext)op, lua_db_async_k);
 }
 
 static int lua_db_async_query(lua_State *L)
