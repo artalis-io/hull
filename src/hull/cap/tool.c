@@ -154,9 +154,40 @@ int hl_tool_check_allowlist(const char *binary)
 {
     if (!binary) return -1;
 
-    /* Extract basename */
-    const char *base = strrchr(binary, '/');
-    base = base ? base + 1 : binary;
+    /* Extract basename. Split on BOTH separators: a cosmo APE reaches Windows,
+     * where a resolved tool path is "C:\tools\gcc.exe" - with '/' alone the
+     * whole string stays the "basename" and never matches. */
+    const char *base = binary;
+    for (const char *c = binary; *c; c++)
+        if (*c == '/' || *c == '\\') base = c + 1;
+
+    /* Drop a host executable suffix before matching. The same tool is `cc` on
+     * POSIX and `cc.exe` on Windows (and hull itself installs as `hull.com`,
+     * the APE convention - see install.ps1 and hl_host_exe_suffix). Without
+     * this every allowlisted tool is denied there, because the match below
+     * accepts only an exact name or a `-<digit>` version suffix.
+     *
+     * Narrow by construction: only these two suffixes, only trailing, and only
+     * the SUFFIX is removed - the remaining name still has to be on the list,
+     * so this admits no name that was not already allowed.
+     *
+     * Case-SENSITIVE, like the name match below it. A mixed-case "CC.EXE" is
+     * therefore still denied - exactly as bare "CC" is today, so this is a
+     * limitation carried over, not one introduced. Matching names case-
+     * insensitively would be a real behaviour change (and wrong on POSIX,
+     * where case is significant), so it is deliberately not done here. */
+    char stripped[64];
+    size_t blen = strlen(base);
+    for (const char **sfx = (const char *[]){ ".com", ".exe", NULL }; *sfx; sfx++) {
+        size_t slen = strlen(*sfx);
+        if (blen > slen && blen - slen < sizeof(stripped) &&
+            memcmp(base + blen - slen, *sfx, slen) == 0) {
+            memcpy(stripped, base, blen - slen);
+            stripped[blen - slen] = '\0';
+            base = stripped;
+            break;
+        }
+    }
 
     for (const char **p = allowed_prefixes; *p; p++) {
         size_t plen = strlen(*p);
