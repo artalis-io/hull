@@ -269,10 +269,10 @@ retained node (opaque to the neutral model - a Lua-specific lowering step inspec
   body }` (the parser's exact param/statement subtrees).
 
 **Read-only contract.** `values` / `positional_value` / `params` / `body` are **live
-references** into that generation's parsed AST — deliberately not deep-copied, so byte
+references** into that generation's parsed AST: deliberately not deep-copied, so byte
 ranges stay exact and nothing is duplicated. A consumer **must treat them read-only**:
 mutating a returned subtree corrupts the generation's AST (and any sibling declaration that
-shares the same node — every name of a multi-name `local` shares one node). This is
+shares the same node, since every name of a multi-name `local` shares one node). This is
 trusted-consumer discipline (app code never reaches `resolve_handle`; only in-process
 build/tool lowerers do, and each analysis re-parses fresh), so no copy/freeze is imposed on
 the hot path.
