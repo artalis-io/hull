@@ -81,6 +81,33 @@ int hl_tool_spawn(const char *const argv[]);
  */
 int hl_tool_spawn_env(const char *const argv[], const char *const envadd[]);
 
+/** @brief hl_tool_spawn_self(): the child could not be started at all. */
+#define HL_TOOL_SPAWN_NOSTART (-2)
+
+/**
+ * @brief Re-exec the binary that is currently running.
+ *
+ * Unlike hl_tool_spawn(), this does NOT consult the compiler allowlist. That
+ * allowlist bounds which EXTERNAL programs a build may execute; re-running the
+ * process that is already running grants no authority it does not already
+ * have, and the allowlist cannot express it anyway - hull ships under several
+ * names (`hull`, `hull.com` on Windows, `hull-cosmo.exe` in CI), none of which
+ * the exact-or-`-<digit>` match admits. Argument validation still applies.
+ *
+ * Used by JS manifest extraction (issue #427), which runs the transient
+ * QuickJS runtime in a child so a teardown abort cannot kill `hull build`.
+ *
+ * @param argv NULL-terminated argv. argv[0] MUST be a resolved path to this
+ *             binary (from hl_release_io_self_path, else the caller's argv[0]):
+ *             the cosmo path uses posix_spawn, which does no PATH search.
+ * @return The child's exit status; -1 if it started but did not exit normally
+ *         (killed by a signal); #HL_TOOL_SPAWN_NOSTART if it never started.
+ *         The caller MUST distinguish the last two: retrying an aborted run
+ *         in-process reproduces the crash the child exists to contain, while
+ *         refusing to retry one that never started breaks builds for no reason.
+ */
+int hl_tool_spawn_self(const char *const argv[]);
+
 /*
  * Drive an allowlisted compiler @p driver THROUGH a POSIX shell @p shell,
  * running `<shell> [sh] -c 'exec "$0" "$@"' <driver> <args...>` (the "sh"

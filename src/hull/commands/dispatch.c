@@ -56,6 +56,7 @@
 #include "hull/commands/verify_self.h"
 #include "hull/commands/sbom.h"
 #include "hull/commands/cache.h"
+#include "hull/commands/extract_manifest_js.h"
 #include "hull/commands/help.h"
 
 #include <string.h>
@@ -105,6 +106,12 @@ static const HlCommand commands[] = {
     { "sbom",           hl_cmd_sbom },
     { "cache",          hl_cmd_cache },
     { "help",           hl_cmd_help },
+    /* INTERNAL, not user-facing: the isolated child that reads a .js app's
+     * manifest so a QuickJS teardown abort cannot kill `hull build` (#427).
+     * Deliberately absent from help.c and completions/. */
+#ifdef HL_ENABLE_JS
+    { "__extract-manifest-js", hl_cmd_extract_manifest_js },
+#endif
     { NULL, NULL }  /* sentinel */
 };
 
