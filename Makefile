@@ -640,6 +640,18 @@ ifeq ($(HL_ENABLE_CFI),1)
         $(shell command -v ld.lld-18 2>/dev/null),\
         $(shell command -v ld.lld-17 2>/dev/null),\
         $(shell command -v ld.lld-16 2>/dev/null))
+    # -fuse-ld=lld names the UNVERSIONED driver only: clang rejects
+    #   -fuse-ld=lld-18   error: invalid linker name
+    # and Ubuntu commonly ships ONLY the versioned ld.lld-N, which is exactly
+    # why the probe lists them. So emit --ld-path=<resolved path> whenever the
+    # match is not the plain name; that form takes an absolute path and works
+    # for both. Without this the gate would pass on a versioned-only host and
+    # the link would still fail - the very thing it exists to prevent.
+    ifeq ($(notdir $(HL_CFI_LD)),ld.lld)
+      HL_CFI_LDFLAG := -fuse-ld=lld
+    else
+      HL_CFI_LDFLAG := --ld-path=$(HL_CFI_LD)
+    endif
     ifeq ($(HL_CFI_LD),)
       $(warning HL_ENABLE_CFI=1 but ld.lld was not found; clang CFI cannot link with GNU ld, building without CFI)
       HL_CFI_CFLAG :=
@@ -647,7 +659,7 @@ ifeq ($(HL_ENABLE_CFI),1)
     endif
   endif
   ifneq ($(HL_CFI_CFLAG),)
-    LDFLAGS          += -fuse-ld=lld
+    LDFLAGS          += $(HL_CFI_LDFLAG)
     CFLAGS           += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit -DHL_CFI_BUILD=1
     LDFLAGS          += $(HL_CFI_CFLAG) -fsplit-lto-unit
     LUA_CFLAGS       += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
