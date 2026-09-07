@@ -1328,6 +1328,56 @@ void *const hull_cosmo_http_bridge_force[] = {
     return feature_objs, feature_libs, needs_base_group, composed_assets
 end
 
+-- detect_instrumented_platform: is the resolved platform archive built with a
+-- sanitizer? (issue #295)
+--
+-- A `make debug` / `make tsan` / `make msan` tree leaves an INSTRUMENTED
+-- libhull_platform.a in build/. `hull build` links the app through the
+-- compiler-free emitter (or a plain system `cc`) and passes no -fsanitize=...,
+-- so the sanitizer runtime is never linked and the link dies at the very last
+-- step on a page of undefined __asan_ / __ubsan_ symbols that names neither the
+-- cause nor the fix.
+--
+-- Only reachable in DEVELOPMENT mode: `platform_dir` is non-nil exactly when
+-- the archive came from a local build tree. The archive embedded in a released
+-- hull is never instrumented.
+--
+-- Returns a human-readable sanitizer name, or nil.
+local function detect_instrumented_platform(platform_lib, platform_dir)
+    if not platform_dir then return nil end
+
+    -- Cheap first: `make debug` records DEBUG := 1 next to the archive. No
+    -- subprocess, and it works on hosts where nm is missing entirely (Git Bash
+    -- on Windows ships no binutils, for one).
+    if file_exists(platform_dir .. ".sanitizer.mk") then
+        return "ASan+UBSan, from `make debug` (build/.sanitizer.mk)"
+    end
+
+    -- Authoritative: probe the archive itself. This is the ONLY route that
+    -- catches `make tsan` / `make msan`, which instrument just as thoroughly
+    -- but do not write the stamp (Makefile:3111 writes it for `debug` alone).
+    --
+    -- nm may be absent, or unable to read a cross-arch archive. On no output we
+    -- stay silent rather than guess: a false refusal would block a legitimate
+    -- build, and the raw linker error is still there as the fallback. Mirrors
+    -- the base_has_sqlite probe's "default to not-composing" caution.
+    local nm_out = tool.spawn_read({ "nm", platform_lib })
+    if not nm_out then return nil end
+    -- Ordered, not a table of pairs: ASan and UBSan co-occur under `make debug`
+    -- and the first match is the one reported, so the order is the priority.
+    -- Substring match also catches the leading-underscore mangling (___asan_).
+    local probes = {
+        { "__asan_",  "AddressSanitizer"            },
+        { "__ubsan_", "UndefinedBehaviorSanitizer"  },
+        { "__tsan_",  "ThreadSanitizer"             },
+        { "__msan_",  "MemorySanitizer"             },
+    }
+    for _, p in ipairs(probes) do
+        if nm_out:find(p[1], 1, true) then return p[2] end
+    end
+    return nil
+end
+
 -- prepare_platform: extract the platform library into the temp build dir (from
 -- the embedded base, a --flavor asset, or the eject dir) and run the platform-sig
 -- cross-check. Extracted from main() (docs/build_modularization.md).
@@ -1533,6 +1583,25 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
             tool.stderr("hull build: cannot find libhull_platform.a\n")
             tool.stderr("hint: run `make platform` first, or use an embedded hull build\n")
         end
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
+
+    -- Refuse an instrumented base rather than letting the app link die on a
+    -- page of undefined sanitizer symbols (issue #295). Feature-agnostic and
+    -- NOT specific to --with: the instrumented input is the PLATFORM lib, so a
+    -- plain `hull build` from a `make debug` tree hits it too. Dev mode only;
+    -- platform_dir is nil for the archive embedded in a released hull.
+    local sanitizer = detect_instrumented_platform(platform_lib, platform_dir)
+    if sanitizer then
+        local where = (platform_dir == "" and "./") or platform_dir
+        tool.stderr("hull build: the platform library in " .. where
+                    .. " is instrumented (" .. sanitizer .. ").\n")
+        tool.stderr("  The app link passes no -fsanitize=..., so it would fail at\n")
+        tool.stderr("  the final step on undefined sanitizer symbols, naming\n")
+        tool.stderr("  neither the cause nor the fix.\n")
+        tool.stderr("hint: compose against a non-instrumented tree:\n")
+        tool.stderr("        make clean && make\n")
         tool.rmdir(tmpdir)
         tool.exit(1)
     end
