@@ -70,6 +70,7 @@ specific signature, parameter list, or return value.
 | [`release_acceptance_v0.14.0.md`](release_acceptance_v0.14.0.md) | Durable v0.14.0 acceptance record: release tag/commit, published binary SHA-256s, environment assertions, and each smoke result (self-contained after the Actions artifacts expire). |
 | [`windows_install.md`](windows_install.md) | User-facing Windows install guide: `install.ps1` quick start, options, verification, uninstall, and the one-time v0.13.0 -> v0.14.0 upgrade. |
 | [`windows_install_design.md`](windows_install_design.md) | Windows-native install/upgrade/verify/remove UX design: the explicit trust model, the user-local install dir + PATH convention, the `install.ps1` CLI contract, Winget/Scoop shape, and the Authenticode-on-APE experiment plan. |
+| [`cosmocc_windows_wedge_upstream_report.md`](cosmocc_windows_wedge_upstream_report.md) | Draft upstream report for the intermittent cosmocc-on-Windows `cc1` hang: reproducer, the ~12% per-large-TU rate, the CPU-delta evidence that it is blocked rather than spinning, and the hypotheses ruled out by measurement (temp dir, parallelism, one bad file, arch). Hull-side tracking in issue #462. |
 | [`sbom.md`](sbom.md) | The SBOM subsystem (human / JSON / CycloneDX / SPDX formats). |
 | [`compiler_free_build.md`](compiler_free_build.md) | The object-emitter path: `hull build` needs only a linker (no C compiler). |
 | [`toolchain_free_build.md`](toolchain_free_build.md) | Linker-as-tool + cross-compilation (`--linker=zig`), the musl static-link floors. |
