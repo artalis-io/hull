@@ -117,6 +117,66 @@ UTEST(tool, allowlist_reject_empty)
     ASSERT_NE(hl_tool_check_allowlist(""), 0);
 }
 
+/* Windows executable names. A cosmo APE reaches Windows, where the tools
+ * `hull build` spawns are `cc.exe` / `gcc.exe` and paths are backslash-
+ * separated. Two blind spots made every one of them DENIED there: the basename
+ * was split on '/' only, so "C:\tools\gcc.exe" stayed whole and matched
+ * nothing; and the match accepts only an exact name or a `-<digit>` version, so
+ * a clean "cc.exe" fell through as well. */
+UTEST(tool, allowlist_accept_windows_com_suffix)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("hull.com"), 0);
+    ASSERT_EQ(hl_tool_check_allowlist("cosmocc.com"), 0);
+}
+
+UTEST(tool, allowlist_accept_windows_exe_suffix)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("cc.exe"), 0);
+    ASSERT_EQ(hl_tool_check_allowlist("clang-18.exe"), 0);
+}
+
+UTEST(tool, allowlist_accept_windows_backslash_path)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("C:\\Users\\m\\.local\\bin\\hull.com"), 0);
+    ASSERT_EQ(hl_tool_check_allowlist("C:\\tools\\gcc.exe"), 0);
+}
+
+/* Stripping a suffix must not admit a name that was not already allowed:
+ * only the SUFFIX is removed, and what remains still has to be on the list. */
+UTEST(tool, allowlist_suffix_strip_admits_no_new_name)
+{
+    ASSERT_NE(hl_tool_check_allowlist("evil.com"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("sh.exe"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("cc-evil.exe"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("rm.com"), 0);
+    /* not a trailing suffix - must not be stripped from the middle */
+    ASSERT_NE(hl_tool_check_allowlist("cc.exe.evil"), 0);
+    /* the suffix alone is not a name */
+    ASSERT_NE(hl_tool_check_allowlist(".com"), 0);
+    ASSERT_NE(hl_tool_check_allowlist(".exe"), 0);
+}
+
+/* The boundary this fix does NOT cross. `hull-cosmo.exe` is a real name the CI
+ * runs, and it stays denied: stripping ".exe" leaves "hull-cosmo", which the
+ * exact-or-`-<digit>` match rejects. That is deliberate - loosening it would
+ * admit any `hull-*`. Re-execing hull does not need the allowlist at all and
+ * goes through hl_tool_spawn_self instead (#427). */
+UTEST(tool, allowlist_still_rejects_suffixed_variant_names)
+{
+    ASSERT_NE(hl_tool_check_allowlist("hull-cosmo.exe"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("gcc-wrapper.exe"), 0);
+}
+
+/* The suffix strip is case-SENSITIVE, like the name match it feeds. "CC.EXE"
+ * is therefore denied - exactly as bare "CC" is, so this is a limitation
+ * carried over rather than introduced. Matching names case-insensitively would
+ * be a real behaviour change, and wrong on POSIX where case is significant. */
+UTEST(tool, allowlist_suffix_strip_is_case_sensitive)
+{
+    ASSERT_NE(hl_tool_check_allowlist("CC.EXE"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("cc.EXE"), 0);
+}
+
 UTEST(tool, allowlist_reject_cc_evil)
 {
     ASSERT_NE(hl_tool_check_allowlist("cc-evil"), 0);
