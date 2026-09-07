@@ -117,6 +117,45 @@ UTEST(tool, allowlist_reject_empty)
     ASSERT_NE(hl_tool_check_allowlist(""), 0);
 }
 
+/* Windows executable suffixes. A cosmo APE reaches Windows, where hull itself
+ * installs as `hull.com` (the APE convention) and system tools are `cc.exe`.
+ * Before this, every allowlisted tool was DENIED there: the match accepts only
+ * an exact name or a `-<digit>` version, so ".com" / ".exe" fell through. The
+ * JS manifest-extraction child (#427) re-execs `hull`, so on Windows it was
+ * refused and extraction silently fell back in-process. */
+UTEST(tool, allowlist_accept_windows_com_suffix)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("hull.com"), 0);
+    ASSERT_EQ(hl_tool_check_allowlist("cosmocc.com"), 0);
+}
+
+UTEST(tool, allowlist_accept_windows_exe_suffix)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("cc.exe"), 0);
+    ASSERT_EQ(hl_tool_check_allowlist("clang-18.exe"), 0);
+}
+
+UTEST(tool, allowlist_accept_windows_backslash_path)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("C:\\Users\\m\\.local\\bin\\hull.com"), 0);
+    ASSERT_EQ(hl_tool_check_allowlist("C:\\tools\\gcc.exe"), 0);
+}
+
+/* Stripping a suffix must not admit a name that was not already allowed:
+ * only the SUFFIX is removed, and what remains still has to be on the list. */
+UTEST(tool, allowlist_suffix_strip_admits_no_new_name)
+{
+    ASSERT_NE(hl_tool_check_allowlist("evil.com"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("sh.exe"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("cc-evil.exe"), 0);
+    ASSERT_NE(hl_tool_check_allowlist("rm.com"), 0);
+    /* not a trailing suffix - must not be stripped from the middle */
+    ASSERT_NE(hl_tool_check_allowlist("cc.exe.evil"), 0);
+    /* the suffix alone is not a name */
+    ASSERT_NE(hl_tool_check_allowlist(".com"), 0);
+    ASSERT_NE(hl_tool_check_allowlist(".exe"), 0);
+}
+
 UTEST(tool, allowlist_reject_cc_evil)
 {
     ASSERT_NE(hl_tool_check_allowlist("cc-evil"), 0);
