@@ -108,6 +108,17 @@ toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
   half-written pair so the ordinary rules rebuild both halves. This is also what
   makes the Windows source build's retry-after-stall work: it resumes from the
   objects already built, and one of those was the pair its own kill had broken.
+- **`hull build`'s no-compiler hint pointed at a flag that no longer exists.** It
+  advised "rebuild hull with `HL_ENABLE_TCC=1`", which was removed with the rest
+  of the tcc toolchain, so following it could only fail. The hint now names a
+  route that exists on the running binary, as doctor's do: a cosmo hull (the
+  build that reaches Windows) is told to run `hull doctor --fix` or
+  `hull tools install cosmocc`, since it can only link with cosmocc and Hull
+  installs that itself; a native build is told to install gcc or clang or point
+  at one with `--compiler=<path>`.
+- **`hull doctor --tui` no longer reserves a row for embedded tcc.** `doctor.c`
+  has emitted no `tcc_embedded` field since tcc was retired, so the row was
+  unreachable.
 
 ## [0.14.0] - 2026-08-27
 
