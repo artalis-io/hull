@@ -337,7 +337,10 @@ int hl_manifest_extract_js_from_file(const char *path,
      * otherwise unobservable from outside the process, which makes a silent
      * regression to the in-process path (and its crash) easy to miss. */
     log_debug("manifest extraction: isolating in child %s", exe);
-    int spawn_rc = hl_tool_spawn(argv);
+    /* spawn_SELF, not spawn: the allowlist bounds external tools and cannot
+     * name this binary anyway (hull ships as `hull`, `hull.com`,
+     * `hull-cosmo.exe`), so routing through it denied the re-exec outright. */
+    int spawn_rc = hl_tool_spawn_self(argv);
 
     size_t rlen = 0;
     char *raw = read_all(result_path, &rlen);
@@ -346,25 +349,28 @@ int hl_manifest_extract_js_from_file(const char *path,
     const size_t maglen = sizeof(HL_MEXTRACT_MAGIC) - 1;
     if (!raw || rlen < maglen || memcmp(raw, HL_MEXTRACT_MAGIC, maglen) != 0) {
         /* No marker at all: the child never reached its first statement.
+         * Falling back in-process is safe only if nothing ran, so the three
+         * cases hl_tool_spawn_self distinguishes matter here:
          *
-         * Falling back in-process is only safe if nothing ran. spawn_rc cannot
-         * settle that by itself - hl_tool_spawn returns WEXITSTATUS or -1, so a
-         * SIGABRT child and a failed fork are both -1. So:
-         *   spawn_rc >= 0  the child exited NORMALLY without writing a marker,
-         *                  which means the verb was not recognised (an older
-         *                  hull on $PATH, or a JS-less build falling through to
-         *                  the serve path). Nothing ran; fall back.
-         *   spawn_rc == -1 ambiguous - a failed fork or a child killed by a
-         *                  signal. Treat it as "ran": re-running in-process
-         *                  would reproduce the abort we are containing. */
+         *   >= 0        exited NORMALLY without writing a marker: the verb was
+         *               not recognised (an older hull on $PATH, or a JS-less
+         *               build falling through to the serve path), or exec
+         *               failed with 127. Nothing of the app ran; fall back.
+         *   NOSTART     never started (spawn refused / failed). Fall back -
+         *               otherwise a spawn that cannot work anywhere would break
+         *               every JS build rather than degrading to the old path.
+         *   -1          started and died on a signal. Do NOT fall back: that
+         *               re-runs the abort this child exists to contain. */
         free(raw);
-        if (spawn_rc >= 0) {
+        if (spawn_rc >= 0 || spawn_rc == HL_TOOL_SPAWN_NOSTART) {
+            log_debug("manifest extraction: child produced no result "
+                      "(status %d), running in-process", spawn_rc);
             return hl_manifest_extract_js_in_process(path, NULL, out_json,
                                                      out_json_len, out_err);
         }
         if (out_err) *out_err = strdup_safe(
-            "manifest extraction could not run (the extraction child could "
-            "not be started, or died immediately)");
+            "manifest extraction crashed (the JS runtime died before it "
+            "could report a result)");
         return -1;
     }
 

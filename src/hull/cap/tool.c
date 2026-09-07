@@ -27,7 +27,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>   /* strcasecmp - Windows tool names vary in case */
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -155,33 +154,9 @@ int hl_tool_check_allowlist(const char *binary)
 {
     if (!binary) return -1;
 
-    /* Extract basename. Split on BOTH separators: a cosmo APE reaches Windows,
-     * where an argv[0] or a resolved tool path is "C:\path\hull.com". */
-    const char *base = binary;
-    for (const char *c = binary; *c; c++)
-        if (*c == '/' || *c == '\\') base = c + 1;
-
-    /* Drop a host executable suffix before matching. The same tool is `cc` on
-     * POSIX and `cc.exe` on Windows, and hull itself installs as `hull.com`
-     * (the APE convention - see install.ps1 and hl_host_exe_suffix). Without
-     * this every allowlisted tool is denied on Windows, because the match below
-     * accepts only an exact name or a `-<digit>` version suffix.
-     *
-     * Narrow by construction: only these two suffixes, only trailing, and only
-     * the SUFFIX is removed - the remaining name still has to be on the list,
-     * so this admits no name that was not already allowed. */
-    char stripped[64];
-    size_t blen = strlen(base);
-    for (const char **sfx = (const char *[]){ ".com", ".exe", NULL }; *sfx; sfx++) {
-        size_t slen = strlen(*sfx);
-        if (blen > slen && blen - slen < sizeof(stripped) &&
-            strcasecmp(base + blen - slen, *sfx) == 0) {
-            memcpy(stripped, base, blen - slen);
-            stripped[blen - slen] = '\0';
-            base = stripped;
-            break;
-        }
-    }
+    /* Extract basename */
+    const char *base = strrchr(binary, '/');
+    base = base ? base + 1 : binary;
 
     for (const char **p = allowed_prefixes; *p; p++) {
         size_t plen = strlen(*p);
@@ -708,6 +683,65 @@ static int cosmocc_reroute_read(const char *const argv[],
     return 1;
 }
 #endif  /* __COSMOPOLITAN__ */
+
+/* Re-exec the RUNNING binary. See the header for why this does not consult
+ * the tool allowlist.
+ *
+ * Spawns inline rather than reusing spawn_and_wait / cosmo_spawn_wait because
+ * those collapse "could not start" and "died on a signal" into the same -1,
+ * and the caller must tell them apart: retrying an ABORTED extraction in-process
+ * would reproduce the very crash the child exists to contain (#427), while
+ * refusing to retry one that never started would break builds for no reason.
+ *
+ * On cosmo this takes the posix_spawn path rather than fork()+execvp(): cosmo's
+ * emulated fork is the mechanism Hull already had to route around on Windows
+ * (see cosmo_spawn_wait), and posix_spawn maps to a direct CreateProcess. That
+ * is also why argv[0] must be a real path - posix_spawn does no PATH search. */
+int hl_tool_spawn_self(const char *const argv[])
+{
+    if (!argv || !argv[0] || !*argv[0]) return HL_TOOL_SPAWN_NOSTART;
+    if (hl_tool_validate_args(argv) != 0) {
+        ShJsonWriter w = hl_audit_begin("tool.spawn_self");
+        sh_json_write_kv_string(&w, "argv0", argv[0]);
+        sh_json_write_kv_string(&w, "result", "denied");
+        hl_audit_end(&w);
+        return HL_TOOL_SPAWN_NOSTART;
+    }
+
+    pid_t pid;
+#ifdef __COSMOPOLITAN__
+    {
+        extern char **environ;
+        if (posix_spawn(&pid, argv[0], NULL, NULL,
+                        (char *const *)(uintptr_t)argv, environ) != 0)
+            return HL_TOOL_SPAWN_NOSTART;
+    }
+#else
+    pid = fork();
+    if (pid < 0) return HL_TOOL_SPAWN_NOSTART;
+    if (pid == 0) {
+        /* execvp failure exits 127 - a NORMAL exit, so the caller sees "ran
+         * and returned 127" rather than "never started". That is the right
+         * reading: it did start, it just could not become the target. */
+        execvp(argv[0], (char *const *)(uintptr_t)argv);
+        _exit(127);
+    }
+#endif
+
+    int status;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    {
+        ShJsonWriter w = hl_audit_begin("tool.spawn_self");
+        sh_json_write_key(&w, "argv");
+        sh_json_write_array_start(&w);
+        for (int k = 0; argv[k]; k++) sh_json_write_string(&w, argv[k]);
+        sh_json_write_array_end(&w);
+        sh_json_write_kv_int(&w, "exit_code", exit_code);
+        hl_audit_end(&w);
+    }
+    return exit_code;
+}
 
 char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
 {
