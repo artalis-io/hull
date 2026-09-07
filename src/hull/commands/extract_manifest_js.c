@@ -30,7 +30,11 @@
 int hl_cmd_extract_manifest_js(int argc, char **argv, const HlCommandEnv *env)
 {
     (void)env;
-    if (argc < 4) {
+    /* argv is rebased at the VERB by hl_command_dispatch (it passes
+     * argc - cmd_idx, argv + cmd_idx), so argv[0] is "__extract-manifest-js"
+     * and the two operands are argv[1] / argv[2]. Same convention as every
+     * other handler, which all start their scan at i = 1. */
+    if (argc < 3) {
         fprintf(stderr,
                 "usage: hull __extract-manifest-js <entry.js> <result-file>\n"
                 "  (internal - used by hull build to isolate JS manifest "
@@ -38,8 +42,8 @@ int hl_cmd_extract_manifest_js(int argc, char **argv, const HlCommandEnv *env)
         return 2;
     }
 
-    const char *path        = argv[2];
-    const char *result_path = argv[3];
+    const char *path        = argv[1];
+    const char *result_path = argv[2];
 
     /* Claim the result file BEFORE running anything. The parent cannot tell a
      * child that never launched from one that launched and died: hl_tool_spawn

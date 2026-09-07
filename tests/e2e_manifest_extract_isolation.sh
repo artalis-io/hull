@@ -183,4 +183,25 @@ pass "a JS app with a manifest still builds through the isolated child"
 build_ok "$noapp" "a manifest-less JS app"
 pass "a manifest-less JS app still builds through the isolated child"
 
+# 4. A real `hull build` actually spawns the child.
+#
+# Everything above either drives the child directly or observes the parent
+# OUTCOME, and the parent falls back to in-process extraction when it cannot
+# launch a child. So a bug that stopped the build path from ever reaching the
+# child would leave checks 1-3 green while silently restoring the old crash.
+# That is not hypothetical: the first cut of this feature indexed argv wrong,
+# the child exited on its usage message, and every JS build quietly fell back.
+#
+# The parent logs its decision at debug level, so --verbose makes the choice
+# observable from outside.
+rm -f "$okapp/out"
+"$HULL" build --verbose "$okapp" -o "$okapp/out" --no-verify-platform >"$WORK/v.log" 2>&1 \
+    || fail "verbose build of a valid JS app failed: $(tail -5 "$WORK/v.log")"
+if grep -q "running in-process" "$WORK/v.log"; then
+    fail "a real build fell back to in-process extraction instead of isolating"
+fi
+grep -q "isolating in child" "$WORK/v.log" \
+    || fail "a real build did not report spawning the extraction child"
+pass "a real hull build spawns the isolated extraction child"
+
 echo "e2e_manifest_extract_isolation: ALL PASS"

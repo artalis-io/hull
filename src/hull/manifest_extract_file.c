@@ -37,6 +37,7 @@ static char *strdup_safe(const char *s)
 #include "quickjs.h"
 #include "hull/cap/tool.h"         /* hl_tool_spawn, hl_tool_cosmo_tmpdir */
 #include "hull/release_io.h"       /* hl_release_io_self_path */
+#include "log.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -324,12 +325,18 @@ int hl_manifest_extract_js_from_file(const char *path,
     if (!exe || make_result_path(result_path, sizeof(result_path)) != 0) {
         /* Could not set isolation up at all. Degrade to the historical
          * in-process behaviour rather than inventing a new way to fail. */
+        log_debug("manifest extraction: no isolation available "
+                  "(exe=%s), running in-process", exe ? exe : "unresolved");
         return hl_manifest_extract_js_in_process(path, NULL, out_json,
                                                  out_json_len, out_err);
     }
 
     const char *argv[] = { exe, "__extract-manifest-js", path, result_path,
                            NULL };
+    /* Visible under --verbose. Whether extraction is isolated or fell back is
+     * otherwise unobservable from outside the process, which makes a silent
+     * regression to the in-process path (and its crash) easy to miss. */
+    log_debug("manifest extraction: isolating in child %s", exe);
     int spawn_rc = hl_tool_spawn(argv);
 
     size_t rlen = 0;
