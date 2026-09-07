@@ -1184,9 +1184,17 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(SRCDIR)/hull/commands/mcp.c, \
       $(CMD_SRCS))
 endif
+# `hull __extract-manifest-js` is the isolated child that reads a .js app's
+# manifest (#427). Without a JS runtime there is nothing for it to run.
+#
+# Two ways to have no JS, and they are NOT the same variable: HL_ENABLE_JS=0
+# drops it wholesale, while RUNTIME=lua leaves HL_ENABLE_JS at its default 1
+# and merely omits -DHL_ENABLE_JS from CFLAGS (see the runtime selection
+# above). Keying on HL_ENABLE_JS alone missed the RUNTIME=lua build.
 ifeq ($(HL_ENABLE_JS),0)
-  # `hull __extract-manifest-js` is the isolated child that reads a .js app's
-  # manifest (#427). Without a JS runtime there is nothing for it to run.
+  CMD_SRCS := $(filter-out $(SRCDIR)/hull/commands/extract_manifest_js.c,$(CMD_SRCS))
+endif
+ifeq ($(RUNTIME),lua)
   CMD_SRCS := $(filter-out $(SRCDIR)/hull/commands/extract_manifest_js.c,$(CMD_SRCS))
 endif
 CMD_OBJS := $(patsubst $(SRCDIR)/hull/commands/%.c,$(BUILDDIR)/cmd_%.o,$(CMD_SRCS))

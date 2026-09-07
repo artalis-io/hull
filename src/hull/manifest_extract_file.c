@@ -13,6 +13,7 @@
 
 #include "hull/manifest_extract_file.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,6 +30,33 @@ static char *strdup_safe(const char *s)
     return out;
 }
 
+/* Result-file writer. Deliberately OUTSIDE the HL_ENABLE_JS guard: it is
+ * pure stdio, and hull __extract-manifest-js (its only caller) is compiled
+ * whenever the make-level HL_ENABLE_JS is on - which includes RUNTIME=lua,
+ * where the macro is NOT defined. Guarding it there left the child command
+ * with an undefined reference at link. */
+#define HL_MEXTRACT_MAGIC "HULLMANIFEST1 "
+
+int hl_manifest_extract_write_result(const char *out_path, const char *status,
+                                     const char *payload, size_t payload_len)
+{
+    if (!out_path || !status) return -1;
+    FILE *f = fopen(out_path, "wb");
+    if (!f) return -1;
+    int ok = (fputs(HL_MEXTRACT_MAGIC, f) >= 0) &&
+             (fputs(status, f) >= 0) &&
+             (fputc('\n', f) != EOF);
+    if (ok && payload && payload_len)
+        ok = (fwrite(payload, 1, payload_len, f) == payload_len);
+    /* fflush before fclose so a write error surfaces here rather than being
+     * swallowed; the parent's magic check is the backstop either way. */
+    if (ok && fflush(f) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) { (void)remove(out_path); return -1; }
+    return 0;
+}
+
+
 #ifdef HL_ENABLE_JS
 
 #include "hull/runtime/js.h"
@@ -40,7 +68,6 @@ static char *strdup_safe(const char *s)
 #include "log.h"
 
 #include <limits.h>
-#include <stdio.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -227,27 +254,6 @@ cleanup:
  * teardown abort still leaves a complete, usable result and the build
  * SUCCEEDS rather than merely failing cleanly.
  */
-
-#define HL_MEXTRACT_MAGIC "HULLMANIFEST1 "
-
-int hl_manifest_extract_write_result(const char *out_path, const char *status,
-                                     const char *payload, size_t payload_len)
-{
-    if (!out_path || !status) return -1;
-    FILE *f = fopen(out_path, "wb");
-    if (!f) return -1;
-    int ok = (fputs(HL_MEXTRACT_MAGIC, f) >= 0) &&
-             (fputs(status, f) >= 0) &&
-             (fputc('\n', f) != EOF);
-    if (ok && payload && payload_len)
-        ok = (fwrite(payload, 1, payload_len, f) == payload_len);
-    /* fflush before fclose so a write error surfaces here rather than being
-     * swallowed; the parent's magic check is the backstop either way. */
-    if (ok && fflush(f) != 0) ok = 0;
-    if (fclose(f) != 0) ok = 0;
-    if (!ok) { (void)remove(out_path); return -1; }
-    return 0;
-}
 
 /* Slurp a whole file. NULL on any failure (absent, unreadable, OOM). */
 static char *read_all(const char *path, size_t *out_len)
