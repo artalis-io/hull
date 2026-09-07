@@ -101,11 +101,79 @@ sampling from outside. Specifically:
   cosmocc 4.0.2, or specific to the cosmo build of it;
 - whether a newer cosmocc changes the rate.
 
-Happy to run further arms on request: the probe harness takes an arm name and
-returns 10 to 250 samples within about half an hour.
+Happy to run further arms on request. The sampling method is recorded in the
+appendix below, so any additional arm can be stood up and answered within about
+half an hour.
 
 ## Workaround in use
 
 Retrying the build on a stall. `make` resumes from the objects already
 completed, so a retry costs a fraction of a build, and three attempts leave
 roughly 3% residual failure. This is a mitigation, not a fix.
+
+## Appendix: how the numbers were produced
+
+The probe workflow that generated these figures has been retired from the tree
+(it was diagnostic scaffolding, and leaving a dispatch-only workflow lying
+around invites it being run by accident). The method is recorded here instead,
+because it is short and because the report offers further arms: anything below
+can be re-run from this description alone.
+
+**Shape.** A `workflow_dispatch` matrix of `arm x n`, `fail-fast: false`, one
+job per sample, on `windows-latest` with `msys2/setup-msys2` (`msystem: MSYS`,
+installing `make binutils vim diffutils git`) and the SHA-pinned cosmocc above.
+Both arms run in the SAME dispatch so they share a runner image.
+
+**Stall detection.** Run the compile in the background writing to a log, poll
+its size, and treat N seconds of no growth as a wedge. 120s for a single TU,
+300s for a whole build; a healthy build never goes quiet for more than a
+fraction of a second.
+
+```sh
+run_watched() {                       # $1 = stall seconds, rest = command
+  _limit=$1; shift
+  _log=$(mktemp); "$@" > "$_log" 2>&1 &
+  _pid=$!; _last=0; _stalled=0
+  while kill -0 "$_pid" 2>/dev/null; do
+    sleep 5
+    _size=$(wc -c < "$_log" 2>/dev/null || echo 0)
+    if [ "$_size" -eq "$_last" ]; then _stalled=$((_stalled+5)); else _stalled=0; _last=$_size; fi
+    if [ "$_stalled" -ge "$_limit" ]; then
+      kill "$_pid" 2>/dev/null || true
+      return 2                        # wedged
+    fi
+  done
+  _rc=0; wait "$_pid" || _rc=$?
+  [ "$_rc" -eq 0 ] || return 1        # genuine build failure, NOT a wedge
+  return 0
+}
+```
+
+Distinguishing the two non-zero returns matters: a compile error and a wedge
+are different events, and conflating them would have made the rate meaningless.
+
+**Rate measurement (the `solo` arm).** Each job loops up to 25 times, removing
+the object and recompiling only `sqlite3.o`, and stops at its first wedge:
+
+```sh
+for i in $(seq 1 25); do
+  rm -f build/sqlite3.o
+  run_watched 120 make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0 build/sqlite3.o
+  [ $? -eq 2 ] && { echo "wedged at iteration $i"; break; }
+done
+```
+
+Ten such jobs gave first-wedge iterations 1, 1, 2, 2, 3, 8, 11, 13, 19, 23.
+Mean 8.3; a geometric distribution has mean 1/p, giving p = 0.12.
+
+**Process snapshot.** On a stall, sample every build process twice five seconds
+apart and report cumulative CPU plus the delta, matching whole base names only
+(an unanchored pattern matches unrelated Windows processes and buries the one
+that matters). The delta is the entire point: `dcpu ~ 0` means blocked,
+`dcpu ~ interval` would mean spinning. `Get-CimInstance Win32_Process` is the
+only thing on Windows that exposes a full command line, and `Get-Process`
+supplies `.CPU`.
+
+**Arms run so far.** `baseline` (unchanged), `tmpdir` (`TMPDIR`/`TMP`/`TEMP`
+relocated off the MSYS2 tree), `solo` (one TU, nothing else running),
+`full-j1` (whole build serialised).
