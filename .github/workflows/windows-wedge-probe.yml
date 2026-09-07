@@ -1,0 +1,175 @@
+name: Windows wedge probe (diagnostic, issue #462)
+
+# A/B sampler for the intermittent cosmocc-on-Windows wedge (#462).
+#
+# WHY A SEPARATE WORKFLOW. The wedge hits roughly 1 build in 3, so a single run
+# proves nothing in either direction. windows-source-build.yml runs nightly,
+# which is one sample per day: telling 30% from ~0% needs on the order of ten
+# samples per arm, so testing three hypotheses that way would take a month.
+# This runs N identical builds in parallel and both arms in the SAME dispatch,
+# so a comparison arrives the same day and on the same runner image, with no
+# drift between arms.
+#
+# WHAT IS BEING TESTED. The one hard measurement so far (run 34045364219) is
+# that the stuck compiler accumulates NO CPU:
+#
+#     pid=5648 cc1  cpu=5.09s  dcpu=0s
+#     cc1 ... vendor/sqlite/sqlite3.c -o <MSYS2 temp>/cchyv2rh.s
+#
+# Blocked, not spinning, while writing its assembly output into MSYS2's temp
+# directory. So the first arm relocates temp.
+#
+# HONEST CONFOUND: the tmpdir arm moves temp BOTH off the MSYS2 tree AND onto
+# another drive, because those are the two things that differ about it. A clean
+# result therefore says "relocating temp helps", not which property mattered.
+# Isolating the two is the follow-up, and only worth doing if this arm moves
+# the needle at all.
+#
+# READING THE RESULT. Each job is one sample; the job's conclusion is the
+# datum. Expect roughly 3/10 failures in baseline. If tmpdir also fails ~3/10
+# the hypothesis is dead and the temp directory is exonerated, which is just as
+# useful. Small samples: 0/10 against 3/10 is suggestive, not proof.
+#
+# COUNTING CAVEAT: the `arms` input deselects an arm by exiting the build step
+# early, so a deselected job reports SUCCESS. When both arms run (the default)
+# that never bites, but on a narrowed follow-up dispatch count only the jobs
+# whose name carries the arm you asked for, or grep the logs for the explicit
+# "OK arm=" / "WEDGED" markers each sample prints.
+#
+# This is a DIAGNOSTIC workflow. It is dispatch-only, it is not part of any
+# gate, and it should be deleted once #462 is understood.
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+on:
+  workflow_dispatch:
+    inputs:
+      arms:
+        description: "Which arms to run (comma-separated: baseline,tmpdir)"
+        type: string
+        default: "baseline,tmpdir"
+
+permissions:
+  contents: read
+
+env:
+  COSMOCC_VERSION: 4.0.2
+  COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+
+jobs:
+  probe:
+    name: "probe ${{ matrix.arm }} ${{ matrix.n }}"
+    runs-on: windows-latest
+    # The build takes ~4 min and the watchdog fires after 5 min of silence, so
+    # a wedged job self-terminates around 9. 20 is headroom, not the mechanism.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false          # every sample matters; one wedge must not cancel the rest
+      max-parallel: 10
+      matrix:
+        arm: [baseline, tmpdir]
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
+        with:
+          msystem: MSYS
+          update: false
+          install: >-
+            make
+            binutils
+            vim
+            diffutils
+            git
+
+      - name: Fetch + verify cosmocc
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          $h = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: got $h" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo
+
+      - name: Build (one sample)
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "${{ inputs.arms }}" | tr ',' '\n' | grep -qx "${{ matrix.arm }}"; then
+            echo "arm '${{ matrix.arm }}' not selected for this dispatch; skipping"
+            exit 0
+          fi
+
+          # cosmo/bin APPENDED: it ships its own make, which must not shadow
+          # MSYS2's. Same ordering as windows-source-build.yml.
+          export PATH="$PATH:$PWD/cosmo/bin"
+          MAKE_BIN=$(command -v make)
+          case "$MAKE_BIN" in
+            */cosmo/bin/*) echo "FAIL make resolved to cosmocc's APE make"; exit 1 ;;
+          esac
+          AR_NAME=ar
+          command -v ar >/dev/null 2>&1 || AR_NAME=x86_64-unknown-cosmo-ar
+
+          # THE VARIABLE UNDER TEST. cc1 was observed blocked while writing its
+          # .s output into MSYS2's temp dir, so this arm moves temp off it (and,
+          # unavoidably, onto another drive - see the confound note in the
+          # header). TMP and TEMP are set alongside TMPDIR because gcc, the
+          # cosmocc driver and mktemper do not all read the same one.
+          if [ "${{ matrix.arm }}" = "tmpdir" ]; then
+            probe_tmp="/c/wedge-probe-tmp"
+            mkdir -p "$probe_tmp"
+            export TMPDIR="$probe_tmp" TMP="$probe_tmp" TEMP="$probe_tmp"
+          fi
+          echo "arm=${{ matrix.arm }} sample=${{ matrix.n }} TMPDIR=${TMPDIR:-<default>}"
+
+          # Watchdog identical to windows-source-build.yml, so a wedge here is
+          # the same event with the same evidence rather than a lookalike.
+          stall_limit=300
+          poll=15
+          log=build-output.log
+
+          "$MAKE_BIN" CC=cosmocc AR="$AR_NAME" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 > "$log" 2>&1 &
+          mk=$!
+          last_size=0
+          stalled=0
+          while kill -0 "$mk" 2>/dev/null; do
+            sleep "$poll"
+            size=$(wc -c < "$log" 2>/dev/null || echo 0)
+            if [ "$size" -eq "$last_size" ]; then
+              stalled=$((stalled + poll))
+            else
+              stalled=0
+              last_size=$size
+            fi
+            if [ "$stalled" -ge "$stall_limit" ]; then
+              echo "WEDGED: no output for ${stalled}s (arm=${{ matrix.arm }} sample=${{ matrix.n }})"
+              echo "--- last 15 lines ---"
+              tail -15 "$log" || true
+              powershell.exe -NoProfile -ExecutionPolicy Bypass \
+                -File "$(cygpath -w .github/scripts/dump-stuck-build.ps1)" \
+                -IntervalSeconds 5 || true
+              kill "$mk" 2>/dev/null || true
+              exit 1
+            fi
+          done
+
+          set +e
+          wait "$mk"; rc=$?
+          set -e
+          [ "$rc" -eq 0 ] || { echo "build failed (rc=$rc), NOT a wedge:"; tail -25 "$log"; exit 1; }
+          test -f build/hull || { echo "no artifact"; exit 1; }
+          echo "OK arm=${{ matrix.arm }} sample=${{ matrix.n }}"
+
+      - name: Upload the wedge evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: wedge-${{ matrix.arm }}-${{ matrix.n }}
+          path: build-output.log
+          if-no-files-found: warn
+          retention-days: 14
