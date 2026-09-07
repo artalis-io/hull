@@ -148,8 +148,27 @@ if "$HULL" __extract-manifest-js "$badapp/app.js" "$res" >/dev/null 2>&1; then
 fi
 head -1 "$res" | grep -q 'err$' \
     || fail "expected an 'err' status, got: $(head -1 "$res")"
-[ -s "$res" ] || fail "err result carried no message"
+tail -n +2 "$res" | grep -q . \
+    || fail "err result carried no message after the header line"
 pass "child protocol: 'err' reports a failure with a message"
+
+# 2d. The entry marker is transient.
+#
+# The child writes "HULLMANIFEST1 start" before anything can abort, and the
+# parent uses it to tell a child that never launched (no file) from one that
+# launched and died mid-run (bare marker). That distinction is what stops the
+# parent retrying IN-PROCESS after an abort and reproducing the crash - the
+# spawn exit status cannot make it, since a signal death and a failed fork are
+# both -1. The end-to-end consequence is pinned by check 1 above; here we pin
+# the invariant it rests on: a child that completes always REPLACES the marker,
+# so a bare marker unambiguously means "died mid-run".
+rm -f "$WORK/probe.res"
+"$HULL" __extract-manifest-js "$okapp/app.js" "$WORK/probe.res" >/dev/null 2>&1 \
+    || fail "child failed on a re-run of the valid app"
+if head -1 "$WORK/probe.res" | grep -q 'start$'; then
+    fail "child left the start marker in place - the real result never landed"
+fi
+pass "child protocol: the entry marker is replaced by the real result"
 
 # ── 3. The ordinary paths still build ────────────────────────────────────
 build_ok() {

@@ -41,6 +41,21 @@ int hl_cmd_extract_manifest_js(int argc, char **argv, const HlCommandEnv *env)
     const char *path        = argv[2];
     const char *result_path = argv[3];
 
+    /* Claim the result file BEFORE running anything. The parent cannot tell a
+     * child that never launched from one that launched and died: hl_tool_spawn
+     * collapses both to -1 (spawn_and_wait returns WEXITSTATUS or -1, and a
+     * SIGABRT child is !WIFEXITED). This marker is that distinction. Without
+     * it the parent would fall back to IN-PROCESS extraction after an abort,
+     * re-running the very crash the isolation exists to contain.
+     *
+     * It is overwritten by the real result moments later; it only has to
+     * survive the window in which the runtime can abort. */
+    if (hl_manifest_extract_write_result(result_path, "start", NULL, 0) != 0) {
+        fprintf(stderr, "hull __extract-manifest-js: cannot write %s\n",
+                result_path);
+        return 1;
+    }
+
     char  *json = NULL;
     char  *err  = NULL;
     size_t len  = 0;

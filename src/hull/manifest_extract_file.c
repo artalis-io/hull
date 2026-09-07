@@ -338,19 +338,26 @@ int hl_manifest_extract_js_from_file(const char *path,
 
     const size_t maglen = sizeof(HL_MEXTRACT_MAGIC) - 1;
     if (!raw || rlen < maglen || memcmp(raw, HL_MEXTRACT_MAGIC, maglen) != 0) {
-        /* No usable result. Distinguish "never ran" from "ran and died": a
-         * child that launched must NOT be retried in-process, since that
-         * re-runs the very abort the isolation exists to contain. */
+        /* No marker at all: the child never reached its first statement.
+         *
+         * Falling back in-process is only safe if nothing ran. spawn_rc cannot
+         * settle that by itself - hl_tool_spawn returns WEXITSTATUS or -1, so a
+         * SIGABRT child and a failed fork are both -1. So:
+         *   spawn_rc >= 0  the child exited NORMALLY without writing a marker,
+         *                  which means the verb was not recognised (an older
+         *                  hull on $PATH, or a JS-less build falling through to
+         *                  the serve path). Nothing ran; fall back.
+         *   spawn_rc == -1 ambiguous - a failed fork or a child killed by a
+         *                  signal. Treat it as "ran": re-running in-process
+         *                  would reproduce the abort we are containing. */
         free(raw);
-        if (spawn_rc == -1) {
-            /* Refused by the spawn allowlist, or fork/exec failed outright -
-             * the child never got to run any app code. Safe to fall back. */
+        if (spawn_rc >= 0) {
             return hl_manifest_extract_js_in_process(path, NULL, out_json,
                                                      out_json_len, out_err);
         }
         if (out_err) *out_err = strdup_safe(
-            "manifest extraction crashed (the JS runtime died before it "
-            "could report a result)");
+            "manifest extraction could not run (the extraction child could "
+            "not be started, or died immediately)");
         return -1;
     }
 
@@ -368,7 +375,14 @@ int hl_manifest_extract_js_from_file(const char *path,
     size_t      plen    = rlen - maglen - (size_t)(payload - body);
 
     int rc = -1;
-    if (strcmp(status, "ok") == 0) {
+    if (strcmp(status, "start") == 0) {
+        /* The child claimed the file and then died without replacing the
+         * marker - the JS runtime aborted mid-extraction. Contained, exactly
+         * as intended: report it and never retry in-process. */
+        if (out_err) *out_err = strdup_safe(
+            "manifest extraction crashed (the JS runtime died before it "
+            "could report a result)");
+    } else if (strcmp(status, "ok") == 0) {
         char *copy = malloc(plen + 1);
         if (copy) {
             memcpy(copy, payload, plen);

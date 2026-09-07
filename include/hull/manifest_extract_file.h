@@ -100,9 +100,12 @@ int hl_manifest_extract_js_in_process(const char *path,
  *
  * Format is a single header line then the payload verbatim:
  *   "HULLMANIFEST1 <status>" then a newline then the payload; status is one
- *   of `ok` / `none` / `err`.
- * The magic lets the reader tell a real result from a file the child never
- * finished writing.
+ *   of `start` / `ok` / `none` / `err`.
+ * `start` is written by the child on entry, before anything can abort, and is
+ * overwritten by the real result. It is what lets the parent tell a child that
+ * never launched (no file at all) from one that launched and died mid-run -
+ * a distinction the spawn exit status cannot make, since a signal death and a
+ * failed fork are both -1.
  *
  * @return 0 on success; -1 on any write failure (the partial file is removed).
  */
