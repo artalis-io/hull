@@ -167,12 +167,19 @@ and is not the same configuration CI exercises.
 
 > **This build wedges intermittently, roughly 1 run in 3.** The compiler stops
 > emitting output and sits at ~0 CPU indefinitely. It is not a hang in *your*
-> setup and not something the flags above avoid: it is an open defect, tracked
-> in [#462](https://github.com/artalis-io/hull/issues/462), and it has been seen
-> on three different translation units. If a build goes silent for several
-> minutes, interrupt it and re-run. `make` resumes from the objects already
-> built, so a retry is cheap. CI catches this with a watchdog that fails after
-> five minutes of silence rather than waiting out the job timeout.
+> setup, and no flag above avoids it: it is a **cosmocc bug on Windows**, not a
+> Hull one, tracked in [#462](https://github.com/artalis-io/hull/issues/462).
+>
+> Measured: `cc1` blocks on about **12% of compiles of a large translation
+> unit** (established over 250 solo compiles of `vendor/sqlite/sqlite3.c`;
+> `vendor/quickjs/quickjs.c` does the same). It needs neither parallelism
+> (`-j1` wedges too) nor any particular temp directory (relocating it changed
+> nothing).
+>
+> **If a build goes silent for several minutes, interrupt it and re-run.**
+> `make` resumes from the objects already built, so a retry costs a fraction of
+> a build, and the odds of wedging twice in a row are small. CI does exactly
+> this automatically, retrying a stall up to three times.
 
 This path is exercised in CI by `.github/workflows/windows-source-build.yml`,
 whose header carries the full evidence and history.

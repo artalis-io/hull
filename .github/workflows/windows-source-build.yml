@@ -79,9 +79,19 @@ name: Windows source build (cosmocc, -O0)
 # clause has now been exercised: see HANG below.
 #
 # HANG - OPEN, INTERMITTENT, NOT UNDERSTOOD.
-#   The build wedges roughly 1 run in 4: the compiler stops emitting output
-#   entirely and accumulates no CPU. Three signatures captured so far, and they
-#   do NOT all share a cause:
+#   MEASURED (#462, probe runs 34112570526 and 34114442514): cosmocc's cc1
+#   blocks indefinitely at ~0 CPU on about 12% of compiles of a LARGE
+#   translation unit. That is a cosmocc-on-Windows bug, not a Hull one. It
+#   needs neither parallelism (-j1 wedges too) nor MSYS2's temp directory
+#   (relocating it changed nothing, 4/10 vs 2/10, p=0.63). Established over 250
+#   solo compiles of vendor/sqlite/sqlite3.c with nothing else running;
+#   vendor/quickjs/quickjs.c wedges identically, and this file's own -O0 note
+#   below recorded the same thing about quickjs.c long before it was measured.
+#
+#   The build step therefore RETRIES a stall (up to 3 attempts), which is a
+#   mitigation for someone else's bug rather than cover for one of ours.
+#
+#   Historical signatures, kept because they show how the picture changed:
 #
 #     a) miniz at -O2 (run 34035825889) - CAUSED by HL_OPT never reaching the
 #        Keel sub-make. Deterministic. Fixed properly in hull#461: Keel now
@@ -399,62 +409,100 @@ jobs:
           # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
           echo "using MAKE_BIN=${MAKE_BIN:-<unset>} AR=${AR:-<unset>}"
 
-          # WATCHDOG. This build wedges intermittently (~1 run in 4) with the
-          # compiler at ~0 CPU and no further output - see the HANG section in
-          # the header, and issue #462. Left to the job timeout, a hang costs
-          # 45 minutes and yields nothing but "cancelled" - which is how two
-          # hangs already went by without leaving any evidence.
+          # WATCHDOG + RETRY.
           #
-          # So: run make in the background and watch its output file. A healthy
-          # build emits a line every fraction of a second and finishes in ~3
-          # minutes, so several minutes of TOTAL silence is unambiguous. On a
-          # stall, dump the tail plus a process snapshot with command lines and
-          # CPU deltas (the one measurement that separates "blocked" from
-          # "spinning") and fail fast instead of burning the runner.
+          # The wedge is a TOOLCHAIN bug, not a Hull one, and it is now measured
+          # (#462): cosmocc's cc1 blocks indefinitely at ~0 CPU compiling large
+          # translation units on Windows, about 12% of the time PER large-TU
+          # compile. Established by 250 solo compiles of vendor/sqlite/sqlite3.c
+          # with nothing else running - so it needs neither concurrency (-j1
+          # still wedges) nor MSYS2's temp directory (relocating it changed
+          # nothing). vendor/quickjs/quickjs.c wedges the same way.
+          #
+          # Retrying is therefore the honest mitigation rather than papering
+          # over our own defect: make resumes from the objects already built, so
+          # a retry costs a fraction of a build, and at ~30% per build three
+          # attempts leave roughly 3% residual failure.
+          #
+          # A retry is applied ONLY to a stall. A genuine compile error fails
+          # immediately - retrying that would just hide it.
           stall_limit=${HULL_STALL_LIMIT_SECS:-300}
           poll=15
+          attempts=${HULL_BUILD_ATTEMPTS:-3}
           log=build-output.log
 
-          "$MAKE_BIN" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 > "$log" 2>&1 &
-          mk=$!
+          # Kill anything the wedge left holding files, or the next attempt
+          # inherits a stuck cc1 still sitting on its output.
+          kill_stragglers() {
+            powershell.exe -NoProfile -Command \
+              "Get-Process cc1,cc1plus,cosmocc,'*cosmo-gcc' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue" \
+              >/dev/null 2>&1 || true
+          }
 
-          last_size=0
-          stalled=0
-          while kill -0 "$mk" 2>/dev/null; do
-            sleep "$poll"
-            size=$(wc -c < "$log" 2>/dev/null || echo 0)
-            if [ "$size" -eq "$last_size" ]; then
-              stalled=$((stalled + poll))
-            else
-              stalled=0
-              last_size=$size
-            fi
-            if [ "$stalled" -ge "$stall_limit" ]; then
-              echo ""
-              echo "=========================================================="
-              echo "BUILD STALLED: no output for ${stalled}s (limit ${stall_limit}s)"
-              echo "=========================================================="
-              echo "--- last 25 lines of build output ---"
-              tail -25 "$log" || true
-              echo ""
-              # PowerShell is the only thing here that can see a Windows
-              # process's command line and cumulative CPU.
-              powershell.exe -NoProfile -ExecutionPolicy Bypass \
-                -File "$(cygpath -w .github/scripts/dump-stuck-build.ps1)" \
-                -IntervalSeconds 5 || true
-              kill "$mk" 2>/dev/null || true
-              exit 1
-            fi
+          build_once() {
+            : > "$log"
+            "$MAKE_BIN" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 > "$log" 2>&1 &
+            mk=$!
+            last_size=0
+            stalled=0
+            while kill -0 "$mk" 2>/dev/null; do
+              sleep "$poll"
+              size=$(wc -c < "$log" 2>/dev/null || echo 0)
+              if [ "$size" -eq "$last_size" ]; then
+                stalled=$((stalled + poll))
+              else
+                stalled=0
+                last_size=$size
+              fi
+              if [ "$stalled" -ge "$stall_limit" ]; then
+                echo ""
+                echo "=========================================================="
+                echo "BUILD STALLED: no output for ${stalled}s (limit ${stall_limit}s)"
+                echo "=========================================================="
+                echo "--- last 25 lines of build output ---"
+                tail -25 "$log" || true
+                echo ""
+                # PowerShell is the only thing here that can see a Windows
+                # process's command line and cumulative CPU. dcpu ~0 on the
+                # stuck compiler is the signature of this wedge; a non-zero
+                # delta would mean something else is going on and the retry
+                # below is the wrong response.
+                powershell.exe -NoProfile -ExecutionPolicy Bypass \
+                  -File "$(cygpath -w .github/scripts/dump-stuck-build.ps1)" \
+                  -IntervalSeconds 5 || true
+                kill "$mk" 2>/dev/null || true
+                kill_stragglers
+                return 2
+              fi
+            done
+            rc=0
+            wait "$mk" || rc=$?
+            [ "$rc" -eq 0 ] || return 1
+            return 0
+          }
+
+          attempt=1
+          while : ; do
+            echo "--- build attempt $attempt of $attempts ---"
+            set +e
+            build_once
+            outcome=$?
+            set -e
+            case "$outcome" in
+              0) echo "build ok on attempt $attempt"; break ;;
+              1) echo "FAIL compile error (not a stall) - not retrying"; tail -25 "$log"; exit 1 ;;
+              2) if [ "$attempt" -ge "$attempts" ]; then
+                   echo "FAIL wedged on all $attempts attempts (see #462)"
+                   exit 1
+                 fi
+                 echo "wedged; retrying (make resumes from existing objects)"
+                 attempt=$((attempt + 1))
+                 ;;
+            esac
           done
 
-          # `wait` reports the child's status; set -e must not pre-empt it.
-          set +e
-          wait "$mk"; rc=$?
-          set -e
           cat "$log"
-          [ "$rc" -eq 0 ] || { echo "FAIL make exited $rc"; exit 1; }
-
-          # Never trust the exit status alone - assert the artifact.
+          # Never trust the exit status alone here - assert the artifact.
           test -f build/hull || { echo "FAIL build/hull was not produced"; exit 1; }
           ls -la build/hull
 
