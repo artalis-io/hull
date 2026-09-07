@@ -93,19 +93,26 @@ check_config() {
 
 echo "check-keel-flags: asserting Hull's flags reach Keel's compiler command lines"
 
+# Every configuration states ALL THREE knobs explicitly, so the gate is
+# hermetic. Left implicit, an inherited HL_ENABLE_LTO=1 (exported in a shell,
+# or set by a wrapping build) silently turns the "default" case into an LTO
+# build, and the gate then reports a failure that says nothing about
+# propagation. A make command-line assignment beats the environment, which is
+# what makes this airtight.
+
 # 1. Default. Guards the other direction: this gate must not quietly turn every
 #    build into something other than what it was.
-check_config "default"        ""                            ' -O2 '  ' -flto'
+check_config "default"          "HL_OPT=-O2 HL_ENABLE_LTO=0 HL_ENABLE_CFI=0" ' -O2 '  ' -flto'
 
 # 2. The defect #461 is about. Before the fix this was -O2 in both halves.
-check_config "HL_OPT=-O0"     "HL_OPT=-O0"                  ' -O0 '  ' -flto'
+check_config "HL_OPT=-O0"       "HL_OPT=-O0 HL_ENABLE_LTO=0 HL_ENABLE_CFI=0" ' -O0 '  ' -flto'
 
 # 3. LTO. Before the fix KEEL_EXTRA_CFLAGS was passed and ignored.
-check_config "HL_ENABLE_LTO=1" "HL_ENABLE_LTO=1"            ' -flto' ''
+check_config "HL_ENABLE_LTO=1"  "HL_OPT=-O2 HL_ENABLE_LTO=1 HL_ENABLE_CFI=0" ' -flto' ''
 
 # 4. Both together, since they travel by different mechanisms (KEEL_OPT vs
 #    KEEL_EXTRA_CFLAGS) and could regress independently.
-check_config "HL_OPT=-O0 + LTO" "HL_OPT=-O0 HL_ENABLE_LTO=1" ' -O0 '  ''
+check_config "HL_OPT=-O0 + LTO" "HL_OPT=-O0 HL_ENABLE_LTO=1 HL_ENABLE_CFI=0" ' -O0 '  ''
 
 # 5. CFI, only where the toolchain can actually do it. Hull's own probe refuses
 #    -fsanitize=cfi-icall on anything but clang, and degrades to LTO-only with a
@@ -113,8 +120,8 @@ check_config "HL_OPT=-O0 + LTO" "HL_OPT=-O0 HL_ENABLE_LTO=1" ' -O0 '  ''
 cfi_probe=$(printf 'int main(void){return 0;}\n' | \
     ${CC:-cc} -Werror -flto -fsanitize=cfi-icall -x c -c -o /dev/null - 2>/dev/null && echo yes || echo no)
 if [ "$cfi_probe" = yes ]; then
-    check_config "HL_ENABLE_CFI=1" "HL_ENABLE_CFI=1" ' -fsanitize=cfi-icall' ''
-    check_config "HL_ENABLE_CFI=1" "HL_ENABLE_CFI=1" ' -fsplit-lto-unit' ''
+    check_config "HL_ENABLE_CFI=1" "HL_OPT=-O2 HL_ENABLE_CFI=1" ' -fsanitize=cfi-icall' ''
+    check_config "HL_ENABLE_CFI=1" "HL_OPT=-O2 HL_ENABLE_CFI=1" ' -fsplit-lto-unit' ''
 else
     printf '  skip  CFI: %s cannot do -fsanitize=cfi-icall (Linux clang only)\n' "${CC:-cc}"
 fi

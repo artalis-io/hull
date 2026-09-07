@@ -36,6 +36,31 @@ cleanup() {
     git checkout -q -- "$HULL_MK" 2>/dev/null || true
     git -C vendor/keel checkout -q -- Makefile 2>/dev/null || true
 }
+
+# REFUSE TO RUN over uncommitted work. Both probes mutate TRACKED files and
+# restore them with `git checkout --`, which discards whatever was there
+# before - silently, and for one of them inside a submodule, where it is even
+# easier to miss. The sibling self-tests plant a NEW file instead and so never
+# had this exposure; these probes cannot, because what they must break is the
+# content of existing files.
+#
+# So check first and bail out rather than eat someone's work in progress.
+if ! git diff --quiet -- "$HULL_MK" 2>/dev/null; then
+    echo "check-keel-flags selftest: $HULL_MK has uncommitted changes." >&2
+    echo "  This test rewrites it and restores with 'git checkout --', which" >&2
+    echo "  would discard them. Commit or stash first." >&2
+    exit 2
+fi
+if ! git -C vendor/keel diff --quiet -- Makefile 2>/dev/null; then
+    echo "check-keel-flags selftest: vendor/keel/Makefile has uncommitted changes." >&2
+    echo "  This test rewrites it and restores with 'git checkout --', which" >&2
+    echo "  would discard them. Commit or stash them in the submodule first." >&2
+    exit 2
+fi
+
+# Trap installed only NOW. Set before the guards above, exiting on a dirty
+# tree would still run cleanup() and discard exactly the work the guards
+# exist to protect - the guard would report the problem and cause it anyway.
 trap cleanup EXIT INT TERM
 
 # 1. Baseline: the real tree must pass, or the probes below prove nothing.
