@@ -158,4 +158,17 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
                          const char *output_dir,
                          const char *platform_dir);
 
+
+/*
+ * Does THIS host have a kernel sandbox backend behind pledge()/unveil()?
+ *
+ * Not a compile-time fact for a Cosmopolitan build: the same APE runs on hosts
+ * that enforce (Linux, OpenBSD) and hosts where both calls return 0 and do
+ * nothing (Windows, macOS, the other BSDs). Exposed so `hull doctor` can report
+ * the state BEFORE an app is run, rather than leaving it to a warning at
+ * startup. Returns 1 when a backend is present, 0 when the C capability layer
+ * is the only boundary.
+ */
+int hl_sandbox_kernel_available(void);
+
 #endif /* HL_SANDBOX_H */

@@ -490,7 +490,7 @@ static char *spawn_read_argv(const char *const argv[], size_t *out_len)
 
 /* ── cosmo/Windows: drive cosmocc through the bundled busybox ───────── */
 
-int hl_tool_cosmo_shell(char *out, size_t outsz)
+int hl_tool_cosmo_shell(const char *driver, char *out, size_t outsz)
 {
     if (!out || outsz == 0) return -1;
 #ifdef __COSMOPOLITAN__
@@ -499,6 +499,37 @@ int hl_tool_cosmo_shell(char *out, size_t outsz)
      * always-present env (no cosmo-API include needed). */
     if (!getenv("SystemRoot") && !getenv("SYSTEMROOT") && !getenv("windir"))
         return -1;
+
+    /* FIRST: busybox.exe beside the driver we were actually given. The cosmocc
+     * bundle ships bin/cosmocc and bin/busybox.exe as siblings, so this holds
+     * wherever the bundle lives, whatever $HOME says, and however the driver
+     * was resolved (PATH, --compiler=<path>, ~/.hull/tools).
+     *
+     * The $HOME probes below cannot cover that. Under MSYS2 - the shell a
+     * Windows source build runs in - $HOME is /home/<user>, i.e.
+     * C:\msys64\home\<user>, while `hull tools install cosmocc` from
+     * PowerShell put the bundle under C:\Users\<user>. So a HOME-only search
+     * missed a perfectly good busybox sitting right next to the cosmocc it had
+     * just resolved, and cosmocc's #!/bin/sh driver could not be run at all. */
+    if (driver && *driver) {
+        char dir[512];
+        int n = snprintf(dir, sizeof(dir), "%s", driver);
+        if (n > 0 && (size_t)n < sizeof(dir)) {
+            char *cut = NULL;
+            for (char *c = dir; *c; c++)
+                if (*c == '/' || *c == '\\') cut = c;
+            if (cut) {
+                *cut = '\0';
+                char p[512];
+                n = snprintf(p, sizeof(p), "%s/busybox.exe", dir);
+                if (n > 0 && (size_t)n < sizeof(p) && access(p, X_OK) == 0) {
+                    n = snprintf(out, outsz, "%s", p);
+                    return (n > 0 && (size_t)n < outsz) ? 0 : -1;
+                }
+            }
+        }
+    }
+
     const char *home = getenv("HOME");
     if (!home || !*home) home = getenv("USERPROFILE");
     if (!home || !*home) return -1;
@@ -518,7 +549,7 @@ int hl_tool_cosmo_shell(char *out, size_t outsz)
     }
     return -1;
 #else
-    (void)out; (void)outsz;
+    (void)driver; (void)out; (void)outsz;
     return -1;
 #endif
 }
@@ -686,7 +717,7 @@ static int cosmocc_reroute_exec(const char *const argv[],
 {
     if (!argv_is_cosmocc(argv)) return 0;
     char shell[512];
-    if (hl_tool_cosmo_shell(shell, sizeof(shell)) != 0) return 0;
+    if (hl_tool_cosmo_shell(argv[0], shell, sizeof(shell)) != 0) return 0;
     cosmo_prepare(shell);
     char td[512];
     const char *tmpdir = (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0) ? td : NULL;
@@ -704,7 +735,7 @@ static int cosmocc_reroute_read(const char *const argv[],
 {
     if (!argv_is_cosmocc(argv)) return 0;
     char shell[512];
-    if (hl_tool_cosmo_shell(shell, sizeof(shell)) != 0) return 0;
+    if (hl_tool_cosmo_shell(argv[0], shell, sizeof(shell)) != 0) return 0;
     cosmo_prepare(shell);
     char td[512];
     const char *tmpdir = (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0) ? td : NULL;

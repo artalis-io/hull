@@ -22,6 +22,7 @@
 
 #include "hull/tools_install.h"
 #include "hull/shared/fs_util.h"
+#include "hull/shared/host.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -332,41 +333,25 @@ static int strip_basename(const char *path, char *out, size_t out_sz)
 }
 
 /* Walk PATH and return the first directory containing an executable
- * `name`. Output buffer holds the full path on success. */
+ * `name`. Output buffer holds the full path on success.
+ *
+ * Delegates to the shared host resolver rather than walking PATH here. The
+ * local walker this replaces split on ':' and joined with '/', which cannot
+ * work on Windows: PATH is ';'-separated with `C:\...` components, so the ':'
+ * split shredded every drive letter and this step found nothing no matter what
+ * was installed - and it never probed the `.exe` / `.com` forms, so even a
+ * correctly-split `wamrc.exe` would have been missed. That is the same defect
+ * hull#459 fixed in doctor's copy; this second copy was left behind, which is
+ * why `hull doctor` and `hull tools list` could disagree about the very same
+ * tool on the very same box.
+ *
+ * POSIX behaviour is unchanged: hl_host_find_in_path splits on ':', joins with
+ * '/', and probes the bare name only. Note the return convention flips - the
+ * shared resolver returns 1 for found - so this wrapper keeps the 0/-1 shape
+ * hl_tools_lookup_path is written against. */
 static int find_on_path(const char *name, char *out, size_t out_sz)
 {
-    const char *path = getenv("PATH");
-    if (!path || !*path) return -1;
-
-    const char *p = path;
-    while (*p) {
-        const char *colon = strchr(p, ':');
-        size_t seg_len = colon ? (size_t)(colon - p) : strlen(p);
-
-        /* Empty segment ('::' or leading ':') means current directory
-         * - POSIX-ism; skip for safety. */
-        if (seg_len > 0) {
-            /* Compose "<seg>/<name>" in a stack buffer first so we
-             * can `access()` it without trampling the caller's out. */
-            char cand[PATH_MAX];
-            if (seg_len + 1 + strlen(name) + 1 <= sizeof(cand)) {
-                memcpy(cand, p, seg_len);
-                cand[seg_len] = '/';
-                size_t nlen = strlen(name);
-                memcpy(cand + seg_len + 1, name, nlen);
-                cand[seg_len + 1 + nlen] = '\0';
-                if (access(cand, X_OK) == 0) {
-                    int n = snprintf(out, out_sz, "%s", cand);
-                    if (n < 0 || (size_t)n >= out_sz) return -1;
-                    return 0;
-                }
-            }
-        }
-
-        if (!colon) break;
-        p = colon + 1;
-    }
-    return -1;
+    return hl_host_find_in_path(name, out, out_sz) == 1 ? 0 : -1;
 }
 
 int hl_tools_lookup_path(const char *name, const char *hull_exe,

@@ -128,15 +128,20 @@ int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
 
 /*
  * Resolve the bundled busybox shell used to drive cosmocc on Windows (the
- * cosmo/Windows build path). Returns 0 and writes the path to @p out when a
- * cosmocc-bundle busybox is present AND this is a cosmo hull on Windows; returns
+ * cosmo/Windows build path). @p driver is the cosmocc invocation about to be
+ * spawned: busybox.exe is looked for BESIDE it first (the bundle ships them as
+ * siblings), which is what makes this work wherever the bundle lives and
+ * whatever $HOME says, before falling back to the $HOME/$USERPROFILE bundle
+ * locations. Pass NULL to search only those. Returns 0 and writes the path to
+ * @p out when a cosmocc-bundle busybox is present AND this is a cosmo hull on
+ * Windows; returns
  * -1 otherwise (always -1 on a native build / on a POSIX host, where cosmocc's
  * #!/bin/sh driver runs directly). Used by the transparent cosmocc reroute in
  * the spawn layer (hl_tool_spawn_env / _read), which covers every cosmocc call
  * site - the compiler vtable, tool.spawn, and the -dumpmachine / --version
  * probes - so the build tool needs no per-call-site change.
  */
-int hl_tool_cosmo_shell(char *out, size_t outsz);
+int hl_tool_cosmo_shell(const char *driver, char *out, size_t outsz);
 
 /*
  * On a cosmo hull on Windows, point TMPDIR/TMP/TEMP at one real directory that

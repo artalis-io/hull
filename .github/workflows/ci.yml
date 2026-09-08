@@ -2527,6 +2527,18 @@ jobs:
       - name: Site-consistency self-test (negative)
         run: make check-site-consistency-selftest
 
+      # scripts/cosmo_fat_repair.sh runs from a parse-time $(shell) and deletes
+      # build artifacts, so what it will and will not delete has to be pinned.
+      # Synthetic trees, no compiler, under a second.
+      - name: Fat-cosmo pair-repair gate
+        run: make check-cosmo-fat-repair
+
+      # `make -n` must describe a build, not perform part of one: three
+      # parse-time $(shell) hooks delete artifacts, and parsing is not
+      # suppressed by -n. Temp dir, no compiler, under a second.
+      - name: Dry-run inertness gate
+        run: make check-dry-run-inert
+
   htmx-browser:
     needs: [classify]
     if: needs.classify.outputs.run_web == 'true'

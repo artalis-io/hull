@@ -96,6 +96,156 @@ toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
   and labelled `[build-eval]` under `--verbose`. The window's existing bounds -
   the kernel sandbox, stripped dynamic-code loaders, no-op capability stubs,
   top-level only, once per process - are now documented at the call site.
+- **An interrupted cosmocc build could not be resumed, only `make clean`ed.**
+  cosmocc compiles every translation unit twice - `foo.o` beside
+  `.aarch64/foo.o` - and pairs the archives that collect them the same way, but
+  only the first of each pair is ever named as a make target. A build stopped
+  part-way (Ctrl-C, or the Windows source-build watchdog killing a wedged cc1)
+  therefore left a half-written pair that every later `make` skipped as up to
+  date, and the build died at the fat link on a message that named the archive
+  rather than the cause (`linker input missing concomitant
+  vendor/keel/.aarch64/libkeel.a file`). A parse-time repair now removes a
+  half-written pair so the ordinary rules rebuild both halves. This is also what
+  makes the Windows source build's retry-after-stall work: it resumes from the
+  objects already built, and one of those was the pair its own kill had broken.
+- **`hull build`'s no-compiler hint pointed at a flag that no longer exists.** It
+  advised "rebuild hull with `HL_ENABLE_TCC=1`", which was removed with the rest
+  of the tcc toolchain, so following it could only fail. The hint now names a
+  route that exists on the running binary, as doctor's do: a cosmo hull (the
+  build that reaches Windows) is told to run `hull doctor --fix` or
+  `hull tools install cosmocc`, since it can only link with cosmocc and Hull
+  installs that itself; a native build is told to install gcc or clang or point
+  at one with `--compiler=<path>`.
+- **`hull doctor --tui` no longer reserves a row for embedded tcc.** `doctor.c`
+  has emitted no `tcc_embedded` field since tcc was retired, so the row was
+  unreachable.
+- **No toolchain on PATH was findable on Windows.** `hl_host_find_in_path` -
+  the resolver introduced to fix exactly this - inferred the list separator
+  from the host and split on `;`. But a Cosmopolitan APE, the only Hull build
+  that runs on Windows, is handed a POSIX-shaped PATH by its own runtime
+  (measured on Windows 11: `/C/Users/...:/C/Program Files (x86)/...`), and an
+  MSYS2 or Git-Bash shell exports the same shape, so the whole list collapsed
+  into one nonsense component and every probe reported "not found" however much
+  was installed. The separator is now taken from the list (`;` when one is
+  present, or a single drive-prefixed entry; `:` otherwise) and each hit is
+  composed with its own component's separator, so a POSIX-shaped entry stays
+  POSIX-shaped. On a POSIX host both rules are exact no-ops. Measured on this
+  machine: `hull doctor` went from reporting no compilers to resolving the
+  `cc.exe` that had been on PATH all along.
+- **`hull doctor` and `hull tools list` could disagree about the same tool.**
+  `hl_tools_lookup_path`'s PATH step kept a second, private walker that split
+  on `:` and joined with `/` - the copy hull#459 replaced in doctor, left
+  behind here - so the two surfaces used different rules and neither tried the
+  `.exe` / `.com` forms. It now delegates to the shared resolver, leaving one
+  PATH walker in the tree.
+- **`hull build --compiler=<name>` failed on Windows for a compiler that was
+  installed.** Selection spawned the bare name and left the search to exec,
+  which does not search the PATH Windows hands an APE. A bare name is now
+  resolved by Hull first (`hl_driver_resolve_name`), falling through to the
+  bare name on a miss so exec still gets its turn and POSIX behaviour is
+  unchanged. The same resolution now applies to `--linker=<name>` and to the
+  automatic cc / gcc / clang / cosmocc probes.
+- **cosmocc could not be driven from a shell whose `$HOME` differed from the
+  install's.** cosmocc ships a `#!/bin/sh` driver that Windows cannot execute
+  directly, so Hull routes it through the busybox in the same bundle - but
+  looked for that busybox only under `$HOME`. Under MSYS2 `$HOME` is
+  `/home/<user>` (`C:\msys64\home\<user>`) while `hull tools install cosmocc`
+  from PowerShell installs under `C:\Users\<user>`, so a perfectly good busybox
+  sitting next to the resolved cosmocc was missed and no compile could start.
+  It is now looked for beside the driver first, with the `$HOME` locations as
+  fallbacks.
+- **Running a lint gate deleted your build.** The build-fingerprint purge and
+  the fat-cosmo pair repair are parse-time `$(shell)` hooks, so they fire on
+  *any* `make` invocation whose configuration differs from the last build - and
+  a gate is normally run without the flags the tree was built with. Measured:
+  after `make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0`, a plain
+  `make check-keel-flags` removed 429 objects and `build/hull`. `make -n` did
+  the same, because `-n` does not suppress parsing. Both hooks are now skipped
+  when the tree must not change: under `-n`, and for goals that build nothing
+  (`lint`, `help`, and every `check-%` except `check-hardening`, which depends
+  on `build/hull` and so genuinely does build). New gate
+  `make check-dry-run-inert` pins it, exercising the MAKEFLAGS detection - the
+  fragile part, where a naive `findstring n` reads `--no-print-directory` as a
+  dry run - in a temp directory where nothing can be lost.
+- **`check-keel-flags` reported six failures on any machine that had built
+  Hull.** It dry-ran `make -n vendor/keel/libkeel.a` and read the compile
+  lines, but that archive's only prerequisites are Hull's mbedTLS objects, so
+  once it exists make answers "up to date", never enters Keel's sub-make and
+  emits no compile lines at all. The gate then reported "no Keel compile lines
+  found (recipe changed?)", which reads as a regression in the thing being
+  gated rather than as the gate mis-firing. It now asks with `-B` what the
+  commands *would* be, which is the actual question.
+- **`check-keel-flags` asserted LTO propagation on toolchains that cannot do
+  LTO.** Hull's own `HL_LTO_CFLAG` comes from a compiler probe and stays empty
+  when neither `-flto=thin` nor `-flto` works, so there was no flag to
+  propagate and the gate was testing the probe. It now skips that
+  configuration, mirroring what it already did for CFI, and the negative
+  self-test skips its matching probe for the same reason (that probe is
+  observable only through the LTO configuration).
+- **`make platform-cosmo` built a corrupt aarch64 platform archive on Windows.**
+  Keel picks per-platform translation units (`socket_posix.c` vs
+  `socket_winsock.c`, `platform_posix.c` vs `platform_win.c`, and four more) and
+  its `clean` removes the set for the configuration it was *parsed* with. Hull
+  invoked that clean without passing `CC`, so on Windows - where Keel sets
+  `WINDOWS := 1` from `uname` - it deleted the Windows objects and left every
+  POSIX object a cosmo build had made. Measured under MSYS2:
+  `make -n clean` names 17 win objects and 0 posix; `make -n clean
+  CC=x86_64-unknown-cosmo-cc` names the 6 posix ones.
+
+  The aarch64 pass then found `platform_posix.o`, `socket_posix.o`,
+  `udp_cmsg.o` and three siblings already present and up to date, and archived
+  those **x86_64** objects into the aarch64 library. Every `hull build` against
+  it then died in the app link with `ld.bfd: i386:x86-64 architecture of input
+  file ... is incompatible with aarch64 output` - naming binutils rather than
+  the stale object. Each keel clean is now given the same `CC`/`AR` as the build
+  whose objects it removes, and asserts that no object survived it; `make clean`
+  passes its own `CC` through for the same reason. On Linux both configurations
+  select the same POSIX set, so this worked there by coincidence.
+
+  The sweep also covers `.aarch64/` residue under `integrations/`, which Keel's
+  own clean does not reach (it sweeps `src/`, `src/protocols/*/` and
+  `vendor/llhttp/`) - found by the new assertion on its first run.
+
+### Security
+
+- **Hull announced a kernel sandbox on Windows that was not there.** A
+  Cosmopolitan APE is the only Hull build that reaches Windows, and
+  `sb_supported()` returned true for every cosmo host unconditionally - so
+  startup logged `[sandbox] phase 1 pledge applied (exec/proc/fork blocked)`
+  and `[sandbox] applied (... pledge: stdio rpath wpath cpath flock fattr
+  inet)`, which a reader can only take as "this process is confined". It was
+  not. Cosmopolitan's `pledge()`/`unveil()` enforce only where the host gives
+  them a mechanism (seccomp-bpf plus Landlock on Linux, the native syscalls on
+  OpenBSD); everywhere else both return 0 and do nothing. Measured with cosmocc
+  4.0.2 on Windows 11: `pledge("stdio", NULL)` returns 0 and a following
+  `socket(AF_INET, SOCK_STREAM, 0)` succeeds, though `stdio` grants no `inet`.
+  The same false claim covered a cosmo APE on macOS and the BSDs, where the
+  cosmo branch is selected ahead of the `__APPLE__` one and Seatbelt is never
+  reached.
+
+  `sb_supported()` is now true only on the hosts that enforce, and any other
+  host emits one warning naming what is and is not protecting it:
+
+  ```
+  [sandbox] NO kernel sandbox on this host: syscall and filesystem
+  confinement, and W^X, are not enforced. Hull's capability layer
+  (manifest fs / env / hosts) is the only boundary.
+  ```
+
+  Startup is **not** refused there. W^X normally fails closed without a kernel
+  sandbox, but that rule exists for a backend that is incomplete - Linux
+  without Landlock, which still refuses unless `--allow-degraded-sandbox`. On a
+  host with no backend at all there is no partial sandbox to opt into and no
+  setting that would produce one, so demanding a flag on every run would add
+  friction without offering an actionable decision. Behaviour on Linux, macOS
+  (native) and OpenBSD is unchanged.
+
+- **`hull doctor` reports the sandbox.** A new `Sandbox` section says whether
+  pledge/unveil are enforcing on THIS host, or that the capability layer is the
+  only boundary - the fallback state, not a failure, so the exit status is
+  unaffected. `--json` carries `kernel_sandbox`. Whether a backend exists is a
+  host fact rather than a build one for the cosmo binary, so it could not be
+  read off the build before.
 
 ## [0.14.0] - 2026-08-27
 

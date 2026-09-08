@@ -2065,7 +2065,21 @@ local function main()
         or is_cosmo
     if will_compile and not tool.compiler then
         tool.stderr("hull build: no C compiler available\n")
-        tool.stderr("hint: install gcc or clang, or rebuild hull with HL_ENABLE_TCC=1\n")
+        -- Name a route that exists on THIS hull, the way doctor does. A cosmo
+        -- build can only link with cosmocc - native cc/gcc/clang would emit
+        -- ELF/Mach-O against cosmo-format archives - and Hull installs that
+        -- itself through the signed `hull tools install` path, so sending a
+        -- Windows user to a Unix package manager is the wrong advice there.
+        -- The previous hint named HL_ENABLE_TCC=1, a build flag that exists
+        -- nowhere in the tree: tcc was retired as a Hull-provided toolchain,
+        -- so following it could only fail.
+        if is_cosmo then
+            tool.stderr("hint: run `hull doctor --fix` (installs cosmocc), "
+                        .. "or `hull tools install cosmocc`\n")
+        else
+            tool.stderr("hint: install gcc or clang, "
+                        .. "or point at one with --compiler=<path>\n")
+        end
         tool.rmdir(tmpdir)
         tool.exit(1)
     end

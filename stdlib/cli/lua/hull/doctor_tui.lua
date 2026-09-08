@@ -133,10 +133,6 @@ local function render(t, d, last_action, palette)
         row(t, 3, y, name, on and true or false, on and "enabled" or "disabled", palette)
         y = y + 1
     end
-    if d.tcc_embedded ~= nil then
-        row(t, 3, y, "tcc", d.tcc_embedded, d.tcc_embedded and "embedded" or "not embedded", palette)
-        y = y + 1
-    end
     y = y + 1
 
     t:style({ bold = true }); t:print(1, y, "Compute"); t:style({})

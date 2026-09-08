@@ -180,6 +180,11 @@ HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe)
 
     int is_system = (explicit_linker && strcmp(explicit_linker, "system") == 0);
     if (explicit_linker && !is_system) {
+        /* Same bare-name resolution the compiler side does - see
+         * hl_driver_resolve_name; exec's PATH search is not dependable here. */
+        char resolved[PATH_MAX];
+        if (hl_driver_resolve_name(explicit_linker, resolved, sizeof resolved) == 0)
+            explicit_linker = resolved;
         HlLinker *l = hl_linker_system_new(explicit_linker);
         if (l && hl_linker_is_available(l)) return l;
         if (l) hl_linker_destroy(l);
