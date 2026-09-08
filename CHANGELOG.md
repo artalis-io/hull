@@ -154,6 +154,34 @@ toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
   sitting next to the resolved cosmocc was missed and no compile could start.
   It is now looked for beside the driver first, with the `$HOME` locations as
   fallbacks.
+- **Running a lint gate deleted your build.** The build-fingerprint purge and
+  the fat-cosmo pair repair are parse-time `$(shell)` hooks, so they fire on
+  *any* `make` invocation whose configuration differs from the last build - and
+  a gate is normally run without the flags the tree was built with. Measured:
+  after `make CC=cosmocc HL_OPT=-O0 HL_ENABLE_WASM=0`, a plain
+  `make check-keel-flags` removed 429 objects and `build/hull`. `make -n` did
+  the same, because `-n` does not suppress parsing. Both hooks are now skipped
+  when the tree must not change: under `-n`, and for goals that build nothing
+  (`lint`, `help`, and every `check-%` except `check-hardening`, which depends
+  on `build/hull` and so genuinely does build). New gate
+  `make check-dry-run-inert` pins it, exercising the MAKEFLAGS detection - the
+  fragile part, where a naive `findstring n` reads `--no-print-directory` as a
+  dry run - in a temp directory where nothing can be lost.
+- **`check-keel-flags` reported six failures on any machine that had built
+  Hull.** It dry-ran `make -n vendor/keel/libkeel.a` and read the compile
+  lines, but that archive's only prerequisites are Hull's mbedTLS objects, so
+  once it exists make answers "up to date", never enters Keel's sub-make and
+  emits no compile lines at all. The gate then reported "no Keel compile lines
+  found (recipe changed?)", which reads as a regression in the thing being
+  gated rather than as the gate mis-firing. It now asks with `-B` what the
+  commands *would* be, which is the actual question.
+- **`check-keel-flags` asserted LTO propagation on toolchains that cannot do
+  LTO.** Hull's own `HL_LTO_CFLAG` comes from a compiler probe and stays empty
+  when neither `-flto=thin` nor `-flto` works, so there was no flag to
+  propagate and the gate was testing the probe. It now skips that
+  configuration, mirroring what it already did for CFI, and the negative
+  self-test skips its matching probe for the same reason (that probe is
+  observable only through the LTO configuration).
 
 ## [0.14.0] - 2026-08-27
 

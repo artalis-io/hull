@@ -2533,6 +2533,12 @@ jobs:
       - name: Fat-cosmo pair-repair gate
         run: make check-cosmo-fat-repair
 
+      # `make -n` must describe a build, not perform part of one: three
+      # parse-time $(shell) hooks delete artifacts, and parsing is not
+      # suppressed by -n. Temp dir, no compiler, under a second.
+      - name: Dry-run inertness gate
+        run: make check-dry-run-inert
+
   htmx-browser:
     needs: [classify]
     if: needs.classify.outputs.run_web == 'true'

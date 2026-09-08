@@ -64,7 +64,8 @@ fi
 trap cleanup EXIT INT TERM
 
 # 1. Baseline: the real tree must pass, or the probes below prove nothing.
-if $GATE >/dev/null 2>&1; then
+#    Keep the output: probe B's applicability is read out of it below.
+if base_out=$($GATE 2>&1); then
     pass "baseline: propagation is intact"
 else
     bad "baseline: gate already failing on an unmodified tree"
@@ -83,15 +84,26 @@ fi
 cleanup
 
 # 3. Probe B - the asymmetric shape: hook reaches CFLAGS, not VENDOR_CFLAGS.
-sed 's/^override VENDOR_CFLAGS += \$(KEEL_EXTRA_CFLAGS)$/# probe B: hook removed from the vendored half/' \
-    "$KEEL_MK" > "$KEEL_MK.probe" && mv "$KEEL_MK.probe" "$KEEL_MK"
-out=$($GATE 2>&1) && rc=0 || rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'vendor'; then
-    pass "probe B (vendored half unhooked) -> gate BITES"
+#
+#    Observable ONLY through the LTO configuration. Probe B removes the
+#    KEEL_EXTRA_CFLAGS hook, while -O0/-O2 travel by KEEL_OPT instead - so
+#    with no LTO flag in play the vendored half has nothing to lose and there
+#    is no bite to demonstrate. The gate already decides that (it skips LTO
+#    when the compiler cannot do it), so read its verdict rather than
+#    re-probing here, which keeps the two from drifting apart.
+if printf '%s' "$base_out" | grep -q 'skip  LTO'; then
+    printf '  skip  probe B: gate skips LTO on this toolchain, so it cannot bite\n'
 else
-    bad "probe B (vendored half unhooked) -> gate did NOT bite (rc=$rc)"
+    sed 's/^override VENDOR_CFLAGS += \$(KEEL_EXTRA_CFLAGS)$/# probe B: hook removed from the vendored half/' \
+        "$KEEL_MK" > "$KEEL_MK.probe" && mv "$KEEL_MK.probe" "$KEEL_MK"
+    out=$($GATE 2>&1) && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'vendor'; then
+        pass "probe B (vendored half unhooked) -> gate BITES"
+    else
+        bad "probe B (vendored half unhooked) -> gate did NOT bite (rc=$rc)"
+    fi
+    cleanup
 fi
-cleanup
 
 # 4. Restored: clean again, so the probes left nothing behind.
 if $GATE >/dev/null 2>&1; then

@@ -2079,6 +2079,54 @@ BUILD_FINGERPRINT := \
   APP_BASE_TLSLESS=$(HL_APP_BASE_TLSLESS)|\
   CC=$(CC)
 
+# ── Dry-run detection ───────────────────────────────────────────────
+#
+# `make -n` must DESCRIBE the build, never perform part of it. Two parse-time
+# $(shell ...) hooks below delete build artifacts (the fingerprint purge and
+# the fat-cosmo pair repair), and $(shell) runs during PARSING - which -n does
+# not suppress. So a dry run mutated the tree.
+#
+# That is not theoretical. tests/check_keel_flag_propagation.sh advertises
+# itself as "dry run, no artifacts" and shells `make -n <vars> libkeel.a` with
+# variables that differ from whatever the developer last built with. The
+# fingerprint mismatch fired the purge: running the LINT gate deleted 273
+# objects and build/hull out of a working tree.
+#
+# GNU make collects single-letter options into the FIRST word of MAKEFLAGS,
+# WITHOUT a leading dash (`-Bn` arrives as `Bn`); long options arrive as
+# separate dash-prefixed words. So a first word that carries no dash is the
+# short-option set, and an `n` in it means -n. No other make short option
+# contains an `n`, and checking for the dash keeps `--no-print-directory` -
+# which does contain one - from reading as a dry run.
+HL_MAKE_SHORT_OPTS := $(firstword $(MAKEFLAGS))
+ifeq ($(findstring -,$(HL_MAKE_SHORT_OPTS)),)
+HL_DRY_RUN := $(findstring n,$(HL_MAKE_SHORT_OPTS))
+endif
+
+# Goals that BUILD NOTHING must not fire it either. The purge exists to stop a
+# stale object from another configuration reaching a binary; a lint gate
+# produces no binary, so there is nothing to protect - and firing it there is
+# actively destructive, because a gate is normally run WITHOUT the flags the
+# tree was built with. `make lint` after `make CC=cosmocc HL_OPT=-O0
+# HL_ENABLE_WASM=0 ...` differs in every fingerprint field, so it deleted that
+# entire build: 429 objects and build/hull, measured, from running a gate.
+#
+# `check-%` covers every gate by construction, so a new one needs no edit here.
+# check-hardening is the single exception: it depends on $(BUILDDIR)/hull and
+# therefore really does build, and skipping the purge for it could let it
+# inspect a binary carrying stale objects.
+HL_INERT_GOALS := $(filter-out check-hardening,\
+                    $(filter lint lint-lua lint-js help check-%,$(MAKECMDGOALS)))
+ifneq ($(MAKECMDGOALS),)
+ifeq ($(filter-out $(HL_INERT_GOALS),$(MAKECMDGOALS)),)
+HL_NO_BUILD := 1
+endif
+endif
+
+# Either reason is enough: this is what the parse-time hooks below are guarded
+# on. Non-empty = leave the tree exactly as found.
+HL_TREE_MUST_NOT_CHANGE := $(HL_DRY_RUN)$(HL_NO_BUILD)
+
 BUILD_CONFIG_FILE := $(BUILDDIR)/.build-config
 
 # Parse-time: ensure builddir exists, then compare fingerprint. On
@@ -2099,6 +2147,8 @@ else
 PLATFORM_LIB_PURGE := $(BUILDDIR)/libhull_platform.a
 endif
 
+# Guarded: a dry run or a build-nothing goal leaves the tree alone (above).
+ifeq ($(HL_TREE_MUST_NOT_CHANGE),)
 $(shell mkdir -p $(BUILDDIR))
 $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)" || { \
     rm -f $(BUILDDIR)/cap_*.o $(BUILDDIR)/cmd_*.o $(BUILDDIR)/js_*.o $(BUILDDIR)/lua_rt_*.o \
@@ -2129,6 +2179,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
           $(BUILDDIR)/test_* 2>/dev/null; \
     printf '%s\n' '$(BUILD_FINGERPRINT)' > $(BUILD_CONFIG_FILE); \
 })
+endif
 
 # ── Fat-cosmo object-pair repair ────────────────────────────────────
 #
@@ -2143,8 +2194,9 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 #
 # Parse-time on purpose, like the fingerprint purge above: the damage has to be
 # undone before make decides anything is up to date, and it decides that as it
-# walks. One consequence worth stating - `make -n` repairs too, so a dry run
-# over a corrupt tree describes the build that would actually happen.
+# walks. Skipped under `-n` for the same reason the purge is: a dry run
+# describes a build, it does not perform part of one. Nothing is built under
+# -n, so not repairing there costs nothing.
 #
 # Two trees, because a fat build writes objects into exactly two: $(BUILDDIR)
 # (Hull's own objects plus every vendored one - mbedTLS, QuickJS, Lua, SQLite,
@@ -2162,12 +2214,14 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 # never touched. In steady state this is a no-op: a build that ran to
 # completion leaves no orphan.
 ifeq ($(CC),cosmocc)
+ifeq ($(HL_TREE_MUST_NOT_CHANGE),)
 $(shell sh scripts/cosmo_fat_repair.sh $(BUILDDIR) $(KEEL_DIR) $(KEEL_LIB) $(BUILDDIR)/libhull.a >/dev/null)
+endif
 endif
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest check-no-emdash check-no-emdash-selftest check-no-milestone-narration check-no-milestone-narration-selftest check-keel-flags check-keel-flags-selftest check-site-consistency check-site-consistency-selftest check-cosmo-fat-repair platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest check-no-emdash check-no-emdash-selftest check-no-milestone-narration check-no-milestone-narration-selftest check-keel-flags check-keel-flags-selftest check-site-consistency check-site-consistency-selftest check-cosmo-fat-repair check-dry-run-inert platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -3481,7 +3535,16 @@ check-site-consistency-selftest:
 check-cosmo-fat-repair:
 	sh tests/check_cosmo_fat_repair.sh
 
-lint: lint-lua lint-js check-sdk-headers check-docs-integrity check-no-emdash check-no-milestone-narration check-site-consistency check-keel-flags check-cosmo-fat-repair
+# Dry-run inertness gate: `make -n` must DESCRIBE a build, never perform part
+# of one. Three parse-time $(shell) hooks delete build artifacts, and parsing
+# is not suppressed by -n - which is how the keel-flags gate, advertising
+# itself as a dry run, came to delete 273 objects and build/hull out of a
+# working tree. Exercises the MAKEFLAGS detection in a temp dir where nothing
+# can be lost. See the script header.
+check-dry-run-inert:
+	sh tests/check_dry_run_is_inert.sh
+
+lint: lint-lua lint-js check-sdk-headers check-docs-integrity check-no-emdash check-no-milestone-narration check-site-consistency check-keel-flags check-cosmo-fat-repair check-dry-run-inert
 
 # ── API documentation (two-tier: source comments + generated HTML) ──
 #
