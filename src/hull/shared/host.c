@@ -172,6 +172,59 @@ int hl_host_render_exec(const char *path, char *out, size_t out_sz)
     return 0;
 }
 
+/* ── Tool naming ────────────────────────────────────────────────────
+ *
+ * Reduce a toolchain INVOCATION to the tool's NAME: take the basename, then
+ * drop a host executable suffix. `C:\msys64\ucrt64\bin\gcc.exe`, `/usr/bin/cc`
+ * and a bare `cosmocc` all name the same thing, and every consumer wants that
+ * thing rather than the spelling it arrived in.
+ *
+ * Both separators, because a resolved path on Windows carries backslashes and
+ * splitting on '/' alone leaves the whole string as the "basename". That was a
+ * live defect: hull#471 fixed it for the spawn allowlist, where every tool was
+ * denied; the compiler and linker vtables kept splitting on '/' only, so on
+ * Windows `hull build` printed "compiling with C:\...\cc.exe" and recorded that
+ * absolute path as the `cc` field inside package.sig - a developer's directory
+ * layout baked into a build artifact, and a value that differs per machine for
+ * what is supposed to be the same toolchain.
+ *
+ * The suffix strip is what makes the name host-independent, which is what the
+ * consumers actually compare against: build.lua matches `cosmocc` and `tcc`,
+ * and test_compiler asserts a plain `cc`. Narrow by construction - only
+ * ".com" and ".exe", only trailing, only the suffix removed.
+ *
+ * Case-SENSITIVE, matching the comparisons it feeds. "CC.EXE" keeps its
+ * suffix, exactly as a bare "CC" is not "cc" today; folding case would be a
+ * real behaviour change and wrong on POSIX, where case is significant.
+ *
+ * @returns 0 on success, -1 on a NULL/oversized argument (out is emptied).
+ */
+int hl_host_tool_name(const char *invocation, char *out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return -1;
+    out[0] = '\0';
+    if (!invocation) return -1;
+
+    const char *base = invocation;
+    for (const char *c = invocation; *c; c++)
+        if (*c == '/' || *c == '\\') base = c + 1;
+
+    size_t blen = strlen(base);
+    static const char *const sfx[] = { ".com", ".exe", NULL };
+    for (const char *const *s = sfx; *s; s++) {
+        size_t slen = strlen(*s);
+        if (blen > slen && memcmp(base + blen - slen, *s, slen) == 0) {
+            blen -= slen;
+            break;
+        }
+    }
+
+    if (blen >= out_sz) return -1;   /* a truncated name would match nothing */
+    memcpy(out, base, blen);
+    out[blen] = '\0';
+    return 0;
+}
+
 /* ── PATH search ────────────────────────────────────────────────────
  *
  * The previous (doctor-local) implementation split on ':' and joined with

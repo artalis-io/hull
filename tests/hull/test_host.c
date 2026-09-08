@@ -218,6 +218,67 @@ UTEST(host, render_exec_reports_overflow_when_quoting)
 
 /* ── PATH search ───────────────────────────────────────────────────── */
 
+UTEST(host, tool_name_takes_the_basename_on_either_separator)
+{
+    char out[64];
+    /* The defect: splitting on '/' alone leaves a Windows path whole, so the
+     * "name" recorded in package.sig was an absolute path off one machine. */
+    ASSERT_EQ(0, hl_host_tool_name("C:\\msys64\\ucrt64\\bin\\gcc.exe", out, sizeof(out)));
+    ASSERT_STREQ("gcc", out);
+    ASSERT_EQ(0, hl_host_tool_name("/usr/bin/gcc", out, sizeof(out)));
+    ASSERT_STREQ("gcc", out);
+    ASSERT_EQ(0, hl_host_tool_name("/C/Users/x/.hull/tools/cosmocc/bin/cosmocc", out, sizeof(out)));
+    ASSERT_STREQ("cosmocc", out);
+    /* Mixed separators: the LAST one wins, whichever it is. */
+    ASSERT_EQ(0, hl_host_tool_name("C:/tools\\bin/cc", out, sizeof(out)));
+    ASSERT_STREQ("cc", out);
+}
+
+UTEST(host, tool_name_drops_only_a_trailing_exe_or_com)
+{
+    char out[64];
+    ASSERT_EQ(0, hl_host_tool_name("cc.exe", out, sizeof(out)));
+    ASSERT_STREQ("cc", out);
+    ASSERT_EQ(0, hl_host_tool_name("hull.com", out, sizeof(out)));
+    ASSERT_STREQ("hull", out);
+    /* Not an extension, not stripped. */
+    ASSERT_EQ(0, hl_host_tool_name("gcc-14", out, sizeof(out)));
+    ASSERT_STREQ("gcc-14", out);
+    ASSERT_EQ(0, hl_host_tool_name("exe", out, sizeof(out)));
+    ASSERT_STREQ("exe", out);
+    ASSERT_EQ(0, hl_host_tool_name(".exe", out, sizeof(out)));
+    ASSERT_STREQ(".exe", out);      /* nothing would be left; leave it alone */
+    /* Mid-string, not trailing. */
+    ASSERT_EQ(0, hl_host_tool_name("cc.exe.bak", out, sizeof(out)));
+    ASSERT_STREQ("cc.exe.bak", out);
+    /* Case-sensitive, matching the comparisons this feeds. */
+    ASSERT_EQ(0, hl_host_tool_name("CC.EXE", out, sizeof(out)));
+    ASSERT_STREQ("CC.EXE", out);
+}
+
+UTEST(host, tool_name_rejects_rather_than_truncates)
+{
+    /* A truncated name could match a DIFFERENT tool, so an over-long one is
+     * refused and the caller decides what to do. */
+    char small[4];
+    ASSERT_EQ(-1, hl_host_tool_name("/usr/bin/clang", small, sizeof(small)));
+    ASSERT_STREQ("", small);
+
+    char out[64];
+    ASSERT_EQ(-1, hl_host_tool_name(NULL, out, sizeof(out)));
+    ASSERT_STREQ("", out);
+    ASSERT_EQ(-1, hl_host_tool_name("cc", NULL, 16));
+    ASSERT_EQ(-1, hl_host_tool_name("cc", out, 0));
+}
+
+UTEST(host, tool_name_handles_a_trailing_separator)
+{
+    /* Degenerate but must not read past the end: the basename is empty. */
+    char out[64];
+    ASSERT_EQ(0, hl_host_tool_name("/usr/bin/", out, sizeof(out)));
+    ASSERT_STREQ("", out);
+}
+
 UTEST(host, find_in_path_rejects_bad_arguments)
 {
     char out[64];
@@ -333,7 +394,7 @@ UTEST(host, find_in_path_splits_a_win32_shaped_list_on_semicolons)
      * the point, not the miss. */
     char out[512];
     ASSERT_EQ(0, hl_host_find_in_path_ex(
-        "C:\tools;C:\Program Files\LLVM\bin;D:\bin",
+        "C:\\tools;C:\\Program Files\\LLVM\\bin;D:\\bin",
         "hull-definitely-not-a-real-binary-zzz", out, sizeof(out)));
     ASSERT_STREQ("", out);
 }
@@ -346,7 +407,7 @@ UTEST(host, find_in_path_keeps_a_single_win32_component_whole)
      * clean miss is the observable; the point is that it does not split. */
     char out[512];
     ASSERT_EQ(0, hl_host_find_in_path_ex(
-        "C:\tools", "hull-definitely-not-a-real-binary-zzz",
+        "C:\\tools", "hull-definitely-not-a-real-binary-zzz",
         out, sizeof(out)));
     ASSERT_STREQ("", out);
 }

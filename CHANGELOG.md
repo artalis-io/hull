@@ -74,6 +74,20 @@ toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
   `/app.com`) and Hull's per-project scratch directory (`/.hull/`).
 
 ### Fixed
+- **A Windows toolchain path leaked into `package.sig`.** The compiler and
+  linker vtables took the tool's name by splitting the invocation on `/` only,
+  so a Windows-shaped path stayed whole. `hull build` then printed
+  `compiling with C:\msys64\ucrt64\bin\gcc.exe` and recorded that absolute path
+  as the `cc` field inside `package.sig` - a developer's directory layout baked
+  into a build artifact, and a different recorded value on two machines with
+  the same toolchain. The name is also matched against (`cosmocc`, `tcc` in
+  `build.lua`), and a path matches nothing.
+
+  Both now derive the name once, through a shared `hl_host_tool_name`:
+  basename on either separator, minus a trailing `.com` / `.exe`, so
+  `C:\tools\gcc.exe`, `/usr/bin/gcc` and a bare `gcc` all yield `gcc`. The
+  spawn allowlist's inline copy of that rule (hull#471) now uses the same
+  helper, leaving one implementation rather than two that must agree.
 
 - **`hull doctor` could not find any compiler on Windows.** Its PATH search split
   on `:` and joined with `/`, which shreds the drive letters in a `;`-separated

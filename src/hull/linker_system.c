@@ -13,6 +13,7 @@
 #include "hull/compiler.h"   /* hl_driver_resolve_native (shared cc resolution) */
 #include "hull/cap/tool.h"
 #include "hull/tools_install.h"
+#include "hull/shared/host.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,13 +25,16 @@
 
 typedef struct {
     char cc[PATH_MAX];
+    /* The tool NAME, derived once at construction - see the identical field in
+     * compiler.c::SysCtx and hl_host_tool_name for why the invocation itself
+     * is the wrong thing to report. */
+    char name[64];
 } SysCtx;
 
 static const char *sys_name(HlLinker *l)
 {
     SysCtx *ctx = (SysCtx *)l->ctx;
-    const char *slash = strrchr(ctx->cc, '/');
-    return slash ? slash + 1 : ctx->cc;
+    return ctx->name;
 }
 
 static int sys_is_available(HlLinker *l)
@@ -80,6 +84,8 @@ HlLinker *hl_linker_system_new(const char *cc_path)
     SysCtx *ctx = (SysCtx *)malloc(sizeof(SysCtx));
     if (!ctx) return NULL;
     snprintf(ctx->cc, sizeof(ctx->cc), "%s", cc_path);
+    if (hl_host_tool_name(cc_path, ctx->name, sizeof(ctx->name)) != 0)
+        snprintf(ctx->name, sizeof(ctx->name), "%s", cc_path);
     HlLinker *l = (HlLinker *)malloc(sizeof(HlLinker));
     if (!l) { free(ctx); return NULL; }
     l->vtable = &sys_vtable;

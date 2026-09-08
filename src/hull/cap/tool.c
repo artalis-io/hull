@@ -13,6 +13,7 @@
  */
 
 #include "hull/cap/tool.h"
+#include "hull/shared/host.h"
 #include "hull/cap/audit.h"
 #include "hull/build_assets.h"
 #include "hull/compiler.h"
@@ -154,39 +155,31 @@ int hl_tool_check_allowlist(const char *binary)
 {
     if (!binary) return -1;
 
-    /* Extract basename. Split on BOTH separators: a cosmo APE reaches Windows,
-     * where a resolved tool path is "C:\tools\gcc.exe" - with '/' alone the
-     * whole string stays the "basename" and never matches. */
-    const char *base = binary;
-    for (const char *c = binary; *c; c++)
-        if (*c == '/' || *c == '\\') base = c + 1;
-
-    /* Drop a host executable suffix before matching. The same tool is `cc` on
-     * POSIX and `cc.exe` on Windows (and hull itself installs as `hull.com`,
-     * the APE convention - see install.ps1 and hl_host_exe_suffix). Without
-     * this every allowlisted tool is denied there, because the match below
-     * accepts only an exact name or a `-<digit>` version suffix.
+    /* Reduce the invocation to a tool NAME before matching: basename on either
+     * separator, minus a trailing ".com" / ".exe". Both halves are load-bearing
+     * on Windows, where a resolved path is "C:\tools\gcc.exe" - splitting on
+     * '/' alone leaves the whole string as the "basename", and the match below
+     * accepts only an exact name or a `-<digit>` version suffix, so every tool
+     * `hull build` spawns there was denied (hull#471).
      *
-     * Narrow by construction: only these two suffixes, only trailing, and only
-     * the SUFFIX is removed - the remaining name still has to be on the list,
-     * so this admits no name that was not already allowed.
+     * The rule is narrow by construction: only those two suffixes, only
+     * trailing, and only the SUFFIX is removed - what remains still has to be
+     * on the list, so no name is admitted that was not already allowed. It is
+     * case-SENSITIVE, matching the comparison it feeds: "CC.EXE" stays denied
+     * exactly as bare "CC" is, a limitation carried over rather than
+     * introduced.
      *
-     * Case-SENSITIVE, like the name match below it. A mixed-case "CC.EXE" is
-     * therefore still denied - exactly as bare "CC" is today, so this is a
-     * limitation carried over, not one introduced. Matching names case-
-     * insensitively would be a real behaviour change (and wrong on POSIX,
-     * where case is significant), so it is deliberately not done here. */
-    char stripped[64];
-    size_t blen = strlen(base);
-    for (const char **sfx = (const char *[]){ ".com", ".exe", NULL }; *sfx; sfx++) {
-        size_t slen = strlen(*sfx);
-        if (blen > slen && blen - slen < sizeof(stripped) &&
-            memcmp(base + blen - slen, *sfx, slen) == 0) {
-            memcpy(stripped, base, blen - slen);
-            stripped[blen - slen] = '\0';
-            base = stripped;
-            break;
-        }
+     * A name too long for the buffer falls back to the raw basename, which
+     * then fails the match - never a truncation, which could match something
+     * else. */
+    char named[64];
+    const char *base;
+    if (hl_host_tool_name(binary, named, sizeof(named)) == 0) {
+        base = named;
+    } else {
+        base = binary;
+        for (const char *c = binary; *c; c++)
+            if (*c == '/' || *c == '\\') base = c + 1;
     }
 
     for (const char **p = allowed_prefixes; *p; p++) {

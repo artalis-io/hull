@@ -76,6 +76,30 @@ UTEST(compiler, system_new_cc)
     hl_compiler_destroy(c);
 }
 
+UTEST(compiler, name_is_the_tool_not_the_invocation)
+{
+    /* The vtable used to take the basename by splitting on '/' only, so a
+     * Windows-shaped invocation stayed whole. That name is not cosmetic: it is
+     * printed ("hull build: compiling with ..."), matched against in build.lua
+     * (`cosmocc`, `tcc`), and RECORDED as the `cc` field inside package.sig -
+     * so a developer's absolute directory layout ended up in a build artifact,
+     * and two machines with the same toolchain recorded different values. */
+    struct { const char *invocation; const char *want; } cases[] = {
+        { "cc",                                  "cc"      },
+        { "/usr/bin/gcc",                        "gcc"     },
+        { "C:\\msys64\\ucrt64\\bin\\gcc.exe",    "gcc"     },
+        { "/C/Users/x/.hull/tools/cosmocc/bin/cosmocc", "cosmocc" },
+        { "cosmocc.exe",                         "cosmocc" },
+        { "gcc-14",                              "gcc-14"  },  /* not a suffix */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        HlCompiler *c = hl_compiler_system_new(cases[i].invocation);
+        ASSERT_NE(c, NULL);
+        ASSERT_STREQ(hl_compiler_name(c), cases[i].want);
+        hl_compiler_destroy(c);
+    }
+}
+
 UTEST(compiler, system_new_null_returns_null)
 {
     HlCompiler *c = hl_compiler_system_new(NULL);

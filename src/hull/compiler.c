@@ -20,14 +20,16 @@
 
 typedef struct {
     char cc[PATH_MAX];
+    /* The tool NAME, derived once at construction (hl_host_tool_name): the
+     * basename with any host executable suffix removed. Held rather than
+     * recomputed so sys_name() can keep returning a borrowed pointer. */
+    char name[64];
 } SysCtx;
 
 static const char *sys_name(HlCompiler *c)
 {
     SysCtx *ctx = (SysCtx *)c->ctx;
-    /* Return just the basename */
-    const char *slash = strrchr(ctx->cc, '/');
-    return slash ? slash + 1 : ctx->cc;
+    return ctx->name;
 }
 
 static int sys_is_available(HlCompiler *c)
@@ -110,6 +112,10 @@ HlCompiler *hl_compiler_system_new(const char *cc_path)
     SysCtx *ctx = (SysCtx *)malloc(sizeof(SysCtx));
     if (!ctx) return NULL;
     snprintf(ctx->cc, sizeof(ctx->cc), "%s", cc_path);
+    /* An over-long name cannot match anything a consumer compares against, so
+     * fall back to the invocation rather than to a truncation that could. */
+    if (hl_host_tool_name(cc_path, ctx->name, sizeof(ctx->name)) != 0)
+        snprintf(ctx->name, sizeof(ctx->name), "%s", cc_path);
     HlCompiler *c = (HlCompiler *)malloc(sizeof(HlCompiler));
     if (!c) { free(ctx); return NULL; }
     c->vtable = &sys_vtable;
