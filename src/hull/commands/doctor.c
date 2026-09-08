@@ -44,6 +44,7 @@
 #include "hull/shared/host.h"
 #include "hull/tool.h"
 #include "hull/tools_install.h"
+#include "hull/sandbox.h"
 #ifdef HL_ENABLE_HTTP_CLIENT
 #include "hull/commands/tools.h"
 #endif
@@ -622,6 +623,28 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
     }
     fprintf(f, "\n");
 
+    /* ── Sandbox ── */
+    /* Whether a kernel backend exists is a HOST fact for the build that
+     * reaches Windows, not a compile-time one: the same APE enforces on Linux
+     * and OpenBSD and enforces nothing on Windows, macOS or a BSD. Reporting it
+     * here means a user learns it from `hull doctor` rather than from a warning
+     * the first time they run an app. Absence is the FALLBACK state, not a
+     * failure - the capability layer is a real boundary, just a different one -
+     * so it gets the fallback glyph, and doctor's exit status is unaffected. */
+    fprintf(f, "Sandbox\n");
+    if (hl_sandbox_kernel_available()) {
+        print_row(f, "kernel", GLYPH_OK,
+                  "pledge/unveil enforcing (syscall + filesystem confinement)");
+    } else {
+        print_row(f, "kernel", GLYPH_FALL,
+                  "none on this host - capability layer only");
+        fprintf(f, "                the manifest's fs / env / hosts gates are "
+                   "checked in C on every call;\n");
+        fprintf(f, "                syscall + filesystem confinement and W^X "
+                   "are NOT enforced here.\n");
+    }
+    fprintf(f, "\n");
+
     /* ── Module subsystems ── */
     /* Summarises which capability bits the *build* satisfies, then walks
      * the registry to flag any modules that can never be admitted in
@@ -865,6 +888,12 @@ static void print_json(FILE *f, CompilerInfo *ci, int nci,
         sh_json_write_kv_bool  (&w, "aot_ready",      aot_ready != 0);
         sh_json_write_object_end(&w);
     }
+
+    /* A HOST fact, not a build one, for the cosmo build: the same APE
+     * enforces on Linux/OpenBSD and enforces nothing on Windows, macOS or a
+     * BSD. Machine-readable so an agent can tell the two apart. */
+    sh_json_write_kv_bool(&w, "kernel_sandbox",
+                          hl_sandbox_kernel_available() != 0);
 
     /* Module-subsystem capability bits - mirrors build_provided_caps()
      * in module_resolver.c. */

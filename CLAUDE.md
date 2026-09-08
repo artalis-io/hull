@@ -1473,6 +1473,22 @@ Two-phase sandbox in `sandbox.c`:
 
 Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sandbox` flag disables kernel enforcement for debugging.
 
+**A cosmo APE only gets a kernel sandbox on Linux and OpenBSD.** Cosmopolitan's
+`pledge()`/`unveil()` enforce where the host gives them a mechanism (seccomp-bpf
++ Landlock on Linux, the native syscalls on OpenBSD); on Windows, macOS and the
+other BSDs both calls return 0 and do nothing. Measured with cosmocc 4.0.2 on
+Windows 11: `pledge("stdio", NULL)` returns 0 and a following
+`socket(AF_INET, SOCK_STREAM, 0)` succeeds, though `stdio` grants no `inet`.
+`sb_supported()` therefore reports true only for those two hosts, and anywhere
+else startup logs one WARN - `[sandbox] NO kernel sandbox on this host` - naming
+the capability layer as the only boundary. W^X is not enforced there either;
+this does NOT refuse startup, because there is no partial sandbox to opt into
+and no setting that would produce one (an INCOMPLETE backend, such as Linux
+without Landlock, is the opposite case and still fails closed unless
+`--allow-degraded-sandbox`). Note the cosmo branch is selected before the
+`__APPLE__` one, so an APE on macOS does not reach Seatbelt - giving it one is a
+tracked follow-up, and would add protection rather than only honesty.
+
 ### Capability Enforcement Invariants
 
 - **SQL injection impossible:** All DB access uses `sqlite3_bind_*` parameterized binding. SQL is always a literal string.

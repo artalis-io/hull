@@ -183,6 +183,47 @@ toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
   self-test skips its matching probe for the same reason (that probe is
   observable only through the LTO configuration).
 
+### Security
+
+- **Hull announced a kernel sandbox on Windows that was not there.** A
+  Cosmopolitan APE is the only Hull build that reaches Windows, and
+  `sb_supported()` returned true for every cosmo host unconditionally - so
+  startup logged `[sandbox] phase 1 pledge applied (exec/proc/fork blocked)`
+  and `[sandbox] applied (... pledge: stdio rpath wpath cpath flock fattr
+  inet)`, which a reader can only take as "this process is confined". It was
+  not. Cosmopolitan's `pledge()`/`unveil()` enforce only where the host gives
+  them a mechanism (seccomp-bpf plus Landlock on Linux, the native syscalls on
+  OpenBSD); everywhere else both return 0 and do nothing. Measured with cosmocc
+  4.0.2 on Windows 11: `pledge("stdio", NULL)` returns 0 and a following
+  `socket(AF_INET, SOCK_STREAM, 0)` succeeds, though `stdio` grants no `inet`.
+  The same false claim covered a cosmo APE on macOS and the BSDs, where the
+  cosmo branch is selected ahead of the `__APPLE__` one and Seatbelt is never
+  reached.
+
+  `sb_supported()` is now true only on the hosts that enforce, and any other
+  host emits one warning naming what is and is not protecting it:
+
+  ```
+  [sandbox] NO kernel sandbox on this host: syscall and filesystem
+  confinement, and W^X, are not enforced. Hull's capability layer
+  (manifest fs / env / hosts) is the only boundary.
+  ```
+
+  Startup is **not** refused there. W^X normally fails closed without a kernel
+  sandbox, but that rule exists for a backend that is incomplete - Linux
+  without Landlock, which still refuses unless `--allow-degraded-sandbox`. On a
+  host with no backend at all there is no partial sandbox to opt into and no
+  setting that would produce one, so demanding a flag on every run would add
+  friction without offering an actionable decision. Behaviour on Linux, macOS
+  (native) and OpenBSD is unchanged.
+
+- **`hull doctor` reports the sandbox.** A new `Sandbox` section says whether
+  pledge/unveil are enforcing on THIS host, or that the capability layer is the
+  only boundary - the fallback state, not a failure, so the exit status is
+  unaffected. `--json` carries `kernel_sandbox`. Whether a backend exists is a
+  host fact rather than a build one for the cosmo binary, so it could not be
+  read off the build before.
+
 ## [0.14.0] - 2026-08-27
 
 Windows stabilization. A produced Cosmopolitan APE web app now serves on Windows
