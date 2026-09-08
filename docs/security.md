@@ -1587,6 +1587,29 @@ A verifier reproduces the toolchain by rebuilding the Dockerfile from
 this repo at the recorded timestamp; nothing is pulled from a registry
 Hull controls, so there is no hosted image to trust or to rot.
 
+**One availability caveat, and what CI does about it.** Everything above buys
+immutability, not availability. `snapshot.ubuntu.com` is a single Canonical
+service with no public mirror - ordinary Ubuntu mirrors carry the CURRENT
+archive and have no `/ubuntu/<timestamp>/` URL space at all - so while it is
+degraded the image cannot be built anywhere. On 2026-09-08 it returned 502/503
+across all three of its IPs for hours, and every reproducible-build job failed
+inside `docker build`, before a line of Hull was compiled.
+
+`apt-get -o Acquire::Retries=5` in the Dockerfile absorbs a blip but not an
+outage of that length. So CI's reproducibility jobs (and only those - see
+below) opt into a buildx `type=gha` LAYER CACHE via the `cache` input on
+`.github/actions/hull-build-container`. That does not weaken what they prove:
+the image is a pure function of the Dockerfile, since the base is digest-pinned
+and the apt snapshot is derived from that base, so a cache hit and a cache miss
+produce the same layers by construction. A hit only skips the network.
+
+The **release** pipeline deliberately does NOT opt in. It builds the image from
+source on every run, so the artifact's provenance still rests on the digest and
+snapshot pins alone, with no mutable cache and no extra actions in that path.
+That asymmetry is the point: CI trades a little trust surface for the ability to
+run at all during someone else's outage; a release does not need to make that
+trade, because it is a deliberate act that can simply be retried.
+
 This was chosen over both a published+digest-pinned image and a Nix flake:
 
 - **vs. a published image (GHCR + `container: @sha256`).** A pushed image

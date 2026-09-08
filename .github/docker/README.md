@@ -9,6 +9,12 @@ not just within a major-version window.
 Design rationale (and why this over a published GHCR image or a Nix flake) lives
 in [`docs/security.md` → "Build-environment immutability"](../../docs/security.md).
 
+CI's reproducibility jobs additionally opt into a buildx `type=gha` layer cache
+(the `cache` input on `.github/actions/hull-build-container`), because
+`snapshot.ubuntu.com` has no public mirror and an outage there otherwise fails
+every one of them inside `docker build`. The release pipeline does not opt in
+and still rebuilds from source every time. Same reference in `docs/security.md`.
+
 ## How it works
 
 - **`Dockerfile.build`** pins two things:
