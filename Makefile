@@ -2652,22 +2652,71 @@ endif
 # Multi-arch cosmo platform: build x86_64 and aarch64 archives
 COSMO_STAGE := .cosmo_staging
 
+# Keel's object SET is configuration-dependent, so its `clean` must be given the
+# same CC as the build whose objects it is removing. Keel picks per-platform TUs
+# (socket_posix.c vs socket_winsock.c, platform_posix.c vs platform_win.c, and
+# four more), and `clean` deletes $(CORE_OBJ) - the set for the configuration it
+# was PARSED with, not the set on disk.
+#
+# Unconfigured, that silently cleans the wrong half on Windows. Measured under
+# MSYS2, where Keel sets WINDOWS := 1 from uname:
+#
+#   make -n clean                          -> names 17 win objects, 0 posix
+#   make -n clean CC=x86_64-unknown-cosmo-cc -> names the 6 posix objects
+#
+# A cosmo build produces the POSIX set, so an unconfigured clean between the two
+# arch passes below removed nothing it had made. The aarch64 pass then found
+# platform_posix.o, socket_posix.o, udp_cmsg.o and three siblings already
+# present and up to date, archived those x86_64 objects into the aarch64 lib,
+# and every `hull build` against it died in the app link with
+#
+#   ld.bfd: i386:x86-64 architecture of input file
+#           `.aarch64/libhull_platform.a(udp_cmsg.o)' is incompatible with
+#           aarch64 output
+#
+# naming binutils rather than the stale object. On Linux both configurations
+# select the same POSIX set, so this worked there by coincidence; passing CC
+# makes it correct by construction on every host.
+#
+# The assertion after each clean is the cheap invariant that would have caught
+# it: a clean that leaves a .o behind has cleaned the wrong set.
+define keel-clean
+	$(MAKE) -C $(KEEL_DIR) clean CC=$(1) AR=$(2)
+	@# Keel's clean sweeps .aarch64/ under src/, src/protocols/*/ and
+	@# vendor/llhttp/ but not under integrations/, so a previous FAT build
+	@# leaves integrations/*/*/.aarch64/*.o behind. Those are inert for the
+	@# single-arch passes here, but they are still residue from another
+	@# configuration and the assertion below is not worth weakening to
+	@# tolerate them. Sweep every .aarch64 dir rather than naming Keel's
+	@# layout, so this keeps working if Keel grows another one.
+	@find $(KEEL_DIR) -type d -name .aarch64 -exec rm -rf {} + 2>/dev/null || true
+	@leftover=$$(find $(KEEL_DIR) -name '*.o' 2>/dev/null | head -5); \
+	if [ -n "$$leftover" ]; then \
+	    echo "ERROR: keel objects survived a clean configured for CC=$(1):"; \
+	    echo "$$leftover" | sed 's/^/  /'; \
+	    echo "  A later arch pass would archive these as if they were its own."; \
+	    exit 1; \
+	fi
+endef
+
 platform-cosmo:
 	@rm -rf $(COSMO_STAGE) && mkdir -p $(COSMO_STAGE)
 	@echo "=== Building x86_64-cosmo platform ==="
 	$(MAKE) clean
-	$(MAKE) -C $(KEEL_DIR) clean
+	$(call keel-clean,x86_64-unknown-cosmo-cc,x86_64-unknown-cosmo-ar)
 	$(MAKE) platform CC=x86_64-unknown-cosmo-cc AR=x86_64-unknown-cosmo-ar
 	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform.x86_64-cosmo.a
 	cp $(BUILDDIR)/platform_canary_hash $(COSMO_STAGE)/platform_canary_hash.x86_64-cosmo
 	@echo "=== Building aarch64-cosmo platform ==="
 	$(MAKE) clean
-	$(MAKE) -C $(KEEL_DIR) clean
+	@# x86_64 on purpose, not a copy-paste slip: what is on disk here is what
+	@# the pass above built, and a clean must match the objects it removes.
+	$(call keel-clean,x86_64-unknown-cosmo-cc,x86_64-unknown-cosmo-ar)
 	$(MAKE) platform CC=aarch64-unknown-cosmo-cc AR=aarch64-unknown-cosmo-ar
 	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform.aarch64-cosmo.a
 	cp $(BUILDDIR)/platform_canary_hash $(COSMO_STAGE)/platform_canary_hash.aarch64-cosmo
 	$(MAKE) clean
-	$(MAKE) -C $(KEEL_DIR) clean
+	$(call keel-clean,aarch64-unknown-cosmo-cc,aarch64-unknown-cosmo-ar)
 	mkdir -p $(BUILDDIR)
 	cp $(COSMO_STAGE)/* $(BUILDDIR)/
 	echo "cosmocc" > $(BUILDDIR)/platform_cc
@@ -3619,7 +3668,12 @@ docs-api-check:
 clean:
 	rm -rf $(BUILDDIR)
 	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn
-	@$(MAKE) -s -C $(KEEL_DIR) clean 2>/dev/null || true
+	@# Hand Keel the SAME CC this clean was invoked with. Keel selects
+	@# per-platform TUs (socket_posix.c vs socket_winsock.c, and five more) and
+	@# its clean removes the set for the configuration it was PARSED with - so
+	@# unconfigured on Windows it deletes the win objects and leaves every posix
+	@# object a cosmo build made. See the keel-clean note in platform-cosmo.
+	@$(MAKE) -s -C $(KEEL_DIR) clean CC=$(CC) AR=$(AR) 2>/dev/null || true
 
 # ── Header-dependency replay ────────────────────────────────────────
 #

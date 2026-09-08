@@ -182,6 +182,29 @@ toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
   configuration, mirroring what it already did for CFI, and the negative
   self-test skips its matching probe for the same reason (that probe is
   observable only through the LTO configuration).
+- **`make platform-cosmo` built a corrupt aarch64 platform archive on Windows.**
+  Keel picks per-platform translation units (`socket_posix.c` vs
+  `socket_winsock.c`, `platform_posix.c` vs `platform_win.c`, and four more) and
+  its `clean` removes the set for the configuration it was *parsed* with. Hull
+  invoked that clean without passing `CC`, so on Windows - where Keel sets
+  `WINDOWS := 1` from `uname` - it deleted the Windows objects and left every
+  POSIX object a cosmo build had made. Measured under MSYS2:
+  `make -n clean` names 17 win objects and 0 posix; `make -n clean
+  CC=x86_64-unknown-cosmo-cc` names the 6 posix ones.
+
+  The aarch64 pass then found `platform_posix.o`, `socket_posix.o`,
+  `udp_cmsg.o` and three siblings already present and up to date, and archived
+  those **x86_64** objects into the aarch64 library. Every `hull build` against
+  it then died in the app link with `ld.bfd: i386:x86-64 architecture of input
+  file ... is incompatible with aarch64 output` - naming binutils rather than
+  the stale object. Each keel clean is now given the same `CC`/`AR` as the build
+  whose objects it removes, and asserts that no object survived it; `make clean`
+  passes its own `CC` through for the same reason. On Linux both configurations
+  select the same POSIX set, so this worked there by coincidence.
+
+  The sweep also covers `.aarch64/` residue under `integrations/`, which Keel's
+  own clean does not reach (it sweeps `src/`, `src/protocols/*/` and
+  `vendor/llhttp/`) - found by the new assertion on its first run.
 
 ### Security
 
