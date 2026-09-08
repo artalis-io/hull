@@ -119,6 +119,41 @@ toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
 - **`hull doctor --tui` no longer reserves a row for embedded tcc.** `doctor.c`
   has emitted no `tcc_embedded` field since tcc was retired, so the row was
   unreachable.
+- **No toolchain on PATH was findable on Windows.** `hl_host_find_in_path` -
+  the resolver introduced to fix exactly this - inferred the list separator
+  from the host and split on `;`. But a Cosmopolitan APE, the only Hull build
+  that runs on Windows, is handed a POSIX-shaped PATH by its own runtime
+  (measured on Windows 11: `/C/Users/...:/C/Program Files (x86)/...`), and an
+  MSYS2 or Git-Bash shell exports the same shape, so the whole list collapsed
+  into one nonsense component and every probe reported "not found" however much
+  was installed. The separator is now taken from the list (`;` when one is
+  present, or a single drive-prefixed entry; `:` otherwise) and each hit is
+  composed with its own component's separator, so a POSIX-shaped entry stays
+  POSIX-shaped. On a POSIX host both rules are exact no-ops. Measured on this
+  machine: `hull doctor` went from reporting no compilers to resolving the
+  `cc.exe` that had been on PATH all along.
+- **`hull doctor` and `hull tools list` could disagree about the same tool.**
+  `hl_tools_lookup_path`'s PATH step kept a second, private walker that split
+  on `:` and joined with `/` - the copy hull#459 replaced in doctor, left
+  behind here - so the two surfaces used different rules and neither tried the
+  `.exe` / `.com` forms. It now delegates to the shared resolver, leaving one
+  PATH walker in the tree.
+- **`hull build --compiler=<name>` failed on Windows for a compiler that was
+  installed.** Selection spawned the bare name and left the search to exec,
+  which does not search the PATH Windows hands an APE. A bare name is now
+  resolved by Hull first (`hl_driver_resolve_name`), falling through to the
+  bare name on a miss so exec still gets its turn and POSIX behaviour is
+  unchanged. The same resolution now applies to `--linker=<name>` and to the
+  automatic cc / gcc / clang / cosmocc probes.
+- **cosmocc could not be driven from a shell whose `$HOME` differed from the
+  install's.** cosmocc ships a `#!/bin/sh` driver that Windows cannot execute
+  directly, so Hull routes it through the busybox in the same bundle - but
+  looked for that busybox only under `$HOME`. Under MSYS2 `$HOME` is
+  `/home/<user>` (`C:\msys64\home\<user>`) while `hull tools install cosmocc`
+  from PowerShell installs under `C:\Users\<user>`, so a perfectly good busybox
+  sitting next to the resolved cosmocc was missed and no compile could start.
+  It is now looked for beside the driver first, with the `$HOME` locations as
+  fallbacks.
 
 ## [0.14.0] - 2026-08-27
 

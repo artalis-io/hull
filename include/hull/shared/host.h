@@ -94,9 +94,14 @@ int hl_host_render_exec(const char *path, char *out, size_t out_sz);
 /**
  * @brief Find @p name as an executable on PATH, honouring host conventions.
  *
- * Splits PATH on hl_host_path_list_sep() and, on Windows, also tries the
- * ".exe" / ".com" / ".bat" / ".cmd" forms (the PATHEXT entries that matter for
- * a toolchain probe). Writes the resolved absolute-ish path to @p out.
+ * Splits PATH on the separator the LIST ITSELF uses, not the one the host
+ * nominally prefers: on Windows both a Win32 `C:\a;C:\b` and a POSIX-shaped
+ * `/C/a:/C/b` occur, and the second is what a Cosmopolitan APE - the only Hull
+ * build that runs there - is actually handed. Each hit is composed with the
+ * separator its own PATH component uses, so a POSIX-shaped entry stays
+ * POSIX-shaped. On Windows the ".exe" / ".com" / ".bat" / ".cmd" forms are
+ * tried too (the PATHEXT entries that matter for a toolchain probe). Writes
+ * the resolved absolute-ish path to @p out.
  *
  * @returns 1 when found, 0 otherwise.
  */

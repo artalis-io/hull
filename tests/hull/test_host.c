@@ -27,6 +27,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* ── Host identity ─────────────────────────────────────────────────── */
 
@@ -233,6 +236,41 @@ UTEST(host, find_in_path_misses_cleanly)
     ASSERT_STREQ("", out);             /* miss clears the buffer */
 }
 
+/* Create a temp directory holding an executable probe file. Returns 1 on
+ * success, 0 if the environment will not allow it (the caller then skips).
+ *
+ * Deliberately POSIX calls rather than system("mkdir -p") / system("chmod +x"):
+ * a Cosmopolitan APE on Windows has no /bin/sh, so every shelling-out test
+ * SKIPPED there - on the one platform whose PATH handling these tests exist to
+ * pin. mkdir/fopen/chmod work on every host Hull runs on. */
+static int host_make_probe(const char *tag, char *dir, size_t dir_sz,
+                           const char *leaf)
+{
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    snprintf(dir, dir_sz, "%s/hull-host-%s", tmp, tag);
+
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) return 0;
+
+    char exe[700];
+    snprintf(exe, sizeof(exe), "%s/%s", dir, leaf);
+    FILE *f = fopen(exe, "w");
+    if (!f) return 0;
+    fputs("#!/bin/sh\nexit 0\n", f);
+    fclose(f);
+    return chmod(exe, 0755) == 0;
+}
+
+/* Best-effort teardown for host_make_probe. */
+static void host_drop_probe(const char *dir, const char *leaf)
+{
+    char exe[700];
+    snprintf(exe, sizeof(exe), "%s/%s", dir, leaf);
+    (void)unlink(exe);
+    (void)rmdir(dir);
+}
+
 UTEST(host, find_in_path_finds_a_real_executable)
 {
     /* Use a directory we control, joined with the HOST separator, so the test
@@ -241,23 +279,8 @@ UTEST(host, find_in_path_finds_a_real_executable)
      * everything on Windows. hl_host_find_in_path_ex takes the search list
      * explicitly, so no environment mutation is needed. */
     char dir[512];
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = getenv("TMP");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(dir, sizeof(dir), "%s/hull-host-test", tmp);
-
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot create a temp directory"); }
-
-    char exe[700];
-    snprintf(exe, sizeof(exe), "%s/hulltestprobe", dir);
-    FILE *f = fopen(exe, "w");
-    if (!f) { UTEST_SKIP("cannot write a temp file"); }
-    fputs("#!/bin/sh\nexit 0\n", f);
-    fclose(f);
-    snprintf(cmd, sizeof(cmd), "chmod +x '%s'", exe);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot chmod a temp file"); }
+    if (!host_make_probe("test", dir, sizeof(dir), "hulltestprobe"))
+        UTEST_SKIP("cannot create a temp probe");
 
     char list[2048];
     snprintf(list, sizeof(list), "%s%c%s", dir, hl_host_path_list_sep(),
@@ -266,12 +289,66 @@ UTEST(host, find_in_path_finds_a_real_executable)
     char out[700];
     int found = hl_host_find_in_path_ex(list, "hulltestprobe",
                                         out, sizeof(out));
-
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-    if (system(cmd) != 0) { /* best-effort cleanup */ }
+    host_drop_probe(dir, "hulltestprobe");
 
     ASSERT_EQ(1, found);
     ASSERT_TRUE(strstr(out, "hulltestprobe") != NULL);
+}
+
+UTEST(host, find_in_path_splits_a_posix_shaped_list_on_any_host)
+{
+    /* THE WINDOWS BUG, in one assertion. A Cosmopolitan APE on Windows is
+     * handed a POSIX-shaped PATH by its own runtime - measured on Windows 11:
+     *
+     *   PATH=/C/Users/.../ft_gcc:/C/Program Files (x86)/.../bin:...
+     *
+     * Inferring ';' from the host collapsed that entire list into one nonsense
+     * component, so `hull doctor` reported every compiler missing however many
+     * were installed. The separator has to come from the list, not the host,
+     * which is what makes this pass on Windows as well as POSIX. */
+    char dir[512];
+    if (!host_make_probe("posixlist", dir, sizeof(dir), "hullprobeposix"))
+        UTEST_SKIP("cannot create a temp probe");
+
+    /* Colon-separated, forward slashes, and a component with a space in it -
+     * the exact shape measured above. */
+    char list[2048];
+    snprintf(list, sizeof(list), "/C/Program Files (x86)/nowhere:%s", dir);
+
+    char out[700];
+    int found = hl_host_find_in_path_ex(list, "hullprobeposix",
+                                        out, sizeof(out));
+
+    host_drop_probe(dir, "hullprobeposix");
+    ASSERT_EQ(1, found);
+    /* Composed with the COMPONENT's separator, so it stays POSIX-shaped. */
+    ASSERT_TRUE(strstr(out, "hull-host-posixlist/hullprobeposix") != NULL);
+}
+
+UTEST(host, find_in_path_splits_a_win32_shaped_list_on_semicolons)
+{
+    /* The mirror: a genuine Win32 list must still split on ';', and its ':'
+     * drive letters must survive. Nothing here exists, so the assertion is
+     * about not crashing and not reporting a bogus hit - the components are
+     * the point, not the miss. */
+    char out[512];
+    ASSERT_EQ(0, hl_host_find_in_path_ex(
+        "C:\tools;C:\Program Files\LLVM\bin;D:\bin",
+        "hull-definitely-not-a-real-binary-zzz", out, sizeof(out)));
+    ASSERT_STREQ("", out);
+}
+
+UTEST(host, find_in_path_keeps_a_single_win32_component_whole)
+{
+    /* A one-entry Win32 PATH carries no ';' but does carry the drive letter's
+     * ':'. Splitting on ':' there would shred `C:\tools` into `C` and
+     * `\tools`, so a lone drive-prefixed entry must be left whole. Again a
+     * clean miss is the observable; the point is that it does not split. */
+    char out[512];
+    ASSERT_EQ(0, hl_host_find_in_path_ex(
+        "C:\tools", "hull-definitely-not-a-real-binary-zzz",
+        out, sizeof(out)));
+    ASSERT_STREQ("", out);
 }
 
 UTEST(host, find_in_path_skips_empty_components)
@@ -319,23 +396,8 @@ UTEST(host, find_in_path_has_no_fixed_length_cap)
      * this function exists to fix. Bury a findable directory past 32 KB of
      * padding and require it to still resolve. */
     char dir[512];
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = getenv("TMP");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(dir, sizeof(dir), "%s/hull-host-longpath", tmp);
-
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot create a temp directory"); }
-
-    char exe[700];
-    snprintf(exe, sizeof(exe), "%s/hulllongprobe", dir);
-    FILE *f = fopen(exe, "w");
-    if (!f) { UTEST_SKIP("cannot write a temp file"); }
-    fputs("#!/bin/sh\nexit 0\n", f);
-    fclose(f);
-    snprintf(cmd, sizeof(cmd), "chmod +x '%s'", exe);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot chmod a temp file"); }
+    if (!host_make_probe("longpath", dir, sizeof(dir), "hulllongprobe"))
+        UTEST_SKIP("cannot create a temp probe");
 
     size_t cap = 40000;
     char *list = (char *)malloc(cap);
@@ -354,8 +416,7 @@ UTEST(host, find_in_path_has_no_fixed_length_cap)
     int found = hl_host_find_in_path_ex(list, "hulllongprobe", out, sizeof(out));
 
     free(list);
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-    if (system(cmd) != 0) { /* best-effort cleanup */ }
+    host_drop_probe(dir, "hulllongprobe");
 
     ASSERT_EQ(1, found);
     ASSERT_TRUE(strstr(out, "hulllongprobe") != NULL);
@@ -372,7 +433,7 @@ UTEST(host, find_in_path_never_probes_the_current_directory)
     if (!f) { UTEST_SKIP("cannot write into the working directory"); }
     fputs("#!/bin/sh\nexit 0\n", f);
     fclose(f);
-    if (system("chmod +x hullcwdprobe") != 0) { /* best effort */ }
+    (void)chmod("hullcwdprobe", 0755);
 
     char sep = hl_host_path_list_sep();
     char list[32];
@@ -395,23 +456,8 @@ UTEST(host, find_in_path_leaves_out_empty_when_the_buffer_is_too_small)
      * that ignores the return value (or logs the buffer on a miss) gets a
      * truncated path, which names a DIFFERENT file than the one found. */
     char dir[512];
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = getenv("TMP");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(dir, sizeof(dir), "%s/hull-host-small", tmp);
-
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot create a temp directory"); }
-
-    char exe[700];
-    snprintf(exe, sizeof(exe), "%s/hullsmallprobe", dir);
-    FILE *f = fopen(exe, "w");
-    if (!f) { UTEST_SKIP("cannot write a temp file"); }
-    fputs("#!/bin/sh\nexit 0\n", f);
-    fclose(f);
-    snprintf(cmd, sizeof(cmd), "chmod +x '%s'", exe);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot chmod a temp file"); }
+    if (!host_make_probe("small", dir, sizeof(dir), "hullsmallprobe"))
+        UTEST_SKIP("cannot create a temp probe");
 
     /* Deliberately far too small to hold the resolved path. */
     char small[8];
@@ -419,8 +465,7 @@ UTEST(host, find_in_path_leaves_out_empty_when_the_buffer_is_too_small)
     int found = hl_host_find_in_path_ex(dir, "hullsmallprobe",
                                         small, sizeof(small));
 
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-    if (system(cmd) != 0) { /* best-effort cleanup */ }
+    host_drop_probe(dir, "hullsmallprobe");
 
     ASSERT_EQ(0, found);          /* cannot report a path that does not fit */
     ASSERT_STREQ("", small);      /* and must not leave a truncated one */

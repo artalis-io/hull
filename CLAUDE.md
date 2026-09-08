@@ -1131,8 +1131,16 @@ per-host fact a user-facing string depends on: `hl_host_is_windows()` (compile-
 time on a native build; an environment probe on a cosmo APE, which is the only
 build that reaches Windows), `hl_host_exe_suffix()` (`".com"` on Windows, `""`
 elsewhere), `hl_host_render_exec()` (`./app` vs `.\app.com`), and
-`hl_host_find_in_path()` (splits PATH on the HOST separator - `;` on Windows -
-and tries the `.exe`/`.com` forms there). Exposed to the tool VM as
+`hl_host_find_in_path()` (splits PATH on the separator the LIST itself uses,
+not the host's - on Windows a Cosmopolitan APE is handed a POSIX-shaped
+`/C/a:/C/b`, an MSYS2 shell exports the same, and a native shell gives Win32
+`C:\a;C:\b` - joins each hit with that component's own separator, and tries the
+`.exe`/`.com` forms on Windows). It is the ONE PATH walker: a second private
+copy in `tools_install.c` was why `hull doctor` and `hull tools list` could
+disagree about the same tool on the same box. `hl_driver_resolve_name()`
+(`compiler.c`) resolves a bare toolchain name through it before spawning,
+because an APE's own exec does not search the PATH Windows hands it. Exposed to
+the tool VM as
 `tool.host_os()` / `tool.exe_suffix()` / `tool.render_exec()`. Every "now run
 it" string routes through `render_exec` rather than hard-coding `./x`: neither
 PowerShell nor a POSIX shell searches the current directory, so a bare relative

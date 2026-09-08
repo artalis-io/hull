@@ -188,6 +188,66 @@ int hl_host_render_exec(const char *path, char *out, size_t out_sz)
  * PATH_MAX buffers (component + leaf + candidate) was worth collapsing. An
  * over-long join is rejected rather than truncated - a truncated path could
  * name a different, existing file. */
+/* Does `s` begin with a Windows drive prefix (`C:\` or `C:/`)? */
+static int looks_like_drive_prefix(const char *s)
+{
+    if (!s || !s[0] || s[1] != ':') return 0;
+    if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z'))) return 0;
+    return s[2] == '\\' || s[2] == '/';
+}
+
+/* Which character separates entries in THIS search list?
+ *
+ * Not a property of the host, which is what an earlier revision assumed. On
+ * Windows both shapes occur, and the host does not tell you which you were
+ * handed:
+ *
+ *   Win32   C:\tools;C:\Program Files\LLVM\bin      (';', backslashes)
+ *   POSIX   /C/tools:/C/Program Files/LLVM/bin      (':', forward slashes)
+ *
+ * The POSIX shape is not an edge case there - it is what the ONLY Hull build
+ * that runs on Windows actually sees. A Cosmopolitan APE is handed a
+ * POSIX-ified PATH by its own runtime (measured on Windows 11:
+ * `/C/Users/...:/C/Program Files (x86)/...`), and an MSYS2 or Git-Bash shell
+ * exports the same shape. Splitting that on ';' yields ONE nonsense component,
+ * so every probe missed whatever was installed - the exact failure this
+ * resolver was written to end.
+ *
+ * Detect from the string:
+ *   - any ';' means Win32. A ';' cannot appear inside a Windows path
+ *     component, and a POSIX list would not carry one either.
+ *   - otherwise a leading drive prefix means a SINGLE Win32 component, where
+ *     the ':' belongs to the drive letter and must not split. Returning ';'
+ *     for it leaves the string whole, which is the right answer.
+ *   - otherwise ':'.
+ *
+ * On a POSIX host neither Windows shape can arise, so this is a no-op there. */
+static char detect_list_sep(const char *path_env)
+{
+    if (strchr(path_env, ';'))          return ';';
+    if (looks_like_drive_prefix(path_env)) return ';';
+    return ':';
+}
+
+/* Which separator should join this PATH component to the leaf?
+ *
+ * The component's own, so the composed path reads the way whoever set PATH
+ * wrote it: `C:\tools\gcc.exe` from a native Windows PATH, `/c/msys64/usr/bin/
+ * gcc` from the POSIX-shaped PATH an MSYS2 shell exports inside a Windows
+ * process. Windows file APIs accept either separator, so this is presentation
+ * rather than function - but these paths are printed (hull doctor, hull tools
+ * list) and a mixed `/c/msys64/usr/bin\gcc` reads like a bug. A component with
+ * no separator at all (a bare `C:`, or a relative directory) has no convention
+ * to preserve, so the host's own is used. */
+static char component_sep(const char *dir, size_t dlen)
+{
+    for (size_t i = 0; i < dlen; i++) {
+        if (dir[i] == '\\') return '\\';
+        if (dir[i] == '/')  return '/';
+    }
+    return hl_host_dir_sep();
+}
+
 static int try_candidate(const char *dir, size_t dlen, char sep,
                          const char *name, const char *ext,
                          char *out, size_t out_sz)
@@ -231,9 +291,7 @@ int hl_host_find_in_path_ex(const char *path_env, const char *name,
     if (!path_env || !*path_env) return 0;
 
     int  win      = hl_host_is_windows();
-    char list_sep = win ? ';' : ':';
-    /* Windows accepts either separator in a path; '\' is conventional. */
-    char dir_sep  = win ? '\\' : '/';
+    char list_sep = detect_list_sep(path_env);
 
     /* The PATHEXT forms worth probing for a toolchain binary. An entry with
      * an explicit extension already (e.g. "busybox.exe") still tries the bare
@@ -270,7 +328,8 @@ int hl_host_find_in_path_ex(const char *path_env, const char *name,
          * a file in the process's cwd could shadow a real toolchain binary. */
         if (dlen > 0) {
             for (const char **e = exts; *e; e++)
-                if (try_candidate(d, dlen, dir_sep, name, *e, out, out_sz))
+                if (try_candidate(d, dlen, component_sep(d, dlen),
+                                  name, *e, out, out_sz))
                     return 1;
         }
 

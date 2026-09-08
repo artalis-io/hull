@@ -31,6 +31,7 @@
 
 #include "utest.h"
 #include "hull/tools_install.h"
+#include "hull/shared/host.h"
 
 #include <errno.h>
 #include <ftw.h>
@@ -667,6 +668,43 @@ UTEST_F(tools_fixture, status_sibling_source) {
     ASSERT_TRUE(st.resolved);
     ASSERT_EQ(st.source, HL_TOOL_SRC_SIBLING);
     ASSERT_STREQ(st.path, tool_path);
+}
+
+UTEST_F(tools_fixture, lookup_finds_a_tool_on_a_host_shaped_path) {
+    /* Step 3 of hl_tools_lookup_path walked PATH with a private ':'-splitting,
+     * '/'-joining loop, which on Windows - where PATH is ';'-separated with
+     * `C:\...` components - collapsed the whole list into one nonsense
+     * component and found nothing however much was installed. Building the
+     * search list with the HOST separator makes this test fail on that walker
+     * and pass on the shared resolver, on either host.
+     *
+     * The fixture points HOME at a fresh tmpdir, so the managed-install step
+     * cannot answer first and this really does exercise the PATH step. */
+    char bin[PATH_MAX], tool[PATH_MAX];
+    snprintf(bin,  sizeof(bin),  "%s/pathdir", utest_fixture->tmpdir);
+    ASSERT_EQ(mkdir(bin, 0755), 0);
+    snprintf(tool, sizeof(tool), "%s/wamrc", bin);
+    ASSERT_EQ(touch_exec(tool), 0);
+
+    const char *prev = getenv("PATH");
+    char saved[4096];
+    snprintf(saved, sizeof(saved), "%s", prev ? prev : "");
+
+    char list[PATH_MAX * 2];
+    snprintf(list, sizeof(list), "%s%c%s/nowhere",
+             bin, hl_host_path_list_sep(), utest_fixture->tmpdir);
+    setenv("PATH", list, 1);
+
+    char out[PATH_MAX];
+    int rc = hl_tools_lookup_path("wamrc", NULL, out, sizeof(out));
+
+    if (*saved) setenv("PATH", saved, 1); else unsetenv("PATH");
+
+    ASSERT_EQ(rc, 0);
+    /* The join keeps the COMPONENT's own separator, so a POSIX-shaped entry
+     * stays POSIX-shaped on every host - these paths get printed (hull doctor,
+     * hull tools list) and a mixed `.../pathdir\wamrc` reads like a bug. */
+    ASSERT_TRUE(strstr(out, "pathdir/wamrc") != NULL);
 }
 
 UTEST_MAIN()

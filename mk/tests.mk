@@ -665,16 +665,16 @@ $(CAP_TOOL_NONE_OBJ): $(SRCDIR)/hull/cap/tool.c | $(BUILDDIR)
 
 # TOOLS_INSTALL_OBJ (pure-libc registry + hl_tools_lookup_path) is needed for
 # tool-resolution symbols referenced by the compiler backend.
-$(BUILDDIR)/test_tool: $(TESTDIR)/hull/cap/test_tool.c $(CAP_TOOL_NONE_OBJ) $(COMPILER_OBJ) $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
-	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CAP_TOOL_NONE_OBJ) $(COMPILER_OBJ) $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ)
+$(BUILDDIR)/test_tool: $(TESTDIR)/hull/cap/test_tool.c $(CAP_TOOL_NONE_OBJ) $(COMPILER_OBJ) $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CAP_TOOL_NONE_OBJ) $(COMPILER_OBJ) $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ)
 
 # Compiler vtable tests
 COMPILER_TEST_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(SH_SEAL_ARENA_OBJ) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ)
 
-$(BUILDDIR)/test_compiler: $(TESTDIR)/hull/compiler/test_compiler.c $(COMPILER_OBJ) $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(CAP_TOOL_NONE_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+$(BUILDDIR)/test_compiler: $(TESTDIR)/hull/compiler/test_compiler.c $(COMPILER_OBJ) $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ) $(CAP_TOOL_NONE_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
 	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/compiler/test_compiler.c \
-		$(COMPILER_OBJ) $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) \
+		$(COMPILER_OBJ) $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ) \
 		$(CAP_TOOL_NONE_OBJ) $(BUILD_ASSET_OBJ) \
 		$(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ) -lm
 
@@ -713,8 +713,8 @@ $(BUILDDIR)/test_release: $(TESTDIR)/hull/test_release.c $(RELEASE_OBJ) $(TEST_C
 		$(RELEASE_OBJ) $(TEST_COMMON_LIBS)
 
 # Tool registry + path helpers - standalone module, no runtime deps.
-$(BUILDDIR)/test_tools_install: $(TESTDIR)/hull/test_tools_install.c $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ)
+$(BUILDDIR)/test_tools_install: $(TESTDIR)/hull/test_tools_install.c $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ)
 
 # release_io/sbom/verify_self now hash via the cap layer's self-contained
 # SHA-256 (hl_cap_crypto_sha256) instead of mbedtls_sha256, so these focused
