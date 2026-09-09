@@ -1111,7 +1111,12 @@ fuzz/fuzz_span_sdk: fuzz/fuzz_span_sdk.c
 # resolver (cap/fs_resolve.c) and the authorization policy (cap/fs_policy.c, since
 # read/write/mmap select through it); link that small chain so the fuzzer resolves
 # without dragging in Keel.
-fuzz/fuzz_span_window: fuzz/fuzz_span_window.c $(SRCDIR)/hull/cap/fs.c $(SRCDIR)/hull/cap/fs_resolve.c $(SRCDIR)/hull/cap/fs_policy.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c
+#
+# shared/host.c joined the chain when the windowed mmap started asking
+# hl_host_is_windows() for the mapping granularity (Windows maps views at the
+# 64 KiB allocation granularity, not the page size). It is a libc-only leaf, so
+# it costs the fuzzer nothing and keeps the "no Keel" property intact.
+fuzz/fuzz_span_window: fuzz/fuzz_span_window.c $(SRCDIR)/hull/cap/fs.c $(SRCDIR)/hull/cap/fs_resolve.c $(SRCDIR)/hull/cap/fs_policy.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SRCDIR)/hull/shared/host.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -o $@ $^
 
 # hull.source.lua parser: adversarial bytes -> lua.parse() over a bounded lua_State.

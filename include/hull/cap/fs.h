@@ -306,6 +306,15 @@ typedef struct HlMappedBuffer {
  */
 #define HL_FS_MMAP_MAX_WINDOW_BYTES ((uint64_t)1 << 30)
 
+/* The alignment a windowed mmap offset must satisfy on this host.
+ *
+ * NOT always the page size. Windows maps views at multiples of the
+ * ALLOCATION GRANULARITY (64 KiB); an offset that is merely page-aligned
+ * is rejected with EINVAL even though sysconf(_SC_PAGESIZE) reports 4096.
+ * Exposed so callers and tests derive the same value instead of each
+ * assuming the page size. */
+uint64_t hl_cap_fs_mmap_granularity(void);
+
 /**
  * @brief Pure, filesystem-free geometry for a page-aligned windowed mmap.
  *
