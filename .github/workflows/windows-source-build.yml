@@ -567,7 +567,13 @@ jobs:
       #
       #                     runner (windows-latest)   dev box (Win 11 + ucrt64)
       #   test_compiler     14 ran, 5 failed          15 ran, 4 failed
-      #   test_fs           37 ran, 3 failed          37 ran, 4 failed
+
+      # test_fs was here too (3 on the runner, 4 on a dev box) until the
+      # windowed-mmap fixes: Windows maps views at the 64 KiB ALLOCATION
+      # GRANULARITY rather than the page size, and refuses a view past
+      # end-of-file, so three mmap_window_* cases could never pass; a
+      # fourth ignored symlink()'s return value and asserted against a
+      # path that was never a symlink. It is ENFORCED now.
       #
       # test_compiler's failures are ENTIRELY system-compiler cases, and the
       # two hosts do not even run the same number of them: the runner has no
@@ -578,8 +584,6 @@ jobs:
       # sensitivity #472 recorded when it saw 10/15. Expect this count to move
       # if the runner image gains a compiler; the ratchet will say so.
       #
-      # test_fs is Windows symlink semantics plus the mmap_window_* cases -
-      # real platform gaps, not anything this workflow introduced.
       #
       # Same flags as the build above. They must match EXACTLY: the Makefile's
       # config fingerprint purge deletes build/test_* on a flag flip, so a
@@ -592,9 +596,9 @@ jobs:
 
           ENFORCED="test_host test_tool test_vfs test_static test_cacert
                     test_dispatch test_csp test_parse_size test_signature
-                    test_release"
+                    test_release test_fs"
           # suite:baseline-failure-count   ("crash" = printed no summary)
-          KNOWN="test_compiler:5 test_fs:3"
+          KNOWN="test_compiler:5"
 
           targets=""
           for s in $ENFORCED; do targets="$targets build/$s"; done
