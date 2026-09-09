@@ -774,33 +774,47 @@ jobs:
           bash .github/scripts/make-watched.sh "platform-cosmo" platform-cosmo.log platform-cosmo CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
           ls -la build/libhull_platform.x86_64-cosmo.a build/libhull_platform.aarch64-cosmo.a
 
-      # KNOWN DEFECT, worked around here on purpose - do not "simplify" this.
+      # TRANSIENT GUARD - observed once, NOT reproduced. Do not "simplify" it,
+      # and do not upgrade the wording to a known defect without new evidence.
       #
-      # The FIRST `EMBED_PLATFORM=cosmo` build after `platform-cosmo` links
-      # against objects it never compiled and dies with:
+      # Seen once on Windows 11 + MSYS2 + cosmocc 4.0.2 (2026-09-09): the first
+      # `EMBED_PLATFORM=cosmo` build after `platform-cosmo` died at the link
+      # with
       #
       #   cosmocc: fatal error: build/cap_audit.o: no such file
       #
-      # Reproduced on Windows 11 + MSYS2 + cosmocc on 2026-09-09: of the
-      # objects on the link line, exactly the first three (cap_audit.o,
-      # cap_blob.o, cap_body.o) are never compiled - the run emits 425 compile
-      # recipes starting at cap_crypto.o - and the link then fails naming the
-      # first of them. Running the IDENTICAL command again succeeds.
+      # having compiled 425 objects. Re-running the IDENTICAL command
+      # succeeded. Captured, so the failure itself is not in doubt.
       #
-      # What is established: `platform-cosmo` leaves build/.build-config
-      # holding a DEFAULT fingerprint (CC=cc, WASM=1, EMBED_PLATFORM=empty)
-      # rather than the flags it was invoked with, because its trailing
-      # `$(MAKE) clean` rm -rf's the build dir and the archives are copied back
-      # afterwards. The next build therefore trips the fingerprint purge
-      # (Makefile "Build-flag fingerprint"), and comes out of it having skipped
-      # those three. The second run's fingerprint matches, no purge fires, and
-      # it builds only what is missing. Why exactly three, and why those, is
-      # NOT established - hence "defect", not "explained".
+      # It did NOT reproduce in two controlled attempts:
       #
-      # This is a Hull build-system bug, not a cosmocc one, and it is separate
-      # from the #462 wedge. It is retried here ONLY on its exact signature so
-      # a genuine compile error still fails on the first pass. Delete this
-      # block once the purge/skip interaction is fixed.
+      #   1. Synthetic precondition - build/ holding only the two arch archives
+      #      plus a planted default-fingerprint .build-config, then the same
+      #      embed command. The fingerprint purge fired exactly once, every
+      #      object built, link succeeded.
+      #   2. The full original sequence - `make platform-cosmo` then the same
+      #      embed command, nothing else. Both returned 0 and produced hull.
+      #
+      # Two guesses that looked obvious and are WRONG, recorded so the next
+      # person does not re-derive them:
+      #
+      #   * "platform-cosmo leaves a stale default fingerprint behind." It
+      #     leaves NO .build-config at all - its trailing `$(MAKE) clean`
+      #     rm -rf's the build dir and only the archives are copied back. The
+      #     next build sees an absent file, purges (a no-op on an empty tree)
+      #     and writes its own.
+      #   * "cap_audit.o / cap_blob.o / cap_body.o are never compiled - the log
+      #     starts at cap_crypto.o." Their recipe lines are missing from the
+      #     log in SUCCESSFUL runs too, while the objects are present on disk
+      #     with .aarch64 counterparts and mtimes one second AHEAD of
+      #     cap_crypto.o. That absence is a logging artifact, not a signal.
+      #
+      # So the cause is unknown and may well be transient (a killed compile
+      # from the #462 wedge, or a Windows file-lock) rather than a Makefile
+      # defect. The retry below is a SAFETY NET for a nightly job, not a fix:
+      # it fires only on this exact signature, so a genuine compile error still
+      # fails on the first pass. If it ever fires in CI, the log is the new
+      # evidence this needs - capture it rather than just re-running.
       - name: Build hull with the platform embedded
         shell: msys2 {0}
         run: |
@@ -815,9 +829,10 @@ jobs:
             if grep -q "no such file" hull-embed.log; then
               echo ""
               echo "=================================================================="
-              echo "KNOWN DEFECT: first embed build after platform-cosmo skipped"
-              echo "objects the fingerprint purge removed. Re-running once; see the"
-              echo "comment above this step. This is NOT the #462 cosmocc wedge."
+              echo "TRANSIENT: an object on the link line was missing. Cause is"
+              echo "UNKNOWN and did not reproduce in two controlled attempts - see"
+              echo "the comment above this step. Re-running once; PLEASE CAPTURE"
+              echo "this log, it is the evidence the investigation needs."
               echo "=================================================================="
               grep -n "no such file" hull-embed.log | head -3
               embed_build "hull-embed-2nd-pass"
