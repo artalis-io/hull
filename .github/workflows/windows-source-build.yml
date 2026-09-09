@@ -551,29 +551,30 @@ jobs:
       #              so and asks for the baseline to be lowered, so this tier
       #              cannot rot into a list nobody reads.
       #
-      # Measured on Windows 11 + MSYS2 + cosmocc, 2026-09-09, with TMP/TEMP
-      # set (see the guard below - without them, suites that mkdtemp under
-      # /tmp fail in bulk and the picture looks far worse than it is):
+      # Measured with TMP/TEMP set (see the guard below - without them, suites
+      # that mkdtemp under /tmp fail in bulk and the picture looks far worse
+      # than it is). ENFORCED is clean on BOTH a Windows 11 desktop and the
+      # Actions runner, which is what makes it safe to enforce.
       #
-      #   test_host 31/31   test_tool 60/61   test_vfs 22/22   test_static 23/23
-      #   test_cacert 6/6   test_dispatch 5/5 test_csp 7/7     test_parse_size 9/9
-      #   test_signature 20/20   test_release 20/20      <- all ENFORCED
-      #   test_compiler 11/15 (4 failed)   test_fs 33/37 (4 failed)  <- KNOWN
+      # The KNOWN baselines are the RUNNER's numbers, because this step only
+      # ever runs in CI. They are NOT the same as a developer box's, and the
+      # difference is instructive rather than noise:
       #
-      # The two KNOWN suites fail for reasons that are understood:
+      #                     runner (windows-latest)   dev box (Win 11 + ucrt64)
+      #   test_compiler     14 ran, 5 failed          15 ran, 4 failed
+      #   test_fs           37 ran, 3 failed          37 ran, 4 failed
       #
-      #   test_compiler: system_is_available_cc, compile_hello,
-      #     compile_with_include_dir, compile_app_registry_pattern - all four
-      #     exercise the SYSTEM compiler, and on Windows the resolved `cc` is a
-      #     native ucrt64 gcc being handed POSIX-shaped paths by an APE. This
-      #     is the same environment difference #472 recorded (it saw 10/15).
-      #     Expect the count to MOVE on a runner whose PATH differs.
-      #   test_fs: validate_rejects_symlink_escape plus three mmap_window_*
-      #     cases - Windows symlink semantics and mmap windowing, i.e. real
-      #     platform gaps rather than anything this workflow introduced.
+      # test_compiler's failures are ENTIRELY system-compiler cases, and the
+      # two hosts do not even run the same number of them: the runner has no
+      # native cc/gcc/clang at all (doctor reports all three null - only
+      # cosmocc is present), while a dev box usually has ucrt64 gcc. So the
+      # failing SET differs too, not just the count - only
+      # system_is_available_cc is common to both. This is the same environment
+      # sensitivity #472 recorded when it saw 10/15. Expect this count to move
+      # if the runner image gains a compiler; the ratchet will say so.
       #
-      # Baselines came from a developer box, so the first nightly may need them
-      # adjusted to the runner - the failure message says exactly how.
+      # test_fs is Windows symlink semantics plus the mmap_window_* cases -
+      # real platform gaps, not anything this workflow introduced.
       #
       # Same flags as the build above. They must match EXACTLY: the Makefile's
       # config fingerprint purge deletes build/test_* on a flag flip, so a
@@ -588,7 +589,7 @@ jobs:
                     test_dispatch test_csp test_parse_size test_signature
                     test_release"
           # suite:baseline-failure-count   ("crash" = printed no summary)
-          KNOWN="test_compiler:4 test_fs:4"
+          KNOWN="test_compiler:5 test_fs:3"
 
           targets=""
           for s in $ENFORCED; do targets="$targets build/$s"; done
@@ -646,6 +647,13 @@ jobs:
               echo "IMPROVED  $s: $n failures, baseline $base"
               echo "          -> lower this suite's baseline in KNOWN above."
               rc_step=1
+            fi
+            # A bare count is not actionable. The first CI run proved it:
+            # test_fs reported "3, baseline 4" with no way to see which three.
+            if [ "$n" != "$base" ]; then
+              echo "          cases failing now:"
+              echo "$out" | grep '\[  FAILED  \] [a-z_]*\.' | sed 's/ ([0-9]*ns)//' \
+                          | sed 's/^/            /' | sort -u
             fi
           done
 
@@ -888,7 +896,24 @@ jobs:
           sed -i 's/^          //' "$work/app.lua"
           echo "--- app.lua ---"; cat "$work/app.lua"
 
-          ./build/hull build "$work" --no-verify-platform 2>&1 | tee hull-app-build.log
+          # DIAGNOSTICS. The first CI run of this step failed here while the
+          # identical build succeeds on a Windows 11 desktop, so print what
+          # hull actually sees before asking it to build. Cheap, and the run
+          # that fails is the only place the answer exists.
+          echo "--- toolchain as this shell sees it ---"
+          echo "cosmocc: $(command -v cosmocc || echo '(not on PATH)')"
+          for d in x86_64-unknown-cosmo-cc aarch64-unknown-cosmo-cc; do
+            p=$(command -v "$d" 2>/dev/null || true)
+            # A tar that cannot create symlinks leaves these as ~10-byte text
+            # files holding the link target, which still lets `cosmocc` work
+            # but breaks the per-arch drivers. Observed locally, so check.
+            echo "$d: ${p:-(absent)} $( [ -n "$p" ] && echo "size=$(stat -c%s "$p" 2>/dev/null)" )"
+          done
+          echo "--- what hull reports about itself ---"
+          ./build/hull doctor --json | tr ',' '\n' \
+            | grep -E '"(platform|platform_embedded|build_compiler|hull_build)"' || true
+
+          ./build/hull build "$work" --no-verify-platform --verbose 2>&1 | tee hull-app-build.log
           echo "--- hull build exit (informational only, see comment): ${PIPESTATUS[0]} ---"
 
           # On Windows the artifact is app.com: Windows will not execute an
