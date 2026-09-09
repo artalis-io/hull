@@ -140,7 +140,15 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     hl_tool_unveil_add(ctx, "/Library", "r");
 #endif
 
-    /* Output directory: write/create */
+    /* The invocation directory: `hull new` / `hull init` create their
+     * scaffold relative to it. Unconditional, so `output_dir` is free to
+     * carry where `hull build` actually writes rather than doubling as
+     * this. */
+    hl_tool_unveil_add(ctx, ".", "rwc");
+
+    /* Output directory: write/create. app_dir above is READ-ONLY, so a
+     * build writing into the app tree (app.com, and the .hull/build the
+     * post-link tidy-up moves debug sidecars into) depends on this. */
     if (output_dir)
         hl_tool_unveil_add(ctx, output_dir, "rwc");
 
