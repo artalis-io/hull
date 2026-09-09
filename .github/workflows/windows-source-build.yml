@@ -193,6 +193,11 @@ env:
   # Same pin as cosmocc-bbox-probe.yml / cosmocc-windows-e2e.yml. Keep in step.
   COSMOCC_VERSION: 4.0.2
   COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+  # busybox-w64: cosmocc's driver is a #!/bin/sh script that Windows cannot
+  # execvp, so `hull build` reroutes it through busybox. Same pin as
+  # release.yml's bundle producer.
+  BUSYBOX_URL: https://frippery.org/files/busybox/busybox64u.exe
+  BUSYBOX_SHA256: 6e263d154d8548d1eb936f65d1d8312c80df31c45974e48d6335e4dcc0f4f34c
 
 jobs:
   windows-source-build:
@@ -734,7 +739,29 @@ jobs:
             diffutils
             git
 
-      - name: Fetch + verify cosmocc
+      # cosmocc, PLUS the busybox ride-along that `hull build` needs.
+      #
+      # WHY BUSYBOX. cosmocc's driver is a `#!/bin/sh` script, and Windows
+      # cannot execvp that - so Hull drives it through a bundled busybox
+      # (src/hull/cap/tool.c, the cosmocc->busybox reroute). `hull tools install
+      # cosmocc` ships one at bin/busybox.exe for exactly this reason; the raw
+      # cosmo.zip does not carry it.
+      #
+      # Without it hull cannot spawn cosmocc at all, decides no compiler is
+      # available, and silently takes the compiler-free emit path - which for a
+      # cosmo hull produces an ELF x86_64 app_registry.o and then dies on
+      # "this hull has no bundled app_main.o". That is precisely how this job
+      # failed on its first two runs, while the same build succeeded on a
+      # developer box whose PATH pointed at an installed Hull bundle. Verified
+      # by adding only busybox.exe to an otherwise-identical raw tree: the
+      # build then produces a runnable app.com.
+      #
+      # NOTE the sibling build job does NOT need this - it only runs
+      # `make CC=cosmocc` from an MSYS2 shell that already has /bin/sh. The
+      # dependency is specific to hull SPAWNING cosmocc itself.
+      #
+      # Same pin as release.yml's bundle producer.
+      - name: Fetch + verify cosmocc (+ busybox, required to spawn it)
         shell: pwsh
         run: |
           curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
@@ -742,7 +769,10 @@ jobs:
           if ($h -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: got $h" }
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null
           tar.exe -xpf cosmocc.zip -C cosmo
-          Write-Host "cosmocc extracted"
+          curl.exe -fsSL --retry 3 -L -o cosmo/bin/busybox.exe "$env:BUSYBOX_URL"
+          $b = (Get-FileHash cosmo/bin/busybox.exe -Algorithm SHA256).Hash.ToLower()
+          if ($b -ne $env:BUSYBOX_SHA256) { throw "busybox sha mismatch: got $b" }
+          Write-Host "cosmocc extracted; busybox.exe verified"
 
       # The sibling job's full probe explains WHY an MSYS-native make is
       # required and asserts it. That reasoning is not repeated here; this only
@@ -896,19 +926,14 @@ jobs:
           sed -i 's/^          //' "$work/app.lua"
           echo "--- app.lua ---"; cat "$work/app.lua"
 
-          # DIAGNOSTICS. The first CI run of this step failed here while the
-          # identical build succeeds on a Windows 11 desktop, so print what
-          # hull actually sees before asking it to build. Cheap, and the run
-          # that fails is the only place the answer exists.
+          # Diagnostics: print what hull can actually reach before asking it to
+          # build. busybox is the load-bearing one - without it hull cannot
+          # spawn cosmocc's #!/bin/sh driver and silently emits a native object
+          # instead, which is how this job failed twice before.
           echo "--- toolchain as this shell sees it ---"
           echo "cosmocc: $(command -v cosmocc || echo '(not on PATH)')"
-          for d in x86_64-unknown-cosmo-cc aarch64-unknown-cosmo-cc; do
-            p=$(command -v "$d" 2>/dev/null || true)
-            # A tar that cannot create symlinks leaves these as ~10-byte text
-            # files holding the link target, which still lets `cosmocc` work
-            # but breaks the per-arch drivers. Observed locally, so check.
-            echo "$d: ${p:-(absent)} $( [ -n "$p" ] && echo "size=$(stat -c%s "$p" 2>/dev/null)" )"
-          done
+          bb=$(dirname "$(command -v cosmocc)")/busybox.exe
+          echo "busybox: $( [ -f "$bb" ] && echo "$bb" || echo '(MISSING - hull cannot spawn cosmocc)')"
           echo "--- what hull reports about itself ---"
           ./build/hull doctor --json | tr ',' '\n' \
             | grep -E '"(platform|platform_embedded|build_compiler|hull_build)"' || true
