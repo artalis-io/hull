@@ -8,6 +8,7 @@
  */
 
 #include "hull/cap/fs.h"
+#include "hull/shared/host.h"
 #include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
@@ -728,6 +729,21 @@ int hl_cap_fs_mmap_window_geometry(uint64_t offset, uint64_t length,
     return 0;
 }
 
+uint64_t hl_cap_fs_mmap_granularity(void)
+{
+    long pg = sysconf(_SC_PAGESIZE);
+    uint64_t gran = (pg > 0) ? (uint64_t)pg : 4096u;
+    /* Windows MapViewOfFile takes the file offset in multiples of the
+     * allocation granularity, which is 64 KiB and independent of the 4 KiB
+     * page size sysconf reports. Measured on Windows 11 + cosmocc 4.0.2:
+     *   mmap(off=4096)  -> EINVAL
+     *   mmap(off=16384) -> EINVAL
+     * A larger granularity is always a valid page alignment too, so this
+     * only ever widens the mapping. */
+    if (hl_host_is_windows() && gran < 65536u) gran = 65536u;
+    return gran;
+}
+
 HlMappedBuffer *hl_cap_fs_mmap_window(const HlFsConfig *cfg, const char *path,
                                       uint64_t offset, uint64_t length,
                                       HlAllocator *alloc, const char **err_msg)
@@ -751,11 +767,10 @@ HlMappedBuffer *hl_cap_fs_mmap_window(const HlFsConfig *cfg, const char *path,
         goto audit;
     }
 
-    long pg = sysconf(_SC_PAGESIZE);
-    if (pg <= 0) pg = 4096;
+    uint64_t gran = hl_cap_fs_mmap_granularity();
 
     if (hl_cap_fs_mmap_window_geometry(offset, length, (uint64_t)st.st_size,
-                                       (uint64_t)pg, &map_off, &map_len, &slop,
+                                       gran, &map_off, &map_len, &slop,
                                        &eff_len, err_msg) != 0) {
         close(fd);
         goto audit;
@@ -773,6 +788,23 @@ HlMappedBuffer *hl_cap_fs_mmap_window(const HlFsConfig *cfg, const char *path,
         if (err_msg) *err_msg = "window_too_large";
         goto audit;
     }
+
+    /* The geometry helper rounds map_len UP to a whole granule. Windows
+     * refuses a view that extends past end-of-file (measured: mapping
+     * 40960 bytes of a 40000-byte file fails, win32 error 8), so clamp to
+     * what the file actually holds. Safe everywhere: mmap does not require
+     * a page-multiple length, and the bytes past EOF were never readable
+     * anyway. The window itself still fits - slop + eff_len never exceeds
+     * file_size - map_off.
+     *
+     * Windows-only ON PURPOSE. The rounded tail past EOF is unusable
+     * everywhere (SIGBUS on POSIX), so clamping would arguably be more
+     * correct in general - but map_len is what the WASM span layer reserves
+     * in guest address space and asserts on (tests/hull/cap/test_wasm_spans.c),
+     * and that path is compiled out on the host this was fixed on. Not
+     * changing memory geometry that cannot be re-validated here. */
+    if (hl_host_is_windows() && map_len > (uint64_t)st.st_size - map_off)
+        map_len = (uint64_t)st.st_size - map_off;
 
     void *base = mmap(NULL, (size_t)map_len, PROT_READ, MAP_PRIVATE, fd,
                       (off_t)map_off);
