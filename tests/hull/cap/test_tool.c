@@ -597,6 +597,46 @@ UTEST(tool, unveil_seal_prevents_add)
     hl_tool_unveil_free(&ctx);
 }
 
+/* mkdir -p must not abort on a component that already exists, whatever
+ * errno the platform reports for it. Regression: Cosmopolitan spells absolute
+ * paths "/C/Users/...", so the first component of the walk is the drive root
+ * "/C" - and mkdir("/C") answers EACCES on Windows, not EEXIST. The walk bailed
+ * there, so every hl_tool_mkdir under a drive root failed and `hull build` could
+ * not create <app>/.hull/build (leaving cosmocc's debug sidecars in the app
+ * root). "/tmp/..." never showed it: that first component answers EEXIST. */
+UTEST(tool, mkdir_p_under_an_existing_root)
+{
+    /* Somewhere real and deep enough to exercise several components. Default
+     * to the temp dir; HULL_UNVEIL_PROBE_DIR points it at another volume. */
+    char tmpl[] = "/tmp/hull_mkdirp_XXXXXX";
+    const char *env = getenv("HULL_UNVEIL_PROBE_DIR");
+    const char *base = env;
+    if (!base) { ASSERT_TRUE(mkdtemp(tmpl) != NULL); base = tmpl; }
+
+    HlToolUnveilCtx ctx;
+    hl_tool_unveil_init(&ctx);
+    ASSERT_EQ(hl_tool_unveil_add(&ctx, base, "rwc"), 0);
+    hl_tool_unveil_seal(&ctx);
+
+    char nested[PATH_MAX];
+    snprintf(nested, sizeof(nested), "%s/.hull/build", base);
+
+    ASSERT_EQ(hl_tool_mkdir(nested, &ctx), 0);
+    struct stat st;
+    ASSERT_EQ(stat(nested, &st), 0);
+    ASSERT_TRUE(S_ISDIR(st.st_mode));
+
+    /* Idempotent: a second call over the same tree must also succeed. */
+    ASSERT_EQ(hl_tool_mkdir(nested, &ctx), 0);
+
+    hl_tool_unveil_free(&ctx);
+    rmdir(nested);
+    char parent[PATH_MAX];
+    snprintf(parent, sizeof(parent), "%s/.hull", base);
+    rmdir(parent);
+    if (!env) rmdir(tmpl);
+}
+
 UTEST(tool, unveil_check_allowed)
 {
     HlToolUnveilCtx ctx;
