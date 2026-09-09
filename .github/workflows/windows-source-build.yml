@@ -1,4 +1,4 @@
-name: Windows source build (cosmocc, -O0)
+name: Windows source build + unit tests + app build (cosmocc, -O0)
 
 # Proves Hull can be BUILT FROM SOURCE on Windows with the SHA-pinned cosmocc
 # toolchain, under MSYS2 - no WSL and no Visual Studio.
@@ -40,6 +40,27 @@ name: Windows source build (cosmocc, -O0)
 # problem they addressed and are both UNNECESSARY under MSYS2, which provides
 # /bin/sh natively and passes a POSIX $0. The probe asserts both properties
 # rather than assuming them.)
+#
+# WHAT THIS FILE COVERS, and what it deliberately does not.
+#
+#   job windows-source-build
+#     1. compiles hull from source with cosmocc under MSYS2
+#     2. asserts the produced binary is Windows-AWARE (host_os, exe_suffix,
+#        build_compiler_required, a usable HTTPS trust store)
+#     3. runs the HOST-SENSITIVE unit suites - see that step for why a subset
+#        and not `make test`
+#   job windows-app-build
+#     4. builds the multi-arch cosmo platform archives, links a hull with them
+#        embedded, then `hull new` + `hull build` + checks the produced app.com
+#
+# Steps 3 and 4 were added after a coverage audit found that NO job in the repo
+# ran a single Hull unit test on a Windows runner, and that the only Windows
+# `hull build` coverage (cosmocc-windows-e2e.yml) used a hull compiled on
+# LINUX. Both gaps are now closed here; see each step for the reasoning.
+#
+# Still NOT covered here, on purpose: optimized-build correctness (this job is
+# -O0, see below), the WASM surface (HL_ENABLE_WASM=0, see below), and the full
+# 108-binary unit suite (cost + wedge exposure, see the unit-test step).
 #
 # WHAT THIS IS NOT: it does not produce a shippable artifact. Every released
 # `hull-cosmo` is built on Linux (release.yml `build-cosmo`, runs-on
@@ -409,7 +430,7 @@ jobs:
           # hardcoded -O2 before it existed). See the HL_OPT block in Makefile.
           echo "using MAKE_BIN=${MAKE_BIN:-<unset>} AR=${AR:-<unset>}"
 
-          # WATCHDOG + RETRY.
+          # WATCHDOG + RETRY -> .github/scripts/make-watched.sh
           #
           # The wedge is a TOOLCHAIN bug, not a Hull one, and it is now measured
           # (#462): cosmocc's cc1 blocks indefinitely at ~0 CPU compiling large
@@ -436,82 +457,13 @@ jobs:
           #
           # A retry is applied ONLY to a stall. A genuine compile error fails
           # immediately - retrying that would just hide it.
-          stall_limit=${HULL_STALL_LIMIT_SECS:-300}
-          poll=15
-          attempts=${HULL_BUILD_ATTEMPTS:-3}
-          log=build-output.log
+          #
+          # The logic lives in a script because the unit-test step below is a
+          # second caller and the multi-arch platform build in the app-build
+          # job is a third. The retry rule is subtle enough that a drifted
+          # copy would be worse than no copy.
+          bash .github/scripts/make-watched.sh "hull" build-output.log CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
 
-          # Kill anything the wedge left holding files, or the next attempt
-          # inherits a stuck cc1 still sitting on its output.
-          kill_stragglers() {
-            powershell.exe -NoProfile -Command \
-              "Get-Process cc1,cc1plus,cosmocc,'*cosmo-gcc' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue" \
-              >/dev/null 2>&1 || true
-          }
-
-          build_once() {
-            : > "$log"
-            "$MAKE_BIN" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 > "$log" 2>&1 &
-            mk=$!
-            last_size=0
-            stalled=0
-            while kill -0 "$mk" 2>/dev/null; do
-              sleep "$poll"
-              size=$(wc -c < "$log" 2>/dev/null || echo 0)
-              if [ "$size" -eq "$last_size" ]; then
-                stalled=$((stalled + poll))
-              else
-                stalled=0
-                last_size=$size
-              fi
-              if [ "$stalled" -ge "$stall_limit" ]; then
-                echo ""
-                echo "=========================================================="
-                echo "BUILD STALLED: no output for ${stalled}s (limit ${stall_limit}s)"
-                echo "=========================================================="
-                echo "--- last 25 lines of build output ---"
-                tail -25 "$log" || true
-                echo ""
-                # PowerShell is the only thing here that can see a Windows
-                # process's command line and cumulative CPU. dcpu ~0 on the
-                # stuck compiler is the signature of this wedge; a non-zero
-                # delta would mean something else is going on and the retry
-                # below is the wrong response.
-                powershell.exe -NoProfile -ExecutionPolicy Bypass \
-                  -File "$(cygpath -w .github/scripts/dump-stuck-build.ps1)" \
-                  -IntervalSeconds 5 || true
-                kill "$mk" 2>/dev/null || true
-                kill_stragglers
-                return 2
-              fi
-            done
-            rc=0
-            wait "$mk" || rc=$?
-            [ "$rc" -eq 0 ] || return 1
-            return 0
-          }
-
-          attempt=1
-          while : ; do
-            echo "--- build attempt $attempt of $attempts ---"
-            set +e
-            build_once
-            outcome=$?
-            set -e
-            case "$outcome" in
-              0) echo "build ok on attempt $attempt"; break ;;
-              1) echo "FAIL compile error (not a stall) - not retrying"; tail -25 "$log"; exit 1 ;;
-              2) if [ "$attempt" -ge "$attempts" ]; then
-                   echo "FAIL wedged on all $attempts attempts (see #462)"
-                   exit 1
-                 fi
-                 echo "wedged; retrying (make resumes from existing objects)"
-                 attempt=$((attempt + 1))
-                 ;;
-            esac
-          done
-
-          cat "$log"
           # Never trust the exit status alone here - assert the artifact.
           test -f build/hull || { echo "FAIL build/hull was not produced"; exit 1; }
           ls -la build/hull
@@ -548,6 +500,174 @@ jobs:
             *) echo "  FAIL doctor reports no usable HTTPS trust store"; exit 1 ;;
           esac
 
+      # UNIT TESTS ON WINDOWS.
+      #
+      # Until this step existed, NO job in the repo ran a single Hull unit test
+      # on a Windows runner - the suite ran on Linux and macOS only, so every
+      # host-specific path was covered by nothing. The three most recent Windows
+      # fixes (#471 spawn allowlist, #472 toolchain resolution, and the
+      # tool-name basename fix) were all in code this step exercises, and all
+      # three were found by hand rather than by CI.
+      #
+      # WHY A SUBSET AND NOT `make test`. The full suite is 108 binaries, each a
+      # fat APE link - far past this job's budget, and it multiplies exposure to
+      # the #462 wedge, which fires per large-TU compile. The suites below are
+      # the ones whose behaviour is HOST-DEPENDENT plus the cheap
+      # always-relevant ones; their portable logic is already covered on Linux
+      # and macOS in ci.yml.
+      #
+      # WHY THE OUTPUT IS PARSED AND NOT JUST THE EXIT CODE.
+      #
+      # On Windows a cosmocc APE does not report its exit code: it reports the
+      # code SHIFTED LEFT BY 8, i.e. a raw wait status. Isolated with a two-line
+      # program on 2026-09-09, so this is the toolchain and not anything Hull
+      # does:
+      #
+      #   int main(void){ return 1; }  -> PowerShell 256,  MSYS2 bash 0
+      #   int main(void){ return 4; }  -> PowerShell 1024, MSYS2 bash 0
+      #
+      # PowerShell shows the shifted value; a POSIX shell keeps the low byte,
+      # which for any code < 256 is 0. So under the msys2 shell this step runs
+      # in, EVERY failing binary looks like a success. Only a signal death
+      # surfaces (SIGILL shows as 4).
+      #
+      # That is not theoretical here: build/test_release prints
+      # "[  PASSED  ] 19 tests." then "[  FAILED  ] 1 tests" and still exits 0.
+      # An exit-code-only gate would score every failure below as a pass.
+      #
+      # So gate on utest's printed summary - the same "assert the artifact, not
+      # the status" rule the build step above already follows. The exit code is
+      # still checked, but only as a secondary signal.
+      #
+      # TWO TIERS, because Windows is not green yet and pretending otherwise
+      # would paint the nightly red forever:
+      #
+      #   ENFORCED - measured clean on Windows 11 + MSYS2 + cosmocc
+      #              (2026-09-09). Any failure fails the job.
+      #   KNOWN    - suites with REAL pre-existing Windows failures, recorded
+      #              with the count measured that day. They do not fail the job
+      #              at baseline, but the count is RATCHETED: more than baseline
+      #              fails. Fewer means somebody fixed something - the step says
+      #              so and asks for the baseline to be lowered, so this tier
+      #              cannot rot into a list nobody reads.
+      #
+      # Measured on Windows 11 + MSYS2 + cosmocc, 2026-09-09, with TMP/TEMP
+      # set (see the guard below - without them, suites that mkdtemp under
+      # /tmp fail in bulk and the picture looks far worse than it is):
+      #
+      #   test_host 31/31   test_tool 60/61   test_vfs 22/22   test_static 23/23
+      #   test_cacert 6/6   test_dispatch 5/5 test_csp 7/7     test_parse_size 9/9
+      #   test_signature 20/20   test_release 20/20      <- all ENFORCED
+      #   test_compiler 11/15 (4 failed)   test_fs 33/37 (4 failed)  <- KNOWN
+      #
+      # The two KNOWN suites fail for reasons that are understood:
+      #
+      #   test_compiler: system_is_available_cc, compile_hello,
+      #     compile_with_include_dir, compile_app_registry_pattern - all four
+      #     exercise the SYSTEM compiler, and on Windows the resolved `cc` is a
+      #     native ucrt64 gcc being handed POSIX-shaped paths by an APE. This
+      #     is the same environment difference #472 recorded (it saw 10/15).
+      #     Expect the count to MOVE on a runner whose PATH differs.
+      #   test_fs: validate_rejects_symlink_escape plus three mmap_window_*
+      #     cases - Windows symlink semantics and mmap windowing, i.e. real
+      #     platform gaps rather than anything this workflow introduced.
+      #
+      # Baselines came from a developer box, so the first nightly may need them
+      # adjusted to the runner - the failure message says exactly how.
+      #
+      # Same flags as the build above. They must match EXACTLY: the Makefile's
+      # config fingerprint purge deletes build/test_* on a flag flip, so a
+      # differing HL_ENABLE_WASM here would discard the binaries just built.
+      - name: Run the host-sensitive unit suites
+        shell: msys2 {0}
+        run: |
+          set -uo pipefail
+          export PATH="$PATH:$PWD/cosmo/bin"
+
+          ENFORCED="test_host test_tool test_vfs test_static test_cacert
+                    test_dispatch test_csp test_parse_size test_signature
+                    test_release"
+          # suite:baseline-failure-count   ("crash" = printed no summary)
+          KNOWN="test_compiler:4 test_fs:4"
+
+          targets=""
+          for s in $ENFORCED; do targets="$targets build/$s"; done
+          for kv in $KNOWN; do targets="$targets build/${kv%%:*}"; done
+
+          bash .github/scripts/make-watched.sh "tests" test-build.log CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 $targets
+
+          # Several suites mkdtemp under /tmp, which for an APE resolves via
+          # TMP/TEMP rather than a real /tmp. The msys2 shell action sets both.
+          if [ -z "${TMP:-}" ] && [ -z "${TEMP:-}" ]; then
+            echo "FAIL neither TMP nor TEMP is set; APE mkdtemp under /tmp will fail"
+            exit 1
+          fi
+          echo "TMP=${TMP:-<unset>} TEMP=${TEMP:-<unset>}"
+
+          fails_of() {
+            printf '%s' "$1" | grep -qE '^\[==========\] [0-9]+ test cases ran\.' || { echo crash; return; }
+            n=$(printf '%s' "$1" | sed -n 's/^\[  FAILED  \] \([0-9][0-9]*\) tests.*/\1/p' | head -1)
+            echo "${n:-0}"
+          }
+
+          rc_step=0
+
+          echo "===================== ENFORCED ====================="
+          for s in $ENFORCED; do
+            test -x "build/$s" || { echo "FAIL $s was not built"; exit 1; }
+            out=$(HULL_QUIET_AOT=1 "./build/$s" 2>&1)
+            n=$(fails_of "$out")
+            if [ "$n" = "0" ]; then
+              echo "ok        $s"
+            else
+              echo "FAIL      $s: $n failure(s) - this suite must be clean"
+              echo "$out" | tail -25
+              rc_step=1
+            fi
+          done
+
+          echo "====================== KNOWN ======================="
+          for kv in $KNOWN; do
+            s=${kv%%:*}; base=${kv##*:}
+            test -x "build/$s" || { echo "FAIL $s was not built"; exit 1; }
+            out=$(HULL_QUIET_AOT=1 "./build/$s" 2>&1)
+            n=$(fails_of "$out")
+            if [ "$n" = "$base" ]; then
+              echo "known     $s: $n (baseline $base)"
+            elif [ "$n" = "crash" ] || [ "$base" = "crash" ]; then
+              echo "CHANGED   $s: now '$n', baseline '$base'"
+              echo "$out" | tail -20
+              rc_step=1
+            elif [ "$n" -gt "$base" ]; then
+              echo "REGRESSED $s: $n failures, baseline $base"
+              echo "$out" | tail -25
+              rc_step=1
+            else
+              echo "IMPROVED  $s: $n failures, baseline $base"
+              echo "          -> lower this suite's baseline in KNOWN above."
+              rc_step=1
+            fi
+          done
+
+          echo ""
+          if [ "$rc_step" -ne 0 ]; then
+            echo "Windows unit suites: FAILED (see above)."
+            echo "If the runner simply differs from the box these baselines came"
+            echo "from, update the KNOWN counts in this step and say so."
+          else
+            echo "Windows unit suites: enforced clean, known failures at baseline."
+          fi
+          exit "$rc_step"
+
+      - name: Upload the unit-test build log on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-windows-test-build-log
+          path: test-build.log
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload the produced APE (diagnostic only, never released)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
@@ -556,3 +676,234 @@ jobs:
           path: build/hull
           if-no-files-found: warn
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # APP BUILD: does a hull COMPILED ON WINDOWS actually build and run an app?
+  #
+  # WHAT THIS ADDS OVER cosmocc-windows-e2e.yml. That workflow already proves
+  # `hull build` works on Windows - but with a hull binary compiled on LINUX
+  # (its build job is runs-on: ubuntu-24.04, EMBED_PLATFORM=cosmo) and only
+  # CONSUMED on the Windows runner. So the two cover different halves:
+  #
+  #   cosmocc-windows-e2e : Linux-built hull   -> hull build on Windows  (was covered)
+  #   this job            : Windows-built hull -> hull build on Windows  (was NOT)
+  #
+  # The gap matters because the Windows-specific defects Hull has actually hit
+  # (#471 spawn allowlist, #472 driver resolution) live in the path a hull takes
+  # when it drives a compiler - so a hull produced BY the Windows toolchain
+  # driving that same toolchain is its own case, not a corollary of either.
+  #
+  # WHY A SEPARATE JOB rather than more steps on the build job. This needs
+  # `make platform-cosmo` (two full clean builds, one per arch) plus an
+  # EMBED_PLATFORM link - three builds where the sibling job does one. At the
+  # #462 wedge rate that is roughly triple the exposure, and folding it in
+  # would mean a wedge here turns the fast build+test signal red even though
+  # both had already passed. Separate job, separate timeout, independent
+  # verdict.
+  #
+  # NOT REQUIRED, same as its sibling: nightly only.
+  # ---------------------------------------------------------------------------
+  windows-app-build:
+    name: hull built on Windows builds + runs an app (cosmocc, HL_ENABLE_WASM=0)
+    runs-on: windows-latest
+    # Three builds, not one, plus up to 3 stall retries each. The watchdog is
+    # what should stop a hang; this is the backstop behind it.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
+        with:
+          msystem: MSYS
+          update: false
+          install: >-
+            make
+            binutils
+            vim
+            diffutils
+            git
+
+      - name: Fetch + verify cosmocc
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          $h = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: got $h" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo
+          Write-Host "cosmocc extracted"
+
+      # The sibling job's full probe explains WHY an MSYS-native make is
+      # required and asserts it. That reasoning is not repeated here; this only
+      # resolves the two tools and refuses cosmocc's bundled APE make, which is
+      # the one substitution that silently produces a broken build.
+      - name: Resolve make + ar
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          MAKE_BIN=$(command -v make || true)
+          [ -n "$MAKE_BIN" ] || { echo "FAIL no make on PATH"; exit 1; }
+          case "$MAKE_BIN" in
+            */cosmo/bin/*) echo "FAIL make resolved to cosmocc's bundled APE make"; exit 1 ;;
+          esac
+          ar_name=""
+          for cand in ar x86_64-unknown-cosmo-ar aarch64-unknown-cosmo-ar cosmoar; do
+            command -v "$cand" >/dev/null 2>&1 && { ar_name=$cand; break; }
+          done
+          [ -n "$ar_name" ] || { echo "FAIL no ar found"; exit 1; }
+          echo "make: $MAKE_BIN ($("$MAKE_BIN" --version | head -1))"
+          echo "ar  : $ar_name"
+          echo "MAKE_BIN=$MAKE_BIN" >> "$GITHUB_ENV"
+          echo "AR=$ar_name" >> "$GITHUB_ENV"
+
+      # `hull build` on cosmo needs BOTH arch archives side by side -
+      # libhull_platform.{x86_64,aarch64}-cosmo.a - because cosmocc links a fat
+      # APE from an x86_64 image plus its .aarch64/ counterpart. build.lua
+      # searches the build dir for exactly that pair, so a single-arch
+      # `make platform` would not do: it is deliberately single-arch even under
+      # cosmocc. platform-cosmo runs `make clean` between the two arches, which
+      # is why the hull link below comes after it and not before.
+      - name: Build the multi-arch cosmo platform archives
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:$PWD/cosmo/bin"
+          bash .github/scripts/make-watched.sh "platform-cosmo" platform-cosmo.log platform-cosmo CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+          ls -la build/libhull_platform.x86_64-cosmo.a build/libhull_platform.aarch64-cosmo.a
+
+      # KNOWN DEFECT, worked around here on purpose - do not "simplify" this.
+      #
+      # The FIRST `EMBED_PLATFORM=cosmo` build after `platform-cosmo` links
+      # against objects it never compiled and dies with:
+      #
+      #   cosmocc: fatal error: build/cap_audit.o: no such file
+      #
+      # Reproduced on Windows 11 + MSYS2 + cosmocc on 2026-09-09: of the
+      # objects on the link line, exactly the first three (cap_audit.o,
+      # cap_blob.o, cap_body.o) are never compiled - the run emits 425 compile
+      # recipes starting at cap_crypto.o - and the link then fails naming the
+      # first of them. Running the IDENTICAL command again succeeds.
+      #
+      # What is established: `platform-cosmo` leaves build/.build-config
+      # holding a DEFAULT fingerprint (CC=cc, WASM=1, EMBED_PLATFORM=empty)
+      # rather than the flags it was invoked with, because its trailing
+      # `$(MAKE) clean` rm -rf's the build dir and the archives are copied back
+      # afterwards. The next build therefore trips the fingerprint purge
+      # (Makefile "Build-flag fingerprint"), and comes out of it having skipped
+      # those three. The second run's fingerprint matches, no purge fires, and
+      # it builds only what is missing. Why exactly three, and why those, is
+      # NOT established - hence "defect", not "explained".
+      #
+      # This is a Hull build-system bug, not a cosmocc one, and it is separate
+      # from the #462 wedge. It is retried here ONLY on its exact signature so
+      # a genuine compile error still fails on the first pass. Delete this
+      # block once the purge/skip interaction is fixed.
+      - name: Build hull with the platform embedded
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:$PWD/cosmo/bin"
+
+          embed_build() {
+            bash .github/scripts/make-watched.sh "$1" hull-embed.log               CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 EMBED_PLATFORM=cosmo -j2
+          }
+
+          if ! embed_build "hull-embed"; then
+            if grep -q "no such file" hull-embed.log; then
+              echo ""
+              echo "=================================================================="
+              echo "KNOWN DEFECT: first embed build after platform-cosmo skipped"
+              echo "objects the fingerprint purge removed. Re-running once; see the"
+              echo "comment above this step. This is NOT the #462 cosmocc wedge."
+              echo "=================================================================="
+              grep -n "no such file" hull-embed.log | head -3
+              embed_build "hull-embed-2nd-pass"
+            else
+              echo "FAIL embed build failed for a reason other than the known defect"
+              exit 1
+            fi
+          fi
+
+          test -f build/hull || { echo "FAIL build/hull was not produced"; exit 1; }
+          ls -la build/hull
+          ./build/hull version
+          # Assert the embed actually took. A hull that silently lost its
+          # platform archives would fail later at `hull build` with a confusing
+          # "not found", and doctor is the surface that knows. Expect
+          # multi-arch, since this embedded BOTH cosmo archives.
+          ./build/hull doctor --json > doctor.json || true
+          grep -o '"platform_library"[^,]*' doctor.json || cat doctor.json
+
+      # THE PAYOFF: a hull COMPILED on Windows builds an app, and that app RUNS.
+      #
+      # Shape of this check, all three parts learned by running it (2026-09-09):
+      #
+      #   * `--no-verify-platform` is REQUIRED. A locally built hull carries no
+      #     embedded platform manifest, and without the flag `hull build` stops
+      #     with "this hull has no embedded platform manifest". The sibling
+      #     cosmocc-windows-e2e.yml passes it for the same reason.
+      #   * The app is an `app.main` CLI printing a marker, NOT `hull new`'s web
+      #     scaffold. A server does not exit, so it cannot be asserted on in a
+      #     step; a marker on stdout can.
+      #   * The verdict is the MARKER, never the exit status. A cosmocc APE on
+      #     Windows reports its exit code shifted left by 8 (a raw wait status),
+      #     so a POSIX shell sees 0 for every failure - isolated with a two-line
+      #     C program, see the unit-test step for the measurements. This is a
+      #     TOOLCHAIN limitation, not a Hull defect, and it is not something
+      #     Hull can work around: `hull build` on an app whose manifest fails to
+      #     extract correctly calls exit(1), prints "the build cannot continue"
+      #     and writes no artifact - and the shell still sees 0. Any script
+      #     doing `hull build && ...` on Windows proceeds after a failed build.
+      #     Assert the artifact and its output instead.
+      - name: hull new + hull build + run the produced APE
+        shell: msys2 {0}
+        run: |
+          set -uo pipefail
+          export PATH="$PATH:$PWD/cosmo/bin"
+
+          work=$(mktemp -d)/demo
+          mkdir -p "$work"
+          cat > "$work/app.lua" <<'LUA'
+          app.manifest({ modules = {} })
+          app.main(function(ctx) ctx.stdout:write("APP-MARKER-OK\n"); return 0 end)
+          LUA
+          sed -i 's/^          //' "$work/app.lua"
+          echo "--- app.lua ---"; cat "$work/app.lua"
+
+          ./build/hull build "$work" --no-verify-platform 2>&1 | tee hull-app-build.log
+          echo "--- hull build exit (informational only, see comment): ${PIPESTATUS[0]} ---"
+
+          # On Windows the artifact is app.com: Windows will not execute an
+          # extensionless file, which is what hl_host_exe_suffix() encodes.
+          app="$work/app.com"
+          if [ ! -f "$app" ]; then
+            echo "FAIL expected $app to exist"
+            ls -la "$work"
+            exit 1
+          fi
+          ls -la "$app"
+
+          out=$("$app" 2>&1) || true
+          echo "--- app output ---"
+          echo "$out"
+          if printf '%s' "$out" | grep -q 'APP-MARKER-OK'; then
+            echo "APP BUILD OK: a Windows-compiled hull produced an APE that runs"
+          else
+            echo "FAIL the produced app did not print its marker"
+            exit 1
+          fi
+
+      - name: Upload the app-build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-windows-app-build-logs
+          path: |
+            platform-cosmo.log
+            hull-embed.log
+            doctor.json
+          if-no-files-found: warn
+          retention-days: 14
