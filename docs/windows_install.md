@@ -184,6 +184,73 @@ and is not the same configuration CI exercises.
 This path is exercised in CI by `.github/workflows/windows-source-build.yml`,
 whose header carries the full evidence and history.
 
+## Exit codes on Windows (read this before scripting `hull`)
+
+**On Windows, a POSIX-style shell cannot tell whether `hull` succeeded.** In
+MSYS2, Git Bash and Cygwin, a *failing* `hull` command reports success: `&&`
+runs the next command anyway and `set -e` does not abort.
+
+```sh
+# In Git Bash / MSYS2 on Windows. `hull build` FAILS here, and yet:
+hull build ./app && echo "shipped"      # prints "shipped"
+set -e; hull build ./app; echo "reached"  # prints "reached"
+```
+
+This is not a Hull bug and Hull cannot work around it. Every Cosmopolitan APE
+on Windows - which is what `hull.com` and the apps it builds are - reports its
+exit status **shifted left by 8**, i.e. the raw `wait()`-style status rather
+than the exit code. A two-line C program built with `cosmocc` does the same
+thing. Tracked upstream as
+[jart/cosmopolitan#1521](https://github.com/jart/cosmopolitan/issues/1521).
+
+| `hull` intends | PowerShell `$LASTEXITCODE` | cmd `ERRORLEVEL` | MSYS2 / Git Bash `$?` |
+|---|---|---|---|
+| `0` (success) | `0` | `0` | `0` |
+| `1` (failure) | `256` | `256` | **`0`** |
+| `2` (failure) | `512` | `512` | **`0`** |
+
+Success is reported correctly everywhere, which is exactly why this is easy to
+miss: a green run behaves normally and only failures are swallowed. The value
+is always `code << 8`, whose low byte is `0` for any code below 256 - so a
+shell that keeps only the low byte sees `0`.
+
+### What to do
+
+**PowerShell** - works, if you test `$LASTEXITCODE` rather than `$?`:
+
+```powershell
+hull build .\app
+if ($LASTEXITCODE -ne 0) { throw "hull build failed" }
+```
+
+Do **not** use `$?` here. Measured on Windows 11 with cosmocc 4.0.2: after a
+failing `hull`, `$LASTEXITCODE` is `256` but `$?` is still `True`.
+
+**cmd.exe** - works, `if errorlevel 1` triggers correctly:
+
+```bat
+hull build .\app
+if errorlevel 1 (echo hull build failed & exit /b 1)
+```
+
+**MSYS2 / Git Bash / Cygwin** - the status is unusable. Check for the
+**artifact** instead, which is what Hull's own CI does:
+
+```sh
+hull build ./app
+test -f ./app/app.com || { echo "hull build failed"; exit 1; }
+```
+
+For commands that produce no file, check the output instead - for example
+`hull doctor --json` and test a field, rather than trusting the status.
+
+### Scope
+
+This affects every `hull` subcommand on Windows, and every app `hull build`
+produces there, since both are APEs. It does not affect Linux, macOS, or the
+BSDs. Windows CI that shells out to `hull` from bash should assert artifacts or
+output; a bare `hull ... && ...` chain is not a check.
+
 ## What it does
 
 - Resolves the latest official stable release from `artalis-io/hull` (drafts and

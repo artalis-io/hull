@@ -1146,6 +1146,22 @@ it" string routes through `render_exec` rather than hard-coding `./x`: neither
 PowerShell nor a POSIX shell searches the current directory, so a bare relative
 name is never a runnable instruction.
 
+**A `hull` exit status is unusable from a POSIX shell on Windows.** Every
+Cosmopolitan APE there reports its status **shifted left by 8** (the raw
+`wait()` status, not the exit code), so MSYS2 / Git Bash / Cygwin - which keep
+only the low byte - see `0` for every failure: `&&` does not short-circuit and
+`set -e` does not abort. Measured with cosmocc 4.0.2 on Windows 11; a two-line
+C program does the same, so this is the toolchain, not Hull, and Hull cannot
+work around it (`exit(1)` is called correctly). Upstream:
+[jart/cosmopolitan#1521](https://github.com/jart/cosmopolitan/issues/1521).
+PowerShell (`$LASTEXITCODE -ne 0`, NOT `$?` - measured `True` after a failure)
+and cmd (`if errorlevel 1`) still detect failure. **Invariant for contributors:**
+a Windows CI step or script must assert the ARTIFACT or the printed output, never
+`hull`'s status - `.github/workflows/windows-source-build.yml` follows this in
+both jobs, and it is why `make test` on Windows is gated on utest's printed
+summary rather than on the binaries' exit codes. User-facing writeup:
+[docs/windows_install.md](docs/windows_install.md#exit-codes-on-windows-read-this-before-scripting-hull).
+
 **CLI logging (`src/hull/shared/cli_log.c`).** `hull <subcommand>` and the
 `hull <app>` serve path have different audiences, so they configure rxi/log.c
 separately. `hl_cli_log_init()` is installed by the dispatcher for subcommands
