@@ -82,8 +82,30 @@ UTEST(compiler, system_new_null_returns_null)
     ASSERT_EQ(c, NULL);
 }
 
+/* Is a SYSTEM C compiler present at all?
+ *
+ * The cases below were written assuming "cc should be available in CI and dev
+ * environments". That is not true everywhere: the Windows runner carries only
+ * cosmocc, which is not a system compiler, so `hull build` there goes through
+ * the cosmo driver instead. With no cc to find, these tests have nothing to
+ * assert - and reporting a FAILURE for it describes a defect that does not
+ * exist, which is how test_compiler ended up carrying a baseline of five
+ * permanent failures on Windows.
+ *
+ * Skip honestly instead. On a host that does have a cc they run exactly as
+ * before. */
+static int have_system_cc(void)
+{
+    HlCompiler *c = hl_compiler_system_new("cc");
+    if (!c) return 0;
+    int ok = hl_compiler_is_available(c);
+    hl_compiler_destroy(c);
+    return ok == 1;
+}
+
 UTEST(compiler, system_is_available_cc)
 {
+    if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     HlCompiler *c = hl_compiler_system_new("cc");
     ASSERT_NE(c, NULL);
     /* cc should be available in CI and dev environments */
@@ -185,6 +207,7 @@ UTEST(compiler, compile_with_include_dir)
 
 UTEST(compiler, select_null_returns_compiler)
 {
+    if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     HlCompiler *c = hl_compiler_select(NULL);
     /* At least one compiler should be available in CI */
     ASSERT_NE(c, NULL);
@@ -194,6 +217,7 @@ UTEST(compiler, select_null_returns_compiler)
 
 UTEST(compiler, select_explicit_cc)
 {
+    if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     HlCompiler *c = hl_compiler_select("cc");
     ASSERT_NE(c, NULL);
     ASSERT_STREQ(hl_compiler_name(c), "cc");
@@ -208,6 +232,7 @@ UTEST(compiler, select_fake_returns_null)
 
 UTEST(compiler, select_system_forces_system)
 {
+    if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     HlCompiler *c = hl_compiler_select("system");
     /* system compilers should always be available in CI */
     ASSERT_NE(c, NULL);
@@ -265,6 +290,7 @@ UTEST(compiler, compile_app_registry_pattern)
 
 UTEST(compiler, default_compiler_resolves)
 {
+    if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     /* Auto-select must resolve an available compiler (the system cc). */
     HlCompiler *c = hl_compiler_select(NULL);
     ASSERT_NE(c, NULL);
