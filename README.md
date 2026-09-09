@@ -58,6 +58,8 @@ hull build           # produces .\app.com  (Windows needs an executable extensio
 
 See [Installing Hull on Windows](docs/windows_install.md) for the full five-minute path, options (`-Version` / `-Prefix` / `-Force` / `-DryRun` / `-NoPath` / `-Uninstall`), verification, and the one-time v0.13.0 -> v0.14.0 manual upgrade.
 
+> **Scripting `hull` on Windows:** a failing `hull` reads as SUCCESS in MSYS2 / Git Bash / Cygwin - `&&` chains and `set -e` do not catch it. Every Cosmopolitan APE on Windows reports its exit status shifted left by 8 ([jart/cosmopolitan#1521](https://github.com/jart/cosmopolitan/issues/1521)), and a POSIX shell keeps only the low byte. PowerShell (`$LASTEXITCODE -ne 0`) and cmd (`if errorlevel 1`) detect failure correctly; from bash, assert the built artifact instead. See [Exit codes on Windows](docs/windows_install.md#exit-codes-on-windows-read-this-before-scripting-hull).
+
 Or build from source:
 
 ```bash
