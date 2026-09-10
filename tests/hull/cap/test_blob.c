@@ -170,6 +170,45 @@ UTEST(hl_cap_blob, init_sweeps_stale_tmps)
     env_free(&e);
 }
 
+/* A temp file whose mtime LEADS the clock must survive the sweep.
+ *
+ * (now - st_mtime) is signed; casting a negative difference to uint64_t wraps
+ * to a huge value that clears any max_age, so the sweep used to unlink the
+ * freshest file rather than the oldest - potentially a concurrent writer's
+ * in-flight blob. mtime can lead time(NULL) after an NTP step or where the
+ * filesystem and the clock resolve differently, which is how this first showed
+ * up: an intermittent CI failure where init_sweeps_stale_tmps lost the file it
+ * had just created. Planted here rather than waited for. */
+UTEST(hl_cap_blob, sweep_keeps_a_tmp_whose_mtime_leads_the_clock)
+{
+    TestEnv e;
+    ASSERT_EQ(env_init(&e), 0);
+
+    HlBlob *b = NULL;
+    ASSERT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 60), 0);
+    hl_cap_blob_free(b);
+
+    char future[512];
+    snprintf(future, sizeof(future), "%s/blobs/tmp/.blob-future.tmp", e.base_dir);
+    int fd = open(future, O_WRONLY | O_CREAT, 0644);
+    ASSERT_TRUE(fd >= 0);
+    write(fd, "z", 1);
+    close(fd);
+
+    /* Two minutes ahead - well past the 60s max_age, so a wrapped comparison
+     * deletes it while a correct one leaves it alone. */
+    struct timeval tv[2] = {{ time(NULL) + 120, 0 }, { time(NULL) + 120, 0 }};
+    ASSERT_EQ(utimes(future, tv), 0);
+
+    ASSERT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 60), 0);
+    hl_cap_blob_free(b);
+
+    struct stat st;
+    ASSERT_EQ(stat(future, &st), 0);   /* survives: a future mtime is not stale */
+
+    env_free(&e);
+}
+
 /* ── put / get round-trip ────────────────────────────────────────── */
 
 UTEST(hl_cap_blob, put_get_roundtrip)
@@ -915,7 +954,13 @@ UTEST(hl_blob_store_keyed, reader_refuses_symlink_at_blob_path)
 
     char blob_path[512];
     snprintf(blob_path, sizeof(blob_path), "%s/%s", shard_dir, key);
-    ASSERT_EQ(symlink(target_file, blob_path), 0);
+    /* Creating a symlink needs SeCreateSymbolicLinkPrivilege on Windows,
+     * which an ordinary account does not hold. Asserting success there
+     * fails for a reason that has nothing to do with the O_NOFOLLOW
+     * refusal under test; skip honestly instead, the same way
+     * hl_cap_fs.validate_rejects_symlink_escape does. */
+    if (symlink(target_file, blob_path) != 0)
+        UTEST_SKIP("symlink() unavailable (needs privilege on this host)");
 
     /* reader_open MUST refuse - O_NOFOLLOW returns ELOOP/EMLINK. */
     HlBlobStoreReader *r = NULL;
