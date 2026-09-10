@@ -1870,7 +1870,15 @@ typedef struct {
     local is_cosmo = false
     if tool.platform_archs then
         for _, arch in ipairs(tool.platform_archs() or {}) do
-            if arch:find("^cosmo-") then is_cosmo = true; break end
+            -- The embedded arch names are "<arch>-cosmo" ("x86_64-cosmo",
+            -- "aarch64-cosmo"), emitted by the Makefile's
+            -- hl_embedded_platforms[] table. This used to test "^cosmo-",
+            -- which never matched ANY real entry, so the authoritative signal
+            -- was dead and detection always fell through to the compiler-name
+            -- heuristic below. A cosmo hull that could not spawn its compiler
+            -- then looked native and silently emitted an ELF object for an APE
+            -- target. Plain find (no pattern) so either ordering matches.
+            if arch:find("cosmo", 1, true) then is_cosmo = true; break end
         end
     end
     -- Last-resort fallback for hull builds where platform_archs
@@ -2332,12 +2340,29 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
 
     if not opts.no_compiler then
+        -- A cosmo build on Windows fails here for one boring reason far more
+        -- often than for a real compile error: cosmocc's driver is a
+        -- `#!/bin/sh` script, Windows cannot execvp that, and hull reroutes it
+        -- through a bundled busybox (src/hull/cap/tool.c). A cosmocc unpacked
+        -- straight from cosmo.zip carries none, so every spawn fails and a
+        -- bare "compilation failed" names the symptom, not the cause.
+        local function compile_hint()
+            if not is_cosmo then return end
+            if not (tool.host_os and tool.host_os() == "windows") then return end
+            tool.stderr("hint: on Windows hull runs cosmocc's #!/bin/sh driver "
+                     .. "through a bundled busybox.exe.\n"
+                     .. "      A cosmocc unpacked from cosmo.zip does not ship "
+                     .. "one. Install the supported bundle:\n"
+                     .. "        hull tools install cosmocc\n")
+        end
+
         -- Compile
         print("hull build: compiling with " .. tool.compiler.name() .. "...")
         ok = tool.compiler.compile(tmpdir .. "/app_registry.c",
                                    tmpdir .. "/app_registry.o", tmpdir)
         if not ok then
             tool.stderr("hull build: compilation failed (app_registry.c)\n")
+            compile_hint()
             tool.rmdir(tmpdir)
             tool.exit(1)
         end
@@ -2346,6 +2371,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                                    tmpdir .. "/app_main.o", nil)
         if not ok then
             tool.stderr("hull build: compilation failed (app_main.c)\n")
+            compile_hint()
             tool.rmdir(tmpdir)
             tool.exit(1)
         end

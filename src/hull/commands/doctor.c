@@ -152,6 +152,35 @@ static void discover_compilers(CompilerInfo *ci, int count, const char *hull_exe
     }
 }
 
+/* Windows cannot execvp a `#!/bin/sh` script, and cosmocc's driver is one,
+ * so hull spawns it through a busybox that ships beside it in the bundle
+ * `hull tools install cosmocc` lays down (the reroute in src/hull/cap/tool.c).
+ * A cosmocc unpacked straight from cosmo.zip carries no busybox: cosmocc is
+ * present, looks fine, and every spawn of it fails.
+ *
+ * Doctor used to report `build_compiler: cosmocc` / `hull_build: ready` in
+ * exactly that state, and `hull build` then died on a downstream symptom
+ * ("this hull has no bundled app_main.o"). Presence of the driver is not
+ * readiness; being able to RUN it is. Non-Windows hosts have a real /bin/sh,
+ * so this returns 1 there.
+ *
+ * `cosmocc_path` is the resolved driver; the busybox must be its sibling. */
+static int doctor_cosmocc_runnable(const char *cosmocc_path)
+{
+    if (!cosmocc_path || !cosmocc_path[0]) return 0;
+    if (!hl_host_is_windows()) return 1;
+
+    const char *slash = strrchr(cosmocc_path, '/');
+    if (!slash) return 0;
+
+    char bb[PATH_MAX];
+    size_t dlen = (size_t)(slash - cosmocc_path) + 1;
+    if (dlen + sizeof("busybox.exe") > sizeof(bb)) return 0;
+    memcpy(bb, cosmocc_path, dlen);
+    memcpy(bb + dlen, "busybox.exe", sizeof("busybox.exe"));
+    return access(bb, F_OK) == 0;
+}
+
 /* ── Which compiler actually satisfies `hull build`? ────────────────
  *
  * Not "any of the four". A COSMO hull embeds cosmo-format platform archives;
@@ -169,7 +198,8 @@ static int doctor_build_compiler(const CompilerInfo *ci, int n)
 {
 #ifdef __COSMOPOLITAN__
     for (int i = 0; i < n; i++)
-        if (strcmp(ci[i].name, "cosmocc") == 0 && ci[i].path[0])
+        if (strcmp(ci[i].name, "cosmocc") == 0 && ci[i].path[0]
+            && doctor_cosmocc_runnable(ci[i].path))
             return i;
     return -1;
 #else
@@ -477,7 +507,19 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
             int found    = ci[i].path[0] != '\0';
             int is_cos   = (strcmp(ci[i].name, "cosmocc") == 0);
             int relevant = want_cosmocc ? is_cos : !is_cos;
-            if (found)
+            /* Present is not the same as usable: on Windows cosmocc is a
+             * #!/bin/sh script hull can only spawn through the busybox its
+             * bundle ships beside it. Name which of the two is missing, or
+             * this row reads OK while the verdict says no-compiler. */
+            if (found && relevant && is_cos
+                && !doctor_cosmocc_runnable(ci[i].path)) {
+                print_row(f, ci[i].name, GLYPH_MISS, ci[i].path);
+                fprintf(f, "                found, but not runnable: no "
+                           "busybox.exe beside it\n");
+                fprintf(f, "                (Windows cannot exec its "
+                           "#!/bin/sh driver directly)\n");
+            }
+            else if (found)
                 print_row(f, ci[i].name, GLYPH_OK, ci[i].path);
             else if (relevant)
                 print_row(f, ci[i].name, GLYPH_MISS, "not found");

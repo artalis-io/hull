@@ -23,7 +23,14 @@
  * add can store TWO entries when realpath differs), so keep headroom for the
  * cosmo/Windows ~/.hull/tmp entry + future additions - an over-full table
  * silently drops adds (hl_tool_unveil_add returns -1 at the cap). */
-#define HL_TOOL_MAX_UNVEILED 24
+/* Generous headroom. Each add can consume TWO slots (the resolved path plus
+ * the original when realpath differs - on a usr-merged Linux /bin, /lib and
+ * /lib64 are all symlinks, so those three alone take six), and an add past
+ * the cap is dropped SILENTLY. At 24 the table sat one entry from full: a
+ * single extra unveil pushed it over and the LAST add - the temp dir - was
+ * the one lost, which broke every `hull compute test` because those run
+ * entirely out of a tempdir. */
+#define HL_TOOL_MAX_UNVEILED 64
 
 typedef struct {
     const char *path;

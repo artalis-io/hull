@@ -1003,6 +1003,14 @@ int hl_tool_copy(const char *src, const char *dst,
 
 /* ── Recursive directory creation ──────────────────────────────────── */
 
+/* Does `path` already exist as a directory? Distinguishes "already there"
+ * from a real mkdir failure, without trusting a specific errno. */
+static int dir_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 int hl_tool_mkdir(const char *path, const HlToolUnveilCtx *ctx)
 {
     if (!path) return -1;
@@ -1016,15 +1024,27 @@ int hl_tool_mkdir(const char *path, const HlToolUnveilCtx *ctx)
     if (len >= sizeof(buf)) return -1;
     memcpy(buf, path, len + 1);
 
+    /* An ALREADY-EXISTING component is not a failure, whatever errno the
+     * platform reports for it. EEXIST alone is not enough: on Windows a
+     * drive root answers EACCES. Cosmopolitan spells absolute paths
+     * "/C/Users/...", so the first component of this walk is "/C" -
+     * mkdir("/C") returns EACCES(5), the walk aborted, and every
+     * hl_tool_mkdir under a drive root failed. "C:/Users/..." and
+     * "/tmp/..." were unaffected because their first component answers
+     * EEXIST, which is why this only bit some paths.
+     *
+     * Concretely: `hull build` could not create <app>/.hull/build, so it
+     * left cosmocc's debug sidecars in the app root. */
     for (char *p = buf + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            if (mkdir(buf, 0755) != 0 && errno != EEXIST)
+            if (mkdir(buf, 0755) != 0 && errno != EEXIST
+                && !dir_exists(buf))
                 return -1;
             *p = '/';
         }
     }
-    if (mkdir(buf, 0755) != 0 && errno != EEXIST)
+    if (mkdir(buf, 0755) != 0 && errno != EEXIST && !dir_exists(buf))
         return -1;
 
     return 0;

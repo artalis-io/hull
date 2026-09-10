@@ -260,6 +260,13 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
         pledge("stdio rpath wpath cpath proc exec fattr", NULL);
     }
 
+    /* A full table means later adds were dropped, and the drop is silent at
+     * the cap. The temp dir is added last, so an overflow shows up as
+     * unrelated tempdir failures far from here. Say so. */
+    if (ctx->count >= HL_TOOL_MAX_UNVEILED)
+        log_warn("[sandbox] unveil table full (%d) - later paths were "
+                 "DROPPED; raise HL_TOOL_MAX_UNVEILED", ctx->count);
+
     log_info("[sandbox] tool mode applied (%d unveiled paths)",
              ctx->count);
 
