@@ -44,6 +44,18 @@
  */
 #define HL_TEST_PATH_MAX 512
 
+/*
+ * Drop any trailing '/'. macOS sets $TMPDIR with one ("/var/folders/xy/.../T/"),
+ * and a prefix with a trailing separator breaks boundary checks that ask whether
+ * the next character is '/' or NUL - hl_tool_unveil_check does exactly that, so
+ * an unveiled ".../T/" would deny every path beneath it.
+ */
+static inline void hl_test_rstrip_slash_(char *p)
+{
+    size_t n = strlen(p);
+    while (n > 1 && p[n - 1] == '/') p[--n] = 0;
+}
+
 static inline int hl_test_is_dir_(const char *p)
 {
     struct stat st;
@@ -71,6 +83,7 @@ static inline const char *hl_test_tmpdir(void)
         const char *v = getenv(names[i]);
         if (hl_test_is_dir_(v) && strlen(v) < sizeof cached) {
             memcpy(cached, v, strlen(v) + 1);
+            hl_test_rstrip_slash_(cached);
             return cached;
         }
     }

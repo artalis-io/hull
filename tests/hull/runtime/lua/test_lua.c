@@ -1418,8 +1418,19 @@ UTEST(lua_require_fs, syntax_error)
 
     const char *err = lua_tostring(lua_rt.L, -1);
     ASSERT_NE(err, NULL);
-    /* Lua compile errors mention the file name */
-    ASSERT_NE(strstr(err, "bad.lua"), NULL);
+    /* Lua compile errors identify the chunk. The loader passes a bare path as
+     * the chunkname (not "@path"), so Lua renders it as [string "..."] and
+     * luaO_chunkid truncates to LUA_IDSIZE keeping the HEAD - the tail, which
+     * is where "bad.lua" sits, is what gets dropped. A short $TMPDIR (/tmp/...)
+     * fits and keeps the name; a long one (macOS /var/folders/xy/.../T/...)
+     * does not. Accept either, so this asserts the chunk is identified without
+     * depending on how long the host's temp path happens to be. */
+    int names_file = strstr(err, "bad.lua") != NULL;
+    int truncated  = strstr(err, "...") != NULL;
+    if (!names_file && !truncated) {
+        fprintf(stderr, "error did not identify the chunk: %s\n", err);
+    }
+    ASSERT_TRUE(names_file || truncated);
     lua_pop(lua_rt.L, 1);
 
     cleanup_lua();
