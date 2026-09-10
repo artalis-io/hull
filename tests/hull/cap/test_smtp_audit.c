@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include "../test_tmpdir.h"
 
 extern int hl_audit_enabled;
 
@@ -33,8 +34,8 @@ static void audit_capture(const HlSmtpMessage *m, const HlSmtpResult *r,
 {
     fflush(stderr);
     int saved = dup(STDERR_FILENO);
-    char tmpl[] = "/tmp/hull_smtp_audit_XXXXXX";
-    int fd = mkstemp(tmpl);
+    char tmpl[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(tmpl, sizeof tmpl, "hull_smtp_audit", NULL);
     dup2(fd, STDERR_FILENO);
 
     int prev = hl_audit_enabled;

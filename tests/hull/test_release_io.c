@@ -28,6 +28,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "test_tmpdir.h"
 
 /* ── verify_local (build-time re-verify of an installed asset) ─────── */
 
@@ -45,8 +46,8 @@ static void vl_rm(const char *dir, const char *name) {
 
 /* No cached manifest in the dir -> refuse (cannot verify). */
 UTEST(verify_local, missing_manifest_fails) {
-    char dir[] = "/tmp/hlvlXXXXXX";
-    ASSERT_TRUE(mkdtemp(dir) != NULL);
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hlvl") != NULL);
     ASSERT_EQ(hl_release_io_verify_local_asset(dir, "libhull_platform-x.a"), -1);
     rmdir(dir);
 }
@@ -55,8 +56,8 @@ UTEST(verify_local, missing_manifest_fails) {
  * fails closed. With a placeholder pubkey: the SHA-only path verifies a
  * matching lib and rejects a tampered one. Adapts to the build's key. */
 UTEST(verify_local, tamper_and_signature_fail_closed) {
-    char dir[] = "/tmp/hlvlXXXXXX";
-    ASSERT_TRUE(mkdtemp(dir) != NULL);
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hlvl") != NULL);
 
     const char *payload = "flavor platform lib bytes";
     char hex[65];
@@ -231,7 +232,7 @@ UTEST(find_checksum, null_args_safe) {
 
 UTEST(atomic_write, creates_file_and_replaces) {
     char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "/tmp/hull-aw-%d", getpid());
+    hl_test_path(tmp, sizeof(tmp), "hull-aw-%d", getpid());
     unlink(tmp);
     const char *payload1 = "first\n";
     ASSERT_EQ(hl_release_io_atomic_write(tmp, payload1, strlen(payload1), 0644), 0);
@@ -267,7 +268,7 @@ UTEST(atomic_write, creates_file_and_replaces) {
 
 UTEST(atomic_write, zero_byte_payload_ok) {
     char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "/tmp/hull-aw-zero-%d", getpid());
+    hl_test_path(tmp, sizeof(tmp), "hull-aw-zero-%d", getpid());
     unlink(tmp);
     ASSERT_EQ(hl_release_io_atomic_write(tmp, "", 0, 0644), 0);
     struct stat st;
@@ -320,7 +321,7 @@ static int has_sidecars(const char *tmp)
 
 UTEST(self_replace, atomic_path_replaces) {
     char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "/tmp/hull-sr-%d", getpid());
+    hl_test_path(tmp, sizeof(tmp), "hull-sr-%d", getpid());
     unlink(tmp);
     ASSERT_EQ(seed(tmp, "OLD-BINARY"), 0);
 
@@ -336,7 +337,7 @@ UTEST(self_replace, atomic_path_replaces) {
 
 UTEST(self_replace, deferred_swap_replaces) {
     char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "/tmp/hull-sr-def-%d", getpid());
+    hl_test_path(tmp, sizeof(tmp), "hull-sr-def-%d", getpid());
     unlink(tmp);
     ASSERT_EQ(seed(tmp, "OLD"), 0);
 
@@ -357,7 +358,7 @@ UTEST(self_replace, deferred_swap_replaces) {
 
 UTEST(self_replace, deferred_swap_rolls_back_on_failure) {
     char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "/tmp/hull-sr-rb-%d", getpid());
+    hl_test_path(tmp, sizeof(tmp), "hull-sr-rb-%d", getpid());
     unlink(tmp);
     ASSERT_EQ(seed(tmp, "ORIGINAL-BINARY"), 0);
 
@@ -381,7 +382,7 @@ UTEST(self_replace, deferred_swap_rolls_back_on_failure) {
 UTEST(self_replace, path_with_spaces) {
     /* A running hull at a path with spaces (the reporter's Windows scenario). */
     char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), "/tmp/hull sr dir-%d", getpid());
+    hl_test_path(dir, sizeof(dir), "hull sr dir-%d", getpid());
     mkdir(dir, 0755);
     char tmp[PATH_MAX];
     snprintf(tmp, sizeof(tmp), "%s/my hull.exe", dir);

@@ -27,12 +27,13 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include "../test_tmpdir.h"
 
 static char base[256];
 
 static void setup(void)
 {
-    snprintf(base, sizeof(base), "/tmp/hull_res_%d", (int)getpid());
+    hl_test_path(base, sizeof(base), "hull_res_%d", (int)getpid());
     mkdir(base, 0755);
 }
 static int rm_entry(const char *p, const struct stat *sb, int t, struct FTW *f)

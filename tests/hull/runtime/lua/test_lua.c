@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../../test_tmpdir.h"
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -1212,8 +1213,8 @@ static void init_lua_with_appdir(const char *app_dir)
 
 UTEST(lua_require_fs, basic)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/mod.lua", tmpdir);
@@ -1233,8 +1234,8 @@ UTEST(lua_require_fs, basic)
 
 UTEST(lua_require_fs, lua_ext_auto)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/mod.lua", tmpdir);
@@ -1254,8 +1255,8 @@ UTEST(lua_require_fs, lua_ext_auto)
 
 UTEST(lua_require_fs, nested_relative)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     /* Create sub directory */
     char subdir[1024];
@@ -1286,8 +1287,8 @@ UTEST(lua_require_fs, nested_relative)
 
 UTEST(lua_require_fs, cached)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/mod.lua", tmpdir);
@@ -1307,8 +1308,8 @@ UTEST(lua_require_fs, cached)
 
 UTEST(lua_require_fs, traversal_above_root)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     init_lua_with_appdir(tmpdir);
     ASSERT_TRUE(lua_initialized);
@@ -1328,8 +1329,8 @@ UTEST(lua_require_fs, traversal_above_root)
 
 UTEST(lua_require_fs, traversal_within_ok)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     /* Create sub directory and sibling file */
     char subdir[1024];
@@ -1362,8 +1363,8 @@ UTEST(lua_require_fs, traversal_within_ok)
 
 UTEST(lua_require_fs, not_found)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     init_lua_with_appdir(tmpdir);
     ASSERT_TRUE(lua_initialized);
@@ -1401,8 +1402,8 @@ UTEST(lua_require_fs, no_appdir)
 
 UTEST(lua_require_fs, syntax_error)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/bad.lua", tmpdir);
@@ -1427,8 +1428,8 @@ UTEST(lua_require_fs, syntax_error)
 
 UTEST(lua_require_fs, returns_nil)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/nilmod.lua", tmpdir);
@@ -1449,8 +1450,8 @@ UTEST(lua_require_fs, returns_nil)
 
 UTEST(lua_require_fs, too_large)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     /* Create a file that exceeds HL_MODULE_MAX_SIZE */
     char path[1024];
@@ -1479,8 +1480,8 @@ UTEST(lua_require_fs, too_large)
 
 UTEST(lua_require_fs, embedded_still_first)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     init_lua_with_appdir(tmpdir);
     ASSERT_TRUE(lua_initialized);
@@ -4043,7 +4044,7 @@ static int bc_rm_entry(const char *path, const struct stat *st,
 
 static void bc_with_tmp_home(char tmpdir[256])
 {
-    snprintf(tmpdir, 256, "/tmp/hull_bc_cache_XXXXXX");
+    hl_test_path(tmpdir, sizeof(tmpdir), "hull_bc_cache_XXXXXX");
     mkdtemp(tmpdir);
     setenv("HOME", tmpdir, 1);
     /* Make sure no stale opt-out from a previous test leaks in. */
@@ -4253,7 +4254,7 @@ UTEST(lua_bytecode_cache, corrupt_cache_falls_back_to_source)
 
 static void tc_with_tmp_home(char tmpdir[256])
 {
-    snprintf(tmpdir, 256, "/tmp/hull_tc_cache_XXXXXX");
+    hl_test_path(tmpdir, sizeof(tmpdir), "hull_tc_cache_XXXXXX");
     mkdtemp(tmpdir);
     setenv("HOME", tmpdir, 1);
     unsetenv("HULL_NO_CACHE");

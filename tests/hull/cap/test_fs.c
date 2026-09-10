@@ -31,6 +31,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../test_tmpdir.h"
 
 static char test_dir[256];
 static HlFsConfig  test_cfg;
@@ -50,7 +51,7 @@ static const char *const test_grants[] = {
 
 static void setup_fs(void)
 {
-    snprintf(test_dir, sizeof(test_dir), "/tmp/hull_test_%d", getpid());
+    hl_test_path(test_dir, sizeof(test_dir), "hull_test_%d", getpid());
     mkdir(test_dir, 0755);
     test_cfg.base_dir = test_dir;
     test_cfg.base_len = strlen(test_dir);

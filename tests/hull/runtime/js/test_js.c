@@ -42,6 +42,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "../../test_tmpdir.h"
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -4288,7 +4289,7 @@ static int jbc_rm_entry(const char *p, const struct stat *st,
 
 static void jbc_with_tmp_home(char tmpdir[256])
 {
-    snprintf(tmpdir, 256, "/tmp/hull_jbc_cache_XXXXXX");
+    hl_test_path(tmpdir, sizeof(tmpdir), "hull_jbc_cache_XXXXXX");
     mkdtemp(tmpdir);
     setenv("HOME", tmpdir, 1);
     unsetenv("HULL_NO_CACHE");
@@ -4480,7 +4481,7 @@ UTEST(js_bytecode_cache, parse_error_returns_no_cache_write)
 
 static void jtc_with_tmp_home(char tmpdir[256])
 {
-    snprintf(tmpdir, 256, "/tmp/hull_jtc_cache_XXXXXX");
+    hl_test_path(tmpdir, sizeof(tmpdir), "hull_jtc_cache_XXXXXX");
     mkdtemp(tmpdir);
     setenv("HOME", tmpdir, 1);
     unsetenv("HULL_NO_CACHE");
@@ -4790,8 +4791,8 @@ UTEST(js_runtime, app_get_allowed_before_registration_closed)
  * these also assert balanced cleanup on every fail-closed path. */
 static int run_lenient_load(const char *src)
 {
-    char path[] = "/tmp/hull_js_liveXXXXXX";
-    int fd = mkstemp(path);
+    char path[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(path, sizeof path, "hull_js_live", NULL);
     if (fd < 0) return -999;
     size_t n = strlen(src);
     ssize_t w = write(fd, src, n);

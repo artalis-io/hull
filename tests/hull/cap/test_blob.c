@@ -30,6 +30,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include "../test_tmpdir.h"
 
 /* ── Test fixture: per-test isolated temp directory + fs_cfg ─────── */
 
@@ -41,10 +42,8 @@ typedef struct {
 
 static int env_init(TestEnv *e)
 {
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp) tmp = "/tmp";
-    snprintf(e->base_dir, sizeof(e->base_dir),
-             "%s/hull-blob-test-XXXXXX", tmp);
+    if (hl_test_path(e->base_dir, sizeof(e->base_dir),
+                     "hull-blob-test-XXXXXX") != 0) return -1;
     if (!mkdtemp(e->base_dir)) return -1;
     e->fs_cfg.base_dir = e->base_dir;
     e->fs_cfg.base_len = strlen(e->base_dir);
@@ -796,7 +795,7 @@ UTEST(hl_cap_blob, cleanup_age_only)
 /* Open a store rooted at a tmpdir, bypassing the cap layer. */
 static HlBlobStore *open_keyed_store(char tmpdir[256])
 {
-    snprintf(tmpdir, 256, "/tmp/hull-blob-keyed-XXXXXX");
+    hl_test_path(tmpdir, 256, "hull-blob-keyed-XXXXXX");
     if (!mkdtemp(tmpdir)) return NULL;
     HlBlobStore *s = NULL;
     if (hl_blob_store_open(&s, NULL, tmpdir, /*shard_depth=*/1, 0) != 0)
@@ -952,7 +951,8 @@ UTEST(hl_blob_store_keyed, reader_refuses_symlink_at_blob_path)
     ASSERT_EQ(write(tfd, "sekret", 6), 6);
     close(tfd);
 
-    char blob_path[512];
+    /* shard_dir + '/' + a 64-char key; sized so this provably cannot truncate. */
+    char blob_path[HL_TEST_PATH_MAX + 128];
     snprintf(blob_path, sizeof(blob_path), "%s/%s", shard_dir, key);
     /* Creating a symlink needs SeCreateSymbolicLinkPrivilege on Windows,
      * which an ordinary account does not hold. Asserting success there

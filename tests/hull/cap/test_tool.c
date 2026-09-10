@@ -13,13 +13,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../test_tmpdir.h"
 
 /* ── Helper: create a temp directory ──────────────────────────────── */
 
 static char *make_tmpdir(void)
 {
-    char tmpl[] = "/tmp/hull_test_XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[HL_TEST_PATH_MAX];
+    char *dir = hl_test_mkdtemp(tmpl, sizeof tmpl, "hull_test");
     if (!dir) return NULL;
     return strdup(dir);
 }
@@ -363,11 +364,12 @@ UTEST(tool, find_files_recursive)
     ASSERT_TRUE(tmpdir != NULL);
 
     /* Create subdirectory */
-    char subdir[512];
+    char subdir[HL_TEST_PATH_MAX];
     snprintf(subdir, sizeof(subdir), "%s/sub", tmpdir);
     mkdir(subdir, 0755);
 
-    char path[512];
+    /* subdir plus a filename; sized so this provably cannot truncate. */
+    char path[HL_TEST_PATH_MAX + 64];
     snprintf(path, sizeof(path), "%s/test_a.lua", tmpdir);
     write_test_file(path, "-- test");
     snprintf(path, sizeof(path), "%s/test_b.lua", subdir);
@@ -504,10 +506,14 @@ UTEST(tool, copy_path_validation)
 {
     HlToolUnveilCtx ctx;
     hl_tool_unveil_init(&ctx);
-    hl_tool_unveil_add(&ctx, "/tmp", "rwc");
+    /* Unveil the temp dir this test actually writes into, not the literal
+     * "/tmp": mkdtemp here honours $TMPDIR, so a hardcoded prefix need not
+     * cover the path under test. */
+    ASSERT_TRUE(hl_test_tmpdir() != NULL);
+    hl_tool_unveil_add(&ctx, hl_test_tmpdir(), "rwc");
     hl_tool_unveil_seal(&ctx);
 
-    /* Copy within /tmp should work */
+    /* A copy inside the temp dir should work. */
     char *tmpdir = make_tmpdir();
     ASSERT_TRUE(tmpdir != NULL);
 
@@ -555,13 +561,14 @@ UTEST(tool, rmdir_path_validation)
 {
     HlToolUnveilCtx ctx;
     hl_tool_unveil_init(&ctx);
-    hl_tool_unveil_add(&ctx, "/tmp", "rwc");
+    ASSERT_TRUE(hl_test_tmpdir() != NULL);
+    hl_tool_unveil_add(&ctx, hl_test_tmpdir(), "rwc");
     hl_tool_unveil_seal(&ctx);
 
     char *tmpdir = make_tmpdir();
     ASSERT_TRUE(tmpdir != NULL);
 
-    /* Should succeed - /tmp is unveiled for write */
+    /* Should succeed - the temp dir is unveiled for write */
     ASSERT_EQ(hl_tool_rmdir(tmpdir, &ctx), 0);
 
     free(tmpdir);
@@ -608,10 +615,13 @@ UTEST(tool, mkdir_p_under_an_existing_root)
 {
     /* Somewhere real and deep enough to exercise several components. Default
      * to the temp dir; HULL_UNVEIL_PROBE_DIR points it at another volume. */
-    char tmpl[] = "/tmp/hull_mkdirp_XXXXXX";
+    char tmpl[HL_TEST_PATH_MAX];
     const char *env = getenv("HULL_UNVEIL_PROBE_DIR");
     const char *base = env;
-    if (!base) { ASSERT_TRUE(mkdtemp(tmpl) != NULL); base = tmpl; }
+    if (!base) {
+        ASSERT_TRUE(hl_test_mkdtemp(tmpl, sizeof tmpl, "hull_mkdirp") != NULL);
+        base = tmpl;
+    }
 
     HlToolUnveilCtx ctx;
     hl_tool_unveil_init(&ctx);

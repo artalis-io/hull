@@ -33,12 +33,13 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include "../test_tmpdir.h"
 
 static char base[256];
 
 static void setup(void)
 {
-    snprintf(base, sizeof(base), "/tmp/hull_par_%d", (int)getpid());
+    hl_test_path(base, sizeof(base), "hull_par_%d", (int)getpid());
     mkdir(base, 0755);
 }
 static int rm_entry(const char *p, const struct stat *sb, int t, struct FTW *f)
@@ -294,11 +295,12 @@ UTEST(fs_resolve_parity, component_swap_race_stays_contained)
     /* external sentinel: if containment ever failed and followed the escaping
      * symlink as a raw host path, "a/mid/f" would resolve to g_ext_dir/f. Content
      * is PID-unique and distinct from "inbase" so a mistaken read is unambiguous.
-     * Its virtual-root RE-ROOTED path (base + "/tmp/hull_ext_PID") is never created,
+     * Its virtual-root RE-ROOTED path (base + the sentinel's own absolute path) is
+     * never created,
      * so a re-rooted resolve is not_found - not a same-named in-base file that could
      * make a wrong read look legitimate (asserted below). */
     char sentinel[64]; snprintf(sentinel, sizeof(sentinel), "SECRET-SENTINEL-%d", (int)getpid());
-    snprintf(g_ext_dir, sizeof(g_ext_dir), "/tmp/hull_ext_%d", (int)getpid());
+    hl_test_path(g_ext_dir, sizeof(g_ext_dir), "hull_ext_%d", (int)getpid());
     mkdir(g_ext_dir, 0755);
     char extf[300]; snprintf(extf, sizeof(extf), "%s/f", g_ext_dir);
     FILE *ef = fopen(extf, "wb"); if (ef) { fputs(sentinel, ef); fclose(ef); }
