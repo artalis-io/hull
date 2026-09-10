@@ -4042,10 +4042,13 @@ static int bc_rm_entry(const char *path, const struct stat *st,
     return remove(path);
 }
 
-static void bc_with_tmp_home(char tmpdir[256])
+static void bc_with_tmp_home(char *tmpdir, size_t n)
 {
-    hl_test_path(tmpdir, sizeof(tmpdir), "hull_bc_cache_XXXXXX");
-    mkdtemp(tmpdir);
+    if (hl_test_path(tmpdir, n, "hull_bc_cache_XXXXXX") != 0 || !mkdtemp(tmpdir)) {
+        fprintf(stderr, "bc_with_tmp_home: no usable temp dir\n");
+        tmpdir[0] = 0;
+        return;
+    }
     setenv("HOME", tmpdir, 1);
     /* Make sure no stale opt-out from a previous test leaks in. */
     unsetenv("HULL_NO_CACHE");
@@ -4100,7 +4103,7 @@ static int bc_count_luac(const char *dir)
 UTEST(lua_bytecode_cache, miss_then_hit_populates_disk)
 {
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
 
     lua_State *L = luaL_newstate();
     ASSERT_NE_MSG(L, NULL, "newstate");
@@ -4131,7 +4134,7 @@ UTEST(lua_bytecode_cache, miss_then_hit_populates_disk)
 UTEST(lua_bytecode_cache, opt_out_via_env_skips_disk)
 {
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
     setenv("HULL_NO_LUA_BYTECODE_CACHE", "1", 1);
 
     lua_State *L = luaL_newstate();
@@ -4151,7 +4154,7 @@ UTEST(lua_bytecode_cache, tiny_source_skips_cache)
 {
     /* Under 256 bytes - cache shouldn't bother to memoize. */
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
 
     const char *src = "return 1 + 2\n";
     lua_State *L = luaL_newstate();
@@ -4169,7 +4172,7 @@ UTEST(lua_bytecode_cache, tiny_source_skips_cache)
 UTEST(lua_bytecode_cache, parse_error_returns_no_cache_write)
 {
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
 
     /* Padded but syntactically invalid. */
     const char *bad =
@@ -4193,7 +4196,7 @@ UTEST(lua_bytecode_cache, parse_error_returns_no_cache_write)
 UTEST(lua_bytecode_cache, corrupt_cache_falls_back_to_source)
 {
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
 
     /* Prime the cache. */
     lua_State *L = luaL_newstate();
@@ -4252,10 +4255,13 @@ UTEST(lua_bytecode_cache, corrupt_cache_falls_back_to_source)
  * render function (post-pcall), so a hit returns a callable
  * function directly. */
 
-static void tc_with_tmp_home(char tmpdir[256])
+static void tc_with_tmp_home(char *tmpdir, size_t n)
 {
-    hl_test_path(tmpdir, sizeof(tmpdir), "hull_tc_cache_XXXXXX");
-    mkdtemp(tmpdir);
+    if (hl_test_path(tmpdir, n, "hull_tc_cache_XXXXXX") != 0 || !mkdtemp(tmpdir)) {
+        fprintf(stderr, "tc_with_tmp_home: no usable temp dir\n");
+        tmpdir[0] = 0;
+        return;
+    }
     setenv("HOME", tmpdir, 1);
     unsetenv("HULL_NO_CACHE");
     unsetenv("HULL_NO_TEMPLATE_CACHE");
@@ -4302,7 +4308,7 @@ static const char *TC_PROBE_CODE =
 UTEST(lua_template_cache, miss_then_hit_populates_disk)
 {
     char tmp[256];
-    tc_with_tmp_home(tmp);
+    tc_with_tmp_home(tmp, sizeof tmp);
 
     lua_State *L = luaL_newstate();
     ASSERT_NE_MSG(L, NULL, "newstate");
@@ -4345,7 +4351,7 @@ UTEST(lua_template_cache, miss_then_hit_populates_disk)
 UTEST(lua_template_cache, opt_out_via_env_skips_disk)
 {
     char tmp[256];
-    tc_with_tmp_home(tmp);
+    tc_with_tmp_home(tmp, sizeof tmp);
     setenv("HULL_NO_TEMPLATE_CACHE", "1", 1);
     hl_lua_template_cache_reset();
 
@@ -4369,7 +4375,7 @@ UTEST(lua_template_cache, generated_code_change_invalidates)
      * entries - the natural invalidation that the design relies on
      * when extends/include targets change. */
     char tmp[256];
-    tc_with_tmp_home(tmp);
+    tc_with_tmp_home(tmp, sizeof tmp);
 
     lua_State *L = luaL_newstate();
     ASSERT_EQ(LUA_OK,
@@ -4399,7 +4405,7 @@ UTEST(lua_template_cache, generated_code_change_invalidates)
 UTEST(lua_template_cache, parse_error_returns_no_cache_write)
 {
     char tmp[256];
-    tc_with_tmp_home(tmp);
+    tc_with_tmp_home(tmp, sizeof tmp);
 
     const char *bad =
         "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
