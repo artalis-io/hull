@@ -561,29 +561,30 @@ jobs:
       # than it is). ENFORCED is clean on BOTH a Windows 11 desktop and the
       # Actions runner, which is what makes it safe to enforce.
       #
-      # The KNOWN baselines are the RUNNER's numbers, because this step only
-      # ever runs in CI. They are NOT the same as a developer box's, and the
-      # difference is instructive rather than noise:
+      # KNOWN IS EMPTY, and that is the goal state - every suite is enforced at
+      # zero. Two of them got there by fixing the platform, one by fixing a
+      # test that was asserting an environment:
       #
-      #                     runner (windows-latest)   dev box (Win 11 + ucrt64)
-      #   test_compiler     14 ran, 5 failed          15 ran, 4 failed
-
-      # test_fs was here too (3 on the runner, 4 on a dev box) until the
-      # windowed-mmap fixes: Windows maps views at the 64 KiB ALLOCATION
-      # GRANULARITY rather than the page size, and refuses a view past
-      # end-of-file, so three mmap_window_* cases could never pass; a
-      # fourth ignored symlink()'s return value and asserted against a
-      # path that was never a symlink. It is ENFORCED now.
+      #   test_fs      sat at 3 (runner) / 4 (dev box) until the windowed-mmap
+      #                fixes: Windows maps views at the 64 KiB ALLOCATION
+      #                GRANULARITY rather than the page size and refuses a view
+      #                past end-of-file, so three mmap_window_* cases could
+      #                never pass. A fourth ignored symlink()'s return value and
+      #                asserted against a path that was never a symlink.
       #
-      # test_compiler's failures are ENTIRELY system-compiler cases, and the
-      # two hosts do not even run the same number of them: the runner has no
-      # native cc/gcc/clang at all (doctor reports all three null - only
-      # cosmocc is present), while a dev box usually has ucrt64 gcc. So the
-      # failing SET differs too, not just the count - only
-      # system_is_available_cc is common to both. This is the same environment
-      # sensitivity #472 recorded when it saw 10/15. Expect this count to move
-      # if the runner image gains a compiler; the ratchet will say so.
+      #   test_compiler sat at 5 (runner) / 4 (dev box) - and the two hosts did
+      #                not even run the same number of cases. Not a defect in
+      #                the compiler abstraction: five cases asserted "cc should
+      #                be available in CI and dev environments", which is false
+      #                on a runner carrying only cosmocc. With no cc to find
+      #                they had nothing to assert, so they skip now. The
+      #                compile_* cases already self-guarded, which is why they
+      #                always passed here.
       #
+      # The tier machinery stays. It is the right landing place for the next
+      # suite that fails for a reason worth RECORDING rather than hiding, and
+      # it ratchets in both directions - a baseline cannot quietly become
+      # permanent, and an improvement is reported rather than absorbed.
       #
       # Same flags as the build above. They must match EXACTLY: the Makefile's
       # config fingerprint purge deletes build/test_* on a flag flip, so a
@@ -596,9 +597,9 @@ jobs:
 
           ENFORCED="test_host test_tool test_vfs test_static test_cacert
                     test_dispatch test_csp test_parse_size test_signature
-                    test_release test_fs"
+                    test_release test_fs test_compiler"
           # suite:baseline-failure-count   ("crash" = printed no summary)
-          KNOWN="test_compiler:5"
+          KNOWN=""
 
           targets=""
           for s in $ENFORCED; do targets="$targets build/$s"; done
