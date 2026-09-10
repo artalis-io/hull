@@ -93,7 +93,19 @@ UTEST(smtp_backend_poll, real_worker_terminal_then_done_dropped_release_once)
     }
     ASSERT_TRUE(got);
     ASSERT_EQ(r.rc, 0);                                 /* worker ran the transport */
-    ASSERT_EQ(hl_smtp_admission_inflight(&adm), 0);     /* lease released on the worker side */
+
+    /* The lease is released by submit_on_terminal, which runs AFTER the
+     * terminal is published (see the hook comment in cap/smtp_submit.c) -
+     * so observing the terminal does NOT imply the slot is back yet. This
+     * used to assert inflight==0 the instant `got` turned true and flaked
+     * on loaded runners, landing on "Actual : 1 vs 0". Wait for it the
+     * same bounded way the terminal itself is waited for. */
+    int released = 0;
+    for (int i = 0; i < 2000; i++) {
+        if (hl_smtp_admission_inflight(&adm) == 0) { released = 1; break; }
+        usleep(1000);
+    }
+    ASSERT_TRUE(released);                              /* lease released on the worker side */
 
     /* Simulate shutdown pass 1 for this op (mark non-resumable), like
      * request_cancel_all would - so the dropped/held done never resumes. */
