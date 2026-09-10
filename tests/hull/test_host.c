@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "test_tmpdir.h"
 
 /* ── Host identity ─────────────────────────────────────────────────── */
 
@@ -246,10 +247,7 @@ UTEST(host, find_in_path_misses_cleanly)
 static int host_make_probe(const char *tag, char *dir, size_t dir_sz,
                            const char *leaf)
 {
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = getenv("TMP");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(dir, dir_sz, "%s/hull-host-%s", tmp, tag);
+    if (hl_test_path(dir, dir_sz, "hull-host-%s", tag) != 0) return 0;
 
     if (mkdir(dir, 0755) != 0 && errno != EEXIST) return 0;
 

@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
+#include "test_tmpdir.h"
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -149,7 +150,7 @@ static void create_legacy_sig(const char *dir, const char *files_json,
 UTEST(hl_sig, setup)
 {
     /* Create temp dir */
-    snprintf(test_dir, sizeof(test_dir), "/tmp/hull_test_sig_XXXXXX");
+    hl_test_path(test_dir, sizeof(test_dir), "hull_test_sig_XXXXXX");
     ASSERT_NE(mkdtemp(test_dir), (char *)NULL);
 
     /* Generate platform keypair */

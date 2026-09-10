@@ -32,6 +32,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../test_tmpdir.h"
 
 /* ── ustar test-vector builders ─────────────────────────────────────── */
 
@@ -93,8 +94,8 @@ static int rm_recursive(const char *path) {
 }
 
 UTEST_F_SETUP(tar_fixture) {
-    snprintf(utest_fixture->tmpdir, sizeof(utest_fixture->tmpdir),
-             "/tmp/hull-tar-test-%d", getpid());
+    hl_test_path(utest_fixture->tmpdir, sizeof(utest_fixture->tmpdir),
+                 "hull-tar-test-%d", getpid());
     rm_recursive(utest_fixture->tmpdir);
     ASSERT_EQ(mkdir(utest_fixture->tmpdir, 0700), 0);
 

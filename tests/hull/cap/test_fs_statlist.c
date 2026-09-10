@@ -24,10 +24,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include "../test_tmpdir.h"
 
 static char base[256];
 
-static void setup(void) { snprintf(base, sizeof(base), "/tmp/hull_statlist_%d", (int)getpid()); mkdir(base, 0755); }
+static void setup(void) { hl_test_path(base, sizeof(base), "hull_statlist_%d", (int)getpid()); mkdir(base, 0755); }
 static int rm_e(const char *p, const struct stat *s, int t, struct FTW *f)
 { (void)s; (void)t; (void)f; return remove(p); }
 static void teardown(void) { if (nftw(base, rm_e, 16, FTW_DEPTH | FTW_PHYS) != 0 && errno != ENOENT) {} }

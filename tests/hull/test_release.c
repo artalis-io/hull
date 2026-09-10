@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "test_tmpdir.h"
 
 /* ── Fixtures ──────────────────────────────────────────────────────── */
 
@@ -210,8 +211,8 @@ static void hex_write(FILE *f, const uint8_t *data, size_t n)
 
 UTEST_F(release_fixture, load_secret_key_roundtrip) {
     (void)utest_fixture;
-    char path[] = "/tmp/hull_release_test_XXXXXX.key";
-    int fd = mkstemps(path, 4);
+    char path[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(path, sizeof path, "hull_release_test", ".key");
     ASSERT_GT(fd, -1);
     FILE *f = fdopen(fd, "w");
     hex_write(f, g_sk, 64);
@@ -233,8 +234,8 @@ UTEST(release, load_secret_key_missing_file) {
 }
 
 UTEST(release, load_secret_key_short_file) {
-    char path[] = "/tmp/hull_release_test_XXXXXX.key";
-    int fd = mkstemps(path, 4);
+    char path[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(path, sizeof path, "hull_release_test", ".key");
     ASSERT_GT(fd, -1);
     FILE *f = fdopen(fd, "w");
     fputs("deadbeef\n", f);  /* 8 hex chars, way too short */
@@ -247,8 +248,8 @@ UTEST(release, load_secret_key_short_file) {
 }
 
 UTEST(release, load_secret_key_long_file) {
-    char path[] = "/tmp/hull_release_test_XXXXXX.key";
-    int fd = mkstemps(path, 4);
+    char path[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(path, sizeof path, "hull_release_test", ".key");
     ASSERT_GT(fd, -1);
     FILE *f = fdopen(fd, "w");
     /* 130 hex chars (too long after stripping newline) */

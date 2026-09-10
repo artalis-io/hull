@@ -49,6 +49,7 @@
 #include <keel/allocator.h>       /* kl_allocator_default (borrowed by the TLS ctx) */
 #include <keel_tls_mbedtls.h>     /* real in-process mbedTLS peer + client ctx */
 #include "smtp_tls_test_certs.h"  /* fixed test-only certs/keys (TEST-ONLY) */
+#include "../test_tmpdir.h"
 
 /* ════════════════════════════════════════════════════════════════════
  * Mock KlTls infrastructure (for the STARTTLS vtable-rejection tests).
@@ -1868,8 +1869,8 @@ static void with_audit_capture(void (*fn)(void), char *out, size_t cap)
 {
     fflush(stderr);
     int saved = dup(STDERR_FILENO);
-    char tmpl[] = "/tmp/hull_smtp_live_audit_XXXXXX";
-    int fd = mkstemp(tmpl);
+    char tmpl[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(tmpl, sizeof tmpl, "hull_smtp_live_audit", NULL);
     dup2(fd, STDERR_FILENO);
     int prev = hl_audit_enabled; hl_audit_enabled = 1;
     fn();
@@ -1959,8 +1960,8 @@ UTEST(smtp_live_audit, teardown_leaked_record_isolated_subprocess)
     MockPeer m; ASSERT_EQ(mp_start(&m, mp_full_smtp_thread), 0);
     g_live_port = m.port;
 
-    char tmpl[] = "/tmp/hull_smtp_leak_audit_XXXXXX";
-    int fd = mkstemp(tmpl);
+    char tmpl[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(tmpl, sizeof tmpl, "hull_smtp_leak_audit", NULL);
     ASSERT_TRUE(fd >= 0);
 
     pid_t pid = fork();

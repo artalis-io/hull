@@ -27,13 +27,14 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include "../test_tmpdir.h"
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
 static char *make_tmpdir(void)
 {
-    char tmpl[] = "/tmp/hull_compiler_test_XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[HL_TEST_PATH_MAX];
+    char *dir = hl_test_mkdtemp(tmpl, sizeof tmpl, "hull_compiler_test");
     return dir ? strdup(dir) : NULL;
 }
 

@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "test_tmpdir.h"
 
 /* ── Source-domain classification ──────────────────────────────────── */
 
@@ -74,10 +75,7 @@ static char captured[8192];
 /* Build a temp path so `make test` never leaves scratch files in the tree. */
 static void capture_path(char *out, size_t out_sz, const char *tag)
 {
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = getenv("TMP");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(out, out_sz, "%s/hull-cli-log-%s.txt", tmp, tag);
+    hl_test_path(out, out_sz, "hull-cli-log-%s.txt", tag);
 }
 
 static void capture_begin(FILE **saved_out, const char *path)

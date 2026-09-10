@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../../test_tmpdir.h"
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -1212,8 +1213,8 @@ static void init_lua_with_appdir(const char *app_dir)
 
 UTEST(lua_require_fs, basic)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/mod.lua", tmpdir);
@@ -1233,8 +1234,8 @@ UTEST(lua_require_fs, basic)
 
 UTEST(lua_require_fs, lua_ext_auto)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/mod.lua", tmpdir);
@@ -1254,8 +1255,8 @@ UTEST(lua_require_fs, lua_ext_auto)
 
 UTEST(lua_require_fs, nested_relative)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     /* Create sub directory */
     char subdir[1024];
@@ -1286,8 +1287,8 @@ UTEST(lua_require_fs, nested_relative)
 
 UTEST(lua_require_fs, cached)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/mod.lua", tmpdir);
@@ -1307,8 +1308,8 @@ UTEST(lua_require_fs, cached)
 
 UTEST(lua_require_fs, traversal_above_root)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     init_lua_with_appdir(tmpdir);
     ASSERT_TRUE(lua_initialized);
@@ -1328,8 +1329,8 @@ UTEST(lua_require_fs, traversal_above_root)
 
 UTEST(lua_require_fs, traversal_within_ok)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     /* Create sub directory and sibling file */
     char subdir[1024];
@@ -1362,8 +1363,8 @@ UTEST(lua_require_fs, traversal_within_ok)
 
 UTEST(lua_require_fs, not_found)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     init_lua_with_appdir(tmpdir);
     ASSERT_TRUE(lua_initialized);
@@ -1401,8 +1402,8 @@ UTEST(lua_require_fs, no_appdir)
 
 UTEST(lua_require_fs, syntax_error)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/bad.lua", tmpdir);
@@ -1417,8 +1418,19 @@ UTEST(lua_require_fs, syntax_error)
 
     const char *err = lua_tostring(lua_rt.L, -1);
     ASSERT_NE(err, NULL);
-    /* Lua compile errors mention the file name */
-    ASSERT_NE(strstr(err, "bad.lua"), NULL);
+    /* Lua compile errors identify the chunk. The loader passes a bare path as
+     * the chunkname (not "@path"), so Lua renders it as [string "..."] and
+     * luaO_chunkid truncates to LUA_IDSIZE keeping the HEAD - the tail, which
+     * is where "bad.lua" sits, is what gets dropped. A short $TMPDIR (/tmp/...)
+     * fits and keeps the name; a long one (macOS /var/folders/xy/.../T/...)
+     * does not. Accept either, so this asserts the chunk is identified without
+     * depending on how long the host's temp path happens to be. */
+    int names_file = strstr(err, "bad.lua") != NULL;
+    int truncated  = strstr(err, "...") != NULL;
+    if (!names_file && !truncated) {
+        fprintf(stderr, "error did not identify the chunk: %s\n", err);
+    }
+    ASSERT_TRUE(names_file || truncated);
     lua_pop(lua_rt.L, 1);
 
     cleanup_lua();
@@ -1427,8 +1439,8 @@ UTEST(lua_require_fs, syntax_error)
 
 UTEST(lua_require_fs, returns_nil)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/nilmod.lua", tmpdir);
@@ -1449,8 +1461,8 @@ UTEST(lua_require_fs, returns_nil)
 
 UTEST(lua_require_fs, too_large)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     /* Create a file that exceeds HL_MODULE_MAX_SIZE */
     char path[1024];
@@ -1479,8 +1491,8 @@ UTEST(lua_require_fs, too_large)
 
 UTEST(lua_require_fs, embedded_still_first)
 {
-    char tmpdir[] = "/tmp/hull_test_XXXXXX";
-    ASSERT_NE(mkdtemp(tmpdir), NULL);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_test"), NULL);
 
     init_lua_with_appdir(tmpdir);
     ASSERT_TRUE(lua_initialized);
@@ -4041,10 +4053,13 @@ static int bc_rm_entry(const char *path, const struct stat *st,
     return remove(path);
 }
 
-static void bc_with_tmp_home(char tmpdir[256])
+static void bc_with_tmp_home(char *tmpdir, size_t n)
 {
-    snprintf(tmpdir, 256, "/tmp/hull_bc_cache_XXXXXX");
-    mkdtemp(tmpdir);
+    if (hl_test_path(tmpdir, n, "hull_bc_cache_XXXXXX") != 0 || !mkdtemp(tmpdir)) {
+        fprintf(stderr, "bc_with_tmp_home: no usable temp dir\n");
+        tmpdir[0] = 0;
+        return;
+    }
     setenv("HOME", tmpdir, 1);
     /* Make sure no stale opt-out from a previous test leaks in. */
     unsetenv("HULL_NO_CACHE");
@@ -4099,7 +4114,7 @@ static int bc_count_luac(const char *dir)
 UTEST(lua_bytecode_cache, miss_then_hit_populates_disk)
 {
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
 
     lua_State *L = luaL_newstate();
     ASSERT_NE_MSG(L, NULL, "newstate");
@@ -4130,7 +4145,7 @@ UTEST(lua_bytecode_cache, miss_then_hit_populates_disk)
 UTEST(lua_bytecode_cache, opt_out_via_env_skips_disk)
 {
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
     setenv("HULL_NO_LUA_BYTECODE_CACHE", "1", 1);
 
     lua_State *L = luaL_newstate();
@@ -4150,7 +4165,7 @@ UTEST(lua_bytecode_cache, tiny_source_skips_cache)
 {
     /* Under 256 bytes - cache shouldn't bother to memoize. */
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
 
     const char *src = "return 1 + 2\n";
     lua_State *L = luaL_newstate();
@@ -4168,7 +4183,7 @@ UTEST(lua_bytecode_cache, tiny_source_skips_cache)
 UTEST(lua_bytecode_cache, parse_error_returns_no_cache_write)
 {
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
 
     /* Padded but syntactically invalid. */
     const char *bad =
@@ -4192,7 +4207,7 @@ UTEST(lua_bytecode_cache, parse_error_returns_no_cache_write)
 UTEST(lua_bytecode_cache, corrupt_cache_falls_back_to_source)
 {
     char tmp[256];
-    bc_with_tmp_home(tmp);
+    bc_with_tmp_home(tmp, sizeof tmp);
 
     /* Prime the cache. */
     lua_State *L = luaL_newstate();
@@ -4251,10 +4266,13 @@ UTEST(lua_bytecode_cache, corrupt_cache_falls_back_to_source)
  * render function (post-pcall), so a hit returns a callable
  * function directly. */
 
-static void tc_with_tmp_home(char tmpdir[256])
+static void tc_with_tmp_home(char *tmpdir, size_t n)
 {
-    snprintf(tmpdir, 256, "/tmp/hull_tc_cache_XXXXXX");
-    mkdtemp(tmpdir);
+    if (hl_test_path(tmpdir, n, "hull_tc_cache_XXXXXX") != 0 || !mkdtemp(tmpdir)) {
+        fprintf(stderr, "tc_with_tmp_home: no usable temp dir\n");
+        tmpdir[0] = 0;
+        return;
+    }
     setenv("HOME", tmpdir, 1);
     unsetenv("HULL_NO_CACHE");
     unsetenv("HULL_NO_TEMPLATE_CACHE");
@@ -4301,7 +4319,7 @@ static const char *TC_PROBE_CODE =
 UTEST(lua_template_cache, miss_then_hit_populates_disk)
 {
     char tmp[256];
-    tc_with_tmp_home(tmp);
+    tc_with_tmp_home(tmp, sizeof tmp);
 
     lua_State *L = luaL_newstate();
     ASSERT_NE_MSG(L, NULL, "newstate");
@@ -4344,7 +4362,7 @@ UTEST(lua_template_cache, miss_then_hit_populates_disk)
 UTEST(lua_template_cache, opt_out_via_env_skips_disk)
 {
     char tmp[256];
-    tc_with_tmp_home(tmp);
+    tc_with_tmp_home(tmp, sizeof tmp);
     setenv("HULL_NO_TEMPLATE_CACHE", "1", 1);
     hl_lua_template_cache_reset();
 
@@ -4368,7 +4386,7 @@ UTEST(lua_template_cache, generated_code_change_invalidates)
      * entries - the natural invalidation that the design relies on
      * when extends/include targets change. */
     char tmp[256];
-    tc_with_tmp_home(tmp);
+    tc_with_tmp_home(tmp, sizeof tmp);
 
     lua_State *L = luaL_newstate();
     ASSERT_EQ(LUA_OK,
@@ -4398,7 +4416,7 @@ UTEST(lua_template_cache, generated_code_change_invalidates)
 UTEST(lua_template_cache, parse_error_returns_no_cache_write)
 {
     char tmp[256];
-    tc_with_tmp_home(tmp);
+    tc_with_tmp_home(tmp, sizeof tmp);
 
     const char *bad =
         "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
