@@ -47,6 +47,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "../../test_tmpdir.h"
+#include "../../../../src/hull/runtime/lua/internal.h"
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -1723,6 +1724,31 @@ UTEST(lua_cap, db_not_available_without_config)
 }
 
 /* ── DB namespace protection tests ──────────────────────────────────── */
+
+UTEST(lua_chunkname, stdlib_namespace_survives_the_file_marker)
+{
+    /* Modules are loaded with an "@" marker so errors render as
+     * "name:line:" rather than [string "name"]:line:. ar.source keeps that
+     * marker verbatim (only short_src strips it), and two gates match
+     * ar.source against "hull.": mod_db.c decides whether _hull_* internal
+     * tables may be touched, and mod_fs.c decides whether a require came
+     * from user code. A raw strncmp would stop matching the moment the
+     * marker appeared, silently revoking every stdlib module's access to
+     * its own tables - so the namespace test skips the marker first. */
+    ASSERT_TRUE(hl_lua_source_is_stdlib("hull.template"));   /* unmarked */
+    ASSERT_TRUE(hl_lua_source_is_stdlib("@hull.template"));  /* file      */
+    ASSERT_TRUE(hl_lua_source_is_stdlib("=hull.template"));  /* literal   */
+
+    /* App code is not in the namespace, marked or not. */
+    ASSERT_FALSE(hl_lua_source_is_stdlib("./routes/users"));
+    ASSERT_FALSE(hl_lua_source_is_stdlib("@./routes/users"));
+    ASSERT_FALSE(hl_lua_source_is_stdlib("@/tmp/app/hull_evil.lua"));
+
+    /* The dot matters: "hull" alone, or a lookalike, is not the namespace. */
+    ASSERT_FALSE(hl_lua_source_is_stdlib("@hullx.template"));
+    ASSERT_FALSE(hl_lua_source_is_stdlib("@hull"));
+    ASSERT_FALSE(hl_lua_source_is_stdlib(NULL));
+}
 
 UTEST(lua_cap, db_namespace_blocks_hull_tables)
 {
