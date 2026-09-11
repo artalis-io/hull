@@ -1418,19 +1418,12 @@ UTEST(lua_require_fs, syntax_error)
 
     const char *err = lua_tostring(lua_rt.L, -1);
     ASSERT_NE(err, NULL);
-    /* Lua compile errors identify the chunk. The loader passes a bare path as
-     * the chunkname (not "@path"), so Lua renders it as [string "..."] and
-     * luaO_chunkid truncates to LUA_IDSIZE keeping the HEAD - the tail, which
-     * is where "bad.lua" sits, is what gets dropped. A short $TMPDIR (/tmp/...)
-     * fits and keeps the name; a long one (macOS /var/folders/xy/.../T/...)
-     * does not. Accept either, so this asserts the chunk is identified without
-     * depending on how long the host's temp path happens to be. */
-    int names_file = strstr(err, "bad.lua") != NULL;
-    int truncated  = strstr(err, "...") != NULL;
-    if (!names_file && !truncated) {
-        fprintf(stderr, "error did not identify the chunk: %s\n", err);
-    }
-    ASSERT_TRUE(names_file || truncated);
+    /* The loader passes "@path", which marks a FILE chunkname: Lua renders
+     * errors as "path:line:" and luaO_chunkid truncates from the FRONT, so
+     * the file name survives however long the host's temp path is. (With a
+     * bare chunkname Lua renders [string "..."] and truncates from the BACK,
+     * dropping the name - which is what this used to have to tolerate.) */
+    ASSERT_NE(strstr(err, "bad.lua"), NULL);
     lua_pop(lua_rt.L, 1);
 
     cleanup_lua();
@@ -4109,6 +4102,43 @@ static int bc_count_luac(const char *dir)
     }
     closedir(r);
     return n;
+}
+
+UTEST(lua_bytecode_cache, chunkname_in_key)
+{
+    /* The key folds in the chunkname because lua_dump bakes it into the
+     * bytecode as the proto's `source`, and the name handed to
+     * luaL_loadbuffer for a BINARY chunk does not override it. Keyed on
+     * source bytes alone, the same source under two names collapsed to one
+     * entry and the second load reported the first one's name - which
+     * mod_db.c::lua_is_stdlib_caller reads to gate _hull_* access. Mirrors
+     * js_bytecode_cache.module_name_in_key. */
+    char tmp[256];
+    bc_with_tmp_home(tmp, sizeof tmp);
+
+    lua_State *L = luaL_newstate();
+    ASSERT_NE_MSG(L, NULL, "newstate");
+
+    ASSERT_EQ(0, bc_count_luac(tmp));
+    ASSERT_EQ(LUA_OK, hl_lua_load_cached(L, BC_PROBE_SRC,
+                                         strlen(BC_PROBE_SRC), "=name_a"));
+    lua_pop(L, 1);
+    ASSERT_EQ(1, bc_count_luac(tmp));
+
+    ASSERT_EQ(LUA_OK, hl_lua_load_cached(L, BC_PROBE_SRC,
+                                         strlen(BC_PROBE_SRC), "=name_b"));
+    ASSERT_EQ_MSG(2, bc_count_luac(tmp),
+                  "distinct chunknames produce distinct entries");
+
+    /* And the second load reports its OWN name, not the first's. */
+    lua_Debug ar;
+    lua_getinfo(L, ">S", &ar);   /* ">S" consumes the function on the stack */
+    /* ar.source keeps the "=" prefix (only short_src strips it) - and that
+     * raw field is what the _hull_* gate matches "hull." against. */
+    ASSERT_STREQ("=name_b", ar.source);
+
+    lua_close(L);
+    nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
 }
 
 UTEST(lua_bytecode_cache, miss_then_hit_populates_disk)

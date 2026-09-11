@@ -110,7 +110,14 @@ static int validate_lua(const char *path, const char *content, size_t len,
         sh_json_write_object_end(&w);
         return 0;
     }
-    int rc = luaL_loadbuffer(L, content, len, path);
+    /* "@" marks a FILE chunkname so a parse error reads "path:line:" and
+     * keeps the file name when the path is long (see mod_fs.c). */
+    char chunkbuf[1024];
+    const char *chunkname = path;
+    int cn = snprintf(chunkbuf, sizeof chunkbuf, "@%s", path);
+    if (cn > 0 && (size_t)cn < sizeof chunkbuf)
+        chunkname = chunkbuf;
+    int rc = luaL_loadbuffer(L, content, len, chunkname);
     int ok = (rc == LUA_OK);
     sh_json_write_kv_bool(&w, "ok", ok);
     if (!ok) {

@@ -561,8 +561,49 @@ UTEST(hl_cap_blob, rejects_invalid_id)
 
 /* ── track_access opt-out ────────────────────────────────────────── */
 
+/*
+ * Does a plain read() bump atime on the filesystem the tests run on?
+ *
+ * hl_cap_blob_get(track_access=0) promises only that HULL does not touch
+ * atime; it cannot stop the KERNEL from doing so. Measured on Windows 11
+ * with cosmocc 4.0.2: utimes() backdates atime by an hour and a following
+ * read() restores it to now. A strictatime Linux mount behaves the same
+ * way. Where that holds, the assertion below says nothing about Hull, so
+ * probe the host instead of assuming, and skip only when the host has
+ * made the check meaningless.
+ */
+static int fs_bumps_atime_on_read(void)
+{
+    char probe[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(probe, sizeof probe, "hull_atime_probe", NULL);
+    if (fd < 0) return 0;              /* cannot tell - do not skip */
+    if (write(fd, "x", 1) != 1) { close(fd); unlink(probe); return 0; }
+    close(fd);
+
+    struct timeval back[2] = {{ time(NULL) - 3600, 0 },
+                              { time(NULL) - 3600, 0 }};
+    if (utimes(probe, back) != 0) { unlink(probe); return 0; }
+
+    struct stat pst;
+    if (stat(probe, &pst) != 0) { unlink(probe); return 0; }
+    time_t before = pst.st_atime;
+
+    fd = open(probe, O_RDONLY);
+    if (fd >= 0) { char c; ssize_t r = read(fd, &c, 1); (void)r; close(fd); }
+
+    int bumped = 0;
+    if (stat(probe, &pst) == 0)
+        bumped = pst.st_atime > before + 1;
+    unlink(probe);
+    return bumped;
+}
+
 UTEST(hl_cap_blob, track_access_false_preserves_atime)
 {
+    if (fs_bumps_atime_on_read())
+        UTEST_SKIP("filesystem updates atime on read; track_access=0 is a "
+                   "promise about Hull, not about the kernel");
+
     TestEnv e; env_init(&e);
     HlBlob *b = NULL;
     hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 0);

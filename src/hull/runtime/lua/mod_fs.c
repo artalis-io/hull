@@ -865,8 +865,21 @@ static int hl_lua_require(lua_State *L)
                     return 1;
                 }
 
-                /* Compile the chunk - copies data into Lua bytecode */
-                int load_ok = luaL_loadbuffer(L, buf, nread, path) == LUA_OK;
+                /* Compile the chunk - copies data into Lua bytecode.
+                 * The leading "@" marks the chunkname as a FILE name. Lua
+                 * then renders errors as "path:line:" and, when the name is
+                 * longer than LUA_IDSIZE, luaO_chunkid truncates from the
+                 * FRONT ("...tail") so the file name survives. A bare name
+                 * is rendered [string "..."] and truncated from the BACK,
+                 * which drops the file name on any long path - e.g. under a
+                 * macOS $TMPDIR. Falls back to the bare path if it does not
+                 * fit, which is only ever the status quo. */
+                char chunkbuf[HL_MODULE_PATH_MAX + 1];
+                const char *chunkname = path;
+                int cn = snprintf(chunkbuf, sizeof chunkbuf, "@%s", path);
+                if (cn > 0 && (size_t)cn < sizeof chunkbuf)
+                    chunkname = chunkbuf;
+                int load_ok = luaL_loadbuffer(L, buf, nread, chunkname) == LUA_OK;
 
                 /* Reclaim file buffer - Lua owns the bytecode now */
                 lua->scratch->used = arena_saved;
