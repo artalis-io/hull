@@ -53,6 +53,14 @@ UTEST(db_select, postgres_scheme)
 #else
     ASSERT_FALSE(b); ASSERT_TRUE(err);
     ASSERT_TRUE(strstr(err, "feature install postgres") != NULL);
+#  if defined(__COSMOPOLITAN__)
+    /* A cosmo build cannot load a native feature archive, so `hull feature
+     * install` refuses for every feature. The hint must not read as though
+     * running it would fix this, and must name a route that works. */
+    ASSERT_TRUE(strstr(err, "not available on this build") != NULL);
+    ASSERT_TRUE(strstr(err, "native hull") != NULL);
+    ASSERT_TRUE(strstr(err, "SQLite") != NULL);
+#  endif
 #endif
 }
 
@@ -70,6 +78,10 @@ UTEST(db_select, mysql_scheme)
 #else
     ASSERT_FALSE(b); ASSERT_TRUE(err);
     ASSERT_TRUE(strstr(err, "feature install mysql") != NULL);
+#  if defined(__COSMOPOLITAN__)
+    ASSERT_TRUE(strstr(err, "not available on this build") != NULL);
+    ASSERT_TRUE(strstr(err, "native hull") != NULL);
+#  endif
     b = hl_db_backend_select("mariadb://u@h/db", &err);
     ASSERT_FALSE(b); ASSERT_TRUE(strstr(err, "feature install mysql") != NULL);
 #endif

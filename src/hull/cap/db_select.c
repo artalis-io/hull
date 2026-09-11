@@ -74,15 +74,55 @@ static const HlDbBackend *const BACKENDS[] = {
  * DuckDB additionally resolves when composed as a build feature: the feature
  * loop above (hl_db_feature_backends) matches duckdb:// before this table, so
  * this hint fires only for a base app with neither the compile flag nor the
- * feature, and points at the feature path. See docs/features_and_flavors.md. */
+ * feature, and points at the feature path. See docs/features_and_flavors.md.
+ *
+ * The feature route does not exist on a cosmo build. Features ship as native
+ * static archives and a fat APE cannot force-load one, so FEATURES[] carries no
+ * cosmo column and `hull feature install` refuses with "not published for
+ * cosmo". Pointing a cosmo user at that command sends them to something that
+ * cannot succeed, so these hints name the routes that do work there: a native
+ * hull, a source build with the compile flag, or SQLite. */
+#if defined(__COSMOPOLITAN__)
+static const char HINT_PG[] =
+    "postgres:// is not available on this build. Features are native static "
+    "archives and a fat APE cannot load one, so they are not published for "
+    "cosmo. Use a native hull (linux-x86_64, linux-aarch64, darwin-arm64) "
+    "with 'hull feature install postgres' then 'hull build --with=postgres', "
+    "or build from source with HL_ENABLE_POSTGRES=1. A SQLite DSN works on "
+    "this build.";
+static const char HINT_MY[] =
+    "mysql:// is not available on this build. Features are native static "
+    "archives and a fat APE cannot load one, so they are not published for "
+    "cosmo. Use a native hull (linux-x86_64, linux-aarch64, darwin-arm64) "
+    "with 'hull feature install mysql' then 'hull build --with=mysql', or "
+    "build from source with HL_ENABLE_MYSQL=1. A SQLite DSN works on this "
+    "build.";
+static const char HINT_DD[] =
+    "duckdb:// is not available on this build. Features are native static "
+    "archives and a fat APE cannot load one, so they are not published for "
+    "cosmo. Use a native hull (linux-x86_64, linux-aarch64, darwin-arm64) "
+    "with 'hull feature install duckdb' then 'hull build --with=duckdb'. "
+    "A SQLite DSN works on this build.";
+#else
+static const char HINT_PG[] =
+    "postgres:// needs the Postgres feature: run 'hull feature install "
+    "postgres', then build the app with 'hull build --with=postgres'";
+static const char HINT_MY[] =
+    "mysql:// needs the MySQL feature: run 'hull feature install mysql', "
+    "then build the app with 'hull build --with=mysql'";
+static const char HINT_DD[] =
+    "duckdb:// needs the DuckDB feature: run 'hull feature install duckdb', "
+    "then build the app with 'hull build --with=duckdb'";
+#endif
+
 static const struct { const char *scheme; const char *msg; } RESERVED[] = {
-    { "postgres",   "postgres:// needs the Postgres feature: run 'hull feature install postgres', then build the app with 'hull build --with=postgres'" },
-    { "postgresql", "postgresql:// needs the Postgres feature: run 'hull feature install postgres', then build the app with 'hull build --with=postgres'" },
+    { "postgres",   HINT_PG },
+    { "postgresql", HINT_PG },
     { "sqlite",     "sqlite:// requires a build with HL_ENABLE_SQLITE" },
     { "file",       "file: URIs require a build with HL_ENABLE_SQLITE" },
-    { "duckdb",     "duckdb:// needs the DuckDB feature: run 'hull feature install duckdb', then build the app with 'hull build --with=duckdb'" },
-    { "mysql",      "mysql:// needs the MySQL feature: run 'hull feature install mysql', then build the app with 'hull build --with=mysql'" },
-    { "mariadb",    "mariadb:// needs the MySQL feature: run 'hull feature install mysql', then build the app with 'hull build --with=mysql'" },
+    { "duckdb",     HINT_DD },
+    { "mysql",      HINT_MY },
+    { "mariadb",    HINT_MY },
 };
 
 static int scheme_in(const char *const *list, const char *scheme)
