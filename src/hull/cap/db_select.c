@@ -84,21 +84,24 @@ static const HlDbBackend *const BACKENDS[] = {
  * hull, a source build with the compile flag, or SQLite. */
 #if defined(__COSMOPOLITAN__)
 static const char HINT_PG[] =
-    "postgres:// is not available on this build. Features are native static "
+    "postgres:// needs the Postgres feature, which is not available on this "
+    "build. Features are native static "
     "archives and a fat APE cannot load one, so they are not published for "
     "cosmo. Use a native hull (linux-x86_64, linux-aarch64, darwin-arm64) "
     "with 'hull feature install postgres' then 'hull build --with=postgres', "
     "or build from source with HL_ENABLE_POSTGRES=1. A SQLite DSN works on "
     "this build.";
 static const char HINT_MY[] =
-    "mysql:// is not available on this build. Features are native static "
+    "mysql:// needs the MySQL feature, which is not available on this build. "
+    "Features are native static "
     "archives and a fat APE cannot load one, so they are not published for "
     "cosmo. Use a native hull (linux-x86_64, linux-aarch64, darwin-arm64) "
     "with 'hull feature install mysql' then 'hull build --with=mysql', or "
     "build from source with HL_ENABLE_MYSQL=1. A SQLite DSN works on this "
     "build.";
 static const char HINT_DD[] =
-    "duckdb:// is not available on this build. Features are native static "
+    "duckdb:// needs the DuckDB feature, which is not available on this "
+    "build. Features are native static "
     "archives and a fat APE cannot load one, so they are not published for "
     "cosmo. Use a native hull (linux-x86_64, linux-aarch64, darwin-arm64) "
     "with 'hull feature install duckdb' then 'hull build --with=duckdb'. "
