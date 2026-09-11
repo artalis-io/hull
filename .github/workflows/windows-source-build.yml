@@ -604,11 +604,38 @@ jobs:
           set -uo pipefail
           export PATH="$PATH:$PWD/cosmo/bin"
 
+          # Every suite below was MEASURED on this runner via the PROBE tier
+          # before being placed, not assumed: runs 34632645185 (20 candidates)
+          # and 34633757865 (6 more, including the two expensive ones). A suite
+          # is in ENFORCED because it came back clean, or in KNOWN with a count
+          # that the probe actually printed.
+          #
+          # test_lua and test_js are the ones that matter most here. The
+          # sizeof-on-array-parameter bug in the bytecode-cache helpers shipped
+          # through a green Windows leg precisely because neither was built on
+          # this platform.
           ENFORCED="test_host test_tool test_vfs test_static test_cacert
                     test_dispatch test_csp test_parse_size test_signature
-                    test_release test_fs test_compiler"
+                    test_release test_fs test_compiler
+                    test_lua test_js test_crypto test_db test_db_backend
+                    test_blob test_release_io test_cli_log test_embed
+                    test_sbom test_obj_emit test_verify_self
+                    test_hex test_arena test_seal_arena test_path_normalize
+                    test_mime test_host_match test_module_registry
+                    test_module_resolver test_manifest_seal test_time test_env"
+
           # suite:baseline-failure-count   ("crash" = printed no summary)
-          KNOWN=""
+          #
+          # test_tools_install: status_managed_single_binary and
+          #   status_managed_executable_bundle. Both write an extensionless file,
+          #   chmod 0755, and expect hl_tools_status to resolve it. Windows takes
+          #   executability from the EXTENSION, not a permission bit - measured
+          #   with cosmocc 4.0.2 on Windows 11: an extensionless file chmod'd
+          #   0755 reads back mode 664 and access(X_OK) returns -1, while the
+          #   same file named .exe or .com reads 775 and access(X_OK) returns 0.
+          #   The suite is asserting POSIX semantics the host does not have.
+          # test_tar: extract_nested_tree. Cause not yet established.
+          KNOWN="test_tools_install:2 test_tar:1"
 
           # Candidates under investigation, supplied by workflow_dispatch.
           # Built and run but never gating: this is how a suite earns a
