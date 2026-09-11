@@ -4117,7 +4117,7 @@ UTEST(lua_bytecode_cache, chunkname_in_key)
     bc_with_tmp_home(tmp, sizeof tmp);
 
     lua_State *L = luaL_newstate();
-    ASSERT_NE_MSG(L, NULL, "newstate");
+    ASSERT_NE_MSG((void *)L, NULL, "newstate");
 
     ASSERT_EQ(0, bc_count_luac(tmp));
     ASSERT_EQ(LUA_OK, hl_lua_load_cached(L, BC_PROBE_SRC,
@@ -4147,7 +4147,7 @@ UTEST(lua_bytecode_cache, miss_then_hit_populates_disk)
     bc_with_tmp_home(tmp, sizeof tmp);
 
     lua_State *L = luaL_newstate();
-    ASSERT_NE_MSG(L, NULL, "newstate");
+    ASSERT_NE_MSG((void *)L, NULL, "newstate");
 
     /* First call: cache miss, should compile + persist. */
     ASSERT_EQ(0, bc_count_luac(tmp));
@@ -4352,7 +4352,7 @@ UTEST(lua_template_cache, miss_then_hit_populates_disk)
     tc_with_tmp_home(tmp, sizeof tmp);
 
     lua_State *L = luaL_newstate();
-    ASSERT_NE_MSG(L, NULL, "newstate");
+    ASSERT_NE_MSG((void *)L, NULL, "newstate");
     /* The probe calls tostring(), so load stdlibs in the test state. */
     luaL_openlibs(L);
 
