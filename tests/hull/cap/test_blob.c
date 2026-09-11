@@ -1022,7 +1022,7 @@ UTEST(hl_blob_store_keyed, reader_refuses_symlink_at_blob_path)
     /* reader_open MUST refuse - O_NOFOLLOW returns ELOOP/EMLINK. */
     HlBlobStoreReader *r = NULL;
     ASSERT_NE(hl_blob_store_reader_open(s, key, 0, &r), 0);
-    ASSERT_EQ(r, NULL);
+    ASSERT_EQ((void *)r, NULL);
 
     /* And `_get` does too. */
     uint8_t *buf = NULL;

@@ -72,7 +72,7 @@ static void rm_rf(const char *dir)
 UTEST(compiler, system_new_cc)
 {
     HlCompiler *c = hl_compiler_system_new("cc");
-    ASSERT_NE(c, NULL);
+    ASSERT_NE((void *)c, NULL);
     ASSERT_STREQ(hl_compiler_name(c), "cc");
     hl_compiler_destroy(c);
 }
@@ -80,7 +80,7 @@ UTEST(compiler, system_new_cc)
 UTEST(compiler, system_new_null_returns_null)
 {
     HlCompiler *c = hl_compiler_system_new(NULL);
-    ASSERT_EQ(c, NULL);
+    ASSERT_EQ((void *)c, NULL);
 }
 
 /* Is a SYSTEM C compiler present at all?
@@ -108,7 +108,7 @@ UTEST(compiler, system_is_available_cc)
 {
     if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     HlCompiler *c = hl_compiler_system_new("cc");
-    ASSERT_NE(c, NULL);
+    ASSERT_NE((void *)c, NULL);
     /* cc should be available in CI and dev environments */
     ASSERT_EQ(hl_compiler_is_available(c), 1);
     hl_compiler_destroy(c);
@@ -117,7 +117,7 @@ UTEST(compiler, system_is_available_cc)
 UTEST(compiler, system_is_not_available_fake)
 {
     HlCompiler *c = hl_compiler_system_new("__hull_fake_compiler_xyz__");
-    ASSERT_NE(c, NULL);
+    ASSERT_NE((void *)c, NULL);
     ASSERT_EQ(hl_compiler_is_available(c), 0);
     hl_compiler_destroy(c);
 }
@@ -125,7 +125,7 @@ UTEST(compiler, system_is_not_available_fake)
 UTEST(compiler, system_version_cc)
 {
     HlCompiler *c = hl_compiler_system_new("cc");
-    ASSERT_NE(c, NULL);
+    ASSERT_NE((void *)c, NULL);
     if (hl_compiler_is_available(c)) {
         char *v = hl_compiler_version(c);
         ASSERT_NE(v, NULL);
@@ -211,7 +211,7 @@ UTEST(compiler, select_null_returns_compiler)
     if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     HlCompiler *c = hl_compiler_select(NULL);
     /* At least one compiler should be available in CI */
-    ASSERT_NE(c, NULL);
+    ASSERT_NE((void *)c, NULL);
     ASSERT_EQ(hl_compiler_is_available(c), 1);
     hl_compiler_destroy(c);
 }
@@ -220,7 +220,7 @@ UTEST(compiler, select_explicit_cc)
 {
     if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     HlCompiler *c = hl_compiler_select("cc");
-    ASSERT_NE(c, NULL);
+    ASSERT_NE((void *)c, NULL);
     ASSERT_STREQ(hl_compiler_name(c), "cc");
     hl_compiler_destroy(c);
 }
@@ -228,7 +228,7 @@ UTEST(compiler, select_explicit_cc)
 UTEST(compiler, select_fake_returns_null)
 {
     HlCompiler *c = hl_compiler_select("__nonexistent_xyz__");
-    ASSERT_EQ(c, NULL);
+    ASSERT_EQ((void *)c, NULL);
 }
 
 UTEST(compiler, select_system_forces_system)
@@ -236,7 +236,7 @@ UTEST(compiler, select_system_forces_system)
     if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     HlCompiler *c = hl_compiler_select("system");
     /* system compilers should always be available in CI */
-    ASSERT_NE(c, NULL);
+    ASSERT_NE((void *)c, NULL);
     hl_compiler_destroy(c);
 }
 
@@ -294,7 +294,7 @@ UTEST(compiler, default_compiler_resolves)
     if (!have_system_cc()) UTEST_SKIP("no system C compiler on this host");
     /* Auto-select must resolve an available compiler (the system cc). */
     HlCompiler *c = hl_compiler_select(NULL);
-    ASSERT_NE(c, NULL);
+    ASSERT_NE((void *)c, NULL);
     ASSERT_EQ(hl_compiler_is_available(c), 1);
     hl_compiler_destroy(c);
 }
