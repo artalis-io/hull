@@ -561,8 +561,65 @@ UTEST(hl_cap_blob, rejects_invalid_id)
 
 /* ── track_access opt-out ────────────────────────────────────────── */
 
+/* Mirrors blob_store.c: O_NOATIME is the Linux-only flag that suppresses
+ * atime updates on read; elsewhere it is 0 and the open is plain. */
+#if defined(__linux__)
+#  ifndef O_NOATIME
+#    define O_NOATIME 01000000
+#  endif
+#else
+#  ifndef O_NOATIME
+#    define O_NOATIME 0
+#  endif
+#endif
+
+/*
+ * Can this host suppress the atime update that a read would otherwise cause?
+ *
+ * hl_cap_blob_get(track_access=0) opens with O_NOATIME (falling back to a
+ * plain open on EPERM), so the contract holds wherever the kernel honours
+ * that flag - Linux does, including under relatime. Where it does not,
+ * atime moves no matter what Hull asks for, and the assertion below stops
+ * being a statement about Hull: on Windows 11 with cosmocc 4.0.2, O_NOATIME
+ * is 0 and a measured read restores a backdated atime to now.
+ *
+ * So probe the ACTUAL production open, not a naive read - an earlier version
+ * of this used a plain open() and skipped on ordinary relatime Linux, where
+ * O_NOATIME works fine and the test is meaningful.
+ */
+static int host_cannot_suppress_atime(void)
+{
+    char probe[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(probe, sizeof probe, "hull_atime_probe", NULL);
+    if (fd < 0) return 0;              /* cannot tell - do not skip */
+    if (write(fd, "x", 1) != 1) { close(fd); unlink(probe); return 0; }
+    close(fd);
+
+    struct timeval back[2] = {{ time(NULL) - 3600, 0 },
+                              { time(NULL) - 3600, 0 }};
+    if (utimes(probe, back) != 0) { unlink(probe); return 0; }
+
+    struct stat pst;
+    if (stat(probe, &pst) != 0) { unlink(probe); return 0; }
+    time_t before = pst.st_atime;
+
+    fd = open(probe, O_RDONLY | O_NOATIME);
+    if (fd < 0 && errno == EPERM) fd = open(probe, O_RDONLY);
+    if (fd >= 0) { char c; ssize_t r = read(fd, &c, 1); (void)r; close(fd); }
+
+    int bumped = 0;
+    if (stat(probe, &pst) == 0)
+        bumped = pst.st_atime > before + 1;
+    unlink(probe);
+    return bumped;
+}
+
 UTEST(hl_cap_blob, track_access_false_preserves_atime)
 {
+    if (host_cannot_suppress_atime())
+        UTEST_SKIP("host does not honour O_NOATIME; atime moves on read "
+                   "whatever Hull asks for");
+
     TestEnv e; env_init(&e);
     HlBlob *b = NULL;
     hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 0);

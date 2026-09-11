@@ -39,10 +39,27 @@
  * $HOME (NFS / dotfile syncing across architectures). */
 
 /* Cache-key digest = sha256(LUA_VERSION || "|" || arch || "|" ||
- * endian || "|" || source). LUA_VERSION moves on every Lua upgrade
- * (header constant), so stale entries from an old vendor bump never
- * collide. arch/endian tags come from the shared helper. */
-static int compute_key(const char *src, size_t src_len,
+ * endian || "|" || chunkname || "|" || source). LUA_VERSION moves on
+ * every Lua upgrade (header constant), so stale entries from an old
+ * vendor bump never collide. arch/endian tags come from the shared
+ * helper.
+ *
+ * The CHUNKNAME is part of the key (mirroring the JS side, which keys
+ * on the module name) because lua_dump bakes the chunkname into the
+ * bytecode as the proto's `source`: a hit returns the name recorded
+ * when the entry was WRITTEN, and the chunkname passed to
+ * luaL_loadbuffer for a binary chunk does not override it. Keying on
+ * source bytes alone therefore made two modules with byte-identical
+ * source (>= the 256-byte floor below) share one entry, so whichever
+ * lost the race loaded bytecode carrying the OTHER module's name.
+ * That is not just cosmetic: mod_db.c::lua_is_stdlib_caller decides
+ * whether _hull_* internal tables may be touched by testing `ar.source`
+ * for a "hull." prefix, and dumps are written with strip=0 precisely so
+ * that field survives. Including the name keeps one entry per (name,
+ * source) pair, so a rename or a new chunkname is a miss rather than a
+ * stale hit. */
+static int compute_key(const char *chunkname,
+                       const char *src, size_t src_len,
                        char hex_out[HL_BLOB_STORE_ID_BUF_SIZE])
 {
     HlSha256Ctx ctx;
@@ -51,12 +68,15 @@ static int compute_key(const char *src, size_t src_len,
     const char *ver  = LUA_VERSION;
     const char *arch = hl_runtime_cache_arch_tag();
     const char *end  = hl_runtime_cache_endian_tag();
+    const char *name = chunkname ? chunkname : "";
 
     if (hl_cap_crypto_sha256_update(&ctx, ver, strlen(ver))   != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, "|", 1)             != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, arch, strlen(arch)) != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, "|", 1)             != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, end, strlen(end))   != 0) return -1;
+    if (hl_cap_crypto_sha256_update(&ctx, "|", 1)             != 0) return -1;
+    if (hl_cap_crypto_sha256_update(&ctx, name, strlen(name)) != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, "|", 1)             != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, src, src_len)       != 0) return -1;
 
@@ -144,7 +164,7 @@ int hl_lua_load_cached(lua_State *L,
     if (!store) return luaL_loadbuffer(L, src, src_len, chunkname);
 
     char key[HL_BLOB_STORE_ID_BUF_SIZE];
-    if (compute_key(src, src_len, key) != 0) {
+    if (compute_key(chunkname, src, src_len, key) != 0) {
         return luaL_loadbuffer(L, src, src_len, chunkname);
     }
 
