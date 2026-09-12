@@ -302,10 +302,20 @@ jobs:
           # again it should say so here, in one line, instead of wedging for 45
           # minutes on a -O2 TU.
           echo "--- Keel receives the opt level directly ---"
+          # Keel v3.0.0 builds objects under build/<backend>/, so the -o target is
+          # build/<backend>/src/*.o and build/<backend>/vendor/llhttp/*.o; the
+          # pre-v3.0.0 src/*.o shape is still accepted. Hull compiles FLAT to
+          # build/*.o, so the extra directory level is what separates them.
+          # The `|| true` matters: under `set -euo pipefail` a grep matching
+          # nothing kills the assignment, and this probe died silently at exactly
+          # that point after the upgrade - printing its header and exiting 1
+          # without ever reaching the FAIL message that explains what to do.
           keel_opt=$("$MAKE_BIN" -n HL_OPT=-O0 vendor/keel/libkeel.a 2>/dev/null \
-                     | grep -- ' -c -o src/' | grep -oE ' -O[0-9]' | sort -u | tr -d ' ' | tr '\n' ' ')
+                     | grep -E -- ' -c -o (build/[^/]+/)?src/' \
+                     | grep -oE ' -O[0-9]' | sort -u | tr -d ' ' | tr '\n' ' ' || true)
           keel_vendor_opt=$("$MAKE_BIN" -n HL_OPT=-O0 vendor/keel/libkeel.a 2>/dev/null \
-                     | grep -- ' -c -o vendor/' | grep -oE ' -O[0-9]' | sort -u | tr -d ' ' | tr '\n' ' ')
+                     | grep -E -- ' -c -o (build/[^/]+/)?vendor/' \
+                     | grep -oE ' -O[0-9]' | sort -u | tr -d ' ' | tr '\n' ' ' || true)
           echo "  keel core TUs   : ${keel_opt:-<none>}"
           echo "  keel vendored   : ${keel_vendor_opt:-<none>}"
           if [ "$(echo $keel_opt)" = "-O0" ] && [ "$(echo $keel_vendor_opt)" = "-O0" ]; then
