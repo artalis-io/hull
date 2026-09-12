@@ -633,23 +633,14 @@ jobs:
                     test_hex test_arena test_seal_arena test_path_normalize
                     test_mime test_host_match test_module_registry
                     test_module_resolver test_manifest_seal test_time test_env
-                    test_tools_install"
+                    test_tools_install test_tar"
 
           # suite:baseline-failure-count   ("crash" = printed no summary)
           #
-          # test_tar: extract_nested_tree asserts (st.st_mode & S_IXUSR) on a
-          #   file the extractor wrote and chmod'd. Measured on Windows 11 with
-          #   cosmocc 4.0.2: chmod 0755 on a newly created EXTENSIONLESS file
-          #   reads back mode 664, so S_IXUSR is never set (the same name as
-          #   .exe or .com reads 775). The test asserts a chmod'd exec bit is
-          #   observable, and on this host it is not.
-          #
-          #   This is the TEST's assumption, not a product defect - unlike the
-          #   resolver bug that the same measurement exposed, which is fixed and
-          #   is why test_tools_install moved to ENFORCED. A candidate for an
-          #   honest UTEST_SKIP, the way test_fs and test_blob got one for
-          #   symlink privilege and atime.
-          KNOWN="test_tar:1"
+          # Empty. Every suite here is expected to be clean; a suite that is not
+          # belongs in KNOWN with a measured baseline and a stated cause, not
+          # quietly outside the tier.
+          KNOWN=""
 
           # Candidates under investigation, supplied by workflow_dispatch.
           # Built and run but never gating: this is how a suite earns a
