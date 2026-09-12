@@ -301,10 +301,56 @@ UTEST_F(tar_fixture, extract_nested_tree) {
     ASSERT_EQ(hl_tar_extract(buf, off, dest), 0);
 
     snprintf(p, sizeof(p), "%s/zig", dest);
-    ASSERT_EQ(stat(p, &st), 0);
-    ASSERT_TRUE(st.st_mode & S_IXUSR);            /* exec bit preserved */
+    ASSERT_EQ(stat(p, &st), 0);                   /* top-level file created */
     snprintf(p, sizeof(p), "%s/lib/std/foo.zig", dest);
     ASSERT_EQ(stat(p, &st), 0);                   /* deep nested file created */
+    free(buf);
+    /* The exec bit is asserted separately: it is the one property here that a
+     * host can fail to express, and folding it in cost this whole test - the
+     * nested-tree extraction it exists for included - on Windows. */
+}
+
+/* Can a chmod'd exec bit be observed on this host?
+ *
+ * hl_tar_extract applies a member's mode with chmod(). On Windows that grants
+ * no execute ACL for a newly created extensionless file: measured with cosmocc
+ * 4.0.2 on Windows 11, chmod 0755 reads back mode 664 and S_IXUSR is never set
+ * (the same name as .exe or .com reads 775). The extractor is doing the only
+ * thing it can; the host does not carry the bit. Probe rather than assume, so
+ * this also covers any other filesystem that drops it. */
+static int host_preserves_exec_bit(void)
+{
+    char probe[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(probe, sizeof probe, "hull_execbit_probe", NULL);
+    if (fd < 0) return 1;              /* cannot tell - assert rather than skip */
+    close(fd);
+    if (chmod(probe, 0755) != 0) { unlink(probe); return 1; }
+
+    struct stat pst;
+    int ok = stat(probe, &pst) == 0 && (pst.st_mode & S_IXUSR) != 0;
+    unlink(probe);
+    return ok;
+}
+
+UTEST_F(tar_fixture, extract_preserves_exec_bit) {
+    if (!host_preserves_exec_bit())
+        UTEST_SKIP("host does not carry a chmod'd exec bit; hl_tar_extract "
+                   "applies the mode, the filesystem does not keep it");
+
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "./zig", "BINARY", 6);
+    off += 1024;
+
+    char dest[PATH_MAX], p[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/xbit", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), 0);
+
+    snprintf(p, sizeof(p), "%s/zig", dest);
+    struct stat st;
+    ASSERT_EQ(stat(p, &st), 0);
+    ASSERT_TRUE(st.st_mode & S_IXUSR);
     free(buf);
 }
 
