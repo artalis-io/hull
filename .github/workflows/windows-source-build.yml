@@ -193,6 +193,14 @@ on:
     - cron: "20 6 * * *"
   workflow_dispatch:
     inputs:
+      probe_e2e:
+        description: >-
+          Space-separated e2e make targets (e2e-cli, e2e-templates, ...) to run
+          WITHOUT gating, to find out which behave on Windows before any of them
+          is made required. Reports pass/fail and duration per target. Empty on
+          the schedule, so nightly cost is unchanged.
+        required: false
+        default: ""
       probe_suites:
         description: >-
           Space-separated unit suites to BUILD and RUN without gating, to find
@@ -770,6 +778,58 @@ jobs:
             echo "Windows unit suites: enforced clean, known failures at baseline."
           fi
           exit "$rc_step"
+
+      # e2e on Windows, measured before anything is made required.
+      #
+      # No tests/e2e_*.sh has ever run on a Windows runner: this job stops at the
+      # unit suites, and cosmocc-windows-e2e.yml builds on Ubuntu and then only
+      # installs + `hull build`s on Windows. 99 suites, none of them exercised
+      # on the platform whose path handling, process spawning and filesystem
+      # semantics differ most.
+      #
+      # READ THE RESULTS WITH CARE, and note what the first probe found. Three
+      # candidates were run (run 34705980180) and all three failed, for three
+      # DIFFERENT reasons - none of which is "e2e does not work on Windows":
+      #
+      #   e2e-cli       exit-status assertions. "expected 1, got 0" and
+      #                 "expected 2, got 0": an APE's status is shifted left by
+      #                 8 on Windows, so a POSIX shell reads 0 for every
+      #                 failure (jart/cosmopolitan#1521). Hull calls exit()
+      #                 correctly; nothing here can fix it. Those assertions
+      #                 would have to check output or an artefact instead.
+      #   e2e-templates "server did not start on port 19890" for both runtimes.
+      #                 A listening APE under msys2, not yet diagnosed.
+      #   e2e-migrate   "cannot open database D:/a/_temp/msys64/tmp/.../data.db".
+      #                 The script's mktemp path as msys2 spells it, handed to
+      #                 an APE that resolves paths differently - the same family
+      #                 as the /tmp resolution fixed for the unit suites in
+      #                 #482, one layer out.
+      #
+      # So a suite passing here is meaningful, and a suite failing needs its
+      # cause named before anyone "fixes" it. That is why this probes and does
+      # not gate.
+      - name: PROBE - e2e suites on Windows (informational, never gates)
+        if: inputs.probe_e2e != ''
+        shell: msys2 {0}
+        run: |
+          set -uo pipefail
+          export PATH="$PATH:$PWD/cosmo/bin"
+          rc_all=0
+          for t in ${{ inputs.probe_e2e }}; do
+            echo "===================== $t ====================="
+            start=$(date +%s)
+            if "$MAKE_BIN" "$t" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=1                  > "e2e-$t.log" 2>&1; then
+              verdict="ok"
+            else
+              verdict="FAILED"
+              rc_all=1
+            fi
+            echo "probe-e2e  $t: $verdict  ($(( $(date +%s) - start ))s)"
+            [ "$verdict" = ok ] || tail -30 "e2e-$t.log" | sed 's/^/    /'
+          done
+          echo ""
+          echo "probe-e2e: informational only; this step does not gate the job."
+          exit 0
 
       - name: Upload the unit-test build log on failure
         if: failure()
