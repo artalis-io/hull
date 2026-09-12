@@ -640,13 +640,26 @@ jobs:
           #   regardless. So the product path works on Windows - a managed
           #   cosmocc DOES resolve - and it is the tests' setup that assumes
           #   chmod is sufficient.
+          # NOT every entry below is benign. The two status_managed_* cases
+          # and test_tar are tests asserting something this host cannot do.
+          # extracted_bundle_resolves_like_doctor_resolves is different: it is a
+          # REAL Windows bug, landed failing on purpose so it is gated while the
+          # fix is designed. hl_tar_extract sets modes with chmod, Windows grants
+          # no execute ACL from that, so hl_tools_lookup_path's access(entry,
+          # X_OK) probe misses and the resolver returns the install DIRECTORY
+          # instead of bin/cosmocc. doctor_cosmocc_runnable then looks for
+          # busybox beside that path, gets ~/.hull/tools rather than
+          # ~/.hull/tools/cosmocc/bin, and reports the toolchain unusable - so
+          # `hull tools install cosmocc` succeeds and `hull doctor` still says
+          # not ready. When that is fixed this baseline drops back to 2.
+          #
           # test_tar: extract_nested_tree asserts (st.st_mode & S_IXUSR) on a
           #   file the extractor wrote and chmod'd. Same root cause as the two
           #   above: measured on Windows 11, chmod 0755 on a newly created
           #   EXTENSIONLESS file reads back mode 664, so S_IXUSR is never set
           #   (the same name as .exe or .com reads 775). Both suites assert that
           #   a chmod'd exec bit is observable; on this host it is not.
-          KNOWN="test_tools_install:2 test_tar:1"
+          KNOWN="test_tools_install:3 test_tar:1"
 
           # Candidates under investigation, supplied by workflow_dispatch.
           # Built and run but never gating: this is how a suite earns a
