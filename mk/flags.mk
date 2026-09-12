@@ -51,6 +51,28 @@ HL_ENABLE_POSTGRES ?= 0
 HL_ENABLE_MYSQL    ?= 0
 HL_ENABLE_DUCKDB   ?= 0
 endif
+# Cosmo compiles the composable subsystems IN, the same reasoning as
+# HL_ENABLE_TUI: a fat APE cannot force-load a native feature archive, and
+# FEATURES[] has no cosmo column at all (has_linux_x86_64, has_linux_aarch64,
+# has_darwin_arm64 are the only three), so `hull feature install postgres`
+# refuses with "not published for cosmo". Left at 0, postgres:// and mysql://
+# are unreachable on EVERY cosmo host, Windows included, with no route that
+# could be made to work.
+#
+# These two are the pair that can be compiled in. Both are pure C wire clients
+# with no vendored engine - cap/pgwire.c and cap/mysqlwire.c, ~1800 lines with
+# their vtables - and they reuse the mbedTLS and cap/crypto the cosmo base
+# already carries for sslmode and SCRAM / caching_sha2 auth. DuckDB (a vendored
+# C++ engine) and GPU (wgpu-native) genuinely cannot follow: they stay
+# native-only.
+#
+# Placed AFTER the HL_ENABLE_DB=0 block above so that pin still wins: ?= only
+# assigns when unset.
+ifeq ($(COSMO),1)
+HL_ENABLE_POSTGRES ?= 1
+HL_ENABLE_MYSQL    ?= 1
+endif
+
 HL_ENABLE_SQLITE   ?= 1
 HL_ENABLE_POSTGRES ?= 0
 HL_ENABLE_MYSQL    ?= 0
