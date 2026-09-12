@@ -640,7 +640,12 @@ jobs:
           #   regardless. So the product path works on Windows - a managed
           #   cosmocc DOES resolve - and it is the tests' setup that assumes
           #   chmod is sufficient.
-          # test_tar: extract_nested_tree. Cause not yet established.
+          # test_tar: extract_nested_tree asserts (st.st_mode & S_IXUSR) on a
+          #   file the extractor wrote and chmod'd. Same root cause as the two
+          #   above: measured on Windows 11, chmod 0755 on a newly created
+          #   EXTENSIONLESS file reads back mode 664, so S_IXUSR is never set
+          #   (the same name as .exe or .com reads 775). Both suites assert that
+          #   a chmod'd exec bit is observable; on this host it is not.
           KNOWN="test_tools_install:2 test_tar:1"
 
           # Candidates under investigation, supplied by workflow_dispatch.
