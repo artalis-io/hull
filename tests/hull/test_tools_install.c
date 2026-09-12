@@ -32,6 +32,7 @@
 #include "utest.h"
 #include "hull/tools_install.h"
 #include "hull/shared/host.h"
+#include "hull/cap/tar.h"
 
 #include <errno.h>
 #include <ftw.h>
@@ -606,6 +607,76 @@ UTEST_F(tools_fixture, status_managed_single_binary) {
     ASSERT_EQ(st.source, HL_TOOL_SRC_MANAGED);
     ASSERT_STREQ(st.path, target);
     ASSERT_EQ(st.size_bytes, 4096ULL);
+}
+
+/* ── install -> resolve, through the REAL extractor ──────────────────────
+ *
+ * Everything else in this file fakes an install with write_data(), i.e. create
+ * + chmod. That is not how a tool arrives: `hull tools install <bundle>` lands
+ * it with hl_tar_extract, and `hull doctor` then resolves it through
+ * hl_tools_status -> hl_tools_lookup_path, whose bundle probe is a single
+ * access(entry, X_OK).
+ *
+ * Nothing covered that seam end to end on any platform. discover_compilers in
+ * doctor.c falls back to hl_tools_status specifically so "a PATH-only probe
+ * would [not] report a hull-installed cosmocc as missing", and CI never
+ * exercises that branch because it puts cosmocc on PATH.
+ *
+ * It matters most where the two halves can disagree. On Windows access(X_OK)
+ * reflects an execute ACL rather than a permission bit, and hl_tar_extract sets
+ * modes with chmod(), so "extracted" and "executable" are not obviously the
+ * same thing there. This test asserts they are: install the way the installer
+ * installs, then resolve the way doctor resolves.
+ */
+static void tools_put_header(unsigned char *b, const char *name, size_t size,
+                             unsigned mode)
+{
+    memset(b, 0, 512);
+    strncpy((char *)b, name, 99);
+    snprintf((char *)(b + 100), 8, "%07o", mode);
+    snprintf((char *)(b + 124), 12, "%011o", (unsigned)size);
+    memset(b + 148, ' ', 8);
+    b[156] = '0';
+}
+
+UTEST_F(tools_fixture, extracted_bundle_resolves_like_doctor_resolves) {
+    /* A cosmocc-shaped bundle: the entry the registry names, plus one sibling
+     * so the directory is not degenerate. */
+    unsigned char *tar = calloc(1, 8192);
+    ASSERT_NE(tar, NULL);
+    size_t off = 0;
+    tools_put_header(tar + off, "bin/cosmocc", 6, 0755);
+    off += 512;
+    memcpy(tar + off, "DRIVER", 6);
+    off += 512;
+    tools_put_header(tar + off, "lib/x.a", 4, 0644);
+    off += 512;
+    memcpy(tar + off, "DATA", 4);
+    off += 512;
+    off += 1024;   /* two zero blocks: end of archive */
+
+    char root[PATH_MAX];
+    ASSERT_EQ(hl_tools_install_path("cosmocc", root, sizeof(root)), 0);
+    ASSERT_EQ(hl_tar_extract(tar, off, root), 0);
+    free(tar);
+
+    /* The file landed. */
+    char entry[PATH_MAX];
+    snprintf(entry, sizeof(entry), "%s/bin/cosmocc", root);
+    struct stat st;
+    ASSERT_EQ(stat(entry, &st), 0);
+
+    /* And doctor's resolver finds it. This is the assertion that matters: if a
+     * host cannot make an extracted file executable, `hull tools install
+     * cosmocc` succeeds and `hull doctor` still reports cosmocc missing, which
+     * would break `hull doctor --fix` - the primary Windows onboarding path. */
+    HlToolStatus ts;
+    ASSERT_EQ(hl_tools_status("cosmocc", NULL, &ts), 0);
+    ASSERT_TRUE(ts.managed);
+    ASSERT_TRUE_MSG(ts.resolved,
+        "extracted bundle entry did not resolve; hull tools install would "
+        "succeed while hull doctor still reports the tool missing");
+    ASSERT_STREQ(ts.path, entry);
 }
 
 UTEST_F(tools_fixture, status_managed_executable_bundle) {
