@@ -17,6 +17,8 @@
 
 #include <sqlite3.h>
 #include <stdarg.h>
+#include "hull/shared/host.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +46,17 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
      * "/var/db", "sqlite://:memory:" -> ":memory:". */
     if (dsn && strncmp(dsn, "sqlite://", 9) == 0)
         dsn += 9;
+
+    /* An MSYS2 / Git Bash shell hands a native program the MIXED path form
+     * "D:/app/data.db". SQLite's unix VFS decides absolute-vs-relative on a
+     * leading '/', so it reads that as relative, prepends the cwd, and cannot
+     * open the result - "cannot open database D:/app/data.db" on a path that
+     * exists. Rewrite to the rooted form ("/D/app/data.db") SQLite and the OS
+     * both accept. No-op off Windows, and on anything without a drive letter -
+     * ":memory:" and "file:" URIs pass through untouched. */
+    char norm[HL_HOST_PATH_MAX];
+    if (dsn && hl_host_normalize_path(dsn, norm, sizeof norm) >= 0)
+        dsn = norm;
 
     int rc = sqlite3_open(dsn, &s->db);
     if (rc != SQLITE_OK) {

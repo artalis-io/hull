@@ -295,6 +295,37 @@ produces there, since both are APEs. It does not affect Linux, macOS, or the
 BSDs. Windows CI that shells out to `hull` from bash should assert artifacts or
 output; a bare `hull ... && ...` chain is not a check.
 
+## Paths from Git Bash and MSYS2
+
+If you drive `hull` from Git Bash, MSYS2 or Cygwin, that shell rewrites a POSIX
+path argument on its way to a native program into the MIXED form
+`D:/work/app/data.db` - drive letter, colon, forward slashes. A Cosmopolitan
+APE is a native program, so that is what `hull` was handed.
+
+Windows itself is happy with that spelling: `open`, `stat` and `mkdir` all
+accept it. The vendored POSIX code inside Hull was not. SQLite's unix VFS
+decides absolute-vs-relative by testing for a leading `/`, so it read
+`D:/work/app/data.db` as RELATIVE, prepended the current directory, and failed
+to open the result. The symptom was a flat contradiction:
+
+```
+hull migrate: cannot open database D:/work/app/data.db
+```
+
+on a database that plainly exists, at a path you can `ls`.
+
+**Hull now rewrites a leading drive letter to the rooted form both layers
+accept** - `D:/work/app/data.db` becomes `/D/work/app/data.db`, which is also
+what cosmo's own `getcwd()` returns. Backslashes are folded in that same case,
+so `D:\work\app\data.db` works too. The rewrite is Windows-only, applies
+only to a SINGLE letter followed by `:` and a separator, and therefore never
+touches a `postgres://` DSN (no real URI scheme is one character) or a POSIX
+path (which never carries a `:` at index 1).
+
+Nothing is required of you. On a Hull released before this fix, the
+workaround is to export `MSYS2_ARG_CONV_EXCL='*'` before invoking `hull`, which
+tells the shell to stop converting arguments at all.
+
 ## What it does
 
 - Resolves the latest official stable release from `artalis-io/hull` (drafts and

@@ -469,4 +469,122 @@ UTEST(host, find_in_path_leaves_out_empty_when_the_buffer_is_too_small)
     ASSERT_STREQ("", small);      /* and must not leave a truncated one */
 }
 
+/* -- Path form (drive letter -> rooted) ---------------------------- */
+
+/*
+ * REGRESSION: an MSYS2 / Git Bash shell rewrites a POSIX argument handed to
+ * a native program into "D:/a/app/data.db". The OS layer accepts that form
+ * (measured: open/stat/mkdir all succeed), but SQLite's unix VFS tests for a
+ * leading '/' to decide absolute-vs-relative, so it prepended the cwd and
+ * failed with "cannot open database D:/a/app/data.db" on a path that exists.
+ * Five e2e suites failed this way on Windows before the rewrite landed.
+ */
+
+UTEST(host, normalize_path_rejects_bad_arguments)
+{
+    char buf[64];
+    ASSERT_EQ(-1, hl_host_normalize_path(NULL, buf, sizeof buf));
+    ASSERT_STREQ("", buf);
+    ASSERT_EQ(-1, hl_host_normalize_path("/tmp/x", NULL, sizeof buf));
+    ASSERT_EQ(-1, hl_host_normalize_path("/tmp/x", buf, 0));
+}
+
+UTEST(host, normalize_path_reports_overflow_rather_than_truncating)
+{
+    char small[4];
+    ASSERT_EQ(-1, hl_host_normalize_path("/a/much/longer/path", small, sizeof small));
+    ASSERT_STREQ("", small);
+}
+
+UTEST(host, normalize_path_passes_posix_paths_through_on_every_host)
+{
+    /* Host-INDEPENDENT: a rooted POSIX path is already the target form, and
+     * a relative one has no drive letter to rewrite. Neither may change on
+     * ANY host - this is the invariant that protects Linux and macOS. */
+    char buf[HL_HOST_PATH_MAX];
+    ASSERT_EQ(0, hl_host_normalize_path("/var/db/data.db", buf, sizeof buf));
+    ASSERT_STREQ("/var/db/data.db", buf);
+    ASSERT_EQ(0, hl_host_normalize_path("data.db", buf, sizeof buf));
+    ASSERT_STREQ("data.db", buf);
+    ASSERT_EQ(0, hl_host_normalize_path("./sub/data.db", buf, sizeof buf));
+    ASSERT_STREQ("./sub/data.db", buf);
+    ASSERT_EQ(0, hl_host_normalize_path("", buf, sizeof buf));
+    ASSERT_STREQ("", buf);
+}
+
+UTEST(host, normalize_path_never_touches_a_uri_scheme)
+{
+    /* A drive letter is ONE character before the ':'. Every real URI scheme
+     * is longer, so a DSN must survive verbatim on every host - otherwise
+     * this helper would corrupt the postgres/mysql connection strings that
+     * flow through the same open path. */
+    char buf[HL_HOST_PATH_MAX];
+    static const char *const dsns[] = {
+        "postgres://user@host/db", "postgresql://h/db", "mysql://h/db",
+        "mariadb://h/db", "sqlite://relative.db", "file:data.db",
+        "duckdb://x.duckdb", ":memory:",
+    };
+    for (size_t i = 0; i < sizeof dsns / sizeof *dsns; i++) {
+        ASSERT_EQ(0, hl_host_normalize_path(dsns[i], buf, sizeof buf));
+        ASSERT_STREQ(dsns[i], buf);
+    }
+}
+
+UTEST(host, normalize_path_rewrites_a_drive_letter_on_windows_only)
+{
+    char buf[HL_HOST_PATH_MAX];
+    int rc = hl_host_normalize_path("D:/a/app/data.db", buf, sizeof buf);
+    if (hl_host_is_windows()) {
+        ASSERT_EQ(1, rc);
+        ASSERT_STREQ("/D/a/app/data.db", buf);
+    } else {
+        /* Off Windows the mixed form is not a path; rewriting it would
+         * corrupt a legal (if odd) relative filename. */
+        ASSERT_EQ(0, rc);
+        ASSERT_STREQ("D:/a/app/data.db", buf);
+    }
+}
+
+UTEST(host, normalize_path_folds_backslashes_in_the_drive_case)
+{
+    char buf[HL_HOST_PATH_MAX];
+    int rc = hl_host_normalize_path("D:\\a\\app\\data.db", buf, sizeof buf);
+    if (hl_host_is_windows()) {
+        ASSERT_EQ(1, rc);
+        ASSERT_STREQ("/D/a/app/data.db", buf);
+    } else {
+        ASSERT_EQ(0, rc);
+    }
+}
+
+UTEST(host, normalize_path_leaves_a_lone_backslash_name_alone)
+{
+    /* Backslashes are folded ONLY in the drive-letter case. A POSIX file may
+     * legitimately contain one, and silently rewriting it would address a
+     * different file. */
+    char buf[HL_HOST_PATH_MAX];
+    const char *odd = "/tmp/we\\ird/name.db";
+    ASSERT_EQ(0, hl_host_normalize_path(odd, buf, sizeof buf));
+    ASSERT_STREQ(odd, buf);
+}
+
+UTEST(host, normalize_path_accepts_either_drive_letter_case)
+{
+    if (!hl_host_is_windows()) return;   /* rewrite is Windows-only */
+    char buf[HL_HOST_PATH_MAX];
+    ASSERT_EQ(1, hl_host_normalize_path("c:/x/y", buf, sizeof buf));
+    ASSERT_STREQ("/c/x/y", buf);
+    ASSERT_EQ(1, hl_host_normalize_path("C:/x/y", buf, sizeof buf));
+    ASSERT_STREQ("/C/x/y", buf);
+}
+
+UTEST(host, normalize_path_ignores_a_drive_letter_without_a_separator)
+{
+    /* "D:foo" is a Win32 drive-RELATIVE path, not an absolute one. Rewriting
+     * it to "/Dfoo" would invent a location, so it is left for the OS. */
+    char buf[HL_HOST_PATH_MAX];
+    ASSERT_EQ(0, hl_host_normalize_path("D:foo", buf, sizeof buf));
+    ASSERT_STREQ("D:foo", buf);
+}
+
 UTEST_MAIN()
