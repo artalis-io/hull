@@ -34,6 +34,21 @@ toolchain setup, APE filename conventions, Unix package managers, or Makefiles.
 
 ### Changed
 
+- **Keel upgraded to v3.0.0** (from the `3.0.0-rc.3`+3 pin). Hull inherits the
+  release's headline server fix without any code change: an early final response
+  is no longer destroyed by its own teardown. Previously a 413 / 431 / 415 / 500
+  - or an auth rejection on a `multipart` route, which is a documented Hull
+  pattern - left the request body unread, and closing a socket with unread
+  received data makes TCP send RST, discarding the response the client should
+  have seen. Keel now flushes the response, half-closes its send side, and drains
+  inbound bytes asynchronously, bounded by `reject_drain_max_bytes` (64 KiB) and
+  `reject_drain_timeout_ms` (500 ms); Hull leaves both at their defaults. Also
+  picked up: `kl_async_complete` sends the response when `on_resume` leaves the
+  connection processing, a connection pool no longer claims its old capacity
+  after being freed, and several IOCP correctness fixes that matter on Windows.
+  No API Hull uses changed - the only public removals are `max_align_t` from a
+  header (so MSVC consumers can compile it) and the prerelease version macros.
+
 - **`hull build` names the produced binary for the host that must run it.** The
   default output is now `app.com` on Windows (`app` on Linux/macOS, unchanged).
   Windows will not execute an extensionless file, so the APE previously written
