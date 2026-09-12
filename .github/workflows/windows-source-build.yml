@@ -831,6 +831,19 @@ jobs:
           echo "TMPDIR=${TMPDIR:-<unset>}"
           probe_dir=$(mktemp -d) && echo "mktemp -d -> $probe_dir" && rmdir "$probe_dir"
 
+          # Hand the APE a path IT can parse. msys2 rewrites a POSIX argument to
+          # a native program into the mixed form D:/a/_temp/... (drive letter,
+          # forward slashes). Moving the scratch dir out of msys2's /tmp mount
+          # changed the prefix and nothing else: e2e-migrate still reported
+          # "cannot open database D:/a/_temp/tmp.XXXX/app2/data.db", so the mount
+          # was never the problem and the FORM is the remaining suspect. Cosmo
+          # spells absolute paths /D/a/... and opens /C/... and /c/... happily
+          # (measured). MSYS2_ARG_CONV_EXCL='*' turns the rewriting off so hull
+          # receives the POSIX path unchanged.
+          export MSYS2_ARG_CONV_EXCL='*'
+          echo "MSYS2_ARG_CONV_EXCL=$MSYS2_ARG_CONV_EXCL"
+
+
           rc_all=0
           for t in ${{ inputs.probe_e2e }}; do
             echo "===================== $t ====================="
