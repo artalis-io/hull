@@ -100,7 +100,7 @@ fi
 SEAL_DEF="-DKEEL_SEAL_REQUEST=1"
 [ -n "${KEEL_DISABLE_SEAL_REQUEST:-}" ] && SEAL_DEF=""
 
-cc -std=c11 -Wall -Wextra -O2 $SEAL_DEF \
+${CC:-cc} -std=c11 -Wall -Wextra -O2 $SEAL_DEF \
     -I"$KEEL_DIR/include" \
     -I"$KEEL_DIR/vendor/sh_seal_arena" \
     -o "$ECHO_BIN" \
