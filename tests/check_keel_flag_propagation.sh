@@ -16,9 +16,15 @@
 # HOW. `make -n` through Hull's own recipe, then read Keel's inner compile
 # lines. Dry run, no artifacts, ~seconds - cheap enough to sit in the lint job.
 #
-# Keel's TUs are identified by their -o target: Keel compiles to `src/*.o` and
-# `vendor/llhttp/*.o` relative to vendor/keel, whereas Hull compiles everything
-# to `build/*.o`. Both groups are checked separately and deliberately: Keel
+# Keel's TUs are identified by their -o target. Keel v3.0.0 moved objects under
+# `build/<backend>/` so switching BACKEND= cannot mix incompatible objects into
+# one archive, making the target `build/<backend>/src/*.o` and
+# `build/<backend>/vendor/llhttp/*.o` relative to vendor/keel; the pre-v3.0.0
+# `src/*.o` / `vendor/llhttp/*.o` shape is still accepted so this gate keeps
+# working across a bisect. Hull compiles everything FLAT to `build/*.o`, so the
+# extra directory level is what tells the two apart - matching `build/` alone
+# would sweep in every Hull TU and make the assertions meaningless.
+# Both groups are checked separately and deliberately: Keel
 # splits CFLAGS (core) from VENDOR_CFLAGS (llhttp, the miniz adapter), and the
 # vendored half is exactly where the Windows wedge was observed, so a hook that
 # reached only one of them would look fine here and still be broken.
@@ -54,8 +60,8 @@ keel_lines() {
     $MAKE -Bn $1 vendor/keel/libkeel.a 2>/dev/null | grep -- ' -c -o ' || true
 }
 
-core_flags()   { printf '%s\n' "$1" | grep -- ' -c -o src/'; }
-vendor_flags() { printf '%s\n' "$1" | grep -- ' -c -o vendor/llhttp/'; }
+core_flags()   { printf '%s\n' "$1" | grep -E -- ' -c -o (build/[^/]+/)?src/'; }
+vendor_flags() { printf '%s\n' "$1" | grep -E -- ' -c -o (build/[^/]+/)?vendor/llhttp/'; }
 
 # $1 label, $2 make vars, $3 pattern that must appear, $4 pattern that must NOT
 # appear (empty to skip the negative assertion).
