@@ -820,37 +820,34 @@ jobs:
           set -uo pipefail
           export PATH="$PATH:$PWD/cosmo/bin"
 
-          # Put every suite's scratch directory somewhere msys2 and an APE
-          # agree about. 94 of the 99 e2e scripts call `mktemp -d`, which
-          # honours $TMPDIR, so this reaches all of them without touching one
-          # of them. Unset, mktemp lands in msys2's OWN /tmp mount, which msys2
-          # spells to a native program as D:/a/_temp/msys64/tmp/... - the path
-          # e2e-migrate was handed and could not open ("cannot open database
-          # D:/a/_temp/msys64/tmp/tmp.XXXX/app2/data.db"). $RUNNER_TEMP is a
-          # real directory outside that mount, which both sides can name.
-          # Same lesson as #482 one layer out: agree on the temp directory
-          # rather than assume /tmp means the same thing to both.
+          # Put every suite's scratch directory on the runner's own temp disk.
+          # 94 of the 99 e2e scripts call `mktemp -d`, which honours $TMPDIR,
+          # so this reaches all of them without touching one of them. Unset,
+          # mktemp lands inside msys2's /tmp mount instead, which is a place
+          # only msys2 names that way. Same lesson as #482 one layer out:
+          # agree on the temp directory rather than assume /tmp means the same
+          # thing to both sides.
+          #
+          # This is hygiene, NOT the fix for the path-form bug. That was a
+          # separate defect on the hull side, fixed by hl_host_normalize_path;
+          # moving the scratch dir changed the prefix and nothing else.
           if [ -n "${RUNNER_TEMP:-}" ]; then
             export TMPDIR="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")"
           fi
           echo "TMPDIR=${TMPDIR:-<unset>}"
           probe_dir=$(mktemp -d) && echo "mktemp -d -> $probe_dir" && rmdir "$probe_dir"
 
-          # Hand the APE a path IT can parse. msys2 rewrites a POSIX argument to
-          # a native program into the mixed form D:/a/_temp/... (drive letter,
-          # forward slashes). Moving the scratch dir out of msys2's /tmp mount
-          # changed the prefix and nothing else: e2e-migrate still reported
-          # "cannot open database D:/a/_temp/tmp.XXXX/app2/data.db", so the mount
-          # was never the problem and the FORM is the remaining suspect. Cosmo
-          # spells absolute paths /D/a/... and opens /C/... and /c/... happily
-          # (measured). MSYS2_ARG_CONV_EXCL='*' turns the rewriting off so hull
-          # receives the POSIX path unchanged.
-          export MSYS2_ARG_CONV_EXCL='*'
-          echo "MSYS2_ARG_CONV_EXCL=$MSYS2_ARG_CONV_EXCL"
+          # NOTE: this step deliberately does NOT set MSYS2_ARG_CONV_EXCL.
+          # The shell converts a POSIX argument to the mixed form
+          # "D:/a/_temp/..." on its way to the APE, and that is exactly what a
+          # user driving hull from Git Bash gets. Suppressing the conversion
+          # here would only hide whether hull itself copes. It does now:
+          # hl_host_normalize_path rewrites a leading drive letter to the
+          # rooted form SQLite's unix VFS requires. Leaving the conversion ON
+          # is what keeps that fix honest.
 
-          # What a 10-suite probe measured once both of the above were in place
-          # (run 34721432268), so the next reader starts from the map rather
-          # than from the symptom:
+          # What a 10-suite probe measured (run 34721432268), so the next
+          # reader starts from the map rather than from the symptom:
           #
           #   ok      e2e-migrate  e2e-templates  e2e-examples  e2e-blob
           #           e2e-multipart
