@@ -814,6 +814,23 @@ jobs:
         run: |
           set -uo pipefail
           export PATH="$PATH:$PWD/cosmo/bin"
+
+          # Put every suite's scratch directory somewhere msys2 and an APE
+          # agree about. 94 of the 99 e2e scripts call `mktemp -d`, which
+          # honours $TMPDIR, so this reaches all of them without touching one
+          # of them. Unset, mktemp lands in msys2's OWN /tmp mount, which msys2
+          # spells to a native program as D:/a/_temp/msys64/tmp/... - the path
+          # e2e-migrate was handed and could not open ("cannot open database
+          # D:/a/_temp/msys64/tmp/tmp.XXXX/app2/data.db"). $RUNNER_TEMP is a
+          # real directory outside that mount, which both sides can name.
+          # Same lesson as #482 one layer out: agree on the temp directory
+          # rather than assume /tmp means the same thing to both.
+          if [ -n "${RUNNER_TEMP:-}" ]; then
+            export TMPDIR="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")"
+          fi
+          echo "TMPDIR=${TMPDIR:-<unset>}"
+          probe_dir=$(mktemp -d) && echo "mktemp -d -> $probe_dir" && rmdir "$probe_dir"
+
           rc_all=0
           for t in ${{ inputs.probe_e2e }}; do
             echo "===================== $t ====================="
