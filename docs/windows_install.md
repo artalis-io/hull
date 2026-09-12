@@ -184,6 +184,50 @@ and is not the same configuration CI exercises.
 This path is exercised in CI by `.github/workflows/windows-source-build.yml`,
 whose header carries the full evidence and history.
 
+## What works on Windows, and what does not
+
+Windows runs the Cosmopolitan APE build. A fat APE cannot force-load a native
+static archive, so every subsystem that ships as a **composable feature** is
+unavailable there. Everything the cosmo base compiles in works normally.
+
+| Capability | Windows | Why |
+|---|---|---|
+| Lua and JS runtimes, `fs`, `crypto`, `http`, `time`, `env` | yes | in the cosmo base |
+| SQLite (`db`, migrations, session/outbox/idempotency/rbac/search) | yes | cosmo compiles SQLite in |
+| WASM compute (`compute.*`) | yes, interpreted | cosmo keeps WASM in-base |
+| Terminal UI (`hull.tui`) | yes | `HL_ENABLE_TUI` defaults to 1 on cosmo |
+| `hull build` of an APE app | yes | needs `cosmocc`; see below |
+| PostgreSQL (`postgres://`) | **no** | native-only feature |
+| MySQL / MariaDB (`mysql://`, `mariadb://`) | **no** | native-only feature |
+| DuckDB (`duckdb://`) | **no** | native-only feature |
+| GPU compute (`gpu.*`) | **no** | native-only feature |
+| AOT-compiled compute | **no** | `wamrc` is not published for cosmo |
+| Kernel sandbox (pledge/unveil) | **no** | see below |
+
+If an app needs a network database or GPU, run it on a native build
+(`hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`), where
+`hull feature install <name>` and `hull build --with=<name>` work. Building
+Hull from source on Windows with `HL_ENABLE_POSTGRES=1` or `HL_ENABLE_MYSQL=1`
+also works, because those backends are pure C with no vendored engine; DuckDB
+and GPU are not viable that way.
+
+### Compute runs interpreted
+
+`wamrc`, the WAMR AOT compiler, is not published for cosmo (it needs LLVM, which
+is too large to bundle into a fat APE). `compute.call` is correct on Windows but
+runs through the interpreter, so compute-heavy workloads are slower than on a
+native host with `hull tools install wamrc`. Building `wamrc` from source with
+`make wamrc` is the alternative.
+
+### There is no kernel sandbox on Windows
+
+Cosmopolitan's `pledge()` and `unveil()` return 0 and do nothing on Windows
+(measured with cosmocc 4.0.2 on Windows 11: `pledge("stdio", NULL)` returns 0
+and a following `socket()` still succeeds). Startup logs one warning saying so.
+Hull's capability layer, the manifest allowlists for `fs`, `env` and `hosts`,
+still applies in full, and it is the only enforcement boundary on this host.
+Treat a Windows deployment as capability-sandboxed but not kernel-sandboxed.
+
 ## Exit codes on Windows (read this before scripting `hull`)
 
 **On Windows, a POSIX-style shell cannot tell whether `hull` succeeded.** In
