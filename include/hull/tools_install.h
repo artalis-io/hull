@@ -66,6 +66,14 @@ typedef struct {
      * (the floor) point it at a sentinel file (crt1.o) that is never exec-looked
      * up. NULL for a single-binary tool. */
     const char *bundle_entry;
+    /* 1 when bundle_entry names an EXECUTABLE driver (zig, cosmocc), 0 when it
+     * is a data sentinel that only proves the bundle is present (crt1.o,
+     * libhull_platform.a). The resolver used to infer this from the filesystem
+     * by probing access(X_OK), which is wrong on a host where that probe cannot
+     * succeed for a file the installer itself just wrote - see
+     * hl_tools_lookup_path. Declaring the intent keeps the data-only fallback
+     * (resolve to the DIRECTORY) exact while letting a real driver resolve. */
+    int         bundle_entry_exec;
     /* Asset-name shape for a bundle. 0 (default): the ARCH is baked into the
      * name and the bundle is published for exactly one platform, so the asset is
      * `hull-<name>.tar` (the libc-musl-<arch> floor). 1: the name is arch-free

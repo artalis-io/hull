@@ -138,6 +138,7 @@ static const HlToolSpec REGISTRY[] = {
         .has_darwin_arm64     = 1,
         .is_bundle            = 1,
         .bundle_entry         = "zig",   /* the zig driver binary */
+        .bundle_entry_exec    = 1,
         .bundle_per_platform  = 1,
     },
     /* The trimmed Cosmopolitan cosmocc toolchain (+ a busybox-w64 ride-along at
@@ -162,6 +163,7 @@ static const HlToolSpec REGISTRY[] = {
         .has_cosmo            = 1,
         .is_bundle            = 1,
         .bundle_entry         = "bin/cosmocc",
+        .bundle_entry_exec    = 1,
     },
     { 0 }  /* sentinel */
 };
@@ -354,6 +356,53 @@ static int find_on_path(const char *name, char *out, size_t out_sz)
     return hl_host_find_in_path(name, out, out_sz) == 1 ? 0 : -1;
 }
 
+/* Is a bundle's entry usable as the thing the resolver should return?
+ *
+ * access(X_OK) is the right probe wherever it means something. It is what keeps
+ * a data-only bundle - crt1.o for the musl floors, libhull_platform.a for the
+ * platform ones - from being mistaken for a toolchain, and build.lua depends on
+ * those resolving to their DIRECTORY instead.
+ *
+ * Windows has no POSIX exec bit. access(X_OK) there reflects an execute ACL,
+ * and hl_tar_extract sets modes with chmod(), which does not grant one. So a
+ * bundle this very installer just laid down fails its own X_OK probe: the entry
+ * misses, the resolver falls through to the install directory, and every
+ * consumer expecting a driver path gets a directory instead. hull doctor then
+ * looks for busybox beside "the driver", finds ~/.hull/tools rather than
+ * ~/.hull/tools/cosmocc/bin, and reports the toolchain unusable - so
+ * `hull tools install cosmocc` succeeds and `hull doctor` still says not ready.
+ *
+ * Where the SPEC declares the entry an executable, trust the spec on that host
+ * and accept a regular file. POSIX behaviour is unchanged: there, a driver that
+ * is not executable is genuinely broken and must not resolve. */
+/* The same X_OK problem as bundle_entry_usable, for the single-binary shape.
+ * A non-bundle tool IS its executable, so there is no data-only case to keep
+ * apart here - on a host where the installer cannot make what it wrote pass
+ * X_OK, a regular file at the canonical install path is the tool.
+ *
+ * Latent rather than live today: every single-binary tool in the registry
+ * (wamrc) is has_cosmo = 0, so none can be installed on Windows in the first
+ * place. Fixed alongside the bundle path so the two do not drift, and so a
+ * future cosmo-published single-binary tool does not reintroduce it. */
+static int single_binary_usable(const char *path)
+{
+    if (access(path, X_OK) == 0) return 1;
+    if (!hl_host_is_windows())   return 0;
+
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int bundle_entry_usable(const HlToolSpec *spec, const char *path)
+{
+    if (access(path, X_OK) == 0) return 1;
+    if (!spec->bundle_entry_exec) return 0;
+    if (!hl_host_is_windows())    return 0;
+
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
 int hl_tools_lookup_path(const char *name, const char *hull_exe,
                          char *out, size_t out_sz)
 {
@@ -373,7 +422,8 @@ int hl_tools_lookup_path(const char *name, const char *hull_exe,
         if (hl_tools_install_path(name, bdir, sizeof(bdir)) == 0) {
             char be[PATH_MAX];
             int n = snprintf(be, sizeof(be), "%s/%s", bdir, bspec->bundle_entry);
-            if (n > 0 && (size_t)n < sizeof(be) && access(be, X_OK) == 0) {
+            if (n > 0 && (size_t)n < sizeof(be) &&
+                bundle_entry_usable(bspec, be)) {
                 int m = snprintf(out, out_sz, "%s", be);
                 if (m < 0 || (size_t)m >= out_sz) return -1;
                 return 0;
@@ -387,7 +437,7 @@ int hl_tools_lookup_path(const char *name, const char *hull_exe,
      *    identically across helpers. */
     char cand[PATH_MAX];
     if (hl_tools_install_path(name, cand, sizeof(cand)) == 0 &&
-        access(cand, X_OK) == 0) {
+        single_binary_usable(cand)) {
         int n = snprintf(out, out_sz, "%s", cand);
         if (n < 0 || (size_t)n >= out_sz) return -1;
         return 0;
