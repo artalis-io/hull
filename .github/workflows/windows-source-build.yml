@@ -59,7 +59,7 @@ name: Windows source build + unit tests + app build (cosmocc, -O0)
 # LINUX. Both gaps are now closed here; see each step for the reasoning.
 #
 # Still NOT covered here, on purpose: optimized-build correctness (this job is
-# -O0, see below), the WASM surface (HL_ENABLE_WASM=0, see below), and the full
+# -O0, see below) and the full
 # 108-binary unit suite (cost + wedge exposure, see the unit-test step).
 #
 # WHAT THIS IS NOT: it does not produce a shippable artifact. Every released
@@ -92,8 +92,15 @@ name: Windows source build + unit tests + app build (cosmocc, -O0)
 #   the only job where -O0 is load-bearing: if it ever regresses, the failure
 #   should be one line in the probe, not a 45-minute wedge on a -O2 TU.
 #
-# HL_ENABLE_WASM=0: WAMR under cosmocc-on-Windows is unproven and would make a
-# "quick" job slow and flaky. The WASM surface is covered on Linux in ci.yml.
+# HL_ENABLE_WASM=1: WAMR builds and runs under cosmocc on Windows. This was 0
+# on the rationale that it was "unproven and would make a quick job slow and
+# flaky". Unproven was accurate; the inference was not. What actually blocked it
+# was the CRLF mismatch fixed by the checkout step below - the build never
+# reached WAMR's sources, it died on the patch-staging gate refusing a submodule
+# the runner had just cloned. Measured once that was fixed: the from-source job
+# goes 5.3 -> 8.7 min against a 25 min timeout, the app-build job 9.1 -> 17.1
+# against 45. WASM is compiled into the cosmo base and ships to Windows users,
+# so leaving it off here meant shipping a capability no Windows job ever built.
 #
 # Non-required. If it proves flaky, move it to nightly.yml rather than letting
 # it block PRs - a hang-prone job on the PR path is worse than no job. That
@@ -210,7 +217,7 @@ env:
 
 jobs:
   windows-source-build:
-    name: build hull.com from source on Windows (cosmocc, HL_ENABLE_WASM=0)
+    name: build hull.com from source on Windows (cosmocc, HL_ENABLE_WASM=1)
     runs-on: windows-latest
     # Backstop only. The build step's watchdog now catches a stall after 5
     # minutes of silence (a healthy build finishes in ~3-4 min and never goes
@@ -221,6 +228,23 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      # Both gits on this runner must agree about line endings, or a freshly
+      # cloned submodule reads as 1551 modified files.
+      #
+      # actions/checkout runs Git for Windows, whose SYSTEM gitconfig sets
+      # core.autocrlf=true, so it writes CRLF working trees. Every build step
+      # below runs under `shell: msys2 {0}`, whose git has autocrlf unset, so it
+      # compares those CRLF files against an LF index and calls them modified.
+      # Measured on vendor/wamr immediately after checkout: 1551 modified, ZERO
+      # mode changes, whole files replaced line for line - the CRLF signature.
+      # scripts/wamr_apply_patches.sh then refuses ("working tree is dirty").
+      #
+      # Hull's own .gitattributes pins Hull's files to LF, but vendor/wamr is a
+      # separate repository those attributes do not reach, so the runner has to
+      # be told before the clone happens.
+      - name: Check out LF, so both gits on this runner agree
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: recursive   # vendor/keel is required to link
@@ -486,7 +510,7 @@ jobs:
           # second caller and the multi-arch platform build in the app-build
           # job is a third. The retry rule is subtle enough that a drifted
           # copy would be worse than no copy.
-          bash .github/scripts/make-watched.sh "hull" build-output.log CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+          bash .github/scripts/make-watched.sh "hull" build-output.log CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=1 -j2
 
           # Never trust the exit status alone here - assert the artifact.
           test -f build/hull || { echo "FAIL build/hull was not produced"; exit 1; }
@@ -653,7 +677,7 @@ jobs:
           for kv in $KNOWN; do targets="$targets build/${kv%%:*}"; done
           for s in $PROBE; do targets="$targets build/$s"; done
 
-          bash .github/scripts/make-watched.sh "tests" test-build.log CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 $targets
+          bash .github/scripts/make-watched.sh "tests" test-build.log CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=1 -j2 $targets
 
           # Several suites mkdtemp under /tmp, which for an APE resolves via
           # TMP/TEMP rather than a real /tmp. The msys2 shell action sets both.
@@ -792,13 +816,30 @@ jobs:
   # NOT REQUIRED, same as its sibling: nightly only.
   # ---------------------------------------------------------------------------
   windows-app-build:
-    name: hull built on Windows builds + runs an app (cosmocc, HL_ENABLE_WASM=0)
+    name: hull built on Windows builds + runs an app (cosmocc, HL_ENABLE_WASM=1)
     runs-on: windows-latest
     # Three builds, not one, plus up to 3 stall retries each. The watchdog is
     # what should stop a hang; this is the backstop behind it.
     timeout-minutes: 45
 
     steps:
+      # Both gits on this runner must agree about line endings, or a freshly
+      # cloned submodule reads as 1551 modified files.
+      #
+      # actions/checkout runs Git for Windows, whose SYSTEM gitconfig sets
+      # core.autocrlf=true, so it writes CRLF working trees. Every build step
+      # below runs under `shell: msys2 {0}`, whose git has autocrlf unset, so it
+      # compares those CRLF files against an LF index and calls them modified.
+      # Measured on vendor/wamr immediately after checkout: 1551 modified, ZERO
+      # mode changes, whole files replaced line for line - the CRLF signature.
+      # scripts/wamr_apply_patches.sh then refuses ("working tree is dirty").
+      #
+      # Hull's own .gitattributes pins Hull's files to LF, but vendor/wamr is a
+      # separate repository those attributes do not reach, so the runner has to
+      # be told before the clone happens.
+      - name: Check out LF, so both gits on this runner agree
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: recursive
@@ -884,7 +925,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$PATH:$PWD/cosmo/bin"
-          bash .github/scripts/make-watched.sh "platform-cosmo" platform-cosmo.log platform-cosmo CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2
+          bash .github/scripts/make-watched.sh "platform-cosmo" platform-cosmo.log platform-cosmo CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=1 -j2
           ls -la build/libhull_platform.x86_64-cosmo.a build/libhull_platform.aarch64-cosmo.a
 
       # TRANSIENT GUARD - observed once, NOT reproduced. Do not "simplify" it,
@@ -935,7 +976,7 @@ jobs:
           export PATH="$PATH:$PWD/cosmo/bin"
 
           embed_build() {
-            bash .github/scripts/make-watched.sh "$1" hull-embed.log               CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 EMBED_PLATFORM=cosmo -j2
+            bash .github/scripts/make-watched.sh "$1" hull-embed.log               CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=1 EMBED_PLATFORM=cosmo -j2
           }
 
           if ! embed_build "hull-embed"; then
