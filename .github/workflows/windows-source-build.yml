@@ -627,13 +627,19 @@ jobs:
           # suite:baseline-failure-count   ("crash" = printed no summary)
           #
           # test_tools_install: status_managed_single_binary and
-          #   status_managed_executable_bundle. Both write an extensionless file,
-          #   chmod 0755, and expect hl_tools_status to resolve it. Windows takes
-          #   executability from the EXTENSION, not a permission bit - measured
-          #   with cosmocc 4.0.2 on Windows 11: an extensionless file chmod'd
-          #   0755 reads back mode 664 and access(X_OK) returns -1, while the
-          #   same file named .exe or .com reads 775 and access(X_OK) returns 0.
-          #   The suite is asserting POSIX semantics the host does not have.
+          #   status_managed_executable_bundle. Both create a file, chmod 0755,
+          #   and expect hl_tools_status (access(X_OK)) to resolve it. On Windows
+          #   access(X_OK) reflects a real execute ACL, and chmod on a
+          #   newly-created file does not grant one. Measured with cosmocc 4.0.2
+          #   on Windows 11, in two different directories:
+          #     printf > f; chmod 0755 f          -> access(X_OK) false
+          #     .hull/tools/cosmocc/bin/cosmocc   -> access(X_OK) TRUE
+          #   That second file is extensionless too, so this is not about the
+          #   extension: a file the installer extracted carries an execute ACL
+          #   and a chmod'd one does not. A .exe/.com name also reads executable
+          #   regardless. So the product path works on Windows - a managed
+          #   cosmocc DOES resolve - and it is the tests' setup that assumes
+          #   chmod is sufficient.
           # test_tar: extract_nested_tree. Cause not yet established.
           KNOWN="test_tools_install:2 test_tar:1"
 
