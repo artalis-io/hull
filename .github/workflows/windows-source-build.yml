@@ -185,6 +185,15 @@ on:
   schedule:
     - cron: "20 6 * * *"
   workflow_dispatch:
+    inputs:
+      probe_suites:
+        description: >-
+          Space-separated unit suites to BUILD and RUN without gating, to find
+          out how they behave on Windows before committing them to ENFORCED or
+          KNOWN. Reports a failure count per suite and never fails the job.
+          Empty on the schedule, so nightly cost is unchanged.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -595,15 +604,60 @@ jobs:
           set -uo pipefail
           export PATH="$PATH:$PWD/cosmo/bin"
 
+          # Every suite below was MEASURED on this runner via the PROBE tier
+          # before being placed, not assumed: runs 34632645185 (20 candidates)
+          # and 34633757865 (6 more, including the two expensive ones). A suite
+          # is in ENFORCED because it came back clean, or in KNOWN with a count
+          # that the probe actually printed.
+          #
+          # test_lua and test_js are the ones that matter most here. The
+          # sizeof-on-array-parameter bug in the bytecode-cache helpers shipped
+          # through a green Windows leg precisely because neither was built on
+          # this platform.
           ENFORCED="test_host test_tool test_vfs test_static test_cacert
                     test_dispatch test_csp test_parse_size test_signature
-                    test_release test_fs test_compiler"
+                    test_release test_fs test_compiler
+                    test_lua test_js test_crypto test_db test_db_backend
+                    test_blob test_release_io test_cli_log test_embed
+                    test_sbom test_obj_emit test_verify_self
+                    test_hex test_arena test_seal_arena test_path_normalize
+                    test_mime test_host_match test_module_registry
+                    test_module_resolver test_manifest_seal test_time test_env"
+
           # suite:baseline-failure-count   ("crash" = printed no summary)
-          KNOWN=""
+          #
+          # test_tools_install: status_managed_single_binary and
+          #   status_managed_executable_bundle. Both create a file, chmod 0755,
+          #   and expect hl_tools_status (access(X_OK)) to resolve it. On Windows
+          #   access(X_OK) reflects a real execute ACL, and chmod on a
+          #   newly-created file does not grant one. Measured with cosmocc 4.0.2
+          #   on Windows 11, in two different directories:
+          #     printf > f; chmod 0755 f          -> access(X_OK) false
+          #     .hull/tools/cosmocc/bin/cosmocc   -> access(X_OK) TRUE
+          #   That second file is extensionless too, so this is not about the
+          #   extension: a file the installer extracted carries an execute ACL
+          #   and a chmod'd one does not. A .exe/.com name also reads executable
+          #   regardless. So the product path works on Windows - a managed
+          #   cosmocc DOES resolve - and it is the tests' setup that assumes
+          #   chmod is sufficient.
+          # test_tar: extract_nested_tree asserts (st.st_mode & S_IXUSR) on a
+          #   file the extractor wrote and chmod'd. Same root cause as the two
+          #   above: measured on Windows 11, chmod 0755 on a newly created
+          #   EXTENSIONLESS file reads back mode 664, so S_IXUSR is never set
+          #   (the same name as .exe or .com reads 775). Both suites assert that
+          #   a chmod'd exec bit is observable; on this host it is not.
+          KNOWN="test_tools_install:2 test_tar:1"
+
+          # Candidates under investigation, supplied by workflow_dispatch.
+          # Built and run but never gating: this is how a suite earns a
+          # place in ENFORCED (clean) or KNOWN (a real, recorded baseline)
+          # instead of one being guessed at.
+          PROBE="${{ github.event.inputs.probe_suites }}"
 
           targets=""
           for s in $ENFORCED; do targets="$targets build/$s"; done
           for kv in $KNOWN; do targets="$targets build/${kv%%:*}"; done
+          for s in $PROBE; do targets="$targets build/$s"; done
 
           bash .github/scripts/make-watched.sh "tests" test-build.log CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=0 -j2 $targets
 
@@ -667,6 +721,28 @@ jobs:
             fi
           done
 
+          if [ -n "${PROBE// /}" ]; then
+            echo "====================== PROBE ======================="
+            echo "(informational only - these do not gate this job)"
+            for s in $PROBE; do
+              if [ ! -x "build/$s" ]; then
+                echo "probe     $s: DID NOT BUILD"
+                continue
+              fi
+              out=$(HULL_QUIET_AOT=1 "./build/$s" 2>&1)
+              n=$(fails_of "$out")
+              if [ "$n" = "0" ]; then
+                echo "probe     $s: clean -> candidate for ENFORCED"
+              elif [ "$n" = "crash" ]; then
+                echo "probe     $s: CRASHED (printed no summary)"
+                echo "$out" | tail -15 | sed "s/^/            /"
+              else
+                echo "probe     $s: $n failure(s) -> KNOWN baseline $s:$n"
+                echo "$out" | grep '\[  FAILED  \] [a-z_]*\.' \
+                            | sed "s/ ([0-9]*ns)//" | sed "s/^/            /" | sort -u
+              fi
+            done
+          fi
           echo ""
           if [ "$rc_step" -ne 0 ]; then
             echo "Windows unit suites: FAILED (see above)."
