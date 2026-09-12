@@ -713,8 +713,12 @@ $(BUILDDIR)/test_release: $(TESTDIR)/hull/test_release.c $(RELEASE_OBJ) $(TEST_C
 		$(RELEASE_OBJ) $(TEST_COMMON_LIBS)
 
 # Tool registry + path helpers - standalone module, no runtime deps.
-$(BUILDDIR)/test_tools_install: $(TESTDIR)/hull/test_tools_install.c $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ)
+# cap_tar.o: extracted_bundle_resolves_like_doctor_resolves installs through the
+# REAL extractor (hl_tar_extract) rather than faking a layout with chmod, so the
+# install -> resolve seam is covered the way `hull tools install` + `hull doctor`
+# actually exercise it.
+$(BUILDDIR)/test_tools_install: $(TESTDIR)/hull/test_tools_install.c $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ) $(BUILDDIR)/cap_tar.o | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) $(HOST_OBJ) $(BUILDDIR)/cap_tar.o
 
 # release_io/sbom/verify_self now hash via the cap layer's self-contained
 # SHA-256 (hl_cap_crypto_sha256) instead of mbedtls_sha256, so these focused
