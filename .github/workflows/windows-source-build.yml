@@ -918,6 +918,15 @@ jobs:
           #
           # timeout(1) is GNU coreutils, already in the MSYS base. -k sends
           # KILL a grace period after TERM for a suite that ignores TERM.
+          # SUITES THAT WIPE THE SHARED BUILD TREE MUST BE PROBED ALONE.
+          # e2e-cache-cosmo runs `$(MAKE) clean` then a full EMBED_PLATFORM=cosmo
+          # rebuild (mk/tests.mk). It is not slow by accident and it is not
+          # hanging - it legitimately takes ~10 min, and it deletes build/ on the
+          # way, so EVERY suite after it in the same job pays a from-scratch
+          # rebuild inside its own timeout and reports TIMEOUT for a reason that
+          # has nothing to do with it. Measured: e2e-multipart went from 8s to a
+          # 150s timeout purely by following it, recompiling Lua and mbedTLS.
+          # Probe it in a dispatch of its own, with a cap that fits a full build.
           limit="${{ inputs.probe_timeout }}"
           case "$limit" in ''|*[!0-9]*) limit=300 ;; esac
           echo "probe-e2e: per-suite timeout ${limit}s"
