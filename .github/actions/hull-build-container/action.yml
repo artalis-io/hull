@@ -17,6 +17,37 @@ inputs:
       digest-pinned base image, which is already deterministic.
     required: false
     default: ""
+  cache:
+    description: >
+      Cache the image layers in the GitHub Actions cache (buildx type=gha).
+
+      OFF by default, and deliberately so. This action also builds the image
+      the RELEASE pipeline uses, and a cached layer is a different trust anchor
+      from the base-image digest + apt snapshot pins the Dockerfile documents:
+      it introduces a mutable store, plus two Docker-org actions, into a path
+      that today depends on neither. Release therefore keeps building from
+      source every time.
+
+      CI's reproducibility jobs opt in, because the alternative is worse for
+      them. snapshot.ubuntu.com is a single Canonical service with no public
+      mirror - ordinary Ubuntu mirrors carry the CURRENT archive and have no
+      /ubuntu/<timestamp>/ space at all - so when it degrades, every one of
+      those jobs fails inside `docker build`, before a line of Hull is
+      compiled. Measured 2026-09-08: 502/503 across all three of its IPs for
+      hours, four jobs red on every push, and `apt-get -o Acquire::Retries`
+      (added in the Dockerfile) does not help against an outage that long.
+
+      Caching does not weaken what those jobs prove. The image is a pure
+      function of the Dockerfile: the base is digest-pinned and the apt
+      snapshot is derived from that base, so a cache HIT and a cache MISS
+      produce the same layers by construction - that is exactly the property
+      the reproducible build asserts. A hit simply skips the network.
+
+      Cost worth knowing: the image carries clang plus a ~330 MB cosmocc, so
+      each arch's cache runs to roughly a gigabyte against the repo's 10 GB
+      budget, and can evict other caches.
+    required: false
+    default: "false"
   user:
     description: >
       Container user. Default (empty) runs as root, fine when the job only
@@ -29,7 +60,30 @@ inputs:
 runs:
   using: composite
   steps:
+    # Two build paths, one image. The cached one is a straight swap of the
+    # builder: same Dockerfile, same context, same build-arg, same tag, so the
+    # `docker run` below cannot tell which produced it (`load: true` puts the
+    # result in the local daemon exactly as `docker build` does).
+    #
+    # The scope is per-arch: ubuntu-24.04 and ubuntu-24.04-arm build genuinely
+    # different images, and sharing one scope would make them evict each other
+    # on every run.
+    - name: Set up buildx
+      if: inputs.cache == 'true'
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+    - name: Build reproducible container (layer-cached)
+      if: inputs.cache == 'true'
+      uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+      with:
+        context: .github/docker
+        file: .github/docker/Dockerfile.build
+        build-args: SOURCE_DATE_EPOCH=${{ inputs.source-date-epoch }}
+        tags: hull-build:pinned
+        load: true
+        cache-from: type=gha,scope=hull-build-${{ runner.arch }}
+        cache-to: type=gha,mode=max,scope=hull-build-${{ runner.arch }}
     - name: Build reproducible container
+      if: inputs.cache != 'true'
       shell: bash
       run: |
         docker build \
