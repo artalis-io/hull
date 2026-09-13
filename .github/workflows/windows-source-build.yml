@@ -201,6 +201,14 @@ on:
           the schedule, so nightly cost is unchanged.
         required: false
         default: ""
+      probe_timeout:
+        description: >-
+          Seconds any ONE probed e2e suite may run before it is killed and
+          reported TIMEOUT. Bounds the damage a non-terminating suite does:
+          without it the first hang eats the rest of the job and every suite
+          after it reports nothing at all. Default 300.
+        required: false
+        default: "300"
       probe_suites:
         description: >-
           Space-separated unit suites to BUILD and RUN without gating, to find
@@ -889,11 +897,44 @@ jobs:
 
 
           rc_all=0
+          # PER-SUITE TIMEOUT. Without one, a suite that hangs consumes the
+          # whole remaining job and every suite after it reports nothing - the
+          # run is cancelled at the job cap and the results are simply absent,
+          # which reads identically to "never dispatched". Measured on the
+          # 93-suite sweep: e2e-smtp and e2e-cache-cosmo each hung and cost
+          # their batch 5 and 16 results respectively, and 21 of 93 suites went
+          # unmeasured for that reason alone.
+          #
+          # A hang is therefore reported as its own verdict rather than folded
+          # into FAILED. They are different findings: FAILED is an assertion
+          # this platform does not satisfy, TIMEOUT is a suite that does not
+          # terminate here, and only the second one silently destroys the rest
+          # of the sample.
+          #
+          # timeout(1) is GNU coreutils, already in the MSYS base. -k sends
+          # KILL a grace period after TERM for a suite that ignores TERM.
+          limit="${{ inputs.probe_timeout }}"
+          case "$limit" in ''|*[!0-9]*) limit=300 ;; esac
+          echo "probe-e2e: per-suite timeout ${limit}s"
+
+          # A killed suite can leave a backgrounded hull still holding its port,
+          # which would fail the NEXT suite for a reason that has nothing to do
+          # with it. Reap before moving on.
+          reap() {
+            powershell.exe -NoProfile -Command               "Get-Process hull,cc1,cosmocc,'*cosmo-gcc' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"               >/dev/null 2>&1 || true
+          }
+
           for t in ${{ inputs.probe_e2e }}; do
             echo "===================== $t ====================="
             start=$(date +%s)
-            if "$MAKE_BIN" "$t" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=1                  > "e2e-$t.log" 2>&1; then
+            rc=0
+            timeout -k 15 "$limit" "$MAKE_BIN" "$t" CC=cosmocc AR="$AR" HL_OPT=-O0 HL_ENABLE_WASM=1 > "e2e-$t.log" 2>&1 || rc=$?
+            if [ "$rc" -eq 0 ]; then
               verdict="ok"
+            elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+              verdict="TIMEOUT"
+              rc_all=1
+              reap
             else
               verdict="FAILED"
               rc_all=1
