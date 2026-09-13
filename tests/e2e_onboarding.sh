@@ -253,7 +253,13 @@ BRC=$?
 # that failed - this took the success path against a build that had produced
 # nothing and reported six artifact assertions as defects. $BRC is still shown
 # in the failure message, where it is informative rather than load-bearing.
-if echo "$BOUT" | grep -qE "cannot find (libhull_platform\.a|platform archives)"; then
+# The unsupported configurations, by the message each prints:
+#   - no platform library at all (plain `make`, no `make platform`)
+#   - no bundled app_main.o, which the compiler-free emit path needs
+#     (build.lua) and which only an EMBED_PLATFORM build carries
+# Both mean "this hull cannot link an app here", which is a SKIP. Anything
+# else that produces no artifact is a regression and must FAIL.
+if echo "$BOUT" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
     echo "  SKIP build assertions (this hull has no platform library):"
     echo "$BOUT" | sed 's/^/      /'
     SKIP=$((SKIP + 1))
