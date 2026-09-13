@@ -223,9 +223,21 @@ V2=$("$HULL" manifest "$WORKDIR/app" --verbose 2>&1 || true)
 assert_contains "pre-command --verbose shows internals"  "$V1" "src/hull/"
 assert_contains "post-command --verbose shows internals" "$V2" "src/hull/"
 
-# ── 7-9. build artifact naming + hygiene (POSIX invariants) ──────────
+# ── 7-9. build artifact naming + hygiene ─────────────────────────────
+#
+# The default artifact is `app` + hl_host_exe_suffix(): plain `app` on
+# Linux/macOS, `app.com` on Windows, because Windows will not execute an
+# extensionless file and `.com` is the APE convention (CLAUDE.md, "hull build
+# output naming"). This section used to hardcode the POSIX spelling, so on
+# Windows it failed against CORRECT behaviour.
+#
+# Ask this hull what it produces rather than assuming. The POSIX expectations
+# below are unchanged when the suffix is empty; the Windows ones are asserted
+# with equal strictness, not skipped.
+EXE_SUFFIX=$("$HULL" doctor --json 2>/dev/null | sed -n 's/.*"exe_suffix"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+ARTIFACT="app${EXE_SUFFIX}"
 echo ""
-echo "── hull build: POSIX output naming is unchanged ──"
+echo "── hull build: output naming (artifact = ${ARTIFACT}) ──"
 BOUT=$("$HULL" build --no-verify-platform "$WORKDIR/app" 2>&1)
 BRC=$?
 # A build failure is only a legitimate SKIP when this hull demonstrably cannot
