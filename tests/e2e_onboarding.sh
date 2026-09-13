@@ -171,7 +171,18 @@ FIXOUT=$("$HULL" doctor --fix --json 2>&1 || true)
 assert_contains "--fix and --json are mutually exclusive" \
                 "$FIXOUT" "mutually exclusive"
 FIXOUT=$("$HULL" doctor --fix 2>&1 || true)
-if "$HULL" doctor >/dev/null 2>&1; then
+# Readiness comes from the JSON, never from hull's exit status. On Windows an
+# APE's status is shifted and a POSIX shell reads 0 for EVERY failure (#1521),
+# so `if "$HULL" doctor` took the ready branch against a doctor that had work
+# to do, and then demanded "nothing to do" from it. CLAUDE.md states the rule
+# this broke: assert the artifact or the printed output, never the status.
+#
+# "hull_build" is computed from exactly the condition doctor exits 0 on -
+# platform library embedded AND a usable compiler - so this is the same test,
+# read somewhere a shifted status cannot corrupt it.
+DOCTOR_READY=$("$HULL" doctor --json 2>/dev/null |
+               sed -n 's/.*"hull_build"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+if [ "$DOCTOR_READY" = "ready" ]; then
     assert_contains "--fix is a clean no-op when already ready" \
                     "$FIXOUT" "nothing to do"
 else
