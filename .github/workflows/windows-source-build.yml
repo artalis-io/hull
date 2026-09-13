@@ -969,6 +969,23 @@ jobs:
           echo "probe-e2e: informational only; this step does not gate the job."
           exit 0
 
+      # The probe echoes only tail -30 of each suite, which is enough to see
+      # THAT a suite failed and almost never enough to see WHY: the 93-suite
+      # sweep left 17 failures unclassifiable because the decisive line had
+      # scrolled past. e2e-compute is the worked example - its last 30 lines are
+      # all PASS followed by "Error 143", so the tail shows a suite dying on a
+      # signal and hides whatever preceded it.
+      #
+      # The logs are already written per suite; they were simply never kept.
+      - name: Upload the per-suite e2e probe logs
+        if: always() && inputs.probe_e2e != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-windows-e2e-probe-logs
+          path: e2e-*.log
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload the unit-test build log on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
