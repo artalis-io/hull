@@ -1,0 +1,47 @@
+# Line endings are a property of the REPOSITORY, not of whoever cloned it.
+#
+# Without this file, each checkout inherits core.autocrlf from the machine.
+# Git for Windows sets it to `true` at SYSTEM level, so a Windows working tree
+# gets CRLF while Linux and macOS get LF. Committing normalises back to LF, so
+# the history has stayed clean by luck rather than by rule: one contributor with
+# core.autocrlf=false on Windows commits CRLF and the tree is permanently mixed.
+#
+# It is not only a tidiness question. Three things here read bytes off DISK and
+# care what they are:
+#   - scripts/wamr_apply_patches.sh pins patches/wamr/*.patch by sha256 of the
+#     working-tree file. A CRLF checkout cannot match a recorded LF hash, so the
+#     WASM build fails on Windows with "stale patch" for a reason that has
+#     nothing to do with the patch.
+#   - site/install.sh is minisign-signed (site/install.sh.minisig). A signature
+#     over LF content does not verify against a CRLF checkout.
+#   - The reproducible-build jobs compare artefacts across platforms.
+#
+# `text=auto` lets Git decide text vs binary by content; `eol=lf` then checks
+# text out as LF on every platform, Windows included. MSYS2, Git Bash, VS Code,
+# PowerShell and MSVC all read LF without complaint.
+* text=auto eol=lf
+
+# ── Byte-exact files ────────────────────────────────────────────────────────
+# `binary` is shorthand for `-text -diff`: never normalised, never line-diffed.
+# Content detection would catch most of these, but declaring them is the point -
+# a corrupted fixture is discovered late and looks like a code bug.
+*.wasm    binary
+*.aot     binary
+*.woff2   binary
+*.bin     binary
+*.der     binary
+*.pdf     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.webp    binary
+*.ico     binary
+*.minisig binary
+*.tar     binary
+*.gz      binary
+*.zip     binary
+
+# Fuzzer seed corpora: extensionless, byte-exact inputs. Normalising one changes
+# what it exercises without changing anything a reviewer would notice.
+fuzz/corpus_*/** binary

@@ -31,6 +31,8 @@
 
 #include "utest.h"
 #include "hull/tools_install.h"
+#include "hull/shared/host.h"
+#include "hull/cap/tar.h"
 
 #include <errno.h>
 #include <ftw.h>
@@ -40,6 +42,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "test_tmpdir.h"
 
 /* ── Fixture: per-test sandbox under /tmp ───────────────────────────── */
 
@@ -77,8 +80,8 @@ static int rm_recursive(const char *path)
 }
 
 UTEST_F_SETUP(tools_fixture) {
-    snprintf(utest_fixture->tmpdir, sizeof(utest_fixture->tmpdir),
-             "/tmp/hull-tools-test-%d", getpid());
+    hl_test_path(utest_fixture->tmpdir, sizeof(utest_fixture->tmpdir),
+                 "hull-tools-test-%d", getpid());
     rm_recursive(utest_fixture->tmpdir);
     ASSERT_EQ(mkdir(utest_fixture->tmpdir, 0700), 0);
 
@@ -606,6 +609,76 @@ UTEST_F(tools_fixture, status_managed_single_binary) {
     ASSERT_EQ(st.size_bytes, 4096ULL);
 }
 
+/* ── install -> resolve, through the REAL extractor ──────────────────────
+ *
+ * Everything else in this file fakes an install with write_data(), i.e. create
+ * + chmod. That is not how a tool arrives: `hull tools install <bundle>` lands
+ * it with hl_tar_extract, and `hull doctor` then resolves it through
+ * hl_tools_status -> hl_tools_lookup_path, whose bundle probe is a single
+ * access(entry, X_OK).
+ *
+ * Nothing covered that seam end to end on any platform. discover_compilers in
+ * doctor.c falls back to hl_tools_status specifically so "a PATH-only probe
+ * would [not] report a hull-installed cosmocc as missing", and CI never
+ * exercises that branch because it puts cosmocc on PATH.
+ *
+ * It matters most where the two halves can disagree. On Windows access(X_OK)
+ * reflects an execute ACL rather than a permission bit, and hl_tar_extract sets
+ * modes with chmod(), so "extracted" and "executable" are not obviously the
+ * same thing there. This test asserts they are: install the way the installer
+ * installs, then resolve the way doctor resolves.
+ */
+static void tools_put_header(unsigned char *b, const char *name, size_t size,
+                             unsigned mode)
+{
+    memset(b, 0, 512);
+    strncpy((char *)b, name, 99);
+    snprintf((char *)(b + 100), 8, "%07o", mode);
+    snprintf((char *)(b + 124), 12, "%011o", (unsigned)size);
+    memset(b + 148, ' ', 8);
+    b[156] = '0';
+}
+
+UTEST_F(tools_fixture, extracted_bundle_resolves_like_doctor_resolves) {
+    /* A cosmocc-shaped bundle: the entry the registry names, plus one sibling
+     * so the directory is not degenerate. */
+    unsigned char *tar = calloc(1, 8192);
+    ASSERT_NE(tar, NULL);
+    size_t off = 0;
+    tools_put_header(tar + off, "bin/cosmocc", 6, 0755);
+    off += 512;
+    memcpy(tar + off, "DRIVER", 6);
+    off += 512;
+    tools_put_header(tar + off, "lib/x.a", 4, 0644);
+    off += 512;
+    memcpy(tar + off, "DATA", 4);
+    off += 512;
+    off += 1024;   /* two zero blocks: end of archive */
+
+    char root[PATH_MAX];
+    ASSERT_EQ(hl_tools_install_path("cosmocc", root, sizeof(root)), 0);
+    ASSERT_EQ(hl_tar_extract(tar, off, root), 0);
+    free(tar);
+
+    /* The file landed. */
+    char entry[PATH_MAX];
+    snprintf(entry, sizeof(entry), "%s/bin/cosmocc", root);
+    struct stat st;
+    ASSERT_EQ(stat(entry, &st), 0);
+
+    /* And doctor's resolver finds it. This is the assertion that matters: if a
+     * host cannot make an extracted file executable, `hull tools install
+     * cosmocc` succeeds and `hull doctor` still reports cosmocc missing, which
+     * would break `hull doctor --fix` - the primary Windows onboarding path. */
+    HlToolStatus ts;
+    ASSERT_EQ(hl_tools_status("cosmocc", NULL, &ts), 0);
+    ASSERT_TRUE(ts.managed);
+    ASSERT_TRUE_MSG(ts.resolved,
+        "extracted bundle entry did not resolve; hull tools install would "
+        "succeed while hull doctor still reports the tool missing");
+    ASSERT_STREQ(ts.path, entry);
+}
+
 UTEST_F(tools_fixture, status_managed_executable_bundle) {
     /* cosmocc is a bundle (bundle_entry "bin/cosmocc", executable): managed via
      * the sentinel, resolved to the entry, sized RECURSIVELY over the dir. */
@@ -667,6 +740,43 @@ UTEST_F(tools_fixture, status_sibling_source) {
     ASSERT_TRUE(st.resolved);
     ASSERT_EQ(st.source, HL_TOOL_SRC_SIBLING);
     ASSERT_STREQ(st.path, tool_path);
+}
+
+UTEST_F(tools_fixture, lookup_finds_a_tool_on_a_host_shaped_path) {
+    /* Step 3 of hl_tools_lookup_path walked PATH with a private ':'-splitting,
+     * '/'-joining loop, which on Windows - where PATH is ';'-separated with
+     * `C:\...` components - collapsed the whole list into one nonsense
+     * component and found nothing however much was installed. Building the
+     * search list with the HOST separator makes this test fail on that walker
+     * and pass on the shared resolver, on either host.
+     *
+     * The fixture points HOME at a fresh tmpdir, so the managed-install step
+     * cannot answer first and this really does exercise the PATH step. */
+    char bin[PATH_MAX], tool[PATH_MAX];
+    snprintf(bin,  sizeof(bin),  "%s/pathdir", utest_fixture->tmpdir);
+    ASSERT_EQ(mkdir(bin, 0755), 0);
+    snprintf(tool, sizeof(tool), "%s/wamrc", bin);
+    ASSERT_EQ(touch_exec(tool), 0);
+
+    const char *prev = getenv("PATH");
+    char saved[4096];
+    snprintf(saved, sizeof(saved), "%s", prev ? prev : "");
+
+    char list[PATH_MAX * 2];
+    snprintf(list, sizeof(list), "%s%c%s/nowhere",
+             bin, hl_host_path_list_sep(), utest_fixture->tmpdir);
+    setenv("PATH", list, 1);
+
+    char out[PATH_MAX];
+    int rc = hl_tools_lookup_path("wamrc", NULL, out, sizeof(out));
+
+    if (*saved) setenv("PATH", saved, 1); else unsetenv("PATH");
+
+    ASSERT_EQ(rc, 0);
+    /* The join keeps the COMPONENT's own separator, so a POSIX-shaped entry
+     * stays POSIX-shaped on every host - these paths get printed (hull doctor,
+     * hull tools list) and a mixed `.../pathdir\wamrc` reads like a bug. */
+    ASSERT_TRUE(strstr(out, "pathdir/wamrc") != NULL);
 }
 
 UTEST_MAIN()

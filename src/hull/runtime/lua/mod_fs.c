@@ -4,6 +4,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"   /* hl_lua_source_is_stdlib */
 #include "hull/utils/alloc.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/fs_resolve.h"  /* descriptor-relative virtual-root module read */
@@ -656,7 +657,7 @@ static int hl_lua_require(lua_State *L)
                 int caller_is_user = lua_getstack(L, 1, &ar) &&
                                      lua_getinfo(L, "S", &ar) &&
                                      ar.source &&
-                                     strncmp(ar.source, "hull.", 5) != 0;
+                                     !hl_lua_source_is_stdlib(ar.source);
                 if (caller_is_user)
                     hl_import_tracker_record(&lua->base, spec->name);
             }
@@ -865,8 +866,19 @@ static int hl_lua_require(lua_State *L)
                     return 1;
                 }
 
-                /* Compile the chunk - copies data into Lua bytecode */
-                int load_ok = luaL_loadbuffer(L, buf, nread, path) == LUA_OK;
+                /* Compile the chunk - copies data into Lua bytecode.
+                 * The leading "@" marks the chunkname as a FILE name. Lua
+                 * then renders errors as "path:line:" and, when the name is
+                 * longer than LUA_IDSIZE, luaO_chunkid truncates from the
+                 * FRONT ("...tail") so the file name survives. A bare name
+                 * is rendered [string "..."] and truncated from the BACK,
+                 * which drops the file name on any long path - e.g. under a
+                 * macOS $TMPDIR. Falls back to the bare path if it does not
+                 * fit, which is only ever the status quo. */
+                char chunkbuf[HL_MODULE_PATH_MAX + 1];
+                int load_ok = luaL_loadbuffer(
+                    L, buf, nread,
+                    hl_lua_chunkname(chunkbuf, sizeof chunkbuf, path)) == LUA_OK;
 
                 /* Reclaim file buffer - Lua owns the bytecode now */
                 lua->scratch->used = arena_saved;
@@ -945,7 +957,10 @@ int hl_lua_register_stdlib(HlLua *lua)
             if (strchr(e->name, ':')) continue;            /* JS / context */
             if (strncmp(e->name, "static/", 7) == 0) continue;
             if (strncmp(e->name, "templates/", 10) == 0) continue;
-            if (hl_lua_load_cached(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
+            char chunk[HL_MODULE_PATH_MAX + 1];
+            if (hl_lua_load_cached(L, (const char *)e->data, e->len,
+                                   hl_lua_chunkname(chunk, sizeof chunk,
+                                                    e->name)) != LUA_OK) {
                 log_error("[hull:c] failed to load stdlib module '%s': %s",
                           e->name, lua_tostring(L, -1));
                 lua_pop(L, 2); /* pop error + modules table */
@@ -969,7 +984,10 @@ int hl_lua_register_stdlib(HlLua *lua)
                 /* JSON data - store as raw string, decoded on first require() */
                 lua_pushlstring(L, (const char *)e->data, e->len);
             } else {
-                if (hl_lua_load_cached(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
+                char chunk[HL_MODULE_PATH_MAX + 1];
+                if (hl_lua_load_cached(L, (const char *)e->data, e->len,
+                                       hl_lua_chunkname(chunk, sizeof chunk,
+                                                        e->name)) != LUA_OK) {
                     log_error("[hull:c] failed to load app module '%s': %s",
                               e->name, lua_tostring(L, -1));
                     lua_pop(L, 2); /* pop error + modules table */

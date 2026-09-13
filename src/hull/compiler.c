@@ -6,6 +6,7 @@
 
 #include "hull/compiler.h"
 #include "hull/cap/tool.h"
+#include "hull/shared/host.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,14 +20,16 @@
 
 typedef struct {
     char cc[PATH_MAX];
+    /* The tool NAME, derived once at construction (hl_host_tool_name): the
+     * basename with any host executable suffix removed. Held rather than
+     * recomputed so sys_name() can keep returning a borrowed pointer. */
+    char name[64];
 } SysCtx;
 
 static const char *sys_name(HlCompiler *c)
 {
     SysCtx *ctx = (SysCtx *)c->ctx;
-    /* Return just the basename */
-    const char *slash = strrchr(ctx->cc, '/');
-    return slash ? slash + 1 : ctx->cc;
+    return ctx->name;
 }
 
 static int sys_is_available(HlCompiler *c)
@@ -109,6 +112,10 @@ HlCompiler *hl_compiler_system_new(const char *cc_path)
     SysCtx *ctx = (SysCtx *)malloc(sizeof(SysCtx));
     if (!ctx) return NULL;
     snprintf(ctx->cc, sizeof(ctx->cc), "%s", cc_path);
+    /* An over-long name cannot match anything a consumer compares against, so
+     * fall back to the invocation rather than to a truncation that could. */
+    if (hl_host_tool_name(cc_path, ctx->name, sizeof(ctx->name)) != 0)
+        snprintf(ctx->name, sizeof(ctx->name), "%s", cc_path);
     HlCompiler *c = (HlCompiler *)malloc(sizeof(HlCompiler));
     if (!c) { free(ctx); return NULL; }
     c->vtable = &sys_vtable;
@@ -117,6 +124,29 @@ HlCompiler *hl_compiler_system_new(const char *cc_path)
 }
 
 /* ── Native driver resolution (shared with the linker) ──────────── */
+
+int hl_driver_resolve_name(const char *name, char *out, size_t outsz)
+{
+    if (!name || !*name || !out || outsz == 0) return -1;
+
+    /* Already a path: the caller named a specific file, so use it verbatim. */
+    if (!strchr(name, '/') && !strchr(name, '\\')) {
+        /* A bare name goes through Hull's OWN PATH search rather than being
+         * left for exec to find. On Windows that is the difference between
+         * working and not: a Cosmopolitan APE is handed a POSIX-shaped PATH
+         * and its exec does not search it, so `--compiler=cosmocc` failed with
+         * "not found in PATH" on a box where `hull doctor` listed that very
+         * cosmocc - the two surfaces disagreeing about one toolchain.
+         *
+         * A miss falls through to the bare name, so POSIX behaviour is
+         * unchanged: exec still gets its turn, and this can only turn a
+         * failure into a success. */
+        if (hl_host_find_in_path(name, out, outsz) == 1) return 0;
+    }
+
+    int n = snprintf(out, outsz, "%s", name);
+    return (n > 0 && (size_t)n < outsz) ? 0 : -1;
+}
 
 /* Is `path` a runnable toolchain driver? Probe `<path> --version`. */
 static int driver_ok(const char *path)
@@ -166,7 +196,10 @@ int hl_driver_resolve_native(char *out, size_t outsz)
         if (driver_ok("/opt/cosmo/bin/cosmocc")) {
             snprintf(out, outsz, "/opt/cosmo/bin/cosmocc"); return 0;
         }
-        if (driver_ok("cosmocc")) { snprintf(out, outsz, "cosmocc"); return 0; }
+        if (hl_driver_resolve_name("cosmocc", path, sizeof(path)) == 0 &&
+            driver_ok(path)) {
+            snprintf(out, outsz, "%s", path); return 0;
+        }
         /* Fall through to cc/gcc/clang. They won't produce a working APE
          * against cosmo .a's, but letting them resolve gives a clearer
          * link-time error than a silent "no compiler found." */
@@ -174,8 +207,11 @@ int hl_driver_resolve_native(char *out, size_t outsz)
 #endif
 
     static const char *candidates[] = { "cc", "gcc", "clang", NULL };
-    for (const char **p = candidates; *p; p++)
-        if (driver_ok(*p)) { snprintf(out, outsz, "%s", *p); return 0; }
+    for (const char **p = candidates; *p; p++) {
+        char cand[PATH_MAX];
+        if (hl_driver_resolve_name(*p, cand, sizeof(cand)) != 0) continue;
+        if (driver_ok(cand)) { snprintf(out, outsz, "%s", cand); return 0; }
+    }
 
     return -1;
 }
@@ -190,6 +226,12 @@ HlCompiler *hl_compiler_select(const char *explicit_cc)
 
     /* Explicit named compiler (a path or a PATH name). */
     if (explicit_cc && !is_system) {
+        /* Resolve a bare name to an absolute path first (see
+         * hl_driver_resolve_name): exec's own PATH search cannot be relied on
+         * for this on Windows. */
+        char resolved[PATH_MAX];
+        if (hl_driver_resolve_name(explicit_cc, resolved, sizeof resolved) == 0)
+            explicit_cc = resolved;
         HlCompiler *c = hl_compiler_system_new(explicit_cc);
         if (c && hl_compiler_is_available(c)) return c;
         if (c) hl_compiler_destroy(c);

@@ -2079,6 +2079,54 @@ BUILD_FINGERPRINT := \
   APP_BASE_TLSLESS=$(HL_APP_BASE_TLSLESS)|\
   CC=$(CC)
 
+# ── Dry-run detection ───────────────────────────────────────────────
+#
+# `make -n` must DESCRIBE the build, never perform part of it. Two parse-time
+# $(shell ...) hooks below delete build artifacts (the fingerprint purge and
+# the fat-cosmo pair repair), and $(shell) runs during PARSING - which -n does
+# not suppress. So a dry run mutated the tree.
+#
+# That is not theoretical. tests/check_keel_flag_propagation.sh advertises
+# itself as "dry run, no artifacts" and shells `make -n <vars> libkeel.a` with
+# variables that differ from whatever the developer last built with. The
+# fingerprint mismatch fired the purge: running the LINT gate deleted 273
+# objects and build/hull out of a working tree.
+#
+# GNU make collects single-letter options into the FIRST word of MAKEFLAGS,
+# WITHOUT a leading dash (`-Bn` arrives as `Bn`); long options arrive as
+# separate dash-prefixed words. So a first word that carries no dash is the
+# short-option set, and an `n` in it means -n. No other make short option
+# contains an `n`, and checking for the dash keeps `--no-print-directory` -
+# which does contain one - from reading as a dry run.
+HL_MAKE_SHORT_OPTS := $(firstword $(MAKEFLAGS))
+ifeq ($(findstring -,$(HL_MAKE_SHORT_OPTS)),)
+HL_DRY_RUN := $(findstring n,$(HL_MAKE_SHORT_OPTS))
+endif
+
+# Goals that BUILD NOTHING must not fire it either. The purge exists to stop a
+# stale object from another configuration reaching a binary; a lint gate
+# produces no binary, so there is nothing to protect - and firing it there is
+# actively destructive, because a gate is normally run WITHOUT the flags the
+# tree was built with. `make lint` after `make CC=cosmocc HL_OPT=-O0
+# HL_ENABLE_WASM=0 ...` differs in every fingerprint field, so it deleted that
+# entire build: 429 objects and build/hull, measured, from running a gate.
+#
+# `check-%` covers every gate by construction, so a new one needs no edit here.
+# check-hardening is the single exception: it depends on $(BUILDDIR)/hull and
+# therefore really does build, and skipping the purge for it could let it
+# inspect a binary carrying stale objects.
+HL_INERT_GOALS := $(filter-out check-hardening,\
+                    $(filter lint lint-lua lint-js help check-%,$(MAKECMDGOALS)))
+ifneq ($(MAKECMDGOALS),)
+ifeq ($(filter-out $(HL_INERT_GOALS),$(MAKECMDGOALS)),)
+HL_NO_BUILD := 1
+endif
+endif
+
+# Either reason is enough: this is what the parse-time hooks below are guarded
+# on. Non-empty = leave the tree exactly as found.
+HL_TREE_MUST_NOT_CHANGE := $(HL_DRY_RUN)$(HL_NO_BUILD)
+
 BUILD_CONFIG_FILE := $(BUILDDIR)/.build-config
 
 # Parse-time: ensure builddir exists, then compare fingerprint. On
@@ -2099,6 +2147,8 @@ else
 PLATFORM_LIB_PURGE := $(BUILDDIR)/libhull_platform.a
 endif
 
+# Guarded: a dry run or a build-nothing goal leaves the tree alone (above).
+ifeq ($(HL_TREE_MUST_NOT_CHANGE),)
 $(shell mkdir -p $(BUILDDIR))
 $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)" || { \
     rm -f $(BUILDDIR)/cap_*.o $(BUILDDIR)/cmd_*.o $(BUILDDIR)/js_*.o $(BUILDDIR)/lua_rt_*.o \
@@ -2129,10 +2179,49 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
           $(BUILDDIR)/test_* 2>/dev/null; \
     printf '%s\n' '$(BUILD_FINGERPRINT)' > $(BUILD_CONFIG_FILE); \
 })
+endif
+
+# ── Fat-cosmo object-pair repair ────────────────────────────────────
+#
+# cosmocc writes every object TWICE - `foo.o` and `.aarch64/foo.o` - but only
+# the first is a make target, so an interrupted build leaves a half-written
+# pair that make skips as up to date and the fat link then dies on, naming the
+# archive rather than the cause. It stays dead until `make clean`. That is the
+# exact state the Windows source build inherits whenever its watchdog kills a
+# wedged cc1, which is what stops its retry-after-stall mitigation from
+# working there (.github/workflows/windows-source-build.yml, HANG). The
+# failing messages and the full rationale are in the script.
+#
+# Parse-time on purpose, like the fingerprint purge above: the damage has to be
+# undone before make decides anything is up to date, and it decides that as it
+# walks. Skipped under `-n` for the same reason the purge is: a dry run
+# describes a build, it does not perform part of one. Nothing is built under
+# -n, so not repairing there costs nothing.
+#
+# Two trees, because a fat build writes objects into exactly two: $(BUILDDIR)
+# (Hull's own objects plus every vendored one - mbedTLS, QuickJS, Lua, SQLite,
+# WAMR all land there) and Keel's, the one sub-make with its own object
+# directory. Pruning objects alone is not enough: make re-enters Keel's
+# sub-make only when libkeel.a is out of date, so a surviving half-paired
+# archive means the pruned objects are never rebuilt. The two paired ARCHIVES
+# are therefore named explicitly rather than swept - build/libhull_platform.a
+# is deliberately single-arch even under cosmocc, so a blanket `*.a` sweep
+# would delete it on every invocation and never converge.
+#
+# Gated on $(CC) being exactly `cosmocc`, the same test Keel uses to set
+# COSMO_FAT, so a single-arch cosmo build (x86_64-unknown-cosmo-cc) - where no
+# counterpart is ever expected and every object would look like an orphan - is
+# never touched. In steady state this is a no-op: a build that ran to
+# completion leaves no orphan.
+ifeq ($(CC),cosmocc)
+ifeq ($(HL_TREE_MUST_NOT_CHANGE),)
+$(shell sh scripts/cosmo_fat_repair.sh $(BUILDDIR) $(KEEL_DIR) $(KEEL_LIB) $(BUILDDIR)/libhull.a >/dev/null)
+endif
+endif
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest check-no-emdash check-no-emdash-selftest check-no-milestone-narration check-no-milestone-narration-selftest check-keel-flags check-keel-flags-selftest check-site-consistency check-site-consistency-selftest platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest check-no-emdash check-no-emdash-selftest check-no-milestone-narration check-no-milestone-narration-selftest check-keel-flags check-keel-flags-selftest check-site-consistency check-site-consistency-selftest check-cosmo-fat-repair check-dry-run-inert platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2563,22 +2652,71 @@ endif
 # Multi-arch cosmo platform: build x86_64 and aarch64 archives
 COSMO_STAGE := .cosmo_staging
 
+# Keel's object SET is configuration-dependent, so its `clean` must be given the
+# same CC as the build whose objects it is removing. Keel picks per-platform TUs
+# (socket_posix.c vs socket_winsock.c, platform_posix.c vs platform_win.c, and
+# four more), and `clean` deletes $(CORE_OBJ) - the set for the configuration it
+# was PARSED with, not the set on disk.
+#
+# Unconfigured, that silently cleans the wrong half on Windows. Measured under
+# MSYS2, where Keel sets WINDOWS := 1 from uname:
+#
+#   make -n clean                          -> names 17 win objects, 0 posix
+#   make -n clean CC=x86_64-unknown-cosmo-cc -> names the 6 posix objects
+#
+# A cosmo build produces the POSIX set, so an unconfigured clean between the two
+# arch passes below removed nothing it had made. The aarch64 pass then found
+# platform_posix.o, socket_posix.o, udp_cmsg.o and three siblings already
+# present and up to date, archived those x86_64 objects into the aarch64 lib,
+# and every `hull build` against it died in the app link with
+#
+#   ld.bfd: i386:x86-64 architecture of input file
+#           `.aarch64/libhull_platform.a(udp_cmsg.o)' is incompatible with
+#           aarch64 output
+#
+# naming binutils rather than the stale object. On Linux both configurations
+# select the same POSIX set, so this worked there by coincidence; passing CC
+# makes it correct by construction on every host.
+#
+# The assertion after each clean is the cheap invariant that would have caught
+# it: a clean that leaves a .o behind has cleaned the wrong set.
+define keel-clean
+	$(MAKE) -C $(KEEL_DIR) clean CC=$(1) AR=$(2)
+	@# Keel's clean sweeps .aarch64/ under src/, src/protocols/*/ and
+	@# vendor/llhttp/ but not under integrations/, so a previous FAT build
+	@# leaves integrations/*/*/.aarch64/*.o behind. Those are inert for the
+	@# single-arch passes here, but they are still residue from another
+	@# configuration and the assertion below is not worth weakening to
+	@# tolerate them. Sweep every .aarch64 dir rather than naming Keel's
+	@# layout, so this keeps working if Keel grows another one.
+	@find $(KEEL_DIR) -type d -name .aarch64 -exec rm -rf {} + 2>/dev/null || true
+	@leftover=$$(find $(KEEL_DIR) -name '*.o' 2>/dev/null | head -5); \
+	if [ -n "$$leftover" ]; then \
+	    echo "ERROR: keel objects survived a clean configured for CC=$(1):"; \
+	    echo "$$leftover" | sed 's/^/  /'; \
+	    echo "  A later arch pass would archive these as if they were its own."; \
+	    exit 1; \
+	fi
+endef
+
 platform-cosmo:
 	@rm -rf $(COSMO_STAGE) && mkdir -p $(COSMO_STAGE)
 	@echo "=== Building x86_64-cosmo platform ==="
 	$(MAKE) clean
-	$(MAKE) -C $(KEEL_DIR) clean
+	$(call keel-clean,x86_64-unknown-cosmo-cc,x86_64-unknown-cosmo-ar)
 	$(MAKE) platform CC=x86_64-unknown-cosmo-cc AR=x86_64-unknown-cosmo-ar
 	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform.x86_64-cosmo.a
 	cp $(BUILDDIR)/platform_canary_hash $(COSMO_STAGE)/platform_canary_hash.x86_64-cosmo
 	@echo "=== Building aarch64-cosmo platform ==="
 	$(MAKE) clean
-	$(MAKE) -C $(KEEL_DIR) clean
+	@# x86_64 on purpose, not a copy-paste slip: what is on disk here is what
+	@# the pass above built, and a clean must match the objects it removes.
+	$(call keel-clean,x86_64-unknown-cosmo-cc,x86_64-unknown-cosmo-ar)
 	$(MAKE) platform CC=aarch64-unknown-cosmo-cc AR=aarch64-unknown-cosmo-ar
 	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform.aarch64-cosmo.a
 	cp $(BUILDDIR)/platform_canary_hash $(COSMO_STAGE)/platform_canary_hash.aarch64-cosmo
 	$(MAKE) clean
-	$(MAKE) -C $(KEEL_DIR) clean
+	$(call keel-clean,aarch64-unknown-cosmo-cc,aarch64-unknown-cosmo-ar)
 	mkdir -p $(BUILDDIR)
 	cp $(COSMO_STAGE)/* $(BUILDDIR)/
 	echo "cosmocc" > $(BUILDDIR)/platform_cc
@@ -3437,7 +3575,25 @@ check-site-consistency:
 check-site-consistency-selftest:
 	sh tests/check_site_consistency_selftest.sh
 
-lint: lint-lua lint-js check-sdk-headers check-docs-integrity check-no-emdash check-no-milestone-narration check-site-consistency check-keel-flags
+# Fat-cosmo pair-repair gate: scripts/cosmo_fat_repair.sh runs from a
+# parse-time $(shell) and DELETES build artifacts, so its blast radius has to
+# be pinned down. Over-reach means an artifact that legitimately has no aarch64
+# counterpart is deleted and rebuilt on every invocation and the build never
+# converges; a stray line on stdout is a syntax error in the middle of the
+# makefile. Synthetic trees, no compiler, under a second. See the script header.
+check-cosmo-fat-repair:
+	sh tests/check_cosmo_fat_repair.sh
+
+# Dry-run inertness gate: `make -n` must DESCRIBE a build, never perform part
+# of one. Three parse-time $(shell) hooks delete build artifacts, and parsing
+# is not suppressed by -n - which is how the keel-flags gate, advertising
+# itself as a dry run, came to delete 273 objects and build/hull out of a
+# working tree. Exercises the MAKEFLAGS detection in a temp dir where nothing
+# can be lost. See the script header.
+check-dry-run-inert:
+	sh tests/check_dry_run_is_inert.sh
+
+lint: lint-lua lint-js check-sdk-headers check-docs-integrity check-no-emdash check-no-milestone-narration check-site-consistency check-keel-flags check-cosmo-fat-repair check-dry-run-inert
 
 # ── API documentation (two-tier: source comments + generated HTML) ──
 #
@@ -3512,7 +3668,12 @@ docs-api-check:
 clean:
 	rm -rf $(BUILDDIR)
 	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn
-	@$(MAKE) -s -C $(KEEL_DIR) clean 2>/dev/null || true
+	@# Hand Keel the SAME CC this clean was invoked with. Keel selects
+	@# per-platform TUs (socket_posix.c vs socket_winsock.c, and five more) and
+	@# its clean removes the set for the configuration it was PARSED with - so
+	@# unconfigured on Windows it deletes the win objects and leaves every posix
+	@# object a cosmo build made. See the keel-clean note in platform-cosmo.
+	@$(MAKE) -s -C $(KEEL_DIR) clean CC=$(CC) AR=$(AR) 2>/dev/null || true
 
 # ── Header-dependency replay ────────────────────────────────────────
 #

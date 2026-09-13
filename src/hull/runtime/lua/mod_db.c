@@ -6,6 +6,7 @@
 #ifdef HL_ENABLE_DB
 
 #include "mod_buffer.h"
+#include "internal.h"   /* hl_lua_source_is_stdlib */
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
@@ -159,7 +160,7 @@ static int lua_is_stdlib_caller(lua_State *L)
         return 0;
     if (lua_getinfo(L, "S", &ar) == 0)
         return 0;
-    return ar.source && strncmp(ar.source, "hull.", 5) == 0;
+    return hl_lua_source_is_stdlib(ar.source);
 }
 
 /* The default connection, resolved from the registry (there is no separate

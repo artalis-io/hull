@@ -191,7 +191,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 **Attack: Declare minimal manifest but access more at runtime**
 
-- **Prevention:** Manifest is signed in `package.sig`. At runtime, pledge/unveil enforce the declared capabilities at the kernel level. Accessing undeclared paths triggers SIGKILL (Linux/Cosmo).
+- **Prevention:** Manifest is signed in `package.sig`. At runtime, pledge/unveil enforce the declared capabilities at the kernel level. Accessing undeclared paths triggers SIGKILL (Linux, and a cosmo APE ON Linux/OpenBSD - see "Cosmopolitan APE" below for the hosts where a cosmo build has no kernel sandbox at all).
 - **Remaining risk:** On macOS, Seatbelt returns EPERM (operation denied) rather than SIGKILL. The app continues running after a violation. The forbidden operation simply fails. On Linux/Cosmo, the process is killed on violation. The practical security is equivalent (the operation is denied either way), but the failure mode differs.
 
 **Attack: Call `app.manifest()` again at runtime to escalate capabilities**
@@ -538,18 +538,58 @@ but it is not equivalent to the full Linux sandbox and is logged as degraded.
 
 ### Cosmopolitan APE (cosmocc)
 
-| Mechanism | Implementation | Violation |
-|-----------|---------------|-----------|
-| Syscall filter | Native pledge() in cosmocc libc | SIGKILL |
-| Filesystem restriction | Native unveil() | ENOENT |
-| Static binary | No dynamic linking | N/A |
+| Mechanism | Implementation | Where it enforces | Violation |
+|-----------|---------------|-------------------|-----------|
+| Syscall filter | Native pledge() in cosmocc libc | Linux, OpenBSD | SIGKILL |
+| Filesystem restriction | Native unveil() | Linux, OpenBSD | ENOENT |
+| Static binary | No dynamic linking | every host | N/A |
 
-**Additional protections:**
-- Works on Linux, FreeBSD, OpenBSD, Windows (via NT security)
+**The kernel sandbox is Linux/OpenBSD only.** Cosmopolitan's `pledge()` and
+`unveil()` enforce where the host gives them a mechanism: seccomp-bpf plus
+Landlock on Linux, the native syscalls on OpenBSD. On **Windows, macOS and the
+other BSDs the same APE gets no kernel confinement at all** - both calls return
+0 and do nothing. Measured with cosmocc 4.0.2 on Windows 11:
+`pledge("stdio", NULL)` returns 0, and a subsequent
+`socket(AF_INET, SOCK_STREAM, 0)` SUCCEEDS even though the `stdio` promise
+grants no `inet`.
+
+Hull reports that rather than assuming it. `sb_supported()`
+(`src/hull/sandbox.c`) is true for a cosmo build only on Linux and OpenBSD; on
+any other host startup emits one warning,
+
+```
+[sandbox] NO kernel sandbox on this host: syscall and filesystem confinement,
+and W^X, are not enforced. Hull's capability layer (manifest fs / env / hosts)
+is the only boundary.
+```
+
+and the process continues. W^X is not enforced there, and that does not refuse
+startup: there is no partial sandbox to opt into on such a host and no setting
+that would produce one, so demanding a flag on every run would add friction
+without offering an actionable decision. A backend that EXISTS but is
+incomplete is the opposite case and still fails closed - Linux without Landlock
+refuses unless `--allow-degraded-sandbox`.
+
+On those hosts the **C capability layer is the boundary**: the manifest's
+fs/env/hosts gates, checked in C before every operation, exactly as on any
+platform with no kernel backend. That is a real boundary against the app's own
+code, but unlike pledge/unveil it is not a boundary against native code that
+escapes the runtime.
+
+Note also that the cosmo branch is selected ahead of the `__APPLE__` one, so an
+APE running on macOS never reaches the Seatbelt profile a native macOS build
+would apply. Wiring Seatbelt into the cosmo path is a tracked follow-up; it
+would add protection, not merely honesty.
+
+**Additional protections (every host):**
 - No dynamic linking → no LD_PRELOAD attacks
 - No DLL injection
 - No dynamic linker attacks
-- W^X enforcement by Cosmopolitan runtime (APE loader uses fixed code segments; `MAP_JIT` and equivalent OS-specific JIT APIs are unavailable to the guest)
+- No JIT surface: the APE loader uses fixed code segments, and `MAP_JIT` and the
+  equivalent OS-specific JIT APIs are unavailable to the guest. This is a
+  property of the loader and the runtime, not a kernel-enforced W^X guarantee -
+  on Linux/OpenBSD the pledge promise set enforces W^X as well, and elsewhere it
+  is unenforced.
 
 ### macOS (gcc/clang)
 

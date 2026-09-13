@@ -23,7 +23,14 @@
  * add can store TWO entries when realpath differs), so keep headroom for the
  * cosmo/Windows ~/.hull/tmp entry + future additions - an over-full table
  * silently drops adds (hl_tool_unveil_add returns -1 at the cap). */
-#define HL_TOOL_MAX_UNVEILED 24
+/* Generous headroom. Each add can consume TWO slots (the resolved path plus
+ * the original when realpath differs - on a usr-merged Linux /bin, /lib and
+ * /lib64 are all symlinks, so those three alone take six), and an add past
+ * the cap is dropped SILENTLY. At 24 the table sat one entry from full: a
+ * single extra unveil pushed it over and the LAST add - the temp dir - was
+ * the one lost, which broke every `hull compute test` because those run
+ * entirely out of a tempdir. */
+#define HL_TOOL_MAX_UNVEILED 64
 
 typedef struct {
     const char *path;
@@ -128,15 +135,20 @@ int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
 
 /*
  * Resolve the bundled busybox shell used to drive cosmocc on Windows (the
- * cosmo/Windows build path). Returns 0 and writes the path to @p out when a
- * cosmocc-bundle busybox is present AND this is a cosmo hull on Windows; returns
+ * cosmo/Windows build path). @p driver is the cosmocc invocation about to be
+ * spawned: busybox.exe is looked for BESIDE it first (the bundle ships them as
+ * siblings), which is what makes this work wherever the bundle lives and
+ * whatever $HOME says, before falling back to the $HOME/$USERPROFILE bundle
+ * locations. Pass NULL to search only those. Returns 0 and writes the path to
+ * @p out when a cosmocc-bundle busybox is present AND this is a cosmo hull on
+ * Windows; returns
  * -1 otherwise (always -1 on a native build / on a POSIX host, where cosmocc's
  * #!/bin/sh driver runs directly). Used by the transparent cosmocc reroute in
  * the spawn layer (hl_tool_spawn_env / _read), which covers every cosmocc call
  * site - the compiler vtable, tool.spawn, and the -dumpmachine / --version
  * probes - so the build tool needs no per-call-site change.
  */
-int hl_tool_cosmo_shell(char *out, size_t outsz);
+int hl_tool_cosmo_shell(const char *driver, char *out, size_t outsz);
 
 /*
  * On a cosmo hull on Windows, point TMPDIR/TMP/TEMP at one real directory that

@@ -23,6 +23,7 @@
 #include "hull/utils/alloc.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <ftw.h>
 #include <string.h>
 #include <stdio.h>
@@ -30,6 +31,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../test_tmpdir.h"
 
 static char test_dir[256];
 static HlFsConfig  test_cfg;
@@ -49,7 +51,7 @@ static const char *const test_grants[] = {
 
 static void setup_fs(void)
 {
-    snprintf(test_dir, sizeof(test_dir), "/tmp/hull_test_%d", getpid());
+    hl_test_path(test_dir, sizeof(test_dir), "hull_test_%d", getpid());
     mkdir(test_dir, 0755);
     test_cfg.base_dir = test_dir;
     test_cfg.base_len = strlen(test_dir);
@@ -253,7 +255,17 @@ UTEST(hl_cap_fs, validate_rejects_symlink_escape)
     /* Create a symlink inside test_dir pointing to /tmp */
     char link_path[512];
     snprintf(link_path, sizeof(link_path), "%s/escape", test_dir);
-    symlink("/tmp", link_path);
+
+    /* Creating a symlink needs SeCreateSymbolicLinkPrivilege on Windows,
+     * which an ordinary account does not hold. The return value was
+     * ignored here, so on such a host no symlink existed and the assertion
+     * below ran against a plain missing path - it passed or failed for
+     * reasons having nothing to do with symlink escape, i.e. the test was
+     * silently covering nothing. Skip honestly instead. */
+    if (symlink("/tmp", link_path) != 0) {
+        teardown_fs();
+        UTEST_SKIP("symlink() unavailable (needs privilege on this host)");
+    }
 
     /* Accessing via symlink should be rejected */
     ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "escape/some_file", NULL), -1);
@@ -555,9 +567,12 @@ static int write_pattern(const char *name, size_t n)
 static void assert_window_invariants(int *utest_result, HlMappedBuffer *buf,
                                      uint64_t offset, size_t eff_len)
 {
-    long pg = sysconf(_SC_PAGESIZE);
-    if (pg <= 0) pg = 4096;
-    uint64_t pagemask = (uint64_t)pg - 1;
+    /* The mapping is aligned to the mmap GRANULARITY, which is not the page
+     * size everywhere: Windows maps views at 64 KiB boundaries while
+     * sysconf(_SC_PAGESIZE) still reports 4096. Ask the same source the
+     * implementation does, or these invariants encode a Linux assumption. */
+    uint64_t gran = hl_cap_fs_mmap_granularity();
+    uint64_t pagemask = gran - 1;
 
     ASSERT_NE(buf, NULL);
     ASSERT_EQ(buf->foffset, offset);

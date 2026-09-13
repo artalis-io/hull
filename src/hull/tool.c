@@ -144,7 +144,14 @@ static const char *parse_linker_option(int argc, char **argv)
  */
 static const char *parse_app_dir(int argc, char **argv)
 {
-    for (int i = 0; i < argc; i++) {
+    /* From i=1: argv[0] is the SUBCOMMAND ("build"), which
+     * hl_command_dispatch passes through as argv[0] of the handler.
+     * Scanning from 0 returned "build" as the app dir, so the
+     * read-only app unveil pointed at a relative path that does not
+     * exist. It went unnoticed because the temp dir and the
+     * invocation dir are unveiled separately, and apps normally live
+     * under one of them. */
+    for (int i = 1; i < argc; i++) {
         if (!argv[i]) continue;
         if (argv[i][0] != '-')
             return argv[i];
@@ -164,6 +171,48 @@ static const char *parse_app_dir(int argc, char **argv)
         }
     }
     return ".";
+}
+
+/*
+ * Extract the output DIRECTORY from argv: dirname of `-o` / `--output`, else
+ * the app dir (a bare `hull build <dir>` writes <dir>/app).
+ *
+ * The tool sandbox unveils app_dir READ-ONLY, so writes under it depend
+ * entirely on the output dir being unveiled "rwc". That used to be the literal
+ * ".", i.e. whatever directory hull happened to be INVOKED from - so
+ * `hull build /path/to/app` from anywhere else could not create
+ * <app>/.hull/build, and the post-link tidy-up that moves cosmocc's debug
+ * sidecars (app.com.dbg, app.aarch64.elf) out of the app root silently
+ * degraded to "leaving debug artifacts in place". Building from INSIDE the app
+ * dir worked, which is why it went unnoticed. Not Windows-specific.
+ *
+ * Writes into `buf` and returns it, or NULL when the caller should fall back.
+ */
+static const char *parse_output_dir(int argc, char **argv, char *buf, size_t bufsz)
+{
+    const char *out = NULL;
+    for (int i = 1; i < argc; i++) {   /* i=1: skip the subcommand */
+        if (!argv[i]) continue;
+        if (strncmp(argv[i], "--output=", 9) == 0) { out = argv[i] + 9; continue; }
+        if ((strcmp(argv[i], "--output") == 0 || strcmp(argv[i], "-o") == 0)
+            && i + 1 < argc && argv[i + 1]) {
+            out = argv[++i];
+        }
+    }
+    if (!out) return NULL;                 /* caller falls back to app_dir */
+
+    /* dirname(out); a bare filename means the current directory. */
+    const char *slash = strrchr(out, '/');
+    const char *bslash = strrchr(out, '\\');
+    if (bslash > slash) slash = bslash;
+    if (!slash) return NULL;
+
+    size_t len = (size_t)(slash - out);
+    if (len == 0) len = 1;                 /* "/x" -> "/" */
+    if (len >= bufsz) return NULL;
+    memcpy(buf, out, len);
+    buf[len] = '\0';
+    return buf;
 }
 
 int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
@@ -203,7 +252,17 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         }
     }
 
-    hl_tool_sandbox_init(&unveil_ctx, app_dir, ".", platform_dir);
+    /* Where `hull build` actually writes. This used to be the literal ".",
+     * i.e. the invocation directory, which is only the app dir when you
+     * happen to build from inside it - see parse_output_dir. The
+     * invocation dir is unveiled unconditionally inside
+     * hl_tool_sandbox_init now, so nothing is lost by naming the real
+     * one here. (It must be passed IN: the context is sealed on return,
+     * and hl_tool_unveil_add then silently drops adds.) */
+    char out_buf[4096];
+    const char *output_dir = parse_output_dir(argc, argv, out_buf, sizeof(out_buf));
+    hl_tool_sandbox_init(&unveil_ctx, app_dir,
+                         output_dir ? output_dir : app_dir, platform_dir);
 
     /* Init unsandboxed Lua VM with tool unveil context */
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;

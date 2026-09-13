@@ -92,15 +92,77 @@ const char *hl_host_exe_suffix(void);
 int hl_host_render_exec(const char *path, char *out, size_t out_sz);
 
 /**
+ * @brief Buffer size a caller needs for @ref hl_host_normalize_path.
+ *
+ * The rewrite grows a path by exactly one byte, so this is one over the
+ * conventional 4096 POSIX limit.
+ */
+#define HL_HOST_PATH_MAX 4097
+
+/**
+ * @brief Rewrite a drive-letter path into the rooted form POSIX code needs.
+ *
+ * An MSYS2 / Git Bash shell rewrites a POSIX argument it passes to a NATIVE
+ * program into the MIXED form "D:/a/app/data.db" - drive letter, colon,
+ * forward slashes. A Cosmopolitan APE is a native program, so this is what
+ * hull is handed. The OS layer coped: open(), stat() and mkdir() all accept
+ * the mixed form (measured, cosmocc 4.0.2 on Windows 11).
+ *
+ * Vendored POSIX code does not. SQLite's unix VFS decides absolute-vs-relative
+ * with a leading '/' (sqlite3.c: a zPath[0] != slash test), so it treated
+ * "D:/a/app/data.db" as RELATIVE, prepended the cwd, and failed to open the
+ * nonexistent result - surfacing as "cannot open database D:/a/app/data.db",
+ * on a path that plainly exists.
+ *
+ * So the rewrite is to the one absolute form BOTH layers accept, which is
+ * also what cosmo's own getcwd() returns:
+ *
+ *   D:/a/app/data.db   ->  /D/a/app/data.db
+ *   D:\a\app\data.db   ->  /D/a/app/data.db
+ *
+ * Only a SINGLE letter followed by ':' and a separator is treated as a drive.
+ * That cannot collide with a URI scheme (no real scheme is one character), so
+ * a "postgres://" DSN passes through untouched, and it cannot collide with a
+ * POSIX path, which never has a ':' at index 1. Backslashes are folded to '/'
+ * only in the drive-letter case, so a POSIX filename that legitimately
+ * contains a backslash is left alone.
+ *
+ * On a non-Windows host this is a verbatim copy: the mixed form is not a path
+ * there, and rewriting it would corrupt a legal (if odd) relative filename.
+ *
+ * @returns 1 if @p out was rewritten, 0 if copied verbatim, -1 on a NULL or
+ *          oversized argument (@p out is emptied when it can be).
+ */
+int hl_host_normalize_path(const char *path, char *out, size_t out_sz);
+
+/**
  * @brief Find @p name as an executable on PATH, honouring host conventions.
  *
- * Splits PATH on hl_host_path_list_sep() and, on Windows, also tries the
- * ".exe" / ".com" / ".bat" / ".cmd" forms (the PATHEXT entries that matter for
- * a toolchain probe). Writes the resolved absolute-ish path to @p out.
+ * Splits PATH on the separator the LIST ITSELF uses, not the one the host
+ * nominally prefers: on Windows both a Win32 `C:\a;C:\b` and a POSIX-shaped
+ * `/C/a:/C/b` occur, and the second is what a Cosmopolitan APE - the only Hull
+ * build that runs there - is actually handed. Each hit is composed with the
+ * separator its own PATH component uses, so a POSIX-shaped entry stays
+ * POSIX-shaped. On Windows the ".exe" / ".com" / ".bat" / ".cmd" forms are
+ * tried too (the PATHEXT entries that matter for a toolchain probe). Writes
+ * the resolved absolute-ish path to @p out.
  *
  * @returns 1 when found, 0 otherwise.
  */
 int hl_host_find_in_path(const char *name, char *out, size_t out_sz);
+
+/**
+ * @brief Reduce a toolchain invocation to the tool's NAME.
+ *
+ * Basename on EITHER separator, then a trailing ".com" / ".exe" removed, so
+ * `C:\tools\gcc.exe`, `/usr/bin/gcc` and a bare `gcc` all yield "gcc".
+ * Consumers compare against that name (build.lua matches `cosmocc` / `tcc`) or
+ * record it (the `cc` field in package.sig), and neither wants the spelling it
+ * arrived in - least of all an absolute path off a developer's machine.
+ *
+ * @returns 0 on success, -1 on a NULL/oversized argument (@p out is emptied).
+ */
+int hl_host_tool_name(const char *invocation, char *out, size_t out_sz);
 
 /**
  * @brief hl_host_find_in_path over an EXPLICIT search list.

@@ -173,6 +173,20 @@ static void sweep_stale_tmps(const char *root, uint64_t max_age_sec)
 
         struct stat st;
         if (stat(path, &st) < 0) continue;
+
+        /* A future mtime is never stale. (now - st_mtime) is signed, and
+         * casting a NEGATIVE difference to uint64_t wraps to a huge value
+         * that clears any max_age - so a temp file whose mtime sits even
+         * one second ahead of time(NULL) was unlinked as ancient. That is
+         * the opposite of what this sweep is for: the file it deletes in
+         * that case is the freshest one, potentially a concurrent writer's
+         * in-flight blob.
+         *
+         * mtime can lead the clock after an NTP step, or where the
+         * filesystem and time(NULL) resolve slightly differently - which is
+         * how this surfaced: an intermittent CI failure where the sweep ate
+         * the file the test had just created. */
+        if (st.st_mtime > now) continue;
         if ((uint64_t)(now - st.st_mtime) >= max_age_sec) unlink(path);
     }
     closedir(d);

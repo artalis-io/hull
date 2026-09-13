@@ -13,6 +13,7 @@
  */
 
 #include "hull/cap/tool.h"
+#include "hull/shared/host.h"
 #include "hull/cap/audit.h"
 #include "hull/build_assets.h"
 #include "hull/compiler.h"
@@ -154,39 +155,31 @@ int hl_tool_check_allowlist(const char *binary)
 {
     if (!binary) return -1;
 
-    /* Extract basename. Split on BOTH separators: a cosmo APE reaches Windows,
-     * where a resolved tool path is "C:\tools\gcc.exe" - with '/' alone the
-     * whole string stays the "basename" and never matches. */
-    const char *base = binary;
-    for (const char *c = binary; *c; c++)
-        if (*c == '/' || *c == '\\') base = c + 1;
-
-    /* Drop a host executable suffix before matching. The same tool is `cc` on
-     * POSIX and `cc.exe` on Windows (and hull itself installs as `hull.com`,
-     * the APE convention - see install.ps1 and hl_host_exe_suffix). Without
-     * this every allowlisted tool is denied there, because the match below
-     * accepts only an exact name or a `-<digit>` version suffix.
+    /* Reduce the invocation to a tool NAME before matching: basename on either
+     * separator, minus a trailing ".com" / ".exe". Both halves are load-bearing
+     * on Windows, where a resolved path is "C:\tools\gcc.exe" - splitting on
+     * '/' alone leaves the whole string as the "basename", and the match below
+     * accepts only an exact name or a `-<digit>` version suffix, so every tool
+     * `hull build` spawns there was denied (hull#471).
      *
-     * Narrow by construction: only these two suffixes, only trailing, and only
-     * the SUFFIX is removed - the remaining name still has to be on the list,
-     * so this admits no name that was not already allowed.
+     * The rule is narrow by construction: only those two suffixes, only
+     * trailing, and only the SUFFIX is removed - what remains still has to be
+     * on the list, so no name is admitted that was not already allowed. It is
+     * case-SENSITIVE, matching the comparison it feeds: "CC.EXE" stays denied
+     * exactly as bare "CC" is, a limitation carried over rather than
+     * introduced.
      *
-     * Case-SENSITIVE, like the name match below it. A mixed-case "CC.EXE" is
-     * therefore still denied - exactly as bare "CC" is today, so this is a
-     * limitation carried over, not one introduced. Matching names case-
-     * insensitively would be a real behaviour change (and wrong on POSIX,
-     * where case is significant), so it is deliberately not done here. */
-    char stripped[64];
-    size_t blen = strlen(base);
-    for (const char **sfx = (const char *[]){ ".com", ".exe", NULL }; *sfx; sfx++) {
-        size_t slen = strlen(*sfx);
-        if (blen > slen && blen - slen < sizeof(stripped) &&
-            memcmp(base + blen - slen, *sfx, slen) == 0) {
-            memcpy(stripped, base, blen - slen);
-            stripped[blen - slen] = '\0';
-            base = stripped;
-            break;
-        }
+     * A name too long for the buffer falls back to the raw basename, which
+     * then fails the match - never a truncation, which could match something
+     * else. */
+    char named[64];
+    const char *base;
+    if (hl_host_tool_name(binary, named, sizeof(named)) == 0) {
+        base = named;
+    } else {
+        base = binary;
+        for (const char *c = binary; *c; c++)
+            if (*c == '/' || *c == '\\') base = c + 1;
     }
 
     for (const char **p = allowed_prefixes; *p; p++) {
@@ -490,7 +483,7 @@ static char *spawn_read_argv(const char *const argv[], size_t *out_len)
 
 /* ── cosmo/Windows: drive cosmocc through the bundled busybox ───────── */
 
-int hl_tool_cosmo_shell(char *out, size_t outsz)
+int hl_tool_cosmo_shell(const char *driver, char *out, size_t outsz)
 {
     if (!out || outsz == 0) return -1;
 #ifdef __COSMOPOLITAN__
@@ -499,6 +492,37 @@ int hl_tool_cosmo_shell(char *out, size_t outsz)
      * always-present env (no cosmo-API include needed). */
     if (!getenv("SystemRoot") && !getenv("SYSTEMROOT") && !getenv("windir"))
         return -1;
+
+    /* FIRST: busybox.exe beside the driver we were actually given. The cosmocc
+     * bundle ships bin/cosmocc and bin/busybox.exe as siblings, so this holds
+     * wherever the bundle lives, whatever $HOME says, and however the driver
+     * was resolved (PATH, --compiler=<path>, ~/.hull/tools).
+     *
+     * The $HOME probes below cannot cover that. Under MSYS2 - the shell a
+     * Windows source build runs in - $HOME is /home/<user>, i.e.
+     * C:\msys64\home\<user>, while `hull tools install cosmocc` from
+     * PowerShell put the bundle under C:\Users\<user>. So a HOME-only search
+     * missed a perfectly good busybox sitting right next to the cosmocc it had
+     * just resolved, and cosmocc's #!/bin/sh driver could not be run at all. */
+    if (driver && *driver) {
+        char dir[512];
+        int n = snprintf(dir, sizeof(dir), "%s", driver);
+        if (n > 0 && (size_t)n < sizeof(dir)) {
+            char *cut = NULL;
+            for (char *c = dir; *c; c++)
+                if (*c == '/' || *c == '\\') cut = c;
+            if (cut) {
+                *cut = '\0';
+                char p[512];
+                n = snprintf(p, sizeof(p), "%s/busybox.exe", dir);
+                if (n > 0 && (size_t)n < sizeof(p) && access(p, X_OK) == 0) {
+                    n = snprintf(out, outsz, "%s", p);
+                    return (n > 0 && (size_t)n < outsz) ? 0 : -1;
+                }
+            }
+        }
+    }
+
     const char *home = getenv("HOME");
     if (!home || !*home) home = getenv("USERPROFILE");
     if (!home || !*home) return -1;
@@ -518,7 +542,7 @@ int hl_tool_cosmo_shell(char *out, size_t outsz)
     }
     return -1;
 #else
-    (void)out; (void)outsz;
+    (void)driver; (void)out; (void)outsz;
     return -1;
 #endif
 }
@@ -686,7 +710,7 @@ static int cosmocc_reroute_exec(const char *const argv[],
 {
     if (!argv_is_cosmocc(argv)) return 0;
     char shell[512];
-    if (hl_tool_cosmo_shell(shell, sizeof(shell)) != 0) return 0;
+    if (hl_tool_cosmo_shell(argv[0], shell, sizeof(shell)) != 0) return 0;
     cosmo_prepare(shell);
     char td[512];
     const char *tmpdir = (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0) ? td : NULL;
@@ -704,7 +728,7 @@ static int cosmocc_reroute_read(const char *const argv[],
 {
     if (!argv_is_cosmocc(argv)) return 0;
     char shell[512];
-    if (hl_tool_cosmo_shell(shell, sizeof(shell)) != 0) return 0;
+    if (hl_tool_cosmo_shell(argv[0], shell, sizeof(shell)) != 0) return 0;
     cosmo_prepare(shell);
     char td[512];
     const char *tmpdir = (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0) ? td : NULL;
@@ -972,6 +996,14 @@ int hl_tool_copy(const char *src, const char *dst,
 
 /* ── Recursive directory creation ──────────────────────────────────── */
 
+/* Does `path` already exist as a directory? Distinguishes "already there"
+ * from a real mkdir failure, without trusting a specific errno. */
+static int dir_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 int hl_tool_mkdir(const char *path, const HlToolUnveilCtx *ctx)
 {
     if (!path) return -1;
@@ -985,15 +1017,27 @@ int hl_tool_mkdir(const char *path, const HlToolUnveilCtx *ctx)
     if (len >= sizeof(buf)) return -1;
     memcpy(buf, path, len + 1);
 
+    /* An ALREADY-EXISTING component is not a failure, whatever errno the
+     * platform reports for it. EEXIST alone is not enough: on Windows a
+     * drive root answers EACCES. Cosmopolitan spells absolute paths
+     * "/C/Users/...", so the first component of this walk is "/C" -
+     * mkdir("/C") returns EACCES(5), the walk aborted, and every
+     * hl_tool_mkdir under a drive root failed. "C:/Users/..." and
+     * "/tmp/..." were unaffected because their first component answers
+     * EEXIST, which is why this only bit some paths.
+     *
+     * Concretely: `hull build` could not create <app>/.hull/build, so it
+     * left cosmocc's debug sidecars in the app root. */
     for (char *p = buf + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            if (mkdir(buf, 0755) != 0 && errno != EEXIST)
+            if (mkdir(buf, 0755) != 0 && errno != EEXIST
+                && !dir_exists(buf))
                 return -1;
             *p = '/';
         }
     }
-    if (mkdir(buf, 0755) != 0 && errno != EEXIST)
+    if (mkdir(buf, 0755) != 0 && errno != EEXIST && !dir_exists(buf))
         return -1;
 
     return 0;

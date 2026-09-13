@@ -172,6 +172,59 @@ int hl_host_render_exec(const char *path, char *out, size_t out_sz)
     return 0;
 }
 
+/* ── Tool naming ────────────────────────────────────────────────────
+ *
+ * Reduce a toolchain INVOCATION to the tool's NAME: take the basename, then
+ * drop a host executable suffix. `C:\msys64\ucrt64\bin\gcc.exe`, `/usr/bin/cc`
+ * and a bare `cosmocc` all name the same thing, and every consumer wants that
+ * thing rather than the spelling it arrived in.
+ *
+ * Both separators, because a resolved path on Windows carries backslashes and
+ * splitting on '/' alone leaves the whole string as the "basename". That was a
+ * live defect: hull#471 fixed it for the spawn allowlist, where every tool was
+ * denied; the compiler and linker vtables kept splitting on '/' only, so on
+ * Windows `hull build` printed "compiling with C:\...\cc.exe" and recorded that
+ * absolute path as the `cc` field inside package.sig - a developer's directory
+ * layout baked into a build artifact, and a value that differs per machine for
+ * what is supposed to be the same toolchain.
+ *
+ * The suffix strip is what makes the name host-independent, which is what the
+ * consumers actually compare against: build.lua matches `cosmocc` and `tcc`,
+ * and test_compiler asserts a plain `cc`. Narrow by construction - only
+ * ".com" and ".exe", only trailing, only the suffix removed.
+ *
+ * Case-SENSITIVE, matching the comparisons it feeds. "CC.EXE" keeps its
+ * suffix, exactly as a bare "CC" is not "cc" today; folding case would be a
+ * real behaviour change and wrong on POSIX, where case is significant.
+ *
+ * @returns 0 on success, -1 on a NULL/oversized argument (out is emptied).
+ */
+int hl_host_tool_name(const char *invocation, char *out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return -1;
+    out[0] = '\0';
+    if (!invocation) return -1;
+
+    const char *base = invocation;
+    for (const char *c = invocation; *c; c++)
+        if (*c == '/' || *c == '\\') base = c + 1;
+
+    size_t blen = strlen(base);
+    static const char *const sfx[] = { ".com", ".exe", NULL };
+    for (const char *const *s = sfx; *s; s++) {
+        size_t slen = strlen(*s);
+        if (blen > slen && memcmp(base + blen - slen, *s, slen) == 0) {
+            blen -= slen;
+            break;
+        }
+    }
+
+    if (blen >= out_sz) return -1;   /* a truncated name would match nothing */
+    memcpy(out, base, blen);
+    out[blen] = '\0';
+    return 0;
+}
+
 /* ── PATH search ────────────────────────────────────────────────────
  *
  * The previous (doctor-local) implementation split on ':' and joined with
@@ -188,6 +241,66 @@ int hl_host_render_exec(const char *path, char *out, size_t out_sz)
  * PATH_MAX buffers (component + leaf + candidate) was worth collapsing. An
  * over-long join is rejected rather than truncated - a truncated path could
  * name a different, existing file. */
+/* Does `s` begin with a Windows drive prefix (`C:\` or `C:/`)? */
+static int looks_like_drive_prefix(const char *s)
+{
+    if (!s || !s[0] || s[1] != ':') return 0;
+    if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z'))) return 0;
+    return s[2] == '\\' || s[2] == '/';
+}
+
+/* Which character separates entries in THIS search list?
+ *
+ * Not a property of the host, which is what an earlier revision assumed. On
+ * Windows both shapes occur, and the host does not tell you which you were
+ * handed:
+ *
+ *   Win32   C:\tools;C:\Program Files\LLVM\bin      (';', backslashes)
+ *   POSIX   /C/tools:/C/Program Files/LLVM/bin      (':', forward slashes)
+ *
+ * The POSIX shape is not an edge case there - it is what the ONLY Hull build
+ * that runs on Windows actually sees. A Cosmopolitan APE is handed a
+ * POSIX-ified PATH by its own runtime (measured on Windows 11:
+ * `/C/Users/...:/C/Program Files (x86)/...`), and an MSYS2 or Git-Bash shell
+ * exports the same shape. Splitting that on ';' yields ONE nonsense component,
+ * so every probe missed whatever was installed - the exact failure this
+ * resolver was written to end.
+ *
+ * Detect from the string:
+ *   - any ';' means Win32. A ';' cannot appear inside a Windows path
+ *     component, and a POSIX list would not carry one either.
+ *   - otherwise a leading drive prefix means a SINGLE Win32 component, where
+ *     the ':' belongs to the drive letter and must not split. Returning ';'
+ *     for it leaves the string whole, which is the right answer.
+ *   - otherwise ':'.
+ *
+ * On a POSIX host neither Windows shape can arise, so this is a no-op there. */
+static char detect_list_sep(const char *path_env)
+{
+    if (strchr(path_env, ';'))          return ';';
+    if (looks_like_drive_prefix(path_env)) return ';';
+    return ':';
+}
+
+/* Which separator should join this PATH component to the leaf?
+ *
+ * The component's own, so the composed path reads the way whoever set PATH
+ * wrote it: `C:\tools\gcc.exe` from a native Windows PATH, `/c/msys64/usr/bin/
+ * gcc` from the POSIX-shaped PATH an MSYS2 shell exports inside a Windows
+ * process. Windows file APIs accept either separator, so this is presentation
+ * rather than function - but these paths are printed (hull doctor, hull tools
+ * list) and a mixed `/c/msys64/usr/bin\gcc` reads like a bug. A component with
+ * no separator at all (a bare `C:`, or a relative directory) has no convention
+ * to preserve, so the host's own is used. */
+static char component_sep(const char *dir, size_t dlen)
+{
+    for (size_t i = 0; i < dlen; i++) {
+        if (dir[i] == '\\') return '\\';
+        if (dir[i] == '/')  return '/';
+    }
+    return hl_host_dir_sep();
+}
+
 static int try_candidate(const char *dir, size_t dlen, char sep,
                          const char *name, const char *ext,
                          char *out, size_t out_sz)
@@ -231,9 +344,7 @@ int hl_host_find_in_path_ex(const char *path_env, const char *name,
     if (!path_env || !*path_env) return 0;
 
     int  win      = hl_host_is_windows();
-    char list_sep = win ? ';' : ':';
-    /* Windows accepts either separator in a path; '\' is conventional. */
-    char dir_sep  = win ? '\\' : '/';
+    char list_sep = detect_list_sep(path_env);
 
     /* The PATHEXT forms worth probing for a toolchain binary. An entry with
      * an explicit extension already (e.g. "busybox.exe") still tries the bare
@@ -270,11 +381,51 @@ int hl_host_find_in_path_ex(const char *path_env, const char *name,
          * a file in the process's cwd could shadow a real toolchain binary. */
         if (dlen > 0) {
             for (const char **e = exts; *e; e++)
-                if (try_candidate(d, dlen, dir_sep, name, *e, out, out_sz))
+                if (try_candidate(d, dlen, component_sep(d, dlen),
+                                  name, *e, out, out_sz))
                     return 1;
         }
 
         dir = sep ? sep + 1 : NULL;
     }
     return 0;
+}
+
+/* -- Path form ----------------------------------------------------- */
+
+int hl_host_normalize_path(const char *path, char *out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return -1;
+    out[0] = 0;
+    if (!path) return -1;
+
+    size_t len = strlen(path);
+    if (len + 1 > out_sz) return -1;
+
+    /* A drive letter is exactly ONE alphabetic character, a ':', and a
+     * separator. Anything longer before the ':' is a URI scheme and must be
+     * left alone (a 'postgres://' DSN reaches this function too). */
+    int drive = hl_host_is_windows() &&
+                ((path[0] >= 'A' && path[0] <= 'Z') ||
+                 (path[0] >= 'a' && path[0] <= 'z')) &&
+                path[1] == ':' &&
+                (path[2] == '/' || path[2] == '\\');
+
+    if (!drive) {
+        memcpy(out, path, len + 1);
+        return 0;
+    }
+
+    /* '/' + letter + the rest, which already starts with its own separator:
+     * "D:/a/x" -> "/D" + "/a/x". One byte longer than the input, so the
+     * length check above is re-run against the real output size. */
+    if (len + 2 > out_sz) return -1;
+
+    size_t n = 0;
+    out[n++] = '/';
+    out[n++] = path[0];
+    for (size_t i = 2; i < len; i++)
+        out[n++] = (path[i] == '\\') ? '/' : path[i];
+    out[n] = 0;
+    return 1;
 }

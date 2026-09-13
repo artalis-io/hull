@@ -120,11 +120,39 @@ static int sandbox_resolve_manifest_path(const char *app_dir,
 
 #if defined(__COSMOPOLITAN__)
 
+#include <cosmo.h>   /* IsLinux() / IsOpenbsd() - see sb_supported() below */
+
 /* Cosmopolitan libc provides pledge() and unveil() natively. */
 extern int pledge(const char *promises, const char *execpromises);
 extern int unveil(const char *path, const char *permissions);
 
-static int sb_supported(void) { return 1; }
+/* ...but they only ENFORCE where the host gives them something to enforce
+ * with: seccomp-bpf + Landlock on Linux, the native syscalls on OpenBSD.
+ * Everywhere else - Windows above all, the platform this build exists to
+ * reach - both calls return 0 and do nothing.
+ *
+ * Returning 1 unconditionally therefore made Hull ANNOUNCE a sandbox it did
+ * not have. Measured on Windows 11 with cosmocc 4.0.2: pledge("stdio", NULL)
+ * returns 0, and a socket(AF_INET, SOCK_STREAM, 0) immediately afterwards
+ * SUCCEEDS - `stdio` grants no `inet`, so under a pledge that is enforcing,
+ * that call is denied. The startup log nonetheless read
+ *
+ *   [sandbox] phase 1 pledge applied (exec/proc/fork blocked)
+ *   [sandbox] applied (unveil: 0 read, 0 write; pledge: stdio ... inet)
+ *
+ * which a reader can only take as "this process is confined". It is not. The
+ * same is true of a cosmo APE on macOS or a BSD: the cosmo branch is selected
+ * before the __APPLE__ one, so a Seatbelt profile is never reached there
+ * either.
+ *
+ * Two things follow from getting this right, beyond the log being true. The
+ * "kernel sandbox not available on this platform" path - which already exists
+ * for exactly this case - becomes the one taken; and a manifest asking for W^X
+ * enforcement FAILS CLOSED there, instead of being accepted with nothing
+ * behind it. The C capability layer is untouched and remains the enforcement
+ * boundary on such hosts, as it is on any platform without a kernel backend.
+ */
+static int sb_supported(void) { return IsLinux() || IsOpenbsd(); }
 
 #elif defined(__OpenBSD__)
 
@@ -560,6 +588,8 @@ static int sb_supported(void) { return 0; }
 
 #endif /* platform dispatch */
 
+int hl_sandbox_kernel_available(void) { return sb_supported(); }
+
 /* ── Phase 1: pre-load pledge ──────────────────────────────────────── */
 
 /* Whether any of stdin/stdout/stderr is a controlling terminal, probed once
@@ -583,7 +613,9 @@ int hl_sandbox_apply_pledge(void)
                       isatty(STDERR_FILENO)) ? 1 : 0;
 
     if (!sb_supported()) {
-        log_info("[sandbox] kernel sandbox not available on this platform");
+        /* Terse here on purpose: this is a step note, and phase 2 carries the
+         * one loud verdict about what is - and is not - enforcing. */
+        log_info("[sandbox] phase 1 skipped (no kernel sandbox on this host)");
         return 0;
     }
 
@@ -670,16 +702,25 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                       "but W^X is enforced - fail-closed.");
             return -1;
         }
-        if (!sb_supported()) {
-            log_error("[sandbox] W^X enforcement requested but no kernel "
-                      "sandbox is available on this platform - fail-closed. "
-                      "Use --no-sandbox to opt out (development only).");
-            return -1;
-        }
+        /* A host with NO kernel backend at all is handled below, not here.
+         * Refusing to start would demand a flag on every run while offering
+         * no decision the user could act on: there is no partial sandbox to
+         * accept, and no setting that would produce one. A backend that
+         * exists but is INCOMPLETE is the opposite case and still fails
+         * closed - see the Landlock check further down. */
     }
 
     if (!sb_supported()) {
-        log_info("[sandbox] kernel sandbox not available on this platform");
+        /* Loud, and once. Everything this process does from here is bounded by
+         * Hull's capability layer alone - the manifest's fs/env/hosts gates
+         * checked in C - with nothing underneath it. Saying "applied" here,
+         * which is what this code used to do on every cosmo host, told the
+         * reader the opposite of the truth. */
+        log_warn("[sandbox] NO kernel sandbox on this host: syscall and "
+                 "filesystem confinement%s are not enforced. Hull's "
+                 "capability layer (manifest fs / env / hosts) is the only "
+                 "boundary. See docs/security.md.",
+                 policy->wx_enforced ? ", and W^X," : "");
         return 0;
     }
 

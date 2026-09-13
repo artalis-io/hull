@@ -13,6 +13,8 @@
 #ifndef HL_RUNTIME_LUA_INTERNAL_H
 #define HL_RUNTIME_LUA_INTERNAL_H
 
+#include <stdio.h>
+#include <string.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "hull/runtime/lua.h"
@@ -159,5 +161,45 @@ void hl_lua_request_register(lua_State *L);
  * non-streaming routes (body_reader is not a multipart wrapper). */
 void hl_lua_request_install_multipart(lua_State *L, HlLua *lua,
                                        struct KlHttpBodyReader *body_reader);
+
+
+/* ── Chunk names ──────────────────────────────────────────────────
+ *
+ * Mark a chunkname as a FILE name with a leading "@". Lua then renders
+ * errors as "name:line:" instead of [string "name"]:line:, and
+ * luaO_chunkid truncates an over-long name from the FRONT, keeping the
+ * tail - the part that identifies the module. Without the marker the
+ * name is a "string source", rendered in brackets and truncated from
+ * the back, so a long path or a deep module name loses exactly the
+ * identifying part.
+ *
+ * Returns @p buf, or @p name unchanged when the marker would not fit
+ * (which is only ever the previous behaviour).
+ */
+static inline const char *hl_lua_chunkname(char *buf, size_t n,
+                                           const char *name)
+{
+    int len = snprintf(buf, n, "@%s", name);
+    if (len > 0 && (size_t)len < n) return buf;
+    return name;
+}
+
+/* ── Chunk-source namespace test (mod_db.c, mod_fs.c) ─────────────
+ *
+ * Lua's `ar.source` carries the chunkname VERBATIM, including the
+ * leading marker: "@" for a file, "=" for a literal, none for a
+ * string source. (Only `short_src` renders it for display.) Modules
+ * are loaded with an "@" marker so errors read "name:line:" rather
+ * than [string "name"]:line:, so a raw strncmp against "hull." would
+ * no longer match the stdlib - and the callers below use that test to
+ * decide whether _hull_* internal tables may be touched, and whether a
+ * require came from user code. Skip the marker first.
+ */
+static inline int hl_lua_source_is_stdlib(const char *source)
+{
+    if (!source) return 0;
+    if (*source == '@' || *source == '=') source++;
+    return strncmp(source, "hull.", 5) == 0;
+}
 
 #endif /* HL_RUNTIME_LUA_INTERNAL_H */

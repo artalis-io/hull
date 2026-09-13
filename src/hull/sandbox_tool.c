@@ -90,6 +90,14 @@ static int sb_supported(void) { return 0; }
 
 /* ── Tool-mode sandbox ─────────────────────────────────────────────── */
 
+/* Does this path name a directory that exists? Unveiling one that does not
+ * grants nothing and, on the kernel path, is a failed call. */
+static int dir_exists_p(const char *path)
+{
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
                          const char *app_dir,
                          const char *output_dir,
@@ -99,8 +107,9 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
 
     hl_tool_unveil_init(ctx);
 
-    /* App sources: read-only */
-    if (app_dir)
+    /* App sources: read-only, and only when the path is a real directory
+     * (see the output_dir note below). */
+    if (app_dir && dir_exists_p(app_dir))
         hl_tool_unveil_add(ctx, app_dir, "r");
 
     /* Temp directory: read/write/create (build artifacts) */
@@ -140,8 +149,21 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     hl_tool_unveil_add(ctx, "/Library", "r");
 #endif
 
-    /* Output directory: write/create */
-    if (output_dir)
+    /* The invocation directory: `hull new` / `hull init` create their
+     * scaffold relative to it. Unconditional, so `output_dir` is free to
+     * carry where `hull build` actually writes rather than doubling as
+     * this. */
+    hl_tool_unveil_add(ctx, ".", "rwc");
+
+    /* Output directory: write/create. app_dir above is READ-ONLY, so a
+     * build writing into the app tree (app.com, and the .hull/build the
+     * post-link tidy-up moves debug sidecars into) depends on this.
+     *
+     * Only when it EXISTS. parse_app_dir returns the first positional
+     * argument, which for a non-build subcommand is a word like "test"
+     * rather than a directory - unveiling that grants nothing and, on
+     * Linux, is a failed unveil against a path that is not there. */
+    if (output_dir && dir_exists_p(output_dir))
         hl_tool_unveil_add(ctx, output_dir, "rwc");
 
     /* Hull runtime cache root - `hull build` writes AOT artifacts
@@ -238,7 +260,15 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
         unveil("/opt", "rx");
         unveil("/Library", "r");
 #endif
-        if (output_dir)   unveil(output_dir, "rwc");
+        /* Mirror of the userspace grant above. These two lists must stay in
+         * step: the ctx is what hl_tool_* check, the kernel unveil is what
+         * actually stops a write. Adding "." to only the first is how
+         * moving output_dir off "." quietly removed the CWD's kernel
+         * grant on Linux, while Windows - which has no kernel sandbox -
+         * looked fine. */
+        unveil(".", "rwc");
+        if (output_dir && dir_exists_p(output_dir))
+            unveil(output_dir, "rwc");
         if (platform_dir) unveil(platform_dir, "rx");
         {
             char cache_path[PATH_MAX];
@@ -259,6 +289,13 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
         /* Pledge for tool mode: needs proc + exec for fork/execvp */
         pledge("stdio rpath wpath cpath proc exec fattr", NULL);
     }
+
+    /* A full table means later adds were dropped, and the drop is silent at
+     * the cap. The temp dir is added last, so an overflow shows up as
+     * unrelated tempdir failures far from here. Say so. */
+    if (ctx->count >= HL_TOOL_MAX_UNVEILED)
+        log_warn("[sandbox] unveil table full (%d) - later paths were "
+                 "DROPPED; raise HL_TOOL_MAX_UNVEILED", ctx->count);
 
     log_info("[sandbox] tool mode applied (%d unveiled paths)",
              ctx->count);

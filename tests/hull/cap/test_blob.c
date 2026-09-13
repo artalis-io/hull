@@ -30,6 +30,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include "../test_tmpdir.h"
 
 /* ── Test fixture: per-test isolated temp directory + fs_cfg ─────── */
 
@@ -41,10 +42,8 @@ typedef struct {
 
 static int env_init(TestEnv *e)
 {
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp) tmp = "/tmp";
-    snprintf(e->base_dir, sizeof(e->base_dir),
-             "%s/hull-blob-test-XXXXXX", tmp);
+    if (hl_test_path(e->base_dir, sizeof(e->base_dir),
+                     "hull-blob-test-XXXXXX") != 0) return -1;
     if (!mkdtemp(e->base_dir)) return -1;
     e->fs_cfg.base_dir = e->base_dir;
     e->fs_cfg.base_len = strlen(e->base_dir);
@@ -166,6 +165,45 @@ UTEST(hl_cap_blob, init_sweeps_stale_tmps)
     struct stat st;
     ASSERT_TRUE(stat(path, &st) != 0);     /* removed */
     ASSERT_EQ(stat(fresh, &st), 0);        /* preserved */
+
+    env_free(&e);
+}
+
+/* A temp file whose mtime LEADS the clock must survive the sweep.
+ *
+ * (now - st_mtime) is signed; casting a negative difference to uint64_t wraps
+ * to a huge value that clears any max_age, so the sweep used to unlink the
+ * freshest file rather than the oldest - potentially a concurrent writer's
+ * in-flight blob. mtime can lead time(NULL) after an NTP step or where the
+ * filesystem and the clock resolve differently, which is how this first showed
+ * up: an intermittent CI failure where init_sweeps_stale_tmps lost the file it
+ * had just created. Planted here rather than waited for. */
+UTEST(hl_cap_blob, sweep_keeps_a_tmp_whose_mtime_leads_the_clock)
+{
+    TestEnv e;
+    ASSERT_EQ(env_init(&e), 0);
+
+    HlBlob *b = NULL;
+    ASSERT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 60), 0);
+    hl_cap_blob_free(b);
+
+    char future[512];
+    snprintf(future, sizeof(future), "%s/blobs/tmp/.blob-future.tmp", e.base_dir);
+    int fd = open(future, O_WRONLY | O_CREAT, 0644);
+    ASSERT_TRUE(fd >= 0);
+    write(fd, "z", 1);
+    close(fd);
+
+    /* Two minutes ahead - well past the 60s max_age, so a wrapped comparison
+     * deletes it while a correct one leaves it alone. */
+    struct timeval tv[2] = {{ time(NULL) + 120, 0 }, { time(NULL) + 120, 0 }};
+    ASSERT_EQ(utimes(future, tv), 0);
+
+    ASSERT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 60), 0);
+    hl_cap_blob_free(b);
+
+    struct stat st;
+    ASSERT_EQ(stat(future, &st), 0);   /* survives: a future mtime is not stale */
 
     env_free(&e);
 }
@@ -523,8 +561,65 @@ UTEST(hl_cap_blob, rejects_invalid_id)
 
 /* ── track_access opt-out ────────────────────────────────────────── */
 
+/* Mirrors blob_store.c: O_NOATIME is the Linux-only flag that suppresses
+ * atime updates on read; elsewhere it is 0 and the open is plain. */
+#if defined(__linux__)
+#  ifndef O_NOATIME
+#    define O_NOATIME 01000000
+#  endif
+#else
+#  ifndef O_NOATIME
+#    define O_NOATIME 0
+#  endif
+#endif
+
+/*
+ * Can this host suppress the atime update that a read would otherwise cause?
+ *
+ * hl_cap_blob_get(track_access=0) opens with O_NOATIME (falling back to a
+ * plain open on EPERM), so the contract holds wherever the kernel honours
+ * that flag - Linux does, including under relatime. Where it does not,
+ * atime moves no matter what Hull asks for, and the assertion below stops
+ * being a statement about Hull: on Windows 11 with cosmocc 4.0.2, O_NOATIME
+ * is 0 and a measured read restores a backdated atime to now.
+ *
+ * So probe the ACTUAL production open, not a naive read - an earlier version
+ * of this used a plain open() and skipped on ordinary relatime Linux, where
+ * O_NOATIME works fine and the test is meaningful.
+ */
+static int host_cannot_suppress_atime(void)
+{
+    char probe[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(probe, sizeof probe, "hull_atime_probe", NULL);
+    if (fd < 0) return 0;              /* cannot tell - do not skip */
+    if (write(fd, "x", 1) != 1) { close(fd); unlink(probe); return 0; }
+    close(fd);
+
+    struct timeval back[2] = {{ time(NULL) - 3600, 0 },
+                              { time(NULL) - 3600, 0 }};
+    if (utimes(probe, back) != 0) { unlink(probe); return 0; }
+
+    struct stat pst;
+    if (stat(probe, &pst) != 0) { unlink(probe); return 0; }
+    time_t before = pst.st_atime;
+
+    fd = open(probe, O_RDONLY | O_NOATIME);
+    if (fd < 0 && errno == EPERM) fd = open(probe, O_RDONLY);
+    if (fd >= 0) { char c; ssize_t r = read(fd, &c, 1); (void)r; close(fd); }
+
+    int bumped = 0;
+    if (stat(probe, &pst) == 0)
+        bumped = pst.st_atime > before + 1;
+    unlink(probe);
+    return bumped;
+}
+
 UTEST(hl_cap_blob, track_access_false_preserves_atime)
 {
+    if (host_cannot_suppress_atime())
+        UTEST_SKIP("host does not honour O_NOATIME; atime moves on read "
+                   "whatever Hull asks for");
+
     TestEnv e; env_init(&e);
     HlBlob *b = NULL;
     hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 0);
@@ -757,7 +852,7 @@ UTEST(hl_cap_blob, cleanup_age_only)
 /* Open a store rooted at a tmpdir, bypassing the cap layer. */
 static HlBlobStore *open_keyed_store(char tmpdir[256])
 {
-    snprintf(tmpdir, 256, "/tmp/hull-blob-keyed-XXXXXX");
+    hl_test_path(tmpdir, 256, "hull-blob-keyed-XXXXXX");
     if (!mkdtemp(tmpdir)) return NULL;
     HlBlobStore *s = NULL;
     if (hl_blob_store_open(&s, NULL, tmpdir, /*shard_depth=*/1, 0) != 0)
@@ -913,14 +1008,21 @@ UTEST(hl_blob_store_keyed, reader_refuses_symlink_at_blob_path)
     ASSERT_EQ(write(tfd, "sekret", 6), 6);
     close(tfd);
 
-    char blob_path[512];
+    /* shard_dir + '/' + a 64-char key; sized so this provably cannot truncate. */
+    char blob_path[HL_TEST_PATH_MAX + 128];
     snprintf(blob_path, sizeof(blob_path), "%s/%s", shard_dir, key);
-    ASSERT_EQ(symlink(target_file, blob_path), 0);
+    /* Creating a symlink needs SeCreateSymbolicLinkPrivilege on Windows,
+     * which an ordinary account does not hold. Asserting success there
+     * fails for a reason that has nothing to do with the O_NOFOLLOW
+     * refusal under test; skip honestly instead, the same way
+     * hl_cap_fs.validate_rejects_symlink_escape does. */
+    if (symlink(target_file, blob_path) != 0)
+        UTEST_SKIP("symlink() unavailable (needs privilege on this host)");
 
     /* reader_open MUST refuse - O_NOFOLLOW returns ELOOP/EMLINK. */
     HlBlobStoreReader *r = NULL;
     ASSERT_NE(hl_blob_store_reader_open(s, key, 0, &r), 0);
-    ASSERT_EQ(r, NULL);
+    ASSERT_EQ((void *)r, NULL);
 
     /* And `_get` does too. */
     uint8_t *buf = NULL;

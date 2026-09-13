@@ -5,6 +5,9 @@ build/
 *.com
 *.exe
 /hull
+# cosmocc drops a per-TU dep file in the CWD when the test binaries are
+# built, so a cosmo `make test` litters the repo root (root only).
+/a-test_*.d
 
 # Database
 *.db

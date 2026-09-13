@@ -42,6 +42,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "../../test_tmpdir.h"
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -4286,10 +4287,13 @@ static int jbc_rm_entry(const char *p, const struct stat *st,
     return remove(p);
 }
 
-static void jbc_with_tmp_home(char tmpdir[256])
+static void jbc_with_tmp_home(char *tmpdir, size_t n)
 {
-    snprintf(tmpdir, 256, "/tmp/hull_jbc_cache_XXXXXX");
-    mkdtemp(tmpdir);
+    if (hl_test_path(tmpdir, n, "hull_jbc_cache_XXXXXX") != 0 || !mkdtemp(tmpdir)) {
+        fprintf(stderr, "jbc_with_tmp_home: no usable temp dir\n");
+        tmpdir[0] = 0;
+        return;
+    }
     setenv("HOME", tmpdir, 1);
     unsetenv("HULL_NO_CACHE");
     unsetenv("HULL_NO_JS_BYTECODE_CACHE");
@@ -4336,7 +4340,7 @@ static const char *JBC_PROBE =
 UTEST(js_bytecode_cache, miss_then_hit_populates_disk)
 {
     char tmp[256];
-    jbc_with_tmp_home(tmp);
+    jbc_with_tmp_home(tmp, sizeof tmp);
 
     JSRuntime *rt = JS_NewRuntime();
     ASSERT_NE(rt, NULL);
@@ -4368,7 +4372,7 @@ UTEST(js_bytecode_cache, miss_then_hit_populates_disk)
 UTEST(js_bytecode_cache, opt_out_via_env_skips_disk)
 {
     char tmp[256];
-    jbc_with_tmp_home(tmp);
+    jbc_with_tmp_home(tmp, sizeof tmp);
     setenv("HULL_NO_JS_BYTECODE_CACHE", "1", 1);
     hl_js_bytecode_cache_reset();
 
@@ -4392,7 +4396,7 @@ UTEST(js_bytecode_cache, opt_out_via_env_skips_disk)
 UTEST(js_bytecode_cache, tiny_source_skips_cache)
 {
     char tmp[256];
-    jbc_with_tmp_home(tmp);
+    jbc_with_tmp_home(tmp, sizeof tmp);
 
     const char *tiny = "export default 1;\n";  /* < 256 bytes */
     JSRuntime *rt = JS_NewRuntime();
@@ -4416,7 +4420,7 @@ UTEST(js_bytecode_cache, module_name_in_key)
      * name into the bytecode. Same source under two different
      * names → two distinct entries. */
     char tmp[256];
-    jbc_with_tmp_home(tmp);
+    jbc_with_tmp_home(tmp, sizeof tmp);
 
     JSRuntime *rt = JS_NewRuntime();
     JSContext *ctx = JS_NewContext(rt);
@@ -4444,7 +4448,7 @@ UTEST(js_bytecode_cache, module_name_in_key)
 UTEST(js_bytecode_cache, parse_error_returns_no_cache_write)
 {
     char tmp[256];
-    jbc_with_tmp_home(tmp);
+    jbc_with_tmp_home(tmp, sizeof tmp);
 
     const char *bad =
         "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
@@ -4478,10 +4482,13 @@ UTEST(js_bytecode_cache, parse_error_returns_no_cache_write)
  * the post-eval render function (skipping both parse and the
  * IIFE execute on hit). */
 
-static void jtc_with_tmp_home(char tmpdir[256])
+static void jtc_with_tmp_home(char *tmpdir, size_t n)
 {
-    snprintf(tmpdir, 256, "/tmp/hull_jtc_cache_XXXXXX");
-    mkdtemp(tmpdir);
+    if (hl_test_path(tmpdir, n, "hull_jtc_cache_XXXXXX") != 0 || !mkdtemp(tmpdir)) {
+        fprintf(stderr, "jtc_with_tmp_home: no usable temp dir\n");
+        tmpdir[0] = 0;
+        return;
+    }
     setenv("HOME", tmpdir, 1);
     unsetenv("HULL_NO_CACHE");
     unsetenv("HULL_NO_JS_TEMPLATE_CACHE");
@@ -4531,7 +4538,7 @@ static const char *JTC_PROBE =
 UTEST(js_template_cache, miss_then_hit_populates_disk)
 {
     char tmp[256];
-    jtc_with_tmp_home(tmp);
+    jtc_with_tmp_home(tmp, sizeof tmp);
 
     JSRuntime *rt = JS_NewRuntime();
     JSContext *ctx = JS_NewContext(rt);
@@ -4574,7 +4581,7 @@ UTEST(js_template_cache, miss_then_hit_populates_disk)
 UTEST(js_template_cache, opt_out_via_env_skips_disk)
 {
     char tmp[256];
-    jtc_with_tmp_home(tmp);
+    jtc_with_tmp_home(tmp, sizeof tmp);
     setenv("HULL_NO_JS_TEMPLATE_CACHE", "1", 1);
     hl_js_template_cache_reset();
 
@@ -4598,7 +4605,7 @@ UTEST(js_template_cache, opt_out_via_env_skips_disk)
 UTEST(js_template_cache, parse_error_returns_no_cache_write)
 {
     char tmp[256];
-    jtc_with_tmp_home(tmp);
+    jtc_with_tmp_home(tmp, sizeof tmp);
 
     const char *bad =
         "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
@@ -4628,7 +4635,7 @@ UTEST(js_template_cache, name_in_key)
     /* Different chunk names → distinct entries (parallel to the
      * js_bytecode_cache.module_name_in_key check). */
     char tmp[256];
-    jtc_with_tmp_home(tmp);
+    jtc_with_tmp_home(tmp, sizeof tmp);
 
     JSRuntime *rt = JS_NewRuntime();
     JSContext *ctx = JS_NewContext(rt);
@@ -4790,8 +4797,8 @@ UTEST(js_runtime, app_get_allowed_before_registration_closed)
  * these also assert balanced cleanup on every fail-closed path. */
 static int run_lenient_load(const char *src)
 {
-    char path[] = "/tmp/hull_js_liveXXXXXX";
-    int fd = mkstemp(path);
+    char path[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(path, sizeof path, "hull_js_live", NULL);
     if (fd < 0) return -999;
     size_t n = strlen(src);
     ssize_t w = write(fd, src, n);

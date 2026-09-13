@@ -50,6 +50,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../test_tmpdir.h"
 
 UTEST_MAIN();
 
@@ -60,7 +61,7 @@ static HlAllocator cfg_alloc;
 
 static void setup(void)
 {
-    snprintf(test_dir, sizeof(test_dir), "/tmp/hull_spans_%d", getpid());
+    hl_test_path(test_dir, sizeof(test_dir), "hull_spans_%d", getpid());
     mkdir(test_dir, 0755);
     cfg.base_dir = test_dir;
     cfg.base_len = strlen(test_dir);

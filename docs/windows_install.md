@@ -184,6 +184,148 @@ and is not the same configuration CI exercises.
 This path is exercised in CI by `.github/workflows/windows-source-build.yml`,
 whose header carries the full evidence and history.
 
+## What works on Windows, and what does not
+
+Windows runs the Cosmopolitan APE build. A fat APE cannot force-load a native
+static archive, so every subsystem that ships as a **composable feature** is
+unavailable there. Everything the cosmo base compiles in works normally.
+
+| Capability | Windows | Why |
+|---|---|---|
+| Lua and JS runtimes, `fs`, `crypto`, `http`, `time`, `env` | yes | in the cosmo base |
+| SQLite (`db`, migrations, session/outbox/idempotency/rbac/search) | yes | cosmo compiles SQLite in |
+| WASM compute (`compute.*`) | yes, interpreted | cosmo keeps WASM in-base |
+| Terminal UI (`hull.tui`) | yes | `HL_ENABLE_TUI` defaults to 1 on cosmo |
+| `hull build` of an APE app | yes | needs `cosmocc`; see below |
+| PostgreSQL (`postgres://`) | **no** | native-only feature |
+| MySQL / MariaDB (`mysql://`, `mariadb://`) | **no** | native-only feature |
+| DuckDB (`duckdb://`) | **no** | native-only feature |
+| GPU compute (`gpu.*`) | **no** | native-only feature |
+| AOT-compiled compute | **no** | `wamrc` is not published for cosmo |
+| Kernel sandbox (pledge/unveil) | **no** | see below |
+
+If an app needs a network database or GPU, run it on a native build
+(`hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`), where
+`hull feature install <name>` and `hull build --with=<name>` work. Building
+Hull from source on Windows with `HL_ENABLE_POSTGRES=1` or `HL_ENABLE_MYSQL=1`
+also works, because those backends are pure C with no vendored engine; DuckDB
+and GPU are not viable that way.
+
+### Compute runs interpreted
+
+`wamrc`, the WAMR AOT compiler, is not published for cosmo (it needs LLVM, which
+is too large to bundle into a fat APE). `compute.call` is correct on Windows but
+runs through the interpreter, so compute-heavy workloads are slower than on a
+native host with `hull tools install wamrc`. Building `wamrc` from source with
+`make wamrc` is the alternative.
+
+### There is no kernel sandbox on Windows
+
+Cosmopolitan's `pledge()` and `unveil()` return 0 and do nothing on Windows
+(measured with cosmocc 4.0.2 on Windows 11: `pledge("stdio", NULL)` returns 0
+and a following `socket()` still succeeds). Startup logs one warning saying so.
+Hull's capability layer, the manifest allowlists for `fs`, `env` and `hosts`,
+still applies in full, and it is the only enforcement boundary on this host.
+Treat a Windows deployment as capability-sandboxed but not kernel-sandboxed.
+
+## Exit codes on Windows (read this before scripting `hull`)
+
+**On Windows, a POSIX-style shell cannot tell whether `hull` succeeded.** In
+MSYS2, Git Bash and Cygwin, a *failing* `hull` command reports success: `&&`
+runs the next command anyway and `set -e` does not abort.
+
+```sh
+# In Git Bash / MSYS2 on Windows. `hull build` FAILS here, and yet:
+hull build ./app && echo "shipped"      # prints "shipped"
+set -e; hull build ./app; echo "reached"  # prints "reached"
+```
+
+This is not a Hull bug and Hull cannot work around it. Every Cosmopolitan APE
+on Windows - which is what `hull.com` and the apps it builds are - reports its
+exit status **shifted left by 8**, i.e. the raw `wait()`-style status rather
+than the exit code. A two-line C program built with `cosmocc` does the same
+thing. Tracked upstream as
+[jart/cosmopolitan#1521](https://github.com/jart/cosmopolitan/issues/1521).
+
+| `hull` intends | PowerShell `$LASTEXITCODE` | cmd `ERRORLEVEL` | MSYS2 / Git Bash `$?` |
+|---|---|---|---|
+| `0` (success) | `0` | `0` | `0` |
+| `1` (failure) | `256` | `256` | **`0`** |
+| `2` (failure) | `512` | `512` | **`0`** |
+
+Success is reported correctly everywhere, which is exactly why this is easy to
+miss: a green run behaves normally and only failures are swallowed. The value
+is always `code << 8`, whose low byte is `0` for any code below 256 - so a
+shell that keeps only the low byte sees `0`.
+
+### What to do
+
+**PowerShell** - works, if you test `$LASTEXITCODE` rather than `$?`:
+
+```powershell
+hull build .\app
+if ($LASTEXITCODE -ne 0) { throw "hull build failed" }
+```
+
+Do **not** use `$?` here. Measured on Windows 11 with cosmocc 4.0.2: after a
+failing `hull`, `$LASTEXITCODE` is `256` but `$?` is still `True`.
+
+**cmd.exe** - works, `if errorlevel 1` triggers correctly:
+
+```bat
+hull build .\app
+if errorlevel 1 (echo hull build failed & exit /b 1)
+```
+
+**MSYS2 / Git Bash / Cygwin** - the status is unusable. Check for the
+**artifact** instead, which is what Hull's own CI does:
+
+```sh
+hull build ./app
+test -f ./app/app.com || { echo "hull build failed"; exit 1; }
+```
+
+For commands that produce no file, check the output instead - for example
+`hull doctor --json` and test a field, rather than trusting the status.
+
+### Scope
+
+This affects every `hull` subcommand on Windows, and every app `hull build`
+produces there, since both are APEs. It does not affect Linux, macOS, or the
+BSDs. Windows CI that shells out to `hull` from bash should assert artifacts or
+output; a bare `hull ... && ...` chain is not a check.
+
+## Paths from Git Bash and MSYS2
+
+If you drive `hull` from Git Bash, MSYS2 or Cygwin, that shell rewrites a POSIX
+path argument on its way to a native program into the MIXED form
+`D:/work/app/data.db` - drive letter, colon, forward slashes. A Cosmopolitan
+APE is a native program, so that is what `hull` was handed.
+
+Windows itself is happy with that spelling: `open`, `stat` and `mkdir` all
+accept it. The vendored POSIX code inside Hull was not. SQLite's unix VFS
+decides absolute-vs-relative by testing for a leading `/`, so it read
+`D:/work/app/data.db` as RELATIVE, prepended the current directory, and failed
+to open the result. The symptom was a flat contradiction:
+
+```
+hull migrate: cannot open database D:/work/app/data.db
+```
+
+on a database that plainly exists, at a path you can `ls`.
+
+**Hull now rewrites a leading drive letter to the rooted form both layers
+accept** - `D:/work/app/data.db` becomes `/D/work/app/data.db`, which is also
+what cosmo's own `getcwd()` returns. Backslashes are folded in that same case,
+so `D:\work\app\data.db` works too. The rewrite is Windows-only, applies
+only to a SINGLE letter followed by `:` and a separator, and therefore never
+touches a `postgres://` DSN (no real URI scheme is one character) or a POSIX
+path (which never carries a `:` at index 1).
+
+Nothing is required of you. On a Hull released before this fix, the
+workaround is to export `MSYS2_ARG_CONV_EXCL='*'` before invoking `hull`, which
+tells the shell to stop converting arguments at all.
+
 ## What it does
 
 - Resolves the latest official stable release from `artalis-io/hull` (drafts and

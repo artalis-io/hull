@@ -114,11 +114,24 @@ elif [ "$UNAME_S" = "OpenBSD" ]; then
     SANDBOX_TYPE="pledge"
 fi
 # Cosmopolitan binaries report Linux on Linux, so check if hull was built
-# with cosmocc by looking for the APE magic or platform_cc marker
+# with cosmocc by looking for the APE magic or platform_cc marker.
+#
+# A cosmo build only ENFORCES where Cosmopolitan's pledge/unveil have a
+# mechanism to enforce with - Linux and OpenBSD. The same APE on Windows or a
+# BSD reports "no kernel sandbox on this host" and runs on the capability layer
+# alone (see sb_supported() in src/hull/sandbox.c), so expecting a sandbox
+# there would assert a protection that deliberately is not claimed. The
+# UNAME_S test above has already set the expectation for the hosts that do
+# enforce, so this only needs to avoid overriding it on the ones that do not.
 if [ -f "$BUILDDIR/platform_cc" ]; then
     PLATFORM_CC=$(cat "$BUILDDIR/platform_cc" 2>/dev/null)
     case "$PLATFORM_CC" in
-        *cosmocc*) SANDBOX_EXPECTED=1; SANDBOX_TYPE="pledge" ;;
+        *cosmocc*)
+            case "$UNAME_S" in
+                Linux|OpenBSD) SANDBOX_EXPECTED=1; SANDBOX_TYPE="pledge" ;;
+                *)             SANDBOX_EXPECTED=0; SANDBOX_TYPE="" ;;
+            esac
+            ;;
     esac
 fi
 
@@ -168,7 +181,7 @@ if wait_for_server 19880; then
             check_contains "sandbox dns promise (hosts declared)" "$LOG" "dns"
         fi
     else
-        check_contains "sandbox not available log" "$LOG" "kernel sandbox not available"
+        check_contains "sandbox not available log" "$LOG" "NO kernel sandbox on this host"
     fi
 else
     stop_server
@@ -211,7 +224,7 @@ if wait_for_server 19881; then
             check_not_contains "no dns without manifest" "$LOG2" " dns"
         fi
     else
-        check_contains "sandbox not available log" "$LOG2" "kernel sandbox not available"
+        check_contains "sandbox not available log" "$LOG2" "NO kernel sandbox on this host"
     fi
 else
     stop_server
@@ -308,7 +321,7 @@ if wait_for_server 19883; then
             check_contains "JS sandbox dns promise (hosts declared)" "$LOG4" "dns"
         fi
     else
-        check_contains "JS sandbox not available log" "$LOG4" "kernel sandbox not available"
+        check_contains "JS sandbox not available log" "$LOG4" "NO kernel sandbox on this host"
     fi
 else
     stop_server
@@ -350,7 +363,7 @@ if wait_for_server 19884; then
             fail "phase 1 should appear before phase 2 (got $P1_LINE vs $P2_LINE)"
         fi
     else
-        check_contains "phase 1 not available log" "$LOG5" "kernel sandbox not available"
+        check_contains "phase 1 not available log" "$LOG5" "NO kernel sandbox on this host"
     fi
 else
     stop_server

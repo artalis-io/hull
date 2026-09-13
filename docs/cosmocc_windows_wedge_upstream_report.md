@@ -1,9 +1,15 @@
 # cosmocc on Windows: cc1 blocks indefinitely on large translation units
 
-Draft of an upstream report for [jart/cosmopolitan](https://github.com/jart/cosmopolitan),
-kept in-tree so the measurements have a home and the numbers do not have to be
-re-derived. Tracked on the Hull side as
+**Filed upstream as
+[jart/cosmopolitan#1522](https://github.com/jart/cosmopolitan/issues/1522)**
+(2026-09-09). This file stays as the working record: the measurements have a
+home here and do not have to be re-derived. Tracked on the Hull side as
 [hull#462](https://github.com/artalis-io/hull/issues/462).
+
+The filed issue carries one thing this draft did not - a **negative control**
+(below), which is probably the most useful part of it - and a standalone
+reproducer that needs no Hull checkout, just the cosmocc zip and the SQLite
+amalgamation.
 
 SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -60,6 +66,27 @@ pid=8512 ppid=500  make.exe                 cpu=0.66s  dcpu=0.04s
 `dcpu=0.01s` over a 5-second window is the key measurement: **`cc1` is blocked,
 not spinning.** It has accumulated only 3-7s of CPU and then stops, consistently
 at roughly the same point.
+
+## Negative control: it does NOT reproduce on a Windows 11 desktop
+
+Everything above was measured on GitHub Actions. Running the same reproducer -
+same cosmocc 4.0.2, same `-O0`, same MSYS2 shell, the SQLite amalgamation as
+the TU - on a **Windows 11 Pro 26200 desktop** gave **0 wedges in 40
+consecutive compiles**, every one finishing in 4-5s.
+
+That is not just "did not reproduce". If p were 0.12, the chance of 40 clean
+compiles is `0.88^40 = 0.6%`; zero events in 40 puts a 95% upper bound of
+`3/40 = 7.5%` on the rate for that host. The two hosts are statistically
+incompatible.
+
+So the trigger is not "cosmocc compiling a large TU on Windows". Something
+about the Actions image differs - its ephemeral `D:\` work volume, real-time
+scanning on the temp path `cc1` writes its `.s` into, or that image's MSYS2
+installation. Note the temp-directory arm below moved `TMPDIR`/`TMP`/`TEMP`
+*within* the image, which does not rule out the volume or the scanner.
+
+This also means the retry mitigation is aimed at CI specifically, and a
+developer building on a Windows desktop may never see the wedge at all.
 
 ## What has been ruled out
 

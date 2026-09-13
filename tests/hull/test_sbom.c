@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <unistd.h>
+#include "test_tmpdir.h"
 
 /* ── Table integrity ──────────────────────────────────────────────── */
 
@@ -350,8 +351,8 @@ UTEST(sbom, binary_sha256_present_when_path_set)
      * at it. Avoids env dependencies (/proc/self/exe absent under some
      * runners; /usr/bin/true absent on minimal containers; argv[0] not
      * always a real path). */
-    char path[] = "/tmp/hull_sbom_test_XXXXXX";
-    int fd = mkstemp(path);
+    char path[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(path, sizeof path, "hull_sbom_test", NULL);
     if (fd < 0) return;  /* skip cleanly on sandboxed envs */
     FILE *fp = fdopen(fd, "wb");
     if (!fp) { close(fd); unlink(path); return; }

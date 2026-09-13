@@ -44,6 +44,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include "../test_tmpdir.h"
 
 /* memory(1) + load8/load32/load64/loadv128(lane0) + fill + copy. Compiled from
  * tests/hull/fixtures/gsub.wat via wat2wasm. */
@@ -392,7 +393,7 @@ UTEST(wasm_guarded, eof_tail_no_sigbus)
     PG = sysconf(_SC_PAGESIZE); if (PG <= 0) PG = 4096;
 
     char path[256];
-    snprintf(path, sizeof(path), "/tmp/hull_gsub_eof_%d.bin", (int)getpid());
+    hl_test_path(path, sizeof(path), "hull_gsub_eof_%d.bin", (int)getpid());
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
     ASSERT_TRUE(fd >= 0);
     size_t fsize = 100; /* window ends mid-page */

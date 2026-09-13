@@ -16,9 +16,15 @@
 # HOW. `make -n` through Hull's own recipe, then read Keel's inner compile
 # lines. Dry run, no artifacts, ~seconds - cheap enough to sit in the lint job.
 #
-# Keel's TUs are identified by their -o target: Keel compiles to `src/*.o` and
-# `vendor/llhttp/*.o` relative to vendor/keel, whereas Hull compiles everything
-# to `build/*.o`. Both groups are checked separately and deliberately: Keel
+# Keel's TUs are identified by their -o target. Keel v3.0.0 moved objects under
+# `build/<backend>/` so switching BACKEND= cannot mix incompatible objects into
+# one archive, making the target `build/<backend>/src/*.o` and
+# `build/<backend>/vendor/llhttp/*.o` relative to vendor/keel; the pre-v3.0.0
+# `src/*.o` / `vendor/llhttp/*.o` shape is still accepted so this gate keeps
+# working across a bisect. Hull compiles everything FLAT to `build/*.o`, so the
+# extra directory level is what tells the two apart - matching `build/` alone
+# would sweep in every Hull TU and make the assertions meaningless.
+# Both groups are checked separately and deliberately: Keel
 # splits CFLAGS (core) from VENDOR_CFLAGS (llhttp, the miniz adapter), and the
 # vendored half is exactly where the Windows wedge was observed, so a hook that
 # reached only one of them would look fine here and still be broken.
@@ -39,13 +45,23 @@ if [ ! -f vendor/keel/Makefile ]; then
 fi
 
 # Keel's compile lines for one configuration. $1 = extra make variables.
+#
+# -B (always-make) is load-bearing, not belt and braces. Without it the gate
+# only works on a tree where vendor/keel/libkeel.a has never been built: the
+# archive's only prerequisites are Hull's mbedTLS objects, so once it exists
+# make answers "'vendor/keel/libkeel.a' is up to date", never enters the
+# sub-make, and emits no compile lines at all. The gate then reported six
+# failures - "no Keel compile lines found (recipe changed?)" - on every
+# developer machine that had built Hull, which reads as a regression in the
+# thing being gated rather than as the gate mis-firing. -B makes it ask what
+# the commands WOULD be, which is the actual question.
 keel_lines() {
     # shellcheck disable=SC2086
-    $MAKE -n $1 vendor/keel/libkeel.a 2>/dev/null | grep -- ' -c -o ' || true
+    $MAKE -Bn $1 vendor/keel/libkeel.a 2>/dev/null | grep -- ' -c -o ' || true
 }
 
-core_flags()   { printf '%s\n' "$1" | grep -- ' -c -o src/'; }
-vendor_flags() { printf '%s\n' "$1" | grep -- ' -c -o vendor/llhttp/'; }
+core_flags()   { printf '%s\n' "$1" | grep -E -- ' -c -o (build/[^/]+/)?src/'; }
+vendor_flags() { printf '%s\n' "$1" | grep -E -- ' -c -o (build/[^/]+/)?vendor/llhttp/'; }
 
 # $1 label, $2 make vars, $3 pattern that must appear, $4 pattern that must NOT
 # appear (empty to skip the negative assertion).
@@ -107,8 +123,24 @@ check_config "default"          "HL_OPT=-O2 HL_ENABLE_LTO=0 HL_ENABLE_CFI=0" ' -
 # 2. The defect #461 is about. Before the fix this was -O2 in both halves.
 check_config "HL_OPT=-O0"       "HL_OPT=-O0 HL_ENABLE_LTO=0 HL_ENABLE_CFI=0" ' -O0 '  ' -flto'
 
-# 3. LTO. Before the fix KEEL_EXTRA_CFLAGS was passed and ignored.
-check_config "HL_ENABLE_LTO=1"  "HL_OPT=-O2 HL_ENABLE_LTO=1 HL_ENABLE_CFI=0" ' -flto' ''
+# 3. LTO, only where the toolchain can actually do it - same reasoning as the
+#    CFI case below. Hull's HL_LTO_CFLAG comes from a probe (-flto=thin, then
+#    -flto) and stays EMPTY when the compiler can do neither, so on such a
+#    toolchain there is no flag to propagate and asserting one tests the probe
+#    rather than propagation. Mirror the probe, not the flag name.
+lto_probe=no
+for lto_f in -flto=thin -flto; do
+    if printf 'int main(void){return 0;}\n' | \
+       ${CC:-cc} -Werror "$lto_f" -x c -c -o /dev/null - 2>/dev/null; then
+        lto_probe=yes
+        break
+    fi
+done
+if [ "$lto_probe" = yes ]; then
+    check_config "HL_ENABLE_LTO=1"  "HL_OPT=-O2 HL_ENABLE_LTO=1 HL_ENABLE_CFI=0" ' -flto' ''
+else
+    printf '  skip  LTO: %s cannot do -flto (no flag to propagate)\n' "${CC:-cc}"
+fi
 
 # 4. Both together, since they travel by different mechanisms (KEEL_OPT vs
 #    KEEL_EXTRA_CFLAGS) and could regress independently.

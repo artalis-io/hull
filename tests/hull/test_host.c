@@ -27,6 +27,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include "test_tmpdir.h"
 
 /* ── Host identity ─────────────────────────────────────────────────── */
 
@@ -215,6 +219,67 @@ UTEST(host, render_exec_reports_overflow_when_quoting)
 
 /* ── PATH search ───────────────────────────────────────────────────── */
 
+UTEST(host, tool_name_takes_the_basename_on_either_separator)
+{
+    char out[64];
+    /* The defect: splitting on '/' alone leaves a Windows path whole, so the
+     * "name" recorded in package.sig was an absolute path off one machine. */
+    ASSERT_EQ(0, hl_host_tool_name("C:\\msys64\\ucrt64\\bin\\gcc.exe", out, sizeof(out)));
+    ASSERT_STREQ("gcc", out);
+    ASSERT_EQ(0, hl_host_tool_name("/usr/bin/gcc", out, sizeof(out)));
+    ASSERT_STREQ("gcc", out);
+    ASSERT_EQ(0, hl_host_tool_name("/C/Users/x/.hull/tools/cosmocc/bin/cosmocc", out, sizeof(out)));
+    ASSERT_STREQ("cosmocc", out);
+    /* Mixed separators: the LAST one wins, whichever it is. */
+    ASSERT_EQ(0, hl_host_tool_name("C:/tools\\bin/cc", out, sizeof(out)));
+    ASSERT_STREQ("cc", out);
+}
+
+UTEST(host, tool_name_drops_only_a_trailing_exe_or_com)
+{
+    char out[64];
+    ASSERT_EQ(0, hl_host_tool_name("cc.exe", out, sizeof(out)));
+    ASSERT_STREQ("cc", out);
+    ASSERT_EQ(0, hl_host_tool_name("hull.com", out, sizeof(out)));
+    ASSERT_STREQ("hull", out);
+    /* Not an extension, not stripped. */
+    ASSERT_EQ(0, hl_host_tool_name("gcc-14", out, sizeof(out)));
+    ASSERT_STREQ("gcc-14", out);
+    ASSERT_EQ(0, hl_host_tool_name("exe", out, sizeof(out)));
+    ASSERT_STREQ("exe", out);
+    ASSERT_EQ(0, hl_host_tool_name(".exe", out, sizeof(out)));
+    ASSERT_STREQ(".exe", out);      /* nothing would be left; leave it alone */
+    /* Mid-string, not trailing. */
+    ASSERT_EQ(0, hl_host_tool_name("cc.exe.bak", out, sizeof(out)));
+    ASSERT_STREQ("cc.exe.bak", out);
+    /* Case-sensitive, matching the comparisons this feeds. */
+    ASSERT_EQ(0, hl_host_tool_name("CC.EXE", out, sizeof(out)));
+    ASSERT_STREQ("CC.EXE", out);
+}
+
+UTEST(host, tool_name_rejects_rather_than_truncates)
+{
+    /* A truncated name could match a DIFFERENT tool, so an over-long one is
+     * refused and the caller decides what to do. */
+    char small[4];
+    ASSERT_EQ(-1, hl_host_tool_name("/usr/bin/clang", small, sizeof(small)));
+    ASSERT_STREQ("", small);
+
+    char out[64];
+    ASSERT_EQ(-1, hl_host_tool_name(NULL, out, sizeof(out)));
+    ASSERT_STREQ("", out);
+    ASSERT_EQ(-1, hl_host_tool_name("cc", NULL, 16));
+    ASSERT_EQ(-1, hl_host_tool_name("cc", out, 0));
+}
+
+UTEST(host, tool_name_handles_a_trailing_separator)
+{
+    /* Degenerate but must not read past the end: the basename is empty. */
+    char out[64];
+    ASSERT_EQ(0, hl_host_tool_name("/usr/bin/", out, sizeof(out)));
+    ASSERT_STREQ("", out);
+}
+
 UTEST(host, find_in_path_rejects_bad_arguments)
 {
     char out[64];
@@ -233,6 +298,38 @@ UTEST(host, find_in_path_misses_cleanly)
     ASSERT_STREQ("", out);             /* miss clears the buffer */
 }
 
+/* Create a temp directory holding an executable probe file. Returns 1 on
+ * success, 0 if the environment will not allow it (the caller then skips).
+ *
+ * Deliberately POSIX calls rather than system("mkdir -p") / system("chmod +x"):
+ * a Cosmopolitan APE on Windows has no /bin/sh, so every shelling-out test
+ * SKIPPED there - on the one platform whose PATH handling these tests exist to
+ * pin. mkdir/fopen/chmod work on every host Hull runs on. */
+static int host_make_probe(const char *tag, char *dir, size_t dir_sz,
+                           const char *leaf)
+{
+    if (hl_test_path(dir, dir_sz, "hull-host-%s", tag) != 0) return 0;
+
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) return 0;
+
+    char exe[700];
+    snprintf(exe, sizeof(exe), "%s/%s", dir, leaf);
+    FILE *f = fopen(exe, "w");
+    if (!f) return 0;
+    fputs("#!/bin/sh\nexit 0\n", f);
+    fclose(f);
+    return chmod(exe, 0755) == 0;
+}
+
+/* Best-effort teardown for host_make_probe. */
+static void host_drop_probe(const char *dir, const char *leaf)
+{
+    char exe[700];
+    snprintf(exe, sizeof(exe), "%s/%s", dir, leaf);
+    (void)unlink(exe);
+    (void)rmdir(dir);
+}
+
 UTEST(host, find_in_path_finds_a_real_executable)
 {
     /* Use a directory we control, joined with the HOST separator, so the test
@@ -241,23 +338,8 @@ UTEST(host, find_in_path_finds_a_real_executable)
      * everything on Windows. hl_host_find_in_path_ex takes the search list
      * explicitly, so no environment mutation is needed. */
     char dir[512];
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = getenv("TMP");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(dir, sizeof(dir), "%s/hull-host-test", tmp);
-
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot create a temp directory"); }
-
-    char exe[700];
-    snprintf(exe, sizeof(exe), "%s/hulltestprobe", dir);
-    FILE *f = fopen(exe, "w");
-    if (!f) { UTEST_SKIP("cannot write a temp file"); }
-    fputs("#!/bin/sh\nexit 0\n", f);
-    fclose(f);
-    snprintf(cmd, sizeof(cmd), "chmod +x '%s'", exe);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot chmod a temp file"); }
+    if (!host_make_probe("test", dir, sizeof(dir), "hulltestprobe"))
+        UTEST_SKIP("cannot create a temp probe");
 
     char list[2048];
     snprintf(list, sizeof(list), "%s%c%s", dir, hl_host_path_list_sep(),
@@ -266,12 +348,66 @@ UTEST(host, find_in_path_finds_a_real_executable)
     char out[700];
     int found = hl_host_find_in_path_ex(list, "hulltestprobe",
                                         out, sizeof(out));
-
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-    if (system(cmd) != 0) { /* best-effort cleanup */ }
+    host_drop_probe(dir, "hulltestprobe");
 
     ASSERT_EQ(1, found);
     ASSERT_TRUE(strstr(out, "hulltestprobe") != NULL);
+}
+
+UTEST(host, find_in_path_splits_a_posix_shaped_list_on_any_host)
+{
+    /* THE WINDOWS BUG, in one assertion. A Cosmopolitan APE on Windows is
+     * handed a POSIX-shaped PATH by its own runtime - measured on Windows 11:
+     *
+     *   PATH=/C/Users/.../ft_gcc:/C/Program Files (x86)/.../bin:...
+     *
+     * Inferring ';' from the host collapsed that entire list into one nonsense
+     * component, so `hull doctor` reported every compiler missing however many
+     * were installed. The separator has to come from the list, not the host,
+     * which is what makes this pass on Windows as well as POSIX. */
+    char dir[512];
+    if (!host_make_probe("posixlist", dir, sizeof(dir), "hullprobeposix"))
+        UTEST_SKIP("cannot create a temp probe");
+
+    /* Colon-separated, forward slashes, and a component with a space in it -
+     * the exact shape measured above. */
+    char list[2048];
+    snprintf(list, sizeof(list), "/C/Program Files (x86)/nowhere:%s", dir);
+
+    char out[700];
+    int found = hl_host_find_in_path_ex(list, "hullprobeposix",
+                                        out, sizeof(out));
+
+    host_drop_probe(dir, "hullprobeposix");
+    ASSERT_EQ(1, found);
+    /* Composed with the COMPONENT's separator, so it stays POSIX-shaped. */
+    ASSERT_TRUE(strstr(out, "hull-host-posixlist/hullprobeposix") != NULL);
+}
+
+UTEST(host, find_in_path_splits_a_win32_shaped_list_on_semicolons)
+{
+    /* The mirror: a genuine Win32 list must still split on ';', and its ':'
+     * drive letters must survive. Nothing here exists, so the assertion is
+     * about not crashing and not reporting a bogus hit - the components are
+     * the point, not the miss. */
+    char out[512];
+    ASSERT_EQ(0, hl_host_find_in_path_ex(
+        "C:\\tools;C:\\Program Files\\LLVM\\bin;D:\\bin",
+        "hull-definitely-not-a-real-binary-zzz", out, sizeof(out)));
+    ASSERT_STREQ("", out);
+}
+
+UTEST(host, find_in_path_keeps_a_single_win32_component_whole)
+{
+    /* A one-entry Win32 PATH carries no ';' but does carry the drive letter's
+     * ':'. Splitting on ':' there would shred `C:\tools` into `C` and
+     * `\tools`, so a lone drive-prefixed entry must be left whole. Again a
+     * clean miss is the observable; the point is that it does not split. */
+    char out[512];
+    ASSERT_EQ(0, hl_host_find_in_path_ex(
+        "C:\\tools", "hull-definitely-not-a-real-binary-zzz",
+        out, sizeof(out)));
+    ASSERT_STREQ("", out);
 }
 
 UTEST(host, find_in_path_skips_empty_components)
@@ -319,23 +455,8 @@ UTEST(host, find_in_path_has_no_fixed_length_cap)
      * this function exists to fix. Bury a findable directory past 32 KB of
      * padding and require it to still resolve. */
     char dir[512];
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = getenv("TMP");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(dir, sizeof(dir), "%s/hull-host-longpath", tmp);
-
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot create a temp directory"); }
-
-    char exe[700];
-    snprintf(exe, sizeof(exe), "%s/hulllongprobe", dir);
-    FILE *f = fopen(exe, "w");
-    if (!f) { UTEST_SKIP("cannot write a temp file"); }
-    fputs("#!/bin/sh\nexit 0\n", f);
-    fclose(f);
-    snprintf(cmd, sizeof(cmd), "chmod +x '%s'", exe);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot chmod a temp file"); }
+    if (!host_make_probe("longpath", dir, sizeof(dir), "hulllongprobe"))
+        UTEST_SKIP("cannot create a temp probe");
 
     size_t cap = 40000;
     char *list = (char *)malloc(cap);
@@ -354,8 +475,7 @@ UTEST(host, find_in_path_has_no_fixed_length_cap)
     int found = hl_host_find_in_path_ex(list, "hulllongprobe", out, sizeof(out));
 
     free(list);
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-    if (system(cmd) != 0) { /* best-effort cleanup */ }
+    host_drop_probe(dir, "hulllongprobe");
 
     ASSERT_EQ(1, found);
     ASSERT_TRUE(strstr(out, "hulllongprobe") != NULL);
@@ -372,7 +492,7 @@ UTEST(host, find_in_path_never_probes_the_current_directory)
     if (!f) { UTEST_SKIP("cannot write into the working directory"); }
     fputs("#!/bin/sh\nexit 0\n", f);
     fclose(f);
-    if (system("chmod +x hullcwdprobe") != 0) { /* best effort */ }
+    (void)chmod("hullcwdprobe", 0755);
 
     char sep = hl_host_path_list_sep();
     char list[32];
@@ -395,23 +515,8 @@ UTEST(host, find_in_path_leaves_out_empty_when_the_buffer_is_too_small)
      * that ignores the return value (or logs the buffer on a miss) gets a
      * truncated path, which names a DIFFERENT file than the one found. */
     char dir[512];
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = getenv("TMP");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(dir, sizeof(dir), "%s/hull-host-small", tmp);
-
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot create a temp directory"); }
-
-    char exe[700];
-    snprintf(exe, sizeof(exe), "%s/hullsmallprobe", dir);
-    FILE *f = fopen(exe, "w");
-    if (!f) { UTEST_SKIP("cannot write a temp file"); }
-    fputs("#!/bin/sh\nexit 0\n", f);
-    fclose(f);
-    snprintf(cmd, sizeof(cmd), "chmod +x '%s'", exe);
-    if (system(cmd) != 0) { UTEST_SKIP("cannot chmod a temp file"); }
+    if (!host_make_probe("small", dir, sizeof(dir), "hullsmallprobe"))
+        UTEST_SKIP("cannot create a temp probe");
 
     /* Deliberately far too small to hold the resolved path. */
     char small[8];
@@ -419,11 +524,128 @@ UTEST(host, find_in_path_leaves_out_empty_when_the_buffer_is_too_small)
     int found = hl_host_find_in_path_ex(dir, "hullsmallprobe",
                                         small, sizeof(small));
 
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-    if (system(cmd) != 0) { /* best-effort cleanup */ }
+    host_drop_probe(dir, "hullsmallprobe");
 
     ASSERT_EQ(0, found);          /* cannot report a path that does not fit */
     ASSERT_STREQ("", small);      /* and must not leave a truncated one */
+}
+
+/* -- Path form (drive letter -> rooted) ---------------------------- */
+
+/*
+ * REGRESSION: an MSYS2 / Git Bash shell rewrites a POSIX argument handed to
+ * a native program into "D:/a/app/data.db". The OS layer accepts that form
+ * (measured: open/stat/mkdir all succeed), but SQLite's unix VFS tests for a
+ * leading '/' to decide absolute-vs-relative, so it prepended the cwd and
+ * failed with "cannot open database D:/a/app/data.db" on a path that exists.
+ * Five e2e suites failed this way on Windows before the rewrite landed.
+ */
+
+UTEST(host, normalize_path_rejects_bad_arguments)
+{
+    char buf[64];
+    ASSERT_EQ(-1, hl_host_normalize_path(NULL, buf, sizeof buf));
+    ASSERT_STREQ("", buf);
+    ASSERT_EQ(-1, hl_host_normalize_path("/tmp/x", NULL, sizeof buf));
+    ASSERT_EQ(-1, hl_host_normalize_path("/tmp/x", buf, 0));
+}
+
+UTEST(host, normalize_path_reports_overflow_rather_than_truncating)
+{
+    char small[4];
+    ASSERT_EQ(-1, hl_host_normalize_path("/a/much/longer/path", small, sizeof small));
+    ASSERT_STREQ("", small);
+}
+
+UTEST(host, normalize_path_passes_posix_paths_through_on_every_host)
+{
+    /* Host-INDEPENDENT: a rooted POSIX path is already the target form, and
+     * a relative one has no drive letter to rewrite. Neither may change on
+     * ANY host - this is the invariant that protects Linux and macOS. */
+    char buf[HL_HOST_PATH_MAX];
+    ASSERT_EQ(0, hl_host_normalize_path("/var/db/data.db", buf, sizeof buf));
+    ASSERT_STREQ("/var/db/data.db", buf);
+    ASSERT_EQ(0, hl_host_normalize_path("data.db", buf, sizeof buf));
+    ASSERT_STREQ("data.db", buf);
+    ASSERT_EQ(0, hl_host_normalize_path("./sub/data.db", buf, sizeof buf));
+    ASSERT_STREQ("./sub/data.db", buf);
+    ASSERT_EQ(0, hl_host_normalize_path("", buf, sizeof buf));
+    ASSERT_STREQ("", buf);
+}
+
+UTEST(host, normalize_path_never_touches_a_uri_scheme)
+{
+    /* A drive letter is ONE character before the ':'. Every real URI scheme
+     * is longer, so a DSN must survive verbatim on every host - otherwise
+     * this helper would corrupt the postgres/mysql connection strings that
+     * flow through the same open path. */
+    char buf[HL_HOST_PATH_MAX];
+    static const char *const dsns[] = {
+        "postgres://user@host/db", "postgresql://h/db", "mysql://h/db",
+        "mariadb://h/db", "sqlite://relative.db", "file:data.db",
+        "duckdb://x.duckdb", ":memory:",
+    };
+    for (size_t i = 0; i < sizeof dsns / sizeof *dsns; i++) {
+        ASSERT_EQ(0, hl_host_normalize_path(dsns[i], buf, sizeof buf));
+        ASSERT_STREQ(dsns[i], buf);
+    }
+}
+
+UTEST(host, normalize_path_rewrites_a_drive_letter_on_windows_only)
+{
+    char buf[HL_HOST_PATH_MAX];
+    int rc = hl_host_normalize_path("D:/a/app/data.db", buf, sizeof buf);
+    if (hl_host_is_windows()) {
+        ASSERT_EQ(1, rc);
+        ASSERT_STREQ("/D/a/app/data.db", buf);
+    } else {
+        /* Off Windows the mixed form is not a path; rewriting it would
+         * corrupt a legal (if odd) relative filename. */
+        ASSERT_EQ(0, rc);
+        ASSERT_STREQ("D:/a/app/data.db", buf);
+    }
+}
+
+UTEST(host, normalize_path_folds_backslashes_in_the_drive_case)
+{
+    char buf[HL_HOST_PATH_MAX];
+    int rc = hl_host_normalize_path("D:\\a\\app\\data.db", buf, sizeof buf);
+    if (hl_host_is_windows()) {
+        ASSERT_EQ(1, rc);
+        ASSERT_STREQ("/D/a/app/data.db", buf);
+    } else {
+        ASSERT_EQ(0, rc);
+    }
+}
+
+UTEST(host, normalize_path_leaves_a_lone_backslash_name_alone)
+{
+    /* Backslashes are folded ONLY in the drive-letter case. A POSIX file may
+     * legitimately contain one, and silently rewriting it would address a
+     * different file. */
+    char buf[HL_HOST_PATH_MAX];
+    const char *odd = "/tmp/we\\ird/name.db";
+    ASSERT_EQ(0, hl_host_normalize_path(odd, buf, sizeof buf));
+    ASSERT_STREQ(odd, buf);
+}
+
+UTEST(host, normalize_path_accepts_either_drive_letter_case)
+{
+    if (!hl_host_is_windows()) return;   /* rewrite is Windows-only */
+    char buf[HL_HOST_PATH_MAX];
+    ASSERT_EQ(1, hl_host_normalize_path("c:/x/y", buf, sizeof buf));
+    ASSERT_STREQ("/c/x/y", buf);
+    ASSERT_EQ(1, hl_host_normalize_path("C:/x/y", buf, sizeof buf));
+    ASSERT_STREQ("/C/x/y", buf);
+}
+
+UTEST(host, normalize_path_ignores_a_drive_letter_without_a_separator)
+{
+    /* "D:foo" is a Win32 drive-RELATIVE path, not an absolute one. Rewriting
+     * it to "/Dfoo" would invent a location, so it is left for the OS. */
+    char buf[HL_HOST_PATH_MAX];
+    ASSERT_EQ(0, hl_host_normalize_path("D:foo", buf, sizeof buf));
+    ASSERT_STREQ("D:foo", buf);
 }
 
 UTEST_MAIN()

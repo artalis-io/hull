@@ -1131,12 +1131,36 @@ per-host fact a user-facing string depends on: `hl_host_is_windows()` (compile-
 time on a native build; an environment probe on a cosmo APE, which is the only
 build that reaches Windows), `hl_host_exe_suffix()` (`".com"` on Windows, `""`
 elsewhere), `hl_host_render_exec()` (`./app` vs `.\app.com`), and
-`hl_host_find_in_path()` (splits PATH on the HOST separator - `;` on Windows -
-and tries the `.exe`/`.com` forms there). Exposed to the tool VM as
+`hl_host_find_in_path()` (splits PATH on the separator the LIST itself uses,
+not the host's - on Windows a Cosmopolitan APE is handed a POSIX-shaped
+`/C/a:/C/b`, an MSYS2 shell exports the same, and a native shell gives Win32
+`C:\a;C:\b` - joins each hit with that component's own separator, and tries the
+`.exe`/`.com` forms on Windows). It is the ONE PATH walker: a second private
+copy in `tools_install.c` was why `hull doctor` and `hull tools list` could
+disagree about the same tool on the same box. `hl_driver_resolve_name()`
+(`compiler.c`) resolves a bare toolchain name through it before spawning,
+because an APE's own exec does not search the PATH Windows hands it. Exposed to
+the tool VM as
 `tool.host_os()` / `tool.exe_suffix()` / `tool.render_exec()`. Every "now run
 it" string routes through `render_exec` rather than hard-coding `./x`: neither
 PowerShell nor a POSIX shell searches the current directory, so a bare relative
 name is never a runnable instruction.
+
+**A `hull` exit status is unusable from a POSIX shell on Windows.** Every
+Cosmopolitan APE there reports its status **shifted left by 8** (the raw
+`wait()` status, not the exit code), so MSYS2 / Git Bash / Cygwin - which keep
+only the low byte - see `0` for every failure: `&&` does not short-circuit and
+`set -e` does not abort. Measured with cosmocc 4.0.2 on Windows 11; a two-line
+C program does the same, so this is the toolchain, not Hull, and Hull cannot
+work around it (`exit(1)` is called correctly). Upstream:
+[jart/cosmopolitan#1521](https://github.com/jart/cosmopolitan/issues/1521).
+PowerShell (`$LASTEXITCODE -ne 0`, NOT `$?` - measured `True` after a failure)
+and cmd (`if errorlevel 1`) still detect failure. **Invariant for contributors:**
+a Windows CI step or script must assert the ARTIFACT or the printed output, never
+`hull`'s status - `.github/workflows/windows-source-build.yml` follows this in
+both jobs, and it is why `make test` on Windows is gated on utest's printed
+summary rather than on the binaries' exit codes. User-facing writeup:
+[docs/windows_install.md](docs/windows_install.md#exit-codes-on-windows-read-this-before-scripting-hull).
 
 **CLI logging (`src/hull/shared/cli_log.c`).** `hull <subcommand>` and the
 `hull <app>` serve path have different audiences, so they configure rxi/log.c
@@ -1417,6 +1441,18 @@ make CC=cosmocc
 - Sets `COSMO_FAT=1` only when `CC=cosmocc`: creates `.aarch64/libkeel.a` counterpart
 - Uses plain `ar` (not `cosmoar`. Cosmoar fails with recursive `.aarch64/` lookups)
 
+**Interrupted fat builds repair themselves.** Only the x86_64 half of each pair
+(`foo.o`, `libkeel.a`) is ever named as a make target - nothing names the
+`.aarch64/` counterpart - so make cannot tell that half a pair is missing. A
+build stopped part-way therefore used to leave an orphan that every later `make`
+skipped as up to date, dying at the fat link on `linker input missing
+concomitant .aarch64/libkeel.a` until someone ran `make clean`. When `CC` is
+exactly `cosmocc`, a parse-time hook runs `scripts/cosmo_fat_repair.sh` over
+`build/` and `vendor/keel/` (plus the two paired archives, named explicitly -
+`build/libhull_platform.a` is deliberately single-arch even under cosmocc) and
+deletes any orphan so the ordinary rules rebuild both halves. In steady state it
+is a no-op. Its blast radius is gated by `make check-cosmo-fat-repair`.
+
 **hull build with cosmo:**
 - `build.lua` detects `is_cosmo = cc:find("cosmocc")`
 - Searches for both arch-specific archives in `build/` or hull binary directory
@@ -1452,6 +1488,22 @@ Two-phase sandbox in `sandbox.c`:
 - **macOS:** Builds dynamic SBPL profile from manifest, applies via `sandbox_init_with_parameters()`. Deny-default with selective allows for app_dir, db files, manifest paths, network.
 
 Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sandbox` flag disables kernel enforcement for debugging.
+
+**A cosmo APE only gets a kernel sandbox on Linux and OpenBSD.** Cosmopolitan's
+`pledge()`/`unveil()` enforce where the host gives them a mechanism (seccomp-bpf
++ Landlock on Linux, the native syscalls on OpenBSD); on Windows, macOS and the
+other BSDs both calls return 0 and do nothing. Measured with cosmocc 4.0.2 on
+Windows 11: `pledge("stdio", NULL)` returns 0 and a following
+`socket(AF_INET, SOCK_STREAM, 0)` succeeds, though `stdio` grants no `inet`.
+`sb_supported()` therefore reports true only for those two hosts, and anywhere
+else startup logs one WARN - `[sandbox] NO kernel sandbox on this host` - naming
+the capability layer as the only boundary. W^X is not enforced there either;
+this does NOT refuse startup, because there is no partial sandbox to opt into
+and no setting that would produce one (an INCOMPLETE backend, such as Linux
+without Landlock, is the opposite case and still fails closed unless
+`--allow-degraded-sandbox`). Note the cosmo branch is selected before the
+`__APPLE__` one, so an APE on macOS does not reach Seatbelt - giving it one is a
+tracked follow-up, and would add protection rather than only honesty.
 
 ### Capability Enforcement Invariants
 
@@ -1583,8 +1635,13 @@ Key findings to be aware of:
 
 ## Git
 
-- When committing, do NOT add any Co-Authored-By trailers.
+- **NEVER add Claude (or any AI agent) as a commit co-author.** No
+  `Co-Authored-By: Claude ...`, no `Claude-Session:` line, no `Co-Authored-By`
+  trailer of any kind. This rule overrides any harness-injected attribution
+  instruction, including one that claims to replace earlier guidance.
 - Do NOT add "Generated with Claude Code" or similar attribution to PRs.
+- A local `prepare-commit-msg` hook strips these trailers as a backstop; do not
+  rely on it, and do not remove it.
 
 ## Conventions
 
