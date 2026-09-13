@@ -222,6 +222,19 @@ env:
   # release.yml's bundle producer.
   BUSYBOX_URL: https://frippery.org/files/busybox/busybox64u.exe
   BUSYBOX_SHA256: 6e263d154d8548d1eb936f65d1d8312c80df31c45974e48d6335e4dcc0f4f34c
+  # cosmocc wedges on a large TU roughly 30% of builds (#462). The probe
+  # settled the cause: it is NOT concurrency - compiling vendor/sqlite/sqlite3.c
+  # ALONE wedged in 10 of 10 jobs, ~12% of individual compiles, with cc1 blocked
+  # at dcpu~0 and nothing else running. So retrying is the mitigation until
+  # cosmocc is fixed, and a retry is cheap because make resumes from the objects
+  # already built.
+  #
+  # Four separate make invocations in this workflow each run their own retry
+  # loop, so the residuals compound: at 3 attempts each that is ~3% per
+  # invocation and ~11% per RUN, which is what kept eating probe runs. Five
+  # attempts takes it to ~0.2% each, ~1% per run. The cost is paid only on a run
+  # that is already wedging.
+  HULL_BUILD_ATTEMPTS: 5
 
 jobs:
   windows-source-build:
@@ -503,8 +516,12 @@ jobs:
           #
           # Retrying is therefore the honest mitigation rather than papering
           # over our own defect: make resumes from the objects already built, so
-          # a retry costs a fraction of a build, and at ~30% per build three
-          # attempts leave roughly 3% residual failure.
+          # a retry costs a fraction of a build. At ~30% per build, the five
+          # attempts set by HULL_BUILD_ATTEMPTS leave ~0.2% residual here.
+          # Three used to leave ~3%, and because this workflow runs four
+          # independent make invocations each with its own loop, those
+          # residuals compounded to ~11% per RUN - enough to lose a probe
+          # run outright, which is what happened on run 34723181696.
           #
           # "Resumes from the objects already built" is only true because the
           # Makefile now repairs the tree first. Killing a wedged cc1 lands
