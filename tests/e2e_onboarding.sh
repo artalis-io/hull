@@ -242,17 +242,23 @@ BOUT=$("$HULL" build --no-verify-platform "$WORKDIR/app" 2>&1)
 BRC=$?
 # A build failure is only a legitimate SKIP when this hull demonstrably cannot
 # link an app here - i.e. it has no platform library (a plain `make` with no
-# `make platform` and no embedded archive). Every OTHER non-zero exit is a
-# regression in the build path and must FAIL: treating all of them as "not
-# supported" is how a broken compile or manifest extraction would leave this
-# whole section green.
-if [ "$BRC" -ne 0 ] &&
-   echo "$BOUT" | grep -qE "cannot find (libhull_platform\.a|platform archives)"; then
+# `make platform` and no embedded archive). Every OTHER failure is a regression
+# in the build path and must FAIL: treating all of them as "not supported" is
+# how a broken compile or manifest extraction would leave this whole section
+# green.
+#
+# Decide from the OUTPUT and the ARTIFACT, never from $BRC. On Windows an APE
+# reports a shifted status and a POSIX shell reads 0 for every outcome
+# (jart/cosmopolitan#1521), so `[ "$BRC" -ne 0 ]` is false even for a build
+# that failed - this took the success path against a build that had produced
+# nothing and reported six artifact assertions as defects. $BRC is still shown
+# in the failure message, where it is informative rather than load-bearing.
+if echo "$BOUT" | grep -qE "cannot find (libhull_platform\.a|platform archives)"; then
     echo "  SKIP build assertions (this hull has no platform library):"
     echo "$BOUT" | sed 's/^/      /'
     SKIP=$((SKIP + 1))
-elif [ "$BRC" -ne 0 ]; then
-    echo "  FAIL hull build exited $BRC (not a known unsupported configuration)"
+elif [ ! -f "$WORKDIR/app/$ARTIFACT" ]; then
+    echo "  FAIL hull build produced no $ARTIFACT (exit was $BRC, unreliable on Windows)"
     echo "$BOUT" | sed 's/^/      /'
     FAIL=$((FAIL + 1))
 else
