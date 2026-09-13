@@ -152,6 +152,19 @@ int hl_host_normalize_path(const char *path, char *out, size_t out_sz);
 int hl_host_find_in_path(const char *name, char *out, size_t out_sz);
 
 /**
+ * @brief Reduce a toolchain invocation to the tool's NAME.
+ *
+ * Basename on EITHER separator, then a trailing ".com" / ".exe" removed, so
+ * `C:\tools\gcc.exe`, `/usr/bin/gcc` and a bare `gcc` all yield "gcc".
+ * Consumers compare against that name (build.lua matches `cosmocc` / `tcc`) or
+ * record it (the `cc` field in package.sig), and neither wants the spelling it
+ * arrived in - least of all an absolute path off a developer's machine.
+ *
+ * @returns 0 on success, -1 on a NULL/oversized argument (@p out is emptied).
+ */
+int hl_host_tool_name(const char *invocation, char *out, size_t out_sz);
+
+/**
  * @brief hl_host_find_in_path over an EXPLICIT search list.
  *
  * Same splitting and extension rules, but @p path_list is supplied by the
