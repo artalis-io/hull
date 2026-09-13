@@ -171,7 +171,18 @@ FIXOUT=$("$HULL" doctor --fix --json 2>&1 || true)
 assert_contains "--fix and --json are mutually exclusive" \
                 "$FIXOUT" "mutually exclusive"
 FIXOUT=$("$HULL" doctor --fix 2>&1 || true)
-if "$HULL" doctor >/dev/null 2>&1; then
+# Readiness comes from the JSON, never from hull's exit status. On Windows an
+# APE's status is shifted and a POSIX shell reads 0 for EVERY failure (#1521),
+# so `if "$HULL" doctor` took the ready branch against a doctor that had work
+# to do, and then demanded "nothing to do" from it. CLAUDE.md states the rule
+# this broke: assert the artifact or the printed output, never the status.
+#
+# "hull_build" is computed from exactly the condition doctor exits 0 on -
+# platform library embedded AND a usable compiler - so this is the same test,
+# read somewhere a shifted status cannot corrupt it.
+DOCTOR_READY=$("$HULL" doctor --json 2>/dev/null |
+               sed -n 's/.*"hull_build"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+if [ "$DOCTOR_READY" = "ready" ]; then
     assert_contains "--fix is a clean no-op when already ready" \
                     "$FIXOUT" "nothing to do"
 else
@@ -212,32 +223,62 @@ V2=$("$HULL" manifest "$WORKDIR/app" --verbose 2>&1 || true)
 assert_contains "pre-command --verbose shows internals"  "$V1" "src/hull/"
 assert_contains "post-command --verbose shows internals" "$V2" "src/hull/"
 
-# ── 7-9. build artifact naming + hygiene (POSIX invariants) ──────────
+# ── 7-9. build artifact naming + hygiene ─────────────────────────────
+#
+# The default artifact is `app` + hl_host_exe_suffix(): plain `app` on
+# Linux/macOS, `app.com` on Windows, because Windows will not execute an
+# extensionless file and `.com` is the APE convention (CLAUDE.md, "hull build
+# output naming"). This section used to hardcode the POSIX spelling, so on
+# Windows it failed against CORRECT behaviour.
+#
+# Ask this hull what it produces rather than assuming. The POSIX expectations
+# below are unchanged when the suffix is empty; the Windows ones are asserted
+# with equal strictness, not skipped.
+EXE_SUFFIX=$("$HULL" doctor --json 2>/dev/null | sed -n 's/.*"exe_suffix"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+ARTIFACT="app${EXE_SUFFIX}"
 echo ""
-echo "── hull build: POSIX output naming is unchanged ──"
+echo "── hull build: output naming (artifact = ${ARTIFACT}) ──"
 BOUT=$("$HULL" build --no-verify-platform "$WORKDIR/app" 2>&1)
 BRC=$?
 # A build failure is only a legitimate SKIP when this hull demonstrably cannot
 # link an app here - i.e. it has no platform library (a plain `make` with no
-# `make platform` and no embedded archive). Every OTHER non-zero exit is a
-# regression in the build path and must FAIL: treating all of them as "not
-# supported" is how a broken compile or manifest extraction would leave this
-# whole section green.
-if [ "$BRC" -ne 0 ] &&
-   echo "$BOUT" | grep -qE "cannot find (libhull_platform\.a|platform archives)"; then
+# `make platform` and no embedded archive). Every OTHER failure is a regression
+# in the build path and must FAIL: treating all of them as "not supported" is
+# how a broken compile or manifest extraction would leave this whole section
+# green.
+#
+# Decide from the OUTPUT and the ARTIFACT, never from $BRC. On Windows an APE
+# reports a shifted status and a POSIX shell reads 0 for every outcome
+# (jart/cosmopolitan#1521), so `[ "$BRC" -ne 0 ]` is false even for a build
+# that failed - this took the success path against a build that had produced
+# nothing and reported six artifact assertions as defects. $BRC is still shown
+# in the failure message, where it is informative rather than load-bearing.
+# The unsupported configurations, by the message each prints:
+#   - no platform library at all (plain `make`, no `make platform`)
+#   - no bundled app_main.o, which the compiler-free emit path needs
+#     (build.lua) and which only an EMBED_PLATFORM build carries
+# Both mean "this hull cannot link an app here", which is a SKIP. Anything
+# else that produces no artifact is a regression and must FAIL.
+if echo "$BOUT" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
     echo "  SKIP build assertions (this hull has no platform library):"
     echo "$BOUT" | sed 's/^/      /'
     SKIP=$((SKIP + 1))
-elif [ "$BRC" -ne 0 ]; then
-    echo "  FAIL hull build exited $BRC (not a known unsupported configuration)"
+elif [ ! -f "$WORKDIR/app/$ARTIFACT" ]; then
+    echo "  FAIL hull build produced no $ARTIFACT (exit was $BRC, unreliable on Windows)"
     echo "$BOUT" | sed 's/^/      /'
     FAIL=$((FAIL + 1))
 else
-    # On every POSIX host the default artifact stays exactly `app_dir/app`.
-    assert "default output is app_dir/app (no suffix on POSIX)" \
-           [ -f "$WORKDIR/app/app" ]
-    assert "the artifact is executable" [ -x "$WORKDIR/app/app" ]
-    assert_not_contains "no .com artifact on POSIX" "$(ls "$WORKDIR/app")" "app.com"
+    # The default artifact is named for the host that must run it.
+    assert "default output is app_dir/$ARTIFACT" \
+           [ -f "$WORKDIR/app/$ARTIFACT" ]
+    assert "the artifact is executable" [ -x "$WORKDIR/app/$ARTIFACT" ]
+    if [ -z "$EXE_SUFFIX" ]; then
+        assert_not_contains "no .com artifact on POSIX" "$(ls "$WORKDIR/app")" "app.com"
+    else
+        # The converse matters just as much on Windows: an extensionless
+        # artifact there would not be executable at all.
+        assert "no extensionless artifact on Windows" [ ! -f "$WORKDIR/app/app" ]
+    fi
     assert_contains "reports where it wrote"  "$BOUT" "hull build: wrote"
     assert_contains "prints a runnable command" "$BOUT" "run it with"
     # The app dir here is an absolute mktemp path, so the runnable command
@@ -246,7 +287,7 @@ else
     # one. The "./" prefix is asserted below, on the relative-path build -
     # the only case where it is load-bearing.
     assert_contains "names the artifact by its full path" \
-                    "$BOUT" "run it with  $WORKDIR/app/app"
+                    "$BOUT" "run it with  $WORKDIR/app/$ARTIFACT"
 
     # One obvious shippable executable in the app root: no stray ELF/debug
     # sidecars left beside it.
@@ -268,8 +309,17 @@ else
     # would not be a runnable instruction. POSIX half of the ".\app.com"
     # assertion in .github/workflows/cosmocc-windows-e2e.yml.
     RBOUT=$(cd "$WORKDIR" && "$HULL" build --no-verify-platform app 2>&1 || true)
-    assert_contains "a relative app dir gets a ./ prefix" \
-                    "$RBOUT" "run it with  ./app/app"
+    if [ -z "$EXE_SUFFIX" ]; then
+        assert_contains "a relative app dir gets a ./ prefix" \
+                        "$RBOUT" "run it with  ./app/app"
+    else
+        # Windows spells the same instruction .\app\app.com - asserted
+        # verbatim in .github/workflows/cosmocc-windows-e2e.yml. Here we only
+        # require that a prefix is present at all, without re-encoding the
+        # separator in a shell that would mangle it.
+        assert_contains "a relative app dir gets a prefix" \
+                        "$RBOUT" "run it with  ."
+    fi
 
     # The sidecar tidy-up moves only what the LINK produced. A same-named
     # file that was already in the project - a developer's own `app.dbg`,
