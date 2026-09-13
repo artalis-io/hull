@@ -35,10 +35,20 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 # main / restricted / universe / multiverse / -updates / -security / -backports
 # pockets, so security-patched package versions are frozen too.
 COPY repro-sources-list.sh /usr/local/bin/repro-sources-list.sh
+# Acquire::Retries is not tuning: snapshot.ubuntu.com is a single Canonical
+# service with no public mirror (ordinary Ubuntu mirrors carry the CURRENT
+# archive and have no /ubuntu/<timestamp>/ space at all), so a transient 5xx
+# there cannot be routed around and fails the whole image build. Retrying
+# absorbs a blip. It does NOT absorb an outage - on 2026-09-08 the service
+# returned 502/503 across all three of its IPs for hours and every
+# reproducible-build job failed right here, before any Hull code compiled.
+# Defending against an outage of that length needs something that skips the
+# network entirely; a layer cache was tried and evicted the artifacts the
+# reproducibility compare depends on (hull#473), so it is still open.
 RUN chmod 0755 /usr/local/bin/repro-sources-list.sh \
  && /usr/local/bin/repro-sources-list.sh \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
+ && apt-get -o Acquire::Retries=5 update \
+ && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
       build-essential clang xxd curl ca-certificates git unzip \
  && rm -rf /var/lib/apt/lists/*
 
@@ -57,7 +67,7 @@ RUN git config --system --add safe.directory '*'
 # bump procedure.
 ARG COSMOCC_VERSION=4.0.2
 ARG COSMOCC_SHA256=85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
-RUN curl -fsSL -o /tmp/cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-${COSMOCC_VERSION}.zip" \
+RUN curl -fsSL --retry 5 --retry-all-errors -o /tmp/cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-${COSMOCC_VERSION}.zip" \
  && echo "${COSMOCC_SHA256}  /tmp/cosmocc.zip" | sha256sum -c - \
  && mkdir -p /opt/cosmo \
  && unzip -q -o /tmp/cosmocc.zip -d /opt/cosmo \
