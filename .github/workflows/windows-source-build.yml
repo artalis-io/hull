@@ -207,6 +207,11 @@ on:
           reported TIMEOUT. Bounds the damage a non-terminating suite does:
           without it the first hang eats the rest of the job and every suite
           after it reports nothing at all. Default 300.
+          NOTE a TIMEOUT verdict means "did not finish inside the cap", which
+          covers both a genuine hang and a suite that is merely slow - the
+          93-suite sweep had e2e-build at 607s and e2e-project-discovery-lua at
+          357s, both of which DID terminate. Re-run a TIMEOUT with a larger cap
+          to tell the two apart before recording it as a hang.
         required: false
         default: "300"
       probe_suites:
@@ -920,8 +925,17 @@ jobs:
           # A killed suite can leave a backgrounded hull still holding its port,
           # which would fail the NEXT suite for a reason that has nothing to do
           # with it. Reap before moving on.
+          #
+          # ONLY hull. make-watched.sh also reaps cc1 / cosmocc, which is right
+          # THERE because that script is retrying the build itself, so a partial
+          # object is going to be rebuilt anyway. Here it is actively harmful:
+          # killing a compiler mid-flight leaves the build tree needing work, the
+          # next suite pays that rebuild inside its OWN timeout, and it times out
+          # too - one hang cascades into every suite after it. Measured: with
+          # compilers reaped, e2e-blob went from 4s to a 120s timeout spent
+          # re-running xxd over the whole stdlib.
           reap() {
-            powershell.exe -NoProfile -Command               "Get-Process hull,cc1,cosmocc,'*cosmo-gcc' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"               >/dev/null 2>&1 || true
+            powershell.exe -NoProfile -Command               "Get-Process hull -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"               >/dev/null 2>&1 || true
           }
 
           for t in ${{ inputs.probe_e2e }}; do
