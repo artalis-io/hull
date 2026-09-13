@@ -271,6 +271,10 @@ jobs:
       #               git-less build succeeds but stamps HL_VERSION=dev. A
       #               source-build job should stamp the real revision.
       # coreutils, findutils, grep, sed and gawk are all in the MSYS base.
+      #   python    - 17 e2e scripts shell out to python3 to pick a field
+      #               out of hull's JSON. Without it they die at Error 127
+      #               (measured: e2e-jobs, run 34721432268). Only this job
+      #               runs e2e, so the app-build job does not need it.
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
         with:
           msystem: MSYS
@@ -281,6 +285,7 @@ jobs:
             vim
             diffutils
             git
+            python
 
       # cosmocc ships as a zip of APEs; SHA-pinned, same acquisition as the
       # sibling cosmocc workflows.
@@ -814,6 +819,58 @@ jobs:
         run: |
           set -uo pipefail
           export PATH="$PATH:$PWD/cosmo/bin"
+
+          # Put every suite's scratch directory on the runner's own temp disk.
+          # 94 of the 99 e2e scripts call `mktemp -d`, which honours $TMPDIR,
+          # so this reaches all of them without touching one of them. Unset,
+          # mktemp lands inside msys2's /tmp mount instead, which is a place
+          # only msys2 names that way. Same lesson as #482 one layer out:
+          # agree on the temp directory rather than assume /tmp means the same
+          # thing to both sides.
+          #
+          # This is hygiene, NOT the fix for the path-form bug. That was a
+          # separate defect on the hull side, fixed by hl_host_normalize_path;
+          # moving the scratch dir changed the prefix and nothing else.
+          if [ -n "${RUNNER_TEMP:-}" ]; then
+            export TMPDIR="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")"
+          fi
+          echo "TMPDIR=${TMPDIR:-<unset>}"
+          probe_dir=$(mktemp -d) && echo "mktemp -d -> $probe_dir" && rmdir "$probe_dir"
+
+          # NOTE: this step deliberately does NOT set MSYS2_ARG_CONV_EXCL.
+          # The shell converts a POSIX argument to the mixed form
+          # "D:/a/_temp/..." on its way to the APE, and that is exactly what a
+          # user driving hull from Git Bash gets. Suppressing the conversion
+          # here would only hide whether hull itself copes. It does now:
+          # hl_host_normalize_path rewrites a leading drive letter to the
+          # rooted form SQLite's unix VFS requires. Leaving the conversion ON
+          # is what keeps that fix honest.
+
+          # What a 10-suite probe measured (run 34721432268), so the next
+          # reader starts from the map rather than from the symptom:
+          #
+          #   ok      e2e-migrate  e2e-templates  e2e-examples  e2e-blob
+          #           e2e-multipart
+          #   FAILED  e2e-cli  e2e-http  e2e-cache  e2e-tools  e2e-jobs
+          #
+          # Four causes, not five:
+          #   e2e-cli, e2e-cache  "verify rc on corruption - got rc=0". The APE
+          #     exit-status shift (jart/cosmopolitan#1521): a POSIX shell reads 0
+          #     for every failure. Not fixable in Hull; these two stay out of the
+          #     tier until their assertions stop reading $?.
+          #   e2e-http  "cc: command not found". The script compiled its echo
+          #     server with a hardcoded cc; this runner has cosmocc and no native
+          #     cc. Fixed at the source: it honours $CC now.
+          #   e2e-jobs  Error 127 on python3. Fixed by installing python above.
+          #   e2e-tools  wamrc has has_cosmo=0, so the install hint legitimately
+          #     differs here, and the reported stub path differs in case from the
+          #     one the shell built. A platform difference, not a break.
+          #
+          # e2e-templates is worth a note: its symptom was "server did not
+          # start", which looks nothing like e2e-migrate's "cannot open
+          # database". Same path-form bug, different mask.
+
+
           rc_all=0
           for t in ${{ inputs.probe_e2e }}; do
             echo "===================== $t ====================="

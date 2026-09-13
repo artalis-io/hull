@@ -6,6 +6,7 @@
  */
 
 #include "hull/shared/cache_dir.h"
+#include "hull/shared/host.h"
 #include "hull/shared/fs_util.h"
 #include <ctype.h>
 #include <errno.h>
@@ -54,6 +55,18 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
      * for the registry-wide path-resolution rules. */
     const char *override = getenv("HULL_CACHE_DIR");
     if (override && *override) {
+        /* A Git Bash / MSYS2 user exports this as "C:/hull-cache", the mixed
+         * form that shell hands a native program. That is absolute, so accept
+         * it by rewriting to the rooted form the rest of this function (and
+         * blob_store, which also tests for a leading '/') requires. No-op off
+         * Windows and on an already-rooted path. */
+        char ovr[HL_HOST_PATH_MAX];
+        if (hl_host_normalize_path(override, ovr, sizeof ovr) < 0) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        override = ovr;
+
         if (override[0] != '/') { errno = EINVAL; return -1; }
         size_t olen = strlen(override);
         /* Strip trailing slashes for canonical form. */

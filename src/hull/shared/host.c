@@ -337,3 +337,42 @@ int hl_host_find_in_path_ex(const char *path_env, const char *name,
     }
     return 0;
 }
+
+/* -- Path form ----------------------------------------------------- */
+
+int hl_host_normalize_path(const char *path, char *out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return -1;
+    out[0] = 0;
+    if (!path) return -1;
+
+    size_t len = strlen(path);
+    if (len + 1 > out_sz) return -1;
+
+    /* A drive letter is exactly ONE alphabetic character, a ':', and a
+     * separator. Anything longer before the ':' is a URI scheme and must be
+     * left alone (a 'postgres://' DSN reaches this function too). */
+    int drive = hl_host_is_windows() &&
+                ((path[0] >= 'A' && path[0] <= 'Z') ||
+                 (path[0] >= 'a' && path[0] <= 'z')) &&
+                path[1] == ':' &&
+                (path[2] == '/' || path[2] == '\\');
+
+    if (!drive) {
+        memcpy(out, path, len + 1);
+        return 0;
+    }
+
+    /* '/' + letter + the rest, which already starts with its own separator:
+     * "D:/a/x" -> "/D" + "/a/x". One byte longer than the input, so the
+     * length check above is re-run against the real output size. */
+    if (len + 2 > out_sz) return -1;
+
+    size_t n = 0;
+    out[n++] = '/';
+    out[n++] = path[0];
+    for (size_t i = 2; i < len; i++)
+        out[n++] = (path[i] == '\\') ? '/' : path[i];
+    out[n] = 0;
+    return 1;
+}
