@@ -17,6 +17,22 @@ cd "$(dirname "$0")/.."
 
 HULL=./build/hull
 
+# A fat APE cannot force-load a native feature archive, so cosmo compiles every
+# composable feature INTO its base by design (CLAUDE.md, "Composable runtime +
+# HTTP base": "cosmo is exempt"). The slim-base invariant below is therefore
+# false there on purpose, and asserting it is a category error rather than a
+# regression.
+#
+# Detect by the APE magic, NOT file(1). On Windows `file` reports an APE as
+# "DOS/MBR boot sector" with no mention of cosmo or APE, so the older
+# *cosmo*|*APE* match silently never fired and this suite FAILED on Windows
+# instead of skipping - one of five that did.
+case "$(head -c 6 "$HULL" 2>/dev/null || true)" in
+    MZqFpD|jartsr)
+        echo "SKIP: cosmo keeps the image codec in-base (a fat APE can't force-load a feature archive)"
+        exit 0;;
+esac
+
 echo "=== build hull + the image-less platform lib + the image archives ==="
 make >/dev/null
 make platform >/dev/null

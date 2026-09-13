@@ -233,11 +233,17 @@ elif [ "$BRC" -ne 0 ]; then
     echo "$BOUT" | sed 's/^/      /'
     FAIL=$((FAIL + 1))
 else
-    # On every POSIX host the default artifact stays exactly `app_dir/app`.
-    assert "default output is app_dir/app (no suffix on POSIX)" \
-           [ -f "$WORKDIR/app/app" ]
-    assert "the artifact is executable" [ -x "$WORKDIR/app/app" ]
-    assert_not_contains "no .com artifact on POSIX" "$(ls "$WORKDIR/app")" "app.com"
+    # The default artifact is named for the host that must run it.
+    assert "default output is app_dir/$ARTIFACT" \
+           [ -f "$WORKDIR/app/$ARTIFACT" ]
+    assert "the artifact is executable" [ -x "$WORKDIR/app/$ARTIFACT" ]
+    if [ -z "$EXE_SUFFIX" ]; then
+        assert_not_contains "no .com artifact on POSIX" "$(ls "$WORKDIR/app")" "app.com"
+    else
+        # The converse matters just as much on Windows: an extensionless
+        # artifact there would not be executable at all.
+        assert "no extensionless artifact on Windows" [ ! -f "$WORKDIR/app/app" ]
+    fi
     assert_contains "reports where it wrote"  "$BOUT" "hull build: wrote"
     assert_contains "prints a runnable command" "$BOUT" "run it with"
     # The app dir here is an absolute mktemp path, so the runnable command
@@ -246,7 +252,7 @@ else
     # one. The "./" prefix is asserted below, on the relative-path build -
     # the only case where it is load-bearing.
     assert_contains "names the artifact by its full path" \
-                    "$BOUT" "run it with  $WORKDIR/app/app"
+                    "$BOUT" "run it with  $WORKDIR/app/$ARTIFACT"
 
     # One obvious shippable executable in the app root: no stray ELF/debug
     # sidecars left beside it.
@@ -268,8 +274,17 @@ else
     # would not be a runnable instruction. POSIX half of the ".\app.com"
     # assertion in .github/workflows/cosmocc-windows-e2e.yml.
     RBOUT=$(cd "$WORKDIR" && "$HULL" build --no-verify-platform app 2>&1 || true)
-    assert_contains "a relative app dir gets a ./ prefix" \
-                    "$RBOUT" "run it with  ./app/app"
+    if [ -z "$EXE_SUFFIX" ]; then
+        assert_contains "a relative app dir gets a ./ prefix" \
+                        "$RBOUT" "run it with  ./app/app"
+    else
+        # Windows spells the same instruction .\app\app.com - asserted
+        # verbatim in .github/workflows/cosmocc-windows-e2e.yml. Here we only
+        # require that a prefix is present at all, without re-encoding the
+        # separator in a shell that would mangle it.
+        assert_contains "a relative app dir gets a prefix" \
+                        "$RBOUT" "run it with  ."
+    fi
 
     # The sidecar tidy-up moves only what the LINK produced. A same-named
     # file that was already in the project - a developer's own `app.dbg`,

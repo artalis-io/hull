@@ -15,10 +15,23 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 HULL="$ROOT/build/hull"
-[ -x "$HULL" ] || { echo "SKIP: build/hull not built"; exit 0; }
-case "$(file "$HULL" 2>/dev/null || true)" in
-    *cosmo*|*"APE"*) echo "SKIP: cosmo keeps SQLite in-base (fat APE can't force-load)"; exit 0;;
+
+# A fat APE cannot force-load a native feature archive, so cosmo compiles every
+# composable feature INTO its base by design (CLAUDE.md, "Composable runtime +
+# HTTP base": "cosmo is exempt"). The slim-base invariant below is therefore
+# false there on purpose, and asserting it is a category error rather than a
+# regression.
+#
+# Detect by the APE magic, NOT file(1). On Windows `file` reports an APE as
+# "DOS/MBR boot sector" with no mention of cosmo or APE, so the older
+# *cosmo*|*APE* match silently never fired and this suite FAILED on Windows
+# instead of skipping - one of five that did.
+case "$(head -c 6 "$HULL" 2>/dev/null || true)" in
+    MZqFpD|jartsr)
+        echo "SKIP: cosmo keeps SQLite in-base (a fat APE can't force-load a feature archive)"
+        exit 0;;
 esac
+[ -x "$HULL" ] || { echo "SKIP: build/hull not built"; exit 0; }
 
 W=""
 STASH=$(mktemp -d)
