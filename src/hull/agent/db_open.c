@@ -22,6 +22,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap */
 #include "hull/migrate.h"
+#include "hull/shared/host.h"
 #include <sqlite3.h>
 
 #include <limits.h>
@@ -40,6 +41,23 @@ sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
     }
 
     if (db_path) {
+        /* Same rewrite the SQLite backend does (#495), because this opens
+         * sqlite3 DIRECTLY rather than through hl_db_backend_select, so the
+         * normalization there does not reach it. An MSYS2 / Git Bash shell
+         * hands a native program "D:/app/data.db"; SQLite's unix VFS decides
+         * absolute-vs-relative on a leading '/', reads that as relative,
+         * prepends the cwd and cannot open the result. Measured: `hull agent
+         * db schema` still reported {"error":"cannot open database"} on
+         * Windows after #495 landed, because of this call site.
+         *
+         * The default_path built above needs it for the same reason: app_dir
+         * arrives in the mixed form too, and access() accepts it (so the
+         * F_OK probe passes) where sqlite3_open_v2 does not - which is how a
+         * path that demonstrably exists still fails to open. */
+        char norm[HL_HOST_PATH_MAX];
+        if (hl_host_normalize_path(db_path, norm, sizeof norm) >= 0)
+            db_path = norm;
+
         if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
             if (db) sqlite3_close(db);
             return NULL;
