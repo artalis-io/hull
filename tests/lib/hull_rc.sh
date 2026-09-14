@@ -66,12 +66,19 @@ hull_rc__pwsh() {
 # Set HULL_RC_STDIN=FILE to feed the process stdin from a file.
 hull_rc() {
     if [ "${HULL_RC_SHIFT:-0}" != 1 ]; then
+        # `|| _r=$?` is not stylistic. Callers run under `set -e`, which a shell
+        # function INHERITS, so a bare `"$@"` returning non-zero aborts the whole
+        # script before `echo $?` runs - the script then exits with the command's
+        # own code and make reports e.g. "Error 7", the app's exit status, as a
+        # build failure. The code this replaced was written `rc=0; cmd || rc=$?`
+        # for exactly this reason.
+        _r=0
         if [ -n "${HULL_RC_STDIN:-}" ]; then
-            "$@" < "$HULL_RC_STDIN" >/dev/null 2>&1
+            "$@" < "$HULL_RC_STDIN" >/dev/null 2>&1 || _r=$?
         else
-            "$@" >/dev/null 2>&1
+            "$@" >/dev/null 2>&1 || _r=$?
         fi
-        echo $?
+        echo "$_r"
         return 0
     fi
     _t=$(mktemp -d)
@@ -87,12 +94,14 @@ hull_rc() {
 hull_run() {
     _out=$1; shift
     if [ "${HULL_RC_SHIFT:-0}" != 1 ]; then
+        # See hull_rc: guarded so an inherited `set -e` cannot abort the caller.
+        _r=0
         if [ -n "${HULL_RC_STDIN:-}" ]; then
-            "$@" < "$HULL_RC_STDIN" > "$_out" 2>&1
+            "$@" < "$HULL_RC_STDIN" > "$_out" 2>&1 || _r=$?
         else
-            "$@" > "$_out" 2>&1
+            "$@" > "$_out" 2>&1 || _r=$?
         fi
-        echo $?
+        echo "$_r"
         return 0
     fi
     _t=$(mktemp -d)
