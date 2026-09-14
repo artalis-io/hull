@@ -10,6 +10,15 @@
 set -u
 
 HULL_BIN="${HULL_BIN:-build/hull}"
+
+# hull exits with a real code; on Windows an APE reports it shifted and a
+# POSIX shell reads 0 for every outcome (jart/cosmopolitan#1521). This suite is
+# almost entirely exit-code assertions, so without recovering the real status
+# it asserts nothing there.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL_BIN"
+HULL_RC_TMP="${TMPDIR:-/tmp}/hull_cli_rc.$$"
+trap 'rm -f "$HULL_RC_TMP" "$HULL_RC_TMP.in"' EXIT
 PASS=0
 FAIL=0
 
@@ -33,15 +42,15 @@ run_hello_cli() {
     echo "--- hello_cli (${runtime}) ---"
 
     # 1. Valid argv → exit 0, stdout starts with "hello"
-    out=$("${HULL_BIN}" run "${app}" -- world 2>/dev/null)
-    rc=$?
+    rc=$(hull_run "$HULL_RC_TMP" "${HULL_BIN}" run "${app}" -- world)
+    out=$(cat "$HULL_RC_TMP")
     expect_eq "${runtime} hello_cli exit code on valid argv" "0" "${rc}"
     line1=$(echo "${out}" | head -1)
     expect_eq "${runtime} hello_cli greeting line" "hello world" "${line1}"
 
     # 2. No args → exit 1, usage on stderr
-    err=$("${HULL_BIN}" run "${app}" 2>&1 >/dev/null)
-    rc=$?
+    rc=$(hull_run "$HULL_RC_TMP" "${HULL_BIN}" run "${app}")
+    err=$(cat "$HULL_RC_TMP")
     expect_eq "${runtime} hello_cli exit code on no args" "1" "${rc}"
     case "${err}" in
         *usage:*) pass "${runtime} hello_cli usage on stderr" ;;
@@ -53,7 +62,8 @@ run_hello_cli() {
     expect_eq "${runtime} hello_cli reads stdin" "hello alice" "${out}"
 
     # 4. --stdin with empty stdin → exit 2
-    rc=$(echo "" | "${HULL_BIN}" run "${app}" -- --stdin >/dev/null 2>&1; echo $?)
+    : > "$HULL_RC_TMP.in"
+    rc=$(HULL_RC_STDIN="$HULL_RC_TMP.in" hull_rc "${HULL_BIN}" run "${app}" -- --stdin)
     expect_eq "${runtime} hello_cli exit code on empty stdin" "2" "${rc}"
 }
 
@@ -108,8 +118,7 @@ app.main(() => {
 });
 JS
     fi
-    "${HULL_BIN}" "${d}/app.${ext}" -d ":memory:" >/dev/null 2>&1
-    rc=$?
+    rc=$(hull_rc "${HULL_BIN}" "${d}/app.${ext}" -d ":memory:")
     # 0 = udf ran + failed-register handled + clean teardown; non-zero/134/139 = a
     # teardown-leak abort or a failed-register double-free (regression).
     expect_eq "${runtime} db.udf clean exit (teardown + failed-register safe)" "0" "${rc}"
@@ -151,8 +160,7 @@ app.main(() => {
 });
 JS
     fi
-    "${HULL_BIN}" "${d}/app.${ext}" >/dev/null 2>&1
-    rc=$?
+    rc=$(hull_rc "${HULL_BIN}" "${d}/app.${ext}")
     expect_eq "${runtime} fs round-trip via app.main" "0" "${rc}"
     rm -rf "${d}"
 }
@@ -209,8 +217,7 @@ app.main(() => {
 });
 JS
     fi
-    "${HULL_BIN}" "${d}/app.${ext}" >/dev/null 2>&1
-    rc=$?
+    rc=$(hull_rc "${HULL_BIN}" "${d}/app.${ext}")
     expect_eq "${runtime} fs.stat + fs.list parity via app.main" "0" "${rc}"
     rm -rf "${d}"
 }
