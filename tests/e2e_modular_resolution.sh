@@ -95,7 +95,22 @@ run_lang() {
         fail "$lang build failed: $out"
     echo "$out" | grep -qi 'manifest extraction failed' && \
         fail "$lang build: extraction failed on a valid modular app"
-    [ -f "$app/out" ] || fail "$lang build produced no binary"
+    # A hull that cannot link an app HERE is an unsupported configuration, not
+    # a failure of module resolution. Two messages say so: no platform library
+    # at all, and no bundled app_main.o (which the compiler-free emit path
+    # needs, and only an EMBED_PLATFORM build carries).
+    #
+    # Decide from the OUTPUT. On Windows an APE's exit status is shifted and a
+    # POSIX shell reads 0 for every outcome (jart/cosmopolitan#1521), so the
+    # `|| fail` above never fires and the build's own error message was
+    # discarded - leaving only "produced no binary", which reads like a
+    # resolution bug and is not one.
+    if echo "$out" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+        echo "SKIP: $lang build assertions (this hull cannot link an app here)"
+        echo "$out" | sed 's/^/    /'
+        return 0
+    fi
+    [ -f "$app/out" ] || fail "$lang build produced no binary: $out"
     pass "$lang manifest extraction resolves the modular chain"
 
     # 3. the BUILT binary RUNS (not merely builds): the embedded-VFS resolver
