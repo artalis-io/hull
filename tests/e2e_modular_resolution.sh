@@ -339,6 +339,19 @@ echo 'return { v = "inroot" }' > "$sl/real/mod.lua"
 ln -s real "$sl/link"                               # in-root symlink
 ext=$(cd "$(mktemp -d)" && pwd -P); echo 'return { v = "ESCAPED" }' > "$ext/secret.lua"
 ln -s "$ext" "$sl/esc"                              # symlink escaping the root
+# The escape fixture must actually BE a symlink. On a Windows shell without
+# symlink privilege `ln -s` silently COPIES the directory: measured here,
+# Get-Item reports Attributes=Directory with empty LinkType/Target, and mutating
+# the original does not show through. The copy then sits INSIDE the app root, so
+# require("./esc/secret") resolves legitimately and returns its contents - the
+# literal string "ESCAPED" - which reads exactly like a containment breach and
+# is not one.
+#
+# Skip rather than weaken. The assertion is correct and hull passes it wherever
+# the fixture can be built; calling it a pass here would claim symlink
+# containment is verified on Windows when it is untested.
+SYMLINK_FIXTURE_OK=1
+[ -L "$sl/esc" ] || SYMLINK_FIXTURE_OK=0
 cat > "$sl/app.lua" <<'LUA'
 local inroot = require("./link/mod")
 local ok, m  = pcall(require, "./esc/secret")
@@ -351,9 +364,14 @@ PORT=$((PORT + 1))
 SRV=$!; sleep 1.2
 inroot=$(get "$PORT" /in); escd=$(get "$PORT" /esc)
 kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=""
-[ "$inroot" = "inroot" ] || fail "in-root symlink did not resolve (dev, got '$inroot')"
-[ "$escd" = "BLOCKED" ]  || fail "external symlink escaped the app root (dev, got '$escd')"
-pass "in-root symlink resolves; external symlink escape blocked (dev)"
+if [ "$SYMLINK_FIXTURE_OK" = 0 ]; then
+    echo "SKIP: symlink containment (this shell's ln -s copied the directory;"
+    echo "      no escaping symlink exists to block - containment UNTESTED here)"
+else
+    [ "$inroot" = "inroot" ] || fail "in-root symlink did not resolve (dev, got '$inroot')"
+    [ "$escd" = "BLOCKED" ]  || fail "external symlink escaped the app root (dev, got '$escd')"
+    pass "in-root symlink resolves; external symlink escape blocked (dev)"
+fi
 
 # Built binaries load modules from the embedded VFS (no runtime fopen of a host
 # path); the security assertion that carries is that a symlink whose target
@@ -369,14 +387,21 @@ local ok, m = pcall(require, "./esc/secret")
 app.manifest({ modules = { "hull/http-server@1" } })
 app.get("/esc", function(req, res) res:text((ok and m.v) or "BLOCKED") end)
 LUA
-"$HULL" build "$slb" -o "$slb/out" --no-verify-platform >/dev/null 2>&1 || fail "symlink app build failed"
+bout=$("$HULL" build "$slb" -o "$slb/out" --no-verify-platform 2>&1 || true)
 PORT=$((PORT + 1))
 "$slb/out" -p "$PORT" >/dev/null 2>&1 &
 SRV=$!; sleep 1.2
 escd=$(get "$PORT" /esc)
 kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=""
-[ "$escd" = "BLOCKED" ] || fail "external symlink surfaced a host object in a built binary (got '$escd')"
-pass "external symlink escape stays blocked in a built binary"
+if [ "$SYMLINK_FIXTURE_OK" = 0 ]; then
+    echo "SKIP: built-binary symlink containment (ln -s copied the directory; UNTESTED here)"
+elif echo "$bout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: built-binary symlink containment (this hull cannot link an app here)"
+else
+    [ -f "$slb/out" ] || fail "symlink app build produced no binary: $bout"
+    [ "$escd" = "BLOCKED" ] || fail "external symlink surfaced a host object in a built binary (got '$escd')"
+    pass "external symlink escape stays blocked in a built binary"
+fi
 
 # ── Security boundary 2: no dynamic-code authority in the extraction window ──
 # App code executed to read the manifest must not compile/run new code. load()
