@@ -84,6 +84,7 @@ local _manifest_cache = {}
 -- extract_manifest_or_fatal); read-only callers may ignore it. Does not print;
 -- the caller owns the (command-correct) diagnostic.
 function M.extract_manifest(app_dir)
+    if tool and tool.stderr then tool.stderr("[diag502] ENTER " .. tostring(app_dir) .. "\n") end
     local cached = _manifest_cache[app_dir]
     if cached ~= nil then return cached.manifest, cached.err end
     local manifest, err = nil, nil
@@ -108,7 +109,9 @@ function M.extract_manifest(app_dir)
         local intends_manifest =
             (tool.read_file(lua_entry) or ""):find("app%.manifest%s*%(") ~= nil
         local chunk, load_err = tool.loadfile(lua_entry)
+        if tool and tool.stderr then tool.stderr("[diag502] AFTER-LOADFILE " .. tostring(chunk ~= nil) .. " load_err=" .. tostring(load_err) .. " intends=" .. tostring(intends_manifest) .. "\n") end
         if not chunk then
+            if tool and tool.stderr then tool.stderr("[diag502] NOT-CHUNK " .. tostring(load_err) .. "\n") end
             if intends_manifest then
                 err = "could not load app.lua: " .. tostring(load_err)
             end
@@ -210,6 +213,7 @@ function M.extract_manifest(app_dir)
             end
         end
     end
+    if tool and tool.stderr then tool.stderr("[diag502] RETURN " .. tostring(manifest) .. " err=" .. tostring(err) .. "\n") end
     _manifest_cache[app_dir] = { manifest = manifest, err = err }
     return manifest, err
 end
