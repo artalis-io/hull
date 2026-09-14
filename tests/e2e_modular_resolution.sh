@@ -20,12 +20,15 @@ HULL=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
 # `if "$HULL" ...` below would be answering a question it cannot see.
 . "$(dirname "$0")/lib/hull_rc.sh"
 hull_rc_init "$HULL"
+HULL_RC_TMP="${TMPDIR:-/tmp}/hull_modres_rc.$$"
 # Canonicalize (pwd -P) so the app root has no symlink component: on macOS
 # mktemp lives under /tmp -> /private/tmp, and the seatbelt sandbox allows the
 # given path while fs access uses the real one - a location quirk unrelated to
 # module resolution. The canonical path makes them agree.
 WORK=$(cd "$(mktemp -d)" && pwd -P)
-trap 'rm -rf "$WORK"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null || true' EXIT
+# One EXIT trap only: a second `trap ... EXIT` REPLACES this one rather than
+# adding to it, so the temp file the rc helper writes is cleaned here.
+trap 'rm -rf "$WORK"; rm -f "$HULL_RC_TMP"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null || true' EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "PASS: $1"; }
 PORT=39600
@@ -413,11 +416,18 @@ local f = load("return 1")
 f()
 app.manifest({ modules = {} })
 LUA
-if "$HULL" build "$dyn" -o "$dyn/out" --no-verify-platform >/dev/null 2>&1; then
-    fail "load() during extraction should fail closed (dynamic code must be removed)"
+drc=$(hull_run "$HULL_RC_TMP" "$HULL" build "$dyn" -o "$dyn/out" --no-verify-platform)
+dout=$(cat "$HULL_RC_TMP")
+# A hull that cannot link an app fails this build for a reason that has nothing
+# to do with dynamic-code authority, so a non-zero status here would pass the
+# assertion vacuously. Skip instead of banking a result that proves nothing.
+if echo "$dout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: dynamic-code extraction boundary (this hull cannot link an app here)"
+else
+    [ "$drc" != 0 ] || fail "load() during extraction should fail closed (dynamic code must be removed): $dout"
+    [ -f "$dyn/out" ] && fail "dynamic-code app produced a binary"
+    pass "dynamic-code (load) is unavailable during extraction (fatal, no binary)"
 fi
-[ -f "$dyn/out" ] && fail "dynamic-code app produced a binary"
-pass "dynamic-code (load) is unavailable during extraction (fatal, no binary)"
 
 # ── Dynamic code cannot be RECOVERED via an approved/preloaded import ──
 # Importing a permitted helper must not restore any Lua loader; using any of
