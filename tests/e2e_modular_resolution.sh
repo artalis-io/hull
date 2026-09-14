@@ -165,7 +165,17 @@ app.manifest({ modules = {} })
 LUA
 out=$("$HULL" build "$brk" -o "$brk/out" --no-verify-platform 2>&1 || true)
 echo "$out" | grep -qi 'manifest extraction failed' || \
-    fail "pre-manifest error was not reported as a fatal extraction failure; hull said: $out"
+    # No message came back at all on Windows: hull printed "1 Lua file(s)" and
+    # stopped. Two very different causes look identical from here - extraction
+    # wrongly reporting SUCCESS (in which case composition is being decided
+    # from a manifest that was never read, and hull build / deploy / eject all
+    # share that path), or the diagnostic being produced and lost. Re-run
+    # verbosely so the failure says which, instead of leaving the next reader
+    # to guess from a symptom.
+    vout=$("$HULL" build "$brk" -o "$brk/out.v" --no-verify-platform --verbose 2>&1 || true)
+    fail "pre-manifest error was not reported as a fatal extraction failure
+  plain:   $out
+  verbose: $vout"
 [ -f "$brk/out" ] && fail "fatal extraction still produced a binary"
 pass "pre-manifest extraction failure is fatal (command-correct, no binary)"
 
