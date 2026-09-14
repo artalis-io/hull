@@ -170,6 +170,19 @@ function M.extract_manifest(app_dir)
             -- captures the manifest at the app.manifest() call and tolerates a
             -- later throw. (Aligns Lua/JS; avoids falsely failing a valid app.)
             manifest = app.get_manifest()
+            -- TEMPORARY (#502 diagnostic, never merged): report every condition
+            -- that gates the fatal-extraction diagnostic, so the Windows
+            -- behaviour is attributed rather than inferred. Written via
+            -- tool.stderr because the tool VM loads neither io nor os, and
+            -- placed here because `tool` is stripped for the extraction window
+            -- and restored just above.
+            if tool and tool.stderr then
+                tool.stderr("[diag502] ok=" .. tostring(ok)
+                    .. " manifest=" .. tostring(manifest)
+                    .. " intends_manifest=" .. tostring(intends_manifest)
+                    .. " chunk_loaded=" .. tostring(chunk ~= nil)
+                    .. " run_err=" .. tostring(run_err) .. "\n")
+            end
             if not ok and not manifest and intends_manifest then
                 err = tostring(run_err)
             end
