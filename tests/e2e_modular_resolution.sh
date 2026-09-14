@@ -165,7 +165,7 @@ app.manifest({ modules = {} })
 LUA
 out=$("$HULL" build "$brk" -o "$brk/out" --no-verify-platform 2>&1 || true)
 echo "$out" | grep -qi 'manifest extraction failed' || \
-    fail "pre-manifest error was not reported as a fatal extraction failure"
+    fail "pre-manifest error was not reported as a fatal extraction failure; hull said: $out"
 [ -f "$brk/out" ] && fail "fatal extraction still produced a binary"
 pass "pre-manifest extraction failure is fatal (command-correct, no binary)"
 
