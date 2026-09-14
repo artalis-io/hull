@@ -164,22 +164,33 @@ error("cannot reach app.manifest")
 app.manifest({ modules = {} })
 LUA
 out=$("$HULL" build "$brk" -o "$brk/out" --no-verify-platform 2>&1 || true)
-# NOTE the if-block. Written as `grep ... || \` with a COMMENT on the next
-# line, the backslash continues into the comment, the || is left without a
-# command, and every line after it runs UNCONDITIONALLY - so `fail` fired even
-# when the message was present, breaking this suite on Linux and macOS where it
-# had been passing. It is not a syntax error and `dash -n` accepts it happily.
-if ! echo "$out" | grep -qi 'manifest extraction failed'; then
-    # Two very different causes look identical from outside: extraction wrongly
-    # reporting SUCCESS (composition then decided from a manifest that was never
-    # read - hull build, deploy and eject share that path), or the diagnostic
-    # being produced and lost. Re-run verbosely so the failure says which.
-    vout=$("$HULL" build "$brk" -o "$brk/out.v" --no-verify-platform --verbose 2>&1 || true)
-    fail "pre-manifest error was not reported as a fatal extraction failure
-  plain:   $out
-  verbose: $vout"
+# A hull that cannot link an app HERE never reaches manifest extraction:
+# `hull build` fails at the missing bundled app_main.o (or platform library)
+# first. Instrumenting M.extract_manifest on Windows confirmed it is not
+# called at all in that configuration - for the VALID apps above either, not
+# just this one - so asserting on its diagnostic is asserting on a code path
+# that did not run. Same unsupported-configuration guard the build assertions
+# in run_lang already carry.
+if echo "$out" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: fatal-extraction assertions (this hull cannot link an app here)"
+else
+    # NOTE the if-block. Written as `grep ... || \` with a COMMENT on the next
+    # line, the backslash continues into the comment, the || is left without a
+    # command, and every line after it runs UNCONDITIONALLY - so `fail` fired even
+    # when the message was present, breaking this suite on Linux and macOS where it
+    # had been passing. It is not a syntax error and `dash -n` accepts it happily.
+    if ! echo "$out" | grep -qi 'manifest extraction failed'; then
+        # Print hull's own output on failure. The message being absent says
+        # only that; WHY is in what hull actually emitted, and discarding it is
+        # what made this failure read as an extraction defect (#502) when the
+        # build had in fact stopped earlier for an unrelated reason.
+        vout=$("$HULL" build "$brk" -o "$brk/out.v" --no-verify-platform --verbose 2>&1 || true)
+        fail "pre-manifest error was not reported as a fatal extraction failure
+      plain:   $out
+      verbose: $vout"
+    fi
+    [ -f "$brk/out" ] && fail "fatal extraction still produced a binary"
 fi
-[ -f "$brk/out" ] && fail "fatal extraction still produced a binary"
 pass "pre-manifest extraction failure is fatal (command-correct, no binary)"
 
 # ── A valid app that declares its manifest THEN errors later still builds ──
