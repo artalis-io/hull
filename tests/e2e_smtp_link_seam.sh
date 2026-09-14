@@ -29,6 +29,21 @@ command -v nm >/dev/null 2>&1 || { echo "PASS: e2e_smtp_link_seam (nm absent; sk
 [ -f "$ROOT/build/libhull_platform.a" ] || make -C "$ROOT" platform >/dev/null 2>&1 || \
     { echo "SKIP: no platform lib + no system cc to build one"; exit 0; }
 
+# Every build below passes --compiler=system, which resolves a NATIVE
+# cc/gcc/clang from PATH. A cosmo host (Windows CI) carries cosmocc and no
+# native compiler, so those builds cannot succeed here. That is an unsupported
+# configuration, not a regression in the link seam, so skip.
+#
+# This has to be checked BEFORE the first build rather than relied on to fail
+# loudly. On Windows an APE's exit status is shifted and a POSIX shell reads 0
+# for every outcome (jart/cosmopolitan#1521), so the `|| fail` on each build
+# never fired: a failed build was silently accepted and the suite then RAN a
+# binary that was never produced, reporting "compute app should exit 7, got
+# 127" - a link-seam defect that did not exist.
+command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 ||
+    command -v clang >/dev/null 2>&1 ||
+    { echo "SKIP: --compiler=system needs a native cc/gcc/clang (none on PATH)"; exit 0; }
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

@@ -14,6 +14,12 @@ set -eu
 HULL="${HULL_BIN:-build/hull}"
 [ -x "$HULL" ] || HULL="./build/hull"
 HULL=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
+
+# Recovering hull's REAL exit status: on Windows an APE reports it shifted and
+# a POSIX shell reads 0 for every outcome (jart/cosmopolitan#1521), so an
+# `if "$HULL" ...` below would be answering a question it cannot see.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
 # Canonicalize (pwd -P) so the app root has no symlink component: on macOS
 # mktemp lives under /tmp -> /private/tmp, and the seatbelt sandbox allows the
 # given path while fs access uses the real one - a location quirk unrelated to
@@ -95,7 +101,22 @@ run_lang() {
         fail "$lang build failed: $out"
     echo "$out" | grep -qi 'manifest extraction failed' && \
         fail "$lang build: extraction failed on a valid modular app"
-    [ -f "$app/out" ] || fail "$lang build produced no binary"
+    # A hull that cannot link an app HERE is an unsupported configuration, not
+    # a failure of module resolution. Two messages say so: no platform library
+    # at all, and no bundled app_main.o (which the compiler-free emit path
+    # needs, and only an EMBED_PLATFORM build carries).
+    #
+    # Decide from the OUTPUT. On Windows an APE's exit status is shifted and a
+    # POSIX shell reads 0 for every outcome (jart/cosmopolitan#1521), so the
+    # `|| fail` above never fires and the build's own error message was
+    # discarded - leaving only "produced no binary", which reads like a
+    # resolution bug and is not one.
+    if echo "$out" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+        echo "SKIP: $lang build assertions (this hull cannot link an app here)"
+        echo "$out" | sed 's/^/    /'
+        return 0
+    fi
+    [ -f "$app/out" ] || fail "$lang build produced no binary: $out"
     pass "$lang manifest extraction resolves the modular chain"
 
     # 3. the BUILT binary RUNS (not merely builds): the embedded-VFS resolver
@@ -126,7 +147,10 @@ cat > "$esc/app.lua" <<'LUA'
 local x = require("./../outside")
 app.manifest({ modules = {} })
 LUA
-if "$HULL" build "$esc" -o "$esc/out" --no-verify-platform >/dev/null 2>&1; then
+# Fail-CLOSED containment. This is the assertion that most needs the real
+# status: a build that is silently reported as succeeding would leave
+# app-root containment unverified on Windows entirely.
+if [ "$(hull_rc "$HULL" build "$esc" -o "$esc/out" --no-verify-platform)" = 0 ]; then
     fail "escape-past-root build should fail closed (it did not)"
 fi
 [ -f "$esc/out" ] && fail "escape-past-root produced a binary"
@@ -140,8 +164,21 @@ error("cannot reach app.manifest")
 app.manifest({ modules = {} })
 LUA
 out=$("$HULL" build "$brk" -o "$brk/out" --no-verify-platform 2>&1 || true)
-echo "$out" | grep -qi 'manifest extraction failed' || \
-    fail "pre-manifest error was not reported as a fatal extraction failure"
+# NOTE the if-block. Written as `grep ... || \` with a COMMENT on the next
+# line, the backslash continues into the comment, the || is left without a
+# command, and every line after it runs UNCONDITIONALLY - so `fail` fired even
+# when the message was present, breaking this suite on Linux and macOS where it
+# had been passing. It is not a syntax error and `dash -n` accepts it happily.
+if ! echo "$out" | grep -qi 'manifest extraction failed'; then
+    # Two very different causes look identical from outside: extraction wrongly
+    # reporting SUCCESS (composition then decided from a manifest that was never
+    # read - hull build, deploy and eject share that path), or the diagnostic
+    # being produced and lost. Re-run verbosely so the failure says which.
+    vout=$("$HULL" build "$brk" -o "$brk/out.v" --no-verify-platform --verbose 2>&1 || true)
+    fail "pre-manifest error was not reported as a fatal extraction failure
+  plain:   $out
+  verbose: $vout"
+fi
 [ -f "$brk/out" ] && fail "fatal extraction still produced a binary"
 pass "pre-manifest extraction failure is fatal (command-correct, no binary)"
 
@@ -169,7 +206,8 @@ import { app } from "hull:app";
 throw new Error("pre-manifest boom");
 app.manifest({ modules: [] });
 JS
-if "$HULL" build "$jpre" -o "$jpre/out" --no-verify-platform >/dev/null 2>&1; then
+# Same fail-closed shape as the escape check: read the real status.
+if [ "$(hull_rc "$HULL" build "$jpre" -o "$jpre/out" --no-verify-platform)" = 0 ]; then
     fail "JS pre-manifest throw should fail extraction (parity with Lua)"
 fi
 [ -f "$jpre/out" ] && fail "JS pre-manifest throw produced a binary"
