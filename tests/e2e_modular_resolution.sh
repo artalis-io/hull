@@ -202,9 +202,17 @@ cat > "$lateok/app.lua" <<'LUA'
 app.manifest({ modules = {} })
 error("late throw after manifest")
 LUA
-"$HULL" build "$lateok" -o "$lateok/out" --no-verify-platform >/dev/null 2>&1 || \
-    fail "a manifest-declared app with a later throw should still build"
-[ -f "$lateok/out" ] || fail "late-throw app produced no binary"
+# Capture rather than discard: on a hull that cannot link an app here the build
+# legitimately produces no binary, and the assertion below would report that as
+# a late-throw regression. Note the `|| true`: hull's exit status is unreadable
+# from a POSIX shell on Windows (jart/cosmopolitan#1521), so the decision comes
+# from the output, not the status.
+lout=$("$HULL" build "$lateok" -o "$lateok/out" --no-verify-platform 2>&1 || true)
+if echo "$lout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: late-throw build assertions (this hull cannot link an app here)"
+else
+    [ -f "$lateok/out" ] || fail "late-throw app produced no binary: $lout"
+fi
 pass "manifest-then-error app still builds (manifest is authoritative)"
 
 # ── JS extraction fatality PARITY with Lua ──
@@ -230,9 +238,13 @@ import { app } from "hull:app";
 app.manifest({ modules: [] });
 throw new Error("post-manifest boom");
 JS
-"$HULL" build "$jpost" -o "$jpost/out" --no-verify-platform >/dev/null 2>&1 || \
-    fail "JS manifest-then-throw should still build (capture-then-tolerate)"
-[ -f "$jpost/out" ] || fail "JS manifest-then-throw produced no binary"
+# Same guard as the Lua late-throw case above.
+jout=$("$HULL" build "$jpost" -o "$jpost/out" --no-verify-platform 2>&1 || true)
+if echo "$jout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: JS manifest-then-throw build assertions (this hull cannot link an app here)"
+else
+    [ -f "$jpost/out" ] || fail "JS manifest-then-throw produced no binary: $jout"
+fi
 pass "JS manifest-then-throw still builds (manifest is authoritative)"
 
 # ── JS extraction loader-liveness (adversarial termination) ──
