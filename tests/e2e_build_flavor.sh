@@ -18,6 +18,15 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 HULL="$ROOT/build/hull"
 
+# Both hull and the apps it produces are APEs. On Windows an APE reports its
+# exit status shifted and a POSIX shell reads 0 for every outcome
+# (jart/cosmopolitan#1521), so "unknown flavor should error" could not tell a
+# rejection from an acceptance, and "app should exit 7" could not see the 7.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
+HULL_RC_TMP="${TMPDIR:-/tmp}/hull_flavor_rc.$$"
+trap 'rm -f "$HULL_RC_TMP"' EXIT
+
 [ -x "$HULL" ] || { echo "SKIP: $HULL not built"; exit 0; }
 case "$(file "$HULL" 2>/dev/null || true)" in
     *cosmo*|*"APE"*) echo "SKIP: cosmo keeps everything in-base (fat APE)"; exit 0;;
@@ -31,9 +40,10 @@ pass() { echo "  ok: $1"; }
 # ── 1. unknown flavor ──────────────────────────────────────────────────
 mkdir -p "$WORK/pc"
 printf 'app.manifest({ modules = {} })\napp.main(function() return 7 end)\n' > "$WORK/pc/app.lua"
-if out=$("$HULL" build --no-verify-platform --flavor=bogus "$WORK/pc" -o "$WORK/pc/x" 2>&1); then
+if [ "$(hull_run "$HULL_RC_TMP" "$HULL" build --no-verify-platform --flavor=bogus "$WORK/pc" -o "$WORK/pc/x")" = 0 ]; then
     fail "unknown flavor should error"
 fi
+out=$(cat "$HULL_RC_TMP")
 echo "$out" | grep -q "unknown build flavor 'bogus'" || fail "unknown-flavor message missing: $out"
 echo "$out" | grep -q "pure-compute" || fail "unknown-flavor should list valid flavors"
 pass "unknown flavor rejected with valid list"
@@ -41,9 +51,10 @@ pass "unknown flavor rejected with valid list"
 # ── 2. forbidden module rejected at build time (validation preset) ─────
 mkdir -p "$WORK/srv"
 printf 'app.manifest({ modules = { "hull/http-server@1" } })\napp.get("/", function(req, res) res:text("hi") end)\n' > "$WORK/srv/app.lua"
-if out=$("$HULL" build --no-verify-platform --flavor=pure-compute "$WORK/srv" -o "$WORK/srv/x" 2>&1); then
+if [ "$(hull_run "$HULL_RC_TMP" "$HULL" build --no-verify-platform --flavor=pure-compute "$WORK/srv" -o "$WORK/srv/x")" = 0 ]; then
     fail "pure-compute build of an http-server app should be rejected"
 fi
+out=$(cat "$HULL_RC_TMP")
 echo "$out" | grep -q "HL_ENABLE_HTTP_SERVER" || fail "expected HTTP_SERVER rejection: $out"
 pass "forbidden module (hull/http-server) rejected at build time"
 
@@ -51,7 +62,7 @@ pass "forbidden module (hull/http-server) rejected at build time"
 if ! out=$("$HULL" build --no-verify-platform --flavor=pure-compute "$WORK/pc" -o "$WORK/pc/app" 2>&1); then
     fail "pure-compute x runtime should build: $out"
 fi
-rc=0; "$WORK/pc/app" >/dev/null 2>&1 || rc=$?
+rc=$(hull_rc "$WORK/pc/app")
 [ "$rc" = 7 ] || fail "pure-compute app should exit 7, got $rc"
 pass "pure-compute (preset) builds on the default base + runs (exit 7)"
 
@@ -60,7 +71,7 @@ out=$("$HULL" build --no-verify-platform --flavor=auto "$WORK/pc" -o "$WORK/pc/a
     || fail "auto build failed: $out"
 echo "$out" | grep -q "auto selected 'pure-compute'" \
     || fail "auto should select pure-compute for an app.main app: $out"
-rc=0; "$WORK/pc/auto" >/dev/null 2>&1 || rc=$?
+rc=$(hull_rc "$WORK/pc/auto")
 [ "$rc" = 7 ] || fail "auto-selected pure-compute app should exit 7, got $rc"
 pass "--flavor=auto -> pure-compute selection builds + runs"
 
@@ -84,7 +95,7 @@ k=$(nm "$WORK/pc/slim" 2>/dev/null | grep -cE ' [Tt] _?kl_' || true)
 m=$(nm "$WORK/pc/slim" 2>/dev/null | grep -cE ' [Tt] _?mbedtls_ssl_handshake' || true)
 [ "$k" = 0 ] || fail "compute app on the Keel-less base should carry no Keel (got $k)"
 [ "$m" = 0 ] || fail "compute app on the TLS-less base should carry no mbedTLS (got $m)"
-rc=0; "$WORK/pc/slim" >/dev/null 2>&1 || rc=$?
+rc=$(hull_rc "$WORK/pc/slim")
 [ "$rc" = 7 ] || fail "the Keel/TLS-less pure-compute app should still exit 7, got $rc"
 # Leave build/ as a full base again for any following target. This flag flip back to
 # the default config makes the sentinel purge build/hull; `make platform` alone rebuilds
