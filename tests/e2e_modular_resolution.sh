@@ -257,7 +257,12 @@ pass "JS manifest-then-throw still builds (manifest is authoritative)"
 # build_guarded DIR SECONDS -> sets BG_TIMEDOUT (1 if killed) and BG_RC.
 build_guarded() {
     d="$1"; secs="$2"
-    "$HULL" build "$d" -o "$d/out" --no-verify-platform >/dev/null 2>&1 &
+    # Capture rather than discard. BG_RC is unusable on Windows - an APE's exit
+    # status reads as 0 from a POSIX shell (jart/cosmopolitan#1521) - so callers
+    # need the OUTPUT to tell an unsupported configuration from a real result,
+    # and to say why when an assertion fails.
+    BG_OUT="$d/.build-out"
+    "$HULL" build "$d" -o "$d/out" --no-verify-platform > "$BG_OUT" 2>&1 &
     bp=$!
     n=0
     while kill -0 "$bp" 2>/dev/null; do
@@ -282,8 +287,18 @@ await new Promise(() => {});          // never settles
 app.manifest({ modules: [] });         // unreachable
 JS
 build_guarded "$jawait" 60
+# The bounded-ness contract is status-free and holds everywhere: the extractor
+# must not hang. Assert it unconditionally.
 [ "$BG_TIMEDOUT" = 0 ] || fail "never-settling top-level await HUNG the extractor (bounded/pending guard regressed)"
-[ "$BG_RC" -ne 0 ] || fail "never-settling top-level await should fail extraction"
+# The "extraction failed" half needs a real exit status, which a POSIX shell
+# cannot read on Windows, and on a hull that cannot link an app the build never
+# reaches extraction at all. Skip it in that configuration rather than assert on
+# a code path that did not run.
+if grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o" "$jawait/.build-out" 2>/dev/null; then
+    echo "SKIP: never-settling await extraction assertion (this hull cannot link an app here)"
+else
+    [ "$BG_RC" -ne 0 ] || fail "never-settling top-level await should fail extraction: $(cat "$jawait/.build-out" 2>/dev/null)"
+fi
 [ -f "$jawait/out" ] && fail "never-settling top-level await produced a binary"
 pass "JS never-settling top-level await is fatal, terminates (no binary)"
 
@@ -305,7 +320,13 @@ app.manifest({ modules: [] });                    // unreachable
 JS
 build_guarded "$jspin" 60
 [ "$BG_TIMEDOUT" = 0 ] || fail "runaway microtask HUNG the extractor (bounded drain regressed)"
-[ "$BG_RC" -ne 0 ] || fail "runaway microtask should fail extraction"
+# Same split as the await case: bounded-ness is status-free and asserted above;
+# the "is fatal" half needs a real status and a build that reached extraction.
+if grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o" "$jspin/.build-out" 2>/dev/null; then
+    echo "SKIP: runaway microtask extraction assertion (this hull cannot link an app here)"
+else
+    [ "$BG_RC" -ne 0 ] || fail "runaway microtask should fail extraction: $(cat "$jspin/.build-out" 2>/dev/null)"
+fi
 [ -f "$jspin/out" ] && fail "runaway microtask produced a binary"
 pass "JS runaway microtask terminates + is fatal (no binary)"
 
