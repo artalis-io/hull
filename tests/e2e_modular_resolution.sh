@@ -14,6 +14,12 @@ set -eu
 HULL="${HULL_BIN:-build/hull}"
 [ -x "$HULL" ] || HULL="./build/hull"
 HULL=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
+
+# Recovering hull's REAL exit status: on Windows an APE reports it shifted and
+# a POSIX shell reads 0 for every outcome (jart/cosmopolitan#1521), so an
+# `if "$HULL" ...` below would be answering a question it cannot see.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
 # Canonicalize (pwd -P) so the app root has no symlink component: on macOS
 # mktemp lives under /tmp -> /private/tmp, and the seatbelt sandbox allows the
 # given path while fs access uses the real one - a location quirk unrelated to
@@ -141,7 +147,10 @@ cat > "$esc/app.lua" <<'LUA'
 local x = require("./../outside")
 app.manifest({ modules = {} })
 LUA
-if "$HULL" build "$esc" -o "$esc/out" --no-verify-platform >/dev/null 2>&1; then
+# Fail-CLOSED containment. This is the assertion that most needs the real
+# status: a build that is silently reported as succeeding would leave
+# app-root containment unverified on Windows entirely.
+if [ "$(hull_rc "$HULL" build "$esc" -o "$esc/out" --no-verify-platform)" = 0 ]; then
     fail "escape-past-root build should fail closed (it did not)"
 fi
 [ -f "$esc/out" ] && fail "escape-past-root produced a binary"
@@ -184,7 +193,8 @@ import { app } from "hull:app";
 throw new Error("pre-manifest boom");
 app.manifest({ modules: [] });
 JS
-if "$HULL" build "$jpre" -o "$jpre/out" --no-verify-platform >/dev/null 2>&1; then
+# Same fail-closed shape as the escape check: read the real status.
+if [ "$(hull_rc "$HULL" build "$jpre" -o "$jpre/out" --no-verify-platform)" = 0 ]; then
     fail "JS pre-manifest throw should fail extraction (parity with Lua)"
 fi
 [ -f "$jpre/out" ] && fail "JS pre-manifest throw produced a binary"
