@@ -344,7 +344,17 @@ run_suite() {
     contains "$SUITE original name"  '"original_name":"img.png"' "$R"
 
     # Extract the id for the metadata + bytes round-trip.
-    ID1=$(printf '%s' "$R" | sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
+    # LC_ALL=C is load-bearing on the unicode upload below, and is set here too
+    # so all three extractions stay identical. The trailing `.*` has to consume
+    # the rest of the JSON, which includes the original filename's bytes; in a
+    # UTF-8 locale sed stops at a byte it cannot decode, the tail SURVIVES into
+    # the captured id, and the result is a 32-hex id with JSON glued to it that
+    # then builds a malformed URL. Measured on Windows:
+    #   curl: (3) unmatched close brace/bracket in URL position 84
+    #   .../serve/allow/7546490ce34ead41cde6926027de4f2a<bad>.png","size":29}]}
+    # Byte-wise matching is what this extraction wants anyway: a hex id out of a
+    # byte stream, with no opinion about the encoding of anything around it.
+    ID1=$(printf '%s' "$R" | LC_ALL=C sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
     if [ -z "$ID1" ]; then
         fail "$SUITE failed to parse attachment id"
         echo "    response: $R"
@@ -366,7 +376,7 @@ run_suite() {
     # ── Dedup: re-upload identical bytes (different filename) ───────
     R2=$(curl -s -X POST "http://127.0.0.1:$PORT/upload" \
         -F "file=@$TMPDIR_WORK/img2.png")
-    ID2=$(printf '%s' "$R2" | sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
+    ID2=$(printf '%s' "$R2" | LC_ALL=C sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
     BLOB2=$(printf '%s' "$R2" | sed -n 's/.*"blob_id":"\([0-9a-f]\{64\}\)".*/\1/p' | head -1)
     if [ -n "$ID2" ] && [ "$ID1" != "$ID2" ]; then
         pass "$SUITE dedup: distinct ids"
@@ -439,7 +449,7 @@ run_suite() {
     UNI_RC=0
     R_UNI=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload" \
         -F "file=@$TMPDIR_WORK/résumé文档📄.png" 2>&1) || UNI_RC=$?
-    ID_UNI=$(printf '%s' "$R_UNI" | sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
+    ID_UNI=$(printf '%s' "$R_UNI" | LC_ALL=C sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
     UNI_SERVE_RC=0
     if [ -z "$ID_UNI" ]; then
         fail "$SUITE unicode upload failed" "curl rc=$UNI_RC resp: $R_UNI"
