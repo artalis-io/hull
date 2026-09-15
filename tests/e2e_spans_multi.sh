@@ -13,6 +13,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$(dirname "$0")/lib/hull_clang.sh"
 HULL="${HULL:-$ROOT/build/hull}"
 export HULL_QUIET_AOT=1
 PASS=0; FAIL=0
@@ -38,6 +39,18 @@ else
 fi
 
 # Compile the plugin to interpreter WASM.
+# `hull compute build` needs a clang that can target wasm32. Where the host
+# has none there is nothing here to measure, and the suite was reporting a
+# fact about the host as a FAILURE ("hull compute build: clang not found").
+# The header assertion above needs no toolchain and still runs, so the skip
+# starts here rather than at the top of the file.
+if ! hull_have_clang; then
+    skip "spanlist compile + run (no clang with wasm32 on this host)"
+    hull_clang_skip_note
+    echo "spans-multi: ${PASS}p ${FAIL}f"
+    [ "$FAIL" -eq 0 ]
+    exit $?
+fi
 if ( cd "$TMP/app" && "$HULL" compute build spanlist ) >"$TMP/build.log" 2>&1 && [ -f "$TMP/app/compute/spanlist.wasm" ]; then
     pass "spanlist compiles to interpreter WASM (hull compute build)"
 else
