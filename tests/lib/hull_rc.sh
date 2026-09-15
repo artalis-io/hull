@@ -129,3 +129,29 @@ hull_run() {
     case "$_raw" in ''|*[!0-9]*) echo 127; return 0 ;; esac
     echo $(( _raw >> 8 ))
 }
+
+# hull_run2 OUTFILE ERRFILE CMD [ARGS...] -> the REAL exit status, with stdout
+# and stderr kept SEPARATE.
+#
+# hull_run merges them, which is right for "show me what happened" but wrong
+# where a suite asserts that stdout is EMPTY while a message goes to stderr -
+# a usage error must not pollute stdout, and merging would make that
+# unfalsifiable. The Windows path already redirects the two to separate files;
+# this just stops throwing the distinction away.
+hull_run2() {
+    _o=$1; _e=$2; shift 2
+    if [ "${HULL_RC_SHIFT:-0}" != 1 ]; then
+        # See hull_rc: guarded so an inherited `set -e` cannot abort the caller.
+        _r=0
+        "$@" > "$_o" 2> "$_e" || _r=$?
+        echo "$_r"
+        return 0
+    fi
+    _t=$(mktemp -d)
+    _raw=$(hull_rc__pwsh "$_t/o" "$_t/e" "${HULL_RC_STDIN:-}" "$@")
+    tr -d "$(printf '\\r')" < "$_t/o" > "$_o" 2>/dev/null || : > "$_o"
+    tr -d "$(printf '\\r')" < "$_t/e" > "$_e" 2>/dev/null || : > "$_e"
+    rm -rf "$_t"
+    case "$_raw" in ''|*[!0-9]*) echo 127; return 0 ;; esac
+    echo $(( _raw >> 8 ))
+}
