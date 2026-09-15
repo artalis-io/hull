@@ -14,6 +14,15 @@
 set -e
 
 HULL=./build/hull
+
+# Eight sites below read an APE's exit status, which a
+# POSIX shell on Windows sees as 0 for every outcome (jart/cosmopolitan#1521)
+# - so `agent routes /nonexistent` refusing correctly was reported as
+# "expected exit 1, got 0". hull_run recovers the real one.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
+RC_TMP="${TMPDIR:-/tmp}/hull_agent_rc.$$"
+trap 'rm -f "$RC_TMP"' EXIT
 PASS=0
 FAIL=0
 RUNTIME=${RUNTIME:-all}
@@ -116,8 +125,8 @@ check_contains "webhooks has POST method"  "$OUT" '"method":"POST"'
 check_contains "webhooks has phase"        "$OUT" '"phase":'
 
 # Bad app dir
-EXIT_CODE=0
-OUT=$($HULL agent routes /nonexistent 2>&1) || EXIT_CODE=$?
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent routes /nonexistent)
+OUT=$(cat "$RC_TMP")
 check_exit "routes bad dir exit code" "$EXIT_CODE" "1"
 
 # ── db schema ─────────────────────────────────────────────────────────
@@ -153,14 +162,14 @@ check_contains "db query finds tasks"      "$OUT" '"tasks"'
 check_contains "db query count 1"          "$OUT" '"count":1'
 
 # Bad SQL
-EXIT_CODE=0
-OUT=$($HULL agent db query "INVALID SQL STATEMENT" examples/rest_api 2>&1) || EXIT_CODE=$?
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "INVALID SQL STATEMENT" examples/rest_api)
+OUT=$(cat "$RC_TMP")
 check_contains "db query bad SQL error"    "$OUT" '"error"'
 check_exit     "db query bad SQL exit"     "$EXIT_CODE" "1"
 
 # Missing SQL argument
-EXIT_CODE=0
-OUT=$($HULL agent db query 2>&1) || EXIT_CODE=$?
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query)
+OUT=$(cat "$RC_TMP")
 check_exit     "db query missing SQL exit" "$EXIT_CODE" "1"
 
 # ── request ───────────────────────────────────────────────────────────
@@ -202,8 +211,8 @@ fi
 rm -rf "$TMPDIR_REQ"
 
 # Connection refused (no server running on unlikely port)
-EXIT_CODE=0
-OUT=$($HULL agent request GET /health -p 39899 2>&1) || EXIT_CODE=$?
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent request GET /health -p 39899)
+OUT=$(cat "$RC_TMP")
 check_contains "request no server error"   "$OUT" '"error"'
 # The failure message retains the 127.0.0.1:<port> context (error-shape delta:
 # the former "cannot connect to ..." is now "request to 127.0.0.1:<port> failed").
@@ -284,16 +293,16 @@ TMPDIR_NOTEST=$(mktemp -d)
 cp "examples/hello/app.$APP_EXT" "$TMPDIR_NOTEST/app.$APP_EXT"
 cp -r examples/hello/migrations "$TMPDIR_NOTEST/" 2>/dev/null || true
 
-EXIT_CODE=0
-OUT=$($HULL agent test "$TMPDIR_NOTEST" 2>&1) || EXIT_CODE=$?
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent test "$TMPDIR_NOTEST")
+OUT=$(cat "$RC_TMP")
 check_contains "test no files error"       "$OUT" 'no test files'
 check_exit     "test no files exit"        "$EXIT_CODE" "1"
 
 rm -rf "$TMPDIR_NOTEST"
 
 # No entry point → error
-EXIT_CODE=0
-OUT=$($HULL agent test /nonexistent 2>&1) || EXIT_CODE=$?
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent test /nonexistent)
+OUT=$(cat "$RC_TMP")
 check_exit     "test bad dir exit"         "$EXIT_CODE" "1"
 
 # ── help / usage ──────────────────────────────────────────────────────
@@ -308,14 +317,14 @@ check_contains "help lists request"        "$OUT" 'request'
 check_contains "help lists test"           "$OUT" 'test'
 
 # No subcommand → usage + exit 1
-EXIT_CODE=0
-OUT=$($HULL agent 2>&1) || EXIT_CODE=$?
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent)
+OUT=$(cat "$RC_TMP")
 check_contains "no subcommand usage"       "$OUT" 'Usage'
 check_exit     "no subcommand exit"        "$EXIT_CODE" "1"
 
 # Unknown subcommand → error + exit 1
-EXIT_CODE=0
-OUT=$($HULL agent bogus 2>&1) || EXIT_CODE=$?
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent bogus)
+OUT=$(cat "$RC_TMP")
 check_contains "unknown subcommand msg"    "$OUT" "unknown subcommand"
 check_exit     "unknown subcommand exit"   "$EXIT_CODE" "1"
 
