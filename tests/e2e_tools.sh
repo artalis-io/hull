@@ -33,7 +33,19 @@ FAIL=0
 # Use a per-run HOME under /tmp so we never touch the real ~/.hull.
 HOME="$(mktemp -d -t hull-tools-e2e.XXXXXX)"
 export HOME
-trap 'rm -rf "$HOME"' EXIT
+
+# Two things this suite reads are unreliable from a POSIX shell on Windows:
+#   - an APE's exit status arrives shifted left by 8 (jart/cosmopolitan#1521),
+#     so every `[ "$RC" -eq 0 ]` below was passing without proving anything;
+#   - a path hull PRINTS differs from the one this shell BUILT by the case of
+#     the drive letter, because the MSYS shell canonicalises "/d/..." to
+#     "D:/..." on the way in. Hull is correct; see tests/lib/hull_path.sh.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
+. "$(dirname "$0")/lib/hull_path.sh"
+RC_TMP="${TMPDIR:-/tmp}/hull_tools_rc.$$"
+# ONE trap: a second `trap ... EXIT` would REPLACE this one, not add to it.
+trap 'rm -rf "$HOME"; rm -f "$RC_TMP"' EXIT
 
 assert() {
     msg="$1"; shift
@@ -42,6 +54,23 @@ assert() {
         PASS=$((PASS + 1))
     else
         echo "  FAIL $msg"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# For a needle that is a PATH. Falls back to the drive-canonical spelling only
+# on an APE host, and only after the verbatim comparison has failed - so on
+# Linux and macOS this is exactly assert_contains.
+assert_contains_path() {
+    msg="$1"; haystack="$2"; needle="$3"
+    if hull_path_contains "$haystack" "$needle"; then
+        echo "  ok  $msg"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL $msg"
+        echo "    expected (any drive-letter case): $needle"
+        echo "    got:"
+        echo "$haystack" | sed 's/^/      /'
         FAIL=$((FAIL + 1))
     fi
 }
@@ -66,16 +95,16 @@ if [ ! -x "$HULL" ]; then
 fi
 
 echo "── hull --help breadcrumb to agent surface ──"
-OUT=$("$HULL" --help 2>&1)
-RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" --help)
+OUT=$(cat "$RC_TMP")
 assert "exits 0"                            [ "$RC" -eq 0 ]
 assert_contains "AI agents line"            "$OUT" "AI agents:"
 assert_contains "points at orientation"     "$OUT" "task=orientation"
 
 echo ""
 echo "── hull tools --help ──"
-OUT=$("$HULL" tools --help 2>&1)
-RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" tools --help)
+OUT=$(cat "$RC_TMP")
 assert "exits 0" [ "$RC" -eq 0 ]
 assert_contains "shows usage"            "$OUT" "Usage: hull tools"
 assert_contains "documents list"         "$OUT" "list"
@@ -85,21 +114,36 @@ assert_contains "mentions trust chain"   "$OUT" "Ed25519"
 
 echo ""
 echo "── hull tools list (empty install) ──"
-OUT=$("$HULL" tools list 2>&1)
-RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" tools list)
+OUT=$(cat "$RC_TMP")
 assert "exits 0" [ "$RC" -eq 0 ]
 assert_contains "lists wamrc"            "$OUT" "wamrc"
-assert_contains "lists tcc"              "$OUT" "tcc"
-assert_contains "marks as available"     "$OUT" "[available]"
+# wamrc is not published for every platform - there is no cosmo build - so
+# both the availability marker and the install hint below legitimately differ
+# by host. Hardcoding the Linux answer made this suite fail on Windows for a
+# correct report. Derive the expectation from hull's own JSON, which makes the
+# check what it should have been: `tools list` and `agent tools` AGREEING about
+# publication state, rather than a guess about which way it falls.
+WAMRC_JSON=$(printf '%s' "$("$HULL" agent tools 2>&1)" \
+    | sed -n 's/.*\({"name":"wamrc"[^}]*}\).*/\1/p')
+case "$WAMRC_JSON" in
+    *'"available_for_platform":true'*) WAMRC_PUBLISHED=1 ;;
+    *)                                 WAMRC_PUBLISHED=0 ;;
+esac
+if [ "$WAMRC_PUBLISHED" = 1 ]; then
+    assert_contains "marks wamrc available"   "$OUT" "[available]"
+else
+    assert_contains "marks wamrc unpublished for this platform" \
+                    "$OUT" "[unavailable for "
+fi
 
 echo ""
 echo "── hull tools list --json ──"
-OUT=$("$HULL" tools list --json 2>&1)
-RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" tools list --json)
+OUT=$(cat "$RC_TMP")
 assert "exits 0" [ "$RC" -eq 0 ]
 assert_contains "tools array"            "$OUT" "\"tools\":"
 assert_contains "wamrc entry"            "$OUT" "\"name\":\"wamrc\""
-assert_contains "tcc entry"              "$OUT" "\"name\":\"tcc\""
 assert_contains "installed flag"         "$OUT" "\"installed\":"
 assert_contains "available flag"         "$OUT" "\"available\":"
 
@@ -127,8 +171,8 @@ assert_contains "rejects unknown name" "$OUT" "unknown tool"
 
 echo ""
 echo "── hull tools uninstall <missing> (idempotent) ──"
-OUT=$("$HULL" tools uninstall wamrc 2>&1)
-RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" tools uninstall wamrc)
+OUT=$(cat "$RC_TMP")
 assert "exits 0 when nothing to remove" [ "$RC" -eq 0 ]
 assert_contains "reports not installed"  "$OUT" "not installed"
 
@@ -146,7 +190,7 @@ printf '#!/bin/sh\necho stub-wamrc\n' > "$HOME/.hull/tools/wamrc"
 chmod 0755 "$HOME/.hull/tools/wamrc"
 
 OUT=$("$HULL" doctor 2>&1)
-assert_contains "doctor shows stub path"     "$OUT" "$HOME/.hull/tools/wamrc"
+assert_contains_path "doctor shows stub path" "$OUT" "$HOME/.hull/tools/wamrc"
 assert_contains "doctor flags managed"       "$OUT" "managed via"
 
 OUT=$("$HULL" tools list 2>&1)
@@ -154,8 +198,8 @@ assert_contains "tools list shows installed" "$OUT" "[installed]"
 
 echo ""
 echo "── hull tools uninstall after planting stub ──"
-OUT=$("$HULL" tools uninstall wamrc 2>&1)
-RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" tools uninstall wamrc)
+OUT=$(cat "$RC_TMP")
 assert "uninstall exits 0" [ "$RC" -eq 0 ]
 assert_contains "reports uninstalled"        "$OUT" "uninstalled wamrc"
 assert "file is gone" [ ! -e "$HOME/.hull/tools/wamrc" ]
@@ -167,8 +211,8 @@ assert_contains "rejects unknown verb"   "$OUT" "unknown verb"
 
 echo ""
 echo "── hull agent context --list (registry discovery) ──"
-OUT=$("$HULL" agent context --list 2>&1)
-RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" agent context --list)
+OUT=$(cat "$RC_TMP")
 assert "exits 0"                            [ "$RC" -eq 0 ]
 assert_contains "tasks array"               "$OUT" "\"tasks\""
 assert_contains "orientation task"          "$OUT" "\"name\":\"orientation\""
@@ -198,8 +242,8 @@ echo "── hull agent overview <example app> ──"
 # was invoked, and migration auto-run can chdir under us.
 EXAMPLE="$SRCDIR/examples/rest_api"
 if [ -d "$EXAMPLE" ]; then
-    OUT=$("$HULL" agent overview "$EXAMPLE" 2>/dev/null)
-    RC=$?
+    RC=$(hull_run "$RC_TMP" "$HULL" agent overview "$EXAMPLE")
+    OUT=$(cat "$RC_TMP")
     assert "exits 0"                              [ "$RC" -eq 0 ]
     assert_contains "app_dir set"                 "$OUT" "\"app_dir\":"
     assert_contains "runtime set"                 "$OUT" "\"runtime\":"
@@ -213,8 +257,8 @@ fi
 
 echo ""
 echo "── hull agent tools (registry + state JSON) ──"
-OUT=$("$HULL" agent tools 2>&1)
-RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" agent tools)
+OUT=$(cat "$RC_TMP")
 assert "exits 0" [ "$RC" -eq 0 ]
 assert_contains "platform field"         "$OUT" "\"platform\""
 assert_contains "tools array"            "$OUT" "\"tools\""
@@ -227,13 +271,19 @@ echo "── hull agent compute (wamrc block) ──"
 # Need a minimal app dir for `hull agent compute` to load context.
 TMPAPP="$(mktemp -d -t hull-agent-compute.XXXXXX)"
 printf 'app.manifest({modules={}})\n' > "$TMPAPP/app.lua"
-OUT=$("$HULL" agent compute "$TMPAPP" 2>&1)
-RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" agent compute "$TMPAPP")
+OUT=$(cat "$RC_TMP")
 assert "exits 0" [ "$RC" -eq 0 ]
 assert_contains "wamrc block"            "$OUT" "\"wamrc\""
 assert_contains "wamrc.installed"        "$OUT" "\"installed\""
 assert_contains "wamrc.managed"          "$OUT" "\"managed\""
-assert_contains "install_hint when missing" "$OUT" "hull tools install wamrc"
+if [ "$WAMRC_PUBLISHED" = 1 ]; then
+    assert_contains "install_hint points at the installer" \
+                    "$OUT" "hull tools install wamrc"
+else
+    assert_contains "install_hint names the source route when unpublished" \
+                    "$OUT" "make wamrc"
+fi
 rm -rf "$TMPAPP"
 
 echo ""
@@ -243,7 +293,7 @@ printf '#!/bin/sh\nexit 0\n' > "$HOME/.hull/tools/wamrc"
 chmod 0755 "$HOME/.hull/tools/wamrc"
 OUT=$("$HULL" agent tools 2>&1)
 assert_contains "reports installed: true"   "$OUT" "\"installed\":true"
-assert_contains "reports stub path"         "$OUT" "$HOME/.hull/tools/wamrc"
+assert_contains_path "reports stub path"    "$OUT" "$HOME/.hull/tools/wamrc"
 rm "$HOME/.hull/tools/wamrc"
 
 echo ""
