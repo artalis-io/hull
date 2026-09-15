@@ -23,15 +23,33 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
+# hull_is_ape FILE -> 0 if FILE is a Cosmopolitan APE.
+#
+# Reads the magic directly rather than shelling out to file(1). On Windows,
+# file(1) reports an APE as "DOS/MBR boot sector" - no mention of cosmo or APE -
+# so a probe written as `case "$(file "$X") in *cosmo*|*APE*)` silently never
+# fires and a cosmo-EXEMPT suite runs anyway. #501 found this and fixed the five
+# feature-* suites by inlining the magic check; e2e_build_flavor carried the
+# same probe and was missed, which is why it executed on a Windows runner and
+# then failed building an app that hull cannot link there.
+#
+# This is that check, factored out, so the next suite that needs it does not
+# have to rediscover why file(1) will not do.
+hull_is_ape() {
+    case "$(head -c 6 "${1:-}" 2>/dev/null || true)" in
+        MZqFpD|jartsr) return 0 ;;
+    esac
+    return 1
+}
+
 # Take the Windows path only when a PowerShell exists AND the binary really is
 # an APE. Probing both means a Linux host with pwsh installed is unaffected, and
 # a native Windows build pays nothing.
 hull_rc_init() {
     HULL_RC_SHIFT=0
     command -v powershell.exe >/dev/null 2>&1 || return 0
-    case "$(head -c 6 "${1:-}" 2>/dev/null || true)" in
-        MZqFpD|jartsr) HULL_RC_SHIFT=1 ;;
-    esac
+    hull_is_ape "${1:-}" && HULL_RC_SHIFT=1
+    return 0
 }
 
 # Internal: run via Start-Process, print the raw (shifted) status.
@@ -107,6 +125,32 @@ hull_run() {
     _t=$(mktemp -d)
     _raw=$(hull_rc__pwsh "$_t/o" "$_t/e" "${HULL_RC_STDIN:-}" "$@")
     cat "$_t/o" "$_t/e" 2>/dev/null | tr -d "$(printf '\\r')" > "$_out"
+    rm -rf "$_t"
+    case "$_raw" in ''|*[!0-9]*) echo 127; return 0 ;; esac
+    echo $(( _raw >> 8 ))
+}
+
+# hull_run2 OUTFILE ERRFILE CMD [ARGS...] -> the REAL exit status, with stdout
+# and stderr kept SEPARATE.
+#
+# hull_run merges them, which is right for "show me what happened" but wrong
+# where a suite asserts that stdout is EMPTY while a message goes to stderr -
+# a usage error must not pollute stdout, and merging would make that
+# unfalsifiable. The Windows path already redirects the two to separate files;
+# this just stops throwing the distinction away.
+hull_run2() {
+    _o=$1; _e=$2; shift 2
+    if [ "${HULL_RC_SHIFT:-0}" != 1 ]; then
+        # See hull_rc: guarded so an inherited `set -e` cannot abort the caller.
+        _r=0
+        "$@" > "$_o" 2> "$_e" || _r=$?
+        echo "$_r"
+        return 0
+    fi
+    _t=$(mktemp -d)
+    _raw=$(hull_rc__pwsh "$_t/o" "$_t/e" "${HULL_RC_STDIN:-}" "$@")
+    tr -d "$(printf '\\r')" < "$_t/o" > "$_o" 2>/dev/null || : > "$_o"
+    tr -d "$(printf '\\r')" < "$_t/e" > "$_e" 2>/dev/null || : > "$_e"
     rm -rf "$_t"
     case "$_raw" in ''|*[!0-9]*) echo 127; return 0 ;; esac
     echo $(( _raw >> 8 ))

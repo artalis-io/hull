@@ -36,10 +36,29 @@ if [ ! -x "$HULL" ]; then
 fi
 HULL=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
 
+# Recovering hull's REAL exit status: on Windows an APE reports it shifted and a
+# POSIX shell reads 0 for every outcome (jart/cosmopolitan#1521). Every check
+# below that turns on whether hull succeeded was therefore answering a question
+# it could not see - which is how check 1 came to report "unexpectedly
+# SUCCEEDED" for a build that had in fact failed exactly as intended.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
+
 # Canonicalize the work root: on macOS mktemp lives under /tmp -> /private/tmp
 # and the seatbelt profile is given one path while fs access uses the other.
 WORK=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$WORK"' EXIT
+
+# A hull that cannot link an app fails `hull build` at the missing bundled
+# app_main.o (or platform library) BEFORE manifest extraction is attempted -
+# instrumenting the extractor on Windows confirmed it is not called at all in
+# that configuration. Every check below that drives a full `hull build` then
+# asserts on a code path that did not run, so it is skipped rather than allowed
+# to pass or fail for an unrelated reason. Checks that drive the extraction
+# CHILD directly need no such guard: the child does not link anything.
+unlinkable() {
+    grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o" "$1" 2>/dev/null
+}
 
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "PASS: $1"; }
@@ -95,18 +114,49 @@ while [ "$i" -lt "$N" ]; do
     done
     if wait "$bp"; then rc=0; else rc=$?; fi
 
-    # The whole point of the issue: 134 = SIGABRT reaching the parent. Any
-    # >=128 status is a signal death and equally disqualifying.
-    [ "$rc" -lt 128 ] || fail "run $i died on a signal (exit $rc) - teardown abort reached the parent"
-    [ "$rc" -ne 0 ]   || fail "run $i unexpectedly SUCCEEDED (a PENDING module must fail extraction)"
+    # Two contracts, and they do not need the same things.
+    #
+    # Terminating, and producing no binary, is status-free: it holds on every
+    # host and is asserted unconditionally. That is the half that catches a
+    # build which wrongly succeeded into an artefact.
     [ ! -f "$repro/out" ] || fail "run $i produced a binary from a failed extraction"
-done
-pass "self-referential-microtask app fails cleanly $N/$N times (no signal death, no binary)"
 
-# The failure has to be legible, not a bare status.
-grep -qi 'manifest' "$WORK/r.log" \
-    || fail "the failure did not mention manifest extraction: $(cat "$WORK/r.log")"
-pass "the clean failure names manifest extraction"
+    # HOW it failed is the #427 contract, and it is readable only from a REAL
+    # status. This build is backgrounded so the hang guard above can watch it,
+    # and a backgrounded build cannot go through hull_rc without giving that up
+    # - so on a shell that cannot see an APE's status, this half is skipped
+    # rather than asserted against a 0 that means nothing.
+    if [ "${HULL_RC_SHIFT:-0}" = 1 ]; then
+        SKIPPED_SIGNAL_CHECK=1
+    elif unlinkable "$WORK/r.log"; then
+        SKIPPED_SIGNAL_CHECK=2
+    else
+        # The whole point of the issue: 134 = SIGABRT reaching the parent. Any
+        # >=128 status is a signal death and equally disqualifying.
+        [ "$rc" -lt 128 ] || fail "run $i died on a signal (exit $rc) - teardown abort reached the parent"
+        [ "$rc" -ne 0 ]   || fail "run $i unexpectedly SUCCEEDED (a PENDING module must fail extraction)"
+    fi
+done
+# A skip here must not read as "check 1 did nothing": the status-free half ran
+# on every one of the N runs, and saying so is what keeps the skip honest.
+case "${SKIPPED_SIGNAL_CHECK:-0}" in
+  1) echo "SKIP: signal-death check (an APE's exit status is unreadable from this shell)"
+     pass "self-referential-microtask app terminates and leaves no binary $N/$N times" ;;
+  2) echo "SKIP: signal-death check (this hull cannot link an app here)"
+     pass "self-referential-microtask app terminates and leaves no binary $N/$N times" ;;
+  *) pass "self-referential-microtask app fails cleanly $N/$N times (no signal death, no binary)" ;;
+esac
+
+# The failure has to be legible, not a bare status. On a hull that cannot link
+# an app the build stops before extraction, so there is no extraction failure
+# for it to name and this check would only be reporting that.
+if unlinkable "$WORK/r.log"; then
+    echo "SKIP: failure-legibility check (this hull cannot link an app here)"
+else
+    grep -qi 'manifest' "$WORK/r.log" \
+        || fail "the failure did not mention manifest extraction: $(cat "$WORK/r.log")"
+    pass "the clean failure names manifest extraction"
+fi
 
 # ── 2. The child protocol round-trips (proves isolation is really engaged) ──
 res="$WORK/result"
@@ -118,7 +168,7 @@ import { app } from "hull:app";
 app.manifest({ modules: ["hull/json@1"] });
 JS
 rm -f "$res"
-"$HULL" __extract-manifest-js "$okapp/app.js" "$res" >/dev/null 2>&1 \
+[ "$(hull_rc "$HULL" __extract-manifest-js "$okapp/app.js" "$res")" = 0 ] \
     || fail "child returned non-zero for a valid manifest app"
 [ -f "$res" ] || fail "child wrote no result file"
 head -c 14 "$res" | grep -q '^HULLMANIFEST1' \
@@ -133,7 +183,7 @@ pass "child protocol: 'ok' carries the manifest JSON back"
 noapp="$WORK/noapp"; mkdir -p "$noapp"
 printf 'const x = 1;\nexport { x };\n' > "$noapp/app.js"
 rm -f "$res"
-"$HULL" __extract-manifest-js "$noapp/app.js" "$res" >/dev/null 2>&1 \
+[ "$(hull_rc "$HULL" __extract-manifest-js "$noapp/app.js" "$res")" = 0 ] \
     || fail "child returned non-zero for a manifest-less app"
 head -1 "$res" | grep -q 'none$' \
     || fail "expected a 'none' status, got: $(head -1 "$res")"
@@ -143,7 +193,7 @@ pass "child protocol: 'none' distinguishes a manifest-less app from a failure"
 badapp="$WORK/badapp"; mkdir -p "$badapp"
 printf 'this is not ( valid javascript\n' > "$badapp/app.js"
 rm -f "$res"
-if "$HULL" __extract-manifest-js "$badapp/app.js" "$res" >/dev/null 2>&1; then
+if [ "$(hull_rc "$HULL" __extract-manifest-js "$badapp/app.js" "$res")" = 0 ]; then
     fail "child returned zero for an unparseable app"
 fi
 head -1 "$res" | grep -q 'err$' \
@@ -163,7 +213,7 @@ pass "child protocol: 'err' reports a failure with a message"
 # the invariant it rests on: a child that completes always REPLACES the marker,
 # so a bare marker unambiguously means "died mid-run".
 rm -f "$WORK/probe.res"
-"$HULL" __extract-manifest-js "$okapp/app.js" "$WORK/probe.res" >/dev/null 2>&1 \
+[ "$(hull_rc "$HULL" __extract-manifest-js "$okapp/app.js" "$WORK/probe.res")" = 0 ] \
     || fail "child failed on a re-run of the valid app"
 if head -1 "$WORK/probe.res" | grep -q 'start$'; then
     fail "child left the start marker in place - the real result never landed"
@@ -171,17 +221,23 @@ fi
 pass "child protocol: the entry marker is replaced by the real result"
 
 # ── 3. The ordinary paths still build ────────────────────────────────────
+# Each build's output is CAPTURED, not just consulted on failure: on a hull
+# that cannot link an app the failure is about app_main.o, not about the
+# isolated child, and the suite has to be able to tell those apart.
 build_ok() {
     d="$1"; what="$2"
     rm -f "$d/out"
-    "$HULL" build "$d" -o "$d/out" --no-verify-platform >"$WORK/b.log" 2>&1 \
-        || fail "$what failed to build: $(tail -5 "$WORK/b.log")"
+    _rc=$(hull_run "$WORK/b.log" "$HULL" build "$d" -o "$d/out" --no-verify-platform)
+    if unlinkable "$WORK/b.log"; then
+        echo "SKIP: $what (this hull cannot link an app here)"
+        return 0
+    fi
+    [ "$_rc" = 0 ] || fail "$what failed to build: $(tail -5 "$WORK/b.log")"
     [ -f "$d/out" ] || fail "$what built but produced no binary"
+    pass "$what still builds through the isolated child"
 }
 build_ok "$okapp" "a JS app with a manifest"
-pass "a JS app with a manifest still builds through the isolated child"
 build_ok "$noapp" "a manifest-less JS app"
-pass "a manifest-less JS app still builds through the isolated child"
 
 # 4. A real `hull build` actually spawns the child.
 #
@@ -195,13 +251,21 @@ pass "a manifest-less JS app still builds through the isolated child"
 # The parent logs its decision at debug level, so --verbose makes the choice
 # observable from outside.
 rm -f "$okapp/out"
-"$HULL" build --verbose "$okapp" -o "$okapp/out" --no-verify-platform >"$WORK/v.log" 2>&1 \
-    || fail "verbose build of a valid JS app failed: $(tail -5 "$WORK/v.log")"
-if grep -q "running in-process" "$WORK/v.log"; then
-    fail "a real build fell back to in-process extraction instead of isolating"
+_vrc=$(hull_run "$WORK/v.log" "$HULL" build --verbose "$okapp" -o "$okapp/out" --no-verify-platform)
+# On a hull that cannot link an app the build stops before extraction, so it
+# neither isolates nor falls back - there is no decision to observe, and both
+# greps below would be reporting that absence rather than a regression.
+if unlinkable "$WORK/v.log"; then
+    echo "SKIP: isolated-child spawn check (this hull cannot link an app here)"
+else
+    [ "$_vrc" = 0 ] \
+        || fail "verbose build of a valid JS app failed: $(tail -5 "$WORK/v.log")"
+    if grep -q "running in-process" "$WORK/v.log"; then
+        fail "a real build fell back to in-process extraction instead of isolating"
+    fi
+    grep -q "isolating in child" "$WORK/v.log" \
+        || fail "a real build did not report spawning the extraction child"
+    pass "a real hull build spawns the isolated extraction child"
 fi
-grep -q "isolating in child" "$WORK/v.log" \
-    || fail "a real build did not report spawning the extraction child"
-pass "a real hull build spawns the isolated extraction child"
 
 echo "e2e_manifest_extract_isolation: ALL PASS"
