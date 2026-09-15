@@ -440,11 +440,19 @@ local helper = require("./helper")          -- approved local-module import
 ;(load or loadfile or loadstring or dofile)("return 1")  -- nil after removal -> error
 app.manifest({ modules = { "hull/http-server@1" } })
 LUA
-if "$HULL" build "$lrec" -o "$lrec/out" --no-verify-platform >/dev/null 2>&1; then
-    fail "a Lua loader was recoverable after an approved import"
+lrecrc=$(hull_run "$HULL_RC_TMP" "$HULL" build "$lrec" -o "$lrec/out" --no-verify-platform)
+lrecout=$(cat "$HULL_RC_TMP")
+# Same two reasons as the load() boundary above: an `if "$HULL" build` reads 0
+# for every outcome on Windows, and on a hull that cannot link an app the build
+# fails for a reason unrelated to loader recovery - which would satisfy this
+# assertion vacuously rather than prove the loaders stayed removed.
+if echo "$lrecout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: loader-recovery extraction boundary (this hull cannot link an app here)"
+else
+    [ "$lrecrc" != 0 ] || fail "a Lua loader was recoverable after an approved import: $lrecout"
+    [ -f "$lrec/out" ] && fail "Lua dyncode-recover app produced a binary"
+    pass "Lua load/loadfile/loadstring/dofile stay removed after importing a helper"
 fi
-[ -f "$lrec/out" ] && fail "Lua dyncode-recover app produced a binary"
-pass "Lua load/loadfile/loadstring/dofile stay removed after importing a helper"
 
 # JS: importing a permitted helper must not restore eval/Function. QuickJS
 # module top-level throws are DEFERRED (promise), so observe SYNCHRONOUSLY via
