@@ -1280,13 +1280,26 @@ e2e-htmx-playwright: $(BUILDDIR)/hull
 # path - static files, templates, migrations, stdlib widget assets
 # all loaded from the binary, not the filesystem. Needs hull built
 # with EMBED_PLATFORM=1 (the make-rule below ensures it).
+# A hull with no embedded platform cannot link the standalone binaries this
+# suite drives. Whether that is an ERROR or a SKIP depends on what the caller
+# asked for, and EMBED_PLATFORM already says: set means they wanted an embedded
+# hull and did not get one (a real misbuild - ci.yml sets it for this job), unset
+# means they never asked and this host simply cannot run the suite.
+#
+# Without the distinction it is one or the other wrongly: a hard failure makes a
+# Windows probe red for an unsupported configuration, and an unconditional skip
+# would let the CI job go green while testing nothing.
 e2e-htmx-playwright-build: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
-	@if ! $(BUILDDIR)/hull doctor --json 2>/dev/null | grep -q '"hull_build":"ready"'; then \
-	  echo "e2e-htmx-playwright-build: hull built without embedded platform."; \
-	  echo "Run: make platform && make EMBED_PLATFORM=1"; \
-	  exit 1; \
+	@if $(BUILDDIR)/hull doctor --json 2>/dev/null | grep -q '"hull_build":"ready"'; then \
+	    MODE=build sh tests/e2e_htmx_playwright.sh; \
+	elif [ -n "$(EMBED_PLATFORM)" ]; then \
+	    echo "e2e-htmx-playwright-build: EMBED_PLATFORM is set but this hull did not embed a platform."; \
+	    echo "  That is a failed build, not an unsupported host. Run: make platform && make EMBED_PLATFORM=1"; \
+	    exit 1; \
+	else \
+	    echo "SKIP: e2e-htmx-playwright-build (this hull has no embedded platform, so it cannot link an app)"; \
+	    echo "      Build one with: make platform && make EMBED_PLATFORM=1"; \
 	fi
-	MODE=build sh tests/e2e_htmx_playwright.sh
 
 e2e-jwt-asym: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_jwt_asym.sh
