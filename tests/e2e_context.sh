@@ -19,6 +19,15 @@ if [ ! -x "$HULL" ]; then
     exit 1
 fi
 
+# The one exit-code assertion below needs hull's REAL status. On Windows an APE
+# reports it shifted left by 8 and a POSIX shell keeps the low byte, so `$?` is 0
+# for every outcome (jart/cosmopolitan#1521) - a usage error then reads as a
+# success and the check reports a defect that is not there.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
+RC_TMP="${TMPDIR:-/tmp}/hull_context_rc.$$"
+trap 'rm -f "$RC_TMP"' EXIT
+
 fail() {
     echo "  FAIL: $1"
     FAIL=$((FAIL + 1))
@@ -106,8 +115,8 @@ OUT=$($HULL agent context --task=auth --level=bogus 2>&1) || EXIT_CODE=$?
 check_contains "invalid level error"   "$OUT" '"error"'
 
 # Missing task
-EXIT_CODE=0
-OUT=$($HULL agent context 2>&1) || EXIT_CODE=$?
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent context)
+OUT=$(cat "$RC_TMP")
 check_exit "missing task exit" "$EXIT_CODE" "1"
 
 # ── JSON validity (basic check) ─────────────────────────────────────────
