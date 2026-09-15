@@ -101,11 +101,12 @@ if [ "$rc" = "1" ] && echo "$out" | grep -q "analyze.not_regular"; then
 else fail "non-regular target (rc=$rc, out=$out)"; fi
 rmdir "$APP/adir.lua"
 
-# ── Test 7: unreadable vs missing (skipped as root: perms are bypassed) ─
-if [ "$(id -u)" = "0" ]; then
-    pass "unreadable-vs-missing (skipped: running as root)"
+# ── Test 7: unreadable vs missing (needs a filesystem that can deny reads) ─
+printf 'x = 1\n' > "$APP/noread.lua"; chmod 000 "$APP/noread.lua"
+if ! is_unreadable "$APP/noread.lua"; then
+    chmod 644 "$APP/noread.lua" 2>/dev/null; rm -f "$APP/noread.lua"
+    echo "SKIP: unreadable-vs-missing (chmod 000 does not restrict reads here)"
 else
-    printf 'x = 1\n' > "$APP/noread.lua"; chmod 000 "$APP/noread.lua"
     rc=$(hull_run2 "$RC_OUT" "$RC_ERR" "$HULL" analyze "$APP" noread.lua gone.lua); out=$(cat "$RC_OUT")
     if [ "$rc" = "1" ] && echo "$out" | grep -q "noread.lua.*analyze.unreadable" \
        && echo "$out" | grep -q "gone.lua.*analyze.not_found"; then
@@ -126,15 +127,25 @@ mkdir -p "$TMP/sym/app"
 printf 'x = 1\n' > "$TMP/sym/outside.lua"
 printf 'app.main(function() return 0 end)\n' > "$TMP/sym/app/app.lua"
 ln -s "$TMP/sym/outside.lua" "$TMP/sym/app/link.lua"
+# `ln -s` without symlink privilege on Windows silently COPIES the target, so
+# the "outside" file ends up INSIDE the app root, resolves legitimately, and
+# there is no containment violation left to detect. The suite would report that
+# as containment BROKEN, which is the opposite of what happened.
+if [ -L "$TMP/sym/app/link.lua" ]; then SYMLINK_FIXTURE_OK=1; else SYMLINK_FIXTURE_OK=0; fi
 rc=$(cd "$TMP/sym" && hull_run2 "$RC_OUT" "$RC_ERR" "$HULL_ABS" analyze app link.lua); out=$(cat "$RC_OUT")
-if [ "$rc" = "1" ] && echo "$out" | grep -q "link.lua.*analyze\." && ! echo "$out" | grep -q "link.lua.*lua.syntax"; then
+if [ "$SYMLINK_FIXTURE_OK" = 0 ]; then
+    echo "SKIP: symlink containment (this shell's ln -s copied the file;"
+    echo "      no escaping symlink exists to reject - containment UNTESTED here)"
+elif [ "$rc" = "1" ] && echo "$out" | grep -q "link.lua.*analyze\." && ! echo "$out" | grep -q "link.lua.*lua.syntax"; then
     pass "symlink inside app → outside is rejected (containment holds), exit 1"
 else fail "symlink containment (rc=$rc, out=$out)"; fi
 
 # ── Test 10: symlinked app ROOT is supported (resolved via realpath) ──
 ln -s "$TMP/sym/app" "$TMP/sym/rootlink"
 rc=$(cd "$TMP/sym" && hull_run2 "$RC_OUT" "$RC_ERR" "$HULL_ABS" analyze rootlink); out=$(cat "$RC_OUT")
-if [ "$rc" = "0" ] && echo "$out" | grep -q "no issues"; then
+if [ ! -L "$TMP/sym/rootlink" ]; then
+    echo "SKIP: symlinked app root (ln -s copied the directory; nothing symlinked to resolve)"
+elif [ "$rc" = "0" ] && echo "$out" | grep -q "no issues"; then
     pass "symlinked app root supported → analyzed"
 else fail "symlinked root (rc=$rc, out=$out)"; fi
 
@@ -182,14 +193,18 @@ if [ "$rc" = "2" ] && [ -z "$out" ] && grep -q "unknown flag" "$TMP/err.txt"; th
 else fail "usage error (rc=$rc, out=[$out])"; fi
 
 # ── Test 16: unreadable NON-excluded discovered subdir → fail closed (exit 2) ─
-if [ "$(id -u)" = "0" ]; then
-    pass "unreadable subdir fail-closed (skipped: running as root)"
+# (needs a filesystem that can deny reads; see is_unreadable/dir_unreadable)
+UNR="$TMP/unreadable"
+mkdir -p "$UNR/sub"
+# The fixture must be WRITTEN before the chmod: where chmod 000 really works,
+# creating sub/ok.lua afterwards would fail.
+printf 'app.main(function() return 0 end)\n' > "$UNR/app.lua"
+printf 'x = 1\n' > "$UNR/sub/ok.lua"
+chmod 000 "$UNR/sub" 2>/dev/null || true
+if ! dir_unreadable "$UNR/sub"; then
+    chmod 755 "$UNR/sub" 2>/dev/null || true
+    echo "SKIP: unreadable subdir fail-closed (chmod 000 does not restrict reads here)"
 else
-    UNR="$TMP/unreadable"
-    mkdir -p "$UNR/sub"
-    printf 'app.main(function() return 0 end)\n' > "$UNR/app.lua"
-    printf 'x = 1\n' > "$UNR/sub/ok.lua"
-    chmod 000 "$UNR/sub"
     rc=$(hull_run2 "$RC_OUT" "$TMP/unr_err.txt" "$HULL" analyze "$UNR"); out=$(cat "$RC_OUT")
     chmod 755 "$UNR/sub"
     if [ "$rc" = "2" ] && [ -z "$out" ] && grep -q "discovery failed" "$TMP/unr_err.txt"; then
