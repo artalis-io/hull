@@ -137,9 +137,13 @@ while [ "$i" -lt "$N" ]; do
         [ "$rc" -ne 0 ]   || fail "run $i unexpectedly SUCCEEDED (a PENDING module must fail extraction)"
     fi
 done
+# A skip here must not read as "check 1 did nothing": the status-free half ran
+# on every one of the N runs, and saying so is what keeps the skip honest.
 case "${SKIPPED_SIGNAL_CHECK:-0}" in
-  1) echo "SKIP: signal-death check (an APE's exit status is unreadable from this shell)" ;;
-  2) echo "SKIP: signal-death check (this hull cannot link an app here)" ;;
+  1) echo "SKIP: signal-death check (an APE's exit status is unreadable from this shell)"
+     pass "self-referential-microtask app terminates and leaves no binary $N/$N times" ;;
+  2) echo "SKIP: signal-death check (this hull cannot link an app here)"
+     pass "self-referential-microtask app terminates and leaves no binary $N/$N times" ;;
   *) pass "self-referential-microtask app fails cleanly $N/$N times (no signal death, no binary)" ;;
 esac
 
