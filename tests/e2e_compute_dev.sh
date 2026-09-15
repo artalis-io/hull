@@ -67,6 +67,13 @@ case "$HULL" in
     *)  HULL_ABS="$(pwd)/$HULL" ;;
 esac
 
+# The two "should error" checks below read an APE's exit status, which a POSIX
+# shell on Windows sees as 0 for every outcome (jart/cosmopolitan#1521) - so
+# `hull compute new` correctly REFUSING an existing module, and an invalid
+# name, both read as success.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL_ABS"
+
 # ── hull compute new ────────────────────────────────────────────────
 
 echo ""
@@ -102,14 +109,14 @@ else
 fi
 
 # Idempotency / safety: re-running new on an existing module errors.
-if "$HULL_ABS" compute new score 2>/dev/null; then
+if [ "$(hull_rc "$HULL_ABS" compute new score)" = 0 ]; then
     fail "hull compute new on existing module should error"
 else
     pass "hull compute new on existing module errors (no clobber)"
 fi
 
 # Bad names rejected.
-if "$HULL_ABS" compute new 'bad name' 2>/dev/null; then
+if [ "$(hull_rc "$HULL_ABS" compute new 'bad name')" = 0 ]; then
     fail "hull compute new with invalid name should error"
 else
     pass "hull compute new rejects invalid name 'bad name'"
