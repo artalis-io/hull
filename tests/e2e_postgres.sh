@@ -38,6 +38,11 @@ cleanup() {
     [ -n "${SVR:-}" ] && kill "$SVR" 2>/dev/null || true
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     [ -n "${APPDIR:-}" ] && rm -rf "$APPDIR"
+    # Under `set -e` a FAILING last command in an EXIT trap replaces the
+    # script's own exit status: on the skip path APPDIR is unset, the test
+    # above is false, and `exit 0` was arriving as 1. Measured - and the
+    # guard keeps a real failure intact (exit 3 still reports 3).
+    return 0
 }
 trap cleanup EXIT
 
