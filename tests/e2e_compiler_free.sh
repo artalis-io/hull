@@ -48,9 +48,19 @@ nm_has()  { nm "$2" 2>/dev/null | grep -q -- "$1"; }
 str_eq()  { [ -n "$1" ] && [ "$1" = "$2" ]; }
 
 # --no-compiler is native-only (cosmo is dual-arch, unsupported in v1).
-case "$($HULL version 2>/dev/null || true)" in
-    *cosmo*|*Cosmo*) echo "SKIP: --no-compiler unsupported on cosmo/APE"; exit 0 ;;
-esac
+#
+# This matched `hull version` output against *cosmo*, which can NEVER match:
+# version.c prints "hull <version>" and nothing else - no platform string. So
+# the guard was dead from the day it was written, and on a Windows runner the
+# suite ran anyway and failed every native-toolchain assertion. Same shape as
+# the file(1) probe fixed in #510: a check asking a question its input cannot
+# answer. hull_is_ape reads the binary's magic, which cannot be reformatted
+# out from under it.
+. "$(dirname "$0")/lib/hull_rc.sh"
+if hull_is_ape "$HULL"; then
+    echo "SKIP: --no-compiler unsupported on cosmo/APE (dual-arch)"
+    exit 0
+fi
 
 WORKDIR="$(mktemp -d)"
 APP="$WORKDIR/hello"

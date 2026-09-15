@@ -64,6 +64,17 @@ find_lld() {
     return 1
 }
 
+# A COSMO hull links cosmo-format objects; a native lld driving a native cc
+# cannot produce them, so this whole suite is inapplicable there whatever lld
+# is installed. Checked BEFORE find_lld, because the presence of an lld is not
+# the question - installing one on the Windows runner (for the wasm32 compute
+# suites) is precisely what made this suite stop skipping and start failing.
+. "$(dirname "$0")/lib/hull_rc.sh"
+if hull_is_ape "$HULL"; then
+    echo "SKIP: a cosmo hull cannot link through a native lld (needs cosmo-format objects)"
+    exit 0
+fi
+
 LLD_BIN=$(find_lld) || { echo "SKIP: no system lld found (brew install lld / apt install lld)"; exit 0; }
 LLD_DIR=$(dirname "$LLD_BIN")
 echo "── using lld from: $LLD_DIR ──"
