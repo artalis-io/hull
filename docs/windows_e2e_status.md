@@ -27,7 +27,7 @@ The previous sweep (2026-09-13, before any fixes) was **58 ok / 34 FAILED /
 
 | suite | verdict | cause |
 |-------|---------|-------|
-| `e2e-agent` | FAILED | `hull agent request` cannot reach a dev server it believes it started (`failed (error 14)`). Undiagnosed. Its exit-status noise was removed separately, so this is now the only signal in the suite. |
+| `e2e-agent` | fixed | Was read as "cannot reach the dev server". It reached it fine - curl fetches `/health` immediately before. Keel's `error 14` is `KL_ERR_URL`, not a connect error: the shell rewrites the bare `/health` ARGUMENT into `C:/Program Files/Git/health` before hull runs, so the URL is malformed. Scoped `MSYS2_ARG_CONV_EXCL` for those calls; the error now names the URL it tried. |
 | `e2e-build` | FAILED | Undiagnosed. ~650s, so it needs a dispatch of its own. |
 | `e2e-cache-cosmo` | FAILED | Undiagnosed. Runs `make clean` + a full `EMBED_PLATFORM=cosmo` rebuild, so it MUST be probed alone - anything after it in the same job pays a from-scratch rebuild inside its own timeout. |
 | `e2e-compiler-free` | TIMEOUT | The `sh -c` injection below was what HUNG it; with that fixed it is a clean FAILED at 13s, and its dead cosmo guard (see cause 4) is why it ran at all. |
@@ -75,7 +75,7 @@ Each names its reason in its own output.
    not deny reads. Guard on the fixture, not on a proxy like `id -u`.
 4. **A guard that asks a question its input cannot answer.** This is the most
    dangerous class, because a broken guard reads exactly like a working one
-   until something makes the suite run. Four found so far, all independent:
+   until something makes the suite run. Five found so far, all independent:
 
    | guard | why it never fired |
    |-------|--------------------|
@@ -83,6 +83,7 @@ Each names its reason in its own output.
    | `case "$($HULL version)" in *cosmo*)` | `version.c` prints `hull <version>` and no platform string, so it could not match on ANY build |
    | `command -v docker` | docker EXISTS on a Windows host, it just serves Windows containers |
    | `command -v cc \|\| gcc \|\| clang` | premised on "a cosmo host has no native compiler", which stopped being true when one was installed |
+   | `[ -x "$DRIVE" ]` (PTY driver) | forkpty COMPILES under cosmo, so the driver builds and still cannot drive a terminal |
 
    The fix in every case was to ask about the thing itself rather than a proxy
    for it: `hull_is_ape` reads the binary's magic, `hull_docker_runs_linux` asks

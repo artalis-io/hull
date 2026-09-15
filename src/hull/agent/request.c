@@ -17,6 +17,7 @@
 
 #include <keel/allocator.h>    /* kl_allocator_default */
 #include <keel/clock.h>        /* kl_monotonic_ms: request elapsed timing */
+#include <keel/error.h>        /* kl_strerror: name the failure, not just its number */
 #include <keel/http_client.h>  /* kl_http_client_request (sync HTTP client) */
 
 int hl_agent_request(const char *method, const char *path, int port,
@@ -81,15 +82,24 @@ int hl_agent_request(const char *method, const char *path, int port,
                                     kh, nhdrs, body, body_len, &resp);
     long elapsed_ms = (long)(kl_monotonic_ms() - t0);
     if (rc != 0) {
-        /* Compatibility delta: the former raw-socket path emitted the
-         * connect-specific "cannot connect to 127.0.0.1:<port>". Keel's client
-         * folds connect/send/recv/parse into one rc, so the message is now the
-         * general "request to 127.0.0.1:<port> failed (error N)" - it retains
-         * the 127.0.0.1:<port> context and carries the KlError code. */
-        char err[160];
-        snprintf(err, sizeof(err),
-                 "request to 127.0.0.1:%d failed (error %d)",
-                 port, (int)resp.error);
+        /* Report the URL ACTUALLY REQUESTED and a named reason, not just the
+         * host:port we intended plus a bare number.
+         *
+         * The previous form was "request to 127.0.0.1:<port> failed (error N)",
+         * which names the one part that is rarely at fault and reads as a
+         * connection failure whatever went wrong. A real case: on Windows a
+         * POSIX shell rewrites a bare "/health" ARGUMENT into a filesystem path
+         * before hull runs, so the URL becomes
+         *     http://127.0.0.1:39890C:/Program Files/Git/health
+         * and Keel returns KL_ERR_URL (14). The old message blamed a host and
+         * port that were reachable - curl had just fetched /health from them -
+         * and hid the malformed URL that was the entire problem.
+         *
+         * kl_strerror gives the reason in words; the numeric code stays so an
+         * existing report or grep still resolves. */
+        char err[PATH_MAX + 256];
+        snprintf(err, sizeof(err), "request to %s failed: %s (error %d)",
+                 url, kl_strerror(resp.error), (int)resp.error);
         kl_http_client_response_free(&resp);
         return hl_agent_write_error(out, err);
     }
