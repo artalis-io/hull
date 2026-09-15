@@ -440,12 +440,22 @@ run_suite() {
     R_UNI=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload" \
         -F "file=@$TMPDIR_WORK/résumé文档📄.png" 2>&1) || UNI_RC=$?
     ID_UNI=$(printf '%s' "$R_UNI" | sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
+    UNI_SERVE_RC=0
     if [ -z "$ID_UNI" ]; then
         fail "$SUITE unicode upload failed" "curl rc=$UNI_RC resp: $R_UNI"
     else
-        curl -s -D "$TMPDIR_WORK/serve-uni-hdrs.txt" -o /dev/null \
-            "http://127.0.0.1:$PORT/serve/allow/$ID_UNI"
-        UNI_HDRS=$(cat "$TMPDIR_WORK/serve-uni-hdrs.txt")
+        # Guarded for the same reason as the upload above, and this is the one
+        # that was actually killing the suite: the upload SUCCEEDS here, so the
+        # graceful path added for it was never the path being taken.
+        curl -sS -D "$TMPDIR_WORK/serve-uni-hdrs.txt" -o /dev/null \
+            "http://127.0.0.1:$PORT/serve/allow/$ID_UNI" \
+            2>"$TMPDIR_WORK/serve-uni-err.txt" || UNI_SERVE_RC=$?
+    fi
+    if [ -n "$ID_UNI" ] && [ "$UNI_SERVE_RC" != 0 ]; then
+        fail "$SUITE unicode serve failed" \
+             "curl rc=$UNI_SERVE_RC $(cat "$TMPDIR_WORK/serve-uni-err.txt" 2>/dev/null)"
+    elif [ -n "$ID_UNI" ]; then
+        UNI_HDRS=$(cat "$TMPDIR_WORK/serve-uni-hdrs.txt" 2>/dev/null || true)
         # filename* should percent-encode every UTF-8 byte of the
         # non-ASCII chars. é=C3A9, 文=E68B87(actually E6 96 87),
         # 档=E6A1A3, 📄=F09F9384. Pattern check (relaxed - just verify
