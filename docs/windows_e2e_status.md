@@ -34,7 +34,7 @@ The previous sweep (2026-09-13, before any fixes) was **58 ok / 34 FAILED /
 | `e2e-compute` | FAILED | Dies on `Error 143` (SIGTERM) after its assertions pass. Undiagnosed. |
 | `e2e-feature-valkey` | FAILED | Probably the docker-cannot-run-linux-containers cause its sibling `e2e-valkey` had, but its log has not been read. |
 | `e2e-linker` | FAILED | **A regression.** See below. Now guarded on `hull_is_ape`: a cosmo hull cannot link through a native lld. |
-| `e2e-project-discovery` | FAILED | Undiagnosed. |
+| `e2e-project-discovery` | 3 of 66 | Down from 9 after the exit-status fixes. The three left all turn on a live `hull dev --agent` session and the `kill(pid,0)` liveness check binding a published generation to it: `sidecars linger after dev exit`, `live matching PID IS served`, `post-stop read is standalone`. Process-lifetime semantics, undiagnosed. NOT related to `e2e-agent`'s failure, which looked similar and was not. |
 | `e2e-project-discovery-lua` | FAILED | Undiagnosed. ~350s. |
 | `e2e-smtp` | TIMEOUT | Did not finish in 600s. The only TIMEOUT in the first sweep too. |
 | `e2e-smtp-link-seam` | FAILED | Regressed with `e2e-linker`, same root cause. |
