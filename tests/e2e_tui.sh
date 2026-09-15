@@ -17,6 +17,9 @@
 set -u
 
 HULL_BIN="${HULL_BIN:-build/hull}"
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL_BIN"
+TUI_RC_TMP="${TMPDIR:-/tmp}/hull_tui_rc.$$"
 PASS=0
 FAIL=0
 
@@ -24,13 +27,20 @@ pass() { PASS=$((PASS + 1)); printf "  \033[32mPASS\033[0m: %s\n" "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf "  \033[31mFAIL\033[0m: %s\n" "$1"; }
 
 # Assert that stderr contains `$3` and exit code is `$2`.
+#
+# The status goes through hull_run because every caller here runs hull, and on
+# Windows an APE reports its status shifted left by 8 - a POSIX shell reads 0
+# for every outcome (jart/cosmopolitan#1521). That is why these checks reported
+# "got rc=0, expected 1; output OK": the refusal happened, the message was
+# right, and only the code could not be seen. HULL_RC_STDIN reproduces the
+# `< /dev/null` these need (a tty-refusal test must not inherit a terminal).
 expect_failure_with() {
     label="$1"
     expected_rc="$2"
     needle="$3"
     shift 3
-    out=$("$@" 2>&1 < /dev/null)
-    rc=$?
+    rc=$(HULL_RC_STDIN=/dev/null hull_run "$TUI_RC_TMP" "$@")
+    out=$(cat "$TUI_RC_TMP")
     case "${out}" in
         *"${needle}"*)
             if [ "${rc}" = "${expected_rc}" ]; then
@@ -66,7 +76,11 @@ expect_failure_with \
 echo "--- manifest gating ---"
 
 TMP=$(mktemp -d)
-trap 'rm -rf "${TMP}"' EXIT
+# ONE trap for the whole suite. A second `trap ... EXIT` REPLACES this one
+# rather than adding to it, so the later DEV_TMP trap was silently dropping
+# both ${TMP} and the rc scratch file. DEV_TMP is registered here instead, and
+# is simply empty until that section sets it.
+trap 'rm -rf "${TMP}" "${DEV_TMP:-}" 2>/dev/null; rm -f "${TUI_RC_TMP}"' EXIT
 
 # 1. Declaring hull/tui without tui:true → resolver rejects.
 cat > "${TMP}/missing_flag.lua" <<'EOF'
@@ -229,7 +243,7 @@ else
     esac
 
     # Non-tty path: should print a helpful message and exit non-zero.
-    if "${HULL_BIN}" doctor --tui < /dev/null > /dev/null 2>&1; then
+    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" doctor --tui)" = 0 ]; then
         fail "hull doctor --tui without a tty should exit non-zero"
     else
         pass "hull doctor --tui without a tty exits with a helpful error"
@@ -279,12 +293,12 @@ else
     esac
 
     # ENOTTY rejection paths for both.
-    if "${HULL_BIN}" agent context --interactive < /dev/null > /dev/null 2>&1; then
+    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" agent context --interactive)" = 0 ]; then
         fail "hull agent context --interactive without a tty should exit non-zero"
     else
         pass "hull agent context --interactive without a tty exits with a helpful error"
     fi
-    if "${HULL_BIN}" agent errors --tui < /dev/null > /dev/null 2>&1; then
+    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" agent errors --tui)" = 0 ]; then
         fail "hull agent errors --tui without a tty should exit non-zero"
     else
         pass "hull agent errors --tui without a tty exits with a helpful error"
@@ -295,7 +309,6 @@ else
 
     # Spin up a tiny test app that logs every 100ms.
     DEV_TMP=$(mktemp -d 2>/dev/null || mktemp -d -t hulldev)
-    trap 'rm -rf "${DEV_TMP}"' EXIT
     cat > "${DEV_TMP}/app.lua" <<'APP'
 app.manifest({})
 app.main(function(ctx)
@@ -344,7 +357,7 @@ APP
             ;;
     esac
 
-    if "${HULL_BIN}" dev --tui "${DEV_TMP}/app.lua" < /dev/null > /dev/null 2>&1; then
+    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" dev --tui "${DEV_TMP}/app.lua")" = 0 ]; then
         fail "hull dev --tui without a tty should exit non-zero"
     else
         pass "hull dev --tui without a tty exits with a helpful error"
@@ -379,7 +392,7 @@ APP
             ;;
     esac
 
-    if "${HULL_BIN}" modules available --tui < /dev/null > /dev/null 2>&1; then
+    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" modules available --tui)" = 0 ]; then
         fail "hull modules available --tui without a tty should exit non-zero"
     else
         pass "hull modules available --tui without a tty exits with a helpful error"
@@ -463,7 +476,7 @@ SQL
     esac
     rm -rf "${MIG_DIR}"
 
-    if "${HULL_BIN}" migrate status --tui < /dev/null > /dev/null 2>&1; then
+    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" migrate status --tui)" = 0 ]; then
         fail "hull migrate status --tui without a tty should exit non-zero"
     else
         pass "hull migrate status --tui without a tty exits with a helpful error"
