@@ -38,6 +38,27 @@ function M.find_clang()
     end
 
     -- Fall back to system clang (works if wasm-ld is in PATH).
+    --
+    -- Resolve the NAME to a path before spawning it. A bare "clang" relies on
+    -- exec's own PATH search, which an APE cannot depend on for the PATH
+    -- Windows hands it - that is exactly why hl_driver_resolve_name exists for
+    -- cc / cosmocc / the linkers (src/hull/compiler.c: "exec's own PATH search
+    -- cannot be relied on for this on Windows"). This lookup never got the same
+    -- treatment, so `hull compute build` reported "clang not found" on a host
+    -- with clang on PATH, and every wasm32 compute suite failed there for a
+    -- reason that had nothing to do with the toolchain being absent.
+    --
+    -- tool.find_tool goes through hl_tools_lookup_path -> hl_host_find_in_path,
+    -- which knows the PATH forms a Windows host uses and the .exe/.com suffixes.
+    -- The spawn allowlist matches on the BASENAME, so an absolute path is still
+    -- admitted as "clang".
+    local resolved = tool.find_tool and tool.find_tool("clang")
+    if resolved and tool.spawn_read({resolved, "--version"}) then
+        return resolved
+    end
+
+    -- Last resort: let exec search. Keeps POSIX hosts working unchanged if
+    -- find_tool is unavailable or missed.
     local out = tool.spawn_read({"clang", "--version"})
     if out then return "clang" end
 

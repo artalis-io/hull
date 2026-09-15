@@ -301,6 +301,10 @@ jobs:
       #               out of hull's JSON. Without it they die at Error 127
       #               (measured: e2e-jobs, run 34721432268). Only this job
       #               runs e2e, so the app-build job does not need it.
+      # clang + wasm-ld come from UCRT64: the MSYS environment itself ships no
+      # clang, and /ucrt64/bin is NOT on the MSYS shell's PATH by default - the
+      # e2e probe step adds it. Without them the wasm32 compute suites have no
+      # toolchain and can only skip.
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
         with:
           msystem: MSYS
@@ -312,6 +316,8 @@ jobs:
             diffutils
             git
             python
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
 
       # cosmocc ships as a zip of APEs; SHA-pinned, same acquisition as the
       # sibling cosmocc workflows.
@@ -848,7 +854,14 @@ jobs:
         shell: msys2 {0}
         run: |
           set -uo pipefail
-          export PATH="$PATH:$PWD/cosmo/bin"
+          # /ucrt64/bin last, not first: MSYS-native make is required by this
+          # job (there is an explicit check for it above), and prepending a
+          # second bin directory is how that kind of requirement gets quietly
+          # shadowed. Appended, clang and wasm-ld are found only because
+          # nothing earlier on PATH provides them.
+          export PATH="$PATH:$PWD/cosmo/bin:/ucrt64/bin"
+          echo "clang:   $(command -v clang   || echo none)"
+          echo "wasm-ld: $(command -v wasm-ld || echo none)"
 
           # Put every suite's scratch directory on the runner's own temp disk.
           # 94 of the 99 e2e scripts call `mktemp -d`, which honours $TMPDIR,
