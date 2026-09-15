@@ -16,6 +16,8 @@
 # install hint, which we detect).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
+. "$(dirname "$0")/lib/hull_docker.sh"
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -72,7 +74,7 @@ start_server() {
         redis-server --port "$PORT" --save '' --appendonly no --daemonize no \
             >/tmp/hull_valkey_srv.log 2>&1 &
         SERVER_PID=$!
-    elif command -v docker >/dev/null 2>&1; then
+    elif hull_docker_runs_linux; then
         CONTAINER="hull-valkey-e2e-$$"
         if docker pull valkey/valkey:8 >/dev/null 2>&1; then
             ENGINE="valkey-docker"; IMG="valkey/valkey:8"
@@ -81,7 +83,7 @@ start_server() {
         fi
         docker run -d --name "$CONTAINER" -p "$PORT:6379" "$IMG" >/dev/null
     else
-        skip "no redis-server on PATH and no docker; cannot start a KV server"
+        skip "no redis-server on PATH, and no docker able to run a linux container; cannot start a KV server"
     fi
     wait_ready || fail "$ENGINE did not become ready on port $PORT"
     log "engine: $ENGINE (port $PORT)"

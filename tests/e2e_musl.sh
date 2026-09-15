@@ -21,6 +21,8 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
+. "$(dirname "$0")/lib/hull_docker.sh"
+
 set -u
 
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,8 +38,8 @@ fi
 
 # ── Not on musl: re-exec inside Alpine via Docker ──────────────────────────
 if [ "${HULL_MUSL_INNER:-0}" != "1" ] && [ "$ON_MUSL" != "1" ]; then
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "SKIP: host is not musl and docker is unavailable"
+    if ! hull_docker_runs_linux; then
+        echo "SKIP: host is not musl, and no docker able to run a linux container"
         exit 0
     fi
     echo "== e2e_musl: host is not musl - re-exec inside alpine:3.20 =="
