@@ -11,6 +11,15 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HULL="${HULL:-$ROOT/build/hull}"
+
+# Two checks below assert that hull FAILS. On Windows an APE reports its exit
+# status shifted left by 8 and a POSIX shell keeps the low byte, so `$?` is 0
+# for every outcome (jart/cosmopolitan#1521) - both of those checks then read a
+# correct refusal as a success and reported it as a defect. hull_rc recovers the
+# real status; off Windows it is a direct call and changes nothing.
+. "$ROOT/tests/lib/hull_rc.sh"
+hull_rc_init "$HULL"
+
 CANON_SPAN="$ROOT/templates/hull_span.h"    # canonical source of truth for hull_span.h
 PASS=0; FAIL=0
 pass() { PASS=$((PASS + 1)); printf "  \033[32mPASS\033[0m: %s\n" "$1"; }
@@ -76,8 +85,7 @@ fi
 before_compute="$(sha compute/foo/hull_compute.h)"
 before_span="$(sha compute/foo/hull_span.h)"
 mkdir -p compute/foo/hull_span.h.hull-tmp
-"$HULL" compute refresh-header foo >/dev/null 2>&1
-rc=$?
+rc=$(hull_rc "$HULL" compute refresh-header foo)
 rmdir compute/foo/hull_span.h.hull-tmp 2>/dev/null
 if [ "$rc" -ne 0 ]; then
     pass "refresh: fails non-zero when a header cannot be staged"
@@ -98,8 +106,8 @@ else
 fi
 
 # ── 6. new refuses to clobber an existing module (unchanged behavior) ────────
-"$HULL" compute new foo >/dev/null 2>&1
-if [ $? -ne 0 ]; then
+rc=$(hull_rc "$HULL" compute new foo)
+if [ "$rc" -ne 0 ]; then
     pass "new: refuses an existing module dir"
 else
     fail "new: should refuse an existing module dir"
