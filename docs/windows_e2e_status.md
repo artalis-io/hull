@@ -30,10 +30,10 @@ The previous sweep (2026-09-13, before any fixes) was **58 ok / 34 FAILED /
 | `e2e-agent` | FAILED | `hull agent request` cannot reach a dev server it believes it started (`failed (error 14)`). Undiagnosed. Its exit-status noise was removed separately, so this is now the only signal in the suite. |
 | `e2e-build` | FAILED | Undiagnosed. ~650s, so it needs a dispatch of its own. |
 | `e2e-cache-cosmo` | FAILED | Undiagnosed. Runs `make clean` + a full `EMBED_PLATFORM=cosmo` rebuild, so it MUST be probed alone - anything after it in the same job pays a from-scratch rebuild inside its own timeout. |
-| `e2e-compiler-free` | TIMEOUT | Was FAILED at 19s before clang was installed on the runner; now does not finish in 180s. |
+| `e2e-compiler-free` | TIMEOUT | The `sh -c` injection below was what HUNG it; with that fixed it is a clean FAILED at 13s, and its dead cosmo guard (see cause 4) is why it ran at all. |
 | `e2e-compute` | FAILED | Dies on `Error 143` (SIGTERM) after its assertions pass. Undiagnosed. |
 | `e2e-feature-valkey` | FAILED | Probably the docker-cannot-run-linux-containers cause its sibling `e2e-valkey` had, but its log has not been read. |
-| `e2e-linker` | FAILED | **A regression.** See below. |
+| `e2e-linker` | FAILED | **A regression.** See below. Now guarded on `hull_is_ape`: a cosmo hull cannot link through a native lld. |
 | `e2e-project-discovery` | FAILED | Undiagnosed. |
 | `e2e-project-discovery-lua` | FAILED | Undiagnosed. ~350s. |
 | `e2e-smtp` | TIMEOUT | Did not finish in 600s. The only TIMEOUT in the first sweep too. |
@@ -73,10 +73,25 @@ Each names its reason in its own output.
    symlink privilege, so a containment test finds no violation to detect and
    reports containment BROKEN - the inverse of what happened. `chmod 000` does
    not deny reads. Guard on the fixture, not on a proxy like `id -u`.
-4. **A probe that asks the wrong question.** `file(1)` calls an APE a "DOS/MBR
-   boot sector", so a `*cosmo*|*APE*` match never fires (`hull_is_ape` reads the
-   magic instead). `command -v docker` is not "docker can run a LINUX container"
-   (`hull_docker_runs_linux` asks `docker info` for the daemon's OSType).
+4. **A guard that asks a question its input cannot answer.** This is the most
+   dangerous class, because a broken guard reads exactly like a working one
+   until something makes the suite run. Four found so far, all independent:
+
+   | guard | why it never fired |
+   |-------|--------------------|
+   | `case "$(file "$HULL")" in *cosmo*\|*APE*)` | `file(1)` on Windows calls an APE a "DOS/MBR boot sector" |
+   | `case "$($HULL version)" in *cosmo*)` | `version.c` prints `hull <version>` and no platform string, so it could not match on ANY build |
+   | `command -v docker` | docker EXISTS on a Windows host, it just serves Windows containers |
+   | `command -v cc \|\| gcc \|\| clang` | premised on "a cosmo host has no native compiler", which stopped being true when one was installed |
+
+   The fix in every case was to ask about the thing itself rather than a proxy
+   for it: `hull_is_ape` reads the binary's magic, `hull_docker_runs_linux` asks
+   `docker info` for the daemon's OSType. A guard phrased as "is a tool
+   present" is nearly always the wrong question - what a suite needs to know is
+   whether the CONFIGURATION it requires exists.
+
+   The same lesson applies to fixtures (cause 3): build it, then check it came
+   out as required, rather than testing a precondition you believe implies it.
 
 ## The regression, and the lesson in it
 
