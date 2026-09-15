@@ -127,9 +127,25 @@ expect_failure_with \
 # we skip these instead of failing.
 
 DRIVE="${DRIVE:-build/e2e_tui_drive}"
-if [ ! -x "${DRIVE}" ]; then
+
+# Whether the driver EXISTS is a proxy for whether it WORKS, and on a cosmo
+# host the two come apart: forkpty compiles, the binary builds, and it cannot
+# actually drive a terminal - so all 24 interactive cases failed with "missing
+# expected output" rather than skipping. Probe the capability instead: drive a
+# trivial command through it and require the expected text back. One extra
+# process, and it cannot be satisfied by a driver that does not function.
+pty_driver_works() {
+    [ -x "${DRIVE}" ] || return 1
+    "${DRIVE}" "hull-pty-probe" "" -- printf 'hull-pty-probe' >/dev/null 2>&1
+}
+
+if ! pty_driver_works; then
     echo "--- interactive (skipped) ---"
-    echo "  (no PTY driver at ${DRIVE} - run \`make build/e2e_tui_drive\`)"
+    if [ -x "${DRIVE}" ]; then
+        echo "  (PTY driver at ${DRIVE} cannot drive a terminal on this host)"
+    else
+        echo "  (no PTY driver at ${DRIVE} - run \`make build/e2e_tui_drive\`)"
+    fi
 else
     echo "--- interactive picker (Lua) ---"
 
