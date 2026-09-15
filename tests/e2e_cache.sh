@@ -20,7 +20,39 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 # Hermetic HOME so we never touch the developer's real cache pool.
 TMPHOME=$(mktemp -d)
 export HOME="$TMPHOME"
-trap 'rm -rf "$TMPHOME"' EXIT
+
+# Exit statuses and printed PATHS are both unreliable when read from a POSIX
+# shell on Windows, and this suite asserts on a lot of each.
+#   - an APE reports its status shifted left by 8 (jart/cosmopolitan#1521), so
+#     `$?` is 0 for every outcome and every "should fail" check read a refusal
+#     as a success;
+#   - a path handed to an APE arrives converted ("/d/a/x" -> "D:/a/x", drive
+#     letter canonically UPPERCASE) and comes back as "/D/a/x", so hull's echo
+#     of a directory differs from the shell's own spelling of it by one
+#     character. Hull is correct here; see tests/lib/hull_path.sh.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
+. "$(dirname "$0")/lib/hull_path.sh"
+RC_TMP="${TMPDIR:-/tmp}/hull_cache_rc.$$"
+
+# hull with an isolated HOME, and a REAL exit status.
+#
+# The env-prefix form (`HOME=x "$HULL" ...`) cannot be handed to hull_run: it
+# would try to exec "HOME=x" as a program. Exporting around the call reaches
+# hull on both paths - a direct child inherits it, and on Windows powershell.exe
+# inherits the shell environment while Start-Process inherits powershell's.
+# Sets RC and OUT directly rather than echoing the status: `RC=$(hull_run_home
+# ...)` would run the function in a SUBSHELL, and the OUT it assigned would
+# never reach the caller.
+hull_run_home() {   # HOME_DIR ARGS...
+    _hrh_home=$1; shift
+    _hrh_saved=$HOME
+    HOME=$_hrh_home; export HOME
+    RC=$(hull_run "$RC_TMP" "$@")
+    HOME=$_hrh_saved; export HOME
+    OUT=$(cat "$RC_TMP")
+}
+trap 'rm -rf "$TMPHOME"; rm -f "$RC_TMP"' EXIT
 
 echo "=== E2E: hull cache (HOME=$TMPHOME) ==="
 
@@ -193,10 +225,11 @@ else
 fi
 
 OUT=$(HULL_CACHE_DIR="$ISOLATED" "$HULL" cache list 2>&1)
-case "$OUT" in
-    *"$ISOLATED"*) pass "list reports the override path" ;;
-    *) fail "list override path" "got: $OUT" ;;
-esac
+if hull_path_contains "$OUT" "$ISOLATED"; then
+    pass "list reports the override path"
+else
+    fail "list override path" "got: $OUT"
+fi
 case "$OUT" in
     *"HULL_CACHE_DIR override active"*)
         pass "list footer flags the override" ;;
@@ -255,10 +288,11 @@ case "$OUT" in
     *"HULL_CACHE_DIR active"*) pass "doctor surfaces active override" ;;
     *) fail "doctor override surface" ;;
 esac
-case "$OUT" in
-    *"$ISO2"*) pass "doctor reports override path" ;;
-    *) fail "doctor override path" ;;
-esac
+if hull_path_contains "$OUT" "$ISO2"; then
+    pass "doctor reports override path"
+else
+    fail "doctor override path" "got: $OUT"
+fi
 rm -rf "$ISO2"
 
 # ── 15. `hull inspect` surfaces the runtime-cache disclosure ─────
@@ -295,16 +329,17 @@ esac
 # 16. inspect under HULL_CACHE_DIR surfaces override line
 ISO3=$(mktemp -d)
 OUT=$(HULL_CACHE_DIR="$ISO3" "$HULL" inspect "$INSP_DIR" 2>&1)
+ISO3_ALT=$(hull_path_alt "$ISO3")
 case "$OUT" in
-    *"HULL_CACHE_DIR override active"*"$ISO3"*)
+    *"HULL_CACHE_DIR override active"*"$ISO3"*|*"HULL_CACHE_DIR override active"*"$ISO3_ALT"*)
         pass "inspect surfaces HULL_CACHE_DIR override" ;;
     *) fail "inspect override surface" "got: $OUT" ;;
 esac
-case "$OUT" in
-    *"$ISO3/lua-bytecode"*)
-        pass "inspect paths reflect override" ;;
-    *) fail "inspect override paths" ;;
-esac
+if hull_path_contains "$OUT" "$ISO3/lua-bytecode"; then
+    pass "inspect paths reflect override"
+else
+    fail "inspect override paths" "got: $OUT"
+fi
 rm -rf "$ISO3" "$INSP_DIR"
 
 # ── 17. Status column reflects per-cache opt-out ─────────────────
@@ -394,8 +429,8 @@ OUT=$("$HULL" cache prune --max-age=2592000 --dry-run 2>&1) || RC=$?
 [ "$RC" -eq 0 ] && pass "prune --max-age=2592000 (bare seconds) still accepted" \
                 || fail "bare-seconds max-age regressed"
 # Bad unit rejected with hint.
-RC=0
-OUT=$("$HULL" cache prune --max-age=30days --dry-run 2>&1) || RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" cache prune --max-age=30days --dry-run)
+OUT=$(cat "$RC_TMP")
 [ "$RC" -ne 0 ] && pass "prune rejects unknown duration unit" \
                 || fail "prune accepted bad unit"
 case "$OUT" in
@@ -455,8 +490,8 @@ fi
 # ── 22. `clear --json` shape ─────────────────────────────────────
 # Clear refuses without --yes even in JSON mode (refusal is a
 # process error, not a structured result).
-RC=0
-OUT=$("$HULL" cache clear --json 2>&1) || RC=$?
+RC=$(hull_run "$RC_TMP" "$HULL" cache clear --json)
+OUT=$(cat "$RC_TMP")
 [ "$RC" -ne 0 ] && pass "clear --json without --yes still refuses" \
                 || fail "clear --json bypassed --yes"
 
@@ -500,8 +535,7 @@ kill -INT $PID 2>/dev/null || true; sleep 1; kill -KILL $PID 2>/dev/null || true
 wait $PID 2>/dev/null || true
 
 # Clean state should verify clean.
-OUT=$(HOME="$VERIFY_HOME" "$HULL" cache verify 2>&1)
-RC=$?
+hull_run_home "$VERIFY_HOME" "$HULL" cache verify
 case "$OUT" in
     *"0 corrupt"*) pass "verify on clean cache reports 0 corrupt" ;;
     *) fail "verify clean output" "got: $OUT" ;;
@@ -514,8 +548,7 @@ SOMEFILE=$(find "$VERIFY_HOME/.hull/blobs/runtime/lua-bytecode/blobs" \
                 -type f | head -1)
 if [ -n "$SOMEFILE" ]; then
     truncate -s 0 "$SOMEFILE"
-    RC=0
-    OUT=$(HOME="$VERIFY_HOME" "$HULL" cache verify 2>&1) || RC=$?
+    hull_run_home "$VERIFY_HOME" "$HULL" cache verify
     case "$OUT" in
         *"zero-size"*) pass "verify detects zero-size corruption" ;;
         *) fail "verify zero-size detection" "got: $OUT" ;;
@@ -528,8 +561,7 @@ if [ -n "$SOMEFILE" ]; then
     esac
 
     # --repair unlinks the corrupt entry.
-    RC=0
-    OUT=$(HOME="$VERIFY_HOME" "$HULL" cache verify --repair 2>&1) || RC=$?
+    hull_run_home "$VERIFY_HOME" "$HULL" cache verify --repair
     case "$OUT" in
         *"unlinked"*) pass "verify --repair reports unlink" ;;
         *) fail "verify --repair output" "got: $OUT" ;;
@@ -565,8 +597,7 @@ mkdir -p "$OF_HOME/.hull/blobs/runtime"
 # Plant a regular file where the lua-bytecode subdir would live.
 echo "blocker" > "$OF_HOME/.hull/blobs/runtime/lua-bytecode"
 
-RC=0
-OUT=$(HOME="$OF_HOME" "$HULL" cache verify 2>&1) || RC=$?
+hull_run_home "$OF_HOME" "$HULL" cache verify
 [ "$RC" -ne 0 ] && pass "verify rc=1 when a store can't open" \
                 || fail "verify open_failed exit code" "rc=$RC out=$OUT"
 case "$OUT" in
@@ -574,8 +605,8 @@ case "$OUT" in
     *) fail "verify cannot-open message" "got: $OUT" ;;
 esac
 
-RC=0
-JSON=$(HOME="$OF_HOME" "$HULL" cache verify --json 2>&1) || RC=$?
+hull_run_home "$OF_HOME" "$HULL" cache verify --json
+JSON=$OUT
 [ "$RC" -ne 0 ] && pass "verify --json rc=1 on open_failed" \
                 || fail "verify --json open_failed rc" "rc=$RC"
 case "$JSON" in
