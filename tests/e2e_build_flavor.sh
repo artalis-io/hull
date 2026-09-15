@@ -25,15 +25,26 @@ HULL="$ROOT/build/hull"
 . "$(dirname "$0")/lib/hull_rc.sh"
 hull_rc_init "$HULL"
 HULL_RC_TMP="${TMPDIR:-/tmp}/hull_flavor_rc.$$"
-trap 'rm -f "$HULL_RC_TMP"' EXIT
 
 [ -x "$HULL" ] || { echo "SKIP: $HULL not built"; exit 0; }
-case "$(file "$HULL" 2>/dev/null || true)" in
-    *cosmo*|*"APE"*) echo "SKIP: cosmo keeps everything in-base (fat APE)"; exit 0;;
-esac
+# This suite is cosmo-EXEMPT: a fat APE keeps every composable subsystem
+# in-base, so there is no flavor axis here to test. The skip existed already -
+# it just never fired, because it matched file(1) output for *cosmo*|*APE* and
+# file(1) on Windows calls an APE a "DOS/MBR boot sector". So the suite ran, on
+# a hull that cannot link the app it then tries to execute, and reported
+# "pure-compute app should exit 7, got 127" - 127 being hull_rc finding no
+# binary to run, because the build above it had failed unnoticed.
+#
+# #501 fixed the identical probe in the five feature-* suites; this one was
+# missed. hull_is_ape is that fix factored out.
+if hull_is_ape "$HULL"; then
+    echo "SKIP: cosmo keeps everything in-base (fat APE)"; exit 0
+fi
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# ONE trap: a second `trap ... EXIT` REPLACES this one rather than adding to it,
+# so the two written separately meant $HULL_RC_TMP was never cleaned up.
+trap 'rm -rf "$WORK"; rm -f "$HULL_RC_TMP"' EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "  ok: $1"; }
 

@@ -23,15 +23,33 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
+# hull_is_ape FILE -> 0 if FILE is a Cosmopolitan APE.
+#
+# Reads the magic directly rather than shelling out to file(1). On Windows,
+# file(1) reports an APE as "DOS/MBR boot sector" - no mention of cosmo or APE -
+# so a probe written as `case "$(file "$X") in *cosmo*|*APE*)` silently never
+# fires and a cosmo-EXEMPT suite runs anyway. #501 found this and fixed the five
+# feature-* suites by inlining the magic check; e2e_build_flavor carried the
+# same probe and was missed, which is why it executed on a Windows runner and
+# then failed building an app that hull cannot link there.
+#
+# This is that check, factored out, so the next suite that needs it does not
+# have to rediscover why file(1) will not do.
+hull_is_ape() {
+    case "$(head -c 6 "${1:-}" 2>/dev/null || true)" in
+        MZqFpD|jartsr) return 0 ;;
+    esac
+    return 1
+}
+
 # Take the Windows path only when a PowerShell exists AND the binary really is
 # an APE. Probing both means a Linux host with pwsh installed is unaffected, and
 # a native Windows build pays nothing.
 hull_rc_init() {
     HULL_RC_SHIFT=0
     command -v powershell.exe >/dev/null 2>&1 || return 0
-    case "$(head -c 6 "${1:-}" 2>/dev/null || true)" in
-        MZqFpD|jartsr) HULL_RC_SHIFT=1 ;;
-    esac
+    hull_is_ape "${1:-}" && HULL_RC_SHIFT=1
+    return 0
 }
 
 # Internal: run via Start-Process, print the raw (shifted) status.
