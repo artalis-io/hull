@@ -124,7 +124,7 @@ run_rt() {
     caught=$(body "http://127.0.0.1:$PORT/caught")
     pinst_code=$(code "http://127.0.0.1:$PORT/pinst")
     dberr=$(body "http://127.0.0.1:$PORT/dberr")
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
 
     case "$ok" in
         *'"r":"alive"'*) pass "${runtime} pooled async success still works" ;;

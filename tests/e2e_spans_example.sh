@@ -59,7 +59,7 @@ check() {
     rng=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/read?name=source&off=5000")
     is_aot=0
     grep -qE "cached module 'spanreader' \(abi=[0-9]+, aot=1" "$TMP/srv.log" && is_aot=1
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     [ "$ok" = "ok name=source len=4096 foff=8195 off=0 val=3" ] \
         && pass "$label: bounded read (name+len+foffset+value)" \
         || fail "$label: bounded read (got: $ok)"

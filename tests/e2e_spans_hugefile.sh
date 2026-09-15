@@ -93,7 +93,7 @@ check() {  # label, workdir, launch argv...
     argc=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/meta?cap=17")
     is_aot=0
     grep -qE "cached module 'spanmeta' \(abi=[0-9]+, aot=1" "$TMP/srv.log" && is_aot=1
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     [ "$c3" = "$EXACT3" ] \
         && pass "$label: 3 distinct >4GiB windows, each exact 64-bit foffset (order) + first/end/one-past/straddle reads" \
         || fail "$label: cap3 (got: $c3)"

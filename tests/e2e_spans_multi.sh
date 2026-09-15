@@ -71,7 +71,7 @@ check() {
     u=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/list?name=zzz")
     is_aot=0
     grep -qE "cached module 'spanlist' \(abi=[0-9]+, aot=1" "$TMP/srv.log" && is_aot=1
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     # Declaration-order discovery is identical for every query; find= varies.
     [ "$a" = "count=3;order=alpha,beta,gamma;find=0" ] \
         && pass "$label: 3 spans, declaration order, find(alpha)=0" \

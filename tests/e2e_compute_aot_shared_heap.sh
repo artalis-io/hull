@@ -82,7 +82,7 @@ PID=$!; sleep 2
 if ! kill -0 $PID 2>/dev/null; then fail "app binary failed to start"; cat "$TMP/srv.log"; else
     span=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/span")
     seg=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/seg")
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     # Proof the AOT was actually loaded (not an interpreter fallback).
     if grep -qE "cached module 'spancount' \(abi=[0-9]+, aot=1" "$TMP/srv.log" \
        && grep -qE "cached module 'segread' \(abi=[0-9]+, aot=1" "$TMP/srv.log"; then
