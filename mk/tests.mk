@@ -472,16 +472,32 @@ $(BUILDDIR)/test_wasm_readonly_heap: $(BUILDDIR)/gen_ro_heap_aot.h
 # interp + AOT-SW. Skips (empty fixture) when wamrc is absent; the interpreter
 # case always runs. HW-bound OOB-to-trap needs the full runtime (e2e-compute);
 # the guard is bound-mode-independent, so SW-bound proves it deterministically.
+#
+# The two failure causes are reported SEPARATELY, and wamrc's own error is kept.
+# Folded together as `[ -x w ] && w ...`, an invocation that FAILED was reported
+# as "wamrc not built" with its stderr sent to /dev/null - so a CI step could
+# print `ci_ensure_wamrc: build/wamrc present and executable` and then
+# `[gsub] wamrc not built` two lines later, and the real cause was unrecoverable
+# from the log. (That is not hypothetical: ci_ensure_wamrc.sh's own header
+# records chasing a disappearing wamrc that was "never reproduced from a clean
+# tree" - which is what a message naming the wrong cause produces.)
 define GEN_GSUB_AOT
 	@w="$(BUILDDIR)/wamrc"; [ -x "$$w" ] || w="$(BUILDDIR)/wamrc-build/wamrc"; \
-	if [ -x "$$w" ] && "$$w" --opt-level=3 $(2) --enable-shared-heap \
-	        -o $(BUILDDIR)/$(3).aot $< >/dev/null 2>&1; then \
-	    (cd $(BUILDDIR) && xxd -i $(3).aot) \
-	      | sed -E 's/unsigned char.*\[\]/static const unsigned char $(3)[]/; s/unsigned int.*_len/static const unsigned int $(3)_len/' > $(1); \
-	    echo "  [gsub] embedded wamrc-built $(3) fixture"; \
-	else \
+	if [ ! -x "$$w" ]; then \
 	    printf 'static const unsigned char $(3)[1] = {0};\nstatic const unsigned int $(3)_len = 0;\n' > $(1); \
-	    echo "  [gsub] wamrc not built; $(3) sub-case will skip"; \
+	    echo "  [gsub] no wamrc at $(BUILDDIR)/wamrc or $(BUILDDIR)/wamrc-build/wamrc; $(3) sub-case will skip"; \
+	else \
+	    rc=0; "$$w" --opt-level=3 $(2) --enable-shared-heap \
+	        -o $(BUILDDIR)/$(3).aot $< >$(BUILDDIR)/$(3).aot.log 2>&1 || rc=$$?; \
+	    if [ "$$rc" = 0 ]; then \
+	        (cd $(BUILDDIR) && xxd -i $(3).aot) \
+	          | sed -E 's/unsigned char.*\[\]/static const unsigned char $(3)[]/; s/unsigned int.*_len/static const unsigned int $(3)_len/' > $(1); \
+	        echo "  [gsub] embedded wamrc-built $(3) fixture"; \
+	    else \
+	        printf 'static const unsigned char $(3)[1] = {0};\nstatic const unsigned int $(3)_len = 0;\n' > $(1); \
+	        echo "  [gsub] $$w FAILED on $(3) (exit $$rc); sub-case will skip. Its output:"; \
+	        sed 's/^/      /' $(BUILDDIR)/$(3).aot.log; \
+	    fi; \
 	fi
 endef
 $(BUILDDIR)/gen_gsub_aot_sw.h: $(TESTDIR)/hull/fixtures/gsub.wasm | $(BUILDDIR)
