@@ -101,6 +101,11 @@ printf '%%PDF-1.4\n%%\xE2\xE3\xCF\xD3\n' > "$TMPDIR_WORK/doc.pdf"
 # 4 KiB max_size cap, so the rejection comes from attachment.store
 # (not from the multipart parser).
 { printf '\211PNG\r\n\032\n'; dd if=/dev/urandom bs=1024 count=5 2>/dev/null; } > "$TMPDIR_WORK/big.png"
+# Non-ASCII filename for the RFC 5987 Content-Disposition encoding
+# parity check - accented Latin + CJK + supplementary-plane emoji
+# all in one filename so we shake out UTF-16 surrogate / UTF-8
+# encoding bugs in either runtime.
+cp "$TMPDIR_WORK/img.png" "$TMPDIR_WORK/résumé文档📄.png"
 
 # ── Lua fixture ─────────────────────────────────────────────────────
 
@@ -426,25 +431,17 @@ run_suite() {
     # encoding. The Lua sibling uses byte-wise gsub on raw UTF-8;
     # the JS sibling must encode to UTF-8 first because JS strings
     # are UTF-16 - both should produce IDENTICAL bytes on the wire.
-    # The unicode name is DECLARED to curl, not read off the filesystem.
-    # What this check is about is the Content-Disposition encoding Hull
-    # produces for a unicode filename - the on-disk name was only ever the
-    # means of delivering one. Those are separable, and on Windows they come
-    # apart: a native curl cannot OPEN a UTF-8-named file (measured: rc=26,
-    # CURLE_READ_ERROR, for `-F file=@<utf8 name>`, while the same file opens
-    # fine under an ASCII name) but SENDS a UTF-8 filename without trouble.
-    # Reading ASCII bytes and declaring the unicode name tests the encoding
-    # directly, and puts byte-identical content on the wire on every host.
-    #
-    # The `cd` is not cosmetic: a POSIX absolute path inside the compound
-    # "file=@PATH;filename=NAME" spec is NOT argument-converted by the MSYS
-    # shell the way a bare @PATH is, so curl would be handed a /tmp/... path
-    # it cannot resolve (measured). A bare relative name needs no conversion.
-    R_UNI=$(cd "$TMPDIR_WORK" && curl -s -X POST "http://127.0.0.1:$PORT/upload" \
-        -F "file=@img.png;filename=résumé文档📄.png")
+    # `set -e` + a bare command substitution is why this suite could die with a
+    # bare `make: *** Error 3` after 22 passing assertions and NO FAIL line -
+    # the one shape a reader cannot classify. curl's status and its message are
+    # captured so the graceful failure path below actually gets reached and can
+    # say what happened. -sS keeps curl quiet on success but talking on error.
+    UNI_RC=0
+    R_UNI=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload" \
+        -F "file=@$TMPDIR_WORK/résumé文档📄.png" 2>&1) || UNI_RC=$?
     ID_UNI=$(printf '%s' "$R_UNI" | sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
     if [ -z "$ID_UNI" ]; then
-        fail "$SUITE unicode upload failed" "resp: $R_UNI"
+        fail "$SUITE unicode upload failed" "curl rc=$UNI_RC resp: $R_UNI"
     else
         curl -s -D "$TMPDIR_WORK/serve-uni-hdrs.txt" -o /dev/null \
             "http://127.0.0.1:$PORT/serve/allow/$ID_UNI"
