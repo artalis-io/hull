@@ -113,7 +113,7 @@ PORT=$((19600 + $$ % 300))
 PID=$!; sleep 2
 if ! kill -0 $PID 2>/dev/null; then fail "interpreter: server failed to start"; cat "$TMP/interp.log"; else
     resp="$(curl -s --max-time 6 "http://127.0.0.1:$PORT/check")"
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     case "$resp" in
         *'"ok":7'*'"total":7'* | *'"total":7'*'"ok":7'*)
             pass "interpreter: all cases correct (memmove both dirs/identical/zero, misaligned memcpy/memset, compiler-generated)";;
@@ -142,7 +142,7 @@ else
     if ! kill -0 $PID 2>/dev/null; then fail "AOT: binary failed to start"; cat "$TMP/aot.log"; else
         # Load is lazy on the first compute.call, so hit the route first.
         resp="$(curl -s --max-time 6 "http://127.0.0.1:$PORT/check")"
-        kill $PID 2>/dev/null; wait $PID 2>/dev/null
+        kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
         if grep -qE "cached module 'memops' \(abi=[0-9]+, aot=1" "$TMP/aot.log"; then
             pass "memops loaded as AOT (aot=1), not interpreter fallback"
         else

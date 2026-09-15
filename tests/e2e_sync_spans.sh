@@ -90,7 +90,7 @@ run_rt() {
     reuse=$(get "http://127.0.0.1:$PORT/span")
     inst=$(get "http://127.0.0.1:$PORT/inst")
     instp=$(get "http://127.0.0.1:$PORT/instplain")
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     case "$span" in *'"count":1'*) case "$span" in *'"byte":3'*)
         pass "$rt compute.call: sync spans attach (count 1, window[0]=3)";; *)
         fail "$rt compute.call attach byte (got: $span)";; esac ;;

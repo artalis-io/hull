@@ -38,10 +38,29 @@ assert() {
     else echo "  FAIL $msg"; FAIL=$((FAIL + 1)); fi
 }
 
+# See tests/e2e_linker.sh for the full account: captured output must be passed
+# as an ARGUMENT, never interpolated into a nested `sh -c`. Hull's own hints
+# contain backticks, and an inner shell executes them - on a Windows runner that
+# turned fragments of hull's output into commands. The same five-instance
+# pattern lived here.
+out_has() { printf '%s' "$2" | grep -qi -- "$1"; }
+nm_has()  { nm "$2" 2>/dev/null | grep -q -- "$1"; }
+str_eq()  { [ -n "$1" ] && [ "$1" = "$2" ]; }
+
 # --no-compiler is native-only (cosmo is dual-arch, unsupported in v1).
-case "$($HULL version 2>/dev/null || true)" in
-    *cosmo*|*Cosmo*) echo "SKIP: --no-compiler unsupported on cosmo/APE"; exit 0 ;;
-esac
+#
+# This matched `hull version` output against *cosmo*, which can NEVER match:
+# version.c prints "hull <version>" and nothing else - no platform string. So
+# the guard was dead from the day it was written, and on a Windows runner the
+# suite ran anyway and failed every native-toolchain assertion. Same shape as
+# the file(1) probe fixed in #510: a check asking a question its input cannot
+# answer. hull_is_ape reads the binary's magic, which cannot be reformatted
+# out from under it.
+. "$(dirname "$0")/lib/hull_rc.sh"
+if hull_is_ape "$HULL"; then
+    echo "SKIP: --no-compiler unsupported on cosmo/APE (dual-arch)"
+    exit 0
+fi
 
 WORKDIR="$(mktemp -d)"
 APP="$WORKDIR/hello"
@@ -80,7 +99,7 @@ echo "== compiler-free build (Lua) =="
 $HULL build "$APP" --no-compiler --no-verify-platform -o "$WORKDIR/hello_nc" >"$WORKDIR/build_nc.log" 2>&1
 assert "build --no-compiler succeeds" [ -x "$WORKDIR/hello_nc" ]
 assert "build log shows the emit step" grep -q "emitting app_registry.o" "$WORKDIR/build_nc.log"
-assert "binary exports hl_app_entries" sh -c "nm '$WORKDIR/hello_nc' 2>/dev/null | grep -q hl_app_entries"
+assert "binary exports hl_app_entries" nm_has hl_app_entries "$WORKDIR/hello_nc"
 serve_and_check "$WORKDIR/hello_nc" "nc_lua"
 
 echo "== default (compiler) build, same app =="
@@ -92,7 +111,7 @@ echo "== both paths produced equivalent responses =="
 # The body carries a live timestamp, so compare the stable message field.
 msg_nc="$(grep -o 'Hello from Hull[^"]*' "$WORKDIR/nc_lua.body" 2>/dev/null || true)"
 msg_cc="$(grep -o 'Hello from Hull[^"]*' "$WORKDIR/cc_lua.body" 2>/dev/null || true)"
-assert "no-compiler message == compiler message" sh -c "[ -n '$msg_nc' ] && [ '$msg_nc' = '$msg_cc' ]"
+assert "no-compiler message == compiler message" str_eq "$msg_nc" "$msg_cc"
 
 echo "== compiler-free build (JS) =="
 $HULL build "$APP" --runtime js --no-compiler --no-verify-platform -o "$WORKDIR/hello_nc_js" >"$WORKDIR/build_nc_js.log" 2>&1
@@ -107,11 +126,11 @@ echo "== default is now the emit path; --with auto-falls back to the compiler ==
 # feature transparently falls back to the C compiler (it needs a generated
 # feature registry) rather than erroring.
 out_default="$($HULL build "$APP" --no-verify-platform -o "$WORKDIR/def" 2>&1 || true)"
-assert "default build uses the emit path" sh -c "printf '%s' \"$out_default\" | grep -qi 'emitting app_registry'"
+assert "default build uses the emit path" out_has 'emitting app_registry' "$out_default"
 out_with="$($HULL build "$APP" --with=gpu --no-verify-platform -o "$WORKDIR/nope" 2>&1 || true)"
-assert "--with falls back to the C compiler" sh -c "printf '%s' \"$out_with\" | grep -qi 'using the C compiler'"
+assert "--with falls back to the C compiler" out_has 'using the C compiler' "$out_with"
 out_cc="$($HULL build "$APP" --compiler=system --no-verify-platform -o "$WORKDIR/ccbin" 2>&1 || true)"
-assert "--compiler=system forces the compiler path" sh -c "printf '%s' \"$out_cc\" | grep -qi 'compiling with'"
+assert "--compiler=system forces the compiler path" out_has 'compiling with' "$out_cc"
 
 echo ""
 echo "compiler-free e2e: $PASS passed, $FAIL failed"

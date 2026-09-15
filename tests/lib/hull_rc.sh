@@ -73,7 +73,17 @@ hull_rc__pwsh() {
     fi
     _ps="$_ps -RedirectStandardOutput '$(cygpath -w "$_o")'"
     _ps="$_ps -RedirectStandardError '$(cygpath -w "$_e")'"
-    [ -n "$_i" ] && _ps="$_ps -RedirectStandardInput '$(cygpath -w "$_i")'"
+    if [ -n "$_i" ]; then
+        # Start-Process cannot redirect stdin from /dev/null. cygpath maps it
+        # to the device path Start-Process throws FileNotFoundException on:
+        # the child never launches, so the caller gets EMPTY output and rc 127
+        # with no indication why. An empty regular file is indistinguishable to
+        # the callee, and one fits in the scratch dir the caller already cleans.
+        case "$_i" in
+            /dev/null) : > "$_o.stdin" 2>/dev/null && _i="$_o.stdin" ;;
+        esac
+        _ps="$_ps -RedirectStandardInput '$(cygpath -w "$_i")'"
+    fi
     _ps="$_ps -NoNewWindow -Wait -PassThru"
     powershell.exe -NoProfile -Command \
         "\$p = $_ps; Write-Output \$p.ExitCode" \

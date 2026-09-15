@@ -140,7 +140,7 @@ run_rt() {
     # is proven at the C level (test_wasm_spans.d3_gas_cleanup_reusable).
     patrap=""
     [ "$runtime" = "js" ] && patrap=$(curl -sf --max-time 8 "http://127.0.0.1:$PORT/patrap" 2>/dev/null || echo FAIL)
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     case "$span" in
         *'"out":"hello_async"'*) pass "${runtime} pooled async span call echoes input" ;;
         *) fail "${runtime} pooled async span call (got: $span)" ;;

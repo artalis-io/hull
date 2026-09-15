@@ -931,7 +931,7 @@ if kill -0 $NODB_PID 2>/dev/null; then
         fail "no-db compute endpoint - response: $RESP"
     fi
 
-    kill $NODB_PID 2>/dev/null; wait $NODB_PID 2>/dev/null
+    kill $NODB_PID 2>/dev/null; wait $NODB_PID 2>/dev/null || true
 else
     fail "no-db server failed to start"
 fi

@@ -90,7 +90,7 @@ if ! kill -0 $PID 2>/dev/null; then
 else
     echo_r=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/echo")
     span=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/span")
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     # Both modules loaded as AOT + Memory64 (not an interpreter fallback).
     grep -qE "cached module 'echo64' \(abi=[0-9]+, aot=1, mem64=1" "$TMP/srv.log" \
         && pass "echo64 loaded as AOT + Memory64 (aot=1, mem64=1)" \

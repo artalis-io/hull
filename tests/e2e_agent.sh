@@ -175,6 +175,29 @@ check_exit     "db query missing SQL exit" "$EXIT_CODE" "1"
 # ── request ───────────────────────────────────────────────────────────
 
 echo ""
+# `hull agent request` takes a URL PATH, and a POSIX shell on Windows converts a
+# bare "/health" argument into a FILESYSTEM path before hull ever sees it.
+# Measured in this shell:
+#
+#     $ prog /health   ->  argv[1] = C:/Program Files/Git/health
+#
+# so hull builds "http://127.0.0.1:39890C:/Program Files/Git/health" and Keel's
+# client rejects it: KL_ERR_URL, which is the "(error 14)" this suite reported
+# as a connection failure. The server was up the whole time - wait_for_server
+# reaches it with curl immediately before.
+#
+# MSYS2_ARG_CONV_EXCL is scoped to these invocations rather than exported. The
+# probe step deliberately leaves the conversion ON so hull's handling of
+# FILESYSTEM paths stays honestly tested; a URL path is a different thing, and
+# no hull-side normalisation can reliably tell a "/health" the shell rewrote
+# from a real "C:/..." the user meant.
+#
+# NOTE this is not only a test artefact: a Windows user running
+#   hull agent request GET /health
+# from Git Bash hits exactly the same conversion.
+AGENT_REQ_ENV=""
+if [ "${HULL_RC_SHIFT:-0}" = 1 ]; then AGENT_REQ_ENV="MSYS2_ARG_CONV_EXCL=*"; fi
+
 echo "--- agent request ---"
 
 PORT_REQ=39890
@@ -189,7 +212,7 @@ if ! wait_for_server "$PORT_REQ"; then
     rm -rf "$TMPDIR_REQ"
 else
     # GET /health - verify all JSON fields
-    OUT=$($HULL agent request GET /health -p "$PORT_REQ")
+    OUT=$(env $AGENT_REQ_ENV $HULL agent request GET /health -p "$PORT_REQ")
     check_contains "request GET has status"      "$OUT" '"status":'
     check_contains "request GET status 200"      "$OUT" '"status":200'
     check_contains "request GET has body"        "$OUT" '"body":'
@@ -197,13 +220,13 @@ else
     check_contains "request GET has elapsed_ms"  "$OUT" '"elapsed_ms":'
 
     # POST /echo with body and header
-    OUT=$($HULL agent request POST /echo -p "$PORT_REQ" \
+    OUT=$(env $AGENT_REQ_ENV $HULL agent request POST /echo -p "$PORT_REQ" \
           -d 'hello agent' -H "Content-Type: text/plain")
     check_contains "request POST body echoed"    "$OUT" 'hello agent'
     check_contains "request POST status 200"     "$OUT" '"status":200'
 
     # 404 for nonexistent path
-    OUT=$($HULL agent request GET /nonexistent -p "$PORT_REQ")
+    OUT=$(env $AGENT_REQ_ENV $HULL agent request GET /nonexistent -p "$PORT_REQ")
     check_contains "request 404 status"          "$OUT" '"status":404'
 
     stop_server
