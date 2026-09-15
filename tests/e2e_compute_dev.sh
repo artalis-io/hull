@@ -206,17 +206,37 @@ EOF
 
 sleep 1
 touch compute/score/score.c
-src_mtime=$(stat -f %m compute/score/score.c 2>/dev/null || \
-            stat -c %Y compute/score/score.c 2>/dev/null)
-wasm_mtime_before=$(stat -f %m compute/score.wasm 2>/dev/null || \
-                    stat -c %Y compute/score.wasm 2>/dev/null)
+# file_mtime FILE -> the mtime in epoch seconds, or non-zero if it cannot be had.
+#
+# NOT `stat -f %m ... || stat -c %Y ...`. GNU stat's -f means --file-system, so
+# given the BSD format string it FAILS (rc=1) *and still prints filesystem info
+# to stdout* - the `||` then appends the real answer to six lines of garbage:
+#
+#     [  File: "score.wasm"
+#        ID: 60ed436f00000000 Namelen: 255 ...
+#      1789466644]
+#
+# which is how this suite reported "mtime did not advance (before=  File: ...".
+# macOS happens to satisfy the BSD form on the first try, and no CI job runs
+# this suite, so it went unnoticed on every GNU-stat host.
+#
+# GNU form first, and the result is VALIDATED as digits, so neither stat's
+# quirks can yield a non-numeric mtime.
+file_mtime() {
+    _m=$(stat -c %Y "$1" 2>/dev/null) || _m=""
+    case "$_m" in ''|*[!0-9]*) _m=$(stat -f %m "$1" 2>/dev/null) || _m="" ;; esac
+    case "$_m" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s' "$_m"
+}
+
+src_mtime=$(file_mtime compute/score/score.c)
+wasm_mtime_before=$(file_mtime compute/score.wasm)
 
 # Run hull build; tolerate non-zero exit (platform-archive errors are
 # fine here, the rebuild step runs first).
 "$HULL_ABS" build --no-verify-platform -o app . > /tmp/buildlog.txt 2>&1 || true
 
-wasm_mtime_after=$(stat -f %m compute/score.wasm 2>/dev/null || \
-                   stat -c %Y compute/score.wasm 2>/dev/null)
+wasm_mtime_after=$(file_mtime compute/score.wasm)
 
 if grep -q "compiled 1 compute source" /tmp/buildlog.txt; then
     pass "hull build reports 'compiled N compute source(s)' for stale source"
@@ -234,13 +254,11 @@ fi
 # --no-build-compute should suppress the auto-rebuild even when stale.
 sleep 1
 touch compute/score/score.c
-wasm_mtime_before=$(stat -f %m compute/score.wasm 2>/dev/null || \
-                    stat -c %Y compute/score.wasm 2>/dev/null)
+wasm_mtime_before=$(file_mtime compute/score.wasm)
 
 "$HULL_ABS" build --no-verify-platform --no-build-compute -o app . > /tmp/buildlog2.txt 2>&1 || true
 
-wasm_mtime_after=$(stat -f %m compute/score.wasm 2>/dev/null || \
-                   stat -c %Y compute/score.wasm 2>/dev/null)
+wasm_mtime_after=$(file_mtime compute/score.wasm)
 
 if grep -q "compiled .* compute source" /tmp/buildlog2.txt; then
     fail "--no-build-compute should not rebuild compute"
