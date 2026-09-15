@@ -16,6 +16,15 @@
 set -e
 
 HULL=./build/hull
+
+# hull's exit status is the whole subject of half this file (exit 0/1/2 are the
+# analyze contract), and on Windows an APE reports it shifted left by 8 so a
+# POSIX shell reads 0 for every outcome (jart/cosmopolitan#1521). Every check
+# below was reading a 0 that meant nothing.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
+RC_OUT="${TMPDIR:-/tmp}/hull_analyze_out.$$"
+RC_ERR="${TMPDIR:-/tmp}/hull_analyze_err.$$"
 HULL_ABS=$(pwd)/build/hull      # absolute (subtests cd into the TMPDIR)
 PASS=0
 FAIL=0
@@ -29,7 +38,7 @@ fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 
 TMP=$(mktemp -d)
-trap 'chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"; rm -f "$RC_OUT" "$RC_ERR"' EXIT
 
 echo ""
 echo "=== E2E: hull analyze ==="
@@ -47,13 +56,13 @@ cp -r "$APP" "$BROKEN"
 printf 'local M = {}\nfunction M.oops() return { ok = ) end\nreturn M\n' > "$BROKEN/routes/bad.lua"
 
 # ── Test 1: clean app → exit 0, "no issues", stdout only ──────────────
-rc=0; out=$("$HULL" analyze "$APP" 2>/dev/null) || rc=$?
+rc=$(hull_run2 "$RC_OUT" "$RC_ERR" "$HULL" analyze "$APP"); out=$(cat "$RC_OUT")
 if [ "$rc" = "0" ] && echo "$out" | grep -q "no issues"; then
     pass "clean app → exit 0 + no issues"
 else fail "clean app (rc=$rc, out=$out)"; fi
 
 # ── Test 2: syntax error in non-entry module → exit 1 + located ───────
-rc=0; out=$("$HULL" analyze "$BROKEN" 2>/dev/null) || rc=$?
+rc=$(hull_run2 "$RC_OUT" "$RC_ERR" "$HULL" analyze "$BROKEN"); out=$(cat "$RC_OUT")
 if [ "$rc" = "1" ] && echo "$out" | grep -q "routes/bad.lua:2:" && echo "$out" | grep -q "lua.syntax"; then
     pass "broken non-entry module → exit 1 + path:line + lua.syntax"
 else fail "broken app (rc=$rc, out=$out)"; fi
@@ -78,7 +87,7 @@ else fail "JSON purity/schema (lines=$lines first=$first last=$last)"; fi
 # covered by the symlink test 9, since canonical containment reports a
 # non-existent ../path as not_found, honestly, before any containment check) ─
 printf 'not lua\n' > "$BROKEN/note.txt"
-rc=0; out=$("$HULL" analyze "$BROKEN" nope.lua note.txt 2>/dev/null) || rc=$?
+rc=$(hull_run2 "$RC_OUT" "$RC_ERR" "$HULL" analyze "$BROKEN" nope.lua note.txt); out=$(cat "$RC_OUT")
 if [ "$rc" = "1" ] && echo "$out" | grep -q "analyze.not_found" \
    && echo "$out" | grep -q "analyze.not_lua"; then
     pass "explicit targets → not_found / not_lua, exit 1"
@@ -86,7 +95,7 @@ else fail "explicit target errors (rc=$rc, out=$out)"; fi
 
 # ── Test 6: non-regular explicit target (a directory) → not_regular ───
 mkdir -p "$APP/adir.lua"
-rc=0; out=$("$HULL" analyze "$APP" adir.lua 2>/dev/null) || rc=$?
+rc=$(hull_run2 "$RC_OUT" "$RC_ERR" "$HULL" analyze "$APP" adir.lua); out=$(cat "$RC_OUT")
 if [ "$rc" = "1" ] && echo "$out" | grep -q "analyze.not_regular"; then
     pass "non-regular explicit target → analyze.not_regular"
 else fail "non-regular target (rc=$rc, out=$out)"; fi
@@ -97,7 +106,7 @@ if [ "$(id -u)" = "0" ]; then
     pass "unreadable-vs-missing (skipped: running as root)"
 else
     printf 'x = 1\n' > "$APP/noread.lua"; chmod 000 "$APP/noread.lua"
-    rc=0; out=$("$HULL" analyze "$APP" noread.lua gone.lua 2>/dev/null) || rc=$?
+    rc=$(hull_run2 "$RC_OUT" "$RC_ERR" "$HULL" analyze "$APP" noread.lua gone.lua); out=$(cat "$RC_OUT")
     if [ "$rc" = "1" ] && echo "$out" | grep -q "noread.lua.*analyze.unreadable" \
        && echo "$out" | grep -q "gone.lua.*analyze.not_found"; then
         pass "unreadable (exists, chmod 000) vs missing → distinct codes"
@@ -117,14 +126,14 @@ mkdir -p "$TMP/sym/app"
 printf 'x = 1\n' > "$TMP/sym/outside.lua"
 printf 'app.main(function() return 0 end)\n' > "$TMP/sym/app/app.lua"
 ln -s "$TMP/sym/outside.lua" "$TMP/sym/app/link.lua"
-rc=0; out=$(cd "$TMP/sym" && "$HULL_ABS" analyze app link.lua 2>/dev/null) || rc=$?
+rc=$(cd "$TMP/sym" && hull_run2 "$RC_OUT" "$RC_ERR" "$HULL_ABS" analyze app link.lua); out=$(cat "$RC_OUT")
 if [ "$rc" = "1" ] && echo "$out" | grep -q "link.lua.*analyze\." && ! echo "$out" | grep -q "link.lua.*lua.syntax"; then
     pass "symlink inside app → outside is rejected (containment holds), exit 1"
 else fail "symlink containment (rc=$rc, out=$out)"; fi
 
 # ── Test 10: symlinked app ROOT is supported (resolved via realpath) ──
 ln -s "$TMP/sym/app" "$TMP/sym/rootlink"
-rc=0; out=$(cd "$TMP/sym" && "$HULL_ABS" analyze rootlink 2>/dev/null) || rc=$?
+rc=$(cd "$TMP/sym" && hull_run2 "$RC_OUT" "$RC_ERR" "$HULL_ABS" analyze rootlink); out=$(cat "$RC_OUT")
 if [ "$rc" = "0" ] && echo "$out" | grep -q "no issues"; then
     pass "symlinked app root supported → analyzed"
 else fail "symlinked root (rc=$rc, out=$out)"; fi
@@ -136,7 +145,7 @@ printf 'app.main(function() return 0 end)\n' > "$EXC/app.lua"
 for d in build site/build vendor .git .hull node_modules; do
     printf 'this is ) not valid lua\n' > "$EXC/$d/gen.lua"
 done
-rc=0; out=$("$HULL" analyze "$EXC" 2>/dev/null) || rc=$?
+rc=$(hull_run2 "$RC_OUT" "$RC_ERR" "$HULL" analyze "$EXC"); out=$(cat "$RC_OUT")
 if [ "$rc" = "0" ] && echo "$out" | grep -q "no issues"; then
     pass "excluded dirs (build/site-build/vendor/.git/.hull/node_modules) not scanned → exit 0"
 else fail "exclusions (rc=$rc, out=$out)"; fi
@@ -159,7 +168,7 @@ i=1; parens=""; cparens=""
 while [ $i -le 30 ]; do parens="(${parens}"; cparens="${cparens})"; i=$((i + 1)); done
 printf 'local x = %s1%s\n' "$parens" "$cparens" > "$APP/deep.lua"
 "$HULL" analyze "$APP" deep.lua --max-depth=5 --json 2>/dev/null > "$TMP/deep.json" || true
-rc=0; "$HULL" analyze "$APP" deep.lua --max-depth=5 >/dev/null 2>&1 || rc=$?
+rc=$(hull_rc "$HULL" analyze "$APP" deep.lua --max-depth=5)
 if [ "$rc" = "1" ] && grep -q '"state":"incomplete"' "$TMP/deep.json" \
    && grep -q '"code":"lua.limit.max_depth"' "$TMP/deep.json" && grep -q '"clean":false' "$TMP/deep.json"; then
     pass "incomplete state (limit trip) → JSON state=incomplete + exit 1"
@@ -167,7 +176,7 @@ else fail "incomplete state (rc=$rc)"; fi
 rm -f "$APP/deep.lua"
 
 # ── Test 15: exit code 2 (usage error) → empty stdout, message on stderr ─
-rc=0; out=$("$HULL" analyze --bogus 2>"$TMP/err.txt") || rc=$?
+rc=$(hull_run2 "$RC_OUT" "$TMP/err.txt" "$HULL" analyze --bogus); out=$(cat "$RC_OUT")
 if [ "$rc" = "2" ] && [ -z "$out" ] && grep -q "unknown flag" "$TMP/err.txt"; then
     pass "unknown flag → exit 2, empty stdout, stderr message"
 else fail "usage error (rc=$rc, out=[$out])"; fi
@@ -181,7 +190,7 @@ else
     printf 'app.main(function() return 0 end)\n' > "$UNR/app.lua"
     printf 'x = 1\n' > "$UNR/sub/ok.lua"
     chmod 000 "$UNR/sub"
-    rc=0; out=$("$HULL" analyze "$UNR" 2>"$TMP/unr_err.txt") || rc=$?
+    rc=$(hull_run2 "$RC_OUT" "$TMP/unr_err.txt" "$HULL" analyze "$UNR"); out=$(cat "$RC_OUT")
     chmod 755 "$UNR/sub"
     if [ "$rc" = "2" ] && [ -z "$out" ] && grep -q "discovery failed" "$TMP/unr_err.txt"; then
         pass "unreadable discovered subdir → exit 2 + discovery failed (fail closed)"
@@ -194,14 +203,14 @@ mkdir -p "$LINT"
 printf -- '-- TODO: finish this\napp.main(function()\n  local t = { a = 1, a = 2 }\n  if t.a then end\n  return 0\nend)\n' > "$LINT/app.lua"
 
 # ── Test 17: lint warnings are advisory (exit 0), findings still printed ─
-rc=0; out=$("$HULL" analyze "$LINT" 2>/dev/null) || rc=$?
+rc=$(hull_run2 "$RC_OUT" "$RC_ERR" "$HULL" analyze "$LINT"); out=$(cat "$RC_OUT")
 if [ "$rc" = "0" ] && echo "$out" | grep -q "lua.lint.duplicate-table-key" \
    && echo "$out" | grep -q "lua.lint.empty-block" && echo "$out" | grep -q "lua.lint.todo-comment"; then
     pass "lint findings advisory (exit 0) with dup-key + empty-block + todo"
 else fail "lint advisory (rc=$rc, out=$out)"; fi
 
 # ── Test 18: --strict makes warnings fail (exit 1) ────────────────────
-rc=0; "$HULL" analyze "$LINT" --strict >/dev/null 2>&1 || rc=$?
+rc=$(hull_rc "$HULL" analyze "$LINT" --strict)
 if [ "$rc" = "1" ]; then pass "--strict: warnings fail (exit 1)"; else fail "--strict (rc=$rc)"; fi
 
 # ── Test 19: --list-rules enumerates the registry ─────────────────────
@@ -220,7 +229,7 @@ if ! echo "$d" | grep -q "empty-block" && echo "$d" | grep -q "duplicate-table-k
 else fail "rule selection (d=$d)(r=$r)"; fi
 
 # ── Test 21: unknown rule → exit 2 ────────────────────────────────────
-rc=0; out=$("$HULL" analyze "$LINT" --rules=nope 2>"$TMP/lr.txt") || rc=$?
+rc=$(hull_run2 "$RC_OUT" "$TMP/lr.txt" "$HULL" analyze "$LINT" --rules=nope); out=$(cat "$RC_OUT")
 if [ "$rc" = "2" ] && [ -z "$out" ] && grep -q "unknown lint rule" "$TMP/lr.txt"; then
     pass "unknown lint rule → exit 2, stderr message"
 else fail "unknown rule (rc=$rc)"; fi
@@ -237,7 +246,7 @@ else fail "lint JSON schema"; fi
 # ── Test 23: a syntax-broken file is NOT linted (no spurious lint) ────
 printf 'local t = { a = ) }\n' > "$LINT/oops.lua"
 n=$("$HULL" analyze "$LINT" oops.lua --json 2>/dev/null | grep -c 'lua.lint' || true)
-rc=0; "$HULL" analyze "$LINT" oops.lua >/dev/null 2>&1 || rc=$?
+rc=$(hull_rc "$HULL" analyze "$LINT" oops.lua)
 if [ "$n" = "0" ] && [ "$rc" = "1" ]; then
     pass "syntax-broken file: no spurious lint, exit 1 from the syntax error"
 else fail "broken-not-linted (n=$n, rc=$rc)"; fi
