@@ -38,7 +38,7 @@ The previous sweep (2026-09-13, before any fixes) was **58 ok / 34 FAILED /
 | `e2e-project-discovery-lua` | FAILED | Undiagnosed. ~350s. |
 | `e2e-smtp` | TIMEOUT | Did not finish in 600s. The only TIMEOUT in the first sweep too. |
 | `e2e-smtp-link-seam` | FAILED | Regressed with `e2e-linker`, same root cause. |
-| `e2e-tui` | FAILED | Needs a pty (`forkpty`). |
+| `e2e-tui` | 19 of 37 | "Needs a pty" is too glib - the pty WORKS. 18 pass, including every `tui_picker` case (enter, arrows, q, escape, both runtimes) and every not-a-tty refusal. What fails is uniformly the checks that assert on MID-SESSION RENDERED content: titles, panes, streamed child output, SGR mouse enable/disable. So the driver allocates a pty and captures a program's FINAL stdout, and what the TUI draws during the session does not arrive. Undiagnosed; a blanket skip would discard 13 genuine passes. |
 
 ## Green but empty
 
