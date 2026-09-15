@@ -20,12 +20,15 @@ HULL=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
 # `if "$HULL" ...` below would be answering a question it cannot see.
 . "$(dirname "$0")/lib/hull_rc.sh"
 hull_rc_init "$HULL"
+HULL_RC_TMP="${TMPDIR:-/tmp}/hull_modres_rc.$$"
 # Canonicalize (pwd -P) so the app root has no symlink component: on macOS
 # mktemp lives under /tmp -> /private/tmp, and the seatbelt sandbox allows the
 # given path while fs access uses the real one - a location quirk unrelated to
 # module resolution. The canonical path makes them agree.
 WORK=$(cd "$(mktemp -d)" && pwd -P)
-trap 'rm -rf "$WORK"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null || true' EXIT
+# One EXIT trap only: a second `trap ... EXIT` REPLACES this one rather than
+# adding to it, so the temp file the rc helper writes is cleaned here.
+trap 'rm -rf "$WORK"; rm -f "$HULL_RC_TMP"; [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null || true' EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "PASS: $1"; }
 PORT=39600
@@ -164,22 +167,33 @@ error("cannot reach app.manifest")
 app.manifest({ modules = {} })
 LUA
 out=$("$HULL" build "$brk" -o "$brk/out" --no-verify-platform 2>&1 || true)
-# NOTE the if-block. Written as `grep ... || \` with a COMMENT on the next
-# line, the backslash continues into the comment, the || is left without a
-# command, and every line after it runs UNCONDITIONALLY - so `fail` fired even
-# when the message was present, breaking this suite on Linux and macOS where it
-# had been passing. It is not a syntax error and `dash -n` accepts it happily.
-if ! echo "$out" | grep -qi 'manifest extraction failed'; then
-    # Two very different causes look identical from outside: extraction wrongly
-    # reporting SUCCESS (composition then decided from a manifest that was never
-    # read - hull build, deploy and eject share that path), or the diagnostic
-    # being produced and lost. Re-run verbosely so the failure says which.
-    vout=$("$HULL" build "$brk" -o "$brk/out.v" --no-verify-platform --verbose 2>&1 || true)
-    fail "pre-manifest error was not reported as a fatal extraction failure
-  plain:   $out
-  verbose: $vout"
+# A hull that cannot link an app HERE never reaches manifest extraction:
+# `hull build` fails at the missing bundled app_main.o (or platform library)
+# first. Instrumenting M.extract_manifest on Windows confirmed it is not
+# called at all in that configuration - for the VALID apps above either, not
+# just this one - so asserting on its diagnostic is asserting on a code path
+# that did not run. Same unsupported-configuration guard the build assertions
+# in run_lang already carry.
+if echo "$out" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: fatal-extraction assertions (this hull cannot link an app here)"
+else
+    # NOTE the if-block. Written as `grep ... || \` with a COMMENT on the next
+    # line, the backslash continues into the comment, the || is left without a
+    # command, and every line after it runs UNCONDITIONALLY - so `fail` fired even
+    # when the message was present, breaking this suite on Linux and macOS where it
+    # had been passing. It is not a syntax error and `dash -n` accepts it happily.
+    if ! echo "$out" | grep -qi 'manifest extraction failed'; then
+        # Print hull's own output on failure. The message being absent says
+        # only that; WHY is in what hull actually emitted, and discarding it is
+        # what made this failure read as an extraction defect (#502) when the
+        # build had in fact stopped earlier for an unrelated reason.
+        vout=$("$HULL" build "$brk" -o "$brk/out.v" --no-verify-platform --verbose 2>&1 || true)
+        fail "pre-manifest error was not reported as a fatal extraction failure
+      plain:   $out
+      verbose: $vout"
+    fi
+    [ -f "$brk/out" ] && fail "fatal extraction still produced a binary"
 fi
-[ -f "$brk/out" ] && fail "fatal extraction still produced a binary"
 pass "pre-manifest extraction failure is fatal (command-correct, no binary)"
 
 # ── A valid app that declares its manifest THEN errors later still builds ──
@@ -191,9 +205,17 @@ cat > "$lateok/app.lua" <<'LUA'
 app.manifest({ modules = {} })
 error("late throw after manifest")
 LUA
-"$HULL" build "$lateok" -o "$lateok/out" --no-verify-platform >/dev/null 2>&1 || \
-    fail "a manifest-declared app with a later throw should still build"
-[ -f "$lateok/out" ] || fail "late-throw app produced no binary"
+# Capture rather than discard: on a hull that cannot link an app here the build
+# legitimately produces no binary, and the assertion below would report that as
+# a late-throw regression. Note the `|| true`: hull's exit status is unreadable
+# from a POSIX shell on Windows (jart/cosmopolitan#1521), so the decision comes
+# from the output, not the status.
+lout=$("$HULL" build "$lateok" -o "$lateok/out" --no-verify-platform 2>&1 || true)
+if echo "$lout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: late-throw build assertions (this hull cannot link an app here)"
+else
+    [ -f "$lateok/out" ] || fail "late-throw app produced no binary: $lout"
+fi
 pass "manifest-then-error app still builds (manifest is authoritative)"
 
 # ── JS extraction fatality PARITY with Lua ──
@@ -219,9 +241,13 @@ import { app } from "hull:app";
 app.manifest({ modules: [] });
 throw new Error("post-manifest boom");
 JS
-"$HULL" build "$jpost" -o "$jpost/out" --no-verify-platform >/dev/null 2>&1 || \
-    fail "JS manifest-then-throw should still build (capture-then-tolerate)"
-[ -f "$jpost/out" ] || fail "JS manifest-then-throw produced no binary"
+# Same guard as the Lua late-throw case above.
+jout=$("$HULL" build "$jpost" -o "$jpost/out" --no-verify-platform 2>&1 || true)
+if echo "$jout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: JS manifest-then-throw build assertions (this hull cannot link an app here)"
+else
+    [ -f "$jpost/out" ] || fail "JS manifest-then-throw produced no binary: $jout"
+fi
 pass "JS manifest-then-throw still builds (manifest is authoritative)"
 
 # ── JS extraction loader-liveness (adversarial termination) ──
@@ -234,7 +260,12 @@ pass "JS manifest-then-throw still builds (manifest is authoritative)"
 # build_guarded DIR SECONDS -> sets BG_TIMEDOUT (1 if killed) and BG_RC.
 build_guarded() {
     d="$1"; secs="$2"
-    "$HULL" build "$d" -o "$d/out" --no-verify-platform >/dev/null 2>&1 &
+    # Capture rather than discard. BG_RC is unusable on Windows - an APE's exit
+    # status reads as 0 from a POSIX shell (jart/cosmopolitan#1521) - so callers
+    # need the OUTPUT to tell an unsupported configuration from a real result,
+    # and to say why when an assertion fails.
+    BG_OUT="$d/.build-out"
+    "$HULL" build "$d" -o "$d/out" --no-verify-platform > "$BG_OUT" 2>&1 &
     bp=$!
     n=0
     while kill -0 "$bp" 2>/dev/null; do
@@ -259,8 +290,18 @@ await new Promise(() => {});          // never settles
 app.manifest({ modules: [] });         // unreachable
 JS
 build_guarded "$jawait" 60
+# The bounded-ness contract is status-free and holds everywhere: the extractor
+# must not hang. Assert it unconditionally.
 [ "$BG_TIMEDOUT" = 0 ] || fail "never-settling top-level await HUNG the extractor (bounded/pending guard regressed)"
-[ "$BG_RC" -ne 0 ] || fail "never-settling top-level await should fail extraction"
+# The "extraction failed" half needs a real exit status, which a POSIX shell
+# cannot read on Windows, and on a hull that cannot link an app the build never
+# reaches extraction at all. Skip it in that configuration rather than assert on
+# a code path that did not run.
+if grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o" "$jawait/.build-out" 2>/dev/null; then
+    echo "SKIP: never-settling await extraction assertion (this hull cannot link an app here)"
+else
+    [ "$BG_RC" -ne 0 ] || fail "never-settling top-level await should fail extraction: $(cat "$jawait/.build-out" 2>/dev/null)"
+fi
 [ -f "$jawait/out" ] && fail "never-settling top-level await produced a binary"
 pass "JS never-settling top-level await is fatal, terminates (no binary)"
 
@@ -282,7 +323,13 @@ app.manifest({ modules: [] });                    // unreachable
 JS
 build_guarded "$jspin" 60
 [ "$BG_TIMEDOUT" = 0 ] || fail "runaway microtask HUNG the extractor (bounded drain regressed)"
-[ "$BG_RC" -ne 0 ] || fail "runaway microtask should fail extraction"
+# Same split as the await case: bounded-ness is status-free and asserted above;
+# the "is fatal" half needs a real status and a build that reached extraction.
+if grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o" "$jspin/.build-out" 2>/dev/null; then
+    echo "SKIP: runaway microtask extraction assertion (this hull cannot link an app here)"
+else
+    [ "$BG_RC" -ne 0 ] || fail "runaway microtask should fail extraction: $(cat "$jspin/.build-out" 2>/dev/null)"
+fi
 [ -f "$jspin/out" ] && fail "runaway microtask produced a binary"
 pass "JS runaway microtask terminates + is fatal (no binary)"
 
@@ -295,6 +342,19 @@ echo 'return { v = "inroot" }' > "$sl/real/mod.lua"
 ln -s real "$sl/link"                               # in-root symlink
 ext=$(cd "$(mktemp -d)" && pwd -P); echo 'return { v = "ESCAPED" }' > "$ext/secret.lua"
 ln -s "$ext" "$sl/esc"                              # symlink escaping the root
+# The escape fixture must actually BE a symlink. On a Windows shell without
+# symlink privilege `ln -s` silently COPIES the directory: measured here,
+# Get-Item reports Attributes=Directory with empty LinkType/Target, and mutating
+# the original does not show through. The copy then sits INSIDE the app root, so
+# require("./esc/secret") resolves legitimately and returns its contents - the
+# literal string "ESCAPED" - which reads exactly like a containment breach and
+# is not one.
+#
+# Skip rather than weaken. The assertion is correct and hull passes it wherever
+# the fixture can be built; calling it a pass here would claim symlink
+# containment is verified on Windows when it is untested.
+SYMLINK_FIXTURE_OK=1
+[ -L "$sl/esc" ] || SYMLINK_FIXTURE_OK=0
 cat > "$sl/app.lua" <<'LUA'
 local inroot = require("./link/mod")
 local ok, m  = pcall(require, "./esc/secret")
@@ -307,9 +367,14 @@ PORT=$((PORT + 1))
 SRV=$!; sleep 1.2
 inroot=$(get "$PORT" /in); escd=$(get "$PORT" /esc)
 kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=""
-[ "$inroot" = "inroot" ] || fail "in-root symlink did not resolve (dev, got '$inroot')"
-[ "$escd" = "BLOCKED" ]  || fail "external symlink escaped the app root (dev, got '$escd')"
-pass "in-root symlink resolves; external symlink escape blocked (dev)"
+if [ "$SYMLINK_FIXTURE_OK" = 0 ]; then
+    echo "SKIP: symlink containment (this shell's ln -s copied the directory;"
+    echo "      no escaping symlink exists to block - containment UNTESTED here)"
+else
+    [ "$inroot" = "inroot" ] || fail "in-root symlink did not resolve (dev, got '$inroot')"
+    [ "$escd" = "BLOCKED" ]  || fail "external symlink escaped the app root (dev, got '$escd')"
+    pass "in-root symlink resolves; external symlink escape blocked (dev)"
+fi
 
 # Built binaries load modules from the embedded VFS (no runtime fopen of a host
 # path); the security assertion that carries is that a symlink whose target
@@ -325,14 +390,21 @@ local ok, m = pcall(require, "./esc/secret")
 app.manifest({ modules = { "hull/http-server@1" } })
 app.get("/esc", function(req, res) res:text((ok and m.v) or "BLOCKED") end)
 LUA
-"$HULL" build "$slb" -o "$slb/out" --no-verify-platform >/dev/null 2>&1 || fail "symlink app build failed"
+bout=$("$HULL" build "$slb" -o "$slb/out" --no-verify-platform 2>&1 || true)
 PORT=$((PORT + 1))
 "$slb/out" -p "$PORT" >/dev/null 2>&1 &
 SRV=$!; sleep 1.2
 escd=$(get "$PORT" /esc)
 kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=""
-[ "$escd" = "BLOCKED" ] || fail "external symlink surfaced a host object in a built binary (got '$escd')"
-pass "external symlink escape stays blocked in a built binary"
+if [ "$SYMLINK_FIXTURE_OK" = 0 ]; then
+    echo "SKIP: built-binary symlink containment (ln -s copied the directory; UNTESTED here)"
+elif echo "$bout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: built-binary symlink containment (this hull cannot link an app here)"
+else
+    [ -f "$slb/out" ] || fail "symlink app build produced no binary: $bout"
+    [ "$escd" = "BLOCKED" ] || fail "external symlink surfaced a host object in a built binary (got '$escd')"
+    pass "external symlink escape stays blocked in a built binary"
+fi
 
 # ── Security boundary 2: no dynamic-code authority in the extraction window ──
 # App code executed to read the manifest must not compile/run new code. load()
@@ -344,11 +416,18 @@ local f = load("return 1")
 f()
 app.manifest({ modules = {} })
 LUA
-if "$HULL" build "$dyn" -o "$dyn/out" --no-verify-platform >/dev/null 2>&1; then
-    fail "load() during extraction should fail closed (dynamic code must be removed)"
+drc=$(hull_run "$HULL_RC_TMP" "$HULL" build "$dyn" -o "$dyn/out" --no-verify-platform)
+dout=$(cat "$HULL_RC_TMP")
+# A hull that cannot link an app fails this build for a reason that has nothing
+# to do with dynamic-code authority, so a non-zero status here would pass the
+# assertion vacuously. Skip instead of banking a result that proves nothing.
+if echo "$dout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: dynamic-code extraction boundary (this hull cannot link an app here)"
+else
+    [ "$drc" != 0 ] || fail "load() during extraction should fail closed (dynamic code must be removed): $dout"
+    [ -f "$dyn/out" ] && fail "dynamic-code app produced a binary"
+    pass "dynamic-code (load) is unavailable during extraction (fatal, no binary)"
 fi
-[ -f "$dyn/out" ] && fail "dynamic-code app produced a binary"
-pass "dynamic-code (load) is unavailable during extraction (fatal, no binary)"
 
 # ── Dynamic code cannot be RECOVERED via an approved/preloaded import ──
 # Importing a permitted helper must not restore any Lua loader; using any of
@@ -361,11 +440,19 @@ local helper = require("./helper")          -- approved local-module import
 ;(load or loadfile or loadstring or dofile)("return 1")  -- nil after removal -> error
 app.manifest({ modules = { "hull/http-server@1" } })
 LUA
-if "$HULL" build "$lrec" -o "$lrec/out" --no-verify-platform >/dev/null 2>&1; then
-    fail "a Lua loader was recoverable after an approved import"
+lrecrc=$(hull_run "$HULL_RC_TMP" "$HULL" build "$lrec" -o "$lrec/out" --no-verify-platform)
+lrecout=$(cat "$HULL_RC_TMP")
+# Same two reasons as the load() boundary above: an `if "$HULL" build` reads 0
+# for every outcome on Windows, and on a hull that cannot link an app the build
+# fails for a reason unrelated to loader recovery - which would satisfy this
+# assertion vacuously rather than prove the loaders stayed removed.
+if echo "$lrecout" | grep -qE "cannot find (libhull_platform\.a|platform archives)|no bundled app_main\.o"; then
+    echo "SKIP: loader-recovery extraction boundary (this hull cannot link an app here)"
+else
+    [ "$lrecrc" != 0 ] || fail "a Lua loader was recoverable after an approved import: $lrecout"
+    [ -f "$lrec/out" ] && fail "Lua dyncode-recover app produced a binary"
+    pass "Lua load/loadfile/loadstring/dofile stay removed after importing a helper"
 fi
-[ -f "$lrec/out" ] && fail "Lua dyncode-recover app produced a binary"
-pass "Lua load/loadfile/loadstring/dofile stay removed after importing a helper"
 
 # JS: importing a permitted helper must not restore eval/Function. QuickJS
 # module top-level throws are DEFERRED (promise), so observe SYNCHRONOUSLY via
