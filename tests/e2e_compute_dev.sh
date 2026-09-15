@@ -31,27 +31,14 @@ fail() { FAIL=$((FAIL + 1)); TOTAL=$((TOTAL + 1)); echo "  FAIL: $1"; }
 # (Homebrew llvm@18 or system clang with wasm-ld in PATH) we cannot
 # exercise the developer workflow, so we skip the entire suite.
 
-find_clang() {
-    for p in /opt/homebrew/opt/llvm@18/bin/clang \
-             /opt/homebrew/opt/llvm/bin/clang \
-             /usr/local/opt/llvm@18/bin/clang \
-             /usr/local/opt/llvm/bin/clang; do
-        if [ -x "$p" ]; then echo "$p"; return 0; fi
-    done
-    if command -v clang >/dev/null 2>&1; then
-        if command -v wasm-ld >/dev/null 2>&1 || \
-           clang --print-targets 2>/dev/null | grep -q wasm32; then
-            echo "clang"
-            return 0
-        fi
-    fi
-    return 1
-}
+# The probe lives in tests/lib/hull_clang.sh - three other suites need the same
+# one, and two copies of a host probe is how #501's bug hid.
+. "$(dirname "$0")/lib/hull_clang.sh"
 
-if ! CLANG_PATH="$(find_clang)"; then
+if ! CLANG_PATH="$(hull_find_clang)"; then
     echo "=== E2E: compute developer workflow ==="
     echo "  SKIP: no clang with wasm32 + wasm-ld available"
-    echo "  (install brew llvm@18 on macOS, apt install clang lld on Linux)"
+    hull_clang_skip_note
     exit 0
 fi
 

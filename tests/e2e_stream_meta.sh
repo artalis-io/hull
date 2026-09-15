@@ -8,6 +8,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$(dirname "$0")/lib/hull_clang.sh"
 HULL="${HULL:-$ROOT/build/hull}"
 export HULL_QUIET_AOT=1
 PASS=0; FAIL=0
@@ -40,6 +41,18 @@ else
     fail "streamprobe hull_compute.h drifted from the canonical embedded header"
 fi
 
+# `hull compute build` needs a clang that can target wasm32. Where the host
+# has none there is nothing here to measure, and the suite was reporting a
+# fact about the host as a FAILURE ("hull compute build: clang not found").
+# The header assertion above needs no toolchain and still runs, so the skip
+# starts here rather than at the top of the file.
+if ! hull_have_clang; then
+    skip "streamprobe compile + run (no clang with wasm32 on this host)"
+    hull_clang_skip_note
+    echo "stream-meta: ${PASS}p ${FAIL}f"
+    [ "$FAIL" -eq 0 ]
+    exit $?
+fi
 if ( cd "$TMP/app" && "$HULL" compute build streamprobe ) >"$TMP/build.log" 2>&1 && [ -f "$TMP/app/compute/streamprobe.wasm" ]; then
     pass "streamprobe compiles (stream helpers link)"
 else
