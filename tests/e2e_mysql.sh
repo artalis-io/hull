@@ -13,6 +13,8 @@
 # default with auto-generated certs). Skips cleanly when Docker is unavailable.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
+. "$(dirname "$0")/lib/hull_docker.sh"
 set -eu
 
 CONTAINER=hull-mysql-e2e
@@ -35,11 +37,16 @@ cleanup() {
     [ -n "${SVR:-}" ] && kill "$SVR" 2>/dev/null || true
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     [ -n "${APPDIR:-}" ] && rm -rf "$APPDIR"
+    # Under `set -e` a FAILING last command in an EXIT trap replaces the
+    # script's own exit status: on the skip path APPDIR is unset, the test
+    # above is false, and `exit 0` was arriving as 1. Measured - and the
+    # guard keeps a real failure intact (exit 3 still reports 3).
+    return 0
 }
 trap cleanup EXIT
 
-if ! command -v docker >/dev/null 2>&1; then
-    echo "SKIP: docker not available"
+if ! hull_docker_runs_linux; then
+    echo "SKIP: no docker able to run a linux container (mysql:8)"
     exit 0
 fi
 if ! command -v curl >/dev/null 2>&1; then
