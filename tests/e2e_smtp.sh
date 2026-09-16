@@ -21,9 +21,13 @@ APPDIR="$(mktemp -d)"
 FAILS=0
 PIDS=""
 
+. "$(dirname "$0")/lib/hull_proc.sh"
+
 log()  { printf '%s\n' "$*"; }
 pass() { printf '  ok   %s\n' "$*"; }
 fail() { printf '  FAIL %s\n' "$*"; FAILS=$((FAILS+1)); }
+# A leg the HOST cannot produce is skipped, not asserted: see hull_proc.sh.
+skip() { printf '  skip %s\n' "$*"; }
 
 cleanup() {
     for p in $PIDS; do kill "$p" 2>/dev/null; done
@@ -34,6 +38,7 @@ trap cleanup EXIT INT TERM
 
 command -v python3 >/dev/null 2>&1 || { log "e2e_smtp: python3 not found - skipping"; exit 0; }
 [ -x "$HULL" ] || { log "e2e_smtp: $HULL not built - skipping"; exit 0; }
+hull_proc_init "$HULL"
 
 # ── mock SMTP peer (mode: fast | slow) ──────────────────────────────────
 cat > "$APPDIR/smtp_mock_$$.py" <<'PY'
@@ -139,7 +144,7 @@ start_hull() {
     HULL_PID=$!; PIDS="$PIDS $HULL_PID"
     for _ in $(seq 1 100); do
         curl -s "http://127.0.0.1:$PORT_HTTP/" 2>/dev/null | grep -q ready && break
-        kill -0 "$HULL_PID" 2>/dev/null || return 1
+        hull_proc_alive "$HULL_PID" || return 1
         sleep 0.2
     done
 }
@@ -173,7 +178,10 @@ run_suite() { # <label> <appfile>
                        *) fail "$RT async success (got: $R_SEND)" ;; esac
     case "$R_DENIED" in *'host_not_allowed'*) pass "$RT host denial before submit: $R_DENIED" ;;
                         *) fail "$RT host denial (got: $R_DENIED)" ;; esac
-    kill -INT "$HULL_PID" 2>/dev/null; wait "$HULL_PID" 2>/dev/null
+    # Teardown only - no assertion rides on this. The old form was
+    # `kill -INT; wait`: on Windows the INT is dropped, so the wait never
+    # returned - 299s of a 300s budget, which was the whole 600s timeout.
+    hull_proc_stop "$HULL_PID"; stop_mock
     if grep -q '"terminal":"cancelled"' "$APPDIR/hull.log"; then
         fail "$RT registry not empty after completion"
     else
@@ -197,7 +205,10 @@ run_suite() { # <label> <appfile>
     curl -s --max-time 8 "http://127.0.0.1:$PORT_HTTP/long" >/dev/null
     SLEN=$(subj_len_from_audit)
     [ "$SLEN" = "400" ] && pass "$RT audit subject exact (len $SLEN)" || fail "$RT audit subject len=$SLEN (want 400)"
-    kill -INT "$HULL_PID" 2>/dev/null; wait "$HULL_PID" 2>/dev/null; stop_mock
+    # Teardown only. Was `kill -INT; wait`: on Windows the INT is dropped
+    # and the wait never returned - 299s of a 300s budget, which was the
+    # entire 600s timeout. hull_proc_stop is bounded on every host.
+    hull_proc_stop "$HULL_PID"; stop_mock
 
     # 4. TRUE saturation (W=2 -> cap 1): one admitted send is held on the slow
     #    peer (occupying the single slot); a concurrent send overflows and must
@@ -221,7 +232,10 @@ run_suite() { # <label> <appfile>
     grep -q '"schedule":"cap_reached"' "$APPDIR/hull.log" \
         && pass "$RT saturation audit schedule:cap_reached" \
         || fail "$RT saturation audit missing schedule:cap_reached"
-    kill -INT "$HULL_PID" 2>/dev/null; wait "$HULL_PID" 2>/dev/null
+    # Teardown only. Was `kill -INT; wait`: on Windows the INT is dropped
+    # and the wait never returned - 299s of a 300s budget, which was the
+    # entire 600s timeout. hull_proc_stop is bounded on every host.
+    hull_proc_stop "$HULL_PID"
     kill "$HELD_CURL" 2>/dev/null; stop_mock
 
     # record canonicalised results for cross-runtime equivalence
@@ -262,7 +276,10 @@ db_saturation_leg() { # <rt> <appfile>
     R_AFTER=$(curl -s --max-time 10 "http://127.0.0.1:$PORT_HTTP/send")
     case "$R_AFTER" in *'"ok":true'*) pass "$RT admission freed after release (slot reusable)" ;;
                        *) fail "$RT slot not reusable after release (got: $R_AFTER)" ;; esac
-    kill -INT "$HULL_PID" 2>/dev/null; wait "$HULL_PID" 2>/dev/null
+    # Teardown only. Was `kill -INT; wait`: on Windows the INT is dropped
+    # and the wait never returned - 299s of a 300s budget, which was the
+    # entire 600s timeout. hull_proc_stop is bounded on every host.
+    hull_proc_stop "$HULL_PID"
     if grep -q '"terminal":"cancelled"' "$APPDIR/hull.log"; then
         fail "$RT registry not empty after release (terminal:cancelled present)"
     else
@@ -279,13 +296,23 @@ db_saturation_leg() { # <rt> <appfile>
     R_DB2=$(curl -s --max-time 8 "http://127.0.0.1:$PORT_HTTP/db")
     case "$R_DB2" in *'"result":2'*) pass "$RT db.async ok before shutdown: $R_DB2" ;;
                      *) fail "$RT db.async before shutdown (got: $R_DB2)" ;; esac
-    S0=$(python3 -c "import time;print(time.time())")
-    kill -INT "$HULL_PID"
-    for _ in $(seq 1 200); do kill -0 "$HULL_PID" 2>/dev/null || break; sleep 0.1; done
-    S1=$(python3 -c "import time;print(time.time())"); DT_SD=$(python3 -c "print(int($S1-$S0))")
-    if kill -0 "$HULL_PID" 2>/dev/null; then fail "$RT shutdown hung (saturated + db)"; kill -9 "$HULL_PID" 2>/dev/null
-    elif [ "$DT_SD" -lt 15 ]; then pass "$RT shutdown-while-saturated bounded (~${DT_SD}s)"
-    else fail "$RT shutdown-while-saturated slow (~${DT_SD}s)"; fi
+    if hull_proc_graceful; then
+        S0=$(python3 -c "import time;print(time.time())")
+        kill -INT "$HULL_PID"
+        for _ in $(seq 1 200); do hull_proc_alive "$HULL_PID" || break; sleep 0.1; done
+        S1=$(python3 -c "import time;print(time.time())"); DT_SD=$(python3 -c "print(int($S1-$S0))")
+        if hull_proc_alive "$HULL_PID"; then fail "$RT shutdown hung (saturated + db)"; kill -9 "$HULL_PID" 2>/dev/null
+        elif [ "$DT_SD" -lt 15 ]; then pass "$RT shutdown-while-saturated bounded (~${DT_SD}s)"
+        else fail "$RT shutdown-while-saturated slow (~${DT_SD}s)"; fi
+    else
+        # Neither pass nor fail: this host cannot CAUSE the event being
+        # asserted. MSYS drops SIGINT to a native APE, and substituting
+        # SIGTERM (= TerminateProcess) would make a bounded-shutdown
+        # check trivially true - a vacuous guard, which is the pattern
+        # this sweep exists to remove.
+        skip "$RT shutdown-while-saturated: $(hull_proc_graceful_note)"
+        hull_proc_stop "$HULL_PID"
+    fi
     kill "$HELD2" 2>/dev/null; stop_mock
 }
 
@@ -309,18 +336,28 @@ log "--- prompt cancellation ---"
 start_mock slow; start_hull "$APPDIR/app.lua"
 ( curl -s --max-time 45 "http://127.0.0.1:$PORT_HTTP/send" >/dev/null 2>&1 & )
 sleep 1.5
-T0=$(python3 -c "import time;print(time.time())")
-kill -INT "$HULL_PID"
-for _ in $(seq 1 200); do kill -0 "$HULL_PID" 2>/dev/null || break; sleep 0.1; done
-T1=$(python3 -c "import time;print(time.time())"); DT=$(python3 -c "print(int($T1-$T0))")
-if kill -0 "$HULL_PID" 2>/dev/null; then fail "shutdown hung with op in flight"; kill -9 "$HULL_PID" 2>/dev/null
-elif [ "$DT" -lt 15 ]; then pass "prompt cancellation: shutdown ~${DT}s (<< 30s SMTP timeout)"
-else fail "shutdown ~${DT}s (not well below the 30s timeout)"; fi
-# No duplicate audit: the one in-flight op is swept to a single terminal record in
-# the cancellation-vs-completion race (exactly one live terminal:cancelled).
-NC=$(grep -c '"terminal":"cancelled"' "$APPDIR/hull.log" 2>/dev/null || printf 0)
-[ "$NC" = "1" ] && pass "prompt cancellation: exactly one terminal:cancelled (no duplicate audit)" \
-                || fail "prompt cancellation: terminal:cancelled count=$NC (want 1)"
+if hull_proc_graceful; then
+    T0=$(python3 -c "import time;print(time.time())")
+    kill -INT "$HULL_PID"
+    for _ in $(seq 1 200); do hull_proc_alive "$HULL_PID" || break; sleep 0.1; done
+    T1=$(python3 -c "import time;print(time.time())"); DT=$(python3 -c "print(int($T1-$T0))")
+    if hull_proc_alive "$HULL_PID"; then fail "shutdown hung with op in flight"; kill -9 "$HULL_PID" 2>/dev/null
+    elif [ "$DT" -lt 15 ]; then pass "prompt cancellation: shutdown ~${DT}s (<< 30s SMTP timeout)"
+    else fail "shutdown ~${DT}s (not well below the 30s timeout)"; fi
+    # No duplicate audit: the one in-flight op is swept to a single terminal record in
+    # the cancellation-vs-completion race (exactly one live terminal:cancelled).
+    NC=$(grep -c '"terminal":"cancelled"' "$APPDIR/hull.log" 2>/dev/null || printf 0)
+    [ "$NC" = "1" ] && pass "prompt cancellation: exactly one terminal:cancelled (no duplicate audit)" \
+        || fail "prompt cancellation: terminal:cancelled count=$NC (want 1)"
+else
+    # Neither pass nor fail: this host cannot CAUSE the event being
+    # asserted. MSYS drops SIGINT to a native APE, and substituting
+    # SIGTERM (= TerminateProcess) would make a bounded-shutdown
+    # check trivially true - a vacuous guard, which is the pattern
+    # this sweep exists to remove.
+    skip "prompt cancellation: $(hull_proc_graceful_note)"
+    hull_proc_stop "$HULL_PID"
+fi
 stop_mock
 
 # ── clean shutdown with an op in flight, under ASan (both runtimes) ─────
@@ -341,7 +378,7 @@ if [ -n "$DBG" ] && [ -x "$DBG" ]; then
         curl -s --max-time 8 "http://127.0.0.1:$PORT_HTTP/db" >/dev/null 2>&1   # db.async resolves (continuation freed)
         ( curl -s --max-time 45 "http://127.0.0.1:$PORT_HTTP/send" >/dev/null 2>&1 & )
         sleep 1.5; kill -INT "$HULL_PID"                                        # held SMTP cancelled (continuation freed)
-        for _ in $(seq 1 200); do kill -0 "$HULL_PID" 2>/dev/null || break; sleep 0.1; done
+        for _ in $(seq 1 200); do hull_proc_alive "$HULL_PID" || break; sleep 0.1; done
         kill -9 "$HULL_PID" 2>/dev/null
         if grep -qiE "runtime error|AddressSanitizer|use-after-free|double-free|SUMMARY: .*Sanitizer" "$APPDIR/asan.log"; then
             fail "$RT ASan error on shutdown-with-op-in-flight"; grep -iE "Sanitizer|use-after" "$APPDIR/asan.log" | head

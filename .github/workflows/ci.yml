@@ -415,6 +415,16 @@ jobs:
         timeout-minutes: 6
         run: make e2e-build-flavor
 
+      # The model-2 async SMTP suite itself. mk/tests.mk describes the
+      # link-seam target below as running "after e2e-smtp so CI covers it
+      # too" - but e2e-smtp was never actually added, so until now the only
+      # SMTP e2e in CI was the link seam. Linux is where this one earns its
+      # keep: the graceful-shutdown legs (bounded drain, exactly one
+      # terminal:cancelled) need a deliverable SIGINT, which Windows skips.
+      - name: Model-2 async SMTP E2E tests
+        timeout-minutes: 6
+        run: make e2e-smtp
+
       - name: SMTP feature link-seam E2E test
         timeout-minutes: 3
         run: make e2e-smtp-link-seam
