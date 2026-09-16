@@ -29,6 +29,28 @@ HULL="${HULL:-./build/hull}"
 # proving anything.
 . "$(dirname "$0")/lib/hull_rc.sh"
 hull_rc_init "$HULL"
+
+# A pid of THIS shell that hull will agree is alive.
+#
+# The liveness gate below is `kill(pid, 0)` inside hull, and on Windows hull is
+# a native process while this shell is an MSYS one - they number processes in
+# DIFFERENT namespaces. Measured in a single shell:
+#
+#     $$ = 640     Windows: no such process
+#     WINPID 36772 Windows: yes
+#
+# so handing hull `$$` asks it about an unrelated pid, it correctly answers
+# "not alive", and the checks that need a LIVE session read as failures. MSYS
+# ps reports the Windows pid in its WINPID column; everywhere else $$ is
+# already the right answer and this returns it unchanged.
+SELF_PID=$$
+if command -v ps >/dev/null 2>&1; then
+    _win=$(ps 2>/dev/null | awk -v p=$$ '$1==p {print $4}' | head -1)
+    case "${_win:-}" in
+        ''|*[!0-9]*) ;;
+        *) [ "$_win" != "$$" ] && SELF_PID="$_win" ;;
+    esac
+fi
 PASS=0
 FAIL=0
 
@@ -275,11 +297,11 @@ RCP=$(hull_rc "$HULL" agent inspect "$OK" --session-pid=5)
 [ "$RCP" = "2" ] && pass "publish: --session-pid without --generation -> exit 2" || fail "partial publish exit ($RCP, want 2)"
 # a full publish writes the CANONICAL <app_dir>/.hull/discovery.json (no caller path), tagged dev
 rm -f "$OK/.hull/discovery.json" 2>/dev/null || true
-"$HULL" agent inspect "$OK" --generation=3 --session-pid="$$" >/dev/null 2>&1 || true
+"$HULL" agent inspect "$OK" --generation=3 --session-pid="$SELF_PID" >/dev/null 2>&1 || true
 if [ -f "$OK/.hull/discovery.json" ]; then
     pass "publish writes the canonical .hull/discovery.json"
     assert_py "published file tagged source=dev, generation=3, session_pid" "$(cat "$OK/.hull/discovery.json")" \
-        "d['source']=='dev' and d['generation']==3 and d.get('session_pid')==$$"
+        "d['source']=='dev' and d['generation']==3 and d.get('session_pid')==$SELF_PID"
 else fail "publish did not write the canonical discovery.json"; fi
 rm -rf "$OK/.hull" 2>/dev/null || true
 
@@ -380,38 +402,38 @@ local function m() end
 return m
 EOF
 # (a) discovery.json session_pid is a non-integer token
-printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1}\n' "$$" > "$MAL/.hull/dev.json"
+printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1}\n' "$SELF_PID" > "$MAL/.hull/dev.json"
 printf '{"schema_version":1,"source":"dev","generation":9,"session_pid":"12x3","declarations":[]}\n' > "$MAL/.hull/discovery.json"
 OUTM1=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "malformed discovery session_pid -> standalone" "$OUTM1" 'd["source"]=="standalone"'
 # (b) dev.json session_pid malformed
 printf '{"port":1,"pid":1,"session_pid":"nan","started_at":1}\n' > "$MAL/.hull/dev.json"
-printf '{"schema_version":1,"source":"dev","generation":9,"session_pid":%s,"declarations":[]}\n' "$$" > "$MAL/.hull/discovery.json"
+printf '{"schema_version":1,"source":"dev","generation":9,"session_pid":%s,"declarations":[]}\n' "$SELF_PID" > "$MAL/.hull/discovery.json"
 OUTM2=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "malformed dev session_pid -> standalone" "$OUTM2" 'd["source"]=="standalone"'
 # (c) discovery.json truncated BEFORE the session_pid field
-printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1}\n' "$$" > "$MAL/.hull/dev.json"
+printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1}\n' "$SELF_PID" > "$MAL/.hull/dev.json"
 printf '{"schema_version":1,"source":"dev","generat' > "$MAL/.hull/discovery.json"
 OUTM3=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "truncated (before PID) discovery sidecar -> standalone" "$OUTM3" 'd["source"]=="standalone"'
 # (d) discovery.json truncated IMMEDIATELY AFTER a valid matching session_pid (no closing
 #     brace) -- the session_pid token alone would match, but the DOCUMENT is incomplete
-printf '{"session_pid":%s' "$$" > "$MAL/.hull/discovery.json"
+printf '{"session_pid":%s' "$SELF_PID" > "$MAL/.hull/discovery.json"
 OUTM4=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "truncated right after a matching PID -> standalone (envelope invalid)" "$OUTM4" 'd["source"]=="standalone"'
 # (e) discovery.json truncated LATER in the document (valid PID, then cut mid-structure)
-printf '{"session_pid":%s,"declarations":[{"id":"x","annota' "$$" > "$MAL/.hull/discovery.json"
+printf '{"session_pid":%s,"declarations":[{"id":"x","annota' "$SELF_PID" > "$MAL/.hull/discovery.json"
 OUTM5=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "truncated later in the document -> standalone (envelope invalid)" "$OUTM5" 'd["source"]=="standalone"'
 # sanity: a COMPLETE valid doc with a matching live PID IS served (proves the gate isn't
 # rejecting everything)
-printf '{"schema_version":1,"source":"dev","generation":7,"session_pid":%s,"declarations":[]}\n' "$$" > "$MAL/.hull/discovery.json"
+printf '{"schema_version":1,"source":"dev","generation":7,"session_pid":%s,"declarations":[]}\n' "$SELF_PID" > "$MAL/.hull/discovery.json"
 OUTM6=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "complete valid doc + live matching PID IS served (source=dev)" "$OUTM6" 'd["source"]=="dev" and d["generation"]==7'
 # (f) valid JSON with a matching PID, then an embedded NUL + trailing garbage: the COMPLETE
 #     on-disk document is invalid -> standalone (must parse/emit the exact byte length, not
 #     stop at the NUL via strlen/fputs)
-{ printf '{"schema_version":1,"source":"dev","generation":8,"session_pid":%s,"declarations":[]}' "$$"; printf '\000trailing-garbage'; } > "$MAL/.hull/discovery.json"
+{ printf '{"schema_version":1,"source":"dev","generation":8,"session_pid":%s,"declarations":[]}' "$SELF_PID"; printf '\000trailing-garbage'; } > "$MAL/.hull/discovery.json"
 OUTM7=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "embedded NUL + trailing garbage -> standalone (byte-length validation)" "$OUTM7" \
     'd["source"]=="standalone"'
