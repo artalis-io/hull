@@ -1610,7 +1610,18 @@ e2e-cache-cosmo:
 	@command -v cosmocc >/dev/null 2>&1 || { \
 		echo "SKIP: cosmocc not on PATH"; exit 0; }
 	$(MAKE) platform-cosmo
-	$(MAKE) clean
+	@# NO `$(MAKE) clean` HERE. platform-cosmo ends by copying the two
+	@# arch archives INTO $(BUILDDIR) (Makefile: `cp $(COSMO_STAGE)/*`),
+	@# and clean is `rm -rf $(BUILDDIR)` - so cleaning here deleted the
+	@# very files the next line needs, and the target died on
+	@#   No rule to make target 'build/libhull_platform.x86_64-cosmo.a'
+	@# It was also redundant: platform-cosmo cleans internally between
+	@# its two arch passes, so what it leaves is already a clean tree
+	@# plus the archives.
+	@#
+	@# The config-sentinel still fires on the flag flip below, which is
+	@# fine: it removes named Hull objects plus PLATFORM_LIB_PURGE, and
+	@# that is only libhull_platform.a - the *-cosmo.a archives survive.
 	$(MAKE) CC=cosmocc EMBED_PLATFORM=cosmo -j8
 	HULL=$(BUILDDIR)/hull sh tests/e2e_cache_cosmo.sh
 
