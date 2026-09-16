@@ -73,7 +73,7 @@ check() {  # label, workdir, launch argv...
     n=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/nonstream")
     is_aot=0
     grep -qE "cached module 'streamprobe' \(abi=[0-9]+, aot=1" "$TMP/srv.log" && is_aot=1
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     [ "$s" = "$STREAM" ] \
         && pass "$label: stream first/middle/last + chunk-index ($STREAM)" \
         || fail "$label: stream (got: $s)"

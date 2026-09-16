@@ -32,6 +32,23 @@ assert() {
     else echo "  FAIL $msg"; FAIL=$((FAIL + 1)); fi
 }
 
+# Matching against CAPTURED OUTPUT must never interpolate it into a nested
+# `sh -c`. Hull's own hints contain BACKTICKS - src/hull/linker_system.c prints
+#
+#     use the self-contained `--linker=zig` via `hull tools install zig`
+#
+# and an inner shell EXECUTES those. Measured on a Windows runner, where the lld
+# link fails and emits exactly that hint, the suite printed:
+#
+#     sh: line 1: --linker=zig: command not found
+#     sh: line 1: hull: command not found
+#
+# - fragments of hull's output running as commands. Passing the text as an
+# ARGUMENT cannot be re-parsed, whatever it contains.
+out_has()   { printf '%s' "$2" | grep -qi -- "$1"; }
+out_lacks() { ! printf '%s' "$2" | grep -qi -- "$1"; }
+nm_has()    { nm "$2" 2>/dev/null | grep -q -- "$1"; }
+
 [ -x "$HULL" ] || { echo "FAIL: $HULL not found - run 'make' first"; exit 1; }
 
 # Find a system lld. `ld.lld` is the ELF personality; on macOS `ld64.lld`.
@@ -46,6 +63,17 @@ find_lld() {
     done
     return 1
 }
+
+# A COSMO hull links cosmo-format objects; a native lld driving a native cc
+# cannot produce them, so this whole suite is inapplicable there whatever lld
+# is installed. Checked BEFORE find_lld, because the presence of an lld is not
+# the question - installing one on the Windows runner (for the wasm32 compute
+# suites) is precisely what made this suite stop skipping and start failing.
+. "$(dirname "$0")/lib/hull_rc.sh"
+if hull_is_ape "$HULL"; then
+    echo "SKIP: a cosmo hull cannot link through a native lld (needs cosmo-format objects)"
+    exit 0
+fi
 
 LLD_BIN=$(find_lld) || { echo "SKIP: no system lld found (brew install lld / apt install lld)"; exit 0; }
 LLD_DIR=$(dirname "$LLD_BIN")
@@ -73,10 +101,10 @@ esac
 echo "== hull build --linker=lld =="
 BUILD_OUT="$($HULL build "$APP" --linker=lld --no-verify-platform -o "$WORKDIR/hello_lld" 2>&1)"
 assert "build --linker=lld succeeds" [ -x "$WORKDIR/hello_lld" ]
-assert "build used the emit path" sh -c "printf '%s' \"$BUILD_OUT\" | grep -qi 'emitting app_registry'"
+assert "build used the emit path" out_has 'emitting app_registry' "$BUILD_OUT"
 # It must NOT have fallen back to the compiler (that would mean lld didn't resolve).
-assert "build did NOT fall back to the C compiler" sh -c "! printf '%s' \"$BUILD_OUT\" | grep -qi 'using the C compiler'"
-assert "binary exports hl_app_entries" sh -c "nm '$WORKDIR/hello_lld' 2>/dev/null | grep -q hl_app_entries"
+assert "build did NOT fall back to the C compiler" out_lacks 'using the C compiler' "$BUILD_OUT"
+assert "binary exports hl_app_entries" nm_has hl_app_entries "$WORKDIR/hello_lld"
 
 echo "== run the lld-linked binary =="
 run="$WORKDIR/run"; mkdir -p "$run"

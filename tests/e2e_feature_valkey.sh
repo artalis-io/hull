@@ -17,6 +17,8 @@
 # (valkey/valkey:8, falling back to redis:7); SKIPs if neither is available.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
+. "$(dirname "$0")/lib/hull_docker.sh"
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -69,13 +71,13 @@ wait_ready() {
 if command -v redis-server >/dev/null 2>&1; then
     redis-server --port "$PORT" --save '' --appendonly no >/tmp/hull_vk_feat_srv.log 2>&1 &
     SRV_PID=$!; ENGINE="redis-local"
-elif command -v docker >/dev/null 2>&1; then
+elif hull_docker_runs_linux; then
     CONTAINER="hull-valkey-feat-$$"
     if docker pull valkey/valkey:8 >/dev/null 2>&1; then IMG="valkey/valkey:8"; ENGINE="valkey-docker"
     else IMG="redis:7"; ENGINE="redis-docker"; fi
     docker run -d --name "$CONTAINER" -p "$PORT:6379" "$IMG" >/dev/null
 else
-    echo "SKIP: no redis-server and no docker; cannot run the composed app"; exit 0
+    echo "SKIP: no redis-server, and no docker able to run a linux container; cannot run the composed app"; exit 0
 fi
 wait_ready || { echo "FAIL: $ENGINE not ready on $PORT"; exit 1; }
 echo "engine: $ENGINE (port $PORT)"

@@ -82,7 +82,7 @@ run_rt() {
     pa=$(curl -sf "http://127.0.0.1:$PORT/pa?t=hello_pa" 2>/dev/null || echo FAIL)
     reuse=$(curl -sf "http://127.0.0.1:$PORT/reuse" 2>/dev/null || echo FAIL)
     mixed=$(curl -sf "http://127.0.0.1:$PORT/mixed" 2>/dev/null || echo FAIL)
-    kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     case "$pa"    in *'"out":"hello_pa"'*) pass "${runtime} persistent async runs" ;; *) fail "${runtime} persistent async (got: $pa)" ;; esac
     case "$reuse" in *'"ok":true'*)        pass "${runtime} repeated reuse (busy clears)" ;; *) fail "${runtime} repeated reuse (got: $reuse)" ;; esac
     case "$mixed" in *'"a":"A"'*'"s":"B"'*|*'"s":"B"'*'"a":"A"'*) pass "${runtime} sync after async (busy cleared)" ;; *) fail "${runtime} sync after async (got: $mixed)" ;; esac

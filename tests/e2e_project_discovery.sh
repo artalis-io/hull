@@ -20,6 +20,15 @@
 set -e
 
 HULL="${HULL:-./build/hull}"
+
+# The exit-code assertions below (usage errors are exit 2, a good run is 0)
+# read an APE's status, which a POSIX shell on Windows sees as 0 for every
+# outcome (jart/cosmopolitan#1521) - so `agent inspect` correctly REFUSING two
+# positional roots, an unknown flag, or a half-specified publish all read as
+# success, and the `single positional still exits 0` check passed without
+# proving anything.
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL"
 PASS=0
 FAIL=0
 
@@ -250,19 +259,19 @@ assert_py "missing root emits project.discovery_failed" "$OUTM" \
 
 # ── usage: multiple positional roots is an error (exit 2), not "use the last" ──
 # (|| RC=$? captures the non-zero exit without tripping `set -e`.)
-RCU=0; "$HULL" agent inspect "$OK" "$BAD" >/dev/null 2>&1 || RCU=$?
+RCU=$(hull_rc "$HULL" agent inspect "$OK" "$BAD")
 [ "$RCU" = "2" ] && pass "two positional roots -> usage error (exit 2)" || fail "multi-positional exit ($RCU, want 2)"
 # a single positional still works (exit 0)
-RCS=0; "$HULL" agent inspect "$OK" >/dev/null 2>&1 || RCS=$?
+RCS=$(hull_rc "$HULL" agent inspect "$OK")
 [ "$RCS" = "0" ] && pass "single positional root still exits 0" || fail "single-positional exit ($RCS)"
 # an unknown flag is a usage error too
-RCF=0; "$HULL" agent inspect --bogus >/dev/null 2>&1 || RCF=$?
+RCF=$(hull_rc "$HULL" agent inspect --bogus)
 [ "$RCF" = "2" ] && pass "unknown flag -> usage error (exit 2)" || fail "unknown-flag exit ($RCF, want 2)"
 
 # ── internal publish flags require BOTH --generation and --session-pid (all-or-none) ──
-RCP=0; "$HULL" agent inspect "$OK" --generation=5 >/dev/null 2>&1 || RCP=$?
+RCP=$(hull_rc "$HULL" agent inspect "$OK" --generation=5)
 [ "$RCP" = "2" ] && pass "publish: --generation without --session-pid -> exit 2" || fail "partial publish exit ($RCP, want 2)"
-RCP=0; "$HULL" agent inspect "$OK" --session-pid=5 >/dev/null 2>&1 || RCP=$?
+RCP=$(hull_rc "$HULL" agent inspect "$OK" --session-pid=5)
 [ "$RCP" = "2" ] && pass "publish: --session-pid without --generation -> exit 2" || fail "partial publish exit ($RCP, want 2)"
 # a full publish writes the CANONICAL <app_dir>/.hull/discovery.json (no caller path), tagged dev
 rm -f "$OK/.hull/discovery.json" 2>/dev/null || true
@@ -298,9 +307,9 @@ if [ -f "$DEVAPP/.hull/discovery.json" ]; then
         && pass "discovery.json + dev.json session_pid match" || fail "session_pid mismatch ($SP_DISC vs $SP_DEV)"
 
     # invalid public CLI forms MUST NOT bypass validation via the live fast path
-    RCX=0; "$HULL" agent inspect "$DEVAPP" extra >/dev/null 2>&1 || RCX=$?
+    RCX=$(hull_rc "$HULL" agent inspect "$DEVAPP" extra)
     [ "$RCX" = "2" ] && pass "live: extra positional -> exit 2 (not streamed)" || fail "live extra-positional exit ($RCX, want 2)"
-    RCX=0; "$HULL" agent inspect "$DEVAPP" --bogus >/dev/null 2>&1 || RCX=$?
+    RCX=$(hull_rc "$HULL" agent inspect "$DEVAPP" --bogus)
     [ "$RCX" = "2" ] && pass "live: unknown flag -> exit 2 (not streamed)" || fail "live unknown-flag exit ($RCX, want 2)"
     HOUT=$("$HULL" agent inspect "$DEVAPP" --help 2>/dev/null || true)
     { echo "$HOUT" | grep -q "usage:" && ! echo "$HOUT" | grep -q '"source"'; } \
