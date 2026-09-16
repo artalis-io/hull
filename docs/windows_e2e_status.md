@@ -120,6 +120,32 @@ branches on its presence.** Six do - `compute_dev`, `compute_memops`,
 `cross_build`, `linker`, `musl`, `smtp_link_seam`. Three were the target; all six
 moved.
 
+## The enforced tier
+
+`windows-source-build.yml` no longer only probes. Since the sweep above, 87
+suites are ENFORCED - the job fails if any of them regresses - in the same
+three-tier shape the unit suites use, with one difference: an e2e target either
+exits 0 or it does not, so there is no failure count to baseline.
+
+| tier | meaning |
+|------|---------|
+| ENFORCED | must exit 0. 87 suites, ~26 minutes (measured: 1191s for the 81 the sweep timed, 348s for the six confirmed after). |
+| KNOWN | expected to FAIL (`e2e-project-discovery`, `e2e-tui`). A KNOWN suite that starts PASSING also fails the job - that is how it gets promoted rather than quietly drifting. |
+| PROBE | `workflow_dispatch` only, never gates. How a suite earns a place in either tier. |
+
+**Not gated, deliberately**: `e2e-build`, `e2e-cache-cosmo`, `e2e-smtp`,
+`e2e-project-discovery-lua`. Together ~30 minutes for four suites whose causes
+are already recorded above; gating them would cost more than it protects.
+
+**Enforcing a skip is still enforcing something.** Several ENFORCED suites pass
+by skipping wholesale (the `feature-*` group, `build-flavor`, `musl`, `valkey`,
+`htmx-playwright-build`, and the `spans-*` group where no wasm32 clang exists).
+That is worth keeping - it catches the skip itself breaking - but 87 ENFORCED is
+not 87 suites' worth of Windows coverage, and should not be read as such.
+
+The gate is skipped on a dispatch that supplies `probe_e2e`, so diagnosing a
+specific suite does not pay for the whole tier first.
+
 ## Running a sweep
 
 `windows-source-build.yml` -> Run workflow, with `probe_e2e` set to a
