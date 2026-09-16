@@ -260,15 +260,19 @@ jobs:
     # fails. Lowered from 45: two hangs each burned the full 45 and produced
     # no evidence, which is precisely what the watchdog replaces.
     #
-    # Raised to 50 for the enforced e2e tier, which needs ~26 minutes on top of
+    # Raised to 65 for the enforced e2e tier, which needs ~38 minutes on top of
     # the ~15-minute build (1191s for the 81 suites the sweep timed, plus 348s
-    # for the six confirmed on main afterwards). That does NOT give back what lowering it bought: the reason
+    # for the six confirmed on main afterwards, plus 33s for e2e-smtp and 679s
+    # for e2e-cache-cosmo). e2e-cache-cosmo is over half the increase on its
+    # own: it rebuilds platform-cosmo and a cosmo hull before it asserts
+    # anything. If that cost stops being worth paying on every push, the move
+    # is to run THAT suite on the schedule only - not to stop gating it. That does NOT give back what lowering it bought: the reason
     # for 25 was that a hang burned the cap and produced nothing, and both
     # phases are individually bounded - the build keeps its watchdog, and every
     # e2e suite runs under `timeout -k 15 300`, so no single one can sit here
     # spending the budget. What is longer is the honest work, not the failure
     # mode.
-    timeout-minutes: 50
+    timeout-minutes: 65
 
     steps:
       # Both gits on this runner must agree about line endings, or a freshly
@@ -1042,7 +1046,7 @@ jobs:
           E2E_ENFORCED="e2e-agent e2e-agent-api e2e-analyze e2e-aot-cache e2e-attachment
                     e2e-auth-flows e2e-auth-flows-2fa
                     e2e-auth-flows-hardening e2e-blob e2e-build-flavor
-                    e2e-ca-bundle e2e-cache e2e-cache-concurrent
+                    e2e-ca-bundle e2e-cache e2e-cache-concurrent e2e-cache-cosmo
                     e2e-cache-module e2e-cli e2e-client-ip-parity
                     e2e-compiler-free e2e-composed-sig e2e-compute
                     e2e-compute-aot-shared-heap e2e-compute-async-trap
@@ -1074,10 +1078,24 @@ jobs:
 
           rc_step=0
 
+          # Per-suite budget. 300s protects the gate from a hang and is ample for
+          # 88 of the 89 suites. e2e-cache-cosmo is the exception on PURPOSE: it
+          # rebuilds platform-cosmo AND a cosmo hull before asserting anything, so
+          # it is a toolchain rebuild wearing a suite's clothes - measured 679s on
+          # this runner, green. Raising the cap for EVERY suite to accommodate one
+          # would give back exactly what the 300 buys (no single suite can sit here
+          # spending the budget), so the exception is named rather than global.
+          e2e_limit() {
+            case "$1" in
+              e2e-cache-cosmo) echo 900 ;;
+              *)               echo 300 ;;
+            esac
+          }
+
           echo "================== e2e ENFORCED ===================="
           for t in $E2E_ENFORCED; do
             start=$(date +%s)
-            if timeout -k 15 300 "$MAKE_BIN" "$t" CC=cosmocc AR="$AR" HL_OPT=-O0                  HL_ENABLE_WASM=1 > "e2e-$t.log" 2>&1; then
+            if timeout -k 15 "$(e2e_limit "$t")" "$MAKE_BIN" "$t" CC=cosmocc AR="$AR" HL_OPT=-O0                  HL_ENABLE_WASM=1 > "e2e-$t.log" 2>&1; then
               echo "ok        $t  ($(( $(date +%s) - start ))s)"
             else
               echo "FAIL      $t  ($(( $(date +%s) - start ))s) - this suite must be clean"
@@ -1088,7 +1106,7 @@ jobs:
 
           echo "==================== e2e KNOWN ====================="
           for t in $E2E_KNOWN; do
-            if timeout -k 15 300 "$MAKE_BIN" "$t" CC=cosmocc AR="$AR" HL_OPT=-O0                  HL_ENABLE_WASM=1 > "e2e-$t.log" 2>&1; then
+            if timeout -k 15 "$(e2e_limit "$t")" "$MAKE_BIN" "$t" CC=cosmocc AR="$AR" HL_OPT=-O0                  HL_ENABLE_WASM=1 > "e2e-$t.log" 2>&1; then
               echo "IMPROVED  $t now PASSES - promote it to E2E_ENFORCED above."
               rc_step=1
             else

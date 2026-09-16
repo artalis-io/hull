@@ -29,7 +29,7 @@ The previous sweep (2026-09-13, before any fixes) was **58 ok / 34 FAILED /
 |-------|---------|-------|
 | `e2e-agent` | fixed | Was read as "cannot reach the dev server". It reached it fine - curl fetches `/health` immediately before. Keel's `error 14` is `KL_ERR_URL`, not a connect error: the shell rewrites the bare `/health` ARGUMENT into `C:/Program Files/Git/health` before hull runs, so the URL is malformed. Scoped `MSYS2_ARG_CONV_EXCL` for those calls; the error now names the URL it tried. |
 | `e2e-build` | TIMEOUT | `make: *** wait: No child processes.  Stop.` at Step 0, before any assertion. make's own job control failing on this host, not a Hull defect and not something the suite does. Undiagnosed; ~650s, so it needs a dispatch of its own. |
-| `e2e-cache-cosmo` | FAILED | **The target deletes its own prerequisite**, and not only on Windows. `mk/tests.mk` runs `$(MAKE) platform-cosmo` (which leaves `build/libhull_platform.{x86_64,aarch64}-cosmo.a`), then `$(MAKE) clean` (which is `rm -rf $(BUILDDIR)`), then a build needing those archives - hence `No rule to make target 'build/libhull_platform.x86_64-cosmo.a'`. No CI job runs `e2e-cache-cosmo` (0 references in ci.yml), which is why it went unnoticed. Unverified fix, because confirming it costs two full cosmo platform builds: drop the intervening `clean`, but note the config-sentinel may wipe `build/` on the flag flip anyway. Must still be probed ALONE - it wipes the shared build tree. |
+| `e2e-cache-cosmo` | **now PASSES (679s), ENFORCED** | The target deleted its own prerequisite, and not only on Windows: `mk/tests.mk` ran `$(MAKE) platform-cosmo` (which leaves `build/libhull_platform.{x86_64,aarch64}-cosmo.a`) and then `$(MAKE) clean` (`rm -rf $(BUILDDIR)`), so the next line died on `No rule to make target 'build/libhull_platform.x86_64-cosmo.a'`. The clean was redundant anyway - `platform-cosmo` already cleans between its two arch passes. Fixed during the sweep, but NOTHING RAN IT afterwards, on any platform, so 'fixed' stayed an untested claim until this measurement. Now gated on Windows, where cosmo is the native case. It carries a NAMED 900s per-suite budget rather than the shared 300s: it rebuilds platform-cosmo and a cosmo hull before asserting anything, so it is a toolchain rebuild wearing a suite's clothes, and raising the cap globally would give back the hang protection the 300s buys. |
 | `e2e-compiler-free` | TIMEOUT | The `sh -c` injection below was what HUNG it; with that fixed it is a clean FAILED at 13s, and its dead cosmo guard (see cause 4) is why it ran at all. |
 | `e2e-compute` | FAILED | Dies on `Error 143` (SIGTERM) after its assertions pass. Undiagnosed. |
 | `e2e-feature-valkey` | FAILED | Probably the docker-cannot-run-linux-containers cause its sibling `e2e-valkey` had, but its log has not been read. |
@@ -133,8 +133,8 @@ exits 0 or it does not, so there is no failure count to baseline.
 | KNOWN | expected to FAIL (`e2e-project-discovery`, `e2e-tui`). A KNOWN suite that starts PASSING also fails the job - that is how it gets promoted rather than quietly drifting. |
 | PROBE | `workflow_dispatch` only, never gates. How a suite earns a place in either tier. |
 
-**Not gated, deliberately**: `e2e-build`, `e2e-cache-cosmo`,
-`e2e-project-discovery-lua`. Together ~30 minutes for four suites whose causes
+**Not gated, deliberately**: `e2e-build` and
+`e2e-project-discovery-lua`. Together ~17 minutes for two suites whose causes
 are already recorded above; gating them would cost more than it protects.
 
 **Enforcing a skip is still enforcing something.** Several ENFORCED suites pass
