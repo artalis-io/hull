@@ -154,21 +154,47 @@ WORKDIR=$(mktemp -d)
 RC_OUT="$WORKDIR/.hull_rc_out"
 hull_rc_init "$HULL"
 
-# A cosmo hull embeds cosmo-format platform archives, so ONLY cosmocc can link a
-# working binary from one; `cc` compiles a native object against cosmo archives
+# Which compiler can THIS hull actually drive? Ask hull, do not guess.
+#
+# A cosmo hull embeds cosmo-format platform archives, so only cosmocc can link a
+# working binary from one - `cc` compiles a native object against cosmo archives
 # and fails. The Windows job builds hull with CC=cosmocc, but this suite never
-# looked at it - it hard-coded `cc`, so every `hull build` here failed. Paired
-# with the shifted exit status above, the two defects hid each other: the wrong
-# compiler produced nothing, and the status could not report it.
+# looked at it: it hard-coded `cc`, so every `hull build` here failed while
+# `check_exit "build exits 0"` passed anyway, because an APE's status is shifted
+# (lib/hull_rc.sh). Two defects hiding each other.
+#
+# Naming cosmocc is still not enough on Windows. The cosmocc.zip driver is a
+# `#!/bin/sh` script: make runs it through a shell, but a cosmo APE cannot exec
+# a shebang - measured, and it fails even for an absolute path that exists.
+# Hull ships the answer (`hull tools install cosmocc` bundles a busybox to drive
+# that script - see src/hull/tools_install.c), but a test must not install a
+# toolchain over the network, so when no usable compiler is present this suite
+# SKIPS the build-dependent steps rather than reporting 42 failures that all
+# restate one missing tool.
+#
+# The gate asks hull for its own verdict instead of probing a proxy: `hull
+# doctor --json` already computes build_compiler for exactly this question, and
+# it is compiler-SPECIFIC (a cosmo hull answers cosmocc, a native one cc/gcc/
+# clang), so this stays correct on every host.
 if [ -z "${BUILD_CC:-}" ] && hull_is_ape "$HULL"; then
-    if command -v cosmocc >/dev/null 2>&1; then
-        BUILD_CC=cosmocc
-    else
-        echo "e2e_build: hull is a cosmo APE but cosmocc is not on PATH - skipping"
-        exit 0
-    fi
+    BUILD_CC=cosmocc
 fi
 BUILD_CC="${BUILD_CC:-cc}"
+
+CAN_BUILD=1
+BUILD_SKIP_WHY=""
+case $("$HULL" doctor --json 2>/dev/null || true) in
+    *'"build_compiler":null'*)
+        CAN_BUILD=0
+        BUILD_SKIP_WHY="hull doctor reports build_compiler=null - no compiler this hull can drive. On Windows the cosmocc.zip driver is a #!/bin/sh script a cosmo APE cannot exec; the supported fix is 'hull tools install cosmocc', which bundles a busybox to drive it."
+        ;;
+esac
+
+# Announce it once, up front, rather than at each skipped step.
+if [ "$CAN_BUILD" = 0 ]; then
+    echo ""
+    echo "SKIP: build-dependent steps - $BUILD_SKIP_WHY"
+fi
 cd "$WORKDIR"
 
 # ── Step 1: hull keygen + sign-platform ──────────────────────────────
@@ -254,6 +280,20 @@ check_contains "manifest has fs.read" "$MANIFEST_OUT" "data/"
 check_contains "manifest has fs.write" "$MANIFEST_OUT" "uploads/"
 check_contains "manifest has env" "$MANIFEST_OUT" "PORT"
 check_contains "manifest has hosts" "$MANIFEST_OUT" "api.stripe.com"
+
+if [ "$CAN_BUILD" = 0 ]; then
+    # Everything below needs a working `hull build`. Reporting 42 failures that
+    # all restate one missing tool would bury the steps that DID run, so stop
+    # with the reason stated once. The skip is loud on purpose: a suite that is
+    # green because it tested almost nothing must say so.
+    echo ""
+    echo "SKIPPED: Steps 4-18 (hull build / verify / inspect / eject) - $BUILD_SKIP_WHY"
+    echo ""
+    echo "$PASS/$((PASS + FAIL)) e2e build pipeline tests passed (build-dependent steps skipped)"
+    if [ "$FAIL" -gt 0 ]; then exit 1; fi
+    exit 0
+fi
+
 
 # ── Step 4: hull build (unsigned) ─────────────────────────────────────
 
