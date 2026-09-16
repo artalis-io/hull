@@ -259,7 +259,16 @@ jobs:
     # what stops a hang any more - it is here in case the watchdog itself
     # fails. Lowered from 45: two hangs each burned the full 45 and produced
     # no evidence, which is precisely what the watchdog replaces.
-    timeout-minutes: 25
+    #
+    # Raised to 50 for the enforced e2e tier, which needs ~26 minutes on top of
+    # the ~15-minute build (1191s for the 81 suites the sweep timed, plus 348s
+    # for the six confirmed on main afterwards). That does NOT give back what lowering it bought: the reason
+    # for 25 was that a hang burned the cap and produced nothing, and both
+    # phases are individually bounded - the build keeps its watchdog, and every
+    # e2e suite runs under `timeout -k 15 300`, so no single one can sit here
+    # spending the budget. What is longer is the honest work, not the failure
+    # mode.
+    timeout-minutes: 50
 
     steps:
       # Both gits on this runner must agree about line endings, or a freshly
@@ -981,6 +990,121 @@ jobs:
           echo ""
           echo "probe-e2e: informational only; this step does not gate the job."
           exit 0
+
+      # ── e2e ENFORCED ────────────────────────────────────────────────────
+      #
+      # The probe above never gates, which was right while nothing was known to
+      # pass. 87 suites now do, and nothing was stopping them regressing: that is
+      # not hypothetical, e2e-linker silently went green-BY-SKIPPING and then
+      # broke the moment lld appeared on this runner.
+      #
+      # Same three-tier shape as the unit suites above, with one difference: an
+      # e2e target either exits 0 or it does not, so there is no failure count to
+      # baseline. ENFORCED must exit 0. KNOWN is expected to FAIL, and a KNOWN
+      # suite that starts passing fails the job too - that is how it gets
+      # promoted rather than quietly drifting.
+      #
+      # EVERY suite here was MEASURED, not assumed: the 93-suite sweep of
+      # 2026-09-15 plus the per-suite probes that followed each fix. The map,
+      # with what is known about every failure, is docs/windows_e2e_status.md.
+      #
+      # NOT GATED, and deliberately: e2e-build (~650s, and it dies in make's own
+      # job control before any assertion), e2e-cache-cosmo (~590s, and the target
+      # deletes its own prerequisite - see the doc), e2e-smtp (times out at
+      # 600s), e2e-project-discovery-lua (~350s). Together they are ~30 minutes
+      # for four suites whose causes are already recorded; gating them would cost
+      # more than it protects.
+      #
+      # COST, measured rather than estimated: 1191s for the 81 suites the sweep
+      # timed, plus 348s for the six confirmed on main afterwards = ~26 minutes,
+      # on top of the ~15-minute build. Hence the 50-minute cap, with headroom.
+      # Nightly and not required, so the wall clock is affordable; #462's wedge
+      # exposure is unchanged, being a per-compile risk in the build phase.
+      #
+      # The per-suite spread is wide and not where you would guess:
+      # e2e-feature-valkey 189s and e2e-smtp-link-seam 107s dominate, and both
+      # SKIP - they spend that time building before deciding they cannot run.
+      - name: e2e suites - ENFORCED tier
+        # Skipped when a probe list was supplied, because that dispatch is a
+        # DIAGNOSIS - you are asking about specific suites and do not want ~24
+        # minutes of gate in front of the answer. The schedule passes no probe
+        # list, so the nightly always gates; a dispatch with the field empty
+        # runs it too, which is how you exercise the gate on demand.
+        if: inputs.probe_e2e == ''
+        shell: msys2 {0}
+        run: |
+          set -uo pipefail
+          export PATH="$PATH:$PWD/cosmo/bin:/ucrt64/bin"
+          if [ -n "${RUNNER_TEMP:-}" ]; then
+            export TMPDIR="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")"
+          fi
+
+          E2E_ENFORCED="e2e-agent e2e-agent-api e2e-analyze e2e-aot-cache e2e-attachment
+                    e2e-auth-flows e2e-auth-flows-2fa
+                    e2e-auth-flows-hardening e2e-blob e2e-build-flavor
+                    e2e-ca-bundle e2e-cache e2e-cache-concurrent
+                    e2e-cache-module e2e-cli e2e-client-ip-parity
+                    e2e-compiler-free e2e-composed-sig e2e-compute
+                    e2e-compute-aot-shared-heap e2e-compute-async-trap
+                    e2e-compute-dev e2e-compute-headers e2e-compute-memory64
+                    e2e-config-parity e2e-context e2e-cross-build
+                    e2e-csrf-cookie-fallback e2e-dynamic-connections
+                    e2e-email e2e-examples e2e-feature-image
+                    e2e-feature-runtime e2e-feature-sqlite e2e-feature-tls
+                    e2e-feature-valkey e2e-feature-wasm e2e-hex-parity
+                    e2e-htmx-playwright e2e-htmx-playwright-build e2e-http
+                    e2e-hypermedia-photos-upload e2e-install e2e-jobs
+                    e2e-jwt-asym e2e-kv e2e-linker e2e-linker-zig
+                    e2e-logx-parity e2e-manifest-extract-isolation e2e-mcp
+                    e2e-migrate e2e-modular-resolution e2e-multipart e2e-musl
+                    e2e-musl-cross e2e-mysql e2e-named-connections
+                    e2e-naming-aliases e2e-oauth e2e-onboarding
+                    e2e-path-parity e2e-persistent-async e2e-postgres
+                    e2e-ratelimit-parity e2e-retry e2e-sandbox
+                    e2e-sign-in-events e2e-smtp-link-seam e2e-spans-async
+                    e2e-spans-bind e2e-spans-example e2e-spans-hugefile
+                    e2e-spans-mmap e2e-spans-multi e2e-stream-meta
+                    e2e-sync-spans e2e-template-parity e2e-templates
+                    e2e-test-harness e2e-token-interop e2e-tools e2e-totp
+                    e2e-update e2e-uuid e2e-validate-parity e2e-valkey"
+
+          # Expected to FAIL, with the cause recorded in the doc. Cheap enough to
+          # keep running: project-discovery ~29s, tui ~28s.
+          E2E_KNOWN="e2e-project-discovery e2e-tui"
+
+          rc_step=0
+
+          echo "================== e2e ENFORCED ===================="
+          for t in $E2E_ENFORCED; do
+            start=$(date +%s)
+            if timeout -k 15 300 "$MAKE_BIN" "$t" CC=cosmocc AR="$AR" HL_OPT=-O0                  HL_ENABLE_WASM=1 > "e2e-$t.log" 2>&1; then
+              echo "ok        $t  ($(( $(date +%s) - start ))s)"
+            else
+              echo "FAIL      $t  ($(( $(date +%s) - start ))s) - this suite must be clean"
+              tail -30 "e2e-$t.log" | sed 's/^/    /'
+              rc_step=1
+            fi
+          done
+
+          echo "==================== e2e KNOWN ====================="
+          for t in $E2E_KNOWN; do
+            if timeout -k 15 300 "$MAKE_BIN" "$t" CC=cosmocc AR="$AR" HL_OPT=-O0                  HL_ENABLE_WASM=1 > "e2e-$t.log" 2>&1; then
+              echo "IMPROVED  $t now PASSES - promote it to E2E_ENFORCED above."
+              rc_step=1
+            else
+              echo "known     $t (expected to fail; see docs/windows_e2e_status.md)"
+            fi
+          done
+
+          if [ "$rc_step" -ne 0 ]; then
+            echo ""
+            echo "Windows e2e: FAILED (see above)."
+          else
+            echo ""
+            echo "Windows e2e: enforced clean, known failures unchanged."
+          fi
+          exit "$rc_step"
+
 
       # The probe echoes only tail -30 of each suite, which is enough to see
       # THAT a suite failed and almost never enough to see WHY: the 93-suite
