@@ -1010,9 +1010,9 @@ jobs:
       #
       # NOT GATED, and deliberately: e2e-build (~650s, and it dies in make's own
       # job control before any assertion), e2e-cache-cosmo (~590s, and the target
-      # deletes its own prerequisite - see the doc), e2e-smtp (times out at
-      # 600s), e2e-project-discovery-lua (~350s). Together they are ~30 minutes
-      # for four suites whose causes are already recorded; gating them would cost
+      # deletes its own prerequisite - see the doc),
+      # e2e-project-discovery-lua (~350s). Together ~20 minutes
+      # for three suites whose causes are already recorded; gating them would cost
       # more than it protects.
       #
       # COST, measured rather than estimated: 1191s for the 81 suites the sweep
@@ -1061,7 +1061,7 @@ jobs:
                     e2e-naming-aliases e2e-oauth e2e-onboarding
                     e2e-path-parity e2e-persistent-async e2e-postgres
                     e2e-ratelimit-parity e2e-retry e2e-sandbox
-                    e2e-sign-in-events e2e-smtp-link-seam e2e-spans-async
+                    e2e-sign-in-events e2e-smtp e2e-smtp-link-seam e2e-spans-async
                     e2e-spans-bind e2e-spans-example e2e-spans-hugefile
                     e2e-spans-mmap e2e-spans-multi e2e-stream-meta
                     e2e-sync-spans e2e-template-parity e2e-templates
