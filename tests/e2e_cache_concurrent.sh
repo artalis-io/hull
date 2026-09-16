@@ -187,7 +187,30 @@ for i in $(seq 1 4); do
         >/dev/null 2>"$TMPHOME/mixed_js_$i.err" &
     pids="$pids $!"
 done
+# How many JS bytecode blobs exist right now. Used both to WAIT below and to
+# assert on afterwards, so the two cannot drift apart.
+js_blob_count() {
+    find "$TMPHOME/.hull/blobs/runtime/js-bytecode/blobs" \
+         -mindepth 2 -maxdepth 2 -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+# `sleep 2` alone is a guess about how long 8 concurrent servers need to
+# compile and flush their bytecode, and it is LOAD-DEPENDENT: this suite
+# passed 3/3 in a three-suite probe batch and FAILED in the enforced tier,
+# where it runs after 80+ suites on a much warmer runner. The assertion that
+# broke was "JS cache also populated under mixed load".
+#
+# So keep the 2s floor - the crash check below wants the servers to have
+# actually run - then WAIT for the condition the assertion depends on,
+# bounded at 15s more. It proceeds the moment the cache is written, so a
+# quiet runner pays nothing, and a genuinely broken JS cache still FAILS
+# rather than hanging.
 sleep 2
+waited=0
+while [ "$(js_blob_count)" -eq 0 ] && [ "$waited" -lt 30 ]; do
+    sleep 0.5
+    waited=$((waited + 1))
+done
 for pid in $pids; do kill -INT "$pid" 2>/dev/null || true; done
 sleep 1
 for pid in $pids; do
@@ -206,9 +229,7 @@ done
     && pass "no crashes with mixed-runtime concurrent writers" \
     || fail "$mixed_errors workers crashed under mixed load"
 
-js_entries=$(find "$TMPHOME/.hull/blobs/runtime/js-bytecode/blobs" \
-                  -mindepth 2 -maxdepth 2 -type f 2>/dev/null \
-                  | wc -l | tr -d ' ')
+js_entries=$(js_blob_count)
 [ "$js_entries" -gt 0 ] \
     && pass "JS cache also populated under mixed load ($js_entries)" \
     || fail "JS cache not populated under mixed load"
