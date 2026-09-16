@@ -31,12 +31,49 @@ runs:
   steps:
     - name: Build reproducible container
       shell: bash
+      # Retry the BUILD, not just apt inside it.
+      #
+      # Dockerfile.build already passes Acquire::Retries=5, and its comment
+      # explains why: snapshot.ubuntu.com is a single Canonical service with no
+      # public mirror, so a transient 5xx cannot be routed around. Those retries
+      # happen INSIDE one apt invocation; when they are exhausted the layer
+      # build exits 100 and the whole job fails, which apt cannot help with.
+      #
+      # Measured 2026-09-16: four unrelated PRs failed here in one day - one
+      # touching a shell test script, one a workflow and a doc - and every one
+      # passed on a manual re-run minutes later. That is the exact shape a
+      # delayed automatic retry absorbs, and it was costing a re-run per PR.
+      #
+      # Safe here in a way it would not be for an ordinary image: the base is
+      # digest-pinned and apt is snapshot-pinned, so attempt N builds the same
+      # image as attempt 1 or fails the same way. It cannot paper over a real
+      # Dockerfile error either - that fails identically three times and still
+      # stops the job.
+      #
+      # It does NOT defend against an OUTAGE. On 2026-09-08 the service
+      # returned 502/503 across all three of its IPs for hours; three attempts
+      # over ~45s would have failed the same. That still needs something that
+      # skips the network, and the layer cache tried at hull#473 evicted the
+      # artifacts the reproducibility compare depends on, so it remains open.
       run: |
-        docker build \
-          --build-arg SOURCE_DATE_EPOCH="${{ inputs.source-date-epoch }}" \
-          -t hull-build:pinned \
-          -f .github/docker/Dockerfile.build \
-          .github/docker
+        for attempt in 1 2 3; do
+          if docker build \
+               --build-arg SOURCE_DATE_EPOCH="${{ inputs.source-date-epoch }}" \
+               -t hull-build:pinned \
+               -f .github/docker/Dockerfile.build \
+               .github/docker; then
+            [ "$attempt" = 1 ] || echo "container build succeeded on attempt $attempt"
+            break
+          fi
+          if [ "$attempt" = 3 ]; then
+            echo "::error::reproducible container build failed 3 times - if this is"
+            echo "::error::snapshot.ubuntu.com returning 5xx, see the note in"
+            echo "::error::.github/docker/Dockerfile.build: retries do not cover an outage"
+            exit 1
+          fi
+          echo "container build failed (attempt $attempt/3); retrying in $((attempt * 15))s"
+          sleep "$((attempt * 15))"
+        done
     - name: Run in reproducible container
       shell: bash
       # The payload is passed as an environment variable and eval'd INSIDE the
