@@ -146,7 +146,10 @@ int hl_cap_db_init(sqlite3 *db)
      *
      * SQLite is entirely correct in rollback mode - just slower under
      * concurrent readers - so a lost race now costs performance instead of
-     * startup. The mode is a property of the FILE and persists, so whichever
+     * startup. Note the loser is not necessarily IN rollback mode:
+     * journal mode is a property of the FILE, so once the winner converts
+     * it, a connection whose own pragma failed is still using WAL. It
+     * failed to SET the mode, not to get it. The mode is a property of the FILE and persists, so whichever
      * process wins converts it for everyone, and subsequent opens simply find
      * it already WAL. Hull's default DSN is the relative path data.db
      * (serve.c), which is why processes sharing a working directory share a
@@ -154,8 +157,8 @@ int hl_cap_db_init(sqlite3 *db)
     int wal = (sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) == SQLITE_OK);
     if (!wal) {
         fprintf(stderr,
-                "hull: sqlite could not enable WAL (%s); continuing in rollback "
-                "mode - correct, but slower under concurrent readers\n",
+                "hull: sqlite could not set WAL (%s); continuing with the "
+                "database's current journal mode\n",
                 sqlite3_errmsg(db));
     }
 
