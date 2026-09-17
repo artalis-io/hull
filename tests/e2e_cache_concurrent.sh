@@ -75,6 +75,24 @@ for i in $(seq 1 $NUM_WORKERS); do
         head -5 "$TMPHOME/worker_$i.err"
     fi
 done
+# The check above greps for four crash words, so a worker that fails to boot
+# for any other reason passes it - which is how 7 of 8 dead workers read as
+# "no worker crashed" on Windows while the cache assertions below passed on
+# the survivor's output alone. Assert the premise of the whole suite instead:
+# that the workers this section claims to race actually ran.
+worker_up=0
+for i in $(seq 1 $NUM_WORKERS); do
+    grep -q "listening on" "$TMPHOME/worker_$i.err" 2>/dev/null \
+        && worker_up=$((worker_up + 1))
+done
+[ "$worker_up" -eq "$NUM_WORKERS" ] \
+    && pass "all $NUM_WORKERS workers actually started ($worker_up/$NUM_WORKERS)" \
+    || { fail "only $worker_up/$NUM_WORKERS workers started - the concurrency premise is unmet"
+         for i in $(seq 1 $NUM_WORKERS); do
+             grep -q "listening on" "$TMPHOME/worker_$i.err" 2>/dev/null && continue
+             echo "      worker_$i: $(head -2 "$TMPHOME/worker_$i.err" 2>/dev/null | tr '\n' ' ')"
+         done; }
+
 [ "$worker_errors" -eq 0 ] \
     && pass "no worker crashed under concurrent cache writes" \
     || fail "$worker_errors workers crashed"
@@ -169,13 +187,14 @@ entries_after=$(find "$CACHE_ROOT" -mindepth 2 -maxdepth 2 -type f \
 # js-bytecode shouldn't interfere even though they share the
 # same allocator + sha helpers.
 #
-# BOTH apps must be DB-FREE. This used examples/rest_api/app.js against a
-# db-free examples/hello/app.lua, and hello/app.lua is db-free while
-# hello/app.js is not - an accidental asymmetry that made this section a
-# test of concurrent SQLite opens, not of cache isolation. On Windows all
-# four JS workers died with "failed to open database connection" before
-# compiling a single module, so js-bytecode stayed empty and the assertion
-# below failed for a reason that has nothing to do with caches.
+# NOTE (Windows): this section's premise - that 8 workers run concurrently -
+# is NOT met there. Measured: only 1 of 8 starts; the other 7 die with
+# "failed to open database connection" before compiling anything. With no
+# -d the default DSN is :memory:, which is private per process and cannot
+# be contended, so that message is a symptom of concurrent APE startup, not
+# of database sharing. js-bytecode stays empty simply because no JS worker
+# was the survivor. Tracked separately - it is a Hull-on-Windows question,
+# not a cache one.
 echo ""
 echo "── mixed-runtime parallel ──"
 
@@ -190,7 +209,7 @@ for i in $(seq 1 4); do
 done
 for i in $(seq 1 4); do
     PORT=$((19950 + i))
-    HOME="$TMPHOME" "$HULL" examples/chat/app.js \
+    HOME="$TMPHOME" "$HULL" examples/rest_api/app.js \
         -p $PORT --no-sandbox --no-migrate \
         >/dev/null 2>"$TMPHOME/mixed_js_$i.err" &
     pids="$pids $!"
