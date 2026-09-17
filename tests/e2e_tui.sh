@@ -155,6 +155,52 @@ pty_driver_works() {
     esac
 }
 
+# ── ENOTTY refusals (no pty needed) ──────────────────────────────────
+#
+# These drive hull directly with stdin closed and assert it refuses, so
+# they need no terminal and no driver. They used to sit INSIDE the pty
+# block below, which meant a host without forkpty lost six real
+# assertions along with the ones it genuinely cannot run. Kept out here,
+# every host checks the refusal paths.
+ENOTTY_TMP=$(mktemp -d 2>/dev/null || mktemp -d -t hullenotty)
+cat > "${ENOTTY_TMP}/app.lua" <<'ENOTTYAPP'
+app.manifest({ modules = {} })
+app.main(function() return 0 end)
+ENOTTYAPP
+echo ""
+echo "--- ENOTTY refusals (no pty required) ---"
+if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" doctor --tui)" = 0 ]; then
+    fail "hull doctor --tui without a tty should exit non-zero"
+else
+    pass "hull doctor --tui without a tty exits with a helpful error"
+fi
+if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" agent context --interactive)" = 0 ]; then
+    fail "hull agent context --interactive without a tty should exit non-zero"
+else
+    pass "hull agent context --interactive without a tty exits with a helpful error"
+fi
+if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" agent errors --tui)" = 0 ]; then
+    fail "hull agent errors --tui without a tty should exit non-zero"
+else
+    pass "hull agent errors --tui without a tty exits with a helpful error"
+fi
+if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" dev --tui "${ENOTTY_TMP}/app.lua")" = 0 ]; then
+    fail "hull dev --tui without a tty should exit non-zero"
+else
+    pass "hull dev --tui without a tty exits with a helpful error"
+fi
+if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" modules available --tui)" = 0 ]; then
+    fail "hull modules available --tui without a tty should exit non-zero"
+else
+    pass "hull modules available --tui without a tty exits with a helpful error"
+fi
+if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" migrate status --tui)" = 0 ]; then
+    fail "hull migrate status --tui without a tty should exit non-zero"
+else
+    pass "hull migrate status --tui without a tty exits with a helpful error"
+fi
+rm -rf "${ENOTTY_TMP}"
+
 if ! pty_driver_works; then
     echo "--- interactive (skipped) ---"
     if [ -x "${DRIVE}" ]; then
@@ -275,11 +321,6 @@ else
     esac
 
     # Non-tty path: should print a helpful message and exit non-zero.
-    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" doctor --tui)" = 0 ]; then
-        fail "hull doctor --tui without a tty should exit non-zero"
-    else
-        pass "hull doctor --tui without a tty exits with a helpful error"
-    fi
 
     # ── hull agent context --interactive (Phase 3 dogfood) ─────────
     echo "--- hull agent context --interactive ---"
@@ -325,16 +366,6 @@ else
     esac
 
     # ENOTTY rejection paths for both.
-    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" agent context --interactive)" = 0 ]; then
-        fail "hull agent context --interactive without a tty should exit non-zero"
-    else
-        pass "hull agent context --interactive without a tty exits with a helpful error"
-    fi
-    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" agent errors --tui)" = 0 ]; then
-        fail "hull agent errors --tui without a tty should exit non-zero"
-    else
-        pass "hull agent errors --tui without a tty exits with a helpful error"
-    fi
 
     # ── hull dev --tui (Phase 3 headline) ──────────────────────────
     echo "--- hull dev --tui ---"
@@ -389,11 +420,6 @@ APP
             ;;
     esac
 
-    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" dev --tui "${DEV_TMP}/app.lua")" = 0 ]; then
-        fail "hull dev --tui without a tty should exit non-zero"
-    else
-        pass "hull dev --tui without a tty exits with a helpful error"
-    fi
 
     # ── hull modules available --tui ──────────────────────────────
     echo "--- hull modules available --tui ---"
@@ -424,11 +450,6 @@ APP
             ;;
     esac
 
-    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" modules available --tui)" = 0 ]; then
-        fail "hull modules available --tui without a tty should exit non-zero"
-    else
-        pass "hull modules available --tui without a tty exits with a helpful error"
-    fi
 
     # ── tui_repl example ──────────────────────────────────────────
     echo "--- tui_repl ---"
@@ -508,11 +529,6 @@ SQL
     esac
     rm -rf "${MIG_DIR}"
 
-    if [ "$(HULL_RC_STDIN=/dev/null hull_rc "${HULL_BIN}" migrate status --tui)" = 0 ]; then
-        fail "hull migrate status --tui without a tty should exit non-zero"
-    else
-        pass "hull migrate status --tui without a tty exits with a helpful error"
-    fi
 
     # ── tui_dashboard example (multi-pane + tui.frame + mouse) ────
     echo "--- tui_dashboard ---"
