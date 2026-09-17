@@ -421,6 +421,15 @@ jobs:
       # SMTP e2e in CI was the link seam. Linux is where this one earns its
       # keep: the graceful-shutdown legs (bounded drain, exactly one
       # terminal:cancelled) need a deliverable SIGINT, which Windows skips.
+      # Concurrent cache writers. Like e2e-smtp before it, this suite ran in
+      # exactly one place - the Windows enforced tier - so its POSIX behaviour
+      # has never been observed. It found a real defect on Windows (four JS
+      # workers dying on a shared SQLite open, reported as "no crashes"), and
+      # there was no Linux baseline to say whether that was platform-specific.
+      - name: Concurrent cache-writer E2E tests
+        timeout-minutes: 4
+        run: make e2e-cache-concurrent
+
       - name: Model-2 async SMTP E2E tests
         timeout-minutes: 6
         run: make e2e-smtp

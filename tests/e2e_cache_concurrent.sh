@@ -168,6 +168,14 @@ entries_after=$(find "$CACHE_ROOT" -mindepth 2 -maxdepth 2 -type f \
 # store isolation: parallel writers to lua-bytecode and
 # js-bytecode shouldn't interfere even though they share the
 # same allocator + sha helpers.
+#
+# BOTH apps must be DB-FREE. This used examples/rest_api/app.js against a
+# db-free examples/hello/app.lua, and hello/app.lua is db-free while
+# hello/app.js is not - an accidental asymmetry that made this section a
+# test of concurrent SQLite opens, not of cache isolation. On Windows all
+# four JS workers died with "failed to open database connection" before
+# compiling a single module, so js-bytecode stayed empty and the assertion
+# below failed for a reason that has nothing to do with caches.
 echo ""
 echo "── mixed-runtime parallel ──"
 
@@ -182,7 +190,7 @@ for i in $(seq 1 4); do
 done
 for i in $(seq 1 4); do
     PORT=$((19950 + i))
-    HOME="$TMPHOME" "$HULL" examples/rest_api/app.js \
+    HOME="$TMPHOME" "$HULL" examples/chat/app.js \
         -p $PORT --no-sandbox --no-migrate \
         >/dev/null 2>"$TMPHOME/mixed_js_$i.err" &
     pids="$pids $!"
@@ -228,6 +236,24 @@ done
 [ "$mixed_errors" -eq 0 ] \
     && pass "no crashes with mixed-runtime concurrent writers" \
     || fail "$mixed_errors workers crashed under mixed load"
+
+# The check above greps for four crash words, so a worker that fails to boot
+# for ANY other reason passes it. That is how four dead JS workers
+# ("failed to open database connection") were read as "no crashes" while the
+# cache assertion below failed with no indication why. Assert what actually
+# matters instead: every worker reached the point of serving.
+mixed_up=0
+for f in "$TMPHOME"/mixed_*.err; do
+    [ -f "$f" ] || continue
+    grep -q "listening on" "$f" 2>/dev/null && mixed_up=$((mixed_up + 1))
+done
+[ "$mixed_up" -eq 8 ] \
+    && pass "all 8 mixed-runtime workers actually started ($mixed_up/8)" \
+    || { fail "only $mixed_up/8 mixed workers started - see stderr below"
+         for f in "$TMPHOME"/mixed_*.err; do
+             grep -q "listening on" "$f" 2>/dev/null && continue
+             echo "      $(basename "$f"): $(head -2 "$f" 2>/dev/null | tr '\n' ' ')"
+         done; }
 
 js_entries=$(js_blob_count)
 [ "$js_entries" -gt 0 ] \
