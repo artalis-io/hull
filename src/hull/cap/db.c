@@ -116,39 +116,77 @@ int hl_cap_db_init(sqlite3 *db)
      * wal_autocheckpoint=1000 - Checkpoint every 1000 pages (~4 MB).
      *                          Default is 1000; explicit for clarity.
      */
-    const char *pragmas[] = {
-        /* busy_timeout FIRST, and that ordering is load-bearing.
-         *
-         * Switching a database to WAL takes an EXCLUSIVE lock. With the
-         * default busy timeout of 0, a process that finds the file locked
-         * fails immediately instead of waiting - so two hull processes opening
-         * the same database at the same moment race, and the loser dies at
-         * startup with SQLITE_PROTOCOL ("locking protocol"). Setting the
-         * timeout after journal_mode meant the 5s budget intended to absorb
-         * exactly this contention was not yet in force when it was needed.
-         *
-         * Measured on Windows: 8 hull processes started simultaneously against
-         * one data.db (the default DSN is relative, so a shared cwd is a
-         * shared database) left 1 survivor; the other 7 failed here. Staggered
-         * starts were fine, which is the signature of a lock race rather than
-         * a limit. Linux tolerated it - SQLite's Windows VFS is stricter about
-         * this - so the same latent bug simply showed up there first. */
+    /* REQUIRED: a failure here is a genuine error and aborts the open.
+     *
+     * busy_timeout goes first because the pragmas after it can contend, and
+     * with SQLite's default timeout of 0 a locked file fails instantly rather
+     * than waiting. foreign_keys is semantic - an app that believes its
+     * referential integrity is enforced must not run if it is not. */
+    static const char *required[] = {
         "PRAGMA busy_timeout=5000",
-        "PRAGMA journal_mode=WAL",
-        "PRAGMA synchronous=NORMAL",
         "PRAGMA foreign_keys=ON",
-        "PRAGMA cache_size=-16384",
-        "PRAGMA temp_store=MEMORY",
-        "PRAGMA mmap_size=268435456",
+        NULL,
+    };
+    for (const char **p = required; *p; p++) {
+        if (sqlite3_exec(db, *p, NULL, NULL, NULL) != SQLITE_OK) {
+            fprintf(stderr, "hull: sqlite %s failed: %s\n", *p, sqlite3_errmsg(db));
+            return -1;
+        }
+    }
+
+    /* WAL is a PERFORMANCE choice, so losing it must not stop the app.
+     *
+     * Converting a database to WAL takes an EXCLUSIVE lock, and several
+     * processes opening the same fresh database at once race for it. The loser
+     * gets SQLITE_PROTOCOL - not a busy condition, so busy_timeout does not
+     * cover it and retrying does not clear it. Measured on Windows: of 8 hull
+     * processes started together against one data.db, 1 served. They were not
+     * failing to open the database; they opened it fine and then aborted
+     * because a tuning pragma did not apply.
+     *
+     * SQLite is entirely correct in rollback mode - just slower under
+     * concurrent readers - so a lost race now costs performance instead of
+     * startup. Note the loser is not necessarily IN rollback mode:
+     * journal mode is a property of the FILE, so once the winner converts
+     * it, a connection whose own pragma failed is still using WAL. It
+     * failed to SET the mode, not to get it. The mode is a property of the FILE and persists, so whichever
+     * process wins converts it for everyone, and subsequent opens simply find
+     * it already WAL. Hull's default DSN is the relative path data.db
+     * (serve.c), which is why processes sharing a working directory share a
+     * database, and hit this window at all. */
+    int wal = (sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) == SQLITE_OK);
+    if (!wal) {
+        fprintf(stderr,
+                "hull: sqlite could not set WAL (%s); continuing with the "
+                "database's current journal mode\n",
+                sqlite3_errmsg(db));
+    }
+
+    /* synchronous=NORMAL is only SAFE under WAL: the docs' guarantee is that
+     * WAL protects against corruption and NORMAL merely risks losing the last
+     * transaction on an OS crash. Without WAL that reasoning does not hold, so
+     * leave the default (FULL) rather than quietly weakening durability for a
+     * connection that lost the race. Same for wal_autocheckpoint, which has no
+     * meaning outside WAL. */
+    static const char *wal_only[] = {
+        "PRAGMA synchronous=NORMAL",
         "PRAGMA wal_autocheckpoint=1000",
         NULL,
     };
-
-    for (const char **p = pragmas; *p; p++) {
-        int rc = sqlite3_exec(db, *p, NULL, NULL, NULL);
-        if (rc != SQLITE_OK)
-            return -1;
+    if (wal) {
+        for (const char **p = wal_only; *p; p++)
+            (void)sqlite3_exec(db, *p, NULL, NULL, NULL);
     }
+
+    /* Pure tuning: best-effort everywhere. None of these change behaviour. */
+    static const char *tuning[] = {
+        "PRAGMA cache_size=-16384",
+        "PRAGMA temp_store=MEMORY",
+        "PRAGMA mmap_size=268435456",
+        NULL,
+    };
+    for (const char **p = tuning; *p; p++)
+        (void)sqlite3_exec(db, *p, NULL, NULL, NULL);
 
     return 0;
 }
