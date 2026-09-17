@@ -132,11 +132,27 @@ DRIVE="${DRIVE:-build/e2e_tui_drive}"
 # host the two come apart: forkpty compiles, the binary builds, and it cannot
 # actually drive a terminal - so all 24 interactive cases failed with "missing
 # expected output" rather than skipping. Probe the capability instead: drive a
-# trivial command through it and require the expected text back. One extra
-# process, and it cannot be satisfied by a driver that does not function.
+# trivial command through it and require the expected text back.
+#
+# REQUIRE THE TEXT, NOT THE STATUS. This probe used to discard stdout and test
+# only the exit status, which is not what the paragraph above describes and is
+# not sufficient on the one host it was written for. Without forkpty the driver
+# prints "SKIP: no forkpty on this platform" and returns 77 (the automake skip
+# convention) - but on Windows it is built by cosmocc, so it is an APE, and an
+# APE's status arrives shifted left by 8 with only the low byte kept
+# (lib/hull_rc.sh). 77 became 0, the probe reported success, and 24 interactive
+# cases ran against a driver that only ever printed SKIP.
+#
+# The cost was not just 19 honest-looking failures. The 8 picker cases assert
+# by exit status too, so they PASSED - vacuously, against a driver that never
+# drove anything. Reading the captured text cannot be fooled that way.
 pty_driver_works() {
     [ -x "${DRIVE}" ] || return 1
-    "${DRIVE}" "hull-pty-probe" "" -- printf 'hull-pty-probe' >/dev/null 2>&1
+    _probe_out=$("${DRIVE}" "hull-pty-probe" "" -- printf 'hull-pty-probe' 2>/dev/null)
+    case "$_probe_out" in
+        *hull-pty-probe*) return 0 ;;
+        *)                return 1 ;;
+    esac
 }
 
 if ! pty_driver_works; then
