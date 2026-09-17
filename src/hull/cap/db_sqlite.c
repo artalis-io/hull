@@ -58,14 +58,28 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
     if (dsn && hl_host_normalize_path(dsn, norm, sizeof norm) >= 0)
         dsn = norm;
 
+    /* Say WHY on failure. The vtable's open() returns only 0/-1 and the
+     * registry flattens that to "failed to open database connection", so the
+     * one fact that explains the failure - SQLite's own code and message - was
+     * discarded at the only point that had it. That made a real defect
+     * undiagnosable: on Windows, hull processes started simultaneously fail
+     * here (1 of 8 survives; staggering them fixes it; Linux is 8 of 8), and
+     * the generic string is all anyone got, for a `:memory:` DSN that cannot
+     * be contended. Two distinct steps can fail, and they mean different
+     * things, so they are reported separately rather than merged. */
     int rc = sqlite3_open(dsn, &s->db);
     if (rc != SQLITE_OK) {
+        fprintf(stderr, "hull: sqlite open failed for '%s': %s (code %d)\n",
+                dsn ? dsn : "(null)",
+                s->db ? sqlite3_errmsg(s->db) : sqlite3_errstr(rc), rc);
         if (s->db) sqlite3_close(s->db);
         free(s);
         return -1;
     }
 
     if (hl_cap_db_init(s->db) != 0) {
+        fprintf(stderr, "hull: sqlite opened '%s' but init failed: %s\n",
+                dsn ? dsn : "(null)", sqlite3_errmsg(s->db));
         sqlite3_close(s->db);
         free(s);
         return -1;
