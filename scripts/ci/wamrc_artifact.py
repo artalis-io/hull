@@ -41,7 +41,9 @@ IDENTITY_FIELDS = [
     "build_script_hash",   # sha256 of the wamrc make rule region + ci_ensure_wamrc.sh
 ]
 # Same-run provenance (proves the artifact belongs to THIS run). HARD.
-PROVENANCE_FIELDS = ["commit_sha", "run_id", "run_attempt", "producer_job"]
+#
+# run_attempt is deliberately NOT here - see WARN_FIELDS below.
+PROVENANCE_FIELDS = ["commit_sha", "run_id", "producer_job"]
 # Recorded for provenance and present/hollow-checked like every other field, but a
 # MISMATCH is a WARNING, not a rejection. GitHub rolls the runner ImageVersion
 # (the image build number, e.g. 20260816.277.1 -> 20260823.283.1) across its fleet
@@ -52,7 +54,24 @@ PROVENANCE_FIELDS = ["commit_sha", "run_id", "run_attempt", "producer_job"]
 # turned the whole compute matrix red during rollouts. The build number is not a
 # toolchain-identity input, so it is retained as provenance and warned-on, never
 # used as a compatibility rejection.
-WARN_FIELDS = ["image_version"]
+#
+# run_attempt is warned-on for the same reason, and the reason is structural
+# rather than incidental. Re-running ONLY the failed jobs of a run does not
+# re-run the producer (it passed), so its artifact keeps attempt 1 while the
+# consumer is attempt 2 - and the gate rejected it. Every partial re-run of a
+# wamrc consumer therefore failed by construction, and the remedy was a FULL
+# re-run including the wamrc build itself, one of the slowest jobs in CI
+# because it needs LLVM. That is a real cost paid on every flaky consumer.
+#
+# What the field was buying, next to what stays HARD: commit_sha, run_id,
+# producer_job, the eight build-identity inputs (os, arch, compiler, llvm,
+# wamr_rev, patch_hash, wamrc_flags, build_script_hash) and a sha256 of the
+# binary. An attempt-1 artifact from the same run, same commit, same producer,
+# same inputs and the same checksum IS the artifact a rebuild would produce -
+# the attempt number distinguishes nothing a rebuild would change. It remains
+# recorded, present/hollow-checked, and surfaced on mismatch; it is simply no
+# longer grounds for rejection.
+WARN_FIELDS = ["image_version", "run_attempt"]
 # The artifact digest (checksum integrity). HARD.
 CHECKSUM_FIELD = "artifact_sha256"
 

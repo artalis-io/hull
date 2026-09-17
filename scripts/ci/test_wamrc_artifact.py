@@ -77,9 +77,10 @@ for field, bad in [("llvm_version", "17.0.0"), ("wamr_rev", "f" * 40),
     check("identity mismatch rejected: %s" % field,
           len(problems(m, local(**{field: bad}))) >= 1)
 
-# -- verify: provenance mismatches (different run/attempt/commit) -> rejected --
+# -- verify: provenance mismatches (different run/commit/producer) -> rejected --
+# run_attempt is deliberately absent: it is a WARN field now, asserted below.
 for field, bad in [("commit_sha", "beefdead" * 5), ("run_id", "99999"),
-                   ("run_attempt", "2"), ("producer_job", "some-other-job")]:
+                   ("producer_job", "some-other-job")]:
     check("provenance mismatch rejected: %s" % field,
           len(problems(m, local(**{field: bad}))) >= 1)
 
@@ -143,6 +144,30 @@ check("the warning names image_version + both observed build numbers",
       any("image_version" in w and "20260816.277.1" in w and "20260823.283.1" in w
           for w in _obs_warns))
 check("identical image_version -> NO warning", warnings(m, local()) == [])
+
+# -- run_attempt WARN model (the partial-re-run fix) -------------------------
+# Re-running ONLY the failed jobs of a run does not re-run the PRODUCER, which
+# passed - so its artifact keeps attempt 1 while the consumer is attempt 2.
+# Gating on that made every partial re-run of a wamrc consumer fail by
+# construction, forcing a full re-run including the LLVM-dependent wamrc build.
+# Next to what stays HARD (commit_sha, run_id, producer_job, the eight identity
+# inputs, and the artifact checksum), the attempt number distinguishes nothing a
+# rebuild would change. It must VERIFY, and it must still be SEEN.
+_m_att = wa.build_manifest(local(run_attempt="1"))
+_att_probs, _att_warns = wa.verify(_m_att, local(run_attempt="2"))
+check("attempt 1 artifact consumed on attempt 2 -> VERIFIES (no problems)",
+      _att_probs == [])
+check("attempt mismatch -> emits a WARNING", len(_att_warns) >= 1)
+check("the warning names run_attempt + both attempts",
+      any("run_attempt" in w and "1" in w and "2" in w for w in _att_warns))
+check("identical run_attempt -> NO warning", warnings(m, local()) == [])
+
+# The demotion must not have widened anything else: a DIFFERENT run is still
+# rejected even when the attempt now matches.
+check("different run_id still rejected (attempt equal)",
+      len(problems(m, local(run_id="99999"))) >= 1)
+check("different commit still rejected (attempt equal)",
+      len(problems(m, local(commit_sha="beefdead" * 5))) >= 1)
 
 # Different OS FAMILY stays a HARD reject (and is a problem, not merely a warning).
 _os_probs, _os_warns = wa.verify(m, local(image_os="ubuntu22"))

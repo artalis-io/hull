@@ -1477,13 +1477,23 @@ refuses the artifact on any mismatch (D.1.3).
 
 **Same-run provenance** (proves the artifact belongs to THIS run, not a stray):
 9. **commit SHA** (`GITHUB_SHA` / the PR head sha);
-10. **workflow run ID + attempt** (`GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`);
+10. **workflow run ID** (`GITHUB_RUN_ID`); the run ATTEMPT is recorded too,
+    but warned-on rather than gated - see below;
 11. **producer job / profile identity** (the producer job name + the arch profile
     it built for).
 
 The consumer asserts 9-11 equal its own run's values, so an artifact from a
-different run/attempt/commit is rejected (belt-and-braces on top of run-scoped
+different run/commit/producer is rejected (belt-and-braces on top of run-scoped
 artifact storage). `schema_version` gates the whole manifest.
+
+**`run_attempt` is recorded but NOT gated.** Re-running only the FAILED jobs of
+a run does not re-run the producer, which passed - so its artifact keeps attempt
+1 while the consumer is attempt 2. Gating on that made every partial re-run of a
+wamrc consumer fail by construction, forcing a full re-run including the
+LLVM-dependent wamrc build. Beside what stays HARD - commit SHA, run ID,
+producer identity, the eight build-identity inputs and the artifact checksum -
+the attempt number distinguishes nothing a rebuild would change. Same treatment,
+and same reasoning, as `image_version` above.
 
 ### D.1.3 Consumer verification - FAIL CI, do NOT silently rebuild
 
