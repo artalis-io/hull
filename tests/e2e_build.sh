@@ -24,7 +24,8 @@
 
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 HULL="$SRCDIR/build/hull"
-BUILD_CC="${BUILD_CC:-cc}"
+. "$(dirname "$0")/lib/hull_rc.sh"
+
 PASS=0
 FAIL=0
 WORKDIR=""
@@ -50,6 +51,20 @@ fail() {
 pass() {
     echo "  PASS: $1"
     PASS=$((PASS + 1))
+}
+
+# Run hull and capture BOTH its real exit status and its output.
+#
+# On Windows a Cosmopolitan APE reports its status shifted left by 8 and MSYS
+# keeps only the low byte, so `$?` is 0 for EVERY outcome (lib/hull_rc.sh).
+# That is not a cosmetic problem here: it is what hid a genuinely failing
+# `hull build` behind a passing "build exits 0" for the whole life of this
+# suite on Windows. The failure only surfaced two assertions later, as a
+# produced binary that was never there - and the eight assertions that expect
+# a NON-zero status could never pass at all.
+hull_do() {
+    RC=$(hull_run "$RC_OUT" "$@")
+    OUT=$(cat "$RC_OUT" 2>/dev/null)
 }
 
 check_contains() {
@@ -136,6 +151,50 @@ fi
 # ── Set up temp working directory ─────────────────────────────────────
 
 WORKDIR=$(mktemp -d)
+RC_OUT="$WORKDIR/.hull_rc_out"
+hull_rc_init "$HULL"
+
+# Which compiler can THIS hull actually drive? Ask hull, do not guess.
+#
+# A cosmo hull embeds cosmo-format platform archives, so only cosmocc can link a
+# working binary from one - `cc` compiles a native object against cosmo archives
+# and fails. The Windows job builds hull with CC=cosmocc, but this suite never
+# looked at it: it hard-coded `cc`, so every `hull build` here failed while
+# `check_exit "build exits 0"` passed anyway, because an APE's status is shifted
+# (lib/hull_rc.sh). Two defects hiding each other.
+#
+# Naming cosmocc is still not enough on Windows. The cosmocc.zip driver is a
+# `#!/bin/sh` script: make runs it through a shell, but a cosmo APE cannot exec
+# a shebang - measured, and it fails even for an absolute path that exists.
+# Hull ships the answer (`hull tools install cosmocc` bundles a busybox to drive
+# that script - see src/hull/tools_install.c), but a test must not install a
+# toolchain over the network, so when no usable compiler is present this suite
+# SKIPS the build-dependent steps rather than reporting 42 failures that all
+# restate one missing tool.
+#
+# The gate asks hull for its own verdict instead of probing a proxy: `hull
+# doctor --json` already computes build_compiler for exactly this question, and
+# it is compiler-SPECIFIC (a cosmo hull answers cosmocc, a native one cc/gcc/
+# clang), so this stays correct on every host.
+if [ -z "${BUILD_CC:-}" ] && hull_is_ape "$HULL"; then
+    BUILD_CC=cosmocc
+fi
+BUILD_CC="${BUILD_CC:-cc}"
+
+CAN_BUILD=1
+BUILD_SKIP_WHY=""
+case $("$HULL" doctor --json 2>/dev/null || true) in
+    *'"build_compiler":null'*)
+        CAN_BUILD=0
+        BUILD_SKIP_WHY="hull doctor reports build_compiler=null - no compiler this hull can drive. On Windows the cosmocc.zip driver is a #!/bin/sh script a cosmo APE cannot exec; the supported fix is 'hull tools install cosmocc', which bundles a busybox to drive it."
+        ;;
+esac
+
+# Announce it once, up front, rather than at each skipped step.
+if [ "$CAN_BUILD" = 0 ]; then
+    echo ""
+    echo "SKIP: build-dependent steps - $BUILD_SKIP_WHY"
+fi
 cd "$WORKDIR"
 
 # ── Step 1: hull keygen + sign-platform ──────────────────────────────
@@ -143,7 +202,7 @@ cd "$WORKDIR"
 echo ""
 echo "=== Step 1: hull keygen ==="
 
-"$HULL" keygen >/dev/null 2>&1; RC=$?
+hull_do "$HULL" keygen
 check_exit "keygen exits 0" 0 $RC
 check_file_exists "developer.pub created" "$WORKDIR/developer.pub"
 check_file_exists "developer.key created" "$WORKDIR/developer.key"
@@ -176,7 +235,7 @@ check_file_exists "custom prefix seckey" "$WORKDIR/myapp.key"
 # then copy resulting platform.sig back to build/
 cp "$SRCDIR/build/libhull_platform.a" "$WORKDIR/"
 cp "$SRCDIR/build/platform_canary_hash" "$WORKDIR/" 2>/dev/null || true
-"$HULL" sign-platform --dir "$WORKDIR/" "$WORKDIR/developer" >/dev/null 2>&1; RC=$?
+hull_do "$HULL" sign-platform --dir "$WORKDIR/" "$WORKDIR/developer"
 check_exit "sign-platform exits 0" 0 $RC
 if [ -f "$WORKDIR/platform.sig" ]; then
     cp "$WORKDIR/platform.sig" "$SRCDIR/build/"
@@ -215,19 +274,33 @@ pass "test app created"
 echo ""
 echo "=== Step 3: hull manifest ==="
 
-MANIFEST_OUT=$("$HULL" manifest "$WORKDIR/myapp" 2>&1); RC=$?
+hull_do "$HULL" manifest "$WORKDIR/myapp"; MANIFEST_OUT=$OUT
 check_exit "manifest exits 0" 0 $RC
 check_contains "manifest has fs.read" "$MANIFEST_OUT" "data/"
 check_contains "manifest has fs.write" "$MANIFEST_OUT" "uploads/"
 check_contains "manifest has env" "$MANIFEST_OUT" "PORT"
 check_contains "manifest has hosts" "$MANIFEST_OUT" "api.stripe.com"
 
+if [ "$CAN_BUILD" = 0 ]; then
+    # Everything below needs a working `hull build`. Reporting 42 failures that
+    # all restate one missing tool would bury the steps that DID run, so stop
+    # with the reason stated once. The skip is loud on purpose: a suite that is
+    # green because it tested almost nothing must say so.
+    echo ""
+    echo "SKIPPED: Steps 4-18 (hull build / verify / inspect / eject) - $BUILD_SKIP_WHY"
+    echo ""
+    echo "$PASS/$((PASS + FAIL)) e2e build pipeline tests passed (build-dependent steps skipped)"
+    if [ "$FAIL" -gt 0 ]; then exit 1; fi
+    exit 0
+fi
+
+
 # ── Step 4: hull build (unsigned) ─────────────────────────────────────
 
 echo ""
 echo "=== Step 4: hull build (unsigned) ==="
 
-BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
+hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp"; BUILD_OUT=$OUT
 check_exit "build exits 0" 0 $RC
 check_contains "build reports compiling" "$BUILD_OUT" "compiling"
 check_contains "build reports linking" "$BUILD_OUT" "linking"
@@ -279,7 +352,7 @@ echo "=== Step 6: hull build --sign ==="
 # Remove previous build artifacts
 rm -f "$WORKDIR/myapp/myapp" "$WORKDIR/myapp/package.sig"
 
-BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
+hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp"; BUILD_OUT=$OUT
 check_exit "signed build exits 0" 0 $RC
 check_file_exists "signed binary exists" "$WORKDIR/myapp/myapp"
 check_file_exists "package.sig exists" "$WORKDIR/myapp/package.sig"
@@ -299,7 +372,7 @@ fi
 echo ""
 echo "=== Step 7: hull verify (valid signature) ==="
 
-VERIFY_OUT=$("$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
+hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
 check_exit "verify exits 0" 0 $RC
 check_contains "verify reports OK" "$VERIFY_OUT" "OK"
 check_contains "verify reports valid" "$VERIFY_OUT" "all checks passed"
@@ -309,7 +382,7 @@ check_contains "verify reports valid" "$VERIFY_OUT" "all checks passed"
 echo ""
 echo "=== Step 8: hull inspect ==="
 
-INSPECT_OUT=$("$HULL" inspect "$WORKDIR/myapp" 2>&1); RC=$?
+hull_do "$HULL" inspect "$WORKDIR/myapp"; INSPECT_OUT=$OUT
 check_exit "inspect exits 0" 0 $RC
 check_contains "inspect shows format" "$INSPECT_OUT" "package.sig"
 check_contains "inspect shows fs.read" "$INSPECT_OUT" "data/"
@@ -330,7 +403,7 @@ cp "$WORKDIR/myapp/app.lua" "$WORKDIR/myapp/app.lua.bak"
 # Tamper with the file
 echo '-- tampered' >> "$WORKDIR/myapp/app.lua"
 
-VERIFY_OUT=$("$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
+hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
 check_exit "verify detects tamper (exit 1)" 1 $RC
 check_contains "verify reports FAILED" "$VERIFY_OUT" "FAILED"
 check_contains "verify mentions modified files" "$VERIFY_OUT" "Modified files"
@@ -339,7 +412,7 @@ check_contains "verify mentions modified files" "$VERIFY_OUT" "Modified files"
 mv "$WORKDIR/myapp/app.lua.bak" "$WORKDIR/myapp/app.lua"
 
 # Verify it passes again after restore
-VERIFY_OUT=$("$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
+hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
 check_exit "verify passes after restore" 0 $RC
 
 # ── Step 10: Multi-file app ──────────────────────────────────────────
@@ -373,7 +446,7 @@ end
 return M
 LIBEOF
 
-BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/multiapp/multiapp" "$WORKDIR/multiapp" 2>&1); RC=$?
+hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/multiapp/multiapp" "$WORKDIR/multiapp"; BUILD_OUT=$OUT
 check_exit "multi-file build exits 0" 0 $RC
 check_contains "multi-file build finds 2 files" "$BUILD_OUT" "2 Lua file"
 check_file_exists "multi-file binary exists" "$WORKDIR/multiapp/multiapp"
@@ -395,11 +468,11 @@ fi
 stop_server
 
 # Verify multi-file signature
-VERIFY_OUT=$("$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/multiapp" 2>&1); RC=$?
+hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/multiapp"; VERIFY_OUT=$OUT
 check_exit "multi-file verify passes" 0 $RC
 
 # Inspect multi-file app (manifest may be nil if app has require() deps)
-INSPECT_OUT=$("$HULL" inspect "$WORKDIR/multiapp" 2>&1); RC=$?
+hull_do "$HULL" inspect "$WORKDIR/multiapp"; INSPECT_OUT=$OUT
 check_contains "multi-file inspect shows files" "$INSPECT_OUT" "app.lua"
 
 # ── Step 11: Built binary is a slim app-runner ────────────────────────
@@ -425,25 +498,25 @@ echo "=== Step 12: Error cases ==="
 
 # Build with no .lua files
 mkdir -p "$WORKDIR/emptyapp"
-BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" "$WORKDIR/emptyapp" 2>&1); RC=$?
+hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" "$WORKDIR/emptyapp"; BUILD_OUT=$OUT
 check_exit "build empty app fails" 1 $RC
 check_contains "build reports no files" "$BUILD_OUT" "no .lua or .js files"
 
 # Verify with no package.sig
-VERIFY_OUT=$("$HULL" verify "$WORKDIR/emptyapp" 2>&1); RC=$?
+hull_do "$HULL" verify "$WORKDIR/emptyapp"; VERIFY_OUT=$OUT
 check_exit "verify without sig fails" 1 $RC
 check_contains "verify reports missing sig" "$VERIFY_OUT" "hull.sig"
 
 # Inspect with no package.sig
-INSPECT_OUT=$("$HULL" inspect "$WORKDIR/emptyapp" 2>&1); RC=$?
+hull_do "$HULL" inspect "$WORKDIR/emptyapp"; INSPECT_OUT=$OUT
 check_exit "inspect without hull.sig fails" 1 $RC
 
 # Manifest with no app.lua
-MANIFEST_OUT=$("$HULL" manifest "$WORKDIR/emptyapp" 2>&1); RC=$?
+hull_do "$HULL" manifest "$WORKDIR/emptyapp"; MANIFEST_OUT=$OUT
 check_exit "manifest without app.lua fails" 1 $RC
 
 # Sign with nonexistent key
-BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "/nonexistent/key.key" "$WORKDIR/myapp" 2>&1); RC=$?
+hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "/nonexistent/key.key" "$WORKDIR/myapp"; BUILD_OUT=$OUT
 check_exit "build with bad key fails" 1 $RC
 
 # ── Step 13: A produced binary is an app-runner, not a hull ──────────
@@ -460,7 +533,7 @@ cat > "$WORKDIR/nullapp/app.lua" << 'APPEOF'
 app.get("/", function(req, res) res:json({status = "ok"}) end)
 APPEOF
 
-BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/nullbin" "$WORKDIR/nullapp" 2>&1); RC=$?
+hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/nullbin" "$WORKDIR/nullapp"; BUILD_OUT=$OUT
 check_exit "build a second app exits 0" 0 $RC
 check_file_executable "produced binary exists and executable" "$WORKDIR/nullbin"
 
@@ -586,7 +659,7 @@ fi
 echo ""
 echo "=== Step 16: hull new ==="
 
-"$HULL" new "$WORKDIR/newapp" >/dev/null 2>&1; RC=$?
+hull_do "$HULL" new "$WORKDIR/newapp"
 check_exit "hull new exits 0" 0 $RC
 check_file_exists "new app.lua exists" "$WORKDIR/newapp/app.lua"
 check_file_exists "new tests/ exists" "$WORKDIR/newapp/tests/test_app.lua"
@@ -604,11 +677,11 @@ fi
 stop_server
 
 # hull new with existing dir should fail
-"$HULL" new "$WORKDIR/newapp" >/dev/null 2>&1; RC=$?
+hull_do "$HULL" new "$WORKDIR/newapp"
 check_exit "hull new existing dir fails" 1 $RC
 
 # hull new with --runtime js
-"$HULL" new --runtime js "$WORKDIR/newapp_js" >/dev/null 2>&1; RC=$?
+hull_do "$HULL" new --runtime js "$WORKDIR/newapp_js"
 check_exit "hull new --runtime js exits 0" 0 $RC
 check_file_exists "new app.js exists" "$WORKDIR/newapp_js/app.js"
 
@@ -632,7 +705,7 @@ echo ""
 echo "=== Step 17: hull eject ==="
 
 # Build platform first (needed by eject)
-"$HULL" eject "$WORKDIR/myapp" -o "$WORKDIR/ejected" >/dev/null 2>&1; RC=$?
+hull_do "$HULL" eject "$WORKDIR/myapp" -o "$WORKDIR/ejected"
 check_exit "hull eject exits 0" 0 $RC
 check_file_exists "ejected Makefile exists" "$WORKDIR/ejected/Makefile"
 check_file_exists "ejected app_main.c exists" "$WORKDIR/ejected/src/app_main.c"
@@ -641,7 +714,7 @@ check_file_exists "ejected platform lib exists" "$WORKDIR/ejected/platform/libhu
 check_file_exists "ejected app.lua exists" "$WORKDIR/ejected/app/app.lua"
 
 # hull eject with existing dir should fail
-"$HULL" eject "$WORKDIR/myapp" -o "$WORKDIR/ejected" >/dev/null 2>&1; RC=$?
+hull_do "$HULL" eject "$WORKDIR/myapp" -o "$WORKDIR/ejected"
 check_exit "hull eject existing dir fails" 1 $RC
 
 # An ejected NATIVE project must actually build AND run. Regression guard for
@@ -662,7 +735,7 @@ app.main(function(ctx)
     return 0
 end)
 EJEOF
-    "$HULL" eject "$WORKDIR/ejectcli" -o "$WORKDIR/ejected_cli" >/dev/null 2>&1; RC=$?
+    hull_do "$HULL" eject "$WORKDIR/ejectcli" -o "$WORKDIR/ejected_cli"
     check_exit "hull eject (cli app) exits 0" 0 $RC
     check_file_exists "ejected app_feature_registry.c" "$WORKDIR/ejected_cli/src/app_feature_registry.c"
     check_file_exists "ejected runtime feature lib"    "$WORKDIR/ejected_cli/platform/libhull_feature-lua.a"
@@ -710,22 +783,21 @@ app.get("/", async (_q, r) => r.text("ok"));
 EOF
 
 # hull manifest on a JS app - should now succeed and emit JSON
-MANIFEST_OUT=$("$HULL" manifest "$WORKDIR/jsapp" 2>&1); RC=$?
+hull_do "$HULL" manifest "$WORKDIR/jsapp"; MANIFEST_OUT=$OUT
 check_exit "js manifest exits 0" 0 $RC
 check_contains "js manifest shows name"    "$MANIFEST_OUT" '"jsapp"'
 check_contains "js manifest shows fs.read" "$MANIFEST_OUT" 'data/'
 check_contains "js manifest shows env"     "$MANIFEST_OUT" 'PORT'
 
 # Build + sign the JS app
-"$HULL" build --no-verify-platform --sign "$WORKDIR/developer.key" "$WORKDIR/jsapp" \
-    >/dev/null 2>&1; RC=$?
+hull_do "$HULL" build --no-verify-platform --sign "$WORKDIR/developer.key" "$WORKDIR/jsapp"
 check_exit "js build --sign exits 0" 0 $RC
 check_file_exists "js package.sig exists" "$WORKDIR/jsapp/package.sig"
 
 # Inspect the JS app - Status should be VALID and the Capabilities
 # section MUST be present (the JS-manifest-extraction fix is what
 # makes this so).
-INSPECT_OUT=$("$HULL" inspect "$WORKDIR/jsapp" 2>&1); RC=$?
+hull_do "$HULL" inspect "$WORKDIR/jsapp"; INSPECT_OUT=$OUT
 check_exit "js inspect exits 0" 0 $RC
 check_contains "js inspect shows VALID"      "$INSPECT_OUT" "Status:    VALID"
 check_contains "js inspect shows Capabilities" "$INSPECT_OUT" "Capabilities:"
@@ -738,7 +810,7 @@ check_contains "js inspect shows hosts"      "$INSPECT_OUT" "hosts:    api.strip
 # should ALSO be VALID. This catches the inspect.lua payload-
 # reconstruction bug that previously printed INVALID on a genuinely
 # valid Lua signature because `modules_resolved` was missing.
-LUA_INSPECT_OUT=$("$HULL" inspect "$WORKDIR/myapp" 2>&1); RC=$?
+hull_do "$HULL" inspect "$WORKDIR/myapp"; LUA_INSPECT_OUT=$OUT
 check_exit "lua re-inspect exits 0" 0 $RC
 check_contains "lua re-inspect shows VALID"  "$LUA_INSPECT_OUT" "Status:    VALID"
 
