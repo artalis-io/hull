@@ -1069,12 +1069,12 @@ jobs:
                     e2e-spans-bind e2e-spans-example e2e-spans-hugefile
                     e2e-spans-mmap e2e-spans-multi e2e-stream-meta
                     e2e-sync-spans e2e-template-parity e2e-templates
-                    e2e-test-harness e2e-token-interop e2e-tools e2e-totp
+                    e2e-test-harness e2e-token-interop e2e-tools e2e-totp e2e-tui
                     e2e-update e2e-uuid e2e-validate-parity e2e-valkey"
 
           # Expected to FAIL, with the cause recorded in the doc. Cheap enough to
-          # keep running: project-discovery ~29s, tui ~28s.
-          E2E_KNOWN="e2e-project-discovery e2e-tui"
+          # keep running: project-discovery ~29s.
+          E2E_KNOWN="e2e-project-discovery"
 
           rc_step=0
 
