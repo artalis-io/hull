@@ -54,7 +54,25 @@ for i in $(seq 1 $NUM_WORKERS); do
         >/dev/null 2>"$TMPHOME/worker_$i.err" &
     pids="$pids $!"
 done
-sleep 2
+# Wait for the workers to BE what the next line assumes they are, rather than
+# guessing a duration. `sleep 2` was enough on a Linux dev box and is not on
+# Windows, where 8 cosmo APEs starting at once took longer than that: 5 of 8
+# were killed before they had logged a single line (empty stderr), so the cache
+# assertions below ran on 3 writers while reporting 8. Bounded, so a worker that
+# genuinely never starts still fails the check below instead of hanging here.
+boot_deadline=40   # 40 x 0.5s = 20s
+booted=0
+while [ "$boot_deadline" -gt 0 ]; do
+    booted=0
+    for i in $(seq 1 $NUM_WORKERS); do
+        grep -q "listening on" "$TMPHOME/worker_$i.err" 2>/dev/null \
+            && booted=$((booted + 1))
+    done
+    [ "$booted" -eq "$NUM_WORKERS" ] && break
+    sleep 0.5
+    boot_deadline=$((boot_deadline - 1))
+done
+
 # All workers should be listening; tell them to stop.
 for pid in $pids; do
     kill -INT "$pid" 2>/dev/null || true
