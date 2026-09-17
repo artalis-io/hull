@@ -54,7 +54,25 @@ for i in $(seq 1 $NUM_WORKERS); do
         >/dev/null 2>"$TMPHOME/worker_$i.err" &
     pids="$pids $!"
 done
-sleep 2
+# Wait for the workers to BE what the next line assumes they are, rather than
+# guessing a duration. This is the right shape regardless, but be clear about
+# what it does NOT fix: on Windows raising the wait from 2s to 20s changed
+# 3-of-8 started into 2-of-8. The workers that fail are not slow, they never
+# start, and they say nothing at all while doing it (empty stderr). Bounded, so
+# a worker that never starts fails the check below instead of hanging here.
+boot_deadline=40   # 40 x 0.5s = 20s
+booted=0
+while [ "$boot_deadline" -gt 0 ]; do
+    booted=0
+    for i in $(seq 1 $NUM_WORKERS); do
+        grep -q "listening on" "$TMPHOME/worker_$i.err" 2>/dev/null \
+            && booted=$((booted + 1))
+    done
+    [ "$booted" -eq "$NUM_WORKERS" ] && break
+    sleep 0.5
+    boot_deadline=$((boot_deadline - 1))
+done
+
 # All workers should be listening; tell them to stop.
 for pid in $pids; do
     kill -INT "$pid" 2>/dev/null || true
@@ -75,6 +93,24 @@ for i in $(seq 1 $NUM_WORKERS); do
         head -5 "$TMPHOME/worker_$i.err"
     fi
 done
+# The check above greps for four crash words, so a worker that fails to boot
+# for any other reason passes it - which is how 7 of 8 dead workers read as
+# "no worker crashed" on Windows while the cache assertions below passed on
+# the survivor's output alone. Assert the premise of the whole suite instead:
+# that the workers this section claims to race actually ran.
+worker_up=0
+for i in $(seq 1 $NUM_WORKERS); do
+    grep -q "listening on" "$TMPHOME/worker_$i.err" 2>/dev/null \
+        && worker_up=$((worker_up + 1))
+done
+[ "$worker_up" -eq "$NUM_WORKERS" ] \
+    && pass "all $NUM_WORKERS workers actually started ($worker_up/$NUM_WORKERS)" \
+    || { fail "only $worker_up/$NUM_WORKERS workers started - the concurrency premise is unmet"
+         for i in $(seq 1 $NUM_WORKERS); do
+             grep -q "listening on" "$TMPHOME/worker_$i.err" 2>/dev/null && continue
+             echo "      worker_$i: $(head -2 "$TMPHOME/worker_$i.err" 2>/dev/null | tr '\n' ' ')"
+         done; }
+
 [ "$worker_errors" -eq 0 ] \
     && pass "no worker crashed under concurrent cache writes" \
     || fail "$worker_errors workers crashed"
@@ -168,6 +204,15 @@ entries_after=$(find "$CACHE_ROOT" -mindepth 2 -maxdepth 2 -type f \
 # store isolation: parallel writers to lua-bytecode and
 # js-bytecode shouldn't interfere even though they share the
 # same allocator + sha helpers.
+#
+# NOTE (Windows): this section's premise - that 8 workers run concurrently -
+# is NOT met there. Measured: only 1 of 8 starts; the other 7 die with
+# "failed to open database connection" before compiling anything. With no
+# -d the default DSN is :memory:, which is private per process and cannot
+# be contended, so that message is a symptom of concurrent APE startup, not
+# of database sharing. js-bytecode stays empty simply because no JS worker
+# was the survivor. Tracked separately - it is a Hull-on-Windows question,
+# not a cache one.
 echo ""
 echo "── mixed-runtime parallel ──"
 
@@ -228,6 +273,24 @@ done
 [ "$mixed_errors" -eq 0 ] \
     && pass "no crashes with mixed-runtime concurrent writers" \
     || fail "$mixed_errors workers crashed under mixed load"
+
+# The check above greps for four crash words, so a worker that fails to boot
+# for ANY other reason passes it. That is how four dead JS workers
+# ("failed to open database connection") were read as "no crashes" while the
+# cache assertion below failed with no indication why. Assert what actually
+# matters instead: every worker reached the point of serving.
+mixed_up=0
+for f in "$TMPHOME"/mixed_*.err; do
+    [ -f "$f" ] || continue
+    grep -q "listening on" "$f" 2>/dev/null && mixed_up=$((mixed_up + 1))
+done
+[ "$mixed_up" -eq 8 ] \
+    && pass "all 8 mixed-runtime workers actually started ($mixed_up/8)" \
+    || { fail "only $mixed_up/8 mixed workers started - see stderr below"
+         for f in "$TMPHOME"/mixed_*.err; do
+             grep -q "listening on" "$f" 2>/dev/null && continue
+             echo "      $(basename "$f"): $(head -2 "$f" 2>/dev/null | tr '\n' ' ')"
+         done; }
 
 js_entries=$(js_blob_count)
 [ "$js_entries" -gt 0 ] \
