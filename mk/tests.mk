@@ -1725,3 +1725,7 @@ hull-test-examples: $(BUILDDIR)/hull
 		if echo "$$output" | grep -qE "[0-9]+ failed"; then exit 1; fi; \
 	done
 
+
+.PHONY: diag-conc
+diag-conc: $(BUILDDIR)/hull
+	sh tests/diag_conc.sh
