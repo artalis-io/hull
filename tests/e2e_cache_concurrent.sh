@@ -55,11 +55,11 @@ for i in $(seq 1 $NUM_WORKERS); do
     pids="$pids $!"
 done
 # Wait for the workers to BE what the next line assumes they are, rather than
-# guessing a duration. `sleep 2` was enough on a Linux dev box and is not on
-# Windows, where 8 cosmo APEs starting at once took longer than that: 5 of 8
-# were killed before they had logged a single line (empty stderr), so the cache
-# assertions below ran on 3 writers while reporting 8. Bounded, so a worker that
-# genuinely never starts still fails the check below instead of hanging here.
+# guessing a duration. This is the right shape regardless, but be clear about
+# what it does NOT fix: on Windows raising the wait from 2s to 20s changed
+# 3-of-8 started into 2-of-8. The workers that fail are not slow, they never
+# start, and they say nothing at all while doing it (empty stderr). Bounded, so
+# a worker that never starts fails the check below instead of hanging here.
 boot_deadline=40   # 40 x 0.5s = 20s
 booted=0
 while [ "$boot_deadline" -gt 0 ]; do
