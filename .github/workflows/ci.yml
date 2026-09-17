@@ -289,20 +289,6 @@ jobs:
           command -v ld.lld >/dev/null 2>&1 || sudo apt-get install -y lld 2>/dev/null || true
           make e2e-linker
 
-      # Keyed on the Zig pin so a version bump auto-invalidates, and shared
-      # with the embed-zig job below (same key). A ~45 MB fetch from
-      # ziglang.org inside a 5-minute step was the single flakiest thing in
-      # this workflow: it timed out three times in one afternoon and each
-      # retry re-ran the whole job, wamrc's LLVM build included, to work
-      # around a download. --retry-all-errors was already there and does not
-      # help when the transfer is merely slow.
-      - name: Cache Zig 0.13.0
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        uses: actions/cache@v4
-        with:
-          path: ~/zig-dist
-          key: zig-${{ runner.os }}-${{ runner.arch }}-0.13.0
-
       # SEPARATE from the test below on purpose. Folded together, the 5-minute
       # budget covered the download AND the e2e - so a slow fetch left the test
       # no time and reported as a test timeout, which is what it looked like
@@ -312,19 +298,14 @@ jobs:
         timeout-minutes: 6
         run: |
           set -eu
-          if [ ! -x "$HOME/zig-dist/zig" ]; then
+          if ! command -v zig >/dev/null 2>&1; then
             curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
               https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
               -o /tmp/zig.tar.xz
-            mkdir -p "$HOME/zig-dist"
-            tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-dist" --strip-components=1
+            sudo mkdir -p /opt/zig
+            sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+            echo "/opt/zig" >> "$GITHUB_PATH"
           fi
-          # /opt/zig stays the installed LOCATION: tests/e2e_linker_zig.sh and
-          # tests/e2e_musl_cross.sh both name it in their find_zig fallback, so
-          # the cache must not move it. The bytes live at a user-owned path
-          # because actions/cache restores without sudo.
-          sudo ln -sfn "$HOME/zig-dist" /opt/zig
-          echo "/opt/zig" >> "$GITHUB_PATH"
 
       - name: Linker (zig) E2E test (hull build --linker=zig)
         # Linux x86_64 only (the e2e self-skips elsewhere: a foreign-target link
@@ -2720,30 +2701,17 @@ jobs:
         with:
           submodules: true
 
-      # Same key as the linker job above, so whichever runs first populates it
-      # for the other.
-      - name: Cache Zig 0.13.0
-        uses: actions/cache@v4
-        with:
-          path: ~/zig-dist
-          key: zig-${{ runner.os }}-${{ runner.arch }}-0.13.0
-
       - name: Install Zig 0.13.0
         timeout-minutes: 6
         run: |
           set -eu
           # --retry-all-errors also retries a partial transfer (curl exit 18),
-          # the observed ziglang.org download flake. Retries do not help a
-          # transfer that is merely slow, which is why the cache above exists;
-          # this path now runs only on a cache miss.
-          if [ ! -x "$HOME/zig-dist/zig" ]; then
-            curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
-              https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
-              -o /tmp/zig.tar.xz
-            mkdir -p "$HOME/zig-dist"
-            tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-dist" --strip-components=1
-          fi
-          sudo ln -sfn "$HOME/zig-dist" /opt/zig
+          # the observed ziglang.org download flake.
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+            -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
           echo "/opt/zig" >> "$GITHUB_PATH"
 
       - name: Zig version
