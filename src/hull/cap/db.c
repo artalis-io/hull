@@ -117,10 +117,26 @@ int hl_cap_db_init(sqlite3 *db)
      *                          Default is 1000; explicit for clarity.
      */
     const char *pragmas[] = {
+        /* busy_timeout FIRST, and that ordering is load-bearing.
+         *
+         * Switching a database to WAL takes an EXCLUSIVE lock. With the
+         * default busy timeout of 0, a process that finds the file locked
+         * fails immediately instead of waiting - so two hull processes opening
+         * the same database at the same moment race, and the loser dies at
+         * startup with SQLITE_PROTOCOL ("locking protocol"). Setting the
+         * timeout after journal_mode meant the 5s budget intended to absorb
+         * exactly this contention was not yet in force when it was needed.
+         *
+         * Measured on Windows: 8 hull processes started simultaneously against
+         * one data.db (the default DSN is relative, so a shared cwd is a
+         * shared database) left 1 survivor; the other 7 failed here. Staggered
+         * starts were fine, which is the signature of a lock race rather than
+         * a limit. Linux tolerated it - SQLite's Windows VFS is stricter about
+         * this - so the same latent bug simply showed up there first. */
+        "PRAGMA busy_timeout=5000",
         "PRAGMA journal_mode=WAL",
         "PRAGMA synchronous=NORMAL",
         "PRAGMA foreign_keys=ON",
-        "PRAGMA busy_timeout=5000",
         "PRAGMA cache_size=-16384",
         "PRAGMA temp_store=MEMORY",
         "PRAGMA mmap_size=268435456",
