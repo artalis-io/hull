@@ -300,7 +300,7 @@ jobs:
         if: runner.os == 'Linux' && runner.arch == 'X64'
         uses: actions/cache@v4
         with:
-          path: ~/zig
+          path: ~/zig-dist
           key: zig-${{ runner.os }}-${{ runner.arch }}-0.13.0
 
       # SEPARATE from the test below on purpose. Folded together, the 5-minute
@@ -312,14 +312,19 @@ jobs:
         timeout-minutes: 6
         run: |
           set -eu
-          if [ ! -x "$HOME/zig/zig" ]; then
+          if [ ! -x "$HOME/zig-dist/zig" ]; then
             curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
               https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
               -o /tmp/zig.tar.xz
-            mkdir -p "$HOME/zig"
-            tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
+            mkdir -p "$HOME/zig-dist"
+            tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-dist" --strip-components=1
           fi
-          echo "$HOME/zig" >> "$GITHUB_PATH"
+          # /opt/zig stays the installed LOCATION: tests/e2e_linker_zig.sh and
+          # tests/e2e_musl_cross.sh both name it in their find_zig fallback, so
+          # the cache must not move it. The bytes live at a user-owned path
+          # because actions/cache restores without sudo.
+          sudo ln -sfn "$HOME/zig-dist" /opt/zig
+          echo "/opt/zig" >> "$GITHUB_PATH"
 
       - name: Linker (zig) E2E test (hull build --linker=zig)
         # Linux x86_64 only (the e2e self-skips elsewhere: a foreign-target link
@@ -338,7 +343,7 @@ jobs:
         if: runner.os == 'Linux' && runner.arch == 'X64'
         timeout-minutes: 25
         run: |
-          command -v zig >/dev/null 2>&1 || export PATH="$HOME/zig:$PATH"
+          command -v zig >/dev/null 2>&1 || export PATH="/opt/zig:$PATH"
           make e2e-musl-cross
 
       - name: Attachment E2E tests
@@ -2720,7 +2725,7 @@ jobs:
       - name: Cache Zig 0.13.0
         uses: actions/cache@v4
         with:
-          path: ~/zig
+          path: ~/zig-dist
           key: zig-${{ runner.os }}-${{ runner.arch }}-0.13.0
 
       - name: Install Zig 0.13.0
@@ -2731,14 +2736,15 @@ jobs:
           # the observed ziglang.org download flake. Retries do not help a
           # transfer that is merely slow, which is why the cache above exists;
           # this path now runs only on a cache miss.
-          if [ ! -x "$HOME/zig/zig" ]; then
+          if [ ! -x "$HOME/zig-dist/zig" ]; then
             curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
               https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
               -o /tmp/zig.tar.xz
-            mkdir -p "$HOME/zig"
-            tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
+            mkdir -p "$HOME/zig-dist"
+            tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-dist" --strip-components=1
           fi
-          echo "$HOME/zig" >> "$GITHUB_PATH"
+          sudo ln -sfn "$HOME/zig-dist" /opt/zig
+          echo "/opt/zig" >> "$GITHUB_PATH"
 
       - name: Zig version
         run: zig version
