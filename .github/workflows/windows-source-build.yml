@@ -1462,6 +1462,105 @@ jobs:
             exit 1
           fi
 
+      # ── the rest of the build pipeline: sign, verify, inspect, tamper ──
+      #
+      # The step above proves a Windows-built hull can PRODUCE a running APE.
+      # Everything after producing it - signing the app layer, verifying that
+      # signature, reading it back with inspect, and noticing when a file is
+      # tampered with - had no Windows coverage at all. e2e_build.sh asserts all
+      # of it, but its Steps 4-18 skip on Windows and cannot be un-skipped
+      # cheaply: they need `make platform-cosmo`, two full clean builds, which
+      # is the cost THIS job exists to isolate. Here the archives already exist,
+      # so the marginal cost is one more `hull build`.
+      #
+      # EXIT STATUS IS NOT USED, deliberately. A cosmo APE's status arrives
+      # shifted left by 8 on Windows and MSYS keeps the low byte, so $? is 0 for
+      # every outcome - the step above already calls its own build exit
+      # "informational only". Every assertion below reads an ARTIFACT or the
+      # PRINTED OUTPUT instead, which is the only thing that can be trusted
+      # here. That is also why the tamper check greps for the failure text
+      # rather than expecting a non-zero exit.
+      - name: hull build --sign + verify + inspect + tamper detection
+        shell: msys2 {0}
+        run: |
+          set -uo pipefail
+          export PATH="$PATH:$PWD/cosmo/bin"
+          HULL=./build/hull
+          fails=0
+          note() { printf '  %-58s %s\n' "$1" "$2"; }
+          want() {   # want LABEL HAYSTACK NEEDLE
+            case "$2" in *"$3"*) note "$1" "ok" ;;
+                         *) note "$1" "FAIL (no '$3')"; fails=$((fails+1)) ;; esac
+          }
+
+          work=$(mktemp -d)/signed
+          mkdir -p "$work"
+          cat > "$work/app.lua" <<'LUA'
+          app.manifest({
+              modules = { "hull/http-server@1" },
+              fs = { read = {"data/"}, write = {"uploads/"} },
+              env = {"PORT"},
+              hosts = {"api.stripe.com"},
+          })
+          app.get("/", function(req, res) res:json({ ok = true }) end)
+          LUA
+          sed -i 's/^          //' "$work/app.lua"
+
+          echo "--- keygen ---"
+          (cd "$work" && "$OLDPWD/$HULL" keygen dev >/dev/null 2>&1) || true
+          [ -f "$work/dev.key" ] && note "dev.key written" "ok" \
+                                 || { note "dev.key written" "FAIL"; fails=$((fails+1)); }
+
+          echo "--- hull build --sign ---"
+          "$HULL" build "$work" --no-verify-platform --sign "$work/dev.key" \
+                  > "$work/build.log" 2>&1 || true
+          tail -3 "$work/build.log" | sed 's/^/      | /'
+          # Windows names the artifact app.com (hl_host_exe_suffix), and the
+          # signature sits beside it regardless of the binary's name.
+          [ -f "$work/app.com" ]     && note "signed build produced app.com" "ok" \
+                                     || { note "signed build produced app.com" "FAIL"; fails=$((fails+1)); }
+          [ -f "$work/package.sig" ] && note "package.sig written" "ok" \
+                                     || { note "package.sig written" "FAIL"; fails=$((fails+1)); }
+
+          if [ -f "$work/package.sig" ]; then
+            sig=$(cat "$work/package.sig")
+            want "package.sig carries files"      "$sig" '"files"'
+            want "package.sig carries signature"  "$sig" '"signature"'
+            want "package.sig carries manifest"   "$sig" '"manifest"'
+          fi
+
+          echo "--- hull verify (valid) ---"
+          v=$("$HULL" verify --no-verify-platform --platform-key "$work/dev.pub" "$work" 2>&1) || true
+          printf '%s\n' "$v" | sed 's/^/      | /'
+          want "verify reports all checks passed" "$v" "all checks passed"
+
+          echo "--- hull inspect ---"
+          ins=$("$HULL" inspect "$work" 2>&1) || true
+          want "inspect shows the fs.read capability"  "$ins" "data/"
+          want "inspect shows the env capability"      "$ins" "PORT"
+          want "inspect shows the host allowlist"      "$ins" "api.stripe.com"
+          want "inspect reports a VALID signature"     "$ins" "VALID"
+
+          echo "--- tamper detection ---"
+          # Asserted on the printed verdict, NOT on exit status: see the header.
+          cp "$work/app.lua" "$work/app.lua.orig"
+          printf '\n-- tampered\n' >> "$work/app.lua"
+          t=$("$HULL" verify --no-verify-platform --platform-key "$work/dev.pub" "$work" 2>&1) || true
+          printf '%s\n' "$t" | sed 's/^/      | /'
+          want "tamper is DETECTED"              "$t" "FAILED"
+          want "tamper names the modified files" "$t" "Modified files"
+          mv "$work/app.lua.orig" "$work/app.lua"
+          r=$("$HULL" verify --no-verify-platform --platform-key "$work/dev.pub" "$work" 2>&1) || true
+          want "verify passes again after restore" "$r" "all checks passed"
+
+          echo ""
+          if [ "$fails" -eq 0 ]; then
+            echo "SIGN/VERIFY/INSPECT/TAMPER OK on a Windows-built hull"
+          else
+            echo "FAIL $fails assertion(s) in the sign/verify/inspect/tamper pipeline"
+            exit 1
+          fi
+
       - name: Upload the app-build logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
