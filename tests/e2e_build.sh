@@ -122,30 +122,66 @@ echo ""
 echo "=== Step 0: Build hull + platform.a from source ==="
 
 cd "$SRCDIR"
-if make clean >/dev/null 2>&1 && make platform >/dev/null 2>&1; then
-    pass "make platform (libhull_platform.a)"
-else
-    fail "make platform (libhull_platform.a)"
-    echo "FATAL: cannot continue without platform library"
-    exit 1
-fi
 
-# The base platform lib is runtime-less; a produced app composes one runtime
-# archive, so hull build needs them in build/ (build.lua resolves them there).
-if make feature-lua feature-js >/dev/null 2>&1; then
-    pass "make feature-lua feature-js (runtime archives)"
-else
-    fail "make feature-lua feature-js (runtime archives)"
-    echo "FATAL: cannot compose a runtime without the archives"
-    exit 1
-fi
+# A COSMO hull needs a different Step 0, and getting it wrong does not show up
+# until Step 4. cosmocc links FAT - both arches in one file - so it demands a
+# .aarch64/ counterpart beside every archive:
+#
+#   hull build: linking failed
+#   libhull_platform.a: linker input missing concomitant .aarch64/libhull_platform.a
+#
+# which is what a native single-arch `make platform` + EMBED_PLATFORM=1
+# produces. The cosmo recipe is `make platform-cosmo` (staging BOTH arch
+# archives) then EMBED_PLATFORM=cosmo, exactly as mk/tests.mk's e2e-cache-cosmo
+# does. Feature archives are skipped: a fat APE cannot force-load a native
+# feature archive, so the cosmo base compiles every runtime in (see "Composable
+# runtime + HTTP base" in CLAUDE.md - cosmo is the documented exemption).
+#
+# Detected from the hull this job already built, before Step 0 replaces it.
+COSMO_BUILD=0
+if [ -x "$HULL" ] && hull_is_ape "$HULL"; then COSMO_BUILD=1; fi
 
-if make EMBED_PLATFORM=1 >/dev/null 2>&1; then
-    pass "make EMBED_PLATFORM=1 (hull binary)"
+if [ "$COSMO_BUILD" = 1 ]; then
+    if make clean >/dev/null 2>&1 && make platform-cosmo >/dev/null 2>&1; then
+        pass "make platform-cosmo (both arch archives)"
+    else
+        fail "make platform-cosmo (both arch archives)"
+        echo "FATAL: cannot continue without the cosmo platform archives"
+        exit 1
+    fi
+    if make CC=cosmocc EMBED_PLATFORM=cosmo >/dev/null 2>&1; then
+        pass "make CC=cosmocc EMBED_PLATFORM=cosmo (hull binary)"
+    else
+        fail "make CC=cosmocc EMBED_PLATFORM=cosmo (hull binary)"
+        echo "FATAL: cannot continue without hull binary"
+        exit 1
+    fi
 else
-    fail "make EMBED_PLATFORM=1 (hull binary)"
-    echo "FATAL: cannot continue without hull binary"
-    exit 1
+    if make clean >/dev/null 2>&1 && make platform >/dev/null 2>&1; then
+        pass "make platform (libhull_platform.a)"
+    else
+        fail "make platform (libhull_platform.a)"
+        echo "FATAL: cannot continue without platform library"
+        exit 1
+    fi
+
+    # The base platform lib is runtime-less; a produced app composes one runtime
+    # archive, so hull build needs them in build/ (build.lua resolves them there).
+    if make feature-lua feature-js >/dev/null 2>&1; then
+        pass "make feature-lua feature-js (runtime archives)"
+    else
+        fail "make feature-lua feature-js (runtime archives)"
+        echo "FATAL: cannot compose a runtime without the archives"
+        exit 1
+    fi
+
+    if make EMBED_PLATFORM=1 >/dev/null 2>&1; then
+        pass "make EMBED_PLATFORM=1 (hull binary)"
+    else
+        fail "make EMBED_PLATFORM=1 (hull binary)"
+        echo "FATAL: cannot continue without hull binary"
+        exit 1
+    fi
 fi
 
 check_file_exists "hull binary exists" "$HULL"
@@ -153,7 +189,9 @@ check_file_executable "hull binary executable" "$HULL"
 check_file_exists "platform .a exists" "$SRCDIR/build/libhull_platform.a"
 
 # Verify hull_main is exported (macOS prefixes symbols with _, Linux does not)
-if nm "$SRCDIR/build/libhull_platform.a" 2>/dev/null | grep -q "hull_main"; then
+_pa="$SRCDIR/build/libhull_platform.a"
+[ "$COSMO_BUILD" = 1 ] && _pa="$SRCDIR/build/libhull_platform.x86_64-cosmo.a"
+if nm "$_pa" 2>/dev/null | grep -q "hull_main"; then
     pass "hull_main exported from platform .a"
 else
     fail "hull_main NOT exported from platform .a"
