@@ -66,10 +66,29 @@
  * raw ("0.1.2") or includes a "-dev" suffix in development builds.
  * Returns 0 on success. The tag is also used to pick the right release
  * via api.github.com/.../releases/tags/<tag>. */
-static int compose_tag(char *out, size_t out_sz)
+/* Compose the release tag to install FROM.
+ *
+ * Default is this binary's own version, which is what keeps a tool
+ * version-coupled to the hull that will drive it - wamrc must match the WAMR
+ * hull was compiled against, and cosmocc must match the platform archives it
+ * links. That default is right and stays.
+ *
+ * It is also unsatisfiable for a SOURCE build: HL_VERSION is then a git SHA,
+ * so the lookup asks for a tag like v0ea4f38 and gets a 404. Every source
+ * build is therefore unable to install any tool - including the one `hull
+ * doctor` recommends by name when it finds no usable compiler, which made that
+ * fix_command a dead end for exactly the users who needed it.
+ *
+ * `override` (from --tag=) names a different release explicitly. It selects
+ * WHICH signed release to trust, never WHETHER to verify: the manifest must
+ * still carry a valid Ed25519 signature from the embedded release key, every
+ * asset is still checked against its sha256 from that manifest, and the
+ * install is still atomic. A caller can pin an older release; a caller cannot
+ * install something unsigned. */
+static int compose_tag(char *out, size_t out_sz, const char *override)
 {
     if (!out || out_sz < 2) return -1;
-    const char *v = HL_VERSION;
+    const char *v = override && *override ? override : HL_VERSION;
     /* Strip any leading "v" so the caller doesn't double up. */
     if (v[0] == 'v') v++;
     int n = snprintf(out, out_sz, "v%s", v);
@@ -433,9 +452,11 @@ static int cmd_install(int argc, char **argv, const char *repo)
 {
     int install_all = 0;
     const char *name = NULL;
+    const char *tag_override = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--all") == 0)            install_all = 1;
         else if (strncmp(argv[i], "--repo=", 7) == 0) repo = argv[i] + 7;
+        else if (strncmp(argv[i], "--tag=", 6) == 0)  tag_override = argv[i] + 6;
         else if (argv[i][0] != '-')                   name = argv[i];
     }
     if (!install_all && !name) {
@@ -476,7 +497,7 @@ static int cmd_install(int argc, char **argv, const char *repo)
 
     /* Compose tag for THIS hull binary's version (not "latest"). */
     char tag[64];
-    if (compose_tag(tag, sizeof(tag)) != 0) {
+    if (compose_tag(tag, sizeof(tag), tag_override) != 0) {
         fprintf(stderr, "hull tools: cannot compose release tag\n");
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
@@ -619,6 +640,12 @@ static void usage(void)
         "\n"
         "Global flags:\n"
         "  --repo=ORG/NAME            override GitHub repo (default: " HL_DEFAULT_REPO ")\n"
+        "  --tag=vX.Y.Z               install from a named release instead of\n"
+        "                             this binary's version. Needed by a SOURCE\n"
+        "                             build, whose version is a git SHA and has\n"
+        "                             no release. Verification is unchanged: the\n"
+        "                             manifest must still be signed by the\n"
+        "                             release key.\n"
         "\n"
         "Tools install to $HOME/.hull/tools/. The trust chain is the same\n"
         "Ed25519-signed hull.sha256 manifest that protects `hull update`.\n");
