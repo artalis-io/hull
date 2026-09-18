@@ -833,6 +833,80 @@ jobs:
           fi
           exit "$rc_step"
 
+      # ── e2e ENFORCED ────────────────────────────────────────────────────
+      #
+      # The probe above never gates, which was right while nothing was known to
+      # pass. 87 suites now do, and nothing was stopping them regressing: that is
+      # not hypothetical, e2e-linker silently went green-BY-SKIPPING and then
+      # broke the moment lld appeared on this runner.
+      #
+      # Same three-tier shape as the unit suites above, with one difference: an
+      # e2e target either exits 0 or it does not, so there is no failure count to
+      # baseline. ENFORCED must exit 0. KNOWN is expected to FAIL, and a KNOWN
+      # suite that starts passing fails the job too - that is how it gets
+      # promoted rather than quietly drifting.
+      #
+      # EVERY suite here was MEASURED, not assumed: the 93-suite sweep of
+      # 2026-09-15 plus the per-suite probes that followed each fix. The map,
+      # with what is known about every failure, is docs/windows_e2e_status.md.
+      #
+      # NOT GATED, and the list is exactly two: e2e-build and
+      # e2e-project-discovery-lua. (e2e-cache-cosmo IS gated - it was promoted
+      # once its self-deleting prerequisite was fixed; this comment claimed
+      # otherwise for a while, which is the hazard of describing a list instead
+      # of deriving it.)
+      #
+      # e2e-project-discovery-lua stays out for a structural reason, not cost:
+      # its recipe opens with `make clean` and rebuilds into an isolated binary,
+      # so it CLOBBERS build/ and would destroy the tree the other suites share.
+      #
+      # e2e-build is a candidate now rather than a permanent exclusion: it
+      # skipped its whole build half for want of a spawnable compiler, and the
+      # cosmocc bundle installed above supplies one. Gate it once a run shows
+      # Steps 4-18 actually passing here - not before.
+      #
+      # COST, measured rather than estimated: 1191s for the 81 suites the sweep
+      # timed, plus 348s for the six confirmed on main afterwards = ~26 minutes,
+      # on top of the ~15-minute build. Hence the 65-minute cap (raised when
+      # e2e-cache-cosmo was gated), with headroom.
+      # exposure is unchanged, being a per-compile risk in the build phase.
+      #
+      # The per-suite spread is wide and not where you would guess:
+      # e2e-feature-valkey 189s and e2e-smtp-link-seam 107s dominate, and both
+      # SKIP - they spend that time building before deciding they cannot run.
+      # ── a compiler `hull build` can actually SPAWN ──────────────────────
+      #
+      # e2e-build skipped its entire second half (Steps 4-18: build, sign,
+      # verify, inspect, eject) because hull reported no usable compiler. The
+      # cosmocc already on PATH here, unpacked from cosmocc.zip, is a
+      # `#!/bin/sh` script - and a cosmo APE cannot exec a shebang, so it fails
+      # even when handed an absolute path that exists.
+      #
+      # The hull-managed bundle solves exactly that: it ships bin/busybox.exe
+      # beside the driver so a cosmo hull can spawn it (tools_install.c,
+      # docs/cosmocc_install.md). 401 MB, ~21s from GitHub's CDN - not cached
+      # on purpose: at that speed a cache adds a failure mode (see the zig
+      # caching attempt) for seconds of gain.
+      #
+      # --tag is REQUIRED, not decoration: `hull tools install` pins the release
+      # to this binary's own version, and a source build's version is a git SHA
+      # with no release behind it, so the default 404s. The tag is pinned rather
+      # than "latest" so a new release cannot change the toolchain under CI
+      # without someone deciding to; bump it deliberately.
+      - name: Install the cosmocc bundle (what lets hull build run here)
+        shell: msys2 {0}
+        timeout-minutes: 12
+        run: |
+          set -uo pipefail
+          export PATH="$PATH:$PWD/cosmo/bin:/ucrt64/bin"
+          ./build/hull tools install cosmocc --tag=v0.14.0
+          # Report what hull now believes, so a future failure in the suites
+          # below can be read without re-deriving it. Not an assertion: this
+          # step must not gate the tier.
+          ./build/hull doctor --json 2>/dev/null \
+            | tr ',' '\n' | grep -E '"build_compiler"|hull_build' || true
+
+
       # e2e on Windows, measured before anything is made required.
       #
       # No tests/e2e_*.sh has ever run on a Windows runner: this job stops at the
@@ -994,80 +1068,6 @@ jobs:
           echo ""
           echo "probe-e2e: informational only; this step does not gate the job."
           exit 0
-
-      # ── e2e ENFORCED ────────────────────────────────────────────────────
-      #
-      # The probe above never gates, which was right while nothing was known to
-      # pass. 87 suites now do, and nothing was stopping them regressing: that is
-      # not hypothetical, e2e-linker silently went green-BY-SKIPPING and then
-      # broke the moment lld appeared on this runner.
-      #
-      # Same three-tier shape as the unit suites above, with one difference: an
-      # e2e target either exits 0 or it does not, so there is no failure count to
-      # baseline. ENFORCED must exit 0. KNOWN is expected to FAIL, and a KNOWN
-      # suite that starts passing fails the job too - that is how it gets
-      # promoted rather than quietly drifting.
-      #
-      # EVERY suite here was MEASURED, not assumed: the 93-suite sweep of
-      # 2026-09-15 plus the per-suite probes that followed each fix. The map,
-      # with what is known about every failure, is docs/windows_e2e_status.md.
-      #
-      # NOT GATED, and the list is exactly two: e2e-build and
-      # e2e-project-discovery-lua. (e2e-cache-cosmo IS gated - it was promoted
-      # once its self-deleting prerequisite was fixed; this comment claimed
-      # otherwise for a while, which is the hazard of describing a list instead
-      # of deriving it.)
-      #
-      # e2e-project-discovery-lua stays out for a structural reason, not cost:
-      # its recipe opens with `make clean` and rebuilds into an isolated binary,
-      # so it CLOBBERS build/ and would destroy the tree the other suites share.
-      #
-      # e2e-build is a candidate now rather than a permanent exclusion: it
-      # skipped its whole build half for want of a spawnable compiler, and the
-      # cosmocc bundle installed above supplies one. Gate it once a run shows
-      # Steps 4-18 actually passing here - not before.
-      #
-      # COST, measured rather than estimated: 1191s for the 81 suites the sweep
-      # timed, plus 348s for the six confirmed on main afterwards = ~26 minutes,
-      # on top of the ~15-minute build. Hence the 65-minute cap (raised when
-      # e2e-cache-cosmo was gated), with headroom.
-      # exposure is unchanged, being a per-compile risk in the build phase.
-      #
-      # The per-suite spread is wide and not where you would guess:
-      # e2e-feature-valkey 189s and e2e-smtp-link-seam 107s dominate, and both
-      # SKIP - they spend that time building before deciding they cannot run.
-      # ── a compiler `hull build` can actually SPAWN ──────────────────────
-      #
-      # e2e-build skipped its entire second half (Steps 4-18: build, sign,
-      # verify, inspect, eject) because hull reported no usable compiler. The
-      # cosmocc already on PATH here, unpacked from cosmocc.zip, is a
-      # `#!/bin/sh` script - and a cosmo APE cannot exec a shebang, so it fails
-      # even when handed an absolute path that exists.
-      #
-      # The hull-managed bundle solves exactly that: it ships bin/busybox.exe
-      # beside the driver so a cosmo hull can spawn it (tools_install.c,
-      # docs/cosmocc_install.md). 401 MB, ~21s from GitHub's CDN - not cached
-      # on purpose: at that speed a cache adds a failure mode (see the zig
-      # caching attempt) for seconds of gain.
-      #
-      # --tag is REQUIRED, not decoration: `hull tools install` pins the release
-      # to this binary's own version, and a source build's version is a git SHA
-      # with no release behind it, so the default 404s. The tag is pinned rather
-      # than "latest" so a new release cannot change the toolchain under CI
-      # without someone deciding to; bump it deliberately.
-      - name: Install the cosmocc bundle (what lets hull build run here)
-        shell: msys2 {0}
-        timeout-minutes: 12
-        run: |
-          set -uo pipefail
-          export PATH="$PATH:$PWD/cosmo/bin:/ucrt64/bin"
-          ./build/hull tools install cosmocc --tag=v0.14.0
-          # Report what hull now believes, so a future failure in the suites
-          # below can be read without re-deriving it. Not an assertion: this
-          # step must not gate the tier.
-          ./build/hull doctor --json 2>/dev/null \
-            | tr ',' '\n' | grep -E '"build_compiler"|hull_build' || true
-
       - name: e2e suites - ENFORCED tier
         # Skipped when a probe list was supplied, because that dispatch is a
         # DIAGNOSIS - you are asking about specific suites and do not want ~24
