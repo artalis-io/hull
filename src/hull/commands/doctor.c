@@ -138,17 +138,34 @@ static void discover_compilers(CompilerInfo *ci, int count, const char *hull_exe
         ci[i].path[0] = '\0';
 
     for (int i = 0; i < count; i++) {
-        find_in_path(ci[i].name, ci[i].path, sizeof(ci[i].path));
-        /* cosmocc is a hull-managed TOOL, not typically on PATH: `hull tools
-         * install cosmocc` extracts it to ~/.hull/tools/cosmocc/bin/cosmocc,
-         * which is what `hull build` resolves via the compiler driver. Consult
-         * the same shared resolver so doctor agrees with build (a PATH-only
-         * probe would report a hull-installed cosmocc as missing). */
-        if (!ci[i].path[0] && strcmp(ci[i].name, "cosmocc") == 0) {
+        /* cosmocc is a hull-managed TOOL: `hull tools install cosmocc` extracts
+         * it to ~/.hull/tools/cosmocc/bin/cosmocc, and that install is probed
+         * BEFORE $PATH - because hl_driver_resolve_native (compiler.c) probes it
+         * first too, "so an explicitly-installed toolchain wins over ad-hoc".
+         * Doctor must answer the question build will actually answer.
+         *
+         * The order is the whole bug this fixes. Doctor used to try $PATH first
+         * and consult the managed install only when $PATH came up EMPTY. On a
+         * machine with both - a cosmocc.zip driver on $PATH and a hull-installed
+         * bundle - doctor therefore judged the $PATH one, found it has no
+         * busybox.exe sibling, correctly called it unrunnable, and reported
+         * `build_compiler: null`... while `hull build` used the bundle and
+         * compiled fine. Measured on the Windows runner: doctor named
+         * /…/cosmo/bin/cosmocc while /…/.hull/tools/cosmocc/bin/cosmocc existed
+         * with its busybox beside it.
+         *
+         * That is the failure CLAUDE.md already records for a different pair
+         * ("a second private copy in tools_install.c was why hull doctor and
+         * hull tools list could disagree about the same tool on the same box"),
+         * grown back between doctor and the compiler driver. Same preference
+         * order, same answer. */
+        if (strcmp(ci[i].name, "cosmocc") == 0) {
             HlToolStatus cs;
             if (hl_tools_status("cosmocc", hull_exe, &cs) == 0 && cs.resolved)
                 snprintf(ci[i].path, sizeof(ci[i].path), "%s", cs.path);
         }
+        if (!ci[i].path[0])
+            find_in_path(ci[i].name, ci[i].path, sizeof(ci[i].path));
     }
 }
 
