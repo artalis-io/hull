@@ -134,6 +134,63 @@ exits 0 or it does not, so there is no failure count to baseline.
 | KNOWN | expected to FAIL (`e2e-project-discovery`, `e2e-tui`). A KNOWN suite that starts PASSING also fails the job - that is how it gets promoted rather than quietly drifting. |
 | PROBE | `workflow_dispatch` only, never gates. How a suite earns a place in either tier. |
 
+## Audit: do the PASSING suites actually assert anything?
+
+Every defect this sweep found was discovered while chasing a FAILURE, so the
+suites that pass on Windows had never been examined for the same problem - and
+three of the ones that did fail turned out to be passing assertions that tested
+nothing. The passing set was audited statically for the four shapes that
+produced every broken guard here. All four are PRESENT in the tree; none of
+them produces a silent false pass on Windows today.
+
+| shape | found | live on Windows? |
+|---|---|---|
+| Symbol-ABSENCE guard (`nm BIN \| grep -c SYM`, assert 0) | 9, in 4 suites | **no** - all four skip first |
+| Status-gated pass (`<hull ...> && pass`) | 10, in 5 suites | **no** - those paths skip |
+| Bad-string guard (`grep -q "Segmentation\|panic\|fatal"`) | 3 | fixed (#529) |
+| `kill -0` as liveness | 20 verdict-bearing | vacuous, but harmless - see below |
+
+**The symbol guards are the ones that would have mattered.** They assert the
+invariants Hull's composable base rests on: pure-compute links zero Keel and
+zero mbedTLS, the base defines zero `sqlite3_open`, a non-SMTP app links none
+of the SMTP objects. And `nm` genuinely cannot read a cosmo APE - measured:
+
+    $ nm build/hull
+    nm: build/hull: no symbols
+
+so a guard pointed at one counts 0 of 0 symbols and passes having inspected
+nothing. It does not happen today because all four suites refuse to run on
+cosmo BEFORE reaching the guard, each with an accurate reason ("cosmo keeps
+SQLite in-base (a fat APE can't force-load a feature archive)"). That is the
+pattern done correctly: establish that the platform can support the claim
+before making it.
+
+**`kill -0` is vacuous here and it does not matter.** A backgrounded NATIVE
+child stays unreaped, so `kill -0` keeps succeeding after it is gone. Fourteen
+sites read `if ! kill -0 $PID; then fail "server failed to start"`, which
+therefore cannot fire; the remaining six only GATE a real assertion that
+follows. In both cases the verdict comes from a later check on actual output
+(a `curl` response, a computed value), so a dead server still fails the suite -
+it is merely reported at the wrong line. Worth fixing opportunistically, not
+worth a sweep.
+
+### The coupling to watch
+
+These guards are dormant because of the skips, not because they are sound. If
+a skip is ever lifted, the guard behind it goes live and asserts nothing. The
+concrete case is already on the roadmap: giving the Windows job a drivable
+`cosmocc` (see the `e2e-build` row) would let `hull build` produce app
+binaries there - and six of the nine symbol guards inspect a hull-BUILT
+binary. They would start passing on APEs `nm` cannot read, and the composable-
+base invariants would be retired silently on the day the coverage gap is
+closed.
+
+Anyone lifting one of those skips should make the guard prove the tool read
+something first - assert a non-zero total symbol count beside the zero match -
+rather than trusting silence. Silence meaning "the tool could not do its job"
+is the single mistake behind every broken guard recorded in this document.
+
+
 **Known coverage gap: TUI rendering is not asserted on Windows.**
 `e2e-tui` passes there because 26 of its 37 cases SKIP - Cosmopolitan has no
 `forkpty`, so the pty driver cannot drive a terminal at all and prints
