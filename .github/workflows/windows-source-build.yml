@@ -1012,12 +1012,27 @@ jobs:
       # 2026-09-15 plus the per-suite probes that followed each fix. The map,
       # with what is known about every failure, is docs/windows_e2e_status.md.
       #
-      # NOT GATED, and deliberately: e2e-build (~650s, and it dies in make's own
-      # job control before any assertion), e2e-cache-cosmo (~590s, and the target
-      # deletes its own prerequisite - see the doc),
-      # e2e-project-discovery-lua (~350s). Together ~20 minutes
-      # for three suites whose causes are already recorded; gating them would cost
-      # more than it protects.
+      # NOT GATED, and the list is exactly two: e2e-build and
+      # e2e-project-discovery-lua. (e2e-cache-cosmo IS gated - promoted once its
+      # self-deleting prerequisite was fixed; this comment claimed otherwise for
+      # a while, which is the hazard of describing a list instead of deriving
+      # it. It also described e2e-build as dying in make's job control, which
+      # #527 disproved, and cited a 50-minute cap raised to 65 in #526.)
+      #
+      # e2e-project-discovery-lua stays out for a structural reason, not cost:
+      # its recipe opens with `make clean` and rebuilds into an isolated binary,
+      # so it CLOBBERS build/ and would destroy the tree the other suites share.
+      #
+      # e2e-build stays out because its build half needs `make platform-cosmo` -
+      # two full clean builds, one per arch - and that is exactly what the
+      # separate windows-app-build job exists to isolate ("three builds where
+      # the sibling job does one... a wedge here turns the fast build+test
+      # signal red even though both had already passed"). Measured when tried:
+      # 1200s and still unfinished. The part that matters is NOT uncovered -
+      # windows-app-build already does hull new + hull build + runs the produced
+      # APE with the cosmocc bundle. What e2e-build would add on top is
+      # sign/verify/inspect/eject; if that is wanted, it belongs in THAT job,
+      # where the archives already exist.
       #
       # COST, measured rather than estimated: 1191s for the 81 suites the sweep
       # timed, plus 348s for the six confirmed on main afterwards = ~26 minutes,
