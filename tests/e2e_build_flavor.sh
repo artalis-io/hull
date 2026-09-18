@@ -23,6 +23,7 @@ HULL="$ROOT/build/hull"
 # (jart/cosmopolitan#1521), so "unknown flavor should error" could not tell a
 # rejection from an acceptance, and "app should exit 7" could not see the 7.
 . "$(dirname "$0")/lib/hull_rc.sh"
+. "$(dirname "$0")/lib/hull_nm.sh"
 hull_rc_init "$HULL"
 HULL_RC_TMP="${TMPDIR:-/tmp}/hull_flavor_rc.$$"
 
@@ -102,6 +103,8 @@ make -C "$ROOT" platform HL_KEEL_FEATURE=1 HL_TLS_FEATURE=1 >/dev/null 2>&1 \
 restore
 out=$("$HULL" build --no-verify-platform --flavor=pure-compute "$WORK/pc" -o "$WORK/pc/slim" 2>&1) \
     || { echo "$out"; fail "pure-compute app on the Keel+TLS-less base should build"; }
+# The two absence checks below are only meaningful if nm READ this binary.
+hull_nm_readable "$WORK/pc/slim" || true
 k=$(nm "$WORK/pc/slim" 2>/dev/null | grep -cE ' [Tt] _?kl_' || true)
 m=$(nm "$WORK/pc/slim" 2>/dev/null | grep -cE ' [Tt] _?mbedtls_ssl_handshake' || true)
 [ "$k" = 0 ] || fail "compute app on the Keel-less base should carry no Keel (got $k)"
