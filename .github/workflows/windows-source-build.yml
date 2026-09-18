@@ -1511,6 +1511,19 @@ jobs:
           [ -f "$work/dev.key" ] && note "dev.key written" "ok" \
                                  || { note "dev.key written" "FAIL"; fails=$((fails+1)); }
 
+          # --sign needs the PLATFORM layer signed first: hull build reads
+          # build/platform.sig to embed it, and without it refuses with
+          # "cannot read platform.sig (required for --sign)". sign_platform.lua
+          # scans libhull_platform*.a and understands the cosmo arch names
+          # (libhull_platform.x86_64-cosmo.a -> x86_64-cosmo), so pointing it at
+          # build/ signs the pair this job already produced. A throwaway dev key
+          # is the point: the app layer is then verified against that same key
+          # below, which is what makes the verify/tamper assertions meaningful.
+          echo "--- sign-platform (required before --sign) ---"
+          "$HULL" sign-platform --dir build/ "$work/dev" > "$work/signplat.log" 2>&1 || true
+          tail -2 "$work/signplat.log" | sed 's/^/      | /'
+          [ -f build/platform.sig ] && note "platform.sig written" "ok"                                     || { note "platform.sig written" "FAIL"; fails=$((fails+1)); }
+
           echo "--- hull build --sign ---"
           "$HULL" build "$work" --no-verify-platform --sign "$work/dev.key" \
                   > "$work/build.log" 2>&1 || true
