@@ -82,8 +82,19 @@ check_file_executable() {
     if [ -x "$2" ]; then pass "$1"; else fail "$1 - not executable: $2"; fi
 }
 
+# On failure, SHOW what the command said. hull_do leaves the captured output in
+# $OUT, and discarding it here is how a failing `hull build` reported only
+# "expected exit 0, got 1" while the linker error that explained it - the whole
+# reason the step failed - was sitting one variable away. A status is a symptom;
+# the output is the cause.
 check_exit() {
-    if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 - expected exit $2, got $3"; fi
+    if [ "$2" = "$3" ]; then
+        pass "$1"
+    else
+        fail "$1 - expected exit $2, got $3"
+        [ -n "${OUT:-}" ] && printf '%s
+' "$OUT" | sed 's/^/        | /' | tail -12
+    fi
 }
 
 wait_for_server() {
