@@ -13,6 +13,7 @@
 # TLS=0 for the base), so it stashes + restores build/hull + the platform lib
 # and leaves build/ as it found it. Heavy (two clean rebuilds); its own CI job.
 set -eu
+. "$(dirname "$0")/lib/hull_nm.sh"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
@@ -108,6 +109,7 @@ out=$("$HULL" build --no-verify-platform "$W/cli" -o "$W/cli/bin" 2>&1) \
     || fail "hull build (tls-free app on the tls-less base should link clean): $out"
 echo "$out" | grep -qi "composed TLS feature" \
     && fail "tls-free app should compose no TLS, got: $out" || true
+    hull_nm_readable "$W/cli/bin" || true
 n=$(nm "$W/cli/bin" 2>/dev/null | grep -c "$hs" || true)
 [ "$n" = 0 ] || fail "tls-free app still carries mbedTLS ($n mbedtls_ssl_handshake) - the drop regressed"
 rc=0; "$W/cli/bin" >/dev/null 2>"$W/cli.err" || rc=$?

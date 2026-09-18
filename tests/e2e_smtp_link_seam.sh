@@ -50,6 +50,7 @@ command -v nm >/dev/null 2>&1 || { echo "PASS: e2e_smtp_link_seam (nm absent; sk
 # 127" - a link-seam defect that does not exist. That is exactly what it
 # reported once the clang check stopped firing.
 . "$(dirname "$0")/lib/hull_rc.sh"
+. "$(dirname "$0")/lib/hull_nm.sh"
 if hull_is_ape "$HULL"; then
     echo "SKIP: a cosmo hull cannot link through --compiler=system (needs cosmo-format objects)"
     exit 0
@@ -69,6 +70,7 @@ out=$("$HULL" build --no-verify-platform --compiler=system "$WORK/pc" -o "$WORK/
 rc=0; "$WORK/pc/app" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 7 ] || fail "compute app should exit 7, got $rc"
 # No REAL SMTP capability object linked (the send/transport/worker/audit machinery).
+hull_nm_readable "$WORK/pc/app" || true
 real=$(nm "$WORK/pc/app" 2>/dev/null | grep -cE ' [Tt] _?hl_smtp_(execute|audit_complete|format_message|transport|wop|submit|admission|inflight)' || true)
 [ "$real" = 0 ] || fail "compute app links real SMTP objects (got $real), boundary broken"
 # A fully-linked executable has no undefined symbols; assert zero undefined kl_*.
@@ -101,6 +103,7 @@ e=$(nm "$WORK/mail/app" 2>/dev/null | grep -cE ' [Tt] _?hl_smtp_execute' || true
 if nm -m "$WORK/mail/app" >/dev/null 2>&1; then
     weak=$(nm -m "$WORK/mail/app" 2>/dev/null | grep -cE 'weak external _?hl_smtp_server_' || true)
 else
+    hull_nm_readable "$WORK/mail/app" || true
     weak=$(nm "$WORK/mail/app" 2>/dev/null | grep -cE ' W _?hl_smtp_server_' || true)
 fi
 [ "$weak" = 0 ] || fail "SMTP app resolved hl_smtp_server_* to WEAK no-op stubs (got $weak), not the strong impls"

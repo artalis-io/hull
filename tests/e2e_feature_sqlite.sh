@@ -11,6 +11,7 @@
 # SQLite=0 for the base), so it stashes + restores build/hull + the platform lib
 # and leaves build/ as it found it. Heavy (two clean rebuilds); its own CI job.
 set -eu
+. "$(dirname "$0")/lib/hull_nm.sh"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
@@ -106,6 +107,7 @@ out=$("$HULL" build --no-verify-platform "$W/plain" -o "$W/plain/bin" 2>&1) \
 echo "$out" | grep -qi "sqlite" \
     && fail "db-free app should compose no SQLite feature, got: $out" || true
 if command -v nm >/dev/null 2>&1; then
+        hull_nm_readable "$W/plain/bin" || true
     n=$(nm "$W/plain/bin" 2>/dev/null | grep -cE ' [Tt] _?sqlite3_open$' || true)
     [ "$n" = 0 ] || fail "db-free app still carries SQLite ($n sqlite3_open) - the C.2b drop regressed"
 fi
