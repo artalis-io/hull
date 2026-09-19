@@ -260,7 +260,10 @@ jobs:
     # fails. Lowered from 45: two hangs each burned the full 45 and produced
     # no evidence, which is precisely what the watchdog replaces.
     #
-    # Raised to 65 for the enforced e2e tier, which needs ~38 minutes on top of
+    # Raised to 80: the tier needed ~38 minutes, and keel#328 adds ~9 more
+    # (2095s -> 2626s measured across the same 89 suites) by charging 53ms to
+    # every hull process start on Windows. Revert to 65 when that lands.
+    # Was raised to 65 for the enforced e2e tier, which needs ~38 minutes on top of
     # the ~15-minute build (1191s for the 81 suites the sweep timed, plus 348s
     # for the six confirmed on main afterwards, plus 33s for e2e-smtp and 679s
     # for e2e-cache-cosmo). e2e-cache-cosmo is over half the increase on its
@@ -272,7 +275,7 @@ jobs:
     # e2e suite runs under `timeout -k 15 300`, so no single one can sit here
     # spending the budget. What is longer is the honest work, not the failure
     # mode.
-    timeout-minutes: 65
+    timeout-minutes: 80
 
     steps:
       # Both gits on this runner must agree about line endings, or a freshly
@@ -1100,9 +1103,28 @@ jobs:
           # this runner, green. Raising the cap for EVERY suite to accommodate one
           # would give back exactly what the 300 buys (no single suite can sit here
           # spending the budget), so the exception is named rather than global.
+          # TEMPORARY, and tied to an upstream fix: keel#328.
+          #
+          # Keel v3.1.0 costs +53ms on EVERY hull process start on Windows
+          # (21ms -> 74ms, measured with the Keel pin as the only variable),
+          # because it replaced Winsock's load-time constructor with a
+          # per-process InitOnceExecuteOnce path written for MSVC and MinGW -
+          # and a Cosmopolitan APE is neither. Suites that spawn many
+          # short-lived hull processes pay it per invocation:
+          #
+          #   e2e-analyze       33s -> 300s (~5000 invocations x 53ms = +267s)
+          #   e2e-cache-module  93s -> 217s
+          #   e2e-cache-cosmo  810s -> 900s
+          #
+          # These budgets accommodate a regression rather than a genuine cost,
+          # which is why they are named and dated here instead of folded into
+          # the default. REVERT THEM when keel#328 lands - if the numbers stay
+          # after that, the cause was something else and this comment is wrong.
           e2e_limit() {
             case "$1" in
-              e2e-cache-cosmo) echo 900 ;;
+              e2e-cache-cosmo) echo 1200 ;;   # 900 pre-keel#328
+              e2e-analyze)     echo 600 ;;    # 300 pre-keel#328, ran in 33s
+              e2e-cache-module) echo 600 ;;   # 300 pre-keel#328, ran in 93s
               *)               echo 300 ;;
             esac
           }
