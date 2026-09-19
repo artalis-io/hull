@@ -591,4 +591,81 @@ UTEST(pg_scram, rfc7677_vector)
     ASSERT_STREQ(sig_b64, "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=");
 }
 
+/* A hostile iteration count must be REJECTED, not honoured.
+ *
+ * The field arrives from the server and drives the PBKDF2 loop, so a peer
+ * answering i=2000000000 used to make the client run two billion HMAC-SHA256
+ * rounds - a hang, reachable by anyone who can MITM the connection, since
+ * sslmode defaults to `prefer`. It parsed with atoi() and was bounded only
+ * below (iters <= 0), and atoi() on a 15-digit field is undefined behaviour
+ * above INT_MAX besides.
+ *
+ * Drives the real receive/frame/dispatch loop over a socketpair: the canned
+ * AuthenticationSASL + server-first below is what a malicious server sends. */
+static int scram_start_with_iters(const char *iters_field)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -99;
+
+    /* AuthenticationSASL naming SCRAM-SHA-256, then AuthenticationSASLContinue
+     * carrying the server-first message with the iteration count under test. */
+    char first[256];
+    int fn = snprintf(first, sizeof first,
+                      "r=abcdefghijklmnopqrstuvwx,s=W22ZaJ0SNY7soEsUEjb6gQ==,%s",
+                      iters_field);
+    if (fn < 0 || (size_t)fn >= sizeof first) { close(sv[0]); close(sv[1]); return -98; }
+
+    uint8_t buf[512];
+    size_t n = 0;
+    const char *mech = "SCRAM-SHA-256";
+    uint32_t sasl_len = (uint32_t)(4 + 4 + strlen(mech) + 1 + 1);
+    buf[n++] = 'R';
+    buf[n++] = (uint8_t)(sasl_len >> 24); buf[n++] = (uint8_t)(sasl_len >> 16);
+    buf[n++] = (uint8_t)(sasl_len >> 8);  buf[n++] = (uint8_t)sasl_len;
+    buf[n++] = 0; buf[n++] = 0; buf[n++] = 0; buf[n++] = 10;   /* SASL */
+    memcpy(buf + n, mech, strlen(mech)); n += strlen(mech);
+    buf[n++] = 0;   /* end of this mechanism name */
+    buf[n++] = 0;   /* end of the mechanism list  */
+
+    uint32_t cont_len = (uint32_t)(4 + 4 + (size_t)fn);
+    buf[n++] = 'R';
+    buf[n++] = (uint8_t)(cont_len >> 24); buf[n++] = (uint8_t)(cont_len >> 16);
+    buf[n++] = (uint8_t)(cont_len >> 8);  buf[n++] = (uint8_t)cont_len;
+    buf[n++] = 0; buf[n++] = 0; buf[n++] = 0; buf[n++] = 11;   /* SASLContinue */
+    memcpy(buf + n, first, (size_t)fn); n += (size_t)fn;
+
+    if (write(sv[0], buf, n) != (ssize_t)n) { close(sv[0]); close(sv[1]); return -97; }
+
+    HlPgDsn dsn;
+    memset(&dsn, 0, sizeof dsn);
+    snprintf(dsn.user, sizeof dsn.user, "%s", "user");
+    snprintf(dsn.password, sizeof dsn.password, "%s", "pencil");
+
+    HlPgConn conn;
+    int rc = hl_pg_conn_start(&conn, sv[1], &dsn);
+    if (rc == 0) hl_pg_conn_close(&conn); else close(sv[1]);
+    close(sv[0]);
+    return rc;
+}
+
+UTEST(pg_scram, rejects_absurd_iteration_count)
+{
+    /* Two billion rounds: the hang this bound exists to prevent. */
+    ASSERT_NE(0, scram_start_with_iters("i=2000000000"));
+}
+
+UTEST(pg_scram, rejects_overflowing_iteration_count)
+{
+    /* 15 digits - atoi() territory for undefined behaviour. */
+    ASSERT_NE(0, scram_start_with_iters("i=999999999999999"));
+}
+
+UTEST(pg_scram, rejects_non_numeric_iteration_count)
+{
+    /* atoi("4096x") silently yielded 4096; strtol + a digit check does not. */
+    ASSERT_NE(0, scram_start_with_iters("i=4096x"));
+    ASSERT_NE(0, scram_start_with_iters("i=-1"));
+    ASSERT_NE(0, scram_start_with_iters("i="));
+}
+
 UTEST_MAIN()

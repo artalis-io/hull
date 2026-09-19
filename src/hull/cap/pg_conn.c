@@ -36,6 +36,17 @@
 #include <time.h>        /* clock_gettime(CLOCK_MONOTONIC) */
 #include <unistd.h>
 
+/* Upper bound on a server-supplied SCRAM iteration count. RFC 5802
+ * recommends at least 4096 and Postgres ships exactly that, so this is
+ * ~2400x the real-world value while still bounding the work a hostile or
+ * MITM'd peer can ask the client to perform. */
+#define SCRAM_MAX_ITERS 10000000
+/* Stringified for the rejection message, so the text cannot drift
+ * from the bound it reports (set_err takes a plain string). */
+#define HL_STR2(x) #x
+#define HL_STR(x)  HL_STR2(x)
+
+
 /* Overwrite memory the optimizer cannot elide (secret scrub). */
 static void pg_secure_zero(void *p, size_t n)
 {
@@ -373,15 +384,51 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
                 } else if (p[0] == 's' && vlen < sizeof salt_b64) {
                     memcpy(salt_b64, val, vlen); salt_b64[vlen] = '\0';
                 } else if (p[0] == 'i') {
+                    /* The iteration count comes from the SERVER and drives the
+                     * PBKDF2 loop below, so it is bounded on BOTH sides.
+                     *
+                     * atoi() cannot do that: it reports no error, and this
+                     * field holds up to 15 digits, so a value above INT_MAX is
+                     * undefined behaviour rather than a rejection. Bounded only
+                     * below (iters <= 0), a peer answering i=2000000000 made
+                     * the client run two billion HMAC-SHA256 rounds - a hang,
+                     * from a peer that only has to be reachable: sslmode
+                     * defaults to `prefer`, so a MITM can downgrade and supply
+                     * it.
+                     *
+                     * SCRAM_MAX_ITERS is far above anything a real server
+                     * asks for (RFC 5802 recommends at least 4096; Postgres
+                     * ships 4096) and far below a stall. */
                     char ib[16];
-                    if (vlen < sizeof ib) { memcpy(ib, val, vlen); ib[vlen] = '\0'; iters = atoi(ib); }
+                    if (vlen > 0 && vlen < sizeof ib) {
+                        memcpy(ib, val, vlen); ib[vlen] = '\0';
+                        int digits = 1;
+                        for (size_t k = 0; k < vlen; k++)
+                            if (!isdigit((unsigned char)ib[k])) { digits = 0; break; }
+                        if (digits) {
+                            errno = 0;
+                            char *iend = NULL;
+                            long v = strtol(ib, &iend, 10);
+                            if (errno == 0 && iend && *iend == '\0' &&
+                                v >= 1 && v <= SCRAM_MAX_ITERS)
+                                iters = (int)v;
+                        }
+                    }
                 }
             }
             if (!comma) break;
             p = comma + 1;
         }
         if (!rnonce[0] || !salt_b64[0] || iters <= 0) {
-            set_err(conn->errmsg, sizeof conn->errmsg, "invalid SCRAM server-first");
+            /* iters is 0 both when absent and when it failed validation above
+             * (non-numeric, out of range, or past SCRAM_MAX_ITERS); naming the
+             * bound is what makes an otherwise baffling rejection diagnosable
+             * against a server that genuinely wants a huge count. */
+            set_err(conn->errmsg, sizeof conn->errmsg,
+                    iters <= 0 && rnonce[0] && salt_b64[0]
+                        ? "SCRAM iteration count missing or outside 1.."
+                          HL_STR(SCRAM_MAX_ITERS)
+                        : "invalid SCRAM server-first");
             return -1;
         }
         if (strncmp(rnonce, sc->client_nonce, strlen(sc->client_nonce)) != 0) {
