@@ -293,11 +293,33 @@ static int run_js_test(const char *script_path, int *pass_out, int *fail_out)
     JSValue val = JS_Eval(js.ctx, buf, got, script_path, JS_EVAL_TYPE_MODULE);
     int failed = JS_IsException(val);
     if (failed) hl_js_dump_error(&js);
-    JS_FreeValue(js.ctx, val);
     free(buf);
-    if (failed) return -1;
 
-    hl_js_run_jobs(&js);
+    if (!failed) {
+        hl_js_run_jobs(&js);
+
+        /* Module evaluation returns a PROMISE, so a throw in the script body
+         * -- or a module-resolver gate refusing one of its imports -- rejects
+         * that promise instead of making JS_Eval return JS_EXCEPTION. Checking
+         * only JS_IsException therefore sails straight past a script that blew
+         * up, and the caller is told "published no counts", which points at
+         * the script's tail when the real fault was anywhere above it. Read
+         * the rejection reason and say so. (Same treatment as the module-gate
+         * tests further down this file.) */
+        if (JS_IsObject(val) &&
+            JS_PromiseState(js.ctx, val) == JS_PROMISE_REJECTED) {
+            JSValue reason = JS_PromiseResult(js.ctx, val);
+            const char *msg = JS_ToCString(js.ctx, reason);
+            fprintf(stderr, "\n%s: module evaluation REJECTED: %s\n",
+                    script_path, msg ? msg : "(no message)");
+            if (msg) JS_FreeCString(js.ctx, msg);
+            JS_FreeValue(js.ctx, reason);
+            failed = 1;
+        }
+    }
+
+    JS_FreeValue(js.ctx, val);
+    if (failed) return -1;
 
     if (eval_int("typeof globalThis.__test_pass === 'number' ? 1 : 0") != 1) {
         fprintf(stderr, "\n%s: published no __test_pass/__test_fail counts\n",
