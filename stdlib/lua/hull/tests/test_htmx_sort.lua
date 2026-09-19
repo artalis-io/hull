@@ -107,7 +107,12 @@ end)
 test("header_attrs preserves existing ?query in base url", function()
     -- If the base URL already has a query string, use & not ?.
     local s = sort.header_attrs("name", nil, { url = "/x?q=foo" })
-    assert_match(s, 'hx-get="/x?q=foo&sort=name:asc"')
+    -- `&` is HTML-escaped because this lands inside an attribute value: the
+    -- module routes every attribute through attr_escape. The browser decodes
+    -- &amp; back to & when parsing, so the URL is still /x?q=foo&sort=...
+    -- The point of the test is the SEPARATOR (& rather than a second ?),
+    -- which is unchanged.
+    assert_match(s, 'hx-get="/x?q=foo&amp;sort=name:asc"')
 end)
 
 test("header_attrs custom target", function()
@@ -134,12 +139,23 @@ test("header_attrs push_url=false omits hx-push-url", function()
     end
 end)
 
-test("header_attrs is keyboard-activatable", function()
+test("header_attrs is keyboard-focusable without a bogus role", function()
+    -- This test used to require role="button" and Enter/Space keys inside
+    -- hx-trigger. The module deliberately dropped BOTH, and says why at
+    -- stdlib/lua/hull/web/htmx/sort.lua: <th> already carries the implicit
+    -- `columnheader` role, and aria-sort is only valid on that role -- pairing
+    -- it with role="button" makes the combination invalid and screen readers
+    -- stop announcing "sorted ascending". Keyboard activation moved to
+    -- sort.js, so hx-trigger is plain "click" now.
+    --
+    -- Asserting the absence matters as much as the presence: without it,
+    -- re-adding role="button" would silently break a11y again.
     local s = sort.header_attrs("name", nil, { url = "/x" })
-    assert_match(s, 'role="button"')
     assert_match(s, 'tabindex="0"')
-    assert_match(s, "Enter")
-    assert_match(s, "key==' '")
+    assert_match(s, 'aria-sort="none"')
+    if s:find('role="button"', 1, true) then
+        error('role="button" is back on <th>; it invalidates aria-sort')
+    end
 end)
 
 -- ── M1 (audit): opts.default is sanitized + allowlist-checked ─────
