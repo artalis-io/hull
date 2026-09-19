@@ -100,6 +100,31 @@ test("createIndex: rejects invalid column names", () => {
     assertTrue(threw, "expected error for invalid column");
 });
 
+// A SQL keyword passes IDENT_RE -- it is a plain identifier -- so nothing
+// above catches it, and `reindex` interpolates the source table and column
+// names UNPREFIXED. Without this branch the failure surfaces as a bare
+// SQLite syntax error naming neither the caller nor the word. Case-
+// insensitive, because SQL's grammar is.
+test("createIndex: rejects a SQL keyword as a column name", () => {
+    let threw = false;
+    try { search.createIndex("posts", ["from"]); } catch (e) { threw = true; }
+    assertTrue(threw, "expected error for keyword column name");
+});
+
+test("reindex: rejects a SQL keyword as the source table", () => {
+    let threw = false;
+    try {
+        search.reindex("posts", "order", { columns: { title: "title" } });
+    } catch (e) { threw = true; }
+    assertTrue(threw, "expected error for keyword source table");
+});
+
+test("createIndex: keyword check is case-insensitive", () => {
+    let threw = false;
+    try { search.createIndex("Select", ["col"]); } catch (e) { threw = true; }
+    assertTrue(threw, "expected error for lower/mixed-case keyword");
+});
+
 // ── snippet ─────────────────────────────────────────────────────────
 
 test("query: with snippet", () => {
