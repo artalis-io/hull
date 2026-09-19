@@ -141,4 +141,7 @@ test("render escapes col.label on both sortable and plain headers", function()
 end)
 
 print(string.format("\n%d/%d htmx-table tests passed", pass, pass + fail))
-if fail > 0 then os.exit(1) end
+-- Results go back to the C harness (tests/hull/lua_script_test.h). NOT
+-- os.exit: this runs in a vanilla lua_State where `os` exists, so exiting
+-- here would terminate the whole test binary instead of failing one suite.
+return { pass = pass, fail = fail }

@@ -207,4 +207,7 @@ end)
 -- ── Done ─────────────────────────────────────────────────────────────
 
 print(string.format("hull.web.htmx: %d passed, %d failed", pass, fail))
-if fail > 0 then error("hull.web.htmx tests failed") end
+-- Results go back to the C harness (tests/hull/lua_script_test.h). NOT
+-- os.exit: this runs in a vanilla lua_State where `os` exists, so exiting
+-- here would terminate the whole test binary instead of failing one suite.
+return { pass = pass, fail = fail }

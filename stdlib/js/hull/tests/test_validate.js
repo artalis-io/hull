@@ -232,4 +232,8 @@ test("first rule error wins", () => {
     assertEq(errors.pw, "is required");
 });
 
-export default { pass, fail };
+// Counts go back to the C harness (run_js_test in
+// tests/hull/runtime/js/test_js.c), which reads them off the global object --
+// a module's default export is not reachable from there.
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;
