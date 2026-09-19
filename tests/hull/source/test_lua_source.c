@@ -33,49 +33,7 @@
 #include "sh_json.h"
 #include "sh_arena.h"
 
-/* Run a co-located Lua test script in a vanilla state. Returns 0 when the script
- * ran and returned a { pass, fail } table (values via out-params); -1 on any
- * harness-level failure (state alloc, package.path, dofile raise, bad return).
- * Uses NO utest macros -- those are only valid inside a UTEST body. */
-static int run_lua_test(const char *script_path, long long *pass_out, long long *fail_out)
-{
-    *pass_out = 0;
-    *fail_out = -1;
-
-    lua_State *L = luaL_newstate();
-    if (!L) return -1;
-    luaL_openlibs(L);
-
-    /* Resolve require("hull.source.X") from the source tree (repo-root relative).
-     * stdlib/lua is also on the path so hull.source.analyze can pull in hull.json
-     * (the tool VM resolves it via the embedded VFS; the harness has no VFS). */
-    if (luaL_dostring(L,
-            "package.path = 'stdlib/cli/lua/?.lua;stdlib/cli/lua/?/init.lua;"
-            "stdlib/lua/?.lua;stdlib/lua/?/init.lua;' .. package.path")
-        != LUA_OK) {
-        fprintf(stderr, "package.path setup failed: %s\n", lua_tostring(L, -1));
-        lua_close(L);
-        return -1;
-    }
-
-    if (luaL_dofile(L, script_path) != LUA_OK) {
-        fprintf(stderr, "\n%s: %s\n", script_path, lua_tostring(L, -1));
-        lua_close(L);
-        return -1;   /* the Lua script raised (a bug in the layer or the test) */
-    }
-
-    if (!lua_istable(L, -1)) { lua_close(L); return -1; }
-    lua_getfield(L, -1, "fail");
-    *fail_out = (long long)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-    lua_getfield(L, -1, "pass");
-    *pass_out = (long long)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    fprintf(stderr, "  %s: %lld passed, %lld failed\n", script_path, *pass_out, *fail_out);
-    lua_close(L);
-    return 0;
-}
+#include "../lua_script_test.h"
 
 /* ── conformance corpus: enumerate real .lua files in C (hermetic + deterministic) ──
  * The conformance suite (test_conformance.lua) needs the repo's actual Lua sources.

@@ -237,6 +237,80 @@ static int eval_int(const char *code)
     return result;
 }
 
+/* Run a co-located JS test script from disk in the caps-bearing test context.
+ *
+ * The JS counterpart to run_lua_test (tests/hull/lua_script_test.h), with one
+ * deliberate difference: that one uses a VANILLA lua_State with no capability
+ * layer, whereas this evaluates inside the context init_js_with_caps() built,
+ * so a script may use db and the rest. `hull:*` imports resolve through the
+ * platform VFS that context already installs -- the same path the inline
+ * js_stdlib tests take when they import hull:search.
+ *
+ * Contract. Path is REPO-ROOT-RELATIVE (tests run from the repo root) and the
+ * script must finish by publishing its counts on the global object:
+ *
+ *     globalThis.__test_pass = pass;
+ *     globalThis.__test_fail = fail;
+ *
+ * NOT `export default { pass, fail }` -- a module's default export is not
+ * reachable through globalThis, so the harness would read nothing and the
+ * suite would look empty rather than broken.
+ *
+ * Returns 0 when the script evaluated and published counts; -1 on any
+ * harness-level failure (unreadable file, a throw during evaluation, or
+ * missing counts). Callers assert on the return code -- no utest macros here,
+ * they are only valid inside a UTEST body. */
+static int run_js_test(const char *script_path, int *pass_out, int *fail_out)
+{
+    *pass_out = 0;
+    *fail_out = -1;
+
+    FILE *f = fopen(script_path, "rb");
+    if (!f) {
+        fprintf(stderr, "\n%s: cannot open\n", script_path);
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return -1; }
+    rewind(f);
+
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return -1; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+
+    /* Clear any counts a previous script left, so a script that throws before
+     * publishing is reported as a harness failure rather than silently
+     * inheriting the last suite's numbers. */
+    JSValue reset = JS_Eval(js.ctx,
+        "globalThis.__test_pass = undefined; globalThis.__test_fail = undefined;",
+        strlen("globalThis.__test_pass = undefined; globalThis.__test_fail = undefined;"),
+        "<reset>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, reset);
+
+    JSValue val = JS_Eval(js.ctx, buf, got, script_path, JS_EVAL_TYPE_MODULE);
+    int failed = JS_IsException(val);
+    if (failed) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    free(buf);
+    if (failed) return -1;
+
+    hl_js_run_jobs(&js);
+
+    if (eval_int("typeof globalThis.__test_pass === 'number' ? 1 : 0") != 1) {
+        fprintf(stderr, "\n%s: published no __test_pass/__test_fail counts\n",
+                script_path);
+        return -1;
+    }
+    *pass_out = eval_int("globalThis.__test_pass");
+    *fail_out = eval_int("globalThis.__test_fail");
+
+    fprintf(stderr, "  %s: %d passed, %d failed\n", script_path, *pass_out, *fail_out);
+    return 0;
+}
+
 /* ── Basic runtime tests ────────────────────────────────────────────── */
 
 UTEST(js_runtime, init_and_free)
@@ -3666,6 +3740,32 @@ UTEST(js_stdlib, csv_encode_headers)
 }
 
 /* ── hull:search tests ───────────────────────────────────────────────── */
+
+/* The user-facing JS stdlib ships 12 co-located test scripts under
+ * stdlib/js/hull/tests/. Until now NOTHING ran them: no Makefile glob collects
+ * that directory -- every glob that names it does so only to EXCLUDE any
+ * path under a tests directory -- and no harness loaded them. Note the
+ * contrast with the cli-js tree, whose tests ARE collected:
+ * STDLIB_JS_CLI_TEST_ONLY_FILES
+ * embeds it into a test-only registry -- so the machinery existed; these
+ * directories were simply never wired to anything.
+ *
+ * First one wired. csv is pure (no capability use), which keeps this leg about
+ * the seam rather than about caps; the harness supplies them regardless, so
+ * db-using scripts can follow without a second mechanism. */
+UTEST(js_stdlib, csv_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_csv.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);        /* evaluated and published counts */
+    EXPECT_EQ(fail, 0);      /* every assertion in the script held */
+    EXPECT_GT(pass, 0);      /* and it actually executed cases */
+
+    cleanup_js_caps();
+}
 
 /* hull:search rejects a SQL keyword as an identifier.
  *
