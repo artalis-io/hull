@@ -896,7 +896,13 @@ WAMR_CFLAGS += -DHL_MSAN
 # pointer casts in quickjs); UBSan flags them as runtime errors, fails
 # the CI job, and tells us nothing about Hull's own code. Hull's own
 # CFLAGS above still get -fsanitize=memory,undefined.
-QJS_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer \
+# -g: Hull's own CFLAGS above carry it, the vendor ones did not, so an MSan
+# report landing INSIDE an instrumented vendor TU printed a function name and
+# no line -- "js_parse_destructuring_element quickjs.c" with nothing to look
+# at. Debug info costs a sanitizer-only build nothing and is the difference
+# between a diagnosable report and a guess. (The other vendor blocks below
+# have the same gap; adding it where a report actually landed.)
+QJS_CFLAGS := -std=c11 -g -O1 -w -fsanitize=memory -fno-omit-frame-pointer \
               -DCONFIG_VERSION=\"$(QJS_VERSION)\" -DCONFIG_BIGNUM -D_GNU_SOURCE
 CFLAGS    += -DHL_QJS_VERSION=\"$(QJS_VERSION)\"
 LUA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer \
