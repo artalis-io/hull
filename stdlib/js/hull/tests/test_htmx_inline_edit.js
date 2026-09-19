@@ -161,4 +161,8 @@ test("editor custom aria-label", () => {
 });
 
 console.log(`\n${pass}/${pass + fail} inline-edit tests passed`);
-if (fail > 0) throw new Error("inline-edit tests failed");
+// Counts go back to the C harness (run_js_test in
+// tests/hull/runtime/js/test_js.c), which reads them off the global object --
+// a module's default export is not reachable from there.
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;

@@ -3767,6 +3767,158 @@ UTEST(js_stdlib, csv_suite)
     cleanup_js_caps();
 }
 
+/* The rest of the co-located JS stdlib suites -- same story as csv_suite
+ * above: written, committed, and never run by anything.
+ *
+ * Four published their counts via `export default`, which the harness cannot
+ * reach through globalThis, and six ended by throwing. Both forms are now the
+ * globalThis convention the harness reads.
+ *
+ * test_email.js is deliberately absent: it wraps its assertions in an async
+ * IIFE around real `await email.send(...)` calls, so its counts are published
+ * only once genuine async work settles -- more than hl_js_run_jobs pumping
+ * microtasks will deliver. It needs the async backend driven, separately. */
+UTEST(js_stdlib, confirm_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_confirm.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, form_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_form.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, htmx_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_htmx.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, htmx_form_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_htmx_form.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, htmx_inline_edit_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_htmx_inline_edit.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, htmx_search_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_htmx_search.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, i18n_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_i18n.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, search_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_search.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, toast_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_toast.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, validate_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_validate.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+
 /* hull:search rejects a SQL keyword as an identifier.
  *
  * A keyword passes the IDENT_RE and the _hull_ prefix check -- it IS a plain
