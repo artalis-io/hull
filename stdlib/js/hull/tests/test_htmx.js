@@ -13,7 +13,7 @@ function test(name, fn) {
         pass++;
     } catch (e) {
         fail++;
-        print("FAIL: " + name + ": " + e.message);
+        console.log("FAIL: " + name + ": " + e.message);
     }
 }
 
@@ -201,5 +201,9 @@ test("redirect on plain request falls back to res.redirect", () => {
 
 // ── Done ─────────────────────────────────────────────────────────────
 
-print(`hull:web:htmx: ${pass} passed, ${fail} failed`);
-if (fail > 0) throw new Error("hull:web:htmx tests failed");
+console.log(`hull:web:htmx: ${pass} passed, ${fail} failed`);
+// Counts go back to the C harness (run_js_test in
+// tests/hull/runtime/js/test_js.c), which reads them off the global object --
+// a module's default export is not reachable from there.
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;

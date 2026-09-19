@@ -13,7 +13,7 @@ function test(name, fn) {
         pass++;
     } catch (e) {
         fail++;
-        print("FAIL: " + name + ": " + e.message);
+        console.log("FAIL: " + name + ": " + e.message);
     }
 }
 
@@ -147,15 +147,33 @@ test("max number: too large fails", () => {
 
 // ── pattern ──────────────────────────────────────────────────────────
 
+// `pattern` takes a STRING, not a RegExp. The module refuses a pre-compiled
+// RegExp on purpose and says why: it screens the pattern source for known-bad
+// backtracking before compiling it, and a RegExp object arrives already
+// compiled, past the screen. These two tests passed /regex literals/ and had
+// never run, so nothing caught that the API had tightened underneath them.
 test("pattern: match passes", () => {
-    const [ok] = validate.check({ code: "ABC-123" }, { code: { pattern: /^[A-Z]+-\d+$/ } });
+    const [ok] = validate.check({ code: "ABC-123" }, { code: { pattern: "^[A-Z]+-\\d+$" } });
     assertEq(ok, true);
 });
 
 test("pattern: no match fails", () => {
-    const [ok, errors] = validate.check({ code: "abc" }, { code: { pattern: /^[A-Z]+-\d+$/ } });
+    const [ok, errors] = validate.check({ code: "abc" }, { code: { pattern: "^[A-Z]+-\\d+$" } });
     assertEq(ok, false);
     assertEq(errors.code, "does not match the required pattern");
+});
+
+// The refusal is the ReDoS defence, so assert it directly -- otherwise
+// accepting RegExp again would silently reopen the hole these two tests were
+// rewritten around.
+test("pattern: a RegExp object is refused", () => {
+    let threw = false;
+    try {
+        validate.check({ code: "ABC-123" }, { code: { pattern: /^[A-Z]+-\d+$/ } });
+    } catch (e) {
+        threw = true;
+    }
+    assertEq(threw, true);
 });
 
 // ── oneof ────────────────────────────────────────────────────────────
@@ -232,4 +250,8 @@ test("first rule error wins", () => {
     assertEq(errors.pw, "is required");
 });
 
-export default { pass, fail };
+// Counts go back to the C harness (run_js_test in
+// tests/hull/runtime/js/test_js.c), which reads them off the global object --
+// a module's default export is not reachable from there.
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;

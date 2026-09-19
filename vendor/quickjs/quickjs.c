@@ -24187,6 +24187,17 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
                         goto var_error;
                     opcode = OP_scope_get_var;
                     scope = s->cur_func->scope_level;
+                    /* HULL PATCH. The OBJECT-destructuring branches set
+                       label_lvalue = -1 alongside opcode/scope (see the two
+                       sites above); this ARRAY branch did not, so a
+                       declaration like `const [a, b] = x` reached the
+                       put_lvalue below with label_lvalue never written.
+                       Benign in effect - put_lvalue reads `label` only under
+                       OP_get_ref_value and this path is OP_scope_get_var - but
+                       a genuine uninitialised read, and MSan flags it at
+                       js_parse_destructuring_element. Re-apply on a QuickJS
+                       upgrade; belongs upstream. */
+                    label_lvalue = -1;
                 } else {
                     if (js_parse_left_hand_side_expr(s))
                         return -1;

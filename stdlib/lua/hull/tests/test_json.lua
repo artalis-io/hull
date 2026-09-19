@@ -32,8 +32,14 @@ test("require returns table with encode and decode", function()
     assert(type(json.decode) == "function", "expected decode function")
 end)
 
-test("encode empty object", function()
-    assert_eq(json.encode({}), "{}")
+test("encode empty table is an array", function()
+    -- Lua cannot distinguish an empty object from an empty array: both are
+    -- `{}`. The vendored encoder resolves the ambiguity toward ARRAY --
+    -- `if rawget(val, 1) ~= nil or next(val) == nil` (stdlib/lua/vendor/json.lua)
+    -- -- so `{}` round-trips to `[]`, not `{}`. This test asserted `{}` and
+    -- never ran, so nothing caught the mismatch. Asserting the real behaviour
+    -- rather than patching a vendored library to match a stale expectation.
+    assert_eq(json.encode({}), "[]")
 end)
 
 test("decode empty object", function()

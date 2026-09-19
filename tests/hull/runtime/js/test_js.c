@@ -293,11 +293,33 @@ static int run_js_test(const char *script_path, int *pass_out, int *fail_out)
     JSValue val = JS_Eval(js.ctx, buf, got, script_path, JS_EVAL_TYPE_MODULE);
     int failed = JS_IsException(val);
     if (failed) hl_js_dump_error(&js);
-    JS_FreeValue(js.ctx, val);
     free(buf);
-    if (failed) return -1;
 
-    hl_js_run_jobs(&js);
+    if (!failed) {
+        hl_js_run_jobs(&js);
+
+        /* Module evaluation returns a PROMISE, so a throw in the script body
+         * -- or a module-resolver gate refusing one of its imports -- rejects
+         * that promise instead of making JS_Eval return JS_EXCEPTION. Checking
+         * only JS_IsException therefore sails straight past a script that blew
+         * up, and the caller is told "published no counts", which points at
+         * the script's tail when the real fault was anywhere above it. Read
+         * the rejection reason and say so. (Same treatment as the module-gate
+         * tests further down this file.) */
+        if (JS_IsObject(val) &&
+            JS_PromiseState(js.ctx, val) == JS_PROMISE_REJECTED) {
+            JSValue reason = JS_PromiseResult(js.ctx, val);
+            const char *msg = JS_ToCString(js.ctx, reason);
+            fprintf(stderr, "\n%s: module evaluation REJECTED: %s\n",
+                    script_path, msg ? msg : "(no message)");
+            if (msg) JS_FreeCString(js.ctx, msg);
+            JS_FreeValue(js.ctx, reason);
+            failed = 1;
+        }
+    }
+
+    JS_FreeValue(js.ctx, val);
+    if (failed) return -1;
 
     if (eval_int("typeof globalThis.__test_pass === 'number' ? 1 : 0") != 1) {
         fprintf(stderr, "\n%s: published no __test_pass/__test_fail counts\n",
@@ -3766,6 +3788,158 @@ UTEST(js_stdlib, csv_suite)
 
     cleanup_js_caps();
 }
+
+/* The rest of the co-located JS stdlib suites -- same story as csv_suite
+ * above: written, committed, and never run by anything.
+ *
+ * Four published their counts via `export default`, which the harness cannot
+ * reach through globalThis, and six ended by throwing. Both forms are now the
+ * globalThis convention the harness reads.
+ *
+ * test_email.js is deliberately absent: it wraps its assertions in an async
+ * IIFE around real `await email.send(...)` calls, so its counts are published
+ * only once genuine async work settles -- more than hl_js_run_jobs pumping
+ * microtasks will deliver. It needs the async backend driven, separately. */
+UTEST(js_stdlib, confirm_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_confirm.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, form_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_form.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, htmx_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_htmx.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, htmx_form_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_htmx_form.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, htmx_inline_edit_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_htmx_inline_edit.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, htmx_search_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_htmx_search.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, i18n_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_i18n.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, search_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_search.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, toast_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_toast.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, validate_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_validate.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 
 /* hull:search rejects a SQL keyword as an identifier.
  *

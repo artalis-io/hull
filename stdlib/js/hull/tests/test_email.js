@@ -15,7 +15,7 @@ async function test(name, fn) {
         pass++;
     } catch (e) {
         fail++;
-        print("FAIL: " + name + ": " + (e && e.message));
+        console.log("FAIL: " + name + ": " + (e && e.message));
     }
 }
 
@@ -68,6 +68,6 @@ await (async () => {
         "invalid_argument", "api_key required");
 
     // ── results ─────────────────────────────────────────────────────
-    print(pass + " passed, " + fail + " failed");
+    console.log(pass + " passed, " + fail + " failed");
     if (fail > 0) throw new Error(fail + " test(s) failed");
 })();
