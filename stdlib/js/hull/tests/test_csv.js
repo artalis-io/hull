@@ -175,4 +175,10 @@ test("roundtrip: with quotes", () => {
     assertEq(output, input);
 });
 
-export default { pass, fail };
+// Reported on globalThis, not as a default export: the C harness
+// (run_js_test in tests/hull/runtime/js/test_js.c) evaluates this file as a
+// module and reads the counts back through the global object, which a module's
+// default export is not reachable from. Same convention as the inline
+// js_stdlib tests.
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;

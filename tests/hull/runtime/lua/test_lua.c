@@ -26,6 +26,8 @@
 #include "hull/vfs.h"
 #include "hull/stdlib_feature.h"
 #include "hull/cap/db.h"
+
+#include "../../lua_script_test.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db_registry.h"
@@ -3861,6 +3863,29 @@ UTEST(lua_stdlib, tar_create_rejects_unsafe_name)
 }
 
 /* ── hull.search tests ───────────────────────────────────────────────── */
+
+/* The user-facing Lua stdlib ships 16 co-located test scripts under
+ * stdlib/lua/hull/tests/. Until now NOTHING ran them: no Makefile glob
+ * collects that directory -- every glob that names it does so only to
+ * EXCLUDE any path under a tests directory -- and no harness loaded them, so they
+ * were 16 files of assurance that did not exist. test_csv.lua even documents
+ * a runner -- "test_lua_runtime.c" -- that no longer exists under that name.
+ *
+ * This is the first one wired, deliberately chosen because it already meets
+ * the `return { pass, fail }` contract: it proves the seam without also
+ * testing a conversion. The remaining scripts follow, and 8 of them must
+ * first lose an `os.exit(1)` tail that would kill this binary outright.
+ *
+ * hull.csv is pure Lua (no capability use), so the vanilla state is the right
+ * harness; a script needing db/crypto belongs in a caps-bearing leg below. */
+UTEST(lua_stdlib, csv_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_csv.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);        /* ran to a { pass, fail } return */
+    EXPECT_EQ(fail, 0LL);    /* every assertion in the script held */
+    EXPECT_GT(pass, 0LL);    /* and it actually executed cases */
+}
 
 UTEST(lua_stdlib, search_create_and_query)
 {
