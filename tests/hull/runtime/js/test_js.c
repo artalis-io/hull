@@ -3667,6 +3667,50 @@ UTEST(js_stdlib, csv_encode_headers)
 
 /* ── hull:search tests ───────────────────────────────────────────────── */
 
+/* hull:search rejects a SQL keyword as an identifier.
+ *
+ * A keyword passes the IDENT_RE and the _hull_ prefix check -- it IS a plain
+ * identifier -- so only this branch catches it, and `reindex` interpolates the
+ * source table and column names UNPREFIXED. Without it the failure surfaces as
+ * a bare SQLite syntax error naming neither the caller nor the word.
+ *
+ * The positive control runs FIRST and is not optional: every call here goes
+ * through requireSqlite(), so on a harness without a SQLite-backed db EVERY
+ * call throws and the three rejection counters below would all trip for the
+ * wrong reason -- a test that passes precisely when it is measuring nothing.
+ * A valid identifier must be accepted for the rejections to mean anything. */
+UTEST(js_stdlib, search_rejects_sql_keyword)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { search } from 'hull:search';\n"
+        "function run() {\n"
+        "  try { search.createIndex('posts_ok', ['title']); }\n"
+        "  catch (e) { return -1; }\n"
+        "  let n = 0;\n"
+        "  try { search.createIndex('posts_kw', ['from']); } catch (e) { n++; }\n"
+        "  try { search.reindex('posts_ok', 'order', { columns: { title: 'title' } }); }\n"
+        "  catch (e) { n++; }\n"
+        "  try { search.createIndex('Select', ['col']); } catch (e) { n++; }\n"
+        "  return n;\n"
+        "}\n"
+        "globalThis.__search_kw = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    /* -1 = the positive control itself threw: the harness has no usable db and
+     * this test measured nothing. Distinct from a missed rejection. */
+    ASSERT_NE(eval_int("globalThis.__search_kw"), -1);
+    ASSERT_EQ(eval_int("globalThis.__search_kw"), 3);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, search_create_and_query)
 {
     init_js_with_caps();

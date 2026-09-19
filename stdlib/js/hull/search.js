@@ -7,7 +7,7 @@
  * Each search index is a `_hull_fts_<name>` FTS5 virtual table with a
  * fixed `id` column plus the columns the caller declared. Identifiers
  * are validated against `/^[A-Za-z_][A-Za-z0-9_]*$/` and rejected if
- * they begin with `_hull_`.
+ * they begin with `_hull_` or are a SQL keyword.
  *
  * Supports snippet/highlight extraction and bulk re-indexing from a
  * source table.
@@ -27,6 +27,21 @@ const db = dbModule.default();
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const TABLE_PREFIX = "_hull_fts_";
 
+// An identifier that passes IDENT_RE cannot inject -- it carries no quote,
+// space, semicolon or comment marker. What it CAN do is collide with SQL's
+// own grammar: `sourceTable` and every column name below are interpolated
+// UNPREFIXED, so an index re-built `FROM order`, or a column named `from`,
+// parses as a keyword and fails deep inside SQLite with a syntax error that
+// names neither the caller nor the offending word. Rejecting the keyword up
+// front is what turns that into a diagnosable message. Mirrors the
+// SQL_KEYWORDS check in search.lua -- same 27 words, same reason.
+const SQL_KEYWORDS = new Set([
+    "SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+    "TABLE", "INDEX", "WHERE", "FROM", "INTO", "VALUES", "SET",
+    "UNION", "JOIN", "ORDER", "GROUP", "HAVING", "LIMIT", "OFFSET",
+    "BEGIN", "COMMIT", "ROLLBACK", "PRAGMA", "ATTACH", "DETACH",
+]);
+
 // FTS5 is a SQLite-only feature; there is no Postgres equivalent wired
 // here. Fail with a clear message rather than a cryptic SQL error when
 // the default connection is not SQLite. Same policy as db.udf.
@@ -41,7 +56,8 @@ function requireSqlite() {
 
 /**
  * Validate an identifier (table name, column name).
- * Must match /^[a-zA-Z_][a-zA-Z0-9_]*$/ and must not start with _hull_.
+ * Must match /^[a-zA-Z_][a-zA-Z0-9_]*$/, must not start with _hull_, and
+ * must not be a SQL keyword.
  * @param {string} name - identifier to validate
  * @param {string} label - description for error messages
  */
@@ -50,6 +66,8 @@ function validateIdent(name, label) {
         throw new Error(label + " must match /^[a-zA-Z_][a-zA-Z0-9_]*$/: " + String(name));
     if (name.indexOf("_hull_") === 0)
         throw new Error(label + " must not start with '_hull_': " + name);
+    if (SQL_KEYWORDS.has(name.toUpperCase()))
+        throw new Error(label + " must not be a SQL keyword: " + name);
 }
 
 /**
