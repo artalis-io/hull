@@ -228,9 +228,11 @@ UTEST(net_stream, free_mid_connect_does_not_crash)
     ASSERT_NE(s, NULL);
     hl_net_stream_free(s);          /* no pump: teardown races the connect */
 
-    /* Keep ticking afterwards: a late callback into freed storage would show
-     * up here under ASan rather than silently. */
-    for (int i = 0; i < 20; i++) f.be->tick(f.ctx, 5);
+    /* Keep ticking afterwards, and generously: teardown completes when the
+     * connect op confirms detachment, which arrives through the loop. A late
+     * callback into freed storage shows up here under ASan, and too few ticks
+     * shows up as a LeakSanitizer report rather than silence. */
+    for (int i = 0; i < 100; i++) f.be->tick(f.ctx, 5);
     fix_free(&f);
 }
 
@@ -256,7 +258,7 @@ UTEST(net_stream, cancel_then_free_is_safe)
     hl_net_stream_cancel(s);        /* idempotent */
     hl_net_stream_free(s);
 
-    for (int i = 0; i < 20; i++) f.be->tick(f.ctx, 5);
+    for (int i = 0; i < 100; i++) f.be->tick(f.ctx, 5);
     fix_free(&f);
 }
 

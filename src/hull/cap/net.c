@@ -501,12 +501,22 @@ void hl_net_stream_cancel(HlNetStream *s)
         s->closing = 1;
         s->result  = HL_NET_E_CANCELLED;
     }
-    if (s->connect_started && !s->connect_done)
+    /* Cancel on NOT-DETACHED, not on not-done. A completed op still has to be
+     * retired before it detaches, and on loopback the connect completes
+     * synchronously, so gating on !connect_done skipped the cancel for exactly
+     * the common case and the op never detached. That was the leak. */
+    if (s->connect_started && !kl_connect_op_is_detached(&s->connect_op))
         kl_connect_op_cancel(&s->connect_op);
 
     co_cancel_delay(s);
     co_cancel_deadline(s);
-    retire_attempts(s);
+
+    /* In-flight attempt descriptors belong to the op until it retires them:
+     * kl_connect_op_cancel drives co_cancel_attempt / co_dispose_fd for each.
+     * Closing them here as well raced those hooks. retire_attempts stays as
+     * the final sweep in maybe_release, where nothing is live any more.
+     *
+     * s->fd is different: on_done handed it over, so it is ours to close. */
     if (kl_handle_valid(s->fd)) { sp_close(s->fd); s->fd = KL_INVALID_SOCKET; }
     wake(s);
 }
