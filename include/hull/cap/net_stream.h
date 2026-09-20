@@ -16,10 +16,15 @@
  * pool is 4 workers, so a handful of idle SSH sessions would exhaust it.
  *
  * So this schedules through HlAsyncBackend (watchers, timers, op suspend), the
- * seam that works for a server app and an `app.main` CLI app alike. Connect
- * borrows the backend's KlEventCtx for KlConnectOp, which brings resolve,
- * IPv4/IPv6 racing, per-attempt delay and a connect deadline that this file
- * does not have to reinvent. See docs/net_module_design.md section 6a.
+ * seam that works for a server app and an `app.main` CLI app alike.
+ *
+ * Keel still supplies the hard parts of connecting: KlConnectOp brings resolve,
+ * IPv4/IPv6 racing, per-attempt delay and a connect deadline this file does not
+ * have to reinvent. It needs no event context to do so. KlConnectOp and
+ * KlStream are both hook-driven state machines, which is what lets Keel's
+ * connect logic sit on Hull's scheduler rather than requiring Keel's loop, and
+ * what keeps this transport working on the poll backend too.
+ * See docs/net_module_design.md section 6a.
  *
  * ## Ownership, which is the part that bites
  *

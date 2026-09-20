@@ -97,19 +97,6 @@ HlAsyncBackendCtx *hl_async_backend_keel_wrap(KlEventCtx *ev)
     return ctx;
 }
 
-/* Borrow the loop this backend drives. Needed by compositions that reach for a
- * Keel-specific primitive (KlConnectOp's resolve + Happy-Eyeballs racing,
- * KlStream) while still scheduling through the portable vtable above.
- *
- * Borrowed, never owned: the caller must not free the returned context, and it
- * stays valid exactly as long as `ctx` does. Returns NULL for a NULL argument
- * so a caller can branch on "is the active backend the Keel one" without
- * knowing which backend it got. */
-KlEventCtx *hl_async_backend_keel_ev(HlAsyncBackendCtx *ctx)
-{
-    return ctx ? ctx->kel : NULL;
-}
-
 void hl_async_backend_keel_unwrap(HlAsyncBackendCtx *ctx)
 {
     if (!ctx) return;

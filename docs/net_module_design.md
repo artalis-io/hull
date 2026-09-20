@@ -208,7 +208,7 @@ byte-stream but not new for Hull. Every piece has a precedent:
 | piece | precedent |
 |---|---|
 | long-lived client connection on the MAIN event context | `kl_ws_client_connect(KlEventCtx *ev, ...)`, already used by `ws.connect`, whose callbacks fire on the event-loop thread |
-| `KlConnectOp` driven to a winning descriptor | `cap/smtp_transport.c` (on a private ctx; hull/net uses the main one) |
+| `KlConnectOp` driven to a winning descriptor | `cap/smtp_transport.c`. Note it needs NO event context: KlConnectOp and KlStream are hook-driven state machines, so Keel's connect logic sits on Hull's scheduler and the transport stays backend-agnostic |
 | pull-style reads over push-style delivery | the multipart body reader: `hl_cap_multipart_park` parks the coroutine on NEED_DATA and the `on_data` callback resumes it |
 | bounded writes with backpressure | `KlStream` (`kl_stream_write` / `_flush` / `_on_write_complete`) |
 

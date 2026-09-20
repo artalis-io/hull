@@ -17,7 +17,6 @@
 
 #include "hull/cap/net_stream.h"
 #include "hull/shared/async_backend.h"
-#include "hull/async/keel.h"
 
 #include "keel/connect_op.h"
 #include "keel/sockaddr.h"
@@ -63,7 +62,6 @@ struct HlNetStream {
      * the runtime's async_ctx) so this file needs no runtime knowledge. */
     HlAsyncBackendCtx *async;
     const HlAsyncBackend *be;
-    KlEventCtx        *ev;          /* borrowed, for KlConnectOp only */
 
     /* Connect */
     KlConnectOp  connect_op;
@@ -387,19 +385,17 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
 
     const HlAsyncBackend *be = hl_async_backend();
     if (!be) return HL_NET_E_INVAL;
-
-    /* KlConnectOp needs the Keel loop. hull/net triggers Keel composition, so
-     * the poll backend and hull/net never coexist; a NULL here means the
-     * composition gate is wrong, and failing closed is the honest response. */
-    KlEventCtx *ev = hl_async_backend_keel_ev(cfg->async);
-    if (!ev) return HL_NET_E_INVAL;
+    /* Backend-agnostic on purpose. KlConnectOp and KlStream are hook-driven
+     * state machines that take no event context, so all scheduling arrives
+     * through the HlAsyncBackend vtable below and this works on the Keel and
+     * poll backends alike. An earlier draft demanded the Keel loop here; that
+     * was a gate on a requirement that does not exist. */
 
     HlNetStream *s = calloc(1, sizeof *s);
     if (!s) return HL_NET_E_NOMEM;
 
     s->async = cfg->async;
     s->be    = be;
-    s->ev    = ev;
     s->fd    = KL_INVALID_SOCKET;
     for (int i = 0; i < NET_MAX_ADDRS; i++) s->attempt_fd[i] = KL_INVALID_SOCKET;
 
