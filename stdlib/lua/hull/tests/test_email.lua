@@ -111,4 +111,7 @@ expect_code("resend requires api_key",
 -- ── results ─────────────────────────────────────────────────────────
 
 print(pass .. " passed, " .. fail .. " failed")
-if fail > 0 then error(fail .. " test(s) failed") end
+-- Results go back to the C harness. This suite runs INSIDE the Hull Lua
+-- runtime (hull.email pulls in hull.http-client and hull.smtp, both
+-- C-backed), not the vanilla state the pure-Lua suites use.
+return { pass = pass, fail = fail }

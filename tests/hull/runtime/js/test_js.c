@@ -3775,6 +3775,26 @@ UTEST(js_stdlib, csv_encode_headers)
  * First one wired. csv is pure (no capability use), which keeps this leg about
  * the seam rather than about caps; the harness supplies them regardless, so
  * db-using scripts can follow without a second mechanism. */
+/* test_email.js wraps its assertions in an async IIFE around await
+ * email.send(...). Every case is a validation rejection -- the script does no
+ * network I/O -- so the chain settles on the microtask queue that
+ * hl_js_run_jobs already drains, and the counts are published before the
+ * harness reads them. A case that did real I/O would need the async backend
+ * driven, which this harness does not do. */
+UTEST(js_stdlib, email_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_email.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, csv_suite)
 {
     init_js_with_caps();
