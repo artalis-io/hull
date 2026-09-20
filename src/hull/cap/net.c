@@ -155,18 +155,28 @@ static void maybe_release(HlNetStream *s)
 
 /* ── Resolution ─────────────────────────────────────────────────────── */
 
-/* Blocking getaddrinfo, inline before the op starts. This mirrors the SMTP
- * transport, where the same call is the documented non-interruptible
- * exception: it runs before anything is armed, so a cancel arriving during it
- * has nothing to tear down. Replacing it needs an async resolver in Keel, not
- * a workaround here.
+/* Blocking getaddrinfo, inline before the op starts.
  *
- * Keel does ship kl_dns_resolver_create, and it is deliberately NOT used: it
- * issues UDP DNS queries, so it would not resolve an mDNS ".local" name, which
- * is exactly the case hsctl leads with (spark-7468.local). getaddrinfo is the
- * system resolver and honours whatever the host is configured to do, mDNS
- * included. It is also the sandbox-compatible choice Hull already made for
- * SMTP. */
+ * KNOWN DEFECT, recorded rather than dressed up: this blocks the EVENT LOOP.
+ * The SMTP transport makes the same call and is fine, because it runs on a
+ * pool worker; copying the call without that context is what makes it wrong
+ * here. A fleet fan-out resolving eight nodes stalls the loop eight times.
+ *
+ * The fix is not Keel's async resolver (see below) but the same thing libuv
+ * does: run getaddrinfo on a worker and complete back on the loop.
+ * HlAsyncBackend already exposes pool_submit(work_fn, done_fn, cancel_fn),
+ * which nine other files use. Resolution is short-lived, so a worker held for
+ * one lookup is nothing like holding one for a whole connection, which is the
+ * thing section 6a of the design rejected.
+ *
+ * Keel does ship kl_dns_resolver_create, and it cannot serve this. Its own
+ * header scopes it to "recursive resolution via a configured nameserver (no
+ * TCP fallback on truncation, no EDNS0, no DNSSEC, no /etc/hosts or search
+ * domains)". That rules out more than mDNS: no /etc/hosts means even
+ * "localhost" does not resolve, and no search domains means a bare hostname
+ * does not either. hsctl leads with spark-7468.local, which is mDNS and so is
+ * not DNS at all. getaddrinfo is the system resolver and honours whatever the
+ * host is configured to do. */
 static int resolve_addrs(HlNetStream *s, const char *host, int port)
 {
     char port_str[8];
