@@ -33,6 +33,7 @@ typedef struct {
     HlAsyncBackendCtx    *ctx;
     HlAsyncBackendPool   *pool;   /* resolution runs here, not on the loop */
     int                   listen_fd;
+    int                   peer_fd;   /* the accepted server side, for I/O */
     int                   port;
 } NetFix;
 
@@ -65,6 +66,7 @@ static int fix_init(NetFix *f)
 {
     memset(f, 0, sizeof *f);
     f->listen_fd = -1;
+    f->peer_fd   = -1;
     f->be = hl_async_backend();
     if (!f->be) return -1;
     if (f->be->init(&f->ctx, NULL) != 0) return -1;
@@ -75,8 +77,41 @@ static int fix_init(NetFix *f)
     return 0;
 }
 
+/* Defined below, next to the other pump helpers; fix_open needs it here. */
+static int pump_connect(NetFix *f, HlNetStream *s, int max_ticks);
+
+/* Take the server side of a connection that has already completed. The
+ * handshake finishes from the backlog, so this returns immediately and the
+ * whole exchange stays single-threaded and deterministic. */
+static int fix_accept(NetFix *f)
+{
+    f->peer_fd = accept(f->listen_fd, NULL, NULL);
+    return f->peer_fd >= 0 ? 0 : -1;
+}
+
+/* Connect + pump to open + accept, which every I/O case needs first. */
+static int fix_open(NetFix *f, HlNetStream **out)
+{
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async      = f->ctx;
+    cfg.pool       = f->pool;
+    cfg.host       = "127.0.0.1";
+    cfg.port       = f->port;
+    cfg.connect_ms = 5000;
+
+    HlNetStream *s = NULL;
+    hl_net_stream_connect(&s, &cfg);
+    if (!s) return -1;
+    if (pump_connect(f, s, 400) != HL_NET_OK) { hl_net_stream_free(s); return -1; }
+    if (fix_accept(f) != 0) { hl_net_stream_free(s); return -1; }
+    *out = s;
+    return 0;
+}
+
 static void fix_free(NetFix *f)
 {
+    if (f->peer_fd >= 0) close(f->peer_fd);
     if (f->listen_fd >= 0) close(f->listen_fd);
     /* Pool first: pool_free drains and joins, so in-flight resolution finishes
      * (or is cancelled) while the loop it completes on is still alive. */
@@ -320,6 +355,194 @@ UTEST(net_stream, free_is_safe_on_null)
     hl_net_stream_cancel(NULL);
     ASSERT_EQ(hl_net_stream_connect_result(NULL), HL_NET_E_INVAL);
     ASSERT_EQ(hl_net_stream_pending_op(NULL), NULL);
+}
+
+
+/* ── I/O ────────────────────────────────────────────────────────────── */
+
+/* Drive the loop until a read is satisfiable or patience runs out. */
+static long pump_read(NetFix *f, HlNetStream *s, void *buf, size_t len, int ticks)
+{
+    long rc = hl_net_stream_read(s, buf, len);
+    for (int i = 0; i < ticks && rc == HL_NET_E_AGAIN; i++) {
+        f->be->tick(f->ctx, 20);
+        rc = hl_net_stream_read(s, buf, len);
+    }
+    return rc;
+}
+
+UTEST(net_stream, reads_what_the_peer_sent)
+{
+    NetFix f; HlNetStream *s = NULL;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+    ASSERT_EQ(fix_open(&f, &s), 0);
+
+    ASSERT_EQ(send(f.peer_fd, "hello", 5, 0), (ssize_t)5);
+
+    char buf[16];
+    long n = pump_read(&f, s, buf, sizeof buf, 200);
+    ASSERT_EQ(n, 5L);
+    ASSERT_EQ(memcmp(buf, "hello", 5), 0);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, read_parks_when_nothing_has_arrived)
+{
+    /* The park path itself: with an open connection and an idle peer, a read
+     * must report AGAIN rather than block or spin. */
+    NetFix f; HlNetStream *s = NULL;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+    ASSERT_EQ(fix_open(&f, &s), 0);
+
+    char buf[16];
+    ASSERT_EQ(hl_net_stream_read(s, buf, sizeof buf), (long)HL_NET_E_AGAIN);
+    ASSERT_NE(hl_net_stream_pending_op(s), NULL);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, read_returns_zero_on_clean_eof)
+{
+    NetFix f; HlNetStream *s = NULL;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+    ASSERT_EQ(fix_open(&f, &s), 0);
+
+    close(f.peer_fd);
+    f.peer_fd = -1;
+
+    char buf[16];
+    ASSERT_EQ(pump_read(&f, s, buf, sizeof buf, 200), 0L);
+    /* And stays at EOF rather than parking again. */
+    ASSERT_EQ(hl_net_stream_read(s, buf, sizeof buf), 0L);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, buffered_bytes_are_drained_before_eof_is_reported)
+{
+    /* A peer that writes then immediately closes: the data must come out
+     * first. Reporting EOF while bytes are still buffered would silently
+     * truncate a protocol. */
+    NetFix f; HlNetStream *s = NULL;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+    ASSERT_EQ(fix_open(&f, &s), 0);
+
+    ASSERT_EQ(send(f.peer_fd, "tail", 4, 0), (ssize_t)4);
+    close(f.peer_fd);
+    f.peer_fd = -1;
+
+    char buf[16];
+    ASSERT_EQ(pump_read(&f, s, buf, sizeof buf, 200), 4L);
+    ASSERT_EQ(memcmp(buf, "tail", 4), 0);
+    ASSERT_EQ(pump_read(&f, s, buf, sizeof buf, 200), 0L);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, read_can_be_served_in_pieces)
+{
+    /* A read returns what is there, not "one record". Asking for less than
+     * arrived leaves the rest for the next call. */
+    NetFix f; HlNetStream *s = NULL;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+    ASSERT_EQ(fix_open(&f, &s), 0);
+
+    ASSERT_EQ(send(f.peer_fd, "abcdef", 6, 0), (ssize_t)6);
+
+    char buf[4];
+    ASSERT_EQ(pump_read(&f, s, buf, 2, 200), 2L);
+    ASSERT_EQ(memcmp(buf, "ab", 2), 0);
+    ASSERT_EQ(pump_read(&f, s, buf, 4, 200), 4L);
+    ASSERT_EQ(memcmp(buf, "cdef", 4), 0);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, writes_reach_the_peer)
+{
+    NetFix f; HlNetStream *s = NULL;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+    ASSERT_EQ(fix_open(&f, &s), 0);
+
+    ASSERT_EQ(hl_net_stream_write(s, "ping", 4), HL_NET_OK);
+    for (int i = 0; i < 50; i++) f.be->tick(f.ctx, 5);
+
+    char got[8];
+    ssize_t n = recv(f.peer_fd, got, sizeof got, 0);
+    ASSERT_EQ(n, (ssize_t)4);
+    ASSERT_EQ(memcmp(got, "ping", 4), 0);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, write_bigger_than_the_send_capacity_is_refused)
+{
+    /* Never admittable, so it is refused outright rather than parked forever
+     * waiting for room that cannot exist. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async      = f.ctx;
+    cfg.pool       = f.pool;
+    cfg.host       = "127.0.0.1";
+    cfg.port       = f.port;
+    cfg.connect_ms = 5000;
+    cfg.write_cap  = 1024;
+
+    HlNetStream *s = NULL;
+    hl_net_stream_connect(&s, &cfg);
+    ASSERT_NE(s, NULL);
+    ASSERT_EQ(pump_connect(&f, s, 400), HL_NET_OK);
+    ASSERT_EQ(fix_accept(&f), 0);
+
+    static char big[4096];
+    memset(big, 'x', sizeof big);
+    ASSERT_EQ(hl_net_stream_write(s, big, sizeof big), HL_NET_E_INVAL);
+    /* And a buffer that does fit still works. */
+    ASSERT_EQ(hl_net_stream_write(s, big, 512), HL_NET_OK);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, io_after_close_fails_closed)
+{
+    NetFix f; HlNetStream *s = NULL;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+    ASSERT_EQ(fix_open(&f, &s), 0);
+
+    hl_net_stream_close(s);
+
+    char buf[8];
+    ASSERT_EQ(hl_net_stream_read(s, buf, sizeof buf), (long)HL_NET_E_CLOSED);
+    ASSERT_EQ(hl_net_stream_write(s, "x", 1), HL_NET_E_CLOSED);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, io_rejects_bad_arguments)
+{
+    char buf[8];
+    ASSERT_EQ(hl_net_stream_read(NULL, buf, sizeof buf), (long)HL_NET_E_INVAL);
+    ASSERT_EQ(hl_net_stream_write(NULL, "x", 1), HL_NET_E_INVAL);
 }
 
 /* ── error strings ──────────────────────────────────────────────────── */

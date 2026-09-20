@@ -1,11 +1,14 @@
-# hull/net: outbound byte-stream capability
+# The private outbound byte stream (cap/net_stream)
 
-Design record. Approved in principle; this is the design to review before
-implementation.
+Design record. **Superseded in one important respect: there is no public
+`hull/net` module and no `net` manifest capability.** The transport described
+here is PRIVATE native infrastructure with exactly one caller, the SSH stdlib.
+Sections 1 to 5 describe it accurately; section 4's capability shape moved to
+`ssh.connect` (see `ssh_module_design.md`).
 
-**Objective.** One capability-gated outbound TCP byte stream, exposed to Lua and
-JS, able to serve `hull/ssh` now and to become the shared transport under
-`hull/http-client`, `hull/smtp` and `hull/web/ws-client` over time.
+**Objective.** A small outbound TCP byte stream, reachable only from trusted
+stdlib code, so a protocol implemented in a safe language can use the network
+without the application gaining raw socket authority.
 
 Prior art and the closest thing to a specification already in the repo:
 [`smtp_keel_client_design.md`](smtp_keel_client_design.md) section 4.
@@ -13,9 +16,16 @@ First consumer: [`ssh_module_design.md`](ssh_module_design.md).
 
 ## 1. Why this exists
 
-Hull can serve the network but cannot dial it from stdlib code. Three protocol
-clients (HTTP, SMTP, WebSocket) each privately re-implement the same
-connect-and-stream sequence in C over the same Keel primitives:
+Hull can serve the network but cannot dial it from stdlib code.
+
+(An earlier draft of this section said three protocol clients privately
+re-implement the connect sequence. That was wrong, and section 6 is corrected
+with it. `cap/http.c` uses Keel's own `KlHttpClient`, pooling included, and the
+WebSocket client uses `kl_ws_client_connect`; neither owns a transport. The
+private ones are SMTP and the SQL wire clients, and both are worker-model by
+design.)
+
+The composition that is missing from the public surface is:
 
 ```
 kl_connect_op_init / _start / _cancel        async connect, resolve,
@@ -24,26 +34,57 @@ KlStream                                     ordered bounded writes, read
                                              delivery, backpressure, cancel
 ```
 
-`src/hull/cap/smtp_transport.c` is the most complete composition of them.
+`src/hull/cap/smtp_transport.c` is the most complete composition of it.
 Nothing exposes any of it to scripts, so a pure-Lua protocol implementation is
 impossible today regardless of how simple the protocol is.
 
 `hull/net` makes that composition public, once, under a capability.
 
-## 2. It must be a registry module, not a private one
+## 2. Why it is NOT a public module
 
-Hull has a private-module convention (`hull.web._request`,
-`hull.web._pwned_blocklist`): underscore-prefixed, absent from
-`src/hull/module_registry.c`, still resolvable from the VFS.
+An earlier draft of this section argued the opposite, on a correct observation
+and a wrong conclusion.
 
-**That convention cannot be used here.** The require gate in
-`src/hull/runtime/lua/mod_fs.c` is `if (spec)`: it only fires for modules found
-in the registry. A module outside the registry is not gated at all. Making
-`hull/net` "private" would therefore hand every app ungated raw TCP, which is
-precisely the ambient authority the capability system exists to prevent.
+The observation stands: Hull's require gate is `if (spec)`, so it only fires
+for modules in the registry. A `_`-prefixed "private" Lua module would be
+UNGATED, and publishing `hull/net` as a registry module is the only way to make
+it refusable.
 
-So `hull/net` is a full registry module with its own manifest capability. Being
-in the registry is what makes it refusable.
+The conclusion was wrong because it assumed the stream had to be reachable from
+application Lua at all. It does not. The layering is three, not two:
+
+```
+Application            require("hull.ssh"); ssh.connect{...}
+                       authority: ssh = { connect = {...} }
+      |
+      v
+Trusted stdlib         the SSH protocol and state machine, in Lua
+      |
+      v
+Private native         cap/net_stream.c: connect / read / write / close
+                       cap/net_policy.c: is this destination allowed
+```
+
+The application never receives the stream. It asks the SSH module for an SSH
+connection, and the SSH module obtains a stream only after the policy check
+passes. So there is no ungated-module problem to solve: there is no module.
+
+What this buys, beyond one fewer public API:
+
+- **The authority an app declares matches what it actually needs.**
+  `ssh = { connect = { hosts = {"*.local"}, users = {"operator"} } }` tells a
+  reviewer what the program may do. `net.connect = *.local:22` tells them a
+  socket may be opened and leaves the rest to trust.
+- **The app cannot be talked into speaking something else** over that socket,
+  because it never holds it.
+- **Protocol gaps stay visible as stdlib gaps.** With a public byte stream, the
+  answer to "Hull does not support protocol X" becomes "write it yourself in
+  Lua", which mostly produces half-correct protocol code in applications.
+  Without one, the gap gets filed.
+
+If a second genuine consumer appears, promoting this to a public module is a
+small change, and by then its requirements will be known. The reverse -
+un-shipping a capability - is not small.
 
 ## 3. Public API
 
@@ -148,32 +189,28 @@ given the stated priority order (correctness, then security, then size).
 Worth noting plainly: SSH does not use TLS, so option A links a TLS stack for a
 cipher. That is a wart. It is a smaller wart than a bespoke AES-GCM.
 
-## 6. Migration path for the three existing clients
+## 6. Migration path: mostly there is not one
 
-The point of `hull/net` is that it eventually stops being SSH-specific. Honest
-assessment of each, in the order I would attempt them:
+Corrected. This section previously proposed migrating SMTP, then WebSocket,
+then maybe HTTP onto hull/net. Two of those three were never duplicating it.
 
-| client | current transport | migration | assessment |
-|---|---|---|---|
-| **SMTP** | `cap/smtp_transport.c` over `KlConnectOp` + `KlStream`, plus `cap/smtp_tls.c` for STARTTLS | best candidate: its adapter already *is* this design, privately | needs `s:start_tls()` first. The contract in `smtp_keel_client_design.md` section 4.3 is the specification. |
-| **WebSocket** | `cap/ws.c` | plausible: WS is framing over a byte stream, the same shape as SSH | needs the HTTP upgrade handshake, so it follows HTTP |
-| **HTTP client** | `cap/http.c` + `cap/http_async.c` | hardest, and least valuable | a mature client with connection reuse, redirects and streaming bodies. Moving it risks regressions in Hull's most-used network path for an architectural tidiness win. |
+| client | what it actually uses | port to hull/net? |
+|---|---|---|
+| **HTTP** | Keel's `KlHttpClient`, including `kl_http_client_request_pooled` | **No.** It is not duplicating this layer; it is using a higher-level Keel API. Porting would mean giving up connection pooling, HTTP/2, redirects, streaming bodies and the TLS integration, and then reimplementing them. |
+| **WebSocket** | Keel's `kl_ws_client_connect` | **No.** Same reason: Keel implements the protocol, so Hull delegates. |
+| **SMTP** | its own `cap/smtp_transport.c`, on a pool worker | **Not worth it.** A genuine private transport, but worker-model by design. Porting is a re-architecture of shipped, working code for tidiness, not a swap. |
+| **SQL wire (pg / mysql)** | its own `cap/db_transport.c`, blocking on a worker | **No.** Explicitly a different execution model, and itself already the product of consolidating two byte-identical copies. |
 
-The SQL wire clients are **not** on this list and should not be: their
-transport is blocking-on-a-worker by design (see section 6a), a different
-execution model rather than a duplicate of this one. `HlDbTransport` was
-itself already extracted from the byte-identical `cap/pg_transport.c` and
-`cap/mysql_transport.c` (`db_transport_extraction.md`), so that
-consolidation has happened and is finished.
+So the rule that falls out, and the one worth keeping:
 
-**Recommendation: do not promise all three.** Build `hull/net` for SSH, then
-migrate SMTP once `start_tls` exists, because SMTP's private adapter is the
-duplicate that most clearly should not exist. Treat WebSocket as a later
-candidate and HTTP as explicitly out of scope unless a concrete need appears.
+> **hull/net exists for protocols Keel does not implement.** Where Keel ships a
+> client, Hull uses it.
 
-Designing `hull/net` so it *could* serve all three is the requirement. Migrating
-all three is not, and committing to it now would be a promise made on the
-strength of one consumer.
+SSH is the case that justifies hull/net: Keel has no SSH client, the protocol
+is small and self-contained, and it had to exist at all. That is a narrow
+charter on purpose. A future protocol with no Keel implementation (a custom
+wire format, a line protocol, an agent transport) is the next legitimate
+consumer; HTTP is not.
 
 ## 6a. Scheduling model (corrected during N1b)
 
