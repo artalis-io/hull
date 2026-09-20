@@ -24,10 +24,10 @@
 
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 
 /* ── Socket provider ────────────────────────────────────────────────── */
 
@@ -40,14 +40,19 @@ static const KlSocketProvider *socket_provider(void)
     return g_sp;
 }
 
+/* The provider is a vtable plus its own context; every op takes that context
+ * as its first argument. Reaching past it to bare POSIX would work on Linux
+ * and quietly diverge everywhere else, which is the whole reason it exists. */
 static KlSocketHandle sp_socket(int d, int t, int p)
-{ return socket_provider()->socket(d, t, p); }
+{ const KlSocketProvider *sp = socket_provider(); return sp->ops->socket(sp->context, d, t, p); }
 static int sp_set_nonblocking(KlSocketHandle fd)
-{ return socket_provider()->set_nonblocking(fd); }
+{ const KlSocketProvider *sp = socket_provider(); return sp->ops->set_nonblocking(sp->context, fd); }
 static int sp_connect(KlSocketHandle fd, const KlSockAddr *a)
-{ return socket_provider()->connect(fd, a); }
+{ const KlSocketProvider *sp = socket_provider(); return sp->ops->connect(sp->context, fd, a); }
+static int sp_get_so_error(KlSocketHandle fd, int *out)
+{ const KlSocketProvider *sp = socket_provider(); return sp->ops->get_so_error(sp->context, fd, out); }
 static int sp_close(KlSocketHandle fd)
-{ return socket_provider()->close(fd); }
+{ const KlSocketProvider *sp = socket_provider(); return sp->ops->close(sp->context, fd); }
 
 /* ── Limits ─────────────────────────────────────────────────────────── */
 
@@ -140,7 +145,14 @@ static void maybe_release(HlNetStream *s)
  * transport, where the same call is the documented non-interruptible
  * exception: it runs before anything is armed, so a cancel arriving during it
  * has nothing to tear down. Replacing it needs an async resolver in Keel, not
- * a workaround here. */
+ * a workaround here.
+ *
+ * Keel does ship kl_dns_resolver_create, and it is deliberately NOT used: it
+ * issues UDP DNS queries, so it would not resolve an mDNS ".local" name, which
+ * is exactly the case hsctl leads with (spark-7468.local). getaddrinfo is the
+ * system resolver and honours whatever the host is configured to do, mDNS
+ * included. It is also the sandbox-compatible choice Hull already made for
+ * SMTP. */
 static int resolve_addrs(HlNetStream *s, const char *host, int port)
 {
     char port_str[8];
@@ -189,30 +201,37 @@ static int co_start_resolve(void *ctx)
     return 0;
 }
 
-/* Watcher callback for an in-flight connect attempt. */
+/* Watcher callback for an in-flight connect attempt.
+ *
+ * The fd arrives as an int because that is HlAsyncWatcherFn's signature, while
+ * Keel handles are intptr_t (keel/handle.h) to leave room for a Win32 SOCKET.
+ * Hull only ever reaches this on a build where descriptors are POSIX ints, so
+ * the widening is safe, but it is written out rather than left implicit. */
 static void attempt_ready(int fd, unsigned ready, void *user)
 {
     (void)ready;
     HlNetStream *s = user;
+    KlSocketHandle h = (KlSocketHandle)fd;
 
     int idx = -1;
     for (int i = 0; i < NET_MAX_ADDRS; i++)
-        if (s->attempt_fd[i] == fd) { idx = i; break; }
+        if (s->attempt_fd[i] == h) { idx = i; break; }
     if (idx < 0) return;
 
     /* Writable means the connect resolved one way or the other; SO_ERROR says
-     * which. Treating writability alone as success is the classic bug here. */
+     * which. Treating writability alone as success is the classic bug here.
+     * Asked through the provider rather than getsockopt directly: the provider
+     * exists precisely so this works the same on every socket backend. */
     int err = 0;
-    socklen_t elen = sizeof err;
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) != 0) err = EIO;
+    if (sp_get_so_error(h, &err) != 0) err = EIO;
 
     if (s->be->watcher_del) s->be->watcher_del(s->async, fd);
 
     if (err == 0) {
         s->attempt_fd[idx] = KL_INVALID_SOCKET;   /* op owns it now */
-        kl_connect_op_on_attempt_connected(&s->connect_op, idx, fd);
+        kl_connect_op_on_attempt_connected(&s->connect_op, idx, h);
     } else {
-        sp_close(fd);
+        sp_close(h);
         s->attempt_fd[idx] = KL_INVALID_SOCKET;
         kl_connect_op_on_attempt_failed(&s->connect_op, idx, (int)KL_ERR_CONNECT);
     }
@@ -245,7 +264,8 @@ static int co_start_attempt(void *ctx, int idx, int *out_err)
 
     s->attempt_fd[idx] = fd;
     if (!s->be->watcher_add ||
-        s->be->watcher_add(s->async, fd, HL_ASYNC_WRITE, attempt_ready, s) != 0) {
+        s->be->watcher_add(s->async, (int)fd, HL_ASYNC_WRITE,
+                           attempt_ready, s) != 0) {
         sp_close(fd);
         s->attempt_fd[idx] = KL_INVALID_SOCKET;
         *out_err = (int)KL_ERR_CONNECT;
@@ -259,7 +279,8 @@ static void co_cancel_attempt(void *ctx, int idx)
     HlNetStream *s = ctx;
     if (idx < 0 || idx >= NET_MAX_ADDRS) return;
     if (kl_handle_valid(s->attempt_fd[idx])) {
-        if (s->be->watcher_del) s->be->watcher_del(s->async, s->attempt_fd[idx]);
+        if (s->be->watcher_del)
+            s->be->watcher_del(s->async, (int)s->attempt_fd[idx]);
         sp_close(s->attempt_fd[idx]);
         s->attempt_fd[idx] = KL_INVALID_SOCKET;
     }
