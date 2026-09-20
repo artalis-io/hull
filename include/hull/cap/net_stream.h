@@ -66,6 +66,7 @@
 
 struct HlAsyncOp;
 struct HlAsyncBackendCtx;
+struct HlAsyncBackendPool;
 
 #ifdef __cplusplus
 extern "C" {
@@ -100,6 +101,10 @@ typedef struct HlNetStreamConfig {
     /* The loop to schedule on, borrowed. The binding passes the runtime's
      * async_ctx, which keeps this file free of any runtime knowledge. */
     struct HlAsyncBackendCtx *async;
+    /* Worker pool, borrowed. REQUIRED: name resolution is blocking and runs
+     * here rather than on the loop this transport is scheduled on. Both Hull
+     * entry points create one, so NULL is a wiring error and is refused. */
+    struct HlAsyncBackendPool *pool;
     const char *host;          /* borrowed for the duration of the call    */
     int         port;          /* 1..65535, already authorized             */
     int         connect_ms;    /* whole-connect deadline; <=0 = default    */
