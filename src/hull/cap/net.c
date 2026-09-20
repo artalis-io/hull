@@ -298,6 +298,17 @@ static void co_cancel_attempt(void *ctx, int idx)
         sp_close(s->attempt_fd[idx]);
         s->attempt_fd[idx] = KL_INVALID_SOCKET;
     }
+    /* CONFIRM the retirement. The op cancel-REQUESTS an attempt; it is still
+     * counted outstanding until the adapter reports back, and
+     * "on_detach fires only after the terminal AND every outstanding op AND
+     * both timers retire" (keel/connect_op.h). Without this line the attempt
+     * never retires, the op never detaches, and the stream is never released:
+     * that was the leak.
+     *
+     * Reported unconditionally, outside the fd check, because the op asked
+     * about THIS index and needs an answer whether or not a descriptor was
+     * still open for it. cap/smtp_transport.c does the same. */
+    kl_connect_op_on_attempt_failed(&s->connect_op, idx, (int)KL_ERR_CONNECT);
 }
 
 static void co_dispose_fd(void *ctx, KlSocketHandle fd)
