@@ -2,7 +2,7 @@
  * @file cap/net_stream.h
  * @brief Outbound byte stream: the transport half of hull/net.
  *
- * Authorization lives next door in cap/net.h and runs BEFORE anything here is
+ * Authorization lives next door in cap/net_policy.h and runs BEFORE anything here is
  * reachable. This header owns only bytes: connect, read, write, close, cancel,
  * deadline. It knows no protocol.
  *
@@ -134,8 +134,8 @@ typedef struct HlNetStreamConfig {
  * and must not block. Suspend on the pending op and call
  * hl_net_stream_connect_result() once resumed.
  *
- * Does NOT authorize: the caller must have called hl_cap_net_check_connect
- * first. This split is deliberate (see cap/net.h) so that a denial cannot race
+ * Does NOT authorize: the caller must have called hl_ssh_check_connect
+ * first. This split is deliberate (see cap/net_policy.h) so that a denial cannot race
  * a resolution that was never started.
  */
 int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg);
