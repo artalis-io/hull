@@ -58,6 +58,10 @@ static int sp_connect(KlSocketHandle fd, const KlSockAddr *a)
 { const KlSocketProvider *sp = socket_provider(); return sp->ops->connect(sp->context, fd, a); }
 static int sp_get_so_error(KlSocketHandle fd, int *out)
 { const KlSocketProvider *sp = socket_provider(); return sp->ops->get_so_error(sp->context, fd, out); }
+static kl_ssize_t sp_send(KlSocketHandle fd, const void *b, size_t n)
+{ const KlSocketProvider *sp = socket_provider(); return sp->ops->send(sp->context, fd, b, n); }
+static kl_ssize_t sp_recv(KlSocketHandle fd, void *b, size_t n)
+{ const KlSocketProvider *sp = socket_provider(); return sp->ops->recv(sp->context, fd, b, n); }
 static int sp_close(KlSocketHandle fd)
 { const KlSocketProvider *sp = socket_provider(); return sp->ops->close(sp->context, fd); }
 
@@ -112,6 +116,22 @@ struct HlNetStream {
     /* Parking. The binding fills op.on_resume and suspends; we complete it. */
     HlAsyncOp    op;
     int          op_pending;
+
+    /* I/O. Two bounded buffers and one watcher.
+     *
+     * Deliberately NOT KlStream. Its value is vectored writes, sendfile and
+     * submit-mode, none of which a protocol like SSH uses, and wiring it costs
+     * the arm/disarm/deliver hook set plus embedding stream_detail.h. Plain
+     * recv/send against a readiness watcher is fewer moving parts to audit,
+     * and KlStream stays available if vectored writes ever matter. */
+    char        *rx;                /* lazily allocated, read_cap bytes      */
+    size_t       rx_len, rx_off;    /* unread span is [rx_off, rx_len)       */
+    char        *tx;                /* lazily allocated, write_cap bytes     */
+    size_t       tx_len, tx_off;    /* unsent span is [tx_off, tx_len)       */
+    unsigned     io_mask;           /* currently armed; 0 = not registered   */
+    int          want_read;         /* a read is parked                      */
+    int          want_write;        /* a write is parked on drain            */
+    int          eof;               /* peer sent FIN                         */
 
     /* Lifecycle */
     int          closing;
@@ -170,7 +190,11 @@ static void maybe_release(HlNetStream *s)
         s->be->timer_cancel(s->async, s->delay_timer);
 
     retire_attempts(s);
+    if (s->io_mask && s->be->watcher_del)
+        s->be->watcher_del(s->async, (int)s->fd);
     if (kl_handle_valid(s->fd)) sp_close(s->fd);
+    free(s->rx);
+    free(s->tx);
     free(s);
 }
 
@@ -546,6 +570,112 @@ static void resolve_cancel(void *user)
     maybe_release(s);
 }
 
+/* ── I/O ────────────────────────────────────────────────────────────── */
+
+static void io_ready(int fd, unsigned ready, void *user);
+
+/* Re-arm the readiness watcher to exactly what is wanted now. Registering once
+ * and modifying afterwards keeps the backend's fd table stable; a mask of 0
+ * deregisters, so an idle stream costs the loop nothing. */
+static void io_rearm(HlNetStream *s)
+{
+    if (!kl_handle_valid(s->fd) || s->closing) return;
+
+    unsigned want = 0;
+    if (s->want_read && !s->eof)   want |= HL_ASYNC_READ;
+    if (s->tx_off < s->tx_len)     want |= HL_ASYNC_WRITE;
+    if (want == s->io_mask) return;
+
+    if (!want) {
+        if (s->io_mask && s->be->watcher_del)
+            s->be->watcher_del(s->async, (int)s->fd);
+        s->io_mask = 0;
+        return;
+    }
+    if (!s->io_mask) {
+        if (s->be->watcher_add &&
+            s->be->watcher_add(s->async, (int)s->fd, want, io_ready, s) == 0)
+            s->io_mask = want;
+        return;
+    }
+    if (s->be->watcher_mod &&
+        s->be->watcher_mod(s->async, (int)s->fd, want) == 0)
+        s->io_mask = want;
+}
+
+/* Compact the receive buffer so a partially-drained span does not wedge the
+ * free tail. Cheap: the unread span is at most read_cap and usually small. */
+static void rx_compact(HlNetStream *s)
+{
+    if (s->rx_off == 0) return;
+    size_t n = s->rx_len - s->rx_off;
+    if (n) memmove(s->rx, s->rx + s->rx_off, n);
+    s->rx_len = n;
+    s->rx_off = 0;
+}
+
+static void tx_compact(HlNetStream *s)
+{
+    if (s->tx_off == 0) return;
+    size_t n = s->tx_len - s->tx_off;
+    if (n) memmove(s->tx, s->tx + s->tx_off, n);
+    s->tx_len = n;
+    s->tx_off = 0;
+}
+
+/* Push whatever is queued. Returns 0, or a negative HL_NET_E_* on a hard
+ * transport error. A short write is normal and simply leaves the remainder. */
+static int tx_flush(HlNetStream *s)
+{
+    while (s->tx_off < s->tx_len) {
+        kl_ssize_t n = sp_send(s->fd, s->tx + s->tx_off, s->tx_len - s->tx_off);
+        if (n > 0) { s->tx_off += (size_t)n; continue; }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        if (n < 0 && errno == EINTR) continue;
+        return HL_NET_E_IO;
+    }
+    if (s->tx_off == s->tx_len) { s->tx_len = s->tx_off = 0; }
+    return HL_NET_OK;
+}
+
+/* Readiness on the connected socket. */
+static void io_ready(int fd, unsigned ready, void *user)
+{
+    (void)fd;
+    HlNetStream *s = user;
+    int woke = 0;
+
+    if ((ready & HL_ASYNC_READ) && s->rx) {
+        rx_compact(s);
+        while (s->rx_len < s->read_cap) {
+            kl_ssize_t n = sp_recv(s->fd, s->rx + s->rx_len,
+                                   s->read_cap - s->rx_len);
+            if (n > 0) { s->rx_len += (size_t)n; continue; }
+            if (n == 0) { s->eof = 1; break; }
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            s->result = HL_NET_E_IO;
+            s->eof    = 1;
+            break;
+        }
+        if (s->want_read && (s->rx_off < s->rx_len || s->eof)) {
+            s->want_read = 0;
+            woke = 1;
+        }
+    }
+
+    if (ready & HL_ASYNC_WRITE) {
+        if (tx_flush(s) != HL_NET_OK) { s->result = HL_NET_E_IO; s->eof = 1; woke = 1; }
+        else if (s->want_write && s->tx_off == s->tx_len) {
+            s->want_write = 0;
+            woke = 1;
+        }
+    }
+
+    io_rearm(s);
+    if (woke) wake(s);
+}
+
 /* ── Public API ─────────────────────────────────────────────────────── */
 
 int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
@@ -659,6 +789,11 @@ void hl_net_stream_cancel(HlNetStream *s)
     co_cancel_delay(s);
     co_cancel_deadline(s);
 
+    if (s->io_mask && s->be->watcher_del) {
+        s->be->watcher_del(s->async, (int)s->fd);
+        s->io_mask = 0;
+    }
+
     /* In-flight attempt descriptors belong to the op until it retires them:
      * kl_connect_op_cancel drives co_cancel_attempt / co_dispose_fd for each.
      * Closing them here as well raced those hooks. retire_attempts stays as
@@ -667,6 +802,75 @@ void hl_net_stream_cancel(HlNetStream *s)
      * s->fd is different: on_done handed it over, so it is ours to close. */
     if (kl_handle_valid(s->fd)) { sp_close(s->fd); s->fd = KL_INVALID_SOCKET; }
     wake(s);
+}
+
+long hl_net_stream_read(HlNetStream *s, void *buf, size_t len)
+{
+    if (!s || (!buf && len)) return HL_NET_E_INVAL;
+    if (s->closing)          return HL_NET_E_CLOSED;
+    if (!s->connect_done)    return HL_NET_E_AGAIN;   /* still connecting */
+    if (s->result != HL_NET_OK && s->result != HL_NET_E_CLOSED)
+        return s->result;
+    if (!len) return 0;
+
+    if (!s->rx) {
+        s->rx = malloc(s->read_cap);
+        if (!s->rx) return HL_NET_E_NOMEM;
+    }
+
+    /* Serve whatever arrived. A read returns WHAT IS THERE, never "one
+     * record": framing is the caller's business, which is what lets a protocol
+     * sit on top without this layer knowing it. */
+    if (s->rx_off < s->rx_len) {
+        size_t n = s->rx_len - s->rx_off;
+        if (n > len) n = len;
+        memcpy(buf, s->rx + s->rx_off, n);
+        s->rx_off += n;
+        if (s->rx_off == s->rx_len) { s->rx_len = s->rx_off = 0; }
+        return (long)n;
+    }
+
+    if (s->eof) return 0;              /* clean EOF, after draining */
+
+    s->want_read = 1;
+    s->op_pending = 1;
+    io_rearm(s);
+    return HL_NET_E_AGAIN;
+}
+
+int hl_net_stream_write(HlNetStream *s, const void *buf, size_t len)
+{
+    if (!s || (!buf && len)) return HL_NET_E_INVAL;
+    if (s->closing)          return HL_NET_E_CLOSED;
+    if (!s->connect_done)    return HL_NET_E_AGAIN;
+    if (s->result != HL_NET_OK) return s->result;
+    if (!len) return HL_NET_OK;
+
+    /* A buffer larger than the whole send capacity can never be admitted, so
+     * say so instead of parking forever. */
+    if (len > s->write_cap) return HL_NET_E_INVAL;
+
+    if (!s->tx) {
+        s->tx = malloc(s->write_cap);
+        if (!s->tx) return HL_NET_E_NOMEM;
+    }
+
+    tx_compact(s);
+    if (s->write_cap - s->tx_len < len) {
+        /* All-or-none: no room for the whole buffer, so admit none of it and
+         * park until the queue drains. Backpressure, not an error. */
+        s->want_write = 1;
+        s->op_pending = 1;
+        io_rearm(s);
+        return HL_NET_E_AGAIN;
+    }
+
+    memcpy(s->tx + s->tx_len, buf, len);
+    s->tx_len += len;
+
+    if (tx_flush(s) != HL_NET_OK) { s->result = HL_NET_E_IO; return HL_NET_E_IO; }
+    io_rearm(s);
+    return HL_NET_OK;
 }
 
 void hl_net_stream_free(HlNetStream *s)
