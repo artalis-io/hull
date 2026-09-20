@@ -26,11 +26,15 @@
 #include <keel/error.h>
 
 #include <errno.h>
-#include <netdb.h>
-#include <netinet/in.h>
+#include <netdb.h>        /* getaddrinfo: the SYSTEM resolver, see resolve_addrs */
+#include <netinet/in.h>   /* sockaddr_in / sockaddr_in6, to read what it returns */
 #include <pthread.h>
+#include <stdio.h>        /* snprintf */
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>   /* AF_UNSPEC / AF_INET / AF_INET6 only. The socket
+                           * CALLS all go through the Keel provider; these are
+                           * just the family constants getaddrinfo speaks. */
 
 /* ── Socket provider ────────────────────────────────────────────────── */
 
