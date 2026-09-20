@@ -1,0 +1,330 @@
+# hull/ssh Phase 0 design report
+
+**Status: decisions taken; phase 1 unblocked.** See section 12 for the record.
+The SSH protocol work is viable in pure Lua/JS, and almost every primitive it
+needs already exists. Two do not, and both are generic capabilities that belong
+to Hull rather than to SSH. This report identifies them, proposes the smallest
+general APIs that would satisfy them, and stops there, per the native-code
+policy.
+
+Driver: `hsctl`, a cross-platform fleet controller for DGX Spark nodes.
+
+## 1. Verdict first
+
+| question | answer |
+|---|---|
+| Can the SSH protocol live in Lua/JS? | Yes. Framing, KEX orchestration, auth, channels and SFTP are all byte manipulation and state machines. |
+| Does Hull expose raw outbound TCP to stdlib code? | **No.** This is the blocker. |
+| Can Keel do it? | **Yes, already.** `kl_connect_op_*` plus `KlStream`, used today by `cap/smtp_transport.c`. |
+| Are the crypto primitives present? | Mostly. Three are missing, all small, all already implemented inside vendored code. |
+| Is new native C required? | Yes, but **not for SSH**. For one generic stream capability that Hull is missing on its own merits. |
+
+The honest framing: SSH is acting here exactly as the task intended, as a design
+probe. What it found is that **Hull can serve the network but cannot dial it**
+from stdlib code, except through three hard-coded protocol clients (HTTP, SMTP,
+WebSocket) each of which privately re-implements the same connect-and-stream
+dance in C.
+
+## 2. Repository alignment
+
+### 2.1 Proposed package path
+
+```
+stdlib/lua/hull/ssh/         Lua implementation (init.lua + submodules)
+stdlib/js/hull/ssh/          JS binding or implementation (see section 8)
+docs/ (user guide)           user-facing documentation, added in phase 5
+stdlib/lua/hull/tests/test_ssh_*.lua    co-located suites
+```
+
+Registry name: `hull/ssh`, declared as `"hull/ssh@1"` in `manifest.modules`.
+
+**Why this path.** Hull's registry (`src/hull/module_registry.c`) is flat under
+`hull/`, with `hull/web/*` reserved for strictly-web modules and cross-cutting
+facilities staying at the top level (`hull/jwt`, `hull/smtp`, `hull/http-client`,
+`hull/template`). SSH is cross-cutting infrastructure, not web, so it sits at
+the top level beside `hull/smtp`. Multi-file modules already use a directory
+(`hull/web/htmx/*`, `hull/crypto/envelope`), so a `ssh/` subtree with an entry
+module matches existing practice and avoids the monolithic-file problem.
+
+Explicitly NOT `tools/` or an `hsctl`-specific subtree, per the brief.
+
+### 2.2 Closest analogue, and an important asymmetry
+
+The closest analogue by *purpose* is `hull/smtp`: an outbound, authenticated,
+stateful network client with TLS and a strict error model. `docs/smtp_keel_client_design.md`
+section 4 is the single most relevant prior art in the repo.
+
+But there is an asymmetry worth naming up front, because it shapes everything:
+
+| module | implementation | has a `.lua` file? |
+|---|---|---|
+| `hull/http-client`, `hull/smtp`, `hull/web/ws-client` | C cap | **no** |
+| `hull/web/pwned`, `hull/email`, `hull/retry`, `hull/cache` | pure Lua/JS | yes |
+
+**Every module with network authority today is C. Every pure-Lua module reaches
+the network only by calling one of those C caps.** `hull/ssh` as proposed would
+be the first pure-Lua module to drive a raw socket. That is architecturally
+sound and is what the brief asks for, but it is a new combination, and it is
+exactly why the missing piece below is a generic capability rather than an SSH
+detail.
+
+## 3. Dependency classification
+
+| SSH need | Existing Hull facility | Sufficient? | Action |
+|---|---|---:|---|
+| TCP byte stream (connect/read/write/close) | none public; `cap/smtp_transport.c` privately over `KlConnectOp` + `KlStream` | **no** | **propose `hull/net` stream capability** |
+| CSPRNG | `crypto.random` | yes | reuse |
+| SHA-256 | `crypto.sha256`, `crypto.create_sha256` (streaming) | yes | reuse |
+| HMAC-SHA256 | `crypto.hmac_sha256`, `hmac_sha256_verify` | yes | reuse |
+| Ed25519 sign/verify | `crypto.ed25519_sign` / `_verify` / `_keypair` | yes | reuse |
+| Constant-time compare | `crypto.constant_time_eq` | yes | reuse |
+| X25519 ECDH (curve25519-sha256 KEX) | TweetNaCl `crypto_scalarmult` is vendored and linked; cap uses only `crypto_scalarmult_base` (`cap/crypto.c:1727`) | **no** | **propose `crypto.x25519`** |
+| AEAD: chacha20-poly1305 or aes256-gcm | neither exposed; `secretbox` is XSalsa20-Poly1305, wrong construction | **no** | **propose one AEAD (see 5.2)** |
+| Byte cursor / endian codec | Lua 5.4 `string.pack`/`unpack` (string lib is loaded); JS `DataView` | yes | reuse |
+| Byte-safe strings / buffers | Lua strings are byte-clean; JS `ArrayBuffer`; unified buffer protocol for zero-copy | yes | reuse |
+| Async / event loop | `hull.sleep`, coroutine yield; `db.async`, `compute.async` precedent | partial | reuse; see 5.1 for stream readiness |
+| Deadlines | `app.every` / `app.daily` timers, `time.now_ms` | yes | reuse |
+| Cancellation | per-op in C caps; nothing script-visible for a stream | **no** | folds into the `hull/net` proposal |
+| Secure zeroization | `hull_secure_zero` is C-internal; no script binding | **no** (minor) | see 5.3, may be deferred |
+| Capability host/port gate | `hl_host_match_any_env` shared matcher; `databases.dynamic` / `kv.dynamic` manifest precedent | yes | **extend, do not invent** |
+| Structured errors | stdlib convention: coded errors (`email.send` throws `.code`) | yes | reuse |
+| SQLite trust store | `hull/db` | yes | reuse, app-owned |
+
+Ten of fourteen reuse cleanly. The four `no` rows collapse into **two
+proposals**, because cancellation and deadlines are properties of the stream
+API rather than separate facilities.
+
+## 4. The blocker, stated precisely
+
+Hull has no public outbound byte-stream capability. The runtime is fully capable
+of one:
+
+```
+kl_connect_op_init / _start / _cancel      async connect with resolve,
+kl_connect_op_on_resolved / _on_attempt_*  IPv4+IPv6 racing, delay, deadline
+KlStream                                   ordered bounded writes, read delivery,
+                                           backpressure, cancel
+```
+
+`src/hull/cap/smtp_transport.c` already composes exactly these. The contract it
+had to establish is written down in `docs/smtp_keel_client_design.md` section 4
+(Open / Byte stream / TLS upgrade / Ownership) and reads like a specification
+for the generic facility that does not exist.
+
+So the situation is not "Hull cannot do this". It is "Hull does this privately,
+once per protocol, in C". HTTP, SMTP and WebSocket each pay that cost. SSH would
+be the fourth, and the first that could avoid it if the facility were public.
+
+**Per the hard rule, I am not implementing sockets inside `hull/ssh`.**
+
+## 5. Proposed stdlib additions
+
+### 5.1 `hull/net`: outbound byte stream capability
+
+The smallest general API that satisfies SSH and the three existing clients.
+
+```lua
+local net = require("hull.net")
+
+local s, err = net.connect({
+    host = "spark-7468.local",
+    port = 22,
+    timeout_ms = 10000,
+})                          -- yields; capability-checked BEFORE any DNS or TCP
+
+local n   = s:write(bytes)  -- bounded, all-or-none admission
+local buf = s:read(4096, { timeout_ms = 5000 })   -- nil on clean EOF
+s:close()                   -- graceful; s:cancel() for abortive
+```
+
+- Manifest-gated (section 6). The check happens before resolution.
+- Async by the same coroutine-yield model as `db.async` and `http.fetch`; no
+  busy-wait, no second event loop.
+- Deadline and cancellation are stream properties, so SSH inherits both.
+- TLS upgrade is deliberately **out of scope for SSH** (SSH does its own
+  crypto), but the same object is the natural place for a later `s:start_tls()`
+  that SMTP's STARTTLS path could eventually share.
+
+This is native C, and it is the one piece I will not write without explicit
+approval. It is justified under the native-code policy on all four counts:
+it is below the stdlib boundary, it cannot be expressed with existing public
+facilities, the correct fix is generic rather than SSH-shaped, and it is being
+presented before implementation.
+
+**Sizing:** the logic already exists in `cap/smtp_transport.c`; the work is
+generalizing it and adding script bindings, not writing a new transport.
+
+### 5.2 `crypto.x25519(scalar, point)`
+
+Raw X25519 scalar multiplication, for `curve25519-sha256` key exchange.
+
+TweetNaCl's `crypto_scalarmult` is **already vendored, already compiled, already
+linked**. `cap/crypto.c` calls its `_base` variant today to generate box
+keypairs. This exposes the two-argument form.
+
+This is the smallest possible addition: one binding over an existing linked
+function. It is generally useful (any ECDH protocol needs it), not SSH-specific.
+
+### 5.3 One AEAD
+
+SSH needs authenticated encryption for the transport. Neither candidate is
+available:
+
+| candidate | status | cost |
+|---|---|---|
+| `chacha20-poly1305@openssh.com` | absent. `secretbox` is XSalsa20-Poly1305, a different construction with a fixed nonce layout; not reusable | needs raw ChaCha20 + Poly1305 exposed separately, because OpenSSH uses two keys and encrypts the length field independently |
+| `aes256-gcm@openssh.com` | absent from the cap layer. mbedTLS is vendored and has GCM, but no Hull code references `mbedtls_gcm` | thinner: one binding over an existing vendored implementation, but only in TLS-linked builds |
+
+**Recommendation: `aes256-gcm@openssh.com`**, exposed as a generic
+`crypto.aes256gcm_encrypt/decrypt`. It is a smaller addition (mbedTLS already
+implements it), it is generically useful, and it avoids exposing raw stream-cipher
+and one-time-MAC primitives that are easy to misuse outside SSH's specific
+construction. The trade-off is that it is only available where mbedTLS is linked,
+which is every build with either HTTP half on, but not a `pure-compute` flavor.
+
+I would rather be told which of these two you prefer than pick silently, because
+the choice has a build-flavor consequence.
+
+## 6. Capability schema
+
+Follows `databases.dynamic` and `kv.dynamic` exactly, including fail-closed
+semantics and the shared `hl_host_match_any_env` matcher (exact host, `*`,
+`*.suffix` glob, CIDR for IP literals, `$VAR` env refs).
+
+```lua
+app.manifest({
+    modules = { "hull/ssh@1" },
+    ssh = {
+        connect = {
+            hosts = { "*.local", "10.0.0.0/8", "$SPARK_HOST" },
+            ports = { 22 },              -- default { 22 } if omitted
+            users = { "operator" },      -- optional; omitted means any
+        },
+    },
+})
+```
+
+Properties, all matching existing Hull behaviour:
+
+- No `ssh` block, or an empty one, denies every connection. Fail closed.
+- Declaring `hull/ssh@1` grants **module resolution only**, never authority.
+  This is the `hull/http-client` model verbatim: the import succeeds, the call
+  is what gets refused.
+- The check runs **before** DNS resolution and before any socket exists.
+- Denial is a distinct structured error (`capability_denied`), never a timeout
+  or a generic failure.
+- `hull/ssh` must NOT grant `hull/net` authority transitively. An app that
+  declares SSH can reach port 22 on allowlisted hosts and nothing else.
+
+That last point matters and is worth a test: if `hull/ssh` is built on
+`hull/net`, the SSH capability has to be a *narrower* grant, not a re-export.
+
+## 7. Algorithm set
+
+Deliberately minimal. Interoperability with current OpenSSH, not legacy breadth.
+
+| role | algorithm | basis |
+|---|---|---|
+| KEX | `curve25519-sha256` | needs 5.2 |
+| host key | `ssh-ed25519` | `crypto.ed25519_verify`, present |
+| encryption | `aes256-gcm@openssh.com` | needs 5.3 |
+| MAC | implicit in AEAD | none needed |
+| user auth | `publickey` with `ssh-ed25519` | `crypto.ed25519_sign`, present |
+| compression | `none` only, explicitly rejected otherwise | |
+
+Rejected by construction: SSH-1, ssh-rsa/SHA-1, DSA, CBC modes, arcfour, MD5,
+DH groups 1/14-SHA1, `zlib`.
+
+Rekey: implemented if it is cheap once the transport exists; otherwise a hard
+connection byte/time limit with a documented, enforced ceiling, never a silent
+overrun.
+
+## 8. Lua and JS: an open architectural question
+
+**Hull has no shared-implementation mechanism between Lua and JS.** Every stdlib
+module is implemented twice, in parallel files (`stdlib/lua/hull/X.lua` and
+`stdlib/js/hull/X.js`), kept at parity by convention and by the co-located test
+suites. The only genuinely shared implementation surface in Hull is WASM
+compute, which has no I/O and so cannot host a protocol driver.
+
+An SSH-2 client is on the order of several thousand lines. Implementing it twice
+contradicts the brief's "do not duplicate the SSH protocol implementation", but
+implementing it once contradicts Hull's stdlib parity convention. This is the
+one genuine architectural ambiguity in the report, and section 23 of the brief
+says to stop for review on exactly that.
+
+Options, with my assessment:
+
+1. **Lua first, JS binding later.** Lua is already Hull's privileged tooling
+   language (the entire CLI tool layer is Lua-only by design, per CLAUDE.md).
+   `hsctl` can be a Lua app. Ships soonest, defers the parity debt honestly.
+   **My recommendation.**
+2. **Both from the start.** Doubles the protocol surface, and doubles the
+   security-review surface, which is the expensive part.
+3. **Protocol core as a WASM compute module**, pure transform, with I/O in the
+   host language. Genuinely shared, and the crypto could come along. But it
+   inverts Hull's own layering (stdlib depending on a compute artifact), needs a
+   build-pipeline story for shipping a `.wasm` inside stdlib, and adds a
+   toolchain dependency to a security-critical path. Interesting, and I do not
+   recommend it for v1.
+
+## 9. Error model
+
+Structured codes, following the `email.send` convention of a coded error rather
+than a string. Distinguishing at minimum:
+
+```
+capability_denied     connect_failed        timeout
+protocol_error        kex_failed            algorithm_mismatch
+hostkey_rejected      hostkey_changed       auth_failed
+channel_rejected      transfer_failed       connection_closed
+```
+
+`exec` returning a non-zero remote exit status is **not** an error. It is a
+successful call whose `exit_status` field is non-zero, exactly as the brief
+requires.
+
+## 10. Host key exposure
+
+The host key object is available to the caller before any trust decision, and
+carries raw canonical bytes, not only a formatted fingerprint:
+
+```lua
+{
+    algorithm   = "ssh-ed25519",
+    raw         = "<32 bytes, canonical SSH wire encoding>",
+    fingerprint = "SHA256:abc...",     -- convenience only
+}
+```
+
+`raw` is what `hsctl` binds into its enrollment HMAC. There is no default-accept
+path: `host_key` is a **required** field, and returning anything other than an
+explicit accept rejects the connection. No global `known_hosts` is read or
+written; trust storage is the application's, in its own SQLite.
+
+## 11. Phasing
+
+Phase 0 (this document) stops here pending decisions.
+
+| phase | content | gate |
+|---|---|---|
+| 0 | this report | **your approval of 5.1 and 5.3** |
+| 1a | `hull/net` stream capability + tests | native C, needs approval |
+| 1b | `crypto.x25519` + chosen AEAD + test vectors | native C, needs approval |
+| 2 | codec, identification, KEX, encrypted transport, host-key exposure | pure Lua |
+| 3 | Ed25519 user auth, session channel, exec, streams, exit status | pure Lua |
+| 4 | SFTP subset (upload/download, no shell quoting) | pure Lua |
+| 5 | fault injection, fuzz targets, capability-denial tests, docs | |
+
+Phases 2 to 5 are pure Lua/JS and need no further approval.
+
+## 12. Decisions taken
+
+| question | decision |
+|---|---|
+| `hull/net` | **Approved**, to be designed first, and designed so it can eventually serve `hull/http-client`, `hull/smtp` and `hull/web/ws-client` as well. Design: [`net_module_design.md`](net_module_design.md). |
+| AEAD | **`aes256-gcm@openssh.com`**. One consequence needs a follow-up call: mbedTLS lives in the composable TLS feature, not the base, so an SSH app with no HTTP links no AES-GCM. See `net_module_design.md` section 5. |
+| Lua vs JS | **Lua only for v1**, JS to follow. Section 8 option 1. |
+| `hsctl` language | **Lua.** |
+
+Phases 2 to 5 (pure Lua) are unblocked once `hull/net` N1 lands.
