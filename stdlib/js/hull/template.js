@@ -539,8 +539,10 @@ function compileSource(source, name) {
     ast = resolveInheritance(ast, loadRaw);
     ast = resolveIncludes(ast, loadRaw);
     const code = codegen(ast);
-    const chunkName = name ? "template:" + name : "template";
-    return _template.compile(code, chunkName);
+    // Pass the bare template name: compile builds the script name itself and
+    // will not take one verbatim, because a script name is what decides stdlib
+    // trust in this runtime.
+    return _template.compile(code, name);
 }
 
 /**

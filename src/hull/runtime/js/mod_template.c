@@ -27,13 +27,31 @@ static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
     if (!code)
         return JS_EXCEPTION;
 
-    const char *name = "<template>";
+    /* The script name is BUILT here, never taken verbatim from the caller.
+     *
+     * Trust in this runtime is decided by script name: js_is_stdlib_caller
+     * reads JS_GetScriptOrModuleName and tests for a "hull:" prefix, and a
+     * frame that passes it may touch _hull_* tables (mod_db.c). The name
+     * passed here becomes exactly that script name, because the cache hands
+     * it to JS_Eval. A caller-supplied name would therefore let any code that
+     * can reach this bridge mint a script that claims to be stdlib - and this
+     * bridge is reachable: "hull:_template" is registered with no
+     * hl_js_check_module_declared gate.
+     *
+     * Forcing the "template:" prefix makes that unforgeable: whatever the
+     * caller passes ends up AFTER a prefix that is not "hull:", so the
+     * resulting script can never be mistaken for stdlib. */
+    char script[HL_MODULE_PATH_MAX];
     if (argc >= 2 && JS_IsString(argv[1])) {
-        name = JS_ToCString(ctx, argv[1]);
-        if (!name) {
+        const char *req = JS_ToCString(ctx, argv[1]);
+        if (!req) {
             JS_FreeCString(ctx, code);
             return JS_EXCEPTION;
         }
+        snprintf(script, sizeof script, "template:%s", req);
+        JS_FreeCString(ctx, req);
+    } else {
+        snprintf(script, sizeof script, "template");
     }
 
     /* Compile + execute the IIFE through the on-disk template
@@ -41,10 +59,8 @@ static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
      * JS_ReadObject and we skip both the parse pass AND the IIFE
      * execute that creates the closure. See
      * include/hull/runtime/js_template_cache.h. */
-    JSValue result = hl_js_template_compile_cached(ctx, code, len, name);
+    JSValue result = hl_js_template_compile_cached(ctx, code, len, script);
 
-    if (argc >= 2 && JS_IsString(argv[1]))
-        JS_FreeCString(ctx, name);
     JS_FreeCString(ctx, code);
 
     return result;

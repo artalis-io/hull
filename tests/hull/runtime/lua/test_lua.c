@@ -4762,6 +4762,78 @@ UTEST(lua_template_cache, parse_error_returns_no_cache_write)
  *
  * Implementation gate lives in lua_app_reject_if_serving(). */
 
+/* ── chunk names decide trust, so they are not caller-supplied ────── */
+
+UTEST(lua_template_bridge, compile_cannot_forge_a_stdlib_chunk_name)
+{
+    /* hl_lua_source_is_stdlib grants _hull_* table access to any chunk whose
+     * name starts with "hull.". _template._compile is reachable from app code
+     * (require's capability gate only fires for names in the module registry,
+     * and "hull._template" is not one), so if it took a chunk name verbatim,
+     * app code could mint a chunk that claims to be stdlib.
+     *
+     * The name is built instead. Whatever the caller asks for lands after a
+     * "=template:" prefix, so the result cannot begin with "hull.". */
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local t = require('hull._template')\n"
+        "local f = t._compile('return function() error(\"boom\") end',\n"
+        "                     'hull.forged')\n"
+        "local ok, err = pcall(f)\n"
+        "assert(not ok, 'the probe chunk must raise')\n"
+        "return err\n");
+    ASSERT_EQ(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+
+    /* Lua prefixes a runtime error with the chunk name, so the error text
+     * reports what the chunk ended up being called. */
+    ASSERT_TRUE_MSG(strstr(err, "template:") != NULL,
+                    "chunk name should carry the forced template prefix");
+    ASSERT_TRUE_MSG(strncmp(err, "hull.", 5) != 0,
+                    "chunk must not be named as stdlib");
+
+    /* The requested name is kept, just demoted - error messages stay useful. */
+    ASSERT_TRUE_MSG(strstr(err, "hull.forged") != NULL,
+                    "the caller's name should still appear");
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_template_bridge, compile_strips_a_caller_supplied_marker)
+{
+    /* A leading "@" or "=" is a chunkname marker. Left in place it would land
+     * in the middle of the built name, so it is stripped before prefixing. */
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local t = require('hull._template')\n"
+        "local f = t._compile('return function() error(\"boom\") end',\n"
+        "                     '@hull.forged')\n"
+        "local ok, err = pcall(f)\n"
+        "assert(not ok)\n"
+        "return err\n");
+    ASSERT_EQ(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_TRUE_MSG(strstr(err, "template:hull.forged") != NULL,
+                    "marker stripped, name kept after the prefix");
+    ASSERT_TRUE(strstr(err, "template:@") == NULL);
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_template_bridge, compile_without_a_name_still_works)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local t = require('hull._template')\n"
+        "local f = t._compile('return function() return 1 end')\n"
+        "assert(type(f) == 'function')\n"
+        "assert(f() == 1)\n");
+    ASSERT_EQ_MSG(rc, LUA_OK, "a nameless compile keeps working");
+    cleanup_lua();
+}
+
 UTEST(lua_runtime, app_get_rejected_after_registration_closed)
 {
     init_lua();
