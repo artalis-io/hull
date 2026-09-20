@@ -1002,7 +1002,7 @@ endif
 # policy with no Keel dependency, so the capability still refuses correctly in
 # a build that cannot dial at all.
 ifeq ($(HL_ENABLE_HTTP_CLIENT)$(HL_ENABLE_HTTP_SERVER),00)
-  CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/net.c,$(CAP_SRCS))
+  CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/net_stream.c,$(CAP_SRCS))
 endif
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   # SERVER-only capability sources - body reader (request bodies) +

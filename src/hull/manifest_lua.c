@@ -408,24 +408,31 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop kv */
 
-    /* net = { connect = { hosts = {...}, ports = {...} } }
-     * The outbound byte-stream allowlist (see HlManifestNet). Ports are read as
-     * integers rather than strings: a port is a number, and accepting "22"
-     * would invite "22 " and ":22" behind it. Anything out of 1..65535, or not
-     * an integer, is SKIPPED rather than clamped, so a typo narrows the grant
-     * instead of silently widening it. */
-    lua_getfield(L, manifest_idx, "net");
+    /* ssh = { connect = { hosts = {...}, ports = {...}, users = {...} } }
+     *
+     * The ONLY manifest key that grants outbound stream authority, and it
+     * grants it to the SSH stdlib rather than to the app (see HlManifestSsh).
+     *
+     * Ports are read as integers rather than strings: a port is a number, and
+     * accepting "22" would invite "22 " and ":22" behind it. Anything out of
+     * 1..65535, or not an integer, is SKIPPED rather than clamped, so a typo
+     * narrows the grant instead of silently widening it. */
+    lua_getfield(L, manifest_idx, "ssh");
     if (lua_istable(L, -1)) {
-        int net_idx = lua_gettop(L);
-        out->net.declared = 1;
-        lua_getfield(L, net_idx, "connect");
+        int ssh_idx = lua_gettop(L);
+        out->ssh.declared = 1;
+        lua_getfield(L, ssh_idx, "connect");
         if (lua_istable(L, -1)) {
             int c_idx = lua_gettop(L);
-            out->net.connect.declared = 1;
-            out->net.connect.host_count =
+            out->ssh.connect.declared = 1;
+            out->ssh.connect.host_count =
                 read_string_array(L, c_idx, "hosts",
-                                  out->net.connect.hosts,
+                                  out->ssh.connect.hosts,
                                   HL_MANIFEST_MAX_NET_HOSTS, out->alloc);
+            out->ssh.user_count =
+                read_string_array(L, c_idx, "users",
+                                  out->ssh.users,
+                                  HL_MANIFEST_MAX_SSH_USERS, out->alloc);
 
             lua_getfield(L, c_idx, "ports");
             if (lua_istable(L, -1)) {
@@ -436,17 +443,17 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     if (lua_isinteger(L, -1)) {
                         lua_Integer v = lua_tointeger(L, -1);
                         if (v >= 1 && v <= 65535)
-                            out->net.connect.ports[n++] = (int)v;
+                            out->ssh.connect.ports[n++] = (int)v;
                     }
                     lua_pop(L, 1);
                 }
-                out->net.connect.port_count = n;
+                out->ssh.connect.port_count = n;
             }
             lua_pop(L, 1); /* pop ports */
         }
         lua_pop(L, 1); /* pop connect */
     }
-    lua_pop(L, 1); /* pop net */
+    lua_pop(L, 1); /* pop ssh */
 
     /* allow_dynamic_code = true - opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox. */
