@@ -77,6 +77,9 @@ static int fix_init(NetFix *f)
     return 0;
 }
 
+/* Defined below, next to the other pump helpers; fix_open needs it here. */
+static int pump_connect(NetFix *f, HlNetStream *s, int max_ticks);
+
 /* Take the server side of a connection that has already completed. The
  * handshake finishes from the backlog, so this returns immediately and the
  * whole exchange stays single-threaded and deterministic. */
