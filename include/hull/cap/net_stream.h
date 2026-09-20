@@ -59,6 +59,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct HlAsyncOp;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -78,6 +80,7 @@ typedef struct HlNetStream HlNetStream;
 #define HL_NET_E_IO         (-7)   /* transport error                         */
 #define HL_NET_E_NOMEM      (-8)
 #define HL_NET_E_INVAL      (-9)   /* bad argument, bounded before use        */
+#define HL_NET_E_AGAIN     (-10)  /* would park; suspend on the pending op   */
 
 /* Bounds. A hostile or merely slow peer must not be able to grow Hull's
  * memory, so both buffers are fixed at construction and writes are admitted
@@ -95,8 +98,27 @@ typedef struct HlNetStreamConfig {
     size_t      write_cap;     /* 0 = HL_NET_WRITE_CAP_DEFAULT             */
 } HlNetStreamConfig;
 
+/* ## Parking protocol
+ *
+ * An operation that cannot complete now returns HL_NET_E_AGAIN. The caller
+ * then suspends on hl_net_stream_pending_op() and retries when resumed.
+ *
+ * C cannot yield mid-function, so this is how every async cap in Hull is
+ * shaped: the cap STARTS the work and the binding does the suspending (see
+ * mod_http_client.c, which calls hl_async_http_start then lua_yieldk). An
+ * earlier draft of this header had connect return a ready stream, which an
+ * event-loop-integrated transport cannot do without blocking the loop it is
+ * scheduled on.
+ */
+
 /**
- * Begin connecting. Returns HL_NET_OK with *out set, or a negative error.
+ * Begin connecting. Returns HL_NET_OK with *out set on a synchronous success,
+ * HL_NET_E_AGAIN with *out set while the connect is in flight, or a negative
+ * error with *out NULL.
+ *
+ * HL_NET_E_AGAIN is the normal case: resolution and the address race take time
+ * and must not block. Suspend on the pending op and call
+ * hl_net_stream_connect_result() once resumed.
  *
  * Does NOT authorize: the caller must have called hl_cap_net_check_connect
  * first. This split is deliberate (see cap/net.h) so that a denial cannot race
@@ -105,10 +127,24 @@ typedef struct HlNetStreamConfig {
 int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg);
 
 /**
+ * Terminal result of a connect that previously returned HL_NET_E_AGAIN.
+ * HL_NET_OK once open, HL_NET_E_AGAIN while still in flight, or the failure.
+ */
+int hl_net_stream_connect_result(HlNetStream *s);
+
+/**
+ * The op to suspend on after any HL_NET_E_AGAIN. Borrowed and owned by the
+ * stream; the caller fills on_resume and hands it to the async backend, and
+ * must not free it or outlive the stream. NULL when nothing is pending.
+ */
+struct HlAsyncOp *hl_net_stream_pending_op(HlNetStream *s);
+
+/**
  * Read up to `len` bytes. Returns the count (>0), 0 on clean EOF, or a
  * negative error. May park the calling coroutine when nothing is buffered yet.
  */
 long hl_net_stream_read(HlNetStream *s, void *buf, size_t len);
+/* Returns >0 bytes, 0 on clean EOF, HL_NET_E_AGAIN to park, or an error. */
 
 /**
  * Write exactly `len` bytes, all-or-none against the send capacity. Returns
@@ -116,6 +152,8 @@ long hl_net_stream_read(HlNetStream *s, void *buf, size_t len);
  * backpressure surfacing rather than an error.
  */
 int hl_net_stream_write(HlNetStream *s, const void *buf, size_t len);
+/* HL_NET_OK, HL_NET_E_AGAIN when the send queue is full (backpressure, not an
+ * error), or a negative error. Never writes a partial buffer. */
 
 /** Rearm the operation deadline. <=0 clears it. */
 void hl_net_stream_deadline(HlNetStream *s, int ms);
