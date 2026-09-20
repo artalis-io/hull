@@ -134,7 +134,14 @@ static void retire_attempts(HlNetStream *s)
 static void maybe_release(HlNetStream *s)
 {
     if (!s->freed) return;
-    if (s->connect_started && !s->connect_detached) return;
+
+    /* The OP's own state is the authority here, not our callback flag.
+     * Cancelling an already-terminal op has nothing to detach, so co_on_detach
+     * never fires, and a flag-only check refuses release forever: a leak.
+     * LeakSanitizer caught exactly that through cancel_then_free_is_safe.
+     * cap/smtp_transport.c asks the op the same way. */
+    if (s->connect_started && !s->connect_detached &&
+        !kl_connect_op_is_detached(&s->connect_op)) return;
 
     if (s->deadline_timer && s->be->timer_cancel)
         s->be->timer_cancel(s->async, s->deadline_timer);
