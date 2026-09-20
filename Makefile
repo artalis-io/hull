@@ -996,6 +996,14 @@ ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
       $(SRCDIR)/hull/cap/smtp_transport.c, \
       $(CAP_SRCS))
 endif
+# hull/net's transport composes Keel (KlConnectOp + the event loop). Keel is
+# linked only when at least one HTTP half is on, so with BOTH off the stream
+# cap goes too. cap/net_policy.c deliberately stays: it is pure manifest
+# policy with no Keel dependency, so the capability still refuses correctly in
+# a build that cannot dial at all.
+ifeq ($(HL_ENABLE_HTTP_CLIENT)$(HL_ENABLE_HTTP_SERVER),00)
+  CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/net.c,$(CAP_SRCS))
+endif
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   # SERVER-only capability sources - body reader (request bodies) +
   # WebSocket server. cap/test.c (in-process HTTP harness) is handled

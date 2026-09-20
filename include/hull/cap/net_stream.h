@@ -60,6 +60,7 @@
 #include <stdint.h>
 
 struct HlAsyncOp;
+struct HlAsyncBackendCtx;
 
 #ifdef __cplusplus
 extern "C" {
@@ -91,6 +92,9 @@ typedef struct HlNetStream HlNetStream;
 #define HL_NET_WRITE_CAP_MAX      (1024u * 1024u)
 
 typedef struct HlNetStreamConfig {
+    /* The loop to schedule on, borrowed. The binding passes the runtime's
+     * async_ctx, which keeps this file free of any runtime knowledge. */
+    struct HlAsyncBackendCtx *async;
     const char *host;          /* borrowed for the duration of the call    */
     int         port;          /* 1..65535, already authorized             */
     int         connect_ms;    /* whole-connect deadline; <=0 = default    */
