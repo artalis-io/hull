@@ -18,9 +18,12 @@
 #include "hull/cap/net_stream.h"
 #include "hull/shared/async_backend.h"
 
-#include "keel/connect_op.h"
-#include "keel/sockaddr.h"
-#include "keel/socket.h"
+#include <keel/connect_op.h>
+#include <keel/connect_op_detail.h> /* opt-in layout: embed a KlConnectOp (storage only) */
+#include <keel/sockaddr.h>
+#include <keel/socket.h>
+#include <keel/handle.h>
+#include <keel/error.h>
 
 #include <errno.h>
 #include <netdb.h>
