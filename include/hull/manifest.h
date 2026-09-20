@@ -16,6 +16,7 @@
  *   - `HL_MANIFEST_MAX_PATHS` = 32 (`fs.read` / `fs.write` patterns)
  *   - `HL_MANIFEST_MAX_ENVS` = 32 (env var names)
  *   - `HL_MANIFEST_MAX_HOSTS` = 32 (HTTP/WS hosts)
+ *   - `HL_MANIFEST_MAX_NET_HOSTS` = 32, `HL_MANIFEST_MAX_NET_PORTS` = 16
  *   - `HL_MANIFEST_MAX_CORS_ORIGINS` = 16
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -38,6 +39,8 @@ typedef struct HlAllocator HlAllocator;
 #define HL_MANIFEST_MAX_PATHS  32
 #define HL_MANIFEST_MAX_ENVS   32
 #define HL_MANIFEST_MAX_HOSTS  32
+#define HL_MANIFEST_MAX_NET_HOSTS  32
+#define HL_MANIFEST_MAX_NET_PORTS  16
 #define HL_MANIFEST_MAX_CORS_ORIGINS 16
 #define HL_MANIFEST_MAX_MODULES 32
 #define HL_MANIFEST_MAX_DATABASES 16
@@ -116,6 +119,34 @@ typedef struct HlManifestKv {
     int                 declared;
 } HlManifestKv;
 
+/* Outbound stream policy (`net = { connect = { hosts = {...}, ports = {...} } }`):
+ * the allowlist a net.connect is validated against BEFORE any name resolution
+ * and before any socket exists. `hosts` are host_match patterns (exact /
+ * "*.suffix" glob / CIDR for IP literals / "$VAR" env ref), the same matcher
+ * http / ws / smtp / databases.dynamic / kv.dynamic already share.
+ *
+ * `ports` is REQUIRED and has no default, unlike the per-protocol capabilities
+ * that imply one. hull/net is a general TCP reach, so the port set is never
+ * inferred: an app that wants 22 says 22.
+ *
+ * Fails closed three separate ways, because this is the broadest network
+ * authority Hull grants: no `net` key, an empty one, or a `connect` with an
+ * empty host list or an empty port list all deny everything. `declared`
+ * distinguishes "no net key" (0) from a present one (1) so a denial can say
+ * which of the two it was. */
+typedef struct HlManifestNetConnect {
+    const char *hosts[HL_MANIFEST_MAX_NET_HOSTS];
+    int         host_count;
+    int         ports[HL_MANIFEST_MAX_NET_PORTS];
+    int         port_count;
+    int         declared;
+} HlManifestNetConnect;
+
+typedef struct HlManifestNet {
+    HlManifestNetConnect connect;
+    int                  declared;
+} HlManifestNet;
+
 /* ── Manifest struct ───────────────────────────────────────────────── */
 
 typedef struct HlManifest {
@@ -186,6 +217,10 @@ typedef struct HlManifest {
     /* KV (Valkey/Redis) config: the dynamic-open policy
      * (`kv = { dynamic = { hosts = {...}, schemes = {...} } }`). */
     HlManifestKv kv;
+
+    /* Outbound byte-stream policy (`net = { connect = {...} }`). Gates
+     * hull/net, and through it hull/ssh. See HlManifestNet above. */
+    HlManifestNet net;
 
     /* W^X / no runtime dynamic code - opt-in escape hatches.
      * Both default to 0 (deny). Setting either to 1 in a manifest is

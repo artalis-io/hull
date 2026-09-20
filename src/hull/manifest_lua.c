@@ -408,6 +408,46 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop kv */
 
+    /* net = { connect = { hosts = {...}, ports = {...} } }
+     * The outbound byte-stream allowlist (see HlManifestNet). Ports are read as
+     * integers rather than strings: a port is a number, and accepting "22"
+     * would invite "22 " and ":22" behind it. Anything out of 1..65535, or not
+     * an integer, is SKIPPED rather than clamped, so a typo narrows the grant
+     * instead of silently widening it. */
+    lua_getfield(L, manifest_idx, "net");
+    if (lua_istable(L, -1)) {
+        int net_idx = lua_gettop(L);
+        out->net.declared = 1;
+        lua_getfield(L, net_idx, "connect");
+        if (lua_istable(L, -1)) {
+            int c_idx = lua_gettop(L);
+            out->net.connect.declared = 1;
+            out->net.connect.host_count =
+                read_string_array(L, c_idx, "hosts",
+                                  out->net.connect.hosts,
+                                  HL_MANIFEST_MAX_NET_HOSTS, out->alloc);
+
+            lua_getfield(L, c_idx, "ports");
+            if (lua_istable(L, -1)) {
+                int n = 0;
+                int len = (int)lua_rawlen(L, -1);
+                for (int i = 1; i <= len && n < HL_MANIFEST_MAX_NET_PORTS; i++) {
+                    lua_rawgeti(L, -1, i);
+                    if (lua_isinteger(L, -1)) {
+                        lua_Integer v = lua_tointeger(L, -1);
+                        if (v >= 1 && v <= 65535)
+                            out->net.connect.ports[n++] = (int)v;
+                    }
+                    lua_pop(L, 1);
+                }
+                out->net.connect.port_count = n;
+            }
+            lua_pop(L, 1); /* pop ports */
+        }
+        lua_pop(L, 1); /* pop connect */
+    }
+    lua_pop(L, 1); /* pop net */
+
     /* allow_dynamic_code = true - opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox. */
     lua_getfield(L, manifest_idx, "allow_dynamic_code");
