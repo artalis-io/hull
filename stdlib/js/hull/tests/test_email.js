@@ -69,5 +69,10 @@ await (async () => {
 
     // ── results ─────────────────────────────────────────────────────
     console.log(pass + " passed, " + fail + " failed");
-    if (fail > 0) throw new Error(fail + " test(s) failed");
+    // Published from INSIDE the async IIFE, after every await has settled --
+    // the harness reads these once the module's evaluation promise resolves.
+    // Every case here is a validation rejection (the file does no network
+    // I/O), so they settle on the microtask queue.
+    globalThis.__test_pass = pass;
+    globalThis.__test_fail = fail;
 })();

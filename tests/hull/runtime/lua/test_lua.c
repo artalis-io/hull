@@ -223,6 +223,80 @@ static int eval_int(const char *code)
     return result;
 }
 
+/* Run a co-located Lua test script INSIDE the Hull runtime (caps present).
+ *
+ * The sibling of run_lua_test (tests/hull/lua_script_test.h), for the scripts
+ * that the vanilla harness cannot host at all. hull.search calls
+ * require("hull.db").default() at module load, and hull.email requires
+ * hull.http-client + hull.smtp; all three are C-backed with NO .lua file, so a
+ * vanilla state cannot resolve them -- the failure is at require, before a
+ * single assertion runs.
+ *
+ * Loading is from C (luaL_loadbuffer), not from Lua: the sandbox removes
+ * load / loadfile / dofile from the script environment, and this deliberately
+ * does not hand them back. The chunk name is the file path and NOT a "hull."
+ * name, so the script is treated as app code -- it does not inherit the
+ * stdlib's bypass of the _hull_ table-namespace guard, and a test that reached
+ * for an internal table directly would still be refused.
+ *
+ * Same contract as the vanilla harness: the script ends with
+ * `return { pass = pass, fail = fail }`; 0 on a clean run, -1 on any
+ * harness-level failure. */
+static int run_lua_test_in_runtime(const char *script_path, long long *pass_out,
+                                   long long *fail_out)
+{
+    *pass_out = 0;
+    *fail_out = -1;
+    if (!lua_initialized || !lua_rt.L) return -1;
+
+    FILE *f = fopen(script_path, "rb");
+    if (!f) {
+        fprintf(stderr, "\n%s: cannot open\n", script_path);
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return -1; }
+    rewind(f);
+
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return -1; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = 0;
+
+    char chunk[512];
+    snprintf(chunk, sizeof chunk, "@%s", script_path);
+    int rc = luaL_loadbuffer(lua_rt.L, buf, got, chunk);
+    free(buf);
+    if (rc != LUA_OK) {
+        fprintf(stderr, "\n%s: %s\n", script_path, lua_tostring(lua_rt.L, -1));
+        lua_pop(lua_rt.L, 1);
+        return -1;
+    }
+    if (lua_pcall(lua_rt.L, 0, 1, 0) != LUA_OK) {
+        fprintf(stderr, "\n%s: %s\n", script_path, lua_tostring(lua_rt.L, -1));
+        lua_pop(lua_rt.L, 1);
+        return -1;
+    }
+    if (!lua_istable(lua_rt.L, -1)) {
+        fprintf(stderr, "\n%s: did not return a { pass, fail } table\n", script_path);
+        lua_pop(lua_rt.L, 1);
+        return -1;
+    }
+
+    lua_getfield(lua_rt.L, -1, "fail");
+    *fail_out = (long long)lua_tointeger(lua_rt.L, -1);
+    lua_pop(lua_rt.L, 1);
+    lua_getfield(lua_rt.L, -1, "pass");
+    *pass_out = (long long)lua_tointeger(lua_rt.L, -1);
+    lua_pop(lua_rt.L, 2);   /* the pass value, then the table */
+
+    fprintf(stderr, "  %s: %lld passed, %lld failed\n", script_path, *pass_out, *fail_out);
+    return 0;
+}
+
+
 /* ── Basic runtime tests ────────────────────────────────────────────── */
 
 UTEST(lua_runtime, init_and_free)
@@ -3878,6 +3952,37 @@ UTEST(lua_stdlib, tar_create_rejects_unsafe_name)
  *
  * hull.csv is pure Lua (no capability use), so the vanilla state is the right
  * harness; a script needing db/crypto belongs in a caps-bearing leg below. */
+/* The two Lua suites the vanilla harness cannot host: their modules are
+ * C-backed and unreachable without the capability layer. Same scripts, same
+ * { pass, fail } contract -- only the state they run in differs. */
+UTEST(lua_stdlib, search_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_search.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, email_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_email.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, csv_suite)
 {
     long long pass = 0, fail = -1;
