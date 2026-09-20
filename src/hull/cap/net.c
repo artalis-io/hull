@@ -470,6 +470,32 @@ static const KlConnectOpHooks NET_CONNECT_HOOKS = {
 
 /* ── Resolution on a worker ─────────────────────────────────────────── */
 
+/* On capacity, and why there is deliberately NO admission cap here.
+ *
+ * docs/dns_resolver_keel_design.md section 6 warns that pool-based resolution
+ * "consumes pool capacity and can delay shutdown", and cap/smtp_admit.c answers
+ * the same worry with a hard cap of max(1, floor(W/2)) concurrent operations.
+ * Copying that here would be wrong.
+ *
+ * An SMTP send is a whole conversation and can run for minutes, so capping it
+ * protects db and compute from a genuinely long occupation. A name lookup is
+ * milliseconds in the normal case. The pool already provides the bound that
+ * matters: the CLI entry point creates 4 workers with a 64-slot queue, so a
+ * fleet fan-out of eight nodes runs four lookups and queues four, and
+ * pool_submit reports back when the queue is actually full.
+ *
+ * With W = 4 the SMTP formula gives a cap of 2, which would REFUSE six of
+ * those eight connects. That trades the primary use case away to halve a rare
+ * pathological one.
+ *
+ * Residual risk, stated rather than designed around: getaddrinfo cannot be
+ * cancelled or given a deadline, so a hung system resolver pins its worker
+ * until the resolver's own timeout. W simultaneous hung lookups therefore
+ * stall other async work for that long, and delay pool_free by the same.
+ * A cap would halve that and cost the fan-out; the trade only becomes worth
+ * revisiting if a real hang shows up, which is also what section 7 of that
+ * record says about this whole area. */
+
 /* WORKER THREAD. Touches only the resolution inputs (read) and outputs
  * (write), nothing else on the stream, and calls nothing back. Everything that
  * needs the loop happens in resolve_done below. */
