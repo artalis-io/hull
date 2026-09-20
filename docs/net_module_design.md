@@ -159,6 +159,13 @@ assessment of each, in the order I would attempt them:
 | **WebSocket** | `cap/ws.c` | plausible: WS is framing over a byte stream, the same shape as SSH | needs the HTTP upgrade handshake, so it follows HTTP |
 | **HTTP client** | `cap/http.c` + `cap/http_async.c` | hardest, and least valuable | a mature client with connection reuse, redirects and streaming bodies. Moving it risks regressions in Hull's most-used network path for an architectural tidiness win. |
 
+The SQL wire clients are **not** on this list and should not be: their
+transport is blocking-on-a-worker by design (see section 6a), a different
+execution model rather than a duplicate of this one. `HlDbTransport` was
+itself already extracted from the byte-identical `cap/pg_transport.c` and
+`cap/mysql_transport.c` (`db_transport_extraction.md`), so that
+consolidation has happened and is finished.
+
 **Recommendation: do not promise all three.** Build `hull/net` for SSH, then
 migrate SMTP once `start_tls` exists, because SMTP's private adapter is the
 duplicate that most clearly should not exist. Treat WebSocket as a later
@@ -167,6 +174,52 @@ candidate and HTTP as explicitly out of scope unless a concrete need appears.
 Designing `hull/net` so it *could* serve all three is the requirement. Migrating
 all three is not, and committing to it now would be a promise made on the
 strength of one consumer.
+
+## 6a. Scheduling model (corrected during N1b)
+
+The first draft of this document said hull/net would follow "the SMTP model".
+Reading the two existing transports properly shows that is wrong, and the
+correction matters enough to record rather than quietly fix.
+
+**Both existing transports pin a thread for the life of the operation.**
+
+| transport | event context | runs on |
+|---|---|---|
+| `HlDbTransport` | private, pumped only during connect, then `set_blocking()` | the calling worker thread |
+| `HlSmtpTransport` | private (`t->ev`), pumped for the whole conversation | a pool worker (`smtp_worker.c`) |
+
+That is fine for a request-scoped operation. It is not fine for SSH:
+
+- The default pool is **4 workers** (`serve.c`, `--workers N`).
+- SMTP caps concurrent sends at `max(1, floor(W / 2))` = **2** by default
+  (`cap/smtp_admit.c`), deliberately leaving workers for db and compute.
+- An SSH connection is **long-lived**, not request-scoped. A worker would be
+  held while idle, waiting on remote output.
+
+So a worker-per-connection hull/net could not deliver hsctl's eight concurrent
+node connections, and raising `--workers` would be the wrong fix: it couples
+connection concurrency to a knob meant for CPU work, and pins threads that are
+doing nothing. The point of an event loop is not to need a thread per idle
+connection.
+
+**hull/net is therefore event-loop integrated**, which is new for a Hull
+byte-stream but not new for Hull. Every piece has a precedent:
+
+| piece | precedent |
+|---|---|
+| long-lived client connection on the MAIN event context | `kl_ws_client_connect(KlEventCtx *ev, ...)`, already used by `ws.connect`, whose callbacks fire on the event-loop thread |
+| `KlConnectOp` driven to a winning descriptor | `cap/smtp_transport.c` (on a private ctx; hull/net uses the main one) |
+| pull-style reads over push-style delivery | the multipart body reader: `hl_cap_multipart_park` parks the coroutine on NEED_DATA and the `on_data` callback resumes it |
+| bounded writes with backpressure | `KlStream` (`kl_stream_write` / `_flush` / `_on_write_complete`) |
+
+`KlStream` is transport-agnostic: it takes writer/submit callbacks and read
+arm/disarm/deliver callbacks rather than owning a descriptor, so wiring it to
+the main event context is a composition question, not a Keel limitation.
+
+Consequence for the API in section 3: unchanged. `s:read` and `s:write` look
+the same to Lua either way, which is why choosing the loop-integrated model now
+does not foreclose anything, and why getting it wrong would have been expensive
+to undo later.
 
 ## 7. Feature composition
 
