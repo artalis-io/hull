@@ -797,7 +797,7 @@ All vendored. No external dependencies:
 |---------|----------|---------|
 | Keel | `vendor/keel/` (git submodule) | HTTP server library (async primitives, thread pool) |
 | Lua 5.4 | `vendor/lua/` | Application scripting |
-| QuickJS | `vendor/quickjs/` | ES2023 JavaScript runtime |
+| QuickJS | `vendor/quickjs/` | ES2023 JavaScript runtime. **Patched in tree** (one fix, marked `HULL PATCH`); re-apply on upgrade, see [docs/quickjs_patches.md](docs/quickjs_patches.md) |
 | SQLite | `vendor/sqlite/` | Embedded database |
 | mbedTLS | `vendor/mbedtls/` | TLS client |
 | TweetNaCl | `vendor/tweetnacl/` | Ed25519 + NaCl crypto |
@@ -3117,6 +3117,26 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_host_match` | 7 | Host-allowlist matcher (exact / `*` / `*.suffix` glob / CIDR) shared by db/http/smtp |
 
 ~58 suites, ~1280 test cases total (this table is representative, not exhaustive).
+
+**The co-located stdlib suites run too.** The 28 scripts under
+`stdlib/lua/hull/tests/*.lua` and `stdlib/js/hull/tests/*.js` are loaded by the
+C harnesses and gated in CI: a `lua_stdlib`/`js_stdlib` UTEST leg per script,
+each asserting `fail == 0` AND `pass > 0` (a suite that silently executes
+nothing is the failure mode these had). Three loaders, picked by what the
+script needs:
+
+| loader | where | for |
+|---|---|---|
+| `run_lua_test` | `tests/hull/lua_script_test.h` | pure-Lua scripts, vanilla `lua_State`, NO capability layer |
+| `run_lua_test_in_runtime` | `tests/hull/runtime/lua/test_lua.c` | scripts whose module is C-backed (`hull.search` needs db, `hull.email` needs http-client + smtp) |
+| `run_js_test` | `tests/hull/runtime/js/test_js.c` | every JS script; runs in the caps-bearing context |
+
+Contract: a Lua script ends `return { pass = pass, fail = fail }`; a JS script
+sets `globalThis.__test_pass` / `__test_fail`. Two traps worth knowing when
+adding one: `os.exit` in a Lua script kills the whole test binary (the vanilla
+state HAS `os`, unlike Hull's sandbox), and `print` does not exist in Hull's JS
+runtime (use `console.log`).
+
 Plus libFuzzer harnesses (sh_json, path_normalize, mime_sniff, host_match, pgwire,
 pg_dsn, pg_rewrite, mysqlwire, mysql_dsn) run 60s each in CI.
 
