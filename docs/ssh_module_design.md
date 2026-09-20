@@ -318,11 +318,71 @@ Phase 0 (this document) stops here pending decisions.
 
 Phases 2 to 5 are pure Lua/JS and need no further approval.
 
+## 11a. Where the protocol lives, and why not C
+
+Revisited deliberately once the shape of `hull/net` became clear, because the
+honest case for a C implementation had grown: every other network protocol in
+Hull is C (`cap/http.c`, `cap/ws.c`, `cap/smtp.c`, `cap/pgwire.c`,
+`cap/mysqlwire.c`), a C cap serves Lua and JS from one implementation, and the
+byte-stream capability would have had exactly one consumer.
+
+**Decision: the SSH protocol is implemented in Lua.** The reasoning that
+settled it:
+
+**Consistency is a description of history, not an argument.** That pgwire is C
+says how Hull got here, not where it should go. `hull/ssh` is a deliberate test
+of whether Hull can stop growing protocol-specific native code.
+
+**The risk profile is not comparable.** Before authentication, SSH parses and
+maintains state over attacker-controlled traffic across identification,
+KEXINIT, algorithm negotiation, X25519, host-key parsing, key derivation,
+encrypted packet framing, AEAD, sequence numbers, service negotiation, userauth,
+channels, window management and rekey. That is a large stateful hostile-input
+surface, and it is the case Hull's own thesis is about: push memory-unsafe code
+down into small auditable primitives and keep protocol logic in a safe language.
+
+**The JS argument proves too much.** A C implementation gives both runtimes
+from one source, and Hull has no mechanism for a JS module to consume a Lua
+stdlib implementation. But if parity forces C, then EVERY substantial stdlib
+module is forced to C, and the orchestration model becomes "C for anything
+reusable". That is a larger architectural question than SSH, and SSH should not
+decide it by accident. Recorded as an open question instead (section 12a).
+
+**The native-code rule, sharpened.** The original brief said "preferably no
+native C", which is vague about what the exception covers. The rule this design
+now follows:
+
+> Protocol semantics must not move into native C merely because a stdlib
+> primitive is missing. Native C is permitted only for small generic primitives
+> below the safe-language boundary.
+
+That permits `cap/net_stream.c`, a crypto primitive, an event-loop bridge. It
+forbids a `cap/ssh.c` containing the SSH parser and state machine, unless that
+decision is revisited explicitly rather than arrived at by drift.
+
+## 12a. Open: language-neutral stdlib implementations
+
+`hull/ssh` is Lua-only for v1, so `hsctl` is Lua. That is acceptable now and
+unsatisfying later, and the general problem is not SSH's to solve:
+
+> Should Hull have a way to implement a stdlib module once and bind it to both
+> runtimes?
+
+Today the answer is no: every stdlib module is written twice, and the only
+shared implementation surface is WASM compute, which has no I/O. Options worth
+examining when this is picked up deliberately include a shared implementation
+compiled to WASM with thin per-runtime bindings, or accepting per-runtime
+implementations as the permanent model and tooling the parity checks.
+
+Until then, a Lua-only module is a recorded gap, not a reason to move protocol
+logic into C.
+
 ## 12. Decisions taken
 
 | question | decision |
 |---|---|
-| `hull/net` | **Approved**, to be designed first, and designed so it can eventually serve `hull/http-client`, `hull/smtp` and `hull/web/ws-client` as well. Design: [`net_module_design.md`](net_module_design.md). |
+| `hull/net` | **Not published.** The byte stream exists as PRIVATE native infrastructure (`cap/net_stream.c`) with one caller, the SSH stdlib. No `hull/net` module, no `net` manifest key. Applications never receive raw socket authority. Design: [`net_module_design.md`](net_module_design.md) section 2. |
+| SSH protocol language | **Lua**, deliberately, not C. See section 11a. |
 | AEAD | **`aes256-gcm@openssh.com`**. One consequence needs a follow-up call: mbedTLS lives in the composable TLS feature, not the base, so an SSH app with no HTTP links no AES-GCM. See `net_module_design.md` section 5. |
 | Lua vs JS | **Lua only for v1**, JS to follow. Section 8 option 1. |
 | `hsctl` language | **Lua.** |
