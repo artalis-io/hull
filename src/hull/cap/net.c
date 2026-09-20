@@ -587,7 +587,9 @@ static void io_rearm(HlNetStream *s)
     if (want == s->io_mask) return;
 
     if (!want) {
-        if (s->io_mask && s->be->watcher_del)
+        /* Only reachable when io_mask differs from want, and want is 0 here,
+         * so io_mask is non-zero: there IS a registration to remove. */
+        if (s->be->watcher_del)
             s->be->watcher_del(s->async, (int)s->fd);
         s->io_mask = 0;
         return;
