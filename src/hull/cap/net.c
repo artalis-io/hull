@@ -64,6 +64,13 @@ static int sp_close(KlSocketHandle fd)
 /* ── Limits ─────────────────────────────────────────────────────────── */
 
 #define NET_MAX_ADDRS        8      /* addresses raced; bounds the fd set   */
+#define HL_NET_HOST_MAX      256    /* 253 is the DNS maximum, plus NUL     */
+
+/* Resolution runs on a pool worker, so the stream outlives connect() with
+ * work still referencing it. These gate release exactly as detachment does. */
+#define NET_RESOLVE_NONE     0
+#define NET_RESOLVE_INFLIGHT 1
+#define NET_RESOLVE_DONE     2
 #define NET_CONNECT_MS_DEF   30000
 #define NET_ATTEMPT_DELAY_MS 250    /* Happy-Eyeballs spacing               */
 
@@ -74,6 +81,15 @@ struct HlNetStream {
      * the runtime's async_ctx) so this file needs no runtime knowledge. */
     HlAsyncBackendCtx *async;
     const HlAsyncBackend *be;
+    HlAsyncBackendPool *pool;       /* borrowed; resolution runs here */
+
+    /* Resolution inputs, OWNED. The worker reads these after connect() has
+     * returned, so borrowing the caller's host pointer would be a dangling
+     * read the moment a Lua string is collected. */
+    char         host[HL_NET_HOST_MAX];
+    int          port;
+    int          resolve_state;     /* NET_RESOLVE_*                        */
+    int          resolve_rc;        /* HL_NET_* written by the worker       */
 
     /* Connect */
     KlConnectOp  connect_op;
@@ -140,6 +156,11 @@ static void maybe_release(HlNetStream *s)
      * never fires, and a flag-only check refuses release forever: a leak.
      * LeakSanitizer caught exactly that through cancel_then_free_is_safe.
      * cap/smtp_transport.c asks the op the same way. */
+    /* A worker may still be reading s->host. The pool fires exactly one of
+     * done_fn / cancel_fn per item, and both run on the loop, so release from
+     * there rather than racing the worker here. */
+    if (s->resolve_state == NET_RESOLVE_INFLIGHT) return;
+
     if (s->connect_started && !s->connect_detached &&
         !kl_connect_op_is_detached(&s->connect_op)) return;
 
@@ -177,8 +198,26 @@ static void maybe_release(HlNetStream *s)
  * does not either. hsctl leads with spark-7468.local, which is mDNS and so is
  * not DNS at all. getaddrinfo is the system resolver and honours whatever the
  * host is configured to do. */
-static int resolve_addrs(HlNetStream *s, const char *host, int port)
+static int resolve_addrs(HlNetStream *s)
 {
+    const char *host = s->host;
+    const int   port = s->port;
+
+    /* SEAM. When keel#332 lands and kl_resolve_sync is exported, this whole
+     * body collapses to:
+     *
+     *     return kl_resolve_sync(host, (uint16_t)port, SOCK_STREAM,
+     *                            s->addrs, NET_MAX_ADDRS, &s->naddrs) == 0
+     *                ? HL_NET_OK : HL_NET_E_RESOLVE;
+     *
+     * and <netdb.h>, <netinet/in.h>, <sys/socket.h>, struct sockaddr_in/in6
+     * and the AF_* constants all leave this file with it. Everything around
+     * this function is already written against that shape: the caller only
+     * needs "fill s->addrs / s->naddrs, return an HL_NET_* code".
+     *
+     * Until then this is the same getaddrinfo loop Keel keeps in
+     * src/resolve_sync.c and Hull keeps a second copy of in
+     * cap/smtp_transport.c. */
     char port_str[8];
     snprintf(port_str, sizeof port_str, "%d", port);
 
@@ -429,6 +468,58 @@ static const KlConnectOpHooks NET_CONNECT_HOOKS = {
     .on_detach       = co_on_detach,
 };
 
+/* ── Resolution on a worker ─────────────────────────────────────────── */
+
+/* WORKER THREAD. Touches only the resolution inputs (read) and outputs
+ * (write), nothing else on the stream, and calls nothing back. Everything that
+ * needs the loop happens in resolve_done below. */
+static void resolve_work(void *user)
+{
+    HlNetStream *s = user;
+    s->resolve_rc = resolve_addrs(s);
+}
+
+/* EVENT LOOP. The worker finished; start the connect op, or fail terminally. */
+static void resolve_done(void *user)
+{
+    HlNetStream *s = user;
+    s->resolve_state = NET_RESOLVE_DONE;
+
+    /* Freed or cancelled while the lookup was in flight: the names are
+     * useless now, and this callback is the release point. */
+    if (s->freed || s->closing) { maybe_release(s); return; }
+
+    if (s->resolve_rc != HL_NET_OK) {
+        s->result       = s->resolve_rc;
+        s->connect_done = 1;
+        wake(s);
+        return;
+    }
+
+    if (kl_connect_op_init(&s->connect_op, &NET_CONNECT_HOOKS, s) != 0 ||
+        kl_connect_op_start(&s->connect_op) != 0) {
+        s->result       = HL_NET_E_IO;
+        s->connect_done = 1;
+        wake(s);
+        return;
+    }
+    s->connect_started = 1;
+
+    /* A synchronous completion already woke the caller inside start(). */
+    if (s->connect_done) wake(s);
+}
+
+/* EVENT LOOP. Queued but never started (pool drained at shutdown). */
+static void resolve_cancel(void *user)
+{
+    HlNetStream *s = user;
+    s->resolve_state = NET_RESOLVE_DONE;
+    if (!s->closing) { s->closing = 1; s->result = HL_NET_E_CANCELLED; }
+    s->connect_done = 1;
+    wake(s);
+    maybe_release(s);
+}
+
 /* ── Public API ─────────────────────────────────────────────────────── */
 
 int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
@@ -447,13 +538,28 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
      * poll backends alike. An earlier draft demanded the Keel loop here; that
      * was a gate on a requirement that does not exist. */
 
+    /* Resolution is blocking, so it runs on a worker rather than on the loop
+     * this transport is scheduled on. A pool is therefore required; both Hull
+     * entry points create one (serve.c and serve_cli.c), so a NULL here is a
+     * wiring error, and blocking the loop instead would be the wrong
+     * "recovery". */
+    if (!cfg->pool) return HL_NET_E_INVAL;
+
+    size_t hlen = strlen(cfg->host);
+    if (hlen >= HL_NET_HOST_MAX) return HL_NET_E_INVAL;
+
     HlNetStream *s = calloc(1, sizeof *s);
     if (!s) return HL_NET_E_NOMEM;
 
     s->async = cfg->async;
     s->be    = be;
+    s->pool  = cfg->pool;
     s->fd    = KL_INVALID_SOCKET;
     for (int i = 0; i < NET_MAX_ADDRS; i++) s->attempt_fd[i] = KL_INVALID_SOCKET;
+
+    /* Owned copy: the worker reads this after we return. */
+    memcpy(s->host, cfg->host, hlen + 1);
+    s->port = cfg->port;
 
     s->connect_ms = cfg->connect_ms > 0 ? cfg->connect_ms : NET_CONNECT_MS_DEF;
     s->read_cap   = cfg->read_cap  ? cfg->read_cap  : HL_NET_READ_CAP_DEFAULT;
@@ -461,24 +567,19 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
     if (s->read_cap  > HL_NET_READ_CAP_MAX)  s->read_cap  = HL_NET_READ_CAP_MAX;
     if (s->write_cap > HL_NET_WRITE_CAP_MAX) s->write_cap = HL_NET_WRITE_CAP_MAX;
 
-    int rc = resolve_addrs(s, cfg->host, cfg->port);
-    if (rc != HL_NET_OK) { free(s); return rc; }
-
-    /* Nothing is armed until here, so every failure above frees outright. */
-    if (kl_connect_op_init(&s->connect_op, &NET_CONNECT_HOOKS, s) != 0) {
+    /* Mark BEFORE submitting: the work can start on another thread the moment
+     * submit returns, and maybe_release must already be refusing by then. */
+    s->resolve_state = NET_RESOLVE_INFLIGHT;
+    if (be->pool_submit(s->pool, resolve_work, resolve_done,
+                        resolve_cancel, s) != 0) {
+        /* Never queued, so no callback will fire and nothing else references
+         * the stream yet. */
+        s->resolve_state = NET_RESOLVE_NONE;
         free(s);
         return HL_NET_E_IO;
     }
-    if (kl_connect_op_start(&s->connect_op) != 0) {
-        free(s);
-        return HL_NET_E_IO;
-    }
-    /* Live from here: teardown must cancel and await detachment. */
-    s->connect_started = 1;
 
     *out = s;
-    if (s->connect_done) return s->result;   /* synchronous completion */
-
     s->op_pending = 1;
     return HL_NET_E_AGAIN;
 }
