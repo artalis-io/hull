@@ -683,6 +683,73 @@ static int lua_crypto_box_open(lua_State *L)
     return 1;
 }
 
+/* crypto.x25519_keypair() -> pk_hex, sk_hex */
+static int lua_crypto_x25519_keypair(lua_State *L)
+{
+    uint8_t pk[32], sk[32];
+    if (hl_cap_crypto_x25519_keypair(pk, sk) != 0)
+        return luaL_error(L, "x25519 keypair generation failed");
+
+    char pk_hex[65], sk_hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
+    pk_hex[64] = '\0';
+    for (int i = 0; i < 32; i++)
+        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
+    sk_hex[64] = '\0';
+
+    lua_pushstring(L, pk_hex);
+    lua_pushstring(L, sk_hex);
+    secure_zero(sk, sizeof(sk));
+    secure_zero(sk_hex, sizeof(sk_hex));
+    return 2;
+}
+
+/* crypto.x25519(sk_hex, pk_hex) -> shared_hex | nil, err
+ *
+ * A low-order peer point is a protocol-level event a caller has to handle, not
+ * a programming error, so it comes back as (nil, reason) rather than raising.
+ */
+static int lua_crypto_x25519(lua_State *L)
+{
+    size_t sk_hex_len, pk_hex_len;
+    const char *sk_hex = luaL_checklstring(L, 1, &sk_hex_len);
+    const char *pk_hex = luaL_checklstring(L, 2, &pk_hex_len);
+
+    if (sk_hex_len != 64)
+        return luaL_error(L, "secret key must be 64 hex chars (32 bytes)");
+    if (pk_hex_len != 64)
+        return luaL_error(L, "public key must be 64 hex chars (32 bytes)");
+
+    uint8_t sk[32], pk[32], shared[32];
+    if (hex_decode(sk_hex, sk_hex_len, sk, 32) != 0)
+        return luaL_error(L, "invalid hex in secret key");
+    if (hex_decode(pk_hex, pk_hex_len, pk, 32) != 0) {
+        secure_zero(sk, sizeof(sk));
+        return luaL_error(L, "invalid hex in public key");
+    }
+
+    int rc = hl_cap_crypto_x25519(shared, sk, pk);
+    secure_zero(sk, sizeof(sk));
+    if (rc == -2) {
+        lua_pushnil(L);
+        lua_pushstring(L, "peer sent a low-order point");
+        return 2;
+    }
+    if (rc != 0)
+        return luaL_error(L, "x25519 failed");
+
+    char shared_hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(shared_hex + i * 2, 3, "%02x", shared[i]);
+    shared_hex[64] = '\0';
+
+    lua_pushstring(L, shared_hex);
+    secure_zero(shared, sizeof(shared));
+    secure_zero(shared_hex, sizeof(shared_hex));
+    return 1;
+}
+
 /* crypto.box_keypair() → pk_hex, sk_hex */
 static int lua_crypto_box_keypair(lua_State *L)
 {
@@ -1042,6 +1109,8 @@ static const luaL_Reg crypto_funcs[] = {
     {"box",               lua_crypto_box},
     {"box_open",          lua_crypto_box_open},
     {"box_keypair",       lua_crypto_box_keypair},
+    {"x25519",            lua_crypto_x25519},
+    {"x25519_keypair",    lua_crypto_x25519_keypair},
     {"hmac_sha256",       lua_crypto_hmac_sha256},
     {"hmac_sha256_verify", lua_crypto_hmac_sha256_verify},
     {"constant_time_eq",  lua_crypto_constant_time_eq},

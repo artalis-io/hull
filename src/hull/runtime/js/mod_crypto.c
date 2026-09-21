@@ -961,6 +961,91 @@ static JSValue js_crypto_box_keypair(JSContext *ctx, JSValueConst this_val,
     return obj;
 }
 
+/* crypto.x25519Keypair() -> { publicKey, secretKey } */
+static JSValue js_crypto_x25519_keypair(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+
+    uint8_t pk[32], sk[32];
+    if (hl_cap_crypto_x25519_keypair(pk, sk) != 0)
+        return JS_ThrowInternalError(ctx, "x25519 keypair generation failed");
+
+    char pk_hex[65], sk_hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
+    pk_hex[64] = '\0';
+    for (int i = 0; i < 32; i++)
+        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
+    sk_hex[64] = '\0';
+
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewString(ctx, pk_hex));
+    JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewString(ctx, sk_hex));
+    secure_zero(sk, sizeof(sk));
+    secure_zero(sk_hex, sizeof(sk_hex));
+    return obj;
+}
+
+/* crypto.x25519(secretKeyHex, publicKeyHex) -> hex string | null
+ *
+ * Null, not a throw, for a low-order peer point: that is a protocol-level
+ * event the caller has to handle, not a programming error.
+ */
+static JSValue js_crypto_x25519(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx,
+            "crypto.x25519 requires (secretKeyHex, publicKeyHex)");
+
+    size_t sk_len, pk_len;
+    const char *sk_hex = JS_ToCStringLen(ctx, &sk_len, argv[0]);
+    if (!sk_hex) return JS_EXCEPTION;
+    const char *pk_hex = JS_ToCStringLen(ctx, &pk_len, argv[1]);
+    if (!pk_hex) { JS_FreeCString(ctx, sk_hex); return JS_EXCEPTION; }
+
+    JSValue ret;
+    uint8_t sk[32], pk[32], shared[32];
+
+    if (sk_len != 64 || pk_len != 64) {
+        ret = JS_ThrowTypeError(ctx, "keys must be 64 hex chars (32 bytes)");
+        goto out;
+    }
+    if (hex_decode_compat(sk_hex, sk_len, sk, 32) != 0 ||
+        hex_decode_compat(pk_hex, pk_len, pk, 32) != 0) {
+        ret = JS_ThrowTypeError(ctx, "invalid hex in key");
+        goto out;
+    }
+
+    int rc = hl_cap_crypto_x25519(shared, sk, pk);
+    secure_zero(sk, sizeof(sk));
+    if (rc == -2) {
+        ret = JS_NULL;                 /* low-order point */
+        goto out;
+    }
+    if (rc != 0) {
+        ret = JS_ThrowInternalError(ctx, "x25519 failed");
+        goto out;
+    }
+
+    {
+        char shared_hex[65];
+        for (int i = 0; i < 32; i++)
+            snprintf(shared_hex + i * 2, 3, "%02x", shared[i]);
+        shared_hex[64] = '\0';
+        ret = JS_NewString(ctx, shared_hex);
+        secure_zero(shared, sizeof(shared));
+        secure_zero(shared_hex, sizeof(shared_hex));
+    }
+
+out:
+    JS_FreeCString(ctx, sk_hex);
+    JS_FreeCString(ctx, pk_hex);
+    return ret;
+}
+
 /* crypto.hmacSha256(data, keyHex) -> hex string */
 static JSValue js_crypto_hmac_sha256(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
@@ -1522,6 +1607,10 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_box_open, "boxOpen", 4));
     JS_SetPropertyStr(ctx, crypto, "boxKeypair",
                       JS_NewCFunction(ctx, js_crypto_box_keypair, "boxKeypair", 0));
+    JS_SetPropertyStr(ctx, crypto, "x25519",
+                      JS_NewCFunction(ctx, js_crypto_x25519, "x25519", 2));
+    JS_SetPropertyStr(ctx, crypto, "x25519Keypair",
+                      JS_NewCFunction(ctx, js_crypto_x25519_keypair, "x25519Keypair", 0));
     JS_SetPropertyStr(ctx, crypto, "hmacSha256",
                       JS_NewCFunction(ctx, js_crypto_hmac_sha256, "hmacSha256", 2));
     JS_SetPropertyStr(ctx, crypto, "hmacSha1",

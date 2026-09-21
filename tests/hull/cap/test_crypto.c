@@ -25,6 +25,98 @@ static void hex20(const uint8_t in[20], char out[41])
     out[40] = '\0';
 }
 
+/* ── X25519 key agreement ───────────────────────────────────────────── */
+
+UTEST(hl_cap_crypto, x25519_both_sides_derive_the_same_secret)
+{
+    /* The whole point of the primitive: Alice and Bob reach the same value
+     * from opposite halves of the exchange. */
+    uint8_t a_pk[32], a_sk[32], b_pk[32], b_sk[32];
+    ASSERT_EQ(hl_cap_crypto_x25519_keypair(a_pk, a_sk), 0);
+    ASSERT_EQ(hl_cap_crypto_x25519_keypair(b_pk, b_sk), 0);
+
+    uint8_t s1[32], s2[32];
+    ASSERT_EQ(hl_cap_crypto_x25519(s1, a_sk, b_pk), 0);
+    ASSERT_EQ(hl_cap_crypto_x25519(s2, b_sk, a_pk), 0);
+    ASSERT_EQ(memcmp(s1, s2, 32), 0);
+
+    /* And it is not the trivial value. */
+    uint8_t zero[32] = {0};
+    ASSERT_NE(memcmp(s1, zero, 32), 0);
+}
+
+UTEST(hl_cap_crypto, x25519_matches_rfc7748_the_published_vector)
+{
+    /* RFC 7748 section 6.1. Pins the implementation to the standard rather
+     * than to itself: a self-consistent but wrong curve would pass the
+     * agreement test above and fail every real peer. */
+    static const uint8_t a_sk[32] = {
+        0x77,0x07,0x6d,0x0a,0x73,0x18,0xa5,0x7d,0x3c,0x16,0xc1,0x72,0x51,0xb2,
+        0x66,0x45,0xdf,0x4c,0x2f,0x87,0xeb,0xc0,0x99,0x2a,0xb1,0x77,0xfb,0xa5,
+        0x1d,0xb9,0x2c,0x2a };
+    static const uint8_t b_pk[32] = {
+        0xde,0x9e,0xdb,0x7d,0x7b,0x7d,0xc1,0xb4,0xd3,0x5b,0x61,0xc2,0xec,0xe4,
+        0x35,0x37,0x3f,0x83,0x43,0xc8,0x5b,0x78,0x67,0x4d,0xad,0xfc,0x7e,0x14,
+        0x6f,0x88,0x2b,0x4f };
+    static const uint8_t expect[32] = {
+        0x4a,0x5d,0x9d,0x5b,0xa4,0xce,0x2d,0xe1,0x72,0x8e,0x3b,0xf4,0x80,0x35,
+        0x0f,0x25,0xe0,0x7e,0x21,0xc9,0x47,0xd1,0x9e,0x33,0x76,0xf0,0x9b,0x3c,
+        0x1e,0x16,0x17,0x42 };
+
+    uint8_t out[32];
+    ASSERT_EQ(hl_cap_crypto_x25519(out, a_sk, b_pk), 0);
+    ASSERT_EQ(memcmp(out, expect, 32), 0);
+}
+
+UTEST(hl_cap_crypto, x25519_rejects_a_low_order_point)
+{
+    /* A peer sending a low-order point forces a shared value it already knows,
+     * whatever our secret was. The bytes look like a secret either way, so the
+     * caller cannot be expected to notice - this must fail loudly. */
+    uint8_t sk[32], pk[32];
+    ASSERT_EQ(hl_cap_crypto_x25519_keypair(pk, sk), 0);
+
+    /* The order-1 point. Every scalar maps it to all-zero. */
+    uint8_t low[32] = {0};
+    uint8_t out[32];
+    ASSERT_EQ_MSG(hl_cap_crypto_x25519(out, sk, low), -2,
+                  "all-zero output must be refused");
+
+    /* And nothing that looks like a secret is left behind. */
+    uint8_t zero[32] = {0};
+    ASSERT_EQ(memcmp(out, zero, 32), 0);
+}
+
+UTEST(hl_cap_crypto, x25519_rejects_null_arguments)
+{
+    uint8_t buf[32] = {0};
+    ASSERT_EQ(hl_cap_crypto_x25519(NULL, buf, buf), -1);
+    ASSERT_EQ(hl_cap_crypto_x25519(buf, NULL, buf), -1);
+    ASSERT_EQ(hl_cap_crypto_x25519(buf, buf, NULL), -1);
+}
+
+UTEST(hl_cap_crypto, x25519_keypair_public_value_matches_the_scalar)
+{
+    /* The generated public value must be the one the secret actually produces,
+     * or agreement fails against a correct peer. Re-derive it the long way:
+     * DH against a known scalar has to agree from both directions. */
+    uint8_t pk[32], sk[32];
+    ASSERT_EQ(hl_cap_crypto_x25519_keypair(pk, sk), 0);
+
+    uint8_t peer_pk[32], peer_sk[32];
+    ASSERT_EQ(hl_cap_crypto_x25519_keypair(peer_pk, peer_sk), 0);
+
+    uint8_t s1[32], s2[32];
+    ASSERT_EQ(hl_cap_crypto_x25519(s1, sk, peer_pk), 0);
+    ASSERT_EQ(hl_cap_crypto_x25519(s2, peer_sk, pk), 0);
+    ASSERT_EQ(memcmp(s1, s2, 32), 0);
+
+    /* Two keypairs in a row must differ - a fixed keypair would pass every
+     * other case here. */
+    ASSERT_NE(memcmp(pk, peer_pk, 32), 0);
+    ASSERT_NE(memcmp(sk, peer_sk, 32), 0);
+}
+
 UTEST(hl_cap_crypto, sha1_empty)
 {
     uint8_t hash[20];
