@@ -1726,3 +1726,37 @@ int hl_cap_crypto_box_keypair(uint8_t out_pk[32], uint8_t out_sk[32])
     hl_cap_crypto_random(out_sk, 32);
     return crypto_scalarmult_base(out_pk, out_sk);
 }
+
+int hl_cap_crypto_x25519(uint8_t out[32], const uint8_t sk[32],
+                         const uint8_t pk[32])
+{
+    if (!out || !sk || !pk)
+        return -1;
+
+    if (crypto_scalarmult(out, sk, pk) != 0)
+        return -1;
+
+    /* Reject the all-zero result. A peer that sends a low-order point forces a
+     * shared value it already knows, whatever our secret was, so continuing
+     * would mean deriving keys from a value the peer chose. RFC 7748 6.1 makes
+     * this check optional; it is not optional here, because the failure is
+     * invisible to a caller - the bytes look like a secret either way.
+     *
+     * Constant-time accumulate rather than an early-exit compare: the branch
+     * would leak where the first non-zero byte sits. */
+    uint8_t acc = 0;
+    for (int i = 0; i < 32; i++)
+        acc |= out[i];
+    if (acc == 0) {
+        hull_secure_zero(out, 32);
+        return -2;
+    }
+    return 0;
+}
+
+int hl_cap_crypto_x25519_keypair(uint8_t out_pk[32], uint8_t out_sk[32])
+{
+    /* Identical construction to box_keypair; see the header for why it carries
+     * its own name. */
+    return hl_cap_crypto_box_keypair(out_pk, out_sk);
+}

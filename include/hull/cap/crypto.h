@@ -634,4 +634,49 @@ int hl_cap_crypto_box_open(uint8_t *out, const void *ct, size_t ct_len,
  */
 int hl_cap_crypto_box_keypair(uint8_t out_pk[32], uint8_t out_sk[32]);
 
+/**
+ * @brief Raw X25519 Diffie-Hellman: multiply a peer's public value by a scalar.
+ *
+ * This is the primitive underneath `box`, exposed on its own because key
+ * agreement protocols specify their own KDF over the raw shared value and
+ * cannot use `box`'s packaged construction. SSH's `curve25519-sha256` key
+ * exchange is the first such caller.
+ *
+ * The scalar is clamped internally (RFC 7748 §5), so a caller may pass any 32
+ * random bytes as a secret key.
+ *
+ * @warning The result is NOT a key. It is a group element with structure, and
+ * every protocol that uses it hashes it together with the exchange transcript
+ * before use. Do not feed it to a cipher directly.
+ *
+ * @param out  32-byte shared value.
+ * @param sk   32-byte secret scalar.
+ * @param pk   32-byte peer public value.
+ *
+ * @return `0` on success, `-1` on a NULL argument, `-2` if the result is
+ * all-zero.
+ *
+ * The all-zero case means the peer sent a low-order point, which forces a
+ * shared value the peer already knows regardless of our secret. RFC 7748 §6.1
+ * leaves the check optional; it is mandatory here, because returning a value
+ * that looks like a secret and is not is the kind of failure a caller cannot
+ * reasonably be expected to notice.
+ */
+int hl_cap_crypto_x25519(uint8_t out[32], const uint8_t sk[32],
+                         const uint8_t pk[32]);
+
+/**
+ * @brief Generate a fresh X25519 keypair for key agreement.
+ *
+ * Same construction as `hl_cap_crypto_box_keypair` - a keypair is a keypair -
+ * but named for agreement rather than for `box`, so a key-exchange call site
+ * does not have to claim it is doing something it is not.
+ *
+ * @param out_pk  32-byte public value.
+ * @param out_sk  32-byte secret scalar.
+ *
+ * @return `0` on success, `-1` on CSPRNG failure.
+ */
+int hl_cap_crypto_x25519_keypair(uint8_t out_pk[32], uint8_t out_sk[32]);
+
 #endif /* HL_CAP_CRYPTO_H */
