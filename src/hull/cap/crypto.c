@@ -765,6 +765,82 @@ const HlCryptoAsymBackend *hl_crypto_asym_active_backend(void)
     return &hl_crypto_asym_backend_stub;   /* fail-closed; mbedTLS TU overrides */
 }
 
+/* ── AEAD (AES-256-GCM) ─────────────────────────────────────────────── */
+
+/* Fail-closed stub. No portable fallback on purpose: HMAC has one because the
+ * portable and mbedTLS constructions are byte-identical, but hand-rolling
+ * AES-GCM is precisely what this seam exists to avoid. A TLS-less build refuses
+ * rather than shipping a second implementation nobody reviewed. */
+static int aead_stub_seal(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],
+                          const uint8_t key[HL_AEAD_KEY_LEN],
+                          const uint8_t iv[HL_AEAD_IV_LEN],
+                          const void *aad, size_t aad_len,
+                          const void *pt, size_t pt_len)
+{
+    (void)out; (void)tag; (void)key; (void)iv;
+    (void)aad; (void)aad_len; (void)pt; (void)pt_len;
+    return -2;
+}
+
+static int aead_stub_open(uint8_t *out,
+                          const uint8_t key[HL_AEAD_KEY_LEN],
+                          const uint8_t iv[HL_AEAD_IV_LEN],
+                          const void *aad, size_t aad_len,
+                          const void *ct, size_t ct_len,
+                          const uint8_t tag[HL_AEAD_TAG_LEN])
+{
+    (void)out; (void)key; (void)iv;
+    (void)aad; (void)aad_len; (void)ct; (void)ct_len; (void)tag;
+    return -2;
+}
+
+static const HlCryptoAeadBackend hl_crypto_aead_backend_stub = {
+    .seal = aead_stub_seal,
+    .open = aead_stub_open,
+};
+
+__attribute__((weak))
+const HlCryptoAeadBackend *hl_crypto_aead_active_backend(void)
+{
+    return &hl_crypto_aead_backend_stub;   /* fail-closed; mbedTLS TU overrides */
+}
+
+int hl_cap_crypto_aes256gcm_seal(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],
+                                 const uint8_t key[HL_AEAD_KEY_LEN],
+                                 const uint8_t iv[HL_AEAD_IV_LEN],
+                                 const void *aad, size_t aad_len,
+                                 const void *pt, size_t pt_len)
+{
+    if (!tag || !key || !iv) return -1;
+    if (pt_len && (!out || !pt)) return -1;
+    if (aad_len && !aad) return -1;
+
+    const HlCryptoAeadBackend *b = hl_crypto_aead_active_backend();
+    return b->seal(out, tag, key, iv, aad, aad_len, pt, pt_len);
+}
+
+int hl_cap_crypto_aes256gcm_open(uint8_t *out,
+                                 const uint8_t key[HL_AEAD_KEY_LEN],
+                                 const uint8_t iv[HL_AEAD_IV_LEN],
+                                 const void *aad, size_t aad_len,
+                                 const void *ct, size_t ct_len,
+                                 const uint8_t tag[HL_AEAD_TAG_LEN])
+{
+    if (!tag || !key || !iv) return -1;
+    if (ct_len && (!out || !ct)) return -1;
+    if (aad_len && !aad) return -1;
+
+    const HlCryptoAeadBackend *b = hl_crypto_aead_active_backend();
+    int rc = b->open(out, key, iv, aad, aad_len, ct, ct_len, tag);
+    if (rc != 0 && ct_len && out) {
+        /* Belt and braces: the backend already clears on failure, but this is
+         * the boundary a caller sees, and plaintext that was never
+         * authenticated must not survive a missed return check. */
+        hull_secure_zero(out, ct_len);
+    }
+    return rc;
+}
+
 /* Generic asym-verify dispatcher (backend-agnostic). Relocated here from
  * cap/crypto_asym_mbedtls.c so it is base-resident. */
 int hl_cap_crypto_asym_verify(const HlCryptoAsymBackend *backend,

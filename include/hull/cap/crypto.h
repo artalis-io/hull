@@ -679,4 +679,98 @@ int hl_cap_crypto_x25519(uint8_t out[32], const uint8_t sk[32],
  */
 int hl_cap_crypto_x25519_keypair(uint8_t out_pk[32], uint8_t out_sk[32]);
 
+
+/* ── AES-256-GCM ────────────────────────────────────────────────────── */
+
+/** Fixed sizes. GCM allows other lengths; Hull offers only these, because the
+ *  12-byte IV is the only length that skips GHASH-derived IV construction, and
+ *  a short tag weakens forgery resistance for no benefit any caller here
+ *  wants. */
+#define HL_AEAD_KEY_LEN 32
+#define HL_AEAD_IV_LEN  12
+#define HL_AEAD_TAG_LEN 16
+
+/**
+ * @brief AEAD backend vtable (AES-256-GCM).
+ *
+ * Selected at runtime through @ref hl_crypto_aead_active_backend so the base
+ * links no mbedTLS. Same seam as the HMAC and asym backends.
+ */
+typedef struct HlCryptoAeadBackend {
+    /** Encrypt + authenticate. Same contract as @ref hl_cap_crypto_aes256gcm_seal. */
+    int (*seal)(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],
+                const uint8_t key[HL_AEAD_KEY_LEN],
+                const uint8_t iv[HL_AEAD_IV_LEN],
+                const void *aad, size_t aad_len,
+                const void *pt, size_t pt_len);
+
+    /** Verify + decrypt. Same contract as @ref hl_cap_crypto_aes256gcm_open. */
+    int (*open)(uint8_t *out,
+                const uint8_t key[HL_AEAD_KEY_LEN],
+                const uint8_t iv[HL_AEAD_IV_LEN],
+                const void *aad, size_t aad_len,
+                const void *ct, size_t ct_len,
+                const uint8_t tag[HL_AEAD_TAG_LEN]);
+} HlCryptoAeadBackend;
+
+/** Built-in mbedTLS AEAD backend. ABSENT on a TLS-less base - prefer
+ *  @ref hl_cap_crypto_aes256gcm_seal / _open, which dispatch through the
+ *  active-backend hook and link on both. */
+extern const HlCryptoAeadBackend hl_crypto_aead_backend_mbedtls;
+
+/**
+ * @brief Encrypt and authenticate with AES-256-GCM.
+ *
+ * @param out      ciphertext, @p pt_len bytes. May alias @p pt.
+ * @param tag      16-byte authentication tag, written on success.
+ * @param key      32-byte key.
+ * @param iv       12-byte IV. MUST be unique per key - see the warning.
+ * @param aad      additional authenticated data (may be NULL when @p aad_len is 0).
+ * @param aad_len  length of @p aad.
+ * @param pt       plaintext (may be NULL when @p pt_len is 0).
+ * @param pt_len   length of @p pt.
+ *
+ * @return `0` on success, `-1` on a NULL argument, `-2` if no AEAD backend is
+ * present (a TLS-less build).
+ *
+ * @warning Reusing an IV under the same key is catastrophic for GCM, not
+ * merely weak: two messages under one (key, IV) leak their XOR and expose the
+ * authentication subkey, which lets an attacker forge arbitrary tags for that
+ * key. Callers must derive the IV from a counter, never from a random draw
+ * over a 96-bit space.
+ */
+int hl_cap_crypto_aes256gcm_seal(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],
+                                 const uint8_t key[HL_AEAD_KEY_LEN],
+                                 const uint8_t iv[HL_AEAD_IV_LEN],
+                                 const void *aad, size_t aad_len,
+                                 const void *pt, size_t pt_len);
+
+/**
+ * @brief Verify and decrypt with AES-256-GCM.
+ *
+ * @param out      plaintext, @p ct_len bytes. May alias @p ct.
+ * @param key      32-byte key.
+ * @param iv       12-byte IV, as used to seal.
+ * @param aad      additional authenticated data (may be NULL when @p aad_len is 0).
+ * @param aad_len  length of @p aad.
+ * @param ct       ciphertext (may be NULL when @p ct_len is 0).
+ * @param ct_len   length of @p ct.
+ * @param tag      16-byte tag to verify.
+ *
+ * @return `0` on success, `-1` on a NULL argument, `-2` if the tag does not
+ * verify OR no backend is present.
+ *
+ * On any non-zero return @p out is zeroed: a caller that forgets to check must
+ * not end up processing unauthenticated plaintext. Authentication failure and
+ * an absent backend share a code deliberately - both mean "this did not
+ * authenticate", and separating them tells an attacker which guess was closer
+ * without telling an honest caller anything it can act on.
+ */
+int hl_cap_crypto_aes256gcm_open(uint8_t *out,
+                                 const uint8_t key[HL_AEAD_KEY_LEN],
+                                 const uint8_t iv[HL_AEAD_IV_LEN],
+                                 const void *aad, size_t aad_len,
+                                 const void *ct, size_t ct_len,
+                                 const uint8_t tag[HL_AEAD_TAG_LEN]);
+
 #endif /* HL_CAP_CRYPTO_H */

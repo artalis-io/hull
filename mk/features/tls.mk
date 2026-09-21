@@ -25,7 +25,7 @@
 # renamed (keel_tls_mbedtls.o) to avoid a member-name clash with the crypto TUs.
 $(BUILDDIR)/keel_tls_mbedtls.o: $(KEEL_LIB) | $(BUILDDIR)
 	@cd $(BUILDDIR) && $(AR) x $(CURDIR)/$(KEEL_LIB) tls_mbedtls.o && mv -f tls_mbedtls.o keel_tls_mbedtls.o
-FEATURE_TLS_OBJS := $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(BUILDDIR)/cap_crypto_asym_mbedtls.o \
+FEATURE_TLS_OBJS := $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(BUILDDIR)/cap_crypto_asym_mbedtls.o \n                    $(BUILDDIR)/cap_crypto_aead_mbedtls.o \
                     $(BUILDDIR)/tls_client.o $(BUILDDIR)/tls_transport.o \
                     $(BUILDDIR)/keel_tls_mbedtls.o $(MBEDTLS_OBJS)
 $(eval $(call define-feature-archive,tls,$(FEATURE_TLS_OBJS)))
