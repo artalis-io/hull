@@ -1501,6 +1501,11 @@ static int hl_serve_wire_caps(HlServerState *s)
      * closed when absent. */
     rt->kv_policy = &s->manifest.kv.dynamic;
 
+    /* Wire the ssh.connect allowlist policy (manifest ssh). Same borrowed
+     * pointer discipline as kv above; the check reads ->declared and fails
+     * closed when absent. */
+    rt->ssh_policy = &s->manifest.ssh;
+
     /* Wire env_cfg from manifest (if app declares env vars) */
     memset(&s->env_cfg_storage, 0, sizeof(s->env_cfg_storage));
     if (s->manifest.env_count > 0) {

@@ -55,6 +55,7 @@ int luaopen_hull_app(lua_State *L);
 int hl_lua_install_app_router(lua_State *L);
 int luaopen_hull_db(lua_State *L);
 int luaopen_hull_kv_native(lua_State *L);   /* hull.kv._native (KV connection cap) */
+int luaopen_hull_ssh_stream(lua_State *L);  /* hull.ssh._stream (private byte stream) */
 int luaopen_hull_time(lua_State *L);
 int luaopen_hull_env(lua_State *L);
 int luaopen_hull_crypto(lua_State *L);

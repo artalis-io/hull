@@ -4762,6 +4762,112 @@ UTEST(lua_template_cache, parse_error_returns_no_cache_write)
  *
  * Implementation gate lives in lua_app_reject_if_serving(). */
 
+/* ── the ssh byte-stream bridge ─────────────────────────────────────── */
+
+#ifdef HL_ENABLE_HTTP
+
+UTEST(lua_ssh_bridge, app_code_cannot_reach_the_byte_stream)
+{
+    /* The caller gate is what makes "the application never holds a socket"
+     * true. The policy alone would not: it bounds WHERE a connection may go,
+     * so an app could otherwise reach a permitted host and speak something
+     * other than SSH over it. */
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local s = require('hull.ssh._stream')\n"
+        "s.connect({ host = 'spark.local', port = 22, user = 'operator' })\n");
+    ASSERT_NE_MSG(rc, LUA_OK, "app code must be refused");
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_TRUE(strstr(err, "internal to the SSH module") != NULL);
+    /* The message points somewhere useful rather than just saying no. */
+    ASSERT_TRUE(strstr(err, "hull.ssh") != NULL);
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+/* Run a chunk under a stdlib name, which is how the bridge recognises trusted
+ * callers. Safe to do here because this is C driving the runtime directly; the
+ * chunk name cannot be forged from Lua (see lua_template_bridge above). */
+static int run_as_stdlib(lua_State *L, const char *src)
+{
+    if (luaL_loadbuffer(L, src, strlen(src), "@hull.ssh.probe") != LUA_OK)
+        return -1;
+    return lua_pcall(L, 0, LUA_MULTRET, 0);
+}
+
+UTEST(lua_ssh_bridge, an_undeclared_manifest_denies_every_connect)
+{
+    /* Fails closed: no `ssh` key means no grant, even for the stdlib. */
+    init_lua();
+    int rc = run_as_stdlib(lua_rt.L,
+        "local s = require('hull.ssh._stream')\n"
+        "local h, err = s.connect({ host = 'spark.local', port = 22,\n"
+        "                           user = 'operator' })\n"
+        "assert(h == nil, 'a connection must not be handed out')\n"
+        "return err\n");
+    ASSERT_EQ_MSG(rc, LUA_OK, "the call itself should return, not raise");
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    /* The reason names the manifest key to add, not just "denied". */
+    ASSERT_TRUE_MSG(strstr(err, "ssh") != NULL,
+                    "the denial should name the capability");
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_ssh_bridge, a_host_outside_the_grant_is_denied)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({ modules = { 'hull/ssh@1' },\n"
+        "  ssh = { connect = { hosts = { 'spark.local' }, ports = { 22 },\n"
+        "                      users = { 'operator' } } } })\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    rc = run_as_stdlib(lua_rt.L,
+        "local s = require('hull.ssh._stream')\n"
+        "local h, err = s.connect({ host = 'evil.example.com', port = 22,\n"
+        "                           user = 'operator' })\n"
+        "assert(h == nil)\n"
+        "return err\n");
+    ASSERT_EQ(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_TRUE_MSG(strstr(err, "hosts") != NULL,
+                    "the denial should name the rule that refused");
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_ssh_bridge, a_user_outside_the_grant_is_denied)
+{
+    /* The login is the part a reach grant cannot express, so it gets its own
+     * case: the host and port here are both permitted. */
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({ modules = { 'hull/ssh@1' },\n"
+        "  ssh = { connect = { hosts = { 'spark.local' }, ports = { 22 },\n"
+        "                      users = { 'operator' } } } })\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    rc = run_as_stdlib(lua_rt.L,
+        "local s = require('hull.ssh._stream')\n"
+        "local h, err = s.connect({ host = 'spark.local', port = 22,\n"
+        "                           user = 'root' })\n"
+        "assert(h == nil)\n"
+        "return err\n");
+    ASSERT_EQ(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_TRUE_MSG(strstr(err, "users") != NULL,
+                    "the denial should name the user rule");
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+#endif /* HL_ENABLE_HTTP */
+
 /* ── chunk names decide trust, so they are not caller-supplied ────── */
 
 UTEST(lua_template_bridge, compile_cannot_forge_a_stdlib_chunk_name)
