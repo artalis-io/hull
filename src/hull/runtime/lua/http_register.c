@@ -41,6 +41,12 @@ void hl_lua_register_http_modules(void *lua_state)
 #ifdef HL_ENABLE_HTTP_CLIENT
     register_native_module(L, "hull.http-client", luaopen_hull_http);
     register_native_module(L, "hull.smtp",        luaopen_hull_smtp);
+    /* The SSH byte stream registers HERE, not in modules.c, for the same
+     * reason the rest of this file exists: it parks on the event loop, so it
+     * reaches hl_async_ctx_create and pulls Keel in behind it. Referenced from
+     * the base module registry it would put Keel into every Lua app, including
+     * compute-only ones that compose no event loop at all. */
+    register_native_module(L, "hull.ssh._stream", luaopen_hull_ssh_stream);
 #endif
 #ifdef HL_ENABLE_HTTP_SERVER
     /* hull.http-server provides server stats; registration verbs land on the

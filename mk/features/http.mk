@@ -62,6 +62,13 @@ FEATURE_HTTP_RT_NAMES := mod_ws_server mod_ws_client mod_http_server mod_sse \
     mod_test routes dispatch sse ws timers mod_request bindings bindings_response \
     http_register mod_http_client mod_smtp
 FEATURE_HTTP_LUA_OBJS := $(addprefix $(BUILDDIR)/lua_rt_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
+# Lua-only additions: bindings that need the event loop but have no JS
+# counterpart yet. mod_ssh parks via hl_async_ctx_create, so leaving it in the
+# pure runtime archive would pull Keel into every Lua app (caught by
+# e2e_build_flavor's "compute app should carry no Keel"). JS parity for
+# hull/ssh is a recorded open question, not an oversight - see
+# docs/ssh_module_design.md section 12a.
+FEATURE_HTTP_LUA_OBJS += $(BUILDDIR)/lua_rt_mod_ssh.o
 FEATURE_HTTP_JS_OBJS  := $(addprefix $(BUILDDIR)/js_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 
 # Per-runtime web-bindings feature archives (issue #114).

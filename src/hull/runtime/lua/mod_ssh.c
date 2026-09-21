@@ -27,7 +27,7 @@
 
 #include "mod_buffer.h"        /* get_hl_lua, luaopen decls */
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_CLIENT
 
 #include "internal.h"          /* hl_lua_source_is_stdlib */
 
@@ -392,12 +392,16 @@ int luaopen_hull_ssh_stream(lua_State *L)
     return 1;
 }
 
-#else  /* !HL_ENABLE_HTTP */
+#else  /* !HL_ENABLE_HTTP_CLIENT */
 
-/* Pure-compute: cap/net_stream.c is not in the build, so there is nothing to
- * bind. The module is never registered either (modules.c), and the resolver
- * refuses `hull/ssh@1` on this build, so an app gets a clear message rather
- * than a link error. A TU has to declare something, hence the typedef. */
+/* Nothing to bind: the guard matches where the module is registered
+ * (http_register.c, under the same flag), and on a pure-compute build
+ * cap/net_stream.c is filtered out of CAP_SRCS entirely. The resolver refuses
+ * `hull/ssh@1` on such a build, so an app gets a clear message rather than a
+ * link error. A translation unit has to declare something, hence the typedef.
+ *
+ * The object is still produced, because the http-lua feature archive names it.
+ */
 typedef int hl_mod_ssh_unused;
 
-#endif /* HL_ENABLE_HTTP */
+#endif /* HL_ENABLE_HTTP_CLIENT */

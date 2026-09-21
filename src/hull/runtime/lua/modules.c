@@ -74,12 +74,6 @@ int hl_lua_register_modules(HlLua *lua)
      * this internally. With no KV backend composed, open() fails closed with a
      * 'hull feature install valkey' hint rather than being absent. */
     register_native_module(L, "hull.kv._native", luaopen_hull_kv_native);
-#ifdef HL_ENABLE_HTTP
-    /* The byte stream rides Keel's socket provider, which a pure-compute build
-     * drops; CAP_SRCS filters cap/net_stream.c out with it, so the binding can
-     * only be registered where those symbols exist. */
-    register_native_module(L, "hull.ssh._stream", luaopen_hull_ssh_stream);
-#endif
     register_native_module(L, "hull.time",   luaopen_hull_time);
     register_native_module(L, "hull.env",    luaopen_hull_env);
     register_native_module(L, "hull.crypto", luaopen_hull_crypto);
