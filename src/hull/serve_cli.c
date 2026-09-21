@@ -281,6 +281,13 @@ int hull_serve(int argc, char **argv)
         rt->env_cfg = &env_cfg;
     }
 
+    /* ssh.connect allowlist policy. Wired HERE and not only in serve.c because
+     * a fleet tool is an app.main program: this is the path it actually runs
+     * on, so leaving it unwired would fail every connect closed in the one mode
+     * that matters. `manifest` is function-scope and outlives the app.main run,
+     * the same lifetime http_cfg and env_cfg above rely on. */
+    rt->ssh_policy = &manifest.ssh;
+
 #ifdef HL_ENABLE_HTTP_CLIENT
     /* http.fetch needs allowlisted hosts + a TLS client for https://.
      * The embedded Mozilla CA bundle is the default trust anchor -

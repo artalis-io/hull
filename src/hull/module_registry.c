@@ -316,6 +316,25 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {0},
     },
     {
+        /* SSH client. The protocol is Lua (stdlib/lua/hull/ssh/) over the
+         * private byte stream in cap/net_stream.c; this declaration admits the
+         * module, and `ssh = { connect = {...} }` in the manifest is what
+         * grants reach. Note it does NOT take HL_MOD_CAP_HOSTS: ssh.connect is
+         * its own grant, deliberately separate from the http.fetch allowlist,
+         * so "may call this API" and "may reach this machine as this login"
+         * stay different statements.
+         *
+         * HTTP_CLIENT is a stand-in for "this build has the outbound socket
+         * layer": the stream rides Keel's socket provider, which a
+         * pure-compute build drops along with Keel. The flag is the right
+         * gate operationally and the wrong word semantically - a dedicated
+         * net cap bit would read better and is worth doing separately. */
+        .name = "hull/ssh",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_CLIENT,
+        .deps = {0},
+    },
+    {
         /* Template engine stays flat in v0.2.0: content-type
          * agnostic. The engine itself doesn't know HTML - apps render
          * any text (emails, configs, codegen). */
