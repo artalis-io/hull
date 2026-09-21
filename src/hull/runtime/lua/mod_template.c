@@ -33,9 +33,33 @@ static int lua_template_compile(lua_State *L)
 {
     size_t len;
     const char *code = luaL_checklstring(L, 1, &len);
-    const char *name = luaL_optstring(L, 2, "=template");
+    const char *name = luaL_optstring(L, 2, NULL);
 
-    if (hl_lua_template_compile_cached(L, code, len, name) != LUA_OK)
+    /* The chunk name is BUILT here, never taken verbatim from the caller.
+     *
+     * Trust in this runtime is decided by chunk name: hl_lua_source_is_stdlib
+     * tests for a "hull." prefix, and a chunk that passes it may touch _hull_*
+     * tables (mod_db.c). A caller-supplied name would therefore let any code
+     * that can reach this bridge mint a chunk that claims to be stdlib - and
+     * this bridge is reachable, because require()'s capability gate only fires
+     * for names in the module registry and "hull._template" is not one.
+     *
+     * Forcing the "=template:" prefix makes that unforgeable: whatever the
+     * caller passes ends up AFTER a prefix that is not "hull.", so the
+     * resulting chunk can never be mistaken for stdlib no matter what it is
+     * called. The '=' marker keeps Lua from decorating the name in errors.
+     *
+     * A caller-supplied marker is stripped first so a name like "@x" cannot
+     * smuggle a second marker into the middle of the result. */
+    char chunk[HL_MODULE_PATH_MAX];
+    if (name && *name) {
+        if (*name == '@' || *name == '=') name++;
+        snprintf(chunk, sizeof chunk, "=template:%s", name);
+    } else {
+        snprintf(chunk, sizeof chunk, "=template");
+    }
+
+    if (hl_lua_template_compile_cached(L, code, len, chunk) != LUA_OK)
         return lua_error(L); /* propagate compile / pcall error */
 
     return 1; /* render function on stack */

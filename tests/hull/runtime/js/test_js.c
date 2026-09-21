@@ -480,6 +480,69 @@ UTEST(js_runtime, hull_time_module)
     cleanup_js();
 }
 
+/* ── script names decide trust, so they are not caller-supplied ───── */
+
+UTEST(js_template_bridge, compile_cannot_forge_a_stdlib_script_name)
+{
+    /* js_is_stdlib_caller reads JS_GetScriptOrModuleName and grants _hull_*
+     * table access to any frame whose name starts with "hull:". The name
+     * handed to _template.compile becomes exactly that, because the cache
+     * passes it to JS_Eval - so taking it verbatim would let any code that
+     * can reach this bridge mint a script that claims to be stdlib.
+     *
+     * The name is built instead: the caller's string lands after a
+     * "template:" prefix, so the result cannot begin with "hull:". */
+    init_js();
+
+    const char *code =
+        "import { _template } from 'hull:_template';\n"
+        "const f = _template.compile(\n"
+        "  '(function(){ return function(){ throw new Error(\"boom\"); }; })()',\n"
+        "  'hull:forged');\n"
+        "try { f(); } catch (e) { globalThis.__tpl_stack = String(e.stack); }\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *stack = eval_str("globalThis.__tpl_stack || ''");
+    ASSERT_NE(stack, NULL);
+
+    /* QuickJS names the frame with the script name, so the stack reports
+     * what the compiled script ended up being called. */
+    ASSERT_TRUE_MSG(strstr(stack, "template:hull:forged") != NULL,
+                    "script name should carry the forced template prefix");
+    free(stack);
+
+    cleanup_js();
+}
+
+UTEST(js_template_bridge, compile_without_a_name_still_works)
+{
+    init_js();
+
+    const char *code =
+        "import { _template } from 'hull:_template';\n"
+        "const f = _template.compile("
+        "'(function(){ return function(){ return 1; }; })()');\n"
+        "globalThis.__tpl_ok = (typeof f === 'function' && f() === 1) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ_MSG(eval_int("globalThis.__tpl_ok|0"), 1,
+                  "a nameless compile keeps working");
+
+    cleanup_js();
+}
+
 UTEST(js_runtime, csv_encode_sanitize_formulas)
 {
     init_js();

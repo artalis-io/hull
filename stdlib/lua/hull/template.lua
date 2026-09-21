@@ -747,8 +747,10 @@ local function compile_source(source, name)
     ast = resolve_inheritance(ast, load_raw)
     ast = resolve_includes(ast, load_raw)
     local code = codegen(ast)
-    local chunk_name = name and ("=template:" .. name) or "=template"
-    local fn = _template._compile(code, chunk_name)
+    -- Pass the bare template name: _compile builds the chunk name itself and
+    -- will not take one verbatim, because a chunk name is what decides stdlib
+    -- trust in this runtime.
+    local fn = _template._compile(code, name)
     return fn
 end
 
