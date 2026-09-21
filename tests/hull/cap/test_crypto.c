@@ -117,6 +117,137 @@ UTEST(hl_cap_crypto, x25519_keypair_public_value_matches_the_scalar)
     ASSERT_NE(memcmp(sk, peer_sk, 32), 0);
 }
 
+/* ── AES-256-GCM ────────────────────────────────────────────────────── */
+
+/* The backend is absent on a TLS-less build, where every call returns -2.
+ * These cases assert real crypto, so they only mean anything where mbedTLS is
+ * linked; elsewhere they assert the fail-closed contract instead. */
+static int gcm_backend_present(void)
+{
+    uint8_t key[32] = {0}, iv[12] = {0}, tag[16], out[1];
+    return hl_cap_crypto_aes256gcm_seal(out, tag, key, iv, NULL, 0, "x", 1) == 0;
+}
+
+UTEST(hl_cap_crypto, aes256gcm_matches_the_nist_vector)
+{
+    /* NIST CAVP gcmEncryptExtIV256, count 0: the all-zero key and IV with an
+     * empty plaintext. Pins the implementation to the standard - a cipher that
+     * only agrees with itself decrypts nothing any peer produced. */
+    if (!gcm_backend_present()) UTEST_SKIP("no AEAD backend in this build");
+
+    uint8_t key[32] = {0}, iv[12] = {0}, tag[16];
+    static const uint8_t expect_tag[16] = {
+        0x53,0x0f,0x8a,0xfb,0xc7,0x45,0x36,0xb9,
+        0xa9,0x63,0xb4,0xf1,0xc4,0xcb,0x73,0x8b };
+
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_seal(NULL, tag, key, iv, NULL, 0, NULL, 0), 0);
+    ASSERT_EQ(memcmp(tag, expect_tag, 16), 0);
+}
+
+UTEST(hl_cap_crypto, aes256gcm_round_trips_with_aad)
+{
+    if (!gcm_backend_present()) UTEST_SKIP("no AEAD backend in this build");
+
+    uint8_t key[32], iv[12];
+    ASSERT_EQ(hl_cap_crypto_random(key, sizeof key), 0);
+    ASSERT_EQ(hl_cap_crypto_random(iv, sizeof iv), 0);
+
+    const char *pt  = "the quick brown fox";
+    const char *aad = "packet-length-field";
+    size_t n = strlen(pt);
+
+    uint8_t ct[32], tag[16], back[32];
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_seal(ct, tag, key, iv,
+                                           aad, strlen(aad), pt, n), 0);
+    /* The ciphertext is not the plaintext. */
+    ASSERT_NE(memcmp(ct, pt, n), 0);
+
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_open(back, key, iv,
+                                           aad, strlen(aad), ct, n, tag), 0);
+    ASSERT_EQ(memcmp(back, pt, n), 0);
+}
+
+UTEST(hl_cap_crypto, aes256gcm_rejects_a_tampered_tag)
+{
+    if (!gcm_backend_present()) UTEST_SKIP("no AEAD backend in this build");
+
+    uint8_t key[32] = {1}, iv[12] = {2};
+    const char *pt = "authenticate me";
+    size_t n = strlen(pt);
+    uint8_t ct[32], tag[16], back[32];
+
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_seal(ct, tag, key, iv, NULL, 0, pt, n), 0);
+    tag[0] ^= 0x01;
+
+    ASSERT_EQ_MSG(hl_cap_crypto_aes256gcm_open(back, key, iv, NULL, 0,
+                                               ct, n, tag), -2,
+                  "a flipped tag bit must not authenticate");
+
+    /* And nothing usable is left behind for a caller that forgot to check. */
+    uint8_t zero[32] = {0};
+    ASSERT_EQ_MSG(memcmp(back, zero, n), 0,
+                  "unauthenticated plaintext must not survive");
+}
+
+UTEST(hl_cap_crypto, aes256gcm_rejects_tampered_ciphertext_and_aad)
+{
+    /* The AAD case is the one that matters for SSH: the packet length travels
+     * as AAD, so an attacker who can change it without failing the tag can
+     * re-frame the stream. */
+    if (!gcm_backend_present()) UTEST_SKIP("no AEAD backend in this build");
+
+    uint8_t key[32] = {3}, iv[12] = {4};
+    const char *pt  = "framed payload";
+    const char *aad = "0123";
+    size_t n = strlen(pt);
+    uint8_t ct[32], tag[16], back[32];
+
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_seal(ct, tag, key, iv,
+                                           aad, 4, pt, n), 0);
+
+    uint8_t bad_ct[32];
+    memcpy(bad_ct, ct, n);
+    bad_ct[0] ^= 0x80;
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_open(back, key, iv, aad, 4,
+                                           bad_ct, n, tag), -2);
+
+    ASSERT_EQ_MSG(hl_cap_crypto_aes256gcm_open(back, key, iv, "0124", 4,
+                                               ct, n, tag), -2,
+                  "a changed length field must not authenticate");
+}
+
+UTEST(hl_cap_crypto, aes256gcm_a_different_key_or_iv_does_not_open)
+{
+    if (!gcm_backend_present()) UTEST_SKIP("no AEAD backend in this build");
+
+    uint8_t key[32] = {5}, iv[12] = {6};
+    const char *pt = "secret";
+    size_t n = strlen(pt);
+    uint8_t ct[16], tag[16], back[16];
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_seal(ct, tag, key, iv, NULL, 0, pt, n), 0);
+
+    uint8_t other_key[32] = {5}; other_key[31] = 1;
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_open(back, other_key, iv, NULL, 0,
+                                           ct, n, tag), -2);
+
+    uint8_t other_iv[12] = {6}; other_iv[11] = 1;
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_open(back, key, other_iv, NULL, 0,
+                                           ct, n, tag), -2);
+}
+
+UTEST(hl_cap_crypto, aes256gcm_rejects_null_arguments)
+{
+    /* Argument validation happens above the backend, so this holds on a
+     * TLS-less build too - hence no skip. */
+    uint8_t key[32] = {0}, iv[12] = {0}, tag[16] = {0}, buf[8] = {0};
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_seal(buf, NULL, key, iv, NULL, 0, buf, 8), -1);
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_seal(buf, tag, NULL, iv, NULL, 0, buf, 8), -1);
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_seal(buf, tag, key, NULL, NULL, 0, buf, 8), -1);
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_seal(NULL, tag, key, iv, NULL, 0, buf, 8), -1);
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_open(buf, key, iv, NULL, 0, buf, 8, NULL), -1);
+    ASSERT_EQ(hl_cap_crypto_aes256gcm_open(NULL, key, iv, NULL, 0, buf, 8, tag), -1);
+}
+
 UTEST(hl_cap_crypto, sha1_empty)
 {
     uint8_t hash[20];

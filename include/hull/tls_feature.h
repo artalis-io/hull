@@ -53,4 +53,16 @@ const HlCryptoHmacBackend *hl_crypto_hmac_active_backend(void);
  */
 const HlCryptoAsymBackend *hl_crypto_asym_active_backend(void);
 
+/**
+ * Return the active AEAD backend (AES-256-GCM).
+ *
+ * WEAK in the base (cap/crypto.c): the default is FAIL-CLOSED - every seal and
+ * open returns -2 - so an AEAD call on a TLS-less base refuses rather than
+ * crashing or, worse, appearing to encrypt. A composed TLS feature provides a
+ * STRONG override returning the mbedTLS backend. Mirrors the asym hook above;
+ * unlike HMAC there is no portable fallback, because hand-rolling AES-GCM is
+ * exactly the thing this seam exists to avoid.
+ */
+const HlCryptoAeadBackend *hl_crypto_aead_active_backend(void);
+
 #endif /* HL_TLS_FEATURE_H */

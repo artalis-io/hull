@@ -2322,7 +2322,8 @@ include mk/features/image.mk
 # the base stays TLS-full. (tls_client.o / tls_transport.o are dropped via their
 # own OBJ vars above; mbedTLS via MBEDTLS_OBJS.)
 ifeq ($(HL_TLS_FEATURE),1)
-FEATURE_TLS_CAP_OBJS := $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(BUILDDIR)/cap_crypto_asym_mbedtls.o
+FEATURE_TLS_CAP_OBJS := $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(BUILDDIR)/cap_crypto_asym_mbedtls.o \
+                        $(BUILDDIR)/cap_crypto_aead_mbedtls.o
 else
 FEATURE_TLS_CAP_OBJS :=
 endif
