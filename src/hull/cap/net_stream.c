@@ -29,6 +29,7 @@
 #include <netdb.h>        /* getaddrinfo: the SYSTEM resolver, see resolve_addrs */
 #include <netinet/in.h>   /* sockaddr_in / sockaddr_in6, to read what it returns */
 #include <pthread.h>
+#include <stddef.h>  /* offsetof: op -> owning stream */
 #include <stdio.h>        /* snprintf */
 #include <stdlib.h>
 #include <string.h>
@@ -132,6 +133,10 @@ struct HlNetStream {
     int          want_read;         /* a read is parked                      */
     int          want_write;        /* a write is parked on drain            */
     int          eof;               /* peer sent FIN                         */
+
+    /* One caller-owned pointer, so a resume callback can find its binding
+     * state. Never dereferenced or freed here; see net_stream.h. */
+    void        *user;
 
     /* Lifecycle */
     int          closing;
@@ -753,6 +758,24 @@ struct HlAsyncOp *hl_net_stream_pending_op(HlNetStream *s)
 {
     if (!s || !s->op_pending) return NULL;
     return &s->op;
+}
+
+/* The op is embedded by value, so the walk back is a fixed offset. Done here
+ * rather than by the caller because the layout is private to this file. */
+HlNetStream *hl_net_stream_from_op(struct HlAsyncOp *op)
+{
+    if (!op) return NULL;
+    return (HlNetStream *)((char *)op - offsetof(HlNetStream, op));
+}
+
+void hl_net_stream_set_user(HlNetStream *s, void *user)
+{
+    if (s) s->user = user;
+}
+
+void *hl_net_stream_user(const HlNetStream *s)
+{
+    return s ? s->user : NULL;
 }
 
 void hl_net_stream_deadline(HlNetStream *s, int ms)

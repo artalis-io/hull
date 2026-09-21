@@ -545,6 +545,70 @@ UTEST(net_stream, io_rejects_bad_arguments)
     ASSERT_EQ(hl_net_stream_write(NULL, "x", 1), HL_NET_E_INVAL);
 }
 
+/* ── the binding seam ───────────────────────────────────────────────── */
+
+UTEST(net_stream, a_pending_op_leads_back_to_its_stream)
+{
+    /* A resume callback is handed only its op. Without this walk it has no way
+     * to reach the stream, and through it whatever the binding attached. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async      = f.ctx;
+    cfg.pool       = f.pool;
+    cfg.host       = "127.0.0.1";
+    cfg.port       = f.port;
+    cfg.connect_ms = 5000;
+
+    HlNetStream *s = NULL;
+    int rc = hl_net_stream_connect(&s, &cfg);
+    ASSERT_NE(s, NULL);
+    ASSERT_EQ(rc, HL_NET_E_AGAIN);          /* resolution is off-thread */
+
+    struct HlAsyncOp *op = hl_net_stream_pending_op(s);
+    ASSERT_NE(op, NULL);
+    ASSERT_EQ_MSG((void *)hl_net_stream_from_op(op), (void *)s,
+                  "the op must lead back to the stream that owns it");
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, the_user_pointer_round_trips_and_is_not_touched)
+{
+    NetFix f; HlNetStream *s = NULL;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+    ASSERT_EQ(fix_open(&f, &s), 0);
+
+    ASSERT_EQ(hl_net_stream_user(s), NULL);   /* nothing attached by default */
+
+    int marker = 0;
+    hl_net_stream_set_user(s, &marker);
+    ASSERT_EQ((void *)hl_net_stream_user(s), (void *)&marker);
+
+    /* I/O must not disturb it: the transport attaches no meaning to it. */
+    ASSERT_EQ(hl_net_stream_write(s, "x", 1), HL_NET_OK);
+    ASSERT_EQ((void *)hl_net_stream_user(s), (void *)&marker);
+    ASSERT_EQ_MSG(marker, 0, "the transport must never dereference it");
+
+    hl_net_stream_set_user(s, NULL);
+    ASSERT_EQ(hl_net_stream_user(s), NULL);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, the_seam_is_null_safe)
+{
+    ASSERT_EQ(hl_net_stream_from_op(NULL), NULL);
+    ASSERT_EQ(hl_net_stream_user(NULL), NULL);
+    hl_net_stream_set_user(NULL, (void *)0x1);   /* must not crash */
+}
+
 /* ── error strings ──────────────────────────────────────────────────── */
 
 UTEST(net_stream, every_error_has_its_own_message)

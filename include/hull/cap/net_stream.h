@@ -154,6 +154,30 @@ int hl_net_stream_connect_result(HlNetStream *s);
 struct HlAsyncOp *hl_net_stream_pending_op(HlNetStream *s);
 
 /**
+ * Recover the stream that owns a pending op.
+ *
+ * A resume callback is handed only its HlAsyncOp (see HlAsyncOp::on_resume),
+ * and that op lives inside this opaque struct, so a caller cannot walk back to
+ * its own state on its own. This does that walk on the caller's behalf; pair it
+ * with hl_net_stream_user() to reach whatever the caller attached.
+ *
+ * @param op an op previously returned by hl_net_stream_pending_op (NULL-safe)
+ * @return the owning stream, or NULL for NULL
+ */
+HlNetStream *hl_net_stream_from_op(struct HlAsyncOp *op);
+
+/**
+ * Attach / read one caller-owned pointer.
+ *
+ * The transport never dereferences it, never frees it, and attaches no meaning
+ * to it: it exists so a binding can find its own context from a resume
+ * callback. Ownership stays entirely with the caller, which must clear or
+ * outlive it before hl_net_stream_free().
+ */
+void  hl_net_stream_set_user(HlNetStream *s, void *user);
+void *hl_net_stream_user(const HlNetStream *s);
+
+/**
  * Read up to `len` bytes. Returns the count (>0), 0 on clean EOF, or a
  * negative error. May park the calling coroutine when nothing is buffered yet.
  */
