@@ -1,10 +1,10 @@
--- test_ssh_websocket.lua - Tests for hull.ssh.websocket
+-- test_ws_stream.lua - Tests for hull.web.ws-stream
 --
 -- The handshake and the framing are checked against RFC 6455's own worked
 -- examples where it gives them, because "my encoder agrees with my decoder"
 -- is exactly the kind of agreement that fails on contact with a real server.
 
-local ws = require('hull.ssh.websocket')
+local ws = require('hull.web.ws-stream')
 
 local pass = 0
 local fail = 0

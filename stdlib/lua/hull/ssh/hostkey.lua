@@ -65,9 +65,9 @@ end
 -- Standard base64, not the URL-safe alphabet hull.crypto offers: a
 -- fingerprint is read aloud and compared against ssh-keygen output, so
 -- "nearly base64" is worse than useless. The implementation moved to
--- hull.ssh.base64 once the key loader needed the decoder too; re-exported
+-- hull.encoding.base64 once the key loader needed the decoder too; re-exported
 -- here because it is part of this module's tested surface.
-local base64_nopad = require('hull.ssh.base64').encode_nopad
+local base64_nopad = require('hull.encoding.base64').encode_nopad
 
 M.base64_nopad = base64_nopad
 

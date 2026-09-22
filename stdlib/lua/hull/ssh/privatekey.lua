@@ -17,7 +17,7 @@
 -- of use over passing it around.
 
 local wire   = require('hull.ssh.wire')
-local base64 = require('hull.ssh.base64')
+local base64 = require('hull.encoding.base64')
 
 local M = {}
 
