@@ -207,5 +207,52 @@ test("a built packet composes in order", function()
     assert_eq(r:remaining(), 0)
 end)
 
+-- peer text headed for a terminal ---------------------------------------
+
+test("a namelist entry with an escape is refused, not cleaned", function()
+    -- Cleaning would leave the peer believing we accepted a name we did not;
+    -- RFC 4251 section 6 makes printable US-ASCII a MUST.
+    local hostile = "aes256-gcm@openssh.com,ssh-[2Jrsa"
+    local r = wire.reader(wire.string(hostile))
+    local ok, err = pcall(function() return r:namelist() end)
+    assert_eq(ok, false, "should have refused")
+    assert_eq(tostring(err):find("printable", 1, true) ~= nil, true, tostring(err))
+end)
+
+test("ordinary algorithm names still parse", function()
+    local r = wire.reader(wire.string("curve25519-sha256,ext-info-c"))
+    local list = r:namelist()
+    assert_eq(#list, 2)
+    assert_eq(list[1], "curve25519-sha256")
+end)
+
+test("safe_text strips CR, which alone can overwrite a line", function()
+    -- A banner ending in CR then FAILED renders as only FAILED. The
+    -- escape does not have to be a full CSI sequence to forge output.
+    local out = wire.safe_text("ok" .. string.char(13) .. "FAILED")
+    assert_eq(out, "okFAILED")
+end)
+
+test("safe_text keeps the layout characters a banner needs", function()
+    local out = wire.safe_text("one" .. string.char(10) .. "two" .. string.char(9) .. "three")
+    assert_eq(out, "one" .. string.char(10) .. "two" .. string.char(9) .. "three")
+end)
+
+test("safe_name drops newline and tab as well", function()
+    -- A name that can introduce a line break can forge a whole second line.
+    assert_eq(wire.safe_name("a" .. string.char(10) .. "b" .. string.char(9) .. "c"), "abc")
+end)
+
+test("safe_name bounds what a peer can put in one error line", function()
+    local out = wire.safe_name(string.rep("x", 500))
+    assert_eq(#out <= 67, true, "got " .. #out)
+    assert_eq(out:sub(-3), "...")
+end)
+
+test("safe_name leaves ordinary text alone", function()
+    assert_eq(wire.safe_name("ssh-ed25519"), "ssh-ed25519")
+end)
+
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

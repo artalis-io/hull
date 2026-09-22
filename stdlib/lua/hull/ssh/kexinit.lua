@@ -13,12 +13,30 @@ local M = {}
 
 M.SSH_MSG_KEXINIT = 20
 
+-- Strict KEX (the Terrapin mitigation, CVE-2023-48795).
+--
+-- Each side advertises a pseudo-algorithm in its kex list to say it will
+-- enforce the stricter rules: no transport chatter during key exchange, and
+-- sequence numbers reset at NEWKEYS. The attack works by inserting an
+-- unauthenticated message during the plaintext handshake and deleting one
+-- after it, which shifts what the two ends think they agreed.
+--
+-- Hull is not exploitable today, but by cipher choice rather than by design:
+-- aes256-gcm does not bind the sequence number into its tag, so a deletion
+-- desynchronises the invocation counter and the next packet fails to
+-- authenticate. That protection lives entirely in the cipher list above, and
+-- would vanish the day someone adds ChaCha20-Poly1305 or a CBC mode. Saying
+-- so explicitly costs one list entry.
+M.STRICT_C = "kex-strict-c-v00@openssh.com"
+M.STRICT_S = "kex-strict-s-v00@openssh.com"
+
 -- What we offer, in preference order. The client's order decides (see
 -- negotiate), so this table IS the policy.
 M.DEFAULT_OFFER = {
     -- RFC 8731. The @libssh.org name is the same exchange under the name it
     -- shipped under before standardisation; servers still advertise it.
-    kex = { "curve25519-sha256", "curve25519-sha256@libssh.org" },
+    kex = { "curve25519-sha256", "curve25519-sha256@libssh.org",
+            "kex-strict-c-v00@openssh.com" },
 
     -- Ed25519 only. RSA host keys would mean carrying RSA verification, and
     -- every server worth reaching has offered Ed25519 for a decade.
@@ -114,6 +132,28 @@ function M.choose(client_list, server_list)
     return nil
 end
 
+-- Whether the peer will enforce strict KEX.
+function M.server_is_strict(server)
+    for _, name in ipairs(server.kex or {}) do
+        if name == M.STRICT_S then return true end
+    end
+    return false
+end
+
+-- The strict-KEX names are SIGNALLING, not exchanges. A server that echoed
+-- our own marker back in its kex list would otherwise win the negotiation
+-- with it, and the handshake would proceed with a "key exchange" that has no
+-- implementation behind it. Removed from both sides before any pick.
+local function without_markers(list)
+    local out = {}
+    for _, name in ipairs(list or {}) do
+        if name ~= M.STRICT_C and name ~= M.STRICT_S then
+            out[#out + 1] = name
+        end
+    end
+    return out
+end
+
 -- Negotiate every algorithm at once.
 --
 -- Returns a table on success, or nil plus a message naming the first
@@ -126,15 +166,20 @@ function M.negotiate(offer, server)
     local function pick(what, mine, theirs)
         local got = M.choose(mine, theirs)
         if not got then
+            -- The peer's list is peer-controlled text headed for an
+            -- operator. wire.namelist already refuses a non-printable name,
+            -- so this bounds the LENGTH: a peer may legally offer a very
+            -- long list, and an error line is not the place for it.
+            local peer = table.concat(theirs, ",")
             return nil, ("ssh: no common %s (offered %s, peer offered %s)")
                 :format(what, table.concat(mine, ","),
-                        table.concat(theirs, ",") ~= "" and
-                        table.concat(theirs, ",") or "nothing")
+                        peer ~= "" and wire.safe_name(peer, 200) or "nothing")
         end
         return got
     end
 
-    local kex, err = pick("key exchange", o.kex, server.kex)
+    local kex, err = pick("key exchange", without_markers(o.kex),
+                          without_markers(server.kex))
     if not kex then return nil, err end
 
     local hostkey; hostkey, err = pick("host key algorithm", o.host_key, server.host_key)
@@ -155,7 +200,7 @@ function M.negotiate(offer, server)
                                           o.compression, server.compression_c2s)
     if not comp_c2s then return nil, err end
 
-    local comp_s2c; comp_s2c, err = pick("server-to-server compression",
+    local comp_s2c; comp_s2c, err = pick("server-to-client compression",
                                           o.compression, server.compression_s2c)
     if not comp_s2c then return nil, err end
 

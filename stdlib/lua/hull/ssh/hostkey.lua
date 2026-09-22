@@ -33,7 +33,8 @@ function M.parse_key(blob)
     if algo ~= M.ALGORITHM then
         -- Only Ed25519 is negotiated, so anything else means the server sent
         -- a key for an algorithm we did not agree to.
-        error("ssh.hostkey: unsupported host key algorithm: " .. tostring(algo))
+        error("ssh.hostkey: unsupported host key algorithm: "
+              .. wire.safe_name(algo))
     end
     local key = r:string()
     if #key ~= M.KEY_LEN then
@@ -50,7 +51,8 @@ function M.parse_signature(blob)
     local r = wire.reader(blob)
     local algo = r:string()
     if algo ~= M.ALGORITHM then
-        error("ssh.hostkey: unsupported signature algorithm: " .. tostring(algo))
+        error("ssh.hostkey: unsupported signature algorithm: "
+              .. wire.safe_name(algo))
     end
     local sig = r:string()
     if #sig ~= M.SIG_LEN then

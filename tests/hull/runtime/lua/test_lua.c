@@ -4082,6 +4082,15 @@ UTEST(lua_stdlib, ssh_privatekey_suite)
     EXPECT_GT(pass, 0LL);
 }
 
+UTEST(lua_stdlib, ssh_transport_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_transport.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 UTEST(lua_stdlib, csv_suite)
 {
     long long pass = 0, fail = -1;
