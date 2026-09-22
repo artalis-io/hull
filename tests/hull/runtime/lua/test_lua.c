@@ -3983,6 +3983,15 @@ UTEST(lua_stdlib, email_suite)
     cleanup_lua_caps();
 }
 
+UTEST(lua_stdlib, ssh_websocket_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_websocket.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 UTEST(lua_stdlib, ssh_wire_suite)
 {
     long long pass = 0, fail = -1;
