@@ -221,11 +221,58 @@ function Reader:namelist()
         if name == "" then
             error("ssh.wire: empty name in namelist", 2)
         end
+        -- RFC 4251 section 6: names are printable US-ASCII. Enforced here
+        -- rather than at each reader, because every algorithm and method
+        -- name a peer sends ends up interpolated into an error a fleet tool
+        -- prints, and a name carrying ANSI escapes lets one hostile host
+        -- forge what looks like another host's output. A name that breaks
+        -- the MUST is a protocol violation, so it is refused rather than
+        -- quietly cleaned: cleaning would leave the peer believing we
+        -- accepted a name we did not.
+        if name:find("[^\32-\126]") then
+            error("ssh.wire: namelist entry is not printable US-ASCII", 2)
+        end
         out[#out + 1] = name
         if not j then break end
         i = j + 1
     end
     return out
+end
+
+-- Peer text headed for a terminal -------------------------------------
+--
+-- Anything a peer sends that an operator will read has to be stripped of
+-- control characters first. A fleet tool prints results from many hosts into
+-- one terminal, so a hostile host that can emit ANSI escapes can reposition
+-- the cursor, recolour, or blank a line - which means forging what looks like
+-- ANOTHER host's result. That is a bigger problem for a tool driving a fleet
+-- than for an interactive client, where a human is watching one session.
+
+-- Multi-line text: a banner, a disconnect reason. Tab and newline survive
+-- because the text is meant to be laid out; nothing else below 0x20 does, and
+-- neither does DEL.
+--
+-- CR is stripped along with the rest. On its own it returns the cursor to the
+-- start of the line just written, so a banner ending "...ok\rFAILED" shows
+-- only the second half - the same overwrite trick as a full escape sequence,
+-- with none of the visibility.
+function M.safe_text(s)
+    if type(s) ~= "string" then return tostring(s) end
+    return (s:gsub("[%z\1-\8\11-\31\127]", ""))
+end
+
+-- Single-line text: an algorithm name, a method name, a service name, a
+-- refusal reason - anything interpolated into one line of an error message.
+-- Stricter than safe_text: tab and newline go too, because a name that can
+-- introduce a line break can forge an entire second line of output. Bounded
+-- as well, since a peer chooses the length and an error line is not where a
+-- caller should discover it sent sixty kilobytes.
+function M.safe_name(s, max)
+    if type(s) ~= "string" then return tostring(s) end
+    s = s:gsub("[%z\1-\31\127]", "")
+    max = max or 64
+    if #s > max then return s:sub(1, max) .. "..." end
+    return s
 end
 
 -- Convenience --------------------------------------------------------

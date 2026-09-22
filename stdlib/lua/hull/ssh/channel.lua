@@ -116,7 +116,9 @@ function M.parse(payload)
 
     if msg == M.SSH_MSG_CHANNEL_OPEN_FAILURE then
         return { type = "open_failure", recipient = r:uint32(),
-                 reason = r:uint32(), description = r:string(),
+                 reason = r:uint32(),
+                 -- Server text that reaches a caller error report.
+                 description = wire.safe_name(r:string(), 200),
                  language = r:string() }
     end
 

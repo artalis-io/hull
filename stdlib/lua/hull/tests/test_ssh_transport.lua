@@ -383,5 +383,56 @@ test("a non-string stdin is refused rather than coerced", function()
     assert_eq(err.code, "bad_stdin")
 end)
 
+-- KEX message discipline ------------------------------------------------------
+--
+-- During a key exchange the transport is at its most exposed: the packets are
+-- plaintext and unauthenticated, so anything accepted there is accepted from
+-- whoever is on the wire, not from the server.
+
+test("the expected message is required, not merely looked for", function()
+    -- The earlier code read up to eight messages hunting for the one it
+    -- wanted and discarded the rest; where NEWKEYS was concerned it did not
+    -- even check it had found it.
+    local s = fake_stream(plain(string.char(30) .. "wrong"), 4)
+    local t = transport.new(s, stub_crypto())
+    local err = assert_raises(function() t:expect(21, "NEWKEYS") end)
+    assert_eq(err:find("expected NEWKEYS", 1, true) ~= nil, true, err)
+    assert_eq(err:find("message 30", 1, true) ~= nil, true, err)
+end)
+
+test("the expected message passes through", function()
+    local s = fake_stream(plain(string.char(21)), 4)
+    local t = transport.new(s, stub_crypto())
+    assert_eq(t:expect(21, "NEWKEYS"):byte(1), 21)
+end)
+
+test("strict KEX refuses the chatter that is normally skipped", function()
+    -- An inserted IGNORE is the Terrapin primitive: it shifts what the two
+    -- ends think they agreed, and a client that silently drops it never
+    -- notices it happened.
+    local s = fake_stream(plain(string.char(2) .. "inserted")
+                          .. plain(string.char(21)), 4)
+    local t = transport.new(s, stub_crypto())
+    local err = assert_raises(function() t:expect(21, "NEWKEYS", true) end)
+    assert_eq(err:find("strict KEX", 1, true) ~= nil, true, err)
+end)
+
+test("without strict KEX the same chatter is still tolerated", function()
+    -- RFC 4253 permits DEBUG and IGNORE at any time, so a server that does
+    -- not advertise strict KEX must not be hung up on for sending one.
+    local s = fake_stream(plain(string.char(2) .. "chatter")
+                          .. plain(string.char(21)), 4)
+    local t = transport.new(s, stub_crypto())
+    assert_eq(t:expect(21, "NEWKEYS", false):byte(1), 21)
+end)
+
+test("strict KEX refuses a global request rather than answering it", function()
+    local gr = wire.writer():byte(80):string("x"):boolean(true):build()
+    local s = fake_stream(plain(gr) .. plain(string.char(21)), 4)
+    local t = transport.new(s, stub_crypto())
+    assert_raises(function() t:expect(21, "NEWKEYS", true) end,
+                  "a global request during KEX should be refused")
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

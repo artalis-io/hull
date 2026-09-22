@@ -172,10 +172,21 @@ end
 -- DISCONNECT, IGNORE, DEBUG and UNIMPLEMENTED can arrive at any time and mean
 -- nothing to a caller; a GLOBAL_REQUEST wanting a reply gets a refusal, since
 -- Hull implements none of them and silence would stall a server that waits.
-function Transport:next_message()
+-- `strict` is the strict-KEX rule: during a key exchange the transport
+-- chatter this normally skips is not permitted at all. Skipping it is the
+-- primitive Terrapin uses - an inserted IGNORE shifts what the two ends
+-- think they agreed, and a client that silently drops it never notices.
+function Transport:next_message(strict)
     for _ = 1, 256 do
         local p = self:read_packet()
         local m = p:byte(1)
+
+        if strict and (m == SSH_MSG_IGNORE or m == SSH_MSG_DEBUG
+                       or m == SSH_MSG_UNIMPLEMENTED
+                       or m == SSH_MSG_GLOBAL_REQUEST) then
+            error("ssh: message " .. tostring(m)
+                  .. " is not permitted during key exchange (strict KEX)")
+        end
 
         if m == SSH_MSG_DISCONNECT then
             local r = wire.reader(p); r:byte()
@@ -192,6 +203,22 @@ function Transport:next_message()
         end
     end
     error("ssh: too many transport messages without progress")
+end
+
+-- The next message must be exactly `want`.
+--
+-- Replaces the earlier "read up to eight and look for it" loops. Those would
+-- silently discard whatever else arrived, which during a key exchange is the
+-- window an injected message lives in - and one of them did not even check
+-- that it had found what it was looking for before carrying on.
+function Transport:expect(want, what, strict)
+    local p = self:next_message(strict)
+    local got = p:byte(1)
+    if got ~= want then
+        error("ssh: expected " .. what .. " (" .. tostring(want)
+              .. ") but the peer sent message " .. tostring(got))
+    end
+    return p
 end
 
 -- Handshake -------------------------------------------------------------------
@@ -211,7 +238,8 @@ function Transport:handshake(opts)
 
     local id = packet.parse_ident(v_s)
     if not id then
-        return nil, { code = "bad_identification", detail = v_s }
+        return nil, { code = "bad_identification",
+                      detail = wire.safe_name(v_s, 255) }
     end
     self:send_raw(self.ident .. "\r\n")
     self.server_ident = v_s
@@ -224,9 +252,13 @@ function Transport:handshake(opts)
     local neg, nerr = kexinit.negotiate(opts.offer, server)
     if not neg then return nil, { code = "no_common_algorithm", detail = nerr } end
     self.negotiated = neg
+    -- Both sides have to advertise it for the stricter rules to apply; a
+    -- server that does not gets RFC 4253 behaviour, where transport chatter
+    -- during a key exchange is legal.
+    self.strict_kex = kexinit.server_is_strict(server)
 
     if kexinit.guess_was_wrong(server, neg) then
-        self:next_message()   -- discard the guessed packet (RFC 4253 7.1)
+        self:next_message(self.strict_kex)   -- discard the guess (RFC 4253 7.1)
     end
 
     -- curve25519 exchange
@@ -234,14 +266,9 @@ function Transport:handshake(opts)
     local q_c = kex.from_hex(q_c_hex)
     self:send_packet(kex.build_ecdh_init(q_c))
 
-    local reply
-    for _ = 1, 8 do
-        local p = self:next_message()
-        if p:byte(1) == kex.SSH_MSG_KEX_ECDH_REPLY then
-            reply = kex.parse_ecdh_reply(p); break
-        end
-    end
-    if not reply then return nil, { code = "no_kex_reply" } end
+    local reply = kex.parse_ecdh_reply(
+        self:expect(kex.SSH_MSG_KEX_ECDH_REPLY, "KEX_ECDH_REPLY",
+                    self.strict_kex))
 
     local k_hex, kerr = self.crypto.x25519(sk_hex, kex.to_hex(reply.q_s))
     if not k_hex then return nil, { code = "bad_kex_point", detail = kerr } end
@@ -274,9 +301,10 @@ function Transport:handshake(opts)
     local keys = kex.derive_keys(self.raw_sha, k_raw, h, h,
                                  kex.SIZES[neg.cipher_c2s])
     self:send_packet(string.char(kex.SSH_MSG_NEWKEYS))
-    for _ = 1, 8 do
-        if self:next_message():byte(1) == kex.SSH_MSG_NEWKEYS then break end
-    end
+    -- Required, not merely awaited. The earlier loop gave up after eight
+    -- messages and installed the ciphers anyway, so a server that never sent
+    -- NEWKEYS still got us into encrypted mode.
+    self:expect(kex.SSH_MSG_NEWKEYS, "NEWKEYS", self.strict_kex)
     -- Only now, so the NEWKEYS exchange itself stays plaintext.
     self.c2s = cipher.new(keys.key_c2s, keys.iv_c2s)
     self.s2c = cipher.new(keys.key_s2c, keys.iv_s2c)
@@ -290,7 +318,8 @@ function Transport:authenticate(user, key, on_banner)
     self:send_packet(userauth.build_service_request())
     local accepted = userauth.parse_service_accept(self:next_message())
     if accepted ~= userauth.SERVICE_USERAUTH then
-        return nil, { code = "service_refused", detail = accepted }
+        return nil, { code = "service_refused",
+                      detail = wire.safe_name(accepted) }
     end
 
     local blob = userauth.signed_blob(self.session_id, user, key.blob)
