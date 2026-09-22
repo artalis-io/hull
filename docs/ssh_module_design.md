@@ -303,32 +303,37 @@ command and closed before its output is drained, which is how a command is fed
 data without a shell redirect - the same reason SFTP exists rather than
 `cat > file`.
 
-### 9b. Why the stream contract has an optional `readable()`
+### 9b. Why `exec` bounds stdin
 
-Feeding a command a large stdin while it writes a large stdout requires the
-two directions to be interleaved. Measured against OpenSSH on loopback, a
-client that writes without reading wedges at roughly **256 KiB of combined
-in-flight bytes** - four 64 KiB socket buffers - each side blocked waiting for
-the other to read. 122 KiB in / 131 KiB out completes; 305 KiB in / 330 KiB
-out stalls; 1.2 MiB in with *small* output is instant, which is what
-identifies the cause as buffering rather than size.
+`opts.stdin` is capped at 128 KiB, and a larger one is refused up front with
+`stdin_too_large` rather than written.
 
-Interleaving on a fixed schedule does not work either: a command like
-`find /c /v ""` emits nothing until its input is closed, so a client that
-stops to read mid-write deadlocks the other way round. The client therefore
-has to know whether a read would **block**, which a plain read cannot say.
+The reason is measured, against OpenSSH on Windows over loopback:
 
-So the stream contract gains one optional method:
+| stdin | stdout | result |
+|---|---|---|
+| 122 KiB | 131 KiB | completes |
+| 305 KiB | 330 KiB | stalls until the socket times out |
+| 1.2 MiB | a single line | instant |
 
-```
-stream:readable() -> boolean        -- would a read return without waiting?
-```
+So the wall is the two directions **together** - around 256 KiB, four 64 KiB
+socket buffers - not the size of either one.
 
-The Hull binding can answer it - the event loop already knows readiness - and
-so can any select-based test harness. A stream that cannot answer is bounded
-rather than deadlocked: stdin above 128 KiB fails with `stdin_too_large`,
-pointing at SFTP. Nothing else in the protocol needs it, because everything
-else is request/response, where the answer is always eventually yes.
+The obvious fix is to interleave reads with the writes, and it does not work.
+Instrumented against that server with a `select`-backed readiness probe,
+**nothing was readable at any point during the write** (18 of 19 probes false):
+the peer has stopped producing, so there is nothing for a client to drain and
+no scheduling change relieves it. Only writing less does. An earlier revision
+of this design added an optional `stream:readable()` for exactly that fix; it
+was removed once the measurement showed it did not deliver one.
+
+Nor can a client read on a fixed schedule instead: a command like
+`find /c /v ""` emits nothing until its input closes, so a client that stops
+to read mid-write deadlocks the other way round.
+
+A bound therefore is the fix, not a workaround for a missing one. It costs the
+1.2 MiB-quiet case, which is bulk data, which belongs in SFTP - one direction
+at a time, and no such limit.
 
 ## 10. Host key exposure
 

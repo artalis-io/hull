@@ -77,11 +77,11 @@ Conn.__index = Conn
 --- drained, then closed. `opts.max_output` (default 8 MiB) bounds only what
 --- is accumulated.
 ---
---- Writing a large stdin to a command that is simultaneously writing a large
---- stdout needs the two directions interleaved, which the stream can only do
---- if it can say whether a read would block. Where it cannot, stdin is capped
---- at 128 KiB and a larger one fails with `stdin_too_large` rather than
---- stalling. Bulk data belongs in `conn:sftp()` either way.
+--- `opts.stdin` is capped at 128 KiB; a larger one is refused with
+--- `stdin_too_large` before anything reaches the wire. Beyond roughly that,
+--- a command writing output while we write input wedges both directions on
+--- full buffers (measured against OpenSSH). Bulk data belongs in
+--- `conn:sftp()`, which moves one direction at a time and has no such limit.
 function Conn:exec(command, opts) return self.t:exec(command, opts) end
 
 --- Open an SFTP session. Paths travel inside the subsystem as

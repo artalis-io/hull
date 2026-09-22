@@ -14,27 +14,27 @@
 --   stream:read(n)   -> bytes (1..n), "" at EOF, or nil, err
 --   stream:write(s)  -> true, or nil, err
 --   stream:close()
---   stream:readable() -> boolean                             (OPTIONAL)
---
--- readable() answers "would a read return without waiting". It is optional
--- because most of the protocol is strictly request/response, where the answer
--- is always eventually yes. The one place it matters is writing a command's
--- stdin while that command is writing output: without it the two directions
--- cannot be interleaved, and both sides eventually block on full buffers. A
--- stream that cannot answer gets a bounded stdin instead of a deadlock.
 --
 -- read() returning SHORT is normal, not an error: the binding hands back
 -- whatever arrived. Under Hull the call parks the coroutine and resumes when
 -- the loop has more, so this code reads as though it were blocking while
 -- never blocking the loop it runs on.
 
--- How much stdin may be written to a command without ever reading, when the
--- stream cannot say whether a read would block. Measured against OpenSSH on
--- loopback, the two directions wedge at roughly 256 KiB of combined in-flight
--- bytes (four 64 KiB socket buffers), so this sits safely under that. Bulk
--- data belongs in sftp, which is one direction at a time and has no such
--- limit.
-local HALF_DUPLEX_STDIN_MAX = 128 * 1024
+-- How much stdin exec will write to a command.
+--
+-- Measured against OpenSSH on Windows over loopback: 122 KiB in with 131 KiB
+-- out completes, 305 KiB in with 330 KiB out stalls until the socket times
+-- out, and 1.2 MiB in with SMALL output is instant. So the wall is the two
+-- directions together, around 256 KiB, not the size of either one.
+--
+-- Interleaving reads with the writes does NOT lift it: instrumented against
+-- that server, nothing is readable at any point during the write, so there is
+-- nothing for a client to drain - the peer has stopped producing, and only
+-- writing less relieves it. Hence a bound rather than a scheduling fix.
+--
+-- Bulk data belongs in sftp, which moves one direction at a time and has no
+-- such limit.
+local STDIN_MAX = 128 * 1024
 
 local packet     = require('hull.ssh.packet')
 local kexinit    = require('hull.ssh.kexinit')
@@ -456,36 +456,16 @@ function Transport:exec(command, opts)
         return m
     end
 
-    -- Consume whatever has ALREADY arrived, without waiting for more.
-    --
-    -- Writing a large stdin to a command that is writing a large stdout
-    -- deadlocks if the two directions are never interleaved: both peers fill
-    -- the operating system's buffers and then block, each waiting for the
-    -- other to read. Measured against OpenSSH on loopback, the wall is around
-    -- 256 KiB of combined in-flight bytes - four 64 KiB socket buffers.
-    --
-    -- Interleaving needs to know whether a read would BLOCK, which a plain
-    -- read cannot tell us: a command like `find /c /v ""` produces nothing
-    -- until its input is closed, so reading on a fixed schedule deadlocks
-    -- the other way round. So this is capability-detected. A stream that can
-    -- answer `readable()` gets true duplex; one that cannot is bounded below
-    -- instead (see the guard after the write loop).
-    local function drain_ready()
-        local probe = self.stream.readable
-        if not probe then return 0 end
-        local n = 0
-        while probe(self.stream) do
-            local m = pump()
-            n = n + 1
-            if overflow or m.type == "close" then break end
-        end
-        return n
-    end
-
     local function drive()
         if stdin then
+            -- Refuse up front rather than part way through: a caller whose
+            -- input is too large should learn that before half of it is on
+            -- the wire and the command has started acting on it.
+            if #stdin > STDIN_MAX then
+                return { code = "stdin_too_large", limit = STDIN_MAX,
+                         detail = "use sftp for bulk data" }
+            end
             local sent = 1
-            local unread = 0
             while sent <= #stdin and not ch.closed do
                 local room = ch:sendable()
                 -- Zero room means the peer has granted nothing more, and only
@@ -500,22 +480,6 @@ function Transport:exec(command, opts)
                 local chunk = stdin:sub(sent, sent + room - 1)
                 self:send_packet(ch:data_message(chunk))
                 sent = sent + #chunk
-                unread = unread + #chunk
-
-                if drain_ready() > 0 then
-                    if overflow then return { code = "output_too_large",
-                                              limit = limit } end
-                    unread = 0
-                elseif not self.stream.readable
-                       and unread > HALF_DUPLEX_STDIN_MAX then
-                    -- Past this the next write can wedge against output we
-                    -- are not reading, and the caller would see a stalled
-                    -- connection with no explanation. Say so instead.
-                    return { code = "stdin_too_large",
-                             limit = HALF_DUPLEX_STDIN_MAX,
-                             detail = "this stream cannot interleave reads "
-                                      .. "with writes; use sftp for bulk data" }
-                end
             end
             if not ch.closed then
                 self:send_packet(channel.build_eof(ch.remote_id))
