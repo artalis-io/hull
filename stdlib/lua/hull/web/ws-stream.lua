@@ -173,6 +173,37 @@ function M.encode(opcode, payload, mask)
     return head .. mask .. apply_mask(payload, mask)
 end
 
+-- How many bytes the frame at the front of `buf` occupies in total, or nil
+-- plus "need_more" while even that cannot be told yet.
+--
+-- Split out so a reader can ask the transport for exactly what is missing
+-- instead of guessing: appending each short read onto a growing buffer is
+-- quadratic in the frame size, which for a 16 KiB frame arriving in small
+-- pieces is hundreds of megabytes of copying for 16 KiB of data. The same
+-- mistake, and the same fix, as hull.ssh.transport's fill.
+function M.frame_size(buf)
+    if #buf < 2 then return nil, "need_more" end
+    local len = sbyte(buf, 2) & 0x7F
+    local head = 2
+    if len == 126 then
+        if #buf < 4 then return nil, "need_more" end
+        len = sunpack(">I2", buf, 3); head = 4
+    elseif len == 127 then
+        if #buf < 10 then return nil, "need_more" end
+        len = sunpack(">I8", buf, 3); head = 10
+        if len < 0 then
+            error("web.ws-stream: frame length exceeds the representable range")
+        end
+    end
+    if len > M.MAX_FRAME then
+        error("web.ws-stream: frame of " .. tostring(len)
+              .. " bytes exceeds the maximum")
+    end
+    -- A server frame is never masked, so there is no 4-byte mask to allow for;
+    -- decode refuses one that is.
+    return head + len
+end
+
 -- Decode one frame from the front of `buf`.
 --
 -- Returns frame, consumed. Returns nil, "need_more" while incomplete.
@@ -237,44 +268,82 @@ end
 local Stream = {}
 Stream.__index = Stream
 
+-- Ensure the buffer holds at least n bytes, gathering short reads into a
+-- table and joining once. Returns false at EOF rather than raising: for a
+-- byte stream a transport that simply ends is EOF, and SSH carries its own
+-- disconnect.
+function Stream:_need(n)
+    if #self.inbuf >= n then return true end
+    local parts, have = { self.inbuf }, #self.inbuf
+    while have < n do
+        local chunk, err = self.s:read(n - have)
+        if chunk == nil then
+            self.inbuf = table.concat(parts)
+            return nil, err
+        end
+        if chunk == "" then
+            self.inbuf = table.concat(parts)
+            self.closed = true
+            return false
+        end
+        parts[#parts + 1] = chunk
+        have = have + #chunk
+    end
+    self.inbuf = table.concat(parts)
+    return true
+end
+
 -- Pull frames until at least one byte of application data is buffered, or the
 -- peer closes. Control frames are handled here and never surface.
 function Stream:_pump()
     while #self.out == 0 and not self.closed do
+        -- Ask for the header, then for exactly the frame it describes. Nothing
+        -- is appended onto a growing buffer, so a peer that dribbles a 16 KiB
+        -- frame out a byte at a time costs 16 KiB of copying, not megabytes.
+        local ok, err = self:_need(2)
+        if ok == nil then return nil, err end
+        if not ok then break end                 -- EOF
+
+        -- Two bytes is only enough when the length is inline. An extended
+        -- length needs four or ten, so grow through the header until it can
+        -- be read rather than assuming; a header is at most ten bytes, so
+        -- this is a handful of tiny reads even from the worst transport.
+        local total = M.frame_size(self.inbuf)
+        while not total do
+            local more; more, err = self:_need(#self.inbuf + 1)
+            if more == nil then return nil, err end
+            if not more then break end           -- EOF inside the header
+            total = M.frame_size(self.inbuf)
+        end
+        if not total then break end
+
+        local got; got, err = self:_need(total)
+        if got == nil then return nil, err end
+        if not got then break end                -- EOF mid-frame
+
         local frame, used = M.decode(self.inbuf)
-        if frame then
-            self.inbuf = ssub(self.inbuf, used + 1)
-            local op = frame.opcode
-            if op == M.OP_BIN or op == M.OP_TEXT or op == M.OP_CONT then
-                -- A byte stream does not care where the peer put its frame
-                -- boundaries, so fragmentation needs no reassembly state:
-                -- every data payload is simply more bytes.
-                self.out = self.out .. frame.payload
-            elseif op == M.OP_PING then
-                -- Answering is required (section 5.5.2), and a peer that
-                -- pings to check liveness will hang up if we do not.
-                self:_send(M.OP_PONG, frame.payload)
-            elseif op == M.OP_PONG then           -- unsolicited: ignore
-            elseif op == M.OP_CLOSE then
-                self.closed = true
-                if not self.close_sent then
-                    self.close_sent = true
-                    pcall(function() self:_send(M.OP_CLOSE, frame.payload) end)
-                end
-            else
-                error("web.ws-stream: unknown opcode " .. tostring(op))
+        self.inbuf = ssub(self.inbuf, used + 1)
+
+        local op = frame.opcode
+        if op == M.OP_BIN or op == M.OP_TEXT or op == M.OP_CONT then
+            -- A byte stream does not care where the peer put its frame
+            -- boundaries, so fragmentation needs no reassembly state: every
+            -- data payload is simply more bytes.
+            self.out = self.out .. frame.payload
+        elseif op == M.OP_PING then
+            -- Answering is required (section 5.5.2), and a peer that pings to
+            -- check liveness will hang up if we do not.
+            self:_send(M.OP_PONG, frame.payload)
+        elseif op == M.OP_CLOSE then
+            self.closed = true
+            if not self.close_sent then
+                self.close_sent = true
+                pcall(function() self:_send(M.OP_CLOSE, frame.payload) end)
             end
-        else
-            local chunk, err = self.s:read(self.readsize)
-            if chunk == nil then return nil, err end
-            if chunk == "" then
-                -- The transport ended without a close frame. For a byte
-                -- stream that is EOF, not an error: SSH carries its own
-                -- disconnect and will report it.
-                self.closed = true
-            else
-                self.inbuf = self.inbuf .. chunk
-            end
+        elseif op ~= M.OP_PONG then
+            -- An unsolicited pong is legal and means nothing (5.5.3).
+            -- Anything else is an opcode we never agreed to.
+            error("web.ws-stream: unknown opcode " .. tostring(op))
         end
     end
     return true
