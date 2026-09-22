@@ -34,6 +34,7 @@
 #include "hull/shared/log_lock.h"
 #include "hull/shared/thread_affinity.h"
 #include "hull/manifest.h"
+#include <sh_seal_arena.h>
 #include "hull/module_resolver.h"
 #include "hull/runtime.h"
 #include "hull/sandbox.h"
@@ -267,6 +268,63 @@ int hull_serve(int argc, char **argv)
         log_warn("[hull:cli] manifest extraction failed; running without policy");
     }
 
+    /* Seal the manifest, exactly as serve.c does for the server build.
+     *
+     * Every capability on this path reads its allowlist straight out of
+     * `manifest` on each call - env names, http hosts, the fs policy, and now
+     * ssh.connect's hosts / ports / users. Left in ordinary heap memory those
+     * lists are one out-of-bounds write away from being extended, which is a
+     * silent capability escalation rather than a crash.
+     *
+     * This used to be server-only, which was defensible while app.main was
+     * the small path. It no longer is: a fleet tool IS an app.main program,
+     * so the mode that reaches other machines over the network was the one
+     * mode running its grants unprotected.
+     *
+     * Sealing failure is FATAL. The alternative is running with unsealed
+     * policy, which silently weakens the guarantee the rest of the hardening
+     * assumes. See docs/security.md, Sealed runtime tables. */
+    ShSealArena seal_arena;
+    if (sh_seal_arena_init(&seal_arena, 16 * 1024, "manifest-policy") != 0) {
+        log_error("[hull:cli] seal arena init failed (mmap)");
+        hl_manifest_free(&manifest);
+        hl_app_context_free(ctx);
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
+        return 1;
+    }
+    {
+        HlManifest sealed;
+        if (hl_manifest_seal(&sealed, &manifest, &seal_arena) != 0) {
+            log_error("[hull:cli] manifest seal failed (arena OOM?)");
+            sh_seal_arena_destroy(&seal_arena);
+            hl_manifest_free(&manifest);
+            hl_app_context_free(ctx);
+            rt->async_ctx = NULL;
+            rt->thread_pool = NULL;
+            if (pool) be->pool_free(pool);
+            be->free(async_ctx);
+            return 1;
+        }
+        /* Free the allocator-backed strings, then take the sealed copy. Its
+         * `alloc` is NULL, so the hl_manifest_free below is a safe no-op for
+         * strings: the arena owns them until it is destroyed. */
+        hl_manifest_free(&manifest);
+        manifest = sealed;
+    }
+    if (sh_seal_arena_seal(&seal_arena) != 0) {
+        log_error("[hull:cli] manifest seal (mprotect) failed");
+        sh_seal_arena_destroy(&seal_arena);
+        hl_app_context_free(ctx);
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
+        return 1;
+    }
+
     /* Wire per-capability configs from the manifest. serve.c does this in
      * `wire_caps` for the server build; in CLI mode we do the same dance inline
      * for env allowlist + http hosts/TLS below. The FS capability (fs.read/write
@@ -348,6 +406,8 @@ int hull_serve(int argc, char **argv)
             be->free(async_ctx);
             hl_manifest_free(&manifest);
             hl_app_context_free(ctx);
+            /* The arena outlives every consumer that aliases it. */
+            sh_seal_arena_destroy(&seal_arena);
             return 1;
         }
     }
@@ -374,6 +434,10 @@ int hull_serve(int argc, char **argv)
     free((void *)env_allow);
     hl_manifest_free(&manifest);
     hl_app_context_free(ctx);
+
+    /* Destroyed LAST: the cap configs above borrow strings out of it, so
+     * unmapping earlier would leave them pointing at nothing. */
+    sh_seal_arena_destroy(&seal_arena);
 
     return (run == 0) ? rc : (rc ? rc : 1);
 }

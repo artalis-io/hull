@@ -77,6 +77,17 @@ static void build_fixture(HlManifest *m, HlAllocator *alloc)
     m->modules_declared     = 1;
     m->allow_dynamic_code      = 0;
     m->allow_dynamic_libraries = 0;
+    /* ssh = { connect = { hosts, ports, users } } - the only manifest key
+     * that grants outbound stream authority. */
+    m->ssh.declared              = 1;
+    m->ssh.connect.declared      = 1;
+    m->ssh.connect.hosts[0]      = DUP("*.fleet.example.com");
+    m->ssh.connect.hosts[1]      = DUP("10.0.0.0/8");
+    m->ssh.connect.host_count    = 2;
+    m->ssh.connect.ports[0]      = 22;
+    m->ssh.connect.port_count    = 1;
+    m->ssh.users[0]              = DUP("operator");
+    m->ssh.user_count            = 1;
     #undef DUP
 }
 
@@ -133,6 +144,23 @@ UTEST(manifest_seal, roundtrip_preserves_all_fields)
     ASSERT_STREQ("api.stripe.com", dst.hosts[0]);
     ASSERT_STREQ("example.com",  dst.hosts[1]);
     ASSERT_STREQ("default-src 'self'", dst.csp);
+
+    /* ssh.connect. This was value-copied but never sealed, so the sealed
+     * manifest kept pointing at allocator memory: the one allowlist granting
+     * outbound stream authority was the one nothing protected. */
+    ASSERT_EQ(1, dst.ssh.declared);
+    ASSERT_EQ(2, dst.ssh.connect.host_count);
+    ASSERT_EQ(1, dst.ssh.user_count);
+    ASSERT_EQ(22, dst.ssh.connect.ports[0]);
+    ASSERT_STREQ("*.fleet.example.com", dst.ssh.connect.hosts[0]);
+    ASSERT_STREQ("10.0.0.0/8",          dst.ssh.connect.hosts[1]);
+    ASSERT_STREQ("operator",            dst.ssh.users[0]);
+    ASSERT_TRUE(in_arena(&arena, dst.ssh.connect.hosts[0]));
+    ASSERT_TRUE(in_arena(&arena, dst.ssh.connect.hosts[1]));
+    ASSERT_TRUE(in_arena(&arena, dst.ssh.users[0]));
+    /* and they are COPIES, not the originals */
+    ASSERT_TRUE(dst.ssh.connect.hosts[0] != src.ssh.connect.hosts[0]);
+    ASSERT_TRUE(dst.ssh.users[0] != src.ssh.users[0]);
     ASSERT_STREQ("https://app.example.com", dst.cors_origins[0]);
     ASSERT_STREQ("GET, POST",    dst.cors_methods);
     ASSERT_STREQ("Content-Type", dst.cors_headers);

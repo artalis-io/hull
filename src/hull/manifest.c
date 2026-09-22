@@ -90,6 +90,12 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->databases.dynamic.hosts[i]);
     for (int i = 0; i < m->databases.dynamic.scheme_count; i++)
         hl_manifest_str_free(a, &m->databases.dynamic.schemes[i]);
+    /* ssh = { connect = { hosts, users } }. Missing here meant the grant
+     * leaked; missing from hl_manifest_seal below meant something worse. */
+    for (int i = 0; i < m->ssh.connect.host_count; i++)
+        hl_manifest_str_free(a, &m->ssh.connect.hosts[i]);
+    for (int i = 0; i < m->ssh.user_count; i++)
+        hl_manifest_str_free(a, &m->ssh.users[i]);
 
     memset(m, 0, sizeof(*m));
 }
@@ -168,6 +174,20 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
             goto fail;
     for (int i = 0; i < src->databases.dynamic.scheme_count; i++)
         if (seal_str(arena, &dst->databases.dynamic.schemes[i], src->databases.dynamic.schemes[i]) != 0)
+            goto fail;
+    /* ssh.connect: the hosts an app may reach and the logins it may use.
+     *
+     * The value-copy above carries the struct's POINTERS across unchanged, so
+     * without this the sealed manifest kept pointing at allocator-owned
+     * strings - the one allowlist that grants outbound stream authority was
+     * the one nothing sealed. It only escaped being a use-after-free because
+     * hl_manifest_free did not know about these strings either, and leaked
+     * them instead. */
+    for (int i = 0; i < src->ssh.connect.host_count; i++)
+        if (seal_str(arena, &dst->ssh.connect.hosts[i],
+                     src->ssh.connect.hosts[i]) != 0) goto fail;
+    for (int i = 0; i < src->ssh.user_count; i++)
+        if (seal_str(arena, &dst->ssh.users[i], src->ssh.users[i]) != 0)
             goto fail;
 
     return 0;
