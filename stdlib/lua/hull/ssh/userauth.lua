@@ -124,14 +124,10 @@ end
 
 -- Strip control characters from server-supplied text.
 --
--- The banner is attacker-controlled and headed for a terminal. Left alone it
--- can carry ANSI escapes that reposition the cursor or recolour output, which
--- for a fleet tool means a hostile host can forge what looks like another
--- host's result. Newline and tab survive; nothing else below 0x20 does, and
--- neither does DEL.
-function M.sanitize_text(s)
-    return (s:gsub("[%z\1-\8\11\12\14-\31\127]", ""))
-end
+-- The one implementation lives in hull.ssh.wire, because every layer has peer
+-- text headed for a terminal and they must not drift apart. Kept here as the
+-- name this module has always exported.
+M.sanitize_text = wire.safe_text
 
 -- Parse an authentication response.
 --

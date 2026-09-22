@@ -284,6 +284,57 @@ channel_rejected      transfer_failed       connection_closed
 successful call whose `exit_status` field is non-zero, exactly as the brief
 requires.
 
+### 9a. exec delivers output two ways
+
+Accumulating a command's output and returning it whole is convenient for
+`uname -a` and wrong for everything else: the caller sees nothing until the
+process exits, and the output has to fit in memory. So each stream is
+delivered one of two ways, chosen per stream:
+
+```lua
+conn:exec("uname -a")                          -- accumulate; r.stdout
+conn:exec("journalctl -fu app",                -- stream; r.stdout stays empty
+          { on_stdout = function(chunk) ... end })
+```
+
+A stream with a callback is never also accumulated, so `max_output` (8 MiB by
+default) bounds only the accumulating path. `opts.stdin` is written to the
+command and closed before its output is drained, which is how a command is fed
+data without a shell redirect - the same reason SFTP exists rather than
+`cat > file`.
+
+### 9b. Why `exec` bounds stdin
+
+`opts.stdin` is capped at 128 KiB, and a larger one is refused up front with
+`stdin_too_large` rather than written.
+
+The reason is measured, against OpenSSH on Windows over loopback:
+
+| stdin | stdout | result |
+|---|---|---|
+| 122 KiB | 131 KiB | completes |
+| 305 KiB | 330 KiB | stalls until the socket times out |
+| 1.2 MiB | a single line | instant |
+
+So the wall is the two directions **together** - around 256 KiB, four 64 KiB
+socket buffers - not the size of either one.
+
+The obvious fix is to interleave reads with the writes, and it does not work.
+Instrumented against that server with a `select`-backed readiness probe,
+**nothing was readable at any point during the write** (18 of 19 probes false):
+the peer has stopped producing, so there is nothing for a client to drain and
+no scheduling change relieves it. Only writing less does. An earlier revision
+of this design added an optional `stream:readable()` for exactly that fix; it
+was removed once the measurement showed it did not deliver one.
+
+Nor can a client read on a fixed schedule instead: a command like
+`find /c /v ""` emits nothing until its input closes, so a client that stops
+to read mid-write deadlocks the other way round.
+
+A bound therefore is the fix, not a workaround for a missing one. It costs the
+1.2 MiB-quiet case, which is bulk data, which belongs in SFTP - one direction
+at a time, and no such limit.
+
 ## 10. Host key exposure
 
 The host key object is available to the caller before any trust decision, and

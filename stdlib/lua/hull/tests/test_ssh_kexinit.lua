@@ -231,8 +231,54 @@ test("the default offer lists only algorithms Hull can do", function()
     assert_eq(#o.compression, 1)
     assert_eq(o.compression[1], "none")
     for _, name in ipairs(o.kex) do
-        assert_eq(name:find("curve25519", 1, true) ~= nil, true, name)
+        -- The strict-KEX marker is signalling, not an exchange.
+        if name ~= kexinit.STRICT_C then
+            assert_eq(name:find("curve25519", 1, true) ~= nil, true, name)
+        end
     end
+end)
+
+-- strict KEX (Terrapin, CVE-2023-48795) ---------------------------------------
+
+test("the offer advertises strict KEX, and last", function()
+    local o = kexinit.DEFAULT_OFFER
+    assert_eq(o.kex[#o.kex], kexinit.STRICT_C,
+              "the marker must never be preferred over a real exchange:")
+end)
+
+test("a server advertising strict KEX is detected", function()
+    assert_eq(kexinit.server_is_strict({ kex = { "curve25519-sha256",
+                                                 kexinit.STRICT_S } }), true)
+    assert_eq(kexinit.server_is_strict({ kex = { "curve25519-sha256" } }), false)
+    assert_eq(kexinit.server_is_strict({}), false)
+end)
+
+test("a server echoing our own marker cannot win the negotiation with it", function()
+    -- Otherwise the handshake proceeds with a "key exchange" that has no
+    -- implementation behind it, chosen by the peer.
+    local neg, err = kexinit.negotiate(nil, {
+        kex = { kexinit.STRICT_C, kexinit.STRICT_S },
+        host_key = { "ssh-ed25519" },
+        cipher_c2s = { "aes256-gcm@openssh.com" },
+        cipher_s2c = { "aes256-gcm@openssh.com" },
+        mac_c2s = {}, mac_s2c = {},
+        compression_c2s = { "none" }, compression_s2c = { "none" },
+    })
+    assert_eq(neg, nil, "must not negotiate a marker as the exchange")
+    assert_eq(tostring(err):find("no common key exchange", 1, true) ~= nil, true,
+              tostring(err))
+end)
+
+test("strict KEX does not disturb an ordinary negotiation", function()
+    local neg = kexinit.negotiate(nil, {
+        kex = { "curve25519-sha256", kexinit.STRICT_S },
+        host_key = { "ssh-ed25519" },
+        cipher_c2s = { "aes256-gcm@openssh.com" },
+        cipher_s2c = { "aes256-gcm@openssh.com" },
+        mac_c2s = {}, mac_s2c = {},
+        compression_c2s = { "none" }, compression_s2c = { "none" },
+    })
+    assert_eq(neg ~= nil and neg.kex, "curve25519-sha256")
 end)
 
 test("the built message round trips through the wire codec", function()

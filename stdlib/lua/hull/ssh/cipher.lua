@@ -32,6 +32,17 @@ M.TAG_LEN   = 16
 M.BLOCK     = 16      -- the encrypted region aligns to the AES block
 M.LENGTH_LEN = 4
 
+-- How many packets one key may protect before this refuses to continue.
+--
+-- NIST SP 800-38D allows 2^32 invocations for a 96-bit deterministic IV, so
+-- this is a conservative backstop rather than the real bound. It should never
+-- be reached: a server rekeys long before (OpenSSH at about a gigabyte, which
+-- is tens of thousands of packets), and hull.ssh.transport now absorbs that
+-- rekey instead of dying on it. Reaching this means no rekey ever happened,
+-- and the honest response is to stop rather than keep encrypting past the
+-- limit the key was chosen for.
+M.MAX_PACKETS = 0x80000000
+
 local Cipher = {}
 Cipher.__index = Cipher
 
@@ -80,6 +91,16 @@ end
 function Cipher:advance()
     self.counter = bump(self.counter)
     self.packets = self.packets + 1
+    if self.packets >= M.MAX_PACKETS then
+        error("ssh.cipher: " .. tostring(self.packets)
+              .. " packets under one key without a rekey; refusing to continue")
+    end
+end
+
+-- Whether this key has protected enough that a rekey is due. Advisory: Hull
+-- does not initiate one, it absorbs the server's.
+function Cipher:packets_sent()
+    return self.packets
 end
 
 -- Encrypt one payload into a wire packet.
