@@ -434,5 +434,59 @@ test("strict KEX refuses a global request rather than answering it", function()
                   "a global request during KEX should be refused")
 end)
 
+-- rekeying (RFC 4253 section 9) -----------------------------------------------
+--
+-- The exchange itself needs real crypto, so what is asserted here is the
+-- DISPATCH: that a KEXINIT arriving mid-session goes to the key exchange and
+-- not to the channel layer, which is what used to kill the connection.
+
+test("a KEXINIT after the handshake is absorbed, not handed to the caller", function()
+    local s = fake_stream(plain(string.char(20) .. "rekey")
+                          .. plain(string.char(94) .. "data"), 4)
+    local t = transport.new(s, stub_crypto())
+    t.session_id = "already-handshaken"
+    local seen
+    t.run_kex = function(_, _, i_s) seen = i_s; return true end
+
+    local m = t:next_message()
+    assert_eq(seen ~= nil and seen:byte(1), 20, "the KEXINIT reaches run_kex:")
+    assert_eq(m:byte(1), 94, "and the caller gets the next real message:")
+end)
+
+test("a KEXINIT before the handshake is left for the exchange to read", function()
+    -- run_kex reads the server KEXINIT itself during the first exchange;
+    -- absorbing it here would consume the message it is waiting for.
+    local s = fake_stream(plain(string.char(20) .. "first"), 4)
+    local t = transport.new(s, stub_crypto())
+    assert_eq(t:next_message():byte(1), 20)
+end)
+
+test("a rekey is not re-entered while one is running", function()
+    local s = fake_stream(plain(string.char(20) .. "a") .. plain(string.char(20) .. "b"), 4)
+    local t = transport.new(s, stub_crypto())
+    t.session_id = "sid"
+    local calls = 0
+    t.run_kex = function(self, _, _)
+        calls = calls + 1
+        -- run_kex reads more messages itself; those must not recurse.
+        local inner = self:next_message()
+        assert_eq(inner:byte(1), 20, "the inner read is NOT absorbed:")
+        return true
+    end
+    assert_raises(function() t:next_message() end)   -- stream runs out after
+    assert_eq(calls, 1, "exactly one exchange:")
+end)
+
+test("a failed rekey stops the connection rather than carrying on", function()
+    -- Carrying on would mean continuing to encrypt under keys the peer has
+    -- already moved away from, or worse, under a swapped host identity.
+    local s = fake_stream(plain(string.char(20) .. "rekey"), 4)
+    local t = transport.new(s, stub_crypto())
+    t.session_id = "sid"
+    t.run_kex = function() return nil, { code = "host_changed_midsession" } end
+    local err = assert_raises(function() t:next_message() end)
+    assert_eq(err:find("host_changed_midsession", 1, true) ~= nil, true, err)
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

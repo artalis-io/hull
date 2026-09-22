@@ -56,6 +56,7 @@ local SSH_MSG_UNIMPLEMENTED = 3
 local SSH_MSG_DEBUG         = 4
 local SSH_MSG_GLOBAL_REQUEST = 80
 local SSH_MSG_REQUEST_FAILURE = 82
+local SSH_MSG_KEXINIT       = 20
 
 local Transport = {}
 Transport.__index = Transport
@@ -188,7 +189,20 @@ function Transport:next_message(strict)
                   .. " is not permitted during key exchange (strict KEX)")
         end
 
-        if m == SSH_MSG_DISCONNECT then
+        if m == SSH_MSG_KEXINIT and self.session_id and not self.in_kex then
+            -- The server has asked to rekey (RFC 4253 section 9). Absorb it
+            -- here rather than letting it reach the channel layer: whatever
+            -- the caller is in the middle of - an exec streaming output, an
+            -- sftp transfer - should not have to know that the connection
+            -- re-keyed underneath it.
+            self.in_kex = true
+            local ok, why = self:run_kex(self.kex_opts or {}, p)
+            self.in_kex = false
+            if not ok then
+                error("ssh: rekey failed: "
+                      .. wire.safe_name((why and why.code) or "unknown"))
+            end
+        elseif m == SSH_MSG_DISCONNECT then
             local r = wire.reader(p); r:byte()
             local code = r:uint32()
             local desc = r:remaining() > 0 and r:string() or ""
@@ -243,11 +257,32 @@ function Transport:handshake(opts)
     end
     self:send_raw(self.ident .. "\r\n")
     self.server_ident = v_s
+    -- A rekey needs the same offer and the same host; keep them rather
+    -- than making every later call thread them through.
+    self.kex_opts = opts
 
-    -- algorithm negotiation
+    return self:run_kex(opts)
+end
+
+-- One key exchange: negotiate, exchange, verify the host key, install keys.
+--
+-- Split out of handshake because it happens more than once. RFC 4253 section
+-- 9 lets EITHER side ask for a new key exchange at any point after the first,
+-- and OpenSSH does so once a connection has moved about a gigabyte. Before
+-- this existed that message reached the channel layer, which raised
+-- "unexpected connection message 20" and killed the connection - which is to
+-- say a long-running streamed command, the thing streaming exists for, would
+-- die partway through for no reason the caller could act on.
+--
+-- `i_s` is the server KEXINIT payload when the server started the exchange
+-- and next_message has already read it; nil when we are starting.
+function Transport:run_kex(opts, i_s)
+    local rekey = self.session_id ~= nil
+
     local i_c = kexinit.build(opts.offer, self.crypto.random(16))
     self:send_packet(i_c)
-    local i_s = self:next_message()
+    if not i_s then i_s = self:next_message() end
+
     local server = kexinit.parse(i_s)
     local neg, nerr = kexinit.negotiate(opts.offer, server)
     if not neg then return nil, { code = "no_common_algorithm", detail = nerr } end
@@ -275,40 +310,64 @@ function Transport:handshake(opts)
     local k_raw = kex.from_hex(k_hex)
 
     local h = self.raw_sha(kex.exchange_hash_input({
-        v_c = self.ident, v_s = v_s, i_c = i_c, i_s = i_s,
+        v_c = self.ident, v_s = self.server_ident, i_c = i_c, i_s = i_s,
         k_s = reply.host_key, q_c = q_c, q_s = reply.q_s, k = k_raw,
     }))
 
-    -- host key: verified, then trusted or not. This never decides for the
-    -- caller; an unknown or changed host comes back as a reason carrying the
-    -- fingerprint (see hull.ssh.hostkey).
-    local d = hostkey.verify(self.crypto, kex.to_hex, self.raw_sha,
-                             opts.trust, opts.host, reply.host_key,
-                             reply.signature, h)
-    if not d.ok then
-        return nil, { code = "host_key_invalid", detail = d.reason }
+    if rekey then
+        -- A rekey re-presents the host key, and it must be the SAME one. The
+        -- store would catch a substitution too, but only against what was
+        -- stored; this pins against the key THIS connection was built on, so
+        -- a server cannot swap identity halfway through a session it already
+        -- holds. The signature is still checked, over the new exchange hash.
+        if reply.host_key ~= self.host_key_blob then
+            return nil, { code = "host_changed_midsession",
+                          fingerprint = hostkey.fingerprint(self.raw_sha,
+                                                            reply.host_key),
+                          stored_fingerprint = self.host_fingerprint }
+        end
+        local ok, why = hostkey.verify_signature(self.crypto, kex.to_hex,
+                                                 reply.host_key,
+                                                 reply.signature, h)
+        if not ok then
+            return nil, { code = "host_key_invalid", detail = why }
+        end
+    else
+        -- host key: verified, then trusted or not. This never decides for the
+        -- caller; an unknown or changed host comes back as a reason carrying
+        -- the fingerprint (see hull.ssh.hostkey).
+        local d = hostkey.verify(self.crypto, kex.to_hex, self.raw_sha,
+                                 opts.trust, opts.host, reply.host_key,
+                                 reply.signature, h)
+        if not d.ok then
+            return nil, { code = "host_key_invalid", detail = d.reason }
+        end
+        if d.status ~= hostkey.TRUSTED then
+            return nil, { code = "host_" .. d.status,
+                          fingerprint = d.fingerprint,
+                          stored_fingerprint = d.stored_fingerprint,
+                          key_blob = d.key_blob }
+        end
+        self.host_fingerprint = d.fingerprint
+        self.host_key_blob    = reply.host_key
+        -- RFC 4253 section 7.2: the session identifier is the exchange hash
+        -- from the FIRST exchange and never changes. A rekey derives new keys
+        -- from a new H against that same identifier, which is what keeps the
+        -- userauth signature bound to the connection rather than to a key set.
+        self.session_id = h
     end
-    if d.status ~= hostkey.TRUSTED then
-        return nil, { code = "host_" .. d.status,
-                      fingerprint = d.fingerprint,
-                      stored_fingerprint = d.stored_fingerprint,
-                      key_blob = d.key_blob }
-    end
-    self.host_fingerprint = d.fingerprint
 
-    -- keys, and the switch to encrypted
-    self.session_id = h
-    local keys = kex.derive_keys(self.raw_sha, k_raw, h, h,
+    local keys = kex.derive_keys(self.raw_sha, k_raw, h, self.session_id,
                                  kex.SIZES[neg.cipher_c2s])
+
+    -- Nothing may be sent between our NEWKEYS and the peer's, which is what
+    -- lets both directions switch together here: NEWKEYS itself travels under
+    -- the OLD keys, and the peer switches its send side the moment it sends
+    -- its own.
     self:send_packet(string.char(kex.SSH_MSG_NEWKEYS))
-    -- Required, not merely awaited. The earlier loop gave up after eight
-    -- messages and installed the ciphers anyway, so a server that never sent
-    -- NEWKEYS still got us into encrypted mode.
     self:expect(kex.SSH_MSG_NEWKEYS, "NEWKEYS", self.strict_kex)
-    -- Only now, so the NEWKEYS exchange itself stays plaintext.
     self.c2s = cipher.new(keys.key_c2s, keys.iv_c2s)
     self.s2c = cipher.new(keys.key_s2c, keys.iv_s2c)
-
     return true
 end
 
