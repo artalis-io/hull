@@ -14,11 +14,27 @@
 --   stream:read(n)   -> bytes (1..n), "" at EOF, or nil, err
 --   stream:write(s)  -> true, or nil, err
 --   stream:close()
+--   stream:readable() -> boolean                             (OPTIONAL)
+--
+-- readable() answers "would a read return without waiting". It is optional
+-- because most of the protocol is strictly request/response, where the answer
+-- is always eventually yes. The one place it matters is writing a command's
+-- stdin while that command is writing output: without it the two directions
+-- cannot be interleaved, and both sides eventually block on full buffers. A
+-- stream that cannot answer gets a bounded stdin instead of a deadlock.
 --
 -- read() returning SHORT is normal, not an error: the binding hands back
 -- whatever arrived. Under Hull the call parks the coroutine and resumes when
 -- the loop has more, so this code reads as though it were blocking while
 -- never blocking the loop it runs on.
+
+-- How much stdin may be written to a command without ever reading, when the
+-- stream cannot say whether a read would block. Measured against OpenSSH on
+-- loopback, the two directions wedge at roughly 256 KiB of combined in-flight
+-- bytes (four 64 KiB socket buffers), so this sits safely under that. Bulk
+-- data belongs in sftp, which is one direction at a time and has no such
+-- limit.
+local HALF_DUPLEX_STDIN_MAX = 128 * 1024
 
 local packet     = require('hull.ssh.packet')
 local kexinit    = require('hull.ssh.kexinit')
@@ -67,16 +83,24 @@ end
 
 -- Pull at least `n` bytes into the buffer. A short read is the normal case.
 function Transport:fill(n)
-    while #self.inbuf < n do
-        local chunk, err = self.stream:read(n - #self.inbuf)
+    if #self.inbuf >= n then return end
+    -- Gather into a table and join once. The stream is free to return SHORT
+    -- reads, and does; appending each one onto a growing string makes filling
+    -- a packet quadratic in its size, which for a 32 KiB packet arriving in
+    -- small pieces is hundreds of megabytes of copying for 32 KiB of data.
+    local parts, have = { self.inbuf }, #self.inbuf
+    while have < n do
+        local chunk, err = self.stream:read(n - have)
         if chunk == nil then
             error("ssh: read failed: " .. tostring(err))
         end
         if chunk == "" then
             error("ssh: connection closed by peer")
         end
-        self.inbuf = self.inbuf .. chunk
+        parts[#parts + 1] = chunk
+        have = have + #chunk
     end
+    self.inbuf = table.concat(parts)
 end
 
 function Transport:take(n)
@@ -310,6 +334,33 @@ function Transport:open_session()
     return nil, { code = "no_channel_response" }
 end
 
+-- Read and discard what the peer still has to say about a channel we have
+-- given up on, up to and including its CHANNEL_CLOSE.
+--
+-- RFC 4254 section 5.3 makes the exchange symmetric: sending CHANNEL_CLOSE
+-- does not end it, the peer's CHANNEL_CLOSE does. Until then the peer may
+-- still be sending data it produced before it saw ours. Those bytes are on
+-- the one connection everything else shares, so not reading them here means
+-- reading them THERE - inside the next command, which raises because they
+-- name a channel it does not own.
+--
+-- Bounded, and tolerant of a read that fails: this runs on a path that is
+-- already handling a failure, and must not turn it into a hang or a second
+-- error that buries the first.
+function Transport:drain_channel(ch)
+    if ch.closed then return end
+    for _ = 1, 10000 do
+        local ok, m = pcall(function()
+            return channel.parse(self:next_message())
+        end)
+        if not ok then return end
+        if m.recipient == ch.local_id then
+            pcall(function() ch:handle(m) end)
+            if m.type == "close" then return end
+        end
+    end
+end
+
 -- Wait for the reply to a channel request.
 --
 -- A window adjust can arrive first: replies interleave, and assuming the next
@@ -353,9 +404,23 @@ function Transport:exec(command, opts)
     local ch, cerr = self:open_session()
     if not ch then return nil, cerr end
 
+    -- Any exit that does not run to the peer's CHANNEL_CLOSE has to close AND
+    -- drain, because the peer's messages for this channel are still in
+    -- flight. Leaving them unread hands them to whatever reads next on this
+    -- connection, which is the NEXT channel: it sees a message addressed to
+    -- an id it does not own and raises. Returning early without draining is
+    -- how one aborted command breaks every command after it.
+    local function abort(reason)
+        pcall(function()
+            self:send_packet(channel.build_close(ch.remote_id))
+            self:drain_channel(ch)
+        end)
+        return nil, reason
+    end
+
     self:send_packet(channel.build_exec(ch.remote_id, command))
     if not self:await_channel_reply(ch) then
-        return nil, { code = "exec_refused", detail = command }
+        return abort({ code = "exec_refused", detail = command })
     end
 
     local out, errout = {}, {}
@@ -391,15 +456,40 @@ function Transport:exec(command, opts)
         return m
     end
 
+    -- Consume whatever has ALREADY arrived, without waiting for more.
+    --
+    -- Writing a large stdin to a command that is writing a large stdout
+    -- deadlocks if the two directions are never interleaved: both peers fill
+    -- the operating system's buffers and then block, each waiting for the
+    -- other to read. Measured against OpenSSH on loopback, the wall is around
+    -- 256 KiB of combined in-flight bytes - four 64 KiB socket buffers.
+    --
+    -- Interleaving needs to know whether a read would BLOCK, which a plain
+    -- read cannot tell us: a command like `find /c /v ""` produces nothing
+    -- until its input is closed, so reading on a fixed schedule deadlocks
+    -- the other way round. So this is capability-detected. A stream that can
+    -- answer `readable()` gets true duplex; one that cannot is bounded below
+    -- instead (see the guard after the write loop).
+    local function drain_ready()
+        local probe = self.stream.readable
+        if not probe then return 0 end
+        local n = 0
+        while probe(self.stream) do
+            local m = pump()
+            n = n + 1
+            if overflow or m.type == "close" then break end
+        end
+        return n
+    end
+
     local function drive()
         if stdin then
             local sent = 1
+            local unread = 0
             while sent <= #stdin and not ch.closed do
                 local room = ch:sendable()
-                -- Only the peer can make room, by granting window. Reading
-                -- while blocked is not merely polite: a command that writes
-                -- as it reads would otherwise deadlock against its own
-                -- unread output.
+                -- Zero room means the peer has granted nothing more, and only
+                -- the peer can change that, so blocking here is correct.
                 while room <= 0 and not ch.closed do
                     pump()
                     if overflow then return { code = "output_too_large",
@@ -410,6 +500,22 @@ function Transport:exec(command, opts)
                 local chunk = stdin:sub(sent, sent + room - 1)
                 self:send_packet(ch:data_message(chunk))
                 sent = sent + #chunk
+                unread = unread + #chunk
+
+                if drain_ready() > 0 then
+                    if overflow then return { code = "output_too_large",
+                                              limit = limit } end
+                    unread = 0
+                elseif not self.stream.readable
+                       and unread > HALF_DUPLEX_STDIN_MAX then
+                    -- Past this the next write can wedge against output we
+                    -- are not reading, and the caller would see a stalled
+                    -- connection with no explanation. Say so instead.
+                    return { code = "stdin_too_large",
+                             limit = HALF_DUPLEX_STDIN_MAX,
+                             detail = "this stream cannot interleave reads "
+                                      .. "with writes; use sftp for bulk data" }
+                end
             end
             if not ch.closed then
                 self:send_packet(channel.build_eof(ch.remote_id))
@@ -434,13 +540,16 @@ function Transport:exec(command, opts)
     end
 
     local ok, failure = pcall(drive)
-    if not ok or failure then
-        -- A raising callback, or a refused command, must not leave the
-        -- channel half-open behind it.
-        pcall(function() self:send_packet(channel.build_close(ch.remote_id)) end)
-        if not ok then error(failure, 0) end
-        return nil, failure
+    if not ok then
+        -- A raising callback must not leave the channel half-open, nor its
+        -- residue in the read path, just because the error came from above.
+        pcall(function()
+            self:send_packet(channel.build_close(ch.remote_id))
+            self:drain_channel(ch)
+        end)
+        error(failure, 0)
     end
+    if failure then return abort(failure) end
     self:send_packet(channel.build_close(ch.remote_id))
 
     local res = ch:result()

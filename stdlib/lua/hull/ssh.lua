@@ -76,6 +76,12 @@ Conn.__index = Conn
 --- `opts.stdin` is a string written to the command before its output is
 --- drained, then closed. `opts.max_output` (default 8 MiB) bounds only what
 --- is accumulated.
+---
+--- Writing a large stdin to a command that is simultaneously writing a large
+--- stdout needs the two directions interleaved, which the stream can only do
+--- if it can say whether a read would block. Where it cannot, stdin is capped
+--- at 128 KiB and a larger one fails with `stdin_too_large` rather than
+--- stalling. Bulk data belongs in `conn:sftp()` either way.
 function Conn:exec(command, opts) return self.t:exec(command, opts) end
 
 --- Open an SFTP session. Paths travel inside the subsystem as

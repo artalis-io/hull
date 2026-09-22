@@ -349,6 +349,38 @@ test("a stdout callback that raises closes the channel", function()
               "the channel must not be left half open behind it:")
 end)
 
+test("a stream that cannot interleave bounds stdin instead of deadlocking", function()
+    -- Writing megabytes to a command that is writing megabytes back wedges
+    -- both sides on full buffers. A stream with no readable() cannot avoid
+    -- that, so it says so rather than hanging.
+    local s = fake_stream(conf(4 * 1024 * 1024, 32768) .. ok_reply()
+                          .. status(0) .. eof() .. fin(), 4096)
+    local t = transport.new(s, stub_crypto())
+    local r, err = t:exec("cat", { stdin = string.rep("y", 512 * 1024) })
+    assert_eq(r, nil)
+    assert_eq(err.code, "stdin_too_large")
+    assert_eq(has_type(s, 97), true, "and it closes the channel behind it:")
+end)
+
+test("a stream that can say a read will not block interleaves instead", function()
+    -- Same size of stdin, but this stream answers readable(), so the two
+    -- directions interleave and there is no bound to apply.
+    local head = conf(4 * 1024 * 1024, 32768) .. ok_reply() .. data("mid-stream")
+    local s = fake_stream(head .. status(0) .. eof() .. fin(), 4096)
+    -- Ready only up to the mid-stream chunk; past that a read would wait,
+    -- which is exactly the case a fixed read schedule would deadlock on.
+    s._ready_until = #head
+    s.readable = function(self) return self._pos <= (self._ready_until or 0) end
+
+    local t = transport.new(s, stub_crypto())
+    local got = {}
+    local r = t:exec("cat", { stdin = string.rep("y", 512 * 1024),
+                              on_stdout = function(c) got[#got + 1] = c end })
+    assert_eq(r ~= nil and r.status, 0, "the command completed:")
+    assert_eq(got[1], "mid-stream", "and its output arrived DURING the write:")
+    assert_eq(has_type(s, 96), true, "stdin was still terminated with EOF:")
+end)
+
 test("a non-string stdin is refused rather than coerced", function()
     local s = fake_stream(conf() .. ok_reply() .. status(0) .. eof() .. fin(), 7)
     local t = transport.new(s, stub_crypto())
