@@ -62,40 +62,12 @@ end
 
 -- Fingerprints ------------------------------------------------------------
 
--- Standard base64, no padding. Implemented here rather than borrowed from
--- hull.crypto, which offers only the URL-safe alphabet: a fingerprint is read
--- aloud and compared against what ssh-keygen prints, so "nearly base64" is
--- worse than useless.
-local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-
-local function base64_nopad(data)
-    local out = {}
-    local n = #data
-    local i = 1
-    while i + 2 <= n do
-        local a, b, c = data:byte(i, i + 2)
-        local v = a * 65536 + b * 256 + c
-        out[#out + 1] = B64:sub((v >> 18) + 1, (v >> 18) + 1)
-                     .. B64:sub(((v >> 12) & 63) + 1, ((v >> 12) & 63) + 1)
-                     .. B64:sub(((v >> 6) & 63) + 1, ((v >> 6) & 63) + 1)
-                     .. B64:sub((v & 63) + 1, (v & 63) + 1)
-        i = i + 3
-    end
-    local rem = n - i + 1
-    if rem == 1 then
-        local a = data:byte(i)
-        local v = a * 16
-        out[#out + 1] = B64:sub((v >> 6) + 1, (v >> 6) + 1)
-                     .. B64:sub((v & 63) + 1, (v & 63) + 1)
-    elseif rem == 2 then
-        local a, b = data:byte(i, i + 1)
-        local v = a * 1024 + b * 4
-        out[#out + 1] = B64:sub((v >> 12) + 1, (v >> 12) + 1)
-                     .. B64:sub(((v >> 6) & 63) + 1, ((v >> 6) & 63) + 1)
-                     .. B64:sub((v & 63) + 1, (v & 63) + 1)
-    end
-    return table.concat(out)
-end
+-- Standard base64, not the URL-safe alphabet hull.crypto offers: a
+-- fingerprint is read aloud and compared against ssh-keygen output, so
+-- "nearly base64" is worse than useless. The implementation moved to
+-- hull.ssh.base64 once the key loader needed the decoder too; re-exported
+-- here because it is part of this module's tested surface.
+local base64_nopad = require('hull.ssh.base64').encode_nopad
 
 M.base64_nopad = base64_nopad
 
