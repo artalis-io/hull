@@ -233,6 +233,30 @@ test("encoding an oversized control frame is refused too", function()
     end, "a 126-byte ping")
 end)
 
+test("frame_size reports the whole frame from its header alone", function()
+    -- What lets the reader ask the transport for exactly what is missing
+    -- instead of appending short reads onto a growing buffer.
+    assert_eq(ws.frame_size(string.char(0x82, 5) .. "abcde"), 7)
+    assert_eq(ws.frame_size(string.char(0x82, 126) .. string.pack(">I2", 300)), 4 + 300)
+    assert_eq(ws.frame_size(string.char(0x82, 127) .. string.pack(">I8", 70000)),
+              10 + 70000)
+end)
+
+test("frame_size needs only the header, not the payload", function()
+    local head = string.char(0x82, 126) .. string.pack(">I2", 9999)
+    assert_eq(ws.frame_size(head), 4 + 9999, "no payload present:")
+    for _, cut in ipairs({ 0, 1, 2, 3 }) do
+        local f, why = ws.frame_size(head:sub(1, cut))
+        assert_eq(f, nil, "cut=" .. cut .. ":")
+        assert_eq(why, "need_more", "cut=" .. cut .. ":")
+    end
+end)
+
+test("frame_size refuses an absurd length before any bytes are waited for", function()
+    local head = string.char(0x82, 127) .. string.pack(">I8", 1 << 40)
+    assert_raises(function() ws.frame_size(head) end, "a terabyte frame")
+end)
+
 -- the stream adapter -----------------------------------------------------
 
 -- A fake transport: hands out `inbound` in short pieces, records writes.
@@ -377,6 +401,20 @@ test("close sends a close frame and closes the transport", function()
     local last = t.written[#t.written]
     assert_eq(last:byte(1) & 0x0F, ws.OP_CLOSE)
     assert_eq(t.closed, true)
+end)
+
+test("a frame dribbled out one byte at a time still assembles", function()
+    -- The pathological transport: read() returns a single byte each call.
+    local body = string.rep("z", 900)
+    local t = fake(handshake_ok(server_frame(ws.OP_BIN, body)), 1)
+    local s = ws.connect(t, { host = "h", random = stub_random, sha1 = stub_sha1 })
+    local got = {}
+    while true do
+        local piece = s:read(4096)
+        if piece == "" then break end
+        got[#got + 1] = piece
+    end
+    assert_eq(table.concat(got), body)
 end)
 
 -- Return results for C test harness
