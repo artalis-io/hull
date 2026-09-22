@@ -25,6 +25,9 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* ── Fixture ────────────────────────────────────────────────────────── */
 
@@ -599,6 +602,570 @@ UTEST(net_stream, the_user_pointer_round_trips_and_is_not_touched)
     ASSERT_EQ(hl_net_stream_user(s), NULL);
 
     hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+/* ── TLS ────────────────────────────────────────────────────────────────
+ *
+ * Driven by a FAKE KlTls rather than mbedTLS. What is under test is the state
+ * machine this file wraps around the vtable - when the handshake runs, what
+ * connect_result reports while it does, which call moves bytes, and the
+ * buffered-plaintext case below - and every one of those is reachable through
+ * a stub. Whether mbedTLS negotiates correctly is mbedTLS's concern, and is
+ * covered live against a real server.
+ *
+ * The fake passes bytes straight through to the socket, so a test can still
+ * assert against the real peer on the other end.
+ */
+
+typedef struct {
+    KlTls   base;              /* first: the session pointer IS the vtable */
+    int     handshakes_left;   /* WANT_* this many times, then OK          */
+    int     handshake_fails;
+    unsigned want;             /* what an unfinished handshake asks for    */
+    int     hostname_calls;
+    char    hostname[128];
+    int     shutdown_calls;
+    size_t  fake_pending;      /* plaintext the "engine" is sitting on     */
+    int     reads, writes;
+    int    *destroyed_flag;    /* outlives the session, for teardown tests */
+    int     eof_seen;          /* the -1 just returned was a clean close  */
+    int     clean_eof;         /* make the next read report one           */
+    int     hard_error;        /* make the next read report a failure     */
+} FakeTls;
+
+static void *fake_alloc_fn(void *ud, size_t n) { (void)ud; return malloc(n); }
+static void *fake_realloc_fn(void *ud, void *p, size_t o, size_t n)
+{ (void)ud; (void)o; return realloc(p, n); }
+static void  fake_free_fn(void *ud, void *p, size_t n) { (void)ud; (void)n; free(p); }
+
+static KlTlsResult fake_handshake(KlTls *self, KlSocketHandle fd)
+{
+    (void)fd;
+    FakeTls *f = (FakeTls *)self;
+    if (f->handshake_fails) return KL_TLS_ERROR;
+    if (f->handshakes_left > 0) {
+        f->handshakes_left--;
+        return f->want == HL_ASYNC_WRITE ? KL_TLS_WANT_WRITE : KL_TLS_WANT_READ;
+    }
+    return KL_TLS_OK;
+}
+
+static kl_ssize_t fake_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len)
+{
+    FakeTls *f = (FakeTls *)self;
+    f->reads++;
+    if (f->fake_pending) {
+        /* Served from the "engine", not the socket: this is exactly the case
+         * the pending() drain exists for. */
+        size_t n = f->fake_pending < len ? f->fake_pending : len;
+        memset(buf, 0x50, n);                     /* 'P' */
+        f->fake_pending -= n;
+        return (kl_ssize_t)n;
+    }
+    if (f->hard_error) { f->eof_seen = 0; return -1; }
+    if (f->clean_eof) {
+        /* What the mbedTLS adapter really does: a close_notify comes back as
+         * -1 with at_eof set, NOT as 0. The header's prose reads the other
+         * way, and following it turned every finished response into a
+         * transport error until a live server proved otherwise. */
+        f->eof_seen = 1;
+        return -1;
+    }
+    kl_ssize_t n = recv((int)fd, buf, len, 0);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;  /* WANT_READ */
+    if (n == 0) { f->eof_seen = 1; return -1; }
+    return n;
+}
+
+static int fake_at_eof(KlTls *self) { return ((FakeTls *)self)->eof_seen; }
+
+static kl_ssize_t fake_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len)
+{
+    FakeTls *f = (FakeTls *)self;
+    f->writes++;
+    kl_ssize_t n = send((int)fd, buf, len, 0);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;  /* WANT_WRITE */
+    return n;
+}
+
+static KlTlsResult fake_shutdown(KlTls *self, KlSocketHandle fd)
+{
+    (void)fd;
+    ((FakeTls *)self)->shutdown_calls++;
+    return KL_TLS_OK;
+}
+
+static size_t fake_pending_fn(KlTls *self) { return ((FakeTls *)self)->fake_pending; }
+static void   fake_reset(KlTls *self)      { (void)self; }
+
+static void fake_destroy(KlTls *self)
+{
+    FakeTls *f = (FakeTls *)self;
+    if (f->destroyed_flag) *f->destroyed_flag = 1;
+    free(f);
+}
+
+static int fake_set_hostname(KlTls *self, const char *host)
+{
+    FakeTls *f = (FakeTls *)self;
+    f->hostname_calls++;
+    snprintf(f->hostname, sizeof f->hostname, "%s", host ? host : "");
+    return 0;
+}
+
+/* What the factory builds. Set per test, then read back through g_fake_last. */
+static FakeTls  g_fake_template;
+static FakeTls *g_fake_last;
+static int      g_fake_no_hostname;   /* omit set_hostname from the vtable */
+
+static KlTls *fake_factory(KlTlsCtx *ctx, KlAllocator *alloc)
+{
+    (void)ctx; (void)alloc;
+    FakeTls *f = calloc(1, sizeof *f);
+    if (!f) return NULL;
+    *f = g_fake_template;
+    f->base.handshake    = fake_handshake;
+    f->base.read         = fake_read;
+    f->base.write        = fake_write;
+    f->base.shutdown     = fake_shutdown;
+    f->base.pending      = fake_pending_fn;
+    f->base.reset        = fake_reset;
+    f->base.destroy      = fake_destroy;
+    f->base.at_eof       = fake_at_eof;
+    f->base.set_hostname = g_fake_no_hostname ? NULL : fake_set_hostname;
+    g_fake_last = f;
+    return &f->base;
+}
+
+static KlAllocator g_fake_alloc;
+static KlTlsConfig g_fake_tlscfg;
+
+static void fake_tls_cfg(HlNetStreamConfig *cfg)
+{
+    memset(&g_fake_alloc, 0, sizeof g_fake_alloc);
+    g_fake_alloc.malloc  = fake_alloc_fn;
+    g_fake_alloc.realloc = fake_realloc_fn;
+    g_fake_alloc.free    = fake_free_fn;
+    memset(&g_fake_tlscfg, 0, sizeof g_fake_tlscfg);
+    g_fake_tlscfg.factory = fake_factory;
+    cfg->tls       = &g_fake_tlscfg;
+    cfg->tls_alloc = &g_fake_alloc;
+}
+
+/* Connect with TLS wired, pumping to a terminal connect result. */
+static int fix_open_tls(NetFix *f, HlNetStream **out, const char *sni, int *rc_out)
+{
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async        = f->ctx;
+    cfg.pool         = f->pool;
+    cfg.host         = "127.0.0.1";
+    cfg.port         = f->port;
+    cfg.connect_ms   = 5000;
+    cfg.tls_hostname = sni;
+    fake_tls_cfg(&cfg);
+
+    HlNetStream *s = NULL;
+    hl_net_stream_connect(&s, &cfg);
+    if (!s) return -1;
+    int rc = pump_connect(f, s, 400);
+    if (rc_out) *rc_out = rc;
+    *out = s;
+    return 0;
+}
+
+UTEST(net_stream, tls_handshake_completes_before_the_stream_is_usable)
+{
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_template.handshakes_left = 3;          /* three steps, not one  */
+    /* WANT_WRITE, because a connected socket is writable and the loop will
+     * therefore deliver readiness. A WANT_READ fake would wait on a peer that
+     * never speaks - which is a real hang, and has its own test below. */
+    g_fake_template.want = HL_ASYNC_WRITE;
+    g_fake_no_hostname = 0;
+
+    HlNetStream *s = NULL; int rc = 0;
+    ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
+    EXPECT_EQ(rc, HL_NET_OK);
+    /* It really took several steps rather than short-circuiting. */
+    EXPECT_EQ(g_fake_last->handshakes_left, 0);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, a_stalled_handshake_times_out_rather_than_parking_forever)
+{
+    /* The connect OP's deadline is cancelled the moment the TCP connection
+     * completes, and the handshake runs after that. Without a deadline of its
+     * own, a peer that accepts and then says nothing would park the caller
+     * forever. Found by a fake that asked for READ from a peer that never
+     * sends - which is exactly the real case. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_template.handshakes_left = 1000000;
+    g_fake_template.want = HL_ASYNC_READ;     /* nothing will ever arrive */
+    g_fake_no_hostname = 0;
+
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async = f.ctx; cfg.pool = f.pool; cfg.host = "127.0.0.1";
+    cfg.port = f.port;
+    cfg.connect_ms = 120;                     /* short, so the test is quick */
+    fake_tls_cfg(&cfg);
+
+    HlNetStream *s = NULL;
+    hl_net_stream_connect(&s, &cfg);
+    ASSERT_TRUE(s != NULL);
+
+    int rc = pump_connect(&f, s, 400);
+    EXPECT_EQ(rc, HL_NET_E_TIMEOUT);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, tls_connect_reports_again_while_the_handshake_runs)
+{
+    /* The whole reason the handshake runs inside the connect park: a caller
+     * must not be handed a stream whose first write would go nowhere. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_template.handshakes_left = 1000000;    /* never finishes */
+    g_fake_template.want = HL_ASYNC_READ;
+    g_fake_no_hostname = 0;
+
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async = f.ctx; cfg.pool = f.pool; cfg.host = "127.0.0.1";
+    cfg.port = f.port; cfg.connect_ms = 5000;
+    fake_tls_cfg(&cfg);
+
+    HlNetStream *s = NULL;
+    hl_net_stream_connect(&s, &cfg);
+    ASSERT_TRUE(s != NULL);
+    for (int i = 0; i < 20; i++) f.be->tick(f.ctx, 5);
+    EXPECT_EQ(hl_net_stream_connect_result(s), HL_NET_E_AGAIN);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, a_failed_tls_handshake_is_reported_as_tls_not_io)
+{
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_template.handshake_fails = 1;
+    g_fake_no_hostname = 0;
+
+    HlNetStream *s = NULL; int rc = 0;
+    ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
+    EXPECT_EQ(rc, HL_NET_E_TLS);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, tls_refuses_a_backend_that_cannot_verify_a_hostname)
+{
+    /* Negotiating an encrypted connection to a peer whose name was never
+     * checked is the failure TLS exists to prevent, so it fails closed. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_no_hostname = 1;
+
+    HlNetStream *s = NULL; int rc = 0;
+    ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
+    EXPECT_EQ(rc, HL_NET_E_TLS);
+
+    g_fake_no_hostname = 0;
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, the_certificate_name_defaults_to_the_host)
+{
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_no_hostname = 0;
+
+    HlNetStream *s = NULL; int rc = 0;
+    ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
+    EXPECT_EQ(rc, HL_NET_OK);
+    EXPECT_EQ(g_fake_last->hostname_calls, 1);
+    EXPECT_STREQ(g_fake_last->hostname, "127.0.0.1");
+    hl_net_stream_free(s);
+
+    /* ...and an explicit name wins, which is what a caller reaching an
+     * address while expecting a name needs. */
+    HlNetStream *s2 = NULL;
+    ASSERT_EQ(fix_open_tls(&f, &s2, "edge.example.com", &rc), 0);
+    EXPECT_STREQ(g_fake_last->hostname, "edge.example.com");
+    hl_net_stream_free(s2);
+
+    fix_free(&f);
+}
+
+UTEST(net_stream, tls_moves_bytes_through_the_session_not_the_socket)
+{
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_no_hostname = 0;
+
+    HlNetStream *s = NULL; int rc = 0;
+    ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
+    ASSERT_EQ(rc, HL_NET_OK);
+    ASSERT_EQ(fix_accept(&f), 0);
+
+    ASSERT_EQ(hl_net_stream_write(s, "through-tls", 11), HL_NET_OK);
+    char got[32] = {0};
+    ASSERT_TRUE(recv(f.peer_fd, got, sizeof got, 0) == 11);
+    EXPECT_STREQ(got, "through-tls");
+    EXPECT_GT(g_fake_last->writes, 0);
+
+    ASSERT_TRUE(send(f.peer_fd, "back-again", 10, 0) == 10);
+    char in[32] = {0};
+    long n = HL_NET_E_AGAIN;
+    for (int i = 0; i < 200 && n == HL_NET_E_AGAIN; i++) {
+        n = hl_net_stream_read(s, in, sizeof in);
+        if (n == HL_NET_E_AGAIN) f.be->tick(f.ctx, 20);
+    }
+    ASSERT_EQ(n, 10L);
+    EXPECT_STREQ(in, "back-again");
+    EXPECT_GT(g_fake_last->reads, 0);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, a_write_during_the_handshake_is_queued_and_sent_after)
+{
+    /* OK from write means ADMITTED TO THE QUEUE, not "on the wire" - already
+     * true for plaintext whenever the socket is busy. The handshake is the
+     * same case: nothing may be encrypted yet, so the bytes wait, and the
+     * flush that follows the handshake carries them. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_template.handshakes_left = 2;
+    g_fake_template.want = HL_ASYNC_WRITE;
+    g_fake_no_hostname = 0;
+
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async = f.ctx; cfg.pool = f.pool; cfg.host = "127.0.0.1";
+    cfg.port = f.port; cfg.connect_ms = 5000;
+    fake_tls_cfg(&cfg);
+
+    HlNetStream *s = NULL;
+    hl_net_stream_connect(&s, &cfg);
+    ASSERT_TRUE(s != NULL);
+
+    /* Wait for the TCP connect, then write while the handshake is mid-flight. */
+    for (int i = 0; i < 50 && hl_net_stream_connect_result(s) == HL_NET_E_AGAIN; i++) {
+        if (hl_net_stream_write(s, "early", 5) == HL_NET_OK) break;
+        f.be->tick(f.ctx, 5);
+    }
+
+    int rc = pump_connect(&f, s, 400);
+    ASSERT_EQ(rc, HL_NET_OK);
+    ASSERT_EQ(fix_accept(&f), 0);
+
+    char got[16] = {0};
+    ssize_t n = 0;
+    for (int i = 0; i < 200 && n <= 0; i++) {
+        n = recv(f.peer_fd, got, sizeof got, MSG_DONTWAIT);
+        if (n <= 0) f.be->tick(f.ctx, 20);
+    }
+    EXPECT_TRUE(n == 5);
+    EXPECT_STREQ(got, "early");
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, buffered_plaintext_is_drained_without_socket_readiness)
+{
+    /* The classic edge-triggered TLS stall: the engine decrypted several
+     * records out of one segment, so the bytes sit inside the session and the
+     * socket never becomes readable again. A reader that only armed a watcher
+     * would wait forever.
+     *
+     * The peer sends NOTHING here, so anything read can only have come from
+     * pending(), and no tick is pumped either. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_no_hostname = 0;
+
+    HlNetStream *s = NULL; int rc = 0;
+    ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
+    ASSERT_EQ(rc, HL_NET_OK);
+    ASSERT_EQ(fix_accept(&f), 0);
+
+    g_fake_last->fake_pending = 24;
+
+    char in[64] = {0};
+    long n = hl_net_stream_read(s, in, sizeof in);
+    ASSERT_EQ(n, 24L);
+    for (int i = 0; i < 24; i++) EXPECT_EQ((unsigned char)in[i], 0x50u);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, a_clean_tls_close_is_eof_not_a_transport_error)
+{
+    /* The mbedTLS adapter reports close_notify as -1 with at_eof set, not as
+     * 0. Reading -1 as a hard error turned every finished response into
+     * "transport error" - which the fake, written to the header's prose
+     * rather than the adapter, happily agreed with until a live server did
+     * not. The fake now follows the adapter. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_no_hostname = 0;
+
+    HlNetStream *s = NULL; int rc = 0;
+    ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
+    ASSERT_EQ(rc, HL_NET_OK);
+    ASSERT_EQ(fix_accept(&f), 0);
+
+    /* A real close_notify arrives on a socket that then closes, which is what
+     * delivers the readiness that drives the read. */
+    g_fake_last->clean_eof = 1;
+    close(f.peer_fd); f.peer_fd = -1;
+
+    char in[32];
+    long n = HL_NET_E_AGAIN;
+    for (int i = 0; i < 200 && n == HL_NET_E_AGAIN; i++) {
+        n = hl_net_stream_read(s, in, sizeof in);
+        if (n == HL_NET_E_AGAIN) f.be->tick(f.ctx, 20);
+    }
+    EXPECT_EQ(n, 0L);                       /* clean EOF, not HL_NET_E_IO */
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, a_tls_transport_error_is_still_an_error)
+{
+    /* The other half of the same branch: -1 WITHOUT at_eof must not be
+     * mistaken for a tidy close. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_no_hostname = 0;
+
+    HlNetStream *s = NULL; int rc = 0;
+    ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
+    ASSERT_EQ(rc, HL_NET_OK);
+    ASSERT_EQ(fix_accept(&f), 0);
+
+    /* Peer vanishes and the session reports a hard failure. */
+    close(f.peer_fd); f.peer_fd = -1;
+    g_fake_last->hard_error = 1;
+
+    char in[32];
+    long n = HL_NET_E_AGAIN;
+    for (int i = 0; i < 200 && n == HL_NET_E_AGAIN; i++) {
+        n = hl_net_stream_read(s, in, sizeof in);
+        if (n == HL_NET_E_AGAIN) f.be->tick(f.ctx, 20);
+    }
+    EXPECT_EQ(n, (long)HL_NET_E_IO);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, closing_a_tls_stream_takes_the_session_with_it)
+{
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_no_hostname = 0;
+    int destroyed = 0;
+
+    HlNetStream *s = NULL; int rc = 0;
+    ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
+    ASSERT_EQ(rc, HL_NET_OK);
+    g_fake_last->destroyed_flag = &destroyed;
+
+    hl_net_stream_close(s);
+    EXPECT_EQ(destroyed, 1);
+    EXPECT_GT(g_fake_last->shutdown_calls, 0);   /* close_notify attempted */
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, asking_for_tls_without_the_means_is_refused_not_downgraded)
+{
+    /* A caller that wanted an encrypted stream and quietly got a plaintext one
+     * would never find out. The creators in tls_transport.h return NULL when
+     * TLS is not composed, so this is the path a TLS-less build takes. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    KlAllocator alloc;
+    memset(&alloc, 0, sizeof alloc);
+    alloc.malloc  = fake_alloc_fn;
+    alloc.realloc = fake_realloc_fn;
+    alloc.free    = fake_free_fn;
+
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async = f.ctx; cfg.pool = f.pool; cfg.host = "127.0.0.1";
+    cfg.port = f.port; cfg.connect_ms = 5000;
+
+    KlTlsConfig no_factory;
+    memset(&no_factory, 0, sizeof no_factory);
+    cfg.tls = &no_factory; cfg.tls_alloc = &alloc;
+    HlNetStream *s = NULL;
+    EXPECT_EQ(hl_net_stream_connect(&s, &cfg), HL_NET_E_INVAL);
+    EXPECT_TRUE(s == NULL);
+
+    KlTlsConfig with_factory;
+    memset(&with_factory, 0, sizeof with_factory);
+    with_factory.factory = fake_factory;
+    cfg.tls = &with_factory; cfg.tls_alloc = NULL;      /* no allocator */
+    EXPECT_EQ(hl_net_stream_connect(&s, &cfg), HL_NET_E_INVAL);
+    EXPECT_TRUE(s == NULL);
+
     fix_free(&f);
 }
 
