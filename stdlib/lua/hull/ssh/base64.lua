@@ -63,21 +63,19 @@ function M.decode(s)
     local out = {}
     for i = 1, #s do
         local c = s:byte(i)
-        if c == 61 then          -- '=' ends the data
-            break
-        elseif c == 32 or c == 9 or c == 10 or c == 13 then
-            -- whitespace between lines
-        else
-            local v = REV[c]
-            if v < 0 then
-                error("ssh.base64: invalid character at offset " .. tostring(i), 2)
-            end
+        if c == 61 then break end          -- '=' ends the data
+        local v = REV[c]
+        if v >= 0 then
             acc = (acc << 6) | v
             bits = bits + 6
             if bits >= 8 then
                 bits = bits - 8
                 out[#out + 1] = string.char((acc >> bits) & 0xFF)
             end
+        elseif not (c == 32 or c == 9 or c == 10 or c == 13) then
+            -- Whitespace is the only thing skipped; anything else is refused
+            -- rather than ignored.
+            error("ssh.base64: invalid character at offset " .. tostring(i), 2)
         end
     end
     return table.concat(out)
