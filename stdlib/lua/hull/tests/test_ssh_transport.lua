@@ -221,5 +221,141 @@ test("the client identification string is sent after the server one", function()
     assert_eq(s.written[1], "SSH-2.0-Hull_x\r\n")
 end)
 
+-- exec ----------------------------------------------------------------------
+--
+-- exec is driven here over a PLAINTEXT fake, which is legal before NEWKEYS
+-- and lets the channel sequencing be tested without a key exchange. What is
+-- under test is the loop: whether output is streamed or accumulated, whether
+-- the cap applies to the right stream, and whether stdin respects the window.
+
+local function conf(window, maxp)
+    return plain(wire.writer():byte(91):uint32(0):uint32(7)
+                 :uint32(window or 65536):uint32(maxp or 32768):build())
+end
+local function ok_reply() return plain(wire.writer():byte(99):uint32(0):build()) end
+local function data(s)   return plain(wire.writer():byte(94):uint32(0):string(s):build()) end
+local function errdata(s)
+    return plain(wire.writer():byte(95):uint32(0):uint32(1):string(s):build())
+end
+local function status(code)
+    return plain(wire.writer():byte(98):uint32(0):string("exit-status")
+                 :boolean(false):uint32(code):build())
+end
+local function grant(n) return plain(wire.writer():byte(93):uint32(0):uint32(n):build()) end
+local function eof()    return plain(wire.writer():byte(96):uint32(0):build()) end
+local function fin()    return plain(wire.writer():byte(97):uint32(0):build()) end
+
+-- The message type of a packet we wrote: 4 length, 1 padding length, then the
+-- payload, whose first byte is the type.
+local function written_types(s)
+    local types = {}
+    for _, p in ipairs(s.written) do
+        if #p >= 6 then types[#types + 1] = p:byte(6) end
+    end
+    return types
+end
+
+local function has_type(s, want)
+    for _, ty in ipairs(written_types(s)) do
+        if ty == want then return true end
+    end
+    return false
+end
+
+test("exec streams stdout to a callback as it arrives", function()
+    local s = fake_stream(conf() .. ok_reply() .. data("one\n") .. data("two\n")
+                          .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local chunks = {}
+    local r = t:exec("cmd", { on_stdout = function(c) chunks[#chunks + 1] = c end })
+    assert_eq(#chunks, 2, "one callback per inbound chunk:")
+    assert_eq(chunks[1], "one\n")
+    assert_eq(chunks[2], "two\n")
+    -- A streamed stream is never also accumulated; that is the whole point.
+    assert_eq(r.stdout, "", "streamed stdout must not be buffered too:")
+    assert_eq(r.status, 0)
+end)
+
+test("a streamed command is not bounded by max_output", function()
+    -- The cap exists because accumulating is unbounded. Streaming is not, so
+    -- a caller watching a long-running command must not trip it.
+    local big = string.rep("x", 4096)
+    local s = fake_stream(conf() .. ok_reply() .. data(big) .. data(big) .. data(big)
+                          .. status(0) .. eof() .. fin(), 64)
+    local t = transport.new(s, stub_crypto())
+    local seen = 0
+    local r = t:exec("cmd", { max_output = 16,
+                              on_stdout = function(c) seen = seen + #c end })
+    assert_eq(seen, 3 * 4096)
+    assert_eq(r.status, 0)
+end)
+
+test("without a callback the output cap still applies", function()
+    local big = string.rep("x", 4096)
+    local s = fake_stream(conf() .. ok_reply() .. data(big) .. data(big)
+                          .. status(0) .. eof() .. fin(), 64)
+    local t = transport.new(s, stub_crypto())
+    local r, err = t:exec("cmd", { max_output = 16 })
+    assert_eq(r, nil)
+    assert_eq(err.code, "output_too_large")
+    assert_eq(has_type(s, 97), true, "an aborted exec must close its channel:")
+end)
+
+test("streaming one stream still accumulates the other", function()
+    local s = fake_stream(conf() .. ok_reply() .. data("out") .. errdata("err")
+                          .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local got = {}
+    local r = t:exec("cmd", { on_stdout = function(c) got[#got + 1] = c end })
+    assert_eq(got[1], "out")
+    assert_eq(r.stdout, "")
+    assert_eq(r.stderr, "err", "stderr has no callback, so it is buffered:")
+end)
+
+test("stdin is written to the command and followed by EOF", function()
+    local s = fake_stream(conf() .. ok_reply() .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cat", { stdin = "hello" })
+    assert_eq(r.status, 0)
+    assert_eq(has_type(s, 94), true, "stdin must be sent as CHANNEL_DATA:")
+    assert_eq(has_type(s, 96), true, "stdin must be terminated with CHANNEL_EOF:")
+    local joined = table.concat(s.written)
+    assert_eq(joined:find("hello", 1, true) ~= nil, true)
+end)
+
+test("stdin larger than the window waits for the peer to grant more", function()
+    -- A client that wrote past the advertised window would be killed by the
+    -- server. Splitting is the transport's job, not the caller's.
+    local s = fake_stream(conf(4, 4) .. ok_reply() .. grant(4)
+                          .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cat", { stdin = "abcdefgh" })
+    assert_eq(r.status, 0)
+    local sent = {}
+    for _, p in ipairs(s.written) do
+        if #p >= 6 and p:byte(6) == 94 then sent[#sent + 1] = p:sub(11) end
+    end
+    assert_eq(#sent, 2, "eight bytes through a four byte window is two writes:")
+end)
+
+test("a stdout callback that raises closes the channel", function()
+    local s = fake_stream(conf() .. ok_reply() .. data("boom")
+                          .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    assert_raises(function()
+        t:exec("cmd", { on_stdout = function() error("caller blew up") end })
+    end, "a raising callback should propagate")
+    assert_eq(has_type(s, 97), true,
+              "the channel must not be left half open behind it:")
+end)
+
+test("a non-string stdin is refused rather than coerced", function()
+    local s = fake_stream(conf() .. ok_reply() .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r, err = t:exec("cat", { stdin = 42 })
+    assert_eq(r, nil)
+    assert_eq(err.code, "bad_stdin")
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

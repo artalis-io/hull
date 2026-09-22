@@ -13,7 +13,9 @@
 --       key  = key_file_contents,
 --       trust = my_store,              -- get/put/forget, app-owned
 --   }
---   local r = conn:exec("uname -a")    -- { status, stdout, stderr }
+--   local r = conn:exec("uname -a")    -- { status, signal, stdout, stderr }
+--   conn:exec("journalctl -fu app",    -- or stream it, chunk by chunk
+--             { on_stdout = print })
 --   conn:close()
 --
 -- Reaching the host at all requires the manifest to say so:
@@ -58,6 +60,22 @@ end
 local Conn = {}
 Conn.__index = Conn
 
+--- Run a command. Returns { status, signal, stdout, stderr }, or nil plus a
+--- reason table.
+---
+--- By default output is accumulated and handed back whole, which suits a
+--- command that prints a line and exits. Pass `on_stdout` / `on_stderr` to
+--- receive each chunk as it arrives instead: that is what makes a deploy log,
+--- a `tail -f`, or output too large to hold in memory usable. A stream with a
+--- callback is not also accumulated, so its field comes back empty.
+---
+---   conn:exec("journalctl -fu app", {
+---       on_stdout = function(chunk) io_write(chunk) end,
+---   })
+---
+--- `opts.stdin` is a string written to the command before its output is
+--- drained, then closed. `opts.max_output` (default 8 MiB) bounds only what
+--- is accumulated.
 function Conn:exec(command, opts) return self.t:exec(command, opts) end
 
 --- Open an SFTP session. Paths travel inside the subsystem as

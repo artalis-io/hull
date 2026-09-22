@@ -284,6 +284,25 @@ channel_rejected      transfer_failed       connection_closed
 successful call whose `exit_status` field is non-zero, exactly as the brief
 requires.
 
+### 9a. exec delivers output two ways
+
+Accumulating a command's output and returning it whole is convenient for
+`uname -a` and wrong for everything else: the caller sees nothing until the
+process exits, and the output has to fit in memory. So each stream is
+delivered one of two ways, chosen per stream:
+
+```lua
+conn:exec("uname -a")                          -- accumulate; r.stdout
+conn:exec("journalctl -fu app",                -- stream; r.stdout stays empty
+          { on_stdout = function(chunk) ... end })
+```
+
+A stream with a callback is never also accumulated, so `max_output` (8 MiB by
+default) bounds only the accumulating path. `opts.stdin` is written to the
+command and closed before its output is drained, which is how a command is fed
+data without a shell redirect - the same reason SFTP exists rather than
+`cat > file`.
+
 ## 10. Host key exposure
 
 The host key object is available to the caller before any trust decision, and

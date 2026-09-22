@@ -325,8 +325,31 @@ function Transport:await_channel_reply(ch)
 end
 
 --- Run a command. Returns { status, signal, stdout, stderr }.
+-- Run a command and return { status, signal, stdout, stderr }.
+--
+-- Each output stream is delivered one of two ways, chosen per stream:
+--
+--   opts.on_stdout / opts.on_stderr   a chunk at a time, as it arrives
+--   (neither given)                   accumulated, returned at the end
+--
+-- Accumulating is convenient for a command that prints a line and exits, but
+-- it is the wrong shape for anything else: a caller watching a deploy sees
+-- nothing until the process ends, and the output has to fit in memory, which
+-- is why that path needs `max_output` and the streaming one does not. A
+-- callback stream is never accumulated, so `stdout` comes back empty for it.
+--
+-- opts.stdin is written to the command before its output is drained, then
+-- EOF is sent. That is the path for feeding a command data without a shell
+-- redirect, the same way sftp writes a file without shell quoting.
 function Transport:exec(command, opts)
     opts = opts or {}
+    local on_stdout, on_stderr = opts.on_stdout, opts.on_stderr
+
+    local stdin = opts.stdin
+    if stdin ~= nil and type(stdin) ~= "string" then
+        return nil, { code = "bad_stdin", detail = type(stdin) }
+    end
+
     local ch, cerr = self:open_session()
     if not ch then return nil, cerr end
 
@@ -337,35 +360,88 @@ function Transport:exec(command, opts)
 
     local out, errout = {}, {}
     local limit = opts.max_output or (8 * 1024 * 1024)
-    local total = 0
+    local buffered = 0
+    local overflow = false
 
-    for _ = 1, 1000000 do
+    -- `buffered` counts only what is held in memory, so a caller streaming
+    -- stdout and accumulating stderr has the cap applied to stderr alone.
+    local function deliver(m)
+        local cb, into
+        if m.type == "data" then
+            cb, into = on_stdout, out
+        elseif m.type == "extended_data" and m.stderr then
+            cb, into = on_stderr, errout
+        else
+            return
+        end
+        if cb then cb(m.data) return end
+        buffered = buffered + #m.data
+        if buffered > limit then overflow = true return end
+        into[#into + 1] = m.data
+    end
+
+    -- One message: account for it, hand off its payload, and top up the
+    -- receive window so a streaming sender never stalls waiting on us.
+    local function pump()
         local m = channel.parse(self:next_message())
         ch:handle(m)
-
-        if m.type == "data" or (m.type == "extended_data" and m.stderr) then
-            total = total + #m.data
-            if total > limit then
-                -- The channel window bounds what is in flight, not what a
-                -- command can produce over time; a caller that asked for a
-                -- command should not be handed unbounded memory.
-                self:send_packet(channel.build_close(ch.remote_id))
-                return nil, { code = "output_too_large", limit = limit }
-            end
-            local into = m.type == "data" and out or errout
-            into[#into + 1] = m.data
-        elseif m.type == "close" then
-            -- RFC 4254 section 5.3: a side that receives CHANNEL_CLOSE must
-            -- send one back unless it already has. Breaking without replying
-            -- leaves the channel half-open on the server for the life of the
-            -- connection, which matters once a tool runs many commands.
-            self:send_packet(channel.build_close(ch.remote_id))
-            break
-        end
-
+        deliver(m)
         local adj = ch:window_adjustment()
         if adj then self:send_packet(adj) end
+        return m
     end
+
+    local function drive()
+        if stdin then
+            local sent = 1
+            while sent <= #stdin and not ch.closed do
+                local room = ch:sendable()
+                -- Only the peer can make room, by granting window. Reading
+                -- while blocked is not merely polite: a command that writes
+                -- as it reads would otherwise deadlock against its own
+                -- unread output.
+                while room <= 0 and not ch.closed do
+                    pump()
+                    if overflow then return { code = "output_too_large",
+                                              limit = limit } end
+                    room = ch:sendable()
+                end
+                if ch.closed then break end
+                local chunk = stdin:sub(sent, sent + room - 1)
+                self:send_packet(ch:data_message(chunk))
+                sent = sent + #chunk
+            end
+            if not ch.closed then
+                self:send_packet(channel.build_eof(ch.remote_id))
+            end
+        end
+
+        for _ = 1, 1000000 do
+            local m = pump()
+            if overflow then
+                return { code = "output_too_large", limit = limit }
+            end
+            if m.type == "close" then
+                -- RFC 4254 section 5.3: a side that receives CHANNEL_CLOSE
+                -- must send one back unless it already has. Breaking without
+                -- replying leaves the channel half-open on the server for the
+                -- life of the connection, which matters once a tool runs many
+                -- commands.
+                break
+            end
+        end
+        return nil
+    end
+
+    local ok, failure = pcall(drive)
+    if not ok or failure then
+        -- A raising callback, or a refused command, must not leave the
+        -- channel half-open behind it.
+        pcall(function() self:send_packet(channel.build_close(ch.remote_id)) end)
+        if not ok then error(failure, 0) end
+        return nil, failure
+    end
+    self:send_packet(channel.build_close(ch.remote_id))
 
     local res = ch:result()
     return { status = res.status, signal = res.signal,
