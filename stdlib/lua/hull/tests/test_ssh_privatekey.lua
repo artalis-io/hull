@@ -1,10 +1,10 @@
--- test_ssh_privatekey.lua - Tests for hull.ssh.base64 and hull.ssh.privatekey
+-- test_ssh_privatekey.lua - Tests for hull.encoding.base64 and hull.ssh.privatekey
 --
 -- The key file is BUILT here rather than embedded, so the repository carries
 -- no blob that looks like a private key to a secret scanner, and so each
 -- malformation can be produced exactly.
 
-local base64     = require('hull.ssh.base64')
+local base64     = require('hull.encoding.base64')
 local privatekey = require('hull.ssh.privatekey')
 local wire       = require('hull.ssh.wire')
 

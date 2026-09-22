@@ -1,4 +1,4 @@
--- hull.ssh.websocket - a WebSocket client that behaves like a byte stream.
+-- hull.web.ws-stream - a WebSocket client that behaves like a byte stream.
 --
 -- RFC 6455, client side only. Turns a stream (read/write/close) carrying a
 -- WebSocket into a stream carrying the bytes inside it, which is exactly the
@@ -23,11 +23,18 @@
 -- Nothing about the framing is Cloudflare-specific; the headers are just
 -- headers. This module knows about neither SSH nor Cloudflare.
 --
--- It lives under hull.ssh because the SSH stdlib is its only consumer, the
--- same reasoning that kept cap/net_stream.c private rather than publishing a
--- hull/net module. If a second consumer appears it should move.
+-- Sibling to hull/web/ws-client, and deliberately not the same thing. That
+-- one is MESSAGE oriented (on_message callbacks) and needs a running server,
+-- because it is driven by the event loop. This one is BYTE oriented and owns
+-- no loop at all: it reads and writes through a stream the caller supplies,
+-- which is what lets it work under app.main, where a fleet tool lives. They
+-- share a wire protocol and nothing else.
+--
+-- It holds no capability. The stream, and the random and sha1 functions, are
+-- all passed in - so this module cannot open a connection, only transform one
+-- it was handed.
 
-local base64 = require('hull.ssh.base64')
+local base64 = require('hull.encoding.base64')
 
 local M = {}
 
@@ -60,7 +67,7 @@ local spack, sunpack = string.pack, string.unpack
 function M.key(random_bytes)
     local raw = random_bytes(16)
     if type(raw) ~= "string" or #raw ~= 16 then
-        error("ssh.websocket: random_bytes must return 16 bytes", 2)
+        error("web.ws-stream: random_bytes must return 16 bytes", 2)
     end
     return base64.encode(raw)
 end
@@ -75,10 +82,10 @@ end
 -- duplicate name is possible where a protocol wants one.
 function M.build_request(opts)
     if type(opts.host) ~= "string" or opts.host == "" then
-        error("ssh.websocket: a host is required", 2)
+        error("web.ws-stream: a host is required", 2)
     end
     if type(opts.key) ~= "string" or opts.key == "" then
-        error("ssh.websocket: a key is required", 2)
+        error("web.ws-stream: a key is required", 2)
     end
     local lines = {
         "GET " .. (opts.path or "/") .. " HTTP/1.1",
@@ -92,7 +99,7 @@ function M.build_request(opts)
         -- A header carrying CR or LF would inject a line of its own, and the
         -- values here come from configuration that may come from env.
         if h:find("[\r\n]") then
-            error("ssh.websocket: header contains CR or LF: "
+            error("web.ws-stream: header contains CR or LF: "
                   .. h:gsub("[\r\n]", "?"), 2)
         end
         lines[#lines + 1] = h
@@ -147,10 +154,10 @@ M.apply_mask = apply_mask
 function M.encode(opcode, payload, mask)
     payload = payload or ""
     if type(mask) ~= "string" or #mask ~= 4 then
-        error("ssh.websocket: a 4-byte mask is required", 2)
+        error("web.ws-stream: a 4-byte mask is required", 2)
     end
     if opcode >= 0x8 and #payload > M.MAX_CONTROL then
-        error("ssh.websocket: a control frame carries at most 125 bytes", 2)
+        error("web.ws-stream: a control frame carries at most 125 bytes", 2)
     end
 
     local b1 = 0x80 | (opcode & 0x0F)          -- FIN set; no fragmentation
@@ -184,12 +191,12 @@ function M.decode(buf)
     if rsv ~= 0 then
         -- No extension was negotiated, so a reserved bit set means the peer
         -- is speaking something we did not agree to.
-        error("ssh.websocket: reserved bits set without an extension")
+        error("web.ws-stream: reserved bits set without an extension")
     end
     if masked then
         -- RFC 6455 section 5.1: a server MUST NOT mask. Accepting one would
         -- mean guessing at which side's rules apply.
-        error("ssh.websocket: server sent a masked frame")
+        error("web.ws-stream: server sent a masked frame")
     end
 
     if len == 126 then
@@ -199,23 +206,23 @@ function M.decode(buf)
         if #buf < pos + 7 then return nil, "need_more" end
         len = sunpack(">I8", buf, pos); pos = pos + 8
         if len < 0 then
-            error("ssh.websocket: frame length exceeds the representable range")
+            error("web.ws-stream: frame length exceeds the representable range")
         end
     end
 
     -- Bounded BEFORE waiting for the bytes, so a peer claiming a gigabyte
     -- costs nothing to refuse.
     if len > M.MAX_FRAME then
-        error("ssh.websocket: frame of " .. tostring(len)
+        error("web.ws-stream: frame of " .. tostring(len)
               .. " bytes exceeds the maximum")
     end
     if opcode >= 0x8 then
         if len > M.MAX_CONTROL then
-            error("ssh.websocket: control frame of " .. tostring(len)
+            error("web.ws-stream: control frame of " .. tostring(len)
                   .. " bytes exceeds 125")
         end
         if not fin then
-            error("ssh.websocket: control frame must not be fragmented")
+            error("web.ws-stream: control frame must not be fragmented")
         end
     end
 
@@ -255,7 +262,7 @@ function Stream:_pump()
                     pcall(function() self:_send(M.OP_CLOSE, frame.payload) end)
                 end
             else
-                error("ssh.websocket: unknown opcode " .. tostring(op))
+                error("web.ws-stream: unknown opcode " .. tostring(op))
             end
         else
             local chunk, err = self.s:read(self.readsize)
@@ -276,10 +283,10 @@ end
 function Stream:_send(opcode, payload)
     local mask = self.random(4)
     if type(mask) ~= "string" or #mask ~= 4 then
-        error("ssh.websocket: random_bytes must return 4 bytes")
+        error("web.ws-stream: random_bytes must return 4 bytes")
     end
     local ok, err = self.s:write(M.encode(opcode, payload, mask))
-    if not ok then error("ssh.websocket: write failed: " .. tostring(err)) end
+    if not ok then error("web.ws-stream: write failed: " .. tostring(err)) end
 end
 
 function Stream:read(n)
@@ -324,7 +331,7 @@ end
 --   opts.sha1     function(bytes) -> 20 raw digest bytes
 function M.connect(stream, opts)
     if type(opts.random) ~= "function" or type(opts.sha1) ~= "function" then
-        error("ssh.websocket: random and sha1 functions are required", 2)
+        error("web.ws-stream: random and sha1 functions are required", 2)
     end
 
     local key = M.key(opts.random)
