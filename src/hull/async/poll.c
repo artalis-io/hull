@@ -73,6 +73,18 @@ struct PollWatcher {
     unsigned          mask;
     HlAsyncWatcherFn  cb;
     void             *user;
+    /* Monotonic, assigned once at registration and never reused.
+     *
+     * tick() dispatches from a SNAPSHOT taken before poll(), and between the
+     * snapshot and the dispatch it runs completions and timers - which run
+     * application code, synchronously (shared/async.c resumes the coroutine
+     * inline). That code can close a connection, which deregisters this
+     * watcher and frees the object `user` points at. Comparing fd alone
+     * cannot detect it: the kernel reuses descriptor numbers immediately, so
+     * a freed stream's fd may already belong to a NEW watcher by the time the
+     * snapshot is walked. The epoch is what distinguishes "still the same
+     * registration" from "that slot has been through a close and a reopen". */
+    uint64_t          epoch;
 };
 
 /* ── Cross-thread completion ────────────────────────────────────────── */
@@ -114,6 +126,7 @@ struct HlAsyncBackendCtx {
     PollWatcher       *watchers;
     size_t             watcher_count;
     size_t             watcher_cap;
+    uint64_t           next_watcher_epoch;  /* always > 0; 0 = no watcher */
 
     /* Cross-thread completion queue */
     PollCompletion    *completions;
@@ -333,6 +346,7 @@ static int poll_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
     }
     ctx->watchers[ctx->watcher_count++] = (PollWatcher){
         .fd = fd, .mask = mask, .cb = cb, .user = user,
+        .epoch = ++ctx->next_watcher_epoch,
     };
     pthread_mutex_unlock(&ctx->lock);
     wakeup_write(ctx);
@@ -416,7 +430,9 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
 
     /* Snapshot watcher fd+mask so a callback that mutates the table
      * doesn't invalidate our pfd iteration. */
-    typedef struct { int fd; unsigned mask; HlAsyncWatcherFn cb; void *user; } Snap;
+    typedef struct {
+        int fd; unsigned mask; HlAsyncWatcherFn cb; void *user; uint64_t epoch;
+    } Snap;
     Snap *snaps = calloc(ctx->watcher_count, sizeof *snaps);
     if (ctx->watcher_count > 0 && !snaps) {
         free(pfds);
@@ -425,7 +441,7 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
     }
     for (size_t i = 0; i < ctx->watcher_count; i++) {
         PollWatcher *w = &ctx->watchers[i];
-        snaps[i] = (Snap){ w->fd, w->mask, w->cb, w->user };
+        snaps[i] = (Snap){ w->fd, w->mask, w->cb, w->user, w->epoch };
         pfds[i + 1].fd = w->fd;
         short ev = 0;
         if (w->mask & HL_ASYNC_READ)  ev |= POLLIN;
@@ -483,7 +499,14 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
     /* ── Step 6: dispatch ready FDs from the snapshot.
      * Walk the snapshot length (nfds - 1 entries; the wakeup pipe
      * occupies slot 0), not the live watcher count - the table may
-     * have grown or shrunk while a completion ran. */
+     * have grown or shrunk while a completion ran.
+     *
+     * That length rule keeps the INDEXING right. It is not enough on its own,
+     * because the snapshot also carries `user`, and steps 4 and 5 above run
+     * application code: a timer or a resumed coroutine that closes a
+     * connection deregisters its watcher and frees the object `user` points
+     * at, and dispatching the stale entry here is a use-after-free. So every
+     * entry is re-validated against the live table before it is invoked. */
     size_t snap_n = nfds - 1;
     for (size_t i = 0; i < snap_n; i++) {
         short re = pfds[i + 1].revents;
@@ -491,7 +514,17 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
         unsigned ready = 0;
         if (re & (POLLIN | POLLHUP | POLLERR)) ready |= HL_ASYNC_READ;
         if (re & POLLOUT) ready |= HL_ASYNC_WRITE;
-        if (ready && snaps[i].cb) snaps[i].cb(snaps[i].fd, ready, snaps[i].user);
+        if (!ready || !snaps[i].cb) continue;
+
+        /* Still the same registration? The epoch answers that even when the
+         * descriptor number has been closed and handed back out in between. */
+        pthread_mutex_lock(&ctx->lock);
+        ssize_t j = watcher_find(ctx, snaps[i].fd);
+        int live = (j >= 0 && ctx->watchers[j].epoch == snaps[i].epoch);
+        pthread_mutex_unlock(&ctx->lock);
+        if (!live) continue;
+
+        snaps[i].cb(snaps[i].fd, ready, snaps[i].user);
     }
 
     free(pfds);

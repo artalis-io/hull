@@ -266,7 +266,6 @@ static int keel_pool_submit(HlAsyncBackendPool *p,
  * thread (matching the contract that on_resume runs on-loop). */
 
 typedef struct KeelOpState {
-    HlAsyncBackendCtx *ctx;
     int64_t  deadline_timer;  /* Keel id; -1 = no timer scheduled */
     int      resumed;         /* op_complete called */
 } KeelOpState;
@@ -283,24 +282,37 @@ typedef struct KeelOpState {
  *
  * No consumer noticed until hull/ssh: http.fetch, compute.async and
  * gpu.async each park ONCE per operation, so none of them re-enters. A byte
- * stream does it on every read and every write. */
+ * stream does it on every read and every write.
+ *
+ * It is ONE function rather than the same three lines written out at each
+ * site because writing them out is how the rule was lost: the reorder landed
+ * on both timers and was missed on op_complete's scheduling-failure fallback,
+ * which fired first and nulled afterwards for another release. A caller that
+ * cannot fire without detaching cannot get the order wrong. */
+static void keel_op_detach(HlAsyncOp *op)
+{
+    KeelOpState *s = op->_backend_state;
+    op->_backend_state = NULL;
+    free(s);                           /* NULL-safe */
+}
+
 static void keel_op_deadline_timer(void *ud)
 {
     HlAsyncOp *op = ud;
     KeelOpState *s = op->_backend_state;
     if (!s) return;                    /* already completed and cleaned up */
-    if (s->resumed) return;            /* op_complete raced us */
-    op->_backend_state = NULL;
-    free(s);
+    /* op_complete raced us: it has already scheduled the resume timer, and
+     * THAT timer owns the state. Returning without detaching is correct; the
+     * state is not leaked, it is someone else's to release. */
+    if (s->resumed) return;
+    keel_op_detach(op);
     if (op->on_deadline) op->on_deadline(op);
 }
 
 static void keel_op_resume_timer(void *ud)
 {
     HlAsyncOp *op = ud;
-    KeelOpState *s = op->_backend_state;
-    op->_backend_state = NULL;
-    free(s);                           /* NULL-safe if the deadline got here first */
+    keel_op_detach(op);
     if (op->on_resume) op->on_resume(op);
 }
 
@@ -309,7 +321,6 @@ static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     if (!ctx || !op) return -1;
     KeelOpState *s = calloc(1, sizeof *s);
     if (!s) return -1;
-    s->ctx = ctx;
     s->deadline_timer = -1;
     op->_backend_state = s;
 
@@ -318,8 +329,7 @@ static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
         uint64_t delay = (op->deadline_ms > now) ? op->deadline_ms - now : 0;
         int64_t h = kl_timer_add(ctx->kel, delay, keel_op_deadline_timer, op);
         if (h < 0) {
-            free(s);
-            op->_backend_state = NULL;
+            keel_op_detach(op);        /* one release path, see above */
             return -1;
         }
         s->deadline_timer = h;
@@ -340,10 +350,12 @@ static void keel_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     /* Schedule on_resume to fire on the event-loop thread. 0ms == ASAP. */
     int64_t h = kl_timer_add(ctx->kel, 0, keel_op_resume_timer, op);
     if (h < 0) {
-        /* Best-effort: fire synchronously if scheduling fails. */
+        /* Best-effort: fire synchronously if scheduling fails. Through the
+         * same detach helper as the timers, which is the whole point of it
+         * being a helper - this branch had the inverted order for a release
+         * because it was written out by hand. */
+        keel_op_detach(op);
         if (op->on_resume) op->on_resume(op);
-        free(s);
-        op->_backend_state = NULL;
     }
 }
 

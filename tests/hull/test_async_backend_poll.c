@@ -19,7 +19,9 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* The poll backend symbol - defined in src/hull/async/poll.c, never
  * returned by hl_async_backend() on HTTP=1 builds. */
@@ -186,6 +188,116 @@ UTEST(async_backend_poll, op_deadline_fires_when_not_completed)
     ASSERT_EQ(op_deadlined, 1);
     ASSERT_EQ(op_resumed, 0);
 
+    fixture_free(&f);
+}
+
+/* ── Dispatch liveness: a watcher deregistered mid-tick is not fired ── */
+
+/*
+ * tick() snapshots the watcher table before poll(), then runs completions and
+ * timers - which run APPLICATION code - and only then dispatches the ready
+ * descriptors from that snapshot. The snapshot carries `user`, so if the
+ * application closed the connection in between, dispatching the stale entry
+ * hands a callback a pointer to freed memory.
+ *
+ * The object here is heap-allocated and really freed so ASan reports the
+ * use-after-free rather than the test having to guess at it, and the pipe is
+ * written to first so the descriptor is genuinely ready in the same tick.
+ */
+typedef struct { int alive; int fd; } DispatchVictim;
+
+static DispatchVictim *victim;
+static const HlAsyncBackend *victim_be;
+static HlAsyncBackendCtx    *victim_ctx;
+static int victim_cb_fired;
+
+static void victim_watch_cb(int fd, unsigned ready, void *user)
+{
+    (void)fd; (void)ready;
+    DispatchVictim *v = user;     /* freed by the completion below */
+    victim_cb_fired = 1;
+    if (v) v->alive = 0;          /* the use-after-free, if we get here */
+}
+
+/* Runs in step 4, before the step 6 dispatch, exactly as a resumed coroutine
+ * calling conn:close() would. */
+static void victim_closer(HlAsyncOp *op)
+{
+    (void)op;
+    victim_be->watcher_del(victim_ctx, victim->fd);
+    free(victim);
+    victim = NULL;
+}
+
+UTEST(async_backend_poll, watcher_freed_by_a_completion_is_not_dispatched)
+{
+    Fixture f;
+    ASSERT_EQ(fixture_init(&f), 0);
+
+    int p[2];
+    ASSERT_EQ(pipe(p), 0);
+
+    victim = malloc(sizeof *victim);
+    ASSERT_TRUE(victim != NULL);
+    victim->alive = 1;
+    victim->fd    = p[0];
+    victim_be     = f.be;
+    victim_ctx    = f.ctx;
+    victim_cb_fired = 0;
+
+    ASSERT_EQ(f.be->watcher_add(f.ctx, p[0], HL_ASYNC_READ,
+                                victim_watch_cb, victim), 0);
+
+    /* Make the descriptor ready, so it IS in the snapshot as readable. */
+    ASSERT_EQ((int)write(p[1], "x", 1), 1);
+
+    /* And arm a completion, which runs before the dispatch and closes it. */
+    HlAsyncOp op = { .on_resume = victim_closer };
+    ASSERT_EQ(f.be->op_suspend(f.ctx, &op), 0);
+    f.be->op_complete(f.ctx, &op);
+
+    uint64_t start = f.be->monotonic_ms();
+    while (victim && f.be->monotonic_ms() - start < 200)
+        f.be->tick(f.ctx, 20);
+
+    ASSERT_TRUE(victim == NULL);           /* the completion did run */
+    ASSERT_EQ(victim_cb_fired, 0);         /* and the stale watcher did not */
+
+    close(p[0]);
+    close(p[1]);
+    fixture_free(&f);
+}
+
+/* A watcher that is NOT touched must still be dispatched - otherwise the fix
+ * above could be "never dispatch anything" and both halves would pass. */
+static int live_cb_fired;
+static void live_watch_cb(int fd, unsigned ready, void *user)
+{
+    (void)fd; (void)ready; (void)user;
+    live_cb_fired = 1;
+}
+
+UTEST(async_backend_poll, an_untouched_watcher_is_still_dispatched)
+{
+    Fixture f;
+    ASSERT_EQ(fixture_init(&f), 0);
+
+    int p[2];
+    ASSERT_EQ(pipe(p), 0);
+    live_cb_fired = 0;
+
+    ASSERT_EQ(f.be->watcher_add(f.ctx, p[0], HL_ASYNC_READ,
+                                live_watch_cb, NULL), 0);
+    ASSERT_EQ((int)write(p[1], "x", 1), 1);
+
+    uint64_t start = f.be->monotonic_ms();
+    while (!live_cb_fired && f.be->monotonic_ms() - start < 200)
+        f.be->tick(f.ctx, 20);
+    ASSERT_EQ(live_cb_fired, 1);
+
+    f.be->watcher_del(f.ctx, p[0]);
+    close(p[0]);
+    close(p[1]);
     fixture_free(&f);
 }
 
