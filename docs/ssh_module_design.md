@@ -516,8 +516,27 @@ wrong in CI, so `HULL_E2E_REQUIRE_SSHD=1` turns the skip into a failure and
 ci.yml sets it. A job that installs openssh-server and then quietly tests
 nothing is worse than a red one.
 
-The e2e tunnel is PLAINTEXT WebSocket, and that is a real gap rather than a
-simplification: see below.
+### Where the trust anchor comes from
+
+`serve_cli.c` used to resolve its anchor from the embedded Mozilla bundle
+ALONE, honouring neither `--ca-bundle` nor `--no-ca-bundle` - both of which
+`serve.c` already did. A public-CA relay (what Cloudflare is) worked; a relay
+behind an internal CA was unreachable, and `--ca-bundle` looked accepted while
+doing nothing. An `app.main` program is exactly what a fleet tool is, so this
+was the one entry point where it mattered most.
+
+Both now walk the same five rungs: `--no-ca-bundle`, then `--ca-bundle PATH`,
+then the system store, then the embedded bundle, then a warning naming all
+three ways out. The system-store probe moved into `cacert.c` beside the
+embedded one rather than being copied - a second copy of a path walker is how
+`hull doctor` and `hull tools list` once disagreed about the same tool on the
+same box.
+
+So the e2e now drives the tunnel over TLS too. It mints a private CA, puts the
+relay behind a certificate it signed, and checks the rung that carries the
+whole guarantee: that the DEFAULT anchor REFUSES that certificate, and only
+`--ca-bundle` makes it trust that one. A TLS test that never sees a refusal is
+not testing verification.
 
 **What the e2e found on its first run**, which is the argument for having it:
 `hull/ssh` could not connect AT ALL, on any platform. Two defects, both
@@ -532,13 +551,6 @@ which is the transport's contract, not the binding's.
 
 ### Still open
 
-- **A CLI app cannot trust a private CA.** `serve_cli.c` resolves its anchor
-  from the embedded Mozilla bundle only - it honours neither `--ca-bundle` nor
-  `--no-ca-bundle`, which `serve.c` both do. A public-CA relay (what
-  Cloudflare is) works; a relay behind an internal CA does not. It is also why
-  the e2e's tunnel is plaintext: a self-signed test cert has no way to be
-  trusted, so the TLS leg rests on `test_net_stream`'s live badssl.com cases
-  instead of being exercised end to end here.
 - No worked example under `examples/`, and no user-facing guide; this design
   record is still the only documentation.
 - JS remains unimplemented, per section 8 - `hull.web.ws-stream` is Lua-only
