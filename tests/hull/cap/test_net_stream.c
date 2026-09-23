@@ -625,10 +625,12 @@ typedef struct {
     unsigned want;             /* what an unfinished handshake asks for    */
     int     hostname_calls;
     char    hostname[128];
-    int     shutdown_calls;
     size_t  fake_pending;      /* plaintext the "engine" is sitting on     */
     int     reads, writes;
     int    *destroyed_flag;    /* outlives the session, for teardown tests */
+    int    *shutdown_counter;  /* ditto. close() runs shutdown THEN destroy,
+                                * and destroy frees us, so the count has to
+                                * live in the caller, not in here           */
     int     eof_seen;          /* the -1 just returned was a clean close  */
     int     clean_eof;         /* make the next read report one           */
     int     hard_error;        /* make the next read report a failure     */
@@ -692,7 +694,8 @@ static kl_ssize_t fake_write(KlTls *self, KlSocketHandle fd, const void *buf, si
 static KlTlsResult fake_shutdown(KlTls *self, KlSocketHandle fd)
 {
     (void)fd;
-    ((FakeTls *)self)->shutdown_calls++;
+    FakeTls *f = (FakeTls *)self;
+    if (f->shutdown_counter) (*f->shutdown_counter)++;
     return KL_TLS_OK;
 }
 
@@ -1123,10 +1126,16 @@ UTEST(net_stream, closing_a_tls_stream_takes_the_session_with_it)
     ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
     ASSERT_EQ(rc, HL_NET_OK);
     g_fake_last->destroyed_flag = &destroyed;
+    /* Count into a variable of our own. close() runs shutdown and then
+     * destroy(), and destroy() FREES the fake, so reading the count back off
+     * g_fake_last afterwards is a use-after-free: it returned a stale 0 on
+     * macOS, and ASan said what it actually was. */
+    int shutdowns = 0;
+    g_fake_last->shutdown_counter = &shutdowns;
 
     hl_net_stream_close(s);
     EXPECT_EQ(destroyed, 1);
-    EXPECT_GT(g_fake_last->shutdown_calls, 0);   /* close_notify attempted */
+    EXPECT_GT(shutdowns, 0);                     /* close_notify attempted */
 
     hl_net_stream_free(s);
     fix_free(&f);
