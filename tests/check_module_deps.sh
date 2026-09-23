@@ -55,19 +55,24 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 # holds on a tree that has not been built - which is when a dep mistake is
 # cheapest to find.
 awk '
-    /^[ \t]*\.name[ \t]*=[ \t]*"/ {
+    /^[ 	]*\.name[ 	]*=[ 	]*"/ {
         line = $0
         sub(/^[^"]*"/, "", line); sub(/".*$/, "", line)
         name = line; deps = ""; next
     }
-    /^[ 	]*\.deps[ 	]*=/ { collecting = 1 }
+    # `.deps` is matched ANYWHERE on the line, not anchored to the start: most
+    # rows write it on the same line as .required_caps. Anchoring it saw 38 of
+    # 79 rows and reported OK over the other 41 - which is why the count check
+    # below is now exact rather than a floor.
+    !collecting && /\.deps[ 	]*=/ {
+        if (name == "") next
+        collecting = 1
+        line = substr($0, index($0, ".deps"))
+    }
     collecting {
-        if (name == "") { collecting = 0; next }
-        line = $0
-        # Every "quoted" entry is a dep; the trailing 0 is not. A .deps
-        # array WRAPS once it is long enough, so accumulate until the
-        # closing brace - reading only the first line silently truncated
-        # the longest rows, which are exactly the ones worth checking.
+        if (line == "") line = $0          # continuation line: scan all of it
+        # Every "quoted" entry is a dep; the trailing 0 is not. A long .deps
+        # array WRAPS, so keep going until the closing brace.
         while (match(line, /"[^"]+"/)) {
             d = substr(line, RSTART + 1, RLENGTH - 2)
             deps = deps (deps == "" ? "" : " ") d
@@ -77,17 +82,41 @@ awk '
             print name "	" deps
             name = ""; deps = ""; collecting = 0
         }
+        line = ""
+        next
     }
 ' "$REGISTRY" > "$WORK/deps.tsv"
 
+# EXACT, not a floor. Every registry row has a .deps field, so the number of
+# rows parsed must equal the number of rows declared - any shortfall means the
+# parser silently skipped modules and every "OK" it printed covered less than
+# it claimed. A floor of 20 is what let it pass while seeing 38 of 79.
 MODCOUNT=$(wc -l < "$WORK/deps.tsv" | tr -d ' ')
-if [ "$MODCOUNT" -lt 20 ]; then
-    echo "check-module-deps: parsed only $MODCOUNT registry modules - the table"
-    echo "  shape must have changed. Fix this parser rather than lowering the bar."
+NAMECOUNT=$(grep -c '^[[:space:]]*\.name[[:space:]]*=[[:space:]]*"' "$REGISTRY")
+if [ "$MODCOUNT" -ne "$NAMECOUNT" ]; then
+    echo "check-module-deps: parsed $MODCOUNT rows but the registry declares"
+    echo "  $NAMECOUNT. The parser is skipping modules, so a pass here would"
+    echo "  cover less than it claims. Fix the parser, not this check."
     exit 1
 fi
 
 cut -f1 "$WORK/deps.tsv" | sort > "$WORK/modules.txt"
+
+# Intrinsic modules are seeded by the resolver into every app, so requiring
+# one is always satisfied and declaring it as a dep would be noise. `hull/app`
+# is the only one today; parsed rather than hard-coded so a second intrinsic
+# does not quietly become 40 false findings.
+#
+# NOT anchored to the line start: `.intrinsic` shares a line with .api_major,
+# exactly as `.deps` shares one with .required_caps. Anchoring it found zero
+# intrinsics and reported hull/app as an undeclared dependency of three
+# modules - the same mistake, twice in one file.
+awk '/\.intrinsic[ 	]*=[ 	]*1[^0-9]/ { print prev }
+     /^[ 	]*\.name[ 	]*=[ 	]*"/ {
+         line = $0; sub(/^[^"]*"/, "", line); sub(/".*$/, "", line); prev = line
+     }' "$REGISTRY" | sort -u > "$WORK/intrinsic.txt"
+
+is_intrinsic() { grep -qxF "$1" "$WORK/intrinsic.txt"; }
 
 is_module() { grep -qxF "$1" "$WORK/modules.txt"; }
 
@@ -147,6 +176,7 @@ for f in $(find "$SRCDIR/stdlib/lua/hull" "$SRCDIR/stdlib/js/hull" \
 
     for r in $reqs; do
         is_module "$r" || continue          # an internal file, not a module
+        is_intrinsic "$r" && continue       # seeded everywhere; never a dep
         [ "$r" = "$owner" ] && continue     # a module's own submodule
         PAIRS=$((PAIRS + 1))
         case " $(closure "$owner") " in

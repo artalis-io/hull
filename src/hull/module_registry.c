@@ -141,6 +141,21 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/http-client", "hull/smtp", "hull/log", "hull/json", 0},
     },
     {
+        /* base64 / base64url as BYTES, for callers that need the encoding
+         * itself rather than a convenience on top of a hash. hull/crypto's
+         * base64url_* exist for its own outputs; this is the general one,
+         * used by the SSH key parser and by the WebSocket handshake.
+         *
+         * Registered rather than left as an internal file so it shows up in
+         * `hull modules available`, is gated like everything else, and - the
+         * reason that decided it - so check_module_deps can SEE it. A module
+         * that starts depending on an unregistered file is a dependency no
+         * gate can check. */
+        .name = "hull/encoding/base64",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0, .deps = {0},
+    },
+    {
         .name = "hull/env",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_ENV, .deps = {0},
@@ -241,7 +256,7 @@ static const HlModuleSpec REGISTRY[] = {
          * already gated, so hull/db is the app's declaration, not a dep here. */
         .name = "hull/kv",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = 0, .deps = {"hull/time", 0},
+        .required_caps = 0, .deps = {"hull/time", "hull/db", 0},
     },
 
     /* ── Logger ───────────────────────────────────────────────────── */
@@ -340,7 +355,8 @@ static const HlModuleSpec REGISTRY[] = {
          * Missed until an e2e drove a real connection: every unit suite
          * injects `opts.crypto`, which is the seam that exists for exactly
          * that reason and which therefore never takes this path. */
-        .deps = {"hull/crypto", 0},
+        .deps = {"hull/crypto", "hull/encoding/base64",
+                 "hull/web/ws-stream", 0},
     },
     {
         /* Template engine stays flat in v0.2.0: content-type
@@ -487,7 +503,7 @@ static const HlModuleSpec REGISTRY[] = {
          * any handler). */
         .name = "hull/web/htmx",
         .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = 0, .deps = {0},
+        .required_caps = 0, .deps = {"hull/template", "hull/json", 0},
     },
     {
         /* HTMX confirm dialog widget - server-side helper that
@@ -713,7 +729,10 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER | HL_MOD_CAP_HTTP_CLIENT,
         /* hull/log is implicitly available (log.X works without
-         * declaration); not in deps because we're at the 8-dep cap.
+         * declaration) for the GLOBAL log.X - but this module also does a
+         * top-level require("hull.log"), which the gate refuses unless the
+         * resolver admitted it, so it is a dep and not an implicit. The
+         * 8-dep cap that note cites is 10 now, so there is room to say so.
          * Also relies on hull/time at runtime via jwt.verify's exp
          * check but jwt itself declares hull/time, so the dep
          * transitively resolves through hull/jwt. */
@@ -724,7 +743,7 @@ static const HlModuleSpec REGISTRY[] = {
          * inside this module. */
         .deps = {"hull/http-server", "hull/http-client", "hull/crypto",
                  "hull/crypto/envelope", "hull/web/cookie", "hull/jwt",
-                 "hull/time", 0},
+                 "hull/time", "hull/log", 0},
     },
     {
         .name = "hull/web/middleware/outbox",
@@ -831,6 +850,22 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/ws-server",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
+    },
+    {
+        /* WebSocket as a BYTE STREAM, client side (RFC 6455). Sibling to
+         * ws-client and deliberately not the same thing: that one is MESSAGE
+         * oriented and driven by the event loop, so it needs a running
+         * server; this one is byte oriented and owns no loop, which is what
+         * lets it work under app.main where a fleet tool lives.
+         *
+         * Holds NO capability, which is why it needs none declared: the
+         * stream, the RNG and the digest are all passed in, so it can only
+         * transform a connection someone else opened. That is also why it is
+         * safe to make public - the authority stays with whoever obtained the
+         * stream (for SSH-over-a-tunnel, the ssh.connect grant). */
+        .name = "hull/web/ws-stream",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {"hull/encoding/base64", 0},
     },
 
     {
