@@ -191,6 +191,75 @@ UTEST(async_backend_poll, op_deadline_fires_when_not_completed)
     fixture_free(&f);
 }
 
+/* ── op_cancel retracts a queued completion ──────────────────────────── */
+
+/*
+ * op_complete DEFERS: it queues the resume for the next tick. An owner that
+ * frees the storage the op lives in between those two points left the backend
+ * holding a pointer into freed memory and had no way to withdraw it. op_cancel
+ * is that way; this asserts it actually drops the queued entry.
+ */
+static int cancelled_op_resumed;
+static void on_resume_should_not_fire(HlAsyncOp *op)
+{
+    (void)op;
+    cancelled_op_resumed = 1;
+}
+
+UTEST(async_backend_poll, op_cancel_drops_an_already_queued_completion)
+{
+    Fixture f;
+    ASSERT_EQ(fixture_init(&f), 0);
+    ASSERT_TRUE(f.be->op_cancel != NULL);
+
+    cancelled_op_resumed = 0;
+    HlAsyncOp op = { .on_resume = on_resume_should_not_fire };
+    ASSERT_EQ(f.be->op_suspend(f.ctx, &op), 0);
+
+    f.be->op_complete(f.ctx, &op);   /* queued, not yet run */
+    f.be->op_cancel(f.ctx, &op);     /* withdrawn before the tick */
+
+    for (int i = 0; i < 5; i++) f.be->tick(f.ctx, 5);
+    ASSERT_EQ(cancelled_op_resumed, 0);
+
+    /* Idempotent, and safe on an op that was never suspended. */
+    f.be->op_cancel(f.ctx, &op);
+    HlAsyncOp never = { .on_resume = on_resume_should_not_fire };
+    f.be->op_cancel(f.ctx, &never);
+
+    fixture_free(&f);
+}
+
+/* The retraction must be specific: cancelling one op must not silently eat
+ * another op's pending resume. */
+static int other_op_resumed;
+static void on_resume_other(HlAsyncOp *op) { (void)op; other_op_resumed = 1; }
+
+UTEST(async_backend_poll, op_cancel_does_not_drop_a_different_ops_completion)
+{
+    Fixture f;
+    ASSERT_EQ(fixture_init(&f), 0);
+
+    cancelled_op_resumed = 0;
+    other_op_resumed = 0;
+    HlAsyncOp a = { .on_resume = on_resume_should_not_fire };
+    HlAsyncOp b = { .on_resume = on_resume_other };
+    ASSERT_EQ(f.be->op_suspend(f.ctx, &a), 0);
+    ASSERT_EQ(f.be->op_suspend(f.ctx, &b), 0);
+
+    f.be->op_complete(f.ctx, &a);
+    f.be->op_complete(f.ctx, &b);
+    f.be->op_cancel(f.ctx, &a);
+
+    uint64_t start = f.be->monotonic_ms();
+    while (!other_op_resumed && f.be->monotonic_ms() - start < 200)
+        f.be->tick(f.ctx, 20);
+    ASSERT_EQ(other_op_resumed, 1);
+    ASSERT_EQ(cancelled_op_resumed, 0);
+
+    fixture_free(&f);
+}
+
 /* ── Dispatch liveness: a watcher deregistered mid-tick is not fired ── */
 
 /*

@@ -212,6 +212,24 @@ typedef struct HlAsyncBackend {
      * a pool worker's done_fn - though done_fn already runs on the
      * event-loop thread, this works regardless). */
     void   (*op_complete)(HlAsyncBackendCtx *ctx, HlAsyncOp *op);
+
+    /* Retract an in-flight op: cancel its deadline, DROP any completion
+     * already queued for it, and release the backend's per-op state. After
+     * this returns the backend holds no reference to `op` and no callback
+     * will fire for it.
+     *
+     * This exists because op_complete DEFERS: it queues the resume for the
+     * next tick rather than running it inline. An owner that frees the
+     * storage `op` lives in between the complete() and that tick left the
+     * backend holding a pointer into freed memory, and had no way to say so.
+     * Every owner that can free an op must call this first.
+     *
+     * Deliberately SILENT - no on_cancel, no on_resume. The caller is the
+     * owner and is mid-teardown; calling back into it is the thing it is
+     * trying to stop. Event-loop thread only.
+     *
+     * Idempotent, and safe on an op that was never suspended. */
+    void   (*op_cancel)(HlAsyncBackendCtx *ctx, HlAsyncOp *op);
 } HlAsyncBackend;
 
 /* ── Backend getter ────────────────────────────────────────────────── */

@@ -267,6 +267,7 @@ static int keel_pool_submit(HlAsyncBackendPool *p,
 
 typedef struct KeelOpState {
     int64_t  deadline_timer;  /* Keel id; -1 = no timer scheduled */
+    int64_t  resume_timer;    /* Keel id; -1 = none. Retractable by op_cancel */
     int      resumed;         /* op_complete called */
 } KeelOpState;
 
@@ -322,6 +323,7 @@ static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     KeelOpState *s = calloc(1, sizeof *s);
     if (!s) return -1;
     s->deadline_timer = -1;
+    s->resume_timer   = -1;
     op->_backend_state = s;
 
     if (op->deadline_ms > 0 && op->on_deadline) {
@@ -349,6 +351,7 @@ static void keel_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     }
     /* Schedule on_resume to fire on the event-loop thread. 0ms == ASAP. */
     int64_t h = kl_timer_add(ctx->kel, 0, keel_op_resume_timer, op);
+    if (h >= 0) s->resume_timer = h;
     if (h < 0) {
         /* Best-effort: fire synchronously if scheduling fails. Through the
          * same detach helper as the timers, which is the whole point of it
@@ -357,6 +360,19 @@ static void keel_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
         keel_op_detach(op);
         if (op->on_resume) op->on_resume(op);
     }
+}
+
+/* Retract an op. See the vtable comment: op_complete defers through a 0 ms
+ * timer, so an owner freeing the storage `op` lives in needs a way to
+ * withdraw that timer before it fires against freed memory. */
+static void keel_op_cancel(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
+{
+    if (!ctx || !op) return;
+    KeelOpState *s = op->_backend_state;
+    if (!s) return;
+    if (s->deadline_timer >= 0) kl_timer_cancel(ctx->kel, s->deadline_timer);
+    if (s->resume_timer   >= 0) kl_timer_cancel(ctx->kel, s->resume_timer);
+    keel_op_detach(op);
 }
 
 /* ── Vtable ────────────────────────────────────────────────────────── */
@@ -380,6 +396,7 @@ const HlAsyncBackend hl_async_backend_keel = {
     .pool_submit      = keel_pool_submit,
     .op_suspend       = keel_op_suspend,
     .op_complete      = keel_op_complete,
+    .op_cancel        = keel_op_cancel,
 };
 
 /* Strong override of the weak hl_async_backend() default in async/poll.c: when

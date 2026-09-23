@@ -881,6 +881,34 @@ static void poll_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     completion_enqueue(ctx, poll_op_complete_eventloop, op);
 }
 
+/* Retract an op. See the vtable comment: op_complete defers, so an owner
+ * freeing the storage `op` lives in needs a way to withdraw the queued
+ * resume before it fires against freed memory. */
+static void poll_op_cancel(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
+{
+    if (!ctx || !op) return;
+
+    /* Drop any completion already queued for THIS op. Compacting in place is
+     * safe here because the queue is only ever walked by tick(), which
+     * detaches the whole array under the lock before touching it. */
+    pthread_mutex_lock(&ctx->lock);
+    size_t keep = 0;
+    for (size_t i = 0; i < ctx->completion_count; i++) {
+        if (ctx->completions[i].fn == poll_op_complete_eventloop &&
+            ctx->completions[i].user == op)
+            continue;
+        ctx->completions[keep++] = ctx->completions[i];
+    }
+    ctx->completion_count = keep;
+    pthread_mutex_unlock(&ctx->lock);
+
+    PollOpState *s = op->_backend_state;
+    if (!s) return;
+    if (s->deadline_timer) poll_timer_cancel(ctx, s->deadline_timer);
+    op->_backend_state = NULL;
+    free(s);
+}
+
 /* ── Exported vtable ───────────────────────────────────────────────── */
 
 const HlAsyncBackend hl_async_backend_poll = {
@@ -902,6 +930,7 @@ const HlAsyncBackend hl_async_backend_poll = {
     .pool_submit      = poll_pool_submit,
     .op_suspend       = poll_op_suspend,
     .op_complete      = poll_op_complete,
+    .op_cancel        = poll_op_cancel,
 };
 
 /* ── Backend selection (weak seam) ─────────────────────────────────────

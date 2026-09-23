@@ -113,12 +113,42 @@ static int push_err(lua_State *L, const char *msg)
     return 2;
 }
 
+/* Hand a parked coroutine back, once.
+ *
+ * Declared before close because close has to use it: a read parked on this
+ * stream is waiting for a wake-up that closing will never deliver, and
+ * clearing the user pointer first - which is what stops ssh_on_resume from
+ * touching a stream that is going away - also stopped it from un-parking
+ * anybody. The coroutine then waited forever and its context leaked.
+ *
+ * Called with the stream still alive and already marked closing, so the
+ * retry the coroutine performs reads the closed state and returns an error
+ * rather than parking again. */
+static void ssh_unpark(HlLuaSshStream *o)
+{
+    HlAsyncCtx *ctx = o->ctx;
+    if (!ctx) return;
+    o->ctx = NULL;                 /* one resume per park */
+
+    /* Same split as worker_wasm.c: a detached (app.main) caller has no
+     * connection to hand back, an attached one does. */
+    if (ctx->detached)
+        hl_async_ctx_resume_detached(ctx);
+    else
+        hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+}
+
 static int lua_ssh_close(lua_State *L)
 {
     HlLuaSshStream *o = check_stream(L);
     if (o->s) {
-        hl_net_stream_set_user(o->s, NULL);   /* drop before the stream goes */
+        /* Order is the whole content of this function. Close FIRST so the
+         * stream reports closed, THEN un-park so the resumed coroutine's
+         * retry sees that and returns "connection closed" instead of parking
+         * again, and only then drop the user pointer and release. */
         hl_net_stream_close(o->s);
+        ssh_unpark(o);
+        hl_net_stream_set_user(o->s, NULL);
         hl_net_stream_free(o->s);
         o->s = NULL;
     }
@@ -129,6 +159,12 @@ static int lua_ssh_gc(lua_State *L)
 {
     HlLuaSshStream *o = luaL_checkudata(L, 1, HL_LUA_SSH_MT);
     if (o->s) {
+        /* NOT ssh_unpark here: resuming a coroutine from a finalizer is not
+         * something the runtime guarantees. It is also unnecessary - while a
+         * read is parked, the coroutine's own stack holds this userdata, so
+         * it is not collectable and this cannot run. If both the coroutine
+         * and the userdata have become garbage together, there is nobody
+         * left to resume. */
         hl_net_stream_set_user(o->s, NULL);
         hl_net_stream_close(o->s);
         hl_net_stream_free(o->s);
@@ -146,17 +182,8 @@ static void ssh_on_resume(HlAsyncOp *op)
 {
     HlNetStream *s = hl_net_stream_from_op(op);
     HlLuaSshStream *o = s ? hl_net_stream_user(s) : NULL;
-    if (!o || !o->ctx) return;
-
-    HlAsyncCtx *ctx = o->ctx;
-    o->ctx = NULL;                 /* one resume per park */
-
-    /* Same split as worker_wasm.c: a detached (app.main) caller has no
-     * connection to hand back, an attached one does. */
-    if (ctx->detached)
-        hl_async_ctx_resume_detached(ctx);
-    else
-        hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+    if (!o) return;
+    ssh_unpark(o);                 /* one resume per park, see above */
 }
 
 /* Park the calling coroutine on the stream's pending op. Returns 0 on success,
@@ -388,6 +415,15 @@ static int lua_ssh_connect(lua_State *L)
     const char *via_host = NULL, *via_sni = NULL;
     int via_port = 0, via_tls = 0, has_via = 0;
     lua_getfield(L, 1, "via");
+    if (!lua_isnil(L, -1) && !lua_istable(L, -1)) {
+        /* Refuse rather than fall through. A `via` that is present but not a
+         * table would otherwise be ignored, and the connection would go
+         * DIRECT - a caller that asked to reach a host through a relay, and
+         * whose credentials live in that relay's headers, would never find
+         * out. Same reasoning as the tls downgrade refused below. */
+        lua_settop(L, base);
+        return push_err(L, "ssh: via must be a table");
+    }
     if (lua_istable(L, -1)) {
         int v = lua_gettop(L);
         has_via = 1;
