@@ -138,6 +138,20 @@ struct HlNetStream {
      * state. Never dereferenced or freed here; see net_stream.h. */
     void        *user;
 
+    /* TLS. NULL = plaintext, which is every field below being inert.
+     *
+     * The session sits BETWEEN the socket and the rx/tx buffers above: the
+     * buffers always hold plaintext, so everything downstream of here - the
+     * read and write entry points, the parking protocol, the caps - is
+     * unchanged by encryption. Only the two calls that touch the socket move. */
+    const KlTlsConfig *tls_cfg;     /* borrowed; NULL = plaintext        */
+    KlTls       *tls;
+    KlAllocator  tls_alloc;         /* copied; the caller's need not persist */
+    char        *tls_host;          /* owned; SNI + cert name               */
+    int          tls_done;          /* handshake finished                   */
+    unsigned     tls_want;          /* readiness the handshake is waiting on */
+    uint64_t     tls_timer;         /* the handshake's share of the budget   */
+
     /* Lifecycle */
     int          closing;
     int          freed;             /* free() called; drop when detached    */
@@ -153,6 +167,13 @@ static void wake(HlNetStream *s)
     s->op_pending = 0;
     if (s->be && s->be->op_complete) s->be->op_complete(s->async, &s->op);
 }
+
+/* The connect callback drives the handshake, and sits above the TLS and
+ * I/O sections that implement it. */
+static void tls_teardown(HlNetStream *s);
+static int  tls_begin(HlNetStream *s, const KlTlsConfig *cfg);
+static int  tls_step(HlNetStream *s);
+static void io_rearm(HlNetStream *s);
 
 /* Drop every racing descriptor we still hold. Idempotent. */
 static void retire_attempts(HlNetStream *s)
@@ -195,6 +216,7 @@ static void maybe_release(HlNetStream *s)
         s->be->timer_cancel(s->async, s->delay_timer);
 
     retire_attempts(s);
+    tls_teardown(s);
     if (s->io_mask && s->be->watcher_del)
         s->be->watcher_del(s->async, (int)s->fd);
     if (kl_handle_valid(s->fd)) sp_close(s->fd);
@@ -455,6 +477,21 @@ static void co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd,
     if (result == KL_CONNECT_SUCCESS) {
         s->fd = fd;
         s->result = HL_NET_OK;
+
+        if (s->tls_cfg) {
+            int rc = tls_begin(s, s->tls_cfg);
+            if (rc != HL_NET_OK) {
+                s->result = rc;
+            } else if (tls_step(s) == 0) {
+                /* Still handshaking. Deliberately no wake: the caller is
+                 * parked on the connect, and a stream whose handshake has not
+                 * finished is not yet a connection anything can be sent on.
+                 * io_ready carries it from here and wakes once. */
+                retire_attempts(s);
+                io_rearm(s);
+                return;
+            }
+        }
     } else if (result == KL_CONNECT_CANCELLED) {
         s->result = HL_NET_E_CANCELLED;
     } else {
@@ -579,6 +616,114 @@ static void resolve_cancel(void *user)
 
 static void io_ready(int fd, unsigned ready, void *user);
 
+/* ── TLS ────────────────────────────────────────────────────────────── */
+
+/* Tear the session down. Best effort on the close_notify: a peer that has
+ * already gone means the shutdown cannot be delivered, and that is not a
+ * failure worth reporting to a caller who asked to close. */
+static void tls_teardown(HlNetStream *s)
+{
+    if (s->tls_timer && s->be->timer_cancel) {
+        s->be->timer_cancel(s->async, s->tls_timer);
+        s->tls_timer = 0;
+    }
+    if (s->tls) {
+        if (s->tls_done && s->tls->shutdown && kl_handle_valid(s->fd))
+            (void)s->tls->shutdown(s->tls, s->fd);
+        if (s->tls->destroy) s->tls->destroy(s->tls);
+        s->tls = NULL;
+    }
+    free(s->tls_host);
+    s->tls_host = NULL;
+}
+
+/* The connect deadline expired with the handshake still running.
+ *
+ * Needed because the connect OP's deadline is cancelled the moment it
+ * completes, and the handshake runs after that - so without this a peer that
+ * completes a TCP connection and then says nothing would park the caller
+ * forever. From the caller's side the connect is not finished until the
+ * handshake is, so the same budget covers both. */
+static void tls_deadline_fired(void *user)
+{
+    HlNetStream *s = user;
+    s->tls_timer = 0;
+    if (s->tls_done) return;
+    s->result = HL_NET_E_TIMEOUT;
+    s->tls_want = 0;
+    io_rearm(s);
+    wake(s);
+}
+
+/* Drive the handshake one step and record what it is waiting on.
+ *
+ * Returns 0 while still running, 1 when complete, -1 on failure. The caller
+ * decides what to do about each; nothing here wakes a parked caller, because
+ * the handshake runs INSIDE the connect park - a caller asked for a usable
+ * stream, and with TLS that means one that has finished its handshake. Waking
+ * early would hand back a connection nothing could be sent on. */
+static int tls_step(HlNetStream *s)
+{
+    if (!s->tls || s->tls_done) return 1;
+
+    KlTlsResult r = s->tls->handshake(s->tls, s->fd);
+    if (r == KL_TLS_OK) {
+        s->tls_done = 1;
+        s->tls_want = 0;
+        if (s->tls_timer && s->be->timer_cancel) {
+            s->be->timer_cancel(s->async, s->tls_timer);
+            s->tls_timer = 0;
+        }
+        return 1;
+    }
+    if (r == KL_TLS_WANT_READ)  { s->tls_want = HL_ASYNC_READ;  return 0; }
+    if (r == KL_TLS_WANT_WRITE) { s->tls_want = HL_ASYNC_WRITE; return 0; }
+
+    /* A failed handshake is terminal and deliberately not detailed: the
+     * reasons an mbedTLS handshake fails (bad certificate, no common cipher,
+     * hostname mismatch) are all "this is not the peer you asked for", and a
+     * caller cannot act differently on which. */
+    s->result = HL_NET_E_TLS;
+    if (s->tls_timer && s->be->timer_cancel) {
+        s->be->timer_cancel(s->async, s->tls_timer);
+        s->tls_timer = 0;
+    }
+    return -1;
+}
+
+/* Begin TLS once the socket is connected. Returns 0 on success, negative on a
+ * setup failure the caller should report. */
+static int tls_begin(HlNetStream *s, const KlTlsConfig *cfg)
+{
+    if (!cfg || !cfg->factory) return HL_NET_E_INVAL;
+
+    s->tls = cfg->factory(cfg->ctx, &s->tls_alloc);
+    if (!s->tls) return HL_NET_E_TLS;
+    if (!kl_tls_vtable_valid(s->tls)) {
+        /* A backend that does not fill the required ops would fail later in a
+         * way that looks like a network fault. Refuse it here instead. */
+        if (s->tls->destroy) s->tls->destroy(s->tls);
+        s->tls = NULL;
+        return HL_NET_E_TLS;
+    }
+
+    /* SNI and the name the certificate is checked against. A backend without
+     * set_hostname cannot verify a name, so refuse rather than negotiate an
+     * encrypted connection to an unverified peer: that is the failure mode
+     * TLS exists to prevent. */
+    if (!s->tls->set_hostname || !s->tls_host ||
+        s->tls->set_hostname(s->tls, s->tls_host) != 0) {
+        if (s->tls->destroy) s->tls->destroy(s->tls);
+        s->tls = NULL;
+        return HL_NET_E_TLS;
+    }
+
+    if (s->be->timer_add)
+        s->tls_timer = s->be->timer_add(s->async, s->connect_ms,
+                                        tls_deadline_fired, s);
+    return HL_NET_OK;
+}
+
 /* Re-arm the readiness watcher to exactly what is wanted now. Registering once
  * and modifying afterwards keeps the backend's fd table stable; a mask of 0
  * deregisters, so an idle stream costs the loop nothing. */
@@ -587,8 +732,15 @@ static void io_rearm(HlNetStream *s)
     if (!kl_handle_valid(s->fd) || s->closing) return;
 
     unsigned want = 0;
-    if (s->want_read && !s->eof)   want |= HL_ASYNC_READ;
-    if (s->tx_off < s->tx_len)     want |= HL_ASYNC_WRITE;
+    if (s->tls && !s->tls_done) {
+        /* Mid-handshake the socket readiness that matters is whatever the
+         * handshake asked for, not what the application wants: no application
+         * byte can move until it finishes. */
+        want = s->tls_want;
+    } else {
+        if (s->want_read && !s->eof)   want |= HL_ASYNC_READ;
+        if (s->tx_off < s->tx_len)     want |= HL_ASYNC_WRITE;
+    }
     if (want == s->io_mask) return;
 
     if (!want) {
@@ -634,8 +786,23 @@ static void tx_compact(HlNetStream *s)
  * transport error. A short write is normal and simply leaves the remainder. */
 static int tx_flush(HlNetStream *s)
 {
+    /* Nothing may be sent before the handshake completes; the queue simply
+     * waits, which is what the caller's backpressure already handles. */
+    if (s->tls && !s->tls_done) return HL_NET_OK;
+
     while (s->tx_off < s->tx_len) {
-        kl_ssize_t n = sp_send(s->fd, s->tx + s->tx_off, s->tx_len - s->tx_off);
+        kl_ssize_t n;
+        if (s->tls) {
+            /* 0 is WANT_WRITE, not EOF: the record could not be flushed to
+             * the socket, so the remainder stays queued exactly as it does
+             * for a short plaintext write. */
+            n = s->tls->write(s->tls, s->fd, s->tx + s->tx_off,
+                              s->tx_len - s->tx_off);
+            if (n > 0) { s->tx_off += (size_t)n; continue; }
+            if (n == 0) break;
+            return HL_NET_E_IO;
+        }
+        n = sp_send(s->fd, s->tx + s->tx_off, s->tx_len - s->tx_off);
         if (n > 0) { s->tx_off += (size_t)n; continue; }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
         if (n < 0 && errno == EINTR) continue;
@@ -645,6 +812,59 @@ static int tx_flush(HlNetStream *s)
     return HL_NET_OK;
 }
 
+/* Fill the receive buffer from the socket, decrypting on the way when a
+ * session is present. Shared by the readiness callback and the read entry
+ * point, which needs it for the buffered-plaintext case below. */
+static void rx_fill(HlNetStream *s)
+{
+    if (!s->rx || s->eof) return;
+    rx_compact(s);
+    while (s->rx_len < s->read_cap) {
+        kl_ssize_t n;
+        if (s->tls) {
+            /* The TLS return codes do NOT line up with recv's, and assuming
+             * they do is how every ordinary end-of-response becomes a
+             * transport error:
+             *
+             *   >0  plaintext
+             *    0  WANT_READ - retry later, NOT end of stream
+             *   -1  error OR a clean close_notify; only at_eof separates them
+             *
+             * The -1 case is the trap. A fake that returns 0 for EOF, which is
+             * what the header's prose suggests, passes every test and then
+             * fails against a real server on the first response that ends. */
+            n = s->tls->read(s->tls, s->fd, s->rx + s->rx_len,
+                             s->read_cap - s->rx_len);
+            if (n > 0) { s->rx_len += (size_t)n; continue; }
+            if (n == 0) break;                      /* WANT_READ */
+            s->eof = 1;
+            if (!(s->tls->at_eof && s->tls->at_eof(s->tls)))
+                s->result = HL_NET_E_IO;
+            break;
+        }
+        n = sp_recv(s->fd, s->rx + s->rx_len, s->read_cap - s->rx_len);
+        if (n > 0) { s->rx_len += (size_t)n; continue; }
+        if (n == 0) { s->eof = 1; break; }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        s->result = HL_NET_E_IO;
+        s->eof    = 1;
+        break;
+    }
+}
+
+/* Copy out of the receive buffer. Returns bytes moved, 0 when it is empty. */
+static size_t rx_take(HlNetStream *s, void *buf, size_t len)
+{
+    if (!s->rx || s->rx_off >= s->rx_len) return 0;
+    size_t n = s->rx_len - s->rx_off;
+    if (n > len) n = len;
+    memcpy(buf, s->rx + s->rx_off, n);
+    s->rx_off += n;
+    if (s->rx_off == s->rx_len) { s->rx_len = s->rx_off = 0; }
+    return n;
+}
+
 /* Readiness on the connected socket. */
 static void io_ready(int fd, unsigned ready, void *user)
 {
@@ -652,19 +872,22 @@ static void io_ready(int fd, unsigned ready, void *user)
     HlNetStream *s = user;
     int woke = 0;
 
-    if ((ready & HL_ASYNC_READ) && s->rx) {
-        rx_compact(s);
-        while (s->rx_len < s->read_cap) {
-            kl_ssize_t n = sp_recv(s->fd, s->rx + s->rx_len,
-                                   s->read_cap - s->rx_len);
-            if (n > 0) { s->rx_len += (size_t)n; continue; }
-            if (n == 0) { s->eof = 1; break; }
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            s->result = HL_NET_E_IO;
-            s->eof    = 1;
-            break;
+    /* Until the handshake is done the socket belongs to it, whichever
+     * direction became ready. */
+    if (s->tls && !s->tls_done) {
+        int r = tls_step(s);
+        if (r != 0) {
+            /* Complete or failed: either way the connect park ends here. */
+            io_rearm(s);
+            wake(s);
+            return;
         }
+        io_rearm(s);
+        return;
+    }
+
+    if ((ready & HL_ASYNC_READ) && s->rx) {
+        rx_fill(s);
         if (s->want_read && (s->rx_off < s->rx_len || s->eof)) {
             s->want_read = 0;
             woke = 1;
@@ -711,6 +934,14 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
     size_t hlen = strlen(cfg->host);
     if (hlen >= HL_NET_HOST_MAX) return HL_NET_E_INVAL;
 
+    /* Asking for TLS without the means to do it is a wiring error, and the
+     * one failure mode that must NOT degrade quietly: a caller that wanted an
+     * encrypted stream and got a plaintext one would never find out. The
+     * context creators in tls_transport.h return NULL when TLS is not
+     * composed, so this is also where that reaches a caller. */
+    if (cfg->tls && (!cfg->tls->factory || !cfg->tls_alloc))
+        return HL_NET_E_INVAL;
+
     HlNetStream *s = calloc(1, sizeof *s);
     if (!s) return HL_NET_E_NOMEM;
 
@@ -723,6 +954,14 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
     /* Owned copy: the worker reads this after we return. */
     memcpy(s->host, cfg->host, hlen + 1);
     s->port = cfg->port;
+
+    if (cfg->tls) {
+        const char *name = cfg->tls_hostname ? cfg->tls_hostname : cfg->host;
+        s->tls_host = strdup(name);
+        if (!s->tls_host) { free(s); return HL_NET_E_NOMEM; }
+        s->tls_cfg   = cfg->tls;
+        s->tls_alloc = *cfg->tls_alloc;   /* by value: the caller's may go */
+    }
 
     s->connect_ms = cfg->connect_ms > 0 ? cfg->connect_ms : NET_CONNECT_MS_DEF;
     s->read_cap   = cfg->read_cap  ? cfg->read_cap  : HL_NET_READ_CAP_DEFAULT;
@@ -751,7 +990,12 @@ int hl_net_stream_connect_result(HlNetStream *s)
 {
     if (!s) return HL_NET_E_INVAL;
     if (s->closing) return HL_NET_E_CLOSED;
-    return s->connect_done ? s->result : HL_NET_E_AGAIN;
+    if (!s->connect_done) return HL_NET_E_AGAIN;
+    /* A connected socket whose handshake is still running is not yet usable,
+     * and saying OK here would hand the caller a stream whose first write
+     * goes nowhere. */
+    if (s->result == HL_NET_OK && s->tls && !s->tls_done) return HL_NET_E_AGAIN;
+    return s->result;
 }
 
 struct HlAsyncOp *hl_net_stream_pending_op(HlNetStream *s)
@@ -793,6 +1037,8 @@ void hl_net_stream_close(HlNetStream *s)
     if (s->connect_started && !s->connect_done)
         kl_connect_op_cancel(&s->connect_op);
 
+    /* Before the descriptor goes: close_notify needs it. */
+    tls_teardown(s);
     if (kl_handle_valid(s->fd)) { sp_close(s->fd); s->fd = KL_INVALID_SOCKET; }
     wake(s);
 }
@@ -818,6 +1064,8 @@ void hl_net_stream_cancel(HlNetStream *s)
         s->be->watcher_del(s->async, (int)s->fd);
         s->io_mask = 0;
     }
+
+    tls_teardown(s);
 
     /* In-flight attempt descriptors belong to the op until it retires them:
      * kl_connect_op_cancel drives co_cancel_attempt / co_dispose_fd for each.
@@ -846,13 +1094,19 @@ long hl_net_stream_read(HlNetStream *s, void *buf, size_t len)
     /* Serve whatever arrived. A read returns WHAT IS THERE, never "one
      * record": framing is the caller's business, which is what lets a protocol
      * sit on top without this layer knowing it. */
-    if (s->rx_off < s->rx_len) {
-        size_t n = s->rx_len - s->rx_off;
-        if (n > len) n = len;
-        memcpy(buf, s->rx + s->rx_off, n);
-        s->rx_off += n;
-        if (s->rx_off == s->rx_len) { s->rx_len = s->rx_off = 0; }
-        return (long)n;
+    {
+        size_t n = rx_take(s, buf, len);
+        if (n) return (long)n;
+    }
+
+    /* TLS can decrypt several application records out of one TCP segment.
+     * Those bytes are inside the session, not on the socket, so arming a
+     * readiness watcher would wait for a segment that never comes - the
+     * classic edge-triggered TLS stall. Drain them before parking. */
+    if (s->tls && s->tls_done && s->tls->pending && s->tls->pending(s->tls)) {
+        rx_fill(s);
+        size_t n = rx_take(s, buf, len);
+        if (n) return (long)n;
     }
 
     if (s->eof) return 0;              /* clean EOF, after draining */
@@ -921,6 +1175,7 @@ const char *hl_net_stream_strerror(int err)
     case HL_NET_E_NOMEM:      return "out of memory";
     case HL_NET_E_INVAL:      return "invalid argument";
     case HL_NET_E_AGAIN:      return "would block";
+    case HL_NET_E_TLS:        return "TLS handshake failed";
     default:                  return "unknown error";
     }
 }

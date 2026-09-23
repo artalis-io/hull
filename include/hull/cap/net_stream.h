@@ -64,6 +64,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* KlTlsConfig / KlAllocator. This header is only reachable in a build that
+ * links Keel: cap/net_stream.c is filtered out of the base when both HTTP
+ * halves are off, and its one consumer is gated the same way. */
+#include <keel/tls.h>
+
 struct HlAsyncOp;
 struct HlAsyncBackendCtx;
 struct HlAsyncBackendPool;
@@ -88,6 +93,7 @@ typedef struct HlNetStream HlNetStream;
 #define HL_NET_E_NOMEM      (-8)
 #define HL_NET_E_INVAL      (-9)   /* bad argument, bounded before use        */
 #define HL_NET_E_AGAIN     (-10)  /* would park; suspend on the pending op   */
+#define HL_NET_E_TLS       (-11)  /* TLS setup or handshake failed           */
 
 /* Bounds. A hostile or merely slow peer must not be able to grow Hull's
  * memory, so both buffers are fixed at construction and writes are admitted
@@ -110,6 +116,28 @@ typedef struct HlNetStreamConfig {
     int         connect_ms;    /* whole-connect deadline; <=0 = default    */
     size_t      read_cap;      /* 0 = HL_NET_READ_CAP_DEFAULT              */
     size_t      write_cap;     /* 0 = HL_NET_WRITE_CAP_DEFAULT             */
+
+    /* Optional TLS. NULL, or a config with no factory, means plaintext.
+     *
+     * Borrowed: the context is the caller's and must outlive the stream. The
+     * per-connection session is created here from `factory` and destroyed with
+     * the stream, so a caller wires the context once and opens many streams.
+     *
+     * Reached ONLY through this config, never by naming an mbedTLS symbol:
+     * TLS is a composed feature and cap/net_stream.c is in the base. A caller
+     * obtains the context from include/hull/tls_transport.h, whose creators
+     * return NULL when TLS is not composed - so a TLS-less build cannot ask
+     * for an encrypted stream rather than silently getting a plaintext one. */
+    const KlTlsConfig *tls;
+
+    /* Allocator for the TLS session. Required when `tls` is set; copied by
+     * value, so the caller's need not outlive the call. */
+    const KlAllocator *tls_alloc;
+
+    /* SNI and the name the certificate is checked against. NULL uses `host`,
+     * which is what a caller wants unless it is connecting to an address and
+     * expecting a different name. */
+    const char *tls_hostname;
 } HlNetStreamConfig;
 
 /* ## Parking protocol
