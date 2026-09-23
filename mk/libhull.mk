@@ -37,7 +37,7 @@ LIBHULL_OBJS := $(EMBED_OBJ) $(CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OB
 	$(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) \
 	$(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) \
-	$(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS)
+	$(TWEETNACL_OBJ) $(BCRYPT_OBJS) $(STB_OBJ) $(PLEDGE_OBJS)
 
 # Under the fat cosmocc driver, every object has a build/<dir>/.aarch64/<name>.o
 # sibling, and a linked archive must ship a concomitant build/.aarch64/libhull.a.
