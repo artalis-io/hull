@@ -235,9 +235,31 @@ Deliberately minimal. Interoperability with current OpenSSH, not legacy breadth.
 Rejected by construction: SSH-1, ssh-rsa/SHA-1, DSA, CBC modes, arcfour, MD5,
 DH groups 1/14-SHA1, `zlib`.
 
-Rekey: implemented if it is cheap once the transport exists; otherwise a hard
-connection byte/time limit with a documented, enforced ceiling, never a silent
-overrun.
+Rekey (RFC 4253 section 9): implemented in both directions.
+
+  - **Absorbed.** A server's `SSH_MSG_KEXINIT` is handled wherever it arrives,
+    including halfway through a streamed command, inside
+    `transport.next_message`. The caller never learns that the connection
+    re-keyed underneath it.
+  - **Initiated.** Once the current keys have protected `cipher.REKEY_BYTES`
+    (1 GiB, matching OpenSSH's default `RekeyLimit`) or `REKEY_PACKETS` in
+    either direction, this side asks. The check happens in
+    `transport.open_session` - the one point every operation passes through
+    and the one point where nothing is in flight. `conn:rekey()` forces one;
+    `conn:stats()` reports what a connection has moved and how often it has
+    re-keyed.
+
+The split follows from where it is safe to START an exchange rather than from
+protocol preference: between operations is unambiguous, mid-stream is not. A
+single transfer larger than the limit is therefore the server's to rekey,
+which is exactly the case OpenSSH handles. There is no TIME trigger: the SSH
+stdlib is handed a stream and an AEAD and nothing else, and threading a clock
+capability through it for a bound the byte counter already covers would buy an
+authority for nothing.
+
+`cipher.MAX_PACKETS` remains underneath all of it as the ceiling that is never
+reached: a connection that somehow re-keys neither way stops rather than
+encrypting past what the key was chosen for.
 
 ## 8. Lua and JS: an open architectural question
 

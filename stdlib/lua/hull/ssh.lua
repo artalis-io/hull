@@ -119,6 +119,24 @@ function Conn:close() return self.t:close() end
 function Conn:fingerprint() return self.t.host_fingerprint end
 function Conn:negotiated() return self.t.negotiated end
 
+--- Ask the server for new keys now. Returns true, or nil plus a reason.
+---
+--- A long-lived connection does not need this: hull/ssh already asks on its
+--- own once the current keys have protected a gigabyte (hull.ssh.cipher's
+--- REKEY_BYTES), and absorbs the server's request whenever it arrives. This
+--- is here for the caller who wants the exchange at a moment of their own
+--- choosing - after handing a connection to less-trusted code, say.
+---
+--- Call it BETWEEN operations. It reads packets, so calling it from inside an
+--- `on_stdout` callback would consume the output that callback is being fed.
+function Conn:rekey() return self.t:rekey() end
+
+--- What this connection has moved, and how many times it has re-keyed:
+--- { rekeys, bytes_sent, bytes_received, packets_sent, packets_received,
+---   rekey_due }. The byte counts span the whole connection; the packet
+--- counts are for the current keys, which is what the limit is about.
+function Conn:stats() return self.t:stats() end
+
 -- Reach the host through a WebSocket relay instead of dialling it directly.
 --
 -- Two layers, and neither knows about the other: the binding opens a TLS

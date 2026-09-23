@@ -43,6 +43,27 @@ M.LENGTH_LEN = 4
 -- limit the key was chosen for.
 M.MAX_PACKETS = 0x80000000
 
+-- When a rekey is DUE - the point at which this client asks for new keys
+-- rather than waiting to be asked.
+--
+-- RFC 4253 section 9 says "after each gigabyte of transmitted data or after
+-- each hour", and recommends it be done by whichever side reaches the limit
+-- first. OpenSSH's default RekeyLimit is the same gigabyte. Matching it means
+-- a Hull client talking to something that never initiates - an embedded
+-- server, a jump host, a router - still gets fresh keys, instead of running a
+-- single key out to MAX_PACKETS and then dying.
+--
+-- The packet trigger is the same bound one order of magnitude earlier, so
+-- MAX_PACKETS stays what it is meant to be: the thing that never happens.
+--
+-- There is deliberately NO time trigger. This module is handed a stream and
+-- an AEAD and nothing else; it has no clock, and inventing one by threading a
+-- time capability through the transport would give the SSH stdlib an
+-- authority it does not otherwise need, for a bound the byte counter already
+-- covers on any connection actually moving data.
+M.REKEY_BYTES   = 1024 * 1024 * 1024        -- 1 GiB, per direction
+M.REKEY_PACKETS = 0x08000000                -- 2^27, a sixteenth of MAX_PACKETS
+
 local Cipher = {}
 Cipher.__index = Cipher
 
@@ -62,6 +83,7 @@ function M.new(key, iv)
         fixed = iv:sub(1, 4),
         counter = iv:sub(5, 12),
         packets = 0,
+        bytes = 0,
     }, Cipher)
 end
 
@@ -97,10 +119,28 @@ function Cipher:advance()
     end
 end
 
--- Whether this key has protected enough that a rekey is due. Advisory: Hull
--- does not initiate one, it absorbs the server's.
 function Cipher:packets_sent()
     return self.packets
+end
+
+-- Bytes this key has protected, counted as they go on the wire: the whole
+-- frame, length field and tag included, not just the payload. That is what
+-- the limit is about - what an attacker has collected under one key - and it
+-- is also the number that matches what OpenSSH's RekeyLimit counts.
+function Cipher:bytes_processed()
+    return self.bytes
+end
+
+-- Whether this key has protected enough that a rekey is DUE.
+--
+-- Advisory, and deliberately so: this object knows nothing about when it is
+-- safe to start a key exchange. It answers the question; hull.ssh.transport
+-- decides where to act on the answer.
+function Cipher:rekey_due(limits)
+    limits = limits or {}
+    local max_bytes   = limits.bytes   or M.REKEY_BYTES
+    local max_packets = limits.packets or M.REKEY_PACKETS
+    return self.bytes >= max_bytes or self.packets >= max_packets
 end
 
 -- Encrypt one payload into a wire packet.
@@ -129,7 +169,9 @@ function Cipher:seal(aead, payload, random_bytes)
         error("ssh.cipher: AEAD seal returned the wrong shape")
     end
     self:advance()
-    return aad .. ct .. tag
+    local frame = aad .. ct .. tag
+    self.bytes = self.bytes + #frame
+    return frame
 end
 
 -- How many bytes a full packet occupies, given its plaintext length field.
@@ -173,6 +215,7 @@ function Cipher:open(aead, buf)
         error("ssh.cipher: packet failed authentication")
     end
     self:advance()
+    self.bytes = self.bytes + total
 
     local pad = plain:byte(1)
     if pad < packet.MIN_PADDING or pad + 1 > #plain then
