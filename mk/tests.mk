@@ -596,6 +596,11 @@ $(BUILDDIR)/test_span_diff: $(BUILDDIR)/gen_spandiff_wasm.h $(BUILDDIR)/gen_span
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
 
+# The vendored KDF, linked directly: this suite pins bcrypt_pbkdf to a
+# published vector, so it drives the vendored code rather than a wrapper.
+$(BUILDDIR)/test_bcrypt: $(TESTDIR)/hull/cap/test_bcrypt.c $(BCRYPT_OBJS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BCRYPT_OBJS) $(TEST_COMMON_LIBS)
+
 # CFI death test - verifies -fsanitize=cfi-icall traps wrong-typed
 # indirect calls.  Self-skips on non-CFI builds via __has_feature.
 # No deps beyond libc.
