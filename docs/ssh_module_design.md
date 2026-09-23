@@ -494,11 +494,40 @@ for, and both had been latent since `hull/ssh` landed.
   `--no-ca-bundle` and the system/embedded ladder mean one thing for every
   outbound connection Hull makes.
 
+### How it is tested
+
+Three layers, because the interesting failures are at different ones:
+
+| layer | what it drives | where |
+|---|---|---|
+| unit, Lua | `ssh.connect` against a FAKE relay - the upgrade request byte for byte, `upgrade_refused` vs `denied`, a peer that is not a WebSocket server | `stdlib/lua/hull/tests/test_ssh_tunnel.lua` |
+| unit, C | the two grants in isolation, with no socket, resolver or loop in scope | `tests/hull/cap/test_net_policy.c` |
+| e2e | a REAL WebSocket relay (`tests/fixtures/ws_tcp_shim.py`) over real sockets, in front of a real OpenSSH `sshd` | `tests/e2e_ssh_tunnel.sh`, `make e2e-ssh-tunnel` |
+
+The e2e has two parts. The SEAM checks need only python3: the upgrade over a
+real socket, the caller's headers arriving verbatim, an Access-style 403
+reported as `upgrade_refused`, and both grants refusing. The LIVE SESSION
+puts an actual `sshd` behind the relay and runs the whole thing - curve25519
+/ ed25519 / aes256-gcm, publickey auth, `exec`, exit status, and the host-key
+accept plus reconnect as a second real tunnel.
+
+The live session skips where sshd is absent, which is right on a laptop and
+wrong in CI, so `HULL_E2E_REQUIRE_SSHD=1` turns the skip into a failure and
+ci.yml sets it. A job that installs openssh-server and then quietly tests
+nothing is worse than a red one.
+
+The e2e tunnel is PLAINTEXT WebSocket, and that is a real gap rather than a
+simplification: see below.
+
 ### Still open
 
-- No e2e. The unit coverage drives `ssh.connect` against a fake relay, which
-  checks the composition but not a real socket. A local WebSocket-to-TCP shim
-  would close this without needing a Cloudflare account.
+- **A CLI app cannot trust a private CA.** `serve_cli.c` resolves its anchor
+  from the embedded Mozilla bundle only - it honours neither `--ca-bundle` nor
+  `--no-ca-bundle`, which `serve.c` both do. A public-CA relay (what
+  Cloudflare is) works; a relay behind an internal CA does not. It is also why
+  the e2e's tunnel is plaintext: a self-signed test cert has no way to be
+  trusted, so the TLS leg rests on `test_net_stream`'s live badssl.com cases
+  instead of being exercised end to end here.
 - No worked example under `examples/`, and no user-facing guide; this design
   record is still the only documentation.
 - JS remains unimplemented, per section 8 - `hull.web.ws-stream` is Lua-only
