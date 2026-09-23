@@ -792,14 +792,19 @@ typedef struct PollOpState {
     uint64_t           deadline_timer;  /* 0 = no timer scheduled */
 } PollOpState;
 
+/* DETACH and free before the callback. See the note on keel_op_resume_timer:
+ * a callback that resumes a coroutine can re-suspend this same op, and
+ * cleaning up afterwards would discard the state that re-suspend installed,
+ * hanging the next wake-up. Kept identical in both backends on purpose - a
+ * lifetime rule that held in only one of them would be worse than either. */
 static void poll_op_deadline_timer(void *ud)
 {
     HlAsyncOp *op = ud;
     PollOpState *s = op->_backend_state;
     if (!s) return;                     /* op_complete already cleaned up */
-    if (op->on_deadline) op->on_deadline(op);
-    free(s);
     op->_backend_state = NULL;
+    free(s);
+    if (op->on_deadline) op->on_deadline(op);
 }
 
 static void poll_op_complete_eventloop(void *ud)
@@ -808,9 +813,9 @@ static void poll_op_complete_eventloop(void *ud)
     PollOpState *s = op->_backend_state;
     if (!s) return;                     /* deadline already fired + cleaned up */
     if (s->deadline_timer) poll_timer_cancel(s->ctx, s->deadline_timer);
-    if (op->on_resume) op->on_resume(op);
-    free(s);
     op->_backend_state = NULL;
+    free(s);
+    if (op->on_resume) op->on_resume(op);
 }
 
 static int poll_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
