@@ -48,6 +48,24 @@ KlTlsCtx *hl_tls_client_ctx_create_from_buf(const unsigned char *ca_buf,
 void hl_tls_ctx_destroy(KlTlsCtx *ctx);
 
 /**
+ * The host's resolved outbound TLS trust, as handed to the runtime.
+ *
+ * A named struct around a borrowed KlTlsConfig, so include/hull/runtime.h can
+ * forward-declare it the way it forward-declares its other config types -
+ * KlTlsConfig itself is an anonymous typedef and cannot be forward-declared,
+ * and pulling <keel/tls.h> into runtime.h would put Keel in front of every
+ * translation unit that includes it.
+ *
+ * `cfg` is NULL when the invocation resolved no trust anchor; a consumer must
+ * then refuse to make an encrypted connection rather than make a plaintext
+ * one. The whole struct is borrowed and owned by the entry point (serve.c /
+ * serve_cli.c), which outlives every stream built from it.
+ */
+typedef struct HlClientTls {
+    const KlTlsConfig *cfg;
+} HlClientTls;
+
+/**
  * Wire @p cfg's {ctx, factory, ctx_destroy} for a created @p ctx so Keel can spin
  * up per-connection sessions. No-op when @p ctx is NULL / TLS is absent. This is
  * what keeps the concrete `kl_tls_mbedtls_create` / `_ctx_destroy` function

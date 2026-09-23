@@ -22,6 +22,26 @@
  * cannot be forged: the one bridge that compiles caller-supplied source builds
  * its chunk name rather than accepting one (mod_template.c).
  *
+ * ## Reaching a host through a relay
+ *
+ * `via = { host, port, tls }` dials somewhere OTHER than the SSH destination
+ * and hands back the bytes, which is how a host behind a WebSocket-over-TLS
+ * tunnel (Cloudflare Access, say) is reached. The WebSocket framing is not
+ * here - it is pure Lua in hull.web.ws-stream, layered on the stream this
+ * returns, because it is a byte transform with no authority in it.
+ *
+ * The POLICY gate then checks BOTH, and both must pass:
+ *
+ *   - hl_ssh_check_connect on the SSH destination, exactly as before, so a
+ *     relay never widens which machine may be reached or as which login
+ *   - hl_ssh_check_tunnel on the relay, because that is the machine a socket
+ *     is actually opened to
+ *
+ * One list could not express this. The destination travels inside the
+ * tunnel's own headers and never appears in the socket address, so a single
+ * allowlist naming the relay would have authorised SSH to every host behind
+ * it.
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -33,6 +53,8 @@
 
 #include "hull/cap/net_policy.h"
 #include "hull/cap/net_stream.h"
+#include "hull/tls_transport.h"  /* HlClientTls: the host's resolved trust */
+#include "hull/utils/alloc.h"    /* hl_alloc_kl */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"   /* hl_net_op_suspend / _complete, HlSuspendOp */
@@ -305,11 +327,20 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o)
 }
 
 /*
- * _stream.connect{ host=, port=, user=, timeout_ms= } -> handle | nil, err
+ * _stream.connect{ host=, port=, user=, timeout_ms=,
+ *                  via = { host=, port=, tls=, tls_hostname= } }
+ *     -> handle | nil, err
  *
- * Refused unless the caller is stdlib AND the manifest grants this exact
- * destination and login. The order matters: the caller check first, so an
- * application probing this bridge learns nothing about the grant.
+ * `host`/`port`/`user` always name the SSH DESTINATION, whether or not a
+ * relay is used: they are what the grant, the host key and the login are
+ * about. `via`, when present, names the machine a socket is actually opened
+ * to, and the bytes that come back are the relay's, not SSH's - wrapping them
+ * is the caller's job (hull.web.ws-stream).
+ *
+ * Refused unless the caller is stdlib AND the manifest grants the exact
+ * destination and login - and, with a relay, the relay too. The order
+ * matters: the caller check first, so an application probing this bridge
+ * learns nothing about the grant.
  */
 static int lua_ssh_connect(lua_State *L)
 {
@@ -319,6 +350,7 @@ static int lua_ssh_connect(lua_State *L)
             "use require('hull.ssh')");
 
     luaL_checktype(L, 1, LUA_TTABLE);
+    int base = lua_gettop(L);
 
     lua_getfield(L, 1, "host");
     const char *host = lua_tostring(L, -1);
@@ -329,27 +361,83 @@ static int lua_ssh_connect(lua_State *L)
     lua_getfield(L, 1, "timeout_ms");
     int timeout = (int)luaL_optinteger(L, -1, SSH_CONNECT_MS_DEF);
 
-    HlLua *lua = get_hl_lua(L);
-    if (!lua) return push_err(L, "no runtime");
+    /* The relay, if any. Its strings stay on the stack until after connect:
+     * cfg.host and cfg.tls_hostname are BORROWED for the duration of the
+     * call, so popping them first would hand the transport freed memory. */
+    const char *via_host = NULL, *via_sni = NULL;
+    int via_port = 0, via_tls = 0, has_via = 0;
+    lua_getfield(L, 1, "via");
+    if (lua_istable(L, -1)) {
+        int v = lua_gettop(L);
+        has_via = 1;
+        lua_getfield(L, v, "host");
+        via_host = lua_tostring(L, -1);
+        lua_getfield(L, v, "port");
+        via_port = (int)luaL_optinteger(L, -1, 443);
+        lua_getfield(L, v, "tls");
+        via_tls = lua_toboolean(L, -1);
+        lua_getfield(L, v, "tls_hostname");
+        via_sni = lua_tostring(L, -1);
+    }
 
-    /* The grant, before any name resolution and before a socket exists. */
+    HlLua *lua = get_hl_lua(L);
+    if (!lua) { lua_settop(L, base); return push_err(L, "no runtime"); }
+
+    /* The grants, before any name resolution and before a socket exists.
+     *
+     * The DESTINATION first even when a relay is in play: refusing on the
+     * machine the app asked to reach is the more informative answer, and it
+     * keeps the relay from being probed by an app that may not reach the
+     * host behind it anyway. */
     HlNetAuth auth = hl_ssh_check_connect(lua->base.ssh_policy, host, port, user);
+    if (auth == HL_NET_ALLOW && has_via)
+        auth = hl_ssh_check_tunnel(lua->base.ssh_policy, via_host, via_port);
     if (auth != HL_NET_ALLOW) {
-        lua_pop(L, 4);
+        lua_settop(L, base);
         return push_err(L, hl_cap_net_auth_reason(auth));
     }
 
     HlNetStreamConfig cfg;
+    KlAllocator       kalloc;
     memset(&cfg, 0, sizeof cfg);
     cfg.async      = lua->base.async_ctx;
     cfg.pool       = lua->base.thread_pool;
-    cfg.host       = host;
-    cfg.port       = port;
+    cfg.host       = has_via ? via_host : host;
+    cfg.port       = has_via ? via_port : port;
     cfg.connect_ms = timeout;
+
+    if (via_tls) {
+        /* Refuse rather than downgrade. A caller that asked for an encrypted
+         * relay and quietly got a plaintext one would never find out, and the
+         * credentials in a tunnel's headers are exactly what the TLS is
+         * protecting. NULL here means this build composed no TLS feature, or
+         * this invocation resolved no CA bundle. */
+        const HlClientTls *t = lua->base.client_tls;
+        if (!t || !t->cfg) {
+            lua_settop(L, base);
+            return push_err(L,
+                "ssh: a TLS tunnel was requested but this build has no TLS "
+                "trust anchor (no CA bundle resolved, or TLS is not composed "
+                "into this binary)");
+        }
+        cfg.tls       = t->cfg;
+        /* The runtime's own allocator, bridged. Stack-local is safe because
+         * the transport COPIES the KlAllocator by value (net_stream.c's
+         * s->tls_alloc) - and the HlAllocator it points through is the
+         * runtime's, which outlives every stream made from it. Routing
+         * through hl_alloc_kl rather than kl_allocator_default also keeps
+         * this file free of a libkeel symbol, as serve_cli.c does. */
+        kalloc        = hl_alloc_kl(lua->base.alloc);
+        cfg.tls_alloc = &kalloc;
+        /* Default the certificate name to the relay's host, which is what a
+         * caller wants unless it dialled an address and expects another
+         * name. Never the SSH destination: the relay presents its own. */
+        cfg.tls_hostname = via_sni;
+    }
 
     HlNetStream *s = NULL;
     int rc = hl_net_stream_connect(&s, &cfg);
-    lua_pop(L, 4);                       /* the four option lookups */
+    lua_settop(L, base);                 /* every option lookup, at once */
 
     if (!s) return push_err(L, hl_net_stream_strerror(rc));
 

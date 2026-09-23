@@ -23,6 +23,30 @@
 --   ssh = { connect = { hosts = {"*.example.com"}, ports = {22},
 --                       users = {"operator"} } }
 --
+-- A host behind a WebSocket tunnel is reached with `tunnel`, and needs a
+-- second grant for the relay, because the relay is a different machine:
+--
+--   ssh = { connect = { hosts = {"spark-7468"}, ports = {22},
+--                       users = {"operator"} },
+--           tunnel  = { hosts = {"ssh.example.com"}, ports = {443} } }
+--
+--   local conn = ssh.connect{
+--       host = "spark-7468", user = "operator", key = key,
+--       tunnel = {
+--           host = "ssh.example.com",
+--           headers = {
+--               "Cf-Access-Client-Id: " .. env.get("CF_ID"),
+--               "Cf-Access-Client-Secret: " .. env.get("CF_SECRET"),
+--               "Cf-Access-Jump-Destination: spark-7468:22",
+--           },
+--       },
+--   }
+--
+-- `connect` still names the host being reached and the login used on it, so
+-- a tunnel never widens either; `tunnel` names only the relay dialled to get
+-- there. Both are checked. The tunnel is TLS by default and the certificate
+-- is verified against the same CA bundle http.fetch uses.
+--
 -- An unknown or changed host key is NOT a callback. connect() fails with a
 -- reason carrying the fingerprint, and the caller decides and retries. A hook
 -- there is a thing applications wire to "return true" once and forget, which
@@ -91,6 +115,68 @@ function Conn:close() return self.t:close() end
 function Conn:fingerprint() return self.t.host_fingerprint end
 function Conn:negotiated() return self.t.negotiated end
 
+-- Reach the host through a WebSocket relay instead of dialling it directly.
+--
+-- Two layers, and neither knows about the other: the binding opens a TLS
+-- stream to the RELAY (and checks ssh.tunnel for it, while still checking
+-- ssh.connect for the host behind it), then hull.web.ws-stream turns that
+-- into the byte stream the SSH transport already takes. So SSH itself needs
+-- no change at all - this is only a different `open_stream`.
+--
+-- `tunnel.headers` is where a provider's authentication goes, as raw
+-- "Name: value" lines. For Cloudflare Access that is Cf-Access-Client-Id and
+-- Cf-Access-Client-Secret, plus Cf-Access-Jump-Destination when the tunnel
+-- routes by destination. Nothing here is Cloudflare-specific; they are
+-- headers, and this module does not read them.
+-- `dial` is how the RELAY is reached, defaulting to the capability-checked
+-- binding. It is a parameter for the same reason `crypto` is one: the layer
+-- above it is a byte transform that a test can drive without a socket, and a
+-- seam that only production uses is a seam nothing checks.
+local function tunnel_opener(tunnel, crypto, dial)
+    if type(tunnel) ~= "table" then
+        error("ssh.connect: tunnel must be a table", 3)
+    end
+    if type(tunnel.host) ~= "string" or tunnel.host == "" then
+        error("ssh.connect: tunnel.host is required", 3)
+    end
+    local ws   = require('hull.web.ws-stream')
+    local port = tunnel.port or 443
+    dial = dial or function(o) return require('hull.ssh._stream').connect(o) end
+    -- TLS unless the caller explicitly says otherwise. A relay carries the
+    -- credentials above in plain headers, so the safe reading of an omitted
+    -- flag is "encrypted"; `tls = false` is for a local test shim.
+    local tls = tunnel.tls ~= false
+
+    return function(o)
+        local raw, err = dial({
+            host       = o.host,      -- the SSH destination: what the grant,
+            port       = o.port,      -- the host key and the login are about
+            user       = o.user,
+            timeout_ms = o.timeout_ms,
+            via        = {            -- the machine actually dialled
+                host         = tunnel.host,
+                port         = port,
+                tls          = tls,
+                tls_hostname = tunnel.tls_hostname,
+            },
+        })
+        if not raw then return nil, { code = "denied", detail = err } end
+
+        local s, werr = ws.connect(raw, {
+            host    = tunnel.tls_hostname or tunnel.host,
+            path    = tunnel.path,
+            headers = tunnel.headers,
+            random  = crypto.random,
+            sha1    = crypto.sha1,
+        })
+        if not s then
+            raw:close()     -- the upgrade failed; the socket is ours to drop
+            return nil, werr
+        end
+        return s
+    end
+end
+
 --- Open a connection. Returns a connection, or nil plus a reason table:
 ---
 ---   { code = "host_unknown", fingerprint = ... }
@@ -116,8 +202,15 @@ function M.connect(opts)
 
     -- The stream is obtained ONLY after the manifest check inside the
     -- binding, and only the SSH stdlib can obtain one at all.
-    local open = opts.open_stream
-    if not open then
+    -- With a tunnel, `open_stream` (if given) dials the RELAY and ws-stream
+    -- wraps what comes back: the option means "how to open the underlying
+    -- byte stream" either way, and the tunnel is a transform on top of it.
+    local open
+    if opts.tunnel then
+        open = tunnel_opener(opts.tunnel, crypto, opts.open_stream)
+    elseif opts.open_stream then
+        open = opts.open_stream
+    else
         local _stream = require('hull.ssh._stream')
         open = function(o) return _stream.connect(o) end
     end
@@ -129,6 +222,11 @@ function M.connect(opts)
         timeout_ms = opts.timeout_ms,
     })
     if not stream then
+        -- A reason that already carries a code keeps it. The tunnel path
+        -- distinguishes cases the caller acts on differently - a 403 from an
+        -- Access policy (`upgrade_refused`) is not the manifest refusing, and
+        -- calling both "denied" sends the operator to the wrong file.
+        if type(serr) == "table" and serr.code then return nil, serr end
         return nil, { code = "denied", detail = serr }
     end
 

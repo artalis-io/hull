@@ -40,6 +40,7 @@ typedef struct HlTestCaseResult HlTestCaseResult;
 typedef struct KlHttpRouter KlHttpRouter;
 typedef struct HlFsConfig HlFsConfig;
 typedef struct HlEnvConfig HlEnvConfig;
+typedef struct HlClientTls HlClientTls;
 typedef struct HlHttpConfig HlHttpConfig;
 typedef struct HlSmtpConfig HlSmtpConfig;
 typedef struct HlSmtpServerCtx HlSmtpServerCtx;
@@ -178,6 +179,17 @@ struct HlRuntime {
      * SSH stdlib rather than to the app - see cap/net_policy.h. */
     const HlManifestSsh *ssh_policy;
     HlEnvConfig  *env_cfg;
+    /* The host's resolved OUTBOUND TLS trust, borrowed. NULL when this build
+     * or this invocation has none (TLS not composed, no CA bundle found).
+     *
+     * ONE anchor for every outbound connection Hull makes, so --ca-bundle,
+     * --no-ca-bundle and the system/embedded ladder mean the same thing to
+     * http.fetch and to an SSH tunnel alike. Consumers must read NULL as
+     * "this cannot do TLS" and refuse - never as "go plaintext". Wrapped in
+     * a named struct rather than held as a KlTlsConfig* because KlTlsConfig
+     * is an anonymous typedef, and this header forward-declares its Keel
+     * types instead of including Keel (see KlHttpRouter above). */
+    const HlClientTls *client_tls;
     HlHttpConfig *http_cfg;
     HlSmtpConfig *smtp_cfg;
     HlSmtpServerCtx *smtp_async;  /* model-2 async SMTP ctx (admission+registry+trust) */

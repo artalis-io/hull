@@ -1155,12 +1155,19 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
     policy->fs_write_count  = manifest->fs_write_count;
 
     /* Sandbox only needs the boolean "any outbound network?" decision. The
-     * actual host allowlist is enforced in cap/http.c (http.fetch) and, for
-     * DB, by the backend + databases.dynamic policy. Granted for http `hosts`
-     * OR a declared network database connection, so a DB-only app can reach
-     * its database (previously blocked -> pledge SIGKILL on connect). */
+     * actual host allowlist is enforced in cap/http.c (http.fetch), for DB by
+     * the backend + databases.dynamic policy, and for SSH by cap/net_policy.c.
+     * Granted for http `hosts`, a declared network database connection, OR a
+     * declared ssh.connect - each of which dials out, and each of which was
+     * SIGKILLed on connect before it was listed here.
+     *
+     * ssh belongs here because hull/ssh deliberately does NOT require `hosts`
+     * (see module_registry.c): ssh.connect is its own grant, so a fleet tool
+     * that declares only `ssh` declares no hosts, and would otherwise have
+     * been denied the socket its manifest plainly asks for. */
     policy->network_outbound = (manifest->hosts_count > 0)
-                             || manifest_has_network_db(manifest);
+                             || manifest_has_network_db(manifest)
+                             || manifest->ssh.connect.declared;
 
     /* Inbound: assume the app may serve (default-permissive). serve.c
      * narrows this to 0 right before applying the sandbox when the

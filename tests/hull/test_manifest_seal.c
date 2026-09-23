@@ -88,6 +88,13 @@ static void build_fixture(HlManifest *m, HlAllocator *alloc)
     m->ssh.connect.port_count    = 1;
     m->ssh.users[0]              = DUP("operator");
     m->ssh.user_count            = 1;
+    /* ssh.tunnel = { hosts, ports } - the relay grant. A second allowlist
+     * with the same authority weight, so it needs the same protection. */
+    m->ssh.tunnel.declared       = 1;
+    m->ssh.tunnel.hosts[0]       = DUP("ssh.fleet.example.com");
+    m->ssh.tunnel.host_count     = 1;
+    m->ssh.tunnel.ports[0]       = 443;
+    m->ssh.tunnel.port_count     = 1;
     #undef DUP
 }
 
@@ -161,6 +168,16 @@ UTEST(manifest_seal, roundtrip_preserves_all_fields)
     /* and they are COPIES, not the originals */
     ASSERT_TRUE(dst.ssh.connect.hosts[0] != src.ssh.connect.hosts[0]);
     ASSERT_TRUE(dst.ssh.users[0] != src.ssh.users[0]);
+
+    /* ssh.tunnel, for the same reason and with the same consequence: it
+     * decides which machine a TLS connection carrying the app's tunnel
+     * credentials may be opened to. */
+    ASSERT_EQ(1, dst.ssh.tunnel.declared);
+    ASSERT_EQ(1, dst.ssh.tunnel.host_count);
+    ASSERT_EQ(443, dst.ssh.tunnel.ports[0]);
+    ASSERT_STREQ("ssh.fleet.example.com", dst.ssh.tunnel.hosts[0]);
+    ASSERT_TRUE(in_arena(&arena, dst.ssh.tunnel.hosts[0]));
+    ASSERT_TRUE(dst.ssh.tunnel.hosts[0] != src.ssh.tunnel.hosts[0]);
     ASSERT_STREQ("https://app.example.com", dst.cors_origins[0]);
     ASSERT_STREQ("GET, POST",    dst.cors_methods);
     ASSERT_STREQ("Content-Type", dst.cors_headers);
