@@ -954,6 +954,38 @@ if [ "$RUNTIME" != "lua" ]; then
     test_irc_chat       "js" $((PORT_BASE + 27)) examples/irc_chat/app.js
 fi
 
+# ── CLI examples ─────────────────────────────────────────────────────
+#
+# An app.main example has no port to curl, so what is checked is that it
+# LOADS: the manifest resolves against the registry, and the entry point runs
+# far enough to answer. Without this, a broken example ships and the first
+# person to find out is a reader following the docs.
+#
+# `hull check` is the manifest gate; the no-argument run exercises the entry
+# point itself. Neither reaches the network - ssh_fleet refuses before it
+# dials, because it was given no host.
+
+test_ssh_fleet() {
+    # Absolute, because the second check runs from inside the app directory.
+    HULL_ABS=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
+
+    OUT=$("$HULL_ABS" check examples/ssh_fleet 2>&1) || true
+    case "$OUT" in
+        *rror*|*ailed*) fail "lua ssh_fleet manifest resolves - got: $OUT" ;;
+        *)              pass "lua ssh_fleet manifest resolves" ;;
+    esac
+
+    # Windows note: a cosmo APE's exit status is unusable from a POSIX shell
+    # (see CLAUDE.md), so this asserts the OUTPUT, not the status.
+    OUT=$(cd examples/ssh_fleet && "$HULL_ABS" --no-sandbox app.lua 2>&1) || true
+    check_contains "lua ssh_fleet with no host prints usage" "$OUT" "usage:"
+    check_contains "lua ssh_fleet names its key variable" "$OUT" "HULL_SSH_KEY"
+}
+
+if [ "$RUNTIME" != "js" ]; then
+    test_ssh_fleet
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 
 echo ""
