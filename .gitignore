@@ -77,6 +77,8 @@ _sec/
 _scratch*/
 _dbg*/
 
-# cosmocc drops the aarch64 half of a fat build beside the target. For a
-# test binary linked from the repo root that lands here, not in build/.
+# cosmocc scratch left in the repo root rather than in build/: the aarch64
+# half of a fat build (for a test binary linked from here), and the temporary
+# assembly it writes next to the compiler's cwd.
 .aarch64/
+cc*.s
