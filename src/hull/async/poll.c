@@ -39,8 +39,11 @@
 #include "hull/shared/async_backend.h"
 #include "hull/utils/alloc.h"
 
+#include "log.h"
+
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>   /* INT_MAX: poll() takes an int timeout */
 #include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -287,6 +290,7 @@ static int heap_push(HlAsyncBackendCtx *ctx, PollTimer *t)
 {
     if (ctx->timer_count == ctx->timer_cap) {
         size_t ncap = ctx->timer_cap ? ctx->timer_cap * 2 : 16;
+        if (ncap > SIZE_MAX / sizeof(*ctx->timers)) return -1;
         PollTimer **n = realloc(ctx->timers, ncap * sizeof(*n));
         if (!n) return -1;
         ctx->timers = n;
@@ -336,6 +340,10 @@ static int poll_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
     }
     if (ctx->watcher_count == ctx->watcher_cap) {
         size_t ncap = ctx->watcher_cap ? ctx->watcher_cap * 2 : 8;
+        if (ncap > SIZE_MAX / sizeof(*ctx->watchers)) {
+            pthread_mutex_unlock(&ctx->lock);
+            return -1;
+        }
         PollWatcher *n = realloc(ctx->watchers, ncap * sizeof(*n));
         if (!n) {
             pthread_mutex_unlock(&ctx->lock);
@@ -409,7 +417,12 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
     if (ctx->timer_count > 0) {
         uint64_t now = poll_monotonic_ms();
         uint64_t next = ctx->timers[0]->deadline_ms;
-        int t = (next > now) ? (int)(next - now) : 0;
+        /* Clamped: poll() takes an int, and a deadline more than ~24.8 days
+         * out truncates to a NEGATIVE one - which poll reads as "block
+         * forever", so the loop would sleep until some unrelated event
+         * happened to wake it. */
+        uint64_t d = (next > now) ? next - now : 0;
+        int t = d > (uint64_t)INT_MAX ? INT_MAX : (int)d;
         if (effective_timeout < 0 || t < effective_timeout)
             effective_timeout = t;
     }
@@ -511,6 +524,18 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
     for (size_t i = 0; i < snap_n; i++) {
         short re = pfds[i + 1].revents;
         if (re == 0) continue;
+
+        /* POLLNVAL means the descriptor is not open - closed without being
+         * deregistered. Left unmapped it produced ready == 0, so the entry
+         * was skipped and the watcher STAYED, and poll() returned
+         * immediately on it forever: a silent 100% CPU spin. Deregister it.
+         * No consumer does this today (maybe_release removes the watcher
+         * before closing the fd), which is why it has never shown. */
+        if (re & POLLNVAL) {
+            poll_watcher_del(ctx, snaps[i].fd);
+            continue;
+        }
+
         unsigned ready = 0;
         if (re & (POLLIN | POLLHUP | POLLERR)) ready |= HL_ASYNC_READ;
         if (re & POLLOUT) ready |= HL_ASYNC_WRITE;
@@ -646,12 +671,19 @@ static void completion_enqueue(HlAsyncBackendCtx *ctx,
     pthread_mutex_lock(&ctx->lock);
     if (ctx->completion_count == ctx->completion_cap) {
         size_t ncap = ctx->completion_cap ? ctx->completion_cap * 2 : 16;
+        if (ncap > SIZE_MAX / sizeof *ctx->completions) {
+            pthread_mutex_unlock(&ctx->lock);
+            return;
+        }
         PollCompletion *n = realloc(ctx->completions, ncap * sizeof *n);
         if (!n) {
-            /* OOM: drop the completion. Caller's done_fn won't fire;
-             * the corresponding work has already happened. Same
-             * failure mode as a queue overflow. */
+            /* OOM: drop the completion. The work already happened, but its
+             * done_fn never fires - which for a parked op means a coroutine
+             * that waits forever and a state that leaks. Silent, that reads
+             * as a hang with no cause; logged, it names itself. */
             pthread_mutex_unlock(&ctx->lock);
+            log_error("[hull:async] completion queue allocation failed; "
+                      "a pending resume was dropped");
             return;
         }
         ctx->completions = n;
@@ -811,9 +843,13 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
  * That marshal removes every race: there are no atomics, no locks,
  * no `resumed` flag, no fragile coordination - the only state-mutating
  * code paths both run on the same thread, in the same tick. The
- * completion queue is drained before timers in poll_tick, so when both
- * fire in the same tick the resume wins (matching keel-backend
- * semantics where op_complete cancels the deadline timer).
+ * completion queue is drained before timers in poll_tick, so a resume
+ * ENQUEUED BEFORE THE TICK BEGAN wins over a deadline due in the same
+ * tick (matching keel-backend semantics where op_complete cancels the
+ * deadline timer). One issued mid-tick lands in the NEXT tick's queue,
+ * so that deadline fires first - still safe, because the deadline
+ * detaches the state and the later drain then finds none and returns,
+ * but not the blanket guarantee the first half of this reads as.
  *
  * Tradeoff vs the keel backend: op_complete has one tick of latency
  * (gets queued, fires on next tick). The keel backend does the same
@@ -854,6 +890,11 @@ static void poll_op_complete_eventloop(void *ud)
 static int poll_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
     if (!ctx || !op) return -1;
+    /* Already suspended. Overwriting would leak the old state and orphan its
+     * deadline timer, which still points at this op. Consumers gate on their
+     * own "is something pending" flag; this is the backstop for one that
+     * forgets to. */
+    if (op->_backend_state) return -1;
     PollOpState *s = calloc(1, sizeof *s);
     if (!s) return -1;
     s->ctx = ctx;

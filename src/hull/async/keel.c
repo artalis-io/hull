@@ -320,6 +320,9 @@ static void keel_op_resume_timer(void *ud)
 static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
     if (!ctx || !op) return -1;
+    /* Already suspended. Overwriting would leak the old state and orphan its
+     * deadline timer, which still points at this op. */
+    if (op->_backend_state) return -1;
     KeelOpState *s = calloc(1, sizeof *s);
     if (!s) return -1;
     s->deadline_timer = -1;
@@ -339,6 +342,11 @@ static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     return 0;
 }
 
+/* EVENT-LOOP THREAD ONLY - see the vtable comment. This reaches
+ * kl_timer_add and kl_timer_cancel, and Keel's event context carries no
+ * lock: a call from a worker would race the loop reallocating the timer
+ * heap. The poll backend marshals instead, which is why the two look
+ * different here. */
 static void keel_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
     if (!ctx || !op) return;

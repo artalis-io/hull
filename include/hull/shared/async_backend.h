@@ -208,9 +208,18 @@ typedef struct HlAsyncBackend {
     int    (*op_suspend)(HlAsyncBackendCtx *ctx, HlAsyncOp *op);
 
     /* Resume an in-flight op. Schedules op->on_resume to fire on the
-     * event-loop thread. Safe to call from any thread (notably from
-     * a pool worker's done_fn - though done_fn already runs on the
-     * event-loop thread, this works regardless). */
+     * event-loop thread.
+     *
+     * EVENT-LOOP THREAD ONLY. This used to say "safe to call from any
+     * thread", which was true of the poll backend - it marshals through a
+     * locked completion queue - and not of the keel one, which reaches
+     * kl_timer_add with no synchronisation at all while the loop may be
+     * reallocating the same timer heap. The contract is the intersection of
+     * what both backends can honour, not the union.
+     *
+     * No caller needs more: a pool worker's done_fn already runs on the
+     * event-loop thread, which is the case the old wording was reaching
+     * for. */
     void   (*op_complete)(HlAsyncBackendCtx *ctx, HlAsyncOp *op);
 
     /* Retract an in-flight op: cancel its deadline, DROP any completion
