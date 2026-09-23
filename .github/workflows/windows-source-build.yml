@@ -1092,7 +1092,11 @@ jobs:
 
           # Expected to FAIL, with the cause recorded in the doc. Cheap enough to
           # keep running: project-discovery ~29s.
-          E2E_KNOWN="e2e-project-discovery"
+          # e2e-ssh-tunnel: the async outbound connect never completes on a
+          # cosmo APE here, so hull/ssh cannot connect at all on Windows -
+          # not tunnel-specific, and not new; it is simply the first suite
+          # that ever drove cap/net_stream.c. Cause + trace in the doc.
+          E2E_KNOWN="e2e-project-discovery e2e-ssh-tunnel"
 
           rc_step=0
 

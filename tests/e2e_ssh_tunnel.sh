@@ -40,8 +40,11 @@
 # skip into a failure, and ci.yml sets it. Same reasoning as the
 # EMBED_PLATFORM check in e2e-htmx-playwright-build.
 #
-# Requires: build/hull, python3. The live session also needs sshd +
-# ssh-keygen.
+# Requires: build/hull, python3, ssh-keygen. The live session also needs an
+# sshd. ssh-keygen is required throughout rather than only for the live half
+# because ssh.connect parses the private key BEFORE it dials - correctly, a
+# bad key should not cost a connection - so even the seam checks need a real
+# one. It ships with openssh-client, which the live half's sshd does not.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -64,6 +67,10 @@ if ! command -v python3 >/dev/null 2>&1; then
     echo "e2e_ssh_tunnel: python3 required"
     exit 1
 fi
+if ! command -v ssh-keygen >/dev/null 2>&1; then
+    echo "e2e_ssh_tunnel: ssh-keygen required (openssh-client)"
+    exit 1
+fi
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1${2:+ - got: $2}"; FAIL=$((FAIL + 1)); }
@@ -77,6 +84,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 WORK=$(mktemp -d 2>/dev/null || mktemp -d -t hullssh)
+
+# ONE ed25519 client key for the whole run. ssh.connect parses the key before
+# it dials, so every app dir needs a real one - a placeholder fails at
+# privatekey.load and never reaches the tunnel the test is about.
+ssh-keygen -q -t ed25519 -N '' -f "$WORK/client_key" </dev/null
+chmod 600 "$WORK/client_key"
 
 # Assert on a KEY=VALUE line the app printed. Unique variable names: POSIX sh
 # has no locals, so a name reused here would clobber the caller's.
@@ -137,6 +150,8 @@ stop_shim() {
 # $6 grant-hosts  $7 grant-ports  $8 tunnel-hosts  $9 tunnel-ports
 write_app() {
     mkdir -p "$1"
+    cp "$WORK/client_key" "$1/client_key"
+    chmod 600 "$1/client_key"
     cat > "$1/app.lua" <<LUA
 app.manifest({
     modules = { "hull/ssh@1", "hull/fs@1" },
@@ -211,8 +226,20 @@ end)
 LUA
 }
 
+# Every case talks to a loopback peer, so a run that has not finished in 20s
+# is not slow, it is stuck. Bounded here rather than left to the caller's
+# budget: a suite that HANGS spends a CI job's whole allowance and reports
+# nothing, where one that fails prints which assertion never arrived.
+#
+# It is not hypothetical. On a cosmo APE on Windows the outbound connect
+# never completes (docs/windows_e2e_status.md), and without this the suite
+# sat there until the runner killed it.
 run_app() {
-    (cd "$1" && "$HULL" --no-sandbox app.lua 2>&1) || true
+    if command -v timeout >/dev/null 2>&1; then
+        (cd "$1" && timeout 20 "$HULL" --no-sandbox app.lua 2>&1) || true
+    else
+        (cd "$1" && "$HULL" --no-sandbox app.lua 2>&1) || true
+    fi
 }
 
 echo "e2e_ssh_tunnel: hull/ssh through a WebSocket relay"
@@ -250,7 +277,6 @@ wait_for_file "$WORK/peer-ready" || { echo "peer did not start"; exit 1; }
 start_shim "$RELAY_PORT" "$PEER_PORT"
 write_app "$WORK/a1" "127.0.0.1" "$PEER_PORT" "127.0.0.1" "$RELAY_PORT" \
     '"127.0.0.1"' "$PEER_PORT" '"127.0.0.1"' "$RELAY_PORT"
-printf 'dummy' > "$WORK/a1/client_key"
 OUT=$(run_app "$WORK/a1")
 SEEN=$(cat "$WORK/headers.txt" 2>/dev/null || echo "")
 stop_shim
@@ -273,7 +299,6 @@ esac
 start_shim "$RELAY_PORT" "$PEER_PORT" --require-header "Cf-Access-Client-Id: nope.access"
 write_app "$WORK/a2" "127.0.0.1" "$PEER_PORT" "127.0.0.1" "$RELAY_PORT" \
     '"127.0.0.1"' "$PEER_PORT" '"127.0.0.1"' "$RELAY_PORT"
-printf 'dummy' > "$WORK/a2/client_key"
 OUT=$(run_app "$WORK/a2")
 stop_shim
 assert_line "$OUT" "first_code" "upgrade_refused" "seam: a 403 from the relay is upgrade_refused, not denied"
@@ -282,7 +307,6 @@ assert_line "$OUT" "first_code" "upgrade_refused" "seam: a 403 from the relay is
 # and refused BEFORE a socket is opened (the shim is not even running).
 write_app "$WORK/a3" "127.0.0.1" "$PEER_PORT" "127.0.0.1" "$RELAY_PORT" \
     '"127.0.0.1"' "$PEER_PORT" '"relay.invalid"' "$RELAY_PORT"
-printf 'dummy' > "$WORK/a3/client_key"
 OUT=$(run_app "$WORK/a3")
 assert_line "$OUT" "first_code" "denied" "seam: a relay outside ssh.tunnel.hosts is denied"
 assert_contains "seam: the denial names the tunnel list" "$OUT" "ssh.tunnel.hosts"
@@ -292,7 +316,6 @@ assert_contains "seam: the denial names the tunnel list" "$OUT" "ssh.tunnel.host
 start_shim "$RELAY_PORT" "$PEER_PORT"
 write_app "$WORK/a4" "10.9.9.9" "$PEER_PORT" "127.0.0.1" "$RELAY_PORT" \
     '"127.0.0.1"' "$PEER_PORT" '"127.0.0.1"' "$RELAY_PORT"
-printf 'dummy' > "$WORK/a4/client_key"
 OUT=$(run_app "$WORK/a4")
 stop_shim
 assert_line "$OUT" "first_code" "denied" "seam: an allowed relay does not widen the destination"
@@ -322,8 +345,7 @@ else
     RELAY_PORT=$(free_port)
     mkdir -p "$WORK/sshd"
     ssh-keygen -q -t ed25519 -N '' -f "$WORK/sshd/host_key" </dev/null
-    ssh-keygen -q -t ed25519 -N '' -f "$WORK/sshd/client_key" </dev/null
-    cp "$WORK/sshd/client_key.pub" "$WORK/sshd/authorized_keys"
+    cp "$WORK/client_key.pub" "$WORK/sshd/authorized_keys"
     chmod 600 "$WORK/sshd/host_key" "$WORK/sshd/authorized_keys"
 
     # A throwaway sshd on a high port, run as the invoking user - which is the
@@ -371,8 +393,6 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         start_shim "$RELAY_PORT" "$SSH_PORT"
         write_app "$WORK/b1" "127.0.0.1" "$SSH_PORT" "127.0.0.1" "$RELAY_PORT" \
             '"127.0.0.1"' "$SSH_PORT" '"127.0.0.1"' "$RELAY_PORT"
-        cp "$WORK/sshd/client_key" "$WORK/b1/client_key"
-        chmod 600 "$WORK/b1/client_key"
         OUT=$(run_app "$WORK/b1")
         SEEN=$(cat "$WORK/headers.txt" 2>/dev/null || echo "")
         stop_shim
