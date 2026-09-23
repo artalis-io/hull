@@ -72,6 +72,15 @@ function M.new(stream, crypto, opts)
         ident = "SSH-2.0-" .. (opts.software or "Hull"),
         inbuf = "",
         next_channel = 0,
+        rekeys = 0,
+        -- Messages read while waiting for the peer's KEXINIT during a rekey
+        -- WE started. See defer_message.
+        deferred = {},
+        deferred_head = 1,
+        -- nil means hull.ssh.cipher's own limits; opts.rekey_limit is the
+        -- escape hatch a test uses to reach them in milliseconds rather than
+        -- gigabytes.
+        rekey_limit = opts.rekey_limit,
         aead = {
             seal = function(k, iv, aad, p) return crypto.gcm_seal(k, iv, aad, p) end,
             open = function(k, iv, aad, c, t) return crypto.gcm_open(k, iv, aad, c, t) end,
@@ -177,7 +186,43 @@ end
 -- chatter this normally skips is not permitted at all. Skipping it is the
 -- primitive Terrapin uses - an inserted IGNORE shifts what the two ends
 -- think they agreed, and a client that silently drops it never notices.
+-- Hold a message that arrived at a moment we cannot deliver it, to be
+-- returned by the next next_message.
+--
+-- Exactly one situation produces these: a rekey THIS side started. Between
+-- our KEXINIT and the peer's, the peer has not yet seen ours and is still
+-- entitled to send channel data (RFC 4253 section 9 constrains it only from
+-- its own KEXINIT onward). Those bytes belong to whatever the caller was
+-- doing; dropping them would silently lose output, and handing them to the
+-- key exchange would make it fail on a message that is perfectly legal.
+function Transport:defer_message(p)
+    self.deferred[#self.deferred + 1] = p
+end
+
+function Transport:take_deferred()
+    local q = self.deferred
+    if self.deferred_head > #q then return nil end
+    local p = q[self.deferred_head]
+    q[self.deferred_head] = nil
+    self.deferred_head = self.deferred_head + 1
+    if self.deferred_head > #q then
+        self.deferred, self.deferred_head = {}, 1
+    end
+    return p
+end
+
+-- Anything set aside during a rekey comes out first, in order: it arrived
+-- first. The key exchange itself must NOT go through here - it calls
+-- read_message directly - or it would re-read the messages it just deferred
+-- and make no progress at all.
 function Transport:next_message(strict)
+    local held = self:take_deferred()
+    if held then return held end
+    return self:read_message(strict)
+end
+
+-- The next message off the WIRE, with transport chatter filtered.
+function Transport:read_message(strict)
     for _ = 1, 256 do
         local p = self:read_packet()
         local m = p:byte(1)
@@ -281,7 +326,25 @@ function Transport:run_kex(opts, i_s)
 
     local i_c = kexinit.build(opts.offer, self.crypto.random(16))
     self:send_packet(i_c)
-    if not i_s then i_s = self:next_message() end
+    if not i_s then
+        if rekey then
+            -- WE started this one, so the peer has not seen our KEXINIT yet
+            -- and may still be sending channel data. Set that aside rather
+            -- than failing on it (see defer_message); from the peer's own
+            -- KEXINIT onward, RFC 4253 section 9 permits only key-exchange
+            -- traffic, so nothing after this point needs deferring.
+            for _ = 1, 4096 do
+                local p = self:read_message()
+                if p:byte(1) == SSH_MSG_KEXINIT then i_s = p; break end
+                self:defer_message(p)
+            end
+            if not i_s then
+                return nil, { code = "no_kexinit_response" }
+            end
+        else
+            i_s = self:next_message()
+        end
+    end
 
     local server = kexinit.parse(i_s)
     local neg, nerr = kexinit.negotiate(opts.offer, server)
@@ -360,6 +423,16 @@ function Transport:run_kex(opts, i_s)
     local keys = kex.derive_keys(self.raw_sha, k_raw, h, self.session_id,
                                  kex.SIZES[neg.cipher_c2s])
 
+    -- The counters live in the cipher objects, which are about to be
+    -- replaced. Carry the totals up first, so `stats()` describes the
+    -- CONNECTION rather than only the current key.
+    if self.c2s then
+        self.total_sent = (self.total_sent or 0) + self.c2s:bytes_processed()
+    end
+    if self.s2c then
+        self.total_received = (self.total_received or 0) + self.s2c:bytes_processed()
+    end
+
     -- Nothing may be sent between our NEWKEYS and the peer's, which is what
     -- lets both directions switch together here: NEWKEYS itself travels under
     -- the OLD keys, and the peer switches its send side the moment it sends
@@ -368,7 +441,86 @@ function Transport:run_kex(opts, i_s)
     self:expect(kex.SSH_MSG_NEWKEYS, "NEWKEYS", self.strict_kex)
     self.c2s = cipher.new(keys.key_c2s, keys.iv_c2s)
     self.s2c = cipher.new(keys.key_s2c, keys.iv_s2c)
+    if rekey then self.rekeys = self.rekeys + 1 end
     return true
+end
+
+-- Rekeying from THIS side ------------------------------------------------
+--
+-- RFC 4253 section 9 lets either end ask, and says the one that reaches the
+-- limit first should. Until now Hull only ever absorbed the server's: correct
+-- against OpenSSH, which asks after about a gigabyte, and worth nothing
+-- against a peer that never does. Embedded servers, appliance SSH stacks and
+-- plenty of jump hosts never do - and a client that also never does runs one
+-- key until hull.ssh.cipher's MAX_PACKETS backstop drops the connection.
+--
+-- So this side now asks too, and the two mechanisms cover different halves:
+-- WE initiate between operations, where starting an exchange is unambiguous;
+-- the SERVER's request is absorbed wherever it arrives, including halfway
+-- through a streamed command. A single transfer larger than the limit is the
+-- server's to rekey - which is exactly the case OpenSSH handles.
+
+--- Start a key exchange now. Returns true, or nil plus a structured reason.
+---
+--- Safe to call between operations. It is NOT safe to call while a channel is
+--- mid-stream from the caller's own code (inside an on_stdout callback, say):
+--- the exchange reads packets, and those reads would consume the very output
+--- the callback is being handed.
+function Transport:rekey()
+    if not self.session_id then return nil, { code = "not_handshaken" } end
+    if self.in_kex then return true end          -- one is already running
+    self.in_kex = true
+    -- No pcall: a raise here comes from the stream or from a failed
+    -- authentication of the exchange, and in both cases the connection is
+    -- already finished - the same reasoning as the absorb path in
+    -- next_message, which is why in_kex is not restored on that path either.
+    local ok, why = self:run_kex(self.kex_opts or {})
+    self.in_kex = false
+    if not ok then return nil, why end
+    return true
+end
+
+--- Rekey if this connection has moved enough under the current keys.
+---
+--- Returns true if an exchange ran. Called from open_session, which is the
+--- one point every operation passes through and the one point where nothing
+--- is in flight.
+function Transport:maybe_rekey()
+    if self.in_kex or not self.session_id then return false end
+    if not self.c2s or not self.s2c then return false end
+    if not (self.c2s:rekey_due(self.rekey_limit)
+            or self.s2c:rekey_due(self.rekey_limit)) then
+        return false
+    end
+    local ok, why = self:rekey()
+    if not ok then
+        -- Same response as a failed absorbed rekey: continuing would mean
+        -- encrypting past the limit the key was chosen for.
+        error("ssh: rekey failed: "
+              .. wire.safe_name((why and why.code) or "unknown"))
+    end
+    return true
+end
+
+--- What this connection has moved, and how many times it has re-keyed.
+---
+--- The byte counts are for the whole connection, not the current key: a
+--- number that silently reset on every rekey would be the one number a
+--- caller watching for a rekey must not be given.
+function Transport:stats()
+    local sent = (self.total_sent or 0)
+        + (self.c2s and self.c2s:bytes_processed() or 0)
+    local recv = (self.total_received or 0)
+        + (self.s2c and self.s2c:bytes_processed() or 0)
+    return {
+        rekeys           = self.rekeys,
+        bytes_sent       = sent,
+        bytes_received   = recv,
+        packets_sent     = self.c2s and self.c2s:packets_sent() or 0,
+        packets_received = self.s2c and self.s2c:packets_sent() or 0,
+        rekey_due        = (self.c2s ~= nil and self.c2s:rekey_due(self.rekey_limit))
+                           or (self.s2c ~= nil and self.s2c:rekey_due(self.rekey_limit)),
+    }
 end
 
 -- Authentication ------------------------------------------------------------------
@@ -413,6 +565,12 @@ end
 -- Channels ----------------------------------------------------------------------------
 
 function Transport:open_session()
+    -- The one gateway every operation passes through, and the one moment
+    -- nothing is in flight: exec and sftp both start here, and neither has a
+    -- channel open yet. Asking for keys anywhere else means asking in the
+    -- middle of somebody's output.
+    self:maybe_rekey()
+
     local ch = channel.new({ id = self.next_channel })
     self.next_channel = self.next_channel + 1
     self:send_packet(ch:open_message())

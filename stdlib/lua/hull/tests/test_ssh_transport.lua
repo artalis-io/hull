@@ -488,5 +488,142 @@ test("a failed rekey stops the connection rather than carrying on", function()
     assert_eq(err:find("host_changed_midsession", 1, true) ~= nil, true, err)
 end)
 
+-- rekeying from THIS side ------------------------------------------------
+--
+-- Absorbing the server's request is half of RFC 4253 section 9. The other
+-- half is asking, which matters against every peer that never asks: without
+-- it one key runs to hull.ssh.cipher's MAX_PACKETS backstop and the
+-- connection dies for no reason the caller can act on.
+
+-- A stand-in for a cipher direction: the transport only ever asks it three
+-- questions, and driving the real one to a gigabyte is not a unit test.
+local function fake_cipher(due, bytes, packets)
+    return {
+        rekey_due = function() return due end,
+        bytes_processed = function() return bytes or 0 end,
+        packets_sent = function() return packets or 0 end,
+    }
+end
+
+test("a connection under its limits does not rekey", function()
+    local t = transport.new(fake_stream("", 4), stub_crypto())
+    t.session_id = "sid"
+    t.c2s, t.s2c = fake_cipher(false), fake_cipher(false)
+    local ran = false
+    t.rekey = function() ran = true; return true end
+    assert_eq(t:maybe_rekey(), false, "no exchange:")
+    assert_eq(ran, false, "and rekey was not called:")
+end)
+
+test("either direction reaching its limit asks for new keys", function()
+    for _, which in ipairs({ "c2s", "s2c" }) do
+        local t = transport.new(fake_stream("", 4), stub_crypto())
+        t.session_id = "sid"
+        t.c2s, t.s2c = fake_cipher(false), fake_cipher(false)
+        t[which] = fake_cipher(true)
+        local ran = false
+        t.rekey = function() ran = true; return true end
+        assert_eq(t:maybe_rekey(), true, which .. " exchanged:")
+        assert_eq(ran, true, which .. " called rekey:")
+    end
+end)
+
+test("a rekey that fails stops the connection rather than continuing", function()
+    -- Carrying on would mean encrypting past the limit the key was chosen
+    -- for, which is the one thing the limit exists to prevent.
+    local t = transport.new(fake_stream("", 4), stub_crypto())
+    t.session_id = "sid"
+    t.c2s, t.s2c = fake_cipher(true), fake_cipher(false)
+    t.rekey = function() return nil, { code = "no_common_algorithm" } end
+    local err = assert_raises(function() t:maybe_rekey() end)
+    assert_eq(err:find("no_common_algorithm", 1, true) ~= nil, true, err)
+end)
+
+test("opening a session is where the limit is checked", function()
+    -- Anywhere else would mean starting a key exchange in the middle of
+    -- somebody's output. exec and sftp both come through here.
+    local t = transport.new(fake_stream("", 4), stub_crypto())
+    local asked = false
+    t.maybe_rekey = function() asked = true; return false end
+    pcall(function() t:open_session() end)   -- the stream ends; that is fine
+    assert_eq(asked, true, "open_session asked:")
+end)
+
+test("rekey before the handshake is refused, not attempted", function()
+    local t = transport.new(fake_stream("", 4), stub_crypto())
+    local ok, why = t:rekey()
+    assert_eq(ok, nil)
+    assert_eq(why.code, "not_handshaken")
+end)
+
+test("a rekey already running is not started a second time", function()
+    local t = transport.new(fake_stream("", 4), stub_crypto())
+    t.session_id = "sid"
+    t.in_kex = true
+    t.run_kex = function() error("run_kex must not be reached") end
+    assert_eq(t:rekey(), true)
+end)
+
+test("messages that arrive before the peer's KEXINIT are kept, in order", function()
+    -- Between our KEXINIT and the peer's, the peer has not seen ours yet and
+    -- is still entitled to send channel data. Dropping it would silently
+    -- lose a command's output; handing it to the key exchange would fail on
+    -- a message that is perfectly legal.
+    local t = transport.new(fake_stream("", 4), stub_crypto())
+    t:defer_message("first")
+    t:defer_message("second")
+    assert_eq(t:next_message(), "first")
+    assert_eq(t:next_message(), "second")
+    -- and then it reads from the stream again
+    local u = transport.new(fake_stream(plain(string.char(94) .. "live"), 4),
+                            stub_crypto())
+    u:defer_message(string.char(93) .. "held")
+    assert_eq(u:next_message():byte(1), 93, "held first:")
+    assert_eq(u:next_message():byte(1), 94, "then the wire:")
+end)
+
+test("a rekey we start defers channel data until the exchange is over", function()
+    -- End to end through run_kex rather than through the queue alone: the
+    -- deferral only helps if the exchange actually routes through it.
+    local data = string.char(94) .. "output"
+    local theirs = kexinit.build({ kex = { "nope" }, host_key = { "nope" },
+                                   cipher = { "nope" }, mac = { "none" },
+                                   compression = { "none" } },
+                                 string.rep(" ", 16))
+    local s = fake_stream(plain(data) .. plain(theirs), 4)
+    local t = transport.new(s, stub_crypto())
+    t.session_id = "sid"          -- makes this a rekey, not a first exchange
+
+    -- Through rekey(), not run_kex directly: rekey() is what marks the
+    -- exchange as running, and without that mark next_message absorbs the
+    -- server's KEXINIT into a NESTED exchange instead of handing it to the
+    -- one already waiting for it.
+    --
+    -- Negotiation then fails on purpose: what is being asserted is what
+    -- happened to the data packet on the way there, not the exchange itself.
+    local ok, why = t:rekey()
+    assert_eq(ok, nil, "the exchange failed as arranged:")
+    assert_eq(why.code, "no_common_algorithm")
+
+    local held = t:next_message()
+    assert_eq(held:byte(1), 94, "the channel data survived the rekey:")
+    assert_eq(held:sub(2), "output")
+end)
+
+test("stats span the connection, not just the current key", function()
+    local t = transport.new(fake_stream("", 4), stub_crypto())
+    t.rekeys = 2
+    t.total_sent, t.total_received = 100, 200
+    t.c2s = fake_cipher(false, 7, 3)
+    t.s2c = fake_cipher(false, 9, 4)
+    local st = t:stats()
+    assert_eq(st.rekeys, 2)
+    assert_eq(st.bytes_sent, 107, "carried across rekeys:")
+    assert_eq(st.bytes_received, 209)
+    assert_eq(st.packets_sent, 3, "packets are per-key:")
+    assert_eq(st.packets_received, 4)
+    assert_eq(st.rekey_due, false)
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

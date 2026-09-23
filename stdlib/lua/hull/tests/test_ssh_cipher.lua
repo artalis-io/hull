@@ -268,5 +268,54 @@ test("seal demands real randomness", function()
     end, "wrong length")
 end)
 
+-- the rekey limits (RFC 4253 section 9) --------------------------------------
+--
+-- These decide when hull.ssh.transport ASKS for new keys. Getting them wrong
+-- is not visible in a handshake - it shows up as a connection that ran a
+-- single key far past what it was chosen for, months later, on the one peer
+-- that never rekeys by itself.
+
+test("bytes are counted as they go on the wire, frame and tag included", function()
+    -- Not the payload length: the limit is about how much an attacker has
+    -- collected under one key, and that is the whole frame.
+    local enc = cipher.new(KEY, IV)
+    local frame = enc:seal(fake_aead(), "hello", zeros)
+    assert_eq(enc:bytes_processed(), #frame, "sealed:")
+
+    local dec = cipher.new(KEY, IV)
+    dec:open(fake_aead(), frame)
+    assert_eq(dec:bytes_processed(), #frame, "opened:")
+end)
+
+test("bytes accumulate across packets", function()
+    local enc = cipher.new(KEY, IV)
+    local total = 0
+    for _ = 1, 5 do total = total + #enc:seal(fake_aead(), "abc", zeros) end
+    assert_eq(enc:bytes_processed(), total)
+end)
+
+test("a fresh cipher is not due for a rekey", function()
+    assert_eq(cipher.new(KEY, IV):rekey_due(), false)
+end)
+
+test("either limit on its own makes a rekey due", function()
+    -- Two triggers because two things run out: the byte budget on a
+    -- connection moving bulk, the invocation counter on a chatty one.
+    local c = cipher.new(KEY, IV)
+    c:seal(fake_aead(), "x", zeros)
+    assert_eq(c:rekey_due({ bytes = 1, packets = math.huge }), true, "bytes:")
+    assert_eq(c:rekey_due({ bytes = math.huge, packets = 1 }), true, "packets:")
+    assert_eq(c:rekey_due({ bytes = math.huge, packets = math.huge }), false,
+              "neither:")
+end)
+
+test("the default limits sit well inside the hard backstop", function()
+    -- MAX_PACKETS is the thing that must never happen. If the rekey trigger
+    -- ever crept up to meet it, the backstop would start firing on healthy
+    -- connections and there would be no warning before it did.
+    assert_eq(cipher.REKEY_PACKETS < cipher.MAX_PACKETS, true, "packets:")
+    assert_eq(cipher.REKEY_BYTES > 0, true, "bytes:")
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}
