@@ -922,6 +922,11 @@ LOG_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer \
 SH_ARENA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
 SH_JSON_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
 TWEETNACL_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
+# bcrypt_pbkdf writes the derived key into a CALLER buffer, so it needs
+# instrumentation for the same reason mbedTLS does (see the note below):
+# uninstrumented, MSan cannot see the write and flags every read of the
+# derived key as use-of-uninitialized-value.
+BCRYPT_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer \n                 -I$(BCRYPT_DIR)
 STB_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
 # mbedTLS must be MSan-instrumented too: it writes to caller buffers
 # (e.g. mbedtls_sha256 → uint8_t digest[32]). Without instrumentation
