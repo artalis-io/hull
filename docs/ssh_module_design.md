@@ -428,6 +428,82 @@ implementations as the permanent model and tooling the parity checks.
 Until then, a Lua-only module is a recorded gap, not a reason to move protocol
 logic into C.
 
+## 11b. Reaching a host through a tunnel
+
+Shipped after phase 5, and worth recording because it touched the capability
+schema rather than only the protocol.
+
+A host behind a WebSocket-over-TLS relay (Cloudflare Access is the case that
+drove it) is reached with `ssh.connect{ tunnel = {...} }`. Three facts made it
+smaller than it looks:
+
+1. **The SSH code did not change.** `hull.ssh.transport` takes a stream with
+   `read`/`write`/`close`. `hull.web.ws-stream` turns a stream carrying a
+   WebSocket into a stream carrying the bytes inside it, which is the same
+   interface. So the tunnel is a different `open_stream` and nothing else.
+2. **The WebSocket client holds no authority.** It is handed its stream, its
+   RNG and its digest, so it can only transform a connection someone else
+   opened. It knows nothing about SSH and nothing about Cloudflare; the
+   provider's `Cf-Access-*` values are just headers the caller passes.
+3. **TLS was already the transport's job**, once `cap/net_stream.c` grew a
+   `KlTlsConfig`. The binding only had to be able to ask for it.
+
+### The grant is two grants
+
+The one genuinely new decision. `hl_ssh_check_connect` is handed the SSH
+destination, and through a tunnel the destination is not what is dialled.
+Neither obvious answer works:
+
+| option | why not |
+|---|---|
+| gate only the relay | the destination travels inside the tunnel's headers and never appears in the socket address, so `hosts = {"ssh.example.com"}, ports = {443}` would authorise SSH to EVERY host behind that edge |
+| gate only the destination | a socket is opened to a machine the manifest never named, and that machine terminates the TLS and sees the tunnel credentials |
+
+So both, as separate keys:
+
+```lua
+ssh = {
+    connect = { hosts = {"spark-7468"}, ports = {22}, users = {"operator"} },
+    tunnel  = { hosts = {"ssh.example.com"}, ports = {443} },
+}
+```
+
+`connect` keeps its existing meaning exactly - which machine may be reached
+and as which login - so adding a tunnel widens neither. `tunnel` says which
+relay may be dialled to get there, and has no `users`: the login belongs to
+the target, and the relay never sees it. Both fail closed (absent or empty
+grants nothing), both go through the shared `hl_host_match_any_env` matcher,
+and both are sealed. The denial reasons are separate values, because a message
+that says "host is not in ssh.connect.hosts" when the RELAY was refused sends
+the reader to the wrong list.
+
+### Two adjacent bugs this surfaced
+
+Neither was about tunnels; both made an SSH-only app fail in the mode it is
+for, and both had been latent since `hull/ssh` landed.
+
+- **The kernel sandbox never granted `network_outbound` for ssh.** It was
+  granted for `hosts` or a declared network DB. But `hull/ssh` deliberately
+  does not take `HL_MOD_CAP_HOSTS` - `ssh.connect` is its own grant - so a
+  fleet tool declaring only `ssh` declared no hosts and was SIGKILLed on
+  connect. The same mistake the `databases` clause beside it already records.
+- **The CA bundle was resolved inside the `hosts` block**, which made the
+  outbound trust anchor a property of `http.fetch`. An app declaring only
+  `ssh` had none and no way to ask for one. It is resolved once now, on both
+  entry paths, and handed to the runtime as `HlClientTls`, so `--ca-bundle`,
+  `--no-ca-bundle` and the system/embedded ladder mean one thing for every
+  outbound connection Hull makes.
+
+### Still open
+
+- No e2e. The unit coverage drives `ssh.connect` against a fake relay, which
+  checks the composition but not a real socket. A local WebSocket-to-TCP shim
+  would close this without needing a Cloudflare account.
+- No worked example under `examples/`, and no user-facing guide; this design
+  record is still the only documentation.
+- JS remains unimplemented, per section 8 - `hull.web.ws-stream` is Lua-only
+  too, so a JS `hull/ssh` inherits this work rather than duplicating it.
+
 ## 12. Decisions taken
 
 | question | decision |
@@ -437,5 +513,6 @@ logic into C.
 | AEAD | **`aes256-gcm@openssh.com`**. One consequence needs a follow-up call: mbedTLS lives in the composable TLS feature, not the base, so an SSH app with no HTTP links no AES-GCM. See `net_module_design.md` section 5. |
 | Lua vs JS | **Lua only for v1**, JS to follow. Section 8 option 1. |
 | `hsctl` language | **Lua.** |
+| Tunnelled reach | **A SECOND grant, `ssh.tunnel`.** `connect` keeps meaning the SSH destination and the login; `tunnel` names the relay dialled to get there. Both are checked, both fail closed. See section 11b. |
 
 Phases 2 to 5 (pure Lua) are unblocked once `hull/net` N1 lands.
