@@ -928,6 +928,11 @@ function Sftp:close()
 end
 
 function Transport:close()
+    -- Swallowed deliberately, and this is the only place that does it
+    -- without saying so: close() is the last act on a connection that is
+    -- already finished, and a stream that has gone away cannot be closed any
+    -- harder. Raising here would replace whatever the caller was actually
+    -- dealing with.
     pcall(function() self.stream:close() end)
 end
 
