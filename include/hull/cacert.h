@@ -30,6 +30,21 @@ extern "C" {
  */
 int hl_embedded_ca_bundle(const unsigned char **data, size_t *len);
 
+/**
+ * @brief Path of the first readable SYSTEM CA store, or NULL if none.
+ *
+ * The other half of "where does a CA bundle come from", and it lives here
+ * rather than in an entry point because BOTH entry points need it and a
+ * second copy is how two of them drift. (`hull doctor` and `hull tools list`
+ * once disagreed about the same tool on the same box for exactly that
+ * reason - see shared/host.c.)
+ *
+ * @return a borrowed static path, or NULL when no system store is readable
+ * (the normal, healthy state on Windows, where the embedded bundle is the
+ * designed answer).
+ */
+const char *hl_ca_bundle_find_system(void);
+
 /* Returns a short identifier for the embedded bundle's update date,
  * or "none" if no bundle is embedded. For doctor / version display. */
 const char *hl_embedded_ca_bundle_label(void);

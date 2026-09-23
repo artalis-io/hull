@@ -310,23 +310,6 @@ static void usage(const char *prog)
             prog);
 }
 
-/* ── CA bundle auto-detection ───────────────────────────────────────── */
-
-static const char *find_ca_bundle(void)
-{
-    static const char *paths[] = {
-        "/etc/ssl/cert.pem",                    /* macOS, Alpine */
-        "/etc/ssl/certs/ca-certificates.crt",   /* Debian/Ubuntu */
-        "/etc/pki/tls/certs/ca-bundle.crt",     /* RHEL/CentOS */
-        NULL,
-    };
-    for (const char **p = paths; *p; p++) {
-        FILE *f = fopen(*p, "r");
-        if (f) { fclose(f); return *p; }
-    }
-    return NULL;
-}
-
 /* ── Server configuration (parsed from CLI + env) ──────────────────── */
 
 typedef struct {
@@ -1552,7 +1535,7 @@ static int hl_serve_wire_caps(HlServerState *s)
             if (!s->client_tls_ctx)
                 log_warn("[hull:c] failed to load CA bundle from %s", s->ca_bundle_path);
         } else {
-            s->ca_bundle_path = find_ca_bundle();
+            s->ca_bundle_path = hl_ca_bundle_find_system();
             if (s->ca_bundle_path) {
                 log_info("[hull:c] using CA bundle: %s", s->ca_bundle_path);
                 s->client_tls_ctx = hl_tls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);

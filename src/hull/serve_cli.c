@@ -74,7 +74,8 @@ static int cli_parse_args(int argc, char **argv,
                           int *out_app_argc, char ***out_app_argv,
                           int *out_no_migrate, int *out_no_sandbox,
                           int *out_allow_degraded_sandbox,
-                          const char **out_db_path)
+                          const char **out_db_path,
+                          int *out_skip_ca, const char **out_ca_override)
 {
     int entry_idx = -1;
     *out_app_argc = 0;
@@ -83,6 +84,8 @@ static int cli_parse_args(int argc, char **argv,
     *out_no_sandbox = 0;
     *out_allow_degraded_sandbox = 0;
     *out_db_path = NULL;
+    *out_skip_ca = 0;
+    *out_ca_override = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--") == 0) {
@@ -106,6 +109,23 @@ static int cli_parse_args(int argc, char **argv,
             *out_db_path = argv[++i];
             continue;
         }
+        /* Same spellings serve.c accepts, because a flag that works on one
+         * entry point and is silently ignored on the other is worse than one
+         * that does not exist. An app.main app took neither before this, so
+         * --ca-bundle looked accepted and did nothing. */
+        if (strcmp(argv[i], "--no-ca-bundle") == 0 ||
+            strcmp(argv[i], "--skip-ca-bundle") == 0) {
+            *out_skip_ca = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--ca-bundle") == 0 && i + 1 < argc) {
+            *out_ca_override = argv[++i];
+            continue;
+        }
+        if (strncmp(argv[i], "--ca-bundle=", 12) == 0) {
+            *out_ca_override = argv[i] + 12;
+            continue;
+        }
         if (argv[i][0] == '-') continue;
         if (entry_idx < 0) entry_idx = i;
     }
@@ -126,10 +146,13 @@ int hull_serve(int argc, char **argv)
     char **app_argv = NULL;
     int no_migrate = 0, no_sandbox = 0, allow_degraded_sandbox = 0;
     const char *db_path = NULL;
+    int skip_ca_bundle = 0;
+    const char *ca_bundle_override = NULL;
 
     int entry_idx = cli_parse_args(argc, argv, &app_argc, &app_argv,
                                     &no_migrate, &no_sandbox,
-                                    &allow_degraded_sandbox, &db_path);
+                                    &allow_degraded_sandbox, &db_path,
+                                    &skip_ca_bundle, &ca_bundle_override);
     if (!db_path) db_path = getenv("HULL_DB");
 
     /* Resolve the entry point. A `hull build` binary embeds its app and is run
@@ -375,16 +398,53 @@ int hull_serve(int argc, char **argv)
      * otherwise have had no anchor and no way to ask for one. This is the
      * path such a tool actually runs on. Mirrors serve.c. */
     if (manifest.hosts_count > 0 || manifest.ssh.tunnel.declared) {
-        const unsigned char *emb_data = NULL;
-        size_t emb_len = 0;
-        if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
-            tls_ctx = hl_tls_client_ctx_create_from_buf(
-                emb_data, emb_len, &kalloc);
-            if (tls_ctx) {
-                hl_tls_config_wire(&tls_cfg, tls_ctx);
-                client_tls.cfg = &tls_cfg;
-                rt->client_tls = &client_tls;
+        /* The SAME ladder serve.c walks, and it is the same ladder on purpose:
+         *   1. --no-ca-bundle         -> no verification (development only)
+         *   2. --ca-bundle PATH       -> that file
+         *   3. system CA store        -> whichever well-known path is readable
+         *   4. embedded Mozilla bundle
+         *   5. none, and say so
+         *
+         * Before this the CLI path took only step 4, so an app.main app could
+         * reach a PUBLIC-CA host and nothing else: a relay or endpoint behind
+         * a private CA was unreachable, and --ca-bundle appeared to be
+         * accepted while doing nothing. A fleet tool is an app.main program,
+         * which made this the one entry point where it mattered most. */
+        const char *ca_path = NULL;
+        if (skip_ca_bundle) {
+            log_warn("[hull:c] TLS certificate verification disabled "
+                     "(--no-ca-bundle)");
+            tls_ctx = hl_tls_client_ctx_create(NULL, &kalloc);
+        } else if (ca_bundle_override) {
+            ca_path = ca_bundle_override;
+            log_info("[hull:c] using CA bundle (override): %s", ca_path);
+            tls_ctx = hl_tls_client_ctx_create(ca_path, &kalloc);
+            if (!tls_ctx)
+                log_warn("[hull:c] failed to load CA bundle from %s", ca_path);
+        } else if ((ca_path = hl_ca_bundle_find_system()) != NULL) {
+            log_info("[hull:c] using CA bundle: %s", ca_path);
+            tls_ctx = hl_tls_client_ctx_create(ca_path, &kalloc);
+        } else {
+            const unsigned char *emb_data = NULL;
+            size_t emb_len = 0;
+            if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
+                log_info("[hull:c] using embedded CA bundle (%s)",
+                         hl_embedded_ca_bundle_label());
+                tls_ctx = hl_tls_client_ctx_create_from_buf(
+                    emb_data, emb_len, &kalloc);
+                if (!tls_ctx)
+                    log_warn("[hull:c] failed to parse embedded CA bundle");
+            } else {
+                log_warn("[hull:c] no CA bundle found; TLS disabled "
+                         "(use --no-ca-bundle, --ca-bundle PATH, or build "
+                         "with HL_EMBED_CA_BUNDLE=1)");
             }
+        }
+
+        if (tls_ctx) {
+            hl_tls_config_wire(&tls_cfg, tls_ctx);
+            client_tls.cfg = &tls_cfg;
+            rt->client_tls = &client_tls;
         }
     }
 

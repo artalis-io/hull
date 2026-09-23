@@ -22,14 +22,11 @@
 # run on a host without sshd, and they are not a consolation prize: the
 # tunnel seam is where the bugs are, and they test it directly.
 #
-# The tunnel is PLAINTEXT WebSocket here (`tls = false`). The TLS leg is
-# covered by test_net_stream's 34 cases, including live handshakes against
-# badssl.com. It is not covered here because an app.main app resolves its
-# trust anchor from the embedded Mozilla bundle only - serve_cli.c honours
-# neither --ca-bundle nor --no-ca-bundle - so a self-signed test cert has no
-# way to be trusted. Reaching a PUBLIC-CA relay (which is what Cloudflare is)
-# works; a private-CA relay from a CLI app does not yet. Recorded in
-# docs/ssh_module_design.md section 11b.
+# A THIRD part runs when openssl is present: the same relay behind TLS, with
+# a private CA, which is what a real tunnel actually is. It checks the rung
+# that matters most - that the DEFAULT refuses a certificate it has no reason
+# to trust - and then that --ca-bundle makes it trust that one and only that
+# one.
 #
 # Usage: sh tests/e2e_ssh_tunnel.sh
 #        HULL_E2E_REQUIRE_SSHD=1 sh tests/e2e_ssh_tunnel.sh
@@ -40,11 +37,11 @@
 # skip into a failure, and ci.yml sets it. Same reasoning as the
 # EMBED_PLATFORM check in e2e-htmx-playwright-build.
 #
-# Requires: build/hull, python3, ssh-keygen. The live session also needs an
-# sshd. ssh-keygen is required throughout rather than only for the live half
-# because ssh.connect parses the private key BEFORE it dials - correctly, a
-# bad key should not cost a connection - so even the seam checks need a real
-# one. It ships with openssh-client, which the live half's sshd does not.
+# Requires: build/hull, python3, ssh-keygen. The TLS part also needs openssl,
+# and the live session an sshd. ssh-keygen is required throughout rather than
+# only for the live half because ssh.connect parses the key BEFORE it dials -
+# correctly, a bad key should not cost a connection - so even the seam checks
+# need a real one. It ships with openssh-client, which the live half's sshd does not.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -234,11 +231,19 @@ LUA
 # It is not hypothetical. On a cosmo APE on Windows the outbound connect
 # never completes (docs/windows_e2e_status.md), and without this the suite
 # sat there until the runner killed it.
+#
+# Arguments after the directory are passed to hull BEFORE the app path, which
+# is where its own flags go. That is the only reason this takes them: the TLS
+# section needs --ca-bundle / --no-ca-bundle, and spelling those invocations
+# out separately meant a second copy of the timeout guard above - which is
+# what was missed, so macOS (no GNU coreutils, hence no `timeout`) failed
+# three TLS assertions with "timeout: command not found" while Linux passed.
 run_app() {
+    r_dir="$1"; shift
     if command -v timeout >/dev/null 2>&1; then
-        (cd "$1" && timeout 20 "$HULL" --no-sandbox app.lua 2>&1) || true
+        (cd "$r_dir" && timeout 20 "$HULL" --no-sandbox "$@" app.lua 2>&1) || true
     else
-        (cd "$1" && "$HULL" --no-sandbox app.lua 2>&1) || true
+        (cd "$r_dir" && "$HULL" --no-sandbox "$@" app.lua 2>&1) || true
     fi
 }
 
@@ -323,6 +328,120 @@ assert_contains "seam: the denial names the connect list" "$OUT" "ssh.connect.ho
 
 kill "$PEER_PID" 2>/dev/null || true
 PEER_PID=""
+
+# ── TLS: the relay behind a certificate, and who is willing to trust it ──
+echo
+echo "A TLS relay, and the trust decision"
+
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "  SKIP: no openssl, cannot mint a private CA"
+else
+    TLS_PORT=$(free_port)
+    PEER2_PORT=$(free_port)
+    mkdir -p "$WORK/tls"
+    # A private CA, and a localhost cert it signed. The point is that the
+    # embedded Mozilla bundle has never heard of this CA - so a default build
+    # MUST refuse it, and only --ca-bundle should change that.
+    #
+    # Each openssl call closes stdin and ends in `|| true`. stdin because a
+    # -subj openssl rejects makes `openssl req` fall back to PROMPTING, which
+    # in a suite with no terminal waits until the job's budget is gone; and
+    # `|| true` because `set -e` is on, so a failure would otherwise abort the
+    # whole run before reaching the SKIP below that explains it. Both were
+    # observed: a shell that rewrites /CN=... as a path hit them in order.
+    # MSYS_NO_PATHCONV is what stops that rewriting on Git Bash; it is inert
+    # everywhere else.
+    MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 \
+        -keyout "$WORK/tls/ca.key" -out "$WORK/tls/ca.pem" \
+        -days 2 -nodes -subj "/CN=hull-e2e-ca" \
+        </dev/null >/dev/null 2>&1 || true
+    MSYS_NO_PATHCONV=1 openssl req -new -newkey rsa:2048 \
+        -keyout "$WORK/tls/srv.key" -out "$WORK/tls/srv.csr" \
+        -nodes -subj "/CN=localhost" \
+        </dev/null >/dev/null 2>&1 || true
+    echo 'subjectAltName=DNS:localhost,IP:127.0.0.1' > "$WORK/tls/ext.cnf"
+    openssl x509 -req -in "$WORK/tls/srv.csr" -CA "$WORK/tls/ca.pem" \
+        -CAkey "$WORK/tls/ca.key" -CAcreateserial -out "$WORK/tls/srv.pem" \
+        -days 2 -extfile "$WORK/tls/ext.cnf" \
+        </dev/null >/dev/null 2>&1 || true
+
+    if [ ! -s "$WORK/tls/srv.pem" ]; then
+        echo "  SKIP: openssl could not mint the test CA"
+    else
+        # Written to a FILE through a quoted heredoc rather than passed to
+        # `python3 -c`, so no layer between here and python can touch what is
+        # inside the string literals. The -c form carried a `\r\n` that one
+        # editing pass turned into a real newline, and python then refused the
+        # whole script for an unterminated literal - which reads as "the peer
+        # did not start", a mile from the actual cause.
+        cat > "$WORK/peer2.py" <<'PY'
+import socket, sys
+port, ready = int(sys.argv[1]), sys.argv[2]
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('127.0.0.1', port))
+srv.listen(4)
+open(ready, 'w').write('x')
+while True:
+    c, _ = srv.accept()
+    try:
+        c.sendall(b'SSH-2.0-E2EFake\r\n')
+        c.recv(65536)
+    except OSError:
+        pass
+    finally:
+        c.close()
+PY
+        python3 "$WORK/peer2.py" "$PEER2_PORT" "$WORK/peer2-ready" &
+        PEER_PID=$!
+        wait_for_file "$WORK/peer2-ready" || { echo "peer did not start"; exit 1; }
+
+        start_shim "$TLS_PORT" "$PEER2_PORT" \
+            --tls-cert "$WORK/tls/srv.pem" --tls-key "$WORK/tls/srv.key"
+
+        # `localhost` rather than 127.0.0.1: the certificate names it, and a
+        # hostname is what a real relay is reached by.
+        write_app "$WORK/t1" "127.0.0.1" "$PEER2_PORT" "localhost" "$TLS_PORT" \
+            '"127.0.0.1"' "$PEER2_PORT" '"localhost"' "$TLS_PORT"
+        # Not `sed -i`: BSD sed wants an argument after -i and GNU sed does
+        # not, so the one spelling that works on both is a temp file.
+        sed 's/tls  = false/tls  = true/' "$WORK/t1/app.lua" > "$WORK/t1/app.tmp"
+        mv "$WORK/t1/app.tmp" "$WORK/t1/app.lua"
+
+        # 1. The default trust anchor must REFUSE this certificate. If this
+        #    passes, verification is not on and every other TLS assertion here
+        #    is worthless.
+        OUT=$(run_app "$WORK/t1")
+        case "$OUT" in
+            *"first_code=denied"*)
+                pass "tls: the default anchor refuses an untrusted CA" ;;
+            *)  fail "tls: the default anchor refuses an untrusted CA" "$OUT" ;;
+        esac
+
+        # 2. --ca-bundle makes it trust THAT CA, and the tunnel comes up.
+        OUT=$(run_app "$WORK/t1" --ca-bundle "$WORK/tls/ca.pem")
+        case "$OUT" in
+            *"first_code=denied"*|*"first_code=upgrade_"*)
+                fail "tls: --ca-bundle is honoured" "$OUT" ;;
+            *"first_code="*)
+                pass "tls: --ca-bundle is honoured" ;;
+            *)  fail "tls: --ca-bundle is honoured" "$OUT" ;;
+        esac
+        assert_contains "tls: the override is the anchor actually used" "$OUT" \
+            "CA bundle (override)"
+
+        # 3. --no-ca-bundle also reaches it, and says out loud that it is not
+        #    verifying. A silent version of this flag would be the dangerous
+        #    one.
+        OUT=$(run_app "$WORK/t1" --no-ca-bundle)
+        assert_contains "tls: --no-ca-bundle warns that verification is off" \
+            "$OUT" "verification disabled"
+
+        stop_shim
+        kill "$PEER_PID" 2>/dev/null || true
+        PEER_PID=""
+    fi
+fi
 
 # ── The live session: a real SSH server behind the relay ────────────────
 echo

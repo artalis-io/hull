@@ -288,12 +288,23 @@ def main():
     ap.add_argument("--require-header", action="append")
     ap.add_argument("--headers-out")
     ap.add_argument("--ready-file")
+    # TLS, so a test can drive the ENCRYPTED tunnel rather than only the
+    # framing. The real thing is WebSocket over TLS; without this the e2e
+    # could only ever cover half of it.
+    ap.add_argument("--tls-cert")
+    ap.add_argument("--tls-key")
     args = ap.parse_args()
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", args.listen))
     srv.listen(8)
+
+    ctx = None
+    if args.tls_cert:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(args.tls_cert, args.tls_key)
 
     if args.ready_file:
         # Written AFTER listen(), so the test waits on the socket actually
@@ -304,6 +315,20 @@ def main():
     while True:
         try:
             conn, _ = srv.accept()
+            if ctx is not None:
+                try:
+                    conn = ctx.wrap_socket(conn, server_side=True)
+                except (OSError, ssl.SSLError) as exc:
+                    # A refused handshake is the interesting case, not a crash:
+                    # a client that will not trust this CA belongs in the log,
+                    # and the relay carries on serving the next connection.
+                    print("shim: TLS handshake failed: %s" % exc,
+                          file=sys.stderr)
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    continue
         except OSError:
             break
         # A thread per connection: FramePrefix has per-connection state, and

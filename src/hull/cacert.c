@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <stdio.h>
 #include "hull/cacert.h"
 
 #ifdef HL_EMBED_CA_BUNDLE
@@ -51,4 +52,22 @@ const char *hl_embedded_ca_bundle_label(void)
 #else
     return "none";
 #endif
+}
+
+/* The system store. Probed by opening rather than by stat: a path that exists
+ * but cannot be read is not a usable bundle, and finding that out here beats
+ * finding out inside a TLS handshake. */
+const char *hl_ca_bundle_find_system(void)
+{
+    static const char *paths[] = {
+        "/etc/ssl/cert.pem",                    /* macOS, Alpine */
+        "/etc/ssl/certs/ca-certificates.crt",   /* Debian/Ubuntu */
+        "/etc/pki/tls/certs/ca-bundle.crt",     /* RHEL/CentOS */
+        NULL,
+    };
+    for (const char **p = paths; *p; p++) {
+        FILE *f = fopen(*p, "r");
+        if (f) { fclose(f); return *p; }
+    }
+    return NULL;
 }
