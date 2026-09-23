@@ -35,6 +35,7 @@
 #include <keel/http_connection.h>
 #include <keel/allocator.h>
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -51,7 +52,11 @@ struct HlAsyncBackendCtx {
     KlEventCtx    kel_storage;
     KlAllocator   kalloc;       /* used only in owned mode */
     HlAllocator  *alloc;        /* borrowed; may be NULL */
-    int           stop_flag;    /* run() / run_until() exit hint */
+    /* Atomic because stop() is documented as callable from any thread, and
+     * the run loops read it every iteration. A plain int here is a data race
+     * by the letter of the standard, and the kind a compiler is entitled to
+     * hoist out of the loop entirely. */
+    _Atomic int   stop_flag;    /* run() / run_until() exit hint */
     int           borrowed;     /* 1 = wrap; free() must not destroy kel */
 };
 
@@ -147,7 +152,17 @@ static int keel_run_until(HlAsyncBackendCtx *ctx,
 
 static void keel_stop(HlAsyncBackendCtx *ctx)
 {
-    if (ctx) ctx->stop_flag = 1;
+    if (!ctx) return;
+    ctx->stop_flag = 1;
+    /* Not woken. Keel's event context exposes no cross-thread wakeup, so a
+     * stop() from another thread is not observed until the loop's current
+     * poll returns - up to 1000 ms in run(), 100 ms in run_until(). The poll
+     * backend writes its self-pipe and returns immediately.
+     *
+     * Left as a latency difference rather than papered over: every caller
+     * today stops from a signal handler or from on-loop code, where the
+     * wait is zero, and inventing a second wakeup channel for a case nobody
+     * has would be more machinery than the problem. */
 }
 
 /* ── Time ──────────────────────────────────────────────────────────── */
@@ -266,8 +281,8 @@ static int keel_pool_submit(HlAsyncBackendPool *p,
  * thread (matching the contract that on_resume runs on-loop). */
 
 typedef struct KeelOpState {
-    HlAsyncBackendCtx *ctx;
     int64_t  deadline_timer;  /* Keel id; -1 = no timer scheduled */
+    int64_t  resume_timer;    /* Keel id; -1 = none. Retractable by op_cancel */
     int      resumed;         /* op_complete called */
 } KeelOpState;
 
@@ -283,34 +298,50 @@ typedef struct KeelOpState {
  *
  * No consumer noticed until hull/ssh: http.fetch, compute.async and
  * gpu.async each park ONCE per operation, so none of them re-enters. A byte
- * stream does it on every read and every write. */
+ * stream does it on every read and every write.
+ *
+ * It is ONE function rather than the same three lines written out at each
+ * site because writing them out is how the rule was lost: the reorder landed
+ * on both timers and was missed on op_complete's scheduling-failure fallback,
+ * which fired first and nulled afterwards for another release. A caller that
+ * cannot fire without detaching cannot get the order wrong. */
+static void keel_op_detach(HlAsyncOp *op)
+{
+    KeelOpState *s = op->_backend_state;
+    op->_backend_state = NULL;
+    free(s);                           /* NULL-safe */
+}
+
 static void keel_op_deadline_timer(void *ud)
 {
     HlAsyncOp *op = ud;
     KeelOpState *s = op->_backend_state;
     if (!s) return;                    /* already completed and cleaned up */
-    if (s->resumed) return;            /* op_complete raced us */
-    op->_backend_state = NULL;
-    free(s);
+    /* op_complete raced us: it has already scheduled the resume timer, and
+     * THAT timer owns the state. Returning without detaching is correct; the
+     * state is not leaked, it is someone else's to release. */
+    if (s->resumed) return;
+    keel_op_detach(op);
     if (op->on_deadline) op->on_deadline(op);
 }
 
 static void keel_op_resume_timer(void *ud)
 {
     HlAsyncOp *op = ud;
-    KeelOpState *s = op->_backend_state;
-    op->_backend_state = NULL;
-    free(s);                           /* NULL-safe if the deadline got here first */
+    keel_op_detach(op);
     if (op->on_resume) op->on_resume(op);
 }
 
 static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
     if (!ctx || !op) return -1;
+    /* Already suspended. Overwriting would leak the old state and orphan its
+     * deadline timer, which still points at this op. */
+    if (op->_backend_state) return -1;
     KeelOpState *s = calloc(1, sizeof *s);
     if (!s) return -1;
-    s->ctx = ctx;
     s->deadline_timer = -1;
+    s->resume_timer   = -1;
     op->_backend_state = s;
 
     if (op->deadline_ms > 0 && op->on_deadline) {
@@ -318,8 +349,7 @@ static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
         uint64_t delay = (op->deadline_ms > now) ? op->deadline_ms - now : 0;
         int64_t h = kl_timer_add(ctx->kel, delay, keel_op_deadline_timer, op);
         if (h < 0) {
-            free(s);
-            op->_backend_state = NULL;
+            keel_op_detach(op);        /* one release path, see above */
             return -1;
         }
         s->deadline_timer = h;
@@ -327,6 +357,11 @@ static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     return 0;
 }
 
+/* EVENT-LOOP THREAD ONLY - see the vtable comment. This reaches
+ * kl_timer_add and kl_timer_cancel, and Keel's event context carries no
+ * lock: a call from a worker would race the loop reallocating the timer
+ * heap. The poll backend marshals instead, which is why the two look
+ * different here. */
 static void keel_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
     if (!ctx || !op) return;
@@ -339,12 +374,28 @@ static void keel_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     }
     /* Schedule on_resume to fire on the event-loop thread. 0ms == ASAP. */
     int64_t h = kl_timer_add(ctx->kel, 0, keel_op_resume_timer, op);
+    if (h >= 0) s->resume_timer = h;
     if (h < 0) {
-        /* Best-effort: fire synchronously if scheduling fails. */
+        /* Best-effort: fire synchronously if scheduling fails. Through the
+         * same detach helper as the timers, which is the whole point of it
+         * being a helper - this branch had the inverted order for a release
+         * because it was written out by hand. */
+        keel_op_detach(op);
         if (op->on_resume) op->on_resume(op);
-        free(s);
-        op->_backend_state = NULL;
     }
+}
+
+/* Retract an op. See the vtable comment: op_complete defers through a 0 ms
+ * timer, so an owner freeing the storage `op` lives in needs a way to
+ * withdraw that timer before it fires against freed memory. */
+static void keel_op_cancel(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
+{
+    if (!ctx || !op) return;
+    KeelOpState *s = op->_backend_state;
+    if (!s) return;
+    if (s->deadline_timer >= 0) kl_timer_cancel(ctx->kel, s->deadline_timer);
+    if (s->resume_timer   >= 0) kl_timer_cancel(ctx->kel, s->resume_timer);
+    keel_op_detach(op);
 }
 
 /* ── Vtable ────────────────────────────────────────────────────────── */
@@ -368,6 +419,7 @@ const HlAsyncBackend hl_async_backend_keel = {
     .pool_submit      = keel_pool_submit,
     .op_suspend       = keel_op_suspend,
     .op_complete      = keel_op_complete,
+    .op_cancel        = keel_op_cancel,
 };
 
 /* Strong override of the weak hl_async_backend() default in async/poll.c: when

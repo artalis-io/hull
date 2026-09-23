@@ -207,6 +207,49 @@ static int lua_crypto_verify_password(lua_State *L)
 
 /* ── Ed25519 bindings ──────────────────────────────────────────────── */
 
+/* ── Pushing a result that sits next to a secret ─────────────────────
+ *
+ * A push ALLOCATES, and an allocation failure longjmps - which skips whatever
+ * scrub was written on the line after it. That is not a theoretical OOM:
+ * hl_lua_alloc returns NULL once an app reaches its mem_limit (64 MB by
+ * default), so app code can reach this on purpose by filling the heap first.
+ *
+ * So every binding that has key material live at push time pushes through
+ * here instead, and scrubs on BOTH outcomes. The two pushes that allocate
+ * nothing - a light C function and a light userdata - are staged first, so
+ * the only thing left inside the protected call is the part that can fail. */
+typedef struct {
+    const char *a; size_t an;
+    const char *b; size_t bn;    /* b may be NULL: push one value */
+} CryptoPushArgs;
+
+static int crypto_push_values(lua_State *L)
+{
+    CryptoPushArgs *x = lua_touserdata(L, 1);
+    lua_pushlstring(L, x->a, x->an);
+    if (!x->b) return 1;
+    lua_pushlstring(L, x->b, x->bn);
+    return 2;
+}
+
+/* Push `pub` then `sec`, then scrub `sec`'s buffer whichever way it went.
+ * Returns the number of results, or longjmps with the original error. */
+static int crypto_push_keypair(lua_State *L, const char *pub, size_t publen,
+                               char *sec, size_t seclen)
+{
+    CryptoPushArgs args = { pub, publen, sec, seclen };
+    if (!lua_checkstack(L, 4)) {
+        secure_zero(sec, seclen);
+        return luaL_error(L, "crypto: stack");
+    }
+    lua_pushcfunction(L, crypto_push_values);
+    lua_pushlightuserdata(L, &args);
+    int st = lua_pcall(L, 1, 2, 0);
+    secure_zero(sec, seclen);
+    if (st != LUA_OK) return lua_error(L);
+    return 2;
+}
+
 /* crypto.ed25519_keypair() → pubkey_hex, secret_key_hex */
 static int lua_crypto_ed25519_keypair(lua_State *L)
 {
@@ -222,11 +265,11 @@ static int lua_crypto_ed25519_keypair(lua_State *L)
         snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
     sk_hex[128] = '\0';
 
-    lua_pushstring(L, pk_hex);
-    lua_pushstring(L, sk_hex);
+    /* The RAW key is done with the moment it is encoded, so it goes now
+     * rather than surviving until after the pushes. */
     secure_zero(sk, sizeof(sk));
-    secure_zero(sk_hex, sizeof(sk_hex));
-    return 2;
+    return crypto_push_keypair(L, pk_hex, strlen(pk_hex),
+                               sk_hex, strlen(sk_hex));
 }
 
 /* crypto.ed25519_sign(data, secret_key_hex) → signature_hex */
@@ -699,11 +742,11 @@ static int lua_crypto_x25519_keypair(lua_State *L)
         snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
     sk_hex[64] = '\0';
 
-    lua_pushstring(L, pk_hex);
-    lua_pushstring(L, sk_hex);
+    /* The RAW key is done with the moment it is encoded, so it goes now
+     * rather than surviving until after the pushes. */
     secure_zero(sk, sizeof(sk));
-    secure_zero(sk_hex, sizeof(sk_hex));
-    return 2;
+    return crypto_push_keypair(L, pk_hex, strlen(pk_hex),
+                               sk_hex, strlen(sk_hex));
 }
 
 /* crypto.x25519(sk_hex, pk_hex) -> shared_hex | nil, err
@@ -766,11 +809,11 @@ static int lua_crypto_box_keypair(lua_State *L)
         snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
     sk_hex[64] = '\0';
 
-    lua_pushstring(L, pk_hex);
-    lua_pushstring(L, sk_hex);
+    /* The RAW key is done with the moment it is encoded, so it goes now
+     * rather than surviving until after the pushes. */
     secure_zero(sk, sizeof(sk));
-    secure_zero(sk_hex, sizeof(sk_hex));
-    return 2;
+    return crypto_push_keypair(L, pk_hex, strlen(pk_hex),
+                               sk_hex, strlen(sk_hex));
 }
 
 /* crypto.hmac_sha256(data, key_hex) → hex string */
@@ -1092,14 +1135,6 @@ static void register_sha256_hasher_mt(lua_State *L)
 
 /* ── OpenSSH key passphrases ────────────────────────────────────────── */
 
-/* Zero memory the optimiser may not elide. Local for the same reason
- * cap/smtp.c keeps its own: hull_secure_zero is static to cap/crypto.c. */
-static void crypto_wipe(void *p, size_t n)
-{
-    volatile unsigned char *v = (volatile unsigned char *)p;
-    while (n--) *v++ = 0;
-}
-
 /* Validate the two numeric arguments both entry points share. Returns 0 when
  * they are usable, or pushes nothing and returns -1 with `why` set.
  *
@@ -1109,8 +1144,10 @@ static void crypto_wipe(void *p, size_t n)
 static int crypto_bcrypt_args_ok(lua_Integer rounds, lua_Integer outlen,
                                  const char **why)
 {
-    if (rounds <= 0 || rounds > 0x7fffffff) {
-        *why = "rounds must be positive";
+    if (rounds <= 0 || rounds > (lua_Integer)HL_BCRYPT_MAX_ROUNDS) {
+        /* Bounded, not just positive: the count is read from the key file,
+         * and this runs uninterruptibly on the event-loop thread. */
+        *why = "rounds is out of range";
         return -1;
     }
     if (outlen <= 0 || outlen > HL_BCRYPT_MAX_OUT) {
@@ -1174,7 +1211,27 @@ static int lua_crypto_bcrypt_pbkdf(lua_State *L)
  *
  * Structured so NO error path unwinds over a live secret: everything that can
  * be rejected is rejected before the copy is taken, and the copy is wiped and
- * freed before any luaL_error can longjmp out of here. */
+ * freed before any luaL_error can longjmp out of here.
+ *
+ * That covered the PASSPHRASE and missed the DERIVED KEY, which is
+ * passphrase-equivalent for the file it opens. The last statement used to be
+ * a bare lua_pushlstring, and a push allocates: on LUA_ERRMEM it longjmps,
+ * and the wipe-and-free two lines below never ran. Not a theoretical OOM
+ * either - hl_lua_alloc returns NULL once an app reaches its 64 MB mem_limit,
+ * so app code could reach it on purpose. So the push now happens under
+ * lua_pcall and the scrub runs on both outcomes. */
+
+/* Pushes a byte range. Runs under lua_pcall so the caller's scrub cannot be
+ * skipped by an allocation failure inside the push. */
+typedef struct { const char *p; size_t n; } CryptoPushArg;
+
+static int crypto_push_bytes(lua_State *L)
+{
+    CryptoPushArg *a = lua_touserdata(L, 1);
+    lua_pushlstring(L, a->p, a->n);
+    return 1;
+}
+
 static int lua_crypto_bcrypt_pbkdf_env(lua_State *L)
 {
     const char *var = luaL_checkstring(L, 1);
@@ -1213,21 +1270,39 @@ static int lua_crypto_bcrypt_pbkdf_env(lua_State *L)
     }
     memcpy(copy, val, n);
 
+    /* Everything the push needs is staged BEFORE the derivation, while there
+     * is still nothing to scrub: lua_checkstack can throw, and a light C
+     * function and a light userdata are the two pushes that allocate nothing
+     * and so cannot. After this point no Lua API call happens until the
+     * protected one. */
+    CryptoPushArg arg = { (const char *)derived, (size_t)outlen };
+    if (!lua_checkstack(L, 3)) {
+        secure_zero(copy, n); free(copy);
+        secure_zero(derived, (size_t)outlen); free(derived);
+        return luaL_error(L, "crypto.bcrypt_pbkdf_env: stack");
+    }
+    lua_pushcfunction(L, crypto_push_bytes);
+    lua_pushlightuserdata(L, &arg);
+
     int rc = hl_cap_crypto_bcrypt_pbkdf(copy, n, salt, salt_len,
                                         (unsigned int)rounds, derived,
                                         (size_t)outlen);
-    crypto_wipe(copy, n);
+    secure_zero(copy, n);
     free(copy);
 
     if (rc != 0) {
-        crypto_wipe(derived, (size_t)outlen);
+        lua_pop(L, 2);                    /* the staged function + argument */
+        secure_zero(derived, (size_t)outlen);
         free(derived);
         return luaL_error(L, "crypto.bcrypt_pbkdf_env: derivation failed");
     }
 
-    lua_pushlstring(L, (const char *)derived, (size_t)outlen);
-    crypto_wipe(derived, (size_t)outlen);
+    int st = lua_pcall(L, 1, 1, 0);
+    /* Unconditional, and before the error is re-raised: this is the whole
+     * point of the protected call. */
+    secure_zero(derived, (size_t)outlen);
     free(derived);
+    if (st != LUA_OK) return lua_error(L);   /* re-raise, message intact */
     return 1;
 }
 
@@ -1259,7 +1334,7 @@ static int lua_crypto_aes256ctr(lua_State *L)
     if (rc != 0) {
         luaL_pushresultsize(&b, 0);
         lua_pop(L, 1);
-        return luaL_error(L, rc == -2
+        return luaL_error(L, rc == -3
             ? "crypto.aes256ctr: no AES backend in this build (TLS is not composed)"
             : "crypto.aes256ctr: bad argument");
     }
@@ -1310,7 +1385,7 @@ static int lua_crypto_gcm_seal(lua_State *L)
     if (rc != 0) {
         luaL_pushresultsize(&b, 0);
         lua_pop(L, 1);
-        return luaL_error(L, rc == -2
+        return luaL_error(L, rc == -3
             ? "crypto.gcm_seal: no AEAD backend in this build (TLS is not composed)"
             : "crypto.gcm_seal: bad argument");
     }
@@ -1349,11 +1424,16 @@ static int lua_crypto_gcm_open(lua_State *L)
                                           ct_len ? ct : NULL, ct_len,
                                           (const uint8_t *)tag);
     if (rc != 0) {
-        /* Includes a tag mismatch, which is the normal way a forged or
-         * corrupted packet arrives. nil, not an error. */
         luaL_pushresultsize(&b, 0);
         lua_pop(L, 1);
-        if (rc == -2)
+        /* -3 is a BUILD fact: no AEAD backend was composed, so no packet can
+         * ever be opened and the caller needs to know why. -2 is a tag that
+         * did not verify, which is the normal way a forged or corrupted
+         * packet arrives - data, not an error, so nil.
+         *
+         * These shared a code once, and this branch read it as "no backend":
+         * every forged packet reported that the build lacked TLS. */
+        if (rc == -3)
             return luaL_error(L, "crypto.gcm_open: no AEAD backend in this "
                                  "build (TLS is not composed)");
         lua_pushnil(L);
@@ -1405,5 +1485,12 @@ int luaopen_hull_crypto(lua_State *L)
 {
     register_sha256_hasher_mt(L);
     luaL_newlib(L, crypto_funcs);
+
+    /* Exported so a caller that reads a work factor out of a FILE can refuse
+     * it with a message naming that file, instead of letting the derivation
+     * fail here with no idea which key was wrong. Exported rather than
+     * duplicated in Lua so the two cannot drift. */
+    lua_pushinteger(L, (lua_Integer)HL_BCRYPT_MAX_ROUNDS);
+    lua_setfield(L, -2, "BCRYPT_MAX_ROUNDS");
     return 1;
 }

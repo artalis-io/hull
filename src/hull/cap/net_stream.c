@@ -220,6 +220,14 @@ static void maybe_release(HlNetStream *s)
     if (s->io_mask && s->be->watcher_del)
         s->be->watcher_del(s->async, (int)s->fd);
     if (kl_handle_valid(s->fd)) sp_close(s->fd);
+
+    /* The op lives INSIDE this allocation, and op_complete defers: a resume
+     * queued by the wake() on the way here would otherwise fire against
+     * freed storage on the next tick. Retracting it is the last thing before
+     * the free, so nothing can queue another one afterwards. */
+    if (s->be->op_cancel) s->be->op_cancel(s->async, &s->op);
+    s->op_pending = 0;
+
     free(s->rx);
     free(s->tx);
     free(s);
@@ -227,19 +235,19 @@ static void maybe_release(HlNetStream *s)
 
 /* ── Resolution ─────────────────────────────────────────────────────── */
 
-/* Blocking getaddrinfo, inline before the op starts.
+/* Blocking getaddrinfo. Runs on a POOL WORKER, never on the event loop - see
+ * resolve_work below, which is its only caller.
  *
- * KNOWN DEFECT, recorded rather than dressed up: this blocks the EVENT LOOP.
- * The SMTP transport makes the same call and is fine, because it runs on a
- * pool worker; copying the call without that context is what makes it wrong
- * here. A fleet fan-out resolving eight nodes stalls the loop eight times.
+ * That is the whole reason hl_net_stream_connect requires a pool. Calling it
+ * inline would be the same thing cap/smtp_transport.c does, and would be
+ * wrong here for the reason SMTP is right: SMTP already runs on a worker. A
+ * fleet fan-out resolving eight nodes would stall the loop eight times.
  *
- * The fix is not Keel's async resolver (see below) but the same thing libuv
- * does: run getaddrinfo on a worker and complete back on the loop.
- * HlAsyncBackend already exposes pool_submit(work_fn, done_fn, cancel_fn),
- * which nine other files use. Resolution is short-lived, so a worker held for
- * one lookup is nothing like holding one for a whole connection, which is the
- * thing section 6a of the design rejected.
+ * The shape is libuv's, not Keel's async resolver: HlAsyncBackend already
+ * exposes pool_submit(work_fn, done_fn, cancel_fn), which nine other files
+ * use. Resolution is short-lived, so a worker held for one lookup is nothing
+ * like holding one for a whole connection - which is the thing section 6a of
+ * the design rejected.
  *
  * Keel does ship kl_dns_resolver_create, and it cannot serve this. Its own
  * header scopes it to "recursive resolution via a configured nameserver (no
@@ -306,7 +314,7 @@ static int resolve_addrs(HlNetStream *s)
 static int co_start_resolve(void *ctx)
 {
     HlNetStream *s = ctx;
-    /* Already resolved inline before start; just report the count. */
+    /* Already resolved on a worker before the op started; report the count. */
     if (s->naddrs < 1) {
         kl_connect_op_on_resolve_failed(&s->connect_op, (int)KL_ERR_DNS);
         return 0;
@@ -975,8 +983,12 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
     if (be->pool_submit(s->pool, resolve_work, resolve_done,
                         resolve_cancel, s) != 0) {
         /* Never queued, so no callback will fire and nothing else references
-         * the stream yet. */
+         * the stream yet - this is the one place the stream is released
+         * WITHOUT going through maybe_release, so anything allocated above
+         * has to be released by hand. tls_host was not, and the queue being
+         * full is exactly the fan-out case this transport is built for. */
         s->resolve_state = NET_RESOLVE_NONE;
+        free(s->tls_host);
         free(s);
         return HL_NET_E_IO;
     }

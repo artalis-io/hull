@@ -87,22 +87,33 @@ function M.build_request(opts)
     if type(opts.key) ~= "string" or opts.key == "" then
         error("web.ws-stream: a key is required", 2)
     end
+    -- CR or LF anywhere in a value injects a line of its own, so every
+    -- interpolated part is checked - not only the caller's extra headers.
+    --
+    -- The request LINE and the Host header were not, and they are the ones
+    -- that matter most here: through a relay the destination is chosen by a
+    -- header (Cf-Access-Jump-Destination), so a newline in `path` forges the
+    -- field that decides which machine is reached - past a manifest that only
+    -- ever saw ssh.connect.hosts. `path` is gated by nothing and resolved by
+    -- nothing, which is what makes it the reachable one.
+    local function no_crlf(what, v)
+        if type(v) == "string" and v:find("[\r\n]") then
+            error("web.ws-stream: " .. what .. " contains CR or LF: "
+                  .. v:gsub("[\r\n]", "?"), 3)
+        end
+        return v
+    end
+
     local lines = {
-        "GET " .. (opts.path or "/") .. " HTTP/1.1",
-        "Host: " .. opts.host,
+        "GET " .. no_crlf("path", opts.path or "/") .. " HTTP/1.1",
+        "Host: " .. no_crlf("host", opts.host),
         "Upgrade: websocket",
         "Connection: Upgrade",
-        "Sec-WebSocket-Key: " .. opts.key,
+        "Sec-WebSocket-Key: " .. no_crlf("key", opts.key),
         "Sec-WebSocket-Version: 13",
     }
     for _, h in ipairs(opts.headers or {}) do
-        -- A header carrying CR or LF would inject a line of its own, and the
-        -- values here come from configuration that may come from env.
-        if h:find("[\r\n]") then
-            error("web.ws-stream: header contains CR or LF: "
-                  .. h:gsub("[\r\n]", "?"), 2)
-        end
-        lines[#lines + 1] = h
+        lines[#lines + 1] = no_crlf("header", h)
     end
     return table.concat(lines, "\r\n") .. "\r\n\r\n"
 end

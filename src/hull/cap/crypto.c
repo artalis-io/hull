@@ -779,7 +779,7 @@ static int aead_stub_seal(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],
 {
     (void)out; (void)tag; (void)key; (void)iv;
     (void)aad; (void)aad_len; (void)pt; (void)pt_len;
-    return -2;
+    return -3;   /* HL_CRYPTO_E_NO_BACKEND, see cap/crypto.h */
 }
 
 static int aead_stub_open(uint8_t *out,
@@ -791,7 +791,7 @@ static int aead_stub_open(uint8_t *out,
 {
     (void)out; (void)key; (void)iv;
     (void)aad; (void)aad_len; (void)ct; (void)ct_len; (void)tag;
-    return -2;
+    return -3;   /* HL_CRYPTO_E_NO_BACKEND, see cap/crypto.h */
 }
 
 static int aead_stub_ctr(uint8_t *out, const uint8_t key[32],
@@ -799,7 +799,7 @@ static int aead_stub_ctr(uint8_t *out, const uint8_t key[32],
                          const void *in, size_t len)
 {
     (void)out; (void)key; (void)ctr_iv; (void)in; (void)len;
-    return -2;
+    return -3;   /* HL_CRYPTO_E_NO_BACKEND, see cap/crypto.h */
 }
 
 static const HlCryptoAeadBackend hl_crypto_aead_backend_stub = {
@@ -816,7 +816,14 @@ const HlCryptoAeadBackend *hl_crypto_aead_active_backend(void)
 
 /* The vendored OpenBSD KDF. Declared here rather than via a vendor header:
  * vendor/bcrypt ships no public header, and this wrapper is the only thing in
- * Hull that calls it. */
+ * Hull that calls it.
+ *
+ * It therefore has EXTERNAL linkage and anything in the tree could declare it
+ * and call it directly, skipping the bounds below - including the round cap,
+ * which is the one that keeps a hostile key file from stalling the loop. Only
+ * tests/hull/cap/test_bcrypt.c does, deliberately, to pin the upstream vector.
+ * Reach it through hl_cap_crypto_bcrypt_pbkdf; a second caller of the bare
+ * symbol is a review finding, not a shortcut. */
 int bcrypt_pbkdf(const char *pass, size_t passlen,
                  const uint8_t *salt, size_t saltlen,
                  uint8_t *key, size_t keylen, unsigned int rounds);
@@ -829,6 +836,10 @@ int hl_cap_crypto_bcrypt_pbkdf(const void *pass, size_t pass_len,
     if (!pass || !salt || !out)          return -1;
     if (!pass_len || !salt_len)          return -1;
     if (!rounds)                         return -1;
+    /* The round count comes out of the key FILE, so it is attacker-chosen
+     * whenever the file is. See HL_BCRYPT_MAX_ROUNDS: this derivation runs to
+     * completion on the event-loop thread and cannot be interrupted. */
+    if (rounds > HL_BCRYPT_MAX_ROUNDS)   return -1;
     if (!out_len || out_len > HL_BCRYPT_MAX_OUT) return -1;
 
     /* The vendored code already fails closed on these, but bounding them here
@@ -858,7 +869,7 @@ int hl_cap_crypto_aes256ctr(uint8_t *out,
      * than call through a null pointer, and refuse with the same code a
      * TLS-less build gives, because to a caller it is the same fact: this
      * build cannot do it. */
-    if (!b->ctr) return -2;
+    if (!b->ctr) return -3;   /* backend predates CTR: unavailable, not a failure */
     return b->ctr(out, key, ctr_iv, in, len);
 }
 

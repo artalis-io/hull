@@ -76,3 +76,9 @@ _evb/
 _sec/
 _scratch*/
 _dbg*/
+
+# cosmocc scratch left in the repo root rather than in build/: the aarch64
+# half of a fat build (for a test binary linked from here), and the temporary
+# assembly it writes next to the compiler's cwd.
+.aarch64/
+cc*.s

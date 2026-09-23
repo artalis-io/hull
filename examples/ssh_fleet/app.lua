@@ -69,6 +69,14 @@ local function to_hex(s)
 end
 
 local function from_hex(s)
+    -- Checked, not just decoded. gsub leaves anything that does not match
+    -- exactly in place, so a truncated or edited entry would decode to a
+    -- blob that is WRONG rather than refused - and the next connection would
+    -- report HOST KEY CHANGED, which is the loudest possible way to say
+    -- "your file is damaged".
+    if type(s) ~= "string" or #s == 0 or #s % 2 ~= 0 or s:find("%X") then
+        return nil
+    end
     return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
 end
 
@@ -83,7 +91,14 @@ local function load_trust()
         error(TRUST_FILE .. " is not readable JSON; refusing to continue")
     end
     local seed = {}
-    for host, hex in pairs(decoded) do seed[host] = from_hex(hex) end
+    for host, hex in pairs(decoded) do
+        local blob = from_hex(hex)
+        if not blob then
+            error(TRUST_FILE .. ": the entry for " .. tostring(host)
+                  .. " is not valid hex; refusing to continue")
+        end
+        seed[host] = blob
+    end
     return ssh.memory_store(seed)
 end
 

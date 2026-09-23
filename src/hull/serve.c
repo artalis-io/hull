@@ -1535,12 +1535,29 @@ static int hl_serve_wire_caps(HlServerState *s)
             if (!s->client_tls_ctx)
                 log_warn("[hull:c] failed to load CA bundle from %s", s->ca_bundle_path);
         } else {
+            /* The system store is TRIED, not trusted to work. A path being
+             * readable is not the same as its contents parsing, and this
+             * branch used to log "using CA bundle: X" and move on without
+             * looking at the result - so an unparseable store disabled
+             * HTTPS silently, with a log line claiming the opposite. Fall
+             * through to the embedded bundle, which is what it is for.
+             *
+             * Not the same as --ca-bundle: an operator who NAMES a file has
+             * said which anchor to use, and quietly substituting another
+             * would be the wrong kind of helpful. That one fails closed. */
             s->ca_bundle_path = hl_ca_bundle_find_system();
             if (s->ca_bundle_path) {
                 log_info("[hull:c] using CA bundle: %s", s->ca_bundle_path);
                 s->client_tls_ctx = hl_tls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
-            } else {
-                /* System bundle not found - try embedded fallback */
+                if (!s->client_tls_ctx) {
+                    log_warn("[hull:c] system CA bundle %s did not load; "
+                             "falling back to the embedded bundle",
+                             s->ca_bundle_path);
+                    s->ca_bundle_path = NULL;
+                }
+            }
+            if (!s->client_tls_ctx) {
+                /* System bundle absent or unusable - try embedded fallback */
                 const unsigned char *emb_data = NULL;
                 size_t emb_len = 0;
                 if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
