@@ -231,11 +231,19 @@ LUA
 # It is not hypothetical. On a cosmo APE on Windows the outbound connect
 # never completes (docs/windows_e2e_status.md), and without this the suite
 # sat there until the runner killed it.
+#
+# Arguments after the directory are passed to hull BEFORE the app path, which
+# is where its own flags go. That is the only reason this takes them: the TLS
+# section needs --ca-bundle / --no-ca-bundle, and spelling those invocations
+# out separately meant a second copy of the timeout guard above - which is
+# what was missed, so macOS (no GNU coreutils, hence no `timeout`) failed
+# three TLS assertions with "timeout: command not found" while Linux passed.
 run_app() {
+    r_dir="$1"; shift
     if command -v timeout >/dev/null 2>&1; then
-        (cd "$1" && timeout 20 "$HULL" --no-sandbox app.lua 2>&1) || true
+        (cd "$r_dir" && timeout 20 "$HULL" --no-sandbox "$@" app.lua 2>&1) || true
     else
-        (cd "$1" && "$HULL" --no-sandbox app.lua 2>&1) || true
+        (cd "$r_dir" && "$HULL" --no-sandbox "$@" app.lua 2>&1) || true
     fi
 }
 
@@ -411,8 +419,7 @@ PY
         esac
 
         # 2. --ca-bundle makes it trust THAT CA, and the tunnel comes up.
-        OUT=$(cd "$WORK/t1" && timeout 30 "$HULL" --no-sandbox \
-              --ca-bundle "$WORK/tls/ca.pem" app.lua 2>&1 || true)
+        OUT=$(run_app "$WORK/t1" --ca-bundle "$WORK/tls/ca.pem")
         case "$OUT" in
             *"first_code=denied"*|*"first_code=upgrade_"*)
                 fail "tls: --ca-bundle is honoured" "$OUT" ;;
@@ -426,8 +433,7 @@ PY
         # 3. --no-ca-bundle also reaches it, and says out loud that it is not
         #    verifying. A silent version of this flag would be the dangerous
         #    one.
-        OUT=$(cd "$WORK/t1" && timeout 30 "$HULL" --no-sandbox \
-              --no-ca-bundle app.lua 2>&1 || true)
+        OUT=$(run_app "$WORK/t1" --no-ca-bundle)
         assert_contains "tls: --no-ca-bundle warns that verification is off" \
             "$OUT" "verification disabled"
 
