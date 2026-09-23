@@ -1325,6 +1325,13 @@ e2e-oauth: $(BUILDDIR)/hull
 e2e-ssh-tunnel: $(BUILDDIR)/hull
 	sh tests/e2e_ssh_tunnel.sh
 
+# Passphrase-protected OpenSSH keys, checked against ssh-keygen as the oracle
+# rather than against ourselves - a round trip would pass just as happily with
+# a wrong KDF, consistently wrong.
+.PHONY: e2e-ssh-key-passphrase
+e2e-ssh-key-passphrase: $(BUILDDIR)/hull
+	sh tests/e2e_ssh_key_passphrase.sh
+
 e2e-totp: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_totp.sh
 

@@ -5,6 +5,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/crypto.h"
+#include "hull/cap/env.h"
 #include "hull/limits/core.h"
 
 #include <sh_arena.h>
@@ -1089,6 +1090,183 @@ static void register_sha256_hasher_mt(lua_State *L)
     lua_pop(L, 1);
 }
 
+/* ── OpenSSH key passphrases ────────────────────────────────────────── */
+
+/* Zero memory the optimiser may not elide. Local for the same reason
+ * cap/smtp.c keeps its own: hull_secure_zero is static to cap/crypto.c. */
+static void crypto_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n--) *v++ = 0;
+}
+
+/* Validate the two numeric arguments both entry points share. Returns 0 when
+ * they are usable, or pushes nothing and returns -1 with `why` set.
+ *
+ * Separate from the derivation so the env path can REJECT before it copies a
+ * passphrase - there is no reason to have the secret in hand while arguing
+ * about a round count. */
+static int crypto_bcrypt_args_ok(lua_Integer rounds, lua_Integer outlen,
+                                 const char **why)
+{
+    if (rounds <= 0 || rounds > 0x7fffffff) {
+        *why = "rounds must be positive";
+        return -1;
+    }
+    if (outlen <= 0 || outlen > HL_BCRYPT_MAX_OUT) {
+        *why = "length is out of range";
+        return -1;
+    }
+    return 0;
+}
+
+/* crypto.bcrypt_pbkdf(pass, salt, rounds, len) -> derived
+ *
+ * The generic primitive: pinned by a known-answer test, and usable by any
+ * caller that already holds the bytes.
+ *
+ * NOTE the passphrase is a Lua string here, and Lua strings are immutable and
+ * interned - Hull cannot scrub it, and it lives in the script heap until GC.
+ * Where that matters, use bcrypt_pbkdf_env below, which never lets the
+ * passphrase become a Lua value at all. */
+static int lua_crypto_bcrypt_pbkdf(lua_State *L)
+{
+    size_t pass_len, salt_len;
+    const char *pass = luaL_checklstring(L, 1, &pass_len);
+    const char *salt = luaL_checklstring(L, 2, &salt_len);
+    lua_Integer rounds = luaL_checkinteger(L, 3);
+    lua_Integer outlen = luaL_checkinteger(L, 4);
+
+    const char *why = NULL;
+    if (crypto_bcrypt_args_ok(rounds, outlen, &why) != 0)
+        return luaL_error(L, "crypto.bcrypt_pbkdf: %s", why);
+    if (!pass_len) return luaL_error(L, "crypto.bcrypt_pbkdf: empty passphrase");
+    if (!salt_len) return luaL_error(L, "crypto.bcrypt_pbkdf: empty salt");
+
+    luaL_Buffer b;
+    char *out = luaL_buffinitsize(L, &b, (size_t)outlen);
+    if (hl_cap_crypto_bcrypt_pbkdf(pass, pass_len, salt, salt_len,
+                                   (unsigned int)rounds,
+                                   (uint8_t *)out, (size_t)outlen) != 0) {
+        luaL_pushresultsize(&b, 0);
+        lua_pop(L, 1);
+        /* Never echo the passphrase, its length, or any derived byte. */
+        return luaL_error(L, "crypto.bcrypt_pbkdf: derivation failed");
+    }
+    luaL_pushresultsize(&b, (size_t)outlen);
+    return 1;
+}
+
+/* crypto.bcrypt_pbkdf_env(var, salt, rounds, len) -> derived
+ *
+ * The same derivation, but Lua passes only the NAME of an environment
+ * variable. The C layer reads the value, derives from it, and scrubs its copy;
+ * the passphrase never becomes a Lua value, so it never lands anywhere Hull
+ * cannot reach. Mirrors how databases.named already takes "$VAR" references.
+ *
+ * Gated by manifest.env like any other environment read - naming a variable
+ * here grants nothing env.get would not already grant.
+ *
+ * Honest about its limit: the value still sits in the process environment for
+ * the process's lifetime, the standard trade-off for an env-carried secret.
+ * What this buys is that it is not ALSO in the script heap, where it would be
+ * unscrubbable, GC-visible and reachable by any app code.
+ *
+ * Structured so NO error path unwinds over a live secret: everything that can
+ * be rejected is rejected before the copy is taken, and the copy is wiped and
+ * freed before any luaL_error can longjmp out of here. */
+static int lua_crypto_bcrypt_pbkdf_env(lua_State *L)
+{
+    const char *var = luaL_checkstring(L, 1);
+    size_t salt_len;
+    const char *salt = luaL_checklstring(L, 2, &salt_len);
+    lua_Integer rounds = luaL_checkinteger(L, 3);
+    lua_Integer outlen = luaL_checkinteger(L, 4);
+
+    const char *why = NULL;
+    if (crypto_bcrypt_args_ok(rounds, outlen, &why) != 0)
+        return luaL_error(L, "crypto.bcrypt_pbkdf_env: %s", why);
+    if (!salt_len) return luaL_error(L, "crypto.bcrypt_pbkdf_env: empty salt");
+
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.env_cfg)
+        return luaL_error(L, "crypto.bcrypt_pbkdf_env: no env capability");
+
+    const char *val = hl_cap_env_get(lua->base.env_cfg, var);
+    if (!val || !*val) {
+        /* One message for "not in manifest.env" and "declared but unset".
+         * Distinguishing them would let a caller probe the allowlist, and the
+         * remedy is the same either way. */
+        return luaL_error(L, "crypto.bcrypt_pbkdf_env: '%s' is not available "
+                             "(declare it in manifest.env and set it)", var);
+    }
+
+    /* Copy so the derivation reads memory WE can wipe. The environment's own
+     * copy belongs to the OS and is left alone: zeroing it would break any
+     * later read and is not this function's decision. */
+    size_t n = strlen(val);
+    char *copy = malloc(n);
+    uint8_t *derived = malloc((size_t)outlen);
+    if (!copy || !derived) {
+        free(copy); free(derived);
+        return luaL_error(L, "crypto.bcrypt_pbkdf_env: out of memory");
+    }
+    memcpy(copy, val, n);
+
+    int rc = hl_cap_crypto_bcrypt_pbkdf(copy, n, salt, salt_len,
+                                        (unsigned int)rounds, derived,
+                                        (size_t)outlen);
+    crypto_wipe(copy, n);
+    free(copy);
+
+    if (rc != 0) {
+        crypto_wipe(derived, (size_t)outlen);
+        free(derived);
+        return luaL_error(L, "crypto.bcrypt_pbkdf_env: derivation failed");
+    }
+
+    lua_pushlstring(L, (const char *)derived, (size_t)outlen);
+    crypto_wipe(derived, (size_t)outlen);
+    free(derived);
+    return 1;
+}
+
+/* crypto.aes256ctr(key, iv, data) -> out
+ *
+ * One function for both directions, because CTR has only one: it XORs a
+ * keystream. Unauthenticated by nature, so the caller supplies its own
+ * integrity check - an OpenSSH private section carries check1/check2 inside
+ * the plaintext for exactly this reason. */
+static int lua_crypto_aes256ctr(lua_State *L)
+{
+    size_t klen, ivlen, len;
+    const char *key = luaL_checklstring(L, 1, &klen);
+    const char *iv  = luaL_checklstring(L, 2, &ivlen);
+    const char *in  = luaL_optlstring(L, 3, "", &len);
+
+    if (klen != HL_AEAD_KEY_LEN)
+        return luaL_error(L, "crypto.aes256ctr: key must be %d bytes, got %d",
+                          (int)HL_AEAD_KEY_LEN, (int)klen);
+    if (ivlen != HL_AES_CTR_IV_LEN)
+        return luaL_error(L, "crypto.aes256ctr: iv must be %d bytes, got %d",
+                          (int)HL_AES_CTR_IV_LEN, (int)ivlen);
+    if (!len) { lua_pushliteral(L, ""); return 1; }
+
+    luaL_Buffer b;
+    char *out = luaL_buffinitsize(L, &b, len);
+    int rc = hl_cap_crypto_aes256ctr((uint8_t *)out, (const uint8_t *)key,
+                                     (const uint8_t *)iv, in, len);
+    if (rc != 0) {
+        luaL_pushresultsize(&b, 0);
+        lua_pop(L, 1);
+        return luaL_error(L, rc == -2
+            ? "crypto.aes256ctr: no AES backend in this build (TLS is not composed)"
+            : "crypto.aes256ctr: bad argument");
+    }
+    luaL_pushresultsize(&b, len);
+    return 1;
+}
+
 /* ── AES-256-GCM ────────────────────────────────────────────────────── */
 
 /* crypto.gcm_seal(key, iv, aad, plaintext) -> ciphertext, tag
@@ -1213,6 +1391,9 @@ static const luaL_Reg crypto_funcs[] = {
     {"hmac_sha1",         lua_crypto_hmac_sha1},
     {"gcm_seal",          lua_crypto_gcm_seal},
     {"gcm_open",          lua_crypto_gcm_open},
+    {"aes256ctr",         lua_crypto_aes256ctr},
+    {"bcrypt_pbkdf",      lua_crypto_bcrypt_pbkdf},
+    {"bcrypt_pbkdf_env",  lua_crypto_bcrypt_pbkdf_env},
     {"base64url_encode",  lua_crypto_base64url_encode},
     {"base64url_decode",  lua_crypto_base64url_decode},
     {"hex_encode",        lua_crypto_hex_encode},

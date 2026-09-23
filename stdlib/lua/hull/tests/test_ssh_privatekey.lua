@@ -160,17 +160,41 @@ end)
 
 -- encrypted keys -------------------------------------------------------------------
 
-test("refuses an encrypted key and says why", function()
-    -- Decrypting needs bcrypt_pbkdf, which Hull does not have. Producing
-    -- garbage from a key the user believes is fine would be worse.
+test("an encrypted key with no passphrase says how to give one", function()
+    -- Hull can decrypt aes256-ctr/bcrypt now, but it will not guess. The
+    -- refusal has to name the option, because the caller's next move is to
+    -- add one and there are two of them.
     local ok, err = pcall(privatekey.load,
         key_file({ cipher = "aes256-ctr", kdf = "bcrypt" }))
     assert_eq(ok, false)
     err = tostring(err)
-    assert_eq(err:find("encrypted", 1, true) ~= nil, true, err)
-    assert_eq(err:find("aes256%-ctr") ~= nil, true, err)
-    -- and it tells the user what to do about it
+    assert_eq(err:find("passphrase_env", 1, true) ~= nil, true, err)
+    assert_eq(err:find("passphrase", 1, true) ~= nil, true, err)
+end)
+
+test("refuses a cipher it does not read, by name", function()
+    -- Anything but aes256-ctr/bcrypt is named rather than flattened, and
+    -- carries the conversion that fixes it. A generic failure here would
+    -- leave the reader guessing which of the two fields was the problem.
+    local ok, err = pcall(privatekey.load,
+        key_file({ cipher = "aes128-cbc", kdf = "bcrypt" }),
+        { passphrase = "x" })
+    assert_eq(ok, false)
+    err = tostring(err)
+    assert_eq(err:find("aes128%-cbc") ~= nil, true, err)
     assert_eq(err:find("ssh%-keygen %-p") ~= nil, true, err)
+end)
+
+test("malformed kdfoptions read as a malformed KEY", function()
+    -- The fixture carries an empty kdfoptions. Before this was guarded the
+    -- failure surfaced from the wire reader as "truncated: need 4 bytes",
+    -- which says nothing about which file is wrong or why.
+    local ok, err = pcall(privatekey.load,
+        key_file({ cipher = "aes256-ctr", kdf = "bcrypt" }),
+        { passphrase = "x" })
+    assert_eq(ok, false)
+    err = tostring(err)
+    assert_eq(err:find("kdfoptions", 1, true) ~= nil, true, err)
 end)
 
 test("parse_container exposes an encrypted key without refusing", function()

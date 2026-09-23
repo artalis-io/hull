@@ -122,20 +122,125 @@ local function parse_private(blob)
              comment = comment }
 end
 
+-- The one cipher this accepts, and the one KDF. ssh-keygen writes exactly
+-- this pair today; anything else is refused BY NAME with the conversion that
+-- fixes it, rather than by a generic failure the reader has to decode.
+M.CIPHER = "aes256-ctr"
+M.KDF    = "bcrypt"
+
+-- aes256-ctr takes a 32-byte key and a 16-byte counter block, derived as ONE
+-- 48-byte draw. bcrypt_pbkdf stripes its output, so two draws of 32 and 16
+-- would not give the same bytes as one of 48 - the key would not open.
+local CIPHER_KEY_LEN = 32
+local CIPHER_IV_LEN  = 16
+
+--- Decrypt the private section of a passphrase-protected key.
+---
+--- The passphrase can arrive two ways, and they are not equivalent:
+---
+---   opts.passphrase_env = "VAR"   the NAME of an environment variable. The
+---                                 C layer reads the value, derives from it
+---                                 and scrubs its copy - the passphrase never
+---                                 becomes a Lua value. Prefer this.
+---   opts.passphrase     = "..."   the bytes. Convenient, and unscrubbable:
+---                                 Lua strings are immutable and interned, so
+---                                 this one lives in the script heap until GC
+---                                 and Hull cannot reach it.
+---
+--- Raises on a wrong passphrase, a refused cipher, or a damaged file. The
+--- wrong-passphrase case is detected by parse_private's check1 == check2,
+--- which is the only integrity signal the format has: CTR is unauthenticated,
+--- so a wrong key yields plausible-looking garbage rather than an error.
+function M.decrypt_private(container, opts)
+    opts = opts or {}
+    if container.cipher ~= M.CIPHER or container.kdf ~= M.KDF then
+        error("ssh.privatekey: unsupported protection (cipher "
+              .. tostring(container.cipher) .. ", kdf " .. tostring(container.kdf)
+              .. "); Hull reads " .. M.CIPHER .. " with " .. M.KDF
+              .. ". Convert it with: ssh-keygen -p -f <file>")
+    end
+
+    -- ORDER MATTERS. Ask "will the caller give me a passphrase" before
+    -- "is this file well-formed", because the first is the likelier mistake
+    -- and the more actionable message - and because there is no reason to
+    -- parse a key we have already been told we cannot open.
+    if not opts.passphrase_env and not opts.passphrase then
+        error("ssh.privatekey: the key is encrypted; pass a passphrase as "
+              .. "opts.passphrase_env = \"VAR\" (preferred - the value never "
+              .. "becomes a Lua string) or opts.passphrase = \"...\"")
+    end
+    if opts.passphrase == "" then
+        error("ssh.privatekey: the key is encrypted but the passphrase is empty")
+    end
+
+    -- kdfoptions is itself a length-prefixed blob: salt, then rounds. Read
+    -- under pcall because it is FILE content: a truncated or absent one
+    -- should read as a malformed key, not as a wire-layer error about byte
+    -- counts that tells the reader nothing about which file is wrong.
+    local okk, salt, rounds = pcall(function()
+        local ko = wire.reader(container.kdfopts)
+        return ko:string(), ko:uint32()
+    end)
+    if not okk then
+        error("ssh.privatekey: the key declares " .. M.KDF .. " but its "
+              .. "kdfoptions are malformed (expected a salt and a round count)")
+    end
+    if #salt == 0 then
+        error("ssh.privatekey: the key carries an empty KDF salt")
+    end
+    if rounds == 0 then
+        error("ssh.privatekey: the key declares zero KDF rounds")
+    end
+
+    local crypto = opts.crypto or require("hull.crypto")
+    local want = CIPHER_KEY_LEN + CIPHER_IV_LEN
+
+    -- passphrase_env wins when both are given: it is the safer of the two,
+    -- and silently preferring the weaker one would be the wrong surprise.
+    local derived
+    if opts.passphrase_env then
+        derived = crypto.bcrypt_pbkdf_env(opts.passphrase_env, salt, rounds, want)
+    else
+        derived = crypto.bcrypt_pbkdf(opts.passphrase, salt, rounds, want)
+    end
+
+    local ok, plain = pcall(function()
+        return crypto.aes256ctr(derived:sub(1, CIPHER_KEY_LEN),
+                                derived:sub(CIPHER_KEY_LEN + 1, want),
+                                container.private_blob)
+    end)
+    -- Nothing derived from the passphrase outlives this function by name. The
+    -- Lua copy cannot be wiped, but dropping the reference is what lets it go
+    -- at the next collection rather than living as long as the key does.
+    derived = nil
+    if not ok then error(plain) end
+    return plain
+end
+
 -- Load a key from the contents of a key file.
 --
 -- Returns { algorithm, public, secret, comment, blob } where `blob` is the
 -- wire-format public key ready for userauth, `public` is the raw 32 bytes and
 -- `secret` the 64 bytes signing wants.
-function M.load(text)
+--- @param opts table|nil { passphrase = string } or { passphrase_env = string }
+function M.load(text, opts)
     local container = M.parse_container(M.unarmour(text))
+    local blob = container.private_blob
     if container.encrypted then
-        error("ssh.privatekey: the key is encrypted (cipher "
-              .. container.cipher .. ", kdf " .. container.kdf
-              .. "); Hull cannot decrypt it. Provide an unencrypted key, or "
-              .. "remove the passphrase with: ssh-keygen -p -N \"\" -f <file>")
+        blob = M.decrypt_private(container, opts)
     end
-    local key = parse_private(container.private_blob)
+    -- A wrong passphrase does not fail in the cipher - CTR is unauthenticated,
+    -- so it decrypts to plausible garbage - it fails in parse_private, as
+    -- check1 ~= check2. Reporting that as "the file is corrupt" would send
+    -- someone to look for a damaged file when they simply mistyped, so the
+    -- encrypted case names what actually happened.
+    local ok, key = pcall(parse_private, blob)
+    if not ok then
+        if container.encrypted then
+            error("ssh.privatekey: wrong passphrase (or the key is damaged)")
+        end
+        error(key)
+    end
 
     -- The public blob in the container header is the one a server sees; check
     -- it against the private section rather than trusting either alone.
