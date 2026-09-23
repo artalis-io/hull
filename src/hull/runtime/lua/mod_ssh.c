@@ -194,6 +194,27 @@ static int ssh_park(HlLua *lua, HlLuaSshStream *o)
     hl_net_stream_set_user(o->s, o);
     op->on_resume = ssh_on_resume;
     op->on_cancel = ssh_on_resume;   /* a cancel must still un-park the coro */
+
+    /* Register the op with the backend, which is what makes the wake-up reach
+     * us at all.
+     *
+     * cap/net_stream.c's wake() calls backend->op_complete, and op_complete
+     * looks up per-op state that ONLY op_suspend creates - with none it
+     * returns early and on_resume is never scheduled. Without this the
+     * connect completed, the stream reported itself ready, and the coroutine
+     * stayed parked forever.
+     *
+     * Armed LAST so the fallible setup above is already done: if the backend
+     * refuses (effectively OOM) there is nothing suspended to unwind but this
+     * binding's own state. */
+    const HlAsyncBackend *be = hl_async_backend();
+    if (!be || !be->op_suspend ||
+        be->op_suspend(lua->base.async_ctx, op) != 0) {
+        o->ctx = NULL;
+        cont->destroy(cont);
+        hl_async_ctx_free(ctx);
+        return -1;
+    }
     return 0;
 }
 
