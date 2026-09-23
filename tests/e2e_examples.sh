@@ -966,14 +966,15 @@ fi
 # dials, because it was given no host.
 
 test_ssh_fleet() {
-    # Absolute, because the second check runs from inside the app directory.
+    # Absolute, because both checks run from inside the app directory - which
+    # is also where `hull modules list` and a bare app path expect to be.
     HULL_ABS=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
 
-    OUT=$("$HULL_ABS" check examples/ssh_fleet 2>&1) || true
-    case "$OUT" in
-        *rror*|*ailed*) fail "lua ssh_fleet manifest resolves - got: $OUT" ;;
-        *)              pass "lua ssh_fleet manifest resolves" ;;
-    esac
+    # `hull modules list`, not `hull check`: check also RUNS the tests, and an
+    # example that ships none is reported as a test failure. What is wanted
+    # here is only that the manifest resolves against the registry.
+    OUT=$(cd examples/ssh_fleet && "$HULL_ABS" modules list 2>&1) || true
+    check_contains "lua ssh_fleet manifest resolves" "$OUT" "hull/ssh@1"
 
     # Windows note: a cosmo APE's exit status is unusable from a POSIX shell
     # (see CLAUDE.md), so this asserts the OUTPUT, not the status.
