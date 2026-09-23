@@ -519,6 +519,17 @@ nothing is worse than a red one.
 The e2e tunnel is PLAINTEXT WebSocket, and that is a real gap rather than a
 simplification: see below.
 
+**What the e2e found on its first run**, which is the argument for having it:
+`hull/ssh` could not connect AT ALL, on any platform. Two defects, both
+invisible to every unit suite. `ssh_park` never registered the stream's op
+with the async backend, so the backend had nothing to resume; and both async
+backends freed an op's state AFTER running its callback, clobbering the state
+a re-suspend had just installed. No other consumer re-enters - `http.fetch`,
+`compute.async` and `gpu.async` park once per operation - while a byte stream
+parks on every read and every write. `test_net_stream` missed it because it
+pumps the loop itself and calls `hl_net_stream_connect_result` directly,
+which is the transport's contract, not the binding's.
+
 ### Still open
 
 - **A CLI app cannot trust a private CA.** `serve_cli.c` resolves its anchor

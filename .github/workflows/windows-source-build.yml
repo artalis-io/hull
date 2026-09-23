@@ -1083,7 +1083,8 @@ jobs:
                     e2e-naming-aliases e2e-oauth e2e-onboarding
                     e2e-path-parity e2e-persistent-async e2e-postgres
                     e2e-ratelimit-parity e2e-retry e2e-sandbox
-                    e2e-sign-in-events e2e-smtp e2e-smtp-link-seam e2e-spans-async
+                    e2e-sign-in-events e2e-smtp e2e-smtp-link-seam
+                    e2e-ssh-tunnel e2e-spans-async
                     e2e-spans-bind e2e-spans-example e2e-spans-hugefile
                     e2e-spans-mmap e2e-spans-multi e2e-stream-meta
                     e2e-sync-spans e2e-template-parity e2e-templates
@@ -1092,11 +1093,7 @@ jobs:
 
           # Expected to FAIL, with the cause recorded in the doc. Cheap enough to
           # keep running: project-discovery ~29s.
-          # e2e-ssh-tunnel: the async outbound connect never completes on a
-          # cosmo APE here, so hull/ssh cannot connect at all on Windows -
-          # not tunnel-specific, and not new; it is simply the first suite
-          # that ever drove cap/net_stream.c. Cause + trace in the doc.
-          E2E_KNOWN="e2e-project-discovery e2e-ssh-tunnel"
+          E2E_KNOWN="e2e-project-discovery"
 
           rc_step=0
 
