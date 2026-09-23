@@ -926,7 +926,7 @@ TWEETNACL_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
 # instrumentation for the same reason mbedTLS does (see the note below):
 # uninstrumented, MSan cannot see the write and flags every read of the
 # derived key as use-of-uninitialized-value.
-BCRYPT_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer \n                 -I$(BCRYPT_DIR)
+BCRYPT_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer -I$(BCRYPT_DIR)
 STB_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
 # mbedTLS must be MSan-instrumented too: it writes to caller buffers
 # (e.g. mbedtls_sha256 → uint8_t digest[32]). Without instrumentation
