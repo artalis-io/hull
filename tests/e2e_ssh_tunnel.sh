@@ -341,38 +341,64 @@ else
     # `|| true` because `set -e` is on, so a failure would otherwise abort the
     # whole run before reaching the SKIP below that explains it. Both were
     # observed: a shell that rewrites /CN=... as a path hit them in order.
-    openssl req -x509 -newkey rsa:2048 -keyout "$WORK/tls/ca.key"         -out "$WORK/tls/ca.pem" -days 2 -nodes -subj "/CN=hull-e2e-ca" </dev/null >/dev/null 2>&1 || true
-    openssl req -new -newkey rsa:2048 -keyout "$WORK/tls/srv.key"         -out "$WORK/tls/srv.csr" -nodes -subj "/CN=localhost" </dev/null >/dev/null 2>&1 || true
+    # MSYS_NO_PATHCONV is what stops that rewriting on Git Bash; it is inert
+    # everywhere else.
+    MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 \
+        -keyout "$WORK/tls/ca.key" -out "$WORK/tls/ca.pem" \
+        -days 2 -nodes -subj "/CN=hull-e2e-ca" \
+        </dev/null >/dev/null 2>&1 || true
+    MSYS_NO_PATHCONV=1 openssl req -new -newkey rsa:2048 \
+        -keyout "$WORK/tls/srv.key" -out "$WORK/tls/srv.csr" \
+        -nodes -subj "/CN=localhost" \
+        </dev/null >/dev/null 2>&1 || true
     echo 'subjectAltName=DNS:localhost,IP:127.0.0.1' > "$WORK/tls/ext.cnf"
-    openssl x509 -req -in "$WORK/tls/srv.csr" -CA "$WORK/tls/ca.pem"         -CAkey "$WORK/tls/ca.key" -CAcreateserial -out "$WORK/tls/srv.pem"         -days 2 -extfile "$WORK/tls/ext.cnf" </dev/null >/dev/null 2>&1 || true
+    openssl x509 -req -in "$WORK/tls/srv.csr" -CA "$WORK/tls/ca.pem" \
+        -CAkey "$WORK/tls/ca.key" -CAcreateserial -out "$WORK/tls/srv.pem" \
+        -days 2 -extfile "$WORK/tls/ext.cnf" \
+        </dev/null >/dev/null 2>&1 || true
 
     if [ ! -s "$WORK/tls/srv.pem" ]; then
         echo "  SKIP: openssl could not mint the test CA"
     else
-        python3 -c "
-import socket
-srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(('127.0.0.1', $PEER2_PORT)); srv.listen(4)
-open('$WORK/peer2-ready', 'w').write('x')
+        # Written to a FILE through a quoted heredoc rather than passed to
+        # `python3 -c`, so no layer between here and python can touch what is
+        # inside the string literals. The -c form carried a `\r\n` that one
+        # editing pass turned into a real newline, and python then refused the
+        # whole script for an unterminated literal - which reads as "the peer
+        # did not start", a mile from the actual cause.
+        cat > "$WORK/peer2.py" <<'PY'
+import socket, sys
+port, ready = int(sys.argv[1]), sys.argv[2]
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('127.0.0.1', port))
+srv.listen(4)
+open(ready, 'w').write('x')
 while True:
     c, _ = srv.accept()
     try:
-        c.sendall(b'SSH-2.0-E2EFake
-'); c.recv(65536)
+        c.sendall(b'SSH-2.0-E2EFake\r\n')
+        c.recv(65536)
     except OSError:
         pass
     finally:
         c.close()
-" &
+PY
+        python3 "$WORK/peer2.py" "$PEER2_PORT" "$WORK/peer2-ready" &
         PEER_PID=$!
         wait_for_file "$WORK/peer2-ready" || { echo "peer did not start"; exit 1; }
 
-        start_shim "$TLS_PORT" "$PEER2_PORT"             --tls-cert "$WORK/tls/srv.pem" --tls-key "$WORK/tls/srv.key"
+        start_shim "$TLS_PORT" "$PEER2_PORT" \
+            --tls-cert "$WORK/tls/srv.pem" --tls-key "$WORK/tls/srv.key"
 
         # `localhost` rather than 127.0.0.1: the certificate names it, and a
         # hostname is what a real relay is reached by.
-        write_app "$WORK/t1" "127.0.0.1" "$PEER2_PORT" "localhost" "$TLS_PORT"             '"127.0.0.1"' "$PEER2_PORT" '"localhost"' "$TLS_PORT"
-        sed -i 's/tls  = false/tls  = true/' "$WORK/t1/app.lua"
+        write_app "$WORK/t1" "127.0.0.1" "$PEER2_PORT" "localhost" "$TLS_PORT" \
+            '"127.0.0.1"' "$PEER2_PORT" '"localhost"' "$TLS_PORT"
+        # Not `sed -i`: BSD sed wants an argument after -i and GNU sed does
+        # not, so the one spelling that works on both is a temp file.
+        sed 's/tls  = false/tls  = true/' "$WORK/t1/app.lua" > "$WORK/t1/app.tmp"
+        mv "$WORK/t1/app.tmp" "$WORK/t1/app.lua"
 
         # 1. The default trust anchor must REFUSE this certificate. If this
         #    passes, verification is not on and every other TLS assertion here
@@ -385,21 +411,25 @@ while True:
         esac
 
         # 2. --ca-bundle makes it trust THAT CA, and the tunnel comes up.
-        OUT=$(cd "$WORK/t1" && timeout 30 "$HULL" --no-sandbox               --ca-bundle "$WORK/tls/ca.pem" app.lua 2>&1 || true)
+        OUT=$(cd "$WORK/t1" && timeout 30 "$HULL" --no-sandbox \
+              --ca-bundle "$WORK/tls/ca.pem" app.lua 2>&1 || true)
         case "$OUT" in
             *"first_code=denied"*|*"first_code=upgrade_"*)
-                fail "tls: --ca-bundle is honoured on the app.main path" "$OUT" ;;
+                fail "tls: --ca-bundle is honoured" "$OUT" ;;
             *"first_code="*)
-                pass "tls: --ca-bundle is honoured on the app.main path" ;;
-            *)  fail "tls: --ca-bundle is honoured on the app.main path" "$OUT" ;;
+                pass "tls: --ca-bundle is honoured" ;;
+            *)  fail "tls: --ca-bundle is honoured" "$OUT" ;;
         esac
-        assert_contains "tls: the override is the anchor actually used" "$OUT"             "CA bundle (override)"
+        assert_contains "tls: the override is the anchor actually used" "$OUT" \
+            "CA bundle (override)"
 
         # 3. --no-ca-bundle also reaches it, and says out loud that it is not
         #    verifying. A silent version of this flag would be the dangerous
         #    one.
-        OUT=$(cd "$WORK/t1" && timeout 30 "$HULL" --no-sandbox               --no-ca-bundle app.lua 2>&1 || true)
-        assert_contains "tls: --no-ca-bundle warns that verification is off"             "$OUT" "verification disabled"
+        OUT=$(cd "$WORK/t1" && timeout 30 "$HULL" --no-sandbox \
+              --no-ca-bundle app.lua 2>&1 || true)
+        assert_contains "tls: --no-ca-bundle warns that verification is off" \
+            "$OUT" "verification disabled"
 
         stop_shim
         kill "$PEER_PID" 2>/dev/null || true
