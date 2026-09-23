@@ -1,4 +1,4 @@
--- hull.ssh.base64 - standard base64, both directions.
+-- hull.encoding.base64 - standard base64, both directions.
 --
 -- Standard alphabet (+/), not the URL-safe one hull.crypto offers. SSH uses
 -- standard base64 in two places that must match OpenSSH byte for byte: the
@@ -57,7 +57,7 @@ end
 --- decode to something plausible.
 function M.decode(s)
     if type(s) ~= "string" then
-        error("ssh.base64: decode expects a string", 2)
+        error("encoding.base64: decode expects a string", 2)
     end
     local acc, bits = 0, 0
     local out = {}
@@ -75,7 +75,7 @@ function M.decode(s)
         elseif not (c == 32 or c == 9 or c == 10 or c == 13) then
             -- Whitespace is the only thing skipped; anything else is refused
             -- rather than ignored.
-            error("ssh.base64: invalid character at offset " .. tostring(i), 2)
+            error("encoding.base64: invalid character at offset " .. tostring(i), 2)
         end
     end
     return table.concat(out)

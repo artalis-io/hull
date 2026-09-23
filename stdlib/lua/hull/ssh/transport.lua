@@ -381,8 +381,15 @@ function Transport:authenticate(user, key, on_banner)
                       detail = wire.safe_name(accepted) }
     end
 
-    local blob = userauth.signed_blob(self.session_id, user, key.blob)
-    local sig  = self.crypto.ed25519_sign(blob, key.secret)
+    -- hex on the way in, raw on the way out. crypto.ed25519_sign takes a
+    -- 128-char hex secret and hands back a hex signature, while a private key
+    -- carries 64 RAW bytes and signature_blob wants 64 raw bytes back - so
+    -- both ends need converting, exactly as the VERIFY path already does via
+    -- hostkey.verify_signature(crypto, kex.to_hex, ...). Without it userauth
+    -- died on "secret key must be 128 hex chars" against a real server.
+    local blob    = userauth.signed_blob(self.session_id, user, key.blob)
+    local sig_hex = self.crypto.ed25519_sign(blob, kex.to_hex(key.secret))
+    local sig     = kex.from_hex(sig_hex)
     self:send_packet(userauth.build_request(user, key.blob,
                                             userauth.signature_blob(sig)))
 

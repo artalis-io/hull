@@ -3983,6 +3983,15 @@ UTEST(lua_stdlib, email_suite)
     cleanup_lua_caps();
 }
 
+UTEST(lua_stdlib, ws_stream_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_ws_stream.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 UTEST(lua_stdlib, ssh_wire_suite)
 {
     long long pass = 0, fail = -1;
@@ -4077,6 +4086,18 @@ UTEST(lua_stdlib, ssh_transport_suite)
 {
     long long pass = 0, fail = -1;
     int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_transport.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
+/* The tunnel COMPOSITION: ssh.connect over hull.web.ws-stream. Driven
+ * against a fake relay, so it asserts the bytes that relay is sent rather
+ * than re-testing either layer. */
+UTEST(lua_stdlib, ssh_tunnel_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_tunnel.lua", &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0LL);
     EXPECT_GT(pass, 0LL);

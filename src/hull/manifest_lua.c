@@ -51,6 +51,39 @@ static int read_string_array(lua_State *L, int table_idx,
     return count;
 }
 
+/* Read a `ports = { ... }` array into a C int array. Returns how many were
+ * accepted (capped at HL_MANIFEST_MAX_NET_PORTS).
+ *
+ * Ports are read as INTEGERS rather than strings: a port is a number, and
+ * accepting "22" would invite "22 " and ":22" behind it. Anything that is not
+ * an integer in 1..65535 is SKIPPED rather than clamped, so a typo narrows
+ * the grant instead of silently widening it.
+ *
+ * Shared by ssh.connect and ssh.tunnel - two grants that must read a port
+ * list the same way, which is the whole reason this is a function. */
+static int read_port_array(lua_State *L, int table_idx, int *out)
+{
+    int n = 0;
+    lua_getfield(L, table_idx, "ports");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    int arr_idx = lua_gettop(L);
+    lua_Integer len = luaL_len(L, arr_idx);
+    for (lua_Integer i = 1; i <= len && n < HL_MANIFEST_MAX_NET_PORTS; i++) {
+        lua_rawgeti(L, arr_idx, i);
+        if (lua_isinteger(L, -1)) {
+            lua_Integer v = lua_tointeger(L, -1);
+            if (v >= 1 && v <= 65535)
+                out[n++] = (int)v;
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1); /* pop array table */
+    return n;
+}
+
 int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
 {
     if (!L || !out)
@@ -408,15 +441,12 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop kv */
 
-    /* ssh = { connect = { hosts = {...}, ports = {...}, users = {...} } }
+    /* ssh = { connect = { hosts = {...}, ports = {...}, users = {...} },
+     *         tunnel  = { hosts = {...}, ports = {...} } }
      *
      * The ONLY manifest key that grants outbound stream authority, and it
      * grants it to the SSH stdlib rather than to the app (see HlManifestSsh).
-     *
-     * Ports are read as integers rather than strings: a port is a number, and
-     * accepting "22" would invite "22 " and ":22" behind it. Anything out of
-     * 1..65535, or not an integer, is SKIPPED rather than clamped, so a typo
-     * narrows the grant instead of silently widening it. */
+     * See read_port_array above for how `ports` is read. */
     lua_getfield(L, manifest_idx, "ssh");
     if (lua_istable(L, -1)) {
         int ssh_idx = lua_gettop(L);
@@ -433,25 +463,30 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                 read_string_array(L, c_idx, "users",
                                   out->ssh.users,
                                   HL_MANIFEST_MAX_SSH_USERS, out->alloc);
-
-            lua_getfield(L, c_idx, "ports");
-            if (lua_istable(L, -1)) {
-                int n = 0;
-                int len = (int)lua_rawlen(L, -1);
-                for (int i = 1; i <= len && n < HL_MANIFEST_MAX_NET_PORTS; i++) {
-                    lua_rawgeti(L, -1, i);
-                    if (lua_isinteger(L, -1)) {
-                        lua_Integer v = lua_tointeger(L, -1);
-                        if (v >= 1 && v <= 65535)
-                            out->ssh.connect.ports[n++] = (int)v;
-                    }
-                    lua_pop(L, 1);
-                }
-                out->ssh.connect.port_count = n;
-            }
-            lua_pop(L, 1); /* pop ports */
+            out->ssh.connect.port_count =
+                read_port_array(L, c_idx, out->ssh.connect.ports);
         }
         lua_pop(L, 1); /* pop connect */
+
+        /* ssh.tunnel = { hosts = {...}, ports = {...} }
+         *
+         * A SEPARATE grant, not a section of connect, because it answers a
+         * different question: connect says which machine may be reached and
+         * as whom, tunnel says which relay may be dialled to get there. No
+         * `users` here - the login belongs to the target, and the relay never
+         * sees it. Absent means no tunnel is permitted at all. */
+        lua_getfield(L, ssh_idx, "tunnel");
+        if (lua_istable(L, -1)) {
+            int t_idx = lua_gettop(L);
+            out->ssh.tunnel.declared = 1;
+            out->ssh.tunnel.host_count =
+                read_string_array(L, t_idx, "hosts",
+                                  out->ssh.tunnel.hosts,
+                                  HL_MANIFEST_MAX_NET_HOSTS, out->alloc);
+            out->ssh.tunnel.port_count =
+                read_port_array(L, t_idx, out->ssh.tunnel.ports);
+        }
+        lua_pop(L, 1); /* pop tunnel */
     }
     lua_pop(L, 1); /* pop ssh */
 

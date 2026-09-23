@@ -271,27 +271,37 @@ typedef struct KeelOpState {
     int      resumed;         /* op_complete called */
 } KeelOpState;
 
+/* Both timers DETACH and free the per-op state BEFORE running the callback,
+ * and the order is load-bearing rather than tidy.
+ *
+ * A callback commonly resumes a coroutine, which runs on to its next park and
+ * re-suspends THIS SAME op - installing fresh state. Freeing afterwards
+ * discarded that fresh state and left _backend_state NULL, so the next
+ * op_complete found nothing to resume and the coroutine parked forever (and
+ * the new state leaked). Detaching first means a re-suspend inside the
+ * callback owns its state outright and nothing here can clobber it.
+ *
+ * No consumer noticed until hull/ssh: http.fetch, compute.async and
+ * gpu.async each park ONCE per operation, so none of them re-enters. A byte
+ * stream does it on every read and every write. */
 static void keel_op_deadline_timer(void *ud)
 {
     HlAsyncOp *op = ud;
     KeelOpState *s = op->_backend_state;
+    if (!s) return;                    /* already completed and cleaned up */
     if (s->resumed) return;            /* op_complete raced us */
-    s->deadline_timer = 0;
-    if (op->on_deadline) op->on_deadline(op);
-    /* The caller is expected to free the op or set it up for re-use
-     * inside on_deadline. We free the state here; the op struct
-     * itself belongs to the caller. */
-    free(s);
     op->_backend_state = NULL;
+    free(s);
+    if (op->on_deadline) op->on_deadline(op);
 }
 
 static void keel_op_resume_timer(void *ud)
 {
     HlAsyncOp *op = ud;
     KeelOpState *s = op->_backend_state;
-    if (op->on_resume) op->on_resume(op);
-    free(s);
     op->_backend_state = NULL;
+    free(s);                           /* NULL-safe if the deadline got here first */
+    if (op->on_resume) op->on_resume(op);
 }
 
 static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)

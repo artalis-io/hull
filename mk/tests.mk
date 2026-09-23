@@ -1313,6 +1313,13 @@ e2e-jwt-asym: $(BUILDDIR)/hull
 e2e-oauth: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_oauth.sh
 
+# hull/ssh through a REAL WebSocket relay (tests/fixtures/ws_tcp_shim.py).
+# Two phases: the tunnel seam always runs (python3 only), and a full SSH
+# handshake/exec runs where sshd is available. The unit suites drive
+# ssh.connect against a FAKE relay; this is the leg with sockets in it.
+e2e-ssh-tunnel: $(BUILDDIR)/hull
+	sh tests/e2e_ssh_tunnel.sh
+
 e2e-totp: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_totp.sh
 

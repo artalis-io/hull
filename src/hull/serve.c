@@ -710,6 +710,9 @@ typedef struct {
     int                  smtp_async_ok;        /* 1 once the registry is initialised */
     KlTlsConfig          client_tls_config;
     KlTlsCtx            *client_tls_ctx;
+    /* What the runtime is handed: a borrowed view of client_tls_config, so
+     * every outbound consumer shares the one resolved trust anchor. */
+    HlClientTls          client_tls;
     const char           *ca_bundle_path;
     /* CORS config - allocated INSIDE the seal arena (RO after seal)
      * so the origin allowlist a heap-write primitive could otherwise
@@ -1520,13 +1523,17 @@ static int hl_serve_wire_caps(HlServerState *s)
     s->client_tls_ctx = NULL;
     s->ca_bundle_path = NULL;
 
-    if (s->manifest.hosts_count > 0) {
-        s->http_cfg_storage.allowed_hosts     = s->manifest.hosts;
-        s->http_cfg_storage.count             = s->manifest.hosts_count;
-        s->http_cfg_storage.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
-        s->http_cfg_storage.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
-
-        /* Set up TLS client for HTTPS support.
+    /* The outbound TLS trust anchor, resolved ONCE for every consumer.
+     *
+     * It used to be resolved inside the `hosts` block, which made it a
+     * property of http.fetch. It is not: an SSH connection through a relay
+     * (ssh.tunnel) is TLS to a host that has nothing to do with the
+     * http.fetch allowlist, so a fleet tool that declares only `ssh` would
+     * have had no trust anchor and no way to ask for one. Resolving it here
+     * means --ca-bundle, --no-ca-bundle and the system/embedded ladder mean
+     * the same thing for every outbound connection Hull makes. */
+    if (s->manifest.hosts_count > 0 || s->manifest.ssh.tunnel.declared) {
+        /* Set up the client TLS context.
          *
          * Resolution order:
          *   1. --no-ca-bundle (or --skip-ca-bundle alias) → no verification (dev only)
@@ -1572,8 +1579,18 @@ static int hl_serve_wire_caps(HlServerState *s)
 
         if (s->client_tls_ctx) {
             hl_tls_config_wire(&s->client_tls_config, s->client_tls_ctx);
-            s->http_cfg_storage.tls          = &s->client_tls_config;
+            s->client_tls.cfg = &s->client_tls_config;
+            rt->client_tls    = &s->client_tls;
         }
+    }
+
+    if (s->manifest.hosts_count > 0) {
+        s->http_cfg_storage.allowed_hosts     = s->manifest.hosts;
+        s->http_cfg_storage.count             = s->manifest.hosts_count;
+        s->http_cfg_storage.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+        s->http_cfg_storage.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
+        s->http_cfg_storage.tls               = s->client_tls_ctx
+                                                ? &s->client_tls_config : NULL;
 
         /* Enable connection pooling and redirect following */
         if (s->cpool_ok == 0)

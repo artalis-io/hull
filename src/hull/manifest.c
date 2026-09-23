@@ -90,10 +90,13 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->databases.dynamic.hosts[i]);
     for (int i = 0; i < m->databases.dynamic.scheme_count; i++)
         hl_manifest_str_free(a, &m->databases.dynamic.schemes[i]);
-    /* ssh = { connect = { hosts, users } }. Missing here meant the grant
-     * leaked; missing from hl_manifest_seal below meant something worse. */
+    /* ssh = { connect = { hosts, users }, tunnel = { hosts } }. Missing here
+     * meant the grant leaked; missing from hl_manifest_seal below meant
+     * something worse. */
     for (int i = 0; i < m->ssh.connect.host_count; i++)
         hl_manifest_str_free(a, &m->ssh.connect.hosts[i]);
+    for (int i = 0; i < m->ssh.tunnel.host_count; i++)
+        hl_manifest_str_free(a, &m->ssh.tunnel.hosts[i]);
     for (int i = 0; i < m->ssh.user_count; i++)
         hl_manifest_str_free(a, &m->ssh.users[i]);
 
@@ -186,6 +189,13 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
     for (int i = 0; i < src->ssh.connect.host_count; i++)
         if (seal_str(arena, &dst->ssh.connect.hosts[i],
                      src->ssh.connect.hosts[i]) != 0) goto fail;
+    /* ssh.tunnel: the relay that is actually dialled. Same reasoning, and the
+     * same consequence if it is skipped - it is an allowlist, so an unsealed
+     * entry is one an app could still be reading after the allocator that
+     * owns it is gone. */
+    for (int i = 0; i < src->ssh.tunnel.host_count; i++)
+        if (seal_str(arena, &dst->ssh.tunnel.hosts[i],
+                     src->ssh.tunnel.hosts[i]) != 0) goto fail;
     for (int i = 0; i < src->ssh.user_count; i++)
         if (seal_str(arena, &dst->ssh.users[i], src->ssh.users[i]) != 0)
             goto fail;

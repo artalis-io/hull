@@ -1089,6 +1089,102 @@ static void register_sha256_hasher_mt(lua_State *L)
     lua_pop(L, 1);
 }
 
+/* ── AES-256-GCM ────────────────────────────────────────────────────── */
+
+/* crypto.gcm_seal(key, iv, aad, plaintext) -> ciphertext, tag
+ * crypto.gcm_open(key, iv, aad, ciphertext, tag) -> plaintext | nil
+ *
+ * The cap layer has had AES-256-GCM since the SSH work needed it, but nothing
+ * bound it to a runtime - so `crypto.gcm_seal` was nil and the first encrypted
+ * SSH packet died on "attempt to call a nil value". Every SSH unit suite
+ * passes its own AEAD table, which is why a shipped cipher layer could have no
+ * cipher under it and still be green.
+ *
+ * Lengths are fixed (32/12/16) and checked here rather than clamped: GCM with
+ * a wrong-length IV is a different construction, and silently accepting one
+ * would produce packets no peer can open.
+ *
+ * Binary in, binary out. Lua strings are byte-clean, so no hex round-trip. */
+static int lua_crypto_gcm_seal(lua_State *L)
+{
+    size_t klen, ivlen, aad_len, pt_len;
+    const char *key = luaL_checklstring(L, 1, &klen);
+    const char *iv  = luaL_checklstring(L, 2, &ivlen);
+    const char *aad = luaL_optlstring(L, 3, "", &aad_len);
+    const char *pt  = luaL_optlstring(L, 4, "", &pt_len);
+
+    if (klen != HL_AEAD_KEY_LEN)
+        return luaL_error(L, "crypto.gcm_seal: key must be %d bytes, got %d",
+                          (int)HL_AEAD_KEY_LEN, (int)klen);
+    if (ivlen != HL_AEAD_IV_LEN)
+        return luaL_error(L, "crypto.gcm_seal: iv must be %d bytes, got %d",
+                          (int)HL_AEAD_IV_LEN, (int)ivlen);
+
+    uint8_t tag[HL_AEAD_TAG_LEN];
+    luaL_Buffer b;
+    char *out = luaL_buffinitsize(L, &b, pt_len ? pt_len : 1);
+
+    int rc = hl_cap_crypto_aes256gcm_seal((uint8_t *)out, tag,
+                                          (const uint8_t *)key,
+                                          (const uint8_t *)iv,
+                                          aad_len ? aad : NULL, aad_len,
+                                          pt_len ? pt : NULL, pt_len);
+    if (rc != 0) {
+        luaL_pushresultsize(&b, 0);
+        lua_pop(L, 1);
+        return luaL_error(L, rc == -2
+            ? "crypto.gcm_seal: no AEAD backend in this build (TLS is not composed)"
+            : "crypto.gcm_seal: bad argument");
+    }
+    luaL_pushresultsize(&b, pt_len);
+    lua_pushlstring(L, (const char *)tag, sizeof tag);
+    return 2;
+}
+
+static int lua_crypto_gcm_open(lua_State *L)
+{
+    size_t klen, ivlen, aad_len, ct_len, tag_len;
+    const char *key = luaL_checklstring(L, 1, &klen);
+    const char *iv  = luaL_checklstring(L, 2, &ivlen);
+    const char *aad = luaL_optlstring(L, 3, "", &aad_len);
+    const char *ct  = luaL_optlstring(L, 4, "", &ct_len);
+    const char *tag = luaL_checklstring(L, 5, &tag_len);
+
+    if (klen != HL_AEAD_KEY_LEN)
+        return luaL_error(L, "crypto.gcm_open: key must be %d bytes, got %d",
+                          (int)HL_AEAD_KEY_LEN, (int)klen);
+    if (ivlen != HL_AEAD_IV_LEN)
+        return luaL_error(L, "crypto.gcm_open: iv must be %d bytes, got %d",
+                          (int)HL_AEAD_IV_LEN, (int)ivlen);
+    /* A wrong-length tag is a failed open, not an error: it is attacker-
+     * controlled input on the receive path, and raising there would turn a
+     * forged packet into a crash instead of a rejection. */
+    if (tag_len != HL_AEAD_TAG_LEN) { lua_pushnil(L); return 1; }
+
+    luaL_Buffer b;
+    char *out = luaL_buffinitsize(L, &b, ct_len ? ct_len : 1);
+
+    int rc = hl_cap_crypto_aes256gcm_open((uint8_t *)out,
+                                          (const uint8_t *)key,
+                                          (const uint8_t *)iv,
+                                          aad_len ? aad : NULL, aad_len,
+                                          ct_len ? ct : NULL, ct_len,
+                                          (const uint8_t *)tag);
+    if (rc != 0) {
+        /* Includes a tag mismatch, which is the normal way a forged or
+         * corrupted packet arrives. nil, not an error. */
+        luaL_pushresultsize(&b, 0);
+        lua_pop(L, 1);
+        if (rc == -2)
+            return luaL_error(L, "crypto.gcm_open: no AEAD backend in this "
+                                 "build (TLS is not composed)");
+        lua_pushnil(L);
+        return 1;
+    }
+    luaL_pushresultsize(&b, ct_len);
+    return 1;
+}
+
 static const luaL_Reg crypto_funcs[] = {
     {"sha256",            lua_crypto_sha256},
     {"create_sha256",        lua_crypto_create_sha256},
@@ -1115,6 +1211,8 @@ static const luaL_Reg crypto_funcs[] = {
     {"hmac_sha256_verify", lua_crypto_hmac_sha256_verify},
     {"constant_time_eq",  lua_crypto_constant_time_eq},
     {"hmac_sha1",         lua_crypto_hmac_sha1},
+    {"gcm_seal",          lua_crypto_gcm_seal},
+    {"gcm_open",          lua_crypto_gcm_open},
     {"base64url_encode",  lua_crypto_base64url_encode},
     {"base64url_decode",  lua_crypto_base64url_decode},
     {"hex_encode",        lua_crypto_hex_encode},

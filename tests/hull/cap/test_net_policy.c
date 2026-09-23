@@ -278,23 +278,130 @@ UTEST(net_policy, the_reach_check_knows_nothing_about_users)
               (int)HL_NET_DENY_NO_POLICY);
 }
 
+/* ── the tunnel grant ────────────────────────────────────────────────── */
+
+static void mf_tunnel(HlManifestSsh *s, const char *host, int port)
+{
+    s->tunnel.declared = 1;
+    if (host) s->tunnel.hosts[s->tunnel.host_count++] = host;
+    if (port) s->tunnel.ports[s->tunnel.port_count++] = port;
+}
+
+UTEST(net_policy, a_relay_needs_its_own_grant)
+{
+    /* THE case this gate exists for. An app allowed to SSH to a host is not
+     * thereby allowed to route the connection through an arbitrary third
+     * machine, because that machine terminates the TLS and sees the tunnel's
+     * credentials. connect alone must not authorise a relay. */
+    HlManifestSsh g; mf_init(&g);
+    mf_allow(&g, "spark-7468", 22);
+    ASSERT_EQ((int)hl_ssh_check_connect(&g, "spark-7468", 22, "operator"),
+              (int)HL_NET_ALLOW);
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "ssh.example.com", 443),
+              (int)HL_NET_DENY_TUNNEL_UNDECLARED);
+}
+
+UTEST(net_policy, a_declared_relay_is_allowed_on_its_own_host_and_port)
+{
+    HlManifestSsh g; mf_init(&g);
+    mf_allow(&g, "spark-7468", 22);
+    mf_tunnel(&g, "ssh.example.com", 443);
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "ssh.example.com", 443),
+              (int)HL_NET_ALLOW);
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "evil.example.com", 443),
+              (int)HL_NET_DENY_TUNNEL_HOST);
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "ssh.example.com", 8443),
+              (int)HL_NET_DENY_TUNNEL_PORT);
+}
+
+UTEST(net_policy, the_relay_grant_does_not_widen_which_host_may_be_reached)
+{
+    /* The whole reason the two lists are separate. The destination travels
+     * inside the tunnel's headers and never appears in the socket address,
+     * so if one list covered both, allowing the relay would have allowed SSH
+     * to every host behind it. The destination check must be unmoved. */
+    HlManifestSsh g; mf_init(&g);
+    mf_allow(&g, "spark-7468", 22);
+    mf_tunnel(&g, "ssh.example.com", 443);
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "ssh.example.com", 443),
+              (int)HL_NET_ALLOW);
+    ASSERT_EQ((int)hl_ssh_check_connect(&g, "some-other-box", 22, "operator"),
+              (int)HL_NET_DENY_HOST);
+}
+
+UTEST(net_policy, the_relay_grant_does_not_widen_which_login_may_be_used)
+{
+    HlManifestSsh g; mf_init(&g);
+    mf_allow(&g, "spark-7468", 22);
+    mf_tunnel(&g, "ssh.example.com", 443);
+    ASSERT_EQ((int)hl_ssh_check_connect(&g, "spark-7468", 22, "root"),
+              (int)HL_NET_DENY_USER);
+}
+
+UTEST(net_policy, an_empty_relay_grant_is_not_a_wildcard)
+{
+    /* `tunnel = {}` reads like "allow tunnels" and must not behave like it,
+     * the same rule connect already follows. */
+    HlManifestSsh g; mf_init(&g);
+    mf_allow(&g, "spark-7468", 22);
+    g.tunnel.declared = 1;                       /* declared, but empty */
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "ssh.example.com", 443),
+              (int)HL_NET_DENY_TUNNEL_NO_POLICY);
+
+    /* Hosts but no ports is equally empty: both lists are required. */
+    g.tunnel.hosts[g.tunnel.host_count++] = "ssh.example.com";
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "ssh.example.com", 443),
+              (int)HL_NET_DENY_TUNNEL_NO_POLICY);
+}
+
+UTEST(net_policy, the_relay_check_fails_closed_without_a_policy)
+{
+    HlManifestSsh g; mf_init(&g);
+    ASSERT_EQ((int)hl_ssh_check_tunnel(NULL, "ssh.example.com", 443),
+              (int)HL_NET_DENY_NO_POLICY);
+    /* No `ssh` key at all is a different answer from `ssh` without a tunnel:
+     * the first says add the capability, the second says add the relay. */
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "ssh.example.com", 443),
+              (int)HL_NET_DENY_UNDECLARED);
+}
+
+UTEST(net_policy, the_relay_host_rule_uses_the_same_matcher)
+{
+    /* Globs and CIDRs work here for the same reason they work for connect -
+     * it is one matcher, shared with http / ws / smtp / databases.dynamic. */
+    HlManifestSsh g; mf_init(&g);
+    mf_allow(&g, "spark-7468", 22);
+    mf_tunnel(&g, "*.example.com", 443);
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "ssh.example.com", 443),
+              (int)HL_NET_ALLOW);
+    ASSERT_EQ((int)hl_ssh_check_tunnel(&g, "example.com", 443),
+              (int)HL_NET_DENY_TUNNEL_HOST);
+}
+
 /* ── denial reasons are distinguishable ─────────────────────────────── */
 
 UTEST(net_policy, every_denial_has_its_own_reason_string)
 {
     /* The reasons exist so a message can say WHICH rule refused. If they
      * collapse to one string the distinction is decorative. */
-    const char *r[6];
+    const char *r[10];
     r[0] = hl_cap_net_auth_reason(HL_NET_ALLOW);
     r[1] = hl_cap_net_auth_reason(HL_NET_DENY_UNDECLARED);
     r[2] = hl_cap_net_auth_reason(HL_NET_DENY_NO_POLICY);
     r[3] = hl_cap_net_auth_reason(HL_NET_DENY_HOST);
     r[4] = hl_cap_net_auth_reason(HL_NET_DENY_PORT);
     r[5] = hl_cap_net_auth_reason(HL_NET_DENY_USER);
-    for (int i = 0; i < 6; i++) {
+    /* The tunnel reasons included: a message that says "host is not in
+     * ssh.connect.hosts" when the RELAY was refused sends the reader to the
+     * wrong list, which is worse than saying nothing. */
+    r[6] = hl_cap_net_auth_reason(HL_NET_DENY_TUNNEL_UNDECLARED);
+    r[7] = hl_cap_net_auth_reason(HL_NET_DENY_TUNNEL_NO_POLICY);
+    r[8] = hl_cap_net_auth_reason(HL_NET_DENY_TUNNEL_HOST);
+    r[9] = hl_cap_net_auth_reason(HL_NET_DENY_TUNNEL_PORT);
+    for (int i = 0; i < 10; i++) {
         ASSERT_NE(r[i], NULL);
         ASSERT_GT(strlen(r[i]), (size_t)0);
-        for (int j = i + 1; j < 6; j++)
+        for (int j = i + 1; j < 10; j++)
             ASSERT_NE(strcmp(r[i], r[j]), 0);
     }
 }

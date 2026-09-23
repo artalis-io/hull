@@ -156,8 +156,24 @@ typedef struct HlManifestNetConnect {
  * tool that should only ever act as `operator` says so, and a compromised
  * script cannot promote itself to root over a connection it is otherwise
  * allowed to make. */
+/* `ssh.tunnel = { hosts, ports }` grants the SEPARATE fact that a tunnel
+ * introduces: which machine may be DIALLED, when that is not the machine
+ * being reached.
+ *
+ * Reaching a host through a Cloudflare Access tunnel (or any WebSocket-over-
+ * TLS relay) splits one destination into two. The TCP connection goes to the
+ * edge on 443; the SSH session, the host key and the login all belong to the
+ * target behind it. `connect` keeps meaning the target, so a tunnel never
+ * widens which machine the app may reach or which login it may use. `tunnel`
+ * says which relay it may go through to get there.
+ *
+ * Both are checked, and both fail closed. Collapsing them into one list would
+ * have made `hosts = {"ssh.example.com"}, ports = {443}` authorise SSH to
+ * EVERY host behind that edge, since the target travels inside the tunnel's
+ * own headers and never appears in the socket address. */
 typedef struct HlManifestSsh {
-    HlManifestNetConnect connect;
+    HlManifestNetConnect connect;   /* the SSH target: host, port, login   */
+    HlManifestNetConnect tunnel;    /* the relay that is actually dialled  */
     const char          *users[HL_MANIFEST_MAX_SSH_USERS];
     int                  user_count;
     int                  declared;

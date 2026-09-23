@@ -332,7 +332,15 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/ssh",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_CLIENT,
-        .deps = {0},
+        /* hull.ssh requires hull.crypto for the KEX, the host-key signature
+         * check and the userauth signature - so an app declaring only
+         * hull/ssh@1 must still get crypto admitted, or the require fails at
+         * connect time with "module 'hull.crypto' is not declared".
+         *
+         * Missed until an e2e drove a real connection: every unit suite
+         * injects `opts.crypto`, which is the seam that exists for exactly
+         * that reason and which therefore never takes this path. */
+        .deps = {"hull/crypto", 0},
     },
     {
         /* Template engine stays flat in v0.2.0: content-type

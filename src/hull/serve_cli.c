@@ -365,14 +365,16 @@ int hull_serve(int argc, char **argv)
     KlAllocator kalloc    = hl_alloc_kl(&http_alloc);
     KlTlsConfig tls_cfg   = {0};
     KlTlsCtx *tls_ctx     = NULL;
+    HlClientTls client_tls = {0};
 
-    if (manifest.hosts_count > 0) {
-        http_cfg.allowed_hosts     = manifest.hosts;
-        http_cfg.count             = manifest.hosts_count;
-        http_cfg.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
-        http_cfg.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
-        http_cfg.follow_redirects  = 1;
-
+    /* The outbound TLS trust anchor, resolved ONCE for every consumer.
+     *
+     * Gated on `hosts` OR `ssh.tunnel`, not on `hosts` alone: reaching a host
+     * through a relay is TLS to a machine that has nothing to do with the
+     * http.fetch allowlist, and a fleet tool declaring only `ssh` would
+     * otherwise have had no anchor and no way to ask for one. This is the
+     * path such a tool actually runs on. Mirrors serve.c. */
+    if (manifest.hosts_count > 0 || manifest.ssh.tunnel.declared) {
         const unsigned char *emb_data = NULL;
         size_t emb_len = 0;
         if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
@@ -380,9 +382,19 @@ int hull_serve(int argc, char **argv)
                 emb_data, emb_len, &kalloc);
             if (tls_ctx) {
                 hl_tls_config_wire(&tls_cfg, tls_ctx);
-                http_cfg.tls        = &tls_cfg;
+                client_tls.cfg = &tls_cfg;
+                rt->client_tls = &client_tls;
             }
         }
+    }
+
+    if (manifest.hosts_count > 0) {
+        http_cfg.allowed_hosts     = manifest.hosts;
+        http_cfg.count             = manifest.hosts_count;
+        http_cfg.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+        http_cfg.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
+        http_cfg.follow_redirects  = 1;
+        http_cfg.tls               = tls_ctx ? &tls_cfg : NULL;
         rt->http_cfg = &http_cfg;
     }
 #endif
@@ -425,7 +437,8 @@ int hull_serve(int argc, char **argv)
     rt->fs_cfg = NULL;
     rt->env_cfg = NULL;
 #ifdef HL_ENABLE_HTTP_CLIENT
-    rt->http_cfg = NULL;
+    rt->http_cfg   = NULL;
+    rt->client_tls = NULL;   /* before the ctx it points through goes */
     if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
 #endif
     if (pool) be->pool_free(pool);

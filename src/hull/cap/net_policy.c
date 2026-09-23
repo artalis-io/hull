@@ -1,5 +1,5 @@
 /*
- * cap/net_policy.c - the outbound reach gate, and the SSH grant on top of it.
+ * cap/net_policy.c - the outbound reach gate, and the SSH grants on top of it.
  *
  * Pure policy: grant plus destination in, allow-or-reason out. No socket, no
  * resolver, no event loop. See include/hull/cap/net_policy.h for why the check
@@ -78,6 +78,30 @@ HlNetAuth hl_ssh_check_connect(const HlManifestSsh *ssh, const char *host,
     return HL_NET_DENY_USER;
 }
 
+HlNetAuth hl_ssh_check_tunnel(const HlManifestSsh *ssh, const char *host,
+                              int port)
+{
+    if (!ssh)           return HL_NET_DENY_NO_POLICY;
+    if (!ssh->declared) return HL_NET_DENY_UNDECLARED;
+
+    /* No tunnel key means no tunnel, not "any tunnel". An app that reaches a
+     * host directly today and gains a relay tomorrow has to say so, because
+     * the relay terminates the TLS the app is trusting. */
+    if (!ssh->tunnel.declared) return HL_NET_DENY_TUNNEL_UNDECLARED;
+
+    /* Same reach check as connect, then the generic reasons are translated to
+     * the tunnel ones. Reusing hl_net_check_connect keeps ONE matcher and one
+     * fail-closed rule for both grants; only the words differ, and they have
+     * to, or a denial sends the reader to the wrong list. */
+    HlNetAuth a = hl_net_check_connect(&ssh->tunnel, host, port);
+    switch (a) {
+    case HL_NET_DENY_NO_POLICY: return HL_NET_DENY_TUNNEL_NO_POLICY;
+    case HL_NET_DENY_HOST:      return HL_NET_DENY_TUNNEL_HOST;
+    case HL_NET_DENY_PORT:      return HL_NET_DENY_TUNNEL_PORT;
+    default:                    return a;
+    }
+}
+
 const char *hl_cap_net_auth_reason(HlNetAuth a)
 {
     switch (a) {
@@ -95,6 +119,17 @@ const char *hl_cap_net_auth_reason(HlNetAuth a)
         return "port is not in ssh.connect.ports";
     case HL_NET_DENY_USER:
         return "user is not in ssh.connect.users";
+    case HL_NET_DENY_TUNNEL_UNDECLARED:
+        return "no `ssh.tunnel` in the manifest; reaching a host through a "
+               "relay needs ssh = { tunnel = { hosts = {...}, ports = {...} } } "
+               "as well as ssh.connect for the host behind it";
+    case HL_NET_DENY_TUNNEL_NO_POLICY:
+        return "`ssh.tunnel` is declared but grants nothing; it needs a "
+               "non-empty hosts list and a non-empty ports list";
+    case HL_NET_DENY_TUNNEL_HOST:
+        return "tunnel host is not in ssh.tunnel.hosts";
+    case HL_NET_DENY_TUNNEL_PORT:
+        return "tunnel port is not in ssh.tunnel.ports";
     }
     return "denied";
 }

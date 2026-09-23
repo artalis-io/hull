@@ -52,7 +52,15 @@ typedef enum HlNetAuth {
     HL_NET_DENY_NO_POLICY,    /* `ssh` present but no usable connect policy */
     HL_NET_DENY_HOST,         /* host matched no pattern in the allowlist */
     HL_NET_DENY_PORT,         /* port is not in the allowed port list */
-    HL_NET_DENY_USER          /* login is not in the allowed user list */
+    HL_NET_DENY_USER,         /* login is not in the allowed user list */
+    /* Tunnel reasons are their OWN values, appended so the existing ones keep
+     * their numbers. A tunnelled connect checks two grants, and "denied" is
+     * useless to someone holding two allowlists: the message has to say which
+     * one refused, and whether it refused the relay or the destination. */
+    HL_NET_DENY_TUNNEL_UNDECLARED, /* no `ssh.tunnel` key; no relay allowed */
+    HL_NET_DENY_TUNNEL_NO_POLICY,  /* `ssh.tunnel` present but grants nothing */
+    HL_NET_DENY_TUNNEL_HOST,       /* relay host is not in ssh.tunnel.hosts */
+    HL_NET_DENY_TUNNEL_PORT        /* relay port is not in ssh.tunnel.ports */
 } HlNetAuth;
 
 /**
@@ -84,6 +92,32 @@ HlNetAuth hl_net_check_connect(const HlManifestNetConnect *g,
  */
 HlNetAuth hl_ssh_check_connect(const HlManifestSsh *ssh, const char *host,
                                int port, const char *user);
+
+/**
+ * Authorize the RELAY a tunnelled SSH connection is dialled through.
+ *
+ * A tunnel splits one destination in two: the TCP connection goes to the
+ * relay, while the SSH session, the host key and the login all belong to the
+ * target behind it. `hl_ssh_check_connect` still gates the target - a tunnel
+ * must never widen which machine may be reached or as whom - and this gates
+ * the machine actually dialled. A tunnelled connect passes BOTH or is refused.
+ *
+ * Separate grants because collapsing them would silently authorise SSH to
+ * every host behind an allowed relay: the target travels inside the tunnel's
+ * own headers and never appears in the socket address, so a single list could
+ * not tell the two apart.
+ *
+ * @param ssh   the manifest's `ssh` section (NULL denies)
+ * @param host  relay hostname or IP literal (NULL or empty denies)
+ * @param port  relay TCP port, 1..65535 (anything else denies)
+ * @return HL_NET_ALLOW, or the specific reason for refusal
+ *
+ * Fails closed: no `ssh.tunnel` key, or an empty one, permits no tunnel.
+ * There is no `users` here - the login belongs to the target, and the relay
+ * never sees it.
+ */
+HlNetAuth hl_ssh_check_tunnel(const HlManifestSsh *ssh, const char *host,
+                              int port);
 
 /** Stable, human-readable reason for a denial. Never NULL. */
 const char *hl_cap_net_auth_reason(HlNetAuth a);
