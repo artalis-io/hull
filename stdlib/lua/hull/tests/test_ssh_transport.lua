@@ -585,12 +585,12 @@ end)
 test("a rekey we start defers channel data until the exchange is over", function()
     -- End to end through run_kex rather than through the queue alone: the
     -- deferral only helps if the exchange actually routes through it.
-    local data = string.char(94) .. "output"
+    local channel_data = string.char(94) .. "output"
     local theirs = kexinit.build({ kex = { "nope" }, host_key = { "nope" },
                                    cipher = { "nope" }, mac = { "none" },
                                    compression = { "none" } },
-                                 string.rep(" ", 16))
-    local s = fake_stream(plain(data) .. plain(theirs), 4)
+                                 string.rep("c", 16))
+    local s = fake_stream(plain(channel_data) .. plain(theirs), 4)
     local t = transport.new(s, stub_crypto())
     t.session_id = "sid"          -- makes this a rekey, not a first exchange
 
