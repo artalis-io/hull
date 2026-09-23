@@ -1,6 +1,8 @@
 # Hull Examples
 
-Example applications demonstrating Hull's capabilities. Each example has both a Lua and JavaScript version with identical behavior.
+Example applications demonstrating Hull's capabilities. Most have both a Lua
+and a JavaScript version with identical behavior; a few cover Lua-only
+subsystems (`hull.tui`, `hull/ssh`) and ship Lua alone.
 
 ## Building Hull
 
@@ -685,6 +687,22 @@ Modules can query chunk metadata via `hull_stream_is_first()`, `hull_stream_is_l
 
 ## Testing Examples
 
+### ssh_fleet
+
+Run one command across a list of hosts over `hull/ssh`, with the reachable
+hosts and logins declared in the manifest, host keys trusted only on an
+explicit `--accept-new`, and the trust store persisted as JSON beside the app.
+Lua only - there is no JS SSH client. Full guide: [`docs/ssh.md`](../docs/ssh.md).
+
+```bash
+hull run examples/ssh_fleet/app.lua -- --accept-new web1.internal
+HULL_SSH_COMMAND="systemctl is-active app"   hull run examples/ssh_fleet/app.lua -- web1.internal web2.internal
+```
+
+Needs a key the manifest can read (`id_ed25519` beside the app by default, or
+`HULL_SSH_KEY`) and hosts that match the manifest's `ssh.connect.hosts` - widen
+that list to your own fleet before running it.
+
 ### Unit tests (`hull test`)
 
 Each example has both `tests/test_app.lua` and `tests/test_app.js` that run in-process via Hull's built-in test framework - no TCP, no server startup, in-memory SQLite for isolation. Running `hull test` on an example directory discovers and runs tests for both runtimes:
@@ -761,7 +779,8 @@ RUNTIME=js  sh tests/e2e_examples.sh
 
 ## Lua vs JavaScript
 
-Every example has both `app.lua` and `app.js`. The APIs are identical except for naming conventions:
+Most examples have both `app.lua` and `app.js` (the Lua-only subsystems above
+are the exception). The APIs are identical except for naming conventions:
 
 | | Lua | JavaScript |
 |---|---|---|
