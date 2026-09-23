@@ -816,7 +816,14 @@ const HlCryptoAeadBackend *hl_crypto_aead_active_backend(void)
 
 /* The vendored OpenBSD KDF. Declared here rather than via a vendor header:
  * vendor/bcrypt ships no public header, and this wrapper is the only thing in
- * Hull that calls it. */
+ * Hull that calls it.
+ *
+ * It therefore has EXTERNAL linkage and anything in the tree could declare it
+ * and call it directly, skipping the bounds below - including the round cap,
+ * which is the one that keeps a hostile key file from stalling the loop. Only
+ * tests/hull/cap/test_bcrypt.c does, deliberately, to pin the upstream vector.
+ * Reach it through hl_cap_crypto_bcrypt_pbkdf; a second caller of the bare
+ * symbol is a review finding, not a shortcut. */
 int bcrypt_pbkdf(const char *pass, size_t passlen,
                  const uint8_t *salt, size_t saltlen,
                  uint8_t *key, size_t keylen, unsigned int rounds);

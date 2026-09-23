@@ -35,6 +35,7 @@
 #include <keel/http_connection.h>
 #include <keel/allocator.h>
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -51,7 +52,11 @@ struct HlAsyncBackendCtx {
     KlEventCtx    kel_storage;
     KlAllocator   kalloc;       /* used only in owned mode */
     HlAllocator  *alloc;        /* borrowed; may be NULL */
-    int           stop_flag;    /* run() / run_until() exit hint */
+    /* Atomic because stop() is documented as callable from any thread, and
+     * the run loops read it every iteration. A plain int here is a data race
+     * by the letter of the standard, and the kind a compiler is entitled to
+     * hoist out of the loop entirely. */
+    _Atomic int   stop_flag;    /* run() / run_until() exit hint */
     int           borrowed;     /* 1 = wrap; free() must not destroy kel */
 };
 
@@ -147,7 +152,17 @@ static int keel_run_until(HlAsyncBackendCtx *ctx,
 
 static void keel_stop(HlAsyncBackendCtx *ctx)
 {
-    if (ctx) ctx->stop_flag = 1;
+    if (!ctx) return;
+    ctx->stop_flag = 1;
+    /* Not woken. Keel's event context exposes no cross-thread wakeup, so a
+     * stop() from another thread is not observed until the loop's current
+     * poll returns - up to 1000 ms in run(), 100 ms in run_until(). The poll
+     * backend writes its self-pipe and returns immediately.
+     *
+     * Left as a latency difference rather than papered over: every caller
+     * today stops from a signal handler or from on-loop code, where the
+     * wait is zero, and inventing a second wakeup channel for a case nobody
+     * has would be more machinery than the problem. */
 }
 
 /* ── Time ──────────────────────────────────────────────────────────── */
