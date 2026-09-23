@@ -31,7 +31,11 @@ local fs   = require("hull.fs")
 local json = require("hull.json")
 
 app.manifest({
-    modules = { "hull/ssh@1", "hull/fs@1", "hull/json@1", "hull/env@1" },
+    -- No "hull/env@1": ctx.env is handed to app.main by the runtime, and the
+    -- manifest's own `env` list below is what gates which variables it can
+    -- see. Declaring the MODULE as well would widen the capability surface
+    -- for an import this app never makes - `hull check` says so.
+    modules = { "hull/ssh@1", "hull/fs@1", "hull/json@1" },
     env = { "HULL_SSH_KEY", "HULL_SSH_USER", "HULL_SSH_COMMAND",
             "HULL_SSH_TUNNEL", "HULL_SSH_KEY_PASSPHRASE" },
     fs = {
