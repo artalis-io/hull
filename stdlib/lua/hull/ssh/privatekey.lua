@@ -193,6 +193,19 @@ function M.decrypt_private(container, opts)
     end
 
     local crypto = opts.crypto or require("hull.crypto")
+
+    -- The round count is FILE content, and the derivation that follows runs
+    -- to completion on the event loop: it cannot be interrupted, and each
+    -- round costs milliseconds. A key declaring a few million rounds is not
+    -- a slow key, it is a stalled process. Refused here as well as in C so
+    -- the message can say which file did it.
+    local max = crypto.BCRYPT_MAX_ROUNDS
+    if max and rounds > max then
+        error("ssh.privatekey: the key declares " .. tostring(rounds)
+              .. " KDF rounds, above the " .. tostring(max) .. " limit "
+              .. "(ssh-keygen writes 16, or 24 with -a); refusing to derive")
+    end
+
     local want = CIPHER_KEY_LEN + CIPHER_IV_LEN
 
     -- passphrase_env wins when both are given: it is the safer of the two,
