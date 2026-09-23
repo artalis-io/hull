@@ -1116,4 +1116,74 @@ UTEST(hl_cap_crypto, hex_decode_empty_is_ok)
     ASSERT_EQ(0, hl_cap_crypto_hex_decode(NULL, 0, out, sizeof(out)));
 }
 
+/* ── AES-256-CTR ────────────────────────────────────────────────────── */
+
+/* Pinned to NIST SP 800-38A F.5.5 (CTR-AES256.Encrypt), because the only
+ * thing that matters about this mode is agreeing with everyone else's. A
+ * round-trip test would pass against a cipher that is confidently wrong. */
+UTEST(aes256ctr, matches_the_nist_sp800_38a_vector)
+{
+    static const uint8_t key[32] = {
+        0x60,0x3d,0xeb,0x10,0x15,0xca,0x71,0xbe,0x2b,0x73,0xae,0xf0,0x85,0x7d,0x77,0x81,
+        0x1f,0x35,0x2c,0x07,0x3b,0x61,0x08,0xd7,0x2d,0x98,0x10,0xa3,0x09,0x14,0xdf,0xf4
+    };
+    static const uint8_t ctr[16] = {
+        0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9,0xfa,0xfb,0xfc,0xfd,0xfe,0xff
+    };
+    static const uint8_t pt[16] = {
+        0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a
+    };
+    static const uint8_t want[16] = {
+        0x60,0x1e,0xc3,0x13,0x77,0x57,0x89,0xa5,0xb7,0xa7,0xf5,0x04,0xbb,0xf3,0xd2,0x28
+    };
+    uint8_t out[16];
+    int rc = hl_cap_crypto_aes256ctr(out, key, ctr, pt, sizeof pt);
+    if (rc == -2) { UTEST_SKIP("no AEAD backend (TLS-less build)"); }
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(memcmp(out, want, sizeof want), 0);
+}
+
+UTEST(aes256ctr, decrypt_is_the_same_operation)
+{
+    /* CTR XORs a keystream, so running the ciphertext back through with the
+     * same counter returns the plaintext. This is why the entry point is not
+     * named _encrypt or _decrypt. */
+    uint8_t key[32], ctr[16];
+    memset(key, 0x11, sizeof key);
+    memset(ctr, 0x22, sizeof ctr);
+
+    const char *msg = "openssh-key-v1 private section";
+    size_t n = strlen(msg);
+    uint8_t enc[64], dec[64];
+
+    ASSERT_EQ(hl_cap_crypto_aes256ctr(enc, key, ctr, msg, n), 0);
+    ASSERT_NE(memcmp(enc, msg, n), 0);            /* it did something */
+    ASSERT_EQ(hl_cap_crypto_aes256ctr(dec, key, ctr, enc, n), 0);
+    ASSERT_EQ(memcmp(dec, msg, n), 0);
+}
+
+UTEST(aes256ctr, handles_a_partial_final_block)
+{
+    /* An OpenSSH private section is padded to the CIPHER block size, but the
+     * caller may hand over any length; CTR has no block alignment rule. */
+    uint8_t key[32], ctr[16], out[5], back[5];
+    memset(key, 0x33, sizeof key);
+    memset(ctr, 0x44, sizeof ctr);
+    ASSERT_EQ(hl_cap_crypto_aes256ctr(out, key, ctr, "abcde", 5), 0);
+    ASSERT_EQ(hl_cap_crypto_aes256ctr(back, key, ctr, out, 5), 0);
+    ASSERT_EQ(memcmp(back, "abcde", 5), 0);
+}
+
+UTEST(aes256ctr, rejects_bad_arguments)
+{
+    uint8_t key[32] = {0}, ctr[16] = {0}, out[8];
+    ASSERT_EQ(hl_cap_crypto_aes256ctr(NULL, key, ctr, "x", 1), -1);
+    ASSERT_EQ(hl_cap_crypto_aes256ctr(out, NULL, ctr, "x", 1), -1);
+    ASSERT_EQ(hl_cap_crypto_aes256ctr(out, key, NULL, "x", 1), -1);
+    ASSERT_EQ(hl_cap_crypto_aes256ctr(out, key, ctr, NULL, 1), -1);
+    /* Zero length is a no-op, not an error: an empty private section is
+     * malformed for other reasons, and this layer does not know that. */
+    ASSERT_EQ(hl_cap_crypto_aes256ctr(out, key, ctr, NULL, 0), 0);
+}
+
 UTEST_MAIN();

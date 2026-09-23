@@ -63,8 +63,12 @@ M.hostkey    = hostkey
 M.privatekey = privatekey
 
 --- Load a key from the contents of a key file.
-function M.load_key(text)
-    return privatekey.load(text)
+---
+--- `opts.passphrase_env` names an environment variable holding the passphrase
+--- (read and scrubbed in C, never a Lua string - prefer this);
+--- `opts.passphrase` passes the bytes directly.
+function M.load_key(text, opts)
+    return privatekey.load(text, opts)
 end
 
 --- An in-memory trust store, for callers that persist it themselves.
@@ -197,7 +201,16 @@ function M.connect(opts)
     end
 
     local crypto = opts.crypto or require('hull.crypto')
-    local key = type(opts.key) == "table" and opts.key or privatekey.load(opts.key)
+    -- A passphrase-protected key needs to say where its passphrase comes from.
+    -- `passphrase_env` names an environment variable and is preferred: the
+    -- value is read, used and scrubbed in C, so it never becomes a Lua string
+    -- (which could not be wiped). `passphrase` takes the bytes directly.
+    local key = type(opts.key) == "table" and opts.key
+        or privatekey.load(opts.key, {
+               passphrase     = opts.passphrase,
+               passphrase_env = opts.passphrase_env,
+               crypto         = crypto,
+           })
     local trust = opts.trust or M.memory_store()
 
     -- The stream is obtained ONLY after the manifest check inside the

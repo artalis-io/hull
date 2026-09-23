@@ -794,15 +794,72 @@ static int aead_stub_open(uint8_t *out,
     return -2;
 }
 
+static int aead_stub_ctr(uint8_t *out, const uint8_t key[32],
+                         const uint8_t ctr_iv[16],
+                         const void *in, size_t len)
+{
+    (void)out; (void)key; (void)ctr_iv; (void)in; (void)len;
+    return -2;
+}
+
 static const HlCryptoAeadBackend hl_crypto_aead_backend_stub = {
     .seal = aead_stub_seal,
     .open = aead_stub_open,
+    .ctr  = aead_stub_ctr,
 };
 
 __attribute__((weak))
 const HlCryptoAeadBackend *hl_crypto_aead_active_backend(void)
 {
     return &hl_crypto_aead_backend_stub;   /* fail-closed; mbedTLS TU overrides */
+}
+
+/* The vendored OpenBSD KDF. Declared here rather than via a vendor header:
+ * vendor/bcrypt ships no public header, and this wrapper is the only thing in
+ * Hull that calls it. */
+int bcrypt_pbkdf(const char *pass, size_t passlen,
+                 const uint8_t *salt, size_t saltlen,
+                 uint8_t *key, size_t keylen, unsigned int rounds);
+
+int hl_cap_crypto_bcrypt_pbkdf(const void *pass, size_t pass_len,
+                               const void *salt, size_t salt_len,
+                               unsigned int rounds,
+                               uint8_t *out, size_t out_len)
+{
+    if (!pass || !salt || !out)          return -1;
+    if (!pass_len || !salt_len)          return -1;
+    if (!rounds)                         return -1;
+    if (!out_len || out_len > HL_BCRYPT_MAX_OUT) return -1;
+
+    /* The vendored code already fails closed on these, but bounding them here
+     * keeps the refusal at Hull's boundary where the error is attributable. */
+    if (bcrypt_pbkdf((const char *)pass, pass_len,
+                     (const uint8_t *)salt, salt_len,
+                     out, out_len, rounds) != 0) {
+        /* It overwrites `out` with random bytes on failure by design, so a
+         * caller ignoring this return gets unusable material rather than
+         * something predictable. Left as it left it. */
+        return -1;
+    }
+    return 0;
+}
+
+int hl_cap_crypto_aes256ctr(uint8_t *out,
+                            const uint8_t key[HL_AEAD_KEY_LEN],
+                            const uint8_t ctr_iv[HL_AES_CTR_IV_LEN],
+                            const void *in, size_t len)
+{
+    if (!key || !ctr_iv) return -1;
+    if (len && (!out || !in)) return -1;
+    if (!len) return 0;                 /* nothing to do, and not an error */
+
+    const HlCryptoAeadBackend *b = hl_crypto_aead_active_backend();
+    /* A backend predating the ctr slot would leave it NULL. Refuse rather
+     * than call through a null pointer, and refuse with the same code a
+     * TLS-less build gives, because to a caller it is the same fact: this
+     * build cannot do it. */
+    if (!b->ctr) return -2;
+    return b->ctr(out, key, ctr_iv, in, len);
 }
 
 int hl_cap_crypto_aes256gcm_seal(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],

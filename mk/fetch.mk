@@ -291,3 +291,19 @@ fetch-cosmocc:
 		echo "=== cosmocc $(COSMOCC_VERSION) installed to $(COSMOCC_DIR)/bin/cosmocc ==="; \
 		echo "Add to PATH: export PATH=$(COSMOCC_DIR)/bin:\$$PATH"; \
 	fi
+
+# ── bcrypt_pbkdf + Blowfish (OpenSSH key passphrases) ──────────────────
+#
+# Refreshes the vendored KDF from openssh-portable. Each file is SHA-256
+# pinned: this is code that derives a key from a passphrase, so "whatever is
+# at that URL today" is not an acceptable input.
+BCRYPT_UPSTREAM := https://raw.githubusercontent.com/openssh/openssh-portable/master/openbsd-compat
+BCRYPT_SHA_bcrypt_pbkdf.c := 37eb9b8c19d1090a144fcd601360038a56d5379a8f51d0f7d091d74a727a5e4c
+BCRYPT_SHA_blowfish.c     := c1ce17befab237bb2e360dd0cf58f0123f27ac4d2458b8db4cc27775c9db403c
+BCRYPT_SHA_blf.h          := 8c110caed5a31a330c8f60d942e9a4fbf42860ec575484c5ad509379d09379f6
+
+.PHONY: fetch-bcrypt
+fetch-bcrypt:
+	@mkdir -p $(BCRYPT_DIR)
+	@for f in bcrypt_pbkdf.c blowfish.c blf.h; do 	    echo "Fetching $$f from openssh-portable/openbsd-compat ..."; 	    curl $(CURL_RETRY) -fsSL "$(BCRYPT_UPSTREAM)/$$f" -o "$(BCRYPT_DIR)/$$f.new"; 	    want=$$(eval echo \$$BCRYPT_SHA_$$f); 	    got=$$(shasum -a 256 "$(BCRYPT_DIR)/$$f.new" | awk '{print $$1}'); 	    if [ "$$got" != "$$want" ]; then 	        echo "SHA-256 mismatch for $$f!"; 	        echo "  expected: $$want"; 	        echo "  actual:   $$got"; 	        echo "  Upstream changed. Review the diff, re-run the known-answer"; 	        echo "  test (build/test_bcrypt), then update the pin here."; 	        rm -f "$(BCRYPT_DIR)/$$f.new"; exit 1; 	    fi; 	    mv "$(BCRYPT_DIR)/$$f.new" "$(BCRYPT_DIR)/$$f"; 	done
+	@echo "Done - vendor/bcrypt refreshed and verified."

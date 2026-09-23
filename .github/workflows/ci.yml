@@ -355,6 +355,11 @@ jobs:
       # hull/ssh through a REAL WebSocket relay: the leg with sockets in it.
       # The unit suites drive ssh.connect against a fake relay, so this is
       # what proves an actual SSH session survives the tunnel.
+      # ssh-keygen is the ORACLE here, not a round trip against ourselves.
+      - name: SSH key passphrase E2E tests
+        timeout-minutes: 3
+        run: make e2e-ssh-key-passphrase
+
       - name: SSH-over-WebSocket tunnel E2E tests
         timeout-minutes: 4
         # REQUIRE_SSHD: both runner images can provide an sshd, so a skipped

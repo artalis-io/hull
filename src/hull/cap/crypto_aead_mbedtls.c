@@ -27,6 +27,7 @@
 #ifdef HL_ENABLE_HTTP
 
 #include <mbedtls/gcm.h>
+#include <mbedtls/aes.h>
 #include <mbedtls/platform_util.h>   /* mbedtls_platform_zeroize */
 
 #define AEAD_KEY_BITS 256
@@ -82,9 +83,49 @@ static int aead_open(uint8_t *out,
     return 0;
 }
 
+/* AES-256-CTR. One direction only because there is only one: CTR XORs a
+ * keystream, so encrypt and decrypt are the same call.
+ *
+ * mbedtls_aes_crypt_ctr wants a stream-block buffer and an offset so a caller
+ * can resume mid-block across calls. Nothing here resumes - each call is a
+ * whole message - so both start at zero and the stream block is scrubbed on
+ * the way out; it holds keystream, which is as good as key material for the
+ * block it covers. */
+static int aead_ctr(uint8_t *out, const uint8_t key[32],
+                    const uint8_t ctr_iv[16],
+                    const void *in, size_t len)
+{
+    mbedtls_aes_context ctx;
+    mbedtls_aes_init(&ctx);
+
+    unsigned char nonce[16];
+    unsigned char stream_block[16];
+    size_t nc_off = 0;
+    memcpy(nonce, ctr_iv, sizeof nonce);
+    memset(stream_block, 0, sizeof stream_block);
+
+    /* CTR encrypts in both directions, so the key schedule is the ENCRYPT
+     * one even when this call is decrypting. */
+    int rc = mbedtls_aes_setkey_enc(&ctx, key, AEAD_KEY_BITS);
+    if (rc == 0)
+        rc = mbedtls_aes_crypt_ctr(&ctx, len, &nc_off, nonce, stream_block,
+                                   (const unsigned char *)in, out);
+
+    mbedtls_aes_free(&ctx);
+    mbedtls_platform_zeroize(stream_block, sizeof stream_block);
+    mbedtls_platform_zeroize(nonce, sizeof nonce);
+
+    if (rc != 0) {
+        if (len && out) mbedtls_platform_zeroize(out, len);
+        return -1;
+    }
+    return 0;
+}
+
 const HlCryptoAeadBackend hl_crypto_aead_backend_mbedtls = {
     .seal = aead_seal,
     .open = aead_open,
+    .ctr  = aead_ctr,
 };
 
 /* STRONG override of the base's weak hl_crypto_aead_active_backend()

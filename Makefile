@@ -400,6 +400,8 @@ include mk/vendor/sh_json.mk
 
 # tweetnacl vendored config -> mk/vendor/tweetnacl.mk
 include mk/vendor/tweetnacl.mk
+# bcrypt_pbkdf + Blowfish (OpenSSH key passphrases) -> mk/vendor/bcrypt.mk
+include mk/vendor/bcrypt.mk
 
 # ── HL_ENABLE_IMAGE (image codecs, on by default) ─────────────────────
 # The image decode/encode subsystem: cap/image.c + cap/image_stb.c + the
@@ -2229,7 +2231,7 @@ endif
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-ssh-tunnel e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest check-no-emdash check-no-emdash-selftest check-no-milestone-narration check-no-milestone-narration-selftest check-module-deps check-module-deps-selftest check-keel-flags check-keel-flags-selftest check-site-consistency check-site-consistency-selftest check-cosmo-fat-repair check-dry-run-inert platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-ssh-tunnel e2e-ssh-key-passphrase e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest check-no-emdash check-no-emdash-selftest check-no-milestone-narration check-no-milestone-narration-selftest check-module-deps check-module-deps-selftest check-keel-flags check-keel-flags-selftest check-site-consistency check-site-consistency-selftest check-cosmo-fat-repair check-dry-run-inert platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2345,7 +2347,7 @@ else
   PLATFORM_STB_OBJ       :=                              # stb moves into libhull_feature-image.a
 endif
 PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(WASM_WEAKSTUB_OBJ) $(IMAGE_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(MBEDTLS_OBJS) \
-	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLATFORM_STB_OBJ) $(PLEDGE_OBJS) \
+	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(BCRYPT_OBJS) $(PLATFORM_STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -2852,7 +2854,7 @@ endif
 # PLATFORM_OBJS is deliberately NOT collapsed: the shared vars are interleaved
 # with each list's distinct ones, so a shared-core extraction would REORDER the
 # link line and risk weak/strong seam resolution - see docs/build_arc_audit.md.)
-HULL_LINK_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS)
+HULL_LINK_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(BCRYPT_OBJS) $(STB_OBJ) $(PLEDGE_OBJS)
 
 # The JS source-frontend tooling runtime needs QuickJS -> linked into the hull binary only
 # when this build links QuickJS (RUNTIME=js or the default both; NOT a lua-only hull). The
@@ -3244,6 +3246,12 @@ $(SH_JSON_OBJ): $(SH_JSON_DIR)/sh_json.c | $(BUILDDIR)
 $(TWEETNACL_OBJ): $(TWEETNACL_DIR)/tweetnacl.c | $(BUILDDIR)
 	$(CC) $(TWEETNACL_CFLAGS) -I$(TWEETNACL_DIR) -c -o $@ $<
 
+$(BUILDDIR)/bcrypt_pbkdf.o: $(BCRYPT_DIR)/bcrypt_pbkdf.c | $(BUILDDIR)
+	$(CC) $(BCRYPT_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/blowfish.o: $(BCRYPT_DIR)/blowfish.c | $(BUILDDIR)
+	$(CC) $(BCRYPT_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
 # jart/pledge polyfill (vendored, Linux only, relaxed warnings)
 
 # WAMR (vendored, relaxed warnings)
@@ -3346,7 +3354,7 @@ check:
 
 analyze:
 	$(MAKE) clean
-	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MINIZ_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(WAMR_OBJS) $(KEEL_LIB)
+	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MINIZ_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(BCRYPT_OBJS) $(STB_OBJ) $(PLEDGE_OBJS) $(WAMR_OBJS) $(KEEL_LIB)
 	scan-build --status-bugs -disable-checker alpha.unix.Stream $(MAKE) $(CAP_OBJS) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:

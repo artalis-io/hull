@@ -690,6 +690,10 @@ int hl_cap_crypto_x25519_keypair(uint8_t out_pk[32], uint8_t out_sk[32]);
 #define HL_AEAD_IV_LEN  12
 #define HL_AEAD_TAG_LEN 16
 
+/** AES-CTR's IV is a full 16-byte counter block, not GCM's 12-byte nonce.
+ *  Named separately so the two cannot be confused at a call site. */
+#define HL_AES_CTR_IV_LEN 16
+
 /**
  * @brief AEAD backend vtable (AES-256-GCM).
  *
@@ -711,6 +715,12 @@ typedef struct HlCryptoAeadBackend {
                 const void *aad, size_t aad_len,
                 const void *ct, size_t ct_len,
                 const uint8_t tag[HL_AEAD_TAG_LEN]);
+
+    /** AES-256-CTR. Same contract as @ref hl_cap_crypto_aes256ctr. */
+    int (*ctr)(uint8_t *out,
+               const uint8_t key[HL_AEAD_KEY_LEN],
+               const uint8_t ctr_iv[HL_AES_CTR_IV_LEN],
+               const void *in, size_t len);
 } HlCryptoAeadBackend;
 
 /** Built-in mbedTLS AEAD backend. ABSENT on a TLS-less base - prefer
@@ -739,6 +749,75 @@ extern const HlCryptoAeadBackend hl_crypto_aead_backend_mbedtls;
  * key. Callers must derive the IV from a counter, never from a random draw
  * over a 96-bit space.
  */
+/* ── bcrypt_pbkdf (OpenSSH key passphrases) ─────────────────────────── */
+
+/** Longest derived output this wrapper will produce. An OpenSSH key needs 48
+ *  (a 32-byte key plus a 16-byte counter block); the cap is generous but
+ *  bounded so a caller cannot ask for an unbounded derivation. */
+#define HL_BCRYPT_MAX_OUT 1024
+
+/**
+ * @brief OpenSSH's bcrypt_pbkdf: passphrase + salt + rounds -> key material.
+ *
+ * The KDF `ssh-keygen` uses to protect a private key. Wraps the vendored
+ * OpenBSD implementation (vendor/bcrypt) so callers reach it through the cap
+ * layer like every other primitive.
+ *
+ * @param pass      passphrase bytes. NOT NUL-terminated by contract.
+ * @param pass_len  length of @p pass. Must be non-zero.
+ * @param salt      salt bytes, from the key file's kdfoptions.
+ * @param salt_len  length of @p salt. Must be non-zero.
+ * @param rounds    work factor from the key file. Must be non-zero.
+ * @param out       derived material, @p out_len bytes.
+ * @param out_len   1..HL_BCRYPT_MAX_OUT.
+ *
+ * @return `0` on success, `-1` on a bad argument.
+ *
+ * @note The output is STRIPED, not a stream: the first N bytes of a longer
+ * derivation are not the same as a shorter one. Ask for exactly what is
+ * needed, in one call.
+ *
+ * @warning @p pass is the caller's to scrub. This function keeps no copy, and
+ * the vendored code zeroes its own intermediates, but it cannot reach the
+ * buffer it was handed.
+ */
+int hl_cap_crypto_bcrypt_pbkdf(const void *pass, size_t pass_len,
+                               const void *salt, size_t salt_len,
+                               unsigned int rounds,
+                               uint8_t *out, size_t out_len);
+
+/**
+ * @brief AES-256-CTR. Encrypt and decrypt are the SAME operation.
+ *
+ * CTR turns the block cipher into a keystream generator and XORs it with the
+ * data, so one function serves both directions - which is why this is not
+ * named _encrypt or _decrypt.
+ *
+ * Present for ONE caller: opening the private section of an OpenSSH key,
+ * which ssh-keygen protects with aes256-ctr. It is NOT a general-purpose
+ * encryption entry point and deliberately reads like a primitive rather than
+ * an API: CTR is unauthenticated, so anything using it must carry its own
+ * integrity check (an SSH key carries check1/check2 inside the plaintext).
+ *
+ * @param out     output, @p len bytes. May alias @p in.
+ * @param key     32-byte key.
+ * @param ctr_iv  16-byte initial counter block.
+ * @param in      input (may be NULL when @p len is 0).
+ * @param len     length of @p in. Need not be a block multiple.
+ *
+ * @return `0` on success, `-1` on a NULL argument, `-2` if no backend is
+ * present (a TLS-less build).
+ *
+ * @warning Reusing a (key, counter) pair across two messages XORs their
+ * plaintexts together, exactly as with any stream cipher. The single caller
+ * here derives both from the key file's own salt, so each file is its own
+ * keystream.
+ */
+int hl_cap_crypto_aes256ctr(uint8_t *out,
+                            const uint8_t key[HL_AEAD_KEY_LEN],
+                            const uint8_t ctr_iv[HL_AES_CTR_IV_LEN],
+                            const void *in, size_t len);
+
 int hl_cap_crypto_aes256gcm_seal(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],
                                  const uint8_t key[HL_AEAD_KEY_LEN],
                                  const uint8_t iv[HL_AEAD_IV_LEN],

@@ -544,6 +544,80 @@ which is the transport's contract, not the binding's.
 - JS remains unimplemented, per section 8 - `hull.web.ws-stream` is Lua-only
   too, so a JS `hull/ssh` inherits this work rather than duplicating it.
 
+## 11c. Passphrase-protected keys
+
+`hull/ssh` originally refused every encrypted key, which meant it worked on
+exactly the keys a fleet tool does not meet. It now reads what `ssh-keygen`
+writes by default: `aes256-ctr` under the `bcrypt` KDF.
+
+### The passphrase is named, not carried
+
+The design constraint is a property of the runtime, not of SSH. **Lua strings
+are immutable and interned**: one cannot be overwritten in place, and it stays
+in the script heap until collection, on memory that is not scrubbed when
+freed. A passphrase that becomes a Lua value is therefore a passphrase Hull
+cannot clean up.
+
+So the preferred route never lets it become one:
+
+```lua
+ssh.connect{ host = ..., user = ..., key = text,
+             passphrase_env = "SPARK_KEY_PASSPHRASE" }
+```
+
+Lua passes the NAME. The C layer reads the value through the env capability,
+derives from a copy, and wipes that copy. It is gated by `manifest.env` like
+any other environment read, and mirrors the `"$VAR"` references
+`databases.named` already accepts.
+
+`passphrase = "..."` remains for callers that already hold the bytes, and says
+in its own docstring that Hull cannot scrub it.
+
+**The limit, stated rather than implied:** an env-carried secret still sits in
+the process environment for the process's lifetime. That is the ordinary
+trade-off and this does not remove it. What it buys is that the passphrase is
+not ALSO in the script heap, where it would be unscrubbable, GC-visible and
+reachable by any app code - and where a second key's passphrase, or a reused
+one, would accumulate beside it.
+
+### Why the error text is part of the contract
+
+`aes256-ctr` is unauthenticated. A wrong passphrase does not fail in the
+cipher; it decrypts to plausible garbage, and the only integrity signal the
+format carries is `check1 == check2` inside the plaintext. So:
+
+| case | what it says |
+|---|---|
+| wrong passphrase | "wrong passphrase", NOT "the file is corrupt" |
+| no passphrase given | names `passphrase_env` and `passphrase`, since the next move is to add one |
+| a cipher Hull does not read | names it, with the `ssh-keygen -p` that converts it |
+| env var undeclared OR unset | ONE message for both, so a caller cannot probe the allowlist |
+
+Nothing ever echoes the passphrase, its length, or a derived byte.
+
+### What is trusted, and how it is checked
+
+The KDF is vendored from OpenBSD rather than written (see
+`vendor/bcrypt/README.md`): its entire value is agreeing byte-for-byte with
+`ssh-keygen`, and a subtly wrong one is indistinguishable from a mistyped
+passphrase. Both it and AES-256-CTR are pinned to published vectors - OpenBSD's
+regress suite and NIST SP 800-38A F.5.5 - not to anything this repository
+computed.
+
+The end-to-end test uses **`ssh-keygen` as the oracle**: it writes an
+encrypted key, Hull decrypts it, and the public key Hull derives is compared
+against what `ssh-keygen -y` derives from the same file. A round-trip against
+ourselves would pass just as happily with a wrong KDF, consistently wrong.
+
+### Still not handled
+
+`client_ed25519` (MariaDB-style), FIDO/`sk-` keys, and agent-held keys. An
+**ssh-agent** client is the one worth naming: it would mean never handling a
+passphrase OR a private key at all, which is strictly better than handling
+either carefully. It needs a unix-socket / named-pipe capability Hull does not
+have - `cap/net_stream.c` is TCP only - so it is a larger piece of work, not a
+variation on this one.
+
 ## 12. Decisions taken
 
 | question | decision |
@@ -553,6 +627,7 @@ which is the transport's contract, not the binding's.
 | AEAD | **`aes256-gcm@openssh.com`**. One consequence needs a follow-up call: mbedTLS lives in the composable TLS feature, not the base, so an SSH app with no HTTP links no AES-GCM. See `net_module_design.md` section 5. |
 | Lua vs JS | **Lua only for v1**, JS to follow. Section 8 option 1. |
 | `hsctl` language | **Lua.** |
+| Key passphrases | **Supported, and NAMED rather than carried.** `aes256-ctr` + `bcrypt` only; `passphrase_env` passes the env var's NAME so the value never becomes a Lua string. See section 11c. |
 | Tunnelled reach | **A SECOND grant, `ssh.tunnel`.** `connect` keeps meaning the SSH destination and the login; `tunnel` names the relay dialled to get there. Both are checked, both fail closed. See section 11b. |
 
 Phases 2 to 5 (pure Lua) are unblocked once `hull/net` N1 lands.
