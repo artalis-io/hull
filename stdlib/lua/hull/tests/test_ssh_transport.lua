@@ -1151,11 +1151,11 @@ end)
 
 test("a large write goes out as pipelined chunks at the right offsets", function()
     local C = 32768
-    local data = string.rep("w", 3 * C + 10)
+    local payload = string.rep("w", 3 * C + 10)
     local f, s = sftp_over(s_handle(1, "h") .. s_status(2, 0) .. s_status(3, 0)
                            .. s_status(4, 0) .. s_status(5, 0) .. s_status(6, 0), 4096, 1048576)
     local file = assert(f:open("/f", "w"))
-    assert_eq(file:write(data), true)
+    assert_eq(file:write(payload), true)
     assert_eq(file:close(), true)
     local writes = sent_of_type(s, 6)
     assert_eq(#writes, 4)
