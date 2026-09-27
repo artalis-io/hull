@@ -189,6 +189,55 @@ test("a destination_header that is not a name is a caller error", function()
     assert_eq(ok, false)
 end)
 
+-- The connection handle ------------------------------------------------------
+--
+-- ssh.connect over a substitute transport, so the handle can be inspected
+-- without a server. What is asserted is what an application can REACH.
+
+local function connect_with_fake_transport()
+    local transport = require('hull.ssh.transport')
+    local fake = {
+        host_fingerprint = "SHA256:fake",
+        handshake    = function() return true end,
+        authenticate = function() return true end,
+        close        = function() end,
+        send_packet  = function() error("must not be reachable") end,
+        exec  = function(_, c) return { status = 0, stdout = c, stderr = "" } end,
+        sftp  = function(self)
+            return { t = self, read = function(_, p) return "contents of " .. p end }
+        end,
+    }
+    local real_new = transport.new
+    transport.new = function() return fake end
+    local ok, conn, err = pcall(ssh.connect, {
+        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        open_stream = function() return {} end,
+    })
+    transport.new = real_new
+    assert(ok, conn)
+    return assert(conn, err and err.code)
+end
+
+test("a connection exposes its methods, not its transport", function()
+    -- conn.t used to BE the transport: conn.t:send_packet could open a
+    -- direct-tcpip channel through the server, and conn.t.stream was the raw
+    -- socket the binding keeps from applications.
+    local conn = connect_with_fake_transport()
+    assert_eq(conn.t, nil, "conn.t")
+    assert_eq(next(conn), nil, "the handle has no fields at all")
+    assert_eq(getmetatable(conn), false, "and its metatable is not handed out")
+    assert_eq(conn:exec("uptime").stdout, "uptime", "the methods still work:")
+    assert_eq(conn:fingerprint(), "SHA256:fake")
+end)
+
+test("an sftp session exposes its methods, not the transport under it", function()
+    local conn = connect_with_fake_transport()
+    local f = conn:sftp()
+    assert_eq(f.t, nil, "sftp.t")
+    assert_eq(next(f), nil, "the handle has no fields at all")
+    assert_eq(f:read("/etc/motd"), "contents of /etc/motd")
+end)
+
 test("a refused upgrade reports the status, not a manifest denial", function()
     -- 403 is the normal shape of an Access rejection, and it is not the
     -- manifest refusing. Flattening both to "denied" sends an operator to

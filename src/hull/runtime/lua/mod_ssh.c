@@ -96,6 +96,17 @@ static int caller_is_stdlib(lua_State *L)
     return hl_lua_source_is_stdlib(ar.source);
 }
 
+/* Raise unless the caller is stdlib. Every entry point, not only connect:
+ * a handle that leaks to application code - it once did, as conn.t.stream -
+ * must be inert there, or "the application never holds a socket" rests on
+ * every stdlib object keeping every field private forever. */
+static void require_stdlib_caller(lua_State *L)
+{
+    if (!caller_is_stdlib(L))
+        luaL_error(L, "ssh: the byte stream is internal to the SSH module; "
+                      "use require('hull.ssh')");
+}
+
 /* ── the stream handle ──────────────────────────────────────────────── */
 
 static HlLuaSshStream *check_stream(lua_State *L)
@@ -140,6 +151,7 @@ static void ssh_unpark(HlLuaSshStream *o)
 
 static int lua_ssh_close(lua_State *L)
 {
+    require_stdlib_caller(L);
     HlLuaSshStream *o = check_stream(L);
     if (o->s) {
         /* Order is the whole content of this function. Close FIRST so the
@@ -331,6 +343,7 @@ static int ssh_read_step(lua_State *L, HlLuaSshStream *o)
 
 static int lua_ssh_read(lua_State *L)
 {
+    require_stdlib_caller(L);
     HlLuaSshStream *o = check_stream(L);
     if (ssh_busy(L, o)) return 2;
     lua_Integer want = luaL_optinteger(L, 2, 4096);
@@ -387,6 +400,7 @@ static int ssh_write_step(lua_State *L, HlLuaSshStream *o, int ud_idx)
 
 static int lua_ssh_write(lua_State *L)
 {
+    require_stdlib_caller(L);
     HlLuaSshStream *o = check_stream(L);
     if (ssh_busy(L, o)) return 2;
     size_t len;
@@ -447,10 +461,7 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o)
  */
 static int lua_ssh_connect(lua_State *L)
 {
-    if (!caller_is_stdlib(L))
-        return luaL_error(L,
-            "ssh: the byte stream is internal to the SSH module; "
-            "use require('hull.ssh')");
+    require_stdlib_caller(L);
 
     luaL_checktype(L, 1, LUA_TTABLE);
     int base = lua_gettop(L);

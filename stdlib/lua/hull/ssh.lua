@@ -84,8 +84,43 @@ function M.memory_store(seed)
     }
 end
 
+-- What an application holds is a HANDLE, never the machinery behind it.
+--
+-- A connection used to carry its transport in a plain field, `conn.t`. That
+-- one field was the whole transport: `conn.t:send_packet(...)` could open a
+-- direct-tcpip channel and forward through the server to anything IT can
+-- reach, and `conn.t.stream` was the raw byte stream the binding keeps from
+-- apps. The manifest grants SSH to a host as a login; it does not grant
+-- arbitrary packets over that session. So the transport (and an sftp
+-- session's) live in this table, keyed weakly by the handle, and only the
+-- methods below can reach them. The sandbox has no `debug` library, so an
+-- upvalue is as far as an application can see.
+local inner = setmetatable({}, { __mode = "k" })
+
+local function handle(class, obj)
+    local h = setmetatable({}, class)
+    inner[h] = obj
+    return h
+end
+
 local Conn = {}
 Conn.__index = Conn
+Conn.__metatable = false
+
+local SftpHandle = {}
+SftpHandle.__index = SftpHandle
+SftpHandle.__metatable = false
+
+--- Resolve a path on the server. Returns the canonical path, or nil + text.
+function SftpHandle:realpath(path) return inner[self]:realpath(path) end
+--- List a directory: the entries safe to use as local names, and the ones
+--- refused and why.
+function SftpHandle:list(path) return inner[self]:list(path) end
+--- Read a whole file; `max` (default 16 MiB) bounds it.
+function SftpHandle:read(path, max) return inner[self]:read(path, max) end
+--- Write a whole file, creating or truncating it.
+function SftpHandle:write(path, data) return inner[self]:write(path, data) end
+function SftpHandle:close() return inner[self]:close() end
 
 --- Run a command. Returns { status, signal, stdout, stderr }, or nil plus a
 --- reason table.
@@ -109,14 +144,18 @@ Conn.__index = Conn
 --- a command writing output while we write input wedges both directions on
 --- full buffers (measured against OpenSSH). Bulk data belongs in
 --- `conn:sftp()`, which moves one direction at a time and has no such limit.
-function Conn:exec(command, opts) return self.t:exec(command, opts) end
+function Conn:exec(command, opts) return inner[self]:exec(command, opts) end
 
 --- Open an SFTP session. Paths travel inside the subsystem as
 --- length-prefixed strings, so a filename never becomes a shell word.
-function Conn:sftp() return self.t:sftp() end
-function Conn:close() return self.t:close() end
-function Conn:fingerprint() return self.t.host_fingerprint end
-function Conn:negotiated() return self.t.negotiated end
+function Conn:sftp()
+    local s, err = inner[self]:sftp()
+    if not s then return nil, err end
+    return handle(SftpHandle, s)
+end
+function Conn:close() return inner[self]:close() end
+function Conn:fingerprint() return inner[self].host_fingerprint end
+function Conn:negotiated() return inner[self].negotiated end
 
 --- Ask the server for new keys now. Returns true, or nil plus a reason.
 ---
@@ -128,13 +167,13 @@ function Conn:negotiated() return self.t.negotiated end
 ---
 --- Call it BETWEEN operations. It reads packets, so calling it from inside an
 --- `on_stdout` callback would consume the output that callback is being fed.
-function Conn:rekey() return self.t:rekey() end
+function Conn:rekey() return inner[self]:rekey() end
 
 --- What this connection has moved, and how many times it has re-keyed:
 --- { rekeys, bytes_sent, bytes_received, packets_sent, packets_received,
 ---   rekey_due }. The byte counts span the whole connection; the packet
 --- counts are for the current keys, which is what the limit is about.
-function Conn:stats() return self.t:stats() end
+function Conn:stats() return inner[self]:stats() end
 
 -- Reach the host through a WebSocket relay instead of dialling it directly.
 --
@@ -344,7 +383,7 @@ function M.connect(opts)
         return nil, aerr
     end
 
-    return setmetatable({ t = t }, Conn)
+    return handle(Conn, t)
 end
 
 --- Accept a host key the caller has decided to trust, so the next connect
