@@ -411,9 +411,12 @@ PY
         # 1. The default trust anchor must REFUSE this certificate. If this
         #    passes, verification is not on and every other TLS assertion here
         #    is worthless.
+        #    A certificate refusal is a failed CONNECTION, not the manifest:
+        #    it once surfaced as `denied`, which sent operators to the
+        #    manifest for a TLS problem.
         OUT=$(run_app "$WORK/t1")
         case "$OUT" in
-            *"first_code=denied"*)
+            *"first_code=connect_failed"*)
                 pass "tls: the default anchor refuses an untrusted CA" ;;
             *)  fail "tls: the default anchor refuses an untrusted CA" "$OUT" ;;
         esac
@@ -421,7 +424,7 @@ PY
         # 2. --ca-bundle makes it trust THAT CA, and the tunnel comes up.
         OUT=$(run_app "$WORK/t1" --ca-bundle "$WORK/tls/ca.pem")
         case "$OUT" in
-            *"first_code=denied"*|*"first_code=upgrade_"*)
+            *"first_code=denied"*|*"first_code=upgrade_"*|*"first_code=connect_failed"*)
                 fail "tls: --ca-bundle is honoured" "$OUT" ;;
             *"first_code="*)
                 pass "tls: --ca-bundle is honoured" ;;

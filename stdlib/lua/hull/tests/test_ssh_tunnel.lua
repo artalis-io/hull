@@ -199,6 +199,7 @@ local function connect_with_fake_transport()
     local fake = {
         host_fingerprint = "SHA256:fake",
         handshake    = function() return true end,
+        set_deadline = function() end,
         authenticate = function() return true end,
         close        = function() end,
         send_packet  = function() error("must not be reachable") end,
@@ -244,6 +245,7 @@ test("connect hands the port to the host-key check", function()
     local real_new = transport.new
     transport.new = function()
         return { handshake = function(_, o) seen = o; return nil, { code = "stop" } end,
+                 set_deadline = function() end,
                  close = function() end }
     end
     pcall(ssh.connect, { host = "spark-7468", port = 2222, user = "operator",
@@ -263,6 +265,104 @@ test("accept_host and forget_host name the entry by host and port", function()
     ssh.forget_host(trust, "spark-7468", 2222)
     assert_eq(trust.entries()["[spark-7468]:2222"], nil)
     assert_eq(trust.entries()["spark-7468"], "BLOB22", "port 22 untouched:")
+end)
+
+-- The error model --------------------------------------------------------------
+--
+-- Every method returns (nil, { code, detail }) on failure; nothing raises at
+-- the caller except a raise from the caller's own callback.
+
+local function conn_over(fake_methods)
+    local transport = require('hull.ssh.transport')
+    local fake = {
+        handshake    = function() return true end,
+        authenticate = function() return true end,
+        set_deadline = function() end,
+        close        = function() end,
+    }
+    for k, v in pairs(fake_methods) do fake[k] = v end
+    local real_new = transport.new
+    transport.new = function() return fake end
+    local conn = ssh.connect{ host = "spark-7468", user = "operator", key = {},
+                              crypto = crypto_stub,
+                              open_stream = function() return {} end }
+    transport.new = real_new
+    return conn
+end
+
+test("a transport failure inside exec comes back as io_error, not a raise", function()
+    local conn = conn_over({ exec = function() error("ssh: read failed: reset") end })
+    local r, err = conn:exec("uptime")
+    assert_eq(r, nil)
+    assert_eq(err.code, "io_error")
+    assert_match(err.detail, "read failed")
+end)
+
+test("a coded failure keeps its code", function()
+    local conn = conn_over({ exec = function()
+        error({ code = "timeout", detail = "nothing from the server" }, 0) end })
+    local _, err = conn:exec("uptime")
+    assert_eq(err.code, "timeout")
+end)
+
+test("the caller's own callback error is raised, unchanged", function()
+    -- A bug in on_stdout is the caller's to see, not a connection failure.
+    local conn = conn_over({ exec = function(_, _, o)
+        local ok, e = pcall(o.on_stdout, "x")
+        if not ok then error({ app_error = e }, 0) end
+    end })
+    local ok, e = pcall(conn.exec, conn, "x", {
+        on_stdout = function() error("my bug", 0) end })
+    assert_eq(ok, false)
+    assert_eq(e, "my bug")
+end)
+
+test("an unreadable key comes back as bad_key, not a raise", function()
+    local _, err = ssh.connect{ host = "h", user = "u", key = "not a key",
+                                crypto = crypto_stub,
+                                open_stream = function() error("must not dial") end }
+    assert_eq(err.code, "bad_key")
+end)
+
+test("a key already trusted is an answer, not a raise", function()
+    local trust = ssh.memory_store()
+    assert_eq(ssh.accept_host(trust, "h", "B1"), true)
+    local ok, err = ssh.accept_host(trust, "h", "B2")
+    assert_eq(ok, nil)
+    assert_eq(err.code, "already_trusted")
+end)
+
+test("a host that cannot be reached is connect_failed, not denied", function()
+    -- `denied` means the manifest said no. A health check exists to tell
+    -- that apart from a machine that is down.
+    local _, err = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+        open_stream = function() return nil, "connection refused", "connect_failed" end }
+    assert_eq(err.code, "connect_failed")
+    local _, err2 = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+        open_stream = function() return nil, "timed out", "timeout" end }
+    assert_eq(err2.code, "timeout")
+end)
+
+test("the handshake runs under the connect budget, reported as timeout", function()
+    local budget
+    local conn, err = (function()
+        local transport = require('hull.ssh.transport')
+        local real_new = transport.new
+        transport.new = function()
+            return { set_deadline = function(_, ms) budget = budget or ms end,
+                     handshake = function() error({ code = "deadline" }, 0) end,
+                     close = function() end }
+        end
+        local c, e = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+                                  timeout_ms = 4000,
+                                  open_stream = function() return {} end }
+        transport.new = real_new
+        return c, e
+    end)()
+    assert_eq(conn, nil)
+    assert_eq(budget, 4000)
+    assert_eq(err.code, "timeout")
+    assert_match(err.detail, "4000 ms")
 end)
 
 test("a refused upgrade reports the status, not a manifest denial", function()
@@ -290,7 +390,7 @@ test("a dial that is refused keeps the refusal", function()
         local _, e = ssh.connect{
             host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
             tunnel = { host = "ssh.example.com" },
-            open_stream = function() return nil, "tunnel host is not in ssh.tunnel.hosts" end,
+            open_stream = function() return nil, "tunnel host is not in ssh.tunnel.hosts", "denied" end,
         }
         err = e
     end

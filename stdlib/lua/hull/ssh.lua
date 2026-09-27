@@ -103,6 +103,45 @@ local function handle(class, obj)
     return h
 end
 
+--- The budget for reaching an authenticated connection, unless
+--- `opts.timeout_ms` says otherwise.
+M.CONNECT_TIMEOUT_MS = 30000
+
+-- The one error shape. The transport raises on I/O failure and malformed
+-- input (the wire readers raise by design) and returns a reason for protocol
+-- refusals; an application gets (nil, { code = ..., detail = ... }) for all of
+-- them, from every method, and never has to pcall.
+--
+-- Two raises are handled differently. A coded failure (a table with `code`,
+-- such as a timeout) already says what happened and is returned as it is.
+-- An error from the caller's OWN callback - an on_stdout that raised - is the
+-- caller's bug, not a connection failure: it travels up wrapped as
+-- { app_error = e } and is raised again here, unchanged.
+local function guard(fn, ...)
+    local r = table.pack(pcall(fn, ...))
+    if r[1] then return table.unpack(r, 2, r.n) end
+    local e = r[2]
+    if type(e) == "table" then
+        if e.app_error ~= nil then error(e.app_error, 0) end
+        if e.code then return nil, e end
+    end
+    return nil, { code = "io_error", detail = tostring(e) }
+end
+
+-- A key file that could not be loaded, by what the caller would do about it.
+-- hull.ssh.privatekey raises prose; these three phrases are its own, and its
+-- tests pin them.
+local function key_error(e)
+    local msg = tostring(e)
+    if msg:find("wrong passphrase", 1, true) then
+        return { code = "bad_passphrase", detail = msg }
+    end
+    if msg:find("is encrypted", 1, true) then
+        return { code = "passphrase_required", detail = msg }
+    end
+    return { code = "bad_key", detail = msg }
+end
+
 local Conn = {}
 Conn.__index = Conn
 Conn.__metatable = false
@@ -112,14 +151,14 @@ SftpHandle.__index = SftpHandle
 SftpHandle.__metatable = false
 
 --- Resolve a path on the server. Returns the canonical path, or nil + text.
-function SftpHandle:realpath(path) return inner[self]:realpath(path) end
+function SftpHandle:realpath(path) return guard(inner[self].realpath, inner[self], path) end
 --- List a directory: the entries safe to use as local names, and the ones
 --- refused and why.
-function SftpHandle:list(path) return inner[self]:list(path) end
+function SftpHandle:list(path) return guard(inner[self].list, inner[self], path) end
 --- Read a whole file; `max` (default 16 MiB) bounds it.
-function SftpHandle:read(path, max) return inner[self]:read(path, max) end
+function SftpHandle:read(path, max) return guard(inner[self].read, inner[self], path, max) end
 --- Write a whole file, creating or truncating it.
-function SftpHandle:write(path, data) return inner[self]:write(path, data) end
+function SftpHandle:write(path, data) return guard(inner[self].write, inner[self], path, data) end
 function SftpHandle:close() return inner[self]:close() end
 
 --- Run a command. Returns { status, signal, stdout, stderr }, or nil plus a
@@ -144,12 +183,12 @@ function SftpHandle:close() return inner[self]:close() end
 --- a command writing output while we write input wedges both directions on
 --- full buffers (measured against OpenSSH). Bulk data belongs in
 --- `conn:sftp()`, which moves one direction at a time and has no such limit.
-function Conn:exec(command, opts) return inner[self]:exec(command, opts) end
+function Conn:exec(command, opts) return guard(inner[self].exec, inner[self], command, opts) end
 
 --- Open an SFTP session. Paths travel inside the subsystem as
 --- length-prefixed strings, so a filename never becomes a shell word.
 function Conn:sftp()
-    local s, err = inner[self]:sftp()
+    local s, err = guard(inner[self].sftp, inner[self])
     if not s then return nil, err end
     return handle(SftpHandle, s)
 end
@@ -167,7 +206,7 @@ function Conn:negotiated() return inner[self].negotiated end
 ---
 --- Call it BETWEEN operations. It reads packets, so calling it from inside an
 --- `on_stdout` callback would consume the output that callback is being fed.
-function Conn:rekey() return inner[self]:rekey() end
+function Conn:rekey() return guard(inner[self].rekey, inner[self]) end
 
 --- What this connection has moved, and how many times it has re-keyed:
 --- { rekeys, bytes_sent, bytes_received, packets_sent, packets_received,
@@ -260,7 +299,7 @@ local function tunnel_opener(tunnel, crypto, dial)
         local headers, herr = tunnel_headers(tunnel, o.host, o.port)
         if not headers then return nil, herr end
 
-        local raw, err = dial({
+        local raw, err, code = dial({
             host       = o.host,      -- the SSH destination: what the grant,
             port       = o.port,      -- the host key and the login are about
             user       = o.user,
@@ -272,7 +311,7 @@ local function tunnel_opener(tunnel, crypto, dial)
                 tls_hostname = tunnel.tls_hostname,
             },
         })
-        if not raw then return nil, { code = "denied", detail = err } end
+        if not raw then return nil, { code = code or "connect_failed", detail = err } end
 
         local s, werr = ws.connect(raw, {
             host    = tunnel.tls_hostname or tunnel.host,
@@ -315,13 +354,23 @@ function M.connect(opts)
     -- `passphrase_env` names an environment variable and is preferred: the
     -- value is read, used and scrubbed in C, so it never becomes a Lua string
     -- (which could not be wiped). `passphrase` takes the bytes directly.
-    local key = type(opts.key) == "table" and opts.key
-        or privatekey.load(opts.key, {
-               passphrase     = opts.passphrase,
-               passphrase_env = opts.passphrase_env,
-               crypto         = crypto,
-           })
+    local key = opts.key
+    if type(key) ~= "table" then
+        local kok, loaded = pcall(privatekey.load, opts.key, {
+            passphrase     = opts.passphrase,
+            passphrase_env = opts.passphrase_env,
+            crypto         = crypto,
+        })
+        if not kok then return nil, key_error(loaded) end
+        key = loaded
+    end
     local trust = opts.trust or M.memory_store()
+
+    -- One budget for everything up to an authenticated connection: TCP (and a
+    -- relay's TLS), the version exchange, the key exchange and userauth. A
+    -- server that accepts the socket and then stalls in any of them runs it
+    -- out, rather than holding the caller forever.
+    local timeout = opts.timeout_ms or M.CONNECT_TIMEOUT_MS
 
     -- The stream is obtained ONLY after the manifest check inside the
     -- binding, and only the SSH stdlib can obtain one at all.
@@ -338,34 +387,39 @@ function M.connect(opts)
         open = function(o) return _stream.connect(o) end
     end
 
-    local stream, serr = open({
+    local stream, serr, scode = open({
         host = opts.host,
         port = opts.port or 22,
         user = opts.user,
-        timeout_ms = opts.timeout_ms,
+        timeout_ms = timeout,
     })
     if not stream then
-        -- A reason that already carries a code keeps it. The tunnel path
-        -- distinguishes cases the caller acts on differently - a 403 from an
-        -- Access policy (`upgrade_refused`) is not the manifest refusing, and
-        -- calling both "denied" sends the operator to the wrong file.
+        -- A reason that already carries a code keeps it: the tunnel path
+        -- distinguishes a relay refusing the upgrade (`upgrade_refused`) from
+        -- the manifest refusing. Otherwise the binding's code says which
+        -- happened: `denied` (the manifest), `connect_failed` (DNS, refused,
+        -- unreachable, TLS) or `timeout`. A host that is down used to be
+        -- reported as `denied`, which is the one distinction a health check
+        -- exists to make.
         if type(serr) == "table" and serr.code then return nil, serr end
-        return nil, { code = "denied", detail = serr }
+        return nil, { code = scode or "connect_failed", detail = serr }
     end
 
-    local t = transport.new(stream, crypto, { software = opts.software })
+    local t = transport.new(stream, crypto, {
+        software      = opts.software,
+        keepalive_ms  = opts.keepalive_ms,
+        keepalive_max = opts.keepalive_max,
+        idle_ms       = opts.idle_ms,
+    })
+    t:set_deadline(timeout)
 
-    -- The transport raises on I/O failure and on malformed input (the wire
-    -- readers raise by design), and returns a reason for protocol refusals.
-    -- This is the boundary where both become one shape: an application
-    -- calling connect() should never have to pcall to find out whether it
-    -- got a connection.
     local function step(fn, ...)
-        local results = table.pack(pcall(fn, ...))
-        if not results[1] then
-            return nil, { code = "io_error", detail = tostring(results[2]) }
+        local r1, r2 = guard(fn, ...)
+        if r1 == nil and r2 and r2.code == "deadline" then
+            r2 = { code = "timeout", detail = "not connected and authenticated within "
+                                              .. tostring(timeout) .. " ms" }
         end
-        return results[2], results[3]
+        return r1, r2
     end
 
     local ok, herr = step(t.handshake, t, {
@@ -386,6 +440,7 @@ function M.connect(opts)
         return nil, aerr
     end
 
+    t:set_deadline(0)       -- connected: from here on, liveness is keepalives
     return handle(Conn, t)
 end
 
@@ -396,7 +451,15 @@ end
 --- `port` (default 22) is part of the identity: a key is trusted for the
 --- host AND port it was met on, as in OpenSSH's known_hosts.
 function M.accept_host(trust, host, key_blob, port)
-    return hostkey.accept_new(trust, hostkey.store_name(host, port), key_blob)
+    local name = hostkey.store_name(host, port)
+    -- Refusing to overwrite is the point of trust-on-first-use; it is an
+    -- answer, not a crash, so it comes back like every other refusal.
+    if type(trust) == "table" and type(trust.get) == "function"
+       and trust.get(name) ~= nil then
+        return nil, { code = "already_trusted", detail = name
+                      .. " already has a stored key; forget_host it first" }
+    end
+    return hostkey.accept_new(trust, name, key_blob)
 end
 
 function M.forget_host(trust, host, port)
