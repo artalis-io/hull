@@ -1,7 +1,9 @@
 # `hull.kv` encryption at rest: design
 
-Status: **accepted design, not yet implemented.** The decisions taken on the
-open questions are recorded in section 11.
+Status: **implemented.** `hull.crypto.sealbox` (Lua + JS), the `encrypt`
+option of `hull.kv.open`, and TOTP on the shared module. The decisions taken on
+the open questions are recorded in section 11; the user-facing description is
+[`kv_cache.md`](kv_cache.md#encryption-at-rest).
 
 ## 1. Why
 

@@ -145,6 +145,70 @@ for an unbounded id set), or each distinct value leaks a store for the process
 lifetime. A durable (SQL) namespace is just an `ns` column value, so it does not
 leak process memory, but the same bounded-cardinality guidance applies.
 
+## Encryption at rest
+
+`hull.kv.open` takes an optional `encrypt` keyring. Every value written through
+the handle is then sealed with authenticated encryption (NaCl secretbox,
+XSalsa20-Poly1305) before it reaches the backend, and checked when it is read
+back. Someone who can read the backend (a database administrator, a backup,
+another app on the same Postgres) sees noise; someone who can write it cannot
+produce, alter or move a value without the key.
+
+```lua
+local env, crypto = require("hull.env"), require("hull.crypto")
+local kv = require("hull.kv").open{
+    backend = "postgres", database = db, namespace = "sessions",
+    encrypt = { keys = { [1] = crypto.hex_decode(env.get("KV_KEY_1")) }, current = 1 },
+}
+```
+
+```javascript
+const store = kv.open({ backend: "postgres", database: db, namespace: "sessions",
+                        encrypt: { keys: { 1: keyBytes }, current: 1 } });
+```
+
+- **Keys** are exactly 32 random bytes (`crypto.random(32)`), under integer ids
+  0..2^32-1. `current` names the key new writes use. Keep them out of source:
+  read them through the manifest's `env` allowlist. A malformed keyring fails
+  `kv.open` with `invalid_argument`.
+- **Binding.** The namespace and the key name are sealed inside each value, so
+  a genuine value copied to another key or namespace does not open.
+- **Failure** is one code, `decrypt_failed`, for every way a value can be
+  wrong: altered, forged, moved, or sealed under a key id the keyring does not
+  hold. It does not say which check failed.
+- **Operations.** `get`, `set` and `cas` seal and open; `cas` compares the
+  opened value with `expected` and swaps on the exact stored bytes, so it stays
+  atomic. `incr` is `unsupported` on an encrypted handle (the backend cannot do
+  arithmetic on ciphertext): keep a secret counter as a value and update it with
+  `cas`. `delete`, `exists`, `scan`, `clear` and TTLs work on keys and are
+  unchanged. `hull.cache` handles have no `encrypt` option.
+- **Rotation.** Add the new key under a new id and make it `current`; values
+  sealed under the old id still open, and each write re-seals under the new
+  one. `kv:rekey(prefix?)` re-seals everything under the prefix that is not on
+  the current key and returns how many it changed; it is safe to interrupt and
+  rerun, and needs `scan` + compare-and-swap. **Drop the old key only after
+  `rekey` has finished**, or the values it still covers stop opening.
+- **Migrating a plaintext namespace.** Open it with `allow_plaintext = true`
+  (`allowPlaintext` in JS): a value that does not open is returned as stored,
+  on the assumption it predates encryption. Run `kv:rekey()`, then remove the
+  flag. While the flag is set, a plaintext value **written by an attacker is
+  accepted too**, so keep that window short.
+
+What it does not protect against:
+
+- **Deletion.** A writer can remove any entry.
+- **Rollback.** A writer who kept an older genuine value for a key can put it
+  back, and it still opens. Ruling that out needs a version counter kept
+  outside the store.
+- **Key names.** Only values are encrypted; key names stay visible (scan needs
+  their prefixes). An app that must hide them hashes them itself.
+- **Anyone who holds the key**, including the app's own process: keys are
+  Lua / JS strings and live in the interpreter heap.
+
+The format is `hull.crypto.sealbox` (`hull:crypto:sealbox`), shared with
+TOTP's encrypted secrets; Lua and JS produce and accept the same bytes. Design
+and threat model: [`kv_encryption_design.md`](kv_encryption_design.md).
+
 ## Backend extension points
 
 The subsystem is deliberately narrow; new engines slot in without touching the

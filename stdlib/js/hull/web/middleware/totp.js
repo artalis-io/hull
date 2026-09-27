@@ -140,15 +140,8 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 // are binary-safe for ArrayBuffer/Uint8Array input - use
 // them when the input is already a typed array.
 import { _hex } from "hull:crypto:_hex";
+import { sealbox } from "hull:crypto:sealbox";
 const bytesToHex = _hex.toHex;
-
-function hexToBytes(h) {
-    let s = "";
-    for (let i = 0; i < h.length; i += 2) {
-        s += String.fromCharCode(parseInt(h.substr(i, 2), 16));
-    }
-    return s;
-}
 
 // RFC 4648 Base32 (no padding) - encode + decode. 20 bytes → 32
 // chars; decoder is case-insensitive and tolerates "=" / whitespace.
@@ -287,56 +280,21 @@ function ctEq(a, b) {
     return diff === 0;
 }
 
-// At-rest encryption: versioned NaCl secretbox. See the matching
-// Lua module's encrypt_secret / decrypt_secret comments for the
-// design - wire format v2 (current) is version(4 BE) || nonce(24) ||
-// ct; v1 (legacy, pre-rotation) was nonce(24) || ct. Both runtimes
-// produce identical byte sequences for the same key so a Lua↔JS
-// migration on the same DB works without re-enrolling.
-const NONCE_LEN = 24;
-const MAC_LEN   = 16;
-const VERSION_PREFIX_LEN = 4;
-const MIN_V2_BLOB_LEN    = VERSION_PREFIX_LEN + NONCE_LEN + MAC_LEN;
-
-function packVersionBE(v) {
-    return String.fromCharCode((v >>> 24) & 0xFF, (v >>> 16) & 0xFF,
-                               (v >>>  8) & 0xFF,  v         & 0xFF);
-}
-
-function unpackVersionBE(s) {
-    return ((s.charCodeAt(0) << 24)
-          | (s.charCodeAt(1) << 16)
-          | (s.charCodeAt(2) <<  8)
-          |  s.charCodeAt(3)) >>> 0;
+// At-rest encryption: hull:crypto:sealbox, the versioned secretbox format
+// shared with hull:kv's encrypted handles. See the matching Lua module's
+// encrypt_secret / decrypt_secret comments for the design - wire format v2
+// (current) is a sealbox blob, version(4 BE) || nonce(24) || ct, sealed with
+// no context; v1 (legacy, pre-rotation) was nonce(24) || ct. Both runtimes
+// produce identical byte sequences for the same key so a Lua<->JS migration
+// on the same DB works without re-enrolling.
+function keyring() {
+    return { keys: _state.keys, current: _state.currentKeyVersion };
 }
 
 function encryptSecret(secretBytes) {
     const cur = _state.currentKeyVersion;
-    const keyHex = cur != null ? _state.keys[cur] : null;
-    if (!keyHex) return [secretBytes, 0, 0];
-    const nonce = new Uint8Array(crypto.random(NONCE_LEN));
-    let nonceStr = "";
-    for (let i = 0; i < NONCE_LEN; i++) nonceStr += String.fromCharCode(nonce[i]);
-    // Pass plaintext as Uint8Array - crypto.secretbox now accepts the
-    // unified buffer protocol. Passing a JS binary string here would
-    // UTF-8-inflate every byte >= 0x80 via JS_ToCStringLen and produce
-    // a blob that doesn't round-trip with Lua-encrypted rows.
-    const plain = new Uint8Array(secretBytes.length);
-    for (let i = 0; i < secretBytes.length; i++) plain[i] = secretBytes.charCodeAt(i) & 0xff;
-    const ctHex = crypto.secretbox(plain, bytesToHex(nonceStr), keyHex);
-    return [packVersionBE(cur) + nonceStr + hexToBytes(ctHex), 1, cur];
-}
-
-// crypto.secretboxOpen now returns an ArrayBuffer (binary-safe;
-// JS_NewStringLen would replace invalid UTF-8 bytes with U+FFFD and
-// corrupt ~87% of random secrets). Convert to a binary string for
-// downstream consumers that walk it via charCodeAt(i) & 0xff.
-function abToBinStr(ab) {
-    if (!ab) return null;
-    const u8 = new Uint8Array(ab);
-    let s = "";
-    for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
-    return s;
+    if (cur == null || !_state.keys[cur]) return [secretBytes, 0, 0];
+    return [sealbox.seal(keyring(), secretBytes), 1, cur];
 }
 
 // Returns [plaintext, version] on success, [null, null] on failure.
@@ -347,35 +305,17 @@ function decryptSecret(blob, encrypted) {
     if (encrypted === 0) return [blob, 0];
     if (typeof blob !== "string") return [null, null];
 
-    // Try v2 (versioned) first.
-    if (blob.length >= MIN_V2_BLOB_LEN) {
-        const version = unpackVersionBE(blob.substring(0, VERSION_PREFIX_LEN));
-        const keyHex = _state.keys[version];
-        if (keyHex) {
-            const nonceStr = blob.substring(VERSION_PREFIX_LEN,
-                                            VERSION_PREFIX_LEN + NONCE_LEN);
-            const ctStr    = blob.substring(VERSION_PREFIX_LEN + NONCE_LEN);
-            const pt = abToBinStr(crypto.secretboxOpen(bytesToHex(ctStr),
-                                             bytesToHex(nonceStr), keyHex));
-            if (pt) return [pt, version];
-            // Recognized version that fails to decrypt is a real
-            // corruption; don't paper over with a legacy attempt.
-            return [null, null];
-        }
-    }
+    const r = sealbox.open(keyring(), blob);
+    if (r.ok) return [r.value, r.version];
+    // A v2 blob with a recognized version that fails to open is real
+    // corruption or a wrong key; don't paper over it with a legacy attempt.
+    if (r.reason === "open_failed" && blob.length >= sealbox.MIN_LEN) return [null, null];
 
     // v1 (legacy) fallback. Only if a legacy_key_version is configured.
     const legacyV = _state.legacyKeyVersion;
-    const legacyKey = legacyV != null ? _state.keys[legacyV] : null;
-    if (legacyKey && blob.length >= NONCE_LEN + MAC_LEN) {
-        const nonceStr = blob.substring(0, NONCE_LEN);
-        const ctStr    = blob.substring(NONCE_LEN);
-        const pt = abToBinStr(crypto.secretboxOpen(bytesToHex(ctStr),
-                                         bytesToHex(nonceStr), legacyKey));
-        if (pt) return [pt, 0];
-    }
-
-    return [null, null];
+    if (legacyV == null) return [null, null];
+    const pt = sealbox.openUnversioned(keyring(), legacyV, blob);
+    return pt !== null ? [pt, 0] : [null, null];
 }
 
 function urlenc(s) {

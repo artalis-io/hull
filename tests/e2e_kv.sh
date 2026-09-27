@@ -8,6 +8,7 @@
 # Part B - durability: a writer process stores durable sqlite KV; a fresh reader
 #          process reads it back (text, binary, a counter) - both runtimes.
 # Part C - hull.cache.open eviction: LRU at max_items + a max_bytes budget.
+# Part D - encrypted handles: sealed by one runtime, opened by the other.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu
@@ -203,6 +204,62 @@ if [ "$cl" = "$cexp" ] && [ "$cl" = "$cj" ]; then
     echo "PASS C: cache.open eviction (LRU + byte budget) identical Lua+JS"
 else
     echo "::error cache.open eviction DRIFT: lua=$cl js=$cj expect=$cexp"; exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Part D - encrypted handles: a value sealed by one runtime opens in the other
+#          (same bytes on disk), and neither accepts a value moved between keys.
+# ---------------------------------------------------------------------------
+cat > "$WD/enc.lua" <<'LUA'
+local kv = require("hull.kv")
+app.manifest({ modules = { "hull/kv@1", "hull/db@1" } })
+app.main(function(ctx)
+    local db = require("hull.db").default()
+    local s = kv.open{ backend = "sqlite", database = db, namespace = "enc",
+                       encrypt = { keys = { [7] = string.rep("K", 32) }, current = 7 } }
+    local raw = kv.open{ backend = "sqlite", database = db, namespace = "enc" }
+    local o = {}
+    if s:get("from_js") ~= nil then
+        o[#o+1] = s:get("from_js") == "js\0\255" and "lua_opens_js" or "F_lua_opens_js"
+    end
+    s:set("from_lua", "lua\0\255")
+    raw:set("moved", raw:get("from_lua"))
+    o[#o+1] = (not pcall(function() s:get("moved") end)) and "moved_rejected" or "F_moved"
+    raw:delete("moved")
+    ctx.stdout:write(table.concat(o, ",") .. "\n"); return 0
+end)
+LUA
+cat > "$WD/enc.js" <<'JS'
+import { app } from "hull:app";
+import { kv } from "hull:kv";
+import { db as dbModule } from "hull:db";
+app.manifest({ modules: ["hull/kv@1", "hull/db@1"] });
+app.main((ctx) => {
+    const db = dbModule.default();
+    const s = kv.open({ backend: "sqlite", database: db, namespace: "enc",
+                        encrypt: { keys: { 7: "K".repeat(32) }, current: 7 } });
+    const raw = kv.open({ backend: "sqlite", database: db, namespace: "enc" });
+    const o = [];
+    o.push(s.get("from_lua") === "lua\x00\xff" ? "js_opens_lua" : "F_js_opens_lua");
+    s.set("from_js", "js\x00\xff");
+    raw.set("moved", raw.get("from_js"));
+    let rejected = false;
+    try { s.get("moved"); } catch (e) { rejected = e.code === "decrypt_failed"; }
+    o.push(rejected ? "moved_rejected" : "F_moved");
+    raw.delete("moved");
+    ctx.stdout.write(o.join(",") + "\n");
+    return 0;
+});
+JS
+EDB="$WD/enc.db"
+e1="$("$HULL" "$WD/enc.lua" -d "$EDB" 2>/dev/null | tail -1)"
+e2="$("$HULL" "$WD/enc.js"  -d "$EDB" 2>/dev/null | tail -1)"
+e3="$("$HULL" "$WD/enc.lua" -d "$EDB" 2>/dev/null | tail -1)"
+if [ "$e1" = "moved_rejected" ] && [ "$e2" = "js_opens_lua,moved_rejected" ] \
+   && [ "$e3" = "lua_opens_js,moved_rejected" ]; then
+    echo "PASS D: encrypted values open across Lua+JS; a moved value is rejected"
+else
+    echo "::error kv encryption cross-runtime FAIL: 1=$e1 2=$e2 3=$e3"; exit 1
 fi
 
 echo "e2e_kv: ALL PASS"

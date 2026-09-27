@@ -259,8 +259,9 @@ file handles, the trust store in `known_hosts` format, RSA in its own PR.
   PTY / shell / env and certificates.
 
 Also done: `ssh.kv_store(kv)` over `hull.kv`, with atomic first use (the
-store-interface alignment above), and a design proposal for `hull.kv`
-encryption (`kv_encryption_design.md`).
+store-interface alignment above), and `hull.kv` encryption at rest
+(`kv_encryption_design.md`), which lets `ssh.kv_store` resist a backend writer
+without the key.
 
 Still open in group 4: RSA user keys (C signing + key parsing), and
 documenting parallel connections.

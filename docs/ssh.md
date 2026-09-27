@@ -143,9 +143,10 @@ Where trust lives is still the application's decision: the manifest names the
 file, or the app opens the kv namespace. The example keeps `known_hosts`
 beside the app. Whoever can write the store decides which keys Hull trusts,
 so treat write access to it like write access to `~/.ssh/known_hosts`.
-([`kv_encryption_design.md`](kv_encryption_design.md) proposes authenticated
-encryption for `hull.kv`, which would stop a backend writer without the key
-from substituting a host key.)
+Opening that namespace with `hull.kv`'s `encrypt` option stops a backend
+writer without the key from substituting a host key; deleting one still
+yields `host_unknown`, and putting back an older genuine entry is not detected
+([`kv_cache.md`](kv_cache.md#encryption-at-rest)).
 
 `host_changed_midsession` deserves its own note: a rekey re-presents the host
 key, and Hull pins it against the key **this connection was built on**, not
