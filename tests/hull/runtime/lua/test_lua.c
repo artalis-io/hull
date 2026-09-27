@@ -2845,6 +2845,30 @@ UTEST(lua_stdlib, totp_rekey_batch_helper)
 
 /* hull.crypto.sealbox + encrypted hull.kv. Each chunk returns 0 when every
  * check passes, else the number of the first check that failed. */
+UTEST(lua_stdlib, otp_rfc4226_vectors)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    /* RFC 4226 Appendix D: the 20-byte ASCII key, counters 0..9. */
+    int step = eval_int(
+        "(function() "
+        "  local otp = require('hull.crypto.otp') "
+        "  local want = { '755224', '287082', '359152', '969429', '338314', "
+        "                 '254676', '287922', '162583', '399871', '520489' } "
+        "  for i, w in ipairs(want) do "
+        "    if otp.hotp('12345678901234567890', i - 1) ~= w then return i end "
+        "  end "
+        "  if otp.hotp('12345678901234567890', 1, 8) ~= '94287082' then return 11 end "
+        "  if pcall(otp.hotp, 'k', -1) or pcall(otp.hotp, 'k', 1.5) then return 12 end "
+        "  if pcall(otp.hotp, 'k', 1, 9) then return 13 end "
+        "  if otp.step(59, 30) ~= 1 or otp.step(60.0, 30) ~= 2 then return 14 end "
+        "  if otp.hotp('12345678901234567890', otp.step(20000000000, 30), 8) ~= '65353130' then return 15 end "
+        "  return 0 "
+        "end)()");
+    ASSERT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, sealbox_seal_open)
 {
     init_lua_with_caps();

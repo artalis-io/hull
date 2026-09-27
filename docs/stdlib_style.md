@@ -157,6 +157,19 @@ XFF-first when trusted, `remote_addr` fallback, 64-char cap - the canonical
 source for the client IP that `session` / `audit-log` / `totp` / `auth-flows`
 each used to hand-roll subtly differently).
 
+**Cryptographic algorithms live under `hull.crypto`.** Primitives (hashes,
+HMAC, AEADs, signatures, key exchange, KDFs, constant-time compare) are C,
+reached through `hull.crypto`; any algorithm the stdlib itself builds on top
+of them is a `hull/crypto/*` module, never code inside the module that uses
+it: `hull.crypto.sealbox` (versioned sealing at rest, used by `hull.kv` and
+TOTP), `hull.crypto.otp` (HOTP, used by TOTP), `hull.crypto.envelope` (signed
+tokens). A consumer keeps only its policy: which key, what is bound in, when
+to rotate. Compare secrets with `crypto.constant_time_eq` /
+`constantTimeEq`, never a Lua or JS loop. A protocol's own key schedule stays
+with the protocol: SSH's exchange hash and RFC 4253 key derivation are in
+`hull.ssh.kex`, built from `hull.crypto` hashes, because they are SSH wire
+format rather than reusable algorithms.
+
 ---
 
 ## 5. Testing parity

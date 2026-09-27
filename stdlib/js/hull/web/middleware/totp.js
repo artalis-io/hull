@@ -141,6 +141,7 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 // them when the input is already a typed array.
 import { _hex } from "hull:crypto:_hex";
 import { sealbox } from "hull:crypto:sealbox";
+import { otp } from "hull:crypto:otp";
 const bytesToHex = _hex.toHex;
 
 // RFC 4648 Base32 (no padding) - encode + decode. 20 bytes → 32
@@ -193,39 +194,9 @@ function base32Decode(s) {
     return out;
 }
 
-// TOTP digest per RFC 4226 §5.3-5.4. Computes the 8-byte big-endian
-// counter as two 32-bit halves so we avoid JS's 53-bit Number cap
-// (step counters fit comfortably in 53 bits but BITWISE OPS truncate
-// to 32 bits, so we split manually). The dynamic-truncation step uses
-// multiplication to keep the 31-bit accumulator inside Number's
-// integer-safe range without any signed-shift surprises.
-function totpAtStep(secretBytes, step, digits) {
-    const hi = Math.floor(step / 0x100000000);
-    const lo = step - hi * 0x100000000;
-    /* Use a Uint8Array (via .buffer) so crypto.hmacSha1 takes the
-     * raw bytes through js_get_buffer's TypedArray probe. A plain
-     * JS string of high-byte chars would UTF-8-inflate at the C
-     * boundary and produce the wrong MAC - silently - for any
-     * counter byte >= 0x80. */
-    const counter = new Uint8Array([
-        (hi >>> 24) & 0xff, (hi >>> 16) & 0xff,
-        (hi >>>  8) & 0xff,  hi         & 0xff,
-        (lo >>> 24) & 0xff, (lo >>> 16) & 0xff,
-        (lo >>>  8) & 0xff,  lo         & 0xff,
-    ]).buffer;
-    const keyHex = bytesToHex(secretBytes);
-    const macHex = crypto.hmacSha1(counter, keyHex);
-    const mac = new Array(20);
-    for (let i = 0; i < 20; i++) mac[i] = parseInt(macHex.substr(i * 2, 2), 16);
-    const offset = mac[19] & 0x0F;
-    const p = (mac[offset] & 0x7F) * 0x1000000
-            + (mac[offset + 1] & 0xFF) * 0x10000
-            + (mac[offset + 2] & 0xFF) * 0x100
-            + (mac[offset + 3] & 0xFF);
-    const mod = Math.pow(10, digits);
-    const code = p % mod;
-    return String(code).padStart(digits, "0");
-}
+// TOTP per RFC 6238 is HOTP(K, T_step); the algorithm lives in
+// hull:crypto:otp.
+const totpAtStep = otp.hotp;
 
 // Recovery codes: 12 chars from a 31-char no-confusables alphabet,
 // formatted as ABCD-EFGH-IJKL. Modulo bias on 31 from a uniform byte
@@ -269,15 +240,12 @@ function verifyRecoveryCode(code, hash) {
 // measurable timing leak when an attacker can submit guesses at
 // high rate. RFC 6238 §4 calls this out. Pair with account lockout
 // (hull/web/middleware/auth_lockout, separate module) for defense
-// in depth. Charcode XOR-fold mirrors the Lua side's ct_eq.
+// in depth.
 function ctEq(a, b) {
     if (typeof a !== "string" || typeof b !== "string") return false;
-    if (a.length !== b.length) return false;
-    let diff = 0;
-    for (let i = 0; i < a.length; i++) {
-        diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-    }
-    return diff === 0;
+    // The C constant-time compare jwt / csrf / the Lua side use, rather than
+    // a hand-rolled loop the interpreter's timing can leak through.
+    return crypto.constantTimeEq(a, b);
 }
 
 // At-rest encryption: hull:crypto:sealbox, the versioned secretbox format
@@ -400,7 +368,7 @@ function markStepUsed(userId, step) {
 }
 
 function currentStep() {
-    return Math.floor(time.now() / _state.period);
+    return otp.step(time.now(), _state.period);
 }
 
 function checkInitialized() {

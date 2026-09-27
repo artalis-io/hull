@@ -2804,6 +2804,30 @@ static int js_run_steps(const char *code, const char *global)
     return eval_int(global);
 }
 
+UTEST(js_stdlib, otp_rfc4226_vectors)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { otp } from 'hull:crypto:otp';\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "function run() {\n"
+        "  const want = ['755224', '287082', '359152', '969429', '338314',\n"
+        "                '254676', '287922', '162583', '399871', '520489'];\n"
+        "  for (let i = 0; i < want.length; i++)\n"
+        "    if (otp.hotp('12345678901234567890', i) !== want[i]) return i + 1;\n"
+        "  if (otp.hotp('12345678901234567890', 1, 8) !== '94287082') return 11;\n"
+        "  if (!threw(() => otp.hotp('k', -1)) || !threw(() => otp.hotp('k', 1.5))) return 12;\n"
+        "  if (!threw(() => otp.hotp('k', 1, 9))) return 13;\n"
+        "  if (otp.step(59, 30) !== 1 || otp.step(60, 30) !== 2) return 14;\n"
+        "  if (otp.hotp('12345678901234567890', otp.step(20000000000, 30), 8) !== '65353130') return 15;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__otp = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__otp"), 0);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, sealbox_seal_open)
 {
     init_js_with_caps();

@@ -90,6 +90,7 @@
 
 local crypto = require("hull.crypto")
 local sealbox = require("hull.crypto.sealbox")
+local otp    = require("hull.crypto.otp")
 local db     = require("hull.db").default()
 local time   = require("hull.time")
 local qrcode = require("hull.qrcode")
@@ -281,37 +282,9 @@ local function base32_decode(s)
     return table.concat(out)
 end
 
--- TOTP per RFC 6238 = HOTP(K, T_step). HOTP per RFC 4226 §5.3-5.4:
---   1. HMAC-SHA1(K, 8-byte BE counter) → 20-byte digest
---   2. offset = digest[19] & 0x0F
---   3. P = ((digest[offset] & 0x7F) << 24)
---        | (digest[offset+1] << 16)
---        | (digest[offset+2] << 8)
---        | (digest[offset+3])
---   4. code = P mod 10^digits, zero-padded to width digits.
-local function totp_at_step(secret_bytes, step, digits)
-    -- Encode the step counter as 8-byte big-endian.
-    local counter = string.char(
-        (step >> 56) & 0xFF, (step >> 48) & 0xFF,
-        (step >> 40) & 0xFF, (step >> 32) & 0xFF,
-        (step >> 24) & 0xFF, (step >> 16) & 0xFF,
-        (step >>  8) & 0xFF,  step        & 0xFF)
-    local key_hex = bytes_to_hex(secret_bytes)
-    local mac_hex = crypto.hmac_sha1(counter, key_hex)
-    -- mac_hex is 40 chars; convert to byte array for the truncation.
-    local mac = {}
-    for i = 1, 40, 2 do
-        mac[#mac + 1] = tonumber(mac_hex:sub(i, i + 1), 16)
-    end
-    local offset = (mac[20] & 0x0F) + 1  -- 1-indexed for Lua
-    local p = ((mac[offset]     & 0x7F) << 24)
-            | ((mac[offset + 1] & 0xFF) << 16)
-            | ((mac[offset + 2] & 0xFF) <<  8)
-            |  (mac[offset + 3] & 0xFF)
-    local mod = 10 ^ digits
-    local code = p % mod
-    return string.format("%0" .. digits .. "d", code)
-end
+-- TOTP per RFC 6238 is HOTP(K, T_step); the algorithm lives in
+-- hull.crypto.otp.
+local totp_at_step = otp.hotp
 
 -- Recovery codes: 12 chars from an unambiguous 31-char alphabet,
 -- formatted as ABCD-EFGH-IJKL. ~59.5 bits of entropy per code - well
@@ -528,7 +501,7 @@ local function mark_step_used(user_id, step)
 end
 
 local function current_step()
-    return time.now() // _state.period
+    return otp.step(time.now(), _state.period)
 end
 
 local function check_initialized()

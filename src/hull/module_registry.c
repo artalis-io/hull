@@ -121,6 +121,15 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/crypto", "hull/json", 0},
     },
     {
+        /* HOTP (RFC 4226), the algorithm under TOTP. Kept here rather than
+         * in hull/web/middleware/totp so every cryptographic algorithm the
+         * stdlib implements lives under hull/crypto. */
+        .name = "hull/crypto/otp",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/crypto", 0},
+    },
+    {
         /* Versioned, authenticated sealing of values at rest (secretbox
          * under a keyring, with an optional context sealed into the
          * frame). Shared by hull/kv's encrypted handles and
@@ -802,7 +811,7 @@ static const HlModuleSpec REGISTRY[] = {
          * conditional decoration in hull/timers adds app.daily,
          * which init() schedules unless cleanup = false is passed. */
         .deps = {"hull/http-server", "hull/db", "hull/crypto",
-                 "hull/qrcode", "hull/time", "hull/crypto/sealbox",
+                 "hull/qrcode", "hull/time", "hull/crypto/sealbox", "hull/crypto/otp",
                  "hull/timers", "hull/log", 0},
     },
     {
