@@ -230,7 +230,9 @@ int hl_net_stream_write(HlNetStream *s, const void *buf, size_t len);
 /** Rearm the operation deadline. <=0 clears it. */
 void hl_net_stream_deadline(HlNetStream *s, int ms);
 
-/** Graceful close: drain what is queued, then FIN. Idempotent. */
+/** Close: send what the socket accepts without waiting, then FIN. Does not
+ *  linger, so queued bytes the kernel will not take yet are dropped.
+ *  Idempotent. */
 void hl_net_stream_close(HlNetStream *s);
 
 /** Abortive teardown. Safe mid-connect and mid-handshake. Idempotent. */
