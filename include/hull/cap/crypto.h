@@ -756,6 +756,23 @@ extern const HlCryptoAeadBackend hl_crypto_aead_backend_mbedtls;
  *  bounded so a caller cannot ask for an unbounded derivation. */
 #define HL_BCRYPT_MAX_OUT 1024
 
+/** Highest work factor this wrapper will run.
+ *
+ *  The round count is NOT a trusted number: it is read out of the key file's
+ *  kdfoptions, so it is whoever wrote the file who chooses it. Each round is
+ *  128 Blowfish state expansions and costs about 5 ms on a 2026 laptop, and
+ *  the derivation runs to completion on the EVENT-LOOP THREAD with no
+ *  interruption: a C binding is invisible to the Lua instruction hook, takes
+ *  no deadline and cannot be cancelled.
+ *
+ *  Unbounded, that is a denial of service with a one-line trigger - 10,000
+ *  rounds stalls the loop for about a minute, and the uint32 the format
+ *  allows for reaches roughly a century. 2^20 is four orders of magnitude
+ *  above what `ssh-keygen` writes (16, or 24 with -a) while still costing
+ *  well over an hour, so no honest key is refused and no dishonest one runs
+ *  to the horizon. */
+#define HL_BCRYPT_MAX_ROUNDS (1u << 20)
+
 /**
  * @brief OpenSSH's bcrypt_pbkdf: passphrase + salt + rounds -> key material.
  *
@@ -767,7 +784,7 @@ extern const HlCryptoAeadBackend hl_crypto_aead_backend_mbedtls;
  * @param pass_len  length of @p pass. Must be non-zero.
  * @param salt      salt bytes, from the key file's kdfoptions.
  * @param salt_len  length of @p salt. Must be non-zero.
- * @param rounds    work factor from the key file. Must be non-zero.
+ * @param rounds    work factor from the key file. 1..HL_BCRYPT_MAX_ROUNDS.
  * @param out       derived material, @p out_len bytes.
  * @param out_len   1..HL_BCRYPT_MAX_OUT.
  *
@@ -837,13 +854,21 @@ int hl_cap_crypto_aes256gcm_seal(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],
  * @param tag      16-byte tag to verify.
  *
  * @return `0` on success, `-1` on a NULL argument, `-2` if the tag does not
- * verify OR no backend is present.
+ * verify, `-3` if this build composed no AEAD backend.
  *
  * On any non-zero return @p out is zeroed: a caller that forgets to check must
- * not end up processing unauthenticated plaintext. Authentication failure and
- * an absent backend share a code deliberately - both mean "this did not
- * authenticate", and separating them tells an attacker which guess was closer
- * without telling an honest caller anything it can act on.
+ * not end up processing unauthenticated plaintext.
+ *
+ * `-2` and `-3` were ONE code until it was noticed what that costs. The
+ * argument for sharing it was that separating them tells an attacker which
+ * guess was closer - but an absent backend is a property of the BINARY, not of
+ * the message: it is the same answer for every packet ever sent, so there is
+ * no oracle to leak and nothing an attacker learns by distinguishing them.
+ * What the conflation did buy was a wrong diagnosis on the one path where it
+ * matters. A forged packet is the normal way `-2` arrives, and the Lua binding
+ * read the shared code as "no backend" and raised "TLS is not composed" - so
+ * an operator under attack, or on a lossy link, was told their build was
+ * misconfigured. Distinguish them; only `-2` means "somebody sent this".
  */
 int hl_cap_crypto_aes256gcm_open(uint8_t *out,
                                  const uint8_t key[HL_AEAD_KEY_LEN],

@@ -26,6 +26,15 @@
 /* Hull's SHA-512: (data, len, out[64]), 0 on success. */
 int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64]);
 
+/* NOTE ON THE RETURN VALUE. bcrypt_pbkdf.c ignores what this returns, because
+ * upstream's crypto_hash_sha512 cannot fail. Hull's hl_cap_crypto_sha512 CAN
+ * (it returns -1 on a NULL argument), and all three call sites in the
+ * vendored file pass provably non-NULL buffers - so the difference is
+ * unreachable today. It is written down because it would not stay unreachable
+ * quietly: the destinations there are uninitialised stack arrays, so a
+ * SHA-512 that failed without anyone looking would derive a key from stack
+ * garbage rather than raise. Any change making Hull's SHA-512 fallible for
+ * these inputs has to revisit the vendored call sites. */
 static inline int crypto_hash_sha512(unsigned char *out,
                                      const unsigned char *in,
                                      unsigned long long inlen)

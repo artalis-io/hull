@@ -417,5 +417,25 @@ test("a frame dribbled out one byte at a time still assembles", function()
     assert_eq(table.concat(got), body)
 end)
 
+test("a newline in the path or the host is refused", function()
+    -- Through a relay the DESTINATION is chosen by a header, so a newline
+    -- in the request line forges the field that picks the machine - past a
+    -- manifest that only ever saw the host it was asked about. The extra
+    -- headers were already checked; these two were not.
+    assert_raises(function()
+        ws.build_request({ host = "relay", key = "k",
+                           path = "/x\r\nCf-Access-Jump-Destination: evil:22" })
+    end, "CRLF in path")
+    assert_raises(function()
+        ws.build_request({ host = "relay\r\nX-Forged: 1", key = "k" })
+    end, "CRLF in host")
+    assert_raises(function()
+        ws.build_request({ host = "relay", key = "k\r\nX: 1" })
+    end, "CRLF in key")
+    -- and an ordinary path still builds
+    local req = ws.build_request({ host = "relay", key = "k", path = "/ok" })
+    assert_eq(req:find("GET /ok HTTP/1.1", 1, true) ~= nil, true)
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

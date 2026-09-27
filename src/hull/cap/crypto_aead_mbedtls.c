@@ -74,8 +74,15 @@ static int aead_open(uint8_t *out,
 
     /* Authentication failure and a malformed call are both -2 here: the caller
      * gets "this did not authenticate" either way, and distinguishing them
-     * would only tell an attacker which of their two guesses was closer.
-     * mbedTLS has already left `out` untouched on a tag mismatch. */
+     * would only tell an attacker which of their two guesses was closer. An
+     * ABSENT backend is -3 and not this function's business (cap/crypto.h).
+     *
+     * The zeroize below is not redundant with mbedTLS, and not for the reason
+     * an earlier version of this comment gave. mbedtls_gcm_auth_decrypt does
+     * NOT leave `out` untouched on a mismatch - it decrypts into it and then
+     * zeroes it itself. The end state is the same, so this is belt and
+     * braces; it is kept because the guarantee belongs at Hull's boundary
+     * rather than to a vendored implementation detail that could change. */
     if (rc != 0) {
         if (ct_len && out) mbedtls_platform_zeroize(out, ct_len);
         return -2;

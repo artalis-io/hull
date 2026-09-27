@@ -39,8 +39,11 @@
 #include "hull/shared/async_backend.h"
 #include "hull/utils/alloc.h"
 
+#include "log.h"
+
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>   /* INT_MAX: poll() takes an int timeout */
 #include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -73,6 +76,18 @@ struct PollWatcher {
     unsigned          mask;
     HlAsyncWatcherFn  cb;
     void             *user;
+    /* Monotonic, assigned once at registration and never reused.
+     *
+     * tick() dispatches from a SNAPSHOT taken before poll(), and between the
+     * snapshot and the dispatch it runs completions and timers - which run
+     * application code, synchronously (shared/async.c resumes the coroutine
+     * inline). That code can close a connection, which deregisters this
+     * watcher and frees the object `user` points at. Comparing fd alone
+     * cannot detect it: the kernel reuses descriptor numbers immediately, so
+     * a freed stream's fd may already belong to a NEW watcher by the time the
+     * snapshot is walked. The epoch is what distinguishes "still the same
+     * registration" from "that slot has been through a close and a reopen". */
+    uint64_t          epoch;
 };
 
 /* ── Cross-thread completion ────────────────────────────────────────── */
@@ -114,6 +129,7 @@ struct HlAsyncBackendCtx {
     PollWatcher       *watchers;
     size_t             watcher_count;
     size_t             watcher_cap;
+    uint64_t           next_watcher_epoch;  /* always > 0; 0 = no watcher */
 
     /* Cross-thread completion queue */
     PollCompletion    *completions;
@@ -274,6 +290,7 @@ static int heap_push(HlAsyncBackendCtx *ctx, PollTimer *t)
 {
     if (ctx->timer_count == ctx->timer_cap) {
         size_t ncap = ctx->timer_cap ? ctx->timer_cap * 2 : 16;
+        if (ncap > SIZE_MAX / sizeof(*ctx->timers)) return -1;
         PollTimer **n = realloc(ctx->timers, ncap * sizeof(*n));
         if (!n) return -1;
         ctx->timers = n;
@@ -323,6 +340,10 @@ static int poll_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
     }
     if (ctx->watcher_count == ctx->watcher_cap) {
         size_t ncap = ctx->watcher_cap ? ctx->watcher_cap * 2 : 8;
+        if (ncap > SIZE_MAX / sizeof(*ctx->watchers)) {
+            pthread_mutex_unlock(&ctx->lock);
+            return -1;
+        }
         PollWatcher *n = realloc(ctx->watchers, ncap * sizeof(*n));
         if (!n) {
             pthread_mutex_unlock(&ctx->lock);
@@ -333,6 +354,7 @@ static int poll_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
     }
     ctx->watchers[ctx->watcher_count++] = (PollWatcher){
         .fd = fd, .mask = mask, .cb = cb, .user = user,
+        .epoch = ++ctx->next_watcher_epoch,
     };
     pthread_mutex_unlock(&ctx->lock);
     wakeup_write(ctx);
@@ -395,7 +417,12 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
     if (ctx->timer_count > 0) {
         uint64_t now = poll_monotonic_ms();
         uint64_t next = ctx->timers[0]->deadline_ms;
-        int t = (next > now) ? (int)(next - now) : 0;
+        /* Clamped: poll() takes an int, and a deadline more than ~24.8 days
+         * out truncates to a NEGATIVE one - which poll reads as "block
+         * forever", so the loop would sleep until some unrelated event
+         * happened to wake it. */
+        uint64_t d = (next > now) ? next - now : 0;
+        int t = d > (uint64_t)INT_MAX ? INT_MAX : (int)d;
         if (effective_timeout < 0 || t < effective_timeout)
             effective_timeout = t;
     }
@@ -416,7 +443,9 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
 
     /* Snapshot watcher fd+mask so a callback that mutates the table
      * doesn't invalidate our pfd iteration. */
-    typedef struct { int fd; unsigned mask; HlAsyncWatcherFn cb; void *user; } Snap;
+    typedef struct {
+        int fd; unsigned mask; HlAsyncWatcherFn cb; void *user; uint64_t epoch;
+    } Snap;
     Snap *snaps = calloc(ctx->watcher_count, sizeof *snaps);
     if (ctx->watcher_count > 0 && !snaps) {
         free(pfds);
@@ -425,7 +454,7 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
     }
     for (size_t i = 0; i < ctx->watcher_count; i++) {
         PollWatcher *w = &ctx->watchers[i];
-        snaps[i] = (Snap){ w->fd, w->mask, w->cb, w->user };
+        snaps[i] = (Snap){ w->fd, w->mask, w->cb, w->user, w->epoch };
         pfds[i + 1].fd = w->fd;
         short ev = 0;
         if (w->mask & HL_ASYNC_READ)  ev |= POLLIN;
@@ -483,15 +512,44 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
     /* ── Step 6: dispatch ready FDs from the snapshot.
      * Walk the snapshot length (nfds - 1 entries; the wakeup pipe
      * occupies slot 0), not the live watcher count - the table may
-     * have grown or shrunk while a completion ran. */
+     * have grown or shrunk while a completion ran.
+     *
+     * That length rule keeps the INDEXING right. It is not enough on its own,
+     * because the snapshot also carries `user`, and steps 4 and 5 above run
+     * application code: a timer or a resumed coroutine that closes a
+     * connection deregisters its watcher and frees the object `user` points
+     * at, and dispatching the stale entry here is a use-after-free. So every
+     * entry is re-validated against the live table before it is invoked. */
     size_t snap_n = nfds - 1;
     for (size_t i = 0; i < snap_n; i++) {
         short re = pfds[i + 1].revents;
         if (re == 0) continue;
+
+        /* POLLNVAL means the descriptor is not open - closed without being
+         * deregistered. Left unmapped it produced ready == 0, so the entry
+         * was skipped and the watcher STAYED, and poll() returned
+         * immediately on it forever: a silent 100% CPU spin. Deregister it.
+         * No consumer does this today (maybe_release removes the watcher
+         * before closing the fd), which is why it has never shown. */
+        if (re & POLLNVAL) {
+            poll_watcher_del(ctx, snaps[i].fd);
+            continue;
+        }
+
         unsigned ready = 0;
         if (re & (POLLIN | POLLHUP | POLLERR)) ready |= HL_ASYNC_READ;
         if (re & POLLOUT) ready |= HL_ASYNC_WRITE;
-        if (ready && snaps[i].cb) snaps[i].cb(snaps[i].fd, ready, snaps[i].user);
+        if (!ready || !snaps[i].cb) continue;
+
+        /* Still the same registration? The epoch answers that even when the
+         * descriptor number has been closed and handed back out in between. */
+        pthread_mutex_lock(&ctx->lock);
+        ssize_t j = watcher_find(ctx, snaps[i].fd);
+        int live = (j >= 0 && ctx->watchers[j].epoch == snaps[i].epoch);
+        pthread_mutex_unlock(&ctx->lock);
+        if (!live) continue;
+
+        snaps[i].cb(snaps[i].fd, ready, snaps[i].user);
     }
 
     free(pfds);
@@ -613,12 +671,19 @@ static void completion_enqueue(HlAsyncBackendCtx *ctx,
     pthread_mutex_lock(&ctx->lock);
     if (ctx->completion_count == ctx->completion_cap) {
         size_t ncap = ctx->completion_cap ? ctx->completion_cap * 2 : 16;
+        if (ncap > SIZE_MAX / sizeof *ctx->completions) {
+            pthread_mutex_unlock(&ctx->lock);
+            return;
+        }
         PollCompletion *n = realloc(ctx->completions, ncap * sizeof *n);
         if (!n) {
-            /* OOM: drop the completion. Caller's done_fn won't fire;
-             * the corresponding work has already happened. Same
-             * failure mode as a queue overflow. */
+            /* OOM: drop the completion. The work already happened, but its
+             * done_fn never fires - which for a parked op means a coroutine
+             * that waits forever and a state that leaks. Silent, that reads
+             * as a hang with no cause; logged, it names itself. */
             pthread_mutex_unlock(&ctx->lock);
+            log_error("[hull:async] completion queue allocation failed; "
+                      "a pending resume was dropped");
             return;
         }
         ctx->completions = n;
@@ -778,9 +843,13 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
  * That marshal removes every race: there are no atomics, no locks,
  * no `resumed` flag, no fragile coordination - the only state-mutating
  * code paths both run on the same thread, in the same tick. The
- * completion queue is drained before timers in poll_tick, so when both
- * fire in the same tick the resume wins (matching keel-backend
- * semantics where op_complete cancels the deadline timer).
+ * completion queue is drained before timers in poll_tick, so a resume
+ * ENQUEUED BEFORE THE TICK BEGAN wins over a deadline due in the same
+ * tick (matching keel-backend semantics where op_complete cancels the
+ * deadline timer). One issued mid-tick lands in the NEXT tick's queue,
+ * so that deadline fires first - still safe, because the deadline
+ * detaches the state and the later drain then finds none and returns,
+ * but not the blanket guarantee the first half of this reads as.
  *
  * Tradeoff vs the keel backend: op_complete has one tick of latency
  * (gets queued, fires on next tick). The keel backend does the same
@@ -821,6 +890,11 @@ static void poll_op_complete_eventloop(void *ud)
 static int poll_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
     if (!ctx || !op) return -1;
+    /* Already suspended. Overwriting would leak the old state and orphan its
+     * deadline timer, which still points at this op. Consumers gate on their
+     * own "is something pending" flag; this is the backstop for one that
+     * forgets to. */
+    if (op->_backend_state) return -1;
     PollOpState *s = calloc(1, sizeof *s);
     if (!s) return -1;
     s->ctx = ctx;
@@ -848,6 +922,34 @@ static void poll_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     completion_enqueue(ctx, poll_op_complete_eventloop, op);
 }
 
+/* Retract an op. See the vtable comment: op_complete defers, so an owner
+ * freeing the storage `op` lives in needs a way to withdraw the queued
+ * resume before it fires against freed memory. */
+static void poll_op_cancel(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
+{
+    if (!ctx || !op) return;
+
+    /* Drop any completion already queued for THIS op. Compacting in place is
+     * safe here because the queue is only ever walked by tick(), which
+     * detaches the whole array under the lock before touching it. */
+    pthread_mutex_lock(&ctx->lock);
+    size_t keep = 0;
+    for (size_t i = 0; i < ctx->completion_count; i++) {
+        if (ctx->completions[i].fn == poll_op_complete_eventloop &&
+            ctx->completions[i].user == op)
+            continue;
+        ctx->completions[keep++] = ctx->completions[i];
+    }
+    ctx->completion_count = keep;
+    pthread_mutex_unlock(&ctx->lock);
+
+    PollOpState *s = op->_backend_state;
+    if (!s) return;
+    if (s->deadline_timer) poll_timer_cancel(ctx, s->deadline_timer);
+    op->_backend_state = NULL;
+    free(s);
+}
+
 /* ── Exported vtable ───────────────────────────────────────────────── */
 
 const HlAsyncBackend hl_async_backend_poll = {
@@ -869,6 +971,7 @@ const HlAsyncBackend hl_async_backend_poll = {
     .pool_submit      = poll_pool_submit,
     .op_suspend       = poll_op_suspend,
     .op_complete      = poll_op_complete,
+    .op_cancel        = poll_op_cancel,
 };
 
 /* ── Backend selection (weak seam) ─────────────────────────────────────

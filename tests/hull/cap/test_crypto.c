@@ -216,6 +216,25 @@ UTEST(hl_cap_crypto, aes256gcm_rejects_tampered_ciphertext_and_aad)
                   "a changed length field must not authenticate");
 }
 
+/* The two failure codes must stay distinct.
+ *
+ * They were one code, and the Lua binding read it as "no backend": every
+ * forged packet reported that the build lacked TLS. A test asserting only
+ * "non-zero" would not have caught that, which is why this one asserts the
+ * exact code on BOTH sides of the build split. */
+UTEST(hl_cap_crypto, aes256gcm_open_separates_a_bad_tag_from_an_absent_backend)
+{
+    uint8_t key[32] = {7}, iv[12] = {8}, tag[16] = {0}, out[4];
+    int rc = hl_cap_crypto_aes256gcm_open(out, key, iv, NULL, 0, "abcd", 4, tag);
+    if (gcm_backend_present()) {
+        ASSERT_EQ_MSG(rc, -2, "an all-zero tag must read as a failed "
+                              "authentication, never as a missing backend");
+    } else {
+        ASSERT_EQ_MSG(rc, -3, "an absent backend must not read as a forged "
+                              "packet");
+    }
+}
+
 UTEST(hl_cap_crypto, aes256gcm_a_different_key_or_iv_does_not_open)
 {
     if (!gcm_backend_present()) UTEST_SKIP("no AEAD backend in this build");
@@ -1138,7 +1157,7 @@ UTEST(aes256ctr, matches_the_nist_sp800_38a_vector)
     };
     uint8_t out[16];
     int rc = hl_cap_crypto_aes256ctr(out, key, ctr, pt, sizeof pt);
-    if (rc == -2) { UTEST_SKIP("no AEAD backend (TLS-less build)"); }
+    if (rc == -3) { UTEST_SKIP("no AEAD backend (TLS-less build)"); }
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(memcmp(out, want, sizeof want), 0);
 }

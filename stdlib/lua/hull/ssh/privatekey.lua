@@ -6,15 +6,21 @@
 -- PEM-looking armour around it. Inside, it is the same length-prefixed
 -- encoding as everything else in SSH, so hull.ssh.wire reads it directly.
 --
--- Encrypted keys are REFUSED with a message naming the reason, rather than
--- half-parsed. Decrypting one needs bcrypt_pbkdf, which Hull does not have;
--- producing garbage from a key the user believes is fine would be worse than
--- saying so.
+-- Encrypted keys are DECRYPTED when the caller says where the passphrase
+-- comes from, and refused by name otherwise - see M.decrypt_private. Only
+-- aes256-ctr with bcrypt is read, which is what ssh-keygen writes; anything
+-- else is named in the error along with the conversion that fixes it, rather
+-- than half-parsed into garbage from a key the user believes is fine.
 --
--- This handles private key material. Lua strings are immutable and garbage
--- collected, so a caller cannot scrub them - keep the loaded key for as
--- little of the program as possible, and prefer loading it once at the point
--- of use over passing it around.
+-- WHAT IS AND IS NOT PROTECTED. `passphrase_env` keeps the PASSPHRASE out of
+-- Lua entirely: C reads the variable, derives, and scrubs its buffers. It
+-- does not, and cannot, do the same for what comes back. The derived key,
+-- the counter block, and the decrypted private key are all ordinary Lua
+-- strings - immutable, uncollectable on demand, unreachable by any scrub -
+-- and the key must stay one for as long as it is used to sign. So the
+-- guarantee is "the passphrase never becomes a Lua value", not "key material
+-- is scrubbed end to end". Load a key once at the point of use, keep it for
+-- as little of the program as possible, and do not pass it around.
 
 local wire   = require('hull.ssh.wire')
 local base64 = require('hull.encoding.base64')
@@ -193,6 +199,19 @@ function M.decrypt_private(container, opts)
     end
 
     local crypto = opts.crypto or require("hull.crypto")
+
+    -- The round count is FILE content, and the derivation that follows runs
+    -- to completion on the event loop: it cannot be interrupted, and each
+    -- round costs milliseconds. A key declaring a few million rounds is not
+    -- a slow key, it is a stalled process. Refused here as well as in C so
+    -- the message can say which file did it.
+    local max = crypto.BCRYPT_MAX_ROUNDS
+    if max and rounds > max then
+        error("ssh.privatekey: the key declares " .. tostring(rounds)
+              .. " KDF rounds, above the " .. tostring(max) .. " limit "
+              .. "(ssh-keygen writes 16, or 24 with -a); refusing to derive")
+    end
+
     local want = CIPHER_KEY_LEN + CIPHER_IV_LEN
 
     -- passphrase_env wins when both are given: it is the safer of the two,

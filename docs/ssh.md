@@ -143,6 +143,20 @@ variable must also be in `manifest.env`.
 `opts.passphrase` takes the bytes directly. It exists for the caller who
 already holds them, and carries exactly the weakness above.
 
+**Be precise about what that buys.** The guarantee is *the passphrase never
+becomes a Lua value* - not *key material is scrubbed end to end*. What comes
+back from the derivation is a Lua string, and so is the decrypted private key,
+and so is the hex copy made each time it signs. None of them can be wiped, and
+the private key has to stay reachable for as long as the connection uses it.
+So `passphrase_env` protects the one secret that does **not** have to live in
+the VM; everything downstream of it does, and an attacker who can read the
+process's Lua heap gets the key either way.
+
+The round count in the key file is also bounded (`crypto.BCRYPT_MAX_ROUNDS`,
+2^20). It is read from the file rather than chosen by Hull, the derivation
+cannot be interrupted, and each round costs milliseconds - so a key declaring
+a few million rounds is not a slow key, it is a stalled process.
+
 ## 5. Through a WebSocket relay
 
 A Cloudflare Access tunnel (and most things shaped like one) is TLS carrying a

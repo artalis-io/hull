@@ -421,20 +421,34 @@ int hull_serve(int argc, char **argv)
             tls_ctx = hl_tls_client_ctx_create(ca_path, &kalloc);
             if (!tls_ctx)
                 log_warn("[hull:c] failed to load CA bundle from %s", ca_path);
-        } else if ((ca_path = hl_ca_bundle_find_system()) != NULL) {
-            log_info("[hull:c] using CA bundle: %s", ca_path);
-            tls_ctx = hl_tls_client_ctx_create(ca_path, &kalloc);
         } else {
+            /* The system store is TRIED, not trusted to work. A path being
+             * readable is not the same as its contents parsing, and the
+             * branch used to log "using CA bundle: X" and move on without
+             * looking at the result - so an unparseable store disabled
+             * outbound TLS silently, with a log line claiming the opposite.
+             * Fall through to the embedded bundle, which is what it is for.
+             *
+             * Not the same as --ca-bundle: an operator who NAMES a file
+             * has said which anchor to use, and quietly substituting another
+             * would be the wrong kind of helpful. That one fails closed. */
+            if ((ca_path = hl_ca_bundle_find_system()) != NULL) {
+                log_info("[hull:c] using CA bundle: %s", ca_path);
+                tls_ctx = hl_tls_client_ctx_create(ca_path, &kalloc);
+                if (!tls_ctx)
+                    log_warn("[hull:c] system CA bundle %s did not load; "
+                             "falling back to the embedded bundle", ca_path);
+            }
             const unsigned char *emb_data = NULL;
             size_t emb_len = 0;
-            if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
+            if (!tls_ctx && hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
                 log_info("[hull:c] using embedded CA bundle (%s)",
                          hl_embedded_ca_bundle_label());
                 tls_ctx = hl_tls_client_ctx_create_from_buf(
                     emb_data, emb_len, &kalloc);
                 if (!tls_ctx)
                     log_warn("[hull:c] failed to parse embedded CA bundle");
-            } else {
+            } else if (!tls_ctx) {
                 log_warn("[hull:c] no CA bundle found; TLS disabled "
                          "(use --no-ca-bundle, --ca-bundle PATH, or build "
                          "with HL_EMBED_CA_BUNDLE=1)");
@@ -496,6 +510,7 @@ int hull_serve(int argc, char **argv)
     rt->async_ctx = NULL;
     rt->fs_cfg = NULL;
     rt->env_cfg = NULL;
+    rt->ssh_policy = NULL;   /* points into `manifest`, freed just below */
 #ifdef HL_ENABLE_HTTP_CLIENT
     rt->http_cfg   = NULL;
     rt->client_tls = NULL;   /* before the ctx it points through goes */
