@@ -5302,6 +5302,32 @@ UTEST(lua_ssh_bridge, a_known_hosts_line_hashed_by_openssh_is_matched)
     cleanup_lua();
 }
 
+UTEST(lua_ssh_bridge, a_trust_store_over_the_real_hull_kv)
+{
+    /* The unit suite uses a stand-in with hull.kv's semantics; this is the
+     * real memory backend, so a change to cas or scan cannot drift past it. */
+    init_lua();
+    ASSERT_EQ(ssh_declare("app.manifest({ modules = { 'hull/ssh@1', 'hull/kv@1' } })"), 0);
+    int rc = run_as_stdlib(lua_rt.L,
+        "local ssh = require('hull.ssh')\n"
+        "local kv = require('hull.kv').open{ backend = 'memory', namespace = 'ssh-trust-test' }\n"
+        "local st = ssh.kv_store(kv)\n"
+        "local blob = 'k1'\n"
+        "assert(ssh.accept_host(st, 'web1', blob) == true)\n"
+        "assert(st.get('web1') == blob)\n"
+        "local ok, err = ssh.accept_host(st, 'web1', 'k2')\n"
+        "assert(ok == nil and err.code == 'already_trusted', 'no overwrite')\n"
+        "assert(st.entries().web1 == blob)\n"
+        "assert(ssh.forget_host(st, 'web1') == true and st.get('web1') == nil)\n"
+        "return 'ok'\n");
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(lua_rt.L, -1));
+    ASSERT_EQ(rc, LUA_OK);
+    EXPECT_STREQ(lua_tostring(lua_rt.L, -1), "ok");
+    lua_settop(lua_rt.L, 0);
+    ssh_undeclare();
+    cleanup_lua();
+}
+
 UTEST(lua_ssh_bridge, a_manifest_denial_carries_its_code)
 {
     /* So the SSH layer reports `denied` for the manifest and only for it. */
