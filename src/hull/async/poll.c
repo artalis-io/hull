@@ -529,8 +529,11 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
          * deregistered. Left unmapped it produced ready == 0, so the entry
          * was skipped and the watcher STAYED, and poll() returned
          * immediately on it forever: a silent 100% CPU spin. Deregister it.
-         * No consumer does this today (maybe_release removes the watcher
-         * before closing the fd), which is why it has never shown. */
+         * Consumers are expected to deregister before closing (net_stream's
+         * io_unwatch); this is the backstop for one that does not. It cannot
+         * cover a closed fd whose NUMBER is reused before this poll(): the
+         * kernel then reports the new file's readiness under the old
+         * registration, which is why deregistering first is the rule. */
         if (re & POLLNVAL) {
             poll_watcher_del(ctx, snaps[i].fd);
             continue;

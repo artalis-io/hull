@@ -70,6 +70,7 @@
 #include <keel/tls.h>
 
 struct HlAsyncOp;
+struct HlAsyncBackend;
 struct HlAsyncBackendCtx;
 struct HlAsyncBackendPool;
 
@@ -107,6 +108,11 @@ typedef struct HlNetStreamConfig {
     /* The loop to schedule on, borrowed. The binding passes the runtime's
      * async_ctx, which keeps this file free of any runtime knowledge. */
     struct HlAsyncBackendCtx *async;
+    /* The backend that owns `async`. NULL = hl_async_backend(), the one this
+     * binary links, which is what every runtime caller wants. Naming it lets
+     * a test drive the same stream over each backend in one binary: the
+     * lifetime rules differ between them in ways only a real loop shows. */
+    const struct HlAsyncBackend *backend;
     /* Worker pool, borrowed. REQUIRED: name resolution is blocking and runs
      * here rather than on the loop this transport is scheduled on. Both Hull
      * entry points create one, so NULL is a wiring error and is refused. */
