@@ -85,6 +85,7 @@ specific signature, parameter list, or return value.
 | Doc | What it covers |
 |---|---|
 | [`app_api_reference.md`](app_api_reference.md) | App-facing API reference moved out of `CLAUDE.md`: stdlib + middleware APIs, `hull/db` handles, WebSocket / SSE / multipart / static / SMTP / timers, WASM compute, GPU, buffer protocol, TUI API. |
+| [`kv_encryption_design.md`](kv_encryption_design.md) | Accepted design: authenticated encryption of `hull.kv` values at rest (threat model, wire format, cas / rotation semantics, a shared `hull.crypto.sealbox` with TOTP), with its decisions. Not yet implemented. |
 | [`ssh_cleanup_roadmap.md`](ssh_cleanup_roadmap.md) | What `hull/ssh` still needs to be safe, secure and usable, plus its architecture / DRY debt, grouped and ordered. |
 | [`jobs.md`](jobs.md) | `hull/jobs@1` - the durable DB-backed job queue (workers, steps/timers/signals/saga, observability). |
 | [`multipart.md`](multipart.md) | Streaming `multipart/form-data` uploads (`req:multipart()` / `req.multipart()`). |

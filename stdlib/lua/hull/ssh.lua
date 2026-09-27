@@ -154,6 +154,56 @@ function M.file_store(path, opts)
     }
 end
 
+--- A trust store in a hull.kv namespace (memory, SQLite, Postgres, ...), for a
+--- service whose workers or instances must agree on trust:
+---
+---   local kv = require("hull.kv").open{ backend = "postgres", database = db,
+---                                       namespace = "ssh-trust" }
+---   local trust = ssh.kv_store(kv)
+---
+--- Entries are stored under `opts.prefix` (default "hostkey:") plus the
+--- known_hosts name ("web1", "[web1]:2222"), so the namespace can hold other
+--- data too. Accepting a key is an atomic set-if-absent (the backend's
+--- compare-and-swap): two workers meeting the same new host at once cannot
+--- both record a key, and the second gets `already_trusted` - where a file
+--- store's last writer would silently win. So the backend must support
+--- compare-and-swap; listing entries also needs its scan.
+function M.kv_store(kv, opts)
+    opts = opts or {}
+    if type(kv) ~= "table" or type(kv.cas) ~= "function"
+       or not (kv.caps and kv.caps.compare_exchange) then
+        error("ssh.kv_store: needs a hull.kv handle whose backend supports "
+              .. "compare-and-swap", 2)
+    end
+    local prefix = opts.prefix or "hostkey:"
+    if type(prefix) ~= "string" then
+        error("ssh.kv_store: prefix must be a string", 2)
+    end
+
+    return {
+        get = function(name) return kv:get(prefix .. name) end,
+        put = function(name, blob)
+            if not kv:cas(prefix .. name, nil, blob) then
+                -- Someone recorded a key for this host between our check and
+                -- this write. Theirs stands; trust-on-first-use means first.
+                error({ code = "already_trusted",
+                        detail = name .. " already has a stored key; forget_host it first" }, 0)
+            end
+        end,
+        forget = function(name) kv:delete(prefix .. name) end,
+        entries = function()
+            local out = {}
+            if kv.caps.scan then
+                for _, key in ipairs(kv:scan(prefix)) do
+                    local blob = kv:get(key)
+                    if blob then out[key:sub(#prefix + 1)] = blob end
+                end
+            end
+            return out
+        end,
+    }
+end
+
 -- What an application holds is a HANDLE, never the machinery behind it.
 --
 -- A connection used to carry its transport in a plain field, `conn.t`. That

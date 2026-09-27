@@ -198,4 +198,87 @@ test("a store that cannot write says store_failed, not a raise", function()
     assert_eq(err.code, "store_failed")
 end)
 
+-- kv_store -------------------------------------------------------------------------
+--
+-- Over a stand-in with hull.kv's semantics (cas(k, nil, v) is set-if-absent and
+-- returns false when k exists; scan(prefix) lists keys). hull.kv itself needs
+-- the runtime; test_lua.c exercises the real one.
+
+local function fake_kv(caps)
+    local data = {}
+    local kv = { data = data,
+                 caps = caps or { compare_exchange = true, scan = true } }
+    function kv:get(k) return data[k] end
+    function kv:delete(k) data[k] = nil; return true end
+    function kv:cas(k, expected, new)
+        if data[k] ~= expected then return false end
+        data[k] = new
+        return true
+    end
+    function kv:scan(prefix)
+        local out = {}
+        for k in pairs(data) do
+            if k:sub(1, #prefix) == prefix then out[#out + 1] = k end
+        end
+        return out
+    end
+    return kv
+end
+
+test("kv_store keeps keys under its prefix, by known_hosts name", function()
+    local kv = fake_kv()
+    local st = ssh.kv_store(kv)
+    assert_eq(ssh.accept_host(st, "Web1", ED_A, 2222), true)
+    assert_eq(kv.data["hostkey:[web1]:2222"], ED_A)
+    assert_eq(st.get("[web1]:2222"), ED_A)
+end)
+
+test("kv_store will not overwrite a key, even under a race", function()
+    -- The ordinary case, and the race: a worker whose get() saw nothing, but
+    -- another recorded a key before its write. The write is set-if-absent, so
+    -- the first key stands and the second worker is told.
+    local kv = fake_kv()
+    local st = ssh.kv_store(kv)
+    ssh.accept_host(st, "web1", ED_A)
+    local ok, err = ssh.accept_host(st, "web1", ED_B)
+    assert_eq(ok, nil)
+    assert_eq(err.code, "already_trusted")
+
+    local racing = ssh.kv_store(kv)
+    local stale_get = racing.get
+    racing.get = function() return nil end            -- saw nothing...
+    ok, err = ssh.accept_host(racing, "web1", ED_B)   -- ...but lost the write
+    racing.get = stale_get
+    assert_eq(ok, nil)
+    assert_eq(err.code, "already_trusted")
+    assert_eq(kv.data["hostkey:web1"], ED_A, "the first key stands:")
+end)
+
+test("kv_store shares a namespace: entries lists only its own keys", function()
+    local kv = fake_kv()
+    kv.data["session:abc"] = "not a host key"
+    local st = ssh.kv_store(kv)
+    ssh.accept_host(st, "web1", ED_A)
+    ssh.accept_host(st, "web2", ED_B)
+    local e = st.entries()
+    assert_eq(e.web1, ED_A)
+    assert_eq(e.web2, ED_B)
+    assert_eq(e["session:abc"], nil)
+    assert_eq(ssh.forget_host(st, "web1"), true)
+    assert_eq(st.get("web1"), nil)
+    assert_eq(kv.data["session:abc"], "not a host key", "untouched:")
+end)
+
+test("kv_store refuses a backend without compare-and-swap", function()
+    local ok = pcall(ssh.kv_store, fake_kv({ scan = true }))
+    assert_eq(ok, false)
+end)
+
+test("kv_store takes its own prefix", function()
+    local kv = fake_kv()
+    local st = ssh.kv_store(kv, { prefix = "fleet-a/" })
+    ssh.accept_host(st, "web1", ED_A)
+    assert_eq(kv.data["fleet-a/web1"], ED_A)
+end)
+
 return {pass = pass, fail = fail}
