@@ -817,9 +817,32 @@ function Sftp:send(payload)
     self.t:send_packet(self.ch:data_message(sftp.frame(payload)))
 end
 
-function Sftp:next_id()
+-- Send one request and return ITS reply.
+--
+-- `build` is one of the sftp.build_* functions; the request id is allocated
+-- here and passed as its first argument. Every reply carries the id of the
+-- request it answers, and this refuses any other. Replies are otherwise
+-- matched by position alone, so one reply left unread - a CLOSE sent on an
+-- error path and never collected - shifts every later answer by one: an OPEN
+-- then receives the previous file's handle, and the data meant for one file
+-- is written into another. A mismatch is a broken session, not a recoverable
+-- answer, so it raises rather than being handed back as data.
+function Sftp:request(build, ...)
     self.id = self.id + 1
-    return self.id
+    local id = self.id
+    self:send(build(id, ...))
+    local r = self:recv()
+    if r.id ~= id then
+        error("ssh.sftp: reply for request " .. tostring(r.id)
+              .. " while waiting for " .. tostring(id))
+    end
+    return r
+end
+
+-- Close a handle and collect the server's answer, on every path. Returns the
+-- status reply.
+function Sftp:close_handle(handle)
+    return self:request(sftp.build_close, handle)
 end
 
 -- Pull one SFTP message, feeding the channel as data arrives.
@@ -845,8 +868,7 @@ end
 
 --- Resolve a path on the server. Returns the canonical path.
 function Sftp:realpath(path)
-    self:send(sftp.build_realpath(self:next_id(), path))
-    local r = self:recv()
+    local r = self:request(sftp.build_realpath, path)
     if r.type == "status" then return nil, r.text end
     return r.names[1] and r.names[1].filename
 end
@@ -855,63 +877,56 @@ end
 --- ones refused and why - refused rather than dropped, because a name
 --- rejected for traversal is something an operator should hear about.
 function Sftp:list(path)
-    self:send(sftp.build_opendir(self:next_id(), path))
-    local h = self:recv()
+    local h = self:request(sftp.build_opendir, path)
     if h.type ~= "handle" then return nil, h.text or h.type end
 
     local all = {}
     for _ = 1, 4096 do
-        self:send(sftp.build_readdir(self:next_id(), h.handle))
-        local r = self:recv()
+        local r = self:request(sftp.build_readdir, h.handle)
         if r.type == "status" then
             -- EOF ends the listing; anything else is a real failure.
             if not r.eof then
-                self:send(sftp.build_close(self:next_id(), h.handle))
+                self:close_handle(h.handle)
                 return nil, r.text
             end
             break
         end
         for _, e in ipairs(r.names) do all[#all + 1] = e end
     end
-    self:send(sftp.build_close(self:next_id(), h.handle))
-    self:recv()
+    self:close_handle(h.handle)
     return sftp.safe_names(all)
 end
 
 --- Read a whole file. `max` bounds it, because the server chooses the size.
 function Sftp:read(path, max)
     max = max or (16 * 1024 * 1024)
-    self:send(sftp.build_open(self:next_id(), path, sftp.FXF_READ))
-    local h = self:recv()
+    local h = self:request(sftp.build_open, path, sftp.FXF_READ)
     if h.type ~= "handle" then return nil, h.text or h.type end
 
     local parts, off, total = {}, 0, 0
     for _ = 1, 100000 do
-        self:send(sftp.build_read(self:next_id(), h.handle, off, 32768))
-        local r = self:recv()
+        local r = self:request(sftp.build_read, h.handle, off, 32768)
         if r.type == "status" then
             if r.eof then break end
-            self:send(sftp.build_close(self:next_id(), h.handle))
+            self:close_handle(h.handle)
             return nil, r.text
         end
         total = total + #r.data
         if total > max then
-            self:send(sftp.build_close(self:next_id(), h.handle))
+            self:close_handle(h.handle)
             return nil, "file exceeds the " .. tostring(max) .. " byte limit"
         end
         parts[#parts + 1] = r.data
         off = off + #r.data
     end
-    self:send(sftp.build_close(self:next_id(), h.handle))
-    self:recv()
+    self:close_handle(h.handle)
     return table.concat(parts)
 end
 
 --- Write a whole file, creating or truncating it.
 function Sftp:write(path, data)
-    self:send(sftp.build_open(self:next_id(), path,
-        sftp.FXF_WRITE | sftp.FXF_CREAT | sftp.FXF_TRUNC))
-    local h = self:recv()
+    local h = self:request(sftp.build_open, path,
+        sftp.FXF_WRITE | sftp.FXF_CREAT | sftp.FXF_TRUNC)
     if h.type ~= "handle" then return nil, h.text or h.type end
 
     local off = 0
@@ -919,16 +934,14 @@ function Sftp:write(path, data)
         -- Chunked to stay under the channel packet cap; the channel refuses
         -- an oversized message rather than truncating it.
         local chunk = data:sub(off + 1, off + 16384)
-        self:send(sftp.build_write(self:next_id(), h.handle, off, chunk))
-        local r = self:recv()
+        local r = self:request(sftp.build_write, h.handle, off, chunk)
         if r.type ~= "status" or not r.ok then
-            self:send(sftp.build_close(self:next_id(), h.handle))
+            self:close_handle(h.handle)
             return nil, r.text or r.type
         end
         off = off + #chunk
     end
-    self:send(sftp.build_close(self:next_id(), h.handle))
-    local st = self:recv()
+    local st = self:close_handle(h.handle)
     if st.type == "status" and not st.ok then return nil, st.text end
     return true
 end

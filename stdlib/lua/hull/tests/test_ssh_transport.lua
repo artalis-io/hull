@@ -686,4 +686,107 @@ test("stats span the connection, not just the current key", function()
 end)
 
 -- Return results for C test harness
+-- sftp ----------------------------------------------------------------------
+--
+-- The SFTP client over the same plaintext fake: a scripted server that
+-- answers each request in order. What is under test is the bookkeeping - that
+-- every request's reply is the one it gets, on the error paths too.
+
+local sftp_codec = require('hull.ssh.sftp')
+
+-- One SFTP message from the server, inside channel data.
+local function sreply(payload) return data(sftp_codec.frame(payload)) end
+local function s_version() return sreply(wire.writer():byte(2):uint32(3):build()) end
+local function s_handle(id, h)
+    return sreply(wire.writer():byte(102):uint32(id):string(h):build())
+end
+local function s_data(id, d)
+    return sreply(wire.writer():byte(103):uint32(id):string(d):build())
+end
+local function s_status(id, code)
+    return sreply(wire.writer():byte(101):uint32(id):uint32(code)
+                  :string(""):string("en"):build())
+end
+
+-- The SFTP requests we sent, decoded: { type, id, handle? } in order.
+local function sent_sftp(s)
+    local out = {}
+    for _, p in ipairs(s.written) do
+        local payload = packet.parse(p, 8)
+        if payload and payload:byte(1) == 94 then
+            local r = wire.reader(payload)
+            r:byte(); r:uint32()
+            local body = r:string()
+            local pos = 1
+            while pos + 4 <= #body do
+                local n = string.unpack(">I4", body, pos)
+                local req = body:sub(pos + 4, pos + 3 + n)
+                pos = pos + 4 + n
+                local rr = wire.reader(req)
+                local ty = rr:byte()
+                local e = { type = ty }
+                if ty ~= 1 then                    -- INIT carries no id
+                    e.id = rr:uint32()
+                    -- CLOSE (4), READ (5) and WRITE (6) name a handle next.
+                    if ty == 4 or ty == 5 or ty == 6 then e.handle = rr:string() end
+                end
+                out[#out + 1] = e
+            end
+        end
+    end
+    return out
+end
+
+test("a failed sftp read does not shift the next request's replies", function()
+    -- read() gives up when the file exceeds its limit and closes the handle.
+    -- That CLOSE's status used to be left unread, so the next OPEN received
+    -- it instead of its handle, and every reply after was off by one - a
+    -- write could land in the previous file.
+    local s = fake_stream(conf() .. ok_reply() .. s_version()
+        .. s_handle(1, "hA") .. s_data(2, "xxxxxxxx") .. s_status(3, 0)
+        .. s_handle(4, "hB") .. s_status(5, 0) .. s_status(6, 0), 11)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+
+    local d, err = f:read("/a", 4)
+    assert_eq(d, nil)
+    assert_eq(err:find("byte limit", 1, true) ~= nil, true, err)
+
+    assert_eq(f:write("/b", "hello"), true, "the write should succeed:")
+
+    local writes = {}
+    for _, e in ipairs(sent_sftp(s)) do
+        if e.type == 6 then writes[#writes + 1] = e.handle end
+    end
+    assert_eq(#writes, 1)
+    assert_eq(writes[1], "hB", "the write must go to the file it opened:")
+end)
+
+test("an sftp reply for another request is refused", function()
+    -- A reply is only ever the answer to the request with its id. Taking the
+    -- next one regardless is how a single stray reply becomes a write into
+    -- the wrong file.
+    local s = fake_stream(conf() .. ok_reply() .. s_version()
+        .. s_status(7, 0))
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    local err = assert_raises(function() f:realpath("/x") end)
+    assert_eq(err:find("reply for request 7 while waiting for 1", 1, true) ~= nil,
+              true, err)
+end)
+
+test("an sftp write closes its handle and reads the answer on failure", function()
+    local s = fake_stream(conf() .. ok_reply() .. s_version()
+        .. s_handle(1, "hW") .. s_status(2, 4) .. s_status(3, 0)
+        .. s_handle(4, "hR") .. s_data(5, "ok") .. s_status(6, 1)
+        .. s_status(7, 0), 5)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    local ok, err = f:write("/w", "data")
+    assert_eq(ok, nil)
+    assert_eq(type(err), "string")
+    -- The session is still in step: the next read gets its own replies.
+    assert_eq(f:read("/r"), "ok")
+end)
+
 return {pass = pass, fail = fail}
