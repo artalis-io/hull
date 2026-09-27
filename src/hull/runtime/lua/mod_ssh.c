@@ -186,13 +186,44 @@ static void ssh_on_resume(HlAsyncOp *op)
     ssh_unpark(o);                 /* one resume per park, see above */
 }
 
+/* The HTTP request a handler was parked in has gone away (client disconnect,
+ * server shutdown) and Keel is cancelling it; hl_async_ctx_cancel below frees
+ * the ctx. Before that happens, the stream must stop pointing at it: its own
+ * op is still armed, and the next bytes from the peer would otherwise resume
+ * a freed ctx through ssh_unpark.
+ *
+ * The stream is closed as well, not just detached. The coroutine was stopped
+ * part-way through an SSH exchange - a packet half-read, a channel half-open -
+ * so whatever the connection's protocol state is now, nothing can vouch for
+ * it; the next caller gets "closed" rather than a corrupt stream. Closing also
+ * completes the stream's op, so it can be armed again. */
+static void ssh_on_request_cancel(KlAsyncOp *kop, void *user_data)
+{
+    (void)kop;
+    HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
+    HlLuaSshStream *o = (HlLuaSshStream *)ctx->driver;
+    if (o && o->ctx == ctx) {
+        o->ctx = NULL;
+        if (o->s) hl_net_stream_close(o->s);
+    }
+    hl_async_ctx_cancel(ctx);
+}
+
 /* Park the calling coroutine on the stream's pending op. Returns 0 on success,
  * -1 if the park could not be armed - the caller must then report an error
- * rather than yield, because nothing would ever resume it. */
+ * rather than yield, because nothing would ever resume it.
+ *
+ * One park per stream: the entry points refuse a second caller before they
+ * touch the stream (see ssh_busy), and this re-checks so the invariant does
+ * not rest on every caller remembering. */
 static int ssh_park(HlLua *lua, HlLuaSshStream *o)
 {
+    if (o->ctx) return -1;
     HlAsyncOp *op = hl_net_stream_pending_op(o->s);
     if (!op) return -1;            /* nothing pending: resuming would hang */
+
+    const HlAsyncBackend *be = hl_async_backend();
+    if (!be || !be->op_suspend || !be->op_cancel) return -1;
 
     HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx,
                                           lua->base.alloc);
@@ -208,41 +239,55 @@ static int ssh_park(HlLua *lua, HlLuaSshStream *o)
     }
     ctx->cont     = cont;
     ctx->detached = (lua->active_conn == NULL);
+    ctx->driver   = o;             /* for ssh_on_request_cancel; not owned */
+    ctx->op.on_cancel = ssh_on_request_cancel;
 
-    if (!ctx->detached &&
-        hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn,
-                          (HlSuspendOp *)&ctx->op) < 0) {
-        cont->destroy(cont);
-        hl_async_ctx_free(ctx);
-        return -1;
-    }
-
-    o->ctx = ctx;
     hl_net_stream_set_user(o->s, o);
     op->on_resume = ssh_on_resume;
     op->on_cancel = ssh_on_resume;   /* a cancel must still un-park the coro */
 
-    /* Register the op with the backend, which is what makes the wake-up reach
-     * us at all.
+    /* Two suspensions, in an order chosen so a failure never has to undo the
+     * one that cannot be undone quietly.
      *
-     * cap/net_stream.c's wake() calls backend->op_complete, and op_complete
-     * looks up per-op state that ONLY op_suspend creates - with none it
-     * returns early and on_resume is never scheduled. Without this the
-     * connect completed, the stream reported itself ready, and the coroutine
-     * stayed parked forever.
+     * The stream's op with the async backend FIRST. That is what makes the
+     * wake-up reach us at all - cap/net_stream.c's wake() calls op_complete,
+     * which finds nothing to schedule unless op_suspend created per-op state -
+     * and it is retracted silently by op_cancel.
      *
-     * Armed LAST so the fallible setup above is already done: if the backend
-     * refuses (effectively OOM) there is nothing suspended to unwind but this
-     * binding's own state. */
-    const HlAsyncBackend *be = hl_async_backend();
-    if (!be || !be->op_suspend ||
-        be->op_suspend(lua->base.async_ctx, op) != 0) {
-        o->ctx = NULL;
+     * The HTTP request (attached callers only) LAST. Keel owns an op once it
+     * is suspended, and cancelling it runs on_cancel, which frees the ctx:
+     * unwinding that by hand after a later failure would free it twice. */
+    if (be->op_suspend(lua->base.async_ctx, op) != 0) {
         cont->destroy(cont);
         hl_async_ctx_free(ctx);
         return -1;
     }
+    if (!ctx->detached &&
+        hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn,
+                          (HlSuspendOp *)&ctx->op) < 0) {
+        be->op_cancel(lua->base.async_ctx, op);
+        cont->destroy(cont);
+        hl_async_ctx_free(ctx);
+        return -1;
+    }
+
+    /* Published only once both are armed: nothing can reach it before then,
+     * because op_complete defers its resume to a later tick. */
+    o->ctx = ctx;
     return 0;
+}
+
+/* A second coroutine using a stream that already has one parked on it (two
+ * requests sharing a module-level connection, say). Refused before anything
+ * is touched: a read would overwrite the parked read's size, and a write the
+ * parked write's anchored bytes - which the first writer's retry would then
+ * send as its own. The SSH layer above has one reader per connection, so the
+ * refusal names the caller's mistake rather than queueing behind it. */
+static int ssh_busy(lua_State *L, const HlLuaSshStream *o)
+{
+    if (!o->ctx) return 0;
+    push_err(L, "busy: another coroutine is waiting on this connection");
+    return 1;
 }
 
 /* ── read / write ───────────────────────────────────────────────────── */
@@ -287,6 +332,7 @@ static int ssh_read_step(lua_State *L, HlLuaSshStream *o)
 static int lua_ssh_read(lua_State *L)
 {
     HlLuaSshStream *o = check_stream(L);
+    if (ssh_busy(L, o)) return 2;
     lua_Integer want = luaL_optinteger(L, 2, 4096);
     if (want <= 0) return push_err(L, "read size must be positive");
 
@@ -334,6 +380,7 @@ static int ssh_write_step(lua_State *L, HlLuaSshStream *o, int ud_idx)
 static int lua_ssh_write(lua_State *L)
 {
     HlLuaSshStream *o = check_stream(L);
+    if (ssh_busy(L, o)) return 2;
     size_t len;
     luaL_checklstring(L, 2, &len);
     if (!len) { lua_pushboolean(L, 1); return 1; }

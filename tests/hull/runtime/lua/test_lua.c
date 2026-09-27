@@ -47,7 +47,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
+#include "hull/shared/async_backend.h"
 #include "../../test_tmpdir.h"
 #include "../../../../src/hull/runtime/lua/internal.h"
 
@@ -4936,16 +4940,42 @@ UTEST(lua_ssh_bridge, an_undeclared_manifest_denies_every_connect)
     cleanup_lua();
 }
 
+/* Declare a manifest and apply its ssh grant to the runtime, the way
+ * serve_cli.c does after load. app.manifest alone does not: the policy is
+ * wired by the entry point, so without this every connect is refused as
+ * "grants nothing" - which contains the words "hosts" and "users", and once
+ * let host and user tests pass without ever reaching those rules. */
+static HlManifest ssh_test_manifest;
+static int        ssh_test_manifest_live;
+
+static int ssh_declare(const char *src)
+{
+    if (luaL_dostring(lua_rt.L, src) != LUA_OK) return -1;
+    if (ssh_test_manifest_live) hl_manifest_free(&ssh_test_manifest);
+    ssh_test_manifest_live = 0;
+    if (hl_manifest_extract_lua(lua_rt.L, &ssh_test_manifest,
+                                lua_rt.base.alloc) != 0) return -1;
+    ssh_test_manifest_live = 1;
+    lua_rt.base.ssh_policy = &ssh_test_manifest.ssh;
+    return 0;
+}
+
+static void ssh_undeclare(void)
+{
+    lua_rt.base.ssh_policy = NULL;
+    if (ssh_test_manifest_live) hl_manifest_free(&ssh_test_manifest);
+    ssh_test_manifest_live = 0;
+}
+
 UTEST(lua_ssh_bridge, a_host_outside_the_grant_is_denied)
 {
     init_lua();
-    int rc = luaL_dostring(lua_rt.L,
+    ASSERT_EQ(ssh_declare(
         "app.manifest({ modules = { 'hull/ssh@1' },\n"
         "  ssh = { connect = { hosts = { 'spark.local' }, ports = { 22 },\n"
-        "                      users = { 'operator' } } } })\n");
-    ASSERT_EQ(rc, LUA_OK);
+        "                      users = { 'operator' } } } })\n"), 0);
 
-    rc = run_as_stdlib(lua_rt.L,
+    int rc = run_as_stdlib(lua_rt.L,
         "local s = require('hull.ssh._stream')\n"
         "local h, err = s.connect({ host = 'evil.example.com', port = 22,\n"
         "                           user = 'operator' })\n"
@@ -4954,9 +4984,9 @@ UTEST(lua_ssh_bridge, a_host_outside_the_grant_is_denied)
     ASSERT_EQ(rc, LUA_OK);
     const char *err = lua_tostring(lua_rt.L, -1);
     ASSERT_NE(err, NULL);
-    ASSERT_TRUE_MSG(strstr(err, "hosts") != NULL,
-                    "the denial should name the rule that refused");
+    ASSERT_STREQ(err, "host is not in ssh.connect.hosts");
     lua_pop(lua_rt.L, 1);
+    ssh_undeclare();
     cleanup_lua();
 }
 
@@ -4965,13 +4995,12 @@ UTEST(lua_ssh_bridge, a_user_outside_the_grant_is_denied)
     /* The login is the part a reach grant cannot express, so it gets its own
      * case: the host and port here are both permitted. */
     init_lua();
-    int rc = luaL_dostring(lua_rt.L,
+    ASSERT_EQ(ssh_declare(
         "app.manifest({ modules = { 'hull/ssh@1' },\n"
         "  ssh = { connect = { hosts = { 'spark.local' }, ports = { 22 },\n"
-        "                      users = { 'operator' } } } })\n");
-    ASSERT_EQ(rc, LUA_OK);
+        "                      users = { 'operator' } } } })\n"), 0);
 
-    rc = run_as_stdlib(lua_rt.L,
+    int rc = run_as_stdlib(lua_rt.L,
         "local s = require('hull.ssh._stream')\n"
         "local h, err = s.connect({ host = 'spark.local', port = 22,\n"
         "                           user = 'root' })\n"
@@ -4980,10 +5009,130 @@ UTEST(lua_ssh_bridge, a_user_outside_the_grant_is_denied)
     ASSERT_EQ(rc, LUA_OK);
     const char *err = lua_tostring(lua_rt.L, -1);
     ASSERT_NE(err, NULL);
-    ASSERT_TRUE_MSG(strstr(err, "users") != NULL,
-                    "the denial should name the user rule");
+    ASSERT_STREQ(err, "user is not in ssh.connect.users");
     lua_pop(lua_rt.L, 1);
+    ssh_undeclare();
     cleanup_lua();
+}
+
+/* Start `src` in a coroutine of its own, compiled under a stdlib chunk name,
+ * the way the runtime starts a handler: active_co is what a park captures to
+ * resume later. Returns lua_resume's status. A coroutine that finishes here is
+ * unpinned here; one that yields is unpinned by hl_lua_async_resume when it
+ * finishes. */
+static int ssh_co_start(HlLua *lua, const char *src, lua_State **co_out)
+{
+    lua_State *L  = lua->L;
+    lua_State *co = lua_newthread(L);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    *co_out = co;
+    if (luaL_loadbuffer(co, src, strlen(src), "@hull.ssh.probe") != LUA_OK)
+        return -1;
+    lua->active_co         = co;
+    lua->active_conn       = NULL;          /* detached, as under app.main */
+    lua->active_thread_ref = ref;
+    lua->dispatch_depth++;
+    int nres = 0;
+    int st = lua_resume(co, L, 0, &nres);
+    if (st != LUA_YIELD) {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        lua->active_co = NULL;
+        lua->active_thread_ref = LUA_NOREF;
+        lua->dispatch_depth--;
+    }
+    return st;
+}
+
+static void ssh_tick_until_done(const HlAsyncBackend *be, HlAsyncBackendCtx *ctx,
+                                lua_State *co)
+{
+    for (int i = 0; i < 250 && lua_status(co) == LUA_YIELD; i++)
+        be->tick(ctx, 20);
+}
+
+UTEST(lua_ssh_bridge, a_second_waiter_on_one_stream_is_refused_not_parked)
+{
+    /* Two coroutines sharing one connection - two requests using a
+     * module-level SSH connection, say. The stream has a single park slot. A
+     * second read used to overwrite it: the first coroutine was never resumed
+     * again, and a second WRITE also replaced the first writer's anchored
+     * bytes, which the first writer's retry would then have sent. */
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(lfd, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family      = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(bind(lfd, (struct sockaddr *)&a, sizeof a), 0);
+    ASSERT_EQ(listen(lfd, 4), 0);
+    socklen_t alen = sizeof a;
+    ASSERT_EQ(getsockname(lfd, (struct sockaddr *)&a, &alen), 0);
+    int port = ntohs(a.sin_port);
+
+    init_lua();
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    ASSERT_EQ(be->pool_create(&lua_rt.base.thread_pool, lua_rt.base.async_ctx,
+                              2, 16), 0);
+
+    char manifest[256];
+    snprintf(manifest, sizeof manifest,
+        "app.manifest({ modules = { 'hull/ssh@1' },\n"
+        "  ssh = { connect = { hosts = { '127.0.0.1' }, ports = { %d },\n"
+        "                      users = { 'operator' } } } })\n", port);
+    ASSERT_EQ(ssh_declare(manifest), 0);
+
+    /* A: connect. Parks while the connect completes, then leaves the handle
+     * in a global the other coroutines share. */
+    char connect_src[256];
+    snprintf(connect_src, sizeof connect_src,
+        "H = assert(require('hull.ssh._stream').connect{\n"
+        "  host = '127.0.0.1', port = %d, user = 'operator' })\n", port);
+    lua_State *co_a, *co_b, *co_c;
+    int st = ssh_co_start(&lua_rt, connect_src, &co_a);
+    if (st != LUA_OK && st != LUA_YIELD)
+        fprintf(stderr, "connect: %s\n", lua_tostring(co_a, -1));
+    ASSERT_TRUE(st == LUA_OK || st == LUA_YIELD);
+    ssh_tick_until_done(be, lua_rt.base.async_ctx, co_a);
+    ASSERT_EQ_MSG(lua_status(co_a), LUA_OK, "connect should complete");
+    int peer = accept(lfd, NULL, NULL);
+    ASSERT_GE(peer, 0);
+
+    /* B: nothing has arrived, so the read parks. */
+    st = ssh_co_start(&lua_rt, "return H:read(16)\n", &co_b);
+    ASSERT_EQ_MSG(st, LUA_YIELD, "the first reader parks");
+
+    /* C: the stream already has a waiter. Refused at once, not parked. */
+    st = ssh_co_start(&lua_rt,
+        "local d, e = H:read(16)\n"
+        "assert(d == nil, 'a second reader must not get data')\n"
+        "return e\n", &co_c);
+    EXPECT_EQ_MSG(st, LUA_OK, "the second reader must be refused, not parked");
+    if (st == LUA_OK) {
+        const char *err = lua_tostring(co_c, -1);
+        EXPECT_TRUE_MSG(err && strstr(err, "busy"), "the refusal says why");
+    }
+
+    /* B is still the one that gets the data: its park survived C. */
+    ASSERT_EQ(send(peer, "ping", 4, 0), (ssize_t)4);
+    ssh_tick_until_done(be, lua_rt.base.async_ctx, co_b);
+    EXPECT_EQ_MSG(lua_status(co_b), LUA_OK, "the first reader resumes");
+    if (lua_status(co_b) == LUA_OK)
+        EXPECT_STREQ(lua_tostring(co_b, -1), "ping");
+
+    /* Stream teardown runs through the backend, so the loop outlives it. */
+    ASSERT_EQ(luaL_dostring(lua_rt.L, "H:close(); H = nil"), LUA_OK);
+    HlAsyncBackendCtx  *actx = lua_rt.base.async_ctx;
+    HlAsyncBackendPool *pool = lua_rt.base.thread_pool;
+    ssh_undeclare();
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->pool_free(pool);
+    be->free(actx);
+    close(peer);
+    close(lfd);
 }
 
 #endif /* HL_ENABLE_HTTP */
