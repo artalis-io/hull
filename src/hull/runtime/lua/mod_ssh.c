@@ -126,6 +126,32 @@ static int push_err(lua_State *L, const char *msg)
     return 2;
 }
 
+/* The short code for a transport failure: what the protocol layer branches on,
+ * so it never has to match on the prose next to it. Name resolution, refusal
+ * and a failed TLS handshake are all "the connection could not be made";
+ * separating them would give a caller distinctions it cannot act on. */
+static const char *net_err_code(int rc)
+{
+    switch (rc) {
+    case HL_NET_E_TIMEOUT:  return "timeout";
+    case HL_NET_E_DEADLINE: return "deadline";
+    case HL_NET_E_CLOSED:   return "closed";
+    case HL_NET_E_RESOLVE:
+    case HL_NET_E_CONNECT:
+    case HL_NET_E_TLS:      return "connect_failed";
+    default:                return "io_error";
+    }
+}
+
+/* Push (nil, message, code). */
+static int push_net_err(lua_State *L, int rc)
+{
+    lua_pushnil(L);
+    lua_pushstring(L, hl_net_stream_strerror(rc));
+    lua_pushstring(L, net_err_code(rc));
+    return 3;
+}
+
 /* Hand a parked coroutine back, once.
  *
  * Declared before close because close has to use it: a read parked on this
@@ -335,7 +361,7 @@ static int ssh_read_step(lua_State *L, HlLuaSshStream *o)
     lua_pop(L, 1);                            /* drop the empty result */
 
     if (n != HL_NET_E_AGAIN)
-        return push_err(L, hl_net_stream_strerror((int)n));
+        return push_net_err(L, (int)n);
 
     HlLua *lua = get_hl_lua(L);
     if (!lua || ssh_park(lua, o) != 0)
@@ -392,7 +418,7 @@ static int ssh_write_step(lua_State *L, HlLuaSshStream *o, int ud_idx)
         return 1;
     }
     if (rc != HL_NET_E_AGAIN)
-        return push_err(L, hl_net_stream_strerror(rc));
+        return push_net_err(L, rc);
 
     HlLua *lua = get_hl_lua(L);
     if (!lua || ssh_park(lua, o) != 0)
@@ -442,7 +468,7 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o)
     hl_net_stream_set_user(o->s, NULL);
     hl_net_stream_free(o->s);
     o->s = NULL;
-    return push_err(L, hl_net_stream_strerror(rc));
+    return push_net_err(L, rc);
 }
 
 /*
@@ -543,7 +569,9 @@ static int lua_ssh_connect(lua_State *L)
         auth = hl_ssh_check_tunnel(lua->base.ssh_policy, via_host, via_port);
     if (auth != HL_NET_ALLOW) {
         lua_settop(L, base);
-        return push_err(L, hl_cap_net_auth_reason(auth));
+        push_err(L, hl_cap_net_auth_reason(auth));
+        lua_pushstring(L, "denied");       /* the manifest said no */
+        return 3;
     }
 
     HlNetStreamConfig cfg;
@@ -596,7 +624,7 @@ static int lua_ssh_connect(lua_State *L)
     int rc = hl_net_stream_connect(&s, &cfg);
     lua_settop(L, base);                 /* every option lookup, at once */
 
-    if (!s) return push_err(L, hl_net_stream_strerror(rc));
+    if (!s) return push_net_err(L, rc);
 
     HlLuaSshStream *o = lua_newuserdatauv(L, sizeof *o, 1);
     memset(o, 0, sizeof *o);
@@ -610,10 +638,41 @@ static int lua_ssh_connect(lua_State *L)
 
 /* ── registration ───────────────────────────────────────────────────── */
 
+/* stream:deadline(ms) / stream:wait(ms): the two bounds in cap/net_stream.h.
+ * Neither ends the stream; an expiry comes back from the read or write it
+ * interrupted as (nil, message, "deadline" | "timeout"). 0 clears. */
+static int bound_arg(lua_State *L)
+{
+    lua_Integer ms = luaL_checkinteger(L, 2);
+    if (ms < 0 || ms > 24LL * 3600 * 1000)
+        luaL_error(L, "ssh: a wait bound must be 0..86400000 ms");
+    return (int)ms;
+}
+
+static int lua_ssh_deadline(lua_State *L)
+{
+    require_stdlib_caller(L);
+    HlLuaSshStream *o = check_stream(L);
+    int ms = bound_arg(L);
+    if (o->s) hl_net_stream_deadline(o->s, ms);
+    return 0;
+}
+
+static int lua_ssh_wait(lua_State *L)
+{
+    require_stdlib_caller(L);
+    HlLuaSshStream *o = check_stream(L);
+    int ms = bound_arg(L);
+    if (o->s) hl_net_stream_wait(o->s, ms);
+    return 0;
+}
+
 static const luaL_Reg ssh_stream_methods[] = {
-    {"read",  lua_ssh_read},
-    {"write", lua_ssh_write},
-    {"close", lua_ssh_close},
+    {"read",     lua_ssh_read},
+    {"write",    lua_ssh_write},
+    {"close",    lua_ssh_close},
+    {"deadline", lua_ssh_deadline},
+    {"wait",     lua_ssh_wait},
     {NULL, NULL}
 };
 

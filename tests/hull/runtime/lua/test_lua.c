@@ -5078,6 +5078,102 @@ static void ssh_tick_until_done(const HlAsyncBackend *be, HlAsyncBackendCtx *ctx
         be->tick(ctx, 20);
 }
 
+/* A stream the SSH stdlib has connected to a loopback listener, on a real
+ * loop, with the manifest applied: what every bridge test below starts from.
+ * The handle is the global H, shared by the coroutines a test starts. */
+typedef struct {
+    const HlAsyncBackend *be;
+    int lfd, peer, port;
+} SshBridgeFix;
+
+/* Returns 0, or the step that failed. */
+static int ssh_bridge_open(SshBridgeFix *bf)
+{
+    memset(bf, 0, sizeof *bf);
+    bf->lfd = bf->peer = -1;
+    bf->be = hl_async_backend();
+    if (!bf->be) return 1;
+
+    bf->lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (bf->lfd < 0) return 2;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family      = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t alen = sizeof a;
+    if (bind(bf->lfd, (struct sockaddr *)&a, sizeof a) != 0 ||
+        listen(bf->lfd, 4) != 0 ||
+        getsockname(bf->lfd, (struct sockaddr *)&a, &alen) != 0) return 3;
+    bf->port = ntohs(a.sin_port);
+
+    init_lua();
+    if (bf->be->init(&lua_rt.base.async_ctx, NULL) != 0) return 4;
+    if (bf->be->pool_create(&lua_rt.base.thread_pool, lua_rt.base.async_ctx,
+                            2, 16) != 0) return 5;
+
+    char src[320];
+    snprintf(src, sizeof src,
+        "app.manifest({ modules = { 'hull/ssh@1' },\n"
+        "  ssh = { connect = { hosts = { '127.0.0.1' }, ports = { %d },\n"
+        "                      users = { 'operator' } } } })\n", bf->port);
+    if (ssh_declare(src) != 0) return 6;
+
+    snprintf(src, sizeof src,
+        "H = assert(require('hull.ssh._stream').connect{\n"
+        "  host = '127.0.0.1', port = %d, user = 'operator' })\n", bf->port);
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt, src, &co);
+    if (st != LUA_OK && st != LUA_YIELD) {
+        fprintf(stderr, "connect: %s\n", lua_tostring(co, -1));
+        return 7;
+    }
+    ssh_tick_until_done(bf->be, lua_rt.base.async_ctx, co);
+    if (lua_status(co) != LUA_OK) return 8;
+    bf->peer = accept(bf->lfd, NULL, NULL);
+    return bf->peer >= 0 ? 0 : 9;
+}
+
+/* Start `src` in its own coroutine and run the loop until it finishes.
+ * Returns the coroutine, finished or not. */
+static lua_State *ssh_bridge_run(SshBridgeFix *bf, const char *src)
+{
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt, src, &co);
+    if (st == LUA_YIELD) ssh_tick_until_done(bf->be, lua_rt.base.async_ctx, co);
+    return co;
+}
+
+static void ssh_bridge_close(SshBridgeFix *bf)
+{
+    /* Stream teardown runs through the backend, so the loop outlives it. */
+    if (lua_initialized) run_as_stdlib(lua_rt.L, "if H then H:close() end; H = nil");
+    HlAsyncBackendCtx  *actx = lua_rt.base.async_ctx;
+    HlAsyncBackendPool *pool = lua_rt.base.thread_pool;
+    ssh_undeclare();
+    cleanup_lua();
+    if (bf->be && actx) {
+        bf->be->tick(actx, 0);
+        if (pool) bf->be->pool_free(pool);
+        bf->be->free(actx);
+    }
+    if (bf->peer >= 0) close(bf->peer);
+    if (bf->lfd >= 0) close(bf->lfd);
+}
+
+UTEST(lua_ssh_bridge, a_read_size_is_not_an_allocation_size)
+{
+    /* The SSH layer once passed a peer-declared packet length straight
+     * through, and the binding sized its buffer from it: 1 GiB here would
+     * exceed the VM's memory limit. */
+    SshBridgeFix bf;
+    ASSERT_EQ(ssh_bridge_open(&bf), 0);
+    ASSERT_EQ(send(bf.peer, "hi", 2, 0), (ssize_t)2);
+    lua_State *co = ssh_bridge_run(&bf, "return H:read(1 << 30)\n");
+    EXPECT_EQ_MSG(lua_status(co), LUA_OK, "a huge read size must not fail");
+    EXPECT_STREQ(lua_tostring(co, -1), "hi");
+    ssh_bridge_close(&bf);
+}
+
 UTEST(lua_ssh_bridge, a_second_waiter_on_one_stream_is_refused_not_parked)
 {
     /* Two coroutines sharing one connection - two requests using a
@@ -5085,66 +5181,16 @@ UTEST(lua_ssh_bridge, a_second_waiter_on_one_stream_is_refused_not_parked)
      * second read used to overwrite it: the first coroutine was never resumed
      * again, and a second WRITE also replaced the first writer's anchored
      * bytes, which the first writer's retry would then have sent. */
-    const HlAsyncBackend *be = hl_async_backend();
-    ASSERT_TRUE(be != NULL);
-
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    ASSERT_GE(lfd, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof a);
-    a.sin_family      = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    ASSERT_EQ(bind(lfd, (struct sockaddr *)&a, sizeof a), 0);
-    ASSERT_EQ(listen(lfd, 4), 0);
-    socklen_t alen = sizeof a;
-    ASSERT_EQ(getsockname(lfd, (struct sockaddr *)&a, &alen), 0);
-    int port = ntohs(a.sin_port);
-
-    init_lua();
-    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
-    ASSERT_EQ(be->pool_create(&lua_rt.base.thread_pool, lua_rt.base.async_ctx,
-                              2, 16), 0);
-
-    char manifest[256];
-    snprintf(manifest, sizeof manifest,
-        "app.manifest({ modules = { 'hull/ssh@1' },\n"
-        "  ssh = { connect = { hosts = { '127.0.0.1' }, ports = { %d },\n"
-        "                      users = { 'operator' } } } })\n", port);
-    ASSERT_EQ(ssh_declare(manifest), 0);
-
-    /* A: connect. Parks while the connect completes, then leaves the handle
-     * in a global the other coroutines share. */
-    char connect_src[256];
-    snprintf(connect_src, sizeof connect_src,
-        "H = assert(require('hull.ssh._stream').connect{\n"
-        "  host = '127.0.0.1', port = %d, user = 'operator' })\n", port);
-    lua_State *co_a, *co_b, *co_c;
-    int st = ssh_co_start(&lua_rt, connect_src, &co_a);
-    if (st != LUA_OK && st != LUA_YIELD)
-        fprintf(stderr, "connect: %s\n", lua_tostring(co_a, -1));
-    ASSERT_TRUE(st == LUA_OK || st == LUA_YIELD);
-    ssh_tick_until_done(be, lua_rt.base.async_ctx, co_a);
-    ASSERT_EQ_MSG(lua_status(co_a), LUA_OK, "connect should complete");
-    int peer = accept(lfd, NULL, NULL);
-    ASSERT_GE(peer, 0);
-
-    /* A read size is not an allocation size. The SSH layer once passed a
-     * peer-declared packet length straight through, and the binding sized
-     * its buffer from it: 1 GiB here would exceed the VM's memory limit. */
-    lua_State *co_r;
-    ASSERT_EQ(send(peer, "hi", 2, 0), (ssize_t)2);
-    st = ssh_co_start(&lua_rt, "return H:read(1 << 30)\n", &co_r);
-    ASSERT_TRUE(st == LUA_OK || st == LUA_YIELD);
-    ssh_tick_until_done(be, lua_rt.base.async_ctx, co_r);
-    ASSERT_EQ_MSG(lua_status(co_r), LUA_OK, "a huge read size must not fail");
-    EXPECT_STREQ(lua_tostring(co_r, -1), "hi");
+    SshBridgeFix bf;
+    ASSERT_EQ(ssh_bridge_open(&bf), 0);
 
     /* B: nothing has arrived, so the read parks. */
-    st = ssh_co_start(&lua_rt, "return H:read(16)\n", &co_b);
-    ASSERT_EQ_MSG(st, LUA_YIELD, "the first reader parks");
+    lua_State *co_b, *co_c;
+    ASSERT_EQ_MSG(ssh_co_start(&lua_rt, "return H:read(16)\n", &co_b), LUA_YIELD,
+                  "the first reader parks");
 
     /* C: the stream already has a waiter. Refused at once, not parked. */
-    st = ssh_co_start(&lua_rt,
+    int st = ssh_co_start(&lua_rt,
         "local d, e = H:read(16)\n"
         "assert(d == nil, 'a second reader must not get data')\n"
         "return e\n", &co_c);
@@ -5155,17 +5201,23 @@ UTEST(lua_ssh_bridge, a_second_waiter_on_one_stream_is_refused_not_parked)
     }
 
     /* B is still the one that gets the data: its park survived C. */
-    ASSERT_EQ(send(peer, "ping", 4, 0), (ssize_t)4);
-    ssh_tick_until_done(be, lua_rt.base.async_ctx, co_b);
+    ASSERT_EQ(send(bf.peer, "ping", 4, 0), (ssize_t)4);
+    ssh_tick_until_done(bf.be, lua_rt.base.async_ctx, co_b);
     EXPECT_EQ_MSG(lua_status(co_b), LUA_OK, "the first reader resumes");
     if (lua_status(co_b) == LUA_OK)
         EXPECT_STREQ(lua_tostring(co_b, -1), "ping");
+    ssh_bridge_close(&bf);
+}
 
-    /* A stream that reaches application code is inert there. Only connect
-     * used to check its caller, so a handle that leaked (it did, as
-     * conn.t.stream) could read and write raw bytes to a granted host. */
+UTEST(lua_ssh_bridge, app_code_holding_a_stream_is_refused)
+{
+    /* Only connect used to check its caller, so a handle that leaked (it did,
+     * as conn.t.stream) could read and write raw bytes to a granted host. */
+    SshBridgeFix bf;
+    ASSERT_EQ(ssh_bridge_open(&bf), 0);
     const char *app_calls[] = { "return H:read(1)", "return H:write('x')",
-                                "return H:close()" };
+                                "return H:close()", "return H:wait(1)",
+                                "return H:deadline(1)" };
     for (size_t i = 0; i < sizeof app_calls / sizeof app_calls[0]; i++) {
         int rc = luaL_dostring(lua_rt.L, app_calls[i]);
         EXPECT_NE_MSG(rc, LUA_OK, app_calls[i]);
@@ -5176,18 +5228,58 @@ UTEST(lua_ssh_bridge, a_second_waiter_on_one_stream_is_refused_not_parked)
         }
         lua_settop(lua_rt.L, 0);
     }
+    ssh_bridge_close(&bf);
+}
 
-    /* Stream teardown runs through the backend, so the loop outlives it. */
-    ASSERT_EQ(run_as_stdlib(lua_rt.L, "H:close(); H = nil"), LUA_OK);
-    HlAsyncBackendCtx  *actx = lua_rt.base.async_ctx;
-    HlAsyncBackendPool *pool = lua_rt.base.thread_pool;
+UTEST(lua_ssh_bridge, a_bounded_wait_comes_back_coded_and_the_stream_lives)
+{
+    /* A quiet server used to hold a read forever. The wait bound returns it
+     * as (nil, message, "timeout"); a deadline as "deadline"; and the stream
+     * still reads afterwards, because what an expiry means is the protocol
+     * layer's decision. */
+    SshBridgeFix bf;
+    ASSERT_EQ(ssh_bridge_open(&bf), 0);
+
+    lua_State *co = ssh_bridge_run(&bf,
+        "H:wait(50)\n"
+        "local d, m, code = H:read(8)\n"
+        "return code\n");
+    ASSERT_EQ(lua_status(co), LUA_OK);
+    EXPECT_STREQ(lua_tostring(co, -1), "timeout");
+
+    co = ssh_bridge_run(&bf,
+        "H:wait(0); H:deadline(50)\n"
+        "local d, m, code = H:read(8)\n"
+        "return code\n");
+    ASSERT_EQ(lua_status(co), LUA_OK);
+    EXPECT_STREQ(lua_tostring(co, -1), "deadline");
+
+    ASSERT_EQ(send(bf.peer, "ok", 2, 0), (ssize_t)2);
+    co = ssh_bridge_run(&bf, "H:deadline(0)\nreturn H:read(8)\n");
+    ASSERT_EQ(lua_status(co), LUA_OK);
+    EXPECT_STREQ(lua_tostring(co, -1), "ok");
+
+    /* A bound outside 0..24 h is a caller error, not a silent clamp. */
+    EXPECT_NE(run_as_stdlib(lua_rt.L, "H:wait(-1)"), LUA_OK);
+    lua_settop(lua_rt.L, 0);
+    ssh_bridge_close(&bf);
+}
+
+UTEST(lua_ssh_bridge, a_manifest_denial_carries_its_code)
+{
+    /* So the SSH layer reports `denied` for the manifest and only for it. */
+    init_lua();
+    ASSERT_EQ(ssh_declare(
+        "app.manifest({ modules = { 'hull/ssh@1' },\n"
+        "  ssh = { connect = { hosts = { 'spark.local' }, ports = { 22 },\n"
+        "                      users = { 'operator' } } } })\n"), 0);
+    ASSERT_EQ(run_as_stdlib(lua_rt.L,
+        "return select(3, require('hull.ssh._stream').connect({\n"
+        "  host = 'elsewhere', port = 22, user = 'operator' }))"), LUA_OK);
+    EXPECT_STREQ(lua_tostring(lua_rt.L, -1), "denied");
+    lua_settop(lua_rt.L, 0);
     ssh_undeclare();
     cleanup_lua();
-    be->tick(actx, 0);
-    be->pool_free(pool);
-    be->free(actx);
-    close(peer);
-    close(lfd);
 }
 
 #endif /* HL_ENABLE_HTTP */

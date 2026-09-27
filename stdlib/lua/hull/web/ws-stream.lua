@@ -289,10 +289,10 @@ function Stream:_need(n)
     if #self.inbuf >= n then return true end
     local parts, have = { self.inbuf }, #self.inbuf
     while have < n do
-        local chunk, err = self.s:read(n - have)
+        local chunk, err, code = self.s:read(n - have)
         if chunk == nil then
             self.inbuf = table.concat(parts)
-            return nil, err
+            return nil, err, code
         end
         if chunk == "" then
             self.inbuf = table.concat(parts)
@@ -313,8 +313,8 @@ function Stream:_pump()
         -- Ask for the header, then for exactly the frame it describes. Nothing
         -- is appended onto a growing buffer, so a peer that dribbles a 16 KiB
         -- frame out a byte at a time costs 16 KiB of copying, not megabytes.
-        local ok, err = self:_need(2)
-        if ok == nil then return nil, err end
+        local ok, err, code = self:_need(2)
+        if ok == nil then return nil, err, code end
         if not ok then break end                 -- EOF
 
         -- Two bytes is only enough when the length is inline. An extended
@@ -323,15 +323,15 @@ function Stream:_pump()
         -- this is a handful of tiny reads even from the worst transport.
         local total = M.frame_size(self.inbuf)
         while not total do
-            local more; more, err = self:_need(#self.inbuf + 1)
-            if more == nil then return nil, err end
+            local more; more, err, code = self:_need(#self.inbuf + 1)
+            if more == nil then return nil, err, code end
             if not more then break end           -- EOF inside the header
             total = M.frame_size(self.inbuf)
         end
         if not total then break end
 
-        local got; got, err = self:_need(total)
-        if got == nil then return nil, err end
+        local got; got, err, code = self:_need(total)
+        if got == nil then return nil, err, code end
         if not got then break end                -- EOF mid-frame
 
         local frame, used = M.decode(self.inbuf)
@@ -346,7 +346,8 @@ function Stream:_pump()
         elseif op == M.OP_PING then
             -- Answering is required (section 5.5.2), and a peer that pings to
             -- check liveness will hang up if we do not.
-            self:_send(M.OP_PONG, frame.payload)
+            local sent, serr, scode = self:_send(M.OP_PONG, frame.payload)
+            if not sent then return nil, serr, scode end
         elseif op == M.OP_CLOSE then
             self.closed = true
             if not self.close_sent then
@@ -367,15 +368,30 @@ function Stream:_send(opcode, payload)
     if type(mask) ~= "string" or #mask ~= 4 then
         error("web.ws-stream: random_bytes must return 4 bytes")
     end
-    local ok, err = self.s:write(M.encode(opcode, payload, mask))
-    if not ok then error("web.ws-stream: write failed: " .. tostring(err)) end
+    -- Returned, not raised: a write that timed out admitted nothing (the
+    -- stream underneath is all-or-none), so the caller may simply retry it,
+    -- and needs the underlying code to know that it can.
+    local ok, err, code = self.s:write(M.encode(opcode, payload, mask))
+    if not ok then return nil, "web.ws-stream: write failed: " .. tostring(err), code end
+    return true
+end
+
+-- The bounded waits of the stream underneath (see hull.ssh._stream), passed
+-- through: a frame is read and written by exactly the reads and writes they
+-- bound. A stream without them (a test double) simply has no bound.
+function Stream:deadline(ms)
+    if self.s and self.s.deadline then self.s:deadline(ms) end
+end
+
+function Stream:wait(ms)
+    if self.s and self.s.wait then self.s:wait(ms) end
 end
 
 function Stream:read(n)
     if n <= 0 then return "" end
     if #self.out == 0 then
-        local ok, err = self:_pump()
-        if not ok then return nil, err end
+        local ok, err, code = self:_pump()
+        if not ok then return nil, err, code end
     end
     if #self.out == 0 then return "" end       -- closed, nothing buffered
     local take = n < #self.out and n or #self.out
@@ -389,8 +405,9 @@ function Stream:write(data)
     if self.closed then return nil, "closed" end
     -- One binary frame per write. The caller above is already sending whole
     -- SSH packets, so this adds no buffering of its own.
-    local ok, err = pcall(function() self:_send(M.OP_BIN, data) end)
-    if not ok then return nil, tostring(err) end
+    local pok, ok, err, code = pcall(self._send, self, M.OP_BIN, data)
+    if not pok then return nil, tostring(ok) end
+    if not ok then return nil, err, code end
     return true
 end
 
