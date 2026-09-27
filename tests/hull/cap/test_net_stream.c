@@ -65,12 +65,17 @@ static int fix_listen(NetFix *f)
     return 0;
 }
 
-static int fix_init(NetFix *f)
+/* hl_async_backend() is whichever backend this binary links (Keel on a full
+ * build). The poll backend is ALWAYS linked - it is the weak default and what
+ * a Keel-free app.main build runs on - so a test that must cover it names it. */
+extern const HlAsyncBackend hl_async_backend_poll;
+
+static int fix_init_on(NetFix *f, const HlAsyncBackend *be)
 {
     memset(f, 0, sizeof *f);
     f->listen_fd = -1;
     f->peer_fd   = -1;
-    f->be = hl_async_backend();
+    f->be = be;
     if (!f->be) return -1;
     if (f->be->init(&f->ctx, NULL) != 0) return -1;
     /* Small on purpose: two workers is enough to show resolution is not
@@ -79,6 +84,8 @@ static int fix_init(NetFix *f)
     if (f->be->pool_create(&f->pool, f->ctx, 2, 16) != 0) return -1;
     return 0;
 }
+
+static int fix_init(NetFix *f) { return fix_init_on(f, hl_async_backend()); }
 
 /* Defined below, next to the other pump helpers; fix_open needs it here. */
 static int pump_connect(NetFix *f, HlNetStream *s, int max_ticks);
@@ -98,6 +105,7 @@ static int fix_open(NetFix *f, HlNetStream **out)
     HlNetStreamConfig cfg;
     memset(&cfg, 0, sizeof cfg);
     cfg.async      = f->ctx;
+    cfg.backend    = f->be;
     cfg.pool       = f->pool;
     cfg.host       = "127.0.0.1";
     cfg.port       = f->port;
@@ -539,6 +547,87 @@ UTEST(net_stream, io_after_close_fails_closed)
 
     hl_net_stream_free(s);
     fix_free(&f);
+}
+
+static int g_reuse_fired;
+static void *g_reuse_user;
+static void reuse_cb(int fd, unsigned ready, void *user)
+{
+    (void)fd; (void)ready;
+    g_reuse_fired++;
+    g_reuse_user = user;
+}
+
+/* The ordinary SSH close: a read is parked (so a watcher is armed) when the
+ * stream is closed and then freed. The registration is keyed by fd, and close
+ * used to invalidate s->fd before removing it, so the registration outlived
+ * the stream. The next descriptor to get that NUMBER could then not be
+ * watched (poll refuses a duplicate fd), and on poll its readiness went to
+ * the freed stream.
+ *
+ * Returns 0 on success, or the number of the step that failed. */
+static int reuse_after_parked_close(const HlAsyncBackend *be)
+{
+    NetFix f; HlNetStream *s = NULL;
+    int step = 0, sp[2] = { -1, -1 }, old_fd = -1, marker = 0;
+
+    if (fix_init_on(&f, be) != 0 || fix_listen(&f) != 0 ||
+        fix_open(&f, &s) != 0) { step = 1; goto out; }
+
+    /* The stream's own descriptor: the one socket connected TO our listener
+     * (peer_fd is connected FROM it, so its peer port differs). */
+    for (int fd = 0; fd < 1024 && old_fd < 0; fd++) {
+        struct sockaddr_in pa;
+        socklen_t plen = sizeof pa;
+        if (fd != f.listen_fd && fd != f.peer_fd &&
+            getpeername(fd, (struct sockaddr *)&pa, &plen) == 0 &&
+            pa.sin_family == AF_INET && ntohs(pa.sin_port) == f.port)
+            old_fd = fd;
+    }
+    if (old_fd < 0) { step = 2; goto out; }
+
+    char buf[8];
+    if (hl_net_stream_read(s, buf, sizeof buf) != HL_NET_E_AGAIN) { step = 3; goto out; }
+
+    hl_net_stream_close(s);
+    hl_net_stream_free(s);
+    s = NULL;
+
+    /* Reuse the NUMBER before the loop runs again, as happens when the app
+     * opens anything next. dup2 pins it rather than hoping the allocator hands
+     * it out. No tick first: poll's POLLNVAL backstop sweeps a stale entry for
+     * a still-CLOSED fd, which is not the case that bites. */
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) != 0 ||
+        dup2(sp[0], old_fd) != old_fd) { step = 4; old_fd = -1; goto out; }
+
+    g_reuse_fired = 0;
+    g_reuse_user  = NULL;
+    if (f.be->watcher_add(f.ctx, old_fd, HL_ASYNC_READ, reuse_cb, &marker) != 0) {
+        step = 5; goto out;
+    }
+    if (write(sp[1], "x", 1) != 1) { step = 6; goto out; }
+    for (int i = 0; i < 50 && !g_reuse_fired; i++) f.be->tick(f.ctx, 20);
+
+    if (g_reuse_fired != 1 || g_reuse_user != (void *)&marker) step = 7;
+    f.be->watcher_del(f.ctx, old_fd);
+
+out:
+    if (s) hl_net_stream_free(s);
+    if (old_fd >= 0 && step >= 5) close(old_fd);
+    if (sp[0] >= 0) close(sp[0]);
+    if (sp[1] >= 0) close(sp[1]);
+    fix_free(&f);
+    return step;
+}
+
+UTEST(net_stream, close_with_a_parked_read_leaves_no_watcher_behind_poll)
+{
+    EXPECT_EQ(reuse_after_parked_close(&hl_async_backend_poll), 0);
+}
+
+UTEST(net_stream, close_with_a_parked_read_leaves_no_watcher_behind_linked)
+{
+    EXPECT_EQ(reuse_after_parked_close(hl_async_backend()), 0);
 }
 
 UTEST(net_stream, io_rejects_bad_arguments)

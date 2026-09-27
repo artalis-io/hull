@@ -175,6 +175,20 @@ static int  tls_begin(HlNetStream *s, const KlTlsConfig *cfg);
 static int  tls_step(HlNetStream *s);
 static void io_rearm(HlNetStream *s);
 
+/* Remove the descriptor's watcher, if one is armed. Idempotent.
+ *
+ * Must run BEFORE the descriptor is closed: the registration is keyed by fd,
+ * so once s->fd is invalidated there is no longer any way to name it. A
+ * registration left behind outlives the stream - on the poll backend a reused
+ * fd number then dispatches io_ready into freed storage, and on Keel the next
+ * stream that gets that fd hangs on a stale node. */
+static void io_unwatch(HlNetStream *s)
+{
+    if (s->io_mask && kl_handle_valid(s->fd) && s->be->watcher_del)
+        s->be->watcher_del(s->async, (int)s->fd);
+    s->io_mask = 0;
+}
+
 /* Drop every racing descriptor we still hold. Idempotent. */
 static void retire_attempts(HlNetStream *s)
 {
@@ -217,8 +231,7 @@ static void maybe_release(HlNetStream *s)
 
     retire_attempts(s);
     tls_teardown(s);
-    if (s->io_mask && s->be->watcher_del)
-        s->be->watcher_del(s->async, (int)s->fd);
+    io_unwatch(s);
     if (kl_handle_valid(s->fd)) sp_close(s->fd);
 
     /* The op lives INSIDE this allocation, and op_complete defers: a resume
@@ -752,11 +765,7 @@ static void io_rearm(HlNetStream *s)
     if (want == s->io_mask) return;
 
     if (!want) {
-        /* Only reachable when io_mask differs from want, and want is 0 here,
-         * so io_mask is non-zero: there IS a registration to remove. */
-        if (s->be->watcher_del)
-            s->be->watcher_del(s->async, (int)s->fd);
-        s->io_mask = 0;
+        io_unwatch(s);
         return;
     }
     if (!s->io_mask) {
@@ -924,7 +933,7 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
     if (cfg->port < 1 || cfg->port > 65535)  return HL_NET_E_INVAL;
     if (!cfg->async)                         return HL_NET_E_INVAL;
 
-    const HlAsyncBackend *be = hl_async_backend();
+    const HlAsyncBackend *be = cfg->backend ? cfg->backend : hl_async_backend();
     if (!be) return HL_NET_E_INVAL;
     /* Backend-agnostic on purpose. KlConnectOp and KlStream are hook-driven
      * state machines that take no event context, so all scheduling arrives
@@ -1049,8 +1058,10 @@ void hl_net_stream_close(HlNetStream *s)
     if (s->connect_started && !s->connect_done)
         kl_connect_op_cancel(&s->connect_op);
 
-    /* Before the descriptor goes: close_notify needs it. */
+    /* Both before the descriptor goes: close_notify needs it, and the watcher
+     * can only be removed by the fd it was registered under. */
     tls_teardown(s);
+    io_unwatch(s);
     if (kl_handle_valid(s->fd)) { sp_close(s->fd); s->fd = KL_INVALID_SOCKET; }
     wake(s);
 }
@@ -1072,11 +1083,7 @@ void hl_net_stream_cancel(HlNetStream *s)
     co_cancel_delay(s);
     co_cancel_deadline(s);
 
-    if (s->io_mask && s->be->watcher_del) {
-        s->be->watcher_del(s->async, (int)s->fd);
-        s->io_mask = 0;
-    }
-
+    io_unwatch(s);
     tls_teardown(s);
 
     /* In-flight attempt descriptors belong to the op until it retires them:
