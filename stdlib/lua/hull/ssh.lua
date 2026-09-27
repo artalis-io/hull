@@ -307,6 +307,8 @@ function M.connect(opts)
             error("ssh.connect: " .. req .. " is required", 2)
         end
     end
+    local offer_ok, offer_why = require('hull.ssh.kexinit').validate_offer(opts.offer)
+    if not offer_ok then error("ssh.connect: " .. offer_why, 2) end
 
     local crypto = opts.crypto or require('hull.crypto')
     -- A passphrase-protected key needs to say where its passphrase comes from.

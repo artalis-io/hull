@@ -59,6 +59,42 @@ M.DEFAULT_OFFER = {
     languages = {},
 }
 
+-- Validate a caller's offer ----------------------------------------------
+
+local OFFER_LISTS = { "kex", "host_key", "cipher", "mac", "compression" }
+
+-- A caller may narrow or reorder the offer, never widen it. DEFAULT_OFFER is
+-- exactly what this client implements: the exchange is always curve25519,
+-- the host key always ed25519, the cipher always AES-256-GCM, whatever name
+-- was agreed. So an offer naming anything else would "negotiate" an algorithm
+-- the transport then does not use - at best a confusing failure after the
+-- server agreed, at worst a server that believes the session uses something
+-- it does not. Refused before anything is dialled. Returns true, or nil and
+-- a reason.
+function M.validate_offer(offer)
+    if offer == nil then return true end
+    if type(offer) ~= "table" then return nil, "offer must be a table" end
+    for _, list in ipairs(OFFER_LISTS) do
+        local names = offer[list]
+        if type(names) ~= "table" then
+            return nil, "offer." .. list .. " must be a list"
+        end
+        local known, real = {}, 0
+        for _, n in ipairs(M.DEFAULT_OFFER[list]) do known[n] = true end
+        for _, n in ipairs(names) do
+            if not known[n] then
+                return nil, "offer." .. list .. " names " .. wire.safe_name(tostring(n))
+                         .. ", which this client does not implement"
+            end
+            if n ~= M.STRICT_C then real = real + 1 end
+        end
+        if real == 0 then
+            return nil, "offer." .. list .. " names no algorithm"
+        end
+    end
+    return true
+end
+
 -- Build ---------------------------------------------------------------
 
 -- Build a KEXINIT payload. `cookie` must be 16 random bytes supplied by the
