@@ -1374,8 +1374,10 @@ static JSValue js_crypto_base64url_decode_bytes(JSContext *ctx, JSValueConst thi
 }
 
 /* crypto.hexEncode(bytes) -> lowercase hex string. Input may be
- * ArrayBuffer, TypedArray, MappedBuffer, WasmBuffer, or string
- * (treated as Latin-1 / binary-string - same as base64urlEncode). */
+ * ArrayBuffer, TypedArray, MappedBuffer, WasmBuffer, or string. A string is
+ * UTF-8 encoded on the way in (js_get_buffer -> JS_ToCStringLen), so "\xff"
+ * hexes as "c3bf", not "ff": a byte string must be passed as a buffer, or
+ * encoded with hull:encoding, which treats it as bytes. */
 static JSValue js_crypto_hex_encode(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 {
@@ -1383,10 +1385,8 @@ static JSValue js_crypto_hex_encode(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "crypto.hexEncode requires (bytes)");
 
-    /* Use the unified buffer protocol - the same path
-     * base64urlEncode takes. This is binary-safe for strings:
-     * js_get_buffer keeps charCodes as single bytes rather than
-     * UTF-8-inflating them, which JS_ToCStringLen would do. */
+    /* The unified buffer protocol - the same path base64urlEncode takes.
+     * Binary-safe for buffers; a string arrives as its UTF-8 bytes. */
     HlBufferView view = {0};
     const char *str = NULL;
     int needs_free = 0;

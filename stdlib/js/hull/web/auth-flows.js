@@ -140,13 +140,7 @@ const ACTIONS = {
     totp_pending:   "totp_pending",
 };
 
-// Kept local (not aliased to crypto.hexEncode) because state
-// secrets may contain code points >= 0x80; crypto.hexEncode for
-// string input goes through JS_ToCStringLen which UTF-8-inflates
-// them, breaking round-trips. The cap-layer helper is correct
-// for ArrayBuffer/Uint8Array; use it for those.
-import { _hex } from "hull:crypto:_hex";
-const bytesToHex = _hex.toHex;
+import { encoding } from "hull:encoding";
 
 // Signature framing lives in hull:crypto:envelope; this wrapper
 // just builds the payload and adds optional extra fields. The
@@ -1222,7 +1216,7 @@ function init(opts) {
         }
     }
 
-    _state.stateSecretHex = bytesToHex(secret);
+    _state.stateSecretHex = encoding.hex.encode(secret);
     _state.emailSend      = opts.emailSend;
     _state.publicOrigin   = opts.publicOrigin || null;
     _state.trustedHosts   = opts.trustedHosts || null;

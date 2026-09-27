@@ -286,8 +286,9 @@ documenting parallel connections.
   `smtp_transport.c` / `tls_client.c` / the DB transport (~300 lines). The CA
   bundle ladder is also duplicated between `serve.c` and `serve_cli.c`.
 - **DRY in the Lua stack.**
-  - hex: `kex.lua`, `examples/ssh_fleet/app.lua`, and `crypto/_hex.lua` (which
-    calls itself the one home; add `from_hex` there);
+  - hex: done in the stdlib - `hull.encoding` is now the one home for hex and
+    base64 (`encoding_consolidation_plan.md`); `examples/ssh_fleet/app.lua`
+    still has its own;
   - fingerprint: `hostkey.lua` and `privatekey.lua`;
   - the buffered short-read gatherer: `Transport:fill` and `ws-stream`'s
     `_need`;

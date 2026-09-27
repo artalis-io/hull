@@ -1,10 +1,10 @@
--- test_ssh_privatekey.lua - Tests for hull.encoding.base64 and hull.ssh.privatekey
+-- test_ssh_privatekey.lua - Tests for hull.ssh.privatekey
 --
 -- The key file is BUILT here rather than embedded, so the repository carries
 -- no blob that looks like a private key to a secret scanner, and so each
 -- malformation can be produced exactly.
 
-local base64     = require('hull.encoding.base64')
+local base64     = require('hull.encoding').base64
 local privatekey = require('hull.ssh.privatekey')
 local wire       = require('hull.ssh.wire')
 
@@ -32,47 +32,17 @@ local function assert_raises(fn, msg)
     if ok then error((msg or "should have raised") .. " but did not") end
 end
 
--- base64 --------------------------------------------------------------------
+-- armour ----------------------------------------------------------------------
+-- The codec itself is tested in test_encoding.lua; this is what the key loader
+-- asks of it.
 
-test("encode matches the RFC 4648 vectors", function()
-    local cases = {
-        { "", "" }, { "f", "Zg" }, { "fo", "Zm8" }, { "foo", "Zm9v" },
-        { "foob", "Zm9vYg" }, { "fooba", "Zm9vYmE" }, { "foobar", "Zm9vYmFy" },
-    }
-    for _, c in ipairs(cases) do
-        assert_eq(base64.encode_nopad(c[1]), c[2], "nopad " .. c[1])
-    end
-end)
-
-test("padded encode matches the RFC 4648 vectors", function()
-    local cases = {
-        { "", "" }, { "f", "Zg==" }, { "fo", "Zm8=" }, { "foo", "Zm9v" },
-        { "foob", "Zm9vYg==" }, { "fooba", "Zm9vYmE=" }, { "foobar", "Zm9vYmFy" },
-    }
-    for _, c in ipairs(cases) do
-        assert_eq(base64.encode(c[1]), c[2], "padded " .. c[1])
-    end
-end)
-
-test("decode round trips every byte value", function()
-    local all = {}
-    for i = 0, 255 do all[#all + 1] = string.char(i) end
-    local raw = table.concat(all)
-    assert_eq(base64.decode(base64.encode(raw)), raw)
-    assert_eq(base64.decode(base64.encode_nopad(raw)), raw)
-end)
-
-test("decode skips the line breaks in armoured files", function()
-    -- Key files wrap at 70 columns, so this is the normal case, not an edge.
-    assert_eq(base64.decode("Zm9v\nYmFy\r\n"), "foobar")
-    assert_eq(base64.decode("Zm9v YmFy"), "foobar")
-end)
-
-test("decode refuses junk rather than skipping it", function()
-    -- Silently ignoring stray bytes would let a corrupted key file decode to
-    -- something plausible.
-    assert_raises(function() base64.decode("Zm9v!YmFy") end, "punctuation")
-    assert_raises(function() base64.decode("Zm9v-YmFy") end, "url-safe char")
+test("armour decode skips line breaks but refuses junk", function()
+    -- Key files wrap at 70 columns, so line breaks are the normal case.
+    local wrap = privatekey.BEGIN .. "\nZm9v\nYmFy\r\n" .. privatekey.END .. "\n"
+    assert_eq(privatekey.unarmour(wrap), "foobar")
+    -- A damaged file must not decode to something plausible.
+    local bad = privatekey.BEGIN .. "\nZm9v!YmFy\n" .. privatekey.END .. "\n"
+    assert_raises(function() privatekey.unarmour(bad) end, "punctuation")
 end)
 
 -- building a key file ---------------------------------------------------------

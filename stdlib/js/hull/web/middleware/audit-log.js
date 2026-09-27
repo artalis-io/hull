@@ -169,28 +169,22 @@ function extractUa(req) {
     return req && req.headers && req.headers["user-agent"] || null;
 }
 
-// Binary-safe byte→hex. Local so audit-log doesn't depend on
-// auth-flows. Mirrors the same workaround used in auth-flows and
-// oauth: crypto.hexEncode for a string input goes through
-// JS_ToCStringLen which UTF-8-inflates any byte >= 0x80, so a raw
-// SHA-256 digest cannot be hexed via the cap helper without first
-// running it through this mask. Without this, fingerprints are
-// stable per-runtime but NOT byte-identical to Lua's, which means
-// a Lua→JS migration of the same DB would mark every existing user
-// as a new device on first request.
-import { _hex } from "hull:crypto:_hex";
-const bytesToHex = _hex.toHex;
+import { encoding } from "hull:encoding";
 
-// Hex SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix),
-// truncated to 16 chars (64 bits). Salt is deployment-private (from
-// init's fingerprintSalt opt) so output is only meaningful within
-// this deployment.
+// From SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix). Salt is
+// deployment-private (from init's fingerprintSalt opt) so output is only
+// meaningful within this deployment.
+// Note what is hashed: crypto.sha256 returns HEX, and that hex text is hexed
+// again before truncating, so the fingerprint is the hex of the first 8 hex
+// characters of the digest (32 bits of it). Coarse, but deliberate to keep:
+// fingerprints are stored in _hull_audit_log, and "fixing" this would make
+// every existing device look new. Both runtimes compute it identically.
 function fingerprint(req) {
     const ua  = extractUa(req);
     const ip  = extractIp(req);
     const salt = _state.fingerprintSalt || "";
     const key = salt + "|" + normalizeUa(ua) + "|" + ipPrefix(ip);
-    return bytesToHex(crypto.sha256(key)).substring(0, 16);
+    return encoding.hex.encode(crypto.sha256(key)).substring(0, 16);
 }
 
 function record(userId, kind, req, opts) {
@@ -379,7 +373,7 @@ function recomputeFingerprints() {
                 lastId = rows[i].id;
                 const key = salt + "|" + normalizeUa(rows[i].user_agent)
                                  + "|" + ipPrefix(rows[i].ip);
-                const newFp = bytesToHex(crypto.sha256(key)).substring(0, 16);
+                const newFp = encoding.hex.encode(crypto.sha256(key)).substring(0, 16);
                 if (newFp !== rows[i].fingerprint) {
                     pageUpdates.push([newFp, rows[i].id]);
                 }

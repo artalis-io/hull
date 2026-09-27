@@ -21,33 +21,14 @@
  */
 
 import { crypto } from "hull:crypto";
-import { _hex }   from "hull:crypto:_hex";
+import { encoding } from "hull:encoding";
 
 const VERSION_LEN = 4;
 const NONCE_LEN   = 24;
 const MAC_LEN     = 16;
 const MIN_LEN     = VERSION_LEN + NONCE_LEN + MAC_LEN;
 
-const toHex = _hex.toHex;
-
-function hexToBin(h) {
-    let s = "";
-    for (let i = 0; i < h.length; i += 2) s += String.fromCharCode(parseInt(h.substr(i, 2), 16));
-    return s;
-}
-
-function binToU8(s) {
-    const u8 = new Uint8Array(s.length);
-    for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i) & 0xff;
-    return u8;
-}
-
-function abToBin(ab) {
-    const u8 = new Uint8Array(ab);
-    let s = "";
-    for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
-    return s;
-}
+const { hex, bytes } = encoding;
 
 function be32(v) {
     return String.fromCharCode((v >>> 24) & 0xff, (v >>> 16) & 0xff,
@@ -84,7 +65,7 @@ function keyring(opts) {
         if (!isByteString(k) || k.length !== 32) {
             throw new Error("sealbox.keyring: key " + idStr + " must be exactly 32 bytes");
         }
-        keys[id] = toHex(k);
+        keys[id] = hex.encode(k);
     }
     if (keys[opts.current] === undefined) {
         throw new Error("sealbox.keyring: current key id " + String(opts.current)
@@ -117,9 +98,9 @@ function unframe(context, plain) {
  *  byte strings, or null). Returns the blob, a byte string. */
 function seal(ring, value, context) {
     const key = ring.keys[ring.current];
-    const nonce = abToBin(crypto.random(NONCE_LEN));
-    const ctHex = crypto.secretbox(binToU8(frame(context, value)), toHex(nonce), key);
-    return be32(ring.current) + nonce + hexToBin(ctHex);
+    const nonce = bytes.fromBuffer(crypto.random(NONCE_LEN));
+    const ctHex = crypto.secretbox(bytes.toU8(frame(context, value)), hex.encode(nonce), key);
+    return be32(ring.current) + nonce + hex.decode(ctHex);
 }
 
 /**
@@ -136,9 +117,9 @@ function open(ring, blob, context) {
     if (key === undefined) return { ok: false, reason: "unknown_version" };
     const nonce = blob.substring(VERSION_LEN, VERSION_LEN + NONCE_LEN);
     const ct    = blob.substring(VERSION_LEN + NONCE_LEN);
-    const ab = crypto.secretboxOpen(toHex(ct), toHex(nonce), key);
+    const ab = crypto.secretboxOpen(hex.encode(ct), hex.encode(nonce), key);
     if (!ab) return { ok: false, reason: "open_failed" };
-    const value = unframe(context, abToBin(ab));
+    const value = unframe(context, bytes.fromBuffer(ab));
     if (value === null) return { ok: false, reason: "open_failed" };
     return { ok: true, value, version };
 }
@@ -150,9 +131,9 @@ function openUnversioned(ring, id, blob) {
     if (key === undefined || typeof blob !== "string" || blob.length < NONCE_LEN + MAC_LEN) {
         return null;
     }
-    const ab = crypto.secretboxOpen(toHex(blob.substring(NONCE_LEN)),
-                                    toHex(blob.substring(0, NONCE_LEN)), key);
-    return ab ? abToBin(ab) : null;
+    const ab = crypto.secretboxOpen(hex.encode(blob.substring(NONCE_LEN)),
+                                    hex.encode(blob.substring(0, NONCE_LEN)), key);
+    return ab ? bytes.fromBuffer(ab) : null;
 }
 
 export const sealbox = {

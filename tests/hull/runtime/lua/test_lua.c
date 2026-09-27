@@ -3269,13 +3269,12 @@ UTEST(lua_stdlib, auth_flows_state_secret_non_ascii_round_trip)
     ASSERT_TRUE(lua_initialized);
 
     /* Round-8 HIGH-2: state_secret may contain bytes >= 0x80 (e.g.
-     * a passphrase / random binary key); prior code piped the secret
-     * through crypto.hex_encode which UTF-8-inflated those bytes on
-     * the C boundary, producing a different HMAC key than the JS
-     * runtime's bytesToHex local. This test pins the byte-for-byte
-     * hex encoding (32 bytes of 0x80 -> "80" repeated 32x) AND
-     * verifies a token signed under the high-byte secret round-trips
-     * via issue_token / parse_token. */
+     * a passphrase / random binary key). Both runtimes must derive the
+     * same HMAC key from it, which is only true if each hexes the raw
+     * bytes (hull.encoding) - the JS crypto.hexEncode UTF-8-inflates a
+     * string. This test pins the byte-for-byte hex encoding (32 bytes of
+     * 0x80 -> "80" repeated 32x) AND verifies a token signed under the
+     * high-byte secret round-trips via issue_token / parse_token. */
     int ok = eval_int(
         "(function() "
         "  local af = require('hull.web.auth-flows') "
@@ -4126,6 +4125,15 @@ UTEST(lua_stdlib, ssh_kexinit_suite)
 {
     long long pass = 0, fail = -1;
     int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_kexinit.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
+UTEST(lua_stdlib, encoding_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_encoding.lua", &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0LL);
     EXPECT_GT(pass, 0LL);
@@ -5398,7 +5406,7 @@ UTEST(lua_ssh_bridge, a_known_hosts_line_hashed_by_openssh_is_matched)
         "local fs = { read = function() return line .. '\\n' end,\n"
         "             write = function() return true end }\n"
         "local st = ssh.file_store('known_hosts', { fs = fs })\n"
-        "local want = require('hull.encoding.base64').decode(key)\n"
+        "local want = require('hull.encoding').base64.decode(key)\n"
         "assert(st.get('web1.internal') == want, 'the hashed entry must match its host')\n"
         "assert(st.get('web2.internal') == nil, 'and nothing else')\n"
         "return 'ok'\n");

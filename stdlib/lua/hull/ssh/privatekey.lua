@@ -23,7 +23,7 @@
 -- as little of the program as possible, and do not pass it around.
 
 local wire   = require('hull.ssh.wire')
-local base64 = require('hull.encoding.base64')
+local base64 = require('hull.encoding').base64
 
 local M = {}
 
@@ -48,8 +48,12 @@ function M.unarmour(text)
     if not e then
         error("ssh.privatekey: truncated key file (no END line)")
     end
-    local body = text:sub(b + #M.BEGIN, e - 1)
-    return base64.decode(body)
+    -- The armour wraps at 70 columns, so whitespace is skipped; anything else
+    -- outside the alphabet is refused, because a damaged key file must not
+    -- decode to something plausible.
+    local raw = base64.decode(text:sub(b + #M.BEGIN, e - 1), { lenient = true })
+    if not raw then error("ssh.privatekey: damaged key file (invalid base64)") end
+    return raw
 end
 
 -- Parse the container. Returns the fields without interpreting the key blob,
@@ -273,7 +277,7 @@ end
 
 -- The fingerprint of the key, for showing which identity is being offered.
 function M.fingerprint(sha256_raw, key)
-    return "SHA256:" .. base64.encode_nopad(sha256_raw(key.blob))
+    return "SHA256:" .. base64.encode(sha256_raw(key.blob), { pad = false })
 end
 
 return M

@@ -103,9 +103,12 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {"hull/env", "hull/fs", 0},
     },
     {
+        /* Its outputs are hex and its inputs bytes, so every user of it
+         * needs hull/encoding to move between the two; admitting it here
+         * saves each of them a slot in its own dependency list. */
         .name = "hull/crypto",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = 0, .deps = {0},
+        .required_caps = 0, .deps = {"hull/encoding", 0},
     },
     {
         /* HMAC-signed, JSON-payload, stateless token framing
@@ -161,17 +164,17 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/http-client", "hull/smtp", "hull/log", "hull/json", 0},
     },
     {
-        /* base64 / base64url as BYTES, for callers that need the encoding
-         * itself rather than a convenience on top of a hash. hull/crypto's
-         * base64url_* exist for its own outputs; this is the general one,
-         * used by the SSH key parser and by the WebSocket handshake.
+        /* Byte <-> text codecs: hex, base64 (standard and url-safe),
+         * base32. The one home for them in the stdlib (docs/stdlib_style.md
+         * section 4); pure, so SSH, ws-stream and kv can use it without
+         * taking on any authority.
          *
          * Registered rather than left as an internal file so it shows up in
          * `hull modules available`, is gated like everything else, and - the
          * reason that decided it - so check_module_deps can SEE it. A module
          * that starts depending on an unregistered file is a dependency no
          * gate can check. */
-        .name = "hull/encoding/base64",
+        .name = "hull/encoding",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
     },
@@ -375,7 +378,7 @@ static const HlModuleSpec REGISTRY[] = {
          * Missed until an e2e drove a real connection: every unit suite
          * injects `opts.crypto`, which is the seam that exists for exactly
          * that reason and which therefore never takes this path. */
-        .deps = {"hull/crypto", "hull/encoding/base64",
+        .deps = {"hull/crypto", "hull/encoding",
                  "hull/web/ws-stream", 0},
     },
     {
@@ -885,7 +888,7 @@ static const HlModuleSpec REGISTRY[] = {
          * stream (for SSH-over-a-tunnel, the ssh.connect grant). */
         .name = "hull/web/ws-stream",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = 0, .deps = {"hull/encoding/base64", 0},
+        .required_caps = 0, .deps = {"hull/encoding", 0},
     },
 
     {

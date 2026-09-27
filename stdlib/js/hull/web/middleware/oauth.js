@@ -171,22 +171,7 @@ const PRESETS = {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-// crypto.hmacSha256 takes the key as a hex string. We pre-encode the
-// secret bytes once at init and reuse the hex form. Kept local
-// (not aliased to crypto.hexEncode) because JS strings with code
-// points >= 0x80 UTF-8-inflate when crossing the C boundary via
-// JS_ToCStringLen; binary-string inputs (state secrets with high
-// bytes, ID-token hashes) must round-trip byte-identically.
-import { _hex } from "hull:crypto:_hex";
-const bytesToHex = _hex.toHex;
-
-function hexToBytes(h) {
-    const u8 = new Uint8Array(h.length >> 1);
-    for (let i = 0, j = 0; i < h.length; i += 2, j++) {
-        u8[j] = parseInt(h.substr(i, 2), 16);
-    }
-    return u8;
-}
+import { encoding } from "hull:encoding";
 
 function randomUrlsafe(nBytes) {
     return crypto.base64urlEncode(crypto.random(nBytes));
@@ -197,7 +182,7 @@ function randomUrlsafe(nBytes) {
 function pkcePair() {
     const verifier = randomUrlsafe(32);
     const shaHex = crypto.sha256(verifier);
-    const challenge = crypto.base64urlEncode(hexToBytes(shaHex).buffer);
+    const challenge = encoding.base64.encode(encoding.hex.decode(shaHex), { url: true });
     return [verifier, challenge];
 }
 
@@ -547,7 +532,7 @@ function init(opts) {
         throw new Error("oauth.init: secret must be a string >= 32 bytes "
             + "(same HMAC primitive as hull/web/auth-flows; pick one floor)");
     }
-    _state.stateSecretHex = bytesToHex(secret);
+    _state.stateSecretHex = encoding.hex.encode(secret);
     _state.stateCookie = opts.stateCookie || _state.stateCookie;
     _state.stateCookiePath =
         opts.stateCookiePath || _state.stateCookiePath;

@@ -35,15 +35,7 @@ local CAP_SHARED       = 32
 local CAP_EVICTION     = 64
 local CAP_TRANSACTIONS = 128
 
-local HEX = "0123456789abcdef"
-local function hex(s)
-    local out = {}
-    for i = 1, #s do
-        local b = string.byte(s, i)
-        out[i] = HEX:sub((b >> 4) + 1, (b >> 4) + 1) .. HEX:sub((b & 15) + 1, (b & 15) + 1)
-    end
-    return table.concat(out)
-end
+local hex = require("hull.encoding").hex.encode
 
 -- Split "kv:agent-state" / "cache:x" into the readable type + the namespace we
 -- hex-encode. A store_ns without a ':' is treated as the whole namespace under

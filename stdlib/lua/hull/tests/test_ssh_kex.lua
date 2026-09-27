@@ -233,21 +233,10 @@ end)
 
 -- hex bridging ---------------------------------------------------------------
 
-test("hex round trips", function()
-    local raw = "\0\1\127\128\255"
-    assert_eq(kex.to_hex(raw), "00017f80ff")
-    assert_eq(kex.from_hex(kex.to_hex(raw)), raw)
-end)
-
-test("from_hex rejects malformed input", function()
-    assert_raises(function() kex.from_hex("abc") end, "odd length")
-    assert_raises(function() kex.from_hex("zz") end, "not hex")
-end)
-
 test("raw_hash adapts a hex-returning hash", function()
     -- hull.crypto returns hex; derive_key wants raw bytes. A missed
     -- conversion here would silently halve the entropy per byte.
-    local hexhash = function(d) return kex.to_hex(fake_hash(d)) end
+    local hexhash = function(d) return require('hull.encoding').hex.encode(fake_hash(d)) end
     local raw = kex.raw_hash(hexhash)
     assert_eq(raw("x"), fake_hash("x"))
 end)

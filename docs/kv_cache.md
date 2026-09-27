@@ -26,7 +26,7 @@ If losing an entry is a correctness bug, it is KV state, not a cache.
 
 Keys and values are arbitrary bytes: Lua strings (natively binary-safe) and, in
 JS, **byte strings** (each char a code unit 0-255 - Hull's JS byte convention,
-the same one `crypto/_hex` and `jwt` use). `.length` / `#v` is the byte count;
+the same one `hull:encoding` uses). `.length` / `#v` is the byte count;
 there is no UTF-8 assumption. Text values are stored as their bytes; for large
 binary blobs prefer `hull/blob`.
 

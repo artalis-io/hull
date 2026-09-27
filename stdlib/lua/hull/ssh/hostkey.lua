@@ -64,14 +64,10 @@ end
 
 -- Fingerprints ------------------------------------------------------------
 
--- Standard base64, not the URL-safe alphabet hull.crypto offers: a
--- fingerprint is read aloud and compared against ssh-keygen output, so
--- "nearly base64" is worse than useless. The implementation moved to
--- hull.encoding.base64 once the key loader needed the decoder too; re-exported
--- here because it is part of this module's tested surface.
-local base64_nopad = require('hull.encoding.base64').encode_nopad
-
-M.base64_nopad = base64_nopad
+-- Standard base64, unpadded, not the URL-safe alphabet: a fingerprint is
+-- read aloud and compared against ssh-keygen output, so "nearly base64" is
+-- worse than useless.
+local base64 = require('hull.encoding').base64
 
 -- The OpenSSH fingerprint of a host key blob: SHA256:<base64 of the digest>,
 -- no padding. Byte-for-byte what `ssh-keygen -l` prints, so an operator can
@@ -82,7 +78,7 @@ function M.fingerprint(sha256_raw, blob)
     if type(sha256_raw) ~= "function" then
         error("ssh.hostkey: fingerprint needs a sha256 function", 2)
     end
-    return "SHA256:" .. base64_nopad(sha256_raw(blob))
+    return "SHA256:" .. base64.encode(sha256_raw(blob), { pad = false })
 end
 
 -- Verification --------------------------------------------------------------

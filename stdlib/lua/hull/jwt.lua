@@ -33,7 +33,7 @@
 
 local json = require("hull.json")
 local crypto = require("hull.crypto")
-local _hex = require("hull.crypto._hex")
+local encoding = require("hull.encoding")
 local time = require("hull.time")
 
 local jwt = {}
@@ -65,13 +65,8 @@ end
 -- HS256 signature: HMAC-SHA256 over the signing input, returning the
 -- raw 32-byte digest. The crypto cap returns hex; convert back.
 local function hs256_signature(data, secret)
-    local key_hex = _hex.to_hex(secret)   -- raw-byte hex (2 chars/byte)
-    local sig_hex = crypto.hmac_sha256(data, key_hex)
-    local raw = {}
-    for i = 1, #sig_hex, 2 do
-        raw[#raw + 1] = string.char(tonumber(sig_hex:sub(i, i + 1), 16))
-    end
-    return table.concat(raw)
+    local sig_hex = crypto.hmac_sha256(data, encoding.hex.encode(secret))
+    return (encoding.hex.decode(sig_hex))
 end
 
 --- Sign a payload and return a JWT string (HS256 only).

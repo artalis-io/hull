@@ -21,37 +21,18 @@
 // Internal module. SPDX-License-Identifier: AGPL-3.0-or-later
 
 import util from "hull:kv:_util";
+import { encoding } from "hull:encoding";
 import { open as nativeOpen } from "hull:kv:_native";
 
 // HL_KV_CAP_* bit values (must match include/hull/cap/kv_backend.h).
 const CAP_TTL = 1, CAP_INCR = 2, CAP_CAS = 4, CAP_SCAN = 8,
       CAP_PERSISTENT = 16, CAP_SHARED = 32, CAP_EVICTION = 64, CAP_TRANSACTIONS = 128;
 
-// byte string -> ArrayBuffer (each char's low byte).
-function toBuf(s) {
-    const n = s.length, u8 = new Uint8Array(n);
-    for (let i = 0; i < n; i++) u8[i] = s.charCodeAt(i) & 0xff;
-    return u8.buffer;
-}
-// ArrayBuffer -> byte string (chunked to avoid a call-stack overflow on big buffers).
-function fromBuf(ab) {
-    const u8 = new Uint8Array(ab), CH = 8192;
-    let out = "";
-    for (let i = 0; i < u8.length; i += CH) {
-        out += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
-    }
-    return out;
-}
-
-const HEX = "0123456789abcdef";
-function hex(s) {
-    let out = "";
-    for (let i = 0; i < s.length; i++) {
-        const b = s.charCodeAt(i) & 0xff;
-        out += HEX[b >> 4] + HEX[b & 15];
-    }
-    return out;
-}
+// byte string <-> ArrayBuffer at the native boundary, and the hex of the
+// namespace in the physical prefix.
+const toBuf = (s) => encoding.bytes.toU8(s).buffer;
+const fromBuf = (ab) => encoding.bytes.fromBuffer(ab);
+const hex = (s) => encoding.hex.encode(s);
 
 // "kv:agent-state" / "cache:x" -> "<type>:<hex(namespace)>:" physical prefix.
 function physPrefix(storeNs) {

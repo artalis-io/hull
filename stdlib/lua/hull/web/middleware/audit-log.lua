@@ -24,6 +24,7 @@
 --   audit_log.cleanup()                    -- delete events older than retain_days
 
 local crypto = require("hull.crypto")
+local encoding = require("hull.encoding")
 local db     = require("hull.db").default()
 local time   = require("hull.time")
 local json   = require("hull.json")
@@ -226,20 +227,24 @@ local function extract_ua(req)
     return req and req.headers and req.headers["user-agent"] or nil
 end
 
---- Compute the (coarse) device fingerprint for a request.
--- Hex SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix),
--- truncated to 16 chars (64 bits). The salt is deployment-private
+--- Compute the (coarse) device fingerprint for a request, from
+-- SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix). The salt is deployment-private
 -- (from init's fingerprint_salt opt) so the fingerprint output is
 -- only meaningful within this deployment - an attacker with read
 -- access to _hull_audit_log can't rainbow-table common (UA, IP)
 -- combinations back to identifying data without also breaching
 -- the app's config.
+-- Note what is hashed: crypto.sha256 returns HEX, and that hex text is hexed
+-- again before truncating, so the fingerprint is the hex of the first 8 hex
+-- characters of the digest (32 bits of it). Coarse, but deliberate to keep:
+-- fingerprints are stored in _hull_audit_log, and "fixing" this would make
+-- every existing device look new. Both runtimes compute it identically.
 function audit_log.fingerprint(req)
     local ua  = extract_ua(req)
     local ip  = extract_ip(req)
     local salt = _state.fingerprint_salt or ""
     local key = salt .. "|" .. normalize_ua(ua) .. "|" .. ip_prefix(ip)
-    return crypto.hex_encode(crypto.sha256(key)):sub(1, 16)
+    return encoding.hex.encode(crypto.sha256(key)):sub(1, 16)
 end
 
 --- Record an event. user_id and kind are required; everything
@@ -493,7 +498,7 @@ function audit_log.recompute_fingerprints()
                 last_id = r.id
                 local key = salt .. "|" .. normalize_ua(r.user_agent)
                                .. "|" .. ip_prefix(r.ip)
-                local new_fp = crypto.hex_encode(crypto.sha256(key)):sub(1, 16)
+                local new_fp = encoding.hex.encode(crypto.sha256(key)):sub(1, 16)
                 if new_fp ~= r.fingerprint then
                     page_updates[#page_updates + 1] = { new_fp, r.id }
                 end
