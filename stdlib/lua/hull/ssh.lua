@@ -70,9 +70,8 @@ function M.load_key(text, opts)
     return privatekey.load(text, opts)
 end
 
---- An in-memory trust store, for callers that persist it themselves.
---- Hull ships no on-disk store on purpose: where trust lives is the
---- application's decision, not the library's.
+--- An in-memory trust store, for callers that persist it themselves (a DB
+--- row, a config map) or not at all. For a file, see file_store.
 function M.memory_store(seed)
     local t = {}
     for k, v in pairs(seed or {}) do t[k] = v end
@@ -81,6 +80,77 @@ function M.memory_store(seed)
         put = function(host, blob) t[host] = blob end,
         forget = function(host) t[host] = nil end,
         entries = function() return t end,
+    }
+end
+
+--- A trust store in an OpenSSH known_hosts file, read and written through
+--- hull/fs - so the app needs `hull/fs` in its modules and the path in
+--- manifest fs.read (and fs.write, to accept or forget keys). The `ssh`
+--- command line reads what this writes, and this reads what it writes,
+--- ssh-keyscan output and hashed entries included (see hull.ssh.known_hosts
+--- for what is skipped).
+---
+---   opts.hash = true    write new entries hashed (HashKnownHosts=yes)
+---
+--- The file is read on every lookup, so a key accepted or removed with the
+--- `ssh` tool is seen by the next connect. A file that does not exist yet is
+--- an empty store; it is created by the first accept.
+function M.file_store(path, opts)
+    opts = opts or {}
+    local fs     = opts.fs or require('hull.fs')
+    local crypto = opts.crypto or require('hull.crypto')
+    local kh     = require('hull.ssh.known_hosts')
+
+    -- crypto.hmac_sha1 speaks hex on both sides; known_hosts wants raw bytes.
+    local function hmac(key, msg)
+        return kex.from_hex(crypto.hmac_sha1(msg, kex.to_hex(key)))
+    end
+    local function load()
+        return fs.read(path) or ""
+    end
+    local function save(text)
+        local ok, err = fs.write(path, text)
+        if not ok then
+            error({ code = "store_failed", detail = tostring(err) }, 0)
+        end
+    end
+    local function each(fn)
+        for line in load():gmatch("[^\n]+") do
+            local e = kh.parse_line(line)
+            if e and fn(e) then return e end
+        end
+    end
+
+    return {
+        -- The ed25519 key recorded for `name`, if any. Other key types are
+        -- not what this client verifies, so they are not what it trusts.
+        get = function(name)
+            local e = each(function(x)
+                return x.keytype == "ssh-ed25519" and kh.matches(x, name, hmac)
+            end)
+            return e and e.blob
+        end,
+        put = function(name, blob)
+            local text = load()
+            if text ~= "" and text:sub(-1) ~= "\n" then text = text .. "\n" end
+            local salt = opts.hash and crypto.random(16) or nil
+            save(text .. kh.render(name, blob, salt, hmac) .. "\n")
+        end,
+        forget = function(name)
+            save(kh.without(load(), name, hmac))
+        end,
+        -- Plain entries only: a hashed name cannot be listed, by design.
+        entries = function()
+            local out = {}
+            each(function(x)
+                if x.names and x.keytype == "ssh-ed25519" then
+                    for _, n in ipairs(x.names) do
+                        if out[n] == nil then out[n] = x.blob end
+                    end
+                end
+            end)
+            return out
+        end,
     }
 end
 
@@ -478,11 +548,12 @@ function M.accept_host(trust, host, key_blob, port)
         return nil, { code = "already_trusted", detail = name
                       .. " already has a stored key; forget_host it first" }
     end
-    return hostkey.accept_new(trust, name, key_blob)
+    -- Through guard: a file store that cannot write says `store_failed`.
+    return guard(hostkey.accept_new, trust, name, key_blob)
 end
 
 function M.forget_host(trust, host, port)
-    return hostkey.forget(trust, hostkey.store_name(host, port))
+    return guard(hostkey.forget, trust, hostkey.store_name(host, port))
 end
 
 --- Fingerprint a key blob, for showing one to an operator.
