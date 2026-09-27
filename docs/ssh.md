@@ -116,11 +116,24 @@ named `host` for port 22 and `[host]:port` otherwise, so two sshds on one
 machine keep separate keys. `ssh.forget_host(trust, host, port)` takes the
 same arguments.
 
-The store is an object with `get`/`put`/`forget`/`entries`.
-`ssh.memory_store(seed)` is the in-process one; persisting it is the
-application's job, because where trust lives (a file, a DB row, a config map,
-nowhere) is a deployment decision rather than a library default. The example
-writes it to JSON beside the app.
+The store is an object with `get`/`put`/`forget`/`entries`, and Hull ships
+two:
+
+- `ssh.file_store(path)` keeps it in an **OpenSSH `known_hosts` file**, read
+  and written through `hull/fs` (so the app declares `hull/fs` and names the
+  file in `fs.read` and `fs.write`). The `ssh` command line reads what it
+  writes and the reverse, so `ssh-keyscan web1 >> known_hosts` seeds it, and
+  hashed entries (`HashKnownHosts`) are matched; `file_store(path, { hash =
+  true })` writes hashed ones too. The file is read on every lookup, so a key
+  changed with the `ssh` tool is seen by the next connect. Host patterns and
+  `@cert-authority` / `@revoked` lines are skipped, not half-honoured: a host
+  covered only by a pattern is simply unknown. A store that cannot write
+  returns `store_failed`.
+- `ssh.memory_store(seed)` holds it in the process, for an app that keeps
+  trust somewhere else (a DB row, a config map) or nowhere.
+
+Where trust lives is still the application's decision: the manifest names the
+file. The example keeps `known_hosts` beside the app.
 
 `host_changed_midsession` deserves its own note: a rekey re-presents the host
 key, and Hull pins it against the key **this connection was built on**, not
@@ -289,6 +302,54 @@ if not data and err.code == "no_such_file" then ... end   -- `max` passed: "too_
 local names, refused = sftp:list("/var/log/app")          -- refused: unsafe names, and why
 ```
 
+The rest of the file operations:
+
+| method | does |
+|---|---|
+| `stat(path)` / `lstat(path)` | `{ size, uid, gid, permissions, atime, mtime, is_dir }` (lstat does not follow a symlink) |
+| `mkdir(path, mode?)` / `rmdir(path)` / `remove(path)` | create a directory, remove an empty one, remove a file |
+| `rename(from, to)` | SFTP v3 refuses when `to` exists (`failure`); remove it first to replace |
+| `chmod(path, mode)` / `setstat(path, attrs)` | permissions, or any of `size`, `uid`+`gid`, `atime`+`mtime` |
+
+Modes are octal **strings** - `"755"`, not `755`, which Lua reads as decimal.
+
+A deploy step that must never leave a half-written file in place writes
+beside it and renames:
+
+```lua
+assert(sftp:write("/srv/app/config.toml.new", contents))
+assert(sftp:chmod("/srv/app/config.toml.new", "640"))
+sftp:remove("/srv/app/config.toml")                     -- rename will not replace
+assert(sftp:rename("/srv/app/config.toml.new", "/srv/app/config.toml"))
+```
+
+### Files larger than memory
+
+`read` and `write` move a whole file. For one too large to hold, or to read
+part of one, open it:
+
+```lua
+local f = assert(sftp:open("/var/log/app/big.log", "r"))
+while true do
+    local chunk, err = f:read(1024 * 1024)       -- up to 1 MiB at a time
+    if not chunk then error(err.code) end
+    if chunk == "" then break end                -- end of file
+    ctx.stdout:write(chunk)
+end
+f:close()
+```
+
+Modes are `"r"`, `"r+"`, `"w"` (create or truncate), `"a"` (append) and
+`"wx"` (create; `failure` if it exists); `open(path, "w", { mode = "600" })`
+sets a new file's permissions. A file has `read(n)`, `write(data)`,
+`seek(offset)`, `tell()`, `stat()` and `close()`. Close it: an open file stays
+open on the server until it is closed or the SFTP session is.
+
+Large transfers are pipelined: requests go out 32 KiB at a time with up to
+eight in flight, so a big file over a relay moves at the link's speed rather
+than one round trip per 32 KiB. A read starts with one request and ramps up,
+so a small file costs no more than it would otherwise.
+
 ## 8. Rekeying
 
 Handled in both directions, and a caller normally sees none of it:
@@ -370,5 +431,12 @@ reporting it as authenticated would skip one.
 - **ssh-agent.** Needs a unix-socket (and named-pipe) capability Hull does not
   have yet; until then a key must be readable through `manifest.fs.read`.
 - **Password and keyboard-interactive auth.** `publickey` only.
-- **Port forwarding**, remote and local.
+- **RSA user keys** (`rsa-sha2-256` / `-512`). Ed25519 keys only for now;
+  RSA signing is the next piece of work.
+- **Port forwarding**, remote and local, and **jump hosts** (`ProxyJump`).
+  A WebSocket relay (§5) is the supported way to reach a host behind another.
+- **A PTY or an interactive shell**, and setting environment variables on the
+  remote side. `exec` runs one command without a terminal.
+- **Certificates**, for host or user keys. A `known_hosts` file's
+  `@cert-authority` lines are skipped (§3).
 - **A JS implementation.** See §8 of the design record.

@@ -20,27 +20,27 @@
 --      as host_unknown carrying its fingerprint; this program prints it and
 --      stops unless the operator passed --accept-new. That is the whole
 --      trust-on-first-use decision, made explicitly, in one place.
---   3. The trust store is the APPLICATION's. Hull ships no on-disk
---      known_hosts, because where trust lives is a deployment decision.
---      Here it is a JSON file beside the app.
+--   3. The trust store is an ordinary OpenSSH known_hosts file beside the
+--      app (ssh.file_store), so the `ssh` command line and this program read
+--      and write the same trust - and ssh-keyscan output can seed it. Where
+--      it lives is still the app's decision: the manifest names the file.
 --   4. A non-zero remote exit is a STATUS, not an error: "systemctl
 --      is-active" answering 3 is the answer, not a failure to ask.
 
 local ssh  = require("hull.ssh")
 local fs   = require("hull.fs")
-local json = require("hull.json")
 
 app.manifest({
     -- No "hull/env@1": ctx.env is handed to app.main by the runtime, and the
     -- manifest's own `env` list below is what gates which variables it can
     -- see. Declaring the MODULE as well would widen the capability surface
     -- for an import this app never makes - `hull check` says so.
-    modules = { "hull/ssh@1", "hull/fs@1", "hull/json@1" },
+    modules = { "hull/ssh@1", "hull/fs@1" },
     env = { "HULL_SSH_KEY", "HULL_SSH_USER", "HULL_SSH_COMMAND",
             "HULL_SSH_TUNNEL", "HULL_SSH_KEY_PASSPHRASE" },
     fs = {
-        read  = { "id_ed25519", "known_hosts.json" },
-        write = { "known_hosts.json" },
+        read  = { "id_ed25519", "known_hosts" },
+        write = { "known_hosts" },
     },
     ssh = {
         -- Widen these to YOUR fleet. A suffix glob is accepted
@@ -59,54 +59,10 @@ app.manifest({
     },
 })
 
-local TRUST_FILE = "known_hosts.json"
-
--- The trust store, persisted as JSON. The stored blobs are RAW host-key
--- bytes, so they are hex-encoded on the way to disk rather than written as
--- if they were text.
-local function to_hex(s)
-    return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-end
-
-local function from_hex(s)
-    -- Checked, not just decoded. gsub leaves anything that does not match
-    -- exactly in place, so a truncated or edited entry would decode to a
-    -- blob that is WRONG rather than refused - and the next connection would
-    -- report HOST KEY CHANGED, which is the loudest possible way to say
-    -- "your file is damaged".
-    if type(s) ~= "string" or #s == 0 or #s % 2 ~= 0 or s:find("%X") then
-        return nil
-    end
-    return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
-end
-
-local function load_trust()
-    local text = fs.read(TRUST_FILE)
-    if not text or text == "" then return ssh.memory_store() end
-    local ok, decoded = pcall(json.decode, text)
-    if not ok or type(decoded) ~= "table" then
-        -- A damaged store is not an empty store. Silently starting over
-        -- would turn every host into a first contact and accept whatever
-        -- answered; stop instead, and let a person look at it.
-        error(TRUST_FILE .. " is not readable JSON; refusing to continue")
-    end
-    local seed = {}
-    for host, hex in pairs(decoded) do
-        local blob = from_hex(hex)
-        if not blob then
-            error(TRUST_FILE .. ": the entry for " .. tostring(host)
-                  .. " is not valid hex; refusing to continue")
-        end
-        seed[host] = blob
-    end
-    return ssh.memory_store(seed)
-end
-
-local function save_trust(trust)
-    local out = {}
-    for host, blob in pairs(trust.entries()) do out[host] = to_hex(blob) end
-    fs.write(TRUST_FILE, json.encode(out))
-end
+-- The trust store: known_hosts beside the app, written as OpenSSH writes it.
+-- A line Hull cannot read is not trusted (it is skipped, not guessed at), so
+-- a damaged file makes a host unknown rather than wrongly accepted.
+local TRUST_FILE = "known_hosts"
 
 -- The relay, when one is configured: "host:port", TLS always on. A plaintext
 -- relay would carry the SSH stream in the clear across whatever sits between
@@ -144,8 +100,13 @@ local function run_one(ctx, host, opts)
             ctx.stderr:write("  re-run with --accept-new to trust it\n")
             return 1
         end
-        ssh.accept_host(opts.trust, host, err.key_blob, 22)
-        save_trust(opts.trust)
+        -- Written to known_hosts at once; nothing to save afterwards.
+        local ok, aerr = ssh.accept_host(opts.trust, host, err.key_blob, 22)
+        if not ok then
+            ctx.stderr:write(host .. ": could not record its key: "
+                             .. tostring(aerr.detail or aerr.code) .. "\n")
+            return 1
+        end
         -- A second connect, not a resumed one: the first was refused before
         -- authentication, so there is nothing to resume.
         conn, err = ssh.connect{
@@ -249,7 +210,7 @@ app.main(function(ctx)
         user       = ctx.env.HULL_SSH_USER or "deploy",
         command    = ctx.env.HULL_SSH_COMMAND or "uname -a",
         tunnel     = parse_tunnel(ctx.env.HULL_SSH_TUNNEL),
-        trust      = load_trust(),
+        trust      = ssh.file_store(TRUST_FILE),
         accept_new = accept_new,
     }
 

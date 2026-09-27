@@ -4086,6 +4086,15 @@ UTEST(lua_stdlib, ssh_privatekey_suite)
     EXPECT_GT(pass, 0LL);
 }
 
+UTEST(lua_stdlib, ssh_known_hosts_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_known_hosts.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 UTEST(lua_stdlib, ssh_transport_suite)
 {
     long long pass = 0, fail = -1;
@@ -5263,6 +5272,34 @@ UTEST(lua_ssh_bridge, a_bounded_wait_comes_back_coded_and_the_stream_lives)
     EXPECT_NE(run_as_stdlib(lua_rt.L, "H:wait(-1)"), LUA_OK);
     lua_settop(lua_rt.L, 0);
     ssh_bridge_close(&bf);
+}
+
+UTEST(lua_ssh_bridge, a_known_hosts_line_hashed_by_openssh_is_matched)
+{
+    /* The line below is ssh-keygen's own: a fresh ed25519 key recorded for
+     * web1.internal, then `ssh-keygen -H`. The unit suite checks the format
+     * with a stand-in HMAC; this checks it against OpenSSH, through the real
+     * hull.crypto, which is the only way to know the two agree. */
+    init_lua();
+    ASSERT_EQ(ssh_declare("app.manifest({ modules = { 'hull/ssh@1', 'hull/crypto@1' } })"), 0);
+    int rc = run_as_stdlib(lua_rt.L,
+        "local ssh = require('hull.ssh')\n"
+        "local key = 'AAAAC3NzaC1lZDI1NTE5AAAAIIVv0Mu44/XjxMDB01Pok3Zpil+AvjX4noCS12D4xykm'\n"
+        "local line = '|1|Ni3Ir1hENwtFHCWUUHN1PzRJcIw=|L939wIPq3PCppqUZb9UObH57zdQ= "
+        "ssh-ed25519 ' .. key\n"
+        "local fs = { read = function() return line .. '\\n' end,\n"
+        "             write = function() return true end }\n"
+        "local st = ssh.file_store('known_hosts', { fs = fs })\n"
+        "local want = require('hull.encoding.base64').decode(key)\n"
+        "assert(st.get('web1.internal') == want, 'the hashed entry must match its host')\n"
+        "assert(st.get('web2.internal') == nil, 'and nothing else')\n"
+        "return 'ok'\n");
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(lua_rt.L, -1));
+    ASSERT_EQ(rc, LUA_OK);
+    EXPECT_STREQ(lua_tostring(lua_rt.L, -1), "ok");
+    lua_settop(lua_rt.L, 0);
+    ssh_undeclare();
+    cleanup_lua();
 }
 
 UTEST(lua_ssh_bridge, a_manifest_denial_carries_its_code)
