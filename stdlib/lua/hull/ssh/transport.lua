@@ -261,8 +261,10 @@ function Transport:read_message(strict)
             local r = wire.reader(p); r:byte()
             local code = r:uint32()
             local desc = r:remaining() > 0 and r:string() or ""
+            -- safe_name, not safe_text: this lands inside ONE error line, and
+            -- a newline in it could forge a second one in the caller's log.
             error("ssh: server disconnected (" .. tostring(code) .. "): "
-                  .. userauth.sanitize_text(desc))
+                  .. wire.safe_name(desc, 200))
         elseif m == SSH_MSG_GLOBAL_REQUEST then
             local r = wire.reader(p); r:byte(); r:string()
             if r:boolean() then self:send_packet(string.char(SSH_MSG_REQUEST_FAILURE)) end

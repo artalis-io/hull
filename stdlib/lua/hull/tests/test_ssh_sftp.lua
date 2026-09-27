@@ -180,6 +180,16 @@ test("a server message is preferred over our text", function()
     assert_eq(m.text, "disk full")
 end)
 
+test("a server message reaches the caller without its controls", function()
+    -- `text` becomes the caller's error value and is printed; `message`
+    -- keeps what the server actually sent.
+    local raw = "denied\27[2K\rOK" .. string.char(10) .. "forged line"
+    local m = sftp.parse(wire.writer():byte(101):uint32(1):uint32(3)
+        :string(raw):string("en"):build())
+    assert_eq(m.text, "denied[2KOKforged line")
+    assert_eq(m.message, raw)
+end)
+
 test("a status with no message still has text", function()
     -- Older servers omit the message and language entirely.
     local m = sftp.parse(wire.writer():byte(101):uint32(1):uint32(2):build())

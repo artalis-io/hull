@@ -201,6 +201,18 @@ test("DISCONNECT surfaces the server reason", function()
     assert_eq(err:find("11", 1, true) ~= nil, true, err)
 end)
 
+test("a DISCONNECT reason cannot add a line to the caller's log", function()
+    -- The reason lands inside one error line. A newline in it would let a
+    -- server write a second, convincing-looking line of its own.
+    local d = wire.writer():byte(1):uint32(11)
+                           :string("bye" .. string.char(10) .. "host-b: OK")
+                           :string("en"):build()
+    local t = transport.new(fake_stream(plain(d)), stub_crypto())
+    local err = assert_raises(function() t:next_message() end)
+    assert_eq(err:find(string.char(10), 1, true), nil, err)
+    assert_eq(err:find("byehost-b: OK", 1, true) ~= nil, true, err)
+end)
+
 test("a hostile disconnect message cannot write escapes to a terminal", function()
     -- The reason string is attacker-controlled and headed for an operator.
     local d = wire.writer():byte(1):uint32(2)
