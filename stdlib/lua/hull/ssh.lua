@@ -37,8 +37,7 @@
 --           headers = {
 --               "Cf-Access-Client-Id: " .. env.get("CF_ID"),
 --               "Cf-Access-Client-Secret: " .. env.get("CF_SECRET"),
---               "Cf-Access-Jump-Destination: spark-7468:22",
---           },
+--           },   -- Cf-Access-Jump-Destination: spark-7468:22 is added
 --       },
 --   }
 --
@@ -147,9 +146,52 @@ function Conn:stats() return self.t:stats() end
 --
 -- `tunnel.headers` is where a provider's authentication goes, as raw
 -- "Name: value" lines. For Cloudflare Access that is Cf-Access-Client-Id and
--- Cf-Access-Client-Secret, plus Cf-Access-Jump-Destination when the tunnel
--- routes by destination. Nothing here is Cloudflare-specific; they are
--- headers, and this module does not read them.
+-- Cf-Access-Client-Secret. This module does not read those.
+--
+-- It DOES own the one header that picks the machine behind the relay:
+-- `tunnel.destination_header` (default "Cf-Access-Jump-Destination"). The
+-- manifest's ssh.connect grant is checked against `host`, but a relay that
+-- routes by header connects wherever that header says - so if the app wrote
+-- it freely, an app granted `web1` could reach any machine the relay can,
+-- and the host key it met there would be filed under `web1`. The header is
+-- therefore written from the granted host and port, and a caller-supplied one
+-- is accepted only if it names exactly that. A relay that routes by some
+-- other header names it here; `destination_header = false` means the relay
+-- does not route by header at all, and then the grant cannot constrain what
+-- it reaches - that is the caller's statement, not a default.
+local DEFAULT_DESTINATION_HEADER = "Cf-Access-Jump-Destination"
+
+-- host:port as a relay reads it; an IPv6 literal is bracketed.
+local function destination_value(host, port)
+    if host:find(":", 1, true) then return "[" .. host .. "]:" .. tostring(port) end
+    return host .. ":" .. tostring(port)
+end
+
+-- The headers to send: the caller's, with the destination header checked
+-- against the granted destination, or added. Returns headers, or nil plus a
+-- reason.
+local function tunnel_headers(tunnel, host, port)
+    local name = tunnel.destination_header
+    if name == nil then name = DEFAULT_DESTINATION_HEADER end
+    local out = {}
+    for i, line in ipairs(tunnel.headers or {}) do out[i] = line end
+    if name == false then return out end
+
+    local want = destination_value(host, port)
+    local lname, seen = name:lower(), false
+    for _, line in ipairs(out) do
+        local n, v = tostring(line):match("^%s*([^:]-)%s*:%s*(.-)%s*$")
+        if n and n:lower() == lname then
+            if v ~= want then
+                return nil, { code = "denied", detail = name .. " names " .. v
+                    .. ", but this connection is granted for " .. want }
+            end
+            seen = true
+        end
+    end
+    if not seen then out[#out + 1] = name .. ": " .. want end
+    return out
+end
 -- `dial` is how the RELAY is reached, defaulting to the capability-checked
 -- binding. It is a parameter for the same reason `crypto` is one: the layer
 -- above it is a byte transform that a test can drive without a socket, and a
@@ -161,6 +203,10 @@ local function tunnel_opener(tunnel, crypto, dial)
     if type(tunnel.host) ~= "string" or tunnel.host == "" then
         error("ssh.connect: tunnel.host is required", 3)
     end
+    local dh = tunnel.destination_header
+    if dh ~= nil and dh ~= false and (type(dh) ~= "string" or dh == "") then
+        error("ssh.connect: tunnel.destination_header must be a header name or false", 3)
+    end
     local ws   = require('hull.web.ws-stream')
     local port = tunnel.port or 443
     dial = dial or function(o) return require('hull.ssh._stream').connect(o) end
@@ -170,6 +216,11 @@ local function tunnel_opener(tunnel, crypto, dial)
     local tls = tunnel.tls ~= false
 
     return function(o)
+        -- Before anything is dialled: a mismatch is a refusal, not a
+        -- connection that fails later.
+        local headers, herr = tunnel_headers(tunnel, o.host, o.port)
+        if not headers then return nil, herr end
+
         local raw, err = dial({
             host       = o.host,      -- the SSH destination: what the grant,
             port       = o.port,      -- the host key and the login are about
@@ -187,7 +238,7 @@ local function tunnel_opener(tunnel, crypto, dial)
         local s, werr = ws.connect(raw, {
             host    = tunnel.tls_hostname or tunnel.host,
             path    = tunnel.path,
-            headers = tunnel.headers,
+            headers = headers,
             random  = crypto.random,
             sha1    = crypto.sha1,
         })

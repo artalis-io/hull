@@ -173,11 +173,22 @@ local conn, err = ssh.connect{
         headers = {
             "Cf-Access-Client-Id: " .. id,
             "Cf-Access-Client-Secret: " .. secret,
-            "Cf-Access-Jump-Destination: web1.internal:22",
         },
     },
 }
 ```
+
+The header that tells the relay which machine to reach is written by Hull,
+from `host` and `port`: `Cf-Access-Jump-Destination: web1.internal:22`. The
+manifest grant is checked against `host`, and a relay connects wherever that
+header says, so letting the app write it freely would let an app granted
+`web1` reach any machine behind the relay. A caller-supplied one is accepted
+only if it names exactly the granted destination; anything else is `denied`
+before a socket is opened. A relay that routes by a different header names it
+with `tunnel.destination_header = "X-Target"`. `destination_header = false`
+sends none, for a relay that routes some other way (a path, a fixed
+backend) - and then the grant does not constrain what the relay reaches, so
+that is a statement about the relay, not a default.
 
 `tls = true` verifies the relay's certificate against Hull's trust anchor (the
 embedded Mozilla bundle, or `--ca-bundle PATH` for an internal CA; see

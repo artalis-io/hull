@@ -113,6 +113,82 @@ test("the upgrade request carries the caller's headers verbatim", function()
     assert_match(req, "Cf-Access-Jump-Destination: spark-7468:22\r\n")
 end)
 
+-- The destination header ------------------------------------------------------
+--
+-- The relay connects wherever its destination header says, while the manifest
+-- grant is checked against `host`. So the header is written from the granted
+-- host, and one the caller supplies must name exactly that.
+
+local function count(s, pat)
+    local n = 0
+    for _ in s:gmatch(pat) do n = n + 1 end
+    return n
+end
+
+test("the destination header is written from the granted host", function()
+    local r = relay(upgraded())
+    connect_via(r, { host = "ssh.example.com",
+                     headers = { "Cf-Access-Client-Id: abc.access" } })
+    assert_match(r.written[1] or "", "Cf-Access-Jump-Destination: spark-7468:22\r\n")
+end)
+
+test("a destination header naming another host is refused before dialling", function()
+    -- The hole this closes: granted spark-7468, relayed to anywhere.
+    local r = relay(upgraded())
+    local err, seen = connect_via(r, { host = "ssh.example.com",
+        headers = { "cf-access-jump-destination: db-prod:22" } })
+    assert_eq(err.code, "denied")
+    assert_match(err.detail, "granted for spark-7468:22")
+    assert_eq(seen, nil, "nothing may be dialled")
+end)
+
+test("a destination header on another port is refused too", function()
+    local r = relay(upgraded())
+    local err = connect_via(r, { host = "ssh.example.com",
+        headers = { "Cf-Access-Jump-Destination: spark-7468:2222" } })
+    assert_eq(err.code, "denied")
+end)
+
+test("a matching destination header is kept once, not doubled", function()
+    local r = relay(upgraded())
+    connect_via(r, { host = "ssh.example.com",
+        headers = { "CF-ACCESS-JUMP-DESTINATION:  spark-7468:22 " } })
+    local req = r.written[1] or ""
+    assert_eq(count(req:lower(), "cf%-access%-jump%-destination:"), 1)
+end)
+
+test("a relay that routes by another header names it", function()
+    local r = relay(upgraded())
+    connect_via(r, { host = "ssh.example.com", destination_header = "X-Target" })
+    local req = r.written[1] or ""
+    assert_match(req, "X-Target: spark-7468:22\r\n")
+    assert_eq(req:find("Cf-Access-Jump-Destination", 1, true), nil)
+end)
+
+test("destination_header = false sends none, as the caller said", function()
+    local r = relay(upgraded())
+    connect_via(r, { host = "ssh.example.com", destination_header = false })
+    assert_eq((r.written[1] or ""):find("Jump-Destination", 1, true), nil)
+end)
+
+test("an IPv6 destination is bracketed", function()
+    local r = relay(upgraded())
+    ssh.connect{
+        host = "fd00::7", user = "operator", key = {}, crypto = crypto_stub,
+        tunnel = { host = "ssh.example.com" },
+        open_stream = function() return r end,
+    }
+    assert_match(r.written[1] or "", "Cf-Access-Jump-Destination: [fd00::7]:22\r\n")
+end)
+
+test("a destination_header that is not a name is a caller error", function()
+    local ok = pcall(ssh.connect, {
+        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        tunnel = { host = "ssh.example.com", destination_header = 7 },
+    })
+    assert_eq(ok, false)
+end)
+
 test("a refused upgrade reports the status, not a manifest denial", function()
     -- 403 is the normal shape of an Access rejection, and it is not the
     -- manifest refusing. Flattening both to "denied" sends an operator to
