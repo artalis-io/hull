@@ -457,7 +457,8 @@ int hull_serve(int argc, char **argv)
 
         if (tls_ctx) {
             hl_tls_config_wire(&tls_cfg, tls_ctx);
-            client_tls.cfg = &tls_cfg;
+            client_tls.cfg      = &tls_cfg;
+            client_tls.verifies = !skip_ca_bundle;
             rt->client_tls = &client_tls;
         }
     }

@@ -96,10 +96,12 @@ function M.build_request(opts)
     -- field that decides which machine is reached - past a manifest that only
     -- ever saw ssh.connect.hosts. `path` is gated by nothing and resolved by
     -- nothing, which is what makes it the reachable one.
+    -- NUL too: HTTP forbids it in a field, and an intermediary that treats
+    -- it as a terminator reads a different request from the one checked.
     local function no_crlf(what, v)
-        if type(v) == "string" and v:find("[\r\n]") then
-            error("web.ws-stream: " .. what .. " contains CR or LF: "
-                  .. v:gsub("[\r\n]", "?"), 3)
+        if type(v) == "string" and v:find("[\r\n%z]") then
+            error("web.ws-stream: " .. what .. " contains CR, LF or NUL: "
+                  .. v:gsub("[\r\n%z]", "?"), 3)
         end
         return v
     end
@@ -449,6 +451,22 @@ function M.connect(stream, opts)
         -- is worth reporting rather than flattening to "failed".
         return nil, { code = "upgrade_refused", status = res.status }
     end
+    -- RFC 6455 section 4.1: the client MUST fail the connection unless the
+    -- response upgrades to exactly this protocol. A 101 that switched to
+    -- something else is not a WebSocket, whatever else it echoes.
+    if (res.headers["upgrade"] or ""):lower() ~= "websocket" then
+        return nil, { code = "upgrade_failed",
+                      detail = "the response does not upgrade to websocket" }
+    end
+    local upgrade_token = false
+    for token in (res.headers["connection"] or ""):gmatch("[^,%s]+") do
+        if token:lower() == "upgrade" then upgrade_token = true end
+    end
+    if not upgrade_token then
+        return nil, { code = "upgrade_failed",
+                      detail = "the response's Connection header lacks Upgrade" }
+    end
+
     local got = res.headers["sec-websocket-accept"]
     if got ~= M.accept(opts.sha1, key) then
         -- Proves the peer ran the handshake rather than echoing a 101 back,

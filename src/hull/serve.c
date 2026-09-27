@@ -1579,8 +1579,9 @@ static int hl_serve_wire_caps(HlServerState *s)
 
         if (s->client_tls_ctx) {
             hl_tls_config_wire(&s->client_tls_config, s->client_tls_ctx);
-            s->client_tls.cfg = &s->client_tls_config;
-            rt->client_tls    = &s->client_tls;
+            s->client_tls.cfg      = &s->client_tls_config;
+            s->client_tls.verifies = !s->cfg.skip_ca_bundle;
+            rt->client_tls         = &s->client_tls;
         }
     }
 

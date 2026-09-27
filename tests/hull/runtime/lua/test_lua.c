@@ -5015,6 +5015,34 @@ UTEST(lua_ssh_bridge, a_user_outside_the_grant_is_denied)
     cleanup_lua();
 }
 
+UTEST(lua_ssh_bridge, an_out_of_range_port_is_refused_not_wrapped)
+{
+    /* A cast to int used to wrap 2^32 + 22 to 22 - checked and dialled as
+     * 22, consistently, but not the port that was asked for. */
+    init_lua();
+    ASSERT_EQ(ssh_declare(
+        "app.manifest({ modules = { 'hull/ssh@1' },\n"
+        "  ssh = { connect = { hosts = { 'spark.local' }, ports = { 22 },\n"
+        "                      users = { 'operator' } } } })\n"), 0);
+    const char *cases[] = {
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = 4294967318, user = 'operator' }))",
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = 22, user = 'operator', timeout_ms = -5 }))",
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = 22, user = 'operator', via = { host = 'r', port = 70000 } }))",
+    };
+    const char *want[] = { "port must be", "timeout_ms must be", "via.port must be" };
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ(run_as_stdlib(lua_rt.L, cases[i]), LUA_OK);
+        const char *err = lua_tostring(lua_rt.L, -1);
+        EXPECT_TRUE_MSG(err && strstr(err, want[i]), cases[i]);
+        lua_settop(lua_rt.L, 0);
+    }
+    ssh_undeclare();
+    cleanup_lua();
+}
+
 /* Start `src` in a coroutine of its own, compiled under a stdlib chunk name,
  * the way the runtime starts a handler: active_co is what a park captures to
  * resume later. Returns lua_resume's status. A coroutine that finishes here is
@@ -5133,8 +5161,24 @@ UTEST(lua_ssh_bridge, a_second_waiter_on_one_stream_is_refused_not_parked)
     if (lua_status(co_b) == LUA_OK)
         EXPECT_STREQ(lua_tostring(co_b, -1), "ping");
 
+    /* A stream that reaches application code is inert there. Only connect
+     * used to check its caller, so a handle that leaked (it did, as
+     * conn.t.stream) could read and write raw bytes to a granted host. */
+    const char *app_calls[] = { "return H:read(1)", "return H:write('x')",
+                                "return H:close()" };
+    for (size_t i = 0; i < sizeof app_calls / sizeof app_calls[0]; i++) {
+        int rc = luaL_dostring(lua_rt.L, app_calls[i]);
+        EXPECT_NE_MSG(rc, LUA_OK, app_calls[i]);
+        if (rc != LUA_OK) {
+            const char *err = lua_tostring(lua_rt.L, -1);
+            EXPECT_TRUE_MSG(err && strstr(err, "internal to the SSH module"),
+                            app_calls[i]);
+        }
+        lua_settop(lua_rt.L, 0);
+    }
+
     /* Stream teardown runs through the backend, so the loop outlives it. */
-    ASSERT_EQ(luaL_dostring(lua_rt.L, "H:close(); H = nil"), LUA_OK);
+    ASSERT_EQ(run_as_stdlib(lua_rt.L, "H:close(); H = nil"), LUA_OK);
     HlAsyncBackendCtx  *actx = lua_rt.base.async_ctx;
     HlAsyncBackendPool *pool = lua_rt.base.thread_pool;
     ssh_undeclare();

@@ -232,7 +232,10 @@ function M.parse(payload)
             out.message = r:string()
             if r:remaining() > 0 then out.language = r:string() end
         end
-        out.text = out.message
+        -- `text` is what reaches a caller's error value, and from there a
+        -- terminal, so it is the server's words with the controls removed
+        -- (wire.safe_name); `message` stays as sent.
+        out.text = out.message and wire.safe_name(out.message, 200)
         if out.text == nil or out.text == "" then
             out.text = M.STATUS_TEXT[code] or ("status " .. tostring(code))
         end

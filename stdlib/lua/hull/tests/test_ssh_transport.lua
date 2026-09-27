@@ -201,6 +201,18 @@ test("DISCONNECT surfaces the server reason", function()
     assert_eq(err:find("11", 1, true) ~= nil, true, err)
 end)
 
+test("a DISCONNECT reason cannot add a line to the caller's log", function()
+    -- The reason lands inside one error line. A newline in it would let a
+    -- server write a second, convincing-looking line of its own.
+    local d = wire.writer():byte(1):uint32(11)
+                           :string("bye" .. string.char(10) .. "host-b: OK")
+                           :string("en"):build()
+    local t = transport.new(fake_stream(plain(d)), stub_crypto())
+    local err = assert_raises(function() t:next_message() end)
+    assert_eq(err:find(string.char(10), 1, true), nil, err)
+    assert_eq(err:find("byehost-b: OK", 1, true) ~= nil, true, err)
+end)
+
 test("a hostile disconnect message cannot write escapes to a terminal", function()
     -- The reason string is attacker-controlled and headed for an operator.
     local d = wire.writer():byte(1):uint32(2)
@@ -370,6 +382,42 @@ test("streaming one stream still accumulates the other", function()
     assert_eq(got[1], "out")
     assert_eq(r.stdout, "")
     assert_eq(r.stderr, "err", "stderr has no callback, so it is buffered:")
+end)
+
+test("a channel request wanting a reply is answered, not ignored", function()
+    -- OpenSSH's ClientAliveInterval sends exactly this on an open session and
+    -- disconnects a client that never answers - which killed long commands.
+    local keepalive = plain(wire.writer():byte(98):uint32(0)
+                            :string("keepalive@openssh.com"):boolean(true):build())
+    local s = fake_stream(conf() .. ok_reply() .. data("a") .. keepalive
+                          .. data("b") .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cmd")
+    assert_eq(r.stdout, "ab", "the command carried on:")
+    assert_eq(r.status, 0)
+    assert_eq(has_type(s, 100), true, "CHANNEL_FAILURE sent:")
+end)
+
+test("a channel request not wanting a reply gets none", function()
+    -- exit-status is the everyday case; answering it would be a protocol error.
+    local s = fake_stream(conf() .. ok_reply() .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    t:exec("cmd")
+    assert_eq(has_type(s, 100), false, "no CHANNEL_FAILURE:")
+end)
+
+test("a channel the server asks to open is refused with a reply", function()
+    -- A forwarded connection or agent request. The server waits for an
+    -- answer; this used to raise "unexpected connection message 90" and take
+    -- the whole connection down instead.
+    local open = plain(wire.writer():byte(90):string("auth-agent@openssh.com")
+                       :uint32(5):uint32(65536):uint32(32768):build())
+    local s = fake_stream(conf() .. ok_reply() .. open .. data("x")
+                          .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cmd")
+    assert_eq(r.stdout, "x")
+    assert_eq(has_type(s, 92), true, "CHANNEL_OPEN_FAILURE sent:")
 end)
 
 test("stdin is written to the command and followed by EOF", function()
@@ -670,6 +718,106 @@ test("a rekey we start defers channel data until the exchange is over", function
     assert_eq(held:sub(2), "output")
 end)
 
+test("a rekey we start reads its reply past the data it set aside", function()
+    -- Same setup, but negotiation SUCCEEDS, so the exchange goes on to wait
+    -- for KEX_ECDH_REPLY. It used to read that through next_message, which
+    -- hands out the deferred channel data first, and failed the connection
+    -- with "expected KEX_ECDH_REPLY but the peer sent message 94" - the
+    -- earlier test never got this far, because it fails negotiation first.
+    local channel_data = string.char(94) .. "output"
+    local theirs = kexinit.build(nil, string.rep("c", 16))
+    local reply = wire.writer():byte(31):string("K_S")
+                               :string(string.rep("q", 32)):string("sig"):build()
+    local s = fake_stream(plain(channel_data) .. plain(theirs) .. plain(reply), 4)
+    local crypto = stub_crypto()
+    crypto.x25519_keypair = function()
+        return string.rep("00", 32), string.rep("11", 32)
+    end
+    -- Stops the exchange just after the reply was accepted: reaching here at
+    -- all is what is being asserted.
+    crypto.x25519 = function() return nil, "stub stops here" end
+    local t = transport.new(s, crypto)
+    t.session_id = "sid"
+
+    local ok, res, why = pcall(t.rekey, t)
+    local detail
+    if not ok then detail = tostring(res)            -- raised
+    elseif res then detail = "succeeded"
+    else detail = why and why.code end
+    assert_eq(detail, "bad_kex_point", "the exchange read its own reply:")
+
+    local held = t:next_message()
+    assert_eq(held:byte(1), 94, "the channel data is still there for the caller:")
+end)
+
+-- strict KEX -------------------------------------------------------------------
+
+-- A server KEXINIT built from our own offer, with the strict marker swapped
+-- for the server's (or dropped).
+local function server_kexinit(strict)
+    local offer = {}
+    for k, v in pairs(kexinit.DEFAULT_OFFER) do offer[k] = v end
+    offer.kex = { "curve25519-sha256" }
+    if strict then offer.kex[2] = kexinit.STRICT_S end
+    return plain(kexinit.build(offer, string.rep("s", 16)))
+end
+
+local function kex_crypto()
+    local c = stub_crypto()
+    c.x25519_keypair = function() return string.rep("00", 32), string.rep("11", 32) end
+    c.x25519 = function() return nil, "stub stops here" end
+    return c
+end
+
+local function ecdh_reply()
+    return plain(wire.writer():byte(31):string("K_S")
+                 :string(string.rep("q", 32)):string("sig"):build())
+end
+
+local IGNORE = plain(string.char(2) .. "x")
+
+-- Run the handshake; return its reason code, or the error it raised.
+local function handshake_outcome(inbound)
+    local t = transport.new(fake_stream("SSH-2.0-test\r\n" .. inbound, 16), kex_crypto())
+    local ok, res, why = pcall(t.handshake, t, { host = "h", trust = {} })
+    if not ok then return tostring(res) end
+    return res and "succeeded" or (why and why.code)
+end
+
+test("strict KEX refuses a packet before the server's KEXINIT", function()
+    -- Terrapin's primitive: an IGNORE the client skips shifts the sequence
+    -- numbers both sides think they share.
+    local out = handshake_outcome(IGNORE .. server_kexinit(true) .. ecdh_reply())
+    assert_eq(out:find("was not its first packet", 1, true) ~= nil, true, out)
+end)
+
+test("without strict KEX a packet before KEXINIT is still tolerated", function()
+    local out = handshake_outcome(IGNORE .. server_kexinit(false) .. ecdh_reply())
+    assert_eq(out, "bad_kex_point", "reached the exchange:")
+end)
+
+test("strict KEX, decided by the first exchange, holds for a rekey", function()
+    -- The markers only mean anything in the initial KEXINIT. Recomputing
+    -- strictness per exchange made every rekey lenient again, so an IGNORE
+    -- injected mid-rekey was skipped.
+    local t = transport.new(fake_stream(server_kexinit(false) .. IGNORE .. ecdh_reply(), 16),
+                            kex_crypto())
+    t.session_id = "sid"
+    t.strict_kex = true              -- as the first exchange left it
+    local ok, err = pcall(t.next_message, t)
+    assert_eq(ok, false)
+    assert_eq(tostring(err):find("strict KEX", 1, true) ~= nil, true, tostring(err))
+end)
+
+test("sequence numbers count every packet, both ways", function()
+    local t = transport.new(fake_stream(IGNORE .. plain(string.char(20) .. "x"), 16),
+                            stub_crypto())
+    t:next_message()
+    assert_eq(t.recv_seq, 2, "the skipped IGNORE counts too:")
+    t:send_packet(string.char(2))
+    assert_eq(t.send_seq, 1)
+end)
+
 test("stats span the connection, not just the current key", function()
     local t = transport.new(fake_stream("", 4), stub_crypto())
     t.rekeys = 2
@@ -773,6 +921,102 @@ test("an sftp reply for another request is refused", function()
     local err = assert_raises(function() f:realpath("/x") end)
     assert_eq(err:find("reply for request 7 while waiting for 1", 1, true) ~= nil,
               true, err)
+end)
+
+test("closing sftp drains its channel, so the next reader is not handed its tail", function()
+    -- The peer's EOF and CLOSE for the sftp channel are still in flight after
+    -- ours. Sftp:close used to send CLOSE and return, leaving them for
+    -- whatever read next. open_session happens to skip up to 16 stray
+    -- messages while it waits for its confirmation, which is why the exec
+    -- below survived even then; a longer tail, or any reader that is not
+    -- open_session, did not. So the property asserted first is close's own:
+    -- the channel is read through to its CLOSE before close returns.
+    local function on(id, w) return plain(w:build()) end
+    local ch1_conf = on(1, wire.writer():byte(91):uint32(1):uint32(8)
+                               :uint32(65536):uint32(32768))
+    local ch1_ok   = on(1, wire.writer():byte(99):uint32(1))
+    local ch1_data = on(1, wire.writer():byte(94):uint32(1):string("hi"))
+    local ch1_st   = on(1, wire.writer():byte(98):uint32(1):string("exit-status")
+                               :boolean(false):uint32(0))
+    local ch1_eof  = on(1, wire.writer():byte(96):uint32(1))
+    local ch1_fin  = on(1, wire.writer():byte(97):uint32(1))
+
+    local s = fake_stream(conf() .. ok_reply() .. s_version()
+        .. eof() .. fin()                                   -- sftp channel's tail
+        .. ch1_conf .. ch1_ok .. ch1_data .. ch1_st .. ch1_eof .. ch1_fin, 9)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    f:close()
+    assert_eq(f.ch.closed, true, "the peer's CLOSE was read:")
+    local r = t:exec("echo hi")
+    assert_eq(r.stdout, "hi")
+    assert_eq(r.status, 0)
+end)
+
+test("closing sftp twice sends one CLOSE", function()
+    local s = fake_stream(conf() .. ok_reply() .. s_version() .. fin(), 9)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    f:close()
+    f:close()
+    local closes = 0
+    for _, ty in ipairs(written_types(s)) do
+        if ty == 97 then closes = closes + 1 end
+    end
+    assert_eq(closes, 1)
+end)
+
+-- The CHANNEL_DATA sizes we sent, in order.
+local function sent_data_sizes(s)
+    local out = {}
+    for _, p in ipairs(s.written) do
+        local payload = packet.parse(p, 8)
+        if payload and payload:byte(1) == 94 then
+            local r = wire.reader(payload)
+            r:byte(); r:uint32()
+            out[#out + 1] = #r:string()
+        end
+    end
+    return out
+end
+
+test("an sftp write fits the peer's packet size", function()
+    -- A 16 KiB chunk plus its header went out as ONE message, and the channel
+    -- refuses (rather than truncates) one over the peer's packet size.
+    local s = fake_stream(conf(1048576, 8192) .. ok_reply() .. s_version()
+        .. s_handle(1, "h") .. s_status(2, 0) .. s_status(3, 0), 11)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    assert_eq(f:write("/big", string.rep("z", 16384)), true)
+    for _, n in ipairs(sent_data_sizes(s)) do
+        assert_eq(n <= 8192, true, "sent " .. n .. " bytes in one message")
+    end
+end)
+
+test("an sftp write waits for the window instead of raising", function()
+    -- The window runs out part way through the write; the peer's adjust
+    -- arrives afterwards, and the rest of the message follows it.
+    local s = fake_stream(conf(2000, 32768) .. ok_reply() .. s_version()
+        .. s_handle(1, "h") .. grant(1048576) .. s_status(2, 0) .. s_status(3, 0), 11)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    assert_eq(f:write("/w", string.rep("z", 5000)), true)
+end)
+
+test("exec stdin is chunked below our own limit, whatever the peer allows", function()
+    -- A peer may advertise a packet size far above what our framing will
+    -- send; a chunk sized to its number was refused on the way out.
+    local s = fake_stream(conf(1048576, 262144) .. ok_reply() .. status(0)
+                          .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cat", { stdin = string.rep("y", 100 * 1024) })
+    assert_eq(r.status, 0)
+    local total = 0
+    for _, n in ipairs(sent_data_sizes(s)) do
+        assert_eq(n <= 32768, true, "sent " .. n .. " bytes in one message")
+        total = total + n
+    end
+    assert_eq(total, 100 * 1024)
 end)
 
 test("an sftp write closes its handle and reads the answer on failure", function()

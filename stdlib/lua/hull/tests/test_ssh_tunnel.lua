@@ -113,6 +113,158 @@ test("the upgrade request carries the caller's headers verbatim", function()
     assert_match(req, "Cf-Access-Jump-Destination: spark-7468:22\r\n")
 end)
 
+-- The destination header ------------------------------------------------------
+--
+-- The relay connects wherever its destination header says, while the manifest
+-- grant is checked against `host`. So the header is written from the granted
+-- host, and one the caller supplies must name exactly that.
+
+local function count(s, pat)
+    local n = 0
+    for _ in s:gmatch(pat) do n = n + 1 end
+    return n
+end
+
+test("the destination header is written from the granted host", function()
+    local r = relay(upgraded())
+    connect_via(r, { host = "ssh.example.com",
+                     headers = { "Cf-Access-Client-Id: abc.access" } })
+    assert_match(r.written[1] or "", "Cf-Access-Jump-Destination: spark-7468:22\r\n")
+end)
+
+test("a destination header naming another host is refused before dialling", function()
+    -- The hole this closes: granted spark-7468, relayed to anywhere.
+    local r = relay(upgraded())
+    local err, seen = connect_via(r, { host = "ssh.example.com",
+        headers = { "cf-access-jump-destination: db-prod:22" } })
+    assert_eq(err.code, "denied")
+    assert_match(err.detail, "granted for spark-7468:22")
+    assert_eq(seen, nil, "nothing may be dialled")
+end)
+
+test("a destination header on another port is refused too", function()
+    local r = relay(upgraded())
+    local err = connect_via(r, { host = "ssh.example.com",
+        headers = { "Cf-Access-Jump-Destination: spark-7468:2222" } })
+    assert_eq(err.code, "denied")
+end)
+
+test("a matching destination header is kept once, not doubled", function()
+    local r = relay(upgraded())
+    connect_via(r, { host = "ssh.example.com",
+        headers = { "CF-ACCESS-JUMP-DESTINATION:  spark-7468:22 " } })
+    local req = r.written[1] or ""
+    assert_eq(count(req:lower(), "cf%-access%-jump%-destination:"), 1)
+end)
+
+test("a relay that routes by another header names it", function()
+    local r = relay(upgraded())
+    connect_via(r, { host = "ssh.example.com", destination_header = "X-Target" })
+    local req = r.written[1] or ""
+    assert_match(req, "X-Target: spark-7468:22\r\n")
+    assert_eq(req:find("Cf-Access-Jump-Destination", 1, true), nil)
+end)
+
+test("destination_header = false sends none, as the caller said", function()
+    local r = relay(upgraded())
+    connect_via(r, { host = "ssh.example.com", destination_header = false })
+    assert_eq((r.written[1] or ""):find("Jump-Destination", 1, true), nil)
+end)
+
+test("an IPv6 destination is bracketed", function()
+    local r = relay(upgraded())
+    ssh.connect{
+        host = "fd00::7", user = "operator", key = {}, crypto = crypto_stub,
+        tunnel = { host = "ssh.example.com" },
+        open_stream = function() return r end,
+    }
+    assert_match(r.written[1] or "", "Cf-Access-Jump-Destination: [fd00::7]:22\r\n")
+end)
+
+test("a destination_header that is not a name is a caller error", function()
+    local ok = pcall(ssh.connect, {
+        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        tunnel = { host = "ssh.example.com", destination_header = 7 },
+    })
+    assert_eq(ok, false)
+end)
+
+-- The connection handle ------------------------------------------------------
+--
+-- ssh.connect over a substitute transport, so the handle can be inspected
+-- without a server. What is asserted is what an application can REACH.
+
+local function connect_with_fake_transport()
+    local transport = require('hull.ssh.transport')
+    local fake = {
+        host_fingerprint = "SHA256:fake",
+        handshake    = function() return true end,
+        authenticate = function() return true end,
+        close        = function() end,
+        send_packet  = function() error("must not be reachable") end,
+        exec  = function(_, c) return { status = 0, stdout = c, stderr = "" } end,
+        sftp  = function(self)
+            return { t = self, read = function(_, p) return "contents of " .. p end }
+        end,
+    }
+    local real_new = transport.new
+    transport.new = function() return fake end
+    local ok, conn, err = pcall(ssh.connect, {
+        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        open_stream = function() return {} end,
+    })
+    transport.new = real_new
+    assert(ok, conn)
+    return assert(conn, err and err.code)
+end
+
+test("a connection exposes its methods, not its transport", function()
+    -- conn.t used to BE the transport: conn.t:send_packet could open a
+    -- direct-tcpip channel through the server, and conn.t.stream was the raw
+    -- socket the binding keeps from applications.
+    local conn = connect_with_fake_transport()
+    assert_eq(conn.t, nil, "conn.t")
+    assert_eq(next(conn), nil, "the handle has no fields at all")
+    assert_eq(getmetatable(conn), false, "and its metatable is not handed out")
+    assert_eq(conn:exec("uptime").stdout, "uptime", "the methods still work:")
+    assert_eq(conn:fingerprint(), "SHA256:fake")
+end)
+
+test("an sftp session exposes its methods, not the transport under it", function()
+    local conn = connect_with_fake_transport()
+    local f = conn:sftp()
+    assert_eq(f.t, nil, "sftp.t")
+    assert_eq(next(f), nil, "the handle has no fields at all")
+    assert_eq(f:read("/etc/motd"), "contents of /etc/motd")
+end)
+
+test("connect hands the port to the host-key check", function()
+    local transport = require('hull.ssh.transport')
+    local seen
+    local real_new = transport.new
+    transport.new = function()
+        return { handshake = function(_, o) seen = o; return nil, { code = "stop" } end,
+                 close = function() end }
+    end
+    pcall(ssh.connect, { host = "spark-7468", port = 2222, user = "operator",
+                         key = {}, crypto = crypto_stub,
+                         open_stream = function() return {} end })
+    transport.new = real_new
+    assert_eq(seen and seen.port, 2222)
+end)
+
+test("accept_host and forget_host name the entry by host and port", function()
+    local trust = ssh.memory_store()
+    ssh.accept_host(trust, "Spark-7468", "BLOB22")
+    ssh.accept_host(trust, "spark-7468", "BLOB2222", 2222)
+    local e = trust.entries()
+    assert_eq(e["spark-7468"], "BLOB22")
+    assert_eq(e["[spark-7468]:2222"], "BLOB2222")
+    ssh.forget_host(trust, "spark-7468", 2222)
+    assert_eq(trust.entries()["[spark-7468]:2222"], nil)
+    assert_eq(trust.entries()["spark-7468"], "BLOB22", "port 22 untouched:")
+end)
+
 test("a refused upgrade reports the status, not a manifest denial", function()
     -- 403 is the normal shape of an Access rejection, and it is not the
     -- manifest refusing. Flattening both to "denied" sends an operator to

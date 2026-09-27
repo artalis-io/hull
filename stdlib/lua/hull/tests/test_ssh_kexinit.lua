@@ -289,5 +289,66 @@ test("the built message round trips through the wire codec", function()
     assert_eq(r:namelist()[1], "curve25519-sha256")
 end)
 
+-- validate_offer ----------------------------------------------------------------
+
+local function copy_offer()
+    local o = {}
+    for k, v in pairs(kexinit.DEFAULT_OFFER) do
+        local list = {}
+        for i, n in ipairs(v) do list[i] = n end
+        o[k] = list
+    end
+    return o
+end
+
+test("the default offer, and no offer at all, are valid", function()
+    assert_eq(kexinit.validate_offer(nil), true)
+    assert_eq(kexinit.validate_offer(kexinit.DEFAULT_OFFER), true)
+end)
+
+test("an offer may narrow and reorder", function()
+    local o = copy_offer()
+    o.kex = { "curve25519-sha256@libssh.org", "curve25519-sha256" }
+    assert_eq(kexinit.validate_offer(o), true)
+end)
+
+test("an offer naming an unimplemented algorithm is refused", function()
+    -- The transport always runs curve25519 / ed25519 / AES-256-GCM. Offering
+    -- anything else would "agree" on an algorithm that is then not used.
+    for list, name in pairs({ kex = "diffie-hellman-group14-sha256",
+                              host_key = "ssh-rsa",
+                              cipher = "aes128-ctr",
+                              compression = "zlib" }) do
+        local o = copy_offer()
+        o[list] = { name }
+        local ok, why = kexinit.validate_offer(o)
+        assert_eq(ok, nil, list)
+        assert_eq(why:find(name, 1, true) ~= nil, true, why)
+    end
+end)
+
+test("an offer with no real algorithm in a list is refused", function()
+    local o = copy_offer()
+    o.kex = { kexinit.STRICT_C }          -- a marker is not an exchange
+    assert_eq(kexinit.validate_offer(o), nil)
+    o = copy_offer()
+    o.cipher = {}
+    assert_eq(kexinit.validate_offer(o), nil)
+end)
+
+test("ssh.connect refuses a bad offer before dialling anything", function()
+    local o = copy_offer()
+    o.cipher = { "arcfour" }
+    local dialled = false
+    local ok, err = pcall(require('hull.ssh').connect, {
+        host = "h", user = "u", key = {}, offer = o,
+        crypto = { random = function(n) return string.rep("\0", n) end },
+        open_stream = function() dialled = true end,
+    })
+    assert_eq(ok, false)
+    assert_eq(tostring(err):find("arcfour", 1, true) ~= nil, true, tostring(err))
+    assert_eq(dialled, false)
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

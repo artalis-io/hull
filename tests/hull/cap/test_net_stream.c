@@ -723,6 +723,9 @@ typedef struct {
     int     eof_seen;          /* the -1 just returned was a clean close  */
     int     clean_eof;         /* make the next read report one           */
     int     hard_error;        /* make the next read report a failure     */
+    int     fail_when_done;    /* ERROR, not OK, once handshakes_left runs
+                                * out: a handshake that fails LATE        */
+    int    *handshake_counter; /* outlives the session, like the above    */
 } FakeTls;
 
 static void *fake_alloc_fn(void *ud, size_t n) { (void)ud; return malloc(n); }
@@ -734,12 +737,13 @@ static KlTlsResult fake_handshake(KlTls *self, KlSocketHandle fd)
 {
     (void)fd;
     FakeTls *f = (FakeTls *)self;
+    if (f->handshake_counter) (*f->handshake_counter)++;
     if (f->handshake_fails) return KL_TLS_ERROR;
     if (f->handshakes_left > 0) {
         f->handshakes_left--;
         return f->want == HL_ASYNC_WRITE ? KL_TLS_WANT_WRITE : KL_TLS_WANT_READ;
     }
-    return KL_TLS_OK;
+    return f->fail_when_done ? KL_TLS_ERROR : KL_TLS_OK;
 }
 
 static kl_ssize_t fake_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len)
@@ -967,6 +971,95 @@ UTEST(net_stream, a_failed_tls_handshake_is_reported_as_tls_not_io)
     HlNetStream *s = NULL; int rc = 0;
     ASSERT_EQ(fix_open_tls(&f, &s, NULL, &rc), 0);
     EXPECT_EQ(rc, HL_NET_E_TLS);
+
+    hl_net_stream_free(s);
+    fix_free(&f);
+}
+
+UTEST(net_stream, a_handshake_that_fails_late_is_not_retried)
+{
+    /* The handshake asks to read, the socket becomes readable, and THEN it
+     * fails. tls_want used to stay set, so the watcher stayed armed and every
+     * later readiness ran handshake() again on a session that had already
+     * failed - a spin until the binding freed the stream. */
+    NetFix f;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+
+    int calls = 0;
+    memset(&g_fake_template, 0, sizeof g_fake_template);
+    g_fake_template.handshakes_left   = 1;
+    g_fake_template.want              = HL_ASYNC_READ;
+    g_fake_template.fail_when_done    = 1;
+    g_fake_template.handshake_counter = &calls;
+    g_fake_no_hostname = 0;
+
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async      = f.ctx;
+    cfg.pool       = f.pool;
+    cfg.host       = "127.0.0.1";
+    cfg.port       = f.port;
+    cfg.connect_ms = 5000;
+    fake_tls_cfg(&cfg);
+
+    HlNetStream *s = NULL;
+    hl_net_stream_connect(&s, &cfg);
+    ASSERT_NE(s, NULL);
+    for (int i = 0; i < 50 && calls < 1; i++) f.be->tick(f.ctx, 20);
+    ASSERT_EQ_MSG(calls, 1, "the handshake started and asked to read");
+
+    /* Make the socket readable; the fake consumes nothing, so it STAYS
+     * readable - exactly the condition a still-armed watcher spins on. */
+    ASSERT_EQ(fix_accept(&f), 0);
+    ASSERT_EQ(send(f.peer_fd, "x", 1, 0), (ssize_t)1);
+    ASSERT_EQ(pump_connect(&f, s, 100), HL_NET_E_TLS);
+    ASSERT_EQ(calls, 2);
+
+    for (int i = 0; i < 20; i++) f.be->tick(f.ctx, 10);
+    EXPECT_EQ_MSG(calls, 2, "a failed session must not be driven again");
+
+    hl_net_stream_free(s);
+    g_fake_template.handshake_counter = NULL;
+    fix_free(&f);
+}
+
+UTEST(net_stream, bytes_buffered_before_a_failure_are_still_read)
+{
+    /* Bytes already in the receive buffer when the stream fails - a peer's
+     * parting DISCONNECT, say, followed by a reset. read used to report the
+     * failure first, so those bytes were never delivered. The failure here is
+     * a write to a reset connection: deterministic on every platform, where
+     * how a kernel treats unread data on an incoming RST is not. */
+    NetFix f; HlNetStream *s = NULL;
+    ASSERT_EQ(fix_init(&f), 0);
+    ASSERT_EQ(fix_listen(&f), 0);
+    ASSERT_EQ(fix_open(&f, &s), 0);
+
+    ASSERT_EQ(send(f.peer_fd, "abcdef", 6, 0), (ssize_t)6);
+    char buf[16];
+    ASSERT_EQ(pump_read(&f, s, buf, 2, 100), 2L);   /* "cdef" stays buffered */
+
+    struct linger lg = { 1, 0 };                     /* close with RST */
+    setsockopt(f.peer_fd, SOL_SOCKET, SO_LINGER, (const void *)&lg, sizeof lg);
+    close(f.peer_fd);
+    f.peer_fd = -1;
+    for (int i = 0; i < 10; i++) f.be->tick(f.ctx, 10);
+
+    /* Write until the reset surfaces: the first send may still be accepted
+     * locally before the error is known. */
+    int wrc = HL_NET_OK;
+    for (int i = 0; i < 50 && (wrc == HL_NET_OK || wrc == HL_NET_E_AGAIN); i++) {
+        wrc = hl_net_stream_write(s, "x", 1);
+        f.be->tick(f.ctx, 10);
+    }
+    ASSERT_TRUE_MSG(wrc < 0 && wrc != HL_NET_E_AGAIN, "the stream has failed");
+
+    long n = hl_net_stream_read(s, buf, sizeof buf);
+    ASSERT_EQ_MSG(n, 4L, "the buffered bytes come first");
+    ASSERT_EQ(memcmp(buf, "cdef", 4), 0);
+    n = hl_net_stream_read(s, buf, sizeof buf);
+    EXPECT_TRUE_MSG(n < 0 && n != HL_NET_E_AGAIN, "then the failure is reported");
 
     hl_net_stream_free(s);
     fix_free(&f);

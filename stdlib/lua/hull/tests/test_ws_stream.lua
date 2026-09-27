@@ -313,10 +313,51 @@ end)
 test("a wrong Sec-WebSocket-Accept is refused", function()
     -- Proves the peer ran the handshake rather than echoing a 101 back.
     local t = fake("HTTP/1.1 101 Switching Protocols\r\n"
+                   .. "Upgrade: websocket\r\nConnection: Upgrade\r\n"
                    .. "Sec-WebSocket-Accept: wrong\r\n\r\n")
     local s, err = ws.connect(t, { host = "h", random = stub_random, sha1 = stub_sha1 })
     assert_eq(s, nil)
     assert_eq(err.code, "upgrade_failed")
+    assert_eq(err.detail, "Sec-WebSocket-Accept does not match")
+end)
+
+-- A 101 with a correct accept value, and the Upgrade / Connection lines given.
+local function response_with(lines)
+    local accept = ws.accept(stub_sha1, ws.key(stub_random))
+    return "HTTP/1.1 101 Switching Protocols\r\n" .. lines
+        .. "Sec-WebSocket-Accept: " .. accept .. "\r\n\r\n"
+end
+
+test("a 101 that does not upgrade to websocket is refused", function()
+    -- RFC 6455 4.1: the client MUST fail the connection. A matching accept
+    -- value alone does not make the peer a WebSocket server.
+    for _, lines in ipairs({ "Connection: Upgrade\r\n",
+                             "Upgrade: h2c\r\nConnection: Upgrade\r\n" }) do
+        local s, err = ws.connect(fake(response_with(lines)),
+            { host = "h", random = stub_random, sha1 = stub_sha1 })
+        assert_eq(s, nil, lines)
+        assert_eq(err.detail, "the response does not upgrade to websocket")
+    end
+end)
+
+test("a 101 whose Connection lacks Upgrade is refused", function()
+    local s, err = ws.connect(fake(response_with("Upgrade: websocket\r\nConnection: keep-alive\r\n")),
+        { host = "h", random = stub_random, sha1 = stub_sha1 })
+    assert_eq(s, nil)
+    assert_eq(err.detail, "the response's Connection header lacks Upgrade")
+end)
+
+test("Upgrade among other Connection tokens, in any case, is accepted", function()
+    local s = ws.connect(fake(response_with("upgrade: WebSocket\r\nConnection: keep-alive, UPGRADE\r\n")),
+        { host = "h", random = stub_random, sha1 = stub_sha1 })
+    assert_eq(s ~= nil, true)
+end)
+
+test("a NUL in a request header is refused", function()
+    local ok, err = pcall(ws.connect, fake(""), { host = "h", random = stub_random,
+        sha1 = stub_sha1, headers = { "X-Id: a\0b" } })
+    assert_eq(ok, false)
+    assert_eq(tostring(err):find("NUL", 1, true) ~= nil, true, tostring(err))
 end)
 
 test("a connection closed mid-upgrade is an error, not a hang", function()

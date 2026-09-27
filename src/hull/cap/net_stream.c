@@ -113,6 +113,8 @@ struct HlNetStream {
     uint64_t     delay_timer;
     uint64_t     deadline_timer;
     int          connect_ms;
+    uint64_t     connect_started_ms;  /* monotonic; the TLS handshake gets
+                                         what is LEFT of connect_ms */
 
     /* Parking. The binding fills op.on_resume and suspends; we complete it. */
     HlAsyncOp    op;
@@ -705,6 +707,10 @@ static int tls_step(HlNetStream *s)
      * hostname mismatch) are all "this is not the peer you asked for", and a
      * caller cannot act differently on which. */
     s->result = HL_NET_E_TLS;
+    /* Nothing more is wanted from the socket. Left set, io_rearm kept the
+     * watcher armed and every readiness re-ran handshake() on a session that
+     * had already failed - a spin until the binding freed the stream. */
+    s->tls_want = 0;
     if (s->tls_timer && s->be->timer_cancel) {
         s->be->timer_cancel(s->async, s->tls_timer);
         s->tls_timer = 0;
@@ -739,9 +745,20 @@ static int tls_begin(HlNetStream *s, const KlTlsConfig *cfg)
         return HL_NET_E_TLS;
     }
 
-    if (s->be->timer_add)
-        s->tls_timer = s->be->timer_add(s->async, s->connect_ms,
-                                        tls_deadline_fired, s);
+    /* What is LEFT of the connect budget, not a fresh one: from the caller's
+     * side the connect is not finished until the handshake is, and arming a
+     * full connect_ms here let TCP plus TLS take up to twice what was asked.
+     * At least 1 ms, so a connect that used the whole budget still gets a
+     * deadline rather than none. */
+    if (s->be->timer_add) {
+        int left = s->connect_ms;
+        if (s->be->monotonic_ms && s->connect_started_ms) {
+            uint64_t spent = s->be->monotonic_ms() - s->connect_started_ms;
+            left = spent >= (uint64_t)s->connect_ms ? 1
+                                                    : s->connect_ms - (int)spent;
+        }
+        s->tls_timer = s->be->timer_add(s->async, left, tls_deadline_fired, s);
+    }
     return HL_NET_OK;
 }
 
@@ -981,6 +998,7 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
     }
 
     s->connect_ms = cfg->connect_ms > 0 ? cfg->connect_ms : NET_CONNECT_MS_DEF;
+    s->connect_started_ms = be->monotonic_ms ? be->monotonic_ms() : 0;
     s->read_cap   = cfg->read_cap  ? cfg->read_cap  : HL_NET_READ_CAP_DEFAULT;
     s->write_cap  = cfg->write_cap ? cfg->write_cap : HL_NET_WRITE_CAP_DEFAULT;
     if (s->read_cap  > HL_NET_READ_CAP_MAX)  s->read_cap  = HL_NET_READ_CAP_MAX;
@@ -1052,14 +1070,21 @@ void hl_net_stream_deadline(HlNetStream *s, int ms)
 void hl_net_stream_close(HlNetStream *s)
 {
     if (!s || s->closing) return;
+    int healthy = s->result == HL_NET_OK && s->connect_done;
     s->closing = 1;
     s->result  = HL_NET_E_CLOSED;
 
     if (s->connect_started && !s->connect_done)
         kl_connect_op_cancel(&s->connect_op);
 
-    /* Both before the descriptor goes: close_notify needs it, and the watcher
-     * can only be removed by the fd it was registered under. */
+    /* Send what the socket will take NOW - the caller's last message is
+     * usually its goodbye (an SSH DISCONNECT) - without waiting: close does
+     * not linger, so bytes the kernel will not accept yet are dropped. Only
+     * on a healthy stream; a failed one has nothing it can still deliver. */
+    if (healthy && kl_handle_valid(s->fd)) (void)tx_flush(s);
+
+    /* Before the descriptor goes: close_notify needs it, and the watcher can
+     * only be removed by the fd it was registered under. */
     tls_teardown(s);
     io_unwatch(s);
     if (kl_handle_valid(s->fd)) { sp_close(s->fd); s->fd = KL_INVALID_SOCKET; }
@@ -1101,21 +1126,25 @@ long hl_net_stream_read(HlNetStream *s, void *buf, size_t len)
     if (!s || (!buf && len)) return HL_NET_E_INVAL;
     if (s->closing)          return HL_NET_E_CLOSED;
     if (!s->connect_done)    return HL_NET_E_AGAIN;   /* still connecting */
-    if (s->result != HL_NET_OK && s->result != HL_NET_E_CLOSED)
-        return s->result;
-    if (!len) return 0;
+    int failed = s->result != HL_NET_OK && s->result != HL_NET_E_CLOSED;
+    if (!len) return failed ? s->result : 0;
+
+    /* Serve whatever arrived. A read returns WHAT IS THERE, never "one
+     * record": framing is the caller's business, which is what lets a protocol
+     * sit on top without this layer knowing it.
+     *
+     * Before any stored error: bytes that arrived before a reset are real
+     * data - a peer's parting DISCONNECT, say - and the error is reported on
+     * the read after them, not instead of them. */
+    if (s->rx) {
+        size_t n = rx_take(s, buf, len);
+        if (n) return (long)n;
+    }
+    if (failed) return s->result;
 
     if (!s->rx) {
         s->rx = malloc(s->read_cap);
         if (!s->rx) return HL_NET_E_NOMEM;
-    }
-
-    /* Serve whatever arrived. A read returns WHAT IS THERE, never "one
-     * record": framing is the caller's business, which is what lets a protocol
-     * sit on top without this layer knowing it. */
-    {
-        size_t n = rx_take(s, buf, len);
-        if (n) return (long)n;
     }
 
     /* TLS can decrypt several application records out of one TCP segment.

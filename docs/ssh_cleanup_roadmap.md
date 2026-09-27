@@ -16,7 +16,7 @@ User guide: [`ssh.md`](ssh.md). Design record: [`ssh_module_design.md`](ssh_modu
 | Group | Theme | State |
 |---|---|---|
 | 1 | Memory safety and data integrity | done (`fix/ssh-lifetimes-and-sftp`); item 2 has no direct test, see below |
-| 2 | Protocol correctness | open |
+| 2 | Protocol correctness | done (`fix/ssh-protocol-correctness`); see below for two behaviour changes |
 | 3 | Timeouts and the error model | open |
 | 4 | Usability: SFTP, trust store, algorithms | open |
 | 5 | Architecture, DRY, clean code | open |
@@ -129,6 +129,55 @@ does and assert the exact reason.
       port / timeout narrowed to `int` without a range check; `--no-ca-bundle`
       silently covers the relay too (warn); bcrypt cap of 2^20 rounds still
       allows an hour-long stall.
+
+**How group 2 was fixed.** Every item below has a regression test verified
+to fail without its fix unless noted.
+
+- 6: the key exchange reads the wire (`read_message`), not the deferred queue.
+- 7: `Transport:channel_message` answers `want_reply` requests with
+  `CHANNEL_FAILURE` and replaces three parse-then-handle copies; a
+  server-initiated `CHANNEL_OPEN` gets `OPEN_FAILURE`.
+- 8: `Transport:close_channel` ends every channel (exec's three paths and
+  `Sftp:close`), sending CLOSE once. **Severity corrected:** the review said the
+  next `exec` would fail; `open_session` skips up to 16 stray messages, so it
+  survived a normal sftp close. The exposure was a longer tail or another reader.
+- 9: the relay's destination header is written from the granted `host:port`;
+  a caller-supplied one must match. `tunnel.destination_header` names another
+  header, `false` sends none (documented as unconstrained).
+- 10: connections and sftp sessions are field-less handles over a private
+  weak table; the stream binding checks its caller on read / write / close.
+- 11, done:
+  - sanitisers decode UTF-8 and drop C1, raw 0x9B and bidi overrides; SFTP
+    status text and DISCONNECT text use `safe_name`;
+  - host keys are stored as `host` / `[host]:port`, lower-cased;
+  - SFTP messages are split to the window / packet size, and `sendable` caps
+    at 32 KiB;
+  - strict KEX: first-packet rule, latched from the first exchange,
+    sequence numbers kept and reset at NEWKEYS;
+  - `opts.offer` validated against the implemented set;
+  - ws-stream checks `Upgrade` / `Connection` and refuses NUL;
+  - net_stream: a failed handshake is not re-driven, buffered bytes are read
+    before a stored error, the TLS handshake shares the connect budget, close
+    flushes what the socket takes (header corrected: it does not linger);
+  - port / via.port / timeout_ms range-checked instead of wrapped;
+  - a WARN when a relay's certificate goes unverified (`--no-ca-bundle`).
+- Not directly tested: the shared TLS budget and the close-time flush (not
+  observable deterministically over loopback) and the WARN (log output is
+  not captured).
+
+**Behaviour changes for callers.**
+- `ssh.accept_host` / `ssh.forget_host` take an optional trailing `port`
+  (default 22). An entry persisted for a non-22 port, or under a mixed-case
+  name, reports `host_unknown` once and must be accepted again.
+- `timeout_ms = 0` used to mean "the default"; it is now refused. Omit it.
+
+**Declined.** Lowering `HL_BCRYPT_MAX_ROUNDS` below 2^20: #581 chose that cap
+so no key `ssh-keygen` writes is refused. A lower cap trades that for a shorter
+worst-case stall and is a policy call, not a defect.
+
+Not in any group yet: the SFTP receive buffer grows by concatenation
+(quadratic for large reads), and a rekey may hold up to 4096 deferred packets.
+Both are bounded; they belong with group 4's streaming SFTP work.
 
 ## Group 3: timeouts and the error model
 

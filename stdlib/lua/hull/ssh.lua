@@ -37,8 +37,7 @@
 --           headers = {
 --               "Cf-Access-Client-Id: " .. env.get("CF_ID"),
 --               "Cf-Access-Client-Secret: " .. env.get("CF_SECRET"),
---               "Cf-Access-Jump-Destination: spark-7468:22",
---           },
+--           },   -- Cf-Access-Jump-Destination: spark-7468:22 is added
 --       },
 --   }
 --
@@ -85,8 +84,43 @@ function M.memory_store(seed)
     }
 end
 
+-- What an application holds is a HANDLE, never the machinery behind it.
+--
+-- A connection used to carry its transport in a plain field, `conn.t`. That
+-- one field was the whole transport: `conn.t:send_packet(...)` could open a
+-- direct-tcpip channel and forward through the server to anything IT can
+-- reach, and `conn.t.stream` was the raw byte stream the binding keeps from
+-- apps. The manifest grants SSH to a host as a login; it does not grant
+-- arbitrary packets over that session. So the transport (and an sftp
+-- session's) live in this table, keyed weakly by the handle, and only the
+-- methods below can reach them. The sandbox has no `debug` library, so an
+-- upvalue is as far as an application can see.
+local inner = setmetatable({}, { __mode = "k" })
+
+local function handle(class, obj)
+    local h = setmetatable({}, class)
+    inner[h] = obj
+    return h
+end
+
 local Conn = {}
 Conn.__index = Conn
+Conn.__metatable = false
+
+local SftpHandle = {}
+SftpHandle.__index = SftpHandle
+SftpHandle.__metatable = false
+
+--- Resolve a path on the server. Returns the canonical path, or nil + text.
+function SftpHandle:realpath(path) return inner[self]:realpath(path) end
+--- List a directory: the entries safe to use as local names, and the ones
+--- refused and why.
+function SftpHandle:list(path) return inner[self]:list(path) end
+--- Read a whole file; `max` (default 16 MiB) bounds it.
+function SftpHandle:read(path, max) return inner[self]:read(path, max) end
+--- Write a whole file, creating or truncating it.
+function SftpHandle:write(path, data) return inner[self]:write(path, data) end
+function SftpHandle:close() return inner[self]:close() end
 
 --- Run a command. Returns { status, signal, stdout, stderr }, or nil plus a
 --- reason table.
@@ -110,14 +144,18 @@ Conn.__index = Conn
 --- a command writing output while we write input wedges both directions on
 --- full buffers (measured against OpenSSH). Bulk data belongs in
 --- `conn:sftp()`, which moves one direction at a time and has no such limit.
-function Conn:exec(command, opts) return self.t:exec(command, opts) end
+function Conn:exec(command, opts) return inner[self]:exec(command, opts) end
 
 --- Open an SFTP session. Paths travel inside the subsystem as
 --- length-prefixed strings, so a filename never becomes a shell word.
-function Conn:sftp() return self.t:sftp() end
-function Conn:close() return self.t:close() end
-function Conn:fingerprint() return self.t.host_fingerprint end
-function Conn:negotiated() return self.t.negotiated end
+function Conn:sftp()
+    local s, err = inner[self]:sftp()
+    if not s then return nil, err end
+    return handle(SftpHandle, s)
+end
+function Conn:close() return inner[self]:close() end
+function Conn:fingerprint() return inner[self].host_fingerprint end
+function Conn:negotiated() return inner[self].negotiated end
 
 --- Ask the server for new keys now. Returns true, or nil plus a reason.
 ---
@@ -129,13 +167,13 @@ function Conn:negotiated() return self.t.negotiated end
 ---
 --- Call it BETWEEN operations. It reads packets, so calling it from inside an
 --- `on_stdout` callback would consume the output that callback is being fed.
-function Conn:rekey() return self.t:rekey() end
+function Conn:rekey() return inner[self]:rekey() end
 
 --- What this connection has moved, and how many times it has re-keyed:
 --- { rekeys, bytes_sent, bytes_received, packets_sent, packets_received,
 ---   rekey_due }. The byte counts span the whole connection; the packet
 --- counts are for the current keys, which is what the limit is about.
-function Conn:stats() return self.t:stats() end
+function Conn:stats() return inner[self]:stats() end
 
 -- Reach the host through a WebSocket relay instead of dialling it directly.
 --
@@ -147,9 +185,52 @@ function Conn:stats() return self.t:stats() end
 --
 -- `tunnel.headers` is where a provider's authentication goes, as raw
 -- "Name: value" lines. For Cloudflare Access that is Cf-Access-Client-Id and
--- Cf-Access-Client-Secret, plus Cf-Access-Jump-Destination when the tunnel
--- routes by destination. Nothing here is Cloudflare-specific; they are
--- headers, and this module does not read them.
+-- Cf-Access-Client-Secret. This module does not read those.
+--
+-- It DOES own the one header that picks the machine behind the relay:
+-- `tunnel.destination_header` (default "Cf-Access-Jump-Destination"). The
+-- manifest's ssh.connect grant is checked against `host`, but a relay that
+-- routes by header connects wherever that header says - so if the app wrote
+-- it freely, an app granted `web1` could reach any machine the relay can,
+-- and the host key it met there would be filed under `web1`. The header is
+-- therefore written from the granted host and port, and a caller-supplied one
+-- is accepted only if it names exactly that. A relay that routes by some
+-- other header names it here; `destination_header = false` means the relay
+-- does not route by header at all, and then the grant cannot constrain what
+-- it reaches - that is the caller's statement, not a default.
+local DEFAULT_DESTINATION_HEADER = "Cf-Access-Jump-Destination"
+
+-- host:port as a relay reads it; an IPv6 literal is bracketed.
+local function destination_value(host, port)
+    if host:find(":", 1, true) then return "[" .. host .. "]:" .. tostring(port) end
+    return host .. ":" .. tostring(port)
+end
+
+-- The headers to send: the caller's, with the destination header checked
+-- against the granted destination, or added. Returns headers, or nil plus a
+-- reason.
+local function tunnel_headers(tunnel, host, port)
+    local name = tunnel.destination_header
+    if name == nil then name = DEFAULT_DESTINATION_HEADER end
+    local out = {}
+    for i, line in ipairs(tunnel.headers or {}) do out[i] = line end
+    if name == false then return out end
+
+    local want = destination_value(host, port)
+    local lname, seen = name:lower(), false
+    for _, line in ipairs(out) do
+        local n, v = tostring(line):match("^%s*([^:]-)%s*:%s*(.-)%s*$")
+        if n and n:lower() == lname then
+            if v ~= want then
+                return nil, { code = "denied", detail = name .. " names " .. v
+                    .. ", but this connection is granted for " .. want }
+            end
+            seen = true
+        end
+    end
+    if not seen then out[#out + 1] = name .. ": " .. want end
+    return out
+end
 -- `dial` is how the RELAY is reached, defaulting to the capability-checked
 -- binding. It is a parameter for the same reason `crypto` is one: the layer
 -- above it is a byte transform that a test can drive without a socket, and a
@@ -161,6 +242,10 @@ local function tunnel_opener(tunnel, crypto, dial)
     if type(tunnel.host) ~= "string" or tunnel.host == "" then
         error("ssh.connect: tunnel.host is required", 3)
     end
+    local dh = tunnel.destination_header
+    if dh ~= nil and dh ~= false and (type(dh) ~= "string" or dh == "") then
+        error("ssh.connect: tunnel.destination_header must be a header name or false", 3)
+    end
     local ws   = require('hull.web.ws-stream')
     local port = tunnel.port or 443
     dial = dial or function(o) return require('hull.ssh._stream').connect(o) end
@@ -170,6 +255,11 @@ local function tunnel_opener(tunnel, crypto, dial)
     local tls = tunnel.tls ~= false
 
     return function(o)
+        -- Before anything is dialled: a mismatch is a refusal, not a
+        -- connection that fails later.
+        local headers, herr = tunnel_headers(tunnel, o.host, o.port)
+        if not headers then return nil, herr end
+
         local raw, err = dial({
             host       = o.host,      -- the SSH destination: what the grant,
             port       = o.port,      -- the host key and the login are about
@@ -187,7 +277,7 @@ local function tunnel_opener(tunnel, crypto, dial)
         local s, werr = ws.connect(raw, {
             host    = tunnel.tls_hostname or tunnel.host,
             path    = tunnel.path,
-            headers = tunnel.headers,
+            headers = headers,
             random  = crypto.random,
             sha1    = crypto.sha1,
         })
@@ -217,6 +307,8 @@ function M.connect(opts)
             error("ssh.connect: " .. req .. " is required", 2)
         end
     end
+    local offer_ok, offer_why = require('hull.ssh.kexinit').validate_offer(opts.offer)
+    if not offer_ok then error("ssh.connect: " .. offer_why, 2) end
 
     local crypto = opts.crypto or require('hull.crypto')
     -- A passphrase-protected key needs to say where its passphrase comes from.
@@ -278,6 +370,7 @@ function M.connect(opts)
 
     local ok, herr = step(t.handshake, t, {
         host = opts.host,
+        port = opts.port or 22,      -- part of the host key's identity
         trust = trust,
         offer = opts.offer,
         on_banner = opts.on_banner,
@@ -293,18 +386,21 @@ function M.connect(opts)
         return nil, aerr
     end
 
-    return setmetatable({ t = t }, Conn)
+    return handle(Conn, t)
 end
 
 --- Accept a host key the caller has decided to trust, so the next connect
 --- succeeds. Separate from connect() on purpose: accepting is an act, not a
 --- flag on the call that discovered the key.
-function M.accept_host(trust, host, key_blob)
-    return hostkey.accept_new(trust, host, key_blob)
+---
+--- `port` (default 22) is part of the identity: a key is trusted for the
+--- host AND port it was met on, as in OpenSSH's known_hosts.
+function M.accept_host(trust, host, key_blob, port)
+    return hostkey.accept_new(trust, hostkey.store_name(host, port), key_blob)
 end
 
-function M.forget_host(trust, host)
-    return hostkey.forget(trust, host)
+function M.forget_host(trust, host, port)
+    return hostkey.forget(trust, hostkey.store_name(host, port))
 end
 
 --- Fingerprint a key blob, for showing one to an operator.

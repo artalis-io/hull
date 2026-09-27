@@ -253,6 +253,44 @@ test("safe_name leaves ordinary text alone", function()
     assert_eq(wire.safe_name("ssh-ed25519"), "ssh-ed25519")
 end)
 
+-- Controls that are not C0: each can forge output without an ESC byte.
+
+test("a raw 8-bit CSI byte is dropped", function()
+    -- 0x9B is CSI in 8-bit mode; as a lone byte it is not valid UTF-8 either.
+    local s = "ok" .. string.char(0x9B) .. "2J"
+    assert_eq(wire.safe_text(s), "ok2J")
+    assert_eq(wire.safe_name(s), "ok2J")
+end)
+
+test("C1 controls encoded as UTF-8 are dropped", function()
+    assert_eq(wire.safe_text("a" .. utf8.char(0x9B) .. "b" .. utf8.char(0x85) .. "c"), "abc")
+end)
+
+test("directional overrides are dropped", function()
+    -- U+202E renders what follows right-to-left: "ok" can be made to read
+    -- as something else with no escape sequence at all.
+    local s = "file" .. utf8.char(0x202E) .. "txt.exe" .. utf8.char(0x2066)
+              .. "x" .. utf8.char(0x200F)
+    assert_eq(wire.safe_name(s, 200), "filetxt.exex")
+end)
+
+test("ordinary non-ASCII text is kept intact", function()
+    local s = "Grüße, 日本, " .. utf8.char(0x1F600)
+    assert_eq(wire.safe_text(s), s)
+    assert_eq(wire.safe_name(s, 200), s)
+end)
+
+test("malformed UTF-8 is dropped byte by byte, not passed through", function()
+    -- An overlong encoding of '/' and a lone continuation byte.
+    local s = "a" .. string.char(0xC0, 0xAF) .. "b" .. string.char(0x80) .. "c"
+    assert_eq(wire.safe_text(s), "abc")
+end)
+
+test("truncation never leaves half a character", function()
+    local out = wire.safe_name(string.rep("é", 40), 7)   -- 2 bytes each
+    assert_eq(out, "ééé...")
+end)
+
 
 -- Return results for C test harness
 return {pass = pass, fail = fail}

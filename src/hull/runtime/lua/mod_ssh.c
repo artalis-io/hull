@@ -64,6 +64,8 @@
 extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
                                              HlLuaPushResultFn push_result);
 
+#include "log.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,6 +96,17 @@ static int caller_is_stdlib(lua_State *L)
     if (lua_getstack(L, 1, &ar) == 0) return 0;
     if (lua_getinfo(L, "S", &ar) == 0) return 0;
     return hl_lua_source_is_stdlib(ar.source);
+}
+
+/* Raise unless the caller is stdlib. Every entry point, not only connect:
+ * a handle that leaks to application code - it once did, as conn.t.stream -
+ * must be inert there, or "the application never holds a socket" rests on
+ * every stdlib object keeping every field private forever. */
+static void require_stdlib_caller(lua_State *L)
+{
+    if (!caller_is_stdlib(L))
+        luaL_error(L, "ssh: the byte stream is internal to the SSH module; "
+                      "use require('hull.ssh')");
 }
 
 /* ── the stream handle ──────────────────────────────────────────────── */
@@ -140,6 +153,7 @@ static void ssh_unpark(HlLuaSshStream *o)
 
 static int lua_ssh_close(lua_State *L)
 {
+    require_stdlib_caller(L);
     HlLuaSshStream *o = check_stream(L);
     if (o->s) {
         /* Order is the whole content of this function. Close FIRST so the
@@ -331,6 +345,7 @@ static int ssh_read_step(lua_State *L, HlLuaSshStream *o)
 
 static int lua_ssh_read(lua_State *L)
 {
+    require_stdlib_caller(L);
     HlLuaSshStream *o = check_stream(L);
     if (ssh_busy(L, o)) return 2;
     lua_Integer want = luaL_optinteger(L, 2, 4096);
@@ -387,6 +402,7 @@ static int ssh_write_step(lua_State *L, HlLuaSshStream *o, int ud_idx)
 
 static int lua_ssh_write(lua_State *L)
 {
+    require_stdlib_caller(L);
     HlLuaSshStream *o = check_stream(L);
     if (ssh_busy(L, o)) return 2;
     size_t len;
@@ -445,12 +461,23 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o)
  * matters: the caller check first, so an application probing this bridge
  * learns nothing about the grant.
  */
+/* An optional integer option at the top of the stack, within [lo, hi]. Returns
+ * it, or -1 when present and out of range (or not an integer). A cast to int
+ * alone would wrap: port 2^32 + 22 became 22, which the policy then checked
+ * and the connect then used - consistent, so not a bypass, but not the port
+ * that was asked for either. */
+static long opt_int_in(lua_State *L, lua_Integer def, lua_Integer lo, lua_Integer hi)
+{
+    if (lua_isnoneornil(L, -1)) return (long)def;
+    int ok = 0;
+    lua_Integer v = lua_tointegerx(L, -1, &ok);
+    if (!ok || v < lo || v > hi) return -1;
+    return (long)v;
+}
+
 static int lua_ssh_connect(lua_State *L)
 {
-    if (!caller_is_stdlib(L))
-        return luaL_error(L,
-            "ssh: the byte stream is internal to the SSH module; "
-            "use require('hull.ssh')");
+    require_stdlib_caller(L);
 
     luaL_checktype(L, 1, LUA_TTABLE);
     int base = lua_gettop(L);
@@ -458,11 +485,16 @@ static int lua_ssh_connect(lua_State *L)
     lua_getfield(L, 1, "host");
     const char *host = lua_tostring(L, -1);
     lua_getfield(L, 1, "port");
-    int port = (int)luaL_optinteger(L, -1, 22);
+    long port = opt_int_in(L, 22, 1, 65535);
     lua_getfield(L, 1, "user");
     const char *user = lua_tostring(L, -1);
     lua_getfield(L, 1, "timeout_ms");
-    int timeout = (int)luaL_optinteger(L, -1, SSH_CONNECT_MS_DEF);
+    long timeout = opt_int_in(L, SSH_CONNECT_MS_DEF, 1, 24L * 3600 * 1000);
+    if (port < 0 || timeout < 0) {
+        lua_settop(L, base);
+        return push_err(L, port < 0 ? "ssh: port must be an integer 1..65535"
+                                    : "ssh: timeout_ms must be an integer 1..86400000");
+    }
 
     /* The relay, if any. Its strings stay on the stack until after connect:
      * cfg.host and cfg.tls_hostname are BORROWED for the duration of the
@@ -485,7 +517,12 @@ static int lua_ssh_connect(lua_State *L)
         lua_getfield(L, v, "host");
         via_host = lua_tostring(L, -1);
         lua_getfield(L, v, "port");
-        via_port = (int)luaL_optinteger(L, -1, 443);
+        long vp = opt_int_in(L, 443, 1, 65535);
+        if (vp < 0) {
+            lua_settop(L, base);
+            return push_err(L, "ssh: via.port must be an integer 1..65535");
+        }
+        via_port = (int)vp;
         lua_getfield(L, v, "tls");
         via_tls = lua_toboolean(L, -1);
         lua_getfield(L, v, "tls_hostname");
@@ -501,7 +538,7 @@ static int lua_ssh_connect(lua_State *L)
      * machine the app asked to reach is the more informative answer, and it
      * keeps the relay from being probed by an app that may not reach the
      * host behind it anyway. */
-    HlNetAuth auth = hl_ssh_check_connect(lua->base.ssh_policy, host, port, user);
+    HlNetAuth auth = hl_ssh_check_connect(lua->base.ssh_policy, host, (int)port, user);
     if (auth == HL_NET_ALLOW && has_via)
         auth = hl_ssh_check_tunnel(lua->base.ssh_policy, via_host, via_port);
     if (auth != HL_NET_ALLOW) {
@@ -515,8 +552,8 @@ static int lua_ssh_connect(lua_State *L)
     cfg.async      = lua->base.async_ctx;
     cfg.pool       = lua->base.thread_pool;
     cfg.host       = has_via ? via_host : host;
-    cfg.port       = has_via ? via_port : port;
-    cfg.connect_ms = timeout;
+    cfg.port       = has_via ? via_port : (int)port;
+    cfg.connect_ms = (int)timeout;
 
     if (via_tls) {
         /* Refuse rather than downgrade. A caller that asked for an encrypted
@@ -532,6 +569,14 @@ static int lua_ssh_connect(lua_State *L)
                 "trust anchor (no CA bundle resolved, or TLS is not composed "
                 "into this binary)");
         }
+        if (!t->verifies)
+            /* Allowed - --no-ca-bundle is a development switch - but said
+             * here, where it matters: the relay's certificate is not checked,
+             * and the tunnel's headers carry its credentials to whoever
+             * answers. */
+            log_warn("[hull:ssh] relay %s:%d: certificate NOT verified "
+                     "(--no-ca-bundle); tunnel credentials go to whoever "
+                     "answers", via_host ? via_host : "?", via_port);
         cfg.tls       = t->cfg;
         /* The runtime's own allocator, bridged. Stack-local is safe because
          * the transport COPIES the KlAllocator by value (net_stream.c's

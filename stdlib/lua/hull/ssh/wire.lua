@@ -248,9 +248,53 @@ end
 -- ANOTHER host's result. That is a bigger problem for a tool driving a fleet
 -- than for an interactive client, where a human is watching one session.
 
--- Multi-line text: a banner, a disconnect reason. Tab and newline survive
--- because the text is meant to be laid out; nothing else below 0x20 does, and
--- neither does DEL.
+-- Code points a terminal acts on rather than shows, beyond C0 and DEL:
+--
+--   C1 (U+0080-U+009F): U+009B is CSI, an escape sequence without the ESC,
+--     honoured by terminals in 8-bit mode.
+--   Directional overrides and isolates (U+202A-U+202E, U+2066-U+2069) and the
+--     LRM/RLM marks (U+200E, U+200F): they reorder what is displayed, so
+--     "ok" can be made to read as something else without a single escape.
+local function is_invisible_control(cp)
+    return (cp >= 0x80 and cp <= 0x9F)
+        or (cp >= 0x202A and cp <= 0x202E)
+        or (cp >= 0x2066 and cp <= 0x2069)
+        or cp == 0x200E or cp == 0x200F
+end
+
+-- Keep what a terminal will display as written. Decodes UTF-8 rather than
+-- filtering bytes, because the dangerous cases above are MULTI-byte (U+009B is
+-- C2 9B) or are single bytes that are only dangerous when they are NOT part of
+-- a valid sequence (a raw 9B). So: a malformed or stray byte is dropped, a
+-- control code point is dropped, and everything else is kept byte-for-byte.
+-- `keep_layout` lets tab and newline through, for text meant to be laid out.
+local function strip_controls(s, keep_layout)
+    local out, n, i = {}, #s, 1
+    while i <= n do
+        local c = sbyte(s, i)
+        local len = (c < 0x80 and 1) or (c >= 0xC2 and c <= 0xDF and 2)
+                 or (c >= 0xE0 and c <= 0xEF and 3) or (c >= 0xF0 and c <= 0xF4 and 4)
+                 or 0
+        local ok, cp = false, nil
+        if len > 0 and i + len - 1 <= n then
+            ok, cp = pcall(utf8.codepoint, s, i)   -- strict: rejects overlongs, surrogates
+        end
+        if not ok then
+            i = i + 1                               -- malformed: drop this byte
+        else
+            if (cp >= 0x20 and cp ~= 0x7F and not is_invisible_control(cp))
+               or (keep_layout and (cp == 0x09 or cp == 0x0A)) then
+                out[#out + 1] = ssub(s, i, i + len - 1)
+            end
+            i = i + len
+        end
+    end
+    return concat(out)
+end
+
+-- Multi-line text: a banner. Tab and newline survive because the text is
+-- meant to be laid out; no other control does, whether C0, DEL, C1 or a
+-- directional override (see is_invisible_control).
 --
 -- CR is stripped along with the rest. On its own it returns the cursor to the
 -- start of the line just written, so a banner ending "...ok\rFAILED" shows
@@ -258,7 +302,7 @@ end
 -- with none of the visibility.
 function M.safe_text(s)
     if type(s) ~= "string" then return tostring(s) end
-    return (s:gsub("[%z\1-\8\11-\31\127]", ""))
+    return strip_controls(s, true)
 end
 
 -- Single-line text: an algorithm name, a method name, a service name, a
@@ -269,9 +313,11 @@ end
 -- caller should discover it sent sixty kilobytes.
 function M.safe_name(s, max)
     if type(s) ~= "string" then return tostring(s) end
-    s = s:gsub("[%z\1-\31\127]", "")
+    s = strip_controls(s, false)
     max = max or 64
-    if #s > max then return s:sub(1, max) .. "..." end
+    -- Cutting at a byte can split a character; cleaning the prefix again
+    -- drops the partial sequence rather than handing a terminal half of one.
+    if #s > max then return strip_controls(s:sub(1, max), false) .. "..." end
     return s
 end
 

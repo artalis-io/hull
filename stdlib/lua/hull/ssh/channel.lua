@@ -92,6 +92,26 @@ function M.build_close(recipient_id)
     return wire.writer():byte(M.SSH_MSG_CHANNEL_CLOSE):uint32(recipient_id):build()
 end
 
+-- The answer to a channel request we do not act on (RFC 4254 section 5.4).
+function M.build_failure(recipient_id)
+    return wire.writer():byte(M.SSH_MSG_CHANNEL_FAILURE):uint32(recipient_id):build()
+end
+
+-- Refuse a channel the SERVER asked to open (RFC 4254 section 5.1). This is a
+-- client that opens its own channels and accepts none: no forwarding, no
+-- agent, no X11.
+M.OPEN_ADMINISTRATIVELY_PROHIBITED = 1
+
+function M.build_open_failure(recipient_id, reason, description)
+    return wire.writer()
+        :byte(M.SSH_MSG_CHANNEL_OPEN_FAILURE)
+        :uint32(recipient_id)
+        :uint32(reason)
+        :string(description or "")
+        :string("")
+        :build()
+end
+
 function M.build_window_adjust(recipient_id, add)
     return wire.writer()
         :byte(M.SSH_MSG_CHANNEL_WINDOW_ADJUST)
@@ -294,14 +314,23 @@ function Channel:can_send(n)
     return n <= self.send_window
 end
 
--- The largest chunk that can be sent right now: the smaller of the remaining
--- window and the peer packet cap. Zero means wait for a window adjust.
+-- The most data we put in one CHANNEL_DATA, whatever the peer allows. A
+-- peer may advertise a packet size far larger than our own framing accepts
+-- (hull.ssh.packet.MAX_PACKET), and a chunk sized to its number alone would be
+-- refused on the way out. 32 KiB leaves room for the message header, padding
+-- and tag inside that limit.
+M.MAX_SEND = 32768
+
+-- The largest chunk that can be sent right now: the smallest of the remaining
+-- window, the peer packet cap and MAX_SEND. Zero means wait for a window
+-- adjust.
 function Channel:sendable()
     if not self.open or self.closed then return 0 end
     local n = self.send_window
     if self.send_max_packet and self.send_max_packet < n then
         n = self.send_max_packet
     end
+    if n > M.MAX_SEND then n = M.MAX_SEND end
     return n
 end
 
