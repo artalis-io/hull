@@ -258,8 +258,12 @@ file handles, the trust store in `known_hosts` format, RSA in its own PR.
 - `docs/ssh.md` "Not implemented" now also lists RSA user keys, jump hosts,
   PTY / shell / env and certificates.
 
-Still open in group 4: RSA user keys (C signing + key parsing), aligning the
-store interface with `hull.kv`, and documenting parallel connections.
+Also done: `ssh.kv_store(kv)` over `hull.kv`, with atomic first use (the
+store-interface alignment above), and a design proposal for `hull.kv`
+encryption (`kv_encryption_design.md`).
+
+Still open in group 4: RSA user keys (C signing + key parsing), and
+documenting parallel connections.
 
 ## Group 5: architecture, DRY, clean code
 

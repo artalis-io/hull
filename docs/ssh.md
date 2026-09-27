@@ -117,7 +117,7 @@ machine keep separate keys. `ssh.forget_host(trust, host, port)` takes the
 same arguments.
 
 The store is an object with `get`/`put`/`forget`/`entries`, and Hull ships
-two:
+three:
 
 - `ssh.file_store(path)` keeps it in an **OpenSSH `known_hosts` file**, read
   and written through `hull/fs` (so the app declares `hull/fs` and names the
@@ -129,11 +129,23 @@ two:
   `@cert-authority` / `@revoked` lines are skipped, not half-honoured: a host
   covered only by a pattern is simply unknown. A store that cannot write
   returns `store_failed`.
+- `ssh.kv_store(kv)` keeps it in a **`hull.kv` namespace** (SQLite, Postgres,
+  ...), for a service whose workers or instances must agree on trust.
+  Accepting a key is atomic - the backend's compare-and-swap as
+  set-if-absent - so two workers meeting the same new host at once cannot both
+  record a key; the second gets `already_trusted`. Entries live under
+  `opts.prefix` (default `"hostkey:"`), so the namespace can hold other data.
+  The backend must support compare-and-swap.
 - `ssh.memory_store(seed)` holds it in the process, for an app that keeps
-  trust somewhere else (a DB row, a config map) or nowhere.
+  trust somewhere else or nowhere.
 
 Where trust lives is still the application's decision: the manifest names the
-file. The example keeps `known_hosts` beside the app.
+file, or the app opens the kv namespace. The example keeps `known_hosts`
+beside the app. Whoever can write the store decides which keys Hull trusts,
+so treat write access to it like write access to `~/.ssh/known_hosts`.
+([`kv_encryption_design.md`](kv_encryption_design.md) proposes authenticated
+encryption for `hull.kv`, which would stop a backend writer without the key
+from substituting a host key.)
 
 `host_changed_midsession` deserves its own note: a rekey re-presents the host
 key, and Hull pins it against the key **this connection was built on**, not
