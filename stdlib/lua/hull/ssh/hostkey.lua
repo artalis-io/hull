@@ -112,9 +112,22 @@ M.TRUSTED = "trusted"   -- stored key matches the one presented
 M.UNKNOWN = "unknown"   -- no stored key for this host
 M.CHANGED = "changed"   -- a key is stored and it is NOT this one
 
+-- The name a host's key is stored under: OpenSSH's known_hosts convention.
+-- Lower-cased, because DNS names are case-insensitive and "Web1" and "web1"
+-- are one machine; and "[host]:port" off port 22, because two sshds on one
+-- machine (22 and 2222, say) have different keys, and filing both under the
+-- bare name reported the second as a changed key - or, worse, trusted a key
+-- accepted for one port on the other.
+function M.store_name(host, port)
+    local h = tostring(host):lower()
+    port = port or 22
+    if port == 22 then return h end
+    return "[" .. h .. "]:" .. tostring(port)
+end
+
 -- Compare the presented key against the store. Makes no decision: returns the
 -- status so the caller can apply its own policy to UNKNOWN, and see CHANGED
--- for what it is.
+-- for what it is. `host` is a store_name.
 function M.check(store, host, key_blob)
     if type(store) ~= "table" or type(store.get) ~= "function" then
         error("ssh.hostkey: a store with a get function is required", 2)

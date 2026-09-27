@@ -106,8 +106,15 @@ end
 To trust one, and only then:
 
 ```lua
-ssh.accept_host(trust, host, err.key_blob)
+ssh.accept_host(trust, host, err.key_blob)         -- port 22
+ssh.accept_host(trust, host, err.key_blob, 2222)   -- any other port
 ```
+
+A key is trusted for the host **and port** it was met on, and host names are
+compared case-insensitively - OpenSSH's `known_hosts` convention. Entries are
+named `host` for port 22 and `[host]:port` otherwise, so two sshds on one
+machine keep separate keys. `ssh.forget_host(trust, host, port)` takes the
+same arguments.
 
 The store is an object with `get`/`put`/`forget`/`entries`.
 `ssh.memory_store(seed)` is the in-process one; persisting it is the

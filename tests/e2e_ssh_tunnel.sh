@@ -191,7 +191,7 @@ app.main(function()
             return 1
         end
         print("fingerprint_shape=" .. tostring(err.fingerprint:match("^SHA256:") ~= nil))
-        ssh.accept_host(trust, "$2", err.key_blob)
+        ssh.accept_host(trust, "$2", err.key_blob, $3)   -- keyed by host AND port
         conn, err = ssh.connect{
             host = "$2", port = $3, user = "$SSH_LOGIN",
             key = key, trust = trust, tunnel = TUNNEL,

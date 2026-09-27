@@ -144,7 +144,7 @@ local function run_one(ctx, host, opts)
             ctx.stderr:write("  re-run with --accept-new to trust it\n")
             return 1
         end
-        ssh.accept_host(opts.trust, host, err.key_blob)
+        ssh.accept_host(opts.trust, host, err.key_blob, 22)
         save_trust(opts.trust)
         -- A second connect, not a resumed one: the first was refused before
         -- authentication, so there is nothing to resume.

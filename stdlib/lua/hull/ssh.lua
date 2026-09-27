@@ -368,6 +368,7 @@ function M.connect(opts)
 
     local ok, herr = step(t.handshake, t, {
         host = opts.host,
+        port = opts.port or 22,      -- part of the host key's identity
         trust = trust,
         offer = opts.offer,
         on_banner = opts.on_banner,
@@ -389,12 +390,15 @@ end
 --- Accept a host key the caller has decided to trust, so the next connect
 --- succeeds. Separate from connect() on purpose: accepting is an act, not a
 --- flag on the call that discovered the key.
-function M.accept_host(trust, host, key_blob)
-    return hostkey.accept_new(trust, host, key_blob)
+---
+--- `port` (default 22) is part of the identity: a key is trusted for the
+--- host AND port it was met on, as in OpenSSH's known_hosts.
+function M.accept_host(trust, host, key_blob, port)
+    return hostkey.accept_new(trust, hostkey.store_name(host, port), key_blob)
 end
 
-function M.forget_host(trust, host)
-    return hostkey.forget(trust, host)
+function M.forget_host(trust, host, port)
+    return hostkey.forget(trust, hostkey.store_name(host, port))
 end
 
 --- Fingerprint a key blob, for showing one to an operator.

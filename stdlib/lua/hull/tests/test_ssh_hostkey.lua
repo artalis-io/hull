@@ -175,6 +175,25 @@ end)
 
 -- accepting and forgetting -------------------------------------------------------
 
+test("a key is stored under host and port, as known_hosts names it", function()
+    assert_eq(hostkey.store_name("spark.local", 22), "spark.local")
+    assert_eq(hostkey.store_name("spark.local"), "spark.local", "port defaults to 22:")
+    assert_eq(hostkey.store_name("spark.local", 2222), "[spark.local]:2222")
+    assert_eq(hostkey.store_name("Spark.LOCAL", 22), "spark.local", "case-insensitive:")
+end)
+
+test("a key accepted on one port is unknown on another", function()
+    -- Two sshds on one machine have two keys. Filed under the bare host name,
+    -- the second was reported as a CHANGED key, and a key accepted for one
+    -- port was trusted on the other.
+    local store = require('hull.ssh').memory_store()
+    hostkey.accept_new(store, hostkey.store_name("spark.local", 22), key_blob(KEY_A))
+    assert_eq(hostkey.check(store, hostkey.store_name("spark.local", 2222),
+                            key_blob(KEY_B)), hostkey.UNKNOWN)
+    assert_eq(hostkey.check(store, hostkey.store_name("SPARK.local", 22),
+                            key_blob(KEY_A)), hostkey.TRUSTED)
+end)
+
 test("accept_new remembers a first-use key", function()
     local store = new_store()
     hostkey.accept_new(store, "spark.local", key_blob(KEY_A))

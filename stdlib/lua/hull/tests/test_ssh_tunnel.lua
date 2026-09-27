@@ -238,6 +238,33 @@ test("an sftp session exposes its methods, not the transport under it", function
     assert_eq(f:read("/etc/motd"), "contents of /etc/motd")
 end)
 
+test("connect hands the port to the host-key check", function()
+    local transport = require('hull.ssh.transport')
+    local seen
+    local real_new = transport.new
+    transport.new = function()
+        return { handshake = function(_, o) seen = o; return nil, { code = "stop" } end,
+                 close = function() end }
+    end
+    pcall(ssh.connect, { host = "spark-7468", port = 2222, user = "operator",
+                         key = {}, crypto = crypto_stub,
+                         open_stream = function() return {} end })
+    transport.new = real_new
+    assert_eq(seen and seen.port, 2222)
+end)
+
+test("accept_host and forget_host name the entry by host and port", function()
+    local trust = ssh.memory_store()
+    ssh.accept_host(trust, "Spark-7468", "BLOB22")
+    ssh.accept_host(trust, "spark-7468", "BLOB2222", 2222)
+    local e = trust.entries()
+    assert_eq(e["spark-7468"], "BLOB22")
+    assert_eq(e["[spark-7468]:2222"], "BLOB2222")
+    ssh.forget_host(trust, "spark-7468", 2222)
+    assert_eq(trust.entries()["[spark-7468]:2222"], nil)
+    assert_eq(trust.entries()["spark-7468"], "BLOB22", "port 22 untouched:")
+end)
+
 test("a refused upgrade reports the status, not a manifest denial", function()
     -- 403 is the normal shape of an Access rejection, and it is not the
     -- manifest refusing. Flattening both to "denied" sends an operator to

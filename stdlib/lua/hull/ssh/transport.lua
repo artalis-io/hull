@@ -426,8 +426,8 @@ function Transport:run_kex(opts, i_s)
         -- caller; an unknown or changed host comes back as a reason carrying
         -- the fingerprint (see hull.ssh.hostkey).
         local d = hostkey.verify(self.crypto, kex.to_hex, self.raw_sha,
-                                 opts.trust, opts.host, reply.host_key,
-                                 reply.signature, h)
+                                 opts.trust, hostkey.store_name(opts.host, opts.port),
+                                 reply.host_key, reply.signature, h)
         if not d.ok then
             return nil, { code = "host_key_invalid", detail = d.reason }
         end
