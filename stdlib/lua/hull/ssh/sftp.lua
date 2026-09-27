@@ -66,6 +66,14 @@ M.STATUS_TEXT = {
     [6] = "no connection", [7] = "connection lost", [8] = "operation unsupported",
 }
 
+-- The same statuses as codes a caller branches on (`err.code`), rather than
+-- text it would have to match.
+M.STATUS_CODE = {
+    [0] = "ok", [1] = "eof", [2] = "no_such_file", [3] = "permission_denied",
+    [4] = "failure", [5] = "bad_message", [6] = "no_connection",
+    [7] = "connection_lost", [8] = "op_unsupported",
+}
+
 -- open flags
 M.FXF_READ   = 0x01
 M.FXF_WRITE  = 0x02
@@ -226,6 +234,7 @@ function M.parse(payload)
     if t == M.FXP_STATUS then
         local code = r:uint32()
         local out = { type = "status", id = id, code = code,
+                      name = M.STATUS_CODE[code] or "failure",
                       ok = code == M.FX_OK, eof = code == M.FX_EOF }
         -- Version 3 carries a message and language; older servers may not.
         if r:remaining() > 0 then

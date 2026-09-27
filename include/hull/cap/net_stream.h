@@ -95,6 +95,7 @@ typedef struct HlNetStream HlNetStream;
 #define HL_NET_E_INVAL      (-9)   /* bad argument, bounded before use        */
 #define HL_NET_E_AGAIN     (-10)  /* would park; suspend on the pending op   */
 #define HL_NET_E_TLS       (-11)  /* TLS setup or handshake failed           */
+#define HL_NET_E_DEADLINE  (-12)  /* the stream's deadline was reached       */
 
 /* Bounds. A hostile or merely slow peer must not be able to grow Hull's
  * memory, so both buffers are fixed at construction and writes are admitted
@@ -227,8 +228,25 @@ int hl_net_stream_write(HlNetStream *s, const void *buf, size_t len);
 /* HL_NET_OK, HL_NET_E_AGAIN when the send queue is full (backpressure, not an
  * error), or a negative error. Never writes a partial buffer. */
 
-/** Rearm the operation deadline. <=0 clears it. */
+/* Bounded waits. Two independent bounds on how long a PARKED read or write may
+ * wait, and neither is fatal: when one expires, that read or write returns
+ * HL_NET_E_DEADLINE / HL_NET_E_TIMEOUT once and the stream stays usable. What
+ * an expiry means (retry, send a keepalive, give up, abandon one command) is
+ * the protocol's decision, not the transport's.
+ *
+ *   hl_net_stream_deadline  an absolute point, `ms` from now, that every
+ *                           park until it is changed may not pass. For a
+ *                           whole phase: a handshake, one command. <=0 clears.
+ *   hl_net_stream_wait      the most any ONE park may wait. For liveness: a
+ *                           quiet interval long enough to deserve a keepalive.
+ *                           <=0 clears.
+ *
+ * When both apply, the earlier wins and is the one reported. An expiry is
+ * reported only when the retried read or write would otherwise wait again:
+ * data (or room) that turned up in the meantime means the wait was met, and
+ * the expiry is discarded. */
 void hl_net_stream_deadline(HlNetStream *s, int ms);
+void hl_net_stream_wait(HlNetStream *s, int ms);
 
 /** Close: send what the socket accepts without waiting, then FIN. Does not
  *  linger, so queued bytes the kernel will not take yet are dropped.

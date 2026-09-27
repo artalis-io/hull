@@ -630,6 +630,74 @@ UTEST(net_stream, close_with_a_parked_read_leaves_no_watcher_behind_linked)
     EXPECT_EQ(reuse_after_parked_close(hl_async_backend()), 0);
 }
 
+/* ── bounded waits ──────────────────────────────────────────────────── */
+
+static int g_resumed;
+static void count_resume(struct HlAsyncOp *op) { (void)op; g_resumed++; }
+
+/* Park a read the way the binding does (suspend the pending op with a resume
+ * callback), then let the loop run until something resumes it. */
+static long park_read_until_resumed(NetFix *f, HlNetStream *s, char *buf, size_t n)
+{
+    long rc = hl_net_stream_read(s, buf, n);
+    if (rc != HL_NET_E_AGAIN) return rc;
+    struct HlAsyncOp *op = hl_net_stream_pending_op(s);
+    if (!op) return -1000;
+    op->on_resume = count_resume;
+    g_resumed = 0;
+    /* The fixture never parked the CONNECT, so the poll backend may still hold
+     * that completion queued for this op (Keel drops one with no state).
+     * Retract it, or it - not the bound under test - resumes the read. */
+    f->be->op_cancel(f->ctx, op);
+    if (f->be->op_suspend(f->ctx, op) != 0) return -1001;
+    for (int i = 0; i < 200 && !g_resumed; i++) f->be->tick(f->ctx, 10);
+    if (!g_resumed) return -1002;
+    return hl_net_stream_read(s, buf, n);
+}
+
+/* Returns 0, or the step that failed. */
+static int bounded_waits_case(const HlAsyncBackend *be)
+{
+    NetFix f; HlNetStream *s = NULL;
+    int step = 0;
+    char buf[8];
+    if (fix_init_on(&f, be) != 0 || fix_listen(&f) != 0 ||
+        fix_open(&f, &s) != 0) { step = 1; goto out; }
+
+    /* The wait bound: the read comes back with TIMEOUT instead of parking
+     * forever on a quiet peer - and the stream is still usable after it. */
+    hl_net_stream_wait(s, 50);
+    if (park_read_until_resumed(&f, s, buf, sizeof buf) != HL_NET_E_TIMEOUT) { step = 2; goto out; }
+    if (hl_net_stream_read(s, buf, sizeof buf) != HL_NET_E_AGAIN) { step = 3; goto out; }
+    if (send(f.peer_fd, "ok", 2, 0) != 2) { step = 4; goto out; }
+    for (int i = 0; i < 50; i++) f.be->tick(f.ctx, 5);
+    if (park_read_until_resumed(&f, s, buf, sizeof buf) != 2) { step = 5; goto out; }
+
+    /* The deadline: reported as DEADLINE, not TIMEOUT, when it comes first,
+     * and every park after it reports it at once until it is cleared. */
+    hl_net_stream_wait(s, 5000);
+    hl_net_stream_deadline(s, 50);
+    if (park_read_until_resumed(&f, s, buf, sizeof buf) != HL_NET_E_DEADLINE) { step = 6; goto out; }
+    if (hl_net_stream_read(s, buf, sizeof buf) != HL_NET_E_DEADLINE) { step = 7; goto out; }
+    hl_net_stream_deadline(s, 0);
+    if (hl_net_stream_read(s, buf, sizeof buf) != HL_NET_E_AGAIN) { step = 8; goto out; }
+
+out:
+    if (s) hl_net_stream_free(s);
+    fix_free(&f);
+    return step;
+}
+
+UTEST(net_stream, bounded_waits_expire_without_killing_the_stream_poll)
+{
+    EXPECT_EQ(bounded_waits_case(&hl_async_backend_poll), 0);
+}
+
+UTEST(net_stream, bounded_waits_expire_without_killing_the_stream_linked)
+{
+    EXPECT_EQ(bounded_waits_case(hl_async_backend()), 0);
+}
+
 UTEST(net_stream, io_rejects_bad_arguments)
 {
     char buf[8];
@@ -1374,7 +1442,8 @@ UTEST(net_stream, every_error_has_its_own_message)
     const int codes[] = {
         HL_NET_OK, HL_NET_E_DENIED, HL_NET_E_RESOLVE, HL_NET_E_CONNECT,
         HL_NET_E_TIMEOUT, HL_NET_E_CLOSED, HL_NET_E_CANCELLED, HL_NET_E_IO,
-        HL_NET_E_NOMEM, HL_NET_E_INVAL, HL_NET_E_AGAIN,
+        HL_NET_E_NOMEM, HL_NET_E_INVAL, HL_NET_E_AGAIN, HL_NET_E_TLS,
+        HL_NET_E_DEADLINE,
     };
     const int n = (int)(sizeof codes / sizeof codes[0]);
     for (int i = 0; i < n; i++) {

@@ -36,6 +36,11 @@
 -- such limit.
 local STDIN_MAX = 128 * 1024
 
+-- How long closing a timed-out command's channel may take. The command has
+-- already had its time; this only bounds reading its tail so the connection
+-- can be reused.
+local CHANNEL_DRAIN_MS = 5000
+
 local packet     = require('hull.ssh.packet')
 local kexinit    = require('hull.ssh.kexinit')
 local kex        = require('hull.ssh.kex')
@@ -55,6 +60,7 @@ local SSH_MSG_IGNORE        = 2
 local SSH_MSG_UNIMPLEMENTED = 3
 local SSH_MSG_DEBUG         = 4
 local SSH_MSG_GLOBAL_REQUEST = 80
+local SSH_MSG_REQUEST_SUCCESS = 81
 local SSH_MSG_REQUEST_FAILURE = 82
 local SSH_MSG_KEXINIT       = 20
 
@@ -64,9 +70,24 @@ Transport.__index = Transport
 --- @param stream  read/write/close, as above
 --- @param crypto  sha256, x25519, x25519_keypair, ed25519_verify,
 ---                ed25519_sign, random, gcm_seal, gcm_open
+-- Liveness defaults (see Transport:quiet). OpenSSH's ServerAliveInterval /
+-- ServerAliveCountMax, and an idle bound on top of them.
+M.KEEPALIVE_MS  = 30000
+M.KEEPALIVE_MAX = 3
+M.IDLE_MS       = 60000
+
 function M.new(stream, crypto, opts)
     opts = opts or {}
-    return setmetatable({
+    local function opt(v, default) if v == nil then return default end return v end
+    local t = setmetatable({
+        -- Liveness. Every read waits at most wait_ms (see apply_wait); each
+        -- time one expires the silence is counted, and once authenticated a
+        -- keepalive asks whether the server is still there.
+        keepalive_ms  = opt(opts.keepalive_ms, M.KEEPALIVE_MS),
+        keepalive_max = opt(opts.keepalive_max, M.KEEPALIVE_MAX),
+        idle_ms       = opt(opts.idle_ms, M.IDLE_MS),
+        quiet_ms      = 0,        -- silence so far, in wait_ms steps
+        unanswered    = 0,        -- keepalives sent since the server last spoke
         stream = stream,
         crypto = crypto,
         ident = "SSH-2.0-" .. (opts.software or "Hull"),
@@ -94,6 +115,85 @@ function M.new(stream, crypto, opts)
         },
         raw_sha = kex.raw_hash(crypto.sha256),
     }, Transport)
+    t:apply_wait()
+    return t
+end
+
+-- Failures the layers above branch on carry a code: raised as a table, so
+-- the facade can hand them back as they are rather than as "io_error".
+--   "deadline"  a phase ran out of time (handshake, one command); the
+--               connection itself may be fine
+--   "timeout"   the server stopped answering; the connection is dead
+local function fail(code, detail)
+    error({ code = code, detail = detail }, 0)
+end
+
+-- How long any one read or write may wait: the keepalive interval when
+-- keepalives are on, else the idle bound, else unbounded. Pushed down to the
+-- stream, which reports each expiry as "timeout" without ending the stream.
+function Transport:apply_wait()
+    local w = (self.keepalive_ms > 0 and self.keepalive_ms) or self.idle_ms
+    self.wait_ms = w
+    if w > 0 and self.stream.wait then self.stream:wait(w) end
+end
+
+-- Bound the current phase: the stream's deadline, `ms` from now (0 clears).
+function Transport:set_deadline(ms)
+    if self.stream.deadline then self.stream:deadline(ms) end
+end
+
+local KEEPALIVE = wire.writer():byte(80):string("keepalive@openssh.com")
+                               :boolean(true):build()
+
+-- A wait expired with nothing from the server.
+--
+-- Silence is counted in wait_ms steps. Once it reaches idle_ms the server is
+-- taken to be gone. Before that, if the session is authenticated and not
+-- mid-rekey, a keepalive (a global request wanting a reply) gives a server
+-- that is merely quiet - a command that prints nothing for a while - the
+-- chance to prove it is there: its reply is traffic, and traffic resets the
+-- count. keepalive_max unanswered in a row also ends it, which only matters
+-- when idle_ms is 0. `may_ping` is false while a WRITE is what is waiting:
+-- the send queue is full, so a keepalive could not go out anyway.
+function Transport:quiet(may_ping)
+    self.quiet_ms = self.quiet_ms + self.wait_ms
+    if self.idle_ms > 0 and self.quiet_ms >= self.idle_ms then
+        self.dead = { code = "timeout",
+                      detail = "nothing from the server for "
+                               .. tostring(self.quiet_ms) .. " ms" }
+        fail(self.dead.code, self.dead.detail)
+    end
+    if not (may_ping and self.authenticated and not self.in_kex
+            and self.keepalive_ms > 0) then
+        return
+    end
+    if self.keepalive_max > 0 and self.unanswered >= self.keepalive_max then
+        self.dead = { code = "timeout",
+                      detail = tostring(self.unanswered) .. " keepalives unanswered" }
+        fail(self.dead.code, self.dead.detail)
+    end
+    self.unanswered = self.unanswered + 1
+    self:send_packet(KEEPALIVE)
+end
+
+-- One read from the stream, however long the server takes, within the rules
+-- above. Returns 1..max bytes, or "" at EOF.
+function Transport:read_some(max)
+    for _ = 1, 1000000 do
+        local chunk, err, code = self.stream:read(max)
+        if chunk then
+            if chunk ~= "" then self.quiet_ms, self.unanswered = 0, 0 end
+            return chunk
+        end
+        if code == "timeout" then
+            self:quiet(true)
+        elseif code == "deadline" then
+            fail("deadline", "deadline reached")
+        else
+            error("ssh: read failed: " .. tostring(err))
+        end
+    end
+    error("ssh: read made no progress")
 end
 
 -- Reading -------------------------------------------------------------------
@@ -116,10 +216,7 @@ function Transport:fill(n)
     -- small pieces is hundreds of megabytes of copying for 32 KiB of data.
     local parts, have = { self.inbuf }, #self.inbuf
     while have < n do
-        local chunk, err = self.stream:read(math.min(n - have, READ_CHUNK))
-        if chunk == nil then
-            error("ssh: read failed: " .. tostring(err))
-        end
+        local chunk = self:read_some(math.min(n - have, READ_CHUNK))
         if chunk == "" then
             error("ssh: connection closed by peer")
         end
@@ -129,9 +226,22 @@ function Transport:fill(n)
     self.inbuf = table.concat(parts)
 end
 
+-- Write all of `bytes`. A write that waited too long admitted nothing (the
+-- stream is all-or-none), so it is retried under the same liveness rules as
+-- a read, without a keepalive: the queue a keepalive would join is full.
 function Transport:send_raw(bytes)
-    local ok, err = self.stream:write(bytes)
-    if not ok then error("ssh: write failed: " .. tostring(err)) end
+    for _ = 1, 1000000 do
+        local ok, err, code = self.stream:write(bytes)
+        if ok then return end
+        if code == "timeout" then
+            self:quiet(false)
+        elseif code == "deadline" then
+            fail("deadline", "deadline reached")
+        else
+            error("ssh: write failed: " .. tostring(err))
+        end
+    end
+    error("ssh: write made no progress")
 end
 
 -- One line of the identification exchange, without its CR LF.
@@ -148,8 +258,7 @@ function Transport:read_line()
             -- without limit while it does so.
             error("ssh: no identification line within a sensible bound")
         end
-        local chunk, err = self.stream:read(256)
-        if chunk == nil then error("ssh: read failed: " .. tostring(err)) end
+        local chunk = self:read_some(256)
         if chunk == "" then error("ssh: connection closed during identification") end
         self.inbuf = self.inbuf .. chunk
     end
@@ -286,8 +395,13 @@ function Transport:read_message(strict)
             self:send_packet(channel.build_open_failure(sender,
                 channel.OPEN_ADMINISTRATIVELY_PROHIBITED,
                 "hull/ssh accepts no server-initiated channels"))
+        -- Skipped as well as the chatter: REQUEST_SUCCESS / FAILURE, the
+        -- answer to a keepalive (the only global request this client sends).
+        -- Its arrival already reset the silence count in read_some; the
+        -- content says nothing more.
         elseif m ~= SSH_MSG_IGNORE and m ~= SSH_MSG_DEBUG
-               and m ~= SSH_MSG_UNIMPLEMENTED then
+               and m ~= SSH_MSG_UNIMPLEMENTED
+               and m ~= SSH_MSG_REQUEST_SUCCESS and m ~= SSH_MSG_REQUEST_FAILURE then
             return p
         end
     end
@@ -520,6 +634,7 @@ end
 --- the callback is being handed.
 function Transport:rekey()
     if not self.session_id then return nil, { code = "not_handshaken" } end
+    if self.dead then return nil, self.dead end
     if self.in_kex then return true end          -- one is already running
     self.in_kex = true
     -- No pcall: a raise here comes from the stream or from a failed
@@ -603,6 +718,7 @@ function Transport:authenticate(user, key, on_banner)
             if on_banner then on_banner(r.message) end
         elseif r.type == "success" then
             self.user = user
+            self.authenticated = true      -- keepalives may now be sent
             return true
         elseif r.type == "failure" then
             -- Partial success is NOT authentication: the server wants another
@@ -621,6 +737,11 @@ function Transport:open_session()
     -- nothing is in flight: exec and sftp both start here, and neither has a
     -- channel open yet. Asking for keys anywhere else means asking in the
     -- middle of somebody's output.
+    --
+    -- Also where a connection already declared dead says so: once the
+    -- server has stopped answering, every later call fails at once with the
+    -- same reason rather than waiting out the idle bound again.
+    if self.dead then return nil, self.dead end
     self:maybe_rekey()
 
     local ch = channel.new({ id = self.next_channel })
@@ -739,6 +860,12 @@ function Transport:exec(command, opts)
     if stdin ~= nil and type(stdin) ~= "string" then
         return nil, { code = "bad_stdin", detail = type(stdin) }
     end
+    -- The whole command - output, exit status, close - within this many ms.
+    local timeout = opts.timeout_ms
+    if timeout ~= nil and (math.type(timeout) ~= "integer" or timeout < 1
+                           or timeout > 86400000) then
+        return nil, { code = "bad_timeout", detail = tostring(timeout) }
+    end
 
     local ch, cerr = self:open_session()
     if not ch then return nil, cerr end
@@ -772,7 +899,14 @@ function Transport:exec(command, opts)
         else
             return
         end
-        if cb then cb(m.data) return end
+        if cb then
+            -- The caller's own error stays the caller's: wrapped so the
+            -- facade rethrows it as raised, rather than reporting it as a
+            -- connection failure.
+            local cb_ok, cb_err = pcall(cb, m.data)
+            if not cb_ok then error({ app_error = cb_err }, 0) end
+            return
+        end
         buffered = buffered + #m.data
         if buffered > limit then overflow = true return end
         into[#into + 1] = m.data
@@ -835,8 +969,27 @@ function Transport:exec(command, opts)
         return nil
     end
 
+    if timeout then self:set_deadline(timeout) end
     local ok, failure = pcall(drive)
+    if timeout then self:set_deadline(0) end
     if not ok then
+        if type(failure) == "table" and failure.code == "deadline" then
+            -- The COMMAND ran out of time; the connection may be fine. Close
+            -- the channel under a short bound of its own, so the next command
+            -- starts clean. If even that does not finish, the connection is
+            -- not trusted with another one.
+            self:set_deadline(CHANNEL_DRAIN_MS)
+            self:close_channel(ch)
+            self:set_deadline(0)
+            if not ch.closed then
+                self.dead = { code = "timeout",
+                              detail = "a timed-out command's channel did not close" }
+                self:close()
+            end
+            return nil, { code = "timeout",
+                          detail = "the command did not finish within "
+                                   .. tostring(timeout) .. " ms" }
+        end
         -- A raising callback must not leave the channel half-open, nor its
         -- residue in the read path, just because the error came from above.
         self:close_channel(ch)
@@ -854,6 +1007,16 @@ end
 
 local Sftp = {}
 Sftp.__index = Sftp
+
+-- A reply that is not the one asked for, as the error a caller branches on:
+-- the server's status by name (`no_such_file`, `permission_denied`, ...),
+-- its sanitised text as detail, and the raw status number.
+local function sftp_error(r)
+    if r.type == "status" then
+        return { code = r.name, detail = r.text, status = r.code }
+    end
+    return { code = "bad_reply", detail = "unexpected " .. tostring(r.type) }
+end
 
 --- Open an SFTP session on its own channel.
 ---
@@ -959,7 +1122,7 @@ end
 --- Resolve a path on the server. Returns the canonical path.
 function Sftp:realpath(path)
     local r = self:request(sftp.build_realpath, path)
-    if r.type == "status" then return nil, r.text end
+    if r.type == "status" then return nil, sftp_error(r) end
     return r.names[1] and r.names[1].filename
 end
 
@@ -968,7 +1131,7 @@ end
 --- rejected for traversal is something an operator should hear about.
 function Sftp:list(path)
     local h = self:request(sftp.build_opendir, path)
-    if h.type ~= "handle" then return nil, h.text or h.type end
+    if h.type ~= "handle" then return nil, sftp_error(h) end
 
     local all = {}
     for _ = 1, 4096 do
@@ -977,7 +1140,7 @@ function Sftp:list(path)
             -- EOF ends the listing; anything else is a real failure.
             if not r.eof then
                 self:close_handle(h.handle)
-                return nil, r.text
+                return nil, sftp_error(r)
             end
             break
         end
@@ -991,7 +1154,7 @@ end
 function Sftp:read(path, max)
     max = max or (16 * 1024 * 1024)
     local h = self:request(sftp.build_open, path, sftp.FXF_READ)
-    if h.type ~= "handle" then return nil, h.text or h.type end
+    if h.type ~= "handle" then return nil, sftp_error(h) end
 
     local parts, off, total = {}, 0, 0
     for _ = 1, 100000 do
@@ -999,12 +1162,13 @@ function Sftp:read(path, max)
         if r.type == "status" then
             if r.eof then break end
             self:close_handle(h.handle)
-            return nil, r.text
+            return nil, sftp_error(r)
         end
         total = total + #r.data
         if total > max then
             self:close_handle(h.handle)
-            return nil, "file exceeds the " .. tostring(max) .. " byte limit"
+            return nil, { code = "too_large", limit = max,
+                         detail = "file exceeds the " .. tostring(max) .. " byte limit" }
         end
         parts[#parts + 1] = r.data
         off = off + #r.data
@@ -1017,7 +1181,7 @@ end
 function Sftp:write(path, data)
     local h = self:request(sftp.build_open, path,
         sftp.FXF_WRITE | sftp.FXF_CREAT | sftp.FXF_TRUNC)
-    if h.type ~= "handle" then return nil, h.text or h.type end
+    if h.type ~= "handle" then return nil, sftp_error(h) end
 
     local off = 0
     while off < #data do
@@ -1027,12 +1191,12 @@ function Sftp:write(path, data)
         local r = self:request(sftp.build_write, h.handle, off, chunk)
         if r.type ~= "status" or not r.ok then
             self:close_handle(h.handle)
-            return nil, r.text or r.type
+            return nil, sftp_error(r)
         end
         off = off + #chunk
     end
     local st = self:close_handle(h.handle)
-    if st.type == "status" and not st.ok then return nil, st.text end
+    if st.type == "status" and not st.ok then return nil, sftp_error(st) end
     return true
 end
 

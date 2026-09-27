@@ -17,7 +17,7 @@ User guide: [`ssh.md`](ssh.md). Design record: [`ssh_module_design.md`](ssh_modu
 |---|---|---|
 | 1 | Memory safety and data integrity | done (`fix/ssh-lifetimes-and-sftp`); item 2 has no direct test, see below |
 | 2 | Protocol correctness | done (`fix/ssh-protocol-correctness`); see below for two behaviour changes |
-| 3 | Timeouts and the error model | open |
+| 3 | Timeouts and the error model | done (`fix/ssh-timeouts-and-errors`); see below |
 | 4 | Usability: SFTP, trust store, algorithms | open |
 | 5 | Architecture, DRY, clean code | open |
 | 6 | Tests and docs | open |
@@ -194,6 +194,37 @@ Both are bounded; they belong with group 4's streaming SFTP work.
   - a host that is down is reported as `denied`, because the binding returns a
     plain string and `ssh.lua` labels any code-less failure `denied`. Add
     `connect_failed` and `timeout`.
+
+**How group 3 was fixed.**
+
+- **Transport** (`cap/net_stream`): two bounds on a parked read or write,
+  neither fatal. `hl_net_stream_deadline` (absolute, for a phase; it existed
+  unused and stored a relative time where the backends expect an absolute
+  one) and the new `hl_net_stream_wait` (per park, for liveness). An expiry is
+  reported once, as `HL_NET_E_DEADLINE` / `HL_NET_E_TIMEOUT`, and only if the
+  retry would otherwise wait again.
+- **Binding**: `stream:deadline(ms)` / `stream:wait(ms)`; every error carries a
+  short code (`denied`, `connect_failed`, `timeout`, `deadline`, `closed`,
+  `io_error`); ws-stream passes both through.
+- **Liveness** (`Transport:quiet`): each read waits at most `keepalive_ms`
+  (30 s); after authentication a silence sends `keepalive@openssh.com`, whose
+  reply is traffic and resets the count; `idle_ms` (60 s) of nothing at all
+  ends the connection with `timeout`, and `keepalive_max` (3) does when
+  `idle_ms = 0`. A dead connection fails every later call at once.
+- **Deadlines**: `timeout_ms` (default 30 s) now covers connect, key exchange
+  and userauth; `exec` takes `timeout_ms` and on expiry closes the channel
+  under its own 5 s bound, keeping the connection.
+- **One error shape**: `exec`, `sftp`, every SFTP operation, `rekey` and
+  `accept_host` return `nil, {code, detail}`; a bad key file is `bad_key` /
+  `bad_passphrase` / `passphrase_required`; SFTP statuses by name; a host that
+  is down is `connect_failed`, not `denied`. The caller's own callback error is
+  still raised, unchanged. `docs/ssh.md` lists every code.
+
+Behaviour changes: `exec` / `sftp` / `rekey` no longer raise on I/O failure;
+SFTP errors are tables, not strings; `accept_host` returns `already_trusted`
+instead of raising; the default connect budget covers the whole handshake and
+is 30 s (it was 10 s for the TCP connect alone); a TLS certificate refusal is
+`connect_failed` (the e2e expected `denied`).
 
 ## Group 4: usability
 

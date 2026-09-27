@@ -834,6 +834,147 @@ test("stats span the connection, not just the current key", function()
 end)
 
 -- Return results for C test harness
+-- liveness ------------------------------------------------------------------
+--
+-- A stream that follows a script, one step per read: a string is data, and
+-- "TIMEOUT" / "DEADLINE" are the stream's bounded-wait expiries. It records
+-- the bounds it was given, so a test can see what the transport asked for.
+
+local function scripted_stream(steps)
+    local s = fake_stream("", 1)
+    s.steps, s.i, s.deadlines, s.waits = steps, 0, {}, {}
+    s.read = function(self, n)
+        self.i = self.i + 1
+        local step = self.steps[self.i]
+        if step == nil then return "" end
+        if step == "TIMEOUT" then return nil, "timed out", "timeout" end
+        if step == "DEADLINE" then return nil, "deadline reached", "deadline" end
+        -- Serve a data step whole even if it is longer than n: the transport
+        -- asks for what it needs, and never less than one byte.
+        if #step > n then
+            table.insert(self.steps, self.i + 1, step:sub(n + 1))
+            step = step:sub(1, n)
+        end
+        return step
+    end
+    s.deadline = function(self, ms) self.deadlines[#self.deadlines + 1] = ms end
+    s.wait = function(self, ms) self.waits[#self.waits + 1] = ms end
+    return s
+end
+
+local function keepalives_sent(s)
+    local n = 0
+    for _, p in ipairs(s.written) do
+        local payload = packet.parse(p, 8)
+        if payload and payload:byte(1) == 80 then n = n + 1 end
+    end
+    return n
+end
+
+local function raised_code(fn)
+    local ok, err = pcall(fn)
+    if ok then return "no error" end
+    return type(err) == "table" and err.code or tostring(err)
+end
+
+test("the stream is given the keepalive interval as its wait bound", function()
+    local s = scripted_stream({})
+    transport.new(s, stub_crypto(), { keepalive_ms = 30000 })
+    assert_eq(s.waits[1], 30000)
+end)
+
+test("a silent server is given up on at the idle bound, keepalive in between", function()
+    -- 30 s of nothing: a keepalive asks. 30 s more, still nothing: 60 s idle.
+    local s = scripted_stream({ "TIMEOUT", "TIMEOUT" })
+    local t = transport.new(s, stub_crypto(),
+                            { keepalive_ms = 30000, idle_ms = 60000 })
+    t.authenticated = true
+    assert_eq(raised_code(function() t:fill(1) end), "timeout")
+    assert_eq(keepalives_sent(s), 1, "one keepalive before giving up:")
+    -- And the connection says so from then on, without waiting again.
+    local ch, err = t:open_session()
+    assert_eq(ch, nil)
+    assert_eq(err.code, "timeout")
+end)
+
+test("a server that answers keepalives is not idle, however quiet", function()
+    -- A command printing nothing for minutes: each keepalive's reply is
+    -- traffic, which resets the silence, so the idle bound never trips.
+    local reply = plain(string.char(82))
+    local steps = {}
+    for _ = 1, 10 do steps[#steps + 1] = "TIMEOUT"; steps[#steps + 1] = reply end
+    steps[#steps + 1] = plain(string.char(20) .. "real")
+    local s = scripted_stream(steps)
+    local t = transport.new(s, stub_crypto(),
+                            { keepalive_ms = 30000, idle_ms = 60000 })
+    t.authenticated = true
+    assert_eq(t:next_message():byte(1), 20, "the reply is absorbed:")
+    assert_eq(keepalives_sent(s), 10)
+end)
+
+test("no keepalive before authentication, and the idle bound still holds", function()
+    local s = scripted_stream({ "TIMEOUT", "TIMEOUT" })
+    local t = transport.new(s, stub_crypto(),
+                            { keepalive_ms = 30000, idle_ms = 60000 })
+    assert_eq(raised_code(function() t:fill(1) end), "timeout")
+    assert_eq(keepalives_sent(s), 0)
+end)
+
+test("with no idle bound, unanswered keepalives end it", function()
+    local s = scripted_stream({ "TIMEOUT", "TIMEOUT", "TIMEOUT", "TIMEOUT" })
+    local t = transport.new(s, stub_crypto(),
+                            { keepalive_ms = 30000, keepalive_max = 3, idle_ms = 0 })
+    t.authenticated = true
+    assert_eq(raised_code(function() t:fill(1) end), "timeout")
+    assert_eq(keepalives_sent(s), 3)
+end)
+
+test("a deadline is its own code, and does not kill the connection", function()
+    local s = scripted_stream({ "DEADLINE" })
+    local t = transport.new(s, stub_crypto())
+    assert_eq(raised_code(function() t:fill(1) end), "deadline")
+    assert_eq(t.dead, nil)
+end)
+
+test("a write that waited too long is retried, not failed", function()
+    local s = scripted_stream({})
+    local tries = 0
+    s.write = function(self, b)
+        tries = tries + 1
+        if tries == 1 then return nil, "timed out", "timeout" end
+        self.written[#self.written + 1] = b
+        return true
+    end
+    local t = transport.new(s, stub_crypto(), { idle_ms = 60000 })
+    t:send_raw("abc")
+    assert_eq(tries, 2)
+    assert_eq(s.written[1], "abc")
+end)
+
+test("exec with timeout_ms returns a timeout and keeps the connection", function()
+    -- The command's deadline expires mid-output. exec closes the channel
+    -- under a short bound of its own and reports; the connection lives on.
+    local s = scripted_stream({ conf(), ok_reply(), data("partial"), "DEADLINE",
+                                eof(), fin() })
+    local t = transport.new(s, stub_crypto())
+    local r, err = t:exec("sleep 600", { timeout_ms = 1500 })
+    assert_eq(r, nil)
+    assert_eq(err.code, "timeout")
+    assert_eq(t.dead, nil, "the connection is still usable:")
+    assert_eq(has_type(s, 97), true, "the channel was closed:")
+    -- The command's bound, cleared, then the drain's own bound, cleared.
+    assert_eq(table.concat(s.deadlines, ","), "1500,0,5000,0")
+end)
+
+test("exec refuses a timeout_ms that is not a positive integer", function()
+    local t = transport.new(scripted_stream({}), stub_crypto())
+    for _, bad in ipairs({ 0, -1, 1.5, "10" }) do
+        local r, err = t:exec("x", { timeout_ms = bad })
+        assert_eq(r, nil)
+        assert_eq(err.code, "bad_timeout", tostring(bad))
+    end
+end)
+
 -- sftp ----------------------------------------------------------------------
 --
 -- The SFTP client over the same plaintext fake: a scripted server that
@@ -898,7 +1039,8 @@ test("a failed sftp read does not shift the next request's replies", function()
 
     local d, err = f:read("/a", 4)
     assert_eq(d, nil)
-    assert_eq(err:find("byte limit", 1, true) ~= nil, true, err)
+    assert_eq(err.code, "too_large")
+    assert_eq(err.detail:find("byte limit", 1, true) ~= nil, true, err.detail)
 
     assert_eq(f:write("/b", "hello"), true, "the write should succeed:")
 
@@ -1028,7 +1170,9 @@ test("an sftp write closes its handle and reads the answer on failure", function
     local f = assert(t:sftp())
     local ok, err = f:write("/w", "data")
     assert_eq(ok, nil)
-    assert_eq(type(err), "string")
+    -- Status 4 by name, not by text a caller would have to match.
+    assert_eq(err.code, "failure")
+    assert_eq(err.status, 4)
     -- The session is still in step: the next read gets its own replies.
     assert_eq(f:read("/r"), "ok")
 end)

@@ -212,8 +212,18 @@ local r = conn:exec("systemctl is-active app")
 ```
 
 `r.status` is the remote exit status. A non-zero one is an **answer**, not an
-error: `is-active` returning 3 means "inactive", and `exec` returns `nil` plus
-a reason only when the command could not be run at all.
+error: `is-active` returning 3 means "inactive". `exec` returns `nil` plus a
+reason (§10) when there is no answer to give - the command could not be run,
+ran out of time, or the connection failed under it.
+
+`opts.timeout_ms` bounds the whole command: output, exit status and close.
+When it passes, `exec` returns `timeout`, closes the command's channel, and
+the connection stays usable for the next one:
+
+```lua
+local r, err = conn:exec("apt-get update", { timeout_ms = 120000 })
+if not r and err.code == "timeout" then ... end
+```
 
 For output that should not be accumulated - a deploy log, a `tail -f`, or
 anything larger than memory - take it a chunk at a time:
@@ -234,6 +244,26 @@ roughly that, a command writing output while we write input wedges both
 directions on full buffers (measured against OpenSSH). Bulk data belongs in
 SFTP.
 
+## 6a. Timeouts and keepalives
+
+A server that accepts the connection and then goes quiet cannot hold a caller
+forever; neither can one that stops answering halfway through a session.
+
+| option (on `connect`) | default | bounds |
+|---|---|---|
+| `timeout_ms` | 30000 | everything up to an authenticated connection: TCP, a relay's TLS, the key exchange, userauth |
+| `keepalive_ms` | 30000 | how long a read waits in silence before asking the server whether it is still there |
+| `idle_ms` | 60000 | how long a connection may go with nothing at all from the server |
+| `keepalive_max` | 3 | keepalives unanswered in a row before giving up; matters only with `idle_ms = 0` |
+
+After 30 s of silence Hull sends `keepalive@openssh.com` (OpenSSH's
+`ServerAliveInterval`). A server that is merely quiet - a command printing
+nothing for ten minutes - answers, its answer counts as traffic, and the
+connection carries on as long as the command does. A server that has gone
+away answers nothing and is given up on at 60 s, with `timeout`; every later
+call on that connection then fails at once with the same reason rather than
+waiting again. `0` turns a bound off. Keepalives start once authenticated.
+
 ## 7. SFTP
 
 ```lua
@@ -248,6 +278,16 @@ Paths travel inside the subsystem as length-prefixed strings, never as words
 in a command line, so a filename with a space, a quote or a `$` needs no
 escaping and cannot become part of a command. SFTP also moves one direction at
 a time, which is why it has no equivalent of the `stdin` cap above.
+
+Each operation returns `nil` plus a coded reason on failure - the server's
+status by name, so a missing file is `err.code == "no_such_file"` rather than
+text to match:
+
+```lua
+local data, err = sftp:read("/etc/app/config.toml", 1024 * 1024)
+if not data and err.code == "no_such_file" then ... end   -- `max` passed: "too_large"
+local names, refused = sftp:list("/var/log/app")          -- refused: unsafe names, and why
+```
 
 ## 8. Rekeying
 
@@ -285,19 +325,42 @@ the stricter Terrapin-resistant rules.
 
 ## 10. Error codes
 
-Every failure is a table with a `code`, so an application branches on a value
-rather than on a message.
+Every method - `connect`, `exec`, `sftp`, every SFTP operation, `rekey`,
+`accept_host` - returns `nil` plus a table with a `code` when it fails, so an
+application branches on a value rather than on a message, and never needs
+`pcall`. `detail` says more, for a person. The one thing that still raises is
+an error from your own callback (an `on_stdout` that raised): that is your
+bug, not a connection failure, and it comes back to you unchanged.
+
+**Reaching the host**
 
 | code | meaning |
 |---|---|
-| `denied` | the manifest refused the host, port or login |
-| `upgrade_refused` | the relay refused the WebSocket upgrade (carries `status`) |
-| `host_unknown` / `host_changed` / `host_key_invalid` | see §3 |
-| `no_common_algorithm` | nothing in §9 was acceptable to both ends |
+| `denied` | the manifest refused the host, port, login or relay - and only that |
+| `connect_failed` | the host did not resolve, refused, was unreachable, or TLS to the relay failed |
+| `timeout` | not connected and authenticated within `timeout_ms`; or, later, the server stopped answering (see §6a) |
+| `upgrade_refused` / `upgrade_failed` | the relay refused the WebSocket upgrade (carries `status`) / answered with something that is not one |
+| `no_identification` / `bad_identification` | the server never sent an SSH version line / sent an unusable one |
+| `host_unknown` / `host_changed` / `host_key_invalid` / `host_changed_midsession` | see §3 |
+| `no_common_algorithm` / `no_kexinit_response` / `bad_kex_point` | the key exchange could not be agreed or completed |
+| `service_refused` / `no_auth_response` | the server would not start user authentication / never answered it |
 | `auth_failed` / `partial_success` | the key was refused, or a second factor is wanted |
-| `channel_refused` / `exec_refused` | the server would not open the channel or run the command |
-| `stdin_too_large` / `output_too_large` | a bound in §6 was reached |
-| `io_error` | the stream failed; `detail` carries what |
+| `bad_key` / `bad_passphrase` / `passphrase_required` | the key file could not be read, the passphrase was wrong, or one is needed (§4) |
+
+**Using the connection**
+
+| code | meaning |
+|---|---|
+| `channel_refused` / `no_channel_response` | the server would not open a channel, or never answered |
+| `exec_refused` | the server would not run the command |
+| `timeout` | `exec`'s `timeout_ms` passed; the command's channel is closed and the connection is still usable |
+| `stdin_too_large` / `output_too_large` / `bad_stdin` / `bad_timeout` | a bound or an option in §6 |
+| `sftp_unavailable` / `sftp_no_version` | the server has no SFTP subsystem, or it did not start |
+| `no_such_file` / `permission_denied` / `failure` / `op_unsupported` / ... | an SFTP status by name; `status` holds the number |
+| `too_large` | an SFTP `read` passed its `max` |
+| `already_trusted` | `accept_host` for a host that already has a key; `forget_host` it first |
+| `not_handshaken` | `rekey` on a connection that never finished connecting |
+| `io_error` | the stream failed in some other way; `detail` says how |
 
 `partial_success` is not success: the server wants another factor, and
 reporting it as authenticated would skip one.

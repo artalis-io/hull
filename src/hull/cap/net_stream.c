@@ -116,6 +116,13 @@ struct HlNetStream {
     uint64_t     connect_started_ms;  /* monotonic; the TLS handshake gets
                                          what is LEFT of connect_ms */
 
+    /* Bounded waits (see net_stream.h). `expired` holds an expiry to report
+     * once, on the next read or write; it is not sticky like `result`. */
+    uint64_t     deadline_at;         /* absolute monotonic ms; 0 = none  */
+    int          wait_ms;             /* per park; 0 = none               */
+    int          expiry_kind;         /* what the armed bound reports     */
+    int          expired;             /* 0, or an expiry not yet reported */
+
     /* Parking. The binding fills op.on_resume and suspends; we complete it. */
     HlAsyncOp    op;
     int          op_pending;
@@ -1061,10 +1068,71 @@ void *hl_net_stream_user(const HlNetStream *s)
     return s ? s->user : NULL;
 }
 
+static uint64_t now_ms(const HlNetStream *s)
+{
+    return s->be->monotonic_ms ? s->be->monotonic_ms() : 0;
+}
+
+/* Absolute, not relative: the backends compare op.deadline_ms against
+ * monotonic_ms(). The earlier version stored `ms` itself, so had anything
+ * called it, every deadline would already have passed. */
 void hl_net_stream_deadline(HlNetStream *s, int ms)
 {
     if (!s) return;
-    s->op.deadline_ms = ms > 0 ? (uint64_t)ms : 0;
+    uint64_t now = now_ms(s);
+    s->deadline_at = (ms > 0 && now) ? now + (uint64_t)ms : 0;
+}
+
+void hl_net_stream_wait(HlNetStream *s, int ms)
+{
+    if (!s) return;
+    s->wait_ms = ms > 0 ? ms : 0;
+}
+
+/* A bound on a parked read or write expired. The backend has retired the op;
+ * record what expired, stop wanting what the park wanted, and hand control
+ * back through the same on_resume a completion would use - so the caller's
+ * retry sees the expiry rather than parking again. */
+static void op_deadline_fired(HlAsyncOp *op)
+{
+    HlNetStream *s = hl_net_stream_from_op(op);
+    if (!s || !s->op_pending) return;
+    s->op_pending = 0;
+    s->want_read  = 0;
+    s->want_write = 0;
+    s->expired    = s->expiry_kind;
+    io_rearm(s);
+    if (op->on_resume) op->on_resume(op);
+}
+
+/* Bound the park about to begin by whichever of the two limits comes first.
+ * Returns HL_NET_E_DEADLINE if the deadline has already passed, so the caller
+ * reports it instead of parking; otherwise 0. */
+static int arm_wait_bound(HlNetStream *s)
+{
+    uint64_t now = now_ms(s), at = 0;
+    int kind = 0;
+    if (s->deadline_at && now >= s->deadline_at) return HL_NET_E_DEADLINE;
+    if (s->wait_ms > 0 && now) {
+        at = now + (uint64_t)s->wait_ms;
+        kind = HL_NET_E_TIMEOUT;
+    }
+    if (s->deadline_at && (!at || s->deadline_at <= at)) {
+        at = s->deadline_at;
+        kind = HL_NET_E_DEADLINE;
+    }
+    s->op.deadline_ms = at;
+    s->op.on_deadline = at ? op_deadline_fired : NULL;
+    s->expiry_kind    = kind;
+    return 0;
+}
+
+/* Report an expiry once. */
+static int take_expiry(HlNetStream *s)
+{
+    int k = s->expired;
+    s->expired = 0;
+    return k;
 }
 
 void hl_net_stream_close(HlNetStream *s)
@@ -1138,7 +1206,7 @@ long hl_net_stream_read(HlNetStream *s, void *buf, size_t len)
      * the read after them, not instead of them. */
     if (s->rx) {
         size_t n = rx_take(s, buf, len);
-        if (n) return (long)n;
+        if (n) { s->expired = 0; return (long)n; }   /* the wait was met */
     }
     if (failed) return s->result;
 
@@ -1154,11 +1222,18 @@ long hl_net_stream_read(HlNetStream *s, void *buf, size_t len)
     if (s->tls && s->tls_done && s->tls->pending && s->tls->pending(s->tls)) {
         rx_fill(s);
         size_t n = rx_take(s, buf, len);
-        if (n) return (long)n;
+        if (n) { s->expired = 0; return (long)n; }
     }
 
     if (s->eof) return 0;              /* clean EOF, after draining */
 
+    /* An expiry from the last park, reported once; then a fresh bound for
+     * this one. */
+    {
+        int k = take_expiry(s);
+        if (!k) k = arm_wait_bound(s);
+        if (k) return k;
+    }
     s->want_read = 1;
     s->op_pending = 1;
     io_rearm(s);
@@ -1185,13 +1260,19 @@ int hl_net_stream_write(HlNetStream *s, const void *buf, size_t len)
     tx_compact(s);
     if (s->write_cap - s->tx_len < len) {
         /* All-or-none: no room for the whole buffer, so admit none of it and
-         * park until the queue drains. Backpressure, not an error. */
+         * park until the queue drains. Backpressure, not an error - but a
+         * bounded one, like a read: an expiry from the last park is reported
+         * once, then this park gets a fresh bound. */
+        int k = take_expiry(s);
+        if (!k) k = arm_wait_bound(s);
+        if (k) return k;
         s->want_write = 1;
         s->op_pending = 1;
         io_rearm(s);
         return HL_NET_E_AGAIN;
     }
 
+    s->expired = 0;                     /* room came: the wait was met */
     memcpy(s->tx + s->tx_len, buf, len);
     s->tx_len += len;
 
@@ -1224,6 +1305,7 @@ const char *hl_net_stream_strerror(int err)
     case HL_NET_E_INVAL:      return "invalid argument";
     case HL_NET_E_AGAIN:      return "would block";
     case HL_NET_E_TLS:        return "TLS handshake failed";
+    case HL_NET_E_DEADLINE:   return "deadline reached";
     default:                  return "unknown error";
     }
 }
