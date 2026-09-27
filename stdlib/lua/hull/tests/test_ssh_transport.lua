@@ -372,6 +372,42 @@ test("streaming one stream still accumulates the other", function()
     assert_eq(r.stderr, "err", "stderr has no callback, so it is buffered:")
 end)
 
+test("a channel request wanting a reply is answered, not ignored", function()
+    -- OpenSSH's ClientAliveInterval sends exactly this on an open session and
+    -- disconnects a client that never answers - which killed long commands.
+    local keepalive = plain(wire.writer():byte(98):uint32(0)
+                            :string("keepalive@openssh.com"):boolean(true):build())
+    local s = fake_stream(conf() .. ok_reply() .. data("a") .. keepalive
+                          .. data("b") .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cmd")
+    assert_eq(r.stdout, "ab", "the command carried on:")
+    assert_eq(r.status, 0)
+    assert_eq(has_type(s, 100), true, "CHANNEL_FAILURE sent:")
+end)
+
+test("a channel request not wanting a reply gets none", function()
+    -- exit-status is the everyday case; answering it would be a protocol error.
+    local s = fake_stream(conf() .. ok_reply() .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    t:exec("cmd")
+    assert_eq(has_type(s, 100), false, "no CHANNEL_FAILURE:")
+end)
+
+test("a channel the server asks to open is refused with a reply", function()
+    -- A forwarded connection or agent request. The server waits for an
+    -- answer; this used to raise "unexpected connection message 90" and take
+    -- the whole connection down instead.
+    local open = plain(wire.writer():byte(90):string("auth-agent@openssh.com")
+                       :uint32(5):uint32(65536):uint32(32768):build())
+    local s = fake_stream(conf() .. ok_reply() .. open .. data("x")
+                          .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cmd")
+    assert_eq(r.stdout, "x")
+    assert_eq(has_type(s, 92), true, "CHANNEL_OPEN_FAILURE sent:")
+end)
+
 test("stdin is written to the command and followed by EOF", function()
     local s = fake_stream(conf() .. ok_reply() .. status(0) .. eof() .. fin(), 7)
     local t = transport.new(s, stub_crypto())
@@ -668,6 +704,38 @@ test("a rekey we start defers channel data until the exchange is over", function
     local held = t:next_message()
     assert_eq(held:byte(1), 94, "the channel data survived the rekey:")
     assert_eq(held:sub(2), "output")
+end)
+
+test("a rekey we start reads its reply past the data it set aside", function()
+    -- Same setup, but negotiation SUCCEEDS, so the exchange goes on to wait
+    -- for KEX_ECDH_REPLY. It used to read that through next_message, which
+    -- hands out the deferred channel data first, and failed the connection
+    -- with "expected KEX_ECDH_REPLY but the peer sent message 94" - the
+    -- earlier test never got this far, because it fails negotiation first.
+    local channel_data = string.char(94) .. "output"
+    local theirs = kexinit.build(nil, string.rep("c", 16))
+    local reply = wire.writer():byte(31):string("K_S")
+                               :string(string.rep("q", 32)):string("sig"):build()
+    local s = fake_stream(plain(channel_data) .. plain(theirs) .. plain(reply), 4)
+    local crypto = stub_crypto()
+    crypto.x25519_keypair = function()
+        return string.rep("00", 32), string.rep("11", 32)
+    end
+    -- Stops the exchange just after the reply was accepted: reaching here at
+    -- all is what is being asserted.
+    crypto.x25519 = function() return nil, "stub stops here" end
+    local t = transport.new(s, crypto)
+    t.session_id = "sid"
+
+    local ok, res, why = pcall(t.rekey, t)
+    local detail
+    if not ok then detail = tostring(res)            -- raised
+    elseif res then detail = "succeeded"
+    else detail = why and why.code end
+    assert_eq(detail, "bad_kex_point", "the exchange read its own reply:")
+
+    local held = t:next_message()
+    assert_eq(held:byte(1), 94, "the channel data is still there for the caller:")
 end)
 
 test("stats span the connection, not just the current key", function()

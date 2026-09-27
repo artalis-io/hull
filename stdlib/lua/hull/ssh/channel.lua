@@ -92,6 +92,26 @@ function M.build_close(recipient_id)
     return wire.writer():byte(M.SSH_MSG_CHANNEL_CLOSE):uint32(recipient_id):build()
 end
 
+-- The answer to a channel request we do not act on (RFC 4254 section 5.4).
+function M.build_failure(recipient_id)
+    return wire.writer():byte(M.SSH_MSG_CHANNEL_FAILURE):uint32(recipient_id):build()
+end
+
+-- Refuse a channel the SERVER asked to open (RFC 4254 section 5.1). This is a
+-- client that opens its own channels and accepts none: no forwarding, no
+-- agent, no X11.
+M.OPEN_ADMINISTRATIVELY_PROHIBITED = 1
+
+function M.build_open_failure(recipient_id, reason, description)
+    return wire.writer()
+        :byte(M.SSH_MSG_CHANNEL_OPEN_FAILURE)
+        :uint32(recipient_id)
+        :uint32(reason)
+        :string(description or "")
+        :string("")
+        :build()
+end
+
 function M.build_window_adjust(recipient_id, add)
     return wire.writer()
         :byte(M.SSH_MSG_CHANNEL_WINDOW_ADJUST)

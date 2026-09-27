@@ -266,6 +266,15 @@ function Transport:read_message(strict)
         elseif m == SSH_MSG_GLOBAL_REQUEST then
             local r = wire.reader(p); r:byte(); r:string()
             if r:boolean() then self:send_packet(string.char(SSH_MSG_REQUEST_FAILURE)) end
+        elseif m == channel.SSH_MSG_CHANNEL_OPEN then
+            -- The server asking US to open a channel (forwarded connections,
+            -- agent, X11). None is offered, so every one is refused - with a
+            -- reply, because a server that asked is waiting for one.
+            local r = wire.reader(p); r:byte(); r:string()
+            local sender = r:uint32()
+            self:send_packet(channel.build_open_failure(sender,
+                channel.OPEN_ADMINISTRATIVELY_PROHIBITED,
+                "hull/ssh accepts no server-initiated channels"))
         elseif m ~= SSH_MSG_IGNORE and m ~= SSH_MSG_DEBUG
                and m ~= SSH_MSG_UNIMPLEMENTED then
             return p
@@ -274,14 +283,19 @@ function Transport:read_message(strict)
     error("ssh: too many transport messages without progress")
 end
 
--- The next message must be exactly `want`.
+-- The next message OFF THE WIRE must be exactly `want`. Key exchange only.
 --
 -- Replaces the earlier "read up to eight and look for it" loops. Those would
 -- silently discard whatever else arrived, which during a key exchange is the
 -- window an injected message lives in - and one of them did not even check
 -- that it had found what it was looking for before carrying on.
+--
+-- read_message, not next_message: during a rekey this side started, channel
+-- data that arrived before the peer's KEXINIT is held in `deferred`, and
+-- next_message hands that out first - so the exchange would find a data
+-- message where its reply belongs and fail the connection.
 function Transport:expect(want, what, strict)
-    local p = self:next_message(strict)
+    local p = self:read_message(strict)
     local got = p:byte(1)
     if got ~= want then
         error("ssh: expected " .. what .. " (" .. tostring(want)
@@ -352,7 +366,7 @@ function Transport:run_kex(opts, i_s)
                 return nil, { code = "no_kexinit_response" }
             end
         else
-            i_s = self:next_message()
+            i_s = self:read_message()
         end
     end
 
@@ -366,7 +380,7 @@ function Transport:run_kex(opts, i_s)
     self.strict_kex = kexinit.server_is_strict(server)
 
     if kexinit.guess_was_wrong(server, neg) then
-        self:next_message(self.strict_kex)   -- discard the guess (RFC 4253 7.1)
+        self:read_message(self.strict_kex)   -- discard the guess (RFC 4253 7.1)
     end
 
     -- curve25519 exchange
@@ -624,14 +638,30 @@ function Transport:drain_channel(ch)
     end
 end
 
+-- The next connection message, applied to channel `ch`.
+--
+-- A channel request the server wants answered gets CHANNEL_FAILURE: this
+-- client acts on exit-status and exit-signal (which never ask for a reply)
+-- and nothing else. Staying silent is not neutral - OpenSSH's
+-- ClientAliveInterval sends keepalive@openssh.com with want_reply set on an
+-- open session channel, and disconnects a client that never answers, which
+-- killed long-running exec and sftp sessions.
+function Transport:channel_message(ch)
+    local m = channel.parse(self:next_message())
+    ch:handle(m)
+    if m.type == "request" and m.want_reply and ch.remote_id then
+        self:send_packet(channel.build_failure(ch.remote_id))
+    end
+    return m
+end
+
 -- Wait for the reply to a channel request.
 --
 -- A window adjust can arrive first: replies interleave, and assuming the next
 -- message answers the last request is how a client desynchronises.
 function Transport:await_channel_reply(ch)
     for _ = 1, 32 do
-        local m = channel.parse(self:next_message())
-        ch:handle(m)
+        local m = self:channel_message(ch)
         if m.type == "request_success" then return true end
         if m.type == "request_failure" then return false end
     end
@@ -711,8 +741,7 @@ function Transport:exec(command, opts)
     -- One message: account for it, hand off its payload, and top up the
     -- receive window so a streaming sender never stalls waiting on us.
     local function pump()
-        local m = channel.parse(self:next_message())
-        ch:handle(m)
+        local m = self:channel_message(ch)
         deliver(m)
         local adj = ch:window_adjustment()
         if adj then self:send_packet(adj) end
@@ -853,8 +882,7 @@ function Sftp:recv()
             self.buf = self.buf:sub(used + 1)
             return sftp.parse(p)
         end
-        local m = channel.parse(self.t:next_message())
-        self.ch:handle(m)
+        local m = self.t:channel_message(self.ch)
         if m.type == "data" then
             self.buf = self.buf .. m.data
         elseif m.type == "close" then
