@@ -18,7 +18,7 @@ User guide: [`ssh.md`](ssh.md). Design record: [`ssh_module_design.md`](ssh_modu
 | 1 | Memory safety and data integrity | done (`fix/ssh-lifetimes-and-sftp`); item 2 has no direct test, see below |
 | 2 | Protocol correctness | done (`fix/ssh-protocol-correctness`); see below for two behaviour changes |
 | 3 | Timeouts and the error model | done (`fix/ssh-timeouts-and-errors`); see below |
-| 4 | Usability: SFTP, trust store, algorithms | open |
+| 4 | Usability: SFTP, trust store, algorithms | SFTP + trust store done (`feat/ssh-sftp-files-and-known-hosts`); RSA user keys next, separately |
 | 5 | Architecture, DRY, clean code | open |
 | 6 | Tests and docs | open |
 
@@ -240,6 +240,26 @@ is 30 s (it was 10 s for the TCP connect alone); a TLS certificate refusal is
 - **Document** parallel connections (is concurrent `connect` in `app.main`
   supported?), and add PTY/shell/env, jump hosts and certificates to "Not
   implemented". Document `list`'s second return and `read`'s `max`.
+
+**How group 4 was done so far.** Decisions taken with the maintainer: SFTP as
+file handles, the trust store in `known_hosts` format, RSA in its own PR.
+
+- The SFTP client moved to `hull.ssh.sftp_client` (the first of group 5's
+  `transport.lua` splits).
+- Operations: `stat`, `lstat`, `mkdir`, `rmdir`, `remove`, `rename`,
+  `chmod`, `setstat`; modes as octal strings.
+- `sftp:open(path, mode, opts)` -> file with `read` / `write` / `seek` /
+  `tell` / `stat` / `close`. Requests are pipelined (32 KiB, up to 8 in
+  flight, a read ramping from 1) and matched by id; whole-file `read` / `write`
+  are loops over a handle.
+- `ssh.file_store(path, { hash })` over `hull.ssh.known_hosts`: plain and
+  hashed entries, patterns and markers skipped. Matched against a line hashed
+  by `ssh-keygen -H` through the real HMAC-SHA1.
+- `docs/ssh.md` "Not implemented" now also lists RSA user keys, jump hosts,
+  PTY / shell / env and certificates.
+
+Still open in group 4: RSA user keys (C signing + key parsing), aligning the
+store interface with `hull.kv`, and documenting parallel connections.
 
 ## Group 5: architecture, DRY, clean code
 
