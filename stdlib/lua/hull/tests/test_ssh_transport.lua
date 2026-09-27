@@ -984,7 +984,13 @@ end)
 local sftp_codec = require('hull.ssh.sftp')
 
 -- One SFTP message from the server, inside channel data.
-local function sreply(payload) return data(sftp_codec.frame(payload)) end
+-- One SFTP message from the server, inside channel data - split across
+-- messages the way a real server splits one larger than our packet size.
+local function sreply(payload)
+    local bytes, out = sftp_codec.frame(payload), {}
+    for i = 1, #bytes, 16384 do out[#out + 1] = data(bytes:sub(i, i + 16383)) end
+    return table.concat(out)
+end
 local function s_version() return sreply(wire.writer():byte(2):uint32(3):build()) end
 local function s_handle(id, h)
     return sreply(wire.writer():byte(102):uint32(id):string(h):build())
@@ -999,32 +1005,176 @@ end
 
 -- The SFTP requests we sent, decoded: { type, id, handle? } in order.
 local function sent_sftp(s)
-    local out = {}
+    -- SFTP is a byte stream inside the channel, and a message may be split
+    -- across CHANNEL_DATA messages: join them all, then cut frames.
+    local body = {}
     for _, p in ipairs(s.written) do
         local payload = packet.parse(p, 8)
         if payload and payload:byte(1) == 94 then
             local r = wire.reader(payload)
             r:byte(); r:uint32()
-            local body = r:string()
-            local pos = 1
-            while pos + 4 <= #body do
-                local n = string.unpack(">I4", body, pos)
-                local req = body:sub(pos + 4, pos + 3 + n)
-                pos = pos + 4 + n
-                local rr = wire.reader(req)
-                local ty = rr:byte()
-                local e = { type = ty }
-                if ty ~= 1 then                    -- INIT carries no id
-                    e.id = rr:uint32()
-                    -- CLOSE (4), READ (5) and WRITE (6) name a handle next.
-                    if ty == 4 or ty == 5 or ty == 6 then e.handle = rr:string() end
-                end
-                out[#out + 1] = e
+            body[#body + 1] = r:string()
+        end
+    end
+    body = table.concat(body)
+    local out, pos = {}, 1
+    while pos + 4 <= #body do
+        local n = string.unpack(">I4", body, pos)
+        local req = body:sub(pos + 4, pos + 3 + n)
+        pos = pos + 4 + n
+        local rr = wire.reader(req)
+        local ty = rr:byte()
+        local e = { type = ty }
+        if ty ~= 1 then                            -- INIT carries no id
+            e.id = rr:uint32()
+            if ty == 4 or ty == 8 then             -- CLOSE, FSTAT
+                e.handle = rr:string()
+            elseif ty == 5 then                    -- READ
+                e.handle = rr:string(); e.offset = rr:uint64(); e.len = rr:uint32()
+            elseif ty == 6 then                    -- WRITE
+                e.handle = rr:string(); e.offset = rr:uint64(); e.data = rr:string()
+            elseif ty == 3 then                    -- OPEN
+                e.path = rr:string(); e.pflags = rr:uint32()
+                e.attrs = sftp_codec.decode_attrs(rr)
+            elseif ty == 14 or ty == 9 then        -- MKDIR, SETSTAT
+                e.path = rr:string(); e.attrs = sftp_codec.decode_attrs(rr)
             end
         end
+        out[#out + 1] = e
     end
     return out
 end
+
+local function sent_of_type(s, ty)
+    local out = {}
+    for _, e in ipairs(sent_sftp(s)) do
+        if e.type == ty then out[#out + 1] = e end
+    end
+    return out
+end
+
+local function s_attrs(id, a)
+    return sreply(wire.writer():byte(105):uint32(id)
+                  :raw(sftp_codec.encode_attrs(a)):build())
+end
+
+-- A session to script: conf, subsystem reply and VERSION, then `rest`.
+local function sftp_over(rest, chunk, window)
+    local s = fake_stream(conf(window) .. ok_reply() .. s_version() .. rest, chunk or 11)
+    local t = transport.new(s, stub_crypto())
+    return assert(t:sftp()), s
+end
+
+test("stat returns the attributes the server sent", function()
+    local f = sftp_over(s_attrs(1, { size = 1234, permissions = 0x41ed,
+                                     uid = 1, gid = 2, atime = 5, mtime = 6 }))
+    local a = f:stat("/srv")
+    assert_eq(a.size, 1234)
+    assert_eq(a.permissions, 0x41ed)
+    assert_eq(a.is_dir, true)
+    assert_eq(a.mtime, 6)
+end)
+
+test("a status by name: a missing file is no_such_file", function()
+    local f = sftp_over(s_status(1, 2))
+    local a, err = f:stat("/nope")
+    assert_eq(a, nil)
+    assert_eq(err.code, "no_such_file")
+end)
+
+test("mkdir sends an octal-string mode as its permission bits", function()
+    -- Lua has no octal literal: "755" is what a caller means, not 755.
+    local f, s = sftp_over(s_status(1, 0))
+    assert_eq(f:mkdir("/srv/app", "755"), true)
+    assert_eq(sent_of_type(s, 14)[1].attrs.permissions, 493)
+end)
+
+test("rename, remove, rmdir and chmod report success and failure", function()
+    local f, s = sftp_over(s_status(1, 0) .. s_status(2, 0) .. s_status(3, 4)
+                           .. s_status(4, 0))
+    assert_eq(f:rename("/a", "/b"), true)
+    assert_eq(f:remove("/b"), true)
+    local ok, err = f:rmdir("/full")
+    assert_eq(ok, nil)
+    assert_eq(err.code, "failure")
+    assert_eq(f:chmod("/x", "0644"), true)
+    assert_eq(sent_of_type(s, 9)[1].attrs.permissions, 420)
+end)
+
+test("a mode that is not octal is a caller error, with a code", function()
+    local f = sftp_over("")
+    local ok, err = pcall(f.chmod, f, "/x", "rwx")
+    assert_eq(ok, false)
+    assert_eq(err.code, "bad_argument")
+end)
+
+test("open modes map to their flags", function()
+    local cases = { r = 0x01, ["r+"] = 0x03, w = 0x1a, a = 0x0e, wx = 0x2a }
+    for mode, flags in pairs(cases) do
+        local f, s = sftp_over(s_handle(1, "h"))
+        assert(f:open("/f", mode))
+        assert_eq(sent_of_type(s, 3)[1].pflags, flags, mode)
+    end
+end)
+
+test("open with opts.mode creates the file with those permissions", function()
+    local f, s = sftp_over(s_handle(1, "h"))
+    assert(f:open("/f", "w", { mode = "600" }))
+    assert_eq(sent_of_type(s, 3)[1].attrs.permissions, 384)
+end)
+
+test("a large read ramps up to several requests in flight", function()
+    -- 1 request, then 2, then 4: a big file reaches full pipelining in a few
+    -- round trips, where one-at-a-time would be a round trip per 32 KiB.
+    local C = 32768
+    local full = string.rep("a", C)
+    local f = sftp_over(s_handle(1, "h")
+        .. s_data(2, full)                           -- batch of 1
+        .. s_data(4, full) .. s_data(3, full)        -- batch of 2, out of order
+        .. s_data(5, "tail") .. s_status(6, 1) .. s_status(7, 1) .. s_status(8, 1))
+    local file = assert(f:open("/big", "r"))
+    local got = file:read(10 * C)
+    assert_eq(#got, 3 * C + 4, "three full chunks and the tail:")
+    assert_eq(got:sub(-4), "tail")
+    assert_eq(file:tell(), 3 * C + 4)
+end)
+
+test("replies are matched by id even when the server reorders them", function()
+    local C = 32768
+    local a, b = string.rep("1", C), string.rep("2", C)
+    local f = sftp_over(s_handle(1, "h") .. s_data(2, a)
+                        .. s_data(4, "end") .. s_data(3, b))
+    local file = assert(f:open("/f", "r"))
+    local got = file:read(3 * C)
+    assert_eq(got, a .. b .. "end", "in offset order, not arrival order:")
+end)
+
+test("a large write goes out as pipelined chunks at the right offsets", function()
+    local C = 32768
+    local data = string.rep("w", 3 * C + 10)
+    local f, s = sftp_over(s_handle(1, "h") .. s_status(2, 0) .. s_status(3, 0)
+                           .. s_status(4, 0) .. s_status(5, 0) .. s_status(6, 0), 4096, 1048576)
+    local file = assert(f:open("/f", "w"))
+    assert_eq(file:write(data), true)
+    assert_eq(file:close(), true)
+    local writes = sent_of_type(s, 6)
+    assert_eq(#writes, 4)
+    for i, w in ipairs(writes) do assert_eq(w.offset, (i - 1) * C, "chunk " .. i) end
+    assert_eq(#writes[4].data, 10)
+end)
+
+test("seek moves where the next read starts; a closed file says so", function()
+    local f, s = sftp_over(s_handle(1, "h") .. s_data(2, "xyz") .. s_status(3, 0))
+    local file = assert(f:open("/f", "r"))
+    file:seek(100)
+    assert_eq(file:read(3), "xyz")
+    assert_eq(sent_of_type(s, 5)[1].offset, 100)
+    assert_eq(file:close(), true)
+    assert_eq(file:close(), true, "closing twice is harmless:")
+    local d, err = file:read(1)
+    assert_eq(d, nil)
+    assert_eq(err.code, "closed")
+end)
 
 test("a failed sftp read does not shift the next request's replies", function()
     -- read() gives up when the file exceeds its limit and closes the handle.

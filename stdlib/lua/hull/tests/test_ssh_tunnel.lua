@@ -317,6 +317,25 @@ test("the caller's own callback error is raised, unchanged", function()
     assert_eq(e, "my bug")
 end)
 
+test("an sftp file is a handle too, and its errors come back coded", function()
+    local file = {
+        s = "the session", handle = "h",
+        read  = function() error("ssh: read failed: reset") end,
+        write = function() return true end,
+        close = function() return true end,
+    }
+    local conn = conn_over({ sftp = function()
+        return { t = "the transport", open = function() return file end }
+    end })
+    local f = assert(conn:sftp():open("/x", "r"))
+    assert_eq(next(f), nil, "no fields on the handle:")
+    assert_eq(getmetatable(f), false)
+    assert_eq(f:write("data"), true)
+    local d, err = f:read(10)
+    assert_eq(d, nil)
+    assert_eq(err.code, "io_error")
+end)
+
 test("an unreadable key comes back as bad_key, not a raise", function()
     local _, err = ssh.connect{ host = "h", user = "u", key = "not a key",
                                 crypto = crypto_stub,

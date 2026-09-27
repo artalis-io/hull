@@ -146,20 +146,39 @@ local Conn = {}
 Conn.__index = Conn
 Conn.__metatable = false
 
+-- Give `class` a method per name that calls the inner object's method of the
+-- same name through guard: the one error shape, with no field of the inner
+-- object reachable from the handle.
+local function forward(class, names)
+    for _, name in ipairs(names) do
+        class[name] = function(self, ...)
+            local o = inner[self]
+            return guard(o[name], o, ...)
+        end
+    end
+end
+
+-- An SFTP session. What each method does is documented where it is
+-- implemented, in hull.ssh.sftp_client, and for applications in docs/ssh.md.
 local SftpHandle = {}
 SftpHandle.__index = SftpHandle
 SftpHandle.__metatable = false
-
---- Resolve a path on the server. Returns the canonical path, or nil + text.
-function SftpHandle:realpath(path) return guard(inner[self].realpath, inner[self], path) end
---- List a directory: the entries safe to use as local names, and the ones
---- refused and why.
-function SftpHandle:list(path) return guard(inner[self].list, inner[self], path) end
---- Read a whole file; `max` (default 16 MiB) bounds it.
-function SftpHandle:read(path, max) return guard(inner[self].read, inner[self], path, max) end
---- Write a whole file, creating or truncating it.
-function SftpHandle:write(path, data) return guard(inner[self].write, inner[self], path, data) end
+forward(SftpHandle, { "realpath", "list", "read", "write", "stat", "lstat",
+                      "mkdir", "rmdir", "remove", "rename", "chmod", "setstat" })
 function SftpHandle:close() return inner[self]:close() end
+
+-- An open file: read / write / seek / tell / stat / close.
+local FileHandle = {}
+FileHandle.__index = FileHandle
+FileHandle.__metatable = false
+forward(FileHandle, { "read", "write", "seek", "tell", "stat", "close" })
+
+--- Open a file on the server; see hull.ssh.sftp_client's Sftp:open.
+function SftpHandle:open(path, mode, opts)
+    local f, err = guard(inner[self].open, inner[self], path, mode, opts)
+    if not f then return nil, err end
+    return handle(FileHandle, f)
+end
 
 --- Run a command. Returns { status, signal, stdout, stderr }, or nil plus a
 --- reason table.
