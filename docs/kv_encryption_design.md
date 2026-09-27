@@ -1,7 +1,7 @@
 # `hull.kv` encryption at rest: design
 
-Status: **proposal, for review.** Nothing here is implemented. Open questions
-for the maintainer are collected at the end.
+Status: **accepted design, not yet implemented.** The decisions taken on the
+open questions are recorded in section 11.
 
 ## 1. Why
 
@@ -169,16 +169,18 @@ Deletion still yields `host_unknown` (fail-safe) and rollback remains possible
 - TOTP's existing rows open unchanged through the shared module.
 - JS parity for all of the above.
 
-## 11. Open questions
+## 11. Decisions
 
-1. **Scope of the first PR:** the shared `hull.crypto.sealbox` plus `hull.kv`
-   encryption together, with TOTP moved onto the shared module in a follow-up?
-   Or TOTP moved in the same PR, so the extraction is proven by two users?
-2. **Keys as Lua strings first**, with the C keyring later (as proposed)? Or
-   the C keyring from the start, which delays the feature but never puts key
-   bytes in the Lua heap?
-3. **Hide key names too?** A keyed hash of each name (HMAC) would hide them,
-   at the cost of `scan` by prefix. Proposed: no, keep names plaintext, and
-   document it. An app that needs hidden names hashes them itself.
-4. **`hull.cache`:** give its byte cache the same option now, or leave it,
-   since a cache is ephemeral and bounded? Proposed: leave it until asked for.
+Taken with the maintainer on 2026-09-27:
+
+1. **One PR:** the shared `hull.crypto.sealbox`, `hull.kv` encryption, and
+   TOTP moved onto the shared module, together - so the extraction is proven
+   by two users from the start, and TOTP's existing rows open unchanged
+   through it (a test in section 10).
+2. **Keys as Lua strings first**, as TOTP does. The C-held keyring of
+   section 6 is a later step, not part of the first version.
+3. **Key names stay plaintext.** No keyed hashing of names; `scan` by prefix
+   keeps working. The docs say names are visible, and an app that needs them
+   hidden hashes them itself.
+4. **`hull.cache` is left as it is** until someone needs encrypted cache
+   entries.
