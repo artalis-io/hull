@@ -386,10 +386,6 @@ function Transport:read_message(strict)
         elseif m == SSH_MSG_GLOBAL_REQUEST then
             local r = wire.reader(p); r:byte(); r:string()
             if r:boolean() then self:send_packet(string.char(SSH_MSG_REQUEST_FAILURE)) end
-        elseif m == SSH_MSG_REQUEST_SUCCESS or m == SSH_MSG_REQUEST_FAILURE then
-            -- The answer to a keepalive (the only global request this client
-            -- sends). Its arrival already reset the silence count in
-            -- read_some; the content says nothing more.
         elseif m == channel.SSH_MSG_CHANNEL_OPEN then
             -- The server asking US to open a channel (forwarded connections,
             -- agent, X11). None is offered, so every one is refused - with a
@@ -399,8 +395,13 @@ function Transport:read_message(strict)
             self:send_packet(channel.build_open_failure(sender,
                 channel.OPEN_ADMINISTRATIVELY_PROHIBITED,
                 "hull/ssh accepts no server-initiated channels"))
+        -- Skipped as well as the chatter: REQUEST_SUCCESS / FAILURE, the
+        -- answer to a keepalive (the only global request this client sends).
+        -- Its arrival already reset the silence count in read_some; the
+        -- content says nothing more.
         elseif m ~= SSH_MSG_IGNORE and m ~= SSH_MSG_DEBUG
-               and m ~= SSH_MSG_UNIMPLEMENTED then
+               and m ~= SSH_MSG_UNIMPLEMENTED
+               and m ~= SSH_MSG_REQUEST_SUCCESS and m ~= SSH_MSG_REQUEST_FAILURE then
             return p
         end
     end
@@ -902,8 +903,8 @@ function Transport:exec(command, opts)
             -- The caller's own error stays the caller's: wrapped so the
             -- facade rethrows it as raised, rather than reporting it as a
             -- connection failure.
-            local cok, cerr = pcall(cb, m.data)
-            if not cok then error({ app_error = cerr }, 0) end
+            local cb_ok, cb_err = pcall(cb, m.data)
+            if not cb_ok then error({ app_error = cb_err }, 0) end
             return
         end
         buffered = buffered + #m.data
