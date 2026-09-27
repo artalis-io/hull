@@ -78,13 +78,73 @@ test("short reads are assembled, not treated as failure", function()
     -- The binding returns whatever arrived; a transport that expected exactly
     -- n bytes would work against a fake and fail against a socket.
     local t = transport.new(fake_stream("abcdefghij", 2), stub_crypto())
-    assert_eq(t:take(10), "abcdefghij")
+    t:fill(10)
+    assert_eq(t.inbuf, "abcdefghij")
 end)
 
 test("a closed stream mid-packet is an error, not a hang", function()
     local t = transport.new(fake_stream("abc"), stub_crypto())
-    local err = assert_raises(function() t:take(10) end)
+    local err = assert_raises(function() t:fill(10) end)
     assert_eq(err:find("closed", 1, true) ~= nil, true, err)
+end)
+
+-- A stream that records the largest read it was asked for, and has nothing
+-- more to give once its script is spent (so a transport that waits is caught
+-- by the "closed" error rather than by a hang).
+local function asking_stream(inbound)
+    local s = fake_stream(inbound, 4096)
+    s.max_asked = 0
+    local read = s.read
+    s.read = function(self, n)
+        if n > self.max_asked then self.max_asked = n end
+        return read(self, n)
+    end
+    return s
+end
+
+test("a huge declared length is refused before anything waits for it", function()
+    -- Before NEWKEYS the length is unauthenticated: a hostile or injected
+    -- 0xFFFFFFFF used to be waited for, and the read asked for 4 GiB.
+    local s = asking_stream(string.pack(">I4", 0xFFFFFFFF) .. "rest")
+    local t = transport.new(s, stub_crypto())
+    local err = assert_raises(function() t:read_packet() end)
+    assert_eq(err:find("exceeds the maximum", 1, true) ~= nil, true, err)
+    assert_eq(s.max_asked <= 32768, true,
+              "asked the stream for " .. tostring(s.max_asked) .. " bytes")
+end)
+
+test("a length below the minimum is refused, not waited for", function()
+    local s = asking_stream(string.pack(">I4", 2) .. "xx")
+    local t = transport.new(s, stub_crypto())
+    local err = assert_raises(function() t:read_packet() end)
+    assert_eq(err:find("below the minimum", 1, true) ~= nil, true, err)
+end)
+
+test("a misaligned length is refused, not waited for", function()
+    local s = asking_stream(string.pack(">I4", 13))
+    local t = transport.new(s, stub_crypto())
+    local err = assert_raises(function() t:read_packet() end)
+    assert_eq(err:find("block size", 1, true) ~= nil, true, err)
+end)
+
+test("after NEWKEYS a huge declared length is refused the same way", function()
+    -- Under GCM the length is plaintext and only authenticated with the tag,
+    -- so an on-path attacker can set it at any time, not only before auth.
+    local s = asking_stream(string.pack(">I4", 0xFFFFFFF0) .. "rest")
+    local t = transport.new(s, stub_crypto())
+    t.s2c = require('hull.ssh.cipher').new(string.rep("k", 32), string.rep("i", 12))
+    local err = assert_raises(function() t:read_packet() end)
+    assert_eq(err:find("exceeds the maximum", 1, true) ~= nil, true, err)
+    assert_eq(s.max_asked <= 32768, true,
+              "asked the stream for " .. tostring(s.max_asked) .. " bytes")
+end)
+
+test("a valid packet still arrives whole through short reads", function()
+    local t = transport.new(fake_stream(plain(string.char(20) .. "real"), 3),
+                            stub_crypto())
+    local p = t:read_packet()
+    assert_eq(p, string.char(20) .. "real")
+    assert_eq(t.inbuf, "")
 end)
 
 test("identification lines are read one at a time", function()

@@ -91,7 +91,16 @@ end
 
 -- Reading -------------------------------------------------------------------
 
+-- The most asked of the stream in one read. The binding sizes its buffer from
+-- the request before a byte arrives, so the request must never be a number
+-- the peer chose; a short read is normal anyway, so asking for less costs
+-- nothing but another loop turn.
+local READ_CHUNK = 32768
+
 -- Pull at least `n` bytes into the buffer. A short read is the normal case.
+--
+-- Callers bound `n` before calling: read_packet has the parser vet a declared
+-- length first. This loop only moves bytes.
 function Transport:fill(n)
     if #self.inbuf >= n then return end
     -- Gather into a table and join once. The stream is free to return SHORT
@@ -100,7 +109,7 @@ function Transport:fill(n)
     -- small pieces is hundreds of megabytes of copying for 32 KiB of data.
     local parts, have = { self.inbuf }, #self.inbuf
     while have < n do
-        local chunk, err = self.stream:read(n - have)
+        local chunk, err = self.stream:read(math.min(n - have, READ_CHUNK))
         if chunk == nil then
             error("ssh: read failed: " .. tostring(err))
         end
@@ -111,13 +120,6 @@ function Transport:fill(n)
         have = have + #chunk
     end
     self.inbuf = table.concat(parts)
-end
-
-function Transport:take(n)
-    self:fill(n)
-    local s = self.inbuf:sub(1, n)
-    self.inbuf = self.inbuf:sub(n + 1)
-    return s
 end
 
 function Transport:send_raw(bytes)
@@ -158,21 +160,29 @@ function Transport:send_packet(payload)
     end
 end
 
+-- One packet off the wire: plaintext framing before NEWKEYS, the AEAD after.
+--
+-- The parser is asked FIRST, with only the 4-byte length in hand. The length
+-- is peer-controlled - and before NEWKEYS, or always under GCM, it is also
+-- unauthenticated - so waiting for however many bytes it claims would let a
+-- 0xFFFFFFFF make us try to buffer 4 GiB. packet.parse and Cipher:open bound
+-- the claim (maximum, minimum, block alignment) and raise before answering
+-- "need_more", so only a packet that can be valid is ever waited for, and the
+-- rules live in one place per framing rather than being restated here.
 function Transport:read_packet()
-    if self.s2c then
-        -- The length is plaintext, so read the header, then exactly the rest.
-        self:fill(4)
-        local n = string.unpack(">I4", self.inbuf)
-        local total = cipher.frame_size(n)
-        self:fill(total)
-        local payload, used = self.s2c:open(self.aead, self.inbuf)
-        self.inbuf = self.inbuf:sub(used + 1)
-        return payload
+    local s2c, aead = self.s2c, self.aead
+    local function parse(buf)
+        if s2c then return s2c:open(aead, buf) end
+        return packet.parse(buf, 8)
     end
+
     self:fill(4)
-    local n = string.unpack(">I4", self.inbuf)
-    self:fill(n + 4)
-    local payload, used = packet.parse(self.inbuf, 8)
+    local payload, used = parse(self.inbuf)
+    if not payload then
+        local n = string.unpack(">I4", self.inbuf)
+        self:fill(s2c and cipher.frame_size(n) or n + 4)
+        payload, used = parse(self.inbuf)
+    end
     self.inbuf = self.inbuf:sub(used + 1)
     return payload
 end

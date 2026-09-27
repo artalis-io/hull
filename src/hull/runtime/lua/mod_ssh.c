@@ -336,6 +336,14 @@ static int lua_ssh_read(lua_State *L)
     lua_Integer want = luaL_optinteger(L, 2, 4096);
     if (want <= 0) return push_err(L, "read size must be positive");
 
+    /* The buffer is sized from `want` before a byte arrives, so a size taken
+     * from a peer's length field would allocate that much up front. A read is
+     * allowed to be short, and the stream never holds more than its read cap
+     * (left at the default by connect below), so asking beyond it is only
+     * ever an allocation, never more data. */
+    if ((lua_Unsigned)want > HL_NET_READ_CAP_DEFAULT)
+        want = (lua_Integer)HL_NET_READ_CAP_DEFAULT;
+
     o->want = (size_t)want;
     return ssh_read_step(L, o);
 }

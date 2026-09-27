@@ -5100,6 +5100,17 @@ UTEST(lua_ssh_bridge, a_second_waiter_on_one_stream_is_refused_not_parked)
     int peer = accept(lfd, NULL, NULL);
     ASSERT_GE(peer, 0);
 
+    /* A read size is not an allocation size. The SSH layer once passed a
+     * peer-declared packet length straight through, and the binding sized
+     * its buffer from it: 1 GiB here would exceed the VM's memory limit. */
+    lua_State *co_r;
+    ASSERT_EQ(send(peer, "hi", 2, 0), (ssize_t)2);
+    st = ssh_co_start(&lua_rt, "return H:read(1 << 30)\n", &co_r);
+    ASSERT_TRUE(st == LUA_OK || st == LUA_YIELD);
+    ssh_tick_until_done(be, lua_rt.base.async_ctx, co_r);
+    ASSERT_EQ_MSG(lua_status(co_r), LUA_OK, "a huge read size must not fail");
+    EXPECT_STREQ(lua_tostring(co_r, -1), "hi");
+
     /* B: nothing has arrived, so the read parks. */
     st = ssh_co_start(&lua_rt, "return H:read(16)\n", &co_b);
     ASSERT_EQ_MSG(st, LUA_YIELD, "the first reader parks");
