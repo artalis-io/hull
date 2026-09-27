@@ -73,6 +73,13 @@ function M.new(stream, crypto, opts)
         inbuf = "",
         next_channel = 0,
         rekeys = 0,
+        -- Packet sequence numbers (RFC 4253 section 6.4), one per direction,
+        -- uint32 and wrapping. The GCM mode in use does not feed them into
+        -- the MAC, so today they matter only to strict KEX; they are kept
+        -- exactly anyway, because a MAC mode that does use them must find
+        -- them already right rather than rediscover Terrapin.
+        recv_seq = 0,
+        send_seq = 0,
         -- Messages read while waiting for the peer's KEXINIT during a rekey
         -- WE started. See defer_message.
         deferred = {},
@@ -158,6 +165,7 @@ function Transport:send_packet(payload)
     else
         self:send_raw(packet.frame(payload, 8, self.crypto.random))
     end
+    self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
 end
 
 -- One packet off the wire: plaintext framing before NEWKEYS, the AEAD after.
@@ -184,6 +192,7 @@ function Transport:read_packet()
         payload, used = parse(self.inbuf)
     end
     self.inbuf = self.inbuf:sub(used + 1)
+    self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
     return payload
 end
 
@@ -379,7 +388,19 @@ function Transport:run_kex(opts, i_s)
     -- Both sides have to advertise it for the stricter rules to apply; a
     -- server that does not gets RFC 4253 behaviour, where transport chatter
     -- during a key exchange is legal.
-    self.strict_kex = kexinit.server_is_strict(server)
+    --
+    -- Decided by the FIRST exchange and kept: the markers are only meaningful
+    -- in the initial KEXINIT (OpenSSH ignores them later), so recomputing it
+    -- per rekey relaxed the rules for every rekey after the first.
+    if not rekey then
+        self.strict_kex = kexinit.server_is_strict(server)
+        -- Strict KEX requires the peer's KEXINIT to be its very first packet.
+        -- read_message skips IGNORE and DEBUG, and it was a skipped IGNORE
+        -- before KEXINIT that let Terrapin shift the sequence numbers.
+        if self.strict_kex and self.recv_seq ~= 1 then
+            error("ssh: strict KEX: the server's KEXINIT was not its first packet")
+        end
+    end
 
     if kexinit.guess_was_wrong(server, neg) then
         self:read_message(self.strict_kex)   -- discard the guess (RFC 4253 7.1)
@@ -464,7 +485,12 @@ function Transport:run_kex(opts, i_s)
     -- the OLD keys, and the peer switches its send side the moment it sends
     -- its own.
     self:send_packet(string.char(kex.SSH_MSG_NEWKEYS))
+    -- Strict KEX resets each direction's sequence number at its NEWKEYS, so
+    -- nothing that crossed the wire before the keys changed can be counted
+    -- after it.
+    if self.strict_kex then self.send_seq = 0 end
     self:expect(kex.SSH_MSG_NEWKEYS, "NEWKEYS", self.strict_kex)
+    if self.strict_kex then self.recv_seq = 0 end
     self.c2s = cipher.new(keys.key_c2s, keys.iv_c2s)
     self.s2c = cipher.new(keys.key_s2c, keys.iv_s2c)
     if rekey then self.rekeys = self.rekeys + 1 end

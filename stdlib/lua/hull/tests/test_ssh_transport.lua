@@ -750,6 +750,74 @@ test("a rekey we start reads its reply past the data it set aside", function()
     assert_eq(held:byte(1), 94, "the channel data is still there for the caller:")
 end)
 
+-- strict KEX -------------------------------------------------------------------
+
+-- A server KEXINIT built from our own offer, with the strict marker swapped
+-- for the server's (or dropped).
+local function server_kexinit(strict)
+    local offer = {}
+    for k, v in pairs(kexinit.DEFAULT_OFFER) do offer[k] = v end
+    offer.kex = { "curve25519-sha256" }
+    if strict then offer.kex[2] = kexinit.STRICT_S end
+    return plain(kexinit.build(offer, string.rep("s", 16)))
+end
+
+local function kex_crypto()
+    local c = stub_crypto()
+    c.x25519_keypair = function() return string.rep("00", 32), string.rep("11", 32) end
+    c.x25519 = function() return nil, "stub stops here" end
+    return c
+end
+
+local function ecdh_reply()
+    return plain(wire.writer():byte(31):string("K_S")
+                 :string(string.rep("q", 32)):string("sig"):build())
+end
+
+local IGNORE = plain(string.char(2) .. "x")
+
+-- Run the handshake; return its reason code, or the error it raised.
+local function handshake_outcome(inbound)
+    local t = transport.new(fake_stream("SSH-2.0-test\r\n" .. inbound, 16), kex_crypto())
+    local ok, res, why = pcall(t.handshake, t, { host = "h", trust = {} })
+    if not ok then return tostring(res) end
+    return res and "succeeded" or (why and why.code)
+end
+
+test("strict KEX refuses a packet before the server's KEXINIT", function()
+    -- Terrapin's primitive: an IGNORE the client skips shifts the sequence
+    -- numbers both sides think they share.
+    local out = handshake_outcome(IGNORE .. server_kexinit(true) .. ecdh_reply())
+    assert_eq(out:find("was not its first packet", 1, true) ~= nil, true, out)
+end)
+
+test("without strict KEX a packet before KEXINIT is still tolerated", function()
+    local out = handshake_outcome(IGNORE .. server_kexinit(false) .. ecdh_reply())
+    assert_eq(out, "bad_kex_point", "reached the exchange:")
+end)
+
+test("strict KEX, decided by the first exchange, holds for a rekey", function()
+    -- The markers only mean anything in the initial KEXINIT. Recomputing
+    -- strictness per exchange made every rekey lenient again, so an IGNORE
+    -- injected mid-rekey was skipped.
+    local t = transport.new(fake_stream(server_kexinit(false) .. IGNORE .. ecdh_reply(), 16),
+                            kex_crypto())
+    t.session_id = "sid"
+    t.strict_kex = true              -- as the first exchange left it
+    local ok, err = pcall(t.next_message, t)
+    assert_eq(ok, false)
+    assert_eq(tostring(err):find("strict KEX", 1, true) ~= nil, true, tostring(err))
+end)
+
+test("sequence numbers count every packet, both ways", function()
+    local t = transport.new(fake_stream(IGNORE .. plain(string.char(20) .. "x"), 16),
+                            stub_crypto())
+    t:next_message()
+    assert_eq(t.recv_seq, 2, "the skipped IGNORE counts too:")
+    t:send_packet(string.char(2))
+    assert_eq(t.send_seq, 1)
+end)
+
 test("stats span the connection, not just the current key", function()
     local t = transport.new(fake_stream("", 4), stub_crypto())
     t.rekeys = 2
