@@ -459,6 +459,20 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o)
  * matters: the caller check first, so an application probing this bridge
  * learns nothing about the grant.
  */
+/* An optional integer option at the top of the stack, within [lo, hi]. Returns
+ * it, or -1 when present and out of range (or not an integer). A cast to int
+ * alone would wrap: port 2^32 + 22 became 22, which the policy then checked
+ * and the connect then used - consistent, so not a bypass, but not the port
+ * that was asked for either. */
+static long opt_int_in(lua_State *L, lua_Integer def, lua_Integer lo, lua_Integer hi)
+{
+    if (lua_isnoneornil(L, -1)) return (long)def;
+    int ok = 0;
+    lua_Integer v = lua_tointegerx(L, -1, &ok);
+    if (!ok || v < lo || v > hi) return -1;
+    return (long)v;
+}
+
 static int lua_ssh_connect(lua_State *L)
 {
     require_stdlib_caller(L);
@@ -469,11 +483,16 @@ static int lua_ssh_connect(lua_State *L)
     lua_getfield(L, 1, "host");
     const char *host = lua_tostring(L, -1);
     lua_getfield(L, 1, "port");
-    int port = (int)luaL_optinteger(L, -1, 22);
+    long port = opt_int_in(L, 22, 1, 65535);
     lua_getfield(L, 1, "user");
     const char *user = lua_tostring(L, -1);
     lua_getfield(L, 1, "timeout_ms");
-    int timeout = (int)luaL_optinteger(L, -1, SSH_CONNECT_MS_DEF);
+    long timeout = opt_int_in(L, SSH_CONNECT_MS_DEF, 1, 24L * 3600 * 1000);
+    if (port < 0 || timeout < 0) {
+        lua_settop(L, base);
+        return push_err(L, port < 0 ? "ssh: port must be an integer 1..65535"
+                                    : "ssh: timeout_ms must be an integer 1..86400000");
+    }
 
     /* The relay, if any. Its strings stay on the stack until after connect:
      * cfg.host and cfg.tls_hostname are BORROWED for the duration of the
@@ -496,7 +515,12 @@ static int lua_ssh_connect(lua_State *L)
         lua_getfield(L, v, "host");
         via_host = lua_tostring(L, -1);
         lua_getfield(L, v, "port");
-        via_port = (int)luaL_optinteger(L, -1, 443);
+        long vp = opt_int_in(L, 443, 1, 65535);
+        if (vp < 0) {
+            lua_settop(L, base);
+            return push_err(L, "ssh: via.port must be an integer 1..65535");
+        }
+        via_port = (int)vp;
         lua_getfield(L, v, "tls");
         via_tls = lua_toboolean(L, -1);
         lua_getfield(L, v, "tls_hostname");
@@ -512,7 +536,7 @@ static int lua_ssh_connect(lua_State *L)
      * machine the app asked to reach is the more informative answer, and it
      * keeps the relay from being probed by an app that may not reach the
      * host behind it anyway. */
-    HlNetAuth auth = hl_ssh_check_connect(lua->base.ssh_policy, host, port, user);
+    HlNetAuth auth = hl_ssh_check_connect(lua->base.ssh_policy, host, (int)port, user);
     if (auth == HL_NET_ALLOW && has_via)
         auth = hl_ssh_check_tunnel(lua->base.ssh_policy, via_host, via_port);
     if (auth != HL_NET_ALLOW) {
@@ -526,8 +550,8 @@ static int lua_ssh_connect(lua_State *L)
     cfg.async      = lua->base.async_ctx;
     cfg.pool       = lua->base.thread_pool;
     cfg.host       = has_via ? via_host : host;
-    cfg.port       = has_via ? via_port : port;
-    cfg.connect_ms = timeout;
+    cfg.port       = has_via ? via_port : (int)port;
+    cfg.connect_ms = (int)timeout;
 
     if (via_tls) {
         /* Refuse rather than downgrade. A caller that asked for an encrypted

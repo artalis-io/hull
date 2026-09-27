@@ -5015,6 +5015,34 @@ UTEST(lua_ssh_bridge, a_user_outside_the_grant_is_denied)
     cleanup_lua();
 }
 
+UTEST(lua_ssh_bridge, an_out_of_range_port_is_refused_not_wrapped)
+{
+    /* A cast to int used to wrap 2^32 + 22 to 22 - checked and dialled as
+     * 22, consistently, but not the port that was asked for. */
+    init_lua();
+    ASSERT_EQ(ssh_declare(
+        "app.manifest({ modules = { 'hull/ssh@1' },\n"
+        "  ssh = { connect = { hosts = { 'spark.local' }, ports = { 22 },\n"
+        "                      users = { 'operator' } } } })\n"), 0);
+    const char *cases[] = {
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = 4294967318, user = 'operator' }))",
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = 22, user = 'operator', timeout_ms = -5 }))",
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = 22, user = 'operator', via = { host = 'r', port = 70000 } }))",
+    };
+    const char *want[] = { "port must be", "timeout_ms must be", "via.port must be" };
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ(run_as_stdlib(lua_rt.L, cases[i]), LUA_OK);
+        const char *err = lua_tostring(lua_rt.L, -1);
+        EXPECT_TRUE_MSG(err && strstr(err, want[i]), cases[i]);
+        lua_settop(lua_rt.L, 0);
+    }
+    ssh_undeclare();
+    cleanup_lua();
+}
+
 /* Start `src` in a coroutine of its own, compiled under a stdlib chunk name,
  * the way the runtime starts a handler: active_co is what a park captures to
  * resume later. Returns lua_resume's status. A coroutine that finishes here is
