@@ -898,6 +898,59 @@ test("closing sftp twice sends one CLOSE", function()
     assert_eq(closes, 1)
 end)
 
+-- The CHANNEL_DATA sizes we sent, in order.
+local function sent_data_sizes(s)
+    local out = {}
+    for _, p in ipairs(s.written) do
+        local payload = packet.parse(p, 8)
+        if payload and payload:byte(1) == 94 then
+            local r = wire.reader(payload)
+            r:byte(); r:uint32()
+            out[#out + 1] = #r:string()
+        end
+    end
+    return out
+end
+
+test("an sftp write fits the peer's packet size", function()
+    -- A 16 KiB chunk plus its header went out as ONE message, and the channel
+    -- refuses (rather than truncates) one over the peer's packet size.
+    local s = fake_stream(conf(1048576, 8192) .. ok_reply() .. s_version()
+        .. s_handle(1, "h") .. s_status(2, 0) .. s_status(3, 0), 11)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    assert_eq(f:write("/big", string.rep("z", 16384)), true)
+    for _, n in ipairs(sent_data_sizes(s)) do
+        assert_eq(n <= 8192, true, "sent " .. n .. " bytes in one message")
+    end
+end)
+
+test("an sftp write waits for the window instead of raising", function()
+    -- The window runs out part way through the write; the peer's adjust
+    -- arrives afterwards, and the rest of the message follows it.
+    local s = fake_stream(conf(2000, 32768) .. ok_reply() .. s_version()
+        .. s_handle(1, "h") .. grant(1048576) .. s_status(2, 0) .. s_status(3, 0), 11)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    assert_eq(f:write("/w", string.rep("z", 5000)), true)
+end)
+
+test("exec stdin is chunked below our own limit, whatever the peer allows", function()
+    -- A peer may advertise a packet size far above what our framing will
+    -- send; a chunk sized to its number was refused on the way out.
+    local s = fake_stream(conf(1048576, 262144) .. ok_reply() .. status(0)
+                          .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cat", { stdin = string.rep("y", 100 * 1024) })
+    assert_eq(r.status, 0)
+    local total = 0
+    for _, n in ipairs(sent_data_sizes(s)) do
+        assert_eq(n <= 32768, true, "sent " .. n .. " bytes in one message")
+        total = total + n
+    end
+    assert_eq(total, 100 * 1024)
+end)
+
 test("an sftp write closes its handle and reads the answer on failure", function()
     local s = fake_stream(conf() .. ok_reply() .. s_version()
         .. s_handle(1, "hW") .. s_status(2, 4) .. s_status(3, 0)

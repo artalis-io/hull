@@ -314,14 +314,23 @@ function Channel:can_send(n)
     return n <= self.send_window
 end
 
--- The largest chunk that can be sent right now: the smaller of the remaining
--- window and the peer packet cap. Zero means wait for a window adjust.
+-- The most data we put in one CHANNEL_DATA, whatever the peer allows. A
+-- peer may advertise a packet size far larger than our own framing accepts
+-- (hull.ssh.packet.MAX_PACKET), and a chunk sized to its number alone would be
+-- refused on the way out. 32 KiB leaves room for the message header, padding
+-- and tag inside that limit.
+M.MAX_SEND = 32768
+
+-- The largest chunk that can be sent right now: the smallest of the remaining
+-- window, the peer packet cap and MAX_SEND. Zero means wait for a window
+-- adjust.
 function Channel:sendable()
     if not self.open or self.closed then return 0 end
     local n = self.send_window
     if self.send_max_packet and self.send_max_packet < n then
         n = self.send_max_packet
     end
+    if n > M.MAX_SEND then n = M.MAX_SEND end
     return n
 end
 

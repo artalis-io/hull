@@ -853,8 +853,40 @@ function Transport:sftp()
     return s
 end
 
+-- Send one SFTP message, split across as many CHANNEL_DATA messages as the
+-- peer's window and packet size require.
+--
+-- SFTP is a byte stream inside the channel, so a message may be cut anywhere.
+-- It used to go out whole, and data_message REFUSES rather than truncates:
+-- a peer advertising a 16 KiB packet size, or a window not yet topped up when
+-- the next write went out, made a write raise part way through a file.
 function Sftp:send(payload)
-    self.t:send_packet(self.ch:data_message(sftp.frame(payload)))
+    local bytes, off = sftp.frame(payload), 1
+    while off <= #bytes do
+        local room = self.ch:sendable()
+        while room <= 0 do
+            -- Only the peer can grant more, and while we wait it may still be
+            -- sending reply bytes: pump keeps them, it does not drop them.
+            self:pump()
+            room = self.ch:sendable()
+        end
+        local chunk = bytes:sub(off, off + room - 1)
+        self.t:send_packet(self.ch:data_message(chunk))
+        off = off + #chunk
+    end
+end
+
+-- Read one connection message for this session's channel: keep its data for
+-- recv, and top up the window we grant.
+function Sftp:pump()
+    local m = self.t:channel_message(self.ch)
+    if m.type == "data" then
+        self.buf = self.buf .. m.data
+    elseif m.type == "close" then
+        error("ssh.sftp: the channel closed mid-request")
+    end
+    local adj = self.ch:window_adjustment()
+    if adj then self.t:send_packet(adj) end
 end
 
 -- Send one request and return ITS reply.
@@ -893,14 +925,7 @@ function Sftp:recv()
             self.buf = self.buf:sub(used + 1)
             return sftp.parse(p)
         end
-        local m = self.t:channel_message(self.ch)
-        if m.type == "data" then
-            self.buf = self.buf .. m.data
-        elseif m.type == "close" then
-            error("ssh.sftp: the channel closed mid-request")
-        end
-        local adj = self.ch:window_adjustment()
-        if adj then self.t:send_packet(adj) end
+        self:pump()
     end
     error("ssh.sftp: no response")
 end
