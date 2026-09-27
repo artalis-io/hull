@@ -63,6 +63,10 @@ void hl_tls_ctx_destroy(KlTlsCtx *ctx);
  */
 typedef struct HlClientTls {
     const KlTlsConfig *cfg;
+    /* 0 when the context verifies nothing (--no-ca-bundle). A consumer about
+     * to send credentials over it can then say so at the point of use, not
+     * only in the one startup line that is easy to miss. */
+    int verifies;
 } HlClientTls;
 
 /**

@@ -64,6 +64,8 @@
 extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
                                              HlLuaPushResultFn push_result);
 
+#include "log.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -567,6 +569,14 @@ static int lua_ssh_connect(lua_State *L)
                 "trust anchor (no CA bundle resolved, or TLS is not composed "
                 "into this binary)");
         }
+        if (!t->verifies)
+            /* Allowed - --no-ca-bundle is a development switch - but said
+             * here, where it matters: the relay's certificate is not checked,
+             * and the tunnel's headers carry its credentials to whoever
+             * answers. */
+            log_warn("[hull:ssh] relay %s:%d: certificate NOT verified "
+                     "(--no-ca-bundle); tunnel credentials go to whoever "
+                     "answers", via_host ? via_host : "?", via_port);
         cfg.tls       = t->cfg;
         /* The runtime's own allocator, bridged. Stack-local is safe because
          * the transport COPIES the KlAllocator by value (net_stream.c's
