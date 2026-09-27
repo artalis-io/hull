@@ -140,15 +140,9 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 // are binary-safe for ArrayBuffer/Uint8Array input - use
 // them when the input is already a typed array.
 import { _hex } from "hull:crypto:_hex";
+import { sealbox } from "hull:crypto:sealbox";
+import { otp } from "hull:crypto:otp";
 const bytesToHex = _hex.toHex;
-
-function hexToBytes(h) {
-    let s = "";
-    for (let i = 0; i < h.length; i += 2) {
-        s += String.fromCharCode(parseInt(h.substr(i, 2), 16));
-    }
-    return s;
-}
 
 // RFC 4648 Base32 (no padding) - encode + decode. 20 bytes → 32
 // chars; decoder is case-insensitive and tolerates "=" / whitespace.
@@ -200,39 +194,9 @@ function base32Decode(s) {
     return out;
 }
 
-// TOTP digest per RFC 4226 §5.3-5.4. Computes the 8-byte big-endian
-// counter as two 32-bit halves so we avoid JS's 53-bit Number cap
-// (step counters fit comfortably in 53 bits but BITWISE OPS truncate
-// to 32 bits, so we split manually). The dynamic-truncation step uses
-// multiplication to keep the 31-bit accumulator inside Number's
-// integer-safe range without any signed-shift surprises.
-function totpAtStep(secretBytes, step, digits) {
-    const hi = Math.floor(step / 0x100000000);
-    const lo = step - hi * 0x100000000;
-    /* Use a Uint8Array (via .buffer) so crypto.hmacSha1 takes the
-     * raw bytes through js_get_buffer's TypedArray probe. A plain
-     * JS string of high-byte chars would UTF-8-inflate at the C
-     * boundary and produce the wrong MAC - silently - for any
-     * counter byte >= 0x80. */
-    const counter = new Uint8Array([
-        (hi >>> 24) & 0xff, (hi >>> 16) & 0xff,
-        (hi >>>  8) & 0xff,  hi         & 0xff,
-        (lo >>> 24) & 0xff, (lo >>> 16) & 0xff,
-        (lo >>>  8) & 0xff,  lo         & 0xff,
-    ]).buffer;
-    const keyHex = bytesToHex(secretBytes);
-    const macHex = crypto.hmacSha1(counter, keyHex);
-    const mac = new Array(20);
-    for (let i = 0; i < 20; i++) mac[i] = parseInt(macHex.substr(i * 2, 2), 16);
-    const offset = mac[19] & 0x0F;
-    const p = (mac[offset] & 0x7F) * 0x1000000
-            + (mac[offset + 1] & 0xFF) * 0x10000
-            + (mac[offset + 2] & 0xFF) * 0x100
-            + (mac[offset + 3] & 0xFF);
-    const mod = Math.pow(10, digits);
-    const code = p % mod;
-    return String(code).padStart(digits, "0");
-}
+// TOTP per RFC 6238 is HOTP(K, T_step); the algorithm lives in
+// hull:crypto:otp.
+const totpAtStep = otp.hotp;
 
 // Recovery codes: 12 chars from a 31-char no-confusables alphabet,
 // formatted as ABCD-EFGH-IJKL. Modulo bias on 31 from a uniform byte
@@ -276,67 +240,29 @@ function verifyRecoveryCode(code, hash) {
 // measurable timing leak when an attacker can submit guesses at
 // high rate. RFC 6238 §4 calls this out. Pair with account lockout
 // (hull/web/middleware/auth_lockout, separate module) for defense
-// in depth. Charcode XOR-fold mirrors the Lua side's ct_eq.
+// in depth.
 function ctEq(a, b) {
     if (typeof a !== "string" || typeof b !== "string") return false;
-    if (a.length !== b.length) return false;
-    let diff = 0;
-    for (let i = 0; i < a.length; i++) {
-        diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-    }
-    return diff === 0;
+    // The C constant-time compare jwt / csrf / the Lua side use, rather than
+    // a hand-rolled loop the interpreter's timing can leak through.
+    return crypto.constantTimeEq(a, b);
 }
 
-// At-rest encryption: versioned NaCl secretbox. See the matching
-// Lua module's encrypt_secret / decrypt_secret comments for the
-// design - wire format v2 (current) is version(4 BE) || nonce(24) ||
-// ct; v1 (legacy, pre-rotation) was nonce(24) || ct. Both runtimes
-// produce identical byte sequences for the same key so a Lua↔JS
-// migration on the same DB works without re-enrolling.
-const NONCE_LEN = 24;
-const MAC_LEN   = 16;
-const VERSION_PREFIX_LEN = 4;
-const MIN_V2_BLOB_LEN    = VERSION_PREFIX_LEN + NONCE_LEN + MAC_LEN;
-
-function packVersionBE(v) {
-    return String.fromCharCode((v >>> 24) & 0xFF, (v >>> 16) & 0xFF,
-                               (v >>>  8) & 0xFF,  v         & 0xFF);
-}
-
-function unpackVersionBE(s) {
-    return ((s.charCodeAt(0) << 24)
-          | (s.charCodeAt(1) << 16)
-          | (s.charCodeAt(2) <<  8)
-          |  s.charCodeAt(3)) >>> 0;
+// At-rest encryption: hull:crypto:sealbox, the versioned secretbox format
+// shared with hull:kv's encrypted handles. See the matching Lua module's
+// encrypt_secret / decrypt_secret comments for the design - wire format v2
+// (current) is a sealbox blob, version(4 BE) || nonce(24) || ct, sealed with
+// no context; v1 (legacy, pre-rotation) was nonce(24) || ct. Both runtimes
+// produce identical byte sequences for the same key so a Lua<->JS migration
+// on the same DB works without re-enrolling.
+function keyring() {
+    return { keys: _state.keys, current: _state.currentKeyVersion };
 }
 
 function encryptSecret(secretBytes) {
     const cur = _state.currentKeyVersion;
-    const keyHex = cur != null ? _state.keys[cur] : null;
-    if (!keyHex) return [secretBytes, 0, 0];
-    const nonce = new Uint8Array(crypto.random(NONCE_LEN));
-    let nonceStr = "";
-    for (let i = 0; i < NONCE_LEN; i++) nonceStr += String.fromCharCode(nonce[i]);
-    // Pass plaintext as Uint8Array - crypto.secretbox now accepts the
-    // unified buffer protocol. Passing a JS binary string here would
-    // UTF-8-inflate every byte >= 0x80 via JS_ToCStringLen and produce
-    // a blob that doesn't round-trip with Lua-encrypted rows.
-    const plain = new Uint8Array(secretBytes.length);
-    for (let i = 0; i < secretBytes.length; i++) plain[i] = secretBytes.charCodeAt(i) & 0xff;
-    const ctHex = crypto.secretbox(plain, bytesToHex(nonceStr), keyHex);
-    return [packVersionBE(cur) + nonceStr + hexToBytes(ctHex), 1, cur];
-}
-
-// crypto.secretboxOpen now returns an ArrayBuffer (binary-safe;
-// JS_NewStringLen would replace invalid UTF-8 bytes with U+FFFD and
-// corrupt ~87% of random secrets). Convert to a binary string for
-// downstream consumers that walk it via charCodeAt(i) & 0xff.
-function abToBinStr(ab) {
-    if (!ab) return null;
-    const u8 = new Uint8Array(ab);
-    let s = "";
-    for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
-    return s;
+    if (cur == null || !_state.keys[cur]) return [secretBytes, 0, 0];
+    return [sealbox.seal(keyring(), secretBytes), 1, cur];
 }
 
 // Returns [plaintext, version] on success, [null, null] on failure.
@@ -347,35 +273,17 @@ function decryptSecret(blob, encrypted) {
     if (encrypted === 0) return [blob, 0];
     if (typeof blob !== "string") return [null, null];
 
-    // Try v2 (versioned) first.
-    if (blob.length >= MIN_V2_BLOB_LEN) {
-        const version = unpackVersionBE(blob.substring(0, VERSION_PREFIX_LEN));
-        const keyHex = _state.keys[version];
-        if (keyHex) {
-            const nonceStr = blob.substring(VERSION_PREFIX_LEN,
-                                            VERSION_PREFIX_LEN + NONCE_LEN);
-            const ctStr    = blob.substring(VERSION_PREFIX_LEN + NONCE_LEN);
-            const pt = abToBinStr(crypto.secretboxOpen(bytesToHex(ctStr),
-                                             bytesToHex(nonceStr), keyHex));
-            if (pt) return [pt, version];
-            // Recognized version that fails to decrypt is a real
-            // corruption; don't paper over with a legacy attempt.
-            return [null, null];
-        }
-    }
+    const r = sealbox.open(keyring(), blob);
+    if (r.ok) return [r.value, r.version];
+    // A v2 blob with a recognized version that fails to open is real
+    // corruption or a wrong key; don't paper over it with a legacy attempt.
+    if (r.reason === "open_failed" && blob.length >= sealbox.MIN_LEN) return [null, null];
 
     // v1 (legacy) fallback. Only if a legacy_key_version is configured.
     const legacyV = _state.legacyKeyVersion;
-    const legacyKey = legacyV != null ? _state.keys[legacyV] : null;
-    if (legacyKey && blob.length >= NONCE_LEN + MAC_LEN) {
-        const nonceStr = blob.substring(0, NONCE_LEN);
-        const ctStr    = blob.substring(NONCE_LEN);
-        const pt = abToBinStr(crypto.secretboxOpen(bytesToHex(ctStr),
-                                         bytesToHex(nonceStr), legacyKey));
-        if (pt) return [pt, 0];
-    }
-
-    return [null, null];
+    if (legacyV == null) return [null, null];
+    const pt = sealbox.openUnversioned(keyring(), legacyV, blob);
+    return pt !== null ? [pt, 0] : [null, null];
 }
 
 function urlenc(s) {
@@ -460,7 +368,7 @@ function markStepUsed(userId, step) {
 }
 
 function currentStep() {
-    return Math.floor(time.now() / _state.period);
+    return otp.step(time.now(), _state.period);
 }
 
 function checkInitialized() {

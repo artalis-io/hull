@@ -31,6 +31,7 @@ import handle from "hull:kv:_handle";
 import memstore from "hull:kv:_memstore";
 import sqlstore from "hull:kv:_sql";
 import valkey from "hull:kv:_valkey";
+import seal from "hull:kv:_seal";
 
 function open(opts) {
     if (typeof opts !== "object" || opts === null)
@@ -64,7 +65,10 @@ function open(opts) {
         util.error("invalid_argument", "kv.open: unknown backend '" + backend + "'");
     }
 
-    return handle.build(store, { namespace, backend: bname });
+    // Opt-in authenticated encryption of values (docs/kv_encryption_design.md).
+    const sealer = (opts.encrypt !== undefined && opts.encrypt !== null)
+        ? seal.create(opts.encrypt, namespace) : null;
+    return handle.build(store, { namespace, backend: bname, seal: sealer });
 }
 
 const kv = { open, _VERSION: "1" };

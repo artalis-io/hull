@@ -2792,6 +2792,126 @@ UTEST(js_stdlib, crypto_envelope_failure_modes)
     cleanup_js_caps();
 }
 
+/* hull:crypto:sealbox + encrypted hull:kv. Each run() returns 0 when every
+ * check passes, else the number of the first check that failed. */
+static int js_run_steps(const char *code, const char *global)
+{
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    return eval_int(global);
+}
+
+UTEST(js_stdlib, otp_rfc4226_vectors)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { otp } from 'hull:crypto:otp';\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "function run() {\n"
+        "  const want = ['755224', '287082', '359152', '969429', '338314',\n"
+        "                '254676', '287922', '162583', '399871', '520489'];\n"
+        "  for (let i = 0; i < want.length; i++)\n"
+        "    if (otp.hotp('12345678901234567890', i) !== want[i]) return i + 1;\n"
+        "  if (otp.hotp('12345678901234567890', 1, 8) !== '94287082') return 11;\n"
+        "  if (!threw(() => otp.hotp('k', -1)) || !threw(() => otp.hotp('k', 1.5))) return 12;\n"
+        "  if (!threw(() => otp.hotp('k', 1, 9))) return 13;\n"
+        "  if (otp.step(59, 30) !== 1 || otp.step(60, 30) !== 2) return 14;\n"
+        "  if (otp.hotp('12345678901234567890', otp.step(20000000000, 30), 8) !== '65353130') return 15;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__otp = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__otp"), 0);
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, sealbox_seal_open)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { sealbox } from 'hull:crypto:sealbox';\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "function run() {\n"
+        "  if (!threw(() => sealbox.keyring({ keys: { 1: 'short' }, current: 1 }))) return 1;\n"
+        "  if (!threw(() => sealbox.keyring({ keys: { 1: 'a'.repeat(32) }, current: 2 }))) return 2;\n"
+        "  const r1 = sealbox.keyring({ keys: { 1: 'a'.repeat(32) }, current: 1 });\n"
+        "  const v = '\\x00\\x01\\xfe\\xff secret';\n"
+        "  const b = sealbox.seal(r1, v, ['ns', 'key']);\n"
+        "  let o = sealbox.open(r1, b, ['ns', 'key']);\n"
+        "  if (!o.ok || o.value !== v || o.version !== 1) return 3;\n"
+        "  if (b.length !== sealbox.MIN_LEN + 4 + 2 + 4 + 3 + v.length) return 4;\n"
+        "  const t = b.substring(0, 30) + String.fromCharCode(b.charCodeAt(30) ^ 1) + b.substring(31);\n"
+        "  if (sealbox.open(r1, t, ['ns', 'key']).reason !== 'open_failed') return 5;\n"
+        "  if (sealbox.open(r1, b, ['ns', 'other']).reason !== 'open_failed') return 6;\n"
+        "  if (sealbox.open(r1, b, ['n', 'skey']).reason !== 'open_failed') return 7;\n"
+        "  if (sealbox.open(r1, b).value === v) return 8;\n"
+        "  if (sealbox.open(r1, 'short').reason !== 'open_failed') return 9;\n"
+        "  const r3 = sealbox.keyring({ keys: { 3: 'c'.repeat(32) }, current: 3 });\n"
+        "  if (sealbox.open(r3, b, ['ns', 'key']).reason !== 'unknown_version') return 10;\n"
+        "  const r12 = sealbox.keyring({ keys: { 1: 'a'.repeat(32), 2: 'b'.repeat(32) }, current: 2 });\n"
+        "  o = sealbox.open(r12, b, ['ns', 'key']);\n"
+        "  if (!o.ok || o.version !== 1) return 11;\n"
+        "  o = sealbox.open(r12, sealbox.seal(r12, v), undefined);\n"
+        "  if (!o.ok || o.value !== v || o.version !== 2) return 12;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__sealbox = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__sealbox"), 0);
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, kv_encrypted_handle)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { kv } from 'hull:kv';\n"
+        "function code(f) { try { f(); return null; } catch (e) { return e.code; } }\n"
+        "const K1 = 'a'.repeat(32), K2 = 'b'.repeat(32);\n"
+        "function run() {\n"
+        "  const enc = kv.open({ namespace: 'sec', encrypt: { keys: { 1: K1 }, current: 1 } });\n"
+        "  const raw = kv.open({ namespace: 'sec' });\n"
+        "  const v = '\\x00\\xff pass';\n"
+        "  enc.set('k', v);\n"
+        "  if (enc.get('k') !== v) return 1;\n"
+        "  if (enc.get('miss') !== null) return 2;\n"
+        "  const stored = raw.get('k');\n"
+        "  if (stored === v || stored.indexOf('pass') >= 0) return 3;\n"
+        "  raw.set('moved', stored);\n"
+        "  if (code(() => enc.get('moved')) !== 'decrypt_failed') return 4;\n"
+        "  kv.open({ namespace: 'other' }).set('k', stored);\n"
+        "  const encOther = kv.open({ namespace: 'other', encrypt: { keys: { 1: K1 }, current: 1 } });\n"
+        "  if (code(() => encOther.get('k')) !== 'decrypt_failed') return 5;\n"
+        "  raw.set('planted', 'plain');\n"
+        "  if (code(() => enc.get('planted')) !== 'decrypt_failed') return 6;\n"
+        "  if (code(() => enc.incr('n', 1)) !== 'unsupported') return 7;\n"
+        "  if (!enc.cas('c', null, 'a') || enc.cas('c', null, 'b')) return 8;\n"
+        "  if (enc.cas('c', 'x', 'b') || !enc.cas('c', 'a', 'b') || enc.get('c') !== 'b') return 9;\n"
+        "  raw.delete('moved'); raw.delete('planted');\n"
+        "  const both = kv.open({ namespace: 'sec', encrypt: { keys: { 1: K1, 2: K2 }, current: 2 } });\n"
+        "  if (both.get('k') !== v) return 10;\n"
+        "  if (both.rekey() !== 2 || both.rekey() !== 0) return 11;\n"
+        "  const only2 = kv.open({ namespace: 'sec', encrypt: { keys: { 2: K2 }, current: 2 } });\n"
+        "  if (only2.get('k') !== v || only2.get('c') !== 'b') return 12;\n"
+        "  if (code(() => enc.get('k')) !== 'decrypt_failed') return 13;\n"
+        "  raw.set('old', 'legacy');\n"
+        "  const mig = kv.open({ namespace: 'sec', encrypt: { keys: { 2: K2 }, current: 2, allowPlaintext: true } });\n"
+        "  if (mig.get('old') !== 'legacy') return 14;\n"
+        "  if (mig.rekey() !== 1 || only2.get('old') !== 'legacy') return 15;\n"
+        "  if (code(() => raw.rekey()) !== 'invalid_argument') return 16;\n"
+        "  if (code(() => kv.open({ encrypt: 'x' })) !== 'invalid_argument') return 17;\n"
+        "  if (code(() => kv.open({ encrypt: { keys: { 1: 'short' }, current: 1 } })) !== 'invalid_argument') return 18;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__kvenc = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__kvenc"), 0);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, auth_flows_token_round_trip)
 {
     init_js_with_caps();

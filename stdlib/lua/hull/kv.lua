@@ -63,7 +63,11 @@ end
 --- Open a KV handle.
 -- @param opts { backend = "memory"|"sqlite"|"postgres", namespace = "default",
 --              database = <db conn> (sql), dsn|path = <dsn> (sql convenience),
---              default_ttl = <seconds>, max_bytes, max_items (memory) }
+--              default_ttl = <seconds>, max_bytes, max_items (memory),
+--              encrypt = { keys = {[id] = 32-byte key}, current = id,
+--                          allow_plaintext = bool } }
+--   `encrypt` seals every value (authenticated; bound to namespace and key
+--   name) - see docs/kv_cache.md "Encryption at rest".
 function M.open(opts)
     if type(opts) ~= "table" then
         u.error("invalid_argument", "kv.open: options table required")
@@ -87,7 +91,10 @@ function M.open(opts)
         u.error("invalid_argument", "kv.open: unknown backend '" .. tostring(backend) .. "'")
     end
 
-    return handle.build(store, { namespace = namespace, backend = bname })
+    -- Opt-in authenticated encryption of values (docs/kv_encryption_design.md).
+    local seal = opts.encrypt ~= nil
+                 and require("hull.kv._seal").new(opts.encrypt, namespace) or nil
+    return handle.build(store, { namespace = namespace, backend = bname, seal = seal })
 end
 
 return M

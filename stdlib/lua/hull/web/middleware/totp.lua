@@ -89,6 +89,8 @@
 --     end)
 
 local crypto = require("hull.crypto")
+local sealbox = require("hull.crypto.sealbox")
+local otp    = require("hull.crypto.otp")
 local db     = require("hull.db").default()
 local time   = require("hull.time")
 local qrcode = require("hull.qrcode")
@@ -221,7 +223,6 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 -- sites stay readable and a future rename of either side is one
 -- edit instead of N.
 local function bytes_to_hex(s) return crypto.hex_encode(s) end
-local function hex_to_bytes(h) return crypto.hex_decode(h) end
 
 -- RFC 4648 Base32 (no padding). 20 bytes → 32 chars exactly with no
 -- padding needed (160/5 = 32). The encoder accepts any byte string;
@@ -281,37 +282,9 @@ local function base32_decode(s)
     return table.concat(out)
 end
 
--- TOTP per RFC 6238 = HOTP(K, T_step). HOTP per RFC 4226 §5.3-5.4:
---   1. HMAC-SHA1(K, 8-byte BE counter) → 20-byte digest
---   2. offset = digest[19] & 0x0F
---   3. P = ((digest[offset] & 0x7F) << 24)
---        | (digest[offset+1] << 16)
---        | (digest[offset+2] << 8)
---        | (digest[offset+3])
---   4. code = P mod 10^digits, zero-padded to width digits.
-local function totp_at_step(secret_bytes, step, digits)
-    -- Encode the step counter as 8-byte big-endian.
-    local counter = string.char(
-        (step >> 56) & 0xFF, (step >> 48) & 0xFF,
-        (step >> 40) & 0xFF, (step >> 32) & 0xFF,
-        (step >> 24) & 0xFF, (step >> 16) & 0xFF,
-        (step >>  8) & 0xFF,  step        & 0xFF)
-    local key_hex = bytes_to_hex(secret_bytes)
-    local mac_hex = crypto.hmac_sha1(counter, key_hex)
-    -- mac_hex is 40 chars; convert to byte array for the truncation.
-    local mac = {}
-    for i = 1, 40, 2 do
-        mac[#mac + 1] = tonumber(mac_hex:sub(i, i + 1), 16)
-    end
-    local offset = (mac[20] & 0x0F) + 1  -- 1-indexed for Lua
-    local p = ((mac[offset]     & 0x7F) << 24)
-            | ((mac[offset + 1] & 0xFF) << 16)
-            | ((mac[offset + 2] & 0xFF) <<  8)
-            |  (mac[offset + 3] & 0xFF)
-    local mod = 10 ^ digits
-    local code = p % mod
-    return string.format("%0" .. digits .. "d", code)
-end
+-- TOTP per RFC 6238 is HOTP(K, T_step); the algorithm lives in
+-- hull.crypto.otp.
+local totp_at_step = otp.hotp
 
 -- Recovery codes: 12 chars from an unambiguous 31-char alphabet,
 -- formatted as ABCD-EFGH-IJKL. ~59.5 bits of entropy per code - well
@@ -377,10 +350,12 @@ local function ct_eq(a, b)
     return crypto.constant_time_eq(a, b)
 end
 
--- At-rest encryption: versioned NaCl secretbox.
+-- At-rest encryption: hull.crypto.sealbox, the versioned secretbox format
+-- shared with hull.kv's encrypted handles.
 --
 -- Wire format v1 (legacy):  nonce(24) || ct
--- Wire format v2 (current): version(4 BE) || nonce(24) || ct
+-- Wire format v2 (current): version(4 BE) || nonce(24) || ct  (a sealbox blob,
+--                           sealed with no context)
 --
 -- v1 was the format before key rotation was supported (single
 -- encryption_key opt). Apps that upgrade with existing rows keep
@@ -388,28 +363,11 @@ end
 -- entry in _state.keys; new writes ALWAYS use v2. The rekey()
 -- helper converts v1 rows to v2 on demand or lazily on verify.
 --
--- Multi-key support: _state.keys is a map {version_id -> key_hex}.
--- The current version (used for new encryptions) lives in
--- _state.current_key_version. Decrypt reads the 4-byte version
--- prefix, looks up the key in the map; if the version is unknown
--- AND a legacy_key_version is configured, falls back to v1
--- decryption with that key.
-local SECRETBOX_NONCE_LEN = 24
-local SECRETBOX_MAC_LEN   = 16
-local VERSION_PREFIX_LEN  = 4
-local MIN_V2_BLOB_LEN     = VERSION_PREFIX_LEN
-                          + SECRETBOX_NONCE_LEN + SECRETBOX_MAC_LEN
-
-local function pack_version_be(v)
-    return string.char((v >> 24) & 0xFF, (v >> 16) & 0xFF,
-                       (v >>  8) & 0xFF,  v        & 0xFF)
-end
-
-local function unpack_version_be(s)
-    return (string.byte(s, 1) << 24)
-         | (string.byte(s, 2) << 16)
-         | (string.byte(s, 3) <<  8)
-         |  string.byte(s, 4)
+-- Multi-key support: _state.keys is a map {version_id -> key_hex}, the
+-- keyring shape sealbox takes. The current version (used for new
+-- encryptions) lives in _state.current_key_version.
+local function keyring()
+    return { keys = _state.keys, current = _state.current_key_version }
 end
 
 -- encrypt_secret returns (blob, encrypted_flag, version). When no
@@ -418,12 +376,8 @@ end
 -- is versioned and version is _state.current_key_version.
 local function encrypt_secret(secret_bytes)
     local cur = _state.current_key_version
-    local key_hex = cur and _state.keys[cur]
-    if not key_hex then return secret_bytes, 0, 0 end
-    local nonce = crypto.random(SECRETBOX_NONCE_LEN)
-    local nonce_hex = bytes_to_hex(nonce)
-    local ct_hex = crypto.secretbox(secret_bytes, nonce_hex, key_hex)
-    return pack_version_be(cur) .. nonce .. hex_to_bytes(ct_hex), 1, cur
+    if not (cur and _state.keys[cur]) then return secret_bytes, 0, 0 end
+    return sealbox.seal(keyring(), secret_bytes), 1, cur
 end
 
 -- decrypt_secret returns (plaintext, version) on success, or nil on
@@ -433,39 +387,20 @@ local function decrypt_secret(blob, encrypted)
     if encrypted == 0 then return blob, 0 end
     if type(blob) ~= "string" then return nil end
 
-    -- Try v2 (versioned) first.
-    if #blob >= MIN_V2_BLOB_LEN then
-        local version = unpack_version_be(blob:sub(1, VERSION_PREFIX_LEN))
-        local key_hex = _state.keys[version]
-        if key_hex then
-            local nonce = blob:sub(VERSION_PREFIX_LEN + 1,
-                                   VERSION_PREFIX_LEN + SECRETBOX_NONCE_LEN)
-            local ct    = blob:sub(VERSION_PREFIX_LEN + SECRETBOX_NONCE_LEN + 1)
-            local pt = crypto.secretbox_open(bytes_to_hex(ct),
-                                              bytes_to_hex(nonce), key_hex)
-            if pt then return pt, version end
-            -- v2 with a recognized version that fails to decrypt is
-            -- a real corruption / wrong-key; don't paper over by
-            -- trying legacy.
-            return nil
-        end
+    local pt, version_or_reason = sealbox.open(keyring(), blob)
+    if pt then return pt, version_or_reason end
+    -- A v2 blob with a recognized version that fails to open is real
+    -- corruption or a wrong key; don't paper over it by trying legacy.
+    if version_or_reason == "open_failed" and #blob >= sealbox.MIN_LEN then
+        return nil
     end
 
-    -- v1 (legacy, no prefix). Only attempted if a legacy_key_version
-    -- is configured AND the blob length matches the v1 shape (nonce +
-    -- non-empty ct). Apps without legacy data have legacy_key_version
-    -- = nil; this branch never runs and decrypt returns nil for any
-    -- unrecognized version.
+    -- v1 (legacy, no prefix). Only attempted if a legacy_key_version is
+    -- configured; apps without legacy data never reach it.
     local legacy_v = _state.legacy_key_version
-    local legacy_key = legacy_v and _state.keys[legacy_v]
-    if legacy_key and #blob >= SECRETBOX_NONCE_LEN + SECRETBOX_MAC_LEN then
-        local nonce = blob:sub(1, SECRETBOX_NONCE_LEN)
-        local ct    = blob:sub(SECRETBOX_NONCE_LEN + 1)
-        local pt = crypto.secretbox_open(bytes_to_hex(ct),
-                                          bytes_to_hex(nonce), legacy_key)
-        if pt then return pt, 0 end  -- version=0 signals "legacy v1"
-    end
-
+    if legacy_v == nil then return nil end
+    pt = sealbox.open_unversioned(keyring(), legacy_v, blob)
+    if pt then return pt, 0 end  -- version=0 signals "legacy v1"
     return nil
 end
 
@@ -566,7 +501,7 @@ local function mark_step_used(user_id, step)
 end
 
 local function current_step()
-    return time.now() // _state.period
+    return otp.step(time.now(), _state.period)
 end
 
 local function check_initialized()

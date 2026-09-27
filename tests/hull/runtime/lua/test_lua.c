@@ -2843,6 +2843,114 @@ UTEST(lua_stdlib, totp_rekey_batch_helper)
     cleanup_lua_caps();
 }
 
+/* hull.crypto.sealbox + encrypted hull.kv. Each chunk returns 0 when every
+ * check passes, else the number of the first check that failed. */
+UTEST(lua_stdlib, otp_rfc4226_vectors)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    /* RFC 4226 Appendix D: the 20-byte ASCII key, counters 0..9. */
+    int step = eval_int(
+        "(function() "
+        "  local otp = require('hull.crypto.otp') "
+        "  local want = { '755224', '287082', '359152', '969429', '338314', "
+        "                 '254676', '287922', '162583', '399871', '520489' } "
+        "  for i, w in ipairs(want) do "
+        "    if otp.hotp('12345678901234567890', i - 1) ~= w then return i end "
+        "  end "
+        "  if otp.hotp('12345678901234567890', 1, 8) ~= '94287082' then return 11 end "
+        "  if pcall(otp.hotp, 'k', -1) or pcall(otp.hotp, 'k', 1.5) then return 12 end "
+        "  if pcall(otp.hotp, 'k', 1, 9) then return 13 end "
+        "  if otp.step(59, 30) ~= 1 or otp.step(60.0, 30) ~= 2 then return 14 end "
+        "  if otp.hotp('12345678901234567890', otp.step(20000000000, 30), 8) ~= '65353130' then return 15 end "
+        "  return 0 "
+        "end)()");
+    ASSERT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, sealbox_seal_open)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local sb = require('hull.crypto.sealbox') "
+        "  if pcall(sb.keyring, { keys = {[1] = 'short'}, current = 1 }) then return 1 end "
+        "  if pcall(sb.keyring, { keys = {[1] = ('a'):rep(32)}, current = 2 }) then return 2 end "
+        "  local r1 = sb.keyring{ keys = {[1] = ('a'):rep(32)}, current = 1 } "
+        "  local v = '\\0\\1\\254\\255 secret' "
+        "  local b = sb.seal(r1, v, { 'ns', 'key' }) "
+        "  local o, ver = sb.open(r1, b, { 'ns', 'key' }) "
+        "  if o ~= v or ver ~= 1 then return 3 end "
+        "  if #b ~= sb.MIN_LEN + 4 + 2 + 4 + 3 + #v then return 4 end "
+        "  local t = b:sub(1, 30) .. string.char(b:byte(31) ~ 1) .. b:sub(32) "
+        "  if select(2, sb.open(r1, t, { 'ns', 'key' })) ~= 'open_failed' then return 5 end "
+        "  if select(2, sb.open(r1, b, { 'ns', 'other' })) ~= 'open_failed' then return 6 end "
+        "  if select(2, sb.open(r1, b, { 'n', 'skey' })) ~= 'open_failed' then return 7 end "
+        "  if sb.open(r1, b) == v then return 8 end "
+        "  if select(2, sb.open(r1, 'short')) ~= 'open_failed' then return 9 end "
+        "  local r3 = sb.keyring{ keys = {[3] = ('c'):rep(32)}, current = 3 } "
+        "  if select(2, sb.open(r3, b, { 'ns', 'key' })) ~= 'unknown_version' then return 10 end "
+        "  local r12 = sb.keyring{ keys = {[1] = ('a'):rep(32), [2] = ('b'):rep(32)}, current = 2 } "
+        "  o, ver = sb.open(r12, b, { 'ns', 'key' }) "
+        "  if o ~= v or ver ~= 1 then return 11 end "
+        "  o, ver = sb.open(r12, sb.seal(r12, v)) "
+        "  if o ~= v or ver ~= 2 then return 12 end "
+        "  return 0 "
+        "end)()");
+    ASSERT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, kv_encrypted_handle)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local kv = require('hull.kv') "
+        "  local function code(f) local ok, e = pcall(f) "
+        "    if ok then return nil end return type(e) == 'table' and e.code or tostring(e) end "
+        "  local K1, K2 = ('a'):rep(32), ('b'):rep(32) "
+        "  local enc = kv.open{ namespace = 'sec', encrypt = { keys = {[1] = K1}, current = 1 } } "
+        "  local raw = kv.open{ namespace = 'sec' } "
+        "  local v = '\\0\\255 pass' "
+        "  enc:set('k', v) "
+        "  if enc:get('k') ~= v then return 1 end "
+        "  if enc:get('miss') ~= nil then return 2 end "
+        "  local stored = raw:get('k') "
+        "  if stored == v or stored:find('pass', 1, true) then return 3 end "
+        "  raw:set('moved', stored) "
+        "  if code(function() enc:get('moved') end) ~= 'decrypt_failed' then return 4 end "
+        "  kv.open{ namespace = 'other' }:set('k', stored) "
+        "  local enc_other = kv.open{ namespace = 'other', encrypt = { keys = {[1] = K1}, current = 1 } } "
+        "  if code(function() enc_other:get('k') end) ~= 'decrypt_failed' then return 5 end "
+        "  raw:set('planted', 'plain') "
+        "  if code(function() enc:get('planted') end) ~= 'decrypt_failed' then return 6 end "
+        "  if code(function() enc:incr('n', 1) end) ~= 'unsupported' then return 7 end "
+        "  if not enc:cas('c', nil, 'a') or enc:cas('c', nil, 'b') then return 8 end "
+        "  if enc:cas('c', 'x', 'b') or not enc:cas('c', 'a', 'b') or enc:get('c') ~= 'b' then return 9 end "
+        "  raw:delete('moved'); raw:delete('planted') "
+        "  local both = kv.open{ namespace = 'sec', encrypt = { keys = {[1] = K1, [2] = K2}, current = 2 } } "
+        "  if both:get('k') ~= v then return 10 end "
+        "  if both:rekey() ~= 2 or both:rekey() ~= 0 then return 11 end "
+        "  local only2 = kv.open{ namespace = 'sec', encrypt = { keys = {[2] = K2}, current = 2 } } "
+        "  if only2:get('k') ~= v or only2:get('c') ~= 'b' then return 12 end "
+        "  if code(function() enc:get('k') end) ~= 'decrypt_failed' then return 13 end "
+        "  raw:set('old', 'legacy') "
+        "  local mig = kv.open{ namespace = 'sec', encrypt = { keys = {[2] = K2}, current = 2, allow_plaintext = true } } "
+        "  if mig:get('old') ~= 'legacy' then return 14 end "
+        "  if mig:rekey() ~= 1 or only2:get('old') ~= 'legacy' then return 15 end "
+        "  if code(function() raw:rekey() end) ~= 'invalid_argument' then return 16 end "
+        "  if code(function() kv.open{ encrypt = 'x' } end) ~= 'invalid_argument' then return 17 end "
+        "  if code(function() kv.open{ encrypt = { keys = {[1] = 'short'}, current = 1 } } end) ~= 'invalid_argument' then return 18 end "
+        "  return 0 "
+        "end)()");
+    ASSERT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, totp_legacy_v1_format_decrypts_via_legacy_key_version)
 {
     init_lua_with_caps();
