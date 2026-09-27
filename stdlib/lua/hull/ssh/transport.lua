@@ -638,6 +638,24 @@ function Transport:drain_channel(ch)
     end
 end
 
+-- Close channel `ch` from our side and read it through to the peer's CLOSE.
+--
+-- The one way every path ends a channel - a command that finished, one that
+-- was aborted or whose callback raised, an sftp session the caller closed.
+-- Sending CLOSE alone is not enough: until the peer's CLOSE arrives, its
+-- data, EOF and exit-status for this channel are still in flight, and
+-- whatever reads next on the connection gets them - the NEXT channel, which
+-- raises on a message addressed to an id it does not own. Once only: a
+-- second CLOSE for one channel is a protocol error.
+function Transport:close_channel(ch)
+    if ch.close_sent then return end
+    ch.close_sent = true
+    pcall(function()
+        self:send_packet(channel.build_close(ch.remote_id))
+        self:drain_channel(ch)
+    end)
+end
+
 -- The next connection message, applied to channel `ch`.
 --
 -- A channel request the server wants answered gets CHANNEL_FAILURE: this
@@ -697,17 +715,11 @@ function Transport:exec(command, opts)
     local ch, cerr = self:open_session()
     if not ch then return nil, cerr end
 
-    -- Any exit that does not run to the peer's CHANNEL_CLOSE has to close AND
-    -- drain, because the peer's messages for this channel are still in
-    -- flight. Leaving them unread hands them to whatever reads next on this
-    -- connection, which is the NEXT channel: it sees a message addressed to
-    -- an id it does not own and raises. Returning early without draining is
-    -- how one aborted command breaks every command after it.
+    -- Any exit that does not run to the peer's CHANNEL_CLOSE goes through
+    -- close_channel: returning early without draining is how one aborted
+    -- command breaks every command after it.
     local function abort(reason)
-        pcall(function()
-            self:send_packet(channel.build_close(ch.remote_id))
-            self:drain_channel(ch)
-        end)
+        self:close_channel(ch)
         return nil, reason
     end
 
@@ -799,14 +811,11 @@ function Transport:exec(command, opts)
     if not ok then
         -- A raising callback must not leave the channel half-open, nor its
         -- residue in the read path, just because the error came from above.
-        pcall(function()
-            self:send_packet(channel.build_close(ch.remote_id))
-            self:drain_channel(ch)
-        end)
+        self:close_channel(ch)
         error(failure, 0)
     end
     if failure then return abort(failure) end
-    self:send_packet(channel.build_close(ch.remote_id))
+    self:close_channel(ch)
 
     local res = ch:result()
     return { status = res.status, signal = res.signal,
@@ -975,7 +984,7 @@ function Sftp:write(path, data)
 end
 
 function Sftp:close()
-    self.t:send_packet(channel.build_close(self.ch.remote_id))
+    self.t:close_channel(self.ch)
 end
 
 function Transport:close()

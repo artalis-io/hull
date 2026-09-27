@@ -843,6 +843,49 @@ test("an sftp reply for another request is refused", function()
               true, err)
 end)
 
+test("closing sftp drains its channel, so the next reader is not handed its tail", function()
+    -- The peer's EOF and CLOSE for the sftp channel are still in flight after
+    -- ours. Sftp:close used to send CLOSE and return, leaving them for
+    -- whatever read next. open_session happens to skip up to 16 stray
+    -- messages while it waits for its confirmation, which is why the exec
+    -- below survived even then; a longer tail, or any reader that is not
+    -- open_session, did not. So the property asserted first is close's own:
+    -- the channel is read through to its CLOSE before close returns.
+    local function on(id, w) return plain(w:build()) end
+    local ch1_conf = on(1, wire.writer():byte(91):uint32(1):uint32(8)
+                               :uint32(65536):uint32(32768))
+    local ch1_ok   = on(1, wire.writer():byte(99):uint32(1))
+    local ch1_data = on(1, wire.writer():byte(94):uint32(1):string("hi"))
+    local ch1_st   = on(1, wire.writer():byte(98):uint32(1):string("exit-status")
+                               :boolean(false):uint32(0))
+    local ch1_eof  = on(1, wire.writer():byte(96):uint32(1))
+    local ch1_fin  = on(1, wire.writer():byte(97):uint32(1))
+
+    local s = fake_stream(conf() .. ok_reply() .. s_version()
+        .. eof() .. fin()                                   -- sftp channel's tail
+        .. ch1_conf .. ch1_ok .. ch1_data .. ch1_st .. ch1_eof .. ch1_fin, 9)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    f:close()
+    assert_eq(f.ch.closed, true, "the peer's CLOSE was read:")
+    local r = t:exec("echo hi")
+    assert_eq(r.stdout, "hi")
+    assert_eq(r.status, 0)
+end)
+
+test("closing sftp twice sends one CLOSE", function()
+    local s = fake_stream(conf() .. ok_reply() .. s_version() .. fin(), 9)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    f:close()
+    f:close()
+    local closes = 0
+    for _, ty in ipairs(written_types(s)) do
+        if ty == 97 then closes = closes + 1 end
+    end
+    assert_eq(closes, 1)
+end)
+
 test("an sftp write closes its handle and reads the answer on failure", function()
     local s = fake_stream(conf() .. ok_reply() .. s_version()
         .. s_handle(1, "hW") .. s_status(2, 4) .. s_status(3, 0)
