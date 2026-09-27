@@ -15,7 +15,7 @@ User guide: [`ssh.md`](ssh.md). Design record: [`ssh_module_design.md`](ssh_modu
 
 | Group | Theme | State |
 |---|---|---|
-| 1 | Memory safety and data integrity | in progress (`fix/ssh-lifetimes-and-sftp`) |
+| 1 | Memory safety and data integrity | done (`fix/ssh-lifetimes-and-sftp`); item 2 has no direct test, see below |
 | 2 | Protocol correctness | open |
 | 3 | Timeouts and the error model | open |
 | 4 | Usability: SFTP, trust store, algorithms | open |
@@ -63,6 +63,29 @@ C.
    any check, and the binding's `read` allocates whatever size is asked. A
    length of `0xFFFFFFFF` (pre-auth, or by a MITM since the GCM length is
    cleartext) forces a multi-GiB allocation attempt.
+
+**How group 1 was fixed.** Each item has a regression test verified to fail
+without its fix, except item 2:
+
+- 1: `io_unwatch` removes the watcher before any close; `HlNetStreamConfig`
+  gained an optional `backend` so `test_net_stream` covers the poll backend
+  inside a Keel-linked binary.
+- 2: the HTTP-attached ctx carries its own `on_cancel` that detaches and closes
+  the stream before the ctx is freed. **Not directly tested**: it needs a live
+  Keel connection the unit harness does not have; an HTTP-server e2e that
+  aborts a request parked on SSH is the missing test (group 6).
+- 3: `read` / `write` refuse a second waiter ("busy"); the stream op is armed
+  before the HTTP suspend so a failure never unwinds Keel's op.
+- 4: `Sftp:request` allocates the id and refuses any other reply;
+  `close_handle` reads CLOSE's status on every path. First tests for the SFTP
+  client itself.
+- 5: `read_packet` lets the parser vet the length before waiting; reads are
+  capped at 32 KiB in Lua and at the stream's read cap in C.
+
+Found on the way: two `lua_ssh_bridge` denial tests passed without reaching
+the rules they named (the policy was never wired, and the fallback message
+contains "hosts" and "users"). They now apply the manifest as `serve_cli.c`
+does and assert the exact reason.
 
 ## Group 2: protocol correctness
 
