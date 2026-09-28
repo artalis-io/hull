@@ -28,7 +28,7 @@
 
 /* ── Hex utilities ────────────────────────────────────────────────── */
 
-/* hex decode goes through the canonical hl_cap_crypto_hex_decode (cap/crypto.h).
+/* hex decode goes through the canonical hl_hex_decode (utils/hex.h).
  * It returns the byte count written (out_size treated as a capacity), so a
  * success check is `rc == N` where N is the expected byte count: that requires
  * hex_len/2 == N exactly (a short input returns <N; a long one returns -1 for
@@ -254,7 +254,7 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
     if (sig_hex_len != 128) return -1;
 
     uint8_t sig_bytes[64];
-    if (hl_cap_crypto_hex_decode(sig->signature_hex, sig_hex_len, sig_bytes, 64) != 64)
+    if (hl_hex_decode(sig->signature_hex, sig_hex_len, sig_bytes, 64) != 64)
         return -1;
 
     /*
@@ -368,7 +368,7 @@ int hl_sig_verify_platform(const HlSignature *sig, const uint8_t pubkey[32])
     if (sig_hex_len != 128) return -1;
 
     uint8_t sig_bytes[64];
-    if (hl_cap_crypto_hex_decode(sig->platform.signature_hex, sig_hex_len, sig_bytes, 64) != 64)
+    if (hl_hex_decode(sig->platform.signature_hex, sig_hex_len, sig_bytes, 64) != 64)
         return -1;
 
     /* Serialize platforms value to canonical JSON */
@@ -591,7 +591,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
     }
 
     uint8_t pubkey[32];
-    if (hl_cap_crypto_hex_decode(pk_hex, 64, pubkey, 32) != 32) {
+    if (hl_hex_decode(pk_hex, 64, pubkey, 32) != 32) {
         log_error("[sig] invalid pubkey hex");
         return -1;
     }
@@ -653,7 +653,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
     if (sig.platform.signature_hex && sig.platform.public_key_hex) {
         uint8_t platform_pk[32];
         if (strlen(sig.platform.public_key_hex) == 64 &&
-            hl_cap_crypto_hex_decode(sig.platform.public_key_hex, 64, platform_pk, 32) == 32) {
+            hl_hex_decode(sig.platform.public_key_hex, 64, platform_pk, 32) == 32) {
             if (hl_sig_verify_platform(&sig, platform_pk) != 0) {
                 log_error("[sig] platform signature verification failed");
                 hl_sig_free(&sig);
@@ -709,7 +709,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
              * explicitly - avoids hl_platform_sig_verify decoding the
              * same macro a second time when its pubkey arg is NULL. */
             uint8_t embedded_pk[32];
-            if (hl_cap_crypto_hex_decode(HL_PLATFORM_PUBKEY_HEX, 64, embedded_pk, 32) != 32) {
+            if (hl_hex_decode(HL_PLATFORM_PUBKEY_HEX, 64, embedded_pk, 32) != 32) {
                 log_error("[sig] HL_PLATFORM_PUBKEY_HEX is malformed "
                           "(compile-time misconfiguration)");
                 hl_sig_free(&sig);

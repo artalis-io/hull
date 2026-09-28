@@ -18,6 +18,7 @@
  */
 
 #include "hull/cap/smtp.h"
+#include "../utils/base64.h"
 #include "hull/cap/smtp_transport.h"
 #include "hull/cap/audit.h"
 #include "hull/host_match.h"
@@ -54,52 +55,6 @@ static int has_crlf(const char *s)
             return 1;
     }
     return 0;
-}
-
-/* ── Base64 encoding ─────────────────────────────────────────────── */
-
-static const char b64_table[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-int hl_smtp_base64_encode(const unsigned char *src, int src_len,
-                          char *dst, int dst_len)
-{
-    if (!src || !dst || src_len < 0 || dst_len < 0)
-        return -1;
-
-    int needed = 4 * ((src_len + 2) / 3) + 1;
-    if (dst_len < needed)
-        return -1;
-
-    int out = 0;
-    int i;
-    for (i = 0; i + 2 < src_len; i += 3) {
-        unsigned int v = ((unsigned int)src[i] << 16) |
-                         ((unsigned int)src[i+1] << 8) |
-                         (unsigned int)src[i+2];
-        dst[out++] = b64_table[(v >> 18) & 0x3F];
-        dst[out++] = b64_table[(v >> 12) & 0x3F];
-        dst[out++] = b64_table[(v >> 6) & 0x3F];
-        dst[out++] = b64_table[v & 0x3F];
-    }
-
-    if (i < src_len) {
-        unsigned int v = (unsigned int)src[i] << 16;
-        if (i + 1 < src_len)
-            v |= (unsigned int)src[i+1] << 8;
-
-        dst[out++] = b64_table[(v >> 18) & 0x3F];
-        dst[out++] = b64_table[(v >> 12) & 0x3F];
-
-        if (i + 1 < src_len)
-            dst[out++] = b64_table[(v >> 6) & 0x3F];
-        else
-            dst[out++] = '=';
-        dst[out++] = '=';
-    }
-
-    dst[out] = '\0';
-    return out;
 }
 
 /* ── Host allowlist check ────────────────────────────────────────── */
@@ -334,8 +289,7 @@ static int smtp_do_auth_plain(HlSmtpTransport *t, const char *username,
     plain[1 + ulen] = '\0';
     memcpy(plain + 2 + ulen, password, plen);
 
-    int b64_len = hl_smtp_base64_encode(plain, (int)plain_len,
-                                        b64, (int)sizeof(b64));
+    int b64_len = hl_base64_encode(plain, plain_len, b64, sizeof(b64), 0);
     if (b64_len < 0) {
         log_warn("smtp: AUTH PLAIN base64 encode failed");
         if (err_msg) *err_msg = "auth_encode_failed";

@@ -23,6 +23,7 @@
  */
 
 #include "utest.h"
+#include "../../../src/hull/utils/base64.h"
 
 /* Direct-source include: the static helpers (reply_acc_*, smtp_do_auth_plain,
  * the chunked write path) are the unit under test. smtp.c must come first: it
@@ -345,7 +346,7 @@ static void expected_auth_b64(const char *user, const char *pass,
     plain[1 + ulen] = '\0';
     memcpy(plain + 2 + ulen, pass, plen);
     size_t plain_len = 1 + ulen + 1 + plen;
-    hl_smtp_base64_encode(plain, (int)plain_len, out, (int)out_size);
+    hl_base64_encode(plain, plain_len, out, out_size, 0);
 }
 
 /* Success path: send hook returns 235; smtp_do_auth_plain returns 0, and the

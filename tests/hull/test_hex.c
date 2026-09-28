@@ -92,4 +92,44 @@ UTEST(hex, null_input_nonzero_len_fails)
     ASSERT_EQ(out[0], '\0');
 }
 
+/* hl_hex_decode */
+
+UTEST(hex_decode, round_trip_all_bytes)
+{
+    uint8_t in[256];
+    for (int i = 0; i < 256; i++) in[i] = (uint8_t)i;
+    char hex[513];
+    ASSERT_EQ(hl_hex_encode(in, 256, hex, sizeof hex), 0);
+    uint8_t back[256];
+    ASSERT_EQ(hl_hex_decode(hex, 512, back, sizeof back), 256);
+    ASSERT_EQ(memcmp(in, back, 256), 0);
+}
+
+UTEST(hex_decode, either_case)
+{
+    uint8_t out[4];
+    ASSERT_EQ(hl_hex_decode("DEADBEEF", 8, out, sizeof out), 4);
+    ASSERT_EQ(out[0], 0xDE); ASSERT_EQ(out[1], 0xAD);
+    ASSERT_EQ(out[2], 0xBE); ASSERT_EQ(out[3], 0xEF);
+    ASSERT_EQ(hl_hex_decode("dEaDbEeF", 8, out, sizeof out), 4);
+    ASSERT_EQ(out[0], 0xDE);
+}
+
+UTEST(hex_decode, rejects_malformed)
+{
+    uint8_t out[2];
+    ASSERT_EQ(hl_hex_decode("abc", 3, out, sizeof out), -1);     /* odd length */
+    ASSERT_EQ(hl_hex_decode("zzzz", 4, out, sizeof out), -1);    /* not hex */
+    ASSERT_EQ(hl_hex_decode("ab/d", 4, out, sizeof out), -1);
+    ASSERT_EQ(hl_hex_decode(" f", 2, out, sizeof out), -1);      /* no whitespace */
+}
+
+UTEST(hex_decode, capacity_and_empty)
+{
+    uint8_t out[1];
+    ASSERT_EQ(hl_hex_decode("abcd", 4, out, sizeof out), -1);    /* needs 2 */
+    ASSERT_EQ(hl_hex_decode(NULL, 0, out, sizeof out), 0);
+    ASSERT_EQ(hl_hex_decode("ab", 2, NULL, 1), -1);
+}
+
 UTEST_MAIN();

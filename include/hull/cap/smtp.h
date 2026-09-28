@@ -107,10 +107,6 @@ void hl_smtp_audit_complete(const HlSmtpMessage *msg, const HlSmtpResult *r,
 
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
 
-/** Base64-encode src into dst. Returns output length or -1 on error. */
-int hl_smtp_base64_encode(const unsigned char *src, int src_len,
-                          char *dst, int dst_len);
-
 /** Check if host is in cfg->allowed_hosts. Returns 0 if allowed, -1 if not. */
 int hl_smtp_check_host(const HlSmtpConfig *cfg, const char *host);
 

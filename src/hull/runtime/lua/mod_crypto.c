@@ -7,6 +7,7 @@
 #include "hull/cap/crypto.h"
 #include "hull/cap/env.h"
 #include "hull/limits/core.h"
+#include "../../utils/hex.h"
 
 #include <sh_arena.h>
 #include <stdlib.h>
@@ -122,13 +123,13 @@ static int lua_crypto_hash_password(lua_State *L)
     return 1;
 }
 
-/* Local 0/-1 wrapper over the cap-layer hex_decode, kept for the
+/* Local 0/-1 wrapper over utils/hex's hl_hex_decode, kept for the
  * many existing callsites in this file. The actual decode lives
- * in cap/crypto.c so all bindings share one implementation. */
+ * in utils/hex.c so all of Hull shares one implementation. */
 static int hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_len)
 {
     if (hex_len != out_len * 2) return -1;
-    return hl_cap_crypto_hex_decode(hex, hex_len, out, out_len) >= 0 ? 0 : -1;
+    return hl_hex_decode(hex, hex_len, out, out_len) >= 0 ? 0 : -1;
 }
 
 /* crypto.verify_password(password, hash_string) → boolean */

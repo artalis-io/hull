@@ -17,6 +17,7 @@
 #include "hull/cap/tui.h"
 #include "hull/cap/tui_width.h"
 #include "tui_internal.h"
+#include "../utils/base64.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -992,34 +993,6 @@ int hl_cap_tui_poll(HlTuiCtx *ctx, int timeout_ms, HlTuiEvent *out)
 
 /* ── Public API: clipboard ──────────────────────────────────────── */
 
-/* RFC 4648 Base64 encode. Writes 4 chars per 3 bytes, no newlines. */
-static size_t b64_encode(const char *in, size_t n, char *out)
-{
-    static const char tab[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t o = 0;
-    size_t i = 0;
-    while (i + 3 <= n) {
-        uint32_t v = ((uint32_t)(unsigned char)in[i]   << 16) |
-                     ((uint32_t)(unsigned char)in[i+1] <<  8) |
-                     ((uint32_t)(unsigned char)in[i+2]);
-        out[o++] = tab[(v >> 18) & 0x3F];
-        out[o++] = tab[(v >> 12) & 0x3F];
-        out[o++] = tab[(v >>  6) & 0x3F];
-        out[o++] = tab[ v        & 0x3F];
-        i += 3;
-    }
-    if (i < n) {
-        uint32_t v = (uint32_t)(unsigned char)in[i] << 16;
-        if (i + 1 < n) v |= (uint32_t)(unsigned char)in[i+1] << 8;
-        out[o++] = tab[(v >> 18) & 0x3F];
-        out[o++] = tab[(v >> 12) & 0x3F];
-        out[o++] = (i + 1 < n) ? tab[(v >> 6) & 0x3F] : '=';
-        out[o++] = '=';
-    }
-    return o;
-}
-
 int hl_cap_tui_clipboard_set(HlTuiCtx *ctx, const char *text, size_t len)
 {
     if (!ctx || (!text && len)) { errno = EINVAL; return -1; }
@@ -1031,7 +1004,9 @@ int hl_cap_tui_clipboard_set(HlTuiCtx *ctx, const char *text, size_t len)
     char *buf = malloc(total);
     if (!buf) { errno = ENOMEM; return -1; }
     memcpy(buf, "\x1b]52;c;", 7);
-    size_t enc_len = b64_encode(text, len, buf + 7);
+    int enc = hl_base64_encode(text, len, buf + 7, b64_max, 0);
+    if (enc < 0) { free(buf); errno = EINVAL; return -1; }
+    size_t enc_len = (size_t)enc;
     buf[7 + enc_len] = '\x07';
     int rc = raw_write(ctx->out_fd, buf, 7 + enc_len + 1);
     free(buf);

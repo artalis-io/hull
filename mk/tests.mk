@@ -617,6 +617,9 @@ $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 $(BUILDDIR)/test_hex: $(TESTDIR)/hull/test_hex.c $(HEX_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HEX_OBJ)
 
+$(BUILDDIR)/test_base64: $(TESTDIR)/hull/test_base64.c $(BASE64_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BASE64_OBJ)
+
 # Host facts + user-facing command rendering (src/hull/shared/host.c). Leaf
 # util, libc only - the artifact-suffix and PATH-split contracts that keep
 # Windows and POSIX output correct. No deps.

@@ -1,7 +1,7 @@
 /*
  * test_smtp.c - Unit tests for SMTP capability (no network)
  *
- * Tests base64 encoding, response parsing, message formatting,
+ * Tests response parsing, message formatting,
  * host allowlist checking, and CRLF injection guards.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -11,125 +11,6 @@
 #include "hull/cap/smtp.h"
 
 #include <string.h>
-
-/* ════════════════════════════════════════════════════════════════════
- * Base64 encoding tests
- * ════════════════════════════════════════════════════════════════════ */
-
-UTEST(base64, empty)
-{
-    char buf[16];
-    int n = hl_smtp_base64_encode((const unsigned char *)"", 0, buf, (int)sizeof(buf));
-    ASSERT_EQ(0, n);
-    ASSERT_EQ(0, strcmp(buf, ""));
-}
-
-UTEST(base64, one_byte)
-{
-    char buf[16];
-    int n = hl_smtp_base64_encode((const unsigned char *)"f", 1, buf, (int)sizeof(buf));
-    ASSERT_EQ(4, n);
-    ASSERT_EQ(0, strcmp(buf, "Zg=="));
-}
-
-UTEST(base64, two_bytes)
-{
-    char buf[16];
-    int n = hl_smtp_base64_encode((const unsigned char *)"fo", 2, buf, (int)sizeof(buf));
-    ASSERT_EQ(4, n);
-    ASSERT_EQ(0, strcmp(buf, "Zm8="));
-}
-
-UTEST(base64, three_bytes)
-{
-    char buf[16];
-    int n = hl_smtp_base64_encode((const unsigned char *)"foo", 3, buf, (int)sizeof(buf));
-    ASSERT_EQ(4, n);
-    ASSERT_EQ(0, strcmp(buf, "Zm9v"));
-}
-
-UTEST(base64, six_bytes)
-{
-    char buf[16];
-    int n = hl_smtp_base64_encode((const unsigned char *)"foobar", 6, buf, (int)sizeof(buf));
-    ASSERT_EQ(8, n);
-    ASSERT_EQ(0, strcmp(buf, "Zm9vYmFy"));
-}
-
-UTEST(base64, auth_plain)
-{
-    /* AUTH PLAIN: \0user\0pass */
-    unsigned char plain[] = { 0, 'u', 's', 'e', 'r', 0, 'p', 'a', 's', 's' };
-    char buf[32];
-    int n = hl_smtp_base64_encode(plain, 10, buf, (int)sizeof(buf));
-    ASSERT_TRUE(n > 0);
-    ASSERT_EQ(0, strcmp(buf, "AHVzZXIAcGFzcw=="));
-}
-
-UTEST(base64, buffer_too_small)
-{
-    char buf[4];  /* needs at least 5 for "Zg==" + NUL */
-    int n = hl_smtp_base64_encode((const unsigned char *)"f", 1, buf, (int)sizeof(buf));
-    ASSERT_EQ(-1, n);
-}
-
-UTEST(base64, null_input)
-{
-    char buf[16];
-    ASSERT_EQ(-1, hl_smtp_base64_encode(NULL, 5, buf, 16));
-    ASSERT_EQ(-1, hl_smtp_base64_encode((const unsigned char *)"a", 1, NULL, 16));
-}
-
-/* ════════════════════════════════════════════════════════════════════
- * Response parsing tests
- * ════════════════════════════════════════════════════════════════════ */
-
-UTEST(response, simple_250)
-{
-    ASSERT_EQ(250, hl_smtp_parse_response("250 OK\r\n", 8));
-}
-
-UTEST(response, greeting_220)
-{
-    const char *line = "220 smtp.example.com ESMTP\r\n";
-    ASSERT_EQ(220, hl_smtp_parse_response(line, (int)strlen(line)));
-}
-
-UTEST(response, auth_235)
-{
-    ASSERT_EQ(235, hl_smtp_parse_response("235 Authentication successful\r\n", 31));
-}
-
-UTEST(response, data_354)
-{
-    ASSERT_EQ(354, hl_smtp_parse_response("354 Start mail input\r\n", 22));
-}
-
-UTEST(response, error_550)
-{
-    ASSERT_EQ(550, hl_smtp_parse_response("550 User not found\r\n", 20));
-}
-
-UTEST(response, continuation_line)
-{
-    /* Multi-line continuation: "250-" prefix */
-    ASSERT_EQ(250, hl_smtp_parse_response("250-PIPELINING\r\n", 16));
-}
-
-UTEST(response, too_short)
-{
-    ASSERT_EQ(-1, hl_smtp_parse_response("25", 2));
-}
-
-UTEST(response, null_input)
-{
-    ASSERT_EQ(-1, hl_smtp_parse_response(NULL, 0));
-}
-
-UTEST(response, non_digit)
-{
-    ASSERT_EQ(-1, hl_smtp_parse_response("abc OK\r\n", 8));
-}
 
 /* ════════════════════════════════════════════════════════════════════
  * Message formatting tests

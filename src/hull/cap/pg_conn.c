@@ -11,16 +11,17 @@
 
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/pgwire.h"
+#include "../utils/base64.h"
 /* SCRAM pulls in cap/crypto (mbedTLS). The DSN / rewriter fuzz harnesses,
  * which link this file for its pure functions, define HL_PG_NO_SCRAM to
- * compile crypto-free. base64 below stays available either way. */
+ * compile crypto-free. */
 #ifndef HL_PG_NO_SCRAM
 #include "hull/cap/crypto.h"
 #endif
 /* The byte transport (Keel v3) + the TLS client. The pure-parser fuzzers define
  * HL_PG_NO_TLS to stay free of Keel; the whole connection layer below is wrapped
  * under the same guard, so those harnesses omit it and reach only the pure
- * functions (DSN parse / sslmode parse / base64 / SCRAM proof / SQL rewrite). */
+ * functions (DSN parse / sslmode parse / SCRAM proof / SQL rewrite). */
 #ifndef HL_PG_NO_TLS
 #include "hull/cap/db_transport.h"
 #include "hull/shared/tls_client.h"
@@ -211,7 +212,7 @@ void hl_pg_dsn_scrub(HlPgDsn *dsn)
  * Everything from here to the end of hl_pg_conn_close (plus the query path and
  * hl_pg_wait_notify further down) rides the HlDbTransport byte transport, which
  * pulls in Keel + tls_client + mbedTLS. The pure-parser fuzzers set HL_PG_NO_TLS
- * to omit this whole layer and keep only the DSN parser, sslmode parser, base64,
+ * to omit this whole layer and keep only the DSN parser, sslmode parser,
  * SCRAM proof, and the SQL rewriter (all outside this guard). */
 #ifndef HL_PG_NO_TLS
 
@@ -331,8 +332,8 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
         }
         uint8_t rnd[24];
         if (hl_cap_crypto_random(rnd, sizeof rnd) != 0 ||
-            hl_pg_b64_encode(rnd, sizeof rnd,
-                             sc->client_nonce, sizeof sc->client_nonce) < 0) {
+            hl_base64_encode(rnd, sizeof rnd,
+                             sc->client_nonce, sizeof sc->client_nonce, 0) < 0) {
             set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM nonce generation failed");
             return -1;
         }
@@ -437,7 +438,7 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
         }
         uint8_t salt[128];
         size_t salt_len = 0;
-        if (hl_pg_b64_decode(salt_b64, strlen(salt_b64), salt, sizeof salt, &salt_len) != 0) {
+        if (hl_base64_decode(salt_b64, strlen(salt_b64), salt, sizeof salt, &salt_len, 0) != 0) {
             set_err(conn->errmsg, sizeof conn->errmsg, "bad SCRAM salt");
             return -1;
         }
@@ -461,7 +462,7 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
         sc->have_server_sig = 1;
 
         char proof_b64[64], cfinal[288];
-        if (hl_pg_b64_encode(proof, 32, proof_b64, sizeof proof_b64) < 0) return -1;
+        if (hl_base64_encode(proof, 32, proof_b64, sizeof proof_b64, 0) < 0) return -1;
         int cf = snprintf(cfinal, sizeof cfinal, "%s,p=%s", cfinal_bare, proof_b64);
         if (cf < 0 || (size_t)cf >= sizeof cfinal) {
             set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM final too long");
@@ -488,7 +489,7 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
         }
         uint8_t got[32];
         size_t gl = 0;
-        if (hl_pg_b64_decode((const char *)sfp + 2, rem - 2, got, sizeof got, &gl) != 0
+        if (hl_base64_decode((const char *)sfp + 2, rem - 2, got, sizeof got, &gl, 0) != 0
             || gl != 32) {
             set_err(conn->errmsg, sizeof conn->errmsg, "bad SCRAM server signature");
             return -1;
@@ -781,56 +782,7 @@ void hl_pg_conn_close(HlPgConn *conn)
 
 #endif /* HL_PG_NO_TLS: end of the second connection-layer region */
 
-/* ── Standard base64 + SCRAM-SHA-256 ──────────────────────────────── */
-
-static const char B64E[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-int hl_pg_b64_encode(const uint8_t *in, size_t inlen, char *out, size_t outsize)
-{
-    size_t need = ((inlen + 2) / 3) * 4;
-    if (need + 1 > outsize) return -1;
-    size_t o = 0;
-    for (size_t i = 0; i < inlen; i += 3) {
-        int rem = (int)(inlen - i);
-        uint32_t n = (uint32_t)in[i] << 16;
-        if (rem > 1) n |= (uint32_t)in[i + 1] << 8;
-        if (rem > 2) n |= (uint32_t)in[i + 2];
-        out[o++] = B64E[(n >> 18) & 63];
-        out[o++] = B64E[(n >> 12) & 63];
-        out[o++] = rem > 1 ? B64E[(n >> 6) & 63] : '=';
-        out[o++] = rem > 2 ? B64E[n & 63] : '=';
-    }
-    out[o] = '\0';
-    return (int)o;
-}
-
-int hl_pg_b64_decode(const char *in, size_t inlen,
-                     uint8_t *out, size_t outsize, size_t *outlen)
-{
-    int rev[256];
-    for (int i = 0; i < 256; i++) rev[i] = -1;
-    for (int i = 0; i < 64; i++) rev[(unsigned char)B64E[i]] = i;
-
-    uint32_t acc = 0;
-    int bits = 0;
-    size_t o = 0;
-    for (size_t i = 0; i < inlen; i++) {
-        unsigned char c = (unsigned char)in[i];
-        if (c == '=') break;
-        int v = rev[c];
-        if (v < 0) return -1;   /* strict: reject any non-alphabet byte */
-        acc = (acc << 6) | (uint32_t)v;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            if (o >= outsize) return -1;
-            out[o++] = (uint8_t)((acc >> bits) & 0xff);
-        }
-    }
-    if (outlen) *outlen = o;
-    return 0;
-}
+/* ── SCRAM-SHA-256 ──────────────────────────────────────────────── */
 
 #ifndef HL_PG_NO_SCRAM
 /*

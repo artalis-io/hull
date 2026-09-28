@@ -10,6 +10,7 @@
  */
 
 #include "utest.h"
+#include "../../../src/hull/utils/base64.h"
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/db_transport.h"
 #include "hull/cap/pgwire.h"
@@ -545,34 +546,13 @@ UTEST(pg_ssl, negotiation_matrix)
 
 /* ── SCRAM-SHA-256 ────────────────────────────────────────────────── */
 
-UTEST(pg_scram, base64_roundtrip)
-{
-    /* RFC 4648 test vectors. */
-    static const char *in[]  = { "", "f", "fo", "foo", "foob", "fooba", "foobar" };
-    static const char *out[] = { "", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==",
-                                 "Zm9vYmE=", "Zm9vYmFy" };
-    for (int i = 0; i < 7; i++) {
-        char enc[32];
-        int el = hl_pg_b64_encode((const uint8_t *)in[i], strlen(in[i]),
-                                  enc, sizeof enc);
-        ASSERT_TRUE(el >= 0);
-        ASSERT_STREQ(enc, out[i]);
-
-        uint8_t dec[32];
-        size_t dl = 0;
-        ASSERT_EQ(0, hl_pg_b64_decode(enc, strlen(enc), dec, sizeof dec, &dl));
-        ASSERT_EQ(dl, strlen(in[i]));
-        if (dl) ASSERT_EQ(0, memcmp(dec, in[i], dl));
-    }
-}
-
 UTEST(pg_scram, rfc7677_vector)
 {
     /* RFC 7677 SCRAM-SHA-256 worked example (user "user", password "pencil"). */
     uint8_t salt[64];
     size_t salt_len = 0;
-    ASSERT_EQ(0, hl_pg_b64_decode("W22ZaJ0SNY7soEsUEjb6gQ==", 24,
-                                  salt, sizeof salt, &salt_len));
+    ASSERT_EQ(0, hl_base64_decode("W22ZaJ0SNY7soEsUEjb6gQ==", 24,
+                                  salt, sizeof salt, &salt_len, 0));
 
     const char *auth_msg =
         "n=user,r=rOprNGfwEbeRWgbNEkqO,"
@@ -585,8 +565,8 @@ UTEST(pg_scram, rfc7677_vector)
                                    auth_msg, strlen(auth_msg), proof, server_sig));
 
     char proof_b64[64], sig_b64[64];
-    ASSERT_TRUE(hl_pg_b64_encode(proof, 32, proof_b64, sizeof proof_b64) >= 0);
-    ASSERT_TRUE(hl_pg_b64_encode(server_sig, 32, sig_b64, sizeof sig_b64) >= 0);
+    ASSERT_TRUE(hl_base64_encode(proof, 32, proof_b64, sizeof proof_b64, 0) >= 0);
+    ASSERT_TRUE(hl_base64_encode(server_sig, 32, sig_b64, sizeof sig_b64, 0) >= 0);
     ASSERT_STREQ(proof_b64, "dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=");
     ASSERT_STREQ(sig_b64, "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=");
 }
