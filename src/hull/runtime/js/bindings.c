@@ -149,7 +149,9 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req)
             }
             /* In place, form rules (utils/url.h): never fails here, since the
              * value only shrinks and its NUL slot is already there. */
-            klen = (size_t)hl_url_decode(pair, klen, pair, klen + 1, HL_URL_FORM);
+            /* The key is used as a C string below, NUL-terminated by the
+             * decode, so its new length is not needed. */
+            (void)hl_url_decode(pair, klen, pair, klen + 1, HL_URL_FORM);
             if (vlen > 0)
                 vlen = (size_t)hl_url_decode(val, vlen, val, vlen + 1,
                                              HL_URL_FORM);

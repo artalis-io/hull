@@ -124,9 +124,12 @@ void hl_lua_make_request(lua_State *L, KlHttpRequest *req)
             }
             /* In place, form rules (utils/url.h): never fails here, since the
              * value only shrinks and its NUL slot is already there. */
-            klen = (size_t)hl_url_decode(pair, klen, pair, klen + 1, HL_URL_FORM);
+            /* The key is used as a C string below, NUL-terminated by the
+             * decode, so its new length is not needed. */
+            (void)hl_url_decode(pair, klen, pair, klen + 1, HL_URL_FORM);
             if (vlen > 0)
-                vlen = (size_t)hl_url_decode((char *)(uintptr_t)val, vlen, (char *)(uintptr_t)val, vlen + 1,
+                vlen = (size_t)hl_url_decode((char *)(uintptr_t)val, vlen,
+                                             (char *)(uintptr_t)val, vlen + 1,
                                              HL_URL_FORM);
             lua_pushlstring(L, val, vlen);
             lua_setfield(L, -2, pair);
