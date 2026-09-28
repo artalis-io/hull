@@ -358,10 +358,13 @@ sets a new file's permissions. A file has `read(n)`, `write(data)`,
 `seek(offset)`, `tell()`, `stat()` and `close()`. Close it: an open file stays
 open on the server until it is closed or the SFTP session is.
 
-Large transfers are pipelined: requests go out 32 KiB at a time with up to
-eight in flight, so a big file over a relay moves at the link's speed rather
-than one round trip per 32 KiB. A read starts with one request and ramps up,
-so a small file costs no more than it would otherwise.
+Large transfers are pipelined: requests go out 32 KiB at a time with up to 64
+in flight (what OpenSSH's `sftp` keeps), as a sliding window - a new request
+goes out as each reply comes back, so the pipe never drains between batches.
+A big file over a relay moves at the link's speed rather than one round trip
+per 32 KiB. A read starts with one request and grows the window by one per
+full reply, so a small file costs no more than it would otherwise. A READ
+reply longer than the request is refused (`bad_reply`).
 
 ## 8. Rekeying
 

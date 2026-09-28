@@ -249,8 +249,8 @@ file handles, the trust store in `known_hosts` format, RSA in its own PR.
 - Operations: `stat`, `lstat`, `mkdir`, `rmdir`, `remove`, `rename`,
   `chmod`, `setstat`; modes as octal strings.
 - `sftp:open(path, mode, opts)` -> file with `read` / `write` / `seek` /
-  `tell` / `stat` / `close`. Requests are pipelined (32 KiB, up to 8 in
-  flight, a read ramping from 1) and matched by id; whole-file `read` / `write`
+  `tell` / `stat` / `close`. Requests are pipelined (32 KiB, a sliding
+  window of up to 64 in flight, a read ramping from 1) and matched by id; whole-file `read` / `write`
   are loops over a handle.
 - `ssh.file_store(path, { hash })` over `hull.ssh.known_hosts`: plain and
   hashed entries, patterns and markers skipped. Matched against a line hashed
