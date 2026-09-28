@@ -72,8 +72,8 @@ function M.verify(token, secret_hex)
     local raw = encoding.base64.decode(body, { url = true })
     raw = raw and encoding.utf8.decode(raw)
     if not raw then return nil, "bad encoding" end
-    local ok, payload = pcall(json.decode, raw)
-    if not ok or type(payload) ~= "table" then return nil, "bad json" end
+    local parsed, payload = pcall(json.decode, raw)
+    if not parsed or type(payload) ~= "table" then return nil, "bad json" end
     return payload, nil
 end
 
