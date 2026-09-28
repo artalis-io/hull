@@ -17,7 +17,7 @@
 -- NOT need CSRF protection (browsers don't auto-send Bearer tokens).
 
 local crypto = require("hull.crypto")
-local _hex = require("hull.crypto._hex")
+local encoding = require("hull.encoding")
 local time = require("hull.time")
 local cookie = require("hull.web.cookie")
 
@@ -53,7 +53,7 @@ function csrf.generate(session_id, secret)
     local ts_hex = string.format("%x", ts)
 
     local message = session_id .. ":" .. ts_hex
-    local key_hex = _hex.to_hex(secret)
+    local key_hex = encoding.hex.encode(secret)
     local mac = crypto.hmac_sha256(message, key_hex)
 
     return ts_hex .. "." .. mac
@@ -111,7 +111,7 @@ function csrf.verify(token, session_id, secret, ttl)
     -- the canonical wire encoding (tsHex), so a token minted by the
     -- JS sibling verifies bit-for-bit here.
     local message = session_id .. ":" .. ts_hex
-    local key_hex = _hex.to_hex(secret)
+    local key_hex = encoding.hex.encode(secret)
     local expected_mac = crypto.hmac_sha256(message, key_hex)
 
     return constant_time_compare(mac, expected_mac)

@@ -91,6 +91,7 @@
 local crypto = require("hull.crypto")
 local sealbox = require("hull.crypto.sealbox")
 local otp    = require("hull.crypto.otp")
+local encoding = require("hull.encoding")
 local db     = require("hull.db").default()
 local time   = require("hull.time")
 local qrcode = require("hull.qrcode")
@@ -222,64 +223,13 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 -- Thin aliases over crypto.hex_encode / crypto.hex_decode so call
 -- sites stay readable and a future rename of either side is one
 -- edit instead of N.
-local function bytes_to_hex(s) return crypto.hex_encode(s) end
 
--- RFC 4648 Base32 (no padding). 20 bytes → 32 chars exactly with no
--- padding needed (160/5 = 32). The encoder accepts any byte string;
--- the decoder is case-insensitive and tolerates "=" padding +
--- whitespace because some authenticator apps echo back padded form.
-local B32_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-
-local function base32_encode(bytes)
-    local out = {}
-    local buf, bits = 0, 0
-    for i = 1, #bytes do
-        buf = (buf << 8) | string.byte(bytes, i)
-        bits = bits + 8
-        while bits >= 5 do
-            bits = bits - 5
-            local v = (buf >> bits) & 0x1F
-            out[#out + 1] = B32_ALPHA:sub(v + 1, v + 1)
-            buf = buf & ((1 << bits) - 1)
-        end
-    end
-    if bits > 0 then
-        local v = (buf << (5 - bits)) & 0x1F
-        out[#out + 1] = B32_ALPHA:sub(v + 1, v + 1)
-    end
-    return table.concat(out)
-end
-
-local B32_INV
-do
-    B32_INV = {}
-    for i = 1, #B32_ALPHA do
-        B32_INV[B32_ALPHA:byte(i)] = i - 1
-    end
-end
-
+-- The enrolment secret is shown as RFC 4648 base32, unpadded: 20 bytes are
+-- exactly 32 characters. Read back leniently, because people and apps copy
+-- the spaces and '=' padding along with it.
+local function base32_encode(bytes) return encoding.base32.encode(bytes) end
 local function base32_decode(s)
-    if type(s) ~= "string" then return nil, "not a string" end
-    local out = {}
-    local buf, bits = 0, 0
-    for i = 1, #s do
-        local c = s:sub(i, i):upper():byte()
-        -- Skip whitespace + "=" padding (some authenticators echo
-        -- it back); inverting the condition avoids the lint warning
-        -- about an empty if-branch.
-        if c ~= 32 and c ~= 9 and c ~= 10 and c ~= 13 and c ~= 0x3D then
-            local v = B32_INV[c]
-            if v == nil then return nil, "invalid base32 char" end
-            buf = (buf << 5) | v
-            bits = bits + 5
-            if bits >= 8 then
-                bits = bits - 8
-                out[#out + 1] = string.char((buf >> bits) & 0xFF)
-                buf = buf & ((1 << bits) - 1)
-            end
-        end
-    end
-    return table.concat(out)
+    return encoding.base32.decode(s, { lenient = true })
 end
 
 -- TOTP per RFC 6238 is HOTP(K, T_step); the algorithm lives in
@@ -715,7 +665,7 @@ function totp.init(opts)
                 error("totp.init: encryption_keys[" .. tostring(id)
                       .. "] must be exactly 32 bytes")
             end
-            keys[id] = bytes_to_hex(k)
+            keys[id] = encoding.hex.encode(k)
         end
         if not keys[opts.current] then
             error("totp.init: current key id " .. tostring(opts.current)
@@ -735,7 +685,7 @@ function totp.init(opts)
            or #opts.encryption_key ~= 32 then
             error("totp.init: encryption_key must be exactly 32 bytes")
         end
-        keys[1] = bytes_to_hex(opts.encryption_key)
+        keys[1] = encoding.hex.encode(opts.encryption_key)
         current = 1
         legacy_version = 1  -- pre-versioning rows decrypt under this key
     end

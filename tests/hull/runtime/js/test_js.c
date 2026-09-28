@@ -3978,6 +3978,20 @@ UTEST(js_stdlib, email_suite)
     cleanup_js_caps();
 }
 
+UTEST(js_stdlib, encoding_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_encoding.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, csv_suite)
 {
     init_js_with_caps();

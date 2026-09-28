@@ -59,28 +59,15 @@ function constantTimeCompare(a, b) {
     return crypto.constantTimeEq(a, b);
 }
 
-import { _hex } from "hull:crypto:_hex";
-// Raw-byte hex (byte-consistent with Lua; NOT crypto.hexEncode which
-// UTF-8-inflates in JS). Accepts any byte, so non-ASCII secrets work too.
-const secretToHex = _hex.toHex;
+import { encoding } from "hull:encoding";
 
 // HS256: HMAC-SHA256 over the signing input, returning the
 // base64url-encoded 32-byte digest (matches what the JWS token holds).
 function hs256SignatureB64(signingInput, secret) {
-    const keyHex = secretToHex(secret);
+    const keyHex = encoding.hex.encode(secret);
     const sigHex = crypto.hmacSha256(signingInput, keyHex);
-    // Base64url the 32 raw digest bytes via an ArrayBuffer, NOT via a JS string.
-    // Building the digest into a String (String.fromCharCode) and passing it to
-    // crypto.base64urlEncode UTF-8-inflates every byte >= 0x80 at the C boundary,
-    // so the signature differs from the Lua sibling's raw-byte base64url for
-    // essentially every token - a real HS256 cross-runtime interop break (a
-    // Lua-Hull could not verify a JS-Hull JWT and vice-versa). base64urlEncode
-    // is binary-safe for an ArrayBuffer. Guarded by tests/e2e_token_interop.sh.
-    const n = sigHex.length >> 1;
-    const u8 = new Uint8Array(n);
-    for (let i = 0; i < n; i++)
-        u8[i] = parseInt(sigHex.substring(i * 2, i * 2 + 2), 16);
-    return crypto.base64urlEncode(u8.buffer);
+    // Byte-for-byte what the Lua sibling produces (tests/e2e_token_interop.sh).
+    return encoding.base64.encode(encoding.hex.decode(sigHex), { url: true });
 }
 
 /**
@@ -121,70 +108,12 @@ function resolveKey(keyOrResolver, kid, alg) {
     return keyOrResolver;
 }
 
-// QuickJS strings are not byte-arrays. Routing raw binary through
-// crypto.base64urlDecode -> JS string -> Uint8Array corrupts any
-// byte >= 128 because the string layer treats input as UTF-8 and
-// silently substitutes / inflates on invalid sequences. JWT
-// signatures (RSA, ECDSA) are uniformly binary, so we need a
-// direct base64url -> Uint8Array path that never touches strings.
-const B64_DEC = (() => {
-    const t = new Int8Array(256).fill(-1);
-    const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    for (let i = 0; i < a.length; i++) t[a.charCodeAt(i)] = i;
-    // Tolerate standard base64 too (+ and /).
-    t["+".charCodeAt(0)] = 62;
-    t["/".charCodeAt(0)] = 63;
-    return t;
-})();
-// Decode a single base64 char via the lookup table, guarding the
-// `s.charCodeAt(i) > 255` case explicitly. B64_DEC is Int8Array(256);
-// indexing past 255 returns undefined, and `(undef | x) < 0` is
-// false because undef coerces to 0 - so without this guard a token
-// containing a non-ASCII char would silently zero-pad and produce
-// garbage bytes (rejected at the crypto layer, but masked as a
-// generic sig failure).
-function b64Lookup(s, i) {
-    const c = s.charCodeAt(i);
-    if (c > 255) return -1;
-    return B64_DEC[c];
-}
-
-function base64urlToBytes(s) {
-    // Strip padding if any (JWT compact form omits it).
-    let n = s.length;
-    while (n > 0 && s.charCodeAt(n - 1) === 61 /* "=" */) n--;
-    const groups = n >> 2;
-    const tail = n & 3;
-    if (tail === 1) return null;  // invalid base64 length
-    let outLen = groups * 3;
-    if (tail === 2) outLen += 1;
-    else if (tail === 3) outLen += 2;
-    const u8 = new Uint8Array(outLen);
-    let si = 0, di = 0;
-    for (let g = 0; g < groups; g++) {
-        const a = b64Lookup(s, si++);
-        const b = b64Lookup(s, si++);
-        const c = b64Lookup(s, si++);
-        const d = b64Lookup(s, si++);
-        if ((a | b | c | d) < 0) return null;
-        u8[di++] = (a << 2) | (b >> 4);
-        u8[di++] = ((b & 0xf) << 4) | (c >> 2);
-        u8[di++] = ((c & 0x3) << 6) | d;
-    }
-    if (tail === 2) {
-        const a = b64Lookup(s, si++);
-        const b = b64Lookup(s, si++);
-        if ((a | b) < 0) return null;
-        u8[di++] = (a << 2) | (b >> 4);
-    } else if (tail === 3) {
-        const a = b64Lookup(s, si++);
-        const b = b64Lookup(s, si++);
-        const c = b64Lookup(s, si++);
-        if ((a | b | c) < 0) return null;
-        u8[di++] = (a << 2) | (b >> 4);
-        u8[di++] = ((b & 0xf) << 4) | (c >> 2);
-    }
-    return u8;
+// The signature bytes of an asymmetric JWS, or null. Strict base64url, the
+// same decoding the Lua sibling gets from C: no padding, no '+' or '/', so a
+// token verifies in both runtimes or in neither.
+function signatureBytes(sigB64) {
+    const raw = encoding.base64.decode(sigB64, { url: true });
+    return raw === null ? null : encoding.bytes.toU8(raw);
 }
 
 function verifySignature(alg, key, signingInput, sigB64) {
@@ -196,7 +125,7 @@ function verifySignature(alg, key, signingInput, sigB64) {
     // Asym: crypto.verify takes the raw r||s sig (for ECDSA), which is
     // exactly what's encoded in the JWS token (per RFC 7515 §3.1).
     if (typeof key !== "string" || key.length === 0) return false;
-    const sigBytes = base64urlToBytes(sigB64);
+    const sigBytes = signatureBytes(sigB64);
     if (sigBytes === null) return false;
     return crypto.verify(alg, key, signingInput, sigBytes.buffer);
 }

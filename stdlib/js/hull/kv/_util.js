@@ -1,26 +1,26 @@
 /*
  * hull:kv:_util - shared internals for the KV/cache subsystem (JS mirror of
- * hull.kv._util). Coded errors, key/value validation, binary-safe base64 + hex
- * codecs, capability vocabulary. Values are BYTE STRINGS (each char a code unit
- * 0-255, one char per byte - Hull's JS byte convention, same as crypto/_hex),
+ * hull.kv._util). Coded errors, key/value validation, the store's base64 + hex
+ * (hull:encoding, with kv's coded errors), capability vocabulary. Values are
+ * BYTE STRINGS (each char a code unit 0-255, one char per byte - Hull's JS
+ * byte convention, same as hull:encoding),
  * so `.length` is the byte count and there is no UTF-8 step.
  *
  * Internal (underscore-prefixed). SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 import { time } from "hull:time";
+import { encoding } from "hull:encoding";
 
 const MAX_KEY = 1024;
 // Far-future "no expiry" sentinel for the SQL backend (keeps expires_at NOT
 // NULL and off the mid-array-nil binding path). Fits a 64-bit BIGINT.
 const NO_EXPIRY = Number.MAX_SAFE_INTEGER;
 
-// Any code unit > 255 means the caller passed a non-byte string (e.g. a UTF-16
-// string like "café" or "Ā"). The hex/base64/toBuf codecs mask `& 0xff`, which
-// would SILENTLY collapse distinct keys onto the same physical key ("Ā" U+0100
-// -> byte 0x00, colliding with "\x00") and corrupt values. Lua strings are
-// already bytes so the Lua side is immune; enforce the byte invariant here so
-// JS behaves identically and fails loudly instead of silently mangling.
+// Any code unit > 255 means the caller passed a non-byte string (UTF-16 text
+// such as U+0100). Such a string has no byte form (hull:encoding refuses it),
+// so reject it here with kv's own error code. Lua strings are already bytes,
+// so this keeps the two runtimes identical.
 const NON_BYTE = /[^\u0000-\u00ff]/;
 
 function codedError(code, message) {
@@ -83,59 +83,23 @@ function checkCount(v, what) {
     return v;
 }
 
-// ---- binary-safe base64 (standard alphabet, padded) over byte strings ----
-const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-const DEC = {};
-for (let i = 0; i < B64.length; i++) DEC[B64[i]] = i;
-
-function b64encode(s) {
-    const out = [];
-    const n = s.length;
-    for (let i = 0; i < n; i += 3) {
-        const b1 = s.charCodeAt(i) & 0xff;
-        const has2 = i + 1 < n, has3 = i + 2 < n;
-        const b2 = has2 ? s.charCodeAt(i + 1) & 0xff : 0;
-        const b3 = has3 ? s.charCodeAt(i + 2) & 0xff : 0;
-        out.push(B64[b1 >> 2]);
-        out.push(B64[((b1 & 0x3) << 4) | (b2 >> 4)]);
-        out.push(has2 ? B64[((b2 & 0xf) << 2) | (b3 >> 6)] : "=");
-        out.push(has3 ? B64[b3 & 0x3f] : "=");
-    }
-    return out.join("");
-}
+// ---- the store's encodings: standard padded base64 for values, lowercase
+// hex for keys (prefix-preserving, so the SQL backend can scan with LIKE).
+// A value that does not decode is corruption in the store, reported with
+// kv's own code. ----
+const b64encode = (s) => encoding.base64.encode(s);
+const hexencode = (s) => encoding.hex.encode(s);
 
 function b64decode(str) {
-    const out = [];
-    let buf = 0, bits = 0;
-    for (let i = 0; i < str.length; i++) {
-        const c = str[i];
-        if (c === "=") continue;
-        const d = DEC[c];
-        if (d === undefined) codedError("invalid_argument", "kv: corrupt base64 in store");
-        buf = (buf << 6) | d;
-        bits += 6;
-        if (bits >= 8) { bits -= 8; out.push(String.fromCharCode((buf >> bits) & 0xff)); }
-    }
-    return out.join("");
-}
-
-// ---- hex (prefix-preserving; lets the SQL backend scan keys with LIKE) ----
-function hexencode(s) {
-    let out = "";
-    for (let i = 0; i < s.length; i++)
-        out += (s.charCodeAt(i) & 0xff).toString(16).padStart(2, "0");
-    return out;
+    const v = encoding.base64.decode(str);
+    if (v === null) codedError("invalid_argument", "kv: corrupt base64 in store");
+    return v;
 }
 
 function hexdecode(hex) {
-    if (hex.length % 2 !== 0) codedError("invalid_argument", "kv: corrupt hex in store");
-    const out = [];
-    for (let i = 0; i < hex.length; i += 2) {
-        const n = parseInt(hex.slice(i, i + 2), 16);
-        if (Number.isNaN(n)) codedError("invalid_argument", "kv: corrupt hex in store");
-        out.push(String.fromCharCode(n));
-    }
-    return out.join("");
+    const v = encoding.hex.decode(hex);
+    if (v === null) codedError("invalid_argument", "kv: corrupt hex in store");
+    return v;
 }
 
 const util = {

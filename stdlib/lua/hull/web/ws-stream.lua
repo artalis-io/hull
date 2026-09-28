@@ -34,7 +34,7 @@
 -- all passed in - so this module cannot open a connection, only transform one
 -- it was handed.
 
-local base64 = require('hull.encoding.base64')
+local base64 = require('hull.encoding').base64
 
 local M = {}
 

@@ -103,6 +103,7 @@
 --     oauth.routes(app)
 
 local crypto      = require("hull.crypto")
+local encoding    = require("hull.encoding")
 local envelope    = require("hull.crypto.envelope")
 local cookie      = require("hull.web.cookie")
 local json        = require("hull.json")
@@ -209,12 +210,6 @@ local PRESETS = {
 
 -- ── Helpers ────────────────────────────────────────────────────────
 
--- Cap layer's hmac_sha256 takes the key as a hex string. We pre-
--- encode the secret bytes once at init and reuse the hex form.
--- Thin aliases over crypto.hex_encode / crypto.hex_decode so
--- the implementation lives in one place (cap/crypto.c).
-local function bytes_to_hex(s) return crypto.hex_encode(s) end
-local function hex_to_bytes(h) return crypto.hex_decode(h) end
 
 -- Cryptographically-random URL-safe string (base64url-encoded).
 local function random_urlsafe(n_bytes)
@@ -226,7 +221,7 @@ end
 local function pkce_pair()
     local verifier = random_urlsafe(32)
     local sha_hex = crypto.sha256(verifier)
-    local challenge = crypto.base64url_encode(hex_to_bytes(sha_hex))
+    local challenge = encoding.base64.encode(encoding.hex.decode(sha_hex), { url = true })
     return verifier, challenge
 end
 
@@ -589,7 +584,7 @@ function oauth.init(opts)
               .. "(same HMAC primitive as hull/web/auth-flows; pick "
               .. "one floor)")
     end
-    _state.state_secret_hex = bytes_to_hex(secret)
+    _state.state_secret_hex = encoding.hex.encode(secret)
     -- redirect_uri origin (see compute_redirect_uri): explicit base_url wins,
     -- else trust_proxy gates the spoofable X-Forwarded-Proto/Host headers.
     if opts.base_url ~= nil then

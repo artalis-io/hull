@@ -25,16 +25,13 @@ import { crypto } from "hull:crypto";
 import { cookie } from "hull:web:cookie";
 import { time } from "hull:time";
 
-import { _hex } from "hull:crypto:_hex";
-// Raw-byte hex (byte-consistent with Lua; NOT crypto.hexEncode which
-// UTF-8-inflates in JS). Accepts any byte, so non-ASCII secrets work too.
-const secretToHex = _hex.toHex;
+import { encoding } from "hull:encoding";
 
 function computeHmac(sessionId, tsHex, secret) {
     // ":" separator deliberately distinct from the wire-format "."
     // separator - see the wire-format note at the top of this file.
     const msg = sessionId + ":" + tsHex;
-    const keyHex = secretToHex(secret);
+    const keyHex = encoding.hex.encode(secret);
     return crypto.hmacSha256(msg, keyHex);
 }
 

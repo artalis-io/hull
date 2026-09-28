@@ -97,7 +97,7 @@
 
 local crypto    = require("hull.crypto")
 local envelope  = require("hull.crypto.envelope")
-local _hex      = require("hull.crypto._hex")
+local encoding = require("hull.encoding")
 local db        = require("hull.db").default()
 local time      = require("hull.time")
 local json      = require("hull.json")
@@ -1631,13 +1631,9 @@ function M.init(opts)
 
     -- crypto.hmac_sha256 takes the key as a hex string; we encode
     -- once at init and reuse the hex form per request.
-    --
-    -- Raw-byte hex via the shared hull.crypto._hex helper: NOT crypto.hex_encode,
-    -- which UTF-8-inflates code points >= 0x80 on the JS side, so a state secret
-    -- with a non-ASCII byte would derive different HMAC keys per runtime and
-    -- break the cross-runtime wire-format guarantee. _hex is byte-identical in
-    -- both runtimes.
-    _state.state_secret_hex = _hex.to_hex(secret)
+    -- hull.encoding is byte-identical in both runtimes, so a secret with
+    -- non-ASCII bytes derives the same HMAC key in Lua and JS.
+    _state.state_secret_hex = encoding.hex.encode(secret)
     _state.email_send       = opts.email_send
     _state.public_origin    = opts.public_origin
     _state.trusted_hosts    = opts.trusted_hosts

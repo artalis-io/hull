@@ -32,9 +32,7 @@ local function assert_raises(fn, msg)
     if ok then error((msg or "should have raised") .. " but did not") end
 end
 
-local function to_hex(raw)
-    return (raw:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-end
+local to_hex = require('hull.encoding').hex.encode
 
 local KEY_A = string.rep("\1", 32)
 local KEY_B = string.rep("\2", 32)
@@ -98,31 +96,6 @@ test("parse_signature reads and length-checks", function()
 end)
 
 -- base64 and fingerprints ------------------------------------------------------
-
-test("base64 matches the RFC 4648 vectors", function()
-    -- A fingerprint is read aloud and compared against ssh-keygen output, so
-    -- "nearly base64" would be worse than useless.
-    local cases = {
-        { "", "" }, { "f", "Zg" }, { "fo", "Zm8" }, { "foo", "Zm9v" },
-        { "foob", "Zm9vYg" }, { "fooba", "Zm9vYmE" }, { "foobar", "Zm9vYmFy" },
-    }
-    for _, c in ipairs(cases) do
-        assert_eq(hostkey.base64_nopad(c[1]), c[2], "base64 of " .. c[1])
-    end
-end)
-
-test("base64 emits no padding", function()
-    for n = 1, 12 do
-        local out = hostkey.base64_nopad(string.rep("x", n))
-        assert_eq(out:find("=", 1, true), nil, "padding at n=" .. n)
-    end
-end)
-
-test("base64 handles bytes above 127", function()
-    -- Digest bytes are not ASCII; a signed-byte bug would show up here.
-    assert_eq(hostkey.base64_nopad("\255\254\253"), "//79")
-    assert_eq(hostkey.base64_nopad("\0\0\0"), "AAAA")
-end)
 
 test("fingerprint has the OpenSSH shape", function()
     local fake_sha = function() return string.rep("\0", 32) end

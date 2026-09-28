@@ -23,6 +23,7 @@
 
 import { blob } from "hull:blob";
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
 import { fs } from "hull:fs";
@@ -79,11 +80,7 @@ function init(opts) {
 
 // 32 hex chars from 16 random bytes - 128 bits of entropy.
 function generateId() {
-    const bytes = new Uint8Array(crypto.random(16));
-    let id = "";
-    for (let i = 0; i < bytes.length; i++)
-        id += bytes[i].toString(16).padStart(2, "0");
-    return id;
+    return encoding.hex.encode(crypto.random(16));
 }
 
 /**

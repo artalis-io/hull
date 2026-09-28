@@ -21,7 +21,7 @@
 --     a key listed only as revoked is not trusted either, since it is not
 --     listed as a host key.
 
-local base64 = require('hull.encoding.base64')
+local base64 = require('hull.encoding').base64
 local wire   = require('hull.ssh.wire')
 
 local M = {}
@@ -43,16 +43,15 @@ function M.parse_line(line)
 
     local hosts, keytype, b64 = s:match("^(%S+)%s+(%S+)%s+(%S+)")
     if not hosts then return nil end
-    local ok, blob = pcall(base64.decode, b64)
-    if not ok or blob == "" or M.blob_type(blob) ~= keytype then return nil end
+    local blob = base64.decode(b64)
+    if not blob or blob == "" or M.blob_type(blob) ~= keytype then return nil end
 
     local e = { keytype = keytype, blob = blob }
     if hosts:sub(1, #M.HASH_MAGIC) == M.HASH_MAGIC then
         local salt64, hash64 = hosts:match("^|1|([^|]+)|([^|]+)$")
         if not salt64 then return nil end
-        local sok, salt = pcall(base64.decode, salt64)
-        local hok, hash = pcall(base64.decode, hash64)
-        if not (sok and hok) or #hash ~= 20 then return nil end
+        local salt, hash = base64.decode(salt64), base64.decode(hash64)
+        if not (salt and hash) or #hash ~= 20 then return nil end
         e.salt, e.hash = salt, hash
     else
         e.names = {}

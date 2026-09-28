@@ -131,68 +131,15 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-// Hex helpers used to bridge binary strings (built via
-// String.fromCharCode) to the cap-layer's hex-string-keyed
-// crypto APIs. Kept local because QuickJS's JS_ToCStringLen
-// (which crypto.hexEncode uses for strings) UTF-8-inflates
-// code points >= 0x80, which corrupts binary-string round-
-// trips. The cap-layer crypto.hexEncode / crypto.hexDecode
-// are binary-safe for ArrayBuffer/Uint8Array input - use
-// them when the input is already a typed array.
-import { _hex } from "hull:crypto:_hex";
+import { encoding } from "hull:encoding";
 import { sealbox } from "hull:crypto:sealbox";
 import { otp } from "hull:crypto:otp";
-const bytesToHex = _hex.toHex;
 
-// RFC 4648 Base32 (no padding) - encode + decode. 20 bytes → 32
-// chars; decoder is case-insensitive and tolerates "=" / whitespace.
-const B32_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-const B32_INV = (() => {
-    const t = {};
-    for (let i = 0; i < B32_ALPHA.length; i++) t[B32_ALPHA.charCodeAt(i)] = i;
-    return t;
-})();
-
-function base32Encode(bytes) {
-    let out = "";
-    let buf = 0, bits = 0;
-    for (let i = 0; i < bytes.length; i++) {
-        buf = (buf << 8) | (bytes.charCodeAt(i) & 0xff);
-        bits += 8;
-        while (bits >= 5) {
-            bits -= 5;
-            const v = (buf >> bits) & 0x1F;
-            out += B32_ALPHA[v];
-            buf &= (1 << bits) - 1;
-        }
-    }
-    if (bits > 0) {
-        const v = (buf << (5 - bits)) & 0x1F;
-        out += B32_ALPHA[v];
-    }
-    return out;
-}
-
-function base32Decode(s) {
-    if (typeof s !== "string") return null;
-    let out = "";
-    let buf = 0, bits = 0;
-    for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i);
-        if (c === 32 || c === 9 || c === 10 || c === 13 || c === 0x3D) continue;
-        const up = c >= 97 && c <= 122 ? c - 32 : c;  // ASCII uppercase
-        const v = B32_INV[up];
-        if (v === undefined) return null;
-        buf = (buf << 5) | v;
-        bits += 5;
-        if (bits >= 8) {
-            bits -= 8;
-            out += String.fromCharCode((buf >> bits) & 0xff);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    return out;
-}
+// The enrolment secret is shown as RFC 4648 base32, unpadded: 20 bytes are
+// exactly 32 characters. Read back leniently, because people and apps copy
+// the spaces and '=' padding along with it.
+const base32Encode = (bytes) => encoding.base32.encode(bytes);
+const base32Decode = (s) => encoding.base32.decode(s, { lenient: true });
 
 // TOTP per RFC 6238 is HOTP(K, T_step); the algorithm lives in
 // hull:crypto:otp.
@@ -534,7 +481,7 @@ function init(opts) {
                 throw new Error("totp.init: encryptionKeys[" + id
                     + "] must be exactly 32 bytes");
             }
-            keys[id] = bytesToHex(k);
+            keys[id] = encoding.hex.encode(k);
         }
         if (keys[opts.current] === undefined) {
             throw new Error("totp.init: current key id " + opts.current
@@ -553,7 +500,7 @@ function init(opts) {
             || opts.encryptionKey.length !== 32) {
             throw new Error("totp.init: encryptionKey must be exactly 32 bytes");
         }
-        keys[1] = bytesToHex(opts.encryptionKey);
+        keys[1] = encoding.hex.encode(opts.encryptionKey);
         current = 1;
         legacyVersion = 1;  // pre-versioning rows decrypt under this key
     }
@@ -700,10 +647,7 @@ function enroll(userId) {
         throw new Error("totp.enroll: userId required");
     }
 
-    const randAb = crypto.random(20);
-    const u8 = new Uint8Array(randAb);
-    let secretBytes = "";
-    for (let i = 0; i < 20; i++) secretBytes += String.fromCharCode(u8[i]);
+    const secretBytes = encoding.bytes.fromBuffer(crypto.random(20));
 
     const secretB32 = base32Encode(secretBytes);
     const enc = encryptSecret(secretBytes);

@@ -49,6 +49,13 @@ local cipher     = require('hull.ssh.cipher')
 local userauth   = require('hull.ssh.userauth')
 local channel    = require('hull.ssh.channel')
 local wire       = require('hull.ssh.wire')
+local hex        = require('hull.encoding').hex
+
+-- hull.crypto speaks hex; SSH speaks bytes. What comes back from crypto is
+-- always well-formed hex, so a failure here is a defect, not input.
+local function unhex(h)
+    return (assert(hex.decode(h), "ssh.transport: crypto returned malformed hex"))
+end
 
 local M = {}
 
@@ -521,16 +528,16 @@ function Transport:run_kex(opts, i_s)
 
     -- curve25519 exchange
     local q_c_hex, sk_hex = self.crypto.x25519_keypair()
-    local q_c = kex.from_hex(q_c_hex)
+    local q_c = unhex(q_c_hex)
     self:send_packet(kex.build_ecdh_init(q_c))
 
     local reply = kex.parse_ecdh_reply(
         self:expect(kex.SSH_MSG_KEX_ECDH_REPLY, "KEX_ECDH_REPLY",
                     self.strict_kex))
 
-    local k_hex, kerr = self.crypto.x25519(sk_hex, kex.to_hex(reply.q_s))
+    local k_hex, kerr = self.crypto.x25519(sk_hex, hex.encode(reply.q_s))
     if not k_hex then return nil, { code = "bad_kex_point", detail = kerr } end
-    local k_raw = kex.from_hex(k_hex)
+    local k_raw = unhex(k_hex)
 
     local h = self.raw_sha(kex.exchange_hash_input({
         v_c = self.ident, v_s = self.server_ident, i_c = i_c, i_s = i_s,
@@ -549,7 +556,7 @@ function Transport:run_kex(opts, i_s)
                                                             reply.host_key),
                           stored_fingerprint = self.host_fingerprint }
         end
-        local ok, why = hostkey.verify_signature(self.crypto, kex.to_hex,
+        local ok, why = hostkey.verify_signature(self.crypto, hex.encode,
                                                  reply.host_key,
                                                  reply.signature, h)
         if not ok then
@@ -559,7 +566,7 @@ function Transport:run_kex(opts, i_s)
         -- host key: verified, then trusted or not. This never decides for the
         -- caller; an unknown or changed host comes back as a reason carrying
         -- the fingerprint (see hull.ssh.hostkey).
-        local d = hostkey.verify(self.crypto, kex.to_hex, self.raw_sha,
+        local d = hostkey.verify(self.crypto, hex.encode, self.raw_sha,
                                  opts.trust, hostkey.store_name(opts.host, opts.port),
                                  reply.host_key, reply.signature, h)
         if not d.ok then
@@ -703,11 +710,11 @@ function Transport:authenticate(user, key, on_banner)
     -- 128-char hex secret and hands back a hex signature, while a private key
     -- carries 64 RAW bytes and signature_blob wants 64 raw bytes back - so
     -- both ends need converting, exactly as the VERIFY path already does via
-    -- hostkey.verify_signature(crypto, kex.to_hex, ...). Without it userauth
+    -- hostkey.verify_signature(crypto, hex.encode, ...). Without it userauth
     -- died on "secret key must be 128 hex chars" against a real server.
     local blob    = userauth.signed_blob(self.session_id, user, key.blob)
-    local sig_hex = self.crypto.ed25519_sign(blob, kex.to_hex(key.secret))
-    local sig     = kex.from_hex(sig_hex)
+    local sig_hex = self.crypto.ed25519_sign(blob, hex.encode(key.secret))
+    local sig     = unhex(sig_hex)
     self:send_packet(userauth.build_request(user, key.blob,
                                             userauth.signature_blob(sig)))
 

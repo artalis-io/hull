@@ -5,8 +5,8 @@
 
 local kh     = require('hull.ssh.known_hosts')
 local wire   = require('hull.ssh.wire')
-local base64 = require('hull.encoding.base64')
-local kex    = require('hull.ssh.kex')
+local enc = require('hull.encoding')
+local base64 = enc.base64
 local ssh    = require('hull.ssh')
 
 local pass = 0
@@ -129,7 +129,7 @@ end
 
 local fake_crypto = {
     hmac_sha1 = function(msg, key_hex)
-        return kex.to_hex(fake_hmac(kex.from_hex(key_hex), msg))
+        return enc.hex.encode(fake_hmac(enc.hex.decode(key_hex), msg))
     end,
     random = function(n) return string.rep("r", n) end,
 }

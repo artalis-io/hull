@@ -13,6 +13,7 @@
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 import { time } from "hull:time";
 import { json } from "hull:json";
 import { app } from "hull:app";
@@ -141,11 +142,7 @@ function init(opts) {
 }
 
 function generateId() {
-    const bytes = new Uint8Array(crypto.random(32));
-    let id = "";
-    for (let i = 0; i < bytes.length; i++)
-        id += bytes[i].toString(16).padStart(2, "0");
-    return id;
+    return encoding.hex.encode(crypto.random(32));
 }
 
 /**

@@ -55,6 +55,7 @@ local transport  = require('hull.ssh.transport')
 local privatekey = require('hull.ssh.privatekey')
 local hostkey    = require('hull.ssh.hostkey')
 local kex        = require('hull.ssh.kex')
+local enc        = require('hull.encoding')
 
 local M = {}
 
@@ -103,7 +104,7 @@ function M.file_store(path, opts)
 
     -- crypto.hmac_sha1 speaks hex on both sides; known_hosts wants raw bytes.
     local function hmac(key, msg)
-        return kex.from_hex(crypto.hmac_sha1(msg, kex.to_hex(key)))
+        return enc.hex.decode(crypto.hmac_sha1(msg, enc.hex.encode(key)))
     end
     local function load()
         return fs.read(path) or ""

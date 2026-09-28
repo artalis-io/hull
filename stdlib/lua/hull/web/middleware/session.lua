@@ -10,6 +10,7 @@
 
 local json = require("hull.json")
 local crypto = require("hull.crypto")
+local encoding = require("hull.encoding")
 local db = require("hull.db").default()
 local time = require("hull.time")
 local _request = require("hull.web._request")
@@ -179,12 +180,7 @@ end
 
 --- Generate a 64-character hex session ID from 32 random bytes.
 local function generate_id()
-    local raw = crypto.random(32)
-    local hex = {}
-    for i = 1, #raw do
-        hex[i] = string.format("%02x", string.byte(raw, i))
-    end
-    return table.concat(hex)
+    return encoding.hex.encode(crypto.random(32))
 end
 
 --- Create a new session.
@@ -254,8 +250,9 @@ function session.load(session_id, opts)
     if not session_id or session_id == "" then
         return nil
     end
-    -- Validate format: must be 64-char hex (from generate_id)
-    if #session_id ~= 64 or not session_id:match("^%x+$") then
+    -- Validate format: 64 lowercase hex characters, exactly what generate_id
+    -- produces (the JS side accepts the same and nothing else).
+    if #session_id ~= 64 or not session_id:match("^[0-9a-f]+$") then
         return nil
     end
 

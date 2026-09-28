@@ -150,12 +150,13 @@ appears in two modules, it moves to a shared internal module:
 
 Current shared helpers: `hull.web.htmx.escape` (HTML escaping for the widgets),
 `hull.crypto.envelope` (signed token framing), `hull.web.cookie` (parse/
-serialize), `hull.crypto._hex` (raw-byte hex - deliberately NOT
-`crypto.hex_encode`/`hexEncode`, which UTF-8-inflates high bytes on the JS side;
-see that module), and `hull.web._request` (`client_ip(req, trust_proxy)`:
-XFF-first when trusted, `remote_addr` fallback, 64-char cap - the canonical
-source for the client IP that `session` / `audit-log` / `totp` / `auth-flows`
-each used to hand-roll subtly differently).
+serialize), `hull.encoding` (hex, base64, base32 over bytes - deliberately NOT
+`crypto.hex_encode`/`hexEncode`, which UTF-8-inflate a JS string; see
+[encoding_consolidation_plan.md](encoding_consolidation_plan.md)), and
+`hull.web._request` (`client_ip(req, trust_proxy)`: XFF-first when trusted,
+`remote_addr` fallback, 64-char cap - the canonical source for the client IP
+that `session` / `audit-log` / `totp` / `auth-flows` each used to hand-roll
+subtly differently).
 
 **Cryptographic algorithms live under `hull.crypto`.** Primitives (hashes,
 HMAC, AEADs, signatures, key exchange, KDFs, constant-time compare) are C,

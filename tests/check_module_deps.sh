@@ -34,7 +34,7 @@
 #   - a computed require (`require("hull." .. name)`) is invisible. Nothing in
 #     the stdlib does that, and a gate cannot resolve it without running it.
 #   - names that are not registry modules (`hull.ssh.transport`,
-#     `hull.encoding.base64`) are ignored: they are internal files, not modules
+#     `hull.web._request`) are ignored: they are internal files, not modules
 #     an app can declare.
 #
 # Usage: sh tests/check_module_deps.sh

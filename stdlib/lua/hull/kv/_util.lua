@@ -87,63 +87,23 @@ function M.to_int(bytes)
     return math.floor(n)
 end
 
--- ---- binary-safe base64 (standard alphabet, padded) ----
-local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-local DEC = {}
-for i = 1, #B64 do DEC[B64:sub(i, i)] = i - 1 end
+-- ---- the store's encodings: standard padded base64 for values, lowercase
+-- hex for keys (prefix-preserving: hex(prefix) is a prefix of hex(key), so the
+-- SQL backend can range-scan keys with a plain LIKE). A value that does not
+-- decode is corruption in the store, reported with kv's own code. ----
+local encoding = require("hull.encoding")
 
-function M.b64encode(bytes)
-    local out, n = {}, #bytes
-    local i = 1
-    while i <= n do
-        local b1 = bytes:byte(i)
-        local b2 = i + 1 <= n and bytes:byte(i + 1) or nil
-        local b3 = i + 2 <= n and bytes:byte(i + 2) or nil
-        local n1 = b1 >> 2
-        local n2 = ((b1 & 0x3) << 4) | ((b2 or 0) >> 4)
-        local n3 = b2 and (((b2 & 0xf) << 2) | ((b3 or 0) >> 6)) or nil
-        local n4 = b3 and (b3 & 0x3f) or nil
-        out[#out + 1] = B64:sub(n1 + 1, n1 + 1)
-        out[#out + 1] = B64:sub(n2 + 1, n2 + 1)
-        out[#out + 1] = n3 and B64:sub(n3 + 1, n3 + 1) or "="
-        out[#out + 1] = n4 and B64:sub(n4 + 1, n4 + 1) or "="
-        i = i + 3
-    end
-    return table.concat(out)
-end
+function M.b64encode(bytes) return encoding.base64.encode(bytes) end
+function M.hexencode(bytes) return encoding.hex.encode(bytes) end
 
 function M.b64decode(str)
-    local out = {}
-    local buf, bits = 0, 0
-    for i = 1, #str do
-        local c = str:sub(i, i)
-        if c ~= "=" then
-            local d = DEC[c]
-            if not d then M.error("invalid_argument", "kv: corrupt base64 in store") end
-            buf = (buf << 6) | d
-            bits = bits + 6
-            if bits >= 8 then
-                bits = bits - 8
-                out[#out + 1] = string.char((buf >> bits) & 0xff)
-            end
-        end
-    end
-    return table.concat(out)
-end
-
--- ---- hex (prefix-preserving: hex(prefix) is a prefix of hex(key), so the SQL
--- backend can range-scan keys with a plain LIKE) ----
-function M.hexencode(bytes)
-    return (bytes:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+    return encoding.base64.decode(str)
+        or M.error("invalid_argument", "kv: corrupt base64 in store")
 end
 
 function M.hexdecode(hex)
-    if #hex % 2 ~= 0 then M.error("invalid_argument", "kv: corrupt hex in store") end
-    return (hex:gsub("..", function(cc)
-        local n = tonumber(cc, 16)
-        if not n then M.error("invalid_argument", "kv: corrupt hex in store") end
-        return string.char(n)
-    end))
+    return encoding.hex.decode(hex)
+        or M.error("invalid_argument", "kv: corrupt hex in store")
 end
 
 return M

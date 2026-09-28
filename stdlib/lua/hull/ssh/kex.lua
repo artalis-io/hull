@@ -13,6 +13,7 @@
 -- hashed, and the tests assert those bytes.
 
 local wire = require('hull.ssh.wire')
+local hex  = require('hull.encoding').hex
 
 local M = {}
 
@@ -163,30 +164,15 @@ M.SIZES = {
     },
 }
 
--- Hex bridging -----------------------------------------------------------
+-- Hex bridging ---------------------------------------------------------
 --
 -- SSH is defined over raw bytes; hull.crypto takes and returns hex (sha256,
--- x25519 and the rest all do). That mismatch has to be crossed somewhere, and
--- doing it here once is better than at each of the half-dozen call sites the
--- transport will have, where a single missed conversion produces key material
--- that is wrong without being obviously wrong.
-
-function M.to_hex(raw)
-    return (raw:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-end
-
-function M.from_hex(hex)
-    if #hex % 2 ~= 0 or hex:find("[^0-9a-fA-F]") then
-        error("ssh.kex: not a hex string", 2)
-    end
-    return (hex:gsub("%x%x", function(cc)
-        return string.char(tonumber(cc, 16))
-    end))
-end
-
--- Wrap a hex-returning hash as the raw-bytes hash derive_key expects.
+-- x25519 and the rest all do). hull.encoding.hex crosses that line; this
+-- adapts a hex-returning hash into the raw-bytes hash derive_key expects.
 function M.raw_hash(hash_hex)
-    return function(data) return M.from_hex(hash_hex(data)) end
+    return function(data)
+        return (assert(hex.decode(hash_hex(data)), "ssh.kex: hash did not return hex"))
+    end
 end
 
 return M

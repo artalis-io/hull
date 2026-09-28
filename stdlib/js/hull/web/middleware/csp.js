@@ -37,10 +37,7 @@ import { crypto } from "hull:crypto";
 // Base64url-encode raw bytes (128-bit by default) for use as a CSP
 // nonce. 16 bytes -> 22 base64url chars unpadded.
 //
-// JS-side note: crypto.random returns an ArrayBuffer (use .byteLength,
-// not .length). crypto.base64urlEncode expects a JS string, so we
-// build a binary-string view via Uint8Array + String.fromCharCode
-// before encoding. Same pattern as stdlib/js/hull/jwt.js.
+// crypto.random returns an ArrayBuffer (use .byteLength, not .length).
 function nonceB64url(nBytes) {
     nBytes = nBytes || 16;
     const ab = crypto.random(nBytes);
