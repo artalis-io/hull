@@ -193,6 +193,36 @@ test("refuses an unsupported key type", function()
     assert_eq(tostring(err):find("ssh%-rsa") ~= nil, true, tostring(err))
 end)
 
+test("the refusals a caller acts on carry a code, and read as before", function()
+    local cases = {
+        { "unsupported_key_type",
+          { "-----BEGIN PRIVATE KEY-----\nMC4CAQ==\n-----END PRIVATE KEY-----\n" } },
+        { "unsupported_key_type",
+          { key_file({ private_blob = private_section({ algo = "ssh-rsa" }) }) } },
+        { "unsupported_key_type",
+          { key_file({ cipher = "aes128-cbc", kdf = "bcrypt" }), { passphrase = "x" } } },
+        { "passphrase_required",
+          { key_file({ cipher = "aes256-ctr", kdf = "bcrypt" }) } },
+        { "passphrase_required",
+          { key_file({ cipher = "aes256-ctr", kdf = "bcrypt" }), { passphrase = "" } } },
+    }
+    for _, c in ipairs(cases) do
+        local ok, err = pcall(privatekey.load, table.unpack(c[2]))
+        assert_eq(ok, false)
+        assert_eq(type(err), "table", c[1])
+        assert_eq(err.code, c[1])
+        assert_eq(tostring(err), err.detail)
+        assert_eq(tostring(err):find("ssh.privatekey: ", 1, true), 1)
+    end
+end)
+
+test("a peer-chosen algorithm name is sanitised before it is quoted", function()
+    local ok, err = pcall(privatekey.load,
+        key_file({ private_blob = private_section({ algo = "ssh-rsa\27[31m" }) }))
+    assert_eq(ok, false)
+    assert_eq(tostring(err):find("\27", 1, true), nil, tostring(err))
+end)
+
 test("refuses when the two public copies disagree", function()
     -- The key would sign with one identity and present another.
     local other = string.rep("\99", 32)

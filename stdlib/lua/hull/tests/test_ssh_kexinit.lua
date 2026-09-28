@@ -64,6 +64,20 @@ test("build produces a parseable KEXINIT", function()
     assert_eq(got.reserved, 0)
 end)
 
+test("the strict-KEX marker is sent even when a caller's kex list drops it", function()
+    -- Strict KEX needs BOTH markers; one side's alone would turn it off
+    -- without either side saying so.
+    for _, opts in ipairs({ nil, { kex = { "curve25519-sha256" } } }) do
+        local got = kexinit.parse(kexinit.build(opts, COOKIE))
+        local seen = 0
+        for _, name in ipairs(got.kex) do
+            if name == kexinit.STRICT_C then seen = seen + 1 end
+        end
+        assert_eq(seen, 1)
+        assert_eq(got.kex[1], "curve25519-sha256")
+    end
+end)
+
 test("build demands a 16-byte cookie", function()
     assert_raises(function() kexinit.build(nil, "short") end, "short cookie")
     assert_raises(function() kexinit.build(nil, nil) end, "no cookie")

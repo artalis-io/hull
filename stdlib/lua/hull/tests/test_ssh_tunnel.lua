@@ -37,6 +37,13 @@ end
 -- Deterministic stand-ins: the nonce and the digest are the server's problem,
 -- and fixing them lets a test state the exact accept value.
 local function stub_random(n) return string.rep("\42", n) end
+
+-- ssh-ed25519 public key blobs, which accept_host now checks for.
+local function ed_blob(byte)
+    return require('hull.ssh.wire').writer():string("ssh-ed25519")
+        :string(string.rep(byte, 32)):build()
+end
+local BLOB22, BLOB2222 = ed_blob("\1"), ed_blob("\2")
 local function stub_sha1() return string.rep("\7", 20) end
 local crypto_stub = { random = stub_random, sha1 = stub_sha1 }
 
@@ -257,14 +264,14 @@ end)
 
 test("accept_host and forget_host name the entry by host and port", function()
     local trust = ssh.memory_store()
-    ssh.accept_host(trust, "Spark-7468", "BLOB22")
-    ssh.accept_host(trust, "spark-7468", "BLOB2222", 2222)
+    ssh.accept_host(trust, "Spark-7468", BLOB22)
+    ssh.accept_host(trust, "spark-7468", BLOB2222, 2222)
     local e = trust.entries()
-    assert_eq(e["spark-7468"], "BLOB22")
-    assert_eq(e["[spark-7468]:2222"], "BLOB2222")
+    assert_eq(e["spark-7468"], BLOB22)
+    assert_eq(e["[spark-7468]:2222"], BLOB2222)
     ssh.forget_host(trust, "spark-7468", 2222)
     assert_eq(trust.entries()["[spark-7468]:2222"], nil)
-    assert_eq(trust.entries()["spark-7468"], "BLOB22", "port 22 untouched:")
+    assert_eq(trust.entries()["spark-7468"], BLOB22, "port 22 untouched:")
 end)
 
 -- The error model --------------------------------------------------------------
@@ -343,10 +350,27 @@ test("an unreadable key comes back as bad_key, not a raise", function()
     assert_eq(err.code, "bad_key")
 end)
 
+test("a key in another tool's format is unsupported_key_type", function()
+    local _, err = ssh.connect{ host = "h", user = "u",
+        key = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
+        crypto = crypto_stub,
+        open_stream = function() error("must not dial") end }
+    assert_eq(err.code, "unsupported_key_type")
+end)
+
+test("an unusable software string is bad_software, before any dial", function()
+    for _, sw in ipairs({ "", "Hull 1.0", "Hull\r\nX", 7 }) do
+        local _, err = ssh.connect{ host = "h", user = "u", key = {}, software = sw,
+                                    crypto = crypto_stub,
+                                    open_stream = function() error("must not dial") end }
+        assert_eq(err.code, "bad_software", tostring(sw))
+    end
+end)
+
 test("a key already trusted is an answer, not a raise", function()
     local trust = ssh.memory_store()
-    assert_eq(ssh.accept_host(trust, "h", "B1"), true)
-    local ok, err = ssh.accept_host(trust, "h", "B2")
+    assert_eq(ssh.accept_host(trust, "h", BLOB22), true)
+    local ok, err = ssh.accept_host(trust, "h", BLOB2222)
     assert_eq(ok, nil)
     assert_eq(err.code, "already_trusted")
 end)

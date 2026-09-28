@@ -108,6 +108,7 @@ end
 M.TRUSTED = "trusted"   -- stored key matches the one presented
 M.UNKNOWN = "unknown"   -- no stored key for this host
 M.CHANGED = "changed"   -- a key is stored and it is NOT this one
+M.REVOKED = "revoked"   -- the store revokes this key (known_hosts @revoked)
 
 -- The name a host's key is stored under: OpenSSH's known_hosts convention.
 -- Lower-cased, because DNS names are case-insensitive and "Web1" and "web1"
@@ -128,6 +129,11 @@ end
 function M.check(store, host, key_blob)
     if type(store) ~= "table" or type(store.get) ~= "function" then
         error("ssh.hostkey: a store with a get function is required", 2)
+    end
+    -- Revocation first: a revoked key is refused even if some line trusts it.
+    -- `revoked` is optional; only stores that can revoke (file_store) have it.
+    if type(store.revoked) == "function" and store.revoked(key_blob) then
+        return M.REVOKED, nil
     end
     local stored = store.get(host)
     if stored == nil then return M.UNKNOWN, nil end

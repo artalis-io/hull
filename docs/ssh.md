@@ -416,10 +416,13 @@ bug, not a connection failure, and it comes back to you unchanged.
 | `upgrade_refused` / `upgrade_failed` | the relay refused the WebSocket upgrade (carries `status`) / answered with something that is not one |
 | `no_identification` / `bad_identification` | the server never sent an SSH version line / sent an unusable one |
 | `host_unknown` / `host_changed` / `host_key_invalid` / `host_changed_midsession` | see §3 |
-| `no_common_algorithm` / `no_kexinit_response` / `bad_kex_point` | the key exchange could not be agreed or completed |
+| `host_revoked` | the trust store revokes the key the server presented (a known_hosts `@revoked` line) |
+| `store_failed` | the trust store could not be read or written (a missing known_hosts file is an empty store, not this) |
+| `no_common_algorithm` / `no_kexinit_response` / `bad_kex_point` / `unexpected_message` | the key exchange could not be agreed or completed |
 | `service_refused` / `no_auth_response` | the server would not start user authentication / never answered it |
 | `auth_failed` / `partial_success` | the key was refused, or a second factor is wanted |
 | `bad_key` / `bad_passphrase` / `passphrase_required` | the key file could not be read, the passphrase was wrong, or one is needed (§4) |
+| `unsupported_key_type` | the key is not an OpenSSH ed25519 key (RSA, ECDSA, a PEM file) or uses protection Hull does not read |
 
 **Using the connection**
 
@@ -431,8 +434,11 @@ bug, not a connection failure, and it comes back to you unchanged.
 | `stdin_too_large` / `output_too_large` / `bad_stdin` / `bad_timeout` | a bound or an option in §6 |
 | `sftp_unavailable` / `sftp_no_version` | the server has no SFTP subsystem, or it did not start |
 | `no_such_file` / `permission_denied` / `failure` / `op_unsupported` / ... | an SFTP status by name; `status` holds the number |
-| `too_large` | an SFTP `read` passed its `max` |
+| `too_large` | an SFTP `read` passed its `max`, or `list` found more than `MAX_LIST_ENTRIES` (100000) entries |
+| `bad_reply` | the SFTP server answered with a message that does not fit the request |
+| `bad_software` | `connect`'s `software` option is not a valid identification string (letters, digits, `.`, `_`) |
 | `already_trusted` | `accept_host` for a host that already has a key; `forget_host` it first |
+| `host_revoked` / `host_key_invalid` | `accept_host` for a key the store revokes / a blob that is not an ed25519 host key |
 | `not_handshaken` | `rekey` on a connection that never finished connecting |
 | `io_error` | the stream failed in some other way; `detail` says how |
 

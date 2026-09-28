@@ -72,24 +72,32 @@ Fix plan: **PR 1** crypto/encoding, **PR 2** SSH, **PR 3** missing C pieces.
 
 ## PR 2: hull.ssh
 
-- [ ] **Medium** - `file_store` treats any read error as an empty file and
-  rewrites the whole file from that; the write is not atomic. Can wipe the
-  trust store. Distinguish "not found", raise `store_failed`, write + rename.
-- [ ] **Medium** - `@revoked` lines are skipped, not enforced: a key revoked
-  and also on a plain line is trusted.
-- [ ] **Medium** - keepalive replies count toward `read_message`'s 256-message
+- [x] **Medium** - `file_store` treats any read error as an empty file and
+  rewrites the whole file from that. Can wipe the trust store. Now only
+  `not_found` is an empty store; any other read error raises `store_failed`.
+  The write itself is still not atomic, because `fs.write` is not (see
+  "Missing, not yet planned").
+- [x] **Medium** - `@revoked` lines are skipped, not enforced: a key revoked
+  and also on a plain line is trusted. Now refused as `host_revoked`, on
+  connect and on `accept_host`.
+- [x] **Medium** - keepalive replies count toward `read_message`'s 256-message
   "no progress" limit: a silent exec / SFTP wait dies after about 128 minutes.
-- [ ] **Medium** - a streamed `exec` falls through to success after 1,000,000
-  messages.
-- [ ] **Medium** - `sftp_client.open` leaves the channel open when SFTP fails
+  The count is gone; the idle and keepalive bounds already end a dead wait.
+- [x] **Medium** - a streamed `exec` falls through to success after 1,000,000
+  messages. The loop is now bounded by `timeout_ms` alone.
+- [x] **Medium** - `sftp_client.open` leaves the channel open when SFTP fails
   to start.
-- [ ] **Low** - the deferred queue during a rekey is capped by count, not
-  bytes; strict KEX is enabled on the server's marker alone and a caller can
-  drop `kex-strict-c`; exit-signal / `error_message` / SFTP `longname` reach
-  the app unsanitised; `accept_host` can raise outside `guard`; key-error codes
-  guessed from message text; `opts.software` unvalidated (`build_ident` unused);
-  `list` has no total cap and stops silently; ws-stream output buffer copies
-  quadratically; `drain_channel` gives up silently.
+- [x] **Low** - the deferred queue during a rekey is capped by count, not
+  bytes (now 8 MiB, and only channel messages may be deferred); strict KEX is
+  enabled on the server's marker alone and a caller can drop `kex-strict-c`
+  (the marker is now always sent); exit-signal / `error_message` / SFTP
+  `longname` reach the app unsanitised; `accept_host` can raise outside
+  `guard`; key-error codes guessed from message text (now raised with a code);
+  `opts.software` unvalidated (now `bad_software`, via `build_ident`); `list`
+  has no total cap and stops silently (now `too_large` past 100000 entries, and
+  `bad_reply` for an empty non-EOF reply); ws-stream output buffer copies
+  quadratically (reads are now served from an offset); `drain_channel` gives up
+  silently (it now closes the connection).
 
 ## PR 3: missing C pieces
 
@@ -106,6 +114,10 @@ Fix plan: **PR 1** crypto/encoding, **PR 2** SSH, **PR 3** missing C pieces.
   written out about 8 times); byte-level (non-hex) crypto API; HKDF; a keyring
   from env; reason strings on JS decode failures; one JS error shape (encoding
   returns `null`, envelope `[v, err]`, sealbox `{ ok, ... }`).
+- **Filesystem:** `fs.write` is not atomic (it truncates in place), so a
+  crash mid-write leaves a truncated file. The SSH `file_store` inherits this.
+  An atomic write (temp file in the same directory + rename, both through the
+  descriptor-relative resolver) belongs in `cap/fs.c`, not in each caller.
 - **SSH, roadmap still open:** RSA user keys; documenting parallel
   connections; group 5 (split `transport.lua`, fingerprint duplicated,
   two buffered readers, raw `string.unpack(">I4")`, facade clutter, dead code);

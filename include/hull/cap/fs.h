@@ -97,7 +97,11 @@ int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
  *
  * @return `0` on success, `-1` on failure (validate / mkdir / fopen / fwrite).
  *
- * @note Overwrites existing files atomically (write-temp + rename).
+ * @note NOT atomic: an existing file is opened O_TRUNC and rewritten in
+ *       place, so a crash or a failed write mid-way leaves it truncated
+ *       or partial, and a concurrent reader can see either. Callers that
+ *       must never lose the old contents (a trust store, a config) need
+ *       a write-temp + rename, which this cap does not yet offer.
  */
 int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
                       const char *data, size_t len,

@@ -8,6 +8,7 @@ local wire   = require('hull.ssh.wire')
 local enc = require('hull.encoding')
 local base64 = enc.base64
 local ssh    = require('hull.ssh')
+local hostkey = require('hull.ssh.hostkey')
 
 local pass = 0
 local fail = 0
@@ -117,7 +118,11 @@ end)
 
 local function fake_fs(initial)
     local fs = { files = { kh = initial }, writes = 0 }
-    fs.read = function(p) return fs.files[p] end
+    fs.read = function(p)
+        if fs.fail_read then return nil, "io_error" end
+        if fs.files[p] == nil then return nil, "not_found" end
+        return fs.files[p]
+    end
     fs.write = function(p, text)
         if fs.deny then return nil, "fs.write: not permitted" end
         fs.writes = fs.writes + 1
@@ -196,6 +201,58 @@ test("a store that cannot write says store_failed, not a raise", function()
     local ok, err = ssh.accept_host(store(fs), "web1", ED_A)
     assert_eq(ok, nil)
     assert_eq(err.code, "store_failed")
+end)
+
+test("a store that cannot READ says store_failed and writes nothing", function()
+    -- Read as empty, the next accept would rewrite the file from nothing.
+    local fs = fake_fs(line("web2", ED_B) .. "\n")
+    fs.fail_read = true
+    local ok, err = ssh.accept_host(store(fs), "web1", ED_A)
+    assert_eq(ok, nil)
+    assert_eq(err.code, "store_failed")
+    assert_eq(fs.writes, 0)
+    assert_eq(fs.files.kh, line("web2", ED_B) .. "\n")
+end)
+
+test("accept_host refuses a blob that is not an ed25519 host key", function()
+    local fs = fake_fs("")
+    for _, b in ipairs({ RSA, "junk", 42 }) do
+        local ok, err = ssh.accept_host(store(fs), "web1", b)
+        assert_eq(ok, nil)
+        assert_eq(err.code, "host_key_invalid")
+    end
+    assert_eq(fs.writes, 0)
+end)
+
+-- @revoked ---------------------------------------------------------------------------
+
+test("revoked_blob reads the key of a @revoked line, and only that", function()
+    assert_eq(kh.revoked_blob("@revoked web1 " .. line("x", ED_A):match(" (.*)")), ED_A)
+    assert_eq(kh.revoked_blob("  @revoked * " .. line("x", ED_A):match(" (.*)") .. " c"), ED_A)
+    assert_eq(kh.revoked_blob(line("web1", ED_A)), nil)
+    assert_eq(kh.revoked_blob("@cert-authority * " .. line("x", ED_A):match(" (.*)")), nil)
+    assert_eq(kh.revoked_blob("@revoked web1 ssh-ed25519 " .. base64.encode(RSA)), nil)
+    assert_eq(kh.revoked_blob("@revoked web1 ssh-ed25519 !!!"), nil)
+end)
+
+test("a revoked key is refused even where a plain line trusts it", function()
+    local fs = fake_fs(line("web1", ED_A) .. "\n"
+                       .. "@revoked * " .. line("x", ED_A):match(" (.*)") .. "\n")
+    local st = store(fs)
+    assert_eq(st.revoked(ED_A), true)
+    assert_eq(st.revoked(ED_B), false)
+    assert_eq(hostkey.check(st, "web1", ED_A), hostkey.REVOKED)
+    -- A revoked key for another host too: revocation is about the key.
+    assert_eq(hostkey.check(st, "web9", ED_A), hostkey.REVOKED)
+    assert_eq(hostkey.check(st, "web9", ED_B), hostkey.UNKNOWN)
+end)
+
+test("accept_host will not trust a revoked key", function()
+    local fs = fake_fs("@revoked * " .. line("x", ED_A):match(" (.*)") .. "\n")
+    local ok, err = ssh.accept_host(store(fs), "web1", ED_A)
+    assert_eq(ok, nil)
+    assert_eq(err.code, "host_revoked")
+    assert_eq(fs.writes, 0)
 end)
 
 -- kv_store -------------------------------------------------------------------------
