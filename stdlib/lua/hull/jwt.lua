@@ -219,8 +219,10 @@ function jwt.verify(token, key_or_resolver, opts)
     if not key then return nil, "no key for kid/alg" end
 
     local signing_input = header_b64 .. "." .. payload_b64
+    -- A signature that does not decode is just an invalid signature (as in
+    -- JS): which check turned a forged token away is nobody's business.
     local sig_raw = segment_bytes(sig_b64)
-    if not sig_raw then return nil, "invalid signature encoding" end
+    if not sig_raw then return nil, "invalid signature" end
 
     if not verify_signature(alg, key, signing_input, sig_raw, sig_b64) then
         return nil, "invalid signature"
