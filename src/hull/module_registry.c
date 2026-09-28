@@ -84,9 +84,11 @@ static const HlModuleSpec REGISTRY[] = {
         /* In-memory key/value cache with TTL + get-or-compute memoization.
          * Bounded (LRU on cap), lazily-expiring, process-local. Pure Lua/JS
          * over time; no persistence, no new authority. */
+        /* Shares hull/kv's internal stores and their codecs (kv/_util),
+         * which encode through hull/encoding. */
         .name = "hull/cache",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = 0, .deps = {"hull/time", 0},
+        .required_caps = 0, .deps = {"hull/time", "hull/encoding", 0},
     },
     {
         .name = "hull/compute",
