@@ -7,6 +7,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/crypto.h"
 #include "hull/limits/core.h"
+#include "../../utils/base64.h"
 #include "../../utils/hex.h"
 
 #include <stdio.h>
@@ -107,6 +108,46 @@ static JSValue js_crypto_random(JSContext *ctx, JSValueConst this_val,
     JSValue ab = JS_NewArrayBufferCopy(ctx, buf, (size_t)n);
     js_free(ctx, buf);
     return ab;
+}
+
+/* crypto.randomToken(n [, "hex"]) -> an unguessable token: n random bytes
+ * as unpadded base64url (the default; safe in URLs, cookies and file names)
+ * or lowercase hex. The one way the stdlib makes ids, nonces, CSRF secrets
+ * and session tokens, so none of them hand-roll the encoding. n is 1-1024. */
+static JSValue js_crypto_random_token(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "crypto.randomToken requires (n)");
+    int32_t n;
+    if (JS_ToInt32(ctx, &n, argv[0]))
+        return JS_EXCEPTION;
+    int hex = 0;
+    if (argc > 1 && !JS_IsUndefined(argv[1])) {
+        const char *fmt = JS_ToCString(ctx, argv[1]);
+        if (!fmt) return JS_EXCEPTION;
+        hex = strcmp(fmt, "hex") == 0;
+        int ok = hex || strcmp(fmt, "base64url") == 0;
+        JS_FreeCString(ctx, fmt);
+        if (!ok)
+            return JS_ThrowTypeError(ctx,
+                "crypto.randomToken: format must be \"base64url\" or \"hex\"");
+    }
+    if (n <= 0 || n > HL_RANDOM_TOKEN_MAX)
+        return JS_ThrowRangeError(ctx, "crypto.randomToken: bytes must be 1-%d",
+                                  HL_RANDOM_TOKEN_MAX);
+
+    uint8_t raw[HL_RANDOM_TOKEN_MAX];
+    char out[HL_RANDOM_TOKEN_MAX * 2 + 1];
+    if (hl_cap_crypto_random(raw, (size_t)n) != 0)
+        return JS_ThrowInternalError(ctx, "random failed");
+    int len = hex
+        ? (hl_hex_encode(raw, (size_t)n, out, sizeof out) == 0 ? (int)n * 2 : -1)
+        : hl_base64_encode(raw, (size_t)n, out, sizeof out, HL_BASE64_URL | HL_BASE64_NOPAD);
+    if (len < 0)
+        return JS_ThrowInternalError(ctx, "crypto.randomToken: encode failed");
+    return JS_NewStringLen(ctx, out, (size_t)len);
 }
 
 /* Local 0/-1 wrapper over utils/hex's hl_hex_decode, kept for the
@@ -1434,6 +1475,8 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_sha1, "sha1", 1));
     JS_SetPropertyStr(ctx, crypto, "random",
                       JS_NewCFunction(ctx, js_crypto_random, "random", 1));
+    JS_SetPropertyStr(ctx, crypto, "randomToken",
+                      JS_NewCFunction(ctx, js_crypto_random_token, "randomToken", 2));
     JS_SetPropertyStr(ctx, crypto, "hashPassword",
                       JS_NewCFunction(ctx, js_crypto_hash_password, "hashPassword", 1));
     JS_SetPropertyStr(ctx, crypto, "verifyPassword",

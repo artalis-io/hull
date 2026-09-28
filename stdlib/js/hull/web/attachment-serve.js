@@ -33,56 +33,17 @@
 
 import { attachment } from "hull:attachment";
 import { blob } from "hull:blob";
+import { encoding } from "hull:encoding";
 
-// Manual UTF-8 encoder: JS strings are UTF-16, so iterating by
-// charCodeAt yields code units, not UTF-8 bytes. RFC 5987 requires
-// percent-encoding of UTF-8 octets, so we encode to bytes first.
-// QuickJS doesn't bundle TextEncoder; this 20-liner covers the
-// full BMP + surrogate pairs.
-function utf8Bytes(str) {
-    const out = [];
-    for (let i = 0; i < str.length; i++) {
-        let cp = str.charCodeAt(i);
-        // High surrogate → combine with the next code unit (low
-        // surrogate) into a single supplementary-plane code point.
-        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < str.length) {
-            const lo = str.charCodeAt(i + 1);
-            if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                i++;
-            }
-        }
-        if (cp < 0x80) {
-            out.push(cp);
-        } else if (cp < 0x800) {
-            out.push(0xC0 | (cp >> 6), 0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            out.push(0xE0 | (cp >> 12),
-                     0x80 | ((cp >> 6) & 0x3F),
-                     0x80 | (cp & 0x3F));
-        } else {
-            out.push(0xF0 | (cp >> 18),
-                     0x80 | ((cp >> 12) & 0x3F),
-                     0x80 | ((cp >> 6) & 0x3F),
-                     0x80 | (cp & 0x3F));
-        }
-    }
-    return out;
-}
+// RFC 5987 attr-char set: ALPHA / DIGIT / !#$&+-.^_`|~ - the RFC 3986
+// unreserved set plus these. Anything else is percent-encoded.
+const ATTR_CHAR = { keep: "!#$&+^`|" };
 
-// RFC 5987 attr-char set: ALPHA / DIGIT / !#$&+-.^_`|~
-// Anything else (including space, /, etc.) gets percent-encoded.
-function pctEncodeByte(b) {
-    if ((b >= 0x30 && b <= 0x39)   // 0-9
-        || (b >= 0x41 && b <= 0x5A) // A-Z
-        || (b >= 0x61 && b <= 0x7A) // a-z
-        || b === 0x21 || b === 0x23 || b === 0x24 || b === 0x26  // ! # $ &
-        || b === 0x2B || b === 0x2D || b === 0x2E || b === 0x5E  // + - . ^
-        || b === 0x5F || b === 0x60 || b === 0x7C || b === 0x7E  // _ ` | ~
-    ) {
-        return String.fromCharCode(b);
-    }
-    return "%" + b.toString(16).toUpperCase().padStart(2, "0");
+// A stored name is not ours to refuse, so a lone surrogate (which has no
+// UTF-8 form) becomes U+FFFD instead of failing the response.
+function wellFormed(name) {
+    return name.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g,
+                        "\ufffd");
 }
 
 // ASCII fallback: iterate the UTF-8 byte stream (NOT JS chars) so
@@ -91,7 +52,8 @@ function pctEncodeByte(b) {
 // can't break out of the header field.
 function asciiFallbackBytes(bytes) {
     let out = "";
-    for (const b of bytes) {
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes.charCodeAt(i);
         if (b === 0x22 || b === 0x5C) {        // " or \
             out += "\\" + String.fromCharCode(b);
         } else if (b < 0x20 || b > 0x7E) {     // non-printable / non-ASCII
@@ -108,9 +70,9 @@ function asciiFallbackBytes(bytes) {
 // SAME UTF-8 byte stream so the output matches the Lua sibling
 // byte-for-byte for any input (BMP, supplementary plane, surrogates).
 function contentDisposition(name) {
-    const bytes = utf8Bytes(name);
-    let pct = "";
-    for (const b of bytes) pct += pctEncodeByte(b);
+    const text = wellFormed(name);
+    const bytes = encoding.utf8.encode(text);
+    const pct = encoding.url.encode(text, ATTR_CHAR);
     return 'attachment; filename="' + asciiFallbackBytes(bytes) +
            '"; filename*=UTF-8\'\'' + pct;
 }

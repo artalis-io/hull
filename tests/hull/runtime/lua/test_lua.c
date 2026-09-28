@@ -2886,6 +2886,30 @@ UTEST(lua_stdlib, encoding_native_matches_pure)
     lua_close(L);
 }
 
+/* crypto.random_token: the shape of each format, the bounds, and that two
+ * calls differ. Returns 0, or the number of the first check that failed. */
+UTEST(lua_stdlib, crypto_random_token)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local crypto = require('hull.crypto') "
+        "  local t = crypto.random_token(16) "
+        "  if #t ~= 22 or t:find('[^%w_%-]') then return 1 end "
+        "  if crypto.random_token(16) == t then return 2 end "
+        "  local h = crypto.random_token(32, 'hex') "
+        "  if #h ~= 64 or h:find('[^0-9a-f]') then return 3 end "
+        "  if #crypto.random_token(1) ~= 2 or #crypto.random_token(1024) ~= 1366 then return 4 end "
+        "  if pcall(crypto.random_token, 0) then return 5 end "
+        "  if pcall(crypto.random_token, 1025) then return 6 end "
+        "  if pcall(crypto.random_token, 16, 'base32') then return 7 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 /* A value of a few MB through hull.encoding inside the 64 MB Lua heap. The
  * pure codecs build one table slot per byte (hex) or group (base64) and ran
  * out of heap around 3 MB; the C fast path writes one buffer. */

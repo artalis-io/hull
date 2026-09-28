@@ -9,6 +9,7 @@
  */
 
 #include "hull/runtime/js.h"
+#include "../../utils/url.h"
 #include "hull/reqctx.h"
 #include "hull/limits/core.h"
 #include "hull/cap/body.h"
@@ -68,50 +69,6 @@ static JSValue js_req_header(JSContext *ctx, JSValueConst this_val,
     return val;
 }
 
-/*
- * Build a JS object representing the HTTP request:
- *   {
- *     method:  "GET",
- *     path:    "/invoices/42",
- *     params:  { id: "42" },
- *     query:   { limit: "10" },
- *     headers: { "content-type": "application/json" },
- *     body:    "..." or parsed object,
- *     ctx:     {}
- *   }
- */
-/* Percent-decode a query-string token in place (also turns `+` into
- * space). Returns the new length. Invalid `%XX` (truncated or non-hex)
- * is left as-is so we never silently drop bytes from a malformed URL.
- * Mirrors hl_query_decode_inplace in src/hull/runtime/lua/bindings.c. */
-static size_t hl_query_decode_inplace(char *s, size_t len)
-{
-    size_t r = 0, w = 0;
-    while (r < len) {
-        unsigned char c = (unsigned char)s[r];
-        if (c == '+') {
-            s[w++] = ' '; r++;
-        } else if (c == '%' && r + 2 < len) {
-            int hi = s[r + 1], lo = s[r + 2];
-            int hv = (hi >= '0' && hi <= '9') ? hi - '0'
-                   : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10
-                   : (hi >= 'A' && hi <= 'F') ? hi - 'A' + 10 : -1;
-            int lv = (lo >= '0' && lo <= '9') ? lo - '0'
-                   : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10
-                   : (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10 : -1;
-            if (hv >= 0 && lv >= 0) {
-                s[w++] = (char)((hv << 4) | lv);
-                r += 3;
-            } else {
-                s[w++] = s[r++];
-            }
-        } else {
-            s[w++] = s[r++];
-        }
-    }
-    return w;
-}
-
 /* Numeric client IP from the connection's peer address, "" on failure.
  * Sibling copy in src/hull/runtime/lua/bindings.c (request_peer_ip). See there
  * for the rationale; best-effort, absent when unavailable. */
@@ -127,6 +84,18 @@ static void hl_request_peer_ip_js(KlHttpRequest *req, char *buf, size_t buflen)
     kl_sockaddr_format_ip(pa, buf, buflen);
 }
 
+/*
+ * Build a JS object representing the HTTP request:
+ *   {
+ *     method:  "GET",
+ *     path:    "/invoices/42",
+ *     params:  { id: "42" },
+ *     query:   { limit: "10" },
+ *     headers: { "content-type": "application/json" },
+ *     body:    "..." or parsed object,
+ *     ctx:     {}
+ *   }
+ */
 JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req)
 {
     JSValue obj = JS_NewObject(ctx);
@@ -178,12 +147,12 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req)
                 val  = "";
                 vlen = 0;
             }
-            klen = hl_query_decode_inplace(pair, klen);
-            pair[klen] = '\0';
-            if (vlen > 0) {
-                vlen = hl_query_decode_inplace(val, vlen);
-                val[vlen] = '\0';
-            }
+            /* In place, form rules (utils/url.h): never fails here, since the
+             * value only shrinks and its NUL slot is already there. */
+            klen = (size_t)hl_url_decode(pair, klen, pair, klen + 1, HL_URL_FORM);
+            if (vlen > 0)
+                vlen = (size_t)hl_url_decode(val, vlen, val, vlen + 1,
+                                             HL_URL_FORM);
             JS_SetPropertyStr(ctx, query_obj, pair,
                               JS_NewStringLen(ctx, val, vlen));
             pair = strtok_r(NULL, "&", &saveptr);

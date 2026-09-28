@@ -226,14 +226,9 @@ function middleware(opts) {
                     const key = pairs[k].substring(0, eqIdx);
                     if (key === fieldName) {
                         const raw = pairs[k].substring(eqIdx + 1);
-                        try {
-                            token = decodeURIComponent(raw);
-                        } catch (_e) {
-                            // Malformed percent-encoding (e.g. "%X") - fall
-                            // back to the raw value rather than throwing
-                            // URIError out of the middleware (H-1).
-                            token = raw;
-                        }
+                        // Malformed percent-encoding (e.g. "%X") comes back
+                        // as it is rather than throwing out of the middleware (H-1).
+                        token = encoding.url.decode(raw, { form: true });
                         break;
                     }
                 }

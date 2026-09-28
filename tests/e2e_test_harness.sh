@@ -54,6 +54,10 @@ app.post("/upload", function(req, res)
     end
     res:json({ fields = fields, files = files })
 end, { multipart = { max_part_size = 1024 * 1024, max_parts = 8 } })
+-- The request query as the runtime decodes it (utils/url, form rules).
+app.get("/query", function(req, res)
+    res:json({ q = req.query.q, bad = req.query.bad, kk = req.query["k k"] })
+end)
 LUA
 cat > "$TMP/lua/tests/test_harness.lua" <<'LUA'
 local blob = require("hull.blob")
@@ -83,6 +87,14 @@ test("multipart upload in the in-process dispatch", function()
     test.eq(r.json.fields.title, "Nexogen Asset")
     test.eq(r.json.files.doc.filename, "a.txt")
     test.eq(r.json.files.doc.sha, crypto.sha256("hello file"))
+end)
+
+test("query string decoding: %XX and '+', malformed kept as written", function()
+    local r = test.get("/query?q=a%20b+c%2Fd&bad=x%zz%41&k+k=v")
+    test.eq(r.status, 200)
+    test.eq(r.json.q, "a b c/d")
+    test.eq(r.json.bad, "x%zz%41")
+    test.eq(r.json.kk, "v")
 end)
 LUA
 
@@ -114,6 +126,10 @@ app.post("/upload", async (req, res) => {
     }
     res.json({ fields, files });
 }, { multipart: { maxPartSize: 1024 * 1024, maxParts: 8 } });
+// The request query as the runtime decodes it (utils/url, form rules).
+app.get("/query", (req, res) => {
+    res.json({ q: req.query.q, bad: req.query.bad, kk: req.query["k k"] });
+});
 JS
 cat > "$TMP/js/tests/test_harness.js" <<'JS'
 import { blob } from "hull:blob";
@@ -145,6 +161,14 @@ test("multipart upload in the in-process dispatch", () => {
     test.eq(r.json.files.doc.filename, "a.txt");
     test.eq(r.json.files.doc.sha, crypto.sha256("hello file"));
 });
+
+test("query string decoding: %XX and '+', malformed kept as written", () => {
+    const r = test.get("/query?q=a%20b+c%2Fd&bad=x%zz%41&k+k=v");
+    test.eq(r.status, 200);
+    test.eq(r.json.q, "a b c/d");
+    test.eq(r.json.bad, "x%zz%41");
+    test.eq(r.json.kk, "v");
+});
 JS
 
 check_runtime() {
@@ -156,14 +180,14 @@ check_runtime() {
         *"no active connection"*) fail "$label: multipart in test" "raised 'no active connection'"; echo "$out"; return ;;
         *"fs config unavailable"*) fail "$label: blob in test" "raised 'fs config unavailable'"; echo "$out"; return ;;
     esac
-    # 2 tests in the fixture; require both green and none failed.
+    # 3 tests in the fixture; require all green and none failed.
     case "$out" in
-        *"2/2 tests passed"*)
+        *"3/3 tests passed"*)
             case "$out" in
                 *"FAIL"*) fail "$label" "a test FAILed"; echo "$out" ;;
-                *)        pass "$label: blob + multipart under hull test" ;;
+                *)        pass "$label: blob + multipart + query under hull test" ;;
             esac ;;
-        *) fail "$label" "did not see 2/2 tests passed"; echo "$out" ;;
+        *) fail "$label" "did not see 3/3 tests passed"; echo "$out" ;;
     esac
 }
 

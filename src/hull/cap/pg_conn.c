@@ -12,7 +12,7 @@
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/pgwire.h"
 #include "../utils/base64.h"
-#include "../utils/hex.h"
+#include "../utils/url.h"
 /* SCRAM pulls in cap/crypto (mbedTLS). The DSN / rewriter fuzz harnesses,
  * which link this file for its pure functions, define HL_PG_NO_SCRAM to
  * compile crypto-free. */
@@ -63,28 +63,6 @@ static void set_err(char *dst, size_t cap, const char *msg)
 
 /* ── DSN parsing ──────────────────────────────────────────────────── */
 
-/* Percent-decode src[0,srclen) into dst (size dstsize, always terminated).
- * Returns 0 on success, -1 if it does not fit or an escape is malformed. */
-static int dsn_decode(char *dst, size_t dstsize, const char *src, size_t srclen)
-{
-    size_t o = 0;
-    for (size_t i = 0; i < srclen; i++) {
-        unsigned char c = (unsigned char)src[i];
-        if (c == '%') {
-            if (i + 2 >= srclen) return -1;
-            int hi = hl_hex_digit((unsigned char)src[i + 1]);
-            int lo = hl_hex_digit((unsigned char)src[i + 2]);
-            if (hi < 0 || lo < 0) return -1;
-            c = (unsigned char)((hi << 4) | lo);
-            i += 2;
-        }
-        if (o + 1 >= dstsize) return -1;   /* keep room for the NUL */
-        dst[o++] = (char)c;
-    }
-    dst[o] = '\0';
-    return 0;
-}
-
 static int starts_with(const char *s, const char *p)
 {
     return strncmp(s, p, strlen(p)) == 0;
@@ -122,12 +100,12 @@ int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen)
             size_t ulen = (size_t)((const char *)cp - p);
             const char *pw = (const char *)cp + 1;
             size_t plen = ui_len - ulen - 1;
-            if (dsn_decode(out->user, sizeof out->user, p, ulen) != 0 ||
-                dsn_decode(out->password, sizeof out->password, pw, plen) != 0) {
+            if (hl_url_decode(p, ulen, out->user, sizeof out->user, 0) < 0 ||
+                hl_url_decode(pw, plen, out->password, sizeof out->password, 0) < 0) {
                 set_err(errbuf, errlen, "DSN user/password too long or malformed");
                 return -1;
             }
-        } else if (dsn_decode(out->user, sizeof out->user, p, ui_len) != 0) {
+        } else if (hl_url_decode(p, ui_len, out->user, sizeof out->user, 0) < 0) {
             set_err(errbuf, errlen, "DSN user too long or malformed");
             return -1;
         }
@@ -153,8 +131,8 @@ int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen)
         memcpy(out->port, port, port_len);
         out->port[port_len] = '\0';
     }
-    if (host_len == 0 || dsn_decode(out->host, sizeof out->host,
-                                    hostport, host_len) != 0) {
+    if (host_len == 0 || hl_url_decode(hostport, host_len,
+                                       out->host, sizeof out->host, 0) < 0) {
         set_err(errbuf, errlen, "DSN host missing or too long"); return -1;
     }
 
@@ -164,7 +142,7 @@ int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen)
     if (*tail == '/') {
         const char *db = tail + 1;
         size_t db_len = (qmark ? (size_t)(qmark - db) : strlen(db));
-        if (dsn_decode(out->dbname, sizeof out->dbname, db, db_len) != 0) {
+        if (hl_url_decode(db, db_len, out->dbname, sizeof out->dbname, 0) < 0) {
             set_err(errbuf, errlen, "DSN database name too long"); return -1;
         }
     }
@@ -181,7 +159,7 @@ int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen)
                     strncmp(q, "sslmode", klen) == 0) {
                     const char *v = eq + 1;
                     size_t vlen = pair_len - klen - 1;
-                    if (dsn_decode(out->sslmode, sizeof out->sslmode, v, vlen) != 0) {
+                    if (hl_url_decode(v, vlen, out->sslmode, sizeof out->sslmode, 0) < 0) {
                         set_err(errbuf, errlen, "DSN sslmode too long"); return -1;
                     }
                 }

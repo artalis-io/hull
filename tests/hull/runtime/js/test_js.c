@@ -2764,6 +2764,32 @@ UTEST(js_stdlib, encoding_native_matches_pure)
     cleanup_js_caps();
 }
 
+/* crypto.randomToken: the shape of each format, the bounds, and that two
+ * calls differ. run() returns 0, or the number of the first check that failed. */
+UTEST(js_stdlib, crypto_random_token)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "function run() {\n"
+        "  const t = crypto.randomToken(16);\n"
+        "  if (t.length !== 22 || /[^A-Za-z0-9_-]/.test(t)) return 1;\n"
+        "  if (crypto.randomToken(16) === t) return 2;\n"
+        "  const h = crypto.randomToken(32, 'hex');\n"
+        "  if (h.length !== 64 || /[^0-9a-f]/.test(h)) return 3;\n"
+        "  if (crypto.randomToken(1).length !== 2 || crypto.randomToken(1024).length !== 1366) return 4;\n"
+        "  if (!threw(() => crypto.randomToken(0))) return 5;\n"
+        "  if (!threw(() => crypto.randomToken(1025))) return 6;\n"
+        "  if (!threw(() => crypto.randomToken(16, 'base32'))) return 7;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__token = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__token"), 0);
+    cleanup_js_caps();
+}
+
 /* Regressions from docs/crypto_encoding_ssh_audit.md (PR 1). run() returns 0,
  * or the number of the first check that failed. */
 UTEST(js_stdlib, crypto_encoding_audit_fixes)

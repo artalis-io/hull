@@ -1,5 +1,5 @@
 -- hull.encoding - byte <-> text codecs: hex, base64 (standard and url-safe),
--- base32, and UTF-8. The one home for them in the stdlib; the JS module
+-- base32, UTF-8, and URL percent-encoding. The one home for them in the stdlib; the JS module
 -- (hull:encoding) produces and accepts exactly the same text.
 --
 --   local enc = require("hull.encoding")
@@ -8,6 +8,8 @@
 --   enc.base64.encode(bytes, { url = true })     -- -_ alphabet, unpadded
 --   enc.base64.decode(text, { lenient = true })  -- skips whitespace
 --   enc.base32.encode(bytes)                     -- RFC 4648, unpadded
+--   enc.url.encode(text)                         -- RFC 3986 percent-encoding
+--   enc.url.decode(text, { form = true })        -- '+' is a space
 --
 -- Values are byte strings. Decoding is strict unless asked otherwise: a byte
 -- outside the alphabet, a misplaced or wrong amount of padding, or an
@@ -244,6 +246,57 @@ function M.utf8.decode(bytes)
     check_string("utf8.decode", bytes)
     if not utf8.len(bytes) then return nil, "invalid_utf8" end
     return bytes
+end
+
+-- URL percent-encoding ------------------------------------------------------
+--
+-- RFC 3986: every byte outside the unreserved set (A-Z a-z 0-9 - . _ ~) is
+-- written as %XX, hex in upper case. The one home for it in the stdlib; query
+-- strings, OAuth redirects, otpauth URIs and RFC 5987 header values all go
+-- through here.
+
+M.url = {}
+
+local PCT = {}
+for i = 0, 255 do PCT[i] = string.format("%%%02X", i) end
+
+--- `text` percent-encoded. opts.keep is a string of further ASCII characters
+--- to leave as they are (RFC 5987's attr-char set keeps "!#$&+^`|", say).
+function M.url.encode(text, opts)
+    check_string("url.encode", text)
+    local keep = opts and opts.keep
+    if keep == nil then
+        return (text:gsub("[^A-Za-z0-9%-%._~]", function(c) return PCT[sbyte(c)] end))
+    end
+    check_string("url.encode (keep)", keep)
+    local kept = {}
+    for i = 1, #keep do
+        local b = sbyte(keep, i)
+        if b >= 0x80 then
+            error("encoding.url.encode: keep must be ASCII", 2)
+        end
+        kept[b] = true
+    end
+    return (text:gsub("[^A-Za-z0-9%-%._~]", function(c)
+        local b = sbyte(c)
+        if kept[b] then return c end
+        return PCT[b]
+    end))
+end
+
+--- `text` with its %XX escapes decoded. opts.form also reads '+' as a space
+--- (application/x-www-form-urlencoded). A '%' that does not begin two hex
+--- digits makes the whole value malformed, and it comes back as it is (with
+--- '+' already read as a space in form mode) rather than half-decoded.
+--- Never fails on a string: a URL is often not ours to reject.
+function M.url.decode(text, opts)
+    check_string("url.decode", text)
+    if opts and opts.form then text = (text:gsub("+", " ")) end
+    if not text:find("%", 1, true) then return text end
+    for pos in text:gmatch("()%%") do
+        if not text:find("^%x%x", pos + 1) then return text end
+    end
+    return (text:gsub("%%(%x%x)", function(h) return schar(tonumber(h, 16)) end))
 end
 
 return M

@@ -197,5 +197,50 @@ test("bytes: byte strings and buffers convert both ways", () => {
     assertThrows(() => bytes.fromBuffer("x"), "string is not a buffer");
 });
 
+// url -------------------------------------------------------------------------
+// The same vectors as the Lua suite; the text here is UTF-8 bytes there.
+
+test("url: RFC 3986 unreserved stays, everything else is %XX upper case", () => {
+    const { url } = encoding;
+    assertEq(url.encode(""), "");
+    assertEq(url.encode("AZaz09-._~"), "AZaz09-._~");
+    assertEq(url.encode("a b/c?d=e&f"), "a%20b%2Fc%3Fd%3De%26f");
+    assertEq(url.encode("!'()*+"), "%21%27%28%29%2A%2B");
+    assertEq(url.encode("h\u00e9"), "h%C3%A9");
+    assertEq(url.encode("\u20ac"), "%E2%82%AC");
+});
+
+test("url: keep leaves further ASCII characters alone", () => {
+    const { url } = encoding;
+    assertEq(url.encode("a!#$&+^`|b c", { keep: "!#$&+^`|" }), "a!#$&+^`|b%20c");
+    assertThrows(() => url.encode("x", { keep: "\u00e9" }), "non-ASCII keep");
+});
+
+test("url: decode reads escapes in either case, and '+' only in form mode", () => {
+    const { url } = encoding;
+    assertEq(url.decode("a%20b%2fc%2F"), "a b/c/");
+    assertEq(url.decode("a+b"), "a+b");
+    assertEq(url.decode("a+b%2B", { form: true }), "a b+");
+    assertEq(url.decode("h%C3%A9"), "h\u00e9");
+    assertEq(url.decode("plain \u00e9"), "plain \u00e9");
+});
+
+test("url: a malformed escape, or escapes that are not UTF-8, leave the value as it is", () => {
+    const { url } = encoding;
+    assertEq(url.decode("a%2"), "a%2");
+    assertEq(url.decode("%zz%41"), "%zz%41");
+    assertEq(url.decode("100%"), "100%");
+    assertEq(url.decode("x+%g1", { form: true }), "x %g1");
+    assertEq(url.decode("%FF"), "%FF");
+});
+
+test("url: text round trips", () => {
+    const { url } = encoding;
+    const t = "a b/\u00e9\u20ac\ud83d\ude00~";
+    assertEq(url.decode(url.encode(t)), t);
+    assertThrows(() => url.encode(null), "non-string");
+    assertThrows(() => url.decode(42), "non-string");
+});
+
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;

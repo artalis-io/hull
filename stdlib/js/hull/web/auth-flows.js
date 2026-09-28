@@ -151,7 +151,7 @@ function issueToken(userId, action, ttl, extra) {
         sub:    userId,
         action: action,
         exp:    time.now() + ttl,
-        nonce:  encoding.base64.encode(crypto.random(16), { url: true }),
+        nonce:  crypto.randomToken(16),
     };
     if (extra) {
         for (const k in extra) {
@@ -445,9 +445,7 @@ function parseBody(req) {
         const eq = pairs[i].indexOf("=");
         if (eq >= 0) {
             const k = pairs[i].substring(0, eq);
-            let v = pairs[i].substring(eq + 1).replace(/\+/g, " ");
-            try { v = decodeURIComponent(v); } catch (_e) { /* keep raw */ }
-            out[k] = v;
+            out[k] = encoding.url.decode(pairs[i].substring(eq + 1), { form: true });
         }
     }
     return out;
@@ -1052,7 +1050,7 @@ function standardUsers(opts) {
     // reserved word ("user", "order") or a future MySQL backend (backtick) is
     // safe. The default connection's backend is known by the time this runs.
     const tbl = db.quoteIdentifier(opts.table || "users");
-    const idGen = opts.idGen || (() => encoding.hex.encode(crypto.random(16)));
+    const idGen = opts.idGen || (() => crypto.randomToken(16, "hex"));
 
     function row(r) {
         if (!r) return null;

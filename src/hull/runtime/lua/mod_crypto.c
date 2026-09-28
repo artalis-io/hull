@@ -7,6 +7,7 @@
 #include "hull/cap/crypto.h"
 #include "hull/cap/env.h"
 #include "hull/limits/core.h"
+#include "../../utils/base64.h"
 #include "../../utils/hex.h"
 
 #include <sh_arena.h>
@@ -84,6 +85,33 @@ static int lua_crypto_random(lua_State *L)
         return luaL_error(L, "random failed");
 
     lua_pushlstring(L, (const char *)buf, (size_t)n);
+    return 1;
+}
+
+/* crypto.random_token(n [, "hex"]) -> an unguessable token: n random bytes
+ * as unpadded base64url (the default; safe in URLs, cookies and file names)
+ * or lowercase hex. The one way the stdlib makes ids, nonces, CSRF secrets
+ * and session tokens, so none of them hand-roll the encoding. n is 1-1024. */
+static int lua_crypto_random_token(lua_State *L)
+{
+    lua_Integer n = luaL_checkinteger(L, 1);
+    const char *fmt = luaL_optstring(L, 2, "base64url");
+    int hex = strcmp(fmt, "hex") == 0;
+    if (!hex && strcmp(fmt, "base64url") != 0)
+        return luaL_error(L, "crypto.random_token: format must be \"base64url\" or \"hex\"");
+    if (n <= 0 || n > HL_RANDOM_TOKEN_MAX)
+        return luaL_error(L, "crypto.random_token: bytes must be 1-%d", HL_RANDOM_TOKEN_MAX);
+
+    uint8_t raw[HL_RANDOM_TOKEN_MAX];
+    char out[HL_RANDOM_TOKEN_MAX * 2 + 1];
+    if (hl_cap_crypto_random(raw, (size_t)n) != 0)
+        return luaL_error(L, "random failed");
+    int len = hex
+        ? (hl_hex_encode(raw, (size_t)n, out, sizeof out) == 0 ? (int)n * 2 : -1)
+        : hl_base64_encode(raw, (size_t)n, out, sizeof out, HL_BASE64_URL | HL_BASE64_NOPAD);
+    if (len < 0)
+        return luaL_error(L, "crypto.random_token: encode failed");
+    lua_pushlstring(L, out, (size_t)len);
     return 1;
 }
 
@@ -1348,6 +1376,7 @@ static const luaL_Reg crypto_funcs[] = {
     {"sha512",            lua_crypto_sha512},
     {"sha1",              lua_crypto_sha1},
     {"random",            lua_crypto_random},
+    {"random_token",      lua_crypto_random_token},
     {"hash_password",     lua_crypto_hash_password},
     {"verify_password",   lua_crypto_verify_password},
     {"ed25519_keypair",   lua_crypto_ed25519_keypair},

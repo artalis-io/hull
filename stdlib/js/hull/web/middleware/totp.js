@@ -234,8 +234,7 @@ function decryptSecret(blob, encrypted) {
 }
 
 function urlenc(s) {
-    return encodeURIComponent(s).replace(/[!'()*]/g, (c) =>
-        "%" + c.charCodeAt(0).toString(16).toUpperCase());
+    return encoding.url.encode(String(s));
 }
 
 function buildOtpauthUrl(userId, secretB32) {

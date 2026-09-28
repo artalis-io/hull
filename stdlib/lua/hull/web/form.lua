@@ -3,15 +3,11 @@
 -- @module hull.web.form
 -- @license AGPL-3.0-or-later
 
+local encoding = require("hull.encoding")
+
 local form = {}
 
---- Decode a percent-encoded byte (%XX) to its character.
--- Returns the original sequence if the hex digits are invalid.
-local function decode_percent(hex)
-    local n = tonumber(hex, 16)
-    if n then return string.char(n) end
-    return "%" .. hex
-end
+local FORM = { form = true }
 
 --- Parse a URL-encoded form body into a key-value table.
 --
@@ -51,9 +47,8 @@ function form.parse(body, opts)
 
             -- Skip empty keys
             if key ~= "" then
-                -- Decode + to space, then percent-encoded bytes
-                key = key:gsub("+", " "):gsub("%%(%x%x)", decode_percent)
-                value = value:gsub("+", " "):gsub("%%(%x%x)", decode_percent)
+                key = encoding.url.decode(key, FORM)
+                value = encoding.url.decode(value, FORM)
                 result[key] = value
             end
         end

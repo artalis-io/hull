@@ -421,7 +421,7 @@ static const HlModuleSpec REGISTRY[] = {
          * no new authority. */
         .name = "hull/uuid",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = 0, .deps = {"hull/crypto", "hull/time", 0},
+        .required_caps = 0, .deps = {"hull/crypto", "hull/encoding", "hull/time", 0},
     },
     {
         .name = "hull/validate",
@@ -444,7 +444,7 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/attachment-serve",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = 0,
-        .deps = {"hull/attachment", "hull/blob", "hull/http-server", 0},
+        .deps = {"hull/attachment", "hull/blob", "hull/encoding", "hull/http-server", 0},
     },
     {
         /* Auth-flow recipes: registration, email-verify, login,
@@ -518,7 +518,7 @@ static const HlModuleSpec REGISTRY[] = {
     {
         .name = "hull/web/form",
         .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = 0, .deps = {0},
+        .required_caps = 0, .deps = {"hull/encoding", 0},
     },
     {
         /* HTMX request inspection + response-header helpers. Pure

@@ -1,6 +1,6 @@
 /*
  * hull:encoding - byte <-> text codecs: hex, base64 (standard and url-safe),
- * base32, and UTF-8. JS twin of hull.encoding; both produce and accept
+ * base32, UTF-8, and URL percent-encoding. JS twin of hull.encoding; both produce and accept
  * exactly the same text.
  *
  *   import { encoding } from "hull:encoding";
@@ -11,6 +11,8 @@
  *   encoding.base32.encode(bytes)                     // RFC 4648, unpadded
  *   encoding.utf8.encode("héllo")                     // text -> UTF-8 bytes
  *   encoding.utf8.decode(bytes)                       // UTF-8 bytes -> text | null
+ *   encoding.url.encode("a b/é")                      // "a%20b%2F%C3%A9"
+ *   encoding.url.decode(text, { form: true })         // '+' is a space
  *
  * Bytes are a BYTE STRING (one character per byte, 0..255), an ArrayBuffer,
  * a typed array or a DataView; decoders return a byte string. A string with
@@ -350,5 +352,72 @@ const utf8 = {
     },
 };
 
-export const encoding = { hex, base64, base32, utf8, bytes };
+// URL percent-encoding -------------------------------------------------------
+//
+// RFC 3986: every byte of the text's UTF-8 outside the unreserved set
+// (A-Z a-z 0-9 - . _ ~) is written as %XX, hex in upper case. Unlike the other
+// families this one takes and returns TEXT, because a URL is text: encode
+// escapes the UTF-8 bytes, decode reads them back as UTF-8. On any UTF-8 input
+// it produces exactly what hull.encoding.url does in Lua.
+
+const PCT_HEX = "0123456789ABCDEF";
+
+function isUnreserved(b) {
+    return (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || (b >= 0x30 && b <= 0x39)
+        || b === 0x2d || b === 0x2e || b === 0x5f || b === 0x7e;
+}
+
+const url = {
+    /**
+     * `text` percent-encoded. opts.keep is a string of further ASCII
+     * characters to leave as they are (RFC 5987's attr-char set keeps
+     * "!#$&+^`|", say).
+     */
+    encode(text, opts) {
+        checkString("url.encode", text);
+        let kept = null;
+        if (opts && opts.keep !== undefined && opts.keep !== null) {
+            checkString("url.encode (keep)", opts.keep);
+            kept = new Uint8Array(128);
+            for (let i = 0; i < opts.keep.length; i++) {
+                const c = opts.keep.charCodeAt(i);
+                if (c >= 0x80) fail("url.encode", "keep must be ASCII");
+                kept[c] = 1;
+            }
+        }
+        const b = utf8.encode(text);
+        const out = new Codes();
+        for (let i = 0; i < b.length; i++) {
+            const c = b.charCodeAt(i);
+            if (isUnreserved(c) || (kept && c < 0x80 && kept[c])) {
+                out.push(c);
+            } else {
+                out.push(37);                          // '%'
+                out.push(PCT_HEX.charCodeAt(c >> 4));
+                out.push(PCT_HEX.charCodeAt(c & 15));
+            }
+        }
+        return out.done();
+    },
+
+    /**
+     * `text` with its %XX escapes decoded as UTF-8. opts.form also reads '+'
+     * as a space. A '%' that does not begin two hex digits, or escapes that
+     * are not UTF-8, make the value malformed, and it comes back as it is
+     * (with '+' already read as a space in form mode). Never throws on a
+     * string: a URL is often not ours to reject.
+     */
+    decode(text, opts) {
+        checkString("url.decode", text);
+        if (opts && opts.form) text = text.split("+").join(" ");
+        if (text.indexOf("%") < 0) return text;
+        if (/%(?![0-9A-Fa-f]{2})/.test(text)) return text;
+        const bytes = utf8.encode(text).replace(/%([0-9A-Fa-f]{2})/g,
+            (_, h) => String.fromCharCode(parseInt(h, 16)));
+        const back = utf8.decode(bytes);
+        return back === null ? text : back;
+    },
+};
+
+export const encoding = { hex, base64, base32, utf8, url, bytes };
 export default encoding;

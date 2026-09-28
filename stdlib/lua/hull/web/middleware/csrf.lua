@@ -23,13 +23,9 @@ local cookie = require("hull.web.cookie")
 
 local csrf = {}
 
---- URL-decode a percent-encoded string (e.g. form body values).
+--- URL-decode a form-encoded value.
 local function url_decode(s)
-    s = s:gsub("+", " ")
-    s = s:gsub("%%(%x%x)", function(hex)
-        return string.char(tonumber(hex, 16))
-    end)
-    return s
+    return encoding.url.decode(s, { form = true })
 end
 
 

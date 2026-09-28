@@ -44,6 +44,7 @@
 /* ── Crypto ─────────────────────────────────────────────────────────── */
 
 #define HL_RANDOM_MAX_BYTES   65536             /* crypto.random() max */
+#define HL_RANDOM_TOKEN_MAX   1024              /* crypto.random_token() max bytes */
 #define HL_PBKDF2_ITERATIONS  100000
 
 /* ── SMTP client ───────────────────────────────────────────────────── */

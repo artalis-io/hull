@@ -8,10 +8,12 @@
  * @license AGPL-3.0-or-later
  */
 
+import { encoding } from "hull:encoding";
+
+const FORM = { form: true };
+
 function decodePart(s) {
-    const decoded = s.split("+").join(" ");
-    try { return decodeURIComponent(decoded); }
-    catch (e) { return decoded; }
+    return encoding.url.decode(s, FORM);
 }
 
 /**
