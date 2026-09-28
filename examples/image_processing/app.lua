@@ -10,11 +10,13 @@
 --       curl localhost:3000/info
 
 local image = require("hull.image")
+local encoding = require("hull.encoding")
 
 app.manifest({
     modules = {
-    "hull/http-server@1",
+        "hull/http-server@1",
         "hull/image@1",
+        "hull/encoding@1",
     },
 })
 
@@ -50,11 +52,6 @@ app.get("/create", function(req, res)
         return
     end
 
-    -- Encode PNG bytes as hex for JSON transport
-    local hex = {}
-    for i = 1, #png_data do
-        hex[#hex + 1] = string.format("%02x", string.byte(png_data, i))
-    end
 
     res:json({
         ok = true,
@@ -63,7 +60,7 @@ app.get("/create", function(req, res)
         format = img:format(),
         pixel_size = img:size(),
         png_size = #png_data,
-        png_hex = table.concat(hex),
+        png_hex = encoding.hex.encode(png_data),   -- hex for JSON transport
     })
 
     img:close()

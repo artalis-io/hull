@@ -10,6 +10,7 @@
 --   - Retry with exponential backoff via outbox.flush()
 
 local crypto      = require("hull.crypto")
+local encoding    = require("hull.encoding")
 local db          = require("hull.db").default()
 local env         = require("hull.env")
 local time        = require("hull.time")
@@ -29,6 +30,7 @@ app.manifest({
         "hull/json@1",
         "hull/log@1",
         "hull/crypto@1",
+        "hull/encoding@1",
         "hull/db@1",
         "hull/env@1",
         "hull/http-client@1",
@@ -58,16 +60,8 @@ app.use_post("POST", "/events", idempotency.middleware())
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 
---- Convert a string to hex for use as HMAC key.
-local function str_to_hex(s)
-    local hex = {}
-    for i = 1, #s do
-        hex[i] = string.format("%02x", string.byte(s, i))
-    end
-    return table.concat(hex)
-end
-
-local SECRET_HEX = str_to_hex(SIGNING_SECRET)
+-- crypto.hmac_sha256 takes its key as hex.
+local SECRET_HEX = encoding.hex.encode(SIGNING_SECRET)
 
 --- Sign a payload string with HMAC-SHA256, return hex signature.
 local function sign_payload(payload_str)

@@ -11,6 +11,7 @@
 
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
 import { log } from "hull:log";
@@ -31,6 +32,7 @@ app.manifest({
         "hull/log@1",
         "hull/web/cookie@1",
         "hull/crypto@1",
+        "hull/encoding@1",
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
@@ -156,13 +158,7 @@ function handleFederatedMessage(data) {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-function toHex(buf) {
-    const bytes = new Uint8Array(buf);
-    let hex = "";
-    for (let i = 0; i < bytes.length; i++)
-        hex += bytes[i].toString(16).padStart(2, "0");
-    return hex;
-}
+const toHex = encoding.hex.encode;
 
 function requireSession(req, res) {
     if (!req.ctx || !req.ctx.session) {
