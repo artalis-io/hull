@@ -104,10 +104,22 @@ function M.build(offer, cookie)
         error("ssh.kexinit: cookie must be exactly 16 bytes", 2)
     end
     local o = offer or M.DEFAULT_OFFER
+    -- Our strict-KEX marker is always sent, whatever the caller's offer says:
+    -- it is the Terrapin mitigation, not a preference, and an offer that
+    -- happened to leave it out would have quietly dropped it. (It also means
+    -- the server's marker alone is enough to know that BOTH sides are strict;
+    -- see server_is_strict.)
+    local kex = {}
+    for i, name in ipairs(o.kex) do kex[i] = name end
+    local has_marker = false
+    for _, name in ipairs(kex) do
+        if name == M.STRICT_C then has_marker = true end
+    end
+    if not has_marker then kex[#kex + 1] = M.STRICT_C end
     local w = wire.writer()
     w:byte(M.SSH_MSG_KEXINIT)
     w:raw(cookie)
-    w:namelist(o.kex)
+    w:namelist(kex)
     w:namelist(o.host_key)
     w:namelist(o.cipher)          -- client to server
     w:namelist(o.cipher)          -- server to client
@@ -168,7 +180,8 @@ function M.choose(client_list, server_list)
     return nil
 end
 
--- Whether the peer will enforce strict KEX.
+-- Whether the peer will enforce strict KEX. Its marker is enough: build()
+-- always sends ours, so the peer's marker means both sides are strict.
 function M.server_is_strict(server)
     for _, name in ipairs(server.kex or {}) do
         if name == M.STRICT_S then return true end

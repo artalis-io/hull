@@ -183,10 +183,12 @@ function M.parse(payload)
         if what == "exit-status" then
             out.exit_status = r:uint32()
         elseif what == "exit-signal" then
-            out.signal = r:string()
+            -- Peer text, bound for the app and probably its logs: cleaned of
+            -- control characters here, once, before anything can print it.
+            out.signal = wire.safe_name(r:string())
             out.core_dumped = r:boolean()
-            out.error_message = r:string()
-            out.language = r:string()
+            out.error_message = wire.safe_text(r:string())
+            out.language = wire.safe_name(r:string())
         end
         -- Any other request type is returned unparsed rather than refused: a
         -- server may send things we do not act on, and hanging up on one

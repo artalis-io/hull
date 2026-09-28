@@ -263,8 +263,10 @@ function M.parse(payload)
         local count = r:uint32()
         local names = {}
         for i = 1, count do
+            -- The filename stays exact (it names a file); longname is display
+            -- text from the peer, so it is cleaned to one safe line.
             local filename = r:string()
-            local longname = r:string()
+            local longname = wire.safe_name(r:string(), 1024)
             names[i] = { filename = filename, longname = longname,
                          attrs = M.decode_attrs(r) }
         end

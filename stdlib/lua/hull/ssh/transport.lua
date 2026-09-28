@@ -41,6 +41,10 @@ local STDIN_MAX = 128 * 1024
 -- can be reused.
 local CHANNEL_DRAIN_MS = 5000
 
+-- The most channel data held back while a rekey WE started waits for the
+-- peer's KEXINIT (see defer_message). Far below the Lua heap limit.
+local DEFER_MAX_BYTES = 8 * 1024 * 1024
+
 local packet     = require('hull.ssh.packet')
 local kexinit    = require('hull.ssh.kexinit')
 local kex        = require('hull.ssh.kex')
@@ -96,7 +100,10 @@ function M.new(stream, crypto, opts)
         unanswered    = 0,        -- keepalives sent since the server last spoke
         stream = stream,
         crypto = crypto,
-        ident = "SSH-2.0-" .. (opts.software or "Hull"),
+        -- build_ident validates the software string: it is sent in the clear
+        -- AND hashed into the exchange, so a CR/LF or space in it would
+        -- corrupt both. Stored without the CR LF, which is sent separately.
+        ident = packet.build_ident(opts.software or "Hull"):sub(1, -3),
         inbuf = "",
         next_channel = 0,
         rekeys = 0,
@@ -356,8 +363,16 @@ function Transport:next_message(strict)
 end
 
 -- The next message off the WIRE, with transport chatter filtered.
+--
+-- No cap on how much chatter it skips. Every pass needs a packet from the
+-- peer, so this cannot spin by itself; a peer that sends only chatter is no
+-- different from a slow one, and the caller's deadline (exec timeout_ms, the
+-- connect timeout) and the idle timeout bound that. A count did harm instead:
+-- keepalives ARE chatter - the replies to ours, a server's own
+-- keepalive@openssh.com requests, the IGNOREs some servers send - so a quiet
+-- exec or SFTP wait died after 256 of them, about two hours.
 function Transport:read_message(strict)
-    for _ = 1, 256 do
+    while true do
         local p = self:read_packet()
         local m = p:byte(1)
 
@@ -411,7 +426,6 @@ function Transport:read_message(strict)
             return p
         end
     end
-    error("ssh: too many transport messages without progress")
 end
 
 -- The next message OFF THE WIRE must be exactly `want`. Key exchange only.
@@ -488,9 +502,23 @@ function Transport:run_kex(opts, i_s)
             -- than failing on it (see defer_message); from the peer's own
             -- KEXINIT onward, RFC 4253 section 9 permits only key-exchange
             -- traffic, so nothing after this point needs deferring.
+            -- Bounded by BYTES, not a count: packets can be 35000 bytes each,
+            -- and only channel traffic (types 90-100) is legal here at all.
+            local held = 0
             for _ = 1, 4096 do
                 local p = self:read_message()
-                if p:byte(1) == SSH_MSG_KEXINIT then i_s = p; break end
+                local m = p:byte(1)
+                if m == SSH_MSG_KEXINIT then i_s = p; break end
+                if m < 90 or m > 100 then
+                    return nil, { code = "unexpected_message",
+                                  detail = "message " .. m .. " before the peer's KEXINIT" }
+                end
+                held = held + #p
+                if held > DEFER_MAX_BYTES then
+                    return nil, { code = "no_kexinit_response",
+                                  detail = "more than " .. DEFER_MAX_BYTES
+                                           .. " bytes before the peer's KEXINIT" }
+                end
                 self:defer_message(p)
             end
             if not i_s then
@@ -778,7 +806,9 @@ end
 --
 -- Bounded, and tolerant of a read that fails: this runs on a path that is
 -- already handling a failure, and must not turn it into a hang or a second
--- error that buries the first.
+-- error that buries the first. If the bound is reached the channel is still
+-- open and its messages still coming, so the CONNECTION is closed: the next
+-- operation then fails as "closed" instead of receiving this channel's data.
 function Transport:drain_channel(ch)
     if ch.closed then return end
     for _ = 1, 10000 do
@@ -791,6 +821,7 @@ function Transport:drain_channel(ch)
             if m.type == "close" then return end
         end
     end
+    self:close()
 end
 
 -- Close channel `ch` from our side and read it through to the peer's CLOSE.
@@ -958,7 +989,11 @@ function Transport:exec(command, opts)
             end
         end
 
-        for _ = 1, 1000000 do
+        -- Until the peer closes the channel, however long a command streams:
+        -- every pass needs a message from the peer, and opts.timeout_ms bounds
+        -- the time. (A count here ended a long `journalctl -f` as if it had
+        -- finished.)
+        while true do
             local m = pump()
             if overflow then
                 return { code = "output_too_large", limit = limit }

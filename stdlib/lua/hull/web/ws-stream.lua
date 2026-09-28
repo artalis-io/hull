@@ -309,7 +309,7 @@ end
 -- Pull frames until at least one byte of application data is buffered, or the
 -- peer closes. Control frames are handled here and never surface.
 function Stream:_pump()
-    while #self.out == 0 and not self.closed do
+    while self.opos > #self.out and not self.closed do
         -- Ask for the header, then for exactly the frame it describes. Nothing
         -- is appended onto a growing buffer, so a peer that dribbles a 16 KiB
         -- frame out a byte at a time costs 16 KiB of copying, not megabytes.
@@ -342,7 +342,8 @@ function Stream:_pump()
             -- A byte stream does not care where the peer put its frame
             -- boundaries, so fragmentation needs no reassembly state: every
             -- data payload is simply more bytes.
-            self.out = self.out .. frame.payload
+            -- _pump runs only once `out` is used up, so this replaces it.
+            self.out, self.opos = frame.payload, 1
         elseif op == M.OP_PING then
             -- Answering is required (section 5.5.2), and a peer that pings to
             -- check liveness will hang up if we do not.
@@ -389,14 +390,17 @@ end
 
 function Stream:read(n)
     if n <= 0 then return "" end
-    if #self.out == 0 then
+    if self.opos > #self.out then
         local ok, err, code = self:_pump()
         if not ok then return nil, err, code end
     end
-    if #self.out == 0 then return "" end       -- closed, nothing buffered
-    local take = n < #self.out and n or #self.out
-    local s = ssub(self.out, 1, take)
-    self.out = ssub(self.out, take + 1)
+    -- Served from an offset rather than by cutting the front off: a payload
+    -- read four bytes at a time would otherwise be copied once per read.
+    local left = #self.out - self.opos + 1
+    if left <= 0 then return "" end            -- closed, nothing buffered
+    local take = n < left and n or left
+    local s = ssub(self.out, self.opos, self.opos + take - 1)
+    self.opos = self.opos + take
     return s
 end
 
@@ -498,6 +502,7 @@ function M.connect(stream, opts)
         random   = opts.random,
         inbuf    = rest,        -- the peer may have framed data immediately
         out      = "",
+        opos     = 1,
         readsize = opts.readsize or 8192,
         closed   = false,
         close_sent = false,

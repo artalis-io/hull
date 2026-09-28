@@ -17,9 +17,10 @@
 --   * patterns ("*.example.com", "!bastion") - a name matches only itself, so
 --     a host covered only by a pattern is simply unknown, never wrongly
 --     trusted;
---   * @cert-authority and @revoked lines - certificates are not implemented;
---     a key listed only as revoked is not trusted either, since it is not
---     listed as a host key.
+--   * @cert-authority lines - certificates are not implemented.
+--
+-- @revoked lines ARE honoured, by revoked_blob below: a revoked key is refused
+-- even when a plain line for the same key trusts it.
 
 local base64 = require('hull.encoding').base64
 local wire   = require('hull.ssh.wire')
@@ -63,6 +64,19 @@ function M.parse_line(line)
         if #e.names == 0 then return nil end
     end
     return e
+end
+
+-- The key a "@revoked hosts keytype base64-key" line revokes, or nil. The key
+-- is revoked for EVERY host, not only the names on its line: revocation is
+-- about the key, and being stricter than the line fails safe. (A hashed or
+-- pattern host list on a @revoked line therefore needs no understanding.)
+function M.revoked_blob(line)
+    local s = line:gsub("^%s+", ""):gsub("%s+$", "")
+    local keytype, b64 = s:match("^@revoked%s+%S+%s+(%S+)%s+(%S+)")
+    if not keytype then return nil end
+    local blob = base64.decode(b64)
+    if not blob or blob == "" or M.blob_type(blob) ~= keytype then return nil end
+    return blob
 end
 
 -- Whether entry `e` is for store name `name`. `hmac_sha1(key, msg)` returns the

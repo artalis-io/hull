@@ -33,6 +33,14 @@ M.END        = "-----END OPENSSH PRIVATE KEY-----"
 M.ALGORITHM  = "ssh-ed25519"
 
 -- Strip the armour and decode the body.
+-- The failures a caller acts on differently carry a code: hull.ssh maps them
+-- to its reason table rather than guessing from the message. The message is
+-- still what tostring() gives, so logs and tests read the same text.
+local Coded = { __tostring = function(e) return e.detail end }
+local function raise(code, msg)
+    error(setmetatable({ code = code, detail = msg }, Coded), 0)
+end
+
 function M.unarmour(text)
     if type(text) ~= "string" then
         error("ssh.privatekey: expected the file contents as a string", 2)
@@ -40,9 +48,12 @@ function M.unarmour(text)
     local b = text:find(M.BEGIN, 1, true)
     if not b then
         -- The most useful thing to say is which format this ISN'T, because
-        -- the usual cause is a PEM key from another tool.
-        error("ssh.privatekey: not an OpenSSH private key "
-              .. "(no " .. M.BEGIN .. " line); PEM and PKCS#8 keys are not supported")
+        -- the usual cause is a PEM key from another tool. Only something that
+        -- looks like one is unsupported_key_type; anything else is a bad key.
+        local msg = "ssh.privatekey: not an OpenSSH private key "
+              .. "(no " .. M.BEGIN .. " line); PEM and PKCS#8 keys are not supported"
+        if text:find("-----BEGIN ", 1, true) then raise("unsupported_key_type", msg) end
+        error(msg, 0)
     end
     local e = text:find(M.END, b, true)
     if not e then
@@ -93,8 +104,8 @@ local function parse_private(blob)
 
     local algo = r:string()
     if algo ~= M.ALGORITHM then
-        error("ssh.privatekey: unsupported key type " .. tostring(algo)
-              .. "; only " .. M.ALGORITHM .. " is supported")
+        raise("unsupported_key_type", "ssh.privatekey: unsupported key type "
+              .. wire.safe_name(tostring(algo)) .. "; only " .. M.ALGORITHM .. " is supported")
     end
 
     local public = r:string()
@@ -164,8 +175,9 @@ local CIPHER_IV_LEN  = 16
 function M.decrypt_private(container, opts)
     opts = opts or {}
     if container.cipher ~= M.CIPHER or container.kdf ~= M.KDF then
-        error("ssh.privatekey: unsupported protection (cipher "
-              .. tostring(container.cipher) .. ", kdf " .. tostring(container.kdf)
+        raise("unsupported_key_type", "ssh.privatekey: unsupported protection (cipher "
+              .. wire.safe_name(tostring(container.cipher)) .. ", kdf "
+              .. wire.safe_name(tostring(container.kdf))
               .. "); Hull reads " .. M.CIPHER .. " with " .. M.KDF
               .. ". Convert it with: ssh-keygen -p -f <file>")
     end
@@ -175,12 +187,12 @@ function M.decrypt_private(container, opts)
     -- and the more actionable message - and because there is no reason to
     -- parse a key we have already been told we cannot open.
     if not opts.passphrase_env and not opts.passphrase then
-        error("ssh.privatekey: the key is encrypted; pass a passphrase as "
+        raise("passphrase_required", "ssh.privatekey: the key is encrypted; pass a passphrase as "
               .. "opts.passphrase_env = \"VAR\" (preferred - the value never "
               .. "becomes a Lua string) or opts.passphrase = \"...\"")
     end
     if opts.passphrase == "" then
-        error("ssh.privatekey: the key is encrypted but the passphrase is empty")
+        raise("passphrase_required", "ssh.privatekey: the key is encrypted but the passphrase is empty")
     end
 
     -- kdfoptions is itself a length-prefixed blob: salt, then rounds. Read
@@ -260,7 +272,7 @@ function M.load(text, opts)
     local ok, key = pcall(parse_private, blob)
     if not ok then
         if container.encrypted then
-            error("ssh.privatekey: wrong passphrase (or the key is damaged)")
+            raise("bad_passphrase", "ssh.privatekey: wrong passphrase (or the key is damaged)")
         end
         error(key)
     end

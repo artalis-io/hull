@@ -52,6 +52,7 @@
 -- is the same as having no trust store.
 
 local transport  = require('hull.ssh.transport')
+local packet     = require('hull.ssh.packet')
 local privatekey = require('hull.ssh.privatekey')
 local hostkey    = require('hull.ssh.hostkey')
 local kex        = require('hull.ssh.kex')
@@ -95,7 +96,10 @@ end
 ---
 --- The file is read on every lookup, so a key accepted or removed with the
 --- `ssh` tool is seen by the next connect. A file that does not exist yet is
---- an empty store; it is created by the first accept.
+--- an empty store; it is created by the first accept. Any OTHER read failure
+--- raises `store_failed`: treating it as an empty store would report every
+--- host as unknown, and the next accept would rewrite the file from nothing.
+--- @revoked lines are honoured (see hull.ssh.known_hosts).
 function M.file_store(path, opts)
     opts = opts or {}
     local fs     = opts.fs or require('hull.fs')
@@ -107,7 +111,10 @@ function M.file_store(path, opts)
         return enc.hex.decode(crypto.hmac_sha1(msg, enc.hex.encode(key)))
     end
     local function load()
-        return fs.read(path) or ""
+        local text, err = fs.read(path)
+        if text then return text end
+        if err == "not_found" then return "" end
+        error({ code = "store_failed", detail = tostring(err) }, 0)
     end
     local function save(text)
         local ok, err = fs.write(path, text)
@@ -139,6 +146,13 @@ function M.file_store(path, opts)
         end,
         forget = function(name)
             save(kh.without(load(), name, hmac))
+        end,
+        -- Whether `blob` is revoked by an @revoked line.
+        revoked = function(blob)
+            for line in load():gmatch("[^\n]+") do
+                if kh.revoked_blob(line) == blob then return true end
+            end
+            return false
         end,
         -- Plain entries only: a hashed name cannot be listed, by design.
         entries = function()
@@ -250,17 +264,14 @@ local function guard(fn, ...)
 end
 
 -- A key file that could not be loaded, by what the caller would do about it.
--- hull.ssh.privatekey raises prose; these three phrases are its own, and its
--- tests pin them.
+-- hull.ssh.privatekey raises the actionable cases with a code
+-- (passphrase_required, bad_passphrase, unsupported_key_type); anything else
+-- is a damaged or malformed key.
 local function key_error(e)
-    local msg = tostring(e)
-    if msg:find("wrong passphrase", 1, true) then
-        return { code = "bad_passphrase", detail = msg }
+    if type(e) == "table" and e.code then
+        return { code = e.code, detail = e.detail }
     end
-    if msg:find("is encrypted", 1, true) then
-        return { code = "passphrase_required", detail = msg }
-    end
-    return { code = "bad_key", detail = msg }
+    return { code = "bad_key", detail = tostring(e) }
 end
 
 local Conn = {}
@@ -472,6 +483,7 @@ end
 ---
 ---   { code = "host_unknown", fingerprint = ... }
 ---   { code = "host_changed", fingerprint = ..., stored_fingerprint = ... }
+---   { code = "host_revoked", fingerprint = ... }   the store revokes the key
 ---   { code = "auth_failed",  methods = {...} }
 ---   { code = "denied",       detail = ... }      manifest refused it
 ---
@@ -511,6 +523,12 @@ function M.connect(opts)
     -- server that accepts the socket and then stalls in any of them runs it
     -- out, rather than holding the caller forever.
     local timeout = opts.timeout_ms or M.CONNECT_TIMEOUT_MS
+    if opts.software ~= nil then
+        local sok, why = pcall(packet.build_ident, opts.software)
+        if not sok then
+            return nil, { code = "bad_software", detail = tostring(why) }
+        end
+    end
 
     -- The stream is obtained ONLY after the manifest check inside the
     -- binding, and only the SSH stdlib can obtain one at all.
@@ -592,15 +610,27 @@ end
 --- host AND port it was met on, as in OpenSSH's known_hosts.
 function M.accept_host(trust, host, key_blob, port)
     local name = hostkey.store_name(host, port)
-    -- Refusing to overwrite is the point of trust-on-first-use; it is an
-    -- answer, not a crash, so it comes back like every other refusal.
-    if type(trust) == "table" and type(trust.get) == "function"
-       and trust.get(name) ~= nil then
-        return nil, { code = "already_trusted", detail = name
-                      .. " already has a stored key; forget_host it first" }
-    end
-    -- Through guard: a file store that cannot write says `store_failed`.
-    return guard(hostkey.accept_new, trust, name, key_blob)
+    -- All of it through guard, the store's reads included: a store that cannot
+    -- read or write answers `store_failed` (or its own code), never a raise.
+    return guard(function()
+        if type(key_blob) ~= "string" or not pcall(hostkey.parse_key, key_blob) then
+            error({ code = "host_key_invalid",
+                    detail = "not an ssh-ed25519 public key blob" }, 0)
+        end
+        if type(trust) == "table" and type(trust.revoked) == "function"
+           and trust.revoked(key_blob) then
+            error({ code = "host_revoked",
+                    detail = "the trust store revokes this key" }, 0)
+        end
+        -- Refusing to overwrite is the point of trust-on-first-use; it is an
+        -- answer, not a crash, so it comes back like every other refusal.
+        if type(trust) == "table" and type(trust.get) == "function"
+           and trust.get(name) ~= nil then
+            error({ code = "already_trusted", detail = name
+                    .. " already has a stored key; forget_host it first" }, 0)
+        end
+        return hostkey.accept_new(trust, name, key_blob)
+    end)
 end
 
 function M.forget_host(trust, host, port)

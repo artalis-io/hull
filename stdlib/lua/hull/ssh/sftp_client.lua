@@ -43,17 +43,25 @@ function M.open(t)
     local ch, cerr = t:open_session()
     if not ch then return nil, cerr end
 
-    t:send_packet(channel.build_subsystem(ch.remote_id, "sftp"))
-    if not t:await_channel_reply(ch) then
-        return nil, { code = "sftp_unavailable" }
+    -- Every way out that is not a session closes the channel: left open, its
+    -- later messages would arrive inside the next operation on the connection.
+    local function fail(e)
+        t:close_channel(ch)
+        return nil, e
     end
 
+    t:send_packet(channel.build_subsystem(ch.remote_id, "sftp"))
+    local ok, replied = pcall(t.await_channel_reply, t, ch)
+    if not ok then t:close_channel(ch); error(replied, 0) end
+    if not replied then return fail({ code = "sftp_unavailable" }) end
+
     local s = setmetatable({ t = t, ch = ch, buf = "", id = 0 }, Sftp)
-    s:send(sftp.build_init())
-    local ver = s:recv()
-    if ver.type ~= "version" then
-        return nil, { code = "sftp_no_version" }
-    end
+    local vok, ver = pcall(function()
+        s:send(sftp.build_init())
+        return s:recv()
+    end)
+    if not vok then t:close_channel(ch); error(ver, 0) end
+    if ver.type ~= "version" then return fail({ code = "sftp_no_version" }) end
     s.version = ver.version
     return s
 end
@@ -241,6 +249,9 @@ function Sftp:setstat(path, attrs)
     return status_result(self:request(sftp.build_setstat, path, attrs))
 end
 
+--- The most entries Sftp:list returns; a larger directory is `too_large`.
+M.MAX_LIST_ENTRIES = 100000
+
 --- List a directory. Returns the entries SAFE to use as local names, plus the
 --- ones refused and why - refused rather than dropped, because a name
 --- rejected for traversal is something an operator should hear about.
@@ -248,8 +259,17 @@ function Sftp:list(path)
     local h = self:request(sftp.build_opendir, path)
     if h.type ~= "handle" then return nil, sftp_error(h) end
 
+    -- Bounded by entry count, not by READDIR round trips: a server may send
+    -- any number of names per reply, and stopping silently at a round-trip
+    -- limit would return a truncated listing as if it were whole.
     local all = {}
-    for _ = 1, 4096 do
+    while true do
+        if #all > M.MAX_LIST_ENTRIES then
+            self:close_handle(h.handle)
+            return nil, { code = "too_large", limit = M.MAX_LIST_ENTRIES,
+                          detail = "directory has more than "
+                              .. M.MAX_LIST_ENTRIES .. " entries" }
+        end
         local r = self:request(sftp.build_readdir, h.handle)
         if r.type == "status" then
             -- EOF ends the listing; anything else is a real failure.
@@ -258,6 +278,13 @@ function Sftp:list(path)
                 return nil, sftp_error(r)
             end
             break
+        end
+        -- An empty reply that is not EOF makes no progress; answering it
+        -- with another READDIR would loop for as long as the server likes.
+        if #r.names == 0 then
+            self:close_handle(h.handle)
+            return nil, { code = "bad_reply",
+                          detail = "READDIR returned no names and no EOF" }
         end
         for _, e in ipairs(r.names) do all[#all + 1] = e end
     end

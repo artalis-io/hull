@@ -479,4 +479,20 @@ test("a newline in the path or the host is refused", function()
 end)
 
 -- Return results for C test harness
+test("small reads walk one payload in order, then the next frame", function()
+    -- Served from an offset: every byte once, none repeated or skipped,
+    -- across the boundary into the following frame.
+    local payload = {}
+    for i = 1, 300 do payload[i] = string.char(i % 256) end
+    payload = table.concat(payload)
+    local t = fake(handshake_ok(server_frame(ws.OP_BIN, payload)
+                                .. server_frame(ws.OP_BIN, "tail")), 64)
+    local s = ws.connect(t, { host = "h", random = stub_random, sha1 = stub_sha1 })
+    local got = {}
+    for _ = 1, 100 do got[#got + 1] = s:read(3) end
+    assert_eq(table.concat(got), payload)
+    assert_eq(s:read(2), "ta")
+    assert_eq(s:read(64), "il")
+end)
+
 return {pass = pass, fail = fail}
