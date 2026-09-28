@@ -85,16 +85,15 @@ end
 
 -- Verify the server signature over the exchange hash.
 --
--- `crypto` needs ed25519_verify(data, sig_hex, pk_hex), and `to_hex` turns
--- bytes into hex (hull.encoding.hex.encode). Returns true, or false plus a
--- reason.
-function M.verify_signature(crypto, to_hex, key_blob, sig_blob, h)
+-- `crypto` needs ed25519_verify(data, signature, public_key), all bytes.
+-- Returns true, or false plus a reason.
+function M.verify_signature(crypto, key_blob, sig_blob, h)
     local ok, key = pcall(M.parse_key, key_blob)
     if not ok then return false, tostring(key) end
     local sig; ok, sig = pcall(M.parse_signature, sig_blob)
     if not ok then return false, tostring(sig) end
 
-    if crypto.ed25519_verify(h, to_hex(sig.signature), to_hex(key.key)) then
+    if crypto.ed25519_verify(h, sig.signature, key.key) then
         return true
     end
     -- The signature is over the exchange hash, which binds the host key to
@@ -182,8 +181,8 @@ end
 --   { ok = true, status = "changed", fingerprint,
 --     stored_fingerprint }                          caller MUST NOT proceed
 --                                                   without human involvement
-function M.verify(crypto, to_hex, sha256_raw, store, host, key_blob, sig_blob, h)
-    local ok, reason = M.verify_signature(crypto, to_hex, key_blob, sig_blob, h)
+function M.verify(crypto, sha256_raw, store, host, key_blob, sig_blob, h)
+    local ok, reason = M.verify_signature(crypto, key_blob, sig_blob, h)
     if not ok then
         return { ok = false, reason = reason }
     end

@@ -13,6 +13,7 @@
 
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 import { log } from "hull:log";
 
 app.manifest({
@@ -21,6 +22,7 @@ app.manifest({
     modules : [
         "hull/http-server@1",
         "hull/crypto@1",
+        "hull/encoding@1",
         "hull/log@1",
     ],
 });
@@ -96,7 +98,7 @@ app.post("/upload", async (req, res) => {
                 filename    : part.filename,
                 contentType : part.contentType,
                 size        : total,
-                sha256      : hasher.digest(),
+                sha256      : encoding.hex.encode(hasher.digest()),
             });
         } else {
             const buf = await part.read();

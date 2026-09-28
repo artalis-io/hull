@@ -712,7 +712,7 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
         /* SHA-256 of body + json encode for the response payload. */
-        .deps = {"hull/http-server", "hull/crypto", "hull/json", 0},
+        .deps = {"hull/http-server", "hull/crypto", "hull/encoding", "hull/json", 0},
     },
     {
         .name = "hull/web/middleware/health",
@@ -728,7 +728,7 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
         /* Key fingerprint (crypto), JSON payload caching, TTL clock. */
-        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/json", "hull/time", 0},
+        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/encoding", "hull/json", "hull/time", 0},
     },
     {
         .name = "hull/web/middleware/inbox",

@@ -23,6 +23,7 @@
 
 local json = require("hull.json")
 local crypto = require("hull.crypto")
+local encoding = require("hull.encoding")
 
 local etag = {}
 
@@ -37,7 +38,7 @@ function etag.compute(body)
     if not body or #body == 0 then return nil end
     local ok, hash = pcall(crypto.sha256, body)
     if not ok or not hash then return nil end
-    return 'W/"' .. hash:sub(1, 16) .. '"'
+    return 'W/"' .. encoding.hex.encode(hash):sub(1, 16) .. '"'
 end
 
 --- Does the request's `If-None-Match` match `tag`?

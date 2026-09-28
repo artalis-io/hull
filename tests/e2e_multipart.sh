@@ -123,10 +123,11 @@ cat > "$TMPDIR_WORK/app.lua" <<'EOF'
 app.manifest({
     name    = "mp-e2e-lua",
     version = "0.0.1",
-    modules = { "hull/http-server@1", "hull/json@1", "hull/crypto@1" },
+    modules = { "hull/http-server@1", "hull/json@1", "hull/crypto@1", "hull/encoding@1" },
 })
 
 local crypto = require("hull.crypto")
+local hex = require("hull.encoding").hex
 
 -- /health - pre-body, so it doesn't need the multipart route's body reader.
 app.get("/health", function(req, res) res:text("ok") end)
@@ -146,13 +147,13 @@ app.post("/upload", function(req, res)
                 chunks[#chunks + 1] = chunk
             end
             local full = table.concat(chunks)
-            -- hull.crypto.sha256 returns a 64-char hex string directly.
+            -- hull.crypto.sha256 returns the 32 raw bytes; sent as hex.
             table.insert(parts, {
                 name         = part.name,
                 filename     = part.filename,
                 content_type = part.content_type,
                 size         = total,
-                sha256       = crypto.sha256(full),
+                sha256       = hex.encode(crypto.sha256(full)),
             })
         else
             -- Text field: read() the whole body.
@@ -249,7 +250,7 @@ end
 app.get("/hash-chained", function(_req, res)
     res:json(safe_hash_op(function()
         local h = crypto.create_sha256()
-        return h:update("a"):update("b"):update("c"):digest()
+        return hex.encode(h:update("a"):update("b"):update("c"):digest())
     end))
 end)
 
@@ -276,11 +277,12 @@ EOF
 cat > "$TMPDIR_WORK/app.js" <<'EOF'
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 
 app.manifest({
     name    : "mp-e2e-js",
     version : "0.0.1",
-    modules : ["hull/http-server@1", "hull/crypto@1"],
+    modules : ["hull/http-server@1", "hull/crypto@1", "hull/encoding@1"],
 });
 
 // QuickJS doesn't bundle TextDecoder - minimal ASCII decoder is enough
@@ -309,13 +311,13 @@ app.post("/upload", async (req, res) => {
             let off = 0;
             for (const b of buffers) { all.set(b, off); off += b.byteLength; }
             // hull.crypto.sha256 accepts ArrayBuffer (binary-safe) and
-            // returns a 64-char hex string directly.
+            // returns the 32 raw bytes; sent as hex.
             parts.push({
                 name        : part.name,
                 filename    : part.filename,
                 contentType : part.contentType,
                 size        : total,
-                sha256      : crypto.sha256(all.buffer),
+                sha256      : encoding.hex.encode(crypto.sha256(all.buffer)),
             });
         } else {
             const buf = await part.read();
@@ -373,7 +375,7 @@ function safeHashOp(fn) {
 app.get("/hash-chained", async (_req, res) => {
     res.json(safeHashOp(() => {
         const h = crypto.createSha256();
-        return h.update("a").update("b").update("c").digest();
+        return encoding.hex.encode(h.update("a").update("b").update("c").digest());
     }));
 });
 

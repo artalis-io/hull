@@ -55,8 +55,6 @@ local transport  = require('hull.ssh.transport')
 local packet     = require('hull.ssh.packet')
 local privatekey = require('hull.ssh.privatekey')
 local hostkey    = require('hull.ssh.hostkey')
-local kex        = require('hull.ssh.kex')
-local enc        = require('hull.encoding')
 
 local M = {}
 
@@ -106,10 +104,7 @@ function M.file_store(path, opts)
     local crypto = opts.crypto or require('hull.crypto')
     local kh     = require('hull.ssh.known_hosts')
 
-    -- crypto.hmac_sha1 speaks hex on both sides; known_hosts wants raw bytes.
-    local function hmac(key, msg)
-        return enc.hex.decode(crypto.hmac_sha1(msg, enc.hex.encode(key)))
-    end
+    local function hmac(key, msg) return crypto.hmac_sha1(msg, key) end
     local function load()
         local text, err = fs.read(path)
         if text then return text end
@@ -639,7 +634,7 @@ end
 
 --- Fingerprint a key blob, for showing one to an operator.
 function M.fingerprint(crypto, key_blob)
-    return hostkey.fingerprint(kex.raw_hash(crypto.sha256), key_blob)
+    return hostkey.fingerprint(crypto.sha256, key_blob)
 end
 
 return M

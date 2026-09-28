@@ -60,12 +60,9 @@ app.use_post("POST", "/events", idempotency.middleware())
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 
--- crypto.hmac_sha256 takes its key as hex.
-local SECRET_HEX = encoding.hex.encode(SIGNING_SECRET)
-
 --- Sign a payload string with HMAC-SHA256, return hex signature.
 local function sign_payload(payload_str)
-    return crypto.hmac_sha256(payload_str, SECRET_HEX)
+    return encoding.hex.encode(crypto.hmac_sha256(payload_str, SIGNING_SECRET))
 end
 
 -- ── Routes ──────────────────────────────────────────────────────────

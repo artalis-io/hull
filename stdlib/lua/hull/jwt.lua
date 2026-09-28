@@ -81,11 +81,9 @@ local function constant_time_compare(a, b)
     return crypto.constant_time_eq(a, b)
 end
 
--- HS256 signature: HMAC-SHA256 over the signing input, returning the
--- raw 32-byte digest. The crypto cap returns hex; convert back.
+-- HS256 signature: HMAC-SHA256 over the signing input, the raw 32 bytes.
 local function hs256_signature(data, secret)
-    local sig_hex = crypto.hmac_sha256(data, encoding.hex.encode(secret))
-    return (encoding.hex.decode(sig_hex))
+    return crypto.hmac_sha256(data, secret)
 end
 
 --- Sign a payload and return a JWT string (HS256 only).

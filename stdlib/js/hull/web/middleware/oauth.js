@@ -90,7 +90,7 @@ import { log }        from "hull:log";
 // ── Module state ───────────────────────────────────────────────────
 
 const _state = {
-    stateSecretHex: null,
+    stateSecret: null,
     stateCookie:    "_oauth_state",
     // Cookie path scoping. Defaults to "/auth" so the state cookie
     // isn't sent on every request (only those matching the auth
@@ -181,8 +181,7 @@ function randomUrlsafe(nBytes) {
 // challenge = base64url(SHA-256(verifier)).
 function pkcePair() {
     const verifier = randomUrlsafe(32);
-    const shaHex = crypto.sha256(verifier);
-    const challenge = encoding.base64.encode(encoding.hex.decode(shaHex), { url: true });
+    const challenge = encoding.base64.encode(crypto.sha256(verifier), { url: true });
     return [verifier, challenge];
 }
 
@@ -233,12 +232,12 @@ function buildUrl(base, params) {
 
 function signState(payload) {
     payload.exp = time.now() + _state.stateTtl;
-    return envelope.sign(payload, _state.stateSecretHex);
+    return envelope.sign(payload, _state.stateSecret);
 }
 
 function verifyState(cookieValue) {
     if (!cookieValue) return [null, "empty"];
-    const r = envelope.verify(cookieValue, _state.stateSecretHex);
+    const r = envelope.verify(cookieValue, _state.stateSecret);
     if (!r[0]) return [null, r[1]];
     const env = r[0];
     if (typeof env.exp !== "number" || time.now() >= env.exp) {
@@ -522,7 +521,8 @@ function init(opts) {
         throw new Error("oauth.init: secret must be a string >= 32 bytes "
             + "(same HMAC primitive as hull/web/auth-flows; pick one floor)");
     }
-    _state.stateSecretHex = encoding.hex.encode(secret);
+    // A byte string, like the Lua side: bytes.toU8 keeps its bytes.
+    _state.stateSecret = encoding.bytes.toU8(secret);
     _state.stateCookie = opts.stateCookie || _state.stateCookie;
     _state.stateCookiePath =
         opts.stateCookiePath || _state.stateCookiePath;
@@ -603,7 +603,7 @@ function init(opts) {
 }
 
 function routes(app) {
-    if (!_state.stateSecretHex) {
+    if (!_state.stateSecret) {
         throw new Error("oauth.routes: oauth.init() must be called first");
     }
     app.get(_state.loginPath.replace("{provider}", ":provider"), handleLogin);
@@ -619,7 +619,7 @@ const _test = {
     refreshJwks,
     safeReturnTo,
     reset: () => {
-        _state.stateSecretHex = null;
+        _state.stateSecret = null;
         _state.providers      = {};
         _state.findUser       = null;
         _state.onLogin        = null;

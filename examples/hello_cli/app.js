@@ -10,11 +10,13 @@
 
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 
 app.manifest({
     modules: [
     "hull/http-server@1",
         "hull/crypto@1",
+        "hull/encoding@1",
     ],
     env: ["USER", "LANG"],
 });
@@ -50,7 +52,7 @@ app.main((ctx) => {
     }
 
     const greeting = `hello ${name}`;
-    const digest = crypto.sha256(greeting);
+    const digest = encoding.hex.encode(crypto.sha256(greeting));
     const user = ctx.env.USER || "unknown";
 
     ctx.stdout.write(`${greeting}\n`);

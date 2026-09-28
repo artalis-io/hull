@@ -18,31 +18,21 @@
 /* ════════════════════════════════════════════════════════════════════
  * hull.crypto module
  *
- * crypto.sha256(data)                → hex string
- * crypto.random(n)                   → string of n random bytes
- * crypto.hash_password(password)     → hash string
- * crypto.verify_password(pw, hash)   → boolean
- * crypto.ed25519_keypair()           → pubkey_hex, secret_key_hex
- * crypto.ed25519_sign(data, sk_hex)  → signature_hex
- * crypto.ed25519_verify(data, sig_hex, pk_hex) → boolean
+ * Bytes in, bytes out: keys, nonces, signatures, tags, digests and
+ * ciphertexts are raw byte strings, never hex. Text encodings are
+ * hull.encoding's job (encoding.hex.encode(crypto.sha256(s))). The one
+ * exception is hash_password's stored "pbkdf2:..." string, which is a
+ * storage format rather than an encoding of a value.
  * ════════════════════════════════════════════════════════════════════ */
 
 static int lua_crypto_sha256(lua_State *L)
 {
     size_t len;
     const char *data = luaL_checklstring(L, 1, &len);
-
     uint8_t hash[32];
     if (hl_cap_crypto_sha256(data, len, hash) != 0)
         return luaL_error(L, "sha256 failed");
-
-    /* Convert to hex string */
-    char hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    hex[64] = '\0';
-
-    lua_pushstring(L, hex);
+    lua_pushlstring(L, (const char *)hash, sizeof hash);
     return 1;
 }
 
@@ -135,10 +125,8 @@ static int lua_crypto_hash_password(lua_State *L)
 
     /* Format: "pbkdf2:100000:salt_hex:hash_hex" */
     char salt_hex[33], hash_hex[65];
-    for (int i = 0; i < 16; i++)
-        snprintf(salt_hex + i * 2, 3, "%02x", salt[i]);
-    for (int i = 0; i < 32; i++)
-        snprintf(hash_hex + i * 2, 3, "%02x", hash[i]);
+    hl_hex_encode(salt, sizeof salt, salt_hex, sizeof salt_hex);
+    hl_hex_encode(hash, sizeof hash, hash_hex, sizeof hash_hex);
 
     char result[128];
     snprintf(result, sizeof(result), "pbkdf2:%d:%s:%s",
@@ -279,82 +267,45 @@ static int crypto_push_keypair(lua_State *L, const char *pub, size_t publen,
     return 2;
 }
 
-/* crypto.ed25519_keypair() → pubkey_hex, secret_key_hex */
+/* crypto.ed25519_keypair() -> public_key (32 bytes), secret_key (64 bytes) */
 static int lua_crypto_ed25519_keypair(lua_State *L)
 {
     uint8_t pk[32], sk[64];
     if (hl_cap_crypto_ed25519_keypair(pk, sk) != 0)
         return luaL_error(L, "ed25519 keypair generation failed");
-
-    char pk_hex[65], sk_hex[129];
-    for (int i = 0; i < 32; i++)
-        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
-    pk_hex[64] = '\0';
-    for (int i = 0; i < 64; i++)
-        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
-    sk_hex[128] = '\0';
-
-    /* The RAW key is done with the moment it is encoded, so it goes now
-     * rather than surviving until after the pushes. */
-    secure_zero(sk, sizeof(sk));
-    return crypto_push_keypair(L, pk_hex, strlen(pk_hex),
-                               sk_hex, strlen(sk_hex));
+    return crypto_push_keypair(L, (const char *)pk, sizeof pk,
+                               (char *)sk, sizeof sk);
 }
 
-/* crypto.ed25519_sign(data, secret_key_hex) → signature_hex */
+/* crypto.ed25519_sign(data, secret_key) -> 64-byte signature */
 static int lua_crypto_ed25519_sign(lua_State *L)
 {
-    size_t data_len;
+    size_t data_len, sk_len;
     const char *data = luaL_checklstring(L, 1, &data_len);
-    size_t sk_hex_len;
-    const char *sk_hex = luaL_checklstring(L, 2, &sk_hex_len);
-
-    if (sk_hex_len != 128)
-        return luaL_error(L, "secret key must be 128 hex chars (64 bytes)");
-
-    uint8_t sk[64];
-    if (hex_decode(sk_hex, sk_hex_len, sk, 64) != 0)
-        return luaL_error(L, "invalid hex in secret key");
-
+    const char *sk   = luaL_checklstring(L, 2, &sk_len);
+    if (sk_len != 64)
+        return luaL_error(L, "ed25519_sign: secret key must be 64 bytes");
     uint8_t sig[64];
-    if (hl_cap_crypto_ed25519_sign((const uint8_t *)data, data_len, sk, sig) != 0) {
-        secure_zero(sk, sizeof(sk));
+    if (hl_cap_crypto_ed25519_sign((const uint8_t *)data, data_len,
+                                   (const uint8_t *)sk, sig) != 0)
         return luaL_error(L, "ed25519 sign failed");
-    }
-
-    secure_zero(sk, sizeof(sk));
-
-    char sig_hex[129];
-    for (int i = 0; i < 64; i++)
-        snprintf(sig_hex + i * 2, 3, "%02x", sig[i]);
-    sig_hex[128] = '\0';
-
-    lua_pushstring(L, sig_hex);
+    lua_pushlstring(L, (const char *)sig, sizeof sig);
     return 1;
 }
 
-/* crypto.ed25519_verify(data, signature_hex, pubkey_hex) → boolean */
+/* crypto.ed25519_verify(data, signature, public_key) -> boolean */
 static int lua_crypto_ed25519_verify(lua_State *L)
 {
-    size_t data_len;
+    size_t data_len, sig_len, pk_len;
     const char *data = luaL_checklstring(L, 1, &data_len);
-    size_t sig_hex_len;
-    const char *sig_hex = luaL_checklstring(L, 2, &sig_hex_len);
-    size_t pk_hex_len;
-    const char *pk_hex = luaL_checklstring(L, 3, &pk_hex_len);
-
-    if (sig_hex_len != 128)
-        return luaL_error(L, "signature must be 128 hex chars (64 bytes)");
-    if (pk_hex_len != 64)
-        return luaL_error(L, "public key must be 64 hex chars (32 bytes)");
-
-    uint8_t sig[64], pk[32];
-    if (hex_decode(sig_hex, sig_hex_len, sig, 64) != 0)
-        return luaL_error(L, "invalid hex in signature");
-    if (hex_decode(pk_hex, pk_hex_len, pk, 32) != 0)
-        return luaL_error(L, "invalid hex in public key");
-
-    int rc = hl_cap_crypto_ed25519_verify((const uint8_t *)data, data_len, sig, pk);
+    const char *sig  = luaL_checklstring(L, 2, &sig_len);
+    const char *pk   = luaL_checklstring(L, 3, &pk_len);
+    if (sig_len != 64)
+        return luaL_error(L, "ed25519_verify: signature must be 64 bytes");
+    if (pk_len != 32)
+        return luaL_error(L, "ed25519_verify: public key must be 32 bytes");
+    int rc = hl_cap_crypto_ed25519_verify((const uint8_t *)data, data_len,
+                                          (const uint8_t *)sig, (const uint8_t *)pk);
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -431,379 +382,196 @@ static int lua_crypto_x509_pubkey_pem(lua_State *L)
 
 /* ── SHA-512 ───────────────────────────────────────────────────────── */
 
-/* crypto.sha512(data) → hex string (128 chars) */
+/* crypto.sha512(data) -> 64-byte digest */
 static int lua_crypto_sha512(lua_State *L)
 {
     size_t len;
     const char *data = luaL_checklstring(L, 1, &len);
-
     uint8_t hash[64];
     if (hl_cap_crypto_sha512(data, len, hash) != 0)
         return luaL_error(L, "sha512 failed");
-
-    char hex[129];
-    for (int i = 0; i < 64; i++)
-        snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    hex[128] = '\0';
-
-    lua_pushstring(L, hex);
+    lua_pushlstring(L, (const char *)hash, sizeof hash);
     return 1;
 }
 
 /* ── HMAC-SHA512/256 authentication ────────────────────────────────── */
 
-/* crypto.auth(msg, key_hex) → tag_hex (64 chars) */
+/* crypto.auth(msg, key) -> 32-byte tag (HMAC-SHA512/256; key 32 bytes) */
 static int lua_crypto_auth(lua_State *L)
 {
-    size_t msg_len;
+    size_t msg_len, key_len;
     const char *msg = luaL_checklstring(L, 1, &msg_len);
-    size_t key_hex_len;
-    const char *key_hex = luaL_checklstring(L, 2, &key_hex_len);
-
-    if (key_hex_len != 64)
-        return luaL_error(L, "auth key must be 64 hex chars (32 bytes)");
-
-    uint8_t key[32];
-    if (hex_decode(key_hex, key_hex_len, key, 32) != 0)
-        return luaL_error(L, "invalid hex in auth key");
-
+    const char *key = luaL_checklstring(L, 2, &key_len);
+    if (key_len != 32)
+        return luaL_error(L, "auth: key must be 32 bytes");
     uint8_t tag[32];
-    if (hl_cap_crypto_auth(msg, msg_len, key, tag) != 0) {
-        secure_zero(key, sizeof(key));
+    if (hl_cap_crypto_auth(msg, msg_len, (const uint8_t *)key, tag) != 0)
         return luaL_error(L, "auth failed");
-    }
-    secure_zero(key, sizeof(key));
-
-    char hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(hex + i * 2, 3, "%02x", tag[i]);
-    hex[64] = '\0';
-
-    lua_pushstring(L, hex);
+    lua_pushlstring(L, (const char *)tag, sizeof tag);
     return 1;
 }
 
-/* crypto.auth_verify(tag_hex, msg, key_hex) → boolean */
+/* crypto.auth_verify(tag, msg, key) -> boolean */
 static int lua_crypto_auth_verify(lua_State *L)
 {
-    size_t tag_hex_len;
-    const char *tag_hex = luaL_checklstring(L, 1, &tag_hex_len);
-    size_t msg_len;
+    size_t tag_len, msg_len, key_len;
+    const char *tag = luaL_checklstring(L, 1, &tag_len);
     const char *msg = luaL_checklstring(L, 2, &msg_len);
-    size_t key_hex_len;
-    const char *key_hex = luaL_checklstring(L, 3, &key_hex_len);
-
-    if (tag_hex_len != 64)
-        return luaL_error(L, "tag must be 64 hex chars (32 bytes)");
-    if (key_hex_len != 64)
-        return luaL_error(L, "auth key must be 64 hex chars (32 bytes)");
-
-    uint8_t tag[32], key[32];
-    if (hex_decode(tag_hex, tag_hex_len, tag, 32) != 0)
-        return luaL_error(L, "invalid hex in tag");
-    if (hex_decode(key_hex, key_hex_len, key, 32) != 0)
-        return luaL_error(L, "invalid hex in key");
-
-    int rc = hl_cap_crypto_auth_verify(tag, msg, msg_len, key);
-    secure_zero(key, sizeof(key));
+    const char *key = luaL_checklstring(L, 3, &key_len);
+    if (tag_len != 32)
+        return luaL_error(L, "auth_verify: tag must be 32 bytes");
+    if (key_len != 32)
+        return luaL_error(L, "auth_verify: key must be 32 bytes");
+    int rc = hl_cap_crypto_auth_verify((const uint8_t *)tag, msg, msg_len,
+                                       (const uint8_t *)key);
     lua_pushboolean(L, rc == 0);
     return 1;
 }
 
 /* ── Secret-key authenticated encryption (XSalsa20+Poly1305) ──────── */
 
-/* crypto.secretbox(msg, nonce_hex, key_hex) → ciphertext_hex */
+/* crypto.secretbox(msg, nonce, key) -> ciphertext (msg + 16-byte tag);
+ * nonce 24 bytes, key 32 bytes */
 static int lua_crypto_secretbox(lua_State *L)
 {
-    size_t msg_len;
-    const char *msg = luaL_checklstring(L, 1, &msg_len);
-    size_t nonce_hex_len;
-    const char *nonce_hex = luaL_checklstring(L, 2, &nonce_hex_len);
-    size_t key_hex_len;
-    const char *key_hex = luaL_checklstring(L, 3, &key_hex_len);
-
-    if (nonce_hex_len != 48)
-        return luaL_error(L, "nonce must be 48 hex chars (24 bytes)");
-    if (key_hex_len != 64)
-        return luaL_error(L, "key must be 64 hex chars (32 bytes)");
-
-    uint8_t nonce[24], key[32];
-    if (hex_decode(nonce_hex, nonce_hex_len, nonce, 24) != 0)
-        return luaL_error(L, "invalid hex in nonce");
-    if (hex_decode(key_hex, key_hex_len, key, 32) != 0)
-        return luaL_error(L, "invalid hex in key");
-
+    size_t msg_len, nonce_len, key_len;
+    const char *msg   = luaL_checklstring(L, 1, &msg_len);
+    const char *nonce = luaL_checklstring(L, 2, &nonce_len);
+    const char *key   = luaL_checklstring(L, 3, &key_len);
+    if (nonce_len != 24)
+        return luaL_error(L, "secretbox: nonce must be 24 bytes");
+    if (key_len != 32)
+        return luaL_error(L, "secretbox: key must be 32 bytes");
     if (msg_len > SIZE_MAX - HL_SECRETBOX_MACBYTES)
-        return luaL_error(L, "message too large");
+        return luaL_error(L, "secretbox: message too large");
     size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
-    HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch)
-        return luaL_error(L, "runtime not available");
-
-    uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
-    if (!ct)
-        return luaL_error(L, "out of memory");
-
-    if (hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key) != 0) {
-        secure_zero(key, sizeof(key));
+    luaL_Buffer b;
+    uint8_t *ct = (uint8_t *)luaL_buffinitsize(L, &b, ct_len);
+    if (hl_cap_crypto_secretbox(ct, msg, msg_len, (const uint8_t *)nonce,
+                                (const uint8_t *)key) != 0)
         return luaL_error(L, "secretbox failed");
-    }
-    secure_zero(key, sizeof(key));
-
-    /* Convert to hex */
-    if (ct_len > SIZE_MAX / 2)
-        return luaL_error(L, "ciphertext too large");
-    size_t hex_len = ct_len * 2 + 1;
-    char *hex = sh_arena_alloc(lua->scratch, hex_len);
-    if (!hex)
-        return luaL_error(L, "out of memory");
-
-    for (size_t i = 0; i < ct_len; i++)
-        snprintf(hex + i * 2, 3, "%02x", ct[i]);
-
-    lua_pushstring(L, hex);
+    luaL_pushresultsize(&b, ct_len);
     return 1;
 }
 
-/* crypto.secretbox_open(ct_hex, nonce_hex, key_hex) → string or nil */
+/* crypto.secretbox_open(ciphertext, nonce, key) -> msg | nil */
 static int lua_crypto_secretbox_open(lua_State *L)
 {
-    size_t ct_hex_len;
-    const char *ct_hex = luaL_checklstring(L, 1, &ct_hex_len);
-    size_t nonce_hex_len;
-    const char *nonce_hex = luaL_checklstring(L, 2, &nonce_hex_len);
-    size_t key_hex_len;
-    const char *key_hex = luaL_checklstring(L, 3, &key_hex_len);
-
-    if (ct_hex_len % 2 != 0)
-        return luaL_error(L, "ciphertext hex must have even length");
-    if (nonce_hex_len != 48)
-        return luaL_error(L, "nonce must be 48 hex chars (24 bytes)");
-    if (key_hex_len != 64)
-        return luaL_error(L, "key must be 64 hex chars (32 bytes)");
-
-    size_t ct_len = ct_hex_len / 2;
+    size_t ct_len, nonce_len, key_len;
+    const char *ct    = luaL_checklstring(L, 1, &ct_len);
+    const char *nonce = luaL_checklstring(L, 2, &nonce_len);
+    const char *key   = luaL_checklstring(L, 3, &key_len);
+    if (nonce_len != 24)
+        return luaL_error(L, "secretbox_open: nonce must be 24 bytes");
+    if (key_len != 32)
+        return luaL_error(L, "secretbox_open: key must be 32 bytes");
     if (ct_len < HL_SECRETBOX_MACBYTES) {
         lua_pushnil(L);
         return 1;
     }
-
-    uint8_t nonce[24], key[32];
-    if (hex_decode(nonce_hex, nonce_hex_len, nonce, 24) != 0)
-        return luaL_error(L, "invalid hex in nonce");
-    if (hex_decode(key_hex, key_hex_len, key, 32) != 0)
-        return luaL_error(L, "invalid hex in key");
-
-    HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch)
-        return luaL_error(L, "runtime not available");
-
-    uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
-    if (!ct)
-        return luaL_error(L, "out of memory");
-    if (hex_decode(ct_hex, ct_hex_len, ct, ct_len) != 0)
-        return luaL_error(L, "invalid hex in ciphertext");
-
     size_t msg_len = ct_len - HL_SECRETBOX_MACBYTES;
-    uint8_t *msg = sh_arena_alloc(lua->scratch, msg_len + 1);
-    if (!msg)
-        return luaL_error(L, "out of memory");
-
-    if (hl_cap_crypto_secretbox_open(msg, ct, ct_len, nonce, key) != 0) {
-        secure_zero(key, sizeof(key));
+    luaL_Buffer b;
+    uint8_t *msg = (uint8_t *)luaL_buffinitsize(L, &b, msg_len + 1);
+    if (hl_cap_crypto_secretbox_open(msg, (const uint8_t *)ct, ct_len,
+                                     (const uint8_t *)nonce,
+                                     (const uint8_t *)key) != 0) {
+        luaL_pushresultsize(&b, 0);
+        lua_pop(L, 1);
         lua_pushnil(L);
         return 1;
     }
-    secure_zero(key, sizeof(key));
-
-    lua_pushlstring(L, (const char *)msg, msg_len);
+    luaL_pushresultsize(&b, msg_len);
     return 1;
 }
 
 /* ── Public-key authenticated encryption (Curve25519+XSalsa20+Poly1305) */
 
-/* crypto.box(msg, nonce_hex, pk_hex, sk_hex) → ciphertext_hex */
+/* crypto.box(msg, nonce, public_key, secret_key) -> ciphertext;
+ * nonce 24 bytes, keys 32 bytes */
 static int lua_crypto_box(lua_State *L)
 {
-    size_t msg_len;
-    const char *msg = luaL_checklstring(L, 1, &msg_len);
-    size_t nonce_hex_len;
-    const char *nonce_hex = luaL_checklstring(L, 2, &nonce_hex_len);
-    size_t pk_hex_len;
-    const char *pk_hex = luaL_checklstring(L, 3, &pk_hex_len);
-    size_t sk_hex_len;
-    const char *sk_hex = luaL_checklstring(L, 4, &sk_hex_len);
-
-    if (nonce_hex_len != 48)
-        return luaL_error(L, "nonce must be 48 hex chars (24 bytes)");
-    if (pk_hex_len != 64)
-        return luaL_error(L, "public key must be 64 hex chars (32 bytes)");
-    if (sk_hex_len != 64)
-        return luaL_error(L, "secret key must be 64 hex chars (32 bytes)");
-
-    uint8_t nonce[24], pk[32], sk[32];
-    if (hex_decode(nonce_hex, nonce_hex_len, nonce, 24) != 0)
-        return luaL_error(L, "invalid hex in nonce");
-    if (hex_decode(pk_hex, pk_hex_len, pk, 32) != 0)
-        return luaL_error(L, "invalid hex in public key");
-    if (hex_decode(sk_hex, sk_hex_len, sk, 32) != 0) {
-        return luaL_error(L, "invalid hex in secret key");
-    }
-
-    if (msg_len > SIZE_MAX - HL_BOX_MACBYTES) {
-        secure_zero(sk, sizeof(sk));
-        return luaL_error(L, "message too large");
-    }
+    size_t msg_len, nonce_len, pk_len, sk_len;
+    const char *msg   = luaL_checklstring(L, 1, &msg_len);
+    const char *nonce = luaL_checklstring(L, 2, &nonce_len);
+    const char *pk    = luaL_checklstring(L, 3, &pk_len);
+    const char *sk    = luaL_checklstring(L, 4, &sk_len);
+    if (nonce_len != 24)
+        return luaL_error(L, "box: nonce must be 24 bytes");
+    if (pk_len != 32)
+        return luaL_error(L, "box: public key must be 32 bytes");
+    if (sk_len != 32)
+        return luaL_error(L, "box: secret key must be 32 bytes");
+    if (msg_len > SIZE_MAX - HL_BOX_MACBYTES)
+        return luaL_error(L, "box: message too large");
     size_t ct_len = msg_len + HL_BOX_MACBYTES;
-    HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch) {
-        secure_zero(sk, sizeof(sk));
-        return luaL_error(L, "runtime not available");
-    }
-
-    uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
-    if (!ct) {
-        secure_zero(sk, sizeof(sk));
-        return luaL_error(L, "out of memory");
-    }
-
-    if (hl_cap_crypto_box(ct, msg, msg_len, nonce, pk, sk) != 0) {
-        secure_zero(sk, sizeof(sk));
+    luaL_Buffer b;
+    uint8_t *ct = (uint8_t *)luaL_buffinitsize(L, &b, ct_len);
+    if (hl_cap_crypto_box(ct, msg, msg_len, (const uint8_t *)nonce,
+                          (const uint8_t *)pk, (const uint8_t *)sk) != 0)
         return luaL_error(L, "box failed");
-    }
-    secure_zero(sk, sizeof(sk));
-
-    if (ct_len > SIZE_MAX / 2)
-        return luaL_error(L, "ciphertext too large");
-    size_t hex_len = ct_len * 2 + 1;
-    char *hex = sh_arena_alloc(lua->scratch, hex_len);
-    if (!hex)
-        return luaL_error(L, "out of memory");
-
-    for (size_t i = 0; i < ct_len; i++)
-        snprintf(hex + i * 2, 3, "%02x", ct[i]);
-
-    lua_pushstring(L, hex);
+    luaL_pushresultsize(&b, ct_len);
     return 1;
 }
 
-/* crypto.box_open(ct_hex, nonce_hex, pk_hex, sk_hex) → string or nil */
+/* crypto.box_open(ciphertext, nonce, public_key, secret_key) -> msg | nil */
 static int lua_crypto_box_open(lua_State *L)
 {
-    size_t ct_hex_len;
-    const char *ct_hex = luaL_checklstring(L, 1, &ct_hex_len);
-    size_t nonce_hex_len;
-    const char *nonce_hex = luaL_checklstring(L, 2, &nonce_hex_len);
-    size_t pk_hex_len;
-    const char *pk_hex = luaL_checklstring(L, 3, &pk_hex_len);
-    size_t sk_hex_len;
-    const char *sk_hex = luaL_checklstring(L, 4, &sk_hex_len);
-
-    if (ct_hex_len % 2 != 0)
-        return luaL_error(L, "ciphertext hex must have even length");
-    if (nonce_hex_len != 48)
-        return luaL_error(L, "nonce must be 48 hex chars (24 bytes)");
-    if (pk_hex_len != 64)
-        return luaL_error(L, "public key must be 64 hex chars (32 bytes)");
-    if (sk_hex_len != 64)
-        return luaL_error(L, "secret key must be 64 hex chars (32 bytes)");
-
-    size_t ct_len = ct_hex_len / 2;
+    size_t ct_len, nonce_len, pk_len, sk_len;
+    const char *ct    = luaL_checklstring(L, 1, &ct_len);
+    const char *nonce = luaL_checklstring(L, 2, &nonce_len);
+    const char *pk    = luaL_checklstring(L, 3, &pk_len);
+    const char *sk    = luaL_checklstring(L, 4, &sk_len);
+    if (nonce_len != 24)
+        return luaL_error(L, "box_open: nonce must be 24 bytes");
+    if (pk_len != 32)
+        return luaL_error(L, "box_open: public key must be 32 bytes");
+    if (sk_len != 32)
+        return luaL_error(L, "box_open: secret key must be 32 bytes");
     if (ct_len < HL_BOX_MACBYTES) {
         lua_pushnil(L);
         return 1;
     }
-
-    uint8_t nonce[24], pk[32], sk[32];
-    if (hex_decode(nonce_hex, nonce_hex_len, nonce, 24) != 0)
-        return luaL_error(L, "invalid hex in nonce");
-    if (hex_decode(pk_hex, pk_hex_len, pk, 32) != 0)
-        return luaL_error(L, "invalid hex in public key");
-    if (hex_decode(sk_hex, sk_hex_len, sk, 32) != 0)
-        return luaL_error(L, "invalid hex in secret key");
-
-    HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch) {
-        secure_zero(sk, sizeof(sk));
-        return luaL_error(L, "runtime not available");
-    }
-
-    uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
-    if (!ct) {
-        secure_zero(sk, sizeof(sk));
-        return luaL_error(L, "out of memory");
-    }
-    if (hex_decode(ct_hex, ct_hex_len, ct, ct_len) != 0) {
-        secure_zero(sk, sizeof(sk));
-        return luaL_error(L, "invalid hex in ciphertext");
-    }
-
     size_t msg_len = ct_len - HL_BOX_MACBYTES;
-    uint8_t *msg = sh_arena_alloc(lua->scratch, msg_len + 1);
-    if (!msg) {
-        secure_zero(sk, sizeof(sk));
-        return luaL_error(L, "out of memory");
-    }
-
-    if (hl_cap_crypto_box_open(msg, ct, ct_len, nonce, pk, sk) != 0) {
-        secure_zero(sk, sizeof(sk));
+    luaL_Buffer b;
+    uint8_t *msg = (uint8_t *)luaL_buffinitsize(L, &b, msg_len + 1);
+    if (hl_cap_crypto_box_open(msg, (const uint8_t *)ct, ct_len,
+                               (const uint8_t *)nonce, (const uint8_t *)pk,
+                               (const uint8_t *)sk) != 0) {
+        luaL_pushresultsize(&b, 0);
+        lua_pop(L, 1);
         lua_pushnil(L);
         return 1;
     }
-    secure_zero(sk, sizeof(sk));
-
-    lua_pushlstring(L, (const char *)msg, msg_len);
+    luaL_pushresultsize(&b, msg_len);
     return 1;
 }
 
-/* crypto.x25519_keypair() -> pk_hex, sk_hex */
+/* crypto.x25519_keypair() -> public_key, secret_key (32 bytes each) */
 static int lua_crypto_x25519_keypair(lua_State *L)
 {
     uint8_t pk[32], sk[32];
     if (hl_cap_crypto_x25519_keypair(pk, sk) != 0)
         return luaL_error(L, "x25519 keypair generation failed");
-
-    char pk_hex[65], sk_hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
-    pk_hex[64] = '\0';
-    for (int i = 0; i < 32; i++)
-        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
-    sk_hex[64] = '\0';
-
-    /* The RAW key is done with the moment it is encoded, so it goes now
-     * rather than surviving until after the pushes. */
-    secure_zero(sk, sizeof(sk));
-    return crypto_push_keypair(L, pk_hex, strlen(pk_hex),
-                               sk_hex, strlen(sk_hex));
+    return crypto_push_keypair(L, (const char *)pk, sizeof pk,
+                               (char *)sk, sizeof sk);
 }
 
-/* crypto.x25519(sk_hex, pk_hex) -> shared_hex | nil, err
+/* crypto.x25519(secret_key, public_key) -> 32-byte shared secret | nil, err
  *
  * A low-order peer point is a protocol-level event a caller has to handle, not
  * a programming error, so it comes back as (nil, reason) rather than raising.
  */
 static int lua_crypto_x25519(lua_State *L)
 {
-    size_t sk_hex_len, pk_hex_len;
-    const char *sk_hex = luaL_checklstring(L, 1, &sk_hex_len);
-    const char *pk_hex = luaL_checklstring(L, 2, &pk_hex_len);
-
-    if (sk_hex_len != 64)
-        return luaL_error(L, "secret key must be 64 hex chars (32 bytes)");
-    if (pk_hex_len != 64)
-        return luaL_error(L, "public key must be 64 hex chars (32 bytes)");
-
-    uint8_t sk[32], pk[32], shared[32];
-    if (hex_decode(sk_hex, sk_hex_len, sk, 32) != 0)
-        return luaL_error(L, "invalid hex in secret key");
-    if (hex_decode(pk_hex, pk_hex_len, pk, 32) != 0) {
-        secure_zero(sk, sizeof(sk));
-        return luaL_error(L, "invalid hex in public key");
-    }
-
-    int rc = hl_cap_crypto_x25519(shared, sk, pk);
-    secure_zero(sk, sizeof(sk));
+    size_t sk_len, pk_len;
+    const char *sk = luaL_checklstring(L, 1, &sk_len);
+    const char *pk = luaL_checklstring(L, 2, &pk_len);
+    if (sk_len != 32)
+        return luaL_error(L, "x25519: secret key must be 32 bytes");
+    if (pk_len != 32)
+        return luaL_error(L, "x25519: public key must be 32 bytes");
+    uint8_t shared[32];
+    int rc = hl_cap_crypto_x25519(shared, (const uint8_t *)sk, (const uint8_t *)pk);
     if (rc == -2) {
         lua_pushnil(L);
         lua_pushstring(L, "peer sent a low-order point");
@@ -811,143 +579,73 @@ static int lua_crypto_x25519(lua_State *L)
     }
     if (rc != 0)
         return luaL_error(L, "x25519 failed");
-
-    char shared_hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(shared_hex + i * 2, 3, "%02x", shared[i]);
-    shared_hex[64] = '\0';
-
-    lua_pushstring(L, shared_hex);
-    secure_zero(shared, sizeof(shared));
-    secure_zero(shared_hex, sizeof(shared_hex));
+    lua_pushlstring(L, (const char *)shared, sizeof shared);
+    secure_zero(shared, sizeof shared);
     return 1;
 }
 
-/* crypto.box_keypair() → pk_hex, sk_hex */
+/* crypto.box_keypair() -> public_key, secret_key (32 bytes each) */
 static int lua_crypto_box_keypair(lua_State *L)
 {
     uint8_t pk[32], sk[32];
     if (hl_cap_crypto_box_keypair(pk, sk) != 0)
         return luaL_error(L, "box keypair generation failed");
-
-    char pk_hex[65], sk_hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
-    pk_hex[64] = '\0';
-    for (int i = 0; i < 32; i++)
-        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
-    sk_hex[64] = '\0';
-
-    /* The RAW key is done with the moment it is encoded, so it goes now
-     * rather than surviving until after the pushes. */
-    secure_zero(sk, sizeof(sk));
-    return crypto_push_keypair(L, pk_hex, strlen(pk_hex),
-                               sk_hex, strlen(sk_hex));
+    return crypto_push_keypair(L, (const char *)pk, sizeof pk,
+                               (char *)sk, sizeof sk);
 }
 
-/* crypto.hmac_sha256(data, key_hex) → hex string */
+/* crypto.hmac_sha256(data, key) -> 32-byte MAC; the key is any non-empty
+ * byte string */
 static int lua_crypto_hmac_sha256(lua_State *L)
 {
-    size_t data_len;
+    size_t data_len, key_len;
     const char *data = luaL_checklstring(L, 1, &data_len);
-    size_t key_hex_len;
-    const char *key_hex = luaL_checklstring(L, 2, &key_hex_len);
-
-    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256)
-        return luaL_error(L, "key must be 1-128 bytes (2-256 hex chars)");
-
-    size_t key_len = key_hex_len / 2;
-    uint8_t key[128];
-    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0)
-        return luaL_error(L, "invalid hex in key");
-
+    const char *key  = luaL_checklstring(L, 2, &key_len);
+    if (key_len == 0)
+        return luaL_error(L, "hmac_sha256: key must not be empty");
     uint8_t out[32];
-    if (hl_cap_crypto_hmac_sha256(key, key_len,
-                                  (const uint8_t *)data, data_len, out) != 0) {
-        secure_zero(key, sizeof(key));
+    if (hl_cap_crypto_hmac_sha256((const uint8_t *)key, key_len,
+                                  (const uint8_t *)data, data_len, out) != 0)
         return luaL_error(L, "hmac_sha256 failed");
-    }
-
-    secure_zero(key, sizeof(key));
-
-    char hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(hex + i * 2, 3, "%02x", out[i]);
-    hex[64] = '\0';
-
-    lua_pushstring(L, hex);
+    lua_pushlstring(L, (const char *)out, sizeof out);
     return 1;
 }
 
-/* crypto.hmac_sha1(data, key_hex) → 40-char hex string.
+/* crypto.hmac_sha1(data, key) -> 20-byte MAC.
  *
- * HOTP/TOTP compatibility only - see hl_cap_crypto_hmac_sha1 docstring.
- * The key is hex-encoded to match the hmac_sha256 binding convention;
- * binary keys go through bytes_to_hex at the call site.
- */
+ * HOTP/TOTP compatibility only - see hl_cap_crypto_hmac_sha1 docstring. */
 static int lua_crypto_hmac_sha1(lua_State *L)
 {
-    size_t data_len;
+    size_t data_len, key_len;
     const char *data = luaL_checklstring(L, 1, &data_len);
-    size_t key_hex_len;
-    const char *key_hex = luaL_checklstring(L, 2, &key_hex_len);
-
-    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256)
-        return luaL_error(L, "key must be 1-128 bytes (2-256 hex chars)");
-
-    size_t key_len = key_hex_len / 2;
-    uint8_t key[128];
-    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0)
-        return luaL_error(L, "invalid hex in key");
-
+    const char *key  = luaL_checklstring(L, 2, &key_len);
+    if (key_len == 0)
+        return luaL_error(L, "hmac_sha1: key must not be empty");
     uint8_t out[20];
-    if (hl_cap_crypto_hmac_sha1(key, key_len,
-                                (const uint8_t *)data, data_len, out) != 0) {
-        secure_zero(key, sizeof(key));
+    if (hl_cap_crypto_hmac_sha1((const uint8_t *)key, key_len,
+                                (const uint8_t *)data, data_len, out) != 0)
         return luaL_error(L, "hmac_sha1 failed");
-    }
-    secure_zero(key, sizeof(key));
-
-    char hex[41];
-    for (int i = 0; i < 20; i++)
-        snprintf(hex + i * 2, 3, "%02x", out[i]);
-    hex[40] = '\0';
-
-    lua_pushstring(L, hex);
+    lua_pushlstring(L, (const char *)out, sizeof out);
     return 1;
 }
 
-/* crypto.hmac_sha256_verify(data, key_hex, expected_hex) → boolean */
+/* crypto.hmac_sha256_verify(data, key, expected) -> boolean; `expected` is
+ * the 32-byte MAC, compared in constant time */
 static int lua_crypto_hmac_sha256_verify(lua_State *L)
 {
-    size_t data_len;
-    const char *data = luaL_checklstring(L, 1, &data_len);
-    size_t key_hex_len;
-    const char *key_hex = luaL_checklstring(L, 2, &key_hex_len);
-    size_t expected_hex_len;
-    const char *expected_hex = luaL_checklstring(L, 3, &expected_hex_len);
-
-    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256)
-        return luaL_error(L, "key must be 1-128 bytes (2-256 hex chars)");
-    if (expected_hex_len != 64)
-        return luaL_error(L, "expected mac must be 64 hex chars (32 bytes)");
-
-    size_t key_len = key_hex_len / 2;
-    uint8_t key[128];
-    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0)
-        return luaL_error(L, "invalid hex in key");
-
-    uint8_t expected[32];
-    if (hex_decode(expected_hex, expected_hex_len, expected, 32) != 0) {
-        secure_zero(key, sizeof(key));
-        return luaL_error(L, "invalid hex in expected mac");
+    size_t data_len, key_len, expected_len;
+    const char *data     = luaL_checklstring(L, 1, &data_len);
+    const char *key      = luaL_checklstring(L, 2, &key_len);
+    const char *expected = luaL_checklstring(L, 3, &expected_len);
+    if (key_len == 0)
+        return luaL_error(L, "hmac_sha256_verify: key must not be empty");
+    if (expected_len != 32) {
+        lua_pushboolean(L, 0);           /* not a MAC of ours: no match */
+        return 1;
     }
-
-    int rc = hl_cap_crypto_hmac_sha256_verify(key, key_len,
+    int rc = hl_cap_crypto_hmac_sha256_verify((const uint8_t *)key, key_len,
                                                (const uint8_t *)data, data_len,
-                                               expected);
-    secure_zero(key, sizeof(key));
-
+                                               (const uint8_t *)expected);
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -976,7 +674,7 @@ static int lua_crypto_constant_time_eq(lua_State *L)
  *
  *   local h = crypto.create_sha256()
  *   h:update(chunk)         -- repeat as needed
- *   local hex = h:digest()  -- finalises; further update/digest = error
+ *   local digest = h:digest()  -- 32 bytes; further update/digest = error
  *
  * Backed by HlSha256Ctx; the userdata holds the context + a 'done' flag
  * so we can reject double-digest + post-digest updates cleanly. */
@@ -1026,10 +724,7 @@ static int lua_sha256_hasher_digest(lua_State *L)
     if (hl_cap_crypto_sha256_final(&h->ctx, out) != 0)
         return luaL_error(L, "sha256:digest() failed");
     h->done = 1;
-    char hex[65];
-    for (int i = 0; i < 32; i++) snprintf(hex + i*2, 3, "%02x", out[i]);
-    hex[64] = '\0';
-    lua_pushlstring(L, hex, 64);
+    lua_pushlstring(L, (const char *)out, sizeof out);
     return 1;
 }
 

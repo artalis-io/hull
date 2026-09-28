@@ -237,7 +237,7 @@ will use after their planned migrations to blob.
 Caller-derived key:
 
 ```lua
-local prompt_sha = crypto.sha256(prompt .. context .. model_id)
+local prompt_sha = encoding.hex.encode(crypto.sha256(prompt .. context .. model_id))
 
 -- Cache hit?
 local cached = blob.get(prompt_sha, { track_access = true })

@@ -32,7 +32,6 @@ local function assert_raises(fn, msg)
     if ok then error((msg or "should have raised") .. " but did not") end
 end
 
-local to_hex = require('hull.encoding').hex.encode
 
 local KEY_A = string.rep("\1", 32)
 local KEY_B = string.rep("\2", 32)
@@ -199,20 +198,20 @@ local function crypto_stub(result)
 end
 
 test("verify_signature passes a good signature through", function()
-    local ok = hostkey.verify_signature(crypto_stub(true), to_hex,
+    local ok = hostkey.verify_signature(crypto_stub(true),
         key_blob(KEY_A), sig_blob(string.rep("\9", 64)), "HASH")
     assert_eq(ok, true)
 end)
 
 test("verify_signature reports a bad signature", function()
-    local ok, err = hostkey.verify_signature(crypto_stub(false), to_hex,
+    local ok, err = hostkey.verify_signature(crypto_stub(false),
         key_blob(KEY_A), sig_blob(string.rep("\9", 64)), "HASH")
     assert_eq(ok, false)
     assert_eq(err:find("does not verify", 1, true) ~= nil, true, err)
 end)
 
 test("a malformed blob is a verification failure, not a crash", function()
-    local ok, err = hostkey.verify_signature(crypto_stub(true), to_hex,
+    local ok, err = hostkey.verify_signature(crypto_stub(true),
         "garbage", sig_blob(string.rep("\9", 64)), "HASH")
     assert_eq(ok, false)
     assert_eq(type(err), "string")
@@ -223,7 +222,7 @@ test("the signature is checked over the exchange hash", function()
     -- from a different session.
     local seen
     local crypto = { ed25519_verify = function(data) seen = data; return true end }
-    hostkey.verify_signature(crypto, to_hex, key_blob(KEY_A),
+    hostkey.verify_signature(crypto, key_blob(KEY_A),
         sig_blob(string.rep("\9", 64)), "THE-EXCHANGE-HASH")
     assert_eq(seen, "THE-EXCHANGE-HASH")
 end)
@@ -236,7 +235,7 @@ test("verify refuses before it ever looks at the store", function()
     -- A bad signature means the peer does not hold the key it presented, so
     -- whether we have seen that key before is beside the point.
     local store = new_store({ ["spark.local"] = key_blob(KEY_A) })
-    local d = hostkey.verify(crypto_stub(false), to_hex, fake_sha, store,
+    local d = hostkey.verify(crypto_stub(false), fake_sha, store,
         "spark.local", key_blob(KEY_A), sig_blob(string.rep("\9", 64)), "H")
     assert_eq(d.ok, false)
     assert_eq(d.status, nil)
@@ -244,7 +243,7 @@ end)
 
 test("verify reports trusted for a known matching host", function()
     local store = new_store({ ["spark.local"] = key_blob(KEY_A) })
-    local d = hostkey.verify(crypto_stub(true), to_hex, fake_sha, store,
+    local d = hostkey.verify(crypto_stub(true), fake_sha, store,
         "spark.local", key_blob(KEY_A), sig_blob(string.rep("\9", 64)), "H")
     assert_eq(d.ok, true)
     assert_eq(d.status, hostkey.TRUSTED)
@@ -255,7 +254,7 @@ test("verify exposes the fingerprint for an unknown host", function()
     -- The key is shown BEFORE trust, so an operator can be asked rather than
     -- told afterwards.
     local store = new_store()
-    local d = hostkey.verify(crypto_stub(true), to_hex, fake_sha, store,
+    local d = hostkey.verify(crypto_stub(true), fake_sha, store,
         "spark.local", key_blob(KEY_A), sig_blob(string.rep("\9", 64)), "H")
     assert_eq(d.status, hostkey.UNKNOWN)
     assert_eq(d.fingerprint ~= nil, true)
@@ -266,7 +265,7 @@ end)
 
 test("verify never returns trusted for a changed key", function()
     local store = new_store({ ["spark.local"] = key_blob(KEY_A) })
-    local d = hostkey.verify(crypto_stub(true), to_hex, fake_sha, store,
+    local d = hostkey.verify(crypto_stub(true), fake_sha, store,
         "spark.local", key_blob(KEY_B), sig_blob(string.rep("\9", 64)), "H")
     assert_eq(d.status, hostkey.CHANGED)
     assert_eq(d.status ~= hostkey.TRUSTED, true)
@@ -275,7 +274,7 @@ end)
 test("a changed key reports both fingerprints", function()
     -- The useful question for whoever reads this is which key they expected.
     local store = new_store({ ["spark.local"] = key_blob(KEY_A) })
-    local d = hostkey.verify(crypto_stub(true), to_hex, fake_sha, store,
+    local d = hostkey.verify(crypto_stub(true), fake_sha, store,
         "spark.local", key_blob(KEY_B), sig_blob(string.rep("\9", 64)), "H")
     assert_eq(d.stored_fingerprint ~= nil, true)
     assert_eq(d.fingerprint ~= d.stored_fingerprint, true)
@@ -286,7 +285,7 @@ test("a valid signature does not by itself mean trusted", function()
     -- about whether that is the key we expected, which is the whole reason a
     -- trust store exists.
     local store = new_store()
-    local d = hostkey.verify(crypto_stub(true), to_hex, fake_sha, store,
+    local d = hostkey.verify(crypto_stub(true), fake_sha, store,
         "new.local", key_blob(KEY_A), sig_blob(string.rep("\9", 64)), "H")
     assert_eq(d.ok, true)
     assert_eq(d.status, hostkey.UNKNOWN)

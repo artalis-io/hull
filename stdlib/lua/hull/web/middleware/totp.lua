@@ -149,10 +149,9 @@ local _state = {
     -- Multi-key encryption state. See totp.init for the input shape
     -- and the encrypt_secret / decrypt_secret comments for the wire
     -- format.
-    keys                = {},   -- {[version_id] = key_hex}
+    keys                = {},   -- {[version_id] = key}
     current_key_version = nil,  -- id used for new encryptions
     legacy_key_version  = nil,  -- id for pre-versioning rows, if any
-    encryption_key_hex  = nil,  -- retained for _test back-compat
     _initialized        = false,
 }
 
@@ -308,8 +307,8 @@ end
 -- entry in _state.keys; new writes ALWAYS use v2. The rekey()
 -- helper converts v1 rows to v2 on demand or lazily on verify.
 --
--- Multi-key support: _state.keys is a map {version_id -> key_hex}, the
--- keyring shape sealbox takes. The current version (used for new
+-- Multi-key support: _state.keys is a map {version_id -> key}, as
+-- sealbox.keyring builds it. The current version (used for new
 -- encryptions) lives in _state.current_key_version.
 local function keyring()
     return { keys = _state.keys, current = _state.current_key_version }
@@ -670,7 +669,7 @@ function totp.init(opts)
            or #opts.encryption_key ~= 32 then
             error("totp.init: encryption_key must be exactly 32 bytes")
         end
-        keys[1] = encoding.hex.encode(opts.encryption_key)
+        keys = sealbox.keyring({ keys = { [1] = opts.encryption_key }, current = 1 }).keys
         current = 1
         legacy_version = 1  -- pre-versioning rows decrypt under this key
     end
@@ -719,8 +718,6 @@ function totp.init(opts)
     _state.keys                 = keys
     _state.current_key_version  = current
     _state.legacy_key_version   = legacy_version
-    -- Back-compat: a few _test helpers still expect this field.
-    _state.encryption_key_hex   = current and keys[current] or nil
 
     -- Idempotent table creation. db.batch wraps the multi-statement
     -- DDL in a transaction so a crash mid-init leaves a consistent
@@ -1280,7 +1277,6 @@ totp._test = {
         _state.keys                = {}
         _state.current_key_version = nil
         _state.legacy_key_version  = nil
-        _state.encryption_key_hex  = nil
         _state._cleanup_catchup_done = false
         _state._cleanup_scheduled    = false
         _state._initialized        = false

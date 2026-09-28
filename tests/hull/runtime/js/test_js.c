@@ -1179,7 +1179,8 @@ UTEST(js_cap, crypto_sha256)
 
     const char *code =
         "import { crypto } from 'hull:crypto';\n"
-        "globalThis.__test_hash = crypto.sha256('hello');\n";
+        "import { encoding } from 'hull:encoding';\n"
+        "globalThis.__test_hash = encoding.hex.encode(crypto.sha256('hello'));\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -1989,8 +1990,9 @@ UTEST(js_cap, crypto_hmac_sha256)
     /* RFC 4231 Test Case 2: key="Jefe", data="what do ya want for nothing?" */
     const char *code =
         "import { crypto } from 'hull:crypto';\n"
-        "globalThis.__test_hmac = crypto.hmacSha256("
-        "  'what do ya want for nothing?', '4a656665');\n";
+        "import { encoding } from 'hull:encoding';\n"
+        "globalThis.__test_hmac = encoding.hex.encode(crypto.hmacSha256("
+        "  'what do ya want for nothing?', 'Jefe'));\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -2028,14 +2030,15 @@ UTEST(js_cap, crypto_hmac_sha1)
      * except possibly the last position). */
     const char *code =
         "import { crypto } from 'hull:crypto';\n"
+        "import { encoding } from 'hull:encoding';\n"
         /* Test 1: RFC 2202 case 2 - text input, no binary pitfalls. */
-        "globalThis.__test_h1_rfc = crypto.hmacSha1("
-        "  'what do ya want for nothing?', '4a656665');\n"
+        "globalThis.__test_h1_rfc = encoding.hex.encode(crypto.hmacSha1("
+        "  'what do ya want for nothing?', 'Jefe'));\n"
         /* Test 2: RFC 6238 TOTP counter=1, key='12345678901234567890'.
          * Counter built as 8-byte BE string via String.fromCharCode. */
         "const counter = String.fromCharCode(0,0,0,0,0,0,0,1);\n"
-        "globalThis.__test_h1_totp = crypto.hmacSha1("
-        "  counter, '3132333435363738393031323334353637383930');\n";
+        "globalThis.__test_h1_totp = encoding.hex.encode(crypto.hmacSha1("
+        "  counter, '12345678901234567890'));\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -2811,8 +2814,9 @@ UTEST(js_stdlib, crypto_encoding_audit_fixes)
         "  const key = '6b6579';\n"
         "  const text = 'The quick brown fox';\n"
         "  const u8 = encoding.bytes.toU8(text);\n"
-        "  if (crypto.hmacSha256(u8.buffer, key) !== crypto.hmacSha256(text, key)) return 1;\n"
-        "  if (crypto.hmacSha256(u8.buffer, key) === crypto.hmacSha256('[object ArrayBuffer]', key)) return 2;\n"
+        "  const hm = (d) => encoding.hex.encode(crypto.hmacSha256(d, key));\n"
+        "  if (hm(u8.buffer) !== hm(text)) return 1;\n"
+        "  if (hm(u8.buffer) === hm('[object ArrayBuffer]')) return 2;\n"
         "  if (!crypto.constantTimeEq(u8, text) || crypto.constantTimeEq(u8, 'x')) return 3;\n"
         /* 4-5: a string `current` is normalised, so rekey reaches 0 */
         "  const h = kv.open({ namespace: 'cur', encrypt: { keys: { 1: K1, 2: K2 }, current: '2' } });\n"
@@ -3512,6 +3516,54 @@ UTEST(js_stdlib, csrf_cross_runtime_reference_token)
 
 /* ── hull:web:middleware:auth tests (smoke - modules load and expose API) */
 
+/* The byte API: every key, nonce, signature, tag and digest is an ArrayBuffer
+ * of its exact size, round trips work, and a wrong-length argument throws.
+ * run() returns 0, or the number of the first check that failed. */
+UTEST(js_cap, crypto_bytes_contract)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "import { encoding } from 'hull:encoding';\n"
+        "const hex = (b) => encoding.hex.encode(b);\n"
+        "const len = (b) => b.byteLength;\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "function run() {\n"
+        "  if (len(crypto.sha256('x')) !== 32 || len(crypto.sha512('x')) !== 64) return 1;\n"
+        "  if (len(crypto.hmacSha256('x', 'k')) !== 32 || len(crypto.hmacSha1('x', 'k')) !== 20) return 2;\n"
+        "  const h = crypto.createSha256(); h.update('he'); h.update(new Uint8Array([108, 108, 111]));\n"
+        "  if (hex(h.digest()) !== hex(crypto.sha256('hello'))) return 3;\n"
+        "  const kp = crypto.ed25519Keypair();\n"
+        "  if (len(kp.publicKey) !== 32 || len(kp.secretKey) !== 64) return 4;\n"
+        "  const sig = crypto.ed25519Sign('msg', kp.secretKey);\n"
+        "  if (len(sig) !== 64 || !crypto.ed25519Verify('msg', sig, kp.publicKey)) return 5;\n"
+        "  if (crypto.ed25519Verify('msh', sig, kp.publicKey)) return 6;\n"
+        "  const key = crypto.random(32), nonce = crypto.random(24);\n"
+        "  const ct = crypto.secretbox('secret', nonce, key);\n"
+        "  const pt = crypto.secretboxOpen(ct, nonce, key);\n"
+        "  if (len(ct) !== 6 + 16 || encoding.bytes.fromBuffer(pt) !== 'secret') return 7;\n"
+        "  const bad = new Uint8Array(ct); bad[0] ^= 1;\n"
+        "  if (crypto.secretboxOpen(bad, nonce, key) !== null) return 8;\n"
+        "  const a = crypto.boxKeypair(), b = crypto.boxKeypair();\n"
+        "  const bct = crypto.box('hi', nonce, b.publicKey, a.secretKey);\n"
+        "  if (encoding.bytes.fromBuffer(crypto.boxOpen(bct, nonce, a.publicKey, b.secretKey)) !== 'hi') return 9;\n"
+        "  const xa = crypto.x25519Keypair(), xb = crypto.x25519Keypair();\n"
+        "  const s1 = crypto.x25519(xa.secretKey, xb.publicKey), s2 = crypto.x25519(xb.secretKey, xa.publicKey);\n"
+        "  if (len(s1) !== 32 || hex(s1) !== hex(s2)) return 10;\n"
+        "  const tag = crypto.auth('m', key);\n"
+        "  if (len(tag) !== 32 || !crypto.authVerify(tag, 'm', key)) return 11;\n"
+        "  if (!threw(() => crypto.ed25519Sign('m', new Uint8Array(63)))) return 12;\n"
+        "  if (!threw(() => crypto.secretbox('m', nonce, new Uint8Array(31)))) return 13;\n"
+        "  if (!threw(() => crypto.hmacSha256('m', ''))) return 14;\n"
+        "  if (crypto.hmacSha256Verify('m', 'k', new Uint8Array(3))) return 15;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__bytes = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__bytes"), 0);
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, crypto_hmac_sha256_verify)
 {
     init_js_with_caps();
@@ -3519,12 +3571,12 @@ UTEST(js_cap, crypto_hmac_sha256_verify)
 
     const char *code =
         "import { crypto } from 'hull:crypto';\n"
-        "const mac = crypto.hmacSha256('what do ya want for nothing?', '4a656665');\n"
-        "globalThis.__test_hv_ok = crypto.hmacSha256Verify('what do ya want for nothing?', '4a656665', mac) ? 1 : 0;\n"
-        "globalThis.__test_hv_bad_mac = crypto.hmacSha256Verify('what do ya want for nothing?', '4a656665', "
-        "  '0000000000000000000000000000000000000000000000000000000000000000') ? 1 : 0;\n"
-        "const mac2 = crypto.hmacSha256('hello', '4a656665');\n"
-        "globalThis.__test_hv_bad_key = crypto.hmacSha256Verify('hello', 'deadbeef', mac2) ? 1 : 0;\n";
+        "const mac = crypto.hmacSha256('what do ya want for nothing?', 'Jefe');\n"
+        "globalThis.__test_hv_ok = crypto.hmacSha256Verify('what do ya want for nothing?', 'Jefe', mac) ? 1 : 0;\n"
+        "globalThis.__test_hv_bad_mac = crypto.hmacSha256Verify('what do ya want for nothing?', 'Jefe', "
+        "  new Uint8Array(32)) ? 1 : 0;\n"
+        "const mac2 = crypto.hmacSha256('hello', 'Jefe');\n"
+        "globalThis.__test_hv_bad_key = crypto.hmacSha256Verify('hello', 'Jeff', mac2) ? 1 : 0;\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);

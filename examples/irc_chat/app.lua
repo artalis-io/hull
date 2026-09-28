@@ -38,6 +38,31 @@ local session  = require("hull.web.middleware.session")
 local auth     = require("hull.web.middleware.auth")
 local log = require("hull.log")
 local json = require("hull.json")
+
+-- Keys, nonces and signatures live in this app as hex (in its database and
+-- its JSON messages); hull.crypto takes and returns bytes. These convert at
+-- that boundary. A signature or key from a peer is untrusted input, so one
+-- that is not hex of the right length is a failed check, not an error.
+local hexc = encoding.hex
+local function keypair_hex(gen)
+    local pk, sk = gen()
+    return hexc.encode(pk), hexc.encode(sk)
+end
+local function sign_hex(msg, sk_hex)
+    return hexc.encode(crypto.ed25519_sign(msg, hexc.decode(sk_hex)))
+end
+local function verify_hex(msg, sig_hex, pk_hex)
+    local sig = type(sig_hex) == "string" and hexc.decode(sig_hex)
+    local pk  = type(pk_hex) == "string" and hexc.decode(pk_hex)
+    if type(msg) ~= "string" or not sig or not pk or #sig ~= 64 or #pk ~= 32 then
+        return false
+    end
+    return crypto.ed25519_verify(msg, sig, pk)
+end
+local function box_hex(msg, nonce_hex, pk_hex, sk_hex)
+    return hexc.encode(crypto.box(msg, hexc.decode(nonce_hex),
+                                  hexc.decode(pk_hex), hexc.decode(sk_hex)))
+end
 local _cookie  = require("hull.web.cookie") -- luacheck: ignore
 
 app.manifest({
@@ -118,7 +143,7 @@ local FEDERATION = {
 
 -- Generate ephemeral Ed25519 keypair for server identity
 if not FEDERATION.public_key then
-    FEDERATION.public_key, FEDERATION.secret_key = crypto.ed25519_keypair()
+    FEDERATION.public_key, FEDERATION.secret_key = keypair_hex(crypto.ed25519_keypair)
 end
 
 -- In-memory federation state
@@ -249,7 +274,7 @@ app.post("/register", function(req, res)
     end
 
     -- Generate Curve25519 keypair for E2E encryption
-    local pk, sk = crypto.box_keypair()
+    local pk, sk = keypair_hex(crypto.box_keypair)
     local hash = crypto.hash_password(body.password)
     local id
 
@@ -366,7 +391,7 @@ app.post("/channels", function(req, res)
     local nonce_hex = to_hex(crypto.random(24))
 
     -- Encrypt channel key for the creator using crypto.box
-    local encrypted_key = crypto.box(
+    local encrypted_key = box_hex(
         channel_key_hex, nonce_hex, sess.public_key, sess.public_key)
     -- Note: in a real system, the creator would use their own sk to encrypt
     -- for themselves. Here we store the key directly since both sides are server.
@@ -1034,7 +1059,7 @@ app.get("/e2e-test", function(req, res)
 
     -- Step 1: Register users directly via DB (bypass HTTP to avoid cookie issues)
     local alice_pw = crypto.hash_password("testpass1234")
-    local alice_pk, _alice_sk = crypto.box_keypair()
+    local alice_pk, _alice_sk = keypair_hex(crypto.box_keypair)
     pcall(function()
         db.exec("INSERT INTO users (username, password_hash, public_key, created_at) VALUES (?, ?, ?, ?)",
                 {"alice_e2e", alice_pw, alice_pk, time.now()})
@@ -1043,7 +1068,7 @@ app.get("/e2e-test", function(req, res)
     results.alice_registered = #alice_rows > 0
 
     local bob_pw = crypto.hash_password("testpass5678")
-    local bob_pk, _bob_sk = crypto.box_keypair()
+    local bob_pk, _bob_sk = keypair_hex(crypto.box_keypair)
     pcall(function()
         db.exec("INSERT INTO users (username, password_hash, public_key, created_at) VALUES (?, ?, ?, ?)",
                 {"bob_e2e", bob_pw, bob_pk, time.now()})
@@ -1410,7 +1435,7 @@ app.ws("/federation", {
                 return
             end
             -- Verify initiator signed our challenge
-            local valid = crypto.ed25519_verify(
+            local valid = verify_hex(
                 pending.challenge, data.signature, pending.public_key)
             if not valid then
                 ws_send(conn, { type = "fed_error", message = "invalid signature" })
@@ -1418,7 +1443,7 @@ app.ws("/federation", {
                 return
             end
             -- Sign their challenge and send welcome
-            local my_sig = crypto.ed25519_sign(data.challenge, FEDERATION.secret_key)
+            local my_sig = sign_hex(data.challenge, FEDERATION.secret_key)
             ws_send(conn, {
                 type = "fed_welcome",
                 signature = my_sig,
@@ -1506,7 +1531,7 @@ if FEDERATION.enabled then
                 if pending and pending.state == "awaiting_challenge" then
                     if data.type == "fed_challenge" then
                         -- Sign their challenge and send our own
-                        local my_sig = crypto.ed25519_sign(data.challenge, FEDERATION.secret_key)
+                        local my_sig = sign_hex(data.challenge, FEDERATION.secret_key)
                         local my_challenge = to_hex(crypto.random(32))
                         pending.state = "awaiting_welcome"
                         pending.challenge = my_challenge
@@ -1522,7 +1547,7 @@ if FEDERATION.enabled then
                 elseif pending and pending.state == "awaiting_welcome" then
                     if data.type == "fed_welcome" then
                         -- Verify their signature on our challenge
-                        local valid = crypto.ed25519_verify(
+                        local valid = verify_hex(
                             pending.challenge, data.signature, pending.public_key)
                         if not valid then
                             log.error("federation: peer signature invalid")
@@ -1598,7 +1623,7 @@ app.get("/e2e-federation-test", function(req, res)
     }
 
     -- Step 1: Generate fake peer keypair
-    local fake_pk, fake_sk = crypto.ed25519_keypair()
+    local fake_pk, fake_sk = keypair_hex(crypto.ed25519_keypair)
     results.keypair_generated = fake_pk ~= nil and fake_sk ~= nil
 
     -- Step 2: Temporarily add fake peer to FEDERATION config and enable.
@@ -1632,7 +1657,7 @@ app.get("/e2e-federation-test", function(req, res)
 
             if data.type == "fed_challenge" then
                 -- Sign their challenge
-                local sig = crypto.ed25519_sign(data.challenge, fake_sk)
+                local sig = sign_hex(data.challenge, fake_sk)
                 my_challenge = to_hex(crypto.random(32))
                 conn:send(json.encode({
                     type = "fed_auth",
@@ -1641,7 +1666,7 @@ app.get("/e2e-federation-test", function(req, res)
                 }))
             elseif data.type == "fed_welcome" then
                 -- Verify their signature on our challenge
-                local valid = crypto.ed25519_verify(
+                local valid = verify_hex(
                     my_challenge, data.signature, FEDERATION.public_key)
                 if valid then
                     results.handshake_completed = true
@@ -1667,7 +1692,7 @@ app.get("/e2e-federation-test", function(req, res)
     if handshake_done then
         -- Ensure #general channel and test user exist
         local fed_pw = crypto.hash_password("fedpass1234")
-        local fed_pk_box, _fed_sk_box = crypto.box_keypair()
+        local fed_pk_box, _fed_sk_box = keypair_hex(crypto.box_keypair)
         pcall(function()
             db.exec("INSERT INTO users (username, password_hash, public_key, created_at) VALUES (?, ?, ?, ?)",
                     {"fed_test_user", fed_pw, fed_pk_box, time.now()})

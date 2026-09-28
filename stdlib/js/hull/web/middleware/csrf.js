@@ -31,8 +31,7 @@ function computeHmac(sessionId, tsHex, secret) {
     // ":" separator deliberately distinct from the wire-format "."
     // separator - see the wire-format note at the top of this file.
     const msg = sessionId + ":" + tsHex;
-    const keyHex = encoding.hex.encode(secret);
-    return crypto.hmacSha256(msg, keyHex);
+    return encoding.hex.encode(crypto.hmacSha256(msg, encoding.bytes.toU8(secret)));
 }
 
 /**

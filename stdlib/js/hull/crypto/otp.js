@@ -37,8 +37,8 @@ function hotp(key, counter, digits) {
         (hi >>> 24) & 0xff, (hi >>> 16) & 0xff, (hi >>> 8) & 0xff, hi & 0xff,
         (lo >>> 24) & 0xff, (lo >>> 16) & 0xff, (lo >>> 8) & 0xff, lo & 0xff,
     ]).buffer;
-    const macHex = crypto.hmacSha1(msg, encoding.hex.encode(key));
-    const byte = (i) => parseInt(macHex.substr(i * 2, 2), 16);
+    const mac = new Uint8Array(crypto.hmacSha1(msg, encoding.bytes.toU8(key)));
+    const byte = (i) => mac[i];
     const offset = byte(19) & 0x0f;
     const p = (byte(offset) & 0x7f) * 0x1000000 + byte(offset + 1) * 0x10000
             + byte(offset + 2) * 0x100 + byte(offset + 3);

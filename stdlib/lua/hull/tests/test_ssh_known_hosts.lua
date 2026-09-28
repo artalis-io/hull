@@ -133,9 +133,7 @@ local function fake_fs(initial)
 end
 
 local fake_crypto = {
-    hmac_sha1 = function(msg, key_hex)
-        return enc.hex.encode(fake_hmac(enc.hex.decode(key_hex), msg))
-    end,
+    hmac_sha1 = function(msg, key) return fake_hmac(key, msg) end,
     random = function(n) return string.rep("r", n) end,
 }
 

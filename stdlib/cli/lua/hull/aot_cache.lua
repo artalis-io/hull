@@ -41,6 +41,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
 
+local hex = require("hull.encoding").hex
 local M = {}
 
 local CACHE_KIND = "compute-aot"
@@ -95,7 +96,7 @@ function M.wamrc_version(wamrc_bin)
         -- failing-probe run together.
         return nil
     end
-    local id = "wamrc-sha256=" .. crypto.sha256(bytes)
+    local id = "wamrc-sha256=" .. hex.encode(crypto.sha256(bytes))
     wamrc_version_memo[wamrc_bin] = id
     return id
 end
@@ -118,7 +119,7 @@ function M.key(wasm_path, arch, mem64, wamrc_version)
     if not wasm_path or not arch then return nil end
     local wasm_bytes = tool.read_file(wasm_path)
     if not wasm_bytes then return nil end
-    local wasm_sha = crypto.sha256(wasm_bytes)
+    local wasm_sha = hex.encode(crypto.sha256(wasm_bytes))
     local payload = table.concat({
         wasm_sha,
         "|arch=", arch,
@@ -127,7 +128,7 @@ function M.key(wasm_path, arch, mem64, wamrc_version)
                                               -- any shared-heap AOT contract change)
         "|wamrc=", wamrc_version or "unknown",
     })
-    return crypto.sha256(payload)
+    return hex.encode(crypto.sha256(payload))
 end
 
 function M.lookup(key, dest_path)

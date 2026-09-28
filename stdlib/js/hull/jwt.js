@@ -72,10 +72,11 @@ import { encoding } from "hull:encoding";
 // HS256: HMAC-SHA256 over the signing input, returning the
 // base64url-encoded 32-byte digest (matches what the JWS token holds).
 function hs256SignatureB64(signingInput, secret) {
-    const keyHex = encoding.hex.encode(secret);
-    const sigHex = crypto.hmacSha256(signingInput, keyHex);
-    // Byte-for-byte what the Lua sibling produces (tests/e2e_token_interop.sh).
-    return encoding.base64.encode(encoding.hex.decode(sigHex), { url: true });
+    // The secret is a byte string, as in Lua: bytes.toU8 keeps its bytes (a
+    // bare string would go in as UTF-8). Byte-for-byte what the Lua sibling
+    // produces (tests/e2e_token_interop.sh).
+    const sig = crypto.hmacSha256(signingInput, encoding.bytes.toU8(secret));
+    return encoding.base64.encode(sig, { url: true });
 }
 
 /**

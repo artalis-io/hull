@@ -42,6 +42,7 @@
 
 local json = require("hull.json")
 local crypto = require("hull.crypto")
+local encoding = require("hull.encoding")
 local db = require("hull.db").default()
 local time = require("hull.time")
 
@@ -156,7 +157,7 @@ end
 --- Compute a request fingerprint: SHA-256(method + path + body).
 local function compute_fingerprint(req)
     local data = (req.method or "") .. "\0" .. (req.path or "") .. "\0" .. (req.body or "")
-    return crypto.sha256(data)
+    return encoding.hex.encode(crypto.sha256(data))
 end
 
 --- Build a post-body idempotency middleware.

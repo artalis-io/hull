@@ -1585,13 +1585,13 @@ end
 
 -- Generate a 64-char hex CSRF secret at scaffold time so apps don't
 -- ship with the literal `CHANGE-ME-IN-PRODUCTION` placeholder. The
--- secret is HMAC-key material; SHA-256 of 32 random bytes gives a
--- canonical 256-bit value with a fixed shape. The warning code in
+-- secret is HMAC-key material; 32 random bytes as hex give a canonical
+-- 256-bit value with a fixed shape. The warning code in
 -- the template stays in place - it now only fires for legacy /
 -- manually-pasted placeholders, not for fresh scaffolds.
 local function fresh_csrf_secret()
     local crypto = require("hull.crypto")
-    return crypto.sha256(crypto.random(32))
+    return crypto.random_token(32, "hex")
 end
 
 -- Replace the FIRST quoted occurrence of "CHANGE-ME-IN-PRODUCTION"

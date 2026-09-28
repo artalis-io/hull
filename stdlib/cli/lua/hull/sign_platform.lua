@@ -10,6 +10,7 @@
 --
 
 local json = require("hull.json")
+local hex = require("hull.encoding").hex
 
 -- ── Argument parsing ─────────────────────────────────────────────────
 
@@ -152,7 +153,7 @@ local function main()
             local arch = detect_arch(scan_dir_path, "libhull_platform.a")
             local lib_data = read_file(single_lib)
             if lib_data then
-                local lib_hash = crypto.sha256(lib_data)
+                local lib_hash = hex.encode(crypto.sha256(lib_data))
                 -- Read canary hash (informational; absent on extracted
                 -- embedded blobs since the canary lives next to the .a
                 -- in the source tree only).
@@ -175,7 +176,7 @@ local function main()
                 if arch then
                     local lib_data = read_file(path)
                     if lib_data then
-                        local lib_hash = crypto.sha256(lib_data)
+                        local lib_hash = hex.encode(crypto.sha256(lib_data))
                         local canary_path = scan_dir_path .. "platform_canary_hash." .. arch
                         local canary_data = read_file(canary_path)
                         if not canary_data then
@@ -229,7 +230,7 @@ local function main()
 
     -- Sign: canonicalStringify(platforms)
     local payload = json.encode(platforms)
-    local sig_hex = crypto.ed25519_sign(payload, sk_hex)
+    local sig_hex = hex.encode(crypto.ed25519_sign(payload, hex.decode(sk_hex)))
 
     -- Build platform.sig
     local sig_table = {

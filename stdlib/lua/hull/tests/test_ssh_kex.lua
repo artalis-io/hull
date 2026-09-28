@@ -231,15 +231,5 @@ test("the shared secret enters the KDF as an mpint", function()
     assert_eq(viaKeys, direct)
 end)
 
--- hex bridging ---------------------------------------------------------------
-
-test("raw_hash adapts a hex-returning hash", function()
-    -- hull.crypto returns hex; derive_key wants raw bytes. A missed
-    -- conversion here would silently halve the entropy per byte.
-    local hexhash = function(d) return require('hull.encoding').hex.encode(fake_hash(d)) end
-    local raw = kex.raw_hash(hexhash)
-    assert_eq(raw("x"), fake_hash("x"))
-end)
-
 -- Return results for C test harness
 return {pass = pass, fail = fail}

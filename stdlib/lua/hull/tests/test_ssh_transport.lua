@@ -64,7 +64,7 @@ end
 local function stub_crypto()
     return {
         random = function(n) return string.rep("\0", n) end,
-        sha256 = function() return string.rep("ab", 32) end,
+        sha256 = function() return string.rep("\171", 32) end,
     }
 end
 
@@ -731,7 +731,7 @@ test("a rekey we start reads its reply past the data it set aside", function()
     local s = fake_stream(plain(channel_data) .. plain(theirs) .. plain(reply), 4)
     local crypto = stub_crypto()
     crypto.x25519_keypair = function()
-        return string.rep("00", 32), string.rep("11", 32)
+        return string.rep("\0", 32), string.rep("\17", 32)
     end
     -- Stops the exchange just after the reply was accepted: reaching here at
     -- all is what is being asserted.
@@ -764,7 +764,7 @@ end
 
 local function kex_crypto()
     local c = stub_crypto()
-    c.x25519_keypair = function() return string.rep("00", 32), string.rep("11", 32) end
+    c.x25519_keypair = function() return string.rep("\0", 32), string.rep("\17", 32) end
     c.x25519 = function() return nil, "stub stops here" end
     return c
 end
