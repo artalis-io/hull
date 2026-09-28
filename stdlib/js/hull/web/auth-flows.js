@@ -28,7 +28,7 @@ import { time }     from "hull:time";
 import { json }     from "hull:json";
 
 const _state = {
-    stateSecretHex:      null,
+    stateSecret:      null,
     verifyTtl:           86400,
     resetTtl:            3600,
     magicLinkTtl:        600,
@@ -160,14 +160,14 @@ function issueToken(userId, action, ttl, extra) {
             }
         }
     }
-    return envelope.sign(payload, _state.stateSecretHex);
+    return envelope.sign(payload, _state.stateSecret);
 }
 
 // Verify signature + action + expiry WITHOUT marking the token
 // used. Signature framing comes from hull:crypto:envelope; the
 // action and expiry checks are auth-flows-specific.
 function parseToken(token, expectedAction) {
-    const r = envelope.verify(token, _state.stateSecretHex);
+    const r = envelope.verify(token, _state.stateSecret);
     if (!r[0]) return [null, r[1]];
     const env = r[0];
     if (env.action !== expectedAction) return [null, "wrong action"];
@@ -178,7 +178,7 @@ function parseToken(token, expectedAction) {
 }
 
 function markTokenUsed(token, exp) {
-    const tokenHash = crypto.sha256(token);
+    const tokenHash = encoding.hex.encode(crypto.sha256(token));
     const rc = db.insertIfAbsent(
         "_hull_auth_used_tokens",
         ["token_hash"],
@@ -188,7 +188,7 @@ function markTokenUsed(token, exp) {
 }
 
 function tokenAlreadyUsed(token) {
-    const tokenHash = crypto.sha256(token);
+    const tokenHash = encoding.hex.encode(crypto.sha256(token));
     const rows = db.query(
         "SELECT 1 FROM _hull_auth_used_tokens WHERE token_hash = ? LIMIT 1",
         [tokenHash]);
@@ -902,7 +902,7 @@ function handleEmailChange(req, res) {
     const now = time.now();
     const token = issueToken(uid, ACTIONS.email_change,
         _state.emailChangeTtl, { new_email: body.new_email });
-    const tokenHash = crypto.sha256(token);
+    const tokenHash = encoding.hex.encode(crypto.sha256(token));
     db.upsert(
         "_hull_auth_pending_email_changes",
         ["user_id"],
@@ -1214,7 +1214,8 @@ function init(opts) {
         }
     }
 
-    _state.stateSecretHex = encoding.hex.encode(secret);
+    // A byte string, like the Lua side: bytes.toU8 keeps its bytes.
+    _state.stateSecret = encoding.bytes.toU8(secret);
     _state.emailSend      = opts.emailSend;
     _state.publicOrigin   = opts.publicOrigin || null;
     _state.trustedHosts   = opts.trustedHosts || null;
@@ -1361,7 +1362,7 @@ const _test = {
     emailRateAllow: (to) => emailRateAllow(to),
     emailRateReset: () => { _emailRl = new Map(); },
     reset: () => {
-        _state.stateSecretHex = null;
+        _state.stateSecret = null;
         _state.emailSend      = null;
         _state.publicOrigin   = null;
         _state.trustedHosts   = null;

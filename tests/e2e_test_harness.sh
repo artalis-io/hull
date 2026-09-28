@@ -36,8 +36,9 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/lua/tests"
 cat > "$TMP/lua/app.lua" <<'LUA'
 local crypto = require("hull.crypto")
+local hex = require("hull.encoding").hex
 app.manifest({
-    modules = { "hull/http-server@1", "hull/blob@1", "hull/crypto@1" },
+    modules = { "hull/http-server@1", "hull/blob@1", "hull/crypto@1", "hull/encoding@1" },
     fs = { write = { "data/blobs" } },
 })
 app.post("/upload", function(req, res)
@@ -47,7 +48,7 @@ app.post("/upload", function(req, res)
             local buf = {}
             for chunk in part:chunks() do buf[#buf + 1] = chunk end
             files[part.name] = { filename = part.filename,
-                                 sha = crypto.sha256(table.concat(buf)) }
+                                 sha = hex.encode(crypto.sha256(table.concat(buf))) }
         else
             fields[part.name] = part:read()
         end
@@ -62,6 +63,7 @@ LUA
 cat > "$TMP/lua/tests/test_harness.lua" <<'LUA'
 local blob = require("hull.blob")
 local crypto = require("hull.crypto")
+local hex = require("hull.encoding").hex
 
 test("blob round-trip under hull test (fs_cfg wired)", function()
     blob.init({ dir = "data/blobs" })
@@ -86,7 +88,7 @@ test("multipart upload in the in-process dispatch", function()
     test.eq(r.status, 200)
     test.eq(r.json.fields.title, "Nexogen Asset")
     test.eq(r.json.files.doc.filename, "a.txt")
-    test.eq(r.json.files.doc.sha, crypto.sha256("hello file"))
+    test.eq(r.json.files.doc.sha, hex.encode(crypto.sha256("hello file")))
 end)
 
 test("query string decoding: %XX and '+', malformed kept as written", function()
@@ -103,8 +105,9 @@ mkdir -p "$TMP/js/tests"
 cat > "$TMP/js/app.js" <<'JS'
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 app.manifest({
-    modules: ["hull/http-server@1", "hull/blob@1", "hull/crypto@1"],
+    modules: ["hull/http-server@1", "hull/blob@1", "hull/crypto@1", "hull/encoding@1"],
     fs: { write: ["data/blobs"] },
 });
 app.post("/upload", async (req, res) => {
@@ -116,7 +119,7 @@ app.post("/upload", async (req, res) => {
             let total = 0; for (const c of chunks) total += c.length;
             const all = new Uint8Array(total); let o = 0;
             for (const c of chunks) { all.set(c, o); o += c.length; }
-            files[part.name] = { filename: part.filename, sha: crypto.sha256(all.buffer) };
+            files[part.name] = { filename: part.filename, sha: encoding.hex.encode(crypto.sha256(all.buffer)) };
         } else {
             const buf = await part.read();
             const u = new Uint8Array(buf); let s = "";
@@ -134,6 +137,7 @@ JS
 cat > "$TMP/js/tests/test_harness.js" <<'JS'
 import { blob } from "hull:blob";
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 
 test("blob round-trip under hull test (fs_cfg wired)", () => {
     blob.init({ dir: "data/blobs" });
@@ -159,7 +163,7 @@ test("multipart upload in the in-process dispatch", () => {
     test.eq(r.status, 200);
     test.eq(r.json.fields.title, "Nexogen Asset");
     test.eq(r.json.files.doc.filename, "a.txt");
-    test.eq(r.json.files.doc.sha, crypto.sha256("hello file"));
+    test.eq(r.json.files.doc.sha, encoding.hex.encode(crypto.sha256("hello file")));
 });
 
 test("query string decoding: %XX and '+', malformed kept as written", () => {

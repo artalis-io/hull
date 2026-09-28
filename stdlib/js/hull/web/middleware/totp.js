@@ -64,7 +64,6 @@ const _state = {
     keys:               {},   // {[versionId]: keyHex}
     currentKeyVersion:  null, // id used for new encryptions
     legacyKeyVersion:   null, // id for pre-versioning rows, if any
-    encryptionKeyHex:   null, // retained for _test back-compat
     initialized:        false,
 };
 
@@ -491,7 +490,7 @@ function init(opts) {
             || opts.encryptionKey.length !== 32) {
             throw new Error("totp.init: encryptionKey must be exactly 32 bytes");
         }
-        keys[1] = encoding.hex.encode(opts.encryptionKey);
+        keys = sealbox.keyring({ keys: { 1: opts.encryptionKey }, current: 1 }).keys;
         current = 1;
         legacyVersion = 1;  // pre-versioning rows decrypt under this key
     }
@@ -531,7 +530,6 @@ function init(opts) {
     _state.keys                = keys;
     _state.currentKeyVersion   = current;
     _state.legacyKeyVersion    = legacyVersion;
-    _state.encryptionKeyHex    = current != null ? keys[current] : null;
 
     db.batch(() => {
         const stmts = SCHEMA.split(";");
@@ -965,7 +963,6 @@ const _test = {
         _state.keys               = {};
         _state.currentKeyVersion  = null;
         _state.legacyKeyVersion   = null;
-        _state.encryptionKeyHex   = null;
         _state.cleanupCatchupDone = false;
         _state.cleanupScheduled   = false;
         _state.initialized        = false;

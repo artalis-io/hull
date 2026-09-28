@@ -23,29 +23,27 @@ import { crypto } from "hull:crypto";
 import { json }   from "hull:json";
 import { encoding } from "hull:encoding";
 
-function sign(payload, secretHex) {
+// `secret` is the HMAC key: a buffer (for a byte string, encoding.bytes.toU8),
+// or a string taken as its UTF-8 text. The tag is hex.
+function sign(payload, secret) {
     const body = encoding.base64.encode(encoding.utf8.encode(json.encode(payload)), { url: true });
-    const tag  = crypto.hmacSha256(body, secretHex);
+    const tag  = encoding.hex.encode(crypto.hmacSha256(body, secret));
     return body + "." + tag;
 }
 
-function verify(token, secretHex) {
+function verify(token, secret) {
     if (typeof token !== "string" || token === "") return [null, "missing"];
     const dot = token.indexOf(".");
     if (dot < 0) return [null, "malformed"];
     const body = token.substring(0, dot);
     const tag  = token.substring(dot + 1);
 
-    // crypto.hmacSha256Verify throws on malformed-hex input -
-    // catch so a junk token from the wire returns "bad tag"
-    // rather than an unhandled exception in the handler.
-    let valid = false;
-    try {
-        valid = crypto.hmacSha256Verify(body, secretHex, tag);
-    } catch (_e) {
+    // A tag that is not hex (or not a MAC's length) is simply a bad tag; the
+    // comparison is constant-time.
+    const mac = encoding.hex.decode(tag);
+    if (mac === null || !crypto.hmacSha256Verify(body, secret, encoding.bytes.toU8(mac))) {
         return [null, "bad tag"];
     }
-    if (!valid) return [null, "bad tag"];
 
     const bytes = encoding.base64.decode(body, { url: true });
     const raw = bytes === null ? null : encoding.utf8.decode(bytes);

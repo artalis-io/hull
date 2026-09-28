@@ -12,72 +12,125 @@
 
 #include <stdio.h>
 
+/* A message argument: the bytes of any buffer (ArrayBuffer, typed array,
+ * MappedBuffer, WasmBuffer), or a string's UTF-8 bytes - a string is text.
+ * JS_ToCStringLen alone would turn an ArrayBuffer into the text
+ * "[object ArrayBuffer]", and give a byte string's high bytes a different
+ * encoding from the same bytes in Lua; bytes go in as a buffer
+ * (hull:encoding's bytes.toU8). Released with js_msg_free on every path. */
+typedef struct {
+    HlBufferView view;
+    const char  *str;
+    int          needs_free;
+} JsMsg;
+
+static int js_msg_get(JSContext *ctx, JSValueConst val, JsMsg *m)
+{
+    memset(m, 0, sizeof(*m));
+    if (!js_get_buffer(ctx, val, &m->view, &m->str, &m->needs_free))
+        return 0;
+    if (!m->view.data) m->view.data = "";       /* an empty buffer */
+    return 1;
+}
+
+static void js_msg_free(JSContext *ctx, JsMsg *m)
+{
+    if (m->needs_free) JS_FreeCString(ctx, m->str);
+    m->needs_free = 0;
+}
+
+/* An argument that must be exactly `want` bytes (a key, nonce, signature or
+ * tag). Returns 1, or 0 with a pending exception and nothing to free. */
+static int js_fixed_arg(JSContext *ctx, JSValueConst v, JsMsg *m, size_t want,
+                        const char *fn, const char *what)
+{
+    if (!js_msg_get(ctx, v, m)) {
+        JS_ThrowTypeError(ctx, "crypto.%s: %s must be a buffer", fn, what);
+        return 0;
+    }
+    if (m->view.len != want) {
+        js_msg_free(ctx, m);
+        JS_ThrowRangeError(ctx, "crypto.%s: %s must be %zu bytes", fn, what, want);
+        return 0;
+    }
+    return 1;
+}
+
+/* { publicKey, secretKey } as ArrayBuffers; the stack copy of the secret key
+ * is scrubbed whichever way it goes. */
+static JSValue js_keypair_object(JSContext *ctx, const uint8_t *pk, size_t pklen,
+                                 uint8_t *sk, size_t sklen)
+{
+    JSValue obj = JS_NewObject(ctx);
+    if (!JS_IsException(obj)) {
+        JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewArrayBufferCopy(ctx, pk, pklen));
+        JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewArrayBufferCopy(ctx, sk, sklen));
+    }
+    secure_zero(sk, sklen);
+    return obj;
+}
+
+typedef int (*JsHmacFn)(const uint8_t *key, size_t key_len,
+                        const uint8_t *msg, size_t msg_len, uint8_t *out);
+
+/* An HMAC of argv[0] under key argv[1], as an ArrayBuffer of `outlen` bytes. */
+static JSValue js_hmac(JSContext *ctx, int argc, JSValueConst *argv,
+                       const char *fn, uint8_t *out, size_t outlen, JsHmacFn mac)
+{
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "crypto.%s requires (data, key)", fn);
+    JsMsg data, key;
+    if (!js_msg_get(ctx, argv[0], &data))
+        return JS_ThrowTypeError(ctx, "crypto.%s: data must be a buffer or a string", fn);
+    if (!js_msg_get(ctx, argv[1], &key) || key.view.len == 0) {
+        js_msg_free(ctx, &data);
+        js_msg_free(ctx, &key);
+        return JS_ThrowTypeError(ctx, "crypto.%s: key must be a non-empty buffer or string", fn);
+    }
+    int rc = mac(key.view.data, key.view.len, data.view.data, data.view.len, out);
+    js_msg_free(ctx, &data);
+    js_msg_free(ctx, &key);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "%s failed", fn);
+    return JS_NewArrayBufferCopy(ctx, out, outlen);
+}
+
+/* crypto.sha256(data) -> ArrayBuffer (32 bytes). `data` is any buffer, or a
+ * string taken as its UTF-8 text. */
 static JSValue js_crypto_sha256(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (argc < 1)
+    JsMsg m;
+    if (argc < 1 || !js_msg_get(ctx, argv[0], &m))
         return JS_ThrowTypeError(ctx, "crypto.sha256 requires (data)");
-
-    /* Accept either ArrayBuffer (binary-safe - preferred for file
-     * contents, multipart bodies, etc.) or string (UTF-8 encoded
-     * via JS_ToCStringLen). Trying ArrayBuffer first means binary
-     * data never round-trips through UTF-8 encoding. */
-    size_t len = 0;
-    const uint8_t *bytes = JS_GetArrayBuffer(ctx, &len, argv[0]);
-    const char *cstr = NULL;
-    if (!bytes) {
-        cstr = JS_ToCStringLen(ctx, &len, argv[0]);
-        if (!cstr) return JS_EXCEPTION;
-        bytes = (const uint8_t *)cstr;
-    }
-
     uint8_t hash[32];
-    int rc = hl_cap_crypto_sha256((const char *)bytes, len, hash);
-    if (cstr) JS_FreeCString(ctx, cstr);
+    int rc = hl_cap_crypto_sha256((const char *)m.view.data, m.view.len, hash);
+    js_msg_free(ctx, &m);
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "sha256 failed");
-
-    /* Convert to hex string */
-    char hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    hex[64] = '\0';
-
-    return JS_NewString(ctx, hex);
+    return JS_NewArrayBufferCopy(ctx, hash, sizeof hash);
 }
 
-/* crypto.sha1(data) -> ArrayBuffer of 20 bytes.
+/* crypto.sha1(data) -> ArrayBuffer (20 bytes).
  *
  * LEGACY INTEROP ONLY. SHA-1 is collision-broken; this exists for
  * third-party protocols that hardcode it (HIBP range API, etc.).
  * DO NOT use for new password hashing / MAC / digest needs - use
- * crypto.sha256 / crypto.hmacSha256 / crypto.hashPassword instead.
- * Returns raw bytes (not hex) so callers can render uppercase or
- * lowercase via encoding.hex.encode(buf).toUpperCase() if needed. */
+ * crypto.sha256 / crypto.hmacSha256 / crypto.hashPassword instead. */
 static JSValue js_crypto_sha1(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (argc < 1)
+    JsMsg m;
+    if (argc < 1 || !js_msg_get(ctx, argv[0], &m))
         return JS_ThrowTypeError(ctx, "crypto.sha1 requires (data)");
-
-    size_t len = 0;
-    const uint8_t *bytes = JS_GetArrayBuffer(ctx, &len, argv[0]);
-    const char *cstr = NULL;
-    if (!bytes) {
-        cstr = JS_ToCStringLen(ctx, &len, argv[0]);
-        if (!cstr) return JS_EXCEPTION;
-        bytes = (const uint8_t *)cstr;
-    }
-
     uint8_t hash[20];
-    int rc = hl_cap_crypto_sha1((const char *)bytes, len, hash);
-    if (cstr) JS_FreeCString(ctx, cstr);
+    int rc = hl_cap_crypto_sha1((const char *)m.view.data, m.view.len, hash);
+    js_msg_free(ctx, &m);
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "sha1 failed");
-
-    return JS_NewArrayBufferCopy(ctx, hash, 20);
+    return JS_NewArrayBufferCopy(ctx, hash, sizeof hash);
 }
 
 static JSValue js_crypto_random(JSContext *ctx, JSValueConst this_val,
@@ -159,32 +212,6 @@ static int hex_decode_compat(const char *hex, size_t hex_len, uint8_t *out, size
     return hl_hex_decode(hex, hex_len, out, out_len) >= 0 ? 0 : -1;
 }
 
-/* A message argument: the bytes of any buffer (ArrayBuffer, typed array,
- * MappedBuffer, WasmBuffer), or a string's UTF-8 bytes - a string is text.
- * JS_ToCStringLen alone would turn an ArrayBuffer into the text
- * "[object ArrayBuffer]", and give a byte string's high bytes a different
- * encoding from the same bytes in Lua; bytes go in as a buffer
- * (hull:encoding's bytes.toU8). Released with js_msg_free on every path. */
-typedef struct {
-    HlBufferView view;
-    const char  *str;
-    int          needs_free;
-} JsMsg;
-
-static int js_msg_get(JSContext *ctx, JSValueConst val, JsMsg *m)
-{
-    memset(m, 0, sizeof(*m));
-    if (!js_get_buffer(ctx, val, &m->view, &m->str, &m->needs_free))
-        return 0;
-    if (!m->view.data) m->view.data = "";       /* an empty buffer */
-    return 1;
-}
-
-static void js_msg_free(JSContext *ctx, JsMsg *m)
-{
-    if (m->needs_free) JS_FreeCString(ctx, m->str);
-    m->needs_free = 0;
-}
 
 /* crypto.hashPassword(password) -> "pbkdf2:iterations:salt_hex:hash_hex" */
 static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
@@ -218,10 +245,8 @@ static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
 
     /* Format: "pbkdf2:100000:salt_hex:hash_hex" */
     char salt_hex[33], hash_hex[65];
-    for (int i = 0; i < 16; i++)
-        snprintf(salt_hex + i * 2, 3, "%02x", salt[i]);
-    for (int i = 0; i < 32; i++)
-        snprintf(hash_hex + i * 2, 3, "%02x", hash[i]);
+    hl_hex_encode(salt, sizeof salt, salt_hex, sizeof salt_hex);
+    hl_hex_encode(hash, sizeof hash, hash_hex, sizeof hash_hex);
 
     char result[128];
     snprintf(result, sizeof(result), "pbkdf2:%d:%s:%s",
@@ -322,131 +347,66 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
 
 /* ── Ed25519 bindings ──────────────────────────────────────────────── */
 
-/* crypto.ed25519Keypair() -> { publicKey: hex, secretKey: hex } */
+/* crypto.ed25519Keypair() -> { publicKey: ArrayBuffer(32), secretKey: ArrayBuffer(64) } */
 static JSValue js_crypto_ed25519_keypair(JSContext *ctx, JSValueConst this_val,
                                           int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
-
     uint8_t pk[32], sk[64];
     if (hl_cap_crypto_ed25519_keypair(pk, sk) != 0)
         return JS_ThrowInternalError(ctx, "ed25519 keypair generation failed");
-
-    char pk_hex[65], sk_hex[129];
-    for (int i = 0; i < 32; i++)
-        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
-    pk_hex[64] = '\0';
-    for (int i = 0; i < 64; i++)
-        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
-    sk_hex[128] = '\0';
-
-    JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewString(ctx, pk_hex));
-    JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewString(ctx, sk_hex));
-    secure_zero(sk, sizeof(sk));
-    secure_zero(sk_hex, sizeof(sk_hex));
-    return obj;
+    return js_keypair_object(ctx, pk, sizeof pk, sk, sizeof sk);
 }
 
-/* crypto.ed25519Sign(data, secretKeyHex) -> signatureHex */
+/* crypto.ed25519Sign(data, secretKey) -> ArrayBuffer (64-byte signature) */
 static JSValue js_crypto_ed25519_sign(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 2)
-        return JS_ThrowTypeError(ctx, "crypto.ed25519Sign requires (data, secretKeyHex)");
-
-    JsMsg m_data;
-    if (!js_msg_get(ctx, argv[0], &m_data))
-        return JS_ThrowTypeError(ctx, "crypto.ed25519Sign: argument 1 must be a buffer or a string");
-    const char *data = (const char *)m_data.view.data;
-    size_t data_len = m_data.view.len;
-
-    size_t sk_hex_len;
-    const char *sk_hex = JS_ToCStringLen(ctx, &sk_hex_len, argv[1]);
-    if (!sk_hex) { js_msg_free(ctx, &m_data); return JS_EXCEPTION; }
-
-    if (sk_hex_len != 128) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, sk_hex);
-        return JS_ThrowTypeError(ctx, "secret key must be 128 hex chars (64 bytes)");
+        return JS_ThrowTypeError(ctx, "crypto.ed25519Sign requires (data, secretKey)");
+    JsMsg data, sk;
+    if (!js_msg_get(ctx, argv[0], &data))
+        return JS_ThrowTypeError(ctx, "crypto.ed25519Sign: data must be a buffer or a string");
+    if (!js_fixed_arg(ctx, argv[1], &sk, 64, "ed25519Sign", "secret key")) {
+        js_msg_free(ctx, &data);
+        return JS_EXCEPTION;
     }
-
-    uint8_t sk[64];
-    if (hex_decode_compat(sk_hex, sk_hex_len, sk, 64) != 0) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, sk_hex);
-        secure_zero(sk, sizeof(sk));
-        return JS_ThrowTypeError(ctx, "invalid hex in secret key");
-    }
-    JS_FreeCString(ctx, sk_hex);
-
     uint8_t sig[64];
-    if (hl_cap_crypto_ed25519_sign((const uint8_t *)data, data_len, sk, sig) != 0) {
-        js_msg_free(ctx, &m_data);
-        secure_zero(sk, sizeof(sk));
+    int rc = hl_cap_crypto_ed25519_sign(data.view.data, data.view.len,
+                                        sk.view.data, sig);
+    js_msg_free(ctx, &data);
+    js_msg_free(ctx, &sk);
+    if (rc != 0)
         return JS_ThrowInternalError(ctx, "ed25519 sign failed");
-    }
-    js_msg_free(ctx, &m_data);
-    secure_zero(sk, sizeof(sk));
-
-    char sig_hex[129];
-    for (int i = 0; i < 64; i++)
-        snprintf(sig_hex + i * 2, 3, "%02x", sig[i]);
-    sig_hex[128] = '\0';
-
-    return JS_NewString(ctx, sig_hex);
+    return JS_NewArrayBufferCopy(ctx, sig, sizeof sig);
 }
 
-/* crypto.ed25519Verify(data, sigHex, pubkeyHex) -> boolean */
+/* crypto.ed25519Verify(data, signature, publicKey) -> boolean */
 static JSValue js_crypto_ed25519_verify(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 3)
-        return JS_ThrowTypeError(ctx, "crypto.ed25519Verify requires (data, sigHex, pubkeyHex)");
-
-    JsMsg m_data;
-    if (!js_msg_get(ctx, argv[0], &m_data))
-        return JS_ThrowTypeError(ctx, "crypto.ed25519Verify: argument 1 must be a buffer or a string");
-    const char *data = (const char *)m_data.view.data;
-    size_t data_len = m_data.view.len;
-
-    size_t sig_hex_len;
-    const char *sig_hex = JS_ToCStringLen(ctx, &sig_hex_len, argv[1]);
-    if (!sig_hex) { js_msg_free(ctx, &m_data); return JS_EXCEPTION; }
-
-    size_t pk_hex_len;
-    const char *pk_hex = JS_ToCStringLen(ctx, &pk_hex_len, argv[2]);
-    if (!pk_hex) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, sig_hex);
+        return JS_ThrowTypeError(ctx, "crypto.ed25519Verify requires (data, signature, publicKey)");
+    JsMsg data, sig, pk;
+    if (!js_msg_get(ctx, argv[0], &data))
+        return JS_ThrowTypeError(ctx, "crypto.ed25519Verify: data must be a buffer or a string");
+    if (!js_fixed_arg(ctx, argv[1], &sig, 64, "ed25519Verify", "signature")) {
+        js_msg_free(ctx, &data);
         return JS_EXCEPTION;
     }
-
-    if (sig_hex_len != 128 || pk_hex_len != 64) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, sig_hex);
-        JS_FreeCString(ctx, pk_hex);
-        return JS_FALSE;
+    if (!js_fixed_arg(ctx, argv[2], &pk, 32, "ed25519Verify", "public key")) {
+        js_msg_free(ctx, &data);
+        js_msg_free(ctx, &sig);
+        return JS_EXCEPTION;
     }
-
-    uint8_t sig[64], pk[32];
-    if (hex_decode_compat(sig_hex, sig_hex_len, sig, 64) != 0 ||
-        hex_decode_compat(pk_hex, pk_hex_len, pk, 32) != 0) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, sig_hex);
-        JS_FreeCString(ctx, pk_hex);
-        return JS_FALSE;
-    }
-
-    JS_FreeCString(ctx, sig_hex);
-    JS_FreeCString(ctx, pk_hex);
-
-    int rc = hl_cap_crypto_ed25519_verify((const uint8_t *)data, data_len, sig, pk);
-    js_msg_free(ctx, &m_data);
-
-    return rc == 0 ? JS_TRUE : JS_FALSE;
+    int rc = hl_cap_crypto_ed25519_verify(data.view.data, data.view.len,
+                                          sig.view.data, pk.view.data);
+    js_msg_free(ctx, &data);
+    js_msg_free(ctx, &sig);
+    js_msg_free(ctx, &pk);
+    return JS_NewBool(ctx, rc == 0);
 }
 
 /* crypto.verify(alg, pubkeyPem, data, sig) -> boolean
@@ -561,757 +521,346 @@ static JSValue js_crypto_x509_pubkey_pem(JSContext *ctx,
 
 /* ── SHA-512 ──────────────────────────────────────────────────────── */
 
+/* crypto.sha512(data) -> ArrayBuffer (64 bytes) */
 static JSValue js_crypto_sha512(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (argc < 1)
+    JsMsg m;
+    if (argc < 1 || !js_msg_get(ctx, argv[0], &m))
         return JS_ThrowTypeError(ctx, "crypto.sha512 requires (data)");
-
-    JsMsg m_data;
-    if (!js_msg_get(ctx, argv[0], &m_data))
-        return JS_ThrowTypeError(ctx, "crypto.sha512: argument 1 must be a buffer or a string");
-    const char *data = (const char *)m_data.view.data;
-    size_t len = m_data.view.len;
-
     uint8_t hash[64];
-    if (hl_cap_crypto_sha512(data, len, hash) != 0) {
-        js_msg_free(ctx, &m_data);
+    int rc = hl_cap_crypto_sha512((const char *)m.view.data, m.view.len, hash);
+    js_msg_free(ctx, &m);
+    if (rc != 0)
         return JS_ThrowInternalError(ctx, "sha512 failed");
-    }
-    js_msg_free(ctx, &m_data);
-
-    char hex[129];
-    for (int i = 0; i < 64; i++)
-        snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    hex[128] = '\0';
-
-    return JS_NewString(ctx, hex);
+    return JS_NewArrayBufferCopy(ctx, hash, sizeof hash);
 }
 
 /* ── HMAC-SHA512/256 auth ─────────────────────────────────────────── */
 
-/* crypto.auth(msg, keyHex) -> hex */
+/* crypto.auth(msg, key) -> ArrayBuffer (32-byte tag; HMAC-SHA512/256, 32-byte key) */
 static JSValue js_crypto_auth(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 2)
-        return JS_ThrowTypeError(ctx, "crypto.auth requires (msg, keyHex)");
-
-    JsMsg m_msg;
-    if (!js_msg_get(ctx, argv[0], &m_msg))
-        return JS_ThrowTypeError(ctx, "crypto.auth: argument 1 must be a buffer or a string");
-    const char *msg = (const char *)m_msg.view.data;
-    size_t msg_len = m_msg.view.len;
-
-    size_t key_hex_len;
-    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[1]);
-    if (!key_hex) { js_msg_free(ctx, &m_msg); return JS_EXCEPTION; }
-
-    if (key_hex_len != 64) {
-        js_msg_free(ctx, &m_msg);
-        JS_FreeCString(ctx, key_hex);
-        return JS_ThrowTypeError(ctx, "key must be 64 hex chars (32 bytes)");
+        return JS_ThrowTypeError(ctx, "crypto.auth requires (msg, key)");
+    JsMsg msg, key;
+    if (!js_msg_get(ctx, argv[0], &msg))
+        return JS_ThrowTypeError(ctx, "crypto.auth: msg must be a buffer or a string");
+    if (!js_fixed_arg(ctx, argv[1], &key, 32, "auth", "key")) {
+        js_msg_free(ctx, &msg);
+        return JS_EXCEPTION;
     }
-
-    uint8_t key[32];
-    if (hex_decode_compat(key_hex, key_hex_len, key, 32) != 0) {
-        js_msg_free(ctx, &m_msg);
-        JS_FreeCString(ctx, key_hex);
-        return JS_ThrowTypeError(ctx, "invalid hex in key");
-    }
-    JS_FreeCString(ctx, key_hex);
-
     uint8_t tag[32];
-    if (hl_cap_crypto_auth(msg, msg_len, key, tag) != 0) {
-        js_msg_free(ctx, &m_msg);
-        secure_zero(key, sizeof(key));
-        return JS_ThrowInternalError(ctx, "crypto.auth failed");
-    }
-    js_msg_free(ctx, &m_msg);
-    secure_zero(key, sizeof(key));
-
-    char hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(hex + i * 2, 3, "%02x", tag[i]);
-    hex[64] = '\0';
-
-    return JS_NewString(ctx, hex);
+    int rc = hl_cap_crypto_auth((const char *)msg.view.data, msg.view.len,
+                                key.view.data, tag);
+    js_msg_free(ctx, &msg);
+    js_msg_free(ctx, &key);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "auth failed");
+    return JS_NewArrayBufferCopy(ctx, tag, sizeof tag);
 }
 
-/* crypto.authVerify(tagHex, msg, keyHex) -> boolean */
+/* crypto.authVerify(tag, msg, key) -> boolean */
 static JSValue js_crypto_auth_verify(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 3)
-        return JS_ThrowTypeError(ctx, "crypto.authVerify requires (tagHex, msg, keyHex)");
-
-    size_t tag_hex_len;
-    const char *tag_hex = JS_ToCStringLen(ctx, &tag_hex_len, argv[0]);
-    if (!tag_hex) return JS_EXCEPTION;
-
-    JsMsg m_msg;
-    if (!js_msg_get(ctx, argv[1], &m_msg)) {
-        JS_FreeCString(ctx, tag_hex);
-        return JS_ThrowTypeError(ctx, "crypto.authVerify: argument 2 must be a buffer or a string");
+        return JS_ThrowTypeError(ctx, "crypto.authVerify requires (tag, msg, key)");
+    JsMsg tag, msg, key;
+    if (!js_fixed_arg(ctx, argv[0], &tag, 32, "authVerify", "tag"))
+        return JS_EXCEPTION;
+    if (!js_msg_get(ctx, argv[1], &msg)) {
+        js_msg_free(ctx, &tag);
+        return JS_ThrowTypeError(ctx, "crypto.authVerify: msg must be a buffer or a string");
     }
-    const char *msg = (const char *)m_msg.view.data;
-    size_t msg_len = m_msg.view.len;
-
-    size_t key_hex_len;
-    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[2]);
-    if (!key_hex) {
-        JS_FreeCString(ctx, tag_hex);
-        js_msg_free(ctx, &m_msg);
+    if (!js_fixed_arg(ctx, argv[2], &key, 32, "authVerify", "key")) {
+        js_msg_free(ctx, &tag);
+        js_msg_free(ctx, &msg);
         return JS_EXCEPTION;
     }
-
-    if (tag_hex_len != 64 || key_hex_len != 64) {
-        JS_FreeCString(ctx, tag_hex);
-        js_msg_free(ctx, &m_msg);
-        JS_FreeCString(ctx, key_hex);
-        return JS_FALSE;
-    }
-
-    uint8_t tag[32], key[32];
-    if (hex_decode_compat(tag_hex, tag_hex_len, tag, 32) != 0 ||
-        hex_decode_compat(key_hex, key_hex_len, key, 32) != 0) {
-        JS_FreeCString(ctx, tag_hex);
-        js_msg_free(ctx, &m_msg);
-        JS_FreeCString(ctx, key_hex);
-        return JS_FALSE;
-    }
-    JS_FreeCString(ctx, tag_hex);
-    JS_FreeCString(ctx, key_hex);
-
-    int rc = hl_cap_crypto_auth_verify(tag, msg, msg_len, key);
-    js_msg_free(ctx, &m_msg);
-    secure_zero(key, sizeof(key));
-
-    return rc == 0 ? JS_TRUE : JS_FALSE;
+    int rc = hl_cap_crypto_auth_verify(tag.view.data, (const char *)msg.view.data,
+                                       msg.view.len, key.view.data);
+    js_msg_free(ctx, &tag);
+    js_msg_free(ctx, &msg);
+    js_msg_free(ctx, &key);
+    return JS_NewBool(ctx, rc == 0);
 }
 
 /* ── Secretbox ────────────────────────────────────────────────────── */
 
-/* crypto.secretbox(msg, nonceHex, keyHex) -> hex
- *
- * Accept ArrayBuffer / TypedArray / MappedBuffer / WasmBuffer / string
- * via the unified buffer protocol. JS_ToCStringLen alone UTF-8-inflates
- * any byte >= 0x80, so a 20-byte binary secret would be ~30 bytes on
- * the wire and would not round-trip with Lua-encrypted blobs. Same
- * fix-shape as crypto.hmacSha1. */
+/* crypto.secretbox(msg, nonce, key) -> ArrayBuffer (msg + 16-byte tag);
+ * nonce 24 bytes, key 32 bytes */
 static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 3)
-        return JS_ThrowTypeError(ctx, "crypto.secretbox requires (msg, nonceHex, keyHex)");
-
-    HlBufferView msg_view = {0};
-    const char *msg_str = NULL;
-    int msg_needs_free = 0;
-    if (!js_get_buffer(ctx, argv[0], &msg_view, &msg_str, &msg_needs_free))
-        return JS_ThrowTypeError(ctx,
-            "crypto.secretbox: msg must be ArrayBuffer, TypedArray, "
-            "MappedBuffer, WasmBuffer, or string");
-
-    size_t nonce_hex_len, key_hex_len;
-    const char *nonce_hex = JS_ToCStringLen(ctx, &nonce_hex_len, argv[1]);
-    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[2]);
-    if (!nonce_hex || !key_hex) {
-        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
-        if (nonce_hex) JS_FreeCString(ctx, nonce_hex);
-        if (key_hex) JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "crypto.secretbox requires (msg, nonce, key)");
+    JsMsg msg, nonce, key;
+    if (!js_msg_get(ctx, argv[0], &msg))
+        return JS_ThrowTypeError(ctx, "crypto.secretbox: msg must be a buffer or a string");
+    if (!js_fixed_arg(ctx, argv[1], &nonce, 24, "secretbox", "nonce")) {
+        js_msg_free(ctx, &msg);
         return JS_EXCEPTION;
     }
-
-    if (nonce_hex_len != 48 || key_hex_len != 64) {
-        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
-        JS_FreeCString(ctx, nonce_hex);
-        JS_FreeCString(ctx, key_hex);
-        return JS_ThrowTypeError(ctx, "nonce must be 48 hex (24 bytes), key 64 hex (32 bytes)");
-    }
-
-    uint8_t nonce[24], key[32];
-    if (hex_decode_compat(nonce_hex, 48, nonce, 24) != 0 ||
-        hex_decode_compat(key_hex, 64, key, 32) != 0) {
-        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
-        JS_FreeCString(ctx, nonce_hex);
-        JS_FreeCString(ctx, key_hex);
-        return JS_ThrowTypeError(ctx, "invalid hex");
-    }
-    JS_FreeCString(ctx, nonce_hex);
-    JS_FreeCString(ctx, key_hex);
-
-    if (msg_view.len > SIZE_MAX - HL_SECRETBOX_MACBYTES) {
-        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
-        secure_zero(key, sizeof(key));
-        return JS_ThrowRangeError(ctx, "message too large");
-    }
-    size_t ct_len = msg_view.len + HL_SECRETBOX_MACBYTES;
-    uint8_t *ct = js_malloc(ctx, ct_len);
-    if (!ct) {
-        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
-        secure_zero(key, sizeof(key));
+    if (!js_fixed_arg(ctx, argv[2], &key, 32, "secretbox", "key")) {
+        js_msg_free(ctx, &msg);
+        js_msg_free(ctx, &nonce);
         return JS_EXCEPTION;
     }
-
-    if (hl_cap_crypto_secretbox(ct, (const char *)msg_view.data,
-                                 msg_view.len, nonce, key) != 0) {
-        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
-        js_free(ctx, ct);
-        secure_zero(key, sizeof(key));
-        return JS_ThrowInternalError(ctx, "secretbox failed");
+    JSValue ret;
+    if (msg.view.len > SIZE_MAX - HL_SECRETBOX_MACBYTES) {
+        ret = JS_ThrowRangeError(ctx, "crypto.secretbox: message too large");
+    } else {
+        size_t ct_len = msg.view.len + HL_SECRETBOX_MACBYTES;
+        uint8_t *ct = js_malloc(ctx, ct_len);
+        if (!ct) {
+            ret = JS_EXCEPTION;
+        } else if (hl_cap_crypto_secretbox(ct, (const char *)msg.view.data, msg.view.len,
+                                           nonce.view.data, key.view.data) != 0) {
+            js_free(ctx, ct);
+            ret = JS_ThrowInternalError(ctx, "secretbox failed");
+        } else {
+            ret = JS_NewArrayBufferCopy(ctx, ct, ct_len);
+            js_free(ctx, ct);
+        }
     }
-    if (msg_needs_free) JS_FreeCString(ctx, msg_str);
-    secure_zero(key, sizeof(key));
-
-    /* Hex encode */
-    if (ct_len > SIZE_MAX / 2) { js_free(ctx, ct); return JS_ThrowRangeError(ctx, "ciphertext too large"); }
-    char *hex = js_malloc(ctx, ct_len * 2 + 1);
-    if (!hex) { js_free(ctx, ct); return JS_EXCEPTION; }
-    for (size_t i = 0; i < ct_len; i++)
-        snprintf(hex + i * 2, 3, "%02x", ct[i]);
-    hex[ct_len * 2] = '\0';
-    js_free(ctx, ct);
-
-    JSValue result = JS_NewString(ctx, hex);
-    js_free(ctx, hex);
-    return result;
+    js_msg_free(ctx, &msg);
+    js_msg_free(ctx, &nonce);
+    js_msg_free(ctx, &key);
+    return ret;
 }
 
-/* crypto.secretboxOpen(ctHex, nonceHex, keyHex) -> ArrayBuffer/null
- *
- * Returns an ArrayBuffer so plaintext bytes round-trip without
- * UTF-8 validation loss (JS_NewStringLen replaces invalid UTF-8
- * sequences with U+FFFD, which would silently corrupt ~87% of
- * random binary secrets). Callers wanting a binary-string view
- * can wrap with `String.fromCharCode(...new Uint8Array(buf))`. */
+/* crypto.secretboxOpen(ciphertext, nonce, key) -> ArrayBuffer | null */
 static JSValue js_crypto_secretbox_open(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 3)
-        return JS_ThrowTypeError(ctx, "crypto.secretboxOpen requires (ctHex, nonceHex, keyHex)");
-
-    size_t ct_hex_len;
-    const char *ct_hex = JS_ToCStringLen(ctx, &ct_hex_len, argv[0]);
-    if (!ct_hex) return JS_EXCEPTION;
-
-    size_t nonce_hex_len, key_hex_len;
-    const char *nonce_hex = JS_ToCStringLen(ctx, &nonce_hex_len, argv[1]);
-    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[2]);
-    if (!nonce_hex || !key_hex) {
-        JS_FreeCString(ctx, ct_hex);
-        if (nonce_hex) JS_FreeCString(ctx, nonce_hex);
-        if (key_hex) JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "crypto.secretboxOpen requires (ciphertext, nonce, key)");
+    JsMsg ct, nonce, key;
+    if (!js_msg_get(ctx, argv[0], &ct))
+        return JS_ThrowTypeError(ctx, "crypto.secretboxOpen: ciphertext must be a buffer");
+    if (!js_fixed_arg(ctx, argv[1], &nonce, 24, "secretboxOpen", "nonce")) {
+        js_msg_free(ctx, &ct);
         return JS_EXCEPTION;
     }
-
-    if (ct_hex_len % 2 != 0 || nonce_hex_len != 48 || key_hex_len != 64) {
-        JS_FreeCString(ctx, ct_hex);
-        JS_FreeCString(ctx, nonce_hex);
-        JS_FreeCString(ctx, key_hex);
-        return JS_NULL;
+    if (!js_fixed_arg(ctx, argv[2], &key, 32, "secretboxOpen", "key")) {
+        js_msg_free(ctx, &ct);
+        js_msg_free(ctx, &nonce);
+        return JS_EXCEPTION;
     }
-
-    size_t ct_len = ct_hex_len / 2;
-    if (ct_len < HL_SECRETBOX_MACBYTES) {
-        JS_FreeCString(ctx, ct_hex);
-        JS_FreeCString(ctx, nonce_hex);
-        JS_FreeCString(ctx, key_hex);
-        return JS_NULL;
+    JSValue ret = JS_NULL;
+    if (ct.view.len >= HL_SECRETBOX_MACBYTES) {
+        size_t msg_len = ct.view.len - HL_SECRETBOX_MACBYTES;
+        uint8_t *msg = js_malloc(ctx, msg_len + 1);
+        if (!msg) {
+            ret = JS_EXCEPTION;
+        } else {
+            if (hl_cap_crypto_secretbox_open(msg, ct.view.data, ct.view.len,
+                                             nonce.view.data, key.view.data) == 0)
+                ret = JS_NewArrayBufferCopy(ctx, msg, msg_len);
+            js_free(ctx, msg);
+        }
     }
-
-    uint8_t nonce[24], key[32];
-    if (hex_decode_compat(nonce_hex, 48, nonce, 24) != 0 ||
-        hex_decode_compat(key_hex, 64, key, 32) != 0) {
-        JS_FreeCString(ctx, ct_hex);
-        JS_FreeCString(ctx, nonce_hex);
-        JS_FreeCString(ctx, key_hex);
-        return JS_NULL;
-    }
-    JS_FreeCString(ctx, nonce_hex);
-    JS_FreeCString(ctx, key_hex);
-
-    uint8_t *ct = js_malloc(ctx, ct_len);
-    if (!ct) { JS_FreeCString(ctx, ct_hex); secure_zero(key, sizeof(key)); return JS_EXCEPTION; }
-    if (hex_decode_compat(ct_hex, ct_hex_len, ct, ct_len) != 0) {
-        JS_FreeCString(ctx, ct_hex);
-        js_free(ctx, ct);
-        secure_zero(key, sizeof(key));
-        return JS_NULL;
-    }
-    JS_FreeCString(ctx, ct_hex);
-
-    size_t pt_len = ct_len - HL_SECRETBOX_MACBYTES;
-    uint8_t *pt = js_malloc(ctx, pt_len + 1);
-    if (!pt) { js_free(ctx, ct); secure_zero(key, sizeof(key)); return JS_EXCEPTION; }
-
-    if (hl_cap_crypto_secretbox_open(pt, ct, ct_len, nonce, key) != 0) {
-        js_free(ctx, ct);
-        js_free(ctx, pt);
-        secure_zero(key, sizeof(key));
-        return JS_NULL;
-    }
-    js_free(ctx, ct);
-    secure_zero(key, sizeof(key));
-
-    /* Return as ArrayBuffer (copies pt; matches the convention used
-     * elsewhere in this file and in mod_db / mod_request). */
-    JSValue result = JS_NewArrayBufferCopy(ctx, pt, pt_len);
-    secure_zero(pt, pt_len);
-    js_free(ctx, pt);
-    return result;
+    js_msg_free(ctx, &ct);
+    js_msg_free(ctx, &nonce);
+    js_msg_free(ctx, &key);
+    return ret;
 }
 
 /* ── Box (public-key encryption) ──────────────────────────────────── */
 
-/* crypto.box(msg, nonceHex, pkHex, skHex) -> hex */
+/* crypto.box(msg, nonce, publicKey, secretKey) -> ArrayBuffer;
+ * nonce 24 bytes, keys 32 bytes */
 static JSValue js_crypto_box(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 4)
-        return JS_ThrowTypeError(ctx, "crypto.box requires (msg, nonceHex, pkHex, skHex)");
-
-    JsMsg m_msg;
-    if (!js_msg_get(ctx, argv[0], &m_msg))
-        return JS_ThrowTypeError(ctx, "crypto.box: argument 1 must be a buffer or a string");
-    const char *msg = (const char *)m_msg.view.data;
-    size_t msg_len = m_msg.view.len;
-
-    size_t nh_len, pkh_len, skh_len;
-    const char *nh = JS_ToCStringLen(ctx, &nh_len, argv[1]);
-    const char *pkh = JS_ToCStringLen(ctx, &pkh_len, argv[2]);
-    const char *skh = JS_ToCStringLen(ctx, &skh_len, argv[3]);
-    if (!nh || !pkh || !skh) {
-        js_msg_free(ctx, &m_msg);
-        if (nh) JS_FreeCString(ctx, nh);
-        if (pkh) JS_FreeCString(ctx, pkh);
-        if (skh) JS_FreeCString(ctx, skh);
+        return JS_ThrowTypeError(ctx, "crypto.box requires (msg, nonce, publicKey, secretKey)");
+    JsMsg msg, nonce, pk, sk;
+    if (!js_msg_get(ctx, argv[0], &msg))
+        return JS_ThrowTypeError(ctx, "crypto.box: msg must be a buffer or a string");
+    if (!js_fixed_arg(ctx, argv[1], &nonce, 24, "box", "nonce")) {
+        js_msg_free(ctx, &msg);
         return JS_EXCEPTION;
     }
-
-    if (nh_len != 48 || pkh_len != 64 || skh_len != 64) {
-        js_msg_free(ctx, &m_msg); JS_FreeCString(ctx, nh);
-        JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
-        return JS_ThrowTypeError(ctx, "nonce 48 hex, pk/sk 64 hex each");
+    if (!js_fixed_arg(ctx, argv[2], &pk, 32, "box", "public key")) {
+        js_msg_free(ctx, &msg); js_msg_free(ctx, &nonce);
+        return JS_EXCEPTION;
     }
-
-    uint8_t nonce[24], pk[32], sk[32];
-    if (hex_decode_compat(nh, 48, nonce, 24) != 0 ||
-        hex_decode_compat(pkh, 64, pk, 32) != 0 ||
-        hex_decode_compat(skh, 64, sk, 32) != 0) {
-        js_msg_free(ctx, &m_msg); JS_FreeCString(ctx, nh);
-        JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
-        return JS_ThrowTypeError(ctx, "invalid hex");
+    if (!js_fixed_arg(ctx, argv[3], &sk, 32, "box", "secret key")) {
+        js_msg_free(ctx, &msg); js_msg_free(ctx, &nonce); js_msg_free(ctx, &pk);
+        return JS_EXCEPTION;
     }
-    JS_FreeCString(ctx, nh);
-    JS_FreeCString(ctx, pkh);
-    JS_FreeCString(ctx, skh);
-
-    if (msg_len > SIZE_MAX - HL_BOX_MACBYTES) {
-        js_msg_free(ctx, &m_msg);
-        secure_zero(sk, sizeof(sk));
-        return JS_ThrowRangeError(ctx, "message too large");
+    JSValue ret;
+    if (msg.view.len > SIZE_MAX - HL_BOX_MACBYTES) {
+        ret = JS_ThrowRangeError(ctx, "crypto.box: message too large");
+    } else {
+        size_t ct_len = msg.view.len + HL_BOX_MACBYTES;
+        uint8_t *ct = js_malloc(ctx, ct_len);
+        if (!ct) {
+            ret = JS_EXCEPTION;
+        } else if (hl_cap_crypto_box(ct, (const char *)msg.view.data, msg.view.len,
+                                     nonce.view.data, pk.view.data, sk.view.data) != 0) {
+            js_free(ctx, ct);
+            ret = JS_ThrowInternalError(ctx, "box failed");
+        } else {
+            ret = JS_NewArrayBufferCopy(ctx, ct, ct_len);
+            js_free(ctx, ct);
+        }
     }
-    size_t ct_len = msg_len + HL_BOX_MACBYTES;
-    uint8_t *ct = js_malloc(ctx, ct_len);
-    if (!ct) { js_msg_free(ctx, &m_msg); secure_zero(sk, sizeof(sk)); return JS_EXCEPTION; }
-
-    if (hl_cap_crypto_box(ct, msg, msg_len, nonce, pk, sk) != 0) {
-        js_msg_free(ctx, &m_msg);
-        js_free(ctx, ct);
-        secure_zero(sk, sizeof(sk));
-        return JS_ThrowInternalError(ctx, "box failed");
-    }
-    js_msg_free(ctx, &m_msg);
-    secure_zero(sk, sizeof(sk));
-
-    if (ct_len > SIZE_MAX / 2) { js_free(ctx, ct); return JS_ThrowRangeError(ctx, "ciphertext too large"); }
-    char *hex = js_malloc(ctx, ct_len * 2 + 1);
-    if (!hex) { js_free(ctx, ct); return JS_EXCEPTION; }
-    for (size_t i = 0; i < ct_len; i++)
-        snprintf(hex + i * 2, 3, "%02x", ct[i]);
-    hex[ct_len * 2] = '\0';
-    js_free(ctx, ct);
-
-    JSValue result = JS_NewString(ctx, hex);
-    js_free(ctx, hex);
-    return result;
+    js_msg_free(ctx, &msg); js_msg_free(ctx, &nonce);
+    js_msg_free(ctx, &pk); js_msg_free(ctx, &sk);
+    return ret;
 }
 
-/* crypto.boxOpen(ctHex, nonceHex, pkHex, skHex) -> string/null */
+/* crypto.boxOpen(ciphertext, nonce, publicKey, secretKey) -> ArrayBuffer | null */
 static JSValue js_crypto_box_open(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 4)
-        return JS_ThrowTypeError(ctx, "crypto.boxOpen requires (ctHex, nonceHex, pkHex, skHex)");
-
-    size_t cth_len, nh_len, pkh_len, skh_len;
-    const char *cth = JS_ToCStringLen(ctx, &cth_len, argv[0]);
-    const char *nh = JS_ToCStringLen(ctx, &nh_len, argv[1]);
-    const char *pkh = JS_ToCStringLen(ctx, &pkh_len, argv[2]);
-    const char *skh = JS_ToCStringLen(ctx, &skh_len, argv[3]);
-    if (!cth || !nh || !pkh || !skh) {
-        if (cth) JS_FreeCString(ctx, cth);
-        if (nh) JS_FreeCString(ctx, nh);
-        if (pkh) JS_FreeCString(ctx, pkh);
-        if (skh) JS_FreeCString(ctx, skh);
+        return JS_ThrowTypeError(ctx, "crypto.boxOpen requires (ciphertext, nonce, publicKey, secretKey)");
+    JsMsg ct, nonce, pk, sk;
+    if (!js_msg_get(ctx, argv[0], &ct))
+        return JS_ThrowTypeError(ctx, "crypto.boxOpen: ciphertext must be a buffer");
+    if (!js_fixed_arg(ctx, argv[1], &nonce, 24, "boxOpen", "nonce")) {
+        js_msg_free(ctx, &ct);
         return JS_EXCEPTION;
     }
-
-    if (cth_len % 2 != 0 || nh_len != 48 || pkh_len != 64 || skh_len != 64) {
-        JS_FreeCString(ctx, cth); JS_FreeCString(ctx, nh);
-        JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
-        return JS_NULL;
+    if (!js_fixed_arg(ctx, argv[2], &pk, 32, "boxOpen", "public key")) {
+        js_msg_free(ctx, &ct); js_msg_free(ctx, &nonce);
+        return JS_EXCEPTION;
     }
-
-    size_t ct_len = cth_len / 2;
-    if (ct_len < HL_BOX_MACBYTES) {
-        JS_FreeCString(ctx, cth); JS_FreeCString(ctx, nh);
-        JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
-        return JS_NULL;
+    if (!js_fixed_arg(ctx, argv[3], &sk, 32, "boxOpen", "secret key")) {
+        js_msg_free(ctx, &ct); js_msg_free(ctx, &nonce); js_msg_free(ctx, &pk);
+        return JS_EXCEPTION;
     }
-
-    uint8_t nonce[24], pk[32], sk[32];
-    if (hex_decode_compat(nh, 48, nonce, 24) != 0 ||
-        hex_decode_compat(pkh, 64, pk, 32) != 0 ||
-        hex_decode_compat(skh, 64, sk, 32) != 0) {
-        JS_FreeCString(ctx, cth); JS_FreeCString(ctx, nh);
-        JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
-        return JS_NULL;
+    JSValue ret = JS_NULL;
+    if (ct.view.len >= HL_BOX_MACBYTES) {
+        size_t msg_len = ct.view.len - HL_BOX_MACBYTES;
+        uint8_t *msg = js_malloc(ctx, msg_len + 1);
+        if (!msg) {
+            ret = JS_EXCEPTION;
+        } else {
+            if (hl_cap_crypto_box_open(msg, ct.view.data, ct.view.len, nonce.view.data,
+                                       pk.view.data, sk.view.data) == 0)
+                ret = JS_NewArrayBufferCopy(ctx, msg, msg_len);
+            js_free(ctx, msg);
+        }
     }
-    JS_FreeCString(ctx, nh);
-    JS_FreeCString(ctx, pkh);
-    JS_FreeCString(ctx, skh);
-
-    uint8_t *ct = js_malloc(ctx, ct_len);
-    if (!ct) { JS_FreeCString(ctx, cth); secure_zero(sk, sizeof(sk)); return JS_EXCEPTION; }
-    if (hex_decode_compat(cth, cth_len, ct, ct_len) != 0) {
-        JS_FreeCString(ctx, cth);
-        js_free(ctx, ct);
-        secure_zero(sk, sizeof(sk));
-        return JS_NULL;
-    }
-    JS_FreeCString(ctx, cth);
-
-    size_t pt_len = ct_len - HL_BOX_MACBYTES;
-    uint8_t *pt = js_malloc(ctx, pt_len + 1);
-    if (!pt) { js_free(ctx, ct); secure_zero(sk, sizeof(sk)); return JS_EXCEPTION; }
-
-    if (hl_cap_crypto_box_open(pt, ct, ct_len, nonce, pk, sk) != 0) {
-        js_free(ctx, ct);
-        js_free(ctx, pt);
-        secure_zero(sk, sizeof(sk));
-        return JS_NULL;
-    }
-    js_free(ctx, ct);
-    secure_zero(sk, sizeof(sk));
-
-    JSValue result = JS_NewStringLen(ctx, (const char *)pt, pt_len);
-    js_free(ctx, pt);
-    return result;
+    js_msg_free(ctx, &ct); js_msg_free(ctx, &nonce);
+    js_msg_free(ctx, &pk); js_msg_free(ctx, &sk);
+    return ret;
 }
 
-/* crypto.boxKeypair() -> { publicKey: hex, secretKey: hex } */
+/* crypto.boxKeypair() -> { publicKey: ArrayBuffer(32), secretKey: ArrayBuffer(32) } */
 static JSValue js_crypto_box_keypair(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
-
     uint8_t pk[32], sk[32];
     if (hl_cap_crypto_box_keypair(pk, sk) != 0)
         return JS_ThrowInternalError(ctx, "box keypair generation failed");
-
-    char pk_hex[65], sk_hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
-    pk_hex[64] = '\0';
-    for (int i = 0; i < 32; i++)
-        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
-    sk_hex[64] = '\0';
-
-    JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewString(ctx, pk_hex));
-    JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewString(ctx, sk_hex));
-    secure_zero(sk, sizeof(sk));
-    secure_zero(sk_hex, sizeof(sk_hex));
-    return obj;
+    return js_keypair_object(ctx, pk, sizeof pk, sk, sizeof sk);
 }
 
-/* crypto.x25519Keypair() -> { publicKey, secretKey } */
+/* crypto.x25519Keypair() -> { publicKey: ArrayBuffer(32), secretKey: ArrayBuffer(32) } */
 static JSValue js_crypto_x25519_keypair(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
-
     uint8_t pk[32], sk[32];
     if (hl_cap_crypto_x25519_keypair(pk, sk) != 0)
         return JS_ThrowInternalError(ctx, "x25519 keypair generation failed");
-
-    char pk_hex[65], sk_hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
-    pk_hex[64] = '\0';
-    for (int i = 0; i < 32; i++)
-        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
-    sk_hex[64] = '\0';
-
-    JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewString(ctx, pk_hex));
-    JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewString(ctx, sk_hex));
-    secure_zero(sk, sizeof(sk));
-    secure_zero(sk_hex, sizeof(sk_hex));
-    return obj;
+    return js_keypair_object(ctx, pk, sizeof pk, sk, sizeof sk);
 }
 
-/* crypto.x25519(secretKeyHex, publicKeyHex) -> hex string | null
- *
- * Null, not a throw, for a low-order peer point: that is a protocol-level
- * event the caller has to handle, not a programming error.
- */
+/* crypto.x25519(secretKey, publicKey) -> ArrayBuffer (32-byte shared secret),
+ * or null when the peer sent a low-order point (a protocol event to handle,
+ * not a programming error). */
 static JSValue js_crypto_x25519(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 2)
-        return JS_ThrowTypeError(ctx,
-            "crypto.x25519 requires (secretKeyHex, publicKeyHex)");
-
-    size_t sk_len, pk_len;
-    const char *sk_hex = JS_ToCStringLen(ctx, &sk_len, argv[0]);
-    if (!sk_hex) return JS_EXCEPTION;
-    const char *pk_hex = JS_ToCStringLen(ctx, &pk_len, argv[1]);
-    if (!pk_hex) { JS_FreeCString(ctx, sk_hex); return JS_EXCEPTION; }
-
-    JSValue ret;
-    uint8_t sk[32], pk[32], shared[32];
-
-    if (sk_len != 64 || pk_len != 64) {
-        ret = JS_ThrowTypeError(ctx, "keys must be 64 hex chars (32 bytes)");
-        goto out;
+        return JS_ThrowTypeError(ctx, "crypto.x25519 requires (secretKey, publicKey)");
+    JsMsg sk, pk;
+    if (!js_fixed_arg(ctx, argv[0], &sk, 32, "x25519", "secret key"))
+        return JS_EXCEPTION;
+    if (!js_fixed_arg(ctx, argv[1], &pk, 32, "x25519", "public key")) {
+        js_msg_free(ctx, &sk);
+        return JS_EXCEPTION;
     }
-    if (hex_decode_compat(sk_hex, sk_len, sk, 32) != 0 ||
-        hex_decode_compat(pk_hex, pk_len, pk, 32) != 0) {
-        ret = JS_ThrowTypeError(ctx, "invalid hex in key");
-        goto out;
-    }
-
-    int rc = hl_cap_crypto_x25519(shared, sk, pk);
-    secure_zero(sk, sizeof(sk));
-    if (rc == -2) {
-        ret = JS_NULL;                 /* low-order point */
-        goto out;
-    }
-    if (rc != 0) {
-        ret = JS_ThrowInternalError(ctx, "x25519 failed");
-        goto out;
-    }
-
-    {
-        char shared_hex[65];
-        for (int i = 0; i < 32; i++)
-            snprintf(shared_hex + i * 2, 3, "%02x", shared[i]);
-        shared_hex[64] = '\0';
-        ret = JS_NewString(ctx, shared_hex);
-        secure_zero(shared, sizeof(shared));
-        secure_zero(shared_hex, sizeof(shared_hex));
-    }
-
-out:
-    JS_FreeCString(ctx, sk_hex);
-    JS_FreeCString(ctx, pk_hex);
+    uint8_t shared[32];
+    int rc = hl_cap_crypto_x25519(shared, sk.view.data, pk.view.data);
+    js_msg_free(ctx, &sk);
+    js_msg_free(ctx, &pk);
+    if (rc == -2)
+        return JS_NULL;
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "x25519 failed");
+    JSValue ret = JS_NewArrayBufferCopy(ctx, shared, sizeof shared);
+    secure_zero(shared, sizeof shared);
     return ret;
 }
 
-/* crypto.hmacSha256(data, keyHex) -> hex string */
+/* crypto.hmacSha256(data, key) -> ArrayBuffer (32 bytes); the key is any
+ * non-empty buffer or string */
 static JSValue js_crypto_hmac_sha256(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (argc < 2)
-        return JS_ThrowTypeError(ctx, "crypto.hmacSha256 requires (data, keyHex)");
-
-    JsMsg m_data;
-    if (!js_msg_get(ctx, argv[0], &m_data))
-        return JS_ThrowTypeError(ctx, "crypto.hmacSha256: argument 1 must be a buffer or a string");
-    const char *data = (const char *)m_data.view.data;
-    size_t data_len = m_data.view.len;
-
-    size_t key_hex_len;
-    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[1]);
-    if (!key_hex) { js_msg_free(ctx, &m_data); return JS_EXCEPTION; }
-
-    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, key_hex);
-        return JS_ThrowTypeError(ctx, "key must be 1-128 bytes (2-256 hex chars)");
-    }
-
-    size_t key_len = key_hex_len / 2;
-    uint8_t key[128];
-    if (hex_decode_compat(key_hex, key_hex_len, key, key_len) != 0) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, key_hex);
-        return JS_ThrowTypeError(ctx, "invalid hex in key");
-    }
-    JS_FreeCString(ctx, key_hex);
-
     uint8_t out[32];
-    if (hl_cap_crypto_hmac_sha256(key, key_len,
-                                  (const uint8_t *)data, data_len, out) != 0) {
-        js_msg_free(ctx, &m_data);
-        secure_zero(key, sizeof(key));
-        return JS_ThrowInternalError(ctx, "hmacSha256 failed");
-    }
-    js_msg_free(ctx, &m_data);
-    secure_zero(key, sizeof(key));
-
-    char hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(hex + i * 2, 3, "%02x", out[i]);
-    hex[64] = '\0';
-
-    return JS_NewString(ctx, hex);
+    return js_hmac(ctx, argc, argv, "hmacSha256", out, sizeof out,
+                   hl_cap_crypto_hmac_sha256);
 }
 
-/* crypto.hmacSha1(data, keyHex) -> 40-char hex string.
- *
- * HOTP/TOTP compatibility only - see hl_cap_crypto_hmac_sha1 docstring.
- * The key is hex-encoded to match the hmacSha256 binding convention.
- */
+/* crypto.hmacSha1(data, key) -> ArrayBuffer (20 bytes). HOTP/TOTP only. */
 static JSValue js_crypto_hmac_sha1(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (argc < 2)
-        return JS_ThrowTypeError(ctx, "crypto.hmacSha1 requires (data, keyHex)");
-
-    /* Accept ArrayBuffer / TypedArray / MappedBuffer / WasmBuffer /
-     * string via the unified buffer protocol. JS_ToCStringLen alone
-     * UTF-8-inflates any byte >= 0x80 (and stringifies an ArrayBuffer
-     * to "[object ArrayBuffer]"), which silently corrupted TOTP
-     * counters whose dynamic-truncation bytes crossed 0x80. Same
-     * fix-shape as the other buffer-taking bindings. */
-    HlBufferView data_view = {0};
-    const char *data_str = NULL;
-    int data_needs_free = 0;
-    if (!js_get_buffer(ctx, argv[0], &data_view, &data_str, &data_needs_free))
-        return JS_ThrowTypeError(ctx,
-            "crypto.hmacSha1: data must be ArrayBuffer, TypedArray, "
-            "MappedBuffer, WasmBuffer, or string");
-
-    size_t key_hex_len;
-    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[1]);
-    if (!key_hex) {
-        if (data_needs_free) JS_FreeCString(ctx, data_str);
-        return JS_EXCEPTION;
-    }
-
-    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256) {
-        if (data_needs_free) JS_FreeCString(ctx, data_str);
-        JS_FreeCString(ctx, key_hex);
-        return JS_ThrowTypeError(ctx, "key must be 1-128 bytes (2-256 hex chars)");
-    }
-
-    size_t key_len = key_hex_len / 2;
-    uint8_t key[128];
-    if (hex_decode_compat(key_hex, key_hex_len, key, key_len) != 0) {
-        if (data_needs_free) JS_FreeCString(ctx, data_str);
-        JS_FreeCString(ctx, key_hex);
-        return JS_ThrowTypeError(ctx, "invalid hex in key");
-    }
-    JS_FreeCString(ctx, key_hex);
-
     uint8_t out[20];
-    if (hl_cap_crypto_hmac_sha1(key, key_len,
-                                (const uint8_t *)data_view.data,
-                                data_view.len, out) != 0) {
-        if (data_needs_free) JS_FreeCString(ctx, data_str);
-        secure_zero(key, sizeof(key));
-        return JS_ThrowInternalError(ctx, "hmacSha1 failed");
-    }
-    if (data_needs_free) JS_FreeCString(ctx, data_str);
-    secure_zero(key, sizeof(key));
-
-    char hex[41];
-    for (int i = 0; i < 20; i++)
-        snprintf(hex + i * 2, 3, "%02x", out[i]);
-    hex[40] = '\0';
-
-    return JS_NewString(ctx, hex);
+    return js_hmac(ctx, argc, argv, "hmacSha1", out, sizeof out,
+                   hl_cap_crypto_hmac_sha1);
 }
 
-/* crypto.hmacSha256Verify(data, keyHex, expectedHex) -> boolean */
+/* crypto.hmacSha256Verify(data, key, expected) -> boolean; `expected` is the
+ * 32-byte MAC, compared in constant time */
 static JSValue js_crypto_hmac_sha256_verify(JSContext *ctx, JSValueConst this_val,
                                              int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 3)
-        return JS_ThrowTypeError(ctx, "crypto.hmacSha256Verify requires (data, keyHex, expectedHex)");
-
-    JsMsg m_data;
-    if (!js_msg_get(ctx, argv[0], &m_data))
-        return JS_ThrowTypeError(ctx, "crypto.hmacSha256Verify: argument 1 must be a buffer or a string");
-    const char *data = (const char *)m_data.view.data;
-    size_t data_len = m_data.view.len;
-
-    size_t key_hex_len;
-    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[1]);
-    if (!key_hex) { js_msg_free(ctx, &m_data); return JS_EXCEPTION; }
-
-    size_t expected_hex_len;
-    const char *expected_hex = JS_ToCStringLen(ctx, &expected_hex_len, argv[2]);
-    if (!expected_hex) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, key_hex);
-        return JS_EXCEPTION;
+        return JS_ThrowTypeError(ctx, "crypto.hmacSha256Verify requires (data, key, expected)");
+    JsMsg data, key, exp;
+    if (!js_msg_get(ctx, argv[0], &data))
+        return JS_ThrowTypeError(ctx, "crypto.hmacSha256Verify: data must be a buffer or a string");
+    if (!js_msg_get(ctx, argv[1], &key) || key.view.len == 0) {
+        js_msg_free(ctx, &data);
+        js_msg_free(ctx, &key);
+        return JS_ThrowTypeError(ctx, "crypto.hmacSha256Verify: key must be a non-empty buffer or string");
     }
-
-    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, key_hex);
-        JS_FreeCString(ctx, expected_hex);
-        return JS_ThrowTypeError(ctx, "key must be 1-128 bytes (2-256 hex chars)");
+    if (!js_msg_get(ctx, argv[2], &exp)) {
+        js_msg_free(ctx, &data);
+        js_msg_free(ctx, &key);
+        return JS_ThrowTypeError(ctx, "crypto.hmacSha256Verify: expected must be a buffer");
     }
-    if (expected_hex_len != 64) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, key_hex);
-        JS_FreeCString(ctx, expected_hex);
-        return JS_ThrowTypeError(ctx, "expected mac must be 64 hex chars (32 bytes)");
-    }
-
-    size_t key_len = key_hex_len / 2;
-    uint8_t key[128];
-    if (hex_decode_compat(key_hex, key_hex_len, key, key_len) != 0) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, key_hex);
-        JS_FreeCString(ctx, expected_hex);
-        return JS_ThrowTypeError(ctx, "invalid hex in key");
-    }
-    JS_FreeCString(ctx, key_hex);
-
-    uint8_t expected[32];
-    if (hex_decode_compat(expected_hex, expected_hex_len, expected, 32) != 0) {
-        js_msg_free(ctx, &m_data);
-        JS_FreeCString(ctx, expected_hex);
-        secure_zero(key, sizeof(key));
-        return JS_ThrowTypeError(ctx, "invalid hex in expected mac");
-    }
-    JS_FreeCString(ctx, expected_hex);
-
-    int rc = hl_cap_crypto_hmac_sha256_verify(key, key_len,
-                                               (const uint8_t *)data, data_len,
-                                               expected);
-    js_msg_free(ctx, &m_data);
-    secure_zero(key, sizeof(key));
-
-    return JS_NewBool(ctx, rc == 0);
+    int ok = exp.view.len == 32
+        && hl_cap_crypto_hmac_sha256_verify(key.view.data, key.view.len,
+                                            data.view.data, data.view.len,
+                                            exp.view.data) == 0;
+    js_msg_free(ctx, &data);
+    js_msg_free(ctx, &key);
+    js_msg_free(ctx, &exp);
+    return JS_NewBool(ctx, ok);
 }
 
 /* crypto.constantTimeEq(a, b) -> boolean
@@ -1390,17 +939,12 @@ static JSValue js_sha256_hasher_update(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "sha256.update requires (data)");
 
-    /* Accept ArrayBuffer (binary-safe) or string (UTF-8 via JS_ToCStringLen). */
-    size_t len = 0;
-    const uint8_t *bytes = JS_GetArrayBuffer(ctx, &len, argv[0]);
-    const char *cstr = NULL;
-    if (!bytes) {
-        cstr = JS_ToCStringLen(ctx, &len, argv[0]);
-        if (!cstr) return JS_EXCEPTION;
-        bytes = (const uint8_t *)cstr;
-    }
-    int rc = hl_cap_crypto_sha256_update(&h->ctx, bytes, len);
-    if (cstr) JS_FreeCString(ctx, cstr);
+    /* Any buffer, or a string taken as its UTF-8 text. */
+    JsMsg m;
+    if (!js_msg_get(ctx, argv[0], &m))
+        return JS_ThrowTypeError(ctx, "sha256.update: data must be a buffer or a string");
+    int rc = hl_cap_crypto_sha256_update(&h->ctx, m.view.data, m.view.len);
+    js_msg_free(ctx, &m);
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "sha256.update() failed");
     return JS_DupValue(ctx, this_val);  /* chainable */
@@ -1418,10 +962,7 @@ static JSValue js_sha256_hasher_digest(JSContext *ctx, JSValueConst this_val,
     if (hl_cap_crypto_sha256_final(&h->ctx, out) != 0)
         return JS_ThrowInternalError(ctx, "sha256.digest() failed");
     h->done = 1;
-    char hex[65];
-    for (int i = 0; i < 32; i++) snprintf(hex + i*2, 3, "%02x", out[i]);
-    hex[64] = '\0';
-    return JS_NewStringLen(ctx, hex, 64);
+    return JS_NewArrayBufferCopy(ctx, out, sizeof out);
 }
 
 static JSValue js_crypto_create_sha256(JSContext *ctx, JSValueConst this_val,

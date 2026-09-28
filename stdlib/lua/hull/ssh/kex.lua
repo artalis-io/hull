@@ -13,7 +13,6 @@
 -- hashed, and the tests assert those bytes.
 
 local wire = require('hull.ssh.wire')
-local hex  = require('hull.encoding').hex
 
 local M = {}
 
@@ -163,16 +162,5 @@ M.SIZES = {
         mac_c2s = 0,  mac_s2c = 0,
     },
 }
-
--- Hex bridging ---------------------------------------------------------
---
--- SSH is defined over raw bytes; hull.crypto takes and returns hex (sha256,
--- x25519 and the rest all do). hull.encoding.hex crosses that line; this
--- adapts a hex-returning hash into the raw-bytes hash derive_key expects.
-function M.raw_hash(hash_hex)
-    return function(data)
-        return (assert(hex.decode(hash_hex(data)), "ssh.kex: hash did not return hex"))
-    end
-end
 
 return M

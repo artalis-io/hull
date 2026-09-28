@@ -113,7 +113,7 @@ cat > "$TMPDIR_WORK/app.lua" <<'EOF'
 app.manifest({
     name = "att-e2e-lua", version = "0.0.1",
     modules = {
-        "hull/attachment@1", "hull/blob@1", "hull/crypto@1",
+        "hull/attachment@1", "hull/blob@1", "hull/crypto@1", "hull/encoding@1",
         "hull/db@1", "hull/fs@1", "hull/http-server@1", "hull/json@1",
         "hull/web/attachment-serve@1",
     },
@@ -171,10 +171,11 @@ end)
 -- handy alongside serve() so we can verify bytes match without
 -- depending on the auth-gated path.
 local crypto = require("hull.crypto")
+local hex = require("hull.encoding").hex
 app.get("/attachments/:id/sha", function(req, res)
     local bytes = attachment.read(req.params.id)
     if not bytes then res:status(404):json({ error = "not found" }); return end
-    res:json({ sha256 = crypto.sha256(bytes), length = #bytes })
+    res:json({ sha256 = hex.encode(crypto.sha256(bytes)), length = #bytes })
 end)
 
 -- PR 2: delete (refcount-aware unlink).
@@ -219,11 +220,12 @@ import { attachment } from "hull:attachment";
 import { attachmentServe } from "hull:web:attachment-serve";
 import { blob } from "hull:blob";
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 
 app.manifest({
     name: "att-e2e-js", version: "0.0.1",
     modules: [
-        "hull/attachment@1", "hull/blob@1", "hull/crypto@1",
+        "hull/attachment@1", "hull/blob@1", "hull/crypto@1", "hull/encoding@1",
         "hull/db@1", "hull/fs@1", "hull/http-server@1", "hull/json@1",
         "hull/web/attachment-serve@1",
     ],
@@ -275,7 +277,7 @@ app.get("/attachments/:id/metadata", (req, res) => {
 app.get("/attachments/:id/sha", (req, res) => {
     const bytes = attachment.read(req.params.id);
     if (!bytes) { res.status(404); res.json({ error: "not found" }); return; }
-    res.json({ sha256: crypto.sha256(bytes), length: bytes.byteLength });
+    res.json({ sha256: encoding.hex.encode(crypto.sha256(bytes)), length: bytes.byteLength });
 });
 
 // PR 2: delete (refcount-aware unlink).

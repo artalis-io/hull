@@ -24,6 +24,7 @@
  */
 
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 
 const MAX_BODY_SIZE = 1024 * 1024; // 1 MB
 
@@ -35,7 +36,7 @@ const MAX_BODY_SIZE = 1024 * 1024; // 1 MB
  */
 function compute(body) {
     if (!body || body.length === 0) return null;
-    const hash = crypto.sha256(body);
+    const hash = encoding.hex.encode(crypto.sha256(body));
     return 'W/"' + hash.substring(0, 16) + '"';
 }
 

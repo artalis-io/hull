@@ -117,7 +117,7 @@ local oauth = {}
 -- ── Module state ───────────────────────────────────────────────────
 
 local _state = {
-    state_secret_hex = nil,  -- secret bytes pre-encoded as hex (HMAC takes hex)
+    state_secret = nil,      -- the HMAC key for the state envelope (bytes)
     -- redirect_uri origin resolution (see compute_redirect_uri):
     --   base_url set        -> use it verbatim (recommended).
     --   trust_proxy = true  -> honor X-Forwarded-Proto/Host (trusted proxy).
@@ -220,8 +220,7 @@ end
 -- challenge = base64url(SHA-256(verifier)).
 local function pkce_pair()
     local verifier = random_urlsafe(32)
-    local sha_hex = crypto.sha256(verifier)
-    local challenge = encoding.base64.encode(encoding.hex.decode(sha_hex), { url = true })
+    local challenge = encoding.base64.encode(crypto.sha256(verifier), { url = true })
     return verifier, challenge
 end
 
@@ -273,12 +272,12 @@ end
 
 local function sign_state(payload)
     payload.exp = time.now() + _state.state_ttl
-    return envelope.sign(payload, _state.state_secret_hex)
+    return envelope.sign(payload, _state.state_secret)
 end
 
 local function verify_state(cookie_value)
     if not cookie_value or cookie_value == "" then return nil, "empty" end
-    local env, err = envelope.verify(cookie_value, _state.state_secret_hex)
+    local env, err = envelope.verify(cookie_value, _state.state_secret)
     if not env then return nil, err end
     if type(env.exp) ~= "number" or time.now() >= env.exp then
         return nil, "expired"
@@ -575,7 +574,7 @@ function oauth.init(opts)
               .. "(same HMAC primitive as hull/web/auth-flows; pick "
               .. "one floor)")
     end
-    _state.state_secret_hex = encoding.hex.encode(secret)
+    _state.state_secret = secret
     -- redirect_uri origin (see compute_redirect_uri): explicit base_url wins,
     -- else trust_proxy gates the spoofable X-Forwarded-Proto/Host headers.
     if opts.base_url ~= nil then
@@ -656,7 +655,7 @@ end
 
 --- Mount the three OIDC routes on `app`. Call after oauth.init().
 function oauth.routes(app)
-    if not _state.state_secret_hex then
+    if not _state.state_secret then
         error("oauth.routes: oauth.init() must be called first")
     end
     app.get(_state.login_path:gsub("{provider}", ":provider"),
@@ -675,7 +674,7 @@ oauth._test = {
     refresh_jwks    = refresh_jwks,
     safe_return_to  = safe_return_to,
     reset = function()
-        _state.state_secret_hex = nil
+        _state.state_secret = nil
         _state.providers        = {}
         _state.find_user        = nil
         _state.on_login         = nil

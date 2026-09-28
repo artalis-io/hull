@@ -104,19 +104,19 @@ ASCII loop for known-ASCII fields).
 ## Incremental SHA-256 (`crypto.create_sha256` / `crypto.createSha256`)
 
 Stream-hash parts without buffering. Chainable `update`, one-shot
-`digest` (lowercase hex). Update-after-digest and double-digest both
-raise.
+`digest` (the 32 raw bytes; wrap with `encoding.hex.encode` for text).
+Update-after-digest and double-digest both raise.
 
 ```lua
 local h = crypto.create_sha256()
 for chunk in part:chunks() do h:update(chunk) end
-local sha = h:digest()
+local sha = encoding.hex.encode(h:digest())
 ```
 
 ```javascript
 const h = crypto.createSha256();
 for await (const chunk of part.chunks()) h.update(chunk);
-const sha = h.digest();
+const sha = encoding.hex.encode(h.digest());
 ```
 
 <!-- full -->
@@ -144,7 +144,7 @@ app.post("/upload", function(req, res)
                 files[#files + 1] = {
                     name = part.name, filename = part.filename,
                     content_type = part.content_type,
-                    size = size, sha256 = h:digest(),
+                    size = size, sha256 = encoding.hex.encode(h:digest()),
                 }
             else
                 fields[part.name] = part:read()
@@ -178,7 +178,7 @@ app.post("/upload", async (req, res) => {
                 files.push({
                     name: part.name, filename: part.filename,
                     contentType: part.contentType,
-                    size, sha256: h.digest(),
+                    size, sha256: encoding.hex.encode(h.digest()),
                 });
             } else {
                 const buf = await part.read();

@@ -174,17 +174,21 @@ import { encoding } from "hull:encoding";
 // From SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix). Salt is
 // deployment-private (from init's fingerprintSalt opt) so output is only
 // meaningful within this deployment.
-// Note what is hashed: crypto.sha256 returns HEX, and that hex text is hexed
-// again before truncating, so the fingerprint is the hex of the first 8 hex
-// characters of the digest (32 bits of it). Coarse, but deliberate to keep:
-// fingerprints are stored in _hull_audit_log, and "fixing" this would make
-// every existing device look new. Both runtimes compute it identically.
+// The fingerprint is the hex of the first 8 hex characters of the digest (32
+// bits of it): crypto.sha256 once returned hex, and that text was hexed again
+// before truncating. Coarse, but deliberate to keep: fingerprints are stored
+// in _hull_audit_log, and "fixing" this would make every existing device look
+// new. Both runtimes compute it identically.
+function fpOf(key) {
+    return encoding.hex.encode(encoding.hex.encode(crypto.sha256(key)).substring(0, 8));
+}
+
 function fingerprint(req) {
     const ua  = extractUa(req);
     const ip  = extractIp(req);
     const salt = _state.fingerprintSalt || "";
     const key = salt + "|" + normalizeUa(ua) + "|" + ipPrefix(ip);
-    return encoding.hex.encode(crypto.sha256(key)).substring(0, 16);
+    return fpOf(key);
 }
 
 function record(userId, kind, req, opts) {
@@ -373,7 +377,7 @@ function recomputeFingerprints() {
                 lastId = rows[i].id;
                 const key = salt + "|" + normalizeUa(rows[i].user_agent)
                                  + "|" + ipPrefix(rows[i].ip);
-                const newFp = encoding.hex.encode(crypto.sha256(key)).substring(0, 16);
+                const newFp = fpOf(key);
                 if (newFp !== rows[i].fingerprint) {
                     pageUpdates.push([newFp, rows[i].id]);
                 }

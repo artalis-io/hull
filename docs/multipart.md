@@ -89,7 +89,7 @@ for part in req:multipart() do
             hasher:update(chunk)
         end
         log.info(string.format("%s: %d bytes, sha256=%s",
-            part.filename, total, hasher:digest()))
+            part.filename, total, encoding.hex.encode(hasher:digest())))
     else
         -- Text field - read the whole body
         local value = part:read()
@@ -111,7 +111,7 @@ for await (const part of req.multipart()) {
             total += chunk.byteLength;
             hasher.update(chunk);
         }
-        log.info(`${part.filename}: ${total} bytes, sha256=${hasher.digest()}`);
+        log.info(`${part.filename}: ${total} bytes, sha256=${encoding.hex.encode(hasher.digest())}`);
     } else {
         const buf = await part.read();
         // buf is an ArrayBuffer; decode via TextDecoder for text fields,
@@ -123,7 +123,8 @@ for await (const part of req.multipart()) {
 
 > The `crypto.create_sha256()` / `crypto.createSha256()` hasher used above is
 > the incremental SHA-256 API - `update(chunk)` repeatedly, then
-> `digest()` once for the 64-char hex digest. Memory use stays
+> `digest()` once for the 32-byte digest (`encoding.hex.encode` it for
+> text). Memory use stays
 > O(chunk_size) regardless of how large the upload is. The one-shot
 > `crypto.sha256(buf)` still exists for when you already have the
 > whole input in hand.
@@ -173,7 +174,7 @@ no normalization:
 
 - **Lua** strings are byte arrays. `#chunk` is the byte count.
   `crypto.sha256(chunk)` over arbitrary binary input returns the
-  correct hash.
+  correct hash (32 raw bytes).
 - **JS** chunks and `read()` results are `ArrayBuffer`, not JS
   strings. Use `.byteLength` for the size; use `new Uint8Array(buf)`
   to access bytes; pass directly to `crypto.sha256(buf)` for hashing.

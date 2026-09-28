@@ -40,23 +40,21 @@ local M = {}
 --                            typically include `sub`, `action`, `exp`,
 --                            and a random `nonce` to defend against
 --                            guessable collisions.
--- @tparam string secret_hex  HMAC-SHA256 key as a hex string.
--- @treturn string            `body.tag` token, URL-safe.
-function M.sign(payload, secret_hex)
+-- @tparam string secret      HMAC-SHA256 key (bytes).
+-- @treturn string            `body.tag` token, URL-safe; the tag is hex.
+function M.sign(payload, secret)
     local body = encoding.base64.encode(json.encode(payload), { url = true })
-    local tag  = crypto.hmac_sha256(body, secret_hex)
+    local tag  = encoding.hex.encode(crypto.hmac_sha256(body, secret))
     return body .. "." .. tag
 end
 
 --- Verify a token's signature and decode its payload.
 -- Returns (payload_table, nil) on success or (nil, reason) on
--- failure. crypto.hmac_sha256_verify raises on malformed-hex
--- inputs (programmer error at the cap layer); we pcall it so a
--- user-supplied junk token returns a clean "bad tag" result
--- instead of crashing the request handler.
+-- failure. A tag that is not hex (or not a MAC's length) is simply
+-- a bad tag; the comparison is constant-time.
 -- @tparam string token       Signed token returned by sign().
--- @tparam string secret_hex  Same key the token was signed with.
-function M.verify(token, secret_hex)
+-- @tparam string secret      Same key the token was signed with.
+function M.verify(token, secret)
     if type(token) ~= "string" or token == "" then
         return nil, "missing"
     end
@@ -65,9 +63,10 @@ function M.verify(token, secret_hex)
     local body = token:sub(1, dot - 1)
     local tag  = token:sub(dot + 1)
 
-    local ok, valid = pcall(crypto.hmac_sha256_verify, body,
-                             secret_hex, tag)
-    if not ok or not valid then return nil, "bad tag" end
+    local mac = encoding.hex.decode(tag)
+    if not mac or not crypto.hmac_sha256_verify(body, secret, mac) then
+        return nil, "bad tag"
+    end
 
     local raw = encoding.base64.decode(body, { url = true })
     raw = raw and encoding.utf8.decode(raw)

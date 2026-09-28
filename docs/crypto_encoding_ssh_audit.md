@@ -158,17 +158,22 @@ a byte-only crypto API (a deliberate breaking change).
 
 ### PR 6: byte-only crypto API (breaking)
 
-- [ ] The older bindings (`hmac_sha256`, `hmac_sha1`, secretbox, box,
+- [x] The older bindings (`hmac_sha256`, `hmac_sha1`, secretbox, box,
   ed25519, x25519) take keys and return results as hex; the newer ones
   (`gcm_seal` / `gcm_open`, `aes256ctr`, bcrypt) take bytes. 17 stdlib files
   hex-encode keys going in and hex-decode results coming out, and the SSH
   stack carries adapters to undo it. Make the whole API take and return
   bytes, and delete the round trips. A clean break, with no hex fallback.
+  Done in both runtimes (JS outputs are ArrayBuffers; keypairs
+  `{ publicKey, secretKey }`). Stored and on-the-wire hex formats (token
+  hashes, CSRF MACs, envelope tags, ETags, idempotency fingerprints, audit
+  fingerprints, package.sig / platform.sig) are unchanged: those callers now
+  encode explicitly. The private `snprintf` hex loops in both bindings and
+  `kex.raw_hash` are gone.
 
 ## Missing, not yet planned
 
-- **Crypto / encoding:** a random-token helper (`base64url(random(n))` is
-  written out about 8 times); byte-level (non-hex) crypto API; HKDF; a keyring
+- **Crypto / encoding:** HKDF; a keyring
   from env; reason strings on JS decode failures; one JS error shape (encoding
   returns `null`, envelope `[v, err]`, sealbox `{ ok, ... }`).
 - **Filesystem:** `fs.write` is not atomic (it truncates in place), so a

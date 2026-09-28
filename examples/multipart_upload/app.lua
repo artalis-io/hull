@@ -12,6 +12,7 @@
 -- that adds content-addressed disk storage on top of this primitive.
 
 local crypto = require("hull.crypto")
+local encoding = require("hull.encoding")
 local log    = require("hull.log")
 
 app.manifest({
@@ -20,6 +21,7 @@ app.manifest({
     modules = {
         "hull/http-server@1",
         "hull/crypto@1",
+        "hull/encoding@1",
         "hull/log@1",
     },
 })
@@ -86,7 +88,7 @@ app.post("/upload", function(req, res)
                 filename     = part.filename,
                 content_type = part.content_type,
                 size         = total,
-                sha256       = hasher:digest(),
+                sha256       = encoding.hex.encode(hasher:digest()),
             })
         else
             table.insert(parts, {

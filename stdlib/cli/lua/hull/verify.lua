@@ -38,6 +38,16 @@
 --
 
 local json = require("hull.json")
+local hex = require("hull.encoding").hex
+
+-- Verify a hex ed25519 signature over `payload` with a hex public key, as
+-- stored in package.sig / platform.sig. Malformed hex is a failed check.
+local function ed25519_verify_hex(payload, sig_hex, pk_hex)
+    local sig = type(sig_hex) == "string" and hex.decode(sig_hex)
+    local pk  = type(pk_hex) == "string" and hex.decode(pk_hex)
+    if not sig or not pk or #sig ~= 64 or #pk ~= 32 then return false end
+    return crypto.ed25519_verify(payload, sig, pk)
+end
 
 -- Placeholder until the real gethull.dev platform key is pinned in this file.
 -- Until then, `hull verify` requires the caller to pass --platform-key PATH
@@ -187,7 +197,7 @@ local function main()
                 issues = issues + 1
             end
         end
-        local gethull_ok = crypto.ed25519_verify(
+        local gethull_ok = ed25519_verify_hex(
             sig.platform.gethull.manifest,
             sig.platform.gethull.signature,
             verify_pubkey_hex)
@@ -228,7 +238,7 @@ local function main()
         end
 
         local plat_payload = json.encode(sig.platform.platforms)
-        local plat_ok = crypto.ed25519_verify(plat_payload,
+        local plat_ok = ed25519_verify_hex(plat_payload,
             sig.platform.signature, sig.platform.public_key)
         if plat_ok then
             print("Platform layer: VALID (self-consistent)")
@@ -287,7 +297,7 @@ local function main()
         })
     end
 
-    local ok = crypto.ed25519_verify(payload, sig.signature, sig.public_key)
+    local ok = ed25519_verify_hex(payload, sig.signature, sig.public_key)
     if not ok then
         tool.stderr("App layer: FAILED - signature is invalid\n")
         tool.exit(1)
@@ -313,7 +323,7 @@ local function main()
         if not data then
             missing[#missing + 1] = name
         else
-            local actual_hash = crypto.sha256(data)
+            local actual_hash = hex.encode(crypto.sha256(data))
             if actual_hash ~= expected_hash then
                 mismatches[#mismatches + 1] = {
                     name = name,

@@ -49,8 +49,7 @@ function csrf.generate(session_id, secret)
     local ts_hex = string.format("%x", ts)
 
     local message = session_id .. ":" .. ts_hex
-    local key_hex = encoding.hex.encode(secret)
-    local mac = crypto.hmac_sha256(message, key_hex)
+    local mac = encoding.hex.encode(crypto.hmac_sha256(message, secret))
 
     return ts_hex .. "." .. mac
 end
@@ -107,8 +106,7 @@ function csrf.verify(token, session_id, secret, ttl)
     -- the canonical wire encoding (tsHex), so a token minted by the
     -- JS sibling verifies bit-for-bit here.
     local message = session_id .. ":" .. ts_hex
-    local key_hex = encoding.hex.encode(secret)
-    local expected_mac = crypto.hmac_sha256(message, key_hex)
+    local expected_mac = encoding.hex.encode(crypto.hmac_sha256(message, secret))
 
     return constant_time_compare(mac, expected_mac)
 end

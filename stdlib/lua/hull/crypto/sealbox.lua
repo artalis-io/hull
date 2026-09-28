@@ -29,7 +29,6 @@
 -- names, which is what makes rotation a matter of adding a key.
 
 local crypto = require('hull.crypto')
-local hex    = require('hull.encoding').hex
 
 local M = {}
 
@@ -72,7 +71,7 @@ function M.keyring(opts)
         if type(k) ~= "string" or #k ~= 32 then
             error("sealbox.keyring: key " .. tostring(id) .. " must be exactly 32 bytes", 2)
         end
-        keys[id] = hex.encode(k)
+        keys[id] = k
     end
     local current = key_id(opts.current)
     if current == nil or keys[current] == nil then
@@ -125,9 +124,8 @@ function M.seal(ring, value, context)
     check_context("seal", context)
     local key = ring.keys[ring.current]
     local nonce = crypto.random(M.NONCE_LEN)
-    local ct_hex = crypto.secretbox(frame(context, value),
-                                    hex.encode(nonce), key)
-    return spack(">I4", ring.current) .. nonce .. hex.decode(ct_hex)
+    local ct = crypto.secretbox(frame(context, value), nonce, key)
+    return spack(">I4", ring.current) .. nonce .. ct
 end
 
 --- Open a blob sealed with `context`. Returns value, version on success;
@@ -145,8 +143,7 @@ function M.open(ring, blob, context)
     if not key then return nil, "unknown_version" end
     local nonce = blob:sub(M.VERSION_LEN + 1, M.VERSION_LEN + M.NONCE_LEN)
     local ct    = blob:sub(M.VERSION_LEN + M.NONCE_LEN + 1)
-    local plain = crypto.secretbox_open(hex.encode(ct),
-                                        hex.encode(nonce), key)
+    local plain = crypto.secretbox_open(ct, nonce, key)
     if not plain then return nil, "open_failed" end
     local value = unframe(context, plain)
     if not value then return nil, "open_failed" end
@@ -161,8 +158,8 @@ function M.open_unversioned(ring, id, blob)
     if not key or type(blob) ~= "string" or #blob < M.NONCE_LEN + M.MAC_LEN then
         return nil
     end
-    return crypto.secretbox_open(hex.encode(blob:sub(M.NONCE_LEN + 1)),
-                                 hex.encode(blob:sub(1, M.NONCE_LEN)), key)
+    return crypto.secretbox_open(blob:sub(M.NONCE_LEN + 1),
+                                 blob:sub(1, M.NONCE_LEN), key)
 end
 
 return M

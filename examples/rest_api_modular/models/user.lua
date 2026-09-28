@@ -11,10 +11,9 @@ local time   = require("hull.time")
 local M = {}
 
 function M.create(input)
-    -- 32 random bytes → SHA-256 hex (64 chars). crypto.random returns
-    -- raw bytes; sha256 returns a hex string. Combined this gives a
-    -- cryptographically-strong opaque id with no separate hex-encoder.
-    local id  = crypto.sha256(crypto.random(32))
+    -- 32 random bytes as hex (64 chars): a cryptographically-strong
+    -- opaque id.
+    local id  = crypto.random_token(32, "hex")
     local now = time.now()
     db.exec(
         "INSERT INTO users (id, email, name, created_at) VALUES (?, ?, ?, ?)",

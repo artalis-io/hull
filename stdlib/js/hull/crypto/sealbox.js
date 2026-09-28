@@ -18,7 +18,7 @@
  * context (hull:kv) or never (TOTP), not both.
  *
  * Values, keys and blobs are BYTE STRINGS (each char a byte, 0-255). Bytes
- * cross the crypto binding as Uint8Array or hex, never as a JS string, which
+ * cross the crypto binding as Uint8Array, never as a JS string, which
  * the binding would UTF-8-encode - see docs/stdlib_style.md §4.
  */
 
@@ -30,7 +30,7 @@ const NONCE_LEN   = 24;
 const MAC_LEN     = 16;
 const MIN_LEN     = VERSION_LEN + NONCE_LEN + MAC_LEN;
 
-const { hex, bytes } = encoding;
+const { bytes } = encoding;
 
 function be32(v) {
     return String.fromCharCode((v >>> 24) & 0xff, (v >>> 16) & 0xff,
@@ -80,7 +80,7 @@ function keyring(opts) {
         if (!isByteString(k) || k.length !== 32) {
             throw new Error("sealbox.keyring: key " + idStr + " must be exactly 32 bytes");
         }
-        keys[id] = hex.encode(k);
+        keys[id] = bytes.toU8(k);
     }
     const current = keyId(opts.current);
     if (current === null || keys[current] === undefined) {
@@ -126,9 +126,9 @@ function seal(ring, value, context) {
     if (!isByteString(value)) throw new TypeError("sealbox.seal: value must be a byte string");
     checkContext("seal", context);
     const key = ring.keys[ring.current];
-    const nonce = bytes.fromBuffer(crypto.random(NONCE_LEN));
-    const ctHex = crypto.secretbox(bytes.toU8(frame(context, value)), hex.encode(nonce), key);
-    return be32(ring.current) + nonce + hex.decode(ctHex);
+    const nonce = crypto.random(NONCE_LEN);
+    const ct = crypto.secretbox(bytes.toU8(frame(context, value)), nonce, key);
+    return be32(ring.current) + bytes.fromBuffer(nonce) + bytes.fromBuffer(ct);
 }
 
 /**
@@ -146,7 +146,7 @@ function open(ring, blob, context) {
     if (key === undefined) return { ok: false, reason: "unknown_version" };
     const nonce = blob.substring(VERSION_LEN, VERSION_LEN + NONCE_LEN);
     const ct    = blob.substring(VERSION_LEN + NONCE_LEN);
-    const ab = crypto.secretboxOpen(hex.encode(ct), hex.encode(nonce), key);
+    const ab = crypto.secretboxOpen(bytes.toU8(ct), bytes.toU8(nonce), key);
     if (!ab) return { ok: false, reason: "open_failed" };
     const value = unframe(context, bytes.fromBuffer(ab));
     if (value === null) return { ok: false, reason: "open_failed" };
@@ -160,8 +160,8 @@ function openUnversioned(ring, id, blob) {
     if (key === undefined || !isByteString(blob) || blob.length < NONCE_LEN + MAC_LEN) {
         return null;
     }
-    const ab = crypto.secretboxOpen(hex.encode(blob.substring(NONCE_LEN)),
-                                    hex.encode(blob.substring(0, NONCE_LEN)), key);
+    const ab = crypto.secretboxOpen(bytes.toU8(blob.substring(NONCE_LEN)),
+                                    bytes.toU8(blob.substring(0, NONCE_LEN)), key);
     return ab ? bytes.fromBuffer(ab) : null;
 }
 

@@ -26,6 +26,7 @@
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 import { time } from "hull:time";
 import { json } from "hull:json";
 
@@ -127,7 +128,7 @@ function init(opts) {
  */
 function computeFingerprint(req) {
     const data = (req.method || "") + "\0" + (req.path || "") + "\0" + (req.body || "");
-    return crypto.sha256(data);
+    return encoding.hex.encode(crypto.sha256(data));
 }
 
 /**

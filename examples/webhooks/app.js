@@ -62,12 +62,10 @@ app.usePost("POST", "/events", idempotency.middleware());
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-// crypto.hmacSha256 takes its key as hex. The secret is text, so it is
-// hexed as its UTF-8 bytes - the same key the Lua version derives.
-const SECRET_HEX = encoding.hex.encode(encoding.utf8.encode(SIGNING_SECRET));
-
+// The secret is text, taken as its UTF-8 bytes - the same key the Lua
+// version uses. The signature is sent as hex.
 function signPayload(payloadStr) {
-    return crypto.hmacSha256(payloadStr, SECRET_HEX);
+    return encoding.hex.encode(crypto.hmacSha256(payloadStr, SIGNING_SECRET));
 }
 
 // ── Routes ──────────────────────────────────────────────────────────

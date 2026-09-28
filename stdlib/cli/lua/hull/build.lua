@@ -16,6 +16,7 @@
 --
 
 local json = require("hull.json")
+local hex = require("hull.encoding").hex
 local fcompose = require("hull.feature_compose")
 -- The per-feature compose registry (single source of truth): { backend, type,
 -- hook, cxx, base_group, whole_archive, libs } per --with feature. Hoisted out
@@ -713,7 +714,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         for _, path in ipairs(list) do
             local data = read_file(path)
             local rel = path:sub(#app_dir + 2)
-            file_hashes[rel] = crypto.sha256(data)
+            file_hashes[rel] = hex.encode(crypto.sha256(data))
         end
     end
 
@@ -823,7 +824,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         trampoline_hash = sign_ctx.trampoline_hash,
     }
     local payload = json.encode(payload_table)
-    local sig_hex = crypto.ed25519_sign(payload, sk_hex)
+    local sig_hex = hex.encode(crypto.ed25519_sign(payload, hex.decode(sk_hex)))
 
     -- Write package.sig
     local sig_table = {
@@ -1662,7 +1663,7 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
                 tool.rmdir(tmpdir)
                 tool.exit(1)
             end
-            local actual = crypto.sha256(read_file(entry.path))
+            local actual = hex.encode(crypto.sha256(read_file(entry.path)))
             local expected = tool.platform_sig_arch_hash(entry.arch)
             if not expected then
                 tool.stderr(
@@ -2551,7 +2552,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             flavor = opts.flavor,
             features = with_feature_list(opts),
             binary_hash = nil,
-            trampoline_hash = crypto.sha256(app_main),
+            trampoline_hash = hex.encode(crypto.sha256(app_main)),
             platform_sig_path = platform_sig_path,
             -- v0.1.3 platform-sig chain. Populated by the cross-check
             -- block above. nil when --no-verify-platform was passed AND
@@ -2569,7 +2570,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         -- Compute binary_hash (SHA256 of the linked output binary)
         local binary_data = read_file(opts.output)
         if binary_data then
-            sign_ctx.binary_hash = crypto.sha256(binary_data)
+            sign_ctx.binary_hash = hex.encode(crypto.sha256(binary_data))
         end
 
         sign_app(opts.app_dir, opts.sign, sign_ctx, {

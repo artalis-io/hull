@@ -9,11 +9,13 @@
 -- via the return value. Mutually exclusive with app.get/post/etc.
 
 local crypto = require("hull.crypto")
+local encoding = require("hull.encoding")
 
 app.manifest({
     modules = {
     "hull/http-server@1",
         "hull/crypto@1",
+        "hull/encoding@1",
     },
     env = { "USER", "LANG" },
 })
@@ -51,7 +53,7 @@ app.main(function(ctx)
 
     -- Greet with a deterministic salt so test output is stable.
     local greeting = "hello " .. name
-    local digest = crypto.sha256(greeting)
+    local digest = encoding.hex.encode(crypto.sha256(greeting))
     local user = ctx.env.USER or "unknown"
 
     ctx.stdout:write(greeting .. "\n")

@@ -10,6 +10,16 @@
 --
 
 local json = require("hull.json")
+local hex = require("hull.encoding").hex
+
+-- Verify a hex ed25519 signature over `payload` with a hex public key, as
+-- stored in package.sig / platform.sig. Malformed hex is a failed check.
+local function ed25519_verify_hex(payload, sig_hex, pk_hex)
+    local sig = type(sig_hex) == "string" and hex.decode(sig_hex)
+    local pk  = type(pk_hex) == "string" and hex.decode(pk_hex)
+    if not sig or not pk or #sig ~= 64 or #pk ~= 32 then return false end
+    return crypto.ed25519_verify(payload, sig, pk)
+end
 
 local function read_file(path)
     return tool.read_file(path)
@@ -71,7 +81,7 @@ local function main()
         -- Verify platform signature if possible
         if sig.platform.signature and sig.platform.public_key and sig.platform.platforms then
             local plat_payload = json.encode(sig.platform.platforms)
-            local plat_ok = crypto.ed25519_verify(plat_payload,
+            local plat_ok = ed25519_verify_hex(plat_payload,
                 sig.platform.signature, sig.platform.public_key)
             if plat_ok then
                 print("  Status:    VALID")
@@ -139,7 +149,7 @@ local function main()
                 manifest = sig.manifest,
             })
         end
-        local ok = crypto.ed25519_verify(payload, sig.signature, sig.public_key)
+        local ok = ed25519_verify_hex(payload, sig.signature, sig.public_key)
         if ok then
             print("  Status:    VALID")
         else

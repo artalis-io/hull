@@ -62,9 +62,36 @@ const FEDERATION = {
     peers: [],                  // { url: "ws://host:port/federation", publicKey: "hex" }
 };
 
+// Keys, nonces and signatures live in this app as hex (in its database and
+// its JSON messages); hull:crypto takes and returns bytes. These convert at
+// that boundary. A signature or key from a peer is untrusted input, so one
+// that is not hex of the right length is a failed check, not an error.
+function hexBytes(s) {
+    const b = typeof s === "string" ? encoding.hex.decode(s) : null;
+    return b === null ? null : encoding.bytes.toU8(b);
+}
+function keypairHex(kp) {
+    return { publicKey: encoding.hex.encode(kp.publicKey),
+             secretKey: encoding.hex.encode(kp.secretKey) };
+}
+function signHex(msg, skHex) {
+    return encoding.hex.encode(crypto.ed25519Sign(msg, hexBytes(skHex)));
+}
+function verifyHex(msg, sigHex, pkHex) {
+    const sig = hexBytes(sigHex), pk = hexBytes(pkHex);
+    if (typeof msg !== "string" || !sig || !pk || sig.length !== 64 || pk.length !== 32) {
+        return false;
+    }
+    return crypto.ed25519Verify(msg, sig, pk);
+}
+function boxHex(msg, nonceHex, pkHex, skHex) {
+    return encoding.hex.encode(crypto.box(msg, hexBytes(nonceHex),
+                                          hexBytes(pkHex), hexBytes(skHex)));
+}
+
 // Generate ephemeral Ed25519 keypair for server identity
 if (!FEDERATION.publicKey) {
-    const fedKp = crypto.ed25519Keypair();
+    const fedKp = keypairHex(crypto.ed25519Keypair());
     FEDERATION.publicKey = fedKp.publicKey;
     FEDERATION.secretKey = fedKp.secretKey;
 }
@@ -205,7 +232,7 @@ app.post("/register", (req, res) => {
     });
     if (!ok) return res.status(400).json({ errors });
 
-    const kp = crypto.boxKeypair();
+    const kp = keypairHex(crypto.boxKeypair());
     const hash = crypto.hashPassword(body.password);
     let id;
 
@@ -305,7 +332,7 @@ app.post("/channels", (req, res) => {
 
     const channelKeyHex = toHex(crypto.random(32));
     const nonceHex = toHex(crypto.random(24));
-    const encryptedKey = crypto.box(
+    const encryptedKey = boxHex(
         channelKeyHex, nonceHex, sess.public_key, sess.public_key);
 
     let channelId;
@@ -879,7 +906,7 @@ app.get("/e2e-test", async (req, res) => {
 
     // Step 1: Register users directly via DB
     const alicePw = crypto.hashPassword("testpass1234");
-    const aliceKp = crypto.boxKeypair();
+    const aliceKp = keypairHex(crypto.boxKeypair());
     try {
         db.exec("INSERT INTO users (username, password_hash, public_key, created_at) VALUES (?, ?, ?, ?)",
                 ["alice_e2e", alicePw, aliceKp.publicKey, time.now()]);
@@ -888,7 +915,7 @@ app.get("/e2e-test", async (req, res) => {
     results.alice_registered = aliceRows.length > 0;
 
     const bobPw = crypto.hashPassword("testpass5678");
-    const bobKp = crypto.boxKeypair();
+    const bobKp = keypairHex(crypto.boxKeypair());
     try {
         db.exec("INSERT INTO users (username, password_hash, public_key, created_at) VALUES (?, ?, ?, ?)",
                 ["bob_e2e", bobPw, bobKp.publicKey, time.now()]);
@@ -1234,14 +1261,14 @@ app.ws("/federation", {
                 conn.close();
                 return;
             }
-            const valid = crypto.ed25519Verify(
+            const valid = verifyHex(
                 pending.challenge, data.signature, pending.publicKey);
             if (!valid) {
                 wsSend(conn, { type: "fed_error", message: "invalid signature" });
                 conn.close();
                 return;
             }
-            const mySig = crypto.ed25519Sign(data.challenge, FEDERATION.secretKey);
+            const mySig = signHex(data.challenge, FEDERATION.secretKey);
             wsSend(conn, {
                 type: "fed_welcome",
                 signature: mySig,
@@ -1322,7 +1349,7 @@ if (FEDERATION.enabled) {
                 const pending = fedPending[conn.id];
                 if (pending && pending.state === "awaiting_challenge") {
                     if (data.type === "fed_challenge") {
-                        const mySig = crypto.ed25519Sign(data.challenge, FEDERATION.secretKey);
+                        const mySig = signHex(data.challenge, FEDERATION.secretKey);
                         const myChallenge = toHex(crypto.random(32));
                         pending.state = "awaiting_welcome";
                         pending.challenge = myChallenge;
@@ -1337,7 +1364,7 @@ if (FEDERATION.enabled) {
                     }
                 } else if (pending && pending.state === "awaiting_welcome") {
                     if (data.type === "fed_welcome") {
-                        const valid = crypto.ed25519Verify(
+                        const valid = verifyHex(
                             pending.challenge, data.signature, pending.publicKey);
                         if (!valid) {
                             log.error("federation: peer signature invalid");
@@ -1412,7 +1439,7 @@ app.get("/e2e-federation-test", async (req, res) => {
     };
 
     // Step 1: Generate fake peer keypair
-    const fakeKp = crypto.ed25519Keypair();
+    const fakeKp = keypairHex(crypto.ed25519Keypair());
     const fakePk = fakeKp.publicKey;
     const fakeSk = fakeKp.secretKey;
     results.keypair_generated = !!fakePk && !!fakeSk;
@@ -1444,7 +1471,7 @@ app.get("/e2e-federation-test", async (req, res) => {
             try { data = JSON.parse(raw); } catch (_e) { return; }
 
             if (data.type === "fed_challenge") {
-                const sig = crypto.ed25519Sign(data.challenge, fakeSk);
+                const sig = signHex(data.challenge, fakeSk);
                 myChallenge = toHex(crypto.random(32));
                 conn.send(JSON.stringify({
                     type: "fed_auth",
@@ -1452,7 +1479,7 @@ app.get("/e2e-federation-test", async (req, res) => {
                     challenge: myChallenge,
                 }));
             } else if (data.type === "fed_welcome") {
-                const valid = crypto.ed25519Verify(
+                const valid = verifyHex(
                     myChallenge, data.signature, FEDERATION.publicKey);
                 if (valid) {
                     results.handshake_completed = true;
@@ -1477,7 +1504,7 @@ app.get("/e2e-federation-test", async (req, res) => {
     // Step 4: Create test user + channel, send message
     if (handshakeDone) {
         const fedPw = crypto.hashPassword("fedpass1234");
-        const fedBoxKp = crypto.boxKeypair();
+        const fedBoxKp = keypairHex(crypto.boxKeypair());
         try {
             db.exec("INSERT INTO users (username, password_hash, public_key, created_at) VALUES (?, ?, ?, ?)",
                     ["fed_test_user", fedPw, fedBoxKp.publicKey, time.now()]);

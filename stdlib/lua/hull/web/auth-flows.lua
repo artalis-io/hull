@@ -111,7 +111,7 @@ local M = {}
 -- ── Module state ───────────────────────────────────────────────────
 
 local _state = {
-    state_secret_hex      = nil,
+    state_secret          = nil,
     -- TTLs in seconds. Verify and reset can be long; magic-link short.
     verify_ttl            = 86400,   -- 24h
     reset_ttl             = 3600,    -- 1h
@@ -341,7 +341,7 @@ local function issue_token(user_id, action, ttl, extra)
     if extra then
         for k, v in pairs(extra) do payload[k] = v end
     end
-    return envelope.sign(payload, _state.state_secret_hex)
+    return envelope.sign(payload, _state.state_secret)
 end
 
 -- Verify a token's signature + action + expiry WITHOUT marking
@@ -354,7 +354,7 @@ end
 -- the token stays usable across retry-on-typo attempts and is
 -- only burned on a successful code verify.
 local function parse_token(token, expected_action)
-    local env, err = envelope.verify(token, _state.state_secret_hex)
+    local env, err = envelope.verify(token, _state.state_secret)
     if not env then return nil, err end
     if env.action ~= expected_action then return nil, "wrong action" end
     if type(env.exp) ~= "number" or time.now() >= env.exp then
@@ -367,7 +367,7 @@ end
 -- insert won (first use) and false if a row already existed
 -- (replay / second consumer in a race).
 local function mark_token_used(token, exp)
-    local token_hash = crypto.sha256(token)
+    local token_hash = encoding.hex.encode(crypto.sha256(token))
     local rc = db.insert_if_absent(
         "_hull_auth_used_tokens",
         { "token_hash" },
@@ -377,7 +377,7 @@ local function mark_token_used(token, exp)
 end
 
 local function token_already_used(token)
-    local token_hash = crypto.sha256(token)
+    local token_hash = encoding.hex.encode(crypto.sha256(token))
     local rows = db.query(
         "SELECT 1 FROM _hull_auth_used_tokens WHERE token_hash = ? LIMIT 1",
         { token_hash })
@@ -1280,7 +1280,7 @@ local function handle_email_change(req, res)
     local now = time.now()
     local token = issue_token(user_id, ACTIONS.email_change,
         _state.email_change_ttl, { new_email = body.new_email })
-    local token_hash = crypto.sha256(token)
+    local token_hash = encoding.hex.encode(crypto.sha256(token))
     db.upsert(
         "_hull_auth_pending_email_changes",
         { "user_id" },
@@ -1628,14 +1628,12 @@ function M.init(opts)
         end
     end
 
-    -- crypto.hmac_sha256 takes the key as a hex string; we encode
-    -- once at init and reuse the hex form per request.
     -- The secret is bytes. The same bytes derive the same key in Lua and JS
     -- (hull.encoding is byte-identical), but the same TEXT may not: a Lua
     -- string holds text as UTF-8, a JS byte string one character per byte.
     -- For a non-ASCII secret written as text, pass JS
     -- encoding.utf8.encode(secret) so both runtimes see the same bytes.
-    _state.state_secret_hex = encoding.hex.encode(secret)
+    _state.state_secret = secret
     _state.email_send       = opts.email_send
     _state.public_origin    = opts.public_origin
     _state.trusted_hosts    = opts.trusted_hosts
@@ -1836,7 +1834,7 @@ M._test = {
         _email_rl_count = 0
     end,
     reset = function()
-        _state.state_secret_hex = nil
+        _state.state_secret = nil
         _state.email_send       = nil
         _state.public_origin    = nil
         _state.trusted_hosts    = nil

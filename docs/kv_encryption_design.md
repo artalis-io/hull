@@ -142,9 +142,8 @@ first step is to **extract that into one shared module** -
 same shape), and `hull.kv` uses it. One implementation of the part that is
 easy to get subtly wrong.
 
-`hull.crypto.secretbox` takes and returns hex, so each value crosses a hex
-encode and decode. Fine for a first version; a raw-bytes variant of the
-binding is a small C follow-up if profiling shows it matters.
+`hull.crypto.secretbox` takes and returns raw bytes (the crypto API has no
+hex anywhere since the byte-only change), so a value crosses no encoding.
 
 ## 9. What changes for `ssh.kv_store`
 

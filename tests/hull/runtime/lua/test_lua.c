@@ -1590,7 +1590,7 @@ UTEST(lua_cap, crypto_sha256)
     ASSERT_TRUE(lua_initialized);
 
     /* SHA-256 of "hello" - known hash */
-    char *hash = eval_str("crypto.sha256('hello')");
+    char *hash = eval_str("require('hull.encoding').hex.encode(crypto.sha256('hello'))");
     ASSERT_NE(hash, NULL);
     ASSERT_STREQ(hash,
         "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
@@ -2204,12 +2204,54 @@ UTEST(lua_cap, crypto_hmac_sha256)
 
     /* RFC 4231 Test Case 2: key="Jefe", data="what do ya want for nothing?" */
     char *hmac = eval_str(
-        "crypto.hmac_sha256('what do ya want for nothing?', '4a656665')");
+        "require('hull.encoding').hex.encode(crypto.hmac_sha256('what do ya want for nothing?', 'Jefe'))");
     ASSERT_NE(hmac, NULL);
     ASSERT_STREQ(hmac,
         "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
     free(hmac);
 
+    cleanup_lua_caps();
+}
+
+/* The byte API: every key, nonce, signature, tag and digest is raw bytes of
+ * its exact size, round trips work, and a wrong-length argument raises.
+ * Returns 0, or the number of the first check that failed. */
+UTEST(lua_cap, crypto_bytes_contract)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  if #crypto.sha256('x') ~= 32 or #crypto.sha512('x') ~= 64 then return 1 end "
+        "  if #crypto.hmac_sha256('x', 'k') ~= 32 or #crypto.hmac_sha1('x', 'k') ~= 20 then return 2 end "
+        "  local h = crypto.create_sha256(); h:update('he'); h:update('llo') "
+        "  if h:digest() ~= crypto.sha256('hello') then return 3 end "
+        "  local pk, sk = crypto.ed25519_keypair() "
+        "  if #pk ~= 32 or #sk ~= 64 then return 4 end "
+        "  local sig = crypto.ed25519_sign('msg', sk) "
+        "  if #sig ~= 64 or not crypto.ed25519_verify('msg', sig, pk) then return 5 end "
+        "  if crypto.ed25519_verify('msh', sig, pk) then return 6 end "
+        "  local key, nonce = crypto.random(32), crypto.random(24) "
+        "  local ct = crypto.secretbox('secret', nonce, key) "
+        "  if #ct ~= 6 + 16 or crypto.secretbox_open(ct, nonce, key) ~= 'secret' then return 7 end "
+        "  if crypto.secretbox_open(ct:sub(1, -2) .. 'x', nonce, key) ~= nil then return 8 end "
+        "  local apk, ask = crypto.box_keypair() "
+        "  local bpk, bsk = crypto.box_keypair() "
+        "  local bct = crypto.box('hi', nonce, bpk, ask) "
+        "  if crypto.box_open(bct, nonce, apk, bsk) ~= 'hi' then return 9 end "
+        "  local xa_pk, xa_sk = crypto.x25519_keypair() "
+        "  local xb_pk, xb_sk = crypto.x25519_keypair() "
+        "  local s1, s2 = crypto.x25519(xa_sk, xb_pk), crypto.x25519(xb_sk, xa_pk) "
+        "  if #s1 ~= 32 or s1 ~= s2 then return 10 end "
+        "  local tag = crypto.auth('m', key) "
+        "  if #tag ~= 32 or not crypto.auth_verify(tag, 'm', key) then return 11 end "
+        "  if pcall(crypto.ed25519_sign, 'm', sk:sub(2)) then return 12 end "
+        "  if pcall(crypto.secretbox, 'm', nonce, key .. 'x') then return 13 end "
+        "  if pcall(crypto.hmac_sha256, 'm', '') then return 14 end "
+        "  if crypto.hmac_sha256_verify('m', 'k', 'short') then return 15 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
     cleanup_lua_caps();
 }
 
@@ -2240,22 +2282,21 @@ UTEST(lua_cap, crypto_hmac_sha1)
      * Provides binding-level proof that the vtable dispatches correctly
      * to mbedTLS for SHA-1. */
     char *hmac = eval_str(
-        "crypto.hmac_sha1('what do ya want for nothing?', '4a656665')");
+        "require('hull.encoding').hex.encode(crypto.hmac_sha1('what do ya want for nothing?', 'Jefe'))");
     ASSERT_NE(hmac, NULL);
     ASSERT_STREQ(hmac, "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
     free(hmac);
 
     /* RFC 6238 TOTP HMAC-SHA1 reference vector for T = 59 (counter = 1).
      *
-     * The spec uses key "12345678901234567890" (ASCII) which is hex
-     * 3132333435363738393031323334353637383930. Counter 1 encodes
+     * The spec uses key "12345678901234567890" (ASCII). Counter 1 encodes
      * to the big-endian 8-byte value 0x0000000000000001.
      *
      * Build the 8-byte BE counter in Lua via string.pack - proves
      * the full TOTP-style call sequence works through the binding. */
     char *vec = eval_str(
-        "crypto.hmac_sha1(string.pack('>I8', 1), "
-        "'3132333435363738393031323334353637383930')");
+        "require('hull.encoding').hex.encode(crypto.hmac_sha1(string.pack('>I8', 1), "
+        "'12345678901234567890'))");
     ASSERT_NE(vec, NULL);
     ASSERT_STREQ(vec, "75a48a19d4cbe100644e8ac1397eea747a2d33ab");
     free(vec);
@@ -3104,17 +3145,13 @@ UTEST(lua_stdlib, totp_legacy_v1_format_decrypts_via_legacy_key_version)
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
         "  local crypto = require('hull.crypto') "
-        "  local hex = require('hull.encoding').hex "
         "  totp._test.reset() "
         "  local k1 = ('a'):rep(32) "
         "  totp.init({ encryption_keys = {[1]=k1}, current = 1, "
         "              legacy_key_version = 1 }) "
         "  local secret = string.rep('S', 20) "
         "  local nonce = crypto.random(24) "
-        "  local nonce_hex = hex.encode(nonce) "
-        "  local key_hex = hex.encode(k1) "
-        "  local ct_hex = crypto.secretbox(secret, nonce_hex, key_hex) "
-        "  local blob = nonce .. hex.decode(ct_hex) "
+        "  local blob = nonce .. crypto.secretbox(secret, nonce, k1) "
         "  local pt, version = totp._test.decrypt_secret(blob, 1) "
         "  if pt ~= secret then return 0 end "
         "  if version ~= 0 then return 0 end "
@@ -3798,22 +3835,22 @@ UTEST(lua_cap, crypto_hmac_sha256_verify)
     /* Correct MAC → true */
     int ok = eval_int(
         "(function() "
-        "  local mac = crypto.hmac_sha256('what do ya want for nothing?', '4a656665') "
-        "  return crypto.hmac_sha256_verify('what do ya want for nothing?', '4a656665', mac) and 1 or 0 "
+        "  local mac = crypto.hmac_sha256('what do ya want for nothing?', 'Jefe') "
+        "  return crypto.hmac_sha256_verify('what do ya want for nothing?', 'Jefe', mac) and 1 or 0 "
         "end)()");
     ASSERT_EQ(ok, 1);
 
     /* Wrong MAC → false */
     int bad_mac = eval_int(
-        "crypto.hmac_sha256_verify('what do ya want for nothing?', '4a656665', "
-        "  '0000000000000000000000000000000000000000000000000000000000000000') and 1 or 0");
+        "crypto.hmac_sha256_verify('what do ya want for nothing?', 'Jefe', "
+        "  string.rep('\\0', 32)) and 1 or 0");
     ASSERT_EQ(bad_mac, 0);
 
     /* Wrong key → false */
     int bad_key = eval_int(
         "(function() "
-        "  local mac = crypto.hmac_sha256('hello', '4a656665') "
-        "  return crypto.hmac_sha256_verify('hello', 'deadbeef', mac) and 1 or 0 "
+        "  local mac = crypto.hmac_sha256('hello', 'Jefe') "
+        "  return crypto.hmac_sha256_verify('hello', 'Jeff', mac) and 1 or 0 "
         "end)()");
     ASSERT_EQ(bad_key, 0);
 
