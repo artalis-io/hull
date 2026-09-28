@@ -78,7 +78,8 @@ function signHex(msg, skHex) {
     return encoding.hex.encode(crypto.ed25519Sign(msg, hexBytes(skHex)));
 }
 function verifyHex(msg, sigHex, pkHex) {
-    const sig = hexBytes(sigHex), pk = hexBytes(pkHex);
+    const sig = hexBytes(sigHex);
+    const pk = hexBytes(pkHex);
     if (typeof msg !== "string" || !sig || !pk || sig.length !== 64 || pk.length !== 32) {
         return false;
     }
