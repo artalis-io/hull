@@ -30,7 +30,7 @@ int hl_hex_encode(const uint8_t *in, size_t in_len, char *out, size_t out_cap)
     return 0;
 }
 
-static int digit(char c)
+int hl_hex_digit(int c)
 {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -47,7 +47,8 @@ int hl_hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_cap)
     if (hex_len / 2 > (size_t)INT_MAX)
         return -1;
     for (size_t i = 0; i < hex_len / 2; i++) {
-        int hi = digit(hex[2 * i]), lo = digit(hex[2 * i + 1]);
+        int hi = hl_hex_digit((unsigned char)hex[2 * i]);
+        int lo = hl_hex_digit((unsigned char)hex[2 * i + 1]);
         if (hi < 0 || lo < 0)
             return -1;
         out[i] = (uint8_t)((hi << 4) | lo);

@@ -22,8 +22,13 @@
  * Decoding is strict unless asked otherwise; a decoder returns null on bad
  * input and throws only when handed something that is not a string.
  *
- * Pure: no capabilities and no other module, so anything may import it.
+ * No capabilities, so anything may import it. The hex and base64 work is done
+ * by the C codecs (hull:encoding:_native), which build the result in one
+ * buffer; the JS codecs below stay the reference, answer every refusal and
+ * every input shape the C side declines, and accept exactly the same inputs.
  */
+
+import * as native from "hull:encoding:_native";
 
 function fail(fname, msg) {
     throw new TypeError("encoding." + fname + ": " + msg);
@@ -110,6 +115,8 @@ function hexVal(c) {
 const hex = {
     /** Lowercase hex, two characters per byte. */
     encode(x) {
+        const fast = native.hexEncode(x);
+        if (fast !== undefined) return fast;
         const s = toByteString("hex.encode", x);
         const parts = new Array(s.length);
         for (let i = 0; i < s.length; i++) parts[i] = HEX_OUT[s.charCodeAt(i)];
@@ -118,6 +125,8 @@ const hex = {
     /** Bytes from hex; either case is accepted. */
     decode(text) {
         checkString("hex.decode", text);
+        const fast = native.hexDecode(text);
+        if (fast !== null) return fast;
         if (text.length % 2 !== 0) return null;
         const out = new Codes();
         for (let i = 0; i < text.length; i += 2) {
@@ -149,10 +158,12 @@ const base64 = {
      * opts.pad overrides.
      */
     encode(x, opts) {
-        const s = toByteString("base64.encode", x);
         const url = !!(opts && opts.url);
         let pad = opts && opts.pad;
         if (pad === undefined || pad === null) pad = !url;
+        const fast = native.base64Encode(x, url, !!pad);
+        if (fast !== undefined) return fast;
+        const s = toByteString("base64.encode", x);
         const E = url ? URL : STD;
         const parts = [];
         let i = 0;
@@ -182,6 +193,10 @@ const base64 = {
         checkString("base64.decode", text);
         const url = !!(opts && opts.url);
         const lenient = !!(opts && opts.lenient);
+        if (!lenient) {
+            const fast = native.base64Decode(text, url);
+            if (fast !== null) return fast;
+        }
         const D = url ? URL_DEC : STD_DEC;
         const out = new Codes();
         let acc = 0, bits = 0, count = 0, padding = 0;

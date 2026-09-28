@@ -12,6 +12,7 @@
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/pgwire.h"
 #include "../utils/base64.h"
+#include "../utils/hex.h"
 /* SCRAM pulls in cap/crypto (mbedTLS). The DSN / rewriter fuzz harnesses,
  * which link this file for its pure functions, define HL_PG_NO_SCRAM to
  * compile crypto-free. */
@@ -62,14 +63,6 @@ static void set_err(char *dst, size_t cap, const char *msg)
 
 /* ── DSN parsing ──────────────────────────────────────────────────── */
 
-static int hexval(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
 /* Percent-decode src[0,srclen) into dst (size dstsize, always terminated).
  * Returns 0 on success, -1 if it does not fit or an escape is malformed. */
 static int dsn_decode(char *dst, size_t dstsize, const char *src, size_t srclen)
@@ -79,7 +72,8 @@ static int dsn_decode(char *dst, size_t dstsize, const char *src, size_t srclen)
         unsigned char c = (unsigned char)src[i];
         if (c == '%') {
             if (i + 2 >= srclen) return -1;
-            int hi = hexval(src[i + 1]), lo = hexval(src[i + 2]);
+            int hi = hl_hex_digit((unsigned char)src[i + 1]);
+            int lo = hl_hex_digit((unsigned char)src[i + 2]);
             if (hi < 0 || lo < 0) return -1;
             c = (unsigned char)((hi << 4) | lo);
             i += 2;

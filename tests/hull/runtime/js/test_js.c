@@ -2706,6 +2706,64 @@ static int js_run_steps(const char *code, const char *global)
     return eval_int(global);
 }
 
+/* hull:encoding's C fast path (hull:encoding:_native) against its pure-JS
+ * codecs. The module cannot be loaded without the native import, so the pure
+ * path is reached through the shapes the native side declines: a DataView for
+ * encoding, and lenient base64 decoding (identical to strict on text with no
+ * whitespace). Hex decoding is checked against a regex oracle. What this
+ * mostly guards is the byte-string marshalling: characters 0x80..0xFF cross
+ * into C as two UTF-8 bytes and must come back as one character. */
+UTEST(js_stdlib, encoding_native_matches_pure)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { encoding } from 'hull:encoding';\n"
+        "const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_=aF09';\n"
+        "let seed = 7;\n"
+        "function rnd(n) { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; }\n"
+        "function bytes(n) { let s = ''; for (let i = 0; i < n; i++) s += String.fromCharCode(rnd(256)); return s; }\n"
+        "function text(n) { let s = ''; for (let i = 0; i < n; i++) s += A[rnd(A.length)]; return s; }\n"
+        "function view(s) { return new DataView(encoding.bytes.toU8(s).buffer); }\n"
+        "function run() {\n"
+        "  let accepted = 0;\n"
+        "  for (let i = 0; i < 4000; i++) {\n"
+        "    const b = bytes(rnd(24));\n"
+        /* 1-3: encoders, native vs pure, every option */
+        "    if (encoding.hex.encode(b) !== encoding.hex.encode(view(b))) return 1;\n"
+        "    if (encoding.hex.encode(encoding.bytes.toU8(b)) !== encoding.hex.encode(view(b))) return 1;\n"
+        "    for (const o of [undefined, { url: true }, { pad: false }, { url: true, pad: true }]) {\n"
+        "      if (encoding.base64.encode(b, o) !== encoding.base64.encode(view(b), o)) return 2;\n"
+        "    }\n"
+        "    if (encoding.hex.decode(encoding.hex.encode(b).toUpperCase()) !== b) return 3;\n"
+        /* 4-5: decoders, native vs pure, on random text */
+        "    let t = text(rnd(24));\n"
+        "    if (rnd(4) === 0) t += '='.repeat(rnd(3));\n"
+        "    for (const url of [false, true]) {\n"
+        "      const fast = encoding.base64.decode(t, { url });\n"
+        "      if (fast !== encoding.base64.decode(t, { url, lenient: true })) return 4;\n"
+        "      if (fast !== null) accepted++;\n"
+        "    }\n"
+        "    const want = /^([0-9a-fA-F]{2})*$/.test(t);\n"
+        "    if ((encoding.hex.decode(t) !== null) !== want) return 5;\n"
+        "  }\n"
+        "  if (accepted < 200) return 6;\n"
+        /* 7-8: what native declines still gets the usual answer */
+        "  try { encoding.hex.encode('\\u0100'); return 7; } catch (e) {}\n"
+        "  if (encoding.hex.decode('\\u00e9\\u00e9') !== null) return 8;\n"
+        /* 9: a wider typed array is its raw bytes */
+        "  if (encoding.hex.encode(new Uint16Array([0x0201])) !== '0102') return 9;\n"
+        /* 10: a value of a few MB round trips (the pure codecs are far too slow) */
+        "  const big = encoding.bytes.fromBuffer(new Uint8Array(4 * 1024 * 1024).fill(0xfa));\n"
+        "  if (encoding.base64.decode(encoding.base64.encode(big)) !== big) return 10;\n"
+        "  if (encoding.hex.decode(encoding.hex.encode(big)) !== big) return 10;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__encnative = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__encnative"), 0);
+    cleanup_js_caps();
+}
+
 /* Regressions from docs/crypto_encoding_ssh_audit.md (PR 1). run() returns 0,
  * or the number of the first check that failed. */
 UTEST(js_stdlib, crypto_encoding_audit_fixes)

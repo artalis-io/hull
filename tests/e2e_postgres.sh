@@ -154,6 +154,12 @@ app.get("/", function(req, res)
         "SELECT id, name, score, active FROM e2e WHERE score >= ? ORDER BY id", { 0 })
     res:json({ rows = rows, count = db.query("SELECT count(*) AS c FROM e2e")[1].c })
 end)
+-- bytea arrives in text format as "\x<hex>" and decodes to a blob.
+app.get("/bytea", function(req, res)
+    local b = db.query("SELECT decode('00ff41', 'hex') AS b")[1].b
+    res:json({ bytea_ok = (#b == 3 and b:byte(1) == 0 and b:byte(2) == 255
+                           and b:byte(3) == 65) })
+end)
 -- migration ran at startup via the runner's script path (multi-statement).
 app.get("/migrated", function(req, res)
     local rows = db.query("SELECT label FROM mig_test ORDER BY id")
@@ -243,6 +249,11 @@ echo "$RESP" | grep -q '"name":"bob"'              || { echo "::error bob missin
 echo "$RESP" | grep -q '"name":"carol"'            && { echo "::error carol should be filtered out"; fail=1; }
 echo "$RESP" | grep -q '"active":true'             || { echo "::error bool decode"; fail=1; }
 echo "$RESP" | grep -q '"score":10'                || { echo "::error int decode"; fail=1; }
+
+# bytea text-format decode ("\x00ff41" -> three bytes)
+RESP_BYTEA=$(curl -fsS "http://127.0.0.1:${PORT}/bytea" || echo FAIL)
+echo "bytea response: $RESP_BYTEA"
+echo "$RESP_BYTEA" | grep -q '"bytea_ok":true'     || { echo "::error bytea decode"; fail=1; }
 
 # migration runner on Postgres (multi-statement file via the script path)
 RESP_MIG=$(curl -fsS "http://127.0.0.1:${PORT}/migrated" || echo FAIL)

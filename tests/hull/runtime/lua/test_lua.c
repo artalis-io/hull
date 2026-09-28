@@ -2810,6 +2810,105 @@ UTEST(lua_stdlib, totp_rekey_batch_helper)
     cleanup_lua_caps();
 }
 
+/* hull.encoding's C fast path (hull.encoding._native) against its pure-Lua
+ * codecs. A vanilla state loads the module twice - once with no native module
+ * (pure), once with it preloaded (fast) - and both must give the same answer,
+ * reasons included, on every input: the fast path is only sound if the C
+ * decoders accept exactly what the Lua ones accept. The script returns 0, or
+ * the number of the first check that failed. */
+int luaopen_hull_encoding_native(lua_State *L);
+
+UTEST(lua_stdlib, encoding_native_matches_pure)
+{
+    lua_State *L = luaL_newstate();
+    ASSERT_TRUE(L != NULL);
+    luaL_openlibs(L);
+    int rc = luaL_dostring(L,
+        "package.path = 'stdlib/lua/?.lua;stdlib/lua/?/init.lua;' .. package.path");
+    ASSERT_EQ(rc, LUA_OK);
+
+    rc = luaL_dostring(L,
+        "local pure = require('hull.encoding') "
+        "package.loaded['hull.encoding'] = nil "
+        "_G.PURE = pure");
+    ASSERT_EQ(rc, LUA_OK);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "preload");
+    lua_pushcfunction(L, luaopen_hull_encoding_native);
+    lua_setfield(L, -2, "hull.encoding._native");
+    lua_pop(L, 2);
+
+    rc = luaL_dostring(L,
+        "return (function() "
+        "  local pure, fast = PURE, require('hull.encoding') "
+        "  if pure == fast then return 1 end "
+        "  if type(package.loaded['hull.encoding._native']) ~= 'table' then return 1 end "
+        "  math.randomseed(7) "
+        "  local A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_=aF09 \\n' "
+        "  local function text(n, alpha) "
+        "    local t = {} "
+        "    for i = 1, n do "
+        "      if alpha then local k = math.random(#A); t[i] = A:sub(k, k) "
+        "      else t[i] = string.char(math.random(0, 255)) end "
+        "    end "
+        "    return table.concat(t) "
+        "  end "
+        "  local accepted = 0 "
+        "  for i = 1, 20000 do "
+        "    local s = text(math.random(0, 24), i % 3 ~= 0) "
+        "    if math.random(4) == 1 then s = s .. string.rep('=', math.random(0, 2)) end "
+        "    local a1, a2 = pure.hex.decode(s) "
+        "    local b1, b2 = fast.hex.decode(s) "
+        "    if a1 ~= b1 or a2 ~= b2 then return 2 end "
+        "    if pure.hex.encode(s) ~= fast.hex.encode(s) then return 3 end "
+        "    for _, url in ipairs({ false, true }) do "
+        "      a1, a2 = pure.base64.decode(s, { url = url }) "
+        "      b1, b2 = fast.base64.decode(s, { url = url }) "
+        "      if a1 ~= b1 or a2 ~= b2 then return 4 end "
+        "      if b1 then accepted = accepted + 1 end "
+        "      for _, pad in ipairs({ false, true }) do "
+        "        local o = { url = url, pad = pad } "
+        "        if pure.base64.encode(s, o) ~= fast.base64.encode(s, o) then return 5 end "
+        "      end "
+        "      local o = { url = url } "
+        "      if pure.base64.encode(s, o) ~= fast.base64.encode(s, o) then return 6 end "
+        "    end "
+        "  end "
+        /* the comparison is only worth something if decoders did accept */
+        "  if accepted < 1000 then return 7 end "
+        /* lenient still goes the pure way and still works */
+        "  if fast.base64.decode('Zm9v\\nYmFy', { lenient = true }) ~= 'foobar' then return 8 end "
+        "  return 0 "
+        "end)()");
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(L, -1));
+    ASSERT_EQ(rc, LUA_OK);
+    EXPECT_EQ(lua_tointeger(L, -1), 0);
+    lua_close(L);
+}
+
+/* A value of a few MB through hull.encoding inside the 64 MB Lua heap. The
+ * pure codecs build one table slot per byte (hex) or group (base64) and ran
+ * out of heap around 3 MB; the C fast path writes one buffer. */
+UTEST(lua_stdlib, encoding_large_value_fits_the_heap)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local enc = require('hull.encoding') "
+        "  local v = string.rep('\\1\\2\\3\\250', 1024 * 1024) "
+        "  local b = enc.base64.encode(v) "
+        "  if #b ~= (#v + 2) // 3 * 4 then return 1 end "
+        "  if enc.base64.decode(b) ~= v then return 2 end "
+        "  local h = enc.hex.encode(v) "
+        "  if #h ~= 2 * #v then return 3 end "
+        "  if enc.hex.decode(h) ~= v then return 4 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 /* hull.crypto.sealbox + encrypted hull.kv. Each chunk returns 0 when every
  * check passes, else the number of the first check that failed. */
 /* Regressions from docs/crypto_encoding_ssh_audit.md (PR 1). Returns 0, or

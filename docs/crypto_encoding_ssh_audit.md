@@ -101,12 +101,17 @@ Fix plan: **PR 1** crypto/encoding, **PR 2** SSH, **PR 3** missing C pieces.
 
 ## PR 3: missing C pieces
 
-- [ ] Script bindings to the C codecs (`hl_base64_*`, `hl_hex_*`) for large
+- [x] Script bindings to the C codecs (`hl_base64_*`, `hl_hex_*`) for large
   values (also fixes Lua heap use: a ~3 MB kv value exceeds the 64 MB heap).
-- [ ] The two remaining hex encoders (`release_io.c`, `cache_common.c`) and
+  Internal `hull.encoding._native` / `hull:encoding:_native`; `hull.encoding`
+  takes them for hex and strict base64 and keeps its pure codecs for reasons,
+  lenient decoding and a vanilla Lua state. A differential test holds the C
+  and pure decoders to the same accepted set.
+- [x] The two remaining hex encoders (`release_io.c`, `cache_common.c`) and
   the four private hex-digit parsers (Postgres `bytea`, three DSN
-  percent-decoders) onto `utils/hex`.
-- [ ] A fuzz target for `hl_base64_decode` / `hl_hex_decode`.
+  percent-decoders) onto `utils/hex` (`hl_hex_digit` is now public).
+- [x] A fuzz target for `hl_base64_decode` / `hl_hex_decode`
+  (`fuzz/fuzz_encoding.c`, asserting canonical re-encoding and round trips).
 
 ## Missing, not yet planned
 

@@ -12,6 +12,7 @@ Hull's source, so the two trees don't overlap).
 | `fuzz_sh_json` | `sh_json_parse` + accessors + the `a.b[2].c` path-expression parser | Parses untrusted request bodies and config; the recursive walk exercises traversal, not just parsing. |
 | `fuzz_path_normalize` | `hl_path_normalize` | Canonicalises `require()`/`import()` paths in place - a `..`-escape or OOB write is a sandbox-traversal primitive. The harness asserts the escape-prevention post-condition. |
 | `fuzz_mime_sniff` | `hl_cap_mime_sniff` | Magic-byte + shape sniffing run on the first ~4 KiB of untrusted stored upload bytes; an over-read past `len` while matching a prefix or validating UTF-8 is a crash / info-leak. ASan brackets an exact-sized buffer. |
+| `fuzz_encoding` | `hl_hex_decode` / `hl_base64_decode` (every flag set) + the encoders | Strict decoding of untrusted text (SCRAM, DSN escapes, signatures, anything an app decodes through `hull.encoding`). Asserts more than no-crash: accepted text must re-encode to exactly itself (one encoding per value), and any bytes must round-trip. |
 
 ## Build & run
 

@@ -14,6 +14,7 @@
  */
 
 #include "hull/cap/valkey_conn.h"
+#include "../utils/hex.h"
 #include "hull/cap/respwire.h"
 #include "hull/utils/alloc.h"
 #include "sh_arena.h"
@@ -53,13 +54,6 @@ void hl_valkey_dsn_scrub(HlValkeyDsn *dsn) {
     if (dsn) memset(dsn->password, 0, sizeof dsn->password);
 }
 
-static int hexval(unsigned char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
 /* Percent-decode [s, s+n) into out (NUL-terminated). -1 if it won't fit or a
  * `%XX` escape is malformed. */
 static int pct_decode(const char *s, size_t n, char *out, size_t outsz) {
@@ -68,8 +62,8 @@ static int pct_decode(const char *s, size_t n, char *out, size_t outsz) {
         if (o + 1 >= outsz) return -1;
         if (s[i] == '%') {
             if (i + 2 >= n) return -1;
-            int hi = hexval((unsigned char)s[i + 1]);
-            int lo = hexval((unsigned char)s[i + 2]);
+            int hi = hl_hex_digit((unsigned char)s[i + 1]);
+            int lo = hl_hex_digit((unsigned char)s[i + 2]);
             if (hi < 0 || lo < 0) return -1;
             out[o++] = (char)((hi << 4) | lo);
             i += 2;

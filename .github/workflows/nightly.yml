@@ -52,11 +52,12 @@ jobs:
       - name: Build core fuzz targets
         run: |
           make CC=clang \
-            fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match
+            fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match \
+            fuzz/fuzz_encoding
       - name: Run core fuzzers (deep)
         run: |
           set -e
-          for f in sh_json path_normalize mime_sniff host_match; do
+          for f in sh_json path_normalize mime_sniff host_match encoding; do
             echo "== fuzz $f (${FUZZ_SECONDS}s) =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time="$FUZZ_SECONDS"
           done
@@ -71,6 +72,7 @@ jobs:
             fuzz/corpus_path_normalize/
             fuzz/corpus_mime_sniff/
             fuzz/corpus_host_match/
+            fuzz/corpus_encoding/
           if-no-files-found: ignore
           retention-days: 14
 

@@ -50,4 +50,11 @@ int hl_hex_encode(const uint8_t *in, size_t in_len, char *out, size_t out_cap);
  */
 int hl_hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_cap);
 
+/*
+ * The value (0-15) of one hex digit, either case, or -1 for anything else.
+ * For parsers that meet hex one escape at a time (the DSN percent-decoders);
+ * pass a char as (unsigned char) so a byte >= 0x80 is not sign-extended.
+ */
+int hl_hex_digit(int c);
+
 #endif /* HULL_UTILS_HEX_H */

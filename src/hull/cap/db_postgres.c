@@ -32,14 +32,6 @@ typedef struct HlDbPgCtx {
     int          listening;   /* 1 once LISTEN was issued on this connection */
 } HlDbPgCtx;
 
-static int hexval(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
 /* ── Open / close ─────────────────────────────────────────────────── */
 
 static int pg_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
@@ -182,14 +174,9 @@ static void decode_value(int32_t oid, const char *text, int32_t len,
             size_t blen = ((size_t)len - 2) / 2;
             char *buf = malloc(blen ? blen : 1);
             if (buf) {
-                int ok = 1;
-                for (size_t j = 0; j < blen; j++) {
-                    int hi = hexval(text[2 + j * 2]);
-                    int lo = hexval(text[2 + j * 2 + 1]);
-                    if (hi < 0 || lo < 0) { ok = 0; break; }
-                    buf[j] = (char)((hi << 4) | lo);
-                }
-                if (ok) {
+                /* An odd digit count is malformed too, not truncated. */
+                if (hl_hex_decode(text + 2, (size_t)len - 2,
+                                  (uint8_t *)buf, blen) >= 0) {
                     out->type = HL_TYPE_BLOB;
                     out->s = buf; out->len = blen;
                     *freeme = buf;
