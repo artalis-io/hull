@@ -128,7 +128,13 @@ class Store {
         const cur = e ? e.v : null;
         const exp = (expected === undefined || expected === null) ? null : expected;
         if (cur !== exp) return false;
-        this.put(k, newVal, ttl);
+        if (ttl === util.KEEP_TTL) {
+            const keepExp = e ? e.exp : null;
+            this.put(k, newVal, false);
+            this.data.get(k).exp = keepExp;
+        } else {
+            this.put(k, newVal, ttl);
+        }
         return true;
     }
 

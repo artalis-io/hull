@@ -27,47 +27,47 @@ Fix plan: **PR 1** crypto/encoding, **PR 2** SSH, **PR 3** missing C pieces.
 
 ## PR 1: crypto and encoding
 
-- [ ] **High** - JS `hull:encoding` builds output with `out +=`, which is
+- [x] **High** - JS `hull:encoding` builds output with `out +=`, which is
   O(n^2) in the vendored QuickJS: `OP_add_loc` duplicates the string before
   `JS_ConcatString`, so the in-place append (refcount 1) never runs. Hits every
   JS kv/cache value on the SQL backends, every encrypted value, attachments.
   Collect pieces and join once.
-- [ ] **Medium** - `jwt.lua` decodes the unauthenticated header (and payload)
+- [x] **Medium** - `jwt.lua` decodes the unauthenticated header (and payload)
   with `json.decode`, which raises on bad JSON; `jwt.verify` then raises and
   the auth middleware answers 500 to any client sending `ew.e30.AA`. JS
   rejects cleanly. Same in `envelope.lua` (after the tag check).
-- [ ] **Medium** - JS `sealbox.keyring` accepts `current: "1"`; `isCurrent`
+- [x] **Medium** - JS `sealbox.keyring` accepts `current: "1"`; `isCurrent`
   compares with `===` against the numeric version, so `rekey()` re-seals
   everything every time. Key ids from env are strings. Also: ids go through
   `Number()`, so `""`, `" 1"`, `"0x10"`, `"1e0"` are accepted.
-- [ ] **Medium** - `kv:rekey()` passes `opts.ttl` (normally nil) to `cas`, so
+- [x] **Medium** - `kv:rekey()` passes `opts.ttl` (normally nil) to `cas`, so
   a re-sealed value loses its TTL. The design says TTL is unchanged.
-- [ ] **Medium** - `cache.open{ encrypt = ... }` is silently ignored (plaintext).
+- [x] **Medium** - `cache.open{ encrypt = ... }` is silently ignored (plaintext).
   Refuse it with `invalid_argument`.
-- [ ] **Medium** - JS `hmacSha256`, `hmacSha256Verify`, `ed25519Sign`,
+- [x] **Medium** - JS `hmacSha256`, `hmacSha256Verify`, `ed25519Sign`,
   `ed25519Verify`, `sha512`, `auth`, `authVerify`, `box`, `boxOpen` and
   `constantTimeEq` read the message only with `JS_ToCStringLen`: binary bytes
   are UTF-8-inflated (a different result from Lua) and an ArrayBuffer becomes
   `"[object ArrayBuffer]"`. Take buffers like `sha256` / `hmacSha1` /
   `secretbox` do.
-- [ ] **Low** - base64 decoding (C, Lua, JS) accepts non-zero trailing bits
+- [x] **Low** - base64 decoding (C, Lua, JS) accepts non-zero trailing bits
   (`Zh==` = `Zg==`), which makes asymmetric JWS signatures malleable; base32
   accepts impossible lengths.
-- [ ] **Low** - `sealbox` does not type-check `value` / `context` / `blob`
+- [x] **Low** - `sealbox` does not type-check `value` / `context` / `blob`
   (JS seals a Uint8Array as the text `"1,2,3"`); "no context" is not bound
   into the frame (document: never share a keyring between context and
   no-context use, or tag it).
-- [ ] **Low** - parity: JS `otp.step` does no validation (`period || 30`);
+- [x] **Low** - parity: JS `otp.step` does no validation (`period || 30`);
   OAuth state compared with `~=` / `!==`; encrypted `cas` compares plaintext
   with `~=`; corrupt kv rows reported as `invalid_argument`.
-- [ ] **Low** - stale comments (`encoding.lua` "as hull.crypto's decoder",
+- [x] **Low** - stale comments (`encoding.lua` "as hull.crypto's decoder",
   `jwt.js` "Lua sibling gets from C", the registry comment omits utf8,
   `hostkey.lua` mentions `kex.to_hex`); TOTP re-implements keyring validation.
-- [ ] **Doc** - JS secrets are bytes (one character per byte), Lua secrets are
+- [x] **Doc** - JS secrets are bytes (one character per byte), Lua secrets are
   their bytes: `"pässword"` gives different HMAC keys, and a JS secret with a
   character above 0xFF now throws (it used to be truncated). Correct the claim
   in `auth-flows.lua` and the plan doc; point text secrets at `utf8.encode`.
-- [ ] **Doc** - `crypto.constant_time_eq` / `constantTimeEq` is missing from
+- [x] **Doc** - `crypto.constant_time_eq` / `constantTimeEq` is missing from
   `docs/app_api_reference.md`.
 
 ## PR 2: hull.ssh

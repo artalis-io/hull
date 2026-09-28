@@ -66,7 +66,12 @@ A merge must not change anything stored or sent. These stay byte-identical:
   existing rows are lowercase); kv values are padded standard base64. kv keeps
   its own `corrupt base64 in store` / `corrupt hex in store` errors.
 - JS secrets are hexed as one byte per character, as before: every HMAC key in
-  jwt, csrf, auth-flows and oauth is unchanged.
+  jwt, csrf, auth-flows and oauth derived from a Latin-1 secret is unchanged.
+  One change: a JS secret containing a character above 0xFF used to be
+  truncated to its low byte silently (so two secrets could share a key); it is
+  now refused. Secrets are bytes: for non-ASCII TEXT, JS passes
+  `encoding.utf8.encode(secret)`, which is also what gives the same key as the
+  same text in Lua (a Lua string holds text as UTF-8).
 - pwned keeps uppercase hex (the HIBP wire format).
 - audit-log's device fingerprint hexes a hex digest before truncating it, so
   it covers 32 bits of the digest. Coarse, but stored in `_hull_audit_log`;

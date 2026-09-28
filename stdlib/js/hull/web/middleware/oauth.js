@@ -387,7 +387,9 @@ async function handleCallback(req, res) {
         log.warn("oauth: provider returned error: " + String(q.error));
         res.status(400).html("auth failed"); return;
     }
-    if (!q.code || q.state !== env.state) {
+    // Constant-time: the state is the CSRF secret of this flow.
+    if (!q.code || typeof q.state !== "string" || typeof env.state !== "string"
+        || !crypto.constantTimeEq(q.state, env.state)) {
         res.status(400).html("auth failed"); return;
     }
 

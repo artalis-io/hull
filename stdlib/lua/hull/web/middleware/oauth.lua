@@ -445,7 +445,9 @@ local function handle_callback(req, res)
         log.warn("oauth: provider returned error: " .. tostring(q.error))
         return res:status(400):html("auth failed")
     end
-    if not q.code or q.state ~= env.state then
+    -- Constant-time: the state is the CSRF secret of this flow.
+    if not q.code or type(q.state) ~= "string" or type(env.state) ~= "string"
+       or not crypto.constant_time_eq(q.state, env.state) then
         return res:status(400):html("auth failed")
     end
 

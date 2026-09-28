@@ -37,7 +37,11 @@ end
 
 --- The TOTP time step for unix time `now` and a period in seconds.
 function M.step(now, period)
-    return math.tointeger(now // (period or 30)) or error("otp.step: bad time or period", 2)
+    if period == nil then period = 30 end
+    if type(now) ~= "number" or now < 0 or type(period) ~= "number" or period <= 0 then
+        error("otp.step: time must be >= 0 and period > 0", 2)
+    end
+    return math.tointeger(now // period) or error("otp.step: bad time or period", 2)
 end
 
 return M

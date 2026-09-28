@@ -16,6 +16,9 @@ const MAX_KEY = 1024;
 // Far-future "no expiry" sentinel for the SQL backend (keeps expires_at NOT
 // NULL and off the mid-array-nil binding path). Fits a 64-bit BIGINT.
 const NO_EXPIRY = Number.MAX_SAFE_INTEGER;
+// A cas() ttl meaning "keep the replaced value's expiry". Internal: rekey uses
+// it to re-seal values in place without changing when they expire.
+const KEEP_TTL = Symbol("kv.KEEP_TTL");
 
 // Any code unit > 255 means the caller passed a non-byte string (UTF-16 text
 // such as U+0100). Such a string has no byte form (hull:encoding refuses it),
@@ -92,18 +95,18 @@ const hexencode = (s) => encoding.hex.encode(s);
 
 function b64decode(str) {
     const v = encoding.base64.decode(str);
-    if (v === null) codedError("invalid_argument", "kv: corrupt base64 in store");
+    if (v === null) codedError("corrupt", "kv: corrupt base64 in store");
     return v;
 }
 
 function hexdecode(hex) {
     const v = encoding.hex.decode(hex);
-    if (v === null) codedError("invalid_argument", "kv: corrupt hex in store");
+    if (v === null) codedError("corrupt", "kv: corrupt hex in store");
     return v;
 }
 
 const util = {
-    MAX_KEY, NO_EXPIRY, error: codedError, checkKey, checkValue, checkCount,
+    MAX_KEY, NO_EXPIRY, KEEP_TTL, error: codedError, checkKey, checkValue, checkCount,
     expiryMs, nowMs, toInt, b64encode, b64decode, hexencode, hexdecode,
 };
 

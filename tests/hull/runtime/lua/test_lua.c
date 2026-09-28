@@ -2812,6 +2812,56 @@ UTEST(lua_stdlib, totp_rekey_batch_helper)
 
 /* hull.crypto.sealbox + encrypted hull.kv. Each chunk returns 0 when every
  * check passes, else the number of the first check that failed. */
+/* Regressions from docs/crypto_encoding_ssh_audit.md (PR 1). Returns 0, or
+ * the number of the first check that failed. */
+UTEST(lua_stdlib, crypto_encoding_audit_fixes)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local jwt = require('hull.jwt') "
+        "  local kv = require('hull.kv') "
+        "  local cache = require('hull.cache') "
+        "  local sb = require('hull.crypto.sealbox') "
+        "  local otp = require('hull.crypto.otp') "
+        "  local function code(f) local ok, e = pcall(f) "
+        "    if ok then return nil end return type(e) == 'table' and e.code or tostring(e) end "
+        /* 1-3: a malformed token is a clean reject, never a raise */
+        "  local ok, p, err = pcall(jwt.verify, 'ew.e30.AA', 'secret') "
+        "  if not ok or p ~= nil or err ~= 'invalid header JSON' then return 1 end "
+        "  if not pcall(jwt.verify, 'NQ.NQ.AA', 'secret') then return 2 end "
+        "  if jwt.decode('eyJhbGciOiJIUzI1NiJ9.NQ.AA') ~= nil then return 3 end "
+        /* 4-6: rekey keeps each value's expiry */
+        "  local K1, K2 = ('a'):rep(32), ('b'):rep(32) "
+        "  local h1 = kv.open{ namespace = 'ttl', encrypt = { keys = {[1] = K1}, current = 1 } } "
+        "  h1:set('t', 'v', { ttl = 3600 }) "
+        "  h1:set('p', 'v') "
+        "  local st = h1._s "
+        "  local before = st.data['t'].exp "
+        "  if not before then return 4 end "
+        "  local h2 = kv.open{ namespace = 'ttl', encrypt = { keys = {[1] = K1, [2] = K2}, current = 2 } } "
+        "  if h2:rekey() ~= 2 then return 5 end "
+        "  if st.data['t'].exp ~= before or st.data['p'].exp ~= nil then return 6 end "
+        /* 7-9: keyring ids in canonical decimal, and nothing else */
+        "  local r = sb.keyring{ keys = { ['1'] = K1 }, current = '1' } "
+        "  if r.current ~= 1 or not r.keys[1] then return 7 end "
+        "  if pcall(sb.keyring, { keys = { [' 1'] = K1 }, current = 1 }) then return 8 end "
+        "  if pcall(sb.keyring, { keys = { ['01'] = K1 }, current = 1 }) then return 9 end "
+        /* 10: cache refuses encrypt instead of storing plaintext */
+        "  if code(function() cache.open{ encrypt = { keys = {[1] = K1}, current = 1 } } end) "
+        "     ~= 'invalid_argument' then return 10 end "
+        /* 11-12: sealbox checks its arguments */
+        "  if pcall(sb.seal, r, 42) then return 11 end "
+        "  if pcall(sb.seal, r, 'v', 'not-an-array') then return 12 end "
+        /* 13: otp.step refuses a zero period */
+        "  if pcall(otp.step, 60, 0) then return 13 end "
+        "  return 0 "
+        "end)()");
+    ASSERT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, otp_rfc4226_vectors)
 {
     init_lua_with_caps();

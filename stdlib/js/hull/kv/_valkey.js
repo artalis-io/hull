@@ -46,6 +46,7 @@ function ttlMs(store, ttl) {
     // Mirror util.expiryMs: undefined/null -> use the default; an explicit
     // `false` (or a nil default) means NO expiry, matching the memory/SQL
     // backends so `ttl: false` behaves the same on every backend.
+    if (ttl === util.KEEP_TTL) return -1;    // HL_KV_TTL_KEEP (cas only)
     if (ttl === undefined || ttl === null) ttl = store.defaultTtl;
     if (ttl === undefined || ttl === null || ttl === false) return undefined;
     if (typeof ttl !== "number" || ttl < 0)

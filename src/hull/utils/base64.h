@@ -51,7 +51,9 @@ int hl_base64_encode(const void *in, size_t in_len, char *out, size_t out_cap,
  *   - '=' padding is optional but, when present, must be exactly right and
  *     only at the end; with HL_BASE64_NOPAD any '=' is refused;
  *   - a length that cannot come from any input (one character left over) is
- *     refused.
+ *     refused;
+ *   - the unused low bits of the last character must be zero, so a value has
+ *     exactly one encoding.
  *
  * `*out_len` receives the decoded length on success. Returns 0, or -1 on
  * malformed input or when `out_cap` is too small (the decoded length of `n`

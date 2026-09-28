@@ -131,12 +131,20 @@ end
 -- report success) -- keep that invariant in mind when adding a backend.
 function Store:cas(k, expected, new, ttl)
     local now = u.now_ms()
-    local exp = u.expiry_ms(ttl, self.default_ttl) or u.NO_EXPIRY
+    local keep = ttl == u.KEEP_TTL
+    local exp = keep and u.NO_EXPIRY or u.expiry_ms(ttl, self.default_ttl) or u.NO_EXPIRY
     if expected == nil then
         local n = self.conn.exec(
             "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) "
             .. "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",
             { self.ns, kenc(k), venc(new), exp, now, now })
+        return (n or 0) == 1
+    end
+    if keep then
+        local n = self.conn.exec(
+            "UPDATE _hull_kv SET v = ?, version = version + 1, updated_at = ? "
+            .. "WHERE ns = ? AND k = ? AND v = ? AND expires_at > ?",
+            { venc(new), now, self.ns, kenc(k), venc(expected), now })
         return (n or 0) == 1
     end
     local n = self.conn.exec(

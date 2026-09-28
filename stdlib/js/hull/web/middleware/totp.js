@@ -460,34 +460,26 @@ function init(opts) {
     //   1. encryptionKeys + current  -> multi-key (explicit)
     //   2. encryptionKey only        -> back-compat shorthand
     //   3. nothing                   -> plaintext storage
-    const keys = {};
+    let keys = {};
     let current = null;
     let legacyVersion = null;
     if (opts.encryptionKeys) {
         if (typeof opts.encryptionKeys !== "object") {
             throw new Error("totp.init: encryptionKeys must be a {[id]: bytes} map");
         }
-        if (typeof opts.current !== "number") {
+        if (opts.current === undefined || opts.current === null) {
             throw new Error("totp.init: `current` (key id) required when "
                 + "encryptionKeys is set");
         }
-        for (const idStr in opts.encryptionKeys) {
-            const id = Number(idStr);
-            if (!Number.isInteger(id) || id < 0 || id > 0xFFFFFFFF) {
-                throw new Error("totp.init: encryptionKeys ids must be 0..2^32-1");
-            }
-            const k = opts.encryptionKeys[idStr];
-            if (typeof k !== "string" || k.length !== 32) {
-                throw new Error("totp.init: encryptionKeys[" + id
-                    + "] must be exactly 32 bytes");
-            }
-            keys[id] = encoding.hex.encode(k);
+        // The same keyring rules as every other sealbox user.
+        let ring;
+        try {
+            ring = sealbox.keyring({ keys: opts.encryptionKeys, current: opts.current });
+        } catch (e) {
+            throw new Error("totp.init: " + String(e && e.message).replace(/^sealbox\.keyring: /, ""));
         }
-        if (keys[opts.current] === undefined) {
-            throw new Error("totp.init: current key id " + opts.current
-                + " not present in encryptionKeys");
-        }
-        current = opts.current;
+        keys = ring.keys;
+        current = ring.current;
         if (opts.legacyKeyVersion !== undefined && opts.legacyKeyVersion !== null) {
             if (keys[opts.legacyKeyVersion] === undefined) {
                 throw new Error("totp.init: legacyKeyVersion "

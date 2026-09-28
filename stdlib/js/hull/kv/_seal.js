@@ -10,6 +10,7 @@
 
 import util from "hull:kv:_util";
 import { sealbox } from "hull:crypto:sealbox";
+import { crypto } from "hull:crypto";
 
 function create(encrypt, namespace) {
     if (!encrypt || typeof encrypt !== "object") {
@@ -40,6 +41,12 @@ function create(encrypt, namespace) {
         },
 
         isCurrent(version) { return version === ring.current; },
+
+        // Whether two opened values are equal, in constant time: `cas`
+        // compares a secret value with the caller's guess.
+        same(a, b) {
+            return typeof a === "string" && typeof b === "string" && crypto.constantTimeEq(a, b);
+        },
     };
 }
 

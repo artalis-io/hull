@@ -92,6 +92,9 @@ UTEST(base64, strict_decoding)
     ASSERT_TRUE(decode_fails("Zg===", 0));        /* too much padding */
     ASSERT_TRUE(decode_fails("Zg==Zg==", 0));     /* data after padding */
     ASSERT_TRUE(decode_fails("Zm9vY", 0));        /* a length nothing encodes to */
+    ASSERT_TRUE(decode_fails("Zh==", 0));         /* non-zero unused bits ("Zg==") */
+    ASSERT_TRUE(decode_fails("Zm9=", 0));         /* likewise ("Zm8=") */
+    ASSERT_TRUE(decode_fails("Zh", HL_BASE64_URL));
 }
 
 UTEST(base64, auth_plain)

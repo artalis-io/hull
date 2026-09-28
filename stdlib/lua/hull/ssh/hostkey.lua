@@ -85,8 +85,9 @@ end
 
 -- Verify the server signature over the exchange hash.
 --
--- `crypto` needs ed25519_verify(data, sig_hex, pk_hex) and to_hex, matching
--- hull.crypto plus hull.ssh.kex. Returns true, or false plus a reason.
+-- `crypto` needs ed25519_verify(data, sig_hex, pk_hex), and `to_hex` turns
+-- bytes into hex (hull.encoding.hex.encode). Returns true, or false plus a
+-- reason.
 function M.verify_signature(crypto, to_hex, key_blob, sig_blob, h)
     local ok, key = pcall(M.parse_key, key_blob)
     if not ok then return false, tostring(key) end
