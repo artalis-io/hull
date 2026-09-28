@@ -287,9 +287,10 @@ function M.load(text, opts)
     return key
 end
 
--- The fingerprint of the key, for showing which identity is being offered.
+-- The fingerprint of the key, for showing which identity is being offered:
+-- that of its public blob, the same form a host key's has.
 function M.fingerprint(sha256_raw, key)
-    return "SHA256:" .. base64.encode(sha256_raw(key.blob), { pad = false })
+    return require('hull.ssh.hostkey').fingerprint(sha256_raw, key.blob)
 end
 
 return M

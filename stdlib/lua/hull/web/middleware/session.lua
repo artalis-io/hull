@@ -10,7 +10,6 @@
 
 local json = require("hull.json")
 local crypto = require("hull.crypto")
-local encoding = require("hull.encoding")
 local db = require("hull.db").default()
 local time = require("hull.time")
 local _request = require("hull.web._request")
@@ -180,7 +179,7 @@ end
 
 --- Generate a 64-character hex session ID from 32 random bytes.
 local function generate_id()
-    return encoding.hex.encode(crypto.random(32))
+    return crypto.random_token(32, "hex")
 end
 
 --- Create a new session.

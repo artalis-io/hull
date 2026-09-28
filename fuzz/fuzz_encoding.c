@@ -1,5 +1,6 @@
 /*
- * fuzz_encoding.c: libFuzzer harness for the C codecs (utils/hex, utils/base64).
+ * fuzz_encoding.c: libFuzzer harness for the C codecs (utils/hex, utils/base64,
+ * utils/url).
  *
  * The decoders read untrusted text: SCRAM server messages, DSN escapes,
  * signatures and, through hull.encoding, anything an app decodes. Beyond
@@ -11,6 +12,9 @@
  *      spelling is a malleability bug, not a style issue.
  *   2. Round trip: any bytes, encoded under each flag set, decode back to the
  *      same bytes.
+ *   3. URL decoding: in place and out of place agree, form mode never fails
+ *      given room, the output is never longer than the input, and strict mode
+ *      fails exactly when some '%' does not begin two hex digits.
  *
  * Every decode runs into an exactly-sized heap buffer, so a write past the
  * documented bound is an ASan report rather than a silent overrun.
@@ -20,6 +24,7 @@
 
 #include "../src/hull/utils/base64.h"
 #include "../src/hull/utils/hex.h"
+#include "../src/hull/utils/url.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -96,9 +101,39 @@ static void check_round_trip(const uint8_t *data, size_t size, unsigned flags)
     free(hback);
 }
 
+static int has_bad_escape(const uint8_t *d, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (d[i] != '%') continue;
+        if (i + 2 >= n || hl_hex_digit(d[i + 1]) < 0 || hl_hex_digit(d[i + 2]) < 0)
+            return 1;
+        i += 2;
+    }
+    return 0;
+}
+
+static void check_url(const uint8_t *data, size_t size)
+{
+    char *a = malloc(size + 1), *b = malloc(size + 1);
+    if (!a || !b) { free(a); free(b); return; }
+    for (unsigned flags = 0; flags <= HL_URL_FORM; flags++) {
+        long n = hl_url_decode((const char *)data, size, a, size + 1, flags);
+        if (flags == HL_URL_FORM && n < 0) abort();
+        if (flags == 0 && (n < 0) != has_bad_escape(data, size)) abort();
+        if (n > (long)size) abort();
+        memcpy(b, data, size);
+        long m = hl_url_decode(b, size, b, size + 1, flags);
+        if (m != n) abort();
+        if (n >= 0 && (memcmp(a, b, (size_t)n) != 0 || a[n] != '\0')) abort();
+    }
+    free(a);
+    free(b);
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     check_hex(data, size);
+    check_url(data, size);
     for (size_t i = 0; i < sizeof FLAG_SETS / sizeof FLAG_SETS[0]; i++) {
         check_base64_decode(data, size, FLAG_SETS[i]);
         check_round_trip(data, size, FLAG_SETS[i]);

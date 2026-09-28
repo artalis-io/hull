@@ -14,7 +14,7 @@
  */
 
 #include "hull/cap/valkey_conn.h"
-#include "../utils/hex.h"
+#include "../utils/url.h"
 #include "hull/cap/respwire.h"
 #include "hull/utils/alloc.h"
 #include "sh_arena.h"
@@ -52,27 +52,6 @@
 
 void hl_valkey_dsn_scrub(HlValkeyDsn *dsn) {
     if (dsn) memset(dsn->password, 0, sizeof dsn->password);
-}
-
-/* Percent-decode [s, s+n) into out (NUL-terminated). -1 if it won't fit or a
- * `%XX` escape is malformed. */
-static int pct_decode(const char *s, size_t n, char *out, size_t outsz) {
-    size_t o = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (o + 1 >= outsz) return -1;
-        if (s[i] == '%') {
-            if (i + 2 >= n) return -1;
-            int hi = hl_hex_digit((unsigned char)s[i + 1]);
-            int lo = hl_hex_digit((unsigned char)s[i + 2]);
-            if (hi < 0 || lo < 0) return -1;
-            out[o++] = (char)((hi << 4) | lo);
-            i += 2;
-        } else {
-            out[o++] = s[i];
-        }
-    }
-    out[o] = '\0';
-    return 0;
 }
 
 /* Copy [s, s+n) verbatim into out (NUL-terminated). -1 if it won't fit. */
@@ -137,12 +116,12 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
         size_t uilen = (size_t)(at - authority);
         const char *colon = memchr(authority, ':', uilen);
         if (colon) {
-            if (pct_decode(authority, (size_t)(colon - authority), out->username, sizeof out->username) != 0)
+            if (hl_url_decode(authority, (size_t)(colon - authority), out->username, sizeof out->username, 0) < 0)
                 FAIL("valkey dsn: username too long");
-            if (pct_decode(colon + 1, (size_t)(at - (colon + 1)), out->password, sizeof out->password) != 0)
+            if (hl_url_decode(colon + 1, (size_t)(at - (colon + 1)), out->password, sizeof out->password, 0) < 0)
                 FAIL("valkey dsn: password too long");
         } else {
-            if (pct_decode(authority, uilen, out->username, sizeof out->username) != 0)
+            if (hl_url_decode(authority, uilen, out->username, sizeof out->username, 0) < 0)
                 FAIL("valkey dsn: username too long");
         }
         hostport = at + 1;

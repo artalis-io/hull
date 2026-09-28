@@ -213,7 +213,7 @@ local PRESETS = {
 
 -- Cryptographically-random URL-safe string (base64url-encoded).
 local function random_urlsafe(n_bytes)
-    return encoding.base64.encode(crypto.random(n_bytes), { url = true })
+    return crypto.random_token(n_bytes)
 end
 
 -- PKCE per RFC 7636: verifier is 32 random bytes (~43 base64url chars);
@@ -249,9 +249,7 @@ end
 
 -- URL-encode a value (RFC 3986 unreserved set untouched).
 local function urlenc(s)
-    return (s:gsub("([^A-Za-z0-9%-._~])", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end))
+    return encoding.url.encode(tostring(s))
 end
 
 -- Build a URL with sorted query params (deterministic for tests).

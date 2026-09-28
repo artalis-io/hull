@@ -24,7 +24,6 @@ import { db as dbModule } from "hull:db";
 import { time } from "hull:time";
 import { json } from "hull:json";
 import { crypto } from "hull:crypto";
-import { encoding } from "hull:encoding";
 const db = dbModule.default();
 
 // Outcome sentinels a handler returns. Frozen objects so
@@ -805,7 +804,7 @@ function resolveQueueOrder(opts) {
 function claimOne(queue, batch) {
     if (isPaused(queue)) return [];   // paused: don't dispatch
     const now = time.now();
-    const token = encoding.base64.encode(crypto.random(16), { url: true });
+    const token = crypto.randomToken(16);
     const d = db.dialect;
     // SKIP LOCKED needs PG 9.5+ / MySQL 8+ / MariaDB 10.6+. init() probes the
     // server and clears _skipLocked on older ones, where we fall back to plain
@@ -1811,7 +1810,7 @@ function makeCtx(job, name) {
         // way to be non-deterministic in a workflow. Hidden from steps_done.
         now: () => { detN += 1; stepPos += 1; return runStep(job.id, "__now:" + detN, () => time.now()); },
         random: () => { detN += 1; stepPos += 1; return runStep(job.id, "__rand:" + detN, () => Math.random()); },
-        uuid: () => { detN += 1; stepPos += 1; return runStep(job.id, "__uuid:" + detN, () => encoding.base64.encode(crypto.random(16), { url: true })); },
+        uuid: () => { detN += 1; stepPos += 1; return runStep(job.id, "__uuid:" + detN, () => crypto.randomToken(16)); },
         step: async (stepKey, fn, opts) => {
             stepPos += 1;
             const result = await runStep(job.id, stepKey, fn);
@@ -2129,7 +2128,7 @@ function eventsDrain(name, opts) {
     const sub = _subscribers[name];
     if (!sub) return { delivered: 0, leased: false };
     const now = o.now !== undefined ? o.now : time.now();
-    const token = encoding.base64.encode(crypto.random(8), { url: true });
+    const token = crypto.randomToken(8);
     // Acquire the lease (CAS): detect acquisition via RETURNING on PG/SQLite
     // (db.exec does not surface an affected-row count on Postgres); MySQL has no
     // RETURNING but returns the count.

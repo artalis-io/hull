@@ -620,6 +620,10 @@ $(BUILDDIR)/test_hex: $(TESTDIR)/hull/test_hex.c $(HEX_OBJ) | $(BUILDDIR)
 $(BUILDDIR)/test_base64: $(TESTDIR)/hull/test_base64.c $(BASE64_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BASE64_OBJ)
 
+# utils/url.h is header-only; the test needs nothing linked.
+$(BUILDDIR)/test_url: $(TESTDIR)/hull/test_url.c $(SRCDIR)/hull/utils/url.h $(SRCDIR)/hull/utils/hex.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $<
+
 # Host facts + user-facing command rendering (src/hull/shared/host.c). Leaf
 # util, libc only - the artifact-suffix and PATH-split contracts that keep
 # Windows and POSIX output correct. No deps.

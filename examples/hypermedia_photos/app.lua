@@ -1,6 +1,7 @@
 -- HTMX + Pico hypermedia app scaffold.
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
+local encoding    = require("hull.encoding")
 local htmx        = require("hull.web.htmx")
 local htmx_confirm = require("hull.web.htmx.confirm")
 local htmx_search  = require("hull.web.htmx.search")
@@ -28,6 +29,7 @@ local PER_PAGE_DEFAULT = 3
 
 app.manifest({
     modules = {
+        "hull/encoding@1",
         "hull/web/htmx@1",
         "hull/web/htmx/confirm@1",
         "hull/web/htmx/search@1",
@@ -228,11 +230,7 @@ local function _valid_id(s)
 end
 
 -- Percent-encode for use as a query-string value.
-local function _url_encode(s)
-    return (s:gsub("([^A-Za-z0-9%-._~])", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end))
-end
+local _url_encode = encoding.url.encode
 
 -- Build the data needed by partials/_entry_feed.html (entries + pagination)
 -- plus the page-level extras (csrf_token + csp_nonce). Used by both the

@@ -4,7 +4,7 @@
 -- (`xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx`, `M` the version nibble, `N` the
 -- variant). Built on `crypto.random` (CSPRNG) + `time.now_ms`; no new
 -- authority. Apps that previously minted ad-hoc ids from
--- `encoding.base64.encode(crypto.random(16), { url = true })` should prefer these - they are
+-- `crypto.random_token(16)` should prefer these - they are
 -- canonical, interoperable with external systems, and v7 is lexically sortable.
 --
 -- @module hull.uuid
@@ -15,11 +15,17 @@
 --   local r  = uuid.v4()   -- fully random
 
 local crypto = require("hull.crypto")
+local encoding = require("hull.encoding")
 local time = require("hull.time")
 
 local uuid = {}
 
-local FMT = "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x"
+-- 16 bytes (as a table of byte values) in the canonical 8-4-4-4-12 form.
+local function fmt(b)
+    local h = encoding.hex.encode(string.char(table.unpack(b)))
+    return h:sub(1, 8) .. "-" .. h:sub(9, 12) .. "-" .. h:sub(13, 16) .. "-"
+        .. h:sub(17, 20) .. "-" .. h:sub(21, 32)
+end
 
 --- Random (version 4) UUID.
 -- @treturn string  36-char canonical UUID.
@@ -27,7 +33,7 @@ function uuid.v4()
     local b = { crypto.random(16):byte(1, 16) }
     b[7] = (b[7] & 0x0f) | 0x40   -- version 4
     b[9] = (b[9] & 0x3f) | 0x80   -- variant 10
-    return string.format(FMT, table.unpack(b))
+    return fmt(b)
 end
 
 --- Time-ordered (version 7) UUID: 48-bit big-endian Unix-ms timestamp followed
@@ -44,7 +50,7 @@ function uuid.v7()
     }
     b[7] = (b[7] & 0x0f) | 0x70   -- version 7
     b[9] = (b[9] & 0x3f) | 0x80   -- variant 10
-    return string.format(FMT, table.unpack(b))
+    return fmt(b)
 end
 
 return uuid

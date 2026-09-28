@@ -5,6 +5,7 @@ import { app }              from "hull:app";
 import { attachment }       from "hull:attachment";
 import { blob }             from "hull:blob";
 import { db as dbModule } from "hull:db";
+import { encoding }         from "hull:encoding";
 const db = dbModule.default();
 import { log }              from "hull:log";
 import { template }         from "hull:template";
@@ -46,6 +47,7 @@ const SEARCH_INPUT_ATTRS = htmxSearch.inputAttrs({
 
 app.manifest({
     modules: [
+        "hull/encoding@1",
         "hull/web/htmx@1",
         "hull/web/htmx/confirm@1",
         "hull/web/htmx/search@1",
@@ -196,13 +198,9 @@ app.usePost("PATCH", "/*", idempotency.middleware({
                             ? String(req.ctx.session_id) : "__anon",
 }));
 
-// Percent-encode for use as a query-string value.
-// encodeURIComponent emits UTF-8 bytes (e.g. 日 → %E6%97%A5); a hand-
-// rolled `charCodeAt(0).toString(16)` loop would emit %65E5 for the
-// same input (UTF-16 code unit, invalid escape - browser then reads
-// it as %65 + literal "E5"). Matches Lua's _url_encode which iterates
-// bytes via string.byte.
-function urlEncode(s) { return encodeURIComponent(s); }
+// Percent-encode for use as a query-string value (the UTF-8 bytes, as
+// the Lua twin does).
+const urlEncode = encoding.url.encode;
 
 // Build the data needed by partials/_entry_feed.html (entries + pagination)
 // plus the page-level extras (csrf_token + csp_nonce). Used by both the

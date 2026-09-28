@@ -164,4 +164,46 @@ test("utf8: malformed bytes do not decode", function()
     assert_raises(function() enc.utf8.decode(nil) end, "non-string")
 end)
 
+-- url -------------------------------------------------------------------------
+-- The same vectors as the JS suite; the text there is the UTF-8 here.
+
+test("url: RFC 3986 unreserved stays, everything else is %XX upper case", function()
+    local url = enc.url
+    assert_eq(url.encode(""), "")
+    assert_eq(url.encode("AZaz09-._~"), "AZaz09-._~")
+    assert_eq(url.encode("a b/c?d=e&f"), "a%20b%2Fc%3Fd%3De%26f")
+    assert_eq(url.encode("!'()*+"), "%21%27%28%29%2A%2B")
+    assert_eq(url.encode("h\xc3\xa9"), "h%C3%A9")
+    assert_eq(url.encode("\0\xff"), "%00%FF")
+end)
+
+test("url: keep leaves further ASCII characters alone", function()
+    local url = enc.url
+    assert_eq(url.encode("a!#$&+^`|b c", { keep = "!#$&+^`|" }), "a!#$&+^`|b%20c")
+    assert_raises(function() url.encode("x", { keep = "\xc3\xa9" }) end, "non-ASCII keep")
+end)
+
+test("url: decode reads escapes in either case, and '+' only in form mode", function()
+    local url = enc.url
+    assert_eq(url.decode("a%20b%2fc%2F"), "a b/c/")
+    assert_eq(url.decode("a+b"), "a+b")
+    assert_eq(url.decode("a+b%2B", { form = true }), "a b+")
+    assert_eq(url.decode("h%C3%A9"), "h\xc3\xa9")
+    assert_eq(url.decode("plain"), "plain")
+end)
+
+test("url: a malformed escape leaves the whole value as it is", function()
+    local url = enc.url
+    assert_eq(url.decode("a%2"), "a%2")
+    assert_eq(url.decode("%zz%41"), "%zz%41")
+    assert_eq(url.decode("100%"), "100%")
+    assert_eq(url.decode("x+%g1", { form = true }), "x %g1")
+end)
+
+test("url: every byte round trips", function()
+    assert_eq(enc.url.decode(enc.url.encode(ALL)), ALL)
+    assert_raises(function() enc.url.encode(nil) end, "non-string")
+    assert_raises(function() enc.url.decode(42) end, "non-string")
+end)
+
 return { pass = pass, fail = fail }

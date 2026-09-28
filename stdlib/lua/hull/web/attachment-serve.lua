@@ -35,24 +35,13 @@
 
 local attachment = require("hull.attachment")
 local blob = require("hull.blob")
+local encoding = require("hull.encoding")
 
 local M = {}
 
--- RFC 5987 attr-char set: ALPHA / DIGIT / !#$&+-.^_`|~
--- Anything else (including space, /, etc.) gets percent-encoded.
-local function pct_encode_attr_char(c)
-    local b = string.byte(c)
-    if (b >= 0x30 and b <= 0x39)   -- 0-9
-        or (b >= 0x41 and b <= 0x5A) -- A-Z
-        or (b >= 0x61 and b <= 0x7A) -- a-z
-        or b == 0x21 or b == 0x23 or b == 0x24 or b == 0x26 -- ! # $ &
-        or b == 0x2B or b == 0x2D or b == 0x2E or b == 0x5E -- + - . ^
-        or b == 0x5F or b == 0x60 or b == 0x7C or b == 0x7E -- _ ` | ~
-    then
-        return c
-    end
-    return string.format("%%%02X", b)
-end
+-- RFC 5987 attr-char set: ALPHA / DIGIT / !#$&+-.^_`|~ - the RFC 3986
+-- unreserved set plus these. Anything else is percent-encoded.
+local ATTR_CHAR = { keep = "!#$&+^`|" }
 
 -- ASCII fallback: replace non-ASCII bytes with `_`; escape `"` and `\`
 -- so the quoted-string can't break out of the header field.
@@ -74,12 +63,10 @@ end
 
 -- Build the full Content-Disposition header value with both the
 -- ASCII fallback and the RFC 5987 percent-encoded UTF-8 form.
--- `gsub(".", ...)` is BYTE-WISE (Lua's `.` matches one byte, not one
--- UTF-8 codepoint) - exactly what RFC 5987 wants since it encodes
--- raw UTF-8 octets. The JS sibling has to UTF-8-encode the input
--- string first because JS strings are UTF-16.
+-- Percent-encoding works on bytes, which is what RFC 5987 wants: it
+-- encodes the raw UTF-8 octets of the name.
 local function content_disposition(name)
-    local pct = name:gsub(".", pct_encode_attr_char)
+    local pct = encoding.url.encode(name, ATTR_CHAR)
     return string.format(
         'attachment; filename="%s"; filename*=UTF-8\'\'%s',
         ascii_fallback(name), pct)

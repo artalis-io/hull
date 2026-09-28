@@ -113,6 +113,57 @@ Fix plan: **PR 1** crypto/encoding, **PR 2** SSH, **PR 3** missing C pieces.
 - [x] A fuzz target for `hl_base64_decode` / `hl_hex_decode`
   (`fuzz/fuzz_encoding.c`, asserting canonical re-encoding and round trips).
 
+## Review 2: duplication, placement, SSH throughput
+
+A second pass after #590-#592: is any crypto or encoding implemented outside
+`hull.crypto` / `hull.encoding` (and their C homes, `cap/crypto*` and
+`utils/`), is anything duplicated, and is the SSH stack fast where it matters.
+Findings come from reading the code; SSH throughput was not measured.
+
+**Crypto placement: clean.** Every stdlib caller (pwned, csrf, totp, jwt,
+sealbox, the SSH stack) delegates to `hull.crypto`; no primitive is
+reimplemented in Lua, JS or C outside `cap/crypto*`.
+
+Fix plan: **PR 4** encoding consolidation, **PR 5** SFTP pipelining, **PR 6**
+a byte-only crypto API (a deliberate breaking change).
+
+### PR 4: encoding consolidation
+
+- [x] Percent-encoding has no home. Seven encoders (oauth, totp and
+  attachment-serve in Lua and JS, plus `examples/hypermedia_photos`) and six
+  decoders (`form`, plus private parsers in `csrf` and `auth-flows`, in each
+  runtime). Add `hull.encoding.url` and move them all onto it. Done; the
+  JS twin of attachment-serve also lost a private UTF-8 encoder.
+- [x] Five percent-decoders in C: two identical query-string decoders in
+  `runtime/{lua,js}/bindings.c` (each with its own inline hex-digit parse)
+  and the Postgres, MySQL and Valkey DSN decoders. Add `utils/url.h` (header-only) with a
+  strict mode (DSNs) and a form mode (`+` is a space, a malformed escape is
+  kept), and move all five onto it.
+- [x] `base64url(random(n))` / `hex(random(n))` is written out at 14 sites
+  (jobs, auth-flows, attachment, session, oauth, uuid, an example). Added
+  `crypto.random_token(n [, "hex"])` (JS `randomToken`), in C over the shared
+  codecs.
+- [x] `hostkey.fingerprint` and `privatekey.fingerprint` are the same
+  function; `uuid` formats its own hex; two SSH test files carry private hex
+  helpers.
+
+### PR 5: SFTP throughput
+
+- [ ] At most 8 x 32 KiB requests in flight, sent in lock-step batches (send
+  all, wait for all), so the pipe drains between batches: under 256 KiB per
+  round trip, about 5 MB/s over a 50 ms relay. OpenSSH keeps 64 in flight and
+  the 2 MiB channel window already allows it. Move reads and writes to a
+  sliding window.
+
+### PR 6: byte-only crypto API (breaking)
+
+- [ ] The older bindings (`hmac_sha256`, `hmac_sha1`, secretbox, box,
+  ed25519, x25519) take keys and return results as hex; the newer ones
+  (`gcm_seal` / `gcm_open`, `aes256ctr`, bcrypt) take bytes. 17 stdlib files
+  hex-encode keys going in and hex-decode results coming out, and the SSH
+  stack carries adapters to undo it. Make the whole API take and return
+  bytes, and delete the round trips. A clean break, with no hex fallback.
+
 ## Missing, not yet planned
 
 - **Crypto / encoding:** a random-token helper (`base64url(random(n))` is

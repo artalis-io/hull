@@ -174,7 +174,7 @@ const PRESETS = {
 import { encoding } from "hull:encoding";
 
 function randomUrlsafe(nBytes) {
-    return encoding.base64.encode(crypto.random(nBytes), { url: true });
+    return crypto.randomToken(nBytes);
 }
 
 // PKCE per RFC 7636: verifier is 32 random bytes (~43 base64url chars),
@@ -208,8 +208,7 @@ function safeReturnTo(s) {
 }
 
 function urlenc(s) {
-    return encodeURIComponent(s).replace(/[!'()*]/g, (c) =>
-        "%" + c.charCodeAt(0).toString(16).toUpperCase());
+    return encoding.url.encode(String(s));
 }
 
 // Sorted query params for deterministic test output.

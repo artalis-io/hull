@@ -352,9 +352,7 @@ end
 -- URL-encoding for the otpauth URI. Authenticator apps are strict
 -- about RFC 3986 - encode anything outside the unreserved set.
 local function urlenc(s)
-    return (s:gsub("([^A-Za-z0-9%-._~])", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end))
+    return encoding.url.encode(tostring(s))
 end
 
 -- Google Authenticator key URI:

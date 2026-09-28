@@ -29,7 +29,6 @@
 
 local blob = require("hull.blob")
 local crypto = require("hull.crypto")
-local encoding = require("hull.encoding")
 local db = require("hull.db").default()
 local fs = require("hull.fs")
 local mime_mod = require("hull.mime")
@@ -93,7 +92,7 @@ end
 -- 32 hex chars from 16 random bytes - 128 bits of entropy. Plenty
 -- for opaque attachment ids that aren't user-guessable.
 local function generate_id()
-    return encoding.hex.encode(crypto.random(16))
+    return crypto.random_token(16, "hex")
 end
 
 --- Store a multipart part as an attachment.

@@ -7,7 +7,7 @@
  * Both variants are 36-char canonical strings
  * (`xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx`, `M` the version nibble, `N` the
  * variant). Built on `crypto.random` (CSPRNG) + `time.nowMs`; no new authority.
- * Prefer these over ad-hoc ids from `encoding.base64.encode(crypto.random(16), { url: true })`:
+ * Prefer these over ad-hoc ids from `crypto.randomToken(16)`:
  * canonical, externally interoperable, and v7 is lexically sortable.
  *
  * @license AGPL-3.0-or-later
@@ -18,17 +18,14 @@
  */
 
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 import { time } from "hull:time";
 
-// Byte -> 2-hex-char lookup, built once.
-const HEX = new Array(256);
-for (let i = 0; i < 256; i++) HEX[i] = (i + 0x100).toString(16).slice(1);
-
+// 16 bytes in the canonical 8-4-4-4-12 form.
 function fmt(b) {
-    return HEX[b[0]] + HEX[b[1]] + HEX[b[2]] + HEX[b[3]] + "-" +
-           HEX[b[4]] + HEX[b[5]] + "-" + HEX[b[6]] + HEX[b[7]] + "-" +
-           HEX[b[8]] + HEX[b[9]] + "-" +
-           HEX[b[10]] + HEX[b[11]] + HEX[b[12]] + HEX[b[13]] + HEX[b[14]] + HEX[b[15]];
+    const h = encoding.hex.encode(b);
+    return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" +
+           h.slice(16, 20) + "-" + h.slice(20, 32);
 }
 
 /**

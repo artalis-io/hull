@@ -13,7 +13,6 @@
 
 local cookie      = require("hull.web.cookie")
 local crypto      = require("hull.crypto")
-local encoding    = require("hull.encoding")
 local csv         = require("hull.csv")
 local db          = require("hull.db").default()
 local form        = require("hull.web.form")
@@ -39,7 +38,6 @@ app.manifest({
         "hull/log@1",
         "hull/web/cookie@1",
         "hull/crypto@1",
-        "hull/encoding@1",
         "hull/csv@1",
         "hull/db@1",
         "hull/web/form@1",
@@ -82,7 +80,7 @@ search.reindex("todos", "todos", { columns = {title = "title"}, id_column = "id"
 
 -- ── CSRF secret ─────────────────────────────────────────────────────
 
-local csrf_secret = encoding.hex.encode(crypto.random(32))
+local csrf_secret = crypto.random_token(32, "hex")
 
 -- ── Middleware stack ─────────────────────────────────────────────────
 

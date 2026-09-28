@@ -31,9 +31,7 @@ local function assert_raises(fn, msg)
     return tostring(err)
 end
 
-local function hex(s)
-    return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-end
+local hex = require('hull.encoding').hex.encode
 
 -- handshake --------------------------------------------------------------
 

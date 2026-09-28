@@ -30,9 +30,7 @@ local function assert_raises(fn, msg)
     if ok then error((msg or "should have raised") .. " but did not") end
 end
 
-local function hex(s)
-    return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-end
+local hex = require('hull.encoding').hex.encode
 
 -- round trips --------------------------------------------------------
 
