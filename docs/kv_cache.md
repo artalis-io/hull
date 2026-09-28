@@ -155,10 +155,10 @@ another app on the same Postgres) sees noise; someone who can write it cannot
 produce, alter or move a value without the key.
 
 ```lua
-local env, crypto = require("hull.env"), require("hull.crypto")
+local env, hex = require("hull.env"), require("hull.encoding").hex
 local kv = require("hull.kv").open{
     backend = "postgres", database = db, namespace = "sessions",
-    encrypt = { keys = { [1] = crypto.hex_decode(env.get("KV_KEY_1")) }, current = 1 },
+    encrypt = { keys = { [1] = hex.decode(env.get("KV_KEY_1")) }, current = 1 },
 }
 ```
 

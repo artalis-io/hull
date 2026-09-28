@@ -128,4 +128,31 @@ test("base32: strict, and lenient for pasted secrets", function()
     assert_eq(select(2, base32.decode("MZXW1", { lenient = true })), "invalid_char")
 end)
 
+-- utf8 ------------------------------------------------------------------------
+
+-- The byte forms the JS suite produces from "héllo", "€", U+1F600.
+local TEXT = { "h\xc3\xa9llo", "\xe2\x82\xac", "\xf0\x9f\x98\x80", "" }
+
+test("utf8: well-formed text round trips", function()
+    for _, t in ipairs(TEXT) do
+        assert_eq(enc.utf8.encode(t), t)
+        assert_eq(enc.utf8.decode(t), t)
+    end
+end)
+
+test("utf8: malformed bytes do not decode", function()
+    local bad = {
+        "\xc0\x80",          -- overlong NUL
+        "\xed\xa0\x80",      -- a surrogate
+        "\xf4\x90\x80\x80",  -- above U+10FFFF
+        "\xe2\x82",          -- truncated
+        "\x80",              -- a bare continuation byte
+        "ok\xff",            -- never valid
+    }
+    for _, b in ipairs(bad) do
+        assert_eq(select(2, enc.utf8.decode(b)), "invalid_utf8", enc.hex.encode(b))
+    end
+    assert_raises(function() enc.utf8.decode(nil) end, "non-string")
+end)
+
 return { pass = pass, fail = fail }

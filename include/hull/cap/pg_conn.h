@@ -111,12 +111,6 @@ HlPgSslDecision hl_pg_ssl_negotiate(struct HlDbTransport *t, HlPgSslMode mode,
 
 /* ── SCRAM-SHA-256 primitives (exposed for tests) ─────────────────── */
 
-/* Standard base64 (with '=' padding). Encode returns the encoded length and
- * NUL-terminates; both return -1 on overflow / malformed input. */
-int hl_pg_b64_encode(const uint8_t *in, size_t inlen, char *out, size_t outsize);
-int hl_pg_b64_decode(const char *in, size_t inlen,
-                     uint8_t *out, size_t outsize, size_t *outlen);
-
 /*
  * Compute the SCRAM-SHA-256 ClientProof and ServerSignature (RFC 5802 /
  * RFC 7677) from the password, salt, iteration count, and the full

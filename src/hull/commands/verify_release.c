@@ -16,6 +16,7 @@
 #include "hull/commands/verify_release.h"
 #include "hull/release.h"
 #include "hull/cap/crypto.h"
+#include "../utils/hex.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,7 +98,7 @@ int hl_cmd_verify_release(int argc, char **argv, const HlCommandEnv *env)
     uint8_t pubkey_buf[32];
     const uint8_t *pubkey = NULL;
     if (pubkey_hex) {
-        if (hl_cap_crypto_hex_decode(pubkey_hex, strlen(pubkey_hex), pubkey_buf, 32) != 32) {
+        if (hl_hex_decode(pubkey_hex, strlen(pubkey_hex), pubkey_buf, 32) != 32) {
             fprintf(stderr, "hull verify-release: --pubkey must be 64 hex chars\n");
             return 1;
         }

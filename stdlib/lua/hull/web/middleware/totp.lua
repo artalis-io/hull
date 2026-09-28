@@ -219,11 +219,6 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 
 -- ── Helpers (private) ──────────────────────────────────────────────
 
--- Hex helpers used at every cap layer that takes hex-encoded keys.
--- Thin aliases over crypto.hex_encode / crypto.hex_decode so call
--- sites stay readable and a future rename of either side is one
--- edit instead of N.
-
 -- The enrolment secret is shown as RFC 4648 base32, unpadded: 20 bytes are
 -- exactly 32 characters. Read back leniently, because people and apps copy
 -- the spaces and '=' padding along with it.

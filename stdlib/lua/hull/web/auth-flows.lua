@@ -336,7 +336,7 @@ local function issue_token(user_id, action, ttl, extra)
         -- 16 random bytes (base64url-encoded). Defends against
         -- guessable collisions and lets two tokens issued in the
         -- same second still be distinct.
-        nonce  = crypto.base64url_encode(crypto.random(16)),
+        nonce  = encoding.base64.encode(crypto.random(16), { url = true }),
     }
     if extra then
         for k, v in pairs(extra) do payload[k] = v end
@@ -1459,7 +1459,7 @@ function M.standard_users(opts)
     -- backend dialect is known.
     local tbl    = db.quote_identifier(opts.table or "users")
     local id_gen = opts.id_gen or function()
-        return crypto.hex_encode(crypto.random(16))
+        return encoding.hex.encode(crypto.random(16))
     end
 
     local function row(r)

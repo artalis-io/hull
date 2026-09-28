@@ -70,12 +70,12 @@ app.manifest({
 })
 local ssh    = require("hull.ssh")
 local fs     = require("hull.fs")
-local crypto = require("hull.crypto")
+local base64 = require("hull.encoding").base64
 
 -- The wire blob base64'd the way an authorized_keys line carries it, so it
 -- can be compared against ssh-keygen -y directly.
 local function pub_b64(k)
-    return (crypto.base64url_encode(k.blob):gsub("-", "+"):gsub("_", "/"))
+    return base64.encode(k.blob)
 end
 
 app.main(function()

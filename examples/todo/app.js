@@ -13,6 +13,7 @@ import { app } from "hull:app";
 import { crypto } from "hull:crypto";
 import { csv } from "hull:csv";
 import { db as dbModule } from "hull:db";
+import { encoding } from "hull:encoding";
 const db = dbModule.default();
 import { httpClient } from "hull:http-client";
 import { i18n } from "hull:i18n";
@@ -39,6 +40,7 @@ app.manifest({
         "hull/log@1",
         "hull/web/cookie@1",
         "hull/crypto@1",
+        "hull/encoding@1",
         "hull/csv@1",
         "hull/db@1",
         "hull/web/form@1",
@@ -80,14 +82,7 @@ search.reindex("todos", "todos", { columns: { title: "title" }, idColumn: "id" }
 
 // ── CSRF secret ─────────────────────────────────────────────────────
 
-function toHex(buf) {
-    const bytes = new Uint8Array(buf);
-    let hex = "";
-    for (let i = 0; i < bytes.length; i++)
-        hex += bytes[i].toString(16).padStart(2, "0");
-    return hex;
-}
-const csrfSecret = toHex(crypto.random(32));
+const csrfSecret = encoding.hex.encode(crypto.random(32));
 
 // ── Middleware stack ─────────────────────────────────────────────────
 

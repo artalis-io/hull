@@ -19,7 +19,7 @@
 
 /* ── Local hex helpers ─────────────────────────────────────────────── */
 
-/* hex decode goes through the canonical hl_cap_crypto_hex_decode (cap/crypto.h):
+/* hex decode goes through the canonical hl_hex_decode (utils/hex.h):
  * it returns the byte count written (out_size is a capacity), so `rc == N`
  * checks an exact N-byte decode - equivalent to the old local 0/-1 contract
  * that required hex_len == N*2. See signature.c for the rationale.
@@ -61,7 +61,7 @@ int hl_release_pubkey_configured(void)
 int hl_release_pubkey_decode(uint8_t out_pk[32])
 {
     if (!out_pk) return -1;
-    return hl_cap_crypto_hex_decode(HL_RELEASE_PUBKEY_HEX, 64, out_pk, 32) == 32 ? 0 : -1;
+    return hl_hex_decode(HL_RELEASE_PUBKEY_HEX, 64, out_pk, 32) == 32 ? 0 : -1;
 }
 
 int hl_release_verify_manifest_sig(const void *manifest, size_t manifest_len,
@@ -76,7 +76,7 @@ int hl_release_verify_manifest_sig(const void *manifest, size_t manifest_len,
 
     /* Decode signature */
     uint8_t sig[64];
-    if (hl_cap_crypto_hex_decode(sig_hex, sig_hex_len, sig, sizeof(sig)) != (int)sizeof(sig))
+    if (hl_hex_decode(sig_hex, sig_hex_len, sig, sizeof(sig)) != (int)sizeof(sig))
         return -1;
 
     /* Resolve public key */
@@ -141,7 +141,7 @@ int hl_release_load_secret_key(const char *path, uint8_t out_sk[64])
         return -1;
     }
 
-    int rc = hl_cap_crypto_hex_decode(buf, hex_len, out_sk, 64) == 64 ? 0 : -1;
+    int rc = hl_hex_decode(buf, hex_len, out_sk, 64) == 64 ? 0 : -1;
     secure_zero(buf, sizeof(buf));
     return rc;
 }

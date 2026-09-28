@@ -12,6 +12,7 @@
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
 import { db as dbModule } from "hull:db";
+import { encoding } from "hull:encoding";
 const db = dbModule.default();
 import { env } from "hull:env";
 import { log } from "hull:log";
@@ -29,6 +30,7 @@ app.manifest({
         "hull/http-server@1",
         "hull/log@1",
         "hull/crypto@1",
+        "hull/encoding@1",
         "hull/db@1",
         "hull/env@1",
         "hull/http-client@1",
@@ -60,14 +62,9 @@ app.usePost("POST", "/events", idempotency.middleware());
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-function secretToHex(secret) {
-    let hex = "";
-    for (let i = 0; i < secret.length; i++)
-        hex += secret.charCodeAt(i).toString(16).padStart(2, "0");
-    return hex;
-}
-
-const SECRET_HEX = secretToHex(SIGNING_SECRET);
+// crypto.hmacSha256 takes its key as hex. The secret is text, so it is
+// hexed as its UTF-8 bytes - the same key the Lua version derives.
+const SECRET_HEX = encoding.hex.encode(encoding.utf8.encode(SIGNING_SECRET));
 
 function signPayload(payloadStr) {
     return crypto.hmacSha256(payloadStr, SECRET_HEX);

@@ -4,7 +4,7 @@
 -- (`xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx`, `M` the version nibble, `N` the
 -- variant). Built on `crypto.random` (CSPRNG) + `time.now_ms`; no new
 -- authority. Apps that previously minted ad-hoc ids from
--- `crypto.base64url_encode(crypto.random(16))` should prefer these - they are
+-- `encoding.base64.encode(crypto.random(16), { url = true })` should prefer these - they are
 -- canonical, interoperable with external systems, and v7 is lexically sortable.
 --
 -- @module hull.uuid

@@ -3,12 +3,11 @@
 # base32).
 #
 # Every HMAC key, token and stored kv row in the stdlib depends on both
-# runtimes encoding the same bytes to the same text. The C bindings cannot
-# promise that: a JS string is UTF-8-encoded at the C boundary, so
-# crypto.hexEncode("\xff") is "c3bf" in JS but "ff" in Lua. hull.encoding is
-# the one home for byte<->text codecs precisely so this cannot happen; this
-# asserts it over the full 0-255 range in every codec, both directions, so any
-# drift fails CI.
+# runtimes encoding the same bytes to the same text. A C codec cannot promise
+# that: a JS string is UTF-8-encoded at the C boundary, so "\xff" would hex
+# as "c3bf" in JS but "ff" in Lua. hull.encoding is the one home for
+# byte<->text codecs precisely so this cannot happen; this asserts it over
+# the full 0-255 range in every codec, both directions, so any drift fails CI.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu

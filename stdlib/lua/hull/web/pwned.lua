@@ -33,6 +33,7 @@
 --   })
 
 local crypto      = require("hull.crypto")
+local encoding    = require("hull.encoding")
 local http_client = require("hull.http-client")
 local log         = require("hull.log")
 local time        = require("hull.time")
@@ -59,7 +60,7 @@ local _warned_failopen = false
 -- for protocols like HIBP that hardcode SHA-1. Do NOT use SHA-1
 -- for any new cryptographic purpose.
 local function sha1_hex(msg)
-    return crypto.hex_encode(crypto.sha1(msg)):upper()
+    return encoding.hex.encode(crypto.sha1(msg)):upper()
 end
 
 -- Binary search the embedded blocklist. The hashes string is a

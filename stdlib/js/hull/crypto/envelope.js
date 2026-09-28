@@ -21,9 +21,10 @@
 
 import { crypto } from "hull:crypto";
 import { json }   from "hull:json";
+import { encoding } from "hull:encoding";
 
 function sign(payload, secretHex) {
-    const body = crypto.base64urlEncode(json.encode(payload));
+    const body = encoding.base64.encode(encoding.utf8.encode(json.encode(payload)), { url: true });
     const tag  = crypto.hmacSha256(body, secretHex);
     return body + "." + tag;
 }
@@ -46,8 +47,9 @@ function verify(token, secretHex) {
     }
     if (!valid) return [null, "bad tag"];
 
-    const raw = crypto.base64urlDecode(body);
-    if (raw === null || raw === undefined) return [null, "bad encoding"];
+    const bytes = encoding.base64.decode(body, { url: true });
+    const raw = bytes === null ? null : encoding.utf8.decode(bytes);
+    if (raw === null) return [null, "bad encoding"];
     let payload;
     try { payload = json.decode(raw); }
     catch (_e) { return [null, "bad json"]; }

@@ -2195,7 +2195,7 @@ UTEST(lua_runtime, manifest_get_manifest)
     cleanup_lua();
 }
 
-/* ── HMAC-SHA256 / base64url tests ─────────────────────────────────── */
+/* ── HMAC-SHA256 tests ───────────────────────────────────────────── */
 
 UTEST(lua_cap, crypto_hmac_sha256)
 {
@@ -2259,39 +2259,6 @@ UTEST(lua_cap, crypto_hmac_sha1)
     ASSERT_NE(vec, NULL);
     ASSERT_STREQ(vec, "75a48a19d4cbe100644e8ac1397eea747a2d33ab");
     free(vec);
-
-    cleanup_lua_caps();
-}
-
-UTEST(lua_cap, crypto_base64url_roundtrip)
-{
-    init_lua_with_caps();
-    ASSERT_TRUE(lua_initialized);
-
-    /* Encode known value */
-    char *enc = eval_str("crypto.base64url_encode('Hello, World!')");
-    ASSERT_NE(enc, NULL);
-    ASSERT_STREQ(enc, "SGVsbG8sIFdvcmxkIQ");
-    free(enc);
-
-    /* Decode back */
-    char *dec = eval_str("crypto.base64url_decode('SGVsbG8sIFdvcmxkIQ')");
-    ASSERT_NE(dec, NULL);
-    ASSERT_STREQ(dec, "Hello, World!");
-    free(dec);
-
-    /* Roundtrip */
-    int ok = eval_int(
-        "(function() "
-        "  local orig = 'test data 123!@#' "
-        "  return crypto.base64url_decode(crypto.base64url_encode(orig)) == orig and 1 or 0 "
-        "end)()");
-    ASSERT_EQ(ok, 1);
-
-    /* Invalid input returns nil */
-    int is_nil = eval_int(
-        "crypto.base64url_decode('!!!invalid!!!') == nil and 1 or 0");
-    ASSERT_EQ(is_nil, 1);
 
     cleanup_lua_caps();
 }
@@ -2964,16 +2931,17 @@ UTEST(lua_stdlib, totp_legacy_v1_format_decrypts_via_legacy_key_version)
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
         "  local crypto = require('hull.crypto') "
+        "  local hex = require('hull.encoding').hex "
         "  totp._test.reset() "
         "  local k1 = ('a'):rep(32) "
         "  totp.init({ encryption_keys = {[1]=k1}, current = 1, "
         "              legacy_key_version = 1 }) "
         "  local secret = string.rep('S', 20) "
         "  local nonce = crypto.random(24) "
-        "  local nonce_hex = crypto.hex_encode(nonce) "
-        "  local key_hex = crypto.hex_encode(k1) "
+        "  local nonce_hex = hex.encode(nonce) "
+        "  local key_hex = hex.encode(k1) "
         "  local ct_hex = crypto.secretbox(secret, nonce_hex, key_hex) "
-        "  local blob = nonce .. crypto.hex_decode(ct_hex) "
+        "  local blob = nonce .. hex.decode(ct_hex) "
         "  local pt, version = totp._test.decrypt_secret(blob, 1) "
         "  if pt ~= secret then return 0 end "
         "  if version ~= 0 then return 0 end "
@@ -3271,8 +3239,8 @@ UTEST(lua_stdlib, auth_flows_state_secret_non_ascii_round_trip)
     /* Round-8 HIGH-2: state_secret may contain bytes >= 0x80 (e.g.
      * a passphrase / random binary key). Both runtimes must derive the
      * same HMAC key from it, which is only true if each hexes the raw
-     * bytes (hull.encoding) - the JS crypto.hexEncode UTF-8-inflates a
-     * string. This test pins the byte-for-byte hex encoding (32 bytes of
+     * bytes (hull.encoding) - handing a JS string to C UTF-8-inflates
+     * it. This test pins the byte-for-byte hex encoding (32 bytes of
      * 0x80 -> "80" repeated 32x) AND verifies a token signed under the
      * high-byte secret round-trips via issue_token / parse_token. */
     int ok = eval_int(

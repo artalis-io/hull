@@ -1046,6 +1046,12 @@ CAP_OBJS += $(HOST_MATCH_OBJ)
 # verify_self/mod_tool) include it by relative path; it is not public API.
 HEX_OBJ := $(BUILDDIR)/hex.o
 CAP_OBJS += $(HEX_OBJ)
+# base64 is the same kind of leaf (src/hull/utils/base64.c): the single home for
+# base64 in C, used by SMTP AUTH PLAIN, PostgreSQL SCRAM and the terminal's
+# OSC 52 clipboard write. Zero undefined symbols, so it widens no consumer's
+# link closure; rides CAP_OBJS for the same reach as hex.
+BASE64_OBJ := $(BUILDDIR)/base64.o
+CAP_OBJS += $(BASE64_OBJ)
 # host is the domain-free leaf util (src/hull/shared/host.c) owning every
 # per-host fact a user-facing string depends on: the PATH list separator, the
 # executable suffix a produced artifact needs (".com" for an APE on Windows),
@@ -3210,6 +3216,9 @@ $(HOST_MATCH_OBJ): $(SRCDIR)/hull/utils/host_match.c $(INCDIR)/hull/host_match.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(HEX_OBJ): $(SRCDIR)/hull/utils/hex.c $(SRCDIR)/hull/utils/hex.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(BASE64_OBJ): $(SRCDIR)/hull/utils/base64.c $(SRCDIR)/hull/utils/base64.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(HOST_OBJ): $(SRCDIR)/hull/shared/host.c $(INCDIR)/hull/shared/host.h | $(BUILDDIR)

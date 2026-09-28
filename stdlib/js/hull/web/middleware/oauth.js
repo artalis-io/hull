@@ -174,7 +174,7 @@ const PRESETS = {
 import { encoding } from "hull:encoding";
 
 function randomUrlsafe(nBytes) {
-    return crypto.base64urlEncode(crypto.random(nBytes));
+    return encoding.base64.encode(crypto.random(nBytes), { url: true });
 }
 
 // PKCE per RFC 7636: verifier is 32 random bytes (~43 base64url chars),
@@ -226,14 +226,6 @@ function buildUrl(base, params) {
     return base + sep + parts.join("&");
 }
 
-// Standard base64 (JWKS x5c) -> base64url for cap-layer decode.
-function b64ToB64url(s) {
-    return s.replace(/[\s\r\n]/g, "")
-            .replace(/=/g, "")
-            .replace(/\+/g, "-")
-            .replace(/\//g, "_");
-}
-
 // ── State cookie ───────────────────────────────────────────────────
 //
 // Payload: { provider, verifier, state, nonce, return_to, exp }.
@@ -270,13 +262,10 @@ async function refreshJwks(providerName) {
     const byKid = {};
     for (const k of doc.keys) {
         if (k && k.kid && Array.isArray(k.x5c) && typeof k.x5c[0] === "string") {
-            // Cap-layer base64urlDecodeBytes returns an ArrayBuffer -
-            // binary-safe (cert bytes >= 0x80 would corrupt through
-            // JS_NewStringLen's UTF-8 validation). Mirrors the Lua
-            // sibling's crypto.base64url_decode call.
-            const ab = crypto.base64urlDecodeBytes(b64ToB64url(k.x5c[0]));
-            if (ab) {
-                const pem = crypto.x509PubkeyPem(ab);
+            // x5c is standard base64 (RFC 7517 section 4.7).
+            const der = encoding.base64.decode(k.x5c[0], { lenient: true });
+            if (der !== null) {
+                const pem = crypto.x509PubkeyPem(encoding.bytes.toU8(der).buffer);
                 if (pem) byKid[k.kid] = pem;
             }
         }
@@ -626,7 +615,6 @@ const _test = {
     pkcePair,
     signState,
     verifyState,
-    b64ToB64url,
     refreshJwks,
     safeReturnTo,
     reset: () => {

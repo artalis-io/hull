@@ -28,6 +28,7 @@
 --   WS /ws - authenticated chat (see protocol below)
 
 local crypto   = require("hull.crypto")
+local encoding = require("hull.encoding")
 local db       = require("hull.db").default()
 local time     = require("hull.time")
 local validate = require("hull.validate")
@@ -49,6 +50,7 @@ app.manifest({
         "hull/log@1",
         "hull/web/cookie@1",
         "hull/crypto@1",
+        "hull/encoding@1",
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
@@ -210,13 +212,7 @@ end
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 
-local function to_hex(raw)
-    local hex = {}
-    for i = 1, #raw do
-        hex[i] = string.format("%02x", string.byte(raw, i))
-    end
-    return table.concat(hex)
-end
+local to_hex = encoding.hex.encode
 
 local function require_session(req, res)
     if not req.ctx.session then

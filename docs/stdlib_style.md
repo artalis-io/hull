@@ -150,8 +150,8 @@ appears in two modules, it moves to a shared internal module:
 
 Current shared helpers: `hull.web.htmx.escape` (HTML escaping for the widgets),
 `hull.crypto.envelope` (signed token framing), `hull.web.cookie` (parse/
-serialize), `hull.encoding` (hex, base64, base32 over bytes - deliberately NOT
-`crypto.hex_encode`/`hexEncode`, which UTF-8-inflate a JS string; see
+serialize), `hull.encoding` (hex, base64, base32 and UTF-8, byte-identical
+in both runtimes; `hull.crypto` has no codecs of its own - see
 [encoding_consolidation_plan.md](encoding_consolidation_plan.md)), and
 `hull.web._request` (`client_ip(req, trust_proxy)`: XFF-first when trusted,
 `remote_addr` fallback, 64-char cap - the canonical source for the client IP

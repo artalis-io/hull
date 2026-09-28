@@ -1,7 +1,7 @@
 # `hull.encoding`: one home for byte <-> text codecs
 
-Status: **phase 1 implemented** (this document's first PR); phases 2 and 3
-are follow-ups.
+Status: **implemented**, in two PRs: phase 1 (the module and the stdlib), then
+phases 2 and 3 (no codecs left in `hull.crypto`, UTF-8, the examples, and C).
 
 ## Why
 
@@ -26,6 +26,7 @@ from "hull:encoding"`. One module, one namespace per codec:
 | `hex` | lowercase | either case; strict |
 | `base64` | standard alphabet, padded; `{ url = true }` for `-_`, unpadded; `pad` overrides | strict; `url` takes no padding; `{ lenient = true }` skips whitespace |
 | `base32` | RFC 4648, uppercase, unpadded | either case; strict; `lenient` skips whitespace and `=` |
+| `utf8` | text to its UTF-8 bytes (JS: throws on a lone surrogate; Lua: the identity) | bytes to text, or nil/null for malformed UTF-8 (overlong, surrogates, above U+10FFFF, truncated) |
 | `bytes` (JS only) | `toU8(byteString)` for the C bindings | `fromBuffer(buf)` to a byte string |
 
 - **Values are bytes**: Lua byte strings; in JS a byte string (one character
@@ -86,20 +87,36 @@ A merge must not change anything stored or sent. These stay byte-identical:
   was binary-safe (it is UTF-8 encoded), and others that pointed at removed
   helpers.
 
-## Phase 2: the codecs in `hull.crypto`
+## Phase 2 (done): no codecs in `hull.crypto`
 
 `crypto.hex_encode` / `hex_decode` / `base64url_encode` / `base64url_decode`
-(and the JS camelCase forms, plus `base64urlDecodeBytes`) are C bindings that
-duplicate `hull.encoding`, and in JS they treat strings as UTF-8 rather than
-bytes. The stdlib still calls them in jwt, envelope, auth-flows, jobs, oauth
-and csp. Moving those callers needs care where the input is JSON text (jwt
-and envelope encode UTF-8 JSON, which is right for text), probably via a small
-`encoding.utf8` helper in JS. After that the bindings can be deprecated.
+and the JS `hexEncode` / `hexDecode` / `base64urlEncode` / `base64urlDecode` /
+`base64urlDecodeBytes` are removed. In JS they took strings as UTF-8, the root
+of every byte-string workaround the stdlib had grown. What they did for text
+now has a name, `hull.encoding.utf8`: jwt and envelope encode their JSON as
+UTF-8 bytes before base64url, and decode a segment as base64url, then UTF-8 -
+strictly, so a segment that is not valid UTF-8 is refused in both runtimes
+rather than turned into U+FFFD in JS. jobs, auth-flows, csp, oauth (PKCE,
+state, and the JWKS `x5c` certificate, now decoded directly as standard
+base64), pwned, sealbox and otp moved too.
 
-## Phase 3: examples and C
+## Phase 3 (done): examples and C
 
-- Examples hand-roll hex too (`irc_chat`, `image_processing`, `webhooks`,
-  `todo`, `ssh_fleet`); they should show `hull.encoding`.
-- C has its own base64 in `cap/smtp.c` (AUTH PLAIN), `cap/pg_conn.c` (SCRAM)
-  and `cap/tui.c` (OSC 52), and several hex-digit parsers in the DB
-  backends. A shared C codec (next to `utils/hex.c`) would remove them.
+- The examples (`irc_chat`, `todo`, `webhooks`, `image_processing`) use
+  `hull.encoding` and declare `hull/encoding@1`. The JS webhooks example hexes
+  its text secret as UTF-8 bytes, so it derives the same key as the Lua one.
+- C has one base64: `src/hull/utils/base64.{c,h}` (`hl_base64_encode` /
+  `hl_base64_decode`, standard or url alphabet, padding optional, strict
+  decode). It replaces the copies in SMTP AUTH PLAIN, PostgreSQL SCRAM, the
+  terminal's OSC 52 clipboard write, and the base64url pair in `cap/crypto.c`.
+  Like `utils/hex` (see `h1_s2b_hex_ownership.md`) it is a leaf with no
+  undefined symbols, so it widens no consumer's link.
+- C has one hex decoder: `hl_hex_decode` joins `hl_hex_encode` in
+  `utils/hex`, replacing `hl_cap_crypto_hex_decode` (release, signature,
+  verify-release, verify-self, the crypto bindings). `hl_cap_crypto_hex_encode`,
+  unused once the bindings went, is removed. Release and signature code no
+  longer reach into the crypto object just to decode hex.
+- Left alone on purpose: mbedTLS's own base64 for PEM output (the library's
+  code, inside the TLS feature), and the one-character hex-digit parsers in the
+  wire protocols (Postgres `bytea`, MySQL, Valkey), which parse protocol text
+  rather than encode bytes.

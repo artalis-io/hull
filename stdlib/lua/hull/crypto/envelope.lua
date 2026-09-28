@@ -31,6 +31,7 @@
 
 local crypto = require("hull.crypto")
 local json   = require("hull.json")
+local encoding = require("hull.encoding")
 
 local M = {}
 
@@ -42,7 +43,7 @@ local M = {}
 -- @tparam string secret_hex  HMAC-SHA256 key as a hex string.
 -- @treturn string            `body.tag` token, URL-safe.
 function M.sign(payload, secret_hex)
-    local body = crypto.base64url_encode(json.encode(payload))
+    local body = encoding.base64.encode(json.encode(payload), { url = true })
     local tag  = crypto.hmac_sha256(body, secret_hex)
     return body .. "." .. tag
 end
@@ -68,7 +69,8 @@ function M.verify(token, secret_hex)
                              secret_hex, tag)
     if not ok or not valid then return nil, "bad tag" end
 
-    local raw = crypto.base64url_decode(body)
+    local raw = encoding.base64.decode(body, { url = true })
+    raw = raw and encoding.utf8.decode(raw)
     if not raw then return nil, "bad encoding" end
     local payload = json.decode(raw)
     if type(payload) ~= "table" then return nil, "bad json" end

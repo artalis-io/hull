@@ -11,6 +11,7 @@
 --   4. code = P mod 10^digits, zero-padded to `digits`
 
 local crypto = require('hull.crypto')
+local hex    = require('hull.encoding').hex
 
 local M = {}
 
@@ -27,8 +28,8 @@ function M.hotp(key, counter, digits)
     if not digits or digits < 6 or digits > 8 then
         error("otp.hotp: digits must be 6, 7 or 8", 2)
     end
-    local mac = crypto.hex_decode(crypto.hmac_sha1(string.pack(">I8", counter),
-                                                   crypto.hex_encode(key)))
+    local mac = hex.decode(crypto.hmac_sha1(string.pack(">I8", counter),
+                                                   hex.encode(key)))
     local offset = (mac:byte(20) & 0x0F) + 1
     local p = string.unpack(">I4", mac, offset) & 0x7FFFFFFF
     return string.format("%0" .. digits .. "d", p % math.tointeger(10 ^ digits))

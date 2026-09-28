@@ -1,5 +1,5 @@
 /*
- * utils/hex.h - lowercase hex encoding of a byte buffer.
+ * utils/hex.h - lowercase hex encoding of a byte buffer, and decoding back.
  *
  * A private, dependency-neutral leaf: no Hull-domain knowledge, no crypto, no
  * allocation. It is the single home for the byte->hex-BUFFER transform that was
@@ -37,5 +37,17 @@
  * `in_len * 2 + 1` size computation.
  */
 int hl_hex_encode(const uint8_t *in, size_t in_len, char *out, size_t out_cap);
+
+/*
+ * Decode `hex_len` hex characters (either case, no NUL needed) into `out`.
+ *
+ *   - `hex_len` must be even and every character a hex digit.
+ *   - `out_cap` must be at least `hex_len / 2`.
+ *   - `hex` may be NULL only when `hex_len == 0` (which decodes to nothing).
+ *
+ * Returns the number of bytes written (`hex_len / 2`), or -1 on an odd
+ * length, a non-hex character, insufficient capacity, or a NULL argument.
+ */
+int hl_hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_cap);
 
 #endif /* HULL_UTILS_HEX_H */

@@ -8,8 +8,8 @@
 -- Verify: HS256 + RS256/384/512 + PS256 + ES256/384, dispatched by
 -- the token's `alg` header against a caller-supplied allowlist.
 --
--- Uses `crypto.hmac_sha256`, `crypto.verify` (asymmetric),
--- `crypto.base64url_encode/decode`, `json`, and `time`.
+-- Uses `crypto.hmac_sha256`, `crypto.verify` (asymmetric), `hull.encoding`
+-- (base64url, UTF-8), `json`, and `time`.
 --
 -- Asym-confusion protection: callers MUST pass `opts.algs` (or
 -- accept the default `{"HS256"}`) to gate which `alg` values are
@@ -41,6 +41,16 @@ local jwt = {}
 -- Pre-computed base64url encoding of {"alg":"HS256","typ":"JWT"} used
 -- by jwt.sign (HS256 is the only signing path).
 local HEADER_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+
+-- The JWS encodings (RFC 7515): base64url without padding, and JSON text as
+-- UTF-8. A segment that is not valid base64url, or does not decode to UTF-8,
+-- is refused - the JS module applies exactly the same rules.
+local function b64url(bytes) return encoding.base64.encode(bytes, { url = true }) end
+local function segment_bytes(s) return encoding.base64.decode(s, { url = true }) end
+local function segment_text(s)
+    local raw = segment_bytes(s)
+    return raw and encoding.utf8.decode(raw)
+end
 
 local EXP_RELATIVE_THRESHOLD = 2e9
 
@@ -98,11 +108,11 @@ function jwt.sign(payload, secret)
     end
 
     local payload_json = json.encode(claims)
-    local payload_b64 = crypto.base64url_encode(payload_json)
+    local payload_b64 = b64url(payload_json)
 
     local signing_input = HEADER_B64 .. "." .. payload_b64
     local sig_raw = hs256_signature(signing_input, secret)
-    local sig_b64 = crypto.base64url_encode(sig_raw)
+    local sig_b64 = b64url(sig_raw)
 
     return signing_input .. "." .. sig_b64
 end
@@ -124,7 +134,7 @@ local function verify_signature(alg, key, signing_input, sig_raw, sig_b64)
     if alg == "HS256" then
         if type(key) ~= "string" or #key == 0 then return false end
         local expected_raw = hs256_signature(signing_input, key)
-        local expected_b64 = crypto.base64url_encode(expected_raw)
+        local expected_b64 = b64url(expected_raw)
         return constant_time_compare(sig_b64, expected_b64)
     end
     -- Asym: crypto.verify takes the raw r||s sig (for ECDSA), which
@@ -172,7 +182,7 @@ function jwt.verify(token, key_or_resolver, opts)
 
     -- Parse the header to discover the alg + kid. We can't just match
     -- a fixed header string anymore now that we support multiple algs.
-    local header_json = crypto.base64url_decode(header_b64)
+    local header_json = segment_text(header_b64)
     if not header_json then return nil, "invalid header encoding" end
     local header = json.decode(header_json)
     if type(header) ~= "table" then return nil, "invalid header JSON" end
@@ -200,14 +210,14 @@ function jwt.verify(token, key_or_resolver, opts)
     if not key then return nil, "no key for kid/alg" end
 
     local signing_input = header_b64 .. "." .. payload_b64
-    local sig_raw = crypto.base64url_decode(sig_b64)
+    local sig_raw = segment_bytes(sig_b64)
     if not sig_raw then return nil, "invalid signature encoding" end
 
     if not verify_signature(alg, key, signing_input, sig_raw, sig_b64) then
         return nil, "invalid signature"
     end
 
-    local payload_json = crypto.base64url_decode(payload_b64)
+    local payload_json = segment_text(payload_b64)
     if not payload_json then return nil, "invalid payload encoding" end
     local payload = json.decode(payload_json)
     if not payload then return nil, "invalid payload JSON" end
@@ -245,7 +255,7 @@ function jwt.decode(token)
         parts[#parts + 1] = part
     end
     if #parts ~= 3 then return nil end
-    local payload_json = crypto.base64url_decode(parts[2])
+    local payload_json = segment_text(parts[2])
     if not payload_json then return nil end
     return json.decode(payload_json)
 end

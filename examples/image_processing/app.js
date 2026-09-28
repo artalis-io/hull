@@ -9,12 +9,14 @@
 //       curl localhost:3000/create
 //       curl localhost:3000/info
 
+import { encoding } from "hull:encoding";
 import { image } from "hull:image";
 
 app.manifest({
     modules: [
-    "hull/http-server@1",
+        "hull/http-server@1",
         "hull/image@1",
+        "hull/encoding@1",
     ],
 });
 
@@ -46,12 +48,6 @@ app.get("/create", (_req, res) => {
     // Encode to PNG
     const pngData = image.encode(img, "png");
 
-    // Encode PNG bytes as hex for JSON transport
-    const pngView = new Uint8Array(pngData);
-    const hexChars = [];
-    for (let i = 0; i < pngView.length; i++) {
-        hexChars.push(pngView[i].toString(16).padStart(2, "0"));
-    }
 
     res.json({
         ok: true,
@@ -59,8 +55,8 @@ app.get("/create", (_req, res) => {
         height: img.height(),
         format: img.format(),
         pixelSize: img.size(),
-        pngSize: pngView.length,
-        pngHex: hexChars.join(""),
+        pngSize: pngData.byteLength,
+        pngHex: encoding.hex.encode(pngData),   // hex for JSON transport
     });
 
     img.close();

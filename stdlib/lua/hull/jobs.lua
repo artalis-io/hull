@@ -26,6 +26,7 @@ local db     = require("hull.db").default()
 local time   = require("hull.time")
 local json   = require("hull.json")
 local crypto = require("hull.crypto")
+local encoding = require("hull.encoding")
 
 local jobs = {}
 
@@ -860,7 +861,7 @@ end
 local function claim_one(queue, batch)
     if is_paused(queue) then return {} end   -- paused: don't dispatch
     local now   = time.now()
-    local token = crypto.base64url_encode(crypto.random(16))
+    local token = encoding.base64.encode(crypto.random(16), { url = true })
     local d = db.dialect
     -- SKIP LOCKED needs PG 9.5+ / MySQL 8+ / MariaDB 10.6+. jobs.init probes the
     -- server and clears _skip_locked on older ones, where we fall back to plain
@@ -1958,7 +1959,7 @@ local function make_ctx(job, name)
     ctx.uuid = function()
         det_n = det_n + 1; step_pos = step_pos + 1
         return run_step(job.id, "__uuid:" .. det_n,
-            function() return crypto.base64url_encode(crypto.random(16)) end)
+            function() return encoding.base64.encode(crypto.random(16), { url = true }) end)
     end
     -- Workflow versioning: ctx.patched(patch_id) lets a changed workflow branch
     -- old-vs-new so in-flight instances finish on the definition they started.
@@ -2285,7 +2286,7 @@ function jobs._events_drain(name, opts)
     local sub = _subscribers[name]
     if not sub then return { delivered = 0, leased = false } end
     local now = opts.now or time.now()
-    local token = crypto.base64url_encode(crypto.random(8))
+    local token = encoding.base64.encode(crypto.random(8), { url = true })
     -- Acquire the lease (CAS): only if free or expired. Fleet-safe, no global lock.
     -- Detect acquisition via RETURNING on PG/SQLite (db.exec does not surface an
     -- affected-row count on Postgres); MySQL has no RETURNING but returns the count.

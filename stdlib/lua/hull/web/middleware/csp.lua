@@ -31,21 +31,18 @@
 -- which is treated as a server error (return 1, 500 response).
 
 local crypto = require("hull.crypto")
+local encoding = require("hull.encoding")
 
 local csp = {}
 
 -- Base64url-encode raw bytes for use as a CSP nonce attribute value.
 -- 16 bytes (128 bits of entropy) -> 22 chars unpadded. The base64url
--- alphabet is HTML-attribute-safe. Strip trailing '='.
+-- alphabet is HTML-attribute-safe.
 local function nonce_b64url(n_bytes)
     n_bytes = n_bytes or 16
     local raw = crypto.random(n_bytes)
     if not raw or #raw ~= n_bytes then return nil end
-    local b64 = crypto.base64url_encode(raw)
-    if not b64 then return nil end
-    -- crypto.base64url_encode already strips padding in Hull's
-    -- implementation; this is defensive in case it changes.
-    return (b64:gsub("=+$", ""))
+    return encoding.base64.encode(raw, { url = true })
 end
 
 -- Build the CSP header value for a given profile + nonce.

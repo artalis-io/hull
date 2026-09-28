@@ -3,11 +3,11 @@
  * @brief Cryptographic primitives.
  *
  * Hashes (SHA-256/512), HMAC, PBKDF2, Ed25519 signatures, NaCl
- * authenticated encryption (secretbox / box), base64url, and a
+ * authenticated encryption (secretbox / box), and a
  * platform-grade CSPRNG.
  *
  * @par Implementation:
- *   - SHA-256, HMAC-SHA256, base64url, PBKDF2: mbedTLS.
+ *   - SHA-256, HMAC-SHA256, PBKDF2: mbedTLS.
  *   - SHA-512, crypto_auth (HMAC-SHA512/256), Ed25519, secretbox, box: TweetNaCl.
  *   - random: `getentropy(3)` on macOS/BSD, `getrandom(2)` on Linux, `BCryptGenRandom` on Windows (cosmocc).
  *
@@ -304,71 +304,6 @@ int hl_cap_crypto_auth(const void *msg, size_t msg_len,
 int hl_cap_crypto_auth_verify(const uint8_t tag[32],
                               const void *msg, size_t msg_len,
                               const uint8_t key[32]);
-
-/* ── Base64url (no padding, RFC 4648 §5) ───────────────────────────── */
-
-/**
- * @brief Encode bytes to base64url (no padding).
- *
- * @param data      Input bytes.
- * @param len       Byte count.
- * @param out       Output buffer (caller-allocated).
- * @param out_size  Capacity of @p out (in bytes, not including a NUL).
- * @param out_len   Out-parameter: encoded length written to @p out.
- *
- * @return `0` on success, `-1` if @p out_size is too small.
- */
-int hl_cap_crypto_base64url_encode(const void *data, size_t len,
-                                   char *out, size_t out_size,
-                                   size_t *out_len);
-
-/**
- * @brief Decode base64url (no padding required) to bytes.
- *
- * @param str       Input string.
- * @param str_len   Input length.
- * @param out       Output buffer.
- * @param out_size  Capacity.
- * @param out_len   Out-parameter: decoded length.
- *
- * @return `0` on success, `-1` on invalid input or insufficient capacity.
- */
-int hl_cap_crypto_base64url_decode(const char *str, size_t str_len,
-                                   uint8_t *out, size_t out_size,
-                                   size_t *out_len);
-
-/* ── Lowercase hex encode / decode ─────────────────────────────────── */
-
-/**
- * @brief Lowercase hex-encode a byte buffer.
- *
- * Writes exactly `2 * in_len` characters into @p out_hex (no NUL).
- *
- * @param in        Input bytes.
- * @param in_len    Byte count.
- * @param out_hex   Output buffer (caller-allocated).
- * @param out_size  Capacity of @p out_hex (must be >= 2 * in_len).
- *
- * @return Number of characters written (`2 * in_len`) on success,
- *         or `-1` if @p out_size is too small.
- */
-int hl_cap_crypto_hex_encode(const uint8_t *in, size_t in_len,
-                             char *out_hex, size_t out_size);
-
-/**
- * @brief Decode a lowercase or uppercase hex string into bytes.
- *
- * @param hex       Hex input (NOT required to be NUL-terminated).
- * @param hex_len   Hex character count (must be even).
- * @param out       Output buffer.
- * @param out_size  Capacity of @p out (must be >= hex_len / 2).
- *
- * @return Bytes written (`hex_len / 2`) on success,
- *         or `-1` on odd length, non-hex character, or insufficient
- *         capacity.
- */
-int hl_cap_crypto_hex_decode(const char *hex, size_t hex_len,
-                             uint8_t *out, size_t out_size);
 
 /* ── Password-based key derivation (PBKDF2-HMAC-SHA256) ────────────── */
 
