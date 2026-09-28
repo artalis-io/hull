@@ -14,7 +14,10 @@
 -- impossible length is refused, because silently skipping junk lets damaged
 -- input decode to something plausible. A decoder returns nil and a reason -
 -- "invalid_char", "bad_padding" or "bad_length" - on bad input, and raises
--- only when handed something that is not a string.
+-- only when handed something that is not a string. The unused low bits of the
+-- last base64 / base32 character must be zero ("non_canonical" otherwise), so
+-- every value has exactly one encoding - a signature that decodes the same
+-- from two different strings is malleable.
 --
 -- Pure: no capabilities and no other module, so anything may require it.
 
@@ -111,9 +114,9 @@ function M.base64.encode(bytes, opts)
 end
 
 --- Bytes from base64. opts.url selects the url-safe alphabet, which takes no
---- padding (as hull.crypto's decoder); the standard alphabet takes padding
---- or none, but if present it must be exactly right. opts.lenient skips
---- whitespace (key files wrap their base64 at 70 columns).
+--- padding; the standard alphabet takes padding or none, but if present it
+--- must be exactly right. opts.lenient skips whitespace (key files wrap their
+--- base64 at 70 columns).
 function M.base64.decode(text, opts)
     check_string("base64.decode", text)
     local url = opts and opts.url
@@ -142,6 +145,7 @@ function M.base64.decode(text, opts)
     if padding > 0 and (padding > 2 or (count + padding) % 4 ~= 0) then
         return nil, "bad_padding"
     end
+    if acc & ((1 << bits) - 1) ~= 0 then return nil, "non_canonical" end
     return concat(out)
 end
 
@@ -170,20 +174,24 @@ function M.base32.encode(bytes)
     return concat(out)
 end
 
---- Bytes from base32, either case. Strictly, only the alphabet; opts.lenient
---- also skips whitespace and '=', which people and apps copy along with a
---- secret.
+-- Base32 lengths (mod 8) that some byte count encodes to: 0, 2, 4, 5 and 7.
+local B32_LEN_OK = { [0] = true, [2] = true, [4] = true, [5] = true, [7] = true }
+
+--- Bytes from base32, either case. Strictly, only the alphabet, a length some
+--- input encodes to, and zero unused low bits; opts.lenient also skips
+--- whitespace and '=', which people and apps copy along with a secret.
 function M.base32.decode(text, opts)
     check_string("base32.decode", text)
     local lenient = opts and opts.lenient
     local out = {}
-    local buf, bits = 0, 0
+    local buf, bits, count = 0, 0, 0
     for i = 1, #text do
         local c = sbyte(text, i)
         local v = B32_DEC[c]
         if v then
             buf = ((buf << 5) | v) & 0xFFFF
             bits = bits + 5
+            count = count + 1
             if bits >= 8 then
                 bits = bits - 8
                 out[#out + 1] = schar((buf >> bits) & 0xFF)
@@ -192,6 +200,8 @@ function M.base32.decode(text, opts)
             return nil, "invalid_char"
         end
     end
+    if not B32_LEN_OK[count % 8] then return nil, "bad_length" end
+    if buf & ((1 << bits) - 1) ~= 0 then return nil, "non_canonical" end
     return concat(out)
 end
 

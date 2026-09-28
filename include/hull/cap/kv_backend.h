@@ -85,6 +85,9 @@
  * (clear is a namespace-prefix wipe; on a Redis-shaped backend it is SCAN+DEL,
  * so it is bounded and NON-ATOMIC - see scan.)
  */
+/* cas() ttl_ms: keep the existing expiry instead of replacing it. */
+#define HL_KV_TTL_KEEP ((int64_t)-1)
+
 #define HL_KV_CAP_TTL               (1u << 0)
 #define HL_KV_CAP_ATOMIC_INCREMENT  (1u << 1)
 #define HL_KV_CAP_COMPARE_EXCHANGE  (1u << 2)
@@ -161,7 +164,9 @@ typedef struct HlKvBackend {
 
     /* Compare-and-swap. has_expected==0 means "set only if absent". Returns the
      * four-state HlKvCasResult (never -1/errno-style); ERROR detail via
-     * last_error(h). NULL unless caps & HL_KV_CAP_COMPARE_EXCHANGE. */
+     * last_error(h). NULL unless caps & HL_KV_CAP_COMPARE_EXCHANGE.
+     * ttl_ms == HL_KV_TTL_KEEP keeps the replaced value's expiry (a set-if-absent
+     * then gets none); used to re-seal values in place. */
     HlKvCasResult (*cas)(HlKvHandle *h, const uint8_t *key, size_t klen,
                          const uint8_t *expected, size_t elen, int has_expected,
                          const uint8_t *newv, size_t nlen, int64_t ttl_ms);

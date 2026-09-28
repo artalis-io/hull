@@ -648,25 +648,17 @@ function totp.init(opts)
         if type(opts.encryption_keys) ~= "table" then
             error("totp.init: encryption_keys must be a {[id]=bytes,...} map")
         end
-        if type(opts.current) ~= "number" then
+        if opts.current == nil then
             error("totp.init: current (key id) required when "
                   .. "encryption_keys is set")
         end
-        for id, k in pairs(opts.encryption_keys) do
-            if type(id) ~= "number" or id < 0 or id > 0xFFFFFFFF then
-                error("totp.init: encryption_keys ids must be 0..2^32-1")
-            end
-            if type(k) ~= "string" or #k ~= 32 then
-                error("totp.init: encryption_keys[" .. tostring(id)
-                      .. "] must be exactly 32 bytes")
-            end
-            keys[id] = encoding.hex.encode(k)
+        -- The same keyring rules as every other sealbox user.
+        local ok, ring = pcall(sealbox.keyring,
+                               { keys = opts.encryption_keys, current = opts.current })
+        if not ok then
+            error("totp.init: " .. tostring(ring):gsub("^sealbox%.keyring: ", ""), 2)
         end
-        if not keys[opts.current] then
-            error("totp.init: current key id " .. tostring(opts.current)
-                  .. " not present in encryption_keys")
-        end
-        current = opts.current
+        keys, current = ring.keys, ring.current
         if opts.legacy_key_version ~= nil then
             if not keys[opts.legacy_key_version] then
                 error("totp.init: legacy_key_version "

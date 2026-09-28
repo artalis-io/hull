@@ -13,7 +13,9 @@
  * A sealed blob is version(u32 BE) || nonce(24) || secretbox(frame), where the
  * frame is the value, or each context string length-prefixed and then the
  * value. secretbox has no associated data, so the context goes inside the box
- * and is checked on open.
+ * and is checked on open. Whether a context was used is not itself recorded
+ * (TOTP's rows predate contexts), so give a keyring one use: always with a
+ * context (hull:kv) or never (TOTP), not both.
  *
  * Values, keys and blobs are BYTE STRINGS (each char a byte, 0-255). Bytes
  * cross the crypto binding as Uint8Array or hex, never as a JS string, which
@@ -51,14 +53,27 @@ function isByteString(s) {
  * anything else: a keyring is configuration, and a wrong one should be heard
  * about at startup.
  */
+// A key id: an integer 0..2^32-1, or the same written in canonical decimal
+// ("7", never "07", " 7", "0x7" or "1e0") - object keys are always strings,
+// and ids often arrive from the environment as text. null for anything else.
+// The Lua module accepts exactly the same.
+function keyId(v) {
+    if (typeof v === "string") {
+        if (!/^(0|[1-9][0-9]{0,9})$/.test(v)) return null;
+        v = Number(v);
+    }
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 0xffffffff) return null;
+    return v;
+}
+
 function keyring(opts) {
     if (!opts || typeof opts.keys !== "object" || opts.keys === null) {
         throw new Error("sealbox.keyring: expected { keys: {[id]: key, ...}, current: id }");
     }
     const keys = {};
     for (const idStr of Object.keys(opts.keys)) {
-        const id = Number(idStr);
-        if (!Number.isInteger(id) || id < 0 || id > 0xffffffff) {
+        const id = keyId(idStr);
+        if (id === null) {
             throw new Error("sealbox.keyring: key ids must be integers 0..2^32-1");
         }
         const k = opts.keys[idStr];
@@ -67,11 +82,22 @@ function keyring(opts) {
         }
         keys[id] = hex.encode(k);
     }
-    if (keys[opts.current] === undefined) {
+    const current = keyId(opts.current);
+    if (current === null || keys[current] === undefined) {
         throw new Error("sealbox.keyring: current key id " + String(opts.current)
                         + " is not in keys");
     }
-    return { keys, current: opts.current };
+    return { keys, current };
+}
+
+// Arguments are checked, not coerced: sealing the wrong thing (a Uint8Array
+// stringified to "1,2,3", say) would produce a blob that opens to something
+// the caller never stored.
+function checkContext(fname, context) {
+    if (context === undefined || context === null) return;
+    if (!Array.isArray(context) || !context.every(isByteString)) {
+        throw new TypeError("sealbox." + fname + ": context must be an array of byte strings");
+    }
 }
 
 function frame(context, value) {
@@ -97,6 +123,8 @@ function unframe(context, plain) {
 /** Seal `value` under the ring's current key, bound to `context` (an array of
  *  byte strings, or null). Returns the blob, a byte string. */
 function seal(ring, value, context) {
+    if (!isByteString(value)) throw new TypeError("sealbox.seal: value must be a byte string");
+    checkContext("seal", context);
     const key = ring.keys[ring.current];
     const nonce = bytes.fromBuffer(crypto.random(NONCE_LEN));
     const ctHex = crypto.secretbox(bytes.toU8(frame(context, value)), hex.encode(nonce), key);
@@ -111,7 +139,8 @@ function seal(ring, value, context) {
  * a blob can fail to be genuine, so it tells an attacker nothing.
  */
 function open(ring, blob, context) {
-    if (typeof blob !== "string" || blob.length < MIN_LEN) return { ok: false, reason: "open_failed" };
+    checkContext("open", context);
+    if (!isByteString(blob) || blob.length < MIN_LEN) return { ok: false, reason: "open_failed" };
     const version = readBe32(blob, 0);
     const key = ring.keys[version];
     if (key === undefined) return { ok: false, reason: "unknown_version" };
@@ -128,7 +157,7 @@ function open(ring, blob, context) {
  *  `id`. Only TOTP has rows like this. Returns the value, or null. */
 function openUnversioned(ring, id, blob) {
     const key = ring.keys[id];
-    if (key === undefined || typeof blob !== "string" || blob.length < NONCE_LEN + MAC_LEN) {
+    if (key === undefined || !isByteString(blob) || blob.length < NONCE_LEN + MAC_LEN) {
         return null;
     }
     const ab = crypto.secretboxOpen(hex.encode(blob.substring(NONCE_LEN)),

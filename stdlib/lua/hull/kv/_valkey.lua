@@ -53,6 +53,7 @@ local function ttl_ms(self, ttl)
     -- Mirror u.expiry_ms's contract exactly: nil -> use the default; an explicit
     -- `false` (or a nil default) means NO expiry. `ttl or self.default_ttl` would
     -- wrongly turn `false` into the default, so branch on nil explicitly.
+    if ttl == u.KEEP_TTL then return -1 end   -- HL_KV_TTL_KEEP (cas only)
     if ttl == nil then ttl = self.default_ttl end
     if ttl == nil or ttl == false then return nil end
     if type(ttl) ~= "number" or ttl < 0 then

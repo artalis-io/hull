@@ -183,6 +183,12 @@ const cache = {
 cache.open = function (opts) {
     if (typeof opts !== "object" || opts === null)
         kvUtil.error("invalid_argument", "cache.open: options object required");
+    if (opts.encrypt !== undefined && opts.encrypt !== null) {
+        // Refused rather than ignored: silently storing plaintext for a caller
+        // that asked for encryption is the one wrong answer. Encrypted values
+        // belong in hull:kv (docs/kv_cache.md "Encryption at rest").
+        kvUtil.error("invalid_argument", "cache.open: encrypt is not supported; use hull:kv");
+    }
     const backend = opts.backend || "memory";
     const namespace = opts.namespace || "default";
     const storeNs = "cache:" + namespace; // isolated from hull:kv's "kv:" namespaces

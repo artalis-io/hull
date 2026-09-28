@@ -117,6 +117,10 @@ int hl_base64_decode(const char *in, size_t in_len, uint8_t *out, size_t out_cap
             out[o++] = (uint8_t)((acc >> bits) & 0xFF);
         }
     }
+    /* The unused low bits of the last character must be zero, so each value
+     * has exactly one encoding ("Zh==" is not another spelling of "Zg=="). */
+    if (acc & ((1u << bits) - 1))
+        return -1;
     *out_len = o;
     return 0;
 }

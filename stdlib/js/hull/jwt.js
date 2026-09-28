@@ -117,7 +117,7 @@ function resolveKey(keyOrResolver, kid, alg) {
 }
 
 // The signature bytes of an asymmetric JWS, or null. Strict base64url, the
-// same decoding the Lua sibling gets from C: no padding, no '+' or '/', so a
+// same decoding the Lua sibling applies: no padding, no '+' or '/', so a
 // token verifies in both runtimes or in neither.
 function signatureBytes(sigB64) {
     const raw = encoding.base64.decode(sigB64, { url: true });
@@ -241,8 +241,12 @@ function decode(token) {
     if (parts.length !== 3) return null;
     const payloadStr = segmentText(parts[1]);
     if (payloadStr === null) return null;
-    try { return json.decode(payloadStr); }
+    let payload;
+    try { payload = json.decode(payloadStr); }
     catch (e) { return null; }
+    // An object or nothing, as in Lua (and as verify requires): a payload that
+    // is `5` is not a claim set.
+    return (payload && typeof payload === "object") ? payload : null;
 }
 
 const jwt = { sign, verify, decode };

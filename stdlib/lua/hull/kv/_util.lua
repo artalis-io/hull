@@ -67,6 +67,10 @@ end
 
 function M.now_ms() return time.now_ms() end
 
+-- A cas() ttl meaning "keep the replaced value's expiry". Internal: rekey uses
+-- it to re-seal values in place without changing when they expire.
+M.KEEP_TTL = setmetatable({}, { __tostring = function() return "kv.KEEP_TTL" end })
+
 -- Validate an optional non-negative integer (a count/limit); nil passes
 -- through. string.format("%d", ...) already rejects non-integers loudly, but
 -- validating up front gives a stable coded error instead of a format raise.
@@ -98,12 +102,12 @@ function M.hexencode(bytes) return encoding.hex.encode(bytes) end
 
 function M.b64decode(str)
     return encoding.base64.decode(str)
-        or M.error("invalid_argument", "kv: corrupt base64 in store")
+        or M.error("corrupt", "kv: corrupt base64 in store")
 end
 
 function M.hexdecode(hex)
     return encoding.hex.decode(hex)
-        or M.error("invalid_argument", "kv: corrupt hex in store")
+        or M.error("corrupt", "kv: corrupt hex in store")
 end
 
 return M

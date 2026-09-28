@@ -95,13 +95,22 @@ class SqlStore {
 
     cas(k, expected, newVal, ttl) {
         const now = util.nowMs();
-        const exp = util.expiryMs(ttl, this.defaultTtl);
+        const keep = ttl === util.KEEP_TTL;
+        const exp = keep ? null : util.expiryMs(ttl, this.defaultTtl);
         const expVal = exp === null ? util.NO_EXPIRY : exp;
         if (expected === undefined || expected === null) {
             const n = this.conn.exec(
                 "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) " +
                 "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",
                 [this.ns, util.hexencode(k), util.b64encode(newVal), expVal, now, now]);
+            return (n || 0) === 1;
+        }
+        if (keep) {
+            const n = this.conn.exec(
+                "UPDATE _hull_kv SET v = ?, version = version + 1, updated_at = ? " +
+                "WHERE ns = ? AND k = ? AND v = ? AND expires_at > ?",
+                [util.b64encode(newVal), now, this.ns, util.hexencode(k),
+                 util.b64encode(expected), now]);
             return (n || 0) === 1;
         }
         const n = this.conn.exec(

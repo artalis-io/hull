@@ -42,6 +42,15 @@ local jwt = {}
 -- by jwt.sign (HS256 is the only signing path).
 local HEADER_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 
+-- The JSON object in a token segment, or nil. json.decode raises on bad JSON,
+-- and the header is decoded before any signature check, so an unguarded call
+-- would let any client turn a malformed token into a 500.
+local function decode_object(text)
+    local ok, v = pcall(json.decode, text)
+    if ok and type(v) == "table" then return v end
+    return nil
+end
+
 -- The JWS encodings (RFC 7515): base64url without padding, and JSON text as
 -- UTF-8. A segment that is not valid base64url, or does not decode to UTF-8,
 -- is refused - the JS module applies exactly the same rules.
@@ -184,8 +193,8 @@ function jwt.verify(token, key_or_resolver, opts)
     -- a fixed header string anymore now that we support multiple algs.
     local header_json = segment_text(header_b64)
     if not header_json then return nil, "invalid header encoding" end
-    local header = json.decode(header_json)
-    if type(header) ~= "table" then return nil, "invalid header JSON" end
+    local header = decode_object(header_json)
+    if not header then return nil, "invalid header JSON" end
 
     local alg = header.alg
     if not alg or alg == "none" then
@@ -210,8 +219,10 @@ function jwt.verify(token, key_or_resolver, opts)
     if not key then return nil, "no key for kid/alg" end
 
     local signing_input = header_b64 .. "." .. payload_b64
+    -- A signature that does not decode is just an invalid signature (as in
+    -- JS): which check turned a forged token away is nobody's business.
     local sig_raw = segment_bytes(sig_b64)
-    if not sig_raw then return nil, "invalid signature encoding" end
+    if not sig_raw then return nil, "invalid signature" end
 
     if not verify_signature(alg, key, signing_input, sig_raw, sig_b64) then
         return nil, "invalid signature"
@@ -219,7 +230,7 @@ function jwt.verify(token, key_or_resolver, opts)
 
     local payload_json = segment_text(payload_b64)
     if not payload_json then return nil, "invalid payload encoding" end
-    local payload = json.decode(payload_json)
+    local payload = decode_object(payload_json)
     if not payload then return nil, "invalid payload JSON" end
 
     -- exp / nbf must be numbers per RFC 7519 §4.1.4 / §4.1.5. A token
@@ -257,7 +268,7 @@ function jwt.decode(token)
     if #parts ~= 3 then return nil end
     local payload_json = segment_text(parts[2])
     if not payload_json then return nil end
-    return json.decode(payload_json)
+    return decode_object(payload_json)
 end
 
 return jwt

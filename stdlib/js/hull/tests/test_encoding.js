@@ -101,6 +101,10 @@ test("base64: strict decoding", () => {
     assertEq(base64.decode("Zg==="), null);
     assertEq(base64.decode("Zg==Zg=="), null, "data after padding");
     assertEq(base64.decode("Zm9vY"), null);
+    // One encoding per value: the unused low bits must be zero.
+    assertEq(base64.decode("Zh=="), null);
+    assertEq(base64.decode("Zm9="), null);
+    assertEq(base64.decode("Zh", { url: true }), null);
 });
 
 test("base64: lenient decoding skips whitespace only", () => {
@@ -130,6 +134,31 @@ test("base32: strict, and lenient for pasted secrets", () => {
     assertEq(base32.decode("MZXW1"), null);
     assertEq(base32.decode("mzxw 6ytb oi==\n", { lenient: true }), "foobar");
     assertEq(base32.decode("MZXW1", { lenient: true }), null);
+    // Lengths nothing encodes to (1, 3, 6 mod 8), and non-zero unused bits.
+    assertEq(base32.decode("M"), null);
+    assertEq(base32.decode("MZX"), null);
+    assertEq(base32.decode("MZXW6Y"), null);
+    assertEq(base32.decode("MZ"), null);
+});
+
+test("large values encode and decode in linear time", () => {
+    // Building output with `out += piece` is quadratic in this QuickJS. Rather
+    // than a wall-clock bound (machine-dependent), compare two sizes: 4x the
+    // input should cost about 4x the time; quadratic building costs about 16x.
+    function roundTrip(n) {
+        const big = ALL.repeat(n / 256);
+        const t0 = Date.now();
+        for (let r = 0; r < 4; r++) {
+            assertEq(hex.decode(hex.encode(big)), big, "hex");
+            assertEq(base64.decode(base64.encode(big)), big, "base64");
+        }
+        return Math.max(1, Date.now() - t0);
+    }
+    roundTrip(4096);                                  // warm up
+    const small = roundTrip(16384), large = roundTrip(65536);
+    if (large > small * 10) {
+        throw new Error("4x input took " + (large / small).toFixed(1) + "x the time");
+    }
 });
 
 // utf8 ------------------------------------------------------------------------

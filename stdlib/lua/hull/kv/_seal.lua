@@ -12,6 +12,7 @@
 
 local u       = require("hull.kv._util")
 local sealbox = require("hull.crypto.sealbox")
+local crypto  = require("hull.crypto")
 
 local M = {}
 local S = {}
@@ -49,6 +50,12 @@ function S:open(k, stored)
     u.error("decrypt_failed", "kv: the value for this key does not open with "
             .. "the handle's keys (altered, from another key or namespace, "
             .. "or sealed with a key not in the keyring)")
+end
+
+--- Whether two opened values are equal, in constant time: `cas` compares a
+--- secret value with the caller's guess.
+function S.same(_, a, b)
+    return type(a) == "string" and type(b) == "string" and crypto.constant_time_eq(a, b)
 end
 
 --- Whether a stored value is sealed under the current key already.

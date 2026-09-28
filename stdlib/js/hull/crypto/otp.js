@@ -47,7 +47,13 @@ function hotp(key, counter, digits) {
 
 /** The TOTP time step for unix time `now` and a period in seconds. */
 function step(now, period) {
-    return Math.floor(now / (period || 30));
+    if (period === undefined || period === null) period = 30;
+    if (typeof now !== "number" || !(now >= 0) || typeof period !== "number" || !(period > 0)) {
+        throw new Error("otp.step: time must be >= 0 and period > 0");
+    }
+    const s = Math.floor(now / period);
+    if (!Number.isSafeInteger(s)) throw new Error("otp.step: bad time or period");
+    return s;
 }
 
 export const otp = { hotp, step };

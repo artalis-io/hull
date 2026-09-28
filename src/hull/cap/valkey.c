@@ -276,9 +276,10 @@ static HlKvCasResult cas_attempt(HlKvHandle *h, const uint8_t *key, size_t klen,
     hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "MULTI");
     if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;
     hl_resp_writer_init(&w);
-    hl_resp_cmd_begin(&w, ttl_ms > 0 ? 5 : 3);
+    hl_resp_cmd_begin(&w, ttl_ms > 0 ? 5 : ttl_ms == HL_KV_TTL_KEEP ? 4 : 3);
     hl_resp_cmd_arg_cstr(&w, "SET"); hl_resp_cmd_arg(&w, key, klen); hl_resp_cmd_arg(&w, newv, nlen);
     if (ttl_ms > 0) { hl_resp_cmd_arg_cstr(&w, "PX"); hl_resp_cmd_arg_i64(&w, ttl_ms); }
+    else if (ttl_ms == HL_KV_TTL_KEEP) hl_resp_cmd_arg_cstr(&w, "KEEPTTL");  /* Valkey / Redis 6+ */
     if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;   /* +QUEUED (or -ERR queued -> EXECABORT) */
     hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "EXEC");
     if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;

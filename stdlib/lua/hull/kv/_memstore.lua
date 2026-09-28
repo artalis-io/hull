@@ -159,7 +159,13 @@ function Store:cas(k, expected, new, ttl)
     local e = live(self, k)
     local cur = e and e.v or nil
     if cur ~= expected then return false end
-    self:put(k, new, ttl)
+    if ttl == u.KEEP_TTL then
+        local exp = e and e.exp
+        self:put(k, new, false)
+        self.data[k].exp = exp
+    else
+        self:put(k, new, ttl)
+    end
     return true
 end
 

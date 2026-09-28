@@ -2706,6 +2706,60 @@ static int js_run_steps(const char *code, const char *global)
     return eval_int(global);
 }
 
+/* Regressions from docs/crypto_encoding_ssh_audit.md (PR 1). run() returns 0,
+ * or the number of the first check that failed. */
+UTEST(js_stdlib, crypto_encoding_audit_fixes)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "import { kv } from 'hull:kv';\n"
+        "import { cache } from 'hull:cache';\n"
+        "import { sealbox } from 'hull:crypto:sealbox';\n"
+        "import { otp } from 'hull:crypto:otp';\n"
+        "import { encoding } from 'hull:encoding';\n"
+        "function code(f) { try { f(); return null; } catch (e) { return e.code || e.message; } }\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "const K1 = 'a'.repeat(32), K2 = 'b'.repeat(32);\n"
+        "function run() {\n"
+        /* 1-3: crypto takes buffers, and a buffer is not the text '[object ArrayBuffer]' */
+        "  const key = '6b6579';\n"
+        "  const text = 'The quick brown fox';\n"
+        "  const u8 = encoding.bytes.toU8(text);\n"
+        "  if (crypto.hmacSha256(u8.buffer, key) !== crypto.hmacSha256(text, key)) return 1;\n"
+        "  if (crypto.hmacSha256(u8.buffer, key) === crypto.hmacSha256('[object ArrayBuffer]', key)) return 2;\n"
+        "  if (!crypto.constantTimeEq(u8, text) || crypto.constantTimeEq(u8, 'x')) return 3;\n"
+        /* 4-5: a string `current` is normalised, so rekey reaches 0 */
+        "  const h = kv.open({ namespace: 'cur', encrypt: { keys: { 1: K1, 2: K2 }, current: '2' } });\n"
+        "  kv.open({ namespace: 'cur', encrypt: { keys: { 1: K1 }, current: 1 } }).set('k', 'v');\n"
+        "  if (h.rekey() !== 1) return 4;\n"
+        "  if (h.rekey() !== 0) return 5;\n"
+        /* 6-7: rekey keeps each value's expiry */
+        "  const h1 = kv.open({ namespace: 'ttl', encrypt: { keys: { 1: K1 }, current: 1 } });\n"
+        "  h1.set('t', 'v', { ttl: 3600 });\n"
+        "  const before = h1._store.data.get('t').exp;\n"
+        "  const h2 = kv.open({ namespace: 'ttl', encrypt: { keys: { 1: K1, 2: K2 }, current: 2 } });\n"
+        "  if (!before || h2.rekey() !== 1) return 6;\n"
+        "  if (h1._store.data.get('t').exp !== before) return 7;\n"
+        /* 8-9: key ids in canonical decimal only */
+        "  if (!threw(() => sealbox.keyring({ keys: { ' 1': K1 }, current: 1 }))) return 8;\n"
+        "  if (!threw(() => sealbox.keyring({ keys: { '1e0': K1 }, current: 1 }))) return 9;\n"
+        /* 10: cache refuses encrypt */
+        "  if (code(() => cache.open({ encrypt: { keys: { 1: K1 }, current: 1 } })) !== 'invalid_argument') return 10;\n"
+        /* 11-12: sealbox checks its arguments; open of a non-byte string fails cleanly */
+        "  const r = sealbox.keyring({ keys: { 1: K1 }, current: 1 });\n"
+        "  if (!threw(() => sealbox.seal(r, new Uint8Array([1, 2, 3])))) return 11;\n"
+        "  if (sealbox.open(r, '\\u0100'.repeat(64)).reason !== 'open_failed') return 12;\n"
+        /* 13: otp.step refuses a zero period */
+        "  if (!threw(() => otp.step(60, 0))) return 13;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__audit1 = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__audit1"), 0);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, otp_rfc4226_vectors)
 {
     init_js_with_caps();

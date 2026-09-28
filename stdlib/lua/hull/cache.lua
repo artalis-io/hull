@@ -174,6 +174,12 @@ function cache.open(opts)
     if type(opts) ~= "table" then
         u.error("invalid_argument", "cache.open: options table required")
     end
+    if opts.encrypt ~= nil then
+        -- Refused rather than ignored: silently storing plaintext for a caller
+        -- that asked for encryption is the one wrong answer. Encrypted values
+        -- belong in hull.kv (docs/kv_cache.md "Encryption at rest").
+        u.error("invalid_argument", "cache.open: encrypt is not supported; use hull.kv")
+    end
     local backend = opts.backend or "memory"
     local ns = opts.namespace or "default"
     local store_ns = "cache:" .. ns   -- isolated from hull.kv's "kv:" namespaces

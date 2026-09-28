@@ -29,6 +29,30 @@ function fail(fname, msg) {
     throw new TypeError("encoding." + fname + ": " + msg);
 }
 
+// Every codec below builds its output through one of these two, never with
+// `out += piece`. In this QuickJS, `s += x` on a local copies all of `s` each
+// time (the string is shared with the variable, so it cannot grow in place),
+// which makes a 1 MB value cost a million full copies.
+//
+// Codes: char codes (0..0xFFFF) buffered and turned into 8 K-code pieces with
+// one String.fromCharCode each - also small enough that apply() cannot
+// overflow the stack. The pieces are joined once at the end.
+function Codes() {
+    this.buf = [];
+    this.parts = [];
+}
+Codes.prototype.push = function (c) {
+    this.buf.push(c);
+    if (this.buf.length === 8192) {
+        this.parts.push(String.fromCharCode.apply(null, this.buf));
+        this.buf = [];
+    }
+};
+Codes.prototype.done = function () {
+    if (this.buf.length) this.parts.push(String.fromCharCode.apply(null, this.buf));
+    return this.parts.join("");
+};
+
 // Any accepted byte input as a byte string.
 function toByteString(fname, x) {
     if (typeof x === "string") {
@@ -41,13 +65,11 @@ function toByteString(fname, x) {
     if (x instanceof ArrayBuffer) u8 = new Uint8Array(x);
     else if (ArrayBuffer.isView(x)) u8 = new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
     else fail(fname, "expected a byte string, ArrayBuffer or typed array");
-    // Chunked: one apply per 8 KiB rather than per byte, and small enough
-    // that a large value cannot overflow the call stack.
-    let s = "";
+    const parts = [];
     for (let i = 0; i < u8.length; i += 8192) {
-        s += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+        parts.push(String.fromCharCode.apply(null, u8.subarray(i, i + 8192)));
     }
-    return s;
+    return parts.join("");
 }
 
 function checkString(fname, s) {
@@ -89,21 +111,21 @@ const hex = {
     /** Lowercase hex, two characters per byte. */
     encode(x) {
         const s = toByteString("hex.encode", x);
-        let out = "";
-        for (let i = 0; i < s.length; i++) out += HEX_OUT[s.charCodeAt(i)];
-        return out;
+        const parts = new Array(s.length);
+        for (let i = 0; i < s.length; i++) parts[i] = HEX_OUT[s.charCodeAt(i)];
+        return parts.join("");
     },
     /** Bytes from hex; either case is accepted. */
     decode(text) {
         checkString("hex.decode", text);
         if (text.length % 2 !== 0) return null;
-        let out = "";
+        const out = new Codes();
         for (let i = 0; i < text.length; i += 2) {
             const hi = hexVal(text.charCodeAt(i)), lo = hexVal(text.charCodeAt(i + 1));
             if (hi < 0 || lo < 0) return null;
-            out += String.fromCharCode(hi * 16 + lo);
+            out.push(hi * 16 + lo);
         }
-        return out;
+        return out.done();
     },
 };
 
@@ -132,34 +154,36 @@ const base64 = {
         let pad = opts && opts.pad;
         if (pad === undefined || pad === null) pad = !url;
         const E = url ? URL : STD;
-        let out = "";
+        const parts = [];
         let i = 0;
         for (; i + 2 < s.length; i += 3) {
             const v = (s.charCodeAt(i) << 16) | (s.charCodeAt(i + 1) << 8) | s.charCodeAt(i + 2);
-            out += E[v >> 18] + E[(v >> 12) & 63] + E[(v >> 6) & 63] + E[v & 63];
+            parts.push(E[v >> 18] + E[(v >> 12) & 63] + E[(v >> 6) & 63] + E[v & 63]);
         }
         const rem = s.length - i;
         if (rem === 1) {
             const v = s.charCodeAt(i) << 4;
-            out += E[v >> 6] + E[v & 63] + (pad ? "==" : "");
+            parts.push(E[v >> 6] + E[v & 63] + (pad ? "==" : ""));
         } else if (rem === 2) {
             const v = (s.charCodeAt(i) << 10) | (s.charCodeAt(i + 1) << 2);
-            out += E[v >> 12] + E[(v >> 6) & 63] + E[v & 63] + (pad ? "=" : "");
+            parts.push(E[v >> 12] + E[(v >> 6) & 63] + E[v & 63] + (pad ? "=" : ""));
         }
-        return out;
+        return parts.join("");
     },
 
     /**
      * Bytes from base64. opts.url selects the url-safe alphabet, which takes
      * no padding; the standard alphabet takes padding or none, but if present
-     * it must be exactly right. opts.lenient skips whitespace.
+     * it must be exactly right. The unused low bits of the last character
+     * must be zero, so each value has exactly one encoding. opts.lenient
+     * skips whitespace.
      */
     decode(text, opts) {
         checkString("base64.decode", text);
         const url = !!(opts && opts.url);
         const lenient = !!(opts && opts.lenient);
         const D = url ? URL_DEC : STD_DEC;
-        let out = "";
+        const out = new Codes();
         let acc = 0, bits = 0, count = 0, padding = 0;
         for (let i = 0; i < text.length; i++) {
             const c = text.charCodeAt(i);
@@ -170,7 +194,7 @@ const base64 = {
                 count++;
                 if (bits >= 8) {
                     bits -= 8;
-                    out += String.fromCharCode((acc >> bits) & 0xff);
+                    out.push((acc >> bits) & 0xff);
                 }
             } else if (c === 61 && !url) {
                 padding++;
@@ -180,7 +204,8 @@ const base64 = {
         }
         if (count % 4 === 1) return null;
         if (padding > 0 && (padding > 2 || (count + padding) % 4 !== 0)) return null;
-        return out;
+        if ((acc & ((1 << bits) - 1)) !== 0) return null;      // non-canonical
+        return out.done();
     },
 };
 
@@ -190,48 +215,55 @@ const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const B32_DEC = decodeTable(B32);
 for (let i = 0; i < 26; i++) B32_DEC[B32.charCodeAt(i) + 32] = i;   // lowercase too
 
+// Base32 lengths (mod 8) that some byte count encodes to: 0, 2, 4, 5 and 7.
+const B32_LEN_OK = [true, false, true, false, true, true, false, true];
+
 const base32 = {
     /** RFC 4648 base32, uppercase, unpadded (the form authenticator apps take). */
     encode(x) {
         const s = toByteString("base32.encode", x);
-        let out = "";
+        const parts = [];
         let buf = 0, bits = 0;
         for (let i = 0; i < s.length; i++) {
             buf = ((buf << 8) | s.charCodeAt(i)) & 0xffff;
             bits += 8;
             while (bits >= 5) {
                 bits -= 5;
-                out += B32[(buf >> bits) & 31];
+                parts.push(B32[(buf >> bits) & 31]);
             }
         }
-        if (bits > 0) out += B32[(buf << (5 - bits)) & 31];
-        return out;
+        if (bits > 0) parts.push(B32[(buf << (5 - bits)) & 31]);
+        return parts.join("");
     },
 
     /**
-     * Bytes from base32, either case. Strictly, only the alphabet;
-     * opts.lenient also skips whitespace and '='.
+     * Bytes from base32, either case. Strictly, only the alphabet, a length
+     * some input encodes to, and zero unused low bits; opts.lenient also
+     * skips whitespace and '='.
      */
     decode(text, opts) {
         checkString("base32.decode", text);
         const lenient = !!(opts && opts.lenient);
-        let out = "";
-        let buf = 0, bits = 0;
+        const out = new Codes();
+        let buf = 0, bits = 0, count = 0;
         for (let i = 0; i < text.length; i++) {
             const c = text.charCodeAt(i);
             const v = c < 256 ? B32_DEC[c] : -1;
             if (v >= 0) {
                 buf = ((buf << 5) | v) & 0xffff;
                 bits += 5;
+                count++;
                 if (bits >= 8) {
                     bits -= 8;
-                    out += String.fromCharCode((buf >> bits) & 0xff);
+                    out.push((buf >> bits) & 0xff);
                 }
             } else if (!(lenient && (isWs(c) || c === 61))) {
                 return null;
             }
         }
-        return out;
+        if (!B32_LEN_OK[count % 8]) return null;
+        if ((buf & ((1 << bits) - 1)) !== 0) return null;      // non-canonical
+        return out.done();
     },
 };
 
@@ -248,10 +280,10 @@ const utf8 = {
     /** The UTF-8 bytes of `text`, as a byte string. Throws on a lone surrogate. */
     encode(text) {
         checkString("utf8.encode", text);
-        let out = "";
+        const out = new Codes();
         for (let i = 0; i < text.length; i++) {
             let c = text.charCodeAt(i);
-            if (c < 0x80) { out += text[i]; continue; }
+            if (c < 0x80) { out.push(c); continue; }
             if (c >= 0xd800 && c <= 0xdfff) {
                 const d = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
                 if (c > 0xdbff || d < 0xdc00 || d > 0xdfff) {
@@ -261,25 +293,25 @@ const utf8 = {
                 i++;
             }
             if (c < 0x800) {
-                out += String.fromCharCode(0xc0 | (c >> 6), 0x80 | (c & 63));
+                out.push(0xc0 | (c >> 6)); out.push(0x80 | (c & 63));
             } else if (c < 0x10000) {
-                out += String.fromCharCode(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63),
-                                           0x80 | (c & 63));
+                out.push(0xe0 | (c >> 12)); out.push(0x80 | ((c >> 6) & 63));
+                out.push(0x80 | (c & 63));
             } else {
-                out += String.fromCharCode(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63),
-                                           0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+                out.push(0xf0 | (c >> 18)); out.push(0x80 | ((c >> 12) & 63));
+                out.push(0x80 | ((c >> 6) & 63)); out.push(0x80 | (c & 63));
             }
         }
-        return out;
+        return out.done();
     },
 
     /** `bytes` (byte string or buffer) as text, or null if not well-formed UTF-8. */
     decode(x) {
         const s = toByteString("utf8.decode", x);
-        let out = "";
+        const out = new Codes();
         for (let i = 0; i < s.length;) {
             const b = s.charCodeAt(i);
-            if (b < 0x80) { out += s[i]; i++; continue; }
+            if (b < 0x80) { out.push(b); i++; continue; }
             let n, c, min;
             if (b >= 0xc2 && b <= 0xdf) { n = 1; c = b & 0x1f; min = 0x80; }
             else if (b >= 0xe0 && b <= 0xef) { n = 2; c = b & 0x0f; min = 0x800; }
@@ -291,10 +323,15 @@ const utf8 = {
                 c = (c << 6) | (t & 0x3f);
             }
             if (c < min || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) return null;
-            out += String.fromCodePoint(c);
+            if (c < 0x10000) {
+                out.push(c);
+            } else {                           // as a UTF-16 surrogate pair
+                c -= 0x10000;
+                out.push(0xd800 | (c >> 10)); out.push(0xdc00 | (c & 0x3ff));
+            }
             i += n + 1;
         }
-        return out;
+        return out.done();
     },
 };
 

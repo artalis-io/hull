@@ -79,7 +79,7 @@ function H:cas(k, expected, new, opts)
     if expected == nil then return self._s:cas(k, nil, sealed_new, ttl) end
     local stored = self._s:get(k)
     if stored == nil then return false end
-    if self._seal:open(k, stored) ~= expected then return false end
+    if not self._seal:same((self._seal:open(k, stored)), expected) then return false end
     return self._s:cas(k, stored, sealed_new, ttl)
 end
 
@@ -99,8 +99,10 @@ function H:rekey(prefix, opts)
         if stored ~= nil then
             local value, version = self._seal:open(k, stored)
             if not self._seal:is_current(version) then
-                if self._s:cas(k, stored, self._seal:seal(k, value),
-                               opts and opts.ttl) then
+                -- Keep each value's expiry: re-sealing is not a write.
+                local ttl = u.KEEP_TTL
+                if opts and opts.ttl ~= nil then ttl = opts.ttl end
+                if self._s:cas(k, stored, self._seal:seal(k, value), ttl) then
                     n = n + 1
                 end
             end

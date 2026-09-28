@@ -33,7 +33,8 @@ binary blobs prefer `hull/blob`.
 - `get` on a **miss returns `nil` / `null`** (absence is a value, per the stdlib
   error convention). A backend/transport error **throws** a coded error.
 - Coded errors carry a stable `.code`: `invalid_argument`, `unsupported`,
-  `capacity_exceeded`, `conflict`.
+  `capacity_exceeded`, `conflict`; `corrupt` when a stored row does not decode,
+  and `decrypt_failed` on an encrypted handle (see "Encryption at rest").
 - Max key size is 1024 bytes; values are bounded only by the backend (and, for a
   memory cache, the byte budget).
 

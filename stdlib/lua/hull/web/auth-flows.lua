@@ -1631,8 +1631,11 @@ function M.init(opts)
 
     -- crypto.hmac_sha256 takes the key as a hex string; we encode
     -- once at init and reuse the hex form per request.
-    -- hull.encoding is byte-identical in both runtimes, so a secret with
-    -- non-ASCII bytes derives the same HMAC key in Lua and JS.
+    -- The secret is bytes. The same bytes derive the same key in Lua and JS
+    -- (hull.encoding is byte-identical), but the same TEXT may not: a Lua
+    -- string holds text as UTF-8, a JS byte string one character per byte.
+    -- For a non-ASCII secret written as text, pass JS
+    -- encoding.utf8.encode(secret) so both runtimes see the same bytes.
     _state.state_secret_hex = encoding.hex.encode(secret)
     _state.email_send       = opts.email_send
     _state.public_origin    = opts.public_origin

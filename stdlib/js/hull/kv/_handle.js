@@ -67,7 +67,7 @@ function build(store, meta) {
             if (absent(expected)) return store.cas(k, null, sealedNew, ttl);
             const stored = store.get(k);
             if (absent(stored)) return false;
-            if (seal.open(k, stored)[0] !== expected) return false;
+            if (!seal.same(seal.open(k, stored)[0], expected)) return false;
             return store.cas(k, stored, sealedNew, ttl);
         },
 
@@ -83,8 +83,9 @@ function build(store, meta) {
                 const stored = store.get(k);
                 if (absent(stored)) continue;
                 const [value, version] = seal.open(k, stored);
-                if (!seal.isCurrent(version)
-                    && store.cas(k, stored, seal.seal(k, value), opts && opts.ttl)) n++;
+                // Keep each value's expiry: re-sealing is not a write.
+                const ttl = (opts && opts.ttl !== undefined && opts.ttl !== null) ? opts.ttl : util.KEEP_TTL;
+                if (!seal.isCurrent(version) && store.cas(k, stored, seal.seal(k, value), ttl)) n++;
             }
             return n;
         },

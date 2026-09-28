@@ -17,6 +17,10 @@
 -- open: a value sealed for one key name cannot be moved to another and still
 -- open. The JS module (hull:crypto:sealbox) produces the same bytes.
 --
+-- Whether a context was used is not itself recorded (TOTP's rows predate
+-- contexts and must keep opening), so give a keyring one use: either always
+-- with a context (hull.kv) or never (TOTP), not both.
+--
 -- Keys are 32 random bytes, grouped in a keyring:
 --
 --     local ring = sealbox.keyring{ keys = { [1] = k1, [2] = k2 }, current = 2 }
@@ -40,25 +44,42 @@ local spack, sunpack = string.pack, string.unpack
 --- Ids are unsigned 32-bit integers; `current` must be one of them. Raises on
 --- anything else: a keyring is configuration, and a wrong one is a bug to hear
 --- about at startup rather than a value that later fails to open.
+-- A key id: an integer 0..2^32-1, or the same written in canonical decimal
+-- ("7", never "07", " 7" or "0x7") - ids often arrive from the environment as
+-- text. nil for anything else. The JS module accepts exactly the same.
+local function key_id(v)
+    if type(v) == "string" then
+        if not (v == "0" or v:match("^[1-9]%d*$")) or #v > 10 then return nil end
+        v = math.tointeger(tonumber(v))
+    end
+    if math.type(v) ~= "integer" or v < 0 or v > 0xFFFFFFFF then return nil end
+    return v
+end
+
 function M.keyring(opts)
     if type(opts) ~= "table" or type(opts.keys) ~= "table" then
         error("sealbox.keyring: expected { keys = {[id] = key, ...}, current = id }", 2)
     end
     local keys = {}
-    for id, k in pairs(opts.keys) do
-        if math.type(id) ~= "integer" or id < 0 or id > 0xFFFFFFFF then
+    for raw, k in pairs(opts.keys) do
+        local id = key_id(raw)
+        if not id then
             error("sealbox.keyring: key ids must be integers 0..2^32-1", 2)
+        end
+        if keys[id] then
+            error("sealbox.keyring: key id " .. id .. " given twice", 2)
         end
         if type(k) ~= "string" or #k ~= 32 then
             error("sealbox.keyring: key " .. tostring(id) .. " must be exactly 32 bytes", 2)
         end
         keys[id] = hex.encode(k)
     end
-    if keys[opts.current] == nil then
+    local current = key_id(opts.current)
+    if current == nil or keys[current] == nil then
         error("sealbox.keyring: current key id " .. tostring(opts.current)
               .. " is not in keys", 2)
     end
-    return { keys = keys, current = opts.current }
+    return { keys = keys, current = current }
 end
 
 -- The frame: the value, preceded by each context string, length-prefixed so
@@ -85,7 +106,23 @@ end
 
 --- Seal `value` under the ring's current key, bound to `context` (an array of
 --- strings, or nil). Returns the blob.
+-- Arguments are checked, not coerced: sealing the wrong thing would produce a
+-- blob that opens to something the caller never stored.
+local function check_context(fname, context)
+    if context == nil then return end
+    if type(context) ~= "table" then
+        error("sealbox." .. fname .. ": context must be an array of strings", 3)
+    end
+    for i = 1, #context do
+        if type(context[i]) ~= "string" then
+            error("sealbox." .. fname .. ": context entries must be strings", 3)
+        end
+    end
+end
+
 function M.seal(ring, value, context)
+    if type(value) ~= "string" then error("sealbox.seal: value must be a string", 2) end
+    check_context("seal", context)
     local key = ring.keys[ring.current]
     local nonce = crypto.random(M.NONCE_LEN)
     local ct_hex = crypto.secretbox(frame(context, value),
@@ -101,6 +138,7 @@ end
 --- One reason covers every way a blob can fail to be genuine, on purpose, so
 --- the answer tells an attacker nothing about which check stopped them.
 function M.open(ring, blob, context)
+    check_context("open", context)
     if type(blob) ~= "string" or #blob < M.MIN_LEN then return nil, "open_failed" end
     local version = sunpack(">I4", blob)
     local key = ring.keys[version]

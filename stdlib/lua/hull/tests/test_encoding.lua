@@ -97,6 +97,10 @@ test("base64: strict decoding", function()
     assert_eq(select(2, base64.decode("Zg===")), "bad_padding")
     assert_eq(select(2, base64.decode("Zg==Zg==")), "bad_padding", "data after padding")
     assert_eq(select(2, base64.decode("Zm9vY")), "bad_length")
+    -- One encoding per value: the unused low bits must be zero.
+    assert_eq(select(2, base64.decode("Zh==")), "non_canonical")
+    assert_eq(select(2, base64.decode("Zm9=")), "non_canonical")
+    assert_eq(select(2, base64.decode("Zh", { url = true })), "non_canonical")
 end)
 
 test("base64: lenient decoding skips whitespace only", function()
@@ -126,6 +130,11 @@ test("base32: strict, and lenient for pasted secrets", function()
     assert_eq(select(2, base32.decode("MZXW1")), "invalid_char")
     assert_eq(base32.decode("mzxw 6ytb oi==\n", { lenient = true }), "foobar")
     assert_eq(select(2, base32.decode("MZXW1", { lenient = true })), "invalid_char")
+    -- Lengths nothing encodes to (1, 3, 6 mod 8), and non-zero unused bits.
+    assert_eq(select(2, base32.decode("M")), "bad_length")
+    assert_eq(select(2, base32.decode("MZX")), "bad_length")
+    assert_eq(select(2, base32.decode("MZXW6Y")), "bad_length")
+    assert_eq(select(2, base32.decode("MZ")), "non_canonical")
 end)
 
 -- utf8 ------------------------------------------------------------------------
