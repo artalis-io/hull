@@ -270,10 +270,10 @@ $(BUILDDIR)/test_agent_probe: $(TESTDIR)/hull/agent/test_agent_probe.c \
 # the crypto objects (reusing the PG set: cap_crypto + mbedTLS + tweetnacl).
 # -DHL_MY_NO_TLS keeps mysql_conn.c free of Keel's KlTls (raw-socket transport)
 # so the codec test needs no TLS link, mirroring test_pg_conn's -DHL_PG_NO_TLS.
-$(BUILDDIR)/test_mysqlwire: $(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_mysqlwire: $(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) $(HEX_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_MY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c \
-		$(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) $(LDFLAGS)
+		$(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) $(HEX_OBJ) $(LDFLAGS)
 
 # mysql connection / handshake test. hl_my_conn_start rides the shared HlDbTransport
 # byte transport (Keel v3), so the test source-compiles mysql_conn.c + mysqlwire.c
