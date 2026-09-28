@@ -55,7 +55,6 @@ local transport  = require('hull.ssh.transport')
 local packet     = require('hull.ssh.packet')
 local privatekey = require('hull.ssh.privatekey')
 local hostkey    = require('hull.ssh.hostkey')
-local kex        = require('hull.ssh.kex')
 
 local M = {}
 
