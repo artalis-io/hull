@@ -147,6 +147,22 @@ function Sftp:collect(ids)
     return out
 end
 
+-- The next reply, which must answer one of the requests in `pending` (a set
+-- of ids). The sliding-window transfers below take replies one at a time, in
+-- whatever order the server sends them.
+function Sftp:recv_pending(pending)
+    local r = self:recv()
+    if not pending[r.id] then
+        local ids = {}
+        for id in pairs(pending) do ids[#ids + 1] = id end
+        table.sort(ids)
+        error("ssh.sftp: reply for request " .. tostring(r.id)
+              .. " while waiting for " .. table.concat(ids, ","))
+    end
+    pending[r.id] = nil
+    return r
+end
+
 -- Close a handle and collect the server's answer, on every path. Returns the
 -- status reply.
 function Sftp:close_handle(handle)
@@ -295,9 +311,20 @@ end
 -- Files -----------------------------------------------------------------------
 
 -- One read or write request. 32 KiB is what every server honours in full
--- (OpenSSH caps a read at 256 KiB); PIPELINE of them are in flight at once.
+-- (OpenSSH caps a read at 256 KiB).
 local IO_CHUNK = 32768
-local PIPELINE = 8
+
+-- Requests in flight at once, as a sliding window: a new one goes out as each
+-- reply comes back, so the pipe never drains between batches. 64 x 32 KiB is
+-- what OpenSSH's sftp keeps in flight, and fits the 2 MiB channel window we
+-- grant (hull.ssh.channel.DEFAULT_WINDOW), which is topped up as replies are
+-- consumed. At 50 ms a round trip that is up to ~40 MB/s, where 8 requests in
+-- lock-step batches managed under 5.
+local PIPELINE = 64
+
+-- What Sftp:read asks File:read for at a time. Each File:read ends with its
+-- window drained, so a larger piece means fewer drains per file.
+local WHOLE_READ = 8 * 1024 * 1024
 
 local OPEN_MODES = {
     r    = sftp.FXF_READ,
@@ -342,45 +369,75 @@ function File:read(n)
     if math.type(n) ~= "integer" or n < 1 then
         bad_argument("ssh.sftp: read size must be a positive integer")
     end
-    local parts, got = {}, 0
-    while got < n do
-        -- One batch of requests for consecutive chunks. The batch starts at
-        -- one and doubles each time a batch comes back full, up to PIPELINE:
-        -- a small file costs what it always did (one read, then EOF), and a
-        -- large one reaches full pipelining within a few round trips.
-        local batch = self.ramp or 1
-        local ids, sizes = {}, {}
-        local off = self.pos + got
-        while #ids < batch and got + (#ids * IO_CHUNK) < n do
-            local want = math.min(IO_CHUNK, n - got - #ids * IO_CHUNK)
-            ids[#ids + 1] = self.s:submit(sftp.build_read, self.handle,
-                                          off + #ids * IO_CHUNK, want)
-            sizes[#sizes + 1] = want
+    local limit = self.pos + n
+    local pending, requests = {}, {}  -- id -> true; id -> { off, want }
+    local ready = {}                   -- offset -> { r, want }, out of order
+    local count = 0
+    local next_off = self.pos          -- the next offset to ask for
+    local cursor = self.pos            -- the next offset to hand back
+    local parts = {}
+    local stop = false                 -- EOF, a short reply or an error seen
+    local err
+    -- The window starts at one and grows by one per full reply, up to
+    -- PIPELINE: a small file costs what it always did (one read, then EOF),
+    -- and a large one fills the window within a few round trips.
+    local depth = self.ramp or 1
+
+    while true do
+        while not stop and count < depth and next_off < limit do
+            local want = math.min(IO_CHUNK, limit - next_off)
+            local id = self.s:submit(sftp.build_read, self.handle, next_off, want)
+            pending[id], requests[id] = true, { off = next_off, want = want }
+            count = count + 1
+            next_off = next_off + want
         end
-        local replies = self.s:collect(ids)
-        -- Taken in offset order, stopping at the first short or EOF reply:
-        -- anything after a gap describes bytes past it, and is asked for
-        -- again by the next read rather than returned out of place.
-        local short = false
-        for i, r in ipairs(replies) do
-            if not short then
-                if r.type == "data" then
-                    parts[#parts + 1] = r.data
-                    got = got + #r.data
-                    if #r.data < sizes[i] then short = true end
-                elseif r.type == "status" and r.eof then
-                    short = true
-                else
-                    self.pos = self.pos + got
-                    return nil, sftp_error(r)
-                end
+        if count == 0 then break end
+
+        local r = self.s:recv_pending(pending)
+        local req = requests[r.id]
+        requests[r.id] = nil
+        count = count - 1
+        if r.type == "data" and #r.data > req.want then
+            -- More than was asked for is not a short read to trust; it is a
+            -- server describing bytes it was not asked about.
+            r = { type = "overlong" }
+        end
+        if r.type == "data" and #r.data == req.want then
+            depth = math.min(PIPELINE, depth + 1)
+        else
+            stop = true          -- the file ends (or fails) here: ask no further
+        end
+        ready[req.off] = { r = r, want = req.want }
+
+        -- Hand back in offset order, stopping at the first short, EOF or
+        -- failed reply: anything after a gap describes bytes past it, and is
+        -- asked for again by the next read rather than returned out of place.
+        -- Replies still in flight are collected (and dropped) before
+        -- returning, so none is left to be mistaken for another's answer.
+        while not err and ready[cursor] do
+            local e = ready[cursor]
+            ready[cursor] = nil
+            if e.r.type == "data" then
+                parts[#parts + 1] = e.r.data
+                cursor = cursor + #e.r.data
+                if #e.r.data < e.want then cursor = math.huge end
+            elseif e.r.type == "status" and e.r.eof then
+                cursor = math.huge
+            elseif e.r.type == "overlong" then
+                err = { code = "bad_reply",
+                        detail = "READ returned more data than was asked for" }
+            else
+                err = sftp_error(e.r)
             end
         end
-        if short then break end
-        self.ramp = math.min(PIPELINE, batch * 2)
+        if err then stop = true end
     end
-    self.pos = self.pos + got
-    return table.concat(parts)
+
+    self.ramp = depth
+    local out = table.concat(parts)
+    self.pos = self.pos + #out
+    if err then return nil, err end
+    return out
 end
 
 --- Write all of `data` at the current position (at the end, in "a" mode).
@@ -390,19 +447,24 @@ function File:write(data)
     if type(data) ~= "string" then
         bad_argument("ssh.sftp: write takes a string")
     end
-    local off = 0
-    while off < #data do
-        local ids = {}
-        while #ids < PIPELINE and off < #data do
+    -- The same sliding window as read: a new chunk goes out as each status
+    -- comes back. After a failure no more are sent, and those in flight are
+    -- still collected so none is left to answer a later request.
+    local pending, count, off, err = {}, 0, 0, nil
+    while true do
+        while not err and count < PIPELINE and off < #data do
             local chunk = data:sub(off + 1, off + IO_CHUNK)
-            ids[#ids + 1] = self.s:submit(sftp.build_write, self.handle,
-                                          self.pos + off, chunk)
+            pending[self.s:submit(sftp.build_write, self.handle,
+                                  self.pos + off, chunk)] = true
+            count = count + 1
             off = off + #chunk
         end
-        for _, r in ipairs(self.s:collect(ids)) do
-            if not (r.type == "status" and r.ok) then return nil, sftp_error(r) end
-        end
+        if count == 0 then break end
+        local r = self.s:recv_pending(pending)
+        count = count - 1
+        if not err and not (r.type == "status" and r.ok) then err = sftp_error(r) end
     end
+    if err then return nil, err end
     self.pos = self.pos + #data
     return true
 end
@@ -445,7 +507,7 @@ function Sftp:read(path, max)
     if not f then return nil, err end
     local parts, total = {}, 0
     while true do
-        local chunk, rerr = f:read(PIPELINE * IO_CHUNK)
+        local chunk, rerr = f:read(math.min(WHOLE_READ, max + 1))
         if not chunk then f:close(); return nil, rerr end
         if chunk == "" then break end
         total = total + #chunk

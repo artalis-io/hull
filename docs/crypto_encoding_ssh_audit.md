@@ -149,11 +149,12 @@ a byte-only crypto API (a deliberate breaking change).
 
 ### PR 5: SFTP throughput
 
-- [ ] At most 8 x 32 KiB requests in flight, sent in lock-step batches (send
+- [x] At most 8 x 32 KiB requests in flight, sent in lock-step batches (send
   all, wait for all), so the pipe drains between batches: under 256 KiB per
   round trip, about 5 MB/s over a 50 ms relay. OpenSSH keeps 64 in flight and
   the 2 MiB channel window already allows it. Move reads and writes to a
-  sliding window.
+  sliding window. Done: up to 64 in flight, topped up per reply; a READ reply
+  longer than the request is now `bad_reply`.
 
 ### PR 6: byte-only crypto API (breaking)
 

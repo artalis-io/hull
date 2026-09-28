@@ -1124,8 +1124,10 @@ test("open with opts.mode creates the file with those permissions", function()
 end)
 
 test("a large read ramps up to several requests in flight", function()
-    -- 1 request, then 2, then 4: a big file reaches full pipelining in a few
-    -- round trips, where one-at-a-time would be a round trip per 32 KiB.
+    -- The window starts at one and grows by one per full reply, topped up as
+    -- each reply arrives: a big file reaches full pipelining in a few round
+    -- trips, where one-at-a-time would be a round trip per 32 KiB. The
+    -- replies below answer requests 2, 3+4, 5-8 in that order.
     local C = 32768
     local full = string.rep("a", C)
     local f = sftp_over(s_handle(1, "h")
@@ -1137,6 +1139,79 @@ test("a large read ramps up to several requests in flight", function()
     assert_eq(#got, 3 * C + 4, "three full chunks and the tail:")
     assert_eq(got:sub(-4), "tail")
     assert_eq(file:tell(), 3 * C + 4)
+end)
+
+test("a read keeps the window full instead of draining it between batches", function()
+    -- Record, at each request we send, how many replies had been consumed.
+    -- In flight = requests sent - replies taken. Lock-step batches let that
+    -- fall to zero before each new batch; a sliding window keeps it at the
+    -- top once it gets there, sending one request per reply.
+    local C, N = 32768, 200     -- enough to reach 64 and stay there
+    local full = string.rep("r", C)
+    local script = { s_handle(1, "h") }
+    local ends = {}                          -- where each data reply ends
+    local head = conf() .. ok_reply() .. s_version() .. s_handle(1, "h")
+    local at = #head
+    for i = 1, N do
+        local rpl = s_data(i + 1, full)
+        script[#script + 1] = rpl
+        at = at + #rpl
+        ends[i] = at
+    end
+    local s = fake_stream(conf() .. ok_reply() .. s_version() .. table.concat(script), 4096)
+    local reads, inflight = 0, {}
+    local write = s.write
+    s.write = function(self, bytes)
+        local p = packet.parse(bytes, 8)
+        if p and p:byte(1) == 94 then
+            local r = wire.reader(p); r:byte(); r:uint32()
+            local body = r:string()
+            -- one SFTP READ per CHANNEL_DATA here (they are small)
+            if #body > 5 and body:byte(5) == 5 then
+                reads = reads + 1
+                local taken = 0
+                for _, e in ipairs(ends) do if e < self._pos then taken = taken + 1 end end
+                inflight[#inflight + 1] = reads - taken
+            end
+        end
+        return write(self, bytes)
+    end
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    local file = assert(f:open("/big", "r"))
+    assert_eq(#file:read(N * C), N * C)
+    assert_eq(reads, N)
+    local peak, at_peak = 0, nil
+    for i, v in ipairs(inflight) do
+        if v > peak then peak, at_peak = v, i end
+    end
+    assert_eq(peak, 64, "the window reaches 64 requests:")
+    for i = at_peak, #inflight do
+        assert_eq(inflight[i] >= 63, true, "request " .. i .. " sent with "
+                  .. inflight[i] .. " in flight")
+    end
+end)
+
+test("a READ reply longer than the request is refused", function()
+    local f = sftp_over(s_handle(1, "h") .. s_data(2, "toolong"))
+    local file = assert(f:open("/f", "r"))
+    local d, err = file:read(3)
+    assert_eq(d, nil)
+    assert_eq(err.code, "bad_reply")
+end)
+
+test("a failed write stops sending and still collects what is in flight", function()
+    local C = 32768
+    local f, s = sftp_over(s_handle(1, "h") .. s_status(2, 0) .. s_status(3, 4)
+                           .. s_status(4, 0) .. s_status(5, 0) .. s_status(6, 0),
+                           4096, 1048576)
+    local file = assert(f:open("/f", "w"))
+    local ok, err = file:write(string.rep("w", 4 * C))
+    assert_eq(ok, nil)
+    assert_eq(err.code, "failure")
+    -- the CLOSE after it gets its own reply, not a leftover write status
+    assert_eq(file:close(), true)
+    assert_eq(#sent_of_type(s, 6), 4)
 end)
 
 test("replies are matched by id even when the server reorders them", function()
@@ -1182,7 +1257,7 @@ test("a failed sftp read does not shift the next request's replies", function()
     -- it instead of its handle, and every reply after was off by one - a
     -- write could land in the previous file.
     local s = fake_stream(conf() .. ok_reply() .. s_version()
-        .. s_handle(1, "hA") .. s_data(2, "xxxxxxxx") .. s_status(3, 0)
+        .. s_handle(1, "hA") .. s_data(2, "xxxxx") .. s_status(3, 0)
         .. s_handle(4, "hB") .. s_status(5, 0) .. s_status(6, 0), 11)
     local t = transport.new(s, stub_crypto())
     local f = assert(t:sftp())
