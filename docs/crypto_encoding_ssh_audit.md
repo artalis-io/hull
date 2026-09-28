@@ -136,7 +136,7 @@ a byte-only crypto API (a deliberate breaking change).
   JS twin of attachment-serve also lost a private UTF-8 encoder.
 - [x] Five percent-decoders in C: two identical query-string decoders in
   `runtime/{lua,js}/bindings.c` (each with its own inline hex-digit parse)
-  and the Postgres, MySQL and Valkey DSN decoders. Add `utils/url.c` with a
+  and the Postgres, MySQL and Valkey DSN decoders. Add `utils/url.h` (header-only) with a
   strict mode (DSNs) and a form mode (`+` is a space, a malformed escape is
   kept), and move all five onto it.
 - [x] `base64url(random(n))` / `hex(random(n))` is written out at 14 sites

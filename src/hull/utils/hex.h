@@ -52,9 +52,18 @@ int hl_hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_cap)
 
 /*
  * The value (0-15) of one hex digit, either case, or -1 for anything else.
- * For parsers that meet hex one escape at a time (the DSN percent-decoders);
- * pass a char as (unsigned char) so a byte >= 0x80 is not sign-extended.
+ * For parsers that meet hex one character at a time (utils/url.h); pass a
+ * char as (unsigned char) so a byte >= 0x80 is not sign-extended.
+ *
+ * Inline, so a composed feature archive that uses it (through utils/url.h)
+ * needs no symbol from the platform library.
  */
-int hl_hex_digit(int c);
+static inline int hl_hex_digit(int c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
 
 #endif /* HULL_UTILS_HEX_H */

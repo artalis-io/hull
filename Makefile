@@ -1052,11 +1052,6 @@ CAP_OBJS += $(HEX_OBJ)
 # link closure; rides CAP_OBJS for the same reach as hex.
 BASE64_OBJ := $(BUILDDIR)/base64.o
 CAP_OBJS += $(BASE64_OBJ)
-# url is the same kind of leaf (src/hull/utils/url.c): the single home for
-# percent-decoding in C, used by the Lua and JS request-query parsers and the
-# Postgres, MySQL and Valkey DSN parsers. Depends only on hex.
-URL_OBJ := $(BUILDDIR)/url.o
-CAP_OBJS += $(URL_OBJ)
 # host is the domain-free leaf util (src/hull/shared/host.c) owning every
 # per-host fact a user-facing string depends on: the PATH list separator, the
 # executable suffix a produced artifact needs (".com" for an APE on Windows),
@@ -3224,9 +3219,6 @@ $(HEX_OBJ): $(SRCDIR)/hull/utils/hex.c $(SRCDIR)/hull/utils/hex.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(BASE64_OBJ): $(SRCDIR)/hull/utils/base64.c $(SRCDIR)/hull/utils/base64.h | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
-
-$(URL_OBJ): $(SRCDIR)/hull/utils/url.c $(SRCDIR)/hull/utils/url.h $(SRCDIR)/hull/utils/hex.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(HOST_OBJ): $(SRCDIR)/hull/shared/host.c $(INCDIR)/hull/shared/host.h | $(BUILDDIR)
