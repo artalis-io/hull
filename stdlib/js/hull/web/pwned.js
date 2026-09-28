@@ -17,6 +17,7 @@
  */
 
 import { crypto }     from "hull:crypto";
+import { encoding } from "hull:encoding";
 import { httpClient } from "hull:http-client";
 import { log }        from "hull:log";
 import { time }       from "hull:time";
@@ -39,7 +40,7 @@ let _warnedFailopen = false;
 // for protocols like HIBP that hardcode SHA-1. Do NOT use SHA-1
 // for any new cryptographic purpose.
 function sha1Hex(msg) {
-    return crypto.hexEncode(crypto.sha1(msg)).toUpperCase();
+    return encoding.hex.encode(crypto.sha1(msg)).toUpperCase();
 }
 
 // Binary search the embedded blocklist. hashes is a packed sort of

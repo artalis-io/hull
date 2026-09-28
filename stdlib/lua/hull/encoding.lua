@@ -1,6 +1,6 @@
 -- hull.encoding - byte <-> text codecs: hex, base64 (standard and url-safe),
--- base32. The one home for them in the stdlib; the JS module (hull:encoding)
--- produces and accepts exactly the same text.
+-- base32, and UTF-8. The one home for them in the stdlib; the JS module
+-- (hull:encoding) produces and accepts exactly the same text.
 --
 --   local enc = require("hull.encoding")
 --   enc.hex.encode(bytes)                        -- lowercase
@@ -193,6 +193,29 @@ function M.base32.decode(text, opts)
         end
     end
     return concat(out)
+end
+
+-- UTF-8 ---------------------------------------------------------------------
+--
+-- Text and bytes are the same thing in Lua, so this is the half of the JS
+-- family that matters here: checking that bytes really are UTF-8 before they
+-- are used as text (a decoded token payload, say). It exists in Lua so the
+-- two runtimes accept exactly the same input.
+
+M.utf8 = {}
+
+--- The UTF-8 bytes of `text`. A Lua string already is its bytes.
+function M.utf8.encode(text)
+    check_string("utf8.encode", text)
+    return text
+end
+
+--- `bytes` as text if they are well-formed UTF-8 (no overlong forms, no
+--- surrogates, nothing above U+10FFFF); otherwise nil, "invalid_utf8".
+function M.utf8.decode(bytes)
+    check_string("utf8.decode", bytes)
+    if not utf8.len(bytes) then return nil, "invalid_utf8" end
+    return bytes
 end
 
 return M

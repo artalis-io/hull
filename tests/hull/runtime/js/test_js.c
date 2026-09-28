@@ -1979,7 +1979,7 @@ UTEST(js_middleware, order_preserved)
     cleanup_js();
 }
 
-/* ── HMAC-SHA256 / base64url tests ─────────────────────────────────── */
+/* ── HMAC-SHA256 tests ───────────────────────────────────────────── */
 
 UTEST(js_cap, crypto_hmac_sha256)
 {
@@ -2053,104 +2053,6 @@ UTEST(js_cap, crypto_hmac_sha1)
     ASSERT_NE(totp, NULL);
     ASSERT_STREQ(totp, "75a48a19d4cbe100644e8ac1397eea747a2d33ab");
     free(totp);
-
-    cleanup_js_caps();
-}
-
-UTEST(js_cap, crypto_base64url_roundtrip)
-{
-    init_js_with_caps();
-    ASSERT_TRUE(js_initialized);
-
-    const char *code =
-        "import { crypto } from 'hull:crypto';\n"
-        "globalThis.__test_b64_enc = crypto.base64urlEncode('Hello, World!');\n"
-        "globalThis.__test_b64_dec = crypto.base64urlDecode('SGVsbG8sIFdvcmxkIQ');\n"
-        "const orig = 'test data 123!@#';\n"
-        "globalThis.__test_b64_rt = crypto.base64urlDecode(crypto.base64urlEncode(orig)) === orig ? 1 : 0;\n"
-        "globalThis.__test_b64_inv = crypto.base64urlDecode('!!!invalid!!!') === null ? 1 : 0;\n";
-
-    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
-                          JS_EVAL_TYPE_MODULE);
-    if (JS_IsException(val))
-        hl_js_dump_error(&js);
-    JS_FreeValue(js.ctx, val);
-    hl_js_run_jobs(&js);
-
-    char *enc = eval_str("globalThis.__test_b64_enc");
-    ASSERT_NE(enc, NULL);
-    ASSERT_STREQ(enc, "SGVsbG8sIFdvcmxkIQ");
-    free(enc);
-
-    char *dec = eval_str("globalThis.__test_b64_dec");
-    ASSERT_NE(dec, NULL);
-    ASSERT_STREQ(dec, "Hello, World!");
-    free(dec);
-
-    ASSERT_EQ(eval_int("globalThis.__test_b64_rt"), 1);
-    ASSERT_EQ(eval_int("globalThis.__test_b64_inv"), 1);
-
-    cleanup_js_caps();
-}
-
-/* Regression: crypto.base64urlEncode used to call JS_ToCStringLen
- * unconditionally, which (a) .toString()s an ArrayBuffer to
- * "[object ArrayBuffer]" and (b) UTF-8-inflates any byte >= 0x80 in
- * a Uint8Array.  The encoder now takes the unified-buffer path
- * (js_get_buffer), so ArrayBuffer + Uint8Array round-trip cleanly.
- *
- * Caught when PKCE in hull/web/middleware/oauth was sending
- * `code_verifier=W29iamVjdCBBcnJheUJ1ZmZlcl0` (== base64url of the
- * literal string "[object ArrayBuffer]") instead of the actual
- * random bytes - IdP rejected with pkce_mismatch. */
-UTEST(js_cap, crypto_base64url_encode_arraybuffer)
-{
-    init_js_with_caps();
-    ASSERT_TRUE(js_initialized);
-
-    const char *code =
-        "import { crypto } from 'hull:crypto';\n"
-        /* 3 bytes -> 4 base64url chars, no padding. ABC = 0x41 0x42 0x43.
-         * base64url(0x41 0x42 0x43) = "QUJD". */
-        "const u8 = new Uint8Array([0x41, 0x42, 0x43]);\n"
-        "globalThis.__test_b64_ab  = crypto.base64urlEncode(u8.buffer);\n"
-        "globalThis.__test_b64_u8  = crypto.base64urlEncode(u8);\n"
-        /* High bytes - proves no UTF-8 inflation. 0xFF 0xFE 0xFD
-         * base64url is "//79" → "__79" (url-alphabet). */
-        "const hi = new Uint8Array([0xff, 0xfe, 0xfd]);\n"
-        "globalThis.__test_b64_hi  = crypto.base64urlEncode(hi.buffer);\n"
-        /* Round-trip 32 random bytes via crypto.random (ArrayBuffer)
-         * → encode → decode-as-Uint8Array → byte-by-byte compare.
-         * Decode goes through base64urlDecode which is still a
-         * string return, so we only assert length here. */
-        "const r = crypto.random(32);\n"
-        "const enc = crypto.base64urlEncode(r);\n"
-        /* 32 bytes base64url no-pad = 43 chars. */
-        "globalThis.__test_b64_len = enc.length;\n";
-
-    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
-                          JS_EVAL_TYPE_MODULE);
-    if (JS_IsException(val))
-        hl_js_dump_error(&js);
-    JS_FreeValue(js.ctx, val);
-    hl_js_run_jobs(&js);
-
-    char *ab = eval_str("globalThis.__test_b64_ab");
-    ASSERT_NE(ab, NULL);
-    ASSERT_STREQ(ab, "QUJD");
-    free(ab);
-
-    char *u8s = eval_str("globalThis.__test_b64_u8");
-    ASSERT_NE(u8s, NULL);
-    ASSERT_STREQ(u8s, "QUJD");
-    free(u8s);
-
-    char *hi = eval_str("globalThis.__test_b64_hi");
-    ASSERT_NE(hi, NULL);
-    ASSERT_STREQ(hi, "__79");
-    free(hi);
-
-    ASSERT_EQ(eval_int("globalThis.__test_b64_len"), 43);
 
     cleanup_js_caps();
 }
@@ -3053,8 +2955,8 @@ UTEST(js_stdlib, auth_flows_state_secret_non_ascii_round_trip)
 
     /* Round-8 HIGH-2: the JS-side bytesToHex local already handled
      * code points >= 0x80 correctly (long-standing). This test pins
-     * the contract so a future "clean up, just use crypto.hexEncode"
-     * refactor can't regress cross-runtime parity. Pairs with the
+     * the contract so a future refactor that hexes the secret any other
+     * way than hull:encoding (byte for byte) can't regress parity. Pairs with the
      * Lua counterpart auth_flows_state_secret_non_ascii_round_trip. */
     const char *code = AF_INIT_JS
         "function run() {\n"

@@ -151,7 +151,7 @@ function issueToken(userId, action, ttl, extra) {
         sub:    userId,
         action: action,
         exp:    time.now() + ttl,
-        nonce:  crypto.base64urlEncode(crypto.random(16)),
+        nonce:  encoding.base64.encode(crypto.random(16), { url: true }),
     };
     if (extra) {
         for (const k in extra) {
@@ -1052,7 +1052,7 @@ function standardUsers(opts) {
     // reserved word ("user", "order") or a future MySQL backend (backtick) is
     // safe. The default connection's backend is known by the time this runs.
     const tbl = db.quoteIdentifier(opts.table || "users");
-    const idGen = opts.idGen || (() => crypto.hexEncode(crypto.random(16)));
+    const idGen = opts.idGen || (() => encoding.hex.encode(crypto.random(16)));
 
     function row(r) {
         if (!r) return null;

@@ -41,6 +41,14 @@ import { json } from "hull:json";
 // Pre-computed base64url of {"alg":"HS256","typ":"JWT"}, used by sign.
 const HEADER_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 
+// The JWS encodings (RFC 7515): base64url without padding, and JSON text as
+// UTF-8. A segment that is not valid base64url, or does not decode to UTF-8,
+// is refused - the Lua module applies exactly the same rules.
+function segmentText(s) {
+    const raw = encoding.base64.decode(s, { url: true });
+    return raw === null ? null : encoding.utf8.decode(raw);
+}
+
 const EXP_RELATIVE_THRESHOLD = 2e9;
 
 // Allowlist of algs this module understands. Token-supplied algs
@@ -92,7 +100,7 @@ function sign(payload, secret) {
     if (typeof p.exp === "number" && p.exp < EXP_RELATIVE_THRESHOLD)
         p.exp = time.now() + p.exp;
 
-    const payloadB64 = crypto.base64urlEncode(json.encode(p));
+    const payloadB64 = encoding.base64.encode(encoding.utf8.encode(json.encode(p)), { url: true });
     const signingInput = HEADER_B64 + "." + payloadB64;
     const sigB64 = hs256SignatureB64(signingInput, secret);
     return signingInput + "." + sigB64;
@@ -170,7 +178,7 @@ function verify(token, keyOrResolver, opts) {
     const payloadB64 = parts[1];
     const sigB64     = parts[2];
 
-    const headerJson = crypto.base64urlDecode(headerB64);
+    const headerJson = segmentText(headerB64);
     if (headerJson === null) return [null, "invalid header encoding"];
     let header;
     try { header = json.decode(headerJson); }
@@ -195,7 +203,7 @@ function verify(token, keyOrResolver, opts) {
     if (!verifySignature(alg, key, signingInput, sigB64))
         return [null, "invalid signature"];
 
-    const payloadStr = crypto.base64urlDecode(payloadB64);
+    const payloadStr = segmentText(payloadB64);
     if (payloadStr === null) return [null, "invalid payload encoding"];
     let payload;
     try { payload = json.decode(payloadStr); }
@@ -231,7 +239,7 @@ function decode(token) {
     if (!token || typeof token !== "string") return null;
     const parts = token.split(".", 4);
     if (parts.length !== 3) return null;
-    const payloadStr = crypto.base64urlDecode(parts[1]);
+    const payloadStr = segmentText(parts[1]);
     if (payloadStr === null) return null;
     try { return json.decode(payloadStr); }
     catch (e) { return null; }

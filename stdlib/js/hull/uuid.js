@@ -7,7 +7,7 @@
  * Both variants are 36-char canonical strings
  * (`xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx`, `M` the version nibble, `N` the
  * variant). Built on `crypto.random` (CSPRNG) + `time.nowMs`; no new authority.
- * Prefer these over ad-hoc ids from `crypto.base64urlEncode(crypto.random(16))`:
+ * Prefer these over ad-hoc ids from `encoding.base64.encode(crypto.random(16), { url: true })`:
  * canonical, externally interoperable, and v7 is lexically sortable.
  *
  * @license AGPL-3.0-or-later

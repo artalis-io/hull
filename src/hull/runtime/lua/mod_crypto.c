@@ -51,7 +51,7 @@ static int lua_crypto_sha256(lua_State *L)
  * DO NOT use for new password hashing / MAC / digest needs - use
  * crypto.sha256 / crypto.hmac_sha256 / crypto.hash_password instead.
  * Returns raw bytes (not hex) so callers can render uppercase or
- * lowercase as needed: `crypto.hex_encode(crypto.sha1(s)):upper()`. */
+ * lowercase as needed: `encoding.hex.encode(crypto.sha1(s)):upper()`. */
 static int lua_crypto_sha1(lua_State *L)
 {
     size_t len;
@@ -943,108 +943,6 @@ static int lua_crypto_constant_time_eq(lua_State *L)
     return 1;
 }
 
-/* crypto.base64url_encode(data) → string (no padding) */
-static int lua_crypto_base64url_encode(lua_State *L)
-{
-    size_t len;
-    const char *data = luaL_checklstring(L, 1, &len);
-
-    if (len > SIZE_MAX / 4)
-        return luaL_error(L, "input too large for base64url");
-    size_t out_size = ((len * 4) + 2) / 3 + 1;
-    HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch)
-        return luaL_error(L, "runtime not available");
-
-    char *out = sh_arena_alloc(lua->scratch, out_size);
-    if (!out)
-        return luaL_error(L, "out of memory");
-
-    size_t out_len;
-    if (hl_cap_crypto_base64url_encode(data, len, out, out_size, &out_len) != 0)
-        return luaL_error(L, "base64url_encode failed");
-
-    lua_pushlstring(L, out, out_len);
-    return 1;
-}
-
-/* crypto.base64url_decode(str) → string or nil on error */
-static int lua_crypto_base64url_decode(lua_State *L)
-{
-    size_t str_len;
-    const char *str = luaL_checklstring(L, 1, &str_len);
-
-    size_t out_size = (str_len * 3) / 4 + 1;
-    HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch)
-        return luaL_error(L, "runtime not available");
-
-    uint8_t *out = sh_arena_alloc(lua->scratch, out_size);
-    if (!out)
-        return luaL_error(L, "out of memory");
-
-    size_t out_len;
-    if (hl_cap_crypto_base64url_decode(str, str_len, out, out_size, &out_len) != 0) {
-        lua_pushnil(L);
-        return 1;
-    }
-
-    lua_pushlstring(L, (const char *)out, out_len);
-    return 1;
-}
-
-/* crypto.hex_encode(bytes) → lowercase hex string */
-static int lua_crypto_hex_encode(lua_State *L)
-{
-    size_t in_len;
-    const uint8_t *in = (const uint8_t *)luaL_checklstring(L, 1, &in_len);
-    if (in_len == 0) {
-        lua_pushliteral(L, "");
-        return 1;
-    }
-    if (in_len > SIZE_MAX / 2)
-        return luaL_error(L, "hex_encode: input too large");
-    size_t out_size = in_len * 2;
-    HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch)
-        return luaL_error(L, "runtime not available");
-    char *out = sh_arena_alloc(lua->scratch, out_size);
-    if (!out)
-        return luaL_error(L, "out of memory");
-    if (hl_cap_crypto_hex_encode(in, in_len, out, out_size) < 0)
-        return luaL_error(L, "hex_encode failed");
-    lua_pushlstring(L, out, out_size);
-    return 1;
-}
-
-/* crypto.hex_decode(hex) → bytes string, or nil on malformed input */
-static int lua_crypto_hex_decode(lua_State *L)
-{
-    size_t hex_len;
-    const char *hex = luaL_checklstring(L, 1, &hex_len);
-    if (hex_len == 0) {
-        lua_pushliteral(L, "");
-        return 1;
-    }
-    if (hex_len & 1u) {
-        lua_pushnil(L);
-        return 1;
-    }
-    size_t out_size = hex_len / 2;
-    HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch)
-        return luaL_error(L, "runtime not available");
-    uint8_t *out = sh_arena_alloc(lua->scratch, out_size);
-    if (!out)
-        return luaL_error(L, "out of memory");
-    if (hl_cap_crypto_hex_decode(hex, hex_len, out, out_size) < 0) {
-        lua_pushnil(L);
-        return 1;
-    }
-    lua_pushlstring(L, (const char *)out, out_size);
-    return 1;
-}
-
 /* ── Incremental SHA-256 hasher ─────────────────────────────────────
  *
  *   local h = crypto.create_sha256()
@@ -1474,10 +1372,6 @@ static const luaL_Reg crypto_funcs[] = {
     {"aes256ctr",         lua_crypto_aes256ctr},
     {"bcrypt_pbkdf",      lua_crypto_bcrypt_pbkdf},
     {"bcrypt_pbkdf_env",  lua_crypto_bcrypt_pbkdf_env},
-    {"base64url_encode",  lua_crypto_base64url_encode},
-    {"base64url_decode",  lua_crypto_base64url_decode},
-    {"hex_encode",        lua_crypto_hex_encode},
-    {"hex_decode",        lua_crypto_hex_decode},
     {NULL, NULL}
 };
 

@@ -33,6 +33,7 @@
  */
 
 import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 
 // Base64url-encode raw bytes (128-bit by default) for use as a CSP
 // nonce. 16 bytes -> 22 base64url chars unpadded.
@@ -42,14 +43,7 @@ function nonceB64url(nBytes) {
     nBytes = nBytes || 16;
     const ab = crypto.random(nBytes);
     if (!ab || ab.byteLength !== nBytes) return null;
-    // Base64url the ArrayBuffer directly - binary-safe. Going through a
-    // String.fromCharCode byte-string and then crypto.base64urlEncode would
-    // UTF-8-inflate every byte >= 0x80 (harmless for a per-response opaque
-    // nonce, but wasteful and the same footgun the jwt HS256 signature hit).
-    const b64 = crypto.base64urlEncode(ab);
-    if (!b64) return null;
-    // Defensive: strip trailing '=' if the encoder ever returns padded.
-    return b64.replace(/=+$/, "");
+    return encoding.base64.encode(ab, { url: true });
 }
 
 // Build the CSP header value for a given profile + nonce.

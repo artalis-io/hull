@@ -52,7 +52,7 @@ static JSValue js_crypto_sha256(JSContext *ctx, JSValueConst this_val,
  * DO NOT use for new password hashing / MAC / digest needs - use
  * crypto.sha256 / crypto.hmacSha256 / crypto.hashPassword instead.
  * Returns raw bytes (not hex) so callers can render uppercase or
- * lowercase via crypto.hexEncode(buf).toUpperCase() if needed. */
+ * lowercase via encoding.hex.encode(buf).toUpperCase() if needed. */
 static JSValue js_crypto_sha1(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
@@ -1112,7 +1112,7 @@ static JSValue js_crypto_hmac_sha1(JSContext *ctx, JSValueConst this_val,
      * UTF-8-inflates any byte >= 0x80 (and stringifies an ArrayBuffer
      * to "[object ArrayBuffer]"), which silently corrupted TOTP
      * counters whose dynamic-truncation bytes crossed 0x80. Same
-     * fix-shape as crypto.base64urlEncode. */
+     * fix-shape as the other buffer-taking bindings. */
     HlBufferView data_view = {0};
     const char *data_str = NULL;
     int data_needs_free = 0;
@@ -1256,202 +1256,6 @@ static JSValue js_crypto_constant_time_eq(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, a);
     JS_FreeCString(ctx, b);
     return JS_NewBool(ctx, eq);
-}
-
-/* crypto.base64urlEncode(data) -> string (no padding) */
-static JSValue js_crypto_base64url_encode(JSContext *ctx, JSValueConst this_val,
-                                           int argc, JSValueConst *argv)
-{
-    (void)this_val;
-    if (argc < 1)
-        return JS_ThrowTypeError(ctx, "crypto.base64urlEncode requires (data)");
-
-    /* Accept ArrayBuffer / TypedArray / MappedBuffer / WasmBuffer /
-     * string via the unified buffer protocol. The previous
-     * JS_ToCStringLen-only path was binary-unsafe: an ArrayBuffer
-     * would .toString() to "[object ArrayBuffer]" and a Uint8Array
-     * full of bytes >= 0x80 would UTF-8-inflate. */
-    HlBufferView view = {0};
-    const char *str = NULL;
-    int needs_free = 0;
-    if (!js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
-        return JS_ThrowTypeError(ctx,
-            "crypto.base64urlEncode: data must be ArrayBuffer, "
-            "TypedArray, MappedBuffer, WasmBuffer, or string");
-
-    if (view.len > SIZE_MAX / 4) {
-        if (needs_free) JS_FreeCString(ctx, str);
-        return JS_ThrowRangeError(ctx, "input too large for base64url");
-    }
-    size_t out_size = ((view.len * 4) + 2) / 3 + 1;
-    char *out = js_malloc(ctx, out_size);
-    if (!out) {
-        if (needs_free) JS_FreeCString(ctx, str);
-        return JS_EXCEPTION;
-    }
-
-    size_t out_len;
-    if (hl_cap_crypto_base64url_encode(view.data, view.len,
-                                       out, out_size, &out_len) != 0) {
-        if (needs_free) JS_FreeCString(ctx, str);
-        js_free(ctx, out);
-        return JS_ThrowInternalError(ctx, "base64urlEncode failed");
-    }
-    if (needs_free) JS_FreeCString(ctx, str);
-
-    JSValue result = JS_NewStringLen(ctx, out, out_len);
-    js_free(ctx, out);
-    return result;
-}
-
-/* crypto.base64urlDecode(str) -> string or null on error.
- *
- * Returns the decoded bytes as a JS string. SAFE for text payloads
- * (JSON, ASCII). For arbitrary binary (cert DER, signatures, NaCl
- * blobs), use crypto.base64urlDecodeBytes - JS_NewStringLen UTF-8-
- * validates and replaces invalid sequences with U+FFFD, which would
- * silently corrupt binary output. */
-static JSValue js_crypto_base64url_decode(JSContext *ctx, JSValueConst this_val,
-                                           int argc, JSValueConst *argv)
-{
-    (void)this_val;
-    if (argc < 1)
-        return JS_ThrowTypeError(ctx, "crypto.base64urlDecode requires (str)");
-
-    size_t str_len;
-    const char *str = JS_ToCStringLen(ctx, &str_len, argv[0]);
-    if (!str) return JS_EXCEPTION;
-
-    size_t out_size = (str_len * 3) / 4 + 1;
-    uint8_t *out = js_malloc(ctx, out_size);
-    if (!out) { JS_FreeCString(ctx, str); return JS_EXCEPTION; }
-
-    size_t out_len;
-    if (hl_cap_crypto_base64url_decode(str, str_len, out, out_size, &out_len) != 0) {
-        JS_FreeCString(ctx, str);
-        js_free(ctx, out);
-        return JS_NULL;
-    }
-    JS_FreeCString(ctx, str);
-
-    JSValue result = JS_NewStringLen(ctx, (const char *)out, out_len);
-    js_free(ctx, out);
-    return result;
-}
-
-/* crypto.base64urlDecodeBytes(str) -> ArrayBuffer or null on error.
- *
- * Binary-safe variant of base64urlDecode. Callers that decode binary
- * payloads (cert DER, JWT signatures, NaCl blobs, JWKS x5c) must use
- * this - the string-returning variant loses bytes >= 0x80 via UTF-8
- * validation in JS_NewStringLen. */
-static JSValue js_crypto_base64url_decode_bytes(JSContext *ctx, JSValueConst this_val,
-                                                 int argc, JSValueConst *argv)
-{
-    (void)this_val;
-    if (argc < 1)
-        return JS_ThrowTypeError(ctx, "crypto.base64urlDecodeBytes requires (str)");
-
-    size_t str_len;
-    const char *str = JS_ToCStringLen(ctx, &str_len, argv[0]);
-    if (!str) return JS_EXCEPTION;
-
-    size_t out_size = (str_len * 3) / 4 + 1;
-    uint8_t *out = js_malloc(ctx, out_size);
-    if (!out) { JS_FreeCString(ctx, str); return JS_EXCEPTION; }
-
-    size_t out_len;
-    if (hl_cap_crypto_base64url_decode(str, str_len, out, out_size, &out_len) != 0) {
-        JS_FreeCString(ctx, str);
-        js_free(ctx, out);
-        return JS_NULL;
-    }
-    JS_FreeCString(ctx, str);
-
-    JSValue result = JS_NewArrayBufferCopy(ctx, out, out_len);
-    js_free(ctx, out);
-    return result;
-}
-
-/* crypto.hexEncode(bytes) -> lowercase hex string. Input may be
- * ArrayBuffer, TypedArray, MappedBuffer, WasmBuffer, or string. A string is
- * UTF-8 encoded on the way in (js_get_buffer -> JS_ToCStringLen), so "\xff"
- * hexes as "c3bf", not "ff": a byte string must be passed as a buffer, or
- * encoded with hull:encoding, which treats it as bytes. */
-static JSValue js_crypto_hex_encode(JSContext *ctx, JSValueConst this_val,
-                                     int argc, JSValueConst *argv)
-{
-    (void)this_val;
-    if (argc < 1)
-        return JS_ThrowTypeError(ctx, "crypto.hexEncode requires (bytes)");
-
-    /* The unified buffer protocol - the same path base64urlEncode takes.
-     * Binary-safe for buffers; a string arrives as its UTF-8 bytes. */
-    HlBufferView view = {0};
-    const char *str = NULL;
-    int needs_free = 0;
-    if (!js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
-        return JS_ThrowTypeError(ctx,
-            "crypto.hexEncode: input must be ArrayBuffer, "
-            "TypedArray, MappedBuffer, WasmBuffer, or string");
-
-    if (view.len == 0) {
-        if (needs_free) JS_FreeCString(ctx, str);
-        return JS_NewStringLen(ctx, "", 0);
-    }
-    if (view.len > SIZE_MAX / 2) {
-        if (needs_free) JS_FreeCString(ctx, str);
-        return JS_ThrowRangeError(ctx, "crypto.hexEncode: input too large");
-    }
-    size_t out_size = view.len * 2;
-    char *out = js_malloc(ctx, out_size);
-    if (!out) {
-        if (needs_free) JS_FreeCString(ctx, str);
-        return JS_EXCEPTION;
-    }
-    int n = hl_cap_crypto_hex_encode((const uint8_t *)view.data, view.len, out, out_size);
-    if (needs_free) JS_FreeCString(ctx, str);
-    if (n < 0) {
-        js_free(ctx, out);
-        return JS_ThrowInternalError(ctx, "hexEncode failed");
-    }
-    JSValue result = JS_NewStringLen(ctx, out, out_size);
-    js_free(ctx, out);
-    return result;
-}
-
-/* crypto.hexDecode(hex) -> binary-string, or null on malformed input. */
-static JSValue js_crypto_hex_decode(JSContext *ctx, JSValueConst this_val,
-                                     int argc, JSValueConst *argv)
-{
-    (void)this_val;
-    if (argc < 1)
-        return JS_ThrowTypeError(ctx, "crypto.hexDecode requires (hex)");
-
-    size_t hex_len;
-    const char *hex = JS_ToCStringLen(ctx, &hex_len, argv[0]);
-    if (!hex) return JS_EXCEPTION;
-
-    if (hex_len == 0) {
-        JS_FreeCString(ctx, hex);
-        return JS_NewStringLen(ctx, "", 0);
-    }
-    if (hex_len & 1u) {
-        JS_FreeCString(ctx, hex);
-        return JS_NULL;
-    }
-    size_t out_size = hex_len / 2;
-    uint8_t *out = js_malloc(ctx, out_size);
-    if (!out) { JS_FreeCString(ctx, hex); return JS_EXCEPTION; }
-    int n = hl_cap_crypto_hex_decode(hex, hex_len, out, out_size);
-    JS_FreeCString(ctx, hex);
-    if (n < 0) {
-        js_free(ctx, out);
-        return JS_NULL;
-    }
-    JSValue result = JS_NewStringLen(ctx, (const char *)out, out_size);
-    js_free(ctx, out);
-    return result;
 }
 
 /* ── Incremental SHA-256 hasher class ───────────────────────────────
@@ -1619,16 +1423,6 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_hmac_sha256_verify, "hmacSha256Verify", 3));
     JS_SetPropertyStr(ctx, crypto, "constantTimeEq",
                       JS_NewCFunction(ctx, js_crypto_constant_time_eq, "constantTimeEq", 2));
-    JS_SetPropertyStr(ctx, crypto, "base64urlEncode",
-                      JS_NewCFunction(ctx, js_crypto_base64url_encode, "base64urlEncode", 1));
-    JS_SetPropertyStr(ctx, crypto, "base64urlDecode",
-                      JS_NewCFunction(ctx, js_crypto_base64url_decode, "base64urlDecode", 1));
-    JS_SetPropertyStr(ctx, crypto, "base64urlDecodeBytes",
-                      JS_NewCFunction(ctx, js_crypto_base64url_decode_bytes, "base64urlDecodeBytes", 1));
-    JS_SetPropertyStr(ctx, crypto, "hexEncode",
-                      JS_NewCFunction(ctx, js_crypto_hex_encode, "hexEncode", 1));
-    JS_SetPropertyStr(ctx, crypto, "hexDecode",
-                      JS_NewCFunction(ctx, js_crypto_hex_decode, "hexDecode", 1));
     JS_SetModuleExport(ctx, m, "crypto", crypto);
     return 0;
 }

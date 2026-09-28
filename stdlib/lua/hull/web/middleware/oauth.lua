@@ -213,7 +213,7 @@ local PRESETS = {
 
 -- Cryptographically-random URL-safe string (base64url-encoded).
 local function random_urlsafe(n_bytes)
-    return crypto.base64url_encode(crypto.random(n_bytes))
+    return encoding.base64.encode(crypto.random(n_bytes), { url = true })
 end
 
 -- PKCE per RFC 7636: verifier is 32 random bytes (~43 base64url chars);
@@ -266,16 +266,6 @@ local function build_url(base, params)
     return base .. sep .. table.concat(parts, "&")
 end
 
--- Standard base64 (JWKS x5c) -> base64url, so crypto.base64url_decode
--- can consume it. Strips whitespace + padding, converts +/=- mapping.
-local function b64_to_b64url(s)
-    s = s:gsub("[%s\n\r]", "")
-    s = s:gsub("=", "")
-    s = s:gsub("+", "-")
-    s = s:gsub("/", "_")
-    return s
-end
-
 -- ── State cookie: sign + verify ────────────────────────────────────
 --
 -- Payload: { provider, verifier, state, nonce, return_to, exp }.
@@ -321,7 +311,8 @@ local function refresh_jwks(provider_name)
     for _, k in ipairs(doc.keys) do
         if type(k) == "table" and k.kid and type(k.x5c) == "table"
            and type(k.x5c[1]) == "string" then
-            local der = crypto.base64url_decode(b64_to_b64url(k.x5c[1]))
+            -- x5c is standard base64 (RFC 7517 section 4.7).
+            local der = encoding.base64.decode(k.x5c[1], { lenient = true })
             if der then
                 local pem = crypto.x509_pubkey_pem(der)
                 if pem then by_kid[k.kid] = pem end
@@ -681,7 +672,6 @@ oauth._test = {
     pkce_pair       = pkce_pair,
     sign_state      = sign_state,
     verify_state    = verify_state,
-    b64_to_b64url   = b64_to_b64url,
     refresh_jwks    = refresh_jwks,
     safe_return_to  = safe_return_to,
     reset = function()

@@ -132,6 +132,31 @@ test("base32: strict, and lenient for pasted secrets", () => {
     assertEq(base32.decode("MZXW1", { lenient: true }), null);
 });
 
+// utf8 ------------------------------------------------------------------------
+
+test("utf8: text encodes to the bytes the Lua suite checks", () => {
+    assertEq(encoding.utf8.encode("héllo"), "h\xc3\xa9llo");
+    assertEq(encoding.utf8.encode("€"), "\xe2\x82\xac");
+    assertEq(encoding.utf8.encode("\u{1F600}"), "\xf0\x9f\x98\x80");
+    assertEq(encoding.utf8.encode(""), "");
+    assertThrows(() => encoding.utf8.encode("a\ud800"), "lone high surrogate");
+    assertThrows(() => encoding.utf8.encode("\udc00b"), "lone low surrogate");
+});
+
+test("utf8: well-formed bytes decode back to the text", () => {
+    for (const t of ["héllo", "€", "\u{1F600}", "", "plain"]) {
+        assertEq(encoding.utf8.decode(encoding.utf8.encode(t)), t, t);
+    }
+    assertEq(encoding.utf8.decode(new Uint8Array([0xe2, 0x82, 0xac])), "€", "buffer input");
+});
+
+test("utf8: malformed bytes do not decode", () => {
+    for (const b of ["\xc0\x80", "\xed\xa0\x80", "\xf4\x90\x80\x80", "\xe2\x82", "\x80", "ok\xff"]) {
+        assertEq(encoding.utf8.decode(b), null, encoding.hex.encode(b));
+    }
+    assertThrows(() => encoding.utf8.decode(null), "non-bytes");
+});
+
 // bytes -----------------------------------------------------------------------
 
 test("bytes: byte strings and buffers convert both ways", () => {

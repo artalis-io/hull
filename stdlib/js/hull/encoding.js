@@ -1,7 +1,7 @@
 /*
  * hull:encoding - byte <-> text codecs: hex, base64 (standard and url-safe),
- * base32. JS twin of hull.encoding; both produce and accept exactly the same
- * text.
+ * base32, and UTF-8. JS twin of hull.encoding; both produce and accept
+ * exactly the same text.
  *
  *   import { encoding } from "hull:encoding";
  *   encoding.hex.encode(bytes)                        // lowercase
@@ -9,6 +9,8 @@
  *   encoding.base64.encode(bytes, { url: true })      // -_ alphabet, unpadded
  *   encoding.base64.decode(text, { lenient: true })   // skips whitespace
  *   encoding.base32.encode(bytes)                     // RFC 4648, unpadded
+ *   encoding.utf8.encode("héllo")                     // text -> UTF-8 bytes
+ *   encoding.utf8.decode(bytes)                       // UTF-8 bytes -> text | null
  *
  * Bytes are a BYTE STRING (one character per byte, 0..255), an ArrayBuffer,
  * a typed array or a DataView; decoders return a byte string. A string with
@@ -233,5 +235,68 @@ const base32 = {
     },
 };
 
-export const encoding = { hex, base64, base32, bytes };
+// UTF-8 ---------------------------------------------------------------------
+//
+// A JS string is text (UTF-16); the codecs above work on bytes. These are the
+// two crossings: text to its UTF-8 bytes (before hashing or base64-encoding a
+// JSON payload) and back. Strict both ways, so Lua and JS accept exactly the
+// same input: a lone surrogate cannot be encoded, and malformed UTF-8
+// (overlong forms, surrogates, anything above U+10FFFF, truncation) does not
+// decode.
+
+const utf8 = {
+    /** The UTF-8 bytes of `text`, as a byte string. Throws on a lone surrogate. */
+    encode(text) {
+        checkString("utf8.encode", text);
+        let out = "";
+        for (let i = 0; i < text.length; i++) {
+            let c = text.charCodeAt(i);
+            if (c < 0x80) { out += text[i]; continue; }
+            if (c >= 0xd800 && c <= 0xdfff) {
+                const d = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+                if (c > 0xdbff || d < 0xdc00 || d > 0xdfff) {
+                    fail("utf8.encode", "lone surrogate at index " + i);
+                }
+                c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
+                i++;
+            }
+            if (c < 0x800) {
+                out += String.fromCharCode(0xc0 | (c >> 6), 0x80 | (c & 63));
+            } else if (c < 0x10000) {
+                out += String.fromCharCode(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63),
+                                           0x80 | (c & 63));
+            } else {
+                out += String.fromCharCode(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63),
+                                           0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+            }
+        }
+        return out;
+    },
+
+    /** `bytes` (byte string or buffer) as text, or null if not well-formed UTF-8. */
+    decode(x) {
+        const s = toByteString("utf8.decode", x);
+        let out = "";
+        for (let i = 0; i < s.length;) {
+            const b = s.charCodeAt(i);
+            if (b < 0x80) { out += s[i]; i++; continue; }
+            let n, c, min;
+            if (b >= 0xc2 && b <= 0xdf) { n = 1; c = b & 0x1f; min = 0x80; }
+            else if (b >= 0xe0 && b <= 0xef) { n = 2; c = b & 0x0f; min = 0x800; }
+            else if (b >= 0xf0 && b <= 0xf4) { n = 3; c = b & 0x07; min = 0x10000; }
+            else return null;
+            for (let k = 1; k <= n; k++) {     // a missing byte reads as -1: truncated
+                const t = i + k < s.length ? s.charCodeAt(i + k) : -1;
+                if (t < 0x80 || t > 0xbf) return null;
+                c = (c << 6) | (t & 0x3f);
+            }
+            if (c < min || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) return null;
+            out += String.fromCodePoint(c);
+            i += n + 1;
+        }
+        return out;
+    },
+};
+
+export const encoding = { hex, base64, base32, utf8, bytes };
 export default encoding;
