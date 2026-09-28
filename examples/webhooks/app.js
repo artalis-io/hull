@@ -11,8 +11,8 @@
 
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
-import { encoding } from "hull:encoding";
 import { db as dbModule } from "hull:db";
+import { encoding } from "hull:encoding";
 const db = dbModule.default();
 import { env } from "hull:env";
 import { log } from "hull:log";

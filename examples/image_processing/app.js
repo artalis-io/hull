@@ -9,8 +9,8 @@
 //       curl localhost:3000/create
 //       curl localhost:3000/info
 
-import { image } from "hull:image";
 import { encoding } from "hull:encoding";
+import { image } from "hull:image";
 
 app.manifest({
     modules: [

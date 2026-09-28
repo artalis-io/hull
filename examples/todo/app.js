@@ -11,9 +11,9 @@
 
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
-import { encoding } from "hull:encoding";
 import { csv } from "hull:csv";
 import { db as dbModule } from "hull:db";
+import { encoding } from "hull:encoding";
 const db = dbModule.default();
 import { httpClient } from "hull:http-client";
 import { i18n } from "hull:i18n";
