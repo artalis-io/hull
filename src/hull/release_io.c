@@ -12,6 +12,7 @@
 #include "hull/cacert.h"
 #include "hull/cap/crypto.h"
 #include "hull/release.h"   /* hl_release_verify_manifest_sig / pubkey_configured */
+#include "utils/hex.h"
 
 #include <keel/allocator.h>
 #include <keel/http_client.h>
@@ -379,13 +380,7 @@ int hl_release_io_sha256_hex(const unsigned char *data, size_t len,
     /* Use the cap layer's self-contained SHA-256 (not mbedTLS) so this
      * helper links in the pure-compute flavor, where mbedTLS is dropped. */
     if (hl_cap_crypto_sha256(data, len, digest) != 0) return -1;
-    static const char *h = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        hex[i*2]   = h[digest[i] >> 4];
-        hex[i*2+1] = h[digest[i] & 0xF];
-    }
-    hex[64] = '\0';
-    return 0;
+    return hl_hex_encode(digest, sizeof digest, hex, 65);
 }
 
 /* ── Checksum manifest lookup ────────────────────────────────────── */

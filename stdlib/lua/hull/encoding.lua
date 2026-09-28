@@ -19,9 +19,17 @@
 -- every value has exactly one encoding - a signature that decodes the same
 -- from two different strings is malleable.
 --
--- Pure: no capabilities and no other module, so anything may require it.
+-- No capabilities, so anything may require it. Inside Hull the hex and base64
+-- work is done by the C codecs (hull.encoding._native), which write the result
+-- into one buffer instead of a table of pieces; the Lua codecs below stay the
+-- reference, answer every refusal (so the reason is theirs), and run alone
+-- where the native module does not exist (a vanilla Lua state). Both accept
+-- exactly the same inputs.
 
 local M = {}
+
+local has_native, native = pcall(require, "hull.encoding._native")
+if not has_native or type(native) ~= "table" then native = nil end
 
 local sbyte, schar, concat = string.byte, string.char, table.concat
 
@@ -48,6 +56,7 @@ for i = 0, 5 do HEX_IN[97 + i] = 10 + i; HEX_IN[65 + i] = 10 + i end
 --- hex(key), which the SQL kv backend relies on for range scans.
 function M.hex.encode(bytes)
     check_string("hex.encode", bytes)
+    if native then return native.hex_encode(bytes) end
     local out = {}
     for i = 1, #bytes do out[i] = HEX_OUT[sbyte(bytes, i)] end
     return concat(out)
@@ -56,6 +65,10 @@ end
 --- Bytes from hex; either case is accepted.
 function M.hex.decode(text)
     check_string("hex.decode", text)
+    if native then
+        local bytes = native.hex_decode(text)
+        if bytes then return bytes end
+    end
     if #text % 2 ~= 0 then return nil, "bad_length" end
     local out = {}
     for i = 1, #text, 2 do
@@ -92,6 +105,7 @@ function M.base64.encode(bytes, opts)
     local url = opts and opts.url
     local pad = opts and opts.pad
     if pad == nil then pad = not url end
+    if native then return native.base64_encode(bytes, url, pad) end
     local E = url and URL_ENC or STD_ENC
     local out, n = {}, #bytes
     local i = 1
@@ -121,6 +135,10 @@ function M.base64.decode(text, opts)
     check_string("base64.decode", text)
     local url = opts and opts.url
     local lenient = opts and opts.lenient
+    if native and not lenient then
+        local bytes = native.base64_decode(text, url)
+        if bytes then return bytes end
+    end
     local D = url and URL_DEC or STD_DEC
     local out = {}
     local acc, bits, count, padding = 0, 0, 0, 0

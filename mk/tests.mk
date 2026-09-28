@@ -204,10 +204,10 @@ $(BUILDDIR)/test_respwire: $(TESTDIR)/hull/cap/test_respwire.c $(SRCDIR)/hull/ca
 # needs no Keel/mbedTLS link, mirroring test_pg_conn's -DHL_PG_NO_TLS.
 # valkey_conn.c uses the pluggable allocator ($(ALLOC_OBJ)) + sh_arena
 # ($(SH_ARENA_OBJ)) for the connection buffer + reply arena.
-$(BUILDDIR)/test_valkey_dsn: $(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+$(BUILDDIR)/test_valkey_dsn: $(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(HEX_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c \
-		$(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
+		$(ALLOC_OBJ) $(SH_ARENA_OBJ) $(HEX_OBJ) $(LDFLAGS)
 
 # Valkey/Redis connection: HELLO/AUTH handshake + RESP2 fallback + SELECT + a
 # command round-trip over a socketpair. Since the connection layer now rides the
@@ -270,10 +270,10 @@ $(BUILDDIR)/test_agent_probe: $(TESTDIR)/hull/agent/test_agent_probe.c \
 # the crypto objects (reusing the PG set: cap_crypto + mbedTLS + tweetnacl).
 # -DHL_MY_NO_TLS keeps mysql_conn.c free of Keel's KlTls (raw-socket transport)
 # so the codec test needs no TLS link, mirroring test_pg_conn's -DHL_PG_NO_TLS.
-$(BUILDDIR)/test_mysqlwire: $(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_mysqlwire: $(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) $(HEX_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_MY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c \
-		$(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) $(LDFLAGS)
+		$(SRCDIR)/hull/cap/mysql_conn.c $(PG_CRYPTO_OBJS) $(HEX_OBJ) $(LDFLAGS)
 
 # mysql connection / handshake test. hl_my_conn_start rides the shared HlDbTransport
 # byte transport (Keel v3), so the test source-compiles mysql_conn.c + mysqlwire.c
@@ -1113,6 +1113,11 @@ fuzz/fuzz_mime_sniff: fuzz/fuzz_mime_sniff.c $(SRCDIR)/hull/cap/mime.c
 fuzz/fuzz_host_match: fuzz/fuzz_host_match.c $(SRCDIR)/hull/utils/host_match.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
+# The C codecs (utils/hex, utils/base64): strict decoding over untrusted text,
+# asserting canonical re-encoding and byte round trips, not just no-crash.
+fuzz/fuzz_encoding: fuzz/fuzz_encoding.c $(SRCDIR)/hull/utils/hex.c $(SRCDIR)/hull/utils/base64.c
+	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+
 # Valkey/Redis RESP2/3 reply parser: the untrusted-server codec.
 fuzz/fuzz_respwire: fuzz/fuzz_respwire.c $(SRCDIR)/hull/cap/respwire.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
@@ -1120,7 +1125,7 @@ fuzz/fuzz_respwire: fuzz/fuzz_respwire.c $(SRCDIR)/hull/cap/respwire.c
 # Valkey/Redis DSN parser: percent-decoding + bounded field splitting over a
 # user-supplied connection string. -DHL_VALKEY_NO_TLS keeps the TLS
 # transport out so the pure-parser fuzzer needs no Keel/mbedTLS.
-fuzz/fuzz_valkey_dsn: fuzz/fuzz_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/utils/alloc.c $(SH_ARENA_DIR)/sh_arena.c
+fuzz/fuzz_valkey_dsn: fuzz/fuzz_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/utils/hex.c $(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/utils/alloc.c $(SH_ARENA_DIR)/sh_arena.c
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -DHL_VALKEY_NO_TLS -o $@ $^
 
 # PostgreSQL wire-protocol reader: the untrusted-server parser (§1).
@@ -1131,11 +1136,11 @@ fuzz/fuzz_pgwire: fuzz/fuzz_pgwire.c $(SRCDIR)/hull/cap/pgwire.c
 # HL_PG_NO_SCRAM keeps the pure-parser fuzzers free of the cap/crypto (mbedTLS)
 # dependency that SCRAM adds to pg_conn.c; HL_PG_NO_TLS does the same for the
 # Keel-backed TLS transport.
-fuzz/fuzz_pg_dsn: fuzz/fuzz_pg_dsn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c
+fuzz/fuzz_pg_dsn: fuzz/fuzz_pg_dsn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/utils/hex.c $(SRCDIR)/hull/cap/pgwire.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_PG_NO_SCRAM -DHL_PG_NO_TLS -o $@ $^
 
 # PostgreSQL placeholder rewriter: quote/comment-aware SQL scan.
-fuzz/fuzz_pg_rewrite: fuzz/fuzz_pg_rewrite.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c
+fuzz/fuzz_pg_rewrite: fuzz/fuzz_pg_rewrite.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/utils/hex.c $(SRCDIR)/hull/cap/pgwire.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_PG_NO_SCRAM -DHL_PG_NO_TLS -o $@ $^
 
 # MySQL/MariaDB wire reader (cap/mysqlwire.c, §2.10). Pure codec.
@@ -1144,7 +1149,7 @@ fuzz/fuzz_mysqlwire: fuzz/fuzz_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c
 
 # MySQL/MariaDB DSN parser (cap/mysql_conn.c). HL_MY_NO_AUTH strips the
 # native_password scramble so the parser fuzzer stays free of cap/crypto.
-fuzz/fuzz_mysql_dsn: fuzz/fuzz_mysql_dsn.c $(SRCDIR)/hull/cap/mysql_conn.c
+fuzz/fuzz_mysql_dsn: fuzz/fuzz_mysql_dsn.c $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/utils/hex.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_MY_NO_AUTH -o $@ $^
 
 # Mapped-span guest SDK math (templates/hull_span.h): the attacker-controlled
@@ -1217,7 +1222,7 @@ build/fuzz-corpus/js_source: fuzz/corpus_js_source
 fuzz-js-source: fuzz/fuzz_js_source build/fuzz-corpus/js_source
 	./fuzz/fuzz_js_source build/fuzz-corpus/js_source/ -dict=fuzz/js_source.dict -max_len=16384 -max_total_time=$(FUZZ_TIME)
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source fuzz/fuzz_js_source
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source fuzz/fuzz_js_source
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -1225,6 +1230,7 @@ fuzz-run: fuzz
 	./fuzz/fuzz_path_normalize fuzz/corpus_path_normalize/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_host_match fuzz/corpus_host_match/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_encoding fuzz/corpus_encoding/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_pgwire fuzz/corpus_pgwire/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_pg_dsn fuzz/corpus_pg_dsn/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_pg_rewrite fuzz/corpus_pg_rewrite/ -max_total_time=$(FUZZ_TIME)

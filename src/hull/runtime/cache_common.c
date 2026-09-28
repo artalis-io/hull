@@ -7,6 +7,7 @@
 
 #include "hull/runtime/cache_common.h"
 #include "hull/shared/cache_dir.h"
+#include "../utils/hex.h"
 
 #include <limits.h>
 #include <pthread.h>
@@ -43,12 +44,8 @@ const char *hl_runtime_cache_endian_tag(void)
 void hl_runtime_cache_hex_encode(const uint8_t *src, size_t src_len,
                                  char *hex_out)
 {
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < src_len; i++) {
-        hex_out[i * 2]     = hex[src[i] >> 4];
-        hex_out[i * 2 + 1] = hex[src[i] & 0xF];
-    }
-    hex_out[src_len * 2] = '\0';
+    /* hex_out holds src_len * 2 + 1 by this function's contract. */
+    (void)hl_hex_encode(src, src_len, hex_out, src_len * 2 + 1);
 }
 
 /* One process-wide mutex serialises the lazy-open + atexit-register

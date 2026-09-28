@@ -41,6 +41,11 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_kv_module(js->ctx, js) != 0)
         return -1;
 
+    /* Register hull:encoding:_native, the C codecs behind hull:encoding
+     * (pure computation, no authority). */
+    if (hl_js_init_encoding_module(js->ctx, js) != 0)
+        return -1;
+
     /* Register hull:json module */
     if (hl_js_init_json_module(js->ctx, js) != 0)
         return -1;

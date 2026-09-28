@@ -10,6 +10,7 @@
  */
 
 #include "hull/cap/mysql_conn.h"
+#include "../utils/hex.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -27,14 +28,6 @@ static int starts_with(const char *s, const char *pfx)
     return strncmp(s, pfx, n) == 0;
 }
 
-static int hexval(int c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
 /* Percent-decode src[0,slen) into dst[0,dstsz) as a NUL-terminated string.
  * Returns 0, or -1 if it would overflow dst or a %-escape is truncated/bad. */
 static int dsn_decode(char *dst, size_t dstsz, const char *src, size_t slen)
@@ -44,8 +37,8 @@ static int dsn_decode(char *dst, size_t dstsz, const char *src, size_t slen)
         char c = src[i];
         if (c == '%') {
             if (i + 2 >= slen) return -1;
-            int hi = hexval((unsigned char)src[i + 1]);
-            int lo = hexval((unsigned char)src[i + 2]);
+            int hi = hl_hex_digit((unsigned char)src[i + 1]);
+            int lo = hl_hex_digit((unsigned char)src[i + 2]);
             if (hi < 0 || lo < 0) return -1;
             c = (char)((hi << 4) | lo);
             i += 2;
