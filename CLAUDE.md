@@ -1710,7 +1710,7 @@ adding one: `os.exit` in a Lua script kills the whole test binary (the vanilla
 state HAS `os`, unlike Hull's sandbox), and `print` does not exist in Hull's JS
 runtime (use `console.log`).
 
-Plus libFuzzer harnesses (sh_json, path_normalize, mime_sniff, host_match, encoding, pgwire,
+Plus libFuzzer harnesses (sh_json, path_normalize, mime_sniff, host_match, encoding, ssh, pgwire,
 pg_dsn, pg_rewrite, mysqlwire, mysql_dsn) run 60s each in CI.
 
 \+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_install.sh`, `e2e_ca_bundle.sh`, `e2e_update.sh`)

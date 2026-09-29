@@ -1783,12 +1783,12 @@ jobs:
         run: |
           make CC=clang \
             fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff \
-            fuzz/fuzz_host_match fuzz/fuzz_encoding
+            fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_ssh
       - name: Run core fuzzers (60s each)
         timeout-minutes: 10
         run: |
           set -e
-          for f in sh_json path_normalize mime_sniff host_match encoding; do
+          for f in sh_json path_normalize mime_sniff host_match encoding ssh; do
             echo "== fuzz $f =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
           done

@@ -317,10 +317,12 @@ documenting parallel connections.
   - Live OpenSSH interop covers only `echo` / `exit 3` through the relay: add
     the direct path, streaming `on_stdout`, `stdin`, `max_output`, a real
     rekey (`rekey_limit` exists for this), `host_changed_midsession`.
-  - Fuzz the Lua parsers fed by the peer: `packet.parse`, `cipher:open`,
-    `kexinit.parse`, `kex.parse_ecdh_reply`, `channel.parse`, `sftp.parse` /
-    `parse_frame` / `decode_attrs`, `userauth.parse_response`,
-    `privatekey.parse_container`, ws-stream `decode` / `parse_response`.
+  - Done: fuzz the Lua parsers fed by the peer (`fuzz/fuzz_ssh.c`, targets
+    in `fuzz/ssh_driver.lua`). Every parser listed here, plus identification,
+    host key and signature blobs, known_hosts and the terminal sanitizers;
+    and whole scripted connections (handshake, auth, exec, a mid-session
+    rekey, SFTP, SSH over the WebSocket tunnel), which is where `cipher:open`
+    runs. Runs in the `fuzz-core-security` CI job.
 - **Docs.**
   - `ssh.md` error table lists 11 codes; the code emits about 25.
   - `ssh.md` says `exec` returns `nil, reason` only when the command could not

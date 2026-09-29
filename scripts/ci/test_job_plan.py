@@ -305,7 +305,7 @@ for _j in ("wamrc-x86_64", "wamrc-artifact-verify"):
 # equals the former single fuzz-native-security set (no target dropped in the split).
 import re  # noqa: E402
 CANONICAL_FUZZ = {
-    "sh_json", "path_normalize", "mime_sniff", "host_match", "encoding",  # core
+    "sh_json", "path_normalize", "mime_sniff", "host_match", "encoding", "ssh",  # core
     "pgwire", "pg_dsn", "pg_rewrite", "mysqlwire", "mysql_dsn", "respwire", "valkey_dsn",  # db wire
     "span_sdk", "span_window",                                        # compute
 }

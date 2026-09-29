@@ -3715,7 +3715,7 @@ docs-api-check:
 
 clean:
 	rm -rf $(BUILDDIR)
-	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn
+	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_ssh fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn
 	@# Hand Keel the SAME CC this clean was invoked with. Keel selects
 	@# per-platform TUs (socket_posix.c vs socket_winsock.c, and five more) and
 	@# its clean removes the set for the configuration it was PARSED with - so
