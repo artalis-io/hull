@@ -22,7 +22,13 @@
  * handed to C is UTF-8 encoded on the way, which changes every byte >= 0x80.
  *
  * Decoding is strict unless asked otherwise; a decoder returns null on bad
- * input and throws only when handed something that is not a string.
+ * input and throws only when handed something that is not a string. Why it
+ * was refused is `why(...)` with the same arguments: the reason Lua's decoder
+ * returns second ("bad_length", "invalid_char", "bad_padding",
+ * "non_canonical", "invalid_utf8"), or null when decode would succeed.
+ *
+ *   const b = encoding.base64.decode(s);    // byte string | null
+ *   if (b === null) log.warn(encoding.base64.why(s));
  *
  * No capabilities, so anything may import it. The hex and base64 work is done
  * by the C codecs (hull:encoding:_native), which build the result in one
@@ -114,6 +120,18 @@ function hexVal(c) {
     return -1;
 }
 
+// [bytes, null] or [null, reason]: the one implementation decode and why share.
+function hexDecode(text) {
+    if (text.length % 2 !== 0) return [null, "bad_length"];
+    const out = new Codes();
+    for (let i = 0; i < text.length; i += 2) {
+        const hi = hexVal(text.charCodeAt(i)), lo = hexVal(text.charCodeAt(i + 1));
+        if (hi < 0 || lo < 0) return [null, "invalid_char"];
+        out.push(hi * 16 + lo);
+    }
+    return [out.done(), null];
+}
+
 const hex = {
     /** Lowercase hex, two characters per byte. */
     encode(x) {
@@ -129,14 +147,12 @@ const hex = {
         checkString("hex.decode", text);
         const fast = native.hexDecode(text);
         if (fast !== null) return fast;
-        if (text.length % 2 !== 0) return null;
-        const out = new Codes();
-        for (let i = 0; i < text.length; i += 2) {
-            const hi = hexVal(text.charCodeAt(i)), lo = hexVal(text.charCodeAt(i + 1));
-            if (hi < 0 || lo < 0) return null;
-            out.push(hi * 16 + lo);
-        }
-        return out.done();
+        return hexDecode(text)[0];
+    },
+    /** Why hex.decode(text) is null, or null if it is not. */
+    why(text) {
+        checkString("hex.why", text);
+        return hexDecode(text)[1];
     },
 };
 
@@ -152,6 +168,37 @@ function decodeTable(alphabet) {
 }
 const STD_DEC = decodeTable(STD);
 const URL_DEC = decodeTable(URL);
+
+// [bytes, null] or [null, reason], with Lua's reasons.
+function base64Decode(text, url, lenient) {
+    const D = url ? URL_DEC : STD_DEC;
+    const out = new Codes();
+    let acc = 0, bits = 0, count = 0, padding = 0;
+    for (let i = 0; i < text.length; i++) {
+        const c = text.charCodeAt(i);
+        const v = c < 256 ? D[c] : -1;
+        if (v >= 0 && padding === 0) {
+            acc = ((acc << 6) | v) & 0xffffff;
+            bits += 6;
+            count++;
+            if (bits >= 8) {
+                bits -= 8;
+                out.push((acc >> bits) & 0xff);
+            }
+        } else if (c === 61 && !url) {
+            padding++;
+        } else if (!(lenient && isWs(c))) {
+            // A data character after padding, or padding where the url
+            // alphabet has none, is misplaced padding; anything else is a
+            // character the alphabet does not have.
+            return [null, (v >= 0 || c === 61) ? "bad_padding" : "invalid_char"];
+        }
+    }
+    if (count % 4 === 1) return [null, "bad_length"];
+    if (padding > 0 && (padding > 2 || (count + padding) % 4 !== 0)) return [null, "bad_padding"];
+    if ((acc & ((1 << bits) - 1)) !== 0) return [null, "non_canonical"];
+    return [out.done(), null];
+}
 
 const base64 = {
     /**
@@ -199,30 +246,12 @@ const base64 = {
             const fast = native.base64Decode(text, url);
             if (fast !== null) return fast;
         }
-        const D = url ? URL_DEC : STD_DEC;
-        const out = new Codes();
-        let acc = 0, bits = 0, count = 0, padding = 0;
-        for (let i = 0; i < text.length; i++) {
-            const c = text.charCodeAt(i);
-            const v = c < 256 ? D[c] : -1;
-            if (v >= 0 && padding === 0) {
-                acc = ((acc << 6) | v) & 0xffffff;
-                bits += 6;
-                count++;
-                if (bits >= 8) {
-                    bits -= 8;
-                    out.push((acc >> bits) & 0xff);
-                }
-            } else if (c === 61 && !url) {
-                padding++;
-            } else if (!(lenient && isWs(c))) {
-                return null;
-            }
-        }
-        if (count % 4 === 1) return null;
-        if (padding > 0 && (padding > 2 || (count + padding) % 4 !== 0)) return null;
-        if ((acc & ((1 << bits) - 1)) !== 0) return null;      // non-canonical
-        return out.done();
+        return base64Decode(text, url, lenient)[0];
+    },
+    /** Why base64.decode(text, opts) is null, or null if it is not. */
+    why(text, opts) {
+        checkString("base64.why", text);
+        return base64Decode(text, !!(opts && opts.url), !!(opts && opts.lenient))[1];
     },
 };
 
@@ -234,6 +263,30 @@ for (let i = 0; i < 26; i++) B32_DEC[B32.charCodeAt(i) + 32] = i;   // lowercase
 
 // Base32 lengths (mod 8) that some byte count encodes to: 0, 2, 4, 5 and 7.
 const B32_LEN_OK = [true, false, true, false, true, true, false, true];
+
+// [bytes, null] or [null, reason], with Lua's reasons.
+function base32Decode(text, lenient) {
+    const out = new Codes();
+    let buf = 0, bits = 0, count = 0;
+    for (let i = 0; i < text.length; i++) {
+        const c = text.charCodeAt(i);
+        const v = c < 256 ? B32_DEC[c] : -1;
+        if (v >= 0) {
+            buf = ((buf << 5) | v) & 0xffff;
+            bits += 5;
+            count++;
+            if (bits >= 8) {
+                bits -= 8;
+                out.push((buf >> bits) & 0xff);
+            }
+        } else if (!(lenient && (isWs(c) || c === 61))) {
+            return [null, "invalid_char"];
+        }
+    }
+    if (!B32_LEN_OK[count % 8]) return [null, "bad_length"];
+    if ((buf & ((1 << bits) - 1)) !== 0) return [null, "non_canonical"];
+    return [out.done(), null];
+}
 
 const base32 = {
     /** RFC 4648 base32, uppercase, unpadded (the form authenticator apps take). */
@@ -260,27 +313,12 @@ const base32 = {
      */
     decode(text, opts) {
         checkString("base32.decode", text);
-        const lenient = !!(opts && opts.lenient);
-        const out = new Codes();
-        let buf = 0, bits = 0, count = 0;
-        for (let i = 0; i < text.length; i++) {
-            const c = text.charCodeAt(i);
-            const v = c < 256 ? B32_DEC[c] : -1;
-            if (v >= 0) {
-                buf = ((buf << 5) | v) & 0xffff;
-                bits += 5;
-                count++;
-                if (bits >= 8) {
-                    bits -= 8;
-                    out.push((buf >> bits) & 0xff);
-                }
-            } else if (!(lenient && (isWs(c) || c === 61))) {
-                return null;
-            }
-        }
-        if (!B32_LEN_OK[count % 8]) return null;
-        if ((buf & ((1 << bits) - 1)) !== 0) return null;      // non-canonical
-        return out.done();
+        return base32Decode(text, !!(opts && opts.lenient))[0];
+    },
+    /** Why base32.decode(text, opts) is null, or null if it is not. */
+    why(text, opts) {
+        checkString("base32.why", text);
+        return base32Decode(text, !!(opts && opts.lenient))[1];
     },
 };
 
@@ -322,6 +360,10 @@ const utf8 = {
         return out.done();
     },
 
+    /** Why utf8.decode(x) is null ("invalid_utf8"), or null if it is not. */
+    why(x) {
+        return utf8.decode(x) === null ? "invalid_utf8" : null;
+    },
     /** `bytes` (byte string or buffer) as text, or null if not well-formed UTF-8. */
     decode(x) {
         const s = toByteString("utf8.decode", x);

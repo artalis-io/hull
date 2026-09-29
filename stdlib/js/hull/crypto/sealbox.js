@@ -132,25 +132,31 @@ function seal(ring, value, context) {
 }
 
 /**
- * Open a blob sealed with `context`. Returns { ok: true, value, version }, or
- * { ok: false, reason } where reason is "unknown_version" (the blob names a key
- * this ring does not hold) or "open_failed" (anything else: altered, forged,
- * sealed for another context, not a sealed blob). One reason covers every way
- * a blob can fail to be genuine, so it tells an attacker nothing.
+ * Open a blob sealed with `context`. Returns [value, null, version], or
+ * [null, reason] where reason is "unknown_version" (the blob names a key this
+ * ring does not hold) or "open_failed" (anything else: altered, forged, sealed
+ * for another context, not a sealed blob). One reason covers every way a blob
+ * can fail to be genuine, so it tells an attacker nothing.
+ *
+ * The shape every hull:crypto / hull:jwt check shares, and the Lua
+ * `value, version` / `nil, reason` read as an array:
+ *
+ *   const [value, err, version] = sealbox.open(ring, blob, context);
+ *   if (err) ...
  */
 function open(ring, blob, context) {
     checkContext("open", context);
-    if (!isByteString(blob) || blob.length < MIN_LEN) return { ok: false, reason: "open_failed" };
+    if (!isByteString(blob) || blob.length < MIN_LEN) return [null, "open_failed"];
     const version = readBe32(blob, 0);
     const key = ring.keys[version];
-    if (key === undefined) return { ok: false, reason: "unknown_version" };
+    if (key === undefined) return [null, "unknown_version"];
     const nonce = blob.substring(VERSION_LEN, VERSION_LEN + NONCE_LEN);
     const ct    = blob.substring(VERSION_LEN + NONCE_LEN);
     const ab = crypto.secretboxOpen(bytes.toU8(ct), bytes.toU8(nonce), key);
-    if (!ab) return { ok: false, reason: "open_failed" };
+    if (!ab) return [null, "open_failed"];
     const value = unframe(context, bytes.fromBuffer(ab));
-    if (value === null) return { ok: false, reason: "open_failed" };
-    return { ok: true, value, version };
+    if (value === null) return [null, "open_failed"];
+    return [value, null, version];
 }
 
 /** Open a blob in the older unversioned shape, nonce(24) || box, with key

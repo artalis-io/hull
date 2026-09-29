@@ -219,11 +219,11 @@ function decryptSecret(blob, encrypted) {
     if (encrypted === 0) return [blob, 0];
     if (typeof blob !== "string") return [null, null];
 
-    const r = sealbox.open(keyring(), blob);
-    if (r.ok) return [r.value, r.version];
+    const [value, err, version] = sealbox.open(keyring(), blob);
+    if (!err) return [value, version];
     // A v2 blob with a recognized version that fails to open is real
     // corruption or a wrong key; don't paper over it with a legacy attempt.
-    if (r.reason === "open_failed" && blob.length >= sealbox.MIN_LEN) return [null, null];
+    if (err === "open_failed" && blob.length >= sealbox.MIN_LEN) return [null, null];
 
     // v1 (legacy) fallback. Only if a legacy_key_version is configured.
     const legacyV = _state.legacyKeyVersion;
