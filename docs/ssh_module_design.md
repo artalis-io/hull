@@ -523,7 +523,7 @@ Three layers, because the interesting failures are at different ones:
 | layer | what it drives | where |
 |---|---|---|
 | unit, Lua | `ssh.connect` against a FAKE relay - the upgrade request byte for byte, `upgrade_refused` vs `denied`, a peer that is not a WebSocket server | `stdlib/lua/hull/tests/test_ssh_tunnel.lua` |
-| unit, C | the two grants in isolation, with no socket, resolver or loop in scope | `tests/hull/cap/test_net_policy.c` |
+| unit, C | the two grants in isolation, with no socket, resolver or loop in scope | `tests/hull/cap/test_ssh_policy.c` |
 | e2e | a REAL WebSocket relay (`tests/fixtures/ws_tcp_shim.py`) over real sockets, in front of a real OpenSSH `sshd` | `tests/e2e_ssh_tunnel.sh`, `make e2e-ssh-tunnel` |
 
 The e2e has two parts. The SEAM checks need only python3: the upgrade over a

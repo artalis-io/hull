@@ -51,7 +51,7 @@
 
 #include "internal.h"          /* hl_lua_source_is_stdlib */
 
-#include "hull/cap/net_policy.h"
+#include "hull/cap/ssh_policy.h"
 #include "hull/cap/net_stream.h"
 #include "hull/tls_transport.h"  /* HlClientTls: the host's resolved trust */
 #include "hull/utils/alloc.h"    /* hl_alloc_kl */
@@ -564,12 +564,12 @@ static int lua_ssh_connect(lua_State *L)
      * machine the app asked to reach is the more informative answer, and it
      * keeps the relay from being probed by an app that may not reach the
      * host behind it anyway. */
-    HlNetAuth auth = hl_ssh_check_connect(lua->base.ssh_policy, host, (int)port, user);
-    if (auth == HL_NET_ALLOW && has_via)
+    HlSshAuth auth = hl_ssh_check_connect(lua->base.ssh_policy, host, (int)port, user);
+    if (auth == HL_SSH_ALLOW && has_via)
         auth = hl_ssh_check_tunnel(lua->base.ssh_policy, via_host, via_port);
-    if (auth != HL_NET_ALLOW) {
+    if (auth != HL_SSH_ALLOW) {
         lua_settop(L, base);
-        push_err(L, hl_cap_net_auth_reason(auth));
+        push_err(L, hl_ssh_auth_reason(auth));
         lua_pushstring(L, "denied");       /* the manifest said no */
         return 3;
     }

@@ -1,38 +1,28 @@
 /**
  * @file cap/net_policy.h
- * @brief Outbound reach authorization, and the SSH grant built on it.
+ * @brief Outbound reach authorization: may this app reach this host and port.
  *
- * This header is the POLICY half of the private outbound stream. It answers
- * "may this app reach this host and port", with no socket, no resolver and no
- * event loop in scope. The transport half (cap/net_stream.h) calls it before
- * doing anything observable from the network.
+ * This header is the POLICY half of the private outbound stream, and it is
+ * GENERIC: a host/port grant in, allow-or-reason out, with no protocol, no
+ * socket, no resolver and no event loop in scope. Protocol grants are built on
+ * top of it (cap/ssh_policy.h adds the SSH login and the relay); the transport
+ * half (cap/net_stream.h) runs after one of them has said yes.
  *
- * Two layers, deliberately: `hl_net_check_connect` is a GENERIC reach check
- * over a host/port grant and knows nothing about SSH, while
- * `hl_ssh_check_connect` adds the one thing a reach grant cannot express -
- * which login the app may authenticate as. Keeping the generic half generic is
- * what lets a second protocol reuse it without inheriting SSH's vocabulary.
- *
- * That split is deliberate. The security invariant Hull wants here is
- * "capability denial occurs BEFORE network access", and the cheapest way to
- * guarantee it is to make the check a pure function of the manifest plus the
- * requested destination, testable on its own. A denial cannot race a DNS query
- * that was never started.
+ * The security invariant Hull wants here is "capability denial occurs BEFORE
+ * network access", and the cheapest way to guarantee it is to make the check a
+ * pure function of the manifest plus the requested destination, testable on
+ * its own. A denial cannot race a DNS query that was never started.
  *
  * Fails closed. Every path that is not an explicit allow is a deny:
  *
- *   - no `ssh` key in the manifest            -> HL_NET_DENY_UNDECLARED
- *   - `ssh = {}` with no connect policy       -> HL_NET_DENY_NO_POLICY
- *   - a connect policy with no hosts or ports -> HL_NET_DENY_NO_POLICY
- *   - host not matching any pattern           -> HL_NET_DENY_HOST
- *   - port not in the port list               -> HL_NET_DENY_PORT
- *   - user not in the user list               -> HL_NET_DENY_USER
- *   - a NULL grant, host or user              -> HL_NET_DENY_NO_POLICY
+ *   - a NULL or undeclared grant              -> HL_NET_REACH_NO_GRANT
+ *   - a grant with no hosts or no ports       -> HL_NET_REACH_NO_GRANT
+ *   - a NULL or empty host, or none matching  -> HL_NET_REACH_HOST
+ *   - a port out of range or not in the list  -> HL_NET_REACH_PORT
  *
- * The distinct denial reasons exist so the error surfaced to an app can say
- * which rule refused it. "You did not declare ssh" and "10.0.0.5 is not in your
- * allowlist" are different problems for whoever is reading the message, and
- * collapsing them wastes the one chance to explain the failure.
+ * The reasons carry no wording: the grant's NAME (`ssh.connect`,
+ * `ssh.tunnel`, ...) belongs to the protocol layer, which maps each reason to
+ * a message naming the list that refused.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -45,82 +35,27 @@
 extern "C" {
 #endif
 
-/* Result of an authorization check. Only HL_NET_ALLOW permits a connection. */
-typedef enum HlNetAuth {
-    HL_NET_ALLOW = 0,
-    HL_NET_DENY_UNDECLARED,   /* the manifest has no `ssh` key at all */
-    HL_NET_DENY_NO_POLICY,    /* `ssh` present but no usable connect policy */
-    HL_NET_DENY_HOST,         /* host matched no pattern in the allowlist */
-    HL_NET_DENY_PORT,         /* port is not in the allowed port list */
-    HL_NET_DENY_USER,         /* login is not in the allowed user list */
-    /* Tunnel reasons are their OWN values, appended so the existing ones keep
-     * their numbers. A tunnelled connect checks two grants, and "denied" is
-     * useless to someone holding two allowlists: the message has to say which
-     * one refused, and whether it refused the relay or the destination. */
-    HL_NET_DENY_TUNNEL_UNDECLARED, /* no `ssh.tunnel` key; no relay allowed */
-    HL_NET_DENY_TUNNEL_NO_POLICY,  /* `ssh.tunnel` present but grants nothing */
-    HL_NET_DENY_TUNNEL_HOST,       /* relay host is not in ssh.tunnel.hosts */
-    HL_NET_DENY_TUNNEL_PORT        /* relay port is not in ssh.tunnel.ports */
-} HlNetAuth;
+/* Result of a reach check. Only HL_NET_REACH_OK permits a connection. */
+typedef enum HlNetReach {
+    HL_NET_REACH_OK = 0,
+    HL_NET_REACH_NO_GRANT,   /* no grant, or one with an empty host or port list */
+    HL_NET_REACH_HOST,       /* host matched no pattern in the grant */
+    HL_NET_REACH_PORT        /* port is not in the grant's port list */
+} HlNetReach;
 
 /**
- * Authorize one outbound reach. Generic: no protocol in scope.
+ * Authorize one outbound reach.
  *
  * @param g     the host/port grant (NULL denies)
  * @param host  hostname or IP literal (NULL or empty denies)
  * @param port  TCP port, 1..65535 (anything else denies)
- * @return HL_NET_ALLOW, or the specific reason for refusal
+ * @return HL_NET_REACH_OK, or the specific reason for refusal
  *
  * Pure: no allocation, no I/O, no globals. Safe to call before the sandbox is
  * applied and safe to call from a test with a hand-built grant.
  */
-HlNetAuth hl_net_check_connect(const HlManifestNetConnect *g,
-                               const char *host, int port);
-
-/**
- * Authorize one SSH connection: the reach check above, plus the login.
- *
- * @param ssh   the manifest's `ssh` section (NULL denies)
- * @param host  hostname or IP literal (NULL or empty denies)
- * @param port  TCP port, 1..65535 (anything else denies)
- * @param user  the login to authenticate as (NULL or empty denies)
- * @return HL_NET_ALLOW, or the specific reason for refusal
- *
- * The user is matched EXACTLY and case-sensitively. Unix logins are
- * case-sensitive, and the glob / CIDR vocabulary that makes sense for hosts
- * would only invite `*` here, which is the grant this check exists to refuse.
- */
-HlNetAuth hl_ssh_check_connect(const HlManifestSsh *ssh, const char *host,
-                               int port, const char *user);
-
-/**
- * Authorize the RELAY a tunnelled SSH connection is dialled through.
- *
- * A tunnel splits one destination in two: the TCP connection goes to the
- * relay, while the SSH session, the host key and the login all belong to the
- * target behind it. `hl_ssh_check_connect` still gates the target - a tunnel
- * must never widen which machine may be reached or as whom - and this gates
- * the machine actually dialled. A tunnelled connect passes BOTH or is refused.
- *
- * Separate grants because collapsing them would silently authorise SSH to
- * every host behind an allowed relay: the target travels inside the tunnel's
- * own headers and never appears in the socket address, so a single list could
- * not tell the two apart.
- *
- * @param ssh   the manifest's `ssh` section (NULL denies)
- * @param host  relay hostname or IP literal (NULL or empty denies)
- * @param port  relay TCP port, 1..65535 (anything else denies)
- * @return HL_NET_ALLOW, or the specific reason for refusal
- *
- * Fails closed: no `ssh.tunnel` key, or an empty one, permits no tunnel.
- * There is no `users` here - the login belongs to the target, and the relay
- * never sees it.
- */
-HlNetAuth hl_ssh_check_tunnel(const HlManifestSsh *ssh, const char *host,
-                              int port);
-
-/** Stable, human-readable reason for a denial. Never NULL. */
-const char *hl_cap_net_auth_reason(HlNetAuth a);
+HlNetReach hl_net_check_reach(const HlManifestNetConnect *g,
+                              const char *host, int port);
 
 #ifdef __cplusplus
 }

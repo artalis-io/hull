@@ -176,7 +176,7 @@ struct HlRuntime {
     /* ssh.connect allowlist policy (manifest ssh). Borrowed pointer into the
      * sealed manifest; NULL means no policy, and the check fails closed. This
      * is the ONLY grant of outbound stream authority, and it is granted to the
-     * SSH stdlib rather than to the app - see cap/net_policy.h. */
+     * SSH stdlib rather than to the app - see cap/ssh_policy.h. */
     const HlManifestSsh *ssh_policy;
     HlEnvConfig  *env_cfg;
     /* The host's resolved OUTBOUND TLS trust, borrowed. NULL when this build

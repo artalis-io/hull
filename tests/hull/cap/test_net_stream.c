@@ -2,7 +2,7 @@
  * test_net_stream.c - the hull/net transport: connect, close, free.
  *
  * Against a real loopback listener, driving a real HlAsyncBackend loop. The
- * capability gate has its own suite (test_net_policy.c) and is deliberately
+ * capability gate has its own suite (test_ssh_policy.c) and is deliberately
  * not repeated here: this file asks whether the transport does what the
  * contract in cap/net_stream.h says, once authorization has already passed.
  *
