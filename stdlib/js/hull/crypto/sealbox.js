@@ -66,6 +66,21 @@ function keyId(v) {
     return v;
 }
 
+// A key held in C (crypto.keyFromEnv): the bytes never become a JS value, and
+// the handle seals and opens with them itself.
+function isKeyHandle(k) {
+    return typeof k === "object" && k !== null && !ArrayBuffer.isView(k)
+        && typeof k.secretbox === "function" && typeof k.secretboxOpen === "function";
+}
+
+function box(key, msg, nonce) {
+    return isKeyHandle(key) ? key.secretbox(msg, nonce) : crypto.secretbox(msg, nonce, key);
+}
+
+function unbox(key, ct, nonce) {
+    return isKeyHandle(key) ? key.secretboxOpen(ct, nonce) : crypto.secretboxOpen(ct, nonce, key);
+}
+
 function keyring(opts) {
     if (!opts || typeof opts.keys !== "object" || opts.keys === null) {
         throw new Error("sealbox.keyring: expected { keys: {[id]: key, ...}, current: id }");
@@ -77,8 +92,13 @@ function keyring(opts) {
             throw new Error("sealbox.keyring: key ids must be integers 0..2^32-1");
         }
         const k = opts.keys[idStr];
+        if (isKeyHandle(k)) {
+            keys[id] = k;
+            continue;
+        }
         if (!isByteString(k) || k.length !== 32) {
-            throw new Error("sealbox.keyring: key " + idStr + " must be exactly 32 bytes");
+            throw new Error("sealbox.keyring: key " + idStr
+                            + " must be exactly 32 bytes or a crypto.keyFromEnv key");
         }
         keys[id] = bytes.toU8(k);
     }
@@ -88,6 +108,31 @@ function keyring(opts) {
                         + " is not in keys");
     }
     return { keys, current };
+}
+
+/**
+ * A keyring whose keys are read from environment variables into memory the C
+ * layer owns, so no key is ever a JS value:
+ *
+ *   const ring = sealbox.keyringFromEnv({ keys: { 1: "KV_KEY_1", 2: "KV_KEY_2" },
+ *                                         current: 2 });
+ *
+ * Each variable holds 64 hex digits or base64 of 32 bytes, and must be in
+ * manifest.env.
+ */
+function keyringFromEnv(opts) {
+    if (!opts || typeof opts.keys !== "object" || opts.keys === null) {
+        throw new Error('sealbox.keyringFromEnv: expected { keys: {[id]: "VAR", ...}, current: id }');
+    }
+    const keys = {};
+    for (const id of Object.keys(opts.keys)) {
+        const v = opts.keys[id];
+        if (typeof v !== "string" || v === "") {
+            throw new Error("sealbox.keyringFromEnv: key " + id + " must name an environment variable");
+        }
+        keys[id] = crypto.keyFromEnv(v);
+    }
+    return keyring({ keys, current: opts.current });
 }
 
 // Arguments are checked, not coerced: sealing the wrong thing (a Uint8Array
@@ -127,7 +172,7 @@ function seal(ring, value, context) {
     checkContext("seal", context);
     const key = ring.keys[ring.current];
     const nonce = crypto.random(NONCE_LEN);
-    const ct = crypto.secretbox(bytes.toU8(frame(context, value)), nonce, key);
+    const ct = box(key, bytes.toU8(frame(context, value)), nonce);
     return be32(ring.current) + bytes.fromBuffer(nonce) + bytes.fromBuffer(ct);
 }
 
@@ -152,7 +197,7 @@ function open(ring, blob, context) {
     if (key === undefined) return [null, "unknown_version"];
     const nonce = blob.substring(VERSION_LEN, VERSION_LEN + NONCE_LEN);
     const ct    = blob.substring(VERSION_LEN + NONCE_LEN);
-    const ab = crypto.secretboxOpen(bytes.toU8(ct), bytes.toU8(nonce), key);
+    const ab = unbox(key, bytes.toU8(ct), bytes.toU8(nonce));
     if (!ab) return [null, "open_failed"];
     const value = unframe(context, bytes.fromBuffer(ab));
     if (value === null) return [null, "open_failed"];
@@ -166,13 +211,13 @@ function openUnversioned(ring, id, blob) {
     if (key === undefined || !isByteString(blob) || blob.length < NONCE_LEN + MAC_LEN) {
         return null;
     }
-    const ab = crypto.secretboxOpen(bytes.toU8(blob.substring(NONCE_LEN)),
-                                    bytes.toU8(blob.substring(0, NONCE_LEN)), key);
+    const ab = unbox(key, bytes.toU8(blob.substring(NONCE_LEN)),
+                     bytes.toU8(blob.substring(0, NONCE_LEN)));
     return ab ? bytes.fromBuffer(ab) : null;
 }
 
 export const sealbox = {
     VERSION_LEN, NONCE_LEN, MAC_LEN, MIN_LEN,
-    keyring, seal, open, openUnversioned,
+    keyring, keyringFromEnv, seal, open, openUnversioned,
 };
 export default sealbox;

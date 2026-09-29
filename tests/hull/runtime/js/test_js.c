@@ -2908,6 +2908,47 @@ UTEST(js_stdlib, encoding_why_reasons)
     cleanup_js_caps();
 }
 
+/* The JS twin of lua_stdlib.crypto_key_from_env: crypto.keyFromEnv end to
+ * end through sealbox, kv and the env allowlist. */
+UTEST(js_stdlib, crypto_key_from_env)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    setenv("HULL_TEST_VAR", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", 1);
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "import { sealbox } from 'hull:crypto:sealbox';\n"
+        "import { kv } from 'hull:kv';\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "function run() {\n"
+        "  let raw = ''; for (let i = 0; i < 32; i++) raw += String.fromCharCode(i);\n"
+        "  const k = crypto.keyFromEnv('HULL_TEST_VAR');\n"
+        "  if (String(k) !== 'crypto.key(HULL_TEST_VAR)') return 1;\n"
+        "  if (Object.keys(k).length !== 0) return 2;\n"
+        "  const rh = sealbox.keyring({ keys: { 1: k }, current: 1 });\n"
+        "  const rr = sealbox.keyring({ keys: { 1: raw }, current: 1 });\n"
+        "  if (sealbox.open(rr, sealbox.seal(rh, 'v', ['ctx']), ['ctx'])[0] !== 'v') return 3;\n"
+        "  if (sealbox.open(rh, sealbox.seal(rr, 'w', ['ctx']), ['ctx'])[0] !== 'w') return 4;\n"
+        "  const re = sealbox.keyringFromEnv({ keys: { 1: 'HULL_TEST_VAR' }, current: 1 });\n"
+        "  if (sealbox.open(re, sealbox.seal(rr, 'x'))[0] !== 'x') return 5;\n"
+        "  const h = kv.open({ namespace: 'held', encrypt: { keys: { 1: k }, current: 1 } });\n"
+        "  h.set('a', 'secret');\n"
+        "  if (h.get('a') !== 'secret') return 6;\n"
+        "  if (!threw(() => crypto.keyFromEnv('PATH'))) return 7;\n"
+        "  const k2 = crypto.keyFromEnv('HULL_TEST_VAR');\n"
+        "  k2.destroy();\n"
+        "  if (!threw(() => k2.secretbox('x', new Uint8Array(24)))) return 8;\n"
+        "  if (!String(k2).includes('destroyed')) return 9;\n"
+        "  if (!threw(() => k.secretbox('x', new Uint8Array(5)))) return 10;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__heldkey = run();\n";
+    int rc = js_run_steps(code, "globalThis.__heldkey");
+    unsetenv("HULL_TEST_VAR");
+    ASSERT_EQ(rc, 0);
+    cleanup_js_caps();
+}
+
 /* Regressions from docs/crypto_encoding_ssh_audit.md (PR 1). run() returns 0,
  * or the number of the first check that failed. */
 UTEST(js_stdlib, crypto_encoding_audit_fixes)

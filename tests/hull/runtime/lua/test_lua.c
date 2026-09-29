@@ -3060,6 +3060,61 @@ UTEST(lua_stdlib, hkdf_rfc5869_vectors)
     cleanup_lua_caps();
 }
 
+/* A key held in C (crypto.key_from_env), end to end through sealbox, kv and
+ * the env allowlist. HULL_TEST_VAR is the harness's allowlisted variable; it
+ * holds 32 bytes 0x00..0x1f as hex. Returns 0, or the first failed check. */
+UTEST(lua_stdlib, crypto_key_from_env)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    setenv("HULL_TEST_VAR", "not a key", 1);
+    int bad = eval_int(
+        "(function() "
+        "  local ok = pcall(require('hull.crypto').key_from_env, 'HULL_TEST_VAR') "
+        "  return ok and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(bad, 0);
+
+    setenv("HULL_TEST_VAR", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n", 1);
+    int step = eval_int(
+        "(function() "
+        "  local crypto = require('hull.crypto') "
+        "  local sb = require('hull.crypto.sealbox') "
+        "  local kv = require('hull.kv') "
+        "  local raw = '' for i = 0, 31 do raw = raw .. string.char(i) end "
+        "  local k = crypto.key_from_env('HULL_TEST_VAR') "
+        /* 1-2: the handle names its variable and hides everything else */
+        "  if tostring(k) ~= 'crypto.key(HULL_TEST_VAR)' then return 1 end "
+        "  if getmetatable(k) ~= 'crypto.key' then return 2 end "
+        /* 3-4: the held key IS those 32 bytes, both ways round */
+        "  local rh = sb.keyring{ keys = { [1] = k }, current = 1 } "
+        "  local rr = sb.keyring{ keys = { [1] = raw }, current = 1 } "
+        "  if sb.open(rr, sb.seal(rh, 'v', { 'ctx' }), { 'ctx' }) ~= 'v' then return 3 end "
+        "  if sb.open(rh, sb.seal(rr, 'w', { 'ctx' }), { 'ctx' }) ~= 'w' then return 4 end "
+        /* 5: keyring_from_env */
+        "  local re = sb.keyring_from_env{ keys = { [1] = 'HULL_TEST_VAR' }, current = 1 } "
+        "  if sb.open(re, sb.seal(rr, 'x')) ~= 'x' then return 5 end "
+        /* 6: an encrypted kv handle with a held key */
+        "  local h = kv.open{ namespace = 'held', encrypt = { keys = { [1] = k }, current = 1 } } "
+        "  h:set('a', 'secret') "
+        "  if h:get('a') ~= 'secret' then return 6 end "
+        /* 7: a variable outside manifest.env is refused */
+        "  if pcall(crypto.key_from_env, 'PATH') then return 7 end "
+        /* 8-9: destroy zeroes it now, and the handle stops working */
+        "  local k2 = crypto.key_from_env('HULL_TEST_VAR') "
+        "  k2:destroy() "
+        "  if pcall(k2.secretbox, k2, 'x', ('n'):rep(24)) then return 8 end "
+        "  if not tostring(k2):find('destroyed', 1, true) then return 9 end "
+        /* 10: a wrong nonce length is refused, not truncated */
+        "  if pcall(k.secretbox, k, 'x', 'short') then return 10 end "
+        "  return 0 "
+        "end)()");
+    unsetenv("HULL_TEST_VAR");
+    ASSERT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, otp_rfc4226_vectors)
 {
     init_lua_with_caps();

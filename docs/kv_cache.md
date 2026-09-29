@@ -156,22 +156,31 @@ another app on the same Postgres) sees noise; someone who can write it cannot
 produce, alter or move a value without the key.
 
 ```lua
-local env, hex = require("hull.env"), require("hull.encoding").hex
+-- manifest: env = { "KV_KEY_1" }; KV_KEY_1 holds 64 hex digits or base64
+local sealbox = require("hull.crypto.sealbox")
 local kv = require("hull.kv").open{
     backend = "postgres", database = db, namespace = "sessions",
-    encrypt = { keys = { [1] = hex.decode(env.get("KV_KEY_1")) }, current = 1 },
+    encrypt = sealbox.keyring_from_env{ keys = { [1] = "KV_KEY_1" }, current = 1 },
 }
 ```
 
 ```javascript
+import { sealbox } from "hull:crypto:sealbox";
 const store = kv.open({ backend: "postgres", database: db, namespace: "sessions",
-                        encrypt: { keys: { 1: keyBytes }, current: 1 } });
+    encrypt: sealbox.keyringFromEnv({ keys: { 1: "KV_KEY_1" }, current: 1 }) });
 ```
+
+`keyring_from_env` reads each key into memory the C layer owns
+(`crypto.key_from_env` / `crypto.keyFromEnv`): the script gets a handle that
+seals and opens, never the bytes, and the buffer is zeroed when the handle is
+collected or `destroy()`ed. That is the recommended form. A keyring of raw
+32-byte strings (`{ keys = { [1] = key_bytes } }`) still works, and the two
+seal identically - a value written with one opens with the other.
 
 - **Keys** are exactly 32 random bytes (`crypto.random(32)`), under integer ids
   0..2^32-1. `current` names the key new writes use. Keep them out of source:
-  read them through the manifest's `env` allowlist. A malformed keyring fails
-  `kv.open` with `invalid_argument`.
+  read them through the manifest's `env` allowlist, ideally as held keys
+  (above). A malformed keyring fails `kv.open` with `invalid_argument`.
 - **Binding.** The namespace and the key name are sealed inside each value, so
   a genuine value copied to another key or namespace does not open.
 - **Failure** is one code, `decrypt_failed`, for every way a value can be
@@ -203,8 +212,10 @@ What it does not protect against:
   outside the store.
 - **Key names.** Only values are encrypted; key names stay visible (scan needs
   their prefixes). An app that must hide them hashes them itself.
-- **Anyone who holds the key**, including the app's own process: keys are
-  Lua / JS strings and live in the interpreter heap.
+- **Anyone who holds the key**, including the app's own process. A held key
+  (`keyring_from_env`) keeps the bytes out of the interpreter heap, but they
+  remain in the process environment for its lifetime, and a raw-string
+  keyring puts them in the heap too.
 
 The format is `hull.crypto.sealbox` (`hull:crypto:sealbox`), shared with
 TOTP's encrypted secrets; Lua and JS produce and accept the same bytes. Design

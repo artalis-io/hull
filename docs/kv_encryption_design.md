@@ -112,11 +112,18 @@ migrating an existing namespace.
   `env` allowlist, as TOTP's docs already do.
 - **First version: keys are Lua strings**, consistent with TOTP, and simple.
   The cost is that key bytes live in the Lua heap, where they cannot be wiped.
-- **Later: a C-held keyring**, following `passphrase_env` in `hull/ssh`: the
-  handle names an environment variable, C reads the key, keeps it in a
-  zeroised buffer and does the sealing, and the key never becomes a Lua
-  string. Worth it for the same reason it was for SSH passphrases, but not
-  needed to ship the format.
+- **Then: a C-held keyring** (built), following `passphrase_env` in
+  `hull/ssh`. `crypto.key_from_env(var)` (JS `crypto.keyFromEnv`) reads the
+  variable under the manifest's `env` allowlist, decodes 64 hex digits or
+  base64 into a buffer `cap/crypto_key.c` owns, and returns a handle whose
+  only methods are `secretbox`, `secretbox_open` and `destroy`; the buffer is
+  zeroed on `destroy` or collection. Sealbox keyrings take a handle anywhere
+  they take a 32-byte string (`sealbox.keyring_from_env` builds a whole
+  keyring from variable names), so `hull/kv`'s `encrypt` and TOTP use it with
+  no change of their own. The sealed bytes are identical either way. The
+  limit is the one `bcrypt_pbkdf_env` states: the value is still in the
+  process environment; what is gone is the unscrubbable copy in the script
+  heap.
 
 ## 7. Rotation and migration
 
