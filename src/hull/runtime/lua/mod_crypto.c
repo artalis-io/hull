@@ -355,6 +355,70 @@ static int lua_crypto_verify(lua_State *L)
     return 1;
 }
 
+/* crypto.sign(alg, private_pem, data) -> signature bytes
+ *
+ *  The inverse of crypto.verify, same algorithms, same encodings: RSA
+ *  signatures are modulus-length, ECDSA ones raw r||s. private_pem is an
+ *  unencrypted PEM private key (PKCS#1, SEC1 or PKCS#8) of the family and
+ *  curve `alg` names. Raises on anything else - signing with the wrong key is
+ *  a mistake to surface, not a false to test for. */
+static int lua_crypto_sign(lua_State *L)
+{
+    size_t alg_len, pk_len, data_len;
+    const char *alg_str = luaL_checklstring(L, 1, &alg_len);
+    const char *pk      = luaL_checklstring(L, 2, &pk_len);
+    const char *data    = luaL_checklstring(L, 3, &data_len);
+
+    HlCryptoAsymAlg alg = hl_crypto_asym_alg_from_string(alg_str, alg_len);
+    if (alg == HL_CRYPTO_ASYM_NONE)
+        return luaL_error(L,
+            "crypto.sign: unsupported alg '%.*s' (use one of "
+            "RS256/RS384/RS512/PS256/ES256/ES384)", (int)alg_len, alg_str);
+
+    uint8_t sig[HL_CRYPTO_SIGN_MAX];
+    size_t sig_len = 0;
+    int rc = hl_cap_crypto_asym_sign_default(pk, pk_len, alg, data, data_len,
+                                             sig, sizeof sig, &sig_len);
+    if (rc == -2)
+        return luaL_error(L, "crypto.sign: signing is not available in this build");
+    if (rc != 0)
+        return luaL_error(L, "crypto.sign: the key cannot sign under %s (malformed, "
+                          "encrypted, a public key, or the wrong key type)",
+                          hl_crypto_asym_alg_to_string(alg));
+    lua_pushlstring(L, (const char *)sig, sig_len);
+    return 1;
+}
+
+/* crypto.rsa_private_pem(n, e, d, p, q) -> PKCS#1 PEM
+ *
+ *  An RSA private key from its components (unsigned big-endian bytes), for
+ *  formats that store a key that way - an OpenSSH key file does. The CRT
+ *  values are derived and the key checked; inconsistent components raise.
+ *  The result is secret: keep it no longer than the signing needs. */
+static int lua_crypto_rsa_private_pem(lua_State *L)
+{
+    HlCryptoRsaParts parts;
+    size_t n;
+    parts.n = (const uint8_t *)luaL_checklstring(L, 1, &n); parts.n_len = n;
+    parts.e = (const uint8_t *)luaL_checklstring(L, 2, &n); parts.e_len = n;
+    parts.d = (const uint8_t *)luaL_checklstring(L, 3, &n); parts.d_len = n;
+    parts.p = (const uint8_t *)luaL_checklstring(L, 4, &n); parts.p_len = n;
+    parts.q = (const uint8_t *)luaL_checklstring(L, 5, &n); parts.q_len = n;
+
+    char pem[HL_CRYPTO_RSA_PEM_MAX];
+    size_t pem_len = 0;
+    int rc = hl_cap_crypto_rsa_private_pem(&parts, pem, sizeof pem, &pem_len);
+    if (rc == -2)
+        return luaL_error(L, "crypto.rsa_private_pem: not available in this build "
+                          "(or an empty component)");
+    if (rc != 0)
+        return luaL_error(L, "crypto.rsa_private_pem: the components do not form "
+                          "a valid RSA key");
+    lua_pushlstring(L, pem, pem_len);
+    secure_zero(pem, pem_len);
+    return 1;
+}
+
 /* crypto.x509_pubkey_pem(der) -> pem_string or nil, err
  *
  *  Bridge from a base64-decoded X.509 certificate (DER) to the PEM-
@@ -1078,6 +1142,8 @@ static const luaL_Reg crypto_funcs[] = {
     {"ed25519_sign",      lua_crypto_ed25519_sign},
     {"ed25519_verify",    lua_crypto_ed25519_verify},
     {"verify",            lua_crypto_verify},
+    {"sign",              lua_crypto_sign},
+    {"rsa_private_pem",   lua_crypto_rsa_private_pem},
     {"x509_pubkey_pem",   lua_crypto_x509_pubkey_pem},
     {"auth",              lua_crypto_auth},
     {"auth_verify",       lua_crypto_auth_verify},

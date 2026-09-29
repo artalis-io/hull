@@ -31,6 +31,11 @@ M.MAGIC      = "openssh-key-v1\0"
 M.BEGIN      = "-----BEGIN OPENSSH PRIVATE KEY-----"
 M.END        = "-----END OPENSSH PRIVATE KEY-----"
 M.ALGORITHM  = "ssh-ed25519"
+M.RSA        = "ssh-rsa"
+
+-- The smallest RSA key this signs with: the floor the host key check uses
+-- too. A server may well accept less; that is not a reason to.
+M.RSA_MIN_BITS = 2048
 
 -- Strip the armour and decode the body.
 -- The failures a caller acts on differently carry a code: hull.ssh maps them
@@ -103,27 +108,36 @@ local function parse_private(blob)
     end
 
     local algo = r:string()
-    if algo ~= M.ALGORITHM then
+    local key
+    if algo == M.ALGORITHM then
+        local public = r:string()
+        local secret = r:string()
+        if #public ~= 32 then
+            error("ssh.privatekey: public half is " .. tostring(#public)
+                  .. " bytes, expected 32")
+        end
+        if #secret ~= 64 then
+            -- OpenSSH stores seed || public as one 64-byte value, which is
+            -- also what TweetNaCl signing wants, so it is passed through.
+            error("ssh.privatekey: secret half is " .. tostring(#secret)
+                  .. " bytes, expected 64")
+        end
+        -- The public half appears twice in the file. They must agree, or the
+        -- key would sign with one identity and present another.
+        if secret:sub(33) ~= public then
+            error("ssh.privatekey: the two copies of the public key disagree")
+        end
+        key = { algorithm = algo, public = public, secret = secret }
+    elseif algo == M.RSA then
+        -- n, e, d, iqmp, p, q (sshkey_private_serialize). iqmp is dropped:
+        -- the PEM is rebuilt from the rest, which also re-derives it.
+        local n, e, d = r:mpint(), r:mpint(), r:mpint()
+        r:mpint()
+        local p, q = r:mpint(), r:mpint()
+        key = { algorithm = algo, n = n, e = e, d = d, p = p, q = q }
+    else
         raise("unsupported_key_type", "ssh.privatekey: unsupported key type "
-              .. wire.safe_name(tostring(algo)) .. "; only " .. M.ALGORITHM .. " is supported")
-    end
-
-    local public = r:string()
-    local secret = r:string()
-    if #public ~= 32 then
-        error("ssh.privatekey: public half is " .. tostring(#public)
-              .. " bytes, expected 32")
-    end
-    if #secret ~= 64 then
-        -- OpenSSH stores seed || public as one 64-byte value, which is also
-        -- what TweetNaCl signing wants, so it is passed through unchanged.
-        error("ssh.privatekey: secret half is " .. tostring(#secret)
-              .. " bytes, expected 64")
-    end
-    -- The public half appears twice in the file. They must agree, or the key
-    -- would sign with one identity and present another.
-    if secret:sub(33) ~= public then
-        error("ssh.privatekey: the two copies of the public key disagree")
+              .. wire.safe_name(tostring(algo)) .. "; ssh-ed25519 and ssh-rsa are supported")
     end
 
     local comment = r:string()
@@ -139,8 +153,36 @@ local function parse_private(blob)
         i = i + 1
     end
 
-    return { algorithm = algo, public = public, secret = secret,
-             comment = comment }
+    key.comment = comment
+    return key
+end
+
+local function rsa_bits(n)
+    local top, bits = n:byte(1) or 0, 0
+    while top > 0 do bits = bits + 1; top = top >> 1 end
+    return (#n - 1) * 8 + bits
+end
+
+-- An RSA key's public blob, and the PEM hull.crypto.sign reads, built from
+-- the components the file holds. The components are dropped from the key
+-- afterwards: the PEM is what signs, and fewer copies of d, p and q is
+-- better than more, even though none of them can be scrubbed (see the
+-- header).
+local function finish_rsa(key, opts)
+    local bits = rsa_bits(key.n)
+    if bits < M.RSA_MIN_BITS then
+        raise("unsupported_key_type", "ssh.privatekey: RSA key of " .. tostring(bits)
+              .. " bits is below the " .. tostring(M.RSA_MIN_BITS)
+              .. "-bit minimum; generate a new one (ssh-keygen -t ed25519)")
+    end
+    local crypto = opts.crypto or require("hull.crypto")
+    local ok, pem = pcall(crypto.rsa_private_pem, key.n, key.e, key.d, key.p, key.q)
+    if not ok then
+        error("ssh.privatekey: the RSA key is damaged (" .. tostring(pem) .. ")")
+    end
+    key.pem, key.bits = pem, bits
+    key.public = wire.writer():string(M.RSA):mpint(key.e):mpint(key.n):build()
+    key.d, key.p, key.q = nil, nil, nil
 end
 
 -- The one cipher this accepts, and the one KDF. ssh-keygen writes exactly
@@ -254,9 +296,11 @@ end
 
 -- Load a key from the contents of a key file.
 --
--- Returns { algorithm, public, secret, comment, blob } where `blob` is the
--- wire-format public key ready for userauth, `public` is the raw 32 bytes and
--- `secret` the 64 bytes signing wants.
+-- Returns { algorithm, comment, blob } plus what signing needs, where `blob`
+-- is the wire-format public key ready for userauth:
+--   ssh-ed25519  `public` (the raw 32 bytes), `secret` (the 64 signing wants)
+--   ssh-rsa      `pem` (PKCS#1, for hull.crypto.sign), `bits`, `n`, `e`
+-- An RSA key needs hull.crypto (opts.crypto in tests) to build its PEM.
 --- @param opts table|nil { passphrase = string } or { passphrase_env = string }
 function M.load(text, opts)
     local container = M.parse_container(M.unarmour(text))
@@ -279,8 +323,14 @@ function M.load(text, opts)
 
     -- The public blob in the container header is the one a server sees; check
     -- it against the private section rather than trusting either alone.
-    if container.public_blob ~= wire.writer():string(key.algorithm)
-                                             :string(key.public):build() then
+    local expect
+    if key.algorithm == M.RSA then
+        finish_rsa(key, opts or {})
+        expect = key.public
+    else
+        expect = wire.writer():string(key.algorithm):string(key.public):build()
+    end
+    if container.public_blob ~= expect then
         error("ssh.privatekey: the public blob does not match the private key")
     end
     key.blob = container.public_blob

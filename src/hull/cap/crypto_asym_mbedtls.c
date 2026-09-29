@@ -20,6 +20,7 @@
 #include "hull/tls_feature.h"   /* hl_crypto_asym_active_backend (strong override) */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -42,6 +43,7 @@
 #include <mbedtls/sha512.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/base64.h>
+#include <mbedtls/platform_util.h>
 
 /* Per-alg static descriptor: hash type + hash size + (for ECDSA)
  * curve identifier. We don't allocate; the table is read-only and
@@ -298,9 +300,227 @@ done:
     return rc;
 }
 
+/* ── Signing ──────────────────────────────────────────────────────────── */
+
+/* mbedTLS's RNG callback over Hull's CSPRNG. RSA signing draws for blinding,
+ * ECDSA for its nonce (this build has no MBEDTLS_ECDSA_DETERMINISTIC), PSS for
+ * its salt. */
+static int hl_mbed_rng(void *ctx, unsigned char *buf, size_t len)
+{
+    (void)ctx;
+    return hl_cap_crypto_random(buf, len) == 0 ? 0 : -1;
+}
+
+/* DER SEQUENCE { INTEGER r, INTEGER s } -> JOSE raw r || s, each left-padded
+ * to coord_len. The inverse of jose_to_der. */
+static int der_to_jose(unsigned char *der, size_t der_len, size_t coord_len,
+                       unsigned char *out, size_t out_size, size_t *out_len)
+{
+    if (out_size < 2 * coord_len) return -1;
+    unsigned char *p = der;             /* the ASN.1 reader advances it */
+    const unsigned char *end = der + der_len;
+    size_t seq_len = 0;
+    mbedtls_mpi r, s;
+    mbedtls_mpi_init(&r);
+    mbedtls_mpi_init(&s);
+    int rc = -1;
+    if (mbedtls_asn1_get_tag(&p, end, &seq_len,
+                             MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE) != 0
+        || p + seq_len != end
+        || mbedtls_asn1_get_mpi(&p, end, &r) != 0
+        || mbedtls_asn1_get_mpi(&p, end, &s) != 0
+        || p != end
+        || mbedtls_mpi_write_binary(&r, out, coord_len) != 0
+        || mbedtls_mpi_write_binary(&s, out + coord_len, coord_len) != 0)
+        goto out;
+    *out_len = 2 * coord_len;
+    rc = 0;
+out:
+    mbedtls_mpi_free(&r);
+    mbedtls_mpi_free(&s);
+    return rc;
+}
+
+/* The key must be of the family (and for ECDSA the curve) `desc` names -
+ * the same check verify makes, for the same reason. */
+static int key_matches(const mbedtls_pk_context *pk, const AlgDesc *desc)
+{
+    if (desc->is_ecdsa) {
+        if (mbedtls_pk_get_type(pk) != MBEDTLS_PK_ECKEY
+            && mbedtls_pk_get_type(pk) != MBEDTLS_PK_ECKEY_DH)
+            return 0;
+        const mbedtls_ecp_keypair *ec = mbedtls_pk_ec(*pk);
+        return ec && ec->MBEDTLS_PRIVATE(grp).id == desc->curve;
+    }
+    return mbedtls_pk_get_type(pk) == MBEDTLS_PK_RSA;
+}
+
+static int mbed_sign(const void *privkey_pem, size_t privkey_len,
+                     HlCryptoAsymAlg alg,
+                     const void *data, size_t data_len,
+                     uint8_t *out, size_t out_size, size_t *out_len)
+{
+    if (!privkey_pem || privkey_len == 0) return -2;
+    if (!data && data_len > 0) return -2;
+    if (!out || !out_len) return -2;
+    const AlgDesc *desc = desc_for(alg);
+    if (!desc) return -2;
+
+    size_t pem_len_with_nl = 0;
+    unsigned char *pem_copy = pem_dup_nul(privkey_pem, privkey_len, &pem_len_with_nl);
+    if (!pem_copy) return -2;
+
+    int rc = -1;
+    unsigned char hash[64];
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+
+    /* No password: an encrypted PEM fails here, which is the contract. */
+    if (mbedtls_pk_parse_key(&pk, pem_copy, pem_len_with_nl + 1, NULL, 0,
+                             hl_mbed_rng, NULL) != 0)
+        goto done;
+    if (!key_matches(&pk, desc)) goto done;
+    if (hash_message(desc, data, data_len, hash) != 0) goto done;
+
+    if (desc->is_ecdsa) {
+        unsigned char der[MBEDTLS_ECDSA_MAX_LEN];
+        size_t der_len = 0;
+        if (mbedtls_pk_sign(&pk, desc->md, hash, desc->hash_len,
+                            der, sizeof(der), &der_len, hl_mbed_rng, NULL) == 0
+            && der_to_jose(der, der_len, desc->coord_len, out, out_size, out_len) == 0)
+            rc = 0;
+    } else if (desc->is_pss) {
+        /* Salt = hash length, MGF1 over the same hash: what verify expects. */
+        if (mbedtls_pk_sign_ext(MBEDTLS_PK_RSASSA_PSS, &pk, desc->md,
+                                hash, desc->hash_len, out, out_size, out_len,
+                                hl_mbed_rng, NULL) == 0)
+            rc = 0;
+    } else {
+        if (mbedtls_pk_sign(&pk, desc->md, hash, desc->hash_len,
+                            out, out_size, out_len, hl_mbed_rng, NULL) == 0)
+            rc = 0;
+    }
+
+done:
+    mbedtls_pk_free(&pk);                       /* zeroizes the key */
+    mbedtls_platform_zeroize(pem_copy, pem_len_with_nl + 1);
+    free(pem_copy);
+    mbedtls_platform_zeroize(hash, sizeof(hash));
+    return rc;
+}
+
+/* Wrap DER in a PEM block with the given label: 64-column base64 between
+ * BEGIN and END lines, NUL-terminated. Scratch space is zeroized, since the
+ * DER may be a private key. */
+static int der_to_pem(const unsigned char *der, size_t der_len, const char *label,
+                      char *out, size_t out_size, size_t *out_len)
+{
+    size_t b64_len = 0;
+    mbedtls_base64_encode(NULL, 0, &b64_len, der, der_len);
+    if (b64_len == 0) return -1;
+
+    char hdr[64], ftr[64];
+    int hl = snprintf(hdr, sizeof hdr, "-----BEGIN %s-----\n", label);
+    int fl = snprintf(ftr, sizeof ftr, "-----END %s-----\n", label);
+    if (hl < 0 || fl < 0 || (size_t)hl >= sizeof hdr || (size_t)fl >= sizeof ftr) return -1;
+
+    unsigned char *scratch = (unsigned char *)malloc(b64_len + 1);
+    if (!scratch) return -1;
+    int rc = -1;
+    size_t written = 0;
+    if (mbedtls_base64_encode(scratch, b64_len + 1, &written, der, der_len) != 0)
+        goto done;
+    size_t need = (size_t)hl + written + (written + 63) / 64 + (size_t)fl + 1;
+    if (need > out_size) goto done;
+
+    size_t pos = 0;
+    memcpy(out, hdr, (size_t)hl);
+    pos += (size_t)hl;
+    for (size_t i = 0; i < written; i += 64) {
+        size_t chunk = (written - i) > 64 ? 64 : (written - i);
+        memcpy(out + pos, scratch + i, chunk);
+        pos += chunk;
+        out[pos++] = '\n';
+    }
+    memcpy(out + pos, ftr, (size_t)fl);
+    pos += (size_t)fl;
+    out[pos] = '\0';
+    *out_len = pos;
+    rc = 0;
+done:
+    mbedtls_platform_zeroize(scratch, b64_len + 1);
+    free(scratch);
+    return rc;
+}
+
+/* An RSA private key from its components, as PKCS#1 PEM. mbedTLS derives the
+ * CRT values and checks the whole key; the DER is written with the ASN.1
+ * writer rather than MBEDTLS_PK_WRITE_C, which this build leaves out (see the
+ * x509 helper below for the same choice). */
+static int mbed_rsa_private_pem(const HlCryptoRsaParts *pp,
+                                char *out, size_t out_size, size_t *out_len)
+{
+    if (!pp->n || !pp->e || !pp->d || !pp->p || !pp->q
+        || !pp->n_len || !pp->e_len || !pp->d_len || !pp->p_len || !pp->q_len)
+        return -2;
+    if (pp->n_len > MBEDTLS_MPI_MAX_SIZE) return -1;
+
+    int rc = -1;
+    mbedtls_rsa_context rsa;
+    mbedtls_rsa_init(&rsa);
+    mbedtls_mpi v[8];                           /* N E D P Q DP DQ QP */
+    for (int i = 0; i < 8; i++) mbedtls_mpi_init(&v[i]);
+    /* n + d + five half-size values, plus DER headers. */
+    size_t cap = 5 * pp->n_len + 128;
+    unsigned char *der = (unsigned char *)calloc(1, cap);
+    if (!der) goto done;
+
+    if (mbedtls_rsa_import_raw(&rsa, pp->n, pp->n_len, pp->p, pp->p_len,
+                               pp->q, pp->q_len, pp->d, pp->d_len,
+                               pp->e, pp->e_len) != 0
+        || mbedtls_rsa_complete(&rsa) != 0
+        || mbedtls_rsa_check_privkey(&rsa) != 0
+        || mbedtls_rsa_export(&rsa, &v[0], &v[3], &v[4], &v[2], &v[1]) != 0
+        || mbedtls_rsa_export_crt(&rsa, &v[5], &v[6], &v[7]) != 0)
+        goto done;
+
+    /* RSAPrivateKey ::= SEQUENCE { version 0, n, e, d, p, q, dP, dQ, qInv },
+     * written backwards as the ASN.1 writer does. */
+    unsigned char *c = der + cap;
+    size_t len = 0;
+    for (int i = 7; i >= 0; i--) {
+        int w = mbedtls_asn1_write_mpi(&c, der, &v[i]);
+        if (w < 0) goto done;
+        len += (size_t)w;
+    }
+    int w = mbedtls_asn1_write_int(&c, der, 0);
+    if (w < 0) goto done;
+    len += (size_t)w;
+    w = mbedtls_asn1_write_len(&c, der, len);
+    if (w < 0) goto done;
+    len += (size_t)w;
+    w = mbedtls_asn1_write_tag(&c, der, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE);
+    if (w < 0) goto done;
+    len += (size_t)w;
+
+    if (der_to_pem(c, len, "RSA PRIVATE KEY", out, out_size, out_len) == 0)
+        rc = 0;
+
+done:
+    if (der) {
+        mbedtls_platform_zeroize(der, cap);
+        free(der);
+    }
+    for (int i = 0; i < 8; i++) mbedtls_mpi_free(&v[i]);   /* zeroizes */
+    mbedtls_rsa_free(&rsa);
+    return rc;
+}
+
 const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls = {
-    .supports = mbed_supports,
-    .verify   = mbed_verify,
+    .supports        = mbed_supports,
+    .verify          = mbed_verify,
+    .sign            = mbed_sign,
+    .rsa_private_pem = mbed_rsa_private_pem,
 };
 
 /* STRONG override of the base's weak hl_crypto_asym_active_backend() (cap/crypto.c):
@@ -339,62 +559,15 @@ int hl_cap_crypto_x509_pubkey_pem(const void *der, size_t der_len,
      * encoded as DER inside the cert. PEM-format = b64 of those bytes
      * wrapped in BEGIN/END PUBLIC KEY headers. This avoids needing
      * MBEDTLS_PK_WRITE_C / MBEDTLS_PEM_WRITE_C (which would bloat the
-     * binary by ~10 KiB for a feature only this one cap uses). */
+     * binary by ~10 KiB); der_to_pem does the wrap, as it does for
+     * rsa_private_pem. */
     const unsigned char *spki_der = crt.pk_raw.p;
     size_t spki_der_len = crt.pk_raw.len;
     if (!spki_der || spki_der_len == 0) goto done;
 
-    /* Probe the base64 output size first. */
-    size_t b64_len = 0;
-    mbedtls_base64_encode(NULL, 0, &b64_len, spki_der, spki_der_len);
-    if (b64_len == 0) goto done;
-
-    /* PEM = 27 (header + NL) + base64 with one NL per 64 chars +
-     * 26 (footer + NL) + 1 (final NL) + 1 (NUL). Base64 line-wrap
-     * adds ceil(b64_len/64) newlines. Add slack for the NUL byte
-     * mbedtls_base64_encode writes implicitly. */
-    static const char HDR[] = "-----BEGIN PUBLIC KEY-----\n";
-    static const char FTR[] = "-----END PUBLIC KEY-----\n";
-    size_t hdr_len = sizeof(HDR) - 1;
-    size_t ftr_len = sizeof(FTR) - 1;
-    size_t wrapped_b64_len = b64_len + (b64_len / 64) + 1;
-    size_t total = hdr_len + wrapped_b64_len + ftr_len;
-    if (total + 1 > out_size) goto done;
-
-    /* Emit header. */
-    memcpy(out_pem, HDR, hdr_len);
-    size_t pos = hdr_len;
-
-    /* Emit base64 into a scratch buffer, then re-emit into out_pem
-     * with a newline every 64 chars (PEM convention). */
-    unsigned char *scratch = (unsigned char *)malloc(b64_len + 1);
-    if (!scratch) goto done;
-    size_t written = 0;
-    if (mbedtls_base64_encode(scratch, b64_len + 1, &written,
-                              spki_der, spki_der_len) != 0) {
-        free(scratch);
-        goto done;
-    }
-
-    for (size_t i = 0; i < written; i += 64) {
-        size_t chunk = (written - i) > 64 ? 64 : (written - i);
-        if (pos + chunk + 1 > out_size) {
-            free(scratch);
-            goto done;
-        }
-        memcpy(out_pem + pos, scratch + i, chunk);
-        pos += chunk;
-        out_pem[pos++] = '\n';
-    }
-    free(scratch);
-
-    if (pos + ftr_len + 1 > out_size) goto done;
-    memcpy(out_pem + pos, FTR, ftr_len);
-    pos += ftr_len;
-    out_pem[pos] = '\0';
-
-    *out_len = pos;
-    rc = 0;
+    if (der_to_pem(spki_der, spki_der_len, "PUBLIC KEY",
+                   out_pem, out_size, out_len) == 0)
+        rc = 0;
 
 done:
     mbedtls_x509_crt_free(&crt);

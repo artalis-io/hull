@@ -178,7 +178,12 @@ a byte-only crypto API (a deliberate breaking change).
   (sealbox moved to it; decoders keep returning `null` and gain `why()`),
   recorded in `stdlib_style.md`. Open: a keyring from env (a C-held keyring,
   see `kv_encryption_design.md`).
-- **SSH, roadmap still open:** RSA user keys; documenting parallel
+- **RSA user keys:** done. `hull.crypto` gained `sign` (RS256/384/512, PS256,
+  ES256/384; the inverse of `verify`) and `rsa_private_pem` (an OpenSSH key
+  stores components, not PKCS#1); userauth signs under `rsa-sha2-512`, then
+  `rsa-sha2-256` if the server refuses it. Checked against keys ssh-keygen
+  wrote and signatures OpenSSL made, and against a live sshd.
+- **SSH, roadmap still open:** documenting parallel
   connections; the rest of group 5 (the C side: capability logic out of
   `mod_ssh.c`, a generic net policy, one connect adapter; moving
   `ws-stream` and merging its short-read gatherer; a net cap bit). The Lua

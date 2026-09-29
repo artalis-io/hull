@@ -108,11 +108,16 @@ function M.build_request(user, key_blob, signature_blob, algorithm)
         :build()
 end
 
--- An ssh-ed25519 signature blob, the wrapper around the raw 64 bytes.
+-- A signature blob: the algorithm name around the raw signature. An Ed25519
+-- signature is exactly 64 bytes; an RSA one is as long as the modulus.
 function M.signature_blob(raw_signature, algorithm)
-    if #raw_signature ~= 64 then
+    algorithm = algorithm or M.ALGORITHM
+    if algorithm == M.ALGORITHM and #raw_signature ~= 64 then
         error("ssh.userauth: an Ed25519 signature is 64 bytes, got "
               .. tostring(#raw_signature), 2)
+    end
+    if #raw_signature == 0 then
+        error("ssh.userauth: empty signature", 2)
     end
     return wire.writer()
         :string(algorithm or M.ALGORITHM)

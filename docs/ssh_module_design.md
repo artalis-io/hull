@@ -229,7 +229,7 @@ Deliberately minimal. Interoperability with current OpenSSH, not legacy breadth.
 | host key | `ssh-ed25519`; `ecdsa-sha2-nistp256` / `-nistp384`; `rsa-sha2-512` / `-256` | `crypto.ed25519_verify`; `crypto.verify` (ES256 / ES384 / RS512 / RS256), present |
 | encryption | `aes256-gcm@openssh.com` | needs 5.3 |
 | MAC | implicit in AEAD | none needed |
-| user auth | `publickey` with `ssh-ed25519` | `crypto.ed25519_sign`, present |
+| user auth | `publickey` with `ssh-ed25519`; RSA under `rsa-sha2-512` / `-256` | `crypto.ed25519_sign`; `crypto.sign` (RS512 / RS256) over the PEM `crypto.rsa_private_pem` rebuilds from the key file, present |
 | compression | `none` only, explicitly rejected otherwise | |
 
 Rejected by construction: SSH-1, ssh-rsa/SHA-1, DSA, CBC modes, arcfour, MD5,

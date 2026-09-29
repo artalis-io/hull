@@ -18,7 +18,7 @@ User guide: [`ssh.md`](ssh.md). Design record: [`ssh_module_design.md`](ssh_modu
 | 1 | Memory safety and data integrity | done (`fix/ssh-lifetimes-and-sftp`); item 2 has no direct test, see below |
 | 2 | Protocol correctness | done (`fix/ssh-protocol-correctness`); see below for two behaviour changes |
 | 3 | Timeouts and the error model | done (`fix/ssh-timeouts-and-errors`); see below |
-| 4 | Usability: SFTP, trust store, algorithms | SFTP + trust store done (`feat/ssh-sftp-files-and-known-hosts`); RSA user keys next, separately |
+| 4 | Usability: SFTP, trust store, algorithms | SFTP + trust store done (`feat/ssh-sftp-files-and-known-hosts`); ECDSA/RSA host keys and RSA user keys done |
 | 5 | Architecture, DRY, clean code | open |
 | 6 | Tests and docs | open |
 
@@ -263,7 +263,7 @@ store-interface alignment above), and `hull.kv` encryption at rest
 (`kv_encryption_design.md`), which lets `ssh.kv_store` resist a backend writer
 without the key.
 
-Still open in group 4: RSA user keys (C signing + key parsing), and
+Still open in group 4 (RSA user keys are done: `crypto.sign` + `crypto.rsa_private_pem`):
 documenting parallel connections.
 
 ## Group 5: architecture, DRY, clean code

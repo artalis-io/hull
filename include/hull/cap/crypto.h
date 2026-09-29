@@ -386,6 +386,17 @@ typedef enum {
     HL_CRYPTO_ASYM_ES384 = 6, /**< ECDSA P-384, SHA-384, raw r||s. */
 } HlCryptoAsymAlg;
 
+/** RSA private key components, each an unsigned big-endian magnitude (the
+ *  form an OpenSSH key file and PKCS#1 both carry). See
+ *  @ref hl_cap_crypto_rsa_private_pem. */
+typedef struct {
+    const uint8_t *n; size_t n_len;   /**< modulus */
+    const uint8_t *e; size_t e_len;   /**< public exponent */
+    const uint8_t *d; size_t d_len;   /**< private exponent */
+    const uint8_t *p; size_t p_len;   /**< first prime */
+    const uint8_t *q; size_t q_len;   /**< second prime */
+} HlCryptoRsaParts;
+
 /** Backend vtable for asymmetric verify. The vtable so the impl can
  *  be swapped later (mbedTLS today; could be BoringSSL, WolfSSL, a
  *  hardware token, etc.) without disturbing the cap surface or the
@@ -407,6 +418,16 @@ typedef struct HlCryptoAsymBackend {
                   HlCryptoAsymAlg alg,
                   const void *data, size_t data_len,
                   const void *sig,  size_t sig_len);
+
+    /** Sign. Same contract as @ref hl_cap_crypto_asym_sign. */
+    int (*sign)(const void *privkey_pem, size_t privkey_len,
+                HlCryptoAsymAlg alg,
+                const void *data, size_t data_len,
+                uint8_t *out, size_t out_size, size_t *out_len);
+
+    /** Same contract as @ref hl_cap_crypto_rsa_private_pem. */
+    int (*rsa_private_pem)(const HlCryptoRsaParts *parts,
+                           char *out, size_t out_size, size_t *out_len);
 } HlCryptoAsymBackend;
 
 /** Built-in mbedTLS asym backend. Present only in builds that link mbedTLS
@@ -458,6 +479,64 @@ int hl_cap_crypto_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
                                       HlCryptoAsymAlg alg,
                                       const void *data, size_t data_len,
                                       const void *sig,  size_t sig_len);
+
+/** Largest signature @ref hl_cap_crypto_asym_sign writes: an RSA-8192
+ *  signature (mbedTLS's MPI ceiling). ECDSA P-384 r||s is 96 bytes. */
+#define HL_CRYPTO_SIGN_MAX 1024
+
+/** Largest PEM @ref hl_cap_crypto_rsa_private_pem writes (an RSA-8192 key
+ *  is about 6.3 KiB). */
+#define HL_CRYPTO_RSA_PEM_MAX 8192
+
+/** Sign @p data under @p alg with @p privkey_pem.
+ *
+ *  The inverse of @ref hl_cap_crypto_asym_verify, with the same algorithms
+ *  and the same signature encodings: an RSA signature is as long as the
+ *  modulus, an ECDSA one is JOSE raw r||s (NOT DER), so what this writes
+ *  verifies there unchanged. The key is an unencrypted PEM private key
+ *  (PKCS#1 "RSA PRIVATE KEY", SEC1 "EC PRIVATE KEY" or PKCS#8), and must be of
+ *  the family and curve @p alg names - an RSA key under ES256 is refused, as
+ *  verify refuses it.
+ *
+ *  @return  0 with @p out_len set.
+ *          -1 if the key cannot sign under @p alg: malformed or encrypted PEM,
+ *             a public key, the wrong key type or curve, @p out_size too
+ *             small (HL_CRYPTO_SIGN_MAX always suffices).
+ *          -2 on a programming error (NULL, unsupported alg) or a backend
+ *             that cannot sign (a TLS-less build fails closed here).
+ *  On any failure @p out is zeroed, so a partial signature never escapes.
+ */
+int hl_cap_crypto_asym_sign(const HlCryptoAsymBackend *backend,
+                            const void *privkey_pem, size_t privkey_len,
+                            HlCryptoAsymAlg alg,
+                            const void *data, size_t data_len,
+                            uint8_t *out, size_t out_size, size_t *out_len);
+
+/** Convenience wrapper: sign via the active asym backend. */
+int hl_cap_crypto_asym_sign_default(const void *privkey_pem, size_t privkey_len,
+                                    HlCryptoAsymAlg alg,
+                                    const void *data, size_t data_len,
+                                    uint8_t *out, size_t out_size, size_t *out_len);
+
+/** The PEM (PKCS#1 "RSA PRIVATE KEY") of the RSA key with these components.
+ *
+ *  For key formats that store an RSA key as its components rather than as
+ *  PKCS#1 - an OpenSSH private key file carries n, e, d, iqmp, p, q. The CRT
+ *  values PKCS#1 also needs (d mod p-1, d mod q-1) are derived here, and the
+ *  key is checked for consistency (n = pq, e and d inverse) before anything is
+ *  written, so a damaged key file is refused rather than turned into a key
+ *  that signs garbage.
+ *
+ *  The output is secret: the caller scrubs it (hull_secure_zero) after use.
+ *
+ *  @return  0 with @p out NUL-terminated and @p out_len its length.
+ *          -1 if the components do not form a valid RSA key, or @p out_size
+ *             is too small (HL_CRYPTO_RSA_PEM_MAX always suffices).
+ *          -2 on a programming error or a backend that cannot (TLS-less).
+ *  On failure @p out is zeroed.
+ */
+int hl_cap_crypto_rsa_private_pem(const HlCryptoRsaParts *parts,
+                                  char *out, size_t out_size, size_t *out_len);
 
 /** Extract the SubjectPublicKeyInfo PEM from an X.509 certificate.
  *

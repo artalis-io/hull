@@ -1637,4 +1637,108 @@ test("an sftp write closes its handle and reads the answer on failure", function
     assert_eq(f:read("/r"), "ok")
 end)
 
+-- userauth --------------------------------------------------------------------
+--
+-- Driven over a plaintext stream with a session id set, as exec is above: what
+-- is under test is which requests go out and which signatures are asked for.
+
+local function accept_service() return plain(wire.writer():byte(6):string("ssh-userauth"):build()) end
+local function auth_failure(methods, partial)
+    return plain(wire.writer():byte(51):namelist(methods):boolean(partial or false):build())
+end
+local function auth_success() return plain("\52") end
+
+-- The public key algorithm named in each USERAUTH_REQUEST written.
+local function requested_algorithms(s)
+    local out = {}
+    for _, w in ipairs(s.written) do
+        local payload = w:sub(1, 4) ~= "SSH-" and packet.parse(w, 8)
+        if payload and payload:byte(1) == 50 then
+            local r = wire.reader(payload)
+            r:byte(); r:string(); r:string()
+            if r:string() == "publickey" then
+                r:boolean()
+                out[#out + 1] = r:string()
+            end
+        end
+    end
+    return table.concat(out, ",")
+end
+
+local function auth_crypto(signed)
+    local c = stub_crypto()
+    c.sign = function(alg) signed[#signed + 1] = alg; return string.rep("\7", 256) end
+    c.ed25519_sign = function() signed[#signed + 1] = "ed25519"; return string.rep("\8", 64) end
+    return c
+end
+
+local RSA_KEY = { algorithm = "ssh-rsa", pem = "PEM",
+                  blob = wire.writer():string("ssh-rsa"):mpint("\1\0\1"):mpint("\255"):build() }
+local ED_KEY = { algorithm = "ssh-ed25519", secret = string.rep("\3", 64),
+                 blob = wire.writer():string("ssh-ed25519"):string(string.rep("\4", 32)):build() }
+
+local function authenticating(inbound, signed)
+    local s = fake_stream(inbound, 64)
+    local t = transport.new(s, auth_crypto(signed))
+    t.session_id = "SESSION"
+    return t, s
+end
+
+test("an RSA key refused under SHA-512 is offered again under SHA-256", function()
+    local signed = {}
+    local t, s = authenticating(accept_service() .. auth_failure({ "publickey" })
+                                .. auth_success(), signed)
+    assert_eq(t:authenticate("u", RSA_KEY), true)
+    assert_eq(table.concat(signed, ","), "RS512,RS256")
+    assert_eq(requested_algorithms(s), "rsa-sha2-512,rsa-sha2-256")
+end)
+
+test("an RSA key accepted under SHA-512 is signed once", function()
+    local signed = {}
+    local t, s = authenticating(accept_service() .. auth_success(), signed)
+    assert_eq(t:authenticate("u", RSA_KEY), true)
+    assert_eq(table.concat(signed, ","), "RS512")
+    assert_eq(requested_algorithms(s), "rsa-sha2-512")
+end)
+
+test("no second hash once the server stops offering publickey", function()
+    local signed = {}
+    local t, s = authenticating(accept_service() .. auth_failure({ "password" }), signed)
+    local ok, err = t:authenticate("u", RSA_KEY)
+    assert_eq(ok, nil)
+    assert_eq(err.code, "auth_failed")
+    assert_eq(requested_algorithms(s), "rsa-sha2-512")
+end)
+
+test("partial success is not retried under another hash", function()
+    -- The signature was accepted; the server wants another factor.
+    local signed = {}
+    local t, s = authenticating(accept_service() .. auth_failure({ "publickey", "password" }, true),
+                                signed)
+    local ok, err = t:authenticate("u", RSA_KEY)
+    assert_eq(ok, nil)
+    assert_eq(err.code, "partial_success")
+    assert_eq(requested_algorithms(s), "rsa-sha2-512")
+end)
+
+test("both RSA hashes refused is an ordinary auth failure", function()
+    local signed = {}
+    local t = authenticating(accept_service() .. auth_failure({ "publickey" })
+                             .. auth_failure({ "publickey" }), signed)
+    local ok, err = t:authenticate("u", RSA_KEY)
+    assert_eq(ok, nil)
+    assert_eq(err.code, "auth_failed")
+    assert_eq(table.concat(signed, ","), "RS512,RS256")
+end)
+
+test("an Ed25519 key is offered once, as before", function()
+    local signed = {}
+    local t, s = authenticating(accept_service() .. auth_failure({ "publickey" }), signed)
+    local ok, err = t:authenticate("u", ED_KEY)
+    assert_eq(ok, nil)
+    assert_eq(err.code, "auth_failed")
+    assert_eq(table.concat(signed, ","), "ed25519")
+    assert_eq(requested_algorithms(s), "ssh-ed25519")
+end)
+
 return {pass = pass, fail = fail}
