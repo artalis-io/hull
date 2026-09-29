@@ -178,7 +178,8 @@ a byte-only crypto API (a deliberate breaking change).
 - **SSH, roadmap still open:** RSA user keys; documenting parallel
   connections; group 5 (split `transport.lua`, fingerprint duplicated,
   two buffered readers, raw `string.unpack(">I4")`, facade clutter, dead code);
-  group 6 (fuzz targets, live rekey / stdin interop tests, context docs).
+  group 6 (live rekey / stdin interop tests, context docs). The group 6 fuzz
+  targets are done: `fuzz/fuzz_ssh.c`.
 - **SSH, not on the roadmap:** only ed25519 host keys (servers with only RSA
   or ECDSA host keys are unreachable); one cipher; one key per connection with
   no fallback; one operation at a time per connection (an exec and an open
