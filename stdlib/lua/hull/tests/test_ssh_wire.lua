@@ -290,5 +290,25 @@ test("truncation never leaves half a character", function()
 end)
 
 
+-- peek_uint32 -----------------------------------------------------------
+
+test("peek_uint32 reads a length prefix without a reader", function()
+    local buf = wire.uint32(0x01020304) .. "rest"
+    assert_eq(wire.peek_uint32(buf), 0x01020304)
+    assert_eq(wire.peek_uint32("xx" .. wire.uint32(7), 3), 7)
+end)
+
+test("peek_uint32 reads the top of the range unsigned", function()
+    assert_eq(wire.peek_uint32("\255\255\255\255"), 0xFFFFFFFF)
+end)
+
+test("peek_uint32 refuses a short buffer with a wire error", function()
+    local ok, err = pcall(wire.peek_uint32, "abc")
+    assert_eq(ok, false)
+    assert_eq(tostring(err):find("ssh.wire: truncated", 1, true) ~= nil, true, tostring(err))
+    assert_raises(function() wire.peek_uint32("abcd", 2) end, "past the end")
+end)
+
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

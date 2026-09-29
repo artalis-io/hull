@@ -336,4 +336,12 @@ test("kv_store takes its own prefix", function()
     assert_eq(kv.data["fleet-a/web1"], ED_A)
 end)
 
+test("ssh.fingerprint takes just the key blob", function()
+    local key = wire.writer():string("ssh-ed25519"):string(string.rep("A", 32)):build()
+    local crypto = { sha256 = function() return string.rep("\0", 32) end }
+    -- 32 zero bytes, unpadded standard base64: what ssh-keygen -l prints.
+    assert_eq(ssh.fingerprint(key, { crypto = crypto }),
+              "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+end)
+
 return {pass = pass, fail = fail}

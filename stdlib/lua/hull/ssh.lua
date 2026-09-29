@@ -58,9 +58,6 @@ local hostkey    = require('hull.ssh.hostkey')
 
 local M = {}
 
-M.hostkey    = hostkey
-M.privatekey = privatekey
-
 --- Load a key from the contents of a key file.
 ---
 --- `opts.passphrase_env` names an environment variable holding the passphrase
@@ -637,8 +634,11 @@ function M.forget_host(trust, host, port)
     return guard(hostkey.forget, trust, hostkey.store_name(host, port))
 end
 
---- Fingerprint a key blob, for showing one to an operator.
-function M.fingerprint(crypto, key_blob)
+--- Fingerprint a key blob, for showing one to an operator: SHA256:<base64>,
+--- exactly what `ssh-keygen -l` prints. `opts.crypto` is the test seam every
+--- other entry point has; callers leave it out.
+function M.fingerprint(key_blob, opts)
+    local crypto = (opts and opts.crypto) or require("hull.crypto")
     return hostkey.fingerprint(crypto.sha256, key_blob)
 end
 

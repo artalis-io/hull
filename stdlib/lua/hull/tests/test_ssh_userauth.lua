@@ -238,8 +238,9 @@ test("banner keeps newline and tab", function()
     assert_eq(userauth.parse_response(p).message, "line one\nline\ttwo")
 end)
 
-test("sanitize removes NUL and DEL", function()
-    assert_eq(userauth.sanitize_text("a\0b\127c"), "abc")
+test("a banner loses NUL and DEL", function()
+    local p = wire.writer():byte(53):string("a\0b\127c"):string(""):build()
+    assert_eq(userauth.parse_response(p).message, "abc")
 end)
 
 -- Return results for C test harness

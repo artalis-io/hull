@@ -23,6 +23,7 @@
 -- composed TLS feature, and this module has no capability access.
 
 local packet = require('hull.ssh.packet')
+local wire   = require('hull.ssh.wire')
 
 local M = {}
 
@@ -190,7 +191,7 @@ end
 function Cipher:open(aead, buf)
     if #buf < M.LENGTH_LEN then return nil, "need_more" end
 
-    local packet_length = string.unpack(">I4", buf, 1)
+    local packet_length = wire.peek_uint32(buf)
     -- Bounded before waiting, as everywhere else. The length is plaintext and
     -- attacker-controlled, and it is only AUTHENTICATED once the tag checks -
     -- so a hostile length is refused on plausibility first.

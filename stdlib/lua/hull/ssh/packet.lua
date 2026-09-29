@@ -9,10 +9,12 @@
 -- allocates against, so the length checks below are the load-bearing part of
 -- this file, not the shape of the header.
 
+local wire = require('hull.ssh.wire')
+
 local M = {}
 
 local ssub, sbyte, srep = string.sub, string.byte, string.rep
-local spack, sunpack = string.pack, string.unpack
+local spack = string.pack
 
 -- RFC 4253 section 6.1: an implementation MUST support 32768 bytes of payload
 -- and a total packet of 35000. Accepting more than a peer could legitimately
@@ -132,7 +134,7 @@ function M.parse(buf, block)
     end
     if #buf < 4 then return nil, "need_more" end
 
-    local packet_length = sunpack(">I4", buf, 1)
+    local packet_length = wire.peek_uint32(buf)
 
     -- Bound the claim BEFORE waiting for that many bytes, or a peer sending a
     -- 4 GB length would have us buffer forever waiting for a packet that will

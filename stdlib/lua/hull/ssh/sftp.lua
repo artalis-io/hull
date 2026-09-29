@@ -110,7 +110,7 @@ end
 -- Raises on a length that cannot be valid whatever arrives next.
 function M.parse_frame(buf)
     if #buf < 4 then return nil, "need_more" end
-    local n = string.unpack(">I4", buf, 1)
+    local n = wire.peek_uint32(buf)
     -- Bounded BEFORE waiting for the bytes, so a peer claiming 4 GB does not
     -- have us buffering for a packet that will never be legal.
     if n > M.MAX_PACKET then
