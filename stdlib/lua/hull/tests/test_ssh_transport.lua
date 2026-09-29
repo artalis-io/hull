@@ -1320,6 +1320,146 @@ test("closing sftp drains its channel, so the next reader is not handed its tail
     assert_eq(r.status, 0)
 end)
 
+-- Two channels on one connection. Whoever reads next reads for both, so a
+-- message for the channel NOT being waited on has to land on that channel.
+-- These run a command while an sftp session is open (channel 0, the server's
+-- id 7), with messages for the sftp channel arriving in the middle of it.
+
+local function on(w) return plain(w:build()) end
+local function exec_on_ch1(extra_mid)
+    return on(wire.writer():byte(91):uint32(1):uint32(8):uint32(65536):uint32(32768))
+        .. on(wire.writer():byte(99):uint32(1))
+        .. extra_mid
+        .. on(wire.writer():byte(94):uint32(1):string("hi"))
+        .. on(wire.writer():byte(98):uint32(1):string("exit-status")
+                  :boolean(false):uint32(0))
+        .. on(wire.writer():byte(96):uint32(1))
+        .. on(wire.writer():byte(97):uint32(1))
+end
+
+test("a window adjust for an open sftp channel does not break an exec", function()
+    -- It used to raise "message for channel 0, expected 1" out of the exec.
+    local adj = on(wire.writer():byte(93):uint32(0):uint32(4096))
+    local s = fake_stream(conf() .. ok_reply() .. s_version() .. exec_on_ch1(adj), 9)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    local before = f.ch.send_window
+    local r = assert(t:exec("echo hi"))
+    assert_eq(r.stdout, "hi")
+    assert_eq(f.ch.send_window, before + 4096, "the adjust reached the sftp channel:")
+end)
+
+test("sftp data that arrives during an exec is kept for the sftp session", function()
+    -- The reply to the sftp request below arrives in the middle of the exec.
+    -- It must wait for the session, not be dropped or handed to the command.
+    local s = fake_stream(conf() .. ok_reply() .. s_version()
+                          .. exec_on_ch1(s_status(1, 0)), 9)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    local r = assert(t:exec("echo hi"))
+    assert_eq(r.stdout, "hi")
+    assert_eq(f:remove("/x"), true, "the queued reply answers the request:")
+end)
+
+test("sftp data that arrives while an exec channel opens is not dropped", function()
+    -- open_session used to skip whatever came before its confirmation.
+    local mid = s_status(1, 0)
+    local s = fake_stream(conf() .. ok_reply() .. s_version()
+        .. mid .. exec_on_ch1(""), 9)
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp())
+    assert(t:exec("echo hi"))
+    assert_eq(f:remove("/x"), true)
+end)
+
+test("a keepalive on the sftp channel during an exec is answered at once", function()
+    -- OpenSSH disconnects a client that leaves keepalive@openssh.com
+    -- unanswered; the command's reader must answer for the sftp channel too.
+    local ka = on(wire.writer():byte(98):uint32(0):string("keepalive@openssh.com")
+                      :boolean(true))
+    local s = fake_stream(conf() .. ok_reply() .. s_version() .. exec_on_ch1(ka), 9)
+    local t = transport.new(s, stub_crypto())
+    assert(t:sftp())
+    assert(t:exec("echo hi"))
+    local answered = false
+    for _, pkt in ipairs(s.written) do
+        local payload = packet.parse(pkt, 8)
+        if payload and payload:byte(1) == 100
+           and string.unpack(">I4", payload, 2) == 7 then
+            answered = true
+        end
+    end
+    assert_eq(answered, true, "CHANNEL_FAILURE to the sftp channel (server id 7):")
+end)
+
+-- An sftp session that stops being answered. The connection stays alive (a
+-- real server keeps answering keepalives, so its idle bound never fires);
+-- what ends the wait is the session's reply deadline. This stream reports a
+-- deadline once its script is spent and one is armed, as the real stream does
+-- when the time runs out.
+local function stalling_stream(inbound)
+    local s = fake_stream(inbound, 9)
+    s.deadlines = {}
+    s.armed = 0
+    s.deadline = function(self, ms)
+        self.deadlines[#self.deadlines + 1] = ms
+        self.armed = ms
+    end
+    local read = s.read
+    s.read = function(self, n)
+        if self._pos > #self._in and self.armed > 0 then
+            return nil, "deadline reached", "deadline"
+        end
+        return read(self, n)
+    end
+    return s
+end
+
+test("an sftp request nobody answers times out and closes the session", function()
+    local s = stalling_stream(conf() .. ok_reply() .. s_version())
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp({ reply_timeout_ms = 1000 }))
+    local ok, err = pcall(f.stat, f, "/x")
+    assert_eq(ok, false)
+    assert_eq(type(err) == "table" and err.code, "timeout")
+    -- The session is not used again: its replies could still arrive.
+    local ok2, err2 = pcall(f.stat, f, "/y")
+    assert_eq(ok2, false)
+    assert_eq(err2.code, "timeout")
+    -- Its channel was closed (CHANNEL_CLOSE to the server's id 7)...
+    local closed = false
+    for _, pkt in ipairs(s.written) do
+        local payload = packet.parse(pkt, 8)
+        if payload and payload:byte(1) == 97 and string.unpack(">I4", payload, 2) == 7 then
+            closed = true
+        end
+    end
+    assert_eq(closed, true, "CHANNEL_CLOSE sent:")
+    -- ...and since the server did not close it back, the connection is done.
+    assert_eq(t.dead and t.dead.code, "timeout")
+end)
+
+test("the sftp reply deadline is armed per message and cleared after", function()
+    local s = stalling_stream(conf() .. ok_reply() .. s_version() .. s_status(1, 0))
+    local t = transport.new(s, stub_crypto())
+    local f = assert(t:sftp({ reply_timeout_ms = 1000 }))
+    assert_eq(f:remove("/x"), true)
+    assert_eq(s.armed, 0, "no deadline left armed:")
+    local armed = 0
+    for _, ms in ipairs(s.deadlines) do if ms == 1000 then armed = armed + 1 end end
+    assert_eq(armed >= 2, true, "armed for the version and for the reply:")
+end)
+
+test("reply_timeout_ms is checked", function()
+    for _, bad in ipairs({ -1, 1.5, "60", 86400001 }) do
+        local s = fake_stream(conf() .. ok_reply() .. s_version(), 9)
+        local t = transport.new(s, stub_crypto())
+        local ok, err = pcall(t.sftp, t, { reply_timeout_ms = bad })
+        assert_eq(ok, false, tostring(bad))
+        assert_eq(err.code, "bad_argument")
+    end
+end)
+
 test("closing sftp twice sends one CLOSE", function()
     local s = fake_stream(conf() .. ok_reply() .. s_version() .. fin(), 9)
     local t = transport.new(s, stub_crypto())

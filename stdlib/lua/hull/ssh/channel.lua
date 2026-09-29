@@ -219,6 +219,9 @@ function M.new(opts)
     c.closed      = false
     c.exit_status = nil
     c.exit_signal = nil
+    -- Messages that arrived while another channel was being read: already
+    -- applied to this channel's state, waiting for its owner to take them.
+    c.inbox, c.inbox_head = {}, 1
     return c
 end
 

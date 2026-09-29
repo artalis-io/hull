@@ -333,8 +333,13 @@ function Conn:exec(command, opts) return guard(inner[self].exec, inner[self], co
 
 --- Open an SFTP session. Paths travel inside the subsystem as
 --- length-prefixed strings, so a filename never becomes a shell word.
-function Conn:sftp()
-    local s, err = guard(inner[self].sftp, inner[self])
+---
+--- `opts.reply_timeout_ms` (default 60000; 0 for none) bounds how long the
+--- session waits for the server's next message. A server that stays
+--- connected but stops answering the session gets `timeout`, and the session
+--- is closed.
+function Conn:sftp(opts)
+    local s, err = guard(inner[self].sftp, inner[self], opts)
     if not s then return nil, err end
     return handle(SftpHandle, s)
 end

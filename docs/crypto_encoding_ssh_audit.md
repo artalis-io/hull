@@ -181,9 +181,10 @@ a byte-only crypto API (a deliberate breaking change).
   group 6 (fuzz targets, live rekey / stdin interop tests, context docs).
 - **SSH, not on the roadmap:** only ed25519 host keys (servers with only RSA
   or ECDSA host keys are unreachable); one cipher; one key per connection with
-  no fallback; no channel multiplexing (exec while SFTP is open breaks); exec
-  stdin capped at 128 KiB and not streamable; no SFTP deadlines; no time-based
-  rekey (deliberate, but unrecorded).
+  no fallback; one operation at a time per connection (an exec and an open
+  SFTP session share it safely, but two coroutines driving one connection at
+  once are not supported); exec stdin capped at 128 KiB and not streamable; no
+  time-based rekey (deliberate, but unrecorded).
 
 See also [`encoding_consolidation_plan.md`](encoding_consolidation_plan.md),
 [`kv_encryption_design.md`](kv_encryption_design.md) and
