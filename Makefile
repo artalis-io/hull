@@ -2403,11 +2403,23 @@ $(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(PLATFORM_SEAL_ARENA_OBJ) $(KEE
 	@# Merge keel objects into the platform archive. KEEL_LIB is empty when
 	@# both HTTP halves are off (pure-compute flavor), in which case there is
 	@# nothing to merge -- skip rather than `ar x` the empty path (a dir).
+	@# Members are named by basename and `ar r` REPLACES a member of the same
+	@# name, so a Keel object named like one of Hull's would silently drop
+	@# Hull's from the archive (Keel's url.o once replaced Hull's url.o, and
+	@# every composed app failed to link hl_url_decode). Refuse instead.
 	@if [ -n "$(KEEL_LIB)" ]; then \
 		tmpdir=$$(mktemp -d) && \
 		cd $$tmpdir && \
 		$(AR) x $(CURDIR)/$(KEEL_LIB) && \
 		$(if $(filter 1,$(HL_TLS_FEATURE)),rm -f tls_mbedtls.o &&,) \
+		$(AR) t $(CURDIR)/$@ | tr -d '\r' | LC_ALL=C sort > .hull_members && \
+		ls *.o | LC_ALL=C sort > .keel_members && \
+		dups=$$(LC_ALL=C comm -12 .hull_members .keel_members) && \
+		if [ -n "$$dups" ]; then \
+			echo "ERROR: $@: Keel object(s) share a name with Hull's and would replace them:" $$dups >&2; \
+			echo "  rename the Hull source (objects are archived by basename)" >&2; \
+			rm -rf $$tmpdir; exit 1; \
+		fi && \
 		$(AR) rcs $(CURDIR)/$@ *.o && \
 		rm -rf $$tmpdir ; \
 	fi
