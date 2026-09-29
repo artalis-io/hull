@@ -197,8 +197,8 @@ app.manifest({
     ssh = {
         connect = {
             hosts = { "*.local", "10.0.0.0/8", "$SPARK_HOST" },
-            ports = { 22 },              -- default { 22 } if omitted
-            users = { "operator" },      -- optional; omitted means any
+            ports = { 22 },              -- required, non-empty
+            users = { "operator" },      -- required, non-empty: the login is part of the grant
         },
     },
 })
@@ -211,8 +211,13 @@ Properties, all matching existing Hull behaviour:
   This is the `hull/http-client` model verbatim: the import succeeds, the call
   is what gets refused.
 - The check runs **before** DNS resolution and before any socket exists.
-- Denial is a distinct structured error (`capability_denied`), never a timeout
-  or a generic failure.
+- Denial is a distinct structured error (`denied`, the detail naming which
+  list refused), never a timeout or a generic failure.
+- As built, `ports` and `users` have no defaults: an `ssh.connect` block
+  without a non-empty `hosts`, `ports` and `users` list is rejected when the
+  manifest is read (`cap/net_policy.c`). The draft below had `ports` default
+  to 22 and `users` to any; granting every login by omission was the wrong
+  default for a capability whose point is naming who may log in.
 - `hull/ssh` must NOT grant `hull/net` authority transitively. An app that
   declares SSH can reach port 22 on allowlisted hosts and nothing else.
 
@@ -293,14 +298,13 @@ Options, with my assessment:
 ## 9. Error model
 
 Structured codes, following the `email.send` convention of a coded error rather
-than a string. Distinguishing at minimum:
-
-```
-capability_denied     connect_failed        timeout
-protocol_error        kex_failed            algorithm_mismatch
-hostkey_rejected      hostkey_changed       auth_failed
-channel_rejected      transfer_failed       connection_closed
-```
+than a string. The vocabulary proposed here (`capability_denied`,
+`kex_failed`, `hostkey_rejected`, ...) was replaced during implementation by
+finer codes that name what the caller would do differently - `host_unknown`
+versus `host_changed` versus `host_revoked`, `partial_success` versus
+`auth_failed`, `output_too_large` versus `stdin_too_large`. The authoritative
+list, one row per code the implementation emits, is
+[`ssh.md` section 10](ssh.md#10-error-codes).
 
 `exec` returning a non-zero remote exit status is **not** an error. It is a
 successful call whose `exit_status` field is non-zero, exactly as the brief
@@ -387,7 +391,7 @@ Phase 0 (this document) stops here pending decisions.
 | 2 | codec, identification, KEX, encrypted transport, host-key exposure | pure Lua |
 | 3 | Ed25519 user auth, session channel, exec, streams, exit status | pure Lua |
 | 4 | SFTP subset (upload/download, no shell quoting) | pure Lua |
-| 5 | fault injection, fuzz targets, capability-denial tests, docs | |
+| 5 | fault injection, fuzz targets, capability-denial tests, docs | done: `fuzz/fuzz_ssh.c` (every peer-fed parser and whole scripted connections), live OpenSSH interop in `tests/e2e_ssh_tunnel.sh`, `stdlib/context/ssh.md` |
 
 Phases 2 to 5 are pure Lua/JS and need no further approval.
 

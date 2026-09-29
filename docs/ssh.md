@@ -462,6 +462,8 @@ bug, not a connection failure, and it comes back to you unchanged.
 | `stdin_too_large` / `output_too_large` / `bad_stdin` / `bad_timeout` | a bound or an option in §6 |
 | `sftp_unavailable` / `sftp_no_version` | the server has no SFTP subsystem, or it did not start |
 | `no_such_file` / `permission_denied` / `failure` / `op_unsupported` / ... | an SFTP status by name; `status` holds the number |
+| `closed` | an SFTP file handle used after `close` |
+| `bad_argument` | an option out of range, e.g. `sftp{ reply_timeout_ms = -1 }` |
 | `too_large` | an SFTP `read` passed its `max`, or `list` found more than `MAX_LIST_ENTRIES` (100000) entries |
 | `bad_reply` | the SFTP server answered with a message that does not fit the request |
 | `bad_software` | `connect`'s `software` option is not a valid identification string (letters, digits, `.`, `_`) |
