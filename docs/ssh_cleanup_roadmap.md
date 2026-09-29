@@ -268,9 +268,12 @@ documenting parallel connections.
 
 ## Group 5: architecture, DRY, clean code
 
-- **Split `transport.lua`** (939 lines): packets + KEX stay; move the `Sftp`
-  class to `sftp_client.lua` and `open_session` / `drain` / `exec` to
-  `session.lua`.
+- **Split `transport.lua`** - done. The `Sftp` class was already in
+  `sftp_client.lua`; the channel layer (`open_session`, the routing in
+  `read_for`, `drain_channel` / `close_channel`, `exec`) is now
+  `session.lua`, installed onto the Transport class so no caller changes.
+  `transport.lua` keeps the connection: handshake, KEX and rekey, packets,
+  liveness (1095 -> 754 lines).
 - **Move capability logic out of the binding.** `lua_ssh_connect` composes the
   two relay grants and selects the TLS trust anchor; that belongs in a
   `cap/` function (e.g. `hl_cap_ssh_open`) so a JS binding does not copy it.
@@ -286,28 +289,33 @@ documenting parallel connections.
   `smtp_transport.c` / `tls_client.c` / the DB transport (~300 lines). The CA
   bundle ladder is also duplicated between `serve.c` and `serve_cli.c`.
 - **DRY in the Lua stack.**
-  - hex: done in the stdlib - `hull.encoding` is now the one home for hex and
-    base64 (`encoding_consolidation_plan.md`); `examples/ssh_fleet/app.lua`
-    still has its own;
-  - fingerprint: `hostkey.lua` and `privatekey.lua`;
-  - the buffered short-read gatherer: `Transport:fill` and `ws-stream`'s
-    `_need`;
-  - `string.unpack(">I4")` in ~8 places instead of `wire.uint32`;
-  - close-and-drain written twice inside `exec`;
-  - `wire.safe_text` / `safe_name` vs `userauth.sanitize_text`: pick one.
-- **Facade hygiene.** `ssh.lua` re-exports `hostkey` / `privatekey` despite
-  its "internal" header; `ssh.fingerprint(crypto, blob)` makes callers pass a
-  crypto module; `hostkey.verify` takes eight positional parameters (build one
-  crypto adapter). `hull/web/ws-stream` is published but no app can obtain a
-  stream to give it, it is not a web concern, and it has no JS twin: move it
+  - hex: done - `hull.encoding` is the one home for hex and base64;
+  - fingerprint: done - `privatekey.fingerprint` delegates to `hostkey`;
+  - the length-prefix peeks: done - `wire.peek_uint32`, used by the packet,
+    cipher, sftp and transport framing;
+  - close-and-drain: done - every path ends a channel through
+    `close_channel`;
+  - `userauth.sanitize_text`: done - it was an alias; `wire.safe_text` is the
+    one sanitizer;
+  - still open: the short-read gatherer in `Transport:fill` and `ws-stream`'s
+    `_need`. They differ on EOF (raise vs return false) and liveness (only
+    the transport keepalives), and `hull/web/ws-stream` cannot require an
+    `hull.ssh` submodule without declaring it, so they merge when ws-stream
+    moves (below), not before.
+- **Facade hygiene.** Done: `ssh.lua` no longer re-exports `hostkey` /
+  `privatekey`; `ssh.fingerprint(blob)` takes just the blob (`opts.crypto`
+  is the test seam); `hostkey.verify` takes one crypto adapter (`sha256`,
+  `ed25519_verify`) instead of a separate digest function. Still open:
+  `hull/web/ws-stream` is published but no app can obtain a stream to give it, it is not a web concern, and it has no JS twin: move it
   under `hull/ssh/` or a future `hull/net/`. The registry uses
   `HL_MOD_CAP_HTTP_CLIENT` as a stand-in for a net cap bit.
-- **Dead code / wrong comments.** `hl_net_stream_deadline` (unused, and wrong),
-  `HL_NET_E_DENIED`, `hl_net_stream_cancel` (could be static); `net_stream.c`
-  header still says `cap/net.c` and "read and write land next";
-  `.cancel_resolve = NULL /* resolution is inline */` (it runs on a worker);
-  `net_stream.h` "graceful close: drain"; the `mod_ssh.c` "nothing suspended to
-  unwind" comment; the `poll.c` POLLNVAL comment.
+- **Dead code / wrong comments.** Done or overtaken:
+  `hl_net_stream_deadline` now backs the SFTP reply deadline;
+  `hl_net_stream_cancel` is used by close and by tests; `HL_NET_E_DENIED` is
+  part of the error-string table. Fixed: the `net_stream.c` header (`cap/net.c`,
+  "read and write land next"), the `cancel_resolve` comment (resolution runs on
+  a worker before the op starts), and a `next_message` doc comment stranded
+  above `defer_message` in `transport.lua` (it describes `read_message`).
 
 ## Group 6: tests and docs
 

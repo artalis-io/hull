@@ -1,8 +1,8 @@
 /*
- * cap/net.c - outbound byte stream: connect, close, free.
+ * cap/net_stream.c - outbound byte stream: connect, read, write, deadlines,
+ * close, free.
  *
- * Read and write land in the next slice; this one carries the ownership
- * protocol, which is the part that bites. See include/hull/cap/net_stream.h for
+ * The ownership protocol is the part that bites. See include/hull/cap/net_stream.h for
  * the contract and docs/net_module_design.md section 6a for why this schedules
  * on the event loop rather than pinning a worker like Hull's other transports.
  *
@@ -552,7 +552,7 @@ static void co_on_detach(void *ctx)
 
 static const KlConnectOpHooks NET_CONNECT_HOOKS = {
     .start_resolve   = co_start_resolve,
-    .cancel_resolve  = NULL,        /* resolution is inline and uninterruptible */
+    .cancel_resolve  = NULL,        /* resolved on a worker before the op starts */
     .start_attempt   = co_start_attempt,
     .cancel_attempt  = co_cancel_attempt,
     .dispose_fd      = co_dispose_fd,

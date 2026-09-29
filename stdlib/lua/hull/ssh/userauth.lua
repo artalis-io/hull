@@ -122,12 +122,6 @@ end
 
 -- Responses -------------------------------------------------------------------
 
--- Strip control characters from server-supplied text.
---
--- The one implementation lives in hull.ssh.wire, because every layer has peer
--- text headed for a terminal and they must not drift apart. Kept here as the
--- name this module has always exported.
-M.sanitize_text = wire.safe_text
 
 -- Parse an authentication response.
 --
@@ -155,7 +149,7 @@ function M.parse_response(payload)
     if msg == M.SSH_MSG_USERAUTH_BANNER then
         local message = r:string()
         local language = r:string()
-        return { type = "banner", message = M.sanitize_text(message),
+        return { type = "banner", message = wire.safe_text(message),
                  raw_message = message, language = language }
     end
 

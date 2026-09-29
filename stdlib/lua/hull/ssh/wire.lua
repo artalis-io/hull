@@ -333,6 +333,18 @@ function M.uint32(v)
     return spack(">I4", v)
 end
 
+-- The uint32 at `pos` (default 1) of a raw buffer, without a reader. For the
+-- one thing every framing layer does before it has a whole message: look at
+-- the length prefix to decide how much more to wait for.
+function M.peek_uint32(buf, pos)
+    pos = pos or 1
+    if #buf < pos + 3 then
+        error("ssh.wire: truncated: need 4 byte(s) at " .. tostring(pos)
+              .. ", have " .. tostring(#buf - pos + 1), 2)
+    end
+    return (sunpack(">I4", buf, pos))
+end
+
 -- Zero padding. Callers needing RANDOM padding (the binary packet protocol
 -- does) must supply it themselves: this module has no capability access and
 -- must not pretend to produce entropy.

@@ -181,7 +181,7 @@ end
 --   { ok = true, status = "changed", fingerprint,
 --     stored_fingerprint }                          caller MUST NOT proceed
 --                                                   without human involvement
-function M.verify(crypto, sha256_raw, store, host, key_blob, sig_blob, h)
+function M.verify(crypto, store, host, key_blob, sig_blob, h)
     local ok, reason = M.verify_signature(crypto, key_blob, sig_blob, h)
     if not ok then
         return { ok = false, reason = reason }
@@ -191,13 +191,13 @@ function M.verify(crypto, sha256_raw, store, host, key_blob, sig_blob, h)
     local out = {
         ok = true,
         status = status,
-        fingerprint = M.fingerprint(sha256_raw, key_blob),
+        fingerprint = M.fingerprint(crypto.sha256, key_blob),
         key_blob = key_blob,
     }
     if status == M.CHANGED then
         -- Both fingerprints, because the useful question for whoever is
         -- reading is which key they were expecting.
-        out.stored_fingerprint = M.fingerprint(sha256_raw, stored)
+        out.stored_fingerprint = M.fingerprint(crypto.sha256, stored)
     end
     return out
 end

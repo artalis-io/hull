@@ -176,8 +176,11 @@ a byte-only crypto API (a deliberate breaking change).
   from env; reason strings on JS decode failures; one JS error shape (encoding
   returns `null`, envelope `[v, err]`, sealbox `{ ok, ... }`).
 - **SSH, roadmap still open:** RSA user keys; documenting parallel
-  connections; group 5 (split `transport.lua`, fingerprint duplicated,
-  two buffered readers, raw `string.unpack(">I4")`, facade clutter, dead code);
+  connections; the rest of group 5 (the C side: capability logic out of
+  `mod_ssh.c`, a generic net policy, one connect adapter; moving
+  `ws-stream` and merging its short-read gatherer; a net cap bit). The Lua
+  side of group 5 is done (`session.lua`, `wire.peek_uint32`, one
+  sanitizer, a tidier facade);
   group 6 (live rekey / stdin interop tests, context docs). The group 6 fuzz
   targets are done: `fuzz/fuzz_ssh.c`.
 - **SSH, not on the roadmap:** only ed25519 host keys (servers with only RSA
