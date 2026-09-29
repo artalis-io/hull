@@ -52,8 +52,8 @@ Transport.__index = Transport
 
 --- @param stream  read/write/close, as above
 --- @param crypto  sha256, x25519, x25519_keypair, ed25519_verify, verify
----                (ECDSA / RSA host keys), ed25519_sign, sign (RSA user
----                keys), random, gcm_seal, gcm_open
+---                (ECDSA / RSA host keys), ed25519_sign, sign (RSA and
+---                ECDSA user keys), random, gcm_seal, gcm_open
 -- Liveness defaults (see Transport:quiet). OpenSSH's ServerAliveInterval /
 -- ServerAliveCountMax, and an idle bound on top of them.
 M.KEEPALIVE_MS  = 30000
@@ -750,11 +750,12 @@ function Transport:authenticate(user, key, on_banner)
 
     for i, alg in ipairs(algorithms) do
         local blob = userauth.signed_blob(self.session_id, user, key.blob, alg)
+        -- RSA and ECDSA sign through crypto.sign under the algorithm's hash
+        -- (the table host keys are verified with); Ed25519 has its own.
         local sig
-        if alg == "rsa-sha2-512" then
-            sig = self.crypto.sign("RS512", key.pem, blob)
-        elseif alg == "rsa-sha2-256" then
-            sig = self.crypto.sign("RS256", key.pem, blob)
+        local a = hostkey.ALGORITHMS[alg]
+        if a and a.jose then
+            sig = self.crypto.sign(a.jose, key.pem, blob)
         else
             sig = self.crypto.ed25519_sign(blob, key.secret)
         end

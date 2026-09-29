@@ -1731,6 +1731,35 @@ test("both RSA hashes refused is an ordinary auth failure", function()
     assert_eq(table.concat(signed, ","), "RS512,RS256")
 end)
 
+local EC_KEY = { algorithm = "ecdsa-sha2-nistp384", pem = "PEM",
+                 blob = wire.writer():string("ecdsa-sha2-nistp384"):string("nistp384")
+                                    :string("\4" .. string.rep("\5", 96)):build() }
+
+test("an ECDSA key signs under its own curve's hash, once", function()
+    local signed = {}
+    local c = auth_crypto(signed)
+    c.sign = function(alg) signed[#signed + 1] = alg; return string.rep("\9", 96) end
+    local s = fake_stream(accept_service() .. auth_success(), 64)
+    local t = transport.new(s, c)
+    t.session_id = "SESSION"
+    assert_eq(t:authenticate("u", EC_KEY), true)
+    assert_eq(table.concat(signed, ","), "ES384")
+    assert_eq(requested_algorithms(s), "ecdsa-sha2-nistp384")
+end)
+
+test("a refused ECDSA key is not retried", function()
+    local signed = {}
+    local c = auth_crypto(signed)
+    c.sign = function(alg) signed[#signed + 1] = alg; return string.rep("\9", 96) end
+    local s = fake_stream(accept_service() .. auth_failure({ "publickey" }), 64)
+    local t = transport.new(s, c)
+    t.session_id = "SESSION"
+    local ok, err = t:authenticate("u", EC_KEY)
+    assert_eq(ok, nil)
+    assert_eq(err.code, "auth_failed")
+    assert_eq(requested_algorithms(s), "ecdsa-sha2-nistp384")
+end)
+
 test("an Ed25519 key is offered once, as before", function()
     local signed = {}
     local t, s = authenticating(accept_service() .. auth_failure({ "publickey" }), signed)
