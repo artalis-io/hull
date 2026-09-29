@@ -47,6 +47,22 @@ boundary. Never phrase a stdlib contract in terms of HTTP status.
 | `validate.check(data, schema)` | valid / invalid / validator broken | `(true, {})` / `(false, findings)` / **throw** |
 | `email.send(msg)` | sent / missing arg / transport fail | `true` / **throw** / **throw** |
 
+**Checking untrusted input: `[value, reason]`.** Opening, verifying or
+decoding something an attacker may have made (a token, a sealed blob, base64
+from a request) rejects bad input as a normal outcome, like a validator. One
+shape across hull:crypto, hull:jwt and hull:encoding, so callers learn it once:
+
+| Operation | Lua | JS |
+|---|---|---|
+| `jwt.verify`, `envelope.open` | `value` / `nil, reason` | `[value, null]` / `[null, reason]` |
+| `sealbox.open` | `value, version` / `nil, reason` | `[value, null, version]` / `[null, reason]` |
+| `encoding.*.decode` | `value` / `nil, reason` | `value` / `null`; the reason is `encoding.*.why(same args)` |
+
+The decoders differ in JS because they are the hot path and a bare value reads
+best there; `why` gives the same reason Lua returns second, from the same
+checks. Reasons are lower-snake and stable, like codes. Misuse (a non-string
+where a string is required, a keyring that is not one) still throws.
+
 **Validation failure ≠ validator failure.** An *invalid input* is a normal,
 successful outcome of running the validator: it returns `(false, findings)`. The
 *validator itself* failing (a bad schema, an exception in a custom rule) throws.

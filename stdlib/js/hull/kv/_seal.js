@@ -30,8 +30,8 @@ function create(encrypt, namespace) {
         // [value, version]; version is null for a plaintext value read under
         // allowPlaintext. Throws decrypt_failed.
         open(k, stored) {
-            const r = sealbox.open(ring, stored, [namespace, k]);
-            if (r.ok) return [r.value, r.version];
+            const [value, err, version] = sealbox.open(ring, stored, [namespace, k]);
+            if (!err) return [value, version];
             // Migration only: while allowPlaintext is set, a plaintext value
             // planted by a writer is accepted too - the docs say so.
             if (allowPlaintext) return [stored, null];
