@@ -95,17 +95,33 @@ int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
  * @param len      Byte count.
  * @param err_msg  Out-parameter for error description; may be NULL.
  *
- * @return `0` on success, `-1` on failure (validate / mkdir / fopen / fwrite).
+ * @return `0` on success, `-1` on failure.
  *
- * @note NOT atomic: an existing file is opened O_TRUNC and rewritten in
- *       place, so a crash or a failed write mid-way leaves it truncated
- *       or partial, and a concurrent reader can see either. Callers that
- *       must never lose the old contents (a trust store, a config) need
- *       a write-temp + rename, which this cap does not yet offer.
+ * @note Atomic: the bytes go to a temp file in the target's directory, which
+ *       is flushed (fsync) and then renamed over the target, and the rename
+ *       is flushed too. A concurrent reader, or the file after a crash or a
+ *       power cut, sees the old contents or the new, never a truncated or
+ *       partial mix. A replaced file keeps its permission bits; its inode
+ *       changes, so a hard link to it keeps the old contents. The one
+ *       exception is a target that is an in-root symlink under a SUBTREE
+ *       grant: that write goes through the link to its target, in place, as
+ *       it always has (a rename would replace the link itself).
  */
 int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
                       const char *data, size_t len,
                       const char **err_msg);
+
+/** Skip the fsyncs: still atomic against a crash of the process, but not
+ *  durable across a power cut. For bulk writers (archive extraction), where a
+ *  flush per file would dominate. */
+#define HL_FS_WRITE_NO_SYNC 0x1u
+
+/**
+ * @brief hl_cap_fs_write with flags (HL_FS_WRITE_NO_SYNC).
+ */
+int hl_cap_fs_write_ex(const HlFsConfig *cfg, const char *path,
+                       const char *data, size_t len, unsigned flags,
+                       const char **err_msg);
 
 /**
  * @brief Test whether a file exists at @p path.

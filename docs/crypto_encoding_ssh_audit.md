@@ -75,8 +75,7 @@ Fix plan: **PR 1** crypto/encoding, **PR 2** SSH, **PR 3** missing C pieces.
 - [x] **Medium** - `file_store` treats any read error as an empty file and
   rewrites the whole file from that. Can wipe the trust store. Now only
   `not_found` is an empty store; any other read error raises `store_failed`.
-  The write itself is still not atomic, because `fs.write` is not (see
-  "Missing, not yet planned").
+  The write is atomic too, now that `fs.write` is (temp file + rename).
 - [x] **Medium** - `@revoked` lines are skipped, not enforced: a key revoked
   and also on a plain line is trusted. Now refused as `host_revoked`, on
   connect and on `accept_host`.
@@ -176,10 +175,6 @@ a byte-only crypto API (a deliberate breaking change).
 - **Crypto / encoding:** HKDF; a keyring
   from env; reason strings on JS decode failures; one JS error shape (encoding
   returns `null`, envelope `[v, err]`, sealbox `{ ok, ... }`).
-- **Filesystem:** `fs.write` is not atomic (it truncates in place), so a
-  crash mid-write leaves a truncated file. The SSH `file_store` inherits this.
-  An atomic write (temp file in the same directory + rename, both through the
-  descriptor-relative resolver) belongs in `cap/fs.c`, not in each caller.
 - **SSH, roadmap still open:** RSA user keys; documenting parallel
   connections; group 5 (split `transport.lua`, fingerprint duplicated,
   two buffered readers, raw `string.unpack(">I4")`, facade clutter, dead code);

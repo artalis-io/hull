@@ -188,8 +188,8 @@ static int extract_write(const HlTarEntry *e, void *vctx)
         pn = snprintf(path, sizeof(path), "%s", e->name);
     if (pn < 0 || (size_t)pn >= sizeof(path)) { c->err = "path too long"; return -1; }
 
-    int rc = hl_cap_fs_write(c->fs, path, (const char *)(e->data ? e->data : (const unsigned char *)""),
-                             e->size, &c->err);
+    int rc = hl_cap_fs_write_ex(c->fs, path, (const char *)(e->data ? e->data : (const unsigned char *)""),
+                             e->size, HL_FS_WRITE_NO_SYNC, &c->err);
     return rc == 0 ? 0 : -1;
 }
 
