@@ -126,6 +126,15 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/crypto", "hull/json", 0},
     },
     {
+        /* HKDF-SHA256 (RFC 5869): several keys from one secret, each bound to
+         * a label. Pure: built on crypto.hmac_sha256, so it needs no C of its
+         * own. */
+        .name = "hull/crypto/hkdf",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/crypto", 0},
+    },
+    {
         /* HOTP (RFC 4226), the algorithm under TOTP. Kept here rather than
          * in hull/web/middleware/totp so every cryptographic algorithm the
          * stdlib implements lives under hull/crypto. */

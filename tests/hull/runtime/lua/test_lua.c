@@ -3026,6 +3026,40 @@ UTEST(lua_stdlib, crypto_encoding_audit_fixes)
     cleanup_lua_caps();
 }
 
+/* HKDF-SHA256 against RFC 5869 appendix A, test cases 1-3 (3 is the empty
+ * salt and info case), through the real crypto.hmac_sha256. Returns 0, or the
+ * number of the first check that failed. */
+UTEST(lua_stdlib, hkdf_rfc5869_vectors)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local hkdf = require('hull.crypto.hkdf') "
+        "  local enc = require('hull.encoding') "
+        "  local hex = enc.hex.encode "
+        "  local function range(a, b) local t = {} for i = a, b do t[#t + 1] = string.char(i) end "
+        "    return table.concat(t) end "
+        "  local ikm = string.rep('\\11', 22) "
+        "  if hex(hkdf.extract(range(0, 12), ikm)) ~= '077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5' then return 1 end "
+        "  if hex(hkdf.derive(ikm, 42, { salt = range(0, 12), info = range(0xf0, 0xf9) })) "
+        "     ~= '3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865' then return 2 end "
+        "  if hex(hkdf.derive(range(0, 0x4f), 82, { salt = range(0x60, 0xaf), "
+        "        info = range(0xb0, 0xff) })) "
+        "     ~= 'b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87' then return 3 end "
+        "  if hex(hkdf.derive(ikm, 42)) ~= '8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8' then return 4 end "
+        "  if pcall(hkdf.derive, ikm, 0) or pcall(hkdf.derive, ikm, 8161) then return 5 end "
+        "  if #hkdf.derive(ikm, 8160) ~= 8160 then return 6 end "
+        /* two labels, two unrelated keys */
+        "  if hkdf.derive(ikm, 32, { info = 'enc' }) == hkdf.derive(ikm, 32, { info = 'mac' }) "
+        "     then return 7 end "
+        "  if pcall(hkdf.expand, 'short', '', 32) then return 8 end "
+        "  return 0 "
+        "end)()");
+    ASSERT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, otp_rfc4226_vectors)
 {
     init_lua_with_caps();
