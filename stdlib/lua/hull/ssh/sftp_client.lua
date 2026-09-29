@@ -34,12 +34,28 @@ local function sftp_error(r)
     return { code = "bad_reply", detail = "unexpected " .. tostring(r.type) }
 end
 
+--- How long a session waits for the server's next message before giving up on
+--- it (opts.reply_timeout_ms; 0 waits as long as the connection lives). Any
+--- message for the session resets it, so a long transfer that keeps moving is
+--- never cut off; what it bounds is a server that stays connected - answering
+--- keepalives, so the connection's idle bound never fires - but stops
+--- answering the session.
+M.REPLY_TIMEOUT_MS = 60000
+
+-- How long a timed-out session gets to close its channel, as for a command.
+local ABANDON_MS = 5000
+
 --- Open an SFTP session on its own channel of connection `t`.
 ---
 --- Paths travel as length-prefixed strings inside the subsystem, never as
 --- words in a command line, which is the whole reason file transfer here
 --- needs no shell quoting.
-function M.open(t)
+function M.open(t, opts)
+    local reply_ms = opts and opts.reply_timeout_ms
+    if reply_ms == nil then reply_ms = M.REPLY_TIMEOUT_MS end
+    if math.type(reply_ms) ~= "integer" or reply_ms < 0 or reply_ms > 86400000 then
+        bad_argument("ssh.sftp: reply_timeout_ms must be an integer 0..86400000")
+    end
     local ch, cerr = t:open_session()
     if not ch then return nil, cerr end
 
@@ -55,7 +71,8 @@ function M.open(t)
     if not ok then t:close_channel(ch); error(replied, 0) end
     if not replied then return fail({ code = "sftp_unavailable" }) end
 
-    local s = setmetatable({ t = t, ch = ch, buf = "", id = 0 }, Sftp)
+    local s = setmetatable({ t = t, ch = ch, buf = "", id = 0,
+                             reply_ms = reply_ms }, Sftp)
     local vok, ver = pcall(function()
         s:send(sftp.build_init())
         return s:recv()
@@ -92,7 +109,15 @@ end
 -- Read one connection message for this session's channel: keep its data for
 -- recv, and top up the window we grant.
 function Sftp:pump()
-    local m = self.t:channel_message(self.ch)
+    if self.broken then error(self.broken, 0) end
+    local t, ms = self.t, self.reply_ms
+    if ms > 0 then t:set_deadline(ms) end
+    local ok, m = pcall(t.channel_message, t, self.ch)
+    if ms > 0 then t:set_deadline(0) end
+    if not ok then
+        if type(m) == "table" and m.code == "deadline" then self:abandon() end
+        error(m, 0)
+    end
     if m.type == "data" then
         self.buf = self.buf .. m.data
     elseif m.type == "close" then
@@ -533,6 +558,26 @@ end
 
 function Sftp:close()
     self.t:close_channel(self.ch)
+end
+
+-- The server stopped answering this session. Replies to requests already sent
+-- may still come, so the session cannot be trusted to match them: close its
+-- channel under a short bound of its own, and fail this call and every later
+-- one on the session. If the channel will not close either, the connection is
+-- not trusted with another operation.
+function Sftp:abandon()
+    local t = self.t
+    self.broken = { code = "timeout",
+                    detail = "no reply from the sftp server within "
+                             .. tostring(self.reply_ms) .. " ms; the session is closed" }
+    t:set_deadline(ABANDON_MS)
+    t:close_channel(self.ch)
+    t:set_deadline(0)
+    if not self.ch.closed then
+        t.dead = { code = "timeout", detail = "a timed-out sftp session's channel did not close" }
+        t:close()
+    end
+    error(self.broken, 0)
 end
 
 return M

@@ -305,6 +305,20 @@ in a command line, so a filename with a space, a quote or a `$` needs no
 escaping and cannot become part of a command. SFTP also moves one direction at
 a time, which is why it has no equivalent of the `stdin` cap above.
 
+A session waits at most `reply_timeout_ms` (default 60000; `0` for no bound)
+for the server's next message: `conn:sftp({ reply_timeout_ms = 30000 })`. Any
+message for the session resets it, so a large transfer that keeps moving is
+never cut off. What it catches is a server that stays connected - still
+answering keepalives, so the connection's idle bound (§6a) never fires - but
+stops answering the session. That call returns `timeout`, the session is
+closed (replies to what it already sent could still arrive, so it is not
+reused), and every later call on it returns `timeout` too.
+
+An sftp session and commands can share a connection. While `exec` runs, what
+arrives for the open sftp session - data, a window adjust, a keepalive request
+- is applied to the session (a request needing a reply is answered at once)
+and its data kept for its next call; the same holds the other way round.
+
 Each operation returns `nil` plus a coded reason on failure - the server's
 status by name, so a missing file is `err.code == "no_such_file"` rather than
 text to match:
@@ -433,7 +447,7 @@ bug, not a connection failure, and it comes back to you unchanged.
 |---|---|
 | `channel_refused` / `no_channel_response` | the server would not open a channel, or never answered |
 | `exec_refused` | the server would not run the command |
-| `timeout` | `exec`'s `timeout_ms` passed; the command's channel is closed and the connection is still usable |
+| `timeout` | `exec`'s `timeout_ms` passed; the command's channel is closed and the connection is still usable. Or an sftp session's `reply_timeout_ms` passed (§7); that session is closed |
 | `stdin_too_large` / `output_too_large` / `bad_stdin` / `bad_timeout` | a bound or an option in §6 |
 | `sftp_unavailable` / `sftp_no_version` | the server has no SFTP subsystem, or it did not start |
 | `no_such_file` / `permission_denied` / `failure` / `op_unsupported` / ... | an SFTP status by name; `status` holds the number |

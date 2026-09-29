@@ -99,6 +99,7 @@ function M.new(stream, crypto, opts)
         ident = packet.build_ident(opts.software or "Hull"):sub(1, -3),
         inbuf = "",
         next_channel = 0,
+        channels = {},          -- our local id -> Channel, while it is open
         rekeys = 0,
         -- Packet sequence numbers (RFC 4253 section 6.4), one per direction,
         -- uint32 and wrapping. The GCM mode in use does not feed them into
@@ -764,17 +765,23 @@ function Transport:open_session()
 
     local ch = channel.new({ id = self.next_channel })
     self.next_channel = self.next_channel + 1
+    -- Registered before the open goes out, so what arrives for the channels
+    -- already open while we wait reaches them (see read_for), instead of
+    -- being skipped - which dropped an sftp session's data on the floor.
+    self.channels[ch.local_id] = ch
     self:send_packet(ch:open_message())
 
     for _ = 1, 16 do
-        local m = channel.parse(self:next_message())
+        local m = self:read_for(ch)
         if m.type == "open_confirmation" then
             ch:handle(m); return ch
         elseif m.type == "open_failure" then
             ch:handle(m)
+            self.channels[ch.local_id] = nil
             return nil, { code = "channel_refused", detail = m.description }
         end
     end
+    self.channels[ch.local_id] = nil
     return nil, { code = "no_channel_response" }
 end
 
@@ -796,12 +803,10 @@ end
 function Transport:drain_channel(ch)
     if ch.closed then return end
     for _ = 1, 10000 do
-        local ok, m = pcall(function()
-            return channel.parse(self:next_message())
-        end)
+        local ok, m = pcall(self.read_for, self, ch)
         if not ok then return end
         if m.recipient == ch.local_id then
-            pcall(function() ch:handle(m) end)
+            if not m.routed then pcall(function() ch:handle(m) end) end
             if m.type == "close" then return end
         end
     end
@@ -824,6 +829,7 @@ function Transport:close_channel(ch)
         self:send_packet(channel.build_close(ch.remote_id))
         self:drain_channel(ch)
     end)
+    self.channels[ch.local_id] = nil
 end
 
 -- The next connection message, applied to channel `ch`.
@@ -835,12 +841,54 @@ end
 -- open session channel, and disconnects a client that never answers, which
 -- killed long-running exec and sftp sessions.
 function Transport:channel_message(ch)
-    local m = channel.parse(self:next_message())
-    ch:handle(m)
-    if m.type == "request" and m.want_reply and ch.remote_id then
-        self:send_packet(channel.build_failure(ch.remote_id))
+    local m = self:read_for(ch)
+    if not m.routed then
+        ch:handle(m)
+        if m.type == "request" and m.want_reply and ch.remote_id then
+            self:send_packet(channel.build_failure(ch.remote_id))
+        end
     end
     return m
+end
+
+-- The next channel message for `ch`, with the others on the connection kept
+-- where they belong.
+--
+-- Every channel shares one stream, so whoever reads next reads for all of
+-- them. A message for another OPEN channel (an sftp session sitting idle
+-- while a command runs, say) is applied to that channel at once - a window
+-- adjust, an EOF, a close - and a request that wants a reply is refused at
+-- once, since the server may be waiting on it (OpenSSH's keepalive). One its
+-- owner needs to see is queued for it, and handed over the next time that
+-- channel is read. The queue cannot outgrow the receive window we granted:
+-- the window only reopens as the owner consumes. A message for a channel
+-- that is not open is returned as it is, and fails where it lands - the
+-- mix-up Channel:handle reports.
+--
+-- A queued message comes back with `routed` set: it has already been
+-- applied, and must not be applied twice.
+function Transport:read_for(ch)
+    local q = ch.inbox
+    if ch.inbox_head <= #q then
+        local m = q[ch.inbox_head]
+        q[ch.inbox_head] = nil
+        ch.inbox_head = ch.inbox_head + 1
+        if ch.inbox_head > #q then ch.inbox, ch.inbox_head = {}, 1 end
+        return m
+    end
+    while true do
+        local m = channel.parse(self:next_message())
+        local other = m.recipient ~= ch.local_id and self.channels[m.recipient]
+        if not other then return m end
+        other:handle(m)
+        if m.type == "request" and m.want_reply and other.remote_id then
+            self:send_packet(channel.build_failure(other.remote_id))
+        end
+        if m.type ~= "window_adjust" then
+            m.routed = true
+            other.inbox[#other.inbox + 1] = m
+        end
+    end
 end
 
 -- Wait for the reply to a channel request.
@@ -1031,8 +1079,8 @@ end
 -- SFTP --------------------------------------------------------------------------------
 
 --- Open an SFTP session on its own channel. See hull.ssh.sftp_client.
-function Transport:sftp()
-    return require('hull.ssh.sftp_client').open(self)
+function Transport:sftp(opts)
+    return require('hull.ssh.sftp_client').open(self, opts)
 end
 
 function Transport:close()
