@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
+#include <time.h>
 
 /* ── Path validation ────────────────────────────────────────────────── */
 
@@ -154,8 +155,18 @@ static int build_path(const HlFsConfig *cfg, const char *path,
  * hl_cap_fs_exists / hl_cap_fs_delete and any direct hl_cap_fs_validate consumer
  * still use the OLD build_path()/realpath path and are NOT policy-gated (they
  * remain base_dir-confined + sandbox-gated). Tracked follow-up. */
-static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
-                         HlFsOpenMode mode, mode_t cmode, const char **err_msg)
+/* The authorization for `path` in `mode`: the selected grant's held anchor fd,
+ * the residual under it (written into `scratch`), and the grant's symlink
+ * policy. Returns 0, or -1 with *err_msg set. */
+typedef struct {
+    int          anchor_fd;
+    const char  *residual;
+    HlFsSymlink  sym;
+} FsTarget;
+
+static int fs_select(const HlFsConfig *cfg, const char *path, HlFsOpenMode mode,
+                     char *scratch, size_t scratch_sz, FsTarget *out,
+                     const char **err_msg)
 {
     if (!cfg || !path || !cfg->base_dir) {
         if (err_msg) *err_msg = "invalid_args";
@@ -168,9 +179,8 @@ static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
         return -1;
     }
 
-    char scratch[HL_FS_PATH_MAX];
     HlFsSelection sel = hl_fs_policy_select(cfg->policy, path, mode,
-                                            scratch, sizeof(scratch));
+                                            scratch, scratch_sz);
     if (!sel.entry) {
         if (err_msg) *err_msg = sel.err ? sel.err : "permission";
         return -1;
@@ -178,11 +188,22 @@ static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
 
     /* SUBTREE follows in-root symlinks (contained within its anchor);
      * EXACT/CREATE/PATTERN refuse every symlink. */
-    HlFsSymlink sym = (sel.entry->kind == HL_FS_ENTRY_SUBTREE)
-                          ? HL_FS_SYMLINK_FOLLOW : HL_FS_SYMLINK_REFUSE;
+    out->anchor_fd = sel.entry->anchor_fd;
+    out->residual  = sel.residual;
+    out->sym = (sel.entry->kind == HL_FS_ENTRY_SUBTREE)
+                   ? HL_FS_SYMLINK_FOLLOW : HL_FS_SYMLINK_REFUSE;
+    return 0;
+}
+
+static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
+                         HlFsOpenMode mode, mode_t cmode, const char **err_msg)
+{
+    char scratch[HL_FS_PATH_MAX];
+    FsTarget t;
+    if (fs_select(cfg, path, mode, scratch, sizeof(scratch), &t, err_msg) != 0)
+        return -1;
     const char *e = NULL;
-    int fd = hl_fs_open_at_ex(sel.entry->anchor_fd, sel.residual, mode,
-                              sym, cmode, &e);
+    int fd = hl_fs_open_at_ex(t.anchor_fd, t.residual, mode, t.sym, cmode, &e);
     if (fd < 0 && err_msg) *err_msg = e ? e : "open_failed";
     return fd;
 }
@@ -260,41 +281,185 @@ audit:
     return result;
 }
 
-int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
-                      const char *data, size_t len,
-                      const char **err_msg)
+/* Write all of `len` bytes to `fd`, retrying short writes and EINTR. */
+static int fs_write_all(int fd, const char *data, size_t len)
 {
-    int result = -1;
+    while (len > 0) {
+        ssize_t n = write(fd, data, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        data += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
 
-    /* WRITE mode: the resolver creates missing parent dirs (contained mkdirat)
-     * and opens the leaf O_WRONLY|O_CREAT|O_TRUNC - same implicit-parents +
-     * truncate behavior as the previous mkdir-p + fopen("wb"), now race-free. */
+/* The old write: open the leaf O_TRUNC through the resolver and rewrite it in
+ * place. Kept for the one case rename cannot serve - a target that is an
+ * in-root symlink under a SUBTREE grant, where the write has always gone
+ * THROUGH the link to its target, and a rename would replace the link. */
+static int fs_write_in_place(const HlFsConfig *cfg, const char *path,
+                             const char *data, size_t len, unsigned flags,
+                             const char **err_msg)
+{
     int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE, 0644, err_msg);
     if (fd < 0)
-        goto audit;
+        return -1;
+    int rc = (len > 0 && data) ? fs_write_all(fd, data, len) : 0;
+    if (rc == 0 && !(flags & HL_FS_WRITE_NO_SYNC) && fsync(fd) != 0)
+        rc = -1;
+    if (close(fd) != 0)
+        rc = -1;
+    if (rc != 0 && err_msg) *err_msg = "write_failed";
+    return rc;
+}
 
-    {
-        FILE *f = fdopen(fd, "wb");
-        if (!f) {
-            close(fd);
-            if (err_msg) *err_msg = "write_failed";
-            goto audit;
-        }
+/* Remove a temp file left by a failed atomic write, best effort. */
+static void fs_unlink_temp(int parent_fd, const char *name)
+{
+    if (parent_fd >= 0) (void)unlinkat(parent_fd, name, 0);
+}
 
-        if (len > 0 && data) {
-            size_t written = fwrite(data, 1, len, f);
-            if (written != len) {
-                fclose(f);
-                if (err_msg) *err_msg = "write_failed";
-                goto audit;
-            }
-        }
+enum { FS_ATOMIC_OK = 0, FS_ATOMIC_FAILED = -1, FS_ATOMIC_IN_PLACE = 1 };
 
-        fclose(f);
-        result = 0;
+/* Write to a temp file beside the target, then rename it over the target, so a
+ * reader - or the file after a crash - sees the old contents or the new, never
+ * a mix. Both the temp and the rename go through the same grant, anchor and
+ * symlink policy as the target: the temp is created by the descriptor-relative
+ * resolver (which also makes missing parents), and the rename is relative to
+ * the target's held parent directory, after checking that the temp IS in that
+ * directory. */
+static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
+                           const char *data, size_t len, unsigned flags,
+                           const char **err_msg)
+{
+    char scratch[HL_FS_PATH_MAX];
+    FsTarget t;
+    if (fs_select(cfg, path, HL_FS_OPEN_WRITE, scratch, sizeof(scratch), &t,
+                  err_msg) != 0)
+        return FS_ATOMIC_FAILED;
+    if (strcmp(t.residual, ".") == 0) {        /* the grant root: a directory */
+        if (err_msg) *err_msg = "not_a_regular_file";
+        return FS_ATOMIC_FAILED;
     }
 
-audit:
+    /* A name unique on this host: pid, a per-process counter and the clock. It
+     * starts with a dot and names nothing a caller asked for, and is gone
+     * again - renamed or removed - before this returns. */
+    static unsigned long counter;
+    unsigned long seq = __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED);
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    char tmpname[80];
+    snprintf(tmpname, sizeof(tmpname), ".hull-tmp-%lx-%lx-%lx-%lx",
+             (unsigned long)getpid(), seq, (unsigned long)now.tv_sec,
+             (unsigned long)now.tv_nsec);
+
+    char tmprel[HL_FS_PATH_MAX];
+    const char *slash = strrchr(t.residual, '/');
+    int w = slash
+        ? snprintf(tmprel, sizeof(tmprel), "%.*s/%s",
+                   (int)(slash - t.residual), t.residual, tmpname)
+        : snprintf(tmprel, sizeof(tmprel), "%s", tmpname);
+    if (w < 0 || (size_t)w >= sizeof(tmprel)) {
+        if (err_msg) *err_msg = "invalid_path";
+        return FS_ATOMIC_FAILED;
+    }
+
+    const char *e = NULL;
+    int tfd = hl_fs_open_at_ex(t.anchor_fd, tmprel, HL_FS_OPEN_WRITE, t.sym,
+                               0644, &e);
+    if (tfd < 0) {
+        if (err_msg) *err_msg = e ? e : "open_failed";
+        return FS_ATOMIC_FAILED;
+    }
+
+    /* The target's directory, held. Its parents exist now (the temp's open
+     * made them), so this cannot fail for a missing directory. */
+    HlFsParent par;
+    if (hl_fs_resolve_parent(t.anchor_fd, t.residual, t.sym, &par, &e) != 0) {
+        close(tfd);
+        HlFsParent tp;
+        if (hl_fs_resolve_parent(t.anchor_fd, tmprel, t.sym, &tp, &e) == 0) {
+            fs_unlink_temp(tp.parent_fd, tmpname);
+            close(tp.parent_fd);
+        }
+        if (err_msg) *err_msg = e ? e : "open_failed";
+        return FS_ATOMIC_FAILED;
+    }
+
+    const char *fail = NULL;
+    int status = FS_ATOMIC_FAILED;
+    struct stat target, tmp_fd_st, tmp_dir_st;
+    int have_target = fstatat(par.parent_fd, par.leaf, &target,
+                              AT_SYMLINK_NOFOLLOW) == 0;
+    if (have_target && S_ISLNK(target.st_mode)) {
+        if (t.sym == HL_FS_SYMLINK_REFUSE) {
+            fail = "symlink_denied";
+        } else {
+            status = FS_ATOMIC_IN_PLACE;       /* write through it, as always */
+        }
+        goto out;
+    }
+    if (have_target && !S_ISREG(target.st_mode)) {
+        fail = "not_a_regular_file";
+        goto out;
+    }
+    /* The temp must be the file of that name in the target's directory, or the
+     * rename below would move something else. */
+    if (fstat(tfd, &tmp_fd_st) != 0
+        || fstatat(par.parent_fd, tmpname, &tmp_dir_st, AT_SYMLINK_NOFOLLOW) != 0
+        || tmp_fd_st.st_dev != tmp_dir_st.st_dev
+        || tmp_fd_st.st_ino != tmp_dir_st.st_ino) {
+        fail = "io_error";
+        goto out;
+    }
+    /* A replaced file keeps its permission bits (a 0600 secret stays 0600). */
+    if (have_target)
+        (void)fchmod(tfd, target.st_mode & 07777);
+
+    if ((len > 0 && data && fs_write_all(tfd, data, len) != 0)
+        || (!(flags & HL_FS_WRITE_NO_SYNC) && fsync(tfd) != 0)) {
+        fail = "write_failed";
+        goto out;
+    }
+    if (close(tfd) != 0) {
+        tfd = -1;
+        fail = "write_failed";
+        goto out;
+    }
+    tfd = -1;
+    if (renameat(par.parent_fd, tmpname, par.parent_fd, par.leaf) != 0) {
+        fail = "write_failed";
+        goto out;
+    }
+    /* Make the rename itself durable. Not every platform can fsync a
+     * directory; the replace has happened either way. */
+    if (!(flags & HL_FS_WRITE_NO_SYNC))
+        (void)fsync(par.parent_fd);
+    status = FS_ATOMIC_OK;
+
+out:
+    if (tfd >= 0) close(tfd);
+    if (status != FS_ATOMIC_OK) fs_unlink_temp(par.parent_fd, tmpname);
+    close(par.parent_fd);
+    if (fail && err_msg) *err_msg = fail;
+    return status;
+}
+
+int hl_cap_fs_write_ex(const HlFsConfig *cfg, const char *path,
+                       const char *data, size_t len, unsigned flags,
+                       const char **err_msg)
+{
+    int result = -1;
+    int status = fs_write_atomic(cfg, path, data, len, flags, err_msg);
+    if (status == FS_ATOMIC_OK)
+        result = 0;
+    else if (status == FS_ATOMIC_IN_PLACE)
+        result = fs_write_in_place(cfg, path, data, len, flags, err_msg);
+
     {
         ShJsonWriter w = hl_audit_begin("fs.write");
         sh_json_write_kv_string(&w, "path", path);
@@ -303,6 +468,13 @@ audit:
         hl_audit_end(&w);
     }
     return result;
+}
+
+int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
+                      const char *data, size_t len,
+                      const char **err_msg)
+{
+    return hl_cap_fs_write_ex(cfg, path, data, len, 0, err_msg);
 }
 
 int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path,

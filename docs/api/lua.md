@@ -421,6 +421,13 @@ and `..` are rejected. See [Filesystem grants](#filesystem-grants).
 creates missing parents + the file and returns `true` (or `nil, err`); `mmap`
 returns a read-only `MappedBuffer` (optionally a page-aligned window).
 
+`write` replaces the file atomically: the bytes go to a temp file beside it,
+which is fsynced and renamed over the target. A concurrent reader, or the file
+after a crash or a power cut, sees the old contents or the new, never a mix. A
+replaced file keeps its permission bits; its inode changes, so a hard link to it
+keeps the old contents. (A target that is an in-root symlink under a subtree
+grant is written through the link, in place.)
+
 The leaf **must be a regular file.** A FIFO, socket, character/block device, or
 directory target is rejected `nil, "not_a_regular_file"` and never blocks (a
 special-file `open` cannot hang the runtime). This is a deliberate confinement of

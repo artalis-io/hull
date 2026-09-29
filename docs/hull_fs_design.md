@@ -104,9 +104,12 @@ leaf's parents (a `mkdir()` loop over reconstructed absolute path prefixes). Thi
 is EXISTING behavior the design must preserve (§4.1), and the absolute-path
 `mkdir()` is itself part of the TOCTOU surface to move descriptor-relative.
 
-**(c) `write` is NOT atomic** - it `fopen(full, "wb")` + `fwrite`, truncating in
-place. Any header/comment implying atomicity is stale. Atomic write is a possible
-FUTURE API change (§4.3), not part of this prerequisite.
+**(c) `write` was NOT atomic** - it truncated in place. It is now: the bytes go to
+a temp file in the target's directory (created through the same resolver, grant
+and symlink policy), which is fsynced and renamed over the target, and the rename
+is fsynced. The one in-place case left is a target that is an in-root symlink
+under a SUBTREE grant, written through the link as before. Archive extraction
+uses the atomic path without the fsyncs (`HL_FS_WRITE_NO_SYNC`).
 
 ## 2. Design goals
 

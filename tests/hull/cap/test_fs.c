@@ -18,6 +18,7 @@
 #endif
 
 #include "utest.h"
+#include "hull/shared/host.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/fs_policy.h"
 #include "hull/utils/alloc.h"
@@ -26,6 +27,7 @@
 #include <sys/mman.h>
 #include <ftw.h>
 #include <string.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/resource.h>
@@ -43,7 +45,8 @@ static HlAllocator test_alloc;
  * read and write sets); the traversal/absolute cases stay denied by the lexical
  * pre-check. Policy authorization itself is covered by test_fs_policy.c. */
 static const char *const test_grants[] = {
-    "a/b/c/file.txt", "del.txt", "gone.txt", "here.txt", "huge.bin",
+    "a/b/c/file.txt", "atomic.txt", "del.txt", "dirt", "gone.txt", "here.txt",
+    "huge.bin", "link.txt", "mode.txt", "sub/",
     "mmap_borrow.txt", "mmap_rel.txt", "mmap_test.txt", "no_such_file.txt",
     "nope.txt", "size.txt", "test.txt", "whole.txt",
     "win_borrow.bin", "win_cross.bin", "win_eof.bin", "win_rej.bin", "win_zero.bin",
@@ -53,6 +56,11 @@ static void setup_fs(void)
 {
     hl_test_path(test_dir, sizeof(test_dir), "hull_test_%d", getpid());
     mkdir(test_dir, 0755);
+    {
+        char sub[512];
+        snprintf(sub, sizeof(sub), "%s/sub", test_dir);  /* a SUBTREE anchor */
+        mkdir(sub, 0755);
+    }
     test_cfg.base_dir = test_dir;
     test_cfg.base_len = strlen(test_dir);
 
@@ -167,6 +175,136 @@ UTEST(hl_cap_fs, write_creates_subdirs)
                                      buf, sizeof(buf), NULL);
     ASSERT_EQ(nread, (int64_t)strlen(data));
 
+    teardown_fs();
+}
+
+/* ── Atomic write ───────────────────────────────────────────────────── */
+
+/* Whether any ".hull-tmp-" file is left in `dir` (relative to test_dir). */
+static int temp_left(const char *dir)
+{
+    char p[512];
+    snprintf(p, sizeof(p), "%s/%s", test_dir, dir);
+    DIR *d = opendir(p);
+    if (!d) return 0;
+    int found = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL)
+        if (strncmp(de->d_name, ".hull-tmp-", 10) == 0) found = 1;
+    closedir(d);
+    return found;
+}
+
+static int host_path_stat(const char *rel, struct stat *st)
+{
+    char p[512];
+    snprintf(p, sizeof(p), "%s/%s", test_dir, rel);
+    return lstat(p, st);
+}
+
+UTEST(hl_cap_fs, write_replaces_by_rename)
+{
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "atomic.txt", "old contents", 12, NULL), 0);
+    struct stat before, after;
+    ASSERT_EQ(host_path_stat("atomic.txt", &before), 0);
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "atomic.txt", "new", 3, NULL), 0);
+    ASSERT_EQ(host_path_stat("atomic.txt", &after), 0);
+
+    char buf[32];
+    int64_t n = hl_cap_fs_read(&test_cfg, "atomic.txt", buf, sizeof(buf), NULL);
+    ASSERT_EQ(n, 3);
+    ASSERT_EQ(memcmp(buf, "new", 3), 0);
+    /* A new inode: the old file was replaced whole, never truncated in place. */
+    if (!hl_host_is_windows())
+        EXPECT_NE(before.st_ino, after.st_ino);
+    EXPECT_FALSE(temp_left("."));
+    EXPECT_FALSE(temp_left("a/b/c"));
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, write_keeps_the_mode_of_a_replaced_file)
+{
+    if (hl_host_is_windows()) return;          /* no POSIX permission bits */
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "mode.txt", "secret", 6, NULL), 0);
+    char p[512];
+    snprintf(p, sizeof(p), "%s/mode.txt", test_dir);
+    ASSERT_EQ(chmod(p, 0600), 0);
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "mode.txt", "rotated", 7, NULL), 0);
+    struct stat st;
+    ASSERT_EQ(host_path_stat("mode.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0600);
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, write_to_a_directory_fails_and_leaves_no_temp)
+{
+    setup_fs();
+    char p[512];
+    snprintf(p, sizeof(p), "%s/dirt", test_dir);
+    ASSERT_EQ(mkdir(p, 0755), 0);
+    const char *err = NULL;
+    EXPECT_EQ(hl_cap_fs_write(&test_cfg, "dirt", "x", 1, &err), -1);
+    EXPECT_STREQ(err, "not_a_regular_file");
+    EXPECT_FALSE(temp_left("."));
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, write_refuses_a_symlink_under_an_exact_grant)
+{
+    if (hl_host_is_windows()) return;          /* symlinks need privileges */
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "here.txt", "keep", 4, NULL), 0);
+    char p[512];
+    snprintf(p, sizeof(p), "%s/link.txt", test_dir);
+    ASSERT_EQ(symlink("here.txt", p), 0);
+    const char *err = NULL;
+    EXPECT_EQ(hl_cap_fs_write(&test_cfg, "link.txt", "x", 1, &err), -1);
+    EXPECT_STREQ(err, "symlink_denied");
+    struct stat st;
+    ASSERT_EQ(host_path_stat("link.txt", &st), 0);
+    EXPECT_TRUE(S_ISLNK(st.st_mode));          /* the link is untouched */
+    EXPECT_FALSE(temp_left("."));
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, write_goes_through_an_in_root_symlink_under_a_subtree)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    char p[512];
+    snprintf(p, sizeof(p), "%s/sub/real.txt", test_dir);
+    FILE *f = fopen(p, "wb");
+    ASSERT_TRUE(f != NULL);
+    fputs("before", f);
+    fclose(f);
+    snprintf(p, sizeof(p), "%s/sub/alias.txt", test_dir);
+    ASSERT_EQ(symlink("real.txt", p), 0);
+
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "sub/alias.txt", "after", 5, NULL), 0);
+    struct stat st;
+    ASSERT_EQ(host_path_stat("sub/alias.txt", &st), 0);
+    EXPECT_TRUE(S_ISLNK(st.st_mode));          /* still a link... */
+    char buf[16];
+    int64_t n = hl_cap_fs_read(&test_cfg, "sub/real.txt", buf, sizeof(buf), NULL);
+    ASSERT_EQ(n, 5);                           /* ...whose target was written */
+    EXPECT_EQ(memcmp(buf, "after", 5), 0);
+    EXPECT_FALSE(temp_left("sub"));
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, write_ex_without_sync_is_still_a_whole_replace)
+{
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write_ex(&test_cfg, "atomic.txt", "one", 3,
+                                 HL_FS_WRITE_NO_SYNC, NULL), 0);
+    ASSERT_EQ(hl_cap_fs_write_ex(&test_cfg, "atomic.txt", "two!", 4,
+                                 HL_FS_WRITE_NO_SYNC, NULL), 0);
+    char buf[16];
+    ASSERT_EQ(hl_cap_fs_read(&test_cfg, "atomic.txt", buf, sizeof(buf), NULL), 4);
+    EXPECT_EQ(memcmp(buf, "two!", 4), 0);
+    EXPECT_FALSE(temp_left("."));
     teardown_fs();
 }
 

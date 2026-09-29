@@ -192,14 +192,14 @@ semantics).
 import { fs } from "hull:fs";
 
 const bytes   = fs.read("config.json");              // ArrayBuffer (throws on error)
-fs.write("uploads/out.bin", bytes);                  // creates parents + truncates; true
+fs.write("uploads/out.bin", bytes);                  // creates parents; atomic replace; true
 const meta    = fs.stat("data.csv");                 // { type, size, mode, mtime } | null
 const entries = fs.list("uploads");                  // [{ name, type, size }, ...] (ordered)
 const buf     = fs.mmap("big.bin", { offset, length }); // read-only MappedBuffer (optional window)
 ```
 
 - `fs.read(path)` -> `ArrayBuffer` (throws on error).
-- `fs.write(path, bytes)` -> `true`; creates missing parents and truncates.
+- `fs.write(path, bytes)` -> `true`; creates missing parents and replaces the file atomically (temp file + fsync + rename): a reader, or the file after a crash, sees the old contents or the new, never a mix. A replaced file keeps its permission bits.
 - `fs.stat(path)` -> `{ type, size, mode, mtime }`, or `null` when the path does not
   exist (so `fs.stat(p) !== null` subsumes an existence check). `type` is `"file"` /
   `"dir"` / `"symlink"` / `"other"`; a terminal symlink is reported as a link (lstat),
