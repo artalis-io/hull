@@ -203,7 +203,10 @@ describes the terminal op; §6 defines which anchor/constraint applies.
   race-free syscall; the returned fd IS the object). `WRITE` first mkdir-p's the
   parents (each `mkdirat` relative to a held, contained fd); `STAT` uses the
   contained parent fd + `fstatat(...AT_SYMLINK_NOFOLLOW)`. `RESOLVE_NO_MAGICLINKS`
-  blocks `/proc` magic-symlink escapes.
+  blocks `/proc` magic-symlink escapes. A lookup that crosses `..` fails `EAGAIN`
+  when a rename or mount lands anywhere on the system mid-walk (the kernel cannot
+  prove the `..` stayed contained); that is transient, so the resolver retries up
+  to 8 times and then falls back to the manual walk rather than reporting it.
 - **Platforms without `openat2` (macOS, older Linux, cosmo where unavailable):** a
   manual walk reproducing `RESOLVE_IN_ROOT` EXACTLY. Hold a STACK of directory fds
   rooted at `root_dfd`; each component `openat(top, comp, O_NOFOLLOW | O_DIRECTORY
