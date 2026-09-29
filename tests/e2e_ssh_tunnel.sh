@@ -147,7 +147,7 @@ stop_shim() {
 # $6 grant-hosts  $7 grant-ports  $8 tunnel-hosts  $9 tunnel-ports
 write_app() {
     mkdir -p "$1"
-    cp "$WORK/client_key" "$1/client_key"
+    cp "${CLIENT_KEY:-$WORK/client_key}" "$1/client_key"   # CLIENT_KEY: another key type
     chmod 600 "$1/client_key"
     cat > "$1/app.lua" <<LUA
 app.manifest({
@@ -571,6 +571,24 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
                 tail -10 "$WORK/sshd/log" 2>/dev/null | sed 's/^/    sshd: /'
             fi
         done
+
+        # An RSA USER key against the same real sshd: rsa-sha2-512 signed by
+        # crypto.sign over the key hull.ssh.privatekey rebuilt from the
+        # OpenSSH file (the CRT values derived, not read).
+        ssh-keygen -q -t rsa -b 3072 -N '' -f "$WORK/client_rsa" </dev/null
+        chmod 600 "$WORK/client_rsa"
+        cat "$WORK/client_rsa.pub" >> "$WORK/sshd/authorized_keys"
+        start_shim "$RELAY_PORT" "$SSH_PORT"
+        CLIENT_KEY="$WORK/client_rsa" write_app "$WORK/rsa_user" "127.0.0.1" "$SSH_PORT" \
+            "127.0.0.1" "$RELAY_PORT" '"127.0.0.1"' "$SSH_PORT" '"127.0.0.1"' "$RELAY_PORT"
+        RSA_OUT=$(run_app "$WORK/rsa_user")
+        stop_shim
+        assert_line "$RSA_OUT" "connected" "yes" "live: an RSA user key authenticates"
+        assert_line "$RSA_OUT" "exec_stdout" "hull-tunnel-ok" "live: and runs a command"
+        if ! printf '%s\n' "$RSA_OUT" | grep -q '^connected=yes$'; then
+            printf '%s\n' "$RSA_OUT" | sed 's/^/    /'
+            tail -10 "$WORK/sshd/log" 2>/dev/null | sed 's/^/    sshd: /'
+        fi
 
         if [ "$FAIL" -ne 0 ]; then
             echo "  --- app output ---"

@@ -2010,6 +2010,68 @@ UTEST(js_cap, crypto_hmac_sha256)
     cleanup_js_caps();
 }
 
+UTEST(js_cap, crypto_sign_and_rsa_private_pem)
+{
+    /* The EC key and the RSA components are the ones test_asym.c signs with
+     * (made by openssl). JS side of crypto.sign / crypto.rsaPrivatePem: an
+     * ES256 signature is raw r||s (64 bytes) and verifies; a PEM rebuilt from
+     * the RSA components signs RS256 that verifies against the original's
+     * public key; the wrong key family throws. */
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "import { encoding } from 'hull:encoding';\n"
+        "const ecPriv = '-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIL2d49Dj0W0CG8otDWmMNcm96RQqL8ACWBbKQ688SzXdoAoGCCqGSM49
+AwEHoUQDQgAE68vsW2ypQeT3oQeUWUZpKeFZ5blnRMKJiofxB4tIQiosja/MWXzA
+6yt/w0rtpatPPAWNKjoXQy+LkoL830ZUuw==
+-----END EC PRIVATE KEY-----
+';\n"
+        "const ecPub = '-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE68vsW2ypQeT3oQeUWUZpKeFZ5bln
+RMKJiofxB4tIQiosja/MWXzA6yt/w0rtpatPPAWNKjoXQy+LkoL830ZUuw==
+-----END PUBLIC KEY-----
+';\n"
+        "const rsaPub = '-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArXHJgrJxPWh9qZV29faS
+siK5aUcAbigfmLy3/7tr29f1yo8Hhd3UqX0N87FDqbQbFCKhQ3V2EfNxqSHt4cRP
+dSIFHRGQW539veaMgfmNQNU4cGUWXwLV4mZHehU7in06CgI6CO/PrG+biQRxSARN
+YdH0s0/5D5w2h/5I2I+lQX+S2G3y2GrM4M99LBqYqOSXnQIz/JrPHVefCRXnyMIf
+N41sHzoH3+Igu3OY6VMTQz6oB7nyKsJXJ7+sbl8QED6ijNJ1aKkkefZL8GpY/4WL
+MI+swk3X1WXd4ET7VUIjx6g3hlRC89SteRzAwJvYFi88A9rmsg5vyDLDjyDRQwoi
+awIDAQAB
+-----END PUBLIC KEY-----
+';\n"
+        "const u8 = (s) => encoding.bytes.toU8(encoding.base64.decode(s));\n"
+        "const msg = 'hull js sign';\n"
+        "const r = [];\n"
+        "const sig = crypto.sign('ES256', ecPriv, msg);\n"
+        "r.push(sig.byteLength, crypto.verify('ES256', ecPub, msg, sig));\n"
+        "const pem = crypto.rsaPrivatePem(u8('rXHJgrJxPWh9qZV29faSsiK5aUcAbigfmLy3/7tr29f1yo8Hhd3UqX0N87FDqbQbFCKhQ3V2EfNxqSHt4cRPdSIFHRGQW539veaMgfmNQNU4cGUWXwLV4mZHehU7in06CgI6CO/PrG+biQRxSARNYdH0s0/5D5w2h/5I2I+lQX+S2G3y2GrM4M99LBqYqOSXnQIz/JrPHVefCRXnyMIfN41sHzoH3+Igu3OY6VMTQz6oB7nyKsJXJ7+sbl8QED6ijNJ1aKkkefZL8GpY/4WLMI+swk3X1WXd4ET7VUIjx6g3hlRC89SteRzAwJvYFi88A9rmsg5vyDLDjyDRQwoiaw=='), u8('AQAB'), u8('EYvCdMAkLYVTD7ieQAlRfhzTgJTICdzG6YF55Fsrm6IFbELmN212qdi2nxxOedii/qP23WdWFOskPesVRggWeQUtMEDKckI8MkhO7DJ4eYJjGG0ELi4QFhGpEcQbxwmeY/clXim9wAt1rWRE03dqnpvfSH6Cyx359EL4pT55hh5nUDUhD79aeAcomDFLJ4xC6c1nCmogvUSnR7xLm3a6Dgaqmuy9TeGE3IF6X36bz4RYlH1sWDQuVLlihE3k0pCx0I/DeqfSNLHc/d9Ih0oCe83+pPzTcCeqTL36wyCVMvQdj+4HAIx2hzYyuFHqVR9FoQ1kcz2KWaC+Vk4x+suebQ=='), u8('7aLVtTp231IPyFICovo8RQGMV0BOTxt5NltvKAfHNK/ZDTZF74c5ODxlOtRXjq0n+7oJGfoJf9antpKfuD+6S6aBzxU64HbuSeQ5OW0m2aGvUqzw1MImukvtiw6QtsWF0/J3jqrjo+pa2H+DbI1RAYFLCqAWCSZ8Ah5pejT8OH8='), u8('utkME6YpVbCC5GQEsOypMWddgNfFq09K7GLi91cxQ4E4y+sYmgL/GmWLm61/3BrhVn3eA/+prXUHIOerZpk8H9B09SHlxDUfe/DbHAks2+X7gwvkLk21rV/utm0PuEicX9SRdLYpJV8u+s0EulE447AyFkmczNWvD198p/TmgBU='));\n"
+        "const rs = crypto.sign('RS256', pem, msg);\n"
+        "r.push(rs.byteLength, crypto.verify('RS256', rsaPub, msg, rs));\n"
+        "let threw = false;\n"
+        "try { crypto.sign('ES256', pem, msg); } catch (e) { threw = true; }\n"
+        "r.push(threw);\n"
+        "globalThis.__test_sign = r.join(',');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *got = eval_str("globalThis.__test_sign");
+    ASSERT_NE(got, NULL);
+    ASSERT_STREQ(got, "64,true,256,true,true");
+    free(got);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, crypto_hmac_sha1)
 {
     init_js_with_caps();

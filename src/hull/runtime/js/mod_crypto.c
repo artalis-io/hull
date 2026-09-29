@@ -422,6 +422,91 @@ static JSValue js_crypto_ed25519_verify(JSContext *ctx, JSValueConst this_val,
  *  false on misuse. Mirrors Lua's crypto.verify exactly.
  */
 
+/* crypto.sign(alg, privatePem, data) -> ArrayBuffer
+ *
+ *  The inverse of crypto.verify: same algorithms, same signature encodings
+ *  (RSA modulus-length, ECDSA raw r||s). privatePem is an unencrypted PEM
+ *  private key of the family and curve `alg` names; anything else throws. */
+static JSValue js_crypto_sign(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 3)
+        return JS_ThrowTypeError(ctx, "crypto.sign requires (alg, privatePem, data)");
+    size_t alg_len = 0, pk_len = 0;
+    const char *alg_str = JS_ToCStringLen(ctx, &alg_len, argv[0]);
+    if (!alg_str) return JS_EXCEPTION;
+    HlCryptoAsymAlg alg = hl_crypto_asym_alg_from_string(alg_str, alg_len);
+    JS_FreeCString(ctx, alg_str);
+    if (alg == HL_CRYPTO_ASYM_NONE)
+        return JS_ThrowTypeError(ctx, "crypto.sign: unsupported alg (use one of "
+                                 "RS256/RS384/RS512/PS256/ES256/ES384)");
+    const char *pk = JS_ToCStringLen(ctx, &pk_len, argv[1]);
+    if (!pk) return JS_EXCEPTION;
+    JsMsg data;
+    if (!js_msg_get(ctx, argv[2], &data)) {
+        JS_FreeCString(ctx, pk);
+        return JS_ThrowTypeError(ctx, "crypto.sign: data must be a buffer or a string");
+    }
+
+    uint8_t sig[HL_CRYPTO_SIGN_MAX];
+    size_t sig_len = 0;
+    int rc = hl_cap_crypto_asym_sign_default(pk, pk_len, alg,
+                                             data.view.data, data.view.len,
+                                             sig, sizeof sig, &sig_len);
+    JS_FreeCString(ctx, pk);
+    js_msg_free(ctx, &data);
+    if (rc == -2)
+        return JS_ThrowInternalError(ctx, "crypto.sign: signing is not available in this build");
+    if (rc != 0)
+        return JS_ThrowTypeError(ctx, "crypto.sign: the key cannot sign under %s (malformed, "
+                                 "encrypted, a public key, or the wrong key type)",
+                                 hl_crypto_asym_alg_to_string(alg));
+    return JS_NewArrayBufferCopy(ctx, sig, sig_len);
+}
+
+/* crypto.rsaPrivatePem(n, e, d, p, q) -> string
+ *
+ *  An RSA private key PEM from its components (big-endian bytes, as buffers).
+ *  The CRT values are derived and the key checked; inconsistent components
+ *  throw. The result is secret. */
+static JSValue js_crypto_rsa_private_pem(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 5)
+        return JS_ThrowTypeError(ctx, "crypto.rsaPrivatePem requires (n, e, d, p, q)");
+    JsMsg m[5];
+    int got = 0;
+    for (; got < 5; got++) {
+        if (!js_msg_get(ctx, argv[got], &m[got])) break;
+    }
+    if (got < 5) {
+        for (int i = 0; i < got; i++) js_msg_free(ctx, &m[i]);
+        return JS_ThrowTypeError(ctx, "crypto.rsaPrivatePem: components must be buffers");
+    }
+    HlCryptoRsaParts parts = {
+        (const uint8_t *)m[0].view.data, m[0].view.len,
+        (const uint8_t *)m[1].view.data, m[1].view.len,
+        (const uint8_t *)m[2].view.data, m[2].view.len,
+        (const uint8_t *)m[3].view.data, m[3].view.len,
+        (const uint8_t *)m[4].view.data, m[4].view.len,
+    };
+    char pem[HL_CRYPTO_RSA_PEM_MAX];
+    size_t pem_len = 0;
+    int rc = hl_cap_crypto_rsa_private_pem(&parts, pem, sizeof pem, &pem_len);
+    for (int i = 0; i < 5; i++) js_msg_free(ctx, &m[i]);
+    if (rc == -2)
+        return JS_ThrowInternalError(ctx, "crypto.rsaPrivatePem: not available in this build "
+                                     "(or an empty component)");
+    if (rc != 0)
+        return JS_ThrowTypeError(ctx, "crypto.rsaPrivatePem: the components do not form "
+                                 "a valid RSA key");
+    JSValue out = JS_NewStringLen(ctx, pem, pem_len);
+    secure_zero(pem, pem_len);
+    return out;
+}
+
 static JSValue js_crypto_verify(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
@@ -1030,6 +1115,10 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_ed25519_verify, "ed25519Verify", 3));
     JS_SetPropertyStr(ctx, crypto, "verify",
                       JS_NewCFunction(ctx, js_crypto_verify, "verify", 4));
+    JS_SetPropertyStr(ctx, crypto, "sign",
+                      JS_NewCFunction(ctx, js_crypto_sign, "sign", 3));
+    JS_SetPropertyStr(ctx, crypto, "rsaPrivatePem",
+                      JS_NewCFunction(ctx, js_crypto_rsa_private_pem, "rsaPrivatePem", 5));
     JS_SetPropertyStr(ctx, crypto, "x509PubkeyPem",
                       JS_NewCFunction(ctx, js_crypto_x509_pubkey_pem,
                                        "x509PubkeyPem", 1));

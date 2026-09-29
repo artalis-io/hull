@@ -757,6 +757,7 @@ static int asym_stub_verify(const void *pk, size_t plen, HlCryptoAsymAlg alg,
 static const HlCryptoAsymBackend hl_crypto_asym_backend_stub = {
     .supports = asym_stub_supports,
     .verify   = asym_stub_verify,
+    /* sign / rsa_private_pem stay NULL: the dispatchers below fail closed. */
 };
 
 __attribute__((weak))
@@ -935,6 +936,52 @@ int hl_cap_crypto_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
     return hl_cap_crypto_asym_verify(hl_crypto_asym_active_backend(),
                                      pubkey_pem, pubkey_len,
                                      alg, data, data_len, sig, sig_len);
+}
+
+int hl_cap_crypto_asym_sign(const HlCryptoAsymBackend *backend,
+                            const void *privkey_pem, size_t privkey_len,
+                            HlCryptoAsymAlg alg,
+                            const void *data, size_t data_len,
+                            uint8_t *out, size_t out_size, size_t *out_len)
+{
+    if (out && out_size) memset(out, 0, out_size);
+    if (out_len) *out_len = 0;
+    if (!backend || !backend->sign || !out || !out_len) return -2;
+    if (alg == HL_CRYPTO_ASYM_NONE) return -2;
+    if (!backend->supports || !backend->supports(alg)) return -2;
+    int rc = backend->sign(privkey_pem, privkey_len, alg, data, data_len,
+                           out, out_size, out_len);
+    if (rc != 0) {
+        hull_secure_zero(out, out_size);
+        *out_len = 0;
+    }
+    return rc;
+}
+
+int hl_cap_crypto_asym_sign_default(const void *privkey_pem, size_t privkey_len,
+                                    HlCryptoAsymAlg alg,
+                                    const void *data, size_t data_len,
+                                    uint8_t *out, size_t out_size, size_t *out_len)
+{
+    return hl_cap_crypto_asym_sign(hl_crypto_asym_active_backend(),
+                                   privkey_pem, privkey_len, alg,
+                                   data, data_len, out, out_size, out_len);
+}
+
+int hl_cap_crypto_rsa_private_pem(const HlCryptoRsaParts *parts,
+                                  char *out, size_t out_size, size_t *out_len)
+{
+    if (out && out_size) memset(out, 0, out_size);
+    if (out_len) *out_len = 0;
+    const HlCryptoAsymBackend *b = hl_crypto_asym_active_backend();
+    if (!b || !b->rsa_private_pem || !parts || !out || !out_len || out_size == 0)
+        return -2;
+    int rc = b->rsa_private_pem(parts, out, out_size, out_len);
+    if (rc != 0) {
+        hull_secure_zero(out, out_size);
+        *out_len = 0;
+    }
+    return rc;
 }
 
 /* Pure string<->enum alg helpers. Base-resident (no mbedTLS) so mod_crypto's

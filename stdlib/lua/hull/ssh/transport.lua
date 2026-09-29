@@ -52,8 +52,8 @@ Transport.__index = Transport
 
 --- @param stream  read/write/close, as above
 --- @param crypto  sha256, x25519, x25519_keypair, ed25519_verify, verify
----                (ECDSA / RSA host keys), ed25519_sign, random, gcm_seal,
----                gcm_open
+---                (ECDSA / RSA host keys), ed25519_sign, sign (RSA user
+---                keys), random, gcm_seal, gcm_open
 -- Liveness defaults (see Transport:quiet). OpenSSH's ServerAliveInterval /
 -- ServerAliveCountMax, and an idle bound on top of them.
 M.KEEPALIVE_MS  = 30000
@@ -740,27 +740,52 @@ function Transport:authenticate(user, key, on_banner)
                       detail = wire.safe_name(accepted) }
     end
 
-    local blob = userauth.signed_blob(self.session_id, user, key.blob)
-    local sig  = self.crypto.ed25519_sign(blob, key.secret)
-    self:send_packet(userauth.build_request(user, key.blob,
-                                            userauth.signature_blob(sig)))
+    -- An RSA key signs under SHA-512 first, then SHA-256 (RFC 8332): a
+    -- server refusing the first may still take the second, and one that
+    -- refuses both refuses the key. Hull does not read server-sig-algs
+    -- (RFC 8308), so it asks rather than being told. SHA-1 ssh-rsa is never
+    -- offered.
+    local algorithms = key.algorithm == "ssh-rsa" and { "rsa-sha2-512", "rsa-sha2-256" }
+                       or { key.algorithm or userauth.ALGORITHM }
 
-    for _ = 1, 16 do
-        local r = userauth.parse_response(self:next_message())
-        if r.type == "banner" then
-            if on_banner then on_banner(r.message) end
-        elseif r.type == "success" then
-            self.user = user
-            self.authenticated = true      -- keepalives may now be sent
-            return true
-        elseif r.type == "failure" then
-            -- Partial success is NOT authentication: the server wants another
-            -- factor, and reporting it as success would skip that.
-            return nil, { code = r.partial and "partial_success" or "auth_failed",
-                          methods = r.methods }
+    for i, alg in ipairs(algorithms) do
+        local blob = userauth.signed_blob(self.session_id, user, key.blob, alg)
+        local sig
+        if alg == "rsa-sha2-512" then
+            sig = self.crypto.sign("RS512", key.pem, blob)
+        elseif alg == "rsa-sha2-256" then
+            sig = self.crypto.sign("RS256", key.pem, blob)
+        else
+            sig = self.crypto.ed25519_sign(blob, key.secret)
+        end
+        self:send_packet(userauth.build_request(user, key.blob,
+                                                userauth.signature_blob(sig, alg), alg))
+
+        local failure
+        for _ = 1, 16 do
+            local r = userauth.parse_response(self:next_message())
+            if r.type == "banner" then
+                if on_banner then on_banner(r.message) end
+            elseif r.type == "success" then
+                self.user = user
+                self.authenticated = true      -- keepalives may now be sent
+                return true
+            elseif r.type == "failure" then
+                failure = r
+                break
+            end
+        end
+        if not failure then return nil, { code = "no_auth_response" } end
+        -- Partial success is NOT authentication: the server wants another
+        -- factor, and reporting it as success would skip that. It is also
+        -- not a refusal of this signature, so another hash will not help.
+        -- Nor will one when publickey is no longer on offer at all.
+        if failure.partial or i == #algorithms
+           or not userauth.can_retry_publickey(failure) then
+            return nil, { code = failure.partial and "partial_success" or "auth_failed",
+                          methods = failure.methods }
         end
     end
-    return nil, { code = "no_auth_response" }
 end
 
 -- SFTP --------------------------------------------------------------------------------

@@ -4400,6 +4400,34 @@ UTEST(lua_stdlib, ssh_hostkey_vectors_real_crypto)
     cleanup_lua_caps();
 }
 
+/* RSA user keys written by ssh-keygen. Vanilla: parsing, the size floor, the
+ * damaged-key error (3). With the capability layer: the loaded key signs
+ * exactly as OpenSSL does with the same key, the passphrase-protected copy
+ * too, and verifies (3 more). Exact counts, as for the host-key vectors. */
+UTEST(lua_stdlib, ssh_rsa_key_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_rsa_key.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 3LL);
+}
+
+UTEST(lua_stdlib, ssh_rsa_key_real_crypto)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_ssh_rsa_key.lua",
+                                     &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 6LL);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, ssh_userauth_suite)
 {
     long long pass = 0, fail = -1;

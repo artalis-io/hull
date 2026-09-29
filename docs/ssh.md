@@ -402,7 +402,7 @@ there is no time-based trigger.
 | host key | `ssh-ed25519`, then `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `rsa-sha2-512`, `rsa-sha2-256` |
 | encryption | `aes256-gcm@openssh.com` |
 | MAC | implicit in the AEAD |
-| user auth | `publickey` with `ssh-ed25519` |
+| user auth | `publickey` with `ssh-ed25519`, or an RSA key under `rsa-sha2-512` then `rsa-sha2-256` |
 | compression | `none` |
 
 Host keys are offered in that order, with one exception: when the trust store
@@ -450,7 +450,7 @@ bug, not a connection failure, and it comes back to you unchanged.
 | `service_refused` / `no_auth_response` | the server would not start user authentication / never answered it |
 | `auth_failed` / `partial_success` | the key was refused, or a second factor is wanted |
 | `bad_key` / `bad_passphrase` / `passphrase_required` | the key file could not be read, the passphrase was wrong, or one is needed (§4) |
-| `unsupported_key_type` | the key is not an OpenSSH ed25519 key (RSA, ECDSA, a PEM file) or uses protection Hull does not read |
+| `unsupported_key_type` | the key is not an OpenSSH Ed25519 or RSA key (ECDSA, a PEM file), is an RSA key under 2048 bits, or uses protection Hull does not read |
 
 **Using the connection**
 
@@ -478,8 +478,8 @@ reporting it as authenticated would skip one.
 - **ssh-agent.** Needs a unix-socket (and named-pipe) capability Hull does not
   have yet; until then a key must be readable through `manifest.fs.read`.
 - **Password and keyboard-interactive auth.** `publickey` only.
-- **RSA user keys** (`rsa-sha2-256` / `-512`). Ed25519 keys only for now;
-  RSA signing is the next piece of work.
+- **ECDSA user keys.** Ed25519 and RSA user keys are supported; an ECDSA
+  key file is refused by name (`unsupported_key_type`).
 - **Port forwarding**, remote and local, and **jump hosts** (`ProxyJump`).
   A WebSocket relay (§5) is the supported way to reach a host behind another.
 - **A PTY or an interactive shell**, and setting environment variables on the
