@@ -160,8 +160,10 @@ struct open_how { uint64_t flags; uint64_t mode; uint64_t resolve; };
 #define __NR_openat2 437
 #endif
 
-/* Returns fd, or -1 with *err set, or -2 meaning "openat2 unavailable, fall
- * back to the manual walk". Under HL_FS_SYMLINK_REFUSE the kernel refuses every
+#define OPENAT2_EAGAIN_TRIES 8
+
+/* Returns fd, or -1 with *err set, or -2 meaning "openat2 unavailable (or kept
+ * losing to concurrent renames), fall back to the manual walk". Under HL_FS_SYMLINK_REFUSE the kernel refuses every
  * symlink (RESOLVE_NO_SYMLINKS) and an ELOOP is mapped to "symlink_denied". */
 static int try_openat2(int root_fd, const char *relpath, int flags,
                        HlFsSymlink sympol, mode_t mode, const char **err)
@@ -173,8 +175,18 @@ static int try_openat2(int root_fd, const char *relpath, int flags,
     how.resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
                 | (sympol == HL_FS_SYMLINK_REFUSE ? RESOLVE_NO_SYMLINKS : 0);
 
-    long r = syscall(__NR_openat2, root_fd, relpath, &how, sizeof(how));
+    /* A scoped lookup that crosses ".." fails EAGAIN when a rename or mount
+     * happens ANYWHERE on the system during the walk (the kernel cannot prove
+     * the ".." stayed inside the root, so it gives up rather than guess). That
+     * is a transient, not an answer about this path: retry, and if renames keep
+     * winning, let the manual walk - which has no such failure - resolve it. */
+    long r;
+    int tries = 0;
+    do {
+        r = syscall(__NR_openat2, root_fd, relpath, &how, sizeof(how));
+    } while (r < 0 && errno == EAGAIN && ++tries < OPENAT2_EAGAIN_TRIES);
     if (r >= 0) return (int)r;
+    if (errno == EAGAIN) return -2;
     if (errno == ENOSYS || errno == EPERM /* seccomp may block it */)
         return -2;
     if (sympol == HL_FS_SYMLINK_REFUSE && errno == ELOOP) { *err = "symlink_denied"; return -1; }
