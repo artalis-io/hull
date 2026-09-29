@@ -399,11 +399,22 @@ there is no time-based trigger.
 | role | algorithm |
 |---|---|
 | key exchange | `curve25519-sha256` (also its pre-standard `@libssh.org` name) |
-| host key | `ssh-ed25519` |
+| host key | `ssh-ed25519`, then `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `rsa-sha2-512`, `rsa-sha2-256` |
 | encryption | `aes256-gcm@openssh.com` |
 | MAC | implicit in the AEAD |
 | user auth | `publickey` with `ssh-ed25519` |
 | compression | `none` |
+
+Host keys are offered in that order, with one exception: when the trust store
+already holds a key for the host, that key's type goes first. A server with
+several host keys presents the one the client ranks highest, so a host known
+by its RSA key would otherwise present Ed25519 and read as a changed key.
+OpenSSH orders its offer the same way. ECDSA and RSA host keys are checked
+with `crypto.verify` (P-256 / P-384 with SHA-256 / SHA-384; RSA PKCS#1 v1.5
+with SHA-512 or SHA-256), always under the algorithm that was negotiated. An
+RSA host key must be at least 2048 bits. `ecdsa-sha2-nistp521` is not offered.
+`file_store` trusts a recorded key of any of these types; if a host has
+several, Ed25519 wins, then ECDSA, then RSA.
 
 Refused by construction, not by configuration: SSH-1, `ssh-rsa`/SHA-1, DSA,
 CBC modes, arcfour, MD5, DH groups 1 and 14-SHA1, and `zlib`. There is no
@@ -455,7 +466,7 @@ bug, not a connection failure, and it comes back to you unchanged.
 | `bad_reply` | the SFTP server answered with a message that does not fit the request |
 | `bad_software` | `connect`'s `software` option is not a valid identification string (letters, digits, `.`, `_`) |
 | `already_trusted` | `accept_host` for a host that already has a key; `forget_host` it first |
-| `host_revoked` / `host_key_invalid` | `accept_host` for a key the store revokes / a blob that is not an ed25519 host key |
+| `host_revoked` / `host_key_invalid` | `accept_host` for a key the store revokes / a blob that is not a host key Hull verifies (Ed25519, ECDSA P-256/384, RSA) |
 | `not_handshaken` | `rekey` on a connection that never finished connecting |
 | `io_error` | the stream failed in some other way; `detail` says how |
 

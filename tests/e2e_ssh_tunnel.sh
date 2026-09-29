@@ -205,6 +205,7 @@ app.main(function()
     print("connected=yes")
     print("negotiated_kex=" .. tostring(conn:negotiated().kex))
     print("negotiated_cipher=" .. tostring(conn:negotiated().cipher_c2s))
+    print("negotiated_hostkey=" .. tostring(conn:negotiated().host_key))
 
     local r = conn:exec("echo hull-tunnel-ok")
     print("exec_status=" .. tostring(r.status))
@@ -488,21 +489,23 @@ LogLevel VERBOSE
 Subsystem sftp internal-sftp
 CFG
 
-    "$SSHD" -f "$WORK/sshd/sshd_config" -D -e >"$WORK/sshd/log" 2>&1 &
-    SSHD_PID=$!
-
-    # Wait for the port, not for a sleep.
-    _ok=0
-    _i=0
-    while [ "$_i" -lt 100 ]; do
-        if python3 -c "
+    # Start sshd and wait for its port, not for a sleep. Sets _ok.
+    start_sshd() {
+        "$SSHD" -f "$WORK/sshd/sshd_config" -D -e >"$WORK/sshd/log" 2>&1 &
+        SSHD_PID=$!
+        _ok=0
+        _i=0
+        while [ "$_i" -lt 100 ]; do
+            if python3 -c "
 import socket,sys
 s=socket.socket(); s.settimeout(0.2)
 sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
 " 2>/dev/null; then _ok=1; break; fi
-        _i=$((_i + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-    done
+            _i=$((_i + 1))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+    }
+    start_sshd
 
     if [ "$_ok" -ne 1 ]; then
         if [ "${HULL_E2E_REQUIRE_SSHD:-0}" = "1" ]; then
@@ -524,6 +527,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "connected" "yes" "live: connected through the relay after accepting the key"
         assert_line "$OUT" "negotiated_kex" "curve25519-sha256" "live: negotiated curve25519-sha256 through the tunnel"
         assert_line "$OUT" "negotiated_cipher" "aes256-gcm@openssh.com" "live: negotiated aes256-gcm through the tunnel"
+        assert_line "$OUT" "negotiated_hostkey" "ssh-ed25519" "live: the Ed25519 host key was used"
         assert_line "$OUT" "exec_status" "0" "live: exec succeeded over the tunnel"
         assert_line "$OUT" "exec_stdout" "hull-tunnel-ok" "live: command output came back through the tunnel"
         assert_line "$OUT" "exit3_status" "3" "live: a non-zero remote exit is a status, not an error"
@@ -537,6 +541,36 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         else
             fail "live: the reconnect after accepting the host key is a second real tunnel" "$UPGRADES upgrades"
         fi
+
+        # A server whose ONLY host key is ECDSA or RSA: the same connection,
+        # the key verified through crypto.verify against a key OpenSSH made
+        # and a signature OpenSSH produced. Each is a fresh sshd, so the
+        # trust store starts empty and the accept-then-reconnect runs again.
+        for spec in "ecdsa 256 ecdsa-sha2-nistp256" "ecdsa 384 ecdsa-sha2-nistp384" "rsa 3072 rsa-sha2-512"; do
+            set -- $spec
+            kill "$SSHD_PID" 2>/dev/null; wait "$SSHD_PID" 2>/dev/null || true
+            rm -f "$WORK/sshd/host_key" "$WORK/sshd/host_key.pub"
+            ssh-keygen -q -t "$1" -b "$2" -N '' -f "$WORK/sshd/host_key" </dev/null
+            chmod 600 "$WORK/sshd/host_key"
+            start_sshd
+            if [ "$_ok" -ne 1 ]; then
+                fail "live: sshd with only a $3 host key would not start"
+                continue
+            fi
+            start_shim "$RELAY_PORT" "$SSH_PORT"
+            write_app "$WORK/hk_$1$2" "127.0.0.1" "$SSH_PORT" "127.0.0.1" "$RELAY_PORT" \
+                '"127.0.0.1"' "$SSH_PORT" '"127.0.0.1"' "$RELAY_PORT"
+            HK_OUT=$(run_app "$WORK/hk_$1$2")
+            stop_shim
+            assert_line "$HK_OUT" "first_code" "host_unknown" "live $3: an unknown host key is refused first"
+            assert_line "$HK_OUT" "connected" "yes" "live $3: connected after accepting the key"
+            assert_line "$HK_OUT" "negotiated_hostkey" "$3" "live $3: negotiated $3"
+            assert_line "$HK_OUT" "exec_stdout" "hull-tunnel-ok" "live $3: command output came back"
+            if ! printf '%s\n' "$HK_OUT" | grep -q '^connected=yes$'; then
+                printf '%s\n' "$HK_OUT" | sed 's/^/    /'
+                tail -10 "$WORK/sshd/log" 2>/dev/null | sed 's/^/    sshd: /'
+            fi
+        done
 
         if [ "$FAIL" -ne 0 ]; then
             echo "  --- app output ---"

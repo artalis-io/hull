@@ -284,6 +284,101 @@ test("no common algorithm is a structured refusal", function()
     assert_eq(err.detail:find("key exchange", 1, true) ~= nil, true, err.detail)
 end)
 
+-- A whole key exchange against a scripted server, with every primitive
+-- stubbed and each verify recorded, so what is under test is which host key
+-- path the transport takes, not the arithmetic.
+local function full_crypto(calls)
+    local c = stub_crypto()
+    c.x25519_keypair = function() return string.rep("\9", 32), string.rep("\1", 32) end
+    c.x25519 = function() return string.rep("\2", 32) end
+    c.gcm_seal = function(_, _, _, p) return p, string.rep("\0", 16) end
+    c.gcm_open = function(_, _, _, x) return x end
+    c.ed25519_verify = function() calls[#calls + 1] = "ed25519"; return true end
+    c.verify = function(jose) calls[#calls + 1] = jose; return true end
+    return c
+end
+
+local P256 = wire.writer():string("ecdsa-sha2-nistp256"):string("nistp256")
+                 :string("\4" .. string.rep("\5", 64)):build()
+local ED = wire.writer():string("ssh-ed25519"):string(string.rep("\6", 32)):build()
+
+local function ecdsa_sig()
+    local rs = wire.writer():mpint(string.rep("\1", 32)):mpint(string.rep("\2", 32)):build()
+    return wire.writer():string("ecdsa-sha2-nistp256"):string(rs):build()
+end
+
+local function server_offering(host_keys, key, sig)
+    local offer = {}
+    for k, v in pairs(kexinit.DEFAULT_OFFER) do offer[k] = v end
+    offer.host_key = host_keys
+    return "SSH-2.0-Test\r\n" .. plain(kexinit.build(offer, string.rep("\0", 16)))
+        .. plain(wire.writer():byte(31):string(key):string(string.rep("Q", 32))
+                     :string(sig):build())
+        .. plain("\21")
+end
+
+test("a server with only an ECDSA host key is verified with ES256", function()
+    local calls = {}
+    local s = fake_stream(server_offering({ "ecdsa-sha2-nistp256" }, P256, ecdsa_sig()), 64)
+    local t = transport.new(s, full_crypto(calls))
+    local ok, err = t:handshake({ host = "h", trust = { get = function() return P256 end } })
+    assert_eq(ok, true, err and err.code)
+    assert_eq(#calls, 1)
+    assert_eq(calls[1], "ES256")
+    assert_eq(t.negotiated.host_key, "ecdsa-sha2-nistp256")
+end)
+
+test("a key of another type than the negotiated algorithm is refused", function()
+    -- ECDSA was negotiated; the server then presents an Ed25519 key.
+    local calls = {}
+    local s = fake_stream(server_offering({ "ecdsa-sha2-nistp256" }, ED, ecdsa_sig()), 64)
+    local t = transport.new(s, full_crypto(calls))
+    local ok, err = t:handshake({ host = "h", trust = { get = function() return ED end } })
+    assert_eq(ok, nil)
+    assert_eq(err.code, "host_key_invalid")
+    assert_eq(#calls, 0, "nothing reached a verifier:")
+end)
+
+-- The host key algorithms in the first KEXINIT this client sent.
+local function offered_host_keys(s)
+    for _, w in ipairs(s.written) do
+        -- The identification line goes out before any packet.
+        local payload = w:sub(1, 4) ~= "SSH-" and packet.parse(w, 8)
+        if payload and payload:byte(1) == 20 then
+            return table.concat(kexinit.parse(payload).host_key, ",")
+        end
+    end
+end
+
+test("the key type the trust store holds for a host is asked for first", function()
+    -- Known by its RSA key: ask for RSA first, or a server that also has an
+    -- Ed25519 key presents that one and the host reads as CHANGED.
+    local rsa = wire.writer():string("ssh-rsa"):string("e"):string("n"):build()
+    local s = fake_stream("SSH-2.0-Test\r\n")
+    local t = transport.new(s, stub_crypto())
+    pcall(function()
+        t:handshake({ host = "h", trust = { get = function() return rsa end } })
+    end)
+    assert_eq(offered_host_keys(s),
+              "rsa-sha2-512,rsa-sha2-256,ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384")
+end)
+
+test("with nothing stored the default host key order is offered", function()
+    local s = fake_stream("SSH-2.0-Test\r\n")
+    local t = transport.new(s, stub_crypto())
+    pcall(function() t:handshake({ host = "h", trust = { get = function() end } }) end)
+    assert_eq(offered_host_keys(s), table.concat(kexinit.DEFAULT_OFFER.host_key, ","))
+end)
+
+test("a trust store that fails to read leaves the offer alone", function()
+    local s = fake_stream("SSH-2.0-Test\r\n")
+    local t = transport.new(s, stub_crypto())
+    pcall(function()
+        t:handshake({ host = "h", trust = { get = function() error("disk gone") end } })
+    end)
+    assert_eq(offered_host_keys(s), table.concat(kexinit.DEFAULT_OFFER.host_key, ","))
+end)
+
 test("the client identification string is sent after the server one", function()
     -- RFC 4253 allows either order, but ours must go out before the first
     -- packet or the exchange hash will not match.

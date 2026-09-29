@@ -226,7 +226,7 @@ Deliberately minimal. Interoperability with current OpenSSH, not legacy breadth.
 | role | algorithm | basis |
 |---|---|---|
 | KEX | `curve25519-sha256` | needs 5.2 |
-| host key | `ssh-ed25519` | `crypto.ed25519_verify`, present |
+| host key | `ssh-ed25519`; `ecdsa-sha2-nistp256` / `-nistp384`; `rsa-sha2-512` / `-256` | `crypto.ed25519_verify`; `crypto.verify` (ES256 / ES384 / RS512 / RS256), present |
 | encryption | `aes256-gcm@openssh.com` | needs 5.3 |
 | MAC | implicit in AEAD | none needed |
 | user auth | `publickey` with `ssh-ed25519` | `crypto.ed25519_sign`, present |

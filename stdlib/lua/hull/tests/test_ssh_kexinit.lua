@@ -171,12 +171,26 @@ test("negotiate refuses a server offering only weak kex", function()
     assert_eq(err:find("key exchange", 1, true) ~= nil, true, err)
 end)
 
-test("negotiate refuses a server offering only RSA host keys", function()
+test("negotiate settles on RSA with SHA-2 when that is all the server has", function()
     local s = agreeable()
-    s.host_key = { "ssh-rsa", "rsa-sha2-512" }
+    s.host_key = { "ssh-rsa", "rsa-sha2-256", "rsa-sha2-512" }
+    local n = kexinit.negotiate(nil, s)
+    -- Our order decides: SHA-512 before SHA-256.
+    assert_eq(n.host_key, "rsa-sha2-512")
+end)
+
+test("negotiate refuses a server offering only SHA-1 RSA signatures", function()
+    local s = agreeable()
+    s.host_key = { "ssh-rsa", "ssh-dss" }
     local n, err = kexinit.negotiate(nil, s)
     assert_eq(n, nil)
     assert_eq(err:find("host key", 1, true) ~= nil, true, err)
+end)
+
+test("negotiate prefers Ed25519 over ECDSA and RSA", function()
+    local s = agreeable()
+    s.host_key = { "rsa-sha2-512", "ecdsa-sha2-nistp256", "ssh-ed25519" }
+    assert_eq(kexinit.negotiate(nil, s).host_key, "ssh-ed25519")
 end)
 
 test("negotiate refuses compression", function()
@@ -240,8 +254,13 @@ test("the default offer lists only algorithms Hull can do", function()
     -- Every name here is one a peer may steer us onto.
     assert_eq(#o.cipher, 1)
     assert_eq(o.cipher[1], "aes256-gcm@openssh.com")
-    assert_eq(#o.host_key, 1)
-    assert_eq(o.host_key[1], "ssh-ed25519")
+    assert_eq(table.concat(o.host_key, ","),
+              "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,rsa-sha2-512,rsa-sha2-256")
+    -- Every one of them is an algorithm hull.ssh.hostkey verifies.
+    local hostkey = require('hull.ssh.hostkey')
+    for _, name in ipairs(o.host_key) do
+        assert_eq(hostkey.ALGORITHMS[name] ~= nil, true, name)
+    end
     assert_eq(#o.compression, 1)
     assert_eq(o.compression[1], "none")
     for _, name in ipairs(o.kex) do

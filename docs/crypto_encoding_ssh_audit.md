@@ -184,8 +184,11 @@ a byte-only crypto API (a deliberate breaking change).
   sanitizer, a tidier facade);
   group 6 (live rekey / stdin interop tests, context docs). The group 6 fuzz
   targets are done: `fuzz/fuzz_ssh.c`.
-- **SSH, not on the roadmap:** only ed25519 host keys (servers with only RSA
-  or ECDSA host keys are unreachable); one cipher; one key per connection with
+- **SSH host keys:** done. ECDSA P-256 / P-384 and RSA (SHA-2, at least
+  2048 bits) are verified alongside Ed25519, the store's key type is asked
+  for first, and the live sshd e2e connects to a server holding only each
+  type. P-521 is not offered (no ES512 in `hull.crypto`).
+- **SSH, not on the roadmap:** one cipher; one key per connection with
   no fallback; one operation at a time per connection (an exec and an open
   SFTP session share it safely, but two coroutines driving one connection at
   once are not supported); exec stdin capped at 128 KiB and not streamable; no

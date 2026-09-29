@@ -38,9 +38,15 @@ M.DEFAULT_OFFER = {
     kex = { "curve25519-sha256", "curve25519-sha256@libssh.org",
             "kex-strict-c-v00@openssh.com" },
 
-    -- Ed25519 only. RSA host keys would mean carrying RSA verification, and
-    -- every server worth reaching has offered Ed25519 for a decade.
-    host_key = { "ssh-ed25519" },
+    -- Ed25519 first: every server worth reaching has offered it for a
+    -- decade. ECDSA and RSA (SHA-2 only, RFC 8332) follow, for the servers
+    -- that have nothing else - appliances, older distributions, hosts whose
+    -- operators rotated to RSA-only keys. hull.ssh.hostkey is the list of
+    -- what verifies; this is only the order. When the trust store already
+    -- holds a key for the host, the transport moves that key's type to the
+    -- front (see prefer_known_key).
+    host_key = { "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
+                 "rsa-sha2-512", "rsa-sha2-256" },
 
     -- AEAD. Hull has AES-256-GCM through the TLS feature; adding a
     -- non-authenticated cipher would only create a downgrade target.

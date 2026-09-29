@@ -51,8 +51,9 @@ local Transport = {}
 Transport.__index = Transport
 
 --- @param stream  read/write/close, as above
---- @param crypto  sha256, x25519, x25519_keypair, ed25519_verify,
----                ed25519_sign, random, gcm_seal, gcm_open
+--- @param crypto  sha256, x25519, x25519_keypair, ed25519_verify, verify
+---                (ECDSA / RSA host keys), ed25519_sign, random, gcm_seal,
+---                gcm_open
 -- Liveness defaults (see Transport:quiet). OpenSSH's ServerAliveInterval /
 -- ServerAliveCountMax, and an idle bound on top of them.
 M.KEEPALIVE_MS  = 30000
@@ -424,6 +425,38 @@ end
 
 -- Handshake -------------------------------------------------------------------
 
+-- `opts` with the host key algorithms reordered so that the type the trust
+-- store already holds for this host comes first. OpenSSH does the same, and
+-- for the same reason: a server with several host keys presents the one the
+-- client ranks highest, and a host we know by its RSA key that presented its
+-- Ed25519 key instead would come back as a CHANGED host - a false alarm that
+-- trains operators to accept changed keys. A store that cannot be read here
+-- is left alone: the trust check proper reads it again and reports failure.
+local function prefer_known_key(opts)
+    local store = opts.trust
+    if type(store) ~= "table" or type(store.get) ~= "function" then return opts end
+    local ok, blob = pcall(store.get, hostkey.store_name(opts.host, opts.port))
+    if not ok or type(blob) ~= "string" then return opts end
+    local wanted = {}
+    for _, a in ipairs(hostkey.algorithms_for(hostkey.key_type(blob))) do wanted[a] = true end
+
+    local base = opts.offer or kexinit.DEFAULT_OFFER
+    local first, rest = {}, {}
+    for _, a in ipairs(base.host_key) do
+        if wanted[a] then first[#first + 1] = a else rest[#rest + 1] = a end
+    end
+    if #first == 0 or first[1] == base.host_key[1] and #first == 1 then return opts end
+    for _, a in ipairs(rest) do first[#first + 1] = a end
+
+    local offer = {}
+    for k, v in pairs(base) do offer[k] = v end
+    offer.host_key = first
+    local out = {}
+    for k, v in pairs(opts) do out[k] = v end
+    out.offer = offer
+    return out
+end
+
 -- Returns true, or nil plus a structured reason. The host-key cases carry the
 -- fingerprint, because the caller has to be able to show it.
 function Transport:handshake(opts)
@@ -446,6 +479,7 @@ function Transport:handshake(opts)
     self.server_ident = v_s
     -- A rekey needs the same offer and the same host; keep them rather
     -- than making every later call thread them through.
+    opts = prefer_known_key(opts)
     self.kex_opts = opts
 
     return self:run_kex(opts)
@@ -557,7 +591,8 @@ function Transport:run_kex(opts, i_s)
         end
         local ok, why = hostkey.verify_signature(self.crypto,
                                                  reply.host_key,
-                                                 reply.signature, h)
+                                                 reply.signature, h,
+                                                 neg.host_key)
         if not ok then
             return nil, { code = "host_key_invalid", detail = why }
         end
@@ -567,7 +602,7 @@ function Transport:run_kex(opts, i_s)
         -- the fingerprint (see hull.ssh.hostkey).
         local d = hostkey.verify(self.crypto,
                                  opts.trust, hostkey.store_name(opts.host, opts.port),
-                                 reply.host_key, reply.signature, h)
+                                 reply.host_key, reply.signature, h, neg.host_key)
         if not d.ok then
             return nil, { code = "host_key_invalid", detail = d.reason }
         end
