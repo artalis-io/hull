@@ -160,13 +160,27 @@ test("a key accepted off port 22 is filed as [host]:port", function()
     assert_eq(st.get("web1"), nil, "port 22 is a different host:")
 end)
 
-test("an existing known_hosts is read, other key types ignored", function()
+test("a host with several recorded keys is known by the best-ranked one", function()
+    -- Ed25519 over RSA, whichever line comes first: the transport asks the
+    -- server for that type first, so it must be the one returned.
     local fs = fake_fs(line("web1", RSA) .. "\n" .. line("web1,web2", ED_B) .. "\n")
     local st = store(fs)
     assert_eq(st.get("web1"), ED_B)
     local e = st.entries()
     assert_eq(e.web1, ED_B)
     assert_eq(e.web2, ED_B)
+end)
+
+test("a host known only by its RSA key is found by it", function()
+    local fs = fake_fs(line("web3", RSA) .. "\n")
+    assert_eq(store(fs).get("web3"), RSA)
+    assert_eq(store(fs).entries().web3, RSA)
+end)
+
+test("a key type Hull does not verify is not trusted", function()
+    local fs = fake_fs(line("old1", blob("ssh-dss", "\4")) .. "\n")
+    assert_eq(store(fs).get("old1"), nil)
+    assert_eq(store(fs).entries().old1, nil)
 end)
 
 test("a file that does not end in a newline is appended to cleanly", function()

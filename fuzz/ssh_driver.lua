@@ -103,6 +103,8 @@ local function stub_crypto()
         x25519          = function(_, q) if #q ~= 32 then return nil, "bad point" end
                                          return string.rep("\2", 32) end,
         ed25519_verify  = function() return true end,
+        verify          = function() return true end,
+        sign            = function() return string.rep("\7", 256) end,
         ed25519_sign    = function() return string.rep("\3", 64) end,
         gcm_seal        = function(_, _, _, p) return p, ZERO_TAG end,
         gcm_open        = function(_, _, _, c, t) if t == ZERO_TAG then return c end return nil end,
@@ -193,9 +195,18 @@ end
 
 T[#T + 1] = function(s)             -- host key and signature blobs
     local ok, k = guarded(hostkey.parse_key, s)
-    if ok then check(#k.key == hostkey.KEY_LEN, "host key length not enforced") end
+    if ok and k.algorithm == hostkey.ALGORITHM then
+        check(#k.key == hostkey.KEY_LEN, "Ed25519 key length not enforced")
+    elseif ok and k.q then
+        check(#k.q == 65 or #k.q == 97, "ECDSA point length not enforced")
+    elseif ok and k.n then
+        check(k.bits >= hostkey.RSA_MIN_BITS, "RSA size floor not enforced")
+    end
+    if ok and not k.key then guarded(hostkey.public_key_pem, k) end
     local sok, sig = guarded(hostkey.parse_signature, s)
-    if sok then check(#sig.signature == hostkey.SIG_LEN, "signature length not enforced") end
+    if sok and sig.algorithm == hostkey.ALGORITHM then
+        check(#sig.signature == hostkey.SIG_LEN, "Ed25519 signature length not enforced")
+    end
     local vok, good = guarded(hostkey.verify_signature, stub_crypto(), s, s, "h")
     if vok then check(type(good) == "boolean", "verify_signature not boolean") end
     guarded(hostkey.fingerprint, stub_crypto().sha256, s)

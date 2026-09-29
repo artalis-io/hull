@@ -4369,6 +4369,37 @@ UTEST(lua_stdlib, ssh_hostkey_suite)
     EXPECT_GT(pass, 0LL);
 }
 
+/* ECDSA and RSA host keys against keys made by ssh-keygen and signatures made
+ * by OpenSSL. Vanilla state: the encoding half (DER/PEM byte-equal to
+ * OpenSSL's, signature conversion, the refusals) - 13 tests. */
+UTEST(lua_stdlib, ssh_hostkey_vectors_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_hostkey_vectors.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 13LL);
+}
+
+/* The same script with the capability layer, so hull.crypto is real and the
+ * OpenSSL signatures are verified by mbedTLS through crypto.verify: 3 more
+ * tests. The exact count is the point - a require that quietly failed would
+ * skip the crypto half and still report no failures. */
+UTEST(lua_stdlib, ssh_hostkey_vectors_real_crypto)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_ssh_hostkey_vectors.lua",
+                                     &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 16LL);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, ssh_userauth_suite)
 {
     long long pass = 0, fail = -1;

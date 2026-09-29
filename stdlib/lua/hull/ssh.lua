@@ -121,14 +121,24 @@ function M.file_store(path, opts)
         end
     end
 
+    -- A key type this client verifies, ranked: the order a host with several
+    -- recorded keys is known by (the transport then asks for that type
+    -- first). Types it does not verify are not trusted, so not returned.
+    local RANK = { ["ssh-ed25519"] = 1, ["ecdsa-sha2-nistp256"] = 2,
+                   ["ecdsa-sha2-nistp384"] = 3, ["ssh-rsa"] = 4 }
+
     return {
-        -- The ed25519 key recorded for `name`, if any. Other key types are
-        -- not what this client verifies, so they are not what it trusts.
+        -- The best-ranked key recorded for `name`, if any.
         get = function(name)
-            local e = each(function(x)
-                return x.keytype == "ssh-ed25519" and kh.matches(x, name, hmac)
+            local best
+            each(function(x)
+                local r = RANK[x.keytype]
+                if r and (not best or r < RANK[best.keytype])
+                   and kh.matches(x, name, hmac) then
+                    best = x
+                end
             end)
-            return e and e.blob
+            return best and best.blob
         end,
         put = function(name, blob)
             local text = load()
@@ -150,9 +160,10 @@ function M.file_store(path, opts)
         entries = function()
             local out = {}
             each(function(x)
-                if x.names and x.keytype == "ssh-ed25519" then
+                if x.names and RANK[x.keytype] then
                     for _, n in ipairs(x.names) do
-                        if out[n] == nil then out[n] = x.blob end
+                        local cur = out[n] and hostkey.key_type(out[n])
+                        if not cur or RANK[x.keytype] < RANK[cur] then out[n] = x.blob end
                     end
                 end
             end)
@@ -612,7 +623,8 @@ function M.accept_host(trust, host, key_blob, port)
     return guard(function()
         if type(key_blob) ~= "string" or not pcall(hostkey.parse_key, key_blob) then
             error({ code = "host_key_invalid",
-                    detail = "not an ssh-ed25519 public key blob" }, 0)
+                    detail = "not a host key blob Hull verifies (ssh-ed25519, "
+                             .. "ecdsa-sha2-nistp256/384 or ssh-rsa)" }, 0)
         end
         if type(trust) == "table" and type(trust.revoked) == "function"
            and trust.revoked(key_blob) then

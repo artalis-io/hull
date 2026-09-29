@@ -98,6 +98,25 @@ seed(T.ecdh, "reply", ECDH_REPLY)
 seed(T.hostkey, "key", HOST_KEY)
 seed(T.hostkey, "sig", HOST_SIG)
 
+-- ECDSA and RSA shapes: a well-formed blob of each, so mutations reach the
+-- curve, point, exponent and modulus checks rather than dying at the name.
+local P256_KEY = w():string("ecdsa-sha2-nistp256"):string("nistp256")
+                    :string("\4" .. string.rep("E", 64)):build()
+local P384_KEY = w():string("ecdsa-sha2-nistp384"):string("nistp384")
+                    :string("\4" .. string.rep("F", 96)):build()
+local RSA_KEY = w():string("ssh-rsa"):mpint("\1\0\1"):mpint("\193" .. string.rep("\3", 255)):build()
+local function ecdsa_sig(alg, n)
+    return w():string(alg):string(w():mpint("\128" .. string.rep("\1", n - 1))
+                                     :mpint(string.rep("\2", n)):build()):build()
+end
+local P256_SIG = ecdsa_sig("ecdsa-sha2-nistp256", 32)
+seed(T.hostkey, "p256_key", P256_KEY)
+seed(T.hostkey, "p384_key", P384_KEY)
+seed(T.hostkey, "rsa_key", RSA_KEY)
+seed(T.hostkey, "p256_sig", P256_SIG)
+seed(T.hostkey, "p384_sig", ecdsa_sig("ecdsa-sha2-nistp384", 48))
+seed(T.hostkey, "rsa512_sig", w():string("rsa-sha2-512"):string(string.rep("\9", 256)):build())
+
 for name, s in pairs({
     version = s_version(), status = s_status(1, 2), attrs = s_attrs(1),
     handle = s_handle(1), data = s_data(1, "abc"), name = s_name(1),
@@ -168,6 +187,16 @@ seed(T.connection, "banner_first", "maintenance tonight\r\n" .. HANDSHAKE .. sea
     w():byte(53):string("Welcome"):string(""):build(),
     w():byte(51):namelist({ "publickey" }):boolean(false):build(),
 }))
+-- A server with only an ECDSA host key: the ES256 path of the handshake.
+local ECDSA_KEXINIT = kexinit.build({
+    kex = kexinit.DEFAULT_OFFER.kex, host_key = { "ecdsa-sha2-nistp256" },
+    cipher = kexinit.DEFAULT_OFFER.cipher, mac = kexinit.DEFAULT_OFFER.mac,
+    compression = { "none" }, languages = {},
+}, zeros(16))
+seed(T.connection, "ecdsa_host", "SSH-2.0-OpenSSH_9.6\r\n" .. plain(ECDSA_KEXINIT)
+     .. plain(w():byte(kex.SSH_MSG_KEX_ECDH_REPLY):string(P256_KEY)
+                 :string(string.rep("Q", 32)):string(P256_SIG):build())
+     .. plain("\21"))
 seed(T.connection, "rekey", HANDSHAKE .. sealed({
     w():byte(6):string("ssh-userauth"):build(), "\52",
     conf(), ok_reply(), data("before\n"), SERVER_KEXINIT,
