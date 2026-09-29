@@ -2023,27 +2023,9 @@ UTEST(js_cap, crypto_sign_and_rsa_private_pem)
     const char *code =
         "import { crypto } from 'hull:crypto';\n"
         "import { encoding } from 'hull:encoding';\n"
-        "const ecPriv = '-----BEGIN EC PRIVATE KEY-----
-MHcCAQEEIL2d49Dj0W0CG8otDWmMNcm96RQqL8ACWBbKQ688SzXdoAoGCCqGSM49
-AwEHoUQDQgAE68vsW2ypQeT3oQeUWUZpKeFZ5blnRMKJiofxB4tIQiosja/MWXzA
-6yt/w0rtpatPPAWNKjoXQy+LkoL830ZUuw==
------END EC PRIVATE KEY-----
-';\n"
-        "const ecPub = '-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE68vsW2ypQeT3oQeUWUZpKeFZ5bln
-RMKJiofxB4tIQiosja/MWXzA6yt/w0rtpatPPAWNKjoXQy+LkoL830ZUuw==
------END PUBLIC KEY-----
-';\n"
-        "const rsaPub = '-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArXHJgrJxPWh9qZV29faS
-siK5aUcAbigfmLy3/7tr29f1yo8Hhd3UqX0N87FDqbQbFCKhQ3V2EfNxqSHt4cRP
-dSIFHRGQW539veaMgfmNQNU4cGUWXwLV4mZHehU7in06CgI6CO/PrG+biQRxSARN
-YdH0s0/5D5w2h/5I2I+lQX+S2G3y2GrM4M99LBqYqOSXnQIz/JrPHVefCRXnyMIf
-N41sHzoH3+Igu3OY6VMTQz6oB7nyKsJXJ7+sbl8QED6ijNJ1aKkkefZL8GpY/4WL
-MI+swk3X1WXd4ET7VUIjx6g3hlRC89SteRzAwJvYFi88A9rmsg5vyDLDjyDRQwoi
-awIDAQAB
------END PUBLIC KEY-----
-';\n"
+        "const ecPriv = '-----BEGIN EC PRIVATE KEY-----\\nMHcCAQEEIL2d49Dj0W0CG8otDWmMNcm96RQqL8ACWBbKQ688SzXdoAoGCCqGSM49\\nAwEHoUQDQgAE68vsW2ypQeT3oQeUWUZpKeFZ5blnRMKJiofxB4tIQiosja/MWXzA\\n6yt/w0rtpatPPAWNKjoXQy+LkoL830ZUuw==\\n-----END EC PRIVATE KEY-----\\n';\n"
+        "const ecPub = '-----BEGIN PUBLIC KEY-----\\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE68vsW2ypQeT3oQeUWUZpKeFZ5bln\\nRMKJiofxB4tIQiosja/MWXzA6yt/w0rtpatPPAWNKjoXQy+LkoL830ZUuw==\\n-----END PUBLIC KEY-----\\n';\n"
+        "const rsaPub = '-----BEGIN PUBLIC KEY-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArXHJgrJxPWh9qZV29faS\\nsiK5aUcAbigfmLy3/7tr29f1yo8Hhd3UqX0N87FDqbQbFCKhQ3V2EfNxqSHt4cRP\\ndSIFHRGQW539veaMgfmNQNU4cGUWXwLV4mZHehU7in06CgI6CO/PrG+biQRxSARN\\nYdH0s0/5D5w2h/5I2I+lQX+S2G3y2GrM4M99LBqYqOSXnQIz/JrPHVefCRXnyMIf\\nN41sHzoH3+Igu3OY6VMTQz6oB7nyKsJXJ7+sbl8QED6ijNJ1aKkkefZL8GpY/4WL\\nMI+swk3X1WXd4ET7VUIjx6g3hlRC89SteRzAwJvYFi88A9rmsg5vyDLDjyDRQwoi\\nawIDAQAB\\n-----END PUBLIC KEY-----\\n';\n"
         "const u8 = (s) => encoding.bytes.toU8(encoding.base64.decode(s));\n"
         "const msg = 'hull js sign';\n"
         "const r = [];\n"
