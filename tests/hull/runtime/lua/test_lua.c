@@ -4428,6 +4428,35 @@ UTEST(lua_stdlib, ssh_rsa_key_real_crypto)
     cleanup_lua_caps();
 }
 
+/* ECDSA user keys written by ssh-keygen. Vanilla: P-256 / P-384 load with a
+ * SEC1 PEM byte-equal to OpenSSL's, P-521 refused, a key failing its
+ * self-check reported as damaged, the r||s -> mpint encoding (5). With the
+ * capability layer the keys really sign and verify against ssh-keygen's
+ * export, including a passphrase-protected copy (3 more). */
+UTEST(lua_stdlib, ssh_ecdsa_key_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_ecdsa_key.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 5LL);
+}
+
+UTEST(lua_stdlib, ssh_ecdsa_key_real_crypto)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_ssh_ecdsa_key.lua",
+                                     &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 8LL);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, ssh_userauth_suite)
 {
     long long pass = 0, fail = -1;

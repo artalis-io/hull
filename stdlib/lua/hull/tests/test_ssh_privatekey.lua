@@ -188,9 +188,9 @@ end)
 
 test("refuses an unsupported key type", function()
     local ok, err = pcall(privatekey.load,
-        key_file({ private_blob = private_section({ algo = "ecdsa-sha2-nistp256" }) }))
+        key_file({ private_blob = private_section({ algo = "ecdsa-sha2-nistp521" }) }))
     assert_eq(ok, false)
-    assert_eq(tostring(err):find("ecdsa%-sha2%-nistp256") ~= nil, true, tostring(err))
+    assert_eq(tostring(err):find("ecdsa%-sha2%-nistp521") ~= nil, true, tostring(err))
 end)
 
 test("the refusals a caller acts on carry a code, and read as before", function()
@@ -198,7 +198,7 @@ test("the refusals a caller acts on carry a code, and read as before", function(
         { "unsupported_key_type",
           { "-----BEGIN PRIVATE KEY-----\nMC4CAQ==\n-----END PRIVATE KEY-----\n" } },
         { "unsupported_key_type",
-          { key_file({ private_blob = private_section({ algo = "ecdsa-sha2-nistp256" }) }) } },
+          { key_file({ private_blob = private_section({ algo = "ecdsa-sha2-nistp521" }) }) } },
         { "unsupported_key_type",
           { key_file({ cipher = "aes128-cbc", kdf = "bcrypt" }), { passphrase = "x" } } },
         { "passphrase_required",

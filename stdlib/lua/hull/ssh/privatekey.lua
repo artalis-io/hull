@@ -37,6 +37,12 @@ M.RSA        = "ssh-rsa"
 -- too. A server may well accept less; that is not a reason to.
 M.RSA_MIN_BITS = 2048
 
+-- ECDSA key types, by the curve each names inside the key.
+M.ECDSA = {
+    ["ecdsa-sha2-nistp256"] = "nistp256",
+    ["ecdsa-sha2-nistp384"] = "nistp384",
+}
+
 -- Strip the armour and decode the body.
 -- The failures a caller acts on differently carry a code: hull.ssh maps them
 -- to its reason table rather than guessing from the message. The message is
@@ -135,9 +141,21 @@ local function parse_private(blob)
         r:mpint()
         local p, q = r:mpint(), r:mpint()
         key = { algorithm = algo, n = n, e = e, d = d, p = p, q = q }
+    elseif M.ECDSA[algo] then
+        -- curve name, public point Q, private scalar d.
+        local curve, q, d = r:string(), r:string(), r:mpint()
+        if curve ~= M.ECDSA[algo] then
+            error("ssh.privatekey: " .. algo .. " key names the curve "
+                  .. wire.safe_name(curve))
+        end
+        key = { algorithm = algo, curve = curve, q = q, d = d }
+    elseif algo == "ecdsa-sha2-nistp521" then
+        raise("unsupported_key_type", "ssh.privatekey: ecdsa-sha2-nistp521 keys are not "
+              .. "supported (P-256 and P-384 are); generate one with ssh-keygen -t ed25519")
     else
         raise("unsupported_key_type", "ssh.privatekey: unsupported key type "
-              .. wire.safe_name(tostring(algo)) .. "; ssh-ed25519 and ssh-rsa are supported")
+              .. wire.safe_name(tostring(algo))
+              .. "; ssh-ed25519, ssh-rsa and ecdsa-sha2-nistp256/384 are supported")
     end
 
     local comment = r:string()
@@ -183,6 +201,36 @@ local function finish_rsa(key, opts)
     key.pem, key.bits = pem, bits
     key.public = wire.writer():string(M.RSA):mpint(key.e):mpint(key.n):build()
     key.d, key.p, key.q = nil, nil, nil
+end
+
+-- An ECDSA key's public blob and signing PEM. The private scalar cannot be
+-- checked against the public point without curve arithmetic, and a key that
+-- disagrees with itself would sign what no server verifies - a failure that
+-- looks like a rejected key, far from its cause. So the key signs a fixed
+-- message and the signature is verified against the file's own public point,
+-- here, where a damaged key file can be named as one.
+local ECDSA_CHECK = "hull.ssh.privatekey: does this key sign for its own public point?"
+
+local function finish_ecdsa(key, opts)
+    local hostkey = require('hull.ssh.hostkey')
+    key.public = wire.writer():string(key.algorithm):string(key.curve)
+                             :string(key.q):build()
+    -- Shape of the point: the same check a host key gets.
+    local ok, parsed = pcall(hostkey.parse_key, key.public)
+    if not ok then error("ssh.privatekey: " .. tostring(parsed)) end
+    local pem
+    ok, pem = pcall(hostkey.ec_private_pem, key.curve, key.q, key.d)
+    if not ok then error("ssh.privatekey: the ECDSA key is damaged (" .. tostring(pem) .. ")") end
+    key.d = nil
+
+    local crypto = opts.crypto or require("hull.crypto")
+    local jose = hostkey.ALGORITHMS[key.algorithm].jose
+    local sok, sig = pcall(crypto.sign, jose, pem, ECDSA_CHECK)
+    if not sok or not crypto.verify(jose, hostkey.public_key_pem(parsed), ECDSA_CHECK, sig) then
+        error("ssh.privatekey: the ECDSA key is damaged (its private half does not "
+              .. "match its public point)")
+    end
+    key.pem = pem
 end
 
 -- The one cipher this accepts, and the one KDF. ssh-keygen writes exactly
@@ -300,7 +348,9 @@ end
 -- is the wire-format public key ready for userauth:
 --   ssh-ed25519  `public` (the raw 32 bytes), `secret` (the 64 signing wants)
 --   ssh-rsa      `pem` (PKCS#1, for hull.crypto.sign), `bits`, `n`, `e`
--- An RSA key needs hull.crypto (opts.crypto in tests) to build its PEM.
+--   ecdsa-sha2-nistp256/384  `pem` (SEC1), `curve`, `q` (the public point)
+-- RSA and ECDSA keys need hull.crypto (opts.crypto in tests): RSA to build
+-- its PEM, ECDSA to check the key signs for its own public point.
 --- @param opts table|nil { passphrase = string } or { passphrase_env = string }
 function M.load(text, opts)
     local container = M.parse_container(M.unarmour(text))
@@ -326,6 +376,9 @@ function M.load(text, opts)
     local expect
     if key.algorithm == M.RSA then
         finish_rsa(key, opts or {})
+        expect = key.public
+    elseif M.ECDSA[key.algorithm] then
+        finish_ecdsa(key, opts or {})
         expect = key.public
     else
         expect = wire.writer():string(key.algorithm):string(key.public):build()

@@ -158,6 +158,19 @@ local function key_file(cipher_name, kdf, kdfopts)
     return privatekey.BEGIN .. "\n" .. base64.encode(raw) .. "\n" .. privatekey.END .. "\n"
 end
 seed(T.privatekey, "plain", key_file("none", "none", ""))
+-- An ECDSA P-256 key file: curve, point, scalar.
+do
+    local q = "\4" .. string.rep("E", 64)
+    local body = w():uint32(9):uint32(9):string("ecdsa-sha2-nistp256"):string("nistp256")
+                    :string(q):mpint(string.rep("\7", 32)):string("c"):build()
+    local pad, i = {}, 1
+    while (#body + #pad) % 8 ~= 0 do pad[#pad + 1] = string.char(i); i = i + 1 end
+    local raw = w():raw(privatekey.MAGIC):string("none"):string("none"):string("")
+                  :uint32(1):string(w():string("ecdsa-sha2-nistp256"):string("nistp256"):string(q):build())
+                  :string(body .. table.concat(pad)):build()
+    seed(T.privatekey, "ecdsa", privatekey.BEGIN .. "\n" .. base64.encode(raw) .. "\n"
+         .. privatekey.END .. "\n")
+end
 seed(T.privatekey, "encrypted", key_file("aes256-ctr", "bcrypt",
      w():string(string.rep("t", 16)):uint32(16):build()))
 

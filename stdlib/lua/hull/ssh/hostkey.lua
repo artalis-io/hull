@@ -104,12 +104,19 @@ local EC_SPKI_PREFIX = {
 -- AlgorithmIdentifier { rsaEncryption, NULL } (RFC 3279).
 local RSA_ALG_ID = unhex("300d06092a864886f70d0101010500")
 
-local function pem(der_bytes)
+-- The curve OIDs a SEC1 private key names (RFC 5480 section 2.1.1.1).
+local EC_CURVE_OID = {
+    nistp256 = unhex("06082a8648ce3d030107"),
+    nistp384 = unhex("06052b81040022"),
+}
+
+local function pem(der_bytes, label)
+    label = label or "PUBLIC KEY"
     local b64 = base64.encode(der_bytes)
     local lines = {}
     for i = 1, #b64, 64 do lines[#lines + 1] = b64:sub(i, i + 63) end
-    return "-----BEGIN PUBLIC KEY-----\n" .. table.concat(lines, "\n")
-           .. "\n-----END PUBLIC KEY-----\n"
+    return "-----BEGIN " .. label .. "-----\n" .. table.concat(lines, "\n")
+           .. "\n-----END " .. label .. "-----\n"
 end
 
 -- Key and signature blobs -----------------------------------------------
@@ -222,6 +229,31 @@ function M.public_key_pem(key)
         return pem(der(0x30, RSA_ALG_ID .. der(0x03, "\0" .. rsa)))
     end
     error("ssh.hostkey: a " .. tostring(key.type) .. " key has no PEM form", 2)
+end
+
+-- The SEC1 PEM ("EC PRIVATE KEY", RFC 5915) of the ECDSA key with public
+-- point `q` and private scalar `d` (an unsigned big-endian magnitude, as an
+-- OpenSSH key file's mpint reads), for hull.crypto.sign. Lives beside
+-- public_key_pem so the DER for SSH keys is written in one place. The PEM is
+-- secret; keep it only as long as signing needs it.
+function M.ec_private_pem(curve, q, d)
+    local a = M.ALGORITHMS["ecdsa-sha2-" .. tostring(curve)]
+    if not a or not a.field or not EC_CURVE_OID[curve] then
+        error("ssh.hostkey: no ECDSA curve " .. wire.safe_name(tostring(curve)), 2)
+    end
+    if type(q) ~= "string" or #q ~= 1 + 2 * a.field or q:byte(1) ~= 4 then
+        error("ssh.hostkey: not an uncompressed " .. curve .. " point", 2)
+    end
+    if type(d) ~= "string" or d == "" or #d > a.field then
+        error("ssh.hostkey: the ECDSA private scalar does not fit " .. curve, 2)
+    end
+    -- ECPrivateKey ::= SEQUENCE { version 1, privateKey OCTET STRING (the
+    -- scalar at the field width), [0] parameters (the curve), [1] publicKey }
+    local body = der(0x02, "\1")
+              .. der(0x04, string.rep("\0", a.field - #d) .. d)
+              .. der(0xA0, EC_CURVE_OID[curve])
+              .. der(0xA1, der(0x03, "\0" .. q))
+    return pem(der(0x30, body), "EC PRIVATE KEY")
 end
 
 -- Fingerprints ------------------------------------------------------------

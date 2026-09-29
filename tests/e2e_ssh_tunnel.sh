@@ -590,6 +590,23 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
             tail -10 "$WORK/sshd/log" 2>/dev/null | sed 's/^/    sshd: /'
         fi
 
+        # And an ECDSA user key (P-256): the SEC1 PEM rebuilt from the OpenSSH
+        # file signs ES256, sent as mpint r, mpint s.
+        ssh-keygen -q -t ecdsa -b 256 -N '' -f "$WORK/client_ecdsa" </dev/null
+        chmod 600 "$WORK/client_ecdsa"
+        cat "$WORK/client_ecdsa.pub" >> "$WORK/sshd/authorized_keys"
+        start_shim "$RELAY_PORT" "$SSH_PORT"
+        CLIENT_KEY="$WORK/client_ecdsa" write_app "$WORK/ecdsa_user" "127.0.0.1" "$SSH_PORT" \
+            "127.0.0.1" "$RELAY_PORT" '"127.0.0.1"' "$SSH_PORT" '"127.0.0.1"' "$RELAY_PORT"
+        EC_OUT=$(run_app "$WORK/ecdsa_user")
+        stop_shim
+        assert_line "$EC_OUT" "connected" "yes" "live: an ECDSA user key authenticates"
+        assert_line "$EC_OUT" "exec_stdout" "hull-tunnel-ok" "live: and runs a command"
+        if ! printf '%s\n' "$EC_OUT" | grep -q '^connected=yes$'; then
+            printf '%s\n' "$EC_OUT" | sed 's/^/    /'
+            tail -10 "$WORK/sshd/log" 2>/dev/null | sed 's/^/    sshd: /'
+        fi
+
         if [ "$FAIL" -ne 0 ]; then
             echo "  --- app output ---"
             printf '%s\n' "$OUT" | sed 's/^/    /'

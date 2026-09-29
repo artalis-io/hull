@@ -183,6 +183,9 @@ a byte-only crypto API (a deliberate breaking change).
   stores components, not PKCS#1); userauth signs under `rsa-sha2-512`, then
   `rsa-sha2-256` if the server refuses it. Checked against keys ssh-keygen
   wrote and signatures OpenSSL made, and against a live sshd.
+- **ECDSA user keys:** done (P-256, P-384). The SEC1 PEM is built in Lua,
+  byte-equal to OpenSSL's for the same key, and each loaded key must sign
+  for its own public point. P-521 is refused by name (no ES512).
 - **SSH, roadmap still open:** documenting parallel
   connections; the rest of group 5 (the C side: capability logic out of
   `mod_ssh.c`, a generic net policy, one connect adapter; moving

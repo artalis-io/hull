@@ -109,7 +109,9 @@ function M.build_request(user, key_blob, signature_blob, algorithm)
 end
 
 -- A signature blob: the algorithm name around the raw signature. An Ed25519
--- signature is exactly 64 bytes; an RSA one is as long as the modulus.
+-- signature is exactly 64 bytes; an RSA one is as long as the modulus. An
+-- ECDSA one arrives as fixed-width r || s (what hull.crypto.sign writes) and
+-- goes on the wire as mpint r, mpint s (RFC 5656 section 3.1.2).
 function M.signature_blob(raw_signature, algorithm)
     algorithm = algorithm or M.ALGORITHM
     if algorithm == M.ALGORITHM and #raw_signature ~= 64 then
@@ -118,6 +120,14 @@ function M.signature_blob(raw_signature, algorithm)
     end
     if #raw_signature == 0 then
         error("ssh.userauth: empty signature", 2)
+    end
+    if algorithm:find("^ecdsa%-sha2%-") then
+        if #raw_signature % 2 ~= 0 then
+            error("ssh.userauth: an ECDSA signature is r || s of equal widths", 2)
+        end
+        local half = #raw_signature // 2
+        raw_signature = wire.writer():mpint(raw_signature:sub(1, half))
+                                     :mpint(raw_signature:sub(half + 1)):build()
     end
     return wire.writer()
         :string(algorithm or M.ALGORITHM)
