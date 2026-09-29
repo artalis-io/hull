@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <string.h>
@@ -225,6 +226,55 @@ UTEST(fs_resolve, symlink_dotdot_clamped)
     ASSERT_GE(fd, 0);
     char b[64]; ASSERT_STREQ("at-root", slurp(fd, b, sizeof(b)));
     close(fd); close(root);
+    teardown();
+}
+
+/* A ".." inside a scoped openat2 lookup fails EAGAIN whenever a rename lands
+ * anywhere on the system mid-walk - on a busy CI runner that is the parallel
+ * test suites, and it made symlink_dotdot_clamped flaky. The resolver must
+ * treat that as transient. This drives the race on purpose: one thread renames
+ * a file back and forth (in a directory the lookup never touches) while the
+ * main thread keeps resolving through the ".." symlink. Every open must land. */
+static volatile int renamer_stop;
+static void *renamer(void *arg)
+{
+    (void)arg;
+    char a[512], b[512];
+    snprintf(a, sizeof(a), "%s/churn/x", base);
+    snprintf(b, sizeof(b), "%s/churn/y", base);
+    while (!renamer_stop) { (void)rename(a, b); (void)rename(b, a); }
+    return NULL;
+}
+
+UTEST(fs_resolve, symlink_dotdot_survives_concurrent_renames)
+{
+    setup();
+    wfile("top", "at-root");
+    mkdirp_host("d");
+    symln("../../../../top", "d/up");
+    mkdirp_host("churn");
+    wfile("churn/x", "");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+
+    renamer_stop = 0;
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, renamer, NULL));
+    int failed = 0;
+    const char *first_err = NULL;
+    for (int i = 0; i < 5000; i++) {
+        err = NULL;
+        int fd = hl_fs_open_at(root, "d/up", HL_FS_OPEN_READ, 0, &err);
+        if (fd < 0) { if (!failed++) first_err = err; continue; }
+        close(fd);
+    }
+    renamer_stop = 1;
+    pthread_join(th, NULL);
+    if (failed) fprintf(stderr, "  %d opens failed, first: %s\n", failed,
+                        first_err ? first_err : "(null)");
+    ASSERT_EQ(0, failed);
+    close(root);
     teardown();
 }
 
