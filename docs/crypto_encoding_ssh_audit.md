@@ -172,8 +172,9 @@ a byte-only crypto API (a deliberate breaking change).
 
 ## Missing, not yet planned
 
-- **Crypto / encoding:** HKDF; a keyring
-  from env; reason strings on JS decode failures; one JS error shape (encoding
+- **Crypto / encoding:** HKDF is done (`hull.crypto.hkdf`, RFC 5869
+  vectors in both runtimes). Open: a keyring from env (a C-held keyring, see
+  `kv_encryption_design.md`); reason strings on JS decode failures; one JS error shape (encoding
   returns `null`, envelope `[v, err]`, sealbox `{ ok, ... }`).
 - **SSH, roadmap still open:** RSA user keys; documenting parallel
   connections; group 5 (split `transport.lua`, fingerprint duplicated,

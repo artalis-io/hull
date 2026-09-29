@@ -2793,6 +2793,38 @@ UTEST(js_stdlib, crypto_random_token)
     cleanup_js_caps();
 }
 
+/* HKDF-SHA256 against RFC 5869 appendix A, test cases 1-3, through the real
+ * crypto.hmacSha256. Byte strings and buffers are both accepted as input. */
+UTEST(js_stdlib, hkdf_rfc5869_vectors)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { hkdf } from 'hull:crypto:hkdf';\n"
+        "import { encoding } from 'hull:encoding';\n"
+        "const hex = (b) => encoding.hex.encode(b);\n"
+        "const range = (a, b) => { let s = ''; for (let i = a; i <= b; i++) s += String.fromCharCode(i); return s; };\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "function run() {\n"
+        "  const ikm = '\\x0b'.repeat(22);\n"
+        "  if (hex(hkdf.extract(range(0, 12), ikm)) !== '077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5') return 1;\n"
+        "  if (hex(hkdf.derive(ikm, 42, { salt: range(0, 12), info: range(0xf0, 0xf9) }))\n"
+        "      !== '3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865') return 2;\n"
+        "  if (hex(hkdf.derive(encoding.bytes.toU8(range(0, 0x4f)), 82,\n"
+        "          { salt: range(0x60, 0xaf), info: range(0xb0, 0xff) }))\n"
+        "      !== 'b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87') return 3;\n"
+        "  if (hex(hkdf.derive(ikm, 42)) !== '8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8') return 4;\n"
+        "  if (!threw(() => hkdf.derive(ikm, 0)) || !threw(() => hkdf.derive(ikm, 8161))) return 5;\n"
+        "  if (hkdf.derive(ikm, 8160).byteLength !== 8160) return 6;\n"
+        "  if (hex(hkdf.derive(ikm, 32, { info: 'enc' })) === hex(hkdf.derive(ikm, 32, { info: 'mac' }))) return 7;\n"
+        "  if (!threw(() => hkdf.derive(42, 32))) return 8;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__hkdf = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__hkdf"), 0);
+    cleanup_js_caps();
+}
+
 /* Regressions from docs/crypto_encoding_ssh_audit.md (PR 1). run() returns 0,
  * or the number of the first check that failed. */
 UTEST(js_stdlib, crypto_encoding_audit_fixes)
