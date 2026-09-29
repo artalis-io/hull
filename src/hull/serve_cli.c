@@ -44,7 +44,7 @@
 
 #ifdef HL_ENABLE_HTTP_CLIENT
 #include "hull/cap/http.h"
-#include "hull/cacert.h"
+#include "hull/ca_trust.h"
 #include <keel/http_client.h>
 #include "hull/tls_transport.h"
 #endif
@@ -398,62 +398,14 @@ int hull_serve(int argc, char **argv)
      * otherwise have had no anchor and no way to ask for one. This is the
      * path such a tool actually runs on. Mirrors serve.c. */
     if (manifest.hosts_count > 0 || manifest.ssh.tunnel.declared) {
-        /* The SAME ladder serve.c walks, and it is the same ladder on purpose:
-         *   1. --no-ca-bundle         -> no verification (development only)
-         *   2. --ca-bundle PATH       -> that file
-         *   3. system CA store        -> whichever well-known path is readable
-         *   4. embedded Mozilla bundle
-         *   5. none, and say so
-         *
-         * Before this the CLI path took only step 4, so an app.main app could
-         * reach a PUBLIC-CA host and nothing else: a relay or endpoint behind
-         * a private CA was unreachable, and --ca-bundle appeared to be
-         * accepted while doing nothing. A fleet tool is an app.main program,
-         * which made this the one entry point where it mattered most. */
-        const char *ca_path = NULL;
-        if (skip_ca_bundle) {
-            log_warn("[hull:c] TLS certificate verification disabled "
-                     "(--no-ca-bundle)");
-            tls_ctx = hl_tls_client_ctx_create(NULL, &kalloc);
-        } else if (ca_bundle_override) {
-            ca_path = ca_bundle_override;
-            log_info("[hull:c] using CA bundle (override): %s", ca_path);
-            tls_ctx = hl_tls_client_ctx_create(ca_path, &kalloc);
-            if (!tls_ctx)
-                log_warn("[hull:c] failed to load CA bundle from %s", ca_path);
-        } else {
-            /* The system store is TRIED, not trusted to work. A path being
-             * readable is not the same as its contents parsing, and the
-             * branch used to log "using CA bundle: X" and move on without
-             * looking at the result - so an unparseable store disabled
-             * outbound TLS silently, with a log line claiming the opposite.
-             * Fall through to the embedded bundle, which is what it is for.
-             *
-             * Not the same as --ca-bundle: an operator who NAMES a file
-             * has said which anchor to use, and quietly substituting another
-             * would be the wrong kind of helpful. That one fails closed. */
-            if ((ca_path = hl_ca_bundle_find_system()) != NULL) {
-                log_info("[hull:c] using CA bundle: %s", ca_path);
-                tls_ctx = hl_tls_client_ctx_create(ca_path, &kalloc);
-                if (!tls_ctx)
-                    log_warn("[hull:c] system CA bundle %s did not load; "
-                             "falling back to the embedded bundle", ca_path);
-            }
-            const unsigned char *emb_data = NULL;
-            size_t emb_len = 0;
-            if (!tls_ctx && hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
-                log_info("[hull:c] using embedded CA bundle (%s)",
-                         hl_embedded_ca_bundle_label());
-                tls_ctx = hl_tls_client_ctx_create_from_buf(
-                    emb_data, emb_len, &kalloc);
-                if (!tls_ctx)
-                    log_warn("[hull:c] failed to parse embedded CA bundle");
-            } else if (!tls_ctx) {
-                log_warn("[hull:c] no CA bundle found; TLS disabled "
-                         "(use --no-ca-bundle, --ca-bundle PATH, or build "
-                         "with HL_EMBED_CA_BUNDLE=1)");
-            }
-        }
+        /* The SAME ladder serve.c walks - one copy, in ca_trust.c. Before it
+         * was shared, the CLI path took only the embedded bundle, so an
+         * app.main app could reach a PUBLIC-CA host and nothing else, and
+         * --ca-bundle appeared to be accepted while doing nothing. A fleet
+         * tool is an app.main program, which made this the entry point where
+         * it mattered most. */
+        tls_ctx = hl_ca_trust_resolve(skip_ca_bundle, ca_bundle_override,
+                                      &kalloc, NULL);
 
         if (tls_ctx) {
             hl_tls_config_wire(&tls_cfg, tls_ctx);
