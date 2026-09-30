@@ -109,6 +109,22 @@ typedef struct HlSandboxPolicy {
  * `policy` is fully overwritten; no need to pre-zero. Always returns
  * successfully (no allocation, no failure modes).
  */
+/**
+ * True if a DSN names a network database or KV backend (it dials out), or is a
+ * "$VAR" env-ref whose scheme cannot be known until connect. A bare path is a
+ * local SQLite file.
+ */
+int hl_sandbox_dsn_is_network(const char *dsn);
+
+/**
+ * True if the manifest declares a connection that may dial a network database
+ * or KV backend: a named connection with a network (or env-ref) DSN, or a
+ * databases.dynamic / kv.dynamic policy admitting a network scheme. The one
+ * definition behind both the sandbox's network_outbound grant and the entry
+ * points' decision to resolve a TLS trust anchor.
+ */
+int hl_sandbox_manifest_has_network_db(const HlManifest *m);
+
 void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
                                      const HlManifest *manifest);
 

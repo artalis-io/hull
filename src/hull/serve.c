@@ -1516,12 +1516,23 @@ static int hl_serve_wire_caps(HlServerState *s)
      * have had no trust anchor and no way to ask for one. Resolving it here
      * means --ca-bundle, --no-ca-bundle and the system/embedded ladder mean
      * the same thing for every outbound connection Hull makes. */
-    if (s->manifest.hosts_count > 0 || s->manifest.ssh.tunnel.declared) {
+    /* A database or KV backend that dials out needs the anchor too - its
+     * verify-full handshake reads it back through hl_ca_bundle_active - even
+     * though it takes no context from here. */
+    int wants_ctx  = s->manifest.hosts_count > 0 || s->manifest.ssh.tunnel.declared;
+    int dials_data = hl_sandbox_manifest_has_network_db(&s->manifest)
+                  || (!s->cfg.no_db && hl_sandbox_dsn_is_network(s->cfg.db_path));
+    if (wants_ctx || dials_data) {
         /* The ladder (--no-ca-bundle, --ca-bundle, system store, embedded
-         * bundle) is shared with serve_cli.c; see ca_trust.h. */
+         * bundle) is shared with serve_cli.c; see ca_trust.h. It also
+         * publishes the anchor for the per-connection clients. */
         s->client_tls_ctx = hl_ca_trust_resolve(s->cfg.skip_ca_bundle,
                                                 s->cfg.ca_bundle_override,
                                                 &s->kl_alloc, &s->ca_bundle_path);
+        if (!wants_ctx && s->client_tls_ctx) {
+            hl_tls_ctx_destroy(s->client_tls_ctx);
+            s->client_tls_ctx = NULL;
+        }
 
         if (s->client_tls_ctx) {
             hl_tls_config_wire(&s->client_tls_config, s->client_tls_ctx);
@@ -1563,17 +1574,21 @@ static int hl_serve_wire_caps(HlServerState *s)
 
     /* Model-2 async SMTP: admission cap from the pool worker count W (known at
      * wiring), the in-flight registry, and the immutable CA trust for per-worker
-     * TLS. The CA bytes are the embedded Mozilla bundle - static .rodata, so they
-     * outlive pool_free() with no lifetime work; a plaintext-only build (no
-     * embedded bundle) leaves ca_buf NULL and the worker sends without TLS. */
+     * TLS: the anchor this invocation resolved (hl_ca_bundle_active - the
+     * embedded bundle unless --ca-bundle or the system store was chosen). Its
+     * bytes are static .rodata or owned by cacert.c for the process, so they
+     * outlive pool_free() with no lifetime work. With no usable anchor ca_buf
+     * stays NULL: a message that asks for TLS then fails closed
+     * (tls_config_missing) rather than trusting a different anchor. */
 #ifdef HL_ENABLE_HTTP_CLIENT
     {
         int workers = s->cfg.num_workers > 0 ? s->cfg.num_workers
                                              : HL_THREAD_POOL_WORKERS;
         const unsigned char *ca_buf = NULL; size_t ca_len = 0;
-#ifdef HL_EMBED_CA_BUNDLE
-        hl_embedded_ca_bundle(&ca_buf, &ca_len);
-#endif
+        if (hl_ca_bundle_active(&ca_buf, &ca_len) != 0) {
+            ca_buf = NULL;
+            ca_len = 0;
+        }
         hl_smtp_server_ctx_init(&s->smtp_async_storage, workers,
                                 ca_buf, ca_len, &s->kl_alloc);
         s->smtp_async_ok = 1;
@@ -1636,24 +1651,6 @@ static const char *sandbox_db_path(const char *dsn)
     return path;
 }
 
-/* True if the `-d` default DSN names a NETWORK backend (postgres/mysql/mariadb),
- * or is a "$VAR" env-ref (opaque scheme -> possibly-network). A scheme-less bare
- * path is SQLite (local). Used to grant network_outbound for `hull -d
- * postgres://... app.lua` (the default DSN lives in cfg, not the manifest, so
- * it isn't covered by hl_sandbox_policy_from_manifest). */
-static int db_dsn_is_network(const char *dsn)
-{
-    if (!dsn || !*dsn) return 0;
-    if (dsn[0] == '$') return 1;
-    const char *sep = strstr(dsn, "://");
-    if (!sep) return 0;   /* scheme-less bare path -> sqlite (local) */
-    size_t n = (size_t)(sep - dsn);
-    return (n == 8  && strncasecmp(dsn, "postgres",   8)  == 0)
-        || (n == 10 && strncasecmp(dsn, "postgresql", 10) == 0)
-        || (n == 5  && strncasecmp(dsn, "mysql",      5)  == 0)
-        || (n == 7  && strncasecmp(dsn, "mariadb",    7)  == 0);
-}
-
 /* Phase 2: apply the OS-level sandbox built from the resolved manifest. */
 static int hl_serve_apply_sandbox(HlServerState *s)
 {
@@ -1666,7 +1663,7 @@ static int hl_serve_apply_sandbox(HlServerState *s)
          * hl_sandbox_policy_from_manifest can't see it. A `-d postgres://...`
          * (or `-d $DATABASE_URL`) app needs outbound network to reach its DB;
          * grant it here so a DB-only app isn't SIGKILLed on connect. */
-        if (!s->cfg.no_db && db_dsn_is_network(s->cfg.db_path))
+        if (!s->cfg.no_db && hl_sandbox_dsn_is_network(s->cfg.db_path))
             sandbox_policy.network_outbound = 1;
 
         /* CLI-mode apps (app.main registered) never accept inbound
@@ -2158,6 +2155,12 @@ int hull_serve(int argc, char **argv)
 
     /* Phase 8: thread pool, client pool, compression (non-fatal) */
     hl_serve_init_infra(&s);
+
+    /* The `-d` database opens in phase 9, before the manifest and the full
+     * trust resolve (phase 11); a network DSN needs its anchor published now
+     * or its verify-full handshake would not see --ca-bundle. */
+    if (!s.cfg.no_db && hl_sandbox_dsn_is_network(s.cfg.db_path))
+        hl_ca_trust_publish(s.cfg.skip_ca_bundle, s.cfg.ca_bundle_override);
 
     /* Phase 9: VFS + DB + runtime init via HlAppContext (deferred app load) */
     if (hl_serve_init_app_context(&s) != 0) { hl_serve_cleanup(&s); return 1; }

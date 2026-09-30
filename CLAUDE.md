@@ -27,6 +27,18 @@ Resolution order at startup (`hl_ca_trust_resolve` in `src/hull/ca_trust.c`, sha
 4. Embedded Mozilla bundle (via `hl_embedded_ca_bundle()` in `src/hull/cacert.c`)
 5. Fail with a clear hint
 
+The same anchor reaches every outbound TLS client, not only `http.fetch` and
+the SSH tunnel: the resolver publishes it (`hl_ca_bundle_set_active`), and the
+clients that build a TLS context per connection - the Postgres / MySQL / Valkey
+wire backends (`shared/tls_client.c`) and the async SMTP workers - read it back
+with `hl_ca_bundle_active`. It is resolved whenever the app may dial out (http
+`hosts`, `ssh.tunnel`, or a network database / KV connection, the same test the
+sandbox's `network_outbound` uses), and file anchors are read into memory at
+startup, before the sandbox narrows file access. A `--ca-bundle` that fails to
+load leaves NO anchor, so those clients fail closed rather than falling back to
+the embedded bundle. `--no-ca-bundle` publishes nothing: a DSN asking for
+`sslmode=verify-full` still verifies, against the embedded bundle.
+
 `hull doctor` reports both system and embedded availability. The new Keel API `kl_tls_mbedtls_client_ctx_create_from_buf()` loads PEM/DER directly from memory.
 
 Refresh the bundle with `make fetch-ca-bundle` (pulls from `curl.se/ca/cacert.pem`, verifies SHA-256). Disable embedding with `make HL_EMBED_CA_BUNDLE=0` (saves ~200KB but breaks HTTPS in stripped-down containers / Windows / air-gapped).
@@ -640,7 +652,8 @@ roadmap §2.9.)
   MD5 is rejected. Reuses `cap/crypto` (SHA-256 / HMAC / PBKDF2).
 - **TLS:** `sslmode=disable|prefer|require|verify-ca|verify-full` in the DSN
   (`?sslmode=...`), default `prefer`. `verify-full` checks the chain +
-  hostname against the embedded CA bundle via the shared `shared/tls_client.c`
+  hostname against the resolved trust anchor (`--ca-bundle`, the system store,
+  or the embedded bundle; see "HTTPS / CA bundle") via the shared `shared/tls_client.c`
   helper (the same KlTls handshake SMTP uses). `HL_LINK_TLS` links Keel +
   mbedTLS whenever an HTTP half OR Postgres is enabled.
 - **Types:** typed decode by OID (bool/int/float/text/bytea); `?` placeholders
@@ -670,7 +683,7 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
 - **TLS:** `sslmode=disable|prefer|require|verify-ca|verify-full` (same names +
   default `prefer` as Postgres). When TLS is wanted and the server advertises
   `CLIENT_SSL`, the client sends an SSLRequest, runs the blocking handshake
-  over the shared `shared/tls_client.c` (embedded CA bundle; `verify-*` checks
+  over the shared `shared/tls_client.c` (the resolved trust anchor; `verify-*` checks
   chain + hostname), then sends the credentialed HandshakeResponse41 over TLS.
   All post-handshake I/O tunnels through `KlTls`.
 - **Queries / types:** param-less statements use the text `COM_QUERY` protocol;

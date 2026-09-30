@@ -160,13 +160,15 @@ HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
 {
     KlAllocator *alloc = default_alloc();   /* persistent; outlives the KlTls/ctx */
 
-    /* verify: trust anchor = embedded CA bundle, cert chain + hostname
-     * checked. Otherwise: no CA, server certificate accepted as-is. */
+    /* verify: trust anchor = the one this invocation resolved (--ca-bundle,
+     * the system store, or the embedded bundle; see hl_ca_bundle_active),
+     * cert chain + hostname checked. Otherwise: no CA, server certificate
+     * accepted as-is. */
     KlTlsCtx *ctx = NULL;
     if (verify) {
         const unsigned char *cab = NULL;
         size_t cab_len = 0;
-        if (hl_embedded_ca_bundle(&cab, &cab_len) == 0)
+        if (hl_ca_bundle_active(&cab, &cab_len) == 0)
             ctx = kl_tls_mbedtls_client_ctx_create_from_buf(cab, cab_len, alloc);
     } else {
         ctx = kl_tls_mbedtls_client_ctx_create(NULL, alloc);
