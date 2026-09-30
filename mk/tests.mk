@@ -454,8 +454,9 @@ $(BUILDDIR)/test_js_generation: $(TESTDIR)/hull/frontend/test_js_generation.c $(
 # failed by which machine CI drew. x86-64-v2 has SSE4.1/4.2, so the check
 # passes everywhere, and pinning it makes the fixtures the same on every
 # runner. SIMD stays ON: gsub.wat exercises v128.load on purpose. aarch64's
-# generic target already has NEON, so it needs no pin.
-WAMRC_TEST_CPU := $(if $(filter x86_64 amd64,$(shell uname -m 2>/dev/null)),--cpu=x86-64-v2,)
+# generic target already has NEON, so it needs no pin. --target goes with it:
+# wamrc refuses a --cpu without one ("target isn't specified for cpu").
+WAMRC_TEST_CPU := $(if $(filter x86_64 amd64,$(shell uname -m 2>/dev/null)),--target=x86_64 --cpu=x86-64-v2,)
 
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
 # the embedded .wasm via the Hull-built wamrc when present (arch + OS correct);
