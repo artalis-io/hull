@@ -124,7 +124,7 @@ static void js_blob_store_finalizer(JSRuntime *rt, JSValue val)
     if (b) hl_cap_blob_free(b);
 }
 
-static JSClassDef js_blob_store_class = {
+static const JSClassDef js_blob_store_class = {
     "HlBlobStore",
     .finalizer = js_blob_store_finalizer,
 };
@@ -303,7 +303,7 @@ static void js_blob_writer_finalizer(JSRuntime *rt, JSValue val)
     if (w) hl_cap_blob_writer_abort(w);   /* silent abort on GC */
 }
 
-static JSClassDef js_blob_writer_class = {
+static const JSClassDef js_blob_writer_class = {
     "HlBlobWriter",
     .finalizer = js_blob_writer_finalizer,
 };
@@ -405,7 +405,7 @@ static void js_blob_reader_finalizer(JSRuntime *rt, JSValue val)
     if (r) hl_cap_blob_reader_close(r);
 }
 
-static JSClassDef js_blob_reader_class = {
+static const JSClassDef js_blob_reader_class = {
     "HlBlobReader",
     .finalizer = js_blob_reader_finalizer,
 };

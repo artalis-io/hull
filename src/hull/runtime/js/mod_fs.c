@@ -19,7 +19,7 @@ static void js_mmap_finalizer(JSRuntime *rt, JSValue val)
     if (buf) hl_cap_fs_munmap(buf);
 }
 
-static JSClassDef js_mmap_class = {
+static const JSClassDef js_mmap_class = {
     "MappedBuffer",
     .finalizer = js_mmap_finalizer,
 };

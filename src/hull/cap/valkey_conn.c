@@ -178,8 +178,12 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
             if (ci_eq(query, klen, "connect_timeout")) {
                 char tb[16];
                 if (copy_bounded(val, vlen, tb, sizeof tb) == 0) {
-                    long ms = atol(tb);
-                    if (ms >= 0 && ms <= 600000) out->connect_timeout_ms = (int)ms;
+                    /* A number and nothing else: atol read "abc" as 0 and
+                     * "10x" as 10. */
+                    char *end = NULL;
+                    long ms = strtol(tb, &end, 10);
+                    if (end != tb && *end == '\0' && ms >= 0 && ms <= 600000)
+                        out->connect_timeout_ms = (int)ms;
                 }
             } else if (ci_eq(query, klen, "sslmode")) {
                 if (ci_eq(val, vlen, "verify-full"))       out->verify = 1;

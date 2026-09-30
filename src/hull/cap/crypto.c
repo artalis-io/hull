@@ -1582,6 +1582,8 @@ static int hmac_sha512(const uint8_t *key, size_t key_len,
     uint8_t inner_hash[64];
     crypto_hash_sha512(inner_hash, inner_buf, (unsigned long long)inner_len);
 
+    /* The first 128 bytes are key ^ ipad: the key, trivially. */
+    hull_secure_zero(inner_buf, 128);
     if (inner_buf != stack_inner) free(inner_buf);
 
     /* outer = SHA512(k_opad || inner_hash) */

@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "log.h"
 #include "hull/runtime/lua.h"     /* HlLua, KlHttpResponse, hl_lua_make_response */
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
 #include "hull/http_feature.h"    /* hl_lua_http_error_response (seam strong) */
@@ -90,7 +91,11 @@ static int lua_res_header(lua_State *L)
     KlHttpResponse *res = check_response(L, 1);
     const char *name = luaL_checkstring(L, 2);
     const char *value = luaL_checkstring(L, 3);
-    kl_http_response_header(res, name, value);
+    /* Rejected for a CR or LF (the header-injection guard). Not named in the
+     * log: the name may be the part carrying the CR/LF. */
+    if (kl_http_response_header(res, name, value) != 0)
+        log_warn("[hull] res:header: a header was dropped - its name or value "
+                 "contains CR or LF");
     lua_pushvalue(L, 1); /* chainable */
     return 1;
 }

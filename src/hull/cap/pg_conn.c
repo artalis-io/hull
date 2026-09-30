@@ -706,7 +706,9 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
         }
         if (d == HL_PG_SSL_USE_TLS) {
             /* verify-ca / verify-full check the chain + hostname against the
-             * embedded CA bundle; require / prefer take the session as-is. The
+             * active trust anchor (hl_ca_bundle_active: --ca-bundle, the system
+             * store, or the embedded bundle); require / prefer take the session
+             * as-is. The
              * handshake needs the raw descriptor (hl_tls_client_handshake takes an
              * int fd); the resulting session is then handed to the transport so
              * subsequent bytes tunnel through it. */

@@ -74,16 +74,28 @@ const char *hl_ca_bundle_find_system(void)
     return NULL;
 }
 
-/* The published anchor (see cacert.h). Plain statics: written once at
- * startup before any connection exists, read-only afterwards. */
+/* The published anchor (see cacert.h). Plain statics: written at startup,
+ * read-only afterwards. */
 static int                  g_active_set;
 static const unsigned char *g_active_data;
 static size_t               g_active_len;
 static unsigned char       *g_active_owned;
 
+/* Owned buffers a later publish replaced. Startup can publish twice (early
+ * for a network -d DSN, then at the full resolve), and the worker pool
+ * already exists by the second, so the first buffer is kept rather than
+ * freed under a reader. Freed only by reset, which runs when nothing is
+ * reading. Two publishes happen at most; past the bound a buffer is
+ * leaked, never freed early. */
+#define HL_CA_RETIRED_MAX 4
+static unsigned char *g_retired[HL_CA_RETIRED_MAX];
+static int            g_retired_n;
+
 void hl_ca_bundle_reset_active(void)
 {
     free(g_active_owned);
+    for (int i = 0; i < g_retired_n; i++) free(g_retired[i]);
+    g_retired_n    = 0;
     g_active_owned = NULL;
     g_active_data  = NULL;
     g_active_len   = 0;
@@ -92,7 +104,9 @@ void hl_ca_bundle_reset_active(void)
 
 void hl_ca_bundle_set_active(const unsigned char *data, size_t len, int owned)
 {
-    hl_ca_bundle_reset_active();
+    if (g_active_owned && g_retired_n < HL_CA_RETIRED_MAX)
+        g_retired[g_retired_n++] = g_active_owned;
+    g_active_owned = NULL;
     g_active_set   = 1;
     g_active_data  = data;
     g_active_len   = data ? len : 0;

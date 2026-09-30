@@ -116,7 +116,7 @@ static void js_ws_conn_gc_mark(JSRuntime *rt, JSValueConst val,
         JS_MarkValue(rt, ud->data_val, mark_func);
 }
 
-static JSClassDef js_ws_conn_class = {
+static const JSClassDef js_ws_conn_class = {
     "WsConn",
     .finalizer = js_ws_conn_finalizer,
     .gc_mark = js_ws_conn_gc_mark,

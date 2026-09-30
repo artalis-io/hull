@@ -64,6 +64,16 @@ UTEST(valkey_dsn, sslmode_and_timeout_opts) {
     { OK("redis://host?connect_timeout=250");   ASSERT_EQ(d.connect_timeout_ms, 250); }
 }
 
+/* A connect_timeout that is not a number is ignored, not read as a prefix:
+ * atol took "abc" as 0 and "10x" as 10. */
+UTEST(valkey_dsn, timeout_must_be_a_number) {
+    int dflt;
+    { OK("redis://host"); dflt = d.connect_timeout_ms; }
+    { OK("redis://host?connect_timeout=abc"); ASSERT_EQ(d.connect_timeout_ms, dflt); }
+    { OK("redis://host?connect_timeout=10x"); ASSERT_EQ(d.connect_timeout_ms, dflt); }
+    { OK("redis://host?connect_timeout=");    ASSERT_EQ(d.connect_timeout_ms, dflt); }
+}
+
 UTEST(valkey_dsn, ipv6_literal) {
     OK("redis://[2001:db8::1]:6379/1");
     ASSERT_STREQ(d.host, "2001:db8::1");

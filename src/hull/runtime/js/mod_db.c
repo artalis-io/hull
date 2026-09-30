@@ -235,7 +235,7 @@ static void js_db_conn_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt; (void)val;   /* handle owned by the registry; nothing to free */
 }
-static JSClassDef js_db_conn_class = {
+static const JSClassDef js_db_conn_class = {
     "HullDbConnection",
     .finalizer = js_db_conn_finalizer,
 };
@@ -272,7 +272,7 @@ static void js_db_owned_conn_finalizer(JSRuntime *rt, JSValue val)
     free(box->dsn);
     free(box);
 }
-static JSClassDef js_db_owned_conn_class = {
+static const JSClassDef js_db_owned_conn_class = {
     "HullDbOwnedConnection",
     .finalizer = js_db_owned_conn_finalizer,
 };

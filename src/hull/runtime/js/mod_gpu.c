@@ -5,6 +5,7 @@
  */
 
 
+#include "hull/cap/fs_resolve.h"  /* hl_fs_fopen_read */
 #include "mod_buffer.h"
 #include "hull/cap/gpu.h"
 #include "hull/cap/image.h"
@@ -101,7 +102,9 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
             JS_FreeCString(ctx, name);
             return JS_ThrowInternalError(ctx, "gpu.load: shader path too long");
         }
-        FILE *f = fopen(path, "r");
+        /* Opened under the app root: the name check above is lexical, and
+         * a symlink below shaders/ used to be followed wherever it led. */
+        FILE *f = hl_fs_fopen_read(js->base.app_vfs->root_dir, vfs_name);
         if (f) {
             long flen = -1;
             if (fseek(f, 0, SEEK_END) == 0) {

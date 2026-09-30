@@ -78,7 +78,7 @@ static void js_ws_client_conn_gc_mark(JSRuntime *rt, JSValueConst val,
     if (!JS_IsUndefined(ud->self_ref)) JS_MarkValue(rt, ud->self_ref, mark_func);
 }
 
-static JSClassDef js_ws_client_conn_class = {
+static const JSClassDef js_ws_client_conn_class = {
     "WsClientConn",
     .finalizer = js_ws_client_conn_finalizer,
     .gc_mark = js_ws_client_conn_gc_mark,

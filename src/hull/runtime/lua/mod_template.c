@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/cap/fs_resolve.h"  /* hl_fs_fopen_read */
 #include "mod_buffer.h"
 #include "hull/limits/core.h"
 #include "hull/runtime/lua_template_cache.h"
@@ -118,21 +119,13 @@ static int lua_template_load_raw(lua_State *L)
         int n = snprintf(path, sizeof(path), "%s/templates/%s",
                          lua->app_dir, name);
         if (n > 0 && (size_t)n < sizeof(path)) {
-            /* Verify resolved path stays within app_dir (symlink escape check).
-             * Canonicalize app_dir too - it may be a relative path when
-             * invoked as `hull test relative/path/`. */
-            char resolved[PATH_MAX];
-            if (realpath(path, resolved)) {
-                char real_app_dir[PATH_MAX];
-                if (!realpath(lua->app_dir, real_app_dir))
-                    return luaL_error(L, "invalid template name: %s", name);
-                size_t app_dir_len = strlen(real_app_dir);
-                if (strncmp(resolved, real_app_dir, app_dir_len) != 0 ||
-                    (resolved[app_dir_len] != '/' && resolved[app_dir_len] != '\0'))
-                    return luaL_error(L, "invalid template name: %s", name);
-            }
-
-            FILE *f = fopen(path, "rb");
+            char rel[HL_MODULE_PATH_MAX];
+            snprintf(rel, sizeof(rel), "templates/%s", name);
+            /* Opened under the app root, as modules are: a symlink below
+             * templates/ is re-rooted there and cannot reach a file outside
+             * it. (This was a realpath check, then a separate fopen - which
+             * could be raced, and which went ahead when realpath failed.) */
+            FILE *f = hl_fs_fopen_read(lua->app_dir, rel);
             if (f) {
                 if (fseek(f, 0, SEEK_END) != 0) {
                     fclose(f);

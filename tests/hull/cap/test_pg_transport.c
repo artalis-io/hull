@@ -238,6 +238,20 @@ static int fk_all_fds_closed(void)
 }
 
 /* ── pending -> succeed ─────────────────────────────────────────────── */
+/* A port is digits and at most five of them. atoi wrapped "4294972528" to
+ * 5232, which then passed the 1..65535 check. */
+UTEST(pg_transport_connect, port_is_parsed_strictly)
+{
+    const char *bad[] = { "4294972528", "65536", "0", "", "54x", "-1", "+80", "123456" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char err[128] = {0};
+        HlDbTransport *t = hl_db_transport_connect("pg", NULL, "h", bad[i], 0,
+                                                   &FK_PROVIDER, err, sizeof err);
+        EXPECT_TRUE(t == NULL);
+        EXPECT_STREQ(err, "invalid port");
+    }
+}
+
 UTEST(pg_transport_connect, pending_then_succeed)
 {
     fk_reset(); tp_arm_watchdog();

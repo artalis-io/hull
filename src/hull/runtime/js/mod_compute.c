@@ -31,7 +31,7 @@ static void js_wasm_buf_finalizer(JSRuntime *rt, JSValue val)
         hl_wasm_buffer_close(buf); /* defers if still borrowed by an image */
 }
 
-static JSClassDef js_wasm_buf_class = {
+static const JSClassDef js_wasm_buf_class = {
     "WasmBuffer",
     .finalizer = js_wasm_buf_finalizer,
 };
@@ -667,7 +667,7 @@ static void js_wasm_inst_finalizer(JSRuntime *rt, JSValue val)
         hl_cap_wasm_instance_destroy(pi);
 }
 
-static JSClassDef js_wasm_inst_class = {
+static const JSClassDef js_wasm_inst_class = {
     "WasmInstance",
     .finalizer = js_wasm_inst_finalizer,
 };

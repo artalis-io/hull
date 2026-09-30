@@ -27,7 +27,7 @@ static void js_image_finalizer(JSRuntime *rt, JSValue val)
     }
 }
 
-static JSClassDef js_image_class = {
+static const JSClassDef js_image_class = {
     "HlImage",
     .finalizer = js_image_finalizer,
 };
