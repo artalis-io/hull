@@ -29,6 +29,7 @@ local kexinit    = require('hull.ssh.kexinit')
 local kex        = require('hull.ssh.kex')
 local hostkey    = require('hull.ssh.hostkey')
 local cipher     = require('hull.ssh.cipher')
+local chacha     = require('hull.ssh.chacha')
 local userauth   = require('hull.ssh.userauth')
 local channel    = require('hull.ssh.channel')
 local session    = require('hull.ssh.session')
@@ -250,7 +251,8 @@ end
 -- Before NEWKEYS: plaintext framing. After: the AEAD.
 function Transport:send_packet(payload)
     if self.c2s then
-        self:send_raw(self.c2s:seal(self.aead, payload, self.crypto.random))
+        self:send_raw(self.c2s:seal(self.aead, payload, self.crypto.random,
+                                    self.send_seq))
     else
         self:send_raw(packet.frame(payload, 8, self.crypto.random))
     end
@@ -267,17 +269,19 @@ end
 -- "need_more", so only a packet that can be valid is ever waited for, and the
 -- rules live in one place per framing rather than being restated here.
 function Transport:read_packet()
-    local s2c, aead = self.s2c, self.aead
+    local s2c, aead, seq = self.s2c, self.aead, self.recv_seq
     local function parse(buf)
-        if s2c then return s2c:open(aead, buf) end
+        if s2c then return s2c:open(aead, buf, seq) end
         return packet.parse(buf, 8)
     end
 
     self:fill(4)
     local payload, used = parse(self.inbuf)
     if not payload then
-        local n = wire.peek_uint32(self.inbuf)
-        self:fill(s2c and cipher.frame_size(n) or n + 4)
+        -- The cipher says how much: not every cipher sends the length in the
+        -- clear (chacha20-poly1305 encrypts it).
+        self:fill(s2c and s2c:needed(self.inbuf, seq)
+                      or wire.peek_uint32(self.inbuf) + 4)
         payload, used = parse(self.inbuf)
     end
     self.inbuf = self.inbuf:sub(used + 1)
@@ -573,7 +577,12 @@ function Transport:run_kex(opts, i_s)
     end
 
     local server = kexinit.parse(i_s)
-    local neg, nerr = kexinit.negotiate(opts.offer, server)
+    -- Strict KEX gates which ciphers may be picked (chacha20-poly1305 only
+    -- under it), so it is known before negotiating: from this KEXINIT on the
+    -- first exchange, and as that exchange decided on every rekey.
+    local strict = self.strict_kex
+    if not rekey then strict = kexinit.server_is_strict(server) end
+    local neg, nerr = kexinit.negotiate(opts.offer, server, strict)
     if not neg then return nil, { code = "no_common_algorithm", detail = nerr } end
     self.negotiated = neg
     -- Both sides have to advertise it for the stricter rules to apply; a
@@ -658,7 +667,7 @@ function Transport:run_kex(opts, i_s)
     end
 
     local keys = kex.derive_keys(self.raw_sha, k_raw, h, self.session_id,
-                                 kex.SIZES[neg.cipher_c2s])
+                                 kex.sizes_for(neg.cipher_c2s, neg.cipher_s2c))
 
     -- The counters live in the cipher objects, which are about to be
     -- replaced. Carry the totals up first, so `stats()` describes the
@@ -681,10 +690,23 @@ function Transport:run_kex(opts, i_s)
     if self.strict_kex then self.send_seq = 0 end
     self:expect(kex.SSH_MSG_NEWKEYS, "NEWKEYS", self.strict_kex)
     if self.strict_kex then self.recv_seq = 0 end
-    self.c2s = cipher.new(keys.key_c2s, keys.iv_c2s)
-    self.s2c = cipher.new(keys.key_s2c, keys.iv_s2c)
+    self.c2s = self:new_cipher(neg.cipher_c2s, keys.key_c2s, keys.iv_c2s)
+    self.s2c = self:new_cipher(neg.cipher_s2c, keys.key_s2c, keys.iv_s2c)
     if rekey then self.rekeys = self.rekeys + 1 end
     return true
+end
+
+-- One direction's packet layer, for the cipher negotiated for it.
+function Transport:new_cipher(name, key, iv)
+    if name == chacha.NAME then
+        local c = self.crypto
+        return chacha.new(key, {
+            chacha20 = function(k, n, ctr, d) return c.chacha20(k, n, ctr, d) end,
+            poly1305 = function(k, m) return c.poly1305(k, m) end,
+            ct_eq    = function(a, b) return c.constant_time_eq(a, b) end,
+        })
+    end
+    return cipher.new(key, iv)
 end
 
 -- Rekeying from THIS side ------------------------------------------------

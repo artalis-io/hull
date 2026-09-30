@@ -714,6 +714,11 @@ int hl_cap_crypto_x25519_keypair(uint8_t out_pk[32], uint8_t out_sk[32]);
  * Selected at runtime through @ref hl_crypto_aead_active_backend so the base
  * links no mbedTLS. Same seam as the HMAC and asym backends.
  */
+#define HL_CHACHA20_KEY_LEN   32
+#define HL_CHACHA20_NONCE_LEN 12
+#define HL_POLY1305_KEY_LEN   32
+#define HL_POLY1305_TAG_LEN   16
+
 typedef struct HlCryptoAeadBackend {
     /** Encrypt + authenticate. Same contract as @ref hl_cap_crypto_aes256gcm_seal. */
     int (*seal)(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],
@@ -735,6 +740,16 @@ typedef struct HlCryptoAeadBackend {
                const uint8_t key[HL_AEAD_KEY_LEN],
                const uint8_t ctr_iv[HL_AES_CTR_IV_LEN],
                const void *in, size_t len);
+
+    /** ChaCha20. Same contract as @ref hl_cap_crypto_chacha20. */
+    int (*chacha20)(uint8_t *out, const uint8_t key[HL_CHACHA20_KEY_LEN],
+                    const uint8_t nonce[HL_CHACHA20_NONCE_LEN], uint32_t counter,
+                    const void *in, size_t len);
+
+    /** Poly1305. Same contract as @ref hl_cap_crypto_poly1305. */
+    int (*poly1305)(uint8_t tag[HL_POLY1305_TAG_LEN],
+                    const uint8_t key[HL_POLY1305_KEY_LEN],
+                    const void *msg, size_t len);
 } HlCryptoAeadBackend;
 
 /** Built-in mbedTLS AEAD backend. ABSENT on a TLS-less base - prefer
@@ -890,5 +905,41 @@ int hl_cap_crypto_aes256gcm_open(uint8_t *out,
                                  const void *aad, size_t aad_len,
                                  const void *ct, size_t ct_len,
                                  const uint8_t tag[HL_AEAD_TAG_LEN]);
+
+/**
+ * @brief ChaCha20 (RFC 8439): XOR @p in with the keystream from @p counter.
+ *
+ * The raw stream cipher, for protocols that compose their own AEAD - the one
+ * caller is chacha20-poly1305@openssh.com, which encrypts its length field
+ * and its payload under separate keys and MACs them with Poly1305 in an order
+ * the IETF AEAD does not. One function for both directions.
+ *
+ * @param out      @p len bytes. May alias @p in.
+ * @param key      32-byte key.
+ * @param nonce    12-byte nonce (RFC 8439 layout).
+ * @param counter  the first 64-byte block's counter.
+ *
+ * @return `0`, `-1` on a NULL argument or a length that would wrap the 32-bit
+ * block counter, `-3` if this build composed no AEAD backend (TLS feature).
+ *
+ * @warning Unauthenticated, and a reused (key, nonce, counter) leaks the XOR
+ * of two plaintexts. The caller supplies both the integrity and the nonce
+ * discipline.
+ */
+int hl_cap_crypto_chacha20(uint8_t *out, const uint8_t key[HL_CHACHA20_KEY_LEN],
+                           const uint8_t nonce[HL_CHACHA20_NONCE_LEN], uint32_t counter,
+                           const void *in, size_t len);
+
+/**
+ * @brief Poly1305 (RFC 8439): the 16-byte one-time MAC of @p msg.
+ *
+ * @param key  32-byte ONE-TIME key: never MAC two messages under one.
+ *
+ * @return `0`, `-1` on a NULL argument, `-3` if no AEAD backend is composed.
+ * Compare tags in constant time (crypto.constant_time_eq from Lua).
+ */
+int hl_cap_crypto_poly1305(uint8_t tag[HL_POLY1305_TAG_LEN],
+                           const uint8_t key[HL_POLY1305_KEY_LEN],
+                           const void *msg, size_t len);
 
 #endif /* HL_CAP_CRYPTO_H */

@@ -4539,6 +4539,33 @@ UTEST(lua_stdlib, ssh_sftp_suite)
     EXPECT_GT(pass, 0LL);
 }
 
+/* chacha20-poly1305@openssh.com. Vanilla: the framing under stand-in
+ * primitives (10). With the capability layer the same file runs again over
+ * hull.crypto's real ChaCha20 / Poly1305 (7 more). */
+UTEST(lua_stdlib, ssh_chacha_suite)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_chacha.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 10LL);
+}
+
+UTEST(lua_stdlib, ssh_chacha_real_crypto)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_ssh_chacha.lua",
+                                     &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 17LL);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, ssh_cipher_suite)
 {
     long long pass = 0, fail = -1;

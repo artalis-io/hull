@@ -180,6 +180,14 @@ function M.frame_size(packet_length)
     return M.LENGTH_LEN + packet_length + M.TAG_LEN
 end
 
+-- The whole frame's size, from the front of `buf` (at least 4 bytes; below
+-- that, 4). The transport asks the cipher rather than peeking itself because
+-- not every cipher sends the length in the clear: chacha20-poly1305 does not.
+function Cipher:needed(buf)
+    if #buf < M.LENGTH_LEN then return M.LENGTH_LEN end
+    return M.frame_size(wire.peek_uint32(buf))
+end
+
 -- Decrypt one packet from the front of `buf`.
 --
 -- Returns payload, consumed.

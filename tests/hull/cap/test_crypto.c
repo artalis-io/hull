@@ -1127,4 +1127,64 @@ UTEST(aes256ctr, rejects_bad_arguments)
     ASSERT_EQ(hl_cap_crypto_aes256ctr(out, key, ctr, NULL, 0), 0);
 }
 
+/* ── ChaCha20 / Poly1305 (RFC 8439 vectors) ────────────────────────── */
+
+/* Not sscanf("%2x"): cosmocc's misreads a byte whose first digit is 0
+ * ("04" came back as 0x44), which turned these vectors into garbage. */
+static int nibble(char c)
+{
+    return c >= '0' && c <= '9' ? c - '0'
+         : c >= 'a' && c <= 'f' ? c - 'a' + 10
+         : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0;
+}
+
+static void unhex(const char *h, uint8_t *out, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        out[i] = (uint8_t)(nibble(h[2 * i]) << 4 | nibble(h[2 * i + 1]));
+}
+
+UTEST(crypto, chacha20_rfc8439_2_4_2)
+{
+    uint8_t key[32], nonce[12], out[114], want[114];
+    for (int i = 0; i < 32; i++) key[i] = (uint8_t)i;
+    unhex("000000000000004a00000000", nonce, 12);
+    const char *pt = "Ladies and Gentlemen of the class of '99: If I could offer "
+                     "you only one tip for the future, sunscreen would be it.";
+    ASSERT_EQ(strlen(pt), (size_t)114);
+    unhex("6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0b"
+          "f91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d8"
+          "07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736"
+          "5af90bbf74a35be6b40b8eedf2785e42874d", want, 114);
+    int rc = hl_cap_crypto_chacha20(out, key, nonce, 1, pt, 114);
+    if (rc == -3) { UTEST_SKIP("no AEAD backend composed"); }
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(memcmp(out, want, 114), 0);
+    /* The same call decrypts. */
+    uint8_t back[114];
+    ASSERT_EQ(hl_cap_crypto_chacha20(back, key, nonce, 1, out, 114), 0);
+    ASSERT_EQ(memcmp(back, pt, 114), 0);
+}
+
+UTEST(crypto, poly1305_rfc8439_2_5_2)
+{
+    uint8_t key[32], tag[16], want[16];
+    unhex("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b", key, 32);
+    unhex("a8061dc1305136c6c22b8baf0c0127a9", want, 16);
+    const char *msg = "Cryptographic Forum Research Group";
+    int rc = hl_cap_crypto_poly1305(tag, key, msg, strlen(msg));
+    if (rc == -3) { UTEST_SKIP("no AEAD backend composed"); }
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(memcmp(tag, want, 16), 0);
+}
+
+UTEST(crypto, chacha20_refuses_a_wrapping_counter)
+{
+    uint8_t key[32] = {0}, nonce[12] = {0}, buf[128] = {0};
+    /* 128 bytes is two blocks: from 0xFFFFFFFF the second would be block 0. */
+    ASSERT_EQ(hl_cap_crypto_chacha20(buf, key, nonce, 0xFFFFFFFFu, buf, 128), -1);
+    ASSERT_EQ(hl_cap_crypto_chacha20(NULL, key, nonce, 0, buf, 1), -1);
+    ASSERT_EQ(hl_cap_crypto_poly1305(NULL, key, buf, 1), -1);
+}
+
 UTEST_MAIN();

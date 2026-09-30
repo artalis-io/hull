@@ -28,6 +28,8 @@
 
 #include <mbedtls/gcm.h>
 #include <mbedtls/aes.h>
+#include <mbedtls/chacha20.h>
+#include <mbedtls/poly1305.h>
 #include <mbedtls/platform_util.h>   /* mbedtls_platform_zeroize */
 
 #define AEAD_KEY_BITS 256
@@ -129,10 +131,34 @@ static int aead_ctr(uint8_t *out, const uint8_t key[32],
     return 0;
 }
 
+static int aead_chacha20(uint8_t *out, const uint8_t key[32],
+                         const uint8_t nonce[12], uint32_t counter,
+                         const void *in, size_t len)
+{
+    /* mbedtls_chacha20_crypt keeps its state on its own stack and zeroizes
+     * it; nothing of the key outlives the call here. */
+    int rc = mbedtls_chacha20_crypt(key, nonce, counter, len,
+                                    (const unsigned char *)in, out);
+    if (rc != 0) {
+        if (len && out) mbedtls_platform_zeroize(out, len);
+        return -1;
+    }
+    return 0;
+}
+
+static int aead_poly1305(uint8_t tag[16], const uint8_t key[32],
+                         const void *msg, size_t len)
+{
+    return mbedtls_poly1305_mac(key, (const unsigned char *)msg, len, tag) == 0
+           ? 0 : -1;
+}
+
 const HlCryptoAeadBackend hl_crypto_aead_backend_mbedtls = {
-    .seal = aead_seal,
-    .open = aead_open,
-    .ctr  = aead_ctr,
+    .seal     = aead_seal,
+    .open     = aead_open,
+    .ctr      = aead_ctr,
+    .chacha20 = aead_chacha20,
+    .poly1305 = aead_poly1305,
 };
 
 /* STRONG override of the base's weak hl_crypto_aead_active_backend()
