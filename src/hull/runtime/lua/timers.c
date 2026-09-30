@@ -164,8 +164,9 @@ void hl_lua_timer_trampoline(void *user_data)
          * in_flight and reschedule. Nothing to do here. */
     } else {
         /* Error - log, reschedule anyway */
-        const char *err = lua_tostring(co, -1);
-        log_error("[hull:timer] %s", err ? err : "unknown error");
+        char ebuf[512];
+        log_error("[hull:timer] %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;

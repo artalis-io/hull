@@ -80,8 +80,9 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         /* Handler yielded - async op in flight (detached mode).
          * dispatch_depth stays elevated. */
     } else {
-        const char *err = lua_tostring(co, -1);
-        log_error("[hull:ws] on_open error: %s", err ? err : "unknown");
+        char ebuf[512];
+        log_error("[hull:ws] on_open error: %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
@@ -143,8 +144,9 @@ void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     } else if (status == LUA_YIELD) {
         /* Async op in flight */
     } else {
-        const char *err = lua_tostring(co, -1);
-        log_error("[hull:ws] on_message error: %s", err ? err : "unknown");
+        char ebuf[512];
+        log_error("[hull:ws] on_message error: %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
@@ -233,8 +235,9 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
              * references it. */
             return;
         } else {
-            const char *err = lua_tostring(co, -1);
-            log_error("[hull:ws] on_close error: %s", err ? err : "unknown");
+            char ebuf[512];
+            log_error("[hull:ws] on_close error: %s",
+                      hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
             luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
             lua->active_thread_ref = LUA_NOREF;
             lua->active_co = NULL;

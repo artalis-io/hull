@@ -97,9 +97,17 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         nargs = 1;
     }
 
+    /* ...and the timer, so a further yield inside a timer handler carries it
+     * too: hl_lua_async_cont_create reads active_timer. Without it the second
+     * wait of a timer handler lost the timer, in_flight was never cleared,
+     * and the timer never fired again. */
+    void *saved_timer = lua->active_timer;
+    lua->active_timer = lc->timer_ctx;
+
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
 
+    lua->active_timer           = saved_timer;
     lua->active_on_complete     = NULL;
     lua->active_on_complete_ctx = NULL;
 
@@ -163,18 +171,14 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
             hl_async_backend()->stop(lua->base.async_ctx);
         }
     } else if (status == LUA_YIELD) {
-        /* Handler yielded again - new HlAsyncCtx already set up.
-         * The new continuation captured the current co/conn/thread_ref.
-         * dispatch_depth stays elevated - decremented on final resume.
-         * Transfer timer_ctx to the new continuation if present. */
-        if (lc->timer_ctx) {
-            /* Find the most recent continuation on the Lua state -
-             * it will have been stored via hl_lua_async_cont_create.
-             * The new cont has our co/thread_ref already captured. */
-        }
+        /* Handler yielded again - new HlAsyncCtx already set up. The new
+         * continuation captured co/conn/thread_ref, and the timer through
+         * active_timer set above.
+         * dispatch_depth stays elevated - decremented on final resume. */
     } else {
         /* Error */
-        const char *msg = lua_tostring(co, -1);
+        char ebuf[512];
+        const char *msg = hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf));
         int was_main = (lua->cli_main_co == co);
         if (conn)
             log_error("[hull:c] async lua handler error: %s",
@@ -288,6 +292,21 @@ void hl_lua_async_cont_set_timer(HlAsyncCont *cont, void *timer)
     lc->timer_ctx = timer;
 }
 
+/* A primitive that waits may only run on the coroutine the runtime is
+ * driving: its continuation resumes lua->active_co, and lua_yieldk raises only
+ * after the op is armed. So check first. Not yieldable: module load (require
+ * runs under lua_pcall), a C callback such as string.gsub or table.sort.
+ * Yieldable but not active_co: a coroutine the app created itself. */
+static int check_can_wait(lua_State *L, HlLua *lua, const char *what)
+{
+    if (!lua_isyieldable(L) || L != lua->active_co)
+        return luaL_error(L, "%s can only wait in a handler, a task or "
+                          "app.main - not while a module loads, inside a C "
+                          "callback such as string.gsub or table.sort, or in "
+                          "a coroutine the app created", what);
+    return 0;
+}
+
 /* ── hull.sleep(ms) ───────────────────────────────────────────────── */
 
 /*
@@ -307,6 +326,7 @@ static int lua_hull_sleep(lua_State *L)
 
     if (!lua || !lua->base.async_ctx)
         return luaL_error(L, "hull.sleep() requires an active event loop");
+    check_can_wait(L, lua, "hull.sleep()");
 
     KlHttpServer *server = lua->server;
     KlHttpConn *conn = lua->active_conn;
@@ -387,13 +407,26 @@ int lua_hull_spawn(lua_State *L)
     lua_pushvalue(L, 1);
     lua_xmove(L, co, 1);
 
-    lua_State *saved_co         = lua->active_co;
-    int        saved_thread_ref = lua->active_thread_ref;
-    KlHttpConn    *saved_conn       = lua->active_conn;
+    /* The task inherits none of its spawner's per-dispatch context. A
+     * continuation it creates captures all of these: with the spawner's timer
+     * its completion would clear the timer's in_flight and reschedule it while
+     * the timer's own handler still runs; with the spawner's teardown hook (a
+     * ws on_close) it would run that teardown a second time. */
+    lua_State      *saved_co         = lua->active_co;
+    int             saved_thread_ref = lua->active_thread_ref;
+    KlHttpConn     *saved_conn       = lua->active_conn;
+    KlHttpRequest  *saved_req        = lua->active_req;
+    void           *saved_timer      = lua->active_timer;
+    void          (*saved_oc)(struct HlLua *, void *) = lua->active_on_complete;
+    void           *saved_oc_ctx     = lua->active_on_complete_ctx;
 
-    lua->active_co         = co;
-    lua->active_thread_ref = co_ref;
-    lua->active_conn       = NULL;  /* bg is always detached */
+    lua->active_co              = co;
+    lua->active_thread_ref      = co_ref;
+    lua->active_conn            = NULL;  /* bg is always detached */
+    lua->active_req             = NULL;
+    lua->active_timer           = NULL;
+    lua->active_on_complete     = NULL;
+    lua->active_on_complete_ctx = NULL;
     lua->dispatch_depth++;
 
     int nres = 0;
@@ -405,15 +438,20 @@ int lua_hull_spawn(lua_State *L)
     } else if (sr == LUA_YIELD) {
         /* Bg yielded; hl_lua_async_resume owns cleanup when it returns. */
     } else {
-        const char *msg = lua_tostring(co, -1);
-        log_error("[hull:async] coroutine error: %s", msg ? msg : "(unknown)");
+        char ebuf[512];
+        log_error("[hull:async] coroutine error: %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
         lua->dispatch_depth--;
     }
 
-    lua->active_co         = saved_co;
-    lua->active_thread_ref = saved_thread_ref;
-    lua->active_conn       = saved_conn;
+    lua->active_co              = saved_co;
+    lua->active_thread_ref      = saved_thread_ref;
+    lua->active_conn            = saved_conn;
+    lua->active_req             = saved_req;
+    lua->active_timer           = saved_timer;
+    lua->active_on_complete     = saved_oc;
+    lua->active_on_complete_ctx = saved_oc_ctx;
     return 0;
 }
 
@@ -505,6 +543,7 @@ static int lua_hull_park(lua_State *L)
     HlLua *lua = s->lua;
     if (!lua->base.async_ctx)
         return luaL_error(L, "hull._park: requires an active event loop");
+    check_can_wait(L, lua, "task:wait()");
 
     HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx,
                                           lua->base.alloc);
@@ -577,6 +616,7 @@ static int lua_hull_wake(lua_State *L)
                                                  slot_wake_fire, s);
     if (tid == 0) {
         s->refs--;
+        s->fired = 0;                 /* not woken after all */
         return luaL_error(L, "hull._wake: failed to schedule the wake");
     }
     return 0;

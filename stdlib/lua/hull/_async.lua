@@ -31,8 +31,10 @@ function M.async(fn, ...)
     end
     local task = setmetatable({ _done = false, _waiters = {} }, Task)
     local args = table.pack(...)
-    H._running = H._running + 1
+    -- Counted inside the body, which _spawn runs at once: a spawn that fails
+    -- before running it leaves the count alone.
     H._spawn(function()
+        H._running = H._running + 1
         local r = table.pack(pcall(fn, table.unpack(args, 1, args.n)))
         if r[1] then
             task._results = table.pack(table.unpack(r, 2, r.n))
@@ -43,7 +45,8 @@ function M.async(fn, ...)
         H._running = H._running - 1
         local waiters = task._waiters
         task._waiters = nil
-        for _, tok in ipairs(waiters) do H._wake(tok) end
+        -- One wake that cannot be scheduled must not keep the rest asleep.
+        for _, tok in ipairs(waiters) do pcall(H._wake, tok) end
     end)
     return task
 end
@@ -76,6 +79,15 @@ local function message_of(v)
     return ok and s or "(an error)"
 end
 
+-- What errors[i] holds for a function that raised nil (error() with no
+-- value): a nil entry would read as "did not fail".
+local NIL_ERROR = "(error with no value)"
+
+local function failed_with(v)
+    if v == nil then return NIL_ERROR end
+    return v
+end
+
 local function raise(errors)
     local first
     for i in pairs(errors) do
@@ -101,7 +113,7 @@ function M.gather(...)
     for i = 1, fns.n do
         local ok, v = pcall(tasks[i].wait, tasks[i])
         if ok then results[i] = v
-        else errors = errors or {}; errors[i] = v end
+        else errors = errors or {}; errors[i] = failed_with(v) end
     end
     if errors then raise(errors) end
     return table.unpack(results, 1, fns.n)
@@ -110,7 +122,10 @@ end
 M.DEFAULT_LIMIT = 16
 
 --- fn(item, i) for every item, at most opts.limit (default 16) at once;
---- results[i] is fn's first result for items[i]. Failures as for gather.
+--- results[i] is fn's first result for items[i], and results.n is the item
+--- count (results may hold nils). The items are items[1..items.n] when the
+--- list carries an n (table.pack), else items[1..#items]. Failures as for
+--- gather.
 function M.map(items, fn, opts)
     if type(items) ~= "table" then
         error("hull.map: expected a list, got " .. type(items), 2)
@@ -118,13 +133,25 @@ function M.map(items, fn, opts)
     if type(fn) ~= "function" then
         error("hull.map: expected a function, got " .. type(fn), 2)
     end
-    local limit = opts and opts.limit or M.DEFAULT_LIMIT
-    if limit ~= math.huge and (math.type(limit) ~= "integer" or limit < 1) then
-        error("hull.map: limit must be a positive integer (or math.huge)", 2)
+    if opts ~= nil and type(opts) ~= "table" then
+        error("hull.map: opts must be a table, got " .. type(opts), 2)
+    end
+    local limit = opts and opts.limit
+    if limit == nil then limit = M.DEFAULT_LIMIT end
+    if limit ~= math.huge then
+        limit = math.tointeger(limit)   -- 4.0 is 4; 4.5 and "4" are not
+        if not limit or limit < 1 then
+            error("hull.map: limit must be a positive integer (or math.huge)", 2)
+        end
     end
 
-    local n = #items
-    local results, errors = {}, nil
+    local n = items.n
+    if n == nil then
+        n = #items
+    elseif math.type(n) ~= "integer" or n < 0 then
+        error("hull.map: items.n must be a non-negative integer", 2)
+    end
+    local results, errors = { n = n }, nil
     local next_i = 1
 
     -- A fixed number of workers each take the next index until none are
@@ -136,7 +163,7 @@ function M.map(items, fn, opts)
             next_i = i + 1
             local ok, v = pcall(fn, items[i], i)
             if ok then results[i] = v
-            else errors = errors or {}; errors[i] = v end
+            else errors = errors or {}; errors[i] = failed_with(v) end
         end
     end
 

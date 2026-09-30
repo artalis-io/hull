@@ -64,8 +64,10 @@ end, { limit = 8 })
 
 ### JS
 
-Promises already cover tasks and `gather` (`Promise.all`). JS gets only the
-bounded fan-out, so fleet code reads the same in both runtimes:
+Promises already cover tasks, and `Promise.allSettled` a gather that waits
+for every one. (`Promise.all` rejects at the first failure and leaves the rest
+running - the orphans §3 rejects.) JS gets only the bounded fan-out, so fleet
+code reads the same in both runtimes:
 
 ```js
 const results = await hull.map(hosts, async (host, i) => {

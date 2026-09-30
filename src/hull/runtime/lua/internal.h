@@ -117,6 +117,14 @@ struct HlLuaSseRoute {
  * Lua instruction-count hook (gas metering). */
 void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar);
 
+/* The text of the error value at `idx` on `from`, into `buf` (always
+ * returned, always terminated). A string or number as is; anything else
+ * through a protected tostring on the main state, so an error object with
+ * __tostring reads as its message. lua_tostring returns NULL for those, which
+ * printed "(unknown)" or reached a "%s" as NULL. Defined in runtime.c. */
+const char *hl_lua_error_text(HlLua *lua, lua_State *from, int idx,
+                              char *buf, size_t size);
+
 /* hull.async(fn): spawn a detached coroutine on the event loop (async.c).
  * Shared by the `hull` global and hull.tui's `tui.async` alias. */
 int lua_hull_spawn(lua_State *L);

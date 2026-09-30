@@ -984,7 +984,9 @@ local up = hull.map(hosts, function(host, i)   -- a list, at most `limit` at onc
 end, { limit = 8 })            -- default 16; math.huge for no cap
 ```
 
-**JS:** Promises already give tasks and `Promise.all`; the bounded fan-out is
+**JS:** Promises already give tasks; for a gather that waits for every one use
+`Promise.allSettled` (`Promise.all` rejects at the first failure and leaves the
+rest running). The bounded fan-out is
 `await hull.map(items, async (item, i) => ..., { limit: 8 })` (default 16,
 `Infinity` for no cap).
 
@@ -992,14 +994,23 @@ end, { limit = 8 })            -- default 16; math.huge for no cap
   first failure (by position) with all of them attached: `err.errors[i]`
   (JS: `e.errors[i]`, sparse). `tostring(err)` / `e.message` is the first
   one's message. There is no fail-fast: nothing in flight can be abandoned
-  halfway, and its own timeout already bounds it.
+  halfway, and its own timeout already bounds it. A Lua function that raised
+  no value (`error()`) appears in `errors` as `"(error with no value)"`.
+- **Items and results (Lua):** `map` takes `items[1..items.n]` when the list
+  has an `n` (as `table.pack` makes), else `items[1..#items]`; `results.n` is
+  that count, since results may hold nils.
+- **Where you can wait:** `task:wait()`, `gather`, `map` and `hull.sleep` wait
+  only in a handler, a task, or `app.main` - not while a module loads, inside a
+  C callback such as `string.gsub` or `table.sort`, or in a coroutine the app
+  created itself. There they raise at once.
 - **Concurrency, not parallelism:** tasks overlap while they wait; CPU-bound
   Lua does not get faster. `compute.async` / `db.async` fan-out does use the
   worker pool's threads.
 - **One connection per task:** an SSH connection (or anything else that parks
   per coroutine) is used by the task that opened it; from another task while
   one waits it is `busy`.
-- **Budgets:** each task has its own instruction limit, like a timer callback.
+- **Budgets:** each task starts with its own instruction limit, like a timer
+  callback, counted over the task's whole run (waiting does not top it up).
 - **`app.main` returning with tasks unjoined** ends the process and abandons
   them, with a WARN saying how many - join what you start. In an app that
   serves routes, `app.main` returning 0 does not end the process, so its tasks

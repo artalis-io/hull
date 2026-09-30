@@ -135,8 +135,9 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     }
 
     /* Error */
+    char ebuf[512];
     log_error("[hull:c] lua handler error: %s",
-              lua_tostring(co, -1));
+              hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
     luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
     lua->active_thread_ref = LUA_NOREF;
     lua->active_co = NULL;
@@ -213,8 +214,9 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
 
     /* Call handler(req, res) - expect 1 return value */
     if (lua_pcall(lua->L, 2, 1, 0) != LUA_OK) {
+        char ebuf[512];
         log_error("[hull:c] lua middleware error: %s",
-                  lua_tostring(lua->L, -1));
+                  hl_lua_error_text(lua, lua->L, -1, ebuf, sizeof(ebuf)));
         lua_pop(lua->L, 1); /* pop error message */
         lua_pop(lua->L, 1); /* pop routes table */
         /* Clean up registry ref */

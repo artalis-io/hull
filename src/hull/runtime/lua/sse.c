@@ -131,8 +131,9 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         lua_pop(lua->L, 1); /* pop routes table */
     } else {
         /* Error - end stream, log */
-        const char *err = lua_tostring(co, -1);
-        log_error("[hull:web:sse] handler error: %s", err ? err : "unknown");
+        char ebuf[512];
+        log_error("[hull:web:sse] handler error: %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
 
         if (!stream_ud->closed)
             kl_http_sse_end(&stream_ud->sse);
