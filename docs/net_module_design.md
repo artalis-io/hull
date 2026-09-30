@@ -62,7 +62,8 @@ Trusted stdlib         the SSH protocol and state machine, in Lua
       |
       v
 Private native         cap/net_stream.c: connect / read / write / close
-                       cap/net_policy.c: is this destination allowed
+                       cap/ssh_policy.c: is this destination and login allowed
+                       (over cap/net_policy.c, the generic reach check)
 ```
 
 The application never receives the stream. It asks the SSH module for an SSH

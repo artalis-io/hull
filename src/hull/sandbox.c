@@ -1156,7 +1156,7 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
 
     /* Sandbox only needs the boolean "any outbound network?" decision. The
      * actual host allowlist is enforced in cap/http.c (http.fetch), for DB by
-     * the backend + databases.dynamic policy, and for SSH by cap/net_policy.c.
+     * the backend + databases.dynamic policy, and for SSH by cap/ssh_policy.c.
      * Granted for http `hosts`, a declared network database connection, OR a
      * declared ssh.connect - each of which dials out, and each of which was
      * SIGKILLed on connect before it was listed here.

@@ -279,11 +279,12 @@ documenting parallel connections.
   `cap/` function (e.g. `hl_cap_ssh_open`) so a JS binding does not copy it.
   The binding is then a generic byte-stream binding (`mod_net_stream.c`) that
   `ws-stream` also uses.
-- **Make the net policy generic.** `hl_cap_net_auth_reason` returns SSH
-  wording for generic codes; `net_policy.c` holds the `hl_ssh_*` rules. Move
-  those to `cap/ssh_policy.c`; unify naming (`hl_net_*` / `hl_ssh_*` /
-  `hl_cap_net_*`); rename the `HL_NET_DENY_*` enum so it does not share a
-  prefix with the `HL_NET_E_*` error macros.
+- **Make the net policy generic.** Done: `cap/net_policy.c` is only the
+  reach check (`hl_net_check_reach` -> `HlNetReach`, `HL_NET_REACH_*`, no
+  wording); the SSH grants and their messages are `cap/ssh_policy.c`
+  (`hl_ssh_check_connect` / `hl_ssh_check_tunnel` -> `HlSshAuth`,
+  `HL_SSH_DENY_*`, `hl_ssh_auth_reason`), which maps each reach reason to the
+  list that refused.
 - **One connect adapter.** `net_stream.c` copies the KlConnectOp adapter,
   socket-provider wrappers, the `getaddrinfo` loop and the TLS rc mapping from
   `smtp_transport.c` / `tls_client.c` / the DB transport (~300 lines). The CA

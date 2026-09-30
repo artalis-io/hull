@@ -169,7 +169,7 @@ typedef struct HlNetStreamConfig {
  * and must not block. Suspend on the pending op and call
  * hl_net_stream_connect_result() once resumed.
  *
- * Does NOT authorize: the caller must have called hl_ssh_check_connect
+ * Does NOT authorize: the caller must have called hl_ssh_check_connect (cap/ssh_policy.h)
  * first. This split is deliberate (see cap/net_policy.h) so that a denial cannot race
  * a resolution that was never started.
  */
