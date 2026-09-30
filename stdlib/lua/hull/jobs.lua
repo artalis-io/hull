@@ -1516,9 +1516,10 @@ function jobs.run_worker(opts)
 
     -- Shared across loops (single event-loop thread, so no data race).
     local total = 0
+    local failed = false          -- a loop raised: the others stop too
     local function loop()
         local empty = 0
-        while _running do
+        while _running and not failed do
             local n = jobs.work(opts)
             total = total + n
             if n == 0 then
@@ -1535,12 +1536,20 @@ function jobs.run_worker(opts)
         loop()
     else
         -- N-1 loops as tasks + 1 inline, all exiting on the same _running
-        -- flag / drain, then joined. A loop that raises no longer leaves the
-        -- worker waiting forever on a count that never reaches zero: every
+        -- flag / drain, then joined. A loop that raises stops the others (they
+        -- finish the job in hand, or an idle wait, first), so the worker
+        -- neither hangs nor runs on short-handed with the error unseen: every
         -- loop is joined, then the first failure is raised.
+        local function guarded()
+            local ok, err = pcall(loop)
+            if not ok then
+                failed = true
+                error(err, 0)
+            end
+        end
         local tasks = {}
-        for i = 1, concurrency - 1 do tasks[i] = hull.async(loop) end
-        local ok, err = pcall(loop)
+        for i = 1, concurrency - 1 do tasks[i] = hull.async(guarded) end
+        local ok, err = pcall(guarded)
         for _, t in ipairs(tasks) do
             local tok, terr = pcall(t.wait, t)
             if ok and not tok then ok, err = false, terr end

@@ -156,7 +156,6 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
         js->async_pending = 0;
         js->active_conn = NULL;
-        js->dispatch_depth--;
 
         /* Handler that awaited has now completed - run any deferred-teardown
          * hook (e.g. ws on_close conn teardown). */
@@ -206,7 +205,6 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
         js->async_pending = 0;
         js->active_conn = NULL;
-        js->dispatch_depth--;
 
         /* Run any deferred-teardown hook (handler rejected after awaiting). */
         if (jc->on_complete) {
@@ -490,18 +488,22 @@ void hl_js_add_hull_global(JSContext *ctx)
     JS_SetPropertyStr(ctx, global, "hull", hull);
 
     /* hull.map(items, fn, { limit }) - bounded fan-out. Promises already give
-     * JS tasks and gather (Promise.all); this is the one piece missing, and
-     * the one fleet code needs: at most `limit` items in flight (default 16),
-     * results in input order, and every item finishes before a failure is
-     * reported - the first (by index) as the message, all of them on
-     * `.errors`. The Lua twin is hull._async; docs/task_join_design.md. */
+     * JS tasks, and Promise.allSettled a gather that waits for everything
+     * (Promise.all rejects at the first failure and leaves the rest running);
+     * this is the one piece missing, and the one fleet code needs: at most
+     * `limit` items in flight (default 16), results in input order, and every
+     * item finishes before a failure is reported - the first (by index) as
+     * the message, all of them on `.errors`. The Lua twin is hull._async;
+     * docs/task_join_design.md. */
     static const char map_src[] =
 "(function(hull) {\n"
 "  const DEFAULT_LIMIT = 16;\n"
 "  hull.map = async function map(items, fn, opts) {\n"
 "    if (!Array.isArray(items)) throw new TypeError('hull.map: expected an array');\n"
 "    if (typeof fn !== 'function') throw new TypeError('hull.map: expected a function');\n"
-"    const limit = opts && opts.limit !== undefined ? opts.limit : DEFAULT_LIMIT;\n"
+"    if (opts != null && typeof opts !== 'object')\n"
+"      throw new TypeError('hull.map: opts must be an object');\n"
+"    const limit = opts != null && opts.limit != null ? opts.limit : DEFAULT_LIMIT;\n"
 "    if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1))\n"
 "      throw new RangeError('hull.map: limit must be a positive integer (or Infinity)');\n"
 "    const n = items.length, results = new Array(n);\n"
@@ -520,7 +522,10 @@ void hl_js_add_hull_global(JSContext *ctx)
 "      let first = -1;\n"
 "      for (let i = 0; i < errors.length; i++) if (i in errors) { first = i; break; }\n"
 "      const e0 = errors[first];\n"
-"      const err = new Error(e0 instanceof Error ? e0.message : String(e0));\n"
+"      let msg;\n"
+"      try { msg = e0 instanceof Error ? String(e0.message) : String(e0); }\n"
+"      catch (_) { msg = '(an error)'; }\n"
+"      const err = new Error(msg);\n"
 "      err.errors = errors;\n"
 "      throw err;\n"
 "    }\n"
@@ -529,6 +534,13 @@ void hl_js_add_hull_global(JSContext *ctx)
 "})(globalThis.hull);\n";
     JSValue r = JS_Eval(ctx, map_src, sizeof(map_src) - 1, "<hull-map-init>",
                         JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) {
+        /* Out of memory at init. Clear the exception rather than leave it
+         * pending for whatever the context runs next; hull.map is missing. */
+        JSValue e = JS_GetException(ctx);
+        log_error("[hull:js] hull.map could not be installed");
+        JS_FreeValue(ctx, e);
+    }
     JS_FreeValue(ctx, r);
 
     JS_FreeValue(ctx, global);

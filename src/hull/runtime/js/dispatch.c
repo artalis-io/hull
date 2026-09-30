@@ -42,10 +42,6 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     if (!js || !js->ctx || !req || !res)
         return -1;
 
-    /* dispatch_depth may be > 0 during self-fetch (outbox.flush → same server).
-     * This is safe because the original handler is yielded and the new
-     * dispatch runs on its own coroutine/promise with independent state. */
-    js->dispatch_depth++;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_guard_stale_txn(hl_db_registry_default(js->base.db_registry));
@@ -130,7 +126,6 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         /* Sync path - clean up middleware ctx */
         js->active_conn = NULL;
         js->active_req = NULL;
-        js->dispatch_depth--;
 
         if (req->ctx) {
             HlReqCtx *rctx = (HlReqCtx *)req->ctx;
@@ -145,8 +140,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
             req->ctx = NULL;
         }
     }
-    /* result == 1: handler suspended, dispatch_depth stays elevated
-     * until async resume completes */
+    /* result == 1: handler suspended; async resume completes it */
 
     /* Run any pending microtasks */
     hl_js_run_jobs(js);

@@ -42,7 +42,6 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         return;
 
     /* Create coroutine for this callback */
-    lua->dispatch_depth++;
 
     lua_State *co = lua_newthread(lua->L);
     int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
@@ -75,17 +74,15 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
-        lua->dispatch_depth--;
     } else if (status == LUA_YIELD) {
-        /* Handler yielded - async op in flight (detached mode).
-         * dispatch_depth stays elevated. */
+        /* Handler yielded - async op in flight (detached mode). */
     } else {
-        const char *err = lua_tostring(co, -1);
-        log_error("[hull:ws] on_open error: %s", err ? err : "unknown");
+        char ebuf[512];
+        log_error("[hull:ws] on_open error: %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
-        lua->dispatch_depth--;
     }
 }
 
@@ -104,7 +101,6 @@ void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     if (!conn)
         return;
 
-    lua->dispatch_depth++;
 
     lua_State *co = lua_newthread(lua->L);
     int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
@@ -139,16 +135,15 @@ void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
-        lua->dispatch_depth--;
     } else if (status == LUA_YIELD) {
         /* Async op in flight */
     } else {
-        const char *err = lua_tostring(co, -1);
-        log_error("[hull:ws] on_message error: %s", err ? err : "unknown");
+        char ebuf[512];
+        log_error("[hull:ws] on_message error: %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
-        lua->dispatch_depth--;
     }
 }
 
@@ -178,7 +173,6 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
     conn->closed = 1;
 
     if (route->on_close_id >= 0) {
-        lua->dispatch_depth++;
 
         lua_State *co = lua_newthread(lua->L);
         int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
@@ -225,7 +219,6 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
             luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
             lua->active_thread_ref = LUA_NOREF;
             lua->active_co = NULL;
-            lua->dispatch_depth--;
         } else if (status == LUA_YIELD) {
             /* Async op in flight - the continuation captured `conn`; the
              * teardown is deferred to hl_lua_async_resume's completion. Do
@@ -233,12 +226,12 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
              * references it. */
             return;
         } else {
-            const char *err = lua_tostring(co, -1);
-            log_error("[hull:ws] on_close error: %s", err ? err : "unknown");
+            char ebuf[512];
+            log_error("[hull:ws] on_close error: %s",
+                      hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
             luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
             lua->active_thread_ref = LUA_NOREF;
             lua->active_co = NULL;
-            lua->dispatch_depth--;
         }
     }
 

@@ -52,6 +52,48 @@ void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar)
     luaL_error(L, "instruction limit exceeded");
 }
 
+/* ── Error values ───────────────────────────────────────────────────── */
+
+static int error_text_k(lua_State *L)
+{
+    luaL_tolstring(L, 1, NULL);
+    return 1;
+}
+
+const char *hl_lua_error_text(HlLua *lua, lua_State *from, int idx,
+                              char *buf, size_t size)
+{
+    if (!buf || size == 0) return "";
+    if (!from) {
+        snprintf(buf, size, "(unknown)");
+        return buf;
+    }
+    idx = lua_absindex(from, idx);
+    int t = lua_type(from, idx);
+    if (t == LUA_TSTRING || t == LUA_TNUMBER) {
+        snprintf(buf, size, "%s", lua_tostring(from, idx));
+        return buf;
+    }
+    /* Anything else goes through tostring, so an error object with
+     * __tostring (hull.gather's aggregate) reads as its message. On the main
+     * state and protected: `from` may be a coroutine that died with this
+     * error, and __tostring may itself raise. */
+    lua_State *M = lua ? lua->L : NULL;
+    if (!M || !lua_checkstack(M, 2) || !lua_checkstack(from, 1)) {
+        snprintf(buf, size, "(%s error value)", lua_typename(from, t));
+        return buf;
+    }
+    lua_pushcfunction(M, error_text_k);
+    lua_pushvalue(from, idx);
+    if (from != M) lua_xmove(from, M, 1);
+    if (lua_pcall(M, 1, 1, 0) == LUA_OK && lua_type(M, -1) == LUA_TSTRING)
+        snprintf(buf, size, "%s", lua_tostring(M, -1));
+    else
+        snprintf(buf, size, "(%s error value)", lua_typename(from, t));
+    lua_pop(M, 1);
+    return buf;
+}
+
 /* ── Custom allocator with memory limit ─────────────────────────────── */
 
 static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
@@ -848,12 +890,10 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     lua_State *saved_co       = lua->active_co;
     KlHttpConn   *saved_conn      = lua->active_conn;
     int       saved_thread_ref = lua->active_thread_ref;
-    int       saved_depth      = lua->dispatch_depth;
 
     lua->active_co         = co;
     lua->active_conn       = NULL;       /* detached - no HTTP conn */
     lua->active_thread_ref = co_ref;
-    lua->dispatch_depth    = saved_depth + 1;
 
     /* First resume: main runs until it returns or yields. */
     int nres = 0;
@@ -871,7 +911,6 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
             lua->active_co         = saved_co;
             lua->active_conn       = saved_conn;
             lua->active_thread_ref = saved_thread_ref;
-            lua->dispatch_depth    = saved_depth;
             lua->cli_main_co       = NULL;
             return -1;
         }
@@ -899,8 +938,9 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     if (status == LUA_OK) {
         rc = lua_coerce_exit_code(co);
     } else {
-        const char *err = lua_tostring(co, -1);
-        fprintf(stderr, "[hull:main] error: %s\n", err ? err : "(unknown)");
+        char ebuf[512];
+        fprintf(stderr, "[hull:main] error: %s\n",
+                hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         rc = 1;
     }
 
@@ -908,7 +948,6 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     lua->active_co         = saved_co;
     lua->active_conn       = saved_conn;
     lua->active_thread_ref = saved_thread_ref;
-    lua->dispatch_depth    = saved_depth;
     lua->cli_main_co       = NULL;
     luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
 

@@ -108,8 +108,6 @@ void hl_lua_timer_trampoline(void *user_data)
     sh_arena_reset(lua->scratch);
     hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
 
-    assert(lua->dispatch_depth == 0 && "timer fired during active dispatch");
-    lua->dispatch_depth++;
 
     /* Clear per-request state (no connection) */
     lua->active_conn = NULL;
@@ -150,7 +148,6 @@ void hl_lua_timer_trampoline(void *user_data)
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_timer = NULL;
-        lua->dispatch_depth--;
         t->in_flight = 0;
 
         if (!cancelled)
@@ -159,18 +156,17 @@ void hl_lua_timer_trampoline(void *user_data)
         /* Handler yielded (async op in flight).
          * The continuation was created by the yielding function and
          * already has timer_ctx wired (via lua->active_timer).
-         * dispatch_depth stays at 1 - decremented on async resume.
          * When async completes, hl_lua_async_resume will clear
          * in_flight and reschedule. Nothing to do here. */
     } else {
         /* Error - log, reschedule anyway */
-        const char *err = lua_tostring(co, -1);
-        log_error("[hull:timer] %s", err ? err : "unknown error");
+        char ebuf[512];
+        log_error("[hull:timer] %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_timer = NULL;
-        lua->dispatch_depth--;
         t->in_flight = 0;
         hl_lua_timer_reschedule(t);
     }

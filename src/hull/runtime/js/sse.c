@@ -37,7 +37,6 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         return;
     JSContext *ctx = js->ctx;
 
-    js->dispatch_depth++;
 
     /* Guard stale transactions */
     hl_db_guard_stale_txn(hl_db_registry_default(js->base.db_registry));
@@ -61,7 +60,6 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         JS_FreeValue(ctx, routes_arr);
         js->active_conn = NULL;
         js->active_req = NULL;
-        js->dispatch_depth--;
         return;
     }
 
@@ -73,7 +71,6 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         JS_FreeValue(ctx, handler);
         js->active_conn = NULL;
         js->active_req = NULL;
-        js->dispatch_depth--;
         return;
     }
 
@@ -87,7 +84,6 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         JS_FreeValue(ctx, js_req);
         js->active_conn = NULL;
         js->active_req = NULL;
-        js->dispatch_depth--;
         kl_http_response_status(res, 500);
         kl_http_response_header(res, "Content-Type", "text/plain");
         kl_http_response_body_borrow(res, "SSE init failed", 15);
@@ -118,7 +114,7 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, js_req);
             JS_FreeValue(ctx, stream_obj);
-            /* dispatch_depth + active_conn stay set - async resume will clear */
+            /* active_conn stays set - async resume will clear */
             return;
         }
         /* Sync completion - close stream if not already */
@@ -132,5 +128,4 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     JS_FreeValue(ctx, stream_obj);
     js->active_conn = NULL;
     js->active_req = NULL;
-    js->dispatch_depth--;
 }

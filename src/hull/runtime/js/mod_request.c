@@ -566,7 +566,6 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         jc->conn = NULL;
         js->async_pending = 0;
         js->active_conn = NULL;
-        js->dispatch_depth--;
         if (conn) {
             /* This resume runs from the multipart body reader's on_data (not
              * kl_async_complete), so Hull drives the send: build on
@@ -592,7 +591,6 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         jc->conn = NULL;
         js->async_pending = 0;
         js->active_conn = NULL;
-        js->dispatch_depth--;
         if (conn) {
             KlHttpResponse *res = kl_http_conn_response(conn);
             kl_http_response_status(res, 500);

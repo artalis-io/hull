@@ -5566,14 +5566,12 @@ static int ssh_co_start(HlLua *lua, const char *src, lua_State **co_out)
     lua->active_co         = co;
     lua->active_conn       = NULL;          /* detached, as under app.main */
     lua->active_thread_ref = ref;
-    lua->dispatch_depth++;
     int nres = 0;
     int st = lua_resume(co, L, 0, &nres);
     if (st != LUA_YIELD) {
         luaL_unref(L, LUA_REGISTRYINDEX, ref);
         lua->active_co = NULL;
         lua->active_thread_ref = LUA_NOREF;
-        lua->dispatch_depth--;
     }
     return st;
 }
@@ -6077,7 +6075,7 @@ TASK_CASE(map_default_limit_is_16,
 
 TASK_CASE(map_of_nothing_is_empty,
     "local r = hull.map({}, function() error('never') end)\n"
-    "check(next(r) == nil, 'not empty')\n")
+    "check(r.n == 0 and next(r, 'n') == nil and r[1] == nil, 'not empty')\n")
 
 TASK_CASE(a_failure_waits_for_the_rest_and_reports_all,
     "local finished = 0\n"
@@ -6145,5 +6143,220 @@ TASK_CASE(bad_arguments_are_refused,
     "check(not pcall(hull.map, {}, function() end, { limit = 0 }), 'limit 0')\n"
     "check(not pcall(hull.map, 'x', function() end), 'items')\n"
     "check(pcall(hull.map, {1}, function() end, { limit = math.huge }), 'huge')\n")
+
+TASK_CASE(map_honours_n_and_reports_it,
+    "local r = hull.map(table.pack(1, nil, 3), function(x) return x end)\n"
+    "check(r.n == 3 and r[1] == 1 and r[2] == nil and r[3] == 3, 'n '..tostring(r.n))\n"
+    "check(#hull.map({1, 2}, function(x) return x end, { limit = 2.0 }) == 2, 'integral float limit')\n"
+    "check(not pcall(hull.map, {1}, function() end, { limit = 1.5 }), 'fractional limit')\n"
+    "check(not pcall(hull.map, {1}, function() end, 5), 'opts not a table')\n"
+    "check(not pcall(hull.map, {1}, function() end, { limit = false }), 'limit false (as in JS)')\n")
+
+TASK_CASE(an_error_with_no_value_still_counts,
+    "local ok, err = pcall(hull.gather, function() busy(5) end, function() error() end)\n"
+    "check(not ok and err.errors[2] == '(error with no value)', 'errors[2] '..tostring(err and err.errors and err.errors[2]))\n"
+    "check(tostring(err) == '(error with no value)', 'message '..tostring(err))\n")
+
+/* A wait can only suspend the coroutine the runtime drives. Where it cannot
+ * yield at all (a C callback) or would suspend some other coroutine (one the
+ * app made), it raises before anything is armed - it used to arm the op
+ * first, then fail in lua_yieldk, and later resume the wrong coroutine. */
+TASK_CASE(a_wait_where_it_cannot_yield_raises_at_once,
+    "local function refused(f, what)\n"
+    "  local ok, e = pcall(f)\n"
+    "  check(not ok and tostring(e):find('can only wait', 1, true), what..': '..tostring(e))\n"
+    "end\n"
+    "refused(function() string.gsub('a', 'a', function() hull.sleep(5) end) end, 'gsub sleep')\n"
+    "refused(coroutine.wrap(function() hull.sleep(5) end), 'own coroutine')\n"
+    "local t = hull.async(function() busy(5); return 1 end)\n"
+    "refused(function() string.gsub('a', 'a', function() t:wait() end) end, 'gsub wait')\n"
+    "check(t:wait() == 1, 'the task is still joinable')\n")
+
+static int oc_calls;
+static void count_oc(struct HlLua *lua, void *ctx)
+{
+    (void)lua;
+    (void)ctx;
+    oc_calls++;
+}
+
+/* A task starts with none of its spawner's per-dispatch context - here the
+ * deferred-teardown hook a ws on_close handler carries. The handler's own
+ * completion runs it once; the task's completion used to run it again (in a
+ * real on_close, a second teardown of a freed connection). */
+UTEST(lua_async, a_task_does_not_inherit_its_spawners_teardown_hook)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+
+    oc_calls = 0;
+    lua_rt.active_on_complete     = count_oc;
+    lua_rt.active_on_complete_ctx = NULL;
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt,
+        "local t = hull.async(function() hull.sleep(5); return 7 end)\n"
+        "OUT = (t:wait() == 7) and 'ok' or 'bad'\n", &co);
+    lua_rt.active_on_complete = NULL;
+    ASSERT_EQ(st, LUA_YIELD);
+    ssh_tick_until_done(be, lua_rt.base.async_ctx, co);
+
+    lua_getglobal(lua_rt.L, "OUT");
+    const char *out = lua_tostring(lua_rt.L, -1);
+    EXPECT_STREQ(out ? out : "(no verdict)", "ok");
+    lua_pop(lua_rt.L, 1);
+    EXPECT_EQ(oc_calls, 1);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
+/* A timer handler that waits more than once keeps its timer: the last wait's
+ * continuation still clears in_flight and reschedules, so the handler runs
+ * again. From the second wait on it used to be lost, and the timer never
+ * fired again - every gather / map in a timer handler waits more than once.
+ * The handler cancels itself (returns false) on its third run, so nothing is
+ * left pending at the end. */
+UTEST(lua_async, a_timer_handler_keeps_its_timer_across_waits)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "RUNS = 0\n"
+        "return function()\n"
+        "  RUNS = RUNS + 1\n"
+        "  hull.sleep(5)\n"
+        "  hull.sleep(5)\n"
+        "  if RUNS >= 3 then return false end\n"
+        "end\n"), LUA_OK);
+    lua_newtable(L);
+    lua_insert(L, -2);
+    lua_rawseti(L, -2, 1);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_timers");
+
+    static HlLuaTimer t;
+    memset(&t, 0, sizeof t);
+    t.lua         = &lua_rt;
+    t.handler_id  = 1;
+    t.interval_ms = 20;
+    hl_lua_timer_trampoline(&t);
+
+    int runs = 0;
+    for (int i = 0; i < 150 && (runs < 3 || t.in_flight); i++) {
+        be->tick(lua_rt.base.async_ctx, 20);
+        lua_getglobal(L, "RUNS");
+        runs = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    EXPECT_EQ(runs, 3);
+    EXPECT_EQ(t.in_flight, 0);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
+/* A timer may fire while a task is suspended. The trampoline used to
+ * assert(dispatch_depth == 0), and every suspended handler or task holds that
+ * above zero - so the first tick with a task in flight aborted the process. */
+UTEST(lua_async, a_timer_fires_while_a_task_waits)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "TICKS = 0\n"
+        "return function() TICKS = TICKS + 1; return false end\n"), LUA_OK);
+    lua_newtable(L);
+    lua_insert(L, -2);
+    lua_rawseti(L, -2, 1);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_timers");
+
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt,
+        "local t = hull.async(function() hull.sleep(60) end)\n"
+        "t:wait()\n"
+        "OUT = 'ok'\n", &co);
+    ASSERT_EQ(st, LUA_YIELD);
+
+    static HlLuaTimer t;
+    memset(&t, 0, sizeof t);
+    t.lua         = &lua_rt;
+    t.handler_id  = 1;
+    t.interval_ms = 20;
+    hl_lua_timer_trampoline(&t);    /* main and its task are both suspended */
+
+    ssh_tick_until_done(be, lua_rt.base.async_ctx, co);
+    lua_getglobal(L, "TICKS");
+    EXPECT_EQ(lua_tointeger(L, -1), 1);
+    lua_pop(L, 1);
+    lua_getglobal(L, "OUT");
+    const char *out = lua_tostring(L, -1);
+    EXPECT_STREQ(out ? out : "(no verdict)", "ok");
+    lua_pop(L, 1);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
+/* Error values reach the logs as text: a table with __tostring (hull.gather's
+ * aggregate) as its message, where lua_tostring gave NULL - "(unknown)", or a
+ * NULL for "%s". Also from a coroutine that died with it, and without letting
+ * a __tostring that raises escape. */
+UTEST(lua_runtime, error_text_reads_error_objects)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    char buf[64];
+    int top = lua_gettop(L);
+
+    lua_pushliteral(L, "plain");
+    EXPECT_STREQ(hl_lua_error_text(&lua_rt, L, -1, buf, sizeof buf), "plain");
+    lua_pop(L, 1);
+
+    lua_pushnil(L);
+    EXPECT_STREQ(hl_lua_error_text(&lua_rt, L, -1, buf, sizeof buf), "nil");
+    lua_pop(L, 1);
+
+    ASSERT_EQ(luaL_dostring(L, "return setmetatable({}, {__tostring = "
+                               "function() return 'from tostring' end})"), LUA_OK);
+    EXPECT_STREQ(hl_lua_error_text(&lua_rt, L, -1, buf, sizeof buf), "from tostring");
+    lua_pop(L, 1);
+
+    ASSERT_EQ(luaL_dostring(L, "return setmetatable({}, {__tostring = "
+                               "function() error('boom') end})"), LUA_OK);
+    EXPECT_STREQ(hl_lua_error_text(&lua_rt, L, -1, buf, sizeof buf),
+                 "(table error value)");
+    lua_pop(L, 1);
+    EXPECT_EQ(lua_gettop(L), top);
+
+    lua_State *co = lua_newthread(L);
+    ASSERT_EQ(luaL_loadstring(co, "error(setmetatable({}, {__tostring = "
+                                  "function() return 'died' end}))"), LUA_OK);
+    int nres = 0;
+    EXPECT_EQ(lua_resume(co, L, 0, &nres), LUA_ERRRUN);
+    EXPECT_STREQ(hl_lua_error_text(&lua_rt, co, -1, buf, sizeof buf), "died");
+    lua_pop(L, 1);                  /* the thread */
+    EXPECT_EQ(lua_gettop(L), top);
+
+    cleanup_lua();
+}
 
 UTEST_MAIN();

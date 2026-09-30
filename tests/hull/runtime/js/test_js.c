@@ -5847,4 +5847,21 @@ JS_MAP_CASE(bad_arguments_are_refused,
     "  }\n"
     "  check((await hull.map([1], () => 2, { limit: Infinity }))[0] === 2, 'Infinity');\n")
 
+JS_MAP_CASE(null_options_mean_the_defaults,
+    "  check((await hull.map([1], (x) => x, null))[0] === 1, 'opts null');\n"
+    "  check((await hull.map([1], (x) => x, { limit: null }))[0] === 1, 'limit null');\n"
+    "  let threw = false;\n"
+    "  try { await hull.map([1], (x) => x, 5); } catch (e) { threw = e instanceof TypeError; }\n"
+    "  check(threw, 'opts not an object');\n")
+
+JS_MAP_CASE(a_failure_that_cannot_be_printed_is_still_reported,
+    "  const odd = Object.create(null);\n"
+    "  try {\n"
+    "    await hull.map([1, 2], async (x) => { if (x === 1) throw odd; return x; });\n"
+    "    check(false, 'did not throw');\n"
+    "  } catch (e) {\n"
+    "    check(e.message === '(an error)', 'message ' + e.message);\n"
+    "    check(e.errors[0] === odd, 'errors');\n"
+    "  }\n")
+
 UTEST_MAIN();

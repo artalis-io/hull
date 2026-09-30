@@ -38,7 +38,6 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     if (!lua || !lua->L || !req || !res)
         return;
 
-    lua->dispatch_depth++;
 
     /* Guard stale transactions */
     hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
@@ -61,7 +60,6 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         lua_pop(lua->L, 1);
         lua->active_conn = NULL;
         lua->active_req = NULL;
-        lua->dispatch_depth--;
         return;
     }
 
@@ -70,7 +68,6 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         lua_pop(lua->L, 2);
         lua->active_conn = NULL;
         lua->active_req = NULL;
-        lua->dispatch_depth--;
         return;
     }
 
@@ -91,7 +88,6 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         lua_pop(lua->L, 1); /* pop routes table */
         lua->active_conn = NULL;
         lua->active_req = NULL;
-        lua->dispatch_depth--;
         kl_http_response_status(res, 500);
         kl_http_response_header(res, "Content-Type", "text/plain");
         kl_http_response_body_borrow(res, "SSE init failed", 15);
@@ -121,7 +117,6 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         lua->active_co = NULL;
         lua->active_conn = NULL;
         lua->active_req = NULL;
-        lua->dispatch_depth--;
 
         lua_pop(lua->L, 1); /* pop routes table */
     } else if (status == LUA_YIELD) {
@@ -131,8 +126,9 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         lua_pop(lua->L, 1); /* pop routes table */
     } else {
         /* Error - end stream, log */
-        const char *err = lua_tostring(co, -1);
-        log_error("[hull:web:sse] handler error: %s", err ? err : "unknown");
+        char ebuf[512];
+        log_error("[hull:web:sse] handler error: %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
 
         if (!stream_ud->closed)
             kl_http_sse_end(&stream_ud->sse);
@@ -142,7 +138,6 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         lua->active_co = NULL;
         lua->active_conn = NULL;
         lua->active_req = NULL;
-        lua->dispatch_depth--;
 
         lua_pop(lua->L, 1); /* pop routes table */
     }

@@ -1414,9 +1414,10 @@ async function runWorker(opts) {
     };
 
     // One independent claim-loop; returns its own processed count.
+    let failed = false;           // a loop threw: the others stop too
     const loop = async () => {
         let processed = 0, empty = 0;
-        while (_running) {
+        while (_running && !failed) {
             const n = await work(o);
             processed += n;
             if (n === 0) {
@@ -1431,9 +1432,19 @@ async function runWorker(opts) {
     };
 
     if (concurrency === 1) return loop();
-    // N loops in flight; Promise.all joins them (all exit on stop / drain).
-    const counts = await Promise.all(Array.from({ length: concurrency }, loop));
-    return counts.reduce((a, b) => a + b, 0);
+    // N loops in flight, every one joined (all exit on stop / drain). A loop
+    // that throws stops the others - they finish the job in hand, or an idle
+    // wait, first - and the first failure is thrown once all have exited.
+    // Promise.all would settle at the first failure with the rest still
+    // claiming jobs. Same as the Lua twin.
+    const guarded = async () => {
+        try { return await loop(); }
+        catch (e) { failed = true; throw e; }
+    };
+    const settled = await Promise.allSettled(Array.from({ length: concurrency }, guarded));
+    const bad = settled.find((s) => s.status === "rejected");
+    if (bad) throw bad.reason;
+    return settled.reduce((a, s) => a + s.value, 0);
 }
 
 /**
