@@ -74,6 +74,10 @@ bits) or ECDSA P-256/P-384. A passphrase-protected key needs
 `passphrase_env = "VAR"` (preferred: read and scrubbed in C, never a Lua
 string) or `passphrase = "..."`.
 
+`keys = { a, b }` instead of `key` offers several in order until one is
+accepted; each entry is key text or an `ssh.load_key` result (to mix
+passphrases). `conn:stats().auth_key` says which one won.
+
 ## Commands
 
 ```lua

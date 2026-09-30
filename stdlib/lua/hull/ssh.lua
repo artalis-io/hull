@@ -10,7 +10,7 @@
 --   local conn, err = ssh.connect{
 --       host = "spark-7468.example.com",
 --       user = "operator",
---       key  = key_file_contents,
+--       key  = key_file_contents,   -- or keys = { a, b }: tried in order
 --       trust = my_store,              -- get/put/forget, app-owned
 --   }
 --   local r = conn:exec("uname -a")    -- { status, signal, stdout, stderr }
@@ -512,10 +512,16 @@ function M.connect(opts)
     if type(opts) ~= "table" then
         error("ssh.connect: expected an options table", 2)
     end
-    for _, req in ipairs({ "host", "user", "key" }) do
+    for _, req in ipairs({ "host", "user" }) do
         if opts[req] == nil then
             error("ssh.connect: " .. req .. " is required", 2)
         end
+    end
+    if (opts.key == nil) == (opts.keys == nil) then
+        error("ssh.connect: exactly one of key and keys is required", 2)
+    end
+    if opts.keys ~= nil and (type(opts.keys) ~= "table" or #opts.keys == 0) then
+        error("ssh.connect: keys must be a non-empty list", 2)
     end
     local offer_ok, offer_why = require('hull.ssh.kexinit').validate_offer(opts.offer)
     if not offer_ok then error("ssh.connect: " .. offer_why, 2) end
@@ -525,15 +531,28 @@ function M.connect(opts)
     -- `passphrase_env` names an environment variable and is preferred: the
     -- value is read, used and scrubbed in C, so it never becomes a Lua string
     -- (which could not be wiped). `passphrase` takes the bytes directly.
-    local key = opts.key
-    if type(key) ~= "table" then
-        local kok, loaded = pcall(privatekey.load, opts.key, {
-            passphrase     = opts.passphrase,
-            passphrase_env = opts.passphrase_env,
-            crypto         = crypto,
-        })
-        if not kok then return nil, key_error(loaded) end
-        key = loaded
+    --
+    -- Every key is loaded before anything is dialled, so a damaged key file is
+    -- reported as such rather than as a refusal after the connection. Each
+    -- entry is key-file text (loaded with the passphrase options above) or a
+    -- key already loaded with ssh.load_key, which is how keys with different
+    -- passphrases are mixed.
+    local keys = {}
+    for i, k in ipairs(opts.keys or { opts.key }) do
+        if type(k) ~= "table" then
+            local kok, loaded = pcall(privatekey.load, k, {
+                passphrase     = opts.passphrase,
+                passphrase_env = opts.passphrase_env,
+                crypto         = crypto,
+            })
+            if not kok then
+                local e = key_error(loaded)
+                if opts.keys then e.key = i end
+                return nil, e
+            end
+            k = loaded
+        end
+        keys[#keys + 1] = k
     end
     local trust = opts.trust or M.memory_store()
 
@@ -611,7 +630,7 @@ function M.connect(opts)
         return nil, herr
     end
 
-    local aok, aerr = step(t.authenticate, t, opts.user, key, opts.on_banner)
+    local aok, aerr = step(t.authenticate, t, opts.user, keys, opts.on_banner)
     if not aok then
         t:close()
         return nil, aerr
