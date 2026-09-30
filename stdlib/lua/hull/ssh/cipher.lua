@@ -180,12 +180,30 @@ function M.frame_size(packet_length)
     return M.LENGTH_LEN + packet_length + M.TAG_LEN
 end
 
+-- The declared packet length, refused unless plausible. It is plaintext and
+-- attacker-controlled, and only AUTHENTICATED once the tag checks - so a
+-- hostile length is refused before anything waits on it.
+local function check_length(packet_length)
+    if packet_length > packet.MAX_PACKET then
+        error("ssh.cipher: declared packet length " .. tostring(packet_length)
+              .. " exceeds the maximum")
+    end
+    if packet_length < M.BLOCK or packet_length % M.BLOCK ~= 0 then
+        error("ssh.cipher: declared packet length " .. tostring(packet_length)
+              .. " is not a whole number of blocks")
+    end
+end
+
 -- The whole frame's size, from the front of `buf` (at least 4 bytes; below
 -- that, 4). The transport asks the cipher rather than peeking itself because
 -- not every cipher sends the length in the clear: chacha20-poly1305 does not.
+-- Bounded here too, as Chacha:needed is: the transport sizes its wait by this,
+-- and an unchecked length kept it buffering until the heap limit.
 function Cipher:needed(buf)
     if #buf < M.LENGTH_LEN then return M.LENGTH_LEN end
-    return M.frame_size(wire.peek_uint32(buf))
+    local packet_length = wire.peek_uint32(buf)
+    check_length(packet_length)
+    return M.frame_size(packet_length)
 end
 
 -- Decrypt one packet from the front of `buf`.
@@ -200,17 +218,8 @@ function Cipher:open(aead, buf)
     if #buf < M.LENGTH_LEN then return nil, "need_more" end
 
     local packet_length = wire.peek_uint32(buf)
-    -- Bounded before waiting, as everywhere else. The length is plaintext and
-    -- attacker-controlled, and it is only AUTHENTICATED once the tag checks -
-    -- so a hostile length is refused on plausibility first.
-    if packet_length > packet.MAX_PACKET then
-        error("ssh.cipher: declared packet length " .. tostring(packet_length)
-              .. " exceeds the maximum")
-    end
-    if packet_length < M.BLOCK or packet_length % M.BLOCK ~= 0 then
-        error("ssh.cipher: declared packet length " .. tostring(packet_length)
-              .. " is not a whole number of blocks")
-    end
+    -- Bounded before waiting, as everywhere else.
+    check_length(packet_length)
 
     local total = M.frame_size(packet_length)
     if #buf < total then return nil, "need_more" end

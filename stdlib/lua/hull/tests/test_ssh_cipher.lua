@@ -246,6 +246,16 @@ test("a non-block-multiple length is refused", function()
     end, "zero length")
 end)
 
+test("needed refuses the lengths open refuses", function()
+    -- The transport sizes its wait by needed(); an unchecked length there
+    -- kept it buffering until the heap limit before open ever raised.
+    local dec = cipher.new(KEY, IV)
+    assert_raises(function() dec:needed("\255\255\255\255") end, "huge length")
+    assert_raises(function() dec:needed(string.pack(">I4", 17)) end, "misaligned")
+    assert_eq(dec:needed(string.pack(">I4", 32)), cipher.frame_size(32), "valid:")
+    assert_eq(dec:needed("\0\0"), cipher.LENGTH_LEN, "short:")
+end)
+
 test("padding that does not fit is refused", function()
     -- Reached only for a packet that DID authenticate, so it is a malformed
     -- peer rather than an attacker.

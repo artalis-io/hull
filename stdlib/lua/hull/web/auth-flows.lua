@@ -458,6 +458,28 @@ local function email_rate_allow(to)
             -- inherently correct.
             _email_rl_count = kept_n + 1
             _email_rl[key] = bucket
+            -- Still over: a flood of distinct recipients, all inside the
+            -- window, so the sweep kept them all - the table outgrew the cap
+            -- and every new key paid an O(n) sweep. Drop the least recently
+            -- used down to 90% of the cap, so the next sweep is a tenth of
+            -- the cap away. The key just added is kept.
+            local cap = _state.email_rate_limit_max_entries or 10000
+            if _email_rl_count > cap then
+                local order = {}
+                for k, b in pairs(_email_rl) do
+                    if k ~= key then
+                        order[#order + 1] = { k = k, t = b.ts[#b.ts] or 0 }
+                    end
+                end
+                table.sort(order, function(x, y) return x.t < y.t end)
+                local target = math.floor(cap * 0.9)
+                local i = 1
+                while _email_rl_count > target and i <= #order do
+                    _email_rl[order[i].k] = nil
+                    _email_rl_count = _email_rl_count - 1
+                    i = i + 1
+                end
+            end
         end
     end
     local fresh = {}

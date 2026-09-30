@@ -105,7 +105,8 @@ const _state = {
     // to support those flows.
     stateCookieSameSite: "Lax",
     stateTtl:       600,
-    providers:      {},  // name -> resolved cfg
+    providers:      Object.create(null),  // name -> resolved cfg (no prototype:
+                                          // the name comes from the route)
     // findUser(provider, claims) -> user-object - required when
     // onLogin is set. Lets onLogin use the same (req, res, user)
     // signature as hull/web/auth-flows so a single login handler
@@ -118,7 +119,7 @@ const _state = {
     loginPath:      "/auth/{provider}/login",
     callbackPath:   "/auth/{provider}/callback",
     logoutPath:     "/auth/logout",
-    _jwksCache:     {},  // name -> { fetchedAt, byKid: { kid: pem } }
+    _jwksCache:     Object.create(null),  // name -> { fetchedAt, byKid: { kid: pem } }
     // TTL on cached JWKS in seconds (forces a refresh past this age
     // even if the kid is still present). Default 1 hour. IdPs may
     // rotate a key while reusing the same kid for emergency
@@ -257,7 +258,7 @@ async function refreshJwks(providerName) {
     try { doc = json.decode(resp.body); }
     catch (_e) { return null; }
     if (!doc || !Array.isArray(doc.keys)) return null;
-    const byKid = {};
+    const byKid = Object.create(null);   // kid comes from the token
     for (const k of doc.keys) {
         if (k && k.kid && Array.isArray(k.x5c) && typeof k.x5c[0] === "string") {
             // x5c is standard base64 (RFC 7517 section 4.7).
@@ -272,6 +273,9 @@ async function refreshJwks(providerName) {
     return byKid;
 }
 
+// Seconds between JWKS fetches caused by an unknown kid.
+const JWKS_MIN_REFRESH = 60;
+
 function jwksResolver(providerName) {
     return async (kid, _alg) => {
         const cache = _state._jwksCache[providerName];
@@ -279,6 +283,14 @@ function jwksResolver(providerName) {
         const fresh = cache
                       && (time.now() - (cache.fetchedAt || 0)) < ttl;
         if (fresh && cache.byKid[kid]) return cache.byKid[kid];
+        // A kid still unknown within a minute of the last fetch stays
+        // unknown: the key set was just read. Refetching for every such
+        // token let anyone make the server fetch the IdP's JWKS once per
+        // request.
+        if (cache && !cache.byKid[kid]
+            && (time.now() - (cache.fetchedAt || 0)) < JWKS_MIN_REFRESH) {
+            return null;
+        }
         // Stale OR unknown kid: refresh once. A still-unknown kid
         // after refresh returns null; signature verify then fails.
         const byKid = await refreshJwks(providerName);
@@ -560,7 +572,7 @@ function init(opts) {
     if (!opts.providers || typeof opts.providers !== "object") {
         throw new Error("oauth.init: providers object required");
     }
-    _state.providers = {};
+    _state.providers = Object.create(null);
     for (const name in opts.providers) {
         if (!Object.prototype.hasOwnProperty.call(opts.providers, name)) continue;
         const p = opts.providers[name];
@@ -620,11 +632,11 @@ const _test = {
     safeReturnTo,
     reset: () => {
         _state.stateSecret = null;
-        _state.providers      = {};
+        _state.providers      = Object.create(null);
         _state.findUser       = null;
         _state.onLogin        = null;
         _state.onLogout       = null;
-        _state._jwksCache     = {};
+        _state._jwksCache     = Object.create(null);
     },
 };
 

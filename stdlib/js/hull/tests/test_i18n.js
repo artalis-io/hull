@@ -241,6 +241,15 @@ test("detect exact match", () => {
     assertEq(i18n.detect("hu,en;q=0.9"), "hu");
 });
 
+test("detect never matches a prototype member", () => {
+    // locales has no prototype: "constructor" from Accept-Language used to
+    // be found on Object.prototype and returned as a locale.
+    i18n.load("en", en);
+    assertEq(i18n.detect("constructor"), null);
+    assertEq(i18n.detect("toString,en;q=0.5"), "en");
+    assertEq(i18n.detect("__proto__"), null);
+});
+
 test("detect quality sorting", () => {
     i18n.load("en", en);
     i18n.load("hu", hu);
