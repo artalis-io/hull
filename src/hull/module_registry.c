@@ -386,8 +386,14 @@ static const HlModuleSpec REGISTRY[] = {
          *
          * Missed until an e2e drove a real connection: every unit suite
          * injects `opts.crypto`, which is the seam that exists for exactly
-         * that reason and which therefore never takes this path. */
-        .deps = {"hull/crypto", "hull/encoding", 0},
+         * that reason and which therefore never takes this path.
+         *
+         * hull/fs for ssh.file_store (the known_hosts trust store), for the
+         * same reason: without it an app that used file_store without also
+         * naming hull/fs failed at the require. Admitting the MODULE grants
+         * no file access - every path still has to be in manifest
+         * fs.read / fs.write, checked at the call. */
+        .deps = {"hull/crypto", "hull/encoding", "hull/fs", 0},
     },
     {
         /* Template engine stays flat in v0.2.0: content-type

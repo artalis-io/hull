@@ -120,8 +120,8 @@ The store is an object with `get`/`put`/`forget`/`entries`, and Hull ships
 three:
 
 - `ssh.file_store(path)` keeps it in an **OpenSSH `known_hosts` file**, read
-  and written through `hull/fs` (so the app declares `hull/fs` and names the
-  file in `fs.read` and `fs.write`). The `ssh` command line reads what it
+  and written through `hull/fs`, which comes with `hull/ssh`; the app names
+  the file in `fs.read` and `fs.write`. The `ssh` command line reads what it
   writes and the reverse, so `ssh-keyscan web1 >> known_hosts` seeds it, and
   hashed entries (`HashKnownHosts`) are matched; `file_store(path, { hash =
   true })` writes hashed ones too. The file is read on every lookup, so a key

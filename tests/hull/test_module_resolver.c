@@ -717,6 +717,28 @@ UTEST(build_flavor, ssh_needs_the_socket_layer_not_http)
     ASSERT_TRUE((ssh->required_caps & HL_MOD_CAP_HTTP) == 0);
 }
 
+UTEST(module_resolver, ssh_admits_what_it_is_built_from)
+{
+    /* hull/ssh requires hull.crypto (the key exchange and signatures),
+     * hull.encoding and - for ssh.file_store - hull.fs. An app declaring only
+     * hull/ssh must be able to use all of them, or the require fails at the
+     * worst moment: mid-connect, or when the trust store is first opened.
+     * tests/check_module_deps.sh checks the same thing from the sources. */
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "hull/ssh", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    ASSERT_EQ(hl_module_resolver_resolve(&m, &s, err, sizeof(err)), 0);
+    const char *want[] = { "hull/crypto", "hull/encoding", "hull/fs" };
+    for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
+        const HlModuleSpec *spec = hl_module_registry_find_short(want[i]);
+        ASSERT_TRUE(spec != NULL);
+        ASSERT_TRUE(hl_module_set_contains_spec(&s, spec));
+    }
+}
+
 UTEST(build_flavor, auto_from_resolved_manifest)
 {
     HlManifest m;
