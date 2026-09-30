@@ -36,6 +36,8 @@ static int wgpu_texture_write(HlGpuDevice *dev, HlGpuTexture *tex,
 static int wgpu_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
                               void **data, size_t *len);
 static void wgpu_texture_destroy(HlGpuDevice *dev, HlGpuTexture *tex);
+static void upload_initial(WGPUQueue queue, WGPUBuffer buf, size_t buf_size,
+                           const HlGpuBufferDesc *desc);
 
 static uint64_t gpu_now_ms(void)
 {
