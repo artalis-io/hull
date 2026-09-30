@@ -264,11 +264,34 @@ A stream with a callback is not also accumulated, so its field comes back
 empty. Without callbacks, `opts.max_output` (default 8 MiB) bounds what is
 held.
 
-`opts.stdin` writes a string to the command and then closes it - the way to
-feed a command data without a shell redirect. It is capped at 128 KiB: past
-roughly that, a command writing output while we write input wedges both
-directions on full buffers (measured against OpenSSH). Bulk data belongs in
-SFTP.
+`opts.stdin` feeds the command data without a shell redirect, then closes
+its input. Two forms:
+
+- **A string** is written whole. It is capped at 128 KiB (`stdin_too_large`,
+  before anything is sent): past roughly that, a command writing output while
+  we wrote input wedged both directions on full buffers, measured against
+  OpenSSH on Windows.
+- **A function** is a source, called for the next chunk until it returns
+  `nil` or `""` - no cap. Between writes Hull takes in whatever output the
+  command has already sent (and reopens its window), so input and output
+  move together; add `on_stdout` to stream both ways. A source that raises
+  raises out of `exec`; one returning a non-string is `bad_stdin`.
+
+```lua
+local left = 80
+conn:exec("sha256sum", {
+    stdin = function()                        -- 5 MB, 64 KiB at a time
+        if left == 0 then return nil end
+        left = left - 1
+        return string.rep("x", 65536)
+    end,
+    timeout_ms = 60000,
+})
+```
+
+A server that stops reading its command's input (the wedge above) is still
+bounded only by `timeout_ms`, so set one. Files belong in SFTP, which moves
+one direction at a time.
 
 ## 6a. Timeouts and keepalives
 

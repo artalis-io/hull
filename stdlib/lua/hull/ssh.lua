@@ -332,11 +332,22 @@ end
 --- drained, then closed. `opts.max_output` (default 8 MiB) bounds only what
 --- is accumulated.
 ---
---- `opts.stdin` is capped at 128 KiB; a larger one is refused with
+--- A string `opts.stdin` is capped at 128 KiB; a larger one is refused with
 --- `stdin_too_large` before anything reaches the wire. Beyond roughly that,
---- a command writing output while we write input wedges both directions on
---- full buffers (measured against OpenSSH). Bulk data belongs in
---- `conn:sftp()`, which moves one direction at a time and has no such limit.
+--- a command writing output while we wrote input wedged both directions on
+--- full buffers (measured against OpenSSH on Windows).
+---
+--- A FUNCTION `opts.stdin` is a source: called for the next chunk until it
+--- returns nil or "", with no cap. Between writes, output the command has
+--- already sent is taken in, so both directions move - pair it with
+--- on_stdout to stream both ways. Against a server that stops reading, as
+--- the one measured above did, timeout_ms is the bound. For files, sftp.
+---
+---   local parts, i = { header, body, trailer }, 0
+---   conn:exec("gzip -c > /tmp/x.gz", {
+---       stdin = function() i = i + 1; return parts[i] end,
+---       timeout_ms = 600000,
+---   })
 function Conn:exec(command, opts) return guard(inner[self].exec, inner[self], command, opts) end
 
 --- Open an SFTP session. Paths travel inside the subsystem as

@@ -224,6 +224,23 @@ app.main(function()
         local rs = conn:exec("cat", { stdin = "hull-stdin-ok" })
         print("stdin_echo=" .. tostring(rs and rs.stdout))
 
+        -- Streamed stdin, both directions at once: 5 MB fed through cat
+        -- from a source while its output streams back. A client that only
+        -- wrote until done before reading would wedge here on full buffers.
+        local block, left = string.rep("s", 64 * 1024), 80
+        local back = 0
+        local rstream, estream = conn:exec("cat", {
+            stdin = function()
+                if left == 0 then return nil end
+                left = left - 1
+                return block
+            end,
+            on_stdout = function(c) back = back + #c end,
+            timeout_ms = 60000,
+        })
+        print("stdin_streamed=" .. tostring(rstream and back
+                                            or ("error:" .. tostring(estream and estream.code))))
+
         -- Streamed output, long enough that sshd (RekeyLimit 1M in its
         -- config) starts a key exchange in the middle of it: the transport
         -- absorbs the server's KEXINIT and the stream carries on.
@@ -602,6 +619,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "exec_stdout" "hull-tunnel-ok" "live: command output came back through the tunnel"
         assert_line "$OUT" "exit3_status" "3" "live: a non-zero remote exit is a status, not an error"
         assert_line "$OUT" "stdin_echo" "hull-stdin-ok" "live: stdin reaches the command"
+        assert_line "$OUT" "stdin_streamed" "5242880" "live: 5 MB of stdin streamed while its output came back"
         assert_line "$OUT" "streamed_bytes" "3000000" "live: 3 MB streamed through on_stdout"
         assert_line "$OUT" "streamed_in_chunks" "true" "live: delivered as it arrived, in chunks"
         assert_line "$OUT" "streamed_buffered" "0" "live: a streamed stream is not also buffered"

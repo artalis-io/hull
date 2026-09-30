@@ -78,7 +78,8 @@ string) or `passphrase = "..."`.
 
 ```lua
 conn:exec(cmd, {
-    stdin      = "data",                    -- up to 128 KiB, then EOF
+    stdin      = "data",                    -- up to 128 KiB, then EOF;
+                                            -- or a function: chunks until nil, no cap
     on_stdout  = function(chunk) ... end,   -- stream instead of buffering
     on_stderr  = function(chunk) ... end,
     max_output = 8 * 1024 * 1024,           -- buffered cap -> output_too_large

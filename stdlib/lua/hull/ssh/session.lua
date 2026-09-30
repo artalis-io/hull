@@ -165,18 +165,45 @@ function Session:read_for(ch)
         return m
     end
     while true do
-        local m = channel.parse(self:next_message())
-        local other = m.recipient ~= ch.local_id and self.channels[m.recipient]
-        if not other then return m end
-        other:handle(m)
-        if m.type == "request" and m.want_reply and other.remote_id then
-            self:send_packet(channel.build_failure(other.remote_id))
-        end
-        if m.type ~= "window_adjust" then
-            m.routed = true
-            other.inbox[#other.inbox + 1] = m
+        local m = self:route(ch, channel.parse(self:next_message()))
+        if m then return m end
+    end
+end
+
+-- `m` if it is for `ch`; otherwise applied to (and queued for) the open
+-- channel it belongs to, and nil. See read_for.
+function Session:route(ch, m)
+    local other = m.recipient ~= ch.local_id and self.channels[m.recipient]
+    if not other then return m end
+    other:handle(m)
+    if m.type == "request" and m.want_reply and other.remote_id then
+        self:send_packet(channel.build_failure(other.remote_id))
+    end
+    if m.type ~= "window_adjust" then
+        m.routed = true
+        other.inbox[#other.inbox + 1] = m
+    end
+    return nil
+end
+
+-- The next channel message for `ch` IF one can be had without waiting on the
+-- peer (Transport:message_ready), else nil. Applied as channel_message would.
+function Session:poll_channel(ch)
+    while self:message_ready() do
+        local p = self:take_deferred()
+        if not p then p = self:handle_packet(self:read_packet()) end
+        if p then
+            local m = self:route(ch, channel.parse(p))
+            if m then
+                ch:handle(m)
+                if m.type == "request" and m.want_reply and ch.remote_id then
+                    self:send_packet(channel.build_failure(ch.remote_id))
+                end
+                return m
+            end
         end
     end
+    return nil
 end
 
 -- Wait for the reply to a channel request.
@@ -206,15 +233,20 @@ end
 -- is why that path needs `max_output` and the streaming one does not. A
 -- callback stream is never accumulated, so `stdout` comes back empty for it.
 --
--- opts.stdin is written to the command before its output is drained, then
--- EOF is sent. That is the path for feeding a command data without a shell
--- redirect, the same way sftp writes a file without shell quoting.
+-- opts.stdin is written to the command, then EOF is sent. That is the path
+-- for feeding a command data without a shell redirect, the same way sftp
+-- writes a file without shell quoting. A string is capped (STDIN_MAX, above).
+-- A function is a SOURCE, called for the next chunk until it returns nil or
+-- "", with no cap: between writes, output the command has already produced
+-- is taken in (poll_channel) so the two directions do not wait on each
+-- other. Against the server that measurement was made on it may still wedge
+-- - see STDIN_MAX - and timeout_ms is what bounds that.
 function Session:exec(command, opts)
     opts = opts or {}
     local on_stdout, on_stderr = opts.on_stdout, opts.on_stderr
 
     local stdin = opts.stdin
-    if stdin ~= nil and type(stdin) ~= "string" then
+    if stdin ~= nil and type(stdin) ~= "string" and type(stdin) ~= "function" then
         return nil, { code = "bad_stdin", detail = type(stdin) }
     end
     -- The whole command - output, exit status, close - within this many ms.
@@ -271,60 +303,104 @@ function Session:exec(command, opts)
 
     -- One message: account for it, hand off its payload, and top up the
     -- receive window so a streaming sender never stalls waiting on us.
+    -- The peer's close, once seen by ANY read here - the stdin writer's reads
+    -- included. Waiting for it again after one of those took it in would
+    -- wait for a message that has already come.
+    local peer_closed = false
+
     local function pump()
         local m = self:channel_message(ch)
+        if m.type == "close" then peer_closed = true end
         deliver(m)
         local adj = ch:window_adjustment()
         if adj then self:send_packet(adj) end
         return m
     end
 
+    -- Take in whatever the command has already sent, without waiting for
+    -- more. Returns the peer's close, if that is what arrived.
+    local function drain()
+        -- Nothing follows the peer's close on this channel: reading on would
+        -- wait on (or report the end of) a stream that has nothing for it.
+        while not peer_closed do
+            local m = self:poll_channel(ch)
+            if not m then return nil end
+            if m.type == "close" then peer_closed = true end
+            deliver(m)
+            local adj = ch:window_adjustment()
+            if adj then self:send_packet(adj) end
+            if overflow then return { code = "output_too_large", limit = limit } end
+        end
+        return nil
+    end
+
+    -- Write `data` within the peer's window, taking in output between
+    -- packets. Returns a failure, or nil.
+    local function send_all(data)
+        local sent = 1
+        while sent <= #data and not ch.closed do
+            local f = drain()
+            if f then return f end
+            local room = ch:sendable()
+            -- Zero room means the peer has granted nothing more, and only
+            -- the peer can change that, so blocking here is correct.
+            while room <= 0 and not ch.closed do
+                pump()
+                if overflow then return { code = "output_too_large",
+                                          limit = limit } end
+                room = ch:sendable()
+            end
+            if ch.closed then break end
+            local chunk = data:sub(sent, sent + room - 1)
+            self:send_packet(ch:data_message(chunk))
+            sent = sent + #chunk
+        end
+        return nil
+    end
+
     local function drive()
-        if stdin then
+        if type(stdin) == "string" then
             -- Refuse up front rather than part way through: a caller whose
             -- input is too large should learn that before half of it is on
             -- the wire and the command has started acting on it.
             if #stdin > STDIN_MAX then
                 return { code = "stdin_too_large", limit = STDIN_MAX,
-                         detail = "use sftp for bulk data" }
+                         detail = "use sftp for bulk data, or pass a function to stream it" }
             end
-            local sent = 1
-            while sent <= #stdin and not ch.closed do
-                local room = ch:sendable()
-                -- Zero room means the peer has granted nothing more, and only
-                -- the peer can change that, so blocking here is correct.
-                while room <= 0 and not ch.closed do
-                    pump()
-                    if overflow then return { code = "output_too_large",
-                                              limit = limit } end
-                    room = ch:sendable()
+            local f = send_all(stdin)
+            if f then return f end
+        elseif stdin then
+            while not ch.closed do
+                -- The caller's source: its error stays the caller's, as the
+                -- output callbacks' do.
+                local s_ok, chunk = pcall(stdin)
+                if not s_ok then error({ app_error = chunk }, 0) end
+                if chunk == nil or chunk == "" then break end
+                if type(chunk) ~= "string" then
+                    return { code = "bad_stdin",
+                             detail = "the stdin source returned a " .. type(chunk) }
                 end
-                if ch.closed then break end
-                local chunk = stdin:sub(sent, sent + room - 1)
-                self:send_packet(ch:data_message(chunk))
-                sent = sent + #chunk
+                local f = send_all(chunk)
+                if f then return f end
             end
-            if not ch.closed then
-                self:send_packet(channel.build_eof(ch.remote_id))
-            end
+        end
+        if stdin and not ch.closed then
+            self:send_packet(channel.build_eof(ch.remote_id))
         end
 
         -- Until the peer closes the channel, however long a command streams:
         -- every pass needs a message from the peer, and opts.timeout_ms bounds
         -- the time. (A count here ended a long `journalctl -f` as if it had
         -- finished.)
-        while true do
-            local m = pump()
+        -- RFC 4254 section 5.3: a side that receives CHANNEL_CLOSE must send
+        -- one back unless it already has; close_channel does, after this.
+        -- Stopping without replying leaves the channel half-open on the
+        -- server for the life of the connection, which matters once a tool
+        -- runs many commands.
+        while not peer_closed do
+            pump()
             if overflow then
                 return { code = "output_too_large", limit = limit }
-            end
-            if m.type == "close" then
-                -- RFC 4254 section 5.3: a side that receives CHANNEL_CLOSE
-                -- must send one back unless it already has. Breaking without
-                -- replying leaves the channel half-open on the server for the
-                -- life of the connection, which matters once a tool runs many
-                -- commands.
-                break
             end
         end
         return nil

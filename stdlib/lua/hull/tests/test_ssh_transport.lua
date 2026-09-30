@@ -641,6 +641,92 @@ test("a non-string stdin is refused rather than coerced", function()
     assert_eq(err.code, "bad_stdin")
 end)
 
+-- stdin from a source function: streamed, uncapped, output taken in between --
+
+-- The bytes of every CHANNEL_DATA we wrote, joined.
+local function written_data(s)
+    local out = {}
+    for _, p in ipairs(s.written) do
+        if #p >= 6 and p:byte(6) == 94 then
+            local r = wire.reader(packet.parse(p, 8))
+            r:byte(); r:uint32()
+            out[#out + 1] = r:string()
+        end
+    end
+    return table.concat(out)
+end
+
+-- A source serving `chunks` in order, then EOF.
+local function source(chunks)
+    local i = 0
+    return function()
+        i = i + 1
+        return chunks[i]
+    end
+end
+
+test("a stdin source is streamed past the string cap, then EOF", function()
+    local big = string.rep("z", 100 * 1024)
+    local s = fake_stream(conf(4 * 1024 * 1024, 32768) .. ok_reply()
+                          .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cat", { stdin = source({ big, big, big }) })
+    assert_eq(r ~= nil and r.status, 0)
+    assert_eq(#written_data(s), 3 * 100 * 1024, "all 300 KiB reached the wire:")
+    assert_eq(has_type(s, 96), true, "and was terminated with EOF:")
+end)
+
+test("a stdin source respects the peer's window", function()
+    local s = fake_stream(conf(4, 4) .. ok_reply() .. grant(4) .. grant(4)
+                          .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r = t:exec("cat", { stdin = source({ "abcdef", "ghij" }) })
+    assert_eq(r.status, 0)
+    assert_eq(written_data(s), "abcdefghij")
+end)
+
+-- A stream that answers a short read with what it has - as the binding does
+-- with a 1 ms per-read bound - so buffered output can be taken in between
+-- stdin writes.
+local function waiting_stream(inbound)
+    local st = fake_stream(inbound, 65536)
+    st.wait = function() end
+    return st
+end
+
+test("output and the close that arrive while stdin streams are taken in", function()
+    -- The command answered and exited before being fed everything. Its
+    -- output must be delivered, not lost, and the close it sent must end the
+    -- exec - waiting for a second close would hang until the timeout.
+    local s = waiting_stream(conf(4 * 1024 * 1024, 32768) .. ok_reply()
+                             .. data("early") .. status(0) .. eof() .. fin())
+    local t = transport.new(s, stub_crypto())
+    local got = {}
+    local r = t:exec("cat", {
+        stdin = source({ "one", "two", "three" }),
+        on_stdout = function(c) got[#got + 1] = c end,
+    })
+    assert_eq(r ~= nil and r.status, 0)
+    assert_eq(table.concat(got), "early")
+end)
+
+test("a stdin source that raises is the caller's error, and the channel closes", function()
+    local s = fake_stream(conf() .. ok_reply() .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    assert_raises(function()
+        t:exec("cat", { stdin = function() error("source blew up") end })
+    end, "a raising source should propagate")
+    assert_eq(has_type(s, 97), true, "the channel must not be left half open:")
+end)
+
+test("a stdin source returning a non-string is bad_stdin", function()
+    local s = fake_stream(conf() .. ok_reply() .. status(0) .. eof() .. fin(), 7)
+    local t = transport.new(s, stub_crypto())
+    local r, err = t:exec("cat", { stdin = source({ "ok", 42 }) })
+    assert_eq(r, nil)
+    assert_eq(err.code, "bad_stdin")
+end)
+
 -- KEX message discipline ------------------------------------------------------
 --
 -- During a key exchange the transport is at its most exposed: the packets are

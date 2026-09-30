@@ -339,7 +339,15 @@ end
 -- exec or SFTP wait died after 256 of them, about two hours.
 function Transport:read_message(strict)
     while true do
-        local p = self:read_packet()
+        local p = self:handle_packet(self:read_packet(), strict)
+        if p then return p end
+    end
+end
+
+-- One packet off the wire, dealt with as read_message describes: returned
+-- when it is for the caller, nil when it was chatter the transport handled.
+function Transport:handle_packet(p, strict)
+    do
         local m = p:byte(1)
 
         if strict and (m == SSH_MSG_IGNORE or m == SSH_MSG_DEBUG
@@ -392,6 +400,42 @@ function Transport:read_message(strict)
             return p
         end
     end
+    return nil
+end
+
+-- Whether the next message can be had without waiting on the peer: one held
+-- from a rekey, a whole packet already buffered, or bytes the stream has right
+-- now that complete one.
+--
+-- For a sender that must keep reading while it writes (exec streaming stdin):
+-- output the command produced meanwhile is taken in - and the receive window
+-- topped up - between writes, so neither direction waits on the other. "Right
+-- now" is a read allowed to wait 1 ms; a stream without a per-read bound
+-- (a test double) is only checked for what is already buffered.
+function Transport:message_ready()
+    if self.deferred_head <= #self.deferred then return true end
+    local function whole()
+        local buf = self.inbuf
+        if #buf < 4 then return false end
+        local n = wire.peek_uint32(buf)
+        return #buf >= (self.s2c and cipher.frame_size(n) or n + 4)
+    end
+    if whole() then return true end
+    if not self.stream.wait then return false end
+
+    self.stream:wait(1)
+    local chunk, err, code = self.stream:read(READ_CHUNK)
+    self.stream:wait(self.wait_ms > 0 and self.wait_ms or 0)
+    if chunk == nil then
+        if code == "timeout" then return false end
+        if code == "deadline" then fail("deadline", "deadline reached") end
+        error("ssh: read failed: " .. tostring(err))
+    end
+    -- End of stream: say ready, so the read that follows reports it.
+    if chunk == "" then return true end
+    self.quiet_ms, self.unanswered = 0, 0
+    self.inbuf = self.inbuf .. chunk
+    return whole()
 end
 
 -- The next message OFF THE WIRE must be exactly `want`. Key exchange only.
