@@ -285,9 +285,16 @@ documenting parallel connections.
   (`hl_ssh_check_connect` / `hl_ssh_check_tunnel` -> `HlSshAuth`,
   `HL_SSH_DENY_*`, `hl_ssh_auth_reason`), which maps each reach reason to the
   list that refused.
-- **One connect adapter.** `net_stream.c` copies the KlConnectOp adapter,
-  socket-provider wrappers, the `getaddrinfo` loop and the TLS rc mapping from
-  `smtp_transport.c` / `tls_client.c` / the DB transport (~300 lines). The CA
+- **One connect adapter.** The `getaddrinfo` loop: done - `hl_net_resolve`
+  (`cap/net_resolve.c`) is the one copy `net_stream.c`, `smtp_transport.c`
+  and `db_transport.c` call (each keeps its test seam in front of it). The
+  copies had drifted: `net_stream.c` dropped the IPv6 scope id, so a
+  link-local destination could not connect, and only the DB copy skipped the
+  resolver for a literal. Deliberately NOT merged: the KlConnectOp hooks and
+  socket-provider wrappers. They sit on different loops (the async backend
+  vs. a private KlEventCtx), and the SMTP and DB wrappers route through
+  per-transport test providers; a shared adapter would have to abstract both,
+  for ~60 lines each. The TLS rc mapping is one line per file. The CA
   bundle ladder: done - `hl_ca_trust_resolve` (`ca_trust.c`) is the one copy
   `serve.c` and `serve_cli.c` call.
 - **DRY in the Lua stack.**

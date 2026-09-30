@@ -47,14 +47,13 @@
 #include <keel/allocator.h>
 #include <keel/clock.h>   /* kl_monotonic_ms: monotonic connect deadline */
 
-/* Resolution is a sandbox-compatible BLOCKING getaddrinfo, kept out of
+/* Resolution (cap/net_resolve.c) is a sandbox-compatible BLOCKING getaddrinfo, kept out of
  * the wire client (which the design keeps free of getaddrinfo/socket/poll/raw I/O).
  * This preserves the current resolver behavior: /etc/hosts, search domains, and
  * the OS resolver the kernel-sandbox network-outbound grant permits. */
-#include <netdb.h>
-#include <sys/socket.h>   /* AF_UNSPEC / AF_INET / AF_INET6 (cosmo needs it explicit) */
+#include <sys/socket.h>   /* AF_INET / AF_INET6 (cosmo needs it explicit) */
+#include "hull/cap/net_resolve.h"
 #include <sys/time.h>     /* struct timeval for SO_RCVTIMEO/SNDTIMEO (set_io_timeout) */
-#include <netinet/in.h>   /* struct sockaddr_in / sockaddr_in6 for the resolver */
 
 #include <errno.h>
 #include <pthread.h>
@@ -259,42 +258,9 @@ static int resolve_addrs(HlDbTransport *t, const char *host, int port)
     if (db_transport_test_resolve)
         return db_transport_test_resolve(t, host, port);
 #endif
-    /* IP-literal fast path: kl_sockaddr_parse is numeric-only (no DNS), matching
-     * the IP-literal-only databases.dynamic CIDR gate. */
-    if (kl_sockaddr_parse(&t->addrs[0], host, (uint16_t)port) == 0)
-        return 1;
-
-    char port_str[8];
-    snprintf(port_str, sizeof port_str, "%d", port);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res)
-        return 0;
-
-    int n = 0;
-    for (struct addrinfo *ai = res; ai && n < KL_CONNECT_MAX_ADDRS; ai = ai->ai_next) {
-        if (ai->ai_family == AF_INET && ai->ai_addr) {
-            const struct sockaddr_in *s = (const struct sockaddr_in *)(const void *)ai->ai_addr;
-            uint8_t ip[4];
-            memcpy(ip, &s->sin_addr, 4);
-            if (kl_sockaddr_from_ipv4(&t->addrs[n], ip, (uint16_t)port) == 0)
-                n++;
-        } else if (ai->ai_family == AF_INET6 && ai->ai_addr) {
-            const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)(const void *)ai->ai_addr;
-            uint8_t ip6[16];
-            memcpy(ip6, &s6->sin6_addr, 16);
-            if (kl_sockaddr_from_ipv6(&t->addrs[n], ip6, (uint16_t)port,
-                                      s6->sin6_scope_id) == 0)
-                n++;
-        }
-    }
-    freeaddrinfo(res);
-    return n;
+    /* The shared loop (cap/net_resolve.c): address literals without a
+     * lookup, then getaddrinfo, keeping each IPv6 scope id. */
+    return hl_net_resolve(host, port, t->addrs, KL_CONNECT_MAX_ADDRS);
 }
 
 static int co_start_resolve(void *ctx)

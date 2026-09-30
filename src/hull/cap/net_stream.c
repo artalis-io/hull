@@ -21,21 +21,18 @@
 #include <keel/connect_op.h>
 #include <keel/connect_op_detail.h> /* opt-in layout: embed a KlConnectOp (storage only) */
 #include <keel/sockaddr.h>
+#include "hull/cap/net_resolve.h"
 #include <keel/socket.h>
 #include <keel/handle.h>
 #include <keel/error.h>
 
 #include <errno.h>
-#include <netdb.h>        /* getaddrinfo: the SYSTEM resolver, see resolve_addrs */
-#include <netinet/in.h>   /* sockaddr_in / sockaddr_in6, to read what it returns */
 #include <pthread.h>
 #include <stddef.h>  /* offsetof: op -> owning stream */
-#include <stdio.h>        /* snprintf */
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>   /* AF_UNSPEC / AF_INET / AF_INET6 only. The socket
-                           * CALLS all go through the Keel provider; these are
-                           * just the family constants getaddrinfo speaks. */
+#include <sys/socket.h>   /* AF_INET / AF_INET6 only. The socket CALLS all go
+                           * through the Keel provider. */
 
 /* ── Socket provider ────────────────────────────────────────────────── */
 
@@ -281,54 +278,11 @@ static void maybe_release(HlNetStream *s)
  * host is configured to do. */
 static int resolve_addrs(HlNetStream *s)
 {
-    const char *host = s->host;
-    const int   port = s->port;
-
-    /* SEAM. When keel#332 lands and kl_resolve_sync is exported, this whole
-     * body collapses to:
-     *
-     *     return kl_resolve_sync(host, (uint16_t)port, SOCK_STREAM,
-     *                            s->addrs, NET_MAX_ADDRS, &s->naddrs) == 0
-     *                ? HL_NET_OK : HL_NET_E_RESOLVE;
-     *
-     * and <netdb.h>, <netinet/in.h>, <sys/socket.h>, struct sockaddr_in/in6
-     * and the AF_* constants all leave this file with it. Everything around
-     * this function is already written against that shape: the caller only
-     * needs "fill s->addrs / s->naddrs, return an HL_NET_* code".
-     *
-     * Until then this is the same getaddrinfo loop Keel keeps in
-     * src/resolve_sync.c and Hull keeps a second copy of in
-     * cap/smtp_transport.c. */
-    char port_str[8];
-    snprintf(port_str, sizeof port_str, "%d", port);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res)
-        return HL_NET_E_RESOLVE;
-
-    int n = 0;
-    for (struct addrinfo *ai = res; ai && n < NET_MAX_ADDRS; ai = ai->ai_next) {
-        if (ai->ai_family == AF_INET) {
-            struct sockaddr_in *v4 = (struct sockaddr_in *)ai->ai_addr;
-            uint8_t ip[4];
-            memcpy(ip, &v4->sin_addr, 4);
-            if (kl_sockaddr_from_ipv4(&s->addrs[n], ip, (uint16_t)port) == 0) n++;
-        } else if (ai->ai_family == AF_INET6) {
-            struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)ai->ai_addr;
-            uint8_t ip[16];
-            memcpy(ip, &v6->sin6_addr, 16);
-            if (kl_sockaddr_from_ipv6(&s->addrs[n], ip, (uint16_t)port, 0) == 0) n++;
-        }
-    }
-    freeaddrinfo(res);
-
-    s->naddrs = n;
-    return n > 0 ? HL_NET_OK : HL_NET_E_RESOLVE;
+    /* The shared loop (cap/net_resolve.c). It also keeps the IPv6 scope id,
+     * which this file's own copy dropped - a link-local destination named no
+     * interface and could not connect. */
+    s->naddrs = hl_net_resolve(s->host, s->port, s->addrs, NET_MAX_ADDRS);
+    return s->naddrs > 0 ? HL_NET_OK : HL_NET_E_RESOLVE;
 }
 
 /* ── KlConnectOp adapter hooks ──────────────────────────────────────── */

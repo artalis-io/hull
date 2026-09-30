@@ -944,6 +944,12 @@ ifneq ($(HL_ENABLE_MYSQL),1)
       $(SRCDIR)/hull/cap/mysqlwire.c, \
       $(CAP_SRCS))
 endif
+# The one getaddrinfo loop (cap/net_resolve.c) the KlConnectOp transports share -
+# net_stream, SMTP and db_transport. It builds Keel KlSockAddrs, so it goes when
+# Keel is not linked (no HTTP half and no network DB/KV backend), as they do.
+ifeq ($(HL_LINK_TLS),0)
+  CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/net_resolve.c,$(CAP_SRCS))
+endif
 # Shared SQL-wire byte transport (cap/db_transport.c) over Keel v3 - backs BOTH
 # the Postgres, MySQL, and Valkey wire clients (extracted from the byte-identical
 # pg_transport.c / mysql_transport.c; docs/db_transport_extraction.md, and Valkey
