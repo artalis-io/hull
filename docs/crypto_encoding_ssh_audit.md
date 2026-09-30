@@ -199,12 +199,15 @@ a byte-only crypto API (a deliberate breaking change).
   2048 bits) are verified alongside Ed25519, the store's key type is asked
   for first, and the live sshd e2e connects to a server holding only each
   type. P-521 is not offered (no ES512 in `hull.crypto`).
-- **SSH, not on the roadmap:** one cipher; one key per connection with
-  no fallback; one operation at a time per connection (an exec and an open
-  SFTP session share it safely, but two coroutines driving one connection at
-  once are not supported); no way to start concurrent tasks from `app.main`,
-  so a fleet tool connects to hosts in turn; exec stdin capped at 128 KiB and
-  not streamable; no time-based rekey (deliberate, but unrecorded).
+- **SSH polish:** done. A second cipher, chacha20-poly1305@openssh.com,
+  negotiated only under strict KEX (#620); several keys offered in order
+  (`keys`, #618); exec stdin streamed from a source function (#619; a
+  string is still capped at 128 KiB).
+- **SSH, not on the roadmap:** one operation at a time per connection (an
+  exec and an open SFTP session share it safely, but two coroutines driving
+  one connection at once are not supported); no way to start concurrent
+  tasks from `app.main`, so a fleet tool connects to hosts in turn; no
+  time-based rekey (deliberate: the cipher layer has no clock).
 
 See also [`encoding_consolidation_plan.md`](encoding_consolidation_plan.md),
 [`kv_encryption_design.md`](kv_encryption_design.md) and
