@@ -98,6 +98,7 @@ specific signature, parameter list, or return value.
 | [`cache.md`](cache.md) | The on-disk runtime cache pool (`hull cache`), registered kinds, eviction. |
 | [`kv_cache.md`](kv_cache.md) | `hull/kv` (durable KV store) + `hull.cache` (byte cache) - backends, capability model. |
 | [`ssh.md`](ssh.md) | `hull/ssh@1` - the SSH-2 client: the manifest allowlist, host-key trust, passphrases, WebSocket relays, exec/SFTP, rekeying. |
+| [`task_join_design.md`](task_join_design.md) | Starting and joining concurrent work from `app.main`: Lua `hull.async` / `hull.gather` / `hull.map`, JS `hull.map`, failure aggregation, and what happens to unjoined tasks. Implemented. |
 | [`cli_mode.md`](cli_mode.md) | `app.main` CLI apps + the `HL_ENABLE_HTTP_SERVER=0` flavor. |
 | [`tui_mode.md`](tui_mode.md) | The `hull.tui` terminal-UI module (`tui.run`, cell-diff rendering). |
 
