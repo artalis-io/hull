@@ -421,8 +421,9 @@ function Transport:message_ready()
     local function whole()
         local buf = self.inbuf
         if #buf < 4 then return false end
-        local n = wire.peek_uint32(buf)
-        return #buf >= (self.s2c and cipher.frame_size(n) or n + 4)
+        -- The cipher sizes the frame: chacha20-poly1305's length is encrypted.
+        return #buf >= (self.s2c and self.s2c:needed(buf, self.recv_seq)
+                                 or wire.peek_uint32(buf) + 4)
     end
     if whole() then return true end
     if not self.stream.wait then return false end

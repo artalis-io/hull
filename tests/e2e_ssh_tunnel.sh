@@ -263,6 +263,19 @@ app.main(function()
                                { on_stdout = function(c) got = got + #c end })
             print("chacha_bytes=" .. tostring(rc and got))
             print("chacha_rekeyed=" .. tostring(cc:stats().rekeys >= 1))
+            -- Streamed stdin under chacha: the writer's between-writes check
+            -- has to size frames whose length is encrypted.
+            local left, back = 16, 0
+            local rs2 = cc:exec("cat", {
+                stdin = function()
+                    if left == 0 then return nil end
+                    left = left - 1
+                    return string.rep("c", 65536)
+                end,
+                on_stdout = function(c) back = back + #c end,
+                timeout_ms = 60000,
+            })
+            print("chacha_stdin=" .. tostring(rs2 and back))
             cc:close()
         else
             print("chacha_cipher=error:" .. tostring(cce and cce.code)
@@ -671,6 +684,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "chacha_cipher" "chacha20-poly1305@openssh.com" "live: chacha20-poly1305 negotiated under strict KEX"
         assert_line "$OUT" "chacha_bytes" "2000000" "live: 2 MB through chacha20-poly1305"
         assert_line "$OUT" "chacha_rekeyed" "true" "live: a rekey under chacha20-poly1305"
+        assert_line "$OUT" "chacha_stdin" "1048576" "live: 1 MB of streamed stdin under chacha20-poly1305"
         assert_line "$OUT" "stdin_echo" "hull-stdin-ok" "live: stdin reaches the command"
         assert_line "$OUT" "stdin_streamed" "5242880" "live: 5 MB of stdin streamed while its output came back"
         assert_line "$OUT" "streamed_bytes" "3000000" "live: 3 MB streamed through on_stdout"
