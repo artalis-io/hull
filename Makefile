@@ -1000,11 +1000,12 @@ ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
 endif
 # hull/net's transport composes Keel (KlConnectOp + the event loop). Keel is
 # linked only when at least one HTTP half is on, so with BOTH off the stream
-# cap goes too. cap/net_policy.c and cap/ssh_policy.c deliberately stay: they
-# are pure manifest policy with no Keel dependency, so the capability still
-# refuses correctly in a build that cannot dial at all.
+# cap goes too, and cap/ssh.c (which dials through it) with it.
+# cap/net_policy.c and cap/ssh_policy.c deliberately stay: they are pure
+# manifest policy with no Keel dependency, so the capability still refuses
+# correctly in a build that cannot dial at all.
 ifeq ($(HL_ENABLE_HTTP_CLIENT)$(HL_ENABLE_HTTP_SERVER),00)
-  CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/net_stream.c,$(CAP_SRCS))
+  CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/net_stream.c $(SRCDIR)/hull/cap/ssh.c,$(CAP_SRCS))
 endif
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   # SERVER-only capability sources - body reader (request bodies) +
