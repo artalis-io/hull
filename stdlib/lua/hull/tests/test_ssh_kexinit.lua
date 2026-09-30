@@ -249,11 +249,63 @@ end)
 
 -- the offer itself -------------------------------------------------------------
 
+-- chacha20-poly1305 and strict KEX ----------------------------------------
+
+local CHACHA = "chacha20-poly1305@openssh.com"
+
+-- A server offering only chacha, with or without the strict-KEX marker.
+local function chacha_only(strict)
+    local s = agreeable()
+    s.cipher_c2s = { CHACHA }
+    s.cipher_s2c = { CHACHA }
+    if strict then s.kex = { "curve25519-sha256", kexinit.STRICT_S } end
+    return s
+end
+
+test("chacha20-poly1305 is chosen when the server is strict and offers only it", function()
+    local n, err = kexinit.negotiate(nil, chacha_only(true))
+    assert_eq(err, nil)
+    assert_eq(n.cipher_c2s, CHACHA)
+    assert_eq(n.cipher_s2c, CHACHA)
+end)
+
+test("chacha20-poly1305 is never chosen without strict KEX (Terrapin)", function()
+    local n, err = kexinit.negotiate(nil, chacha_only(false))
+    assert_eq(n, nil)
+    assert_eq(type(err), "string")
+end)
+
+test("AES-GCM still wins when the server offers both", function()
+    local s = chacha_only(true)
+    s.cipher_c2s = { CHACHA, "aes256-gcm@openssh.com" }
+    s.cipher_s2c = { CHACHA, "aes256-gcm@openssh.com" }
+    assert_eq(kexinit.negotiate(nil, s).cipher_c2s, "aes256-gcm@openssh.com")
+end)
+
+test("an offer of chacha alone against a non-strict server says why", function()
+    local _, err = kexinit.negotiate({ kex = { "curve25519-sha256" },
+                                       host_key = { "ssh-ed25519" },
+                                       cipher = { CHACHA },
+                                       mac = { "hmac-sha2-256" },
+                                       compression = { "none" } },
+                                     chacha_only(false))
+    assert_eq(err:find("strict KEX", 1, true) ~= nil, true, err)
+end)
+
+test("on a rekey the connection's strictness decides, not the new KEXINIT", function()
+    -- OpenSSH sends the marker only in its first KEXINIT, so a rekey's
+    -- KEXINIT never has it. The caller passes the connection's flag.
+    local s = chacha_only(false)           -- no marker, as in a rekey
+    local n = kexinit.negotiate(nil, s, true)
+    assert_eq(n.cipher_c2s, CHACHA)
+    assert_eq(kexinit.negotiate(nil, chacha_only(true), false), nil)
+end)
+
 test("the default offer lists only algorithms Hull can do", function()
     local o = kexinit.DEFAULT_OFFER
     -- Every name here is one a peer may steer us onto.
-    assert_eq(#o.cipher, 1)
-    assert_eq(o.cipher[1], "aes256-gcm@openssh.com")
+    assert_eq(table.concat(o.cipher, ","),
+              "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com")
     assert_eq(table.concat(o.host_key, ","),
               "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,rsa-sha2-512,rsa-sha2-256")
     -- Every one of them is an algorithm hull.ssh.hostkey verifies.

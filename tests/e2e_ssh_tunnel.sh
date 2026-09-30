@@ -240,6 +240,47 @@ app.main(function()
         }
         print("decoy_only_code=" .. tostring(de and de.code))
 
+        -- chacha20-poly1305, forced by offering nothing else. It needs strict
+        -- KEX (Terrapin), so the offer carries our marker; sshd has offered
+        -- the server side since 9.6. 2 MB of output crosses sshd's 1M
+        -- RekeyLimit, so a rekey runs under chacha too.
+        local cc, cce = ssh.connect{
+            host = "$2", port = $3, user = "$SSH_LOGIN",
+            key = key, trust = trust, tunnel = TUNNEL,
+            offer = {
+                kex = { "curve25519-sha256", "kex-strict-c-v00@openssh.com" },
+                host_key = { "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
+                             "rsa-sha2-512", "rsa-sha2-256" },
+                cipher = { "chacha20-poly1305@openssh.com" },
+                mac = { "hmac-sha2-256" },
+                compression = { "none" },
+            },
+        }
+        if cc then
+            print("chacha_cipher=" .. tostring(cc:negotiated().cipher_c2s))
+            local got = 0
+            local rc = cc:exec("head -c 2000000 /dev/zero",
+                               { on_stdout = function(c) got = got + #c end })
+            print("chacha_bytes=" .. tostring(rc and got))
+            print("chacha_rekeyed=" .. tostring(cc:stats().rekeys >= 1))
+            -- Streamed stdin under chacha: the writer's between-writes check
+            -- has to size frames whose length is encrypted.
+            local left, back = 16, 0
+            local rs2 = cc:exec("cat", {
+                stdin = function()
+                    if left == 0 then return nil end
+                    left = left - 1
+                    return string.rep("c", 65536)
+                end,
+                on_stdout = function(c) back = back + #c end,
+                timeout_ms = 60000,
+            })
+            print("chacha_stdin=" .. tostring(rs2 and back))
+            cc:close()
+        else
+            print("chacha_cipher=error:" .. tostring(cce and cce.code)
+                  .. ":" .. tostring(cce and cce.detail))
+        end
         -- stdin reaches the command, and EOF ends it
         local rs = conn:exec("cat", { stdin = "hull-stdin-ok" })
         print("stdin_echo=" .. tostring(rs and rs.stdout))
@@ -640,6 +681,10 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "exit3_status" "3" "live: a non-zero remote exit is a status, not an error"
         assert_line "$OUT" "fallback_key" "2" "live: a refused key gives way to the next"
         assert_line "$OUT" "decoy_only_code" "auth_failed" "live: an unknown key alone is auth_failed"
+        assert_line "$OUT" "chacha_cipher" "chacha20-poly1305@openssh.com" "live: chacha20-poly1305 negotiated under strict KEX"
+        assert_line "$OUT" "chacha_bytes" "2000000" "live: 2 MB through chacha20-poly1305"
+        assert_line "$OUT" "chacha_rekeyed" "true" "live: a rekey under chacha20-poly1305"
+        assert_line "$OUT" "chacha_stdin" "1048576" "live: 1 MB of streamed stdin under chacha20-poly1305"
         assert_line "$OUT" "stdin_echo" "hull-stdin-ok" "live: stdin reaches the command"
         assert_line "$OUT" "stdin_streamed" "5242880" "live: 5 MB of stdin streamed while its output came back"
         assert_line "$OUT" "streamed_bytes" "3000000" "live: 3 MB streamed through on_stdout"

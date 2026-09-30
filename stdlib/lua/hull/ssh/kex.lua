@@ -161,6 +161,24 @@ M.SIZES = {
         key_c2s = 32, key_s2c = 32,
         mac_c2s = 0,  mac_s2c = 0,
     },
+    -- Two 32-byte keys per direction (payload and length), and no IV: the
+    -- nonce is the packet sequence number.
+    ["chacha20-poly1305@openssh.com"] = {
+        iv_c2s = 0, iv_s2c = 0,
+        key_c2s = 64, key_s2c = 64,
+        mac_c2s = 0,  mac_s2c = 0,
+    },
 }
+
+-- The sizes for a negotiation whose two directions may use different
+-- ciphers: each direction's fields from its own cipher.
+function M.sizes_for(cipher_c2s, cipher_s2c)
+    local a, b = M.SIZES[cipher_c2s], M.SIZES[cipher_s2c]
+    if not a or not b then return nil end
+    return {
+        iv_c2s = a.iv_c2s, key_c2s = a.key_c2s, mac_c2s = a.mac_c2s,
+        iv_s2c = b.iv_s2c, key_s2c = b.key_s2c, mac_s2c = b.mac_s2c,
+    }
+end
 
 return M

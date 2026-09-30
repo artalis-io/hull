@@ -1169,6 +1169,67 @@ static int lua_crypto_aes256ctr(lua_State *L)
     return 1;
 }
 
+/* ── ChaCha20 / Poly1305 ────────────────────────────────────────────── */
+
+/* crypto.chacha20(key, nonce, counter, data) -> out
+ * crypto.poly1305(key, msg) -> tag
+ *
+ * The two halves of chacha20-poly1305@openssh.com, which composes them itself
+ * (separate keys for the length and the payload, the MAC over the encrypted
+ * packet) - so the IETF AEAD does not fit and the raw primitives are bound.
+ * RFC 8439 layout: 32-byte key, 12-byte nonce, 32-bit block counter. Like
+ * aes256ctr, unauthenticated by itself; poly1305's key is ONE-TIME. */
+static int lua_crypto_chacha20(lua_State *L)
+{
+    size_t klen, nlen, len;
+    const char *key   = luaL_checklstring(L, 1, &klen);
+    const char *nonce = luaL_checklstring(L, 2, &nlen);
+    lua_Integer ctr   = luaL_checkinteger(L, 3);
+    const char *in    = luaL_optlstring(L, 4, "", &len);
+
+    if (klen != HL_CHACHA20_KEY_LEN)
+        return luaL_error(L, "crypto.chacha20: key must be %d bytes, got %d",
+                          (int)HL_CHACHA20_KEY_LEN, (int)klen);
+    if (nlen != HL_CHACHA20_NONCE_LEN)
+        return luaL_error(L, "crypto.chacha20: nonce must be %d bytes, got %d",
+                          (int)HL_CHACHA20_NONCE_LEN, (int)nlen);
+    if (ctr < 0 || ctr > 0xFFFFFFFFLL)
+        return luaL_error(L, "crypto.chacha20: counter must be 0..2^32-1");
+    if (!len) { lua_pushliteral(L, ""); return 1; }
+
+    luaL_Buffer b;
+    char *out = luaL_buffinitsize(L, &b, len);
+    int rc = hl_cap_crypto_chacha20((uint8_t *)out, (const uint8_t *)key,
+                                    (const uint8_t *)nonce, (uint32_t)ctr, in, len);
+    if (rc != 0) {
+        luaL_pushresultsize(&b, 0);
+        lua_pop(L, 1);
+        return luaL_error(L, rc == -3
+            ? "crypto.chacha20: no ChaCha20 backend in this build (TLS is not composed)"
+            : "crypto.chacha20: bad argument (or the block counter would wrap)");
+    }
+    luaL_pushresultsize(&b, len);
+    return 1;
+}
+
+static int lua_crypto_poly1305(lua_State *L)
+{
+    size_t klen, len;
+    const char *key = luaL_checklstring(L, 1, &klen);
+    const char *msg = luaL_optlstring(L, 2, "", &len);
+    if (klen != HL_POLY1305_KEY_LEN)
+        return luaL_error(L, "crypto.poly1305: key must be %d bytes, got %d",
+                          (int)HL_POLY1305_KEY_LEN, (int)klen);
+    uint8_t tag[HL_POLY1305_TAG_LEN];
+    int rc = hl_cap_crypto_poly1305(tag, (const uint8_t *)key, msg, len);
+    if (rc != 0)
+        return luaL_error(L, rc == -3
+            ? "crypto.poly1305: no Poly1305 backend in this build (TLS is not composed)"
+            : "crypto.poly1305: bad argument");
+    lua_pushlstring(L, (const char *)tag, sizeof tag);
+    return 1;
+}
+
 /* ── AES-256-GCM ────────────────────────────────────────────────────── */
 
 /* crypto.gcm_seal(key, iv, aad, plaintext) -> ciphertext, tag
@@ -1302,6 +1363,8 @@ static const luaL_Reg crypto_funcs[] = {
     {"gcm_seal",          lua_crypto_gcm_seal},
     {"gcm_open",          lua_crypto_gcm_open},
     {"aes256ctr",         lua_crypto_aes256ctr},
+    {"chacha20",          lua_crypto_chacha20},
+    {"poly1305",          lua_crypto_poly1305},
     {"bcrypt_pbkdf",      lua_crypto_bcrypt_pbkdf},
     {"bcrypt_pbkdf_env",  lua_crypto_bcrypt_pbkdf_env},
     {"key_from_env",      lua_crypto_key_from_env},

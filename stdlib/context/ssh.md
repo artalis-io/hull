@@ -128,7 +128,8 @@ ssh.connect{ host = "10.0.0.7", user = "deploy", key = key, trust = trust,
 
 ## What is negotiated
 
-curve25519-sha256 key exchange, AES-256-GCM, strict KEX (Terrapin). Refused
+curve25519-sha256 key exchange, AES-256-GCM (chacha20-poly1305 when the
+server has no GCM, only under strict KEX), strict KEX (Terrapin). Refused
 by construction: SSH-1, SHA-1 `ssh-rsa`, DSA, CBC, MD5, weak DH, compression.
 P-521 keys are not supported.
 

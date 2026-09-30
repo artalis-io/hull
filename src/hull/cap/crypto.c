@@ -803,10 +803,27 @@ static int aead_stub_ctr(uint8_t *out, const uint8_t key[32],
     return -3;   /* HL_CRYPTO_E_NO_BACKEND, see cap/crypto.h */
 }
 
+static int aead_stub_chacha20(uint8_t *out, const uint8_t key[32],
+                              const uint8_t nonce[12], uint32_t counter,
+                              const void *in, size_t len)
+{
+    (void)out; (void)key; (void)nonce; (void)counter; (void)in; (void)len;
+    return -3;   /* HL_CRYPTO_E_NO_BACKEND, see cap/crypto.h */
+}
+
+static int aead_stub_poly1305(uint8_t tag[16], const uint8_t key[32],
+                              const void *msg, size_t len)
+{
+    (void)tag; (void)key; (void)msg; (void)len;
+    return -3;   /* HL_CRYPTO_E_NO_BACKEND, see cap/crypto.h */
+}
+
 static const HlCryptoAeadBackend hl_crypto_aead_backend_stub = {
-    .seal = aead_stub_seal,
-    .open = aead_stub_open,
-    .ctr  = aead_stub_ctr,
+    .seal     = aead_stub_seal,
+    .open     = aead_stub_open,
+    .ctr      = aead_stub_ctr,
+    .chacha20 = aead_stub_chacha20,
+    .poly1305 = aead_stub_poly1305,
 };
 
 __attribute__((weak))
@@ -872,6 +889,35 @@ int hl_cap_crypto_aes256ctr(uint8_t *out,
      * build cannot do it. */
     if (!b->ctr) return -3;   /* backend predates CTR: unavailable, not a failure */
     return b->ctr(out, key, ctr_iv, in, len);
+}
+
+int hl_cap_crypto_chacha20(uint8_t *out, const uint8_t key[HL_CHACHA20_KEY_LEN],
+                           const uint8_t nonce[HL_CHACHA20_NONCE_LEN], uint32_t counter,
+                           const void *in, size_t len)
+{
+    if (!key || !nonce) return -1;
+    if (len && (!out || !in)) return -1;
+    /* The block counter is 32 bits in the RFC 8439 layout; a run past its
+     * end would wrap into block 0 and reuse keystream. Refused, not wrapped. */
+    if (len && (uint64_t)counter + (((uint64_t)len + 63) / 64) > 0x100000000ULL)
+        return -1;
+    if (!len) return 0;
+
+    const HlCryptoAeadBackend *b = hl_crypto_aead_active_backend();
+    if (!b->chacha20) return -3;   /* backend predates the slot: unavailable */
+    return b->chacha20(out, key, nonce, counter, in, len);
+}
+
+int hl_cap_crypto_poly1305(uint8_t tag[HL_POLY1305_TAG_LEN],
+                           const uint8_t key[HL_POLY1305_KEY_LEN],
+                           const void *msg, size_t len)
+{
+    if (!tag || !key) return -1;
+    if (len && !msg) return -1;
+
+    const HlCryptoAeadBackend *b = hl_crypto_aead_active_backend();
+    if (!b->poly1305) return -3;
+    return b->poly1305(tag, key, msg, len);
 }
 
 int hl_cap_crypto_aes256gcm_seal(uint8_t *out, uint8_t tag[HL_AEAD_TAG_LEN],

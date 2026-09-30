@@ -474,10 +474,18 @@ there is no time-based trigger.
 |---|---|
 | key exchange | `curve25519-sha256` (also its pre-standard `@libssh.org` name) |
 | host key | `ssh-ed25519`, then `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `rsa-sha2-512`, `rsa-sha2-256` |
-| encryption | `aes256-gcm@openssh.com` |
+| encryption | `aes256-gcm@openssh.com`, then `chacha20-poly1305@openssh.com` (only under strict KEX) |
 | MAC | implicit in the AEAD |
 | user auth | `publickey` with `ssh-ed25519`, `ecdsa-sha2-nistp256` / `-nistp384`, or an RSA key under `rsa-sha2-512` then `rsa-sha2-256` |
 | compression | `none` |
+
+`chacha20-poly1305@openssh.com` is for servers that disable AES-GCM. It is
+negotiated only when strict KEX is in effect: its nonce is the packet sequence
+number, which is exactly what the Terrapin attack (CVE-2023-48795) shifts, so
+against a server without the `kex-strict-s` marker Hull keeps it out of the
+offer. AES-256-GCM stays first either way (hardware AES where the CPU has it).
+Force one with `offer.cipher` on `connect`; `conn:negotiated().cipher_c2s`
+says which was agreed.
 
 Host keys are offered in that order, with one exception: when the trust store
 already holds a key for the host, that key's type goes first. A server with

@@ -21,12 +21,12 @@ M.SSH_MSG_KEXINIT = 20
 -- unauthenticated message during the plaintext handshake and deleting one
 -- after it, which shifts what the two ends think they agreed.
 --
--- Hull is not exploitable today, but by cipher choice rather than by design:
--- aes256-gcm does not bind the sequence number into its tag, so a deletion
--- desynchronises the invocation counter and the next packet fails to
--- authenticate. That protection lives entirely in the cipher list above, and
--- would vanish the day someone adds ChaCha20-Poly1305 or a CBC mode. Saying
--- so explicitly costs one list entry.
+-- aes256-gcm is not exploitable without it: it does not bind the sequence
+-- number into its tag, so a deletion desynchronises the invocation counter
+-- and the next packet fails to authenticate. chacha20-poly1305 IS: its nonce
+-- is the sequence number, which is exactly what the attack shifts. So
+-- negotiate() offers chacha20-poly1305 only when strict KEX is in effect, and
+-- aes256-gcm stays first either way.
 M.STRICT_C = "kex-strict-c-v00@openssh.com"
 M.STRICT_S = "kex-strict-s-v00@openssh.com"
 
@@ -48,9 +48,12 @@ M.DEFAULT_OFFER = {
     host_key = { "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
                  "rsa-sha2-512", "rsa-sha2-256" },
 
-    -- AEAD. Hull has AES-256-GCM through the TLS feature; adding a
-    -- non-authenticated cipher would only create a downgrade target.
-    cipher = { "aes256-gcm@openssh.com" },
+    -- AEAD only: a non-authenticated cipher would only create a downgrade
+    -- target. AES-256-GCM first (hardware AES where the CPU has it);
+    -- chacha20-poly1305 for servers that disable GCM, and ONLY under strict
+    -- KEX (see the Terrapin note above and negotiate()). Both come from the
+    -- TLS feature's mbedTLS.
+    cipher = { "aes256-gcm@openssh.com", "chacha20-poly1305@openssh.com" },
 
     -- Under an AEAD cipher the MAC field is unused: authentication comes from
     -- the cipher. The list is still sent because servers expect a non-empty
@@ -70,9 +73,8 @@ M.DEFAULT_OFFER = {
 local OFFER_LISTS = { "kex", "host_key", "cipher", "mac", "compression" }
 
 -- A caller may narrow or reorder the offer, never widen it. DEFAULT_OFFER is
--- exactly what this client implements: the exchange is always curve25519,
--- the host key always ed25519, the cipher always AES-256-GCM, whatever name
--- was agreed. So an offer naming anything else would "negotiate" an algorithm
+-- exactly what this client implements, so a name outside it would be agreed
+-- and then not used. So an offer naming anything else would "negotiate" an algorithm
 -- the transport then does not use - at best a confusing failure after the
 -- server agreed, at worst a server that believes the session uses something
 -- it does not. Refused before anything is dialled. Returns true, or nil and
@@ -215,8 +217,9 @@ end
 -- category with no overlap. The message names the category and both sides,
 -- because "no matching algorithm" on its own tells an operator nothing about
 -- which knob to turn.
-function M.negotiate(offer, server)
+function M.negotiate(offer, server, strict)
     local o = offer or M.DEFAULT_OFFER
+    if strict == nil then strict = M.server_is_strict(server) end
 
     local function pick(what, mine, theirs)
         local got = M.choose(mine, theirs)
@@ -240,10 +243,25 @@ function M.negotiate(offer, server)
     local hostkey; hostkey, err = pick("host key algorithm", o.host_key, server.host_key)
     if not hostkey then return nil, err end
 
-    local c2s; c2s, err = pick("client-to-server cipher", o.cipher, server.cipher_c2s)
+    -- chacha20-poly1305 only under strict KEX (Terrapin). Removed from OUR
+    -- side, so a server preferring it cannot pull a non-strict session onto
+    -- it; an offer naming nothing else then fails and says why.
+    local ciphers = o.cipher
+    if not strict then
+        ciphers = {}
+        for _, name in ipairs(o.cipher) do
+            if name ~= "chacha20-poly1305@openssh.com" then ciphers[#ciphers + 1] = name end
+        end
+        if #ciphers == 0 then
+            return nil, "ssh: chacha20-poly1305 needs strict KEX (the Terrapin "
+                        .. "mitigation), which the server does not offer"
+        end
+    end
+
+    local c2s; c2s, err = pick("client-to-server cipher", ciphers, server.cipher_c2s)
     if not c2s then return nil, err end
 
-    local s2c; s2c, err = pick("server-to-client cipher", o.cipher, server.cipher_s2c)
+    local s2c; s2c, err = pick("server-to-client cipher", ciphers, server.cipher_s2c)
     if not s2c then return nil, err end
 
     -- MAC is negotiated for completeness but unused under an AEAD cipher; a
