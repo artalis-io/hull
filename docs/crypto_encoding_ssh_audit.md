@@ -176,8 +176,10 @@ a byte-only crypto API (a deliberate breaking change).
   vectors in both runtimes). Reason strings on JS decode failures and one JS
   error shape are done: checks of untrusted input return `[value, reason]`
   (sealbox moved to it; decoders keep returning `null` and gain `why()`),
-  recorded in `stdlib_style.md`. Open: a keyring from env (a C-held keyring,
-  see `kv_encryption_design.md`).
+  recorded in `stdlib_style.md`. A keyring from env is done:
+  `crypto.key_from_env` holds a key in C, and `sealbox.keyring_from_env`
+  builds a keyring of them for `hull/kv` and TOTP
+  (`kv_encryption_design.md` section 6).
 - **RSA user keys:** done. `hull.crypto` gained `sign` (RS256/384/512, PS256,
   ES256/384; the inverse of `verify`) and `rsa_private_pem` (an OpenSSH key
   stores components, not PKCS#1); userauth signs under `rsa-sha2-512`, then

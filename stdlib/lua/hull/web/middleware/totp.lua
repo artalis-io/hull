@@ -665,11 +665,14 @@ function totp.init(opts)
             legacy_version = opts.legacy_key_version
         end
     elseif opts.encryption_key then
-        if type(opts.encryption_key) ~= "string"
-           or #opts.encryption_key ~= 32 then
-            error("totp.init: encryption_key must be exactly 32 bytes")
+        -- 32 bytes, or a crypto.key_from_env key; sealbox.keyring decides.
+        local ok, ring = pcall(sealbox.keyring,
+                               { keys = { [1] = opts.encryption_key }, current = 1 })
+        if not ok then
+            error("totp.init: encryption_key "
+                  .. tostring(ring):gsub("^sealbox%.keyring: key 1 ", ""), 2)
         end
-        keys = sealbox.keyring({ keys = { [1] = opts.encryption_key }, current = 1 }).keys
+        keys = ring.keys
         current = 1
         legacy_version = 1  -- pre-versioning rows decrypt under this key
     end

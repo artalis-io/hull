@@ -5,6 +5,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/crypto.h"
+#include "hull/cap/crypto_key.h"
 #include "hull/cap/env.h"
 #include "hull/limits/core.h"
 #include "../../utils/base64.h"
@@ -819,6 +820,146 @@ static void register_sha256_hasher_mt(lua_State *L)
     lua_pop(L, 1);
 }
 
+/* ── Keys held in C ─────────────────────────────────────────────────── */
+
+/* crypto.key_from_env(var) -> key
+ *
+ * A 32-byte secretbox key read from the environment variable `var` (64 hex
+ * digits or base64, under manifest.env like any env read) into memory the C
+ * layer owns. The script gets a handle, never the bytes: key:secretbox /
+ * key:secretbox_open seal with it, key:destroy() or the collector zeroes it.
+ * hull/crypto/sealbox keyrings take a key in place of a byte string, which is
+ * how hull/kv's `encrypt` and TOTP's secret store keep their keys out of the
+ * script heap. */
+#define HL_CRYPTO_KEY_MT "hull.crypto.key"
+
+typedef struct {
+    HlCryptoKey *k;
+    char name[64];              /* the variable's name, for tostring; not secret */
+} HlLuaCryptoKey;
+
+static HlLuaCryptoKey *check_key(lua_State *L, int idx)
+{
+    return (HlLuaCryptoKey *)luaL_checkudata(L, idx, HL_CRYPTO_KEY_MT);
+}
+
+static const HlCryptoKey *live_key(lua_State *L, int idx)
+{
+    HlLuaCryptoKey *h = check_key(L, idx);
+    if (!h->k) luaL_error(L, "crypto.key: the key has been destroyed");
+    return h->k;
+}
+
+static int lua_crypto_key_from_env(lua_State *L)
+{
+    const char *var = luaL_checkstring(L, 1);
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.env_cfg)
+        return luaL_error(L, "crypto.key_from_env: no env capability");
+
+    /* The handle is allocated first, so nothing that can raise runs while a
+     * key exists outside it. */
+    HlLuaCryptoKey *h = (HlLuaCryptoKey *)lua_newuserdatauv(L, sizeof *h, 0);
+    h->k = NULL;
+    snprintf(h->name, sizeof h->name, "%s", var);
+    luaL_setmetatable(L, HL_CRYPTO_KEY_MT);
+
+    const char *val = hl_cap_env_get(lua->base.env_cfg, var);
+    if (!val || !*val) {
+        /* One message for "not in manifest.env" and "declared but unset", as
+         * bcrypt_pbkdf_env: telling them apart would let a caller probe the
+         * allowlist, and the remedy is the same. */
+        return luaL_error(L, "crypto.key_from_env: '%s' is not available "
+                             "(declare it in manifest.env and set it)", var);
+    }
+    /* Decoded straight from the environment's own copy into the key buffer;
+     * no intermediate script-visible or unscrubbed copy is made. */
+    if (hl_cap_crypto_key_from_text(val, strlen(val), &h->k) != 0)
+        return luaL_error(L, "crypto.key_from_env: '%s' is not a 32-byte key "
+                             "(64 hex digits or base64)", var);
+    return 1;
+}
+
+static int lua_crypto_key_secretbox(lua_State *L)
+{
+    const HlCryptoKey *k = live_key(L, 1);
+    size_t msg_len, nonce_len;
+    const char *msg   = luaL_checklstring(L, 2, &msg_len);
+    const char *nonce = luaL_checklstring(L, 3, &nonce_len);
+    if (nonce_len != 24) return luaL_error(L, "key:secretbox: nonce must be 24 bytes");
+    if (msg_len > SIZE_MAX - HL_SECRETBOX_MACBYTES)
+        return luaL_error(L, "key:secretbox: message too large");
+    size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
+    luaL_Buffer b;
+    uint8_t *ct = (uint8_t *)luaL_buffinitsize(L, &b, ct_len);
+    if (hl_cap_crypto_key_secretbox(k, ct, msg, msg_len, (const uint8_t *)nonce) != 0)
+        return luaL_error(L, "key:secretbox failed");
+    luaL_pushresultsize(&b, ct_len);
+    return 1;
+}
+
+/* key:secretbox_open(ciphertext, nonce) -> msg | nil */
+static int lua_crypto_key_secretbox_open(lua_State *L)
+{
+    const HlCryptoKey *k = live_key(L, 1);
+    size_t ct_len, nonce_len;
+    const char *ct    = luaL_checklstring(L, 2, &ct_len);
+    const char *nonce = luaL_checklstring(L, 3, &nonce_len);
+    if (nonce_len != 24) return luaL_error(L, "key:secretbox_open: nonce must be 24 bytes");
+    if (ct_len < HL_SECRETBOX_MACBYTES) { lua_pushnil(L); return 1; }
+    size_t msg_len = ct_len - HL_SECRETBOX_MACBYTES;
+    luaL_Buffer b;
+    uint8_t *msg = (uint8_t *)luaL_buffinitsize(L, &b, msg_len + 1);
+    if (hl_cap_crypto_key_secretbox_open(k, msg, ct, ct_len, (const uint8_t *)nonce) != 0) {
+        luaL_pushresultsize(&b, 0);
+        lua_pop(L, 1);
+        lua_pushnil(L);
+        return 1;
+    }
+    luaL_pushresultsize(&b, msg_len);
+    return 1;
+}
+
+/* Zero it now rather than whenever the collector runs. Idempotent. */
+static int lua_crypto_key_destroy(lua_State *L)
+{
+    HlLuaCryptoKey *h = check_key(L, 1);
+    hl_cap_crypto_key_free(h->k);
+    h->k = NULL;
+    return 0;
+}
+
+static int lua_crypto_key_tostring(lua_State *L)
+{
+    HlLuaCryptoKey *h = check_key(L, 1);
+    lua_pushfstring(L, "crypto.key(%s%s)", h->name, h->k ? "" : ", destroyed");
+    return 1;
+}
+
+static const luaL_Reg crypto_key_methods[] = {
+    {"secretbox",      lua_crypto_key_secretbox},
+    {"secretbox_open", lua_crypto_key_secretbox_open},
+    {"destroy",        lua_crypto_key_destroy},
+    {NULL, NULL}
+};
+
+static void register_crypto_key_mt(lua_State *L)
+{
+    luaL_newmetatable(L, HL_CRYPTO_KEY_MT);
+    lua_newtable(L);
+    luaL_setfuncs(L, crypto_key_methods, 0);
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, lua_crypto_key_destroy);
+    lua_setfield(L, -2, "__gc");
+    lua_pushcfunction(L, lua_crypto_key_tostring);
+    lua_setfield(L, -2, "__tostring");
+    /* No __metatable access to the methods table beyond these three, and no
+     * field holds the bytes, so a script cannot read a key back. */
+    lua_pushliteral(L, "crypto.key");
+    lua_setfield(L, -2, "__metatable");
+    lua_pop(L, 1);
+}
+
 /* ── OpenSSH key passphrases ────────────────────────────────────────── */
 
 /* Validate the two numeric arguments both entry points share. Returns 0 when
@@ -1163,12 +1304,14 @@ static const luaL_Reg crypto_funcs[] = {
     {"aes256ctr",         lua_crypto_aes256ctr},
     {"bcrypt_pbkdf",      lua_crypto_bcrypt_pbkdf},
     {"bcrypt_pbkdf_env",  lua_crypto_bcrypt_pbkdf_env},
+    {"key_from_env",      lua_crypto_key_from_env},
     {NULL, NULL}
 };
 
 int luaopen_hull_crypto(lua_State *L)
 {
     register_sha256_hasher_mt(L);
+    register_crypto_key_mt(L);
     luaL_newlib(L, crypto_funcs);
 
     /* Exported so a caller that reads a work factor out of a FILE can refuse

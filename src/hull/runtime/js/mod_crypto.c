@@ -6,6 +6,8 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/crypto.h"
+#include "hull/cap/crypto_key.h"
+#include "hull/cap/env.h"
 #include "hull/limits/core.h"
 #include "../../utils/base64.h"
 #include "../../utils/hex.h"
@@ -1083,16 +1085,205 @@ static void js_register_sha256_hasher_class(JSContext *ctx)
     JS_SetClassProto(ctx, hl_js_sha256_hasher_class_id, proto);
 }
 
+/* ── Keys held in C ─────────────────────────────────────────────────── *
+ *
+ * crypto.keyFromEnv(name) -> CryptoKey. A 32-byte secretbox key read from an
+ * environment variable (64 hex digits or base64, under manifest.env) into
+ * memory the C layer owns. The script gets a handle and never the bytes:
+ * key.secretbox / key.secretboxOpen seal with it; key.destroy() or the
+ * collector zeroes it. hull:crypto:sealbox keyrings take one in place of a
+ * byte string. Same contract as the Lua crypto.key_from_env. */
+
+static JSClassID hl_js_crypto_key_class_id;
+
+typedef struct {
+    HlCryptoKey *k;
+    char name[64];              /* the variable's name, for toString; not secret */
+} HlJsCryptoKey;
+
+static void js_crypto_key_finalizer(JSRuntime *rt, JSValue val)
+{
+    HlJsCryptoKey *h = JS_GetOpaque(val, hl_js_crypto_key_class_id);
+    if (!h) return;
+    hl_cap_crypto_key_free(h->k);
+    js_free_rt(rt, h);
+}
+
+static JSClassDef js_crypto_key_class = {
+    "CryptoKey",
+    .finalizer = js_crypto_key_finalizer,
+};
+
+static const HlCryptoKey *js_live_key(JSContext *ctx, JSValueConst this_val)
+{
+    HlJsCryptoKey *h = JS_GetOpaque2(ctx, this_val, hl_js_crypto_key_class_id);
+    if (!h) return NULL;
+    if (!h->k) {
+        JS_ThrowTypeError(ctx, "crypto key: the key has been destroyed");
+        return NULL;
+    }
+    return h->k;
+}
+
+static JSValue js_crypto_key_secretbox(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    const HlCryptoKey *k = js_live_key(ctx, this_val);
+    if (!k) return JS_EXCEPTION;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "key.secretbox requires (message, nonce)");
+    JsMsg msg, nonce;
+    if (!js_msg_get(ctx, argv[0], &msg))
+        return JS_ThrowTypeError(ctx, "key.secretbox: message must be a buffer or a string");
+    if (!js_fixed_arg(ctx, argv[1], &nonce, 24, "key.secretbox", "nonce")) {
+        js_msg_free(ctx, &msg);
+        return JS_EXCEPTION;
+    }
+    JSValue ret = JS_EXCEPTION;
+    size_t ct_len = msg.view.len + HL_SECRETBOX_MACBYTES;
+    uint8_t *ct = js_malloc(ctx, ct_len);
+    if (ct) {
+        if (hl_cap_crypto_key_secretbox(k, ct, msg.view.data, msg.view.len,
+                                        nonce.view.data) == 0)
+            ret = JS_NewArrayBufferCopy(ctx, ct, ct_len);
+        else
+            ret = JS_ThrowInternalError(ctx, "key.secretbox failed");
+        js_free(ctx, ct);
+    }
+    js_msg_free(ctx, &msg);
+    js_msg_free(ctx, &nonce);
+    return ret;
+}
+
+/* key.secretboxOpen(ciphertext, nonce) -> ArrayBuffer | null */
+static JSValue js_crypto_key_secretbox_open(JSContext *ctx, JSValueConst this_val,
+                                            int argc, JSValueConst *argv)
+{
+    const HlCryptoKey *k = js_live_key(ctx, this_val);
+    if (!k) return JS_EXCEPTION;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "key.secretboxOpen requires (ciphertext, nonce)");
+    JsMsg ct, nonce;
+    if (!js_msg_get(ctx, argv[0], &ct))
+        return JS_ThrowTypeError(ctx, "key.secretboxOpen: ciphertext must be a buffer");
+    if (!js_fixed_arg(ctx, argv[1], &nonce, 24, "key.secretboxOpen", "nonce")) {
+        js_msg_free(ctx, &ct);
+        return JS_EXCEPTION;
+    }
+    JSValue ret = JS_NULL;
+    if (ct.view.len >= HL_SECRETBOX_MACBYTES) {
+        size_t msg_len = ct.view.len - HL_SECRETBOX_MACBYTES;
+        uint8_t *out = js_malloc(ctx, msg_len + 1);
+        if (!out) {
+            ret = JS_EXCEPTION;
+        } else {
+            if (hl_cap_crypto_key_secretbox_open(k, out, ct.view.data, ct.view.len,
+                                                 nonce.view.data) == 0)
+                ret = JS_NewArrayBufferCopy(ctx, out, msg_len);
+            js_free(ctx, out);
+        }
+    }
+    js_msg_free(ctx, &ct);
+    js_msg_free(ctx, &nonce);
+    return ret;
+}
+
+/* Zero it now rather than whenever the collector runs. Idempotent. */
+static JSValue js_crypto_key_destroy(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlJsCryptoKey *h = JS_GetOpaque2(ctx, this_val, hl_js_crypto_key_class_id);
+    if (!h) return JS_EXCEPTION;
+    hl_cap_crypto_key_free(h->k);
+    h->k = NULL;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_crypto_key_to_string(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlJsCryptoKey *h = JS_GetOpaque2(ctx, this_val, hl_js_crypto_key_class_id);
+    if (!h) return JS_EXCEPTION;
+    char buf[96];
+    snprintf(buf, sizeof buf, "crypto.key(%s%s)", h->name, h->k ? "" : ", destroyed");
+    return JS_NewString(ctx, buf);
+}
+
+static JSValue js_crypto_key_from_env(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "crypto.keyFromEnv requires (name)");
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.env_cfg)
+        return JS_ThrowInternalError(ctx, "crypto.keyFromEnv: no env capability");
+    const char *var = JS_ToCString(ctx, argv[0]);
+    if (!var) return JS_EXCEPTION;
+
+    HlJsCryptoKey *h = js_malloc(ctx, sizeof *h);
+    if (!h) { JS_FreeCString(ctx, var); return JS_ThrowOutOfMemory(ctx); }
+    h->k = NULL;
+    snprintf(h->name, sizeof h->name, "%s", var);
+
+    const char *val = hl_cap_env_get(js->base.env_cfg, var);
+    if (!val || !*val) {
+        /* One message for "not declared" and "unset", as the Lua twin. */
+        JSValue e = JS_ThrowTypeError(ctx, "crypto.keyFromEnv: '%s' is not available "
+                                      "(declare it in manifest.env and set it)", var);
+        JS_FreeCString(ctx, var);
+        js_free(ctx, h);
+        return e;
+    }
+    if (hl_cap_crypto_key_from_text(val, strlen(val), &h->k) != 0) {
+        JSValue e = JS_ThrowTypeError(ctx, "crypto.keyFromEnv: '%s' is not a 32-byte "
+                                      "key (64 hex digits or base64)", var);
+        JS_FreeCString(ctx, var);
+        js_free(ctx, h);
+        return e;
+    }
+    JS_FreeCString(ctx, var);
+
+    JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_crypto_key_class_id);
+    if (JS_IsException(obj)) {
+        hl_cap_crypto_key_free(h->k);
+        js_free(ctx, h);
+        return obj;
+    }
+    JS_SetOpaque(obj, h);
+    return obj;
+}
+
+static void js_register_crypto_key_class(JSContext *ctx)
+{
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    JS_NewClassID(&hl_js_crypto_key_class_id);
+    JS_NewClass(rt, hl_js_crypto_key_class_id, &js_crypto_key_class);
+
+    JSValue proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, proto, "secretbox",
+        JS_NewCFunction(ctx, js_crypto_key_secretbox, "secretbox", 2));
+    JS_SetPropertyStr(ctx, proto, "secretboxOpen",
+        JS_NewCFunction(ctx, js_crypto_key_secretbox_open, "secretboxOpen", 2));
+    JS_SetPropertyStr(ctx, proto, "destroy",
+        JS_NewCFunction(ctx, js_crypto_key_destroy, "destroy", 0));
+    JS_SetPropertyStr(ctx, proto, "toString",
+        JS_NewCFunction(ctx, js_crypto_key_to_string, "toString", 0));
+    JS_SetClassProto(ctx, hl_js_crypto_key_class_id, proto);
+}
+
 static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
 {
     if (hl_js_check_module_declared(ctx, "hull/crypto", "hull:crypto") != 0)
         return -1;
 
     js_register_sha256_hasher_class(ctx);
+    js_register_crypto_key_class(ctx);
 
     JSValue crypto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, crypto, "sha256",
                       JS_NewCFunction(ctx, js_crypto_sha256, "sha256", 1));
+    JS_SetPropertyStr(ctx, crypto, "keyFromEnv",
+                      JS_NewCFunction(ctx, js_crypto_key_from_env, "keyFromEnv", 1));
     JS_SetPropertyStr(ctx, crypto, "createSha256",
                       JS_NewCFunction(ctx, js_crypto_create_sha256, "createSha256", 0));
     JS_SetPropertyStr(ctx, crypto, "sha512",

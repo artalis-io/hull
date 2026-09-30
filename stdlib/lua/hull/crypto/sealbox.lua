@@ -39,7 +39,26 @@ M.MIN_LEN     = M.VERSION_LEN + M.NONCE_LEN + M.MAC_LEN
 
 local spack, sunpack = string.pack, string.unpack
 
---- A keyring from { keys = { [id] = 32-byte key, ... }, current = id }.
+-- A key held in C (crypto.key_from_env): the bytes never enter the script
+-- heap, and the handle seals and opens with them itself. Recognised by the
+-- metatable the binding locks to this name.
+local function is_key_handle(k)
+    return type(k) == "userdata" and getmetatable(k) == "crypto.key"
+end
+
+local function box(key, msg, nonce)
+    if is_key_handle(key) then return key:secretbox(msg, nonce) end
+    return crypto.secretbox(msg, nonce, key)
+end
+
+local function unbox(key, ct, nonce)
+    if is_key_handle(key) then return key:secretbox_open(ct, nonce) end
+    return crypto.secretbox_open(ct, nonce, key)
+end
+
+--- A keyring from { keys = { [id] = 32-byte key, ... }, current = id }. A key
+--- is a 32-byte string, or a handle from crypto.key_from_env, which keeps the
+--- bytes in C (see keyring_from_env).
 --- Ids are unsigned 32-bit integers; `current` must be one of them. Raises on
 --- anything else: a keyring is configuration, and a wrong one is a bug to hear
 --- about at startup rather than a value that later fails to open.
@@ -68,8 +87,9 @@ function M.keyring(opts)
         if keys[id] then
             error("sealbox.keyring: key id " .. id .. " given twice", 2)
         end
-        if type(k) ~= "string" or #k ~= 32 then
-            error("sealbox.keyring: key " .. tostring(id) .. " must be exactly 32 bytes", 2)
+        if not is_key_handle(k) and (type(k) ~= "string" or #k ~= 32) then
+            error("sealbox.keyring: key " .. tostring(id)
+                  .. " must be exactly 32 bytes or a crypto.key_from_env key", 2)
         end
         keys[id] = k
     end
@@ -79,6 +99,30 @@ function M.keyring(opts)
               .. " is not in keys", 2)
     end
     return { keys = keys, current = current }
+end
+
+--- A keyring whose keys are read from environment variables into memory the
+--- C layer owns, so no key is ever a Lua string:
+---
+---   local ring = sealbox.keyring_from_env{
+---       keys = { [1] = "KV_KEY_1", [2] = "KV_KEY_2" }, current = 2 }
+---
+--- Each variable holds 64 hex digits or base64 of 32 bytes, and must be in
+--- manifest.env. hull/kv's `encrypt` and TOTP take the result, or its keys,
+--- wherever they take a keyring.
+function M.keyring_from_env(opts)
+    if type(opts) ~= "table" or type(opts.keys) ~= "table" then
+        error("sealbox.keyring_from_env: expected { keys = {[id] = \"VAR\", ...}, current = id }", 2)
+    end
+    local keys = {}
+    for id, var in pairs(opts.keys) do
+        if type(var) ~= "string" or var == "" then
+            error("sealbox.keyring_from_env: key " .. tostring(id)
+                  .. " must name an environment variable", 2)
+        end
+        keys[id] = crypto.key_from_env(var)
+    end
+    return M.keyring{ keys = keys, current = opts.current }
 end
 
 -- The frame: the value, preceded by each context string, length-prefixed so
@@ -124,7 +168,7 @@ function M.seal(ring, value, context)
     check_context("seal", context)
     local key = ring.keys[ring.current]
     local nonce = crypto.random(M.NONCE_LEN)
-    local ct = crypto.secretbox(frame(context, value), nonce, key)
+    local ct = box(key, frame(context, value), nonce)
     return spack(">I4", ring.current) .. nonce .. ct
 end
 
@@ -143,7 +187,7 @@ function M.open(ring, blob, context)
     if not key then return nil, "unknown_version" end
     local nonce = blob:sub(M.VERSION_LEN + 1, M.VERSION_LEN + M.NONCE_LEN)
     local ct    = blob:sub(M.VERSION_LEN + M.NONCE_LEN + 1)
-    local plain = crypto.secretbox_open(ct, nonce, key)
+    local plain = unbox(key, ct, nonce)
     if not plain then return nil, "open_failed" end
     local value = unframe(context, plain)
     if not value then return nil, "open_failed" end
@@ -158,8 +202,7 @@ function M.open_unversioned(ring, id, blob)
     if not key or type(blob) ~= "string" or #blob < M.NONCE_LEN + M.MAC_LEN then
         return nil
     end
-    return crypto.secretbox_open(blob:sub(M.NONCE_LEN + 1),
-                                 blob:sub(1, M.NONCE_LEN), key)
+    return unbox(key, blob:sub(M.NONCE_LEN + 1), blob:sub(1, M.NONCE_LEN))
 end
 
 return M

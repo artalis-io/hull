@@ -486,11 +486,13 @@ function init(opts) {
             legacyVersion = opts.legacyKeyVersion;
         }
     } else if (opts.encryptionKey !== undefined && opts.encryptionKey !== null) {
-        if (typeof opts.encryptionKey !== "string"
-            || opts.encryptionKey.length !== 32) {
-            throw new Error("totp.init: encryptionKey must be exactly 32 bytes");
+        // 32 bytes, or a crypto.keyFromEnv key; sealbox.keyring decides.
+        try {
+            keys = sealbox.keyring({ keys: { 1: opts.encryptionKey }, current: 1 }).keys;
+        } catch (e) {
+            throw new Error("totp.init: encryptionKey "
+                            + String(e.message).replace(/^sealbox\.keyring: key 1 /, ""));
         }
-        keys = sealbox.keyring({ keys: { 1: opts.encryptionKey }, current: 1 }).keys;
         current = 1;
         legacyVersion = 1;  // pre-versioning rows decrypt under this key
     }
