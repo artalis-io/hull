@@ -1,4 +1,4 @@
--- hull.web.ws-stream - a WebSocket client that behaves like a byte stream.
+-- hull.ssh.ws_stream - a WebSocket client that behaves like a byte stream.
 --
 -- RFC 6455, client side only. Turns a stream (read/write/close) carrying a
 -- WebSocket into a stream carrying the bytes inside it, which is exactly the
@@ -23,6 +23,11 @@
 -- Nothing about the framing is Cloudflare-specific; the headers are just
 -- headers. This module knows about neither SSH nor Cloudflare.
 --
+-- Part of hull/ssh, not a module of its own: its one use is reaching an SSH
+-- host through a tunnel (ssh.connect's `tunnel`), no application can obtain a
+-- raw stream to hand it, and it needs no capability. It used to be published
+-- as hull/web/ws-stream; declaring that name now gets a fix-it pointing here.
+--
 -- Sibling to hull/web/ws-client, and deliberately not the same thing. That
 -- one is MESSAGE oriented (on_message callbacks) and needs a running server,
 -- because it is driven by the event loop. This one is BYTE oriented and owns
@@ -35,6 +40,7 @@
 -- it was handed.
 
 local base64 = require('hull.encoding').base64
+local wire   = require('hull.ssh.wire')
 
 local M = {}
 
@@ -67,7 +73,7 @@ local spack, sunpack = string.pack, string.unpack
 function M.key(random_bytes)
     local raw = random_bytes(16)
     if type(raw) ~= "string" or #raw ~= 16 then
-        error("web.ws-stream: random_bytes must return 16 bytes", 2)
+        error("ssh.ws_stream: random_bytes must return 16 bytes", 2)
     end
     return base64.encode(raw)
 end
@@ -82,10 +88,10 @@ end
 -- duplicate name is possible where a protocol wants one.
 function M.build_request(opts)
     if type(opts.host) ~= "string" or opts.host == "" then
-        error("web.ws-stream: a host is required", 2)
+        error("ssh.ws_stream: a host is required", 2)
     end
     if type(opts.key) ~= "string" or opts.key == "" then
-        error("web.ws-stream: a key is required", 2)
+        error("ssh.ws_stream: a key is required", 2)
     end
     -- CR or LF anywhere in a value injects a line of its own, so every
     -- interpolated part is checked - not only the caller's extra headers.
@@ -100,7 +106,7 @@ function M.build_request(opts)
     -- it as a terminator reads a different request from the one checked.
     local function no_crlf(what, v)
         if type(v) == "string" and v:find("[\r\n%z]") then
-            error("web.ws-stream: " .. what .. " contains CR, LF or NUL: "
+            error("ssh.ws_stream: " .. what .. " contains CR, LF or NUL: "
                   .. v:gsub("[\r\n%z]", "?"), 3)
         end
         return v
@@ -167,10 +173,10 @@ M.apply_mask = apply_mask
 function M.encode(opcode, payload, mask)
     payload = payload or ""
     if type(mask) ~= "string" or #mask ~= 4 then
-        error("web.ws-stream: a 4-byte mask is required", 2)
+        error("ssh.ws_stream: a 4-byte mask is required", 2)
     end
     if opcode >= 0x8 and #payload > M.MAX_CONTROL then
-        error("web.ws-stream: a control frame carries at most 125 bytes", 2)
+        error("ssh.ws_stream: a control frame carries at most 125 bytes", 2)
     end
 
     local b1 = 0x80 | (opcode & 0x0F)          -- FIN set; no fragmentation
@@ -205,11 +211,11 @@ function M.frame_size(buf)
         if #buf < 10 then return nil, "need_more" end
         len = sunpack(">I8", buf, 3); head = 10
         if len < 0 then
-            error("web.ws-stream: frame length exceeds the representable range")
+            error("ssh.ws_stream: frame length exceeds the representable range")
         end
     end
     if len > M.MAX_FRAME then
-        error("web.ws-stream: frame of " .. tostring(len)
+        error("ssh.ws_stream: frame of " .. tostring(len)
               .. " bytes exceeds the maximum")
     end
     -- A server frame is never masked, so there is no 4-byte mask to allow for;
@@ -235,12 +241,12 @@ function M.decode(buf)
     if rsv ~= 0 then
         -- No extension was negotiated, so a reserved bit set means the peer
         -- is speaking something we did not agree to.
-        error("web.ws-stream: reserved bits set without an extension")
+        error("ssh.ws_stream: reserved bits set without an extension")
     end
     if masked then
         -- RFC 6455 section 5.1: a server MUST NOT mask. Accepting one would
         -- mean guessing at which side's rules apply.
-        error("web.ws-stream: server sent a masked frame")
+        error("ssh.ws_stream: server sent a masked frame")
     end
 
     if len == 126 then
@@ -250,23 +256,23 @@ function M.decode(buf)
         if #buf < pos + 7 then return nil, "need_more" end
         len = sunpack(">I8", buf, pos); pos = pos + 8
         if len < 0 then
-            error("web.ws-stream: frame length exceeds the representable range")
+            error("ssh.ws_stream: frame length exceeds the representable range")
         end
     end
 
     -- Bounded BEFORE waiting for the bytes, so a peer claiming a gigabyte
     -- costs nothing to refuse.
     if len > M.MAX_FRAME then
-        error("web.ws-stream: frame of " .. tostring(len)
+        error("ssh.ws_stream: frame of " .. tostring(len)
               .. " bytes exceeds the maximum")
     end
     if opcode >= 0x8 then
         if len > M.MAX_CONTROL then
-            error("web.ws-stream: control frame of " .. tostring(len)
+            error("ssh.ws_stream: control frame of " .. tostring(len)
                   .. " bytes exceeds 125")
         end
         if not fin then
-            error("web.ws-stream: control frame must not be fragmented")
+            error("ssh.ws_stream: control frame must not be fragmented")
         end
     end
 
@@ -281,29 +287,16 @@ end
 local Stream = {}
 Stream.__index = Stream
 
--- Ensure the buffer holds at least n bytes, gathering short reads into a
--- table and joining once. Returns false at EOF rather than raising: for a
--- byte stream a transport that simply ends is EOF, and SSH carries its own
--- disconnect.
+-- Ensure the buffer holds at least n bytes (the gatherer the SSH transport
+-- uses too). Returns false at EOF rather than raising: for a byte stream a
+-- transport that simply ends is EOF, and SSH carries its own disconnect.
 function Stream:_need(n)
-    if #self.inbuf >= n then return true end
-    local parts, have = { self.inbuf }, #self.inbuf
-    while have < n do
-        local chunk, err, code = self.s:read(n - have)
-        if chunk == nil then
-            self.inbuf = table.concat(parts)
-            return nil, err, code
-        end
-        if chunk == "" then
-            self.inbuf = table.concat(parts)
-            self.closed = true
-            return false
-        end
-        parts[#parts + 1] = chunk
-        have = have + #chunk
-    end
-    self.inbuf = table.concat(parts)
-    return true
+    local buf, ok, err, code = wire.gather(self.inbuf, n,
+                                           function(m) return self.s:read(m) end)
+    self.inbuf = buf
+    if ok == false then self.closed = true end
+    if ok then return true end
+    return ok, err, code
 end
 
 -- Pull frames until at least one byte of application data is buffered, or the
@@ -358,7 +351,7 @@ function Stream:_pump()
         elseif op ~= M.OP_PONG then
             -- An unsolicited pong is legal and means nothing (5.5.3).
             -- Anything else is an opcode we never agreed to.
-            error("web.ws-stream: unknown opcode " .. tostring(op))
+            error("ssh.ws_stream: unknown opcode " .. tostring(op))
         end
     end
     return true
@@ -367,13 +360,13 @@ end
 function Stream:_send(opcode, payload)
     local mask = self.random(4)
     if type(mask) ~= "string" or #mask ~= 4 then
-        error("web.ws-stream: random_bytes must return 4 bytes")
+        error("ssh.ws_stream: random_bytes must return 4 bytes")
     end
     -- Returned, not raised: a write that timed out admitted nothing (the
     -- stream underneath is all-or-none), so the caller may simply retry it,
     -- and needs the underlying code to know that it can.
     local ok, err, code = self.s:write(M.encode(opcode, payload, mask))
-    if not ok then return nil, "web.ws-stream: write failed: " .. tostring(err), code end
+    if not ok then return nil, "ssh.ws_stream: write failed: " .. tostring(err), code end
     return true
 end
 
@@ -434,7 +427,7 @@ end
 --   opts.sha1     function(bytes) -> 20 raw digest bytes
 function M.connect(stream, opts)
     if type(opts.random) ~= "function" or type(opts.sha1) ~= "function" then
-        error("web.ws-stream: random and sha1 functions are required", 2)
+        error("ssh.ws_stream: random and sha1 functions are required", 2)
     end
 
     local key = M.key(opts.random)

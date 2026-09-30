@@ -345,6 +345,35 @@ function M.peek_uint32(buf, pos)
     return (sunpack(">I4", buf, pos))
 end
 
+-- Read until `buf` holds at least `n` bytes. `read(max)` returns a chunk
+-- (short is normal), "" at end of stream, or nil, err, code; `max_chunk`
+-- (optional) caps what one call asks for.
+--
+-- Returns the new buffer, then true when it holds n bytes, false at end of
+-- stream, or nil, err, code when a read failed - the bytes gathered so far
+-- are kept either way. What those mean is the caller's: the SSH transport
+-- raises on end of stream, while a tunnel's stream reports it as EOF.
+--
+-- Pieces are collected in a table and joined once. A stream returns short
+-- reads, and appending each onto a growing string makes filling n bytes
+-- quadratic: a 32 KiB packet in small pieces is hundreds of megabytes of
+-- copying.
+function M.gather(buf, n, read, max_chunk)
+    local have = #buf
+    if have >= n then return buf, true end
+    local parts = { buf }
+    while have < n do
+        local want = n - have
+        if max_chunk and want > max_chunk then want = max_chunk end
+        local chunk, err, code = read(want)
+        if chunk == nil then return table.concat(parts), nil, err, code end
+        if chunk == "" then return table.concat(parts), false end
+        parts[#parts + 1] = chunk
+        have = have + #chunk
+    end
+    return table.concat(parts), true
+end
+
 -- Zero padding. Callers needing RANDOM padding (the binary packet protocol
 -- does) must supply it themselves: this module has no capability access and
 -- must not pretend to produce entropy.

@@ -197,21 +197,13 @@ local READ_CHUNK = 32768
 -- Callers bound `n` before calling: read_packet has the parser vet a declared
 -- length first. This loop only moves bytes.
 function Transport:fill(n)
-    if #self.inbuf >= n then return end
-    -- Gather into a table and join once. The stream is free to return SHORT
-    -- reads, and does; appending each one onto a growing string makes filling
-    -- a packet quadratic in its size, which for a 32 KiB packet arriving in
-    -- small pieces is hundreds of megabytes of copying for 32 KiB of data.
-    local parts, have = { self.inbuf }, #self.inbuf
-    while have < n do
-        local chunk = self:read_some(math.min(n - have, READ_CHUNK))
-        if chunk == "" then
-            error("ssh: connection closed by peer")
-        end
-        parts[#parts + 1] = chunk
-        have = have + #chunk
-    end
-    self.inbuf = table.concat(parts)
+    -- read_some already turns every failure into a raise (with keepalives
+    -- between timeouts), so the only outcome left to handle is the end.
+    local buf, ok = wire.gather(self.inbuf, n,
+                                function(m) return self:read_some(m) end,
+                                READ_CHUNK)
+    self.inbuf = buf
+    if not ok then error("ssh: connection closed by peer") end
 end
 
 -- Write all of `bytes`. A write that waited too long admitted nothing (the

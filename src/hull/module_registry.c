@@ -177,7 +177,7 @@ static const HlModuleSpec REGISTRY[] = {
     {
         /* Byte <-> text codecs: hex, base64 (standard and url-safe),
          * base32. The one home for them in the stdlib (docs/stdlib_style.md
-         * section 4); pure, so SSH, ws-stream and kv can use it without
+         * section 4); pure, so SSH (and its ws_stream) and kv can use it without
          * taking on any authority.
          *
          * Registered rather than left as an internal file so it shows up in
@@ -387,8 +387,7 @@ static const HlModuleSpec REGISTRY[] = {
          * Missed until an e2e drove a real connection: every unit suite
          * injects `opts.crypto`, which is the seam that exists for exactly
          * that reason and which therefore never takes this path. */
-        .deps = {"hull/crypto", "hull/encoding",
-                 "hull/web/ws-stream", 0},
+        .deps = {"hull/crypto", "hull/encoding", 0},
     },
     {
         /* Template engine stays flat in v0.2.0: content-type
@@ -883,23 +882,6 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
-    {
-        /* WebSocket as a BYTE STREAM, client side (RFC 6455). Sibling to
-         * ws-client and deliberately not the same thing: that one is MESSAGE
-         * oriented and driven by the event loop, so it needs a running
-         * server; this one is byte oriented and owns no loop, which is what
-         * lets it work under app.main where a fleet tool lives.
-         *
-         * Holds NO capability, which is why it needs none declared: the
-         * stream, the RNG and the digest are all passed in, so it can only
-         * transform a connection someone else opened. That is also why it is
-         * safe to make public - the authority stays with whoever obtained the
-         * stream (for SSH-over-a-tunnel, the ssh.connect grant). */
-        .name = "hull/web/ws-stream",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = 0, .deps = {"hull/encoding", 0},
-    },
-
     {
         .name = "hull/worker",
         .api_major = 1, .intrinsic = 0, .pure = 0,

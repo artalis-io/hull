@@ -426,6 +426,15 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
                 }
             }
 
+            /* Folded into another module rather than renamed: there is no
+             * new name to declare, only the module that now carries it. */
+            if (strcmp(check, "hull/web/ws-stream") == 0) {
+                ERR2("module '%s@%u' is now part of hull/ssh; declare "
+                     "hull/ssh@1 and require 'hull.ssh.ws_stream'",
+                     m->name, (unsigned)m->api_major);
+                return -1;
+            }
+
             const HlModuleSpec *guess = hl_module_registry_suggest(m->name);
             if (guess) {
                 ERR3("unknown module '%s' in app.manifest.modules - "

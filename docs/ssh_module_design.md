@@ -464,7 +464,7 @@ drove it) is reached with `ssh.connect{ tunnel = {...} }`. Three facts made it
 smaller than it looks:
 
 1. **The SSH code did not change.** `hull.ssh.transport` takes a stream with
-   `read`/`write`/`close`. `hull.web.ws-stream` turns a stream carrying a
+   `read`/`write`/`close`. `hull.ssh.ws_stream` turns a stream carrying a
    WebSocket into a stream carrying the bytes inside it, which is the same
    interface. So the tunnel is a different `open_stream` and nothing else.
 2. **The WebSocket client holds no authority.** It is handed its stream, its
@@ -579,7 +579,7 @@ which is the transport's contract, not the binding's.
 
 - No worked example under `examples/`, and no user-facing guide; this design
   record is still the only documentation.
-- JS remains unimplemented, per section 8 - `hull.web.ws-stream` is Lua-only
+- JS remains unimplemented, per section 8 - `hull.ssh.ws_stream` is Lua-only
   too, so a JS `hull/ssh` inherits this work rather than duplicating it.
 
 ## 11c. Passphrase-protected keys

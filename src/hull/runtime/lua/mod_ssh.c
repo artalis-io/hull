@@ -27,7 +27,7 @@
  * `via = { host, port, tls }` dials somewhere OTHER than the SSH destination
  * and hands back the bytes, which is how a host behind a WebSocket-over-TLS
  * tunnel (Cloudflare Access, say) is reached. The WebSocket framing is not
- * here - it is pure Lua in hull.web.ws-stream, layered on the stream this
+ * here - it is pure Lua in hull.ssh.ws_stream, layered on the stream this
  * returns, because it is a byte transform with no authority in it.
  *
  * The POLICY gate then checks BOTH, and both must pass:
@@ -480,7 +480,7 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o)
  * relay is used: they are what the grant, the host key and the login are
  * about. `via`, when present, names the machine a socket is actually opened
  * to, and the bytes that come back are the relay's, not SSH's - wrapping them
- * is the caller's job (hull.web.ws-stream).
+ * is the caller's job (hull.ssh.ws_stream).
  *
  * Refused unless the caller is stdlib AND the manifest grants the exact
  * destination and login - and, with a relay, the relay too. The order

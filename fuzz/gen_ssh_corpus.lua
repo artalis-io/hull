@@ -19,7 +19,7 @@ local sftp       = require("hull.ssh.sftp")
 local cipher     = require("hull.ssh.cipher")
 local privatekey = require("hull.ssh.privatekey")
 local base64     = require("hull.encoding").base64
-local ws         = require("hull.web.ws-stream")
+local ws         = require("hull.ssh.ws_stream")
 
 local T = {                 -- target indices, as in ssh_driver.lua
     packet = 0, ident = 1, kexinit = 2, ecdh = 3, hostkey = 4, sftp = 5,

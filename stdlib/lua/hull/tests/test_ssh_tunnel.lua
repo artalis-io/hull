@@ -7,7 +7,7 @@
 -- was sent - which is the part a tunnel gets wrong.
 
 local ssh = require('hull.ssh')
-local ws  = require('hull.web.ws-stream')
+local ws  = require('hull.ssh.ws_stream')
 
 local pass = 0
 local fail = 0
