@@ -147,6 +147,7 @@ static uint32_t build_compile_caps(void)
 #endif
 #ifdef HL_ENABLE_HTTP_CLIENT
     caps |= HL_MOD_CAP_HTTP_CLIENT;
+    caps |= HL_MOD_CAP_NET;       /* the same flag compiles the socket layer */
 #endif
 #ifdef HL_ENABLE_HTTP_SERVER
     caps |= HL_MOD_CAP_HTTP_SERVER;
@@ -209,7 +210,8 @@ bool hl_module_needs_absent_build_cap(const HlModuleSpec *spec)
     if (!spec) return false;
     const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
                                     | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
-                                    | HL_MOD_CAP_TUI | HL_MOD_CAP_IMAGE;
+                                    | HL_MOD_CAP_TUI | HL_MOD_CAP_IMAGE
+                                    | HL_MOD_CAP_NET;
     return (spec->required_caps & build_cap_mask & ~build_provided_caps()) != 0;
 }
 
@@ -228,6 +230,8 @@ static const char *cap_label(uint32_t cap)
     case HL_MOD_CAP_HTTP:        return "HL_ENABLE_HTTP (build-time)";
     case HL_MOD_CAP_TUI:         return "HL_ENABLE_TUI (build-time)";
     case HL_MOD_CAP_IMAGE:       return "HL_ENABLE_IMAGE (build-time)";
+    case HL_MOD_CAP_NET:         return "the outbound socket layer "
+                                        "(HL_ENABLE_HTTP_CLIENT, build-time)";
     default:                     return "unknown";
     }
 }
@@ -253,10 +257,11 @@ uint32_t hl_module_build_caps(void)
  * `pure-compute` no longer needs a pre-built base -- it is a validation preset
  * (reject any HTTP-declaring app). Single source of truth for the resolver
  * target-caps, the platform-lib lookup, and listing.
- * Note: HL_MOD_CAP_HTTP == HTTP_CLIENT | HTTP_SERVER (the alias). */
+ * Note: HL_MOD_CAP_HTTP == HTTP_CLIENT | HTTP_SERVER (the alias). pure-compute
+ * clears NET too: it drops Keel, and the socket layer rides Keel. */
 static const HlBuildFlavor BUILD_FLAVORS[] = {
-    { "full",         0,               "libhull_platform" },
-    { "pure-compute", HL_MOD_CAP_HTTP, "" },
+    { "full",         0,                                "libhull_platform" },
+    { "pure-compute", HL_MOD_CAP_HTTP | HL_MOD_CAP_NET, "" },
 };
 
 const HlBuildFlavor *hl_build_flavor_find(const char *name)
@@ -304,8 +309,8 @@ static int popcount32(uint32_t v)
 const HlBuildFlavor *hl_build_flavor_auto(uint32_t needed_caps)
 {
     /* Pick the flavor clearing the most caps without clearing one the app
-     * needs. Flavors only differ in the HTTP_SERVER / HTTP_CLIENT bits, so
-     * only those of `needed_caps` matter here; "full" (clears nothing) is
+     * needs. Flavors only differ in the HTTP_SERVER / HTTP_CLIENT / NET bits,
+     * so only those of `needed_caps` matter here; "full" (clears nothing) is
      * always a valid fallback. */
     const HlBuildFlavor *best = NULL;
     int best_bits = -1;
@@ -354,7 +359,8 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
     const uint32_t prov_build    = build_caps;
     const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
                                     | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
-                                    | HL_MOD_CAP_TUI | HL_MOD_CAP_IMAGE;
+                                    | HL_MOD_CAP_TUI | HL_MOD_CAP_IMAGE
+                                    | HL_MOD_CAP_NET;
 
     /* Pass 1: look up each declared module + admit it. Detect unknown
      * names, version mismatches, duplicates, missing capabilities. */

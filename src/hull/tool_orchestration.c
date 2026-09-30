@@ -224,9 +224,13 @@ static int l_tool_modules_resolve(lua_State *L)
      * client)? Drives `hull build`'s decision to compose the http core + the
      * per-runtime web bindings (issue #114). Reliable because the
      * route/ws/sse decorations (app.get/…) only exist when an HTTP module is
-     * declared, so a serving app always trips an HTTP cap here. */
+     * declared, so a serving app always trips an HTTP cap here.
+     *
+     * NET counts too. It is not HTTP, but the socket layer composes back the
+     * same way: the Lua ssh binding lives in the http-<rt> archive and dials
+     * over Keel, which composes on this signal. */
     uint32_t req_caps = hl_module_set_required_caps(&set);
-    lua_pushboolean(L, (req_caps & HL_MOD_CAP_HTTP) ? 1 : 0);
+    lua_pushboolean(L, (req_caps & (HL_MOD_CAP_HTTP | HL_MOD_CAP_NET)) ? 1 : 0);
     lua_setfield(L, -2, "needs_http");
 
     /* needs_wasm (S1 of the two-signal gate, docs/wasm_feature.md) =
@@ -265,8 +269,9 @@ static int l_tool_modules_resolve(lua_State *L)
      * ORs in the network-DB signal (a postgres/mysql --with, whose wire backend
      * links the shared tls_client for sslmode) at compose time. ACTIVE: on a
      * TLS-less base (the release SLIM base) an HTTP or net-DB app composes
-     * libhull_feature-tls.a; a plaintext app links zero mbedTLS. */
-    lua_pushboolean(L, (req_caps & HL_MOD_CAP_HTTP) ? 1 : 0);
+     * libhull_feature-tls.a; a plaintext app links zero mbedTLS. NET is
+     * included: an SSH connection may be tunnelled over TLS. */
+    lua_pushboolean(L, (req_caps & (HL_MOD_CAP_HTTP | HL_MOD_CAP_NET)) ? 1 : 0);
     lua_setfield(L, -2, "needs_tls");
 
     /* auto = the minimal build flavor that still satisfies this app's
@@ -489,6 +494,7 @@ static int l_tool_modules_available(lua_State *L)
             { HL_MOD_CAP_HTTP_SERVER, "http_server" },
             { HL_MOD_CAP_TUI,         "tui"         },
             { HL_MOD_CAP_IMAGE,       "image"       },
+            { HL_MOD_CAP_NET,         "net"         },
         };
         for (size_t k = 0; k < sizeof map / sizeof map[0]; k++) {
             if (need & map[k].bit) {
@@ -605,6 +611,7 @@ static int l_tool_build_caps(lua_State *L)
         { HL_MOD_CAP_HTTP_CLIENT, "http_client" },
         { HL_MOD_CAP_HTTP_SERVER, "http_server" },
         { HL_MOD_CAP_TUI,         "tui"         },
+        { HL_MOD_CAP_NET,         "net"         },
     };
     lua_newtable(L);
     for (size_t k = 0; k < sizeof map / sizeof map[0]; k++) {
