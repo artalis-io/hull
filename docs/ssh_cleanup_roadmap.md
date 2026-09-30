@@ -306,17 +306,19 @@ documenting parallel connections.
     `close_channel`;
   - `userauth.sanitize_text`: done - it was an alias; `wire.safe_text` is the
     one sanitizer;
-  - still open: the short-read gatherer in `Transport:fill` and `ws-stream`'s
-    `_need`. They differ on EOF (raise vs return false) and liveness (only
-    the transport keepalives), and `hull/web/ws-stream` cannot require an
-    `hull.ssh` submodule without declaring it, so they merge when ws-stream
-    moves (below), not before.
+  - the short-read gatherer: done - `wire.gather` serves `Transport:fill`
+    and `ws_stream`'s `_need`; each keeps its own policy (the transport
+    raises at EOF and keepalives between timeouts, the tunnel reports EOF).
 - **Facade hygiene.** Done: `ssh.lua` no longer re-exports `hostkey` /
   `privatekey`; `ssh.fingerprint(blob)` takes just the blob (`opts.crypto`
   is the test seam); `hostkey.verify` takes one crypto adapter (`sha256`,
-  `ed25519_verify`) instead of a separate digest function. Still open:
-  `hull/web/ws-stream` is published but no app can obtain a stream to give it, it is not a web concern, and it has no JS twin: move it
-  under `hull/ssh/` or a future `hull/net/`. The net cap bit: done -
+  `ed25519_verify`) instead of a separate digest function. The WebSocket
+  tunnel stream: done - `hull/web/ws-stream` (published, but no app could
+  obtain a stream to give it, not a web concern, no JS twin) is now
+  `hull.ssh.ws_stream`, part of `hull/ssh`; declaring the old name gets a
+  fix-it. The binding keeps its name (`mod_ssh.c`): it enforces the
+  `ssh.connect` grant and serves only `hull.ssh`, so a generic byte-stream
+  name would describe it wrongly. The net cap bit: done -
   `hull/ssh` requires `HL_MOD_CAP_NET` (the outbound socket layer) instead of
   borrowing `HL_MOD_CAP_HTTP_CLIENT`; the compose gates (`needs_http`,
   `needs_tls`) and the pure-compute preset treat it as they treated the

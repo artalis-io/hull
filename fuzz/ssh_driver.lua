@@ -26,7 +26,7 @@ local channel     = require("hull.ssh.channel")
 local known_hosts = require("hull.ssh.known_hosts")
 local privatekey  = require("hull.ssh.privatekey")
 local transport   = require("hull.ssh.transport")
-local ws_stream   = require("hull.web.ws-stream")
+local ws_stream   = require("hull.ssh.ws_stream")
 
 -- Oracle ----------------------------------------------------------------------
 
@@ -44,9 +44,9 @@ local function expected_error(e)
     end
     if type(e) ~= "string" then return false end
     -- "ssh: ...", "ssh.wire: ...", "ssh.sftp_client: ...", and the tunnel's
-    -- "web.ws-stream: ..." - position prefix optional, since error() at
+    -- "ssh.ws_stream: ..." - position prefix optional, since error() at
     -- level 1 adds one.
-    if not (e:find("ssh[%w%._]*: ") or e:find("web%.ws%-stream: ")) then return false end
+    if not e:find("ssh[%w%._]*: ") then return false end
     for _, p in ipairs(VM_ERRORS) do
         -- Only where the VM puts it: straight after a chunk position
         -- ("transport.lua:12: attempt to ..."), which it always adds for a

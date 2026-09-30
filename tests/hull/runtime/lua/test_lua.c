@@ -4575,7 +4575,7 @@ UTEST(lua_stdlib, ssh_transport_suite)
     EXPECT_GT(pass, 0LL);
 }
 
-/* The tunnel COMPOSITION: ssh.connect over hull.web.ws-stream. Driven
+/* The tunnel COMPOSITION: ssh.connect over hull.ssh.ws_stream. Driven
  * against a fake relay, so it asserts the bytes that relay is sent rather
  * than re-testing either layer. */
 UTEST(lua_stdlib, ssh_tunnel_suite)

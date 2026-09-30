@@ -310,5 +310,62 @@ test("peek_uint32 refuses a short buffer with a wire error", function()
 end)
 
 
+-- gather: the one short-read loop the transport and the tunnel share.
+
+-- A read function serving `pieces` in order, recording what it was asked for.
+local function reader(pieces)
+    local asked, i = {}, 0
+    return function(max)
+        asked[#asked + 1] = max
+        i = i + 1
+        local p = pieces[i]
+        if type(p) == "table" then return table.unpack(p) end
+        return p
+    end, asked
+end
+
+test("gather joins short reads until n bytes are held", function()
+    local read, asked = reader({ "ab", "c", "defg" })
+    local buf, ok = wire.gather("x", 6, read)
+    assert_eq(ok, true)
+    assert_eq(buf, "xabcdefg")
+    assert_eq(asked[1], 5)      -- asks only for what is missing
+    assert_eq(asked[2], 3)
+end)
+
+test("gather does not read when the buffer already holds n", function()
+    local read, asked = reader({})
+    local buf, ok = wire.gather("abcdef", 4, read)
+    assert_eq(ok, true)
+    assert_eq(buf, "abcdef")
+    assert_eq(#asked, 0)
+end)
+
+test("gather reports end of stream and keeps what it had", function()
+    local read = reader({ "ab", "" })
+    local buf, ok = wire.gather("", 5, read)
+    assert_eq(ok, false)
+    assert_eq(buf, "ab")
+end)
+
+test("gather passes a read failure through with its code", function()
+    local read = reader({ "a", { nil, "reset", "io_error" } })
+    local buf, ok, err, code = wire.gather("", 5, read)
+    assert_eq(ok, nil)
+    assert_eq(buf, "a")
+    assert_eq(err, "reset")
+    assert_eq(code, "io_error")
+end)
+
+test("gather caps one read at max_chunk", function()
+    local read, asked = reader({ "abc", "def", "g" })
+    local buf, ok = wire.gather("", 7, read, 3)
+    assert_eq(ok, true)
+    assert_eq(buf, "abcdefg")
+    assert_eq(asked[1], 3)
+    assert_eq(asked[2], 3)
+    assert_eq(asked[3], 1)
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

@@ -377,7 +377,7 @@ function Conn:stats() return inner[self]:stats() end
 --
 -- Two layers, and neither knows about the other: the binding opens a TLS
 -- stream to the RELAY (and checks ssh.tunnel for it, while still checking
--- ssh.connect for the host behind it), then hull.web.ws-stream turns that
+-- ssh.connect for the host behind it), then hull.ssh.ws_stream turns that
 -- into the byte stream the SSH transport already takes. So SSH itself needs
 -- no change at all - this is only a different `open_stream`.
 --
@@ -444,7 +444,7 @@ local function tunnel_opener(tunnel, crypto, dial)
     if dh ~= nil and dh ~= false and (type(dh) ~= "string" or dh == "") then
         error("ssh.connect: tunnel.destination_header must be a header name or false", 3)
     end
-    local ws   = require('hull.web.ws-stream')
+    local ws   = require('hull.ssh.ws_stream')
     local port = tunnel.port or 443
     dial = dial or function(o) return require('hull.ssh._stream').connect(o) end
     -- TLS unless the caller explicitly says otherwise. A relay carries the

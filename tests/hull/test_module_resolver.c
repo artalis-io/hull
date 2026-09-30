@@ -235,6 +235,23 @@ UTEST(module_resolver, v0_2_0_rename_hint_flat_module)
     ASSERT_NE(strstr(err, "v0.2.0"), NULL);
 }
 
+UTEST(module_resolver, ws_stream_points_at_hull_ssh)
+{
+    /* hull/web/ws-stream was folded into hull/ssh (hull.ssh.ws_stream), not
+     * renamed: the hint names the module to declare and what to require. */
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "hull/web/ws-stream", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
+    ASSERT_EQ(rc, -1);
+    ASSERT_NE(strstr(err, "now part of hull/ssh"), NULL);
+    ASSERT_NE(strstr(err, "hull.ssh.ws_stream"), NULL);
+    ASSERT_EQ(strstr(err, "did you mean"), NULL);
+}
+
 UTEST(module_resolver, v0_2_0_rename_hint_middleware)
 {
     /* Same hint for the middleware/* subtree rename. */
