@@ -156,8 +156,8 @@ handshake and another at rekey, even one the store would have accepted.
 ## 4. Keys and passphrases
 
 `ssh.load_key(text, opts)` reads an OpenSSH private key
-(`-----BEGIN OPENSSH PRIVATE KEY-----`, ed25519). PEM / PKCS#8 keys are
-refused by name rather than by a generic parse error.
+(`-----BEGIN OPENSSH PRIVATE KEY-----`: Ed25519, RSA, or ECDSA P-256 / P-384).
+PEM / PKCS#8 keys are refused by name rather than by a generic parse error.
 
 An encrypted key needs its passphrase **named, not carried**:
 
@@ -189,6 +189,35 @@ The round count in the key file is also bounded (`crypto.BCRYPT_MAX_ROUNDS`,
 2^20). It is read from the file rather than chosen by Hull, the derivation
 cannot be interrupted, and each round costs milliseconds - so a key declaring
 a few million rounds is not a slow key, it is a stalled process.
+
+### Several keys
+
+`keys = { ... }` in place of `key` offers them in order until the server
+accepts one, as `ssh` does with several `IdentityFile` lines. Each entry is
+key-file text (loaded with the connect's `passphrase` / `passphrase_env`) or a
+key already loaded with `ssh.load_key` - which is how keys with different
+passphrases are mixed. `conn:stats().auth_key` is the position of the one that
+was accepted.
+
+```lua
+local conn, err = ssh.connect{
+    host = "web1", user = "deploy",
+    keys = { fs.read("id_ed25519"), ssh.load_key(fs.read("id_rsa"),
+                                                 { passphrase_env = "RSA_PASS" }) },
+}
+```
+
+- Every key is loaded before anything is dialled: a damaged one is
+  `bad_key` (with `err.key`, its position) rather than a refusal later.
+- An RSA key is still tried under SHA-512 and then SHA-256 before the next
+  key.
+- The next key is offered only after a plain refusal that still lists
+  `publickey`. `partial_success` stops at the key that earned it - the server
+  wants a second factor, which another key does not supply.
+- When none is accepted the error is one `auth_failed`, with
+  `detail = "none of the N keys was accepted"`.
+- The server's limit on attempts still applies: OpenSSH's `MaxAuthTries`
+  (6 by default) counts every signature, and an RSA key spends two.
 
 ## 5. Through a WebSocket relay
 
@@ -493,8 +522,8 @@ bug, not a connection failure, and it comes back to you unchanged.
 | `store_failed` | the trust store could not be read or written (a missing known_hosts file is an empty store, not this) |
 | `no_common_algorithm` / `no_kexinit_response` / `bad_kex_point` / `unexpected_message` | the key exchange could not be agreed or completed |
 | `service_refused` / `no_auth_response` | the server would not start user authentication / never answered it |
-| `auth_failed` / `partial_success` | the key was refused, or a second factor is wanted |
-| `bad_key` / `bad_passphrase` / `passphrase_required` | the key file could not be read, the passphrase was wrong, or one is needed (§4) |
+| `auth_failed` / `partial_success` | the key (or every key in `keys`) was refused, or a second factor is wanted |
+| `bad_key` / `bad_passphrase` / `passphrase_required` | the key file could not be read, the passphrase was wrong, or one is needed (§4); with `keys`, `err.key` is the position |
 | `unsupported_key_type` | the key is not an OpenSSH Ed25519, RSA or ECDSA P-256/P-384 key (P-521, a PEM file), is an RSA key under 2048 bits, or uses protection Hull does not read |
 
 **Using the connection**

@@ -87,6 +87,9 @@ WORK=$(mktemp -d 2>/dev/null || mktemp -d -t hullssh)
 # privatekey.load and never reaches the tunnel the test is about.
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/client_key" </dev/null
 chmod 600 "$WORK/client_key"
+# A key sshd does not know: offered first, to prove the next key is tried.
+ssh-keygen -q -t ed25519 -N '' -f "$WORK/decoy_key" </dev/null
+chmod 600 "$WORK/decoy_key"
 
 # Assert on a KEY=VALUE line the app printed. Unique variable names: POSIX sh
 # has no locals, so a name reused here would clobber the caller's.
@@ -148,11 +151,12 @@ stop_shim() {
 write_app() {
     mkdir -p "$1"
     cp "${CLIENT_KEY:-$WORK/client_key}" "$1/client_key"   # CLIENT_KEY: another key type
-    chmod 600 "$1/client_key"
+    cp "$WORK/decoy_key" "$1/decoy_key"
+    chmod 600 "$1/client_key" "$1/decoy_key"
     cat > "$1/app.lua" <<LUA
 app.manifest({
     modules = { "hull/ssh@1", "hull/fs@1" },
-    fs = { read = { "client_key" } },
+    fs = { read = { "client_key", "decoy_key" } },
     ssh = {
         connect = { hosts = { $6 }, ports = { $7 }, users = { "$SSH_LOGIN" } },
         tunnel  = { hosts = { $8 }, ports = { $9 } },
@@ -220,6 +224,22 @@ app.main(function()
     -- The rest of what hull/ssh does, against a real sshd. Run once (the first
     -- session), not for every key type below: it moves a few megabytes.
     if "${FULL_INTEROP:-0}" == "1" then
+        -- Several keys: the one sshd does not know is refused, the next is
+        -- offered on the same connection, and the handle says which won.
+        local decoy = fs.read("decoy_key")
+        local ck, ce = ssh.connect{
+            host = "$2", port = $3, user = "$SSH_LOGIN",
+            keys = { decoy, key }, trust = trust, tunnel = TUNNEL,
+        }
+        print("fallback_key=" .. tostring(ck and ck:stats().auth_key
+                                           or ("error:" .. tostring(ce and ce.code))))
+        if ck then ck:close() end
+        local _, de = ssh.connect{
+            host = "$2", port = $3, user = "$SSH_LOGIN",
+            keys = { decoy }, trust = trust, tunnel = TUNNEL,
+        }
+        print("decoy_only_code=" .. tostring(de and de.code))
+
         -- stdin reaches the command, and EOF ends it
         local rs = conn:exec("cat", { stdin = "hull-stdin-ok" })
         print("stdin_echo=" .. tostring(rs and rs.stdout))
@@ -618,6 +638,8 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "exec_status" "0" "live: exec succeeded over the tunnel"
         assert_line "$OUT" "exec_stdout" "hull-tunnel-ok" "live: command output came back through the tunnel"
         assert_line "$OUT" "exit3_status" "3" "live: a non-zero remote exit is a status, not an error"
+        assert_line "$OUT" "fallback_key" "2" "live: a refused key gives way to the next"
+        assert_line "$OUT" "decoy_only_code" "auth_failed" "live: an unknown key alone is auth_failed"
         assert_line "$OUT" "stdin_echo" "hull-stdin-ok" "live: stdin reaches the command"
         assert_line "$OUT" "stdin_streamed" "5242880" "live: 5 MB of stdin streamed while its output came back"
         assert_line "$OUT" "streamed_bytes" "3000000" "live: 3 MB streamed through on_stdout"

@@ -1911,4 +1911,63 @@ test("an Ed25519 key is offered once, as before", function()
     assert_eq(requested_algorithms(s), "ssh-ed25519")
 end)
 
+-- Several keys: offered in order until one is accepted -------------------------
+
+test("a refused key gives way to the next, and the accepted one is recorded", function()
+    local signed = {}
+    local t, s = authenticating(accept_service() .. auth_failure({ "publickey" })
+                                .. auth_success(), signed)
+    assert_eq(t:authenticate("u", { ED_KEY, EC_KEY }), true)
+    assert_eq(requested_algorithms(s), "ssh-ed25519,ecdsa-sha2-nistp384")
+    assert_eq(t:stats().auth_key, 2)
+end)
+
+test("an RSA key still tries both hashes before the next key", function()
+    local signed = {}
+    local t, s = authenticating(accept_service() .. auth_failure({ "publickey" })
+                                .. auth_failure({ "publickey" }) .. auth_success(), signed)
+    assert_eq(t:authenticate("u", { RSA_KEY, ED_KEY }), true)
+    assert_eq(requested_algorithms(s), "rsa-sha2-512,rsa-sha2-256,ssh-ed25519")
+    assert_eq(t:stats().auth_key, 2)
+end)
+
+test("every key refused is one auth failure that says how many were tried", function()
+    local signed = {}
+    local t, s = authenticating(accept_service() .. auth_failure({ "publickey" })
+                                .. auth_failure({ "publickey" }), signed)
+    local ok, err = t:authenticate("u", { ED_KEY, EC_KEY })
+    assert_eq(ok, nil)
+    assert_eq(err.code, "auth_failed")
+    assert_eq(err.detail, "none of the 2 keys was accepted")
+    assert_eq(requested_algorithms(s), "ssh-ed25519,ecdsa-sha2-nistp384")
+end)
+
+test("partial success stops at the key that earned it", function()
+    -- The server accepted that key and wants another factor: offering the
+    -- next key would not supply it.
+    local signed = {}
+    local t, s = authenticating(accept_service()
+                                .. auth_failure({ "publickey", "password" }, true), signed)
+    local ok, err = t:authenticate("u", { ED_KEY, EC_KEY })
+    assert_eq(ok, nil)
+    assert_eq(err.code, "partial_success")
+    assert_eq(requested_algorithms(s), "ssh-ed25519")
+end)
+
+test("no next key once the server stops offering publickey", function()
+    local signed = {}
+    local t, s = authenticating(accept_service() .. auth_failure({ "password" }), signed)
+    local ok, err = t:authenticate("u", { ED_KEY, EC_KEY })
+    assert_eq(ok, nil)
+    assert_eq(err.code, "auth_failed")
+    assert_eq(requested_algorithms(s), "ssh-ed25519")
+end)
+
+test("a single key is still accepted as a key, not a list", function()
+    local signed = {}
+    local t = authenticating(accept_service() .. auth_success(), signed)
+    assert_eq(t:authenticate("u", ED_KEY), true)
+    assert_eq(t:stats().auth_key, 1)
+end)
+
 return {pass = pass, fail = fail}

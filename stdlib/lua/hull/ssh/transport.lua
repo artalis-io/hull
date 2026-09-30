@@ -757,6 +757,7 @@ function Transport:stats()
         + (self.s2c and self.s2c:bytes_processed() or 0)
     return {
         rekeys           = self.rekeys,
+        auth_key         = self.auth_key,
         bytes_sent       = sent,
         bytes_received   = recv,
         packets_sent     = self.c2s and self.c2s:packets_sent() or 0,
@@ -768,14 +769,9 @@ end
 
 -- Authentication ------------------------------------------------------------------
 
-function Transport:authenticate(user, key, on_banner)
-    self:send_packet(userauth.build_service_request())
-    local accepted = userauth.parse_service_accept(self:next_message())
-    if accepted ~= userauth.SERVICE_USERAUTH then
-        return nil, { code = "service_refused",
-                      detail = wire.safe_name(accepted) }
-    end
-
+-- Offer one key, under each signature algorithm it has. Returns true, or nil
+-- plus a failure; `next_key` says whether another key is worth offering.
+local function offer_key(self, user, key, on_banner)
     -- An RSA key signs under SHA-512 first, then SHA-256 (RFC 8332): a
     -- server refusing the first may still take the second, and one that
     -- refuses both refuses the key. Hull does not read server-sig-algs
@@ -804,25 +800,60 @@ function Transport:authenticate(user, key, on_banner)
             if r.type == "banner" then
                 if on_banner then on_banner(r.message) end
             elseif r.type == "success" then
-                self.user = user
-                self.authenticated = true      -- keepalives may now be sent
                 return true
             elseif r.type == "failure" then
                 failure = r
                 break
             end
         end
-        if not failure then return nil, { code = "no_auth_response" } end
+        if not failure then return nil, { code = "no_auth_response" }, false end
         -- Partial success is NOT authentication: the server wants another
         -- factor, and reporting it as success would skip that. It is also
-        -- not a refusal of this signature, so another hash will not help.
-        -- Nor will one when publickey is no longer on offer at all.
-        if failure.partial or i == #algorithms
-           or not userauth.can_retry_publickey(failure) then
-            return nil, { code = failure.partial and "partial_success" or "auth_failed",
-                          methods = failure.methods }
+        -- not a refusal of this signature, so neither another hash nor
+        -- another key will help. Nor will either once publickey is no longer
+        -- on offer at all.
+        if failure.partial then
+            return nil, { code = "partial_success", methods = failure.methods }, false
+        end
+        if not userauth.can_retry_publickey(failure) then
+            return nil, { code = "auth_failed", methods = failure.methods }, false
+        end
+        if i == #algorithms then
+            return nil, { code = "auth_failed", methods = failure.methods }, true
         end
     end
+end
+
+-- `keys` is one loaded key, or a list of them offered in order until one is
+-- accepted - what ssh(1) does with several IdentityFile lines.
+function Transport:authenticate(user, keys, on_banner)
+    self:send_packet(userauth.build_service_request())
+    local accepted = userauth.parse_service_accept(self:next_message())
+    if accepted ~= userauth.SERVICE_USERAUTH then
+        return nil, { code = "service_refused",
+                      detail = wire.safe_name(accepted) }
+    end
+
+    if keys.blob then keys = { keys } end
+    local err
+    for n, key in ipairs(keys) do
+        local ok, e, next_key = offer_key(self, user, key, on_banner)
+        if ok then
+            self.user = user
+            self.auth_key = n                  -- which one; see Conn:stats()
+            self.authenticated = true          -- keepalives may now be sent
+            return true
+        end
+        err = e
+        -- A server stops accepting attempts (OpenSSH's MaxAuthTries, 6 by
+        -- default, counts each signature) by disconnecting, which surfaces
+        -- here as a raise, not as a failure to move past.
+        if not next_key then break end
+    end
+    if err and err.code == "auth_failed" and #keys > 1 then
+        err.detail = "none of the " .. tostring(#keys) .. " keys was accepted"
+    end
+    return nil, err
 end
 
 -- SFTP --------------------------------------------------------------------------------

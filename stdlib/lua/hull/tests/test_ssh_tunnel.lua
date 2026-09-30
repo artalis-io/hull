@@ -350,6 +350,29 @@ test("an unreadable key comes back as bad_key, not a raise", function()
     assert_eq(err.code, "bad_key")
 end)
 
+test("exactly one of key and keys, and keys is a non-empty list", function()
+    local base = { host = "h", user = "u", crypto = crypto_stub,
+                   open_stream = function() error("must not dial") end }
+    local function try(extra)
+        local o = {}
+        for k, v in pairs(base) do o[k] = v end
+        for k, v in pairs(extra) do o[k] = v end
+        return pcall(ssh.connect, o)
+    end
+    assert_eq((try({})), false)
+    assert_eq((try({ key = {}, keys = { {} } })), false)
+    assert_eq((try({ keys = {} })), false)
+    assert_eq((try({ keys = "not a list" })), false)
+end)
+
+test("a bad key anywhere in keys fails before the dial, and says which", function()
+    local _, err = ssh.connect{ host = "h", user = "u", keys = { {}, "not a key" },
+                                crypto = crypto_stub,
+                                open_stream = function() error("must not dial") end }
+    assert_eq(err.code, "bad_key")
+    assert_eq(err.key, 2)
+end)
+
 test("a key in another tool's format is unsupported_key_type", function()
     local _, err = ssh.connect{ host = "h", user = "u",
         key = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
