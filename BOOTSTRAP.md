@@ -443,8 +443,12 @@ network unless you also list `hosts`.
 | | `hull/attachment` | File attachments backed by blob. |
 | | `hull/web/attachment-serve` | Serve attachments with Content-Type + ETag + Range. |
 | | `hull/mime` | MIME sniffer (magic-bytes). |
-| **Crypto** | `hull/crypto` | SHA, HMAC, PBKDF2, Ed25519, NaCl, random. Asymmetric verify (RS/ES). |
+| **Crypto** | `hull/crypto` | SHA, HMAC, PBKDF2, Ed25519, NaCl, random. Asymmetric sign + verify (RS/PS/ES). Bytes in, bytes out. |
+| | `hull/crypto/hkdf` | HKDF-SHA256: several keys from one secret. |
+| | `hull/crypto/sealbox` | Versioned authenticated sealing under a keyring (encryption at rest). |
+| | `hull/encoding` | hex, base64, base32, UTF-8, URL percent-encoding. Use it; never hand-roll a codec. |
 | | `hull/jwt` | Sign + verify (HS256 + asym). |
+| **Remote** | `hull/ssh` | SSH-2 client, Lua only: exec, SFTP, WebSocket relays. Hosts / ports / logins are manifest grants. `hull agent context --task=ssh`. |
 | **Misc** | `hull/template` | HTML template engine. Cached. |
 | | `hull/validate` | Declarative input validation. |
 | | `hull/log` | Structured logging. |

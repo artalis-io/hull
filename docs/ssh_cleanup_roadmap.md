@@ -323,6 +323,17 @@ documenting parallel connections.
 
 ## Group 6: tests and docs
 
+Done. Live OpenSSH interop (`tests/e2e_ssh_tunnel.sh`) now covers stdin,
+3 MB of streamed stdout with a key exchange sshd starts in the middle of it
+(`RekeyLimit 1M`), the `max_output` refusal, a client-initiated rekey, an
+SFTP round trip (write, read back, stat, list, remove), the direct path
+without the relay, ECDSA / RSA host keys and ECDSA / RSA user keys. A real
+`host_changed_midsession` - a rekey presenting another key - is a scripted
+transport test, since sshd cannot swap its key mid-session. `ssh.md` lists
+every code the stack emits; `ssh_module_design.md` §6 / §9 / §11 match the
+code; `stdlib/context/ssh.md` exists and BOOTSTRAP.md / AGENTS.md list
+`hull/ssh`. The items as originally recorded:
+
 - **Tests.**
   - The SFTP *client* has no tests (only the codec does); the live sshd in CI
     enables the subsystem and never uses it.

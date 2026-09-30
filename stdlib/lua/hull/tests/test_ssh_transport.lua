@@ -339,6 +339,61 @@ test("a key of another type than the negotiated algorithm is refused", function(
     assert_eq(#calls, 0, "nothing reached a verifier:")
 end)
 
+-- A rekey that presents a DIFFERENT host key: the case the stubbed
+-- run_kex test above only asserts the handling of. Here the whole exchange
+-- runs - a real handshake under key A, then the server answers a rekey with
+-- key B - and the transport itself must notice. The store still trusts A,
+-- and B's signature would verify (every stub signature does), so nothing
+-- but the pin against the session's own key can catch it.
+local cipher = require('hull.ssh.cipher')
+
+local function ed_key(byte)
+    return wire.writer():string("ssh-ed25519"):string(string.rep(byte, 32)):build()
+end
+local function ed_sig()
+    return wire.writer():string("ssh-ed25519"):string(string.rep("\8", 64)):build()
+end
+
+-- Packets after NEWKEYS, under the stub's identity AEAD.
+local function sealed(payloads)
+    local c = cipher.new(string.rep("\0", 32), string.rep("\0", 12))
+    local aead = { seal = function(_, _, _, p) return p, string.rep("\0", 16) end }
+    local out = {}
+    for i, p in ipairs(payloads) do out[i] = c:seal(aead, p, function(n) return string.rep("\0", n) end) end
+    return table.concat(out)
+end
+
+test("a rekey presenting another host key is refused as host_changed_midsession", function()
+    local KEY_A, KEY_B = ed_key("A"), ed_key("B")
+    local offer = {}
+    for k, v in pairs(kexinit.DEFAULT_OFFER) do offer[k] = v end
+    offer.host_key = { "ssh-ed25519" }
+    local server_kexinit = kexinit.build(offer, string.rep("\0", 16))
+    local function reply(key)
+        return wire.writer():byte(31):string(key):string(string.rep("Q", 32))
+                  :string(ed_sig()):build()
+    end
+    local inbound = "SSH-2.0-Test\r\n" .. plain(server_kexinit) .. plain(reply(KEY_A))
+                 .. plain("\21")
+                 .. sealed({ server_kexinit, reply(KEY_B) })
+    local calls = {}
+    local c = full_crypto(calls)
+    -- A digest that depends on its input, so the two keys' fingerprints differ.
+    c.sha256 = function(d) return (string.rep("\0", 32) .. d):sub(-32) end
+    local t = transport.new(fake_stream(inbound, 64), c)
+    local ok, err = t:handshake({ host = "h", trust = { get = function() return KEY_A end } })
+    assert_eq(ok, true, err and err.code)
+
+    local rok, rerr = t:rekey()
+    assert_eq(rok, nil)
+    assert_eq(rerr.code, "host_changed_midsession")
+    -- Both fingerprints, so an operator sees which key was expected.
+    assert_eq(type(rerr.fingerprint) == "string" and rerr.fingerprint ~= rerr.stored_fingerprint,
+              true, "fingerprints:")
+    -- Refused before B's signature was looked at.
+    assert_eq(#calls, 1, "only the first exchange verified a signature:")
+end)
+
 -- The host key algorithms in the first KEXINIT this client sent.
 local function offered_host_keys(s)
     for _, w in ipairs(s.written) do

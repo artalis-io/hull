@@ -192,8 +192,7 @@ a byte-only crypto API (a deliberate breaking change).
   `ws-stream` and merging its short-read gatherer; a net cap bit). The Lua
   side of group 5 is done (`session.lua`, `wire.peek_uint32`, one
   sanitizer, a tidier facade);
-  group 6 (live rekey / stdin interop tests, context docs). The group 6 fuzz
-  targets are done: `fuzz/fuzz_ssh.c`.
+  group 6 is done (fuzz targets, live interop, docs).
 - **SSH host keys:** done. ECDSA P-256 / P-384 and RSA (SHA-2, at least
   2048 bits) are verified alongside Ed25519, the store's key type is asked
   for first, and the live sshd e2e connects to a server holding only each

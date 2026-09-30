@@ -706,6 +706,8 @@ Every module except the intrinsic core must be listed in `manifest.modules`. The
 | `validate` | `require("hull.validate")` | `import { validate } from "hull:validate"` | `"hull/validate@1"` | Input validation |
 | `form` | `require("hull.web.form")` | `import { form } from "hull:web:form"` | `"hull/web/form@1"` | Form parsing |
 | `cookie` | `require("hull.web.cookie")` | `import { cookie } from "hull:web:cookie"` | `"hull/web/cookie@1"` | Cookie helpers |
+| `ssh` | `require("hull.ssh")` | (Lua only) | `"hull/ssh@1"` | SSH-2 client: `connect` / `exec` / `sftp`, host-key trust stores, WebSocket relays. Needs a `ssh.connect` grant (hosts, ports, users). See `hull agent context --task=ssh` |
+| `encoding` | `require("hull.encoding")` | `import { encoding } from "hull:encoding"` | `"hull/encoding@1"` | hex / base64 / base32 / UTF-8 / URL codecs (JS: `decode` returns null, `why(...)` gives the reason) |
 | `jwt` | `require("hull.jwt")` | `import { jwt } from "hull:jwt"` | `"hull/jwt@1"` | JWT sign/verify (deps: `crypto`) |
 | `csv` | `require("hull.csv")` | `import { csv } from "hull:csv"` | `"hull/csv@1"` | CSV parse/encode |
 | `path` | `require("hull.path")` | `import { path } from "hull:path"` | `"hull/path@1"` | Pure LEXICAL path-name manipulation (`normalize`/`join`/`dirname`/`basename`/`extension`/`stem`/`is_absolute`/`relative`/`is_within`). No fs authority; NOT a security boundary (use `hull.fs` for containment against the resolved object) |

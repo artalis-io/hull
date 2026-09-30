@@ -217,6 +217,74 @@ app.main(function()
     local r2 = conn:exec("exit 3")
     print("exit3_status=" .. tostring(r2.status))
 
+    -- The rest of what hull/ssh does, against a real sshd. Run once (the first
+    -- session), not for every key type below: it moves a few megabytes.
+    if "${FULL_INTEROP:-0}" == "1" then
+        -- stdin reaches the command, and EOF ends it
+        local rs = conn:exec("cat", { stdin = "hull-stdin-ok" })
+        print("stdin_echo=" .. tostring(rs and rs.stdout))
+
+        -- Streamed output, long enough that sshd (RekeyLimit 1M in its
+        -- config) starts a key exchange in the middle of it: the transport
+        -- absorbs the server's KEXINIT and the stream carries on.
+        local got, chunks = 0, 0
+        local rb = conn:exec("head -c 3000000 /dev/zero", {
+            on_stdout = function(c) got = got + #c; chunks = chunks + 1 end,
+        })
+        print("streamed_bytes=" .. tostring(got))
+        print("streamed_in_chunks=" .. tostring(chunks > 1))
+        print("streamed_buffered=" .. tostring(rb and #rb.stdout))
+        print("server_rekeyed=" .. tostring(conn:stats().rekeys >= 1))
+
+        -- The output cap refuses rather than truncating
+        local _, em = conn:exec("head -c 100000 /dev/zero", { max_output = 1000 })
+        print("max_output_code=" .. tostring(em and em.code))
+
+        -- A key exchange this side asks for, then the session still works
+        local before = conn:stats().rekeys
+        print("client_rekey=" .. tostring(conn:rekey()))
+        print("rekey_counted=" .. tostring(conn:stats().rekeys == before + 1))
+        local ra = conn:exec("echo after-rekey")
+        print("after_rekey=" .. tostring((ra.stdout or ""):gsub("%s+$", "")))
+
+        -- SFTP: the subsystem the config enables, used for real
+        local f, fe = conn:sftp()
+        if not f then
+            print("sftp_open=" .. tostring(fe and fe.code))
+        else
+            local data = string.rep("hull-sftp ", 20000)      -- 200 KB, several windows
+            local name = "hull_e2e_sftp.txt"
+            print("sftp_write=" .. tostring(f:write(name, data)))
+            print("sftp_read_back=" .. tostring(f:read(name) == data))
+            local a = f:stat(name)
+            print("sftp_size=" .. tostring(a and a.size))
+            local found = false
+            for _, e in ipairs(f:list(".") or {}) do
+                if e.filename == name then found = true end
+            end
+            print("sftp_listed=" .. tostring(found))
+            print("sftp_remove=" .. tostring(f:remove(name)))
+            local _, gone = f:stat(name)
+            print("sftp_gone=" .. tostring(gone and gone.code))
+            f:close()
+            -- exec still works after an sftp session on the same connection
+            local rx = conn:exec("echo after-sftp")
+            print("after_sftp=" .. tostring((rx.stdout or ""):gsub("%s+$", "")))
+        end
+
+        -- The direct path: the same host, dialled without the relay
+        local d, de = ssh.connect{
+            host = "$2", port = $3, user = "$SSH_LOGIN", key = key, trust = trust,
+        }
+        if d then
+            local rd = d:exec("echo hull-direct-ok")
+            print("direct=" .. tostring((rd.stdout or ""):gsub("%s+$", "")))
+            d:close()
+        else
+            print("direct=" .. tostring(de and de.code) .. " " .. tostring(de and de.detail))
+        end
+    end
+
     conn:close()
     print("done=yes")
     return 0
@@ -487,6 +555,8 @@ PubkeyAuthentication yes
 PidFile $WORK/sshd/pid
 LogLevel VERBOSE
 Subsystem sftp internal-sftp
+# Small, so the 3 MB streamed below makes sshd start a key exchange mid-stream.
+RekeyLimit 1M
 CFG
 
     # Start sshd and wait for its port, not for a sleep. Sets _ok.
@@ -516,7 +586,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         sed 's/^/    sshd: /' "$WORK/sshd/log" 2>/dev/null | head -10
     else
         start_shim "$RELAY_PORT" "$SSH_PORT"
-        write_app "$WORK/b1" "127.0.0.1" "$SSH_PORT" "127.0.0.1" "$RELAY_PORT" \
+        FULL_INTEROP=1 write_app "$WORK/b1" "127.0.0.1" "$SSH_PORT" "127.0.0.1" "$RELAY_PORT" \
             '"127.0.0.1"' "$SSH_PORT" '"127.0.0.1"' "$RELAY_PORT"
         OUT=$(run_app "$WORK/b1")
         SEEN=$(cat "$WORK/headers.txt" 2>/dev/null || echo "")
@@ -531,6 +601,23 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "exec_status" "0" "live: exec succeeded over the tunnel"
         assert_line "$OUT" "exec_stdout" "hull-tunnel-ok" "live: command output came back through the tunnel"
         assert_line "$OUT" "exit3_status" "3" "live: a non-zero remote exit is a status, not an error"
+        assert_line "$OUT" "stdin_echo" "hull-stdin-ok" "live: stdin reaches the command"
+        assert_line "$OUT" "streamed_bytes" "3000000" "live: 3 MB streamed through on_stdout"
+        assert_line "$OUT" "streamed_in_chunks" "true" "live: delivered as it arrived, in chunks"
+        assert_line "$OUT" "streamed_buffered" "0" "live: a streamed stream is not also buffered"
+        assert_line "$OUT" "server_rekeyed" "true" "live: sshd's mid-stream key exchange was absorbed"
+        assert_line "$OUT" "max_output_code" "output_too_large" "live: max_output refuses, not truncates"
+        assert_line "$OUT" "client_rekey" "true" "live: a client-initiated key exchange completes"
+        assert_line "$OUT" "rekey_counted" "true" "live: and is counted"
+        assert_line "$OUT" "after_rekey" "after-rekey" "live: the session works under the new keys"
+        assert_line "$OUT" "sftp_write" "true" "live: sftp writes a 200 KB file"
+        assert_line "$OUT" "sftp_read_back" "true" "live: sftp reads it back unchanged"
+        assert_line "$OUT" "sftp_size" "200000" "live: sftp stat reports its size"
+        assert_line "$OUT" "sftp_listed" "true" "live: sftp lists it"
+        assert_line "$OUT" "sftp_remove" "true" "live: sftp removes it"
+        assert_line "$OUT" "sftp_gone" "no_such_file" "live: and it is gone"
+        assert_line "$OUT" "after_sftp" "after-sftp" "live: exec works after an sftp session"
+        assert_line "$OUT" "direct" "hull-direct-ok" "live: the direct path, without the relay"
         assert_line "$OUT" "done" "yes" "live: the session closed cleanly"
 
         # Two upgrades: one per connect. The host-key accept is a real
