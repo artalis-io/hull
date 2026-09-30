@@ -20,7 +20,7 @@ contributors hacking on the runtime, stdlib, or build pipeline.
 
 Hull embeds Mozilla's CA bundle (from curl.se, ~226KB, ~145 roots) into `libhull_platform.a` so HTTPS works without a system CA store. Apps built via `hull build` inherit the embedded bundle automatically.
 
-Resolution order at startup (in `main.c::hl_serve_wire_and_start`):
+Resolution order at startup (`hl_ca_trust_resolve` in `src/hull/ca_trust.c`, shared by the server and `app.main` entry points):
 1. `--no-ca-bundle` (or `--skip-ca-bundle` deprecated alias) → no verification (dev only, MITM-vulnerable)
 2. `--ca-bundle PATH` (or `--ca-bundle=PATH`) → load that file
 3. System CA store at `/etc/ssl/cert.pem`, `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`

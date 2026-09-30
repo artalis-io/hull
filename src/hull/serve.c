@@ -46,6 +46,7 @@
 #include "hull/net_backend.h"
 #include "hull/net/keel.h"
 #include "hull/cacert.h"
+#include "hull/ca_trust.h"
 #include "hull/utils/csp.h"
 #include <sh_seal_arena.h>
 #ifdef HL_ENABLE_DB
@@ -1516,66 +1517,11 @@ static int hl_serve_wire_caps(HlServerState *s)
      * means --ca-bundle, --no-ca-bundle and the system/embedded ladder mean
      * the same thing for every outbound connection Hull makes. */
     if (s->manifest.hosts_count > 0 || s->manifest.ssh.tunnel.declared) {
-        /* Set up the client TLS context.
-         *
-         * Resolution order:
-         *   1. --no-ca-bundle (or --skip-ca-bundle alias) → no verification (dev only)
-         *   2. --ca-bundle PATH (override) → use that file
-         *   3. system CA store at well-known paths
-         *   4. embedded Mozilla bundle (when HL_EMBED_CA_BUNDLE=1)
-         *   5. fail with a clear hint
-         */
-        if (s->cfg.skip_ca_bundle) {
-            log_warn("[hull:c] TLS certificate verification disabled (--no-ca-bundle)");
-            s->client_tls_ctx = hl_tls_client_ctx_create(NULL, &s->kl_alloc);
-        } else if (s->cfg.ca_bundle_override) {
-            s->ca_bundle_path = s->cfg.ca_bundle_override;
-            log_info("[hull:c] using CA bundle (override): %s", s->ca_bundle_path);
-            s->client_tls_ctx = hl_tls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
-            if (!s->client_tls_ctx)
-                log_warn("[hull:c] failed to load CA bundle from %s", s->ca_bundle_path);
-        } else {
-            /* The system store is TRIED, not trusted to work. A path being
-             * readable is not the same as its contents parsing, and this
-             * branch used to log "using CA bundle: X" and move on without
-             * looking at the result - so an unparseable store disabled
-             * HTTPS silently, with a log line claiming the opposite. Fall
-             * through to the embedded bundle, which is what it is for.
-             *
-             * Not the same as --ca-bundle: an operator who NAMES a file has
-             * said which anchor to use, and quietly substituting another
-             * would be the wrong kind of helpful. That one fails closed. */
-            s->ca_bundle_path = hl_ca_bundle_find_system();
-            if (s->ca_bundle_path) {
-                log_info("[hull:c] using CA bundle: %s", s->ca_bundle_path);
-                s->client_tls_ctx = hl_tls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
-                if (!s->client_tls_ctx) {
-                    log_warn("[hull:c] system CA bundle %s did not load; "
-                             "falling back to the embedded bundle",
-                             s->ca_bundle_path);
-                    s->ca_bundle_path = NULL;
-                }
-            }
-            if (!s->client_tls_ctx) {
-                /* System bundle absent or unusable - try embedded fallback */
-                const unsigned char *emb_data = NULL;
-                size_t emb_len = 0;
-                if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
-                    log_info("[hull:c] using embedded CA bundle (%s)",
-                             hl_embedded_ca_bundle_label());
-                    s->client_tls_ctx = hl_tls_client_ctx_create_from_buf(
-                        emb_data, emb_len, &s->kl_alloc);
-                    /* Sentinel so doctor / introspection sees "(embedded)" */
-                    s->ca_bundle_path = "(embedded)";
-                    if (!s->client_tls_ctx)
-                        log_warn("[hull:c] failed to parse embedded CA bundle");
-                } else {
-                    log_warn("[hull:c] no CA bundle found; HTTPS disabled "
-                             "(use --no-ca-bundle, --ca-bundle PATH, or "
-                             "build with HL_EMBED_CA_BUNDLE=1)");
-                }
-            }
-        }
+        /* The ladder (--no-ca-bundle, --ca-bundle, system store, embedded
+         * bundle) is shared with serve_cli.c; see ca_trust.h. */
+        s->client_tls_ctx = hl_ca_trust_resolve(s->cfg.skip_ca_bundle,
+                                                s->cfg.ca_bundle_override,
+                                                &s->kl_alloc, &s->ca_bundle_path);
 
         if (s->client_tls_ctx) {
             hl_tls_config_wire(&s->client_tls_config, s->client_tls_ctx);

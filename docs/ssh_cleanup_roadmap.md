@@ -288,7 +288,8 @@ documenting parallel connections.
 - **One connect adapter.** `net_stream.c` copies the KlConnectOp adapter,
   socket-provider wrappers, the `getaddrinfo` loop and the TLS rc mapping from
   `smtp_transport.c` / `tls_client.c` / the DB transport (~300 lines). The CA
-  bundle ladder is also duplicated between `serve.c` and `serve_cli.c`.
+  bundle ladder: done - `hl_ca_trust_resolve` (`ca_trust.c`) is the one copy
+  `serve.c` and `serve_cli.c` call.
 - **DRY in the Lua stack.**
   - hex: done - `hull.encoding` is the one home for hex and base64;
   - fingerprint: done - `privatekey.fingerprint` delegates to `hostkey`;
