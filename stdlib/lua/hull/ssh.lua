@@ -81,8 +81,8 @@ function M.memory_store(seed)
 end
 
 --- A trust store in an OpenSSH known_hosts file, read and written through
---- hull/fs - so the app needs `hull/fs` in its modules and the path in
---- manifest fs.read (and fs.write, to accept or forget keys). The `ssh`
+--- hull/fs (a dependency of hull/ssh, so it comes with it) - the app names
+--- the path in manifest fs.read (and fs.write, to accept or forget keys). The `ssh`
 --- command line reads what this writes, and this reads what it writes,
 --- ssh-keyscan output and hashed entries included (see hull.ssh.known_hosts
 --- for what is skipped).
