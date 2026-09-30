@@ -959,6 +959,55 @@ app.daily("02:00", () => { inbox.cleanup(); }, { localtime: true });
 
 **Implementation:** Timer callbacks fire via Keel's `kl_timer_add` min-heap. Self-re-adding callbacks give repeating behavior. Async operations use "detached" mode. `HlAsyncCtx` with `detached=1` resumes via `hl_async_ctx_resume_detached()` instead of `kl_async_complete()`.
 
+### Concurrent work (`hull.async`, `hull.gather`, `hull.map`)
+
+Everything a Hull program does runs on one event loop, and a coroutine that
+waits (network, a worker-pool job, `hull.sleep`) lets the others run. These
+start work concurrently and wait for it - most usefully from `app.main`,
+which is otherwise one coroutine doing things in turn.
+
+**Lua:**
+```lua
+local t = hull.async(function(url) return fetch(url) end, url)  -- a task
+local body = t:wait()          -- its return values, or its error raised
+t:done()                       -- finished yet?
+
+local a, b = hull.gather(      -- a fixed set; first results, in order
+    function() return fetch(x) end,
+    function() return fetch(y) end)
+
+local up = hull.map(hosts, function(host, i)   -- a list, at most `limit` at once
+    local c = assert(ssh.connect{ host = host, user = "deploy", key = key })
+    local r = c:exec("uptime")
+    c:close()
+    return r.stdout
+end, { limit = 8 })            -- default 16; math.huge for no cap
+```
+
+**JS:** Promises already give tasks and `Promise.all`; the bounded fan-out is
+`await hull.map(items, async (item, i) => ..., { limit: 8 })` (default 16,
+`Infinity` for no cap).
+
+- **Failures:** `gather` and `map` let every item finish, then raise the
+  first failure (by position) with all of them attached: `err.errors[i]`
+  (JS: `e.errors[i]`, sparse). `tostring(err)` / `e.message` is the first
+  one's message. There is no fail-fast: nothing in flight can be abandoned
+  halfway, and its own timeout already bounds it.
+- **Concurrency, not parallelism:** tasks overlap while they wait; CPU-bound
+  Lua does not get faster. `compute.async` / `db.async` fan-out does use the
+  worker pool's threads.
+- **One connection per task:** an SSH connection (or anything else that parks
+  per coroutine) is used by the task that opened it; from another task while
+  one waits it is `busy`.
+- **Budgets:** each task has its own instruction limit, like a timer callback.
+- **`app.main` returning with tasks unjoined** ends the process and abandons
+  them, with a WARN saying how many - join what you start. In an app that
+  serves routes, `app.main` returning 0 does not end the process, so its tasks
+  keep running.
+
+`tui.async(fn)` stays fire-and-forget. Design:
+[task_join_design.md](task_join_design.md).
+
 ### WASM Compute Plugins
 
 Hull supports compute-only WASM plugins for CPU-intensive pure functions. Plugins have no I/O. They transform input bytes to output bytes inside isolated WASM linear memory with gas-metered execution.

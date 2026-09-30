@@ -1515,7 +1515,7 @@ function jobs.run_worker(opts)
     end
 
     -- Shared across loops (single event-loop thread, so no data race).
-    local total, active = 0, concurrency
+    local total = 0
     local function loop()
         local empty = 0
         while _running do
@@ -1529,18 +1529,23 @@ function jobs.run_worker(opts)
                 empty = 0
             end
         end
-        active = active - 1
     end
 
     if concurrency == 1 then
         loop()
     else
-        -- N-1 detached loops (hull.async has no join) + 1 inline. Every loop
-        -- exits on the same _running flag / drain, and `active` counts down as
-        -- each finishes, so we can wait for all to settle before returning.
-        for _ = 1, concurrency - 1 do hull.async(loop) end
-        loop()
-        while active > 0 do hull.sleep(5) end
+        -- N-1 loops as tasks + 1 inline, all exiting on the same _running
+        -- flag / drain, then joined. A loop that raises no longer leaves the
+        -- worker waiting forever on a count that never reaches zero: every
+        -- loop is joined, then the first failure is raised.
+        local tasks = {}
+        for i = 1, concurrency - 1 do tasks[i] = hull.async(loop) end
+        local ok, err = pcall(loop)
+        for _, t in ipairs(tasks) do
+            local tok, terr = pcall(t.wait, t)
+            if ok and not tok then ok, err = false, terr end
+        end
+        if not ok then error(err, 0) end
     end
     return total
 end

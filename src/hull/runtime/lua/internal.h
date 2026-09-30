@@ -119,7 +119,7 @@ void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar);
 
 /* hull.async(fn): spawn a detached coroutine on the event loop (async.c).
  * Shared by the `hull` global and hull.tui's `tui.async` alias. */
-int lua_hull_async(lua_State *L);
+int lua_hull_spawn(lua_State *L);
 
 /* ── Promoted: defined in timers.c, used in routes.c (initial schedule
  * during wire_routes_server) and from within timers.c itself. */

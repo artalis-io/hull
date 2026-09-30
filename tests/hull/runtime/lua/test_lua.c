@@ -5994,4 +5994,156 @@ UTEST(lua_runtime, app_get_allowed_before_registration_closed)
     cleanup_lua();
 }
 
+
+/* ── hull.async tasks, hull.gather, hull.map (docs/task_join_design.md) ──
+ *
+ * Driven on a real loop, as under app.main: each script runs on its own
+ * coroutine (ssh_co_start), the loop ticks until it finishes, and the script
+ * leaves its verdict in the global OUT ("ok", or what went wrong).
+ * Concurrency is measured, not timed: a counter of items in flight and its
+ * peak, so a slow CI runner cannot make these flaky. */
+
+static const char TASK_PRELUDE[] =
+    "local inflight, peak = 0, 0\n"
+    "local function busy(ms)\n"
+    "  inflight = inflight + 1\n"
+    "  if inflight > peak then peak = inflight end\n"
+    "  hull.sleep(ms)\n"
+    "  inflight = inflight - 1\n"
+    "end\n"
+    "local function check(c, what) if not c then error(what, 2) end end\n";
+
+/* Returns 0, or the step that failed; OUT is left in `out`. */
+static int run_task_script(const char *body, char *out, size_t outsz)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    if (!be) return 1;
+    init_lua();
+    if (be->init(&lua_rt.base.async_ctx, NULL) != 0) return 2;
+
+    size_t n = strlen(TASK_PRELUDE) + strlen(body) + 64;
+    char *src = malloc(n);
+    if (!src) return 3;
+    snprintf(src, n, "%s%s\nOUT = 'ok'\n", TASK_PRELUDE, body);
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt, src, &co);
+    free(src);
+    if (st == LUA_YIELD) ssh_tick_until_done(be, lua_rt.base.async_ctx, co);
+    st = lua_status(co);
+
+    lua_getglobal(lua_rt.L, "OUT");
+    const char *o = lua_tostring(lua_rt.L, -1);
+    snprintf(out, outsz, "%s", o ? o
+             : (st != LUA_OK && lua_tostring(co, -1)) ? lua_tostring(co, -1)
+             : "(no verdict)");
+    lua_pop(lua_rt.L, 1);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+    return 0;
+}
+
+#define TASK_CASE(name, body)                                   \
+    UTEST(lua_async, name)                                      \
+    {                                                           \
+        char out[512];                                          \
+        ASSERT_EQ(run_task_script(body, out, sizeof out), 0);   \
+        ASSERT_STREQ(out, "ok");                                \
+    }
+
+TASK_CASE(gather_runs_concurrently_and_keeps_order,
+    "local a, b, c = hull.gather(\n"
+    "  function() busy(60); return 'a' end,\n"
+    "  function() busy(20); return 'b' end,\n"
+    "  function() busy(40); return 'c' end)\n"
+    "check(a == 'a' and b == 'b' and c == 'c', 'order: '..tostring(a)..tostring(b)..tostring(c))\n"
+    "check(peak == 3, 'peak '..peak)\n")
+
+TASK_CASE(map_respects_the_limit_and_keeps_order,
+    "local items = {}\n"
+    "for i = 1, 10 do items[i] = i end\n"
+    "local r = hull.map(items, function(x, i) busy(10 + (11 - x)); return x * x, 'extra' end,\n"
+    "                   { limit = 3 })\n"
+    "check(peak == 3, 'peak '..peak)\n"
+    "for i = 1, 10 do check(r[i] == i * i, 'r['..i..']='..tostring(r[i])) end\n")
+
+TASK_CASE(map_default_limit_is_16,
+    "local items = {}\n"
+    "for i = 1, 40 do items[i] = i end\n"
+    "hull.map(items, function() busy(5) end)\n"
+    "check(peak == 16, 'peak '..peak)\n")
+
+TASK_CASE(map_of_nothing_is_empty,
+    "local r = hull.map({}, function() error('never') end)\n"
+    "check(next(r) == nil, 'not empty')\n")
+
+TASK_CASE(a_failure_waits_for_the_rest_and_reports_all,
+    "local finished = 0\n"
+    "local items = {}\n"
+    "for i = 1, 8 do items[i] = i end\n"
+    "local ok, err = pcall(hull.map, items, function(x)\n"
+    "  busy(10)\n"
+    "  if x == 2 or x == 5 then error('bad '..x, 0) end\n"
+    "  finished = finished + 1\n"
+    "end, { limit = 4 })\n"
+    "check(not ok, 'did not raise')\n"
+    "check(finished == 6, 'finished '..finished)\n"
+    "check(err.errors[2] == 'bad 2' and err.errors[5] == 'bad 5', 'errors')\n"
+    "check(tostring(err) == 'bad 2', 'message '..tostring(err))\n"
+    "check(inflight == 0, 'still in flight '..inflight)\n")
+
+TASK_CASE(gather_reports_failures_by_position,
+    "local ok, err = pcall(hull.gather,\n"
+    "  function() busy(10); return 1 end,\n"
+    "  function() busy(5); error({ code = 'x' }) end)\n"
+    "check(not ok and err.errors[2].code == 'x', 'errors')\n"
+    "check(err.errors[1] == nil, 'first did not fail')\n")
+
+TASK_CASE(wait_returns_every_value_including_nils,
+    "local t = hull.async(function(a, b) busy(10); return a, nil, b, nil end, 'x', 'y')\n"
+    "local r = table.pack(t:wait())\n"
+    "check(r.n == 4 and r[1] == 'x' and r[2] == nil and r[3] == 'y', 'values')\n"
+    "check(t:done(), 'not done')\n"
+    "local again = table.pack(t:wait())\n"
+    "check(again.n == 4 and again[3] == 'y', 'second wait')\n")
+
+TASK_CASE(wait_reraises_the_task_error,
+    "local t = hull.async(function() busy(5); error('boom', 0) end)\n"
+    "local ok, e = pcall(t.wait, t)\n"
+    "check(not ok and e == 'boom', 'got '..tostring(e))\n")
+
+TASK_CASE(several_waiters_on_one_task,
+    "local t = hull.async(function() busy(30); return 42 end)\n"
+    "local a, b = hull.gather(function() return t:wait() end,\n"
+    "                         function() return t:wait() end)\n"
+    "check(a == 42 and b == 42, 'waiters')\n")
+
+TASK_CASE(tasks_nest,
+    "local outer = hull.async(function()\n"
+    "  local x, y = hull.gather(function() busy(10); return 1 end,\n"
+    "                           function() busy(10); return 2 end)\n"
+    "  return x + y\n"
+    "end)\n"
+    "check(outer:wait() == 3, 'nested')\n")
+
+TASK_CASE(a_task_that_never_yields_is_already_done,
+    "local t = hull.async(function() return 'now' end)\n"
+    "check(t:done() and t:wait() == 'now', 'sync task')\n")
+
+TASK_CASE(the_running_count_returns_to_zero,
+    "hull.map({1, 2, 3}, function() busy(5) end)\n"
+    "local t = hull.async(function() busy(5) end)\n"
+    "check(hull._running == 1, 'running '..hull._running)\n"
+    "t:wait()\n"
+    "check(hull._running == 0, 'running after '..hull._running)\n")
+
+TASK_CASE(bad_arguments_are_refused,
+    "check(not pcall(hull.async, 42), 'async')\n"
+    "check(not pcall(hull.gather, function() end, 'x'), 'gather')\n"
+    "check(not pcall(hull.map, {}, function() end, { limit = 0 }), 'limit 0')\n"
+    "check(not pcall(hull.map, 'x', function() end), 'items')\n"
+    "check(pcall(hull.map, {1}, function() end, { limit = math.huge }), 'huge')\n")
+
 UTEST_MAIN();

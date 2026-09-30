@@ -488,5 +488,48 @@ void hl_js_add_hull_global(JSContext *ctx)
         JS_NewCFunction(ctx, js_hull_sleep, "sleep", 1));
 
     JS_SetPropertyStr(ctx, global, "hull", hull);
+
+    /* hull.map(items, fn, { limit }) - bounded fan-out. Promises already give
+     * JS tasks and gather (Promise.all); this is the one piece missing, and
+     * the one fleet code needs: at most `limit` items in flight (default 16),
+     * results in input order, and every item finishes before a failure is
+     * reported - the first (by index) as the message, all of them on
+     * `.errors`. The Lua twin is hull._async; docs/task_join_design.md. */
+    static const char map_src[] =
+"(function(hull) {\n"
+"  const DEFAULT_LIMIT = 16;\n"
+"  hull.map = async function map(items, fn, opts) {\n"
+"    if (!Array.isArray(items)) throw new TypeError('hull.map: expected an array');\n"
+"    if (typeof fn !== 'function') throw new TypeError('hull.map: expected a function');\n"
+"    const limit = opts && opts.limit !== undefined ? opts.limit : DEFAULT_LIMIT;\n"
+"    if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1))\n"
+"      throw new RangeError('hull.map: limit must be a positive integer (or Infinity)');\n"
+"    const n = items.length, results = new Array(n);\n"
+"    let next = 0, errors = null;\n"
+"    async function worker() {\n"
+"      while (next < n) {\n"
+"        const i = next++;\n"
+"        try { results[i] = await fn(items[i], i); }\n"
+"        catch (e) { if (!errors) errors = []; errors[i] = e; }\n"
+"      }\n"
+"    }\n"
+"    const workers = [];\n"
+"    for (let k = 0; k < Math.min(limit, n); k++) workers.push(worker());\n"
+"    await Promise.all(workers);\n"
+"    if (errors) {\n"
+"      let first = -1;\n"
+"      for (let i = 0; i < errors.length; i++) if (i in errors) { first = i; break; }\n"
+"      const e0 = errors[first];\n"
+"      const err = new Error(e0 instanceof Error ? e0.message : String(e0));\n"
+"      err.errors = errors;\n"
+"      throw err;\n"
+"    }\n"
+"    return results;\n"
+"  };\n"
+"})(globalThis.hull);\n";
+    JSValue r = JS_Eval(ctx, map_src, sizeof(map_src) - 1, "<hull-map-init>",
+                        JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(ctx, r);
+
     JS_FreeValue(ctx, global);
 }

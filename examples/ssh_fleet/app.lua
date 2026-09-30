@@ -214,10 +214,14 @@ app.main(function(ctx)
         accept_new = accept_new,
     }
 
+    -- Hosts are reached concurrently, at most 8 at a time: each item is its
+    -- own task with its own connection, and prints its lines as it finishes.
     -- The worst status wins, so a wrapper script can branch on one number.
+    local statuses = hull.map(hosts, function(host)
+        return run_one(ctx, host, opts)
+    end, { limit = 8 })
     local worst = 0
-    for _, host in ipairs(hosts) do
-        local status = run_one(ctx, host, opts)
+    for _, status in ipairs(statuses) do
         if status > worst then worst = status end
     end
     return worst

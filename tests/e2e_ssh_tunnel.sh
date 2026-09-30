@@ -155,7 +155,7 @@ write_app() {
     chmod 600 "$1/client_key" "$1/decoy_key"
     cat > "$1/app.lua" <<LUA
 app.manifest({
-    modules = { "hull/ssh@1", "hull/fs@1" },
+    modules = { "hull/ssh@1", "hull/fs@1", "hull/time@1" },
     fs = { read = { "client_key", "decoy_key" } },
     ssh = {
         connect = { hosts = { $6 }, ports = { $7 }, users = { "$SSH_LOGIN" } },
@@ -224,6 +224,24 @@ app.main(function()
     -- The rest of what hull/ssh does, against a real sshd. Run once (the first
     -- session), not for every key type below: it moves a few megabytes.
     if "${FULL_INTEROP:-0}" == "1" then
+        -- Fan-out from app.main: four connections, each running a 1 s
+        -- command, through hull.map. Run in turn this takes 4 s or more;
+        -- concurrently, about one command's time plus the connects.
+        local time = require("hull.time")
+        local t0 = time.now_ms()
+        local outs = hull.map({ 1, 2, 3, 4 }, function(i)
+            local c = assert(ssh.connect{
+                host = "$2", port = $3, user = "$SSH_LOGIN",
+                key = key, trust = trust, tunnel = TUNNEL,
+            })
+            local r = c:exec("sleep 1; echo fan-" .. i)
+            c:close()
+            return (r.stdout:gsub("%s+$", ""))
+        end, { limit = 4 })
+        local took = time.now_ms() - t0
+        print("fanout_outputs=" .. table.concat(outs, ","))
+        print("fanout_concurrent=" .. tostring(took < 3000) .. ":" .. took .. "ms")
+
         -- Several keys: the one sshd does not know is refused, the next is
         -- offered on the same connection, and the handle says which won.
         local decoy = fs.read("decoy_key")
@@ -685,6 +703,12 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "chacha_bytes" "2000000" "live: 2 MB through chacha20-poly1305"
         assert_line "$OUT" "chacha_rekeyed" "true" "live: a rekey under chacha20-poly1305"
         assert_line "$OUT" "chacha_stdin" "1048576" "live: 1 MB of streamed stdin under chacha20-poly1305"
+        assert_line "$OUT" "fanout_outputs" "fan-1,fan-2,fan-3,fan-4" "live: hull.map over four connections, results in order"
+        a_fan=$(printf '%s\n' "$OUT" | sed -n 's/^fanout_concurrent=//p' | head -1)
+        case "$a_fan" in
+            true:*) pass "live: hull.map ran the four connections concurrently (${a_fan#true:})" ;;
+            *)      fail "live: hull.map ran the four connections concurrently" "fanout_concurrent=${a_fan:-<missing>}" ;;
+        esac
         assert_line "$OUT" "stdin_echo" "hull-stdin-ok" "live: stdin reaches the command"
         assert_line "$OUT" "stdin_streamed" "5242880" "live: 5 MB of stdin streamed while its output came back"
         assert_line "$OUT" "streamed_bytes" "3000000" "live: 3 MB streamed through on_stdout"
