@@ -188,13 +188,13 @@ a byte-only crypto API (a deliberate breaking change).
 - **ECDSA user keys:** done (P-256, P-384). The SEC1 PEM is built in Lua,
   byte-equal to OpenSSL's for the same key, and each loaded key must sign
   for its own public point. P-521 is refused by name (no ES512).
-- **SSH, roadmap still open:** documenting parallel
-  connections; the rest of group 5 (the C side: capability logic out of
-  `mod_ssh.c`, a generic net policy, one connect adapter; moving
-  `ws-stream` and merging its short-read gatherer; a net cap bit). The Lua
-  side of group 5 is done (`session.lua`, `wire.peek_uint32`, one
-  sanitizer, a tidier facade);
-  group 6 is done (fuzz targets, live interop, docs).
+- **SSH roadmap:** done. Group 5's C side landed in #609-#615 (one CA
+  ladder, a generic reach check under `cap/ssh_policy.c`, one resolver,
+  `hl_cap_ssh_open`, `HL_MOD_CAP_NET`, `hull.ssh.ws_stream` with one
+  gatherer); group 6 in #607 (live interop, fuzz, docs); parallel
+  connections are documented (`ssh.md` section 6b). Every outbound TLS
+  client, the DB wire backends and async SMTP included, now trusts the
+  anchor the invocation chose (#616).
 - **SSH host keys:** done. ECDSA P-256 / P-384 and RSA (SHA-2, at least
   2048 bits) are verified alongside Ed25519, the store's key type is asked
   for first, and the live sshd e2e connects to a server holding only each
@@ -202,8 +202,9 @@ a byte-only crypto API (a deliberate breaking change).
 - **SSH, not on the roadmap:** one cipher; one key per connection with
   no fallback; one operation at a time per connection (an exec and an open
   SFTP session share it safely, but two coroutines driving one connection at
-  once are not supported); exec stdin capped at 128 KiB and not streamable; no
-  time-based rekey (deliberate, but unrecorded).
+  once are not supported); no way to start concurrent tasks from `app.main`,
+  so a fleet tool connects to hosts in turn; exec stdin capped at 128 KiB and
+  not streamable; no time-based rekey (deliberate, but unrecorded).
 
 See also [`encoding_consolidation_plan.md`](encoding_consolidation_plan.md),
 [`kv_encryption_design.md`](kv_encryption_design.md) and

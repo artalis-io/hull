@@ -290,6 +290,28 @@ away answers nothing and is given up on at 60 s, with `timeout`; every later
 call on that connection then fails at once with the same reason rather than
 waiting again. `0` turns a bound off. Keepalives start once authenticated.
 
+## 6b. Several connections at once
+
+A connection belongs to the task that opened it, and one task drives it at a
+time. Hull runs each HTTP request handler and each timer callback
+(`app.every` / `app.daily`) as its own task on the event loop, and
+`app.main` as one more; a connection waiting on the network parks its task and
+lets the others run. So:
+
+- **Many connections, one per task, run concurrently.** Two requests that each
+  connect to a different host are both in flight at once.
+- **One connection used from two tasks is refused**, not queued: the second
+  gets `busy: another coroutine is waiting on this connection`. Share a
+  connection only between calls in the same task - an `exec` and an open SFTP
+  session on one connection are fine, one after the other.
+- **`app.main` is one task, so its connections run one after another.** There
+  is no primitive yet for starting further tasks from `app.main`, and a
+  coroutine the app creates itself (`coroutine.create`) is not a task: SSH
+  calls must not be made from one. A fleet tool that reaches ten hosts from
+  `app.main` reaches them in turn; each host's share is bounded by the
+  connect `timeout_ms` and the idle bounds in §6a, so one unreachable host
+  delays the rest by at most those bounds.
+
 ## 7. SFTP
 
 ```lua
@@ -324,7 +346,7 @@ status by name, so a missing file is `err.code == "no_such_file"` rather than
 text to match:
 
 ```lua
-local data, err = sftp:read("/etc/app/config.toml", 1024 * 1024)
+local data, err = sftp:read("/etc/app/config.toml", 1024 * 1024)  -- max; default 16 MiB
 if not data and err.code == "no_such_file" then ... end   -- `max` passed: "too_large"
 local names, refused = sftp:list("/var/log/app")          -- refused: unsafe names, and why
 ```

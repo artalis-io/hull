@@ -19,8 +19,8 @@ User guide: [`ssh.md`](ssh.md). Design record: [`ssh_module_design.md`](ssh_modu
 | 2 | Protocol correctness | done (`fix/ssh-protocol-correctness`); see below for two behaviour changes |
 | 3 | Timeouts and the error model | done (`fix/ssh-timeouts-and-errors`); see below |
 | 4 | Usability: SFTP, trust store, algorithms | SFTP + trust store done (`feat/ssh-sftp-files-and-known-hosts`); ECDSA/RSA host keys and RSA user keys done |
-| 5 | Architecture, DRY, clean code | open |
-| 6 | Tests and docs | open |
+| 5 | Architecture, DRY, clean code | done (#609-#615); the connect hooks and the binding name kept deliberately, see below |
+| 6 | Tests and docs | done (#607) |
 
 ## What is already solid
 
@@ -263,8 +263,10 @@ store-interface alignment above), and `hull.kv` encryption at rest
 (`kv_encryption_design.md`), which lets `ssh.kv_store` resist a backend writer
 without the key.
 
-Still open in group 4 (RSA user keys are done: `crypto.sign` + `crypto.rsa_private_pem`):
-documenting parallel connections.
+Group 4 is done. Parallel connections are documented in `ssh.md` section 6b:
+one connection per task; requests and timers are tasks, `app.main` is one, so
+its connections run in turn (there is no task-spawning primitive for
+`app.main` yet).
 
 ## Group 5: architecture, DRY, clean code
 

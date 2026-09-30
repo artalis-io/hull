@@ -447,6 +447,16 @@ $(BUILDDIR)/test_js_fuzz_entry: $(TESTDIR)/hull/frontend/test_js_fuzz_entry.c $(
 $(BUILDDIR)/test_js_generation: $(TESTDIR)/hull/frontend/test_js_generation.c $(SRCDIR)/hull/frontend/js_generation.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_JS_GEN_TESTING $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $(TESTDIR)/hull/frontend/test_js_generation.c $(SRCDIR)/hull/frontend/js_generation.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
+# The CPU the AOT test fixtures are compiled for. Without --cpu, wamrc asks
+# LLVM for the host's, and a runner whose CPU the vendored LLVM does not know
+# comes back "generic": baseline x86-64, no SSE4.1, which fails wamrc's SIMD
+# check ("SIMD compatibility check failed") - so the same commit passed or
+# failed by which machine CI drew. x86-64-v2 has SSE4.1/4.2, so the check
+# passes everywhere, and pinning it makes the fixtures the same on every
+# runner. SIMD stays ON: gsub.wat exercises v128.load on purpose. aarch64's
+# generic target already has NEON, so it needs no pin.
+WAMRC_TEST_CPU := $(if $(filter x86_64 amd64,$(shell uname -m 2>/dev/null)),--cpu=x86-64-v2,)
+
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
 # the embedded .wasm via the Hull-built wamrc when present (arch + OS correct);
 # otherwise a zero-length stub so the test compiles and SKIPS the AOT case
@@ -455,7 +465,7 @@ $(BUILDDIR)/test_js_generation: $(TESTDIR)/hull/frontend/test_js_generation.c $(
 # its include path + as a prerequisite.
 $(BUILDDIR)/gen_ro_heap_aot.h: $(TESTDIR)/hull/fixtures/ro_heap.wasm | $(BUILDDIR)
 	@w="$(BUILDDIR)/wamrc"; [ -x "$$w" ] || w="$(BUILDDIR)/wamrc-build/wamrc"; \
-	if [ -x "$$w" ] && "$$w" --opt-level=3 --bounds-checks=1 --enable-shared-heap \
+	if [ -x "$$w" ] && "$$w" --opt-level=3 $(WAMRC_TEST_CPU) --bounds-checks=1 --enable-shared-heap \
 	        -o $(BUILDDIR)/ro_heap.aot $< >/dev/null 2>&1; then \
 	    (cd $(BUILDDIR) && xxd -i ro_heap.aot) \
 	      | sed -E 's/unsigned char.*\[\]/static const unsigned char ro_heap_aot[]/; s/unsigned int.*_len/static const unsigned int ro_heap_aot_len/' > $@; \
@@ -487,7 +497,7 @@ define GEN_GSUB_AOT
 	    printf 'static const unsigned char $(3)[1] = {0};\nstatic const unsigned int $(3)_len = 0;\n' > $(1); \
 	    echo "  [gsub] no wamrc at $(BUILDDIR)/wamrc or $(BUILDDIR)/wamrc-build/wamrc; $(3) sub-case will skip"; \
 	else \
-	    rc=0; "$$w" --opt-level=3 $(2) --enable-shared-heap \
+	    rc=0; "$$w" --opt-level=3 $(WAMRC_TEST_CPU) $(2) --enable-shared-heap \
 	        -o $(BUILDDIR)/$(3).aot $< >$(BUILDDIR)/$(3).aot.log 2>&1 || rc=$$?; \
 	    if [ "$$rc" = 0 ]; then \
 	        (cd $(BUILDDIR) && xxd -i $(3).aot) \
@@ -530,7 +540,7 @@ $(BUILDDIR)/test_wasm_spans: $(BUILDDIR)/gen_ro_heap_span_aot.h
 define GEN_MEM64_AOT
 	@w="$(BUILDDIR)/wamrc"; [ -x "$$w" ] || w="$(BUILDDIR)/wamrc-build/wamrc"; \
 	if [ -x "$$w" ]; then \
-	    if "$$w" --opt-level=3 --bounds-checks=1 $(3) \
+	    if "$$w" --opt-level=3 $(WAMRC_TEST_CPU) --bounds-checks=1 $(3) \
 	            -o $(BUILDDIR)/$(2).aot $< 2>$(BUILDDIR)/$(2).wamrc.err; then \
 	        (cd $(BUILDDIR) && xxd -i $(2).aot) \
 	          | sed -E 's/unsigned char.*\[\]/static const unsigned char $(2)[]/; s/unsigned int.*_len/static const unsigned int $(2)_len/' > $(1); \
