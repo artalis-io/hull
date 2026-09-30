@@ -45,6 +45,40 @@ int hl_embedded_ca_bundle(const unsigned char **data, size_t *len);
  */
 const char *hl_ca_bundle_find_system(void);
 
+/**
+ * @brief The trust anchor per-connection TLS clients load.
+ *
+ * The DB / KV wire backends (shared/tls_client.c) and the async SMTP workers
+ * build a TLS context per connection, from bytes, and used to take the
+ * embedded bundle unconditionally - so `--ca-bundle` and the system store,
+ * which the entry points resolve for http.fetch and the SSH tunnel, never
+ * reached a database or a mail relay behind a private CA.
+ *
+ * The entry points now publish the anchor they resolved here
+ * (hl_ca_trust_resolve does it), and those clients read it back. Unset, it is
+ * the embedded bundle, as before.
+ *
+ * Set once at startup, before any connection is made; read-only after.
+ *
+ * @param data  the anchor's bytes (PEM NUL-terminated with len counting the
+ *              NUL, or DER), or NULL for "no usable anchor": a named bundle
+ *              that failed to load. Verification then fails closed rather
+ *              than quietly trusting a different anchor.
+ * @param owned non-zero hands @p data (from malloc) to this module, which
+ *              frees it on the next set or reset.
+ */
+void hl_ca_bundle_set_active(const unsigned char *data, size_t len, int owned);
+
+/** Back to the embedded bundle; frees an owned anchor. */
+void hl_ca_bundle_reset_active(void);
+
+/**
+ * @brief The active anchor: the one published, else the embedded bundle.
+ * @return 0 with *data / *len set, or -1 when there is none (no anchor was
+ *         usable, or none is embedded and none was published).
+ */
+int hl_ca_bundle_active(const unsigned char **data, size_t *len);
+
 /* Returns a short identifier for the embedded bundle's update date,
  * or "none" if no bundle is embedded. For doctor / version display. */
 const char *hl_embedded_ca_bundle_label(void);

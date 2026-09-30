@@ -1077,7 +1077,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
  * manifest time, so it's treated as possibly-network (the common
  * `$DATABASE_URL` = postgres case must not be blocked). A scheme-less bare
  * path is SQLite (local). */
-static int sandbox_dsn_is_network(const char *dsn)
+int hl_sandbox_dsn_is_network(const char *dsn)
 {
     if (!dsn || !*dsn) return 0;
     if (dsn[0] == '$') return 1;                 /* env-ref: assume network */
@@ -1108,11 +1108,11 @@ static int kv_scheme_is_network(const char *s)
  * for a DB-only app that has no http `hosts` - without it the kernel sandbox
  * blocks the connect (pledge SIGKILL on Linux). The `-d` default DSN is not in
  * the manifest (it lives in cfg); serve.c ORs that in separately. */
-static int manifest_has_network_db(const HlManifest *m)
+int hl_sandbox_manifest_has_network_db(const HlManifest *m)
 {
     if (!m) return 0;
     for (int i = 0; i < m->databases.named_count; i++)
-        if (sandbox_dsn_is_network(m->databases.named[i].dsn)) return 1;
+        if (hl_sandbox_dsn_is_network(m->databases.named[i].dsn)) return 1;
     if (m->databases.dynamic.declared) {
         for (int i = 0; i < m->databases.dynamic.scheme_count; i++) {
             const char *s = m->databases.dynamic.schemes[i];
@@ -1166,7 +1166,7 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
      * that declares only `ssh` declares no hosts, and would otherwise have
      * been denied the socket its manifest plainly asks for. */
     policy->network_outbound = (manifest->hosts_count > 0)
-                             || manifest_has_network_db(manifest)
+                             || hl_sandbox_manifest_has_network_db(manifest)
                              || manifest->ssh.connect.declared;
 
     /* Inbound: assume the app may serve (default-permissive). serve.c

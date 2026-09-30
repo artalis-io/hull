@@ -9,6 +9,8 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
 #include "hull/cacert.h"
 
 #ifdef HL_EMBED_CA_BUNDLE
@@ -70,4 +72,43 @@ const char *hl_ca_bundle_find_system(void)
         if (f) { fclose(f); return *p; }
     }
     return NULL;
+}
+
+/* The published anchor (see cacert.h). Plain statics: written once at
+ * startup before any connection exists, read-only afterwards. */
+static int                  g_active_set;
+static const unsigned char *g_active_data;
+static size_t               g_active_len;
+static unsigned char       *g_active_owned;
+
+void hl_ca_bundle_reset_active(void)
+{
+    free(g_active_owned);
+    g_active_owned = NULL;
+    g_active_data  = NULL;
+    g_active_len   = 0;
+    g_active_set   = 0;
+}
+
+void hl_ca_bundle_set_active(const unsigned char *data, size_t len, int owned)
+{
+    hl_ca_bundle_reset_active();
+    g_active_set   = 1;
+    g_active_data  = data;
+    g_active_len   = data ? len : 0;
+    g_active_owned = (owned && data) ? (unsigned char *)(uintptr_t)data : NULL;
+}
+
+int hl_ca_bundle_active(const unsigned char **data, size_t *len)
+{
+    if (!data || !len) return -1;
+    if (!g_active_set) return hl_embedded_ca_bundle(data, len);
+    if (!g_active_data || g_active_len == 0) {
+        *data = NULL;
+        *len  = 0;
+        return -1;
+    }
+    *data = g_active_data;
+    *len  = g_active_len;
+    return 0;
 }

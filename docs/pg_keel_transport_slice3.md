@@ -153,11 +153,11 @@ real Postgres 16 in Docker) plus the negotiation-decision unit matrix
   the embedded CA bundle REJECTS it (no connection).
 - `prefer`/`require` server-`S`/`N` decisions - covered by the unit matrix.
 
-`verify-full` SUCCESS against a private CA is not e2e-testable here because Hull's
-PG TLS verify trusts only the embedded Mozilla bundle (a private PG cert is never
-in it); the chain + hostname verification logic itself is the shared
-`shared/tls_client.c`, covered by the live-mbedTLS-peer unit suite
-(`test_smtp_tls`), which the PG path reuses unchanged.
+`verify-full` SUCCESS against a private CA is covered too: the wire backends
+verify against the invocation's resolved anchor (`hl_ca_bundle_active`, so
+`--ca-bundle` or the system store), and `e2e_postgres.sh` connects with
+`--ca-bundle` naming the container's own certificate. (Originally PG TLS verify
+trusted only the embedded Mozilla bundle, which made that untestable.)
 
 ## Amendment 3: blocking I/O contract
 

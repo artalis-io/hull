@@ -829,10 +829,33 @@ fi
 # ── sslmode matrix: verify-full rejects an untrusted certificate ──────────
 # The container now serves TLS with a self-signed cert that is NOT in the embedded
 # Mozilla CA bundle, so sslmode=verify-full must fail chain verification instead of
-# connecting. (verify-full SUCCESS against a private CA is not e2e-testable here:
-# Hull's pg TLS verify trusts only the embedded bundle; the chain + hostname
-# verification logic itself is covered by the shared tls_client live-peer unit
-# suite.)
+# connecting.
 echo "=== sslmode=verify-full rejects the untrusted self-signed cert ==="
 assert_connect_refused "verify-full (untrusted self-signed cert)" \
     "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=verify-full"
+
+# ── verify-full SUCCEEDS once the operator names the private CA ──────────
+# The same DSN, with --ca-bundle naming the server's own certificate. Before the
+# wire backends read the resolved anchor (hl_ca_bundle_active) they trusted only
+# the embedded bundle, so --ca-bundle was accepted and changed nothing here, and
+# a database behind a private CA could not be verified at all.
+echo "=== sslmode=verify-full connects under --ca-bundle <private CA> ==="
+_d=$(mktemp -d)
+cat > "$_d/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/db@1" } })
+app.main(function(ctx)
+  local db = require("hull.db").default()
+  ctx.stdout:write(("ONE=%s\n"):format(tostring(db.query("SELECT 1 AS one")[1].one)))
+  return 0
+end)
+LUA
+./build/hull --ca-bundle "$APPDIR/server.crt" \
+    -d "postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=verify-full" \
+    "$_d/app.lua" >"$_d/out" 2>&1 || true
+if grep -q "ONE=1" "$_d/out"; then
+    echo "PASS: verify-full verified the server against the named CA"
+else
+    echo "::error verify-full under --ca-bundle did not connect:"; cat "$_d/out"
+    rm -rf "$_d"; exit 1
+fi
+rm -rf "$_d"

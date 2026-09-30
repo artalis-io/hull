@@ -248,6 +248,13 @@ int hull_serve(int argc, char **argv)
         .sandbox         = !no_sandbox,
         .gate_modules    = 1,
     };
+#ifdef HL_ENABLE_HTTP_CLIENT
+    /* The -d database opens here, before the manifest and the full trust
+     * resolve below; a network DSN needs its anchor published first or its
+     * verify-full handshake would not see --ca-bundle. */
+    if (hl_sandbox_dsn_is_network(db_path))
+        hl_ca_trust_publish(skip_ca_bundle, ca_bundle_override);
+#endif
     if (hl_app_context_init(&ctx, &opts) != 0) {
         fprintf(stderr, "hull: failed to initialize app context\n");
         if (pool) be->pool_free(pool);
@@ -397,7 +404,12 @@ int hull_serve(int argc, char **argv)
      * http.fetch allowlist, and a fleet tool declaring only `ssh` would
      * otherwise have had no anchor and no way to ask for one. This is the
      * path such a tool actually runs on. Mirrors serve.c. */
-    if (manifest.hosts_count > 0 || manifest.ssh.tunnel.declared) {
+    /* A database or KV backend that dials out needs the anchor too: its
+     * verify-full handshake reads it back through hl_ca_bundle_active. */
+    int wants_ctx  = manifest.hosts_count > 0 || manifest.ssh.tunnel.declared;
+    int dials_data = hl_sandbox_manifest_has_network_db(&manifest)
+                  || hl_sandbox_dsn_is_network(db_path);
+    if (wants_ctx || dials_data) {
         /* The SAME ladder serve.c walks - one copy, in ca_trust.c. Before it
          * was shared, the CLI path took only the embedded bundle, so an
          * app.main app could reach a PUBLIC-CA host and nothing else, and
@@ -406,6 +418,10 @@ int hull_serve(int argc, char **argv)
          * it mattered most. */
         tls_ctx = hl_ca_trust_resolve(skip_ca_bundle, ca_bundle_override,
                                       &kalloc, NULL);
+        if (!wants_ctx && tls_ctx) {
+            hl_tls_ctx_destroy(tls_ctx);
+            tls_ctx = NULL;
+        }
 
         if (tls_ctx) {
             hl_tls_config_wire(&tls_cfg, tls_ctx);
