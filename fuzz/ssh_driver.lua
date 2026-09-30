@@ -48,9 +48,16 @@ local function expected_error(e)
     -- level 1 adds one.
     if not (e:find("ssh[%w%._]*: ") or e:find("web%.ws%-stream: ")) then return false end
     for _, p in ipairs(VM_ERRORS) do
+        -- Only where the VM puts it: straight after a chunk position
+        -- ("transport.lua:12: attempt to ..."), which it always adds for a
+        -- fault in named stdlib code - wrapped inside an ssh message or not.
+        -- Scanning the whole message instead flagged a peer-chosen name the
+        -- module had correctly echoed ("unsupported host key algorithm:
+        -- ssh-rsattempt to ...").
+        local vm = e:find(":%d+: " .. p:gsub("%p", "%%%0"))
         -- "out of range" is also a legitimate wire phrase ("byte out of
         -- range"), so only reject it when it is not ours.
-        if e:find(p, 1, true) and not (p == "out of range" and e:find("ssh%.wire: ")) then
+        if vm and not (p == "out of range" and e:find("ssh%.wire: ")) then
             return false
         end
     end
