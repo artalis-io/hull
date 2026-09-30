@@ -356,13 +356,22 @@ lets the others run. So:
   gets `busy: another coroutine is waiting on this connection`. Share a
   connection only between calls in the same task - an `exec` and an open SFTP
   session on one connection are fine, one after the other.
-- **`app.main` is one task, so its connections run one after another.** There
-  is no primitive yet for starting further tasks from `app.main`, and a
-  coroutine the app creates itself (`coroutine.create`) is not a task: SSH
-  calls must not be made from one. A fleet tool that reaches ten hosts from
-  `app.main` reaches them in turn; each host's share is bounded by the
-  connect `timeout_ms` and the idle bounds in §6a, so one unreachable host
-  delays the rest by at most those bounds.
+- **`app.main` is one task; start more with `hull.map`.** A fleet tool
+  reaches many hosts concurrently with a bounded fan-out, one connection per
+  item:
+
+  ```lua
+  local out = hull.map(hosts, function(host)
+      local c = assert(ssh.connect{ host = host, user = "deploy", key = key })
+      local r = c:exec("uptime")
+      c:close()
+      return r.stdout
+  end, { limit = 8 })
+  ```
+
+  `hull.async` / `hull.gather` start and join tasks individually (see the API
+  reference, "Concurrent work"). A coroutine the app creates itself
+  (`coroutine.create`) is NOT a task: SSH calls must not be made from one.
 
 ## 7. SFTP
 

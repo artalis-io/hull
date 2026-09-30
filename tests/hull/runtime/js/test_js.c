@@ -5738,4 +5738,113 @@ UTEST(js_db_async, submit_failure_clears_last_async_cont)
     cleanup_js_caps();
 }
 
+
+/* ── hull.map (docs/task_join_design.md) ─────────────────────────────
+ *
+ * On a real loop: the module sets globalThis.__map to "ok" or to what went
+ * wrong, and the test ticks the loop and drains QuickJS jobs until it does.
+ * Concurrency is measured with an in-flight counter's peak, not timed. */
+static int js_map_case(const char *body, char *out, size_t outsz)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    if (be->init(&actx, NULL) != 0) return 1;
+    js.base.async_ctx = actx;
+
+    static const char pre[] =
+        "let inflight = 0, peak = 0;\n"
+        "async function busy(ms) {\n"
+        "  inflight++; if (inflight > peak) peak = inflight;\n"
+        "  await hull.sleep(ms);\n"
+        "  inflight--;\n"
+        "}\n"
+        "function check(c, what) { if (!c) throw new Error(what); }\n"
+        "(async () => {\n";
+    static const char post[] =
+        "})().then(() => { globalThis.__map = 'ok'; },\n"
+        "          (e) => { globalThis.__map = String(e && e.message || e); });\n";
+    size_t n = strlen(pre) + strlen(body) + strlen(post) + 1;
+    char *src = malloc(n);
+    if (!src) return 2;
+    snprintf(src, n, "%s%s%s", pre, body, post);
+    JSValue v = JS_Eval(js.ctx, src, strlen(src), "<map>", JS_EVAL_TYPE_GLOBAL);
+    free(src);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+
+    for (int i = 0; i < 400; i++) {
+        hl_js_run_jobs(&js);
+        JSValue g = JS_GetGlobalObject(js.ctx);
+        JSValue m = JS_GetPropertyStr(js.ctx, g, "__map");
+        JS_FreeValue(js.ctx, g);
+        if (!JS_IsUndefined(m)) {
+            const char *c = JS_ToCString(js.ctx, m);
+            snprintf(out, outsz, "%s", c ? c : "(unprintable)");
+            if (c) JS_FreeCString(js.ctx, c);
+            JS_FreeValue(js.ctx, m);
+            break;
+        }
+        JS_FreeValue(js.ctx, m);
+        be->tick(actx, 20);
+    }
+    be->tick(actx, 0);
+    be->free(actx);
+    js.base.async_ctx = NULL;
+    return 0;
+}
+
+#define JS_MAP_CASE(name, body)                                  \
+    UTEST(js_map, name)                                          \
+    {                                                            \
+        init_js_with_caps();                                     \
+        ASSERT_TRUE(js_initialized);                             \
+        char out[512] = "(no verdict)";                          \
+        ASSERT_EQ(js_map_case(body, out, sizeof out), 0);        \
+        ASSERT_STREQ(out, "ok");                                 \
+        cleanup_js_caps();                                       \
+    }
+
+JS_MAP_CASE(respects_the_limit_and_keeps_order,
+    "  const items = [1,2,3,4,5,6,7,8,9,10];\n"
+    "  const r = await hull.map(items, async (x) => { await busy(10 + (11 - x)); return x * x; },\n"
+    "                           { limit: 3 });\n"
+    "  check(peak === 3, 'peak ' + peak);\n"
+    "  for (let i = 0; i < 10; i++) check(r[i] === (i + 1) * (i + 1), 'r[' + i + ']');\n")
+
+JS_MAP_CASE(default_limit_is_16,
+    "  const items = Array.from({ length: 40 }, (_, i) => i);\n"
+    "  await hull.map(items, () => busy(5));\n"
+    "  check(peak === 16, 'peak ' + peak);\n")
+
+JS_MAP_CASE(a_failure_waits_for_the_rest_and_reports_all,
+    "  let finished = 0;\n"
+    "  const items = [1,2,3,4,5,6,7,8];\n"
+    "  try {\n"
+    "    await hull.map(items, async (x) => {\n"
+    "      await busy(10);\n"
+    "      if (x === 2 || x === 5) throw new Error('bad ' + x);\n"
+    "      finished++;\n"
+    "    }, { limit: 4 });\n"
+    "    check(false, 'did not throw');\n"
+    "  } catch (e) {\n"
+    "    check(e.message === 'bad 2', 'message ' + e.message);\n"
+    "    check(e.errors[1].message === 'bad 2' && e.errors[4].message === 'bad 5', 'errors');\n"
+    "    check(!(0 in e.errors), 'sparse');\n"
+    "  }\n"
+    "  check(finished === 6 && inflight === 0, 'finished ' + finished);\n")
+
+JS_MAP_CASE(sync_functions_and_empty_lists,
+    "  const r = await hull.map([1, 2], (x, i) => x + i);\n"
+    "  check(r[0] === 1 && r[1] === 3, 'sync');\n"
+    "  check((await hull.map([], () => 1)).length === 0, 'empty');\n")
+
+JS_MAP_CASE(bad_arguments_are_refused,
+    "  for (const bad of [() => hull.map('x', () => 1), () => hull.map([], 7),\n"
+    "                     () => hull.map([1], () => 1, { limit: 0 })]) {\n"
+    "    let threw = false;\n"
+    "    try { await bad(); } catch (e) { threw = true; }\n"
+    "    check(threw, 'accepted a bad argument');\n"
+    "  }\n"
+    "  check((await hull.map([1], () => 2, { limit: Infinity }))[0] === 2, 'Infinity');\n")
+
 UTEST_MAIN();

@@ -703,7 +703,7 @@ app.use_post("POST", "/api/*", idempotency.middleware())
 | `compute` | WASM compute | `available`, `call`, `async.call`, `load`, `buffer`, `instance`, `segment`, `stream` |
 | `gpu` | GPU compute | `available`, `devices`, `compile`, `load`, `dispatch`, `pipeline`, `async.*`, `buffer`, `buffer_read`, `buffer_copy`, `texture`, `texture_read` |
 | `image` | Image | `new`, `from_buffer`, `decode`, `encode` |
-| `hull` | Runtime helpers | `sleep(ms)`, `gather(fn1, fn2, ...)` |
+| `hull` | Runtime helpers | `sleep(ms)`, `async(fn, ...)` -> task (`:wait()`, `:done()`), `gather(fn1, fn2, ...)`, `map(items, fn, { limit })` (JS: `sleep`, `map`; use `Promise.all` for the rest) |
 
 ### WebSocket endpoints
 

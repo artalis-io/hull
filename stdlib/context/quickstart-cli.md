@@ -100,6 +100,23 @@ end)
 `http.fetch` requires `manifest.hosts = {"api.example.com"}`. See
 `hull agent context --task=compute` for WASM, `--task=gpu` for GPU.
 
+## Doing several things at once in main
+
+`app.main` is one coroutine, so by default its calls happen in turn. Fan out
+with `hull.map` (at most `limit` in flight, results in input order) or join
+tasks with `hull.gather` / `hull.async(fn):wait()`:
+
+```lua
+local bodies = hull.map(urls, function(url)
+    return (http.fetch(url)).body
+end, { limit = 8 })                      -- default 16
+```
+
+JS: `await hull.map(urls, async (u) => ..., { limit: 8 })`, or `Promise.all`.
+Every item finishes before a failure is raised; `err.errors[i]` has them all.
+Join what you start: tasks still running when `app.main` returns are
+abandoned (a WARN says how many).
+
 ## Combining CLI + server
 
 `app.main` and route registration coexist. `main` runs as a startup

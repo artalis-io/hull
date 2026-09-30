@@ -23,6 +23,9 @@
 
 #include "log.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 /* ── HlLuaAsyncCont ───────────────────────────────────────────────── */
 
 typedef struct HlLuaAsyncCont {
@@ -355,7 +358,10 @@ static int lua_hull_sleep(lua_State *L)
     return lua_yieldk(L, 0, 0, NULL);
 }
 
-/* hull.async(fn) - spawn fn in a detached coroutine running on the event loop.
+/* hull._spawn(fn) - spawn fn in a detached coroutine running on the event loop.
+ *
+ * Private: apps reach it through hull.async (hull._async), which wraps the body
+ * so it can be joined. This is the raw fire-and-forget primitive underneath.
  * The body may call async-yielding primitives (hull.sleep, compute.async,
  * http.fetch, db.async); those capture `lua->active_co` at suspension, so we
  * set active_co (+ dispatch bookkeeping) to the bg coroutine for its first
@@ -365,7 +371,7 @@ static int lua_hull_sleep(lua_State *L)
  *
  * Detached = fire-and-forget (no join). Used by jobs.run_worker's concurrency
  * (N in-flight claim-loops) and by hull.tui (tui.async aliases this). */
-int lua_hull_async(lua_State *L)
+int lua_hull_spawn(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TFUNCTION);
 
@@ -373,7 +379,7 @@ int lua_hull_async(lua_State *L)
     HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     if (!lua)
-        return luaL_error(L, "hull.async: no runtime context");
+        return luaL_error(L, "hull._spawn: no runtime context");
 
     lua_State *co = lua_newthread(L);
     int co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -411,16 +417,217 @@ int lua_hull_async(lua_State *L)
     return 0;
 }
 
+/* ── Park / wake: the join primitive ─────────────────────────────── */
+
+/*
+ * hull._token()        -> a wake token, not yet fired
+ * hull._park(token)    -> suspend until the token is fired (at once if it
+ *                         already has been)
+ * hull._wake(token)    -> fire it; a coroutine parked on it resumes
+ *
+ * Private to hull._async, which builds joinable tasks on them. The wake is
+ * always DEFERRED to the event loop (a zero-delay timer), never an inline
+ * resume: the waker is usually a task finishing inside its own resume, and
+ * resuming another coroutine from there would replace the active-coroutine
+ * state it is still running under.
+ *
+ * The token's state lives in a separate heap slot, not in the userdata:
+ * resuming the parked coroutine runs Lua, which can collect the token before
+ * the async ctx releases it (free_driver). The slot is freed by whichever of
+ * its holders - the token's __gc, the parked ctx, a pending wake timer - lets
+ * go last.
+ */
+
+#define HL_LUA_TOKEN_MT "hull.token"
+
+typedef struct HlParkSlot {
+    HlLua      *lua;
+    HlAsyncCtx *ctx;      /* set while parked; cleared when the ctx lets go */
+    int         fired;
+    int         refs;
+} HlParkSlot;
+
+typedef struct { HlParkSlot *slot; } HlLuaToken;
+
+static void slot_release(HlParkSlot *s)
+{
+    if (s && --s->refs == 0) free(s);
+}
+
+/* free_driver for a parked ctx: every resume and cancel path calls it before
+ * the ctx is freed, so the slot never points at a freed ctx. */
+static void slot_ctx_gone(void *driver)
+{
+    HlParkSlot *s = (HlParkSlot *)driver;
+    s->ctx = NULL;
+    slot_release(s);
+}
+
+static HlLuaToken *check_token(lua_State *L, int idx)
+{
+    return (HlLuaToken *)luaL_checkudata(L, idx, HL_LUA_TOKEN_MT);
+}
+
+static int lua_token_gc(lua_State *L)
+{
+    HlLuaToken *t = check_token(L, 1);
+    slot_release(t->slot);
+    t->slot = NULL;
+    return 0;
+}
+
+static int lua_hull_token(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (!lua) return luaL_error(L, "hull._token: no runtime context");
+
+    HlLuaToken *t = lua_newuserdatauv(L, sizeof *t, 0);
+    t->slot = NULL;
+    luaL_setmetatable(L, HL_LUA_TOKEN_MT);
+    HlParkSlot *s = calloc(1, sizeof *s);
+    if (!s) return luaL_error(L, "hull._token: out of memory");
+    s->lua  = lua;
+    s->refs = 1;                      /* the token's */
+    t->slot = s;
+    return 1;
+}
+
+static int lua_hull_park(lua_State *L)
+{
+    HlLuaToken *t = check_token(L, 1);
+    HlParkSlot *s = t->slot;
+    if (!s) return luaL_error(L, "hull._park: dead token");
+    if (s->fired) return 0;           /* already woken: nothing to wait for */
+    if (s->ctx) return luaL_error(L, "hull._park: token already has a waiter");
+
+    HlLua *lua = s->lua;
+    if (!lua->base.async_ctx)
+        return luaL_error(L, "hull._park: requires an active event loop");
+
+    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx,
+                                          lua->base.alloc);
+    if (!ctx) return luaL_error(L, "hull._park: out of memory");
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc, NULL);
+    if (!cont) {
+        hl_async_ctx_free(ctx);
+        return luaL_error(L, "hull._park: out of memory");
+    }
+    ctx->cont        = cont;
+    ctx->driver      = s;             /* not pushed: push_result is NULL */
+    ctx->free_driver = slot_ctx_gone;
+
+#ifdef HL_ENABLE_HTTP_SERVER
+    KlHttpConn *conn = lua->active_conn;
+    if (conn) {
+        /* Attached (a request handler): suspend the request with no
+         * deadline; the wake completes the op. */
+        ctx->op.deadline_ms = 0;
+        ctx->op.on_deadline = hl_async_on_deadline_sleep;
+        ctx->detached = 0;
+        if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)conn,
+                              (HlSuspendOp *)&ctx->op) < 0) {
+            ctx->cont->destroy(ctx->cont);
+            hl_async_ctx_free(ctx);
+            return luaL_error(L, "hull._park: failed to suspend connection");
+        }
+    } else
+#endif
+    {
+        /* Detached (app.main, a timer, a task): nothing is armed; only the
+         * wake resumes it. */
+        ctx->detached = 1;
+    }
+    s->ctx = ctx;
+    s->refs++;                        /* the ctx's, until slot_ctx_gone */
+    return lua_yieldk(L, 0, 0, NULL);
+}
+
+/* The deferred half of a wake, on the loop. */
+static void slot_wake_fire(void *user_data)
+{
+    HlParkSlot *s = (HlParkSlot *)user_data;
+    HlAsyncCtx *ctx = s->ctx;
+    if (ctx) {
+        /* Still parked (not cancelled with its request meanwhile). */
+        if (ctx->detached) {
+            hl_async_ctx_resume_detached(ctx);
+        }
+#ifdef HL_ENABLE_HTTP_SERVER
+        else {
+            hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+        }
+#endif
+    }
+    slot_release(s);                  /* the timer's */
+}
+
+static int lua_hull_wake(lua_State *L)
+{
+    HlLuaToken *t = check_token(L, 1);
+    HlParkSlot *s = t->slot;
+    if (!s || s->fired) return 0;
+    s->fired = 1;
+    if (!s->ctx) return 0;            /* nobody parked yet: park returns at once */
+
+    HlLua *lua = s->lua;
+    s->refs++;                        /* the timer's, until slot_wake_fire */
+    uint64_t tid = hl_async_backend()->timer_add(lua->base.async_ctx, 0,
+                                                 slot_wake_fire, s);
+    if (tid == 0) {
+        s->refs--;
+        return luaL_error(L, "hull._wake: failed to schedule the wake");
+    }
+    return 0;
+}
+
 /* ── Module registration ──────────────────────────────────────────── */
 
 static const luaL_Reg hull_funcs[] = {
-    {"sleep", lua_hull_sleep},
-    {"async", lua_hull_async},
+    {"sleep",  lua_hull_sleep},
+    {"_spawn", lua_hull_spawn},
+    {"_token", lua_hull_token},
+    {"_park",  lua_hull_park},
+    {"_wake",  lua_hull_wake},
     {NULL, NULL}
 };
 
+/* async / gather / map live in Lua (hull._async) and are loaded the first time
+ * one is touched, so a program that never uses them never loads it. */
+static int lua_hull_index(lua_State *L)
+{
+    const char *k = lua_tostring(L, 2);
+    if (!k || (strcmp(k, "async") != 0 && strcmp(k, "gather") != 0
+               && strcmp(k, "map") != 0))
+        return 0;
+    lua_getglobal(L, "require");
+    lua_pushliteral(L, "hull._async");
+    lua_call(L, 1, 1);
+    const char *names[] = { "async", "gather", "map" };
+    for (int i = 0; i < 3; i++) {
+        lua_getfield(L, -1, names[i]);
+        lua_setfield(L, 1, names[i]);  /* cache on the hull table */
+    }
+    lua_pop(L, 1);
+    lua_rawget(L, 1);                  /* the key (still at 2) */
+    return 1;
+}
+
 int luaopen_hull_hull(lua_State *L)
 {
+    if (luaL_newmetatable(L, HL_LUA_TOKEN_MT)) {
+        lua_pushcfunction(L, lua_token_gc);
+        lua_setfield(L, -2, "__gc");
+        lua_pushliteral(L, "hull.token");
+        lua_setfield(L, -2, "__metatable");
+    }
+    lua_pop(L, 1);
+
     luaL_newlib(L, hull_funcs);
+    lua_newtable(L);
+    lua_pushcfunction(L, lua_hull_index);
+    lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, -2);
     return 1;
 }

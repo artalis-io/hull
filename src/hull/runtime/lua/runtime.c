@@ -912,6 +912,24 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     lua->cli_main_co       = NULL;
     luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
 
+    /* Tasks started with hull.async and never joined are abandoned when the
+     * process ends here - it does unless main returned 0 and routes are
+     * registered, in which case the serve loop keeps them running. Say so
+     * rather than letting their work vanish silently. */
+    if (rc != 0 || !vt_lua_has_server_handlers(rt)) {
+        lua_getglobal(L, "hull");
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, "_running");
+            lua_Integer n = lua_isinteger(L, -1) ? lua_tointeger(L, -1) : 0;
+            if (n > 0)
+                log_warn("[hull:async] app.main returned with %lld task(s) still "
+                         "running; they were abandoned (join them with task:wait, "
+                         "hull.gather or hull.map)", (long long)n);
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+    }
+
     *exit_code_out = rc;
     return (status == LUA_OK) ? 0 : -1;
 }

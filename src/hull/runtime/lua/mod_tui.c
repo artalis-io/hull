@@ -493,7 +493,7 @@ static const luaL_Reg tui_funcs[] = {
     {"enable_focus",     lua_tui_enable_focus},
     {"enable_kitty_kbd", lua_tui_enable_kitty_kbd},
 
-    {"async",            lua_hull_async},   /* shared primitive (async.c) */
+    {"async",            lua_hull_spawn},   /* shared primitive (async.c): fire-and-forget */
 
     {NULL, NULL}
 };
