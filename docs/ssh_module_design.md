@@ -577,8 +577,8 @@ which is the transport's contract, not the binding's.
 
 ### Still open
 
-- No worked example under `examples/`, and no user-facing guide; this design
-  record is still the only documentation.
+- (Done since: the user guide is `docs/ssh.md`, and `examples/ssh_fleet` is
+  the worked example.)
 - JS remains unimplemented, per section 8 - `hull.ssh.ws_stream` is Lua-only
   too, so a JS `hull/ssh` inherits this work rather than duplicating it.
 
