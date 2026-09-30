@@ -4,12 +4,14 @@
  *
  * Exposes an internal module `hull.ssh._stream` with one entry, connect{...},
  * returning a stream userdata carrying read / write / close. The SSH protocol
- * itself is Lua (stdlib/lua/hull/ssh/); this file moves bytes and enforces the
- * grant, and knows nothing about SSH framing.
+ * itself is Lua (stdlib/lua/hull/ssh/); this file moves bytes and knows nothing
+ * about SSH framing. The grants, the relay's TLS and the dial are decided by
+ * the capability, hl_cap_ssh_open (cap/ssh.c), so another runtime's binding
+ * cannot decide them differently.
  *
  * TWO gates, and they do different jobs:
  *
- *   1. The POLICY gate (hl_ssh_check_connect) bounds WHERE a connection may go
+ *   1. The POLICY gate (hl_cap_ssh_open) bounds WHERE a connection may go
  *      and as WHOM, from the manifest. It does not care who is calling, so it
  *      holds even if this module is reached directly.
  *
@@ -51,10 +53,8 @@
 
 #include "internal.h"          /* hl_lua_source_is_stdlib */
 
-#include "hull/cap/ssh_policy.h"
+#include "hull/cap/ssh.h"         /* hl_cap_ssh_open */
 #include "hull/cap/net_stream.h"
-#include "hull/tls_transport.h"  /* HlClientTls: the host's resolved trust */
-#include "hull/utils/alloc.h"    /* hl_alloc_kl */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"   /* hl_net_op_suspend / _complete, HlSuspendOp */
@@ -558,73 +558,35 @@ static int lua_ssh_connect(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua) { lua_settop(L, base); return push_err(L, "no runtime"); }
 
-    /* The grants, before any name resolution and before a socket exists.
-     *
-     * The DESTINATION first even when a relay is in play: refusing on the
-     * machine the app asked to reach is the more informative answer, and it
-     * keeps the relay from being probed by an app that may not reach the
-     * host behind it anyway. */
-    HlSshAuth auth = hl_ssh_check_connect(lua->base.ssh_policy, host, (int)port, user);
-    if (auth == HL_SSH_ALLOW && has_via)
-        auth = hl_ssh_check_tunnel(lua->base.ssh_policy, via_host, via_port);
-    if (auth != HL_SSH_ALLOW) {
-        lua_settop(L, base);
-        push_err(L, hl_ssh_auth_reason(auth));
-        lua_pushstring(L, "denied");       /* the manifest said no */
-        return 3;
-    }
-
-    HlNetStreamConfig cfg;
-    KlAllocator       kalloc;
-    memset(&cfg, 0, sizeof cfg);
-    cfg.async      = lua->base.async_ctx;
-    cfg.pool       = lua->base.thread_pool;
-    cfg.host       = has_via ? via_host : host;
-    cfg.port       = has_via ? via_port : (int)port;
-    cfg.connect_ms = (int)timeout;
-
-    if (via_tls) {
-        /* Refuse rather than downgrade. A caller that asked for an encrypted
-         * relay and quietly got a plaintext one would never find out, and the
-         * credentials in a tunnel's headers are exactly what the TLS is
-         * protecting. NULL here means this build composed no TLS feature, or
-         * this invocation resolved no CA bundle. */
-        const HlClientTls *t = lua->base.client_tls;
-        if (!t || !t->cfg) {
-            lua_settop(L, base);
-            return push_err(L,
-                "ssh: a TLS tunnel was requested but this build has no TLS "
-                "trust anchor (no CA bundle resolved, or TLS is not composed "
-                "into this binary)");
-        }
-        if (!t->verifies)
-            /* Allowed - --no-ca-bundle is a development switch - but said
-             * here, where it matters: the relay's certificate is not checked,
-             * and the tunnel's headers carry its credentials to whoever
-             * answers. */
-            log_warn("[hull:ssh] relay %s:%d: certificate NOT verified "
-                     "(--no-ca-bundle); tunnel credentials go to whoever "
-                     "answers", via_host ? via_host : "?", via_port);
-        cfg.tls       = t->cfg;
-        /* The runtime's own allocator, bridged. Stack-local is safe because
-         * the transport COPIES the KlAllocator by value (net_stream.c's
-         * s->tls_alloc) - and the HlAllocator it points through is the
-         * runtime's, which outlives every stream made from it. Routing
-         * through hl_alloc_kl rather than kl_allocator_default also keeps
-         * this file free of a libkeel symbol, as serve_cli.c does. */
-        kalloc        = hl_alloc_kl(lua->base.alloc);
-        cfg.tls_alloc = &kalloc;
-        /* Default the certificate name to the relay's host, which is what a
-         * caller wants unless it dialled an address and expects another
-         * name. Never the SSH destination: the relay presents its own. */
-        cfg.tls_hostname = via_sni;
-    }
-
+    /* The grants, the relay's TLS and the dial are the capability's
+     * (cap/ssh.c); this binding only parses and reports. */
+    HlSshOpen req = {
+        .host = host, .port = (int)port, .user = user,
+        .connect_ms = (int)timeout,
+        .via = has_via, .via_host = via_host, .via_port = via_port,
+        .via_tls = via_tls, .via_tls_hostname = via_sni,
+    };
+    HlSshEnv env = {
+        .policy     = lua->base.ssh_policy,
+        .client_tls = lua->base.client_tls,
+        .alloc      = lua->base.alloc,
+        .async      = lua->base.async_ctx,
+        .pool       = lua->base.thread_pool,
+    };
     HlNetStream *s = NULL;
-    int rc = hl_net_stream_connect(&s, &cfg);
+    const char *why = NULL;
+    int rc = hl_cap_ssh_open(&env, &req, &s, &why);
     lua_settop(L, base);                 /* every option lookup, at once */
 
-    if (!s) return push_net_err(L, rc);
+    if (!s) {
+        if (rc == HL_NET_E_DENIED) {
+            push_err(L, why);
+            lua_pushstring(L, "denied");   /* the manifest said no */
+            return 3;
+        }
+        if (why) return push_err(L, why);
+        return push_net_err(L, rc);
+    }
 
     HlLuaSshStream *o = lua_newuserdatauv(L, sizeof *o, 1);
     memset(o, 0, sizeof *o);

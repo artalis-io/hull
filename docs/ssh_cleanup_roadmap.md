@@ -274,11 +274,13 @@ documenting parallel connections.
   `session.lua`, installed onto the Transport class so no caller changes.
   `transport.lua` keeps the connection: handshake, KEX and rekey, packets,
   liveness (1095 -> 754 lines).
-- **Move capability logic out of the binding.** `lua_ssh_connect` composes the
-  two relay grants and selects the TLS trust anchor; that belongs in a
-  `cap/` function (e.g. `hl_cap_ssh_open`) so a JS binding does not copy it.
-  The binding is then a generic byte-stream binding (`mod_net_stream.c`) that
-  `ws-stream` also uses.
+- **Move capability logic out of the binding.** Done: `hl_cap_ssh_open`
+  (`cap/ssh.c`) checks the destination and relay grants, refuses a TLS relay
+  with no trust anchor rather than downgrading, and dials; `lua_ssh_connect`
+  only parses and reports, so a JS binding cannot decide any of it
+  differently. Unit-tested without a network (`tests/hull/cap/test_ssh.c`).
+  Still open with the `ws-stream` move: renaming the binding to a generic
+  byte-stream one (`mod_net_stream.c`).
 - **Make the net policy generic.** Done: `cap/net_policy.c` is only the
   reach check (`hl_net_check_reach` -> `HlNetReach`, `HL_NET_REACH_*`, no
   wording); the SSH grants and their messages are `cap/ssh_policy.c`
