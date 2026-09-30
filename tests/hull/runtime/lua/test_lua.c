@@ -5566,14 +5566,12 @@ static int ssh_co_start(HlLua *lua, const char *src, lua_State **co_out)
     lua->active_co         = co;
     lua->active_conn       = NULL;          /* detached, as under app.main */
     lua->active_thread_ref = ref;
-    lua->dispatch_depth++;
     int nres = 0;
     int st = lua_resume(co, L, 0, &nres);
     if (st != LUA_YIELD) {
         luaL_unref(L, LUA_REGISTRYINDEX, ref);
         lua->active_co = NULL;
         lua->active_thread_ref = LUA_NOREF;
-        lua->dispatch_depth--;
     }
     return st;
 }
@@ -6261,6 +6259,55 @@ UTEST(lua_async, a_timer_handler_keeps_its_timer_across_waits)
     }
     EXPECT_EQ(runs, 3);
     EXPECT_EQ(t.in_flight, 0);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
+/* A timer may fire while a task is suspended. The trampoline used to
+ * assert(dispatch_depth == 0), and every suspended handler or task holds that
+ * above zero - so the first tick with a task in flight aborted the process. */
+UTEST(lua_async, a_timer_fires_while_a_task_waits)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "TICKS = 0\n"
+        "return function() TICKS = TICKS + 1; return false end\n"), LUA_OK);
+    lua_newtable(L);
+    lua_insert(L, -2);
+    lua_rawseti(L, -2, 1);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_timers");
+
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt,
+        "local t = hull.async(function() hull.sleep(60) end)\n"
+        "t:wait()\n"
+        "OUT = 'ok'\n", &co);
+    ASSERT_EQ(st, LUA_YIELD);
+
+    static HlLuaTimer t;
+    memset(&t, 0, sizeof t);
+    t.lua         = &lua_rt;
+    t.handler_id  = 1;
+    t.interval_ms = 20;
+    hl_lua_timer_trampoline(&t);    /* main and its task are both suspended */
+
+    ssh_tick_until_done(be, lua_rt.base.async_ctx, co);
+    lua_getglobal(L, "TICKS");
+    EXPECT_EQ(lua_tointeger(L, -1), 1);
+    lua_pop(L, 1);
+    lua_getglobal(L, "OUT");
+    const char *out = lua_tostring(L, -1);
+    EXPECT_STREQ(out ? out : "(no verdict)", "ok");
+    lua_pop(L, 1);
 
     HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
     cleanup_lua();

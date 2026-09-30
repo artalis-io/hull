@@ -36,10 +36,6 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     if (!lua || !lua->L || !req || !res)
         return -1;
 
-    /* dispatch_depth may be > 0 during self-fetch (outbox.flush → same server).
-     * This is safe because the original handler is yielded and the new
-     * dispatch runs on its own coroutine with independent per-request state. */
-    lua->dispatch_depth++;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
@@ -104,7 +100,6 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         lua->active_co = NULL;
         lua->active_conn = NULL;
         lua->active_req = NULL;
-        lua->dispatch_depth--;
 
         /* Pop any return values and routes table */
         if (nres > 0)
@@ -127,7 +122,6 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     if (status == LUA_YIELD) {
         /* Handler yielded - connection is suspended.
          * Don't clean up coroutine ref, don't free ctx.
-         * dispatch_depth stays at 1 - decremented on async resume.
          * kl_async_suspend already removed client FD from event loop.
          * Routes table stays on main state stack - cleaned up on resume. */
         lua_pop(lua->L, 1); /* pop routes table */
@@ -143,7 +137,6 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua->active_co = NULL;
     lua->active_conn = NULL;
     lua->active_req = NULL;
-    lua->dispatch_depth--;
 
     lua_pop(lua->L, 1); /* pop routes table */
 

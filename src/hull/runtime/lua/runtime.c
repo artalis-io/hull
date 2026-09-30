@@ -890,12 +890,10 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     lua_State *saved_co       = lua->active_co;
     KlHttpConn   *saved_conn      = lua->active_conn;
     int       saved_thread_ref = lua->active_thread_ref;
-    int       saved_depth      = lua->dispatch_depth;
 
     lua->active_co         = co;
     lua->active_conn       = NULL;       /* detached - no HTTP conn */
     lua->active_thread_ref = co_ref;
-    lua->dispatch_depth    = saved_depth + 1;
 
     /* First resume: main runs until it returns or yields. */
     int nres = 0;
@@ -913,7 +911,6 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
             lua->active_co         = saved_co;
             lua->active_conn       = saved_conn;
             lua->active_thread_ref = saved_thread_ref;
-            lua->dispatch_depth    = saved_depth;
             lua->cli_main_co       = NULL;
             return -1;
         }
@@ -951,7 +948,6 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     lua->active_co         = saved_co;
     lua->active_conn       = saved_conn;
     lua->active_thread_ref = saved_thread_ref;
-    lua->dispatch_depth    = saved_depth;
     lua->cli_main_co       = NULL;
     luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
 

@@ -108,9 +108,6 @@ typedef struct HlLua {
     size_t          timer_count;
     size_t          timer_cap;
 
-    /* Re-entrance guard: > 0 while dispatch or async resume is active */
-    int         dispatch_depth;
-
     /* Per-request async state (set during dispatch, cleared after) */
     KlHttpServer   *server;             /* set once during wire_routes_server */
     KlHttpConn     *active_conn;        /* current connection (per dispatch) */

@@ -37,7 +37,6 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     if (route->on_open_id < 0)
         return;
 
-    js->dispatch_depth++;
     js->active_conn = NULL; /* detached - no HTTP connection */
     js->active_req = NULL;
     js->active_timer = NULL;
@@ -55,7 +54,6 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
 
     if (!JS_IsFunction(ctx, handler)) {
         JS_FreeValue(ctx, handler);
-        js->dispatch_depth--;
         return;
     }
 
@@ -81,14 +79,12 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
                 (HlAsyncCont *)js->last_async_cont, ctx, ret);
             js->last_async_cont = NULL;
             JS_FreeValue(ctx, ret);
-            /* dispatch_depth stays elevated for async */
             return;
         }
     }
 
     hl_js_run_jobs(js);
     JS_FreeValue(ctx, ret);
-    js->dispatch_depth--;
 }
 
 void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
@@ -107,7 +103,6 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     if (!conn)
         return;
 
-    js->dispatch_depth++;
     js->active_conn = NULL;
     js->active_req = NULL;
     js->active_timer = NULL;
@@ -125,7 +120,6 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
 
     if (!JS_IsFunction(ctx, handler)) {
         JS_FreeValue(ctx, handler);
-        js->dispatch_depth--;
         return;
     }
 
@@ -162,7 +156,6 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
 
     hl_js_run_jobs(js);
     JS_FreeValue(ctx, ret);
-    js->dispatch_depth--;
 }
 
 /* Deferred-teardown hook (HlJS::active_on_complete): invalidate the conn
@@ -192,7 +185,6 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
     conn->closed = 1;
 
     if (route->on_close_id >= 0) {
-        js->dispatch_depth++;
         js->active_conn = NULL;
         js->active_req = NULL;
         js->active_timer = NULL;
@@ -241,7 +233,6 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         JS_FreeValue(ctx, handler);
         js->active_on_complete     = NULL;
         js->active_on_complete_ctx = NULL;
-        js->dispatch_depth--;
 
         if (js->async_pending) {
             /* Handler is suspended on an async op - the continuation captured

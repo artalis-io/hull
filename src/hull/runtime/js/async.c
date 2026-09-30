@@ -156,7 +156,6 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
         js->async_pending = 0;
         js->active_conn = NULL;
-        js->dispatch_depth--;
 
         /* Handler that awaited has now completed - run any deferred-teardown
          * hook (e.g. ws on_close conn teardown). */
@@ -206,7 +205,6 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
         js->async_pending = 0;
         js->active_conn = NULL;
-        js->dispatch_depth--;
 
         /* Run any deferred-teardown hook (handler rejected after awaiting). */
         if (jc->on_complete) {

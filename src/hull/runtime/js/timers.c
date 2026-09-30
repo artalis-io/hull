@@ -110,8 +110,6 @@ void hl_js_timer_trampoline(void *user_data)
     sh_arena_reset(js->scratch);
     hl_db_guard_stale_txn(hl_db_registry_default(js->base.db_registry));
 
-    assert(js->dispatch_depth == 0 && "timer fired during active dispatch");
-    js->dispatch_depth++;
 
     /* Clear per-request state (no connection) */
     js->active_conn = NULL;
@@ -151,7 +149,6 @@ void hl_js_timer_trampoline(void *user_data)
         JS_FreeValue(ctx, ret);
         t->in_flight = 0;
         js->active_timer = NULL;
-        js->dispatch_depth--;
         hl_js_timer_reschedule(t);
         return;
     }
@@ -167,8 +164,7 @@ void hl_js_timer_trampoline(void *user_data)
         }
         /* Timer ctx was already set via js->active_timer at cont creation */
         JS_FreeValue(ctx, ret);
-        /* in_flight stays 1; dispatch_depth stays elevated.
-         * Both cleared when async resume completes. */
+        /* in_flight stays 1 until async resume completes. */
         js->active_timer = NULL;
         return;
     }
@@ -198,7 +194,6 @@ void hl_js_timer_trampoline(void *user_data)
     JS_FreeValue(ctx, ret);
     t->in_flight = 0;
     js->active_timer = NULL;
-    js->dispatch_depth--;
 
     if (!cancelled)
         hl_js_timer_reschedule(t);

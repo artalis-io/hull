@@ -131,7 +131,6 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_conn = NULL;
-        lua->dispatch_depth--;
 
         /* Handler that yielded has now completed - run any deferred-teardown
          * hook (e.g. ws on_close conn teardown). */
@@ -173,8 +172,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     } else if (status == LUA_YIELD) {
         /* Handler yielded again - new HlAsyncCtx already set up. The new
          * continuation captured co/conn/thread_ref, and the timer through
-         * active_timer set above.
-         * dispatch_depth stays elevated - decremented on final resume. */
+         * active_timer set above. */
     } else {
         /* Error */
         char ebuf[512];
@@ -194,7 +192,6 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_conn = NULL;
-        lua->dispatch_depth--;
 
         /* Run any deferred-teardown hook (handler errored after yielding). */
         if (lc->on_complete) {
@@ -427,14 +424,12 @@ int lua_hull_spawn(lua_State *L)
     lua->active_timer           = NULL;
     lua->active_on_complete     = NULL;
     lua->active_on_complete_ctx = NULL;
-    lua->dispatch_depth++;
 
     int nres = 0;
     int sr   = lua_resume(co, L, 0, &nres);
 
     if (sr == LUA_OK) {
         luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
-        lua->dispatch_depth--;
     } else if (sr == LUA_YIELD) {
         /* Bg yielded; hl_lua_async_resume owns cleanup when it returns. */
     } else {
@@ -442,7 +437,6 @@ int lua_hull_spawn(lua_State *L)
         log_error("[hull:async] coroutine error: %s",
                   hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
-        lua->dispatch_depth--;
     }
 
     lua->active_co              = saved_co;
