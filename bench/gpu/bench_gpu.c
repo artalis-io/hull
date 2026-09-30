@@ -270,7 +270,7 @@ static void bench_gpu(HlGpuCtx *gpu_ctx, uint32_t dims, uint32_t count,
     uint32_t wg_x = (count + 63) / 64;
 
     HlGpuBufferDesc bufs[3] = {
-        { .data = query, .size = dims * 4, .usage = HL_GPU_USAGE_READ, .binding = -1 },
+        { .data = query, .data_len = dims * 4, .size = dims * 4, .usage = HL_GPU_USAGE_READ, .binding = -1 },
         { .name = "bench_candidates", .usage = HL_GPU_USAGE_READ, .binding = -1 },
         { .size = count * 4, .usage = HL_GPU_USAGE_READWRITE, .binding = -1 },
     };

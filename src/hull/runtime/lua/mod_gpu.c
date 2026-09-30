@@ -251,6 +251,7 @@ static int l_gpu_dispatch(lua_State *L)
                     HlBufferView bv;
                     if (lua_get_buffer(L, -1, &bv)) {
                         bufs[i].data = bv.data;
+                        bufs[i].data_len = bv.len;
                         bufs[i].size = bv.len;
                     }
                 }
@@ -823,6 +824,7 @@ static int l_gpu_async_dispatch(lua_State *L)
                             if (buf_data_ptrs[i]) {
                                 memcpy(buf_data_ptrs[i], d, dlen);
                                 buf_descs[i].data = buf_data_ptrs[i];
+                                buf_descs[i].data_len = dlen;
                                 buf_descs[i].size = dlen;
                             }
                         }
@@ -983,6 +985,7 @@ static int parse_pipeline_stages(lua_State *L, int tbl_idx,
                         HlBufferView bv;
                         if (lua_get_buffer(L, -1, &bv)) {
                             all_bufs[buf_offset + b].data = bv.data;
+                            all_bufs[buf_offset + b].data_len = bv.len;
                             all_bufs[buf_offset + b].size = bv.len;
                         }
                     }
@@ -1297,14 +1300,18 @@ static int l_gpu_async_pipeline(lua_State *L)
                     return luaL_error(L, "gpu.async.pipeline: out of memory");
                 }
             }
-            if (src_desc->data && src_desc->size > 0) {
-                op->buffer_data[buf_off] = malloc(src_desc->size);
+            /* Copy what the data holds (data_len), not `size`: a size
+             * larger than the data read past its end. */
+            if (src_desc->data && src_desc->data_len > 0) {
+                op->buffer_data[buf_off] = malloc(src_desc->data_len);
                 if (!op->buffer_data[buf_off]) {
                     hl_worker_gpu_op_free(op); free(op);
                     return luaL_error(L, "gpu.async.pipeline: out of memory");
                 }
-                memcpy(op->buffer_data[buf_off], src_desc->data, src_desc->size);
+                memcpy(op->buffer_data[buf_off], src_desc->data,
+                       src_desc->data_len);
                 dst_desc->data = op->buffer_data[buf_off];
+                dst_desc->data_len = src_desc->data_len;
             }
             buf_off++;
         }

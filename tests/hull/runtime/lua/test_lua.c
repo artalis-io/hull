@@ -2234,7 +2234,7 @@ UTEST(lua_cap, crypto_bytes_contract)
         "  local key, nonce = crypto.random(32), crypto.random(24) "
         "  local ct = crypto.secretbox('secret', nonce, key) "
         "  if #ct ~= 6 + 16 or crypto.secretbox_open(ct, nonce, key) ~= 'secret' then return 7 end "
-        "  if crypto.secretbox_open(ct:sub(1, -2) .. 'x', nonce, key) ~= nil then return 8 end "
+        "  if crypto.secretbox_open(ct:sub(1, -2) .. string.char(ct:byte(-1) ~ 1), nonce, key) ~= nil then return 8 end "
         "  local apk, ask = crypto.box_keypair() "
         "  local bpk, bsk = crypto.box_keypair() "
         "  local bct = crypto.box('hi', nonce, bpk, ask) "
