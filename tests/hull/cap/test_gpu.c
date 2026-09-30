@@ -163,6 +163,7 @@ UTEST(hull_cap_gpu, dispatch_double)
     uint32_t input[4] = {1, 2, 3, 4};
     HlGpuBufferDesc buf = {
         .data = input,
+        .data_len = sizeof(input),
         .size = sizeof(input),
         .usage = HL_GPU_USAGE_READWRITE,
         .binding = -1,
@@ -190,6 +191,58 @@ UTEST(hull_cap_gpu, dispatch_double)
     ASSERT_EQ((uint32_t)4, result[1]);
     ASSERT_EQ((uint32_t)6, result[2]);
     ASSERT_EQ((uint32_t)8, result[3]);
+
+    free(output);
+    hl_cap_gpu_destroy(&ctx);
+}
+
+/* A buffer larger than its data gets the data and zeros - not whatever lies
+ * past the data. Upload used to copy `size` bytes from `data`, so a script
+ * asking for {data = "abcd", size = 1 << 20} read host memory into the GPU
+ * buffer and back out as the dispatch's output. Here the bytes past data_len
+ * are a known non-zero fill; a ragged data_len exercises the padded tail. */
+UTEST(hull_cap_gpu, upload_reads_no_further_than_the_data)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+
+    const char *wgsl =
+        "@group(0) @binding(0) var<storage, read_write> data: array<u32>;\n"
+        "@compute @workgroup_size(1)\n"
+        "fn main() { data[0] = data[0]; }\n";
+    int rc = hl_cap_gpu_compile(&ctx, -1, "touch", wgsl, strlen(wgsl));
+    ASSERT_EQ(HL_GPU_OK, rc);
+
+    uint8_t backing[32];
+    memset(backing, 0xAB, sizeof(backing));
+    for (int i = 0; i < 6; i++) backing[i] = (uint8_t)(i + 1);
+    HlGpuBufferDesc buf = {
+        .data = backing,
+        .data_len = 6,
+        .size = sizeof(backing),
+        .usage = HL_GPU_USAGE_READWRITE,
+        .binding = -1,
+    };
+    HlGpuDispatchOpts opts = {
+        .buffers = &buf,
+        .buffer_count = 1,
+        .workgroups = {1, 1, 1},
+        .output_buffer = 0,
+        .device = -1,
+    };
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err_msg = NULL;
+    rc = hl_cap_gpu_dispatch(&ctx, "touch", &opts,
+                             &output, &output_len, &err_msg);
+    ASSERT_EQ(HL_GPU_OK, rc);
+    ASSERT_TRUE(output != NULL);
+    ASSERT_EQ(sizeof(backing), output_len);
+
+    const uint8_t *out = (const uint8_t *)output;
+    for (int i = 0; i < 6; i++) EXPECT_EQ(out[i], (uint8_t)(i + 1));
+    for (size_t i = 6; i < sizeof(backing); i++) EXPECT_EQ(out[i], 0);
 
     free(output);
     hl_cap_gpu_destroy(&ctx);
@@ -269,7 +322,8 @@ UTEST(hull_cap_gpu, pipeline_two_stage)
     uint32_t input[4] = {1, 2, 3, 4};
 
     HlGpuBufferDesc bufs_s1[] = {
-        { .name = "data", .data = input, .size = sizeof(input),
+        { .name = "data", .data = input, .data_len = sizeof(input),
+          .size = sizeof(input),
           .usage = HL_GPU_USAGE_READWRITE, .binding = -1 },
     };
     HlGpuBufferDesc bufs_s2[] = {

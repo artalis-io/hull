@@ -619,9 +619,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             temp_bufs[temp_count++] = gpu_buf;
 
             /* Upload initial data if present */
-            if (desc->data && desc->size > 0)
-                wgpuQueueWriteBuffer(dctx->queue, gpu_buf, 0,
-                                      desc->data, desc->size);
+            upload_initial(dctx->queue, gpu_buf, buf_size, desc);
         }
 
         uint32_t binding = (uint32_t)(i + binding_offset);
@@ -962,6 +960,28 @@ typedef struct {
     size_t      size;  /* allocated (aligned) size */
 } TempBufEntry;
 
+/* A buffer's initial data. At most data_len bytes are read from it - `size`
+ * is the buffer's, and may be larger (the rest stays zero) - and never more
+ * than the buffer holds. It used to upload `size` bytes from `data`, so a
+ * size larger than the data read past the end of it into the GPU buffer,
+ * where the script could read it back. WriteBuffer takes whole 4-byte words:
+ * a ragged tail goes through one zero-padded word. */
+static void upload_initial(WGPUQueue queue, WGPUBuffer buf, size_t buf_size,
+                           const HlGpuBufferDesc *desc)
+{
+    if (!desc->data) return;
+    size_t n = desc->size < desc->data_len ? desc->size : desc->data_len;
+    if (n > buf_size) n = buf_size;
+    size_t whole = n & ~(size_t)3;
+    if (whole > 0)
+        wgpuQueueWriteBuffer(queue, buf, 0, desc->data, whole);
+    if (n > whole && whole + 4 <= buf_size) {
+        uint8_t tail[4] = {0};
+        memcpy(tail, (const uint8_t *)desc->data + whole, n - whole);
+        wgpuQueueWriteBuffer(queue, buf, whole, tail, 4);
+    }
+}
+
 static WGPUBuffer find_or_create_temp(WgpuDeviceCtx *dctx,
                                         TempBufEntry *map, int *map_count,
                                         const char *name, size_t size,
@@ -1165,10 +1185,13 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                 goto cleanup;
             }
 
-            /* Upload data if this is the first declaration with data */
-            if (desc->data && desc->size > 0)
-                wgpuQueueWriteBuffer(dctx->queue, gpu_buf, 0,
-                                      desc->data, desc->size);
+            /* Upload data if this is the first declaration with data
+             * (find_or_create_temp sizes the buffer to alloc_size, rounded
+             * up to a word) */
+            upload_initial(dctx->queue, gpu_buf,
+                           alloc_size <= SIZE_MAX - 3
+                               ? (alloc_size + 3) & ~(size_t)3 : alloc_size,
+                           desc);
 
             size_t buf_aligned = alloc_size <= SIZE_MAX - 3
                 ? (alloc_size + 3) & ~(size_t)3 : alloc_size;

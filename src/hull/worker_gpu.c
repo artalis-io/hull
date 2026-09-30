@@ -42,6 +42,12 @@ static void gpu_work_fn(void *ud)
         /* Wire per-stage buffers and uniforms */
         int buf_off = 0;
         for (int s = 0; s < op->stage_count; s++) {
+            /* Never past the copied descriptors, whatever a stage's count
+             * says: the bindings set it, and it indexes op->buffers. */
+            if (op->stages[s].buffer_count < 0)
+                op->stages[s].buffer_count = 0;
+            if (op->stages[s].buffer_count > op->buffer_count - buf_off)
+                op->stages[s].buffer_count = op->buffer_count - buf_off;
             if (op->stages[s].buffer_count > 0) {
                 op->stages[s].buffers = &op->buffers[buf_off];
                 buf_off += op->stages[s].buffer_count;

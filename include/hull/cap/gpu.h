@@ -121,7 +121,8 @@ typedef struct HlGpuTextureDesc {
 typedef struct HlGpuBufferDesc {
     const char *name;       /* persistent buffer name, or NULL for inline */
     const void *data;       /* initial data (NULL for output/existing) */
-    size_t      size;
+    size_t      data_len;   /* bytes at data: the most an upload reads */
+    size_t      size;       /* buffer size; may exceed data_len (rest zero) */
     int         usage;
     int         binding;    /* -1 = auto-assign */
 } HlGpuBufferDesc;

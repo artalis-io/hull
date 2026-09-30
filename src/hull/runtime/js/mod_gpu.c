@@ -250,7 +250,8 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
             }
         }
     }
-    JS_FreeValue(ctx, uni_val);
+    /* uni_val is released after the dispatch: opts.uniforms may point into
+     * its ArrayBuffer. */
 
     /* Parse buffers array */
     HlGpuBufferDesc bufs[16];
@@ -259,6 +260,11 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     /* Keep JS string refs alive until after dispatch */
     const char *buf_name_strs[16] = {0};
     const char *buf_data_strs[16] = {0};
+    /* ...and the ArrayBuffers bufs[].data points into. `data` may be a getter
+     * that returns a fresh one, freed the moment its value is released - the
+     * dispatch then read freed memory. */
+    JSValue buf_data_vals[16];
+    for (int i = 0; i < 16; i++) buf_data_vals[i] = JS_UNDEFINED;
 
     JSValue bufs_val = JS_GetPropertyStr(ctx, opts_val, "buffers");
     if (JS_IsArray(ctx, bufs_val)) {
@@ -283,12 +289,15 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
                     size_t dlen;
                     uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
                     if (dab) {
+                        buf_data_vals[buf_count] = JS_DupValue(ctx, dv);
                         bufs[buf_count].data = dab;
+                        bufs[buf_count].data_len = dlen;
                         bufs[buf_count].size = dlen;
                     } else {
                         buf_data_strs[buf_count] = JS_ToCStringLen(ctx, &dlen, dv);
                         if (buf_data_strs[buf_count]) {
                             bufs[buf_count].data = buf_data_strs[buf_count];
+                            bufs[buf_count].data_len = dlen;
                             bufs[buf_count].size = dlen;
                         }
                     }
@@ -366,10 +375,13 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     /* Free uniform string if we used JS_ToCStringLen */
     if (uni_str) JS_FreeCString(ctx, uni_str);
 
-    /* Free buffer name/data strings */
+    JS_FreeValue(ctx, uni_val);
+
+    /* Free buffer name/data strings, and release their ArrayBuffers */
     for (int i = 0; i < buf_count; i++) {
         if (buf_name_strs[i]) JS_FreeCString(ctx, buf_name_strs[i]);
         if (buf_data_strs[i]) JS_FreeCString(ctx, buf_data_strs[i]);
+        JS_FreeValue(ctx, buf_data_vals[i]);
     }
 
     /* Free texture tracked strings */
@@ -932,6 +944,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                             if (buf_data_ptrs[buf_count]) {
                                 memcpy(buf_data_ptrs[buf_count], dab, dlen);
                                 buf_descs[buf_count].data = buf_data_ptrs[buf_count];
+                                buf_descs[buf_count].data_len = dlen;
                                 buf_descs[buf_count].size = dlen;
                             }
                         } else {
@@ -942,6 +955,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                                     if (buf_data_ptrs[buf_count]) {
                                         memcpy(buf_data_ptrs[buf_count], ds, dlen);
                                         buf_descs[buf_count].data = buf_data_ptrs[buf_count];
+                                        buf_descs[buf_count].data_len = dlen;
                                         buf_descs[buf_count].size = dlen;
                                     }
                                 }
@@ -1093,6 +1107,12 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         if ((s) && js_string_count < 256) js_strings[js_string_count++] = (s); \
     } while (0)
 
+    /* The ArrayBuffers stage uniforms and buffer data point into, held until
+     * after the dispatch: a getter may return a fresh one, freed as soon as
+     * its value is released. At most one per stage uniform and per buffer. */
+    JSValue js_keep[HL_GPU_MAX_PIPELINE_STAGES + HL_GPU_MAX_PIPELINE_BUFFERS];
+    int js_keep_count = 0;
+
     for (int32_t s = 0; s < stage_count; s++) {
         JSValue stage_val = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)s);
         if (!JS_IsObject(stage_val)) { JS_FreeValue(ctx, stage_val); continue; }
@@ -1122,6 +1142,7 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
             size_t ulen;
             uint8_t *uab = JS_GetArrayBuffer(ctx, &ulen, uni);
             if (uab) {
+                js_keep[js_keep_count++] = JS_DupValue(ctx, uni);
                 stages[s].uniforms = uab;
                 stages[s].uniforms_len = ulen;
             } else {
@@ -1142,6 +1163,9 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
             int32_t bc = 0;
             JS_ToInt32(ctx, &bc, blen_val);
             JS_FreeValue(ctx, blen_val);
+            /* A Proxy can report any length. A negative one moved buf_offset
+             * below zero, and the next stage wrote before all_bufs. */
+            if (bc < 0) bc = 0;
             if (bc > 16) bc = 16;
             if (buf_offset + bc > HL_GPU_MAX_PIPELINE_BUFFERS)
                 bc = HL_GPU_MAX_PIPELINE_BUFFERS - buf_offset;
@@ -1164,12 +1188,15 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
                         size_t dlen;
                         uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
                         if (dab) {
+                            js_keep[js_keep_count++] = JS_DupValue(ctx, dv);
                             all_bufs[buf_offset + b].data = dab;
+                            all_bufs[buf_offset + b].data_len = dlen;
                             all_bufs[buf_offset + b].size = dlen;
                         } else {
                             const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
                             if (ds) {
                                 all_bufs[buf_offset + b].data = ds;
+                                all_bufs[buf_offset + b].data_len = dlen;
                                 all_bufs[buf_offset + b].size = dlen;
                                 JS_TRACK_STR(ds);
                             }
@@ -1257,9 +1284,11 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
     const char *err_msg = NULL;
     int rc = hl_cap_gpu_pipeline(gpu, &opts, &result, &err_msg);
 
-    /* Free tracked JS strings */
+    /* Free tracked JS strings, and release the kept ArrayBuffers */
     for (int i = 0; i < js_string_count; i++)
         JS_FreeCString(ctx, js_strings[i]);
+    for (int i = 0; i < js_keep_count; i++)
+        JS_FreeValue(ctx, js_keep[i]);
     #undef JS_TRACK_STR
 
     if (rc != HL_GPU_OK)
@@ -1338,6 +1367,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                 JSValue bl = JS_GetPropertyStr(ctx, bv, "length");
                 int32_t bc = 0; JS_ToInt32(ctx, &bc, bl);
                 JS_FreeValue(ctx, bl);
+                if (bc < 0) bc = 0;
                 if (bc > 16) bc = 16;
                 total_bufs += bc;
             }
@@ -1427,8 +1457,9 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
             JSValue blen = JS_GetPropertyStr(ctx, bufs_val, "length");
             int32_t bc = 0; JS_ToInt32(ctx, &bc, blen);
             JS_FreeValue(ctx, blen);
+            if (bc < 0) bc = 0;
             if (bc > 16) bc = 16;
-            op->stages[s].buffer_count = bc;
+            int first_buf = buf_off;
 
             for (int32_t b = 0; b < bc && buf_off < total_bufs; b++) {
                 JSValue elem = JS_GetPropertyUint32(ctx, bufs_val, (uint32_t)b);
@@ -1455,6 +1486,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                             if (op->buffer_data[buf_off]) {
                                 memcpy(op->buffer_data[buf_off], dab, dlen);
                                 op->buffers[buf_off].data = op->buffer_data[buf_off];
+                                op->buffers[buf_off].data_len = dlen;
                                 op->buffers[buf_off].size = dlen;
                             } else {
                                 oom = 1;
@@ -1467,6 +1499,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                                     if (op->buffer_data[buf_off]) {
                                         memcpy(op->buffer_data[buf_off], ds, dlen);
                                         op->buffers[buf_off].data = op->buffer_data[buf_off];
+                                        op->buffers[buf_off].data_len = dlen;
                                         op->buffers[buf_off].size = dlen;
                                     } else {
                                         oom = 1;
@@ -1490,6 +1523,10 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                 JS_FreeValue(ctx, elem);
                 buf_off++;
             }
+            /* What was copied, not what `length` said: a getter can report
+             * a larger length here than in the counting pass above, and the
+             * worker lays the stages over op->buffers by these counts. */
+            op->stages[s].buffer_count = buf_off - first_buf;
         }
         JS_FreeValue(ctx, bufs_val);
         JS_FreeValue(ctx, stage_val);
