@@ -308,8 +308,11 @@ documenting parallel connections.
   is the test seam); `hostkey.verify` takes one crypto adapter (`sha256`,
   `ed25519_verify`) instead of a separate digest function. Still open:
   `hull/web/ws-stream` is published but no app can obtain a stream to give it, it is not a web concern, and it has no JS twin: move it
-  under `hull/ssh/` or a future `hull/net/`. The registry uses
-  `HL_MOD_CAP_HTTP_CLIENT` as a stand-in for a net cap bit.
+  under `hull/ssh/` or a future `hull/net/`. The net cap bit: done -
+  `hull/ssh` requires `HL_MOD_CAP_NET` (the outbound socket layer) instead of
+  borrowing `HL_MOD_CAP_HTTP_CLIENT`; the compose gates (`needs_http`,
+  `needs_tls`) and the pure-compute preset treat it as they treated the
+  HTTP bit, since the binding and Keel still compose back the same way.
 - **Dead code / wrong comments.** Done or overtaken:
   `hl_net_stream_deadline` now backs the SFTP reply deadline;
   `hl_net_stream_cancel` is used by close and by tests; `HL_NET_E_DENIED` is

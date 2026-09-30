@@ -57,6 +57,11 @@
 #define HL_MOD_CAP_HTTP_SERVER (1u << 7)  /* requires HL_ENABLE_HTTP_SERVER at build */
 #define HL_MOD_CAP_TUI         (1u << 8)  /* requires HL_ENABLE_TUI + tui:true */
 #define HL_MOD_CAP_IMAGE       (1u << 9)  /* requires HL_ENABLE_IMAGE at build */
+/* The outbound socket layer (cap/net_stream.c over Keel's socket provider): a
+ * module that dials its own connections, as hull/ssh does. Present when
+ * HL_ENABLE_HTTP_CLIENT is - that is what compiles the binding - but it is
+ * not HTTP, and a module needing it should not have to say it is. */
+#define HL_MOD_CAP_NET         (1u << 10)
 /* Back-compat: HL_MOD_CAP_HTTP means "any HTTP" (server OR client).
  * Existing module specs that haven't been classified yet still use
  * this; new specs should pick CLIENT or SERVER. */

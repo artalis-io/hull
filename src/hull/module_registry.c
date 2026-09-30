@@ -373,14 +373,12 @@ static const HlModuleSpec REGISTRY[] = {
          * so "may call this API" and "may reach this machine as this login"
          * stay different statements.
          *
-         * HTTP_CLIENT is a stand-in for "this build has the outbound socket
-         * layer": the stream rides Keel's socket provider, which a
-         * pure-compute build drops along with Keel. The flag is the right
-         * gate operationally and the wrong word semantically - a dedicated
-         * net cap bit would read better and is worth doing separately. */
+         * HL_MOD_CAP_NET is "this build has the outbound socket layer": the
+         * stream rides Keel's socket provider, which a pure-compute build
+         * drops along with Keel. */
         .name = "hull/ssh",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_CLIENT,
+        .required_caps = HL_MOD_CAP_NET,
         /* hull.ssh requires hull.crypto for the KEX, the host-key signature
          * check and the userauth signature - so an app declaring only
          * hull/ssh@1 must still get crypto admitted, or the require fails at

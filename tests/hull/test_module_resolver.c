@@ -611,8 +611,8 @@ UTEST(build_flavor, registry_lookup)
 
     const HlBuildFlavor *po = hl_build_flavor_find("pure-compute");
     ASSERT_TRUE(po != NULL);
-    /* HL_MOD_CAP_HTTP == HTTP_CLIENT | HTTP_SERVER. */
-    ASSERT_EQ((int)po->clear_caps, (int)HL_MOD_CAP_HTTP);
+    /* HL_MOD_CAP_HTTP == HTTP_CLIENT | HTTP_SERVER; NET goes with Keel. */
+    ASSERT_EQ((int)po->clear_caps, (int)(HL_MOD_CAP_HTTP | HL_MOD_CAP_NET));
 
     /* server-only / client-only were removed (issue #114): the HTTP flavor axis
      * is now binary (full vs pure-compute). */
@@ -626,9 +626,11 @@ UTEST(build_flavor, registry_lookup)
 
 UTEST(build_flavor, caps_clear_http)
 {
-    uint32_t base = HL_MOD_CAP_DB | HL_MOD_CAP_HTTP_CLIENT | HL_MOD_CAP_HTTP_SERVER;
+    uint32_t base = HL_MOD_CAP_DB | HL_MOD_CAP_HTTP_CLIENT | HL_MOD_CAP_HTTP_SERVER
+                  | HL_MOD_CAP_NET;
     uint32_t pc = hl_build_flavor_caps(hl_build_flavor_find("pure-compute"), base);
     ASSERT_TRUE((pc & HL_MOD_CAP_HTTP_CLIENT) == 0);
+    ASSERT_TRUE((pc & HL_MOD_CAP_NET) == 0);
     ASSERT_TRUE((pc & HL_MOD_CAP_HTTP_SERVER) == 0);
     ASSERT_TRUE((pc & HL_MOD_CAP_DB) != 0);   /* unrelated caps preserved */
     /* full and a NULL flavor pass the base through unchanged. */
@@ -683,6 +685,19 @@ UTEST(build_flavor, auto_picks_minimal)
     ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP_SERVER)->name, "full");
     ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP_CLIENT)->name, "full");
     ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP)->name, "full");
+    /* The socket layer rides Keel, which pure-compute drops. */
+    ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_NET)->name, "full");
+}
+
+UTEST(build_flavor, ssh_needs_the_socket_layer_not_http)
+{
+    /* hull/ssh dials its own connections; it is not an HTTP client, and its
+     * spec says so. Which build flag happens to compile the layer is the
+     * resolver's business (build_compile_caps), not the module's. */
+    const HlModuleSpec *ssh = hl_module_registry_find_short("hull/ssh");
+    ASSERT_TRUE(ssh != NULL);
+    ASSERT_TRUE((ssh->required_caps & HL_MOD_CAP_NET) != 0);
+    ASSERT_TRUE((ssh->required_caps & HL_MOD_CAP_HTTP) == 0);
 }
 
 UTEST(build_flavor, auto_from_resolved_manifest)
