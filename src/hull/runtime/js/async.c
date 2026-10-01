@@ -292,6 +292,11 @@ static void hl_js_async_destroy(HlAsyncCont *self)
         JS_FreeValue(jc->js->ctx, jc->resolve);
         JS_FreeValue(jc->js->ctx, jc->reject);
     }
+    /* Never leave dispatch a pointer to a freed continuation: a failure path
+     * that destroys a just-registered cont left last_async_cont dangling, and
+     * dispatch then attached the handler promise to freed memory. */
+    if (jc->js && jc->js->last_async_cont == jc)
+        jc->js->last_async_cont = NULL;
     hl_alloc_free(jc->alloc, jc, sizeof(HlJsAsyncCont));
 }
 

@@ -1128,8 +1128,6 @@ static const HlCryptoKey *js_live_key(JSContext *ctx, JSValueConst this_val)
 static JSValue js_crypto_key_secretbox(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv)
 {
-    const HlCryptoKey *k = js_live_key(ctx, this_val);
-    if (!k) return JS_EXCEPTION;
     if (argc < 2) return JS_ThrowTypeError(ctx, "key.secretbox requires (message, nonce)");
     JsMsg msg, nonce;
     if (!js_msg_get(ctx, argv[0], &msg))
@@ -1138,6 +1136,10 @@ static JSValue js_crypto_key_secretbox(JSContext *ctx, JSValueConst this_val,
         js_msg_free(ctx, &msg);
         return JS_EXCEPTION;
     }
+    /* The key last: converting the arguments can run app code, which can
+     * key.destroy() - the key resolved first was then freed under us. */
+    const HlCryptoKey *k = js_live_key(ctx, this_val);
+    if (!k) { js_msg_free(ctx, &msg); js_msg_free(ctx, &nonce); return JS_EXCEPTION; }
     JSValue ret = JS_EXCEPTION;
     size_t ct_len = msg.view.len + HL_SECRETBOX_MACBYTES;
     uint8_t *ct = js_malloc(ctx, ct_len);
@@ -1158,8 +1160,6 @@ static JSValue js_crypto_key_secretbox(JSContext *ctx, JSValueConst this_val,
 static JSValue js_crypto_key_secretbox_open(JSContext *ctx, JSValueConst this_val,
                                             int argc, JSValueConst *argv)
 {
-    const HlCryptoKey *k = js_live_key(ctx, this_val);
-    if (!k) return JS_EXCEPTION;
     if (argc < 2) return JS_ThrowTypeError(ctx, "key.secretboxOpen requires (ciphertext, nonce)");
     JsMsg ct, nonce;
     if (!js_msg_get(ctx, argv[0], &ct))
@@ -1168,6 +1168,9 @@ static JSValue js_crypto_key_secretbox_open(JSContext *ctx, JSValueConst this_va
         js_msg_free(ctx, &ct);
         return JS_EXCEPTION;
     }
+    /* The key last: see key.secretbox. */
+    const HlCryptoKey *k = js_live_key(ctx, this_val);
+    if (!k) { js_msg_free(ctx, &ct); js_msg_free(ctx, &nonce); return JS_EXCEPTION; }
     JSValue ret = JS_NULL;
     if (ct.view.len >= HL_SECRETBOX_MACBYTES) {
         size_t msg_len = ct.view.len - HL_SECRETBOX_MACBYTES;

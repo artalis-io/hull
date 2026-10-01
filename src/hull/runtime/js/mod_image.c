@@ -150,35 +150,29 @@ static JSValue js_image_from_buffer(JSContext *ctx, JSValueConst this_val,
     if (argc < 4)
         return JS_ThrowTypeError(ctx, "image.fromBuffer requires (data, w, h, format)");
 
+    /* Scalars first: valueOf / toString are app code, and could close or
+     * free the buffer a view taken earlier named. The view comes last. */
+    uint32_t w, h;
+    if (JS_ToUint32(ctx, &w, argv[1]))
+        return JS_EXCEPTION;
+    if (JS_ToUint32(ctx, &h, argv[2]))
+        return JS_EXCEPTION;
+
+    const char *fmt_name = JS_ToCString(ctx, argv[3]);
+    if (!fmt_name)
+        return JS_EXCEPTION;
+
+    int fmt = hl_image_format_from_name(fmt_name);
+    JS_FreeCString(ctx, fmt_name);
+
+    if (fmt < 0)
+        return JS_ThrowTypeError(ctx, "unknown image format");
+
     HlBufferView view;
     const char *str_out;
     int needs_free;
     if (!js_get_buffer(ctx, argv[0], &view, &str_out, &needs_free))
         return JS_ThrowTypeError(ctx, "image.fromBuffer: arg 1 must be a buffer");
-
-    uint32_t w, h;
-    if (JS_ToUint32(ctx, &w, argv[1])) {
-        if (needs_free) JS_FreeCString(ctx, str_out);
-        return JS_EXCEPTION;
-    }
-    if (JS_ToUint32(ctx, &h, argv[2])) {
-        if (needs_free) JS_FreeCString(ctx, str_out);
-        return JS_EXCEPTION;
-    }
-
-    const char *fmt_name = JS_ToCString(ctx, argv[3]);
-    if (!fmt_name) {
-        if (needs_free) JS_FreeCString(ctx, str_out);
-        return JS_EXCEPTION;
-    }
-
-    int fmt = hl_image_format_from_name(fmt_name);
-    JS_FreeCString(ctx, fmt_name);
-
-    if (fmt < 0) {
-        if (needs_free) JS_FreeCString(ctx, str_out);
-        return JS_ThrowTypeError(ctx, "unknown image format");
-    }
 
     /* Borrow refcountable zero-copy sources (mmap / WASM buffer) with deferred
      * source teardown; copy everything else (string, ArrayBuffer, TypedArray,
@@ -230,19 +224,20 @@ static JSValue js_image_decode_fn(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "image.decode requires data");
 
-    HlBufferView view;
-    const char *str_out;
-    int needs_free;
-    if (!js_get_buffer(ctx, argv[0], &view, &str_out, &needs_free))
-        return JS_ThrowTypeError(ctx, "image.decode: arg 1 must be a buffer");
-
+    /* The format first (toString is app code); the view last. */
     const char *fmt_name = NULL;
     if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
         fmt_name = JS_ToCString(ctx, argv[1]);
-        if (!fmt_name) {
-            if (needs_free) JS_FreeCString(ctx, str_out);
+        if (!fmt_name)
             return JS_EXCEPTION;
-        }
+    }
+
+    HlBufferView view;
+    const char *str_out;
+    int needs_free;
+    if (!js_get_buffer(ctx, argv[0], &view, &str_out, &needs_free)) {
+        if (fmt_name) JS_FreeCString(ctx, fmt_name);
+        return JS_ThrowTypeError(ctx, "image.decode: arg 1 must be a buffer");
     }
 
     const char *err_msg = NULL;
@@ -266,9 +261,6 @@ static JSValue js_image_encode_fn(JSContext *ctx, JSValueConst this_val,
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "image.encode requires (img, format)");
 
-    HlImage *img = JS_GetOpaque2(ctx, argv[0], js_image_class_id);
-    if (!img) return JS_ThrowTypeError(ctx, "image.encode: arg 1 must be an Image");
-
     const char *fmt_name = JS_ToCString(ctx, argv[1]);
     if (!fmt_name) return JS_EXCEPTION;
 
@@ -281,6 +273,14 @@ static JSValue js_image_encode_fn(JSContext *ctx, JSValueConst this_val,
             quality = q;
         }
         JS_FreeValue(ctx, qval);
+    }
+
+    /* The image last: the format's toString and the quality getter are app
+     * code, which could img.close() - an image fetched first was freed. */
+    HlImage *img = JS_GetOpaque2(ctx, argv[0], js_image_class_id);
+    if (!img) {
+        JS_FreeCString(ctx, fmt_name);
+        return JS_ThrowTypeError(ctx, "image.encode: arg 1 must be an Image");
     }
 
     void *out = NULL;

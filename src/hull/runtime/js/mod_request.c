@@ -163,6 +163,10 @@ typedef struct HlJsMpCont {
      * mark p->spent on completion). NOT used by MP_MODE_CHUNKS - see the
      * note on HlJsMpChunks. */
     HlJsMpPart   *part;
+    /* The Part / Chunks object `part` / `chunks` belongs to, held while
+     * parked: a temporary (part.chunks().next()) is otherwise finalized at
+     * once, and arriving data then wrote into its freed state. */
+    JSValue       owner;
 } HlJsMpCont;
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -647,6 +651,11 @@ static void mp_js_cont_destroy(HlAsyncCont *self)
         hl_mp_iter_unref(jc->iter);
         jc->iter = NULL;
     }
+    if (jc->js && jc->js->ctx)
+        JS_FreeValue(jc->js->ctx, jc->owner);
+    /* Never leave dispatch a pointer to a freed continuation. */
+    if (jc->js && jc->js->last_async_cont == jc)
+        jc->js->last_async_cont = NULL;
     hl_alloc_free(jc->alloc, jc, sizeof(*jc));
 }
 
@@ -662,6 +671,7 @@ static void mp_js_cont_destroy(HlAsyncCont *self)
  */
 static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
                        HlJsMpPart *part, HlJsMpChunks *chunks,
+                       JSValueConst owner,
                        JSValue resolve, JSValue reject)
 {
     HlJS *js = it->js;
@@ -692,6 +702,7 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
     jc->read_cap        = 0;
     jc->chunks          = chunks;
     jc->part            = part;
+    jc->owner           = JS_DupValue(ctx, owner);
 
     /* Side-effect so dispatch picks up the cont for handler_promise wiring. */
     js->last_async_cont = jc;
@@ -786,7 +797,7 @@ static JSValue js_iter_next(JSContext *ctx, JSValueConst this_val,
     JSValue resolving[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving);
     if (JS_IsException(promise)) return JS_EXCEPTION;
-    if (mp_js_park(ctx, it, MP_MODE_ITER, NULL, NULL,
+    if (mp_js_park(ctx, it, MP_MODE_ITER, NULL, NULL, JS_UNDEFINED,
                     resolving[0], resolving[1]) != 0) {
         JS_FreeValue(ctx, resolving[0]);
         JS_FreeValue(ctx, resolving[1]);
@@ -846,6 +857,7 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     jc->iter            = hl_mp_iter_ref(it);
     jc->mode            = MP_MODE_READ;
     jc->part            = p;
+    jc->owner           = JS_DupValue(ctx, this_val);
 
     /* Run the first pump synchronously; if it completes with no NEED_DATA,
      * resolve immediately and skip the park dance. */
@@ -916,7 +928,7 @@ static JSValue js_chunks_next(JSContext *ctx, JSValueConst this_val,
     JSValue resolving[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving);
     if (JS_IsException(promise)) return JS_EXCEPTION;
-    if (mp_js_park(ctx, it, MP_MODE_CHUNKS, NULL, c,
+    if (mp_js_park(ctx, it, MP_MODE_CHUNKS, NULL, c, this_val,
                     resolving[0], resolving[1]) != 0) {
         JS_FreeValue(ctx, resolving[0]);
         JS_FreeValue(ctx, resolving[1]);

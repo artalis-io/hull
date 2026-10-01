@@ -57,10 +57,14 @@ static int js_query_row_cb(void *opaque, HlColumn *cols, int ncols)
             val = JS_NULL;
             break;
         }
-        JS_SetPropertyStr(qc->ctx, row, cols[i].name, val);
+        /* Defined, never set: a set runs any Object.prototype setter -
+         * app code, inside the statement's row loop, where it could close
+         * the connection or evict the statement being stepped. */
+        JS_DefinePropertyValueStr(qc->ctx, row, cols[i].name, val, JS_PROP_C_W_E);
     }
 
-    JS_SetPropertyUint32(qc->ctx, qc->array, (uint32_t)qc->row_count, row);
+    JS_DefinePropertyValueUint32(qc->ctx, qc->array, (uint32_t)qc->row_count,
+                                 row, JS_PROP_C_W_E);
     qc->row_count++;
     return 0;
 }
@@ -336,7 +340,7 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = js_call_handle(ctx, this_val);
+    HlDbHandle *h;   /* resolved after the parameters: see below */
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
         JS_FreeCString(ctx, sql);
@@ -351,6 +355,15 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
             JS_FreeCString(ctx, sql);
             return JS_ThrowTypeError(ctx, "params must be an array");
         }
+    }
+
+    /* Resolve again: converting the parameters can run app code (a Proxy's
+     * getters), which can close() a db.open handle and free h. */
+    h = js_call_handle(ctx, this_val);
+    if (!h) {
+        js_free_hl_values(ctx, params, nparams);
+        JS_FreeCString(ctx, sql);
+        return JS_ThrowInternalError(ctx, "database connection is closed");
     }
 
     JsQueryCtx qc = {
@@ -391,7 +404,7 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = js_call_handle(ctx, this_val);
+    HlDbHandle *h;   /* resolved after the parameters: see below */
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
         JS_FreeCString(ctx, sql);
@@ -406,6 +419,15 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
             JS_FreeCString(ctx, sql);
             return JS_ThrowTypeError(ctx, "params must be an array");
         }
+    }
+
+    /* Resolve again: converting the parameters can run app code (a Proxy's
+     * getters), which can close() a db.open handle and free h. */
+    h = js_call_handle(ctx, this_val);
+    if (!h) {
+        js_free_hl_values(ctx, params, nparams);
+        JS_FreeCString(ctx, sql);
+        return JS_ThrowInternalError(ctx, "database connection is closed");
     }
 
     int rc = hl_db_exec(h, sql, params, nparams);
@@ -459,11 +481,16 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
 
     JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
+    /* Resolve again: fn may have closed a db.open handle, freeing h. */
+    h = js_call_handle(ctx, this_val);
     if (JS_IsException(result)) {
-        hl_db_rollback(h);
+        if (h) hl_db_rollback(h);
         return result; /* propagate exception */
     }
     JS_FreeValue(ctx, result);
+    if (!h)
+        return JS_ThrowInternalError(ctx,
+            "db.batch: the connection was closed inside the batch");
 
     if (hl_db_commit(h) != 0) {
         hl_db_rollback(h);

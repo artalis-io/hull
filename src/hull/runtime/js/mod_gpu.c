@@ -19,7 +19,7 @@
 static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
                                    HlGpuTextureDesc *descs, int max_descs,
                                    const char **tracked_strs, int *str_count,
-                                   int str_max);
+                                   int str_max, JSValue *keep);
 
 #include <keel/http_server.h>
 #include <stdio.h>
@@ -346,9 +346,12 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     HlGpuTextureDesc tex_descs[8];
     const char *tex_strs[32] = {0};
     int tex_str_count = 0;
+    JSValue tex_keep[8];
+    for (int i = 0; i < 8; i++) tex_keep[i] = JS_UNDEFINED;
     JSValue tex_arr = JS_GetPropertyStr(ctx, opts_val, "textures");
     int tex_count = js_parse_texture_descs(ctx, tex_arr, tex_descs, 8,
-                                            tex_strs, &tex_str_count, 32);
+                                            tex_strs, &tex_str_count, 32,
+                                            tex_keep);
     JS_FreeValue(ctx, tex_arr);
     opts.textures = tex_descs;
     opts.texture_count = tex_count;
@@ -387,9 +390,11 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, buf_data_vals[i]);
     }
 
-    /* Free texture tracked strings */
+    /* Free texture tracked strings, and release their kept ArrayBuffers */
     for (int i = 0; i < tex_str_count; i++)
         JS_FreeCString(ctx, tex_strs[i]);
+    for (int i = 0; i < 8; i++)
+        JS_FreeValue(ctx, tex_keep[i]);
 
     JS_FreeCString(ctx, name);
 
@@ -428,17 +433,6 @@ static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
         return JS_TRUE;
     }
 
-    /* Get data from any buffer type (MappedBuffer, WasmBuffer, ArrayBuffer, string) */
-    HlBufferView bv;
-    const char *str_data = NULL;
-    int str_needs_free = 0;
-    if (!js_get_buffer(ctx, argv[1], &bv, &str_data, &str_needs_free)) {
-        JS_FreeCString(ctx, name);
-        return JS_ThrowTypeError(ctx, "gpu.buffer: data must be a buffer type");
-    }
-    const uint8_t *data = (const uint8_t *)bv.data;
-    size_t data_len = bv.len;
-
     size_t offset = 0;
     if (argc > 2 && JS_IsObject(argv[2])) {
         JSValue off_val = JS_GetPropertyStr(ctx, argv[2], "offset");
@@ -456,6 +450,19 @@ static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
         }
         JS_FreeValue(ctx, dev_val);
     }
+
+    /* The source view after the options: their getters are app code, which
+     * could close or free the buffer a view taken first named. */
+    /* Get data from any buffer type (MappedBuffer, WasmBuffer, ArrayBuffer, string) */
+    HlBufferView bv;
+    const char *str_data = NULL;
+    int str_needs_free = 0;
+    if (!js_get_buffer(ctx, argv[1], &bv, &str_data, &str_needs_free)) {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowTypeError(ctx, "gpu.buffer: data must be a buffer type");
+    }
+    const uint8_t *data = (const uint8_t *)bv.data;
+    size_t data_len = bv.len;
 
     int rc = hl_cap_gpu_buffer_write(gpu, device, name, data, data_len, offset);
     if (rc == HL_GPU_ERR_NOT_FOUND) {
@@ -606,17 +613,12 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
         width = img->width;
         height = img->height;
         format = (HlGpuTexFormat)img->format;
-        pixels = img->pixels;
-        pixel_len = img->pixel_len;
     } else
 #endif
     {
-        /* Get data from buffer protocol */
+        /* Validate the source now; its bytes are taken after the options. */
         HlBufferView bv;
-        if (js_get_buffer(ctx, argv[1], &bv, &str_data, &str_needs_free)) {
-            pixels = bv.data;
-            pixel_len = bv.len;
-        } else {
+        if (!js_get_buffer(ctx, argv[1], &bv, &str_data, &str_needs_free)) {
             JS_FreeCString(ctx, name);
             return JS_ThrowTypeError(ctx, "gpu.texture: data must be "
 #ifdef HL_ENABLE_IMAGE
@@ -669,6 +671,33 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
             }
         }
         JS_FreeValue(ctx, v);
+    }
+
+    /* Take the source again: the options above are app code (getters,
+     * valueOf) and could have closed or freed what was taken first. Their
+     * dimensions/format still win over the source's. */
+#ifdef HL_ENABLE_IMAGE
+    if (img) {
+        img = JS_GetOpaque(argv[1], js_image_class_id);
+        if (!img) {
+            JS_FreeCString(ctx, name);
+            return JS_ThrowTypeError(ctx, "gpu.texture: the image was closed");
+        }
+        pixels = img->pixels;
+        pixel_len = img->pixel_len;
+    } else
+#endif
+    {
+        if (str_data) JS_FreeCString(ctx, str_data);
+        str_data = NULL;
+        str_needs_free = 0;
+        HlBufferView bv2;
+        if (!js_get_buffer(ctx, argv[1], &bv2, &str_data, &str_needs_free)) {
+            JS_FreeCString(ctx, name);
+            return JS_ThrowTypeError(ctx, "gpu.texture: the data was closed");
+        }
+        pixels = bv2.data;
+        pixel_len = bv2.len;
     }
 
     if (width == 0 || height == 0) {
@@ -739,10 +768,13 @@ static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
 
 /* ── JS texture desc parsing helper ──────────────────────────────── */
 
+/* keep[i] (max_descs of them, set to JS_UNDEFINED by the caller) holds desc
+ * i's data ArrayBuffer until the caller frees it after the dispatch: `data`
+ * may be a getter returning a fresh one, freed when its value is released. */
 static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
                                    HlGpuTextureDesc *descs, int max_descs,
                                    const char **tracked_strs, int *str_count,
-                                   int str_max)
+                                   int str_max, JSValue *keep)
 {
     if (!JS_IsArray(ctx, arr))
         return 0;
@@ -791,6 +823,7 @@ static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
                 size_t dlen;
                 uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
                 if (dab) {
+                    keep[i] = JS_DupValue(ctx, dv);
                     descs[i].data = dab;
                     descs[i].data_len = dlen;
                 } else {

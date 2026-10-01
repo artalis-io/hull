@@ -2949,6 +2949,52 @@ UTEST(js_stdlib, crypto_key_from_env)
     cleanup_js_caps();
 }
 
+/* Binding lifetimes: app code a binding runs while converting its arguments
+ * (valueOf, toString, a getter, a prototype setter) must not free what the
+ * binding already resolved. Each case crashed or wrote freed memory before;
+ * run() returns 0, or the number of the first check that failed. */
+UTEST(js_cap, conversions_cannot_free_resolved_objects)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    setenv("HULL_TEST_VAR", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", 1);
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "import { db as dbMod } from 'hull:db';\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "function run() {\n"
+        /* crypto: a message object whose toString destroys the key is not a
+         * buffer - it is refused, and never stringified */
+        "  const k = crypto.keyFromEnv('HULL_TEST_VAR');\n"
+        "  let ran = false;\n"
+        "  const evil = { toString() { ran = true; k.destroy(); return 'x'; } };\n"
+        "  if (!threw(() => k.secretbox(evil, new Uint8Array(24)))) return 2;\n"
+        "  if (ran) return 3;\n"
+        "  if (k.secretbox('x', new Uint8Array(24)).byteLength !== 17) return 4;\n"
+        /* db: rows are defined, so an Object.prototype setter never runs
+         * inside the statement's row loop */
+        "  const db = dbMod.default();\n"
+        "  db.exec('CREATE TABLE life (name TEXT)');\n"
+        "  db.exec('INSERT INTO life (name) VALUES (?)', ['alice']);\n"
+        "  let setter = 0;\n"
+        "  Object.defineProperty(Object.prototype, 'name',\n"
+        "      { set(v) { setter++; }, configurable: true });\n"
+        "  Object.defineProperty(Array.prototype, '0',\n"
+        "      { set(v) { setter++; }, configurable: true });\n"
+        "  let rows;\n"
+        "  try { rows = db.query('SELECT name FROM life'); }\n"
+        "  finally { delete Object.prototype.name; delete Array.prototype[0]; }\n"
+        "  if (setter !== 0) return 5;\n"
+        "  if (rows.length !== 1 || rows[0].name !== 'alice') return 6;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__life = run();\n";
+    int rc = js_run_steps(code, "globalThis.__life");
+    unsetenv("HULL_TEST_VAR");
+    ASSERT_EQ(rc, 0);
+    cleanup_js_caps();
+}
+
 /* Regressions from docs/crypto_encoding_ssh_audit.md (PR 1). run() returns 0,
  * or the number of the first check that failed. */
 UTEST(js_stdlib, crypto_encoding_audit_fixes)
