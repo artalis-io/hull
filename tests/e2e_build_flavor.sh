@@ -96,6 +96,17 @@ for d in args_cli args_srv; do
 done
 pass "a built binary passes bare arguments to app.main (both entry points)"
 
+# An option Hull does not take starts the app's arguments too: a built CLI
+# tool must be able to have a --help of its own.
+HELP_MAIN='app.main(function(ctx) if ctx.args[1] == "--help" and ctx.args[2] == "x" then return 0 end return 3 end)'
+mkdir -p "$WORK/help_cli"
+printf 'app.manifest({ modules = {} })\n%s\n' "$HELP_MAIN" > "$WORK/help_cli/app.lua"
+out=$("$HULL" build --no-verify-platform "$WORK/help_cli" -o "$WORK/help_cli/app" 2>&1) \
+    || fail "help_cli should build: $out"
+rc=$(hull_rc "$WORK/help_cli/app" --help x)
+[ "$rc" = 0 ] || fail "'./app --help x' should give the app [--help, x] (exit 0), got $rc"
+pass "a built binary passes an unknown option to app.main"
+
 # ── 4. --flavor=auto infers pure-compute for an app.main app ───────────
 out=$("$HULL" build --no-verify-platform --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) \
     || fail "auto build failed: $out"

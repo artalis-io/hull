@@ -144,7 +144,26 @@ static int cli_parse_args(int argc, char **argv,
             *out_ca_override = argv[i] + 12;
             continue;
         }
-        if (argv[i][0] == '-') continue;
+        if (argv[i][0] == '-') {
+            /* Global flags the command dispatcher already read. */
+            if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "--json") == 0 ||
+                strncmp(argv[i], "--app-dir=", 10) == 0)
+                continue;
+            if (strcmp(argv[i], "--app-dir") == 0 && i + 1 < argc) { i++; continue; }
+            /* Any other option: a built binary's app takes it (`./tool
+             * --help`); under hull it is an error. It used to be skipped
+             * silently, so a misspelt option did nothing and said nothing. */
+            if (embedded_app_present()) {
+                *out_app_argv = &argv[i];
+                *out_app_argc = argc - i;
+                break;
+            }
+            fprintf(stderr,
+                "hull: unknown option '%s' (or it needs a value) - see "
+                "`hull --help`; options for the app go after --\n",
+                argv[i]);
+            return -2;
+        }
         if (embedded_app_present()) {
             /* `./app world`: this word and the rest are the app's. It used
              * to be taken as an entry path, so a built CLI tool failed on
