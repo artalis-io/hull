@@ -42,4 +42,19 @@ int hl_host_match_any_env(const char *const *patterns, int n, const char *host);
 int hl_host_match_any_env_n(const char *const *patterns, int n,
                             const char *host, size_t host_len);
 
+/*
+ * The host of a network DSN (scheme://[userinfo@]host[:port][/...]), for the
+ * dynamic-connection checks (db.open, kv.open). IPv6 "[::1]" comes back
+ * without brackets. Returns 1 + host in buf, or 0 - and 0 for any DSN a
+ * backend's own parser could read differently, so the check never passes
+ * one host while the connector dials another:
+ *   - more than one '@' before the path (checkers took the last, the
+ *     Postgres/MySQL parsers the first),
+ *   - a '#' anywhere (the Valkey parser does not end the authority there),
+ *   - a host byte outside [A-Za-z0-9.-_] (or hex/':'/'.' in brackets): no
+ *     percent-encoding, which a parser decodes - "%00" truncated the host,
+ *   - a port that is not all digits, or any control byte in the authority.
+ */
+int hl_dsn_host(const char *dsn, char *buf, size_t bufsz);
+
 #endif /* HL_UTILS_HOST_MATCH_H */

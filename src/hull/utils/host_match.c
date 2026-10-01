@@ -123,3 +123,63 @@ int hl_host_match_any_env_n(const char *const *patterns, int n,
     buf[host_len] = '\0';
     return hl_host_match_any_env(patterns, n, buf);
 }
+
+int hl_dsn_host(const char *dsn, char *buf, size_t bufsz)
+{
+    if (!dsn || !buf || bufsz == 0) return 0;
+    const char *sep = strstr(dsn, "://");
+    if (!sep) return 0;
+    if (strchr(dsn, '#')) return 0;
+
+    const char *p = sep + 3;
+    /* Up to the path: a parser that ends the authority only at '/' still
+     * sees every '@' counted here. */
+    const char *pathstart = p + strcspn(p, "/");
+    int ats = 0;
+    for (const char *q = p; q < pathstart; q++) {
+        unsigned char c = (unsigned char)*q;
+        if (c < 0x20 || c == 0x7f) return 0;
+        if (c == '@') ats++;
+    }
+    if (ats > 1) return 0;
+
+    const char *end = p + strcspn(p, "/?");
+    const char *at  = memchr(p, '@', (size_t)(end - p));
+    const char *host = at ? at + 1 : p;
+
+    const char *hend, *rest;
+    if (host < end && *host == '[') {                 /* IPv6 literal */
+        const char *close = memchr(host, ']', (size_t)(end - host));
+        if (!close) return 0;
+        for (const char *q = host + 1; q < close; q++) {
+            char c = *q;
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                  (c >= 'A' && c <= 'F') || c == ':' || c == '.'))
+                return 0;
+        }
+        rest = close + 1;
+        host++;
+        hend = close;
+    } else {
+        hend = host;
+        while (hend < end && *hend != ':') {
+            char c = *hend;
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                  (c >= 'A' && c <= 'Z') || c == '.' || c == '-' || c == '_'))
+                return 0;
+            hend++;
+        }
+        rest = hend;
+    }
+    if (rest < end) {                                 /* ":port", digits */
+        if (*rest != ':' || rest + 1 == end) return 0;
+        for (const char *q = rest + 1; q < end; q++)
+            if (*q < '0' || *q > '9') return 0;
+    }
+
+    size_t n = (size_t)(hend - host);
+    if (n == 0 || n >= bufsz) return 0;
+    memcpy(buf, host, n);
+    buf[n] = '\0';
+    return 1;
+}

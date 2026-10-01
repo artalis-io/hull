@@ -195,6 +195,7 @@ static void lua_push_worker_dispatch_result(lua_State *L, void *driver)
 /* worker.dispatch(fn, ctx) - serialize fn + ctx, submit to thread pool */
 static int lua_worker_dispatch(lua_State *L)
 {
+    hl_lua_check_can_wait(L, "worker.dispatch()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "worker.dispatch not available (no thread pool)");

@@ -7,6 +7,7 @@
 #include "hull/cap/http.h"
 #include "hull/cap/http_async.h"
 #include "hull/shared/async.h"
+#include "internal.h"   /* hl_lua_check_can_wait */
 
 #include <keel/http_server.h>
 
@@ -322,6 +323,7 @@ static void lua_push_async_http_response(lua_State *L, void *driver)
  * Returns { status, body, headers } on resume. */
 static int lua_http_fetch(lua_State *L)
 {
+    hl_lua_check_can_wait(L, "http.fetch()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.http_cfg)
         return luaL_error(L, "http not configured (no hosts in manifest)");

@@ -279,8 +279,10 @@ static void lua_dispatch_work_fn(void *ud)
     lua_State *L = wctx->L;
 
     /* Load the bytecode */
-    int rc = luaL_loadbuffer(L, (const char *)op->bytecode,
-                              op->bytecode_len, "dispatch");
+    /* Binary: lua_worker_dispatch dumped this from a function value
+     * (luaL_checktype LUA_TFUNCTION) - never bytes the app supplied. */
+    int rc = luaL_loadbufferx(L, (const char *)op->bytecode,
+                              op->bytecode_len, "dispatch", "b");
     if (rc != LUA_OK) {
         op->error = 1;
         const char *msg = lua_tostring(L, -1);

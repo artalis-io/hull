@@ -876,9 +876,11 @@ static int hl_lua_require(lua_State *L)
                  * macOS $TMPDIR. Falls back to the bare path if it does not
                  * fit, which is only ever the status quo. */
                 char chunkbuf[HL_MODULE_PATH_MAX + 1];
-                int load_ok = luaL_loadbuffer(
+                /* Text only: an app file holding bytecode is refused. */
+                int load_ok = luaL_loadbufferx(
                     L, buf, nread,
-                    hl_lua_chunkname(chunkbuf, sizeof chunkbuf, path)) == LUA_OK;
+                    hl_lua_chunkname(chunkbuf, sizeof chunkbuf, path),
+                    "t") == LUA_OK;
 
                 /* Reclaim file buffer - Lua owns the bytecode now */
                 lua->scratch->used = arena_saved;

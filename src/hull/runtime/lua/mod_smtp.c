@@ -9,6 +9,7 @@
 #include "hull/cap/smtp_async.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
+#include "internal.h"   /* hl_lua_check_can_wait */
 
 #include <sh_arena.h>
 #include <stdlib.h>
@@ -202,6 +203,8 @@ static int lua_smtp_send(lua_State *L)
         hl_smtp_audit_denied(&msg);
         return lua_smtp_fail(L, "host_not_allowed");
     }
+
+    hl_lua_check_can_wait(L, "smtp.send()");   /* before anything is armed */
 
     /* Deep-copy the message into an owned op (crosses to the worker thread). */
     int timeout_ms = lua->base.smtp_cfg->timeout_ms > 0

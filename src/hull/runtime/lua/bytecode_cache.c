@@ -151,28 +151,32 @@ int hl_lua_load_cached(lua_State *L,
                        const char *src, size_t src_len,
                        const char *chunkname)
 {
+    /* `src` is source, loaded as text only ("t"): a binary chunk is
+     * unverified bytecode, which crafted corrupts the VM. Only a cache hit -
+     * this runtime's own dump - is loaded as binary. */
     /* Fast bail: cache disabled, source too tiny to bother.
      * Kind string is "lua_bytecode" so the env-var builder
      * produces HULL_NO_LUA_BYTECODE_CACHE - symmetric with
      * HULL_NO_JS_BYTECODE_CACHE on the JS side. */
     if (!src || src_len < 256 ||
         hl_hull_cache_disabled("lua_bytecode")) {
-        return luaL_loadbuffer(L, src, src_len, chunkname);
+        return luaL_loadbufferx(L, src, src_len, chunkname, "t");
     }
 
     HlBlobStore *store = get_store();
-    if (!store) return luaL_loadbuffer(L, src, src_len, chunkname);
+    if (!store) return luaL_loadbufferx(L, src, src_len, chunkname, "t");
 
     char key[HL_BLOB_STORE_ID_BUF_SIZE];
     if (compute_key(chunkname, src, src_len, key) != 0) {
-        return luaL_loadbuffer(L, src, src_len, chunkname);
+        return luaL_loadbufferx(L, src, src_len, chunkname, "t");
     }
 
     /* ── Cache hit. ─────────────────────────────────────────────── */
     uint8_t *bc      = NULL;
     size_t   bc_len  = 0;
     if (hl_blob_store_get(store, key, /*track_access=*/1, &bc, &bc_len) == 0) {
-        int rc = luaL_loadbuffer(L, (const char *)bc, bc_len, chunkname);
+        /* Binary: the cache holds what this runtime dumped. */
+        int rc = luaL_loadbufferx(L, (const char *)bc, bc_len, chunkname, "b");
         free(bc);  /* allocator was NULL → libc malloc */
         if (rc == LUA_OK) return LUA_OK;
         /* Stale / corrupt entry - pop error, evict, fall through. */
@@ -181,7 +185,7 @@ int hl_lua_load_cached(lua_State *L,
     }
 
     /* ── Cache miss: compile + persist. ─────────────────────────── */
-    int rc = luaL_loadbuffer(L, src, src_len, chunkname);
+    int rc = luaL_loadbufferx(L, src, src_len, chunkname, "t");
     if (rc != LUA_OK) return rc;     /* parse error on stack */
 
     /* lua_dump with strip=0 - keep source-name + line numbers so

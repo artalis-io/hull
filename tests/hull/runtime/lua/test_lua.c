@@ -52,6 +52,8 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include "hull/shared/async_backend.h"
+#include "hull/worker_db.h"   /* hl_deep_copy_params */
+#include "hull/utils/alloc.h"   /* hl_free_const */
 #include "../../test_tmpdir.h"
 #include "../../../../src/hull/runtime/lua/internal.h"
 
@@ -6075,7 +6077,7 @@ TASK_CASE(map_default_limit_is_16,
 
 TASK_CASE(map_of_nothing_is_empty,
     "local r = hull.map({}, function() error('never') end)\n"
-    "check(r.n == 0 and next(r, 'n') == nil and r[1] == nil, 'not empty')\n")
+    "check(next(r) == nil, 'not empty')\n")
 
 TASK_CASE(a_failure_waits_for_the_rest_and_reports_all,
     "local finished = 0\n"
@@ -6146,7 +6148,8 @@ TASK_CASE(bad_arguments_are_refused,
 
 TASK_CASE(map_honours_n_and_reports_it,
     "local r = hull.map(table.pack(1, nil, 3), function(x) return x end)\n"
-    "check(r.n == 3 and r[1] == 1 and r[2] == nil and r[3] == 3, 'n '..tostring(r.n))\n"
+    "check(r[1] == 1 and r[2] == nil and r[3] == 3, 'items.n')\n"
+    "check(r.n == nil, 'results carry no n: they encode as a JSON list')\n"
     "check(#hull.map({1, 2}, function(x) return x end, { limit = 2.0 }) == 2, 'integral float limit')\n"
     "check(not pcall(hull.map, {1}, function() end, { limit = 1.5 }), 'fractional limit')\n"
     "check(not pcall(hull.map, {1}, function() end, 5), 'opts not a table')\n"
@@ -6313,6 +6316,47 @@ UTEST(lua_async, a_timer_fires_while_a_task_waits)
     cleanup_lua();
     be->tick(actx, 0);
     be->free(actx);
+}
+
+/* Bytecode is never loaded from app reach: the template bridge, which app
+ * code can require, compiles text only. A binary chunk is unverified Lua
+ * bytecode - crafted, it corrupts the VM, out of the sandbox. */
+UTEST(lua_runtime, template_bridge_refuses_bytecode)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    int ok = eval_int(
+        "(function() "
+        "  local tb = require('hull._template') "
+        "  local good = pcall(tb._compile, 'return function() return 1 end') "
+        "  local bad, err = pcall(tb._compile, string.dump(function() return 7 end)) "
+        "  if not good then return 1 end "
+        "  if bad then return 2 end "
+        "  if not tostring(err):find('binary chunk', 1, true) then return 3 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(ok, 0);
+    cleanup_lua();
+}
+
+/* db.async copies every TEXT/BLOB parameter, empty ones too: the op frees
+ * whatever it holds, and an uncopied "" was the caller's string. */
+UTEST(lua_runtime, db_async_copies_empty_params)
+{
+    static const char empty[] = "";
+    HlValue v[2];
+    memset(v, 0, sizeof v);
+    v[0].type = HL_TYPE_TEXT; v[0].s = empty; v[0].len = 0;
+    v[1].type = HL_TYPE_BLOB; v[1].s = empty; v[1].len = 0;
+    HlValue *c = hl_deep_copy_params(v, 2);
+    ASSERT_TRUE(c != NULL);
+    for (int i = 0; i < 2; i++) {
+        EXPECT_TRUE(c[i].s != NULL);
+        EXPECT_TRUE(c[i].s != empty);
+        EXPECT_EQ(c[i].len, (size_t)0);
+        hl_free_const(c[i].s);
+    }
+    free(c);
 }
 
 /* Error values reach the logs as text: a table with __tostring (hull.gather's

@@ -294,9 +294,12 @@ void hl_lua_async_cont_set_timer(HlAsyncCont *cont, void *timer)
  * after the op is armed. So check first. Not yieldable: module load (require
  * runs under lua_pcall), a C callback such as string.gsub or table.sort.
  * Yieldable but not active_co: a coroutine the app created itself. */
-static int check_can_wait(lua_State *L, HlLua *lua, const char *what)
+int hl_lua_check_can_wait(lua_State *L, const char *what)
 {
-    if (!lua_isyieldable(L) || L != lua->active_co)
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (!lua || !lua_isyieldable(L) || L != lua->active_co)
         return luaL_error(L, "%s can only wait in a handler, a task or "
                           "app.main - not while a module loads, inside a C "
                           "callback such as string.gsub or table.sort, or in "
@@ -323,7 +326,7 @@ static int lua_hull_sleep(lua_State *L)
 
     if (!lua || !lua->base.async_ctx)
         return luaL_error(L, "hull.sleep() requires an active event loop");
-    check_can_wait(L, lua, "hull.sleep()");
+    hl_lua_check_can_wait(L, "hull.sleep()");
 
     KlHttpServer *server = lua->server;
     KlHttpConn *conn = lua->active_conn;
@@ -537,7 +540,7 @@ static int lua_hull_park(lua_State *L)
     HlLua *lua = s->lua;
     if (!lua->base.async_ctx)
         return luaL_error(L, "hull._park: requires an active event loop");
-    check_can_wait(L, lua, "task:wait()");
+    hl_lua_check_can_wait(L, "task:wait()");
 
     HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx,
                                           lua->base.alloc);

@@ -391,6 +391,7 @@ static int lua_tui_poll(lua_State *L)
 
     if (timeout_ms < 0) timeout_ms = INT_MAX;
 
+    hl_lua_check_can_wait(L, "tui.poll()");   /* before anything is armed */
     TuiPollOp *op = calloc(1, sizeof *op);
     if (!op) return luaL_error(L, "tui.poll: out of memory");
     op->lua          = lua;

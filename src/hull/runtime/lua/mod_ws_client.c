@@ -255,11 +255,12 @@ static int lua_ws_connect(lua_State *L)
         return luaL_error(L, "invalid WebSocket URL");
 
 #ifdef HL_ENABLE_HTTP_CLIENT
-    if (lua->base.http_cfg) {
-        if (hl_http_check_host(lua->base.http_cfg, parsed.host,
-                                parsed.host_len) != 0)
-            return luaL_error(L, "host not in allowlist");
-    }
+    /* No http config means an empty manifest.hosts: nothing is allowed. This
+     * used to skip the check, so ws.connect reached any host. */
+    if (!lua->base.http_cfg ||
+        hl_http_check_host(lua->base.http_cfg, parsed.host,
+                           parsed.host_len) != 0)
+        return luaL_error(L, "host not in allowlist");
 #else
     return luaL_error(L,
         "ws.connect requires HL_ENABLE_HTTP_CLIENT (build-time)");

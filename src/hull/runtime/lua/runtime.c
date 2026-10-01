@@ -360,8 +360,10 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
     }
     lua_pop(lua->L, 1); /* pop __hull_modules (or non-table) */
 
-    /* Load and execute from filesystem (development mode) */
-    if (luaL_dofile(lua->L, filename) != LUA_OK) {
+    /* Load and execute from filesystem (development mode). Text only: an
+     * entry file holding bytecode is refused (luaL_dofile accepts both). */
+    if (luaL_loadfilex(lua->L, filename, "t") != LUA_OK ||
+        lua_pcall(lua->L, 0, LUA_MULTRET, 0) != LUA_OK) {
         hl_lua_dump_error(lua);
         return -1;
     }
@@ -608,7 +610,8 @@ static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
 #ifdef HL_ENABLE_HTTP_SERVER
     HlLua *lua = (HlLua *)rt;
     hl_lua_test_clear(lua->L);
-    if (luaL_dofile(lua->L, file_path) != LUA_OK) {
+    if (luaL_loadfilex(lua->L, file_path, "t") != LUA_OK ||   /* text only */
+        lua_pcall(lua->L, 0, LUA_MULTRET, 0) != LUA_OK) {
         const char *err = lua_tostring(lua->L, -1);
         if (load_err) *load_err = err ? err : "unknown";
         lua_pop(lua->L, 1);

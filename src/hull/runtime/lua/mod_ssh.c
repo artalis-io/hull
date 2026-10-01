@@ -363,6 +363,7 @@ static int ssh_read_step(lua_State *L, HlLuaSshStream *o)
     if (n != HL_NET_E_AGAIN)
         return push_net_err(L, (int)n);
 
+    hl_lua_check_can_wait(L, "ssh read");
     HlLua *lua = get_hl_lua(L);
     if (!lua || ssh_park(lua, o) != 0)
         return push_err(L, "cannot wait for data");
@@ -420,6 +421,7 @@ static int ssh_write_step(lua_State *L, HlLuaSshStream *o, int ud_idx)
     if (rc != HL_NET_E_AGAIN)
         return push_net_err(L, rc);
 
+    hl_lua_check_can_wait(L, "ssh write");
     HlLua *lua = get_hl_lua(L);
     if (!lua || ssh_park(lua, o) != 0)
         return push_err(L, "cannot wait for send capacity");
@@ -457,6 +459,7 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o)
     if (rc == HL_NET_OK) return 1;             /* the handle is on the stack */
 
     if (rc == HL_NET_E_AGAIN) {
+        hl_lua_check_can_wait(L, "ssh connect");
         HlLua *lua = get_hl_lua(L);
         if (!lua || ssh_park(lua, o) != 0)
             return push_err(L, "cannot wait for the connection");

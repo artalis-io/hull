@@ -463,8 +463,11 @@ HlValue *hl_deep_copy_params(const HlValue *src, int n)
     if (!dst) return NULL;
     for (int i = 0; i < n; i++) {
         dst[i] = src[i];
+        /* Empty ones too: hl_worker_db_op_free frees every non-NULL `s`, so
+         * a "" left pointing at the caller's string was freed from under
+         * it - inside a Lua string, or a double free in JS. */
         if ((src[i].type == HL_TYPE_TEXT || src[i].type == HL_TYPE_BLOB) &&
-            src[i].s && src[i].len > 0) {
+            src[i].s) {
             char *buf = malloc(src[i].len + 1);
             if (!buf) {
                 /* Clean up already-copied strings */

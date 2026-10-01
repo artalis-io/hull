@@ -996,9 +996,9 @@ rest running). The bounded fan-out is
   one's message. There is no fail-fast: nothing in flight can be abandoned
   halfway, and its own timeout already bounds it. A Lua function that raised
   no value (`error()`) appears in `errors` as `"(error with no value)"`.
-- **Items and results (Lua):** `map` takes `items[1..items.n]` when the list
-  has an `n` (as `table.pack` makes), else `items[1..#items]`; `results.n` is
-  that count, since results may hold nils.
+- **Items (Lua):** `map` takes `items[1..items.n]` when the list has an `n`
+  (as `table.pack` makes), else `items[1..#items]`. `results` is a plain
+  list (it encodes as JSON); where `fn` returned nil it has a hole.
 - **Where you can wait:** `task:wait()`, `gather`, `map` and `hull.sleep` wait
   only in a handler, a task, or `app.main` - not while a module loads, inside a
   C callback such as `string.gsub` or `table.sort`, or in a coroutine the app

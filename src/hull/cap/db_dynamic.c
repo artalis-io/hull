@@ -52,37 +52,6 @@ static int scheme_is_file(const char *scheme)
  * (scheme://[user[:pass]@]host[:port]/...). IPv6 literals "[::1]" are returned
  * without the brackets (so host_match's inet_pton sees a bare address). Returns
  * 1 + host in @p buf, or 0 if no host is present. */
-static int dsn_host(const char *dsn, char *buf, size_t bufsz)
-{
-    const char *sep = strstr(dsn, "://");
-    if (!sep) return 0;
-    const char *p   = sep + 3;
-    const char *end = p + strcspn(p, "/?#");   /* authority ends at path/query */
-
-    const char *at = NULL;                     /* last '@' delimits userinfo */
-    for (const char *q = p; q < end; q++)
-        if (*q == '@') at = q;
-    const char *host = at ? at + 1 : p;
-
-    const char *hend;
-    if (host < end && *host == '[') {          /* IPv6 literal */
-        const char *close = memchr(host, ']', (size_t)(end - host));
-        if (!close) return 0;
-        host++;
-        hend = close;
-    } else {
-        hend = host;
-        while (hend < end && *hend != ':')     /* stop at :port */
-            hend++;
-    }
-
-    size_t n = (size_t)(hend - host);
-    if (n == 0 || n >= bufsz) return 0;
-    memcpy(buf, host, n);
-    buf[n] = '\0';
-    return 1;
-}
-
 /* Match @p host against the policy's host patterns (exact / glob / CIDR),
  * resolving "$VAR" entries from the environment. Same matcher http/smtp use. */
 static int host_allowed(const HlManifestDbDynamic *policy, const char *host)
@@ -154,8 +123,8 @@ HlDbHandle *hl_db_dynamic_open(const char *dsn,
     } else {
         /* Network backend: host must match databases.dynamic.hosts. */
         char host[256];
-        if (!dsn_host(dsn, host, sizeof host)) {
-            if (err) *err = "db.open: could not parse host from DSN";
+        if (!hl_dsn_host(dsn, host, sizeof host)) {
+            if (err) *err = "db.open: DSN has no host, or one a backend could parse differently";
             return NULL;
         }
         if (!host_allowed(policy, host)) {

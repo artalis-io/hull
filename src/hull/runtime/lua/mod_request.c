@@ -189,6 +189,7 @@ static int mp_park_and_yield(lua_State *L, HlMpIter *it,
      * dispatch sets lua->active_conn before the handler is entered. If
      * it isn't set we have nothing to park against (e.g. an in-process
      * test harness call). Fail loudly rather than hang. */
+    hl_lua_check_can_wait(L, "req:multipart()");
     KlHttpConn *conn = it->lua->active_conn;
     if (!conn)
         return luaL_error(L,

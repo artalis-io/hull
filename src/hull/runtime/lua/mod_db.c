@@ -684,6 +684,7 @@ static void lua_push_worker_db_result(lua_State *L, void *driver)
 /* Common implementation for db.async.query and db.async.exec */
 static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
 {
+    hl_lua_check_can_wait(L, "db.async");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "db.async not available (no thread pool)");

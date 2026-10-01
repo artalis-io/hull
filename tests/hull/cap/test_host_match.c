@@ -75,4 +75,37 @@ UTEST(host_match, match_any)
     ASSERT_FALSE(hl_host_match_any(pats, 0, "a.example.com"));
 }
 
+/* hl_dsn_host refuses any DSN a backend could parse to a different host than
+ * the check saw. */
+UTEST(host_match, dsn_host_plain)
+{
+    char h[256];
+    ASSERT_EQ(1, hl_dsn_host("postgres://u:p@db.example.com:5432/x", h, sizeof h));
+    ASSERT_STREQ("db.example.com", h);
+    ASSERT_EQ(1, hl_dsn_host("redis://cache.local", h, sizeof h));
+    ASSERT_STREQ("cache.local", h);
+    ASSERT_EQ(1, hl_dsn_host("mysql://[::1]:3306/x", h, sizeof h));
+    ASSERT_STREQ("::1", h);
+    ASSERT_EQ(1, hl_dsn_host("postgres://u%40corp:p@db.example.com/x?sslmode=require", h, sizeof h));
+    ASSERT_STREQ("db.example.com", h);
+}
+
+UTEST(host_match, dsn_host_refuses_ambiguity)
+{
+    char h[256];
+    /* Two '@': the checkers took the last, Postgres/MySQL take the first. */
+    EXPECT_EQ(0, hl_dsn_host("postgres://u@169.254.169.254%00@db.example.com/x", h, sizeof h));
+    EXPECT_EQ(0, hl_dsn_host("postgres://u@evil.com@db.example.com/x", h, sizeof h));
+    /* A '#': the Valkey parser does not end the authority there. */
+    EXPECT_EQ(0, hl_dsn_host("valkey://cache.internal#@10.0.0.9:6379", h, sizeof h));
+    /* Percent-encoding or odd bytes in the host. */
+    EXPECT_EQ(0, hl_dsn_host("postgres://evil.com%00.rds.amazonaws.com/x", h, sizeof h));
+    EXPECT_EQ(0, hl_dsn_host("postgres://db.example.com\t/x", h, sizeof h));
+    /* A port that is not digits; no host. */
+    EXPECT_EQ(0, hl_dsn_host("redis://cache.local:63x9", h, sizeof h));
+    EXPECT_EQ(0, hl_dsn_host("redis://cache.local:", h, sizeof h));
+    EXPECT_EQ(0, hl_dsn_host("redis:///0", h, sizeof h));
+    EXPECT_EQ(0, hl_dsn_host("not a dsn", h, sizeof h));
+}
+
 UTEST_MAIN()
