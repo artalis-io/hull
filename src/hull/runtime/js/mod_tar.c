@@ -34,16 +34,19 @@ static int js_parse_collect(const HlTarEntry *e, void *vctx)
     struct js_parse_ctx *c = (struct js_parse_ctx *)vctx;
     JSContext *ctx = c->ctx;
 
+    /* Defined, never set: a set runs any setter on Object.prototype /
+     * Array.prototype - app code, in the middle of a parse whose source
+     * bytes it could close or unmap. */
     JSValue o = JS_NewObject(ctx);
     if (JS_IsException(o)) { c->oom = 1; return -1; }
-    JS_SetPropertyStr(ctx, o, "name", JS_NewString(ctx, e->name));
-    JS_SetPropertyStr(ctx, o, "data",
+    JS_DefinePropertyValueStr(ctx, o, "name", JS_NewString(ctx, e->name), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, o, "data",
                       JS_NewArrayBufferCopy(ctx, e->data ? e->data : (const uint8_t *)"",
-                                            e->size));
-    JS_SetPropertyStr(ctx, o, "size", JS_NewInt64(ctx, (int64_t)e->size));
-    JS_SetPropertyStr(ctx, o, "mode", JS_NewInt32(ctx, (int32_t)e->mode));
-    JS_SetPropertyStr(ctx, o, "isDir", JS_NewBool(ctx, e->is_dir));
-    JS_SetPropertyUint32(ctx, c->arr, c->n++, o);
+                                            e->size), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, o, "size", JS_NewInt64(ctx, (int64_t)e->size), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, o, "mode", JS_NewInt32(ctx, (int32_t)e->mode), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, o, "isDir", JS_NewBool(ctx, e->is_dir), JS_PROP_C_W_E);
+    JS_DefinePropertyValueUint32(ctx, c->arr, c->n++, o, JS_PROP_C_W_E);
     return 0;
 }
 
@@ -92,10 +95,12 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
     HlBufferView *views = n ? (HlBufferView *)calloc((size_t)n, sizeof(HlBufferView)) : NULL;
     const char **dstrs = n ? (const char **)calloc((size_t)n, sizeof(char *)) : NULL;
     int *dfree = n ? (int *)calloc((size_t)n, sizeof(int)) : NULL;
-    if (n && (!ents || !names || !views || !dstrs || !dfree)) {
-        free(ents); free(names); free(views); free(dstrs); free(dfree);
+    JSValue *datas = n ? (JSValue *)malloc((size_t)n * sizeof(JSValue)) : NULL;
+    if (n && (!ents || !names || !views || !dstrs || !dfree || !datas)) {
+        free(ents); free(names); free(views); free(dstrs); free(dfree); free(datas);
         return JS_ThrowOutOfMemory(ctx);
     }
+    for (int64_t j = 0; j < n; j++) datas[j] = JS_UNDEFINED;
 
     const char *err = NULL;
     int64_t i;
@@ -119,19 +124,25 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, mv);
         ents[i].mode = (unsigned)mode;
 
-        if (!ents[i].is_dir) {
-            JSValue data = JS_GetPropertyStr(ctx, ent, "data");
-            if (!JS_IsUndefined(data) && !JS_IsNull(data)) {
-                if (!js_get_buffer(ctx, data, &views[i], &dstrs[i], &dfree[i])) {
-                    JS_FreeValue(ctx, data); JS_FreeValue(ctx, ent);
-                    err = "entry 'data' must be a buffer"; break;
-                }
-                ents[i].data = (const unsigned char *)views[i].data;
-                ents[i].size = views[i].len;
-            }
-            JS_FreeValue(ctx, data);
-        }
+        if (!ents[i].is_dir)
+            datas[i] = JS_GetPropertyStr(ctx, ent, "data");   /* held */
         JS_FreeValue(ctx, ent);
+    }
+
+    /* Second pass, with no app code left to run: take each data view only
+     * now, from a value held since the first pass. Taken during that pass,
+     * a later entry's getter could free (a fresh ArrayBuffer, released at
+     * once) or close (a WasmBuffer / MappedBuffer) what an earlier view
+     * named, before hl_tar_create read it. */
+    for (int64_t j = 0; !err && j < i; j++) {
+        if (ents[j].is_dir || JS_IsUndefined(datas[j]) || JS_IsNull(datas[j]))
+            continue;
+        if (!js_get_buffer(ctx, datas[j], &views[j], &dstrs[j], &dfree[j])) {
+            err = "entry 'data' must be a buffer";
+            break;
+        }
+        ents[j].data = (const unsigned char *)views[j].data;
+        ents[j].size = views[j].len;
     }
 
     unsigned char *out = NULL;
@@ -143,8 +154,9 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
     for (int64_t j = 0; j < n; j++) {
         if (names && names[j]) JS_FreeCString(ctx, names[j]);
         if (dfree && dfree[j] && dstrs[j]) JS_FreeCString(ctx, dstrs[j]);
+        if (datas) JS_FreeValue(ctx, datas[j]);
     }
-    free(ents); free(names); free(views); free(dstrs); free(dfree);
+    free(ents); free(names); free(views); free(dstrs); free(dfree); free(datas);
 
     if (rc != 0) {
         return err ? JS_ThrowTypeError(ctx, "tar.create: %s", err)

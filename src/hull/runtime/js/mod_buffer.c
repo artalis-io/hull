@@ -104,7 +104,12 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
             JS_FreeValue(ctx, JS_GetException(ctx));
         }
     }
-    /* String (caller must free) */
+    /* String (caller must free). Primitives only: converting an object runs
+     * its toString - app code, which a binding holding a view of another
+     * argument (taken just before) cannot allow: it could close or free
+     * what that view names. An object that is no buffer is not one. */
+    if (JS_IsObject(val))
+        return 0;
     size_t slen;
     const char *s = JS_ToCStringLen(ctx, &slen, val);
     if (s) {

@@ -35,6 +35,12 @@ static const JSClassDef js_kv_conn_class = {
     .finalizer = js_kv_conn_finalizer,
 };
 
+/* The connection behind `this`. Methods call it AFTER converting their
+ * arguments, right before the cap call: a conversion can run app code
+ * (toString, valueOf, a getter), and app code can close() this connection,
+ * which frees it - a pointer resolved first then named freed memory. Scalars
+ * are converted before buffers for the same reason: valueOf could close a
+ * WasmBuffer whose bytes a view already pointed into. */
 static HlKvConn *kv_self(JSContext *ctx, JSValueConst this_val)
 {
     HlKvConn *c = (HlKvConn *)JS_GetOpaque(this_val, hull_kv_conn_class_id);
@@ -71,9 +77,10 @@ static int64_t kv_opt_ttl_ms(JSContext *ctx, int argc, JSValueConst *argv, int i
 /* conn.get(keyBuf) -> ArrayBuffer | null (COPY of the borrowed value). */
 static JSValue js_kv_get(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    HlKvConn *c = kv_self(ctx, this_val); if (!c) return JS_EXCEPTION;
     HlBufferView kv; const char *ks; int kf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "key", &kv, &ks, &kf)) return JS_EXCEPTION;
+    HlKvConn *c = kv_self(ctx, this_val);
+    if (!c) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     const uint8_t *val; size_t vlen; int found = 0;
     int rc = hl_cap_kv_get(c, (const uint8_t *)kv.data, kv.len, &val, &vlen, &found);
     kv_arg_free(ctx, ks, kf);
@@ -85,11 +92,12 @@ static JSValue js_kv_get(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 /* conn.set(keyBuf, valBuf, ttlMs?) -> true. */
 static JSValue js_kv_set(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    HlKvConn *c = kv_self(ctx, this_val); if (!c) return JS_EXCEPTION;
+    int64_t ttl = kv_opt_ttl_ms(ctx, argc, argv, 2);
     HlBufferView kb, vb; const char *ks, *vs; int kf, vf;
     if (argc < 2 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
     if (!kv_arg(ctx, argv[1], "value", &vb, &vs, &vf)) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
-    int64_t ttl = kv_opt_ttl_ms(ctx, argc, argv, 2);
+    HlKvConn *c = kv_self(ctx, this_val);
+    if (!c) { kv_arg_free(ctx, ks, kf); kv_arg_free(ctx, vs, vf); return JS_EXCEPTION; }
     int rc = hl_cap_kv_set(c, (const uint8_t *)kb.data, kb.len,
                            (const uint8_t *)vb.data, vb.len, ttl);
     kv_arg_free(ctx, ks, kf); kv_arg_free(ctx, vs, vf);
@@ -100,9 +108,10 @@ static JSValue js_kv_set(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 /* conn.del(keyBuf) -> bool. */
 static JSValue js_kv_del(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    HlKvConn *c = kv_self(ctx, this_val); if (!c) return JS_EXCEPTION;
     HlBufferView kb; const char *ks; int kf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
+    HlKvConn *c = kv_self(ctx, this_val);
+    if (!c) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     int deleted = 0;
     int rc = hl_cap_kv_del(c, (const uint8_t *)kb.data, kb.len, &deleted);
     kv_arg_free(ctx, ks, kf);
@@ -113,9 +122,10 @@ static JSValue js_kv_del(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 /* conn.has(keyBuf) -> bool. */
 static JSValue js_kv_has(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    HlKvConn *c = kv_self(ctx, this_val); if (!c) return JS_EXCEPTION;
     HlBufferView kb; const char *ks; int kf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
+    HlKvConn *c = kv_self(ctx, this_val);
+    if (!c) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     int present = 0;
     int rc = hl_cap_kv_exists(c, (const uint8_t *)kb.data, kb.len, &present);
     kv_arg_free(ctx, ks, kf);
@@ -126,11 +136,14 @@ static JSValue js_kv_has(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 /* conn.incr(keyBuf, by, ttlMs?) -> number. */
 static JSValue js_kv_incr(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    HlKvConn *c = kv_self(ctx, this_val); if (!c) return JS_EXCEPTION;
-    HlBufferView kb; const char *ks; int kf;
-    if (argc < 2 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
-    int64_t by = 0; JS_ToInt64(ctx, &by, argv[1]);
+    if (argc < 2) return JS_ThrowTypeError(ctx, "kv: incr requires (key, by [, ttlMs])");
+    int64_t by = 0;
+    if (JS_ToInt64(ctx, &by, argv[1]) < 0) return JS_EXCEPTION;
     int64_t ttl = kv_opt_ttl_ms(ctx, argc, argv, 2);
+    HlBufferView kb; const char *ks; int kf;
+    if (!kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
+    HlKvConn *c = kv_self(ctx, this_val);
+    if (!c) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     int64_t nv = 0;
     int rc = hl_cap_kv_incr(c, (const uint8_t *)kb.data, kb.len, by, ttl, &nv);
     kv_arg_free(ctx, ks, kf);
@@ -142,7 +155,7 @@ static JSValue js_kv_incr(JSContext *ctx, JSValueConst this_val, int argc, JSVal
  * 2 conflict. A transport ERROR throws. */
 static JSValue js_kv_cas(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    HlKvConn *c = kv_self(ctx, this_val); if (!c) return JS_EXCEPTION;
+    int64_t ttl = kv_opt_ttl_ms(ctx, argc, argv, 3);
     HlBufferView kb, eb, nb; const char *ks, *es = NULL, *ns; int kf, ef = 0, nf;
     if (argc < 3 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
     int has_expected = !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1]);
@@ -153,7 +166,12 @@ static JSValue js_kv_cas(JSContext *ctx, JSValueConst this_val, int argc, JSValu
         kv_arg_free(ctx, ks, kf); if (has_expected) kv_arg_free(ctx, es, ef);
         return JS_EXCEPTION;
     }
-    int64_t ttl = kv_opt_ttl_ms(ctx, argc, argv, 3);
+    HlKvConn *c = kv_self(ctx, this_val);
+    if (!c) {
+        kv_arg_free(ctx, ks, kf); if (has_expected) kv_arg_free(ctx, es, ef);
+        kv_arg_free(ctx, ns, nf);
+        return JS_EXCEPTION;
+    }
     HlKvCasResult r = hl_cap_kv_cas(c, (const uint8_t *)kb.data, kb.len,
                                     has_expected ? (const uint8_t *)eb.data : NULL,
                                     has_expected ? eb.len : 0, has_expected,
@@ -166,9 +184,10 @@ static JSValue js_kv_cas(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 /* conn.clear(prefixBuf) -> number removed. */
 static JSValue js_kv_clear(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    HlKvConn *c = kv_self(ctx, this_val); if (!c) return JS_EXCEPTION;
     HlBufferView pb; const char *ps; int pf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "prefix", &pb, &ps, &pf)) return JS_EXCEPTION;
+    HlKvConn *c = kv_self(ctx, this_val);
+    if (!c) { kv_arg_free(ctx, ps, pf); return JS_EXCEPTION; }
     int64_t removed = 0;
     int rc = hl_cap_kv_clear(c, (const uint8_t *)pb.data, pb.len, &removed);
     kv_arg_free(ctx, ps, pf);
@@ -184,18 +203,21 @@ static int kv_scan_js_cb(void *ctx_, const uint8_t *key, size_t klen)
     struct kv_scan_js *s = (struct kv_scan_js *)ctx_;
     JSValue ab = JS_NewArrayBufferCopy(s->ctx, key, klen);   /* COPY inside cb */
     if (JS_IsException(ab)) { s->err = 1; return 1; }
-    JS_SetPropertyUint32(s->ctx, s->arr, s->n++, ab);
+    JS_DefinePropertyValueUint32(s->ctx, s->arr, s->n++, ab, JS_PROP_C_W_E);
     return 0;
 }
 
 /* conn.scan(prefixBuf, limit?) -> Array<ArrayBuffer> (prefix-stripped keys). */
 static JSValue js_kv_scan(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    HlKvConn *c = kv_self(ctx, this_val); if (!c) return JS_EXCEPTION;
+    int64_t limit = 0;
+    if (argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) &&
+        JS_ToInt64(ctx, &limit, argv[1]) < 0)
+        return JS_EXCEPTION;
     HlBufferView pb; const char *ps; int pf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "prefix", &pb, &ps, &pf)) return JS_EXCEPTION;
-    int64_t limit = 0;
-    if (argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) JS_ToInt64(ctx, &limit, argv[1]);
+    HlKvConn *c = kv_self(ctx, this_val);
+    if (!c) { kv_arg_free(ctx, ps, pf); return JS_EXCEPTION; }
     struct kv_scan_js s = { ctx, JS_NewArray(ctx), 0, 0 };
     int rc = hl_cap_kv_scan(c, (const uint8_t *)pb.data, pb.len, (size_t)limit, kv_scan_js_cb, &s);
     kv_arg_free(ctx, ps, pf);

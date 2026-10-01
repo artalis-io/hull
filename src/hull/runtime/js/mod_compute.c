@@ -143,10 +143,14 @@ static void js_wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
 }
 
 /* Free the OWNED (JS_ToCString) name copies in reqs[0..n). Idempotent. */
-static void js_free_span_names(JSContext *ctx, HlWasmSpanReq *reqs, int n)
+static void js_free_span_names(JSContext *ctx, HlWasmSpanReq *reqs,
+                               JSValue *holders, int n)
 {
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
         if (reqs[i].name) { JS_FreeCString(ctx, reqs[i].name); reqs[i].name = NULL; }
+        JS_FreeValue(ctx, holders[i]);
+        holders[i] = JS_UNDEFINED;
+    }
 }
 
 /* Parse opts.spans = [{name, buffer:<MappedBuffer>}, ...] into reqs[] (cap
@@ -161,7 +165,12 @@ static void js_free_span_names(JSContext *ctx, HlWasmSpanReq *reqs, int n)
  * validating). reqs[i].buf is a borrowed MappedBuffer pointer. On -1 every name
  * allocated so far is freed. An ASYNC caller must deep-copy names into non-JS
  * storage and pin each buffer before submit (item D); it must NOT retain these. */
-static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs)
+/* holders[i] keeps span i's MappedBuffer object referenced until
+ * js_free_span_names: `buffer` may be a getter returning a fresh mapping,
+ * freed (unmapped) the moment its value is released - reqs[i].buf then
+ * named freed memory for the rest of the parse and the call. */
+static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs,
+                          JSValue *holders)
 {
     JSValue arr = JS_GetPropertyStr(ctx, opts, "spans");
     if (JS_IsUndefined(arr) || JS_IsNull(arr)) { JS_FreeValue(ctx, arr); return 0; }
@@ -213,21 +222,23 @@ static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs
         }
         JSValue bv = JS_GetPropertyStr(ctx, entry, "buffer");
         HlMappedBuffer *mb = JS_GetOpaque2(ctx, bv, js_mmap_class_id);
-        JS_FreeValue(ctx, bv);
         JS_FreeValue(ctx, entry);
         if (!mb) {
+            JS_FreeValue(ctx, bv);
             JS_FreeCString(ctx, nm);
             /* JS_GetOpaque2 set a class exception; replace with a clearer message. */
             JS_ThrowTypeError(ctx, "compute: spans[%u].buffer must be a MappedBuffer", i);
             goto fail;
         }
         if (mb->closed) {
+            JS_FreeValue(ctx, bv);
             JS_FreeCString(ctx, nm);
             JS_ThrowTypeError(ctx, "compute: spans[%u].buffer is closed", i);
             goto fail;
         }
         reqs[count].name = nm;   /* owned */
         reqs[count].buf = mb;
+        holders[count] = bv;     /* held: released by js_free_span_names */
         count++;
     }
     JS_FreeValue(ctx, arr);
@@ -235,7 +246,7 @@ static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs
 
 fail:
     JS_FreeValue(ctx, arr);
-    js_free_span_names(ctx, reqs, count);
+    js_free_span_names(ctx, reqs, holders, count);
     return -1;
 }
 
@@ -253,36 +264,6 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name)
         return JS_EXCEPTION;
-
-    /* Input can be a string, ArrayBuffer, WasmBuffer, or MappedBuffer */
-    size_t input_len = 0;
-    const uint8_t *input = NULL;
-    int input_is_string = 0;
-
-    /* Check for WasmBuffer first */
-    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[1], js_wasm_buf_class_id);
-    if (wbuf_in && !wbuf_in->closed) {
-        input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
-        input_len = hl_wasm_buffer_len(wbuf_in);
-    } else {
-        /* Check for MappedBuffer */
-        HlMappedBuffer *mmap_buf = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
-        if (mmap_buf && !mmap_buf->closed) {
-            input = (const uint8_t *)mmap_buf->addr;
-            input_len = mmap_buf->len;
-        } else {
-            input = JS_GetArrayBuffer(ctx, &input_len, argv[1]);
-            if (!input) {
-                /* Try as string */
-                input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
-                if (!input) {
-                    JS_FreeCString(ctx, name);
-                    return JS_ThrowTypeError(ctx, "compute.call: input must be a string, ArrayBuffer, WasmBuffer, or MappedBuffer");
-                }
-                input_is_string = 1;
-            }
-        }
-    }
 
     HlWasmCallOpts opts = {0};
     int want_buffer = 0;
@@ -332,14 +313,49 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
      * outlive the call and are freed right after it (js_free_span_names, below).
      * Empty/absent -> a plain call (span_count 0). */
     HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+    JSValue span_holders[HL_WASM_MAX_SPANS];
     int span_count = 0;
     if (argc > 2 && JS_IsObject(argv[2])) {
-        span_count = js_parse_spans(ctx, argv[2], span_reqs);
+        span_count = js_parse_spans(ctx, argv[2], span_reqs, span_holders);
         if (span_count < 0) return JS_EXCEPTION;
     }
     if (span_count > 0) {
         opts.spans = span_reqs;
         opts.span_count = span_count;
+    }
+
+    /* The input is resolved after the options: an options getter is app
+     * code, and could close or drop the buffer a pointer taken earlier
+     * named (WasmBuffer.close, a fresh mapping freed at once). */
+    /* Input can be a string, ArrayBuffer, WasmBuffer, or MappedBuffer */
+    size_t input_len = 0;
+    const uint8_t *input = NULL;
+    int input_is_string = 0;
+
+    /* Check for WasmBuffer first */
+    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[1], js_wasm_buf_class_id);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
+    } else {
+        /* Check for MappedBuffer */
+        HlMappedBuffer *mmap_buf = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
+        if (mmap_buf && !mmap_buf->closed) {
+            input = (const uint8_t *)mmap_buf->addr;
+            input_len = mmap_buf->len;
+        } else {
+            input = JS_GetArrayBuffer(ctx, &input_len, argv[1]);
+            if (!input) {
+                /* Try as string */
+                input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
+                if (!input) {
+                    js_free_span_names(ctx, span_reqs, span_holders, span_count);
+                    JS_FreeCString(ctx, name);
+                    return JS_ThrowTypeError(ctx, "compute.call: input must be a string, ArrayBuffer, WasmBuffer, or MappedBuffer");
+                }
+                input_is_string = 1;
+            }
+        }
     }
 
     js_wasm_clamp_opts(&opts, &js->base);
@@ -357,7 +373,7 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
 
         if (input_is_string) JS_FreeCString(ctx, (const char *)input);
         JS_FreeCString(ctx, name);
-        js_free_span_names(ctx, span_reqs, span_count);
+        js_free_span_names(ctx, span_reqs, span_holders, span_count);
 
         if (rc != 0)
             return JS_ThrowInternalError(ctx, "compute.call: %s",
@@ -382,7 +398,7 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     if (input_is_string)
         JS_FreeCString(ctx, (const char *)input);
     JS_FreeCString(ctx, name);
-    js_free_span_names(ctx, span_reqs, span_count);
+    js_free_span_names(ctx, span_reqs, span_holders, span_count);
 
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "compute.call: %s",
@@ -466,6 +482,34 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     if (!name)
         return JS_EXCEPTION;
 
+    /* Parse opts */
+    HlWasmCallOpts opts = {0};
+    int want_buffer = 0;
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        JSValue val;
+        val = JS_GetPropertyStr(ctx, argv[2], "maxInput");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "maxOutput");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "heap");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.heap_size = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "stack");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.stack_size = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "gas");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "buffer");
+        if (JS_ToBool(ctx, val)) want_buffer = 1;
+        JS_FreeValue(ctx, val);
+    }
+
+    /* The input is resolved after the options: an options getter is app
+     * code, and could close or drop the buffer a pointer taken earlier
+     * named (WasmBuffer.close, a fresh mapping freed at once). */
     /* Get input (string, ArrayBuffer, or WasmBuffer) */
     const uint8_t *input = NULL;
     size_t input_len = 0;
@@ -494,31 +538,6 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
                 input_is_string = 1;
             }
         }
-    }
-
-    /* Parse opts */
-    HlWasmCallOpts opts = {0};
-    int want_buffer = 0;
-    if (argc > 2 && JS_IsObject(argv[2])) {
-        JSValue val;
-        val = JS_GetPropertyStr(ctx, argv[2], "maxInput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "maxOutput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "heap");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.heap_size = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "stack");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.stack_size = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "gas");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "buffer");
-        if (JS_ToBool(ctx, val)) want_buffer = 1;
-        JS_FreeValue(ctx, val);
     }
 
     js_wasm_clamp_opts(&opts, &js->base);
@@ -573,14 +592,15 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
      * below (ctx / promise / cont / submit) frees the op, releasing the pins. */
     if (argc > 2 && JS_IsObject(argv[2])) {
         HlWasmSpanReq parsed[HL_WASM_MAX_SPANS];
-        int sn = js_parse_spans(ctx, argv[2], parsed);
+        JSValue parsed_holders[HL_WASM_MAX_SPANS];
+        int sn = js_parse_spans(ctx, argv[2], parsed, parsed_holders);
         if (sn < 0) {
             hl_worker_wasm_op_free(op);
             free(op);
             return JS_EXCEPTION;
         }
         hl_worker_wasm_adopt_spans(op, parsed, sn);
-        js_free_span_names(ctx, parsed, sn);
+        js_free_span_names(ctx, parsed, parsed_holders, sn);
     }
 
     /* Create async ctx */
@@ -684,31 +704,6 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
 
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
 
-    /* Parse input */
-    size_t input_len = 0;
-    const uint8_t *input = NULL;
-    int input_is_string = 0;
-
-    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[0], js_wasm_buf_class_id);
-    if (wbuf_in && !wbuf_in->closed) {
-        input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
-        input_len = hl_wasm_buffer_len(wbuf_in);
-    } else {
-        HlMappedBuffer *mmap_in = JS_GetOpaque2(ctx, argv[0], js_mmap_class_id);
-        if (mmap_in && !mmap_in->closed) {
-            input = (const uint8_t *)mmap_in->addr;
-            input_len = mmap_in->len;
-        } else {
-            input = JS_GetArrayBuffer(ctx, &input_len, argv[0]);
-            if (!input) {
-                input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[0]);
-                if (!input)
-                    return JS_ThrowTypeError(ctx, "WasmInstance.call: input must be a string, ArrayBuffer, WasmBuffer, or MappedBuffer");
-                input_is_string = 1;
-            }
-        }
-    }
-
     HlWasmCallOpts opts = {0};
     int want_buffer = 0;
     if (argc > 1 && JS_IsObject(argv[1])) {
@@ -731,14 +726,45 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
      * (hl_cap_wasm_instance_call attaches + tears down within this call). The
      * JS_ToCString'd names outlive the call and are freed right after it. */
     HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+    JSValue span_holders[HL_WASM_MAX_SPANS];
     int span_count = 0;
     if (argc > 1 && JS_IsObject(argv[1])) {
-        span_count = js_parse_spans(ctx, argv[1], span_reqs);
+        span_count = js_parse_spans(ctx, argv[1], span_reqs, span_holders);
         if (span_count < 0) return JS_EXCEPTION;
     }
     if (span_count > 0) {
         opts.spans = span_reqs;
         opts.span_count = span_count;
+    }
+
+    /* The input is resolved after the options: an options getter is app
+     * code, and could close or drop the buffer a pointer taken earlier
+     * named (WasmBuffer.close, a fresh mapping freed at once). */
+    /* Parse input */
+    size_t input_len = 0;
+    const uint8_t *input = NULL;
+    int input_is_string = 0;
+
+    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[0], js_wasm_buf_class_id);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
+    } else {
+        HlMappedBuffer *mmap_in = JS_GetOpaque2(ctx, argv[0], js_mmap_class_id);
+        if (mmap_in && !mmap_in->closed) {
+            input = (const uint8_t *)mmap_in->addr;
+            input_len = mmap_in->len;
+        } else {
+            input = JS_GetArrayBuffer(ctx, &input_len, argv[0]);
+            if (!input) {
+                input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[0]);
+                if (!input) {
+                    js_free_span_names(ctx, span_reqs, span_holders, span_count);
+                    return JS_ThrowTypeError(ctx, "WasmInstance.call: input must be a string, ArrayBuffer, WasmBuffer, or MappedBuffer");
+                }
+                input_is_string = 1;
+            }
+        }
     }
 
     if (js) js_wasm_clamp_opts(&opts, &js->base);
@@ -750,7 +776,7 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
                                                 &out_buf, &opts, NULL, NULL,
                                                 js ? js->base.alloc : NULL, &err_msg);
         if (input_is_string) JS_FreeCString(ctx, (const char *)input);
-        js_free_span_names(ctx, span_reqs, span_count);
+        js_free_span_names(ctx, span_reqs, span_holders, span_count);
         if (rc != 0)
             return JS_ThrowInternalError(ctx, "WasmInstance.call: %s",
                                          err_msg ? err_msg : "unknown error");
@@ -765,7 +791,7 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
                                         &opts, NULL, NULL,
                                         js ? js->base.alloc : NULL, &err_msg);
     if (input_is_string) JS_FreeCString(ctx, (const char *)input);
-    js_free_span_names(ctx, span_reqs, span_count);
+    js_free_span_names(ctx, span_reqs, span_holders, span_count);
 
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "WasmInstance.call: %s",
@@ -864,6 +890,26 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "WasmInstance.asyncCall requires (input [, opts])");
 
+    HlWasmCallOpts opts = {0};
+    int want_buffer = 0;
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        JSValue val;
+        val = JS_GetPropertyStr(ctx, argv[1], "gas");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[1], "maxInput");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[1], "maxOutput");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[1], "buffer");
+        if (JS_ToBool(ctx, val)) want_buffer = 1;
+        JS_FreeValue(ctx, val);
+    }
+    /* The input is resolved after the options: an options getter is app
+     * code, and could close or drop the buffer a pointer taken earlier
+     * named (WasmBuffer.close, a fresh mapping freed at once). */
     /* Parse input */
     const uint8_t *input = NULL;
     size_t input_len = 0;
@@ -889,22 +935,12 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         }
     }
 
-    HlWasmCallOpts opts = {0};
-    int want_buffer = 0;
-    if (argc > 1 && JS_IsObject(argv[1])) {
-        JSValue val;
-        val = JS_GetPropertyStr(ctx, argv[1], "gas");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "maxInput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "maxOutput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "buffer");
-        if (JS_ToBool(ctx, val)) want_buffer = 1;
-        JS_FreeValue(ctx, val);
+
+    /* An options getter may have closed the instance or started a call on it
+     * since the checks above. */
+    if (pi->closed || atomic_load(&pi->busy)) {
+        if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: instance closed or busy");
     }
     js_wasm_clamp_opts(&opts, &js->base);
 
@@ -940,14 +976,15 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
      * parse copies. On bad input free the op (busy not yet set) and throw. */
     if (argc > 1 && JS_IsObject(argv[1])) {
         HlWasmSpanReq parsed[HL_WASM_MAX_SPANS];
-        int sn = js_parse_spans(ctx, argv[1], parsed);
+        JSValue parsed_holders[HL_WASM_MAX_SPANS];
+        int sn = js_parse_spans(ctx, argv[1], parsed, parsed_holders);
         if (sn < 0) {
             hl_worker_wasm_op_free(op);
             free(op);
             return JS_EXCEPTION;
         }
         hl_worker_wasm_adopt_spans(op, parsed, sn);
-        js_free_span_names(ctx, parsed, sn);
+        js_free_span_names(ctx, parsed, parsed_holders, sn);
     }
 
     /* Set busy before dispatch */
