@@ -409,13 +409,17 @@ function genExpr(exprInfo, escaped, localsSet) {
             escaped = false;
         } else if (f.arg) {
             let arg = f.arg.trim();
+            // A quoted argument is spliced into the generated source as a JS
+            // literal, so it may hold neither its quote nor a backslash: "a\"
+            // escaped its own closing quote, and what followed ran as code.
+            // The Lua engine refuses backslashes the same way.
             if (arg[0] === '"') {
-                if (!/^"[^"]*"$/.test(arg)) {
+                if (!/^"[^"\\]*"$/.test(arg)) {
                     throw new Error("invalid filter argument (unbalanced quotes): " + arg);
                 }
                 code = "__f." + f.name + "(" + code + ", " + arg + ")";
             } else if (arg[0] === "'") {
-                if (!/^'[^']*'$/.test(arg)) {
+                if (!/^'[^'\\]*'$/.test(arg)) {
                     throw new Error("invalid filter argument (unbalanced quotes): " + arg);
                 }
                 code = "__f." + f.name + "(" + code + ", " + arg + ")";

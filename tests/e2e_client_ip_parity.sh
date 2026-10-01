@@ -2,7 +2,8 @@
 # e2e_client_ip_parity.sh: Lua/JS parity for the shared client-IP helper.
 #
 # hull.web._request.client_ip / clientIp is the ONE home for deriving a
-# request's source IP under a trust_proxy policy (XFF-first when trusted,
+# request's source IP under a trust_proxy policy (the last XFF entry - the
+# peer the trusted proxy saw - when trusted,
 # remote_addr fallback, 64-char cap). Four middleware (session, audit-log,
 # totp, auth-flows) delegate to it; before it existed each hand-rolled the
 # extraction and they had already drifted (some capped the length, some did
@@ -65,11 +66,11 @@ JS
 lua_ip="$("$HULL" "$WD/ip.lua" 2>/dev/null | tail -1)"
 js_ip="$("$HULL" "$WD/ip.js"  2>/dev/null | tail -1)"
 
-# Expected: remote_addr / remote_addr (xff untrusted) / first-of-chain /
-# trimmed-first / remote_addr fallback / remote_addr (empty xff) / (nil) /
+# Expected: remote_addr / remote_addr (xff untrusted) / last-of-chain /
+# trimmed-last / remote_addr fallback / remote_addr (empty xff) / (nil) /
 # 64-char cap / (nil) for a nil req.
 cap64="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-expect="10.0.0.1|10.0.0.1|a|1.2.3.4|10.0.0.1|10.0.0.1|(nil)|${cap64}|(nil)"
+expect="10.0.0.1|10.0.0.1|c|x|10.0.0.1|10.0.0.1|(nil)|${cap64}|(nil)"
 
 if [ "$lua_ip" = "$expect" ] && [ "$lua_ip" = "$js_ip" ]; then
     echo "PASS: hull.web._request client-IP helper is byte-identical across Lua and JS"

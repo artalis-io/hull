@@ -49,7 +49,12 @@ function segmentText(s) {
     return raw === null ? null : encoding.utf8.decode(raw);
 }
 
-const EXP_RELATIVE_THRESHOLD = 2e9;
+// An `exp` below this is a duration from now ({ exp: 3600 }); at or above it,
+// an absolute time, as RFC 7519 has it. It was 2e9 - above the current time
+// (~1.8e9) - so the standard exp = time.now() + 3600 was taken as relative
+// and the token lived ~57 years. 1e9 seconds (31 years) is far above any
+// sane duration and far below any current timestamp.
+const EXP_RELATIVE_THRESHOLD = 1e9;
 
 // Allowlist of algs this module understands. Token-supplied algs
 // outside this set are rejected before the resolver runs.

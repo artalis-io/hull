@@ -238,7 +238,9 @@ end
 local function safe_return_to(s)
     if type(s) ~= "string" or s == "" then return "/" end
     if #s > 200 then return "/" end
-    if s:find("[\r\n%z]") then return "/" end
+    -- Any control character or backslash: browsers drop tab/CR/LF from
+    -- URLs, so "/\t/evil.com" became "//evil.com" - an open redirect.
+    if s:find("[%c\\]") then return "/" end
     -- First char must be "/", second char (if any) must not be "/" or "\".
     if s:sub(1, 1) ~= "/" then return "/" end
     local c2 = s:sub(2, 2)

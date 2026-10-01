@@ -200,7 +200,9 @@ function pkcePair() {
 function safeReturnTo(s) {
     if (typeof s !== "string" || s === "") return "/";
     if (s.length > 200) return "/";
-    if (/[\r\n\0]/.test(s)) return "/";
+    // Any control character or backslash: browsers drop tab/CR/LF from
+    // URLs, so "/\t/evil.com" became "//evil.com" - an open redirect.
+    if (/[\x00-\x1f\x7f\\]/.test(s)) return "/";
     if (s.charAt(0) !== "/") return "/";
     const c2 = s.charAt(1);
     if (c2 === "/" || c2 === "\\") return "/";

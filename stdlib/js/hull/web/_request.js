@@ -15,9 +15,12 @@
  *
  * With `trustProxy` false (the safe default), returns the un-spoofable socket
  * peer (`req.remote_addr`). With `trustProxy` true - only correct behind a
- * trusted reverse proxy that sets it - returns the FIRST address of the
- * `X-Forwarded-For` chain (the original client), trimmed, falling back to the
- * socket peer. Capped at 64 chars (IPv6 with headroom) so a hostile
+ * trusted reverse proxy - returns the LAST address of the `X-Forwarded-For`
+ * chain, trimmed, falling back to the socket peer. Proxies append the peer
+ * they saw; everything to its left came from the client and is whatever the
+ * client wrote, so the first entry was spoofable (a fresh rate limit bucket
+ * per request). Behind more than one proxy layer, put the outer one in charge
+ * of the header (or strip it) so the last entry is the client. Capped at 64 chars (IPv6 with headroom) so a hostile
  * multi-kilobyte XFF header can't land in an indexed column or a rate key.
  *
  * @param {object} req
@@ -29,8 +32,9 @@ function clientIp(req, trustProxy) {
     let ip;
     const xff = req.headers["x-forwarded-for"];
     if (trustProxy && typeof xff === "string" && xff !== "") {
-        const first = (xff.split(",")[0] || "").trim();
-        if (first) ip = first;
+        const parts = xff.split(",");
+        const last = (parts[parts.length - 1] || "").trim();
+        if (last) ip = last;
     }
     if (!ip && typeof req.remote_addr === "string" && req.remote_addr !== "") {
         ip = req.remote_addr;

@@ -61,7 +61,12 @@ local function segment_text(s)
     return raw and encoding.utf8.decode(raw)
 end
 
-local EXP_RELATIVE_THRESHOLD = 2e9
+-- An `exp` below this is a duration from now ({ exp = 3600 }); at or above it,
+-- an absolute time, as RFC 7519 has it. It was 2e9 - above the current time
+-- (~1.8e9) - so the standard exp = time.now() + 3600 was taken as relative
+-- and the token lived ~57 years. 1e9 seconds (31 years) is far above any
+-- sane duration and far below any current timestamp.
+local EXP_RELATIVE_THRESHOLD = 1e9
 
 -- Allowlist of algorithms this module understands. Anything not in
 -- this set is rejected before the key resolver runs. `"none"` is

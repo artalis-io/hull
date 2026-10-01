@@ -527,105 +527,72 @@ local function strip_user_secrets(user)
     return out
 end
 
+-- The request's host, strictly: X-Forwarded-Host only behind a trusted
+-- proxy (a direct client sets any header it likes), its first entry, and
+-- nothing but a hostname or bracketed IPv6 literal plus an optional numeric
+-- port. Returns host, port|nil - or nil. Anything else (userinfo, a path,
+-- percent-encoding) is refused, never trimmed into shape.
+local function request_host(h)
+    local raw = (_state.trust_proxy and h["x-forwarded-host"]) or h.host
+    if type(raw) ~= "string" then return nil end
+    local comma = raw:find(",", 1, true)
+    if comma then raw = raw:sub(1, comma - 1) end
+    raw = raw:match("^%s*(.-)%s*$")
+    local host, rest = raw:match("^(%[[%x:%.]+%])(.*)$")
+    if not host then host, rest = raw:match("^([%w%.%-]+)(.*)$") end
+    if not host then return nil end
+    local port
+    if rest ~= "" then
+        port = rest:match("^:(%d%d?%d?%d?%d?)$")
+        if not port or tonumber(port) > 65535 then return nil end
+    end
+    return host, port
+end
+
+-- X-Forwarded-Proto behind a trusted proxy, and only "http" / "https".
+local function request_proto(h, default)
+    if _state.trust_proxy then
+        local p = h["x-forwarded-proto"]
+        if p == "http" or p == "https" then return p end
+    end
+    return default
+end
+
 -- Round-9 HIGH-1: build a click-through URL origin from validated
 -- sources only. public_origin (when set) wins unconditionally;
--- otherwise the request's host header must match a trusted_hosts
--- entry exactly. If neither check admits a value, raise - letting
--- a request through with a header-derived origin reintroduces the
--- host-injection class. init.lua already validates that one of
--- public_origin / trusted_hosts is set, so the raise is only
--- reachable when an attacker submits a request whose host header
--- isn't in the allowlist.
+-- otherwise the request's host must match a trusted_hosts entry
+-- exactly, and the URL is built from THAT ENTRY (plus the validated
+-- port) - never from the header. A header like "app.example.com:@evil.com"
+-- used to pass the allowlist (its host part, cut at ':', matched) and then
+-- became the link itself, sending reset and magic-link tokens to evil.com.
+-- If neither check admits a value, return nil - the handler then answers
+-- with the same enumeration-safe response without sending the link.
 local function origin_for(req)
     if _state.public_origin then
         return _state.public_origin
     end
     local h = (req and req.headers) or {}
-    local host = h["x-forwarded-host"] or h.host
-    -- Round-10 MEDIUM-6: normalize before allowlist comparison.
-    -- X-Forwarded-Host can be a chain ("a.com, internal-lb") on
-    -- nginx+ALB deployments - take the leftmost (client-facing)
-    -- entry. Then strip an optional :PORT suffix so apps deployed
-    -- on non-standard ports without a proxy that strips it match
-    -- their bare-hostname allowlist entry.
-    --
-    -- Round-11 HIGH-3: IPv6 literals (`[::1]:8080`) are bracketed
-    -- per RFC 3986. The naive first-colon split eats the IPv6
-    -- colons; bare host becomes `[`. Detect the bracket and pull
-    -- the literal whole (keep brackets so it matches a bracketed
-    -- allowlist entry), then strip any trailing `:PORT`.
-    if type(host) == "string" then
-        local comma = host:find(",", 1, true)
-        if comma then host = host:sub(1, comma - 1) end
-        host = host:match("^%s*(.-)%s*$")
-        if host:sub(1, 1) == "[" then
-            local close = host:find("]", 1, true)
-            if close then
-                host = host:sub(1, close)
-            elseif not _state.warned_malformed_ipv6 then
-                -- Round-12 LOW-5: surface the bad Host header on its
-                -- own one-shot warn so it doesn't consume the
-                -- generic warned_host_mismatch slot. The mismatch
-                -- itself still fires below; this just adds a
-                -- diagnostic line pointing at the malformation.
-                _state.warned_malformed_ipv6 = true
-                local log = require("hull.log")
-                log.warn("auth-flows: malformed IPv6 literal in "
-                      .. "Host header (no closing ']'): '"
-                      .. tostring(host) .. "'. RFC 3986 requires "
-                      .. "IPv6 literals to be bracketed.")
-            end
-        else
-            local colon = host:find(":", 1, true)
-            if colon then host = host:sub(1, colon - 1) end
-        end
-    end
-    if type(host) == "string" and host ~= ""
-       and _state.trusted_hosts then
+    local host, port = request_host(h)
+    local suffix = port and (":" .. port) or ""
+    if host and _state.trusted_hosts then
         for _, allowed in ipairs(_state.trusted_hosts) do
             if host == allowed then
-                -- Use the raw (un-normalized) host:port for the URL
-                -- so non-standard-port apps generate working links.
-                local raw_host = h["x-forwarded-host"] or h.host
-                local raw_comma = raw_host:find(",", 1, true)
-                if raw_comma then
-                    raw_host = raw_host:sub(1, raw_comma - 1)
-                end
-                raw_host = raw_host:match("^%s*(.-)%s*$")
-                local proto = _state.trust_proxy
-                    and (h["x-forwarded-proto"] or "https") or "https"
-                return proto .. "://" .. raw_host
+                return request_proto(h, "https") .. "://" .. allowed .. suffix
             end
         end
     end
     -- trust_request_host opt-out (dev/test). Last resort; the init
     -- warning fires once so operators can spot it in startup logs.
-    if _state.trust_request_host and type(host) == "string"
-       and host ~= "" then
-        local raw_host = h["x-forwarded-host"] or h.host
-        local raw_comma = raw_host:find(",", 1, true)
-        if raw_comma then
-            raw_host = raw_host:sub(1, raw_comma - 1)
-        end
-        raw_host = raw_host:match("^%s*(.-)%s*$")
-        local proto = _state.trust_proxy
-            and (h["x-forwarded-proto"] or "http") or "http"
-        return proto .. "://" .. raw_host
+    if host and _state.trust_request_host then
+        return request_proto(h, "http") .. "://" .. host .. suffix
     end
-    -- We get here only if a request lands with a host not in the
-    -- allowlist AND trust_request_host is off. Refuse to build a
-    -- URL; the handler returns the same generic enumeration-safe
-    -- response without actually sending the link.
-    --
-    -- Round-11 LOW-10: one-shot warn the first time this fires.
-    -- Pre-fix, a misconfigured trusted_hosts produced 100% silent
-    -- no-mail - operators learned from user complaints. The
-    -- enumeration-safe contract means we can't 4xx the request,
-    -- but a single log line at startup is enough for ops to spot
-    -- the misconfig.
+    -- Round-11 LOW-10: one-shot warn the first time this fires, so a
+    -- misconfigured trusted_hosts is not silent no-mail. The
+    -- enumeration-safe contract means we can't 4xx the request.
     if not _state.warned_host_mismatch then
         _state.warned_host_mismatch = true
-        local raw = h["x-forwarded-host"] or h.host or "(nil)"
+        local raw = (_state.trust_proxy and h["x-forwarded-host"]) or h.host or "(nil)"
+        raw = tostring(raw):sub(1, 200):gsub("%c", "?")
         local hosts = _state.trusted_hosts
         local list = "(none configured)"
         if hosts then
@@ -633,12 +600,12 @@ local function origin_for(req)
         end
         local log = require("hull.log")
         log.warn("auth-flows: origin_for refused host '"
-              .. tostring(raw) .. "' (normalized: '"
-              .. tostring(host or "") .. "'). trusted_hosts = ["
+              .. raw .. "'. trusted_hosts = ["
               .. list .. "]. URL build skipped; subsequent email "
               .. "sends to this user-flow will be silently dropped "
               .. "until the host is added. Set public_origin or "
-              .. "trust_request_host = true to override.")
+              .. "trust_request_host = true to override (behind a "
+              .. "proxy that sets X-Forwarded-Host, set trust_proxy).")
     end
     return nil
 end
@@ -1117,10 +1084,23 @@ local function handle_magic_link_consume(req, res)
     if not user then
         return secure_html(res):status(400):html("magic link failed")
     end
-    -- Magic-link clicks count as proof of email ownership.
+    -- Magic-link clicks count as proof of email ownership. On an account
+    -- that was not yet verified, they also void the password: anyone could
+    -- have registered this address and set it, and verifying here would
+    -- hand them the owner's account. The owner sets one by reset; existing
+    -- sessions go too (on_password_reset, when the app wires it).
     if not user.email_verified then
         _state.user_set_email_verified(user_uid(user), true)
+        _state.user_set_password(user_uid(user), crypto.hash_password(
+            encoding.hex.encode(crypto.random(32))))
         user.email_verified = true
+        if _state.on_password_reset then
+            local ok, cb_err = pcall(_state.on_password_reset, req, res, user)
+            if not ok then
+                require("hull.log").warn(
+                    "auth-flows: on_password_reset failed: " .. tostring(cb_err))
+            end
+        end
     end
     gc_expired()
     if _state.enable_totp
@@ -1405,11 +1385,10 @@ local function register_routes(app)
             limit  = rl_opts.limit  or 20,
             window = rl_opts.window or 300,  -- 5 min
             -- Per-IP key via the shared hull.web._request helper
-            -- (trust_proxy -> leftmost XFF entry -> remote_addr). Using
-            -- the whole XFF chain as the bucket key would let a client
-            -- with rotating downstream proxies mint a new bucket per
-            -- request; taking the leftmost entry pins it to the client
-            -- the edge proxy observed. Falls back to the literal
+            -- (trust_proxy -> the last XFF entry, the peer our proxy saw
+            -- -> remote_addr). The client writes every entry to the left
+            -- of it, so keying on those (or the whole chain) let a client
+            -- mint a new bucket per request. Falls back to the literal
             -- "_anon" so a malformed request can't escape the bucket
             -- entirely. App-supplied opts.key still wins.
             key    = rl_opts.key or function(req)
@@ -1667,7 +1646,6 @@ function M.init(opts)
     -- only once per process - an operator who "fixes" the config
     -- but introduces a new typo wouldn't see the second warn.
     _state.warned_host_mismatch = false
-    _state.warned_malformed_ipv6 = false
     -- Round-9 MEDIUM-6: optional user_sanitize callback. See
     -- strip_user_secrets for the threat model.
     if opts.user_sanitize ~= nil
@@ -1840,6 +1818,8 @@ end
 -- ── Test helpers (not public; exposed for unit tests) ──────────────
 
 M._test = {
+    origin_for         = origin_for,
+    state              = _state,
     issue_token        = issue_token,
     consume_token      = consume_token,
     parse_token        = parse_token,
@@ -1863,7 +1843,6 @@ M._test = {
         _state.trust_request_host = false
         _state.user_sanitize    = nil
         _state.warned_host_mismatch = false
-        _state.warned_malformed_ipv6 = false
         _state.templates        = {}
         _state.user_find_by_email      = nil
         _state.user_get                = nil
