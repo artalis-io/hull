@@ -33,11 +33,22 @@ tmp.query(...); tmp.close();
 ```
 
 Named and dynamic connections are declared in the manifest. A DSN of exactly
-`"$VAR"` / `"${VAR}"` is an env reference resolved at open time:
+`"$VAR"` / `"${VAR}"` is an env reference resolved at open time.
+
+**Every referenced variable must be declared**, in `secrets` or in `env`, or the
+app fails to load with a message naming the field and the variable. List it in
+`secrets` when only the manifest should read it: a secret reaches the connection
+or allowlist that names it and is never readable through `env.get`. List it in
+`env` only if scripts also need it. The same rule covers every field that
+accepts a reference: `hosts`, `databases.named`, `databases.dynamic.hosts`,
+`kv.dynamic.hosts`, `ssh.connect.hosts` and `ssh.tunnel.hosts`. (Without it, a
+reference could read any variable in the environment, an SQLite file name, for
+instance, can be read back with `PRAGMA database_list`.)
 
 ```lua
 app.manifest({
     modules = { "hull/db@1" },
+    secrets = { "DATABASE_URL" },          -- readable by "$DATABASE_URL" only
     databases = {
         named = {
             cache   = "./cache.db",       -- SQLite file (literal)

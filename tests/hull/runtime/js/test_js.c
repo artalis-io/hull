@@ -2953,6 +2953,73 @@ UTEST(js_stdlib, crypto_key_from_env)
  * (valueOf, toString, a getter, a prototype setter) must not free what the
  * binding already resolved. Each case crashed or wrote freed memory before;
  * run() returns 0, or the number of the first check that failed. */
+/* A stdlib helper that calls a function the app handed it does not lend that
+ * function its stdlib identity, whether the app passes conn.exec itself (its
+ * `this` is then not a connection) or a copy bound to the connection (QuickJS
+ * gives a bound call its own frame - HULL PATCH 0002). The dialect helpers check
+ * every identifier, case-insensitively. */
+UTEST(js_cap, stdlib_helpers_do_not_lend_their_identity)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { db as dbMod } from 'hull:db';\n"
+        "import { retry } from 'hull:retry';\n"
+        "const db = dbMod.default();\n"
+        "const sql = () => 'CREATE TABLE _hull_probe (x)';\n"
+        "function count() {\n"
+        "  return db.query(\"SELECT count(*) AS n FROM sqlite_master \" +\n"
+        "                  \"WHERE name = '_' || 'hull_probe'\")[0].n;\n"
+        "}\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "async function run() {\n"
+        "  for (const retryOn of [db.exec, db.exec.bind(db)]) {\n"
+        "    let rejected = false;\n"
+        "    try { await retry.run(sql, { maxAttempts: 1, retryOn }); }\n"
+        "    catch (e) { rejected = true; }\n"
+        "    if (!rejected) return 1;\n"
+        "    if (count() !== 0) return 2;\n"
+        "  }\n"
+        "  db.exec('CREATE TABLE life (id INTEGER PRIMARY KEY, v TEXT)');\n"
+        "  if (!threw(() => db.upsert('_HULL_sessions', ['id'], ['id'], [1]))) return 3;\n"
+        "  if (!threw(() => db.upsert('life', ['id'], ['id', '_hull_x'], [1, 2]))) return 4;\n"
+        "  if (threw(() => db.insertIfAbsent('life', ['id'], ['id'], [1]))) return 5;\n"
+        "  if (!threw(() => db.tableColumns('main._hull_sessions'))) return 6;\n"
+        "  return 0;\n"
+        "}\n"
+        "run().then(v => { globalThis.__lend = v; }, () => { globalThis.__lend = 99; });\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__lend"), 0);
+    cleanup_js_caps();
+}
+
+/* No route back to the Function constructors: deleting the global left
+ * (() => 0).constructor - and the async / generator ones - compiling strings
+ * into code. Their names survive, for the usual "is this async?" test. */
+UTEST(js_cap, function_constructors_are_unreachable)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "function threw(f) { try { f(); return false; } catch (e) { return e instanceof TypeError; } }\n"
+        "function run() {\n"
+        "  const fns = [() => 0, async () => 0, function* () {}, async function* () {}];\n"
+        "  for (const f of fns) {\n"
+        "    if (!threw(() => f.constructor('globalThis.__escaped = 1'))) return 1;\n"
+        "    if (!threw(() => new f.constructor('return 1'))) return 2;\n"
+        "    if (Object.getPrototypeOf(f).constructor !== f.constructor) return 3;\n"
+        "    try { Object.getPrototypeOf(f).constructor = null; } catch (e) {}\n"
+        "    if (typeof f.constructor !== 'function') return 4;\n"
+        "  }\n"
+        "  if (globalThis.__escaped) return 5;\n"
+        "  if ((async () => 0).constructor.name !== 'AsyncFunction') return 6;\n"
+        "  if ((() => 0).constructor.name !== 'Function') return 7;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__fnctor = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__fnctor"), 0);
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, conversions_cannot_free_resolved_objects)
 {
     init_js_with_caps();
@@ -4771,6 +4838,38 @@ UTEST(js_runtime, import_gated_undeclared_stdlib_fails)
     JS_FreeCString(js.ctx, msg);
     JS_FreeValue(js.ctx, exc);
     JS_FreeValue(js.ctx, val);
+
+    js.base.module_set = NULL;
+    cleanup_js();
+}
+
+/* Internal modules (":_" segments) are the stdlib's plumbing - hull:_template
+ * compiles strings into code - so once the module set is wired an app module
+ * may not import one. */
+UTEST(js_runtime, internal_modules_are_stdlib_only)
+{
+    init_js();
+    HlManifest m;
+    memset(&m, 0, sizeof(m));
+    m.modules[0].name = "validate";
+    m.modules[0].api_major = 1;
+    m.modules_count = 1;
+    m.modules_declared = 1;
+    HlResolvedModuleSet set;
+    char err[256] = {0};
+    ASSERT_EQ(hl_module_resolver_resolve(&m, &set, err, sizeof(err)), 0);
+    js.base.module_set = &set;
+
+    const char *code =
+        "import { _template } from 'hull:_template';\n"
+        "globalThis.__internal = 1;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    int threw = JS_IsException(val);
+    if (threw) JS_FreeValue(js.ctx, JS_GetException(js.ctx));
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    EXPECT_TRUE(threw || eval_int("globalThis.__internal === 1 ? 1 : 0") == 0);
+    EXPECT_EQ(eval_int("globalThis.__internal === 1 ? 1 : 0"), 0);
 
     js.base.module_set = NULL;
     cleanup_js();

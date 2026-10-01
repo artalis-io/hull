@@ -117,9 +117,13 @@ void hl_vfs_init_composed(HlVfs *vfs, const HlEntry *base,
      * binary search stays correct. Sort BEFORE sealing (the seal makes it RO). */
     qsort(merged, total, sizeof(*merged), hl_entry_name_cmp);
 
-    /* Seal RO. If mprotect ever fails the table is still valid (just unsealed) -
-     * strictly no worse than the pre-seal heap version; do not fail the build. */
-    (void)sh_seal_arena_seal(arena);
+    /* Seal RO. If mprotect fails the table is still valid, just writable -
+     * no worse than the pre-seal heap version, so startup continues. But the
+     * stdlib entry table is a code-substitution target, so the loss of that
+     * protection is reported rather than swallowed. */
+    if (sh_seal_arena_seal(arena) != 0)
+        fprintf(stderr, "hull: could not seal the embedded module table "
+                        "read-only; it stays writable for this run\n");
 
     if (out_owned) *out_owned = arena;
     hl_vfs_init(vfs, merged, root_dir);

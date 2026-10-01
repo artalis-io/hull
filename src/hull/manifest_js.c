@@ -93,6 +93,11 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                                             out->env,
                                             HL_MANIFEST_MAX_ENVS, alloc);
 
+    /* secrets = [...]: names a "$VAR" may read, not env.get */
+    out->secrets_count = read_js_string_array(ctx, manifest, "secrets",
+                                                out->secrets,
+                                                HL_MANIFEST_MAX_SECRETS, alloc);
+
     /* hosts = [...] */
     out->hosts_count = read_js_string_array(ctx, manifest, "hosts",
                                               out->hosts,

@@ -96,6 +96,37 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
 
 /* ── Database initialization ───────────────────────────────────────── */
 
+/* SQL is a second route to the filesystem, and it must not reach files the fs
+ * capability never granted. ATTACH opens another database file by name.
+ * VACUUM INTO writes a copy of the database to any path: SQLite carries it out
+ * as an internal ATTACH of that path, which reaches this callback too. So both
+ * are refused, except the two attaches that name no file: '' (the temporary
+ * database a plain VACUUM attaches) and ":memory:". An ATTACH whose name is an
+ * expression arrives with a NULL name and is refused.
+ *
+ * writable_schema lets SQL rewrite sqlite_schema directly (DEFENSIVE below
+ * disables it as well), and the *_store_directory pragmas move where SQLite
+ * writes its files. None of these has a use in application SQL. */
+static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
+                         const char *a3, const char *a4)
+{
+    (void)ud; (void)a2; (void)a3; (void)a4;
+    switch (action) {
+    case SQLITE_ATTACH:
+        if (a1 && (a1[0] == '\0' || strcmp(a1, ":memory:") == 0))
+            return SQLITE_OK;
+        return SQLITE_DENY;
+    case SQLITE_PRAGMA:
+        if (a1 && (strcasecmp(a1, "writable_schema") == 0 ||
+                   strcasecmp(a1, "temp_store_directory") == 0 ||
+                   strcasecmp(a1, "data_store_directory") == 0))
+            return SQLITE_DENY;
+        return SQLITE_OK;
+    default:
+        return SQLITE_OK;
+    }
+}
+
 int hl_cap_db_init(sqlite3 *db)
 {
     if (!db)
@@ -187,6 +218,16 @@ int hl_cap_db_init(sqlite3 *db)
     };
     for (const char **p = tuning; *p; p++)
         (void)sqlite3_exec(db, *p, NULL, NULL, NULL);
+
+    /* REQUIRED, and last, so the pragmas above are not subject to it: a
+     * connection that cannot refuse ATTACH / VACUUM INTO would let SQL write
+     * outside the fs grants, so a failure here aborts the open. */
+    if (sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, 1, (int *)NULL) != SQLITE_OK ||
+        sqlite3_set_authorizer(db, db_authorizer, NULL) != SQLITE_OK) {
+        fprintf(stderr, "hull: sqlite could not install its SQL guard: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
 
     return 0;
 }

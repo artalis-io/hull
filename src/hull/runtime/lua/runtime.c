@@ -362,7 +362,20 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
 
     /* Load and execute from filesystem (development mode). Text only: an
      * entry file holding bytecode is refused (luaL_dofile accepts both). */
-    if (luaL_loadfilex(lua->L, filename, "t") != LUA_OK ||
+    /* An entry file named "hull.*" would get the chunkname "@hull.*", which is
+     * how the stdlib is recognised (hl_lua_source_is_stdlib): load it by an
+     * explicit "./" path instead, which names the same file. */
+    char entry_path[4096];
+    const char *load_name = filename;
+    if (strncmp(filename, "hull.", 5) == 0) {
+        int n = snprintf(entry_path, sizeof entry_path, "./%s", filename);
+        if (n < 0 || (size_t)n >= sizeof entry_path) {
+            log_error("[hull:c] entry path too long: %s", filename);
+            return -1;
+        }
+        load_name = entry_path;
+    }
+    if (luaL_loadfilex(lua->L, load_name, "t") != LUA_OK ||
         lua_pcall(lua->L, 0, LUA_MULTRET, 0) != LUA_OK) {
         hl_lua_dump_error(lua);
         return -1;

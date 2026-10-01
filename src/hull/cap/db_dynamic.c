@@ -9,9 +9,11 @@
 #include "hull/cap/db_dynamic.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_policy.h"
 #include "hull/manifest.h"
 #include "hull/host_match.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -64,7 +66,21 @@ HlDbHandle *hl_db_dynamic_open(const char *dsn,
                                const HlFsConfig *fs_cfg,
                                const char **err)
 {
+    return hl_db_dynamic_open_ex(dsn, policy, fs_cfg, NULL, 0, err);
+}
+
+HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
+                                  const HlManifestDbDynamic *policy,
+                                  const HlFsConfig *fs_cfg,
+                                  char *opened, size_t opened_size,
+                                  const char **err)
+{
     if (err) *err = NULL;
+    if (opened && opened_size) opened[0] = '\0';
+    /* The DSN the backend opens: the app's, or (file backends) the same file
+     * named by its absolute path under the app directory. */
+    char abs_dsn[HL_DB_DYNAMIC_DSN_MAX];
+    const char *open_dsn = dsn;
     if (!dsn || !dsn[0]) {
         if (err) *err = "db.open: empty DSN";
         return NULL;
@@ -119,6 +135,32 @@ HlDbHandle *hl_db_dynamic_open(const char *dsn,
                 if (err) *err = fe ? fe : "db.open: file path not allowed by manifest.fs";
                 return NULL;
             }
+            /* Containment is not authorization. SQLite opens the file read-
+             * write and creates it (and its -wal / -journal siblings) if it is
+             * missing, so the path needs an fs.write grant, the same one
+             * fs.write would. Without it any SQLite file under the app dir
+             * could be read or created with no fs grant at all. */
+            char scratch[HL_DB_DYNAMIC_DSN_MAX];
+            HlFsSelection sel = hl_fs_policy_select(fs_cfg->policy, path,
+                                                    HL_FS_OPEN_WRITE,
+                                                    scratch, sizeof scratch);
+            if (!fs_cfg->policy || !sel.entry) {
+                if (err) *err = "db.open: a file DSN needs an fs.write grant for its path";
+                return NULL;
+            }
+            /* Open it where it was checked. The backend resolves a relative
+             * path against the process's working directory, which is not the
+             * app directory when hull runs an app elsewhere - the check and the
+             * open would name two different files. */
+            int n = scheme[0]
+                ? snprintf(abs_dsn, sizeof abs_dsn, "%s://%s/%s", scheme,
+                           fs_cfg->base_dir, path)
+                : snprintf(abs_dsn, sizeof abs_dsn, "%s/%s", fs_cfg->base_dir, path);
+            if (n < 0 || (size_t)n >= sizeof abs_dsn) {
+                if (err) *err = "db.open: file path too long";
+                return NULL;
+            }
+            open_dsn = abs_dsn;
         }
     } else {
         /* Network backend: host must match databases.dynamic.hosts. */
@@ -139,12 +181,22 @@ HlDbHandle *hl_db_dynamic_open(const char *dsn,
         return NULL;
     }
     h->backend = be;
-    if (be->open(&h->ctx, dsn, NULL) != 0) {
+    if (be->open(&h->ctx, open_dsn, NULL) != 0) {
         if (err) *err = "db.open: connection failed";
         free(h);
         return NULL;
     }
     g_dynamic_open_count++;
+    if (opened && opened_size) {
+        if (strlen(open_dsn) >= opened_size) {
+            /* The caller could not name this database again; do not hand it
+             * a connection whose async twin would open something else. */
+            hl_db_dynamic_close(h);
+            if (err) *err = "db.open: DSN too long";
+            return NULL;
+        }
+        memcpy(opened, open_dsn, strlen(open_dsn) + 1);
+    }
     return h;
 }
 

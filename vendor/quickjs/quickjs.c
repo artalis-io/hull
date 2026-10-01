@@ -16010,8 +16010,33 @@ static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,
         return JS_CallConstructor2(ctx, bf->func_obj, new_target,
                                    arg_count, arg_buf);
     } else {
-        return JS_Call(ctx, bf->func_obj, bf->this_val,
-                       arg_count, arg_buf);
+        /* HULL PATCH 0002: give a bound call a stack frame of its own, as
+           js_call_c_function does for a native one. Without it the target
+           runs with the BOUND function's caller as its immediate caller, so
+           JS_GetScriptOrModuleName(ctx, 1) inside a native target names that
+           caller - and Hull decides whether `_hull_*` tables may be touched
+           by exactly that name. A stdlib helper invoking an app-supplied
+           `conn.exec.bind(conn, sql)` therefore ran app SQL with stdlib
+           privilege. The frame is not bytecode, so the lookup returns no
+           name for it, which Hull treats as app code. See
+           docs/quickjs_patches.md. */
+        JSRuntime *rt = ctx->rt;
+        JSStackFrame sf_s, *sf = &sf_s;
+        JSValue ret;
+        sf->prev_frame = rt->current_stack_frame;
+        rt->current_stack_frame = sf;
+#ifdef CONFIG_BIGNUM
+        sf->js_mode = sf->prev_frame ? (sf->prev_frame->js_mode & JS_MODE_MATH) : 0;
+#else
+        sf->js_mode = 0;
+#endif
+        sf->cur_func = (JSValue)func_obj;
+        sf->arg_count = arg_count;
+        sf->arg_buf = (JSValue *)arg_buf;
+        ret = JS_Call(ctx, bf->func_obj, bf->this_val,
+                      arg_count, arg_buf);
+        rt->current_stack_frame = sf->prev_frame;
+        return ret;
     }
 }
 

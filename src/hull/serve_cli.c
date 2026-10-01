@@ -41,6 +41,9 @@
 #include "hull/serve.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/env.h"
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_registry.h"
+#endif
 
 #ifdef HL_ENABLE_HTTP_CLIENT
 #include "hull/cap/http.h"
@@ -314,6 +317,17 @@ int hull_serve(int argc, char **argv)
      * Sealing failure is FATAL. The alternative is running with unsealed
      * policy, which silently weakens the guarantee the rest of the hardening
      * assumes. See docs/security.md, Sealed runtime tables. */
+    char ref_err[512];
+    if (hl_manifest_check_env_refs(&manifest, ref_err, sizeof ref_err) != 0) {
+        log_error("[hull:cli] %s", ref_err);
+        hl_manifest_free(&manifest);
+        hl_app_context_free(ctx);
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
+        return 1;
+    }
     ShSealArena seal_arena;
     if (sh_seal_arena_init(&seal_arena, 16 * 1024, "manifest-policy") != 0) {
         log_error("[hull:cli] seal arena init failed (mmap)");
@@ -325,7 +339,10 @@ int hull_serve(int argc, char **argv)
         be->free(async_ctx);
         return 1;
     }
-    {
+    /* An app with no manifest runs with the zeroed, deny-everything policy:
+     * there are no strings to seal (hl_manifest_seal refuses an absent one,
+     * which used to stop every manifest-less app.main program here). */
+    if (manifest.present) {
         HlManifest sealed;
         if (hl_manifest_seal(&sealed, &manifest, &seal_arena) != 0) {
             log_error("[hull:cli] manifest seal failed (arena OOM?)");
@@ -343,6 +360,27 @@ int hull_serve(int argc, char **argv)
          * strings: the arena owns them until it is destroyed. */
         hl_manifest_free(&manifest);
         manifest = sealed;
+    }
+    /* The resolved module set too, as serve.c seals it: it decides which
+     * modules require/import admit, and in the CLI build it was left in the
+     * app context's heap, where one flipped bit admits an undeclared module.
+     * Aligned alloc for the uint64_t bitset (see serve.c). */
+    if (rt->module_set) {
+        HlResolvedModuleSet *resolved =
+            sh_seal_arena_alloc(&seal_arena, sizeof(HlResolvedModuleSet),
+                                _Alignof(HlResolvedModuleSet));
+        if (!resolved) {
+            log_error("[hull:cli] seal arena alloc(module_set) failed");
+            sh_seal_arena_destroy(&seal_arena);
+            hl_app_context_free(ctx);
+            rt->async_ctx = NULL;
+            rt->thread_pool = NULL;
+            if (pool) be->pool_free(pool);
+            be->free(async_ctx);
+            return 1;
+        }
+        memcpy(resolved, rt->module_set, sizeof(HlResolvedModuleSet));
+        rt->module_set = resolved;
     }
     if (sh_seal_arena_seal(&seal_arena) != 0) {
         log_error("[hull:cli] manifest seal (mprotect) failed");
@@ -375,6 +413,16 @@ int hull_serve(int argc, char **argv)
      * that matters. `manifest` is function-scope and outlives the app.main run,
      * the same lifetime http_cfg and env_cfg above rely on. */
     rt->ssh_policy = &manifest.ssh;
+
+    /* kv.open's allowlist and the named / dynamic database policy, as serve.c
+     * wires them. Unwired, kv.open, db.connect(name) and db.open were denied
+     * in every app.main program however the manifest declared them. Same
+     * borrowed lifetime as ssh_policy. */
+    rt->kv_policy = &manifest.kv.dynamic;
+#ifdef HL_ENABLE_DB
+    if (rt->db_registry)
+        hl_db_registry_set_manifest(rt->db_registry, &manifest);
+#endif
 
 #ifdef HL_ENABLE_HTTP_CLIENT
     /* http.fetch needs allowlisted hosts + a TLS client for https://.
@@ -480,6 +528,7 @@ int hull_serve(int argc, char **argv)
     rt->fs_cfg = NULL;
     rt->env_cfg = NULL;
     rt->ssh_policy = NULL;   /* points into `manifest`, freed just below */
+    rt->kv_policy  = NULL;
 #ifdef HL_ENABLE_HTTP_CLIENT
     rt->http_cfg   = NULL;
     rt->client_tls = NULL;   /* before the ctx it points through goes */

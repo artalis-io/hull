@@ -9,7 +9,11 @@
 #include "hull/cap/db_backend.h"
 #include "hull/manifest.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_policy.h"
+#include "hull/utils/alloc.h"
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static HlManifestDbDynamic policy_sqlite(void)
 {
@@ -75,6 +79,44 @@ UTEST(db_dynamic, file_fs_gate)
     HlDbHandle *h = hl_db_dynamic_open("/etc/hosts", &p, &fs, &err);
     ASSERT_TRUE(h == NULL);
     ASSERT_TRUE(err != NULL);
+}
+
+/* A file DSN needs an fs.write grant for its path, not just containment, and
+ * opens under the app directory (not the process's working directory): the
+ * DSN reported back - which conn.async reopens - is the absolute one. */
+UTEST(db_dynamic, file_dsn_needs_a_write_grant_and_opens_under_the_app_dir)
+{
+    char cwd[1024];
+    ASSERT_TRUE(getcwd(cwd, sizeof cwd) != NULL);
+    const char *wr[] = { "dyn_grant_probe.db" };
+    HlAllocator alloc = {0};
+    HlFsPolicy pol = HL_FS_POLICY_INIT;
+    const char *perr = NULL;
+    ASSERT_EQ(0, hl_fs_policy_compile_manifest(cwd, &alloc, NULL, 0, wr, 1, &pol, &perr));
+    HlFsConfig fs = { .base_dir = cwd, .base_len = strlen(cwd), .policy = &pol };
+    HlManifestDbDynamic p = policy_sqlite();
+    const char *err = NULL;
+    char opened[HL_DB_DYNAMIC_DSN_MAX];
+
+    remove("dyn_nogrant_probe.db");
+    EXPECT_TRUE(hl_db_dynamic_open_ex("dyn_nogrant_probe.db", &p, &fs,
+                                      opened, sizeof opened, &err) == NULL);
+    EXPECT_TRUE(err != NULL && strstr(err, "fs.write") != NULL);
+    FILE *f = fopen("dyn_nogrant_probe.db", "rb");
+    EXPECT_TRUE(f == NULL);
+    if (f) fclose(f);
+
+    HlDbHandle *h = hl_db_dynamic_open_ex("dyn_grant_probe.db", &p, &fs,
+                                          opened, sizeof opened, &err);
+    ASSERT_TRUE(h != NULL);
+    char want[1100];
+    snprintf(want, sizeof want, "%s/dyn_grant_probe.db", cwd);
+    EXPECT_STREQ(want, opened);
+    hl_db_dynamic_close(h);
+    remove("dyn_grant_probe.db");
+    remove("dyn_grant_probe.db-wal");
+    remove("dyn_grant_probe.db-shm");
+    hl_fs_policy_free(&pol);
 }
 
 /* The process-wide concurrent-open cap trips (and does not overflow). */

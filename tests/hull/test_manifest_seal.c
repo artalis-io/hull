@@ -52,6 +52,13 @@ static void build_fixture(HlManifest *m, HlAllocator *alloc)
     m->env[1]          = DUP("DATABASE_URL"); m->env_count      = 2;
     m->hosts[0]        = DUP("api.stripe.com");
     m->hosts[1]        = DUP("example.com");  m->hosts_count    = 2;
+    m->secrets[0]      = DUP("PG_URL");       m->secrets_count  = 1;
+    m->kv.declared              = 1;
+    m->kv.dynamic.declared      = 1;
+    m->kv.dynamic.hosts[0]      = DUP("cache.internal");
+    m->kv.dynamic.host_count    = 1;
+    m->kv.dynamic.schemes[0]    = DUP("valkey");
+    m->kv.dynamic.scheme_count  = 1;
     m->csp             = DUP("default-src 'self'");
     m->csp_set         = 1;
     m->cors_origins[0] = DUP("https://app.example.com");
@@ -151,6 +158,18 @@ UTEST(manifest_seal, roundtrip_preserves_all_fields)
     ASSERT_STREQ("api.stripe.com", dst.hosts[0]);
     ASSERT_STREQ("example.com",  dst.hosts[1]);
     ASSERT_STREQ("default-src 'self'", dst.csp);
+
+    /* secrets, and kv.dynamic (read on every kv.open, and once sealed by
+     * nothing): copies, in the arena. */
+    ASSERT_EQ(1, dst.secrets_count);
+    ASSERT_STREQ("PG_URL", dst.secrets[0]);
+    ASSERT_TRUE(in_arena(&arena, dst.secrets[0]));
+    ASSERT_EQ(1, dst.kv.dynamic.host_count);
+    ASSERT_STREQ("cache.internal", dst.kv.dynamic.hosts[0]);
+    ASSERT_STREQ("valkey", dst.kv.dynamic.schemes[0]);
+    ASSERT_TRUE(in_arena(&arena, dst.kv.dynamic.hosts[0]));
+    ASSERT_TRUE(in_arena(&arena, dst.kv.dynamic.schemes[0]));
+    ASSERT_TRUE(dst.kv.dynamic.hosts[0] != src.kv.dynamic.hosts[0]);
 
     /* ssh.connect. This was value-copied but never sealed, so the sealed
      * manifest kept pointing at allocator memory: the one allowlist granting
@@ -383,6 +402,58 @@ UTEST(manifest_seal, write_to_sealed_module_set_faults)
     ASSERT_TRUE(sig == SIGSEGV || sig == SIGBUS);
 
     sh_seal_arena_destroy(&arena);
+}
+
+/* A "$VAR" reads the environment on the app's behalf, so it must name a
+ * variable the manifest declares - in secrets, or in env. */
+UTEST(manifest_env_refs, a_reference_must_name_a_declared_variable)
+{
+    HlAllocator alloc = {0};
+    HlManifest m;
+    build_fixture(&m, &alloc);
+    char err[512];
+
+    /* The fixture has no references: nothing to check. */
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+
+    /* Declared in secrets, or in env: accepted, in every field that resolves. */
+    m.databases.named[0].name = "main";
+    m.databases.named[0].dsn  = "$PG_URL";
+    m.databases.named_count   = 1;
+    m.databases.dynamic.hosts[0]   = "${DATABASE_URL}";
+    m.databases.dynamic.host_count = 1;
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+
+    /* Undeclared: refused, naming the field and the variable. */
+    const char *undeclared = "$AWS_SECRET_ACCESS_KEY";
+    m.databases.named[0].dsn = undeclared;
+    EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
+    EXPECT_TRUE(strstr(err, "databases.named") != NULL);
+    EXPECT_TRUE(strstr(err, "AWS_SECRET_ACCESS_KEY") != NULL);
+    m.databases.named[0].dsn = "$PG_URL";
+
+    const char **fields[] = {
+        &m.databases.dynamic.hosts[0], &m.kv.dynamic.hosts[0],
+        &m.ssh.connect.hosts[0], &m.ssh.tunnel.hosts[0],
+    };
+    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+        const char *saved = *fields[i];
+        *fields[i] = "${HOME}";
+        EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
+        *fields[i] = saved;
+    }
+    const char *saved_host = m.hosts[0];
+    m.hosts[0] = "$HOME";
+    EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
+    m.hosts[0] = saved_host;
+
+    /* A value that merely CONTAINS a '$' is literal, not a reference. */
+    m.databases.named[0].dsn = "postgres://u:pa$$word@db/app";
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+
+    m.databases.named_count = 0;   /* the borrowed literals above are not owned */
+    m.databases.dynamic.host_count = 0;
+    hl_manifest_free(&m);
 }
 
 UTEST_MAIN()
