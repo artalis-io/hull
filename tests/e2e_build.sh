@@ -97,6 +97,16 @@ check_exit() {
     fi
 }
 
+# Run a command for a moment and stop it: for a built server app given
+# arguments, which it keeps serving rather than exiting.
+run_briefly() {
+    "$@" >/dev/null 2>&1 &
+    _rb=$!
+    sleep 2
+    kill "$_rb" 2>/dev/null || true
+    wait "$_rb" 2>/dev/null || true
+}
+
 wait_for_server() {
     for _i in 1 2 3 4 5 6 7 8 9 10; do
         if curl -s "http://127.0.0.1:$1/" >/dev/null 2>&1; then
@@ -495,7 +505,9 @@ echo "=== Step 11: Built binary is a slim app-runner ==="
 # hull CLI dispatch, so it RUNS its app and does not answer hull subcommands
 # (keygen / manifest / etc.). Confirm the app-runner contract: keygen must not
 # produce a keypair (the binary treats "keygen" as an app arg, not a command).
-"$WORKDIR/multiapp/multiapp" keygen "$WORKDIR/app_key" >/dev/null 2>&1 || true
+# A built binary hands its bare words to the app, so this server app starts
+# serving: stop it, then check that no keypair appeared.
+run_briefly "$WORKDIR/multiapp/multiapp" -p 19874 keygen "$WORKDIR/app_key"
 if [ -f "$WORKDIR/app_key.pub" ]; then
     fail "built binary must NOT expose the keygen subcommand (app-runner only)"
 else
@@ -549,7 +561,7 @@ check_exit "build a second app exits 0" 0 $RC
 check_file_executable "produced binary exists and executable" "$WORKDIR/nullbin"
 
 # It is an app-runner, not a hull: keygen must not produce a keypair.
-"$WORKDIR/nullbin" keygen "$WORKDIR/nb_key" >/dev/null 2>&1 || true
+run_briefly "$WORKDIR/nullbin" -p 19875 keygen "$WORKDIR/nb_key"
 if [ -f "$WORKDIR/nb_key.pub" ]; then
     fail "produced binary must not expose hull subcommands (app-runner only)"
 else
