@@ -21,7 +21,9 @@
  * if (cookies.session_id) { ... }
  */
 function parse(headerString) {
-    const result = {};
+    // No prototype: a cookie named __proto__ was dropped, and an absent
+    // "constructor" read as Object's. As form.js and csv.js do.
+    const result = Object.create(null);
     if (!headerString || typeof headerString !== "string")
         return result;
 

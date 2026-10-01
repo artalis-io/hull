@@ -17,7 +17,9 @@
 
 // ── Internal state ──────────────────────────────────────────────────
 
-let locales = {};      // name -> locale table
+// No prototype: detect() looks request-supplied names up here, and on a
+// plain {} "constructor" or "toString" (from Accept-Language) was found.
+let locales = Object.create(null);      // name -> locale table
 let active = null;     // current locale name
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -284,7 +286,7 @@ function detect(headerOrReq) {
 }
 
 function reset() {
-    locales = {};
+    locales = Object.create(null);
     active = null;
 }
 

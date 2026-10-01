@@ -532,3 +532,17 @@ int hl_fs_resolve_parent(int root_fd, const char *relpath, HlFsSymlink sympol,
     out->parent_fd = parent_fd;
     return 0;
 }
+
+FILE *hl_fs_fopen_read(const char *base_dir, const char *relpath)
+{
+    if (!base_dir || !relpath) return NULL;
+    const char *err = NULL;
+    int root_fd = hl_fs_open_base(base_dir, &err);
+    if (root_fd < 0) return NULL;
+    int fd = hl_fs_open_at(root_fd, relpath, HL_FS_OPEN_READ, 0, &err);
+    close(root_fd);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "rb");
+    if (!f) close(fd);
+    return f;
+}

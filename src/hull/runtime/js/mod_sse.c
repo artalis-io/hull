@@ -111,7 +111,7 @@ static void js_sse_stream_finalizer(JSRuntime *rt, JSValue val)
         js_free_rt(rt, ud);
 }
 
-static JSClassDef js_sse_stream_class = {
+static const JSClassDef js_sse_stream_class = {
     "SseStream",
     .finalizer = js_sse_stream_finalizer,
 };

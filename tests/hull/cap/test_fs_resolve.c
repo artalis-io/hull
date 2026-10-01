@@ -185,6 +185,29 @@ UTEST(fs_resolve, symlink_interior_component_followed)
     teardown();
 }
 
+/* hl_fs_fopen_read: the runtime's own reads of app files (templates,
+ * shaders) get the same containment as hl_fs_open_at. */
+UTEST(fs_resolve, fopen_read_is_contained)
+{
+    setup();
+    mkdirp_host("templates");
+    wfile("templates/page.html", "hi");
+    FILE *f = hl_fs_fopen_read(base, "templates/page.html");
+    ASSERT_TRUE(f != NULL);
+    char b[16] = {0};
+    ASSERT_EQ(fread(b, 1, sizeof b - 1, f), (size_t)2);
+    ASSERT_STREQ("hi", b);
+    fclose(f);
+
+    EXPECT_TRUE(hl_fs_fopen_read(base, "../outside") == NULL);
+    EXPECT_TRUE(hl_fs_fopen_read(base, "/etc/hostname") == NULL);
+    EXPECT_TRUE(hl_fs_fopen_read(base, "templates/missing") == NULL);
+    /* A symlink out of the root is re-rooted, not followed. */
+    symln("/etc/hostname", "templates/escape");
+    EXPECT_TRUE(hl_fs_fopen_read(base, "templates/escape") == NULL);
+    teardown();
+}
+
 UTEST(fs_resolve, symlink_absolute_rerooted)
 {
     setup();

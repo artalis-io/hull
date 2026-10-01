@@ -10,6 +10,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "log.h"
 #include "hull/runtime/js.h"      /* HlJS, KlHttpResponse, hl_js_make_response */
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
 #include "hull/http_feature.h"    /* hl_js_http_error_response (seam strong) */
@@ -45,7 +46,7 @@ static void hl_response_finalizer(JSRuntime *rt, JSValue val)
     /* KlHttpResponse is owned by the connection pool, not by JS */
 }
 
-static JSClassDef hl_response_class = {
+static const JSClassDef hl_response_class = {
     "HlResponse",
     .finalizer = hl_response_finalizer,
 };
@@ -111,8 +112,11 @@ static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
     const char *name = JS_ToCString(ctx, argv[0]);
     const char *value = JS_ToCString(ctx, argv[1]);
 
-    if (name && value)
-        kl_http_response_header(res, name, value);
+    /* Rejected for a CR or LF (the header-injection guard). Not named in the
+     * log: the name may be the part carrying the CR/LF. */
+    if (name && value && kl_http_response_header(res, name, value) != 0)
+        log_warn("[hull] res.header: a header was dropped - its name or value "
+                 "contains CR or LF");
 
     if (value) JS_FreeCString(ctx, value);
     if (name) JS_FreeCString(ctx, name);

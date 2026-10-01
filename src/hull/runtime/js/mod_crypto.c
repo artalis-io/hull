@@ -1011,7 +1011,7 @@ static void js_sha256_hasher_finalizer(JSRuntime *rt, JSValue val)
     js_free_rt(rt, h);
 }
 
-static JSClassDef js_sha256_hasher_class = {
+static const JSClassDef js_sha256_hasher_class = {
     "Sha256Hasher",
     .finalizer = js_sha256_hasher_finalizer,
 };
@@ -1109,7 +1109,7 @@ static void js_crypto_key_finalizer(JSRuntime *rt, JSValue val)
     js_free_rt(rt, h);
 }
 
-static JSClassDef js_crypto_key_class = {
+static const JSClassDef js_crypto_key_class = {
     "CryptoKey",
     .finalizer = js_crypto_key_finalizer,
 };

@@ -251,6 +251,17 @@ function emailRateAllow(to) {
             });
             _emailRl = kept;
             _emailRl.set(key, bucket);
+            // Still over: a flood of distinct recipients, all inside the
+            // window, so the sweep kept them all - the map outgrew the cap
+            // and every new key paid an O(n) sweep. Drop the oldest-inserted
+            // (Map order) down to 90% of the cap, so the next sweep is a
+            // tenth of the cap away. The key just added is the newest.
+            if (_emailRl.size > max) {
+                const target = Math.floor(max * 0.9);
+                const it = _emailRl.keys();
+                while (_emailRl.size > target) _emailRl.delete(it.next().value);
+                _emailRl.set(key, bucket);
+            }
         }
     }
     bucket.ts = bucket.ts.filter(t => t > cutoff);

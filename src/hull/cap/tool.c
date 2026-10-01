@@ -132,7 +132,7 @@ int hl_tool_unveil_check(const HlToolUnveilCtx *ctx, const char *path, char need
 
 /* ── Compiler allowlist ────────────────────────────────────────────── */
 
-static const char *allowed_prefixes[] = {
+static const char *const allowed_prefixes[] = {
     "cc", "gcc", "clang", "cosmocc", "cosmoar", "ar", "wamrc", "hull",
     "ld",
     /* lld personalities spawned DIRECTLY (not via a cc driver) by
@@ -182,7 +182,7 @@ int hl_tool_check_allowlist(const char *binary)
             if (*c == '/' || *c == '\\') base = c + 1;
     }
 
-    for (const char **p = allowed_prefixes; *p; p++) {
+    for (const char *const *p = allowed_prefixes; *p; p++) {
         size_t plen = strlen(*p);
         if (strncmp(base, *p, plen) == 0) {
             /* Exact match or versioned variant (e.g. clang-18, gcc-12) */
@@ -210,7 +210,7 @@ int hl_tool_validate_args(const char *const argv[])
         if (strcmp(a, "-Xlinker") == 0)       return -1; /* linker pass */
         if (strncmp(a, "-Wl,", 4) == 0) {
             /* Only allow specific safe linker options after -Wl, */
-            static const char *safe_linker_flags[] = {
+            static const char *const safe_linker_flags[] = {
                 "--no-entry", "--export=", "--export-all", "--allow-undefined",
                 "--initial-memory=", "--max-memory=", "--stack-first",
                 "--import-memory", "--export-memory", "--shared-memory",
@@ -237,7 +237,7 @@ int hl_tool_validate_args(const char *const argv[])
             };
             const char *wl_arg = a + 4;
             int safe = 0;
-            for (const char **sf = safe_linker_flags; *sf; sf++) {
+            for (const char *const *sf = safe_linker_flags; *sf; sf++) {
                 size_t sflen = strlen(*sf);
                 if (strncmp(wl_arg, *sf, sflen) == 0) { safe = 1; break; }
             }

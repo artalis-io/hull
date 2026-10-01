@@ -323,6 +323,9 @@ local function refresh_jwks(provider_name)
     return by_kid
 end
 
+-- Seconds between JWKS fetches caused by an unknown kid.
+local JWKS_MIN_REFRESH = 60
+
 local function jwks_resolver(provider_name)
     return function(kid, _alg)
         local cache = _state._jwks_cache[provider_name]
@@ -331,6 +334,14 @@ local function jwks_resolver(provider_name)
                       and (time.now() - (cache.fetched_at or 0)) < ttl
         if fresh and cache.by_kid[kid] then
             return cache.by_kid[kid]
+        end
+        -- A kid still unknown within a minute of the last fetch stays
+        -- unknown: the key set was just read. Refetching for every such
+        -- token let anyone make the server fetch the IdP's JWKS once per
+        -- request.
+        if cache and not cache.by_kid[kid]
+           and (time.now() - (cache.fetched_at or 0)) < JWKS_MIN_REFRESH then
+            return nil
         end
         -- Stale OR unknown kid: refresh once. A still-unknown kid
         -- after refresh returns nil; signature verify then fails.

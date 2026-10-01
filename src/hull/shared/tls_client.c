@@ -16,8 +16,11 @@
 #include <keel/tls.h>
 #include <keel_tls_mbedtls.h>
 
+#include "log.h"
+
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -168,8 +171,17 @@ HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
     if (verify) {
         const unsigned char *cab = NULL;
         size_t cab_len = 0;
-        if (hl_ca_bundle_active(&cab, &cab_len) == 0)
+        if (hl_ca_bundle_active(&cab, &cab_len) == 0) {
             ctx = kl_tls_mbedtls_client_ctx_create_from_buf(cab, cab_len, alloc);
+        } else {
+            /* Only when --ca-bundle failed to load. Said once, here: the
+             * callers can only report a failed handshake, which reads like a
+             * network or certificate problem. */
+            static atomic_flag said = ATOMIC_FLAG_INIT;
+            if (!atomic_flag_test_and_set(&said))
+                log_error("[hull:tls] no CA anchor: the --ca-bundle file did "
+                          "not load, so verified TLS connections are refused");
+        }
     } else {
         ctx = kl_tls_mbedtls_client_ctx_create(NULL, alloc);
     }

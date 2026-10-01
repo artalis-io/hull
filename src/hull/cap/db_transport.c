@@ -622,7 +622,15 @@ HlDbTransport *hl_db_transport_connect(const char *tag, HlAllocator *alloc,
         set_err(errbuf, errlen, "invalid connect arguments");
         return NULL;
     }
-    int port_n = atoi(port);
+    /* Digits only, at most five: atoi wrapped "4294972528" to 5232, which
+     * then passed the range check. */
+    int port_n = 0;
+    size_t port_len = strlen(port);
+    if (port_len == 0 || port_len > 5) port_n = -1;
+    for (size_t i = 0; port_n >= 0 && i < port_len; i++) {
+        if (port[i] < '0' || port[i] > '9') port_n = -1;
+        else port_n = port_n * 10 + (port[i] - '0');
+    }
     if (port_n < 1 || port_n > 65535) {
         set_err(errbuf, errlen, "invalid port");
         return NULL;

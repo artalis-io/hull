@@ -20,6 +20,7 @@
 #define HULL_CAP_FS_RESOLVE_H
 
 #include <limits.h>    /* NAME_MAX */
+#include <stdio.h>     /* FILE */
 #include <sys/types.h>
 
 /*
@@ -71,6 +72,16 @@ typedef enum {
  * here - it is the ceiling, not a traversal step).
  */
 int hl_fs_open_base(const char *base_dir, const char **err);
+
+/*
+ * Open `relpath` under the app root `base_dir` for reading, as a stdio stream:
+ * hl_fs_open_base + hl_fs_open_at(READ) + fdopen, the containment the module
+ * loaders use - a symlink met on the way is re-rooted, never followed out of
+ * the root. NULL when it cannot be opened (missing, not a regular file, an
+ * invalid relpath...). For the runtime's own dev-mode reads of app files
+ * (templates, shaders); app code reads through hl_cap_fs_*.
+ */
+FILE *hl_fs_fopen_read(const char *base_dir, const char *relpath);
 
 /*
  * Resolve+open `relpath` under `root_fd` with virtual-root semantics.

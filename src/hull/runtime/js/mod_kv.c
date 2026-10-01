@@ -30,7 +30,7 @@ static void js_kv_conn_finalizer(JSRuntime *rt, JSValue val)
     if (c) hl_cap_kv_close(c);
 }
 
-static JSClassDef js_kv_conn_class = {
+static const JSClassDef js_kv_conn_class = {
     "hull.kv.conn",
     .finalizer = js_kv_conn_finalizer,
 };

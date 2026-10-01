@@ -1013,9 +1013,9 @@ static void js_chunks_finalizer(JSRuntime *rt, JSValue val)
     hl_alloc_free(a, c, sizeof(*c));
 }
 
-static JSClassDef js_iter_class   = { "MultipartIter",   .finalizer = js_iter_finalizer };
-static JSClassDef js_part_class   = { "MultipartPart",   .finalizer = js_part_finalizer };
-static JSClassDef js_chunks_class = { "MultipartChunks", .finalizer = js_chunks_finalizer };
+static const JSClassDef js_iter_class   = { "MultipartIter",   .finalizer = js_iter_finalizer };
+static const JSClassDef js_part_class   = { "MultipartPart",   .finalizer = js_part_finalizer };
+static const JSClassDef js_chunks_class = { "MultipartChunks", .finalizer = js_chunks_finalizer };
 
 /* ── req.multipart() entry point ─────────────────────────────────────── */
 

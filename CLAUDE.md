@@ -36,8 +36,11 @@ with `hl_ca_bundle_active`. It is resolved whenever the app may dial out (http
 sandbox's `network_outbound` uses), and file anchors are read into memory at
 startup, before the sandbox narrows file access. A `--ca-bundle` that fails to
 load leaves NO anchor, so those clients fail closed rather than falling back to
-the embedded bundle. `--no-ca-bundle` publishes nothing: a DSN asking for
-`sslmode=verify-full` still verifies, against the embedded bundle.
+the embedded bundle (with one ERROR saying so). `--no-ca-bundle` publishes
+nothing: it turns verification off for `http.fetch`, the SSH tunnel and
+synchronous SMTP only. The clients that read the published anchor - a DSN
+asking for `sslmode=verify-full`, and the async SMTP workers - still verify,
+against the embedded bundle.
 
 `hull doctor` reports both system and embedded availability. The new Keel API `kl_tls_mbedtls_client_ctx_create_from_buf()` loads PEM/DER directly from memory.
 
