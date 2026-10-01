@@ -293,15 +293,31 @@ jobs:
       # budget covered the download AND the e2e - so a slow fetch left the test
       # no time and reported as a test timeout, which is what it looked like
       # every time. Now the fetch has its own budget and the test keeps its own.
+      - name: Cache the Zig 0.13.0 tarball
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/cache@v4
+        with:
+          path: /tmp/zig.tar.xz
+          key: zig-0.13.0-x86_64-linux-d45312e61ebcc480
+
       - name: Install Zig 0.13.0
         if: runner.os == 'Linux' && runner.arch == 'X64'
-        timeout-minutes: 6
+        timeout-minutes: 15
         run: |
           set -eu
           if ! command -v zig >/dev/null 2>&1; then
-            curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
-              https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
-              -o /tmp/zig.tar.xz
+            # Cached between runs and checked against the SHA-256 ziglang.org
+            # publishes (download/index.json): the host has been slow enough that a
+            # fresh fetch overran its budget for hours at a time.
+            if [ -s /tmp/zig.tar.xz ] && ! echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c --status -; then
+              rm -f /tmp/zig.tar.xz            # a bad cached copy: fetch again
+            fi
+            if [ ! -s /tmp/zig.tar.xz ]; then
+              curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+                https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+                -o /tmp/zig.tar.xz
+            fi
+            echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c -
             sudo mkdir -p /opt/zig
             sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
             echo "/opt/zig" >> "$GITHUB_PATH"
@@ -2727,15 +2743,30 @@ jobs:
         with:
           submodules: true
 
+      - name: Cache the Zig 0.13.0 tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/zig.tar.xz
+          key: zig-0.13.0-x86_64-linux-d45312e61ebcc480
+
       - name: Install Zig 0.13.0
-        timeout-minutes: 6
+        timeout-minutes: 15
         run: |
           set -eu
           # --retry-all-errors also retries a partial transfer (curl exit 18),
           # the observed ziglang.org download flake.
-          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
-            https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
-            -o /tmp/zig.tar.xz
+          # Cached between runs and checked against the SHA-256 ziglang.org
+          # publishes (download/index.json): the host has been slow enough that a
+          # fresh fetch overran its budget for hours at a time.
+          if [ -s /tmp/zig.tar.xz ] && ! echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c --status -; then
+            rm -f /tmp/zig.tar.xz            # a bad cached copy: fetch again
+          fi
+          if [ ! -s /tmp/zig.tar.xz ]; then
+            curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+              https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+              -o /tmp/zig.tar.xz
+          fi
+          echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c -
           sudo mkdir -p /opt/zig
           sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
           echo "/opt/zig" >> "$GITHUB_PATH"
