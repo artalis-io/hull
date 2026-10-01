@@ -77,6 +77,27 @@ app.main(async (ctx) => {
 });
 ```
 
+### Where `ctx.args` comes from
+
+Under `hull`, the first bare word is the entry file and the app's arguments go
+after `--`; everything before it is Hull's own flags:
+
+```sh
+hull run app.lua -- world --verbose     # ctx.args = { "world", "--verbose" }
+hull run app.lua world                  # refused: "unexpected argument 'world'"
+```
+
+A `hull build` binary embeds its app and takes no entry argument, so its first
+bare word starts `ctx.args` (`--` still works):
+
+```sh
+./app world --verbose                   # ctx.args = { "world", "--verbose" }
+```
+
+In a built binary, Hull's own flags (`-d`, `--no-sandbox`, `--ca-bundle`,
+...) are recognised only before that first word; under `hull` they may appear
+anywhere before `--`.
+
 `ctx` is a flat bag. No methods beyond what's listed. Apps wanting richer
 IO (random-access file read, mmap, fifo) use `require("hull.fs")` exactly as
 HTTP apps do today.

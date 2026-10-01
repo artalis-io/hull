@@ -2,11 +2,16 @@
 //
 // Run: hull run app.js -- world
 //      hull run app.js -- alice
-//      echo "stuff" | hull run app.js --stdin
+//      echo "stuff" | hull run app.js -- --stdin
+//
+// Arguments for the app go after `--`; anything before it is Hull's. A
+// built binary takes no entry argument, so there they need no `--`:
+//      hull build && ./app world
 //
 // Demonstrates the CLI-mode (app.main) entry point: argv via ctx.args,
 // env vars via ctx.env, stdin/stdout/stderr via ctx streams, exit code
-// via the return value. Mutually exclusive with app.get/post/etc.
+// via the return value. A CLI tool declares no HTTP module, so `hull
+// build` links no HTTP server, event loop or TLS into it.
 
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
@@ -14,7 +19,6 @@ import { encoding } from "hull:encoding";
 
 app.manifest({
     modules: [
-    "hull/http-server@1",
         "hull/crypto@1",
         "hull/encoding@1",
     ],
@@ -23,7 +27,7 @@ app.manifest({
 
 function printUsage(stderr) {
     stderr.write("usage: hull run app.js -- <name>\n");
-    stderr.write("       hull run app.js --stdin   (read greeting target from stdin)\n");
+    stderr.write("       hull run app.js -- --stdin   (read greeting target from stdin)\n");
 }
 
 app.main((ctx) => {

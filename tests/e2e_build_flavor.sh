@@ -78,6 +78,24 @@ rc=$(hull_rc "$WORK/pc/app")
 [ "$rc" = 7 ] || fail "pure-compute app should exit 7, got $rc"
 pass "pure-compute (preset) builds on the default base + runs (exit 7)"
 
+# ── 3b. a built CLI binary's bare arguments are the app's ──────────────
+# A built binary takes no entry argument, so `./app alpha -x` hands the app
+# ["alpha", "-x"]. Both entry points: the Keel-free runner (serve_cli.c, a
+# compute app) and the server one (serve.c, an http-server app with app.main).
+# Each used to take "alpha" as an entry path and fail with "app context init
+# failed".
+ARGS_MAIN='app.main(function(ctx) if ctx.args[1] == "alpha" and ctx.args[2] == "-x" and #ctx.args == 2 then return 0 end return 3 end)'
+mkdir -p "$WORK/args_cli" "$WORK/args_srv"
+printf 'app.manifest({ modules = {} })\n%s\n' "$ARGS_MAIN" > "$WORK/args_cli/app.lua"
+printf 'app.manifest({ modules = { "hull/http-server@1" } })\n%s\n' "$ARGS_MAIN" > "$WORK/args_srv/app.lua"
+for d in args_cli args_srv; do
+    out=$("$HULL" build --no-verify-platform "$WORK/$d" -o "$WORK/$d/app" 2>&1) \
+        || fail "$d should build: $out"
+    rc=$(hull_rc "$WORK/$d/app" alpha -x)
+    [ "$rc" = 0 ] || fail "$d: './app alpha -x' should give the app [alpha, -x] (exit 0), got $rc"
+done
+pass "a built binary passes bare arguments to app.main (both entry points)"
+
 # ── 4. --flavor=auto infers pure-compute for an app.main app ───────────
 out=$("$HULL" build --no-verify-platform --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) \
     || fail "auto build failed: $out"

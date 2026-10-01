@@ -65,6 +65,17 @@ run_hello_cli() {
     : > "$HULL_RC_TMP.in"
     rc=$(HULL_RC_STDIN="$HULL_RC_TMP.in" hull_rc "${HULL_BIN}" run "${app}" -- --stdin)
     expect_eq "${runtime} hello_cli exit code on empty stdin" "2" "${rc}"
+
+    # 5. An app argument without `--` is refused with the fix spelled out. It
+    #    used to replace the entry point ("world" was loaded as the app) and
+    #    fail with only "app context init failed".
+    rc=$(hull_run "$HULL_RC_TMP" "${HULL_BIN}" run "${app}" world)
+    err=$(cat "$HULL_RC_TMP")
+    expect_eq "${runtime} hello_cli exit code on a stray argument" "1" "${rc}"
+    case "${err}" in
+        *"go after --"*) pass "${runtime} hello_cli stray argument names the fix" ;;
+        *)               fail "${runtime} hello_cli stray argument message (got '${err}')" ;;
+    esac
 }
 
 run_hello_cli "lua" "lua"

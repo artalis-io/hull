@@ -72,9 +72,22 @@ static const char **build_env_allowlist(const HlManifest *m)
     return arr;
 }
 
+/* A `hull build` binary embeds its app; the hull toolchain embeds none. */
+static int embedded_app_present(void)
+{
+    extern const HlEntry hl_app_entries[];
+    for (int i = 0; hl_app_entries[i].name; i++)
+        if (strcmp(hl_app_entries[i].name, "./app.js") == 0 ||
+            strcmp(hl_app_entries[i].name, "./app") == 0)
+            return 1;
+    return 0;
+}
+
 /* Extract entry point (first positional arg) and the `--` separator.
  * Returns the entry point's argv index, fills app_argc/app_argv pointers
- * to the slice past `--`. Returns -1 if no entry point given. */
+ * to the slice past `--`. Returns -1 if no entry point given, -2 on a stray
+ * argument (reported here). A built binary takes no entry argument: its
+ * first bare word starts the app's argv. */
 static int cli_parse_args(int argc, char **argv,
                           int *out_app_argc, char ***out_app_argv,
                           int *out_no_migrate, int *out_no_sandbox,
@@ -132,7 +145,22 @@ static int cli_parse_args(int argc, char **argv,
             continue;
         }
         if (argv[i][0] == '-') continue;
-        if (entry_idx < 0) entry_idx = i;
+        if (embedded_app_present()) {
+            /* `./app world`: this word and the rest are the app's. It used
+             * to be taken as an entry path, so a built CLI tool failed on
+             * its first argument. */
+            *out_app_argv = &argv[i];
+            *out_app_argc = argc - i;
+            break;
+        }
+        if (entry_idx >= 0) {
+            fprintf(stderr,
+                "hull: unexpected argument '%s' - arguments for the app go "
+                "after --:\n  hull %s -- %s\n",
+                argv[i], argv[entry_idx], argv[i]);
+            return -2;
+        }
+        entry_idx = i;
     }
     return entry_idx;
 }
@@ -158,6 +186,7 @@ int hull_serve(int argc, char **argv)
                                     &no_migrate, &no_sandbox,
                                     &allow_degraded_sandbox, &db_path,
                                     &skip_ca_bundle, &ca_bundle_override);
+    if (entry_idx == -2) return 1;
     if (!db_path) db_path = getenv("HULL_DB");
 
     /* Resolve the entry point. A `hull build` binary embeds its app and is run
