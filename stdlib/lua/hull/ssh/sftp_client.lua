@@ -238,7 +238,7 @@ end
 --- Resolve a path on the server. Returns the canonical path.
 function Sftp:realpath(path)
     local r = self:request(sftp.build_realpath, path)
-    if r.type == "status" then return nil, sftp_error(r) end
+    if r.type ~= "name" then return nil, sftp_error(r) end
     return r.names[1] and r.names[1].filename
 end
 
@@ -319,6 +319,12 @@ function Sftp:list(path)
                 return nil, sftp_error(r)
             end
             break
+        end
+        -- Any other reply type (data, handle, ...) carries no names: a server
+        -- that sends one is not answering READDIR.
+        if r.type ~= "name" then
+            self:close_handle(h.handle)
+            return nil, sftp_error(r)
         end
         -- An empty reply that is not EOF makes no progress; answering it
         -- with another READDIR would loop for as long as the server likes.
