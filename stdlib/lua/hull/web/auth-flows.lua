@@ -206,7 +206,12 @@ local _state = {
     -- locked_until window. handle_login short-circuits with
     -- 429 + Retry-After during that window. Counter clears on
     -- successful login or password-reset confirm.
+    -- The count is kept per (account, client IP): keyed on the account
+    -- alone, five wrong passwords from anywhere locked anyone out. A
+    -- second, account-wide count with a much higher threshold still stops
+    -- a brute force spread over many addresses.
     max_failed_logins     = 5,
+    max_failed_logins_per_account = 50,
     lockout_duration      = 15 * 60,   -- 15 min
 
     -- Hardening: pwned-password check (opt-in). When true, register
@@ -653,6 +658,32 @@ local function send_email(to, template_name, ctx)
     _state.email_send(to, r.subject, r.html, r.text)
 end
 
+-- Run fn after the response has gone. Issuing a token and sending its email
+-- happen only for SOME addresses (an existing account, or a new one), and an
+-- email send is a network round trip: done inline, response time said
+-- whether an account exists. Deferred onto the event loop, every outcome
+-- answers equally fast. Inline only where there is no loop to defer onto
+-- (an in-process test harness); a failure is logged, not raised - the
+-- response is already sent.
+local function after_response(fn)
+    local H = hull
+    local run = function()
+        local ok, err = pcall(fn)
+        if not ok then
+            require("hull.log").warn("auth-flows: deferred email failed: "
+                                     .. tostring(err))
+        end
+    end
+    if H and H.async and H.sleep then
+        local spawned = pcall(H.async, function()
+            pcall(H.sleep, 1)   -- yields to the loop; fails without one
+            run()
+        end)
+        if spawned then return end
+    end
+    run()
+end
+
 -- Cheap GC. Called opportunistically from the request path after
 -- a successful confirm so the consumed-token table doesn't grow
 -- unboundedly. Apps that want determinism can also schedule
@@ -689,7 +720,7 @@ local function lockout_remaining(user_id)
     return 0
 end
 
-local function bump_failed_login(user_id)
+local function bump_failed_login(user_id, max)
     local now = time.now()
     -- Portable conditional upsert. The original used INSERT ... ON CONFLICT
     -- DO UPDATE, which MySQL spells differently (ON DUPLICATE KEY UPDATE), so
@@ -723,7 +754,7 @@ local function bump_failed_login(user_id)
         now,           -- failed_count CASE: window-expired check
         now,           -- last_failed_at
         now,           -- locked_until CASE: window-expired check
-        _state.max_failed_logins, now, _state.lockout_duration,
+        max, now, _state.lockout_duration,
         user_id }
     if db.exec(update_sql, update_args) > 0 then return end
     -- No existing row: first failure for this user. INSERT; if a concurrent
@@ -750,6 +781,23 @@ end
 local function clear_failed_logins(user_id)
     db.exec("DELETE FROM _hull_auth_login_attempts WHERE user_id = ?",
             { user_id })
+end
+
+-- The lockout rows a login touches: one for (account, client IP), keyed
+-- `<user_id> \31 <ip>` in the same column (no schema change), and the
+-- account-wide one keyed by the user id alone.
+local IP_SEP = "\31"
+local function attempt_ip_key(uid, req)
+    return tostring(uid) .. IP_SEP
+           .. (_request.client_ip(req, _state.trust_proxy) or "_anon")
+end
+
+-- Every row for an account, after a password reset proves control of it.
+local function clear_all_failed_logins(uid)
+    local pat = tostring(uid):gsub("[!%%_]", "!%0") .. IP_SEP .. "%"
+    db.exec("DELETE FROM _hull_auth_login_attempts "
+            .. "WHERE user_id = ? OR user_id LIKE ? ESCAPE '!'",
+            { uid, pat })
 end
 
 -- ── Pwned-password check (opt-in) ──────────────────────────────────
@@ -914,16 +962,18 @@ local function handle_register(req, res)
         return res:status(500):json({ error = "user_create returned an id that user_get cannot resolve" })
     end
 
-    local token = issue_token(user_id,
-        ACTIONS.verify_email, _state.verify_ttl)
     local origin = origin_for(req)
-    if origin then
-        local verify_url = origin .. _state.prefix
-                           .. "/verify?token=" .. token
-        send_email(body.email, "welcome", {
-            user = user, verify_url = verify_url, token = token,
-        })
-    end
+    after_response(function()
+        local token = issue_token(user_id,
+            ACTIONS.verify_email, _state.verify_ttl)
+        if origin then
+            local verify_url = origin .. _state.prefix
+                               .. "/verify?token=" .. token
+            send_email(body.email, "welcome", {
+                user = user, verify_url = verify_url, token = token,
+            })
+        end
+    end)
     res:json({ ok = true })
 end
 
@@ -942,16 +992,18 @@ local function handle_verify_resend(req, res)
     local user = _state.user_find_by_email(body.email)
     if not user or user.email_verified then return generic_ok(res) end
     local user_id = user_uid(user)
-    local token = issue_token(user_id, ACTIONS.verify_email,
-                               _state.verify_ttl)
     local origin = origin_for(req)
-    if origin then
-        local verify_url = origin .. _state.prefix
-                           .. "/verify?token=" .. token
-        send_email(body.email, "welcome", {
-            user = user, verify_url = verify_url, token = token,
-        })
-    end
+    after_response(function()
+        local token = issue_token(user_id, ACTIONS.verify_email,
+                                   _state.verify_ttl)
+        if origin then
+            local verify_url = origin .. _state.prefix
+                               .. "/verify?token=" .. token
+            send_email(body.email, "welcome", {
+                user = user, verify_url = verify_url, token = token,
+            })
+        end
+    end)
     res:json({ ok = true })
 end
 
@@ -1035,7 +1087,10 @@ local function handle_login(req, res)
     -- user who's already authenticated through a different channel
     -- (e.g. mobile app) can read the counter via the (private)
     -- lockout_remaining helper on their own.
-    local pre_locked = user and lockout_remaining(user_uid(user)) > 0
+    local uid    = user and user_uid(user)
+    local ip_key = uid and attempt_ip_key(uid, req)
+    local pre_locked = user and (lockout_remaining(ip_key) > 0
+                                 or lockout_remaining(uid) > 0)
     -- Run verify_password unconditionally when enumeration_safe is on,
     -- using a pre-computed dummy hash on the unknown-email branch so
     -- network timing is identical between known and unknown emails.
@@ -1045,15 +1100,19 @@ local function handle_login(req, res)
     local pw_ok  = (_state.enumeration_safe or user ~= nil)
                    and crypto.verify_password(body.password, pwhash)
     if pre_locked or not user or not user.password_hash or not pw_ok then
-        if user and not pre_locked then bump_failed_login(user_uid(user)) end
+        if user and not pre_locked then
+            bump_failed_login(ip_key, _state.max_failed_logins)
+            bump_failed_login(uid, _state.max_failed_logins_per_account)
+        end
         return res:status(401):json({ error = "invalid credentials" })
     end
     if _state.require_verified_email and not user.email_verified then
         return res:status(403):json({ error = "email not verified" })
     end
-    -- Successful auth - clear the failed-attempts row so subsequent
-    -- typos don't accumulate against a long-standing baseline.
-    clear_failed_logins(user_uid(user))
+    -- Successful auth - clear this address's row and the account-wide one
+    -- so subsequent typos don't accumulate against a long-standing baseline.
+    clear_failed_logins(ip_key)
+    clear_failed_logins(uid)
     if _state.enable_totp
        and _state.user_totp_enrolled(user_uid(user)) then
         return start_totp_pending(req, res, user)
@@ -1094,16 +1153,18 @@ local function handle_magic_link(req, res)
         -- sibling sites in handle_register / handle_magic_link_consume).
         if not user then return generic_ok(res) end
     end
-    local token = issue_token(user_uid(user),
-        ACTIONS.magic_link, _state.magic_link_ttl)
     local origin = origin_for(req)
-    if origin then
-        local link = origin .. _state.prefix
-                     .. "/magic-link/consume?token=" .. token
-        send_email(body.email, "magic_link", {
-            user = user, link = link, token = token,
-        })
-    end
+    after_response(function()
+        local token = issue_token(user_uid(user),
+            ACTIONS.magic_link, _state.magic_link_ttl)
+        if origin then
+            local link = origin .. _state.prefix
+                         .. "/magic-link/consume?token=" .. token
+            send_email(body.email, "magic_link", {
+                user = user, link = link, token = token,
+            })
+        end
+    end)
     res:json({ ok = true })
 end
 
@@ -1201,16 +1262,18 @@ local function handle_password_reset_request(req, res)
     end
     local user = _state.user_find_by_email(body.email)
     if not user then return generic_ok(res) end
-    local token = issue_token(user_uid(user),
-        ACTIONS.password_reset, _state.reset_ttl, reset_token_extra(user))
     local origin = origin_for(req)
-    if origin then
-        local link = origin .. _state.prefix
-                     .. "/password-reset/confirm?token=" .. token
-        send_email(body.email, "password_reset", {
-            user = user, link = link, token = token,
-        })
-    end
+    after_response(function()
+        local token = issue_token(user_uid(user),
+            ACTIONS.password_reset, _state.reset_ttl, reset_token_extra(user))
+        if origin then
+            local link = origin .. _state.prefix
+                         .. "/password-reset/confirm?token=" .. token
+            send_email(body.email, "password_reset", {
+                user = user, link = link, token = token,
+            })
+        end
+    end)
     res:json({ ok = true })
 end
 
@@ -1241,7 +1304,7 @@ local function handle_password_reset_confirm(req, res)
     -- demonstrably controls the email, so any prior lockout is
     -- moot. (If they don't reset, the lockout window expires
     -- naturally per lockout_duration.)
-    clear_failed_logins(env.sub)
+    clear_all_failed_logins(env.sub)
     -- Audit + give the app a chance to invalidate existing
     -- sessions. The recommended on_password_reset implementation
     -- is `function(req,res,user) session.destroy_all(user.id) end`;
@@ -1705,6 +1768,8 @@ function M.init(opts)
                                      or _state.totp_pending_redirect
     _state.max_failed_logins       = opts.max_failed_logins
                                      or _state.max_failed_logins
+    _state.max_failed_logins_per_account = opts.max_failed_logins_per_account
+                                     or _state.max_failed_logins_per_account
     _state.lockout_duration        = opts.lockout_duration
                                      or _state.lockout_duration
     _state.check_pwned_passwords   = opts.check_pwned_passwords == true
@@ -1892,6 +1957,7 @@ M._test = {
         _state.check_pwned_passwords   = false
         _state.pwned_endpoint          = nil
         _state.max_failed_logins       = 5
+        _state.max_failed_logins_per_account = 50
         _state.lockout_duration        = 15 * 60
         _state.sign_in_log             = false
         _state.audit_log               = nil

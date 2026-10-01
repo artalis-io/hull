@@ -4357,20 +4357,23 @@ UTEST(lua_stdlib, csv_encode_sanitize_formulas)
     init_lua();
     ASSERT_TRUE(lua_initialized);
 
-    /* Off by default: a formula cell is emitted verbatim. */
-    char *plain = eval_str("require('hull.csv').encode({{'=cmd|calc'}})");
+    /* On by default: a leading = / @ / - (etc.) is prefixed with a ' so a
+     * spreadsheet treats it as text; a plain number and a non-formula cell
+     * are untouched. */
+    char *safe = eval_str(
+        "require('hull.csv').encode({{'=cmd|calc'},{'@x'},{'-2+3+cmd|x'},"
+        "{'-5'},{'+3.2'},{'1e-3'},{'-1+1'},{'ok'}})");
+    ASSERT_NE(safe, NULL);
+    ASSERT_STREQ(safe,
+        "'=cmd|calc\n'@x\n'-2+3+cmd|x\n-5\n+3.2\n1e-3\n'-1+1\nok\n");
+    free(safe);
+
+    /* Opt out: emitted verbatim. */
+    char *plain = eval_str(
+        "require('hull.csv').encode({{'=cmd|calc'}}, { sanitize_formulas = false })");
     ASSERT_NE(plain, NULL);
     ASSERT_STREQ(plain, "=cmd|calc\n");
     free(plain);
-
-    /* Opt-in: a leading = / @ (etc.) is prefixed with a ' so a spreadsheet
-     * treats it as text; a non-formula cell is untouched. */
-    char *safe = eval_str(
-        "require('hull.csv').encode({{'=cmd|calc'},{'@x'},{'ok'}}, "
-        "{ sanitize_formulas = true })");
-    ASSERT_NE(safe, NULL);
-    ASSERT_STREQ(safe, "'=cmd|calc\n'@x\nok\n");
-    free(safe);
 
     cleanup_lua();
 }

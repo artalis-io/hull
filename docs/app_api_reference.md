@@ -313,11 +313,23 @@ verify step between successful first-factor auth and `on_login` when
   - **Hardening options** (all opt-in via init):
     - `opts.max_failed_logins` (default `5`) + `opts.lockout_duration`
       (default `900` = 15 min). After N consecutive failed-password
-      attempts, the user's row in `_hull_auth_login_attempts` trips
-      a `locked_until` window; `handle_login` responds 429 +
-      `Retry-After` during the window regardless of whether the
-      submitted password is right. Counter clears on successful
-      login OR `password-reset/confirm`.
+      attempts **from one client IP**, that (account, IP) pair trips a
+      `locked_until` window in `_hull_auth_login_attempts`; login then
+      fails during the window regardless of whether the submitted
+      password is right (the same 401 as a wrong password, so the lock
+      does not reveal that the account exists). Keyed on the account
+      alone, five wrong passwords from anywhere locked anyone out.
+      `opts.max_failed_logins_per_account` (default `50`;
+      `maxFailedLoginsPerAccount` in JS) is a second, account-wide count
+      that still stops a brute force spread over many addresses. The
+      client IP honours `trust_proxy`. Counters clear on successful login
+      (that address and the account-wide one) or `password-reset/confirm`
+      (all of them).
+    - Registration, verify-resend, magic-link and password-reset requests
+      issue their token and send their email **after** the response, on the
+      event loop: those steps happen only for some addresses, so doing them
+      inline let response time say whether an account exists. A failing
+      `email_send` is logged instead of failing the request.
     - `opts.check_pwned_passwords` (default `false`). Routes
       register + password-reset-confirm through `hull/web/pwned`
       (HIBP k-anonymity). Apps must add `api.pwnedpasswords.com`
@@ -538,6 +550,11 @@ template.clearCache();                           // clear compiled function cach
 **csv.encode(rows, opts?)**. Encode rows as CSV text.
 - `opts.headers`. Rows are objects; emit header row (default: `false`)
 - `opts.separator`. Field delimiter (default: `","`)
+- `opts.sanitize_formulas` (`sanitizeFormulas` in JS, default **`true`**).
+  A cell beginning with `= + - @` (or a tab / CR) gets a leading `'`, so a
+  spreadsheet opening the export treats it as text, not a formula or DDE
+  call. Plain numbers (`-5`, `+3.2`, `1e-3`) are left alone. Pass `false`
+  for output that is not meant for a spreadsheet.
 - Returns CSV string.
 
 **tar** (`hull.archive.tar` / `hull:archive:tar`). ustar (`.tar`) archive
