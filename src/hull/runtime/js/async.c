@@ -9,6 +9,7 @@
 
 #include "hull/runtime/js.h"
 #include "internal.h"
+#include "hull/shared/req_life.h"
 #include "hull/http_feature.h"  /* hl_js_http_error_response (HTTP-feature seam) */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
@@ -42,6 +43,7 @@ typedef struct HlJsAsyncCont {
      * once on fulfilled / rejected completion. */
     void            (*on_complete)(HlJS *js, void *ctx);
     void             *on_complete_ctx;
+    HlReqLife        *life;         /* the handler's request life (ref held) */
 } HlJsAsyncCont;
 
 /*
@@ -130,12 +132,14 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
      * carries it onto the next continuation. */
     js->active_on_complete     = jc->on_complete;
     js->active_on_complete_ctx = jc->on_complete_ctx;
+    js->active_life            = jc->life;
 
     /* Drain microtasks - this continues the handler past the await */
     hl_js_run_jobs(js);
 
     js->active_on_complete     = NULL;
     js->active_on_complete_ctx = NULL;
+    js->active_life            = NULL;
 
     /* Check outer handler promise state (per-continuation ref) */
     JSPromiseStateEnum state = JS_PromiseState(ctx, jc->handler_promise);
@@ -157,8 +161,10 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->async_pending = 0;
         js->active_conn = NULL;
 
-        /* Handler that awaited has now completed - run any deferred-teardown
-         * hook (e.g. ws on_close conn teardown). */
+        /* Handler that awaited has now completed - its request objects (res,
+         * an SSE stream) are done, and run any deferred-teardown hook (e.g.
+         * ws on_close conn teardown). */
+        hl_req_life_kill(jc->life);
         if (jc->on_complete) {
             jc->on_complete(js, jc->on_complete_ctx);
             jc->on_complete = NULL;
@@ -207,6 +213,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
 
         /* Run any deferred-teardown hook (handler rejected after awaiting). */
+        hl_req_life_kill(jc->life);
         if (jc->on_complete) {
             jc->on_complete(js, jc->on_complete_ctx);
             jc->on_complete = NULL;
@@ -274,6 +281,9 @@ static void hl_js_async_cancel(HlAsyncCont *self)
         jc->handler_promise = JS_UNDEFINED;
     }
     jc->conn = NULL;
+    /* The connection is gone: so is the request every `res` / stream object
+     * of this handler points into. */
+    hl_req_life_kill(jc->life);
 }
 
 /*
@@ -297,6 +307,7 @@ static void hl_js_async_destroy(HlAsyncCont *self)
      * dispatch then attached the handler promise to freed memory. */
     if (jc->js && jc->js->last_async_cont == jc)
         jc->js->last_async_cont = NULL;
+    hl_req_life_release(jc->life);
     hl_alloc_free(jc->alloc, jc, sizeof(HlJsAsyncCont));
 }
 
@@ -349,6 +360,8 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
     jc->timer_ctx       = js->active_timer;  /* inherit timer ctx if in timer callback */
     jc->on_complete     = js->active_on_complete;     /* deferred-teardown hook */
     jc->on_complete_ctx = js->active_on_complete_ctx;
+    jc->life            = js->active_life;
+    hl_req_life_retain(jc->life);
 
     /* Store pointer so dispatch/resume can wire handler_promise */
     js->last_async_cont = jc;

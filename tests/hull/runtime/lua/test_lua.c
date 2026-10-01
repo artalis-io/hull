@@ -2087,6 +2087,43 @@ UTEST(lua_middleware, dispatch_return_nonzero_short_circuits)
     cleanup_lua();
 }
 
+/* A `res` kept past its request fails closed: middleware stashes it, the
+ * request finishes, and using it later raises instead of writing into a
+ * response that was sent (on a connection that may be gone). */
+UTEST(lua_middleware, res_kept_past_its_request_fails_closed)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.use('*', '/*', function(req, res) KEPT = res; res:status(201); return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "handler_id");
+    int handler_id = (int)lua_tointeger(lua_rt.L, -1);
+    lua_pop(lua_rt.L, 3);
+
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    ASSERT_EQ(hl_lua_dispatch_middleware(&lua_rt, handler_id, &req, &res), 0);
+    EXPECT_EQ(res.status, 201);   /* usable while the request runs */
+
+    rc = luaL_dostring(lua_rt.L, "KEPT:status(500)");
+    EXPECT_NE(rc, LUA_OK);
+    if (rc != LUA_OK) {
+        const char *err = lua_tostring(lua_rt.L, -1);
+        EXPECT_TRUE(err && strstr(err, "has finished") != NULL);
+        lua_pop(lua_rt.L, 1);
+    }
+    EXPECT_EQ(res.status, 201);   /* and nothing was written after */
+
+    free_lua_req_ctx(&req);
+    cleanup_lua();
+}
+
 /* Track allocations from wire_routes_server to free them later */
 static void *wiring_allocs_lua[16];
 static int   wiring_alloc_count_lua;

@@ -218,6 +218,11 @@ static inline const char *hl_lua_chunkname(char *buf, size_t n,
  * internal modules to app code - a C caller has no Lua frame to check. */
 int hl_lua_require_trusted(lua_State *L);
 
+/* on_complete hook (HlLua::active_on_complete) that ends a request life
+ * (shared/req_life.h): the handler that owned it has finished, failed, or
+ * was cancelled because the client went away. */
+void hl_lua_req_life_end_cb(struct HlLua *lua, void *life);
+
 /* The chunkname for an APP file loaded from disk. A chunkname starting with
  * "hull." is what marks the stdlib (hl_lua_source_is_stdlib), and a dev-mode
  * path is app-relative with its "./" collapsed, so `require("./hull.evil")`

@@ -10,6 +10,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/req_life.h"
 
 #include <keel/http_sse.h>
 
@@ -24,7 +25,16 @@ JSClassID js_sse_stream_class_id;
 typedef struct {
     KlHttpSse    sse;
     int      closed;
+    HlReqLife *life;  /* the request's life (shared/req_life.h) */
 } HlJSSseStreamUD;
+
+/* Closed by the script, or its request is over: a stream kept past its
+ * request (fan-out lists are the usual case) holds a write path into a
+ * connection that may have gone away, so it fails closed. */
+static int stream_dead(const HlJSSseStreamUD *ud)
+{
+    return !ud || ud->closed || !hl_req_life_live(ud->life);
+}
 
 /* ── Methods ───────────────────────────────────────────────────────── */
 
@@ -33,7 +43,7 @@ static JSValue js_sse_event(JSContext *ctx, JSValueConst this_val,
 {
     HlJSSseStreamUD *ud = (HlJSSseStreamUD *)JS_GetOpaque2(ctx, this_val,
                                                               js_sse_stream_class_id);
-    if (!ud || ud->closed)
+    if (stream_dead(ud))
         return JS_ThrowTypeError(ctx, "SSE stream is closed");
 
     if (argc < 2)
@@ -71,7 +81,7 @@ static JSValue js_sse_comment(JSContext *ctx, JSValueConst this_val,
     (void)argc;
     HlJSSseStreamUD *ud = (HlJSSseStreamUD *)JS_GetOpaque2(ctx, this_val,
                                                               js_sse_stream_class_id);
-    if (!ud || ud->closed)
+    if (stream_dead(ud))
         return JS_ThrowTypeError(ctx, "SSE stream is closed");
 
     size_t len;
@@ -92,7 +102,7 @@ static JSValue js_sse_close(JSContext *ctx, JSValueConst this_val,
     (void)argc; (void)argv;
     HlJSSseStreamUD *ud = (HlJSSseStreamUD *)JS_GetOpaque2(ctx, this_val,
                                                               js_sse_stream_class_id);
-    if (!ud || ud->closed)
+    if (stream_dead(ud))
         return JS_UNDEFINED;
 
     kl_http_sse_end(&ud->sse);
@@ -108,6 +118,7 @@ static void js_sse_stream_finalizer(JSRuntime *rt, JSValue val)
     HlJSSseStreamUD *ud = (HlJSSseStreamUD *)JS_GetOpaque(val,
                                                              js_sse_stream_class_id);
     if (ud)
+        hl_req_life_release(ud->life);
         js_free_rt(rt, ud);
 }
 
@@ -138,7 +149,8 @@ void hl_js_sse_register_class(JSContext *ctx)
 
 /* Create and return an SSE stream JS object. Calls kl_http_sse_begin.
  * Returns JS_EXCEPTION on error. */
-JSValue hl_js_sse_create_stream(JSContext *ctx, KlHttpResponse *res)
+JSValue hl_js_sse_create_stream(JSContext *ctx, KlHttpResponse *res,
+                                HlReqLife *life)
 {
     JSValue obj = JS_NewObjectClass(ctx, (int)js_sse_stream_class_id);
     if (JS_IsException(obj))
@@ -150,6 +162,7 @@ JSValue hl_js_sse_create_stream(JSContext *ctx, KlHttpResponse *res)
         return JS_EXCEPTION;
     }
     ud->closed = 0;
+    ud->life = NULL;
 
     if (kl_http_sse_begin(res, &ud->sse) < 0) {
         js_free(ctx, ud);
@@ -157,6 +170,8 @@ JSValue hl_js_sse_create_stream(JSContext *ctx, KlHttpResponse *res)
         return JS_EXCEPTION;
     }
 
+    ud->life = life;
+    hl_req_life_retain(life);
     JS_SetOpaque(obj, ud);
     return obj;
 }

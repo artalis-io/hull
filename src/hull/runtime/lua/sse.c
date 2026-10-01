@@ -9,6 +9,7 @@
  */
 
 #include "internal.h"
+#include "hull/shared/req_life.h"
 
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
@@ -71,6 +72,18 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         return;
     }
 
+    /* The request's life: the stream holds it, and it ends when this handler
+     * is done - including when the client goes away mid-stream (cancel). A
+     * stream kept for fan-out then fails closed instead of writing into a
+     * connection that is gone. */
+    HlReqLife *life = hl_req_life_new();
+    if (!life) {
+        lua_pop(lua->L, 2); /* pop function + routes table */
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
+        return;
+    }
+
     /* Create coroutine */
     lua_State *co = lua_newthread(lua->L);
     int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
@@ -82,8 +95,9 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     hl_lua_make_request(co, req);
 
     /* Create SSE stream userdata (calls kl_http_sse_begin) */
-    struct HlSseStreamUD *stream_ud = hl_lua_sse_push_stream(co, res);
+    struct HlSseStreamUD *stream_ud = hl_lua_sse_push_stream(co, res, life);
     if (!stream_ud) {
+        hl_req_life_end(life);
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua_pop(lua->L, 1); /* pop routes table */
         lua->active_conn = NULL;
@@ -103,14 +117,21 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
                     INSTR_COUNT(lua->max_instructions));
 
+    lua->active_on_complete     = hl_lua_req_life_end_cb;
+    lua->active_on_complete_ctx = life;
+
     /* Resume: handler(req, stream) */
     int nres = 0;
     int status = lua_resume(co, lua->L, 2, &nres);
+
+    lua->active_on_complete     = NULL;
+    lua->active_on_complete_ctx = NULL;
 
     if (status == LUA_OK) {
         /* Synchronous completion - end stream if not already closed */
         if (!stream_ud->closed)
             kl_http_sse_end(&stream_ud->sse);
+        hl_req_life_end(life);
 
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
@@ -132,6 +153,7 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
 
         if (!stream_ud->closed)
             kl_http_sse_end(&stream_ud->sse);
+        hl_req_life_end(life);
 
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;

@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/req_life.h"
 #include "internal.h"
 #include "hull/http_feature.h"  /* hl_lua_http_error_response (HTTP-feature seam) */
 
@@ -69,6 +70,16 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         return -1;
     }
 
+    /* The request's life: `res` holds it, and it ends when this handler is
+     * done (below, or in the async continuation's completion / cancel). */
+    HlReqLife *life = hl_req_life_new();
+    if (!life) {
+        lua_pop(lua->L, 2); /* pop function + routes table */
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
+        return -1;
+    }
+
     /* Create coroutine for this handler invocation */
     lua_State *co = lua_newthread(lua->L);
     int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
@@ -78,7 +89,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
 
     /* Build request and response objects on the coroutine stack */
     hl_lua_make_request(co, req);
-    hl_lua_make_response(co, res);
+    hl_lua_make_response_life(co, res, life);
 
     /* Set coroutine state for async C functions */
     lua->active_co = co;
@@ -89,9 +100,19 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
                     INSTR_COUNT(lua->max_instructions));
 
+    /* A continuation created while the handler runs captures this, so the
+     * life ends when the handler finally completes, or is cancelled. */
+    lua->active_on_complete     = hl_lua_req_life_end_cb;
+    lua->active_on_complete_ctx = life;
+
     /* Resume coroutine: handler(req, res) */
     int nres = 0;
     int status = lua_resume(co, lua->L, 2, &nres);
+
+    lua->active_on_complete     = NULL;
+    lua->active_on_complete_ctx = NULL;
+    if (status != LUA_YIELD)
+        hl_req_life_end(life);
 
     if (status == LUA_OK) {
         /* Synchronous completion - same as lua_pcall path */
@@ -153,6 +174,12 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     return -1;
 }
 
+void hl_lua_req_life_end_cb(HlLua *lua, void *life)
+{
+    (void)lua;
+    hl_req_life_end((HlReqLife *)life);
+}
+
 void hl_lua_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlLuaRoute *route = (HlLuaRoute *)user_data;
@@ -196,9 +223,17 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
         return -1;
     }
 
+    /* Middleware runs to completion (lua_pcall, no yield), so its `res`
+     * belongs to this call alone: the life ends as soon as it returns. */
+    HlReqLife *life = hl_req_life_new();
+    if (!life) {
+        lua_pop(lua->L, 2); /* pop function + routes table */
+        return -1;
+    }
+
     /* Build request and response objects */
     hl_lua_make_request(lua->L, req);
-    hl_lua_make_response(lua->L, res);
+    hl_lua_make_response_life(lua->L, res, life);
 
     /* Save a reference to the req table in the registry so we can
      * read ctx after pcall (which consumes the arguments). */
@@ -206,7 +241,9 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
 
     /* Call handler(req, res) - expect 1 return value */
-    if (lua_pcall(lua->L, 2, 1, 0) != LUA_OK) {
+    int mw_rc = lua_pcall(lua->L, 2, 1, 0);
+    hl_req_life_end(life);
+    if (mw_rc != LUA_OK) {
         char ebuf[512];
         log_error("[hull:c] lua middleware error: %s",
                   hl_lua_error_text(lua, lua->L, -1, ebuf, sizeof(ebuf)));

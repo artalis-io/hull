@@ -236,6 +236,13 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
         lc->co = NULL;
     }
     lc->conn = NULL;
+    /* The handler will never complete, so this is its end too: run the
+     * completion hook (end the request's life, tear down a ws conn) rather
+     * than leaving objects that point into a closed connection usable. */
+    if (lc->on_complete) {
+        lc->on_complete(lua, lc->on_complete_ctx);
+        lc->on_complete = NULL;
+    }
 }
 
 /*

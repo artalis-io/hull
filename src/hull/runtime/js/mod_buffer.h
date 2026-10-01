@@ -119,7 +119,9 @@ void    hl_js_ws_invalidate_conn(JSContext *ctx, struct HlWsConn *conn);
 extern JSClassID js_sse_stream_class_id;
 
 void    hl_js_sse_register_class(JSContext *ctx);
-JSValue hl_js_sse_create_stream(JSContext *ctx, KlHttpResponse *res);
+struct HlReqLife;
+JSValue hl_js_sse_create_stream(JSContext *ctx, KlHttpResponse *res,
+                                struct HlReqLife *life);
 int     hl_js_sse_stream_is_closed(JSContext *ctx, JSValueConst val);
 void    hl_js_sse_stream_force_close(JSContext *ctx, JSValueConst val);
 

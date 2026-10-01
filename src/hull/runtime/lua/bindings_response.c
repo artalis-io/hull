@@ -10,6 +10,7 @@
  */
 
 #include "log.h"
+#include "hull/shared/req_life.h"
 #include "hull/runtime/lua.h"     /* HlLua, KlHttpResponse, hl_lua_make_response */
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
 #include "hull/http_feature.h"    /* hl_lua_http_error_response (seam strong) */
@@ -42,10 +43,30 @@
  *   res:redirect(url, code) → HTTP redirect
  */
 
+/* The userdata: the response, and the life of the request it belongs to
+ * (shared/req_life.h). Used after its request is over - kept in a closure a
+ * timer runs, stashed in a global - it fails closed instead of writing into a
+ * response that was already sent, on a connection that may be gone. */
+typedef struct {
+    KlHttpResponse *res;
+    HlReqLife      *life;   /* NULL: not tracked (always live) */
+} HlLuaResUD;
+
 static KlHttpResponse *check_response(lua_State *L, int idx)
 {
-    KlHttpResponse **pp = (KlHttpResponse **)luaL_checkudata(L, idx, HL_RESPONSE_MT);
-    return *pp;
+    HlLuaResUD *ud = (HlLuaResUD *)luaL_checkudata(L, idx, HL_RESPONSE_MT);
+    if (!ud->res || !hl_req_life_live(ud->life))
+        luaL_error(L, "res: the request this response belongs to has finished");
+    return ud->res;
+}
+
+static int lua_res_gc(lua_State *L)
+{
+    HlLuaResUD *ud = (HlLuaResUD *)luaL_checkudata(L, 1, HL_RESPONSE_MT);
+    hl_req_life_release(ud->life);
+    ud->life = NULL;
+    ud->res = NULL;
+    return 0;
 }
 
 /* Has a header with this name (case-insensitive) already been added to
@@ -233,19 +254,29 @@ static void ensure_response_metatable(lua_State *L)
         /* First time - set up metatable */
         luaL_newlib(L, response_methods);
         lua_setfield(L, -2, "__index");
+        lua_pushcfunction(L, lua_res_gc);
+        lua_setfield(L, -2, "__gc");
     }
     lua_pop(L, 1); /* pop metatable */
 }
 
 /* ── Public: create Lua response userdata ───────────────────────────── */
 
-void hl_lua_make_response(lua_State *L, KlHttpResponse *res)
+void hl_lua_make_response_life(lua_State *L, KlHttpResponse *res,
+                               HlReqLife *life)
 {
     ensure_response_metatable(L);
 
-    KlHttpResponse **pp = (KlHttpResponse **)lua_newuserdata(L, sizeof(KlHttpResponse *));
-    *pp = res;
+    HlLuaResUD *ud = (HlLuaResUD *)lua_newuserdatauv(L, sizeof *ud, 0);
+    ud->res = res;
+    ud->life = life;
+    hl_req_life_retain(life);
     luaL_setmetatable(L, HL_RESPONSE_MT);
+}
+
+void hl_lua_make_response(lua_State *L, KlHttpResponse *res)
+{
+    hl_lua_make_response_life(L, res, NULL);
 }
 
 /* ── HTTP-feature seam: 500-error response ──────────────────────────── */
