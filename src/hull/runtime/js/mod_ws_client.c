@@ -39,6 +39,7 @@ typedef struct {
     JSValue         on_close;
     JSValue         on_error;
     JSValue         self_ref;    /* DupValue'd self object (prevent GC while active) */
+    int             release_scheduled;  /* self_ref release already queued */
     JSContext      *ctx;
     HlJS           *js;
 } HlJSWsClientUD;
@@ -240,6 +241,33 @@ static void js_ws_client_release_self(void *user_data)
     JS_FreeValue(ud->ctx, self);
 }
 
+/* The connection is over (closed, or failed - Keel closes it before calling
+ * on_error, and fires no on_close after). */
+static void js_ws_client_finish(HlJSWsClientUD *ud)
+{
+    /* Mark closed (methods fail closed) but keep `client` non-NULL so the
+     * finalizer frees the KlWsClientConn - Keel does NOT free it on close,
+     * and we must not free it here (Keel touches `ws` immediately after this
+     * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
+    ud->closed = 1;
+
+    /* Release the self-reference on the next loop turn, never here. When it
+     * is the last reference QuickJS runs the finalizer at once, freeing ud
+     * (this function then wrote ud->closed into freed memory) and the
+     * KlWsClientConn Keel is about to use. If no timer can be had the
+     * reference is kept: a leak until teardown, not a use after free. */
+    if (!JS_IsUndefined(ud->self_ref) && !ud->release_scheduled) {
+        const HlAsyncBackend *be = hl_async_backend();
+        if (!be || !ud->js->base.async_ctx ||
+            be->timer_add(ud->js->base.async_ctx, 0,
+                          js_ws_client_release_self, ud) == 0)
+            log_warn("[hull:ws:client] could not schedule the close "
+                     "release; the client is kept until shutdown");
+        else
+            ud->release_scheduled = 1;
+    }
+}
+
 static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
                                     const char *reason, size_t reason_len,
                                     void *user_data)
@@ -269,25 +297,7 @@ static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
         JS_FreeValue(ud->ctx, ret);
     }
 
-    /* Mark closed (methods fail closed) but keep `client` non-NULL so the
-     * finalizer frees the KlWsClientConn - Keel does NOT free it on close,
-     * and we must not free it here (Keel touches `ws` immediately after this
-     * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
-    ud->closed = 1;
-
-    /* Release the self-reference on the next loop turn, never here. When it
-     * is the last reference QuickJS runs the finalizer at once, freeing ud
-     * (this function then wrote ud->closed into freed memory) and the
-     * KlWsClientConn Keel is about to use. If no timer can be had the
-     * reference is kept: a leak until teardown, not a use after free. */
-    if (!JS_IsUndefined(ud->self_ref)) {
-        const HlAsyncBackend *be = hl_async_backend();
-        if (!be || !ud->js->base.async_ctx ||
-            be->timer_add(ud->js->base.async_ctx, 0,
-                          js_ws_client_release_self, ud) == 0)
-            log_warn("[hull:ws:client] could not schedule the close "
-                     "release; the client is kept until shutdown");
-    }
+    js_ws_client_finish(ud);
 }
 
 static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
@@ -297,6 +307,7 @@ static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
     if (JS_IsUndefined(ud->on_error)) {
         log_error("[hull:ws:client] error: %s", msg ? msg : "unknown");
+        js_ws_client_finish(ud);
         return;
     }
 
@@ -316,6 +327,10 @@ static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
         JS_FreeValue(ud->ctx, exc);
     }
     JS_FreeValue(ud->ctx, ret);
+    /* Terminal: Keel closed the connection and will not call on_close, so
+     * this is where the client is released (it stayed pinned until VM
+     * teardown). */
+    js_ws_client_finish(ud);
 }
 
 /* ── ws module functions ───────────────────────────────────────────── */
@@ -401,6 +416,7 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     ud->on_close = JS_IsFunction(ctx, on_close) ? on_close : (JS_FreeValue(ctx, on_close), JS_UNDEFINED);
     ud->on_error = JS_IsFunction(ctx, on_error) ? on_error : (JS_FreeValue(ctx, on_error), JS_UNDEFINED);
     ud->self_ref = JS_DupValue(ctx, obj); /* prevent GC while connected */
+    ud->release_scheduled = 0;
     ud->ctx = ctx;
     ud->js = js;
     ud->client = NULL;
@@ -430,28 +446,6 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     }
 
     ud->client = client;
-
-    /* Track for cleanup on runtime destroy */
-    if (js->ws_client_count >= js->ws_client_cap) {
-        size_t new_cap = js->ws_client_cap ? js->ws_client_cap * 2 : 4;
-        if (new_cap > SIZE_MAX / sizeof(void *)) {
-            JS_FreeValue(ctx, ud->self_ref);
-            ud->self_ref = JS_UNDEFINED;
-            JS_FreeValue(ctx, obj);
-            return JS_ThrowInternalError(ctx, "too many WebSocket clients");
-        }
-        size_t old_sz = js->ws_client_cap * sizeof(void *);
-        size_t new_sz = new_cap * sizeof(void *);
-        void **new_arr = hl_alloc_realloc(js->base.alloc,
-                                           js->ws_clients, old_sz, new_sz);
-        if (new_arr) {
-            js->ws_clients = new_arr;
-            js->ws_client_cap = new_cap;
-        }
-    }
-    if (js->ws_client_count < js->ws_client_cap) {
-        js->ws_clients[js->ws_client_count++] = ud;
-    }
 
     return obj;
 }

@@ -12,6 +12,8 @@
 
 #include "log.h"
 #include "hull/runtime/js.h"      /* HlJS, KlHttpResponse, hl_js_make_response */
+#include "hull/shared/req_life.h"
+#include <stdlib.h>
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
 #include "hull/http_feature.h"    /* hl_js_http_error_response (seam strong) */
 #include "mod_buffer.h"           /* js_get_buffer + HlBufferView (res.bytes) */
@@ -39,11 +41,26 @@
  *   res.redirect(url, code) → HTTP redirect
  */
 
+/* The object's opaque: the response (owned by the connection, not by JS) and
+ * the life of the request it belongs to (shared/req_life.h). Used after its
+ * request is over - stashed, or kept in a closure a timer runs - it fails
+ * closed instead of writing into a response that was already sent, on a
+ * connection that may be gone. */
+typedef struct {
+    KlHttpResponse *res;
+    HlReqLife      *life;   /* NULL: not tracked (always live) */
+} HlJsResBox;
+
+/* The class id, for the finalizer (which has no context to look it up in). */
+static JSClassID g_response_class_id;
+
 static void hl_response_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
-    (void)val;
-    /* KlHttpResponse is owned by the connection pool, not by JS */
+    HlJsResBox *box = (HlJsResBox *)JS_GetOpaque(val, g_response_class_id);
+    if (!box) return;
+    hl_req_life_release(box->life);
+    free(box);
 }
 
 static const JSClassDef hl_response_class = {
@@ -51,10 +68,19 @@ static const JSClassDef hl_response_class = {
     .finalizer = hl_response_finalizer,
 };
 
+/* NULL - with a TypeError pending - once the response's request is over.
+ * Every method checks the NULL and returns JS_EXCEPTION. */
 static KlHttpResponse *get_response(JSContext *ctx, JSValueConst this_val)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    return (KlHttpResponse *)JS_GetOpaque(this_val, (JSClassID)js->response_class_id);
+    HlJsResBox *box = (HlJsResBox *)JS_GetOpaque(this_val,
+                                                 (JSClassID)js->response_class_id);
+    if (!box || !box->res) return NULL;
+    if (!hl_req_life_live(box->life)) {
+        JS_ThrowTypeError(ctx, "res: the request this response belongs to has finished");
+        return NULL;
+    }
+    return box->res;
 }
 
 /* Has a header with this name (case-insensitive) already been added to
@@ -281,6 +307,7 @@ static int hl_js_ensure_response_class(HlJS *js)
     JSClassID class_id = 0;
     JS_NewClassID(&class_id);
     js->response_class_id = (uint32_t)class_id;
+    g_response_class_id = class_id;
 
     JSRuntime *rt = JS_GetRuntime(js->ctx);
     if (JS_NewClass(rt, class_id, &hl_response_class) < 0)
@@ -311,14 +338,29 @@ static int hl_js_ensure_response_class(HlJS *js)
 
 /* ── Public: create JS request/response objects ─────────────────────── */
 
-JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res)
+JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res,
+                                 HlReqLife *life)
 {
     if (hl_js_ensure_response_class(js) != 0)
         return JS_ThrowInternalError(js->ctx, "failed to register Response class");
 
     JSValue obj = JS_NewObjectClass(js->ctx, (int)js->response_class_id);
-    JS_SetOpaque(obj, res);
+    if (JS_IsException(obj)) return obj;
+    HlJsResBox *box = (HlJsResBox *)malloc(sizeof *box);
+    if (!box) {
+        JS_FreeValue(js->ctx, obj);
+        return JS_ThrowOutOfMemory(js->ctx);
+    }
+    box->res = res;
+    box->life = life;
+    hl_req_life_retain(life);
+    JS_SetOpaque(obj, box);
     return obj;
+}
+
+JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res)
+{
+    return hl_js_make_response_life(js, res, NULL);
 }
 
 /* ── HTTP-feature seam: 500-error response ──────────────────────────── */

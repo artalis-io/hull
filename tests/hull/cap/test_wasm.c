@@ -19,6 +19,8 @@
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1782,6 +1784,63 @@ UTEST(hl_cap_wasm, shared_data_load_unload)
     ASSERT_EQ(mod->shared_data, NULL);
 
     hl_cap_wasm_destroy(&cache);
+}
+
+/* A zero-copy segment holds the caller's pin until its descriptor is gone,
+ * and only then releases it; copied data, or a failed load, releases at
+ * once. Without the pin, mmap.close() unmapped memory the shared heap still
+ * pointed at. */
+static int g_pin_releases;
+static void count_pin_release(void *pin) { (void)pin; g_pin_releases++; }
+
+UTEST(hl_cap_wasm, segment_pin_lives_as_long_as_the_segment)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) page = 4096;
+    void *mem = mmap(NULL, (size_t)page, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_TRUE(mem != MAP_FAILED);
+    memset(mem, 'x', (size_t)page);
+    const char *err = NULL;
+    int pin = 0;
+
+    /* Page-sized: used in place, so the pin is kept... */
+    g_pin_releases = 0;
+    ASSERT_EQ(hl_cap_wasm_data_load_pinned(&cache, "shared_read", "seg0",
+                                           mem, (size_t)page, mem, &vfs, NULL,
+                                           &err, &pin, count_pin_release), 0);
+    EXPECT_EQ(g_pin_releases, 0);
+    /* ...until the segment is removed. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    NULL, 0, NULL, &vfs, NULL, &err), 0);
+    EXPECT_EQ(g_pin_releases, 1);
+
+    /* Not page-sized: copied, so the pin is released straight away. */
+    g_pin_releases = 0;
+    ASSERT_EQ(hl_cap_wasm_data_load_pinned(&cache, "shared_read", "seg1",
+                                           mem, 10, mem, &vfs, NULL,
+                                           &err, &pin, count_pin_release), 0);
+    EXPECT_EQ(g_pin_releases, 1);
+
+    /* A failed load releases it too. */
+    g_pin_releases = 0;
+    EXPECT_NE(hl_cap_wasm_data_load_pinned(&cache, "no_such_module", "seg0",
+                                           mem, (size_t)page, mem, &vfs, NULL,
+                                           &err, &pin, count_pin_release), 0);
+    EXPECT_EQ(g_pin_releases, 1);
+
+    /* Teardown releases a pin still held. */
+    g_pin_releases = 0;
+    ASSERT_EQ(hl_cap_wasm_data_load_pinned(&cache, "shared_read", "seg2",
+                                           mem, (size_t)page, mem, &vfs, NULL,
+                                           &err, &pin, count_pin_release), 0);
+    hl_cap_wasm_destroy(&cache);
+    EXPECT_EQ(g_pin_releases, 1);
+    munmap(mem, (size_t)page);
 }
 
 /* ── R1: segment mutation refused while async compute calls in flight ──

@@ -182,6 +182,22 @@ static void lua_ws_client_on_message(KlWsClientConn *ws, const char *data,
     }
 }
 
+/* The connection is over (closed, or failed - Keel closes it before calling
+ * on_error, and fires no on_close after). */
+static void lua_ws_client_finish(HlLuaWsClientUD *ud)
+{
+    /* Release self-ref - allow GC */
+    if (ud->self_ref != LUA_NOREF) {
+        luaL_unref(ud->L, LUA_REGISTRYINDEX, ud->self_ref);
+        ud->self_ref = LUA_NOREF;
+    }
+    /* Mark closed (methods fail closed) but keep `client` non-NULL so __gc
+     * frees the KlWsClientConn - Keel does NOT free it on close, and we must
+     * not free it here either (Keel touches `ws` immediately after this
+     * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
+    ud->closed = 1;
+}
+
 static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
                                      const char *reason, size_t reason_len,
                                      void *user_data)
@@ -205,16 +221,7 @@ static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
         }
     }
 
-    /* Release self-ref - allow GC */
-    if (ud->self_ref != LUA_NOREF) {
-        luaL_unref(ud->L, LUA_REGISTRYINDEX, ud->self_ref);
-        ud->self_ref = LUA_NOREF;
-    }
-    /* Mark closed (methods fail closed) but keep `client` non-NULL so __gc
-     * frees the KlWsClientConn - Keel does NOT free it on close, and we must
-     * not free it here either (Keel touches `ws` immediately after this
-     * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
-    ud->closed = 1;
+    lua_ws_client_finish(ud);
 }
 
 static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
@@ -224,6 +231,7 @@ static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
     if (ud->on_error_ref == LUA_NOREF) {
         log_error("[hull:ws:client] error: %s", msg ? msg : "unknown");
+        lua_ws_client_finish(ud);
         return;
     }
 
@@ -236,6 +244,10 @@ static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
                   err ? err : "unknown");
         lua_pop(ud->L, 1);
     }
+    /* Terminal: Keel closed the connection and will not call on_close, so
+     * this is where the client is released (it stayed pinned until VM
+     * teardown). */
+    lua_ws_client_finish(ud);
 }
 
 /* ws.connect(url, handlers [, opts]) */

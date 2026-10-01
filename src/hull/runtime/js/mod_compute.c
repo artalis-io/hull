@@ -1233,12 +1233,18 @@ static JSValue js_compute_segment(JSContext *ctx, JSValueConst this_val,
         }
     }
 
+    /* A MappedBuffer used in place is borrowed for as long as the segment
+     * uses it: without the pin, mmap.close() (or GC) unmapped memory the
+     * WASM shared heap still pointed at. The cap owns the borrow from here. */
+    HlMappedBuffer *pin = pre_alloc ? JS_GetOpaque(argv[2], js_mmap_class_id) : NULL;
+    if (pin) hl_cap_fs_mmap_borrow(pin);
     const char *err_msg = NULL;
-    int rc = hl_cap_wasm_data_load(js->base.wasm_cache, module_name,
+    int rc = hl_cap_wasm_data_load_pinned(js->base.wasm_cache, module_name,
                                     segment_name, data, data_len, pre_alloc,
                                     js->base.app_vfs,
                                     js->base.app_vfs ? js->base.app_vfs->root_dir : NULL,
-                                    &err_msg);
+                                    &err_msg,
+                                    pin, pin ? hl_cap_fs_mmap_release : NULL);
 
     if (JS_IsString(argv[2]))
         JS_FreeCString(ctx, (const char *)data);
@@ -1315,6 +1321,12 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
         }
         JS_FreeValue(ctx, fv);
     }
+    /* A WasmBuffer / MappedBuffer input is borrowed for the whole stream:
+     * the options' getters and the output callback (both app code) run while
+     * the stream reads it, and either could close() it - unmapping memory the
+     * next chunk was read from. Released after the stream returns. */
+    HlWasmBuffer   *in_wbuf = NULL;
+    HlMappedBuffer *in_mmap = NULL;
     if (input.kind != HL_STREAM_IN_FILE) {
         /* Try buffer protocol / ArrayBuffer / string */
         size_t ilen = 0;
@@ -1329,12 +1341,16 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
                 input.kind = HL_STREAM_IN_BUFFER;
                 input.buffer.data = hl_wasm_buffer_data(wbuf);
                 input.buffer.len = hl_wasm_buffer_len(wbuf);
+                in_wbuf = wbuf;
+                hl_wasm_buffer_borrow(in_wbuf);
             } else {
                 HlMappedBuffer *mmap = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
                 if (mmap && !mmap->closed) {
                     input.kind = HL_STREAM_IN_BUFFER;
                     input.buffer.data = mmap->addr;
                     input.buffer.len = mmap->len;
+                    in_mmap = mmap;
+                    hl_cap_fs_mmap_borrow(in_mmap);
                 } else {
                     const char *s = JS_ToCStringLen(ctx, &ilen, argv[1]);
                     if (!s) {
@@ -1443,6 +1459,8 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
         js->base.alloc, &res, &err);
 
     /* Cleanup */
+    if (in_wbuf) hl_wasm_buffer_release(in_wbuf);
+    if (in_mmap) hl_cap_fs_mmap_release(in_mmap);
     if (input_is_string)
         JS_FreeCString(ctx, (const char *)input.buffer.data);
     if (in_file_str)

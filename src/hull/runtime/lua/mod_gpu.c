@@ -86,7 +86,10 @@ static int l_gpu_load(lua_State *L)
 
     /* Try VFS first: shaders/<name>.wgsl */
     char vfs_name[512];
-    snprintf(vfs_name, sizeof(vfs_name), "shaders/%s.wgsl", name);
+    int vn = snprintf(vfs_name, sizeof(vfs_name), "shaders/%s.wgsl", name);
+    /* A cut name would open a different file: no ".wgsl", a prefix of it. */
+    if (vn < 0 || (size_t)vn >= sizeof(vfs_name))
+        return luaL_error(L, "shader name too long: %s", name);
     const HlEntry *entry = NULL;
     if (lua && lua->base.app_vfs)
         entry = hl_vfs_find(lua->base.app_vfs, vfs_name);

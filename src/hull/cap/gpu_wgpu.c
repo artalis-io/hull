@@ -1188,12 +1188,20 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
             }
 
             /* Upload data if this is the first declaration with data
-             * (find_or_create_temp sizes the buffer to alloc_size, rounded
-             * up to a word) */
-            upload_initial(dctx->queue, gpu_buf,
-                           alloc_size <= SIZE_MAX - 3
-                               ? (alloc_size + 3) & ~(size_t)3 : alloc_size,
-                           desc);
+             * (find_or_create_temp sizes a temp buffer to alloc_size, rounded
+             * up to a word). A PERSISTENT buffer of that name is returned
+             * as-is, at its own size - which a stage declaring a larger size
+             * must not write past, so bound the upload by the real one. */
+            size_t upload_cap = alloc_size <= SIZE_MAX - 3
+                ? (alloc_size + 3) & ~(size_t)3 : alloc_size;
+            for (int p = 0; p < persistent_count; p++) {
+                if (persistent_buffers[p].handle == (void *)gpu_buf) {
+                    if (persistent_buffers[p].size < upload_cap)
+                        upload_cap = persistent_buffers[p].size;
+                    break;
+                }
+            }
+            upload_initial(dctx->queue, gpu_buf, upload_cap, desc);
 
             size_t buf_aligned = alloc_size <= SIZE_MAX - 3
                 ? (alloc_size + 3) & ~(size_t)3 : alloc_size;

@@ -10,6 +10,7 @@
  */
 
 #include "internal.h"
+#include "hull/shared/req_life.h"
 #include "hull/http_feature.h"  /* hl_js_http_error_response (HTTP-feature seam) */
 
 #include "hull/reqctx.h"
@@ -28,6 +29,7 @@
 /* Forward declarations from bindings.c */
 JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req);
 JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res);
+JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res, HlReqLife *life);
 
 /* From async.c */
 extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
@@ -76,13 +78,27 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         return -1;
     }
 
+    /* The request's life: `res` holds it, and so does every continuation
+     * the handler creates (js->active_life). It dies when the handler is
+     * done - here, or when an awaiting handler completes or is cancelled. */
+    HlReqLife *life = hl_req_life_new();
+    if (!life) {
+        JS_FreeValue(js->ctx, handler);
+        JS_FreeValue(js->ctx, global);
+        js->active_conn = NULL;
+        js->active_req = NULL;
+        return -1;
+    }
+
     /* Build JS request and response objects */
     JSValue js_req = hl_js_make_request(js->ctx, req);
-    JSValue js_res = hl_js_make_response(js, res);
+    JSValue js_res = hl_js_make_response_life(js, res, life);
 
     /* Call handler(req, res) */
     JSValue argv[2] = { js_req, js_res };
+    js->active_life = life;
     JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
+    js->active_life = NULL;
 
     int result = 0;
     if (JS_IsException(ret)) {
@@ -121,6 +137,12 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     JS_FreeValue(js->ctx, js_req);
     JS_FreeValue(js->ctx, handler);
     JS_FreeValue(js->ctx, global);
+
+    /* Suspended: the continuations hold the life now. Otherwise the handler
+     * is done with its request. Either way dispatch drops its own ref. */
+    if (result != 1)
+        hl_req_life_kill(life);
+    hl_req_life_release(life);
 
     if (result != 1) {
         /* Sync path - clean up middleware ctx */
@@ -191,13 +213,23 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
         return -1;
     }
 
+    /* Middleware returns synchronously, so its `res` belongs to this call
+     * alone: the life ends as soon as it returns. */
+    HlReqLife *life = hl_req_life_new();
+    if (!life) {
+        JS_FreeValue(js->ctx, handler);
+        JS_FreeValue(js->ctx, global);
+        return -1;
+    }
+
     /* Build JS request and response objects */
     JSValue js_req = hl_js_make_request(js->ctx, req);
-    JSValue js_res = hl_js_make_response(js, res);
+    JSValue js_res = hl_js_make_response_life(js, res, life);
 
     /* Call handler(req, res) - capture return value */
     JSValue argv[2] = { js_req, js_res };
     JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
+    hl_req_life_end(life);
 
     int result = 0;
     if (JS_IsException(ret)) {

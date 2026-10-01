@@ -1858,6 +1858,39 @@ UTEST(js_middleware, dispatch_return_zero_continues)
     cleanup_js();
 }
 
+/* A `res` kept past its request fails closed: middleware stashes it, the
+ * request finishes, and using it later throws instead of writing into a
+ * response that was sent (on a connection that may be gone). */
+UTEST(js_middleware, res_kept_past_its_request_fails_closed)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.use('*', '/*', (req, res) => { globalThis.kept = res; res.status(201); return 0; });\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    ASSERT_EQ(hl_js_dispatch_middleware(&js, handler_id, &req, &res), 0);
+    EXPECT_EQ(res.status, 201);   /* usable while the request runs */
+
+    EXPECT_EQ(eval_int("(() => { try { globalThis.kept.status(500); return 0; }"
+                       " catch (e) { return String(e).includes('has finished') ? 1 : 2; } })()"),
+              1);
+    EXPECT_EQ(res.status, 201);   /* and nothing was written after */
+
+    free_req_ctx(&req);
+    cleanup_js();
+}
+
 UTEST(js_middleware, dispatch_return_nonzero_short_circuits)
 {
     init_js();

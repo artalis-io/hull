@@ -95,8 +95,12 @@ static int l_test_http(lua_State *L, const char *method)
             run_middleware = 1;
         lua_pop(L, 1);
         /* opts.body */
+        /* Real strings only (not numbers): those stay anchored by the opts
+         * table after the pop, while a number's converted string was owned by
+         * the popped stack slot alone - and dispatch runs Lua, so it could be
+         * collected before the body was read. */
         lua_getfield(L, 2, "body");
-        if (lua_isstring(L, -1))
+        if (lua_type(L, -1) == LUA_TSTRING)
             body_str = lua_tolstring(L, -1, &body_len);
         lua_pop(L, 1);
 
@@ -105,7 +109,11 @@ static int l_test_http(lua_State *L, const char *method)
         if (lua_istable(L, -1)) {
             lua_pushnil(L);
             while (lua_next(L, -2) != 0 && num_headers < KL_MAX_HEADERS) {
-                if (lua_isstring(L, -2) && lua_isstring(L, -1)) {
+                /* Real strings only: lua_tostring on a number KEY converts it
+                 * in place and breaks lua_next, and a converted value is not
+                 * anchored by the table (see body above). */
+                if (lua_type(L, -2) == LUA_TSTRING &&
+                    lua_type(L, -1) == LUA_TSTRING) {
                     header_names[num_headers] = lua_tostring(L, -2);
                     header_values[num_headers] = lua_tostring(L, -1);
                     num_headers++;

@@ -235,6 +235,11 @@ void hl_lua_make_request(lua_State *L, KlHttpRequest *req);
  * Push a Lua userdata representing the HTTP response onto the stack.
  */
 void hl_lua_make_response(lua_State *L, KlHttpResponse *res);
+/* As hl_lua_make_response, tied to a request life (shared/req_life.h): once
+ * the life ends, every method on the object fails closed. Takes a reference. */
+struct HlReqLife;
+void hl_lua_make_response_life(lua_State *L, KlHttpResponse *res,
+                               struct HlReqLife *life);
 
 /* ── Route wiring ──────────────────────────────────────────────────── */
 

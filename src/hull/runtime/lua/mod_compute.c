@@ -1077,12 +1077,22 @@ static int lua_compute_segment(lua_State *L)
         return 2;
     }
 
+    /* A MappedBuffer used in place is borrowed for as long as the segment
+     * uses it: the registry pin below keeps the object from being collected,
+     * but mmap:close() still unmapped memory the WASM shared heap pointed at.
+     * The cap owns the borrow from here. */
+    HlMappedBuffer *pin = NULL;
+    if (has_mmap_ref) {
+        pin = *(HlMappedBuffer **)lua_touserdata(L, 3);
+        hl_cap_fs_mmap_borrow(pin);
+    }
     const char *err_msg = NULL;
-    int rc = hl_cap_wasm_data_load(lua->base.wasm_cache, module_name,
+    int rc = hl_cap_wasm_data_load_pinned(lua->base.wasm_cache, module_name,
                                     segment_name, data, data_len, pre_alloc,
                                     lua->base.app_vfs,
                                     lua->base.app_vfs ? lua->base.app_vfs->root_dir : NULL,
-                                    &err_msg);
+                                    &err_msg,
+                                    pin, pin ? hl_cap_fs_mmap_release : NULL);
     if (rc != 0) {
         lua_pushnil(L);
         lua_pushstring(L, err_msg ? err_msg : "unknown_error");
@@ -1154,13 +1164,20 @@ static int lua_compute_stream(lua_State *L)
     /* ── Parse input (arg 2) ─────────────────────────────────────── */
     HlStreamInput input = {0};
 
+    /* Fixed argument slots, so values kept on the stack above them (the file
+     * paths below) do not shift the indices this function reads. */
+    lua_settop(L, 4);
+
     if (lua_istable(L, 2)) {
         lua_getfield(L, 2, "file");
-        if (lua_isstring(L, -1)) {
+        if (lua_type(L, -1) == LUA_TSTRING) {
             input.kind = HL_STREAM_IN_FILE;
             input.path = lua_tostring(L, -1);
+            /* left on the stack: a string __index produced is anchored by
+             * nothing else, and input.path is read for the whole stream */
+        } else {
+            lua_pop(L, 1);
         }
-        lua_pop(L, 1);
         if (input.kind != HL_STREAM_IN_FILE)
             return luaL_error(L, "compute.stream: input table must have 'file' key");
     } else {
@@ -1200,13 +1217,14 @@ static int lua_compute_stream(lua_State *L)
         out_ptr = &out_storage;
     } else if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "file");
-        if (lua_isstring(L, -1)) {
+        if (lua_type(L, -1) == LUA_TSTRING) {
             has_output = 1;
             out_storage.kind = HL_STREAM_OUT_FILE;
-            out_storage.path = lua_tostring(L, -1);
+            out_storage.path = lua_tostring(L, -1);   /* left on the stack */
             out_ptr = &out_storage;
+        } else {
+            lua_pop(L, 1);
         }
-        lua_pop(L, 1);
         if (!has_output) {
             /* It's the opts table */
             opts_arg = 3;
@@ -1247,6 +1265,38 @@ static int lua_compute_stream(lua_State *L)
 
     wasm_clamp_opts(&stream_opts.call_opts, &lua->base);
 
+    /* A buffer input is pinned for the whole stream: the output callback is
+     * app code, run between chunks, and could close() the input - unmapping
+     * the memory the next chunk is read from. MappedBuffer / WasmBuffer take a
+     * borrow (close is deferred until released); an image has no borrow, so
+     * its pixels are copied for the duration. */
+    HlMappedBuffer *in_mmap = NULL;
+    HlWasmBuffer   *in_wbuf = NULL;
+    void           *in_copy = NULL;
+    size_t          in_copy_len = 0;
+    if (input.kind == HL_STREAM_IN_BUFFER) {
+        HlMappedBuffer **mp = luaL_testudata(L, 2, HL_MMAP_MT);
+        HlWasmBuffer   **wp = luaL_testudata(L, 2, HL_WASM_BUF_MT);
+        void          **ip = luaL_testudata(L, 2, HL_IMAGE_MT);  /* HlImage ** */
+        if (mp && *mp) {
+            in_mmap = *mp;
+            hl_cap_fs_mmap_borrow(in_mmap);
+        } else if (wp && *wp) {
+            in_wbuf = *wp;
+            hl_wasm_buffer_borrow(in_wbuf);
+        } else if (ip && *ip && input.buffer.len > 0) {
+            in_copy_len = input.buffer.len;
+            in_copy = hl_alloc_malloc(lua->base.alloc, in_copy_len);
+            if (!in_copy) {
+                if (cb_ctx.func_ref != LUA_NOREF)
+                    luaL_unref(L, LUA_REGISTRYINDEX, cb_ctx.func_ref);
+                return luaL_error(L, "compute.stream: out of memory");
+            }
+            memcpy(in_copy, input.buffer.data, in_copy_len);
+            input.buffer.data = in_copy;
+        }
+    }
+
     /* ── Call stream API ─────────────────────────────────────────── */
     const char *err = NULL;
     HlStreamResult res = {0};
@@ -1258,6 +1308,10 @@ static int lua_compute_stream(lua_State *L)
         lua->base.app_vfs,
         lua->base.app_vfs ? lua->base.app_vfs->root_dir : NULL,
         lua->base.alloc, &res, &err);
+
+    if (in_mmap) hl_cap_fs_mmap_release(in_mmap);
+    if (in_wbuf) hl_wasm_buffer_release(in_wbuf);
+    if (in_copy) hl_alloc_free(lua->base.alloc, in_copy, in_copy_len);
 
     /* Clean up callback reference */
     if (cb_ctx.func_ref != LUA_NOREF)

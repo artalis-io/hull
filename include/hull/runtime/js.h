@@ -121,11 +121,6 @@ typedef struct HlJS {
     size_t          sse_route_count;
     size_t          sse_route_cap;
 
-    /* Tracked WS client connections (freed in hl_js_free) */
-    void          **ws_clients;
-    size_t          ws_client_count;
-    size_t          ws_client_cap;
-
     /* Per-request async state (set during dispatch, cleared after) */
     KlHttpServer       *server;          /* set once during wire_routes_server */
     KlHttpConn         *active_conn;     /* current connection (per dispatch) */
@@ -143,6 +138,10 @@ typedef struct HlJS {
      * not while it is still suspended. Subsystem-agnostic. */
     void          (*active_on_complete)(struct HlJS *js, void *ctx);
     void           *active_on_complete_ctx;
+    /* The life (shared/req_life.h) of the request whose handler is running:
+     * a continuation created now takes a reference, and kills it when the
+     * handler completes or the continuation is cancelled. */
+    struct HlReqLife *active_life;
 
     /* UDF lifecycle: 1 while JS runtime is valid, 0 before JS_FreeRuntime.
      * UDF destroy callbacks check this before calling JS_FreeValue. */

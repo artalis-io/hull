@@ -91,14 +91,17 @@ struct HlWsConn;
 
 /* SSE stream userdata (used by runtime.c for stream lifecycle) */
 #include <keel/http_sse.h>
+struct HlReqLife;
 struct HlSseStreamUD {
     KlHttpSse    sse;     /* Keel SSE context */
     int      closed;  /* 1 after close */
+    struct HlReqLife *life;  /* the request's life (shared/req_life.h) */
 };
 
 /* SSE stream helpers (defined in lua/mod_sse.c) */
 void hl_lua_sse_register_mt(lua_State *L);
-struct HlSseStreamUD *hl_lua_sse_push_stream(lua_State *L, KlHttpResponse *res);
+struct HlSseStreamUD *hl_lua_sse_push_stream(lua_State *L, KlHttpResponse *res,
+                                             struct HlReqLife *life);
 
 /* hull.ws module (defined in lua/mod_ws.c) */
 int luaopen_hull_ws_server(lua_State *L);

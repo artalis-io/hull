@@ -10,6 +10,7 @@
  */
 
 #include "internal.h"
+#include "hull/shared/req_life.h"
 
 #include "hull/shared/async.h"
 #include "hull/cap/db.h"
@@ -77,9 +78,17 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     /* Build request object */
     JSValue js_req = hl_js_make_request(ctx, req);
 
+    /* The request's life: the stream holds it, and so does every
+     * continuation the handler creates. It dies when the handler is done -
+     * including when the client goes away mid-stream - so a stream kept for
+     * fan-out fails closed instead of writing into a connection that is gone. */
+    HlReqLife *life = hl_req_life_new();
+
     /* Create SSE stream object (calls kl_http_sse_begin) */
-    JSValue stream_obj = hl_js_sse_create_stream(ctx, res);
+    JSValue stream_obj = life ? hl_js_sse_create_stream(ctx, res, life)
+                              : JS_EXCEPTION;
     if (JS_IsException(stream_obj)) {
+        hl_req_life_end(life);
         JS_FreeValue(ctx, handler);
         JS_FreeValue(ctx, js_req);
         js->active_conn = NULL;
@@ -92,7 +101,9 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
 
     /* Call handler(req, stream) */
     JSValue args[2] = { js_req, stream_obj };
+    js->active_life = life;
     JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 2, args);
+    js->active_life = NULL;
     JS_FreeValue(ctx, handler);
 
     if (JS_IsException(ret)) {
@@ -114,6 +125,8 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, js_req);
             JS_FreeValue(ctx, stream_obj);
+            /* The continuation holds the life now; drop ours. */
+            hl_req_life_release(life);
             /* active_conn stays set - async resume will clear */
             return;
         }
@@ -122,6 +135,8 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
             hl_js_sse_stream_force_close(ctx, stream_obj);
     }
 
+    /* The handler is done with its request (the stream was ended above). */
+    hl_req_life_end(life);
     hl_js_run_jobs(js);
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, js_req);

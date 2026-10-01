@@ -82,7 +82,12 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
     }
 
     char vfs_name[512];
-    snprintf(vfs_name, sizeof(vfs_name), "shaders/%s.wgsl", name);
+    int vn = snprintf(vfs_name, sizeof(vfs_name), "shaders/%s.wgsl", name);
+    /* A cut name would open a different file: no ".wgsl", a prefix of it. */
+    if (vn < 0 || (size_t)vn >= sizeof(vfs_name)) {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowRangeError(ctx, "shader name too long");
+    }
     const HlEntry *entry = NULL;
     if (js && js->base.app_vfs)
         entry = hl_vfs_find(js->base.app_vfs, vfs_name);

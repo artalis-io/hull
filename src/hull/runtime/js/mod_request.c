@@ -43,6 +43,7 @@
 #include "hull/runtime/js.h"
 #include "hull/utils/alloc.h"
 #include "hull/shared/async.h"
+#include "hull/shared/req_life.h"
 #include "hull/cap/body.h"
 
 #include <keel/http_body_reader.h>
@@ -167,6 +168,8 @@ typedef struct HlJsMpCont {
      * parked: a temporary (part.chunks().next()) is otherwise finalized at
      * once, and arriving data then wrote into its freed state. */
     JSValue       owner;
+    /* The handler's request life (shared/req_life.h), reference held. */
+    HlReqLife    *life;
 } HlJsMpCont;
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -557,12 +560,17 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     jc->reject  = JS_UNDEFINED;
 
     /* Drain microtasks - the for-await loop body runs here. */
+    js->active_life = jc->life;
     hl_js_run_jobs(js);
+    js->active_life = NULL;
 
     /* Check outer handler-Promise state */
     JSPromiseStateEnum state = JS_PROMISE_PENDING;
     if (!JS_IsUndefined(jc->handler_promise))
         state = JS_PromiseState(ctx, jc->handler_promise);
+
+    if (state == JS_PROMISE_FULFILLED || state == JS_PROMISE_REJECTED)
+        hl_req_life_kill(jc->life);   /* the handler is done with its request */
 
     if (state == JS_PROMISE_FULFILLED) {
         JS_FreeValue(ctx, jc->handler_promise);
@@ -636,6 +644,7 @@ static void mp_js_cont_cancel(HlAsyncCont *self)
     if (!JS_IsUndefined(jc->reject))          { JS_FreeValue(ctx, jc->reject);          jc->reject  = JS_UNDEFINED; }
     if (!JS_IsUndefined(jc->handler_promise)) { JS_FreeValue(ctx, jc->handler_promise); jc->handler_promise = JS_UNDEFINED; }
     jc->conn = NULL;
+    hl_req_life_kill(jc->life);   /* the connection, and its request, are gone */
 }
 
 static void mp_js_cont_destroy(HlAsyncCont *self)
@@ -653,6 +662,8 @@ static void mp_js_cont_destroy(HlAsyncCont *self)
     }
     if (jc->js && jc->js->ctx)
         JS_FreeValue(jc->js->ctx, jc->owner);
+    hl_req_life_release(jc->life);
+    jc->life = NULL;
     /* Never leave dispatch a pointer to a freed continuation. */
     if (jc->js && jc->js->last_async_cont == jc)
         jc->js->last_async_cont = NULL;
@@ -703,6 +714,8 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
     jc->chunks          = chunks;
     jc->part            = part;
     jc->owner           = JS_DupValue(ctx, owner);
+    jc->life            = js->active_life;
+    hl_req_life_retain(jc->life);
 
     /* Side-effect so dispatch picks up the cont for handler_promise wiring. */
     js->last_async_cont = jc;
@@ -858,6 +871,8 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     jc->mode            = MP_MODE_READ;
     jc->part            = p;
     jc->owner           = JS_DupValue(ctx, this_val);
+    jc->life            = it->js->active_life;
+    hl_req_life_retain(jc->life);
 
     /* Run the first pump synchronously; if it completes with no NEED_DATA,
      * resolve immediately and skip the park dance. */
