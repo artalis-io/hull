@@ -162,6 +162,61 @@ typedef struct HlRuntimeVtable {
 } HlRuntimeVtable;
 
 struct HlRuntime {
+    /* ── Capability policy: the leading HL_POLICY_SPAN bytes ──────────
+     * Everything the cap layer consults to decide what the app may do.
+     * A factory allocates the runtime page-aligned, and the last step of
+     * wiring seals this span read-only (hl_policy_seal_runtime), so these
+     * ROOT pointers to sealed policy cannot be repointed either. Written
+     * only while wiring; the rest of the struct stays writable. */
+    union {
+        struct {
+            HlFsConfig   *fs_cfg;
+            /* kv.open(dsn) allowlist policy (manifest kv.dynamic). Borrowed pointer into
+             * the sealed manifest; NULL means no policy (kv.open fails closed). */
+            const HlManifestKvDynamic *kv_policy;
+            /* ssh.connect allowlist policy (manifest ssh). Borrowed pointer into the
+             * sealed manifest; NULL means no policy, and the check fails closed. This
+             * is the ONLY grant of outbound stream authority, and it is granted to the
+             * SSH stdlib rather than to the app - see cap/ssh_policy.h. */
+            const HlManifestSsh *ssh_policy;
+            HlEnvConfig  *env_cfg;
+            /* The host's resolved OUTBOUND TLS trust, borrowed. NULL when this build
+             * or this invocation has none (TLS not composed, no CA bundle found).
+             *
+             * ONE anchor for every outbound connection Hull makes, so --ca-bundle,
+             * --no-ca-bundle and the system/embedded ladder mean the same thing to
+             * http.fetch and to an SSH tunnel alike. Consumers must read NULL as
+             * "this cannot do TLS" and refuse - never as "go plaintext". Wrapped in
+             * a named struct rather than held as a KlTlsConfig* because KlTlsConfig
+             * is an anonymous typedef, and this header forward-declares its Keel
+             * types instead of including Keel (see KlHttpRouter above). */
+            const HlClientTls *client_tls;
+            HlHttpConfig *http_cfg;
+            HlSmtpConfig *smtp_cfg;
+            const char   *csp_policy;  /* CSP header value for HTML responses (NULL = none) */
+            /* Frozen module set: which first-party stdlib modules the app may
+             * import. Borrowed pointer; lifetime exceeds the runtime. NULL means
+             * no gating (legacy entry points: test runner, agent, mcp). When
+             * non-NULL, gating fires for any registry-known name not in the set. */
+            const HlResolvedModuleSet *module_set;
+            HlGpuCtx *gpu_ctx;                /* GPU compute context; NULL when no backend
+                                                * (base build without a composed gpu feature) */
+#ifdef HL_ENABLE_WASM
+            HlWasmCache *wasm_cache;           /* WAMR compute module cache (NULL if disabled) */
+            struct {
+                uint32_t heap_size;   /* ceiling: 0 = use compile-time default */
+                uint32_t stack_size;
+                int64_t  gas;
+                uint64_t max_input;
+                uint64_t max_output;
+            } wasm_config;                     /* three-tier resolved limits (CLI > manifest > defaults) */
+#endif
+        };
+        unsigned char policy_span[65536];   /* == HL_POLICY_SPAN */
+    };
+    int policy_page_owned;   /* allocated by a factory: page-aligned */
+    int policy_sealed;       /* the span is read-only now */
+
     const HlRuntimeVtable *vt;
     HlDbRegistry *db_registry;    /* owns all DB connections, incl. "default".
                                    * Resolve the default via
@@ -169,38 +224,9 @@ struct HlRuntime {
                                    * separate default-handle field. NULL under
                                    * --no-db / pure-compute builds. */
     HlAllocator  *alloc;
-    HlFsConfig   *fs_cfg;
-    /* kv.open(dsn) allowlist policy (manifest kv.dynamic). Borrowed pointer into
-     * the sealed manifest; NULL means no policy (kv.open fails closed). */
-    const HlManifestKvDynamic *kv_policy;
-    /* ssh.connect allowlist policy (manifest ssh). Borrowed pointer into the
-     * sealed manifest; NULL means no policy, and the check fails closed. This
-     * is the ONLY grant of outbound stream authority, and it is granted to the
-     * SSH stdlib rather than to the app - see cap/ssh_policy.h. */
-    const HlManifestSsh *ssh_policy;
-    HlEnvConfig  *env_cfg;
-    /* The host's resolved OUTBOUND TLS trust, borrowed. NULL when this build
-     * or this invocation has none (TLS not composed, no CA bundle found).
-     *
-     * ONE anchor for every outbound connection Hull makes, so --ca-bundle,
-     * --no-ca-bundle and the system/embedded ladder mean the same thing to
-     * http.fetch and to an SSH tunnel alike. Consumers must read NULL as
-     * "this cannot do TLS" and refuse - never as "go plaintext". Wrapped in
-     * a named struct rather than held as a KlTlsConfig* because KlTlsConfig
-     * is an anonymous typedef, and this header forward-declares its Keel
-     * types instead of including Keel (see KlHttpRouter above). */
-    const HlClientTls *client_tls;
-    HlHttpConfig *http_cfg;
-    HlSmtpConfig *smtp_cfg;
     HlSmtpServerCtx *smtp_async;  /* model-2 async SMTP ctx (admission+registry+trust) */
-    const char   *csp_policy;  /* CSP header value for HTML responses (NULL = none) */
     const HlVfs  *app_vfs;       /* app entries (embedded + dev fallback) */
     const HlVfs  *platform_vfs;  /* stdlib entries (always embedded) */
-    /* Frozen module set: which first-party stdlib modules the app may
-     * import. Borrowed pointer; lifetime exceeds the runtime. NULL means
-     * no gating (legacy entry points: test runner, agent, mcp). When
-     * non-NULL, gating fires for any registry-known name not in the set. */
-    const HlResolvedModuleSet *module_set;
     /* Pre-manifest import tracker. Top-level Lua require() / JS import
      * statements run before module_set is wired (the manifest hasn't
      * been extracted yet, so the resolver hasn't run). To prevent
@@ -234,18 +260,6 @@ struct HlRuntime {
     const char   *db_path;       /* SQLite file path (borrowed, for worker connections) */
     struct KlCompressConfig *compress;  /* response compression config (NULL = disabled) */
     HlWsRegistry *ws_registry;          /* WebSocket connection registry (NULL if no WS endpoints) */
-#ifdef HL_ENABLE_WASM
-    HlWasmCache *wasm_cache;           /* WAMR compute module cache (NULL if disabled) */
-    struct {
-        uint32_t heap_size;   /* ceiling: 0 = use compile-time default */
-        uint32_t stack_size;
-        int64_t  gas;
-        uint64_t max_input;
-        uint64_t max_output;
-    } wasm_config;                     /* three-tier resolved limits (CLI > manifest > defaults) */
-#endif
-    HlGpuCtx *gpu_ctx;                /* GPU compute context; NULL when no backend
-                                        * (base build without a composed gpu feature) */
     /* Phase gate for the `app.X` registration bindings (app.get / use /
      * use_post / ws / sse / every / daily).  Set to 1 by serve.c
      * (hl_serve_wire_routes) after the route registry has been flushed

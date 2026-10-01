@@ -16,6 +16,9 @@
 #include "hull/runtime/factory.h"
 #include "hull/runtime/lua.h"
 #include "hull/app_context.h"
+#include "hull/cap/policy_seal.h"
+
+#include <stddef.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -25,8 +28,13 @@ static int lua_create(HlRuntime **out, const HlAppContextOpts *opts,
 {
     if (!out || !opts) return -1;
 
-    HlLua *lua = (HlLua *)calloc(1, sizeof(HlLua));
+    /* Page-aligned (and zeroed): the runtime's leading policy span is sealed
+     * once wiring is done (hl_policy_seal_runtime), which needs base - the
+     * first member - to start a page. */
+    _Static_assert(offsetof(HlLua, base) == 0, "base must be the first member");
+    HlLua *lua = hl_policy_page_alloc(sizeof(HlLua));
     if (!lua) return -1;
+    lua->base.policy_page_owned = 1;
 
     /* Copy base config into rt->base BEFORE init: hl_lua_init reads
      * db_registry (for the db module), alloc (custom Lua allocator),
@@ -58,7 +66,7 @@ static int lua_create(HlRuntime **out, const HlAppContextOpts *opts,
         cfg.max_instructions = opts->instruction_limit;
 
     if (hl_lua_init(lua, &cfg) != 0) {
-        free(lua);
+        hl_policy_page_free(lua, sizeof(HlLua));
         return -1;
     }
 
@@ -72,8 +80,9 @@ static void lua_destroy(HlRuntime *rt)
 {
     if (!rt) return;
     HlLua *lua = (HlLua *)rt;   /* base is the first field of HlLua */
+    hl_policy_unseal_runtime(rt);   /* teardown writes the span */
     hl_lua_free(lua);
-    free(lua);
+    hl_policy_page_free(lua, sizeof(HlLua));
 }
 
 const HlRuntimeFactory hl_lua_factory = {

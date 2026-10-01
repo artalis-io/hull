@@ -61,6 +61,11 @@ static inline HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
  */
 void hl_db_registry_set_manifest(HlDbRegistry *reg, const HlManifest *manifest);
 
+/* Make the registry's DSN sources (the manifest pointer and the -d DSN)
+ * read-only for the rest of the process - the last step of wiring, after
+ * set_manifest. 0 on success; -1 is fatal for the caller. Destroy undoes it. */
+int hl_db_registry_seal(HlDbRegistry *reg);
+
 /*
  * Seed a pre-opened, externally-owned connection under @p name (typically
  * "default", the -d flag connection that app_context already opened). The

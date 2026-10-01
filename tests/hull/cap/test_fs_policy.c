@@ -28,6 +28,8 @@
 #include "hull/cap/fs.h"
 #include "hull/cap/env.h"
 #include "hull/runtime.h"
+#include "hull/cap/db_registry.h"
+#include "hull/manifest.h"
 #include <sh_seal_arena.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -554,5 +556,84 @@ UTEST(fs_policy, the_runtime_s_cap_configs_move_into_sealed_memory)
     hl_fs_policy_free(&p);
     teardown();
 }
+
+/* ── Policy spans: the ROOT pointers are sealed too ───────────────────────── */
+
+static void poke_rt_http_cfg(void *arg)
+{
+    ((volatile HlRuntime *)arg)->http_cfg = (HlHttpConfig *)(uintptr_t)1;
+}
+
+static void poke_rt_mutable(void *arg)
+{
+    ((volatile HlRuntime *)arg)->import_tracker_count = 5;   /* outside the span */
+    _exit(0);
+}
+
+UTEST(policy_span, a_sealed_runtime_cannot_be_repointed)
+{
+    /* What a factory does: page-aligned, owned. */
+    HlRuntime *rt = hl_policy_page_alloc(sizeof *rt);
+    ASSERT_TRUE(rt != NULL);
+    rt->policy_page_owned = 1;
+    static HlEnvConfig env;
+    rt->env_cfg = &env;
+    ASSERT_EQ(0, hl_policy_seal_runtime(rt));
+
+    EXPECT_TRUE(rt->env_cfg == &env);                 /* still readable */
+    EXPECT_TRUE(faults(poke_rt_http_cfg, rt));        /* the span is RO */
+    EXPECT_FALSE(faults(poke_rt_mutable, rt));        /* the rest is not */
+
+    ASSERT_EQ(0, hl_policy_unseal_runtime(rt));
+    rt->http_cfg = NULL;                              /* writable again */
+    hl_policy_page_free(rt, sizeof *rt);
+}
+
+UTEST(policy_span, a_runtime_not_from_a_factory_refuses_to_seal)
+{
+    /* Not page-aligned / not owned: sealing would protect the wrong bytes. */
+    static HlRuntime rt;
+    EXPECT_EQ(-1, hl_policy_seal_runtime(&rt));
+}
+
+#ifdef HL_ENABLE_DB
+static void poke_registry(void *arg)
+{
+    /* The first word of the registry is its manifest pointer (in the span). */
+    *(volatile uintptr_t *)arg = 1;
+}
+
+UTEST(policy_span, a_sealed_registry_keeps_its_dsn_sources)
+{
+    static HlManifest m;
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    hl_db_registry_set_manifest(reg, &m);
+    ASSERT_EQ(0, hl_db_registry_seal(reg));
+
+    /* After the seal the manifest can no longer be swapped... */
+    static HlManifest other;
+    hl_db_registry_set_manifest(reg, &other);
+    EXPECT_TRUE(hl_db_registry_dynamic_policy(reg) == &m.databases.dynamic);
+    /* ...nor written behind the API. */
+    EXPECT_TRUE(faults(poke_registry, reg));
+
+    /* The -d DSN still resolves, and a worker's DSN is worked out from the
+     * sealed sources rather than a stored copy. */
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(h != NULL);
+    EXPECT_STREQ(":memory:", hl_db_registry_dsn_for(reg, h));
+
+    hl_db_registry_destroy(reg);
+}
+
+UTEST(policy_span, an_overlong_default_dsn_is_refused)
+{
+    static char dsn[9000];
+    memset(dsn, 'a', sizeof dsn - 1);
+    EXPECT_TRUE(hl_db_registry_create(NULL, dsn, NULL) == NULL);
+}
+#endif
 
 UTEST_MAIN();

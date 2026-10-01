@@ -297,13 +297,22 @@ typedef struct HlGpuBackend {
 
 /* Top-level GPU context */
 struct HlGpuCtx {
+    /* The manifest's device allowlist: a leading policy span (see
+     * cap/policy_seal.h). serve.c allocates the context page-aligned and
+     * seals this span once it is set, so a write cannot widen the
+     * allowlist; the device and pipeline state after it stays writable. */
+    union {
+        struct {
+            int allowed_devices[HL_GPU_MAX_DEVICES]; /* 1 = allowed */
+            int device_restriction;                  /* 1 = allowlist active */
+        };
+        unsigned char policy_span[65536];            /* == HL_POLICY_SPAN */
+    };
     const HlGpuBackend *backend;
     void               *backend_ctx;
     HlGpuDevice         devices[HL_GPU_MAX_DEVICES];
     int                  device_count;
     int                  default_device;
-    int                  allowed_devices[HL_GPU_MAX_DEVICES]; /* 1 = allowed */
-    int                  device_restriction;  /* 1 = allowlist active */
 };
 
 /* ── Public API ────────────────────────────────────────────────────── */
