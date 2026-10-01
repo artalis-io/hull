@@ -67,6 +67,16 @@ test("query: with limit", function()
     assert_eq(#results, 1)
 end)
 
+-- Re-indexing an id replaces its row: FTS5's OR REPLACE conflicts only on
+-- rowid, so the old text used to stay searchable beside the new.
+test("index: re-indexing an id replaces it", function()
+    search.index("articles", "2", {title = "Renamed", body = "nothing about that language"})
+    assert_eq(#search.query("articles", "programming"), 0, "old text gone")
+    local r = search.query("articles", "renamed")
+    assert_eq(#r, 1)
+    assert_eq(r[1].id, "2")
+end)
+
 -- ── remove ──────────────────────────────────────────────────────────
 
 test("remove: deletes document", function()

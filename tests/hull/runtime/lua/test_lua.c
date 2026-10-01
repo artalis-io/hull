@@ -6539,6 +6539,41 @@ UTEST(lua_cap, stdlib_helpers_do_not_lend_their_identity)
     cleanup_lua_caps();
 }
 
+/* Stdlib fixes from the second audit (D2): jwt verify options and strict
+ * splitting; template quoting before a tag; the safe_url filter. run() returns
+ * 0, or the number of the first check that failed. */
+UTEST(lua_stdlib, audit2_stdlib_fixes)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local jwt = require('hull.jwt') "
+        "  local tpl = require('hull.template') "
+        "  local now = require('hull.time').now() "
+        "  local k = string.rep('k', 32) "
+        "  local t = jwt.sign({ sub = 'u', iss = 'me', aud = { 'api', 'x' }, exp = now + 60 }, k) "
+        "  if not jwt.verify(t, k, { iss = 'me', aud = 'api' }) then return 1 end "
+        "  if jwt.verify(t, k, { iss = 'other' }) then return 2 end "
+        "  if jwt.verify(t, k, { aud = { 'nope', 'no' } }) then return 3 end "
+        "  local h, p, s = t:match('^([^.]+)%.([^.]+)%.([^.]+)$') "
+        "  if jwt.verify(h .. '..' .. p .. '.' .. s, k) then return 4 end "
+        "  if jwt.decode(h .. '.' .. p .. '..' .. s) then return 5 end "
+        "  local old = jwt.sign({ sub = 'u', exp = now - 5 }, k) "
+        "  if jwt.verify(old, k) then return 6 end "
+        "  if not jwt.verify(old, k, { leeway = 30 }) then return 7 end "
+        "  if jwt.verify(jwt.sign({ sub = 'u', exp = now + 60 }, k), k, { aud = 'api' }) then return 8 end "
+        "  if tpl.render_string('a[1]{{ x }}', { x = 2 }) ~= 'a[1]2' then return 9 end "
+        "  if tpl.render_string('{{ u | safe_url }}', { u = 'java\\tscript:alert(1)' }) ~= '#' then return 10 end "
+        "  if tpl.render_string('{{ u | safe_url }}', { u = 'DATA:text/html,x' }) ~= '#' then return 11 end "
+        "  if tpl.render_string('{{ u | safe_url }}', { u = '/a?b=1' }) ~= '/a?b=1' then return 12 end "
+        "  if tpl.render_string('{{ u | safe_url }}', { u = 'https://x.test/' }) ~= 'https://x.test/' then return 13 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
 /* Error values reach the logs as text: a table with __tostring (hull.gather's
  * aggregate) as its message, where lua_tostring gave NULL - "(unknown)", or a
  * NULL for "%s". Also from a coroutine that died with it, and without letting

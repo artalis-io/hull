@@ -189,7 +189,11 @@ function search.index(name, id, fields)
         values[#values + 1] = val
     end
 
-    local sql = "INSERT OR REPLACE INTO " .. tbl ..
+    -- Delete, then insert. FTS5's OR REPLACE conflicts only on rowid, not on
+    -- the id column, so re-indexing an id added a second row and the old
+    -- (perhaps removed, perhaps sensitive) text stayed searchable. Same as JS.
+    db.exec("DELETE FROM " .. tbl .. " WHERE id = ?", { id })
+    local sql = "INSERT INTO " .. tbl ..
                 "(" .. table.concat(col_names, ", ") .. ") VALUES (" ..
                 table.concat(placeholders, ", ") .. ")"
     db.exec(sql, values)

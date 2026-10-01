@@ -344,6 +344,28 @@ local function issue_token(user_id, action, ttl, extra)
     return envelope.sign(payload, _state.state_secret)
 end
 
+-- A reset token names the password it replaces: a short hash of the
+-- account's password_hash at issue time, checked again at confirm. Once the
+-- password changes (any reset, or a change), every other outstanding reset
+-- link - a leaked one included - stops working, instead of living out its
+-- reset_ttl. Read through user_find_by_email, the lookup login itself relies
+-- on for password_hash, so issue and confirm see the same field.
+local function password_binding(user)
+    local h = user and user.password_hash
+    return encoding.hex.encode(crypto.sha256(type(h) == "string" and h or "")):sub(1, 16)
+end
+
+local function reset_token_extra(user)
+    return { pwb = password_binding(user) }
+end
+
+local function reset_binding_holds(env, user)
+    local current = user and type(user.email) == "string"
+                    and _state.user_find_by_email(user.email)
+    return current ~= nil and current ~= false
+           and env.pwb == password_binding(current)
+end
+
 -- Verify a token's signature + action + expiry WITHOUT marking
 -- it used. Returns (envelope, nil) or (nil, reason). Reason
 -- strings are intentionally vague at the response layer so an
@@ -462,12 +484,21 @@ local function email_rate_allow(to)
             -- window, so the sweep kept them all - the table outgrew the cap
             -- and every new key paid an O(n) sweep. Drop the least recently
             -- used down to 90% of the cap, so the next sweep is a tenth of
-            -- the cap away. The key just added is kept.
+            -- the cap away. The key just added is kept, and so is every
+            -- bucket AT its limit: dropping one reset it, so flooding other
+            -- addresses bought an attacker a fresh allowance against the
+            -- address they were blocked on. A saturated bucket costs `limit`
+            -- sends to create, so keeping them all stays bounded.
             local cap = _state.email_rate_limit_max_entries or 10000
+            local limit = cfg.limit or 3
             if _email_rl_count > cap then
                 local order = {}
                 for k, b in pairs(_email_rl) do
-                    if k ~= key then
+                    local live = 0
+                    for _, t in ipairs(b.ts) do
+                        if t > cutoff then live = live + 1 end
+                    end
+                    if k ~= key and live < limit then
                         order[#order + 1] = { k = k, t = b.ts[#b.ts] or 0 }
                     end
                 end
@@ -871,10 +902,12 @@ local function handle_register(req, res)
     -- Enumeration-safe: returns ok whether the email exists or not.
     -- If it does exist, no email goes out (we don't want to spam
     -- existing users, and we don't want to leak existence).
+    -- Hash FIRST, on both branches: PBKDF2 is by far the slowest step, and
+    -- running it only for new addresses let response time tell an attacker
+    -- which ones already have an account.
+    local pw_hash = crypto.hash_password(body.password)
     local existing = _state.user_find_by_email(body.email)
     if existing then return generic_ok(res) end
-
-    local pw_hash = crypto.hash_password(body.password)
     local user_id = _state.user_create(body.email, pw_hash)
     local user = _state.user_get(user_id)
     if not user then
@@ -1169,7 +1202,7 @@ local function handle_password_reset_request(req, res)
     local user = _state.user_find_by_email(body.email)
     if not user then return generic_ok(res) end
     local token = issue_token(user_uid(user),
-        ACTIONS.password_reset, _state.reset_ttl)
+        ACTIONS.password_reset, _state.reset_ttl, reset_token_extra(user))
     local origin = origin_for(req)
     if origin then
         local link = origin .. _state.prefix
@@ -1200,7 +1233,7 @@ local function handle_password_reset_confirm(req, res)
         return res:status(400):json({ error = "reset failed: " .. (err or "?") })
     end
     local user = _state.user_get(env.sub)
-    if not user then
+    if not user or not reset_binding_holds(env, user) then
         return res:status(400):json({ error = "reset failed" })
     end
     _state.user_set_password(env.sub, crypto.hash_password(body.password))
@@ -1781,7 +1814,7 @@ function M.send_password_reset(email, reset_url_prefix)
     if not user then return end  -- enumeration-safe; silently no-op
     local user_id = user_uid(user)
     local token = issue_token(user_id, ACTIONS.password_reset,
-                               _state.reset_ttl)
+                               _state.reset_ttl, reset_token_extra(user))
     local link = (reset_url_prefix or "")
                  .. _state.prefix .. "/password-reset/confirm?token=" .. token
     send_email(email, "password_reset", {

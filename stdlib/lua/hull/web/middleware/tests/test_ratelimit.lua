@@ -75,4 +75,26 @@ test("middleware returns a function", function()
     assert(type(mw) == "function", "expected function")
 end)
 
+-- The default key is the client, not one bucket for everybody: one client
+-- spending the limit must not lock out another.
+test("default key is per client", function()
+    local mw = ratelimit.middleware({ limit = 1, window = 60 })
+    local function res()
+        local r = { code = 200 }
+        function r:header() return self end
+        function r:status(c) self.code = c; return self end
+        function r:json() return self end
+        return r
+    end
+    local a = { headers = {}, remote_addr = "198.51.100.1" }
+    local b = { headers = {}, remote_addr = "198.51.100.2" }
+    assert_eq(mw(a, res()), 0, "first request from a")
+    assert_eq(mw(a, res()), 1, "second request from a is limited")
+    assert_eq(mw(b, res()), 0, "b has its own bucket")
+    -- X-Forwarded-For is ignored unless trust_proxy is set.
+    local spoof = { headers = { ["x-forwarded-for"] = "203.0.113.9" },
+                    remote_addr = "198.51.100.1" }
+    assert_eq(mw(spoof, res()), 1, "a spoofed XFF does not buy a fresh bucket")
+end)
+
 return {pass = pass, fail = fail}

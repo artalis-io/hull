@@ -123,6 +123,22 @@ function filters.raw(val)
     return val
 end
 
+-- For a URL placed in an attribute (href, src, action): HTML escaping alone
+-- lets href="{{ url }}" carry javascript:alert(1). Keeps http(s), mailto and
+-- relative URLs; anything else (javascript:, data:, vbscript:, ...) becomes
+-- "#". Browsers ignore whitespace and control characters inside a scheme, so
+-- they are removed before the scheme is read. The result is still escaped.
+function filters.safe_url(val)
+    local s = tostring(val or "")
+    local probe = s:gsub("[%c%s]", ""):lower()
+    local scheme = probe:match("^([%a][%w+.-]*):")
+    if scheme == nil or scheme == "http" or scheme == "https"
+       or scheme == "mailto" then
+        return s
+    end
+    return "#"
+end
+
 -- ── Lexer ────────────────────────────────────────────────────────────
 
 -- Token types
@@ -214,13 +230,17 @@ local function parse_expr(expr)
 
     for i = 2, #parts do
         local f = parts[i]
-        local name, arg = f:match("^(%w+)%s*:%s*(.+)$")
+        local name, arg = f:match("^([%a_][%w_]*)%s*:%s*(.+)$")
         if not name then
-            name = f:match("^(%w+)$")
+            name = f:match("^([%a_][%w_]*)$")
         end
-        if name then
-            filter_chain[#filter_chain + 1] = { name = name, arg = arg }
+        -- A filter that does not parse is an error, not dropped: dropping it
+        -- silently rendered `{{ url | safe_url }}` without the filter at all
+        -- (names with "_" did not match %w+).
+        if not name then
+            error("invalid template filter: " .. f)
         end
+        filter_chain[#filter_chain + 1] = { name = name, arg = arg }
     end
 
     return { var = var_part, filters = filter_chain }
@@ -489,6 +509,10 @@ local function resolve_includes(ast, load_fn, visited, depth)
             local inc_tokens = lex(source)
             local inc_ast = parse(inc_tokens)
             inc_ast = resolve_includes(inc_ast, load_fn, visited, depth + 1)
+            -- `visited` is the chain of includes being expanded, not every
+            -- include seen: leave it on the way out, so including the same
+            -- partial twice (in a loop, a block, side by side) is not a cycle.
+            visited[node.name] = nil
             for _, inc_node in ipairs(inc_ast) do
                 result[#result + 1] = inc_node
             end
@@ -631,8 +655,12 @@ end
 local function lua_quote(s)
     -- Use Lua long string to avoid escaping issues
     -- Find a level of [=...=[ that doesn't appear in the string
+    -- Search s .. "]", not s: the closing "]=*]" is appended right after s,
+    -- so a chunk ending in "]" (text like "a[1]" just before a tag) or
+    -- "]=" formed the delimiter early and the template failed to compile.
     local level = 0
-    while s:find("%]" .. string.rep("=", level) .. "%]") do
+    local probe = s .. "]"
+    while probe:find("%]" .. string.rep("=", level) .. "%]") do
         level = level + 1
     end
     local eq = string.rep("=", level)

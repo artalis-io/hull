@@ -135,6 +135,13 @@ local function deliver_item(item)
                 req_headers = decoded
             end
         end
+        -- Delivery is at-least-once, so give the receiver what it needs to
+        -- drop a repeat: the row's idempotency key, unless the app set the
+        -- header itself.
+        if type(item.idempotency_key) == "string" and item.idempotency_key ~= ""
+           and req_headers["Idempotency-Key"] == nil then
+            req_headers["Idempotency-Key"] = item.idempotency_key
+        end
 
         local send_ok, result = pcall(function()
             return http_client.async.post(item.destination, item.payload, {
@@ -160,6 +167,10 @@ local function deliver_item(item)
     -- Unknown kind: mark as failed
     return false, "unsupported outbox kind: " .. tostring(item.kind)
 end
+
+-- How long a flush's claim on a row lasts before another flush may take it
+-- (seconds): longer than any delivery should run.
+local CLAIM_LEASE = 300
 
 --- Compute exponential backoff delay (in seconds) for attempt N.
 -- 2^attempt * 10 seconds, capped at 1 hour.
@@ -195,29 +206,40 @@ function outbox.flush(opts)
     local retried = 0
 
     for _, item in ipairs(items) do
-        local ok, err = deliver_item(item)
+        -- Claim the row before sending it. Delivery yields to the event loop,
+        -- so another request's flush could select the same pending rows and
+        -- send them again. The claim pushes next_attempt_at out by a lease;
+        -- only the flush whose UPDATE changed the row delivers it. If this
+        -- process dies mid-send the lease runs out and the row is retried.
+        local claimed = db.exec(
+            "UPDATE _hull_outbox SET next_attempt_at = ? WHERE id = ? " ..
+            "AND state = 'pending' AND next_attempt_at <= ?",
+            { now + CLAIM_LEASE, item.id, now })
+        if claimed == 1 then
+            local ok, err = deliver_item(item)
 
-        if ok then
-            db.exec(
-                "UPDATE _hull_outbox SET state = 'delivered', delivered_at = ?, attempts = attempts + 1 WHERE id = ?",
-                { time.now(), item.id }
-            )
-            delivered = delivered + 1
-        else
-            local new_attempts = item.attempts + 1
-            if new_attempts >= item.max_attempts then
+            if ok then
                 db.exec(
-                    "UPDATE _hull_outbox SET state = 'failed', attempts = ?, last_error = ? WHERE id = ?",
-                    { new_attempts, err, item.id }
+                    "UPDATE _hull_outbox SET state = 'delivered', delivered_at = ?, attempts = attempts + 1 WHERE id = ?",
+                    { time.now(), item.id }
                 )
-                failed = failed + 1
+                delivered = delivered + 1
             else
-                local next_at = time.now() + backoff_delay(new_attempts)
-                db.exec(
-                    "UPDATE _hull_outbox SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?",
-                    { new_attempts, next_at, err, item.id }
-                )
-                retried = retried + 1
+                local new_attempts = item.attempts + 1
+                if new_attempts >= item.max_attempts then
+                    db.exec(
+                        "UPDATE _hull_outbox SET state = 'failed', attempts = ?, last_error = ? WHERE id = ?",
+                        { new_attempts, err, item.id }
+                    )
+                    failed = failed + 1
+                else
+                    local next_at = time.now() + backoff_delay(new_attempts)
+                    db.exec(
+                        "UPDATE _hull_outbox SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?",
+                        { new_attempts, next_at, err, item.id }
+                    )
+                    retried = retried + 1
+                end
             end
         end
     end

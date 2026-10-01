@@ -125,6 +125,12 @@ async function deliverItem(item) {
             catch (_e) { decoded = null; }
             if (decoded && typeof decoded === "object") reqHeaders = decoded;
         }
+        // Delivery is at-least-once, so give the receiver what it needs to
+        // drop a repeat: the row's idempotency key, unless the app set the
+        // header itself.
+        if (typeof item.idempotency_key === "string" && item.idempotency_key !== ""
+            && reqHeaders["Idempotency-Key"] === undefined)
+            reqHeaders["Idempotency-Key"] = item.idempotency_key;
 
         try {
             const result = await httpClient.async.post(item.destination, item.payload, {
@@ -169,6 +175,10 @@ function backoffDelay(attempt) {
  * @param {number} [opts.limit=50]  Max items to process per call.
  * @returns {Promise<{ delivered: number, failed: number, retried: number }>}
  */
+// How long a flush's claim on a row lasts before another flush may take it
+// (seconds): longer than any delivery should run.
+const CLAIM_LEASE = 300;
+
 async function flush(opts) {
     const o = opts || {};
     const limit = o.limit || 50;
@@ -184,6 +194,16 @@ async function flush(opts) {
 
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
+        // Claim the row before sending it. Delivery yields to the event loop,
+        // so another request's flush could select the same pending rows and
+        // send them again. The claim pushes next_attempt_at out by a lease;
+        // only the flush whose UPDATE changed the row delivers it. If this
+        // process dies mid-send the lease runs out and the row is retried.
+        const claimed = db.exec(
+            "UPDATE _hull_outbox SET next_attempt_at = ? WHERE id = ? " +
+            "AND state = 'pending' AND next_attempt_at <= ?",
+            [now + CLAIM_LEASE, item.id, now]);
+        if (claimed !== 1) continue;
         const [ok, err] = await deliverItem(item);
 
         if (ok) {

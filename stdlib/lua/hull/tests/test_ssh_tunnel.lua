@@ -178,6 +178,19 @@ test("destination_header = false sends none, as the caller said", function()
     assert_eq((r.written[1] or ""):find("Jump-Destination", 1, true), nil)
 end)
 
+test("the well-known destination header is checked even when another is configured", function()
+    -- Renaming the header, or turning it off, must not let the caller route
+    -- the relay through the default one to a host the grant never named.
+    for _, dh in ipairs({ false, "X-Target" }) do
+        local r = relay(upgraded())
+        local err, seen = connect_via(r, { host = "ssh.example.com",
+            destination_header = dh,
+            headers = { "Cf-Access-Jump-Destination: db-prod:22" } })
+        assert_eq(err and err.code, "denied")
+        assert_eq(seen, nil, "nothing may be dialled")
+    end
+end)
+
 test("an IPv6 destination is bracketed", function()
     local r = relay(upgraded())
     ssh.connect{
