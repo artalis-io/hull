@@ -32,6 +32,16 @@ import { json } from "hull:json";
 
 let idemTtl = 86400;
 const HEADER_NAME = "idempotency-key";
+
+// An in-flight key expires after this many seconds (or the TTL, if shorter).
+// A handler that threw never completes its row, and with the full TTL every
+// retry got 409 for a day - defeating the point of an idempotent retry. A
+// completed response keeps the full TTL (completedExpiry).
+const INFLIGHT_LEASE = 300;
+
+function completedExpiry(req) {
+    return time.now() + (req.ctx._idem_ttl !== undefined ? req.ctx._idem_ttl : idemTtl);
+}
 // Matches the `key` column width (VARCHAR(255)); keys over this are rejected.
 const MAX_KEY_LEN = 255;
 
@@ -140,7 +150,9 @@ function computeFingerprint(req) {
  * @param {Object} [opts]
  * @param {(req) => string} [opts.getPrincipal]
  *   Returns a stable per-user key for scoping. Default:
- *   `req.ctx.session.user_id` or `"__anon"`.
+ *   the session's `user_id`, else the JWT user's `sub` / `id` / `user_id`
+ *   (`req.ctx.user`, set by auth.jwtMiddleware), else `"__anon"` - which every
+ *   anonymous caller shares, so mount it after authentication.
  * @param {number}   [opts.ttl]        Override module TTL for this instance.
  * @param {string}   [opts.headerName="idempotency-key"]
  * @param {string[]} [opts.methods=["POST"]]
@@ -157,6 +169,15 @@ function middleware(opts) {
     const getPrincipal = o.getPrincipal || function(req) {
         if (req.ctx && req.ctx.session && req.ctx.session.user_id)
             return String(req.ctx.session.user_id);
+        // A JWT-authenticated user (auth.jwtMiddleware). Without this every
+        // bearer-token user shared "__anon", so one could replay another's
+        // stored response, or squat their key, by knowing key and body.
+        const u = req.ctx && req.ctx.user;
+        if (u && typeof u === "object") {
+            const id = u.sub !== undefined ? u.sub
+                     : u.id !== undefined ? u.id : u.user_id;
+            if (id !== undefined && id !== null) return "user:" + String(id);
+        }
         return "__anon";
     };
 
@@ -308,7 +329,7 @@ function middleware(opts) {
             ["key", "principal_id", "fingerprint", "endpoint",
              "state", "created_at", "expires_at"],
             [key, principalId, fingerprint, endpoint,
-             "inflight", now, now + ttl]
+             "inflight", now, now + Math.min(ttl, INFLIGHT_LEASE)]
         );
         if (inserted === 0) {
             res.status(409);
@@ -319,6 +340,7 @@ function middleware(opts) {
         // Store key info in context for respond() to use
         req.ctx._idem_key = key;
         req.ctx._idem_principal = principalId;
+        req.ctx._idem_ttl = ttl;
 
         return 0;
     };
@@ -383,8 +405,10 @@ function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, 
         const headersStr = json.encode(filtered);
         db.exec(
             "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, " +
-            "response_body = ?, response_headers = ? WHERE principal_id = ? AND key = ?",
-            [statusCode, bodyStr, headersStr, req.ctx._idem_principal, req.ctx._idem_key]
+            "response_body = ?, response_headers = ?, expires_at = ? " +
+            "WHERE principal_id = ? AND key = ?",
+            [statusCode, bodyStr, headersStr, completedExpiry(req),
+             req.ctx._idem_principal, req.ctx._idem_key]
         );
     }
 }
@@ -429,9 +453,9 @@ function respondHtml(req, res, statusCode, html, extraHeaders) {
 function complete(req) {
     if (req.ctx && req.ctx._idem_key) {
         db.exec(
-            "UPDATE _hull_idempotency_keys SET state = 'complete' " +
+            "UPDATE _hull_idempotency_keys SET state = 'complete', expires_at = ? " +
             "WHERE principal_id = ? AND key = ?",
-            [req.ctx._idem_principal, req.ctx._idem_key]
+            [completedExpiry(req), req.ctx._idem_principal, req.ctx._idem_key]
         );
     }
 }

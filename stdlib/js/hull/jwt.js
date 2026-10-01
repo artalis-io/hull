@@ -157,9 +157,23 @@ function verifySignature(alg, key, signingInput, sigB64) {
  *   alg values. MUST include the asym algs you intend to accept.
  * @param {boolean} [opts.requireExp]   Reject tokens missing `exp`.
  * @param {boolean} [opts.require_exp]  Lua-parity alias.
+ * @param {string} [opts.iss]   Required issuer: the `iss` claim must equal it.
+ * @param {string|string[]} [opts.aud]  Required audience (or a list of
+ *   acceptable ones): the `aud` claim - a string or an array - must contain one.
+ * @param {number} [opts.leeway=0]  Seconds of clock skew allowed on exp / nbf.
  * @returns {[Object|null, string|null]}  `[payload, null]` on success,
  *   `[null, reason]` on failure.
  */
+// Does the `aud` claim (a string or an array of strings) contain one of the
+// acceptable audiences (a string or an array)?
+function audienceMatches(claim, want) {
+    const wants = Array.isArray(want) ? want : [want];
+    const have = Array.isArray(claim) ? claim : [claim];
+    for (const h of have)
+        if (typeof h === "string" && wants.indexOf(h) !== -1) return true;
+    return false;
+}
+
 function verify(token, keyOrResolver, opts) {
     // A missing KEY is a precondition failure (you cannot verify without one) ->
     // throw, matching the Lua sibling (docs/stdlib_style.md section 1). A
@@ -171,9 +185,13 @@ function verify(token, keyOrResolver, opts) {
         return [null, "invalid token"];
     opts = opts || {};
     const allowed = opts.algs || ["HS256"];
+    const leeway = opts.leeway === undefined ? 0 : opts.leeway;
+    if (typeof leeway !== "number" || !(leeway >= 0))
+        throw new Error("jwt.verify: opts.leeway must be a non-negative number of seconds");
 
     const parts = token.split(".", 4);
-    if (parts.length !== 3)
+    // Exactly three NON-EMPTY parts, as in Lua.
+    if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2])
         return [null, "malformed token"];
 
     // Index access rather than array destructuring: QuickJS's parser
@@ -225,15 +243,20 @@ function verify(token, keyOrResolver, opts) {
     if (payload.exp !== undefined) {
         if (typeof payload.exp !== "number")
             return [null, "invalid exp claim"];
-        if (time.now() >= payload.exp) return [null, "token expired"];
+        if (time.now() >= payload.exp + leeway) return [null, "token expired"];
     } else if (opts.requireExp || opts.require_exp) {
         return [null, "token missing required exp claim"];
     }
     if (payload.nbf !== undefined) {
         if (typeof payload.nbf !== "number")
             return [null, "invalid nbf claim"];
-        if (time.now() < payload.nbf) return [null, "token not yet valid"];
+        if (time.now() + leeway < payload.nbf) return [null, "token not yet valid"];
     }
+
+    if (opts.iss !== undefined && payload.iss !== opts.iss)
+        return [null, "issuer mismatch"];
+    if (opts.aud !== undefined && !audienceMatches(payload.aud, opts.aud))
+        return [null, "audience mismatch"];
 
     return [payload, null];
 }
@@ -244,7 +267,7 @@ function verify(token, keyOrResolver, opts) {
 function decode(token) {
     if (!token || typeof token !== "string") return null;
     const parts = token.split(".", 4);
-    if (parts.length !== 3) return null;
+    if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return null;
     const payloadStr = segmentText(parts[1]);
     if (payloadStr === null) return null;
     let payload;

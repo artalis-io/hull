@@ -19,6 +19,7 @@
 
 import { time } from "hull:time";
 import { cache } from "hull:cache";
+import { _request } from "hull:web:_request";
 
 const MAX_BUCKETS = 10000;
 
@@ -76,13 +77,18 @@ function check(buckets, key, limit, window, now) {
  * @param {Object}  [opts]
  * @param {number}  [opts.limit=60]
  * @param {number}  [opts.window=60]  Seconds.
- * @param {string|((req) => string)} [opts.key="global"]  Limit key.
+ * @param {string|((req) => string)} [opts.key]  Limit key. Default: the client
+ *   IP (one bucket per client). A fixed string makes one bucket shared by
+ *   every client.
+ * @param {boolean} [opts.trustProxy=false]  Take the client IP from the
+ *   proxy-appended (last) X-Forwarded-For entry. Only behind a proxy you
+ *   control - the header is client-supplied otherwise.
  * @returns {(req, res) => number}
  *
  * @example
  * app.use("*", "/api/*", ratelimit.middleware({
  *     limit: 60, window: 60,
- *     key: (req) => req.ctx.userId || req.headers["x-forwarded-for"] || "anon",
+ *     key: (req) => req.ctx.userId || req.remote_addr || "anon",
  * }));
  */
 function middleware(opts) {
@@ -94,8 +100,13 @@ function middleware(opts) {
     const buckets = cache.new({ maxEntries: MAX_BUCKETS });
 
     // Normalize key option into a function
-    if (typeof keyFn !== "function") {
-        const fixedKey = keyFn || "global";
+    if (keyFn === undefined || keyFn === null) {
+        // Per client. A single shared bucket let one client spend the limit
+        // for everyone.
+        const trustProxy = o.trustProxy === true || o.trust_proxy === true;
+        keyFn = function(req) { return _request.clientIp(req, trustProxy) || "unknown"; };
+    } else if (typeof keyFn !== "function") {
+        const fixedKey = keyFn;
         keyFn = function(_req) { return fixedKey; };
     }
 

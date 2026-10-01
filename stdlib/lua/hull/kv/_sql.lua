@@ -122,6 +122,16 @@ function Store:del(k)
     return (n or 0) > 0
 end
 
+-- An expired row is absent to get(), but it still holds the (ns, k) primary
+-- key, so an INSERT ... DO NOTHING collided with it: a TTL lock could never be
+-- re-acquired and a TTL counter raised `conflict` until cleanup() ran. Remove
+-- it first. Concurrent callers stay correct - only one INSERT wins.
+local function drop_expired(self, khex, now)
+    self.conn.exec(
+        "DELETE FROM _hull_kv WHERE ns = ? AND k = ? AND expires_at <= ?",
+        { self.ns, khex, now })
+end
+
 -- Atomic compare-and-swap. expected == nil means "set only if absent".
 -- CAS/incr correctness relies on `conn.exec` returning rows CHANGED (not rows
 -- matched): `ON CONFLICT ... DO NOTHING` on an existing row must report 0, and a
@@ -134,6 +144,7 @@ function Store:cas(k, expected, new, ttl)
     local keep = ttl == u.KEEP_TTL
     local exp = keep and u.NO_EXPIRY or u.expiry_ms(ttl, self.default_ttl) or u.NO_EXPIRY
     if expected == nil then
+        drop_expired(self, kenc(k), now)
         local n = self.conn.exec(
             "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) "
             .. "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",
@@ -165,6 +176,7 @@ function Store:incr(k, by, ttl)
             { self.ns, khex, now })
         if not rows or #rows == 0 then
             local exp = u.expiry_ms(ttl, self.default_ttl) or u.NO_EXPIRY
+            drop_expired(self, khex, now)
             local n = self.conn.exec(
                 "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) "
                 .. "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",

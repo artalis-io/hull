@@ -118,6 +118,9 @@ end
 --   - `optional`      (boolean, default `false`): continue without a valid token.
 --   - `exclude_paths` (array of strings): skip this middleware on these
 --                     paths. Each entry is an exact match or "/prefix/*".
+--   - `require_exp`, `iss`, `aud`, `leeway`: passed to @{hull.jwt.verify}
+--                     (require an expiry, the issuer, the audience; clock
+--                     skew in seconds).
 --
 -- @treturn function  Middleware `(req, res) -> integer`.
 -- @raise At factory time if `opts.secret` is missing.
@@ -132,6 +135,10 @@ function auth.jwt_middleware(opts)
     local secret = opts.secret
     local optional = opts.optional or false
     local exclude_paths = opts.exclude_paths or {}
+    local verify_opts = {
+        require_exp = opts.require_exp, iss = opts.iss,
+        aud = opts.aud, leeway = opts.leeway,
+    }
 
     return function(req, res)
         local p = req.path or ""
@@ -165,7 +172,7 @@ function auth.jwt_middleware(opts)
         end
 
         -- Verify JWT
-        local payload, err = jwt_mod.verify(token, secret)
+        local payload, err = jwt_mod.verify(token, secret, verify_opts)
         if not payload then
             if optional then
                 return 0

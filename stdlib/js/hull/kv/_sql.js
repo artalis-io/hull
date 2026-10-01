@@ -93,12 +93,24 @@ class SqlStore {
         return (n || 0) > 0;
     }
 
+    // An expired row is absent to get(), but it still holds the (ns, k)
+    // primary key, so an INSERT ... DO NOTHING collided with it: a TTL lock
+    // could never be re-acquired and a TTL counter threw `conflict` until
+    // cleanup() ran. Remove it first. Concurrent callers stay correct - only
+    // one INSERT wins.
+    _dropExpired(khex, now) {
+        this.conn.exec(
+            "DELETE FROM _hull_kv WHERE ns = ? AND k = ? AND expires_at <= ?",
+            [this.ns, khex, now]);
+    }
+
     cas(k, expected, newVal, ttl) {
         const now = util.nowMs();
         const keep = ttl === util.KEEP_TTL;
         const exp = keep ? null : util.expiryMs(ttl, this.defaultTtl);
         const expVal = exp === null ? util.NO_EXPIRY : exp;
         if (expected === undefined || expected === null) {
+            this._dropExpired(util.hexencode(k), now);
             const n = this.conn.exec(
                 "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) " +
                 "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",
@@ -131,6 +143,7 @@ class SqlStore {
             if (!rows || rows.length === 0) {
                 const exp = util.expiryMs(ttl, this.defaultTtl);
                 const expVal = exp === null ? util.NO_EXPIRY : exp;
+                this._dropExpired(khex, now);
                 const n = this.conn.exec(
                     "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) " +
                     "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",

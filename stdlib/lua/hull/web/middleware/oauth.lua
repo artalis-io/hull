@@ -377,6 +377,13 @@ local function compute_redirect_uri(req, provider_name)
     return proto .. "://" .. host .. path
 end
 
+-- Is the app served over https (the scheme its redirect_uri is built with)?
+local function state_cookie_secure(req, provider_name)
+    if _state.state_cookie_secure ~= nil then return _state.state_cookie_secure end
+    if _state.state_cookie_samesite == "None" then return true end
+    return compute_redirect_uri(req, provider_name):sub(1, 8) == "https://"
+end
+
 -- GET /auth/:provider/login
 local function handle_login(req, res)
     local provider_name = req.params and req.params.provider
@@ -401,9 +408,11 @@ local function handle_login(req, res)
         _state.state_cookie, signed,
         { httponly = true,
           samesite = _state.state_cookie_samesite,
-          -- SameSite=None mandates Secure per spec, and browsers
-          -- silently drop None-without-Secure. Set both together.
-          secure   = (_state.state_cookie_samesite == "None"),
+          -- The cookie carries the PKCE verifier and the nonce: Secure
+          -- whenever the app is served over https (and always with
+          -- SameSite=None, which browsers drop without it). Plain-http dev
+          -- keeps working; state_cookie_secure overrides.
+          secure   = state_cookie_secure(req, provider_name),
           path     = _state.state_cookie_path,
           max_age  = _state.state_ttl }))
 
@@ -500,7 +509,8 @@ local function handle_callback(req, res)
     local claims, jerr = jwt.verify(tokens.id_token,
         jwks_resolver(provider_name),
         { algs = { "RS256", "RS384", "RS512", "PS256",
-                   "ES256", "ES384" }})
+                   "ES256", "ES384" },
+          require_exp = true })   -- OIDC Core 3.1.3.7: an id_token expires
     if not claims then
         log.warn("oauth: id_token verify failed: " .. tostring(jerr))
         return res:status(400):html("auth failed")
@@ -560,8 +570,16 @@ local function handle_callback(req, res)
     res:redirect(target)
 end
 
--- GET /auth/logout
+-- GET or POST /auth/logout
 local function handle_logout(req, res)
+    -- Logout changes state, so another site must not trigger it with an
+    -- <img src="/auth/logout"> or a link: refuse a request the browser marks
+    -- as cross-site. (Same-site, same-origin, a typed URL - "none" - and
+    -- non-browser clients that send no header pass.)
+    local site = req.headers and req.headers["sec-fetch-site"]
+    if site == "cross-site" then
+        return res:status(403):html("forbidden")
+    end
     res:header("Set-Cookie",
         cookie.clear(_state.state_cookie,
                      { path = _state.state_cookie_path }))
@@ -611,6 +629,9 @@ function oauth.init(opts)
                   .. "'Lax', 'Strict', or 'None'")
         end
         _state.state_cookie_samesite = s
+    end
+    if opts.state_cookie_secure ~= nil then
+        _state.state_cookie_secure = opts.state_cookie_secure == true
     end
     _state.state_ttl    = opts.state_ttl or _state.state_ttl
     _state.jwks_ttl     = opts.jwks_ttl  or _state.jwks_ttl
@@ -676,6 +697,7 @@ function oauth.routes(app)
     app.get(_state.callback_path:gsub("{provider}", ":provider"),
             handle_callback)
     app.get(_state.logout_path, handle_logout)
+    app.post(_state.logout_path, handle_logout)
 end
 
 -- Test helpers (not part of the public contract). Lets tests round-

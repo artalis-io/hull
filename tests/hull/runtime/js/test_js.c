@@ -3020,6 +3020,40 @@ UTEST(js_cap, function_constructors_are_unreachable)
     cleanup_js_caps();
 }
 
+/* Stdlib fixes from the second audit (D2): jwt verify options and strict
+ * splitting; the safe_url filter. run() returns 0, or the number of the first
+ * check that failed. */
+UTEST(js_stdlib, audit2_stdlib_fixes)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { jwt } from 'hull:jwt';\n"
+        "import { template } from 'hull:template';\n"
+        "import { time } from 'hull:time';\n"
+        "function run() {\n"
+        "  const now = time.now();\n"
+        "  const k = 'k'.repeat(32);\n"
+        "  const t = jwt.sign({ sub: 'u', iss: 'me', aud: ['api', 'x'], exp: now + 60 }, k);\n"
+        "  if (!jwt.verify(t, k, { iss: 'me', aud: 'api' })[0]) return 1;\n"
+        "  if (jwt.verify(t, k, { iss: 'other' })[0]) return 2;\n"
+        "  if (jwt.verify(t, k, { aud: ['nope', 'no'] })[0]) return 3;\n"
+        "  const p = t.split('.');\n"
+        "  if (jwt.verify(p[0] + '.' + p[1] + '..' + p[2], k)[0]) return 4;\n"
+        "  const old = jwt.sign({ sub: 'u', exp: now - 5 }, k);\n"
+        "  if (jwt.verify(old, k)[0]) return 5;\n"
+        "  if (!jwt.verify(old, k, { leeway: 30 })[0]) return 6;\n"
+        "  if (jwt.verify(jwt.sign({ sub: 'u', exp: now + 60 }, k), k, { aud: 'api' })[0]) return 7;\n"
+        "  if (template.renderString('{{ u | safe_url }}', { u: 'java\\tscript:alert(1)' }) !== '#') return 8;\n"
+        "  if (template.renderString('{{ u | safe_url }}', { u: 'DATA:text/html,x' }) !== '#') return 9;\n"
+        "  if (template.renderString('{{ u | safe_url }}', { u: '/a?b=1' }) !== '/a?b=1') return 10;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__audit2 = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__audit2"), 0);
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, conversions_cannot_free_resolved_objects)
 {
     init_js_with_caps();

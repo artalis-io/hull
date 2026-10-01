@@ -131,6 +131,12 @@ function jwtMiddleware(opts) {
     const secret = o.secret;
     const optional = o.optional === true;
     const excludePaths = o.excludePaths || [];
+    // Passed to jwt.verify: require an expiry, the issuer, the audience; clock
+    // skew in seconds.
+    const verifyOpts = {
+        requireExp: o.requireExp === true || o.require_exp === true,
+        iss: o.iss, aud: o.aud, leeway: o.leeway,
+    };
 
     if (!secret)
         throw new Error("jwtMiddleware requires opts.secret");
@@ -160,7 +166,7 @@ function jwtMiddleware(opts) {
         }
 
         const token = authHeader.substring(7);
-        const result = jwt.verify(token, secret);
+        const result = jwt.verify(token, secret, verifyOpts);
 
         // jwt.verify returns [payload, null] on success, [null, "reason"] on failure
         if (!result[0]) {

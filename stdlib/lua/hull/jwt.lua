@@ -167,8 +167,29 @@ end
 --                   `{"HS256"}` for back-compat with the pre-asym API.
 --                   MUST be set to include asym algs for asym tokens.
 --   - `require_exp` Reject tokens lacking an `exp` claim.
+--   - `iss`         Required issuer: the `iss` claim must equal it.
+--   - `aud`         Required audience (a string, or a list of acceptable
+--                   ones): the `aud` claim - a string or a list - must
+--                   contain one of them.
+--   - `leeway`      Seconds of clock skew allowed on `exp` / `nbf`
+--                   (default 0).
 -- @treturn ?table payload  Decoded claims on success.
 -- @treturn ?string err     Reason on failure (when payload is nil).
+-- Does the `aud` claim (a string or a list of strings) contain one of the
+-- acceptable audiences (a string or a list)?
+local function audience_matches(claim, want)
+    local wants = type(want) == "table" and want or { want }
+    local have = type(claim) == "table" and claim or { claim }
+    for _, h in ipairs(have) do
+        if type(h) == "string" then
+            for _, w in ipairs(wants) do
+                if h == w then return true end
+            end
+        end
+    end
+    return false
+end
+
 function jwt.verify(token, key_or_resolver, opts)
     -- A missing KEY is a precondition failure (you cannot verify without one) ->
     -- throw. A missing/malformed TOKEN is untrusted input -> return nil, the
@@ -182,15 +203,18 @@ function jwt.verify(token, key_or_resolver, opts)
     end
     opts = opts or {}
     local allowed = opts.algs or { "HS256" }
-
-    -- Split into the three b64-encoded parts.
-    local parts = {}
-    for part in token:gmatch("[^%.]+") do
-        parts[#parts + 1] = part
+    local leeway = opts.leeway or 0
+    if type(leeway) ~= "number" or leeway < 0 or leeway ~= leeway then
+        error("jwt.verify: opts.leeway must be a non-negative number of seconds")
     end
-    if #parts ~= 3 then return nil, "invalid token format" end
 
-    local header_b64, payload_b64, sig_b64 = parts[1], parts[2], parts[3]
+    -- Exactly three non-empty b64 parts. Splitting on "[^.]+" dropped empty
+    -- segments, so "h..p.s" verified the same as "h.p.s": one token, many
+    -- spellings, which matters wherever a token string is an identifier
+    -- (deny-lists, replay caches).
+    local header_b64, payload_b64, sig_b64 =
+        token:match("^([^%.]+)%.([^%.]+)%.([^%.]+)$")
+    if not header_b64 then return nil, "invalid token format" end
 
     -- Parse the header to discover the alg + kid. We can't just match
     -- a fixed header string anymore now that we support multiple algs.
@@ -244,7 +268,7 @@ function jwt.verify(token, key_or_resolver, opts)
         if type(payload.exp) ~= "number" then
             return nil, "invalid exp claim"
         end
-        if time.now() >= payload.exp then return nil, "token expired" end
+        if time.now() >= payload.exp + leeway then return nil, "token expired" end
     elseif opts.require_exp then
         return nil, "token missing required exp claim"
     end
@@ -253,9 +277,16 @@ function jwt.verify(token, key_or_resolver, opts)
         if type(payload.nbf) ~= "number" then
             return nil, "invalid nbf claim"
         end
-        if time.now() < payload.nbf then
+        if time.now() + leeway < payload.nbf then
             return nil, "token not yet valid"
         end
+    end
+
+    if opts.iss ~= nil and payload.iss ~= opts.iss then
+        return nil, "issuer mismatch"
+    end
+    if opts.aud ~= nil and not audience_matches(payload.aud, opts.aud) then
+        return nil, "audience mismatch"
     end
 
     return payload
@@ -263,13 +294,10 @@ end
 
 --- Decode a JWT payload WITHOUT verifying the signature. Debug use.
 function jwt.decode(token)
-    if not token then return nil end
-    local parts = {}
-    for part in token:gmatch("[^%.]+") do
-        parts[#parts + 1] = part
-    end
-    if #parts ~= 3 then return nil end
-    local payload_json = segment_text(parts[2])
+    if type(token) ~= "string" then return nil end
+    local _, payload_b64 = token:match("^([^%.]+)%.([^%.]+)%.([^%.]+)$")
+    if not payload_b64 then return nil end
+    local payload_json = segment_text(payload_b64)
     if not payload_json then return nil end
     return decode_object(payload_json)
 end

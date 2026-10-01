@@ -71,4 +71,26 @@ test("middleware returns a function", () => {
     assertEq(typeof mw, "function");
 });
 
+// The default key is the client, not one bucket for everybody: one client
+// spending the limit must not lock out another.
+test("default key is per client", () => {
+    const mw = ratelimit.middleware({ limit: 1, window: 60 });
+    const res = () => {
+        const r = { code: 200 };
+        r.header = () => r;
+        r.status = (c) => { r.code = c; return r; };
+        r.json = () => r;
+        return r;
+    };
+    const a = { headers: {}, remote_addr: "198.51.100.1" };
+    const b = { headers: {}, remote_addr: "198.51.100.2" };
+    assertEq(mw(a, res()), 0);
+    assertEq(mw(a, res()), 1);
+    assertEq(mw(b, res()), 0);
+    // X-Forwarded-For is ignored unless trustProxy is set.
+    const spoof = { headers: { "x-forwarded-for": "203.0.113.9" },
+                    remote_addr: "198.51.100.1" };
+    assertEq(mw(spoof, res()), 1);
+});
+
 export default { pass, fail };

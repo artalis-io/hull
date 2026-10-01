@@ -14,6 +14,7 @@
 
 local time = require("hull.time")
 local cache = require("hull.cache")
+local _request = require("hull.web._request")
 
 local ratelimit = {}
 
@@ -74,14 +75,18 @@ end
 --   - `limit`  (integer, default `60`): max requests per window.
 --   - `window` (integer, default `60`): window length in seconds.
 --   - `key`    (string or `function(req) -> string`): limit key.
---     Default `"global"` (single bucket for all clients).
+--     Default: the client IP (one bucket per client). A fixed string
+--     makes one bucket shared by every client.
+--   - `trust_proxy` (boolean, default `false`): take the client IP from
+--     the proxy-appended (last) `X-Forwarded-For` entry. Only behind a
+--     proxy you control - the header is client-supplied otherwise.
 --
 -- @treturn function  Middleware `(req, res) -> integer`.
 -- @usage
 -- -- Per-user rate limit
 -- app.use("*", "/api/*", ratelimit.middleware({
 --     limit = 60, window = 60,
---     key = function(req) return req.ctx.user_id or req.headers["x-forwarded-for"] or "anon" end,
+--     key = function(req) return req.ctx.user_id or req.remote_addr or "anon" end,
 -- }))
 function ratelimit.middleware(opts)
     opts = opts or {}
@@ -92,8 +97,15 @@ function ratelimit.middleware(opts)
     local buckets = cache.new({ max_entries = MAX_BUCKETS })
 
     -- Normalize key option into a function
-    if type(key_fn) ~= "function" then
-        local fixed_key = key_fn or "global"
+    if key_fn == nil then
+        -- Per client. A single shared bucket let one client spend the limit
+        -- for everyone.
+        local trust_proxy = opts.trust_proxy == true
+        key_fn = function(req)
+            return _request.client_ip(req, trust_proxy) or "unknown"
+        end
+    elseif type(key_fn) ~= "function" then
+        local fixed_key = key_fn
         key_fn = function(_req) return fixed_key end
     end
 

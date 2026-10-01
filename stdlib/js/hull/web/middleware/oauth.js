@@ -324,6 +324,13 @@ function computeRedirectUri(req, providerName) {
     return proto + "://" + host + path;
 }
 
+// Is the app served over https (the scheme its redirect_uri is built with)?
+function stateCookieSecure(req, providerName) {
+    if (_state.stateCookieSecure !== undefined) return _state.stateCookieSecure;
+    if (_state.stateCookieSameSite === "None") return true;
+    return computeRedirectUri(req, providerName).startsWith("https://");
+}
+
 function handleLogin(req, res) {
     const providerName = req.params && req.params.provider;
     const cfg = providerName ? _state.providers[providerName] : null;
@@ -347,9 +354,11 @@ function handleLogin(req, res) {
         _state.stateCookie, signed,
         { httpOnly: true,
           sameSite: _state.stateCookieSameSite,
-          // SameSite=None mandates Secure per spec, and browsers
-          // silently drop None-without-Secure. Set both together.
-          secure:   (_state.stateCookieSameSite === "None"),
+          // The cookie carries the PKCE verifier and the nonce: Secure
+          // whenever the app is served over https (and always with
+          // SameSite=None, which browsers drop without it). Plain-http dev
+          // keeps working; stateCookieSecure overrides.
+          secure:   stateCookieSecure(req, providerName),
           path:     _state.stateCookiePath,
           maxAge:   _state.stateTtl }));
 
@@ -453,12 +462,14 @@ async function handleCallback(req, res) {
     };
     let claims, jerr;
     [claims, jerr] = jwt.verify(tokens.id_token, syncResolver,
-        { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"] });
+        { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"],
+          requireExp: true });   // OIDC Core 3.1.3.7: an id_token expires
     if (!claims) {
         // Cache miss on a rotated kid? Re-fetch and retry once.
         await refreshJwks(providerName);
         [claims, jerr] = jwt.verify(tokens.id_token, syncResolver,
-            { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"] });
+            { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"],
+          requireExp: true });   // OIDC Core 3.1.3.7: an id_token expires
     }
     if (!claims) {
         log.warn("oauth: id_token verify failed: " + String(jerr));
@@ -513,6 +524,12 @@ async function handleCallback(req, res) {
 }
 
 async function handleLogout(req, res) {
+    // Logout changes state, so another site must not trigger it with an
+    // <img src="/auth/logout"> or a link: refuse a request the browser marks
+    // as cross-site. (Same-site, same-origin, a typed URL - "none" - and
+    // non-browser clients that send no header pass.)
+    const site = req.headers && req.headers["sec-fetch-site"];
+    if (site === "cross-site") { res.status(403).html("forbidden"); return; }
     res.header("Set-Cookie", cookie.clear(_state.stateCookie,
                               { path: _state.stateCookiePath }));
     let target = "/";
@@ -548,6 +565,8 @@ function init(opts) {
         }
         _state.stateCookieSameSite = s;
     }
+    if (opts.stateCookieSecure !== undefined)
+        _state.stateCookieSecure = opts.stateCookieSecure === true;
     _state.stateTtl    = opts.stateTtl    || _state.stateTtl;
     _state.jwksTtl     = opts.jwksTtl     || _state.jwksTtl;
     // redirect_uri origin. Preferred: an explicit baseUrl ("https://app.com").
@@ -623,6 +642,7 @@ function routes(app) {
     app.get(_state.loginPath.replace("{provider}", ":provider"), handleLogin);
     app.get(_state.callbackPath.replace("{provider}", ":provider"), handleCallback);
     app.get(_state.logoutPath, handleLogout);
+    app.post(_state.logoutPath, handleLogout);
 }
 
 // Test helpers (not public surface).

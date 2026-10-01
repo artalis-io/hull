@@ -146,6 +146,25 @@ import { encoding } from "hull:encoding";
 // just builds the payload and adds optional extra fields. The
 // action / expiry / single-use checks remain in parseToken /
 // consumeToken since they're auth-flows-specific.
+// A reset token names the password it replaces: a short hash of the
+// account's password_hash at issue time, checked again at confirm. Once the
+// password changes, every other outstanding reset link - a leaked one
+// included - stops working, instead of living out its resetTtl. Read through
+// userFindByEmail, the lookup login itself relies on for password_hash, so
+// issue and confirm see the same field.
+function passwordBinding(user) {
+    const h = user && user.password_hash;
+    return encoding.hex.encode(crypto.sha256(typeof h === "string" ? h : "")).slice(0, 16);
+}
+
+function resetTokenExtra(user) { return { pwb: passwordBinding(user) }; }
+
+function resetBindingHolds(env, user) {
+    const current = user && typeof user.email === "string"
+        ? _state.userFindByEmail(user.email) : null;
+    return !!current && env.pwb === passwordBinding(current);
+}
+
 function issueToken(userId, action, ttl, extra) {
     const payload = {
         sub:    userId,
@@ -253,14 +272,24 @@ function emailRateAllow(to) {
             _emailRl.set(key, bucket);
             // Still over: a flood of distinct recipients, all inside the
             // window, so the sweep kept them all - the map outgrew the cap
-            // and every new key paid an O(n) sweep. Drop the oldest-inserted
-            // (Map order) down to 90% of the cap, so the next sweep is a
-            // tenth of the cap away. The key just added is the newest.
+            // and every new key paid an O(n) sweep. Drop the least recently
+            // used down to 90% of the cap, so the next sweep is a tenth of
+            // the cap away. The key just added is kept, and so is every
+            // bucket AT its limit: dropping one reset it, so flooding other
+            // addresses bought an attacker a fresh allowance against the
+            // address they were blocked on. A saturated bucket costs `limit`
+            // sends to create, so keeping them all stays bounded.
             if (_emailRl.size > max) {
                 const target = Math.floor(max * 0.9);
-                const it = _emailRl.keys();
-                while (_emailRl.size > target) _emailRl.delete(it.next().value);
-                _emailRl.set(key, bucket);
+                const order = [];
+                _emailRl.forEach((b, k) => {
+                    const live = b.ts.filter(t => t > cutoff).length;
+                    if (k !== key && live < limit)
+                        order.push({ k, t: b.ts.length ? b.ts[b.ts.length - 1] : 0 });
+                });
+                order.sort((x, y) => x.t - y.t);
+                for (let i = 0; i < order.length && _emailRl.size > target; i++)
+                    _emailRl.delete(order[i].k);
             }
         }
     }
@@ -588,10 +617,12 @@ async function handleRegister(req, res) {
             error: "password appears in known data breaches; choose another",
         });
     }
+    // Hash FIRST, on both branches: PBKDF2 is by far the slowest step, and
+    // running it only for new addresses let response time tell an attacker
+    // which ones already have an account.
+    const pwHash = crypto.hashPassword(body.password);
     const existing = _state.userFindByEmail(body.email);
     if (existing) return genericOk(res);
-
-    const pwHash = crypto.hashPassword(body.password);
     const uid = _state.userCreate(body.email, pwHash);
     const user = _state.userGet(uid);
     if (!user) {
@@ -836,7 +867,7 @@ function handlePasswordResetRequest(req, res) {
     const user = _state.userFindByEmail(body.email);
     if (!user) return genericOk(res);
     const token = issueToken(userId(user), ACTIONS.password_reset,
-        _state.resetTtl);
+        _state.resetTtl, resetTokenExtra(user));
     const origin = originFor(req);
     if (origin) {
         const link = origin + _state.prefix
@@ -864,7 +895,8 @@ async function handlePasswordResetConfirm(req, res) {
             error: "reset failed: " + (result[1] || "?") });
     }
     const user = _state.userGet(result[0].sub);
-    if (!user) return res.status(400).json({ error: "reset failed" });
+    if (!user || !resetBindingHolds(result[0], user))
+        return res.status(400).json({ error: "reset failed" });
     _state.userSetPassword(result[0].sub, crypto.hashPassword(body.password));
     // A successful reset demonstrates email control; clear any
     // outstanding lockout so the new password works immediately.
@@ -1341,7 +1373,8 @@ function sendPasswordReset(email, resetUrlPrefix) {
     const user = _state.userFindByEmail(email);
     if (!user) return;
     const uid = userId(user);
-    const token = issueToken(uid, ACTIONS.password_reset, _state.resetTtl);
+    const token = issueToken(uid, ACTIONS.password_reset, _state.resetTtl,
+        resetTokenExtra(user));
     const link = (resetUrlPrefix || "") + _state.prefix
         + "/password-reset/confirm?token=" + token;
     sendEmail(email, "password_reset", { user, link, token });

@@ -90,6 +90,19 @@ const filters = {
     },
     json(val) { return JSON.stringify(val).replace(/</g, "\\u003c"); },
     raw(val) { return val; },
+    // For a URL placed in an attribute (href, src, action): HTML escaping
+    // alone lets href="{{ url }}" carry javascript:alert(1). Keeps http(s),
+    // mailto and relative URLs; anything else (javascript:, data:, vbscript:,
+    // ...) becomes "#". Browsers ignore whitespace and control characters
+    // inside a scheme, so they are removed before the scheme is read. The
+    // result is still escaped.
+    safe_url(val) {
+        const s = String(val ?? "");
+        const probe = s.replace(/[\u0000-\u0020\u007f]/g, "").toLowerCase();
+        const m = /^([a-z][a-z0-9+.-]*):/.exec(probe);
+        if (!m || m[1] === "http" || m[1] === "https" || m[1] === "mailto") return s;
+        return "#";
+    },
 };
 
 // ── Lexer ────────────────────────────────────────────────────────────
@@ -160,7 +173,10 @@ function parseExpr(expr) {
             filterChain.push({ name: m[1], arg: m[2].trim() });
         } else {
             m = f.match(/^(\w+)$/);
-            if (m) filterChain.push({ name: m[1], arg: null });
+            // A filter that does not parse is an error, not dropped: dropping
+            // it silently would render the value without the filter at all.
+            if (!m) throw new Error("invalid template filter: " + f);
+            filterChain.push({ name: m[1], arg: null });
         }
     }
 
@@ -348,6 +364,10 @@ function resolveIncludes(ast, loadFn, visited, depth) {
             if (source == null) throw new Error("template not found: " + node.name);
             let incAst = parse(lex(source));
             incAst = resolveIncludes(incAst, loadFn, visited, depth + 1);
+            // `visited` is the chain of includes being expanded, not every
+            // include seen: leave it on the way out, so including the same
+            // partial twice (in a loop, a block, side by side) is not a cycle.
+            delete visited[node.name];
             for (const n of incAst) result.push(n);
         } else if (node.kind === "if") {
             // Clone visited per branch so same partial can appear in mutually exclusive branches

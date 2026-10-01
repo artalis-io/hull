@@ -423,21 +423,28 @@ local function tunnel_headers(tunnel, host, port)
     if name == nil then name = DEFAULT_DESTINATION_HEADER end
     local out = {}
     for i, line in ipairs(tunnel.headers or {}) do out[i] = line end
-    if name == false then return out end
+
+    -- Every header that can route the relay is checked: the configured one
+    -- AND the well-known default. Checking only the configured name let a
+    -- caller that renamed it, or set it to false, still send
+    -- Cf-Access-Jump-Destination in `headers` and reach a host the grant
+    -- never named.
+    local checked = { [DEFAULT_DESTINATION_HEADER:lower()] = true }
+    if name ~= false then checked[name:lower()] = true end
 
     local want = destination_value(host, port)
-    local lname, seen = name:lower(), false
+    local seen = false
     for _, line in ipairs(out) do
         local n, v = tostring(line):match("^%s*([^:]-)%s*:%s*(.-)%s*$")
-        if n and n:lower() == lname then
+        if n and checked[n:lower()] then
             if v ~= want then
-                return nil, { code = "denied", detail = name .. " names " .. v
+                return nil, { code = "denied", detail = n .. " names " .. v
                     .. ", but this connection is granted for " .. want }
             end
-            seen = true
+            if name ~= false and n:lower() == name:lower() then seen = true end
         end
     end
-    if not seen then out[#out + 1] = name .. ": " .. want end
+    if name ~= false and not seen then out[#out + 1] = name .. ": " .. want end
     return out
 end
 -- `dial` is how the RELAY is reached, defaulting to the capability-checked

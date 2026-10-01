@@ -50,6 +50,16 @@ local idempotency = {}
 
 local _ttl = 86400  -- default 24 hours
 
+-- An in-flight key expires after this many seconds (or the TTL, if shorter).
+-- A handler that raised never completes its row, and with the full TTL every
+-- retry got 409 for a day - defeating the point of an idempotent retry. A
+-- completed response keeps the full TTL (completed_expiry).
+local INFLIGHT_LEASE = 300
+
+local function completed_expiry(req)
+    return time.now() + (req.ctx._idem_ttl or _ttl)
+end
+
 -- M-3: allowlist of headers safe to replay/cache. Excludes credential
 -- and session-binding headers (Set-Cookie, WWW-Authenticate, etc.) so a
 -- stored Set-Cookie can't outlive a revoked session.
@@ -170,8 +180,10 @@ end
 -- @function idempotency.middleware
 -- @tparam[opt] table opts
 -- @tparam[opt] function(req)->string opts.get_principal
---   Returns a stable per-user key for scoping. Default:
---   `req.ctx.session.user_id` or `"__anon"`.
+--   Returns a stable per-user key for scoping. Default: the session's
+--   `user_id`, else the JWT user's `sub` / `id` / `user_id`
+--   (`req.ctx.user`, set by auth.jwt_middleware), else `"__anon"` - which
+--   every anonymous caller shares, so mount it after authentication.
 -- @tparam[opt] number opts.ttl  Override module-level TTL for this instance.
 -- @tparam[opt="idempotency-key"] string opts.header_name  Header to read.
 -- @tparam[opt={"POST"}] table opts.methods  Methods to intercept.
@@ -182,6 +194,14 @@ function idempotency.middleware(opts)
     local get_principal = opts.get_principal or function(req)
         if req.ctx and req.ctx.session and req.ctx.session.user_id then
             return tostring(req.ctx.session.user_id)
+        end
+        -- A JWT-authenticated user (auth.jwt_middleware). Without this every
+        -- bearer-token user shared "__anon", so one could replay another's
+        -- stored response, or squat their key, by knowing key and body.
+        local u = req.ctx and req.ctx.user
+        if type(u) == "table" then
+            local id = u.sub or u.id or u.user_id
+            if id ~= nil then return "user:" .. tostring(id) end
         end
         return "__anon"
     end
@@ -317,7 +337,7 @@ function idempotency.middleware(opts)
             { "key", "principal_id", "fingerprint", "endpoint",
               "state", "created_at", "expires_at" },
             { key, principal_id, fingerprint, endpoint,
-              "inflight", now, now + ttl }
+              "inflight", now, now + math.min(ttl, INFLIGHT_LEASE) }
         )
         if inserted == 0 then
             -- Another request claimed this key between our SELECT and INSERT
@@ -330,6 +350,7 @@ function idempotency.middleware(opts)
         -- Store key info in context for idempotency.respond() to use
         req.ctx._idem_key = key
         req.ctx._idem_principal = principal_id
+        req.ctx._idem_ttl = ttl
 
         return 0
     end
@@ -388,8 +409,9 @@ local function cache_and_send(req, res, status_code, body_str, content_type, ext
         end
         local headers_str = json.encode(filtered)
         db.exec(
-            "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, response_body = ?, response_headers = ? WHERE principal_id = ? AND key = ?",
-            { status_code, body_str, headers_str, req.ctx._idem_principal, req.ctx._idem_key }
+            "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, response_body = ?, response_headers = ?, expires_at = ? WHERE principal_id = ? AND key = ?",
+            { status_code, body_str, headers_str, completed_expiry(req),
+              req.ctx._idem_principal, req.ctx._idem_key }
         )
     end
 end
@@ -435,8 +457,8 @@ end
 function idempotency.complete(req)
     if req.ctx._idem_key then
         db.exec(
-            "UPDATE _hull_idempotency_keys SET state = 'complete' WHERE principal_id = ? AND key = ?",
-            { req.ctx._idem_principal, req.ctx._idem_key }
+            "UPDATE _hull_idempotency_keys SET state = 'complete', expires_at = ? WHERE principal_id = ? AND key = ?",
+            { completed_expiry(req), req.ctx._idem_principal, req.ctx._idem_key }
         )
     end
 end
