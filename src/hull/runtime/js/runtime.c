@@ -1219,15 +1219,6 @@ void hl_js_free(HlJS *js)
         js->sse_route_cap = 0;
     }
 
-    /* Free tracked WS client allocations */
-    if (js->ws_clients) {
-        hl_alloc_free(js->base.alloc, js->ws_clients,
-                      js->ws_client_cap * sizeof(void *));
-        js->ws_clients = NULL;
-        js->ws_client_count = 0;
-        js->ws_client_cap = 0;
-    }
-
     /* Free WebSocket registry - HTTP-only; CLI builds never create one. */
 #ifdef HL_ENABLE_HTTP_SERVER
     if (js->base.ws_registry) {

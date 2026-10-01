@@ -243,8 +243,46 @@ static void owned_conn_release(HlLuaOwnedConn *o)
  * way (db.open(), NULL once closed), else the default connection.
  * Internal-table (_hull_*) access is gated by a caller check at each call
  * site, not by a separate handle. */
+/* Row loops in progress: hl_db_query / hl_db_table_columns calling back into
+ * Lua per row. A row-table allocation can run a GC step, and a GC step can run
+ * a script __gc - Lua code, inside the loop - that calls the database again.
+ * That re-entrant call could evict and finalize the statement being stepped,
+ * or close the connection under it, and the next step reads freed memory. So
+ * while a loop runs, every connection method refuses (db_call_handle and
+ * close() check this). Event-loop thread only.
+ *
+ * The count comes back down through a to-be-closed guard, so an error
+ * unwinding out of the row callback (out of memory) cannot leave it raised. */
+static int g_db_row_loops;
+
+static int row_loop_guard_close(lua_State *L)
+{
+    (void)L;
+    if (g_db_row_loops > 0) g_db_row_loops--;
+    return 0;
+}
+
+/* Push the guard and mark it to-be-closed. Returns its stack index; closing
+ * it (lua_settop below it, lua_closeslot, or an error unwinding) ends the
+ * loop's count. */
+static int push_row_loop_guard(lua_State *L)
+{
+    lua_newuserdatauv(L, 1, 0);
+    if (luaL_newmetatable(L, "hull.db.rowloop")) {
+        lua_pushcfunction(L, row_loop_guard_close);
+        lua_setfield(L, -2, "__close");
+    }
+    lua_setmetatable(L, -2);
+    g_db_row_loops++;
+    lua_toclose(L, -1);
+    return lua_gettop(L);
+}
+
 static HlDbHandle *db_call_handle(lua_State *L)
 {
+    if (g_db_row_loops > 0)
+        luaL_error(L, "db: called while a query's rows are being read "
+                      "(from a __gc finalizer?)");
     int uv = lua_upvalueindex(1);
     if (lua_islightuserdata(L, uv))
         return (HlDbHandle *)lua_touserdata(L, uv);
@@ -308,8 +346,10 @@ static int lua_db_query_impl(lua_State *L)
         .row_count = 0,
     };
 
+    int guard = push_row_loop_guard(L);
     int rc = hl_db_query(h, sql, params, nparams,
                          lua_query_row_cb, &qc, lua->base.alloc);
+    lua_settop(L, guard - 1);   /* closes the guard; the result table is on top */
 
     /*
      * lua_to_hl_values left nparams values on the stack (to keep string
@@ -355,7 +395,11 @@ static int lua_db_exec_impl(lua_State *L)
             return luaL_error(L, "params must be a table");
     }
 
+    /* A Lua UDF runs inside the statement's step, so this is a row loop too
+     * as far as re-entry is concerned. */
+    int guard = push_row_loop_guard(L);
     int rc = hl_db_exec(h, sql, params, nparams);
+    lua_settop(L, guard - 1);
 
     lua_free_hl_values(L, params, nparams);
 
@@ -616,9 +660,11 @@ static int lua_db_table_columns(lua_State *L)
     check_app_identifiers(L, "table_columns", table, NULL, 0, NULL, 0);
     HlDbHandle *h = db_call_handle(L);
 
+    int guard = push_row_loop_guard(L);
     lua_newtable(L);  /* result */
     LuaColForwardCtx fwd = { L, 0 };
     int rc = hl_db_table_columns(h, table, lua_db_table_columns_cb, &fwd);
+    lua_closeslot(L, guard);    /* the result table stays on top */
     if (rc < 0) {
         return luaL_error(L, "db.table_columns: %s", hl_db_errmsg(h));
     }
@@ -1030,6 +1076,9 @@ static int lua_owned_conn_gc(lua_State *L)
  * backstop). The owner box rides as upvalue 1. */
 static int lua_owned_conn_close(lua_State *L)
 {
+    if (g_db_row_loops > 0)
+        return luaL_error(L, "db: close() while a query's rows are being read "
+                             "(from a __gc finalizer?)");
     owned_conn_release(luaL_testudata(L, lua_upvalueindex(1),
                                       HL_LUA_DB_OWNED_MT));
     return 0;

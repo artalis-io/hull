@@ -145,6 +145,15 @@ int hl_wasm_free_segment(HlWasmDataSegment *seg)
         munmap(seg->host_addr, seg->alloc_size);
         seg->host_addr = NULL;
     }
+    /* Zero-copy backing: the descriptor is gone, so the caller's memory may
+     * now be unmapped - drop the pin taken at load. */
+    if (seg->pin_release) {
+        void (*rel)(void *) = seg->pin_release;
+        void *pin = seg->pin;
+        seg->pin_release = NULL;
+        seg->pin = NULL;
+        rel(pin);
+    }
     seg->size = 0;
     seg->wasm_addr = 0;
     seg->name[0] = '\0';
@@ -222,12 +231,52 @@ void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
 
 /* ── Shared data public API ─────────────────────────────────────────── */
 
+/* The load. `*kept` = 1 once the pin's ownership has passed to a segment
+ * (which releases it when destroyed); otherwise the caller releases it. */
+static int data_load_impl(HlWasmCache *cache, const char *module_name,
+                          const char *segment_name,
+                          const void *data, size_t data_len,
+                          void *pre_alloc,
+                          const struct HlVfs *app_vfs, const char *app_dir,
+                          const char **err_msg,
+                          void *pin, void (*pin_release)(void *), int *kept);
+
 int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
                            const char *segment_name,
                            const void *data, size_t data_len,
                            void *pre_alloc,
                            const struct HlVfs *app_vfs, const char *app_dir,
                            const char **err_msg)
+{
+    int kept = 0;
+    return data_load_impl(cache, module_name, segment_name, data, data_len,
+                          pre_alloc, app_vfs, app_dir, err_msg, NULL, NULL, &kept);
+}
+
+int hl_cap_wasm_data_load_pinned(HlWasmCache *cache, const char *module_name,
+                                  const char *segment_name,
+                                  const void *data, size_t data_len,
+                                  void *pre_alloc,
+                                  const struct HlVfs *app_vfs, const char *app_dir,
+                                  const char **err_msg,
+                                  void *pin, void (*pin_release)(void *))
+{
+    int kept = 0;
+    int rc = data_load_impl(cache, module_name, segment_name, data, data_len,
+                            pre_alloc, app_vfs, app_dir, err_msg,
+                            pin, pin_release, &kept);
+    if (!kept && pin_release)
+        pin_release(pin);
+    return rc;
+}
+
+static int data_load_impl(HlWasmCache *cache, const char *module_name,
+                          const char *segment_name,
+                          const void *data, size_t data_len,
+                          void *pre_alloc,
+                          const struct HlVfs *app_vfs, const char *app_dir,
+                          const char **err_msg,
+                          void *pin, void (*pin_release)(void *), int *kept)
 {
     static const char *err_internal  = "internal_error";
     static const char *err_not_found = "not_found";
@@ -517,6 +566,10 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
     seg->size = data_len;
     seg->alloc_size = alloc_size;
     seg->is_mmap = is_mmap_backing;
+    /* Only memory used in place needs the caller's pin; copied data does not. */
+    seg->pin = is_mmap_backing ? pin : NULL;
+    seg->pin_release = is_mmap_backing ? pin_release : NULL;
+    *kept = is_mmap_backing;
 
     if (slot == sd->count)
         sd->count++;

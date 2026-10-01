@@ -73,6 +73,12 @@ typedef struct HlWasmDataSegment {
     size_t   alloc_size;     /* page-aligned mmap size (for munmap) */
     uint64_t wasm_addr;      /* WASM-space start address (computed on chain) */
     int      is_mmap;        /* 1 = pre_alloc'd (caller owns backing), 0 = we own */
+    /* The caller's pin on a zero-copy backing (is_mmap): released, through
+     * pin_release, only once the descriptor that references the backing is
+     * gone. Holding it is what stops mmap.close() / GC unmapping memory a
+     * live segment still points at. NULL when not pinned. */
+    void    *pin;
+    void   (*pin_release)(void *pin);
 } HlWasmDataSegment;
 
 /* All shared data for a module - segments chained into one shared heap */
@@ -477,6 +483,21 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
                            void *pre_alloc,
                            const struct HlVfs *app_vfs, const char *app_dir,
                            const char **err_msg);
+
+/*
+ * hl_cap_wasm_data_load, for zero-copy data the caller pinned (a MappedBuffer
+ * borrow): the call takes ownership of `pin`. It is kept for as long as a
+ * segment uses the caller's memory directly and released through
+ * `pin_release` once that segment's descriptor is destroyed - or released
+ * before returning, when the data was copied or the load failed.
+ */
+int hl_cap_wasm_data_load_pinned(HlWasmCache *cache, const char *module_name,
+                           const char *segment_name,
+                           const void *data, size_t data_len,
+                           void *pre_alloc,
+                           const struct HlVfs *app_vfs, const char *app_dir,
+                           const char **err_msg,
+                                  void *pin, void (*pin_release)(void *));
 
 /**
  * Remove all shared data for a module.

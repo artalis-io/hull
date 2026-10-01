@@ -121,11 +121,6 @@ typedef struct HlJS {
     size_t          sse_route_count;
     size_t          sse_route_cap;
 
-    /* Tracked WS client connections (freed in hl_js_free) */
-    void          **ws_clients;
-    size_t          ws_client_count;
-    size_t          ws_client_cap;
-
     /* Per-request async state (set during dispatch, cleared after) */
     KlHttpServer       *server;          /* set once during wire_routes_server */
     KlHttpConn         *active_conn;     /* current connection (per dispatch) */
