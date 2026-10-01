@@ -17,6 +17,7 @@
 #include <keel/http_redirect.h>
 #include <keel/url.h>
 
+#include <stdint.h>
 #include <string.h>
 #include <strings.h>
 
@@ -34,6 +35,30 @@ int hl_http_check_host(const HlHttpConfig *cfg,
      * ws.connect (same cfg) and smtp.send (§2.8). */
     return hl_host_match_any_env_n(cfg->allowed_hosts, cfg->count, host, host_len)
            ? 0 : -1;
+}
+
+/* ── Redirects ───────────────────────────────────────────────────── */
+
+/* Keel's per-hop redirect check (KlHttpRedirectConfig.on_redirect). The host
+ * allowlist used to be checked against the FIRST URL only: Keel followed every
+ * Location after it, so an allowed host could redirect http.fetch to a cloud
+ * metadata endpoint (169.254.169.254) or an internal service, and the body
+ * came back to the app. Every hop now passes the same check. @p data is the
+ * HlHttpConfig, which lives (sealed) for the whole process. */
+int hl_http_redirect_allowed(const char *next_url, void *data)
+{
+    const HlHttpConfig *cfg = (const HlHttpConfig *)data;
+    KlUrl parsed;
+    if (!next_url || kl_url_parse(next_url, &parsed) != 0 ||
+        hl_http_check_host(cfg, parsed.host, parsed.host_len) != 0) {
+        ShJsonWriter w = hl_audit_begin("http.redirect");
+        sh_json_write_kv_string(&w, "url", next_url ? next_url : "");
+        sh_json_write_kv_string(&w, "result", "denied");
+        hl_audit_end(&w);
+        log_warn("[hull:http] redirect to a host outside manifest.hosts refused");
+        return -1;
+    }
+    return 0;
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -76,7 +101,11 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
     KlAllocator alloc = kl_allocator_default();
     int rc;
     if (cfg->follow_redirects) {
-        KlHttpRedirectConfig redir = { .max_redirects = cfg->max_redirects };
+        KlHttpRedirectConfig redir = {
+            .max_redirects    = cfg->max_redirects,
+            .on_redirect      = hl_http_redirect_allowed,
+            .on_redirect_data = (void *)(uintptr_t)cfg,
+        };
         if (cfg->pool)
             rc = kl_http_redirect_request_pooled(cfg->pool, &alloc, &kl_cfg, &redir,
                                              method, url,

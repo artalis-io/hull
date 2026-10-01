@@ -94,4 +94,35 @@ UTEST(host, env_ref)
     ASSERT_NE(0, hl_http_check_host(&cfg, "api.example.com", 15));
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ * Redirect hops (Keel's on_redirect): the same allowlist on every hop
+ * ════════════════════════════════════════════════════════════════════ */
+
+UTEST(redirect, a_hop_to_an_allowed_host_is_followed)
+{
+    const char *hosts[] = { "api.example.com" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+    ASSERT_EQ(0, hl_http_redirect_allowed("https://api.example.com/v2/x", &cfg));
+}
+
+UTEST(redirect, a_hop_elsewhere_is_refused)
+{
+    /* What an allowed host could do before: send the client to the cloud
+     * metadata endpoint or an internal service. */
+    const char *hosts[] = { "api.example.com" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+    ASSERT_EQ(-1, hl_http_redirect_allowed(
+        "http://169.254.169.254/latest/meta-data/", &cfg));
+    ASSERT_EQ(-1, hl_http_redirect_allowed("http://10.0.0.5:6379/", &cfg));
+    ASSERT_EQ(-1, hl_http_redirect_allowed("http://api.example.com.evil.net/", &cfg));
+}
+
+UTEST(redirect, an_unparseable_hop_is_refused)
+{
+    const char *hosts[] = { "*" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+    ASSERT_EQ(-1, hl_http_redirect_allowed("not a url", &cfg));
+    ASSERT_EQ(-1, hl_http_redirect_allowed(NULL, &cfg));
+}
+
 UTEST_MAIN()
