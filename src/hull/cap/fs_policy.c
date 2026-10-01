@@ -9,6 +9,7 @@
 #include "hull/cap/fs_policy.h"
 #include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
+#include <sh_seal_arena.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -779,4 +780,64 @@ HlFsListSelection hl_fs_policy_select_list(const HlFsPolicy *policy,
 
     sel.err = "permission";
     return sel;
+}
+
+/* ── Sealed copy ───────────────────────────────────────────────────── */
+
+#define SEAL_ALIGN(n) (((n) + 15u) & ~(size_t)15u)
+
+static size_t set_sealed_size(const HlFsAuthEntry *e, size_t n)
+{
+    size_t b = SEAL_ALIGN(n * sizeof *e);
+    for (size_t i = 0; i < n; i++) {
+        b += SEAL_ALIGN(e[i].grant_n * sizeof(char *));
+        for (size_t k = 0; k < e[i].grant_n; k++)
+            b += SEAL_ALIGN(strlen(e[i].grant[k]) + 1);
+    }
+    return b;
+}
+
+size_t hl_fs_policy_sealed_size(const HlFsPolicy *p)
+{
+    if (!p) return 0;
+    return SEAL_ALIGN(sizeof *p) + set_sealed_size(p->read, p->read_n)
+                                 + set_sealed_size(p->write, p->write_n);
+}
+
+static int copy_set(ShSealArena *a, const HlFsAuthEntry *src, size_t n,
+                    HlFsAuthEntry **out)
+{
+    *out = NULL;
+    if (n == 0) return 0;
+    HlFsAuthEntry *dst = sh_seal_arena_alloc(a, n * sizeof *dst,
+                                             _Alignof(HlFsAuthEntry));
+    if (!dst) return -1;
+    for (size_t i = 0; i < n; i++) {
+        dst[i] = src[i];
+        dst[i].grant = NULL;
+        if (src[i].grant_n == 0) continue;
+        char **g = sh_seal_arena_alloc(a, src[i].grant_n * sizeof(char *),
+                                       _Alignof(char *));
+        if (!g) return -1;
+        for (size_t k = 0; k < src[i].grant_n; k++) {
+            g[k] = sh_seal_arena_strdup(a, src[i].grant[k]);
+            if (!g[k]) return -1;
+        }
+        dst[i].grant = g;
+    }
+    *out = dst;
+    return 0;
+}
+
+const HlFsPolicy *hl_fs_policy_copy_sealed(const HlFsPolicy *p,
+                                           ShSealArena *arena)
+{
+    if (!p || !arena) return NULL;
+    HlFsPolicy *q = sh_seal_arena_alloc(arena, sizeof *q, _Alignof(HlFsPolicy));
+    if (!q) return NULL;
+    *q = *p;
+    if (copy_set(arena, p->read, p->read_n, &q->read) != 0 ||
+        copy_set(arena, p->write, p->write_n, &q->write) != 0)
+        return NULL;
+    return q;
 }

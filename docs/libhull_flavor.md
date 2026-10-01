@@ -168,8 +168,10 @@ different: `hl_cap_fs_*` reads `HlFsConfig.base_dir` on *every* call to
 resolve and bounds-check paths. Per the c-audit §5b rule for boot-built,
 per-call-read, security-influencing state, it is copied into an
 `sh_seal_arena` (RW mmap → `mprotect` RO) during seal, and the writable
-heap copy is freed. After seal there is no writable alias of the app's
-filesystem root anywhere in the process.
+heap copy is freed. After seal the root's bytes cannot be rewritten in place.
+The `HlFsConfig` that points at them is part of the (heap) embed handle and
+stays writable, so repointing it at a forged path remains possible; it takes
+more than a byte write (see security.md §4b, "What's NOT sealed").
 
 This is verified by a fork+SIGSEGV death test
 (`tests/hull/test_embed.c::embed.sealed_base_dir_is_readonly`): a child

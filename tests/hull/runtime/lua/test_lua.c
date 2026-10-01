@@ -90,6 +90,11 @@ static void install_test_globals(lua_State *L)
     (void)luaL_dostring(L, PRELUDE);
 }
 
+/* A loop + pool for the NEXT init_lua: hull.worker registers only when a
+ * thread pool exists at init. Consumed (cleared) by init_lua. */
+static HlAsyncBackendCtx  *pending_async_ctx;
+static HlAsyncBackendPool *pending_thread_pool;
+
 static void init_lua(void)
 {
     hl_platform_vfs_dispose(platform_vfs_owned);
@@ -99,6 +104,10 @@ static void init_lua(void)
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
     lua_rt.base.platform_vfs = &platform_vfs;
+    lua_rt.base.async_ctx   = pending_async_ctx;
+    lua_rt.base.thread_pool = pending_thread_pool;
+    pending_async_ctx   = NULL;
+    pending_thread_pool = NULL;
     int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
     if (lua_initialized) install_test_globals(lua_rt.L);
@@ -6376,6 +6385,10 @@ UTEST(lua_async, a_timer_handler_keeps_its_timer_across_waits)
     EXPECT_EQ(t.in_flight, 0);
 
     HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    /* A reschedule left pending (a failed run above) would fire the
+     * trampoline on the destroyed runtime at the final tick, hiding the
+     * real assertion behind a crash. */
+    if (t.timer_id > 0) be->timer_cancel(actx, (uint64_t)t.timer_id);
     cleanup_lua();
     be->tick(actx, 0);
     be->free(actx);
@@ -6653,6 +6666,112 @@ UTEST(lua_runtime, error_text_reads_error_objects)
     EXPECT_EQ(lua_gettop(L), top);
 
     cleanup_lua();
+}
+
+/* ── worker.dispatch VMs ─────────────────────────────────────────────
+ *
+ * A ONE-thread pool, so consecutive dispatches are guaranteed to share a
+ * thread: that is where a reused VM leaked state. */
+typedef struct {
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx    *actx;
+    HlAsyncBackendPool   *pool;
+} LuaWorkerFix;
+
+static int lua_worker_open(LuaWorkerFix *f)
+{
+    memset(f, 0, sizeof *f);
+    f->be = hl_async_backend();
+    if (!f->be || f->be->init(&f->actx, NULL) != 0) return -1;
+    if (f->be->pool_create(&f->pool, f->actx, 1, 16) != 0) return -1;
+    pending_async_ctx   = f->actx;
+    pending_thread_pool = f->pool;
+    init_lua();
+    return lua_initialized ? 0 : -1;
+}
+
+/* Run `body` in a coroutine (dispatch yields); its string result is the
+ * verdict. */
+static void lua_worker_run(LuaWorkerFix *f, const char *body,
+                           char *out, size_t outsz)
+{
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt, body, &co);
+    if (st == LUA_YIELD) ssh_tick_until_done(f->be, f->actx, co);
+    if (lua_status(co) == LUA_OK && lua_type(co, -1) == LUA_TSTRING)
+        snprintf(out, outsz, "%s", lua_tostring(co, -1));
+    else
+        snprintf(out, outsz, "(status %d: %s)", lua_status(co),
+                 lua_tostring(co, -1) ? lua_tostring(co, -1) : "?");
+}
+
+static void lua_worker_close(LuaWorkerFix *f)
+{
+    cleanup_lua();
+    if (f->actx) f->be->tick(f->actx, 0);
+    if (f->pool) f->be->pool_free(f->pool);
+    if (f->actx) f->be->free(f->actx);
+}
+
+UTEST(lua_worker, a_dispatch_does_not_see_what_the_last_one_left)
+{
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    char out[256];
+    lua_worker_run(&f,
+        "local w = require('hull.worker')\n"
+        "w.dispatch(function() LEAK = 42; string.leak = 1;\n"
+        "  getmetatable('').__index.leak2 = 2; return 0 end)\n"
+        "return w.dispatch(function()\n"
+        "  return tostring(LEAK)..','..tostring(string.leak)..','..\n"
+        "         tostring(string.leak2) end)\n", out, sizeof out);
+    EXPECT_STREQ(out, "nil,nil,nil");
+    lua_worker_close(&f);
+}
+
+UTEST(lua_worker, a_runaway_dispatch_is_stopped)
+{
+    /* It held a pool thread for good: no instruction hook in worker VMs. */
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    lua_rt.max_instructions = 100000;
+    char out[256];
+    lua_worker_run(&f,
+        /* a failed dispatch resolves to { error = msg } */
+        "local r = require('hull.worker').dispatch(\n"
+        "                      function() while true do end end)\n"
+        "return type(r) == 'table' and r.error or tostring(r)\n", out, sizeof out);
+    EXPECT_NE_MSG(strstr(out, "instruction limit exceeded"), NULL, out);
+    lua_worker_close(&f);
+}
+
+UTEST(lua_worker, a_dispatch_is_held_to_the_heap_limit)
+{
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    lua_rt.mem_limit = 16u << 20;
+    char out[256];
+    lua_worker_run(&f,
+        "local r = require('hull.worker').dispatch(function()\n"
+        "  local t = {}\n"
+        "  for i = 1, 64 do t[i] = string.rep('x', 1 << 20) .. i end\n"
+        "  return #t end)\n"
+        "return type(r) == 'table' and r.error or tostring(r)\n", out, sizeof out);
+    EXPECT_NE_MSG(strstr(out, "memory"), NULL, out);
+    lua_worker_close(&f);
+}
+
+UTEST(lua_worker, db_is_absent_unless_declared)
+{
+    /* No module set says hull/db, so the worker VM gets no `db` global. */
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    char out[256];
+    lua_worker_run(&f,
+        "return tostring(require('hull.worker').dispatch(\n"
+        "  function() return db == nil end))\n", out, sizeof out);
+    EXPECT_STREQ(out, "true");
+    lua_worker_close(&f);
 }
 
 UTEST_MAIN();

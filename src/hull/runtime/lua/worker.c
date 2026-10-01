@@ -24,7 +24,6 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -44,77 +43,88 @@ void hl_lua_worker_register_init(HlLuaWorkerInitFn fn)
         init_hooks[init_hook_count++] = fn;
 }
 
-/* ── Per-worker Lua VM (TLS, lazy init) ────────────────────────────── */
+/* ── Worker Lua VM (one per dispatch) ──────────────────────────────── */
+
+/* Each dispatch gets a FRESH state, closed when it returns. A VM reused
+ * across dispatches leaked: a global, or a change to a shared library table
+ * (string, math, db...), made by one dispatch was seen by the next one on
+ * that thread - another request's code. A per-dispatch _ENV does not fix
+ * that: rawset and getmetatable("").__index still reach the shared tables.
+ * A new state costs tens of microseconds, small beside a thread hop. */
 
 typedef struct {
-    lua_State *L;
-} HlLuaWorkerCtx;
+    size_t used;
+    size_t limit;   /* 0 = none */
+} WorkerHeap;
 
-static pthread_key_t  lua_worker_key;
-static pthread_once_t lua_worker_once = PTHREAD_ONCE_INIT;
-
-static void lua_worker_destructor(void *ptr)
+/* The app's heap limit, counted per VM. Deliberately not the server's
+ * tracking allocator: that one belongs to the event loop thread. */
+static void *worker_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {
-    if (!ptr) return;
-    HlLuaWorkerCtx *wctx = (HlLuaWorkerCtx *)ptr;
-    if (wctx->L) lua_close(wctx->L);
-    free(wctx);
-}
-
-static void lua_worker_key_create(void)
-{
-    pthread_key_create(&lua_worker_key, lua_worker_destructor);
-}
-
-static HlLuaWorkerCtx *get_lua_worker_ctx(void)
-{
-    pthread_once(&lua_worker_once, lua_worker_key_create);
-
-    HlLuaWorkerCtx *wctx = (HlLuaWorkerCtx *)pthread_getspecific(lua_worker_key);
-    if (wctx) return wctx;
-
-    wctx = calloc(1, sizeof(HlLuaWorkerCtx));
-    if (!wctx) return NULL;
-
-    wctx->L = luaL_newstate();
-    if (!wctx->L) {
-        free(wctx);
+    WorkerHeap *heap = (WorkerHeap *)ud;
+    size_t old = ptr ? osize : 0;   /* osize is a type tag when ptr is NULL */
+    if (nsize == 0) {
+        heap->used = heap->used >= old ? heap->used - old : 0;
+        free(ptr);
         return NULL;
     }
+    if (nsize > old && heap->limit > 0 &&
+        (nsize - old > heap->limit || heap->used > heap->limit - (nsize - old)))
+        return NULL;
+    void *p = realloc(ptr, nsize);
+    if (!p) return NULL;
+    if (nsize > old) heap->used += nsize - old;
+    else             heap->used -= old - nsize;
+    return p;
+}
+
+static lua_State *worker_vm_new(WorkerHeap *heap,
+                                const HlLuaWorkerDispatchOp *op)
+{
+    heap->used = 0;
+    heap->limit = op->mem_limit;
+    lua_State *L = lua_newstate(worker_alloc, heap);
+    if (!L) return NULL;
+
+    /* The same instruction budget a request handler gets: without it
+     * `while true do end` held a pool thread for good, and a few of those
+     * starved every db.async / compute.async / smtp job. */
+    if (op->max_instructions > 0)
+        lua_sethook(L, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    INSTR_COUNT(op->max_instructions));
 
     /* Open minimal standard libraries */
-    luaL_requiref(wctx->L, "_G", luaopen_base, 1);
-    lua_pop(wctx->L, 1);
-    luaL_requiref(wctx->L, "string", luaopen_string, 1);
-    lua_pop(wctx->L, 1);
-    luaL_requiref(wctx->L, "table", luaopen_table, 1);
-    lua_pop(wctx->L, 1);
-    luaL_requiref(wctx->L, "math", luaopen_math, 1);
-    lua_pop(wctx->L, 1);
-    luaL_requiref(wctx->L, "utf8", luaopen_utf8, 1);
-    lua_pop(wctx->L, 1);
+    luaL_requiref(L, "_G", luaopen_base, 1);
+    lua_pop(L, 1);
+    luaL_requiref(L, "string", luaopen_string, 1);
+    lua_pop(L, 1);
+    luaL_requiref(L, "table", luaopen_table, 1);
+    lua_pop(L, 1);
+    luaL_requiref(L, "math", luaopen_math, 1);
+    lua_pop(L, 1);
+    luaL_requiref(L, "utf8", luaopen_utf8, 1);
+    lua_pop(L, 1);
 
     /* Remove dangerous functions from minimal VM */
-    lua_pushnil(wctx->L); lua_setglobal(wctx->L, "dofile");
-    lua_pushnil(wctx->L); lua_setglobal(wctx->L, "loadfile");
-    lua_pushnil(wctx->L); lua_setglobal(wctx->L, "load");
-    lua_pushnil(wctx->L); lua_setglobal(wctx->L, "print");
-    lua_pushnil(wctx->L); lua_setglobal(wctx->L, "io");
-    lua_pushnil(wctx->L); lua_setglobal(wctx->L, "os");
-    lua_pushnil(wctx->L); lua_setglobal(wctx->L, "require");
+    lua_pushnil(L); lua_setglobal(L, "dofile");
+    lua_pushnil(L); lua_setglobal(L, "loadfile");
+    lua_pushnil(L); lua_setglobal(L, "load");
+    lua_pushnil(L); lua_setglobal(L, "print");
+    lua_pushnil(L); lua_setglobal(L, "io");
+    lua_pushnil(L); lua_setglobal(L, "os");
+    lua_pushnil(L); lua_setglobal(L, "require");
 
-    /* Run registered init hooks (e.g. db.*, json.*) */
-    for (int i = 0; i < init_hook_count; i++) {
-        if (init_hooks[i](wctx->L) != 0) {
-            log_error("[hull:worker] init hook %d failed", i);
-            lua_close(wctx->L);
-            free(wctx);
-            return NULL;
+    /* The registered hooks install `db`: only for an app that declared it. */
+    if (op->with_db) {
+        for (int i = 0; i < init_hook_count; i++) {
+            if (init_hooks[i](L) != 0) {
+                log_error("[hull:worker] init hook %d failed", i);
+                lua_close(L);
+                return NULL;
+            }
         }
     }
-
-    pthread_setspecific(lua_worker_key, wctx);
-    return wctx;
+    return L;
 }
 
 /* ── KV helpers: Lua table ↔ HlKV array ───────────────────────────── */
@@ -264,19 +274,26 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
 
 /* ── KlWorkItem callbacks ──────────────────────────────────────────── */
 
+static void lua_dispatch_run(lua_State *L, HlLuaWorkerDispatchOp *op);
+
 static void lua_dispatch_work_fn(void *ud)
 {
     HlLuaWorkerDispatchOp *op = (HlLuaWorkerDispatchOp *)ud;
 
-    HlLuaWorkerCtx *wctx = get_lua_worker_ctx();
-    if (!wctx || !wctx->L) {
+    WorkerHeap heap;
+    lua_State *L = worker_vm_new(&heap, op);
+    if (!L) {
         op->error = 1;
         snprintf(op->error_msg, sizeof(op->error_msg),
                  "failed to create worker Lua VM");
         return;
     }
+    lua_dispatch_run(L, op);
+    lua_close(L);
+}
 
-    lua_State *L = wctx->L;
+static void lua_dispatch_run(lua_State *L, HlLuaWorkerDispatchOp *op)
+{
 
     /* Load the bytecode */
     /* Binary: lua_worker_dispatch dumped this from a function value

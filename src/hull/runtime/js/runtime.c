@@ -776,6 +776,8 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     /* Restore caller-set base fields */
     js->base = saved_base;
     js->max_instructions = cfg->max_instructions;
+    js->max_heap_bytes = cfg->max_heap_bytes;
+    js->max_stack_bytes = cfg->max_stack_bytes;
 
     /* Create runtime (using default allocator for now;
      * custom KlAllocator routing added when Keel is linked) */
@@ -842,6 +844,25 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     JS_AddIntrinsicMapSet(js->ctx);
     JS_AddIntrinsicTypedArrays(js->ctx);
     JS_AddIntrinsicPromise(js->ctx);
+
+    /* Keep the original Function.prototype.toString for worker.dispatch -
+     * before the sandbox removes the Function global, and before app code
+     * can replace it. */
+    {
+        JSValue fts = JS_Eval(js->ctx, "Function.prototype.toString",
+                              sizeof "Function.prototype.toString" - 1,
+                              "<hull:init>", JS_EVAL_TYPE_GLOBAL);
+        JSValue *slot = malloc(sizeof *slot);
+        if (JS_IsException(fts) || !JS_IsFunction(js->ctx, fts) || !slot) {
+            JS_FreeValue(js->ctx, JS_IsException(fts)
+                                  ? JS_GetException(js->ctx) : fts);
+            free(slot);
+            log_error("[hull:c] could not keep Function.prototype.toString");
+            return -1;
+        }
+        *slot = fts;
+        js->fn_to_string = slot;
+    }
 
     /* Apply sandbox (remove eval global, etc.) */
     hl_js_sandbox(js->ctx);
@@ -1233,6 +1254,12 @@ void hl_js_free(HlJS *js)
      * destroy callbacks (fired by sqlite3_close) don't call JS_FreeValue
      * on a dead runtime */
     js->udf_runtime_alive = 0;
+
+    if (js->ctx && js->fn_to_string) {
+        JS_FreeValue(js->ctx, *(JSValue *)js->fn_to_string);
+        free(js->fn_to_string);
+        js->fn_to_string = NULL;
+    }
 
     if (js->ctx) {
         /* Free test state opaque data before deleting globals.

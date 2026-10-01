@@ -79,6 +79,22 @@ void hl_ca_bundle_reset_active(void);
  */
 int hl_ca_bundle_active(const unsigned char **data, size_t *len);
 
+/**
+ * @brief Make the published anchor read-only for the rest of the process.
+ *
+ * Called once startup has resolved the anchor (both entry points, right after
+ * hl_ca_trust_resolve), before any connection reads it. The descriptor, and
+ * the bytes when they are a heap copy (--ca-bundle, the system store), move
+ * into a sealed arena: a heap write can then neither append a root to the
+ * bytes nor repoint the descriptor, so a verify-full database connection or
+ * an SMTP STARTTLS cannot be turned into a MITM by one. A later
+ * hl_ca_bundle_set_active is refused. Idempotent.
+ *
+ * @return 0, or -1 if the arena could not be mapped or sealed (startup
+ * treats that as fatal, like every other policy seal).
+ */
+int hl_ca_bundle_seal_active(void);
+
 /* Returns a short identifier for the embedded bundle's update date,
  * or "none" if no bundle is embedded. For doctor / version display. */
 const char *hl_embedded_ca_bundle_label(void);

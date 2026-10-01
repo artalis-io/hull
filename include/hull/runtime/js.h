@@ -156,6 +156,17 @@ typedef struct HlJS {
     int             cli_main_active;     /* 1 = waiting on main's Promise */
     int             cli_main_rejected;   /* 1 = Promise rejected, 0 = fulfilled */
     void           *cli_main_value;      /* JSValue * - borrowed in runtime.c */
+
+    /* The ORIGINAL Function.prototype.toString (JSValue *, owned), taken
+     * before any app code runs. worker.dispatch compiles the function's
+     * source text in the worker VM; asking the function itself (its own,
+     * overridable toString) let an app hand over any string to compile -
+     * an eval. */
+    void           *fn_to_string;
+
+    /* Limits applied to worker.dispatch VMs (the app's own). */
+    size_t          max_heap_bytes;
+    size_t          max_stack_bytes;
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */
@@ -301,6 +312,8 @@ typedef int (*HlJsWorkerInitFn)(JSContext *ctx);
 
 /* Register an init hook for worker JS VMs. Call before workers spawn. */
 void hl_js_worker_register_init(HlJsWorkerInitFn fn);
+/* Registered hooks install the worker `db` global, so a dispatch runs them
+ * only when the app declared hull/db (op->with_db). */
 
 /*
  * HlJsWorkerDispatchOp + the hl_js_worker_dispatch_* functions and

@@ -56,6 +56,12 @@ typedef struct HlLuaWorkerDispatchOp {
     HlKV         *ctx_kvs;
     int           ctx_count;
 
+    /* The app's own limits, applied to the worker VM (0 = none), and
+     * whether it declared hull/db (the worker `db` global). */
+    size_t        mem_limit;
+    int64_t       max_instructions;
+    int           with_db;
+
     /* Output (set by worker thread) */
     int           result_kind;       /* 0=nil,1=bool,2=int,3=double,4=text,5=table */
     int64_t       result_int;

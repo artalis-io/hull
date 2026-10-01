@@ -145,6 +145,11 @@ static HlDbRegistry *test_db_registry;
 static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
 static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
+/* A loop + pool for the NEXT init_js_with_caps: hull:worker registers
+ * only when a thread pool exists at init. Consumed (cleared) there. */
+static HlAsyncBackendCtx  *pending_async_ctx;
+static HlAsyncBackendPool *pending_thread_pool;
+
 static void init_js_with_caps(void)
 {
     hl_platform_vfs_dispose(platform_vfs_owned);
@@ -175,6 +180,10 @@ static void init_js_with_caps(void)
     js.base.db_registry = test_db_registry;
     js.base.env_cfg = &env_cfg;
     js.base.platform_vfs = &platform_vfs;
+    js.base.async_ctx   = pending_async_ctx;
+    js.base.thread_pool = pending_thread_pool;
+    pending_async_ctx   = NULL;
+    pending_thread_pool = NULL;
     int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
     if (js_initialized) install_test_js_globals(&js);
@@ -6168,5 +6177,116 @@ UTEST(js_stdlib, template_filter_arg_refuses_backslash)
     EXPECT_EQ(v, 0);
     cleanup_js_caps();
 }
+
+/* ── worker.dispatch VMs ─────────────────────────────────────────────
+ *
+ * A ONE-thread pool, so consecutive dispatches share a thread: where a
+ * reused context leaked state. Same verdict protocol as js_map_case. */
+static int js_worker_open(const HlAsyncBackend **be, HlAsyncBackendCtx **actx,
+                          HlAsyncBackendPool **pool)
+{
+    *be = hl_async_backend();
+    *actx = NULL;
+    *pool = NULL;
+    if ((*be)->init(actx, NULL) != 0) return -1;
+    if ((*be)->pool_create(pool, *actx, 1, 16) != 0) return -1;
+    pending_async_ctx   = *actx;
+    pending_thread_pool = *pool;
+    init_js_with_caps();
+    return js_initialized ? 0 : -1;
+}
+
+static void js_worker_run(const HlAsyncBackend *be, HlAsyncBackendCtx *actx,
+                          const char *body, char *out, size_t outsz)
+{
+    static const char pre[] =
+        "function check(c, what) { if (!c) throw new Error(what); }\n"
+        /* a failed dispatch resolves to { error: msg } */
+        "async function fails(fn) {\n"
+        "  const r = await worker.dispatch(fn);\n"
+        "  return r && typeof r.error === 'string' ? r.error : '(no error)';\n"
+        "}\n"
+        "(async () => {\n";
+    static const char post[] =
+        "})().then(() => { globalThis.__wk = 'ok'; },\n"
+        "          (e) => { globalThis.__wk = String(e && e.message || e); });\n";
+    size_t n = strlen(pre) + strlen(body) + strlen(post) + 1;
+    char *src = malloc(n);
+    if (!src) return;
+    snprintf(src, n, "%s%s%s", pre, body, post);
+    JSValue v = JS_Eval(js.ctx, src, strlen(src), "<worker>", JS_EVAL_TYPE_GLOBAL);
+    free(src);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+
+    for (int i = 0; i < 400; i++) {
+        hl_js_run_jobs(&js);
+        JSValue g = JS_GetGlobalObject(js.ctx);
+        JSValue m = JS_GetPropertyStr(js.ctx, g, "__wk");
+        JS_FreeValue(js.ctx, g);
+        if (!JS_IsUndefined(m)) {
+            const char *c = JS_ToCString(js.ctx, m);
+            snprintf(out, outsz, "%s", c ? c : "(unprintable)");
+            if (c) JS_FreeCString(js.ctx, c);
+            JS_FreeValue(js.ctx, m);
+            break;
+        }
+        JS_FreeValue(js.ctx, m);
+        be->tick(actx, 20);
+    }
+}
+
+static void js_worker_close(const HlAsyncBackend *be, HlAsyncBackendCtx *actx,
+                            HlAsyncBackendPool *pool)
+{
+    cleanup_js_caps();
+    if (actx) be->tick(actx, 0);
+    if (pool) be->pool_free(pool);
+    if (actx) be->free(actx);
+}
+
+#define JS_WORKER_CASE(name, setup, body)                        \
+    UTEST(js_worker, name)                                       \
+    {                                                            \
+        const HlAsyncBackend *be;                                \
+        HlAsyncBackendCtx *actx;                                 \
+        HlAsyncBackendPool *pool;                                \
+        ASSERT_EQ(js_worker_open(&be, &actx, &pool), 0);         \
+        setup;                                                   \
+        char out[512] = "(no verdict)";                          \
+        js_worker_run(be, actx, body, out, sizeof out);          \
+        EXPECT_STREQ(out, "ok");                                 \
+        js_worker_close(be, actx, pool);                         \
+    }
+
+JS_WORKER_CASE(a_dispatch_does_not_see_what_the_last_one_left, (void)0,
+    "  await worker.dispatch(() => { globalThis.LEAK = 42;\n"
+    "                                Array.prototype.leak = 1; return 0; });\n"
+    "  const r = await worker.dispatch(() => typeof LEAK + ',' + typeof [].leak);\n"
+    "  check(r === 'undefined,undefined', r);\n")
+
+JS_WORKER_CASE(the_function_s_own_toString_is_not_what_runs, (void)0,
+    /* An overridden toString was compiled in the worker: an eval. */
+    "  const f = Object.assign(() => 'real',\n"
+    "                          { toString: () => \"() => 'injected'\" });\n"
+    "  const r = await worker.dispatch(f);\n"
+    "  check(r === 'real', 'ran ' + r);\n")
+
+JS_WORKER_CASE(a_runaway_dispatch_is_stopped, js.max_instructions = 1000,
+    "  const m = await fails(() => { for (;;) {} });\n"
+    "  check(m.includes('interrupted'), m);\n")
+
+JS_WORKER_CASE(a_dispatch_is_held_to_the_heap_limit,
+    js.max_heap_bytes = 16u << 20,
+    "  const m = await fails(() => {\n"
+    "    const a = []; for (let i = 0; i < 64; i++) a.push('x'.repeat(1 << 20) + i);\n"
+    "    return a.length; });\n"
+    /* At the limit QuickJS may not manage even the out-of-memory error
+     * object and throws null, so assert the failure, not its text. */
+    "  check(m !== '(no error)', 'no limit');\n")
+
+JS_WORKER_CASE(db_is_absent_unless_declared, (void)0,
+    "  const r = await worker.dispatch(() => typeof db);\n"
+    "  check(r === 'undefined', r);\n")
 
 UTEST_MAIN();

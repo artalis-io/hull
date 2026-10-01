@@ -24,6 +24,13 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include "../test_tmpdir.h"
+#include "hull/cap/policy_seal.h"
+#include "hull/cap/fs.h"
+#include "hull/cap/env.h"
+#include "hull/runtime.h"
+#include <sh_seal_arena.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 static char base[256];
 
@@ -435,6 +442,116 @@ UTEST(fs_policy, alloc_failure_no_leak)
         if (rc == 0) hl_fs_policy_free(&p);
         ASSERT_EQ_MSG((size_t)0, hl_alloc_used(&a), "capped-alloc failure leaked bytes");
     }
+    teardown();
+}
+
+/* ── Sealed copies (policy_seal.h) ───────────────────────────────────────────
+ *
+ * The cap layer reads the compiled policy and the cap configs on every call, so
+ * they live in sealed memory: a heap write must not widen a grant or re-count
+ * an allowlist. */
+
+/* Run `poke` in a child; 1 if it died of a memory fault (the page is read-only). */
+static int faults(void (*poke)(void *), void *arg)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGSEGV, SIG_DFL);   /* not a sanitizer's handler */
+        signal(SIGBUS,  SIG_DFL);
+        poke(arg);
+        _exit(0);
+    }
+    if (pid < 0) return 0;
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return 0;
+    return WIFSIGNALED(status) &&
+           (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS);
+}
+
+static void poke_entry(void *arg)
+{
+    ((volatile HlFsAuthEntry *)arg)->grant_n = 99;
+}
+
+UTEST(fs_policy, a_sealed_copy_decides_the_same_and_is_read_only)
+{
+    setup(); build_tree();
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "data.bin", "data/*.csv", "logs" };
+    const char *wr[] = { "data/sub" };
+    ASSERT_EQ(0, build_policy(&a, rd, 3, wr, 1, &p, &err));
+
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, hl_fs_policy_sealed_size(&p), "t"));
+    const HlFsPolicy *q = hl_fs_policy_copy_sealed(&p, &arena);
+    ASSERT_TRUE(q != NULL);
+    ASSERT_EQ(0, sh_seal_arena_seal(&arena));
+    ASSERT_TRUE(q->read != p.read);
+
+    static const char *paths[] = {
+        "data.bin", "sibling.bin", "data/a.csv", "data/a.txt",
+        "data/sub/a.csv", "logs/2026/a.txt", "secret.txt", "data/sub/new.txt",
+    };
+    static const int modes[] = { HL_FS_OPEN_READ, HL_FS_OPEN_WRITE };
+    for (size_t m = 0; m < sizeof modes / sizeof modes[0]; m++) {
+        for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+            char s1[256], s2[256];
+            HlFsSelection x = hl_fs_policy_select(&p, paths[i], modes[m], s1, sizeof s1);
+            HlFsSelection y = hl_fs_policy_select(q, paths[i], modes[m], s2, sizeof s2);
+            EXPECT_EQ(x.entry == NULL, y.entry == NULL);
+            if (x.entry && y.entry) EXPECT_STREQ(x.residual, y.residual);
+            if (!x.entry && !y.entry) EXPECT_STREQ(x.err, y.err);
+        }
+    }
+
+    EXPECT_TRUE(faults(poke_entry, (void *)(uintptr_t)&q->read[0]));
+
+    sh_seal_arena_destroy(&arena);
+    hl_fs_policy_free(&p);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    teardown();
+}
+
+static void poke_env_count(void *arg)
+{
+    ((volatile HlEnvConfig *)arg)->count = 32;
+}
+
+UTEST(fs_policy, the_runtime_s_cap_configs_move_into_sealed_memory)
+{
+    setup(); build_tree();
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "data.bin" };
+    ASSERT_EQ(0, build_policy(&a, rd, 1, NULL, 0, &p, &err));
+
+    static const char *envs[] = { "HOME", "PATH" };
+    HlEnvConfig env = { envs, 2 };
+    HlFsConfig  fs  = { base, strlen(base), &p };
+    HlRuntime rt;
+    memset(&rt, 0, sizeof rt);
+    rt.env_cfg = &env;
+    rt.fs_cfg  = &fs;
+
+    ShSealArena arena;
+    ASSERT_EQ(0, hl_policy_seal_cap_configs(&rt, &arena));
+    ASSERT_TRUE(rt.env_cfg != &env);
+    ASSERT_EQ(2, rt.env_cfg->count);
+    ASSERT_TRUE(rt.env_cfg->allowed == envs);
+    ASSERT_TRUE(rt.fs_cfg != &fs);
+    ASSERT_TRUE(rt.fs_cfg->base_dir != base);
+    ASSERT_STREQ(base, rt.fs_cfg->base_dir);
+    ASSERT_TRUE(rt.fs_cfg->policy != &p);
+
+    char sc[256];
+    HlFsSelection sel = hl_fs_policy_select(rt.fs_cfg->policy, "data.bin",
+                                            HL_FS_OPEN_READ, sc, sizeof sc);
+    EXPECT_TRUE(sel.entry != NULL);
+    EXPECT_TRUE(faults(poke_env_count, rt.env_cfg));
+
+    sh_seal_arena_destroy(&arena);
+    hl_fs_policy_free(&p);
     teardown();
 }
 

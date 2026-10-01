@@ -816,8 +816,8 @@ $(BUILDDIR)/test_obj_emit: $(TESTDIR)/hull/test_obj_emit.c $(OBJ_EMIT_OBJ) | $(B
 # embedded-blob SHA-256 cache. Links against sbom.o + cacert.o + mbedTLS;
 # nothing else. If SBOM accidentally pulls in other Hull subsystems,
 # this link line will need to grow - that's the orthogonality canary.
-$(BUILDDIR)/test_sbom: $(TESTDIR)/hull/test_sbom.c $(SBOM_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SBOM_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS)
+$(BUILDDIR)/test_sbom: $(TESTDIR)/hull/test_sbom.c $(SBOM_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SBOM_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS)
 
 # Path-normalize test - standalone, exercises hl_path_normalize directly
 # so a regression in the helper is caught here rather than only via the
@@ -858,9 +858,9 @@ $(BUILDDIR)/test_module_resolver: $(TESTDIR)/hull/test_module_resolver.c $(MODUL
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o $(BUILDDIR)/cap_tui_feature.o
 
 # CA bundle test - links against cacert.o and mbedTLS for parse verification
-$(BUILDDIR)/test_cacert: $(TESTDIR)/hull/test_cacert.c $(CACERT_OBJ) $(MBEDTLS_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_cacert: $(TESTDIR)/hull/test_cacert.c $(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(MBEDTLS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(CACERT_OBJ) $(MBEDTLS_OBJS)
+		$(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(MBEDTLS_OBJS)
 
 # ── Focused source-frontend test groups (docs/ci_architecture_design.md sections 4, 9) ──
 # Build the frontend test binaries FRESH (they embed the current stdlib registry

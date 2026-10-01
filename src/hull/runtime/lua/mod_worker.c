@@ -6,6 +6,7 @@
 #include "mod_buffer.h"
 #include "internal.h"
 #include "hull/shared/async.h"
+#include "hull/module_resolver.h"
 #include "hull/net_backend.h"
 
 #include <keel/http_server.h>
@@ -234,6 +235,10 @@ static int lua_worker_dispatch(lua_State *L)
 
     op->server = lua->server;
     op->alloc = lua->base.alloc;
+    op->mem_limit = lua->mem_limit;
+    op->max_instructions = lua->max_instructions;
+    op->with_db = lua->base.module_set &&
+                  hl_module_set_contains_short(lua->base.module_set, "db");
     op->bytecode = bw.buf;
     op->bytecode_len = bw.len;
     op->ctx_kvs = ctx_kvs;

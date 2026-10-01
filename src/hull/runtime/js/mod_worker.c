@@ -7,6 +7,7 @@
 #include "mod_buffer.h"
 #include "internal.h"
 #include "hull/worker_db.h"
+#include "hull/module_resolver.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
@@ -190,8 +191,14 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx,
             "worker.dispatch requires (fn, ctx?)");
 
-    /* Get function source text via fn.toString() */
-    JSValue fn_str = JS_ToString(ctx, argv[0]);
+    /* The source text, from the ORIGINAL Function.prototype.toString kept
+     * at init - never the function's own (overridable) toString, which let
+     * an app pass any string to be compiled in the worker. */
+    if (!js->fn_to_string)
+        return JS_ThrowInternalError(ctx,
+            "worker.dispatch: cannot serialize function");
+    JSValue fn_str = JS_Call(ctx, *(JSValue *)js->fn_to_string, argv[0],
+                             0, NULL);
     if (JS_IsException(fn_str))
         return JS_ThrowInternalError(ctx,
             "worker.dispatch: cannot serialize function");
@@ -223,6 +230,11 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
 
     op->server = js->server;
     op->alloc = js->base.alloc;
+    op->max_heap_bytes = js->max_heap_bytes;
+    op->max_stack_bytes = js->max_stack_bytes;
+    op->max_instructions = js->max_instructions;
+    op->with_db = js->base.module_set &&
+                  hl_module_set_contains_short(js->base.module_set, "db");
     /* Copy source text (JS_ToCStringLen returns js_malloc'd memory) */
     op->fn_source = malloc(src_len + 1);
     if (!op->fn_source) {

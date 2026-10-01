@@ -42,11 +42,18 @@ void hl_js_worker_register_init(HlJsWorkerInitFn fn)
         init_hooks[init_hook_count++] = fn;
 }
 
-/* ── Per-worker JS VM (TLS, lazy init) ─────────────────────────────── */
+/* ── Worker JS VM: a runtime per thread, a context per dispatch ─────── */
+
+/* The runtime (atoms, shapes, allocator state) is reused on its thread; the
+ * CONTEXT - every global and builtin an app can touch - is created for one
+ * dispatch and freed after it. A context reused across dispatches leaked
+ * state between unrelated requests: a global, or a patched builtin
+ * (Array.prototype.map = ...), left by one was seen by the next. */
 
 typedef struct {
     JSRuntime *rt;
-    JSContext *ctx;
+    int64_t    instructions;
+    int64_t    max_instructions;   /* 0 = none */
 } HlJsWorkerCtx;
 
 static pthread_key_t  js_worker_key;
@@ -56,8 +63,7 @@ static void js_worker_destructor(void *ptr)
 {
     if (!ptr) return;
     HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)ptr;
-    if (wctx->ctx) JS_FreeContext(wctx->ctx);
-    if (wctx->rt)  JS_FreeRuntime(wctx->rt);
+    if (wctx->rt) JS_FreeRuntime(wctx->rt);
     free(wctx);
 }
 
@@ -66,7 +72,19 @@ static void js_worker_key_create(void)
     pthread_key_create(&js_worker_key, js_worker_destructor);
 }
 
-static HlJsWorkerCtx *get_js_worker_ctx(void)
+/* The same instruction budget a request handler gets: without it
+ * `while (true) {}` held a pool thread for good, and a few of those starved
+ * every db.async / compute.async / smtp job. */
+static int js_worker_interrupt(JSRuntime *rt, void *opaque)
+{
+    (void)rt;
+    HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)opaque;
+    wctx->instructions++;
+    return wctx->max_instructions > 0 &&
+           wctx->instructions > wctx->max_instructions;
+}
+
+static HlJsWorkerCtx *get_js_worker_rt(void)
 {
     pthread_once(&js_worker_once, js_worker_key_create);
 
@@ -75,50 +93,59 @@ static HlJsWorkerCtx *get_js_worker_ctx(void)
 
     wctx = calloc(1, sizeof(HlJsWorkerCtx));
     if (!wctx) return NULL;
-
     wctx->rt = JS_NewRuntime();
     if (!wctx->rt) {
         free(wctx);
         return NULL;
     }
-
-    wctx->ctx = JS_NewContext(wctx->rt);
-    if (!wctx->ctx) {
-        JS_FreeRuntime(wctx->rt);
-        free(wctx);
-        return NULL;
-    }
-
-    /* Remove dangerous globals from worker VM */
-    JSValue global = JS_GetGlobalObject(wctx->ctx);
-    JSAtom eval_atom = JS_NewAtom(wctx->ctx, "eval");
-    JS_DeleteProperty(wctx->ctx, global, eval_atom, 0);
-    JS_FreeAtom(wctx->ctx, eval_atom);
-    JSAtom fn_atom = JS_NewAtom(wctx->ctx, "Function");
-    JS_DeleteProperty(wctx->ctx, global, fn_atom, 0);
-    JS_FreeAtom(wctx->ctx, fn_atom);
-    JS_FreeValue(wctx->ctx, global);
-    if (hl_js_poison_code_constructors(wctx->ctx) != 0) {
-        log_error("[hull:worker] could not disable the Function constructors");
-        JS_FreeContext(wctx->ctx);
-        JS_FreeRuntime(wctx->rt);
-        free(wctx);
-        return NULL;
-    }
-
-    /* Run registered init hooks (e.g. db.*, json.*) */
-    for (int i = 0; i < init_hook_count; i++) {
-        if (init_hooks[i](wctx->ctx) != 0) {
-            log_error("[hull:worker] JS init hook %d failed", i);
-            JS_FreeContext(wctx->ctx);
-            JS_FreeRuntime(wctx->rt);
-            free(wctx);
-            return NULL;
-        }
-    }
-
+    JS_SetInterruptHandler(wctx->rt, js_worker_interrupt, wctx);
     pthread_setspecific(js_worker_key, wctx);
     return wctx;
+}
+
+/* A fresh, sandboxed context for one dispatch. */
+static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
+                                        const HlJsWorkerDispatchOp *op)
+{
+    /* The app's limits; set per dispatch (the runtime outlives any app). */
+    /* QuickJS reads a 0 limit literally (every allocation fails). */
+    JS_SetMemoryLimit(wctx->rt, op->max_heap_bytes ? op->max_heap_bytes
+                                                   : (size_t)-1);
+    if (op->max_stack_bytes > 0)
+        JS_SetMaxStackSize(wctx->rt, op->max_stack_bytes);
+    JS_UpdateStackTop(wctx->rt);
+    wctx->instructions = 0;
+    wctx->max_instructions = op->max_instructions;
+
+    JSContext *ctx = JS_NewContext(wctx->rt);
+    if (!ctx) return NULL;
+
+    /* Remove dangerous globals from worker VM */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSAtom eval_atom = JS_NewAtom(ctx, "eval");
+    JS_DeleteProperty(ctx, global, eval_atom, 0);
+    JS_FreeAtom(ctx, eval_atom);
+    JSAtom fn_atom = JS_NewAtom(ctx, "Function");
+    JS_DeleteProperty(ctx, global, fn_atom, 0);
+    JS_FreeAtom(ctx, fn_atom);
+    JS_FreeValue(ctx, global);
+    if (hl_js_poison_code_constructors(ctx) != 0) {
+        log_error("[hull:worker] could not disable the Function constructors");
+        JS_FreeContext(ctx);
+        return NULL;
+    }
+
+    /* The registered hooks install `db`: only for an app that declared it. */
+    if (op->with_db) {
+        for (int i = 0; i < init_hook_count; i++) {
+            if (init_hooks[i](ctx) != 0) {
+                log_error("[hull:worker] JS init hook %d failed", i);
+                JS_FreeContext(ctx);
+                return NULL;
+            }
+        }
+    }
+    return ctx;
 }
 
 /* ── KV helpers: JS object ↔ HlKV array ──────────────────────────── */
@@ -302,20 +329,27 @@ static int capture_result(JSContext *ctx, JSValue val,
 
 /* ── KlWorkItem callbacks ──────────────────────────────────────────── */
 
+static void js_dispatch_run(JSContext *ctx, HlJsWorkerDispatchOp *op);
+
 static void js_dispatch_work_fn(void *ud)
 {
     HlJsWorkerDispatchOp *op = (HlJsWorkerDispatchOp *)ud;
 
-    HlJsWorkerCtx *wctx = get_js_worker_ctx();
-    if (!wctx || !wctx->ctx) {
+    HlJsWorkerCtx *wctx = get_js_worker_rt();
+    JSContext *ctx = wctx ? js_worker_context_new(wctx, op) : NULL;
+    if (!ctx) {
         op->error = 1;
         snprintf(op->error_msg, sizeof(op->error_msg),
                  "failed to create worker JS VM");
         return;
     }
+    js_dispatch_run(ctx, op);
+    JS_FreeContext(ctx);
+    JS_RunGC(wctx->rt);   /* cycles the dispatch left behind */
+}
 
-    JSContext *ctx = wctx->ctx;
-
+static void js_dispatch_run(JSContext *ctx, HlJsWorkerDispatchOp *op)
+{
     /* Compile function source text: wrap in parens to get an expression.
      * Source comes from fn.toString(), e.g. "(ctx) => { ... }" or
      * "function(ctx) { ... }".  Evaluating "(<source>)" yields the function

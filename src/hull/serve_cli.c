@@ -48,6 +48,8 @@
 #ifdef HL_ENABLE_HTTP_CLIENT
 #include "hull/cap/http.h"
 #include "hull/ca_trust.h"
+#include "hull/cacert.h"
+#include "hull/cap/policy_seal.h"
 #include <keel/http_client.h>
 #include "hull/tls_transport.h"
 #endif
@@ -329,7 +331,8 @@ int hull_serve(int argc, char **argv)
         return 1;
     }
     ShSealArena seal_arena;
-    if (sh_seal_arena_init(&seal_arena, 16 * 1024, "manifest-policy") != 0) {
+    if (sh_seal_arena_init(&seal_arena, 16 * 1024 + sizeof(HlManifest),
+                           "manifest-policy") != 0) {
         log_error("[hull:cli] seal arena init failed (mmap)");
         hl_manifest_free(&manifest);
         hl_app_context_free(ctx);
@@ -382,6 +385,23 @@ int hull_serve(int argc, char **argv)
         memcpy(resolved, rt->module_set, sizeof(HlResolvedModuleSet));
         rt->module_set = resolved;
     }
+    /* The manifest STRUCT as well, not only its strings: its pointer arrays
+     * and counts are the allowlists (hosts[], hosts_count, ...), and a copy
+     * on the stack let a write re-count or repoint one. Everything wired
+     * below that keeps a pointer into the manifest points into this copy;
+     * the stack value is read once, while wiring, and never again. */
+    const HlManifest *policy = sh_seal_arena_memdup(&seal_arena, &manifest,
+                                                    sizeof manifest);
+    if (!policy) {
+        log_error("[hull:cli] seal arena alloc(manifest) failed");
+        sh_seal_arena_destroy(&seal_arena);
+        hl_app_context_free(ctx);
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
+        return 1;
+    }
     if (sh_seal_arena_seal(&seal_arena) != 0) {
         log_error("[hull:cli] manifest seal (mprotect) failed");
         sh_seal_arena_destroy(&seal_arena);
@@ -401,9 +421,9 @@ int hull_serve(int argc, char **argv)
      * base_dir-only HlFsConfig would clobber the policy and deny every op). */
 
     HlEnvConfig env_cfg = {0};
-    if (manifest.env_count > 0) {
-        env_cfg.allowed = manifest.env;
-        env_cfg.count   = manifest.env_count;
+    if (policy->env_count > 0) {
+        env_cfg.allowed = policy->env;
+        env_cfg.count   = policy->env_count;
         rt->env_cfg = &env_cfg;
     }
 
@@ -412,16 +432,16 @@ int hull_serve(int argc, char **argv)
      * on, so leaving it unwired would fail every connect closed in the one mode
      * that matters. `manifest` is function-scope and outlives the app.main run,
      * the same lifetime http_cfg and env_cfg above rely on. */
-    rt->ssh_policy = &manifest.ssh;
+    rt->ssh_policy = &policy->ssh;
 
     /* kv.open's allowlist and the named / dynamic database policy, as serve.c
      * wires them. Unwired, kv.open, db.connect(name) and db.open were denied
      * in every app.main program however the manifest declared them. Same
      * borrowed lifetime as ssh_policy. */
-    rt->kv_policy = &manifest.kv.dynamic;
+    rt->kv_policy = &policy->kv.dynamic;
 #ifdef HL_ENABLE_DB
     if (rt->db_registry)
-        hl_db_registry_set_manifest(rt->db_registry, &manifest);
+        hl_db_registry_set_manifest(rt->db_registry, policy);
 #endif
 
 #ifdef HL_ENABLE_HTTP_CLIENT
@@ -478,10 +498,23 @@ int hull_serve(int argc, char **argv)
             rt->client_tls = &client_tls;
         }
     }
+    /* The anchor is final: seal it before any connection reads it. */
+    if (hl_ca_bundle_seal_active() != 0) {
+        log_error("[hull:cli] could not seal the CA trust anchor");
+        if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
+        hl_manifest_free(&manifest);
+        hl_app_context_free(ctx);
+        sh_seal_arena_destroy(&seal_arena);
+        return 1;
+    }
 
     if (manifest.hosts_count > 0) {
-        http_cfg.allowed_hosts     = manifest.hosts;
-        http_cfg.count             = manifest.hosts_count;
+        http_cfg.allowed_hosts     = policy->hosts;
+        http_cfg.count             = policy->hosts_count;
         http_cfg.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
         http_cfg.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
         http_cfg.follow_redirects  = 1;
@@ -489,6 +522,24 @@ int hull_serve(int argc, char **argv)
         rt->http_cfg = &http_cfg;
     }
 #endif
+
+    /* Every cap config is wired: copy them into sealed memory and point the
+     * runtime there (policy_seal.h). */
+    ShSealArena cfg_arena;
+    if (hl_policy_seal_cap_configs(rt, &cfg_arena) != 0) {
+        log_error("[hull:cli] could not seal the capability configs");
+#ifdef HL_ENABLE_HTTP_CLIENT
+        if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
+#endif
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
+        hl_manifest_free(&manifest);
+        hl_app_context_free(ctx);
+        sh_seal_arena_destroy(&seal_arena);
+        return 1;
+    }
 
     if (!no_sandbox) {
         HlSandboxPolicy sandbox_policy;
@@ -509,7 +560,8 @@ int hull_serve(int argc, char **argv)
             be->free(async_ctx);
             hl_manifest_free(&manifest);
             hl_app_context_free(ctx);
-            /* The arena outlives every consumer that aliases it. */
+            /* The arenas outlive every consumer that aliases them. */
+            sh_seal_arena_destroy(&cfg_arena);
             sh_seal_arena_destroy(&seal_arena);
             return 1;
         }
@@ -543,6 +595,7 @@ int hull_serve(int argc, char **argv)
 
     /* Destroyed LAST: the cap configs above borrow strings out of it, so
      * unmapping earlier would leave them pointing at nothing. */
+    sh_seal_arena_destroy(&cfg_arena);
     sh_seal_arena_destroy(&seal_arena);
 
     return (run == 0) ? rc : (rc ? rc : 1);

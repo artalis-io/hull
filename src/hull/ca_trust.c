@@ -141,7 +141,10 @@ static KlTlsCtx *ladder(int skip_verify, const char *override,
                 source = "(embedded)";
                 if (!ctx)
                     LOG_WARN("[hull:c] failed to parse embedded CA bundle");
-                hl_ca_bundle_reset_active();   /* the default: embedded */
+                /* Published like any other anchor, so a heap anchor an
+                 * EARLY publish left (the system store, which then failed
+                 * here) is retired, not freed under a worker reading it. */
+                hl_ca_bundle_set_active(emb, emb_len, 0);
             } else {
                 LOG_WARN("[hull:c] no CA bundle found; outbound TLS disabled "
                          "(use --no-ca-bundle, --ca-bundle PATH, or build "

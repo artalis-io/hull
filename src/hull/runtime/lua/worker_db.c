@@ -132,10 +132,48 @@ static int worker_lua_row_cb(void *opaque, HlColumn *cols, int ncols)
     return 0;
 }
 
+/* ── Re-entry guard ──────────────────────────────────────────────── */
+
+/* Same hazard as the event-loop mod_db: a __gc finalizer (a table with a
+ * __gc metamethod is enough) can run during a row loop or a UDF step and
+ * call db again, and the statement cache hands the same SQL back as the
+ * statement being stepped - resetting it under the loop. While a statement
+ * runs on this thread, db calls refuse. A to-be-closed guard brings the
+ * count back down even when an error unwinds out of the loop. */
+static _Thread_local int t_row_loops;
+
+static int row_loop_guard_close(lua_State *L)
+{
+    (void)L;
+    if (t_row_loops > 0) t_row_loops--;
+    return 0;
+}
+
+static int push_row_loop_guard(lua_State *L)
+{
+    lua_newuserdatauv(L, 1, 0);
+    if (luaL_newmetatable(L, "hull.worker.db.rowloop")) {
+        lua_pushcfunction(L, row_loop_guard_close);
+        lua_setfield(L, -2, "__close");
+    }
+    lua_setmetatable(L, -2);
+    t_row_loops++;
+    lua_toclose(L, -1);
+    return lua_gettop(L);
+}
+
+static void refuse_reentry(lua_State *L)
+{
+    if (t_row_loops > 0)
+        luaL_error(L, "db: called while a query's rows are being read "
+                      "(from a __gc finalizer?)");
+}
+
 /* ── db.query for worker VMs ────────────────────────────────────── */
 
 static int worker_lua_db_query(lua_State *L)
 {
+    refuse_reentry(L);
     const char *sql = luaL_checkstring(L, 1);
     const char *err = NULL;
     HlDbHandle *h = hl_worker_db_handle_checked(sql, &err);
@@ -153,7 +191,9 @@ static int worker_lua_db_query(lua_State *L)
     int table_idx = lua_gettop(L);
     WorkerLuaQueryCtx qc = { .L = L, .table_idx = table_idx, .row_count = 0 };
 
+    int guard = push_row_loop_guard(L);
     int rc = hl_db_query(h, sql, params, nparams, worker_lua_row_cb, &qc, NULL);
+    lua_settop(L, guard - 1);   /* closes the guard; the result table is on top */
 
     /* Rotate the result table below the aliased param values so the pop
      * removes params, not the result (same discipline as the sync path). */
@@ -174,6 +214,7 @@ static int worker_lua_db_query(lua_State *L)
 
 static int worker_lua_db_exec(lua_State *L)
 {
+    refuse_reentry(L);
     const char *sql = luaL_checkstring(L, 1);
     const char *err = NULL;
     HlDbHandle *h = hl_worker_db_handle_checked(sql, &err);
@@ -187,7 +228,9 @@ static int worker_lua_db_exec(lua_State *L)
             return luaL_error(L, "params must be a table");
     }
 
+    int guard = push_row_loop_guard(L);   /* a UDF steps inside exec */
     int rc = hl_db_exec(h, sql, params, nparams);
+    lua_settop(L, guard - 1);
 
     if (nparams > 0)
         lua_pop(L, nparams);
@@ -204,6 +247,7 @@ static int worker_lua_db_exec(lua_State *L)
 
 static int worker_lua_db_batch(lua_State *L)
 {
+    refuse_reentry(L);
     HlWorkerDb *wdb = hl_worker_db_get();
     if (!wdb || !wdb->handle.backend)
         return luaL_error(L, "database not available in worker");
@@ -234,6 +278,7 @@ static int worker_lua_db_batch(lua_State *L)
 
 static int worker_lua_db_last_id(lua_State *L)
 {
+    refuse_reentry(L);
     HlWorkerDb *wdb = hl_worker_db_get();
     if (!wdb || !wdb->handle.backend)
         return luaL_error(L, "database not available in worker");

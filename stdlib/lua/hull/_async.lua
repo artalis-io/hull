@@ -46,7 +46,26 @@ function M.async(fn, ...)
         local waiters = task._waiters
         task._waiters = nil
         -- One wake that cannot be scheduled must not keep the rest asleep.
-        for _, tok in ipairs(waiters) do pcall(H._wake, tok) end
+        local pending = {}
+        for _, tok in ipairs(waiters) do
+            if not pcall(H._wake, tok) then pending[#pending + 1] = tok end
+        end
+        -- Nor may it be dropped: its waiter would stay parked for good. A
+        -- wake fails only when its timer cannot be allocated, so try again
+        -- on later ticks, and if that never works, say so.
+        for _ = 1, 20 do
+            if #pending == 0 then break end
+            pcall(H.sleep, 50)
+            local still = {}
+            for _, tok in ipairs(pending) do
+                if not pcall(H._wake, tok) then still[#still + 1] = tok end
+            end
+            pending = still
+        end
+        if #pending > 0 then
+            error(("hull.async: %d waiter(s) of a finished task could not be "
+                   .. "woken"):format(#pending), 0)
+        end
     end)
     return task
 end

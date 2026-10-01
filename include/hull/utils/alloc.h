@@ -17,24 +17,30 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <keel/allocator.h>
 
 /* Forward declarations */
 typedef struct SHArena SHArena;
 
+/* The counters are atomic because one allocator is shared across threads:
+ * the server's tracker is used by the event loop (through Keel's kl_alloc)
+ * AND by thread-pool work (compute.async copies, WASM buffers). Plain `+=`
+ * there lost updates, so `used` drifted - down, weakening --max-memory, or
+ * up, until every allocation failed. `limit` is written once, at init. */
 typedef struct HlAllocator {
-    size_t used;
-    size_t limit;   /* 0 = unlimited (tracking only) */
-    size_t peak;
+    _Atomic size_t used;
+    size_t         limit;   /* 0 = unlimited (tracking only) */
+    _Atomic size_t peak;
 } HlAllocator;
 
 /* Initialize allocator. limit=0 means tracking only, no cap. */
 static inline void hl_alloc_init(HlAllocator *a, size_t limit)
 {
-    a->used = 0;
+    atomic_init(&a->used, 0);
     a->limit = limit;
-    a->peak = 0;
+    atomic_init(&a->peak, 0);
 }
 
 /* Tracked allocation functions.
@@ -89,7 +95,13 @@ char  *hl_arena_strdup(SHArena *arena, const char *s);
 void  *hl_arena_memdup(SHArena *arena, const void *src, size_t n);
 
 /* Accessors */
-static inline size_t hl_alloc_used(const HlAllocator *a) { return a->used; }
-static inline size_t hl_alloc_peak(const HlAllocator *a) { return a->peak; }
+static inline size_t hl_alloc_used(const HlAllocator *a)
+{
+    return atomic_load_explicit(&a->used, memory_order_relaxed);
+}
+static inline size_t hl_alloc_peak(const HlAllocator *a)
+{
+    return atomic_load_explicit(&a->peak, memory_order_relaxed);
+}
 
 #endif /* HL_ALLOC_H */
