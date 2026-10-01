@@ -768,13 +768,10 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     if (!js || !cfg)
         return -1;
 
-    /* Save caller-set base fields before zeroing */
-    HlRuntime saved_base = js->base;
-
-    memset(js, 0, sizeof(*js));
-
-    /* Restore caller-set base fields */
-    js->base = saved_base;
+    /* Zero everything after the caller-set base (base is the first member;
+     * copying it out and back would put its 64 KiB policy span on the
+     * stack). */
+    memset((char *)js + sizeof(js->base), 0, sizeof(*js) - sizeof(js->base));
     js->max_instructions = cfg->max_instructions;
     js->max_heap_bytes = cfg->max_heap_bytes;
     js->max_stack_bytes = cfg->max_stack_bytes;

@@ -15,6 +15,9 @@
 #include "hull/runtime/factory.h"
 #include "hull/runtime/js.h"
 #include "hull/app_context.h"
+#include "hull/cap/policy_seal.h"
+
+#include <stddef.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -24,8 +27,13 @@ static int js_create(HlRuntime **out, const HlAppContextOpts *opts,
 {
     if (!out || !opts) return -1;
 
-    HlJS *js = (HlJS *)calloc(1, sizeof(HlJS));
+    /* Page-aligned (and zeroed): the runtime's leading policy span is sealed
+     * once wiring is done (hl_policy_seal_runtime), which needs base - the
+     * first member - to start a page. */
+    _Static_assert(offsetof(HlJS, base) == 0, "base must be the first member");
+    HlJS *js = hl_policy_page_alloc(sizeof(HlJS));
     if (!js) return -1;
+    js->base.policy_page_owned = 1;
 
     /* Copy base config into rt->base BEFORE init (parallel to Lua side). */
     if (base) {
@@ -56,7 +64,7 @@ static int js_create(HlRuntime **out, const HlAppContextOpts *opts,
         cfg.max_instructions = opts->instruction_limit;
 
     if (hl_js_init(js, &cfg) != 0) {
-        free(js);
+        hl_policy_page_free(js, sizeof(HlJS));
         return -1;
     }
 
@@ -69,8 +77,9 @@ static void js_destroy(HlRuntime *rt)
 {
     if (!rt) return;
     HlJS *js = (HlJS *)rt;
+    hl_policy_unseal_runtime(rt);   /* teardown writes the span */
     hl_js_free(js);
-    free(js);
+    hl_policy_page_free(js, sizeof(HlJS));
 }
 
 const HlRuntimeFactory hl_js_factory = {

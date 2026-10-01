@@ -540,6 +540,26 @@ int hull_serve(int argc, char **argv)
         sh_seal_arena_destroy(&seal_arena);
         return 1;
     }
+    /* Then the roots that point at all of it (cap/policy_seal.h). */
+    if (hl_policy_seal_runtime(rt) != 0
+#ifdef HL_ENABLE_DB
+        || (rt->db_registry && hl_db_registry_seal(rt->db_registry) != 0)
+#endif
+        ) {
+        log_error("[hull:cli] could not seal the runtime's policy");
+#ifdef HL_ENABLE_HTTP_CLIENT
+        if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
+#endif
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
+        hl_manifest_free(&manifest);
+        hl_app_context_free(ctx);
+        sh_seal_arena_destroy(&cfg_arena);
+        sh_seal_arena_destroy(&seal_arena);
+        return 1;
+    }
 
     if (!no_sandbox) {
         HlSandboxPolicy sandbox_policy;
@@ -574,7 +594,9 @@ int hull_serve(int argc, char **argv)
     int rc = 1;
     int run = rt->vt->run_main(rt, NULL, app_argc, app_argv, env_allow, &rc);
 
-    /* Detach borrowed pointers before tearing down (mirrors serve.c). */
+    /* Detach borrowed pointers before tearing down (mirrors serve.c). The
+     * policy span is read-only since wiring; writable again for this. */
+    hl_policy_unseal_runtime(rt);
     rt->thread_pool = NULL;
     rt->async_ctx = NULL;
     rt->fs_cfg = NULL;

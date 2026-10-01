@@ -193,7 +193,9 @@ static int wasm_cache_ok = 0;
 #endif
 /* Base-resident: the GPU context is populated from a composed feature
  * backend (or a monolithic HL_ENABLE_GPU build); unavailable otherwise. */
-static HlGpuCtx gpu_ctx;
+/* Page-allocated (hl_policy_page_alloc) so its device-allowlist span can be
+ * sealed; NULL until GPU init. */
+static HlGpuCtx *gpu_ctx;
 static int gpu_ctx_ok = 0;
 
 /* ── Runtime selection ──────────────────────────────────────────────── */
@@ -1030,10 +1032,12 @@ static int hl_serve_init_app_context(HlServerState *s)
         if (!gpu_be)
             gpu_be = &hl_gpu_backend_wgpu;
 #endif
-        if (gpu_be && hl_cap_gpu_init(&gpu_ctx, gpu_be) == HL_GPU_OK
-            && hl_cap_gpu_available(&gpu_ctx)) {
-            if (s->cfg.gpu_device >= 0 && s->cfg.gpu_device < gpu_ctx.device_count)
-                gpu_ctx.default_device = s->cfg.gpu_device;
+        if (gpu_be && !gpu_ctx)
+            gpu_ctx = hl_policy_page_alloc(sizeof *gpu_ctx);
+        if (gpu_be && gpu_ctx && hl_cap_gpu_init(gpu_ctx, gpu_be) == HL_GPU_OK
+            && hl_cap_gpu_available(gpu_ctx)) {
+            if (s->cfg.gpu_device >= 0 && s->cfg.gpu_device < gpu_ctx->device_count)
+                gpu_ctx->default_device = s->cfg.gpu_device;
             gpu_ctx_ok = 1;
         } else if (gpu_be) {
             log_info("[hull:c] GPU compute unavailable - gpu.* disabled");
@@ -1058,7 +1062,7 @@ static int hl_serve_init_app_context(HlServerState *s)
 #ifdef HL_ENABLE_WASM
         .wasm_cache        = wasm_cache_ok ? &wasm_cache : NULL,
 #endif
-        .gpu_ctx           = gpu_ctx_ok ? &gpu_ctx : NULL,
+        .gpu_ctx           = gpu_ctx_ok ? gpu_ctx : NULL,
         .gpu_device        = s->cfg.gpu_device,
     };
 
@@ -1470,15 +1474,15 @@ static int hl_serve_wire_caps(HlServerState *s)
     /* Apply per-device allowlist if manifest declares specific devices */
     if (gpu_ctx_ok && s->manifest.present && s->manifest.gpu &&
         s->manifest.gpu_device_count > 0) {
-        gpu_ctx.device_restriction = 1;
-        memset(gpu_ctx.allowed_devices, 0, sizeof(gpu_ctx.allowed_devices));
+        gpu_ctx->device_restriction = 1;
+        memset(gpu_ctx->allowed_devices, 0, sizeof(gpu_ctx->allowed_devices));
         for (int i = 0; i < s->manifest.gpu_device_count; i++) {
             int d = s->manifest.gpu_devices[i];
-            if (d >= 0 && d < gpu_ctx.device_count)
-                gpu_ctx.allowed_devices[d] = 1;
+            if (d >= 0 && d < gpu_ctx->device_count)
+                gpu_ctx->allowed_devices[d] = 1;
         }
         log_info("[hull:c] gpu device restriction: %d of %d devices allowed",
-                 s->manifest.gpu_device_count, gpu_ctx.device_count);
+                 s->manifest.gpu_device_count, gpu_ctx->device_count);
     }
 
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write
@@ -1634,6 +1638,23 @@ static int hl_serve_wire_caps(HlServerState *s)
         return -1;
     }
     s->cfg_sealed = 1;
+
+    /* Then the roots that point at all of it: the runtime's policy span and
+     * the GPU device allowlist (cap/policy_seal.h). */
+    if (hl_policy_seal_runtime(rt) != 0) {
+        log_error("[hull:c] could not seal the runtime's policy");
+        return -1;
+    }
+    if (gpu_ctx_ok && hl_policy_page_seal(gpu_ctx) != 0) {
+        log_error("[hull:c] could not seal the GPU device allowlist");
+        return -1;
+    }
+#ifdef HL_ENABLE_DB
+    if (rt->db_registry && hl_db_registry_seal(rt->db_registry) != 0) {
+        log_error("[hull:c] could not seal the database registry's policy");
+        return -1;
+    }
+#endif
 
     return 0;
 }
@@ -1907,8 +1928,13 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
      * gpu_ctx_ok via the feature hook, so the destroy must NOT be
      * #ifdef-gated or the GPU context leaks on shutdown. hl_cap_gpu_destroy
      * lives in base-resident gpu.c and is NULL-safe + idempotent. */
-    if (gpu_ctx_ok)
-        hl_cap_gpu_destroy(&gpu_ctx);
+    if (gpu_ctx_ok) {
+        hl_policy_page_unseal(gpu_ctx);   /* destroy writes the span */
+        hl_cap_gpu_destroy(gpu_ctx);
+        hl_policy_page_free(gpu_ctx, sizeof *gpu_ctx);
+        gpu_ctx = NULL;
+        gpu_ctx_ok = 0;
+    }
     if (s->client_tls_ctx) {
         hl_tls_ctx_destroy(s->client_tls_ctx);
         s->client_tls_ctx = NULL;

@@ -202,13 +202,10 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     if (!lua || !cfg)
         return -1;
 
-    /* Save caller-set base fields before zeroing */
-    HlRuntime saved_base = lua->base;
-
-    memset(lua, 0, sizeof(*lua));
-
-    /* Restore caller-set base fields */
-    lua->base = saved_base;
+    /* Zero everything after the caller-set base (base is the first member;
+     * copying it out and back would put its 64 KiB policy span on the
+     * stack). */
+    memset((char *)lua + sizeof(lua->base), 0, sizeof(*lua) - sizeof(lua->base));
     lua->mem_limit = cfg->max_heap_bytes;
     lua->max_instructions = cfg->max_instructions;
 
