@@ -22,8 +22,8 @@ import { auditLog }  from "hull:web:middleware:audit-log";
 import { log }       from "hull:log";
 import { ratelimit } from "hull:web:middleware:ratelimit";
 import { _request }  from "hull:web:_request";
-import { db as dbModule } from "hull:db";
-const db = dbModule.default();
+import { internal as dbInternal } from "hull:db:_internal";
+const db = dbInternal.connection();
 import { time }     from "hull:time";
 import { json }     from "hull:json";
 

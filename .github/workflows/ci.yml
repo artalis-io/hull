@@ -461,6 +461,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-dynamic-connections
 
+      - name: Internal-database (databases.internal) E2E tests
+        timeout-minutes: 2
+        run: make e2e-db-internal
+
       - name: Build-flavor E2E tests
         timeout-minutes: 6
         run: make e2e-build-flavor

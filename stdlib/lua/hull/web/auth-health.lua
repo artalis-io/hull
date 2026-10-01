@@ -43,7 +43,7 @@
 --         res:json(auth_health.check())
 --     end)
 
-local db = require("hull.db").default()
+local db = require("hull.db._internal").connection()
 
 local auth_health = {}
 

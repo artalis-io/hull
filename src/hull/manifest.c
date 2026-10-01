@@ -90,6 +90,7 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->databases.named[i].name);
         hl_manifest_str_free(a, &m->databases.named[i].dsn);
     }
+    hl_manifest_str_free(a, &m->databases.internal);
     for (int i = 0; i < m->databases.dynamic.host_count; i++)
         hl_manifest_str_free(a, &m->databases.dynamic.hosts[i]);
     for (int i = 0; i < m->databases.dynamic.scheme_count; i++)
@@ -182,6 +183,8 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
         if (seal_str(arena, &dst->databases.named[i].dsn, src->databases.named[i].dsn) != 0)
             goto fail;
     }
+    if (seal_str(arena, &dst->databases.internal, src->databases.internal) != 0)
+        goto fail;
     for (int i = 0; i < src->databases.dynamic.host_count; i++)
         if (seal_str(arena, &dst->databases.dynamic.hosts[i], src->databases.dynamic.hosts[i]) != 0)
             goto fail;
@@ -265,10 +268,12 @@ int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size)
     if (err && err_size) err[0] = '\0';
     if (!m) return 0;
 
-    const char *dsns[HL_MANIFEST_MAX_DATABASES];
+    const char *dsns[HL_MANIFEST_MAX_DATABASES + 1];
     int ndsn = 0;
     for (int i = 0; i < m->databases.named_count && ndsn < HL_MANIFEST_MAX_DATABASES; i++)
         dsns[ndsn++] = m->databases.named[i].dsn;
+    if (m->databases.internal)
+        dsns[ndsn++] = m->databases.internal;
 
     if (check_refs(m, "hosts", m->hosts, m->hosts_count, err, err_size) != 0 ||
         check_refs(m, "databases.named", dsns, ndsn, err, err_size) != 0 ||

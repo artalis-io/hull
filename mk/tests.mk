@@ -1318,6 +1318,9 @@ e2e-test-harness: $(BUILDDIR)/hull
 e2e-named-connections: $(BUILDDIR)/hull
 	sh tests/e2e_named_connections.sh
 
+e2e-db-internal: $(BUILDDIR)/hull
+	sh tests/e2e_db_internal.sh
+
 e2e-dynamic-connections: $(BUILDDIR)/hull
 	sh tests/e2e_dynamic_connections.sh
 

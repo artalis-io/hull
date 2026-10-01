@@ -14,6 +14,8 @@
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
 #include "hull/worker_db.h"
+#include "hull/manifest.h"
+#include "log.h"
 
 #include <keel/http_server.h>
 
@@ -1192,6 +1194,51 @@ static int lua_db_connect(lua_State *L)
         return luaL_error(L, "db.connect('%s'): %s", name,
                           err ? err : "unknown database");
     return push_conn_object(L, h);
+}
+
+/* hull.db._internal_conn.connection() -> (conn, final)
+ *
+ * The connection the stdlib keeps its _hull_* tables on (manifest
+ * `databases.internal`, else the default one). Stdlib-only: the module name's
+ * underscore segment keeps it out of app code's reach. `final` is true once
+ * the manifest is wired; before that (a stdlib init() at app top level) the
+ * DSN is read from the app's manifest table on the spot, and the caller (the
+ * hull.db._internal proxy) must not cache the result. */
+static int lua_db_internal_conn(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    HlDbRegistry *reg = lua ? lua->base.db_registry : NULL;
+    if (!reg) {
+        push_conn_object(L, NULL);
+        lua_pushboolean(L, 1);
+        return 2;
+    }
+    int final = hl_db_registry_manifest_wired(reg);
+    if (!final) {
+        HlManifest m;
+        memset(&m, 0, sizeof m);
+        if (hl_manifest_extract_lua(L, &m, lua->base.alloc) == 0) {
+            if (hl_db_registry_set_internal_dsn(reg, m.databases.internal) != 0)
+                log_warn("[hull:db] databases.internal is too long; ignored");
+        }
+        hl_manifest_free(&m);
+    }
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_registry_internal(reg, &err);
+    if (!h && hl_db_registry_has_internal(reg))
+        return luaL_error(L, "hull internal database: %s",
+                          err ? err : "cannot open databases.internal");
+    push_conn_object(L, h);
+    lua_pushboolean(L, final);
+    return 2;
+}
+
+int luaopen_hull_db_internal_conn(lua_State *L)
+{
+    lua_createtable(L, 0, 1);
+    lua_pushcfunction(L, lua_db_internal_conn);
+    lua_setfield(L, -2, "connection");
+    return 1;
 }
 
 int luaopen_hull_db(lua_State *L)

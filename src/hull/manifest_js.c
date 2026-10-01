@@ -416,7 +416,19 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         }
         JS_FreeValue(ctx, dyn);
 
-        if (out->databases.named_count == 0 && !out->databases.dynamic.declared)
+        JSValue internal = JS_GetPropertyStr(ctx, db_val, "internal");
+        if (JS_IsString(internal)) {
+            const char *s = JS_ToCString(ctx, internal);
+            if (s && s[0])
+                out->databases.internal = hl_manifest_strdup(alloc, s);
+            if (s) JS_FreeCString(ctx, s);
+        } else if (!JS_IsUndefined(internal) && !JS_IsNull(internal)) {
+            log_warn("[manifest] databases.internal: expected a DSN string");
+        }
+        JS_FreeValue(ctx, internal);
+
+        if (out->databases.named_count == 0 && !out->databases.dynamic.declared
+            && !out->databases.internal)
             log_warn("[manifest] databases has no `named` or `dynamic` entry; "
                      "named connections now go under databases.named = {...}");
     }
