@@ -6500,9 +6500,11 @@ UTEST(lua_runtime, internal_and_cached_modules_stay_gated)
         EXPECT_NE(rc, LUA_OK);
         if (rc != LUA_OK) lua_pop(lua_rt.L, 1);
     }
-    /* A declared module still loads. */
+    /* A declared module still loads, and so does the runtime's own use of an
+     * internal one: hull.map loads hull._async from C. */
     EXPECT_EQ(luaL_dostring(lua_rt.L, "assert(type(require('hull.validate')) == 'table')"),
               LUA_OK);
+    EXPECT_EQ(luaL_dostring(lua_rt.L, "assert(type(hull.map) == 'function')"), LUA_OK);
 
     lua_rt.base.module_set = NULL;
     cleanup_lua();

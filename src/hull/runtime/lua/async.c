@@ -638,7 +638,7 @@ static int lua_hull_index(lua_State *L)
     if (!k || (strcmp(k, "async") != 0 && strcmp(k, "gather") != 0
                && strcmp(k, "map") != 0))
         return 0;
-    lua_getglobal(L, "require");
+    lua_pushcfunction(L, hl_lua_require_trusted);
     lua_pushliteral(L, "hull._async");
     lua_call(L, 1, 1);
     const char *names[] = { "async", "gather", "map" };

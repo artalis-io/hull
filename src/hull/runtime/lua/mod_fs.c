@@ -606,7 +606,11 @@ static int cached_but_undeclared(lua_State *L, HlLua *lua, const char *name)
     return !require_caller_is_stdlib(L);
 }
 
-static int hl_lua_require(lua_State *L)
+/* trusted: the runtime's own C code asking for a module it uses (hull.map
+ * loading hull._async). Its caller frame is a C function, which the caller
+ * checks below rightly treat as app code, so it skips them. Script never
+ * reaches this entry: the `require` global is the untrusted one. */
+static int require_impl(lua_State *L, int trusted)
 {
     const char *name = luaL_checkstring(L, 1);
     HlLua *lua = get_hl_lua(L);
@@ -616,7 +620,7 @@ static int hl_lua_require(lua_State *L)
      * hull._template compiles strings into code. Only stdlib code may require
      * one, once the app's module set is wired - the point from which
      * declarations are enforced at all. */
-    if (lua && lua->base.module_set && strncmp(name, "hull.", 5) == 0 &&
+    if (!trusted && lua && lua->base.module_set && strncmp(name, "hull.", 5) == 0 &&
         strstr(name, "._") && !require_caller_is_stdlib(L))
         return luaL_error(L, "module '%s' is internal to the Hull stdlib", name);
 
@@ -628,7 +632,7 @@ static int hl_lua_require(lua_State *L)
      * callers keep the cache: their dependencies are admitted with them. */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
     lua_getfield(L, -1, name);
-    if (!lua_isnil(L, -1) && !cached_but_undeclared(L, lua, name)) {
+    if (!lua_isnil(L, -1) && (trusted || !cached_but_undeclared(L, lua, name))) {
         lua_remove(L, -2); /* remove __hull_loaded table */
         return 1;          /* return cached module */
     }
@@ -961,6 +965,10 @@ static int hl_lua_require(lua_State *L)
 
     return luaL_error(L, "module not found: %s", name);
 }
+
+static int hl_lua_require(lua_State *L) { return require_impl(L, 0); }
+
+int hl_lua_require_trusted(lua_State *L) { return require_impl(L, 1); }
 
 int hl_lua_register_stdlib(HlLua *lua)
 {

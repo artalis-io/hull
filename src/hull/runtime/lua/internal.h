@@ -213,6 +213,11 @@ static inline const char *hl_lua_chunkname(char *buf, size_t n,
     return name;
 }
 
+/* require() for the runtime's own C code (mod_fs.c): the same lookup as the
+ * `require` global, without the caller checks that refuse undeclared and
+ * internal modules to app code - a C caller has no Lua frame to check. */
+int hl_lua_require_trusted(lua_State *L);
+
 /* The chunkname for an APP file loaded from disk. A chunkname starting with
  * "hull." is what marks the stdlib (hl_lua_source_is_stdlib), and a dev-mode
  * path is app-relative with its "./" collapsed, so `require("./hull.evil")`
