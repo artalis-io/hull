@@ -340,7 +340,7 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = js_call_handle(ctx, this_val);
+    HlDbHandle *h;   /* resolved after the parameters: see below */
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
         JS_FreeCString(ctx, sql);
@@ -404,7 +404,7 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = js_call_handle(ctx, this_val);
+    HlDbHandle *h;   /* resolved after the parameters: see below */
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
         JS_FreeCString(ctx, sql);

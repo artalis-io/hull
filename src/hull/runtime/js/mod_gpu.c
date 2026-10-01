@@ -613,17 +613,12 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
         width = img->width;
         height = img->height;
         format = (HlGpuTexFormat)img->format;
-        pixels = img->pixels;
-        pixel_len = img->pixel_len;
     } else
 #endif
     {
-        /* Get data from buffer protocol */
+        /* Validate the source now; its bytes are taken after the options. */
         HlBufferView bv;
-        if (js_get_buffer(ctx, argv[1], &bv, &str_data, &str_needs_free)) {
-            pixels = bv.data;
-            pixel_len = bv.len;
-        } else {
+        if (!js_get_buffer(ctx, argv[1], &bv, &str_data, &str_needs_free)) {
             JS_FreeCString(ctx, name);
             return JS_ThrowTypeError(ctx, "gpu.texture: data must be "
 #ifdef HL_ENABLE_IMAGE
