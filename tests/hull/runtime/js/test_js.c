@@ -5864,4 +5864,97 @@ JS_MAP_CASE(a_failure_that_cannot_be_printed_is_still_reported,
     "    check(e.errors[0] === odd, 'errors');\n"
     "  }\n")
 
+/* Run a module that leaves its verdict (0 = pass, else the failing step) in
+ * globalThis.__verdict. */
+static int run_verdict_module(const char *code)
+{
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    return eval_int("globalThis.__verdict === undefined ? -1 : globalThis.__verdict");
+}
+
+UTEST(js_stdlib, crypto_envelope_tag_is_lowercase_only)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int v = run_verdict_module(
+        "import { envelope } from 'hull:crypto:envelope';\n"
+        "const secret = 'bb'.repeat(32);\n"
+        "const tok = envelope.sign({x: 1}, secret);\n"
+        "const dot = tok.indexOf('.');\n"
+        "const up = tok.slice(0, dot + 1) + tok.slice(dot + 1).toUpperCase();\n"
+        "const r = envelope.verify(up, secret);\n"
+        "globalThis.__verdict = up === tok ? 1\n"
+        "  : (r[0] !== null || r[1] !== 'bad tag') ? 2\n"
+        "  : envelope.verify(tok, secret)[0] === null ? 3 : 0;\n");
+    EXPECT_EQ(v, 0);
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, auth_flows_origin_is_built_from_the_allowlist)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int v = run_verdict_module(
+        AF_INIT_JS
+        "authFlows.init(defaults());\n"
+        "const o = authFlows._test.originFor;\n"
+        "const req = h => ({ headers: h });\n"
+        "let step = 0;\n"
+        "if (o(req({host: 'app.example.com:8443'})) !== 'http://app.example.com:8443') step = 1;\n"
+        "else if (o(req({host: 'app.example.com:@evil.com'})) !== null) step = 2;\n"
+        "else if (o(req({host: 'evil.com/x'})) !== null) step = 3;\n"
+        "else if (o(req({host: 'app.example.com', 'x-forwarded-host': 'evil.com'})) !== 'http://app.example.com') step = 4;\n"
+        "if (!step) {\n"
+        "  const st = authFlows._test.state;\n"
+        "  st.trustRequestHost = false; st.trustedHosts = ['app.example.com'];\n"
+        "  if (o(req({host: 'app.example.com:@evil.com'})) !== null) step = 5;\n"
+        "  else if (o(req({host: 'app.example.com:8443'})) !== 'https://app.example.com:8443') step = 6;\n"
+        "  else if (o(req({host: 'evil.com'})) !== null) step = 7;\n"
+        "  else if (o(req({host: 'app.example.com:99999'})) !== null) step = 8;\n"
+        "  else {\n"
+        "    st.trustProxy = true;\n"
+        "    if (o(req({host: 'x', 'x-forwarded-host': 'app.example.com', 'x-forwarded-proto': 'javascript'})) !== 'https://app.example.com') step = 9;\n"
+        "  }\n"
+        "}\n"
+        "globalThis.__verdict = step;\n");
+    EXPECT_EQ(v, 0);
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, jwt_absolute_exp_is_kept)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int v = run_verdict_module(
+        "import { jwt } from 'hull:jwt';\n"
+        "const abs = 1900000000;\n"
+        "const p = jwt.verify(jwt.sign({ exp: abs }, 'mysecret'), 'mysecret')[0];\n"
+        "const r = jwt.verify(jwt.sign({ exp: 3600 }, 'mysecret'), 'mysecret')[0];\n"
+        "globalThis.__verdict = (!p || p.exp !== abs) ? 1\n"
+        "  : (!r || r.exp < 1000000000 || r.exp > abs) ? 2 : 0;\n");
+    EXPECT_EQ(v, 0);
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, template_filter_arg_refuses_backslash)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int v = run_verdict_module(
+        "import { template } from 'hull:template';\n"
+        "let msg = '';\n"
+        "try { template.renderString('{{ x | default: \"a\\\\\" | default: \"b\" }}', {}); }\n"
+        "catch (e) { msg = String(e && e.message); }\n"
+        "const ok = template.renderString('{{ x | default: \"b\" }}', {});\n"
+        "globalThis.__verdict = !msg.includes('invalid filter argument') ? 1\n"
+        "  : ok !== 'b' ? 2 : 0;\n");
+    EXPECT_EQ(v, 0);
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();

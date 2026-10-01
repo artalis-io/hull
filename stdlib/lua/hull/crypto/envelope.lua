@@ -63,6 +63,10 @@ function M.verify(token, secret)
     local body = token:sub(1, dot - 1)
     local tag  = token:sub(dot + 1)
 
+    -- Lowercase only, the form sign() writes: hex.decode accepts either
+    -- case, so "ABcd..." verified like "abcd..." and a single-use token
+    -- (keyed on its exact text) could be replayed once per case variant.
+    if tag:find("[^0-9a-f]") then return nil, "bad tag" end
     local mac = encoding.hex.decode(tag)
     if not mac or not crypto.hmac_sha256_verify(body, secret, mac) then
         return nil, "bad tag"

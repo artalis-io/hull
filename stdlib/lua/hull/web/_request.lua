@@ -15,9 +15,12 @@ local M = {}
 --
 -- With `trust_proxy` false (the safe default), returns the un-spoofable socket
 -- peer (`req.remote_addr`). With `trust_proxy` true - only correct behind a
--- trusted reverse proxy that sets it - returns the FIRST address of the
--- `X-Forwarded-For` chain (the original client), whitespace-trimmed, falling
--- back to the socket peer. Capped at 64 chars (IPv6 with headroom) so a hostile
+-- trusted reverse proxy - returns the LAST address of the `X-Forwarded-For`
+-- chain, whitespace-trimmed, falling back to the socket peer. Proxies append
+-- the peer they saw; everything to its left came from the client and is
+-- whatever the client wrote, so the first entry was spoofable (a fresh rate
+-- limit bucket per request). Behind more than one proxy layer, put the outer
+-- one in charge of the header (or strip it) so the last entry is the client. Capped at 64 chars (IPv6 with headroom) so a hostile
 -- multi-kilobyte XFF header can't land in an indexed column or a rate key.
 --
 -- @tparam table req            request object
@@ -28,9 +31,9 @@ function M.client_ip(req, trust_proxy)
     local ip
     local xff = req.headers["x-forwarded-for"]
     if trust_proxy and type(xff) == "string" and xff ~= "" then
-        local first = xff:match("^([^,]+)")
-        if first then
-            local trimmed = first:gsub("^%s+", ""):gsub("%s+$", "")
+        local last = xff:match("([^,]+)$")
+        if last then
+            local trimmed = last:gsub("^%s+", ""):gsub("%s+$", "")
             if trimmed ~= "" then ip = trimmed end
         end
     end

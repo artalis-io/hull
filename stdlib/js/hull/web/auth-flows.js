@@ -499,61 +499,53 @@ function userId(user) {
     return user.id || user.user_id || null;
 }
 
-// Round-9 HIGH-1: build a click-through URL origin from validated
-// sources only. publicOrigin (when set) wins unconditionally;
-// otherwise the request's host header must match a trustedHosts
-// entry exactly. See the Lua sibling for the threat model - a
-// hostile Host header pre-fix rerouted reset/magic-link tokens to
-// a phishing origin. Returns null when no valid origin can be
-// built; callers fall back to a generic-OK response (preserving
-// enumeration safety) without actually sending the link.
+// The request's host, strictly: X-Forwarded-Host only behind a trusted
+// proxy (a direct client sets any header it likes), its first entry, and
+// nothing but a hostname or bracketed IPv6 literal plus an optional numeric
+// port. Returns [host, port|null] - or null. Anything else (userinfo, a path,
+// percent-encoding) is refused, never trimmed into shape.
+function requestHost(headers) {
+    let raw = (_state.trustProxy && headers["x-forwarded-host"]) || headers.host;
+    if (typeof raw !== "string") return null;
+    const comma = raw.indexOf(",");
+    if (comma >= 0) raw = raw.substring(0, comma);
+    raw = raw.trim();
+    const m = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::(\d{1,5}))?$/.exec(raw);
+    if (!m) return null;
+    if (m[2] !== undefined && Number(m[2]) > 65535) return null;
+    return [m[1], m[2] === undefined ? null : m[2]];
+}
+
+// X-Forwarded-Proto behind a trusted proxy, and only "http" / "https".
+function requestProto(headers, dflt) {
+    if (_state.trustProxy) {
+        const p = headers["x-forwarded-proto"];
+        if (p === "http" || p === "https") return p;
+    }
+    return dflt;
+}
+
 function originFor(req) {
     if (_state.publicOrigin) return _state.publicOrigin;
     const headers = (req && req.headers) || {};
-    const rawHost = headers["x-forwarded-host"] || headers.host;
-    if (typeof rawHost !== "string") return null;
-    // Round-10 MEDIUM-6: normalize for allowlist comparison -
-    // strip comma-XFF chain to leftmost, strip :PORT suffix.
-    // Round-11 HIGH-3: IPv6 literals (`[::1]:8080`) - keep the
-    // bracketed literal whole. See Lua sibling for the bug.
-    let firstHost = rawHost;
-    const comma = firstHost.indexOf(",");
-    if (comma >= 0) firstHost = firstHost.substring(0, comma);
-    firstHost = firstHost.trim();
-    let bareHost = firstHost;
-    if (bareHost.charAt(0) === "[") {
-        const close = bareHost.indexOf("]");
-        if (close >= 0) {
-            bareHost = bareHost.substring(0, close + 1);
-        } else if (!_state.warnedMalformedIpv6) {
-            // Round-12 LOW-5: separate one-shot warn for malformed
-            // IPv6 so it doesn't consume the generic
-            // warnedHostMismatch slot. See Lua sibling.
-            _state.warnedMalformedIpv6 = true;
-            log.warn("auth-flows: malformed IPv6 literal in Host "
-                + "header (no closing ']'): '" + bareHost + "'. "
-                + "RFC 3986 requires IPv6 literals to be bracketed.");
-        }
-    } else {
-        const colon = bareHost.indexOf(":");
-        if (colon >= 0) bareHost = bareHost.substring(0, colon);
-    }
-    if (bareHost === "") return null;
-    if (_state.trustedHosts) {
+    // The URL is built from the MATCHED ALLOWLIST ENTRY plus the validated
+    // port - never from the header. "app.example.com:@evil.com" used to pass
+    // the allowlist (its host part, cut at ':', matched) and then became the
+    // link itself, sending reset and magic-link tokens to evil.com.
+    const hp = requestHost(headers);
+    const suffix = hp && hp[1] ? ":" + hp[1] : "";
+    if (hp && _state.trustedHosts) {
         for (let i = 0; i < _state.trustedHosts.length; i++) {
-            if (bareHost === _state.trustedHosts[i]) {
-                const proto = _state.trustProxy
-                    ? (headers["x-forwarded-proto"] || "https") : "https";
-                return proto + "://" + firstHost;
+            if (hp[0] === _state.trustedHosts[i]) {
+                return requestProto(headers, "https") + "://"
+                    + _state.trustedHosts[i] + suffix;
             }
         }
     }
-    if (_state.trustRequestHost) {
-        const proto = _state.trustProxy
-            ? (headers["x-forwarded-proto"] || "http") : "http";
-        return proto + "://" + firstHost;
+    if (hp && _state.trustRequestHost) {
+        return requestProto(headers, "http") + "://" + hp[0] + suffix;
     }
-    // Round-11 LOW-10: one-shot warn on first nil-return. See Lua
+    // Round-11 LOW-10: one-shot warn on first null-return. See Lua
     // sibling. Mute after the first hit so a hostile scanner can't
     // flood the log.
     if (!_state.warnedHostMismatch) {
@@ -561,12 +553,15 @@ function originFor(req) {
         const list = _state.trustedHosts
             ? _state.trustedHosts.join(", ")
             : "(none configured)";
-        log.warn("auth-flows: originFor refused host '"
-            + String(rawHost) + "' (normalized: '" + bareHost
-            + "'). trustedHosts = [" + list + "]. URL build "
+        const raw = String((_state.trustProxy && headers["x-forwarded-host"])
+                           || headers.host || "(nil)")
+            .slice(0, 200).replace(/[\x00-\x1f\x7f]/g, "?");
+        log.warn("auth-flows: originFor refused host '" + raw
+            + "'. trustedHosts = [" + list + "]. URL build "
             + "skipped; subsequent email sends will be silently "
             + "dropped until the host is added. Set publicOrigin "
-            + "or trustRequestHost: true to override.");
+            + "or trustRequestHost: true to override (behind a "
+            + "proxy that sets X-Forwarded-Host, set trustProxy).");
     }
     return null;
 }
@@ -768,9 +763,23 @@ function handleMagicLinkConsume(req, res) {
     }
     const user = _state.userGet(result[0].sub);
     if (!user) return secureHtml(res).status(400).html("magic link failed");
+    // Magic-link clicks count as proof of email ownership. On an account
+    // that was not yet verified, they also void the password: anyone could
+    // have registered this address and set it, and verifying here would
+    // hand them the owner's account. The owner sets one by reset; existing
+    // sessions go too (onPasswordReset, when the app wires it).
     if (!user.email_verified) {
         _state.userSetEmailVerified(userId(user), true);
+        _state.userSetPassword(userId(user), crypto.hashPassword(
+            encoding.hex.encode(crypto.random(32))));
         user.email_verified = true;
+        if (_state.onPasswordReset) {
+            try {
+                _state.onPasswordReset(req, res, user);
+            } catch (e) {
+                log.warn("auth-flows: onPasswordReset threw: " + (e && e.message ? e.message : e));
+            }
+        }
     }
     gcExpired();
     if (_state.enableTotp && _state.userTotpEnrolled(userId(user))) {
@@ -999,11 +1008,10 @@ function registerRoutes(app) {
         const rlOpts = typeof _state.loginRatelimit === "object"
             ? _state.loginRatelimit : {};
         // Per-IP key via the shared hull:web:_request helper
-        // (trustProxy -> leftmost XFF entry -> remote_addr). Using
-        // the whole XFF chain as the bucket key would let a client
-        // with rotating downstream proxies mint a new bucket per
-        // request; the leftmost entry pins it to the client the
-        // edge proxy observed. App-supplied opts.key still wins.
+        // (trustProxy -> the last XFF entry, the peer our proxy saw
+        // -> remote_addr). The client writes every entry to the left
+        // of it, so keying on those (or the whole chain) let a client
+        // mint a new bucket per request. App-supplied opts.key still wins.
         const mw = ratelimit.middleware({
             limit:  rlOpts.limit  || 20,
             window: rlOpts.window || 300,
@@ -1241,7 +1249,6 @@ function init(opts) {
     // hot-reload that fixes / changes the allowlist gets a fresh
     // diagnostic on the next bad host. See Lua sibling.
     _state.warnedHostMismatch = false;
-    _state.warnedMalformedIpv6 = false;
     if (opts.userSanitize !== undefined
         && typeof opts.userSanitize !== "function") {
         throw new Error("auth-flows.init: userSanitize must be a "
@@ -1360,6 +1367,8 @@ function sendMagicLink(email, magicUrlPrefix) {
 }
 
 const _test = {
+    originFor,
+    state: _state,
     issueToken,
     consumeToken,
     parseToken,
@@ -1380,7 +1389,6 @@ const _test = {
         _state.trustRequestHost = false;
         _state.userSanitize   = null;
         _state.warnedHostMismatch = false;
-        _state.warnedMalformedIpv6 = false;
         _state.templates      = {};
         _state.userFindByEmail      = null;
         _state.userGet              = null;

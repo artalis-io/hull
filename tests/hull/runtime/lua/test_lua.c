@@ -3369,6 +3369,60 @@ UTEST(lua_stdlib, crypto_envelope_failure_modes)
     ASSERT_EQ(ok, 1);
 }
 
+/* A token's tag is lowercase hex, the form sign() writes. hex.decode takes
+ * either case, so an upper-cased tag verified too - and a single-use token,
+ * keyed on its exact text, was replayable once per case variant. */
+UTEST(lua_stdlib, crypto_envelope_tag_is_lowercase_only)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int ok = eval_int(
+        "(function() "
+        "  local env = require('hull.crypto.envelope') "
+        "  local secret = ('bb'):rep(32) "
+        "  local tok = env.sign({x=1}, secret) "
+        "  local dot = tok:find('.', 1, true) "
+        "  local up = tok:sub(1, dot) .. tok:sub(dot + 1):upper() "
+        "  if up == tok then return 2 end "
+        "  local p, e = env.verify(up, secret) "
+        "  if p or e ~= 'bad tag' then return 0 end "
+        "  return env.verify(tok, secret) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+    cleanup_lua_caps();
+}
+
+/* Link origins: the Host header is parsed strictly and the URL is built from
+ * the allowlist entry, never from the header. "app.example.com:@evil.com"
+ * used to pass the allowlist and become the emailed link (token to evil.com).
+ * X-Forwarded-Host / -Proto count only behind a trusted proxy. */
+UTEST(lua_stdlib, auth_flows_origin_is_built_from_the_allowlist)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  local o = af._test.origin_for "
+        "  local function req(h) return { headers = h } end "
+        "  if o(req{host='app.example.com:8443'}) ~= 'http://app.example.com:8443' then return 1 end "
+        "  if o(req{host='app.example.com:@evil.com'}) ~= nil then return 2 end "
+        "  if o(req{host='evil.com/x'}) ~= nil then return 3 end "
+        "  if o(req{host='app.example.com', ['x-forwarded-host']='evil.com'}) ~= 'http://app.example.com' then return 4 end "
+        "  local st = af._test.state "
+        "  st.trust_request_host = false; st.trusted_hosts = { 'app.example.com' } "
+        "  if o(req{host='app.example.com:@evil.com'}) ~= nil then return 5 end "
+        "  if o(req{host='app.example.com:8443'}) ~= 'https://app.example.com:8443' then return 6 end "
+        "  if o(req{host='evil.com'}) ~= nil then return 7 end "
+        "  if o(req{host='app.example.com:99999'}) ~= nil then return 8 end "
+        "  st.trust_proxy = true "
+        "  if o(req{host='x', ['x-forwarded-host']='app.example.com', ['x-forwarded-proto']='javascript'}) ~= 'https://app.example.com' then return 9 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, auth_flows_token_round_trip)
 {
     init_lua_with_caps();
@@ -3796,6 +3850,27 @@ UTEST(lua_stdlib, jwt_sign_and_verify)
         "end)()");
     ASSERT_EQ(ok, 1);
 
+    cleanup_lua_caps();
+}
+
+/* An absolute exp stays absolute. The relative cutoff was 2e9, above the
+ * current time, so the standard exp = now + 3600 was taken as a duration and
+ * the token lived ~57 years. */
+UTEST(lua_stdlib, jwt_absolute_exp_is_kept)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int ok = eval_int(
+        "(function() "
+        "  local jwt = require('hull.jwt') "
+        "  local abs = 1900000000 "
+        "  local p = jwt.verify(jwt.sign({ exp = abs }, 'mysecret'), 'mysecret') "
+        "  if not p or p.exp ~= abs then return 0 end "
+        "  local r = jwt.verify(jwt.sign({ exp = 3600 }, 'mysecret'), 'mysecret') "
+        "  if not r or r.exp < 1000000000 or r.exp > abs then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
     cleanup_lua_caps();
 }
 

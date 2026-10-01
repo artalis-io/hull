@@ -40,6 +40,10 @@ function verify(token, secret) {
 
     // A tag that is not hex (or not a MAC's length) is simply a bad tag; the
     // comparison is constant-time.
+    // Lowercase only, the form sign() writes: hex.decode accepts either
+    // case, so "ABcd..." verified like "abcd..." and a single-use token
+    // (keyed on its exact text) could be replayed once per case variant.
+    if (/[^0-9a-f]/.test(tag)) return [null, "bad tag"];
     const mac = encoding.hex.decode(tag);
     if (mac === null || !crypto.hmacSha256Verify(body, secret, encoding.bytes.toU8(mac))) {
         return [null, "bad tag"];
