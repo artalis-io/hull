@@ -424,6 +424,25 @@ HlFsListSelection hl_fs_policy_select_list(const HlFsPolicy *policy,
  */
 int hl_fs_pattern_match(const char *pattern, size_t plen, const char *name, size_t nlen);
 
+struct ShSealArena;
+
+/**
+ * @brief Bytes a sealed copy of @p p needs (hl_fs_policy_copy_sealed).
+ */
+size_t hl_fs_policy_sealed_size(const HlFsPolicy *p);
+
+/**
+ * @brief A read-only copy of @p p, built in @p arena (not yet sealed).
+ *
+ * The cap layer reads the policy on every fs call, so it belongs in sealed
+ * memory: a heap write could otherwise widen a grant or retarget an entry.
+ * The copy ALIASES @p p's descriptors (base_fd, each anchor_fd) - @p p still
+ * owns them and closes them in hl_fs_policy_free - so free @p p only once
+ * nothing reads the copy. NULL if the arena runs out.
+ */
+const HlFsPolicy *hl_fs_policy_copy_sealed(const HlFsPolicy *p,
+                                           struct ShSealArena *arena);
+
 /*
  * Close every owned anchor/base fd and free the entry arrays via policy->alloc.
  * Safe on an HL_FS_POLICY_INIT policy and idempotent (post-call the policy is

@@ -793,9 +793,9 @@ UTEST(db_transport_alloc, block_from_embedder_allocator)
     char err[128] = {0};
     HlDbTransport *t = hl_db_transport_adopt("pg", &a, sv[0], NULL, err, sizeof err);
     ASSERT_TRUE(t != NULL);
-    ASSERT_TRUE(a.used > 0);                 /* the transport block came from &a */
+    ASSERT_TRUE(hl_alloc_used(&a) > 0);                 /* the transport block came from &a */
     ASSERT_EQ(hl_db_transport_close(t), 0);
-    ASSERT_EQ(a.used, (size_t)0);            /* the retained allocator freed it */
+    ASSERT_EQ(hl_alloc_used(&a), (size_t)0);            /* the retained allocator freed it */
     close(sv[1]);
 }
 

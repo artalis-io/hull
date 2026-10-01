@@ -10,6 +10,45 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ── Accounting (thread-safe) ──────────────────────────────────────── */
+
+/* Count @p size against the allocator, or refuse if that would pass the
+ * limit. Reserving BEFORE the allocation (and handing it back if malloc
+ * fails) makes check and add one step, so two threads cannot both pass the
+ * check for the last bytes under the limit. */
+static int account_reserve(HlAllocator *a, size_t size)
+{
+    size_t cur = atomic_load_explicit(&a->used, memory_order_relaxed);
+    for (;;) {
+        if (a->limit > 0 && (size > a->limit || cur > a->limit - size))
+            return -1;
+        if (atomic_compare_exchange_weak_explicit(&a->used, &cur, cur + size,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed))
+            break;
+    }
+    size_t now = cur + size;
+    size_t peak = atomic_load_explicit(&a->peak, memory_order_relaxed);
+    while (now > peak &&
+           !atomic_compare_exchange_weak_explicit(&a->peak, &peak, now,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed))
+        ;
+    return 0;
+}
+
+static void account_release(HlAllocator *a, size_t size)
+{
+    size_t cur = atomic_load_explicit(&a->used, memory_order_relaxed);
+    for (;;) {
+        size_t next = cur >= size ? cur - size : 0;
+        if (atomic_compare_exchange_weak_explicit(&a->used, &cur, next,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed))
+            return;
+    }
+}
+
 /* ── Tracked allocation functions ──────────────────────────────────── */
 
 void *hl_alloc_malloc(HlAllocator *a, size_t size)
@@ -17,15 +56,11 @@ void *hl_alloc_malloc(HlAllocator *a, size_t size)
     if (!a)
         return malloc(size);
 
-    if (a->limit > 0 && (size > a->limit || a->used > a->limit - size))
+    if (account_reserve(a, size) != 0)
         return NULL;
-
     void *p = malloc(size);
-    if (p) {
-        a->used += size;
-        if (a->used > a->peak)
-            a->peak = a->used;
-    }
+    if (!p)
+        account_release(a, size);
     return p;
 }
 
@@ -53,21 +88,17 @@ void *hl_alloc_realloc(HlAllocator *a, void *ptr,
 
     if (new_size > old_size) {
         size_t delta = new_size - old_size;
-        if (a->limit > 0 && (delta > a->limit || a->used > a->limit - delta))
+        if (account_reserve(a, delta) != 0)
             return NULL;
+        void *p = realloc(ptr, new_size);
+        if (!p)
+            account_release(a, delta);
+        return p;
     }
 
     void *p = realloc(ptr, new_size);
-    if (p) {
-        if (new_size > old_size) {
-            a->used += new_size - old_size;
-        } else {
-            size_t delta = old_size - new_size;
-            a->used = (a->used >= delta) ? a->used - delta : 0;
-        }
-        if (a->used > a->peak)
-            a->peak = a->used;
-    }
+    if (p)
+        account_release(a, old_size - new_size);
     return p;
 }
 
@@ -76,7 +107,7 @@ void hl_alloc_free(HlAllocator *a, void *ptr, size_t size)
     if (!ptr)
         return;
     if (a)
-        a->used = (a->used >= size) ? a->used - size : 0;
+        account_release(a, size);
     free(ptr);
 }
 
@@ -115,18 +146,12 @@ SHArena *hl_arena_create(HlAllocator *a, size_t capacity)
     if (capacity > SIZE_MAX - sizeof(SHArena))
         return NULL;
     size_t total = sizeof(SHArena) + capacity;
-    if (a && a->limit > 0 && (total > a->limit || a->used > a->limit - total))
+    if (a && account_reserve(a, total) != 0)
         return NULL;
 
     SHArena *arena = sh_arena_create(capacity);
-    if (!arena)
-        return NULL;
-
-    if (a) {
-        a->used += total;
-        if (a->used > a->peak)
-            a->peak = a->used;
-    }
+    if (!arena && a)
+        account_release(a, total);
     return arena;
 }
 
@@ -136,8 +161,7 @@ void hl_arena_free(HlAllocator *a, SHArena *arena)
         return;
 
     if (a) {
-        size_t total = sizeof(SHArena) + arena->capacity;
-        a->used = (a->used >= total) ? a->used - total : 0;
+        account_release(a, sizeof(SHArena) + arena->capacity);
     }
     sh_arena_free(arena);
 }

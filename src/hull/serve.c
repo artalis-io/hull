@@ -46,6 +46,7 @@
 #include "hull/net_backend.h"
 #include "hull/net/keel.h"
 #include "hull/cacert.h"
+#include "hull/cap/policy_seal.h"
 #include "hull/ca_trust.h"
 #include "hull/utils/csp.h"
 #include <sh_seal_arena.h>
@@ -684,6 +685,15 @@ typedef struct {
      * never get faulted in). */
     ShSealArena          seal_arena;
     int                  manifest_sealed; /* 1 after successful seal */
+    /* The sealed copy of the manifest STRUCT (in seal_arena): its pointer
+     * arrays and counts are the allowlists, so every lasting pointer into the
+     * manifest (cap configs, kv / ssh policy, the db registry) points here.
+     * `manifest` above is the pre-seal working value, read only while wiring. */
+    const HlManifest    *policy;
+    /* The cap configs the runtime reads per call, sealed at the end of
+     * wire_caps (policy_seal.h). */
+    ShSealArena          cfg_arena;
+    int                  cfg_sealed;
     HlResolvedModuleSet  module_set; /* frozen after resolver; consulted by gating */
     HlFsConfig           fs_cfg_storage;
     HlFsPolicy           fs_policy_storage; /* compiled fs authorization policy */
@@ -1261,7 +1271,7 @@ static int hl_serve_wire_caps(HlServerState *s)
             log_error("[hull:c] %s", ref_err);
             return -1;
         }
-        if (sh_seal_arena_init(&s->seal_arena, 16 * 1024,
+        if (sh_seal_arena_init(&s->seal_arena, 16 * 1024 + sizeof(HlManifest),
                                 "manifest-policy") != 0) {
             log_error("[hull:c] seal arena init failed (mmap)");
             return -1;
@@ -1278,6 +1288,12 @@ static int hl_serve_wire_caps(HlServerState *s)
          * for strings (the arena owns them; destroyed at shutdown). */
         hl_manifest_free(&s->manifest);
         s->manifest = sealed;
+        s->policy = sh_seal_arena_memdup(&s->seal_arena, &sealed, sizeof sealed);
+        if (!s->policy) {
+            log_error("[hull:c] seal arena alloc(manifest) failed");
+            sh_seal_arena_destroy(&s->seal_arena);
+            return -1;
+        }
 
         /* Point the connection registry at the now-sealed databases map so
          * db.connect("<name>") can resolve declared named connections. Until
@@ -1285,7 +1301,7 @@ static int hl_serve_wire_caps(HlServerState *s)
          * lives for the process, satisfying the registry's borrow. */
 #ifdef HL_ENABLE_DB
         if (rt->db_registry)
-            hl_db_registry_set_manifest(rt->db_registry, &s->manifest);
+            hl_db_registry_set_manifest(rt->db_registry, s->policy);
 #endif
 
         /* CORS config - build it INSIDE the seal arena alongside the
@@ -1491,17 +1507,22 @@ static int hl_serve_wire_caps(HlServerState *s)
     /* Wire the kv.open allowlist policy (manifest kv.dynamic). Borrowed pointer
      * into the sealed manifest; the cap validator reads ->declared and fails
      * closed when absent. */
-    rt->kv_policy = &s->manifest.kv.dynamic;
+    if (!s->policy) {
+        /* No manifest: the deny-everything policy, in read-only data. */
+        static const HlManifest no_manifest;
+        s->policy = &no_manifest;
+    }
+    rt->kv_policy = &s->policy->kv.dynamic;
 
     /* Wire the ssh.connect allowlist policy (manifest ssh). Same borrowed
      * pointer discipline as kv above; the check reads ->declared and fails
      * closed when absent. */
-    rt->ssh_policy = &s->manifest.ssh;
+    rt->ssh_policy = &s->policy->ssh;
 
     /* Wire env_cfg from manifest (if app declares env vars) */
     memset(&s->env_cfg_storage, 0, sizeof(s->env_cfg_storage));
     if (s->manifest.env_count > 0) {
-        s->env_cfg_storage.allowed = s->manifest.env;
+        s->env_cfg_storage.allowed = s->policy->env;
         s->env_cfg_storage.count   = s->manifest.env_count;
         rt->env_cfg = &s->env_cfg_storage;
     }
@@ -1546,9 +1567,14 @@ static int hl_serve_wire_caps(HlServerState *s)
             rt->client_tls         = &s->client_tls;
         }
     }
+    /* The anchor is final: seal it before any connection reads it. */
+    if (hl_ca_bundle_seal_active() != 0) {
+        log_error("[hull:c] could not seal the CA trust anchor");
+        return -1;
+    }
 
     if (s->manifest.hosts_count > 0) {
-        s->http_cfg_storage.allowed_hosts     = s->manifest.hosts;
+        s->http_cfg_storage.allowed_hosts     = s->policy->hosts;
         s->http_cfg_storage.count             = s->manifest.hosts_count;
         s->http_cfg_storage.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
         s->http_cfg_storage.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
@@ -1570,7 +1596,7 @@ static int hl_serve_wire_caps(HlServerState *s)
     /* Wire smtp_cfg - shares same host allowlist and TLS context as HTTP */
     memset(&s->smtp_cfg_storage, 0, sizeof(s->smtp_cfg_storage));
     if (s->manifest.hosts_count > 0) {
-        s->smtp_cfg_storage.allowed_hosts = s->manifest.hosts;
+        s->smtp_cfg_storage.allowed_hosts = s->policy->hosts;
         s->smtp_cfg_storage.host_count    = s->manifest.hosts_count;
         s->smtp_cfg_storage.timeout_ms    = HL_SMTP_DEFAULT_TIMEOUT_MS;
         s->smtp_cfg_storage.tls           = s->client_tls_ctx ? &s->client_tls_config : NULL;
@@ -1601,6 +1627,14 @@ static int hl_serve_wire_caps(HlServerState *s)
     }
 #endif
 
+    /* Every cap config is wired: copy them into sealed memory and point the
+     * runtime there (policy_seal.h). Fatal like every other policy seal. */
+    if (hl_policy_seal_cap_configs(rt, &s->cfg_arena) != 0) {
+        log_error("[hull:c] could not seal the capability configs");
+        return -1;
+    }
+    s->cfg_sealed = 1;
+
     return 0;
 }
 
@@ -1618,14 +1652,10 @@ static void hl_serve_undo_caps(HlServerState *s)
         hl_tls_ctx_destroy(s->client_tls_ctx);
         s->client_tls_ctx = NULL;
     }
-    /* Sealed manifest arena: LAST. The TLS ctx destroyed above (and
-     * any other cap-config consumer added in the future) may alias
-     * manifest string pointers; unmapping the arena earlier turns
-     * those aliases into faults. */
-    if (s->manifest_sealed) {
-        sh_seal_arena_destroy(&s->seal_arena);
-        s->manifest_sealed = 0;
-    }
+    /* The sealed manifest arena is NOT unmapped here: hl_serve_cleanup,
+     * which always runs after this, still frees the pool and the server
+     * while rt->module_set and the cap configs point into it. It is
+     * destroyed last, at the end of hl_serve_cleanup. */
 }
 
 /* Map a database DSN to the local filesystem path the kernel sandbox must gate,
@@ -1888,15 +1918,9 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
         s->server_tls_ctx = NULL;
     }
 
-    /* Sealed manifest arena: LAST to be destroyed. Every consumer
-     * above (runtime / cap configs / WASM cache GC finalizers / TLS
-     * contexts that may have manifest-host pointers) has aliased
-     * pointers into this mapping; munmapping it earlier turns those
-     * aliases into faults. */
-    if (s->manifest_sealed) {
-        sh_seal_arena_destroy(&s->seal_arena);
-        s->manifest_sealed = 0;
-    }
+    /* The sealed manifest arena is unmapped at the end of
+     * hl_serve_cleanup (always run after this), not here: the pool and
+     * the server it frees first still alias policy in the arena. */
 }
 
 /* Build a NULL-terminated env_allowlist from the manifest. The returned
@@ -2116,9 +2140,14 @@ static void hl_serve_cleanup(HlServerState *s)
      * manifest.hosts) and TLS contexts alias the sealed strings;
      * unmapping the arena earlier would turn those aliases into
      * faults during runtime/server cleanup above. */
+    if (s->cfg_sealed) {
+        sh_seal_arena_destroy(&s->cfg_arena);
+        s->cfg_sealed = 0;
+    }
     if (s->manifest_sealed) {
         sh_seal_arena_destroy(&s->seal_arena);
         s->manifest_sealed = 0;
+        s->policy = NULL;
     }
 
     log_debug("[hull:c] peak memory: %zu bytes", hl_alloc_peak(&s->alloc));

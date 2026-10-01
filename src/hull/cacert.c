@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include "hull/cacert.h"
+#include <sh_seal_arena.h>
 
 #ifdef HL_EMBED_CA_BUNDLE
 #include "embedded_cacert.h"
@@ -91,8 +92,24 @@ static unsigned char       *g_active_owned;
 static unsigned char *g_retired[HL_CA_RETIRED_MAX];
 static int            g_retired_n;
 
+/* The SEALED anchor (see hl_ca_bundle_seal_active): the descriptor - and the
+ * bytes, when they were a heap copy - in a read-only arena. Once set, it is
+ * all hl_ca_bundle_active reads, and no publish changes it. */
+typedef struct {
+    int                  set;
+    const unsigned char *data;
+    size_t               len;
+} CaAnchor;
+
+static ShSealArena     g_seal_arena;
+static const CaAnchor *g_sealed;
+
 void hl_ca_bundle_reset_active(void)
 {
+    if (g_sealed) {
+        sh_seal_arena_destroy(&g_seal_arena);
+        g_sealed = NULL;
+    }
     free(g_active_owned);
     for (int i = 0; i < g_retired_n; i++) free(g_retired[i]);
     g_retired_n    = 0;
@@ -104,6 +121,12 @@ void hl_ca_bundle_reset_active(void)
 
 void hl_ca_bundle_set_active(const unsigned char *data, size_t len, int owned)
 {
+    if (g_sealed) {
+        /* Startup is over; nothing may swap the anchor now. */
+        fprintf(stderr, "[hull:c] CA anchor publish refused: already sealed\n");
+        if (owned) free((void *)(uintptr_t)data);
+        return;
+    }
     if (g_active_owned && g_retired_n < HL_CA_RETIRED_MAX)
         g_retired[g_retired_n++] = g_active_owned;
     g_active_owned = NULL;
@@ -116,13 +139,47 @@ void hl_ca_bundle_set_active(const unsigned char *data, size_t len, int owned)
 int hl_ca_bundle_active(const unsigned char **data, size_t *len)
 {
     if (!data || !len) return -1;
-    if (!g_active_set) return hl_embedded_ca_bundle(data, len);
-    if (!g_active_data || g_active_len == 0) {
+    int                  set = g_sealed ? g_sealed->set  : g_active_set;
+    const unsigned char *d   = g_sealed ? g_sealed->data : g_active_data;
+    size_t               n   = g_sealed ? g_sealed->len  : g_active_len;
+    if (!set) return hl_embedded_ca_bundle(data, len);
+    if (!d || n == 0) {
         *data = NULL;
         *len  = 0;
         return -1;
     }
-    *data = g_active_data;
-    *len  = g_active_len;
+    *data = d;
+    *len  = n;
+    return 0;
+}
+
+int hl_ca_bundle_seal_active(void)
+{
+    if (g_sealed) return 0;   /* nothing can have changed since */
+
+    /* A heap anchor (--ca-bundle, the system store) is copied in; the
+     * embedded one is .rodata already and is only pointed at. */
+    size_t copy = g_active_owned ? g_active_len : 0;
+    if (sh_seal_arena_init(&g_seal_arena, sizeof(CaAnchor) + copy + 64,
+                           "hull-ca-anchor") != 0)
+        return -1;
+    CaAnchor *a = sh_seal_arena_alloc(&g_seal_arena, sizeof *a,
+                                      _Alignof(CaAnchor));
+    unsigned char *bytes = copy
+        ? sh_seal_arena_memdup(&g_seal_arena, g_active_data, copy) : NULL;
+    if (!a || (copy && !bytes)) {
+        sh_seal_arena_destroy(&g_seal_arena);
+        return -1;
+    }
+    a->set  = g_active_set;
+    a->data = copy ? bytes : g_active_data;
+    a->len  = g_active_len;
+    if (sh_seal_arena_seal(&g_seal_arena) != 0) {
+        sh_seal_arena_destroy(&g_seal_arena);
+        return -1;
+    }
+    /* The heap copy stays allocated (retired): a connection that read the
+     * pointer just before this may still be parsing it. Freed by reset. */
+    g_sealed = a;
     return 0;
 }

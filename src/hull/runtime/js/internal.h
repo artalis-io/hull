@@ -54,6 +54,13 @@ typedef struct HlJsWorkerDispatchOp {
     HlKV         *ctx_kvs;
     int           ctx_count;
 
+    /* The app's own limits, applied to the worker VM (0 = none), and
+     * whether it declared hull/db (the worker `db` global). */
+    size_t        max_heap_bytes;
+    size_t        max_stack_bytes;
+    int64_t       max_instructions;
+    int           with_db;
+
     /* Output (set by worker thread) */
     int           result_kind;
     int64_t       result_int;

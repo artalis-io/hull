@@ -20,8 +20,13 @@
 #include "utest.h"
 #include "hull/cacert.h"
 
+#include <signal.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 UTEST(cacert, accessor_null_args_safe)
 {
@@ -165,5 +170,59 @@ UTEST(cacert, no_usable_anchor_fails_closed)
     hl_ca_bundle_reset_active();
 }
 
+
+UTEST(cacert, a_sealed_anchor_is_a_read_only_copy)
+{
+    /* A heap anchor (--ca-bundle, the system store) is copied into the seal:
+     * the active bytes are no longer the heap buffer a write could extend. */
+    static const char pem[] = "-----BEGIN CERTIFICATE-----\n";
+    unsigned char *owned = malloc(sizeof pem);
+    ASSERT_TRUE(owned != NULL);
+    memcpy(owned, pem, sizeof pem);
+    hl_ca_bundle_reset_active();
+    hl_ca_bundle_set_active(owned, sizeof pem, 1);
+    ASSERT_EQ(hl_ca_bundle_seal_active(), 0);
+    ASSERT_EQ(hl_ca_bundle_seal_active(), 0);          /* idempotent */
+
+    const unsigned char *a = NULL;
+    size_t alen = 0;
+    ASSERT_EQ(hl_ca_bundle_active(&a, &alen), 0);
+    ASSERT_TRUE(a != owned);
+    ASSERT_EQ(alen, sizeof pem);
+    ASSERT_EQ(memcmp(a, pem, sizeof pem), 0);
+
+    /* Startup is over: a later publish does not replace it. */
+    static const unsigned char other[] = "-----BEGIN OTHER-----\n";
+    hl_ca_bundle_set_active(other, sizeof other, 0);
+    ASSERT_EQ(hl_ca_bundle_active(&a, &alen), 0);
+    ASSERT_EQ(memcmp(a, pem, sizeof pem), 0);
+
+    /* And the bytes are on a sealed page: a write faults. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGSEGV, SIG_DFL);   /* not a sanitizer's handler */
+        signal(SIGBUS,  SIG_DFL);
+        ((volatile unsigned char *)(uintptr_t)a)[0] = 'X';
+        _exit(0);
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    ASSERT_TRUE(WIFSIGNALED(status));
+    int sig = WTERMSIG(status);
+    ASSERT_TRUE(sig == SIGSEGV || sig == SIGBUS);
+    hl_ca_bundle_reset_active();
+}
+
+UTEST(cacert, an_unpublished_anchor_seals_as_the_embedded_default)
+{
+    hl_ca_bundle_reset_active();
+    ASSERT_EQ(hl_ca_bundle_seal_active(), 0);
+    const unsigned char *a = NULL, *e = NULL;
+    size_t alen = 0, elen = 0;
+    ASSERT_EQ(hl_ca_bundle_active(&a, &alen), hl_embedded_ca_bundle(&e, &elen));
+    ASSERT_TRUE(a == e);
+    hl_ca_bundle_reset_active();
+}
 
 UTEST_MAIN()

@@ -174,13 +174,17 @@ HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
         if (hl_ca_bundle_active(&cab, &cab_len) == 0) {
             ctx = kl_tls_mbedtls_client_ctx_create_from_buf(cab, cab_len, alloc);
         } else {
-            /* Only when --ca-bundle failed to load. Said once, here: the
-             * callers can only report a failed handshake, which reads like a
-             * network or certificate problem. */
+            /* A --ca-bundle that failed to load, or a build without the
+             * embedded bundle (HL_EMBED_CA_BUNDLE=0) where nothing was
+             * published. Said once, here: the callers can only report a
+             * failed handshake, which reads like a network or certificate
+             * problem. */
             static atomic_flag said = ATOMIC_FLAG_INIT;
             if (!atomic_flag_test_and_set(&said))
-                log_error("[hull:tls] no CA anchor: the --ca-bundle file did "
-                          "not load, so verified TLS connections are refused");
+                log_error("[hull:tls] no CA anchor available (the --ca-bundle "
+                          "file did not load, or this build has no embedded "
+                          "bundle and none was found), so verified TLS "
+                          "connections are refused");
         }
     } else {
         ctx = kl_tls_mbedtls_client_ctx_create(NULL, alloc);

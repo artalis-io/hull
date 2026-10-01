@@ -6,10 +6,12 @@
  * it into an HlSandboxPolicy, applies the kernel sandbox, and seals the
  * one datum the capability layer reads on every call - the filesystem
  * base directory (HlFsConfig.base_dir) - into a page-backed read-only
- * arena (sh_seal_arena). After a successful seal there is no writable
- * alias of that path left in the process, so an arbitrary-write primitive
- * cannot repoint the app's filesystem root. See docs/security.md §4b and
- * the c-audit §5b sealed-runtime-table rules.
+ * arena (sh_seal_arena). After a successful seal the path's BYTES are
+ * read-only, so a write cannot rewrite the app's filesystem root in place.
+ * The HlFsConfig holding the pointer lives in this (heap) handle and stays
+ * writable: repointing it at a forged path is still possible, it just takes
+ * more than a byte write. See docs/security.md §4b and the c-audit §5b
+ * sealed-runtime-table rules.
  *
  * Fail-closed: the fs capability calls refuse to run until the handle is
  * SEALED, and hl_embed_seal marks SEALED only after BOTH the arena seal

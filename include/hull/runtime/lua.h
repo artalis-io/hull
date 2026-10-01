@@ -155,6 +155,8 @@ typedef int (*HlLuaWorkerInitFn)(lua_State *L);
 
 /* Register an init hook for worker Lua VMs. Call before workers spawn. */
 void hl_lua_worker_register_init(HlLuaWorkerInitFn fn);
+/* Registered hooks install the worker `db` global, so a dispatch runs them
+ * only when the app declared hull/db (op->with_db). */
 
 /*
  * HlLuaWorkerDispatchOp + the hl_lua_worker_dispatch_* functions and
