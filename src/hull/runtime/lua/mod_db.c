@@ -96,6 +96,11 @@ static int lua_to_hl_values(lua_State *L, int idx,
     if (!lua || !lua->scratch)
         return -1;
 
+    /* Every value stays on the stack (it keeps its string alive), so room
+     * for all of them first: past the free slots it wrote out of bounds. */
+    if (!lua_checkstack(L, len))
+        return -1;
+
     HlValue *params = sh_arena_calloc(lua->scratch, (size_t)len, sizeof(HlValue));
     if (!params)
         return -1;
@@ -354,10 +359,14 @@ static int lua_db_batch(lua_State *L)
     lua_pushvalue(L, 1); /* push the function */
     int rc = lua_pcall(L, 0, 0, 0);
 
+    /* Resolve again: fn may have closed a db.open handle, freeing h. */
+    h = db_call_handle(L);
     if (rc != LUA_OK) {
-        hl_db_rollback(h);
+        if (h) hl_db_rollback(h);
         return lua_error(L); /* re-raise the error */
     }
+    if (!h)
+        return luaL_error(L, "db.batch: the connection was closed inside the batch");
 
     if (hl_db_commit(h) != 0) {
         hl_db_rollback(h);
@@ -384,7 +393,9 @@ static const char **lua_strings_from_array(lua_State *L, int idx, int *out_n,
         luaL_error(L, "expected array of strings at arg %d", idx);
         return NULL;
     }
-    int n = (int)luaL_len(L, idx);
+    /* Raw length, no __len: a metamethod is app code, and app code
+     * running here could drop the strings already taken. */
+    int n = (int)lua_rawlen(L, idx);
     if (n < 0) {
         luaL_error(L, "negative array length at arg %d", idx);
         return NULL;
@@ -417,7 +428,7 @@ static HlValue *lua_values_from_array(lua_State *L, int idx, int *out_n,
         luaL_error(L, "expected values array at arg %d", idx);
         return NULL;
     }
-    int n = (int)luaL_len(L, idx);
+    int n = (int)lua_rawlen(L, idx);
     HlValue *vals = sh_arena_alloc(lua->scratch, (size_t)n * sizeof(*vals));
     if (!vals) {
         luaL_error(L, "out of memory");
@@ -813,7 +824,9 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     if (!ctx->detached &&
         hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
         op->cancelled = 1;
-        ctx->cont->cancel(ctx->cont);
+        /* No cancel(): it unrefs the handler coroutine's registry slot,
+         * which dispatch unrefs again when this error reaches it - a
+         * double luaL_unref corrupts the registry free list. */
         ctx->cont->destroy(ctx->cont);
         ctx->cont = NULL;
         return luaL_error(L, "db.async: failed to suspend connection");

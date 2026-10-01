@@ -15,7 +15,7 @@
 
 /* Forward declaration */
 static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
-                                    HlGpuTextureDesc *out, int max);
+                                    HlGpuTextureDesc *out, int max, int anchor);
 
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
@@ -178,6 +178,9 @@ static int l_gpu_dispatch(lua_State *L)
     HlGpuCtx *ctx = lua_get_gpu_ctx(L);
     const char *name = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);
+    lua_settop(L, 2);
+    lua_newtable(L);                 /* anchor: see hl_lua_anchor */
+    const int anchor = lua_gettop(L);
 
     HlGpuDispatchOpts opts;
     memset(&opts, 0, sizeof(opts));
@@ -232,6 +235,7 @@ static int l_gpu_dispatch(lua_State *L)
     lua_getfield(L, 2, "uniforms");
     if (lua_isstring(L, -1)) {
         opts.uniforms = lua_tolstring(L, -1, &opts.uniforms_len);
+        hl_lua_anchor(L, anchor, -1);
     }
     lua_pop(L, 1);
 
@@ -248,12 +252,14 @@ static int l_gpu_dispatch(lua_State *L)
             if (lua_istable(L, -1)) {
                 lua_getfield(L, -1, "name");
                 bufs[i].name = lua_tostring(L, -1);
+                hl_lua_anchor(L, anchor, -1);
                 lua_pop(L, 1);
 
                 lua_getfield(L, -1, "data");
                 {
                     HlBufferView bv;
                     if (lua_get_buffer(L, -1, &bv)) {
+                        hl_lua_anchor(L, anchor, -1);
                         bufs[i].data = bv.data;
                         bufs[i].data_len = bv.len;
                         bufs[i].size = bv.len;
@@ -293,7 +299,8 @@ static int l_gpu_dispatch(lua_State *L)
     HlGpuTextureDesc tex_descs[8];
     memset(tex_descs, 0, sizeof(tex_descs));
     lua_getfield(L, 2, "textures");
-    int tex_count = lua_parse_texture_descs(L, lua_gettop(L), tex_descs, 8);
+    int tex_count = lua_parse_texture_descs(L, lua_gettop(L), tex_descs, 8,
+                                            anchor);
     lua_pop(L, 1);
     opts.textures = tex_descs;
     opts.texture_count = tex_count;
@@ -639,7 +646,8 @@ static int l_gpu_texture_read(lua_State *L)
 /* ── Texture desc parsing helper (used by dispatch + pipeline) ────── */
 
 static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
-                                    HlGpuTextureDesc *descs, int max_descs)
+                                    HlGpuTextureDesc *descs, int max_descs,
+                                    int anchor)
 {
     if (!lua_istable(L, tbl_idx))
         return 0;
@@ -653,6 +661,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
 
             lua_getfield(L, -1, "name");
             descs[i].name = lua_tostring(L, -1);
+            hl_lua_anchor(L, anchor, -1);
             lua_pop(L, 1);
 
             lua_getfield(L, -1, "storage");
@@ -678,6 +687,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
             HlImage **imgp2 = (HlImage **)luaL_testudata(L, -1, HL_IMAGE_MT);
             if (imgp2 && *imgp2) {
                 HlImage *img = *imgp2;
+                hl_lua_anchor(L, anchor, -1);   /* the image owns pixels */
                 descs[i].data = img->pixels;
                 descs[i].data_len = img->pixel_len;
                 if (descs[i].width == 0) descs[i].width = img->width;
@@ -691,6 +701,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
                 lua_getfield(L, -1, "data");
                 HlBufferView bv;
                 if (lua_get_buffer(L, -1, &bv)) {
+                    hl_lua_anchor(L, anchor, -1);
                     descs[i].data = bv.data;
                     descs[i].data_len = bv.len;
                 }
@@ -908,7 +919,9 @@ static int l_gpu_async_dispatch(lua_State *L)
     if (!actx->detached &&
         hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
-        actx->cont->cancel(actx->cont);
+        /* No cancel(): it unrefs the handler coroutine's registry slot,
+         * which dispatch unrefs again when this error reaches it - a
+         * double luaL_unref corrupts the registry free list. */
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;
         return luaL_error(L, "gpu.async.dispatch: failed to suspend connection");
@@ -927,7 +940,7 @@ static int l_gpu_async_dispatch(lua_State *L)
 static int parse_pipeline_stages(lua_State *L, int tbl_idx,
                                   HlGpuPipelineStage *stages, int max_stages,
                                   HlGpuBufferDesc *all_bufs, int max_bufs,
-                                  int *total_bufs)
+                                  int *total_bufs, int anchor)
 {
     int stage_count = (int)lua_rawlen(L, tbl_idx);
     if (stage_count > max_stages) stage_count = max_stages;
@@ -947,6 +960,7 @@ static int parse_pipeline_stages(lua_State *L, int tbl_idx,
         /* shader (required) */
         lua_getfield(L, -1, "shader");
         stages[s].shader = lua_tostring(L, -1);
+        hl_lua_anchor(L, anchor, -1);
         lua_pop(L, 1);
 
         /* workgroups */
@@ -968,6 +982,7 @@ static int parse_pipeline_stages(lua_State *L, int tbl_idx,
         lua_getfield(L, -1, "uniforms");
         if (lua_isstring(L, -1))
             stages[s].uniforms = lua_tolstring(L, -1, &stages[s].uniforms_len);
+        hl_lua_anchor(L, anchor, -1);
         lua_pop(L, 1);
 
         /* buffers */
@@ -984,11 +999,13 @@ static int parse_pipeline_stages(lua_State *L, int tbl_idx,
                 if (lua_istable(L, -1)) {
                     lua_getfield(L, -1, "name");
                     all_bufs[buf_offset + b].name = lua_tostring(L, -1);
+                    hl_lua_anchor(L, anchor, -1);
                     lua_pop(L, 1);
                     lua_getfield(L, -1, "data");
                     {
                         HlBufferView bv;
                         if (lua_get_buffer(L, -1, &bv)) {
+                            hl_lua_anchor(L, anchor, -1);
                             all_bufs[buf_offset + b].data = bv.data;
                             all_bufs[buf_offset + b].data_len = bv.len;
                             all_bufs[buf_offset + b].size = bv.len;
@@ -1026,6 +1043,9 @@ static int parse_pipeline_stages(lua_State *L, int tbl_idx,
 
 static int l_gpu_pipeline(lua_State *L)
 {
+    lua_settop(L, 2);                /* opts may be absent: keep slot 2 */
+    lua_newtable(L);                 /* anchor: see hl_lua_anchor */
+    const int anchor = lua_gettop(L);
     HlGpuCtx *ctx = lua_get_gpu_ctx(L);
     luaL_checktype(L, 1, LUA_TTABLE); /* stages array */
 
@@ -1035,7 +1055,7 @@ static int l_gpu_pipeline(lua_State *L)
     int total_bufs = 0;
     int stage_count = parse_pipeline_stages(L, 1, stages,
         HL_GPU_MAX_PIPELINE_STAGES, all_bufs, HL_GPU_MAX_PIPELINE_BUFFERS,
-        &total_bufs);
+        &total_bufs, anchor);
 
     if (stage_count <= 0) {
         lua_pushnil(L);
@@ -1170,6 +1190,9 @@ static void lua_push_worker_gpu_pipeline_result(lua_State *L, void *driver)
 static int l_gpu_async_pipeline(lua_State *L)
 {
     hl_lua_check_can_wait(L, "gpu.async.pipeline()");   /* before anything is armed */
+    lua_settop(L, 2);                /* opts may be absent: keep slot 2 */
+    lua_newtable(L);                 /* anchor: see hl_lua_anchor */
+    const int anchor = lua_gettop(L);
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "gpu.async not available (no thread pool)");
@@ -1186,7 +1209,7 @@ static int l_gpu_async_pipeline(lua_State *L)
     int total_bufs = 0;
     int stage_count = parse_pipeline_stages(L, 1, stages,
         HL_GPU_MAX_PIPELINE_STAGES, all_bufs, HL_GPU_MAX_PIPELINE_BUFFERS,
-        &total_bufs);
+        &total_bufs, anchor);
     if (stage_count <= 0)
         return luaL_error(L, "gpu.async.pipeline: empty pipeline");
 
@@ -1356,7 +1379,9 @@ static int l_gpu_async_pipeline(lua_State *L)
     if (!actx->detached &&
         hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
-        actx->cont->cancel(actx->cont);
+        /* No cancel(): it unrefs the handler coroutine's registry slot,
+         * which dispatch unrefs again when this error reaches it - a
+         * double luaL_unref corrupts the registry free list. */
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;
         return luaL_error(L, "gpu.async.pipeline: failed to suspend");

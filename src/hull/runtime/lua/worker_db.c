@@ -46,6 +46,10 @@ static int worker_lua_to_hl_values(lua_State *L, int idx,
     if ((size_t)len > SIZE_MAX / sizeof(HlValue))
         return -1;
 
+    /* Every value stays on the stack: room for all of them first. */
+    if (!lua_checkstack(L, len))
+        return -1;
+
     HlValue *params = calloc((size_t)len, sizeof(HlValue));
     if (!params)
         return -1;

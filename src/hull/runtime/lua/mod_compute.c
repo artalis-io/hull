@@ -568,7 +568,9 @@ static int lua_compute_async_call(lua_State *L)
                               (HlReqHandle *)lua->active_conn,
                               (HlSuspendOp *)&ctx->op) < 0) {
             op->cancelled = 1;
-            ctx->cont->cancel(ctx->cont);
+            /* No cancel(): it unrefs the handler coroutine's registry slot,
+             * which dispatch unrefs again when this error reaches it - a
+             * double luaL_unref corrupts the registry free list. */
             ctx->cont->destroy(ctx->cont);
             ctx->cont = NULL;
             return luaL_error(L,
@@ -816,9 +818,13 @@ static int lua_wasm_inst_async_call(lua_State *L)
 
     if (!ctx->detached &&
         hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
-        atomic_store(&pi->busy, 0);
+        /* busy stays set: the job is already on a worker, and its done /
+         * cancel callback clears it. Clearing it here let close() or GC free
+         * the instance while the worker still ran on it. */
         op->cancelled = 1;
-        ctx->cont->cancel(ctx->cont);
+        /* No cancel(): it unrefs the handler coroutine's registry slot,
+         * which dispatch unrefs again when this error reaches it - a
+         * double luaL_unref corrupts the registry free list. */
         ctx->cont->destroy(ctx->cont);
         ctx->cont = NULL;
         return luaL_error(L, "WasmInstance:async_call: failed to suspend");
