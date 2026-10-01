@@ -109,4 +109,48 @@ UTEST(hl_audit, escaping)
     hl_audit_enabled = 0;
 }
 
+/* A record too long for the buffer is replaced by a short, complete one, and
+ * the record after it still gets its own line: a cut record used to lose its
+ * closing brace and newline, joining the next record into one bad line. */
+UTEST(hl_audit, oversized_record_stays_one_line)
+{
+    int pipefd[2];
+    ASSERT_EQ(pipe(pipefd), 0);
+    int saved_stderr = dup(STDERR_FILENO);
+    ASSERT_NE(saved_stderr, -1);
+    dup2(pipefd[1], STDERR_FILENO);
+    hl_audit_enabled = 1;
+
+    static char big[6000];
+    memset(big, 'a', sizeof big - 1);
+    big[sizeof big - 1] = '\0';
+    ShJsonWriter w = hl_audit_begin("http.fetch");
+    sh_json_write_kv_string(&w, "url", big);
+    hl_audit_end(&w);
+    ShJsonWriter w2 = hl_audit_begin("next.event");
+    sh_json_write_kv_string(&w2, "ok", "yes");
+    hl_audit_end(&w2);
+
+    fflush(stderr);
+    dup2(saved_stderr, STDERR_FILENO);
+    close(saved_stderr);
+    close(pipefd[1]);
+    char buf[2048];
+    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    close(pipefd[0]);
+    hl_audit_enabled = 0;
+    ASSERT_GT(n, 0);
+    buf[n] = '\0';
+
+    const char *first = "{\"cap\":\"http.fetch\",\"truncated\":true}\n";
+    ASSERT_EQ(0, strncmp(buf, first, strlen(first)));
+    const char *second = buf + strlen(first);
+    EXPECT_EQ(0, strncmp(second, "{\"ts\":", 6));
+    EXPECT_TRUE(strstr(second, "\"cap\":\"next.event\"") != NULL);
+    char *nl = strchr(second, '\n');
+    ASSERT_TRUE(nl != NULL);
+    EXPECT_EQ('}', nl[-1]);
+    EXPECT_EQ('\0', nl[1]);
+}
+
 UTEST_MAIN()

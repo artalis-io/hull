@@ -157,4 +157,13 @@ void hl_js_request_register(JSContext *ctx);
 void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
                                       struct KlHttpBodyReader *body_reader);
 
+/* Make the four code-compiling constructors unreachable from script. Deleting
+ * the `Function` global is not enough: (() => 0).constructor is Function, and
+ * the async / generator / async-generator prototypes reach their own
+ * constructors the same way, each of which compiles a string into code. Each
+ * prototype's `constructor` is replaced by a non-writable, non-configurable
+ * stub with the same name that throws. Returns 0, or -1 if it could not. Used
+ * by the main runtime and the worker VMs. */
+int hl_js_poison_code_constructors(JSContext *ctx);
+
 #endif /* HL_RUNTIME_JS_INTERNAL_H */

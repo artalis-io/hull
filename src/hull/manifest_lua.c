@@ -119,6 +119,11 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                          out->env,
                                          HL_MANIFEST_MAX_ENVS, alloc);
 
+    /* secrets = {"DATABASE_URL", ...}: names a "$VAR" may read, not env.get */
+    out->secrets_count = read_string_array(L, manifest_idx, "secrets",
+                                             out->secrets,
+                                             HL_MANIFEST_MAX_SECRETS, alloc);
+
     /* hosts = {"api.stripe.com", ...} */
     out->hosts_count = read_string_array(L, manifest_idx, "hosts",
                                            out->hosts,

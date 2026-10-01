@@ -101,8 +101,21 @@ static char *hl_js_module_normalize(JSContext *ctx,
     if (!name) return NULL;
 
     /* hull:* modules are already normalized */
-    if (strncmp(name, "hull:", 5) == 0)
+    if (strncmp(name, "hull:", 5) == 0) {
+        /* A segment starting with '_' (hull:_template, hull:kv:_native, ...)
+         * is the stdlib's own plumbing: it bypasses the module declaration
+         * gate, and hull:_template compiles strings into code. Only another
+         * hull: module may import one, once the app's module set is wired -
+         * the point from which declarations are enforced at all. */
+        HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+        if (js && js->base.module_set && strstr(name, ":_") &&
+            strncmp(base_name ? base_name : "", "hull:", 5) != 0) {
+            JS_ThrowReferenceError(ctx,
+                "module '%s' is internal to the Hull stdlib", name);
+            return NULL;
+        }
         return js_strdup(ctx, name);
+    }
 
     /* Reject path traversal */
     if (hl_js_validate_module_name(name) != 0) {
@@ -658,6 +671,36 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
 
 /* ── Sandbox: remove dangerous globals ──────────────────────────────── */
 
+int hl_js_poison_code_constructors(JSContext *ctx)
+{
+    /* Run as host code (JS_Eval), before any app code. The stub keeps the
+     * original's name, so `fn.constructor.name === "AsyncFunction"` - the usual
+     * way to tell an async function apart - still works. */
+    static const char src[] =
+        "(function () {\n"
+        "  'use strict';\n"
+        "  const kinds = [function () {}, async function () {},\n"
+        "                 function* () {}, async function* () {}];\n"
+        "  for (const f of kinds) {\n"
+        "    const proto = Object.getPrototypeOf(f);\n"
+        "    const name = proto.constructor.name;\n"
+        "    const stub = { [name]: function () {\n"
+        "      throw new TypeError('code generation from strings is disabled');\n"
+        "    } }[name];\n"
+        "    Object.defineProperty(proto, 'constructor', { value: stub,\n"
+        "      writable: false, enumerable: false, configurable: false });\n"
+        "  }\n"
+        "})();\n";
+    JSValue r = JS_Eval(ctx, src, sizeof src - 1, "<hull:sandbox>",
+                        JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return -1;
+    }
+    JS_FreeValue(ctx, r);
+    return 0;
+}
+
 static void hl_js_sandbox(JSContext *ctx)
 {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -802,6 +845,10 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
 
     /* Apply sandbox (remove eval global, etc.) */
     hl_js_sandbox(js->ctx);
+    if (hl_js_poison_code_constructors(js->ctx) != 0) {
+        log_error("[hull:c] could not disable the Function constructors");
+        return -1;
+    }
 
     /* Add console polyfill */
     hl_js_add_console(js->ctx);

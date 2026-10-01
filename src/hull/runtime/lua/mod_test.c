@@ -164,10 +164,12 @@ static int l_test_http(lua_State *L, const char *method)
 
         /* Auto-decode JSON if body looks like JSON */
         if (result.body[0] == '{' || result.body[0] == '[') {
-            /* Try json.decode via hull.json module */
-            lua_getglobal(L, "require");
-            lua_pushstring(L, "hull.json");
-            if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_istable(L, -1)) {
+            /* The runtime's own json (registry stash), not require(): the
+             * harness decodes for every test, declared hull/json or not, and
+             * a require from here runs with the test file as its caller - app
+             * code, which the module gate refuses an undeclared module. */
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
+            if (lua_istable(L, -1)) {
                 lua_getfield(L, -1, "decode");
                 lua_pushlstring(L, result.body, result.body_len);
                 if (lua_pcall(L, 1, 1, 0) == LUA_OK) {

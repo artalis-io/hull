@@ -663,4 +663,34 @@ UTEST(hl_cap_db, udf_wasm_rejects_null_args)
 }
 #endif /* HL_ENABLE_WASM */
 
+/* SQL cannot reach files the fs capability never granted: ATTACH of a file and
+ * VACUUM INTO are refused, and neither leaves a file behind. The attaches that
+ * name no file still work, and so does a plain VACUUM (which attaches ''). */
+UTEST(hl_cap_db, sql_cannot_open_or_write_other_files)
+{
+    setup_db();
+    const char *probe = "hull_sql_guard_probe.db";
+    remove(probe);
+
+    char sql[128];
+    snprintf(sql, sizeof sql, "ATTACH '%s' AS other", probe);
+    EXPECT_NE(sqlite3_exec(test_db, sql, NULL, NULL, NULL), SQLITE_OK);
+    snprintf(sql, sizeof sql, "VACUUM INTO '%s'", probe);
+    EXPECT_NE(sqlite3_exec(test_db, sql, NULL, NULL, NULL), SQLITE_OK);
+    EXPECT_NE(sqlite3_exec(test_db, "ATTACH 'x' || '.db' AS other", NULL, NULL, NULL),
+              SQLITE_OK);
+    FILE *f = fopen(probe, "rb");
+    EXPECT_TRUE(f == NULL);
+    if (f) { fclose(f); remove(probe); }
+
+    EXPECT_NE(sqlite3_exec(test_db, "PRAGMA writable_schema = ON", NULL, NULL, NULL),
+              SQLITE_OK);
+
+    EXPECT_EQ(sqlite3_exec(test_db, "ATTACH ':memory:' AS scratch", NULL, NULL, NULL),
+              SQLITE_OK);
+    EXPECT_EQ(sqlite3_exec(test_db, "DETACH scratch", NULL, NULL, NULL), SQLITE_OK);
+    EXPECT_EQ(sqlite3_exec(test_db, "VACUUM", NULL, NULL, NULL), SQLITE_OK);
+    teardown_db();
+}
+
 UTEST_MAIN();

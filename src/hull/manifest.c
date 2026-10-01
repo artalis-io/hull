@@ -17,9 +17,11 @@
 
 #include "hull/manifest.h"
 #include "hull/utils/alloc.h"
+#include "hull/utils/env_ref.h"   /* hl_env_ref, for hl_manifest_check_env_refs */
 #include <sh_seal_arena.h>
 #include "manifest_internal.h"
 #include "log.h"
+#include <stdio.h>
 #include <string.h>
 
 /* ── Helpers (shared with manifest_lua.c / manifest_js.c) ───────────── */
@@ -73,6 +75,8 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->fs_write[i]);
     for (int i = 0; i < m->env_count; i++)
         hl_manifest_str_free(a, &m->env[i]);
+    for (int i = 0; i < m->secrets_count; i++)
+        hl_manifest_str_free(a, &m->secrets[i]);
     for (int i = 0; i < m->hosts_count; i++)
         hl_manifest_str_free(a, &m->hosts[i]);
     hl_manifest_str_free(a, &m->csp);
@@ -90,6 +94,10 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->databases.dynamic.hosts[i]);
     for (int i = 0; i < m->databases.dynamic.scheme_count; i++)
         hl_manifest_str_free(a, &m->databases.dynamic.schemes[i]);
+    for (int i = 0; i < m->kv.dynamic.host_count; i++)
+        hl_manifest_str_free(a, &m->kv.dynamic.hosts[i]);
+    for (int i = 0; i < m->kv.dynamic.scheme_count; i++)
+        hl_manifest_str_free(a, &m->kv.dynamic.schemes[i]);
     /* ssh = { connect = { hosts, users }, tunnel = { hosts } }. Missing here
      * meant the grant leaked; missing from hl_manifest_seal below meant
      * something worse. */
@@ -155,6 +163,8 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
         if (seal_str(arena, &dst->fs_write[i], src->fs_write[i]) != 0) goto fail;
     for (int i = 0; i < src->env_count; i++)
         if (seal_str(arena, &dst->env[i], src->env[i]) != 0) goto fail;
+    for (int i = 0; i < src->secrets_count; i++)
+        if (seal_str(arena, &dst->secrets[i], src->secrets[i]) != 0) goto fail;
     for (int i = 0; i < src->hosts_count; i++)
         if (seal_str(arena, &dst->hosts[i], src->hosts[i]) != 0) goto fail;
     if (seal_str(arena, &dst->csp, src->csp) != 0) goto fail;
@@ -177,6 +187,16 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
             goto fail;
     for (int i = 0; i < src->databases.dynamic.scheme_count; i++)
         if (seal_str(arena, &dst->databases.dynamic.schemes[i], src->databases.dynamic.schemes[i]) != 0)
+            goto fail;
+    /* kv.dynamic: read on every kv.open. Neither seal nor free knew about it,
+     * so the sealed manifest kept pointing at allocator strings (which leaked,
+     * and stayed writable) - a rewritten pattern would let kv.open reach any
+     * host. */
+    for (int i = 0; i < src->kv.dynamic.host_count; i++)
+        if (seal_str(arena, &dst->kv.dynamic.hosts[i], src->kv.dynamic.hosts[i]) != 0)
+            goto fail;
+    for (int i = 0; i < src->kv.dynamic.scheme_count; i++)
+        if (seal_str(arena, &dst->kv.dynamic.schemes[i], src->kv.dynamic.schemes[i]) != 0)
             goto fail;
     /* ssh.connect: the hosts an app may reach and the logins it may use.
      *
@@ -208,4 +228,58 @@ fail:
      * away the integer fields. Caller treats -1 as "destroy the arena
      * and don't use dst". */
     return -1;
+}
+
+/* ── hl_manifest_check_env_refs ────────────────────────────────────── */
+
+static int env_name_declared(const HlManifest *m, const char *var)
+{
+    for (int i = 0; i < m->secrets_count; i++)
+        if (m->secrets[i] && strcmp(m->secrets[i], var) == 0) return 1;
+    for (int i = 0; i < m->env_count; i++)
+        if (m->env[i] && strcmp(m->env[i], var) == 0) return 1;
+    return 0;
+}
+
+/* Check one list of values a "$VAR" may appear in. */
+static int check_refs(const HlManifest *m, const char *field,
+                      const char *const *vals, int n, char *err, size_t err_size)
+{
+    char var[128];
+    for (int i = 0; i < n; i++) {
+        if (!vals[i] || !hl_env_ref(vals[i], var, sizeof var)) continue;
+        if (env_name_declared(m, var)) continue;
+        if (err && err_size)
+            snprintf(err, err_size,
+                     "manifest: \"%s\" in %s reads the environment variable %s, "
+                     "which the manifest does not declare. Add \"%s\" to "
+                     "secrets (or to env, if scripts may also read it).",
+                     vals[i], field, var, var);
+        return -1;
+    }
+    return 0;
+}
+
+int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size)
+{
+    if (err && err_size) err[0] = '\0';
+    if (!m) return 0;
+
+    const char *dsns[HL_MANIFEST_MAX_DATABASES];
+    int ndsn = 0;
+    for (int i = 0; i < m->databases.named_count && ndsn < HL_MANIFEST_MAX_DATABASES; i++)
+        dsns[ndsn++] = m->databases.named[i].dsn;
+
+    if (check_refs(m, "hosts", m->hosts, m->hosts_count, err, err_size) != 0 ||
+        check_refs(m, "databases.named", dsns, ndsn, err, err_size) != 0 ||
+        check_refs(m, "databases.dynamic.hosts", m->databases.dynamic.hosts,
+                   m->databases.dynamic.host_count, err, err_size) != 0 ||
+        check_refs(m, "kv.dynamic.hosts", m->kv.dynamic.hosts,
+                   m->kv.dynamic.host_count, err, err_size) != 0 ||
+        check_refs(m, "ssh.connect.hosts", m->ssh.connect.hosts,
+                   m->ssh.connect.host_count, err, err_size) != 0 ||
+        check_refs(m, "ssh.tunnel.hosts", m->ssh.tunnel.hosts,
+                   m->ssh.tunnel.host_count, err, err_size) != 0)
+        return -1;
+    return 0;
 }

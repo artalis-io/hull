@@ -15,6 +15,7 @@
  * @par Limits (compile-time):
  *   - `HL_MANIFEST_MAX_PATHS` = 32 (`fs.read` / `fs.write` patterns)
  *   - `HL_MANIFEST_MAX_ENVS` = 32 (env var names)
+ *   - `HL_MANIFEST_MAX_SECRETS` = 32 (env vars reachable only via "$VAR")
  *   - `HL_MANIFEST_MAX_HOSTS` = 32 (HTTP/WS hosts)
  *   - `HL_MANIFEST_MAX_NET_HOSTS` = 32, `HL_MANIFEST_MAX_NET_PORTS` = 16,
  *     `HL_MANIFEST_MAX_SSH_USERS` = 16
@@ -39,6 +40,7 @@ typedef struct HlAllocator HlAllocator;
 
 #define HL_MANIFEST_MAX_PATHS  32
 #define HL_MANIFEST_MAX_ENVS   32
+#define HL_MANIFEST_MAX_SECRETS 32
 #define HL_MANIFEST_MAX_HOSTS  32
 #define HL_MANIFEST_MAX_NET_HOSTS  32
 #define HL_MANIFEST_MAX_NET_PORTS  16
@@ -195,6 +197,14 @@ typedef struct HlManifest {
     const char *env[HL_MANIFEST_MAX_ENVS];
     int         env_count;
 
+    /* Environment variables a "$VAR" / "${VAR}" reference may name
+     * (`secrets = {"DATABASE_URL"}`) WITHOUT making them readable by env.get:
+     * the value reaches only the connection or allowlist that names it, never
+     * a script. A "$VAR" must be listed here or in `env`, otherwise the app
+     * fails to load (hl_manifest_check_env_refs). */
+    const char *secrets[HL_MANIFEST_MAX_SECRETS];
+    int         secrets_count;
+
     /* Outbound HTTP host allowlist */
     const char *hosts[HL_MANIFEST_MAX_HOSTS];
     int         hosts_count;
@@ -339,6 +349,23 @@ typedef struct ShSealArena ShSealArena;
  * inputs, src not present). On -1 `dst` is zero-initialized.
  */
 int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena);
+
+/*
+ * Check every "$VAR" / "${VAR}" reference in the manifest names a variable the
+ * manifest declares, in `secrets` or `env`.
+ *
+ * A reference reads the environment on the app's behalf: in a DSN the value
+ * becomes the database location (an SQLite file name can be read back with
+ * PRAGMA database_list), and in a host allowlist it decides where the app may
+ * connect. Without this check a reference could name ANY variable, and the
+ * `env` allowlist would not describe what the app can reach.
+ *
+ * Fields that resolve references: hosts, databases.named[].dsn,
+ * databases.dynamic.hosts, kv.dynamic.hosts, ssh.connect.hosts,
+ * ssh.tunnel.hosts. Returns 0 when every reference is declared; otherwise -1,
+ * with the first offender described in @p err.
+ */
+int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size);
 
 /* The "$VAR" / "${VAR}" full-value env-reference parser moved to the neutral
  * util header hull/utils/env_ref.h (hl_env_ref) so a domain-free leaf like

@@ -1256,6 +1256,11 @@ static int hl_serve_wire_caps(HlServerState *s)
          * Sealing failure is FATAL - the alternative is shipping with
          * unsealed policy, which silently weakens the hardening
          * guarantee. See docs/security.md §Sealed runtime tables. */
+        char ref_err[512];
+        if (hl_manifest_check_env_refs(&s->manifest, ref_err, sizeof ref_err) != 0) {
+            log_error("[hull:c] %s", ref_err);
+            return -1;
+        }
         if (sh_seal_arena_init(&s->seal_arena, 16 * 1024,
                                 "manifest-policy") != 0) {
             log_error("[hull:c] seal arena init failed (mmap)");

@@ -105,6 +105,7 @@ static int emit_manifest_json(const HlManifest *m, ShJsonBuf *out,
 
     /* env, hosts */
     emit_string_array(&w, "env",   m->env,   m->env_count);
+    emit_string_array(&w, "secrets", m->secrets, m->secrets_count);
     emit_string_array(&w, "hosts", m->hosts, m->hosts_count);
 
     /* csp */

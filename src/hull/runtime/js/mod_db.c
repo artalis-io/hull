@@ -213,9 +213,24 @@ static void js_free_string_array(JSContext *ctx, const char **strs, int count)
  * is sufficient.  Returns 1 for stdlib, 0 for user code.
  *
  * n_stack_levels=1 skips the C function stack frame (level 0) to reach
- * the JS caller's frame. */
-static int js_is_stdlib_caller(JSContext *ctx)
+ * the JS caller's frame.
+ *
+ * A stdlib frame is not enough on its own: a stdlib helper that calls a
+ * function the APP handed it (hull.map(list, fn), a loader, a callback) would
+ * lend its identity to whatever that function is, and passing `conn.exec`
+ * itself ran app SQL with stdlib privilege. So `this` must also be a real
+ * connection object, the way the stdlib calls it (`conn.exec(sql)`): a function
+ * invoked as a callback gets `this` undefined, or the object it was stored on.
+ * A bound function would keep its bound `this` - QuickJS gives it a frame of
+ * its own for that reason (HULL PATCH 0002), which is not a stdlib frame. */
+static JSClassID hull_db_conn_class_id;  /* connection objects (below) */
+static JSClassID hull_db_owned_conn_class_id;
+
+static int js_is_stdlib_caller(JSContext *ctx, JSValueConst this_val)
 {
+    if (!JS_GetOpaque(this_val, hull_db_conn_class_id) &&
+        !JS_GetOpaque(this_val, hull_db_owned_conn_class_id))
+        return 0;
     JSAtom name = JS_GetScriptOrModuleName(ctx, 1);
     if (name == JS_ATOM_NULL)
         return 0;
@@ -234,7 +249,6 @@ static int js_is_stdlib_caller(JSContext *ctx)
  * nothing; the opaque is just a borrowed HlDbHandle*. Non-forgeable: only C
  * sets the opaque, so app JS cannot fabricate a connection over an arbitrary
  * pointer (a plain object's JS_GetOpaque against this class id is NULL). */
-static JSClassID hull_db_conn_class_id;
 static void js_db_conn_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt; (void)val;   /* handle owned by the registry; nothing to free */
@@ -264,7 +278,6 @@ typedef struct {
     char       *dsn;      /* owned; validated DSN, for conn.async */
     int         refcount; /* live objects sharing this box (conn + conn.async) */
 } HlJsOwnedConn;
-static JSClassID hull_db_owned_conn_class_id;
 static void js_db_owned_conn_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
@@ -339,7 +352,7 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
     if (!sql)
         return JS_EXCEPTION;
 
-    int is_stdlib = js_is_stdlib_caller(ctx);
+    int is_stdlib = js_is_stdlib_caller(ctx, this_val);
     HlDbHandle *h;   /* resolved after the parameters: see below */
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
@@ -403,7 +416,7 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
     if (!sql)
         return JS_EXCEPTION;
 
-    int is_stdlib = js_is_stdlib_caller(ctx);
+    int is_stdlib = js_is_stdlib_caller(ctx, this_val);
     HlDbHandle *h;   /* resolved after the parameters: see below */
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
@@ -521,14 +534,7 @@ static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
     if (!table)
         return JS_EXCEPTION;
 
-    int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = js_call_handle(ctx, this_val);
-
-    if (!is_stdlib && strncmp(table, "_hull_", 6) == 0) {
-        JS_FreeCString(ctx, table);
-        return JS_ThrowInternalError(ctx,
-            "access denied: _hull_* tables are reserved");
-    }
+    int is_stdlib = js_is_stdlib_caller(ctx, this_val);
 
     const char **conflict_cols = NULL;
     int n_conflict = 0;
@@ -553,6 +559,29 @@ static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
         js_free_string_array(ctx, conflict_cols, n_conflict);
         JS_FreeCString(ctx, table);
         return JS_ThrowTypeError(ctx, "values length must match cols length");
+    }
+
+    /* Every identifier lands in the statement these build, so an app caller
+     * may not name a reserved table in any of them (case-insensitive, as the
+     * query/exec check is). The handle is resolved last: the conversions above
+     * run app code (getters), which can close a db.open handle. */
+    int denied = 0;
+    if (!is_stdlib) {
+        denied = hl_cap_db_check_namespace(table) != 0;
+        for (int i = 0; !denied && i < n_conflict; i++)
+            denied = hl_cap_db_check_namespace(conflict_cols[i]) != 0;
+        for (int i = 0; !denied && i < n_cols; i++)
+            denied = hl_cap_db_check_namespace(cols[i]) != 0;
+    }
+    HlDbHandle *h = denied ? NULL : js_call_handle(ctx, this_val);
+    if (denied || !h) {
+        js_free_hl_values(ctx, values, n_values);
+        js_free_string_array(ctx, cols, n_cols);
+        js_free_string_array(ctx, conflict_cols, n_conflict);
+        JS_FreeCString(ctx, table);
+        return JS_ThrowInternalError(ctx, denied
+            ? "access denied: _hull_* tables are reserved"
+            : "database connection is closed");
     }
 
     int rc = is_upsert
@@ -595,8 +624,8 @@ typedef struct {
 static void js_table_columns_cb(void *cb_ctx, const char *col_name)
 {
     JsColumnsCtx *cc = (JsColumnsCtx *)cb_ctx;
-    JS_SetPropertyUint32(cc->ctx, cc->array, cc->n,
-                          JS_NewString(cc->ctx, col_name));
+    JS_DefinePropertyValueUint32(cc->ctx, cc->array, cc->n,
+                                 JS_NewString(cc->ctx, col_name), JS_PROP_C_W_E);
     cc->n++;
 }
 
@@ -615,13 +644,18 @@ static JSValue js_db_table_columns(JSContext *ctx, JSValueConst this_val,
     if (!table)
         return JS_EXCEPTION;
 
-    int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = js_call_handle(ctx, this_val);
+    int is_stdlib = js_is_stdlib_caller(ctx, this_val);
 
-    if (!is_stdlib && strncmp(table, "_hull_", 6) == 0) {
+    if (!is_stdlib && hl_cap_db_check_namespace(table) != 0) {
         JS_FreeCString(ctx, table);
         return JS_ThrowInternalError(ctx,
             "access denied: _hull_* tables are reserved");
+    }
+    /* After the conversion: toString can close a db.open handle. */
+    HlDbHandle *h = js_call_handle(ctx, this_val);
+    if (!h) {
+        JS_FreeCString(ctx, table);
+        return JS_ThrowInternalError(ctx, "database connection is closed");
     }
 
     JsColumnsCtx cc = { .ctx = ctx, .array = JS_NewArray(ctx), .n = 0 };
@@ -781,7 +815,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         if (!sql)
             return JS_EXCEPTION;
 
-        if (!js_is_stdlib_caller(ctx) && hl_cap_db_check_namespace(sql) != 0) {
+        if (!js_is_stdlib_caller(ctx, this_val) && hl_cap_db_check_namespace(sql) != 0) {
             JS_FreeCString(ctx, sql);
             return JS_ThrowInternalError(ctx,
                 "access denied: _hull_* tables are reserved");
@@ -1191,12 +1225,17 @@ static JSValue js_db_open(JSContext *ctx, JSValueConst this_val,
     const HlManifestDbDynamic *policy =
         hl_db_registry_dynamic_policy(js->base.db_registry);
     const char *err = NULL;
-    HlDbHandle *h = hl_db_dynamic_open(dsn, policy, js->base.fs_cfg, &err);
+    /* The DSN actually opened (a file DSN resolves under the app directory):
+     * conn.async opens its worker connection from this, so both name the same
+     * database. */
+    char opened[HL_DB_DYNAMIC_DSN_MAX];
+    HlDbHandle *h = hl_db_dynamic_open_ex(dsn, policy, js->base.fs_cfg,
+                                          opened, sizeof opened, &err);
     if (!h) {
         JS_FreeCString(ctx, dsn);
         return JS_ThrowInternalError(ctx, "%s", err ? err : "db.open: denied");
     }
-    JSValue obj = push_owned_conn_object(ctx, h, dsn);   /* strdups dsn */
+    JSValue obj = push_owned_conn_object(ctx, h, opened);   /* strdups it */
     JS_FreeCString(ctx, dsn);
     return obj;
 }

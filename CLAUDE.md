@@ -595,7 +595,13 @@ runtimes) and the cross-backend variant in `tests/e2e_postgres.sh`.
 under `manifest.databases.named` (a name -> DSN map). A DSN value of exactly
 `"$VAR"` or `"${VAR}"` is an env reference resolved at connection-open time (so
 credentials never sit in app source); a value that merely CONTAINS a `$` (e.g.
-a password) is literal.
+a password) is literal. The variable must be DECLARED, in `manifest.secrets`
+(readable only through `$VAR` references, never by `env.get`) or in `env`;
+`hl_manifest_check_env_refs` (`manifest.c`) refuses app load otherwise, for every
+field that resolves references (`hosts`, `databases.named`,
+`databases.dynamic.hosts`, `kv.dynamic.hosts`, `ssh.connect.hosts`,
+`ssh.tunnel.hosts`). Before this a reference could read ANY variable - an SQLite
+DSN's value is readable back through `PRAGMA database_list`.
 
 (The DB connection dials its host directly; `manifest.hosts` gates
 `http.fetch`, not database connections.)
@@ -1456,10 +1462,11 @@ tracked follow-up, and would add protection rather than only honesty.
 ### Capability Enforcement Invariants
 
 - **SQL injection impossible:** All DB access uses `sqlite3_bind_*` parameterized binding. SQL is always a literal string.
-- **Internal tables protected:** `hl_cap_db_check_namespace()` blocks user code from accessing `_hull_*` tables. Enforcement uses call-stack inspection (Lua checks `ar.source` for `hull.` prefix, JS checks module name for `hull:` prefix) so stdlib modules transparently bypass the check via normal `db.exec`/`db.query`. No internal API is exposed. Tables: `_hull_outbox`, `_hull_inbox_processed`, `_hull_idempotency_keys`, `_hull_sessions`.
+- **Internal tables protected:** `hl_cap_db_check_namespace()` blocks user code from accessing `_hull_*` tables. Enforcement uses call-stack inspection (Lua checks `ar.source` for `hull.` prefix, JS checks module name for `hull:` prefix) so stdlib modules transparently bypass the check via normal `db.exec`/`db.query`. No internal API is exposed. Tables: `_hull_outbox`, `_hull_inbox_processed`, `_hull_idempotency_keys`, `_hull_sessions`. A stdlib frame alone does not grant the bypass: the call must also NAME the method (Lua: `namewhat` `method`/`field` with the method's own name; JS: `this` is a real connection object), so a stdlib helper that invokes an app-supplied function (`retry.run`'s `retryOn`, `hull.map`'s `fn`) cannot be handed `conn.exec` itself; a JS bound function gets its own stack frame (QuickJS HULL PATCH 0002) so `conn.exec.bind(conn, sql)` is app code too. `insert_if_absent` / `upsert` / `table_columns` check the table AND every column name. Known limit: the check is lexical, so on Postgres / MySQL dynamic SQL that assembles the name at run time (`DO $$ ... EXECUTE`, `PREPARE` from `CONCAT`) is not caught - real separation there needs a database role or schema the app's connection cannot reach. Internal underscore modules (`hull._template`, `hull.kv._native`, `hull:web:_request`, ...) are importable only by the stdlib once the module set is wired, and a cached first-party module is not returned to app code that did not declare it.
 - **Path traversal blocked:** `hl_cap_fs_validate()` rejects absolute paths, `..` components, symlink escapes via `realpath()` ancestor check. Plus kernel unveil.
 - **Host allowlist enforced:** `hl_cap_http_request()` validates target host against manifest's `hosts` array. Since §2.8 the check delegates to the shared matcher `hl_host_match_any_env` (`src/hull/utils/host_match.c`), so `hosts` entries may be an exact hostname (case-insensitive), `"*"` (any), a `"*.suffix"` subdomain glob, a CIDR (matches only IP-literal hosts, never a DNS name), or a `"$VAR"` / `"${VAR}"` env reference resolved at match time. The same matcher gates `ws.connect` (shares the http config) and `smtp.send` (`hl_smtp_check_host`), and `databases.dynamic.hosts` - one convention across every outbound host allowlist.
-- **Env allowlist enforced:** `hl_cap_env_get()` checks against manifest's `env` array (max 32 entries).
+- **Env allowlist enforced:** `hl_cap_env_get()` checks against manifest's `env` array (max 32 entries). A `$VAR` reference elsewhere in the manifest must name a variable in `env` or `secrets` (checked at load by `hl_manifest_check_env_refs`).
+- **SQL cannot reach other files (SQLite):** `hl_cap_db_init` installs an authorizer that refuses `ATTACH` of any real file (and so `VACUUM INTO`, which SQLite runs as an internal ATTACH), `writable_schema` and the `*_store_directory` pragmas, plus `SQLITE_DBCONFIG_DEFENSIVE`.
 - **No shell invocation:** Tool mode uses `hl_tool_spawn()` with compiler allowlist. No `system()`/`popen()`.
 - **Key material zeroed:** `hull_secure_zero()` (volatile memset) scrubs crypto material from stack buffers.
 - **Instruction limits:** Both Lua and JS runtimes enforce per-request instruction limits (default 100M). Lua uses `lua_sethook(LUA_MASKCOUNT)`, JS uses `JS_SetInterruptHandler`. Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var.

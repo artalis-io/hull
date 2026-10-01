@@ -6475,6 +6475,70 @@ UTEST(lua_cap, many_query_params_fit_the_stack)
     cleanup_lua_caps();
 }
 
+/* Internal modules ("_" segments) are the stdlib's plumbing: once the app's
+ * module set is wired, app code may not require one, even a cached one, nor
+ * an undeclared module the runtime itself already loaded (hull.json). */
+UTEST(lua_runtime, internal_and_cached_modules_stay_gated)
+{
+    init_lua();
+    HlManifest m;
+    memset(&m, 0, sizeof(m));
+    m.modules[0].name = "validate";
+    m.modules[0].api_major = 1;
+    m.modules_count = 1;
+    m.modules_declared = 1;
+    HlResolvedModuleSet set;
+    char err[256] = {0};
+    ASSERT_EQ(hl_module_resolver_resolve(&m, &set, err, sizeof(err)), 0);
+    lua_rt.base.module_set = &set;
+
+    const char *names[] = { "hull._template", "hull.kv._native", "hull.json" };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        char code[128];
+        snprintf(code, sizeof code, "require('%s')", names[i]);
+        int rc = luaL_dostring(lua_rt.L, code);
+        EXPECT_NE(rc, LUA_OK);
+        if (rc != LUA_OK) lua_pop(lua_rt.L, 1);
+    }
+    /* A declared module still loads, and so does the runtime's own use of an
+     * internal one: hull.map loads hull._async from C. */
+    EXPECT_EQ(luaL_dostring(lua_rt.L, "assert(type(require('hull.validate')) == 'table')"),
+              LUA_OK);
+    EXPECT_EQ(luaL_dostring(lua_rt.L, "assert(type(hull.map) == 'function')"), LUA_OK);
+
+    lua_rt.base.module_set = NULL;
+    cleanup_lua();
+}
+
+/* A stdlib helper that calls a function the app handed it does not lend that
+ * function its stdlib identity: given `db.exec` itself as retry_on, retry.run
+ * calls it with the value the app's fn returned, and the `_hull_*` guard still
+ * applies. The dialect helpers check every identifier too. */
+UTEST(lua_cap, stdlib_helpers_do_not_lend_their_identity)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local retry = require('hull.retry') "
+        "  local ok = pcall(retry.run, "
+        "      function() return 'CREATE TABLE _hull_probe (x)' end, "
+        "      { max_attempts = 1, retry_on = db.exec }) "
+        "  if ok then return 1 end "
+        "  local n = db.query(\"SELECT count(*) AS n FROM sqlite_master \" .. "
+        "      \"WHERE name = '_' || 'hull_probe'\")[1].n "
+        "  if n ~= 0 then return 2 end "
+        "  db.exec('CREATE TABLE life (id INTEGER PRIMARY KEY, v TEXT)') "
+        "  if pcall(db.upsert, '_HULL_sessions', {'id'}, {'id'}, {1}) then return 3 end "
+        "  if pcall(db.upsert, 'life', {'id'}, {'id', '_hull_x'}, {1, 2}) then return 4 end "
+        "  if pcall(db.insert_if_absent, 'life', nil, {'id'}, {1}) == false then return 5 end "
+        "  if pcall(db.table_columns, '_hull_sessions') then return 6 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
 /* Error values reach the logs as text: a table with __tostring (hull.gather's
  * aggregate) as its message, where lua_tostring gave NULL - "(unknown)", or a
  * NULL for "%s". Also from a coroutine that died with it, and without letting

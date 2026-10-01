@@ -213,6 +213,25 @@ static inline const char *hl_lua_chunkname(char *buf, size_t n,
     return name;
 }
 
+/* require() for the runtime's own C code (mod_fs.c): the same lookup as the
+ * `require` global, without the caller checks that refuse undeclared and
+ * internal modules to app code - a C caller has no Lua frame to check. */
+int hl_lua_require_trusted(lua_State *L);
+
+/* The chunkname for an APP file loaded from disk. A chunkname starting with
+ * "hull." is what marks the stdlib (hl_lua_source_is_stdlib), and a dev-mode
+ * path is app-relative with its "./" collapsed, so `require("./hull.evil")`
+ * named its chunk "@hull.evil.lua" and ran with stdlib privilege. Such a path
+ * keeps an explicit "./". On failure returns a name that is never stdlib. */
+static inline const char *hl_lua_app_chunkname(char *buf, size_t n,
+                                               const char *path)
+{
+    int spoof = strncmp(path, "hull.", 5) == 0;
+    int len = snprintf(buf, n, spoof ? "@./%s" : "@%s", path);
+    if (len > 0 && (size_t)len < n) return buf;
+    return "=app";
+}
+
 /* ── Chunk-source namespace test (mod_db.c, mod_fs.c) ─────────────
  *
  * Lua's `ar.source` carries the chunkname VERBATIM, including the

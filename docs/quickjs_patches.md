@@ -48,3 +48,37 @@ was missing it.
 again with `use-of-uninitialized-value ... in js_parse_destructuring_element`.
 Note that the report is only readable because `QJS_CFLAGS` under `MSAN` carries
 `-g` (mk/tests.mk); without it the trace names the function and no line.
+
+## Patch 0002 - a stack frame for bound-function calls
+
+**File:** `vendor/quickjs/quickjs.c`, `js_call_bound_function`
+**Found by:** the second capability audit (stdlib-identity spoofing)
+**Upstream:** Hull-specific; not a QuickJS bug.
+
+Hull decides whether a database call may touch the reserved `_hull_*` tables
+by asking who called it: `JS_GetScriptOrModuleName(ctx, 1)` inside the native
+binding names the immediate JS caller, and a `hull:` module is the stdlib.
+`js_call_c_function` pushes a frame for the native function itself, so level 1
+is its caller.
+
+A bound function had no frame. Calling `f.bind(conn, sql)` ran the native
+target with the bound function's CALLER as its level-1 frame. So a stdlib
+helper that invokes an app-supplied callback - `retry.run(fn, { retryOn })`
+calls `opts.retryOn(value)` - lent its stdlib identity to
+`conn.exec.bind(conn)`, and app SQL ran against `_hull_*` tables.
+
+The patch pushes a frame for the bound function in the non-constructor branch,
+set up the way `js_call_c_function` sets up its own (`prev_frame`, `js_mode`,
+`cur_func`, `arg_buf`, `arg_count`), and pops it on return. The frame's
+function is the bound function object, which is not bytecode, so
+`JS_GetScriptOrModuleName` returns no name for it and Hull treats the call as
+app code. Frame walkers already handle non-bytecode frames (every native call
+has one): backtraces print the bound function as a native frame, and the
+strict/math-mode checks see the same zero `js_mode` a native frame carries.
+
+The constructor branch (`new boundFn()`) is unchanged: a constructor call
+cannot target a database binding.
+
+**Guard:** `tests/hull/runtime/js/test_js.c`,
+`js_cap.stdlib_helpers_do_not_lend_their_identity`. Without the patch the
+bound-`retryOn` case runs the `_hull_*` statement and the test fails.

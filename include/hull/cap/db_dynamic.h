@@ -15,7 +15,13 @@
 
 #include "hull/cap/db_backend.h"
 
+#include <stddef.h>
+
 typedef struct HlManifestDbDynamic HlManifestDbDynamic;
+
+/* Longest DSN db.open will open (the app's, or the absolute file path it
+ * resolves to). */
+#define HL_DB_DYNAMIC_DSN_MAX 4096
 typedef struct HlFsConfig HlFsConfig;
 
 /*
@@ -29,6 +35,21 @@ HlDbHandle *hl_db_dynamic_open(const char *dsn,
                                const HlManifestDbDynamic *policy,
                                const HlFsConfig *fs_cfg,
                                const char **err);
+
+/*
+ * hl_db_dynamic_open, also writing the DSN the connection was actually opened
+ * with into @p opened (@p opened_size bytes) - the one a second connection to
+ * the same database must use, e.g. conn.async's worker pool. For a file
+ * backend that is the absolute path under the app directory, not the
+ * app-relative DSN the app passed (which the backend would open against the
+ * process's working directory). Every other DSN is returned as given.
+ * @p opened may be NULL.
+ */
+HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
+                                  const HlManifestDbDynamic *policy,
+                                  const HlFsConfig *fs_cfg,
+                                  char *opened, size_t opened_size,
+                                  const char **err);
 
 /* Close + free a handle from hl_db_dynamic_open. NULL-safe; call exactly once
  * per successful open (the caller guards against double-close). */

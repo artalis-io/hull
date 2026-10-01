@@ -157,7 +157,7 @@ static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
 /* Check if the immediate Lua caller is a stdlib module (chunk name starts
  * with "hull.").  User modules start with "./" - so a simple prefix check
  * is sufficient.  Returns 1 for stdlib, 0 for user code. */
-static int lua_is_stdlib_caller(lua_State *L)
+static int lua_is_stdlib_caller(lua_State *L, const char *method)
 {
     lua_Debug ar;
     /* level 0 = this C function, level 1 = Lua caller */
@@ -165,7 +165,46 @@ static int lua_is_stdlib_caller(lua_State *L)
         return 0;
     if (lua_getinfo(L, "S", &ar) == 0)
         return 0;
-    return hl_lua_source_is_stdlib(ar.source);
+    if (!hl_lua_source_is_stdlib(ar.source))
+        return 0;
+
+    /* A stdlib frame is not enough on its own. A stdlib helper that calls a
+     * function the APP handed it - hull.map(list, fn), a loader, a callback -
+     * would otherwise lend its identity to whatever that function is: passing
+     * `conn.exec` itself, with the SQL as the list item, ran app SQL with
+     * stdlib privilege. So the call must also NAME this method, as
+     * `conn.exec(...)` or `conn:exec(...)`, the way the stdlib does. A function
+     * held in a parameter or local ("local" / "upvalue") is refused, and so is
+     * any other name. A tail-called C function keeps its caller's frame in Lua
+     * 5.4, so `return db.exec(...)` in the stdlib still names the method. */
+    lua_Debug self;
+    if (lua_getstack(L, 0, &self) == 0 || lua_getinfo(L, "n", &self) == 0)
+        return 0;
+    if (!self.name || !self.namewhat ||
+        (strcmp(self.namewhat, "method") != 0 &&
+         strcmp(self.namewhat, "field") != 0))
+        return 0;
+    return strcmp(self.name, method) == 0;
+}
+
+/* Refuse an app caller's identifier that names a reserved `_hull_*` table.
+ * insert_if_absent / upsert / table_columns build their SQL from these names,
+ * so the query/exec text check never sees them; every name is checked, since
+ * a column name lands in the same statement. */
+static void check_app_identifiers(lua_State *L, const char *method,
+                                  const char *table,
+                                  const char **a, int na,
+                                  const char **b, int nb)
+{
+    if (lua_is_stdlib_caller(L, method))
+        return;
+    int bad = hl_cap_db_check_namespace(table) != 0;
+    for (int i = 0; !bad && i < na; i++)
+        bad = hl_cap_db_check_namespace(a[i]) != 0;
+    for (int i = 0; !bad && i < nb; i++)
+        bad = hl_cap_db_check_namespace(b[i]) != 0;
+    if (bad)
+        luaL_error(L, "access denied: _hull_* tables are reserved");
 }
 
 /* The default connection, resolved from the registry (there is no separate
@@ -246,7 +285,7 @@ static int lua_db_query_impl(lua_State *L)
 
     const char *sql = luaL_checkstring(L, 1);
 
-    int is_stdlib = lua_is_stdlib_caller(L);
+    int is_stdlib = lua_is_stdlib_caller(L, "query");
     HlDbHandle *h = db_call_handle(L);
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
@@ -303,7 +342,7 @@ static int lua_db_exec_impl(lua_State *L)
 
     const char *sql = luaL_checkstring(L, 1);
 
-    int is_stdlib = lua_is_stdlib_caller(L);
+    int is_stdlib = lua_is_stdlib_caller(L, "exec");
     HlDbHandle *h = db_call_handle(L);
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
@@ -499,6 +538,8 @@ static int lua_db_insert_if_absent(lua_State *L)
     if (n_cols != n_vals)
         return luaL_error(L, "columns/values length mismatch (%d vs %d)",
                           n_cols, n_vals);
+    check_app_identifiers(L, "insert_if_absent", table,
+                          conflict_cols, n_conflict, cols, n_cols);
 
     HlDbHandle *h = db_call_handle(L);
 
@@ -533,6 +574,8 @@ static int lua_db_upsert(lua_State *L)
     if (n_cols != n_vals)
         return luaL_error(L, "columns/values length mismatch (%d vs %d)",
                           n_cols, n_vals);
+    check_app_identifiers(L, "upsert", table,
+                          conflict_cols, n_conflict, cols, n_cols);
 
     HlDbHandle *h = db_call_handle(L);
 
@@ -570,6 +613,7 @@ static int lua_db_table_columns(lua_State *L)
         return luaL_error(L, "database not configured");
 
     const char *table = luaL_checkstring(L, 1);
+    check_app_identifiers(L, "table_columns", table, NULL, 0, NULL, 0);
     HlDbHandle *h = db_call_handle(L);
 
     lua_newtable(L);  /* result */
@@ -719,7 +763,8 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         timeout_ms = (int)luaL_optinteger(L, 2, 1000);
     } else {
         sql = luaL_checkstring(L, 1);
-        if (!lua_is_stdlib_caller(L) && hl_cap_db_check_namespace(sql) != 0)
+        if (!lua_is_stdlib_caller(L, kind == HL_WORK_DB_QUERY ? "query" : "exec") &&
+            hl_cap_db_check_namespace(sql) != 0)
             return luaL_error(L, "access denied: _hull_* tables are reserved");
         if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
             if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
@@ -1062,10 +1107,15 @@ static int lua_db_open(lua_State *L)
     const HlManifestDbDynamic *policy =
         hl_db_registry_dynamic_policy(lua->base.db_registry);
     const char *err = NULL;
-    HlDbHandle *h = hl_db_dynamic_open(dsn, policy, lua->base.fs_cfg, &err);
+    /* The DSN actually opened (a file DSN resolves under the app directory):
+     * conn.async opens its worker connection from this, so both name the same
+     * database. */
+    char opened[HL_DB_DYNAMIC_DSN_MAX];
+    HlDbHandle *h = hl_db_dynamic_open_ex(dsn, policy, lua->base.fs_cfg,
+                                          opened, sizeof opened, &err);
     if (!h)
         return luaL_error(L, "%s", err ? err : "db.open: denied");
-    return push_owned_conn_object(L, h, dsn);
+    return push_owned_conn_object(L, h, opened);
 }
 
 /* db.default() → connection object for the "default" connection. Returns an

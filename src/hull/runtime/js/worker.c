@@ -98,6 +98,13 @@ static HlJsWorkerCtx *get_js_worker_ctx(void)
     JS_DeleteProperty(wctx->ctx, global, fn_atom, 0);
     JS_FreeAtom(wctx->ctx, fn_atom);
     JS_FreeValue(wctx->ctx, global);
+    if (hl_js_poison_code_constructors(wctx->ctx) != 0) {
+        log_error("[hull:worker] could not disable the Function constructors");
+        JS_FreeContext(wctx->ctx);
+        JS_FreeRuntime(wctx->rt);
+        free(wctx);
+        return NULL;
+    }
 
     /* Run registered init hooks (e.g. db.*, json.*) */
     for (int i = 0; i < init_hook_count; i++) {

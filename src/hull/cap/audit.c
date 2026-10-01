@@ -24,15 +24,27 @@ int hl_audit_enabled = 0;
  * other threads. A record is always built start-to-finish on one thread
  * (tight begin/end pair, no nesting), so the buffer needs no further lock. */
 #define HL_AUDIT_BUF_MAX 4096
-typedef struct { char data[HL_AUDIT_BUF_MAX]; size_t len; } HlAuditBuf;
+typedef struct {
+    char   data[HL_AUDIT_BUF_MAX];
+    size_t len;
+    int    overflow;   /* a write did not fit: the record is replaced */
+    char   cap[64];    /* the record's cap, for the replacement */
+} HlAuditBuf;
 static _Thread_local HlAuditBuf g_audit_buf;
 
 static int audit_buf_write(void *ctx, const char *data, size_t len)
 {
     HlAuditBuf *b = (HlAuditBuf *)ctx;
     if (!b) return -1;
-    size_t avail = sizeof(b->data) - b->len;
-    if (len > avail) len = avail; /* truncate oversized records (rare) */
+    /* Keep one byte for the record's newline. A record that does not fit is
+     * NOT cut short: a cut record has no closing brace and no newline, so the
+     * next record joined its line and both became unparseable JSONL - a way to
+     * hide an audit event behind a long, denied URL. hl_audit_end replaces it
+     * with a short, complete one instead. */
+    if (b->overflow || len > sizeof(b->data) - 1 - b->len) {
+        b->overflow = 1;
+        return 0;
+    }
     memcpy(b->data + b->len, data, len);
     b->len += len;
     return 0;
@@ -50,6 +62,8 @@ ShJsonWriter hl_audit_begin(const char *cap)
     }
 
     g_audit_buf.len = 0;
+    g_audit_buf.overflow = 0;
+    snprintf(g_audit_buf.cap, sizeof g_audit_buf.cap, "%s", cap ? cap : "");
     sh_json_writer_init(&w, audit_buf_write, &g_audit_buf);
     sh_json_write_object_start(&w);
 
@@ -79,10 +93,21 @@ void hl_audit_end(ShJsonWriter *w)
         return;
 
     sh_json_write_object_end(w);
-    /* Append the newline into the buffer, then emit the whole record with a
-     * single fwrite so concurrent event-loop / worker audit lines cannot
-     * interleave byte-wise on the shared stderr. */
-    if (g_audit_buf.len < sizeof(g_audit_buf.data))
-        g_audit_buf.data[g_audit_buf.len++] = '\n';
+    if (g_audit_buf.overflow) {
+        /* Too long to log whole: log that it happened, completely. */
+        g_audit_buf.len = 0;
+        g_audit_buf.overflow = 0;
+        ShJsonWriter t;
+        sh_json_writer_init(&t, audit_buf_write, &g_audit_buf);
+        sh_json_write_object_start(&t);
+        sh_json_write_kv_string(&t, "cap", g_audit_buf.cap);
+        sh_json_write_key(&t, "truncated");
+        sh_json_write_bool(&t, 1);
+        sh_json_write_object_end(&t);
+    }
+    /* Append the newline into the buffer (a byte is always kept for it), then
+     * emit the whole record with a single fwrite so concurrent event-loop /
+     * worker audit lines cannot interleave byte-wise on the shared stderr. */
+    g_audit_buf.data[g_audit_buf.len++] = '\n';
     fwrite(g_audit_buf.data, 1, g_audit_buf.len, stderr);
 }
