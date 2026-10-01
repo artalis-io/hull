@@ -20,6 +20,7 @@
 #include <keel/websocket_client.h>
 #include <keel/url.h>
 
+#include "hull/shared/async_backend.h"
 #include "log.h"
 
 #include <string.h>
@@ -227,6 +228,18 @@ static void js_ws_client_on_message(KlWsClientConn *ws, const char *data,
     JS_FreeValue(ud->ctx, ret);
 }
 
+/* The deferred half of on_close: drop the self-reference on the loop turn
+ * after Keel's close callback. That may run the finalizer, which frees ud
+ * and the KlWsClientConn. */
+static void js_ws_client_release_self(void *user_data)
+{
+    HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
+    if (JS_IsUndefined(ud->self_ref)) return;
+    JSValue self = ud->self_ref;
+    ud->self_ref = JS_UNDEFINED;
+    JS_FreeValue(ud->ctx, self);
+}
+
 static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
                                     const char *reason, size_t reason_len,
                                     void *user_data)
@@ -256,16 +269,25 @@ static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
         JS_FreeValue(ud->ctx, ret);
     }
 
-    /* Release self-reference - allow GC */
-    if (!JS_IsUndefined(ud->self_ref)) {
-        JS_FreeValue(ud->ctx, ud->self_ref);
-        ud->self_ref = JS_UNDEFINED;
-    }
     /* Mark closed (methods fail closed) but keep `client` non-NULL so the
      * finalizer frees the KlWsClientConn - Keel does NOT free it on close,
      * and we must not free it here (Keel touches `ws` immediately after this
      * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
     ud->closed = 1;
+
+    /* Release the self-reference on the next loop turn, never here. When it
+     * is the last reference QuickJS runs the finalizer at once, freeing ud
+     * (this function then wrote ud->closed into freed memory) and the
+     * KlWsClientConn Keel is about to use. If no timer can be had the
+     * reference is kept: a leak until teardown, not a use after free. */
+    if (!JS_IsUndefined(ud->self_ref)) {
+        const HlAsyncBackend *be = hl_async_backend();
+        if (!be || !ud->js->base.async_ctx ||
+            be->timer_add(ud->js->base.async_ctx, 0,
+                          js_ws_client_release_self, ud) == 0)
+            log_warn("[hull:ws:client] could not schedule the close "
+                     "release; the client is kept until shutdown");
+    }
 }
 
 static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
@@ -324,12 +346,13 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     }
 
 #ifdef HL_ENABLE_HTTP_CLIENT
-    if (js->base.http_cfg) {
-        if (hl_http_check_host(js->base.http_cfg, parsed.host,
-                                parsed.host_len) != 0) {
-            JS_FreeCString(ctx, url);
-            return JS_ThrowTypeError(ctx, "host not in allowlist");
-        }
+    /* No http config means an empty manifest.hosts: nothing is allowed. This
+     * used to skip the check, so ws.connect reached any host. */
+    if (!js->base.http_cfg ||
+        hl_http_check_host(js->base.http_cfg, parsed.host,
+                           parsed.host_len) != 0) {
+        JS_FreeCString(ctx, url);
+        return JS_ThrowTypeError(ctx, "host not in allowlist");
     }
 #else
     /* Without HL_ENABLE_HTTP_CLIENT the host allowlist function isn't

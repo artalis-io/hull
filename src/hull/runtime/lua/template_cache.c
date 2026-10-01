@@ -118,7 +118,11 @@ static int fresh_compile(lua_State *L,
                          const char *code, size_t code_len,
                          const char *chunkname)
 {
-    int rc = luaL_loadbuffer(L, code, code_len, chunkname);
+    /* Text only: `code` reaches here from the template bridge, which app code
+     * can call. A binary chunk is unverified Lua bytecode - crafted, it
+     * corrupts the VM (out of the sandbox), and it carries its own source
+     * name, past the forced "=template:" one. */
+    int rc = luaL_loadbufferx(L, code, code_len, chunkname, "t");
     if (rc != LUA_OK) return rc;
     rc = lua_pcall(L, 0, 1, 0);
     return rc;
@@ -145,7 +149,8 @@ int hl_lua_template_compile_cached(lua_State *L,
     uint8_t *bc     = NULL;
     size_t   bc_len = 0;
     if (hl_blob_store_get(store, key, /*track_access=*/1, &bc, &bc_len) == 0) {
-        int rc = luaL_loadbuffer(L, (const char *)bc, bc_len, chunkname);
+        /* Binary: the cache holds what this runtime dumped. */
+        int rc = luaL_loadbufferx(L, (const char *)bc, bc_len, chunkname, "b");
         free(bc);
         if (rc == LUA_OK) return LUA_OK;
         /* Stale / corrupt entry - pop error, evict, fall through. */

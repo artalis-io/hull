@@ -122,10 +122,10 @@ end
 M.DEFAULT_LIMIT = 16
 
 --- fn(item, i) for every item, at most opts.limit (default 16) at once;
---- results[i] is fn's first result for items[i], and results.n is the item
---- count (results may hold nils). The items are items[1..items.n] when the
---- list carries an n (table.pack), else items[1..#items]. Failures as for
---- gather.
+--- results[i] is fn's first result for items[i] - a plain list, so it
+--- encodes as JSON (results may hold nils where fn returned nil). The items
+--- are items[1..items.n] when the list carries an n (table.pack), else
+--- items[1..#items]. Failures as for gather.
 function M.map(items, fn, opts)
     if type(items) ~= "table" then
         error("hull.map: expected a list, got " .. type(items), 2)
@@ -151,7 +151,7 @@ function M.map(items, fn, opts)
     elseif math.type(n) ~= "integer" or n < 0 then
         error("hull.map: items.n must be a non-negative integer", 2)
     end
-    local results, errors = { n = n }, nil
+    local results, errors = {}, nil
     local next_i = 1
 
     -- A fixed number of workers each take the next index until none are

@@ -117,6 +117,14 @@ struct HlLuaSseRoute {
  * Lua instruction-count hook (gas metering). */
 void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar);
 
+/* Every binding that suspends the running coroutine calls this before it
+ * arms anything (allocates an op, submits, suspends): its continuation will
+ * resume lua->active_co, and lua_yieldk only raises after the op is armed.
+ * Raises unless L is the coroutine the runtime drives and can yield - so not
+ * while a module loads, in a C callback (string.gsub, table.sort), or in a
+ * coroutine the app made. Defined in async.c. */
+int hl_lua_check_can_wait(lua_State *L, const char *what);
+
 /* The text of the error value at `idx` on `from`, into `buf` (always
  * returned, always terminated). A string or number as is; anything else
  * through a protected tostring on the main state, so an error object with

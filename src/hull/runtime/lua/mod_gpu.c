@@ -20,6 +20,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
 #include "hull/utils/alloc.h"
+#include "internal.h"   /* hl_lua_check_can_wait */
 #endif
 
 #include <keel/http_server.h>
@@ -721,6 +722,7 @@ static void lua_push_worker_gpu_result(lua_State *L, void *driver)
 /* Async dispatch - submits GPU work to thread pool */
 static int l_gpu_async_dispatch(lua_State *L)
 {
+    hl_lua_check_can_wait(L, "gpu.async.dispatch()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "gpu.async not available (no thread pool)");
@@ -1167,6 +1169,7 @@ static void lua_push_worker_gpu_pipeline_result(lua_State *L, void *driver)
 
 static int l_gpu_async_pipeline(lua_State *L)
 {
+    hl_lua_check_can_wait(L, "gpu.async.pipeline()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "gpu.async not available (no thread pool)");

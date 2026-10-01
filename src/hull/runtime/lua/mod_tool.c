@@ -608,7 +608,7 @@ static int l_tool_set_app_dir(lua_State *L)
 static int l_tool_loadfile(lua_State *L)
 {
     const char *path = luaL_checkstring(L, 1);
-    int rc = luaL_loadfile(L, path);
+    int rc = luaL_loadfilex(L, path, "t");   /* source only, never bytecode */
     if (rc != LUA_OK) {
         /* Stack: error message. Return nil, errmsg. */
         lua_pushnil(L);

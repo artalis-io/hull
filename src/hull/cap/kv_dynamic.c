@@ -38,37 +38,6 @@ static void kv_dsn_scheme(const char *dsn, char *buf, size_t bufsz)
 
 /* Host from a network DSN authority (scheme://[user[:pass]@]host[:port]/...).
  * IPv6 "[::1]" is returned without brackets. Returns 1 + host, or 0. */
-static int kv_dsn_host(const char *dsn, char *buf, size_t bufsz)
-{
-    const char *sep = strstr(dsn, "://");
-    if (!sep) return 0;
-    const char *p   = sep + 3;
-    const char *end = p + strcspn(p, "/?#");
-
-    const char *at = NULL;
-    for (const char *q = p; q < end; q++)
-        if (*q == '@') at = q;
-    const char *host = at ? at + 1 : p;
-
-    const char *hend;
-    if (host < end && *host == '[') {
-        const char *close = memchr(host, ']', (size_t)(end - host));
-        if (!close) return 0;
-        host++;
-        hend = close;
-    } else {
-        hend = host;
-        while (hend < end && *hend != ':')
-            hend++;
-    }
-
-    size_t n = (size_t)(hend - host);
-    if (n == 0 || n >= bufsz) return 0;
-    memcpy(buf, host, n);
-    buf[n] = '\0';
-    return 1;
-}
-
 int hl_cap_kv_check_dsn(const struct HlManifestKvDynamic *policy, const char *dsn,
                         char *errbuf, size_t errlen)
 {
@@ -101,8 +70,8 @@ int hl_cap_kv_check_dsn(const struct HlManifestKvDynamic *policy, const char *ds
     }
 
     char host[256];
-    if (!kv_dsn_host(dsn, host, sizeof host)) {
-        if (errbuf && errlen) snprintf(errbuf, errlen, "kv.open: could not parse host from DSN");
+    if (!hl_dsn_host(dsn, host, sizeof host)) {
+        if (errbuf && errlen) snprintf(errbuf, errlen, "kv.open: DSN has no host, or one a backend could parse differently");
         return -1;
     }
     if (!hl_host_match_any_env(policy->hosts, policy->host_count, host)) {

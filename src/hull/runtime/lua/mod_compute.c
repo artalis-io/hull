@@ -16,6 +16,7 @@
 #include "hull/net_backend.h"
 #include "hull/worker_wasm.h"
 #include "hull/vfs.h"
+#include "internal.h"   /* hl_lua_check_can_wait */
 
 #include <keel/http_server.h>
 
@@ -412,6 +413,7 @@ static int lua_compute_async_k(lua_State *L, int status, lua_KContext kctx)
 
 static int lua_compute_async_call(lua_State *L)
 {
+    hl_lua_check_can_wait(L, "compute.async.call()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "compute.async not available (no thread pool)");
@@ -690,6 +692,7 @@ static int lua_wasm_inst_call(lua_State *L)
 /* inst:async_call(input, opts?) - dispatch to thread pool, yield */
 static int lua_wasm_inst_async_call(lua_State *L)
 {
+    hl_lua_check_can_wait(L, "instance:async_call()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "WasmInstance:async_call: not available (no thread pool)");
