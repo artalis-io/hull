@@ -43,6 +43,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <keel/sockaddr.h>
 
@@ -62,6 +64,66 @@ static void tp_disarm_watchdog(void) { alarm(0); }
  *  and get_so_error reports 0; "fail" reports ECONNREFUSED; "immediate" makes
  *  connect() return 0. Close calls are counted per fd.
  * ════════════════════════════════════════════════════════════════════ */
+
+/* Does this host's socketpair(AF_UNIX) give SOCKETS? On Windows
+ * (Cosmopolitan) it gives descriptors that are not ("Socket operation on
+ * non-socket"), so SO_SNDBUF / SO_*TIMEO and the full-send-buffer "pending"
+ * trick the mock provider relies on do not apply there. Tests that need them
+ * skip on such a host rather than fail for reasons unrelated to the
+ * transport (which itself uses real TCP sockets, where all of this works). */
+static int tp_unix_pairs_are_sockets(void)
+{
+    static int known = -1;
+    if (known >= 0) return known;
+    int sv[2];
+    known = 0;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+        int type = 0;
+        socklen_t l = sizeof type;
+        known = getsockopt(sv[0], SOL_SOCKET, SO_TYPE, &type, &l) == 0;
+        close(sv[0]);
+        close(sv[1]);
+    }
+    return known;
+}
+
+#define TP_NEEDS_UNIX_SOCKETS()                                              \
+    do {                                                                     \
+        if (!tp_unix_pairs_are_sockets())                                    \
+            UTEST_SKIP("socketpair(AF_UNIX) does not give sockets here "     \
+                       "(Windows): the mock's buffer-full pending trick "    \
+                       "and close status need them");                        \
+    } while (0)
+
+/* A connected pair of SOCKETS for the tests that only need socket options:
+ * AF_UNIX where that is a socket, else a connected TCP loopback pair. */
+static int tp_socketpair(int sv[2])
+{
+    if (tp_unix_pairs_are_sockets())
+        return socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family      = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t al = sizeof a;
+    int c = -1, srv = -1;
+    if (bind(lfd, (struct sockaddr *)&a, sizeof a) != 0 || listen(lfd, 1) != 0 ||
+        getsockname(lfd, (struct sockaddr *)&a, &al) != 0) goto fail;
+    c = socket(AF_INET, SOCK_STREAM, 0);
+    if (c < 0 || connect(c, (struct sockaddr *)&a, sizeof a) != 0) goto fail;
+    srv = accept(lfd, NULL, NULL);
+    if (srv < 0) goto fail;
+    close(lfd);
+    sv[0] = c;
+    sv[1] = srv;
+    return 0;
+fail:
+    if (c >= 0) close(c);
+    close(lfd);
+    return -1;
+}
 
 enum { FK_PENDING = 0, FK_SUCCEED = 1, FK_FAIL = 2, FK_IMMEDIATE = 3 };
 
@@ -291,6 +353,7 @@ UTEST(pg_transport_connect, immediate_success_rc0)
 /* ── RFC 8305 stagger: address 0 pends, the stagger starts address 1 which wins ─ */
 UTEST(pg_transport_connect, stagger_second_address_wins)
 {
+    TP_NEEDS_UNIX_SOCKETS();
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 2; g_fk_disp[0] = FK_PENDING; g_fk_disp[1] = FK_SUCCEED;
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
@@ -323,6 +386,7 @@ UTEST(pg_transport_connect, all_addresses_fail_detach)
 /* ── the connect deadline fires -> NULL + confirmed detachment ──────── */
 UTEST(pg_transport_connect, deadline_fires_detaches)
 {
+    TP_NEEDS_UNIX_SOCKETS();
     fk_reset(); tp_arm_watchdog();
     g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;   /* never completes on its own */
     db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
@@ -673,6 +737,7 @@ static HlDbTransport *tp_make_live_op(void)
  *    the exact contract hl_db_transport_close relies on. ────────────────────────── */
 UTEST(pg_transport_close, teardown_returns_status)
 {
+    TP_NEEDS_UNIX_SOCKETS();
     fk_reset(); tp_arm_watchdog();
     HlDbTransport *t = tp_make_live_op();
     ASSERT_TRUE(t != NULL);
@@ -695,6 +760,7 @@ UTEST(pg_transport_close, teardown_returns_status)
  *    LSan sees no leak. Proves both preservation and the retryable close. ──────── */
 UTEST(pg_transport_close, forced_non_detach_close_preserves_then_retry)
 {
+    TP_NEEDS_UNIX_SOCKETS();
     fk_reset(); tp_arm_watchdog();
     HlDbTransport *t = tp_make_live_op();
     ASSERT_TRUE(t != NULL);
@@ -722,7 +788,7 @@ UTEST(pg_transport_close, forced_non_detach_close_preserves_then_retry)
  * (bounded on BOTH sides, allowing only modest kernel rounding). */
 UTEST(db_transport_io_timeout, installs_both_options)
 {
-    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    int sv[2]; ASSERT_EQ(tp_socketpair(sv), 0);
     char err[128] = {0};
     HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, err, sizeof err);
     ASSERT_TRUE(t != NULL);
@@ -742,7 +808,7 @@ UTEST(db_transport_io_timeout, installs_both_options)
 
 UTEST(db_transport_io_timeout, zero_is_noop)
 {
-    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    int sv[2]; ASSERT_EQ(tp_socketpair(sv), 0);
     char err[128] = {0};
     HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, err, sizeof err);
     ASSERT_TRUE(t != NULL);
@@ -761,7 +827,7 @@ UTEST(db_transport_io_timeout, zero_is_noop)
 UTEST(db_transport_io_timeout, stalled_read_expires)
 {
     tp_arm_watchdog();   /* alarm(5): a broken timeout can never hang past 5 s */
-    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    int sv[2]; ASSERT_EQ(tp_socketpair(sv), 0);
     char err[128] = {0};
     HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, err, sizeof err);
     ASSERT_TRUE(t != NULL);
