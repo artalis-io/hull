@@ -59,6 +59,16 @@ typedef struct PollTimer      PollTimer;
 typedef struct PollWatcher    PollWatcher;
 typedef struct PollCompletion PollCompletion;
 
+/* A completion batch tick() has detached and is running. op_cancel nulls
+ * matching entries here as well as in the queue: an earlier completion in
+ * the same batch can free an op whose resume sits later in it. Frames stack
+ * because a completion may run a nested tick. */
+typedef struct PollDrain {
+    PollCompletion   *batch;
+    size_t            n;
+    struct PollDrain *prev;
+} PollDrain;
+
 /* ── Timer (min-heap entry, addressed by stable id) ─────────────────── */
 
 struct PollTimer {
@@ -135,6 +145,7 @@ struct HlAsyncBackendCtx {
     PollCompletion    *completions;
     size_t             completion_count;
     size_t             completion_cap;
+    PollDrain         *draining;     /* batches tick() is running; under lock */
 };
 
 /* ── Monotonic clock ────────────────────────────────────────────────── */
@@ -488,11 +499,23 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
     ctx->completions       = NULL;
     ctx->completion_count  = 0;
     ctx->completion_cap    = 0;
+    PollDrain drain = { batch, batch_n, ctx->draining };
+    ctx->draining = &drain;
     pthread_mutex_unlock(&ctx->lock);
 
     for (size_t i = 0; i < batch_n; i++) {
-        if (batch[i].fn) batch[i].fn(batch[i].user);
+        /* Read under the lock: an earlier entry's callback may have
+         * cancelled this one (poll_op_cancel nulls its fn). */
+        pthread_mutex_lock(&ctx->lock);
+        HlAsyncWorkFn fn = batch[i].fn;
+        void *user = batch[i].user;
+        pthread_mutex_unlock(&ctx->lock);
+        if (fn) fn(user);
     }
+
+    pthread_mutex_lock(&ctx->lock);
+    ctx->draining = drain.prev;
+    pthread_mutex_unlock(&ctx->lock);
     free(batch);
 
     /* ── Step 5: fire expired timers. Pop under the lock, fire after. */
@@ -944,6 +967,13 @@ static void poll_op_cancel(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
         ctx->completions[keep++] = ctx->completions[i];
     }
     ctx->completion_count = keep;
+    /* ...and from any batch tick() has already detached and is running:
+     * an earlier completion in it may be the one freeing this op. */
+    for (PollDrain *d = ctx->draining; d; d = d->prev)
+        for (size_t i = 0; i < d->n; i++)
+            if (d->batch[i].fn == poll_op_complete_eventloop &&
+                d->batch[i].user == op)
+                d->batch[i].fn = NULL;
     pthread_mutex_unlock(&ctx->lock);
 
     PollOpState *s = op->_backend_state;

@@ -117,6 +117,19 @@ struct HlLuaSseRoute {
  * Lua instruction-count hook (gas metering). */
 void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar);
 
+/* Keep the value at `idx` reachable until the binding returns, by storing it
+ * in the anchor table at absolute index `anchor` (a lua_newtable the binding
+ * made first). For a pointer taken from a value that is then popped
+ * (lua_tolstring, a buffer view, an image's pixels): a number converted in
+ * place, or an __index result, has no other reference, and GC during the
+ * rest of the parse freed what the pointer still named. */
+static inline void hl_lua_anchor(lua_State *L, int anchor, int idx)
+{
+    idx = lua_absindex(L, idx);
+    lua_pushvalue(L, idx);
+    lua_rawseti(L, anchor, (lua_Integer)lua_rawlen(L, anchor) + 1);
+}
+
 /* Every binding that suspends the running coroutine calls this before it
  * arms anything (allocates an op, submits, suspends): its continuation will
  * resume lua->active_co, and lua_yieldk only raises after the op is armed.

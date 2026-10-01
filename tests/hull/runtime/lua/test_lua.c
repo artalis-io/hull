@@ -6434,6 +6434,47 @@ UTEST(lua_runtime, db_async_copies_empty_params)
     free(c);
 }
 
+/* A Lua UDF registered from a coroutine (a handler, app.main) runs on every
+ * later query - after that coroutine has finished and been collected. It
+ * kept the coroutine's lua_State and ran on it (a use after free under ASan);
+ * it runs on the main state now. */
+UTEST(lua_cap, udf_outlives_the_coroutine_that_registered_it)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  if not db or not db.udf then return -1 end "
+        "  local co = coroutine.create(function() "
+        "    db.udf.register('hull_twice', function(x) return x * 2 end) "
+        "  end) "
+        "  assert(coroutine.resume(co)) "
+        "  co = nil "
+        "  collectgarbage() collectgarbage() "
+        "  local rows = db.query('SELECT hull_twice(21) AS v') "
+        "  return rows[1].v "
+        "end)()");
+    EXPECT_EQ(v, 42);
+    cleanup_lua_caps();
+}
+
+/* Query parameters stay on the Lua stack while they are bound (they keep their
+ * strings alive). The marshaller pushed one per parameter with no room check,
+ * so past the free slots it wrote out of bounds. */
+UTEST(lua_cap, many_query_params_fit_the_stack)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local p = {} for i = 1, 300 do p[i] = i end "
+        "  local rows = db.query('SELECT ' .. ('?+'):rep(299) .. '? AS s', p) "
+        "  return rows[1].s "
+        "end)()");
+    EXPECT_EQ(v, 45150);
+    cleanup_lua_caps();
+}
+
 /* Error values reach the logs as text: a table with __tostring (hull.gather's
  * aggregate) as its message, where lua_tostring gave NULL - "(unknown)", or a
  * NULL for "%s". Also from a coroutine that died with it, and without letting

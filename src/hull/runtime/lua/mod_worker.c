@@ -280,7 +280,9 @@ static int lua_worker_dispatch(lua_State *L)
     if (!actx->detached &&
         hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
-        actx->cont->cancel(actx->cont);
+        /* No cancel(): it unrefs the handler coroutine's registry slot,
+         * which dispatch unrefs again when this error reaches it - a
+         * double luaL_unref corrupts the registry free list. */
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;
         return luaL_error(L, "worker.dispatch: failed to suspend connection");

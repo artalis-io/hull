@@ -335,7 +335,10 @@ static int lua_db_udf_register(lua_State *L)
         if (!udf_ctx)
             return luaL_error(L, "db.udf.register: out of memory");
 
-        udf_ctx->L = L;
+        /* The main state, not L: L is whatever coroutine registered the
+         * UDF (a handler, app.main), and the UDF runs on every later query
+         * - long after that coroutine has finished and been collected. */
+        udf_ctx->L = lua->L;
         udf_ctx->alive = &lua->udf_runtime_alive;
         lua_pushvalue(L, 2);
         udf_ctx->func_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -376,7 +379,10 @@ static int lua_db_udf_register(lua_State *L)
             return luaL_error(L, "db.udf.register: out of memory");
         }
 
-        udf_ctx->L = L;
+        /* The main state, not L: L is whatever coroutine registered the
+         * UDF (a handler, app.main), and the UDF runs on every later query
+         * - long after that coroutine has finished and been collected. */
+        udf_ctx->L = lua->L;
         udf_ctx->alive = &lua->udf_runtime_alive;
         /* finalize is on top of stack, step below it */
         udf_ctx->finalize_ref = luaL_ref(L, LUA_REGISTRYINDEX);

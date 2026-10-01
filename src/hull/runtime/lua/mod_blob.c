@@ -231,10 +231,15 @@ static int lua_blob_writer_new(lua_State *L)
     if (open_rc != 0)
         return luaL_error(L, "blob.writer: open failed");
 
+    /* One user value: the store, kept alive while the writer is. A later
+     * blob.init replaces the registry's store; its __gc then freed the
+     * HlBlob this writer still used. */
     HlBlobWriterLua *ud = (HlBlobWriterLua *)
-        lua_newuserdatauv(L, sizeof(*ud), 0);
+        lua_newuserdatauv(L, sizeof(*ud), 1);
     ud->w = w;
     luaL_setmetatable(L, HL_BLOB_WRITER_MT);
+    lua_getfield(L, LUA_REGISTRYINDEX, HL_BLOB_REG_KEY);
+    lua_setiuservalue(L, -2, 1);
     return 1;
 }
 
@@ -316,10 +321,13 @@ static int lua_blob_reader_new(lua_State *L)
     if (hl_cap_blob_reader_open(b, id, track, &r) != 0)
         return luaL_error(L, "blob.reader: blob not found");
 
+    /* One user value: the store, kept alive while the reader is. */
     HlBlobReaderLua *ud = (HlBlobReaderLua *)
-        lua_newuserdatauv(L, sizeof(*ud), 0);
+        lua_newuserdatauv(L, sizeof(*ud), 1);
     ud->r = r;
     luaL_setmetatable(L, HL_BLOB_READER_MT);
+    lua_getfield(L, LUA_REGISTRYINDEX, HL_BLOB_REG_KEY);
+    lua_setiuservalue(L, -2, 1);
     return 1;
 }
 

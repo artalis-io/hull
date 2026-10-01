@@ -230,6 +230,43 @@ UTEST(async_backend_poll, op_cancel_drops_an_already_queued_completion)
     fixture_free(&f);
 }
 
+/* A completion can cancel an op whose resume sits later in the SAME batch -
+ * one tick() has already detached from the queue. op_cancel searched only
+ * the queue, so the later entry still ran against the op's storage: freed,
+ * or (as here) reused for a new wait, which it then resumed spuriously. */
+static Fixture   *g_batch_fix;
+static HlAsyncOp *g_batch_victim;
+static void on_resume_cancels_and_reuses_victim(HlAsyncOp *op)
+{
+    (void)op;
+    g_batch_fix->be->op_cancel(g_batch_fix->ctx, g_batch_victim);
+    /* The owner reuses the storage for a new, still pending wait. */
+    g_batch_victim->on_resume = on_resume_should_not_fire;
+    (void)g_batch_fix->be->op_suspend(g_batch_fix->ctx, g_batch_victim);
+}
+
+UTEST(async_backend_poll, op_cancel_reaches_the_batch_being_drained)
+{
+    Fixture f;
+    ASSERT_EQ(fixture_init(&f), 0);
+
+    cancelled_op_resumed = 0;
+    HlAsyncOp first  = { .on_resume = on_resume_cancels_and_reuses_victim };
+    HlAsyncOp victim = { .on_resume = on_resume_should_not_fire };
+    ASSERT_EQ(f.be->op_suspend(f.ctx, &first), 0);
+    ASSERT_EQ(f.be->op_suspend(f.ctx, &victim), 0);
+    g_batch_fix = &f;
+    g_batch_victim = &victim;
+
+    f.be->op_complete(f.ctx, &first);
+    f.be->op_complete(f.ctx, &victim);   /* same batch, after `first` */
+    for (int i = 0; i < 5; i++) f.be->tick(f.ctx, 5);
+    ASSERT_EQ(cancelled_op_resumed, 0);
+
+    f.be->op_cancel(f.ctx, &victim);      /* the reused wait */
+    fixture_free(&f);
+}
+
 /* The retraction must be specific: cancelling one op must not silently eat
  * another op's pending resume. */
 static int other_op_resumed;

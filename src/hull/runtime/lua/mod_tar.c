@@ -19,6 +19,7 @@
 #include "hull/cap/tar.h"
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
+#include "internal.h"   /* hl_lua_anchor */
 
 #include <stdlib.h>
 #include <string.h>
@@ -84,7 +85,7 @@ static int l_tar_parse(lua_State *L)
  * remain on the stack. Returns a malloc'd array (caller frees) + count, or
  * NULL on a shape error (msg set). */
 static HlTarEntry *read_entries(lua_State *L, int idx, size_t *out_n,
-                                const char **msg)
+                                const char **msg, int anchor)
 {
     if (lua_type(L, idx) != LUA_TTABLE) {
         *msg = "tar.create: arg 1 must be a table of entries";
@@ -108,7 +109,8 @@ static HlTarEntry *read_entries(lua_State *L, int idx, size_t *out_n,
         HlTarEntry *e = &ents[i - 1];
 
         lua_getfield(L, -1, "name");
-        e->name = lua_tostring(L, -1);          /* borrowed (kept by entry tbl) */
+        e->name = lua_tostring(L, -1);          /* borrowed, anchored below */
+        hl_lua_anchor(L, anchor, -1);
         lua_pop(L, 1);
         if (!e->name) {
             lua_pop(L, 1);
@@ -129,6 +131,7 @@ static HlTarEntry *read_entries(lua_State *L, int idx, size_t *out_n,
             lua_getfield(L, -1, "data");
             size_t len = 0;
             const char *d = lua_tolstring(L, -1, &len);  /* borrowed */
+            hl_lua_anchor(L, anchor, -1);
             lua_pop(L, 1);
             e->data = (const unsigned char *)(d ? d : "");
             e->size = d ? len : 0;
@@ -144,7 +147,12 @@ static int l_tar_create(lua_State *L)
 {
     size_t n = 0;
     const char *msg = NULL;
-    HlTarEntry *ents = read_entries(L, 1, &n, &msg);
+    /* Anchor the names and data the entries point into: a number or an
+     * __index result is not held by the entries table, and a later entry's
+     * __index code could run GC before hl_tar_create reads them. */
+    lua_settop(L, 1);
+    lua_newtable(L);
+    HlTarEntry *ents = read_entries(L, 1, &n, &msg, 2);
     if (!ents && n != 0) {          /* real error (n==0 is the empty-array case) */
         lua_pushnil(L);
         lua_pushstring(L, msg ? msg : "tar.create: bad entries");
