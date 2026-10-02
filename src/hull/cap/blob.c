@@ -45,12 +45,13 @@ static int resolve_root(const HlFsConfig *fs_cfg, const char *dir,
 }
 
 /* The store creates files of its own naming anywhere beneath its directory,
- * so the manifest must grant fs.write over that directory as a subtree: a
- * SUBTREE grant at or above it, or a not-yet-existing directory granted with
- * a trailing slash ("data/blobs/"). Asked of the policy with a probe name
- * inside the directory - the same question fs.write would ask for any file
- * the store writes. Without this the directory only had to lie inside the app
- * root, so blob.init made a writable store with no fs.write grant at all. */
+ * so the manifest must grant fs.write over that directory: a SUBTREE grant at
+ * or above it, a not-yet-existing directory granted with a trailing slash
+ * ("data/blobs/"), or a grant naming exactly the directory ("data/blobs",
+ * which for a path not made yet compiles as "create this one name" - but the
+ * app named the store's own directory, so it granted the store). Without this
+ * the directory only had to lie inside the app root, so blob.init made a
+ * writable store with no fs.write grant at all. */
 static int blob_dir_granted(const HlFsConfig *cfg, const char *dir)
 {
     if (!cfg->policy)
@@ -62,11 +63,15 @@ static int blob_dir_granted(const HlFsConfig *cfg, const char *dir)
     char scratch[PATH_MAX + 2];   /* the selection writes the residual here */
     HlFsSelection sel = hl_fs_policy_select(cfg->policy, probe, HL_FS_OPEN_WRITE,
                                             scratch, sizeof scratch);
-    if (!sel.entry)
-        return 0;
-    return sel.entry->kind == HL_FS_ENTRY_SUBTREE ||
-           (sel.entry->kind == HL_FS_ENTRY_CREATE &&
-            sel.entry->terminal == HL_FS_TERMINAL_SUBTREE);
+    if (sel.entry &&
+        (sel.entry->kind == HL_FS_ENTRY_SUBTREE ||
+         (sel.entry->kind == HL_FS_ENTRY_CREATE &&
+          sel.entry->terminal == HL_FS_TERMINAL_SUBTREE)))
+        return 1;
+    /* A grant naming the directory itself. */
+    sel = hl_fs_policy_select(cfg->policy, dir, HL_FS_OPEN_WRITE,
+                              scratch, sizeof scratch);
+    return sel.entry && sel.entry->kind == HL_FS_ENTRY_CREATE;
 }
 
 int hl_cap_blob_init(HlBlob **out,

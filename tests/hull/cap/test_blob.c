@@ -170,6 +170,15 @@ UTEST(hl_cap_blob, init_needs_a_write_grant_over_the_directory)
     ASSERT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "data/blobs", 1, 0), 0);
     ASSERT_TRUE(b != NULL);
     hl_cap_blob_free(b);
+    b = NULL;
+    env_free(&e);
+
+    /* ...and the same directory named without the slash, as apps write it. */
+    static const char *const named[] = { "data/blobs" };
+    ASSERT_EQ(env_init_grants(&e, named, 1), 0);
+    ASSERT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "data/blobs", 1, 0), 0);
+    ASSERT_TRUE(b != NULL);
+    hl_cap_blob_free(b);
     env_free(&e);
 }
 
