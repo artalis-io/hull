@@ -9,6 +9,7 @@
 #include "hull/cap/fs.h"
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
+#include "protected.h"   /* pushes that cannot leak the C buffer */
 #endif
 
 #include <stdlib.h>
@@ -242,7 +243,10 @@ static int l_image_encode(lua_State *L)
         return 2;
     }
 
-    lua_pushlstring(L, (const char *)out, out_len);
+    if (hl_lua_pushlstring_safe(L, (const char *)out, out_len) != 0) {
+        free(out);
+        return luaL_error(L, "not enough memory for the result");
+    }
     free(out);
     return 1;
 }
@@ -285,7 +289,10 @@ static int l_image_to_wasm(lua_State *L)
     buf[8] = (char)(img->format + 1); /* 1-based: RGBA8=1, R8=2, RGBA16F=3, R32F=4 */
     memcpy(buf + hdr, img->pixels, img->pixel_len);
 
-    lua_pushlstring(L, buf, total);
+    if (hl_lua_pushlstring_safe(L, buf, total) != 0) {
+        free(buf);
+        return luaL_error(L, "not enough memory for the result");
+    }
     free(buf);
     return 1;
 }

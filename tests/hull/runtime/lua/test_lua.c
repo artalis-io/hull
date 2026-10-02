@@ -6655,6 +6655,40 @@ UTEST(lua_stdlib, client_ip_matrix)
     cleanup_lua();
 }
 
+/* Running out of Lua heap while a query's rows are being built raised from
+ * inside the backend's read loop - on Postgres / MySQL that left the reply on
+ * the wire, and the next query on the connection returned this one's rows.
+ * The row is now built under lua_pcall: the query stops, the backend drains,
+ * and the error is raised afterwards, so the connection stays in step. */
+UTEST(lua_cap, a_result_too_big_for_the_heap_fails_cleanly)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "db.exec('CREATE TABLE big (x BLOB)') "
+        "db.exec(\"INSERT INTO big SELECT randomblob(65536) FROM "
+        "  (WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c "
+        "   WHERE i < 160) SELECT i FROM c)\")"), LUA_OK);
+
+    size_t saved = lua_rt.mem_limit;
+    lua_rt.mem_limit = 4u << 20;   /* the 10 MB result cannot fit */
+    int rc = luaL_dostring(lua_rt.L,
+        "local ok, err = pcall(db.query, 'SELECT x FROM big') "
+        "assert(not ok) "
+        "return tostring(err)");
+    lua_rt.mem_limit = saved;
+    ASSERT_EQ(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    EXPECT_TRUE_MSG(strstr(err, "not enough memory for the result") != NULL, err);
+    lua_settop(lua_rt.L, 0);
+
+    /* The connection answers the next query with its own result. */
+    EXPECT_EQ(eval_int("db.query('SELECT count(*) AS n FROM big')[1].n"), 160);
+    EXPECT_EQ(eval_int("#db.query('SELECT x FROM big LIMIT 3')"), 3);
+    cleanup_lua_caps();
+}
+
 /* A stdlib helper that calls a function the app handed it does not lend that
  * function its stdlib identity: given `db.exec` itself as retry_on, retry.run
  * calls it with the value the app's fn returned, and the `_hull_*` guard still

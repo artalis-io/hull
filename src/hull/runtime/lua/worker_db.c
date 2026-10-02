@@ -13,6 +13,7 @@
 
 #include "hull/runtime/lua.h"
 #include "internal.h"
+#include "protected.h"
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
@@ -96,39 +97,20 @@ typedef struct {
     lua_State *L;
     int        table_idx;
     int        row_count;
+    int        failed;    /* a row could not be built (out of memory) */
 } WorkerLuaQueryCtx;
 
+/* Runs inside the backend's read loop, so it must not raise: see
+ * lua_query_row_cb in mod_db.c. */
 static int worker_lua_row_cb(void *opaque, HlColumn *cols, int ncols)
 {
     WorkerLuaQueryCtx *qc = (WorkerLuaQueryCtx *)opaque;
-    qc->row_count++;
-
-    if (!lua_checkstack(qc->L, ncols + 2))
-        return -1;
-    lua_createtable(qc->L, 0, ncols);
-    for (int i = 0; i < ncols; i++) {
-        switch (cols[i].value.type) {
-        case HL_TYPE_INT:
-            lua_pushinteger(qc->L, (lua_Integer)cols[i].value.i);
-            break;
-        case HL_TYPE_DOUBLE:
-            lua_pushnumber(qc->L, (lua_Number)cols[i].value.d);
-            break;
-        case HL_TYPE_TEXT:
-        case HL_TYPE_BLOB:
-            lua_pushlstring(qc->L, cols[i].value.s, cols[i].value.len);
-            break;
-        case HL_TYPE_BOOL:
-            lua_pushboolean(qc->L, cols[i].value.b);
-            break;
-        case HL_TYPE_NIL:
-        default:
-            lua_pushnil(qc->L);
-            break;
-        }
-        lua_setfield(qc->L, -2, cols[i].name ? cols[i].name : "?");
+    if (hl_lua_append_row(qc->L, qc->table_idx, (lua_Integer)qc->row_count + 1,
+                          cols, ncols) != 0) {
+        qc->failed = 1;
+        return 1;
     }
-    lua_rawseti(qc->L, qc->table_idx, qc->row_count);
+    qc->row_count++;
     return 0;
 }
 
@@ -203,6 +185,8 @@ static int worker_lua_db_query(lua_State *L)
     }
     free(params);
 
+    if (qc.failed)
+        return luaL_error(L, "query: not enough memory for the result");
     if (rc != 0) {
         lua_pop(L, 1); /* pop result table */
         return luaL_error(L, "query: %s", hl_db_errmsg(h));

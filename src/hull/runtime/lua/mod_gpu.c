@@ -22,6 +22,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
 #include "hull/utils/alloc.h"
 #include "internal.h"   /* hl_lua_check_can_wait */
 #endif
+#include "protected.h"   /* pushes that cannot leak the C buffer */
 
 #include <keel/http_server.h>
 
@@ -342,14 +343,20 @@ static int l_gpu_dispatch(lua_State *L)
                 lua_push_wasm_buffer(L, wbuf);
             } else {
                 /* Fallback: copy to string if buffer creation fails */
-                lua_pushlstring(L, (const char *)output, output_len);
+                if (hl_lua_pushlstring_safe(L, (const char *)output, output_len) != 0) {
+                    free(output);
+                    return luaL_error(L, "not enough memory for the result");
+                }
                 free(output);
             }
         } else
 #endif
         {
             (void)want_buffer;
-            lua_pushlstring(L, (const char *)output, output_len);
+            if (hl_lua_pushlstring_safe(L, (const char *)output, output_len) != 0) {
+                free(output);
+                return luaL_error(L, "not enough memory for the result");
+            }
             free(output);
         }
     } else {
@@ -429,7 +436,10 @@ static int l_gpu_buffer_read(lua_State *L)
         return 2;
     }
 
-    lua_pushlstring(L, (const char *)data, len);
+    if (hl_lua_pushlstring_safe(L, (const char *)data, len) != 0) {
+        free(data);
+        return luaL_error(L, "not enough memory for the result");
+    }
     free(data);
     return 1;
 }
@@ -1159,7 +1169,10 @@ static int l_gpu_pipeline(lua_State *L)
         }
 #endif
         (void)pipe_want_buffer;
-        lua_pushlstring(L, (const char *)result.data[0], result.len[0]);
+        if (hl_lua_pushlstring_safe(L, (const char *)result.data[0], result.len[0]) != 0) {
+            hl_cap_gpu_pipeline_result_free(&result);
+            return luaL_error(L, "not enough memory for the result");
+        }
         hl_cap_gpu_pipeline_result_free(&result);
         return 1;
     }

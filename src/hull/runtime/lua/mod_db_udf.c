@@ -109,27 +109,67 @@ static void lua_to_sqlite_result(lua_State *L, sqlite3_context *ctx)
     }
 }
 
+/* A UDF runs inside sqlite3_step, and SQLite cannot be unwound through: a
+ * Lua error raised there - from pushing an argument, building the aggregate's
+ * context table, or converting the result, not only from the UDF itself -
+ * would longjmp across SQLite's frames. So the whole marshal -> call ->
+ * unmarshal sequence runs as one C function under lua_pcall, and a failure is
+ * reported the way SQLite expects, through sqlite3_result_error. */
+typedef struct {
+    sqlite3_context  *ctx;
+    int               argc;
+    sqlite3_value   **argv;
+    int               fn_ref;
+    LuaAggGroupState *gs;      /* aggregates only */
+    int               nresults;
+} LuaUdfCall;
+
+/* (arg: LuaUdfCall *) */
+static int lua_udf_call_k(lua_State *L)
+{
+    LuaUdfCall *c = (LuaUdfCall *)lua_touserdata(L, 1);
+    luaL_checkstack(L, c->argc + 3, "UDF arguments");
+    lua_rawgeti(L, LUA_REGISTRYINDEX, c->fn_ref);
+    int nargs = c->argc;
+    if (c->gs) {
+        if (c->gs->ctx_table_ref == 0) {
+            lua_newtable(L);
+            c->gs->ctx_table_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        }
+        lua_rawgeti(L, LUA_REGISTRYINDEX, c->gs->ctx_table_ref);
+        nargs++;
+    }
+    for (int i = 0; i < c->argc; i++)
+        lua_push_sqlite_value(L, c->argv[i]);
+    lua_call(L, nargs, c->nresults);
+    if (c->nresults > 0)
+        lua_to_sqlite_result(L, c->ctx);
+    return 0;
+}
+
+/* Run @p c protected; on failure report @p what through SQLite. */
+static void lua_udf_run(lua_State *L, LuaUdfCall *c, const char *what)
+{
+    if (!lua_checkstack(L, 2)) {
+        sqlite3_result_error_nomem(c->ctx);
+        return;
+    }
+    lua_pushcfunction(L, lua_udf_call_k);
+    lua_pushlightuserdata(L, c);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        sqlite3_result_error(c->ctx, err ? err : what, -1);
+        lua_pop(L, 1);
+    }
+}
+
 /* Scalar Lua UDF callback */
 static void lua_scalar_udf_func(sqlite3_context *ctx, int argc,
                                  sqlite3_value **argv)
 {
     LuaScalarUdfCtx *udf = (LuaScalarUdfCtx *)sqlite3_user_data(ctx);
-    lua_State *L = udf->L;
-
-    lua_rawgeti(L, LUA_REGISTRYINDEX, udf->func_ref);
-
-    for (int i = 0; i < argc; i++)
-        lua_push_sqlite_value(L, argv[i]);
-
-    if (lua_pcall(L, argc, 1, 0) != LUA_OK) {
-        const char *err = lua_tostring(L, -1);
-        sqlite3_result_error(ctx, err ? err : "Lua UDF error", -1);
-        lua_pop(L, 1);
-        return;
-    }
-
-    lua_to_sqlite_result(L, ctx);
-    lua_pop(L, 1);
+    LuaUdfCall c = { ctx, argc, argv, udf->func_ref, NULL, 1 };
+    lua_udf_run(udf->L, &c, "Lua UDF error");
 }
 
 /* Destroy callback for scalar Lua UDF */
@@ -157,23 +197,10 @@ static void lua_agg_step_func(sqlite3_context *ctx, int argc,
         return;
     }
 
-    /* Create context table on first call for this group */
-    if (gs->ctx_table_ref == 0) {
-        lua_newtable(L);
-        gs->ctx_table_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    }
-
-    /* Call step(ctx_table, arg1, arg2, ...) */
-    lua_rawgeti(L, LUA_REGISTRYINDEX, udf->step_ref);
-    lua_rawgeti(L, LUA_REGISTRYINDEX, gs->ctx_table_ref);
-    for (int i = 0; i < argc; i++)
-        lua_push_sqlite_value(L, argv[i]);
-
-    if (lua_pcall(L, argc + 1, 0, 0) != LUA_OK) {
-        const char *err = lua_tostring(L, -1);
-        sqlite3_result_error(ctx, err ? err : "Lua UDF step error", -1);
-        lua_pop(L, 1);
-    }
+    /* step(ctx_table, arg1, arg2, ...); the context table is created on the
+     * group's first call, inside the protected call. */
+    LuaUdfCall c = { ctx, argc, argv, udf->step_ref, gs, 0 };
+    lua_udf_run(L, &c, "Lua UDF step error");
 }
 
 /* Aggregate Lua UDF finalize callback */
@@ -188,18 +215,9 @@ static void lua_agg_finalize_func(sqlite3_context *ctx)
         return;
     }
 
-    /* Call finalize(ctx_table) -> result */
-    lua_rawgeti(L, LUA_REGISTRYINDEX, udf->finalize_ref);
-    lua_rawgeti(L, LUA_REGISTRYINDEX, gs->ctx_table_ref);
-
-    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
-        const char *err = lua_tostring(L, -1);
-        sqlite3_result_error(ctx, err ? err : "Lua UDF finalize error", -1);
-        lua_pop(L, 1);
-    } else {
-        lua_to_sqlite_result(L, ctx);
-        lua_pop(L, 1);
-    }
+    /* finalize(ctx_table) -> result */
+    LuaUdfCall c = { ctx, 0, NULL, udf->finalize_ref, gs, 1 };
+    lua_udf_run(L, &c, "Lua UDF finalize error");
 
     /* Clean up group state */
     luaL_unref(L, LUA_REGISTRYINDEX, gs->ctx_table_ref);
