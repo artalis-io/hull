@@ -58,6 +58,13 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
 
 /**
+ * @brief Per-hop redirect check for Keel (KlHttpRedirectConfig.on_redirect):
+ * the next URL's host must pass the same allowlist as the first one.
+ * @p data is the HlHttpConfig. 0 to follow, -1 to refuse (audited).
+ */
+int hl_http_redirect_allowed(const char *next_url, void *data);
+
+/**
  * @brief Check if a hostname is in the allowlist.
  * @return 0 if allowed, -1 if denied.
  */

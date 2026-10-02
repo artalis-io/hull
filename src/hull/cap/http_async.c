@@ -215,7 +215,11 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
 
     /* Start Keel async client - prefer redirect+pooled path */
     if (http_cfg->follow_redirects) {
-        KlHttpRedirectConfig redir = { .max_redirects = http_cfg->max_redirects };
+        KlHttpRedirectConfig redir = {
+            .max_redirects    = http_cfg->max_redirects,
+            .on_redirect      = hl_http_redirect_allowed,   /* every hop */
+            .on_redirect_data = http_cfg,
+        };
 
         ctx->free_driver = free_redirect_client;
 
