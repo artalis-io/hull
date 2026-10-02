@@ -25,6 +25,108 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
 
 #include <keel/http_server.h>
 
+/* ── Pinned views ─────────────────────────────────────────────────────
+ *
+ * dispatch / pipeline (and their async forms) read long descriptor tables,
+ * taking a raw view of each buffer as they go - and reading a table field can
+ * run app code (__index), which can close() a buffer whose view was already
+ * taken. The GPU then read unmapped or freed memory, and could hand it back.
+ * So each view is pinned the moment it is taken, until the call returns: a
+ * MappedBuffer / WasmBuffer takes a borrow (its close waits for the release),
+ * an image's pixels are copied (images have no borrow). The pins live in a
+ * to-be-closed userdata, released on return and on an error alike, found
+ * through the call's anchor table. */
+#define GPU_PINS_MAX 64
+enum { GPU_PIN_MMAP = 1, GPU_PIN_WBUF, GPU_PIN_COPY };
+typedef struct {
+    int n;
+    struct { int kind; void *p; size_t len; } e[GPU_PINS_MAX];
+} GpuPins;
+
+static int gpu_pins_close(lua_State *L)
+{
+    GpuPins *ps = (GpuPins *)lua_touserdata(L, 1);
+    if (!ps) return 0;
+    for (int i = 0; i < ps->n; i++) {
+        switch (ps->e[i].kind) {
+        case GPU_PIN_MMAP: hl_cap_fs_mmap_release(ps->e[i].p); break;
+#ifdef HL_ENABLE_WASM
+        case GPU_PIN_WBUF: hl_wasm_buffer_release((HlWasmBuffer *)ps->e[i].p); break;
+#endif
+        case GPU_PIN_COPY: free(ps->e[i].p); break;
+        default: break;
+        }
+    }
+    ps->n = 0;
+    return 0;
+}
+
+/* One pin set per call, as a to-be-closed slot, recorded on @p anchor. */
+static void gpu_pins_open(lua_State *L, int anchor)
+{
+    GpuPins *ps = (GpuPins *)lua_newuserdatauv(L, sizeof *ps, 0);
+    ps->n = 0;
+    if (luaL_newmetatable(L, "hull.gpu.pins")) {
+        lua_pushcfunction(L, gpu_pins_close);
+        lua_setfield(L, -2, "__close");
+        lua_pushcfunction(L, gpu_pins_close);
+        lua_setfield(L, -2, "__gc");
+    }
+    lua_setmetatable(L, -2);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, anchor, "pins");
+    lua_toclose(L, -1);
+}
+
+static void gpu_pin_add(lua_State *L, GpuPins *ps, int kind, void *p, size_t len)
+{
+    if (ps->n >= GPU_PINS_MAX) {
+        if (kind == GPU_PIN_MMAP) hl_cap_fs_mmap_release(p);
+#ifdef HL_ENABLE_WASM
+        else if (kind == GPU_PIN_WBUF) hl_wasm_buffer_release((HlWasmBuffer *)p);
+#endif
+        else if (kind == GPU_PIN_COPY) free(p);
+        luaL_error(L, "gpu: too many buffers in one call (max %d)", GPU_PINS_MAX);
+        return;
+    }
+    ps->e[ps->n].kind = kind;
+    ps->e[ps->n].p = p;
+    ps->e[ps->n].len = len;
+    ps->n++;
+}
+
+/* Pin the buffer at @p idx, whose view @p bv was just taken. */
+static void gpu_pin_view(lua_State *L, int anchor, int idx, HlBufferView *bv)
+{
+    idx = lua_absindex(L, idx);
+    lua_getfield(L, anchor, "pins");
+    GpuPins *ps = (GpuPins *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (!ps || !bv->data || bv->len == 0) return;
+    HlMappedBuffer **mp = (HlMappedBuffer **)luaL_testudata(L, idx, HL_MMAP_MT);
+    if (mp && *mp) {
+        hl_cap_fs_mmap_borrow(*mp);
+        gpu_pin_add(L, ps, GPU_PIN_MMAP, *mp, 0);
+        return;
+    }
+#ifdef HL_ENABLE_WASM
+    HlWasmBuffer **wp = (HlWasmBuffer **)luaL_testudata(L, idx, HL_WASM_BUF_MT);
+    if (wp && *wp) {
+        hl_wasm_buffer_borrow(*wp);
+        gpu_pin_add(L, ps, GPU_PIN_WBUF, *wp, 0);
+        return;
+    }
+#endif
+    if (luaL_testudata(L, idx, HL_IMAGE_MT)) {
+        void *copy = malloc(bv->len);
+        if (!copy) { luaL_error(L, "gpu: out of memory"); return; }
+        memcpy(copy, bv->data, bv->len);
+        gpu_pin_add(L, ps, GPU_PIN_COPY, copy, bv->len);
+        bv->data = copy;
+    }
+    /* a string: anchored by the caller, immutable */
+}
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -184,6 +286,7 @@ static int l_gpu_dispatch(lua_State *L)
     lua_settop(L, 2);
     lua_newtable(L);                 /* anchor: see hl_lua_anchor */
     const int anchor = lua_gettop(L);
+    gpu_pins_open(L, anchor);
 
     HlGpuDispatchOpts opts;
     memset(&opts, 0, sizeof(opts));
@@ -263,6 +366,7 @@ static int l_gpu_dispatch(lua_State *L)
                     HlBufferView bv;
                     if (lua_get_buffer(L, -1, &bv)) {
                         hl_lua_anchor(L, anchor, -1);
+                        gpu_pin_view(L, anchor, -1, &bv);
                         bufs[i].data = bv.data;
                         bufs[i].data_len = bv.len;
                         bufs[i].size = bv.len;
@@ -514,6 +618,50 @@ static int l_gpu_texture(lua_State *L)
     const void *pixels = NULL;
     size_t pixel_len = 0;
 
+    /* The opts first: reading them can run app code (__index), which could
+     * close the image / buffer in arg 2 - after its pixel pointer was taken,
+     * the upload read freed or unmapped memory into a texture the app can read
+     * back. The source is taken last, with nothing between it and the upload;
+     * the opts' width / height / format still win over the source's. */
+    int have_w = 0, have_h = 0, have_fmt = 0;
+    uint32_t opt_w = 0, opt_h = 0;
+    HlGpuTexFormat opt_fmt = HL_GPU_TEX_RGBA8;
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "device");
+        if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "width");
+        if (!lua_isnil(L, -1)) { opt_w = (uint32_t)lua_tointeger(L, -1); have_w = 1; }
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "height");
+        if (!lua_isnil(L, -1)) { opt_h = (uint32_t)lua_tointeger(L, -1); have_h = 1; }
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "format");
+        if (lua_isstring(L, -1)) { opt_fmt = lua_parse_tex_format(lua_tostring(L, -1)); have_fmt = 1; }
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "storage");
+        if (lua_toboolean(L, -1)) storage = 1;
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "filter");
+        if (lua_isstring(L, -1)) {
+            const char *f = lua_tostring(L, -1);
+            if (strcmp(f, "linear") == 0) filter = HL_GPU_FILTER_LINEAR;
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "wrap");
+        if (lua_isstring(L, -1)) {
+            const char *w = lua_tostring(L, -1);
+            if (strcmp(w, "repeat") == 0) {
+                address_u = HL_GPU_ADDRESS_REPEAT;
+                address_v = HL_GPU_ADDRESS_REPEAT;
+            } else if (strcmp(w, "mirror") == 0) {
+                address_u = HL_GPU_ADDRESS_MIRROR;
+                address_v = HL_GPU_ADDRESS_MIRROR;
+            }
+        }
+        lua_pop(L, 1);
+    }
+
 #ifdef HL_ENABLE_IMAGE
     /* Check if arg 2 is an HlImage userdata */
     HlImage **imgp = (HlImage **)luaL_testudata(L, 2, HL_IMAGE_MT);
@@ -538,43 +686,9 @@ static int l_gpu_texture(lua_State *L)
         pixels = bv.data;
         pixel_len = bv.len;
     }
-
-    /* Parse opts */
-    if (lua_istable(L, 3)) {
-        lua_getfield(L, 3, "device");
-        if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        lua_getfield(L, 3, "width");
-        if (!lua_isnil(L, -1)) width = (uint32_t)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        lua_getfield(L, 3, "height");
-        if (!lua_isnil(L, -1)) height = (uint32_t)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        lua_getfield(L, 3, "format");
-        if (lua_isstring(L, -1)) format = lua_parse_tex_format(lua_tostring(L, -1));
-        lua_pop(L, 1);
-        lua_getfield(L, 3, "storage");
-        if (lua_toboolean(L, -1)) storage = 1;
-        lua_pop(L, 1);
-        lua_getfield(L, 3, "filter");
-        if (lua_isstring(L, -1)) {
-            const char *f = lua_tostring(L, -1);
-            if (strcmp(f, "linear") == 0) filter = HL_GPU_FILTER_LINEAR;
-        }
-        lua_pop(L, 1);
-        lua_getfield(L, 3, "wrap");
-        if (lua_isstring(L, -1)) {
-            const char *w = lua_tostring(L, -1);
-            if (strcmp(w, "repeat") == 0) {
-                address_u = HL_GPU_ADDRESS_REPEAT;
-                address_v = HL_GPU_ADDRESS_REPEAT;
-            } else if (strcmp(w, "mirror") == 0) {
-                address_u = HL_GPU_ADDRESS_MIRROR;
-                address_v = HL_GPU_ADDRESS_MIRROR;
-            }
-        }
-        lua_pop(L, 1);
-    }
+    if (have_w) width = opt_w;
+    if (have_h) height = opt_h;
+    if (have_fmt) format = opt_fmt;
 
     if (width == 0 || height == 0)
         return luaL_error(L, "gpu.texture: width and height required");
@@ -691,8 +805,10 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
             if (imgp2 && *imgp2) {
                 HlImage *img = *imgp2;
                 hl_lua_anchor(L, anchor, -1);   /* the image owns pixels */
-                descs[i].data = img->pixels;
-                descs[i].data_len = img->pixel_len;
+                HlBufferView iv = { img->pixels, img->pixel_len };
+                gpu_pin_view(L, anchor, -1, &iv);   /* copied: close() frees pixels */
+                descs[i].data = iv.data;
+                descs[i].data_len = iv.len;
                 if (descs[i].width == 0) descs[i].width = img->width;
                 if (descs[i].height == 0) descs[i].height = img->height;
                 descs[i].format = image_format_to_gpu(img->format);
@@ -705,6 +821,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
                 HlBufferView bv;
                 if (lua_get_buffer(L, -1, &bv)) {
                     hl_lua_anchor(L, anchor, -1);
+                    gpu_pin_view(L, anchor, -1, &bv);
                     descs[i].data = bv.data;
                     descs[i].data_len = bv.len;
                 }
@@ -1009,6 +1126,7 @@ static int parse_pipeline_stages(lua_State *L, int tbl_idx,
                         HlBufferView bv;
                         if (lua_get_buffer(L, -1, &bv)) {
                             hl_lua_anchor(L, anchor, -1);
+                            gpu_pin_view(L, anchor, -1, &bv);
                             all_bufs[buf_offset + b].data = bv.data;
                             all_bufs[buf_offset + b].data_len = bv.len;
                             all_bufs[buf_offset + b].size = bv.len;
@@ -1049,6 +1167,7 @@ static int l_gpu_pipeline(lua_State *L)
     lua_settop(L, 2);                /* opts may be absent: keep slot 2 */
     lua_newtable(L);                 /* anchor: see hl_lua_anchor */
     const int anchor = lua_gettop(L);
+    gpu_pins_open(L, anchor);
     HlGpuCtx *ctx = lua_get_gpu_ctx(L);
     luaL_checktype(L, 1, LUA_TTABLE); /* stages array */
 
@@ -1196,6 +1315,7 @@ static int l_gpu_async_pipeline(lua_State *L)
     lua_settop(L, 2);                /* opts may be absent: keep slot 2 */
     lua_newtable(L);                 /* anchor: see hl_lua_anchor */
     const int anchor = lua_gettop(L);
+    gpu_pins_open(L, anchor);
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "gpu.async not available (no thread pool)");

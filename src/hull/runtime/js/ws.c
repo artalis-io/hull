@@ -219,27 +219,53 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
             JS_FreeValue(ctx, code_val);
             JS_FreeValue(ctx, reason_val);
 
+            int deferred = 0;
             if (JS_IsException(ret)) {
                 JSValue exc = JS_GetException(ctx);
                 const char *msg = JS_ToCString(ctx, exc);
                 log_error("[hull:ws] on_close error: %s", msg ? msg : "unknown");
                 if (msg) JS_FreeCString(ctx, msg);
                 JS_FreeValue(ctx, exc);
+            } else if (JS_PromiseState(ctx, ret) == JS_PROMISE_PENDING) {
+                /* An async close handler. Its continuation captured the
+                 * teardown hook, and is told the handler's promise so the
+                 * teardown runs when the handler completes - not now, while
+                 * it is suspended and still holds the conn. (This used to key
+                 * off js->async_pending, which nothing sets, so the conn was
+                 * torn down under every awaiting handler.) A handler that only
+                 * awaits microtasks gets them run first, hook still armed, so
+                 * a Hull call they make still captures it, as dispatch.c does. */
+                if (!js->last_async_cont)
+                    hl_js_run_jobs(js);
+                if (JS_PromiseState(ctx, ret) == JS_PROMISE_PENDING) {
+                    if (js->last_async_cont) {
+                        extern void hl_js_async_cont_set_handler_promise(
+                            HlAsyncCont *cont, JSContext *c, JSValue promise);
+                        hl_js_async_cont_set_handler_promise(
+                            (HlAsyncCont *)js->last_async_cont, ctx, ret);
+                        js->last_async_cont = NULL;
+                        deferred = 1;
+                    } else {
+                        log_warn("[hull:ws] on_close awaits a promise Hull does "
+                                 "not drive; the connection is closed now");
+                    }
+                }
             }
-            hl_js_run_jobs(js);
+            if (!deferred)
+                hl_js_run_jobs(js);
             JS_FreeValue(ctx, ret);
+
+            if (deferred) {
+                JS_FreeValue(ctx, handler);
+                js->active_on_complete     = NULL;
+                js->active_on_complete_ctx = NULL;
+                return;   /* the continuation tears the conn down */
+            }
         }
 
         JS_FreeValue(ctx, handler);
         js->active_on_complete     = NULL;
         js->active_on_complete_ctx = NULL;
-
-        if (js->async_pending) {
-            /* Handler is suspended on an async op - the continuation captured
-             * the teardown hook; it runs once the handler completes. Do NOT
-             * tear the conn down now while the handler still references it. */
-            return;
-        }
     }
 
     /* Invalidate conn object and remove from registry (sync completion, error,

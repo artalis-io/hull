@@ -155,17 +155,34 @@ void hl_js_timer_trampoline(void *user_data)
 
     JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
 
+    /* Pending with no continuation: the handler awaits only microtasks so far
+     * (`await null`, an already-resolved promise). Run them, with the timer
+     * still active, so a Hull call they reach takes it - as dispatch.c does
+     * for a request. */
+    if (state == JS_PROMISE_PENDING && !js->last_async_cont) {
+        hl_js_run_jobs(js);
+        state = JS_PromiseState(ctx, ret);
+    }
+
     if (state == JS_PROMISE_PENDING) {
-        /* Async handler - wire handler_promise on the continuation */
         if (js->last_async_cont) {
+            /* Async handler - wire handler_promise on the continuation; it
+             * clears in_flight and reschedules when the handler completes. */
             hl_js_async_cont_set_handler_promise(
                 (HlAsyncCont *)js->last_async_cont, ctx, ret);
             js->last_async_cont = NULL;
+            JS_FreeValue(ctx, ret);
+            js->active_timer = NULL;
+            return;
         }
-        /* Timer ctx was already set via js->active_timer at cont creation */
+        /* Waiting on something Hull does not drive: nothing will ever clear
+         * in_flight, and the timer used to stop firing for good, silently. */
+        log_warn("[hull:timer] handler awaits a promise Hull does not drive; "
+                 "the timer is rescheduled without waiting for it");
         JS_FreeValue(ctx, ret);
-        /* in_flight stays 1 until async resume completes. */
+        t->in_flight = 0;
         js->active_timer = NULL;
+        hl_js_timer_reschedule(t);
         return;
     }
 
