@@ -210,6 +210,18 @@ static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
+int hl_cap_fs_open_read_fd(const HlFsConfig *cfg, const char *path,
+                           const char **err_msg)
+{
+    return fs_resolve_fd(cfg, path, HL_FS_OPEN_READ, 0, err_msg);
+}
+
+int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
+                            const char **err_msg)
+{
+    return fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE, 0644, err_msg);
+}
+
 int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
                          char *buf, size_t buf_size,
                          const char **err_msg)

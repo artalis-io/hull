@@ -18,6 +18,7 @@
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/crypto.h"
+#include "hull/cap/fs_policy.h"
 #include "hull/shared/blob_store.h"
 #include "hull/utils/alloc.h"
 #include <dirent.h>
@@ -38,17 +39,33 @@ typedef struct {
     char         base_dir[256];
     HlFsConfig   fs_cfg;
     HlAllocator  alloc;
+    HlFsPolicy   policy;
 } TestEnv;
 
-static int env_init(TestEnv *e)
+/* A temp app root whose fs.write grants are @p write (NULL: the whole root). */
+static int env_init_grants(TestEnv *e, const char *const *write, size_t n)
 {
+    static const char *const whole[] = { "." };
+    if (!write) { write = whole; n = 1; }
+    memset(e, 0, sizeof *e);
     if (hl_test_path(e->base_dir, sizeof(e->base_dir),
                      "hull-blob-test-XXXXXX") != 0) return -1;
     if (!mkdtemp(e->base_dir)) return -1;
     e->fs_cfg.base_dir = e->base_dir;
     e->fs_cfg.base_len = strlen(e->base_dir);
     hl_alloc_init(&e->alloc, 0);
+    e->policy = HL_FS_POLICY_INIT;
+    const char *perr = NULL;
+    if (hl_fs_policy_compile_manifest(e->base_dir, &e->alloc, NULL, 0, write, n,
+                                      &e->policy, &perr) != 0)
+        return -1;
+    e->fs_cfg.policy = &e->policy;
     return 0;
+}
+
+static int env_init(TestEnv *e)
+{
+    return env_init_grants(e, NULL, 0);
 }
 
 /* Recursive rm -rf for cleanup. Best-effort. */
@@ -77,6 +94,7 @@ static void rm_rf(const char *path)
 
 static void env_free(TestEnv *e)
 {
+    hl_fs_policy_free(&e->policy);
     rm_rf(e->base_dir);
 }
 
@@ -114,6 +132,43 @@ UTEST(hl_cap_blob, init_creates_layout)
     ASSERT_EQ(stat(path, &st), 0);
     ASSERT_TRUE(S_ISDIR(st.st_mode));
 
+    hl_cap_blob_free(b);
+    env_free(&e);
+}
+
+/* The store writes names of its own choosing under its directory, so it needs
+ * an fs.write grant covering that directory as a subtree - what fs.write would
+ * need for any file the store writes. Inside the app root was all it took. */
+UTEST(hl_cap_blob, init_needs_a_write_grant_over_the_directory)
+{
+    TestEnv e;
+    HlBlob *b = NULL;
+
+    /* A grant elsewhere: refused. */
+    static const char *const elsewhere[] = { "other/" };
+    ASSERT_EQ(env_init_grants(&e, elsewhere, 1), 0);
+    EXPECT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "data/blobs", 1, 0), -1);
+    EXPECT_TRUE(b == NULL);
+    env_free(&e);
+
+    /* A grant of one file in it: not the directory, refused. */
+    static const char *const one_file[] = { "data/blobs/x" };
+    ASSERT_EQ(env_init_grants(&e, one_file, 1), 0);
+    EXPECT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "data/blobs", 1, 0), -1);
+    env_free(&e);
+
+    /* No policy at all: refused (fail closed). */
+    ASSERT_EQ(env_init(&e), 0);
+    e.fs_cfg.policy = NULL;
+    EXPECT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "data/blobs", 1, 0), -1);
+    e.fs_cfg.policy = &e.policy;
+    env_free(&e);
+
+    /* The documented grant for a directory not made yet: allowed. */
+    static const char *const subtree[] = { "data/blobs/" };
+    ASSERT_EQ(env_init_grants(&e, subtree, 1), 0);
+    ASSERT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "data/blobs", 1, 0), 0);
+    ASSERT_TRUE(b != NULL);
     hl_cap_blob_free(b);
     env_free(&e);
 }

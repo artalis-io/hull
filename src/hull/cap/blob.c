@@ -14,6 +14,7 @@
 
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_policy.h"
 #include "hull/utils/alloc.h"
 
 #include <limits.h>
@@ -43,6 +44,31 @@ static int resolve_root(const HlFsConfig *fs_cfg, const char *dir,
     return 0;
 }
 
+/* The store creates files of its own naming anywhere beneath its directory,
+ * so the manifest must grant fs.write over that directory as a subtree: a
+ * SUBTREE grant at or above it, or a not-yet-existing directory granted with
+ * a trailing slash ("data/blobs/"). Asked of the policy with a probe name
+ * inside the directory - the same question fs.write would ask for any file
+ * the store writes. Without this the directory only had to lie inside the app
+ * root, so blob.init made a writable store with no fs.write grant at all. */
+static int blob_dir_granted(const HlFsConfig *cfg, const char *dir)
+{
+    if (!cfg->policy)
+        return 0;
+    char probe[PATH_MAX];
+    int n = snprintf(probe, sizeof probe, "%s/.blob-grant-probe", dir);
+    if (n < 0 || (size_t)n >= sizeof probe)
+        return 0;
+    char scratch[PATH_MAX + 2];   /* the selection writes the residual here */
+    HlFsSelection sel = hl_fs_policy_select(cfg->policy, probe, HL_FS_OPEN_WRITE,
+                                            scratch, sizeof scratch);
+    if (!sel.entry)
+        return 0;
+    return sel.entry->kind == HL_FS_ENTRY_SUBTREE ||
+           (sel.entry->kind == HL_FS_ENTRY_CREATE &&
+            sel.entry->terminal == HL_FS_TERMINAL_SUBTREE);
+}
+
 int hl_cap_blob_init(HlBlob **out,
                      const HlFsConfig *fs_cfg,
                      HlAllocator *alloc,
@@ -64,6 +90,7 @@ int hl_cap_blob_init(HlBlob **out,
 
     const char *err = NULL;
     if (hl_cap_fs_validate(fs_cfg, trimmed, &err) != 0) return -1;
+    if (!blob_dir_granted(fs_cfg, trimmed)) return -1;
 
     char abs_root[PATH_MAX];
     if (resolve_root(fs_cfg, trimmed, abs_root, sizeof(abs_root)) != 0)

@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ── Internal helpers ──────────────────────────────────────────────── */
 
@@ -84,19 +85,20 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
             if (err_msg) *err_msg = "missing_fs_config";
             return HL_WASM_ERR_INTERNAL;
         }
-        if (hl_cap_fs_validate(fs_cfg, input->path, NULL) != 0) {
-            if (err_msg) *err_msg = "path_validation_failed";
+        /* Opened as fs.read opens: through the fs.read grants and the
+         * descriptor-relative resolver. A check that the path lay under the
+         * app directory, then a plain fopen, ignored the grants (an app with
+         * no fs.read could stream any file in its directory), left the path
+         * open to a swap between the check and the open, and followed a FIFO. */
+        const char *ferr = NULL;
+        int in_fd = hl_cap_fs_open_read_fd(fs_cfg, input->path, &ferr);
+        if (in_fd < 0) {
+            if (err_msg) *err_msg = ferr ? ferr : "permission";
             return HL_WASM_ERR_INTERNAL;
         }
-        char path_buf[4096];
-        int n = snprintf(path_buf, sizeof(path_buf), "%s/%s",
-                         fs_cfg->base_dir, input->path);
-        if (n < 0 || (size_t)n >= sizeof(path_buf)) {
-            if (err_msg) *err_msg = "path_too_long";
-            return HL_WASM_ERR_INTERNAL;
-        }
-        in_file = fopen(path_buf, "rb");
+        in_file = fdopen(in_fd, "rb");
         if (!in_file) {
+            close(in_fd);
             if (err_msg) *err_msg = "open_input_failed";
             return HL_WASM_ERR_INTERNAL;
         }
@@ -134,23 +136,19 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
             if (err_msg) *err_msg = "missing_fs_config";
             return HL_WASM_ERR_INTERNAL;
         }
-        if (hl_cap_fs_validate(fs_cfg, output->path, NULL) != 0) {
+        /* Opened as fs.write opens (see the input above): the fs.write
+         * grants decide, not "somewhere under the app directory". */
+        const char *ferr = NULL;
+        int out_fd = hl_cap_fs_open_write_fd(fs_cfg, output->path, &ferr);
+        if (out_fd < 0) {
             if (in_file) fclose(in_file);
             if (in_buf) hl_alloc_free(alloc, in_buf, chunk_size);
-            if (err_msg) *err_msg = "path_validation_failed";
+            if (err_msg) *err_msg = ferr ? ferr : "permission";
             return HL_WASM_ERR_INTERNAL;
         }
-        char path_buf[4096];
-        int n = snprintf(path_buf, sizeof(path_buf), "%s/%s",
-                         fs_cfg->base_dir, output->path);
-        if (n < 0 || (size_t)n >= sizeof(path_buf)) {
-            if (in_file) fclose(in_file);
-            if (in_buf) hl_alloc_free(alloc, in_buf, chunk_size);
-            if (err_msg) *err_msg = "path_too_long";
-            return HL_WASM_ERR_INTERNAL;
-        }
-        out_file = fopen(path_buf, "wb");
+        out_file = fdopen(out_fd, "wb");
         if (!out_file) {
+            close(out_fd);
             if (in_file) fclose(in_file);
             if (in_buf) hl_alloc_free(alloc, in_buf, chunk_size);
             if (err_msg) *err_msg = "open_output_failed";

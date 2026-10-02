@@ -23,6 +23,10 @@ done
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 cp -r "$ROOT/tests/fixtures/stream_meta" "$TMP/app"
+# Files for the file-mode routes: one under the fs.read grant, one beside it.
+mkdir -p "$TMP/app/public"
+head -c 768 /dev/zero | tr '\0' 'x' > "$TMP/app/public/in.txt"
+echo "not granted" > "$TMP/app/secret.txt"
 
 # Assert the fixture's hull_compute.h is byte-identical to the CANONICAL embedded
 # source (the HULL_COMPUTE_H literal in compute.lua) - independently extracted,
@@ -71,6 +75,8 @@ check() {  # label, workdir, launch argv...
     if ! kill -0 $PID 2>/dev/null; then fail "$label: server start"; cat "$TMP/srv.log"; return; fi
     s=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/stream")
     n=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/nonstream")
+    f=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/streamfile")
+    d=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/streamdenied")
     is_aot=0
     grep -qE "cached module 'streamprobe' \(abi=[0-9]+, aot=1" "$TMP/srv.log" && is_aot=1
     kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
@@ -80,6 +86,13 @@ check() {  # label, workdir, launch argv...
     [ "$n" = "0,0,0" ] \
         && pass "$label: non-stream call reports default metadata (0,0,0)" \
         || fail "$label: nonstream (got: $n)"
+    [ "$f" = "chunks:3" ] \
+        && pass "$label: a file under the fs.read grant streams (3 chunks)" \
+        || fail "$label: streamfile (got: $f)"
+    case "$d" in
+        *permission*) pass "$label: a file outside the fs.read grants is refused" ;;
+        *) fail "$label: streamdenied should be refused (got: $d)" ;;
+    esac
     case "$label" in
         *aot) [ "$is_aot" = "1" ] && pass "$label: ran against a real AOT module (aot=1)" || fail "$label: AOT not loaded";;
     esac
