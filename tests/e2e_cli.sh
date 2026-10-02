@@ -76,6 +76,20 @@ run_hello_cli() {
         *"go after --"*) pass "${runtime} hello_cli stray argument names the fix" ;;
         *)               fail "${runtime} hello_cli stray argument message (got '${err}')" ;;
     esac
+
+    # 6. An option Hull does not take is refused too: it used to be skipped
+    #    silently, so a misspelt one did nothing and said nothing.
+    rc=$(hull_run "$HULL_RC_TMP" "${HULL_BIN}" run "${app}" --no-sandbx -- world)
+    err=$(cat "$HULL_RC_TMP")
+    expect_eq "${runtime} hello_cli exit code on an unknown option" "1" "${rc}"
+    case "${err}" in
+        *"unknown option '--no-sandbx'"*) pass "${runtime} hello_cli unknown option is named" ;;
+        *) fail "${runtime} hello_cli unknown option message (got '${err}')" ;;
+    esac
+
+    # 7. ...but the global flags the dispatcher reads still pass through.
+    rc=$(hull_run "$HULL_RC_TMP" "${HULL_BIN}" --verbose run "${app}" -- world)
+    expect_eq "${runtime} hello_cli accepts a global flag" "0" "${rc}"
 }
 
 run_hello_cli "lua" "lua"

@@ -560,9 +560,16 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             cfg->gpu_device = (int)v;
-        } else if (strcmp(argv[i], "-h") == 0) {
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 1; /* signal help shown, exit 0 */
+        } else if (strcmp(argv[i], "--verbose") == 0 ||
+                   strcmp(argv[i], "--json") == 0 ||
+                   strncmp(argv[i], "--app-dir=", 10) == 0) {
+            /* Global flags: the command dispatcher reads them, then hands
+             * this parser the same argv. Nothing to do here. */
+        } else if (strcmp(argv[i], "--app-dir") == 0 && i + 1 < argc) {
+            i++;   /* its value is not an entry point */
         } else if (strcmp(argv[i], "--") == 0) {
             /* Everything past `--` is app argv (CLI mode). */
             cfg->app_args = &argv[i + 1];
@@ -589,6 +596,24 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             cfg->entry_point = argv[i];
+        } else {
+            if (embedded_app_present()) {
+                /* An option Hull does not take starts the app's arguments,
+                 * as a bare word does: `./tool --help` reaches the tool. */
+                cfg->app_args = &argv[i];
+                cfg->app_argc = argc - i;
+                break;
+            }
+            /* It used to be skipped without a word, so a misspelt option
+             * (--no-sandbx) or one missing its value (a trailing -p) did
+             * nothing and said nothing. */
+            fprintf(stderr,
+                "hull: unknown option '%s' (or it needs a value) - see "
+                "`hull --help`; options for the app go after --:\n"
+                "  hull %s -- %s\n",
+                argv[i], cfg->entry_point ? cfg->entry_point : "app.lua",
+                argv[i]);
+            return -1;
         }
     }
 

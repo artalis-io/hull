@@ -57,11 +57,22 @@ int hull_main(int argc, char **argv)
     /* `hull run [args]` is a discoverable alias for `hull [args]` -
      * both go through hull_serve, which branches on whether the loaded
      * app registered app.main (CLI mode) or routes (server mode). */
-    if (argc >= 2 && strcmp(argv[1], "run") == 0) {
-        for (int i = 1; i < argc - 1; i++) argv[i] = argv[i + 1];
-        argc--;
-        argv[argc] = NULL;
-        return hull_serve(argc, argv);
+    /* `run` may follow the global flags (`hull --verbose run app.lua`), the
+     * same as any subcommand; skip them to find it. Only `run` is removed -
+     * the serve parser accepts the global flags themselves. */
+    {
+        int r = 1;
+        while (r < argc && (strcmp(argv[r], "--verbose") == 0 ||
+                            strcmp(argv[r], "--json") == 0 ||
+                            strncmp(argv[r], "--app-dir=", 10) == 0 ||
+                            (strcmp(argv[r], "--app-dir") == 0 && r + 1 < argc && ++r)))
+            r++;
+        if (r < argc && strcmp(argv[r], "run") == 0) {
+            for (int i = r; i < argc - 1; i++) argv[i] = argv[i + 1];
+            argc--;
+            argv[argc] = NULL;
+            return hull_serve(argc, argv);
+        }
     }
 
     int rc = hl_command_dispatch(argc, argv);
