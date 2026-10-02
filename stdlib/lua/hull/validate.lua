@@ -12,6 +12,8 @@
 -- })
 -- if not ok then return res:status(422):json({ errors = errors }) end
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
+
 local validate = {}
 
 -- Pattern-validation input cap: 8192 bytes. Shared contract with the JS sibling
@@ -83,7 +85,7 @@ function validate.check(data, schema)
 
         -- 1. trim (mutates data[field] in-place - caller's table is modified)
         if rules.trim and type(value) == "string" then
-            value = value:match("^%s*(.-)%s*$")
+            value = _text.trim(value)
             data[field] = value
         end
 

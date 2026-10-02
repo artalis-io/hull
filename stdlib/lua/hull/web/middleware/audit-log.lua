@@ -23,6 +23,7 @@
 --   audit_log.fingerprint(req)             -- exposed for app-side reuse
 --   audit_log.cleanup()                    -- delete events older than retain_days
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local crypto = require("hull.crypto")
 local encoding = require("hull.encoding")
 local db     = require("hull.db._internal").connection()
@@ -200,7 +201,7 @@ end
 local function ip_prefix(ip)
     if type(ip) ~= "string" or ip == "" then return "0.0.0.0/24" end
     -- Strip whitespace + take first IP from x-forwarded-for chain.
-    ip = (ip:match("^([^,]+)") or ip):gsub("^%s+", ""):gsub("%s+$", "")
+    ip = _text.trim((ip:match("^([^,]+)") or ip))
     local a, b, c = ip:match("^(%d+)%.(%d+)%.(%d+)%.")
     if a then return a .. "." .. b .. "." .. c .. ".0/24" end
     -- IPv6 - first 4 groups as /64.

@@ -22,6 +22,7 @@
 -- @revoked lines ARE honoured, by revoked_blob below: a revoked key is refused
 -- even when a plain line for the same key trusts it.
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local base64 = require('hull.encoding').base64
 local wire   = require('hull.ssh.wire')
 
@@ -39,7 +40,7 @@ end
 -- malformed). Never raises: a file edited by hand is not a reason to fail a
 -- connection, and a line Hull cannot read is a line it does not trust.
 function M.parse_line(line)
-    local s = line:gsub("^%s+", ""):gsub("%s+$", "")
+    local s = _text.trim(line)
     if s == "" or s:sub(1, 1) == "#" or s:sub(1, 1) == "@" then return nil end
 
     local hosts, keytype, b64 = s:match("^(%S+)%s+(%S+)%s+(%S+)")
@@ -71,7 +72,7 @@ end
 -- about the key, and being stricter than the line fails safe. (A hashed or
 -- pattern host list on a @revoked line therefore needs no understanding.)
 function M.revoked_blob(line)
-    local s = line:gsub("^%s+", ""):gsub("%s+$", "")
+    local s = _text.trim(line)
     local keytype, b64 = s:match("^@revoked%s+%S+%s+(%S+)%s+(%S+)")
     if not keytype then return nil end
     local blob = base64.decode(b64)

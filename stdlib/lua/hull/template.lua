@@ -40,6 +40,7 @@ local MAX_EXTENDS_DEPTH  = 8
 local MAX_CACHE_SIZE     = 1024
 
 -- Native bridge for parse/codegen (private - not in module registry).
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local json = require("hull.json")
 local _template = require("hull._template")
 
@@ -90,7 +91,7 @@ function filters.lower(val)
 end
 
 function filters.trim(val)
-    return tostring(val or ""):match("^%s*(.-)%s*$")
+    return _text.trim(tostring(val or ""))
 end
 
 function filters.length(val)
@@ -178,7 +179,7 @@ local function lex(source)
             if not close then
                 error("unclosed {{{ at position " .. d_start)
             end
-            local expr = source:sub(d_start + 3, close - 1):match("^%s*(.-)%s*$")
+            local expr = _text.trim(source:sub(d_start + 3, close - 1))
             tokens[#tokens + 1] = { type = T_RAW, value = expr }
             pos = close + 3
         elseif c1 == "{{" then
@@ -187,7 +188,7 @@ local function lex(source)
             if not close then
                 error("unclosed {{ at position " .. d_start)
             end
-            local expr = source:sub(d_start + 2, close - 1):match("^%s*(.-)%s*$")
+            local expr = _text.trim(source:sub(d_start + 2, close - 1))
             tokens[#tokens + 1] = { type = T_VAR, value = expr }
             pos = close + 2
         elseif c1 == "{%" then
@@ -196,7 +197,7 @@ local function lex(source)
             if not close then
                 error("unclosed {% at position " .. d_start)
             end
-            local tag = source:sub(d_start + 2, close - 1):match("^%s*(.-)%s*$")
+            local tag = _text.trim(source:sub(d_start + 2, close - 1))
             tokens[#tokens + 1] = { type = T_TAG, value = tag }
             pos = close + 2
         elseif c1 == "{#" then
@@ -222,7 +223,7 @@ end
 local function parse_expr(expr)
     local parts = {}
     for part in expr:gmatch("[^|]+") do
-        parts[#parts + 1] = part:match("^%s*(.-)%s*$")
+        parts[#parts + 1] = _text.trim(part)
     end
 
     local var_part = parts[1]
@@ -609,7 +610,7 @@ local function gen_expr(expr_info, escaped, locals_set)
             escaped = false
         elseif f.arg then
             -- Filter with argument
-            local arg = f.arg:match("^%s*(.-)%s*$")
+            local arg = _text.trim(f.arg)
             -- Check if arg is a string literal
             if arg:sub(1, 1) == '"' then
                 if not arg:match('^"[^"]*"$') then
@@ -645,7 +646,7 @@ end
 
 -- Generate condition expression
 local function gen_cond(cond, negated, locals_set)
-    local path = gen_dot_path(cond:match("^%s*(.-)%s*$"), nil, locals_set)
+    local path = gen_dot_path(_text.trim(cond), nil, locals_set)
     if negated then
         return "not " .. path
     end

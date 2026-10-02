@@ -6689,6 +6689,47 @@ UTEST(lua_cap, a_result_too_big_for_the_heap_fails_cleanly)
     cleanup_lua_caps();
 }
 
+/* The stdlib's trims were s:match("^%s*(.-)%s*$") / s:gsub("%s+$", ""),
+ * quadratic in a run of whitespace with a non-space after it, inside one C
+ * call where the instruction limit never fires: an 8 KB Cookie header held the
+ * loop for 0.7 s. hull._text trims in one pass. A 1 MB run takes milliseconds
+ * now; quadratically it would take hours. */
+UTEST(lua_stdlib, trims_are_linear)
+{
+    init_lua();
+    const char *helper =
+        "local t = require('hull._text') "
+        "assert(t.trim('  a b \\t\\n') == 'a b') "
+        "assert(t.trim('') == '' and t.trim(' \\t ') == '') "
+        "assert(t.trim('x') == 'x' and t.trim(' x') == 'x' and t.trim('x ') == 'x') "
+        "assert(t.rtrim('  a  ') == '  a' and t.rtrim('   ') == '') "
+        "assert(t.trim('\\v\\fa\\r') == 'a') "
+        "return 0";
+    ASSERT_EQ(luaL_loadbuffer(lua_rt.L, helper, strlen(helper), "@hull.tests.text"),
+              LUA_OK);
+    int rc = lua_pcall(lua_rt.L, 0, 1, 0);
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(lua_rt.L, -1));
+    ASSERT_EQ(rc, LUA_OK);
+    lua_settop(lua_rt.L, 0);
+
+    int step = eval_int(
+        "(function() "
+        "  local cookie = require('hull.web.cookie') "
+        "  local validate = require('hull.validate') "
+        "  local gap = string.rep(' ', 1024 * 1024) "
+        "  local t0 = time.clock() "
+        "  local c = cookie.parse('a=b' .. gap .. 'c; d= e ') "
+        "  if c.a ~= 'b' .. gap .. 'c' or c.d ~= 'e' then return 1 end "
+        "  local data = { name = ' x' .. gap .. 'y ' } "
+        "  validate.check(data, { name = { trim = true } }) "
+        "  if data.name ~= 'x' .. gap .. 'y' then return 2 end "
+        "  if time.clock() - t0 > 2000 then return 3 end "   /* ms */
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
+    cleanup_lua();
+}
+
 /* A stdlib helper that calls a function the app handed it does not lend that
  * function its stdlib identity: given `db.exec` itself as retry_on, retry.run
  * calls it with the value the app's fn returned, and the `_hull_*` guard still

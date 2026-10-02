@@ -102,6 +102,7 @@
 --     })
 --     oauth.routes(app)
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local crypto      = require("hull.crypto")
 local encoding    = require("hull.encoding")
 local envelope    = require("hull.crypto.envelope")
@@ -365,7 +366,7 @@ local function compute_redirect_uri(req, provider_name)
         -- client-facing (first) hop.
         local xfh = req.headers["x-forwarded-host"]
         local first = xfh and xfh:match("^%s*([^,]+)")
-        host = (first and first:match("^%s*(.-)%s*$")) or req.headers.host or "localhost"
+        host = (first and _text.trim(first)) or req.headers.host or "localhost"
     else
         -- Naked case: no base_url, no trusted proxy. The Host header is
         -- client-controllable, so the redirect_uri host is only as trustworthy
