@@ -158,4 +158,88 @@ UTEST(db_registry, env_ref_parsing)
     ASSERT_FALSE(hl_env_ref(NULL, v, sizeof v));
 }
 
+/* ── databases.internal: the stdlib's own connection ──────────────────── */
+
+UTEST(db_registry, internal_is_the_default_unless_declared)
+{
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    const char *err = NULL;
+    HlDbHandle *def = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(def != NULL);
+    EXPECT_FALSE(hl_db_registry_has_internal(reg));
+    EXPECT_TRUE(hl_db_registry_internal(reg, &err) == def);
+    hl_db_registry_destroy(reg);
+}
+
+UTEST(db_registry, a_declared_internal_dsn_is_its_own_connection)
+{
+    HlManifest m = {0};
+    m.databases.internal = ":memory:";
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    hl_db_registry_set_manifest(reg, &m);
+    const char *err = NULL;
+    HlDbHandle *def = hl_db_registry_get(reg, "default", &err);
+    HlDbHandle *in  = hl_db_registry_internal(reg, &err);
+    ASSERT_TRUE(def != NULL);
+    ASSERT_TRUE(in != NULL);
+    EXPECT_TRUE(in != def);                                    /* separate DB */
+    EXPECT_TRUE(hl_db_registry_internal(reg, &err) == in);    /* cached */
+    /* A worker resolves the same database for it. */
+    EXPECT_STREQ(":memory:", hl_db_registry_dsn_for(reg, in));
+
+    /* The internal tables live there, not in the app's database. */
+    ASSERT_TRUE(hl_db_exec(in, "CREATE TABLE _hull_probe (x INTEGER)", NULL, 0) >= 0);
+    EXPECT_TRUE(hl_db_exec(def, "INSERT INTO _hull_probe VALUES (1)", NULL, 0) < 0);
+    hl_db_registry_destroy(reg);
+}
+
+UTEST(db_registry, app_code_cannot_name_the_internal_connection)
+{
+    HlManifest m = {0};
+    m.databases.internal = ":memory:";
+    HlDbRegistry *reg = hl_db_registry_create(&m, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    const char *err = NULL;
+    ASSERT_TRUE(hl_db_registry_internal(reg, &err) != NULL);  /* now cached */
+    err = NULL;
+    EXPECT_TRUE(hl_db_registry_get(reg, "\x01internal", &err) == NULL);
+    EXPECT_TRUE(err != NULL);
+    hl_db_registry_destroy(reg);
+}
+
+UTEST(db_registry, an_internal_dsn_learned_before_wiring_is_used)
+{
+    /* A stdlib init() at app top level, before the manifest is wired. */
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    EXPECT_FALSE(hl_db_registry_manifest_wired(reg));
+    ASSERT_EQ(0, hl_db_registry_set_internal_dsn(reg, ":memory:"));
+    EXPECT_TRUE(hl_db_registry_has_internal(reg));
+    const char *err = NULL;
+    HlDbHandle *def = hl_db_registry_get(reg, "default", &err);
+    HlDbHandle *in  = hl_db_registry_internal(reg, &err);
+    EXPECT_TRUE(in != NULL && in != def);
+
+    /* Once sealed, it can no longer be swapped. */
+    HlManifest m = {0};
+    hl_db_registry_set_manifest(reg, &m);
+    EXPECT_TRUE(hl_db_registry_manifest_wired(reg));
+    ASSERT_EQ(0, hl_db_registry_seal(reg));
+    EXPECT_EQ(-1, hl_db_registry_set_internal_dsn(reg, "postgres://evil/db"));
+    hl_db_registry_destroy(reg);
+}
+
+UTEST(db_registry, a_network_default_without_internal_is_reported)
+{
+    HlDbRegistry *pg = hl_db_registry_create(NULL, "postgres://u@db/app", NULL);
+    HlDbRegistry *sq = hl_db_registry_create(NULL, "./app.db", NULL);
+    ASSERT_TRUE(pg != NULL && sq != NULL);
+    EXPECT_TRUE(hl_db_registry_default_is_network(pg));
+    EXPECT_FALSE(hl_db_registry_default_is_network(sq));
+    hl_db_registry_destroy(pg);
+    hl_db_registry_destroy(sq);
+}
+
 UTEST_MAIN()

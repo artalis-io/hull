@@ -23,8 +23,8 @@
  * @license AGPL-3.0-or-later
  */
 
-import { db as dbModule } from "hull:db";
-const db = dbModule.default();
+import { internal as dbInternal } from "hull:db:_internal";
+const db = dbInternal.connection();
 import { crypto } from "hull:crypto";
 import { encoding } from "hull:encoding";
 import { time } from "hull:time";

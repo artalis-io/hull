@@ -591,6 +591,20 @@ which database via the registry's DSN for the bound handle
 time (udf is SQLite-only). Covered by `tests/e2e_named_connections.sh` (both
 runtimes) and the cross-backend variant in `tests/e2e_postgres.sh`.
 
+**Internal database (`databases.internal`).** An optional DSN (or `"$VAR"`)
+for the stdlib's own `_hull_*` tables - session, auth-flows, totp, audit-log,
+rbac, auth-health, idempotency, attachment - so they can live under a database
+role the app's connection has no grants on: the database, not the SQL-text
+check, then keeps app SQL away from them. The stdlib reaches it through the
+stdlib-only `hull.db._internal` / `hull:db:_internal` proxy (a lazily resolved
+connection: a module takes it at load, before the manifest is wired, and a
+stdlib `init()` at app top level reads `databases.internal` from the app's
+manifest on the spot); `db.connect` cannot name it. Undeclared, everything
+stays on the default connection. Outbox, inbox and jobs stay on the APP
+connection by design - they must commit atomically with the app's own writes
+- as do search (its FTS index reads app tables) and the kv SQL store, so those
+tables keep only the SQL-text check. Covered by `tests/e2e_db_internal.sh`.
+
 **Named connections via the manifest.** Additional connections are declared
 under `manifest.databases.named` (a name -> DSN map). A DSN value of exactly
 `"$VAR"` or `"${VAR}"` is an env reference resolved at connection-open time (so
@@ -1462,7 +1476,7 @@ tracked follow-up, and would add protection rather than only honesty.
 ### Capability Enforcement Invariants
 
 - **SQL injection impossible:** All DB access uses `sqlite3_bind_*` parameterized binding. SQL is always a literal string.
-- **Internal tables protected:** `hl_cap_db_check_namespace()` blocks user code from accessing `_hull_*` tables. Enforcement uses call-stack inspection (Lua checks `ar.source` for `hull.` prefix, JS checks module name for `hull:` prefix) so stdlib modules transparently bypass the check via normal `db.exec`/`db.query`. No internal API is exposed. Tables: `_hull_outbox`, `_hull_inbox_processed`, `_hull_idempotency_keys`, `_hull_sessions`. A stdlib frame alone does not grant the bypass: the call must also NAME the method (Lua: `namewhat` `method`/`field` with the method's own name; JS: `this` is a real connection object), so a stdlib helper that invokes an app-supplied function (`retry.run`'s `retryOn`, `hull.map`'s `fn`) cannot be handed `conn.exec` itself; a JS bound function gets its own stack frame (QuickJS HULL PATCH 0002) so `conn.exec.bind(conn, sql)` is app code too. `insert_if_absent` / `upsert` / `table_columns` check the table AND every column name. Known limit: the check is lexical, so on Postgres / MySQL dynamic SQL that assembles the name at run time (`DO $$ ... EXECUTE`, `PREPARE` from `CONCAT`) is not caught - real separation there needs a database role or schema the app's connection cannot reach. Internal underscore modules (`hull._template`, `hull.kv._native`, `hull:web:_request`, ...) are importable only by the stdlib once the module set is wired, and a cached first-party module is not returned to app code that did not declare it.
+- **Internal tables protected:** `hl_cap_db_check_namespace()` blocks user code from accessing `_hull_*` tables. Enforcement uses call-stack inspection (Lua checks `ar.source` for `hull.` prefix, JS checks module name for `hull:` prefix) so stdlib modules transparently bypass the check via normal `db.exec`/`db.query`. No internal API is exposed. Tables: `_hull_outbox`, `_hull_inbox_processed`, `_hull_idempotency_keys`, `_hull_sessions`. A stdlib frame alone does not grant the bypass: the call must also NAME the method (Lua: `namewhat` `method`/`field` with the method's own name; JS: `this` is a real connection object), so a stdlib helper that invokes an app-supplied function (`retry.run`'s `retryOn`, `hull.map`'s `fn`) cannot be handed `conn.exec` itself; a JS bound function gets its own stack frame (QuickJS HULL PATCH 0002) so `conn.exec.bind(conn, sql)` is app code too. `insert_if_absent` / `upsert` / `table_columns` check the table AND every column name. Known limit: the check is lexical, so on Postgres / MySQL dynamic SQL that assembles the name at run time (`DO $$ ... EXECUTE`, `PREPARE` from `CONCAT`) is not caught - real separation there needs a database role the app's connection cannot reach, which `databases.internal` provides (below; a startup WARN names it when the default connection is Postgres / MySQL and none is declared). Internal underscore modules (`hull._template`, `hull.kv._native`, `hull:web:_request`, ...) are importable only by the stdlib once the module set is wired, and a cached first-party module is not returned to app code that did not declare it.
 - **Path traversal blocked:** `hl_cap_fs_validate()` rejects absolute paths, `..` components, symlink escapes via `realpath()` ancestor check. Plus kernel unveil.
 - **Host allowlist enforced:** `hl_cap_http_request()` validates target host against manifest's `hosts` array. Since §2.8 the check delegates to the shared matcher `hl_host_match_any_env` (`src/hull/utils/host_match.c`), so `hosts` entries may be an exact hostname (case-insensitive), `"*"` (any), a `"*.suffix"` subdomain glob, a CIDR (matches only IP-literal hosts, never a DNS name), or a `"$VAR"` / `"${VAR}"` env reference resolved at match time. The same matcher gates `ws.connect` (shares the http config) and `smtp.send` (`hl_smtp_check_host`), and `databases.dynamic.hosts` - one convention across every outbound host allowlist.
 - **Env allowlist enforced:** `hl_cap_env_get()` checks against manifest's `env` array (max 32 entries). A `$VAR` reference elsewhere in the manifest must name a variable in `env` or `secrets` (checked at load by `hl_manifest_check_env_refs`).

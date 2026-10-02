@@ -67,8 +67,12 @@ int hl_lua_register_modules(HlLua *lua)
      * the gate in hl_lua_require enforces the resolved module set. */
 
 #ifdef HL_ENABLE_DB
-    if (lua->base.db_registry)
+    if (lua->base.db_registry) {
         register_native_module(L, "hull.db", luaopen_hull_db);
+        /* The stdlib's internal-table connection (underscore: stdlib-only). */
+        register_native_module(L, "hull.db._internal_conn",
+                               luaopen_hull_db_internal_conn);
+    }
 #endif
     /* KV connection cap (base-resident): the stdlib valkey backend requires
      * this internally. With no KV backend composed, open() fails closed with a

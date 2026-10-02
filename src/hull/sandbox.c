@@ -1113,6 +1113,7 @@ int hl_sandbox_manifest_has_network_db(const HlManifest *m)
     if (!m) return 0;
     for (int i = 0; i < m->databases.named_count; i++)
         if (hl_sandbox_dsn_is_network(m->databases.named[i].dsn)) return 1;
+    if (hl_sandbox_dsn_is_network(m->databases.internal)) return 1;
     if (m->databases.dynamic.declared) {
         for (int i = 0; i < m->databases.dynamic.scheme_count; i++) {
             const char *s = m->databases.dynamic.schemes[i];

@@ -8,6 +8,8 @@
 
 #include "mod_buffer.h"
 #include "mod_db.h"               /* js_call_handle / new_bound_subobject seam */
+#include "log.h"
+#include "hull/manifest.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
@@ -1278,13 +1280,52 @@ static JSValue js_db_connect(JSContext *ctx, JSValueConst this_val,
     return push_conn_object(ctx, h);
 }
 
+/* hull:db:_internal_conn - _internal_conn.connection() -> { conn, final }
+ *
+ * The connection the stdlib keeps its _hull_* tables on (manifest
+ * `databases.internal`, else the default one). Stdlib-only: the module name's
+ * underscore segment keeps it out of app code's reach. `final` is true once
+ * the manifest is wired; before that (a stdlib init() at app top level) the
+ * DSN is read from the app's manifest on the spot, and the caller (the
+ * hull:db:_internal proxy) must not cache the result. */
+static JSValue js_db_internal_conn(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    HlDbRegistry *reg = js ? js->base.db_registry : NULL;
+    int final = 1;
+    HlDbHandle *h = NULL;
+    if (reg) {
+        final = hl_db_registry_manifest_wired(reg);
+        if (!final) {
+            HlManifest m;
+            memset(&m, 0, sizeof m);
+            if (hl_manifest_extract_js(ctx, &m, js->base.alloc) == 0) {
+                if (hl_db_registry_set_internal_dsn(reg, m.databases.internal) != 0)
+                    log_warn("[hull:db] databases.internal is too long; ignored");
+            }
+            hl_manifest_free(&m);
+        }
+        const char *err = NULL;
+        h = hl_db_registry_internal(reg, &err);
+        if (!h && hl_db_registry_has_internal(reg))
+            return JS_ThrowInternalError(ctx, "hull internal database: %s",
+                                         err ? err : "cannot open databases.internal");
+    }
+    JSValue conn = push_conn_object(ctx, h);
+    if (JS_IsException(conn)) return conn;
+    JSValue out = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, out, "conn", conn);
+    JS_SetPropertyStr(ctx, out, "final", JS_NewBool(ctx, final));
+    return out;
+}
+
 /* ── Module init ─────────────────────────────────────────────────────── */
 
-static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
+/* Register the connection-object classes once (idempotent per runtime). */
+static void js_db_register_classes(JSContext *ctx)
 {
-    if (hl_js_check_module_declared(ctx, "hull/db", "hull:db") != 0) return -1;
-
-    /* Register the connection-object classes once (idempotent per runtime). */
     if (hull_db_conn_class_id == 0) {
         JS_NewClassID(&hull_db_conn_class_id);
         JS_NewClass(JS_GetRuntime(ctx), hull_db_conn_class_id, &js_db_conn_class);
@@ -1294,6 +1335,23 @@ static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
         JS_NewClass(JS_GetRuntime(ctx), hull_db_owned_conn_class_id,
                     &js_db_owned_conn_class);
     }
+}
+
+static int js_db_internal_conn_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    js_db_register_classes(ctx);
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "connection",
+                      JS_NewCFunction(ctx, js_db_internal_conn, "connection", 0));
+    JS_SetModuleExport(ctx, m, "_internal_conn", o);
+    return 0;
+}
+
+static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    if (hl_js_check_module_declared(ctx, "hull/db", "hull:db") != 0) return -1;
+
+    js_db_register_classes(ctx);
 
     /* The DB module exposes only connection acquisition: every query goes
      * through a connection object from db.connect(name) or db.default(). The
@@ -1318,6 +1376,12 @@ int hl_js_init_db_module(JSContext *ctx, HlJS *js)
     if (!m)
         return -1;
     JS_AddModuleExport(ctx, m, "db");
+    /* The stdlib's internal-table connection (underscore: stdlib-only). */
+    JSModuleDef *im = JS_NewCModule(ctx, "hull:db:_internal_conn",
+                                    js_db_internal_conn_module_init);
+    if (!im)
+        return -1;
+    JS_AddModuleExport(ctx, im, "_internal_conn");
     return 0;
 }
 

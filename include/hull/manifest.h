@@ -98,6 +98,11 @@ typedef struct HlManifestDatabase {
     int                 named_count;
     int                 declared;
     HlManifestDbDynamic dynamic;
+    /* `databases.internal`: an optional DSN (or "$VAR") for the stdlib's own
+     * _hull_* tables (sessions, auth state, rbac, ...), so they can live
+     * under a database role the app's connection has no grants on. NULL =
+     * they share the app's default connection. */
+    const char         *internal;
 } HlManifestDatabase;
 
 /* KV dynamic-open policy (`kv = { dynamic = { hosts = {...}, schemes = {...} } }`):

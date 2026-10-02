@@ -43,7 +43,7 @@
 local json = require("hull.json")
 local crypto = require("hull.crypto")
 local encoding = require("hull.encoding")
-local db = require("hull.db").default()
+local db = require("hull.db._internal").connection()
 local time = require("hull.time")
 
 local idempotency = {}

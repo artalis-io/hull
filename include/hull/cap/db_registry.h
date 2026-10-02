@@ -66,6 +66,31 @@ void hl_db_registry_set_manifest(HlDbRegistry *reg, const HlManifest *manifest);
  * set_manifest. 0 on success; -1 is fatal for the caller. Destroy undoes it. */
 int hl_db_registry_seal(HlDbRegistry *reg);
 
+/* The connection the stdlib keeps its own _hull_* tables on: the manifest's
+ * `databases.internal` DSN when one is declared (opened lazily, cached),
+ * otherwise the default connection. Reachable only through the stdlib-only
+ * hull.db._internal module - db.connect cannot name it. NULL + *err on
+ * failure. */
+HlDbHandle *hl_db_registry_internal(HlDbRegistry *reg, const char **err);
+
+/* Whether a separate internal connection is declared. */
+int hl_db_registry_has_internal(const HlDbRegistry *reg);
+
+/* Before the manifest is wired, a stdlib init() at app top level may already
+ * need the internal connection: the runtime reads `databases.internal` from
+ * the app's manifest table and hands it over here. The wired manifest's value
+ * takes over afterwards. -1 once sealed, or for a DSN that is too long. */
+int hl_db_registry_set_internal_dsn(HlDbRegistry *reg, const char *dsn);
+
+/* Whether the (sealed) manifest has been wired - after this the internal
+ * connection is final and may be cached. */
+int hl_db_registry_manifest_wired(const HlDbRegistry *reg);
+
+/* Whether the default connection is a network database (Postgres / MySQL),
+ * where a database role - not Hull's SQL-text check - is what can keep the
+ * app away from the stdlib's _hull_* tables. */
+int hl_db_registry_default_is_network(const HlDbRegistry *reg);
+
 /*
  * Seed a pre-opened, externally-owned connection under @p name (typically
  * "default", the -d flag connection that app_context already opened). The

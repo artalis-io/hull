@@ -29,7 +29,7 @@
 
 local blob = require("hull.blob")
 local crypto = require("hull.crypto")
-local db = require("hull.db").default()
+local db = require("hull.db._internal").connection()
 local fs = require("hull.fs")
 local mime_mod = require("hull.mime")
 local time = require("hull.time")

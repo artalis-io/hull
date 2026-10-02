@@ -469,8 +469,18 @@ int hull_serve(int argc, char **argv)
      * borrowed lifetime as ssh_policy. */
     rt->kv_policy = &policy->kv.dynamic;
 #ifdef HL_ENABLE_DB
-    if (rt->db_registry)
+    if (rt->db_registry) {
         hl_db_registry_set_manifest(rt->db_registry, policy);
+        /* On Postgres / MySQL the _hull_* guard is a check of the SQL
+         * text, which SQL that builds a table name at run time gets
+         * past. A database role is the real separation. */
+        if (!hl_db_registry_has_internal(rt->db_registry) &&
+            hl_db_registry_default_is_network(rt->db_registry))
+            log_warn("[hull:c] the stdlib's _hull_* tables share the app's "
+                     "database role: declare databases.internal (a role "
+                     "the app's connection has no grants on) to keep app "
+                     "SQL away from them - see docs/security.md");
+    }
 #endif
 
 #ifdef HL_ENABLE_HTTP_CLIENT

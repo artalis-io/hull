@@ -416,7 +416,15 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         }
         lua_pop(L, 1); /* pop dynamic */
 
-        if (out->databases.named_count == 0 && !out->databases.dynamic.declared)
+        lua_getfield(L, db_idx, "internal");
+        if (lua_type(L, -1) == LUA_TSTRING && lua_rawlen(L, -1) > 0)
+            out->databases.internal = hl_manifest_strdup(alloc, lua_tostring(L, -1));
+        else if (!lua_isnil(L, -1))
+            log_warn("[manifest] databases.internal: expected a DSN string");
+        lua_pop(L, 1); /* pop internal */
+
+        if (out->databases.named_count == 0 && !out->databases.dynamic.declared
+            && !out->databases.internal)
             log_warn("[manifest] databases has no `named` or `dynamic` entry; "
                      "named connections now go under databases.named = {...}");
     }

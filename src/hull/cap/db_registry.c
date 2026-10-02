@@ -16,10 +16,16 @@
 #include "hull/cap/policy_seal.h"  /* hl_policy_page_* */
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 /* One extra slot beyond the manifest cap for the seeded "default". */
 #define HL_DB_REGISTRY_MAX (HL_MANIFEST_MAX_DATABASES + 1)
+
+/* The registry name of the stdlib's internal connection. It starts with a
+ * byte no manifest name can, and hl_db_registry_get refuses it, so app code
+ * cannot reach the connection by name (db.connect). */
+#define INTERNAL_NAME "\x01internal"
 
 /* Longest -d DSN the registry keeps (inline, in the sealed span). */
 #define HL_DB_REGISTRY_DSN_MAX 8192
@@ -42,6 +48,11 @@ struct HlDbRegistry {
             const HlManifest *manifest;    /* borrowed (the sealed manifest) */
             int               has_default_dsn;
             char              default_dsn[HL_DB_REGISTRY_DSN_MAX]; /* the -d DSN */
+            /* databases.internal learned before the manifest is wired (a
+             * stdlib init() at app top level); the wired manifest's own
+             * value takes over once set. */
+            int               has_internal_dsn;
+            char              internal_dsn[HL_DB_REGISTRY_DSN_MAX];
         };
         unsigned char policy_span[HL_POLICY_SPAN];
     };
@@ -141,20 +152,89 @@ static const char *resolve_manifest_dsn(HlDbRegistry *reg, const char *name,
 static const char *lookup_dsn(HlDbRegistry *reg, const char *name,
                               const char **err)
 {
+    if (strcmp(name, INTERNAL_NAME) == 0) {
+        const char *d = (reg->manifest && reg->manifest->databases.internal)
+                        ? reg->manifest->databases.internal
+                        : (reg->has_internal_dsn ? reg->internal_dsn : NULL);
+        char var[128];
+        if (d && hl_env_ref(d, var, sizeof var)) {
+            const char *v = getenv(var);
+            if (!v || !v[0]) {
+                *err = "databases.internal env var is unset";
+                return NULL;
+            }
+            return v;
+        }
+        return d;
+    }
     const char *dsn = resolve_manifest_dsn(reg, name, err);
     if (!dsn && !*err && reg->has_default_dsn && strcmp(name, "default") == 0)
         dsn = reg->default_dsn;
     return dsn;
 }
 
+static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
+                                const char **err);
+
 HlDbHandle *hl_db_registry_get(HlDbRegistry *reg, const char *name,
                                const char **err)
 {
     if (err) *err = NULL;
-    if (!reg || !name || !name[0]) {
+    if (!reg || !name || !name[0] || name[0] == INTERNAL_NAME[0]) {
         if (err) *err = "invalid database name";
         return NULL;
     }
+    return registry_get(reg, name, err);
+}
+
+int hl_db_registry_has_internal(const HlDbRegistry *reg)
+{
+    return reg && ((reg->manifest && reg->manifest->databases.internal)
+                   || reg->has_internal_dsn);
+}
+
+HlDbHandle *hl_db_registry_internal(HlDbRegistry *reg, const char **err)
+{
+    if (err) *err = NULL;
+    if (!reg) return NULL;
+    if (!hl_db_registry_has_internal(reg))
+        return registry_get(reg, "default", err);
+    return registry_get(reg, INTERNAL_NAME, err);
+}
+
+int hl_db_registry_set_internal_dsn(HlDbRegistry *reg, const char *dsn)
+{
+    if (!reg || reg->sealed) return -1;
+    if (!dsn || !dsn[0]) {
+        reg->has_internal_dsn = 0;
+        return 0;
+    }
+    size_t n = strlen(dsn);
+    if (n >= sizeof reg->internal_dsn) return -1;
+    memcpy(reg->internal_dsn, dsn, n + 1);
+    reg->has_internal_dsn = 1;
+    return 0;
+}
+
+int hl_db_registry_default_is_network(const HlDbRegistry *reg)
+{
+    if (!reg) return 0;
+    const char *err = NULL;
+    const char *dsn = lookup_dsn((HlDbRegistry *)(uintptr_t)reg, "default", &err);
+    if (!dsn) return 0;
+    if (dsn[0] == '$') return 1;
+    return strncmp(dsn, "postgres", 8) == 0 || strncmp(dsn, "mysql", 5) == 0
+        || strncmp(dsn, "mariadb", 7) == 0;
+}
+
+int hl_db_registry_manifest_wired(const HlDbRegistry *reg)
+{
+    return reg && reg->manifest;
+}
+
+static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
+                                const char **err)
+{
 
     /* Cache hit (includes seeded connections like "default"). */
     for (int i = 0; i < reg->nslots; i++)

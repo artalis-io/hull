@@ -10,7 +10,7 @@
 
 local json = require("hull.json")
 local crypto = require("hull.crypto")
-local db = require("hull.db").default()
+local db = require("hull.db._internal").connection()
 local time = require("hull.time")
 local _request = require("hull.web._request")
 

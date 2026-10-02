@@ -40,7 +40,7 @@ app fails to load with a message naming the field and the variable. List it in
 `secrets` when only the manifest should read it: a secret reaches the connection
 or allowlist that names it and is never readable through `env.get`. List it in
 `env` only if scripts also need it. The same rule covers every field that
-accepts a reference: `hosts`, `databases.named`, `databases.dynamic.hosts`,
+accepts a reference: `hosts`, `databases.named`, `databases.internal`, `databases.dynamic.hosts`,
 `kv.dynamic.hosts`, `ssh.connect.hosts` and `ssh.tunnel.hosts`. (Without it, a
 reference could read any variable in the environment, an SQLite file name, for
 instance, can be read back with `PRAGMA database_list`.)
@@ -55,9 +55,32 @@ app.manifest({
             primary = "$DATABASE_URL",    -- postgres:// from $DATABASE_URL (env ref)
         },
         dynamic = { hosts = { "*.rds.amazonaws.com" }, schemes = { "postgres" } },
+        internal = "$HULL_INTERNAL_URL",  -- the stdlib's own _hull_* tables (optional)
     },
 })
 ```
+
+**`databases.internal`** (optional). Where the stdlib keeps its own `_hull_*`
+tables: sessions, auth-flows tokens and lockouts, TOTP, the audit log, RBAC,
+idempotency keys and attachment metadata. Point it at a database (or a
+schema) reached under a role your app's connection has **no grants on**, and
+the database itself keeps app SQL away from those tables. Without it they
+share the app's default connection and Hull's check of the SQL text is the
+only separation - enough on SQLite (which also has an authorizer), but SQL
+that builds a table name at run time can get past it on Postgres / MySQL, so
+Hull logs a warning at startup there. Postgres sketch:
+
+```sql
+CREATE ROLE hull_internal LOGIN PASSWORD '...';
+CREATE SCHEMA hull_internal AUTHORIZATION hull_internal;
+ALTER ROLE hull_internal SET search_path = hull_internal;
+REVOKE ALL ON SCHEMA hull_internal FROM PUBLIC;   -- the app role gets nothing
+```
+
+Outbox, inbox and jobs deliberately stay on the app's connection: their rows
+must commit in the same transaction as the app's own writes. Search (its index
+reads app tables) and the KV SQL store (on the connection you open it with)
+stay there too. Those tables keep the SQL-text check only.
 
 ## Stdlib Middleware
 

@@ -19,8 +19,8 @@
  */
 
 import { crypto } from "hull:crypto";
-import { db as dbModule } from "hull:db";
-const db = dbModule.default();
+import { internal as dbInternal } from "hull:db:_internal";
+const db = dbInternal.connection();
 import { time }   from "hull:time";
 import { json }   from "hull:json";
 import { app }    from "hull:app";
