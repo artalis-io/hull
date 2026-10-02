@@ -18,6 +18,7 @@ typedef struct {
     unsigned char *data;
     size_t         len;
     size_t         cap;
+    int            failed;   /* a chunk could not be stored */
 } WriteCtx;
 
 static void write_cb(void *context, void *data, int size)
@@ -29,7 +30,10 @@ static void write_cb(void *context, void *data, int size)
         size_t newcap = wc->cap * 2;
         if (newcap < needed) newcap = needed;
         unsigned char *p = realloc(wc->data, newcap);
-        if (!p) return; /* silent failure - stbi_write returns 0 */
+        /* stbi_write's return does not see this (the PNG writer encodes in
+         * memory first, but the JPEG writer streams chunk by chunk), so a
+         * dropped chunk would come back as a short image and success. */
+        if (!p) { wc->failed = 1; return; }
         wc->data = p;
         wc->cap = newcap;
     }
@@ -75,7 +79,7 @@ static int stb_encode_png(const void *pixels, uint32_t w, uint32_t h,
 {
     (void)quality;
     (void)alloc;
-    WriteCtx wc = { .data = NULL, .len = 0, .cap = 0 };
+    WriteCtx wc = { .data = NULL, .len = 0, .cap = 0, .failed = 0 };
     /* Pre-allocate a reasonable buffer (overflow-safe) */
     uint64_t est = (uint64_t)w * h * (uint64_t)channels / 2 + 256;
     if (est > SIZE_MAX / 2) est = (uint64_t)w * h + 256;
@@ -87,7 +91,7 @@ static int stb_encode_png(const void *pixels, uint32_t w, uint32_t h,
     int rc = stbi_write_png_to_func(write_cb, &wc,
                                      (int)w, (int)h, channels,
                                      pixels, stride);
-    if (rc == 0) {
+    if (rc == 0 || wc.failed) {
         free(wc.data);
         return -1;
     }
@@ -126,7 +130,7 @@ static int stb_encode_jpeg(const void *pixels, uint32_t w, uint32_t h,
     if (quality <= 0) quality = 90;
     if (quality > 100) quality = 100;
 
-    WriteCtx wc = { .data = NULL, .len = 0, .cap = 0 };
+    WriteCtx wc = { .data = NULL, .len = 0, .cap = 0, .failed = 0 };
     uint64_t jest = (uint64_t)w * h * (uint64_t)channels / 4 + 256;
     if (jest > SIZE_MAX / 2) jest = (uint64_t)w * h + 256;
     wc.cap = (size_t)jest;
@@ -136,7 +140,7 @@ static int stb_encode_jpeg(const void *pixels, uint32_t w, uint32_t h,
     int rc = stbi_write_jpg_to_func(write_cb, &wc,
                                      (int)w, (int)h, channels,
                                      pixels, quality);
-    if (rc == 0) {
+    if (rc == 0 || wc.failed) {
         free(wc.data);
         return -1;
     }

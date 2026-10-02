@@ -526,6 +526,46 @@ UTEST(hl_cap_fs, mmap_borrow_defers_close)
     teardown_fs();
 }
 
+/* A compute.async span set borrows and releases on a worker thread while the
+ * event loop borrows (images, sync spans) and closes. The counts were plain
+ * ints: concurrent updates got lost, and close() and the last release could
+ * each decide to free. Four threads churning borrow/release must leave the
+ * count exactly where it started, and the close that follows frees once. */
+#include <pthread.h>
+
+static void *borrow_churn(void *arg)
+{
+    HlMappedBuffer *buf = (HlMappedBuffer *)arg;
+    for (int i = 0; i < 10000; i++) {
+        hl_cap_fs_mmap_borrow(buf);
+        hl_cap_fs_mmap_release(buf);
+    }
+    return NULL;
+}
+
+UTEST(hl_cap_fs, mmap_borrow_is_thread_safe)
+{
+    setup_fs();
+    const char *data = "shared across threads";
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "mmap_borrow.txt", data, strlen(data), NULL), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "mmap_borrow.txt", NULL, NULL);
+    ASSERT_NE(buf, NULL);
+
+    pthread_t th[4];
+    for (int i = 0; i < 4; i++)
+        ASSERT_EQ(pthread_create(&th[i], NULL, borrow_churn, buf), 0);
+    for (int i = 0; i < 4; i++)
+        pthread_join(th[i], NULL);
+
+    EXPECT_EQ(atomic_load(&buf->borrow_count), 0);
+    EXPECT_EQ(atomic_load(&buf->refs), 1);       /* only the owner's */
+    EXPECT_EQ(atomic_load(&buf->pending_free), 0);
+    EXPECT_EQ(memcmp(buf->addr, data, strlen(data)), 0);
+
+    hl_cap_fs_munmap(buf);   /* the owner's reference was the last: freed here */
+    teardown_fs();
+}
+
 /* A borrow that is released BEFORE any close must not tear the buffer down;
  * the normal munmap still owns teardown. */
 UTEST(hl_cap_fs, mmap_release_without_close_keeps_buffer)
