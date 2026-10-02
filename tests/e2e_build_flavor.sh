@@ -97,15 +97,38 @@ done
 pass "a built binary passes bare arguments to app.main (both entry points)"
 
 # An option Hull does not take starts the app's arguments too: a built CLI
-# tool must be able to have a --help of its own.
-HELP_MAIN='app.main(function(ctx) if ctx.args[1] == "--help" and ctx.args[2] == "x" then return 0 end return 3 end)'
-mkdir -p "$WORK/help_cli"
+# tool must be able to have a --help of its own - and --verbose / --json,
+# which only hull's command dispatcher reads. The app answers 5, not 0: Hull's
+# own usage also exits 0, so 0 could not tell the two apart. Both entry points:
+# the Keel-free runner (serve_cli.c) and the server one (serve.c).
+HELP_MAIN='app.main(function(ctx) if (ctx.args[1] == "--help" or ctx.args[1] == "--verbose") and ctx.args[2] == "x" and #ctx.args == 2 then return 5 end return 3 end)'
+mkdir -p "$WORK/help_cli" "$WORK/help_srv"
 printf 'app.manifest({ modules = {} })\n%s\n' "$HELP_MAIN" > "$WORK/help_cli/app.lua"
-out=$("$HULL" build --no-verify-platform "$WORK/help_cli" -o "$WORK/help_cli/app" 2>&1) \
-    || fail "help_cli should build: $out"
-rc=$(hull_rc "$WORK/help_cli/app" --help x)
-[ "$rc" = 0 ] || fail "'./app --help x' should give the app [--help, x] (exit 0), got $rc"
-pass "a built binary passes an unknown option to app.main"
+printf 'app.manifest({ modules = { "hull/http-server@1" } })\n%s\n' "$HELP_MAIN" > "$WORK/help_srv/app.lua"
+for d in help_cli help_srv; do
+    out=$("$HULL" build --no-verify-platform "$WORK/$d" -o "$WORK/$d/app" 2>&1) \
+        || fail "$d should build: $out"
+    for flag in --help --verbose; do
+        rc=$(hull_rc "$WORK/$d/app" "$flag" x)
+        [ "$rc" = 5 ] || fail "$d: './app $flag x' should give the app [$flag, x] (exit 5), got $rc"
+    done
+done
+pass "a built binary passes --help / --verbose to app.main (both entry points)"
+
+# A built binary runs the migrations it was built with, and no others. With
+# none embedded it used to fall back to <cwd>/migrations, so whatever SQL had
+# been put beside the binary ran at start - past --verify-sig, on the app's
+# connection. The planted migration must not run (the app exits 9 if it did).
+mkdir -p "$WORK/mig_app"
+printf 'app.manifest({ modules = { "hull/db@1" } })\nlocal db = require("hull.db").default()\napp.main(function() local n = db.query("SELECT count(*) AS n FROM sqlite_master WHERE name = ?", { "planted" })[1].n return n == 0 and 0 or 9 end)\n' \
+    > "$WORK/mig_app/app.lua"
+out=$("$HULL" build --no-verify-platform "$WORK/mig_app" -o "$WORK/mig_app/app" 2>&1) \
+    || fail "mig_app should build: $out"
+mkdir -p "$WORK/mig_app/migrations"
+echo "CREATE TABLE planted (x INTEGER);" > "$WORK/mig_app/migrations/001_plant.sql"
+rc=$(cd "$WORK/mig_app" && hull_rc ./app -d plant.db)
+[ "$rc" = 0 ] || fail "a built binary ran a migration from its working directory (exit $rc)"
+pass "a built binary runs no migration it was not built with"
 
 # ── 4. --flavor=auto infers pure-compute for an app.main app ───────────
 out=$("$HULL" build --no-verify-platform --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) \

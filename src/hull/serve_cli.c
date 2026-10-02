@@ -145,11 +145,15 @@ static int cli_parse_args(int argc, char **argv,
             continue;
         }
         if (argv[i][0] == '-') {
-            /* Global flags the command dispatcher already read. */
-            if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "--json") == 0 ||
-                strncmp(argv[i], "--app-dir=", 10) == 0)
-                continue;
-            if (strcmp(argv[i], "--app-dir") == 0 && i + 1 < argc) { i++; continue; }
+            /* Global flags the command dispatcher already read - under hull.
+             * A built binary has no dispatcher: they are the app's, like any
+             * option Hull does not take (`./tool --verbose`). */
+            if (!embedded_app_present()) {
+                if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "--json") == 0 ||
+                    strncmp(argv[i], "--app-dir=", 10) == 0)
+                    continue;
+                if (strcmp(argv[i], "--app-dir") == 0 && i + 1 < argc) { i++; continue; }
+            }
             /* Any other option: a built binary's app takes it (`./tool
              * --help`); under hull it is an error. It used to be skipped
              * silently, so a misspelt option did nothing and said nothing. */

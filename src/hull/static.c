@@ -228,6 +228,10 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     }
 
     /* ── Try filesystem (dev mode) ────────────────────────────────── */
+    /* Development only: a built binary (its app files embedded) serves what it
+     * was built with, not whatever lies under <cwd>/static when it runs. */
+    if (ctx->vfs && ctx->vfs->count > 0)
+        return 0;
     {
         char fpath[4096];
         int n = hl_vfs_path(ctx->vfs, full_name, fpath, sizeof(fpath));
