@@ -180,6 +180,15 @@ function verifyRecoveryCode(code, hash) {
     return crypto.verifyPassword(normalizeRecoveryCode(code), hash);
 }
 
+// Every recovery code is 12 characters once normalized. Anything else - a
+// 6-digit TOTP code above all - cannot match one, and checking it anyway cost
+// a PBKDF2 hash per unused code (10 by default) on the event loop for every
+// wrong code submitted.
+const RECOVERY_CODE_LEN = 12;
+function recoveryShaped(code) {
+    return normalizeRecoveryCode(code).length === RECOVERY_CODE_LEN;
+}
+
 // Constant-time string equality. TOTP code matching where both
 // sides are zero-padded numeric strings of the same length; JS's
 // native `===` short-circuits on first code-unit mismatch, a
@@ -343,19 +352,18 @@ function bumpFailedAttempt(userId) {
             + "WHERE user_id = ?", [userId]);
         let fc = (r && r[0] && r[0].failed_count) || 0;
         let newFc = fc + 1;
-        let lockedUntil = (r && r[0] && r[0].locked_until) || null;
+        // 0 for "not locked", as the Lua twin stores it: lockoutRemaining
+        // reads anything not in the future as unlocked.
+        let lockedUntil = (r && r[0] && r[0].locked_until) || 0;
         if (newFc >= _state.maxFailedAttempts) {
             lockedUntil = now + _state.lockoutDuration;
             newFc = 0;
         }
-        db.exec(
-            "INSERT INTO _hull_totp_attempts "
-            + "(user_id, failed_count, last_failed_at, locked_until) "
-            + "VALUES (?, ?, ?, ?) "
-            + "ON CONFLICT(user_id) DO UPDATE SET "
-            + "  failed_count   = excluded.failed_count, "
-            + "  last_failed_at = excluded.last_failed_at, "
-            + "  locked_until   = excluded.locked_until",
+        // db.upsert writes each backend's own dialect. A hand-written
+        // INSERT ... ON CONFLICT is not MySQL syntax: there every wrong code
+        // failed here instead of being counted, and the lockout never came.
+        db.upsert("_hull_totp_attempts", ["user_id"],
+            ["user_id", "failed_count", "last_failed_at", "locked_until"],
             [userId, newFc, now, lockedUntil]);
     });
 }
@@ -386,19 +394,13 @@ function bumpFailedAttemptIp(ip) {
             + "WHERE ip = ?", [ip]);
         const fc = (r && r[0] && r[0].failed_count) || 0;
         let newFc = fc + 1;
-        let lockedUntil = null;
+        let lockedUntil = 0;   // not locked (see bumpFailedAttempt)
         if (newFc >= _state.maxFailedAttemptsPerIp) {
             lockedUntil = now + _state.lockoutDurationPerIp;
             newFc = 0;
         }
-        db.exec(
-            "INSERT INTO _hull_totp_attempts_by_ip "
-            + "(ip, failed_count, last_failed_at, locked_until) "
-            + "VALUES (?, ?, ?, ?) "
-            + "ON CONFLICT(ip) DO UPDATE SET "
-            + "  failed_count   = excluded.failed_count, "
-            + "  last_failed_at = excluded.last_failed_at, "
-            + "  locked_until   = excluded.locked_until",
+        db.upsert("_hull_totp_attempts_by_ip", ["ip"],
+            ["ip", "failed_count", "last_failed_at", "locked_until"],
             [ip, newFc, now, lockedUntil]);
     });
 }
@@ -796,9 +798,9 @@ function verifyWithKind(userId, code, req) {
         }
     }
 
-    const rows = db.query(
+    const rows = recoveryShaped(code) ? db.query(
         "SELECT code_hash FROM _hull_totp_recovery "
-        + "WHERE user_id = ? AND used_at IS NULL", [userId]);
+        + "WHERE user_id = ? AND used_at IS NULL", [userId]) : [];
     for (let i = 0; i < (rows || []).length; i++) {
         if (verifyRecoveryCode(code, rows[i].code_hash)) {
             // Consume atomically: the `used_at IS NULL` filter + affected-row

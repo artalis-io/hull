@@ -154,7 +154,7 @@ app.manifest({ modules = {
     "hull/web/middleware/session@1", "hull/web/middleware/outbox@1",
     "hull/web/middleware/inbox@1", "hull/web/middleware/rbac@1",
     "hull/web/middleware/audit-log@1", "hull/web/middleware/transaction@1",
-    "hull/web/auth-health@1",
+    "hull/web/auth-health@1", "hull/web/middleware/totp@1",
 } })
 local db = require("hull.db").default()
 local session = require("hull.web.middleware.session")
@@ -165,7 +165,9 @@ local audit_log = require("hull.web.middleware.audit-log")
 local transaction = require("hull.web.middleware.transaction")
 local auth_health = require("hull.web.auth-health")
 local search = require("hull.search")
+local totp = require("hull.web.middleware.totp")
 session.init()
+totp.init({})
 outbox.init()
 inbox.init()
 rbac.init()
@@ -251,6 +253,19 @@ app.get("/stdlib2", function(req, res)
         txn_count    = txn_count,
     })
 end)
+-- TOTP brute-force lockout on MySQL. Its counters were written with
+-- INSERT ... ON CONFLICT, which MySQL rejects: every wrong code failed instead
+-- of being counted and the lockout never came. Drive both counters past their
+-- thresholds and check each lockout is in force.
+app.get("/totp", function(req, res)
+    local t = totp._test
+    for _ = 1, 5 do t.bump_failed_attempt("totp-user") end
+    for _ = 1, 20 do t.bump_failed_attempt_ip("203.0.113.9") end
+    res:json({
+        user_locked = t.lockout_remaining("totp-user") > 0,
+        ip_locked   = t.lockout_remaining_ip("203.0.113.9") > 0,
+    })
+end)
 LUA
 
 echo "=== running app against mysql (native auth, plaintext) ==="
@@ -290,6 +305,12 @@ echo "$RESP_STDLIB" | grep -q '"session_role":"admin"'  || { echo "::error sessi
 echo "$RESP_STDLIB" | grep -q '"outbox_pending":1'      || { echo "::error outbox enqueue"; fail=1; }
 echo "$RESP_STDLIB" | grep -q '"sessions_ok":true'      || { echo "::error auth-health table probe"; fail=1; }
 echo "$RESP_STDLIB" | grep -q '"search_guarded":true'   || { echo "::error search SQLite-only guard"; fail=1; }
+
+# TOTP lockout counters are written on MySQL, so the lockout engages.
+RESP_TOTP=$(curl -fsS "http://127.0.0.1:${PORT}/totp" || echo FAIL)
+echo "totp response: $RESP_TOTP"
+echo "$RESP_TOTP" | grep -q '"user_locked":true' || { echo "::error totp per-user lockout never engaged"; fail=1; }
+echo "$RESP_TOTP" | grep -q '"ip_locked":true'   || { echo "::error totp per-IP lockout never engaged"; fail=1; }
 
 # backend-agnostic DB stdlib on MySQL: inbox / rbac / audit-log / transaction / insert_if_absent
 RESP_STDLIB2=$(curl -fsS "http://127.0.0.1:${PORT}/stdlib2" || echo FAIL)
