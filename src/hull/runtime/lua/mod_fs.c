@@ -594,6 +594,28 @@ static int require_caller_is_stdlib(lua_State *L)
            hl_lua_source_is_stdlib(ar.source);
 }
 
+/* 1 when stdlib code called `require` by that name: `require("hull._x")` in a
+ * hull.* chunk. A stdlib frame alone is not enough. A stdlib helper that calls
+ * a function the app handed it (retry.run's retry_on, hull.map's fn) would
+ * lend that function its identity, so an app could pass `require` itself, with
+ * the internal name as the value, and have the helper load it. Naming the
+ * call shuts that out, as the _hull_* guard does for conn.exec. A tail call
+ * keeps the caller's frame in Lua 5.4, so `return require(...)` still names
+ * it; pcall(require, ...) does not, which is why the stdlib calls it inside a
+ * function of its own there. */
+static int require_named_by_stdlib(lua_State *L)
+{
+    lua_Debug self;
+    if (lua_getstack(L, 0, &self) == 0 || lua_getinfo(L, "n", &self) == 0)
+        return 0;
+    if (!self.name || strcmp(self.name, "require") != 0 || !self.namewhat ||
+        (strcmp(self.namewhat, "global") != 0 &&
+         strcmp(self.namewhat, "local") != 0 &&
+         strcmp(self.namewhat, "upvalue") != 0))
+        return 0;
+    return require_caller_is_stdlib(L);
+}
+
 /* 1 when @p name is a first-party module the app has not declared and the
  * caller is app code, i.e. a cache hit the declaration gate would refuse. */
 static int cached_but_undeclared(lua_State *L, HlLua *lua, const char *name)
@@ -615,13 +637,16 @@ static int require_impl(lua_State *L, int trusted)
     const char *name = luaL_checkstring(L, 1);
     HlLua *lua = get_hl_lua(L);
 
-    /* 0. A segment starting with '_' (hull._template, hull.kv._native, ...)
-     * is the stdlib's own plumbing: it bypasses the declaration gate, and
-     * hull._template compiles strings into code. Only stdlib code may require
-     * one, once the app's module set is wired - the point from which
-     * declarations are enforced at all. */
-    if (!trusted && lua && lua->base.module_set && strncmp(name, "hull.", 5) == 0 &&
-        strstr(name, "._") && !require_caller_is_stdlib(L))
+    /* 0. A segment starting with '_' (hull._template, hull.kv._native,
+     * hull.db._internal_conn, ...) is the stdlib's own plumbing: it bypasses
+     * the declaration gate, hull._template compiles strings into code, and
+     * hull.db._internal_conn is the connection to databases.internal. Only
+     * stdlib code may require one - from the first line of the app on, not
+     * only once the module set is wired: these names are not in the
+     * registry, so the import tracker never sees a top-level require of one,
+     * and an app took them that way before the gate existed. */
+    if (!trusted && lua && strncmp(name, "hull.", 5) == 0 &&
+        strstr(name, "._") && !require_named_by_stdlib(L))
         return luaL_error(L, "module '%s' is internal to the Hull stdlib", name);
 
     /* 1. Check cache (registry "__hull_loaded"). A cached first-party module

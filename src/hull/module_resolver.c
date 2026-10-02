@@ -598,15 +598,21 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
 void hl_import_tracker_record(HlRuntime *rt, const char *canonical_name)
 {
     if (!rt || !canonical_name) return;
-    if (rt->import_tracker_count >= HL_MANIFEST_MAX_MODULES) return;
 
     /* Dedup against the existing list - apps commonly require/import
      * the same module from multiple files, and we want each name to
      * appear at most once in the validation error. Linear scan is
-     * fine; HL_MANIFEST_MAX_MODULES is small. */
+     * fine; the registry is small. */
     for (int i = 0; i < rt->import_tracker_count; i++) {
         if (rt->import_tracker_names[i] == canonical_name) return;
         if (strcmp(rt->import_tracker_names[i], canonical_name) == 0) return;
+    }
+    /* A name not recorded is a name never checked: fail closed. */
+    const int cap = (int)(sizeof(rt->import_tracker_names) /
+                          sizeof(rt->import_tracker_names[0]));
+    if (rt->import_tracker_count >= cap) {
+        rt->import_tracker_overflow = 1;
+        return;
     }
     rt->import_tracker_names[rt->import_tracker_count++] = canonical_name;
 }
@@ -616,6 +622,14 @@ int hl_import_tracker_validate(const HlRuntime *rt,
                                 char *errbuf, size_t errlen)
 {
     if (!rt || !set) return 0;
+
+    if (rt->import_tracker_overflow) {
+        if (errbuf && errlen)
+            snprintf(errbuf, errlen,
+                     "too many distinct top-level imports to check against "
+                     "app.manifest");
+        return -1;
+    }
 
     int missing_count = 0;
     const char *first_missing = NULL;

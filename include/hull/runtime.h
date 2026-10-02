@@ -237,10 +237,14 @@ struct HlRuntime {
      * cover. See hl_import_tracker_record / _validate in
      * module_resolver.c.
      *
-     * Capacity is HL_MANIFEST_MAX_MODULES because no app can declare
-     * (or transitively use) more registry-known modules than that. */
+     * Capacity is the registry's (names are registry names, recorded
+     * once each), so it cannot fill. It was HL_MANIFEST_MAX_MODULES (32):
+     * an app's 33rd distinct top-level import went unrecorded, and an
+     * undeclared module imported then was never checked. Overflow, should
+     * the bound ever be wrong, fails validation rather than passing. */
     int import_tracker_count;
-    const char *import_tracker_names[HL_MANIFEST_MAX_MODULES];
+    int import_tracker_overflow;
+    const char *import_tracker_names[HL_MODULE_BITSET_WORDS * 64];
     HlAsyncBackendPool *thread_pool; /* worker pool for async work (NULL if not created) */
     /* HlAsyncBackend context - the event loop primitives layer. In
      * server-mode builds this is a wrap around the KlHttpServer's

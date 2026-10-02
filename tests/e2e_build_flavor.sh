@@ -107,6 +107,21 @@ rc=$(hull_rc "$WORK/help_cli/app" --help x)
 [ "$rc" = 0 ] || fail "'./app --help x' should give the app [--help, x] (exit 0), got $rc"
 pass "a built binary passes an unknown option to app.main"
 
+# A top-level require of a module the manifest does not declare is refused by
+# the Keel-free runner too. It resolves modules through the app context, which
+# never checked what the top level had loaded before the set was wired, so a
+# built app.main app could use any module it did not declare. Refused at build
+# or at start; the body must not run (it would exit 9).
+mkdir -p "$WORK/undecl_cli"
+printf 'local c = require("hull.crypto")\napp.manifest({ modules = {} })\napp.main(function() return 9 end)\n' \
+    > "$WORK/undecl_cli/app.lua"
+if "$HULL" build --no-verify-platform "$WORK/undecl_cli" -o "$WORK/undecl_cli/app" >/dev/null 2>&1; then
+    rc=$(hull_rc "$WORK/undecl_cli/app")
+    [ "$rc" != 9 ] && [ "$rc" != 0 ] \
+        || fail "an undeclared top-level require should stop a built app.main app, got exit $rc"
+fi
+pass "a built app.main app cannot use a module it did not declare"
+
 # ── 4. --flavor=auto infers pure-compute for an app.main app ───────────
 out=$("$HULL" build --no-verify-platform --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) \
     || fail "auto build failed: $out"

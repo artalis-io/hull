@@ -30,7 +30,11 @@
 
 local M = {}
 
-local has_native, native = pcall(require, "hull.encoding._native")
+-- Called by name inside a function: an internal module loads only for a
+-- stdlib frame that names `require`, and pcall(require, ...) names nothing.
+local has_native, native = pcall(function()
+    return require("hull.encoding._native")
+end)
 if not has_native or type(native) ~= "table" then native = nil end
 
 local sbyte, schar, concat = string.byte, string.char, table.concat
