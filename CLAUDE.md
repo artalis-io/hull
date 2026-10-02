@@ -688,6 +688,17 @@ roadmap §2.9.)
   dialect-portable (name PK, host-generated ISO-8601 `applied_at`).
 - **SQLite-only features under Postgres:** `db.udf` and `hull/search` (FTS5)
   are SQLite-only and fail with a clear error on a Postgres connection.
+- **Lost connections (Postgres and MySQL):** every read is bounded by the
+  DSN's `?read_timeout=<ms>` (default 300000, `0` = none), from the startup
+  exchange on. A connection whose reply was left part-read - a failed or
+  timed-out read, a malformed packet, a dropped socket - refuses further use
+  rather than hand the next query this one's reply. The backend keeps the DSN
+  (scrubbed on close) and reconnects on the next call when the connection was
+  idle. Lost inside a transaction it does not: the server rolled the
+  transaction back, and statements on a new connection would each commit alone,
+  so calls refuse until a `ROLLBACK` (the batch wrapper's, or the app's own),
+  which then succeeds. Covered by the `/reconnect` phase of `e2e_postgres` /
+  `e2e_mysql` (each kills its own session).
 
 **MySQL/MariaDB specifics** (`HL_ENABLE_MYSQL=1`). One backend serves both
 `mysql://` and `mariadb://` (MariaDB is a MySQL fork on the same wire

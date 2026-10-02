@@ -31,7 +31,12 @@ typedef struct HlMyDsn {
     char password[HL_MY_DSN_PASSWORD_MAX]; /* secret: scrub after use */
     char dbname[HL_MY_DSN_DBNAME_MAX];
     char sslmode[HL_MY_DSN_SSLMODE_MAX];   /* parsed now, enforced in the TLS phase */
+    int  read_timeout_ms;                  /* ?read_timeout=: bound on each read (0 = none) */
 } HlMyDsn;
+
+/* A read that blocks longer than this fails (see HL_PG_READ_TIMEOUT_DEFAULT_MS):
+ * a server that accepts and then stalls cannot hold a query forever. */
+#define HL_MY_READ_TIMEOUT_DEFAULT_MS 300000
 
 /*
  * Parse a `mysql://` / `mariadb://` DSN into @p out. Percent-decodes user /
@@ -87,8 +92,18 @@ typedef struct HlMyConn {
     uint32_t capabilities;  /* client capability flags used at handshake */
     uint8_t  seq;           /* next packet sequence to send in a command */
     uint64_t last_insert_id;/* from the most recent OK packet */
+    /* Set when a command is sent, cleared only once its reply has been read
+     * to a clean end (OK, ERR, or the final EOF, with no result set still to
+     * come). Any other exit - a failed read, a malformed or oversized packet,
+     * LOCAL INFILE - leaves it set: the next reply would answer this command,
+     * so every later command refuses and the backend reconnects. */
+    int      broken;
+    uint16_t server_status; /* status flags of the latest OK / EOF */
     char     errmsg[HL_MY_ERRMSG_SIZE];
 } HlMyConn;
+
+/* SERVER_STATUS_IN_TRANS: a transaction is open on the connection. */
+#define HL_MY_SERVER_STATUS_IN_TRANS 0x0001
 
 /*
  * Connect to dsn->host:port and run the handshake (mysql_native_password +

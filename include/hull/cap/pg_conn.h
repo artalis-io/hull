@@ -28,7 +28,14 @@ typedef struct HlPgDsn {
     char password[256];   /* secret: scrub after use */
     char dbname[128];
     char sslmode[16];     /* parsed; drives TLS negotiation */
+    int  read_timeout_ms; /* ?read_timeout=: bound on each read (0 = none) */
 } HlPgDsn;
+
+/* A read that blocks longer than this fails, so a server that accepts the
+ * connection and then stalls cannot hold a blocking query (and the event loop
+ * running it) forever. Long enough for a slow migration; ?read_timeout= sets
+ * another bound, 0 none. */
+#define HL_PG_READ_TIMEOUT_DEFAULT_MS 300000
 
 /*
  * Parse a "postgres://" / "postgresql://" DSN of the form
@@ -55,6 +62,10 @@ typedef struct HlPgConn {
     int32_t  backend_pid; /* BackendKeyData, for a future CancelRequest */
     int32_t  backend_key;
     int      tx_status;   /* latest ReadyForQuery status: 'I' / 'T' / 'E' */
+    /* A send or a read failed, so a reply may be left part-read: what arrives
+     * next would answer an earlier query. Every later query refuses; the
+     * backend reconnects (db_postgres.c). */
+    int      broken;
     char     errmsg[256];
 } HlPgConn;
 
