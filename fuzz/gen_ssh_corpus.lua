@@ -229,6 +229,11 @@ seed(T.sftp_session, "ops", plain(conf()) .. plain(ok_reply()) .. plain(data(s_v
      .. plain(data(s_status(5, 0))) .. plain(data(s_handle(6) .. s_data(7, "abc") .. s_status(8, 1)))
      .. plain(data(s_status(9, 0))))
 
+-- A reply of the wrong type to READDIR (data, where a name or a status
+-- belongs): Sftp:list once indexed its missing names and raised.
+seed(T.sftp_session, "readdir_data", plain(conf()) .. plain(ok_reply()) .. plain(data(s_version()))
+     .. plain(data(s_attrs(1))) .. plain(data(s_handle(2) .. s_data(3, "abc"))))
+
 -- WebSocket framing. Server frames are unmasked; opcodes 2 (binary),
 -- 9 (ping), 8 (close), and the 126 extended-length form.
 local function sframe(opcode, payload)
