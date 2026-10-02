@@ -186,9 +186,18 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
                         out->connect_timeout_ms = (int)ms;
                 }
             } else if (ci_eq(query, klen, "sslmode")) {
-                if (ci_eq(val, vlen, "verify-full"))       out->verify = 1;
-                else if (ci_eq(val, vlen, "require"))       out->verify = 0;
-                else if (ci_eq(val, vlen, "disable") || ci_eq(val, vlen, "none")) out->verify = 0;
+                /* require / verify-* ask for TLS, so they turn it on: they
+                 * used to set only `verify`, and redis://...?sslmode=verify-full
+                 * connected in plaintext and sent HELLO 3 AUTH with the
+                 * password in clear. verify-ca checks as verify-full does
+                 * (chain and host name) - stricter, never weaker. */
+                if (ci_eq(val, vlen, "verify-full") || ci_eq(val, vlen, "verify-ca")) {
+                    out->tls = 1; out->verify = 1;
+                } else if (ci_eq(val, vlen, "require")) {
+                    out->tls = 1; out->verify = 0;
+                } else if (ci_eq(val, vlen, "disable") || ci_eq(val, vlen, "none")) {
+                    out->verify = 0;
+                }
             }
         }
         if (!amp) break;
@@ -226,6 +235,13 @@ struct HlValkeyConn {
     SHArena *arena;          /* reply aggregate items; reset per reply */
     char     errmsg[HL_VALKEY_ERRMSG];
     int      resp3;
+    /* The stream is no longer in step with the server: a send or a read
+     * failed (a timeout among them) or a reply could not be taken whole, so
+     * what the server sends next answers an earlier command, and the next
+     * bytes sent may complete a half-sent one. Every later command refuses
+     * until the connection is reopened. A server -ERR reply is a whole reply
+     * and does not count. */
+    int      dead;
 };
 
 HlAllocator *hl_valkey_conn_alloc(HlValkeyConn *c) { return c ? c->alloc : NULL; }
@@ -257,7 +273,7 @@ static int conn_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         ssize_t n = io_send(c, buf + sent, len - sent);
-        if (n <= 0) { set_err(c, "socket write failed"); return -1; }
+        if (n <= 0) { c->dead = 1; set_err(c, "socket write failed"); return -1; }
         sent += (size_t)n;
     }
     return 0;
@@ -276,22 +292,30 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
         size_t consumed = 0;
         HlRespResult r = hl_resp_parse(c->rbuf, c->rlen, &consumed, out, reply_alloc, c);
         if (r == HL_RESP_OK) { c->consumed = consumed; return 0; }
-        if (r == HL_RESP_PARSE_ERR) { set_err(c, "malformed reply from server"); return -1; }
+        if (r == HL_RESP_PARSE_ERR) { c->dead = 1; set_err(c, "malformed reply from server"); return -1; }
         if (c->rlen == c->rcap) {                 /* NEED_MORE: grow bounded */
             size_t ncap = c->rcap ? c->rcap * 2 : HL_VALKEY_RBUF_INIT;
-            if (ncap > HL_VALKEY_MAX_REPLY) { set_err(c, "server reply exceeds limit"); return -1; }
+            if (ncap > HL_VALKEY_MAX_REPLY) { c->dead = 1; set_err(c, "server reply exceeds limit"); return -1; }
             uint8_t *nb = hl_alloc_realloc(c->alloc, c->rbuf, c->rcap, ncap);
-            if (!nb) { set_err(c, "out of memory"); return -1; }
+            if (!nb) { c->dead = 1; set_err(c, "out of memory"); return -1; }
             c->rbuf = nb; c->rcap = ncap;
         }
         ssize_t n = io_recv(c, c->rbuf + c->rlen, c->rcap - c->rlen);
-        if (n <= 0) { set_err(c, "connection closed by server"); return -1; }
+        if (n <= 0) {
+            c->dead = 1;
+            set_err(c, n < 0 ? "read failed or timed out" : "connection closed by server");
+            return -1;
+        }
         c->rlen += (size_t)n;
     }
 }
 
 /* Send a command built with hl_resp_cmd_* and read its reply. */
 int hl_valkey_command(HlValkeyConn *c, const HlRespWriter *cmd, HlRespValue *out) {
+    if (c->dead) {
+        set_err(c, "connection broken by an earlier failed command; reopen it");
+        return -1;
+    }
     if (cmd->err) { set_err(c, "command encode failed"); return -1; }
     if (conn_send(c, cmd->buf, cmd->len) != 0) return -1;
     return read_reply(c, out);

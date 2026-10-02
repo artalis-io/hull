@@ -58,6 +58,17 @@ UTEST(valkey_dsn, tls_schemes_verify_default_on) {
     { OK("valkeys://host"); ASSERT_EQ(d.tls, 1); ASSERT_EQ(d.verify, 1); }
 }
 
+/* sslmode=require / verify-* ask for TLS, so they turn it on over a plaintext
+ * scheme; they used to set only `verify`, and the connection (and its AUTH)
+ * went out in clear. */
+UTEST(valkey_dsn, sslmode_turns_tls_on) {
+    { OK("redis://host?sslmode=require");      ASSERT_EQ(d.tls, 1); ASSERT_EQ(d.verify, 0); }
+    { OK("redis://host?sslmode=verify-full");  ASSERT_EQ(d.tls, 1); ASSERT_EQ(d.verify, 1); }
+    { OK("valkey://host?sslmode=verify-ca");   ASSERT_EQ(d.tls, 1); ASSERT_EQ(d.verify, 1); }
+    { OK("redis://host?sslmode=disable");      ASSERT_EQ(d.tls, 0); }
+    { OK("redis://host");                      ASSERT_EQ(d.tls, 0); }
+}
+
 UTEST(valkey_dsn, sslmode_and_timeout_opts) {
     { OK("rediss://host?sslmode=require");      ASSERT_EQ(d.verify, 0); }
     { OK("rediss://host?sslmode=verify-full");  ASSERT_EQ(d.verify, 1); }

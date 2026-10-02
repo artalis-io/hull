@@ -128,4 +128,41 @@ UTEST(valkey_conn, command_get_roundtrip) {
     close(sv[0]);
 }
 
+/* A failed read leaves the stream out of step: what arrives next answers the
+ * earlier command. The connection refuses every later command instead of
+ * handing that reply to it - here a valid GET reply is already waiting behind
+ * the malformed one, and the second command must not take it. */
+UTEST(valkey_conn, a_failed_reply_breaks_the_connection) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    const char *bad  = "!not a resp reply\r\n";
+    const char *next = "$5\r\nhello\r\n";
+    write(sv[0], HELLO_MAP, strlen(HELLO_MAP));
+    write(sv[0], bad, strlen(bad));
+    write(sv[0], next, strlen(next));
+    HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://localhost", &d));
+    HlValkeyConn *c = NULL; char e[128];
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
+
+    HlRespWriter w; hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, 2);
+    hl_resp_cmd_arg_cstr(&w, "GET");
+    hl_resp_cmd_arg_cstr(&w, "a");
+    HlRespValue reply;
+    EXPECT_EQ(-1, hl_valkey_command(c, &w, &reply));
+    hl_resp_writer_free(&w);
+
+    hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, 2);
+    hl_resp_cmd_arg_cstr(&w, "GET");
+    hl_resp_cmd_arg_cstr(&w, "b");
+    EXPECT_EQ(-1, hl_valkey_command(c, &w, &reply));
+    const char *err = hl_valkey_conn_error(c);
+    EXPECT_TRUE(err && strstr(err, "reopen") != NULL);
+    hl_resp_writer_free(&w);
+
+    hl_valkey_conn_close(c);
+    close(sv[0]);
+}
+
 UTEST_MAIN();
