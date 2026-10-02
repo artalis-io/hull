@@ -94,6 +94,38 @@ echo "=== databases.internal ==="
 run_case lua "lua"
 run_case js "js"
 
+# `hull build` reads the manifest by running the app's top level in a VM with
+# no database, where the internal-connection module is a stand-in. A stdlib
+# module that takes the connection at load, and an init() called at top level,
+# must not stop the manifest from being read there.
+echo "=== build-time manifest extraction ==="
+mkdir -p "$TMPDIR/xlua" "$TMPDIR/xjs"
+cat > "$TMPDIR/xlua/app.lua" <<'EOF2'
+app.manifest({ modules = { "hull/web/middleware/session@1" } })
+local session = require("hull.web.middleware.session")
+session.init({})
+app.main(function() return 0 end)
+EOF2
+cat > "$TMPDIR/xjs/app.js" <<'EOF2'
+import { app } from "hull:app";
+import { session } from "hull:web:middleware:session";
+app.manifest({ modules: ["hull/web/middleware/session@1"] });
+session.init({});
+app.main(() => 0);
+EOF2
+# Lua extraction keeps a manifest declared before a later top-level error, so
+# what matters there is that the stdlib module loads at all.
+out=$("$HULL" manifest "$TMPDIR/xlua" 2>&1 || true)
+case "$out" in
+    *"module not found"*) fail "lua: the stdlib loads while the manifest is read" "$out" ;;
+    *) pass "lua: the stdlib loads while the manifest is read" ;;
+esac
+out=$("$HULL" manifest "$TMPDIR/xjs" 2>&1 || true)
+case "$out" in
+    *'"hull/web/middleware/session@1"'*) pass "js: the manifest is read past a top-level init()" ;;
+    *) fail "js: the manifest is read past a top-level init()" "$out" ;;
+esac
+
 echo ""
 echo "e2e_db_internal: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

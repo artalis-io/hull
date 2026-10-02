@@ -13,13 +13,17 @@
 // connection: the _hull_* caller check needs `this` to be that connection and
 // the calling frame to be stdlib (a bound function would be neither).
 
-import { internalConn } from "hull:db:_internal_conn";
+// The export is named for the module's last segment, like every hull:* native
+// module: while `hull build` reads the manifest, this module is a stand-in that
+// exports that name (and does nothing), so a stdlib init() at app top level
+// runs through it.
+import { _internal_conn as native } from "hull:db:_internal_conn";
 
 let cached = null;
 
 function resolve() {
     if (cached) return cached;
-    const r = internalConn.connection();
+    const r = native.connection();
     if (r.final) cached = r.conn;
     return r.conn;
 }

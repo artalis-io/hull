@@ -374,6 +374,17 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
             }
         }
 
+        /* hull.db._internal_conn is not a registry module (stdlib-only, never
+         * declared), so the loop above skips it; the stdlib modules that keep
+         * _hull_* tables require it at load through hull.db._internal. */
+        lua_getfield(L, -2, "hull.db._internal_conn");
+        int has_internal = !lua_isnil(L, -1);
+        lua_pop(L, 1);
+        if (!has_internal) {
+            lua_rawgeti(L, LUA_REGISTRYINDEX, nop_ref);
+            lua_setfield(L, -3, "hull.db._internal_conn");
+        }
+
         lua_pop(L, 2);  /* pop __hull_modules + _LOADED */
         /* Keep nop_ref alive - released when the VM is freed. */
     }

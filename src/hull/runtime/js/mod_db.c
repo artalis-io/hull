@@ -1280,7 +1280,7 @@ static JSValue js_db_connect(JSContext *ctx, JSValueConst this_val,
     return push_conn_object(ctx, h);
 }
 
-/* hull:db:_internal_conn - internalConn.connection() -> { conn, final }
+/* hull:db:_internal_conn - _internal_conn.connection() -> { conn, final }
  *
  * The connection the stdlib keeps its _hull_* tables on (manifest
  * `databases.internal`, else the default one). Stdlib-only: the module name's
@@ -1343,7 +1343,7 @@ static int js_db_internal_conn_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue o = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, o, "connection",
                       JS_NewCFunction(ctx, js_db_internal_conn, "connection", 0));
-    JS_SetModuleExport(ctx, m, "internalConn", o);
+    JS_SetModuleExport(ctx, m, "_internal_conn", o);
     return 0;
 }
 
@@ -1381,7 +1381,7 @@ int hl_js_init_db_module(JSContext *ctx, HlJS *js)
                                     js_db_internal_conn_module_init);
     if (!im)
         return -1;
-    JS_AddModuleExport(ctx, im, "internalConn");
+    JS_AddModuleExport(ctx, im, "_internal_conn");
     return 0;
 }
 
