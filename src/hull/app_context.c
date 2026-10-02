@@ -377,6 +377,18 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             }
             ctx->rt->module_set = &ctx->module_set;
             ctx->module_set_wired = 1;
+
+            /* What the app's top level required / imported before this set
+             * existed was let through unchecked; check it now, as serve.c
+             * does. Without this an app.main app (the CLI runner, which
+             * comes here) could import an undeclared module at top level. */
+            char itrack_err[256] = {0};
+            if (hl_import_tracker_validate(ctx->rt, ctx->rt->module_set,
+                                           itrack_err, sizeof(itrack_err)) != 0) {
+                fprintf(stderr, "[app-context] %s\n", itrack_err);
+                hl_app_context_free(ctx);
+                return -1;
+            }
         }
     }
 

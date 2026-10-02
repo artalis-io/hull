@@ -18,6 +18,7 @@
 # define _XOPEN_SOURCE 700
 #endif
 
+#include "../../client_ip_matrix.h"
 #include "utest.h"
 #include "hull/runtime/js.h"
 #include "hull/runtime/js_bytecode_cache.h"
@@ -510,7 +511,7 @@ UTEST(js_template_bridge, compile_cannot_forge_a_stdlib_script_name)
         "  'hull:forged');\n"
         "try { f(); } catch (e) { globalThis.__tpl_stack = String(e.stack); }\n";
 
-    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "hull:tests:template_bridge",
                           JS_EVAL_TYPE_MODULE);
     if (JS_IsException(val))
         hl_js_dump_error(&js);
@@ -539,7 +540,7 @@ UTEST(js_template_bridge, compile_without_a_name_still_works)
         "'(function(){ return function(){ return 1; }; })()');\n"
         "globalThis.__tpl_ok = (typeof f === 'function' && f() === 1) ? 1 : 0;\n";
 
-    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "hull:tests:template_bridge",
                           JS_EVAL_TYPE_MODULE);
     if (JS_IsException(val))
         hl_js_dump_error(&js);
@@ -5006,6 +5007,75 @@ UTEST(js_runtime, internal_modules_are_stdlib_only)
     EXPECT_EQ(eval_int("globalThis.__internal === 1 ? 1 : 0"), 0);
 
     js.base.module_set = NULL;
+    cleanup_js();
+}
+
+/* ...and before it is wired, too. Static imports all run before the manifest
+ * is read, and an internal name is not in the registry, so the import tracker
+ * never sees one: a gate that waited for the module set let an app's top-level
+ * import of hull:_template (or hull:db:_internal_conn) straight through. A
+ * hull: module may still import one. */
+UTEST(js_runtime, internal_modules_are_stdlib_only_before_wiring)
+{
+    init_js();
+    ASSERT_TRUE(js.base.module_set == NULL);
+
+    const char *app =
+        "import { _template } from 'hull:_template';\n"
+        "globalThis.__early = 1;\n";
+    JSValue val = JS_Eval(js.ctx, app, strlen(app), "<test>", JS_EVAL_TYPE_MODULE);
+    int threw = JS_IsException(val);
+    if (threw) JS_FreeValue(js.ctx, JS_GetException(js.ctx));
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(eval_int("globalThis.__early === 1 ? 1 : 0"), 0);
+
+    const char *lib =
+        "import { _template } from 'hull:_template';\n"
+        "globalThis.__lib = (typeof _template.compile === 'function') ? 1 : 0;\n";
+    val = JS_Eval(js.ctx, lib, strlen(lib), "hull:tests:internal_import",
+                  JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(eval_int("globalThis.__lib|0"), 1);
+
+    cleanup_js();
+}
+
+/* hull:web:_request.clientIp is the one place a request's source IP is derived
+ * under trust_proxy; four middleware delegate to it. The Lua twin asserts the
+ * same string (lua_stdlib.client_ip_matrix), so the two cannot drift. */
+UTEST(js_stdlib, client_ip_matrix)
+{
+    init_js();
+    const char *code =
+        "import { _request } from 'hull:web:_request';\n"
+        "const s = (v) => (v === null || v === undefined) ? '(nil)' : v;\n"
+        "const cases = [\n"
+        "  [{ headers: {}, remote_addr: '10.0.0.1' }, false],\n"
+        "  [{ headers: { 'x-forwarded-for': '1.1.1.1' }, remote_addr: '10.0.0.1' }, false],\n"
+        "  [{ headers: { 'x-forwarded-for': 'a, b, c' }, remote_addr: '10.0.0.1' }, true],\n"
+        "  [{ headers: { 'x-forwarded-for': ' 1.2.3.4 , x' }, remote_addr: '10.0.0.1' }, true],\n"
+        "  [{ headers: {}, remote_addr: '10.0.0.1' }, true],\n"
+        "  [{ headers: { 'x-forwarded-for': '' }, remote_addr: '10.0.0.1' }, true],\n"
+        "  [{ headers: {} }, false],\n"
+        "  [{ headers: {}, remote_addr: 'a'.repeat(100) }, false],\n"
+        "];\n"
+        "const out = cases.map((c) => s(_request.clientIp(c[0], c[1])));\n"
+        "out.push(s(_request.clientIp(null, true)));\n"
+        "globalThis.__ip = out.join('|');\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "hull:tests:client_ip",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    char *got = eval_str("globalThis.__ip || ''");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, HL_TEST_CLIENT_IP_MATRIX);
+    free(got);
     cleanup_js();
 }
 

@@ -102,13 +102,16 @@ static char *hl_js_module_normalize(JSContext *ctx,
 
     /* hull:* modules are already normalized */
     if (strncmp(name, "hull:", 5) == 0) {
-        /* A segment starting with '_' (hull:_template, hull:kv:_native, ...)
-         * is the stdlib's own plumbing: it bypasses the module declaration
-         * gate, and hull:_template compiles strings into code. Only another
-         * hull: module may import one, once the app's module set is wired -
-         * the point from which declarations are enforced at all. */
+        /* A segment starting with '_' (hull:_template, hull:kv:_native,
+         * hull:db:_internal_conn, ...) is the stdlib's own plumbing: it
+         * bypasses the module declaration gate, hull:_template compiles
+         * strings into code, and hull:db:_internal_conn is the connection to
+         * databases.internal. Only another hull: module may import one - from
+         * the app's first import on, not only once the module set is wired:
+         * these names are not in the registry, so the import tracker never
+         * sees a static import of one, and every static import runs first. */
         HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-        if (js && js->base.module_set && strstr(name, ":_") &&
+        if (js && strstr(name, ":_") &&
             strncmp(base_name ? base_name : "", "hull:", 5) != 0) {
             JS_ThrowReferenceError(ctx,
                 "module '%s' is internal to the Hull stdlib", name);

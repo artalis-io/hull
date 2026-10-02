@@ -18,6 +18,7 @@
 # define _XOPEN_SOURCE 700
 #endif
 
+#include "../../client_ip_matrix.h"
 #include "utest.h"
 #include "hull/runtime/lua.h"
 #include "hull/runtime/lua_bytecode_cache.h"
@@ -5536,7 +5537,7 @@ UTEST(lua_ssh_bridge, app_code_cannot_reach_the_byte_stream)
     ASSERT_NE_MSG(rc, LUA_OK, "app code must be refused");
     const char *err = lua_tostring(lua_rt.L, -1);
     ASSERT_NE(err, NULL);
-    ASSERT_TRUE(strstr(err, "internal to the SSH module") != NULL);
+    ASSERT_TRUE(strstr(err, "internal to the") != NULL);
     /* The message points somewhere useful rather than just saying no. */
     ASSERT_TRUE(strstr(err, "hull.ssh") != NULL);
     lua_pop(lua_rt.L, 1);
@@ -5973,19 +5974,31 @@ UTEST(lua_ssh_bridge, a_manifest_denial_carries_its_code)
 
 /* ── chunk names decide trust, so they are not caller-supplied ────── */
 
+/* App code cannot require hull._template; a stdlib module hands its compile
+ * function on. Load it the way the stdlib does (a hull.* chunk that names
+ * require) and leave it in the global __tb for the app-level chunk under test. */
+static int expose_template_bridge(lua_State *L)
+{
+    const char *src = "__tb = require('hull._template')";
+    if (luaL_loadbuffer(L, src, strlen(src), "@hull.tests.template_bridge") != LUA_OK)
+        return -1;
+    return lua_pcall(L, 0, 0, 0);
+}
+
 UTEST(lua_template_bridge, compile_cannot_forge_a_stdlib_chunk_name)
 {
     /* hl_lua_source_is_stdlib grants _hull_* table access to any chunk whose
-     * name starts with "hull.". _template._compile is reachable from app code
-     * (require's capability gate only fires for names in the module registry,
-     * and "hull._template" is not one), so if it took a chunk name verbatim,
-     * app code could mint a chunk that claims to be stdlib.
+     * name starts with "hull.". App code cannot require hull._template, but
+     * the template engine hands it names, and a stdlib module that passed one
+     * through from the app would let it mint a chunk that claims to be
+     * stdlib if the name were taken verbatim.
      *
      * The name is built instead. Whatever the caller asks for lands after a
      * "=template:" prefix, so the result cannot begin with "hull.". */
     init_lua();
+    ASSERT_EQ(expose_template_bridge(lua_rt.L), LUA_OK);
     int rc = luaL_dostring(lua_rt.L,
-        "local t = require('hull._template')\n"
+        "local t = __tb\n"
         "local f = t._compile('return function() error(\"boom\") end',\n"
         "                     'hull.forged')\n"
         "local ok, err = pcall(f)\n"
@@ -6014,8 +6027,9 @@ UTEST(lua_template_bridge, compile_strips_a_caller_supplied_marker)
     /* A leading "@" or "=" is a chunkname marker. Left in place it would land
      * in the middle of the built name, so it is stripped before prefixing. */
     init_lua();
+    ASSERT_EQ(expose_template_bridge(lua_rt.L), LUA_OK);
     int rc = luaL_dostring(lua_rt.L,
-        "local t = require('hull._template')\n"
+        "local t = __tb\n"
         "local f = t._compile('return function() error(\"boom\") end',\n"
         "                     '@hull.forged')\n"
         "local ok, err = pcall(f)\n"
@@ -6034,8 +6048,9 @@ UTEST(lua_template_bridge, compile_strips_a_caller_supplied_marker)
 UTEST(lua_template_bridge, compile_without_a_name_still_works)
 {
     init_lua();
+    ASSERT_EQ(expose_template_bridge(lua_rt.L), LUA_OK);
     int rc = luaL_dostring(lua_rt.L,
-        "local t = require('hull._template')\n"
+        "local t = __tb\n"
         "local f = t._compile('return function() return 1 end')\n"
         "assert(type(f) == 'function')\n"
         "assert(f() == 1)\n");
@@ -6453,9 +6468,10 @@ UTEST(lua_runtime, template_bridge_refuses_bytecode)
 {
     init_lua();
     ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(expose_template_bridge(lua_rt.L), LUA_OK);
     int ok = eval_int(
         "(function() "
-        "  local tb = require('hull._template') "
+        "  local tb = __tb "
         "  local good = pcall(tb._compile, 'return function() return 1 end') "
         "  local bad, err = pcall(tb._compile, string.dump(function() return 7 end)) "
         "  if not good then return 1 end "
@@ -6560,6 +6576,82 @@ UTEST(lua_runtime, internal_and_cached_modules_stay_gated)
     EXPECT_EQ(luaL_dostring(lua_rt.L, "assert(type(hull.map) == 'function')"), LUA_OK);
 
     lua_rt.base.module_set = NULL;
+    cleanup_lua();
+}
+
+/* ...and before it is wired, too: an app's top-level require runs before the
+ * manifest is read, and an internal name is not in the registry, so the
+ * import tracker never sees one. Stdlib code may still require one. */
+UTEST(lua_runtime, internal_modules_are_stdlib_only_before_wiring)
+{
+    init_lua();
+    ASSERT_TRUE(lua_rt.base.module_set == NULL);
+    const char *names[] = { "hull._template", "hull.db._internal_conn",
+                            "hull.web._request" };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        char code[128];
+        snprintf(code, sizeof code, "require('%s')", names[i]);
+        int rc = luaL_dostring(lua_rt.L, code);
+        EXPECT_NE_MSG(rc, LUA_OK, names[i]);
+        if (rc != LUA_OK) lua_pop(lua_rt.L, 1);
+    }
+    const char *lib = "return type(require('hull.web._request').client_ip)";
+    ASSERT_EQ(luaL_loadbuffer(lua_rt.L, lib, strlen(lib), "@hull.tests.internal"),
+              LUA_OK);
+    ASSERT_EQ(lua_pcall(lua_rt.L, 0, 1, 0), LUA_OK);
+    EXPECT_STREQ(lua_tostring(lua_rt.L, -1), "function");
+    lua_pop(lua_rt.L, 1);
+
+    /* A stdlib helper that calls a function the app gave it does not lend it
+     * its identity: handed `require` and an internal name, it is refused, as
+     * pcall(require, ...) from stdlib code is - neither names the call. */
+    const char *helper = "__call_with = function(f, x) return f(x) end";
+    ASSERT_EQ(luaL_loadbuffer(lua_rt.L, helper, strlen(helper), "@hull.tests.helper"),
+              LUA_OK);
+    ASSERT_EQ(lua_pcall(lua_rt.L, 0, 0, 0), LUA_OK);
+    EXPECT_NE(luaL_dostring(lua_rt.L, "__call_with(require, 'hull._template')"),
+              LUA_OK);
+    lua_settop(lua_rt.L, 0);
+    const char *viapcall = "return (pcall(require, 'hull._template'))";
+    ASSERT_EQ(luaL_loadbuffer(lua_rt.L, viapcall, strlen(viapcall), "@hull.tests.viapcall"),
+              LUA_OK);
+    ASSERT_EQ(lua_pcall(lua_rt.L, 0, 1, 0), LUA_OK);
+    EXPECT_FALSE(lua_toboolean(lua_rt.L, -1));
+    lua_settop(lua_rt.L, 0);
+    cleanup_lua();
+}
+
+/* hull.web._request.client_ip is the one place a request's source IP is
+ * derived under trust_proxy; four middleware delegate to it. The JS twin
+ * asserts the same string (js_stdlib.client_ip_matrix), so the two cannot
+ * drift. */
+UTEST(lua_stdlib, client_ip_matrix)
+{
+    init_lua();
+    const char *code =
+        "local _request = require('hull.web._request')\n"
+        "local function s(v) return v == nil and '(nil)' or v end\n"
+        "local cases = {\n"
+        "  { { headers = {}, remote_addr = '10.0.0.1' }, false },\n"
+        "  { { headers = { ['x-forwarded-for'] = '1.1.1.1' }, remote_addr = '10.0.0.1' }, false },\n"
+        "  { { headers = { ['x-forwarded-for'] = 'a, b, c' }, remote_addr = '10.0.0.1' }, true },\n"
+        "  { { headers = { ['x-forwarded-for'] = ' 1.2.3.4 , x' }, remote_addr = '10.0.0.1' }, true },\n"
+        "  { { headers = {}, remote_addr = '10.0.0.1' }, true },\n"
+        "  { { headers = { ['x-forwarded-for'] = '' }, remote_addr = '10.0.0.1' }, true },\n"
+        "  { { headers = {} }, false },\n"
+        "  { { headers = {}, remote_addr = string.rep('a', 100) }, false },\n"
+        "}\n"
+        "local out = {}\n"
+        "for _, c in ipairs(cases) do out[#out + 1] = s(_request.client_ip(c[1], c[2])) end\n"
+        "out[#out + 1] = s(_request.client_ip(nil, true))\n"
+        "return table.concat(out, '|')\n";
+    ASSERT_EQ(luaL_loadbuffer(lua_rt.L, code, strlen(code), "@hull.tests.client_ip"),
+              LUA_OK);
+    int rc = lua_pcall(lua_rt.L, 0, 1, 0);
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(lua_rt.L, -1));
+    ASSERT_EQ(rc, LUA_OK);
+    EXPECT_STREQ(lua_tostring(lua_rt.L, -1), HL_TEST_CLIENT_IP_MATRIX);
+    lua_pop(lua_rt.L, 1);
     cleanup_lua();
 }
 
