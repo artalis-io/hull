@@ -2,18 +2,22 @@
 --
 -- Run: hull run app.lua -- world
 --      hull run app.lua -- alice
---      echo "stuff" | hull run app.lua --stdin
+--      echo "stuff" | hull run app.lua -- --stdin
+--
+-- Arguments for the app go after `--`; anything before it is Hull's. A
+-- built binary takes no entry argument, so there they need no `--`:
+--      hull build && ./app world
 --
 -- Demonstrates the CLI-mode (app.main) entry point: argv via ctx.args,
 -- env vars via ctx.env, stdin/stdout/stderr via ctx streams, exit code
--- via the return value. Mutually exclusive with app.get/post/etc.
+-- via the return value. A CLI tool declares no HTTP module, so `hull
+-- build` links no HTTP server, event loop or TLS into it.
 
 local crypto = require("hull.crypto")
 local encoding = require("hull.encoding")
 
 app.manifest({
     modules = {
-    "hull/http-server@1",
         "hull/crypto@1",
         "hull/encoding@1",
     },
@@ -22,7 +26,7 @@ app.manifest({
 
 local function print_usage(stderr)
     stderr:write("usage: hull run app.lua -- <name>\n")
-    stderr:write("       hull run app.lua --stdin   (read greeting target from stdin)\n")
+    stderr:write("       hull run app.lua -- --stdin   (read greeting target from stdin)\n")
 end
 
 app.main(function(ctx)

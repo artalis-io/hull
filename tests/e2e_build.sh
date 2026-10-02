@@ -97,6 +97,16 @@ check_exit() {
     fi
 }
 
+# Run a command for a moment and stop it: for a built server app given
+# arguments, which it keeps serving rather than exiting.
+run_briefly() {
+    "$@" >/dev/null 2>&1 &
+    _rb=$!
+    sleep 2
+    kill "$_rb" 2>/dev/null || true
+    wait "$_rb" 2>/dev/null || true
+}
+
 wait_for_server() {
     for _i in 1 2 3 4 5 6 7 8 9 10; do
         if curl -s "http://127.0.0.1:$1/" >/dev/null 2>&1; then
@@ -340,7 +350,12 @@ fi
 echo ""
 echo "=== Step 5: Built binary serves HTTP ==="
 
-"$WORKDIR/myapp/myapp" -p 19870 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+# Built binaries run from their app directory, as `hull deploy` runs them
+# (WorkingDirectory=): a built binary takes no entry argument - its bare
+# words are its app's - so the app directory (package.sig, data/) is its
+# working directory, not the directory of a path given on the command line.
+
+(cd "$WORKDIR/myapp" && exec ./myapp -p 19870) >/dev/null 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19870; then
@@ -463,7 +478,7 @@ check_contains "multi-file build finds 2 files" "$BUILD_OUT" "2 Lua file"
 check_file_exists "multi-file binary exists" "$WORKDIR/multiapp/multiapp"
 
 # Serve the multi-file app
-"$WORKDIR/multiapp/multiapp" -p 19871 "$WORKDIR/multiapp/app.lua" >/dev/null 2>&1 &
+(cd "$WORKDIR/multiapp" && exec ./multiapp -p 19871) >/dev/null 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19871; then
@@ -495,7 +510,9 @@ echo "=== Step 11: Built binary is a slim app-runner ==="
 # hull CLI dispatch, so it RUNS its app and does not answer hull subcommands
 # (keygen / manifest / etc.). Confirm the app-runner contract: keygen must not
 # produce a keypair (the binary treats "keygen" as an app arg, not a command).
-"$WORKDIR/multiapp/multiapp" keygen "$WORKDIR/app_key" >/dev/null 2>&1 || true
+# A built binary hands its bare words to the app, so this server app starts
+# serving: stop it, then check that no keypair appeared.
+run_briefly "$WORKDIR/multiapp/multiapp" -p 19884 keygen "$WORKDIR/app_key"
 if [ -f "$WORKDIR/app_key.pub" ]; then
     fail "built binary must NOT expose the keygen subcommand (app-runner only)"
 else
@@ -549,7 +566,7 @@ check_exit "build a second app exits 0" 0 $RC
 check_file_executable "produced binary exists and executable" "$WORKDIR/nullbin"
 
 # It is an app-runner, not a hull: keygen must not produce a keypair.
-"$WORKDIR/nullbin" keygen "$WORKDIR/nb_key" >/dev/null 2>&1 || true
+run_briefly "$WORKDIR/nullbin" -p 19885 keygen "$WORKDIR/nb_key"
 if [ -f "$WORKDIR/nb_key.pub" ]; then
     fail "produced binary must not expose hull subcommands (app-runner only)"
 else
@@ -562,7 +579,7 @@ echo ""
 echo "=== Step 14: --verify-sig ==="
 
 # Start signed app with --verify-sig → should start and serve
-"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" --no-verify-platform -p 19872 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/developer.pub" --no-verify-platform -p 19872) >/dev/null 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19872; then
@@ -581,7 +598,7 @@ stop_server
 cp "$WORKDIR/myapp/package.sig" "$WORKDIR/myapp/package.sig.bak"
 echo "corrupted" > "$WORKDIR/myapp/package.sig"
 
-"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" --no-verify-platform -p 19873 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/developer.pub" --no-verify-platform -p 19873) >/dev/null 2>&1 &
 TPID=$!
 sleep 2
 
@@ -605,7 +622,7 @@ mv "$WORKDIR/myapp/package.sig.bak" "$WORKDIR/myapp/package.sig"
 
 # Test with wrong key → should refuse
 "$HULL" keygen "$WORKDIR/wrong_key" >/dev/null 2>&1
-"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/wrong_key.pub" --no-verify-platform -p 19874 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/wrong_key.pub" --no-verify-platform -p 19874) >/dev/null 2>&1 &
 TPID=$!
 sleep 2
 
@@ -635,7 +652,7 @@ fi
 echo ""
 echo "=== Step 14b: --verify-sig strict default (no gethull → reject) ==="
 
-"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" -p 19876 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/developer.pub" -p 19876) >/dev/null 2>&1 &
 TPID=$!
 sleep 2
 

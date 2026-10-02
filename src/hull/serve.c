@@ -215,6 +215,17 @@ static HlRuntimeType detect_runtime(const char *entry_point)
 
 /* ── Auto-detect entry point ───────────────────────────────────────── */
 
+/* A `hull build` binary embeds its app; the hull toolchain embeds none. */
+static int embedded_app_present(void)
+{
+    extern const HlEntry hl_app_entries[];
+    for (int i = 0; hl_app_entries[i].name; i++)
+        if (strcmp(hl_app_entries[i].name, "./app.js") == 0 ||
+            strcmp(hl_app_entries[i].name, "./app") == 0)
+            return 1;
+    return 0;
+}
+
 static const char *auto_detect_entry(void)
 {
     /* Check embedded app entries first (hull build binaries) */
@@ -558,6 +569,25 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             cfg->app_argc = argc - i - 1;
             break;
         } else if (argv[i][0] != '-') {
+            if (embedded_app_present()) {
+                /* A built binary takes no entry argument: this word and
+                 * everything after it are the app's (`./app world`), as if
+                 * they followed `--`. It used to be taken as an entry path,
+                 * so a built CLI tool failed on its first argument. */
+                cfg->app_args = &argv[i];
+                cfg->app_argc = argc - i;
+                break;
+            }
+            if (cfg->entry_point) {
+                /* Each bare word used to REPLACE the entry, so
+                 * `hull app.lua world` tried to load "world" and failed with
+                 * no reason given. */
+                fprintf(stderr,
+                    "hull: unexpected argument '%s' - arguments for the app "
+                    "go after --:\n  hull %s -- %s\n",
+                    argv[i], cfg->entry_point, argv[i]);
+                return -1;
+            }
             cfg->entry_point = argv[i];
         }
     }
