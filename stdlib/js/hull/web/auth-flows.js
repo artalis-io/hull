@@ -56,7 +56,10 @@ const _state = {
     totpPendingTtl:         300,
     totpPendingRedirect:    null,
     // Hardening: account lockout. See the Lua module for the design.
+    // Per (account, client IP); the account-wide count below has a much
+    // higher threshold (see the Lua module for the reasoning).
     maxFailedLogins:        5,
+    maxFailedLoginsPerAccount: 50,
     lockoutDuration:        15 * 60,
     // Hardening: pwned-password check (opt-in). Apps must add
     // api.pwnedpasswords.com to manifest.hosts.
@@ -345,6 +348,27 @@ function stripUserSecrets(user) {
     return out;
 }
 
+// Run fn after the response has gone. Issuing a token and sending its email
+// happen only for SOME addresses (an existing account, or a new one), and an
+// email send is a network round trip: done inline, response time said
+// whether an account exists. Deferred onto the event loop, every outcome
+// answers equally fast. Inline only where there is no loop to defer onto (an
+// in-process test harness, where hull.sleep throws); a failure is logged, not
+// thrown - the response is already sent.
+function afterResponse(fn) {
+    const run = () => {
+        try { fn(); }
+        catch (e) { log.warn("auth-flows: deferred email failed: " + String(e && e.message || e)); }
+    };
+    let wait = null;
+    try { wait = hull.sleep(1); } catch (_) { wait = null; }
+    if (wait && typeof wait.then === "function") {
+        wait.then(run, run);
+        return;
+    }
+    run();
+}
+
 function sendEmail(to, templateName, ctx) {
     if (!emailRateAllow(to)) return;
     if (ctx && typeof ctx === "object" && ctx.user
@@ -381,7 +405,7 @@ function lockoutRemaining(userIdStr) {
     return lu > now ? (lu - now) : 0;
 }
 
-function bumpFailedLogin(userIdStr) {
+function bumpFailedLogin(userIdStr, max) {
     const now = time.now();
     // Portable conditional upsert. The original used INSERT ... ON CONFLICT
     // DO UPDATE, which MySQL spells differently (ON DUPLICATE KEY UPDATE), so
@@ -412,7 +436,7 @@ function bumpFailedLogin(userIdStr) {
         now,                // failed_count CASE: window-expired check
         now,                // last_failed_at
         now,                // locked_until CASE: window-expired check
-        _state.maxFailedLogins, now, _state.lockoutDuration,
+        max, now, _state.lockoutDuration,
         userIdStr];
     if (db.exec(updateSql, updateArgs) > 0) return;
     // No existing row: first failure for this user. INSERT; if a concurrent
@@ -432,6 +456,21 @@ function bumpFailedLogin(userIdStr) {
 function clearFailedLogins(userIdStr) {
     db.exec("DELETE FROM _hull_auth_login_attempts WHERE user_id = ?",
             [userIdStr]);
+}
+
+// The lockout rows a login touches: (account, client IP), keyed
+// `<user_id> \x1f <ip>` in the same column, and the account-wide one.
+const IP_SEP = "\x1f";
+function attemptIpKey(uid, req) {
+    return uid + IP_SEP + (_request.clientIp(req, _state.trustProxy) || "_anon");
+}
+
+// Every row for an account, after a password reset proves control of it.
+function clearAllFailedLogins(uid) {
+    const pat = String(uid).replace(/[!%_]/g, "!$&") + IP_SEP + "%";
+    db.exec("DELETE FROM _hull_auth_login_attempts "
+            + "WHERE user_id = ? OR user_id LIKE ? ESCAPE '!'",
+            [uid, pat]);
 }
 
 // ── Pwned-password check (opt-in) ──────────────────────────────
@@ -630,12 +669,14 @@ async function handleRegister(req, res) {
             error: "user_create returned an id that user_get cannot resolve" });
     }
 
-    const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
     const origin = originFor(req);
-    if (origin) {
-        const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
-        sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
-    }
+    afterResponse(() => {
+        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
+        if (origin) {
+            const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
+            sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
+        }
+    });
     res.json({ ok: true });
 }
 
@@ -649,12 +690,14 @@ function handleVerifyResend(req, res) {
     const user = _state.userFindByEmail(body.email);
     if (!user || user.email_verified) return genericOk(res);
     const uid = userId(user);
-    const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
     const origin = originFor(req);
-    if (origin) {
-        const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
-        sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
-    }
+    afterResponse(() => {
+        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
+        if (origin) {
+            const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
+            sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
+        }
+    });
     res.json({ ok: true });
 }
 
@@ -725,8 +768,11 @@ function handleLogin(req, res) {
     // internally - the counter ticks, the user still can't log in
     // until the window expires - but the wire response is now
     // indistinguishable from a wrong-password reply.
+    const uid   = user ? userId(user) : null;
+    const ipKey = user ? attemptIpKey(uid, req) : null;
     const preLocked = user
-                      && lockoutRemaining(userId(user)) > 0;
+                      && (lockoutRemaining(ipKey) > 0
+                          || lockoutRemaining(uid) > 0);
     // Timing-safe email enumeration defense. crypto.verifyPassword
     // (PBKDF2-SHA256, 600k iters by default) takes 50–200ms; a 401
     // that skipped the verify because the email was unknown would
@@ -739,13 +785,17 @@ function handleLogin(req, res) {
     const pwOk   = (_state.enumerationSafe || Boolean(user))
                    && crypto.verifyPassword(body.password, pwHash);
     if (preLocked || !user || !user.password_hash || !pwOk) {
-        if (user && !preLocked) bumpFailedLogin(userId(user));
+        if (user && !preLocked) {
+            bumpFailedLogin(ipKey, _state.maxFailedLogins);
+            bumpFailedLogin(uid, _state.maxFailedLoginsPerAccount);
+        }
         return res.status(401).json({ error: "invalid credentials" });
     }
     if (_state.requireVerifiedEmail && !user.email_verified) {
         return res.status(403).json({ error: "email not verified" });
     }
-    clearFailedLogins(userId(user));
+    clearFailedLogins(ipKey);
+    clearFailedLogins(uid);
     if (_state.enableTotp && _state.userTotpEnrolled(userId(user))) {
         return startTotpPending(req, res, user);
     }
@@ -776,13 +826,15 @@ function handleMagicLink(req, res) {
         // unknown-email path above) rather than 500.
         if (!user) return genericOk(res);
     }
-    const token = issueToken(userId(user), ACTIONS.magic_link,
-        _state.magicLinkTtl);
     const origin = originFor(req);
-    if (origin) {
-        const link = origin + _state.prefix + "/magic-link/consume?token=" + token;
-        sendEmail(body.email, "magic_link", { user, link, token });
-    }
+    afterResponse(() => {
+        const token = issueToken(userId(user), ACTIONS.magic_link,
+            _state.magicLinkTtl);
+        if (origin) {
+            const link = origin + _state.prefix + "/magic-link/consume?token=" + token;
+            sendEmail(body.email, "magic_link", { user, link, token });
+        }
+    });
     res.json({ ok: true });
 }
 
@@ -866,14 +918,16 @@ function handlePasswordResetRequest(req, res) {
     }
     const user = _state.userFindByEmail(body.email);
     if (!user) return genericOk(res);
-    const token = issueToken(userId(user), ACTIONS.password_reset,
-        _state.resetTtl, resetTokenExtra(user));
     const origin = originFor(req);
-    if (origin) {
-        const link = origin + _state.prefix
-            + "/password-reset/confirm?token=" + token;
-        sendEmail(body.email, "password_reset", { user, link, token });
-    }
+    afterResponse(() => {
+        const token = issueToken(userId(user), ACTIONS.password_reset,
+            _state.resetTtl, resetTokenExtra(user));
+        if (origin) {
+            const link = origin + _state.prefix
+                + "/password-reset/confirm?token=" + token;
+            sendEmail(body.email, "password_reset", { user, link, token });
+        }
+    });
     res.json({ ok: true });
 }
 
@@ -900,7 +954,7 @@ async function handlePasswordResetConfirm(req, res) {
     _state.userSetPassword(result[0].sub, crypto.hashPassword(body.password));
     // A successful reset demonstrates email control; clear any
     // outstanding lockout so the new password works immediately.
-    clearFailedLogins(result[0].sub);
+    clearAllFailedLogins(result[0].sub);
     // Audit + app-side session revocation. Recommended onPasswordReset
     // body: `(req, res, user) => session.destroyAll(user.id)`.
     emitEvent(result[0].sub, "password_reset_completed", req);
@@ -1304,6 +1358,8 @@ function init(opts) {
                                   || _state.totpPendingRedirect;
     _state.maxFailedLogins      = opts.maxFailedLogins
                                   || _state.maxFailedLogins;
+    _state.maxFailedLoginsPerAccount = opts.maxFailedLoginsPerAccount
+                                  || _state.maxFailedLoginsPerAccount;
     _state.lockoutDuration      = opts.lockoutDuration
                                   || _state.lockoutDuration;
     _state.checkPwnedPasswords  = opts.checkPwnedPasswords === true;
@@ -1438,6 +1494,7 @@ const _test = {
         _state.checkPwnedPasswords  = false;
         _state.pwnedEndpoint        = null;
         _state.maxFailedLogins      = 5;
+        _state.maxFailedLoginsPerAccount = 50;
         _state.lockoutDuration      = 15 * 60;
         _state.signInLog            = false;
         _state.onPasswordReset      = null;

@@ -30,6 +30,9 @@
 JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req);
 JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res);
 JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res, HlReqLife *life);
+extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
+                                                 JSContext *ctx,
+                                                 JSValue promise);
 
 /* From async.c */
 extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
@@ -101,6 +104,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     js->active_life = NULL;
 
     int result = 0;
+    int attached = 0;   /* a continuation holds the handler promise */
     if (JS_IsException(ret)) {
         hl_js_dump_error(js);
         result = -1;
@@ -108,14 +112,15 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         /* Async handler - connection already suspended by hull.sleep
          * or similar async call. Store the outer handler promise on
          * the continuation (per-connection, not global) so the resume
-         * callback can check when the handler completes. */
-        extern void hl_js_async_cont_set_handler_promise(
-            HlAsyncCont *cont, JSContext *ctx, JSValue promise);
+         * callback can check when the handler completes. With no
+         * continuation yet (a microtask-only await), see after the job
+         * run below. */
         if (js->last_async_cont) {
             hl_js_async_cont_set_handler_promise(
                 (HlAsyncCont *)js->last_async_cont,
                 js->ctx, ret);
             js->last_async_cont = NULL;
+            attached = 1;
         }
         js->async_pending = 1;
         result = 1; /* signal: handler suspended */
@@ -130,6 +135,42 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         if (msg) JS_FreeCString(js->ctx, msg);
         JS_FreeValue(js->ctx, err);
         result = -1;
+    }
+
+    /* A pending handler with no continuation yet awaits only microtasks (or
+     * something Hull does not drive). Run them now, with the life active so
+     * a Hull call they make (hull.sleep, db.async, ...) takes it too, and
+     * see whether a continuation turned up. If none did, the connection was
+     * never suspended: the response goes out when this returns, so the
+     * request is over whatever the handler does next - and its `res` must
+     * not outlive it (it used to stay usable, onto a finished request). */
+    if (result == 1 && !attached) {
+        js->active_life = life;
+        hl_js_run_jobs(js);
+        js->active_life = NULL;
+        if (js->last_async_cont) {
+            hl_js_async_cont_set_handler_promise(
+                (HlAsyncCont *)js->last_async_cont, js->ctx, ret);
+            js->last_async_cont = NULL;
+        } else {
+            int st = JS_PromiseState(js->ctx, ret);
+            if (st == JS_PROMISE_PENDING) {
+                log_warn("[hull:c] handler awaits a promise Hull does not "
+                         "drive; the request ends now and its res is closed");
+                result = 0;
+            } else if (st == JS_PROMISE_REJECTED) {
+                JSValue err = JS_PromiseResult(js->ctx, ret);
+                const char *msg = JS_ToCString(js->ctx, err);
+                log_error("[hull:c] async handler rejected: %s",
+                          msg ? msg : "(unknown)");
+                if (msg) JS_FreeCString(js->ctx, msg);
+                JS_FreeValue(js->ctx, err);
+                result = -1;
+            } else {
+                result = 0;
+            }
+            js->async_pending = 0;
+        }
     }
 
     JS_FreeValue(js->ctx, ret);

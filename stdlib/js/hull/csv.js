@@ -131,11 +131,11 @@ function parse(text, opts) {
  * @param {boolean} [opts.headers=false]
  * @param {string}  [opts.separator=","]
  * @param {string}  [opts.quote='"']
- * @param {boolean} [opts.sanitizeFormulas=false]  Prefix a "'" to any cell
+ * @param {boolean} [opts.sanitizeFormulas=true]  Prefix a "'" to any cell
  *   beginning with = + - @ (or a leading tab/CR) to neutralize spreadsheet
- *   formula/DDE injection when the export is opened in Excel/Sheets. Off by
- *   default (it prepends a character to affected cells). Lua-parity alias:
- *   `sanitize_formulas`.
+ *   formula/DDE injection when the export is opened in Excel/Sheets. A plain
+ *   number (-5, +3.2, 1e-3) is left alone. Pass false for output not meant
+ *   for a spreadsheet. Lua-parity alias: `sanitize_formulas`.
  * @returns {string}  CSV text (LF line endings).
  */
 function encode(rows, opts) {
@@ -144,10 +144,11 @@ function encode(rows, opts) {
     const sep = (opts && opts.separator) || ",";
     const quo = (opts && opts.quote) || '"';
     const useHeaders = !!(opts && opts.headers);
-    // Opt-in CSV formula-injection defense (Lua-parity alias: sanitize_formulas):
-    // prefix a "'" to any cell beginning with = + - @ (or a leading tab/CR) so a
-    // spreadsheet app treats it as text, not a formula/DDE. Off by default.
-    const sanitize = !!(opts && (opts.sanitizeFormulas ?? opts.sanitize_formulas));
+    // CSV formula-injection defense, ON by default (Lua-parity alias:
+    // sanitize_formulas): a cell beginning with = + - @ (or a leading tab/CR)
+    // ran as a formula/DDE when the export was opened in a spreadsheet.
+    const flag = opts ? (opts.sanitizeFormulas ?? opts.sanitize_formulas) : undefined;
+    const sanitize = flag !== false;
     const doubledQuote = quo + quo;
 
     function needsQuoting(value) {
@@ -163,8 +164,9 @@ function encode(rows, opts) {
         let s = String(value);
         if (sanitize && s.length > 0) {
             const c = s[0];
-            if (c === "=" || c === "+" || c === "-" || c === "@" ||
-                c === "\t" || c === "\r")
+            if ((c === "=" || c === "+" || c === "-" || c === "@" ||
+                 c === "\t" || c === "\r")
+                && !/^[+-]?\d+\.?\d*(?:[eE][+-]?\d+)?$/.test(s))
                 s = "'" + s;
         }
         if (needsQuoting(s)) {

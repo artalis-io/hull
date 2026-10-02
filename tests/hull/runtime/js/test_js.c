@@ -556,13 +556,14 @@ UTEST(js_runtime, csv_encode_sanitize_formulas)
 {
     init_js();
 
-    /* Import hull:csv and encode with/without the opt-in formula sanitizer. */
+    /* Import hull:csv and encode with the (default-on) formula sanitizer,
+     * and with it switched off. */
     const char *code =
         "import { csv } from 'hull:csv';\n"
-        "globalThis.__csv_plain = csv.encode([['=cmd|calc']]);\n"
+        "globalThis.__csv_plain = csv.encode([['=cmd|calc']], { sanitizeFormulas: false });\n"
         "globalThis.__csv_safe = csv.encode("
-        "  [['=cmd|calc'],['@x'],['ok']], { sanitizeFormulas: true });\n"
-        "globalThis.__csv_alias = csv.encode([['=x']], { sanitize_formulas: true });\n";
+        "  [['=cmd|calc'],['@x'],['-2+3+cmd|x'],['-5'],['+3.2'],['1e-3'],['ok']]);\n"
+        "globalThis.__csv_alias = csv.encode([['=x']], { sanitize_formulas: false });\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -571,13 +572,14 @@ UTEST(js_runtime, csv_encode_sanitize_formulas)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    /* Off by default: the formula cell is emitted verbatim. */
+    /* Opted out: the formula cell is emitted verbatim. */
     ASSERT_EQ(eval_int("globalThis.__csv_plain === '=cmd|calc\\n' ? 1 : 0"), 1);
-    /* Opt-in: leading = / @ prefixed with '; a non-formula cell untouched. */
+    /* Default: leading = / @ / - prefixed with '; plain numbers and a
+     * non-formula cell untouched. */
     ASSERT_EQ(eval_int(
-        "globalThis.__csv_safe === \"'=cmd|calc\\n'@x\\nok\\n\" ? 1 : 0"), 1);
-    /* snake_case alias (Lua parity) also enables it. */
-    ASSERT_EQ(eval_int("globalThis.__csv_alias === \"'=x\\n\" ? 1 : 0"), 1);
+        "globalThis.__csv_safe === \"'=cmd|calc\\n'@x\\n'-2+3+cmd|x\\n-5\\n+3.2\\n1e-3\\nok\\n\" ? 1 : 0"), 1);
+    /* snake_case alias (Lua parity) also switches it. */
+    ASSERT_EQ(eval_int("globalThis.__csv_alias === '=x\\n' ? 1 : 0"), 1);
 
     cleanup_js();
 }
@@ -1896,6 +1898,62 @@ UTEST(js_middleware, res_kept_past_its_request_fails_closed)
               1);
     EXPECT_EQ(res.status, 201);   /* and nothing was written after */
 
+    free_req_ctx(&req);
+    cleanup_js();
+}
+
+/* A handler left pending with no Hull continuation was never suspended: the
+ * response goes out when dispatch returns. Its `res` used to stay live
+ * afterwards, onto a finished request. */
+static int js_dispatch_last_route(const char *handler_src, KlHttpResponse *res,
+                                  KlHttpRequest *req)
+{
+    char code[1024];
+    snprintf(code, sizeof code,
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.get('/x', %s);\n", handler_src);
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    int id = eval_int("globalThis.__hull_routes.length - 1");
+    return hl_js_dispatch(&js, id, req, res);
+}
+
+UTEST(js_dispatch, a_microtask_only_handler_completes_and_closes_res)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    EXPECT_EQ(js_dispatch_last_route(
+        "async (req, res) => { globalThis.kept = res; await Promise.resolve();"
+        " res.status(203); }", &res, &req), 0);
+    EXPECT_EQ(res.status, 203);
+    EXPECT_EQ(eval_int("(() => { try { globalThis.kept.status(500); return 0; }"
+                       " catch (e) { return String(e).includes('has finished') ? 1 : 2; } })()"),
+              1);
+    EXPECT_EQ(res.status, 203);
+    free_req_ctx(&req);
+    cleanup_js();
+}
+
+UTEST(js_dispatch, a_handler_awaiting_an_undriven_promise_ends_its_request)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    EXPECT_EQ(js_dispatch_last_route(
+        "async (req, res) => { globalThis.kept = res; res.status(202);"
+        " await new Promise(() => {}); res.status(500); }", &res, &req), 0);
+    EXPECT_EQ(res.status, 202);
+    EXPECT_EQ(eval_int("(() => { try { globalThis.kept.status(500); return 0; }"
+                       " catch (e) { return String(e).includes('has finished') ? 1 : 2; } })()"),
+              1);
+    EXPECT_EQ(res.status, 202);   /* nothing written after the request ended */
     free_req_ctx(&req);
     cleanup_js();
 }
