@@ -665,6 +665,28 @@ static int l_tool_extract_manifest_js(lua_State *L)
     return 1;
 }
 
+/* ── tool.extract_manifest_lua(path) → json|nil, err|nil ────────────── *
+ *
+ * Runs the Lua app's top level in a fresh, sandboxed runtime - never this
+ * tool VM - and returns its manifest as JSON (nil when none was declared),
+ * plus the error its top level raised, if any. A manifest declared before
+ * that error still comes back; the caller decides whether the error counts.
+ * See hl_lua_extract_manifest_json. */
+static int l_tool_extract_manifest_lua(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    HlLua *lua = get_hl_lua_from_L(L);
+    char *json = NULL, *err = NULL;
+    size_t json_len = 0;
+    (void)hl_lua_extract_manifest_json(path, lua ? lua->base.platform_vfs : NULL,
+                                       &json, &json_len, &err);
+    if (json) lua_pushlstring(L, json, json_len); else lua_pushnil(L);
+    if (err) lua_pushstring(L, err); else lua_pushnil(L);
+    free(json);
+    free(err);
+    return 2;
+}
+
 /* ── tool.extract_platform(dir) → bool ─────────────────────────────── */
 
 static int l_tool_extract_platform(lua_State *L)
@@ -1802,6 +1824,7 @@ static const luaL_Reg tool_funcs[] = {
     { "loadfile",               l_tool_loadfile },
     { "set_app_dir",            l_tool_set_app_dir },
     { "extract_manifest_js",    l_tool_extract_manifest_js },
+    { "extract_manifest_lua",   l_tool_extract_manifest_lua },
     { "extract_platform",       l_tool_extract_platform },
     { "extract_feature_runtime", l_tool_extract_feature_runtime },
     { "extract_feature_http",   l_tool_extract_feature_http },

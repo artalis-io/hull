@@ -43,18 +43,14 @@ local function main()
         tool.exit(1)
     end
 
-    local chunk, err = tool.loadfile(entry)
-    if not chunk then
-        tool.stderr("hull modules list: " .. tostring(err) .. "\n")
-        tool.exit(1)
-    end
-    local ok, run_err = pcall(chunk)
-    if not ok then
+    -- The app's top level runs in a Lua runtime of its own, never this tool
+    -- VM (see hl_lua_extract_manifest_json).
+    local json_s, run_err = tool.extract_manifest_lua(entry)
+    if run_err then
         tool.stderr("hull modules list: " .. tostring(run_err) .. "\n")
         tool.exit(1)
     end
-
-    local m = app.get_manifest()
+    local m = json_s and json.decode(json_s) or nil
     if not m then
         tool.stderr("hull modules list: no app.manifest() declared in " .. entry .. "\n")
         tool.exit(1)

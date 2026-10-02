@@ -103,16 +103,6 @@ int hull_keygen(int argc, char **argv)
  *   --compiler=system   (equals-separated)
  * Returns compiler name (or NULL for default).
  */
-/* Returns a function that does nothing - used as the __index of the
- * tool-mode stub table so chained attribute access (e.g. `db.exec(...)`)
- * doesn't fault. The returned function is reused - same closure every
- * time, with `return nil` semantics. */
-static int hl_tool_noop_fn(lua_State *L) { (void)L; return 0; }
-int hl_tool_noop_index(lua_State *L)
-{
-    lua_pushcfunction(L, hl_tool_noop_fn);
-    return 1;
-}
 
 static const char *parse_cc_option(int argc, char **argv)
 {
@@ -328,66 +318,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
      *   (b) Promote every entry in LUA_LOADED_TABLE to a global of the
      *       same short name (hull.crypto → crypto, hull.web.middleware.session
      *       → session, …). Restores phase-2a tool-mode globals. */
-    {
-        lua_State *L = lua.L;
-        size_t total = 0;
-        const HlModuleSpec *all = hl_module_registry_all(&total);
-
-        /* Build a single shared "noop" table with __index returning a
-         * nop function. Reused across every stub entry. */
-        lua_newtable(L);                 /* nop_table */
-        lua_newtable(L);                 /* metatable */
-        lua_pushcfunction(L, hl_tool_noop_index);
-        lua_setfield(L, -2, "__index");
-        lua_setmetatable(L, -2);
-        int nop_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-
-        lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
-        lua_getfield(L, LUA_REGISTRYINDEX, "__hull_modules");
-
-        for (size_t i = 0; i < total; i++) {
-            const char *cname = all[i].name;
-            if (strncmp(cname, "hull/", 5) != 0) continue;
-            char lua_name[HL_MODULE_NAME_MAX];
-            size_t cname_len = strlen(cname);
-            if (cname_len + 1 > sizeof(lua_name)) continue;
-            memcpy(lua_name, cname, cname_len + 1);
-            for (char *p = lua_name; *p; p++)
-                if (*p == '/') *p = '.';
-
-            /* In _LOADED already? (native-registered) */
-            lua_getfield(L, -2, lua_name);
-            int in_loaded = !lua_isnil(L, -1);
-            lua_pop(L, 1);
-
-            /* In __hull_modules? (stdlib .lua file) */
-            int in_hull_mods = 0;
-            if (lua_istable(L, -1)) {
-                lua_getfield(L, -1, lua_name);
-                in_hull_mods = !lua_isnil(L, -1);
-                lua_pop(L, 1);
-            }
-
-            if (!in_loaded && !in_hull_mods) {
-                lua_rawgeti(L, LUA_REGISTRYINDEX, nop_ref);
-                lua_setfield(L, -3, lua_name);  /* _LOADED[lua_name] = nop_table */
-            }
-        }
-
-        /* hull.db._internal_conn is not a registry module (stdlib-only, never
-         * declared), so the loop above skips it; the stdlib modules that keep
-         * _hull_* tables require it at load through hull.db._internal. */
-        lua_getfield(L, -2, "hull.db._internal_conn");
-        int has_internal = !lua_isnil(L, -1);
-        lua_pop(L, 1);
-        if (!has_internal) {
-            lua_rawgeti(L, LUA_REGISTRYINDEX, nop_ref);
-            lua_setfield(L, -3, "hull.db._internal_conn");
-        }
-
-        lua_pop(L, 2);  /* pop __hull_modules + _LOADED */
-        /* Keep nop_ref alive - released when the VM is freed. */
-    }
+    hl_lua_stub_unbacked_modules(lua.L);   /* (a), shared with manifest extraction */
 
     /* (b) Promote registry-known modules in _LOADED to short-name globals
      * for tool-mode convenience. Required because every shipped tool

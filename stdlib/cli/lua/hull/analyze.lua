@@ -274,19 +274,15 @@ local function main()
     -- "skipping analysis" rather than a hard failure so `hull check`
     -- still runs the rest of its pipeline. A genuine import problem
     -- still surfaces at server startup via the resolver.
-    local chunk, err = tool.loadfile(entry)
-    if not chunk then
-        tool.stderr("hull modules analyze: cannot load " .. entry ..
-                    " (" .. tostring(err) .. ") - skipping\n")
-        return
-    end
-    local ok, run_err = pcall(chunk)
-    if not ok then
+    -- The app's top level runs in a Lua runtime of its own, never this tool
+    -- VM (see hl_lua_extract_manifest_json).
+    local json_s, run_err = tool.extract_manifest_lua(entry)
+    if run_err then
         tool.stderr("hull modules analyze: app load error (" ..
                     tostring(run_err) .. ") - skipping\n")
         return
     end
-    local manifest = app.get_manifest()
+    local manifest = json_s and json.decode(json_s) or nil
     local declared = collect_declared(manifest)
 
     -- Scan only source files matching the entry-point runtime. Apps

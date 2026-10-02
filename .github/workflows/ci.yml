@@ -466,6 +466,9 @@ jobs:
       - name: Async JS timer E2E tests
         timeout-minutes: 2
         run: make e2e-timers
+      - name: Manifest extraction isolation E2E tests
+        timeout-minutes: 2
+        run: make e2e-manifest-isolation
 
       - name: Build-flavor E2E tests
         timeout-minutes: 6
