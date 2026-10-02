@@ -278,6 +278,15 @@ local function verify_recovery_code(code, hash)
     return crypto.verify_password(normalize_recovery_code(code), hash)
 end
 
+-- Every recovery code is 12 characters once normalized. Anything else - a
+-- 6-digit TOTP code above all - cannot match one, and checking it anyway cost
+-- a PBKDF2 hash per unused code (10 by default) on the event loop for every
+-- wrong code submitted.
+local RECOVERY_CODE_LEN = 12
+local function recovery_shaped(code)
+    return #normalize_recovery_code(code) == RECOVERY_CODE_LEN
+end
+
 -- Constant-time string equality. Used for TOTP code matching where
 -- both sides are fixed-length zero-padded numeric strings; Lua's
 -- native `==` short-circuits on first mismatch, which is a
@@ -488,19 +497,18 @@ local function bump_failed_attempt(user_id)
             .. "WHERE user_id = ?", { user_id })
         local fc = (r and r[1] and r[1].failed_count) or 0
         local new_fc = fc + 1
-        local locked_until = (r and r[1] and r[1].locked_until) or nil
+        -- 0, not nil, for "not locked": lockout_remaining reads anything not
+        -- in the future as unlocked, and a nil would end the values array.
+        local locked_until = (r and r[1] and r[1].locked_until) or 0
         if new_fc >= _state.max_failed_attempts then
             locked_until = now + _state.lockout_duration
             new_fc = 0  -- reset; next bad code restarts the counter
         end
-        db.exec(
-            "INSERT INTO _hull_totp_attempts "
-            .. "(user_id, failed_count, last_failed_at, locked_until) "
-            .. "VALUES (?, ?, ?, ?) "
-            .. "ON CONFLICT(user_id) DO UPDATE SET "
-            .. "  failed_count   = excluded.failed_count, "
-            .. "  last_failed_at = excluded.last_failed_at, "
-            .. "  locked_until   = excluded.locked_until",
+        -- db.upsert writes each backend's own dialect. A hand-written
+        -- INSERT ... ON CONFLICT is not MySQL syntax: there every wrong code
+        -- failed here instead of being counted, and the lockout never came.
+        db.upsert("_hull_totp_attempts", { "user_id" },
+            { "user_id", "failed_count", "last_failed_at", "locked_until" },
             { user_id, new_fc, now, locked_until })
     end)
 end
@@ -535,19 +543,13 @@ local function bump_failed_attempt_ip(ip)
             .. "WHERE ip = ?", { ip })
         local fc = (r and r[1] and r[1].failed_count) or 0
         local new_fc = fc + 1
-        local locked_until = nil
+        local locked_until = 0   -- not locked (see bump_failed_attempt)
         if new_fc >= _state.max_failed_attempts_per_ip then
             locked_until = now + _state.lockout_duration_per_ip
             new_fc = 0
         end
-        db.exec(
-            "INSERT INTO _hull_totp_attempts_by_ip "
-            .. "(ip, failed_count, last_failed_at, locked_until) "
-            .. "VALUES (?, ?, ?, ?) "
-            .. "ON CONFLICT(ip) DO UPDATE SET "
-            .. "  failed_count   = excluded.failed_count, "
-            .. "  last_failed_at = excluded.last_failed_at, "
-            .. "  locked_until   = excluded.locked_until",
+        db.upsert("_hull_totp_attempts_by_ip", { "ip" },
+            { "ip", "failed_count", "last_failed_at", "locked_until" },
             { ip, new_fc, now, locked_until })
     end)
 end
@@ -1064,10 +1066,10 @@ function totp.verify_with_kind(user_id, code, req)
 
     -- Recovery-code path. Walk unused codes; constant-time verify
     -- per row. SQL filter on used_at handles single-use enforcement.
-    local rows = db.query(
+    local rows = recovery_shaped(code) and db.query(
         "SELECT code_hash FROM _hull_totp_recovery "
-        .. "WHERE user_id = ? AND used_at IS NULL", { user_id })
-    for _, r in ipairs(rows or {}) do
+        .. "WHERE user_id = ? AND used_at IS NULL", { user_id }) or {}
+    for _, r in ipairs(rows) do
         if verify_recovery_code(code, r.code_hash) then
             -- Consume atomically: the `used_at IS NULL` filter + affected-row
             -- count is the single-use gate. Without it, two concurrent requests
