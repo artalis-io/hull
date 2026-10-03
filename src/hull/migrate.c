@@ -341,8 +341,11 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
         return applied;
     }
 
-    /* Fall back to filesystem discovery */
-    if (!vfs->root_dir)
+    /* Fall back to filesystem discovery - in development only. A built binary
+     * (its app files embedded) has exactly the migrations it was built with,
+     * none included: reading <cwd>/migrations ran whatever unsigned SQL lay
+     * beside the binary when it started, past --verify-sig. */
+    if (!vfs->root_dir || vfs->count > 0)
         return HL_MIGRATE_NO_DIR;
 
     MigrationList ml = {0};

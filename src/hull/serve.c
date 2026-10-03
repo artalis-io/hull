@@ -560,15 +560,21 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             cfg->gpu_device = (int)v;
-        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+        } else if (!embedded_app_present() &&
+                   (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)) {
+            /* Under hull only: a built binary's app owns its --help, and it
+             * reaches it below as an option Hull does not take. */
             usage(argv[0]);
             return 1; /* signal help shown, exit 0 */
-        } else if (strcmp(argv[i], "--verbose") == 0 ||
-                   strcmp(argv[i], "--json") == 0 ||
-                   strncmp(argv[i], "--app-dir=", 10) == 0) {
+        } else if (!embedded_app_present() &&
+                   (strcmp(argv[i], "--verbose") == 0 ||
+                    strcmp(argv[i], "--json") == 0 ||
+                    strncmp(argv[i], "--app-dir=", 10) == 0)) {
             /* Global flags: the command dispatcher reads them, then hands
-             * this parser the same argv. Nothing to do here. */
-        } else if (strcmp(argv[i], "--app-dir") == 0 && i + 1 < argc) {
+             * this parser the same argv. Nothing to do here. A built binary
+             * has no dispatcher, so there they are the app's. */
+        } else if (!embedded_app_present() &&
+                   strcmp(argv[i], "--app-dir") == 0 && i + 1 < argc) {
             i++;   /* its value is not an entry point */
         } else if (strcmp(argv[i], "--") == 0) {
             /* Everything past `--` is app argv (CLI mode). */

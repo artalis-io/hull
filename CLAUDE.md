@@ -1342,7 +1342,7 @@ SQL migrations provide versioned schema management for SQLite databases.
 | Auto-run (test) | `test.c` | Runs migrations against `:memory:` database |
 | Embedding | `build.lua` | Embeds `migrations/*.sql` in built binaries |
 
-**Convention:** `migrations/*.sql` files numbered `001_`, `002_`, etc. Each runs in `BEGIN IMMEDIATE` / `COMMIT`. The `_hull_migrations` table tracks applied migrations (name + checksum + timestamp). Opt out with `--no-migrate`.
+**Convention:** `migrations/*.sql` files numbered `001_`, `002_`, etc. Each runs in `BEGIN IMMEDIATE` / `COMMIT`. The `_hull_migrations` table tracks applied migrations (name + checksum + timestamp). Opt out with `--no-migrate`. A built binary runs only the migrations embedded in it: the `<app_dir>/migrations` filesystem fallback (and the static-file one) is for development, when the app VFS is empty, so SQL placed beside a built binary never runs.
 
 **Commands:**
 - `hull migrate [app_dir]`. Run pending migrations
