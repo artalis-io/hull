@@ -30,7 +30,76 @@
 
 typedef struct HlDbMyCtx {
     HlMyConn conn;
+    char    *dsn;       /* to reconnect (secret: scrubbed on close) */
 } HlDbMyCtx;
+
+static int my_connect(HlMyConn *conn, const char *dsn)
+{
+    HlMyDsn parsed;
+    char err[128];
+    if (hl_my_dsn_parse(dsn, &parsed, err, sizeof err) != 0) return -1;
+    int rc = hl_my_conn_open(conn, &parsed, 10000 /* 10s connect */);
+    hl_my_dsn_scrub(&parsed);   /* password is secret material */
+    return rc;
+}
+
+/* 1 when @p sql is a bare ROLLBACK (any case, surrounding space, optional ';').
+ * A connection lost inside a transaction lost the transaction with it - the
+ * server rolled it back - so a ROLLBACK for it has already happened. */
+static int sql_is_rollback(const char *sql)
+{
+    if (!sql) return 0;
+    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
+    static const char kw[] = "rollback";
+    for (size_t i = 0; i < sizeof kw - 1; i++, sql++) {
+        char c = *sql;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != kw[i]) return 0;
+    }
+    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r' || *sql == ';') sql++;
+    return *sql == '\0';
+}
+
+static void scrub_free(char *s)
+{
+    if (!s) return;
+    volatile char *p = s;
+    while (*p) *p++ = 0;
+    free(s);
+}
+
+/* Before any use: replace a connection left out of step (HlMyConn.broken), as
+ * db_postgres.c's pg_ready does - outside a transaction only. Inside one the
+ * server rolled the transaction back when the connection went, and statements
+ * run on a new connection would each commit alone, so every call refuses until
+ * a ROLLBACK (@p sql), which has in effect already happened and returns 1.
+ * Returns 0 to go ahead, 1 done, -1 refused. */
+static int my_ready(HlDbMyCtx *s, const char *sql)
+{
+    if (!s->conn.broken)
+        return 0;
+    if ((s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS) && sql_is_rollback(sql)) {
+        s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+        return 1;
+    }
+    if (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "the connection was lost inside a transaction, which the "
+                 "server rolled back; roll back and retry");
+        return -1;
+    }
+    HlMyConn fresh;
+    memset(&fresh, 0, sizeof fresh);
+    if (my_connect(&fresh, s->dsn) != 0) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "the connection was lost, and reconnecting failed: %.150s",
+                 fresh.errmsg[0] ? fresh.errmsg : "unknown error");
+        return -1;
+    }
+    hl_my_conn_close(&s->conn);
+    s->conn = fresh;
+    return 0;
+}
 
 /* Case-insensitive substring search (strcasestr is not standard C). */
 static const char *ci_strstr(const char *hay, const char *needle)
@@ -240,14 +309,12 @@ static int mysql_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
     (void)alloc;
     HlDbMyCtx *s = calloc(1, sizeof *s);
     if (!s) return -1;
-
-    HlMyDsn parsed;
-    char err[128];
-    if (hl_my_dsn_parse(dsn, &parsed, err, sizeof err) != 0) { free(s); return -1; }
-    int rc = hl_my_conn_open(&s->conn, &parsed, 10000 /* 10s connect */);
-    hl_my_dsn_scrub(&parsed);   /* password is secret material */
-    if (rc != 0) { free(s); return -1; }
-
+    s->dsn = strdup(dsn);
+    if (!s->dsn || my_connect(&s->conn, dsn) != 0) {
+        scrub_free(s->dsn);
+        free(s);
+        return -1;
+    }
     *out_ctx = s;
     return 0;
 }
@@ -257,6 +324,7 @@ static void mysql_close(HlDbHandle *h)
     if (!h || !h->ctx) return;
     HlDbMyCtx *s = h->ctx;
     hl_my_conn_close(&s->conn);
+    scrub_free(s->dsn);
     free(s);
     h->ctx = NULL;
 }
@@ -268,6 +336,8 @@ static int mysql_query(HlDbHandle *h, const char *sql,
     (void)params; (void)alloc;
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
+    int ready = my_ready(s, sql);
+    if (ready != 0) return ready > 0 ? 0 : -1;
 
     /* Parameterized: bind through the binary prepared-statement protocol so the
      * values never touch the SQL text (injection-safe). */
@@ -308,6 +378,8 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
 {
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
+    int ready = my_ready(s, sql);
+    if (ready != 0) return ready > 0 ? 0 : -1;
     int64_t affected = 0;
 
     if (nparams == 0) {
@@ -326,8 +398,13 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
         return (int)(affected < 0 ? 0 : affected);
     }
 
-    if (hl_my_conn_query(&s->conn, sql, NULL, NULL, NULL, &affected) != 0)
+    if (hl_my_conn_query(&s->conn, sql, NULL, NULL, NULL, &affected) != 0) {
+        if (s->conn.broken && sql_is_rollback(sql)) {   /* see mysql_txn */
+            s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+            return 0;
+        }
         return -1;
+    }
     return (int)(affected < 0 ? 0 : affected);
 }
 
@@ -337,6 +414,8 @@ static int mysql_exec_script(HlDbHandle *h, const char *sql)
      * CLIENT_MULTI_STATEMENTS so the whole script runs as one COM_QUERY. */
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
+    int ready = my_ready(s, sql);
+    if (ready != 0) return ready > 0 ? 0 : -1;
     return hl_my_conn_exec_multi(&s->conn, sql);
 }
 
@@ -344,7 +423,16 @@ static int mysql_txn(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
-    return hl_my_conn_query(&s->conn, sql, NULL, NULL, NULL, NULL);
+    int ready = my_ready(s, sql);
+    if (ready != 0) return ready > 0 ? 0 : -1;
+    int rc = hl_my_conn_query(&s->conn, sql, NULL, NULL, NULL, NULL);
+    /* A ROLLBACK that failed because the connection went: the server rolled
+     * the transaction back with it. */
+    if (rc != 0 && s->conn.broken && sql_is_rollback(sql)) {
+        s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+        rc = 0;
+    }
+    return rc;
 }
 
 static int mysql_begin(HlDbHandle *h)    { return mysql_txn(h, "START TRANSACTION"); }

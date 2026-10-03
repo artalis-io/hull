@@ -154,6 +154,29 @@ app.get("/", function(req, res)
         "SELECT id, name, score, active FROM e2e WHERE score >= ? ORDER BY id", { 0 })
     res:json({ rows = rows, count = db.query("SELECT count(*) AS c FROM e2e")[1].c })
 end)
+local function kill_self() db.query("SELECT pg_terminate_backend(pg_backend_pid())") end
+-- A connection the server drops is replaced on its next use, instead of
+-- staying broken (or out of step) for every later request. Inside a
+-- transaction it is not replaced under it: the transaction fails, its
+-- rollback clears the state, and the next call reconnects. The server drop is
+-- the app's own session being killed.
+local function settles()
+    for _ = 1, 3 do
+        local ok, rows = pcall(db.query, "SELECT count(*) AS c FROM e2e")
+        if ok and tonumber(rows[1].c) == 3 then return true end
+    end
+    return false
+end
+app.get("/reconnect", function(req, res)
+    pcall(kill_self)
+    local replaced = settles()
+    local tx_ok = pcall(db.batch, function()
+        db.exec("INSERT INTO e2e (name, score, active) VALUES (?, ?, ?)", { "dave", 5, true })
+        kill_self()
+    end)
+    local after_tx = settles()   -- dave's insert went with the transaction
+    res:json({ replaced = replaced, tx_failed = not tx_ok, after_tx = after_tx })
+end)
 -- bytea arrives in text format as "\x<hex>" and decodes to a blob.
 app.get("/bytea", function(req, res)
     local b = db.query("SELECT decode('00ff41', 'hex') AS b")[1].b
@@ -251,6 +274,14 @@ echo "$RESP" | grep -q '"active":true'             || { echo "::error bool decod
 echo "$RESP" | grep -q '"score":10'                || { echo "::error int decode"; fail=1; }
 
 # bytea text-format decode ("\x00ff41" -> three bytes)
+# A dropped connection is replaced on next use; inside a transaction the
+# transaction fails (and its write is gone) and the connection recovers after.
+RESP_RC=$(curl -fsS "http://127.0.0.1:${PORT}/reconnect" || echo FAIL)
+echo "reconnect response: $RESP_RC"
+echo "$RESP_RC" | grep -q '"replaced":true'  || { echo "::error dropped connection not replaced"; fail=1; }
+echo "$RESP_RC" | grep -q '"tx_failed":true' || { echo "::error transaction survived its connection"; fail=1; }
+echo "$RESP_RC" | grep -q '"after_tx":true'  || { echo "::error no recovery after a lost transaction"; fail=1; }
+
 RESP_BYTEA=$(curl -fsS "http://127.0.0.1:${PORT}/bytea" || echo FAIL)
 echo "bytea response: $RESP_BYTEA"
 echo "$RESP_BYTEA" | grep -q '"bytea_ok":true'     || { echo "::error bytea decode"; fail=1; }

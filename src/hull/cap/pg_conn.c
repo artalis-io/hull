@@ -72,6 +72,7 @@ int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen)
 {
     memset(out, 0, sizeof(*out));
     snprintf(out->port, sizeof out->port, "%s", "5432");
+    out->read_timeout_ms = HL_PG_READ_TIMEOUT_DEFAULT_MS;
 
     if (!dsn) { set_err(errbuf, errlen, "null DSN"); return -1; }
 
@@ -147,7 +148,7 @@ int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen)
         }
     }
     if (qmark) {
-        /* Only sslmode is consumed today; other params are ignored. */
+        /* sslmode and read_timeout are read; other params are ignored. */
         const char *q = qmark + 1;
         while (*q) {
             const char *amp = strchr(q, '&');
@@ -162,6 +163,24 @@ int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen)
                     if (hl_url_decode(v, vlen, out->sslmode, sizeof out->sslmode, 0) < 0) {
                         set_err(errbuf, errlen, "DSN sslmode too long"); return -1;
                     }
+                } else if (klen == strlen("read_timeout") &&
+                           strncmp(q, "read_timeout", klen) == 0) {
+                    /* Milliseconds a single read may block; 0 = no limit. */
+                    char tb[16];
+                    size_t vlen = pair_len - klen - 1;
+                    char *end = NULL;
+                    long ms = -1;
+                    if (vlen > 0 && vlen < sizeof tb) {
+                        memcpy(tb, eq + 1, vlen);
+                        tb[vlen] = '\0';
+                        ms = strtol(tb, &end, 10);
+                        if (end == tb || *end != '\0') ms = -1;
+                    }
+                    if (ms < 0 || ms > 86400000) {
+                        set_err(errbuf, errlen, "DSN read_timeout must be 0..86400000 (ms)");
+                        return -1;
+                    }
+                    out->read_timeout_ms = (int)ms;
                 }
             }
             if (!amp) break;
@@ -206,7 +225,8 @@ static int conn_send(HlPgConn *conn, const uint8_t *buf, size_t len)
     size_t sent = 0;
     while (sent < len) {
         ssize_t n = io_send(conn, buf + sent, len - sent);
-        if (n <= 0) { set_err(conn->errmsg, sizeof conn->errmsg, "socket write failed");
+        if (n <= 0) { conn->broken = 1;
+                      set_err(conn->errmsg, sizeof conn->errmsg, "socket write failed");
                       return -1; }
         sent += (size_t)n;
     }
@@ -228,6 +248,7 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
         HlPgResult r = hl_pg_frame_next(conn->rbuf, conn->rlen, f, &consumed);
         if (r == HL_PG_OK) { conn->consumed = consumed; return 0; }
         if (r == HL_PG_ERR) {
+            conn->broken = 1;
             set_err(conn->errmsg, sizeof conn->errmsg,
                     "malformed message from server");
             return -1;
@@ -238,12 +259,14 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
             /* frame_next rejects any length > HL_PG_MAX_MSG, so a legitimate
              * frame never needs more than that plus its 5-byte header. */
             if (ncap > (size_t)HL_PG_MAX_MSG + 8192) {
+                conn->broken = 1;
                 set_err(conn->errmsg, sizeof conn->errmsg,
                         "server message exceeds limit");
                 return -1;
             }
             uint8_t *nb = realloc(conn->rbuf, ncap);
-            if (!nb) { set_err(conn->errmsg, sizeof conn->errmsg, "out of memory");
+            if (!nb) { conn->broken = 1;
+                       set_err(conn->errmsg, sizeof conn->errmsg, "out of memory");
                        return -1; }
             conn->rbuf = nb;
             conn->rcap = ncap;
@@ -251,8 +274,10 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
         ssize_t n = io_recv(conn, conn->rbuf + conn->rlen,
                             conn->rcap - conn->rlen);
         if (n <= 0) {
+            conn->broken = 1;
             set_err(conn->errmsg, sizeof conn->errmsg,
-                    "connection closed by server");
+                    n < 0 ? "read failed or timed out (see ?read_timeout=)"
+                          : "connection closed by server");
             return -1;
         }
         conn->rlen += (size_t)n;
@@ -683,6 +708,10 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
                  "cannot connect to %s:%s", dsn->host, dsn->port);
         return -1;
     }
+    /* Bound every read from here on - the SSLRequest answer, the startup and
+     * auth exchange, every query. Only the connect and the TLS handshake had a
+     * deadline: a server that accepted and then stalled blocked forever. */
+    hl_db_transport_set_io_timeout(t, dsn->read_timeout_ms);
 
     int mode = hl_pg_sslmode_parse(dsn->sslmode);
     if (mode < 0) {
@@ -1035,6 +1064,11 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         if (conn) set_err(conn->errmsg, sizeof conn->errmsg, "not connected");
         return -1;
     }
+    if (conn->broken) {
+        set_err(conn->errmsg, sizeof conn->errmsg,
+                "connection to the server was lost");
+        return -1;
+    }
     conn->errmsg[0] = '\0';
     if (nparams < 0 || nparams > 65535) {
         set_err(conn->errmsg, sizeof conn->errmsg, "invalid parameter count");
@@ -1176,6 +1210,11 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
 {
     if (!conn || !conn->transport) {
         if (conn) set_err(conn->errmsg, sizeof conn->errmsg, "not connected");
+        return -1;
+    }
+    if (conn->broken) {
+        set_err(conn->errmsg, sizeof conn->errmsg,
+                "connection to the server was lost");
         return -1;
     }
     conn->errmsg[0] = '\0';

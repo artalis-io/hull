@@ -337,6 +337,10 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
         }
     }
 
+    /* Rows are stored ncols wide, from the first row; one of another width
+     * would be read past (fewer columns) or cut (more). */
+    if (ncols != r->ncols) { mc->err = "result rows differ in column count"; return -1; }
+
     if (db_result_grow(r) != 0) { mc->err = "too many rows"; return -1; }
 
     HlDbValue *row = &r->values[r->nrows * r->ncols];

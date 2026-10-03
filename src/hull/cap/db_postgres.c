@@ -30,7 +30,81 @@ typedef struct HlDbPgCtx {
     HlPgConn     conn;
     HlAllocator *alloc;
     int          listening;   /* 1 once LISTEN was issued on this connection */
+    char        *dsn;         /* to reconnect (secret: scrubbed on close) */
 } HlDbPgCtx;
+
+static int pg_connect(HlPgConn *conn, const char *dsn)
+{
+    HlPgDsn parsed;
+    char err[128];
+    if (hl_pg_dsn_parse(dsn, &parsed, err, sizeof err) != 0)
+        return -1;
+    int rc = hl_pg_conn_open(conn, &parsed, 10000 /* 10s connect */);
+    hl_pg_dsn_scrub(&parsed);   /* password is secret material */
+    return rc;
+}
+
+/* 1 when @p sql is a bare ROLLBACK (any case, surrounding space, optional ';').
+ * A connection lost inside a transaction lost the transaction with it - the
+ * server rolled it back - so a ROLLBACK for it has already happened. */
+static int sql_is_rollback(const char *sql)
+{
+    if (!sql) return 0;
+    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
+    static const char kw[] = "rollback";
+    for (size_t i = 0; i < sizeof kw - 1; i++, sql++) {
+        char c = *sql;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != kw[i]) return 0;
+    }
+    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r' || *sql == ';') sql++;
+    return *sql == '\0';
+}
+
+static void scrub_free(char *s)
+{
+    if (!s) return;
+    volatile char *p = s;
+    while (*p) *p++ = 0;
+    free(s);
+}
+
+/* Before any use: a connection a failed send or read left out of step (see
+ * HlPgConn.broken) is replaced. It was the shared default connection, so it
+ * used to stay broken for every later request - or, with a reply left half
+ * read, hand one query's rows to the next. Outside a transaction a fresh
+ * connection is opened in its place. Inside one it is not: the server rolled
+ * that transaction back when the connection went, and statements run on a new
+ * connection would each commit alone; so every call refuses until a ROLLBACK
+ * (@p sql), which has in effect already happened and returns 1 (done).
+ * Returns 0 to go ahead, 1 done, -1 refused. */
+static int pg_ready(HlDbPgCtx *s, const char *sql)
+{
+    if (!s->conn.broken)
+        return 0;
+    if (s->conn.tx_status != 'I' && sql_is_rollback(sql)) {
+        s->conn.tx_status = 'I';
+        return 1;
+    }
+    if (s->conn.tx_status != 'I') {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "the connection was lost inside a transaction, which the "
+                 "server rolled back; roll back and retry");
+        return -1;
+    }
+    HlPgConn fresh;
+    memset(&fresh, 0, sizeof fresh);
+    if (pg_connect(&fresh, s->dsn) != 0) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "the connection was lost, and reconnecting failed: %.150s",
+                 fresh.errmsg[0] ? fresh.errmsg : "unknown error");
+        return -1;
+    }
+    hl_pg_conn_close(&s->conn);
+    s->conn = fresh;
+    s->listening = 0;
+    return 0;
+}
 
 /* ── Open / close ─────────────────────────────────────────────────── */
 
@@ -39,16 +113,9 @@ static int pg_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
     HlDbPgCtx *s = calloc(1, sizeof *s);
     if (!s) return -1;
     s->alloc = alloc;
-
-    HlPgDsn parsed;
-    char err[128];
-    if (hl_pg_dsn_parse(dsn, &parsed, err, sizeof err) != 0) {
-        free(s);
-        return -1;
-    }
-    int rc = hl_pg_conn_open(&s->conn, &parsed, 10000 /* 10s connect */);
-    hl_pg_dsn_scrub(&parsed);   /* password is secret material */
-    if (rc != 0) {
+    s->dsn = strdup(dsn);
+    if (!s->dsn || pg_connect(&s->conn, dsn) != 0) {
+        scrub_free(s->dsn);
         free(s);
         return -1;
     }
@@ -61,6 +128,7 @@ static void pg_close(HlDbHandle *h)
     if (!h || !h->ctx) return;
     HlDbPgCtx *s = h->ctx;
     hl_pg_conn_close(&s->conn);
+    scrub_free(s->dsn);
     free(s);
     h->ctx = NULL;
 }
@@ -203,6 +271,7 @@ typedef struct {
     char        **names;   /* copied field names (survive past RowDescription) */
     int32_t      *oids;
     int           nfields;
+    int           bad_row;  /* a DataRow did not match the RowDescription */
 } PgAdapter;
 
 static void adapter_desc(void *ctx, const HlPgField *fields, int nf)
@@ -225,7 +294,14 @@ static int adapter_row(void *ctx, const char *const *vals,
 {
     PgAdapter *a = ctx;
     if (!a->user_cb) return 0;
-    if (a->nfields > 0 && nc > a->nfields) nc = a->nfields;
+    /* Every DataRow carries the RowDescription's column count. Clamping only
+     * from above let a hostile (or TLS-stripped) server send fewer, and a
+     * consumer that sized its rows from the first one (db.async's collector)
+     * then read past this row's array. A mismatch fails the query. */
+    if (a->nfields > 0 && nc != a->nfields) {
+        a->bad_row = 1;
+        return 1;
+    }
 
     HlColumn *cols = calloc((size_t)(nc > 0 ? nc : 1), sizeof *cols);
     char **frees = calloc((size_t)(nc > 0 ? nc : 1), sizeof *frees);
@@ -251,6 +327,8 @@ static int pg_query(HlDbHandle *h, const char *sql,
     (void)alloc;
     if (!h || !h->ctx) return -1;
     HlDbPgCtx *s = h->ctx;
+    int ready = pg_ready(s, sql);
+    if (ready != 0) return ready > 0 ? 0 : -1;
 
     char **scratch = NULL;
     HlPgParam *pp = encode_params(params, nparams, &scratch);
@@ -267,6 +345,18 @@ static int pg_query(HlDbHandle *h, const char *sql,
     int rc = hl_pg_query(&s->conn, sql, pp, nparams,
                          cb ? adapter_desc : NULL,
                          cb ? adapter_row : NULL, &a, &affected);
+    /* A ROLLBACK that failed because the connection went: the server rolled
+     * the transaction back with it. */
+    if (rc != 0 && s->conn.broken && sql_is_rollback(sql)) {
+        s->conn.tx_status = 'I';
+        rc = 0;
+    }
+    if (rc == 0 && a.bad_row) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "server sent a row whose column count does not match its "
+                 "row description");
+        rc = -1;
+    }
 
     if (a.names)
         for (int i = 0; i < a.nfields; i++) free(a.names[i]);
@@ -299,6 +389,8 @@ static int pg_exec_script(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->ctx) return -1;
     HlDbPgCtx *s = h->ctx;
+    int ready = pg_ready(s, sql);
+    if (ready != 0) return ready > 0 ? 0 : -1;
     return hl_pg_exec_simple(&s->conn, sql);
 }
 
@@ -493,13 +585,16 @@ static int pg_wait_notify(HlDbHandle *h, const char *channel, int timeout_ms)
 {
     HlDbPgCtx *s = h->ctx;
     if (!pg_channel_ok(channel)) return -1;
+    if (pg_ready(s, NULL) != 0) return -1;
     if (!s->listening) {
         char sql[80];
         snprintf(sql, sizeof sql, "LISTEN %s", channel);
         if (hl_pg_exec_simple(&s->conn, sql) != 0) return -1;
         s->listening = 1;
     }
-    return hl_pg_wait_notify(&s->conn, timeout_ms);
+    int rc = hl_pg_wait_notify(&s->conn, timeout_ms);
+    if (rc < 0) s->conn.broken = 1;   /* reconnected (and re-LISTENed) next call */
+    return rc;
 }
 
 /* ── Vtable (const, lands in .rodata) ─────────────────────────────── */

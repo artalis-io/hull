@@ -182,6 +182,32 @@ app.get("/", function(req, res)
         "SELECT id, name, score, active FROM e2e WHERE score >= ? ORDER BY id", { 0 })
     res:json({ rows = rows, count = db.query("SELECT count(*) AS c FROM e2e")[1].c })
 end)
+local function kill_self()
+    local id = math.tointeger(db.query("SELECT CONNECTION_ID() AS id")[1].id)
+    db.exec("KILL " .. id)
+end
+-- A connection the server drops is replaced on its next use, instead of
+-- staying broken (or out of step) for every later request. Inside a
+-- transaction it is not replaced under it: the transaction fails, its
+-- rollback clears the state, and the next call reconnects. The server drop is
+-- the app's own session being killed.
+local function settles()
+    for _ = 1, 3 do
+        local ok, rows = pcall(db.query, "SELECT count(*) AS c FROM e2e")
+        if ok and tonumber(rows[1].c) == 3 then return true end
+    end
+    return false
+end
+app.get("/reconnect", function(req, res)
+    pcall(kill_self)
+    local replaced = settles()
+    local tx_ok = pcall(db.batch, function()
+        db.exec("INSERT INTO e2e (name, score, active) VALUES (?, ?, ?)", { "dave", 5, 1 })
+        kill_self()
+    end)
+    local after_tx = settles()   -- dave's insert went with the transaction
+    res:json({ replaced = replaced, tx_failed = not tx_ok, after_tx = after_tx })
+end)
 -- migration ran at startup via the runner's script path (multi-statement).
 app.get("/migrated", function(req, res)
     local rows = db.query("SELECT label FROM mig_test ORDER BY id")
@@ -296,6 +322,14 @@ echo "async response: $RESP_ASYNC"
 echo "$RESP_ASYNC" | grep -q '"name":"alice"'      || { echo "::error async alice missing"; fail=1; }
 echo "$RESP_ASYNC" | grep -q '"name":"bob"'        || { echo "::error async bob missing"; fail=1; }
 echo "$RESP_ASYNC" | grep -q '"name":"carol"'      && { echo "::error async carol not filtered"; fail=1; }
+
+# A dropped connection is replaced on next use; inside a transaction the
+# transaction fails (and its write is gone) and the connection recovers after.
+RESP_RC=$(curl -fsS "http://127.0.0.1:${PORT}/reconnect" || echo FAIL)
+echo "reconnect response: $RESP_RC"
+echo "$RESP_RC" | grep -q '"replaced":true'  || { echo "::error dropped connection not replaced"; fail=1; }
+echo "$RESP_RC" | grep -q '"tx_failed":true' || { echo "::error transaction survived its connection"; fail=1; }
+echo "$RESP_RC" | grep -q '"after_tx":true'  || { echo "::error no recovery after a lost transaction"; fail=1; }
 
 # stdlib modules on MySQL (session / outbox / auth-health / search guard)
 RESP_STDLIB=$(curl -fsS "http://127.0.0.1:${PORT}/stdlib" || echo FAIL)

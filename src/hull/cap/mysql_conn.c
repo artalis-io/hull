@@ -13,6 +13,7 @@
 #include "../utils/url.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── DSN parsing (pure; mirrors hl_pg_dsn_parse) ──────────────────── */
@@ -32,6 +33,7 @@ int hl_my_dsn_parse(const char *dsn, HlMyDsn *out, char *errbuf, size_t errlen)
 {
     memset(out, 0, sizeof(*out));
     snprintf(out->port, sizeof out->port, "%s", "3306");
+    out->read_timeout_ms = HL_MY_READ_TIMEOUT_DEFAULT_MS;
 
     if (!dsn) { set_err(errbuf, errlen, "null DSN"); return -1; }
 
@@ -107,7 +109,7 @@ int hl_my_dsn_parse(const char *dsn, HlMyDsn *out, char *errbuf, size_t errlen)
         }
     }
     if (qmark) {
-        /* Only sslmode is consumed today; other params are ignored. */
+        /* sslmode and read_timeout are read; other params are ignored. */
         const char *q = qmark + 1;
         while (*q) {
             const char *amp = strchr(q, '&');
@@ -122,6 +124,24 @@ int hl_my_dsn_parse(const char *dsn, HlMyDsn *out, char *errbuf, size_t errlen)
                     if (hl_url_decode(v, vlen, out->sslmode, sizeof out->sslmode, 0) < 0) {
                         set_err(errbuf, errlen, "DSN sslmode too long"); return -1;
                     }
+                } else if (klen == strlen("read_timeout") &&
+                           strncmp(q, "read_timeout", klen) == 0) {
+                    /* Milliseconds a single read may block; 0 = no limit. */
+                    char tb[16];
+                    size_t vlen = pair_len - klen - 1;
+                    char *end = NULL;
+                    long ms = -1;
+                    if (vlen > 0 && vlen < sizeof tb) {
+                        memcpy(tb, eq + 1, vlen);
+                        tb[vlen] = '\0';
+                        ms = strtol(tb, &end, 10);
+                        if (end == tb || *end != '\0') ms = -1;
+                    }
+                    if (ms < 0 || ms > 86400000) {
+                        set_err(errbuf, errlen, "DSN read_timeout must be 0..86400000 (ms)");
+                        return -1;
+                    }
+                    out->read_timeout_ms = (int)ms;
                 }
             }
             if (!amp) break;
@@ -271,7 +291,11 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
         ssize_t n;
         do { n = conn_read_raw(conn, conn->rbuf + conn->rlen, conn->rcap - conn->rlen); }
         while (n < 0 && errno == EINTR);
-        if (n <= 0) { conn_set_err(conn, "connection closed by server"); return -1; }
+        if (n <= 0) {
+            conn_set_err(conn, n < 0 ? "read failed or timed out (see ?read_timeout=)"
+                                     : "connection closed by server");
+            return -1;
+        }
         conn->rlen += (size_t)n;
     }
 }
@@ -566,10 +590,58 @@ int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
                  "could not connect to %s:%s", dsn->host, dsn->port);
         return -1;
     }
+    /* Bound every read from here on - the handshake and auth exchange, every
+     * query. Only the connect and the TLS handshake had a deadline. */
+    hl_db_transport_set_io_timeout(t, dsn->read_timeout_ms);
     return my_start_over_transport(conn, t, dsn);
 }
 
 /* ── Queries (COM_QUERY text protocol) ────────────────────────────── */
+
+static int refuse_if_broken(HlMyConn *conn)
+{
+    if (!conn->broken) return 0;
+    conn_set_err(conn, "connection to the server was lost");
+    return -1;
+}
+
+/* Status flags of an EOF packet (0xFE, warnings u16, status u16). */
+static uint16_t eof_status(const HlMyFrame *f)
+{
+    HlMyCursor ec; hl_my_cursor_init(&ec, f);
+    (void)hl_my_get_u8(&ec);
+    (void)hl_my_get_u16(&ec);
+    uint16_t status = hl_my_get_u16(&ec);
+    return hl_my_cursor_err(&ec) ? 0 : status;
+}
+
+static int drain_one_result(HlMyConn *conn, int *more);
+
+/* Read the result sets still to come after one whose status said
+ * MORE_RESULTS (a multi-statement COM_QUERY, a CALL). Left unread they were
+ * the next command's reply. 0 once the reply is read to its end - an ERR
+ * included, which ends it - or -1 with the stream out of step. */
+static int drain_more_results(HlMyConn *conn)
+{
+    int more = 1;
+    while (more) {
+        int rc = drain_one_result(conn, &more);
+        if (rc == -2) return 0;   /* server ERR: the reply ends there */
+        if (rc != 0) return -1;
+    }
+    return 0;
+}
+
+/* A reply that ended with status @p status: in step unless more results follow
+ * and cannot be read. Clears `broken` when the reply is fully read. */
+static void reply_done(HlMyConn *conn, uint16_t status)
+{
+    conn->server_status = status;
+    if (status & HL_MY_SERVER_MORE_RESULTS) {
+        if (drain_more_results(conn) != 0) return;   /* stays broken */
+    }
+    conn->broken = 0;
+}
 
 /* An EOF packet body is shorter than an OK/row body that also starts 0xFE. */
 #define HL_MY_EOF_MAX_LEN  9
@@ -586,6 +658,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
                      int64_t *affected)
 {
     if (affected) *affected = -1;
+    if (refuse_if_broken(conn) != 0) return -1;
 
     /* COM_QUERY is a fresh command: the packet sequence restarts at 0. */
     HlMyWriter w; hl_my_writer_init(&w);
@@ -593,6 +666,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
     hl_my_put_u8(&w, HL_MY_COM_QUERY);
     hl_my_put_bytes(&w, sql, strlen(sql));
     hl_my_packet_end(&w, m);
+    conn->broken = 1;                           /* until the reply is read */
     int se = w.err || conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send query"); return -1; }
@@ -604,11 +678,13 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
 
     if (hdr == HL_MY_PKT_OK) {                 /* no result set (DML / DDL) */
         HlMyOk ok;
-        if (hl_my_parse_ok(&f, &ok) == 0) {
-            conn->last_insert_id = ok.last_insert_id;
-            if (affected) *affected = (int64_t)ok.affected_rows;
+        if (hl_my_parse_ok(&f, &ok) != 0) {
+            conn_set_err(conn, "malformed OK packet"); return -1;
         }
-        return 0;
+        conn->last_insert_id = ok.last_insert_id;
+        if (affected) *affected = (int64_t)ok.affected_rows;
+        reply_done(conn, ok.status_flags);
+        return conn->broken ? -1 : 0;
     }
     if (hdr == HL_MY_PKT_ERR) {
         HlMyErr e;
@@ -616,6 +692,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
             snprintf(conn->errmsg, sizeof conn->errmsg, "query failed: %.*s",
                      (int)e.message_len, e.message);
         else conn_set_err(conn, "query failed");
+        conn->broken = 0;                       /* an ERR ends the reply */
         return -1;
     }
     if (hdr == HL_MY_PKT_LOCAL_INFILE) {
@@ -662,14 +739,18 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
     int stop = 0;
     for (;;) {
         if (conn_next_frame(conn, &f) != 0) goto fail;
-        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN)
-            break;                              /* end of rows */
+        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
+            reply_done(conn, eof_status(&f));   /* end of rows */
+            if (conn->broken) goto fail;
+            break;
+        }
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
             HlMyErr e;
             if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
                 snprintf(conn->errmsg, sizeof conn->errmsg, "query failed: %.*s",
                          (int)e.message_len, e.message);
             else conn_set_err(conn, "query failed mid-result");
+            conn->broken = 0;                   /* an ERR ends the reply */
             goto fail;
         }
         HlMyCursor rc; hl_my_cursor_init(&rc, &f);
@@ -856,6 +937,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
                               void *cb_ctx, int64_t *affected)
 {
     if (affected) *affected = -1;
+    if (refuse_if_broken(conn) != 0) return -1;
 
     /* 1. COM_STMT_PREPARE (fresh command: sequence restarts at 0). */
     HlMyWriter w; hl_my_writer_init(&w);
@@ -863,6 +945,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     hl_my_put_u8(&w, HL_MY_COM_STMT_PREPARE);
     hl_my_put_bytes(&w, sql, strlen(sql));
     hl_my_packet_end(&w, m);
+    conn->broken = 1;                           /* until the reply is read */
     int se = w.err || conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send prepare"); return -1; }
@@ -875,6 +958,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
             snprintf(conn->errmsg, sizeof conn->errmsg, "prepare failed: %.*s",
                      (int)e.message_len, e.message);
         else conn_set_err(conn, "prepare failed");
+        conn->broken = 0;                       /* an ERR ends the reply */
         return -1;
     }
     HlMyPrepareOk prep;
@@ -894,7 +978,8 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     if (drain_defs(conn, prep.num_params) != 0) goto close_stmt;
     if (drain_defs(conn, prep.num_columns) != 0) goto close_stmt;
 
-    /* 3. COM_STMT_EXECUTE with the bound parameters. */
+    /* 3. COM_STMT_EXECUTE with the bound parameters. The PREPARE reply has been
+     * read whole (its definitions drained above); the EXECUTE's is pending. */
     hl_my_writer_init(&w);
     m = hl_my_packet_begin(&w, 0);
     int be = build_execute(&w, prep.statement_id, params, nparams,
@@ -911,11 +996,13 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
 
     if (hdr == HL_MY_PKT_OK) {
         HlMyOk ok;
-        if (hl_my_parse_ok(&f, &ok) == 0) {
-            conn->last_insert_id = ok.last_insert_id;
-            if (affected) *affected = (int64_t)ok.affected_rows;
+        if (hl_my_parse_ok(&f, &ok) != 0) {
+            conn_set_err(conn, "malformed OK packet"); goto close_stmt;
         }
-        ret = 0;
+        conn->last_insert_id = ok.last_insert_id;
+        if (affected) *affected = (int64_t)ok.affected_rows;
+        reply_done(conn, ok.status_flags);
+        ret = conn->broken ? -1 : 0;
         goto close_stmt;
     }
     if (hdr == HL_MY_PKT_ERR) {
@@ -924,6 +1011,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
             snprintf(conn->errmsg, sizeof conn->errmsg, "execute failed: %.*s",
                      (int)e.message_len, e.message);
         else conn_set_err(conn, "execute failed");
+        conn->broken = 0;                       /* an ERR ends the reply */
         goto close_stmt;
     }
 
@@ -961,14 +1049,18 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     int stop = 0;
     for (;;) {
         if (conn_next_frame(conn, &f) != 0) goto close_stmt;
-        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN)
-            break;                                          /* end of rows */
+        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
+            reply_done(conn, eof_status(&f));               /* end of rows */
+            if (conn->broken) goto close_stmt;
+            break;
+        }
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
             HlMyErr e;
             if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
                 snprintf(conn->errmsg, sizeof conn->errmsg, "execute failed: %.*s",
                          (int)e.message_len, e.message);
             else conn_set_err(conn, "execute failed mid-result");
+            conn->broken = 0;                   /* an ERR ends the reply */
             goto close_stmt;
         }
         HlMyCursor rc; hl_my_cursor_init(&rc, &f);
@@ -993,7 +1085,9 @@ close_stmt:
     free_names(names, ncols);
     free(fields);
     free(vals);
-    /* COM_STMT_CLOSE (fresh command, no response). Best-effort. */
+    /* COM_STMT_CLOSE (fresh command, no response). Best-effort; pointless on a
+     * connection out of step, which is about to be replaced. */
+    if (conn->broken) return ret;
     hl_my_writer_init(&w);
     m = hl_my_packet_begin(&w, 0);
     hl_my_put_u8(&w, HL_MY_COM_STMT_CLOSE);
@@ -1007,7 +1101,9 @@ close_stmt:
 /* ── Multi-statement scripts (migrations / DDL) ───────────────────── */
 
 /* Read one statement's complete response (OK or a full result set, rows
- * discarded), reporting via *more whether another result set follows. */
+ * discarded), reporting via *more whether another result set follows.
+ * Returns 0, -2 for a server ERR (the reply ends there, in step), or -1 with
+ * the stream out of step. */
 static int drain_one_result(HlMyConn *conn, int *more)
 {
     *more = 0;
@@ -1018,10 +1114,12 @@ static int drain_one_result(HlMyConn *conn, int *more)
 
     if (hdr == HL_MY_PKT_OK) {
         HlMyOk ok;
-        if (hl_my_parse_ok(&f, &ok) == 0) {
-            conn->last_insert_id = ok.last_insert_id;
-            *more = (ok.status_flags & HL_MY_SERVER_MORE_RESULTS) != 0;
+        if (hl_my_parse_ok(&f, &ok) != 0) {
+            conn_set_err(conn, "malformed OK packet"); return -1;
         }
+        conn->last_insert_id = ok.last_insert_id;
+        conn->server_status = ok.status_flags;
+        *more = (ok.status_flags & HL_MY_SERVER_MORE_RESULTS) != 0;
         return 0;
     }
     if (hdr == HL_MY_PKT_ERR) {
@@ -1030,7 +1128,7 @@ static int drain_one_result(HlMyConn *conn, int *more)
             snprintf(conn->errmsg, sizeof conn->errmsg, "script failed: %.*s",
                      (int)e.message_len, e.message);
         else conn_set_err(conn, "script failed");
-        return -1;
+        return -2;
     }
     if (hdr == HL_MY_PKT_LOCAL_INFILE) {
         conn_set_err(conn, "LOCAL INFILE responses are not supported"); return -1;
@@ -1049,10 +1147,8 @@ static int drain_one_result(HlMyConn *conn, int *more)
     for (;;) {
         if (conn_next_frame(conn, &f) != 0) return -1;
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
-            HlMyCursor ec; hl_my_cursor_init(&ec, &f);
-            (void)hl_my_get_u8(&ec);                     /* 0xFE */
-            (void)hl_my_get_u16(&ec);                    /* warnings */
-            uint16_t status = hl_my_get_u16(&ec);
+            uint16_t status = eof_status(&f);
+            conn->server_status = status;
             *more = (status & HL_MY_SERVER_MORE_RESULTS) != 0;
             return 0;
         }
@@ -1062,7 +1158,7 @@ static int drain_one_result(HlMyConn *conn, int *more)
                 snprintf(conn->errmsg, sizeof conn->errmsg, "script failed: %.*s",
                          (int)e.message_len, e.message);
             else conn_set_err(conn, "script failed mid-result");
-            return -1;
+            return -2;
         }
         /* otherwise a data row: discarded */
     }
@@ -1070,19 +1166,24 @@ static int drain_one_result(HlMyConn *conn, int *more)
 
 int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql)
 {
+    if (refuse_if_broken(conn) != 0) return -1;
     HlMyWriter w; hl_my_writer_init(&w);
     size_t m = hl_my_packet_begin(&w, 0);
     hl_my_put_u8(&w, HL_MY_COM_QUERY);
     hl_my_put_bytes(&w, sql, strlen(sql));
     hl_my_packet_end(&w, m);
+    conn->broken = 1;                           /* until the reply is read */
     int se = w.err || conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send script"); return -1; }
 
     int more = 1;
     while (more) {
-        if (drain_one_result(conn, &more) != 0) return -1;
+        int rc = drain_one_result(conn, &more);
+        if (rc == -2) { conn->broken = 0; return -1; }   /* ERR ends the reply */
+        if (rc != 0) return -1;
     }
+    conn->broken = 0;
     return 0;
 }
 
