@@ -193,4 +193,13 @@ void hl_release_io_cleanup_stale_self(const char *argv0);
  * *comparable is 0 (and the result 0) when either does not parse. */
 int hl_release_io_version_cmp(const char *a, const char *b, int *comparable);
 
+/* The release's own name, signed. `version` is the content of the release's
+ * hull.version asset; `manifest` is its (already signature-verified)
+ * hull.sha256. Returns 0 when hull.version's digest is the manifest's and its
+ * content (one line) names `tag`; 1 when the manifest has no hull.version
+ * entry (a release published before it existed); -1 otherwise. */
+int hl_release_io_check_signed_version(const char *manifest, size_t manifest_len,
+                                       const char *version, size_t version_len,
+                                       const char *tag);
+
 #endif /* HL_RELEASE_IO_H */

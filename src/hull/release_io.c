@@ -646,3 +646,23 @@ int hl_release_io_version_cmp(const char *a, const char *b, int *comparable)
         if (va[i] != vb[i]) return va[i] < vb[i] ? -1 : 1;
     return aa - ab;
 }
+
+int hl_release_io_check_signed_version(const char *manifest, size_t manifest_len,
+                                       const char *version, size_t version_len,
+                                       const char *tag)
+{
+    if (!manifest || !tag) return -1;
+    char expected[65], actual[65];
+    if (hl_release_io_find_checksum(manifest, manifest_len, "hull.version", expected) != 0)
+        return 1;
+    if (!version) return -1;
+    if (hl_release_io_sha256_hex((const unsigned char *)version, version_len, actual) != 0)
+        return -1;
+    if (!local_ct_hex_eq(expected, actual)) return -1;
+    /* One line: the tag, then optional trailing whitespace. */
+    size_t n = version_len;
+    while (n > 0 && (version[n - 1] == '\n' || version[n - 1] == '\r' ||
+                     version[n - 1] == ' '  || version[n - 1] == '\t'))
+        n--;
+    return (n == strlen(tag) && memcmp(version, tag, n) == 0) ? 0 : -1;
+}

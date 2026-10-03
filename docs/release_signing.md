@@ -41,6 +41,17 @@ The chain is: signature binds `hull.sha256` → SHA-256 binds each binary. Stand
 
 Trade-off accepted: one signature per release covers all three platform binaries. Simpler key management, simpler verification, slightly weaker fault isolation (a corrupted binary still has a valid signature on the manifest until the manifest is regenerated. But `hull update` always verifies the binary's SHA-256 against the signed manifest, so this is moot in practice).
 
+**The release names itself in the signed manifest.** The tag `hull update`
+gets from the GitHub API ("latest") is unsigned. Without more, an old but
+genuinely signed release could be served under a newer tag - from a `--repo`
+fork, or a tampered API reply - and every signature would check out. So each
+release publishes `hull.version` (one line: the tag) and lists its SHA-256 in
+`hull.sha256` like any other asset. `hull update` fetches it, checks it against
+the signed manifest, and refuses to install unless it names the tag it was
+offered. A regular entry rather than a bare `version` line keeps
+`sha256sum -c hull.sha256` working. Releases from before `hull.version` have no
+entry; for those `hull update` says so and trusts the tag, as it did before.
+
 ## Artifact layout
 
 After the GitHub Actions release job, every release contains:

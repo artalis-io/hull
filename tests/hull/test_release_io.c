@@ -92,6 +92,31 @@ UTEST(verify_local, tamper_and_signature_fail_closed) {
 
 /* ── platform ─────────────────────────────────────────────────────── */
 
+/* hull.version, hashed into the signed manifest, names the release: the tag
+ * GitHub reports is unsigned, so an old signed release served as "latest"
+ * under a newer tag is caught by the mismatch. */
+UTEST(release_io, signed_version_names_the_release) {
+    const char *ver = "v0.16.0\n";
+    char hex[65];
+    ASSERT_EQ(hl_release_io_sha256_hex((const unsigned char *)ver, strlen(ver), hex), 0);
+    char manifest[256];
+    snprintf(manifest, sizeof(manifest),
+             "%s  hull.version\n%064d  hull-linux-x86_64\n", hex, 0);
+    size_t ml = strlen(manifest);
+
+    EXPECT_EQ(hl_release_io_check_signed_version(manifest, ml, ver, strlen(ver), "v0.16.0"), 0);
+    /* served under another tag */
+    EXPECT_EQ(hl_release_io_check_signed_version(manifest, ml, ver, strlen(ver), "v9.9.9"), -1);
+    /* hull.version swapped for one naming the new tag: its hash is wrong */
+    const char *forged = "v9.9.9\n";
+    EXPECT_EQ(hl_release_io_check_signed_version(manifest, ml, forged, strlen(forged), "v9.9.9"), -1);
+    /* entry present but the file could not be fetched */
+    EXPECT_EQ(hl_release_io_check_signed_version(manifest, ml, NULL, 0, "v0.16.0"), -1);
+    /* a release from before hull.version */
+    const char *old = "0000000000000000000000000000000000000000000000000000000000000000  hull-cosmo\n";
+    EXPECT_EQ(hl_release_io_check_signed_version(old, strlen(old), NULL, 0, "v0.15.0"), 1);
+}
+
 /* hull update installs only a NEWER release without --force: any tag that
  * merely differed used to be installed, older ones included. */
 UTEST(release_io, version_order) {
