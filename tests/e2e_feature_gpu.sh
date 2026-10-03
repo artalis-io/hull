@@ -38,6 +38,9 @@ nm build/libhull_feature-gpu.a 2>/dev/null | grep -qE '[ _]hl_gpu_backend_wgpu$'
     || { echo "FAIL: feature archive lacks hl_gpu_backend_wgpu"; exit 1; }
 
 HULL=/tmp/hull_base_gpu_e2e
+# hull build takes a local feature archive only from the running hull's own
+# directory (never ./build), so stage it beside the copied binary.
+cp build/libhull_feature-gpu.a "$(dirname "$HULL")/"
 APP=$(mktemp -d)
 PLAIN=$(mktemp -d)
 trap 'rm -rf "$APP" "$PLAIN" /tmp/hull_base_gpu_e2e' EXIT
