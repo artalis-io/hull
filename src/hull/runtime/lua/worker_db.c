@@ -162,6 +162,10 @@ static int worker_lua_db_query(lua_State *L)
     if (!h)
         return luaL_error(L, "%s", err ? err : "worker db");
 
+    /* (sql, params) exactly: slot 2 is the params or nil, never a value
+     * pushed below - with params omitted, the table / guard pushed next
+     * would sit there and be read as them. */
+    lua_settop(L, 2);
     /* The result table and the guard come FIRST, the calloc'd params last:
      * both allocate and can raise, and raised after the calloc they leaked
      * it. Nothing between the conversion and the free below can raise. */
@@ -203,6 +207,7 @@ static int worker_lua_db_exec(lua_State *L)
     if (!h)
         return luaL_error(L, "%s", err ? err : "worker db");
 
+    lua_settop(L, 2);   /* (sql, params): see worker_lua_db_query */
     /* The guard first, the calloc'd params last: the guard allocates and
      * can raise, and raised after the calloc it leaked it. */
     int guard = push_row_loop_guard(L);   /* a UDF steps inside exec */
