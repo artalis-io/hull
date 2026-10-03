@@ -69,6 +69,69 @@ typedef struct HlLuaAsyncCont {
 void hl_lua_timer_reschedule(HlLuaTimer *t);
 #endif
 
+/* ── Parked coroutines ─────────────────────────────────────────────────
+ *
+ * A coroutine waiting on a Hull operation is marked in its thread's extra
+ * space (no allocation, so marking cannot raise). The app can reach such a
+ * coroutine - coroutine.running() inside a handler, passed to another task -
+ * and coroutine.resume on it fed the yield values the app chose while a
+ * worker could still be writing the op's result, after which the real
+ * continuation resumed a dead coroutine. coroutine.resume / close refuse a
+ * parked coroutine (hl_lua_guard_coroutine_lib). */
+static char hl_lua_parked_marker;
+
+static void hl_lua_set_parked(lua_State *co, int on)
+{
+    if (co) *(void **)lua_getextraspace(co) = on ? &hl_lua_parked_marker : NULL;
+}
+
+static int hl_lua_thread_is_parked(lua_State *co)
+{
+    return co && *(void **)lua_getextraspace(co) == &hl_lua_parked_marker;
+}
+
+/* coroutine.resume / coroutine.close, refusing a parked coroutine; the
+ * original function is upvalue 1. */
+static int hl_lua_co_guarded(lua_State *L)
+{
+    lua_State *co = lua_tothread(L, 1);
+    if (hl_lua_thread_is_parked(co))
+        return luaL_error(L, "cannot resume or close a coroutine that is "
+                             "waiting on a Hull operation");
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+    return lua_gettop(L);
+}
+
+void hl_lua_guard_coroutine_lib(lua_State *L)
+{
+    lua_getglobal(L, "coroutine");
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+    static const char *const fns[] = { "resume", "close" };
+    for (size_t i = 0; i < sizeof fns / sizeof fns[0]; i++) {
+        lua_getfield(L, -1, fns[i]);
+        if (lua_isfunction(L, -1)) {
+            lua_pushcclosure(L, hl_lua_co_guarded, 1);
+            lua_setfield(L, -2, fns[i]);
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+}
+
+/* lua_pcall body for building an op's result: (cont, driver) lightuserdata
+ * in, the result out. */
+static int hl_lua_async_push_k(lua_State *L)
+{
+    HlLuaAsyncCont *lc = (HlLuaAsyncCont *)lua_touserdata(L, 1);
+    void *driver = lua_touserdata(L, 2);
+    lua_settop(L, 0);
+    lc->push_result(L, driver);
+    return 1;
+}
+
 static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 {
     HlLuaAsyncCont *lc = (HlLuaAsyncCont *)self;
@@ -77,6 +140,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     KlHttpConn *conn = lc->conn;
 
     if (!co) return;
+    hl_lua_set_parked(co, 0);   /* the runtime resumes it now */
 
     /* Restore per-request context so C functions called during resume
      * (e.g., another http.async.get) can find the active connection */
@@ -91,10 +155,27 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 
     /* Push driver result onto the coroutine stack so lua_resume
      * delivers it as the return value of the yield point */
+    /* The result is built on the main state under lua_pcall, then moved to
+     * the coroutine. Built straight onto the suspended coroutine, an
+     * allocation failure (a large db.async result, an http.fetch body near
+     * the heap limit) raised with no handler anywhere on that path, and Lua
+     * aborted the whole process. Now the memory error itself is handed to the
+     * coroutine, which takes the error path below - one request fails. */
     int nargs = 0;
+    int push_failed = 0;
     if (driver && lc->push_result) {
-        lc->push_result(co, driver);
-        nargs = 1;
+        lua_State *M = lua->L;
+        if (!lua_checkstack(M, 3) || !lua_checkstack(co, 2)) {
+            push_failed = -1;
+        } else {
+            lua_pushcfunction(M, hl_lua_async_push_k);
+            lua_pushlightuserdata(M, lc);
+            lua_pushlightuserdata(M, driver);
+            if (lua_pcall(M, 2, 1, 0) != LUA_OK)
+                push_failed = 1;            /* the error object is on M */
+            lua_xmove(M, co, 1);            /* the result, or the error */
+            nargs = 1;
+        }
     }
 
     /* ...and the timer, so a further yield inside a timer handler carries it
@@ -105,7 +186,15 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     lua->active_timer = lc->timer_ctx;
 
     int nres = 0;
-    int status = lua_resume(co, lua->L, nargs, &nres);
+    int status;
+    if (push_failed) {
+        /* Not resumed: the coroutine ends here, through the error path,
+         * with the error object on top (or, with no stack room even for
+         * that, whatever is on top - hl_lua_error_text reads any value). */
+        status = LUA_ERRMEM;
+    } else {
+        status = lua_resume(co, lua->L, nargs, &nres);
+    }
 
     lua->active_timer           = saved_timer;
     lua->active_on_complete     = NULL;
@@ -229,6 +318,7 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
 {
     HlLuaAsyncCont *lc = (HlLuaAsyncCont *)self;
     HlLua *lua = lc->lua;
+    hl_lua_set_parked(lc->co, 0);
 
     if (lc->thread_ref != LUA_NOREF) {
         luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
@@ -282,6 +372,7 @@ HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
     lc->timer_ctx  = lua->active_timer;  /* inherit timer ctx if in timer callback */
     lc->on_complete     = lua->active_on_complete;     /* deferred-teardown hook */
     lc->on_complete_ctx = lua->active_on_complete_ctx;
+    hl_lua_set_parked(lc->co, 1);
 
     return &lc->base;
 }

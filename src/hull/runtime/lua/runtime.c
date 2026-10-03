@@ -234,6 +234,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         lua_pop(lua->L, 1);
         luaL_requiref(lua->L, LUA_COLIBNAME, luaopen_coroutine, 1);
         lua_pop(lua->L, 1);
+        hl_lua_guard_coroutine_lib(lua->L);   /* see async.c */
 
         /* Apply sandbox - remove io, os, loadfile, dofile, load */
         hl_lua_sandbox(lua->L);

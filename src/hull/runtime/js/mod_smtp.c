@@ -283,12 +283,9 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
 
     /* RESOLVED: the immediate scheduling failure was audited once in the
      * orchestration, which also tore down the unparked cont (freeing its dup of
-     * rf). hl_js_async_cont_create had registered that cont as js->last_async_cont;
-     * now that it is freed, clear the dangling pointer so the dispatch's
-     * pending-handler path does not attach the outer handler promise to freed
-     * memory (the handler's `await` on our resolved promise completes via the
-     * microtask pump, no cont needed). */
-    js->last_async_cont = NULL;
+     * rf); its destroy() took it off js->last_async_cont, so dispatch never
+     * attaches the handler promise to freed memory (the handler's `await` on
+     * our resolved promise completes via the microtask pump, no cont needed). */
 
     /* Resolve the promise ourselves via our own rf copies, then free them. */
     {

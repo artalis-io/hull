@@ -167,7 +167,12 @@ static void wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
  * a worker op. */
 static int lua_parse_spans(lua_State *L, int opts_idx, HlWasmSpanReq *reqs)
 {
-    lua_getfield(L, opts_idx, "spans");
+    /* Raw reads throughout: an __index here is app code that could close a
+     * buffer already validated (its span then pointed at freed memory) or
+     * return a fresh name string nothing anchors. With rawget, every name is a
+     * string held by the caller's table, and no app code runs until the call. */
+    lua_pushliteral(L, "spans");
+    lua_rawget(L, opts_idx);
     if (lua_isnil(L, -1)) { lua_pop(L, 1); return 0; }
     if (!lua_istable(L, -1))
         return luaL_error(L, "compute: spans must be an array");
@@ -182,7 +187,8 @@ static int lua_parse_spans(lua_State *L, int opts_idx, HlWasmSpanReq *reqs)
             return luaL_error(L, "compute: spans[%d] must be a table", (int)i);
         int entry = lua_gettop(L);
 
-        lua_getfield(L, entry, "name");
+        lua_pushliteral(L, "name");
+        lua_rawget(L, entry);
         if (lua_type(L, -1) != LUA_TSTRING)
             return luaL_error(L, "compute: spans[%d].name must be a string", (int)i);
         size_t nlen = 0;
@@ -195,7 +201,8 @@ static int lua_parse_spans(lua_State *L, int opts_idx, HlWasmSpanReq *reqs)
             if (strcmp(reqs[j].name, nm) == 0)
                 return luaL_error(L, "compute: duplicate span name '%s'", nm);
 
-        lua_getfield(L, entry, "buffer");
+        lua_pushliteral(L, "buffer");
+        lua_rawget(L, entry);
         HlMappedBuffer **pp = luaL_testudata(L, -1, HL_MMAP_MT);
         if (!pp || !*pp)
             return luaL_error(L,
@@ -223,23 +230,8 @@ static int lua_compute_call(lua_State *L)
         return luaL_error(L, "compute.call: WASM runtime not initialized");
 
     const char *name = luaL_checkstring(L, 1);
-    const void *input;
+    const void *input = NULL;
     size_t input_len = 0;
-
-    /* Accept WasmBuffer, MappedBuffer, or string as input */
-    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
-    if (wbuf_in && !wbuf_in->closed) {
-        input = hl_wasm_buffer_data(wbuf_in);
-        input_len = hl_wasm_buffer_len(wbuf_in);
-    } else {
-        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
-        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
-            input = (*mmap_pp)->addr;
-            input_len = (*mmap_pp)->len;
-        } else {
-            input = luaL_checklstring(L, 2, &input_len);
-        }
-    }
 
     HlWasmCallOpts opts = {0};
     int want_buffer = 0;
@@ -291,6 +283,22 @@ static int lua_compute_call(lua_State *L)
         opts.span_count = span_count;
     }
 
+    /* The input is resolved LAST, after the options and spans: an opts
+     * __index is app code and could close the buffer a pointer taken
+     * earlier named (a use-after-free read, handed to WASM). */
+    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
+    } else {
+        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
+        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
+            input = (*mmap_pp)->addr;
+            input_len = (*mmap_pp)->len;
+        } else {
+            input = luaL_checklstring(L, 2, &input_len);
+        }
+    }
     wasm_clamp_opts(&opts, &lua->base);
 
     if (want_buffer) {
@@ -333,13 +341,13 @@ static int lua_compute_call(lua_State *L)
         return 2;
     }
 
-    if (output && output_len > 0)
-        lua_pushlstring(L, (const char *)output, output_len);
-    else
-        lua_pushlstring(L, "", 0);
-    lua_pushnil(L);
-
+    /* Protected: a plain push that ran out of memory raised past the free
+     * below and leaked the output. */
+    int pushed = hl_lua_pushlstring_safe(L, output ? (const char *)output : "",
+                                         output ? output_len : 0);
     hl_alloc_free(lua->base.alloc, output, output_len);
+    if (pushed != 0) return luaL_error(L, "not enough memory for the result");
+    lua_pushnil(L);
     return 2;
 }
 
@@ -425,23 +433,8 @@ static int lua_compute_async_call(lua_State *L)
         return luaL_error(L, "compute.async.call: WASM runtime not initialized");
 
     const char *name = luaL_checkstring(L, 1);
-    const void *input;
+    const void *input = NULL;
     size_t input_len = 0;
-
-    /* Accept WasmBuffer, MappedBuffer, or string as input */
-    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
-    if (wbuf_in && !wbuf_in->closed) {
-        input = hl_wasm_buffer_data(wbuf_in);
-        input_len = hl_wasm_buffer_len(wbuf_in);
-    } else {
-        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
-        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
-            input = (*mmap_pp)->addr;
-            input_len = (*mmap_pp)->len;
-        } else {
-            input = luaL_checklstring(L, 2, &input_len);
-        }
-    }
 
     /* Parse opts */
     HlWasmCallOpts opts = {0};
@@ -481,6 +474,22 @@ static int lua_compute_async_call(lua_State *L)
     if (lua_istable(L, 3))
         span_count = lua_parse_spans(L, 3, parsed_spans);
 
+    /* The input is resolved LAST, after the options and spans: an opts
+     * __index is app code and could close the buffer a pointer taken
+     * earlier named (a use-after-free read, handed to WASM). */
+    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
+    } else {
+        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
+        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
+            input = (*mmap_pp)->addr;
+            input_len = (*mmap_pp)->len;
+        } else {
+            input = luaL_checklstring(L, 2, &input_len);
+        }
+    }
     wasm_clamp_opts(&opts, &lua->base);
 
     /* Pre-load module on event loop thread (cache writes are not thread-safe) */
@@ -602,22 +611,8 @@ static int lua_wasm_inst_call(lua_State *L)
 
     HlLua *lua = get_hl_lua(L);
 
-    /* Parse input (string, WasmBuffer, MappedBuffer) */
-    const void *input;
+    const void *input = NULL;
     size_t input_len = 0;
-    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
-    if (wbuf_in && !wbuf_in->closed) {
-        input = hl_wasm_buffer_data(wbuf_in);
-        input_len = hl_wasm_buffer_len(wbuf_in);
-    } else {
-        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
-        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
-            input = (*mmap_pp)->addr;
-            input_len = (*mmap_pp)->len;
-        } else {
-            input = luaL_checklstring(L, 2, &input_len);
-        }
-    }
 
     /* Parse per-call opts */
     HlWasmCallOpts opts = {0};
@@ -650,6 +645,26 @@ static int lua_wasm_inst_call(lua_State *L)
         opts.span_count = span_count;
     }
 
+    /* The input is resolved LAST, after the options and spans: an opts
+     * __index is app code and could close the buffer a pointer taken
+     * earlier named (a use-after-free read, handed to WASM). */
+    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
+    } else {
+        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
+        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
+            input = (*mmap_pp)->addr;
+            input_len = (*mmap_pp)->len;
+        } else {
+            input = luaL_checklstring(L, 2, &input_len);
+        }
+    }
+    /* opts __index (app code) can also inst:close(), freeing the instance:
+     * check the userdata still holds it before using pi. */
+    if (check_wasm_inst(L, 1) != pi || pi->closed)
+        return luaL_error(L, "WasmInstance:call: instance closed");
     if (lua) wasm_clamp_opts(&opts, &lua->base);
 
     if (want_buffer) {
@@ -681,14 +696,14 @@ static int lua_wasm_inst_call(lua_State *L)
         return 2;
     }
 
-    if (output && output_len > 0)
-        lua_pushlstring(L, (const char *)output, output_len);
-    else
-        lua_pushlstring(L, "", 0);
-    lua_pushnil(L);
-
+    /* Protected: a plain push that ran out of memory raised past the free
+     * below and leaked the output. */
+    int pushed = hl_lua_pushlstring_safe(L, output ? (const char *)output : "",
+                                         output ? output_len : 0);
     if (lua) hl_alloc_free(lua->base.alloc, output, output_len);
     else free(output);
+    if (pushed != 0) return luaL_error(L, "not enough memory for the result");
+    lua_pushnil(L);
     return 2;
 }
 
@@ -708,22 +723,8 @@ static int lua_wasm_inst_async_call(lua_State *L)
     if (atomic_load(&pi->busy))
         return luaL_error(L, "WasmInstance:async_call: instance busy");
 
-    /* Parse input */
-    const void *input;
+    const void *input = NULL;
     size_t input_len = 0;
-    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
-    if (wbuf_in && !wbuf_in->closed) {
-        input = hl_wasm_buffer_data(wbuf_in);
-        input_len = hl_wasm_buffer_len(wbuf_in);
-    } else {
-        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
-        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
-            input = (*mmap_pp)->addr;
-            input_len = (*mmap_pp)->len;
-        } else {
-            input = luaL_checklstring(L, 2, &input_len);
-        }
-    }
 
     HlWasmCallOpts opts = {0};
     int want_buffer = 0;
@@ -747,6 +748,26 @@ static int lua_wasm_inst_async_call(lua_State *L)
     int span_count = 0;
     if (lua_istable(L, 3))
         span_count = lua_parse_spans(L, 3, parsed_spans);
+    /* The input is resolved LAST, after the options and spans: an opts
+     * __index is app code and could close the buffer a pointer taken
+     * earlier named (a use-after-free read, handed to WASM). */
+    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
+    } else {
+        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
+        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
+            input = (*mmap_pp)->addr;
+            input_len = (*mmap_pp)->len;
+        } else {
+            input = luaL_checklstring(L, 2, &input_len);
+        }
+    }
+    /* opts __index (app code) can also inst:close() - freeing the
+     * instance - or start a call on it: check again before using pi. */
+    if (check_wasm_inst(L, 1) != pi || pi->closed || atomic_load(&pi->busy))
+        return luaL_error(L, "WasmInstance:async_call: instance closed or busy");
     wasm_clamp_opts(&opts, &lua->base);
 
     /* Allocate worker op */

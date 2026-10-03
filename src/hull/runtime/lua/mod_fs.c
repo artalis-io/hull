@@ -542,7 +542,9 @@ static int resolve_module_key(lua_State *L, const char *name,
  * Returns 1 (number of Lua return values) on success.
  * On error, calls lua_error (does not return).
  */
-static int execute_and_cache_module(lua_State *L, const char *module_path)
+/* `cache_key` is where the result is cached (NULL = module_path). */
+static int execute_and_cache_module_as(lua_State *L, const char *module_path,
+                                       const char *cache_key)
 {
     /* Save current module context */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_current_module");
@@ -579,12 +581,28 @@ static int execute_and_cache_module(lua_State *L, const char *module_path)
     /* Cache the result in __hull_loaded */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
     lua_pushvalue(L, -2);  /* push module result */
-    lua_setfield(L, -2, module_path);
+    lua_setfield(L, -2, cache_key ? cache_key : module_path);
     lua_pop(L, 1); /* pop __hull_loaded */
 
     /* Remove original chunk, leaving just the result */
     lua_remove(L, -2);
     return 1;
+}
+
+static int execute_and_cache_module(lua_State *L, const char *module_path)
+{
+    return execute_and_cache_module_as(L, module_path, NULL);
+}
+
+/* The __hull_loaded key for a module read from the filesystem: its path
+ * with a "file:" prefix. Unprefixed, an app run from its own directory
+ * resolved require("./hull.json") to "hull.json" - the key the runtime
+ * preloads the stdlib json module under - so the cache handed back that
+ * module and the declaration gate never ran. */
+static const char *fs_cache_key(char *buf, size_t cap, const char *path)
+{
+    int n = snprintf(buf, cap, "file:%s", path);
+    return (n > 0 && (size_t)n < cap) ? buf : NULL;
 }
 
 /* ── Main require() implementation ────────────────────────────────── */
@@ -841,8 +859,11 @@ static int require_impl(lua_State *L, int trusted)
                                 path, sizeof(path)) == 0) {
 
             /* Check cache by resolved canonical path */
+            char ckeybuf[HL_MODULE_PATH_MAX + 8];
+            const char *ckey = fs_cache_key(ckeybuf, sizeof ckeybuf, path);
+            if (!ckey) return luaL_error(L, "module path too long: %s", path);
             lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
-            lua_getfield(L, -1, path);
+            lua_getfield(L, -1, ckey);
             if (!lua_isnil(L, -1)) {
                 lua_remove(L, -2); /* remove __hull_loaded */
                 return 1;
@@ -929,7 +950,7 @@ static int require_impl(lua_State *L, int trusted)
                     /* Cache in __hull_loaded */
                     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
                     lua_pushvalue(L, -2);
-                    lua_setfield(L, -2, path);
+                    lua_setfield(L, -2, ckey);
                     lua_pop(L, 1); /* pop __hull_loaded */
                     return 1;
                 }
@@ -956,7 +977,7 @@ static int require_impl(lua_State *L, int trusted)
                 if (!load_ok)
                     return lua_error(L); /* propagate compile error */
 
-                return execute_and_cache_module(L, path);
+                return execute_and_cache_module_as(L, path, ckey);
             }
         }
     }

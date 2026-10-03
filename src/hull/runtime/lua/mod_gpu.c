@@ -860,6 +860,47 @@ static void lua_push_worker_gpu_result(lua_State *L, void *driver)
     }
 }
 
+/* The deep copies gpu.async.dispatch makes before the op owns them, as a
+ * to-be-closed slot: a later lua_getfield (an __index error, a number
+ * conversion out of memory) raised past plain mallocs, and a pcall loop
+ * leaked up to 16 buffer copies per call outside the VM's memory limit. */
+typedef struct {
+    void            *uni;
+    HlGpuBufferDesc *descs;
+    void           **datas;
+    int              count;
+} GpuAsyncTmp;
+
+static int gpu_async_tmp_close(lua_State *L)
+{
+    GpuAsyncTmp *t = (GpuAsyncTmp *)lua_touserdata(L, 1);
+    if (!t) return 0;
+    for (int i = 0; i < t->count; i++) {
+        if (t->descs) free((void *)(uintptr_t)t->descs[i].name);
+        if (t->datas) free(t->datas[i]);
+    }
+    free(t->descs);
+    free(t->datas);
+    free(t->uni);
+    memset(t, 0, sizeof *t);
+    return 0;
+}
+
+static GpuAsyncTmp *gpu_async_tmp_open(lua_State *L)
+{
+    GpuAsyncTmp *t = (GpuAsyncTmp *)lua_newuserdatauv(L, sizeof *t, 0);
+    memset(t, 0, sizeof *t);
+    if (luaL_newmetatable(L, "hull.gpu.async_tmp")) {
+        lua_pushcfunction(L, gpu_async_tmp_close);
+        lua_setfield(L, -2, "__close");
+        lua_pushcfunction(L, gpu_async_tmp_close);
+        lua_setfield(L, -2, "__gc");
+    }
+    lua_setmetatable(L, -2);
+    lua_toclose(L, -1);
+    return t;
+}
+
 /* Async dispatch - submits GPU work to thread pool */
 static int l_gpu_async_dispatch(lua_State *L)
 {
@@ -907,6 +948,10 @@ static int l_gpu_async_dispatch(lua_State *L)
         opts.timeout_ms = (uint32_t)lua_tointeger(L, -1);
     lua_pop(L, 1);
 
+    /* Every copy below is owned by `tmp` until the op takes it. */
+    int tmp_idx = lua_gettop(L) + 1;
+    GpuAsyncTmp *tmp = gpu_async_tmp_open(L);
+
     /* Parse and deep-copy uniforms */
     void *uni_copy = NULL;
     size_t uni_len = 0;
@@ -919,6 +964,7 @@ static int l_gpu_async_dispatch(lua_State *L)
                 memcpy(uni_copy, uni, uni_len);
             else
                 uni_len = 0; /* prevent NULL-with-nonzero-len */
+            tmp->uni = uni_copy;
         }
     }
     lua_pop(L, 1);
@@ -935,11 +981,11 @@ static int l_gpu_async_dispatch(lua_State *L)
         if (buf_count > 0) {
             buf_descs = calloc((size_t)buf_count, sizeof(HlGpuBufferDesc));
             buf_data_ptrs = calloc((size_t)buf_count, sizeof(void *));
-            if (!buf_descs || !buf_data_ptrs) {
-                free(buf_descs); free(buf_data_ptrs); free(uni_copy);
-                lua_pop(L, 1);
+            tmp->descs = buf_descs;
+            tmp->datas = buf_data_ptrs;
+            tmp->count = (buf_descs && buf_data_ptrs) ? buf_count : 0;
+            if (!buf_descs || !buf_data_ptrs)
                 return luaL_error(L, "gpu.async.dispatch: out of memory");
-            }
             for (int i = 0; i < buf_count; i++) {
                 lua_rawgeti(L, -1, i + 1);
                 if (lua_istable(L, -1)) {
@@ -1000,11 +1046,8 @@ static int l_gpu_async_dispatch(lua_State *L)
 
     /* Allocate worker op */
     HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
-    if (!op) {
-        for (int i = 0; i < buf_count; i++) free(buf_data_ptrs[i]);
-        free(buf_data_ptrs); free(buf_descs); free(uni_copy);
-        return luaL_error(L, "gpu.async.dispatch: out of memory");
-    }
+    if (!op)
+        return luaL_error(L, "gpu.async.dispatch: out of memory");   /* tmp frees */
 
     op->server = lua->server;
     op->gpu_ctx = lua->base.gpu_ctx;
@@ -1015,6 +1058,10 @@ static int l_gpu_async_dispatch(lua_State *L)
     op->buffer_count = buf_count;
     op->uniforms = uni_copy;
     op->uniforms_len = uni_len;
+    /* The op owns the copies now (hl_worker_gpu_op_free releases them on
+     * every path below); the slot is closed here, before the yield. */
+    memset(tmp, 0, sizeof *tmp);
+    lua_closeslot(L, tmp_idx);
 
     /* Create async ctx */
     HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
@@ -1296,9 +1343,18 @@ static int l_gpu_pipeline(lua_State *L)
         return 1;
     }
 
+    /* Protected pushes: a plain one that ran out of memory raised past the
+     * free below and leaked every stage output. */
+    if (!lua_checkstack(L, 4)) {
+        hl_cap_gpu_pipeline_result_free(&result);
+        return luaL_error(L, "not enough memory for the result");
+    }
     lua_createtable(L, result.count, 0);
     for (int i = 0; i < result.count; i++) {
-        lua_pushlstring(L, (const char *)result.data[i], result.len[i]);
+        if (hl_lua_pushlstring_safe(L, (const char *)result.data[i], result.len[i]) != 0) {
+            hl_cap_gpu_pipeline_result_free(&result);
+            return luaL_error(L, "not enough memory for the result");
+        }
         lua_rawseti(L, -2, i + 1);
     }
     hl_cap_gpu_pipeline_result_free(&result);

@@ -720,12 +720,19 @@ static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
         return obj;
     }
 
-    /* HL_WORK_DB_QUERY - array of row objects */
+    /* HL_WORK_DB_QUERY - array of row objects, built exactly as the sync
+     * db.query builds them: a BLOB is an ArrayBuffer (it was decoded as a
+     * string - lossy for binary, and a different type than the sync path
+     * returns for the same row), and columns are DEFINED, never set (a set
+     * ran an Object.prototype setter for a column named like one, and a
+     * column named __proto__ replaced the row's prototype). */
     HlDbResult *r = &op->result;
     JSValue arr = JS_NewArray(ctx);
+    if (JS_IsException(arr)) return arr;
 
     for (int row = 0; row < r->nrows; row++) {
         JSValue obj = JS_NewObject(ctx);
+        if (JS_IsException(obj)) { JS_FreeValue(ctx, arr); return obj; }
         HlDbValue *vals = &r->values[row * r->ncols];
         for (int col = 0; col < r->ncols; col++) {
             JSValue v;
@@ -737,8 +744,11 @@ static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
                 v = JS_NewFloat64(ctx, vals[col].d);
                 break;
             case HL_TYPE_TEXT:
-            case HL_TYPE_BLOB:
                 v = JS_NewStringLen(ctx, vals[col].s, vals[col].len);
+                break;
+            case HL_TYPE_BLOB:
+                v = JS_NewArrayBufferCopy(ctx, (const uint8_t *)vals[col].s,
+                                          vals[col].len);
                 break;
             case HL_TYPE_BOOL:
                 /* Postgres bool columns arrive as HL_TYPE_BOOL (flag in .i);
@@ -750,9 +760,19 @@ static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
                 v = JS_NULL;
                 break;
             }
-            JS_SetPropertyStr(ctx, obj, r->col_names[col], v);
+            if (JS_IsException(v) ||
+                JS_DefinePropertyValueStr(ctx, obj, r->col_names[col], v,
+                                          JS_PROP_C_W_E) < 0) {
+                JS_FreeValue(ctx, obj);
+                JS_FreeValue(ctx, arr);
+                return JS_EXCEPTION;
+            }
         }
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)row, obj);
+        if (JS_DefinePropertyValueUint32(ctx, arr, (uint32_t)row, obj,
+                                         JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, arr);
+            return JS_EXCEPTION;
+        }
     }
 
     return arr;
@@ -929,12 +949,10 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
 
     /* Submit to thread pool */
     if (hl_worker_db_submit(js->base.thread_pool, op) != 0) {
+        /* destroy() also takes this cont off js->last_async_cont (back to
+         * the run's previous unwired cont), so dispatch never attaches the
+         * handler promise to freed memory. */
         actx->cont->destroy(actx->cont);
-        /* hl_js_async_cont_create registered this cont as js->last_async_cont; it
-         * is freed now, so clear the dangling pointer (matches the mod_smtp.c
-         * scheduling-failure path). Otherwise the dispatch's pending-handler path
-         * would attach the outer handler promise to freed memory. */
-        js->last_async_cont = NULL;
         hl_worker_db_op_free(op);
         free(op);
         hl_async_ctx_free(actx);
@@ -948,8 +966,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         op->cancelled = 1;
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);
-        actx->cont = NULL;
-        js->last_async_cont = NULL;   /* freed cont: clear the dangling registry pointer */
+        actx->cont = NULL;   /* destroy() took it off js->last_async_cont */
         JS_FreeValue(ctx, promise);
         return JS_ThrowInternalError(ctx,
             "db.async: failed to suspend connection");

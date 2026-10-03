@@ -395,10 +395,12 @@ static int lua_blob_get(lua_State *L)
         lua_pushnil(L);
         return 1;
     }
-    /* Empty-blob contract: (NULL, 0). lua_pushlstring accepts NULL when
-     * len is 0 and pushes an empty string - no allocation to free. */
-    lua_pushlstring(L, (const char *)buf, len);
+    /* Empty-blob contract: (NULL, 0) pushes an empty string - no allocation
+     * to free. Protected: a plain push that ran out of memory raised past the
+     * free below and leaked the blob. */
+    int pushed = hl_lua_pushlstring_safe(L, buf ? (const char *)buf : "", buf ? len : 0);
     if (buf) hl_alloc_free(lua->base.alloc, buf, len);
+    if (pushed != 0) return luaL_error(L, "not enough memory for the blob");
     return 1;
 }
 

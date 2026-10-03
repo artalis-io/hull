@@ -22,11 +22,25 @@
 
 #include "log.h"
 
+#include <stdlib.h>
+
 /* ── HlJsAsyncCont ─────────────────────────────────────────────────── */
 
 typedef JSValue (*HlJsPushResultFn)(JSContext *ctx, void *driver);
 
-typedef struct HlJsAsyncCont {
+/* One handler invocation's completion, shared by every continuation it has
+ * outstanding. A handler awaiting several Hull operations at once
+ * (Promise.all / race) has one continuation per operation; only one of them
+ * may run the completion (timer reschedule, ws teardown, the response), and
+ * whichever resumes LAST must still see the handler promise. */
+typedef struct {
+    int refs;
+    int done;
+} HlJsRunOnce;
+
+typedef struct HlJsAsyncCont HlJsAsyncCont;
+
+struct HlJsAsyncCont {
     HlAsyncCont       base;         /* vtable - must be first member */
     HlJS             *js;           /* runtime instance */
     JSValue           resolve;      /* Promise resolve function */
@@ -44,7 +58,15 @@ typedef struct HlJsAsyncCont {
     void            (*on_complete)(HlJS *js, void *ctx);
     void             *on_complete_ctx;
     HlReqLife        *life;         /* the handler's request life (ref held) */
-} HlJsAsyncCont;
+    /* An earlier continuation of the same handler run that has not been given
+     * the handler promise yet: dispatch hands it to the LAST one created, and
+     * used to drop every other one's - so when those resumed last, the
+     * handler's completion was never seen (a timer stopped for good, a ws
+     * conn was never torn down). Walked and cleared when the promise is
+     * attached. */
+    HlJsAsyncCont    *unwired_prev;
+    HlJsRunOnce      *once;         /* shared with the run's other conts */
+};
 
 /*
  * Resume the JS handler by resolving the inner promise and draining
@@ -74,6 +96,44 @@ void hl_js_timer_reschedule(HlJSTimer *t);
 static void hl_js_async_cont_set_handler_promise_impl(HlAsyncCont *self,
                                                          void *ctx_v,
                                                          void *promise_v);
+
+static void hl_js_run_once_release(HlJsRunOnce *o)
+{
+    if (o && --o->refs <= 0) free(o);
+}
+
+/* Give @p promise to @p last and every unwired continuation created before
+ * it in the same run, all sharing @p once (a new one when NULL). */
+static void hl_js_async_wire_run(HlJsAsyncCont *last, JSContext *ctx,
+                                 JSValue promise, HlJsRunOnce *once)
+{
+    if (!once) {
+        once = (HlJsRunOnce *)malloc(sizeof *once);
+        if (once) { once->refs = 0; once->done = 0; }
+    }
+    for (HlJsAsyncCont *c = last; c; ) {
+        HlJsAsyncCont *prev = c->unwired_prev;
+        c->unwired_prev = NULL;
+        if (JS_IsUndefined(c->handler_promise))
+            c->handler_promise = JS_DupValue(ctx, promise);
+        if (!c->once && once) {
+            c->once = once;
+            once->refs++;
+        }
+        c = prev;
+    }
+    if (once && once->refs == 0) free(once);
+}
+
+/* True once per run: the caller runs the handler's completion. A cont with
+ * no run record (allocation failed) completes as before. */
+static int hl_js_async_claim_completion(HlJsAsyncCont *jc)
+{
+    if (!jc->once) return 1;
+    if (jc->once->done) return 0;
+    jc->once->done = 1;
+    return 1;
+}
 
 static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 {
@@ -143,6 +203,21 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
     /* Check outer handler promise state (per-continuation ref) */
     JSPromiseStateEnum state = JS_PromiseState(ctx, jc->handler_promise);
+
+    /* Another continuation of this run already completed the handler (a
+     * Promise.race, or an early rejection of a Promise.all): nothing left
+     * to finish here - running the completion again rescheduled a timer
+     * twice or tore a ws conn down twice. */
+    if ((state == JS_PROMISE_FULFILLED || state == JS_PROMISE_REJECTED) &&
+        !hl_js_async_claim_completion(jc)) {
+        JS_FreeValue(ctx, jc->handler_promise);
+        jc->handler_promise = JS_UNDEFINED;
+        jc->conn = NULL;
+        jc->timer_ctx = NULL;
+        jc->on_complete = NULL;
+        if (js->active_conn == conn) js->active_conn = NULL;
+        return;
+    }
 
     if (state == JS_PROMISE_FULFILLED) {
         /* Handler completed - clean up */
@@ -242,14 +317,16 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
          * type (timers can't originate streaming-multipart routes). */
         if (js->last_async_cont) {
             HlAsyncCont *nc = (HlAsyncCont *)js->last_async_cont;
-            if (nc->set_handler_promise)
-                nc->set_handler_promise(nc, ctx, &jc->handler_promise);
-            /* Only transfer timer_ctx when the new cont is a standard
-             * HlJsAsyncCont (the only type that has the field). */
+            /* Only a standard HlJsAsyncCont carries timer_ctx and a run
+             * record: the new ones join THIS run, so the run still
+             * completes exactly once across old and new continuations. */
             if (nc->set_handler_promise == hl_js_async_cont_set_handler_promise_impl) {
                 HlJsAsyncCont *new_jc = (HlJsAsyncCont *)nc;
+                hl_js_async_wire_run(new_jc, ctx, jc->handler_promise, jc->once);
                 new_jc->timer_ctx = jc->timer_ctx;
                 jc->timer_ctx = NULL;
+            } else if (nc->set_handler_promise) {
+                nc->set_handler_promise(nc, ctx, &jc->handler_promise);
             }
             js->last_async_cont = NULL;
         }
@@ -306,7 +383,9 @@ static void hl_js_async_destroy(HlAsyncCont *self)
      * that destroys a just-registered cont left last_async_cont dangling, and
      * dispatch then attached the handler promise to freed memory. */
     if (jc->js && jc->js->last_async_cont == jc)
-        jc->js->last_async_cont = NULL;
+        jc->js->last_async_cont = jc->unwired_prev;   /* keep the run's chain */
+    hl_js_run_once_release(jc->once);
+    jc->once = NULL;
     hl_req_life_release(jc->life);
     hl_alloc_free(jc->alloc, jc, sizeof(HlJsAsyncCont));
 }
@@ -326,10 +405,8 @@ static void hl_js_async_cont_set_handler_promise_impl(HlAsyncCont *self,
                                                          void *ctx_v,
                                                          void *promise_v)
 {
-    HlJsAsyncCont *jc = (HlJsAsyncCont *)self;
-    JSContext *ctx = (JSContext *)ctx_v;
-    JSValue promise = *(JSValue *)promise_v;
-    jc->handler_promise = JS_DupValue(ctx, promise);
+    hl_js_async_wire_run((HlJsAsyncCont *)self, (JSContext *)ctx_v,
+                         *(JSValue *)promise_v, NULL);
 }
 
 HlAsyncCont *hl_js_async_cont_create(HlJS *js,
@@ -362,6 +439,15 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
     jc->on_complete_ctx = js->active_on_complete_ctx;
     jc->life            = js->active_life;
     hl_req_life_retain(jc->life);
+    jc->once            = NULL;
+    /* An earlier, not yet wired continuation of the same run (a parallel
+     * await) - only a standard HlJsAsyncCont can be chained. */
+    {
+        HlAsyncCont *prev = (HlAsyncCont *)js->last_async_cont;
+        jc->unwired_prev = (prev && prev->set_handler_promise ==
+                                    hl_js_async_cont_set_handler_promise_impl)
+                           ? (HlJsAsyncCont *)prev : NULL;
+    }
 
     /* Store pointer so dispatch/resume can wire handler_promise */
     js->last_async_cont = jc;

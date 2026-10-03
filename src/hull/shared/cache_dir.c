@@ -15,6 +15,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
+#include "log.h"
 
 /* Cache subdir names are filesystem path components - restrict to a
  * conservative charset so a misconfigured caller can't path-traverse
@@ -31,6 +34,39 @@ static int name_valid(const char *name)
         if (!ok) return 0;
     }
     return 1;
+}
+
+/* The caches hold compiled Lua / QuickJS bytecode and AOT code that Hull
+ * loads without re-verifying it - Lua bytecode in particular is not safe
+ * to load from an untrusted source. So a cache directory is used only if
+ * nobody else can write into it: a real directory (not a symlink), owned
+ * by this user, and not group- or world-writable. A shared HULL_CACHE_DIR
+ * (or a ~/.hull another account can write to) was a way to run code in
+ * every app that used it. Failing this disables the cache - the source is
+ * compiled afresh - with one WARN naming the directory.
+ *
+ * Not on Windows: Cosmopolitan reports no meaningful owner or mode bits
+ * there, and the cache lives under the user's own profile. */
+static int cache_dir_trusted(const char *path)
+{
+    if (hl_host_is_windows()) return 1;
+    struct stat st;
+    const char *why = NULL;
+    if (lstat(path, &st) != 0)              why = "cannot be inspected";
+    else if (S_ISLNK(st.st_mode))           why = "is a symlink";
+    else if (!S_ISDIR(st.st_mode))          why = "is not a directory";
+    else if (st.st_uid != geteuid())        why = "is owned by another user";
+    else if (st.st_mode & (S_IWGRP | S_IWOTH)) why = "is writable by other users";
+    if (!why) return 1;
+    static int warned;
+    if (!warned) {
+        warned = 1;
+        log_warn("[cache] %s %s; the bytecode / template / AOT caches are "
+                 "off (fix its ownership or permissions, or set "
+                 "HULL_CACHE_DIR to a private directory)", path, why);
+    }
+    errno = EPERM;
+    return 0;
 }
 
 int hl_hull_cache_dir(char *out, size_t out_sz)
@@ -82,7 +118,8 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
         if (olen >= sizeof(abspath)) { errno = ENAMETOOLONG; return -1; }
         memcpy(abspath, override, olen);
         abspath[olen] = '\0';
-        if (hl_mkdir_p(abspath, 0755) != 0) return -1;
+        if (hl_mkdir_p(abspath, 0700) != 0) return -1;
+        if (!cache_dir_trusted(abspath)) return -1;
         return 0;
     }
 
@@ -115,7 +152,8 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
     if (n < 0 || (size_t)n >= sizeof(runtime_dir)) {
         errno = ENAMETOOLONG; return -1;
     }
-    if (hl_ensure_dir(runtime_dir, 0755) != 0) return -1;
+    if (hl_ensure_dir(runtime_dir, 0700) != 0) return -1;
+    if (!cache_dir_trusted(runtime_dir)) return -1;
 
     /* Trailing slash for easy concatenation. */
     n = snprintf(out, out_sz, "%s/", runtime_dir);
@@ -139,7 +177,8 @@ int hl_hull_cache_subdir(const char *name, char *out, size_t out_sz)
     if (n < 0 || (size_t)n >= sizeof(sub)) {
         errno = ENAMETOOLONG; return -1;
     }
-    if (hl_ensure_dir(sub, 0755) != 0) return -1;
+    if (hl_ensure_dir(sub, 0700) != 0) return -1;
+    if (!cache_dir_trusted(sub)) return -1;
 
     n = snprintf(out, out_sz, "%s/", sub);
     if (n < 0 || (size_t)n >= out_sz) {
