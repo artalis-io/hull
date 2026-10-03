@@ -138,6 +138,9 @@ int            hl_pg_cursor_err(const HlPgCursor *c);
 #define HL_PG_B_NO_DATA          'n'
 #define HL_PG_B_PARAM_DESC       't'
 #define HL_PG_B_EMPTY_QUERY      'I'
+#define HL_PG_B_COPY_IN          'G'   /* CopyInResponse: the server wants data */
+#define HL_PG_B_COPY_OUT         'H'   /* CopyOutResponse: CopyData follows */
+#define HL_PG_B_COPY_BOTH        'W'   /* CopyBothResponse (replication) */
 
 /* Frontend (client -> server) message tags. */
 #define HL_PG_F_QUERY            'Q'

@@ -46,6 +46,13 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
      * "/var/db", "sqlite://:memory:" -> ":memory:". */
     if (dsn && strncmp(dsn, "sqlite://", 9) == 0)
         dsn += 9;
+    /* "file://<path>" likewise. The DSN selector routes it here and db.open
+     * checks the path after the "file://" against manifest.fs, but plain
+     * sqlite3_open does not parse URIs: it opened the literal "file://..." -
+     * a relative name under the working directory, not the file that was
+     * checked. (A single-colon "file:x" stays a literal name, as checked.) */
+    else if (dsn && strncmp(dsn, "file://", 7) == 0)
+        dsn += 7;
 
     /* An MSYS2 / Git Bash shell hands a native program the MIXED path form
      * "D:/app/data.db". SQLite's unix VFS decides absolute-vs-relative on a
@@ -414,6 +421,19 @@ HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h)
 }
 
 /* ── Wrap an externally-owned sqlite3* ────────────────────────────── */
+
+int hl_db_sqlite_drop_function(sqlite3 *db, const char *name)
+{
+    if (!db || !name) return SQLITE_MISUSE;
+    int max = sqlite3_limit(db, SQLITE_LIMIT_FUNCTION_ARG, -1);
+    if (max < 0) max = 127;
+    for (int n = -1; n <= max; n++) {
+        int rc = sqlite3_create_function_v2(db, name, n, SQLITE_UTF8,
+                                            NULL, NULL, NULL, NULL, NULL);
+        if (rc != SQLITE_OK) return rc;
+    }
+    return SQLITE_OK;
+}
 
 int hl_db_sqlite_wrap(HlDbHandle *out, sqlite3 *db)
 {

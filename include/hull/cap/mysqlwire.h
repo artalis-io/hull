@@ -275,6 +275,7 @@ void hl_my_build_ssl_request(HlMyWriter *w, uint8_t seq,
 
 /* Capability flags (subset; little-endian on the wire). */
 #define HL_MY_CLIENT_LONG_PASSWORD      0x00000001u
+#define HL_MY_CLIENT_FOUND_ROWS         0x00000002u
 #define HL_MY_CLIENT_LONG_FLAG          0x00000004u
 #define HL_MY_CLIENT_CONNECT_WITH_DB    0x00000008u
 #define HL_MY_CLIENT_PROTOCOL_41        0x00000200u

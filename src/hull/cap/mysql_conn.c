@@ -275,15 +275,31 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
     for (;;) {
         size_t consumed = 0;
         HlMyResult r = hl_my_frame_next(conn->rbuf, conn->rlen, f, &consumed);
-        if (r == HL_MY_OK) { conn->consumed = consumed; return 0; }
+        if (r == HL_MY_OK) {
+            conn->consumed = consumed;
+            /* A full 0xFFFFFF payload means the value continues in the next
+             * packet (a row of 16 MB or more). Not reassembled: taken as a
+             * whole frame, the continuation was parsed as the next message. */
+            if (f->body_len == HL_MY_MAX_MSG) {
+                conn_set_err(conn, "server sent a packet of 16 MB or more "
+                                   "(not supported)");
+                return -1;
+            }
+            return 0;
+        }
         if (r == HL_MY_ERR) { conn_set_err(conn, "malformed message from server");
                               return -1; }
         /* NEED_MORE: grow if full (bounded by the 24-bit packet cap), then read. */
         if (conn->rlen == conn->rcap) {
-            size_t ncap = conn->rcap ? conn->rcap * 2 : HL_MY_RECV_BUF_INIT;
-            if (ncap > (size_t)HL_MY_MAX_MSG + HL_MY_RECV_BUF_INIT) {
+            /* Up to one whole packet (header + 24-bit payload), clamped:
+             * doubling from 8 KB reaches 16 MB exactly, and the next step
+             * overshot the cap - a maximal packet was refused. */
+            size_t lim = (size_t)HL_MY_MAX_MSG + 4;
+            if (conn->rcap >= lim) {
                 conn_set_err(conn, "server message exceeds limit"); return -1;
             }
+            size_t ncap = conn->rcap ? conn->rcap * 2 : HL_MY_RECV_BUF_INIT;
+            if (ncap > lim) ncap = lim;
             uint8_t *nb = realloc(conn->rbuf, ncap);
             if (!nb) { conn_set_err(conn, "out of memory"); return -1; }
             conn->rbuf = nb; conn->rcap = ncap;
@@ -410,9 +426,14 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         return -1;
     }
 
+    /* FOUND_ROWS: an UPDATE reports the rows it MATCHED, as SQLite and
+     * Postgres do. Without it MySQL counts only rows whose values changed,
+     * so an update that set what was already there reported 0 - and a
+     * "changes == 1" check (a claim, an optimistic lock) read it as lost. */
     uint32_t caps = HL_MY_CLIENT_PROTOCOL_41 | HL_MY_CLIENT_SECURE_CONNECTION
                   | HL_MY_CLIENT_PLUGIN_AUTH | HL_MY_CLIENT_TRANSACTIONS
-                  | HL_MY_CLIENT_MULTI_STATEMENTS | HL_MY_CLIENT_MULTI_RESULTS;
+                  | HL_MY_CLIENT_MULTI_STATEMENTS | HL_MY_CLIENT_MULTI_RESULTS
+                  | HL_MY_CLIENT_FOUND_ROWS;
     if (dsn->dbname[0]) caps |= HL_MY_CLIENT_CONNECT_WITH_DB;
     uint8_t charset = hs.charset ? hs.charset : HL_MY_DEFAULT_CHARSET;
 
@@ -619,28 +640,36 @@ static int drain_one_result(HlMyConn *conn, int *more);
 
 /* Read the result sets still to come after one whose status said
  * MORE_RESULTS (a multi-statement COM_QUERY, a CALL). Left unread they were
- * the next command's reply. 0 once the reply is read to its end - an ERR
- * included, which ends it - or -1 with the stream out of step. */
+ * the next command's reply. 0 once the reply is read to its end, 1 when it
+ * ended in a server ERR (in step - a LATER statement failed), or -1 with the
+ * stream out of step. */
 static int drain_more_results(HlMyConn *conn)
 {
     int more = 1;
     while (more) {
         int rc = drain_one_result(conn, &more);
-        if (rc == -2) return 0;   /* server ERR: the reply ends there */
+        if (rc == -2) return 1;   /* server ERR: the reply ends there */
         if (rc != 0) return -1;
     }
     return 0;
 }
 
 /* A reply that ended with status @p status: in step unless more results follow
- * and cannot be read. Clears `broken` when the reply is fully read. */
-static void reply_done(HlMyConn *conn, uint16_t status)
+ * and cannot be read. Clears `broken` when the reply is fully read. Returns 0,
+ * or -1 when the reply failed: a later statement's ERR (errmsg says which;
+ * it used to be read past and the whole call reported success - the first
+ * statement's commit hid the second's failure) or a stream out of step. */
+static int reply_done(HlMyConn *conn, uint16_t status)
 {
     conn->server_status = status;
     if (status & HL_MY_SERVER_MORE_RESULTS) {
-        if (drain_more_results(conn) != 0) return;   /* stays broken */
+        int d = drain_more_results(conn);
+        if (d < 0) return -1;                    /* stays broken */
+        conn->broken = 0;
+        return d ? -1 : 0;
     }
     conn->broken = 0;
+    return 0;
 }
 
 /* An EOF packet body is shorter than an OK/row body that also starts 0xFE. */
@@ -666,8 +695,16 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
     hl_my_put_u8(&w, HL_MY_COM_QUERY);
     hl_my_put_bytes(&w, sql, strlen(sql));
     hl_my_packet_end(&w, m);
+    /* A packet too big to build is refused before anything goes out: it
+     * used to mark the connection mid-reply first, and the next call then
+     * found it "lost" though it was never used. */
+    if (w.err) {                                /* nothing was sent */
+        hl_my_writer_free(&w);
+        conn_set_err(conn, "the statement is larger than one MySQL packet (16 MB)");
+        return -1;
+    }
     conn->broken = 1;                           /* until the reply is read */
-    int se = w.err || conn_send(conn, w.buf, w.len);
+    int se = conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send query"); return -1; }
 
@@ -683,8 +720,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
         }
         conn->last_insert_id = ok.last_insert_id;
         if (affected) *affected = (int64_t)ok.affected_rows;
-        reply_done(conn, ok.status_flags);
-        return conn->broken ? -1 : 0;
+        return reply_done(conn, ok.status_flags);
     }
     if (hdr == HL_MY_PKT_ERR) {
         HlMyErr e;
@@ -740,8 +776,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
     for (;;) {
         if (conn_next_frame(conn, &f) != 0) goto fail;
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
-            reply_done(conn, eof_status(&f));   /* end of rows */
-            if (conn->broken) goto fail;
+            if (reply_done(conn, eof_status(&f)) != 0) goto fail;   /* end of rows */
             break;
         }
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
@@ -945,8 +980,16 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     hl_my_put_u8(&w, HL_MY_COM_STMT_PREPARE);
     hl_my_put_bytes(&w, sql, strlen(sql));
     hl_my_packet_end(&w, m);
+    /* A packet too big to build is refused before anything goes out: it
+     * used to mark the connection mid-reply first, and the next call then
+     * found it "lost" though it was never used. */
+    if (w.err) {                                /* nothing was sent */
+        hl_my_writer_free(&w);
+        conn_set_err(conn, "the statement is larger than one MySQL packet (16 MB)");
+        return -1;
+    }
     conn->broken = 1;                           /* until the reply is read */
-    int se = w.err || conn_send(conn, w.buf, w.len);
+    int se = conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send prepare"); return -1; }
 
@@ -985,7 +1028,17 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     int be = build_execute(&w, prep.statement_id, params, nparams,
                            (int)prep.num_params);
     hl_my_packet_end(&w, m);
-    se = be || w.err || conn_send(conn, w.buf, w.len);
+    if (be || w.err) {
+        /* Not sent: a parameter of 16 MB or more does not fit one packet
+         * (and long-data streaming is not implemented). Said as such, and
+         * the connection stays in step. */
+        hl_my_writer_free(&w);
+        conn->broken = 0;     /* the PREPARE reply is read whole: in step */
+        conn_set_err(conn, be ? "could not encode the parameters"
+                              : "a parameter is larger than one MySQL packet (16 MB)");
+        goto close_stmt;
+    }
+    se = conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send execute"); goto close_stmt; }
 
@@ -1001,8 +1054,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
         }
         conn->last_insert_id = ok.last_insert_id;
         if (affected) *affected = (int64_t)ok.affected_rows;
-        reply_done(conn, ok.status_flags);
-        ret = conn->broken ? -1 : 0;
+        ret = reply_done(conn, ok.status_flags);
         goto close_stmt;
     }
     if (hdr == HL_MY_PKT_ERR) {
@@ -1050,8 +1102,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     for (;;) {
         if (conn_next_frame(conn, &f) != 0) goto close_stmt;
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
-            reply_done(conn, eof_status(&f));               /* end of rows */
-            if (conn->broken) goto close_stmt;
+            if (reply_done(conn, eof_status(&f)) != 0) goto close_stmt;   /* end of rows */
             break;
         }
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
@@ -1172,8 +1223,16 @@ int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql)
     hl_my_put_u8(&w, HL_MY_COM_QUERY);
     hl_my_put_bytes(&w, sql, strlen(sql));
     hl_my_packet_end(&w, m);
+    /* A packet too big to build is refused before anything goes out: it
+     * used to mark the connection mid-reply first, and the next call then
+     * found it "lost" though it was never used. */
+    if (w.err) {                                /* nothing was sent */
+        hl_my_writer_free(&w);
+        conn_set_err(conn, "the script is larger than one MySQL packet (16 MB)");
+        return -1;
+    }
     conn->broken = 1;                           /* until the reply is read */
-    int se = w.err || conn_send(conn, w.buf, w.len);
+    int se = conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send script"); return -1; }
 

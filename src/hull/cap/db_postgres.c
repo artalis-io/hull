@@ -271,17 +271,42 @@ typedef struct {
     char        **names;   /* copied field names (survive past RowDescription) */
     int32_t      *oids;
     int           nfields;
+    int           nnames;   /* entries allocated in names (what free walks) */
     int           bad_row;  /* a DataRow did not match the RowDescription */
 } PgAdapter;
 
+static void adapter_free_desc(PgAdapter *a)
+{
+    if (a->names)
+        for (int i = 0; i < a->nnames; i++) free(a->names[i]);
+    free(a->names);
+    free(a->oids);
+    a->names = NULL;
+    a->oids = NULL;
+    a->nnames = 0;
+    a->nfields = 0;
+}
+
+/* A RowDescription. A second one (a server that sends another) replaced the
+ * arrays without freeing them, and the cleanup then freed names[0..nfields)
+ * of the NEW count over the OLD array - out of bounds when it grew. An
+ * allocation failure leaves nfields at -1, so every DataRow is refused
+ * rather than taken at whatever width it claims. */
 static void adapter_desc(void *ctx, const HlPgField *fields, int nf)
 {
     PgAdapter *a = ctx;
-    a->nfields = nf;
+    adapter_free_desc(a);
     if (nf <= 0) return;
     a->names = calloc((size_t)nf, sizeof *a->names);
     a->oids  = calloc((size_t)nf, sizeof *a->oids);
-    if (!a->names || !a->oids) { a->nfields = 0; return; }
+    if (!a->names || !a->oids) {
+        free(a->names); free(a->oids);
+        a->names = NULL; a->oids = NULL;
+        a->nfields = -1;
+        return;
+    }
+    a->nnames = nf;
+    a->nfields = nf;
     for (int i = 0; i < nf; i++) {
         const char *nm = fields[i].name ? fields[i].name : "";
         a->names[i] = strdup(nm);
@@ -298,7 +323,7 @@ static int adapter_row(void *ctx, const char *const *vals,
      * from above let a hostile (or TLS-stripped) server send fewer, and a
      * consumer that sized its rows from the first one (db.async's collector)
      * then read past this row's array. A mismatch fails the query. */
-    if (a->nfields > 0 && nc != a->nfields) {
+    if (nc != a->nfields) {   /* also: a DataRow with no RowDescription */
         a->bad_row = 1;
         return 1;
     }
@@ -358,10 +383,7 @@ static int pg_query(HlDbHandle *h, const char *sql,
         rc = -1;
     }
 
-    if (a.names)
-        for (int i = 0; i < a.nfields; i++) free(a.names[i]);
-    free(a.names);
-    free(a.oids);
+    adapter_free_desc(&a);
     if (scratch)
         for (int i = 0; i < nparams; i++) free(scratch[i]);
     free(scratch);

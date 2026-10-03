@@ -238,6 +238,11 @@ ssize_t hl_tls_client_read(int fd, HlTlsClient *c, void *buf, size_t len)
     return c->tls->read(c->tls, fd, buf, len);
 }
 
+size_t hl_tls_client_pending(HlTlsClient *c)
+{
+    return (c && c->tls && c->tls->pending) ? c->tls->pending(c->tls) : 0;
+}
+
 ssize_t hl_tls_client_write(int fd, HlTlsClient *c, const void *buf, size_t len)
 {
     return c->tls->write(c->tls, fd, buf, len);

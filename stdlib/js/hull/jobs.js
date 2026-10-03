@@ -435,8 +435,9 @@ function finish(job, info, transition) {
     let outcome;
     db.batch(() => {
         outcome = transition();
-        emitDurable(EVENT_OF[outcome] || outcome, job, info);
+        if (outcome !== "lost") emitDurable(EVENT_OF[outcome] || outcome, job, info);
     });
+    if (outcome === "lost") { job._lost = true; return undefined; }   // another run owns it now
     emit(EVENT_OF[outcome] || outcome, job, info);
     return outcome;
 }
@@ -719,8 +720,9 @@ function isPaused(queue) {
 }
 
 function setPaused(queue, v) {
-    const n = db.exec("UPDATE _hull_queue SET paused=? WHERE name=?", [v, queue]);
-    if ((n || 0) === 0) db.exec("INSERT INTO _hull_queue (name, paused) VALUES (?, ?)", [queue, v]);
+    // One statement: UPDATE-then-INSERT raced - two callers both updated
+    // nothing and the second INSERT failed on the key.
+    db.upsert("_hull_queue", ["name"], ["name", "paused"], [queue, v]);
     _pausedAt = 0;   // invalidate this process's cache so the change is seen now
     return jobs;
 }
@@ -941,23 +943,36 @@ function on(event, fn) {
     return jobs;
 }
 
-function markDone(id, result) {
-    db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
-        [time.now(), id]);
+// Every transition out of 'running' is guarded by the claim: the job must
+// still be running under THIS worker's claimToken. A job that outlived the
+// visibility timeout is reclaimed by the reaper and may be running again under
+// another worker; the first worker finishing late used to overwrite that run
+// and resolve its dependents twice. Such a transition changes nothing and
+// returns "lost".
+const CLAIMED = " AND claim_token=? AND status='running'";
+
+function markDone(job, result) {
+    const id = job.id;
+    const n = db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? " +
+        "WHERE id=?" + CLAIMED, [time.now(), id, job.claimToken]);
+    if ((n || 0) === 0) return "lost";
     if (result !== undefined) {   // persist the handler's return value for dependents
         const enc = json.encode(result);
-        const n = db.exec("UPDATE _hull_job_results SET result=? WHERE job_id=?", [enc, id]);
-        if ((n || 0) === 0) db.exec("INSERT INTO _hull_job_results (job_id, result) VALUES (?, ?)", [id, enc]);
+        db.upsert("_hull_job_results", ["job_id"], ["job_id", "result"], [id, enc]);
     }
     resolveDeps(id, true);                                   // unblock dependents
     db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [id]);   // consumed its own deps
+    return "done";
 }
 
-function markDead(id, err) {
-    db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, updated_at=? WHERE id=?",
-        [err, time.now(), id]);
+function markDead(job, err) {
+    const id = job.id;
+    const n = db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, " +
+        "updated_at=? WHERE id=?" + CLAIMED, [err, time.now(), id, job.claimToken]);
+    if ((n || 0) === 0) return "lost";
     resolveDeps(id, false);                                  // cascade to dependents
     db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [id]);
+    return "dead";
 }
 
 // Reschedule with backoff, or dead-letter once attempts are exhausted. attempts
@@ -968,12 +983,13 @@ function markRetry(job, err) {
     const attempts = job.attempts || 0;
     const max = job.maxAttempts !== undefined && job.maxAttempts !== null
         ? job.maxAttempts : _cfg.maxAttempts;
-    if (attempts >= max) { markDead(job.id, err); return "dead"; }
+    if (attempts >= max) return markDead(job, err);
     const now = time.now();
-    db.exec(
+    const n = db.exec(
         "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, " +
-        "updated_at=? WHERE id=?",
-        [now + _cfg.backoff(attempts), err, now, job.id]);
+        "updated_at=? WHERE id=?" + CLAIMED,
+        [now + _cfg.backoff(attempts), err, now, job.id, job.claimToken]);
+    if ((n || 0) === 0) return "lost";
     return "retried";
 }
 
@@ -1017,6 +1033,25 @@ function reap(opts) {
         "SELECT COUNT(*) FROM _hull_jobs j " +
         "WHERE j.concurrency_key = _hull_job_concurrency.name " +
         "AND j.concurrency_strict = 1 AND j.status = 'running')");
+    // Dependents whose dependencies have all ended but which are still
+    // blocked: the enqueue re-check and resolveDeps close the race only when
+    // each sees the other's write, and two transactions in flight at once
+    // (READ COMMITTED) each saw the other "not yet" - the dependent stayed
+    // blocked for good. Applied here as the re-check would.
+    const stuck = db.query(
+        "SELECT d.dependent_id, d.dep_id, d.fail_mode, j.status AS dep_status " +
+        "FROM _hull_job_deps d " +
+        "JOIN _hull_jobs b ON b.id = d.dependent_id " +
+        "LEFT JOIN _hull_jobs j ON j.id = d.dep_id " +
+        "WHERE d.satisfied = 0 AND b.status = 'blocked' " +
+        "AND (j.id IS NULL OR j.status IN ('done', 'dead', 'compensated')) " +
+        "LIMIT 500");
+    for (const e of stuck) {
+        const ok = e.dep_status == null || e.dep_status === "done";
+        if (resolveEdge(e.dependent_id, e.dep_id, ok, e.fail_mode) === "failed") {
+            resolveDeps(e.dependent_id, false);
+        }
+    }
     return reclaimed;
 }
 
@@ -1176,16 +1211,12 @@ function cron(name, spec, data, opts) {
     const queue = o.queue || "default";
     const priority = o.priority || 0;
     const ma = o.maxAttempts !== undefined ? o.maxAttempts : null;
-    const n = db.exec(
-        "UPDATE _hull_cron SET spec=?, type=?, payload=?, queue=?, priority=?, " +
-        "max_attempts=?, next_run_at=?, tz_offset=?, updated_at=? WHERE name=?",
-        [spec, jobType, payload, queue, priority, ma, nxt, tzOffset, now, name]);
-    if ((n || 0) === 0) {
-        db.exec(
-            "INSERT INTO _hull_cron (name, spec, type, payload, queue, priority, " +
-            "max_attempts, next_run_at, tz_offset, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [name, spec, jobType, payload, queue, priority, ma, nxt, tzOffset, now]);
-    }
+    // One statement: UPDATE-then-INSERT raced - two callers both updated
+    // nothing and the second INSERT failed on the key.
+    db.upsert("_hull_cron", ["name"],
+        ["name", "spec", "type", "payload", "queue", "priority",
+         "max_attempts", "next_run_at", "tz_offset", "updated_at"],
+        [name, spec, jobType, payload, queue, priority, ma, nxt, tzOffset, now]);
     return jobs;
 }
 
@@ -1253,7 +1284,7 @@ async function work(opts) {
         let outcome, errStr;              // undefined outcome = a yield (not recorded)
         if (!h) {
             errStr = `no handler for job type '${job.type}'`;
-            outcome = finish(job, { error: errStr }, () => { markDead(job.id, errStr); return "dead"; });
+            outcome = finish(job, { error: errStr }, () => markDead(job, errStr));
         } else {
         try {
             const result = await h(job);
@@ -1269,8 +1300,8 @@ async function work(opts) {
                     // timeout deadline (0 = none); the reaper wakes a timed-out
                     // wait, jobs.signal wakes a delivered one.
                     db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, " +
-                        "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
-                        [result.deadline || 0, now, job.id]);
+                        "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
+                        [result.deadline || 0, now, job.id, job.claimToken]);
                     // Close the deliver-before-park race: a signal delivered in the
                     // check->park window couldn't re-activate us (we were 'running'),
                     // so re-check now that we are 'waiting'.
@@ -1286,12 +1317,12 @@ async function work(opts) {
                 } else {
                     // ctx.sleep: future-dated pending job.
                     db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
-                        "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
-                        [result.wakeAt || now, now, job.id]);
+                        "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
+                        [result.wakeAt || now, now, job.id, job.claimToken]);
                 }
             } else if (result === DEAD) {
                 errStr = "handler returned jobs.DEAD";
-                outcome = finish(job, { error: errStr }, () => { markDead(job.id, errStr); return "dead"; });
+                outcome = finish(job, { error: errStr }, () => markDead(job, errStr));
             } else if (result === RETRY) {
                 errStr = "handler requested retry";
                 outcome = finish(job, { error: errStr, attempt: job.attempts },
@@ -1301,7 +1332,7 @@ async function work(opts) {
                 // value is stored as the job's result (for dependents).
                 const res = (result !== undefined && result !== true && result !== DISCARD)
                     ? result : undefined;
-                outcome = finish(job, { result: res }, () => { markDone(job.id, res); return "done"; });
+                outcome = finish(job, { result: res }, () => markDone(job, res));
             }
         } catch (e) {
             errStr = String((e && e.message) || e);
@@ -1316,7 +1347,9 @@ async function work(opts) {
         // Release the strict-concurrency slot reserved at claim: any exit from
         // 'running' (done / dead / retry / workflow yield) frees it. A yielded
         // workflow re-reserves on its next claim.
-        if (job._concStrict === 1 && job._concKey !== undefined && job._concKey !== null) {
+        // Not for a lost claim: the run that owns the job now holds the slot.
+        if (job._concStrict === 1 && job._concKey !== undefined && job._concKey !== null &&
+            !job._lost) {
             concRelease(job._concKey);
         }
     }

@@ -167,6 +167,10 @@ int hl_db_transport_attach_tls(HlDbTransport *t, struct HlTlsClient *tls);
  */
 ssize_t hl_db_transport_send(HlDbTransport *t, const uint8_t *buf, size_t len);
 ssize_t hl_db_transport_recv(HlDbTransport *t, uint8_t *buf, size_t len);
+/* Bytes a recv would return without waiting on the socket: TLS plaintext
+ * already decrypted (one record can hold several protocol messages). A
+ * poll(2) on the descriptor does not see them. 0 without TLS. */
+size_t  hl_db_transport_pending(HlDbTransport *t);
 
 /**
  * Send every byte of @p buf (all-or-error), looping over hl_db_transport_send.

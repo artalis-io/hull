@@ -116,11 +116,16 @@ function outbox.enqueue(opts)
     local max = opts.max_attempts or _max_attempts
     local delay = opts.delay or 0
 
-    db.exec(
-        "INSERT INTO _hull_outbox (kind, destination, payload, headers, idempotency_key, max_attempts, next_attempt_at, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
-        { opts.kind, opts.destination, opts.payload, opts.headers, opts.idempotency_key, max, now + delay, now }
-    )
-
+    local sql = "INSERT INTO _hull_outbox (kind, destination, payload, headers, idempotency_key, max_attempts, next_attempt_at, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)"
+    local vals = { opts.kind, opts.destination, opts.payload, opts.headers, opts.idempotency_key, max, now + delay, now }
+    -- The new id from the INSERT itself where the backend can (SQLite,
+    -- Postgres): last_id has no Postgres implementation, so enqueue returned
+    -- nothing there. MySQL has no RETURNING; its last_id is per connection.
+    if db.dialect and db.dialect.supports_returning then
+        local rows = db.query(sql .. " RETURNING id", vals)
+        return rows and rows[1] and rows[1].id
+    end
+    db.exec(sql, vals)
     return db.last_id()
 end
 
@@ -130,8 +135,10 @@ local function deliver_item(item)
     if item.kind == "webhook" or item.kind == "http" then
         local req_headers = {}
         if item.headers then
-            local decoded = json.decode(item.headers)
-            if decoded then
+            -- Protected: a stored value that is not JSON raised here, out of
+            -- the whole flush, with the row still leased.
+            local ok, decoded = pcall(json.decode, item.headers)
+            if ok and type(decoded) == "table" then
                 req_headers = decoded
             end
         end
@@ -211,34 +218,40 @@ function outbox.flush(opts)
         -- send them again. The claim pushes next_attempt_at out by a lease;
         -- only the flush whose UPDATE changed the row delivers it. If this
         -- process dies mid-send the lease runs out and the row is retried.
+        local lease = now + CLAIM_LEASE
         local claimed = db.exec(
             "UPDATE _hull_outbox SET next_attempt_at = ? WHERE id = ? " ..
             "AND state = 'pending' AND next_attempt_at <= ?",
-            { now + CLAIM_LEASE, item.id, now })
+            { lease, item.id, now })
         if claimed == 1 then
             local ok, err = deliver_item(item)
 
+            -- Every outcome is written only while the row still holds THIS
+            -- flush's lease. A delivery that outran it was reclaimed and sent
+            -- again by another flush; a late write here then overwrote that
+            -- flush's outcome (and counted the row twice).
+            local mine = " AND state = 'pending' AND next_attempt_at = ?"
             if ok then
-                db.exec(
-                    "UPDATE _hull_outbox SET state = 'delivered', delivered_at = ?, attempts = attempts + 1 WHERE id = ?",
-                    { time.now(), item.id }
+                local n = db.exec(
+                    "UPDATE _hull_outbox SET state = 'delivered', delivered_at = ?, attempts = attempts + 1 WHERE id = ?" .. mine,
+                    { time.now(), item.id, lease }
                 )
-                delivered = delivered + 1
+                if n == 1 then delivered = delivered + 1 end
             else
                 local new_attempts = item.attempts + 1
                 if new_attempts >= item.max_attempts then
-                    db.exec(
-                        "UPDATE _hull_outbox SET state = 'failed', attempts = ?, last_error = ? WHERE id = ?",
-                        { new_attempts, err, item.id }
+                    local n = db.exec(
+                        "UPDATE _hull_outbox SET state = 'failed', attempts = ?, last_error = ? WHERE id = ?" .. mine,
+                        { new_attempts, err, item.id, lease }
                     )
-                    failed = failed + 1
+                    if n == 1 then failed = failed + 1 end
                 else
                     local next_at = time.now() + backoff_delay(new_attempts)
-                    db.exec(
-                        "UPDATE _hull_outbox SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?",
-                        { new_attempts, next_at, err, item.id }
+                    local n = db.exec(
+                        "UPDATE _hull_outbox SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?" .. mine,
+                        { new_attempts, next_at, err, item.id, lease }
                     )
-                    retried = retried + 1
+                    if n == 1 then retried = retried + 1 end
                 end
             end
         end

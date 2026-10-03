@@ -500,11 +500,9 @@ int hl_cap_db_udf_unregister(HlDbHandle *handle, const char *sql_name)
     sqlite3 *db = hl_db_sqlite_raw(handle);
     if (!db) return -1;
 
-    /* Passing NULL function pointers removes the function.
-     * SQLite calls xDestroy on the old registration. */
-    int rc = sqlite3_create_function_v2(
-        db, sql_name, -1, SQLITE_UTF8,
-        NULL, NULL, NULL, NULL, NULL);
+    /* NULL function pointers remove the function, at every arity it was
+     * registered with (opts.nargs); SQLite calls xDestroy on each. */
+    int rc = hl_db_sqlite_drop_function(db, sql_name);
 
     if (rc != SQLITE_OK) {
         log_error("[db_udf] unregister failed for '%s': %s",

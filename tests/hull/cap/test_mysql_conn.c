@@ -621,6 +621,39 @@ UTEST(mysql_conn, exec_multi_statement)
     close(sv[0]);
 }
 
+/* A multi-statement COM_QUERY whose SECOND statement fails: the ERR used to
+ * be read past and the call reported success. It fails, and the connection
+ * stays in step (the reply was read to its end). */
+UTEST(mysql_conn, query_later_statement_error_fails)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);                                   /* auth OK */
+    put_ok_more(&s, 1, HL_MY_SERVER_MORE_RESULTS);     /* statement 1: OK, more */
+    build_err(&s, 2, 1146, "Table 'db.nope' doesn't exist");   /* statement 2 */
+    put_ok_more(&s, 1, 0);                             /* the next command */
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    EXPECT_NE(0, hl_my_conn_query(&conn, "UPDATE a SET x=1; UPDATE nope SET x=1",
+                                  NULL, NULL, NULL, NULL));
+    EXPECT_TRUE(strstr(conn.errmsg, "nope") != NULL);
+    EXPECT_EQ(0, conn.broken);
+    /* still usable: the next reply is read normally */
+    EXPECT_EQ(0, hl_my_conn_query(&conn, "SELECT 1", NULL, NULL, NULL, NULL));
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 /* A single-statement script must stop after one result (no MORE_RESULTS). */
 UTEST(mysql_conn, exec_multi_single)
 {

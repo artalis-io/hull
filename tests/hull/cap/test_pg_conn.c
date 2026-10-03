@@ -122,6 +122,30 @@ UTEST(pg_conn, handshake_trust_auth)
     close(sv[0]);
 }
 
+/* A password in the DSN means the server must ask for it: an OK with no
+ * exchange ("trust") is what a man in the middle answers. */
+UTEST(pg_conn, handshake_trust_with_a_password_refused)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    static const uint8_t resp[] = {
+        'R', 0,0,0,8,  0,0,0,0,                      /* AuthenticationOk */
+        'Z', 0,0,0,5,  'I',                          /* ReadyForQuery    */
+    };
+    ASSERT_TRUE(write(sv[0], resp, sizeof resp) == (ssize_t)sizeof resp);
+
+    HlPgDsn dsn;
+    memset(&dsn, 0, sizeof dsn);
+    snprintf(dsn.user, sizeof dsn.user, "%s", "app");
+    snprintf(dsn.password, sizeof dsn.password, "%s", "secret");
+
+    HlPgConn conn;
+    EXPECT_NE(0, hl_pg_conn_start(&conn, sv[1], &dsn));
+    EXPECT_TRUE(strstr(conn.errmsg, "without asking for the password") != NULL);
+    close(sv[0]);
+}
+
 UTEST(pg_conn, handshake_cleartext_auth)
 {
     int sv[2];

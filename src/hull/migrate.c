@@ -61,12 +61,19 @@ static int migrate_found_cb(void *ctx, HlColumn *cols, int ncols)
     return 1;   /* one row is enough; stop the scan */
 }
 
+/* 1 applied, 0 not, -1 when the lookup itself failed. A failed lookup read
+ * as "not applied" and ran the migration again - on a dropped connection, a
+ * locked database, a timeout - against a schema that already had it. */
 static int is_applied(HlDbHandle *h, const char *name)
 {
     HlValue p = { .type = HL_TYPE_TEXT, .s = name, .len = strlen(name) };
     int found = 0;
-    hl_db_query(h, "SELECT 1 FROM _hull_migrations WHERE name = ?",
-                &p, 1, migrate_found_cb, &found, NULL);
+    if (hl_db_query(h, "SELECT 1 FROM _hull_migrations WHERE name = ?",
+                    &p, 1, migrate_found_cb, &found, NULL) != 0) {
+        log_error("[migrate] could not check whether %s is applied: %s",
+                  name, hl_db_errmsg(h));
+        return -1;
+    }
     return found;
 }
 
@@ -329,7 +336,10 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
         int applied = 0;
         for (size_t i = 0; i < mig_count; i++) {
             const char *mig_name = first[i].name + 11; /* strip "migrations/" */
-            if (is_applied(handle, mig_name))
+            int ia = is_applied(handle, mig_name);
+            if (ia < 0)
+                return HL_MIGRATE_ERR;
+            if (ia)
                 continue;
 
             int rc = execute_migration(handle, mig_name,
@@ -358,7 +368,12 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
 
     int applied = 0;
     for (int i = 0; i < ml.count; i++) {
-        if (is_applied(handle, ml.names[i]))
+        int ia = is_applied(handle, ml.names[i]);
+        if (ia < 0) {
+            migration_list_free(&ml);
+            return HL_MIGRATE_ERR;
+        }
+        if (ia)
             continue;
 
         rc = execute_migration(handle, ml.names[i],

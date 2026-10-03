@@ -46,6 +46,15 @@ struct HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h);
  */
 int  hl_db_sqlite_wrap(HlDbHandle *out, struct sqlite3 *db);
 void hl_db_sqlite_unwrap(HlDbHandle *h);
+
+/*
+ * Remove every registration of the SQL function @p name, at every arity.
+ * SQLite keys a function by (name, nargs): removing it at nargs = -1 (the
+ * variadic slot) left one registered with a fixed argument count in place,
+ * so db.udf.unregister was a no-op for it. Returns SQLITE_OK or the first
+ * error.
+ */
+int hl_db_sqlite_drop_function(struct sqlite3 *db, const char *name);
 #else
 /* No-SQLite build: cache is NULL, wrap fails, unwrap is a no-op, so callers
  * that legitimately degrade for a non-SQLite handle stay compilable without
