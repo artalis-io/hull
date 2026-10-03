@@ -218,8 +218,13 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
         goto cleanup;
     }
 
-    /* Active loop: model 2 (regardless of cap). Authorize the host on the submit
-     * side (audited once here) before any reservation or worker submission. */
+    /* Active loop: model 2 (regardless of cap). Validate (CR/LF in a header
+     * field, missing fields) and authorize the host on the submit side (audited
+     * once here) before any reservation or worker submission. */
+    if (hl_smtp_validate_message(&msg) != 0) {
+        result = js_resolved_result(ctx, 0, "validation_failed");
+        goto cleanup;
+    }
     if (hl_smtp_check_host(js->base.smtp_cfg, msg.host) != 0) {
         hl_smtp_audit_denied(&msg);
         result = js_resolved_result(ctx, 0, "host_not_allowed");

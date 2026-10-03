@@ -197,8 +197,11 @@ static int lua_smtp_send(lua_State *L)
         return lua_smtp_fail(L, err_msg);
     }
 
-    /* Active event loop: model 2. Authorize the host on the submit side (audited
-     * exactly once here) BEFORE any reservation or worker submission. */
+    /* Active event loop: model 2. Validate (CR/LF in a header field, missing
+     * fields) and authorize the host on the submit side (audited exactly once
+     * here) BEFORE any reservation or worker submission. */
+    if (hl_smtp_validate_message(&msg) != 0)
+        return lua_smtp_fail(L, "validation_failed");
     if (hl_smtp_check_host(lua->base.smtp_cfg, msg.host) != 0) {
         hl_smtp_audit_denied(&msg);
         return lua_smtp_fail(L, "host_not_allowed");

@@ -92,6 +92,14 @@ int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
                     int (*cancel_poll)(void *), void *cancel_user,
                     HlSmtpResult *out);
 
+/**
+ * Check a message before it is sent: the required fields are present, no
+ * header-bound field (host, from, to, cc, subject, reply_to, content_type)
+ * carries CR or LF, and the port is 1..65535. 0 = valid, -1 = refused. Every
+ * send path calls it (sync, the async submit, and hl_smtp_execute itself).
+ */
+int hl_smtp_validate_message(const HlSmtpMessage *msg);
+
 /* ── Audit helpers (single record; shared sync + model-2 async) ──────── */
 
 /** Emit the "denied" audit record for a host-allowlist rejection (submit side). */

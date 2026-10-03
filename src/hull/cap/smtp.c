@@ -173,12 +173,24 @@ int hl_smtp_format_message(const HlSmtpMessage *msg, char *buf, int size)
     if (n < 0 || off + n >= size) return -1;
     off += n;
 
-    /* Body with dot-stuffing:
-     * Any line starting with '.' must be doubled per RFC 5321 §4.5.2 */
+    /* Body with dot-stuffing: any line starting with '.' is doubled (RFC
+     * 5321 4.5.2). Every line break - CRLF, a bare LF or a bare CR - is
+     * written as CRLF first: stuffing only after "\n" let "\r.\r\n" through
+     * unstuffed, and a server that takes a bare CR (or LF) as a line end
+     * then ended DATA there and read the rest as commands (SMTP smuggling). */
     const char *p = msg->body;
     int at_line_start = 1;
 
     while (*p) {
+        if (*p == '\r' || *p == '\n') {
+            if (*p == '\r' && p[1] == '\n') p++;
+            if (off + 2 >= size) return -1;
+            buf[off++] = '\r';
+            buf[off++] = '\n';
+            at_line_start = 1;
+            p++;
+            continue;
+        }
         if (at_line_start && *p == '.') {
             if (off + 1 >= size) return -1;
             buf[off++] = '.';
@@ -187,7 +199,7 @@ int hl_smtp_format_message(const HlSmtpMessage *msg, char *buf, int size)
         if (off + 1 >= size) return -1;
         buf[off++] = *p;
 
-        at_line_start = (*p == '\n');
+        at_line_start = 0;
         p++;
     }
 
@@ -208,7 +220,7 @@ int hl_smtp_format_message(const HlSmtpMessage *msg, char *buf, int size)
 
 /* ── Validate message fields ─────────────────────────────────────── */
 
-static int smtp_validate_message(const HlSmtpMessage *msg)
+int hl_smtp_validate_message(const HlSmtpMessage *msg)
 {
     if (!msg->host || !msg->from || !msg->to ||
         !msg->subject || !msg->body)
@@ -345,6 +357,14 @@ int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
     out->token = NULL;
     out->teardown_leaked = 0;
     out->deadline_expired = 0;
+    /* Validated here too, whoever submitted: the async path (every served
+     * app) went submit -> worker -> here without the CR/LF checks the sync
+     * path ran, so a subject from a form could end DATA early and smuggle
+     * MAIL FROM / RCPT TO through the app's authenticated relay. */
+    if (!msg || hl_smtp_validate_message(msg) != 0) {
+        out->token = "validation_failed";
+        return -1;
+    }
     /* The interior conversation writes its stable token through `err_msg`; alias
      * it onto out->token so the body below stays byte-identical to the prior
      * in-place send. */
@@ -490,8 +510,11 @@ int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
     /* Format and send the message */
     {
         /* Allocate message buffer (body + headers overhead) */
+        /* Each body byte becomes at most two (a doubled '.', a line break
+         * written as CRLF), plus the headers. */
         size_t body_len = strlen(msg->body);
-        size_t msg_size = body_len + 4096;  /* headers + dot-stuffing headroom */
+        size_t msg_size = (body_len > (size_t)HL_SMTP_MAX_MSG_SIZE)
+            ? (size_t)HL_SMTP_MAX_MSG_SIZE : body_len * 2 + 4096;
         if (msg_size > (size_t)HL_SMTP_MAX_MSG_SIZE)
             msg_size = (size_t)HL_SMTP_MAX_MSG_SIZE;
 
@@ -608,7 +631,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     /* Phase 1 (event-loop side in model 2): validate + authorize BEFORE any
      * resolve or socket work. Authorization is against the declared hostname
      * and never crosses to a worker. */
-    if (smtp_validate_message(msg) != 0) {
+    if (hl_smtp_validate_message(msg) != 0) {
         if (err_msg) *err_msg = "validation_failed";
         return -1;
     }
