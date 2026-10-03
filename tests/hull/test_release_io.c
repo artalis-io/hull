@@ -92,6 +92,25 @@ UTEST(verify_local, tamper_and_signature_fail_closed) {
 
 /* ── platform ─────────────────────────────────────────────────────── */
 
+/* hull update installs only a NEWER release without --force: any tag that
+ * merely differed used to be installed, older ones included. */
+UTEST(release_io, version_order) {
+    int ok = 0;
+    EXPECT_LT(hl_release_io_version_cmp("v0.15.0", "v0.16.0", &ok), 0);
+    EXPECT_EQ(ok, 1);
+    EXPECT_GT(hl_release_io_version_cmp("v1.0.0", "v0.99.99", &ok), 0);
+    EXPECT_LT(hl_release_io_version_cmp("v0.9.0", "v0.10.0", &ok), 0);  /* numeric, not text */
+    EXPECT_EQ(hl_release_io_version_cmp("0.15.0", "v0.15.0", &ok), 0);
+    /* a development build past a tag is ahead of it */
+    EXPECT_GT(hl_release_io_version_cmp("v0.15.0-103-gf5fc8e5f-dirty", "v0.15.0", &ok), 0);
+    EXPECT_LT(hl_release_io_version_cmp("v0.15.0-103-gf5fc8e5f", "v0.15.1", &ok), 0);
+    /* unparseable: no order */
+    EXPECT_EQ(hl_release_io_version_cmp("nightly", "v1.0.0", &ok), 0);
+    EXPECT_EQ(ok, 0);
+    EXPECT_EQ(hl_release_io_version_cmp("v1.0", "v1.0.0", &ok), 0);
+    EXPECT_EQ(ok, 0);
+}
+
 UTEST(release_io, platform_nonempty_and_known) {
     const char *p = hl_release_io_platform();
     ASSERT_TRUE(p != NULL);

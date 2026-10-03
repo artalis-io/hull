@@ -257,8 +257,17 @@ static int cmd_install(const char *name, const char *repo)
     if (rc == 0) {
         /* Cache the signed manifest so a later `hull build` can re-verify the
          * installed feature lib offline against the embedded release pubkey
-         * (closes the install->build TOCTOU, same as flavored builds). */
+         * (closes the install->build TOCTOU, same as flavored builds). Each
+         * feature keeps its OWN copy, <asset>.sha256: one shared hull.sha256
+         * was overwritten by every install, so a feature installed from an
+         * earlier release no longer matched it and failed to verify. The
+         * shared copy is still written for an older hull reading this cache. */
         char p[PATH_MAX];
+        if ((size_t)snprintf(p, sizeof(p), "%s/%s.sha256", cache_dir, asset) < sizeof(p))
+            hl_release_io_atomic_write(p, manifest, manifest_len, 0644);
+        if (sig && (size_t)snprintf(p, sizeof(p), "%s/%s.sha256.sig",
+                                    cache_dir, asset) < sizeof(p))
+            hl_release_io_atomic_write(p, sig, sig_len, 0644);
         if ((size_t)snprintf(p, sizeof(p), "%s/hull.sha256", cache_dir) < sizeof(p))
             hl_release_io_atomic_write(p, manifest, manifest_len, 0644);
         if (sig && (size_t)snprintf(p, sizeof(p), "%s/hull.sha256.sig",

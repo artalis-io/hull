@@ -187,4 +187,10 @@ int hl_release_io_self_replace(const char *self_path,
  */
 void hl_release_io_cleanup_stale_self(const char *argv0);
 
+/* Order two version strings ("v1.2.3", or a `git describe` like
+ * "v1.2.3-4-gabc-dirty"): <0 when `a` is older than `b`, 0 the same release,
+ * >0 newer. A development build past a tag is newer than that tag.
+ * *comparable is 0 (and the result 0) when either does not parse. */
+int hl_release_io_version_cmp(const char *a, const char *b, int *comparable);
+
 #endif /* HL_RELEASE_IO_H */

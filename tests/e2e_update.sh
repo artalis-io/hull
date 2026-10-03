@@ -85,7 +85,7 @@ case "$OUT" in
         echo "  ok  no-release path handled cleanly"
         PASS=$((PASS + 1))
         ;;
-    *"already up to date"*|*"update available"*)
+    *"already up to date"*|*"update available"*|*"is not newer than this hull"*)
         echo "  ok  found a real release (artalis-io/hull has tags now)"
         PASS=$((PASS + 1))
         ;;
@@ -122,9 +122,22 @@ esac
 
 echo ""
 echo "── unknown flags ──"
-OUT=$("$HULL" update --unknown-flag 2>&1 || true)
-# Should not crash; will hit the repo check, likely 404
-assert_contains "no crash on unknown flag" "$OUT" "checking"
+# Refused up front (it used to be ignored, so a typo did nothing silently),
+# before any network access.
+RC=0
+OUT=$("$HULL" update --unknown-flag 2>&1) || RC=$?
+assert_contains "unknown flag refused" "$OUT" "unknown option '--unknown-flag'"
+if [ "$RC" -ne 0 ]; then
+    echo "  ok  unknown flag exits non-zero"; PASS=$((PASS + 1))
+else
+    echo "  FAIL unknown flag exited 0"; FAIL=$((FAIL + 1))
+fi
+case "$OUT" in
+    *checking*) echo "  FAIL unknown flag still reached the network"; FAIL=$((FAIL + 1)) ;;
+    *)          echo "  ok  refused before any network access"; PASS=$((PASS + 1)) ;;
+esac
+OUT=$("$HULL" update --channel=beta 2>&1 || true)
+assert_contains "only the stable channel" "$OUT" "only the stable channel"
 
 echo ""
 echo "── Summary ──"

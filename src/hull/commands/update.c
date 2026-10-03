@@ -58,16 +58,27 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
             repo = argv[i] + 7;
         } else if (strcmp(argv[i], "--repo") == 0 && i + 1 < argc) {
             repo = argv[++i];
+        } else if (strcmp(argv[i], "--channel=stable") == 0) {
+            /* the only channel published */
+        } else if (strncmp(argv[i], "--channel", 9) == 0) {
+            fprintf(stderr, "hull update: only the stable channel is published\n");
+            return 2;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stdout,
                 "Usage: hull update [options]\n"
                 "\n"
                 "Options:\n"
                 "  --check          Check for an update without installing\n"
-                "  --force          Reinstall even if version matches\n"
+                "  --force          Reinstall the same version, or install an older one\n"
                 "  --repo=ORG/NAME  Override the GitHub repo (default: " HL_DEFAULT_REPO ")\n"
                 "\n");
             return 0;
+        } else {
+            /* An unknown option was ignored, so a typo'd flag (or one from a
+             * newer hull's docs) silently did nothing. */
+            fprintf(stderr, "hull update: unknown option '%s' (see hull update --help)\n",
+                    argv[i]);
+            return 2;
         }
     }
 
@@ -115,6 +126,25 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         fprintf(stdout, "hull update: already up to date\n");
         kl_tls_mbedtls_ctx_destroy(tls);
         return 0;
+    }
+
+    /* Any tag that merely DIFFERED was installed, older ones included: a
+     * repo (or a --repo fork) whose "latest" is an old, genuinely signed
+     * release rolled hull back to it, known bugs and all. Moving back needs
+     * --force. A development build past the latest tag is ahead of it. */
+    int comparable = 0;
+    int order = hl_release_io_version_cmp(HL_VERSION, latest_tag, &comparable);
+    if (!force && comparable && order >= 0) {
+        fprintf(stdout, "hull update: %s is not newer than this hull; nothing to do "
+                        "(--force installs it anyway)\n", latest_tag);
+        kl_tls_mbedtls_ctx_destroy(tls);
+        return 0;
+    }
+    if (!force && !comparable) {
+        fprintf(stderr, "hull update: cannot order versions '%s' and '%s'; "
+                        "pass --force to install %s\n", HL_VERSION, latest_tag, latest_tag);
+        kl_tls_mbedtls_ctx_destroy(tls);
+        return 1;
     }
 
     if (check_only) {

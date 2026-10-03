@@ -96,6 +96,13 @@ static int path_is_safe(const char *rel, size_t len)
     if (memchr(rel, '\0', len) != NULL)
         return 0;
 
+    /* A backslash is a separator on Windows (a cosmo APE, which has no kernel
+     * sandbox there), so "..\..\data.db" climbed out of static/ past the
+     * '/'-only checks below; ':' would name a drive ("C:x") or an NTFS stream
+     * ("f.css::$DATA"). Neither belongs in a static asset name on any host. */
+    if (memchr(rel, '\\', len) != NULL || memchr(rel, ':', len) != NULL)
+        return 0;
+
     /* Reject ".." anywhere in path */
     for (size_t i = 0; i + 1 < len; i++) {
         if (rel[i] == '.' && rel[i + 1] == '.') {

@@ -293,20 +293,31 @@ int hl_release_io_verify_local_asset(const char *dir, const char *asset)
     size_t mlen = 0, slen = 0, llen = 0;
     int result = -1;
 
-    /* 1. Cached signed manifest (required; its absence means we can't verify). */
-    if ((size_t)snprintf(path, sizeof(path), "%s/hull.sha256", dir) >= sizeof(path))
+    /* 1. Cached signed manifest (required; its absence means we can't verify).
+     *    The asset's own copy, <asset>.sha256, when the installer wrote one -
+     *    the manifest of the release the asset came from - else the shared
+     *    hull.sha256 (the last install's, for any asset). */
+    char mname[PATH_MAX];
+    if ((size_t)snprintf(mname, sizeof(mname), "%s.sha256", asset) >= sizeof(mname))
+        return -1;
+    if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, mname) >= sizeof(path))
         return -1;
     if (local_read_file(path, &manifest, &mlen) != 0) {
-        fprintf(stderr, "hull flavor: no cached signed manifest in %s "
-                        "(run `hull flavor install` again)\n", dir);
-        return -1;
+        snprintf(mname, sizeof(mname), "%s", "hull.sha256");
+        if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, mname) >= sizeof(path))
+            return -1;
+        if (local_read_file(path, &manifest, &mlen) != 0) {
+            fprintf(stderr, "hull flavor: no cached signed manifest in %s "
+                            "(run `hull flavor install` again)\n", dir);
+            return -1;
+        }
     }
 
     /* 2. Signature check against the EMBEDDED release pubkey (the trust anchor,
      *    baked into this binary, NOT the writable cache dir). Skipped only on
      *    a placeholder pubkey, matching install-time behavior. */
     if (hl_release_pubkey_configured()) {
-        if ((size_t)snprintf(path, sizeof(path), "%s/hull.sha256.sig", dir) >= sizeof(path))
+        if ((size_t)snprintf(path, sizeof(path), "%s/%s.sig", dir, mname) >= sizeof(path))
             goto done;
         if (local_read_file(path, &sig, &slen) != 0) {
             fprintf(stderr, "hull flavor: cached manifest has no signature; "
@@ -594,4 +605,44 @@ void hl_release_io_cleanup_stale_self(const char *argv0)
     int n = snprintf(old_path, sizeof(old_path), "%s.old", self);
     if (n > 0 && (size_t)n < sizeof(old_path))
         (void)unlink(old_path);   /* best-effort; absent in the common case */
+}
+
+/* ── Version order ───────────────────────────────────────────────── */
+
+/* Parse "vMAJOR.MINOR.PATCH[-N-gSHA[-dirty]]" (a release tag, or `git
+ * describe` for a development build). *ahead is 1 when there are commits past
+ * the tag. Returns 0, or -1 when the string is not of that shape. */
+static int parse_version(const char *s, long v[3], int *ahead)
+{
+    if (!s) return -1;
+    if (*s == 'v') s++;
+    for (int i = 0; i < 3; i++) {
+        if (*s < '0' || *s > '9') return -1;
+        char *end;
+        v[i] = strtol(s, &end, 10);
+        s = end;
+        if (i < 2) {
+            if (*s != '.') return -1;
+            s++;
+        }
+    }
+    *ahead = (*s == '-');
+    return 0;
+}
+
+/* <0 when `a` is older than `b`, 0 when the same release, >0 when newer; a
+ * development build past a tag is newer than that tag. Returns 0 (no order)
+ * if either string does not parse. */
+int hl_release_io_version_cmp(const char *a, const char *b, int *comparable)
+{
+    long va[3], vb[3];
+    int aa, ab;
+    if (parse_version(a, va, &aa) != 0 || parse_version(b, vb, &ab) != 0) {
+        if (comparable) *comparable = 0;
+        return 0;
+    }
+    if (comparable) *comparable = 1;
+    for (int i = 0; i < 3; i++)
+        if (va[i] != vb[i]) return va[i] < vb[i] ? -1 : 1;
+    return aa - ab;
 }

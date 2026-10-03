@@ -119,6 +119,30 @@ UTEST(static_serve, path_traversal_dotdot)
     ASSERT_EQ(0, rc);
 }
 
+/* '\' is a separator on Windows and ':' names a drive or an NTFS stream, so
+ * neither may appear in a static path - refused before any lookup, even one
+ * that would match (the VFS here holds such names on purpose). */
+UTEST(static_serve, path_with_backslash_or_colon_refused)
+{
+    static const HlEntry entries[] = {
+        { "static/a\\b.txt", (const unsigned char *)"x", 1 },
+        { "static/f.css:s", (const unsigned char *)"x", 1 },
+        { NULL, NULL, 0 },
+    };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, entries, NULL);
+    HlStaticCtx ctx = { .vfs = &vfs };
+    KlHttpResponse res;
+
+    KlHttpRequest req = make_request("GET", "/static/a\\b.txt");
+    memset(&res, 0, sizeof(res));
+    EXPECT_EQ(0, hl_static_middleware(&req, &res, &ctx));
+
+    req = make_request("GET", "/static/f.css:s");
+    memset(&res, 0, sizeof(res));
+    EXPECT_EQ(0, hl_static_middleware(&req, &res, &ctx));
+}
+
 UTEST(static_serve, path_traversal_middle)
 {
     /* Path with /../ in the middle should be rejected */
