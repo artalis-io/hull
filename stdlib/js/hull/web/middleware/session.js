@@ -19,6 +19,18 @@ import { app } from "hull:app";
 import { log } from "hull:log";
 import { _request } from "hull:web:_request";
 
+// A user id as stored. Apps key users by INTEGER PRIMARY KEY as often as by
+// text, and the column is text, so an integer id is its decimal string. These
+// functions used to accept strings only, and an integer id made them return
+// nothing, silently: session.destroyAll(42) left every session alive, and no
+// login was recorded. Anything else (null, "", a float, an object) is no id.
+function uidString(userId) {
+    if (typeof userId === "string") return userId === "" ? null : userId;
+    if (typeof userId === "number" && Number.isSafeInteger(userId)) return String(userId);
+    if (typeof userId === "bigint") return userId.toString();
+    return null;
+}
+
 let sessionTtl = 86400;
 // Round-8 MEDIUM-8: absolute (hard) TTL cap from created_at.
 // Sliding sessionTtl extends expires_at on every hit; absolute caps
@@ -165,7 +177,7 @@ function create(data, opts) {
     // Capture device columns for audit-log + listForUser. user_id
     // comes from the data blob (standard auth-flows pattern); ip
     // + ua come from opts.req if supplied.
-    const userId = (data && typeof data === "object" && data.user_id) || null;
+    const userId = uidString(data && typeof data === "object" ? data.user_id : null);
     let ip = null, ua = null;
     if (opts && opts.req) {
         const h = opts.req.headers || {};
@@ -323,7 +335,8 @@ function cleanup() {
  * first. Excludes expired rows.
  */
 function listForUser(userId) {
-    if (typeof userId !== "string" || userId === "") return [];
+    userId = uidString(userId);
+    if (userId === null) return [];
     const now = time.now();
     // Round-10 MEDIUM-9: filter past-absolute-ttl rows so list+load
     // stay in sync. See Lua sibling.
@@ -351,7 +364,8 @@ function listForUser(userId) {
  * the number of rows removed.
  */
 function destroyOthers(currentSid, userId) {
-    if (typeof userId !== "string" || userId === "") return 0;
+    userId = uidString(userId);
+    if (userId === null) return 0;
     return db.exec(
         "DELETE FROM _hull_sessions WHERE user_id = ? AND id != ?",
         [userId, currentSid || ""]) || 0;
@@ -363,7 +377,8 @@ function destroyOthers(currentSid, userId) {
  * true (default).
  */
 function destroyAll(userId) {
-    if (typeof userId !== "string" || userId === "") return 0;
+    userId = uidString(userId);
+    if (userId === null) return 0;
     return db.exec("DELETE FROM _hull_sessions WHERE user_id = ?",
                    [userId]) || 0;
 }

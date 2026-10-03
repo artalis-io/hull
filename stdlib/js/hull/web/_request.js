@@ -43,5 +43,36 @@ function clientIp(req, trustProxy) {
     return ip || null;
 }
 
-export const _request = { clientIp };
+/**
+ * The key a per-client limit (a rate limit, a lockout) counts an address
+ * under: an IPv4 address as itself, an IPv6 address as its /64. Anyone with
+ * one IPv6 host holds a whole /64 and can take a fresh address per request, so
+ * keyed by the full address every request had its own budget - the TOTP
+ * per-IP gate and any login rate limit did nothing. IPv4-mapped addresses
+ * (::ffff:a.b.c.d) count as the IPv4 address; anything that does not parse is
+ * returned as it is. Same as hull.web._request.limit_key.
+ */
+function limitKey(ip) {
+    if (typeof ip !== "string" || ip === "" || ip.indexOf(":") < 0) return ip;
+    ip = ip.replace(/%.*$/, "");                            // zone ("fe80::1%eth0")
+    const m4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+    if (m4) return m4[1];
+    const hex = /^[0-9a-fA-F]{1,4}$/;
+    const split = (s) => (s === "" ? [] : s.split(":"));
+    let groups;
+    const dc = ip.indexOf("::");
+    if (dc >= 0) {
+        const h = split(ip.slice(0, dc));
+        const t = split(ip.slice(dc + 2));
+        if (h.length + t.length > 7) return ip;
+        groups = h.concat(new Array(8 - h.length - t.length).fill("0"), t);
+    } else {
+        groups = ip.split(":");
+        if (groups.length !== 8) return ip;
+    }
+    if (!groups.every((g) => hex.test(g))) return ip;
+    return groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(":") + "::/64";
+}
+
+export const _request = { clientIp, limitKey };
 export default _request;

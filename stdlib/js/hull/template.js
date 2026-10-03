@@ -88,7 +88,13 @@ const filters = {
         if (val == null || val === false || val === "") return fallback ?? "";
         return val;
     },
-    json(val) { return JSON.stringify(val).replace(/</g, "\\u003c"); },
+    // JSON.stringify(undefined) - a missing variable, or a function - is
+    // undefined, not a string, and the .replace below threw: one absent key
+    // failed the whole render. It is null, as in Lua.
+    json(val) {
+        const s = JSON.stringify(val);
+        return (s === undefined ? "null" : s).replace(/</g, "\\u003c");
+    },
     raw(val) { return val; },
     // For a URL placed in an attribute (href, src, action): HTML escaping
     // alone lets href="{{ url }}" carry javascript:alert(1). Keeps http(s),

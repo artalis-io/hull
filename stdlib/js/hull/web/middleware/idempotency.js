@@ -6,7 +6,7 @@
  *
  * Prevents duplicate side effects when clients retry the same request by
  * caching the response keyed by `(principal_id, idempotency_key)`. A
- * `SHA-256(method || path || body)` fingerprint detects key reuse with a
+ * `SHA-256(method || path || query || body)` fingerprint detects key reuse with a
  * different body (returns `409 Conflict`).
  *
  * **Replay semantics:**
@@ -134,10 +134,30 @@ function init(opts) {
 }
 
 /**
- * Compute a request fingerprint: SHA-256(method + path + body).
+ * The query string as fingerprint input: its pairs sorted by name, each
+ * length-prefixed so that no two different queries encode alike.
+ */
+function queryPart(q) {
+    if (!q || typeof q !== "object") return "";
+    const names = Object.keys(q).sort();
+    const parts = [];
+    for (const k of names) {
+        const v = String(q[k]);
+        parts.push(k.length + ":" + k + v.length + ":" + v);
+    }
+    return parts.join("");
+}
+
+/**
+ * Compute a request fingerprint: SHA-256(method + path + query + body).
+ * The query is part of it: without it, reusing a key for
+ * `POST /transfer?to=alice` and then `?to=bob` (same body) replayed
+ * alice's response instead of answering 409, and bob's transfer was never
+ * made.
  */
 function computeFingerprint(req) {
-    const data = (req.method || "") + "\0" + (req.path || "") + "\0" + (req.body || "");
+    const data = (req.method || "") + "\0" + (req.path || "") + "\0"
+        + queryPart(req.query) + "\0" + (req.body || "");
     return encoding.hex.encode(crypto.sha256(data));
 }
 

@@ -29,8 +29,19 @@ local MAX_BUCKETS = 10000   -- max unique keys per limiter (cache LRU cap)
 -- @tparam integer window Window length (seconds).
 -- @tparam integer now    Current time (seconds).
 -- @treturn table  `{ allowed, remaining, reset }`.
-function ratelimit.check(buckets, key, limit, window, now)
+function ratelimit.check(buckets, key, limit, window, now, saturated)
     local bucket = buckets.get(key)
+    -- An exhausted bucket the LRU cache evicted (a flood of other keys pushes
+    -- out the least recently used) is still exhausted: put it back rather than
+    -- open a fresh window. Without this, sending from ~10,000 other keys bought
+    -- a full allowance again against the key you were blocked on.
+    if not bucket and saturated then
+        local s = saturated.map[key]
+        if s and (now - s.window_start) < window then
+            bucket = s
+            buckets.set(key, s)
+        end
+    end
     if not bucket or (now - bucket.window_start) >= window then
         -- New window. cache.set bounds the store at max_entries by evicting
         -- the least-recently-used bucket, so a flood of unique keys never
@@ -41,6 +52,24 @@ function ratelimit.check(buckets, key, limit, window, now)
         -- Live window: bump in place. buckets.get already refreshed this
         -- bucket's LRU rank, so an active key won't be the eviction victim.
         bucket.count = bucket.count + 1
+        if saturated and bucket.count > limit and not saturated.map[key] then
+            -- Kept apart from the cache, so eviction cannot reset it. Each
+            -- entry costs a client `limit` requests within one window, and
+            -- entries whose window has passed are dropped as it grows.
+            saturated.map[key] = bucket
+            saturated.n = saturated.n + 1
+            if saturated.n > MAX_BUCKETS then
+                local live = 0
+                for k, b in pairs(saturated.map) do
+                    if (now - b.window_start) >= window then
+                        saturated.map[k] = nil
+                    else
+                        live = live + 1
+                    end
+                end
+                saturated.n = live
+            end
+        end
     end
 
     local remaining = limit - bucket.count
@@ -95,6 +124,7 @@ function ratelimit.middleware(opts)
     local window = opts.window or 60
     local key_fn = opts.key
     local buckets = cache.new({ max_entries = MAX_BUCKETS })
+    local saturated = { map = {}, n = 0 }   -- see ratelimit.check
 
     -- Normalize key option into a function
     if key_fn == nil then
@@ -102,7 +132,7 @@ function ratelimit.middleware(opts)
         -- for everyone.
         local trust_proxy = opts.trust_proxy == true
         key_fn = function(req)
-            return _request.client_ip(req, trust_proxy) or "unknown"
+            return _request.limit_key(_request.client_ip(req, trust_proxy)) or "unknown"
         end
     elseif type(key_fn) ~= "function" then
         local fixed_key = key_fn
@@ -113,7 +143,7 @@ function ratelimit.middleware(opts)
         local key = key_fn(req)
         local now = time.now()
 
-        local result = ratelimit.check(buckets, key, limit, window, now)
+        local result = ratelimit.check(buckets, key, limit, window, now, saturated)
 
         res:header("X-RateLimit-Limit", tostring(limit))
         res:header("X-RateLimit-Remaining", tostring(result.remaining))

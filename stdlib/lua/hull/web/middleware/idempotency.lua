@@ -2,7 +2,7 @@
 --
 -- Prevents duplicate side effects when clients retry the same request by
 -- caching the response keyed by `(principal_id, idempotency_key)`. A
--- `SHA-256(method || path || body)` fingerprint detects key reuse with a
+-- `SHA-256(method || path || query || body)` fingerprint detects key reuse with a
 -- different body (returns `409 Conflict`).
 --
 -- @par State table
@@ -164,9 +164,31 @@ function idempotency.init(opts)
     ]])
 end
 
---- Compute a request fingerprint: SHA-256(method + path + body).
+--- The query string as fingerprint input: its pairs sorted by name, each
+-- length-prefixed so that no two different queries encode alike.
+local function query_part(q)
+    if type(q) ~= "table" then return "" end
+    local names = {}
+    for k in pairs(q) do
+        if type(k) == "string" then names[#names + 1] = k end
+    end
+    table.sort(names)
+    local parts = {}
+    for _, k in ipairs(names) do
+        local v = tostring(q[k])
+        parts[#parts + 1] = #k .. ":" .. k .. #v .. ":" .. v
+    end
+    return table.concat(parts)
+end
+
+--- Compute a request fingerprint: SHA-256(method + path + query + body).
+-- The query is part of it: without it, reusing a key for
+-- `POST /transfer?to=alice` and then `?to=bob` (same body) replayed
+-- alice's response instead of answering 409, and bob's transfer was never
+-- made.
 local function compute_fingerprint(req)
-    local data = (req.method or "") .. "\0" .. (req.path or "") .. "\0" .. (req.body or "")
+    local data = (req.method or "") .. "\0" .. (req.path or "") .. "\0"
+        .. query_part(req.query) .. "\0" .. (req.body or "")
     return encoding.hex.encode(crypto.sha256(data))
 end
 

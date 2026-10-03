@@ -462,7 +462,7 @@ function clearFailedLogins(userIdStr) {
 // `<user_id> \x1f <ip>` in the same column, and the account-wide one.
 const IP_SEP = "\x1f";
 function attemptIpKey(uid, req) {
-    return uid + IP_SEP + (_request.clientIp(req, _state.trustProxy) || "_anon");
+    return uid + IP_SEP + (_request.limitKey(_request.clientIp(req, _state.trustProxy)) || "_anon");
 }
 
 // Every row for an account, after a password reset proves control of it.
@@ -1102,7 +1102,7 @@ function registerRoutes(app) {
             limit:  rlOpts.limit  || 20,
             window: rlOpts.window || 300,
             key:    rlOpts.key || ((req) =>
-                _request.clientIp(req, _state.trustProxy) || "_anon"),
+                _request.limitKey(_request.clientIp(req, _state.trustProxy)) || "_anon"),
         });
         app.use("POST", p + "/register", mw);
         app.use("POST", p + "/login", mw);

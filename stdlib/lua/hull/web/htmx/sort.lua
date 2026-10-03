@@ -117,17 +117,24 @@ end
 --- Parse `?sort=col[:asc|desc]` from the request.
 --
 -- @tparam table req     Keel request.
--- @tparam[opt] table opts
--- @tparam[opt] table opts.allowed  Array of column names that
---                                  callers permit. Anything else
---                                  is rejected (falls back to
---                                  opts.default or nil).
+-- @tparam table opts
+-- @tparam table opts.allowed       Array of column names that
+--                                  callers permit (required).
+--                                  Anything else is rejected
+--                                  (falls back to opts.default
+--                                  or nil).
 -- @tparam[opt] string opts.default Column to use when no valid
 --                                  sort param is present.
 -- @treturn ?table { column = string, direction = "asc"|"desc" }
 --                 or nil if no allowed column was identified.
 function sort.parse(req, opts)
     opts = opts or {}
+    -- The allowlist is required. Without one, any identifier passed: a
+    -- client could order rows by `password_hash` or `reset_token` and read
+    -- the secret off the order, a prefix at a time.
+    if type(opts.allowed) ~= "table" then
+        error("sort.parse: opts.allowed (the sortable column names) is required", 2)
+    end
     local raw = req and req.query and req.query.sort or nil
     local column, direction
     if raw and raw ~= "" then
@@ -142,7 +149,7 @@ function sort.parse(req, opts)
         column = safe_column(column)
         if column == "" then column = nil end
     end
-    if opts.allowed and column then
+    if column then
         local found = false
         for _, name in ipairs(opts.allowed) do
             if name == column then found = true; break end
@@ -157,12 +164,8 @@ function sort.parse(req, opts)
         -- safety story.
         local d = safe_column(opts.default)
         if d ~= "" then
-            if not opts.allowed then
-                column = d
-            else
-                for _, name in ipairs(opts.allowed) do
-                    if name == d then column = d; break end
-                end
+            for _, name in ipairs(opts.allowed) do
+                if name == d then column = d; break end
             end
             if column then direction = direction or "asc" end
         end

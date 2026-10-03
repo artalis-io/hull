@@ -33,8 +33,19 @@ const MAX_BUCKETS = 10000;
  * @param {number} now     seconds
  * @returns {{allowed: boolean, remaining: number, reset: number}}
  */
-function check(buckets, key, limit, window, now) {
+function check(buckets, key, limit, window, now, saturated) {
     let bucket = buckets.get(key);
+    // An exhausted bucket the LRU cache evicted (a flood of other keys pushes
+    // out the least recently used) is still exhausted: put it back rather than
+    // open a fresh window. Without this, sending from ~10,000 other keys bought
+    // a full allowance again against the key you were blocked on.
+    if (!bucket && saturated) {
+        const s = saturated.get(key);
+        if (s && (now - s.windowStart) < window) {
+            bucket = s;
+            buckets.set(key, s);
+        }
+    }
     if (!bucket || (now - bucket.windowStart) >= window) {
         // New window. cache.set bounds the store at maxEntries by evicting the
         // least-recently-used bucket, so a flood of unique keys never rejects a
@@ -45,6 +56,17 @@ function check(buckets, key, limit, window, now) {
         // Live window: bump in place. buckets.get already refreshed this
         // bucket's LRU rank, so an active key won't be the eviction victim.
         bucket.count++;
+        if (saturated && bucket.count > limit && !saturated.has(key)) {
+            // Kept apart from the cache, so eviction cannot reset it. Each
+            // entry costs a client `limit` requests within one window, and
+            // entries whose window has passed are dropped as it grows.
+            saturated.set(key, bucket);
+            if (saturated.size > MAX_BUCKETS) {
+                saturated.forEach((b, k) => {
+                    if ((now - b.windowStart) >= window) saturated.delete(k);
+                });
+            }
+        }
     }
 
     const remaining = Math.max(0, limit - bucket.count);
@@ -98,13 +120,14 @@ function middleware(opts) {
     const window = o.window !== undefined ? o.window : 60;
     let keyFn = o.key;
     const buckets = cache.new({ maxEntries: MAX_BUCKETS });
+    const saturated = new Map();   // see check
 
     // Normalize key option into a function
     if (keyFn === undefined || keyFn === null) {
         // Per client. A single shared bucket let one client spend the limit
         // for everyone.
         const trustProxy = o.trustProxy === true || o.trust_proxy === true;
-        keyFn = function(req) { return _request.clientIp(req, trustProxy) || "unknown"; };
+        keyFn = function(req) { return _request.limitKey(_request.clientIp(req, trustProxy)) || "unknown"; };
     } else if (typeof keyFn !== "function") {
         const fixedKey = keyFn;
         keyFn = function(_req) { return fixedKey; };
@@ -114,7 +137,7 @@ function middleware(opts) {
         const key = keyFn(req);
         const now = time.now();
 
-        const result = check(buckets, key, limit, window, now);
+        const result = check(buckets, key, limit, window, now, saturated);
 
         res.header("X-RateLimit-Limit", String(limit));
         res.header("X-RateLimit-Remaining", String(result.remaining));

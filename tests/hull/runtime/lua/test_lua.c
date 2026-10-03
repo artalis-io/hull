@@ -6794,6 +6794,83 @@ UTEST(lua_stdlib, audit2_stdlib_fixes)
     cleanup_lua_caps();
 }
 
+/* The third audit's stdlib fixes. An integer user id is a user id (it made
+ * session.destroy_all and audit_log.record do nothing); the inbox's insert is
+ * its check; an IPv6 client counts as its /64; an exhausted rate-limit bucket
+ * survives eviction; the idempotency fingerprint covers the query; and a PEM
+ * public key is never an HS256 secret. */
+UTEST(lua_stdlib, audit3_stdlib_fixes)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local s = require('hull.web.middleware.session') "
+        "  s.init({ ttl = 3600 }) "
+        "  local sid = s.create({ user_id = 42 }) "
+        "  if #s.list_for_user(42) ~= 1 then return 1 end "
+        "  if s.destroy_all(42) ~= 1 then return 2 end "
+        "  if s.load(sid) ~= nil then return 3 end "
+        "  if s.destroy_all(4.5) ~= 0 or s.destroy_all('') ~= 0 then return 4 end "
+        "  local al = require('hull.web.middleware.audit-log') "
+        "  al.init({ fingerprint_salt = 'test-salt-123' }) "
+        "  local req = { headers = { ['user-agent'] = 'curl/8' }, remote_addr = '10.0.0.1' } "
+        "  al.record(7, 'login', req) "
+        "  if #al.list(7) ~= 1 or #al.list('7') ~= 1 then return 5 end "
+        "  local inbox = require('hull.web.middleware.inbox') "
+        "  inbox.init() "
+        "  if inbox.check_and_mark('m1', 'src') ~= false then return 6 end "
+        "  if inbox.check_and_mark('m1', 'src') ~= true then return 7 end "
+        "  if inbox.check_and_mark('m2', 'src', { ttl = -1 }) ~= false then return 8 end "
+        "  if inbox.check_and_mark('m2', 'src') ~= false then return 9 end "
+        "  local rl = require('hull.web.middleware.ratelimit') "
+        "  local function hdr() local r = {} "
+        "    function r:header() return self end "
+        "    function r:status() return self end "
+        "    function r:json() return self end return r end "
+        "  local function shared(a, b) "
+        "    local m = rl.middleware({ limit = 1 }) "
+        "    m({ headers = {}, remote_addr = a }, hdr()) "
+        "    return m({ headers = {}, remote_addr = b }, hdr()) == 1 end "
+        "  if not shared('2001:db8:0:1:aaaa::1', '2001:DB8:0000:0001:1:2:3:4') then return 10 end "
+        "  if shared('2001:db8:0:1::1', '2001:db8:0:2::1') then return 11 end "
+        "  if not shared('::ffff:192.0.2.7', '192.0.2.7') then return 12 end "
+        "  if shared('192.0.2.7', '192.0.2.8') then return 13 end "
+        "  if not shared('fe80::1%eth0', 'fe80::2') then return 14 end "
+        "  local b = require('hull.cache').new({ max_entries = 2 }) "
+        "  local sat = { map = {}, n = 0 } "
+        "  rl.check(b, 'a', 1, 60, 100, sat) "
+        "  if rl.check(b, 'a', 1, 60, 100, sat).allowed then return 17 end "
+        "  for _, k in ipairs({ 'b', 'c', 'd' }) do rl.check(b, k, 1, 60, 100, sat) end "
+        "  if rl.check(b, 'a', 1, 60, 101, sat).allowed then return 18 end "
+        "  if not rl.check(b, 'a', 1, 60, 200, sat).allowed then return 19 end "
+        "  local idem = require('hull.web.middleware.idempotency') "
+        "  idem.init() "
+        "  local mw = idem.middleware() "
+        "  local function res() "
+        "    local r = {} "
+        "    function r:status(c) self.code = c; return self end "
+        "    function r:json(d) self.err = d.error; return self end "
+        "    function r:header() return self end "
+        "    return r end "
+        "  local function rqst(to) return { method = 'POST', path = '/transfer', "
+        "    query = { to = to }, body = 'amount=5', ctx = {}, "
+        "    headers = { ['idempotency-key'] = 'k1' } } end "
+        "  if mw(rqst('alice'), res()) ~= 0 then return 20 end "
+        "  local r2 = res() "
+        "  if mw(rqst('bob'), r2) ~= 1 or r2.code ~= 409 then return 21 end "
+        "  if not tostring(r2.err):find('different request', 1, true) then return 22 end "
+        "  local jwt = require('hull.jwt') "
+        "  local pem = '-----BEGIN PUBLIC KEY-----\\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE\\n-----END PUBLIC KEY-----\\n' "
+        "  local now = require('hull.time').now() "
+        "  local forged = jwt.sign({ sub = 'admin', exp = now + 60 }, pem) "
+        "  if jwt.verify(forged, pem, { algs = { 'HS256', 'RS256' } }) then return 23 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
 /* Error values reach the logs as text: a table with __tostring (hull.gather's
  * aggregate) as its message, where lua_tostring gave NULL - "(unknown)", or a
  * NULL for "%s". Also from a coroutine that died with it, and without letting

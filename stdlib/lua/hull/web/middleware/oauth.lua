@@ -294,7 +294,46 @@ end
 -- use, ...}, ...]}`. We fetch lazily, cache by provider, and rebuild
 -- on a kid miss (handles IdP key rotation). x5c[0] is a base64-DER
 -- X.509 cert; crypto.x509_pubkey_pem extracts the SPKI as PEM so
--- jwt.verify (via crypto.verify) can consume it.
+-- jwt.verify (via crypto.verify) can consume it. A key with no x5c
+-- (Google's) is an RSA modulus + exponent, built into the same PEM.
+
+-- An RSA JWK with no certificate - just the modulus `n` and exponent `e`,
+-- base64url (RFC 7518 section 6.3.1) - as an SPKI PEM. Google's JWKS is all
+-- such keys: x5c-only parsing skipped every one, so no Google ID token could
+-- ever verify. The DER is SEQUENCE { SEQUENCE { rsaEncryption, NULL },
+-- BIT STRING { SEQUENCE { INTEGER n, INTEGER e } } }.
+local RSA_OID = "\6\9\42\134\72\134\247\13\1\1\1"   -- 1.2.840.113549.1.1.1
+local function der(tag, body)
+    local n = #body
+    local len
+    if n < 0x80 then len = string.char(n)
+    elseif n < 0x100 then len = "\129" .. string.char(n)
+    else len = "\130" .. string.char(n >> 8, n & 0xff) end
+    return string.char(tag) .. len .. body
+end
+local function der_uint(b)
+    b = b:gsub("^\0+", "")
+    if b == "" or b:byte(1) >= 0x80 then b = "\0" .. b end
+    return der(0x02, b)
+end
+local function rsa_jwk_pem(k)
+    if k.kty ~= "RSA" or type(k.n) ~= "string" or type(k.e) ~= "string" then
+        return nil
+    end
+    local n = encoding.base64.decode(k.n, { url = true })
+    local e = encoding.base64.decode(k.e, { url = true })
+    -- 8192-bit keys at most, so every length fits two bytes.
+    if not n or not e or #n < 128 or #n > 1024 or #e == 0 or #e > 8 then
+        return nil
+    end
+    local spki = der(0x30, der(0x30, RSA_OID .. "\5\0")
+        .. der(0x03, "\0" .. der(0x30, der_uint(n) .. der_uint(e))))
+    local b64 = encoding.base64.encode(spki)
+    local lines = {}
+    for i = 1, #b64, 64 do lines[#lines + 1] = b64:sub(i, i + 63) end
+    return "-----BEGIN PUBLIC KEY-----\n" .. table.concat(lines, "\n")
+        .. "\n-----END PUBLIC KEY-----\n"
+end
 
 local function refresh_jwks(provider_name)
     local cfg = _state.providers[provider_name]
@@ -309,14 +348,16 @@ local function refresh_jwks(provider_name)
     end
     local by_kid = {}
     for _, k in ipairs(doc.keys) do
-        if type(k) == "table" and k.kid and type(k.x5c) == "table"
+        if type(k) == "table" and type(k.kid) == "string" and type(k.x5c) == "table"
            and type(k.x5c[1]) == "string" then
             -- x5c is standard base64 (RFC 7517 section 4.7).
-            local der = encoding.base64.decode(k.x5c[1], { lenient = true })
-            if der then
-                local pem = crypto.x509_pubkey_pem(der)
+            local cert = encoding.base64.decode(k.x5c[1], { lenient = true })
+            if cert then
+                local pem = crypto.x509_pubkey_pem(cert)
                 if pem then by_kid[k.kid] = pem end
             end
+        elseif type(k) == "table" and type(k.kid) == "string" then
+            by_kid[k.kid] = rsa_jwk_pem(k)
         end
     end
     _state._jwks_cache[provider_name] = {

@@ -237,6 +237,25 @@ if [ "$RUNTIME" = "all" ] || [ "$RUNTIME" = "js" ]; then
     run_flow js "$SRCDIR/tests/fixtures/oauth_client_js" "app.js"
 fi
 
+# The same flow against a JWKS with no certificates - only each key's
+# modulus and exponent, the way Google publishes it. Before the client built
+# a key from n/e it skipped every such entry, and no ID token verified.
+echo ""
+echo "=== JWKS without x5c (n/e only, as Google) ==="
+JWKS_NE=$(curl -fs "$IDP_ISSUER/admin/jwk-form?form=ne" >/dev/null \
+          && curl -fs "$IDP_ISSUER/.well-known/jwks.json")
+check_contains "n/e JWKS has a modulus" "$JWKS_NE" '"n"'
+case "$JWKS_NE" in
+    *x5c*) fail "n/e JWKS still carries x5c" ;;
+    *)     pass "n/e JWKS carries no x5c" ;;
+esac
+if [ "$RUNTIME" = "all" ] || [ "$RUNTIME" = "lua" ]; then
+    run_flow lua-ne "$SRCDIR/tests/fixtures/oauth_client_lua" "app.lua"
+fi
+if [ "$RUNTIME" = "all" ] || [ "$RUNTIME" = "js" ]; then
+    run_flow js-ne "$SRCDIR/tests/fixtures/oauth_client_js" "app.js"
+fi
+
 echo ""
 echo "=== Summary ==="
 echo "PASSED: $PASS"

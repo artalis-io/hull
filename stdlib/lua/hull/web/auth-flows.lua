@@ -790,7 +790,7 @@ end
 local IP_SEP = "\31"
 local function attempt_ip_key(uid, req)
     return tostring(uid) .. IP_SEP
-           .. (_request.client_ip(req, _state.trust_proxy) or "_anon")
+           .. (_request.limit_key(_request.client_ip(req, _state.trust_proxy)) or "_anon")
 end
 
 -- Every row for an account, after a password reset proves control of it.
@@ -1489,7 +1489,7 @@ local function register_routes(app)
             -- "_anon" so a malformed request can't escape the bucket
             -- entirely. App-supplied opts.key still wins.
             key    = rl_opts.key or function(req)
-                return _request.client_ip(req, _state.trust_proxy) or "_anon"
+                return _request.limit_key(_request.client_ip(req, _state.trust_proxy)) or "_anon"
             end,
         })
         app.use("POST", p .. "/register", mw)

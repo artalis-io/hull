@@ -590,7 +590,7 @@ local function extract_ip(req)
     end
     -- Core extraction (trust_xff -> XFF-first -> remote_addr, 64-cap)
     -- via the shared hull.web._request helper; see docs/stdlib_style.md.
-    return _request.client_ip(req, _state.trust_xff)
+    return _request.limit_key(_request.client_ip(req, _state.trust_xff))
 end
 
 -- ── Public API ─────────────────────────────────────────────────────

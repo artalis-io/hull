@@ -38,14 +38,20 @@ function checkScalar(value, name) {
  * Parse `?sort=col[:asc|desc]` from the request.
  * @param {object} req
  * @param {object} [opts]
- * @param {string[]} [opts.allowed]  Column-name whitelist; anything
- *                                   else falls back to opts.default.
+ * @param {string[]} opts.allowed    Column-name allowlist (required);
+ *                                   anything else falls back to
+ *                                   opts.default.
  * @param {string}   [opts.default]  Default column when no valid
  *                                   sort param is present.
  * @returns {?{column: string, direction: "asc"|"desc"}}
  */
 function parse(req, opts) {
     opts = opts || {};
+    // The allowlist is required. Without one, any identifier passed: a
+    // client could order rows by `password_hash` or `reset_token` and read
+    // the secret off the order, a prefix at a time.
+    if (!Array.isArray(opts.allowed))
+        throw new Error("sort.parse: opts.allowed (the sortable column names) is required");
     const raw = req && req.query && req.query.sort;
     let column = null;
     let direction = null;
@@ -58,7 +64,7 @@ function parse(req, opts) {
         column = safeColumn(column);
         if (column === "") column = null;
     }
-    if (opts.allowed && column) {
+    if (column) {
         if (opts.allowed.indexOf(column) < 0) column = null;
     }
     if (!column && opts.default) {
@@ -68,7 +74,7 @@ function parse(req, opts) {
         // safety. Lua parity: stdlib/lua/hull/web/htmx/sort.lua.
         const d = safeColumn(opts.default);
         if (d) {
-            if (!opts.allowed || opts.allowed.indexOf(d) >= 0) {
+            if (opts.allowed.indexOf(d) >= 0) {
                 column = d;
                 direction = direction || "asc";
             }
