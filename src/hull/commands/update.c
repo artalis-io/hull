@@ -140,6 +140,15 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         kl_tls_mbedtls_ctx_destroy(tls);
         return 0;
     }
+    /* No order: this build's version is not a release (a bare commit from a
+     * shallow checkout, say). --check still reports what is out there. */
+    if (!force && !comparable && check_only) {
+        fprintf(stdout, "hull update: update available (this build, '%s', is not "
+                        "a release; `hull update --force` installs %s)\n",
+                HL_VERSION, latest_tag);
+        kl_tls_mbedtls_ctx_destroy(tls);
+        return 0;
+    }
     if (!force && !comparable) {
         fprintf(stderr, "hull update: cannot order versions '%s' and '%s'; "
                         "pass --force to install %s\n", HL_VERSION, latest_tag, latest_tag);
