@@ -368,6 +368,51 @@ UTEST(hl_cap_fs, delete_nonexistent)
     teardown_fs();
 }
 
+/* exists / delete went around the fs policy (a base_dir path join): an
+ * ungranted file could be probed and removed. */
+UTEST(hl_cap_fs, exists_and_delete_honour_the_grants)
+{
+    setup_fs();
+    char p[600];
+    snprintf(p, sizeof p, "%s/secret.txt", test_dir);
+    FILE *f = fopen(p, "w");
+    ASSERT_TRUE(f != NULL);
+    fputs("s", f);
+    fclose(f);
+
+    const char *err = NULL;
+    EXPECT_EQ(hl_cap_fs_exists(&test_cfg, "secret.txt", &err), -1);
+    err = NULL;
+    EXPECT_EQ(hl_cap_fs_delete(&test_cfg, "secret.txt", &err), -1);
+    EXPECT_TRUE(err != NULL);
+    struct stat st;
+    EXPECT_EQ(stat(p, &st), 0);                    /* still there */
+
+    /* a granted path whose parent is missing is absent, not an error */
+    EXPECT_EQ(hl_cap_fs_exists(&test_cfg, "a/b/c/file.txt", NULL), 0);
+    /* deleting a missing granted file names the reason */
+    err = NULL;
+    EXPECT_EQ(hl_cap_fs_delete(&test_cfg, "nope.txt", &err), -1);
+    EXPECT_STREQ(err ? err : "(null)", "not_found");
+    teardown_fs();
+}
+
+/* Windows splits a path on a backslash too and reads "C:" as a drive: a
+ * caller path holding either is refused there (ordinary bytes on POSIX). */
+UTEST(hl_cap_fs, windows_separators_are_refused_on_windows)
+{
+    if (!hl_host_is_windows()) UTEST_SKIP("Windows-only path syntax");
+    setup_fs();
+    char buf[16];
+    const char *err = NULL;
+    EXPECT_EQ(hl_cap_fs_read(&test_cfg, "sub\\..\\..\\x", buf, sizeof buf, &err), -1);
+    EXPECT_STREQ(err ? err : "(null)", "invalid_path");
+    err = NULL;
+    EXPECT_EQ(hl_cap_fs_write(&test_cfg, "sub/C:x", "x", 1, &err), -1);
+    EXPECT_STREQ(err ? err : "(null)", "invalid_path");
+    teardown_fs();
+}
+
 /* ── Path traversal rejection in operations ─────────────────────────── */
 
 UTEST(hl_cap_fs, write_rejects_traversal)

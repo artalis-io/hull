@@ -103,6 +103,59 @@ static int validate_id(const char *id)
 
 /* ── Path builders ───────────────────────────────────────────────── */
 
+/* The shard directory a blob goes into: made if missing, and it must be a
+ * real directory - a symlink planted in its place (a shared cache root)
+ * redirected every write below it. */
+static int ensure_shard(const char *shard)
+{
+    if (hl_mkdir_p(shard, 0755) < 0) return -1;
+    struct stat st;
+    if (lstat(shard, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return -1;
+    }
+    return 0;
+}
+
+/* Something already at @p dest (not following a symlink there). */
+static int dest_present(const char *dest)
+{
+    struct stat st;
+    return lstat(dest, &st) == 0;
+}
+
+/* Cross-filesystem fallback for rename(tmp, dest): copy into a file this
+ * call CREATES (O_EXCL, O_NOFOLLOW). fopen(dest, "wb") followed a symlink
+ * planted at dest and truncated whatever it named. A dest that appeared
+ * meanwhile is the race's winner (same content by contract): 1. */
+static int copy_into_place(const char *tmp, const char *dest)
+{
+    int ofd = open(dest, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                   0644);
+    if (ofd < 0) return errno == EEXIST ? 1 : -1;
+    FILE *dst = fdopen(ofd, "wb");
+    if (!dst) { close(ofd); unlink(dest); return -1; }
+    int ifd = open(tmp, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    FILE *src = ifd >= 0 ? fdopen(ifd, "rb") : NULL;
+    if (!src) {
+        if (ifd >= 0) close(ifd);
+        fclose(dst);
+        unlink(dest);
+        return -1;
+    }
+    char copy_buf[65536];
+    size_t n;
+    int err = 0;
+    while ((n = fread(copy_buf, 1, sizeof(copy_buf), src)) > 0) {
+        if (fwrite(copy_buf, 1, n, dst) != n) { err = 1; break; }
+    }
+    if (ferror(src)) err = 1;
+    fclose(src);
+    if (fclose(dst) != 0) err = 1;
+    if (err) { unlink(dest); return -1; }
+    return 0;
+}
+
 static int build_blob_path(HlBlobStore *s, const char *id,
                            char *out, size_t out_cap)
 {
@@ -387,15 +440,14 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
         writer_release(w);
         return -1;
     }
-    if (hl_mkdir_p(shard, 0755) < 0) {
+    if (ensure_shard(shard) < 0) {
         unlink(w->tmp_path);
         writer_release(w);
         return -1;
     }
 
-    struct stat st;
     int renamed_into_place = 0;
-    if (stat(dest, &st) == 0) {
+    if (dest_present(dest)) {
         unlink(w->tmp_path);
     } else if (rename(w->tmp_path, dest) < 0) {
         if (errno != EXDEV) {
@@ -403,32 +455,13 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
             writer_release(w);
             return -1;
         }
-        FILE *src = fopen(w->tmp_path, "rb");
-        FILE *dst = fopen(dest, "wb");
-        if (!src || !dst) {
-            if (src) fclose(src);
-            if (dst) { fclose(dst); unlink(dest); }
-            unlink(w->tmp_path);
-            writer_release(w);
-            return -1;
-        }
-        char copy_buf[65536];
-        size_t n;
-        int copy_err = 0;
-        while ((n = fread(copy_buf, 1, sizeof(copy_buf), src)) > 0) {
-            if (fwrite(copy_buf, 1, n, dst) != n) { copy_err = 1; break; }
-        }
-        if (ferror(src)) copy_err = 1;
-        fclose(src);
-        if (fclose(dst) != 0) copy_err = 1;
-        if (copy_err) {
-            unlink(dest);
-            unlink(w->tmp_path);
-            writer_release(w);
-            return -1;
-        }
+        int rc = copy_into_place(w->tmp_path, dest);
         unlink(w->tmp_path);
-        renamed_into_place = 1;
+        if (rc < 0) {
+            writer_release(w);
+            return -1;
+        }
+        renamed_into_place = (rc == 0);
     } else {
         renamed_into_place = 1;
     }
@@ -541,7 +574,7 @@ int hl_blob_store_put_keyed(HlBlobStore *s, const char *key,
         unlink(tmp_path);
         return -1;
     }
-    if (hl_mkdir_p(shard, 0755) < 0) {
+    if (ensure_shard(shard) < 0) {
         unlink(tmp_path);
         return -1;
     }
@@ -549,33 +582,16 @@ int hl_blob_store_put_keyed(HlBlobStore *s, const char *key,
     /* If a race produced the target between exists() and rename(),
      * unlink our tmp and accept the winner. Same content by
      * contract. */
-    struct stat st;
-    if (stat(dest, &st) == 0) {
+    if (dest_present(dest)) {
         unlink(tmp_path);
         return 0;
     }
     if (rename(tmp_path, dest) < 0) {
         if (errno == EXDEV) {
             /* Cross-fs fallback: copy + unlink. */
-            FILE *src = fopen(tmp_path, "rb");
-            FILE *dst = fopen(dest, "wb");
-            if (!src || !dst) {
-                if (src) fclose(src);
-                if (dst) { fclose(dst); unlink(dest); }
-                unlink(tmp_path);
-                return -1;
-            }
-            char copy_buf[65536];
-            size_t n; int err = 0;
-            while ((n = fread(copy_buf, 1, sizeof(copy_buf), src)) > 0) {
-                if (fwrite(copy_buf, 1, n, dst) != n) { err = 1; break; }
-            }
-            if (ferror(src)) err = 1;
-            fclose(src);
-            if (fclose(dst) != 0) err = 1;
+            int rc = copy_into_place(tmp_path, dest);
             unlink(tmp_path);
-            if (err) { unlink(dest); return -1; }
-            return 0;
+            return rc < 0 ? -1 : 0;
         }
         unlink(tmp_path);
         return -1;
@@ -621,13 +637,20 @@ int hl_blob_store_reader_open(HlBlobStore *s, const char *id, int track_access,
      * a plain open() on EPERM (O_NOATIME requires owner-or-CAP),
      * since lacking permission to suppress atime updates isn't
      * fatal - worst case the policy degrades to "best-effort". */
-    int open_flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
+    /* O_NONBLOCK, then a regular-file check: a FIFO planted at the blob
+     * path otherwise blocked this open() - and the event loop - until a
+     * writer turned up. Blocking mode is restored for the reads. */
+    int open_flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
     if (!track_access) open_flags |= O_NOATIME;
     int fd = open(path, open_flags);
     if (fd < 0 && errno == EPERM && !track_access) {
-        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     }
     if (fd < 0) return -1;
+    struct stat fst;
+    if (fstat(fd, &fst) != 0 || !S_ISREG(fst.st_mode)) { close(fd); return -1; }
+    int fl = fcntl(fd, F_GETFL);
+    if (fl < 0 || fcntl(fd, F_SETFL, fl & ~O_NONBLOCK) < 0) { close(fd); return -1; }
 
     HlBlobStoreReader *r = hl_alloc_malloc(s->alloc, sizeof(*r));
     if (!r) { close(fd); return -1; }

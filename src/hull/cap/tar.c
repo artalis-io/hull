@@ -297,6 +297,78 @@ static void sym_collect_free(struct sym_collect *s)
     free(s->v);
 }
 
+/* Resolve @p linkname, written in the link member @p name, to the in-root
+ * path it really names, following any link it passes THROUGH (never the
+ * final component). tar_safe_linkname counts ".." lexically, but the
+ * kernel resolves a ".." after a link physically: with `a -> .` on disk,
+ * `b -> a/../q` passed (depth 1, 0, 1) and named the root's parent. Here
+ * every ".." is applied to the resolved path. Result in @p out (relative
+ * to the root, "" = the root). Returns 0, 1 when an intermediate does not
+ * exist yet (a link this run creates later - defer), or -1 on an escape, a
+ * non-directory intermediate, an absolute inner link, or a link loop. */
+static int link_target_in_root(const char *dest, const char *name,
+                               const char *linkname, char *out, size_t cap)
+{
+    char cur[PATH_MAX];                     /* resolved dir, root-relative */
+    const char *slash = strrchr(name, '/');
+    size_t cl = slash ? (size_t)(slash - name) : 0;
+    if (cl >= sizeof cur) return -1;
+    memcpy(cur, name, cl);
+    cur[cl] = '\0';
+
+    char pending[PATH_MAX];                 /* components still to apply */
+    if (snprintf(pending, sizeof pending, "%s", linkname) >= (int)sizeof pending)
+        return -1;
+    int hops = 0;
+    char *p = pending;
+    while (*p) {
+        char *e = strchr(p, '/');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        char *rest = e ? e + 1 : p + n;
+        int final = (*rest == '\0');
+        if (n == 0 || (n == 1 && p[0] == '.')) {
+            /* "" or "." */
+        } else if (n == 2 && p[0] == '.' && p[1] == '.') {
+            if (cur[0] == '\0') return -1;   /* above the root */
+            char *ls = strrchr(cur, '/');
+            if (ls) *ls = '\0'; else cur[0] = '\0';
+        } else {
+            char cand[PATH_MAX];
+            int k = cur[0] ? snprintf(cand, sizeof cand, "%s/%.*s", cur, (int)n, p)
+                           : snprintf(cand, sizeof cand, "%.*s", (int)n, p);
+            if (k < 0 || (size_t)k >= sizeof cand) return -1;
+            if (!final) {
+                char full[PATH_MAX];
+                k = snprintf(full, sizeof full, "%s/%s", dest, cand);
+                if (k < 0 || (size_t)k >= sizeof full) return -1;
+                struct stat st;
+                if (lstat(full, &st) != 0) return 1;           /* not yet */
+                if (S_ISLNK(st.st_mode)) {
+                    if (++hops > 40) return -1;
+                    char lt[PATH_MAX];
+                    ssize_t ln = readlink(full, lt, sizeof lt - 1);
+                    if (ln <= 0) return -1;
+                    lt[ln] = '\0';
+                    if (lt[0] == '/') return -1;
+                    /* splice: the link's target, then what followed it,
+                     * applied from the link's directory (cur, unchanged) */
+                    char next[PATH_MAX];
+                    k = snprintf(next, sizeof next, "%s/%s", lt, rest);
+                    if (k < 0 || (size_t)k >= sizeof next) return -1;
+                    memcpy(pending, next, (size_t)k + 1);
+                    p = pending;
+                    continue;
+                }
+                if (!S_ISDIR(st.st_mode)) return -1;
+            }
+            memcpy(cur, cand, (size_t)k + 1);
+        }
+        p = rest;
+    }
+    if (snprintf(out, cap, "%s", cur) >= (int)cap) return -1;
+    return 0;
+}
+
 /* Materialize one collected link under @p dest. Returns 0 = done, 1 = DEFERRED
  * (target not yet on disk - retry after other links materialize), -1 = hard
  * error. */
@@ -321,6 +393,12 @@ static int materialize_link(const char *dest, struct sym_ent *se)
     }
 
     if (extract_make_parents(path) != 0) return -1;
+
+    /* Where the link really points, resolved through any link on the way. */
+    char resolved[PATH_MAX];
+    int tr = link_target_in_root(dest, se->name, se->linkname,
+                                 resolved, sizeof resolved);
+    if (tr != 0) return tr;                      /* escape (-1) / not yet (1) */
     (void)unlink(path);                          /* idempotent re-extract */
 
     /* A real symlink is best where the platform allows it (and needs no target
@@ -335,11 +413,7 @@ static int materialize_link(const char *dest, struct sym_ent *se)
      * the linkname resolved against the link's OWN directory; tar_safe_linkname
      * confined it to the extraction root at parse time. */
     char target[PATH_MAX];
-    char *last = strrchr(path, '/');
-    int tn = last
-        ? snprintf(target, sizeof(target), "%.*s/%s",
-                   (int)(last - path), path, se->linkname)
-        : snprintf(target, sizeof(target), "%s/%s", dest, se->linkname);
+    int tn = snprintf(target, sizeof(target), "%s/%s", dest, resolved);
     if (tn < 0 || (size_t)tn >= sizeof(target)) return -1;
 
     /* Target must be an existing REGULAR file. If it is MISSING it may be

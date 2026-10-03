@@ -742,4 +742,40 @@ UTEST(tool, rmdir_null_args)
     ASSERT_EQ(hl_tool_rmdir(NULL, NULL), -1);
 }
 
+/* ── audit 3 ───────────────────────────────────────────────────────── */
+
+/* zig is admitted as a C driver; `zig run` / `zig build` / `zig test` run
+ * code, so only the driver-ish subcommands may follow it. */
+UTEST(tool, zig_runs_only_driver_subcommands)
+{
+    const char *ok_cc[]   = { "zig", "cc", "-c", "a.c", NULL };
+    const char *ok_ver[]  = { "/opt/zig/zig", "version", NULL };
+    const char *bad_run[] = { "zig", "run", "x.zig", NULL };
+    const char *bad_bld[] = { "zig", "build", NULL };
+    const char *bad_none[] = { "zig", NULL };
+    EXPECT_EQ(hl_tool_validate_args(ok_cc), 0);
+    EXPECT_EQ(hl_tool_validate_args(ok_ver), 0);
+    EXPECT_NE(hl_tool_validate_args(bad_run), 0);
+    EXPECT_NE(hl_tool_validate_args(bad_bld), 0);
+    EXPECT_NE(hl_tool_validate_args(bad_none), 0);
+}
+
+/* --for-linker is -Xlinker spelled out; a linker spawned directly takes
+ * its plugin options bare. */
+UTEST(tool, linker_passthrough_and_plugins_are_refused)
+{
+    const char *a1[] = { "cc", "--for-linker", "--plugin=/tmp/x.so", NULL };
+    const char *a2[] = { "cc", "--for-linker=--plugin=/tmp/x.so", NULL };
+    const char *a3[] = { "ld.lld", "--plugin=/tmp/x.so", "a.o", NULL };
+    const char *a4[] = { "ld.lld", "-plugin", "/tmp/x.so", "a.o", NULL };
+    const char *a5[] = { "clang", "-fpass-plugin=/tmp/x.so", NULL };
+    const char *a6[] = { "ld.lld", "--load-pass-plugin=/tmp/x.so", NULL };
+    EXPECT_NE(hl_tool_validate_args(a1), 0);
+    EXPECT_NE(hl_tool_validate_args(a2), 0);
+    EXPECT_NE(hl_tool_validate_args(a3), 0);
+    EXPECT_NE(hl_tool_validate_args(a4), 0);
+    EXPECT_NE(hl_tool_validate_args(a5), 0);
+    EXPECT_NE(hl_tool_validate_args(a6), 0);
+}
+
 UTEST_MAIN();

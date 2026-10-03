@@ -13,6 +13,7 @@
  */
 
 #include "hull/cap/fs_resolve.h"
+#include "hull/shared/host.h"   /* hl_host_is_windows */
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -95,6 +96,8 @@ static int finalize_regular_leaf(int fd, const char **err)
 static int caller_path_ok(const char *p)
 {
     if (!p || p[0] == '\0' || p[0] == '/') return 0;   /* empty or absolute */
+    /* Windows separators and drive letters (see split_caller, fs_policy.c). */
+    if (hl_host_is_windows() && strpbrk(p, "\\:")) return 0;
     size_t len = strlen(p);
     if (p[len - 1] == '/') return 0;                   /* trailing slash (dir-shaped) */
     const char *c = p;
@@ -222,7 +225,9 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
 {
     int stack[HL_FS_MAX_DEPTH];
     int depth = 0;
-    stack[depth++] = dup(root_fd);            /* stack[0] = root; never popped */
+    /* CLOEXEC: a plain dup() clears it, and a tool spawned while this walk
+     * held the copy inherited a descriptor on the app root. */
+    stack[depth++] = fcntl(root_fd, F_DUPFD_CLOEXEC, 0);   /* stack[0] = root; never popped */
     if (stack[0] < 0) { map_errno(errno, err); return -1; }
 
     char rem[HL_FS_PATH_MAX];

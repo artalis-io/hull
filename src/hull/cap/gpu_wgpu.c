@@ -152,6 +152,19 @@ static void on_buffer_map(WGPUMapAsyncStatus status,
     r->done = 1;
 }
 
+/* Wait for a map request to complete, polling up to @p timeout_ms. A
+ * blocking wgpuDevicePoll waited forever on a hung device. */
+static void gpu_wait_map(WGPUDevice device, MapReq *req, uint32_t timeout_ms)
+{
+    uint64_t deadline = gpu_now_ms() + timeout_ms;
+    while (!req->done) {
+        (void)wgpuDevicePoll(device, 0, NULL);
+        if (req->done || gpu_now_ms() >= deadline) break;
+        struct timespec ts = { 0, 100000 };   /* 100 us */
+        nanosleep(&ts, NULL);
+    }
+}
+
 /* ── Readback helper ───────────────────────────────────────────────── */
 
 /*
@@ -159,9 +172,35 @@ static void on_buffer_map(WGPUMapAsyncStatus status,
  * Creates a staging buffer, copies, maps, memcpy, cleans up.
  * Caller must free(*out_data).
  */
-static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
-                            size_t size, void **out_data, size_t *out_len)
+/* Write @p len bytes at offset 0 of a buffer @p cap bytes long (cap is
+ * 4-aligned), zero-padded to whole words: wgpuQueueWriteBuffer takes a
+ * multiple of 4 only, and an odd uniform length was a validation error -
+ * the shader read the buffer's previous contents. */
+static int gpu_write_padded(WGPUQueue queue, WGPUBuffer buf, const void *data,
+                            size_t len, size_t cap)
 {
+    size_t whole = len & ~(size_t)3;
+    if (whole > 0) wgpuQueueWriteBuffer(queue, buf, 0, data, whole);
+    if (len > whole && whole + 4 <= cap) {
+        uint8_t tail[4] = {0};
+        memcpy(tail, (const uint8_t *)data + whole, len - whole);
+        wgpuQueueWriteBuffer(queue, buf, whole, tail, 4);
+    }
+    return 0;
+}
+
+static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
+                            size_t want, void **out_data, size_t *out_len)
+{
+    /* Copies are whole 4-byte words; every Hull buffer is allocated
+     * 4-aligned, so the rounded copy stays inside it. Only `want` bytes go
+     * back to the caller. (An unaligned size was a validation error: the
+     * map then failed, or read a staging buffer the copy never filled.) */
+    if (want > SIZE_MAX - 3) return HL_GPU_ERR_READBACK;
+    size_t size = (want + 3) & ~(size_t)3;
+    if (size == 0) size = 4;
+    wgpu_last_error = 0;
+
     /* Create staging buffer for MapRead */
     WGPUBufferDescriptor staging_desc = {
         .label = sv("hull_staging"),
@@ -192,12 +231,18 @@ static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
         return HL_GPU_ERR_READBACK;
     }
 
-    /* Submit and poll to completion */
+    /* Submit and wait - bounded: a blocking poll here waited forever on a
+     * hung device, holding the device mutex. */
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
-    wgpuDevicePoll(dctx->device, 1, NULL);
+    int waited = gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS);
 
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(encoder);
+    if (waited != 0 || wgpu_last_error) {
+        wgpuBufferDestroy(staging);
+        wgpuBufferRelease(staging);
+        return waited != 0 ? HL_GPU_ERR_TIMEOUT : HL_GPU_ERR_READBACK;
+    }
 
     /* Map staging buffer (v27: uses WGPUBufferMapCallbackInfo) */
     MapReq map_req = {0};
@@ -207,7 +252,7 @@ static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
         .userdata1 = &map_req,
     };
     wgpuBufferMapAsync(staging, WGPUMapMode_Read, 0, size, map_cb);
-    wgpuDevicePoll(dctx->device, 1, NULL);
+    gpu_wait_map(dctx->device, &map_req, HL_GPU_TIMEOUT_MS);
 
     if (!map_req.done || map_req.status != WGPUMapAsyncStatus_Success) {
         wgpuBufferDestroy(staging);
@@ -224,21 +269,21 @@ static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
         return HL_GPU_ERR_READBACK;
     }
 
-    void *result = malloc(size);
+    void *result = malloc(want ? want : 1);
     if (!result) {
         wgpuBufferUnmap(staging);
         wgpuBufferDestroy(staging);
         wgpuBufferRelease(staging);
         return HL_GPU_ERR_INTERNAL;
     }
-    memcpy(result, mapped, size);
+    memcpy(result, mapped, want);
 
     wgpuBufferUnmap(staging);
     wgpuBufferDestroy(staging);
     wgpuBufferRelease(staging);
 
     *out_data = result;
-    *out_len = size;
+    *out_len = want;
     return HL_GPU_OK;
 }
 
@@ -304,24 +349,35 @@ static int wgpu_enumerate_devices(HlGpuCtx *ctx,
     if (!bctx || !bctx->instance)
         return 0;
 
-    /* Count available adapters */
-    size_t adapter_count = wgpuInstanceEnumerateAdapters(
-        bctx->instance, NULL, NULL);
-    if (adapter_count == 0)
+    /* Every adapter the instance has: enumeration writes ALL of them, so
+     * the array is sized by the count it reports - a fixed
+     * HL_GPU_MAX_DEVICES array overflowed on a box with more adapters.
+     * Each one is either claimed by a device context or released, exactly
+     * once (the old tail loop released by index, which re-released failed
+     * adapters and released claimed ones). */
+    size_t total = wgpuInstanceEnumerateAdapters(bctx->instance, NULL, NULL);
+    if (total == 0)
         return 0;
+    if (total > 1024)
+        total = 1024;   /* refuse an absurd count rather than trust it */
+    WGPUAdapter *adapters = calloc(total, sizeof *adapters);
+    if (!adapters)
+        return 0;
+    size_t got = wgpuInstanceEnumerateAdapters(bctx->instance, NULL, adapters);
+    if (got > total) got = total;   /* it never writes more than it reported */
 
-    /* Cap to available slots */
+    size_t adapter_count = got;
     if (adapter_count > (size_t)max_devices)
         adapter_count = (size_t)max_devices;
     if (adapter_count > (size_t)HL_GPU_MAX_DEVICES)
         adapter_count = (size_t)HL_GPU_MAX_DEVICES;
-
-    /* Stack-allocate adapter array */
-    WGPUAdapter adapters[HL_GPU_MAX_DEVICES];
-    wgpuInstanceEnumerateAdapters(bctx->instance, NULL, adapters);
+    /* The ones past the cap are never looked at. */
+    for (size_t i = adapter_count; i < got; i++)
+        if (adapters[i]) wgpuAdapterRelease(adapters[i]);
 
     int count = 0;
     for (size_t i = 0; i < adapter_count; i++) {
+        if (!adapters[i]) continue;
         /* Get adapter info for device name */
         WGPUAdapterInfo info = {0};
         wgpuAdapterGetInfo(adapters[i], &info);
@@ -397,10 +453,9 @@ static int wgpu_enumerate_devices(HlGpuCtx *ctx,
         wgpuAdapterInfoFreeMembers(info);
         count++;
     }
-
-    /* Release adapters that weren't claimed */
-    for (size_t i = (size_t)count; i < adapter_count; i++)
-        wgpuAdapterRelease(adapters[i]);
+    /* Every adapter below adapter_count was claimed (stored in a device
+     * context) or released on its failure path above. */
+    free(adapters);
 
     bctx->device_count = count;
     return count;
@@ -501,6 +556,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
         if (err_msg) *err_msg = "invalid_device";
         return HL_GPU_ERR_DEVICE;
     }
+    wgpu_last_error = 0;   /* checked after the submit */
 
     int rc = HL_GPU_ERR_DISPATCH;
     WGPUBuffer uniform_buf = NULL;
@@ -564,8 +620,11 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             if (err_msg) *err_msg = "uniform_buffer_create_failed";
             goto cleanup;
         }
-        wgpuQueueWriteBuffer(dctx->queue, uniform_buf, 0,
-                              opts->uniforms, opts->uniforms_len);
+        if (gpu_write_padded(dctx->queue, uniform_buf, opts->uniforms,
+                             opts->uniforms_len, usize) != 0) {
+            if (err_msg) *err_msg = "out_of_memory";
+            goto cleanup;
+        }
 
         entries[0] = (WGPUBindGroupEntry){
             .binding = 0,
@@ -804,6 +863,14 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             rc = HL_GPU_ERR_TIMEOUT;
             goto cleanup;
         }
+        /* wgpu reports a bad bind group, size or command through the
+         * uncaptured-error callback, not a return value: it was logged and
+         * the dispatch "succeeded" with whatever the buffers held. */
+        if (wgpu_last_error) {
+            if (err_msg) *err_msg = "gpu_validation_error";
+            rc = HL_GPU_ERR_DISPATCH;
+            goto cleanup;
+        }
     }
 
     /* ── Output readback (skip for fire-and-forget) ──────── */
@@ -914,9 +981,20 @@ static int wgpu_buffer_write(HlGpuDevice *dev, HlGpuBuffer *buf,
     if (!dctx || !buf || !buf->handle)
         return HL_GPU_ERR_BUFFER;
 
-    wgpuQueueWriteBuffer(dctx->queue, (WGPUBuffer)buf->handle,
-                          offset, data, len);
-    return HL_GPU_OK;
+    /* Whole words, plus a zero-padded tail word: gpu.c admits an odd
+     * length only at the buffer's end, where the tail lands in padding. */
+    wgpu_last_error = 0;
+    size_t whole = len & ~(size_t)3;
+    if (whole > 0)
+        wgpuQueueWriteBuffer(dctx->queue, (WGPUBuffer)buf->handle,
+                             offset, data, whole);
+    if (len > whole) {
+        uint8_t tail[4] = {0};
+        memcpy(tail, (const uint8_t *)data + whole, len - whole);
+        wgpuQueueWriteBuffer(dctx->queue, (WGPUBuffer)buf->handle,
+                             offset + whole, tail, 4);
+    }
+    return wgpu_last_error ? HL_GPU_ERR_BUFFER : HL_GPU_OK;
 }
 
 /* ── wgpu_buffer_read ──────────────────────────────────────────────── */
@@ -1043,6 +1121,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
         if (err_msg) *err_msg = "invalid_device";
         return HL_GPU_ERR_DEVICE;
     }
+    wgpu_last_error = 0;
 
     int rc = HL_GPU_ERR_DISPATCH;
     WGPUCommandEncoder encoder = NULL;
@@ -1138,8 +1217,11 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                 if (err_msg) *err_msg = "uniform_buffer_create_failed";
                 goto cleanup;
             }
-            wgpuQueueWriteBuffer(dctx->queue, uniform_bufs[s], 0,
-                                  stage->uniforms, stage->uniforms_len);
+            if (gpu_write_padded(dctx->queue, uniform_bufs[s], stage->uniforms,
+                                 stage->uniforms_len, usize) != 0) {
+                if (err_msg) *err_msg = "out_of_memory";
+                goto cleanup;
+            }
             entries[0] = (WGPUBindGroupEntry){
                 .binding = 0, .buffer = uniform_bufs[s],
                 .offset = 0, .size = usize,
@@ -1349,6 +1431,11 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
         if (gpu_poll_with_timeout(dctx->device, timeout) != 0) {
             if (err_msg) *err_msg = "gpu_timeout";
             rc = HL_GPU_ERR_TIMEOUT;
+            goto cleanup;
+        }
+        if (wgpu_last_error) {          /* see wgpu_dispatch */
+            if (err_msg) *err_msg = "gpu_validation_error";
+            rc = HL_GPU_ERR_DISPATCH;
             goto cleanup;
         }
     }
@@ -1646,11 +1733,17 @@ static int wgpu_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
         return HL_GPU_ERR_READBACK;
     }
 
+    wgpu_last_error = 0;
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
-    wgpuDevicePoll(dctx->device, 1, NULL);
+    int waited = gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS);
 
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(encoder);
+    if (waited != 0 || wgpu_last_error) {
+        wgpuBufferDestroy(staging);
+        wgpuBufferRelease(staging);
+        return waited != 0 ? HL_GPU_ERR_TIMEOUT : HL_GPU_ERR_READBACK;
+    }
 
     /* Map staging buffer */
     MapReq map_req = {0};
@@ -1660,7 +1753,7 @@ static int wgpu_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
         .userdata1 = &map_req,
     };
     wgpuBufferMapAsync(staging, WGPUMapMode_Read, 0, staging_size, map_cb);
-    wgpuDevicePoll(dctx->device, 1, NULL);
+    gpu_wait_map(dctx->device, &map_req, HL_GPU_TIMEOUT_MS);
 
     if (!map_req.done || map_req.status != WGPUMapAsyncStatus_Success) {
         wgpuBufferDestroy(staging);

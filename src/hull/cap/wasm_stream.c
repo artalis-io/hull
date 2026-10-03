@@ -289,7 +289,13 @@ cleanup:
     hl_cap_wasm_instance_destroy(inst);
     if (in_file) fclose(in_file);
     if (in_buf) hl_alloc_free(alloc, in_buf, chunk_size);
-    if (out_file) fclose(out_file);
+    /* fwrite only buffers: the last chunks reach the file at fclose, and a
+     * full disk shows up there. Unchecked, the stream reported success over
+     * a truncated output file. */
+    if (out_file && fclose(out_file) != 0 && rc == HL_WASM_OK) {
+        rc = HL_WASM_ERR_INTERNAL;
+        if (err_msg) *err_msg = "write_failed";
+    }
 
     /* Set output for BUFFER mode */
     if (rc == HL_WASM_OK && out_buf &&
