@@ -132,10 +132,9 @@ static int l_image_new(lua_State *L)
 /* image.from_buffer(buf, w, h, format_str) -> HlImage userdata (borrowed) */
 static int l_image_from_buffer(lua_State *L)
 {
-    HlBufferView view;
-    if (!lua_get_buffer(L, 1, &view))
-        return luaL_error(L, "image.from_buffer: arg 1 must be a buffer");
-
+    /* The other arguments first: converting them can allocate, so run a GC
+     * step and an app __gc that closes the buffer. The view is taken last,
+     * when nothing else runs before it is used (or borrowed, below). */
     int w = (int)luaL_checkinteger(L, 2);
     int h = (int)luaL_checkinteger(L, 3);
     const char *fmt_name = luaL_checkstring(L, 4);
@@ -143,6 +142,10 @@ static int l_image_from_buffer(lua_State *L)
     int fmt = hl_image_format_from_name(fmt_name);
     if (fmt < 0)
         return luaL_error(L, "unknown image format: %s", fmt_name);
+
+    HlBufferView view;
+    if (!lua_get_buffer(L, 1, &view))
+        return luaL_error(L, "image.from_buffer: arg 1 must be a buffer");
 
     /* Refcountable zero-copy sources (mmap / WASM buffer) are borrowed and
      * their teardown is deferred until this image is freed (so buf:close()

@@ -19,6 +19,7 @@
 
 #include "mod_buffer.h"        /* get_hl_lua, luaopen decls */
 #include "hull/cap/kv.h"
+#include "protected.h"         /* hl_lua_pushlstring_safe */
 
 #include <string.h>
 
@@ -26,13 +27,23 @@
 
 typedef struct {
     HlKvConn *c;   /* owned; NULL after close (idempotent; __gc-safe) */
+    /* A scan is running: its keys point into the connection's reply buffer
+     * while each is copied into Lua, and that copy can run a GC step - so an
+     * app __gc. Another command would reuse (and could reallocate) that
+     * buffer, and close() would free the connection under the loop, so both
+     * wait: commands are refused, a close is held until the scan ends. */
+    int scanning;
+    int close_pending;
 } HlLuaKvConn;
 
 /* Resolve the live connection at stack arg 1, or raise if closed. */
 static HlKvConn *kv_self(lua_State *L)
 {
     HlLuaKvConn *o = luaL_checkudata(L, 1, HL_LUA_KV_MT);
-    if (!o->c) return (HlKvConn *)(luaL_error(L, "kv: connection is closed"), NULL);
+    if (!o->c || o->close_pending)
+        return (HlKvConn *)(luaL_error(L, "kv: connection is closed"), NULL);
+    if (o->scanning)
+        return (HlKvConn *)(luaL_error(L, "kv: connection is busy with a scan"), NULL);
     return o->c;
 }
 
@@ -141,11 +152,13 @@ static int l_kv_clear(lua_State *L)
 
 /* scan collector: append each borrowed key (prefix already stripped by the
  * backend) as a Lua byte string into a result table. */
-struct kv_scan_lua { lua_State *L; int tbl; lua_Integer n; };
+struct kv_scan_lua { lua_State *L; int tbl; lua_Integer n; int oom; };
 static int kv_scan_lua_cb(void *ctx, const uint8_t *key, size_t klen)
 {
     struct kv_scan_lua *s = (struct kv_scan_lua *)ctx;
-    lua_pushlstring(s->L, (const char *)key, klen);   /* COPY inside the callback */
+    /* COPY inside the callback, protected: running out of heap here raised
+     * through the backend's scan loop (a longjmp past its cleanup). */
+    if (hl_lua_pushlstring_safe(s->L, key, klen) != 0) { s->oom = 1; return 1; }
     lua_rawseti(s->L, s->tbl, ++s->n);
     return 0;
 }
@@ -154,11 +167,22 @@ static int kv_scan_lua_cb(void *ctx, const uint8_t *key, size_t klen)
 static int l_kv_scan(lua_State *L)
 {
     HlKvConn *c = kv_self(L);
+    HlLuaKvConn *o = luaL_checkudata(L, 1, HL_LUA_KV_MT);
     size_t plen; const char *prefix = luaL_checklstring(L, 2, &plen);
     size_t limit = (size_t)luaL_optinteger(L, 3, 0);
     lua_newtable(L);
-    struct kv_scan_lua s = { L, lua_gettop(L), 0 };
-    if (hl_cap_kv_scan(c, (const uint8_t *)prefix, plen, limit, kv_scan_lua_cb, &s) != 0)
+    struct kv_scan_lua s = { L, lua_gettop(L), 0, 0 };
+    o->scanning = 1;
+    int rc = hl_cap_kv_scan(c, (const uint8_t *)prefix, plen, limit, kv_scan_lua_cb, &s);
+    o->scanning = 0;
+    if (o->close_pending) {              /* a close() came in during the scan */
+        hl_cap_kv_close(o->c);
+        o->c = NULL;
+        o->close_pending = 0;
+        return luaL_error(L, "kv: connection closed during scan");
+    }
+    if (s.oom) return luaL_error(L, "kv.scan: not enough memory for the result");
+    if (rc != 0)
         return luaL_error(L, "%s", hl_cap_kv_error(c));
     return 1;   /* the table is on top */
 }
@@ -181,6 +205,7 @@ static int l_kv_backend_name(lua_State *L)
 static int l_kv_close(lua_State *L)
 {
     HlLuaKvConn *o = luaL_checkudata(L, 1, HL_LUA_KV_MT);
+    if (o->scanning) { o->close_pending = 1; return 0; }   /* see HlLuaKvConn */
     if (o->c) { hl_cap_kv_close(o->c); o->c = NULL; }
     return 0;
 }
@@ -211,6 +236,7 @@ static int l_kv_open(lua_State *L)
         return luaL_error(L, "%s", err);
 
     HlLuaKvConn *o = lua_newuserdatauv(L, sizeof *o, 0);
+    memset(o, 0, sizeof *o);
     o->c = c;
     luaL_setmetatable(L, HL_LUA_KV_MT);   /* installs __gc + method __index */
     return 1;

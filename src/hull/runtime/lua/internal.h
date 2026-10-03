@@ -144,6 +144,10 @@ static inline void hl_lua_anchor(lua_State *L, int anchor, int idx)
  * coroutine the app made. Defined in async.c. */
 int hl_lua_check_can_wait(lua_State *L, const char *what);
 
+/* Wrap coroutine.resume / coroutine.close so they refuse a coroutine the
+ * runtime has parked on a Hull operation (async.c). */
+void hl_lua_guard_coroutine_lib(lua_State *L);
+
 /* The text of the error value at `idx` on `from`, into `buf` (always
  * returned, always terminated). A string or number as is; anything else
  * through a protected tostring on the main state, so an error object with

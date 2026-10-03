@@ -373,16 +373,22 @@ static JSValue js_blob_writer_new(JSContext *ctx, JSValueConst this_val,
 static JSValue js_writer_write(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
-    HlBlobWriter *w = JS_GetOpaque2(ctx, this_val, hl_js_blob_writer_class_id);
-    if (!w) return JS_ThrowInternalError(ctx,
-        "blob.writer: write after finalize/abort");
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "writer.write requires (chunk)");
 
+    /* The chunk first: a non-buffer chunk is converted with its toString,
+     * which is app code and can abort() this writer - freeing it. The
+     * writer is fetched after, so a closed one is seen as closed. */
     size_t len = 0;
     const char *cstr = NULL;
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
     if (!bytes) return JS_EXCEPTION;
+
+    HlBlobWriter *w = JS_GetOpaque2(ctx, this_val, hl_js_blob_writer_class_id);
+    if (!w) {
+        if (cstr) JS_FreeCString(ctx, cstr);
+        return JS_ThrowInternalError(ctx, "blob.writer: write after finalize/abort");
+    }
 
     int rc = hl_cap_blob_writer_write(w, bytes, len);
     if (cstr) JS_FreeCString(ctx, cstr);
@@ -468,11 +474,14 @@ static JSValue js_blob_reader_new(JSContext *ctx, JSValueConst this_val,
 static JSValue js_reader_read(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
+    /* The size first: its valueOf is app code and can close() this reader
+     * - freeing it. The reader is fetched after. */
+    int64_t cap = 65536;
+    if (argc > 0 && !JS_IsUndefined(argv[0]) && JS_ToInt64(ctx, &cap, argv[0]) < 0)
+        return JS_EXCEPTION;
+
     HlBlobReader *r = JS_GetOpaque2(ctx, this_val, hl_js_blob_reader_class_id);
     if (!r) return JS_ThrowInternalError(ctx, "blob.reader: read after close");
-
-    int64_t cap = 65536;
-    if (argc > 0 && !JS_IsUndefined(argv[0])) JS_ToInt64(ctx, &cap, argv[0]);
     if (cap <= 0) return JS_NewArrayBufferCopy(ctx, NULL, 0);
 
     uint8_t *buf = js_malloc(ctx, (size_t)cap);
@@ -740,6 +749,11 @@ static JSValue js_blob_cleanup(JSContext *ctx, JSValueConst this_val,
     opts.dry_run = JS_ToBool(ctx, v);
     JS_FreeValue(ctx, v);
 
+    /* The option getters are app code: blob.init() from one replaces the
+     * store, and the old one is freed. Fetched again, as every other blob
+     * function does after its conversions. */
+    b = get_store(ctx);
+    if (!b) return JS_EXCEPTION;
     uint64_t removed = 0, freed = 0;
     if (hl_cap_blob_cleanup(b, &opts, &removed, &freed) != 0)
         return JS_ThrowInternalError(ctx, "blob.cleanup: failed");

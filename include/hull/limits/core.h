@@ -46,6 +46,11 @@
 #define HL_RANDOM_MAX_BYTES   65536             /* crypto.random() max */
 #define HL_RANDOM_TOKEN_MAX   1024              /* crypto.random_token() max bytes */
 #define HL_PBKDF2_ITERATIONS  100000
+/* The most a stored "pbkdf2:N:..." hash may ask for. The count is read from
+ * the hash, and a hash the app stores is input as much as the password is:
+ * an unbounded N had one verify run for minutes on the event loop. 100x the
+ * default, so a deliberately strengthened hash still verifies. */
+#define HL_PBKDF2_MAX_ITERATIONS 10000000
 
 /* ── SMTP client ───────────────────────────────────────────────────── */
 

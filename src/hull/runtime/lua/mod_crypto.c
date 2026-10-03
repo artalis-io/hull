@@ -10,6 +10,7 @@
 #include "hull/limits/core.h"
 #include "../../utils/base64.h"
 #include "../../utils/hex.h"
+#include "protected.h"   /* pushes that cannot leak or skip a scrub */
 
 #include <sh_arena.h>
 #include <stdlib.h>
@@ -167,7 +168,8 @@ static int lua_crypto_verify_password(lua_State *L)
     /* Parse iterations */
     char *end = NULL;
     long iterations = strtol(p, &end, 10);
-    if (!end || *end != ':' || iterations < 100000) {
+    if (!end || *end != ':' || iterations < 100000 ||
+        iterations > HL_PBKDF2_MAX_ITERATIONS) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -415,8 +417,11 @@ static int lua_crypto_rsa_private_pem(lua_State *L)
     if (rc != 0)
         return luaL_error(L, "crypto.rsa_private_pem: the components do not form "
                           "a valid RSA key");
-    lua_pushlstring(L, pem, pem_len);
+    /* Protected, and scrubbed either way: a push that raised left the
+     * private key in this stack buffer. */
+    int pushed = hl_lua_pushlstring_safe(L, pem, pem_len);
     secure_zero(pem, pem_len);
+    if (pushed != 0) return luaL_error(L, "not enough memory for the key");
     return 1;
 }
 
@@ -644,8 +649,10 @@ static int lua_crypto_x25519(lua_State *L)
     }
     if (rc != 0)
         return luaL_error(L, "x25519 failed");
-    lua_pushlstring(L, (const char *)shared, sizeof shared);
+    /* Protected, and scrubbed either way (see rsa_private_pem). */
+    int pushed = hl_lua_pushlstring_safe(L, (const char *)shared, sizeof shared);
     secure_zero(shared, sizeof shared);
+    if (pushed != 0) return luaL_error(L, "not enough memory for the secret");
     return 1;
 }
 

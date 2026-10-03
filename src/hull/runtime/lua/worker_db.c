@@ -162,28 +162,30 @@ static int worker_lua_db_query(lua_State *L)
     if (!h)
         return luaL_error(L, "%s", err ? err : "worker db");
 
+    /* (sql, params) exactly: slot 2 is the params or nil, never a value
+     * pushed below - with params omitted, the table / guard pushed next
+     * would sit there and be read as them. */
+    lua_settop(L, 2);
+    /* The result table and the guard come FIRST, the calloc'd params last:
+     * both allocate and can raise, and raised after the calloc they leaked
+     * it. Nothing between the conversion and the free below can raise. */
+    lua_newtable(L);
+    int table_idx = lua_gettop(L);
+    WorkerLuaQueryCtx qc = { .L = L, .table_idx = table_idx, .row_count = 0 };
+    int guard = push_row_loop_guard(L);
+
     HlValue *params = NULL;
     int nparams = 0;
-    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+    if (!lua_isnoneornil(L, 2)) {
         if (worker_lua_to_hl_values(L, 2, &params, &nparams) != 0)
             return luaL_error(L, "params must be a table");
     }
 
-    lua_newtable(L);
-    int table_idx = lua_gettop(L);
-    WorkerLuaQueryCtx qc = { .L = L, .table_idx = table_idx, .row_count = 0 };
-
-    int guard = push_row_loop_guard(L);
     int rc = hl_db_query(h, sql, params, nparams, worker_lua_row_cb, &qc, NULL);
-    lua_settop(L, guard - 1);   /* closes the guard; the result table is on top */
-
-    /* Rotate the result table below the aliased param values so the pop
-     * removes params, not the result (same discipline as the sync path). */
-    if (nparams > 0) {
-        lua_rotate(L, table_idx - nparams, 1);
-        lua_pop(L, nparams);
-    }
     free(params);
+    /* Closes the guard and drops the param values above it; the result
+     * table is on top. */
+    lua_settop(L, guard - 1);
 
     if (qc.failed)
         return luaL_error(L, "query: not enough memory for the result");
@@ -205,20 +207,21 @@ static int worker_lua_db_exec(lua_State *L)
     if (!h)
         return luaL_error(L, "%s", err ? err : "worker db");
 
+    lua_settop(L, 2);   /* (sql, params): see worker_lua_db_query */
+    /* The guard first, the calloc'd params last: the guard allocates and
+     * can raise, and raised after the calloc it leaked it. */
+    int guard = push_row_loop_guard(L);   /* a UDF steps inside exec */
+
     HlValue *params = NULL;
     int nparams = 0;
-    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+    if (!lua_isnoneornil(L, 2)) {
         if (worker_lua_to_hl_values(L, 2, &params, &nparams) != 0)
             return luaL_error(L, "params must be a table");
     }
 
-    int guard = push_row_loop_guard(L);   /* a UDF steps inside exec */
     int rc = hl_db_exec(h, sql, params, nparams);
-    lua_settop(L, guard - 1);
-
-    if (nparams > 0)
-        lua_pop(L, nparams);
     free(params);
+    lua_settop(L, guard - 1);   /* closes the guard, drops the param values */
 
     if (rc < 0)
         return luaL_error(L, "exec: %s", hl_db_errmsg(h));

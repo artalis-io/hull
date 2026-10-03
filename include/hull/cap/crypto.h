@@ -314,7 +314,8 @@ int hl_cap_crypto_auth_verify(const uint8_t tag[32],
  * @param pw_len      Password length.
  * @param salt        Salt bytes (recommended ≥ 16).
  * @param salt_len    Salt length.
- * @param iterations  Iteration count. Hull defaults to 100_000 in the
+ * @param iterations  Iteration count, 100_000 to HL_PBKDF2_MAX_ITERATIONS
+ *                    (the call fails outside it). Hull defaults to 100_000 in the
  *                    stdlib (`crypto.hash_password`); the OWASP minimum
  *                    for PBKDF2-HMAC-SHA256 is also 100_000 as of 2026.
  * @param out         Output buffer.
