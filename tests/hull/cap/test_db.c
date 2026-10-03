@@ -407,6 +407,19 @@ UTEST(hl_cap_db, namespace_check_blocks_hull_tables)
     ASSERT_EQ(hl_cap_db_check_namespace(NULL), HL_DB_ERR_DENIED);
 }
 
+/* Postgres decodes U&"\005fhull_sessions" to _hull_sessions after this text
+ * check has looked, so the Unicode-escape identifier form is refused. The
+ * U&'...' string literal is not an identifier and stays allowed. */
+UTEST(hl_cap_db, namespace_check_refuses_unicode_escape_identifiers)
+{
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT * FROM U&\"\\005fhull_sessions\""),
+              HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("select * from u&\"d\\0061ta\""),
+              HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT U&'d\\0061t\\+000061'"), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT a & b FROM t"), HL_DB_OK);
+}
+
 UTEST(hl_cap_db, namespace_check_case_insensitive)
 {
     ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _Hull_Outbox"), HL_DB_ERR_DENIED);
