@@ -172,6 +172,36 @@ UTEST(hull_cap_image, data_too_small)
     ASSERT_TRUE(img == NULL);
 }
 
+/* The 1x1 PNG with its IHDR rewritten to w x h (stb does not check CRCs). */
+static void png_with_size(unsigned char *out, uint32_t w, uint32_t h)
+{
+    memcpy(out, minimal_png, sizeof(minimal_png));
+    for (int i = 0; i < 4; i++) {
+        out[16 + i] = (unsigned char)(w >> (24 - 8 * i));
+        out[20 + i] = (unsigned char)(h >> (24 - 8 * i));
+    }
+}
+
+/* A header's declared size is checked before decoding: stb allocated the
+ * whole buffer first, so a 70-byte file claiming 23000 x 23000 cost 2 GB.
+ * 8193 x 8193 is under the per-side limit but over the pixel budget. */
+UTEST(hull_cap_image, decode_refuses_a_header_past_the_pixel_budget)
+{
+    unsigned char png[sizeof(minimal_png)];
+    const char *err = NULL;
+
+    png_with_size(png, 23000, 23000);
+    EXPECT_TRUE(hl_image_decode(png, sizeof png, NULL, NULL, &err) == NULL);
+
+    png_with_size(png, 8193, 8193);
+    EXPECT_TRUE(hl_image_decode(png, sizeof png, NULL, NULL, &err) == NULL);
+
+    png_with_size(png, 1, 1);
+    HlImage *img = hl_image_decode(png, sizeof png, NULL, NULL, &err);
+    ASSERT_TRUE(img != NULL);
+    hl_image_free(img);
+}
+
 UTEST(hull_cap_image, decode_png)
 {
     const char *err = NULL;

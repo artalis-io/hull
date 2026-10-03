@@ -187,7 +187,10 @@ static int parse_params(const char *s, size_t n, int *out, int max)
     for (size_t i = 0; i < n && count < max; i++) {
         char c = s[i];
         if (c >= '0' && c <= '9') {
-            cur = cur * 10 + (c - '0');
+            /* Saturate: a run of digits from the terminal (or anything
+             * written to it) overflowed `cur`, which is undefined. No real
+             * parameter - a key code, a mouse cell - comes near this. */
+            if (cur < 100000) cur = cur * 10 + (c - '0');
             have_digit = 1;
         } else if (c == ';') {
             out[count++] = have_digit ? cur : 0;

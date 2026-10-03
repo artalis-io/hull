@@ -199,6 +199,70 @@ int hl_tool_check_allowlist(const char *binary)
 
 /* ── Dangerous flag validation ─────────────────────────────────────── */
 
+/* Only these linker options may follow -Wl,. An entry ending in '=' takes a
+ * value and matches as a prefix; any other entry matches exactly. */
+static const char *const safe_linker_flags[] = {
+    "--no-entry", "--export=", "--export-all", "--allow-undefined",
+    "--initial-memory=", "--max-memory=", "--stack-first",
+    "--import-memory", "--export-memory", "--shared-memory",
+    /* Composable-feature whole-archive linking (`hull build
+     * --with=<feature>` for a whole_archive feature like tui). These
+     * only control WHICH members of an archive are pulled -- no
+     * plugin load, no codegen, no code execution (contrast the
+     * blocked -load / -Xlinker / @response). build.lua emits them
+     * solely for the trusted FEATURE_SPECS feature archive, whose
+     * path it controls; the build sandbox's unveil bounds the path. */
+    "-force_load",        /* macOS ld64: -Wl,-force_load,<archive> */
+    "--whole-archive", "--no-whole-archive",  /* GNU ld / lld bracket */
+    /* GNU ld archive-interdependency group, emitted by build.lua when
+     * composing a DB wire feature (postgres/mysql) whose archive
+     * references base symbols (tls_client) in the platform lib. Only
+     * affects archive resolution order -- no code execution. */
+    "--start-group", "--end-group",
+    /* Dead-code section stripping, emitted by the zig linker backend
+     * (linker_zig.c) per target format: --gc-sections on ELF,
+     * -dead_strip on Mach-O. Pure size optimization (drops unreferenced
+     * sections) -- no plugin, no codegen, no code execution. */
+    "--gc-sections", "-dead_strip",
+    NULL
+};
+
+static int safe_linker_flag(const char *f, size_t n)
+{
+    for (const char *const *sf = safe_linker_flags; *sf; sf++) {
+        size_t sflen = strlen(*sf);
+        if ((*sf)[sflen - 1] == '=') {
+            if (n >= sflen && strncmp(f, *sf, sflen) == 0) return 1;
+        } else if (n == sflen && strncmp(f, *sf, sflen) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Every comma-separated piece of a -Wl, argument is its own linker argument,
+ * so every piece is checked. Only the first used to be, by prefix:
+ * -Wl,--export=x,--plugin=/tmp/evil.so passed on its "--export=". The one
+ * piece that is not a flag is the archive after -force_load. */
+static int check_wl(const char *wl)
+{
+    int want_path = 0;
+    for (const char *p = wl;;) {
+        const char *comma = strchr(p, ',');
+        size_t n = comma ? (size_t)(comma - p) : strlen(p);
+        if (want_path) {
+            if (n == 0 || p[0] == '-') return -1;
+            want_path = 0;
+        } else {
+            if (!safe_linker_flag(p, n)) return -1;
+            if (n == 11 && strncmp(p, "-force_load", 11) == 0) want_path = 1;
+        }
+        if (!comma) break;
+        p = comma + 1;
+    }
+    return want_path ? -1 : 0;
+}
+
 int hl_tool_validate_args(const char *const argv[])
 {
     if (!argv) return -1;
@@ -207,42 +271,17 @@ int hl_tool_validate_args(const char *const argv[])
         if (strcmp(a, "-load") == 0)          return -1; /* Clang plugin */
         if (strcmp(a, "-fplugin") == 0)       return -1; /* GCC plugin */
         if (strncmp(a, "-fplugin=", 9) == 0)  return -1; /* GCC plugin= */
+        if (strncmp(a, "-fpass-plugin=", 14) == 0) return -1; /* Clang pass plugin */
         if (strcmp(a, "-Xlinker") == 0)       return -1; /* linker pass */
-        if (strncmp(a, "-Wl,", 4) == 0) {
-            /* Only allow specific safe linker options after -Wl, */
-            static const char *const safe_linker_flags[] = {
-                "--no-entry", "--export=", "--export-all", "--allow-undefined",
-                "--initial-memory=", "--max-memory=", "--stack-first",
-                "--import-memory", "--export-memory", "--shared-memory",
-                /* Composable-feature whole-archive linking (`hull build
-                 * --with=<feature>` for a whole_archive feature like tui). These
-                 * only control WHICH members of an archive are pulled -- no
-                 * plugin load, no codegen, no code execution (contrast the
-                 * blocked -load / -Xlinker / @response). build.lua emits them
-                 * solely for the trusted FEATURE_SPECS feature archive, whose
-                 * path it controls; the build sandbox's unveil bounds the path. */
-                "-force_load,",       /* macOS ld64: -Wl,-force_load,<archive> */
-                "--whole-archive", "--no-whole-archive",  /* GNU ld / lld bracket */
-                /* GNU ld archive-interdependency group, emitted by build.lua when
-                 * composing a DB wire feature (postgres/mysql) whose archive
-                 * references base symbols (tls_client) in the platform lib. Only
-                 * affects archive resolution order -- no code execution. */
-                "--start-group", "--end-group",
-                /* Dead-code section stripping, emitted by the zig linker backend
-                 * (linker_zig.c) per target format: --gc-sections on ELF,
-                 * -dead_strip on Mach-O. Pure size optimization (drops unreferenced
-                 * sections) -- no plugin, no codegen, no code execution. */
-                "--gc-sections", "-dead_strip",
-                NULL
-            };
-            const char *wl_arg = a + 4;
-            int safe = 0;
-            for (const char *const *sf = safe_linker_flags; *sf; sf++) {
-                size_t sflen = strlen(*sf);
-                if (strncmp(wl_arg, *sf, sflen) == 0) { safe = 1; break; }
-            }
-            if (!safe) return -1;
-        }
+        if (strcmp(a, "-wrapper") == 0)       return -1; /* runs a program around each tool */
+        if (strncmp(a, "-specs=", 7) == 0 ||
+            strncmp(a, "--specs=", 8) == 0)   return -1; /* GCC spec file: arbitrary commands */
+        if (strncmp(a, "--ld-path=", 10) == 0) return -1; /* linker named by path */
+        /* -fuse-ld=lld picks a linker by name (Hull's lld backend uses it);
+         * -fuse-ld=/tmp/x runs that file as the linker. */
+        if (strncmp(a, "-fuse-ld=", 9) == 0 &&
+            (strchr(a + 9, '/') || strchr(a + 9, '\\'))) return -1;
+        if (strncmp(a, "-Wl,", 4) == 0 && check_wl(a + 4) != 0) return -1;
         if (a[0] == '@')                       return -1; /* response file */
     }
     return 0;

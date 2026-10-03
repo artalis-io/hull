@@ -120,7 +120,7 @@ static void restore_signal_handlers(void);
 static int  enter_alt_screen(HlTuiCtx *ctx);
 static int  leave_alt_screen(HlTuiCtx *ctx);
 static int  update_size(HlTuiCtx *ctx);
-static int  alloc_cells(HlTuiCtx *ctx);
+static int  alloc_cells(HlTuiCtx *ctx, int cols, int rows);
 static int  raw_write(int fd, const char *s, size_t n);
 static int  detect_caps(HlTuiCtx *ctx);
 static void detect_theme(HlTuiCtx *ctx);
@@ -361,14 +361,23 @@ static int update_size(HlTuiCtx *ctx)
     if (ioctl(ctx->out_fd, TIOCGWINSZ, &ws) < 0) return -1;
     if (ws.ws_col == 0) ws.ws_col = HL_TUI_TTY_DEFAULT_COLS;
     if (ws.ws_row == 0) ws.ws_row = HL_TUI_TTY_DEFAULT_ROWS;
+    /* The size is committed only once buffers of that size exist: when the
+     * allocation failed, cols/rows already described the new screen and
+     * every write indexed buffers sized for the old one. */
+    if (alloc_cells(ctx, ws.ws_col, ws.ws_row) < 0) return -1;
     ctx->cols = ws.ws_col;
     ctx->rows = ws.ws_row;
-    return alloc_cells(ctx);
+    /* A cursor left past the new edge (80x24 shrunk to 40x10, cursor at
+     * 79,23) was used as-is by the next write: a combining mark landed at
+     * 23*40+78 in a 400-cell buffer. Clamp it into the new grid. */
+    if (ctx->cursor_x > ctx->cols) ctx->cursor_x = ctx->cols;
+    if (ctx->cursor_y > ctx->rows - 1) ctx->cursor_y = ctx->rows - 1;
+    return 0;
 }
 
-static int alloc_cells(HlTuiCtx *ctx)
+static int alloc_cells(HlTuiCtx *ctx, int cols, int rows)
 {
-    size_t need = (size_t)ctx->cols * (size_t)ctx->rows;
+    size_t need = (size_t)cols * (size_t)rows;
     if (need == 0) return 0;
     if (need == ctx->cells_alloc) return 0;
 
@@ -673,7 +682,8 @@ int hl_cap_tui_write(HlTuiCtx *ctx, const char *s, size_t len)
         int w = hl_tui_cp_width(cp);
         if (w == 0) {
             /* Combining mark - attach to preceding cell when possible. */
-            if (ctx->cursor_x > 0) {
+            if (ctx->cursor_x > 0 && ctx->cursor_x - 1 < ctx->cols &&
+                ctx->cursor_y >= 0 && ctx->cursor_y < ctx->rows) {
                 HlTuiCell *c = cell_at(ctx->pending, ctx->cols,
                                        ctx->cursor_x - 1, ctx->cursor_y);
                 if (c->combining_count < HL_TUI_MAX_COMBINING) {

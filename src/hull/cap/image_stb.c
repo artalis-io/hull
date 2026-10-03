@@ -58,12 +58,24 @@ static int stb_decode(const void *src, size_t src_len,
     if (src_len > (size_t)INT32_MAX)
         return -1; /* stbi takes int len - reject oversized input */
     int iw, ih, channels_in_file;
+    /* Size the image from its header BEFORE decoding. stb allocates the
+     * whole pixel buffer up front, with plain malloc outside the VM's
+     * tracked heap, and the dimension check below ran only after that: a
+     * tiny JPEG header, or a PNG of compressed zeros, cost gigabytes. */
+    if (!stbi_info_from_memory((const unsigned char *)src, (int)src_len,
+                               &iw, &ih, &channels_in_file))
+        return -1;
+    if (iw <= 0 || ih <= 0 || (uint32_t)iw > HL_IMAGE_MAX_DIM ||
+        (uint32_t)ih > HL_IMAGE_MAX_DIM ||
+        (uint64_t)iw * (uint64_t)ih > HL_IMAGE_MAX_PIXELS)
+        return -1;
     unsigned char *data = stbi_load_from_memory(
         (const unsigned char *)src, (int)src_len,
         &iw, &ih, &channels_in_file, requested_channels);
     if (!data) return -1;
     if (iw <= 0 || ih <= 0 || (uint32_t)iw > HL_IMAGE_MAX_DIM ||
-        (uint32_t)ih > HL_IMAGE_MAX_DIM) {
+        (uint32_t)ih > HL_IMAGE_MAX_DIM ||
+        (uint64_t)iw * (uint64_t)ih > HL_IMAGE_MAX_PIXELS) {
         stbi_image_free(data);
         return -1;
     }

@@ -1654,8 +1654,13 @@ void hl_cap_wasm_instance_destroy(HlWasmInstance *pi)
         return;
 
     if (atomic_load(&pi->busy)) {
-        log_warn("[wasm] persistent instance '%s' destroyed while busy", pi->name);
-        return; /* let async complete first */
+        /* An async call is running on a worker. Free it when that call
+         * completes (hl_cap_wasm_instance_release_busy). This returned
+         * without recording anything, and the bindings drop their pointer
+         * on close, so the instance - its linear memory and exec env - was
+         * never freed. `closed` stays clear: the worker reads it. */
+        pi->destroy_pending = 1;
+        return;
     }
 
     pi->closed = 1;
@@ -1684,6 +1689,14 @@ void hl_cap_wasm_instance_destroy(HlWasmInstance *pi)
         hl_alloc_free(pi->alloc, pi, sizeof(*pi));
     else
         free(pi);
+}
+
+void hl_cap_wasm_instance_release_busy(HlWasmInstance *pi)
+{
+    if (!pi) return;
+    atomic_store(&pi->busy, 0);
+    if (pi->destroy_pending)
+        hl_cap_wasm_instance_destroy(pi);
 }
 
 /* ── Streaming I/O context helpers (for wasm_stream.c) ─────────────── */

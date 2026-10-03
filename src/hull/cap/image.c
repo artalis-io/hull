@@ -73,6 +73,8 @@ static int image_byte_size(uint32_t w, uint32_t h, int bpp, size_t *out)
         return -1;
     if (w > HL_IMAGE_MAX_DIM || h > HL_IMAGE_MAX_DIM)
         return -1;
+    if ((uint64_t)w * (uint64_t)h > HL_IMAGE_MAX_PIXELS)
+        return -1;
     uint64_t total = (uint64_t)w * (uint64_t)h * (uint64_t)bpp;
     if (total > SIZE_MAX / 2)
         return -1;
