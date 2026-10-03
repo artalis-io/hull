@@ -106,6 +106,10 @@ static int hl_lua_co_guarded(lua_State *L)
 
 void hl_lua_guard_coroutine_lib(lua_State *L)
 {
+    /* Every thread starts with a copy of the main thread's extra space, so
+     * clearing it here makes "not parked" the default for all of them (it
+     * was never written: the parked check read uninitialized memory). */
+    *(void **)lua_getextraspace(L) = NULL;
     lua_getglobal(L, "coroutine");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
     static const char *const fns[] = { "resume", "close" };
