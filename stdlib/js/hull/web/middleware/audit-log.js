@@ -171,6 +171,18 @@ function extractUa(req) {
 
 import { encoding } from "hull:encoding";
 
+// A user id as stored. Apps key users by INTEGER PRIMARY KEY as often as by
+// text, and the column is text, so an integer id is its decimal string. These
+// functions used to accept strings only, and an integer id made them return
+// nothing, silently: session.destroyAll(42) left every session alive, and no
+// login was recorded. Anything else (null, "", a float, an object) is no id.
+function uidString(userId) {
+    if (typeof userId === "string") return userId === "" ? null : userId;
+    if (typeof userId === "number" && Number.isSafeInteger(userId)) return String(userId);
+    if (typeof userId === "bigint") return userId.toString();
+    return null;
+}
+
 // From SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix). Salt is
 // deployment-private (from init's fingerprintSalt opt) so output is only
 // meaningful within this deployment.
@@ -192,8 +204,8 @@ function fingerprint(req) {
 }
 
 function record(userId, kind, req, opts) {
-    if (typeof userId !== "string" || userId === ""
-        || typeof kind !== "string" || kind === "") return;
+    userId = uidString(userId);
+    if (userId === null || typeof kind !== "string" || kind === "") return;
     opts = opts || {};
     const ip = opts.ip !== undefined ? opts.ip : extractIp(req);
     let ua = opts.user_agent !== undefined ? opts.user_agent : extractUa(req);
@@ -233,7 +245,8 @@ function record(userId, kind, req, opts) {
 }
 
 function list(userId, opts) {
-    if (typeof userId !== "string" || userId === "") return [];
+    userId = uidString(userId);
+    if (userId === null) return [];
     opts = opts || {};
     const limit = opts.limit || 50;
     let rows;
@@ -264,7 +277,8 @@ function list(userId, opts) {
 }
 
 function listDevices(userId, opts) {
-    if (typeof userId !== "string" || userId === "") return [];
+    userId = uidString(userId);
+    if (userId === null) return [];
     opts = opts || {};
     const cutoff = time.now() - ((opts.window_days || 90) * 86400);
     return db.query(
@@ -282,7 +296,8 @@ function listDevices(userId, opts) {
 }
 
 function isNewDevice(userId, req, opts) {
-    if (typeof userId !== "string" || userId === "") return false;
+    userId = uidString(userId);
+    if (userId === null) return false;
     opts = opts || {};
     const cutoff = time.now() - ((opts.window_days || 30) * 86400);
     const fp = fingerprint(req);

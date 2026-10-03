@@ -25,29 +25,31 @@ end
 -- ── parse() ────────────────────────────────────────────────────────
 
 test("parse nil/empty returns nil", function()
-    assert_eq(sort.parse(mock_req(nil)), nil)
-    assert_eq(sort.parse(mock_req("")), nil)
+    assert_eq(sort.parse(mock_req(nil), { allowed = { "name", "email", "id" } }), nil)
+    assert_eq(sort.parse(mock_req(""), { allowed = { "name", "email", "id" } }), nil)
 end)
 
 test("parse bare column defaults direction to asc", function()
-    local r = sort.parse(mock_req("name"))
+    local r = sort.parse(mock_req("name"), { allowed = { "name", "email", "id" } })
     assert_eq(r.column, "name")
     assert_eq(r.direction, "asc")
 end)
 
 test("parse col:asc and col:desc round-trip", function()
-    assert_eq(sort.parse(mock_req("name:asc")).direction, "asc")
-    assert_eq(sort.parse(mock_req("name:desc")).direction, "desc")
+    assert_eq(sort.parse(mock_req("name:asc"), { allowed = { "name", "email", "id" } }).direction, "asc")
+    assert_eq(sort.parse(mock_req("name:desc"), { allowed = { "name", "email", "id" } }).direction, "desc")
 end)
 
 test("parse unknown direction defaults to asc", function()
-    assert_eq(sort.parse(mock_req("name:weird")).direction, "asc")
+    assert_eq(sort.parse(mock_req("name:weird"), { allowed = { "name", "email", "id" } }).direction, "asc")
 end)
 
 test("parse strips non-[A-Za-z0-9_-] from column name", function()
     -- URL-injection / SQL-injection defense: column name is
     -- always allowlist-sanitized before reaching SQL.
-    assert_eq(sort.parse(mock_req("name; DROP TABLE assets")).column, "nameDROPTABLEassets")
+    assert_eq(sort.parse(mock_req("name; DROP TABLE assets"),
+        { allowed = { "nameDROPTABLEassets" } }).column, "nameDROPTABLEassets")
+    assert_eq(sort.parse(mock_req("name; DROP TABLE assets"), { allowed = { "name" } }), nil)
 end)
 
 test("parse with opts.allowed rejects non-allowed column", function()
@@ -60,8 +62,18 @@ test("parse with opts.allowed admits allowed column", function()
     assert_eq(r.column, "name")
 end)
 
+test("parse without opts.allowed raises", function()
+    -- With no allowlist any column passed, so ?sort=password_hash let a
+    -- client order rows by a secret and read it off the order.
+    local ok, err = pcall(sort.parse, mock_req("password_hash"))
+    assert_eq(ok, false)
+    assert_match(tostring(err), "opts.allowed")
+    ok = pcall(sort.parse, mock_req("name"), { default = "id" })
+    assert_eq(ok, false)
+end)
+
 test("parse falls back to opts.default when no param", function()
-    local r = sort.parse(mock_req(), { default = "id" })
+    local r = sort.parse(mock_req(), { allowed = { "id" }, default = "id" })
     assert_eq(r.column, "id")
     assert_eq(r.direction, "asc")
 end)
@@ -163,7 +175,7 @@ end)
 test("parse sanitizes opts.default through safe_column", function()
     -- If an app passes a default with SQL meta-chars (config typo
     -- / user-controlled config), the result must still be safe.
-    local r = sort.parse(mock_req(), { default = "name; DROP TABLE" })
+    local r = sort.parse(mock_req(), { allowed = { "nameDROPTABLE" }, default = "name; DROP TABLE" })
     assert_eq(r.column, "nameDROPTABLE")
 end)
 

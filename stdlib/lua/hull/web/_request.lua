@@ -48,4 +48,45 @@ function M.client_ip(req, trust_proxy)
     return ip
 end
 
+
+--- The key a per-client limit (a rate limit, a lockout) counts an address
+-- under: an IPv4 address as itself, an IPv6 address as its /64. Anyone with
+-- one IPv6 host holds a whole /64 and can take a fresh address per request,
+-- so keyed by the full address every request had its own budget - the TOTP
+-- per-IP gate and any login rate limit did nothing. IPv4-mapped addresses
+-- (::ffff:a.b.c.d) count as the IPv4 address; anything that does not parse
+-- is returned as it is.
+--
+-- @tparam string|nil ip
+-- @treturn string|nil
+function M.limit_key(ip)
+    if type(ip) ~= "string" or ip == "" or not ip:find(":", 1, true) then
+        return ip
+    end
+    ip = ip:gsub("%%.*$", "")                               -- zone ("fe80::1%eth0")
+    local v4 = ip:match("^::[fF][fF][fF][fF]:(%d+%.%d+%.%d+%.%d+)$")
+    if v4 then return v4 end
+    local function split(s, out)
+        if s == "" then return true end
+        for g in (s .. ":"):gmatch("([^:]*):") do
+            if not g:match("^%x%x?%x?%x?$") then return false end
+            out[#out + 1] = g
+        end
+        return true
+    end
+    local groups = {}
+    local head, tail = ip:match("^(.-)::(.*)$")
+    if head then
+        local h, t = {}, {}
+        if not split(head, h) or not split(tail, t) or #h + #t > 7 then return ip end
+        for _, g in ipairs(h) do groups[#groups + 1] = g end
+        for _ = 1, 8 - #h - #t do groups[#groups + 1] = "0" end
+        for _, g in ipairs(t) do groups[#groups + 1] = g end
+    elseif not split(ip, groups) or #groups ~= 8 then
+        return ip
+    end
+    for i = 1, 4 do groups[i] = string.format("%x", tonumber(groups[i], 16)) end
+    return groups[1] .. ":" .. groups[2] .. ":" .. groups[3] .. ":" .. groups[4] .. "::/64"
+end
+
 return M

@@ -426,7 +426,7 @@ function extractIp(req) {
     }
     // Core extraction (trustXff -> XFF-first -> remote_addr, 64-cap)
     // via the shared hull:web:_request helper; see docs/stdlib_style.md.
-    return _request.clientIp(req, _state.trustXff);
+    return _request.limitKey(_request.clientIp(req, _state.trustXff));
 }
 
 // ── Public API ─────────────────────────────────────────────────────

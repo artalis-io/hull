@@ -174,6 +174,43 @@ const PRESETS = {
 
 import { encoding } from "hull:encoding";
 
+// An RSA JWK with no certificate - just the modulus `n` and exponent `e`,
+// base64url (RFC 7518 section 6.3.1) - as an SPKI PEM. Google's JWKS is all
+// such keys: x5c-only parsing skipped every one, so no Google ID token could
+// ever verify. The DER is SEQUENCE { SEQUENCE { rsaEncryption, NULL },
+// BIT STRING { SEQUENCE { INTEGER n, INTEGER e } } }. Byte strings throughout.
+const RSA_OID = "\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01";   // 1.2.840.113549.1.1.1
+function der(tag, body) {
+    const n = body.length;
+    let len;
+    if (n < 0x80) len = String.fromCharCode(n);
+    else if (n < 0x100) len = "\x81" + String.fromCharCode(n);
+    else len = "\x82" + String.fromCharCode(n >> 8, n & 0xff);
+    return String.fromCharCode(tag) + len + body;
+}
+function derUint(b) {
+    b = b.replace(/^\x00+/, "");
+    if (b === "" || b.charCodeAt(0) >= 0x80) b = "\x00" + b;
+    return der(0x02, b);
+}
+function rsaJwkPem(k) {
+    if (k.kty !== "RSA" || typeof k.n !== "string" || typeof k.e !== "string")
+        return null;
+    const n = encoding.base64.decode(k.n, { url: true });
+    const e = encoding.base64.decode(k.e, { url: true });
+    // 8192-bit keys at most, so every length fits two bytes.
+    if (n === null || e === null || n.length < 128 || n.length > 1024
+        || e.length === 0 || e.length > 8)
+        return null;
+    const spki = der(0x30, der(0x30, RSA_OID + "\x05\x00")
+        + der(0x03, "\x00" + der(0x30, derUint(n) + derUint(e))));
+    const b64 = encoding.base64.encode(spki);
+    const lines = [];
+    for (let i = 0; i < b64.length; i += 64) lines.push(b64.slice(i, i + 64));
+    return "-----BEGIN PUBLIC KEY-----\n" + lines.join("\n")
+        + "\n-----END PUBLIC KEY-----\n";
+}
+
 function randomUrlsafe(nBytes) {
     return crypto.randomToken(nBytes);
 }
@@ -262,13 +299,17 @@ async function refreshJwks(providerName) {
     if (!doc || !Array.isArray(doc.keys)) return null;
     const byKid = Object.create(null);   // kid comes from the token
     for (const k of doc.keys) {
-        if (k && k.kid && Array.isArray(k.x5c) && typeof k.x5c[0] === "string") {
+        if (k && typeof k.kid === "string" && Array.isArray(k.x5c)
+            && typeof k.x5c[0] === "string") {
             // x5c is standard base64 (RFC 7517 section 4.7).
-            const der = encoding.base64.decode(k.x5c[0], { lenient: true });
-            if (der !== null) {
-                const pem = crypto.x509PubkeyPem(encoding.bytes.toU8(der).buffer);
+            const cert = encoding.base64.decode(k.x5c[0], { lenient: true });
+            if (cert !== null) {
+                const pem = crypto.x509PubkeyPem(encoding.bytes.toU8(cert).buffer);
                 if (pem) byKid[k.kid] = pem;
             }
+        } else if (k && typeof k.kid === "string") {
+            const pem = rsaJwkPem(k);
+            if (pem) byKid[k.kid] = pem;
         }
     }
     _state._jwksCache[providerName] = { fetchedAt: time.now(), byKid };

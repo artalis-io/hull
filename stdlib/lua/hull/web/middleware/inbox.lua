@@ -152,15 +152,32 @@ end
 -- @tparam[opt] table opts  Same as `inbox.mark_processed`.
 -- @treturn boolean  `true` if duplicate, `false` if new (and marked).
 function inbox.check_and_mark(message_id, source, opts)
-    local is_dup = false
-    db.batch(function()
-        if inbox.is_duplicate(message_id, source) then
-            is_dup = true
-            return
-        end
-        inbox.mark_processed(message_id, source, opts)
-    end)
-    return is_dup
+    if not message_id or message_id == "" then
+        return false
+    end
+    source = source or "default"
+    check_id_len(message_id, source)
+    opts = opts or {}
+    local now = time.now()
+    local ttl = opts.ttl or _ttl
+
+    -- A mark that has expired no longer counts: drop it, so the message is
+    -- new again.
+    db.exec(
+        "DELETE FROM _hull_inbox_processed "
+        .. "WHERE source = ? AND message_id = ? AND expires_at <= ?",
+        { source, message_id, now })
+    -- The insert IS the check. It used to be a SELECT, then an upsert: two
+    -- instances handling the same redelivery at once (Postgres at READ
+    -- COMMITTED, MySQL) both saw no row, both wrote one, and both ran the side
+    -- effect. The primary key lets exactly one insert in; whoever's did not
+    -- land has a duplicate.
+    local inserted = db.insert_if_absent(
+        "_hull_inbox_processed",
+        { "source", "message_id" },
+        { "message_id", "source", "processed_at", "expires_at" },
+        { message_id, source, now, now + ttl })
+    return inserted == 0
 end
 
 --- Delete expired inbox records.

@@ -32,6 +32,20 @@ local json   = require("hull.json")
 local log    = require("hull.log")
 local _request = require("hull.web._request")
 
+-- A user id as stored. Apps key users by INTEGER PRIMARY KEY as often as by
+-- text, and the column is text, so an integer id is its decimal string. These
+-- functions used to accept strings only, and an integer id made them return
+-- nothing, silently: session.destroy_all(42) left every session alive, and no
+-- login was recorded. Anything else (nil, "", a float, a table) is no id.
+local function uid_string(user_id)
+    if type(user_id) == "string" then
+        if user_id == "" then return nil end
+        return user_id
+    end
+    if math.type(user_id) == "integer" then return tostring(user_id) end
+    return nil
+end
+
 local audit_log = {}
 
 local _state = {
@@ -255,8 +269,8 @@ end
 --- Record an event. user_id and kind are required; everything
 -- else is derived from req or supplied via opts.
 function audit_log.record(user_id, kind, req, opts)
-    if type(user_id) ~= "string" or user_id == ""
-       or type(kind) ~= "string" or kind == "" then return end
+    user_id = uid_string(user_id)
+    if not user_id or type(kind) ~= "string" or kind == "" then return end
     opts = opts or {}
     local ip = opts.ip ~= nil and opts.ip or extract_ip(req)
     local ua = opts.user_agent ~= nil and opts.user_agent or extract_ua(req)
@@ -299,7 +313,8 @@ end
 --- List recent events for a user, newest first.
 -- opts.limit (default 50), opts.kinds (filter - array of kinds).
 function audit_log.list(user_id, opts)
-    if type(user_id) ~= "string" or user_id == "" then return {} end
+    user_id = uid_string(user_id)
+    if not user_id then return {} end
     opts = opts or {}
     local limit = opts.limit or 50
     local rows
@@ -338,7 +353,8 @@ end
 -- Each row: { fingerprint, first_seen, last_seen, count, ip, user_agent }.
 -- opts.window_days (default 90) - older events excluded.
 function audit_log.list_devices(user_id, opts)
-    if type(user_id) ~= "string" or user_id == "" then return {} end
+    user_id = uid_string(user_id)
+    if not user_id then return {} end
     opts = opts or {}
     local cutoff = time.now() - ((opts.window_days or 90) * 86400)
     local rows = db.query(
@@ -360,7 +376,8 @@ end
 -- recently? Returns true if the fingerprint has NO events in the
 -- last `opts.window_days` (default 30) for `user_id`.
 function audit_log.is_new_device(user_id, req, opts)
-    if type(user_id) ~= "string" or user_id == "" then return false end
+    user_id = uid_string(user_id)
+    if not user_id then return false end
     opts = opts or {}
     local cutoff = time.now() - ((opts.window_days or 30) * 86400)
     local fp = audit_log.fingerprint(req)

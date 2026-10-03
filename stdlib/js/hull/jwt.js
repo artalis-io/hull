@@ -133,6 +133,11 @@ function signatureBytes(sigB64) {
 function verifySignature(alg, key, signingInput, sigB64) {
     if (alg === "HS256") {
         if (typeof key !== "string" || key.length === 0) return false;
+        // A PEM key is a PUBLIC key, never an HMAC secret. With both HS256
+        // and an asymmetric alg allowed (or a resolver that hands back a PEM
+        // for any alg), a token claiming HS256 was checked with the public
+        // key text as the HMAC secret - which anyone can compute.
+        if (key.indexOf("-----BEGIN") >= 0) return false;
         const expected = hs256SignatureB64(signingInput, key);
         return constantTimeCompare(sigB64, expected);
     }

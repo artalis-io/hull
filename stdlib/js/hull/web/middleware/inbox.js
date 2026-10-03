@@ -137,15 +137,31 @@ function markProcessed(messageId, source, opts) {
  * }
  */
 function checkAndMark(messageId, source, opts) {
-    let isDup = false;
-    db.batch(function() {
-        if (isDuplicate(messageId, source)) {
-            isDup = true;
-            return;
-        }
-        markProcessed(messageId, source, opts);
-    });
-    return isDup;
+    if (!messageId || messageId === "")
+        return false;
+    if (!source) source = "default";
+    checkIdLen(messageId, source);
+    const o = opts || {};
+    const now = time.now();
+    const ttl = o.ttl !== undefined ? o.ttl : inboxTtl;
+
+    // A mark that has expired no longer counts: drop it, so the message is
+    // new again.
+    db.exec(
+        "DELETE FROM _hull_inbox_processed "
+        + "WHERE source = ? AND message_id = ? AND expires_at <= ?",
+        [source, messageId, now]);
+    // The insert IS the check. It used to be a SELECT, then an upsert: two
+    // instances handling the same redelivery at once (Postgres at READ
+    // COMMITTED, MySQL) both saw no row, both wrote one, and both ran the side
+    // effect. The primary key lets exactly one insert in; whoever's did not
+    // land has a duplicate.
+    const inserted = db.insertIfAbsent(
+        "_hull_inbox_processed",
+        ["source", "message_id"],
+        ["message_id", "source", "processed_at", "expires_at"],
+        [messageId, source, now, now + ttl]);
+    return inserted === 0;
 }
 
 /**

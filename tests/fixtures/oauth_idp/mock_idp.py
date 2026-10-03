@@ -37,6 +37,24 @@ with open(CERT_B64_PATH) as f:
 with open(KID_PATH) as f:
     KID = f.read().strip()
 
+
+def _rsa_n_e():
+    """The signing key's modulus and exponent, as JWK base64url."""
+    mod = subprocess.run(["openssl", "rsa", "-in", KEY_PATH, "-noout", "-modulus"],
+                         capture_output=True, check=True, text=True).stdout
+    n = bytes.fromhex(mod.strip().split("=", 1)[1])
+    txt = subprocess.run(["openssl", "rsa", "-in", KEY_PATH, "-noout", "-text"],
+                         capture_output=True, check=True, text=True).stdout
+    e_int = int(txt.split("publicExponent:", 1)[1].split()[0])
+    e = e_int.to_bytes((e_int.bit_length() + 7) // 8, "big")
+    return b64url(n), b64url(e)
+
+
+# "x5c" (a certificate, as Microsoft and most IdPs publish) or "ne" (a bare
+# modulus + exponent and no certificate, as Google publishes). Flipped by
+# GET /admin/jwk-form?form=ne so one IdP process serves both shapes.
+JWK_FORM = {"form": "x5c"}
+
 # State carried between /authorize and /token. Keyed by the code we
 # issued in /authorize. Cleared on /token redemption (single-use).
 PENDING = {}  # code -> { state, nonce, code_challenge, redirect_uri, sub }
@@ -110,6 +128,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if url.path == "/health":
             self._send_json(200, {"ok": True})
+            return
+
+        if url.path == "/admin/jwk-form":
+            JWK_FORM["form"] = params.get("form", "x5c")
+            self._send_json(200, {"form": JWK_FORM["form"]})
+            return
+
+        if url.path == "/.well-known/jwks.json" and JWK_FORM["form"] == "ne":
+            n, e = _rsa_n_e()
+            self._send_json(200, {
+                "keys": [{
+                    "kty": "RSA", "use": "sig", "alg": "RS256", "kid": KID,
+                    "n": n, "e": e,
+                }]})
             return
 
         if url.path == "/.well-known/jwks.json":

@@ -145,6 +145,11 @@ end
 local function verify_signature(alg, key, signing_input, sig_raw, sig_b64)
     if alg == "HS256" then
         if type(key) ~= "string" or #key == 0 then return false end
+        -- A PEM key is a PUBLIC key, never an HMAC secret. With both HS256
+        -- and an asymmetric alg allowed (or a resolver that hands back a PEM
+        -- for any alg), a token claiming HS256 was checked with the public
+        -- key text as the HMAC secret - which anyone can compute.
+        if key:find("-----BEGIN", 1, true) then return false end
         local expected_raw = hs256_signature(signing_input, key)
         local expected_b64 = b64url(expected_raw)
         return constant_time_compare(sig_b64, expected_b64)

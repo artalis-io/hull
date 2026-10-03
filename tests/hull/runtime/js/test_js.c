@@ -3155,6 +3155,79 @@ UTEST(js_stdlib, audit2_stdlib_fixes)
     cleanup_js_caps();
 }
 
+/* The third audit's stdlib fixes, as in lua_stdlib.audit3_stdlib_fixes, plus
+ * the template json filter on a missing value (it threw, failing the render). */
+UTEST(js_stdlib, audit3_stdlib_fixes)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { session } from 'hull:web:middleware:session';\n"
+        "import { auditLog } from 'hull:web:middleware:audit-log';\n"
+        "import { inbox } from 'hull:web:middleware:inbox';\n"
+        "import { ratelimit } from 'hull:web:middleware:ratelimit';\n"
+        "import { idempotency } from 'hull:web:middleware:idempotency';\n"
+        "import { jwt } from 'hull:jwt';\n"
+        "import { template } from 'hull:template';\n"
+        "import { time } from 'hull:time';\n"
+        "function run() {\n"
+        "  session.init({ ttl: 3600 });\n"
+        "  const sid = session.create({ user_id: 42 });\n"
+        "  if (session.listForUser(42).length !== 1) return 1;\n"
+        "  if (session.destroyAll(42) !== 1) return 2;\n"
+        "  if (session.load(sid) !== null) return 3;\n"
+        "  if (session.destroyAll(4.5) !== 0 || session.destroyAll('') !== 0) return 4;\n"
+        "  auditLog.init({ fingerprintSalt: 'test-salt-123' });\n"
+        "  auditLog.record(7, 'login', { headers: { 'user-agent': 'curl/8' }, remoteAddr: '10.0.0.1' });\n"
+        "  if (auditLog.list(7).length !== 1 || auditLog.list('7').length !== 1) return 5;\n"
+        "  inbox.init();\n"
+        "  if (inbox.checkAndMark('m1', 'src') !== false) return 6;\n"
+        "  if (inbox.checkAndMark('m1', 'src') !== true) return 7;\n"
+        "  if (inbox.checkAndMark('m2', 'src', { ttl: -1 }) !== false) return 8;\n"
+        "  if (inbox.checkAndMark('m2', 'src') !== false) return 9;\n"
+        "  const quiet = { header() { return this; }, status() { return this; }, json() { return this; } };\n"
+        "  const shared = (a, b) => {\n"
+        "    const m = ratelimit.middleware({ limit: 1 });\n"
+        "    m({ headers: {}, remote_addr: a }, quiet);\n"
+        "    return m({ headers: {}, remote_addr: b }, quiet) === 1;\n"
+        "  };\n"
+        "  if (!shared('2001:db8:0:1:aaaa::1', '2001:DB8:0000:0001:1:2:3:4')) return 10;\n"
+        "  if (shared('2001:db8:0:1::1', '2001:db8:0:2::1')) return 11;\n"
+        "  if (!shared('::ffff:192.0.2.7', '192.0.2.7')) return 12;\n"
+        "  if (shared('192.0.2.7', '192.0.2.8')) return 13;\n"
+        "  if (!shared('fe80::1%eth0', 'fe80::2')) return 14;\n"
+        "  const b = new Map();\n"
+        "  const cache = { get: (k) => b.get(k), set: (k, v) => { b.set(k, v); if (b.size > 2) b.delete(b.keys().next().value); } };\n"
+        "  const sat = new Map();\n"
+        "  ratelimit.check(cache, 'a', 1, 60, 100, sat);\n"
+        "  if (ratelimit.check(cache, 'a', 1, 60, 100, sat).allowed) return 17;\n"
+        "  for (const k of ['b', 'c', 'd']) ratelimit.check(cache, k, 1, 60, 100, sat);\n"
+        "  if (b.has('a')) return 99;\n"
+        "  if (ratelimit.check(cache, 'a', 1, 60, 101, sat).allowed) return 18;\n"
+        "  if (!ratelimit.check(cache, 'a', 1, 60, 200, sat).allowed) return 19;\n"
+        "  idempotency.init();\n"
+        "  const mw = idempotency.middleware();\n"
+        "  const res = () => ({ status(c) { this.code = c; return this; },\n"
+        "                       json(d) { this.err = d.error; return this; },\n"
+        "                       header() { return this; } });\n"
+        "  const rq = (to) => ({ method: 'POST', path: '/transfer', query: { to },\n"
+        "                        body: 'amount=5', ctx: {}, headers: {},\n"
+        "                        header: (n) => n === 'idempotency-key' ? 'k1' : undefined });\n"
+        "  if (mw(rq('alice'), res()) !== 0) return 20;\n"
+        "  const r2 = res();\n"
+        "  if (mw(rq('bob'), r2) !== 1 || r2.code !== 409) return 21;\n"
+        "  if (String(r2.err).indexOf('different request') < 0) return 22;\n"
+        "  const pem = '-----BEGIN PUBLIC KEY-----\\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE\\n-----END PUBLIC KEY-----\\n';\n"
+        "  const forged = jwt.sign({ sub: 'admin', exp: time.now() + 60 }, pem);\n"
+        "  if (jwt.verify(forged, pem, { algs: ['HS256', 'RS256'] })[0]) return 23;\n"
+        "  if (template.renderString('[{{ x | json }}]', {}) !== '[null]') return 24;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__audit3 = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__audit3"), 0);
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, conversions_cannot_free_resolved_objects)
 {
     init_js_with_caps();
