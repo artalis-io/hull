@@ -50,6 +50,7 @@ static const char *const test_grants[] = {
     "mmap_borrow.txt", "mmap_rel.txt", "mmap_test.txt", "no_such_file.txt",
     "nope.txt", "size.txt", "test.txt", "whole.txt",
     "win_borrow.bin", "win_cross.bin", "win_eof.bin", "win_rej.bin", "win_zero.bin",
+    "shrink.bin",
 };
 
 static void setup_fs(void)
@@ -413,6 +414,53 @@ UTEST(hl_cap_fs, validate_rejects_symlink_escape)
 }
 
 /* ── mmap tests ─────────────────────────────────────────────────────── */
+
+/* A file that shrinks under its mapping no longer kills the process: the
+ * read of a page past the new end raised SIGBUS. In a child, since a failure
+ * is the process dying. Skipped where the host refuses to shrink a mapped file
+ * (Windows), which is the same protection. */
+#include <signal.h>
+#include <sys/wait.h>
+UTEST(hl_cap_fs, mmap_truncated_file_reads_zeros)
+{
+    setup_fs();
+    long ps = sysconf(_SC_PAGESIZE);
+    size_t n = (size_t)(ps > 0 ? ps : 4096) * 3;
+    char *data = malloc(n);
+    ASSERT_TRUE(data != NULL);
+    memset(data, 'x', n);
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "shrink.bin", data, n, NULL), 0);
+    free(data);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/shrink.bin", test_dir);
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "shrink.bin", NULL, NULL);
+        if (!buf) _exit(10);
+        if (truncate(path, 0) != 0) _exit(77);          /* host refuses: skip */
+        volatile const char *p = (const char *)buf->addr;
+        char c = p[n - 1];                              /* page past the new end */
+        hl_cap_fs_munmap(buf);
+        /* Surviving the read is the point. Linux faults the page (SIGBUS,
+         * absorbed: zeros); macOS keeps serving the cached page. */
+#ifdef __linux__
+        _exit(c == 0 ? 0 : 11);
+#else
+        (void)c;
+        _exit(0);
+#endif
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    teardown_fs();
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 77)
+        UTEST_SKIP("the host refuses to shrink a mapped file");
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+}
 
 UTEST(hl_cap_fs, mmap_basic)
 {
