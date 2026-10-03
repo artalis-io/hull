@@ -356,12 +356,14 @@ end
 -- out under a key with a nonce it had already used.
 function Transport:send_reply(payload)
     if self.in_kex then
-        local q = self.deferred or {}
+        -- Its own queue: `deferred` holds INCOMING messages set aside
+        -- during a rekey, and must survive the exchange.
+        local q = self.held_replies or {}
         if #q >= 64 then
             error("ssh: too many requests from the peer during key exchange")
         end
         q[#q + 1] = payload
-        self.deferred = q
+        self.held_replies = q
         return
     end
     self:send_packet(payload)
@@ -720,8 +722,8 @@ function Transport:run_kex(opts, i_s)
     self.s2c = self:new_cipher(neg.cipher_s2c, keys.key_s2c, keys.iv_s2c)
     if rekey then self.rekeys = self.rekeys + 1 end
     -- Replies held during the exchange (send_reply) go out under the new keys.
-    local q = self.deferred
-    self.deferred = nil
+    local q = self.held_replies
+    self.held_replies = nil
     if q then
         for _, payload in ipairs(q) do self:send_packet(payload) end
     end
