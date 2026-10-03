@@ -247,6 +247,49 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
             "             skipping Ed25519 signature check (SHA-256 only).\n");
     }
 
+    /* ── 4c. The signed manifest names the release ────────────────
+     * The tag above came from the GitHub API, unsigned. hull.version, hashed
+     * into the signed manifest, says which release these bytes are: a repo
+     * (or a --repo fork) serving an old signed release as "latest" under a
+     * newer tag is caught here, and the downgrade check above stays honest.
+     * Releases published before hull.version existed have no entry. */
+    {
+        char ver_url[256];
+        snprintf(ver_url, sizeof(ver_url),
+                 "https://github.com/%s/releases/download/%s/hull.version",
+                 repo, latest_tag);
+        char *ver = NULL;
+        size_t ver_len = 0;
+        int have = hl_release_io_check_signed_version(manifest, manifest_len,
+                                                      NULL, 0, latest_tag) != 1;
+        int vrc = 1;
+        if (have) {
+            if (hl_release_io_get(ver_url, &ver, &ver_len, &alloc, tls,
+                                  "hull-update") != 0) {
+                ver = NULL;
+                ver_len = 0;
+            }
+            vrc = hl_release_io_check_signed_version(manifest, manifest_len,
+                                                     ver, ver_len, latest_tag);
+            if (ver) kl_free(&alloc, ver, ver_len);
+        }
+        if (vrc < 0) {
+            fprintf(stderr,
+                "hull update: the signed manifest does not name this release %s\n"
+                "             (hull.version missing or different); refusing to install\n",
+                latest_tag);
+            kl_free(&alloc, binary, binary_len);
+            kl_free(&alloc, manifest, manifest_len);
+            kl_tls_mbedtls_ctx_destroy(tls);
+            return 1;
+        }
+        if (vrc == 0)
+            fprintf(stdout, "hull update: signed manifest names %s\n", latest_tag);
+        else
+            fprintf(stdout, "hull update: %s predates the signed version entry; "
+                            "trusting the release tag\n", latest_tag);
+    }
+
     char expected[65];
     if (hl_release_io_find_checksum(manifest, manifest_len,
                                     asset_name, expected) != 0) {

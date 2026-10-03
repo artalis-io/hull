@@ -1435,7 +1435,14 @@ jobs:
         # release signature (Ed25519 + Sigstore + SLSA).
         working-directory: dist
         run: |
-          sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 \
+          # hull.version names this release INSIDE the signed manifest: the
+          # tag GitHub reports as "latest" is unsigned, so without it an old,
+          # genuinely signed release could be served under a newer name.
+          # `hull update` checks the two agree. A regular entry (not a bare
+          # line) keeps `sha256sum -c hull.sha256` working.
+          printf '%s\n' "${GITHUB_REF_NAME}" > hull.version
+          sha256sum hull.version \
+                    hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 \
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
                     hull-libc-musl-x86_64.tar hull-libc-musl-aarch64.tar \
                     hull-platform-musl-x86_64.tar hull-platform-musl-aarch64.tar \
@@ -1525,6 +1532,7 @@ jobs:
             dist/hull-zig-darwin-arm64.tar
             dist/hull-cosmocc.tar
             dist/hull.sha256
+            dist/hull.version
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
             dist/hull.sbom.spdx.json
@@ -1552,6 +1560,7 @@ jobs:
             dist/hull-zig-darwin-arm64.tar
             dist/hull-cosmocc.tar
             dist/hull.sha256
+            dist/hull.version
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
             dist/hull.sbom.spdx.json
