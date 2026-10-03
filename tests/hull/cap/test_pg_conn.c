@@ -138,6 +138,8 @@ UTEST(pg_conn, handshake_cleartext_auth)
     memset(&dsn, 0, sizeof dsn);
     snprintf(dsn.user, sizeof dsn.user, "%s", "app");
     snprintf(dsn.password, sizeof dsn.password, "%s", "secret");
+    /* Cleartext without TLS only when the DSN chose plaintext. */
+    snprintf(dsn.sslmode, sizeof dsn.sslmode, "%s", "disable");
 
     HlPgConn conn;
     ASSERT_EQ(0, hl_pg_conn_start(&conn, sv[1], &dsn));
@@ -149,6 +151,63 @@ UTEST(pg_conn, handshake_cleartext_auth)
     ASSERT_TRUE(bytes_contain(got, (size_t)n, "secret"));
 
     hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+/* Under the default sslmode (prefer), a server that asks for the password in
+ * cleartext over a connection without TLS - what stripping the TLS offer
+ * produces - is refused, and the password is never sent. */
+UTEST(pg_conn, handshake_cleartext_without_tls_refused)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    static const uint8_t resp[] = {
+        'R', 0,0,0,8, 0,0,0,3,   /* AuthenticationCleartextPassword */
+        'R', 0,0,0,8, 0,0,0,0,   /* AuthenticationOk                */
+        'Z', 0,0,0,5, 'I',       /* ReadyForQuery                   */
+    };
+    ASSERT_TRUE(write(sv[0], resp, sizeof resp) == (ssize_t)sizeof resp);
+
+    HlPgDsn dsn;
+    memset(&dsn, 0, sizeof dsn);
+    snprintf(dsn.user, sizeof dsn.user, "%s", "app");
+    snprintf(dsn.password, sizeof dsn.password, "%s", "secret");
+
+    HlPgConn conn;
+    ASSERT_EQ(-1, hl_pg_conn_start(&conn, sv[1], &dsn));
+    ASSERT_TRUE(strstr(conn.errmsg, "cleartext") != NULL);
+
+    uint8_t got[512];
+    ssize_t n = read(sv[0], got, sizeof got);   /* the startup message only */
+    ASSERT_TRUE(n > 0);
+    ASSERT_FALSE(bytes_contain(got, (size_t)n, "secret"));
+    close(sv[0]);
+}
+
+/* A server that starts SCRAM and then sends AuthenticationOk without the
+ * SASLFinal never proved it knows the password: refused. */
+UTEST(pg_conn, handshake_scram_without_final_refused)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    static const uint8_t resp[] = {
+        'R', 0,0,0,23, 0,0,0,10,                 /* AuthenticationSASL */
+        'S','C','R','A','M','-','S','H','A','-','2','5','6',0, 0,
+        'R', 0,0,0,8, 0,0,0,0,                   /* AuthenticationOk   */
+        'Z', 0,0,0,5, 'I',                       /* ReadyForQuery      */
+    };
+    ASSERT_TRUE(write(sv[0], resp, sizeof resp) == (ssize_t)sizeof resp);
+
+    HlPgDsn dsn;
+    memset(&dsn, 0, sizeof dsn);
+    snprintf(dsn.user, sizeof dsn.user, "%s", "app");
+    snprintf(dsn.password, sizeof dsn.password, "%s", "secret");
+
+    HlPgConn conn;
+    ASSERT_EQ(-1, hl_pg_conn_start(&conn, sv[1], &dsn));
+    ASSERT_TRUE(strstr(conn.errmsg, "SCRAM") != NULL);
     close(sv[0]);
 }
 
@@ -358,6 +417,40 @@ UTEST(pg_query, exec_affected_count)
                              &(HlPgParam){ .text = "0", .len = 1 }, 1,
                              NULL, NULL, NULL, &affected));
     ASSERT_EQ(affected, (int64_t)3);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+/* More placeholders than values (Lua's # stops at the first nil, so a params
+ * list with trailing nils arrives short): the tail binds NULL. The rewrite
+ * buffer was sized from the VALUE count, so 40 '?' and no values failed with
+ * "failed to rewrite SQL placeholders". */
+UTEST(pg_query, placeholders_beyond_the_values_rewrite)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);   /* ParseComplete */
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);   /* BindComplete  */
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "INSERT 0 1"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.transport = hl_db_transport_adopt("pg", NULL, sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    ASSERT_TRUE(conn.transport != NULL);
+
+    char sql[512] = "INSERT INTO t VALUES (?";
+    for (int i = 1; i < 40; i++) strcat(sql, ",?");
+    strcat(sql, ")");
+    ASSERT_EQ(0, hl_pg_query(&conn, sql, NULL, 0, NULL, NULL, NULL, NULL));
 
     hl_pg_conn_close(&conn);
     close(sv[0]);

@@ -308,6 +308,8 @@ typedef struct {
     char    client_first_bare[128];  /* "n=,r=<nonce>" */
     uint8_t server_sig[32];          /* expected ServerSignature */
     int     have_server_sig;
+    int     started;                 /* the server asked for SASL */
+    int     verified;                /* its SASLFinal signature checked out */
 } PgScram;
 
 /* Handle one SASL AuthenticationRequest sub-message. Returns 0 to continue
@@ -316,6 +318,7 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
                         int32_t sub, HlPgCursor *c)
 {
     if (sub == HL_PG_AUTH_SASL) {
+        sc->started = 1;
         int have = 0;
         for (;;) {
             const char *m = hl_pg_get_cstr(c);
@@ -497,6 +500,7 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
             set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM server signature mismatch");
             return -1;
         }
+        sc->verified = 1;
         return 0;   /* server sends AuthenticationOk next */
     }
 
@@ -510,7 +514,10 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
  * attached the session to @p transport, so every byte tunnels through it
  * transparently. SIGPIPE suppression is the transport's job (adopt / connect set
  * SO_NOSIGPIPE on the descriptor). */
-static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn)
+/* `tls_active`: the transport carries a TLS session (cleartext auth is only
+ * sent over one, unless the DSN said sslmode=disable). */
+static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn,
+                    int tls_active)
 {
     memset(conn, 0, sizeof(*conn));
     conn->transport = transport;
@@ -555,8 +562,35 @@ static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn
                 conn_teardown(conn); return -1;
             }
             if (sub == HL_PG_AUTH_OK) {
+#ifndef HL_PG_NO_SCRAM
+                /* Once SCRAM has begun, only a verified server signature
+                 * proves the server knows the password. Taking OK without it
+                 * let anyone in the middle (sslmode=require checks no
+                 * certificate) skip the SASLFinal and be trusted. */
+                if (scram.started && !scram.verified) {
+                    set_err(conn->errmsg, sizeof conn->errmsg,
+                            "server ended SCRAM without proving its signature");
+                    conn_teardown(conn); return -1;
+                }
+#endif
                 authenticated = 1;
             } else if (sub == HL_PG_AUTH_CLEARTEXT) {
+                /* A cleartext request hands over the password itself. Refuse it
+                 * mid-SCRAM (a downgrade), and on a connection without TLS
+                 * unless the DSN chose plaintext (sslmode=disable): under the
+                 * default `prefer`, whoever can strip the TLS offer could ask
+                 * for the password and get it. */
+                int allowed = tls_active ||
+                    hl_pg_sslmode_parse(dsn->sslmode) == HL_PG_SSLMODE_DISABLE;
+#ifndef HL_PG_NO_SCRAM
+                if (scram.started) allowed = 0;
+#endif
+                if (!allowed) {
+                    set_err(conn->errmsg, sizeof conn->errmsg,
+                            "server asked for the password in cleartext without "
+                            "TLS; refused (use TLS, or sslmode=disable to allow it)");
+                    conn_teardown(conn); return -1;
+                }
                 HlPgWriter pw;
                 hl_pg_writer_init(&pw);
                 hl_pg_build_password(&pw, dsn->password);
@@ -641,7 +675,7 @@ int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
     /* On any handshake failure pg_start's error path runs conn_teardown, which
      * closes the transport (and thus the adopted fd), matching the documented
      * "closed on handshake failure" behavior without a double close. */
-    return pg_start(conn, t, dsn);
+    return pg_start(conn, t, dsn, 0);
 }
 
 #endif /* HL_PG_NO_TLS: end of the first connection-layer region */
@@ -762,12 +796,12 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
                 hl_db_transport_close(t);
                 return -1;
             }
-            return pg_start(conn, t, dsn);
+            return pg_start(conn, t, dsn, 1);
         }
         /* PLAINTEXT: server declined TLS and sslmode permits fallback. */
     }
 
-    return pg_start(conn, t, dsn);
+    return pg_start(conn, t, dsn, 0);
 }
 
 void hl_pg_conn_close(HlPgConn *conn)
@@ -1075,14 +1109,30 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         return -1;
     }
 
-    /* Rewrite '?' -> '$n' into a buffer sized for the worst case. */
-    size_t rwcap = strlen(sql) + (size_t)nparams * 12 + 32;
+    /* Rewrite '?' -> '$n' into a buffer sized for the worst case: every '?'
+     * in the text (quoted ones too - an upper bound) growing to "$65535".
+     * It was sized from the VALUE count, so SQL with more '?' than values -
+     * the trailing-nils case padded below - failed to rewrite. */
+    size_t sql_len = strlen(sql), marks = 0;
+    for (const char *q = sql; *q; q++)
+        if (*q == '?') marks++;
+    if (sql_len > SIZE_MAX / 8) {
+        set_err(conn->errmsg, sizeof conn->errmsg, "query too long");
+        return -1;
+    }
+    size_t rwcap = sql_len + marks * 5 + 32;
     char *rw = malloc(rwcap);
     if (!rw) { set_err(conn->errmsg, sizeof conn->errmsg, "out of memory"); return -1; }
     int found = 0;
     if (hl_pg_rewrite_sql(sql, rw, rwcap, &found) != 0) {
         free(rw);
         set_err(conn->errmsg, sizeof conn->errmsg, "failed to rewrite SQL placeholders");
+        return -1;
+    }
+    /* The Bind message carries the count as an int16. */
+    if (found > 65535) {
+        free(rw);
+        set_err(conn->errmsg, sizeof conn->errmsg, "too many placeholders (max 65535)");
         return -1;
     }
     /* Match SQLite's leniency: a Lua/JS params array with trailing nils

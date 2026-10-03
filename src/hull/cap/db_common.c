@@ -27,6 +27,13 @@ int hl_cap_db_check_namespace(const char *sql)
         if ((*p == '_' || *p == 'H' || *p == 'h') &&
             strncasecmp(p, "_hull_", 6) == 0)
             return HL_DB_ERR_DENIED;
+        /* A Postgres Unicode-escape identifier, U&"\005fhull_sessions",
+         * spells the name with escapes this text check cannot see: the
+         * server decodes it to _hull_sessions. App SQL may not use one. The
+         * U&'...' string literal stays legal - it cannot name a table (only
+         * dynamic SQL could make one, the documented limit). */
+        if ((*p == 'U' || *p == 'u') && p[1] == '&' && p[2] == '"')
+            return HL_DB_ERR_DENIED;
     }
     return HL_DB_OK;
 }

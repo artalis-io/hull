@@ -232,6 +232,15 @@ is set post-connect as intended defense-in-depth, but it is runtime-SET-only
 Linux (it does on macOS - a DuckDB platform quirk), so the kernel unveil is the
 authoritative bound.
 
+That list is also coarser than the grants: it is directory-granular (a file
+grant becomes its parent directory) and has no read-only form, so on its own it
+would let `COPY ... TO` write into a directory the app may only read. The kernel
+layer is exact on both counts - each declared path is unveiled itself, `r` for
+`fs.read` and `rwc` for `fs.write` (Seatbelt grants `file-read*` vs
+`file-read* file-write*` the same way) - so a read grant stays read-only and a
+file grant stays that file. With `--no-sandbox` there is no such bound, for
+DuckDB as for everything else.
+
 **Known limitation - apps must only read declared paths.** Because
 `allowed_directories` does not pre-empt the open on Linux, an undeclared read
 reaches the kernel, gets `EACCES`, and DuckDB **aborts the process** (NULL-deref
