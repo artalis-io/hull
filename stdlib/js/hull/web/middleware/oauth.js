@@ -509,7 +509,12 @@ async function handleCallback(req, res) {
     // callback used to read the cache directly - the TTL never applied - and
     // refetched on ANY failed verify, so a forged token cost a fetch each.
     const kid = tokenKid(tokens.id_token);
-    const pem = await jwksResolver(providerName)(kid, null);
+    const resolve = jwksResolver(providerName);
+    let pem = await resolve(kid, null);
+    // One more try when the JWKS FETCH failed (no cache entry was written,
+    // so the resolver fetches again). An unknown kid with a fresh cache stays
+    // throttled inside the resolver, so a forged token cannot buy fetches.
+    if (!pem && !_state._jwksCache[providerName]) pem = await resolve(kid, null);
     const syncResolver = (k, _alg) => (k === kid ? pem : null);
     const [claims, jerr] = jwt.verify(tokens.id_token, syncResolver,
         { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"],
