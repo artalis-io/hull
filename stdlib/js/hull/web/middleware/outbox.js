@@ -101,14 +101,19 @@ function enqueue(opts) {
     const max = opts.maxAttempts !== undefined ? opts.maxAttempts : maxAttempts;
     const delay = opts.delay || 0;
 
-    db.exec(
-        "INSERT INTO _hull_outbox " +
+    const sql = "INSERT INTO _hull_outbox " +
         "(kind, destination, payload, headers, idempotency_key, max_attempts, next_attempt_at, state, created_at) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
-        [opts.kind, opts.destination, opts.payload, opts.headers || null,
-         opts.idempotencyKey || null, max, now + delay, now]
-    );
-
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)";
+    const vals = [opts.kind, opts.destination, opts.payload, opts.headers || null,
+                  opts.idempotencyKey || null, max, now + delay, now];
+    // The new id from the INSERT itself where the backend can (SQLite,
+    // Postgres): lastId has no Postgres implementation, so enqueue returned
+    // nothing there. MySQL has no RETURNING; its lastId is per connection.
+    if (db.dialect && db.dialect.supportsReturning) {
+        const rows = db.query(sql + " RETURNING id", vals);
+        return rows && rows[0] ? rows[0].id : undefined;
+    }
+    db.exec(sql, vals);
     return db.lastId();
 }
 
@@ -199,34 +204,39 @@ async function flush(opts) {
         // send them again. The claim pushes next_attempt_at out by a lease;
         // only the flush whose UPDATE changed the row delivers it. If this
         // process dies mid-send the lease runs out and the row is retried.
+        const lease = now + CLAIM_LEASE;
         const claimed = db.exec(
             "UPDATE _hull_outbox SET next_attempt_at = ? WHERE id = ? " +
             "AND state = 'pending' AND next_attempt_at <= ?",
-            [now + CLAIM_LEASE, item.id, now]);
+            [lease, item.id, now]);
         if (claimed !== 1) continue;
         const [ok, err] = await deliverItem(item);
 
+        // Every outcome is written only while the row still holds THIS flush's
+        // lease: a delivery that outran it was reclaimed and sent again by
+        // another flush, and a late write here overwrote that flush's outcome.
+        const mine = " AND state = 'pending' AND next_attempt_at = ?";
         if (ok) {
-            db.exec(
-                "UPDATE _hull_outbox SET state = 'delivered', delivered_at = ?, attempts = attempts + 1 WHERE id = ?",
-                [time.now(), item.id]
+            const n = db.exec(
+                "UPDATE _hull_outbox SET state = 'delivered', delivered_at = ?, attempts = attempts + 1 WHERE id = ?" + mine,
+                [time.now(), item.id, lease]
             );
-            delivered++;
+            if (n === 1) delivered++;
         } else {
             const newAttempts = item.attempts + 1;
             if (newAttempts >= item.max_attempts) {
-                db.exec(
-                    "UPDATE _hull_outbox SET state = 'failed', attempts = ?, last_error = ? WHERE id = ?",
-                    [newAttempts, err, item.id]
+                const n = db.exec(
+                    "UPDATE _hull_outbox SET state = 'failed', attempts = ?, last_error = ? WHERE id = ?" + mine,
+                    [newAttempts, err, item.id, lease]
                 );
-                failed++;
+                if (n === 1) failed++;
             } else {
                 const nextAt = time.now() + backoffDelay(newAttempts);
-                db.exec(
-                    "UPDATE _hull_outbox SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?",
-                    [newAttempts, nextAt, err, item.id]
+                const n = db.exec(
+                    "UPDATE _hull_outbox SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?" + mine,
+                    [newAttempts, nextAt, err, item.id, lease]
                 );
-                retried++;
+                if (n === 1) retried++;
             }
         }
     }

@@ -190,16 +190,40 @@ typedef struct {
     char        **names;   /* copied field names */
     uint8_t      *types;
     int           nfields;
+    int           nnames;   /* entries allocated in names (what free walks) */
+    int           bad_row;  /* a row did not match its column definitions */
 } MyAdapter;
 
+static void free_names(char **names, int n)
+{
+    if (names)
+        for (int i = 0; i < n; i++) free(names[i]);
+    free(names);
+}
+
+/* A result set's column definitions. A multi-statement query sends one per
+ * result set: the next replaced the arrays without freeing them, and the
+ * cleanup freed names[0..nfields) of the LAST count over whichever array
+ * was left - out of bounds when it grew. On an allocation failure nfields
+ * is -1 and every row is refused. */
 static void adapter_desc(void *ctx, const HlMyField *fields, int nf)
 {
     MyAdapter *a = ctx;
-    a->nfields = nf;
+    free_names(a->names, a->nnames);
+    free(a->types);
+    a->names = NULL; a->types = NULL; a->nnames = 0;
+    a->nfields = 0;
     if (nf <= 0) return;
     a->names = calloc((size_t)nf, sizeof *a->names);
     a->types = calloc((size_t)nf, sizeof *a->types);
-    if (!a->names || !a->types) { a->nfields = 0; return; }
+    if (!a->names || !a->types) {
+        free(a->names); free(a->types);
+        a->names = NULL; a->types = NULL;
+        a->nfields = -1;
+        return;
+    }
+    a->nnames = nf;
+    a->nfields = nf;
     for (int i = 0; i < nf; i++) {
         a->names[i] = strdup(fields[i].name ? fields[i].name : "");
         a->types[i] = fields[i].type;
@@ -211,7 +235,10 @@ static int adapter_row(void *ctx, const char *const *vals,
 {
     MyAdapter *a = ctx;
     if (!a->user_cb) return 0;
-    if (a->nfields > 0 && nc > a->nfields) nc = a->nfields;
+    /* Every row carries its result set's column count. Clamped only from
+     * above, a short row reached a consumer that sized its rows from the
+     * first (db.async's collector), which read past it. */
+    if (nc != a->nfields) { a->bad_row = 1; return 1; }
 
     HlColumn *cols = calloc((size_t)(nc > 0 ? nc : 1), sizeof *cols);
     if (!cols) return 1;
@@ -232,15 +259,21 @@ typedef struct {
     void         *user_ctx;
     char        **names;
     int           nfields;
+    int           nnames;
+    int           bad_row;
 } MyBinAdapter;
 
 static void bin_adapter_desc(void *ctx, const HlMyField *fields, int nf)
 {
     MyBinAdapter *a = ctx;
-    a->nfields = nf;
+    free_names(a->names, a->nnames);          /* see adapter_desc */
+    a->names = NULL; a->nnames = 0;
+    a->nfields = 0;
     if (nf <= 0) return;
     a->names = calloc((size_t)nf, sizeof *a->names);
-    if (!a->names) { a->nfields = 0; return; }
+    if (!a->names) { a->nfields = -1; return; }
+    a->nnames = nf;
+    a->nfields = nf;
     for (int i = 0; i < nf; i++)
         a->names[i] = strdup(fields[i].name ? fields[i].name : "");
 }
@@ -249,7 +282,7 @@ static int bin_adapter_row(void *ctx, const HlMyVal *vals, int nc)
 {
     MyBinAdapter *a = ctx;
     if (!a->user_cb) return 0;
-    if (a->nfields > 0 && nc > a->nfields) nc = a->nfields;
+    if (nc != a->nfields) { a->bad_row = 1; return 1; }   /* see adapter_row */
 
     HlColumn *cols = calloc((size_t)(nc > 0 ? nc : 1), sizeof *cols);
     if (!cols) return 1;
@@ -351,10 +384,14 @@ static int mysql_query(HlDbHandle *h, const char *sql,
         int rc = hl_my_conn_query_prepared(&s->conn, sql, pp, nparams,
                                            cb ? bin_adapter_desc : NULL,
                                            cb ? bin_adapter_row : NULL, &ba, NULL);
-        if (ba.names)
-            for (int i = 0; i < ba.nfields; i++) free(ba.names[i]);
-        free(ba.names);
+        free_names(ba.names, ba.nnames);
         free(pp);
+        if (rc == 0 && ba.bad_row) {
+            snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                     "server sent a row whose column count does not match "
+                     "its column definitions");
+            rc = -1;
+        }
         return rc;
     }
 
@@ -366,10 +403,14 @@ static int mysql_query(HlDbHandle *h, const char *sql,
     int rc = hl_my_conn_query(&s->conn, sql,
                               cb ? adapter_desc : NULL,
                               cb ? adapter_row : NULL, &a, NULL);
-    if (a.names)
-        for (int i = 0; i < a.nfields; i++) free(a.names[i]);
-    free(a.names);
+    free_names(a.names, a.nnames);
     free(a.types);
+    if (rc == 0 && a.bad_row) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "server sent a row whose column count does not match its "
+                 "column definitions");
+        rc = -1;
+    }
     return rc;
 }
 

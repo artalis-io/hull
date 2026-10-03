@@ -713,10 +713,9 @@ local function is_paused(queue)
 end
 
 local function set_paused(queue, v)
-    local n = db.exec("UPDATE _hull_queue SET paused=? WHERE name=?", { v, queue })
-    if (n or 0) == 0 then
-        db.exec("INSERT INTO _hull_queue (name, paused) VALUES (?, ?)", { queue, v })
-    end
+    -- One statement: UPDATE-then-INSERT raced - two callers both updated
+    -- nothing and the second INSERT failed on the key.
+    db.upsert("_hull_queue", { "name" }, { "name", "paused" }, { queue, v })
     _paused_at = 0   -- invalidate this process's cache so the change is seen now
     return jobs
 end
@@ -1009,25 +1008,36 @@ function jobs.on(event, fn)
     return jobs
 end
 
-local function mark_done(id, result)
-    db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
-        { time.now(), id })
+-- Every transition out of 'running' is guarded by the claim: the job must
+-- still be running under THIS worker's claim_token. A job that outlived the
+-- visibility timeout is reclaimed by the reaper and may be running again
+-- under another worker; the first worker finishing late used to overwrite
+-- that run (done over running, dead over a retry) and resolve its
+-- dependents twice. Such a transition changes nothing and returns "lost".
+local CLAIMED = " AND claim_token=? AND status='running'"
+
+local function mark_done(job, result)
+    local id = job.id
+    local n = db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? "
+        .. "WHERE id=?" .. CLAIMED, { time.now(), id, job.claim_token })
+    if (n or 0) == 0 then return "lost" end
     if result ~= nil then   -- persist the handler's return value for dependents
         local enc = json.encode(result)
-        local n = db.exec("UPDATE _hull_job_results SET result=? WHERE job_id=?", { enc, id })
-        if (n or 0) == 0 then
-            db.exec("INSERT INTO _hull_job_results (job_id, result) VALUES (?, ?)", { id, enc })
-        end
+        db.upsert("_hull_job_results", { "job_id" }, { "job_id", "result" }, { id, enc })
     end
     resolve_deps(id, true)                                   -- unblock dependents
     db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { id })   -- consumed its own deps
+    return "done"
 end
 
-local function mark_dead(id, err)
-    db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, updated_at=? WHERE id=?",
-        { err, time.now(), id })
+local function mark_dead(job, err)
+    local id = job.id
+    local n = db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, "
+        .. "updated_at=? WHERE id=?" .. CLAIMED, { err, time.now(), id, job.claim_token })
+    if (n or 0) == 0 then return "lost" end
     resolve_deps(id, false)                                  -- cascade to dependents
     db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { id })
+    return "dead"
 end
 
 -- Reschedule with backoff, or dead-letter once attempts are exhausted. `attempts`
@@ -1039,14 +1049,14 @@ local function mark_retry(job, err)
     local attempts = job.attempts or 0
     local max = job.max_attempts or _cfg.max_attempts
     if attempts >= max then
-        mark_dead(job.id, err)
-        return "dead"
+        return mark_dead(job, err)
     end
     local now = time.now()
-    db.exec(
+    local n = db.exec(
         "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, "
-        .. "updated_at=? WHERE id=?",
-        { now + _cfg.backoff(attempts), err, now, job.id })
+        .. "updated_at=? WHERE id=?" .. CLAIMED,
+        { now + _cfg.backoff(attempts), err, now, job.id, job.claim_token })
+    if (n or 0) == 0 then return "lost" end
     return "retried"
 end
 
@@ -1068,8 +1078,14 @@ local function finish(job, info, transition)
     local outcome
     db.batch(function()
         outcome = transition()
-        emit_durable(EVENT_OF[outcome] or outcome, job, info)
+        if outcome ~= "lost" then
+            emit_durable(EVENT_OF[outcome] or outcome, job, info)
+        end
     end)
+    if outcome == "lost" then        -- another run owns it now
+        job._lost = true
+        return nil
+    end
     emit(EVENT_OF[outcome] or outcome, job, info)
     return outcome
 end
@@ -1103,6 +1119,25 @@ function jobs.reap(opts)
         .. "SELECT COUNT(*) FROM _hull_jobs j "
         .. "WHERE j.concurrency_key = _hull_job_concurrency.name "
         .. "AND j.concurrency_strict = 1 AND j.status = 'running')")
+    -- Dependents whose dependencies have all ended but which are still
+    -- blocked. The enqueue re-check and the completion's resolve_deps close
+    -- the race only when each sees the other's write: two transactions in
+    -- flight at once (READ COMMITTED) each saw the other "not yet", and the
+    -- dependent stayed blocked for good. Applied here as the re-check would.
+    local stuck = db.query(
+        "SELECT d.dependent_id, d.dep_id, d.fail_mode, j.status AS dep_status "
+        .. "FROM _hull_job_deps d "
+        .. "JOIN _hull_jobs b ON b.id = d.dependent_id "
+        .. "LEFT JOIN _hull_jobs j ON j.id = d.dep_id "
+        .. "WHERE d.satisfied = 0 AND b.status = 'blocked' "
+        .. "AND (j.id IS NULL OR j.status IN ('done', 'dead', 'compensated')) "
+        .. "LIMIT 500")
+    for _, e in ipairs(stuck) do
+        local ok = e.dep_status == nil or e.dep_status == "done"
+        if resolve_edge(e.dependent_id, e.dep_id, ok, e.fail_mode) == "failed" then
+            resolve_deps(e.dependent_id, false)
+        end
+    end
     return reclaimed
 end
 
@@ -1277,16 +1312,13 @@ function jobs.cron(name, spec, data, opts)
     local payload  = data ~= nil and json.encode(data) or nil
     local queue    = opts.queue or "default"
     local priority = opts.priority or 0
-    local n = db.exec(
-        "UPDATE _hull_cron SET spec=?, type=?, payload=?, queue=?, priority=?, "
-        .. "max_attempts=?, next_run_at=?, tz_offset=?, updated_at=? WHERE name=?",
-        { spec, job_type, payload, queue, priority, opts.max_attempts, nxt, tz_offset, now, name })
-    if (n or 0) == 0 then
-        db.exec(
-            "INSERT INTO _hull_cron (name, spec, type, payload, queue, priority, "
-            .. "max_attempts, next_run_at, tz_offset, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            { name, spec, job_type, payload, queue, priority, opts.max_attempts, nxt, tz_offset, now })
-    end
+    -- One statement: UPDATE-then-INSERT raced - two callers both updated
+    -- nothing and the second INSERT failed on the key.
+    db.upsert("_hull_cron", { "name" },
+        { "name", "spec", "type", "payload", "queue", "priority",
+          "max_attempts", "next_run_at", "tz_offset", "updated_at" },
+        { name, spec, job_type, payload, queue, priority,
+          opts.max_attempts, nxt, tz_offset, now })
     return jobs
 end
 
@@ -1366,7 +1398,7 @@ function jobs.work(opts)
         if not h then
             err_str = "no handler for job type '" .. tostring(job.type) .. "'"
             outcome = finish(job, { error = err_str }, function()
-                mark_dead(job.id, err_str); return "dead"
+                return mark_dead(job, err_str)
             end)
         else
             local ok, result = pcall(h, job)
@@ -1382,8 +1414,9 @@ function jobs.work(opts)
                     -- timeout deadline (0 = none); the reaper wakes a timed-out
                     -- wait, jobs.signal wakes a delivered one.
                     db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
-                        .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
-                        { result.deadline or 0, wf_now, job.id })
+                        .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
+                        .. CLAIMED,
+                        { result.deadline or 0, wf_now, job.id, job.claim_token })
                     -- Close the deliver-before-park race: a signal delivered in the
                     -- check->park window couldn't re-activate us (we were 'running'),
                     -- so re-check now that we are 'waiting'.
@@ -1400,8 +1433,9 @@ function jobs.work(opts)
                 else
                     -- ctx.sleep: future-dated pending job.
                     db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
-                        .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
-                        { result.wake_at or wf_now, wf_now, job.id })
+                        .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
+                        .. CLAIMED,
+                        { result.wake_at or wf_now, wf_now, job.id, job.claim_token })
                 end
             elseif not ok then
                 err_str = tostring(result)
@@ -1410,7 +1444,7 @@ function jobs.work(opts)
             elseif result == jobs.DEAD then
                 err_str = "handler returned jobs.DEAD"
                 outcome = finish(job, { error = err_str }, function()
-                    mark_dead(job.id, err_str); return "dead"
+                    return mark_dead(job, err_str)
                 end)
             elseif result == jobs.RETRY then
                 err_str = "handler requested retry"
@@ -1424,7 +1458,7 @@ function jobs.work(opts)
                     res = result
                 end
                 outcome = finish(job, { result = res }, function()
-                    mark_done(job.id, res); return "done"
+                    return mark_done(job, res)
                 end)
             end
         end
@@ -1435,7 +1469,8 @@ function jobs.work(opts)
         -- Release the strict-concurrency slot reserved at claim: any exit from
         -- 'running' (done / dead / retry / workflow yield) frees it. A yielded
         -- workflow re-reserves on its next claim.
-        if job._conc_strict == 1 and job._conc_key ~= nil then
+        -- Not for a lost claim: the run that owns the job now holds the slot.
+        if job._conc_strict == 1 and job._conc_key ~= nil and not job._lost then
             conc_release(job._conc_key)
         end
     end

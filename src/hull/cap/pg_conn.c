@@ -535,6 +535,7 @@ static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn
     }
 
     int authenticated = 0;
+    int sent_password = 0;   /* answered a cleartext request */
     int guard = 0;
 #ifndef HL_PG_NO_SCRAM
     PgScram scram;
@@ -573,6 +574,22 @@ static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn
                     conn_teardown(conn); return -1;
                 }
 #endif
+                /* With a password in the DSN the server must ask for it -
+                 * by SCRAM, which also proves the server knows it, or in
+                 * cleartext. An OK with no exchange at all ("trust") is what
+                 * anyone in the middle answers, and sslmode=require checks
+                 * no certificate. */
+                int proven = sent_password;
+#ifndef HL_PG_NO_SCRAM
+                proven = proven || scram.verified;
+#endif
+                if (dsn->password[0] && !proven) {
+                    set_err(conn->errmsg, sizeof conn->errmsg,
+                            "server accepted the connection without asking for "
+                            "the password; refused (drop the password from the "
+                            "DSN if the server really trusts this client)");
+                    conn_teardown(conn); return -1;
+                }
                 authenticated = 1;
             } else if (sub == HL_PG_AUTH_CLEARTEXT) {
                 /* A cleartext request hands over the password itself. Refuse it
@@ -602,6 +619,7 @@ static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn
                                 "failed to send password");
                     conn_teardown(conn); return -1;
                 }
+                sent_password = 1;
             } else if (sub == HL_PG_AUTH_SASL ||
                        sub == HL_PG_AUTH_SASL_CONTINUE ||
                        sub == HL_PG_AUTH_SASL_FINAL) {
@@ -1088,6 +1106,23 @@ static int handle_data_row(HlPgCursor *c, HlPgRowCb cb, void *ctx,
     return r ? 1 : 0;
 }
 
+/* The server answered a statement with CopyIn / CopyBoth: it now waits for
+ * COPY data, and the client - reading for ReadyForQuery - waited for the
+ * server: both sat until the read timeout. Hull does not stream COPY data,
+ * so it answers CopyFail ('f'); the server then reports an error and goes
+ * on to ReadyForQuery. -1 when even that could not be sent. */
+static int pg_refuse_copy(HlPgConn *conn)
+{
+    HlPgWriter w;
+    hl_pg_writer_init(&w);
+    size_t m = hl_pg_msg_begin(&w, 'f');
+    hl_pg_put_cstr(&w, "COPY FROM STDIN is not supported by hull/db");
+    hl_pg_msg_end(&w, m);
+    int se = w.err || conn_send(conn, w.buf, w.len);
+    hl_pg_writer_free(&w);
+    return se ? -1 : 0;
+}
+
 int hl_pg_query(HlPgConn *conn, const char *sql,
                 const HlPgParam *params, int nparams,
                 HlPgDescCb desc_cb, HlPgRowCb row_cb, void *cb_ctx,
@@ -1247,6 +1282,10 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
             had_error = 1;
             break;
         }
+        case HL_PG_B_COPY_IN:
+        case HL_PG_B_COPY_BOTH:
+            if (pg_refuse_copy(conn) != 0) return -1;
+            break;            /* the ErrorResponse that follows fails it */
         case HL_PG_B_READY:
             conn->tx_status = hl_pg_get_u8(&c);
             return had_error ? -1 : 0;
@@ -1315,6 +1354,10 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
             had_error = 1;
             break;
         }
+        case HL_PG_B_COPY_IN:
+        case HL_PG_B_COPY_BOTH:
+            if (pg_refuse_copy(conn) != 0) return -1;
+            break;            /* the ErrorResponse that follows fails it */
         case HL_PG_B_READY:
             conn->tx_status = hl_pg_get_u8(&c);
             return had_error ? -1 : 0;
@@ -1369,11 +1412,16 @@ int hl_pg_wait_notify(HlPgConn *conn, int timeout_ms)
          * frames can't extend the total wait past timeout_ms). */
         int remaining = (int)(deadline - mono_ms());
         if (remaining <= 0) return 0;   /* timed out, no notification */
-        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
-        int pr = poll(&pfd, 1, remaining);
-        if (pr < 0) { if (errno == EINTR) continue; return -1; }
-        if (pr == 0) return 0;          /* timed out */
-        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;   /* dead conn */
+        /* Under TLS the next message may already be decrypted and held by
+         * the session: poll would not see it, and the wait ran out with a
+         * notification sitting in the buffer. Read it instead. */
+        if (hl_db_transport_pending(conn->transport) == 0) {
+            struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+            int pr = poll(&pfd, 1, remaining);
+            if (pr < 0) { if (errno == EINTR) continue; return -1; }
+            if (pr == 0) return 0;          /* timed out */
+            if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;   /* dead conn */
+        }
 
         /* 3. Readable: recv one chunk into the buffer (grow if full, bounded like
          * conn_next_frame), then loop back to parse. */

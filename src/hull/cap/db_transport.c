@@ -771,12 +771,29 @@ ssize_t hl_db_transport_recv(HlDbTransport *t, uint8_t *buf, size_t len)
 {
     if (!t || !kl_handle_valid(t->fd))
         return -1;
-    if (t->tls)
-        return hl_tls_client_read((int)t->fd, t->tls, buf, len);
+    if (t->tls) {
+        /* The TLS read returns 0 for "nothing for the caller yet" - a record
+         * that carried no application data (a post-handshake message) - and
+         * -1 for EOF / error. The DB clients read 0 as "connection closed by
+         * server", so such a record ended the connection. Retry it; a socket
+         * read timeout (SO_RCVTIMEO: EAGAIN) still returns at once. */
+        for (int tries = 0; ; tries++) {
+            errno = 0;
+            ssize_t n = hl_tls_client_read((int)t->fd, t->tls, buf, len);
+            if (n != 0 || len == 0) return n;
+            if (errno == EAGAIN || errno == EWOULDBLOCK || tries >= 64)
+                return -1;
+        }
+    }
     kl_ssize_t n;
     do { n = sp_recv(t, t->fd, buf, len); }
     while (n < 0 && sp_io_status(t) == KL_IO_INTERRUPTED);
     return (ssize_t)n;
+}
+
+size_t hl_db_transport_pending(HlDbTransport *t)
+{
+    return (t && t->tls) ? hl_tls_client_pending(t->tls) : 0;
 }
 
 int hl_db_transport_send_all(HlDbTransport *t, const uint8_t *buf, size_t len)

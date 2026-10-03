@@ -47,6 +47,9 @@ HlTlsClient *hl_tls_client_handshake_cfg(int fd, const char *host,
 /* Blocking plaintext read/write tunnelled through the TLS session. Return
  * bytes transferred (> 0), or <= 0 on error / close. */
 ssize_t hl_tls_client_read(int fd, HlTlsClient *c, void *buf, size_t len);
+/* Decrypted bytes the session holds that a read would return without
+ * touching the socket - invisible to poll(2). */
+size_t  hl_tls_client_pending(HlTlsClient *c);
 ssize_t hl_tls_client_write(int fd, HlTlsClient *c, const void *buf, size_t len);
 
 /* Send a TLS close_notify on @p fd (best-effort; NULL-safe). Call before
