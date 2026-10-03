@@ -114,31 +114,6 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
     return 0;
 }
 
-/* ── Internal: build full path ──────────────────────────────────────── */
-
-static int build_path(const HlFsConfig *cfg, const char *path,
-                      char *out, size_t out_size, const char **err_msg)
-{
-    if (hl_cap_fs_validate(cfg, path, err_msg) != 0)
-        return -1;
-
-    /* Use resolved base_dir to avoid TOCTOU with symlinks.
-     * hl_cap_fs_validate already verified base_dir resolves. */
-    char resolved_base[PATH_MAX];
-    if (realpath(cfg->base_dir, resolved_base) == NULL) {
-        if (err_msg) *err_msg = "validate_failed";
-        return -1;
-    }
-
-    int n = snprintf(out, out_size, "%s/%s", resolved_base, path);
-    if (n < 0 || (size_t)n >= out_size) {
-        if (err_msg) *err_msg = "validate_failed";
-        return -1;
-    }
-
-    return 0;
-}
-
 #ifndef HL_FS_PATH_MAX
 #define HL_FS_PATH_MAX 4096   /* residual scratch for policy selection */
 #endif
@@ -154,10 +129,9 @@ static int build_path(const HlFsConfig *cfg, const char *path,
  * REFUSE any symlink so a symlink cannot alias a non-authorized target. No
  * matching grant -> "permission" (fail closed).
  *
- * SCOPE: read/write/mmap route through the policy.
- * hl_cap_fs_exists / hl_cap_fs_delete and any direct hl_cap_fs_validate consumer
- * still use the OLD build_path()/realpath path and are NOT policy-gated (they
- * remain base_dir-confined + sandbox-gated). Tracked follow-up. */
+ * SCOPE: read/write/mmap/stat/list route through the policy, and so do
+ * exists (via stat) and delete (the WRITE set). Only a direct
+ * hl_cap_fs_validate consumer still checks lexically against base_dir. */
 /* The authorization for `path` in `mode`: the selected grant's held anchor fd,
  * the residual under it (written into `scratch`), and the grant's symlink
  * policy. Returns 0, or -1 with *err_msg set. */
@@ -492,14 +466,18 @@ int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
     return hl_cap_fs_write_ex(cfg, path, data, len, 0, err_msg);
 }
 
+/* Both go through the fs policy now, as read / write / stat do: they used
+ * the old base_dir path join (a realpath of a host path), so the manifest's
+ * fs grants did not gate them - an embedder's exists() saw, and delete()
+ * removed, anything under the base dir. */
 int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path,
                      const char **err_msg)
 {
-    char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
-        return -1;
-
-    return access(full, F_OK) == 0 ? 1 : 0;
+    HlFsStatInfo info;
+    int rc = hl_cap_fs_stat(cfg, path, &info, err_msg);
+    if (rc == 0) return 1;
+    if (rc == 1) return 0;      /* absent - a missing parent too - is not an error */
+    return -1;
 }
 
 int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path,
@@ -507,13 +485,41 @@ int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path,
 {
     int result = -1;
 
-    char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
+    char scratch[HL_FS_PATH_MAX];
+    FsTarget t;
+    if (fs_select(cfg, path, HL_FS_OPEN_WRITE, scratch, sizeof(scratch), &t,
+                  err_msg) != 0)
         goto audit;
-
-    if (unlink(full) != 0) {
-        if (err_msg) *err_msg = "delete_failed";
+    if (strcmp(t.residual, ".") == 0) {        /* the grant root: a directory */
+        if (err_msg) *err_msg = "not_a_regular_file";
         goto audit;
+    }
+    {
+        HlFsParent par;
+        const char *e = NULL;
+        if (hl_fs_resolve_parent(t.anchor_fd, t.residual, t.sym, &par, &e) != 0) {
+            if (err_msg) *err_msg = e ? e : "delete_failed";
+            goto audit;
+        }
+        /* The leaf itself, never followed: a symlink is removed, not its
+         * target; a directory is not a file to delete. */
+        struct stat st;
+        int rc = fstatat(par.parent_fd, par.leaf, &st, AT_SYMLINK_NOFOLLOW);
+        if (rc == 0 && S_ISDIR(st.st_mode)) {
+            close(par.parent_fd);
+            if (err_msg) *err_msg = "not_a_regular_file";
+            goto audit;
+        }
+        if (rc != 0 || unlinkat(par.parent_fd, par.leaf, 0) != 0) {
+            int saved = errno;
+            close(par.parent_fd);
+            if (err_msg)
+                *err_msg = saved == ENOENT ? "not_found"
+                         : (saved == EACCES || saved == EPERM) ? "permission"
+                         : "delete_failed";
+            goto audit;
+        }
+        close(par.parent_fd);
     }
 
     result = 0;
@@ -807,13 +813,15 @@ static _Atomic int       g_guard_hit[MMAP_GUARD_SLOTS];
 static _Atomic int       g_guard_state;   /* 0 none, 1 installing, 2 on, -1 failed */
 static struct sigaction  g_prev_sigbus;
 static uintptr_t         g_guard_page;
+/* A slot's base while its registrar fills it in: never a mapping address. */
+#define GUARD_CLAIMED ((uintptr_t)1)
 
 static void mmap_guard_sigbus(int sig, siginfo_t *si, void *uc)
 {
     uintptr_t a = (uintptr_t)si->si_addr;
     for (int i = 0; i < MMAP_GUARD_SLOTS; i++) {
         uintptr_t b = atomic_load(&g_guard_base[i]);
-        if (!b) continue;
+        if (b <= GUARD_CLAIMED) continue;        /* free, or being filled */
         size_t l = atomic_load(&g_guard_len[i]);
         if (a >= b && a - b < l) {
             void *pg = (void *)(a & ~(g_guard_page - 1));
@@ -860,11 +868,17 @@ static int mmap_guard_register(void *base, size_t len)
     mmap_guard_install();
     for (int i = 0; i < MMAP_GUARD_SLOTS; i++) {
         uintptr_t zero = 0;
-        if (atomic_load(&g_guard_base[i]) != 0) continue;
-        atomic_store(&g_guard_len[i], len);      /* before base: the handler */
-        atomic_store(&g_guard_hit[i], 0);        /* reads base first */
-        if (atomic_compare_exchange_strong(&g_guard_base[i], &zero, (uintptr_t)base))
-            return i;
+        /* Claim the slot FIRST, then fill it, then publish the base. Two
+         * threads used to store their lengths into the same free slot
+         * before racing for its base, so a winner could be published with
+         * the loser's length - and the handler then mapped zero pages over
+         * whatever memory followed the real mapping. */
+        if (!atomic_compare_exchange_strong(&g_guard_base[i], &zero, GUARD_CLAIMED))
+            continue;
+        atomic_store(&g_guard_len[i], len);
+        atomic_store(&g_guard_hit[i], 0);
+        atomic_store(&g_guard_base[i], (uintptr_t)base);   /* now live */
+        return i;
     }
     return -1;
 }

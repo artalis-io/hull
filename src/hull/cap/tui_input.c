@@ -212,8 +212,11 @@ static void decode_csi(HlTuiParser *p, char final)
             /* Enter paste mode. */
             p->state = HL_TUI_PS_PASTE;
             if (!p->paste_buf) {
-                p->paste_cap = HL_TUI_PASTE_INITIAL_CAP;
-                p->paste_buf = malloc(p->paste_cap);
+                /* The capacity only once the buffer exists: set first, a
+                 * failed malloc left cap > 0 over a NULL buffer, and the
+                 * first pasted byte was written through it. */
+                p->paste_buf = malloc(HL_TUI_PASTE_INITIAL_CAP);
+                p->paste_cap = p->paste_buf ? HL_TUI_PASTE_INITIAL_CAP : 0;
             }
             p->paste_len = 0;
             return;

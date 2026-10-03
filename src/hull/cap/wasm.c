@@ -251,6 +251,17 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
             clear_validate_oob_exception(inst);
             return -1;
         }
+        /* The record must lie in the instance's own linear memory.
+         * validate_app_addr also accepts the shared heaps above it - and the
+         * mapped spans are among them, read-only file mappings: a record
+         * aimed at a span had the host write into it, which faulted the
+         * whole process (or, for a writable mapping, wrote the file). */
+        wasm_memory_inst_t mem = wasm_runtime_get_default_memory(inst);
+        uint64_t lin = mem ? (uint64_t)wasm_memory_get_cur_page_count(mem) *
+                             (uint64_t)wasm_memory_get_bytes_per_page(mem)
+                           : 0;
+        if (app > lin || (uint64_t)cap > lin - app)
+            return -1;
         p = wasm_runtime_addr_app_to_native(inst, app);
         if (!p)
             return -1;

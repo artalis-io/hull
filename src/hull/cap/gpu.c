@@ -433,6 +433,15 @@ int hl_cap_gpu_buffer_write(HlGpuCtx *ctx, int device, const char *name,
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_BUFFER;
     }
+    /* WebGPU writes whole 4-byte words at 4-aligned offsets. An unaligned
+     * write was a validation error that only got logged - the call
+     * "succeeded" and the buffer kept its old bytes. A short tail is padded
+     * by the backend, which is only harmless at the buffer's end (the
+     * allocation's padding); elsewhere it would zero the next bytes. */
+    if (offset % 4 != 0 || (len % 4 != 0 && offset + len != buf->size)) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUFFER;
+    }
 
     int rc = ctx->backend->buffer_write(dev, buf,
                                         data, len, offset);
@@ -669,8 +678,21 @@ int hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
         return HL_GPU_ERR_BUFFER;
     }
 
-    /* Align to 4 bytes (WebGPU requirement for copy operations) */
-    copy_size = (copy_size + 3) & ~(size_t)3;
+    /* WebGPU copies whole 4-byte words between 4-aligned offsets. The size
+     * used to be rounded up after the bounds check: the extra bytes landed
+     * past the requested range, over the destination's data. Now a rounded
+     * copy is allowed only when the extra bytes fall in padding: the copy
+     * ends at the destination's end, and stays inside the source's
+     * (4-aligned) allocation. */
+    size_t rounded = (copy_size + 3) & ~(size_t)3;
+    size_t src_alloc = (src->size + 3) & ~(size_t)3;
+    if (src_offset % 4 != 0 || dst_offset % 4 != 0 ||
+        rounded < copy_size || rounded > src_alloc - src_offset ||
+        (rounded != copy_size && dst_offset + copy_size != dst->size)) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUFFER;
+    }
+    copy_size = rounded;
 
     if (!ctx->backend->buffer_copy) {
         pthread_mutex_unlock(&dev->mutex);

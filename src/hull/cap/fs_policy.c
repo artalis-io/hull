@@ -9,6 +9,7 @@
 #include "hull/cap/fs_policy.h"
 #include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
+#include "hull/shared/host.h"   /* hl_host_is_windows */
 #include <sh_seal_arena.h>
 
 #include <errno.h>
@@ -554,6 +555,11 @@ static long split_caller(const char *path, const char **comp, size_t *len,
 {
     if (!path || path[0] == '\0') { *err = "invalid_path"; return -1; }
     if (path[0] == '/' || path[0] == '\\') { *err = "invalid_path"; return -1; }
+    /* On Windows the OS also splits on a backslash and reads "C:" as a
+     * drive, so a..x joined by backslashes was one harmless-looking
+     * component here and a walk out of the root there. Both are ordinary
+     * name bytes on POSIX. */
+    if (hl_host_is_windows() && strpbrk(path, "\\:")) { *err = "invalid_path"; return -1; }
     size_t plen = strlen(path);
     if (path[plen - 1] == '/') { *err = "invalid_path"; return -1; }   /* trailing slash */
 

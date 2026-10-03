@@ -18,9 +18,9 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
 #include <sys/random.h>
-#include <errno.h>
 #endif
 
 /* Compiler-safe memory zeroing that won't be optimized away */
@@ -646,9 +646,11 @@ int hl_cap_crypto_sha256_final(HlSha256Ctx *ctx, uint8_t out[32])
         out[i*4+3] = (uint8_t)(ctx->state[i]);
     }
     /* Scrub the working buffers so a stale stack frame can't leak
-     * partial input back through the context after free. */
-    memset(block, 0, 64);
-    memset(ctx,   0, sizeof(*ctx));
+     * partial input back through the context after free - with a store the
+     * compiler keeps: both are dead after this, so a plain memset could be
+     * (and at -O2 was) dropped. */
+    hull_secure_zero(block, sizeof block);
+    hull_secure_zero(ctx, sizeof(*ctx));
     return 0;
 }
 
@@ -689,8 +691,13 @@ int hl_cap_crypto_random(void *buf, size_t len)
     }
     return 0;
 #else
-    /* POSIX fallback: /dev/urandom */
-    int fd = open("/dev/urandom", O_RDONLY);
+    /* POSIX fallback: /dev/urandom. A signal arriving during the open or a
+     * read is retried: it used to fail the call - and with it a key, a
+     * token or a session id - for no reason but timing. */
+    int fd;
+    do {
+        fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    } while (fd < 0 && errno == EINTR);
     if (fd < 0)
         return -1;
 
@@ -698,6 +705,8 @@ int hl_cap_crypto_random(void *buf, size_t len)
     size_t remaining = len;
     while (remaining > 0) {
         ssize_t n = read(fd, p, remaining);
+        if (n < 0 && errno == EINTR)
+            continue;
         if (n <= 0) {
             close(fd);
             return -1;
@@ -1576,8 +1585,12 @@ static int hmac_sha512(const uint8_t *key, size_t key_len,
 
     /* inner = SHA512(k_ipad || msg) */
     /* Allocate contiguous buffer for inner hash input */
-    if (msg_len > SIZE_MAX - 128)
+    if (msg_len > SIZE_MAX - 128) {
+        hull_secure_zero(k_ipad, sizeof(k_ipad));   /* the key, xor a constant */
+        hull_secure_zero(k_opad, sizeof(k_opad));
+        hull_secure_zero(tk, sizeof(tk));
         return -1;
+    }
     size_t inner_len = 128 + msg_len;
     uint8_t stack_inner[4224]; /* 128 + 4096 */
     uint8_t *inner_buf = (inner_len <= sizeof(stack_inner)) ? stack_inner
@@ -1637,8 +1650,11 @@ int hl_cap_crypto_auth_verify(const uint8_t tag[32],
     if (hl_cap_crypto_auth(msg, msg_len, key, computed) != 0)
         return -1;
 
-    /* Constant-time comparison */
-    return crypto_verify_32(computed, tag);
+    /* Constant-time comparison; the expected tag is a valid MAC for this
+     * message - not left on the stack for the next frame to read. */
+    int rc = crypto_verify_32(computed, tag);
+    hull_secure_zero(computed, sizeof computed);
+    return rc;
 }
 
 /* ── Secret-key authenticated encryption (XSalsa20+Poly1305) ───────

@@ -650,4 +650,27 @@ UTEST(tar_create, empty_archive_is_two_zero_blocks) {
     free(out);
 }
 
+
+/* The depth check counts ".." lexically; the kernel applies a ".." after a
+ * link physically. With `a -> .` on disk, `b -> a/../q` counts 1, 0, 1 yet
+ * names the extraction root's parent. */
+UTEST_F(tar_fixture, extract_refuses_a_dotdot_through_a_link) {
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_symlink(buf, &off, "a", ".");
+    tar_add_symlink(buf, &off, "b", "a/../q");
+    off += 512;
+
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/x", utest_fixture->tmpdir);
+    EXPECT_NE(hl_tar_extract(buf, off, dest), 0);
+
+    char p[PATH_MAX];
+    struct stat st;
+    snprintf(p, sizeof(p), "%s/b", dest);
+    EXPECT_NE(lstat(p, &st), 0);
+    free(buf);
+}
+
 UTEST_MAIN()

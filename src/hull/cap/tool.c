@@ -263,9 +263,48 @@ static int check_wl(const char *wl)
     return want_path ? -1 : 0;
 }
 
+/* A linker's own plugin options - for ld / ld.lld / ld64.lld spawned
+ * directly, where they are not behind -Wl, (and an LTO pass plugin through
+ * the driver). Each loads and runs a shared object. */
+static int is_linker_plugin_flag(const char *a)
+{
+    static const char *const exact[] = {
+        "-plugin", "--plugin", "--load-pass-plugin", "-load-pass-plugin", NULL
+    };
+    static const char *const prefix[] = {
+        "-plugin=", "--plugin=", "--load-pass-plugin=", "-load-pass-plugin=",
+        "-fplugin-arg-", NULL
+    };
+    for (const char *const *p = exact; *p; p++)
+        if (strcmp(a, *p) == 0) return 1;
+    for (const char *const *p = prefix; *p; p++)
+        if (strncmp(a, *p, strlen(*p)) == 0) return 1;
+    return 0;
+}
+
+/* zig is admitted as a C driver and linker; most of its other subcommands
+ * run code (`zig run`, `zig build` runs build.zig, `zig test`), so only
+ * these may follow it. */
+static int zig_subcommand_ok(const char *sub)
+{
+    static const char *const ok[] = {
+        "cc", "c++", "ar", "ranlib", "version", "env", "targets", NULL
+    };
+    if (!sub) return 0;
+    for (const char *const *p = ok; *p; p++)
+        if (strcmp(sub, *p) == 0) return 1;
+    return 0;
+}
+
 int hl_tool_validate_args(const char *const argv[])
 {
     if (!argv) return -1;
+    if (argv[0]) {
+        char named[64];
+        if (hl_host_tool_name(argv[0], named, sizeof named) == 0 &&
+            strcmp(named, "zig") == 0 && !zig_subcommand_ok(argv[1]))
+            return -1;
+    }
     for (int i = 1; argv[i]; i++) {
         const char *a = argv[i];
         if (strcmp(a, "-load") == 0)          return -1; /* Clang plugin */
@@ -273,6 +312,9 @@ int hl_tool_validate_args(const char *const argv[])
         if (strncmp(a, "-fplugin=", 9) == 0)  return -1; /* GCC plugin= */
         if (strncmp(a, "-fpass-plugin=", 14) == 0) return -1; /* Clang pass plugin */
         if (strcmp(a, "-Xlinker") == 0)       return -1; /* linker pass */
+        if (strcmp(a, "--for-linker") == 0 ||
+            strncmp(a, "--for-linker=", 13) == 0) return -1; /* -Xlinker, spelled out */
+        if (is_linker_plugin_flag(a))          return -1;
         if (strcmp(a, "-wrapper") == 0)       return -1; /* runs a program around each tool */
         if (strncmp(a, "-specs=", 7) == 0 ||
             strncmp(a, "--specs=", 8) == 0)   return -1; /* GCC spec file: arbitrary commands */

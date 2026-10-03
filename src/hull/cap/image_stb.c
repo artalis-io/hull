@@ -69,9 +69,18 @@ static int stb_decode(const void *src, size_t src_len,
         (uint32_t)ih > HL_IMAGE_MAX_DIM ||
         (uint64_t)iw * (uint64_t)ih > HL_IMAGE_MAX_PIXELS)
         return -1;
+    /* Bound every allocation stb makes for this decode by what the header
+     * allows: the largest raw image (4 channels x 16 bits, plus one filter
+     * byte a row), the compressed input it accumulates, and slack. stb's
+     * PNG inflate grows its buffer without a limit of its own, so a zlib
+     * bomb inside a small image ran past the pixel cap above. */
+    extern _Thread_local size_t hl_stb_alloc_cap;
+    hl_stb_alloc_cap = (size_t)iw * (size_t)ih * 8u + (size_t)ih * 8u +
+                       src_len + ((size_t)1 << 20);
     unsigned char *data = stbi_load_from_memory(
         (const unsigned char *)src, (int)src_len,
         &iw, &ih, &channels_in_file, requested_channels);
+    hl_stb_alloc_cap = 0;
     if (!data) return -1;
     if (iw <= 0 || ih <= 0 || (uint32_t)iw > HL_IMAGE_MAX_DIM ||
         (uint32_t)ih > HL_IMAGE_MAX_DIM ||

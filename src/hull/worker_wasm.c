@@ -130,9 +130,13 @@ static void wasm_cancel_fn(void *ud)
 
     wasm_inflight_release(op);
 
-    /* Clear busy flag for persistent instances */
-    if (op->persistent_inst)
-        atomic_store(&op->persistent_inst->busy, 0);
+    /* Clear busy, and finish a close() that was deferred while this call
+     * was queued - as done_fn does. Clearing the flag alone left that
+     * instance (its linear memory, its exec env) allocated for good. */
+    if (op->persistent_inst) {
+        hl_cap_wasm_instance_release_busy(op->persistent_inst);
+        op->persistent_inst = NULL;
+    }
 
     HlAsyncCtx *ctx = op->async_ctx;
     hl_worker_wasm_op_free(op);
