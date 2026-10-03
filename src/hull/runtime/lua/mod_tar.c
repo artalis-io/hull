@@ -20,6 +20,7 @@
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
 #include "internal.h"   /* hl_lua_anchor */
+#include "protected.h"   /* pushes that cannot leak the C buffer */
 
 #include <stdlib.h>
 #include <string.h>
@@ -168,7 +169,10 @@ static int l_tar_create(lua_State *L)
         lua_pushstring(L, "tar.create: unsafe name or out of memory");
         return 2;
     }
-    lua_pushlstring(L, (const char *)out, out_len);
+    if (hl_lua_pushlstring_safe(L, (const char *)out, out_len) != 0) {
+        free(out);
+        return luaL_error(L, "not enough memory for the result");
+    }
     free(out);
     return 1;
 }
@@ -316,7 +320,10 @@ static int l_tar_pack(lua_State *L)
         lua_pushstring(L, err ? err : "tar.pack: failed");
         return 2;
     }
-    lua_pushlstring(L, (const char *)out, out_len);
+    if (hl_lua_pushlstring_safe(L, (const char *)out, out_len) != 0) {
+        free(out);
+        return luaL_error(L, "not enough memory for the result");
+    }
     free(out);
     return 1;
 }

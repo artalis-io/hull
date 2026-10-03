@@ -7,6 +7,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"   /* hl_lua_source_is_stdlib */
+#include "protected.h"  /* rows built without raising inside the backend */
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
@@ -36,42 +37,24 @@ typedef struct {
     lua_State *L;
     int        table_idx; /* absolute stack index of result table */
     int        row_count;
+    int        failed;    /* a row could not be built (out of memory) */
 } LuaQueryCtx;
 
+/* Runs inside the backend's read loop (between sqlite3_step calls, or while a
+ * Postgres / MySQL reply is still on the wire), so it must not raise: an
+ * out-of-memory longjmp from here left the reply unread, and the next query
+ * on that connection returned this one's rows. The row is built under
+ * lua_pcall; a failure stops the query (every backend then drains to the end
+ * of the reply) and the binding raises once hl_db_query has returned. */
 static int lua_query_row_cb(void *opaque, HlColumn *cols, int ncols)
 {
     LuaQueryCtx *qc = (LuaQueryCtx *)opaque;
-    qc->row_count++;
-
-    lua_newtable(qc->L);
-    if (!lua_checkstack(qc->L, ncols + 2))
-        return -1;
-    for (int i = 0; i < ncols; i++) {
-        switch (cols[i].value.type) {
-        case HL_TYPE_INT:
-            lua_pushinteger(qc->L, (lua_Integer)cols[i].value.i);
-            break;
-        case HL_TYPE_DOUBLE:
-            lua_pushnumber(qc->L, (lua_Number)cols[i].value.d);
-            break;
-        case HL_TYPE_TEXT:
-            lua_pushlstring(qc->L, cols[i].value.s, cols[i].value.len);
-            break;
-        case HL_TYPE_BLOB:
-            lua_pushlstring(qc->L, cols[i].value.s, cols[i].value.len);
-            break;
-        case HL_TYPE_BOOL:
-            lua_pushboolean(qc->L, cols[i].value.b);
-            break;
-        case HL_TYPE_NIL:
-        default:
-            lua_pushnil(qc->L);
-            break;
-        }
-        lua_setfield(qc->L, -2, cols[i].name);
+    if (hl_lua_append_row(qc->L, qc->table_idx, (lua_Integer)qc->row_count + 1,
+                          cols, ncols) != 0) {
+        qc->failed = 1;
+        return 1;
     }
-
-    lua_rawseti(qc->L, qc->table_idx, qc->row_count);
+    qc->row_count++;
     return 0;
 }
 
@@ -367,6 +350,8 @@ static int lua_db_query_impl(lua_State *L)
 
     lua_free_hl_values(L, params, nparams);
 
+    if (qc.failed)
+        return luaL_error(L, "db.query: not enough memory for the result");
     if (rc != 0) {
         lua_pop(L, 1); /* pop result table */
         return luaL_error(L, "query failed: %s", hl_db_errmsg(h));
@@ -639,13 +624,41 @@ static int lua_db_upsert(lua_State *L)
 typedef struct {
     lua_State *L;
     int        i;
+    int        failed;
 } LuaColForwardCtx;
 
+/* (args: name, result) */
+static int lua_db_table_columns_k(lua_State *L)
+{
+    const HlLuaBytes *name = (const HlLuaBytes *)lua_touserdata(L, 1);
+    lua_pushstring(L, name->p);
+    lua_rawseti(L, 2, (lua_Integer)lua_tointeger(L, 3));
+    return 0;
+}
+
+/* Runs inside the backend's query, so it must not raise (see
+ * lua_query_row_cb): each name is stored under lua_pcall, and a failure is
+ * raised after hl_db_table_columns returns. */
 static void lua_db_table_columns_cb(void *cb_ctx, const char *col_name)
 {
     LuaColForwardCtx *fwd = (LuaColForwardCtx *)cb_ctx;
-    lua_pushstring(fwd->L, col_name);
-    lua_rawseti(fwd->L, -2, ++fwd->i);
+    lua_State *L = fwd->L;
+    if (fwd->failed || !lua_checkstack(L, 4)) {
+        fwd->failed = 1;
+        return;
+    }
+    int result = lua_gettop(L);
+    HlLuaBytes name = { col_name, 0 };
+    lua_pushcfunction(L, lua_db_table_columns_k);
+    lua_pushlightuserdata(L, &name);
+    lua_pushvalue(L, result);
+    lua_pushinteger(L, (lua_Integer)fwd->i + 1);
+    if (lua_pcall(L, 3, 0, 0) != LUA_OK) {
+        lua_pop(L, 1);
+        fwd->failed = 1;
+        return;
+    }
+    fwd->i++;
 }
 
 /* db.table_columns(table) -> { "col1", "col2", ... }
@@ -664,9 +677,11 @@ static int lua_db_table_columns(lua_State *L)
 
     int guard = push_row_loop_guard(L);
     lua_newtable(L);  /* result */
-    LuaColForwardCtx fwd = { L, 0 };
+    LuaColForwardCtx fwd = { L, 0, 0 };
     int rc = hl_db_table_columns(h, table, lua_db_table_columns_cb, &fwd);
     lua_closeslot(L, guard);    /* the result table stays on top */
+    if (fwd.failed)
+        return luaL_error(L, "db.table_columns: not enough memory for the result");
     if (rc < 0) {
         return luaL_error(L, "db.table_columns: %s", hl_db_errmsg(h));
     }

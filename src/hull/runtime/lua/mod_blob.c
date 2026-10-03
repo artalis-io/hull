@@ -40,6 +40,7 @@
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
 #include "log.h"
+#include "protected.h"   /* pushes that cannot leak the C buffer */
 
 #include <lauxlib.h>
 #include <lua.h>
@@ -355,7 +356,10 @@ static int lua_reader_read(lua_State *L)
         hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
         lua_pushnil(L);
     } else {
-        lua_pushlstring(L, (const char *)buf, got);
+        if (hl_lua_pushlstring_safe(L, (const char *)buf, got) != 0) {
+            hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
+            return luaL_error(L, "not enough memory for the result");
+        }
         hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
     }
     return 1;

@@ -17,6 +17,7 @@
 #include "hull/worker_wasm.h"
 #include "hull/vfs.h"
 #include "internal.h"   /* hl_lua_check_can_wait */
+#include "protected.h"   /* pushes that cannot leak the C buffer */
 
 #include <keel/http_server.h>
 
@@ -1333,7 +1334,10 @@ static int lua_compute_stream(lua_State *L)
 
     /* Return based on output mode */
     if (out_storage.kind == HL_STREAM_OUT_BUFFER && out_data) {
-        lua_pushlstring(L, (const char *)out_data, out_len);
+        if (hl_lua_pushlstring_safe(L, (const char *)out_data, out_len) != 0) {
+            hl_alloc_free(lua->base.alloc, out_data, out_len);
+            return luaL_error(L, "not enough memory for the result");
+        }
         hl_alloc_free(lua->base.alloc, out_data, out_len);
         lua_pushnil(L);
         return 2;

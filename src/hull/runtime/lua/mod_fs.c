@@ -16,6 +16,7 @@
 #include "hull/vfs.h"
 
 #include "log.h"
+#include "protected.h"   /* pushes that cannot leak the C buffer */
 
 #include <sh_arena.h>
 #include <stdio.h>
@@ -76,7 +77,10 @@ static int lua_fs_read(lua_State *L)
         lua_pushstring(L, err_msg ? err_msg : "read_failed");
         return 2;
     }
-    lua_pushlstring(L, (const char *)buf, (size_t)got);
+    if (hl_lua_pushlstring_safe(L, (const char *)buf, (size_t)got) != 0) {
+        hl_alloc_free(lua->base.alloc, buf, (size_t)size);
+        return luaL_error(L, "not enough memory for the result");
+    }
     hl_alloc_free(lua->base.alloc, buf, (size_t)size);
     return 1;
 }
