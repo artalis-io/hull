@@ -369,6 +369,44 @@ UTEST_F(tar_fixture, extract_rejects_nested_traversal) {
 /* Spec item B: a symlink member extracts as a link where supported, else a copy
  * of its (already-extracted) target. Either way the path resolves to the target
  * content - the cosmocc arch-cc -> cosmocc case. */
+/* The depth check counts by member NAME, which a link in the parent path
+ * makes wrong: with `d -> .`, `d/d/d` is the root itself, so `d/d/d/l ->
+ * ../../..` points three levels above it. A link under a link is refused. */
+UTEST_F(tar_fixture, extract_refuses_link_under_a_link) {
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_symlink(buf, &off, "d", ".");
+    tar_add_symlink(buf, &off, "d/d/d/l", "../../..");
+    off += 512;
+
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/x", utest_fixture->tmpdir);
+    ASSERT_NE(hl_tar_extract(buf, off, dest), 0);
+
+    char p[PATH_MAX];
+    struct stat st;
+    snprintf(p, sizeof(p), "%s/l", dest);
+    EXPECT_NE(lstat(p, &st), 0);
+    free(buf);
+}
+
+/* A header's size field holds 8 GiB - 1. Past it, the writer refuses rather
+ * than write a truncated size with all the data after it. */
+UTEST(tar_create, refuses_entry_past_the_size_field) {
+    if (sizeof(size_t) < 8) UTEST_SKIP("32-bit size_t");
+    static const unsigned char tiny[1] = { 0 };
+    HlTarEntry e;
+    memset(&e, 0, sizeof e);
+    e.name = "big";
+    e.data = tiny;                                /* never read: refused first */
+    e.size = (size_t)1 << 33;                     /* 8 GiB */
+    unsigned char *out = NULL;
+    size_t out_len = 0;
+    EXPECT_NE(hl_tar_create(&e, 1, &out, &out_len), 0);
+    EXPECT_TRUE(out == NULL);
+}
+
 UTEST_F(tar_fixture, extract_symlink_resolves_to_target) {
     unsigned char *buf = calloc(1, 8192);
     ASSERT_NE(buf, NULL);

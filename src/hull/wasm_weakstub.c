@@ -123,6 +123,11 @@ __attribute__((weak)) void hl_cap_wasm_instance_destroy(HlWasmInstance *inst)
     (void)inst;
 }
 
+__attribute__((weak)) void hl_cap_wasm_instance_release_busy(HlWasmInstance *inst)
+{
+    if (inst) atomic_store(&inst->busy, 0);
+}
+
 /* ── Unified buffer protocol: the WasmBuffer type (mod_buffer / image / gpu) ── */
 
 __attribute__((weak)) const void *hl_wasm_buffer_data(const HlWasmBuffer *buf)

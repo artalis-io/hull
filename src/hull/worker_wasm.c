@@ -99,9 +99,13 @@ static void wasm_done_fn(void *ud)
 
     wasm_inflight_release(op);
 
-    /* Clear busy flag for persistent instances (event loop thread) */
-    if (op->persistent_inst)
-        atomic_store(&op->persistent_inst->busy, 0);
+    /* Clear busy flag for persistent instances (event loop thread), and
+     * finish a close that came in while the call ran. Nothing below reads
+     * the instance. */
+    if (op->persistent_inst) {
+        hl_cap_wasm_instance_release_busy(op->persistent_inst);
+        op->persistent_inst = NULL;
+    }
 
     if (atomic_load(&op->cancelled)) {
         HlAsyncCtx *ctx = op->async_ctx;

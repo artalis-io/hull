@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -186,6 +187,34 @@ static void child_size_query(void)
     hl_cap_tui_release(ctx);
 }
 
+/* Shrink the terminal under a cursor at the old bottom-right corner, then
+ * write a combining mark. The resize did not clamp the cursor, and the mark
+ * attaches to the cell left of it: 23*40+78 in a 400-cell buffer, a heap
+ * write past the end (ASan reports it; CI runs this suite under ASan). */
+static void child_resize_then_combining(void)
+{
+    struct winsize big = { .ws_row = 24, .ws_col = 80 };
+    struct winsize small = { .ws_row = 10, .ws_col = 40 };
+    if (ioctl(STDOUT_FILENO, TIOCSWINSZ, &big) != 0) _exit(50);
+
+    HlTuiCtx *ctx = NULL;
+    if (hl_cap_tui_acquire(&ctx) != 0) _exit(51);
+    hl_cap_tui_move(ctx, 80, 24);
+
+    if (ioctl(STDOUT_FILENO, TIOCSWINSZ, &small) != 0) _exit(52);
+    raise(SIGWINCH);
+    HlTuiEvent ev;
+    (void)hl_cap_tui_poll(ctx, 0, &ev);
+
+    int cols = 0, rows = 0;
+    if (hl_cap_tui_size(ctx, &cols, &rows) != 0) _exit(53);
+    if (cols != 40 || rows != 10) _exit(54);
+
+    if (hl_cap_tui_write(ctx, "\xcc\x81" "x", 3) != 0) _exit(55);  /* U+0301 */
+    hl_cap_tui_flush(ctx);
+    hl_cap_tui_release(ctx);
+}
+
 /* ── Tests ──────────────────────────────────────────────────────── */
 
 UTEST(tui_lifecycle_pty, acquire_release_roundtrip)
@@ -263,6 +292,22 @@ UTEST(tui_lifecycle_pty, size_reports_pty_dimensions)
     ASSERT_EQ(sscanf(marker, "hull-tui-size:%d,%d", &c, &r), 2);
     ASSERT_GT(c, 0);
     ASSERT_GT(r, 0);
+
+    int status = 0;
+    ASSERT_TRUE(waitpid_timeout(pid, &status, TEST_CHILD_WAIT_MS));
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+    close(master);
+}
+
+UTEST(tui_lifecycle_pty, resize_clamps_the_cursor)
+{
+    int master = -1;
+    pid_t pid = spawn_pty(&master, child_resize_then_combining);
+    ASSERT_GE(pid, 0);
+
+    char drainbuf[TEST_DRAIN_BUF_BYTES];
+    drain(master, drainbuf, sizeof drainbuf, TEST_DRAIN_DEADLINE_MS);
 
     int status = 0;
     ASSERT_TRUE(waitpid_timeout(pid, &status, TEST_CHILD_WAIT_MS));

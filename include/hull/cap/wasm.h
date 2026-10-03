@@ -266,6 +266,7 @@ typedef struct HlWasmInstance {
     uint64_t     default_max_output;
     int          closed;
     atomic_int   busy;          /* 1 = async call in flight */
+    int          destroy_pending; /* closed while busy (event-loop thread only) */
     HlAllocator *alloc;
 } HlWasmInstance;
 
@@ -462,6 +463,10 @@ int hl_cap_wasm_instance_call_buf_async(HlWasmInstance *inst,
  * If busy (async in-flight), logs a warning and does not destroy.
  */
 void hl_cap_wasm_instance_destroy(HlWasmInstance *inst);
+
+/* An async call on `pi` finished (event-loop thread): drop the busy
+ * reservation and, if the instance was closed meanwhile, destroy it now. */
+void hl_cap_wasm_instance_release_busy(HlWasmInstance *pi);
 
 /* ── Shared data API ──────────────────────────────────────────────── */
 

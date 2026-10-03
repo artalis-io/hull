@@ -306,6 +306,20 @@ static int materialize_link(const char *dest, struct sym_ent *se)
     int pn = snprintf(path, sizeof(path), "%s/%s", dest, se->name);
     if (pn < 0 || (size_t)pn >= sizeof(path)) return -1;
 
+    /* tar_safe_linkname counts depth by the member's NAME, which is only the
+     * real depth while no parent is itself a link. `d -> .` and then
+     * `d/d/d/l -> ../../..` passed it (depth 3, three ".."), yet `d/d/d` IS
+     * the root, so `l` pointed three levels above it. A link is created only
+     * where every parent is a real directory. */
+    size_t dl = strlen(dest) + 1;
+    for (char *s = path + dl; (s = strchr(s, '/')) != NULL; s++) {
+        struct stat st;
+        *s = '\0';
+        int is_link = lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
+        *s = '/';
+        if (is_link) return -1;
+    }
+
     if (extract_make_parents(path) != 0) return -1;
     (void)unlink(path);                          /* idempotent re-extract */
 
@@ -420,8 +434,13 @@ static int tar_write_header(unsigned char hdr[TAR_BLOCK], const HlTarEntry *e)
              (e->mode ? e->mode : 0644) & 0777);
     snprintf((char *)(hdr + TAR_UID_OFF), TAR_NUM_FIELD, "%07o", 0);
     snprintf((char *)(hdr + TAR_GID_OFF), TAR_NUM_FIELD, "%07o", 0);
-    snprintf((char *)(hdr + TAR_SIZE_OFF), TAR_NUM12_FIELD, "%011o",
-             (unsigned)(e->is_dir ? 0 : e->size));
+    /* The size field holds 11 octal digits (8 GiB - 1). It was written from
+     * an `unsigned`, so a 4 GiB+ entry got a header claiming a few bytes while
+     * all its data followed - and the reader then parsed the rest of that data
+     * as further headers: entries chosen by whoever supplied the content. */
+    unsigned long long size = e->is_dir ? 0 : (unsigned long long)e->size;
+    if (size > 077777777777ULL) { errno = EFBIG; return -1; }
+    snprintf((char *)(hdr + TAR_SIZE_OFF), TAR_NUM12_FIELD, "%011llo", size);
     snprintf((char *)(hdr + TAR_MTIME_OFF), TAR_NUM12_FIELD, "%011o", 0);
     hdr[TAR_TYPE_OFF] = e->is_dir ? '5' : '0';
     memcpy(hdr + TAR_MAGIC_OFF, "ustar", 6);

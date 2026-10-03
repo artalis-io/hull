@@ -50,6 +50,11 @@ HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
     buf->alloc = alloc;
     buf->data  = data;
     buf->u.owned.alloc = data; /* free(data) on destroy */
+    /* The bytes came from plain malloc (the GPU readback), not from `alloc`,
+     * so they were never counted against it. Releasing them on destroy
+     * lowered `used` by bytes it never held: every gpu.dispatch returning a
+     * buffer gave the app that much more room past its memory limit. */
+    buf->u.owned.untracked = 1;
     return buf;
 }
 
@@ -146,7 +151,10 @@ void hl_wasm_buffer_destroy(HlWasmBuffer *buf)
 
     switch (buf->kind) {
     case HL_WASM_BUF_OWNED:
-        hl_alloc_free(buf->alloc, buf->u.owned.alloc, buf->len);
+        if (buf->u.owned.untracked)
+            free(buf->u.owned.alloc);
+        else
+            hl_alloc_free(buf->alloc, buf->u.owned.alloc, buf->len);
         buf->u.owned.alloc = NULL;
         break;
 

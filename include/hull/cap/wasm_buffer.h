@@ -45,7 +45,10 @@ typedef struct HlWasmBuffer {
     HlAllocator   *alloc;     /* tracked allocator (NULL = raw malloc) */
 
     union {
-        struct { void *alloc; } owned;                    /* free(alloc) */
+        struct {
+            void *alloc;
+            int   untracked;   /* adopted: never counted, so never released */
+        } owned;                                          /* free(alloc) */
         struct { HlMappedBuffer *mbuf; } mmap;            /* hl_cap_fs_munmap(mbuf) */
         struct {
             void    *instance;      /* wasm_module_inst_t */

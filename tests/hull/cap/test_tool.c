@@ -256,6 +256,43 @@ UTEST(tool, validate_reject_response_file)
     ASSERT_NE(hl_tool_validate_args(argv), 0);
 }
 
+/* Every comma piece of -Wl, is a linker argument and is checked: a safe
+ * first piece used to carry anything after it. */
+UTEST(tool, validate_wl_checks_every_piece)
+{
+    const char *smuggled[] = { "cc", "-Wl,--export=x,--plugin=/tmp/evil.so", NULL };
+    ASSERT_NE(hl_tool_validate_args(smuggled), 0);
+    const char *after_load[] = { "cc", "-Wl,-force_load,a.a,-plugin,/tmp/e.so", NULL };
+    ASSERT_NE(hl_tool_validate_args(after_load), 0);
+    const char *prefix_only[] = { "cc", "-Wl,--no-entryX", NULL };
+    ASSERT_NE(hl_tool_validate_args(prefix_only), 0);
+    const char *no_archive[] = { "cc", "-Wl,-force_load", NULL };
+    ASSERT_NE(hl_tool_validate_args(no_archive), 0);
+
+    const char *ok[] = { "cc", "-Wl,--export=hull_process", "-Wl,--no-entry",
+                         "-Wl,-force_load,/b/libhull_feature-tui.a",
+                         "-Wl,--whole-archive", "-Wl,--start-group", NULL };
+    ASSERT_EQ(hl_tool_validate_args(ok), 0);
+}
+
+UTEST(tool, validate_reject_driver_program_flags)
+{
+    const char *wrapper[] = { "cc", "-wrapper", "/tmp/x", NULL };
+    ASSERT_NE(hl_tool_validate_args(wrapper), 0);
+    const char *specs[] = { "cc", "-specs=/tmp/s", NULL };
+    ASSERT_NE(hl_tool_validate_args(specs), 0);
+    const char *ldpath[] = { "cc", "--ld-path=/tmp/ld", NULL };
+    ASSERT_NE(hl_tool_validate_args(ldpath), 0);
+    const char *fuse_path[] = { "cc", "-fuse-ld=/tmp/ld", NULL };
+    ASSERT_NE(hl_tool_validate_args(fuse_path), 0);
+    const char *pass_plugin[] = { "cc", "-fpass-plugin=/tmp/p.so", NULL };
+    ASSERT_NE(hl_tool_validate_args(pass_plugin), 0);
+
+    /* What Hull's own lld backend passes. */
+    const char *lld[] = { "cc", "-B/opt/lld/bin", "-fuse-ld=lld", NULL };
+    ASSERT_EQ(hl_tool_validate_args(lld), 0);
+}
+
 UTEST(tool, validate_accept_normal)
 {
     const char *argv[] = { "cc", "-std=c11", "-O2", "-c", "-o", "out.o", "main.c", NULL };

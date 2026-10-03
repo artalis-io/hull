@@ -13,6 +13,7 @@
 #include "tweetnacl.h"
 /* SHA-1 is hand-rolled below (hl_cap_crypto_sha1) so it works in mbedtls-free
  * builds, same as the hand-rolled SHA-256 in this file. No mbedtls include. */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
@@ -1229,10 +1230,21 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
  */
 
 /* TweetNaCl requires an external randombytes() implementation.
- * We provide it via our existing hl_cap_crypto_random(). */
+ * We provide it via our existing hl_cap_crypto_random(). It cannot report a
+ * failure and TweetNaCl assumes none (libsodium's contract is the same), so a
+ * failed read aborts: crypto_sign_keypair used to return success with a
+ * secret key made of whatever the caller's buffer held - fd exhaustion
+ * (EMFILE on /dev/urandom), or a getrandom blocked by seccomp, was enough. */
 void randombytes(unsigned char *buf, unsigned long long len)
 {
-    hl_cap_crypto_random(buf, (size_t)len);
+    if (len == 0) return;
+    if (len > SIZE_MAX || hl_cap_crypto_random(buf, (size_t)len) != 0) {
+        /* stderr, not the logger: cap_crypto.o is linked into small
+         * binaries (tests, tools) that do not carry log.c. */
+        fputs("hull: [crypto] the system random source failed; refusing to "
+              "continue rather than generate predictable keys\n", stderr);
+        abort();
+    }
 }
 
 int hl_cap_crypto_ed25519_verify(const uint8_t *msg, size_t msg_len,
@@ -1808,7 +1820,10 @@ int hl_cap_crypto_box_keypair(uint8_t out_pk[32], uint8_t out_sk[32])
     /* TweetNaCl's crypto_box_keypair is commented out in our vendored
      * copy, so we implement it directly: random secret key + derive
      * public key via Curve25519 base-point multiplication. */
-    hl_cap_crypto_random(out_sk, 32);
+    if (hl_cap_crypto_random(out_sk, 32) != 0) {
+        hull_secure_zero(out_sk, 32);
+        return -1;                      /* never a key from stale memory */
+    }
     return crypto_scalarmult_base(out_pk, out_sk);
 }
 

@@ -116,5 +116,9 @@ void hl_image_stb_init(void);
 
 #define HL_IMAGE_MAX_CODECS 8
 #define HL_IMAGE_MAX_DIM    65536
+/* Pixels in one image (8192 x 8192; ~268 MB at RGBA). A side may still reach
+ * HL_IMAGE_MAX_DIM, but not both at once: a 200-byte header declaring
+ * 23000 x 23000 asked the decoder for 2 GB. */
+#define HL_IMAGE_MAX_PIXELS ((uint64_t)1 << 26)
 
 #endif /* HL_CAP_IMAGE_H */
