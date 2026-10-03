@@ -800,7 +800,11 @@ extern const HlCryptoAeadBackend hl_crypto_aead_backend_mbedtls;
  *  above what `ssh-keygen` writes (16, or 24 with -a) while still costing
  *  well over an hour, so no honest key is refused and no dishonest one runs
  *  to the horizon. */
-#define HL_BCRYPT_MAX_ROUNDS (1u << 20)
+/* bcrypt_pbkdf rounds a private key may declare. Each round costs a few
+ * milliseconds and the derivation runs on the caller's thread: the old 2^20
+ * let a crafted key block the event loop for over an hour. OpenSSH writes 16
+ * by default (ssh-keygen -a); 1024 is far past any real key. */
+#define HL_BCRYPT_MAX_ROUNDS 1024u
 
 /**
  * @brief OpenSSH's bcrypt_pbkdf: passphrase + salt + rounds -> key material.

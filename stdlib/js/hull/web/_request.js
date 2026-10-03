@@ -74,5 +74,20 @@ function limitKey(ip) {
     return groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(":") + "::/64";
 }
 
-export const _request = { clientIp, limitKey };
+/**
+ * A user id as the stdlib stores and compares it (the user_id columns are
+ * text): a non-empty string as is, a safe integer or bigint as its decimal
+ * string. Every stdlib entry point that takes a user id goes through this,
+ * so 42 and "42" are the same user everywhere - session, audit-log, totp,
+ * rbac. Anything else (null, "", a float, an object) is no id: null. Same as
+ * hull.web._request.user_id.
+ */
+function userId(id) {
+    if (typeof id === "string") return id === "" ? null : id;
+    if (typeof id === "number" && Number.isSafeInteger(id)) return String(id);
+    if (typeof id === "bigint") return id.toString();
+    return null;
+}
+
+export const _request = { clientIp, limitKey, userId };
 export default _request;

@@ -108,12 +108,15 @@ function M.serve(req, res, id, opts)
     local inm = req.headers and req.headers["if-none-match"]
     if inm then
         if inm:match("^%s*%*%s*$") then
+            res:header("ETag", etag)
             res:status(304)
             return
         end
         for part in inm:gmatch("[^,]+") do
             local trimmed = _text.trim(part)
             if trimmed == etag then
+                -- RFC 9110 15.4.5: a 304 carries the ETag the 200 would have.
+                res:header("ETag", etag)
                 res:status(304)
                 return
             end
@@ -131,6 +134,10 @@ function M.serve(req, res, id, opts)
     res:header("Content-Type", meta.mime)
     res:header("Content-Disposition", content_disposition(meta.original_name))
     res:header("ETag", etag)
+    -- The stored MIME type is whatever the uploader claimed. nosniff stops a
+    -- browser second-guessing it - rendering an uploaded "text/plain" that
+    -- looks like HTML as HTML, on this origin.
+    res:header("X-Content-Type-Options", "nosniff")
     res:bytes(bytes)
 end
 

@@ -356,9 +356,19 @@ end
 -- link - a leaked one included - stops working, instead of living out its
 -- reset_ttl. Read through user_find_by_email, the lookup login itself relies
 -- on for password_hash, so issue and confirm see the same field.
+-- The account's email is part of it too: a link sent to the old mailbox
+-- stayed good after an email change (the password hash was unchanged), so
+-- whoever still reads that mailbox could reset the password.
+local function email_binding(user)
+    local e = user and user.email
+    return encoding.hex.encode(crypto.sha256(
+        type(e) == "string" and e:lower() or "")):sub(1, 16)
+end
+
 local function password_binding(user)
     local h = user and user.password_hash
-    return encoding.hex.encode(crypto.sha256(type(h) == "string" and h or "")):sub(1, 16)
+    return encoding.hex.encode(crypto.sha256(
+        (type(h) == "string" and h or "") .. "\0" .. email_binding(user))):sub(1, 16)
 end
 
 local function reset_token_extra(user)
@@ -1157,7 +1167,8 @@ local function handle_magic_link(req, res)
     local origin = origin_for(req)
     after_response(function()
         local token = issue_token(user_uid(user),
-            ACTIONS.magic_link, _state.magic_link_ttl)
+            ACTIONS.magic_link, _state.magic_link_ttl,
+            { eb = email_binding(user) })
         if origin then
             local link = origin .. _state.prefix
                          .. "/magic-link/consume?token=" .. token
@@ -1176,7 +1187,9 @@ local function handle_magic_link_consume(req, res)
         return secure_html(res):status(400):html("magic link failed: " .. (err or "?"))
     end
     local user = _state.user_get(env.sub)
-    if not user then
+    -- A magic link is bound to the address it was sent to: after an email
+    -- change, one still sitting in the old mailbox no longer signs in.
+    if not user or env.eb ~= email_binding(user) then
         return secure_html(res):status(400):html("magic link failed")
     end
     -- Magic-link clicks count as proof of email ownership. On an account
@@ -1906,7 +1919,8 @@ function M.send_magic_link(email, magic_url_prefix)
     end
     local user_id = user_uid(user)
     local token = issue_token(user_id, ACTIONS.magic_link,
-                               _state.magic_link_ttl)
+                               _state.magic_link_ttl,
+                               { eb = email_binding(user) })
     local link = (magic_url_prefix or "")
                  .. _state.prefix .. "/magic-link/consume?token=" .. token
     send_email(email, "magic_link", {

@@ -14,20 +14,6 @@ local db = require("hull.db._internal").connection()
 local time = require("hull.time")
 local _request = require("hull.web._request")
 
--- A user id as stored. Apps key users by INTEGER PRIMARY KEY as often as by
--- text, and the column is text, so an integer id is its decimal string. These
--- functions used to accept strings only, and an integer id made them return
--- nothing, silently: session.destroy_all(42) left every session alive, and no
--- login was recorded. Anything else (nil, "", a float, a table) is no id.
-local function uid_string(user_id)
-    if type(user_id) == "string" then
-        if user_id == "" then return nil end
-        return user_id
-    end
-    if math.type(user_id) == "integer" then return tostring(user_id) end
-    return nil
-end
-
 local session = {}
 
 -- Module-level TTL (seconds), default 24 hours.
@@ -215,7 +201,7 @@ function session.create(data, opts)
     -- + session.list_for_user. user_id is taken from the data
     -- blob (the standard auth-flows pattern is to put it there);
     -- ip + ua come from opts.req if the caller passes it.
-    local user_id = uid_string(type(data) == "table" and data.user_id or nil)
+    local user_id = _request.user_id(type(data) == "table" and data.user_id or nil)
     local ip, ua
     if opts and opts.req then
         local h = opts.req.headers
@@ -340,10 +326,14 @@ function session.update(session_id, data, opts)
     -- AND expires_at > ? prevents reviving a session that the user
     -- already let expire. Matches the JS guard so apps that check
     -- the return get the same semantics on both runtimes.
+    -- The user_id column follows the data: a session created before login
+    -- and given its user by update() was invisible to destroy_all /
+    -- destroy_others / list_for_user, so a password reset left it alive.
+    local user_id = _request.user_id(type(data) == "table" and data.user_id or nil)
     local affected = db.exec(
-        "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ? "
-        .. "WHERE id = ? AND expires_at > ?",
-        { encoded, now, now + ttl, session_id, now }
+        "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ?, "
+        .. "user_id = ? WHERE id = ? AND expires_at > ?",
+        { encoded, now, now + ttl, user_id, session_id, now }
     )
     return (affected or 0) > 0
 end
@@ -384,7 +374,7 @@ end
 -- @tparam string user_id
 -- @treturn table  Array (possibly empty).
 function session.list_for_user(user_id)
-    user_id = uid_string(user_id)
+    user_id = _request.user_id(user_id)
     if not user_id then return {} end
     local now = time.now()
     -- Round-10 MEDIUM-9: filter rows past the absolute_ttl cap too.
@@ -419,7 +409,7 @@ end
 --- Destroy every session for a user EXCEPT `current_sid`.
 -- Standard "sign out everywhere else" UX. Returns the count.
 function session.destroy_others(current_sid, user_id)
-    user_id = uid_string(user_id)
+    user_id = _request.user_id(user_id)
     if not user_id then return 0 end
     return db.exec(
         "DELETE FROM _hull_sessions WHERE user_id = ? AND id != ?",
@@ -430,7 +420,7 @@ end
 -- Used by hull/web/auth-flows on a successful password reset
 -- when opts.revoke_sessions_on_password_reset is true (default).
 function session.destroy_all(user_id)
-    user_id = uid_string(user_id)
+    user_id = _request.user_id(user_id)
     if not user_id then return 0 end
     return db.exec(
         "DELETE FROM _hull_sessions WHERE user_id = ?",

@@ -428,7 +428,11 @@ function genExpr(exprInfo, escaped, localsSet) {
     let code = genDotPath(exprInfo.var, null, localsSet);
 
     for (const f of exprInfo.filters) {
-        if (f.name !== "raw" && !filters[f.name]) {
+        // Own properties only: `filters` is a plain object, so "constructor",
+        // "hasOwnProperty" or "__defineGetter__" resolved through
+        // Object.prototype and were callable from a template (renderString
+        // on user-supplied source).
+        if (f.name !== "raw" && !Object.prototype.hasOwnProperty.call(filters, f.name)) {
             throw new Error("unknown template filter: " + f.name);
         }
         if (f.name === "raw") {

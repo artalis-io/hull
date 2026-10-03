@@ -6871,6 +6871,76 @@ UTEST(lua_stdlib, audit3_stdlib_fixes)
     cleanup_lua_caps();
 }
 
+/* The fourth audit's stdlib fixes (audit 3 found them). Each line would fail
+ * on the code before: integer ids reach totp/rbac/session.update; search
+ * refuses _HULL_*; an exhausted rate-limit bucket stays restored in later
+ * windows; inbox takes an integer id; a comma in an SSH host name is refused;
+ * the sort header normalises its direction; the audit-log /64 expands "::";
+ * a client-chosen X-Forwarded-For is parsed in linear time. */
+UTEST(lua_stdlib, audit4_stdlib_fixes)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp.init({ issuer = 'T', encryption_key = string.rep('k', 32) }) "
+        "  if not pcall(totp.enroll, 42) then return 1 end "
+        "  if totp.enrolled(42) ~= totp.enrolled('42') then return 2 end "
+        "  if totp.disable(42) ~= true then return 3 end "
+        "  local s = require('hull.web.middleware.session') "
+        "  s.init({ ttl = 3600 }) "
+        "  local sid = s.create({}) "
+        "  s.update(sid, { user_id = 42 }) "
+        "  if #s.list_for_user(42) ~= 1 then return 4 end "
+        "  local rbac = require('hull.web.middleware.rbac') "
+        "  rbac.init() rbac.define_role('admin') "
+        "  rbac.assign(7, 'admin') "
+        "  if not rbac.has_role('7', 'admin') then return 5 end "
+        "  if pcall(rbac.assign, 7.5, 'admin') then return 6 end "
+        "  local search = require('hull.search') "
+        "  search.create_index('docs', { 'body' }) "
+        "  if pcall(search.reindex, 'docs', '_HULL_SESSIONS', { columns = { body = 'data' } }) then return 7 end "
+        "  local rows, why = search.query('docs', 'foo AND') "
+        "  if #rows ~= 0 or why == nil then return 8 end "
+        "  if pcall(search.query, 'docs', string.rep('w ', 70)) then return 9 end "
+        "  local rl = require('hull.web.middleware.ratelimit') "
+        "  local b = require('hull.cache').new({ max_entries = 2 }) "
+        "  local sat = { map = {}, n = 0 } "
+        "  rl.check(b, 'a', 1, 60, 100, sat) rl.check(b, 'a', 1, 60, 100, sat) "
+        "  rl.check(b, 'a', 1, 60, 200, sat) rl.check(b, 'a', 1, 60, 200, sat) "
+        "  for _, k in ipairs({ 'b', 'c', 'd' }) do rl.check(b, k, 1, 60, 200, sat) end "
+        "  if rl.check(b, 'a', 1, 60, 201, sat).allowed then return 10 end "
+        "  local inbox = require('hull.web.middleware.inbox') "
+        "  inbox.init() "
+        "  if inbox.check_and_mark(12345, 'w') ~= false then return 11 end "
+        "  if inbox.check_and_mark(12345, 'w') ~= true then return 12 end "
+        "  local hk = require('hull.ssh.hostkey') "
+        "  if pcall(hk.store_name, 'victim.org,x.example.com', 22) then return 13 end "
+        "  if hk.store_name('Web1', 2222) ~= '[web1]:2222' then return 14 end "
+        "  local sort = require('hull.web.htmx.sort') "
+        "  local h = sort.header_attrs('name', { column = 'name', direction = 'x\" onmouseover=\"y' }, { url = '/t' }) "
+        "  if h:find('onmouseover', 1, true) then return 15 end "
+        "  local al = require('hull.web.middleware.audit-log') "
+        "  al.init({ fingerprint_salt = 'test-salt-123' }) "
+        "  local function fp(ip) return al.fingerprint({ headers = { ['user-agent'] = 'curl/8' }, remote_addr = ip }) end "
+        "  if fp('2001:db8::1') ~= fp('2001:db8::2') then return 16 end "
+        "  if fp('2001:db8:1:2:3:4:5:6') ~= fp('2001:db8:1:2:9:9:9:9') then return 17 end "
+        "  if fp('::ffff:10.1.2.3') ~= fp('10.1.2.99') then return 18 end "
+        "  local m = rl.middleware({ limit = 1000, trust_proxy = true }) "
+        "  local quiet = {} "
+        "  function quiet:header() return self end "
+        "  function quiet:status() return self end "
+        "  function quiet:json() return self end "
+        "  local t0 = require('hull.time').clock() "
+        "  m({ headers = { ['x-forwarded-for'] = string.rep('1', 200000) .. ',' }, remote_addr = '1.1.1.1' }, quiet) "
+        "  if require('hull.time').clock() - t0 > 1000 then return 19 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
 /* Error values reach the logs as text: a table with __tostring (hull.gather's
  * aggregate) as its message, where lua_tostring gave NULL - "(unknown)", or a
  * NULL for "%s". Also from a coroutine that died with it, and without letting

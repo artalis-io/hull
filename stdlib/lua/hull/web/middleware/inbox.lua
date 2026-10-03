@@ -38,6 +38,17 @@ local _ttl = 604800  -- default 7 days
 -- distinct messages sharing a 255-char prefix into one (dropping the second as
 -- a false duplicate). Uniform across every backend.
 local MAX_ID_LEN = 255
+-- A message id as stored: webhook ids are often numeric, and `#` on an
+-- integer raised "attempt to get length of a number value". An integer is its
+-- decimal string; any other non-string is a caller error, said plainly.
+local function norm_id(message_id)
+    if math.type(message_id) == "integer" then return tostring(message_id) end
+    if message_id ~= nil and type(message_id) ~= "string" then
+        error("inbox: message_id must be a string or an integer", 3)
+    end
+    return message_id
+end
+
 local function check_id_len(message_id, source)
     if message_id and #message_id > MAX_ID_LEN then
         error("inbox: message_id too long (max " .. MAX_ID_LEN .. ")", 3)
@@ -85,6 +96,7 @@ end
 -- @tparam[opt="default"] string source  Source name (scopes the namespace).
 -- @treturn boolean
 function inbox.is_duplicate(message_id, source)
+    message_id = norm_id(message_id)
     if not message_id or message_id == "" then
         return false
     end
@@ -123,6 +135,7 @@ end
 -- @tparam[opt] table opts
 -- @tparam[opt] number opts.ttl  Override module-level TTL for this message.
 function inbox.mark_processed(message_id, source, opts)
+    message_id = norm_id(message_id)
     if not message_id or message_id == "" then
         return
     end
@@ -152,6 +165,7 @@ end
 -- @tparam[opt] table opts  Same as `inbox.mark_processed`.
 -- @treturn boolean  `true` if duplicate, `false` if new (and marked).
 function inbox.check_and_mark(message_id, source, opts)
+    message_id = norm_id(message_id)
     if not message_id or message_id == "" then
         return false
     end

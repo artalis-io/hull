@@ -348,6 +348,27 @@ function Transport:read_message(strict)
     end
 end
 
+-- A reply the transport owes the peer (a refused channel or global request).
+-- During a key exchange it waits for the new keys: once our KEXINIT is out,
+-- only key-exchange messages may be sent (RFC 4253 section 7.1), and between
+-- our NEWKEYS and the peer's the sequence number has already been reset for
+-- strict KEX while the OLD keys are still installed - a reply sent then went
+-- out under a key with a nonce it had already used.
+function Transport:send_reply(payload)
+    if self.in_kex then
+        -- Its own queue: `deferred` holds INCOMING messages set aside
+        -- during a rekey, and must survive the exchange.
+        local q = self.held_replies or {}
+        if #q >= 64 then
+            error("ssh: too many requests from the peer during key exchange")
+        end
+        q[#q + 1] = payload
+        self.held_replies = q
+        return
+    end
+    self:send_packet(payload)
+end
+
 -- One packet off the wire, dealt with as read_message describes: returned
 -- when it is for the caller, nil when it was chatter the transport handled.
 function Transport:handle_packet(p, strict)
@@ -368,8 +389,14 @@ function Transport:handle_packet(p, strict)
             -- sftp transfer - should not have to know that the connection
             -- re-keyed underneath it.
             self.in_kex = true
-            local ok, why = self:run_kex(self.kex_opts or {}, p)
+            local done, ok, why = pcall(self.run_kex, self, self.kex_opts or {}, p)
             self.in_kex = false
+            if not done then
+                -- The connection is finished: say so, rather than leave
+                -- in_kex set and let a later rekey() report success.
+                self.dead = { code = "kex_failed" }
+                error(ok, 0)
+            end
             if not ok then
                 error("ssh: rekey failed: "
                       .. wire.safe_name((why and why.code) or "unknown"))
@@ -384,14 +411,14 @@ function Transport:handle_packet(p, strict)
                   .. wire.safe_name(desc, 200))
         elseif m == SSH_MSG_GLOBAL_REQUEST then
             local r = wire.reader(p); r:byte(); r:string()
-            if r:boolean() then self:send_packet(string.char(SSH_MSG_REQUEST_FAILURE)) end
+            if r:boolean() then self:send_reply(string.char(SSH_MSG_REQUEST_FAILURE)) end
         elseif m == channel.SSH_MSG_CHANNEL_OPEN then
             -- The server asking US to open a channel (forwarded connections,
             -- agent, X11). None is offered, so every one is refused - with a
             -- reply, because a server that asked is waiting for one.
             local r = wire.reader(p); r:byte(); r:string()
             local sender = r:uint32()
-            self:send_packet(channel.build_open_failure(sender,
+            self:send_reply(channel.build_open_failure(sender,
                 channel.OPEN_ADMINISTRATIVELY_PROHIBITED,
                 "hull/ssh accepts no server-initiated channels"))
         -- Skipped as well as the chatter: REQUEST_SUCCESS / FAILURE, the
@@ -694,6 +721,12 @@ function Transport:run_kex(opts, i_s)
     self.c2s = self:new_cipher(neg.cipher_c2s, keys.key_c2s, keys.iv_c2s)
     self.s2c = self:new_cipher(neg.cipher_s2c, keys.key_s2c, keys.iv_s2c)
     if rekey then self.rekeys = self.rekeys + 1 end
+    -- Replies held during the exchange (send_reply) go out under the new keys.
+    local q = self.held_replies
+    self.held_replies = nil
+    if q then
+        for _, payload in ipairs(q) do self:send_packet(payload) end
+    end
     return true
 end
 
@@ -736,12 +769,16 @@ function Transport:rekey()
     if self.dead then return nil, self.dead end
     if self.in_kex then return true end          -- one is already running
     self.in_kex = true
-    -- No pcall: a raise here comes from the stream or from a failed
-    -- authentication of the exchange, and in both cases the connection is
-    -- already finished - the same reasoning as the absorb path in
-    -- next_message, which is why in_kex is not restored on that path either.
-    local ok, why = self:run_kex(self.kex_opts or {})
+    -- A raise here comes from the stream or from a failed authentication of
+    -- the exchange; either way the connection is finished. It is marked dead
+    -- and the error re-raised: in_kex left set made the next rekey() return
+    -- true ("one is already running") on a connection that could not work.
+    local done, ok, why = pcall(self.run_kex, self, self.kex_opts or {})
     self.in_kex = false
+    if not done then
+        self.dead = { code = "kex_failed" }
+        error(ok, 0)
+    end
     if not ok then return nil, why end
     return true
 end

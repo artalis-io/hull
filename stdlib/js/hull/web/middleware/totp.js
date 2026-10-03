@@ -636,7 +636,11 @@ function cleanup() {
 
 function enroll(userId) {
     checkInitialized();
-    if (typeof userId !== "string" || userId === "") {
+    // Every entry point takes the id through _request.userId: an integer id
+    // used to be refused here and silently "not enrolled" in enrolled(), so
+    // auth-flows with INTEGER PRIMARY KEY users skipped the second factor.
+    userId = _request.userId(userId);
+    if (userId === null) {
         throw new Error("totp.enroll: userId required");
     }
 
@@ -688,7 +692,8 @@ function enroll(userId) {
 
 function confirm(userId, code) {
     checkInitialized();
-    if (typeof userId !== "string" || typeof code !== "string") return false;
+    userId = _request.userId(userId);
+    if (userId === null || typeof code !== "string") return false;
 
     // Confirm verifies against the PENDING enrollment. On success
     // it PROMOTES the pending row into _hull_totp, replacing any
@@ -760,7 +765,8 @@ function verify(userId, code, req) {
 
 function verifyWithKind(userId, code, req) {
     checkInitialized();
-    if (typeof userId !== "string" || typeof code !== "string") {
+    userId = _request.userId(userId);
+    if (userId === null || typeof code !== "string") {
         return [false, null];
     }
     // Round-9 HIGH-4: per-IP gate runs BEFORE the per-user gate so a
@@ -892,7 +898,8 @@ function rekeyStatus() {
 
 function disable(userId) {
     checkInitialized();
-    if (typeof userId !== "string") return false;
+    userId = _request.userId(userId);
+    if (userId === null) return false;
     let removedMain = 0, removedPending = 0;
     db.batch(() => {
         removedMain = db.exec("DELETE FROM _hull_totp WHERE user_id = ?",
@@ -911,7 +918,8 @@ function disable(userId) {
 
 function enrolled(userId) {
     checkInitialized();
-    if (typeof userId !== "string") return false;
+    userId = _request.userId(userId);
+    if (userId === null) return false;
     const rows = db.query(
         "SELECT confirmed FROM _hull_totp WHERE user_id = ?", [userId]);
     return rows && rows.length > 0 && rows[0].confirmed === 1;
@@ -975,7 +983,8 @@ const _test = {
 
 function lockoutRemainingPublic(userId) {
     checkInitialized();
-    if (typeof userId !== "string") return 0;
+    userId = _request.userId(userId);
+    if (userId === null) return 0;
     return lockoutRemaining(userId);
 }
 

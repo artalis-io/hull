@@ -862,7 +862,11 @@ end
 -- actively trying to set up). The confirmed slot stays untouched.
 function totp.enroll(user_id)
     check_initialized()
-    if type(user_id) ~= "string" or user_id == "" then
+    -- Every entry point takes the id through _request.user_id: an integer
+    -- id used to be refused here and silently "not enrolled" in enrolled(),
+    -- so auth-flows with INTEGER PRIMARY KEY users skipped the second factor.
+    user_id = _request.user_id(user_id)
+    if not user_id then
         error("totp.enroll: user_id required")
     end
 
@@ -915,7 +919,8 @@ end
 -- as used so the same code can't be reused for an immediate verify.
 function totp.confirm(user_id, code)
     check_initialized()
-    if type(user_id) ~= "string" or type(code) ~= "string" then
+    user_id = _request.user_id(user_id)
+    if not user_id or type(code) ~= "string" then
         return false
     end
 
@@ -1001,7 +1006,8 @@ end
 -- the second return.
 function totp.verify_with_kind(user_id, code, req)
     check_initialized()
-    if type(user_id) ~= "string" or type(code) ~= "string" then
+    user_id = _request.user_id(user_id)
+    if not user_id or type(code) ~= "string" then
         return false, nil
     end
     -- Round-9 HIGH-4: per-IP gate runs BEFORE the per-user gate so a
@@ -1105,7 +1111,8 @@ end
 -- false to keep the lockout state non-enumerable from the wire.
 function totp.lockout_remaining(user_id)
     check_initialized()
-    if type(user_id) ~= "string" then return 0 end
+    user_id = _request.user_id(user_id)
+    if not user_id then return 0 end
     return lockout_remaining(user_id)
 end
 
@@ -1183,7 +1190,8 @@ end
 -- was actually removed, false otherwise.
 function totp.disable(user_id)
     check_initialized()
-    if type(user_id) ~= "string" then return false end
+    user_id = _request.user_id(user_id)
+    if not user_id then return false end
     local removed_main = 0
     local removed_pending = 0
     db.batch(function()
@@ -1207,7 +1215,8 @@ end
 -- the route layer to decide whether to gate.
 function totp.enrolled(user_id)
     check_initialized()
-    if type(user_id) ~= "string" then return false end
+    user_id = _request.user_id(user_id)
+    if not user_id then return false end
     local rows = db.query(
         "SELECT confirmed FROM _hull_totp WHERE user_id = ?",
         { user_id })

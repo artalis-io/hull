@@ -64,7 +64,11 @@ function requireSqlite() {
 function validateIdent(name, label) {
     if (typeof name !== "string" || !IDENT_RE.test(name))
         throw new Error(label + " must match /^[a-zA-Z_][a-zA-Z0-9_]*$/: " + String(name));
-    if (name.indexOf("_hull_") === 0)
+    // Case-insensitive: SQLite identifiers are, and this module's SQL runs as
+    // a stdlib caller, past the C-level _hull_* guard. "_HULL_SESSIONS"
+    // passed the old check, so reindex() copied every session row into an
+    // index the app could query.
+    if (name.slice(0, 6).toLowerCase() === "_hull_")
         throw new Error(label + " must not start with '_hull_': " + name);
     if (SQL_KEYWORDS.has(name.toUpperCase()))
         throw new Error(label + " must not be a SQL keyword: " + name);
@@ -250,10 +254,13 @@ function query(name, q, opts) {
     const maxTerms = o.maxQueryTerms !== undefined ? o.maxQueryTerms : 64;
     if (q.length > maxLen)
         throw new Error("query too long (" + q.length + " > " + maxLen + ")");
+    // Every word is a term (implicit AND costs as much as OR), every prefix
+    // `*` widens one, and parentheses group: count all three. Counting only
+    // OR / NEAR / parens let "a b c d ..." or "a* b* c* ..." through.
     const complexity =
         (q.match(/[()]/g) || []).length +
-        (q.match(/\bOR\b/g) || []).length +
-        (q.match(/\bNEAR\b/g) || []).length;
+        (q.match(/[^\s()]+/g) || []).length +
+        (q.match(/\*/g) || []).length;
     if (complexity > maxTerms)
         throw new Error("query too complex (>" + maxTerms +
                         " operators/groups); bound untrusted input");
@@ -318,7 +325,21 @@ function query(name, q, opts) {
     params.push(limit);
     params.push(offset);
 
-    return db.query(sql, params);
+    // A query FTS5 cannot parse is the user's input, not a server fault: it
+    // returns no rows, with the reason as `.error` on the array, where it
+    // used to throw (a 500 for any search box fed "foo AND"). Other errors
+    // still throw.
+    try {
+        return db.query(sql, params);
+    } catch (e) {
+        const msg = String(e && e.message !== undefined ? e.message : e);
+        if (/fts5:|syntax error|no such column|unterminated|malformed MATCH/.test(msg)) {
+            const none = [];
+            none.error = "invalid search query";
+            return none;
+        }
+        throw e;
+    }
 }
 
 /**
@@ -367,12 +388,15 @@ function reindex(name, sourceTable, opts) {
         srcColList += ", " + columnMap[ftsColumns[j]];
     }
 
-    // Clear and repopulate
-    db.exec("DELETE FROM " + table);
-    db.exec(
-        "INSERT INTO " + table + " (" + ftsColList + ") " +
-        "SELECT " + srcColList + " FROM " + sourceTable
-    );
+    // Clear and repopulate in one transaction: a failure part-way used to
+    // leave the index empty, and a reader between the two saw no results.
+    db.batch(() => {
+        db.exec("DELETE FROM " + table);
+        db.exec(
+            "INSERT INTO " + table + " (" + ftsColList + ") " +
+            "SELECT " + srcColList + " FROM " + sourceTable
+        );
+    });
 }
 
 const search = { createIndex, dropIndex, index, remove, query, reindex };

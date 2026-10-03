@@ -187,8 +187,12 @@ function middleware(opts) {
     const o = opts || {};
 
     const getPrincipal = o.getPrincipal || function(req) {
-        if (req.ctx && req.ctx.session && req.ctx.session.user_id)
-            return String(req.ctx.session.user_id);
+        // User id 0 is a user: a truthiness test sent it to the shared
+        // "__anon" principal, where anonymous callers could replay or squat
+        // its keys.
+        const sid = req.ctx && req.ctx.session ? req.ctx.session.user_id : undefined;
+        if (sid !== undefined && sid !== null && sid !== "")
+            return String(sid);
         // A JWT-authenticated user (auth.jwtMiddleware). Without this every
         // bearer-token user shared "__anon", so one could replay another's
         // stored response, or squat their key, by knowing key and body.
