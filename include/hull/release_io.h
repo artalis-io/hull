@@ -193,6 +193,21 @@ void hl_release_io_cleanup_stale_self(const char *argv0);
  * *comparable is 0 (and the result 0) when either does not parse. */
 int hl_release_io_version_cmp(const char *a, const char *b, int *comparable);
 
+/* The first release whose signed manifest names its version (hull.version).
+ * A tag at or past it must carry that entry: without the rule, an old signed
+ * release served under a newer tag passed as "predates the entry". */
+#define HL_RELEASE_SIGNED_VERSION_SINCE "v0.15.1"
+
+/* 1 when the release with @p tag must carry hull.version in its signed
+ * manifest (it is at or past HL_RELEASE_SIGNED_VERSION_SINCE, or cannot be
+ * ordered - fail closed). */
+int hl_release_io_requires_signed_version(const char *tag);
+
+/* 1 when @p tag is a release tag of the shape Hull publishes
+ * (vMAJOR.MINOR.PATCH[-suffix], [A-Za-z0-9._-] only, < 64 bytes). The tag
+ * comes unsigned from the GitHub API and is pasted into download URLs. */
+int hl_release_io_tag_valid(const char *tag);
+
 /* The release's own name, signed. `version` is the content of the release's
  * hull.version asset; `manifest` is its (already signature-verified)
  * hull.sha256. Returns 0 when hull.version's digest is the manifest's and its

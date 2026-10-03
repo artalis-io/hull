@@ -207,7 +207,8 @@ end
 
 --- Resolve a feature / runtime archive by file name.
 --
--- Search order: local build dirs (hull_dir, ./build, ../build) first, then
+-- Search order: the running hull's own directory (a source build keeps the
+-- archives beside build/hull) first, then
 -- the signed feature cache (~/.hull/feature), which is re-verified against
 -- its signed manifest (embedded release pubkey) before use. This closes the
 -- install-to-build TOCTOU and fails CLOSED: a missing `platform_verify`
@@ -234,8 +235,14 @@ function M.resolve_lib(libname, asset_name, ctx)
     if ctx.musl_dir and file_exists(ctx.musl_dir .. "/" .. libname) then
         return ctx.musl_dir .. "/" .. libname, "musl"
     end
-    for _, d in ipairs({ ctx.hull_dir or "", "build/", "../build/" }) do
-        if file_exists(d .. libname) then return d .. libname, "local" end
+    -- Only the directory of the hull being run. ./build and ../build were
+    -- relative to wherever `hull build` was started: a checkout or download
+    -- with a build/libhull_feature-*.a in it had that unsigned archive linked
+    -- into the app ahead of the verified cache. An empty hull_dir would name
+    -- the working directory the same way, so it is skipped.
+    local d = ctx.hull_dir
+    if d and d ~= "" and file_exists(d .. libname) then
+        return d .. libname, "local"
     end
     if asset_name and ctx.plat and tool.feature_cache_dir then
         local cache = tool.feature_cache_dir()
