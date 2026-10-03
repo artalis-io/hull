@@ -209,14 +209,15 @@ local function introspect_app(app_dir)
     -- Try to extract manifest (Lua only - JS needs C runtime)
     if info.runtime == "lua" then
         local entry_path = app_dir .. "/app.lua"
-        local chunk = tool.loadfile(entry_path)
-        if chunk then
-            local ok, err = pcall(chunk)
-            if not ok then
-                tool.stderr("hull deploy: warning: manifest extraction failed: " .. tostring(err) .. "\n")
-            end
-            if ok then
-                local m = app.get_manifest()
+        -- The app's top level runs in a Lua runtime of its own, never this
+        -- tool VM (see hl_lua_extract_manifest_json).
+        local json_s, run_err = tool.extract_manifest_lua(entry_path)
+        if run_err then
+            tool.stderr("hull deploy: warning: manifest extraction failed: " .. tostring(run_err) .. "\n")
+        end
+        do
+            if json_s then
+                local m = require("hull.json").decode(json_s)
                 if m then
                     info.manifest = m
                     -- The manifest is UNTRUSTED third-party input that gets

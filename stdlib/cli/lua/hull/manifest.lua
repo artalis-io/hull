@@ -32,19 +32,21 @@ local function main()
 
     local m = nil
     if kind == "lua" then
-        local chunk, err = tool.loadfile(entry)
-        if not chunk then
-            tool.stderr("hull manifest: " .. tostring(err) .. "\n")
-            tool.exit(1)
-        end
-
-        local ok, run_err = pcall(chunk)
-        if not ok then
+        -- The app's top level runs in a Lua runtime of its own, never this
+        -- tool VM (see hl_lua_extract_manifest_json).
+        local json_s, run_err = tool.extract_manifest_lua(entry)
+        if run_err then
             tool.stderr("hull manifest: " .. tostring(run_err) .. "\n")
             tool.exit(1)
         end
-
-        m = app.get_manifest()
+        if json_s then
+            local decoded, decode_err = json.decode(json_s)
+            if not decoded then
+                tool.stderr("hull manifest: JSON decode failed: " .. tostring(decode_err) .. "\n")
+                tool.exit(1)
+            end
+            m = decoded
+        end
     else
         -- JS entry: spin up a transient JS runtime via the C-side
         -- helper, get back the JSON-stringified manifest, decode.

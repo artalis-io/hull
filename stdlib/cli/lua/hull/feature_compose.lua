@@ -44,18 +44,18 @@ local function file_exists(p) return tool.file_exists(p) end
 -- silently mis-compose the binary, which is worse than executing the entry.
 --
 -- What bounds that execution:
+--   * it runs in a Lua runtime of its OWN (tool.extract_manifest_lua ->
+--     hl_lua_extract_manifest_json): fresh, sandboxed as when the app is
+--     served (no io / os / load, the heap and instruction limits), sharing
+--     nothing with this tool VM. It used to run here, with `tool` and the
+--     loaders stripped for the window and restored after - and a metatable
+--     the app set on _G saw `tool` come back and kept it;
 --   * the KERNEL sandbox is already applied (hl_tool_sandbox_init: unveil +
 --     pledge "stdio rpath wpath cpath proc exec fattr"), so the app cannot
 --     reach outside the unveiled build region;
---   * DYNAMIC CODE authority is removed for the window (load / loadfile /
---     dofile / loadstring are nil'd across the pcall and restored on every
---     exit path), matching the runtime sandbox;
---   * capability modules with no tool-mode backing (db, compute, gpu,
---     worker) resolve to no-op stubs, so top-level code touching them
---     neither works nor escapes;
---   * the BUILD-TOOL API (`tool`, a global in this VM: spawn / write_file /
---     remove_file / rmdir / ...) is stripped for the window, the same way
---     the loaders are - see the strip below for why that is safe;
+--   * capability modules with no backing there (db, compute, gpu, worker)
+--     resolve to no-op stubs, so top-level code touching them neither works
+--     nor escapes;
 --   * ONLY top level runs - route handlers, timers and app.main are
 --     registered, never invoked;
 --   * it runs exactly ONCE per process (the cache above), so extraction is
@@ -90,13 +90,6 @@ function M.extract_manifest(app_dir)
     local lua_entry = app_dir .. "/app.lua"
     local js_entry  = app_dir .. "/app.js"
     if file_exists(lua_entry) then
-        -- Give the tool VM the app root so the entry's relative local requires
-        -- (require("./routes/users") and their nested ./../models/user) resolve
-        -- through the SAME requiring-module-relative + ./.. collapse + app-root
-        -- containment path the runtime uses. Without this a modular app's
-        -- top-level require failed with "module not found" and the manifest was
-        -- silently lost. tool.set_app_dir is a no-op on a build that lacks it.
-        if tool.set_app_dir then tool.set_app_dir(app_dir) end
         -- Does the app INTEND a manifest? A failure to capture one is only a
         -- real (fatal) extraction failure when the app declares app.manifest -
         -- then we lost authoritative composition info and must not silently fall
@@ -107,72 +100,26 @@ function M.extract_manifest(app_dir)
         -- e2e_build null-app case relies on this).
         local intends_manifest =
             (tool.read_file(lua_entry) or ""):find("app%.manifest%s*%(") ~= nil
-        local chunk, load_err = tool.loadfile(lua_entry)
-        if not chunk then
-            if intends_manifest then
-                err = "could not load app.lua: " .. tostring(load_err)
+        -- The app's top level runs in a Lua runtime of its own - fresh,
+        -- sandboxed as when it is served - never this tool VM, which holds
+        -- the build-tool API (see hl_lua_extract_manifest_json). Whatever
+        -- app.manifest() declared counts even when the top level raised
+        -- later: the manifest is authoritative for composition, and the rest
+        -- of the entry (register(app), a subfile touching a capability with no
+        -- backing here) can legitimately throw. Only a failure that leaves an
+        -- INTENDED manifest undetermined fails - matching the JS side.
+        if tool.log_app_phase then tool.log_app_phase(true) end
+        local json_s, run_err = tool.extract_manifest_lua(lua_entry)
+        if tool.log_app_phase then tool.log_app_phase(false) end
+        if json_s then
+            local decoded, decode_err = json.decode(json_s)
+            if decoded then
+                manifest = decoded
+            else
+                err = "manifest JSON decode failed: " .. tostring(decode_err)
             end
-        else
-            -- Remove dynamic-code authority from the extraction window: app code
-            -- executed to read the manifest must not compile or run new code
-            -- (parity with the runtime sandbox, which strips these). The tool VM
-            -- is not otherwise locked down (cfg.sandbox=0), so save the loaders,
-            -- nil them for the pcall, and restore the tool VM's own environment
-            -- afterwards on EVERY path (success / error / OOM). require() does not
-            -- use these (it goes through hl_lua_require), so a valid app's
-            -- extraction is unaffected.
-            local sv_load, sv_loadfile = _G.load, _G.loadfile
-            local sv_dofile, sv_loadstr = _G.dofile, _G.loadstring
-            _G.load, _G.loadfile, _G.dofile, _G.loadstring = nil, nil, nil, nil
-
-            -- Remove the BUILD-TOOL API from the extraction window too.
-            --
-            -- mod_tool.c publishes `tool` as a GLOBAL in this VM, so without
-            -- this an app's top-level code reached tool.spawn (process
-            -- execution, bounded only by the compiler allowlist - which
-            -- includes `hull` itself), tool.write_file / remove_file / rmdir
-            -- (bounded only by the unveil set, which grants /tmp "rwcx" and
-            -- the output dir "rwc"), and the rest of the build surface. That
-            -- is strictly more authority than the loaders stripped above, so
-            -- stripping those while leaving this open was inconsistent.
-            --
-            -- Removing it costs nothing: `tool` does not exist in the RUNTIME
-            -- VM at all, so any app touching it would already fail when run,
-            -- and no user-facing stdlib module references it. This makes
-            -- extraction match runtime semantics instead of exceeding them.
-            --
-            -- The extraction machinery keeps its own capability by capturing
-            -- the function reference BEFORE the strip - a local binding is
-            -- unaffected by clearing the global.
-            local log_phase = tool.log_app_phase
-            local sv_tool = _G.tool
-            _G.tool = nil
-
-            -- Mark the window so the CLI log policy can attribute anything
-            -- the app logs to build-time extraction rather than letting it
-            -- appear as unexplained build output. Cleared on EVERY exit path
-            -- alongside the restores. No-op on a hull without it.
-            if log_phase then log_phase(true) end
-            local ok, run_err = pcall(chunk)
-            if log_phase then log_phase(false) end
-            _G.tool = sv_tool
-            _G.load, _G.loadfile = sv_load, sv_loadfile
-            _G.dofile, _G.loadstring = sv_dofile, sv_loadstr
-            -- Capture whatever app.manifest() declared, even if the chunk later
-            -- errors: the manifest is authoritative for composition (it lists
-            -- every module any file imports), and executing the rest of the
-            -- entry - register(app), subfile top-level code that touches a
-            -- capability the tool VM lacks - can legitimately throw during
-            -- extraction without invalidating an already-declared manifest. Only
-            -- a failure that prevents DETERMINING an INTENDED manifest (syntax
-            -- error, an unresolved require, or an error BEFORE app.manifest ran)
-            -- is a real extraction failure. This matches the JS side, which
-            -- captures the manifest at the app.manifest() call and tolerates a
-            -- later throw. (Aligns Lua/JS; avoids falsely failing a valid app.)
-            manifest = app.get_manifest()
-            if not ok and not manifest and intends_manifest then
-                err = tostring(run_err)
-            end
+        elseif run_err and intends_manifest then
+            err = tostring(run_err)
         end
     elseif file_exists(js_entry) then
         local intends_manifest =

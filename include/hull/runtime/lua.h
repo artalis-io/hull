@@ -204,6 +204,27 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
  */
 void hl_lua_free(HlLua *lua);
 
+/*
+ * Read the manifest of the Lua app at @p path by running its top level in a
+ * fresh, sandboxed runtime of its own (runtime/lua/manifest_extract.c), never
+ * the caller's VM. @p platform_vfs supplies the stdlib.
+ *
+ * On return *out_json is the manifest as malloc'd JSON (NULL when the app
+ * declared none) and *out_err a malloc'd message when the top level raised
+ * (NULL otherwise); a manifest declared before the error still comes back.
+ * Returns -1 only when there is no manifest AND the app failed to load.
+ */
+int hl_lua_extract_manifest_json(const char *path, const HlVfs *platform_vfs,
+                                 char **out_json, size_t *out_len, char **out_err);
+
+/*
+ * Give every first-party module this runtime has no backing for (hull.db with
+ * no database, hull.compute with no WASM, ...) a stand-in whose every field is
+ * a function doing nothing, so an app's top-level require of it resolves while
+ * its manifest is read. Never for a runtime that serves the app.
+ */
+void hl_lua_stub_unbacked_modules(lua_State *L);
+
 /* ── Module registration ────────────────────────────────────────────── */
 
 /*

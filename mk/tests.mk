@@ -1327,6 +1327,9 @@ e2e-http-redirect: $(BUILDDIR)/hull
 e2e-timers: $(BUILDDIR)/hull
 	sh tests/e2e_timers.sh
 
+e2e-manifest-isolation: $(BUILDDIR)/hull
+	sh tests/e2e_manifest_isolation.sh
+
 e2e-dynamic-connections: $(BUILDDIR)/hull
 	sh tests/e2e_dynamic_connections.sh
 
