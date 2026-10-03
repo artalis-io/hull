@@ -69,6 +69,19 @@ typedef struct HlFsConfig {
 int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
                        const char **err_msg);
 
+/*
+ * Open @p path for another capability exactly as fs.read / fs.write open it:
+ * authorized by the manifest's fs.read (resp. fs.write) grants, resolved
+ * descriptor-relative under the app root (no path race between the check and
+ * the open), a regular-file leaf only. The write open creates missing parent
+ * directories within the grant and truncates the leaf. Returns an fd the
+ * caller closes, or -1 with *err_msg set ("permission", "not_found", ...).
+ */
+int hl_cap_fs_open_read_fd(const HlFsConfig *cfg, const char *path,
+                           const char **err_msg);
+int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
+                            const char **err_msg);
+
 /**
  * @brief Read a file's full contents into a caller-supplied buffer.
  *

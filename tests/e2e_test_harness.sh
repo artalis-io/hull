@@ -39,7 +39,7 @@ local crypto = require("hull.crypto")
 local hex = require("hull.encoding").hex
 app.manifest({
     modules = { "hull/http-server@1", "hull/blob@1", "hull/crypto@1", "hull/encoding@1" },
-    fs = { write = { "data/blobs" } },
+    fs = { write = { "data/blobs/" } },
 })
 app.post("/upload", function(req, res)
     local fields, files = {}, {}
@@ -108,7 +108,7 @@ import { crypto } from "hull:crypto";
 import { encoding } from "hull:encoding";
 app.manifest({
     modules: ["hull/http-server@1", "hull/blob@1", "hull/crypto@1", "hull/encoding@1"],
-    fs: { write: ["data/blobs"] },
+    fs: { write: ["data/blobs/"] },
 });
 app.post("/upload", async (req, res) => {
     const fields = {}, files = {};
