@@ -30,6 +30,7 @@
 #include "hull/frontend/js_generation.h"
 #endif
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -38,11 +39,74 @@
 
 /* ── hull keygen ───────────────────────────────────────────────────── */
 
+/* Write @p text to @p path as a NEW file of mode @p mode: O_EXCL (an existing
+ * file is refused unless @p force, which replaces it), O_NOFOLLOW (a symlink
+ * planted at the path is never written through), the mode forced with fchmod
+ * (O_CREAT's mode is masked by the umask, and a replaced file kept its old,
+ * possibly world-readable, mode), and every write checked. 0 / -1. */
+static int keygen_write(const char *path, const char *text, size_t len,
+                        mode_t mode, int force)
+{
+    if (force) {
+        struct stat st;
+        if (lstat(path, &st) == 0) {
+            if (!S_ISREG(st.st_mode)) {
+                fprintf(stderr, "hull keygen: %s exists and is not a regular file\n", path);
+                return -1;
+            }
+            if (unlink(path) != 0) {
+                fprintf(stderr, "hull keygen: cannot replace %s\n", path);
+                return -1;
+            }
+        }
+    }
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode);
+    if (fd < 0) {
+        if (errno == EEXIST)
+            fprintf(stderr, "hull keygen: %s already exists; refusing to overwrite "
+                            "it (pass --force to replace the key)\n", path);
+        else
+            fprintf(stderr, "hull keygen: cannot create %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    int bad = fchmod(fd, mode) != 0;
+    size_t off = 0;
+    while (!bad && off < len) {
+        ssize_t n = write(fd, text + off, len - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { bad = 1; break; }
+        off += (size_t)n;
+    }
+    if (!bad && fsync(fd) != 0) bad = 1;
+    if (close(fd) != 0) bad = 1;
+    if (bad) {
+        unlink(path);                       /* never leave half a key */
+        fprintf(stderr, "hull keygen: failed writing %s\n", path);
+        return -1;
+    }
+    return 0;
+}
+
 int hull_keygen(int argc, char **argv)
 {
     const char *prefix = "developer";
-    if (argc >= 2)
-        prefix = argv[1];
+    int force = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--force") == 0) force = 1;
+        else if (argv[i][0] == '-') {
+            fprintf(stderr, "hull keygen: unknown option %s\n"
+                            "usage: hull keygen [prefix] [--force]\n", argv[i]);
+            return 1;
+        } else prefix = argv[i];
+    }
+
+    /* Build filenames */
+    char pk_file[256], sk_file[256];
+    if ((size_t)snprintf(pk_file, sizeof(pk_file), "%s.pub", prefix) >= sizeof pk_file ||
+        (size_t)snprintf(sk_file, sizeof(sk_file), "%s.key", prefix) >= sizeof sk_file) {
+        fprintf(stderr, "hull keygen: prefix too long\n");
+        return 1;
+    }
 
     uint8_t pk[32], sk[64];
     if (hl_cap_crypto_ed25519_keypair(pk, sk) != 0) {
@@ -50,43 +114,26 @@ int hull_keygen(int argc, char **argv)
         return 1;
     }
 
-    /* Build filenames */
-    char pk_file[256], sk_file[256];
-    snprintf(pk_file, sizeof(pk_file), "%s.pub", prefix);
-    snprintf(sk_file, sizeof(sk_file), "%s.key", prefix);
+    char pk_hex[65 + 1], sk_hex[129 + 1];
+    for (int i = 0; i < 32; i++) snprintf(pk_hex + 2 * i, 3, "%02x", pk[i]);
+    pk_hex[64] = '\n'; pk_hex[65] = '\0';
+    for (int i = 0; i < 64; i++) snprintf(sk_hex + 2 * i, 3, "%02x", sk[i]);
+    sk_hex[128] = '\n'; sk_hex[129] = '\0';
 
-    /* Write hex-encoded public key */
-    FILE *f = fopen(pk_file, "w");
-    if (!f) {
-        fprintf(stderr, "hull keygen: cannot write %s\n", pk_file);
-        return 1;
+    /* The secret first: if it cannot be written, no public half is left
+     * behind naming a key that does not exist. */
+    int rc = keygen_write(sk_file, sk_hex, 129, 0600, force);
+    if (rc == 0 && keygen_write(pk_file, pk_hex, 65, 0644, force) != 0) {
+        unlink(sk_file);
+        rc = -1;
     }
-    for (int i = 0; i < 32; i++)
-        fprintf(f, "%02x", pk[i]);
-    fprintf(f, "\n");
-    fclose(f);
 
-    /* Write hex-encoded secret key (mode 0600 - owner-only) */
-    int sk_fd = open(sk_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (sk_fd < 0) {
-        fprintf(stderr, "hull keygen: cannot write %s\n", sk_file);
-        return 1;
-    }
-    f = fdopen(sk_fd, "w");
-    if (!f) {
-        close(sk_fd);
-        fprintf(stderr, "hull keygen: cannot write %s\n", sk_file);
-        return 1;
-    }
-    for (int i = 0; i < 64; i++)
-        fprintf(f, "%02x", sk[i]);
-    fprintf(f, "\n");
-    fclose(f);
-
-    /* Zero secret key material before returning */
+    /* Zero secret key material on every path */
     volatile uint8_t *p = sk;
-    for (size_t i = 0; i < sizeof(sk); i++)
-        p[i] = 0;
+    for (size_t i = 0; i < sizeof(sk); i++) p[i] = 0;
+    volatile char *q = sk_hex;
+    for (size_t i = 0; i < sizeof(sk_hex); i++) q[i] = 0;
+    if (rc != 0) return 1;
 
     printf("wrote %s (public key)\n", pk_file);
     printf("wrote %s (secret key - keep safe!)\n", sk_file);

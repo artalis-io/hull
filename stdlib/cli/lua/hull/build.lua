@@ -957,7 +957,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
     if next(features_needed) then
         local plat = tool.platform_name and tool.platform_name() or nil
         local hull_dir = ""
-        if __hull_exe then hull_dir = __hull_exe:match("(.*/)") or "" end
+        if __hull_exe then hull_dir = __hull_exe:match("(.*[/\\])") or "" end
 
         -- Pass 1: validate + resolve each feature's archive, collect its link
         -- libs, and group backends by the base hook they fill (one hook per
@@ -1213,7 +1213,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             -- hand-rolled blocks (verified by e2e_composed_sig).
             local rt_plat = tool.platform_name and tool.platform_name() or nil
             local rt_hull_dir = ""
-            if __hull_exe then rt_hull_dir = __hull_exe:match("(.*/)") or "" end
+            if __hull_exe then rt_hull_dir = __hull_exe:match("(.*[/\\])") or "" end
             -- Target format, not host: a musl cross FROM macOS whole-archives
             -- ELF (--whole-archive), not Mach-O (-force_load). Audit #4c.
             local is_darwin = target_spec(opts).fmt == "macho"
@@ -1415,15 +1415,19 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
     -- platform manifest yet, so the platform-sig cross-check is skipped (MVP;
     -- signed fetch is a follow-on phase).
     if flavor_asset then
-        local hull_dir = __hull_exe and (__hull_exe:match("(.*/)") or "") or ""
-        local dirs = { hull_dir, "build/", "../build/", "" }
+        local hull_dir = __hull_exe and (__hull_exe:match("(.*[/\\])") or "") or ""
+        -- Only the running hull's own directory: ./build, ../build and ""
+        -- (the working directory) let wherever `hull build` was started
+        -- supply the platform library that is linked into the app.
+        local dirs = { hull_dir ~= "" and hull_dir or nil }
         if is_cosmo then
             -- Dual-arch: <asset>.x86_64-cosmo.a + <asset>.aarch64-cosmo.a,
             -- laid out the way cosmocc's apelink expects (.aarch64/ counterpart).
             -- Search local build dirs, then the ~/.hull/platform cache where
             -- `hull flavor install <flavor>` stores the fetched+verified pair
             -- (as <asset>.x86_64-cosmo.a / <asset>.aarch64-cosmo.a).
-            local search = { hull_dir, "build/", "../build/", "" }
+            local search = {}
+            if hull_dir ~= "" then search[1] = hull_dir end   -- see `dirs` above
             local cache = tool.platform_cache_dir and tool.platform_cache_dir()
             if cache then search[#search + 1] = cache .. "/" end
             local x86, arm, from_cache
@@ -1530,13 +1534,13 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
         -- Derive hull binary directory from __hull_exe global
         local hull_dir = ""
         if __hull_exe then
-            hull_dir = __hull_exe:match("(.*/)" ) or ""
+            hull_dir = __hull_exe:match("(.*[/\\])") or ""
         end
-        local dev_paths = {
-            hull_dir,
-            "build/",
-            "../build/",
-        }
+        -- The running hull's own directory only (a source build keeps
+        -- libhull_platform*.a beside build/hull). ./build and ../build were
+        -- relative to wherever `hull build` was started.
+        local dev_paths = {}
+        if hull_dir ~= "" then dev_paths[1] = hull_dir end
 
         if is_cosmo then
             -- Look for multi-arch cosmo archives

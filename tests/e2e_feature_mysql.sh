@@ -39,6 +39,9 @@ nm build/libhull_feature-mysql.a 2>/dev/null | grep -qE '[ _]hl_db_backend_mysql
     || { echo "FAIL: feature archive lacks hl_db_backend_mysql"; exit 1; }
 
 HULL=/tmp/hull_base_my_e2e
+# hull build takes a local feature archive only from the running hull's own
+# directory (never ./build), so stage it beside the copied binary.
+cp build/libhull_feature-mysql.a "$(dirname "$HULL")/"
 APP=$(mktemp -d)
 PLAIN=$(mktemp -d)
 trap 'rm -rf "$APP" "$PLAIN" /tmp/hull_base_my_e2e' EXIT

@@ -158,6 +158,19 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
         return -1;
     }
 
+    /* A legacy hull.sig (no binary_hash) signs only {files, manifest}. Any
+     * field of the newer format in it - a platform block, the composed
+     * attestation inside it, modules_resolved, a trampoline hash - is not
+     * covered by its signature, yet was read and trusted: a platform block
+     * lifted from another app, attached to an old signature, passed for
+     * this one. Refused. */
+    if (!sig->binary_hash_hex &&
+        (sh_json_get(root, "platform") || sh_json_get(root, "modules_resolved") ||
+         sig->trampoline_hash_hex || sig->build_value)) {
+        hl_sig_free(sig);
+        return -1;
+    }
+
     /* ── Platform layer (nested object) ───────────────────────── */
 
     ShJsonValue *platform = sh_json_get(root, "platform");
@@ -238,6 +251,12 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
                 &sig->files_value->u.object_val.members[i];
             sig->entries[i].name = m->key;
             sig->entries[i].hash_hex = sh_json_as_string(m->value, NULL);
+            /* A hash that is not a string was NULL here, and the file check
+             * strcmp'd against it - a crash on a hostile package.sig. */
+            if (!sig->entries[i].name || !sig->entries[i].hash_hex) {
+                hl_sig_free(sig);
+                return -1;
+            }
         }
     }
 

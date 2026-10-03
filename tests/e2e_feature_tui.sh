@@ -36,6 +36,9 @@ nm build/libhull_feature-tui.a 2>/dev/null | grep -qE '[ _]hl_tui_feature_presen
     || { echo "FAIL: feature archive lacks hl_tui_feature_present"; exit 1; }
 
 HULL=/tmp/hull_base_tui_e2e
+# hull build takes a local feature archive only from the running hull's own
+# directory (never ./build), so stage it beside the copied binary.
+cp build/libhull_feature-tui.a "$(dirname "$HULL")/"
 APP=$(mktemp -d)
 JSAPP=$(mktemp -d)
 PLAIN=$(mktemp -d)

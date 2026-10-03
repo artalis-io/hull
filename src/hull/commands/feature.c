@@ -262,17 +262,33 @@ static int cmd_install(const char *name, const char *repo)
          * was overwritten by every install, so a feature installed from an
          * earlier release no longer matched it and failed to verify. The
          * shared copy is still written for an older hull reading this cache. */
+        /* The signature before the manifest it signs, and every write
+         * checked: these were best-effort, so a failed write reported the
+         * install as done and the next `hull build` could not verify it. A
+         * feature whose own manifest is not on disk is not installed. */
         char p[PATH_MAX];
-        if ((size_t)snprintf(p, sizeof(p), "%s/%s.sha256", cache_dir, asset) < sizeof(p))
-            hl_release_io_atomic_write(p, manifest, manifest_len, 0644);
-        if (sig && (size_t)snprintf(p, sizeof(p), "%s/%s.sha256.sig",
-                                    cache_dir, asset) < sizeof(p))
-            hl_release_io_atomic_write(p, sig, sig_len, 0644);
-        if ((size_t)snprintf(p, sizeof(p), "%s/hull.sha256", cache_dir) < sizeof(p))
-            hl_release_io_atomic_write(p, manifest, manifest_len, 0644);
-        if (sig && (size_t)snprintf(p, sizeof(p), "%s/hull.sha256.sig",
-                                    cache_dir) < sizeof(p))
-            hl_release_io_atomic_write(p, sig, sig_len, 0644);
+        int bad = 0;
+        if (sig) {
+            bad |= (size_t)snprintf(p, sizeof(p), "%s/%s.sha256.sig",
+                                    cache_dir, asset) >= sizeof(p) ||
+                   hl_release_io_atomic_write(p, sig, sig_len, 0644) != 0;
+        }
+        bad |= (size_t)snprintf(p, sizeof(p), "%s/%s.sha256", cache_dir, asset) >= sizeof(p) ||
+               hl_release_io_atomic_write(p, manifest, manifest_len, 0644) != 0;
+        if (bad) {
+            fprintf(stderr, "hull feature: could not store the signed manifest for %s "
+                            "in %s; the install is undone\n", asset, cache_dir);
+            if ((size_t)snprintf(p, sizeof(p), "%s/%s", cache_dir, asset) < sizeof(p))
+                unlink(p);
+            rc = 1;
+        } else {
+            /* The shared copy, for an older hull reading this cache. */
+            if (sig && (size_t)snprintf(p, sizeof(p), "%s/hull.sha256.sig",
+                                        cache_dir) < sizeof(p))
+                (void)hl_release_io_atomic_write(p, sig, sig_len, 0644);
+            if ((size_t)snprintf(p, sizeof(p), "%s/hull.sha256", cache_dir) < sizeof(p))
+                (void)hl_release_io_atomic_write(p, manifest, manifest_len, 0644);
+        }
     }
 
     kl_free(&alloc, manifest, manifest_len);
@@ -340,6 +356,14 @@ static int cmd_uninstall(const char *name)
         return 1;
     }
     fprintf(stdout, "hull feature: removed %s\n", p);
+    /* Its own signed manifest goes with it: left behind it outlived the
+     * archive it described (the shared hull.sha256 is not touched). */
+    static const char *const sfx[] = { ".sha256", ".sha256.sig" };
+    for (size_t i = 0; i < sizeof sfx / sizeof sfx[0]; i++) {
+        char m[PATH_MAX];
+        if ((size_t)snprintf(m, sizeof(m), "%s%s", p, sfx[i]) < sizeof(m))
+            (void)unlink(m);
+    }
     return 0;
 }
 

@@ -29,6 +29,9 @@ make feature-duckdb >/dev/null
 ls -la build/libhull_feature-duckdb.a
 
 HULL=/tmp/hull_base_duckdb_e2e
+# hull build takes a local feature archive only from the running hull's own
+# directory (never ./build), so stage it beside the copied binary.
+cp build/libhull_feature-duckdb.a "$(dirname "$HULL")/"
 APP=$(mktemp -d)
 PLAIN=$(mktemp -d)
 trap 'rm -rf "$APP" "$PLAIN" /tmp/hull_base_duckdb_e2e' EXIT

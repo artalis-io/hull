@@ -285,12 +285,35 @@ static int local_read_file(const char *path, char **out, size_t *len)
     return 0;
 }
 
+/* SHA-256 of a file, streamed: the archives verified here run past the 64 MB
+ * local_read_file reads whole (a composed DuckDB archive is ~127 MB), so
+ * they could never be verified at all. */
+static int local_sha256_file_hex(const char *path, char hex[65])
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    HlSha256Ctx ctx;
+    hl_cap_crypto_sha256_init(&ctx);
+    unsigned char buf[65536];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
+        if (hl_cap_crypto_sha256_update(&ctx, buf, n) != 0) { rc = -1; break; }
+    }
+    if (ferror(f)) rc = -1;
+    fclose(f);
+    unsigned char digest[32];
+    if (hl_cap_crypto_sha256_final(&ctx, digest) != 0) rc = -1;
+    if (rc != 0) return -1;
+    return hl_hex_encode(digest, sizeof digest, hex, 65) < 0 ? -1 : 0;
+}
+
 int hl_release_io_verify_local_asset(const char *dir, const char *asset)
 {
     if (!dir || !asset) return -1;
     char path[PATH_MAX];
-    char *manifest = NULL, *sig = NULL, *lib = NULL;
-    size_t mlen = 0, slen = 0, llen = 0;
+    char *manifest = NULL, *sig = NULL;
+    size_t mlen = 0, slen = 0;
     int result = -1;
 
     /* 1. Cached signed manifest (required; its absence means we can't verify).
@@ -339,9 +362,7 @@ int hl_release_io_verify_local_asset(const char *dir, const char *asset)
     }
     if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, asset) >= sizeof(path))
         goto done;
-    if (local_read_file(path, &lib, &llen) != 0) goto done;
-    if (hl_release_io_sha256_hex((const unsigned char *)lib, llen, actual) != 0)
-        goto done;
+    if (local_sha256_file_hex(path, actual) != 0) goto done;
 
     /* 4. Constant-time compare. */
     if (!local_ct_hex_eq(expected, actual)) {
@@ -352,7 +373,7 @@ int hl_release_io_verify_local_asset(const char *dir, const char *asset)
     result = 0;
 
 done:
-    free(manifest); free(sig); free(lib);
+    free(manifest); free(sig);
     return result;
 }
 
@@ -574,11 +595,16 @@ void hl_release_io_cleanup_stale_self(const char *argv0)
 
 /* ── Version order ───────────────────────────────────────────────── */
 
-/* Parse "vMAJOR.MINOR.PATCH[-N-gSHA[-dirty]]" (a release tag, or `git
- * describe` for a development build). *ahead is 1 when there are commits past
- * the tag. Returns 0, or -1 when the string is not of that shape. */
-static int parse_version(const char *s, long v[3], int *ahead)
+/* Parse "vMAJOR.MINOR.PATCH[-SUFFIX]". The suffix decides where the string
+ * sits relative to the bare release: "-N-gSHA[-dirty]" (`git describe` of a
+ * development build) is past it, *ahead = 1; any other suffix ("-rc1",
+ * "-beta.2") is a pre-release before it, *ahead = -1, with *pre pointing at
+ * the suffix; none is the release, 0. A pre-release used to count as "ahead"
+ * - v0.14.0-rc1 ordered after v0.14.0, so an rc could replace the release it
+ * preceded. Returns 0, or -1 when the string is not of that shape. */
+static int parse_version_ex(const char *s, long v[3], int *ahead, const char **pre)
 {
+    if (pre) *pre = NULL;
     if (!s) return -1;
     if (*s == 'v') s++;
     for (int i = 0; i < 3; i++) {
@@ -591,8 +617,19 @@ static int parse_version(const char *s, long v[3], int *ahead)
             s++;
         }
     }
-    *ahead = (*s == '-');
+    if (*s != '-') { *ahead = 0; return 0; }
+    const char *suf = s + 1;
+    const char *d = suf;
+    while (*d >= '0' && *d <= '9') d++;
+    if (d > suf && d[0] == '-' && d[1] == 'g') { *ahead = 1; return 0; }
+    *ahead = -1;
+    if (pre) *pre = suf;
     return 0;
+}
+
+static int parse_version(const char *s, long v[3], int *ahead)
+{
+    return parse_version_ex(s, v, ahead, NULL);
 }
 
 /* <0 when `a` is older than `b`, 0 when the same release, >0 when newer; a
@@ -602,14 +639,42 @@ int hl_release_io_version_cmp(const char *a, const char *b, int *comparable)
 {
     long va[3], vb[3];
     int aa, ab;
-    if (parse_version(a, va, &aa) != 0 || parse_version(b, vb, &ab) != 0) {
+    const char *pa, *pb;
+    if (parse_version_ex(a, va, &aa, &pa) != 0 || parse_version_ex(b, vb, &ab, &pb) != 0) {
         if (comparable) *comparable = 0;
         return 0;
     }
     if (comparable) *comparable = 1;
     for (int i = 0; i < 3; i++)
         if (va[i] != vb[i]) return va[i] < vb[i] ? -1 : 1;
-    return aa - ab;
+    if (aa != ab) return aa < ab ? -1 : 1;   /* pre-release < release < dev */
+    if (aa == -1 && pa && pb) {              /* two pre-releases: rc1 < rc2 */
+        int c = strcmp(pa, pb);
+        return c < 0 ? -1 : c > 0 ? 1 : 0;
+    }
+    return 0;
+}
+
+int hl_release_io_tag_valid(const char *tag)
+{
+    if (!tag) return 0;
+    size_t n = strlen(tag);
+    if (n == 0 || n > 63) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = tag[i];
+        int ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                 (c >= 'A' && c <= 'Z') || c == '.' || c == '-' || c == '_';
+        if (!ok) return 0;
+    }
+    long v[3]; int ahead;
+    return parse_version(tag, v, &ahead) == 0;
+}
+
+int hl_release_io_requires_signed_version(const char *tag)
+{
+    int comparable = 0;
+    int c = hl_release_io_version_cmp(tag, HL_RELEASE_SIGNED_VERSION_SINCE, &comparable);
+    return !comparable || c >= 0;   /* unordered: fail closed, require it */
 }
 
 int hl_release_io_check_signed_version(const char *manifest, size_t manifest_len,
