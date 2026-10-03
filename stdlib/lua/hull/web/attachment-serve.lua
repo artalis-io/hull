@@ -33,6 +33,7 @@
 --     opts.auth_check    function(req, meta) → bool   REQUIRED
 --                        (omit → unconditional 403)
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local attachment = require("hull.attachment")
 local blob = require("hull.blob")
 local encoding = require("hull.encoding")
@@ -111,7 +112,7 @@ function M.serve(req, res, id, opts)
             return
         end
         for part in inm:gmatch("[^,]+") do
-            local trimmed = part:match("^%s*(.-)%s*$")
+            local trimmed = _text.trim(part)
             if trimmed == etag then
                 res:status(304)
                 return

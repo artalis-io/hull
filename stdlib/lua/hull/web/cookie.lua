@@ -3,6 +3,8 @@
 -- @module hull.web.cookie
 -- @license AGPL-3.0-or-later
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
+
 local cookie = {}
 
 --- Parse a `Cookie` header string into a name-value table.
@@ -23,12 +25,12 @@ function cookie.parse(header_string)
 
     for pair in string.gmatch(header_string, "[^;]+") do
         -- Trim leading/trailing whitespace
-        pair = pair:match("^%s*(.-)%s*$")
+        pair = _text.trim(pair)
         if pair ~= "" then
             local eq = pair:find("=", 1, true)
             if eq then
-                local name = pair:sub(1, eq - 1):match("^%s*(.-)%s*$")
-                local value = pair:sub(eq + 1):match("^%s*(.-)%s*$")
+                local name = _text.trim(pair:sub(1, eq - 1))
+                local value = _text.trim(pair:sub(eq + 1))
                 if name ~= "" then
                     result[name] = value
                 end

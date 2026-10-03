@@ -88,6 +88,7 @@
 --         end
 --     end)
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local crypto = require("hull.crypto")
 local sealbox = require("hull.crypto.sealbox")
 local otp    = require("hull.crypto.otp")
@@ -729,7 +730,7 @@ function totp.init(opts)
     -- DB.
     db.batch(function()
         for stmt in SCHEMA:gmatch("([^;]+);") do
-            local s = stmt:gsub("^%s+", ""):gsub("%s+$", "")
+            local s = _text.trim(stmt)
             if #s > 0 then db.exec(s) end
         end
     end)

@@ -9,6 +9,8 @@
 -- differently (some capped the length, some did not; some named the trust flag
 -- `trust_proxy`, one `trust_xff`). See docs/stdlib_style.md §4.
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
+
 local M = {}
 
 --- The client's source IP, honoring a `trust_proxy` policy.
@@ -33,7 +35,7 @@ function M.client_ip(req, trust_proxy)
     if trust_proxy and type(xff) == "string" and xff ~= "" then
         local last = xff:match("([^,]+)$")
         if last then
-            local trimmed = last:gsub("^%s+", ""):gsub("%s+$", "")
+            local trimmed = _text.trim(last)
             if trimmed ~= "" then ip = trimmed end
         end
     end

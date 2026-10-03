@@ -51,6 +51,7 @@
 -- there is a thing applications wire to "return true" once and forget, which
 -- is the same as having no trust store.
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local transport  = require('hull.ssh.transport')
 local packet     = require('hull.ssh.packet')
 local privatekey = require('hull.ssh.privatekey')
@@ -435,7 +436,12 @@ local function tunnel_headers(tunnel, host, port)
     local want = destination_value(host, port)
     local seen = false
     for _, line in ipairs(out) do
-        local n, v = tostring(line):match("^%s*([^:]-)%s*:%s*(.-)%s*$")
+        -- Split at the first colon, then trim each side: the one-pattern form
+        -- ("^%s*([^:]-)%s*:%s*(.-)%s*$") is quadratic in a run of spaces.
+        local s = tostring(line)
+        local colon = s:find(":", 1, true)
+        local n, v
+        if colon then n, v = _text.trim(s:sub(1, colon - 1)), _text.trim(s:sub(colon + 1)) end
         if n and checked[n:lower()] then
             if v ~= want then
                 return nil, { code = "denied", detail = n .. " names " .. v

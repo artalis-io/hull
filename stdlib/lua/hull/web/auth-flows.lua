@@ -95,6 +95,7 @@
 --     })
 --     authflows.routes(app)
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local crypto    = require("hull.crypto")
 local envelope  = require("hull.crypto.envelope")
 local encoding = require("hull.encoding")
@@ -573,7 +574,7 @@ local function request_host(h)
     if type(raw) ~= "string" then return nil end
     local comma = raw:find(",", 1, true)
     if comma then raw = raw:sub(1, comma - 1) end
-    raw = raw:match("^%s*(.-)%s*$")
+    raw = _text.trim(raw)
     local host, rest = raw:match("^(%[[%x:%.]+%])(.*)$")
     if not host then host, rest = raw:match("^([%w%.%-]+)(.*)$") end
     if not host then return nil end
@@ -1824,7 +1825,7 @@ function M.init(opts)
 
     db.batch(function()
         for stmt in SCHEMA:gmatch("([^;]+);") do
-            local s = stmt:gsub("^%s+", ""):gsub("%s+$", "")
+            local s = _text.trim(stmt)
             if #s > 0 then db.exec(s) end
         end
     end)

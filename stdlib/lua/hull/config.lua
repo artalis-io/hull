@@ -19,6 +19,7 @@
 --   local dsn    = config.require("DATABASE_URL")          -- throws if unset
 --   local debug  = config.get("DEBUG", { type = "boolean", default = false })
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local env = require("hull.env")
 local fs = require("hull.fs")
 
@@ -117,12 +118,12 @@ function config.load_dotenv(path)
     if not content then return 0 end
     local n = 0
     for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-        local s = line:gsub("^%s+", ""):gsub("%s+$", "")
+        local s = _text.trim(line)
         if s ~= "" and s:sub(1, 1) ~= "#" then
             s = s:gsub("^export%s+", "")
             local eq = s:find("=", 1, true)
             if eq then
-                local k = (s:sub(1, eq - 1)):gsub("%s+$", "")
+                local k = _text.rtrim(s:sub(1, eq - 1))
                 local v = strip_quotes((s:sub(eq + 1)):gsub("^%s+", ""))
                 if k ~= "" and env.allowed(k) then
                     _dotenv[k] = v

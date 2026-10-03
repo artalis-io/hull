@@ -21,6 +21,7 @@
 --       etag.json(req, res, db.query("SELECT * FROM items"))
 --   end)
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
 local json = require("hull.json")
 local crypto = require("hull.crypto")
 local encoding = require("hull.encoding")
@@ -59,7 +60,7 @@ function etag.matches(req, tag)
 
     -- Check each comma-separated value
     for part in inm:gmatch("[^,]+") do
-        local trimmed = part:match("^%s*(.-)%s*$")
+        local trimmed = _text.trim(part)
         if trimmed == tag then return true end
     end
     return false

@@ -13,6 +13,8 @@
 -- i18n.locale(i18n.detect(req.headers["accept-language"]) or "en")
 -- res:html(i18n.t("hello", { name = "Alice" }))
 
+local _text = require("hull._text")   -- linear trims (see hull._text)
+
 local i18n = {}
 
 -- ── Internal state ──────────────────────────────────────────────────
@@ -85,7 +87,7 @@ local function parse_accept_language(header)
     if not header or header == "" then return {} end
     local entries = {}
     for part in header:gmatch("[^,]+") do
-        part = part:match("^%s*(.-)%s*$")
+        part = _text.trim(part)
         local lang, rest = part:match("^([%w%-]+)(.*)")
         if lang then
             local q = 1.0
