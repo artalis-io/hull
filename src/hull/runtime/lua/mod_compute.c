@@ -1181,17 +1181,14 @@ static int lua_compute_stream(lua_State *L)
         if (input.kind != HL_STREAM_IN_FILE)
             return luaL_error(L, "compute.stream: input table must have 'file' key");
     } else {
-        HlBufferView view;
-        if (lua_get_buffer(L, 2, &view)) {
-            input.kind = HL_STREAM_IN_BUFFER;
-            input.buffer = view;
-        } else {
-            size_t slen;
-            const char *s = luaL_checklstring(L, 2, &slen);
-            input.kind = HL_STREAM_IN_BUFFER;
-            input.buffer.data = s;
-            input.buffer.len = slen;
-        }
+        /* A buffer input's view is taken further down, after the output and
+         * opts tables are read: reading them can run app code (__index), and
+         * that code could close() the buffer a view already taken points into.
+         * Checked here only so a wrong type fails before anything is held. */
+        HlBufferView probe;
+        if (!lua_get_buffer(L, 2, &probe))
+            (void)luaL_checklstring(L, 2, NULL);
+        input.kind = HL_STREAM_IN_BUFFER;
     }
 
     /* ── Parse output (arg 3) and opts (arg 3 or 4) ──────────────── */
@@ -1269,12 +1266,23 @@ static int lua_compute_stream(lua_State *L)
      * app code, run between chunks, and could close() the input - unmapping
      * the memory the next chunk is read from. MappedBuffer / WasmBuffer take a
      * borrow (close is deferred until released); an image has no borrow, so
-     * its pixels are copied for the duration. */
+     * its pixels are copied for the duration. The view is taken here, with no
+     * app code between it and the pin. */
     HlMappedBuffer *in_mmap = NULL;
     HlWasmBuffer   *in_wbuf = NULL;
     void           *in_copy = NULL;
     size_t          in_copy_len = 0;
     if (input.kind == HL_STREAM_IN_BUFFER) {
+        HlBufferView view;
+        if (lua_get_buffer(L, 2, &view)) {
+            input.buffer = view;
+        } else {
+            /* It was a buffer when checked above; the app code run since has
+             * closed it. */
+            if (cb_ctx.func_ref != LUA_NOREF)
+                luaL_unref(L, LUA_REGISTRYINDEX, cb_ctx.func_ref);
+            return luaL_error(L, "compute.stream: input buffer is closed");
+        }
         HlMappedBuffer **mp = luaL_testudata(L, 2, HL_MMAP_MT);
         HlWasmBuffer   **wp = luaL_testudata(L, 2, HL_WASM_BUF_MT);
         void          **ip = luaL_testudata(L, 2, HL_IMAGE_MT);  /* HlImage ** */

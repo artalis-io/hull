@@ -202,13 +202,24 @@ static JSValue js_tar_extract(JSContext *ctx, JSValueConst this_val,
     if (!js || !js->base.fs_cfg)
         return JS_ThrowTypeError(ctx, "tar.extract: not available (declare fs.write in manifest)");
 
+    /* The directory first: converting it can run app code (toString), which
+     * could close the archive buffer - after its view was taken, the parse
+     * read unmapped or freed memory. The view is taken last, with nothing
+     * between it and the parse. */
+    const char *dir = NULL;
+    if (argc >= 2) {
+        dir = JS_ToCString(ctx, argv[1]);
+        if (!dir)
+            return JS_EXCEPTION;
+    }
+
     HlBufferView view;
     const char *str = NULL;
     int needs_free = 0;
-    if (argc < 1 || !js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
+    if (argc < 1 || !js_get_buffer(ctx, argv[0], &view, &str, &needs_free)) {
+        if (dir) JS_FreeCString(ctx, dir);
         return JS_ThrowTypeError(ctx, "tar.extract: arg 1 must be a buffer");
-
-    const char *dir = argc >= 2 ? JS_ToCString(ctx, argv[1]) : NULL;
+    }
 
     struct js_extract_ctx c = { js->base.fs_cfg, dir ? dir : "", NULL };
     int rc = hl_tar_parse((const unsigned char *)view.data, view.len,

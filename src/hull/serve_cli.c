@@ -339,8 +339,8 @@ int hull_serve(int argc, char **argv)
         rt->async_ctx = NULL;
         rt->thread_pool = NULL;
         if (pool) be->pool_free(pool);
-        be->free(async_ctx);
         hl_app_context_free(ctx);
+        be->free(async_ctx);   /* last: the runtime's finalizers still use it */
         return 1;
     }
 
@@ -563,9 +563,9 @@ int hull_serve(int argc, char **argv)
         rt->async_ctx = NULL;
         rt->thread_pool = NULL;
         if (pool) be->pool_free(pool);
-        be->free(async_ctx);
         hl_manifest_free(&manifest);
         hl_app_context_free(ctx);
+        be->free(async_ctx);   /* last: the runtime's finalizers still use it */
         sh_seal_arena_destroy(&seal_arena);
         return 1;
     }
@@ -592,9 +592,9 @@ int hull_serve(int argc, char **argv)
         rt->async_ctx = NULL;
         rt->thread_pool = NULL;
         if (pool) be->pool_free(pool);
-        be->free(async_ctx);
         hl_manifest_free(&manifest);
         hl_app_context_free(ctx);
+        be->free(async_ctx);   /* last: the runtime's finalizers still use it */
         sh_seal_arena_destroy(&seal_arena);
         return 1;
     }
@@ -611,9 +611,9 @@ int hull_serve(int argc, char **argv)
         rt->async_ctx = NULL;
         rt->thread_pool = NULL;
         if (pool) be->pool_free(pool);
-        be->free(async_ctx);
         hl_manifest_free(&manifest);
         hl_app_context_free(ctx);
+        be->free(async_ctx);   /* last: the runtime's finalizers still use it */
         sh_seal_arena_destroy(&cfg_arena);
         sh_seal_arena_destroy(&seal_arena);
         return 1;
@@ -635,9 +635,9 @@ int hull_serve(int argc, char **argv)
             rt->async_ctx = NULL;
             rt->thread_pool = NULL;
             if (pool) be->pool_free(pool);
-            be->free(async_ctx);
             hl_manifest_free(&manifest);
             hl_app_context_free(ctx);
+            be->free(async_ctx);   /* last: the runtime's finalizers still use it */
             /* The arenas outlive every consumer that aliases them. */
             sh_seal_arena_destroy(&cfg_arena);
             sh_seal_arena_destroy(&seal_arena);
@@ -667,11 +667,11 @@ int hull_serve(int argc, char **argv)
     if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
 #endif
     if (pool) be->pool_free(pool);
-    be->free(async_ctx);
 
     free((void *)env_allow);
     hl_manifest_free(&manifest);
     hl_app_context_free(ctx);
+    be->free(async_ctx);   /* last: the runtime's finalizers still use it */
 
     /* Destroyed LAST: the cap configs above borrow strings out of it, so
      * unmapping earlier would leave them pointing at nothing. */

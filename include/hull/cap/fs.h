@@ -19,6 +19,7 @@
 #ifndef HL_CAP_FS_H
 #define HL_CAP_FS_H
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "hull/cap/fs_policy.h"   /* HlFsPolicy - path-authorization policy */
@@ -299,8 +300,16 @@ typedef struct HlMappedBuffer {
     size_t        len;    /**< Caller-visible window length in bytes. */
     int           closed; /**< `1` iff already munmap'd; further `_munmap` is a no-op. */
     HlAllocator  *alloc;  /**< Tracked allocator (NULL = raw malloc). */
-    int           borrow_count;  /**< Live zero-copy borrowers (e.g. images). */
-    int           pending_free;  /**< close()/gc was deferred while borrowed. */
+    /* Lifetime. A borrow is taken and released on the event loop (an image,
+     * a compute.call span) AND on a worker thread (a compute.async span set),
+     * so this is one atomic reference count: the open buffer's own reference
+     * plus one per borrower. close() drops the owner's, once; whoever drops
+     * the last frees. Two plain counters, a borrower count tested by close()
+     * and a pending flag tested by the release, raced across threads into a
+     * free while still borrowed, or two frees. */
+    _Atomic int   refs;          /**< Owner (until close) + live borrowers. */
+    _Atomic int   borrow_count;  /**< Live zero-copy borrowers (e.g. images). */
+    _Atomic int   pending_free;  /**< close()/gc was deferred while borrowed. */
     /* Windowing (mapped-spans cut 1). For a whole-file mmap, @ref map_base ==
      * @ref addr, @ref map_len == @ref len, and @ref foffset == 0. For a windowed
      * mmap the mmap is page-aligned: @ref map_base / @ref map_len are the actual

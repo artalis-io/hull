@@ -814,8 +814,9 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
     buf->len = (size_t)st.st_size;
     buf->closed = 0;
     buf->alloc = alloc;
-    buf->borrow_count = 0;
-    buf->pending_free = 0;
+    atomic_init(&buf->refs, 1);          /* the owner's reference */
+    atomic_init(&buf->borrow_count, 0);
+    atomic_init(&buf->pending_free, 0);
     /* Whole-file mmap: the window IS the whole mapping. */
     buf->map_base = addr;
     buf->map_len = (size_t)st.st_size;
@@ -1000,8 +1001,9 @@ HlMappedBuffer *hl_cap_fs_mmap_window(const HlFsConfig *cfg, const char *path,
     buf->foffset = offset;
     buf->closed = 0;
     buf->alloc = alloc;
-    buf->borrow_count = 0;
-    buf->pending_free = 0;
+    atomic_init(&buf->refs, 1);          /* the owner's reference */
+    atomic_init(&buf->borrow_count, 0);
+    atomic_init(&buf->pending_free, 0);
 
 audit:
     {
@@ -1014,17 +1016,10 @@ audit:
     return buf;
 }
 
-void hl_cap_fs_munmap(HlMappedBuffer *buf)
+/* The last reference is gone: unmap and free. Runs exactly once, on whichever
+ * thread dropped the last reference. */
+static void mapped_buffer_destroy(HlMappedBuffer *buf)
 {
-    if (!buf) return;
-    /* Defer the real teardown while a zero-copy borrower (e.g. an image
-     * created via image.from_buffer) still points into the mapping. The
-     * last hl_cap_fs_mmap_release completes it. The owning userdata detaches
-     * (sets its pointer to NULL) regardless, so no new borrows can start. */
-    if (buf->borrow_count > 0) {
-        buf->pending_free = 1;
-        return;
-    }
     /* Unmap the PAGE-ALIGNED mapping (map_base/map_len), never the caller window
      * (addr/len) -- for a windowed buffer addr is offset into map_base. */
     if (!buf->closed && buf->map_base) {
@@ -1034,22 +1029,32 @@ void hl_cap_fs_munmap(HlMappedBuffer *buf)
     hl_alloc_free(buf->alloc, buf, sizeof(HlMappedBuffer));
 }
 
+void hl_cap_fs_munmap(HlMappedBuffer *buf)
+{
+    if (!buf) return;
+    /* Drop the owner's reference. While a zero-copy borrower (an image made by
+     * image.from_buffer, a span of an in-flight compute.async) still points
+     * into the mapping, the teardown waits for its release. The owning
+     * userdata detaches (sets its pointer to NULL) regardless, so no new
+     * borrows can start; it calls this once. */
+    if (atomic_load(&buf->borrow_count) > 0)
+        atomic_store(&buf->pending_free, 1);
+    if (atomic_fetch_sub(&buf->refs, 1) == 1)
+        mapped_buffer_destroy(buf);
+}
+
 void hl_cap_fs_mmap_borrow(HlMappedBuffer *buf)
 {
-    if (buf) buf->borrow_count++;
+    if (!buf) return;
+    atomic_fetch_add(&buf->refs, 1);
+    atomic_fetch_add(&buf->borrow_count, 1);
 }
 
 void hl_cap_fs_mmap_release(void *p)
 {
     HlMappedBuffer *buf = (HlMappedBuffer *)p;
     if (!buf) return;
-    if (buf->borrow_count > 0) buf->borrow_count--;
-    if (buf->borrow_count == 0 && buf->pending_free) {
-        /* Unmap the page-aligned mapping, not the caller window (see munmap). */
-        if (!buf->closed && buf->map_base) {
-            munmap(buf->map_base, buf->map_len);
-            buf->closed = 1;
-        }
-        hl_alloc_free(buf->alloc, buf, sizeof(HlMappedBuffer));
-    }
+    atomic_fetch_sub(&buf->borrow_count, 1);
+    if (atomic_fetch_sub(&buf->refs, 1) == 1)
+        mapped_buffer_destroy(buf);
 }
