@@ -342,6 +342,14 @@ M.REVOKED = "revoked"   -- the store revokes this key (known_hosts @revoked)
 -- accepted for one port on the other.
 function M.store_name(host, port)
     local h = tostring(host):lower()
+    -- A host name is one known_hosts pattern. A comma separates patterns,
+    -- `*` / `?` / `!` are wildcards and negation, `|` starts a hashed entry,
+    -- `#` a comment, `[` `]` the port form built below: one of these in the
+    -- name (from an app-chosen host under a wildcard grant) wrote an entry
+    -- that also trusted the key for ANOTHER host - "victim.org,x.example.com".
+    if h == "" or h:find("[,#|*?!%[%]%s%c]") then
+        error("ssh.hostkey: invalid host name for the trust store", 2)
+    end
     port = port or 22
     if port == 22 then return h end
     return "[" .. h .. "]:" .. tostring(port)

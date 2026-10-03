@@ -400,6 +400,11 @@ function File:read(n)
     if math.type(n) ~= "integer" or n < 1 then
         bad_argument("ssh.sftp: read size must be a positive integer")
     end
+    -- pos + n wrapped for a huge n: the limit went negative, nothing was
+    -- requested, and the read returned "" - which reads as end of file.
+    if n > math.maxinteger - self.pos then
+        bad_argument("ssh.sftp: read size too large")
+    end
     local limit = self.pos + n
     local pending, requests = {}, {}  -- id -> true; id -> { off, want }
     local ready = {}                   -- offset -> { r, want }, out of order

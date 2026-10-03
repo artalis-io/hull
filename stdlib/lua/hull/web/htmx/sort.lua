@@ -177,17 +177,27 @@ end
 
 -- Compute the URL fragment + direction-data for a column given the
 -- current sort state. Returns { url_sort, next_direction, this_direction }.
+local function url_component(s)
+    return (tostring(s):gsub("[^%w%-%._~]", function(c)
+        return string.format("%%%02X", c:byte())
+    end))
+end
+
 local function plan_toggle(column, current)
     local this_direction = "none"
     local next_direction = "asc"
     if current and current.column == column then
-        this_direction = current.direction
-        next_direction = (current.direction == "asc") and "desc" or "asc"
+        -- Normalised: the direction is emitted into class= and
+        -- data-sort-direction= unescaped, and `current` may be built by
+        -- the app rather than come from sort.parse.
+        this_direction = (current.direction == "desc") and "desc" or "asc"
+        next_direction = (this_direction == "asc") and "desc" or "asc"
     end
     -- URL emits :asc explicitly so the toggle round-trips
     -- (omitting it makes "asc" the implicit default, but explicit
-    -- is friendlier for back-button shareability).
-    local url_sort = column .. ":" .. next_direction
+    -- is friendlier for back-button shareability). The column goes into a
+    -- query string: percent-encode it.
+    local url_sort = url_component(column) .. ":" .. next_direction
     return url_sort, next_direction, this_direction
 end
 

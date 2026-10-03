@@ -151,8 +151,24 @@ function ipPrefix(ip) {
     const m = first.match(/^(\d+)\.(\d+)\.(\d+)\./);
     if (m) return m[1] + "." + m[2] + "." + m[3] + ".0/24";
     if (first.indexOf(":") >= 0) {
-        const parts = first.split(":").filter(p => p.length > 0).slice(0, 4);
-        return parts.join(":") + "::/64";
+        const ip6 = first.replace(/%.*$/, "");                  // zone id
+        // An IPv4-mapped address is its IPv4 address: /24, like the above.
+        const v4 = /^::ffff:(\d+)\.(\d+)\.(\d+)\.\d+$/i.exec(ip6);
+        if (v4) return v4[1] + "." + v4[2] + "." + v4[3] + ".0/24";
+        const groupsOf = (s) => s.split(":").filter(p => p.length > 0);
+        // "::" inside the first four groups stands for zero groups: expand
+        // it, or 2001:db8::1 and 2001:db8::2 had different "/64"s (the tail's
+        // groups were taken as the prefix's). Any other address yields
+        // exactly the prefix it did before, so stored fingerprints stay valid.
+        const dc = ip6.indexOf("::");
+        let parts;
+        if (dc >= 0 && groupsOf(ip6.slice(0, dc)).length < 4) {
+            const h = groupsOf(ip6.slice(0, dc)), t = groupsOf(ip6.slice(dc + 2));
+            parts = h.concat(new Array(Math.max(0, 8 - h.length - t.length)).fill("0"), t);
+        } else {
+            parts = groupsOf(ip6);
+        }
+        return parts.slice(0, 4).join(":") + "::/64";
     }
     return first;
 }
@@ -170,18 +186,6 @@ function extractUa(req) {
 }
 
 import { encoding } from "hull:encoding";
-
-// A user id as stored. Apps key users by INTEGER PRIMARY KEY as often as by
-// text, and the column is text, so an integer id is its decimal string. These
-// functions used to accept strings only, and an integer id made them return
-// nothing, silently: session.destroyAll(42) left every session alive, and no
-// login was recorded. Anything else (null, "", a float, an object) is no id.
-function uidString(userId) {
-    if (typeof userId === "string") return userId === "" ? null : userId;
-    if (typeof userId === "number" && Number.isSafeInteger(userId)) return String(userId);
-    if (typeof userId === "bigint") return userId.toString();
-    return null;
-}
 
 // From SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix). Salt is
 // deployment-private (from init's fingerprintSalt opt) so output is only
@@ -204,7 +208,7 @@ function fingerprint(req) {
 }
 
 function record(userId, kind, req, opts) {
-    userId = uidString(userId);
+    userId = _request.userId(userId);
     if (userId === null || typeof kind !== "string" || kind === "") return;
     opts = opts || {};
     const ip = opts.ip !== undefined ? opts.ip : extractIp(req);
@@ -245,7 +249,7 @@ function record(userId, kind, req, opts) {
 }
 
 function list(userId, opts) {
-    userId = uidString(userId);
+    userId = _request.userId(userId);
     if (userId === null) return [];
     opts = opts || {};
     const limit = opts.limit || 50;
@@ -277,7 +281,7 @@ function list(userId, opts) {
 }
 
 function listDevices(userId, opts) {
-    userId = uidString(userId);
+    userId = _request.userId(userId);
     if (userId === null) return [];
     opts = opts || {};
     const cutoff = time.now() - ((opts.window_days || 90) * 86400);
@@ -296,7 +300,7 @@ function listDevices(userId, opts) {
 }
 
 function isNewDevice(userId, req, opts) {
-    userId = uidString(userId);
+    userId = _request.userId(userId);
     if (userId === null) return false;
     opts = opts || {};
     const cutoff = time.now() - ((opts.window_days || 30) * 86400);

@@ -98,6 +98,14 @@ function M.render(name, blob, salt, hmac_sha1)
     local keytype = M.blob_type(blob)
     if not keytype then error("ssh.known_hosts: not a key blob", 2) end
     local hosts = name
+    -- A plain name is written as is: refuse what known_hosts would read as
+    -- more than one name (see hull.ssh.hostkey.store_name). "[host]:port" is
+    -- the one bracket form allowed.
+    if not salt and (type(name) ~= "string" or name == ""
+                     or name:find("[,#|*?!%s%c]")
+                     or (name:find("[%[%]]") and not name:match("^%[[^%[%]]+%]:%d+$"))) then
+        error("ssh.known_hosts: invalid host name", 2)
+    end
     if salt then
         hosts = M.HASH_MAGIC .. base64.encode(salt) .. "|"
                 .. base64.encode(hmac_sha1(salt, name))

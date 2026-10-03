@@ -56,15 +56,27 @@ function check(buckets, key, limit, window, now, saturated) {
         // Live window: bump in place. buckets.get already refreshed this
         // bucket's LRU rank, so an active key won't be the eviction victim.
         bucket.count++;
-        if (saturated && bucket.count > limit && !saturated.has(key)) {
-            // Kept apart from the cache, so eviction cannot reset it. Each
-            // entry costs a client `limit` requests within one window, and
-            // entries whose window has passed are dropped as it grows.
+        if (saturated && bucket.count > limit && saturated.get(key) !== bucket) {
+            // Kept apart from the cache, so eviction cannot reset it. Recorded
+            // whenever the map holds a DIFFERENT bucket for the key: testing
+            // only for presence kept the first window's (expired) entry, so
+            // from the second window on the restore above found nothing live.
             saturated.set(key, bucket);
             if (saturated.size > MAX_BUCKETS) {
+                // Drop expired entries; if every entry is live (an attacker
+                // spending `limit + 1` requests per key), drop the ones
+                // closest to expiry down to 90% of the cap, so the map has a
+                // hard bound and each new key does not pay a full sweep.
+                const live = [];
                 saturated.forEach((b, k) => {
                     if ((now - b.windowStart) >= window) saturated.delete(k);
+                    else live.push(k);
                 });
+                if (live.length > MAX_BUCKETS) {
+                    live.sort((a, b) => saturated.get(a).windowStart - saturated.get(b).windowStart);
+                    const drop = live.length - Math.floor(MAX_BUCKETS * 0.9);
+                    for (let n = 0; n < drop; n++) saturated.delete(live[n]);
+                }
             }
         }
     }

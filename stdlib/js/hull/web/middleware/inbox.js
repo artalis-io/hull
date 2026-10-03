@@ -25,6 +25,17 @@ let inboxTtl = 604800; // default 7 days
 // distinct messages sharing a 255-char prefix into one (dropping the second as
 // a false duplicate). Uniform across every backend.
 const MAX_ID_LEN = 255;
+// A message id as stored: webhook ids are often numeric. An integer is its
+// decimal string (a number has no .length, so the length cap never applied);
+// any other non-string is a caller error, said plainly.
+function normId(messageId) {
+    if (typeof messageId === "number" && Number.isSafeInteger(messageId))
+        return String(messageId);
+    if (messageId !== null && messageId !== undefined && typeof messageId !== "string")
+        throw new Error("inbox: messageId must be a string or an integer");
+    return messageId;
+}
+
 function checkIdLen(messageId, source) {
     if (messageId && messageId.length > MAX_ID_LEN)
         throw new Error("inbox: messageId too long (max " + MAX_ID_LEN + ")");
@@ -67,7 +78,8 @@ function init(opts) {
  * @returns {boolean}
  */
 function isDuplicate(messageId, source) {
-    if (!messageId || messageId === "")
+    messageId = normId(messageId);
+    if (messageId === null || messageId === undefined || messageId === "")
         return false;
     if (!source) source = "default";
     checkIdLen(messageId, source);
@@ -103,7 +115,8 @@ function isDuplicate(messageId, source) {
  * @param {number} [opts.ttl]  Override module-level TTL for this message.
  */
 function markProcessed(messageId, source, opts) {
-    if (!messageId || messageId === "")
+    messageId = normId(messageId);
+    if (messageId === null || messageId === undefined || messageId === "")
         return;
     if (!source) source = "default";
     checkIdLen(messageId, source);
@@ -137,7 +150,8 @@ function markProcessed(messageId, source, opts) {
  * }
  */
 function checkAndMark(messageId, source, opts) {
-    if (!messageId || messageId === "")
+    messageId = normId(messageId);
+    if (messageId === null || messageId === undefined || messageId === "")
         return false;
     if (!source) source = "default";
     checkIdLen(messageId, source);

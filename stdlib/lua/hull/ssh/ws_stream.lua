@@ -439,9 +439,12 @@ function M.connect(stream, opts)
 
     -- Read until the end of the header block, bounded: a peer that never
     -- sends the blank line must not make us buffer without limit.
-    local buf = ""
-    while not buf:find("\r\n\r\n", 1, true) do
-        if #buf > 64 * 1024 then
+    -- Chunks are collected, and only the newly read bytes (plus the three
+    -- before them) are searched: re-concatenating and re-scanning the whole
+    -- buffer on every read was quadratic in a peer that sends a byte at a time.
+    local parts, total, tail, found = {}, 0, "", false
+    while not found do
+        if total > 64 * 1024 then
             return nil, { code = "upgrade_failed",
                           detail = "response headers too large" }
         end
@@ -453,8 +456,13 @@ function M.connect(stream, opts)
             return nil, { code = "upgrade_failed",
                           detail = "connection closed during the upgrade" }
         end
-        buf = buf .. chunk
+        parts[#parts + 1] = chunk
+        total = total + #chunk
+        local seam = tail .. chunk
+        found = seam:find("\r\n\r\n", 1, true) ~= nil
+        tail = seam:sub(-3)
     end
+    local buf = table.concat(parts)
 
     local res, perr = M.parse_response(buf)
     if not res then

@@ -55,7 +55,11 @@ local function validate_identifier(name, label)
         error("search: invalid " .. label .. " '" .. name ..
               "' (must match [a-zA-Z_][a-zA-Z0-9_]*)")
     end
-    if name:sub(1, 6) == "_hull_" then
+    -- Case-insensitive: SQLite identifiers are, and this module's SQL runs
+    -- as a stdlib caller, past the C-level _hull_* guard. "_HULL_SESSIONS"
+    -- passed the old check, so reindex() copied every session row into an
+    -- index the app could query.
+    if name:sub(1, 6):lower() == "_hull_" then
         error("search: " .. label .. " must not start with '_hull_'")
     end
     if SQL_KEYWORDS[name:upper()] then
@@ -249,10 +253,13 @@ function search.query(name, query, opts)
     if #query > max_len then
         error("search.query: query too long (" .. #query .. " > " .. max_len .. ")")
     end
-    local _, term_count = query:gsub("[%(%)]", "")           -- parentheses
-    local _, or_count = query:gsub("%f[%w]OR%f[%W]", "")     -- OR operators
-    local _, near_count = query:gsub("%f[%w]NEAR%f[%W]", "") -- NEAR operators
-    if term_count + or_count + near_count > max_terms then
+    -- Every word is a term (implicit AND costs as much as OR), every prefix
+    -- `*` widens one, and parentheses group: count all three. Counting only
+    -- OR / NEAR / parens let "a b c d ..." or "a* b* c* ..." through.
+    local _, paren_count = query:gsub("[%(%)]", "")
+    local _, word_count = query:gsub("[^%s%(%)]+", "")
+    local _, star_count = query:gsub("%*", "")
+    if paren_count + word_count + star_count > max_terms then
         error("search.query: query too complex (>" .. max_terms
               .. " operators/groups); bound untrusted input")
     end
@@ -304,7 +311,21 @@ function search.query(name, query, opts)
     params[#params + 1] = limit
     params[#params + 1] = offset
 
-    return db.query(sql, params)
+    -- A query FTS5 cannot parse is the user's input, not a server fault: it
+    -- returns no rows and the reason, where it used to raise (a 500 for any
+    -- search box fed "foo AND"). Other errors still raise.
+    -- Through a closure that names db.query: the stdlib may touch its
+    -- _hull_fts_* tables only in a call that names the method, and
+    -- pcall(db.query, ...) does not.
+    local ok, rows = pcall(function() return db.query(sql, params) end)
+    if ok then return rows end
+    local msg = tostring(rows)
+    if msg:find("fts5:", 1, true) or msg:find("syntax error", 1, true)
+       or msg:find("no such column", 1, true) or msg:find("unterminated", 1, true)
+       or msg:find("malformed MATCH", 1, true) then
+        return {}, "invalid search query"
+    end
+    error(rows, 0)
 end
 
 --- Bulk re-index from a source table.
@@ -343,15 +364,16 @@ function search.reindex(name, source_table, opts)
         end
     end
 
-    -- Clear existing index data
-    db.exec("DELETE FROM " .. tbl)
-
-    -- Bulk insert from source table
+    -- Clear and repopulate in one transaction: a failure part-way used to
+    -- leave the index empty, and a reader between the two saw no results.
     local sql = "INSERT INTO " .. tbl ..
                 "(" .. table.concat(fts_cols, ", ") .. ")" ..
                 " SELECT " .. table.concat(src_cols, ", ") ..
                 " FROM " .. source_table
-    db.exec(sql)
+    db.batch(function()
+        db.exec("DELETE FROM " .. tbl)
+        db.exec(sql)
+    end)
 end
 
 return search

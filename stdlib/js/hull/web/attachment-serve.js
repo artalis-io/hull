@@ -115,11 +115,14 @@ function serve(req, res, id, opts) {
     const inm = req.headers && req.headers["if-none-match"];
     if (inm) {
         if (/^\s*\*\s*$/.test(inm)) {
+            res.header("ETag", etag);
             res.status(304);
             return;
         }
         for (const part of inm.split(",")) {
             if (part.trim() === etag) {
+                // RFC 9110 15.4.5: a 304 carries the ETag the 200 would have.
+                res.header("ETag", etag);
                 res.status(304);
                 return;
             }
@@ -138,6 +141,10 @@ function serve(req, res, id, opts) {
     res.header("Content-Type", meta.mime);
     res.header("Content-Disposition", contentDisposition(meta.original_name));
     res.header("ETag", etag);
+    // The stored MIME type is whatever the uploader claimed. nosniff stops a
+    // browser second-guessing it - rendering an uploaded "text/plain" that
+    // looks like HTML as HTML, on this origin.
+    res.header("X-Content-Type-Options", "nosniff");
     res.bytes(bytes);
 }
 

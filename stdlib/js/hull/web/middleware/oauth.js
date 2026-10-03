@@ -319,6 +319,19 @@ async function refreshJwks(providerName) {
 // Seconds between JWKS fetches caused by an unknown kid.
 const JWKS_MIN_REFRESH = 60;
 
+// The `kid` from a compact JWT's header, or null.
+function tokenKid(token) {
+    if (typeof token !== "string") return null;
+    const dot = token.indexOf(".");
+    if (dot <= 0) return null;
+    const raw = encoding.base64.decode(token.slice(0, dot), { url: true });
+    if (raw === null) return null;
+    let header;
+    try { header = json.decode(encoding.utf8.decode(raw) || ""); }
+    catch (_e) { return null; }
+    return header && typeof header.kid === "string" ? header.kid : null;
+}
+
 function jwksResolver(providerName) {
     return async (kid, _alg) => {
         const cache = _state._jwksCache[providerName];
@@ -490,28 +503,17 @@ async function handleCallback(req, res) {
     }
 
     // 4. Verify ID token. HS256 excluded - OIDC IdPs use asym.
-    const resolver = jwksResolver(providerName);
-    // jwt.verify's resolver is called synchronously in our codepath
-    // (jwt.verify is sync). To support async JWKS fetch we pre-warm
-    // the cache by attempting one refresh before verify.
-    if (!_state._jwksCache[providerName]) {
-        await refreshJwks(providerName);
-    }
-    const syncResolver = (kid, _alg) => {
-        const cache = _state._jwksCache[providerName];
-        return (cache && cache.byKid[kid]) ? cache.byKid[kid] : null;
-    };
-    let claims, jerr;
-    [claims, jerr] = jwt.verify(tokens.id_token, syncResolver,
+    // jwt.verify is synchronous, so the key is resolved first, through
+    // jwksResolver: it refreshes a JWKS older than jwksTtl (so a key the IdP
+    // pulled stops verifying) and an unknown kid at most once a minute. The
+    // callback used to read the cache directly - the TTL never applied - and
+    // refetched on ANY failed verify, so a forged token cost a fetch each.
+    const kid = tokenKid(tokens.id_token);
+    const pem = await jwksResolver(providerName)(kid, null);
+    const syncResolver = (k, _alg) => (k === kid ? pem : null);
+    const [claims, jerr] = jwt.verify(tokens.id_token, syncResolver,
         { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"],
           requireExp: true });   // OIDC Core 3.1.3.7: an id_token expires
-    if (!claims) {
-        // Cache miss on a rotated kid? Re-fetch and retry once.
-        await refreshJwks(providerName);
-        [claims, jerr] = jwt.verify(tokens.id_token, syncResolver,
-            { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"],
-          requireExp: true });   // OIDC Core 3.1.3.7: an id_token expires
-    }
     if (!claims) {
         log.warn("oauth: id_token verify failed: " + String(jerr));
         res.status(400).html("auth failed"); return;

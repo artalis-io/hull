@@ -91,10 +91,15 @@ function planToggle(column, current) {
     let thisDirection = "none";
     let nextDirection = "asc";
     if (current && current.column === column) {
-        thisDirection = current.direction;
-        nextDirection = current.direction === "asc" ? "desc" : "asc";
+        // Normalised: the direction is emitted into class= and
+        // data-sort-direction= unescaped, and `current` may be built by the
+        // app rather than come from parse().
+        thisDirection = current.direction === "desc" ? "desc" : "asc";
+        nextDirection = thisDirection === "asc" ? "desc" : "asc";
     }
-    return [column + ":" + nextDirection, nextDirection, thisDirection];
+    // The column goes into a query string: percent-encode it.
+    return [encodeURIComponent(String(column)) + ":" + nextDirection,
+            nextDirection, thisDirection];
 }
 
 /**

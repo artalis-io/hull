@@ -16,6 +16,7 @@
  */
 
 import { internal as dbInternal } from "hull:db:_internal";
+import { _request } from "hull:web:_request";
 const db = dbInternal.connection();
 /**
  * Create the four `_hull_*` RBAC tables. Idempotent.
@@ -96,12 +97,14 @@ function definePermission(name) {
     db.insertIfAbsent("_hull_permissions", ["name"], ["name"], [permName]);
 }
 
-// String() on null/undefined yields the literal "null"/"undefined", which
-// would silently insert a real-looking user_id row. Reject explicitly.
+// Every user id goes through _request.userId, as in session and totp: 42 and
+// "42" are one user. String() turned null into "null" and 42.5 into "42.5"; on
+// MySQL a raw number was compared numerically against the VARCHAR column.
 function normalizeUserId(userId) {
-    if (userId === null || userId === undefined)
-        throw new Error("rbac: userId is required");
-    return String(userId);
+    const u = _request.userId(userId);
+    if (u === null)
+        throw new Error("rbac: userId is required (a non-empty string or an integer)");
+    return u;
 }
 
 /**
@@ -274,7 +277,7 @@ function requireRole(roleOrRoles, opts) {
         const userId = getUserId
             ? getUserId(req)
             : (req.ctx && req.ctx.session && req.ctx.session.user_id);
-        if (!userId) {
+        if (userId === null || userId === undefined || userId === "") {
             res.status(401);
             res.json({ error: "authentication required" });
             return 1;
@@ -311,7 +314,7 @@ function requirePermission(permOrPerms, opts) {
         const userId = getUserId
             ? getUserId(req)
             : (req.ctx && req.ctx.session && req.ctx.session.user_id);
-        if (!userId) {
+        if (userId === null || userId === undefined || userId === "") {
             res.status(401);
             res.json({ error: "authentication required" });
             return 1;

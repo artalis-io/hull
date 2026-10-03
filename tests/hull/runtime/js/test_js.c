@@ -3228,6 +3228,65 @@ UTEST(js_stdlib, audit3_stdlib_fixes)
     cleanup_js_caps();
 }
 
+/* The fourth audit's stdlib fixes, as in lua_stdlib.audit4_stdlib_fixes,
+ * plus JS-only ones: user id 0, prototype names as template filters. */
+UTEST(js_stdlib, audit4_stdlib_fixes)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "import { session } from 'hull:web:middleware:session';\n"
+        "import { rbac } from 'hull:web:middleware:rbac';\n"
+        "import { search } from 'hull:search';\n"
+        "import { ratelimit } from 'hull:web:middleware:ratelimit';\n"
+        "import { inbox } from 'hull:web:middleware:inbox';\n"
+        "import { sort } from 'hull:web:htmx:sort';\n"
+        "import { auditLog } from 'hull:web:middleware:audit-log';\n"
+        "import { template } from 'hull:template';\n"
+        "function threw(f) { try { f(); return false; } catch (e) { return true; } }\n"
+        "function run() {\n"
+        "  totp.init({ issuer: 'T', encryptionKey: 'k'.repeat(32) });\n"
+        "  if (threw(() => totp.enroll(42))) return 1;\n"
+        "  if (totp.enrolled(42) !== totp.enrolled('42')) return 2;\n"
+        "  if (totp.disable(42) !== true) return 3;\n"
+        "  session.init({ ttl: 3600 });\n"
+        "  const sid = session.create({});\n"
+        "  session.update(sid, { user_id: 42 });\n"
+        "  if (session.listForUser(42).length !== 1) return 4;\n"
+        "  rbac.init(); rbac.defineRole('admin');\n"
+        "  rbac.assign(7, 'admin');\n"
+        "  if (!rbac.hasRole('7', 'admin')) return 5;\n"
+        "  if (!threw(() => rbac.assign(7.5, 'admin'))) return 6;\n"
+        "  search.createIndex('docs', ['body']);\n"
+        "  if (!threw(() => search.reindex('docs', '_HULL_SESSIONS', { columns: { body: 'data' } }))) return 7;\n"
+        "  const r = search.query('docs', 'foo AND');\n"
+        "  if (r.length !== 0 || !r.error) return 8;\n"
+        "  if (!threw(() => search.query('docs', 'w '.repeat(70)))) return 9;\n"
+        "  const b = new Map();\n"
+        "  const cache = { get: (k) => b.get(k), set: (k, v) => { b.set(k, v); if (b.size > 2) b.delete(b.keys().next().value); } };\n"
+        "  const sat = new Map();\n"
+        "  ratelimit.check(cache, 'a', 1, 60, 100, sat); ratelimit.check(cache, 'a', 1, 60, 100, sat);\n"
+        "  ratelimit.check(cache, 'a', 1, 60, 200, sat); ratelimit.check(cache, 'a', 1, 60, 200, sat);\n"
+        "  for (const k of ['b', 'c', 'd']) ratelimit.check(cache, k, 1, 60, 200, sat);\n"
+        "  if (ratelimit.check(cache, 'a', 1, 60, 201, sat).allowed) return 10;\n"
+        "  inbox.init();\n"
+        "  if (inbox.checkAndMark(12345, 'w') !== false) return 11;\n"
+        "  if (inbox.checkAndMark(12345, 'w') !== true) return 12;\n"
+        "  const h = sort.headerAttrs('name', { column: 'name', direction: 'x\" onmouseover=\"y' }, { url: '/t' });\n"
+        "  if (h.indexOf('onmouseover') >= 0) return 15;\n"
+        "  auditLog.init({ fingerprintSalt: 'test-salt-123' });\n"
+        "  const fp = (ip) => auditLog.fingerprint({ headers: { 'user-agent': 'curl/8' }, remote_addr: ip });\n"
+        "  if (fp('2001:db8::1') !== fp('2001:db8::2')) return 16;\n"
+        "  if (fp('::ffff:10.1.2.3') !== fp('10.1.2.99')) return 18;\n"
+        "  if (!threw(() => template.renderString('{{ x | constructor }}', { x: 1 }))) return 20;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__audit4 = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__audit4"), 0);
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, conversions_cannot_free_resolved_objects)
 {
     init_js_with_caps();

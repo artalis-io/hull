@@ -19,6 +19,17 @@
 --   app.use_post("*", "/admin/*", rbac.require_role("admin"))
 
 local db = require("hull.db._internal").connection()
+local _request = require("hull.web._request")
+
+-- Every user id goes through _request.user_id, as in session and totp: 42 and
+-- "42" are one user, and a float (42.0 -> "42.0") or a table is refused
+-- instead of stored. On MySQL a raw integer was compared numerically against
+-- the VARCHAR column, so 42 also matched "042" and "42abc".
+local function uid(user_id)
+    local u = _request.user_id(user_id)
+    if not u then error("rbac: user_id is required (a non-empty string or an integer)", 3) end
+    return u
+end
 
 local rbac = {}
 
@@ -92,6 +103,7 @@ end
 -- @tparam string user_id
 -- @tparam string role
 function rbac.assign(user_id, role)
+    user_id = uid(user_id)
     db.insert_if_absent("_hull_user_roles",
         { "user_id", "role" },
         { "user_id", "role" }, { user_id, role })
@@ -102,6 +114,7 @@ end
 -- @tparam string user_id
 -- @tparam string role
 function rbac.revoke(user_id, role)
+    user_id = uid(user_id)
     db.exec(
         "DELETE FROM _hull_user_roles WHERE user_id = ? AND role = ?",
         { user_id, role }
@@ -134,6 +147,7 @@ end
 -- @tparam string user_id
 -- @treturn {string,...}  Array of role names (possibly empty).
 function rbac.roles(user_id)
+    user_id = uid(user_id)
     local rows = db.query(
         "SELECT role FROM _hull_user_roles WHERE user_id = ? ORDER BY role",
         { user_id }
@@ -150,6 +164,7 @@ end
 -- @tparam string user_id
 -- @treturn {string,...}
 function rbac.permissions(user_id)
+    user_id = uid(user_id)
     local rows = db.query(
         [[SELECT DISTINCT rp.permission FROM _hull_user_roles ur
           JOIN _hull_role_permissions rp ON ur.role = rp.role
@@ -169,6 +184,7 @@ end
 -- @tparam string role
 -- @treturn boolean
 function rbac.has_role(user_id, role)
+    user_id = uid(user_id)
     local rows = db.query(
         "SELECT 1 FROM _hull_user_roles WHERE user_id = ? AND role = ? LIMIT 1",
         { user_id, role }
@@ -182,6 +198,7 @@ end
 -- @tparam string permission
 -- @treturn boolean
 function rbac.has_permission(user_id, permission)
+    user_id = uid(user_id)
     local rows = db.query(
         [[SELECT 1 FROM _hull_user_roles ur
           JOIN _hull_role_permissions rp ON ur.role = rp.role
@@ -197,6 +214,7 @@ end
 -- @tparam {string,...} roles_list
 -- @treturn boolean
 function rbac.has_any_role(user_id, roles_list)
+    user_id = uid(user_id)
     for _, role in ipairs(roles_list) do
         if rbac.has_role(user_id, role) then
             return true
@@ -211,6 +229,7 @@ end
 -- @tparam {string,...} perms_list
 -- @treturn boolean
 function rbac.has_any_permission(user_id, perms_list)
+    user_id = uid(user_id)
     for _, perm in ipairs(perms_list) do
         if rbac.has_permission(user_id, perm) then
             return true

@@ -32,15 +32,17 @@ const config = {};
 // can never widen what config exposes beyond manifest.env.
 const _dotenv = {};
 
-const TRUTHY = { "1": true, "true": true, "yes": true, "on": true };
-const FALSY = { "0": true, "false": true, "no": true, "off": true, "": true };
+// Sets, not plain objects: TRUTHY["constructor"] was Object's constructor,
+// so a boolean setting with the value "constructor" read as true.
+const TRUTHY = new Set(["1", "true", "yes", "on"]);
+const FALSY = new Set(["0", "false", "no", "off", ""]);
 
 function coerce(name, raw, ty) {
     if (ty === undefined || ty === "string") return raw;
     if (ty === "boolean") {
         const k = raw.toLowerCase();
-        if (TRUTHY[k]) return true;
-        if (FALSY[k]) return false;
+        if (TRUTHY.has(k)) return true;
+        if (FALSY.has(k)) return false;
         throw new Error("config: " + name + " is not a boolean: '" + raw + "'");
     }
     if (ty === "number") {

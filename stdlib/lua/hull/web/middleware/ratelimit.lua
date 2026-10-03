@@ -52,22 +52,38 @@ function ratelimit.check(buckets, key, limit, window, now, saturated)
         -- Live window: bump in place. buckets.get already refreshed this
         -- bucket's LRU rank, so an active key won't be the eviction victim.
         bucket.count = bucket.count + 1
-        if saturated and bucket.count > limit and not saturated.map[key] then
-            -- Kept apart from the cache, so eviction cannot reset it. Each
-            -- entry costs a client `limit` requests within one window, and
-            -- entries whose window has passed are dropped as it grows.
+        if saturated and bucket.count > limit and saturated.map[key] ~= bucket then
+            -- Kept apart from the cache, so eviction cannot reset it. Recorded
+            -- whenever the map holds a DIFFERENT bucket for the key: testing
+            -- only for presence kept the first window's (expired) entry, so
+            -- from the second window on the restore above found nothing live.
+            if not saturated.map[key] then saturated.n = saturated.n + 1 end
             saturated.map[key] = bucket
-            saturated.n = saturated.n + 1
             if saturated.n > MAX_BUCKETS then
-                local live = 0
+                -- Drop expired entries; if every entry is live (an attacker
+                -- spending `limit + 1` requests per key), drop the ones
+                -- closest to expiry down to 90% of the cap, so the map has a
+                -- hard bound and each new key does not pay a full sweep.
+                local live = {}
                 for k, b in pairs(saturated.map) do
                     if (now - b.window_start) >= window then
                         saturated.map[k] = nil
                     else
-                        live = live + 1
+                        live[#live + 1] = k
                     end
                 end
-                saturated.n = live
+                if #live > MAX_BUCKETS then
+                    local m = saturated.map
+                    table.sort(live, function(a, b)
+                        return m[a].window_start < m[b].window_start
+                    end)
+                    for i = 1, #live - math.floor(MAX_BUCKETS * 0.9) do
+                        m[live[i]] = nil
+                    end
+                    saturated.n = math.floor(MAX_BUCKETS * 0.9)
+                else
+                    saturated.n = #live
+                end
             end
         end
     end

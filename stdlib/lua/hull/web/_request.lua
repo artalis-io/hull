@@ -33,7 +33,11 @@ function M.client_ip(req, trust_proxy)
     local ip
     local xff = req.headers["x-forwarded-for"]
     if trust_proxy and type(xff) == "string" and xff ~= "" then
-        local last = xff:match("([^,]+)$")
+        -- Anchored: the unanchored "([^,]+)$" retried from every offset, which
+        -- is quadratic in a long run with no comma (the header is the
+        -- client's; 0.7 s of event loop for 8 KB). "^.*," backs off from the
+        -- end once.
+        local last = xff:match("^.*,(.*)$") or xff
         if last then
             local trimmed = _text.trim(last)
             if trimmed ~= "" then ip = trimmed end
@@ -87,6 +91,25 @@ function M.limit_key(ip)
     end
     for i = 1, 4 do groups[i] = string.format("%x", tonumber(groups[i], 16)) end
     return groups[1] .. ":" .. groups[2] .. ":" .. groups[3] .. ":" .. groups[4] .. "::/64"
+end
+
+
+--- A user id as the stdlib stores and compares it (the user_id columns are
+-- text): a non-empty string as is, an integer as its decimal string. Apps
+-- key users by INTEGER PRIMARY KEY as often as by text, and every stdlib
+-- entry point that takes a user id goes through this, so 42 and "42" are
+-- the same user everywhere - session, audit-log, totp, rbac. Anything else
+-- (nil, "", a float, a table) is no id: nil.
+--
+-- @param user_id
+-- @treturn string|nil
+function M.user_id(user_id)
+    if type(user_id) == "string" then
+        if user_id == "" then return nil end
+        return user_id
+    end
+    if math.type(user_id) == "integer" then return tostring(user_id) end
+    return nil
 end
 
 return M

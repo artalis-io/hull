@@ -32,20 +32,6 @@ local json   = require("hull.json")
 local log    = require("hull.log")
 local _request = require("hull.web._request")
 
--- A user id as stored. Apps key users by INTEGER PRIMARY KEY as often as by
--- text, and the column is text, so an integer id is its decimal string. These
--- functions used to accept strings only, and an integer id made them return
--- nothing, silently: session.destroy_all(42) left every session alive, and no
--- login was recorded. Anything else (nil, "", a float, a table) is no id.
-local function uid_string(user_id)
-    if type(user_id) == "string" then
-        if user_id == "" then return nil end
-        return user_id
-    end
-    if math.type(user_id) == "integer" then return tostring(user_id) end
-    return nil
-end
-
 local audit_log = {}
 
 local _state = {
@@ -220,12 +206,33 @@ local function ip_prefix(ip)
     if a then return a .. "." .. b .. "." .. c .. ".0/24" end
     -- IPv6 - first 4 groups as /64.
     if ip:find(":", 1, true) then
-        local parts = {}
-        for part in ip:gmatch("[^:]+") do
-            parts[#parts + 1] = part
-            if #parts == 4 then break end
+        ip = ip:gsub("%%.*$", "")                       -- zone id
+        -- An IPv4-mapped address is its IPv4 address: /24, like the above.
+        local m1, m2, m3 = ip:lower():match("^::ffff:(%d+)%.(%d+)%.(%d+)%.%d+$")
+        if m1 then return m1 .. "." .. m2 .. "." .. m3 .. ".0/24" end
+        local function groups_of(s)
+            local g = {}
+            for part in s:gmatch("[^:]+") do g[#g + 1] = part end
+            return g
         end
-        return table.concat(parts, ":") .. "::/64"
+        -- "::" inside the first four groups stands for zero groups: expand
+        -- it, or 2001:db8::1 and 2001:db8::2 had different "/64"s (the
+        -- tail's groups were taken as the prefix's). Any other address
+        -- yields exactly the prefix it did before, so stored fingerprints
+        -- stay valid.
+        local head, tail = ip:match("^(.-)::(.*)$")
+        local parts
+        if head and #groups_of(head) < 4 then
+            local h, t = groups_of(head), groups_of(tail)
+            parts = h
+            for _ = 1, math.max(0, 8 - #h - #t) do parts[#parts + 1] = "0" end
+            for _, x in ipairs(t) do parts[#parts + 1] = x end
+        else
+            parts = groups_of(ip)
+        end
+        local first4 = {}
+        for i = 1, math.min(4, #parts) do first4[i] = parts[i] end
+        return table.concat(first4, ":") .. "::/64"
     end
     return ip
 end
@@ -269,7 +276,7 @@ end
 --- Record an event. user_id and kind are required; everything
 -- else is derived from req or supplied via opts.
 function audit_log.record(user_id, kind, req, opts)
-    user_id = uid_string(user_id)
+    user_id = _request.user_id(user_id)
     if not user_id or type(kind) ~= "string" or kind == "" then return end
     opts = opts or {}
     local ip = opts.ip ~= nil and opts.ip or extract_ip(req)
@@ -313,7 +320,7 @@ end
 --- List recent events for a user, newest first.
 -- opts.limit (default 50), opts.kinds (filter - array of kinds).
 function audit_log.list(user_id, opts)
-    user_id = uid_string(user_id)
+    user_id = _request.user_id(user_id)
     if not user_id then return {} end
     opts = opts or {}
     local limit = opts.limit or 50
@@ -353,7 +360,7 @@ end
 -- Each row: { fingerprint, first_seen, last_seen, count, ip, user_agent }.
 -- opts.window_days (default 90) - older events excluded.
 function audit_log.list_devices(user_id, opts)
-    user_id = uid_string(user_id)
+    user_id = _request.user_id(user_id)
     if not user_id then return {} end
     opts = opts or {}
     local cutoff = time.now() - ((opts.window_days or 90) * 86400)
@@ -376,7 +383,7 @@ end
 -- recently? Returns true if the fingerprint has NO events in the
 -- last `opts.window_days` (default 30) for `user_id`.
 function audit_log.is_new_device(user_id, req, opts)
-    user_id = uid_string(user_id)
+    user_id = _request.user_id(user_id)
     if not user_id then return false end
     opts = opts or {}
     local cutoff = time.now() - ((opts.window_days or 30) * 86400)

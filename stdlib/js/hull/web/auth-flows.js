@@ -155,9 +155,19 @@ import { encoding } from "hull:encoding";
 // included - stops working, instead of living out its resetTtl. Read through
 // userFindByEmail, the lookup login itself relies on for password_hash, so
 // issue and confirm see the same field.
+// The account's email is part of it too: a link sent to the old mailbox
+// stayed good after an email change (the password hash was unchanged), so
+// whoever still reads that mailbox could reset the password.
+function emailBinding(user) {
+    const e = user && user.email;
+    return encoding.hex.encode(crypto.sha256(
+        typeof e === "string" ? e.toLowerCase() : "")).slice(0, 16);
+}
+
 function passwordBinding(user) {
     const h = user && user.password_hash;
-    return encoding.hex.encode(crypto.sha256(typeof h === "string" ? h : "")).slice(0, 16);
+    return encoding.hex.encode(crypto.sha256(
+        (typeof h === "string" ? h : "") + "\0" + emailBinding(user))).slice(0, 16);
 }
 
 function resetTokenExtra(user) { return { pwb: passwordBinding(user) }; }
@@ -564,7 +574,8 @@ function secureHtml(res) {
 // on app-supplied user objects. Lua mirrors this with `user_uid`.
 function userId(user) {
     if (!user || typeof user !== "object") return null;
-    return user.id || user.user_id || null;
+    // `??`, not `||`: a user whose id is 0 is a user (Lua treats 0 as true).
+    return user.id ?? user.user_id ?? null;
 }
 
 // The request's host, strictly: X-Forwarded-Host only behind a trusted
@@ -829,7 +840,7 @@ function handleMagicLink(req, res) {
     const origin = originFor(req);
     afterResponse(() => {
         const token = issueToken(userId(user), ACTIONS.magic_link,
-            _state.magicLinkTtl);
+            _state.magicLinkTtl, { eb: emailBinding(user) });
         if (origin) {
             const link = origin + _state.prefix + "/magic-link/consume?token=" + token;
             sendEmail(body.email, "magic_link", { user, link, token });
@@ -845,7 +856,10 @@ function handleMagicLinkConsume(req, res) {
         return secureHtml(res).status(400).html("magic link failed: " + (result[1] || "?"));
     }
     const user = _state.userGet(result[0].sub);
-    if (!user) return secureHtml(res).status(400).html("magic link failed");
+    // A magic link is bound to the address it was sent to: after an email
+    // change, one still sitting in the old mailbox no longer signs in.
+    if (!user || result[0].eb !== emailBinding(user))
+        return secureHtml(res).status(400).html("magic link failed");
     // Magic-link clicks count as proof of email ownership. On an account
     // that was not yet verified, they also void the password: anyone could
     // have registered this address and set it, and verifying here would
@@ -1449,7 +1463,8 @@ function sendMagicLink(email, magicUrlPrefix) {
         if (!user) return;
     }
     const uid = userId(user);
-    const token = issueToken(uid, ACTIONS.magic_link, _state.magicLinkTtl);
+    const token = issueToken(uid, ACTIONS.magic_link, _state.magicLinkTtl,
+        { eb: emailBinding(user) });
     const link = (magicUrlPrefix || "") + _state.prefix
         + "/magic-link/consume?token=" + token;
     sendEmail(email, "magic_link", { user, link, token });
