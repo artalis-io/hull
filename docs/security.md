@@ -1522,6 +1522,29 @@ hull verify [--no-verify-platform] [--platform-key <file|url>] \
   the gethull layer (for dev hulls and forks). Builds with the
   all-zeros placeholder pubkey skip the gethull layer with a
   one-line warning.
+- Checks the app signature before it reads any platform block, and
+  refuses a `gethull` block the signature does not cover (the signed
+  payload holds `platform: null` unless `platforms`, `public_key` and
+  `signature` are all present).
+
+**Built binary vs. an app directory.** The guarantee above is for a
+built binary: the files it verifies are the embedded bytes it then
+runs, so nothing on disk can change them in between. `--verify-sig`
+also works on an unbuilt app (`hull app.lua --verify-sig dev.pub`),
+and there it is weaker:
+
+- **Check, then use.** Each signed file is hashed, then read again
+  from disk when it is loaded. Anyone who can write to the app
+  directory during that window can swap a file after it passed.
+- **Only migrations are checked for extras.** An unsigned
+  `migrations/*.sql` is refused, because the runner applies every one.
+  Extra modules and templates are not: they load only when signed code
+  names them, so an unsigned file is reached only through a name the
+  signed code computes at run time.
+
+So an unbuilt app's signature proves what was on disk at startup to
+someone who also controls that directory's writers. Ship the built
+binary where the files' integrity matters.
 
 ---
 

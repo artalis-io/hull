@@ -332,6 +332,7 @@ typedef struct HlMappedBuffer {
     void         *map_base;  /**< Page-aligned mmap base (the `munmap` address). */
     size_t        map_len;   /**< Page-rounded mmap length (the `munmap` length). */
     uint64_t      foffset;   /**< 64-bit logical file offset of the window's first byte. */
+    int           guard_slot; /**< SIGBUS-guard registration (fs.c), or -1. */
 } HlMappedBuffer;
 
 /**

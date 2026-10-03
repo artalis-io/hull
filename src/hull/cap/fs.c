@@ -22,6 +22,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <time.h>
 
 /* ── Path validation ────────────────────────────────────────────────── */
@@ -783,6 +786,97 @@ void hl_cap_fs_list_free(HlFsDirEntry *entries, size_t count, HlAllocator *alloc
     hl_alloc_free(alloc, entries, count * sizeof(HlFsDirEntry));
 }
 
+/* ── Truncation guard ───────────────────────────────────────────────
+ *
+ * A mapping outlives the file's size: when the file shrinks (an fs.write
+ * through a symlink under a SUBTREE grant truncates the same inode, and so
+ * can any other process), a read of a page past the new end raises SIGBUS and
+ * the whole server died - a WASM span guest reading the mapping included.
+ * Every mapping this file makes is registered here, and a SIGBUS whose address
+ * falls inside one has the missing page replaced by an anonymous zero page,
+ * so the read completes (with zeros) and the process lives. A SIGBUS anywhere
+ * else goes to the previous disposition, so a real fault still crashes.
+ *
+ * The registry is a fixed table of atomics: the handler only loads, and maps
+ * one page. A mapping that finds the table full is still made, unguarded. */
+
+#define MMAP_GUARD_SLOTS 256
+static _Atomic uintptr_t g_guard_base[MMAP_GUARD_SLOTS];
+static _Atomic size_t    g_guard_len[MMAP_GUARD_SLOTS];
+static _Atomic int       g_guard_hit[MMAP_GUARD_SLOTS];
+static _Atomic int       g_guard_state;   /* 0 none, 1 installing, 2 on, -1 failed */
+static struct sigaction  g_prev_sigbus;
+static uintptr_t         g_guard_page;
+
+static void mmap_guard_sigbus(int sig, siginfo_t *si, void *uc)
+{
+    uintptr_t a = (uintptr_t)si->si_addr;
+    for (int i = 0; i < MMAP_GUARD_SLOTS; i++) {
+        uintptr_t b = atomic_load(&g_guard_base[i]);
+        if (!b) continue;
+        size_t l = atomic_load(&g_guard_len[i]);
+        if (a >= b && a - b < l) {
+            void *pg = (void *)(a & ~(g_guard_page - 1));
+            if (mmap(pg, (size_t)g_guard_page, PROT_READ,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != MAP_FAILED) {
+                atomic_store(&g_guard_hit[i], 1);
+                return;                 /* the read retries and sees zeros */
+            }
+            break;
+        }
+    }
+    if ((g_prev_sigbus.sa_flags & SA_SIGINFO) && g_prev_sigbus.sa_sigaction) {
+        g_prev_sigbus.sa_sigaction(sig, si, uc);
+        return;
+    }
+    if (!(g_prev_sigbus.sa_flags & SA_SIGINFO) &&
+        g_prev_sigbus.sa_handler != SIG_DFL && g_prev_sigbus.sa_handler != SIG_IGN) {
+        g_prev_sigbus.sa_handler(sig);
+        return;
+    }
+    /* Default action: re-raised on return, when the faulting read retries. */
+    signal(SIGBUS, SIG_DFL);
+    raise(SIGBUS);
+}
+
+static void mmap_guard_install(void)
+{
+    int expect = 0;
+    if (!atomic_compare_exchange_strong(&g_guard_state, &expect, 1))
+        return;
+    long ps = sysconf(_SC_PAGESIZE);
+    g_guard_page = ps > 0 ? (uintptr_t)ps : 4096;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = mmap_guard_sigbus;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    atomic_store(&g_guard_state,
+                 sigaction(SIGBUS, &sa, &g_prev_sigbus) == 0 ? 2 : -1);
+}
+
+static int mmap_guard_register(void *base, size_t len)
+{
+    mmap_guard_install();
+    for (int i = 0; i < MMAP_GUARD_SLOTS; i++) {
+        uintptr_t zero = 0;
+        if (atomic_load(&g_guard_base[i]) != 0) continue;
+        atomic_store(&g_guard_len[i], len);      /* before base: the handler */
+        atomic_store(&g_guard_hit[i], 0);        /* reads base first */
+        if (atomic_compare_exchange_strong(&g_guard_base[i], &zero, (uintptr_t)base))
+            return i;
+    }
+    return -1;
+}
+
+/* Before the munmap. Returns 1 when a fault was absorbed in this mapping. */
+static int mmap_guard_unregister(int slot)
+{
+    if (slot < 0 || slot >= MMAP_GUARD_SLOTS) return 0;
+    atomic_store(&g_guard_base[slot], 0);
+    return atomic_exchange(&g_guard_hit[slot], 0);
+}
+
 /* ── Memory-mapped file ────────────────────────────────────────────── */
 
 HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
@@ -833,6 +927,7 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
     buf->map_base = addr;
     buf->map_len = (size_t)st.st_size;
     buf->foffset = 0;
+    buf->guard_slot = mmap_guard_register(addr, (size_t)st.st_size);
 
 audit:
     {
@@ -1016,6 +1111,7 @@ HlMappedBuffer *hl_cap_fs_mmap_window(const HlFsConfig *cfg, const char *path,
     atomic_init(&buf->refs, 1);          /* the owner's reference */
     atomic_init(&buf->borrow_count, 0);
     atomic_init(&buf->pending_free, 0);
+    buf->guard_slot = mmap_guard_register(base, (size_t)map_len);
 
 audit:
     {
@@ -1035,6 +1131,10 @@ static void mapped_buffer_destroy(HlMappedBuffer *buf)
     /* Unmap the PAGE-ALIGNED mapping (map_base/map_len), never the caller window
      * (addr/len) -- for a windowed buffer addr is offset into map_base. */
     if (!buf->closed && buf->map_base) {
+        /* stderr, not the logger: cap_fs.o is linked without log.c in tests. */
+        if (mmap_guard_unregister(buf->guard_slot))
+            fputs("hull: [fs] a mapped file shrank while mapped; reads past its "
+                  "new end returned zeros\n", stderr);
         munmap(buf->map_base, buf->map_len);
         buf->closed = 1;
     }
