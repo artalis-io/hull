@@ -42,6 +42,52 @@ UTEST(format, basic_message)
     ASSERT_TRUE(strstr(buf, "\r\n\r\nHello, World!") != NULL);
 }
 
+/* Every line break in the body is written as CRLF before stuffing: a bare CR
+ * or LF before a '.' used to go out unstuffed, and a server taking it as a
+ * line end ended DATA there (SMTP smuggling). */
+UTEST(format, bare_cr_and_lf_are_normalised_then_stuffed)
+{
+    HlSmtpMessage msg = {
+        .from = "a@b.com", .to = "c@d.com", .subject = "S",
+        .body = "a\r.\r\nMAIL FROM:<x@y>\nb\n.c\r\n.",
+        .content_type = "text/plain",
+    };
+    char buf[4096];
+    int n = hl_smtp_format_message(&msg, buf, (int)sizeof(buf));
+    ASSERT_TRUE(n > 0);
+    ASSERT_TRUE(strstr(buf, "\r\n\r\na\r\n..\r\nMAIL FROM:<x@y>\r\nb\r\n..c\r\n..\r\n") != NULL);
+    /* no bare CR or LF anywhere */
+    for (int i = 0; i < n; i++) {
+        if (buf[i] == '\r') ASSERT_EQ(buf[i + 1], '\n');
+        if (buf[i] == '\n') ASSERT_EQ(buf[i - 1], '\r');
+    }
+}
+
+/* The validator every send path runs, and hl_smtp_execute itself (the async
+ * worker's entry), which used to run without it. */
+UTEST(validate, header_fields_refuse_cr_lf_on_every_path)
+{
+    HlSmtpMessage ok = {
+        .host = "smtp.example.com", .port = 587,
+        .from = "a@b.com", .to = "c@d.com", .subject = "S", .body = "b",
+    };
+    EXPECT_EQ(hl_smtp_validate_message(&ok), 0);
+
+    HlSmtpMessage bad = ok;
+    bad.subject = "x\r\n.\r\nMAIL FROM:<ceo@corp>";
+    EXPECT_EQ(hl_smtp_validate_message(&bad), -1);
+    bad = ok; bad.to = "v@x>\r\nRCPT TO:<w@y";
+    EXPECT_EQ(hl_smtp_validate_message(&bad), -1);
+    bad = ok; bad.from = "a@b\nX";
+    EXPECT_EQ(hl_smtp_validate_message(&bad), -1);
+
+    /* Refused before any connection is attempted. */
+    HlSmtpResult r;
+    bad = ok; bad.subject = "x\r\nDATA";
+    EXPECT_EQ(hl_smtp_execute(&bad, NULL, 1000, NULL, NULL, &r), -1);
+    EXPECT_TRUE(r.token != NULL && strcmp(r.token, "validation_failed") == 0);
+}
+
 UTEST(format, html_content_type)
 {
     HlSmtpMessage msg = {
@@ -113,10 +159,10 @@ UTEST(format, dot_stuffing)
     ASSERT_TRUE(body_start != NULL);
     body_start += 4;  /* skip \r\n\r\n */
 
-    /* .line2 should become ..line2 */
-    ASSERT_TRUE(strstr(body_start, "\n..line2\n") != NULL);
+    /* .line2 should become ..line2, and line breaks go out as CRLF */
+    ASSERT_TRUE(strstr(body_start, "\r\n..line2\r\n") != NULL);
     /* ..line3 should become ...line3 */
-    ASSERT_TRUE(strstr(body_start, "\n...line3") != NULL);
+    ASSERT_TRUE(strstr(body_start, "\r\n...line3") != NULL);
 }
 
 UTEST(format, default_content_type)
