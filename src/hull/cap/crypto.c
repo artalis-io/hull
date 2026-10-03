@@ -11,9 +11,9 @@
 #include "hull/cap/crypto.h"
 #include "hull/tls_feature.h"
 #include "tweetnacl.h"
-#include "log.h"
 /* SHA-1 is hand-rolled below (hl_cap_crypto_sha1) so it works in mbedtls-free
  * builds, same as the hand-rolled SHA-256 in this file. No mbedtls include. */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
@@ -1239,8 +1239,10 @@ void randombytes(unsigned char *buf, unsigned long long len)
 {
     if (len == 0) return;
     if (len > SIZE_MAX || hl_cap_crypto_random(buf, (size_t)len) != 0) {
-        log_fatal("[crypto] the system random source failed; refusing to "
-                  "continue rather than generate predictable keys");
+        /* stderr, not the logger: cap_crypto.o is linked into small
+         * binaries (tests, tools) that do not carry log.c. */
+        fputs("hull: [crypto] the system random source failed; refusing to "
+              "continue rather than generate predictable keys\n", stderr);
         abort();
     }
 }
