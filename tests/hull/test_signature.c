@@ -410,6 +410,101 @@ UTEST(hl_sig, verify_files_fs_missing)
     hl_sig_free(&sig);
 }
 
+/* Every *.sql in migrations/ runs at startup, so in filesystem mode one that
+ * is not in the signature is refused - it used to run although --verify-sig
+ * passed. */
+UTEST(hl_sig, verify_files_fs_rejects_unsigned_migration)
+{
+    char subdir[512], mdir[600], p[700];
+    snprintf(subdir, sizeof(subdir), "%s/mig_test", test_dir);
+    mkdir(subdir, 0755);
+    snprintf(mdir, sizeof(mdir), "%s/migrations", subdir);
+    mkdir(mdir, 0755);
+
+    const char *sql = "CREATE TABLE t (x INTEGER);\n";
+    snprintf(p, sizeof(p), "%s/001_init.sql", mdir);
+    FILE *f = fopen(p, "w");
+    ASSERT_TRUE(f != NULL);
+    fputs(sql, f);
+    fclose(f);
+    uint8_t hash[32];
+    char hex[65];
+    hl_cap_crypto_sha256(sql, strlen(sql), hash);
+    hex_encode(hash, 32, hex);
+
+    char files_json[256];
+    snprintf(files_json, sizeof(files_json), "{\"migrations/001_init.sql\":\"%s\"}", hex);
+    create_test_package_sig(subdir, files_json, "null", "deadbeef00", "deadbeef00");
+
+    char sig_path[700];
+    snprintf(sig_path, sizeof(sig_path), "%s/package.sig", subdir);
+    HlSignature sig;
+    ASSERT_EQ(hl_sig_read(sig_path, &sig), 0);
+    EXPECT_EQ(hl_sig_verify_files_fs(&sig, subdir), 0);
+
+    snprintf(p, sizeof(p), "%s/999_extra.sql", mdir);
+    f = fopen(p, "w");
+    ASSERT_TRUE(f != NULL);
+    fputs("DROP TABLE t;\n", f);
+    fclose(f);
+    EXPECT_EQ(hl_sig_verify_files_fs(&sig, subdir), -1);
+    hl_sig_free(&sig);
+}
+
+/* The app signature covers `platform` only when platforms / public_key /
+ * signature are all there; otherwise the signed payload says null. A gethull
+ * block in that shape is not covered by the signature, so it is refused. */
+UTEST(hl_sig, verify_startup_rejects_unsigned_gethull)
+{
+    char subdir[512];
+    snprintf(subdir, sizeof(subdir), "%s/gethull_test", test_dir);
+    mkdir(subdir, 0755);
+
+    char app_path[600];
+    snprintf(app_path, sizeof(app_path), "%s/app.lua", subdir);
+    FILE *f = fopen(app_path, "w");
+    ASSERT_TRUE(f != NULL);
+    fprintf(f, "app.get(\"/\", function(req, res) res:json({ok=true}) end)\n");
+    fclose(f);
+
+    char payload[1024];
+    snprintf(payload, sizeof(payload),
+             "{\"binary_hash\":\"b0\","
+             "\"build\":{\"cc\":\"cc\",\"cc_version\":\"1\",\"flags\":\"-O2\"},"
+             "\"files\":{\"app.lua\":\"%s\"},"
+             "\"manifest\":null,"
+             "\"platform\":null,"
+             "\"trampoline_hash\":\"t0\"}", app_hash_hex);
+    char app_sig_hex[129];
+    sign_payload(payload, test_sk, app_sig_hex);
+
+    char sig_path[600];
+    snprintf(sig_path, sizeof(sig_path), "%s/package.sig", subdir);
+    f = fopen(sig_path, "w");
+    ASSERT_TRUE(f != NULL);
+    fprintf(f,
+        "{\"binary_hash\":\"b0\","
+        "\"build\":{\"cc\":\"cc\",\"cc_version\":\"1\",\"flags\":\"-O2\"},"
+        "\"files\":{\"app.lua\":\"%s\"},"
+        "\"manifest\":null,"
+        "\"platform\":{\"gethull\":{\"manifest\":\"m\",\"signature\":\"s\"}},"
+        "\"public_key\":\"%s\",\"signature\":\"%s\",\"trampoline_hash\":\"t0\"}\n",
+        app_hash_hex, test_pk_hex, app_sig_hex);
+    fclose(f);
+
+    char pk_path[600];
+    snprintf(pk_path, sizeof(pk_path), "%s/test.pub", subdir);
+    f = fopen(pk_path, "w");
+    ASSERT_TRUE(f != NULL);
+    fprintf(f, "%s\n", test_pk_hex);
+    fclose(f);
+
+    extern const HlEntry hl_app_entries[];
+    HlVfs app_vfs;
+    hl_vfs_init(&app_vfs, hl_app_entries, subdir);
+    EXPECT_EQ(hl_verify_startup(pk_path, app_path, &app_vfs, 1), -1);
+}
+
 /* ── Legacy hull.sig backwards compatibility ──────────────────────── */
 
 UTEST(hl_sig, legacy_read_and_verify)

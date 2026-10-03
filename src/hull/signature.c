@@ -18,6 +18,7 @@
 #include <sh_json.h>
 #include <sh_arena.h>
 
+#include <dirent.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -536,6 +537,40 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
         }
     }
 
+    /* Every migration must be a signed one. The runner applies EVERY *.sql in
+     * migrations/ (top level, as hull build signs them), so a file dropped
+     * there beside a signed app ran at startup although --verify-sig passed.
+     * (Modules and templates are loaded by name, from signed code.) This mode
+     * still reads each file again to load it after hashing it here; a built
+     * binary has no such window - it verifies the embedded bytes it runs. */
+    char mdir[PATH_MAX];
+    if ((size_t)snprintf(mdir, sizeof(mdir), "%s/migrations", app_dir) >= sizeof(mdir))
+        return -1;
+    DIR *d = opendir(mdir);
+    if (d) {
+        struct dirent *de;
+        int bad = 0;
+        while (!bad && (de = readdir(d)) != NULL) {
+            size_t nl = strlen(de->d_name);
+            if (nl < 5 || strcmp(de->d_name + nl - 4, ".sql") != 0)
+                continue;
+            char rel[PATH_MAX];
+            if ((size_t)snprintf(rel, sizeof(rel), "migrations/%s", de->d_name) >= sizeof(rel)) {
+                bad = 1;
+                break;
+            }
+            int signed_one = 0;
+            for (size_t i = 0; i < sig->entry_count; i++)
+                if (strcmp(sig->entries[i].name, rel) == 0) { signed_one = 1; break; }
+            if (!signed_one) {
+                log_error("[sig] migration not in signature: %s", rel);
+                bad = 1;
+            }
+        }
+        closedir(d);
+        if (bad) return -1;
+    }
+
     return 0;
 }
 
@@ -638,6 +673,26 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
             hl_sig_free(&sig);
             return -1;
         }
+    }
+
+    /* 4b. The app signature, before anything below reads the platform blocks.
+     * It covers `platform` only when all of platforms / public_key /
+     * signature are present; otherwise the signed payload says null. A
+     * package.sig without them but WITH a gethull block (or its composed
+     * attestation) carried that block unsigned - anyone could paste in a
+     * genuine release's gethull manifest - so that shape is refused. */
+    if (sig.platform.gethull_value &&
+        !(sig.platform.platforms_value && sig.platform.signature_hex &&
+          sig.platform.public_key_hex)) {
+        log_error("[sig] platform.gethull is outside the app signature "
+                  "(platform has no platforms/public_key/signature)");
+        hl_sig_free(&sig);
+        return -1;
+    }
+    if (hl_sig_verify(&sig, pubkey) != 0) {
+        log_error("[sig] Ed25519 signature verification failed");
+        hl_sig_free(&sig);
+        return -1;
     }
 
     /* 5. v0.1.2 per-app platform layer (self-consistency only).
@@ -800,12 +855,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
         }
     }
 
-    /* 6. Verify app Ed25519 signature */
-    if (hl_sig_verify(&sig, pubkey) != 0) {
-        log_error("[sig] Ed25519 signature verification failed");
-        hl_sig_free(&sig);
-        return -1;
-    }
+    /* 6. (The app signature was verified at 4b.) */
 
     /* 7. Verify file hashes: embedded or filesystem */
     int rc;
