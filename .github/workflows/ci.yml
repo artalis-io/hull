@@ -1092,9 +1092,9 @@ jobs:
           if grep -qE '\bSKIP\b' stream_meta.log; then
             echo "::error::stream-meta e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
           fi
-          grep -qE "stream-meta: 14 passed, 0 failed" stream_meta.log \
-            || { echo "::error::stream-meta e2e did not run its 14 checks to pass"; exit 1; }
-          echo "stream metadata helpers: first/middle/last + chunk-index + non-stream default, both runtimes, interp + AOT."
+          grep -qE "stream-meta: 22 passed, 0 failed" stream_meta.log \
+            || { echo "::error::stream-meta e2e did not run its 22 checks to pass"; exit 1; }
+          echo "stream metadata helpers: first/middle/last + chunk-index + non-stream default + fs-granted file input, both runtimes, interp + AOT."
 
   # mapped_spans reference example (3b slice 2). The spanreader plugin uses only
   # the public hull_span.h SDK and reads a NON-page-aligned mapped-span window;
