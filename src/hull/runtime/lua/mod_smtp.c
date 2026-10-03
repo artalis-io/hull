@@ -99,22 +99,23 @@ static int lua_smtp_send(lua_State *L)
 
     luaL_checktype(L, 1, LUA_TTABLE);
 
-    /* Extract required fields */
+    /* Extract required fields. Every value stays on the stack until the
+     * message has been copied: lua_tostring converts a number in place and
+     * an __index may return a fresh string, and once popped nothing
+     * referenced it - a later field's conversion could collect it, and the
+     * freed bytes were sent to the SMTP server. */
+    luaL_checkstack(L, 24, "smtp.send");
     lua_getfield(L, 1, "host");
     const char *host = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "port");
     int port = lua_isinteger(L, -1) ? (int)lua_tointeger(L, -1) : 587;
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "username");
     const char *username = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "password");
     const char *password = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "tls");
     int use_tls = 0;
@@ -122,31 +123,24 @@ static int lua_smtp_send(lua_State *L)
         use_tls = lua_toboolean(L, -1) ? 1 : 0;
     else if (lua_isinteger(L, -1))
         use_tls = (int)lua_tointeger(L, -1);
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "from");
     const char *from = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "to");
     const char *to = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "subject");
     const char *subject = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "body");
     const char *body = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "content_type");
     const char *content_type = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    lua_pop(L, 1);
 
     lua_getfield(L, 1, "reply_to");
     const char *reply_to = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
-    lua_pop(L, 1);
 
     /* CC array (optional) */
     const char **cc = NULL;
@@ -156,7 +150,6 @@ static int lua_smtp_send(lua_State *L)
         int cc_idx = lua_gettop(L);
         lua_get_string_array(L, cc_idx, &cc, &cc_count);
     }
-    lua_pop(L, 1);
 
     /* Validate required fields */
     if (!host)    { lua_newtable(L); lua_pushboolean(L, 0); lua_setfield(L, -2, "ok"); lua_pushstring(L, "host required"); lua_setfield(L, -2, "error"); return 1; }

@@ -9,6 +9,7 @@
  */
 
 #include "hull/cap/crypto.h"
+#include "hull/limits/core.h"   /* HL_PBKDF2_MAX_ITERATIONS */
 #include "hull/tls_feature.h"
 #include "tweetnacl.h"
 /* SHA-1 is hand-rolled below (hl_cap_crypto_sha1) so it works in mbedtls-free
@@ -1176,7 +1177,8 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
      * hl_cap_crypto_hmac_sha256 below, which now dispatches via
      * HlCryptoHmacBackend - so a future backend swap covers PBKDF2
      * transitively without touching this function. */
-    if (!password || !salt || !out || iterations < 100000 || out_len == 0)
+    if (!password || !salt || !out || iterations < 100000 ||
+        iterations > HL_PBKDF2_MAX_ITERATIONS || out_len == 0)
         return -1;
 
     /* Salt size guard - stack buffer is 68 bytes */

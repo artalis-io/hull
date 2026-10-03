@@ -117,6 +117,29 @@ static void lua_push_http_response(lua_State *L, const KlHttpClientResponse *res
     lua_setfield(L, -2, "headers");
 }
 
+/* lua_pcall body for lua_push_http_response: (resp) lightuserdata in. */
+static int lua_push_http_response_k(lua_State *L)
+{
+    const KlHttpClientResponse *resp = lua_touserdata(L, 1);
+    lua_settop(L, 0);
+    lua_push_http_response(L, resp);
+    return 1;
+}
+
+/* Push the response table and free the response, whatever happens: building
+ * the table allocates (the body, every header), and a raise there skipped the
+ * free that followed it - a leak of the whole response, up to its 4 MB cap,
+ * outside the VM's memory limit, per failed call. */
+static void lua_push_http_response_owned(lua_State *L, KlHttpClientResponse *resp)
+{
+    luaL_checkstack(L, 3, "http");
+    lua_pushcfunction(L, lua_push_http_response_k);
+    lua_pushlightuserdata(L, resp);
+    int st = lua_pcall(L, 1, 1, 0);
+    kl_http_client_response_free(resp);
+    if (st != LUA_OK) lua_error(L);
+}
+
 /* http.request(method, url, opts?) */
 static int lua_http_request(lua_State *L)
 {
@@ -134,10 +157,13 @@ static int lua_http_request(lua_State *L)
 
     /* Parse optional opts table at position 3 */
     if (lua_istable(L, 3)) {
+        /* Left on the stack: lua_tolstring converts a number in place and an
+         * __index may return a fresh string, and once popped nothing referenced
+         * it - parsing the headers below allocates, so it could be collected
+         * and the freed bytes sent as the request body. */
         lua_getfield(L, 3, "body");
         if (lua_isstring(L, -1))
             body = lua_tolstring(L, -1, &body_len);
-        lua_pop(L, 1);
 
         lua_getfield(L, 3, "headers");
         if (lua_istable(L, -1)) {
@@ -160,8 +186,7 @@ static int lua_http_request(lua_State *L)
         return luaL_error(L, "http request failed: %s",
                           kl_strerror(resp.error));
 
-    lua_push_http_response(L, &resp);
-    kl_http_client_response_free(&resp);
+    lua_push_http_response_owned(L, &resp);
     return 1;
 }
 
@@ -194,8 +219,7 @@ static int lua_http_get(lua_State *L)
     if (rc != 0)
         return luaL_error(L, "http.get failed: %s", kl_strerror(resp.error));
 
-    lua_push_http_response(L, &resp);
-    kl_http_client_response_free(&resp);
+    lua_push_http_response_owned(L, &resp);
     return 1;
 }
 
@@ -234,8 +258,7 @@ static int lua_http_body_method(lua_State *L, const char *method)
         return luaL_error(L, "http.%s failed: %s", method,
                           kl_strerror(resp.error));
 
-    lua_push_http_response(L, &resp);
-    kl_http_client_response_free(&resp);
+    lua_push_http_response_owned(L, &resp);
     return 1;
 }
 
@@ -273,8 +296,7 @@ static int lua_http_delete(lua_State *L)
         return luaL_error(L, "http.delete failed: %s",
                           kl_strerror(resp.error));
 
-    lua_push_http_response(L, &resp);
-    kl_http_client_response_free(&resp);
+    lua_push_http_response_owned(L, &resp);
     return 1;
 }
 
@@ -340,10 +362,13 @@ static int lua_http_fetch(lua_State *L)
 
     /* Parse optional opts table at position 3 */
     if (lua_istable(L, 3)) {
+        /* Left on the stack: lua_tolstring converts a number in place and an
+         * __index may return a fresh string, and once popped nothing referenced
+         * it - parsing the headers below allocates, so it could be collected
+         * and the freed bytes sent as the request body. */
         lua_getfield(L, 3, "body");
         if (lua_isstring(L, -1))
             body = lua_tolstring(L, -1, &body_len);
-        lua_pop(L, 1);
 
         lua_getfield(L, 3, "headers");
         if (lua_istable(L, -1)) {
@@ -354,23 +379,24 @@ static int lua_http_fetch(lua_State *L)
         lua_pop(L, 1);
     }
 
+    /* The continuation first: created after the request was started (and
+     * the connection suspended), a failed allocation left ctx->cont NULL,
+     * and the completion dereferenced it. */
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
+                                                   HlLuaPushResultFn push_result);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
+                                                   lua_push_async_http_response);
+    if (!cont)
+        return luaL_error(L, "http.fetch: out of memory");
+
     /* Start the async HTTP request - checks allowlist, creates KlHttpClient,
      * creates HlAsyncCtx, and suspends the inbound connection */
     HlAsyncCtx *ctx = hl_async_http_start(
         lua->server, lua->active_conn, lua->base.net_ctx, lua->base.alloc,
         lua->base.http_cfg, method, url, headers, num_headers, body, body_len);
-    if (!ctx)
+    if (!ctx) {
+        cont->destroy(cont);
         return luaL_error(L, "http.fetch: failed to start request");
-
-    /* Wire the Lua continuation */
-    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
-                                                   HlLuaPushResultFn push_result);
-    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
-                                                   lua_push_async_http_response);
-    if (!cont) {
-        /* Connection was already suspended - we can't easily undo that.
-         * The cancel callback will clean up when the connection times out. */
-        return luaL_error(L, "http.fetch: out of memory");
     }
     ctx->cont = cont;
 

@@ -148,6 +148,7 @@ static void js_free_span_names(JSContext *ctx, HlWasmSpanReq *reqs,
 {
     for (int i = 0; i < n; i++) {
         if (reqs[i].name) { JS_FreeCString(ctx, reqs[i].name); reqs[i].name = NULL; }
+        if (reqs[i].buf) { hl_cap_fs_mmap_release(reqs[i].buf); reqs[i].buf = NULL; }
         JS_FreeValue(ctx, holders[i]);
         holders[i] = JS_UNDEFINED;
     }
@@ -237,6 +238,11 @@ static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs
             goto fail;
         }
         reqs[count].name = nm;   /* owned */
+        /* Borrowed until js_free_span_names: holding the JS object does not
+         * keep the mapping alive - mb.close() frees an unborrowed buffer -
+         * and app code still runs after this (a later entry's getter, the
+         * input's toString), so the span pointed at freed memory. */
+        hl_cap_fs_mmap_borrow(mb);
         reqs[count].buf = mb;
         holders[count] = bv;     /* held: released by js_free_span_names */
         count++;
@@ -333,13 +339,13 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     int input_is_string = 0;
 
     /* Check for WasmBuffer first */
-    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[1], js_wasm_buf_class_id);
+    HlWasmBuffer *wbuf_in = JS_GetOpaque(argv[1], js_wasm_buf_class_id);
     if (wbuf_in && !wbuf_in->closed) {
         input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
         input_len = hl_wasm_buffer_len(wbuf_in);
     } else {
         /* Check for MappedBuffer */
-        HlMappedBuffer *mmap_buf = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
+        HlMappedBuffer *mmap_buf = JS_GetOpaque(argv[1], js_mmap_class_id);
         if (mmap_buf && !mmap_buf->closed) {
             input = (const uint8_t *)mmap_buf->addr;
             input_len = mmap_buf->len;
@@ -515,12 +521,12 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     size_t input_len = 0;
     int input_is_string = 0;
 
-    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[1], js_wasm_buf_class_id);
+    HlWasmBuffer *wbuf_in = JS_GetOpaque(argv[1], js_wasm_buf_class_id);
     if (wbuf_in && !wbuf_in->closed) {
         input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
         input_len = hl_wasm_buffer_len(wbuf_in);
     } else {
-        HlMappedBuffer *mmap_in = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
+        HlMappedBuffer *mmap_in = JS_GetOpaque(argv[1], js_mmap_class_id);
         if (mmap_in && !mmap_in->closed) {
             input = (const uint8_t *)mmap_in->addr;
             input_len = mmap_in->len;
@@ -745,12 +751,12 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
     const uint8_t *input = NULL;
     int input_is_string = 0;
 
-    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[0], js_wasm_buf_class_id);
+    HlWasmBuffer *wbuf_in = JS_GetOpaque(argv[0], js_wasm_buf_class_id);
     if (wbuf_in && !wbuf_in->closed) {
         input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
         input_len = hl_wasm_buffer_len(wbuf_in);
     } else {
-        HlMappedBuffer *mmap_in = JS_GetOpaque2(ctx, argv[0], js_mmap_class_id);
+        HlMappedBuffer *mmap_in = JS_GetOpaque(argv[0], js_mmap_class_id);
         if (mmap_in && !mmap_in->closed) {
             input = (const uint8_t *)mmap_in->addr;
             input_len = mmap_in->len;
@@ -768,6 +774,15 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
     }
 
     if (js) js_wasm_clamp_opts(&opts, &js->base);
+
+    /* Option and span getters and the input's toString are app code and can
+     * close this instance, which frees it: `pi` must not be read until the
+     * object is known to still hold it (a pointer compare, no dereference). */
+    if (JS_GetOpaque(this_val, js_wasm_inst_class_id) != pi || pi->closed) {
+        if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        js_free_span_names(ctx, span_reqs, span_holders, span_count);
+        return JS_ThrowInternalError(ctx, "WasmInstance.call: instance closed");
+    }
 
     if (want_buffer) {
         HlWasmBuffer *out_buf = NULL;
@@ -915,12 +930,12 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     size_t input_len = 0;
     int input_is_string = 0;
 
-    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[0], js_wasm_buf_class_id);
+    HlWasmBuffer *wbuf_in = JS_GetOpaque(argv[0], js_wasm_buf_class_id);
     if (wbuf_in && !wbuf_in->closed) {
         input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
         input_len = hl_wasm_buffer_len(wbuf_in);
     } else {
-        HlMappedBuffer *mmap_in = JS_GetOpaque2(ctx, argv[0], js_mmap_class_id);
+        HlMappedBuffer *mmap_in = JS_GetOpaque(argv[0], js_mmap_class_id);
         if (mmap_in && !mmap_in->closed) {
             input = (const uint8_t *)mmap_in->addr;
             input_len = mmap_in->len;
@@ -936,11 +951,11 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     }
 
 
-    /* An options getter may have closed the instance or started a call on it
-     * since the checks above. */
-    if (pi->closed || atomic_load(&pi->busy)) {
+    /* The input's toString is app code: pi is read below (its name), so it
+     * must still be this object's instance (checked again after the spans). */
+    if (JS_GetOpaque(this_val, js_wasm_inst_class_id) != pi) {
         if (input_is_string) JS_FreeCString(ctx, (const char *)input);
-        return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: instance closed or busy");
+        return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: instance closed");
     }
     js_wasm_clamp_opts(&opts, &js->base);
 
@@ -985,6 +1000,17 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         }
         hl_worker_wasm_adopt_spans(op, parsed, sn);
         js_free_span_names(ctx, parsed, parsed_holders, sn);
+    }
+
+    /* Option and span getters and the input's toString are app code: they
+     * may have closed this instance (freeing it) or started a call on it
+     * since the checks above. Only once the object still holds `pi` - a
+     * pointer compare, no dereference - may pi be read. */
+    if (JS_GetOpaque(this_val, js_wasm_inst_class_id) != pi
+        || pi->closed || atomic_load(&pi->busy)) {
+        hl_worker_wasm_op_free(op);
+        free(op);
+        return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: instance closed or busy");
     }
 
     /* Set busy before dispatch */
@@ -1215,7 +1241,7 @@ static JSValue js_compute_segment(JSContext *ctx, JSValueConst this_val,
         }
     } else {
         /* Try MappedBuffer (zero-copy) */
-        HlMappedBuffer *mmap_buf = JS_GetOpaque2(ctx, argv[2], js_mmap_class_id);
+        HlMappedBuffer *mmap_buf = JS_GetOpaque(argv[2], js_mmap_class_id);
         if (mmap_buf && !mmap_buf->closed) {
             data = mmap_buf->addr;
             data_len = mmap_buf->len;
@@ -1336,7 +1362,7 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
             input.buffer.data = idata;
             input.buffer.len = ilen;
         } else {
-            HlWasmBuffer *wbuf = JS_GetOpaque2(ctx, argv[1], js_wasm_buf_class_id);
+            HlWasmBuffer *wbuf = JS_GetOpaque(argv[1], js_wasm_buf_class_id);
             if (wbuf && !wbuf->closed) {
                 input.kind = HL_STREAM_IN_BUFFER;
                 input.buffer.data = hl_wasm_buffer_data(wbuf);
@@ -1344,7 +1370,7 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
                 in_wbuf = wbuf;
                 hl_wasm_buffer_borrow(in_wbuf);
             } else {
-                HlMappedBuffer *mmap = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
+                HlMappedBuffer *mmap = JS_GetOpaque(argv[1], js_mmap_class_id);
                 if (mmap && !mmap->closed) {
                     input.kind = HL_STREAM_IN_BUFFER;
                     input.buffer.data = mmap->addr;

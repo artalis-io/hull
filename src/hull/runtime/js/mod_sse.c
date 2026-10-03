@@ -49,9 +49,14 @@ static JSValue js_sse_event(JSContext *ctx, JSValueConst this_val,
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "stream.event requires (name, data)");
 
+    /* A conversion that threw is an error, not an absent field: it used to
+     * send the event unnamed (or without its id) with the exception still
+     * pending. */
     const char *event_name = NULL;
-    if (!JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
+    if (!JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0])) {
         event_name = JS_ToCString(ctx, argv[0]);
+        if (!event_name) return JS_EXCEPTION;
+    }
 
     size_t data_len;
     const char *data = JS_ToCStringLen(ctx, &data_len, argv[1]);
@@ -61,15 +66,26 @@ static JSValue js_sse_event(JSContext *ctx, JSValueConst this_val,
     }
 
     const char *id = NULL;
-    if (argc >= 3 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2]))
+    if (argc >= 3 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) {
         id = JS_ToCString(ctx, argv[2]);
+        if (!id) {
+            if (event_name) JS_FreeCString(ctx, event_name);
+            JS_FreeCString(ctx, data);
+            return JS_EXCEPTION;
+        }
+    }
 
-    int rc = kl_http_sse_event(&ud->sse, event_name, data, data_len, id);
+    /* Again: a toString above is app code, and may have closed the stream
+     * - kl_http_sse_end has run, and the write went out after the end. */
+    int rc = stream_dead(ud) ? -2
+           : kl_http_sse_event(&ud->sse, event_name, data, data_len, id);
 
     if (event_name) JS_FreeCString(ctx, event_name);
     JS_FreeCString(ctx, data);
     if (id) JS_FreeCString(ctx, id);
 
+    if (rc == -2)
+        return JS_ThrowTypeError(ctx, "SSE stream is closed");
     if (rc < 0)
         return JS_ThrowTypeError(ctx, "SSE write failed");
     return JS_UNDEFINED;
@@ -88,6 +104,11 @@ static JSValue js_sse_comment(JSContext *ctx, JSValueConst this_val,
     const char *text = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!text) return JS_EXCEPTION;
 
+    /* Re-checked: the toString above may have closed the stream. */
+    if (stream_dead(ud)) {
+        JS_FreeCString(ctx, text);
+        return JS_ThrowTypeError(ctx, "SSE stream is closed");
+    }
     int rc = kl_http_sse_comment(&ud->sse, text, len);
     JS_FreeCString(ctx, text);
 
@@ -117,9 +138,10 @@ static void js_sse_stream_finalizer(JSRuntime *rt, JSValue val)
     (void)rt;
     HlJSSseStreamUD *ud = (HlJSSseStreamUD *)JS_GetOpaque(val,
                                                              js_sse_stream_class_id);
-    if (ud)
+    if (ud) {
         hl_req_life_release(ud->life);
         js_free_rt(rt, ud);
+    }
 }
 
 static const JSClassDef js_sse_stream_class = {

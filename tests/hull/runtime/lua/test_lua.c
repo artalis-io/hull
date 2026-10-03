@@ -22,6 +22,8 @@
 #include "utest.h"
 #include "hull/runtime/lua.h"
 #include "hull/runtime/lua_bytecode_cache.h"
+#include "hull/shared/cache_dir.h"   /* hl_hull_cache_dir / _subdir */
+#include "hull/shared/host.h"        /* hl_host_is_windows */
 #include "hull/runtime/lua_template_cache.h"
 #include "hull/reqctx.h"
 #include "hull/vfs.h"
@@ -52,6 +54,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <time.h>
 #include "hull/shared/async_backend.h"
 #include "hull/worker_db.h"   /* hl_deep_copy_params */
 #include "hull/utils/alloc.h"   /* hl_free_const */
@@ -7089,6 +7092,120 @@ UTEST(lua_worker, db_is_absent_unless_declared)
         "  function() return db == nil end))\n", out, sizeof out);
     EXPECT_STREQ(out, "true");
     lua_worker_close(&f);
+}
+
+/* ── audit 3: runtime fixes ──────────────────────────────────────────── */
+
+/* A coroutine waiting on a Hull operation could be resumed (or closed) by
+ * the app: the dispatch returned the app's values while the worker still
+ * ran, and the real completion then resumed a dead coroutine. */
+UTEST(lua_audit3, a_parked_coroutine_cannot_be_resumed_by_the_app)
+{
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    lua_State *co = NULL;
+    int st = ssh_co_start(&lua_rt,
+        "PARKED = coroutine.running()\n"
+        "local r = require('hull.worker').dispatch(function() return 7 end)\n"
+        "return 'done ' .. tostring(r)\n", &co);
+    ASSERT_EQ(st, LUA_YIELD);
+    lua_State *L = lua_rt.L;
+    static const char *const probes[] = {
+        "local ok, e = pcall(coroutine.resume, PARKED, 'forged') "
+        "return tostring(ok) .. ':' .. tostring(e)",
+        "local ok, e = pcall(coroutine.close, PARKED) "
+        "return tostring(ok) .. ':' .. tostring(e)",
+    };
+    for (size_t i = 0; i < sizeof probes / sizeof probes[0]; i++) {
+        ASSERT_EQ(luaL_dostring(L, probes[i]), LUA_OK);
+        const char *msg = lua_tostring(L, -1);
+        EXPECT_TRUE(msg && strncmp(msg, "false:", 6) == 0 &&
+                    strstr(msg, "waiting on a Hull operation") != NULL);
+        lua_pop(L, 1);
+    }
+    ssh_tick_until_done(f.be, f.actx, co);
+    EXPECT_EQ(lua_status(co), LUA_OK);
+    EXPECT_STREQ(lua_tostring(co, -1), "done 7");
+    /* once it is no longer parked, the guard is out of the way */
+    ASSERT_EQ(luaL_dostring(L,
+        "local c = coroutine.create(function(a) return a + 1 end) "
+        "return select(2, coroutine.resume(c, 41))"), LUA_OK);
+    EXPECT_EQ(lua_tointeger(L, -1), 42);
+    lua_pop(L, 1);
+    lua_worker_close(&f);
+}
+
+/* A stored hash names its own iteration count: one past the cap is refused
+ * at once instead of running for minutes. */
+UTEST(lua_audit3, verify_password_refuses_an_absurd_iteration_count)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int r = eval_int(
+        "(function() "
+        "  local h = 'pbkdf2:2000000000:' .. string.rep('00', 16) .. ':' .. "
+        "            string.rep('00', 32) "
+        "  return crypto.verify_password('x', h) and 1 or 0 "
+        "end)()");
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    EXPECT_EQ(r, 0);
+    EXPECT_LT((double)(t1.tv_sec - t0.tv_sec), 5.0);
+    cleanup_lua_caps();
+}
+
+/* require("./hull.json") from an app run in its own directory resolved to
+ * the cache key of the stdlib json module, and got that module back. */
+UTEST(lua_audit3, a_local_json_file_is_not_the_stdlib_module)
+{
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a3json"), NULL);
+    char p[HL_TEST_PATH_MAX + 32];
+    snprintf(p, sizeof p, "%s/hull.json", tmpdir);
+    write_file(p, "{\"x\": 41}");
+    char cwd[4096];
+    ASSERT_NE(getcwd(cwd, sizeof cwd), NULL);
+    ASSERT_EQ(chdir(tmpdir), 0);
+    init_lua_with_appdir(".");
+    ASSERT_TRUE(lua_initialized);
+    /* load the stdlib json first so it is in the module cache */
+    (void)luaL_dostring(lua_rt.L, "pcall(function() return require('hull.json') end)");
+    lua_settop(lua_rt.L, 0);
+    int st = luaL_dostring(lua_rt.L,
+        "local t = require('./hull.json') "
+        "return type(t) == 'table' and t.x == 41 and t.encode == nil "
+        "       and 'file' or 'stdlib'");
+    const char *got = st == LUA_OK ? lua_tostring(lua_rt.L, -1) : lua_tostring(lua_rt.L, -1);
+    EXPECT_STREQ(got ? got : "(nil)", "file");
+    lua_settop(lua_rt.L, 0);
+    cleanup_lua();
+    ASSERT_EQ(chdir(cwd), 0);
+    rm_rf(tmpdir);
+}
+
+/* The bytecode cache is loaded without verification, so a cache directory
+ * another account can write to is refused (the cache turns off). */
+UTEST(lua_audit3, a_writable_cache_dir_is_not_used)
+{
+    if (hl_host_is_windows()) UTEST_SKIP("no owner / mode bits on Windows");
+    char tmpdir[512];
+    bc_with_tmp_home(tmpdir, sizeof tmpdir);
+    ASSERT_NE(tmpdir[0], 0);
+    char sub[1024];
+    ASSERT_EQ(hl_hull_cache_subdir("lua-bytecode", sub, sizeof sub), 0);
+    size_t n = strlen(sub);
+    while (n > 1 && sub[n - 1] == '/') sub[--n] = '\0';
+    ASSERT_EQ(chmod(sub, 0777), 0);
+    EXPECT_EQ(hl_hull_cache_subdir("lua-bytecode", sub, sizeof sub), -1);
+    char rt[1024];
+    snprintf(rt, sizeof rt, "%s/.hull/blobs/runtime", tmpdir);
+    ASSERT_EQ(chmod(rt, 0775), 0);
+    EXPECT_EQ(hl_hull_cache_dir(sub, sizeof sub), -1);
+    ASSERT_EQ(chmod(rt, 0700), 0);
+    EXPECT_EQ(hl_hull_cache_dir(sub, sizeof sub), 0);
+    bc_cleanup_tmp_home(tmpdir);
+    hl_lua_bytecode_cache_reset();
 }
 
 UTEST_MAIN();

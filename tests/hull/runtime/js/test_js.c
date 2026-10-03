@@ -43,6 +43,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
+
+#include "hull/worker_db.h"   /* hl_worker_db_init */
 #include "../../test_tmpdir.h"
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -6548,5 +6551,53 @@ JS_WORKER_CASE(a_dispatch_is_held_to_the_heap_limit,
 JS_WORKER_CASE(db_is_absent_unless_declared, (void)0,
     "  const r = await worker.dispatch(() => typeof db);\n"
     "  check(r === 'undefined', r);\n")
+
+/* ── audit 3: runtime fixes ──────────────────────────────────────────── */
+
+UTEST(js_audit3, verify_password_refuses_an_absurd_iteration_count)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "const h = 'pbkdf2:2000000000:' + '00'.repeat(16) + ':' + '00'.repeat(32);\n"
+        "globalThis.__a3_vp = crypto.verifyPassword('x', h) ? 1 : 0;\n";
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    EXPECT_EQ(eval_int("globalThis.__a3_vp"), 0);
+    EXPECT_LT((double)(t1.tv_sec - t0.tv_sec), 5.0);
+    cleanup_js_caps();
+}
+
+
+/* db.async rows were built differently from db.query rows: a BLOB came back
+ * as a (lossy) string, and columns were SET, so a column named __proto__
+ * replaced the row's prototype instead of becoming a column. */
+/* A file, not ":memory:": the worker keeps the DSN pointer, and on Windows
+ * cosmo's realpath turns ":memory:" into a path it cannot open. */
+static char a3_worker_dsn[HL_TEST_PATH_MAX + 16];
+static void a3_worker_db(void)
+{
+    char dir[HL_TEST_PATH_MAX];
+    if (!hl_test_mkdtemp(dir, sizeof dir, "hull_a3db")) return;
+    snprintf(a3_worker_dsn, sizeof a3_worker_dsn, "%s/w.db", dir);
+    hl_worker_db_init(a3_worker_dsn);
+}
+
+JS_WORKER_CASE(db_async_rows_are_built_like_db_query_rows,
+    a3_worker_db(),
+    "  const rows = await db.async.query(\n"
+    "    \"SELECT X'00FF10' AS b, 7 AS \\\"__proto__\\\"\");\n"
+    "  const r = rows[0];\n"
+    "  check(r.b instanceof ArrayBuffer && r.b.byteLength === 3 &&\n"
+    "        new Uint8Array(r.b)[1] === 0xFF, 'blob came back as ' + typeof r.b);\n"
+    "  check(Object.getPrototypeOf(r) === Object.prototype, 'prototype replaced');\n"
+    "  const d = Object.getOwnPropertyDescriptor(r, '__proto__');\n"
+    "  check(d && d.value === 7, 'no own __proto__ column');\n")
 
 UTEST_MAIN();

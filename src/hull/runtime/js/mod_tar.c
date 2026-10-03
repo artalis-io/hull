@@ -285,14 +285,18 @@ static JSValue js_tar_pack(JSContext *ctx, JSValueConst this_val,
         if (size < 0) break;
         char *buf = (char *)malloc(size ? (size_t)size : 1);
         if (!buf) { err = "out_of_memory"; break; }
+        int64_t got = 0;
         if (size > 0) {
-            int64_t got = hl_cap_fs_read(js->base.fs_cfg, paths[i], buf, (size_t)size, &err);
+            got = hl_cap_fs_read(js->base.fs_cfg, paths[i], buf, (size_t)size, &err);
             if (got < 0) { free(buf); break; }
         }
         bufs[i] = buf;
         ents[i].name = names[i] ? names[i] : paths[i];
         ents[i].data = (const unsigned char *)buf;
-        ents[i].size = (size_t)size;
+        /* What was read, not the size probed before it: a file that shrank in
+         * between left the rest of the malloc'd buffer - uninitialised heap -
+         * in the archive. */
+        ents[i].size = (size_t)got;
         ents[i].mode = 0644;
         ents[i].is_dir = 0;
     }
