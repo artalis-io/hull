@@ -41,6 +41,9 @@
 #include "hull/serve.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/env.h"
+#include "hull/cap/audit.h"
+#include "hull/signature.h"
+#include "hull/vfs.h"
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_registry.h"
 #endif
@@ -88,12 +91,20 @@ static int embedded_app_present(void)
  * to the slice past `--`. Returns -1 if no entry point given, -2 on a stray
  * argument (reported here). A built binary takes no entry argument: its
  * first bare word starts the app's argv. */
+/* Startup options this runner shares with serve.c beyond the ones above. */
+typedef struct {
+    const char *verify_sig;          /* --verify-sig PUBKEY */
+    int         no_verify_platform;  /* --no-verify-platform */
+    long        instruction_limit;   /* --max-instructions N (0 = default) */
+} CliOpts;
+
 static int cli_parse_args(int argc, char **argv,
                           int *out_app_argc, char ***out_app_argv,
                           int *out_no_migrate, int *out_no_sandbox,
                           int *out_allow_degraded_sandbox,
                           const char **out_db_path,
-                          int *out_skip_ca, const char **out_ca_override)
+                          int *out_skip_ca, const char **out_ca_override,
+                          CliOpts *x)
 {
     int entry_idx = -1;
     *out_app_argc = 0;
@@ -142,6 +153,32 @@ static int cli_parse_args(int argc, char **argv,
         }
         if (strncmp(argv[i], "--ca-bundle=", 12) == 0) {
             *out_ca_override = argv[i] + 12;
+            continue;
+        }
+        /* --verify-sig was serve.c's alone: every app built without HTTP runs
+         * here, so `./tool --verify-sig dev.pub` handed both words to the app
+         * as its argv and started it unverified - silently, exactly when the
+         * operator asked for verification. */
+        if (strcmp(argv[i], "--verify-sig") == 0 && i + 1 < argc) {
+            x->verify_sig = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--no-verify-platform") == 0) {
+            x->no_verify_platform = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--audit") == 0) {
+            hl_audit_enabled = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--max-instructions") == 0 && i + 1 < argc) {
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 0) {
+                fprintf(stderr, "hull: invalid instruction limit: %s\n", argv[i]);
+                return -2;
+            }
+            x->instruction_limit = v;
             continue;
         }
         if (argv[i][0] == '-') {
@@ -205,12 +242,24 @@ int hull_serve(int argc, char **argv)
     int skip_ca_bundle = 0;
     const char *ca_bundle_override = NULL;
 
+    CliOpts xo = { 0 };
     int entry_idx = cli_parse_args(argc, argv, &app_argc, &app_argv,
                                     &no_migrate, &no_sandbox,
                                     &allow_degraded_sandbox, &db_path,
-                                    &skip_ca_bundle, &ca_bundle_override);
+                                    &skip_ca_bundle, &ca_bundle_override, &xo);
     if (entry_idx == -2) return 1;
     if (!db_path) db_path = getenv("HULL_DB");
+    /* Same environment fallbacks as serve.c. */
+    {
+        const char *a = getenv("HULL_AUDIT");
+        if (a && strcmp(a, "1") == 0) hl_audit_enabled = 1;
+        const char *il = getenv("HULL_MAX_INSTRUCTIONS");
+        if (xo.instruction_limit == 0 && il) {
+            char *end;
+            long v = strtol(il, &end, 10);
+            if (*end == '\0' && v >= 0) xo.instruction_limit = v;
+        }
+    }
 
     /* Resolve the entry point. A `hull build` binary embeds its app and is run
      * with no argv entry, so when none is given fall back to the embedded
@@ -259,6 +308,19 @@ int hull_serve(int argc, char **argv)
         app_dir[1] = '\0';
     }
 
+    /* Verify the app signature BEFORE any app code is loaded (serve.c's
+     * RT-01): a tampered app never runs. The embedded entries are what a
+     * built binary runs; an unbuilt app is verified on disk. */
+    if (xo.verify_sig) {
+        extern const HlEntry hl_app_entries[];
+        HlVfs vfs;
+        hl_vfs_init(&vfs, hl_app_entries, app_dir);
+        if (hl_verify_startup(xo.verify_sig, entry, &vfs, xo.no_verify_platform) != 0) {
+            fprintf(stderr, "hull: signature verification failed - refusing to start\n");
+            return 1;
+        }
+    }
+
     /* Create the async event loop + worker pool BEFORE any kernel sandbox.
      * glibc registers a per-thread rseq area when each thread starts; once
      * the phase-2 pledge's seccomp filter is installed, the rseq syscall is
@@ -304,6 +366,7 @@ int hull_serve(int argc, char **argv)
         .no_migrate      = no_migrate,
         .sandbox         = !no_sandbox,
         .gate_modules    = 1,
+        .instruction_limit = xo.instruction_limit,
     };
 #ifdef HL_ENABLE_HTTP_CLIENT
     /* The -d database opens here, before the manifest and the full trust

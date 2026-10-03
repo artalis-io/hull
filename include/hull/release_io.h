@@ -17,6 +17,8 @@
 
 #include <stddef.h>
 
+#include "hull/release.h"   /* hl_release_io_find_checksum */
+
 /* Keel allocator + TLS types are typedefs over anonymous structs, so
  * we can't forward-declare them - pull the headers in directly. Both
  * consumers (`commands/update.c`, `commands/tools.c`) already need
@@ -132,14 +134,7 @@ int hl_release_io_json_str(const char *json, const char *key,
 int hl_release_io_sha256_hex(const unsigned char *data, size_t len,
                              char hex[65]);
 
-/**
- * Locate a `<sha256-hex>  <asset>\n` line in a `hull.sha256` manifest
- * and copy the 64-char hex into @p hex_out.
- *
- * @returns 0 on match, -1 if @p asset is not in the manifest.
- */
-int hl_release_io_find_checksum(const char *manifest, size_t mlen,
-                                const char *asset, char hex_out[65]);
+/* hl_release_io_find_checksum() is declared in hull/release.h. */
 
 /**
  * Atomically write @p data to @p target_path: opens

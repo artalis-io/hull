@@ -842,6 +842,40 @@ hull_do "$HULL" inspect "$WORKDIR/myapp"; LUA_INSPECT_OUT=$OUT
 check_exit "lua re-inspect exits 0" 0 $RC
 check_contains "lua re-inspect shows VALID"  "$LUA_INSPECT_OUT" "Status:    VALID"
 
+# ── --verify-sig on an app built without HTTP ─────────────────────────
+#
+# An app.main app with no HTTP module runs on the Keel-free app runner
+# (serve_cli.c), not serve.c. That runner used to know nothing of
+# --verify-sig: the flag and the key path were handed to the app as its argv,
+# and the app ran unverified - silently. Built and signed, then run with the
+# right key (runs) and a different key (refuses, and no app code runs).
+
+echo ""
+echo "=== --verify-sig on a built app.main app (no HTTP) ==="
+
+mkdir -p "$WORKDIR/sigcli"
+cat > "$WORKDIR/sigcli/app.lua" << 'APPEOF'
+app.manifest({})
+app.main(function(ctx)
+    ctx.stdout:write("sigcli-ran " .. table.concat(ctx.args, ",") .. "\n")
+    return 0
+end)
+APPEOF
+hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/sigcli/sigcli" "$WORKDIR/sigcli"
+check_exit "build signed CLI app exits 0" 0 $RC
+if [ -x "$WORKDIR/sigcli/sigcli" ]; then
+    GOOD=$(cd "$WORKDIR/sigcli" && ./sigcli --verify-sig "$WORKDIR/developer.pub" --no-verify-platform hello 2>&1)
+    check_contains "right key: the app runs with only its own argv" "$GOOD" "sigcli-ran hello"
+    BAD=$(cd "$WORKDIR/sigcli" && ./sigcli --verify-sig "$WORKDIR/myapp.pub" --no-verify-platform hello 2>&1)
+    case "$BAD" in
+        *sigcli-ran*) fail "wrong key: the app ran anyway: $BAD" ;;
+        *)            pass "wrong key: the app does not run" ;;
+    esac
+    check_contains "wrong key: refusal is reported" "$BAD" "verification failed"
+else
+    fail "signed CLI app binary missing"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────
 
 echo ""

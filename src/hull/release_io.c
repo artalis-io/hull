@@ -396,41 +396,6 @@ int hl_release_io_sha256_hex(const unsigned char *data, size_t len,
 
 /* ── Checksum manifest lookup ────────────────────────────────────── */
 
-int hl_release_io_find_checksum(const char *manifest, size_t mlen,
-                                const char *asset, char hex_out[65])
-{
-    if (!manifest || !asset || !hex_out) return -1;
-    size_t alen = strlen(asset);
-    /* Each line is "<64-hex>  <asset>\n" */
-    const char *p = manifest;
-    const char *end = manifest + mlen;
-    while (p < end) {
-        const char *eol = memchr(p, '\n', (size_t)(end - p));
-        size_t ll = eol ? (size_t)(eol - p) : (size_t)(end - p);
-        if (ll >= 66 + alen) {
-            const char *anchor = p + 64;
-            /* Exact-match guard. Bounds check FIRST so we never
-             * dereference `anchor[2 + alen]` when it points one past
-             * the manifest buffer (the no-trailing-newline edge case).
-             * The `||` short-circuits, so the deref only runs when
-             * the byte is in-bounds. */
-            if (anchor[0] == ' ' && anchor[1] == ' ' &&
-                strncmp(anchor + 2, asset, alen) == 0 &&
-                (anchor + 2 + alen >= end ||
-                 anchor[2 + alen] == '\n' ||
-                 anchor[2 + alen] == '\r' ||
-                 anchor[2 + alen] == '\0')) {
-                memcpy(hex_out, p, 64);
-                hex_out[64] = '\0';
-                return 0;
-            }
-        }
-        if (!eol) break;
-        p = eol + 1;
-    }
-    return -1;
-}
-
 /* ── Atomic write ────────────────────────────────────────────────── */
 
 /* Write @p data to @p new_path (O_CREAT|O_TRUNC, @p mode), fsync, close, and
