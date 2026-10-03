@@ -118,4 +118,15 @@ int hl_release_sign_manifest(const void *manifest, size_t manifest_len,
  */
 int hl_release_load_secret_key(const char *path, uint8_t out_sk[64]);
 
+/* Defined in release.c (Keel-free); the name keeps its release_io prefix
+ * for its many callers. */
+/**
+ * Locate a `<sha256-hex>  <asset>\n` line in a `hull.sha256` manifest
+ * and copy the 64-char hex into @p hex_out.
+ *
+ * @returns 0 on match, -1 if @p asset is not in the manifest.
+ */
+int hl_release_io_find_checksum(const char *manifest, size_t mlen,
+                                const char *asset, char hex_out[65]);
+
 #endif /* HL_RELEASE_H */
