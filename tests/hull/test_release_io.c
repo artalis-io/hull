@@ -473,4 +473,41 @@ UTEST(self_replace, null_args_rejected) {
     hl_release_io_cleanup_stale_self(NULL);   /* must not crash */
 }
 
+/* A pre-release sits BEFORE its release: v0.14.0-rc1 used to count as
+ * "ahead of" v0.14.0, so an rc could replace the release it preceded. */
+UTEST(release_io, prerelease_orders_before_its_release) {
+    int ok = 0;
+    EXPECT_LT(hl_release_io_version_cmp("v0.14.0-rc1", "v0.14.0", &ok), 0);
+    EXPECT_EQ(ok, 1);
+    EXPECT_GT(hl_release_io_version_cmp("v0.14.0", "v0.14.0-rc1", &ok), 0);
+    EXPECT_LT(hl_release_io_version_cmp("v0.14.0-rc1", "v0.14.0-rc2", &ok), 0);
+    EXPECT_GT(hl_release_io_version_cmp("v0.14.0-rc1", "v0.13.9", &ok), 0);
+    /* a dev build past a tag is still ahead of it, and of its rc */
+    EXPECT_GT(hl_release_io_version_cmp("v0.14.0-3-gabc", "v0.14.0", &ok), 0);
+    EXPECT_GT(hl_release_io_version_cmp("v0.14.0-3-gabc", "v0.14.0-rc1", &ok), 0);
+}
+
+/* The tag comes unsigned from the API and names every download URL. */
+UTEST(release_io, tag_shape) {
+    EXPECT_TRUE(hl_release_io_tag_valid("v0.15.1"));
+    EXPECT_TRUE(hl_release_io_tag_valid("v1.0.0-rc1"));
+    EXPECT_FALSE(hl_release_io_tag_valid("v1.0.0/../../evil"));
+    EXPECT_FALSE(hl_release_io_tag_valid("v1.0.0?x=1"));
+    EXPECT_FALSE(hl_release_io_tag_valid("v1.0.0%2F"));
+    EXPECT_FALSE(hl_release_io_tag_valid("latest"));
+    EXPECT_FALSE(hl_release_io_tag_valid(""));
+    EXPECT_FALSE(hl_release_io_tag_valid(NULL));
+}
+
+/* From the first release that carries hull.version, a manifest without it
+ * is refused: an old signed release served under a newer tag. */
+UTEST(release_io, signed_version_required_from_its_first_release) {
+    EXPECT_FALSE(hl_release_io_requires_signed_version("v0.15.0"));
+    EXPECT_FALSE(hl_release_io_requires_signed_version("v0.14.0"));
+    EXPECT_TRUE(hl_release_io_requires_signed_version(HL_RELEASE_SIGNED_VERSION_SINCE));
+    EXPECT_TRUE(hl_release_io_requires_signed_version("v0.16.0"));
+    EXPECT_TRUE(hl_release_io_requires_signed_version("v1.0.0"));
+    EXPECT_TRUE(hl_release_io_requires_signed_version("nightly"));   /* fail closed */
+}
+
 UTEST_MAIN()

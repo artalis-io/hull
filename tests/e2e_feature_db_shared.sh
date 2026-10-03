@@ -50,6 +50,9 @@ for a in postgres mysql valkey; do
         || { echo "FAIL: libhull_feature-$a.a lacks cap_db_transport.o"; exit 1; }
 done
 echo "ok  cap_db_transport.o present in all three archives"
+# hull build takes a local feature archive only from the running hull's own
+# directory (never ./build), so stage it beside the copied binary.
+for a in postgres mysql valkey; do cp "build/libhull_feature-$a.a" "$(dirname "$BASE")/"; done
 
 cat > "$APP/app.lua" <<'LUA'
 app.manifest({ modules = { "hull/db@1" } })

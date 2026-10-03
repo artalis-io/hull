@@ -114,6 +114,14 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         return 1;
     }
     kl_free(&alloc, meta_body, meta_len);
+    /* The tag names every URL below: "../", "?" or "%" in it would point
+     * them elsewhere. Only the shape Hull publishes is used. */
+    if (!hl_release_io_tag_valid(latest_tag)) {
+        fprintf(stderr, "hull update: release tag '%s' is not a version tag; refusing\n",
+                latest_tag);
+        kl_tls_mbedtls_ctx_destroy(tls);
+        return 1;
+    }
 
     /* Strip leading 'v' from tag for comparison */
     const char *latest_ver = latest_tag;
@@ -278,6 +286,18 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
                 "hull update: the signed manifest does not name this release %s\n"
                 "             (hull.version missing or different); refusing to install\n",
                 latest_tag);
+            kl_free(&alloc, binary, binary_len);
+            kl_free(&alloc, manifest, manifest_len);
+            kl_tls_mbedtls_ctx_destroy(tls);
+            return 1;
+        }
+        if (vrc == 1 && hl_release_io_requires_signed_version(latest_tag)) {
+            /* A release this new carries the entry. Its absence means the
+             * bytes are an older signed release under this newer tag. */
+            fprintf(stderr,
+                "hull update: the signed manifest for %s has no hull.version entry,\n"
+                "             which every release since %s carries; refusing to install\n",
+                latest_tag, HL_RELEASE_SIGNED_VERSION_SINCE);
             kl_free(&alloc, binary, binary_len);
             kl_free(&alloc, manifest, manifest_len);
             kl_tls_mbedtls_ctx_destroy(tls);

@@ -8,6 +8,7 @@
 #include "hull/signature.h"
 #include "hull/vfs.h"
 #include "hull/cap/crypto.h"
+#include "test_tmpdir.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -720,6 +721,50 @@ UTEST(hl_sig, cleanup)
 {
     int rc = rmdir_recursive(test_dir);
     ASSERT_EQ(rc, 0);
+}
+
+/* Write @p body as package.sig in a fresh directory; read it. */
+static int a3_read_raw(const char *body)
+{
+    /* Its own directory: the fixture's `cleanup` test has removed test_dir
+     * by the time these run. */
+    char dir[512], path[600];
+    if (!hl_test_mkdtemp(dir, sizeof dir, "hull_a3sig")) return -2;
+    snprintf(path, sizeof path, "%s/package.sig", dir);
+    FILE *f = fopen(path, "w");
+    if (!f) return -2;
+    fputs(body, f);
+    fclose(f);
+    HlSignature sig;
+    int rc = hl_sig_read(path, &sig);
+    if (rc == 0) hl_sig_free(&sig);
+    unlink(path);
+    rmdir(dir);
+    return rc;
+}
+
+#define A3_SIG "\"signature\":\"" \
+    "00000000000000000000000000000000000000000000000000000000000000000000" \
+    "000000000000000000000000000000000000000000000000000000000000\""
+#define A3_PK  "\"public_key\":\"" \
+    "0000000000000000000000000000000000000000000000000000000000000000\""
+
+/* A legacy (no binary_hash) signature signs only {files, manifest}: a
+ * platform block in it is unsigned, and is refused rather than trusted. */
+UTEST(hl_sig, legacy_with_a_platform_block_is_refused)
+{
+    EXPECT_EQ(0, a3_read_raw("{\"files\":{\"app.lua\":\"aa\"}," A3_SIG "," A3_PK "}"));
+    EXPECT_EQ(-1, a3_read_raw("{\"files\":{\"app.lua\":\"aa\"},"
+                              "\"platform\":{\"platforms\":{}}," A3_SIG "," A3_PK "}"));
+    EXPECT_EQ(-1, a3_read_raw("{\"files\":{\"app.lua\":\"aa\"},"
+                              "\"modules_resolved\":[]," A3_SIG "," A3_PK "}"));
+}
+
+/* A file hash that is not a string was a NULL the file check strcmp'd. */
+UTEST(hl_sig, non_string_file_hash_is_refused)
+{
+    EXPECT_EQ(-1, a3_read_raw("{\"files\":{\"app.lua\":7}," A3_SIG "," A3_PK "}"));
+    EXPECT_EQ(-1, a3_read_raw("{\"files\":{\"app.lua\":null}," A3_SIG "," A3_PK "}"));
 }
 
 UTEST_MAIN()

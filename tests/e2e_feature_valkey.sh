@@ -41,6 +41,9 @@ make feature-valkey >/dev/null
 ls -la build/libhull_feature-valkey.a
 
 HULL=/tmp/hull_base_valkey_e2e
+# hull build takes a local feature archive only from the running hull's own
+# directory (never ./build), so stage it beside the copied binary.
+cp build/libhull_feature-valkey.a "$(dirname "$HULL")/"
 APP=$(mktemp -d)
 PLAIN=$(mktemp -d)
 SRV_PID=""; CONTAINER=""
