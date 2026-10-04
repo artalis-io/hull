@@ -322,7 +322,7 @@ static int lua_db_query_impl(lua_State *L)
     const char *sql = luaL_checkstring(L, 1);
 
     int is_stdlib = lua_is_stdlib_caller(L, "query");
-    HlDbHandle *h = db_call_handle(L);
+    (void)db_call_handle(L);   /* the re-entry check; the handle is resolved below */
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
@@ -348,7 +348,7 @@ static int lua_db_query_impl(lua_State *L)
     /* The handle again, now that nothing more runs before the call: the
      * params' conversion, the result table and the guard can all run app
      * code (an __index, a __gc) that closes a db.open connection. */
-    h = db_resolve_handle(L);
+    HlDbHandle *h = db_resolve_handle(L);
     if (!h)
         return luaL_error(L, "query: the connection was closed");
     int rc = hl_db_query(h, sql, params, nparams,
@@ -389,7 +389,7 @@ static int lua_db_exec_impl(lua_State *L)
     const char *sql = luaL_checkstring(L, 1);
 
     int is_stdlib = lua_is_stdlib_caller(L, "exec");
-    HlDbHandle *h = db_call_handle(L);
+    (void)db_call_handle(L);   /* the re-entry check; the handle is resolved below */
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
@@ -404,7 +404,7 @@ static int lua_db_exec_impl(lua_State *L)
     /* A Lua UDF runs inside the statement's step, so this is a row loop too
      * as far as re-entry is concerned. */
     int guard = push_row_loop_guard(L);
-    h = db_resolve_handle(L);       /* see lua_db_query_impl */
+    HlDbHandle *h = db_resolve_handle(L);       /* see lua_db_query_impl */
     if (!h)
         return luaL_error(L, "exec: the connection was closed");
     int rc = hl_db_exec(h, sql, params, nparams);
@@ -695,11 +695,11 @@ static int lua_db_table_columns(lua_State *L)
 
     const char *table = luaL_checkstring(L, 1);
     check_app_identifiers(L, "table_columns", table, NULL, 0, NULL, 0);
-    HlDbHandle *h = db_call_handle(L);
+    (void)db_call_handle(L);   /* the re-entry check; the handle is resolved below */
 
     int guard = push_row_loop_guard(L);
     lua_newtable(L);  /* result */
-    h = db_resolve_handle(L);       /* see lua_db_query_impl */
+    HlDbHandle *h = db_resolve_handle(L);       /* see lua_db_query_impl */
     if (!h)
         return luaL_error(L, "db.table_columns: the connection was closed");
     LuaColForwardCtx fwd = { L, 0, 0 };
