@@ -63,8 +63,10 @@ static int write_blob(const char *path, const unsigned char *data, size_t len)
     if (!f)
         return -1;
     size_t written = fwrite(data, 1, len, f);
-    fclose(f);
-    return (written == len) ? 0 : -1;
+    /* fclose reports a deferred write error (ENOSPC): ignored, a truncated
+     * archive was reported as written. */
+    int closed = fclose(f);
+    return (written == len && closed == 0) ? 0 : -1;
 }
 #endif
 

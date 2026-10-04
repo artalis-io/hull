@@ -316,14 +316,12 @@ UTEST(hl_cap_blob, put_empty_buffer_is_valid)
     env_free(&e);
 }
 
-UTEST(hl_cap_blob, put_verified_short_circuits_when_present)
+UTEST(hl_cap_blob, put_verified_refuses_bytes_that_do_not_match_the_id)
 {
-    /* When `expected` is supplied and the blob already exists on
-     * disk, put skips the tmp-write + hash entirely. Verify by:
-     *  (a) writing a blob once
-     *  (b) re-putting different bytes claiming the SAME id - the
-     *      short-circuit accepts (existing file's SHA is trusted)
-     *  (c) reading back: bytes are the original, not the "lie" */
+    /* `expected` is checked against the bytes given, even when a blob of
+     * that id already exists: the short-circuit used to trust the id, so a
+     * put of other bytes "succeeded" - and a caller that went on to treat
+     * its bytes as stored was wrong. The stored blob is left as it was. */
     TestEnv e; env_init(&e);
     HlBlob *b = NULL;
     hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 0);
@@ -333,12 +331,14 @@ UTEST(hl_cap_blob, put_verified_short_circuits_when_present)
     ASSERT_EQ(hl_cap_blob_put(b, (const uint8_t *)original,
                                 strlen(original), NULL, id), 0);
 
-    /* Now put_verified with DIFFERENT bytes but claim the same id.
-     * Short-circuit returns 0 immediately because the id exists. */
     const char *liar = "totally different bytes";
     char id2[HL_BLOB_ID_BUF_SIZE];
-    ASSERT_EQ(hl_cap_blob_put(b, (const uint8_t *)liar,
+    ASSERT_NE(hl_cap_blob_put(b, (const uint8_t *)liar,
                                 strlen(liar), id, id2), 0);
+
+    /* The matching bytes still short-circuit. */
+    ASSERT_EQ(hl_cap_blob_put(b, (const uint8_t *)original,
+                                strlen(original), id, id2), 0);
     ASSERT_STREQ(id2, id);
 
     /* Confirm only ONE blob landed and the original bytes survived. */

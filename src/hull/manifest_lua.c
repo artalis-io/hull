@@ -20,6 +20,16 @@
 #include "lua.h"
 #include "lauxlib.h"
 
+/* A manifest string, or NULL when it holds a NUL byte: copied with
+ * strdup, "api.example.com\0.x" became "api.example.com" - a grant that is
+ * not the one `hull verify` / `hull inspect` show. Treated as absent. */
+static const char *mstr(lua_State *L, int idx)
+{
+    size_t n = 0;
+    const char *s = lua_tolstring(L, idx, &n);
+    return (s && strlen(s) == n) ? s : NULL;
+}
+
 /* Read a string array from a Lua table field into a C array.
  * Strings are copied via hl_manifest_strdup.
  * Returns number of strings read (capped at max). */
@@ -40,7 +50,7 @@ static int read_string_array(lua_State *L, int table_idx,
     for (lua_Integer i = 1; i <= len && count < max; i++) {
         lua_rawgeti(L, arr_idx, i);
         if (lua_isstring(L, -1)) {
-            const char *copy = hl_manifest_strdup(alloc, lua_tostring(L, -1));
+            const char *copy = hl_manifest_strdup(alloc, mstr(L, -1));
             if (copy)
                 out[count++] = copy;
         }
@@ -132,7 +142,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     /* csp = "policy-string" or false */
     lua_getfield(L, manifest_idx, "csp");
     if (lua_isstring(L, -1)) {
-        const char *csp_str = lua_tostring(L, -1);
+        const char *csp_str = mstr(L, -1);
         if (hl_manifest_csp_is_valid(csp_str)) {
             out->csp = hl_manifest_strdup(alloc, csp_str);
             out->csp_set = 1;
@@ -156,12 +166,12 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                                      alloc);
         lua_getfield(L, cors_idx, "methods");
         if (lua_isstring(L, -1))
-            out->cors_methods = hl_manifest_strdup(alloc, lua_tostring(L, -1));
+            out->cors_methods = hl_manifest_strdup(alloc, mstr(L, -1));
         lua_pop(L, 1);
 
         lua_getfield(L, cors_idx, "headers");
         if (lua_isstring(L, -1))
-            out->cors_headers = hl_manifest_strdup(alloc, lua_tostring(L, -1));
+            out->cors_headers = hl_manifest_strdup(alloc, mstr(L, -1));
         lua_pop(L, 1);
 
         lua_getfield(L, cors_idx, "credentials");
@@ -261,7 +271,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                 }
                 lua_rawgeti(L, modules_idx, i);
                 if (lua_type(L, -1) == LUA_TSTRING) {
-                    const char *spec = lua_tostring(L, -1);
+                    const char *spec = mstr(L, -1);
                     /* Trailing '?' marks the module optional (skip, not error,
                      * when its build cap is absent). It sits after the major,
                      * so the name length (before '@') is unaffected. */
@@ -315,8 +325,8 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                         lua_pop(L, 1);
                         continue;
                     }
-                    const char *alias = lua_tostring(L, -2);
-                    const char *spec  = lua_tostring(L, -1);
+                    const char *alias = mstr(L, -2);
+                    const char *spec  = mstr(L, -1);
                     size_t speclen = strlen(spec);
                     int optional = (speclen > 0 && spec[speclen - 1] == '?');
                     const char *at    = strchr(spec, '@');
@@ -382,8 +392,8 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     lua_pop(L, 1);
                     continue;
                 }
-                const char *name = lua_tostring(L, -2);
-                const char *dsn  = lua_tostring(L, -1);
+                const char *name = mstr(L, -2);
+                const char *dsn  = mstr(L, -1);
                 if (name && name[0] && dsn && dsn[0]) {
                     const char *ncopy = hl_manifest_strdup(alloc, name);
                     const char *dcopy = hl_manifest_strdup(alloc, dsn);
@@ -418,7 +428,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
 
         lua_getfield(L, db_idx, "internal");
         if (lua_type(L, -1) == LUA_TSTRING && lua_rawlen(L, -1) > 0)
-            out->databases.internal = hl_manifest_strdup(alloc, lua_tostring(L, -1));
+            out->databases.internal = hl_manifest_strdup(alloc, mstr(L, -1));
         else if (!lua_isnil(L, -1))
             log_warn("[manifest] databases.internal: expected a DSN string");
         lua_pop(L, 1); /* pop internal */

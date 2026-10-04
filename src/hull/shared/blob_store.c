@@ -490,6 +490,34 @@ void hl_blob_store_writer_abort(HlBlobStoreWriter *w)
 
 /* ── Buffer put ──────────────────────────────────────────────────── */
 
+/* 1 when the stored blob @p id hashes to @p id, 0 when it does not (or
+ * cannot be read). */
+static int stored_blob_matches(HlBlobStore *s, const char *id)
+{
+    HlBlobStoreReader *r = NULL;
+    if (hl_blob_store_reader_open(s, id, /*track_access=*/0, &r) != 0)
+        return 0;
+    HlSha256Ctx h;
+    hl_cap_crypto_sha256_init(&h);
+    uint8_t chunk[65536];
+    int ok = 1;
+    for (;;) {
+        size_t got = 0;
+        if (hl_blob_store_reader_read(r, chunk, sizeof chunk, &got) != 0) { ok = 0; break; }
+        if (got == 0) break;
+        if (hl_cap_crypto_sha256_update(&h, chunk, got) != 0) { ok = 0; break; }
+    }
+    hl_blob_store_reader_close(r);
+    uint8_t digest[32];
+    if (!ok || hl_cap_crypto_sha256_final(&h, digest) != 0) return 0;
+    char hex[HL_BLOB_STORE_ID_BUF_SIZE];
+    hl_hex_encode(digest, 32, hex, sizeof hex);
+    unsigned char diff = 0;
+    for (size_t i = 0; i < HL_BLOB_STORE_ID_HEX_LEN; i++)
+        diff |= (unsigned char)(hex[i] ^ id[i]);
+    return diff == 0;
+}
+
 static int store_put_full(HlBlobStore *s, const uint8_t *buf, size_t len,
                           const char *expected, int durable, char *out_id)
 {
@@ -499,8 +527,26 @@ static int store_put_full(HlBlobStore *s, const uint8_t *buf, size_t len,
     if (expected && validate_id(expected) == 0) {
         int rc = hl_blob_store_exists(s, expected);
         if (rc == 1) {
-            if (out_id) memcpy(out_id, expected, HL_BLOB_STORE_ID_BUF_SIZE);
-            return 0;
+            /* Already stored - but the CALLER's bytes were never hashed on
+             * this path, and it goes on to use them (hull tools install
+             * extracted the downloaded bundle): a swapped download passed
+             * as "verified" whenever an earlier install had stored the
+             * genuine one. And the stored file itself was trusted on its
+             * name alone - a corrupt or planted blob is replaced. */
+            uint8_t digest[32];
+            char hex[HL_BLOB_STORE_ID_BUF_SIZE];
+            if (hl_cap_crypto_sha256(buf ? buf : (const uint8_t *)"", len, digest) != 0)
+                return -1;
+            hl_hex_encode(digest, 32, hex, sizeof hex);
+            unsigned char diff = 0;
+            for (size_t i = 0; i < HL_BLOB_STORE_ID_HEX_LEN; i++)
+                diff |= (unsigned char)(hex[i] ^ expected[i]);
+            if (diff != 0) return -1;
+            if (stored_blob_matches(s, expected)) {
+                if (out_id) memcpy(out_id, expected, HL_BLOB_STORE_ID_BUF_SIZE);
+                return 0;
+            }
+            (void)hl_blob_store_delete(s, expected);   /* rewritten below */
         }
     }
 

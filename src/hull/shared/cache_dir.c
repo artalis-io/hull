@@ -57,6 +57,27 @@ static int cache_dir_trusted(const char *path)
     else if (!S_ISDIR(st.st_mode))          why = "is not a directory";
     else if (st.st_uid != geteuid())        why = "is owned by another user";
     else if (st.st_mode & (S_IWGRP | S_IWOTH)) why = "is writable by other users";
+    /* And every directory above it: a parent another user can write (with
+     * no sticky bit) lets them rename this one away and put their own in
+     * its place after the check. Each must be the user's or root's, and
+     * shared-writable only when sticky (/tmp). */
+    if (!why) {
+        char up[4096];
+        int n = snprintf(up, sizeof up, "%s", path);
+        if (n < 0 || (size_t)n >= sizeof up) why = "path is too long";
+        while (!why) {
+            char *sl = strrchr(up, '/');
+            if (!sl) break;
+            if (sl == up) { up[1] = '\0'; } else { *sl = '\0'; }
+            struct stat ps;
+            if (stat(up, &ps) != 0) { why = "has a parent that cannot be inspected"; break; }
+            if (ps.st_uid != geteuid() && ps.st_uid != 0)
+                why = "has a parent owned by another user";
+            else if ((ps.st_mode & (S_IWGRP | S_IWOTH)) && !(ps.st_mode & S_ISVTX))
+                why = "has a parent writable by other users";
+            if (sl == up) break;   /* checked "/" */
+        }
+    }
     if (!why) return 1;
     static int warned;
     if (!warned) {

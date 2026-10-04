@@ -403,11 +403,20 @@ assert_py "truncated right after a matching PID -> standalone (envelope invalid)
 printf '{"session_pid":%s,"declarations":[{"id":"x","annota' "$$" > "$MAL/.hull/discovery.json"
 OUTM5=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "truncated later in the document -> standalone (envelope invalid)" "$OUTM5" 'd["source"]=="standalone"'
-# sanity: a COMPLETE valid doc with a matching live PID IS served (proves the gate isn't
-# rejecting everything)
+# a repo-shipped pair (complete doc, matching LIVE pid - this shell's) but no session
+# nonce kept under $HOME: NOT served (a cloned repo could ship exactly this)
 printf '{"schema_version":1,"source":"dev","generation":7,"session_pid":%s,"declarations":[]}\n' "$$" > "$MAL/.hull/discovery.json"
 OUTM6=$("$HULL" agent inspect "$MAL" 2>/dev/null)
-assert_py "complete valid doc + live matching PID IS served (source=dev)" "$OUTM6" 'd["source"]=="dev" and d["generation"]==7'
+assert_py "planted sidecars without the session nonce -> standalone" "$OUTM6" 'd["source"]=="standalone"'
+# sanity: with the nonce in dev.json AND in $HOME/.hull/dev-sessions/<pid> (what a live
+# `hull dev --agent` writes) it IS served (proves the gate isn't rejecting everything)
+NHOME="$TMP/nonce_home"
+NONCE=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+mkdir -p "$NHOME/.hull/dev-sessions"
+printf '%s' "$NONCE" > "$NHOME/.hull/dev-sessions/$$"
+printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1,"nonce":"%s"}\n' "$$" "$NONCE" > "$MAL/.hull/dev.json"
+OUTM6B=$(HOME="$NHOME" "$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "complete valid doc + live matching PID + session nonce IS served (source=dev)" "$OUTM6B" 'd["source"]=="dev" and d["generation"]==7'
 # (f) valid JSON with a matching PID, then an embedded NUL + trailing garbage: the COMPLETE
 #     on-disk document is invalid -> standalone (must parse/emit the exact byte length, not
 #     stop at the NUL via strlen/fputs)

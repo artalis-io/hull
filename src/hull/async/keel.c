@@ -58,7 +58,30 @@ struct HlAsyncBackendCtx {
      * hoist out of the loop entirely. */
     _Atomic int   stop_flag;    /* run() / run_until() exit hint */
     int           borrowed;     /* 1 = wrap; free() must not destroy kel */
+    /* Per-fd watcher boxes for keel_watcher_tramp: {fd, cb, user}. */
+    struct KeelWatchBox **boxes;
+    size_t        nboxes, capboxes;
 };
+
+/* Keel calls a KlWatcherFn (KlSocketHandle, KlEventMask, void *); Hull's
+ * watchers are HlAsyncWatcherFn (int, unsigned, void *). Calling one through
+ * the other's type was undefined behaviour - fine on the SysV / AAPCS64
+ * calling conventions, a trap under clang's -fsanitize=cfi-icall. Keel gets
+ * this correctly typed trampoline and a box carrying the Hull callback. */
+typedef struct KeelWatchBox {
+    int              fd;
+    HlAsyncWatcherFn cb;
+    void            *user;
+} KeelWatchBox;
+
+static void keel_watcher_tramp(KlSocketHandle fd, KlEventMask ready, void *u)
+{
+    KeelWatchBox *b = (KeelWatchBox *)u;
+    HlAsyncWatcherFn cb = b->cb;       /* read before: cb may delete b */
+    void *user = b->user;
+    /* KlEventMask's READ / WRITE bits are HL_ASYNC_READ / WRITE. */
+    cb((int)fd, (unsigned)ready, user);
+}
 
 /* ── Init / free ────────────────────────────────────────────────────── */
 
@@ -87,6 +110,8 @@ static void keel_free(HlAsyncBackendCtx *ctx)
 {
     if (!ctx) return;
     if (!ctx->borrowed) kl_event_ctx_free(&ctx->kel_storage);
+    for (size_t i = 0; i < ctx->nboxes; i++) free(ctx->boxes[i]);
+    free(ctx->boxes);
     free(ctx);
 }
 
@@ -201,10 +226,24 @@ static int keel_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
     KlEventMask kmask = 0;
     if (mask & HL_ASYNC_READ)  kmask |= KL_EVENT_READ;
     if (mask & HL_ASYNC_WRITE) kmask |= KL_EVENT_WRITE;
-    /* KlWatcherFn signature: void (*)(int fd, KlEventMask, void *).
-     * HlAsyncWatcherFn:      void (*)(int fd, unsigned, void *).
-     * KlEventMask is an enum (int-compatible); the bits line up. */
-    return kl_watcher_add(ctx->kel, fd, kmask, (KlWatcherFn)cb, user);
+    if (ctx->nboxes == ctx->capboxes) {
+        size_t nc = ctx->capboxes ? ctx->capboxes * 2 : 16;
+        KeelWatchBox **nb = realloc(ctx->boxes, nc * sizeof *nb);
+        if (!nb) return -1;
+        ctx->boxes = nb;
+        ctx->capboxes = nc;
+    }
+    KeelWatchBox *b = malloc(sizeof *b);
+    if (!b) return -1;
+    b->fd = fd;
+    b->cb = cb;
+    b->user = user;
+    if (kl_watcher_add(ctx->kel, fd, kmask, keel_watcher_tramp, b) != 0) {
+        free(b);
+        return -1;
+    }
+    ctx->boxes[ctx->nboxes++] = b;
+    return 0;
 }
 
 static int keel_watcher_mod(HlAsyncBackendCtx *ctx, int fd, unsigned mask)
@@ -218,7 +257,15 @@ static int keel_watcher_mod(HlAsyncBackendCtx *ctx, int fd, unsigned mask)
 
 static void keel_watcher_del(HlAsyncBackendCtx *ctx, int fd)
 {
-    if (ctx) kl_watcher_del(ctx->kel, fd);
+    if (!ctx) return;
+    kl_watcher_del(ctx->kel, fd);
+    for (size_t i = 0; i < ctx->nboxes; i++) {
+        if (ctx->boxes[i]->fd == fd) {
+            free(ctx->boxes[i]);
+            ctx->boxes[i] = ctx->boxes[--ctx->nboxes];
+            break;
+        }
+    }
 }
 
 /* ── Thread pool ───────────────────────────────────────────────────── */

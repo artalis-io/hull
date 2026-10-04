@@ -117,29 +117,30 @@ void hl_manifest_free(HlManifest *m)
 /* Shared helper: copy one string into the arena, store the in-arena
  * pointer into *out, returning -1 on arena OOM. Treats NULL src as
  * success-with-NULL (some manifest fields are legitimately optional). */
-static int seal_str(ShSealArena *arena, const char **out, const char *src)
+/* Seal into `arena`, or - arena NULL - only add up what that would take
+ * (hl_manifest_seal_bytes), so the caller sizes the arena to the manifest
+ * rather than to a fixed 16 KiB a large legitimate one outgrew. */
+typedef struct {
+    ShSealArena *arena;
+    size_t       need;
+} SealCtx;
+
+static int seal_str(SealCtx *arena, const char **out, const char *src)
 {
     if (!src) { *out = NULL; return 0; }
-    char *dup = sh_seal_arena_strdup(arena, src);
+    if (!arena->arena) {
+        arena->need += strlen(src) + 1 + 16;   /* + alignment slack */
+        *out = src;
+        return 0;
+    }
+    char *dup = sh_seal_arena_strdup(arena->arena, src);
     if (!dup) return -1;
     *out = dup;
     return 0;
 }
 
-int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
+static int manifest_seal_impl(HlManifest *dst, const HlManifest *src, SealCtx *arena)
 {
-    if (!dst || !src || !arena) return -1;
-    if (!src->present) {
-        /* Nothing to seal - apps without a manifest declaration get
-         * a deny-default policy elsewhere. Zero dst to be safe. */
-        memset(dst, 0, sizeof(*dst));
-        return -1;
-    }
-    if (sh_seal_arena_is_sealed(arena)) {
-        /* Arena already sealed; can't allocate. Programming bug. */
-        memset(dst, 0, sizeof(*dst));
-        return -1;
-    }
 
     /* Start with a value-copy of integer + bounded-array fields. We'll
      * overwrite the pointer fields below. The wasm_*, gpu_*, compute,
@@ -231,6 +232,33 @@ fail:
      * away the integer fields. Caller treats -1 as "destroy the arena
      * and don't use dst". */
     return -1;
+}
+
+int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
+{
+    if (!dst || !src || !arena) return -1;
+    if (!src->present) {
+        /* Nothing to seal - apps without a manifest declaration get
+         * a deny-default policy elsewhere. Zero dst to be safe. */
+        memset(dst, 0, sizeof(*dst));
+        return -1;
+    }
+    if (sh_seal_arena_is_sealed(arena)) {
+        /* Arena already sealed; can't allocate. Programming bug. */
+        memset(dst, 0, sizeof(*dst));
+        return -1;
+    }
+    SealCtx c = { arena, 0 };
+    return manifest_seal_impl(dst, src, &c);
+}
+
+size_t hl_manifest_seal_bytes(const HlManifest *src)
+{
+    if (!src || !src->present) return 0;
+    HlManifest scratch;
+    SealCtx c = { NULL, 0 };
+    (void)manifest_seal_impl(&scratch, src, &c);
+    return c.need;
 }
 
 /* ── hl_manifest_check_env_refs ────────────────────────────────────── */

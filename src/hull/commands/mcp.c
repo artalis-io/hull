@@ -707,8 +707,18 @@ int hl_cmd_mcp(int argc, char **argv, const HlCommandEnv *env)
     }
 
     while (fgets(line_buf, MCP_MAX_LINE, stdin)) {
+        /* A line longer than the buffer: fgets returned only its first part,
+         * and the rest arrived as further "messages" (parse errors, the
+         * stream out of step). Drop the whole line and answer it once. */
+        size_t got = strlen(line_buf);
+        if (got == MCP_MAX_LINE - 1 && line_buf[got - 1] != '\n') {
+            int c;
+            while ((c = fgetc(stdin)) != EOF && c != '\n') { }
+            send_error(stdout, NULL, -32600, "Request too large");
+            continue;
+        }
         /* Skip empty lines */
-        size_t len = strlen(line_buf);
+        size_t len = got;
         while (len > 0 && (line_buf[len-1] == '\n' || line_buf[len-1] == '\r'))
             line_buf[--len] = '\0';
         if (len == 0) continue;

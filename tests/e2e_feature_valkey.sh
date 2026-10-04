@@ -109,7 +109,7 @@ echo "=== hull build --with=valkey ==="
 BUILD_OUT=$("$HULL" build --compiler=system --with=valkey --no-verify-platform -o "$APP/bin" "$APP" 2>&1) || true
 echo "$BUILD_OUT"
 echo "$BUILD_OUT" | grep -q "composed feature 'valkey'" || { echo "FAIL: feature not composed"; exit 1; }
-"$APP/bin" --no-sandbox -- "$DSN" 2>&1 | grep -q "VALKEY FEATURE APP OK" \
+"$APP/bin" --hull-no-sandbox -- "$DSN" 2>&1 | grep -q "VALKEY FEATURE APP OK" \
     || { echo "FAIL: composed app did not run"; exit 1; }
 echo "ok  --with=valkey composed + ran (--no-sandbox)"
 
@@ -134,7 +134,7 @@ echo "ok  plain app is valkey-free"
 
 # ---- negative: manifest kv.dynamic denies a disallowed host ----------------
 echo "=== negative: kv.dynamic host allowlist denies before dialing ==="
-DENY_OUT=$("$APP/bin" --no-sandbox -- "redis://10.11.12.13:$PORT" 2>&1) || true
+DENY_OUT=$("$APP/bin" --hull-no-sandbox -- "redis://10.11.12.13:$PORT" 2>&1) || true
 echo "$DENY_OUT" | grep -qi "not allowed by kv.dynamic.hosts" \
     || { echo "$DENY_OUT"; echo "FAIL: disallowed host was not denied by policy"; exit 1; }
 echo "ok  disallowed host denied by policy (no connect)"

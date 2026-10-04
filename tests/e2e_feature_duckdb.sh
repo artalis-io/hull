@@ -61,7 +61,7 @@ if ! echo "$RUN_OUT" | grep -q "DUCKDB FEATURE APP OK"; then
     file "$APP/bin" 2>/dev/null || true
     command -v ldd >/dev/null 2>&1 && ldd "$APP/bin" 2>&1 | head || true
     echo "--- retry with --no-sandbox (isolates sandbox vs link/static-init) ---"
-    if "$APP/bin" --no-sandbox 2>&1 | grep -q "DUCKDB FEATURE APP OK"; then
+    if "$APP/bin" --hull-no-sandbox 2>&1 | grep -q "DUCKDB FEATURE APP OK"; then
         echo "DIAG: works with --no-sandbox -> a sandboxed syscall blocks DuckDB init"
         if command -v strace >/dev/null 2>&1; then
             echo "--- strace (sandboxed run): syscalls that returned an error ---"

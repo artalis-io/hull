@@ -94,9 +94,17 @@ bare word starts `ctx.args` (`--` still works):
 ./app world --verbose                   # ctx.args = { "world", "--verbose" }
 ```
 
-In a built binary, Hull's own flags (`-d`, `--no-sandbox`, `--ca-bundle`,
-...) are recognised only before that first word; under `hull` they may appear
-anywhere before `--`.
+In a built binary, Hull's own flags (`-d`, `--verify-sig`, ...) are recognised
+only before that first word; under `hull` they may appear anywhere before `--`.
+
+The flags that weaken the process - `--no-sandbox`, `--allow-degraded-sandbox`,
+`--no-ca-bundle` / `--skip-ca-bundle`, `--ca-bundle`, `--no-verify-platform`,
+`--agent-api`, `--max-instructions` - take a reserved spelling in a built
+binary: `--hull-no-sandbox`, `--hull-ca-bundle PATH`, and so on. A bare one is
+refused with a hint rather than honoured, because a built binary cannot tell an
+operator's option from one of the app's own arguments (a wrapper forwarding a
+file name that reads `--no-sandbox`). Every Hull flag accepts the
+`--hull-<name>` spelling, under `hull` too (`--hull-d PATH` is `-d PATH`).
 
 `ctx` is a flat bag. No methods beyond what's listed. Apps wanting richer
 IO (random-access file read, mmap, fifo) use `require("hull.fs")` exactly as

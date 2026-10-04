@@ -510,4 +510,44 @@ UTEST(release_io, signed_version_required_from_its_first_release) {
     EXPECT_TRUE(hl_release_io_requires_signed_version("nightly"));   /* fail closed */
 }
 
+/* ── audit 4 ─────────────────────────────────────────────────────────── */
+
+UTEST(release_io_audit4, version_order_is_natural_and_strict)
+{
+    int c = 0;
+    EXPECT_GT(hl_release_io_version_cmp("v1.0.0-rc10", "v1.0.0-rc9", &c), 0);
+    EXPECT_TRUE(c);
+    EXPECT_LT(hl_release_io_version_cmp("v1.0.0-rc2", "v1.0.0-rc10", &c), 0);
+    hl_release_io_version_cmp("v1.2.3x", "v1.2.3", &c);
+    EXPECT_FALSE(c);                                       /* not a version */
+    hl_release_io_version_cmp("v99999999999.0.0", "v1.0.0", &c);
+    EXPECT_FALSE(c);                                       /* no saturation */
+}
+
+UTEST(release_io_audit4, checksum_lines_are_strict)
+{
+    char hex[65];
+    const char *good = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  a.tar\n";
+    EXPECT_EQ(hl_release_io_find_checksum(good, strlen(good), "a.tar", hex), 0);
+    const char *dup =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  a.tar\n"
+        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210  a.tar\n";
+    EXPECT_NE(hl_release_io_find_checksum(dup, strlen(dup), "a.tar", hex), 0);
+    const char *nothex = "z123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  a.tar\n";
+    EXPECT_NE(hl_release_io_find_checksum(nothex, strlen(nothex), "a.tar", hex), 0);
+    static const char withnul[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  a.tar\0x\n";
+    EXPECT_NE(hl_release_io_find_checksum(withnul, sizeof withnul - 1, "a.tar", hex), 0);
+}
+
+UTEST(release_io_audit4, repo_names_are_checked)
+{
+    EXPECT_TRUE(hl_release_io_repo_valid("artalis-io/hull"));
+    EXPECT_FALSE(hl_release_io_repo_valid("artalis-io/hull/../x"));
+    EXPECT_FALSE(hl_release_io_repo_valid("evil.com?x=/y"));
+    EXPECT_FALSE(hl_release_io_repo_valid("../hull"));
+    EXPECT_FALSE(hl_release_io_repo_valid("noslash"));
+    EXPECT_FALSE(hl_release_io_tag_valid("v1.0.0/../../x"));
+}
+
 UTEST_MAIN()

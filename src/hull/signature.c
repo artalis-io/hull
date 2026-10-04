@@ -22,6 +22,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 
 /* VFS: O(log n) lookups into sorted entry arrays */
@@ -488,17 +489,18 @@ int hl_sig_verify_files_embedded(const HlSignature *sig, const HlVfs *vfs)
         }
     }
 
-    /* Check for extra module files in the binary not in the signature */
-    const HlEntry *mod_first = NULL;
-    size_t mod_count = hl_vfs_prefix(vfs, "./", &mod_first);
-    for (size_t i = 0; i < mod_count; i++) {
-        const char *ename = mod_first[i].name;
+    /* Every embedded entry must be signed - not only the ./ modules:
+     * compute WASM, AOT native code, shaders, templates, static files and
+     * migrations added after signing were never noticed. */
+    for (size_t i = 0; i < vfs->count; i++) {
+        const char *ename = vfs->entries[i].name;
+        if (!ename) continue;
         if (ename[0] == '.' && ename[1] == '/')
             ename += 2;
 
         if (!sig_entry_in_sig(sig, ename)) {
             log_error("[sig] extra file in binary not in signature: %s",
-                      mod_first[i].name);
+                      vfs->entries[i].name);
             return -1;
         }
     }
@@ -519,6 +521,11 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
 
         FILE *f = fopen(path, "rb");
         if (!f) {
+            /* An AOT artifact is made in the build's tmpdir and only ever
+             * embedded: an unbuilt app's tree does not have it. */
+            if (strncmp(name, "compute/", 8) == 0 && strstr(name, ".aot.") &&
+                errno == ENOENT)
+                continue;
             log_error("[sig] cannot open file: %s", path);
             return -1;
         }
@@ -609,6 +616,142 @@ void hl_sig_free(HlSignature *sig)
 }
 
 /* ── Full startup verification ────────────────────────────────────── */
+
+/* ── The verified policy (M13) ─────────────────────────────────────
+ *
+ * What --verify-sig verified, kept for the runtime check that follows app
+ * load: the signed `manifest` and `modules_resolved`, as canonical JSON.
+ * Captured from the very signature that was verified (re-reading
+ * package.sig later would be a race), once per process. */
+static char *g_verified_manifest;   /* NULL: no manifest was signed */
+static size_t g_verified_manifest_len;
+static char *g_verified_modules;
+static size_t g_verified_modules_len;
+static int   g_verified_captured;
+
+static char *sig_value_json(const ShJsonValue *v, size_t *out_len)
+{
+    *out_len = 0;
+    if (!v || sh_json_type(v) == SH_JSON_NULL) return NULL;
+    ShJsonBuf jb;
+    sh_json_buf_init(&jb);
+    ShJsonWriter w;
+    sh_json_writer_init(&w, sh_json_buf_write, &jb);
+    sig_write_value(&w, v);
+    if (sh_json_writer_error(&w) || !jb.buf) { sh_json_buf_free(&jb); return NULL; }
+    char *out = malloc(jb.len + 1);
+    if (out) { memcpy(out, jb.buf, jb.len); out[jb.len] = '\0'; *out_len = jb.len; }
+    sh_json_buf_free(&jb);
+    return out;
+}
+
+static void sig_capture_policy(const HlSignature *sig)
+{
+    free(g_verified_manifest);
+    free(g_verified_modules);
+    g_verified_manifest = sig_value_json(sig->manifest_value, &g_verified_manifest_len);
+    g_verified_modules  = sig_value_json(sig->modules_resolved_value, &g_verified_modules_len);
+    g_verified_captured = 1;
+}
+
+/* Structural JSON equality: objects compare by key set, not order. */
+static int json_equal(const ShJsonValue *a, const ShJsonValue *b, int depth)
+{
+    if (depth > 64) return 0;
+    ShJsonType ta = sh_json_type(a), tb = sh_json_type(b);
+    if (ta != tb) return 0;
+    switch (ta) {
+    case SH_JSON_NULL:   return 1;
+    case SH_JSON_BOOL:   return a->u.bool_val == b->u.bool_val;
+    case SH_JSON_NUMBER: return a->u.num_val == b->u.num_val;
+    case SH_JSON_STRING:
+        return a->u.string_val.len == b->u.string_val.len &&
+               memcmp(a->u.string_val.str, b->u.string_val.str,
+                      a->u.string_val.len) == 0;
+    case SH_JSON_ARRAY:
+        if (a->u.array_val.count != b->u.array_val.count) return 0;
+        for (size_t i = 0; i < a->u.array_val.count; i++)
+            if (!json_equal(a->u.array_val.items[i], b->u.array_val.items[i], depth + 1))
+                return 0;
+        return 1;
+    case SH_JSON_OBJECT:
+        if (a->u.object_val.count != b->u.object_val.count) return 0;
+        for (size_t i = 0; i < a->u.object_val.count; i++) {
+            const ShJsonMember *m = &a->u.object_val.members[i];
+            ShJsonValue *o = sh_json_get_n(b, m->key, m->key_len);
+            if (!o || !json_equal(m->value, o, depth + 1)) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+int hl_sig_check_runtime_policy(const char *manifest_json, size_t manifest_len,
+                                HlSigHasModuleFn has_module, void *ud,
+                                int module_count, char *err, size_t err_size)
+{
+    if (!g_verified_captured) {
+        snprintf(err, err_size, "no verified signature to check the policy against");
+        return -1;
+    }
+    size_t asz = 4096 + 8 * (manifest_len + g_verified_manifest_len +
+                             g_verified_modules_len);
+    SHArena *arena = sh_arena_create(asz);
+    if (!arena) { snprintf(err, err_size, "out of memory"); return -1; }
+    int rc = -1;
+
+    /* 1. The manifest the app runs with is the one that was signed. */
+    if (!manifest_json != !g_verified_manifest) {
+        snprintf(err, err_size, "the app %s a manifest but the signed package %s",
+                 manifest_json ? "declares" : "does not declare",
+                 g_verified_manifest ? "has one" : "has none");
+        goto out;
+    }
+    if (manifest_json) {
+        ShJsonValue *rt = NULL, *sg = NULL;
+        if (sh_json_parse(manifest_json, manifest_len, arena, &rt) != SH_JSON_OK ||
+            sh_json_parse(g_verified_manifest, g_verified_manifest_len, arena, &sg) != SH_JSON_OK) {
+            snprintf(err, err_size, "manifest JSON unreadable");
+            goto out;
+        }
+        if (!json_equal(rt, sg, 0)) {
+            snprintf(err, err_size, "the manifest the app declared at run time "
+                     "differs from the signed one");
+            goto out;
+        }
+    }
+
+    /* 2. And so is its resolved module surface. */
+    if (g_verified_modules && has_module) {
+        ShJsonValue *mods = NULL;
+        if (sh_json_parse(g_verified_modules, g_verified_modules_len, arena, &mods) != SH_JSON_OK ||
+            sh_json_type(mods) != SH_JSON_ARRAY) {
+            snprintf(err, err_size, "signed modules_resolved unreadable");
+            goto out;
+        }
+        size_t nsig = mods->u.array_val.count;
+        for (size_t i = 0; i < nsig; i++) {
+            ShJsonValue *e = mods->u.array_val.items[i];
+            const char *name = sh_json_type(e) == SH_JSON_OBJECT
+                ? sh_json_as_string(sh_json_get(e, "name"), NULL)
+                : sh_json_as_string(e, NULL);
+            if (!name || !has_module(ud, name)) {
+                snprintf(err, err_size, "signed module '%s' is not resolved at run time",
+                         name ? name : "?");
+                goto out;
+            }
+        }
+        if (module_count < 0 || (size_t)module_count != nsig) {
+            snprintf(err, err_size, "the run-time module set (%d) differs from the "
+                     "signed modules_resolved (%zu)", module_count, nsig);
+            goto out;
+        }
+    }
+    rc = 0;
+out:
+    sh_arena_free(arena);
+    return rc;
+}
 
 int hl_verify_startup(const char *pubkey_path, const char *entry_point,
                       const HlVfs *app_vfs, int no_verify_platform)
@@ -800,6 +943,43 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
                 return -1;
             }
 
+            /* The signed manifest proves only that the MANIFEST is
+             * genuine; the app is bound to it by the per-arch hashes the
+             * build cross-checked against its platform archive. Without
+             * them (a --no-verify-platform or --target build inherits the
+             * building hull's manifest + signature verbatim) this check
+             * passed for an app linked against any libhull_platform.a. */
+            {
+                ShJsonValue *ah = sig.platform.gethull_value
+                    ? sh_json_get(sig.platform.gethull_value, "arch_hashes") : NULL;
+                size_t nah = (ah && sh_json_type(ah) == SH_JSON_OBJECT)
+                    ? ah->u.object_val.count : 0;
+                if (nah == 0) {
+                    log_error("[sig] app does not bind its platform library to "
+                              "the signed manifest (built with "
+                              "--no-verify-platform?); pass --no-verify-platform "
+                              "to skip this check");
+                    hl_sig_free(&sig);
+                    return -1;
+                }
+                for (size_t i = 0; i < nah; i++) {
+                    const char *arch = ah->u.object_val.members[i].key;
+                    const char *hash = sh_json_as_string(
+                        ah->u.object_val.members[i].value, NULL);
+                    char want[65];
+                    if (!arch || !hash || strlen(hash) != 64 ||
+                        hl_platform_sig_extract_for_arch(
+                            sig.platform.gethull_manifest,
+                            sig.platform.gethull_manifest_len, arch, want) != 0 ||
+                        memcmp(want, hash, 64) != 0) {   /* public hashes */
+                        log_error("[sig] platform hash for '%s' is not the one "
+                                  "in the signed manifest", arch ? arch : "?");
+                        hl_sig_free(&sig);
+                        return -1;
+                    }
+                }
+            }
+
             /* 5c. Composed-feature attestation (issue #114).
              *
              * Beyond the base platform lib, a native app whole-archives the
@@ -898,6 +1078,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
         return -1;
     }
 
+    sig_capture_policy(&sig);   /* for hl_sig_check_runtime_policy */
     hl_sig_free(&sig);
     return 0;
 }

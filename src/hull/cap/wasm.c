@@ -898,6 +898,9 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     uint32_t heap_size  = opts && opts->heap_size   ? opts->heap_size  : HL_WASM_DEFAULT_HEAP;
     uint32_t stack_size = opts && opts->stack_size   ? opts->stack_size : HL_WASM_DEFAULT_STACK;
     int64_t  gas        = opts && opts->gas          ? opts->gas        : HL_WASM_DEFAULT_GAS;
+    /* A non-positive gas is "the default", never "unmetered": a limit is
+     * set only for gas > 0, so {gas = -1} ran an infinite loop forever. */
+    if (gas <= 0) gas = HL_WASM_DEFAULT_GAS;
 
     /* Clamp to maximums (I/O limits widened for Memory64 after module detection) */
     if (max_input > HL_WASM64_MAX_IO_SIZE)   max_input = HL_WASM64_MAX_IO_SIZE;
@@ -1398,6 +1401,7 @@ static int instance_call_buf_impl(HlWasmInstance *pi,
     int64_t  gas        = opts && opts->gas          ? opts->gas
                         : pi->default_gas            ? pi->default_gas
                         : HL_WASM_DEFAULT_GAS;
+    if (gas <= 0) gas = HL_WASM_DEFAULT_GAS;   /* see the call path above */
 
     {
         uint64_t io_max = (pi->module && pi->module->is_memory64)

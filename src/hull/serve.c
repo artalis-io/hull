@@ -79,6 +79,7 @@
 #include "hull/utils/parse_size.h"
 #include "hull/sandbox.h"
 #include "hull/signature.h"
+#include "hull/runtime_flags.h"
 #include "hull/static.h"
 #include "hull/tool.h"
 #ifdef HL_ENABLE_WASM
@@ -392,6 +393,10 @@ typedef struct {
 static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
 {
     for (int i = 1; i < argc; i++) {
+        /* --hull-<name> and the built-binary rule: include/hull/runtime_flags.h */
+        int prefixed = hl_runtime_flag_unprefix(&argv[i]);
+        if (hl_runtime_flag_check(argv[i], prefixed, embedded_app_present()) != 0)
+            return -1;
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             char *end;
             long p = strtol(argv[++i], &end, 10);
@@ -657,7 +662,7 @@ static void hl_resolve_wasm_config(HlRuntime *rt, const HlManifest *manifest,
 {
     uint32_t wh = manifest->wasm_heap;
     uint32_t ws = manifest->wasm_stack;
-    int64_t  wg = manifest->wasm_gas;
+    int64_t  wg = manifest->wasm_gas > 0 ? manifest->wasm_gas : 0;   /* <= 0: default */
     uint32_t wi = manifest->wasm_max_input;
     uint32_t wo = manifest->wasm_max_output;
 
@@ -1065,6 +1070,24 @@ static void hl_serve_init_infra(HlServerState *s)
  * Depends on: init_server, init_infra (thread_pool, comp_ctx). */
 static int hl_serve_init_app_context(HlServerState *s)
 {
+    /* RT-01: verify the app signature before ANYTHING of the app runs - its
+     * migrations included. Verified in phase 10, the context had already
+     * applied migrations/ *.sql to the -d database (a tampered DROP TABLE
+     * committed before "signature verification failed"). The embedded
+     * entries are what a built binary runs; an unbuilt app is verified on
+     * disk (as serve_cli.c does). */
+    if (s->cfg.verify_sig_path) {
+        extern const HlEntry hl_app_entries[];
+        HlVfs vfs;
+        hl_vfs_init(&vfs, hl_app_entries, s->app_dir);
+        if (hl_verify_startup(s->cfg.verify_sig_path, s->entry_point, &vfs,
+                              s->cfg.no_verify_platform) != 0) {
+            log_error("[hull:c] signature verification failed - refusing to start");
+            return -1;
+        }
+        log_info("[hull:c] signature verified OK");
+    }
+
 #ifdef HL_ENABLE_WASM
     /* Initialize WAMR compute runtime (static cache persists across calls).
      * Wired to context via opts so module registration in init() can see it.
@@ -1105,6 +1128,15 @@ static int hl_serve_init_app_context(HlServerState *s)
         }
     }
 
+    /* Phase 1 sandbox (exec/proc/fork blocked) before the context runs any
+     * of the app's SQL or code; after the WAMR / GPU device init above. */
+    if (!s->cfg.no_sandbox) {
+        if (hl_sandbox_apply_pledge() != 0) {
+            log_error("[hull:c] failed to apply phase 1 sandbox");
+            return -1;
+        }
+    }
+
     HlAppContextOpts app_opts = {
         .app_dir           = s->app_dir,
         .entry_point       = s->entry_point,
@@ -1135,30 +1167,43 @@ static int hl_serve_init_app_context(HlServerState *s)
     return 0;
 }
 
+/* --verify-sig: the policy the app runs with must be the one that was
+ * signed (the manifest is re-derived by running app code, which could
+ * declare a wider one when served than when built). */
+typedef struct { const HlResolvedModuleSet *set; } SigModuleSet;
+
+static int sig_has_module(void *ud, const char *name)
+{
+    return hl_module_set_contains_name(((SigModuleSet *)ud)->set, name);
+}
+
+static int hl_check_signed_policy(HlRuntime *rt)
+{
+    char *mj = NULL;
+    size_t ml = 0;
+    if (!rt->vt->manifest_json || rt->vt->manifest_json(rt, &mj, &ml) != 0) {
+        log_error("[hull:c] --verify-sig: cannot read the app's manifest");
+        return -1;
+    }
+    char err[256];
+    SigModuleSet ms = { rt->module_set };
+    int rc = hl_sig_check_runtime_policy(
+        mj, ml, rt->module_set ? sig_has_module : NULL, &ms,
+        rt->module_set ? hl_module_set_count(rt->module_set) : 0, err, sizeof err);
+    free(mj);
+    if (rc != 0) {
+        log_error("[hull:c] --verify-sig: %s - refusing to start", err);
+        return -1;
+    }
+    return 0;
+}
+
 /* Phase 10: Verify signature, apply phase-1 sandbox, load app code.
  * Depends on: init_app_context (runtime initialized, app not yet loaded). */
 static int hl_serve_load_app(HlServerState *s)
 {
-    const HlVfs *app_vfs = hl_app_context_app_vfs(s->app);
-
-    /* RT-01: Verify app signature BEFORE loading - malicious code never
-     * executes if verification fails. */
-    if (s->cfg.verify_sig_path) {
-        if (hl_verify_startup(s->cfg.verify_sig_path, s->entry_point, app_vfs,
-                              s->cfg.no_verify_platform) != 0) {
-            log_error("[hull:c] signature verification failed - refusing to start");
-            return -1;
-        }
-        log_info("[hull:c] signature verified OK");
-    }
-
-    /* Phase 1 sandbox: block exec/proc/fork before loading user code */
-    if (!s->cfg.no_sandbox) {
-        if (hl_sandbox_apply_pledge() != 0) {
-            log_error("[hull:c] failed to apply phase 1 sandbox");
-            return -1;
-        }
-    }
+    /* The signature was verified and the phase-1 sandbox applied in phase 9,
+     * before the context ran migrations. */
 
     /* Load and evaluate the app (runs under phase 1 pledge) */
     if (hl_app_context_load(s->app, s->entry_point) != 0) {
@@ -1336,7 +1381,16 @@ static int hl_serve_wire_caps(HlServerState *s)
             log_error("[hull:c] %s", ref_err);
             return -1;
         }
-        if (sh_seal_arena_init(&s->seal_arena, 16 * 1024 + sizeof(HlManifest),
+        /* Sized to the manifest: a fixed 16 KiB refused a large legitimate
+         * one at startup. The 16 KiB stays for the module set, the DuckDB
+         * policy and the struct copy that follow. */
+        if (sh_seal_arena_init(&s->seal_arena,
+                                16 * 1024 + sizeof(HlManifest) +
+                                hl_manifest_seal_bytes(&s->manifest) +
+                                /* the DuckDB policy's absolute fs paths */
+                                (size_t)(s->manifest.fs_read_count +
+                                         s->manifest.fs_write_count) *
+                                    (strlen(s->app_dir) + 32),
                                 "manifest-policy") != 0) {
             log_error("[hull:c] seal arena init failed (mmap)");
             return -1;
@@ -1480,6 +1534,9 @@ static int hl_serve_wire_caps(HlServerState *s)
         log_info("[hull:c] modules resolved: %d admitted",
                  hl_module_set_count(rt->module_set));
     }
+
+    if (s->cfg.verify_sig_path && hl_check_signed_policy(rt) != 0)
+        return -1;
 
     /* Validate the pre-manifest import tracker against the resolved
      * set.  Top-level Lua require / JS import statements run before
@@ -1875,8 +1932,18 @@ static int hl_serve_wire_routes(HlServerState *s)
     /* Register agent diagnostic endpoints (opt-in via --agent-api) */
     s->agent_api_ctx = (HlAgentApiCtx){ .app_dir = s->app_dir,
                                         .db_path = s->cfg.no_db ? NULL : s->cfg.db_path };
-    if (s->cfg.agent_api_mode)
+    if (s->cfg.agent_api_mode) {
+        /* Unauthenticated (schema, migrate, errors): loopback only. With
+         * -b 0.0.0.0 they were reachable from the network. */
+        const char *b = s->cfg.bind_addr ? s->cfg.bind_addr : "";
+        if (strcmp(b, "127.0.0.1") != 0 && strcmp(b, "::1") != 0 &&
+            strcmp(b, "localhost") != 0 && strncmp(b, "127.", 4) != 0) {
+            log_error("[hull:c] --agent-api serves unauthenticated endpoints "
+                      "and needs a loopback bind (got -b %s)", b);
+            return -1;
+        }
         hl_agent_api_register(&s->server, &s->agent_api_ctx);
+    }
     return 0;
 }
 
@@ -2293,10 +2360,11 @@ int hull_serve(int argc, char **argv)
     if (!s.cfg.no_db && hl_sandbox_dsn_is_network(s.cfg.db_path))
         hl_ca_trust_publish(s.cfg.skip_ca_bundle, s.cfg.ca_bundle_override);
 
-    /* Phase 9: VFS + DB + runtime init via HlAppContext (deferred app load) */
+    /* Phase 9: signature verify, phase-1 sandbox, then VFS + DB + migrations +
+     * runtime init via HlAppContext (deferred app load) */
     if (hl_serve_init_app_context(&s) != 0) { hl_serve_cleanup(&s); return 1; }
 
-    /* Phase 10: signature verify, phase-1 sandbox, load app */
+    /* Phase 10: load app */
     if (hl_serve_load_app(&s) != 0) { hl_serve_cleanup(&s); return 1; }
 
     /* Phase 11: manifest, caps, phase-2 sandbox, routes, event loop */

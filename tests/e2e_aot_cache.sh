@@ -152,7 +152,7 @@ HITS3=$(echo "$OUT7" | grep -c "\[cache hit\]" || true)
 # The cached AOT was produced once at step 6 and replayed at step 7;
 # loading it through the embedded VFS proves the cache→build→runtime
 # round-trip preserves AOT correctness.
-"$OUT/app7" -p 19874 --no-migrate --no-sandbox >/dev/null 2>&1 &
+"$OUT/app7" -p 19874 --no-migrate --hull-no-sandbox >/dev/null 2>&1 &
 APP_PID=$!
 sleep 1
 HEALTH=$(curl -sf --max-time 2 "http://127.0.0.1:19874/health" 2>/dev/null || echo "")

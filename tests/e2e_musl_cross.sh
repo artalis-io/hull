@@ -109,7 +109,7 @@ if [ -f "$BIN" ]; then
     #    has no landlock, so pledge/unveil sealing fails (a container limit, not
     #    a musl issue - same convention as e2e_musl.sh).
     echo "== run the musl binary in alpine:3.20 =="
-    RUN="$(docker run --rm -v "$WORKDIR":/app:ro alpine:3.20 /app/app-musl --no-sandbox 2>&1 || true)"
+    RUN="$(docker run --rm -v "$WORKDIR":/app:ro alpine:3.20 /app/app-musl --hull-no-sandbox 2>&1 || true)"
     echo "$RUN" | sed 's/^/    /'
     assert "app.main ran on musl"      sh -c "printf '%s' '$RUN' | grep -q 'musl-cross-ok'"
 fi

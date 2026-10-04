@@ -88,7 +88,7 @@ printf 'app.manifest({ modules = {} })\napp.main(function(ctx) ctx.stdout:write(
     > "$WORKDIR/compute/app.lua"
 if "$HULL" build "$WORKDIR/compute" --no-verify-platform -o "$WORKDIR/compute/bin" \
         >/tmp/musl_c.log 2>&1; then
-    out="$("$WORKDIR/compute/bin" --no-sandbox 2>/dev/null || true)"
+    out="$("$WORKDIR/compute/bin" --hull-no-sandbox 2>/dev/null || true)"
     if [ "$out" = "musl compute ok" ]; then
         ok "compute emit-path app builds + runs on musl (no ld-musl reloc crash)"
     else
@@ -104,7 +104,7 @@ printf 'app.manifest({ modules = { "hull/http-server@1" } })\napp.get("/", funct
     > "$WORKDIR/http/app.lua"
 if "$HULL" build "$WORKDIR/http" --no-verify-platform -o "$WORKDIR/http/srv" \
         >/tmp/musl_h.log 2>&1; then
-    "$WORKDIR/http/srv" -p 8137 --no-sandbox >/tmp/musl_srv.log 2>&1 &
+    "$WORKDIR/http/srv" -p 8137 --hull-no-sandbox >/tmp/musl_srv.log 2>&1 &
     SRV=$!
     sleep 1
     body="$(wget -qO- http://127.0.0.1:8137/ 2>/dev/null || true)"
@@ -130,7 +130,7 @@ if command -v ld.lld >/dev/null 2>&1 && [ -r /usr/lib/crt1.o ]; then
         # static iff no PT_INTERP program header; plus it must run.
         if readelf -l "$WORKDIR/static/bin" 2>/dev/null | grep -q INTERP; then
             bad "Tier B binary is not static (has a PT_INTERP)"
-        elif "$WORKDIR/static/bin" --no-sandbox >/dev/null 2>&1; then
+        elif "$WORKDIR/static/bin" --hull-no-sandbox >/dev/null 2>&1; then
             ok "Tier B (--linker=lld-static) builds a fully static musl binary that runs"
         else
             bad "Tier B static binary did not run cleanly"
@@ -148,7 +148,7 @@ if command -v ld.lld >/dev/null 2>&1 && [ -r /usr/lib/crt1.o ]; then
     if PATH="$ccfree" HULL_LIBC_DIR=/usr/lib "$HULL" build "$WORKDIR/static" \
             --no-verify-platform --linker=lld-static -o "$WORKDIR/ccfree" \
             >/tmp/musl_cf.log 2>&1 \
-       && "$WORKDIR/ccfree" --no-sandbox >/dev/null 2>&1; then
+       && "$WORKDIR/ccfree" --hull-no-sandbox >/dev/null 2>&1; then
         ok "Tier B links with NO cc on PATH (libgcc found by glob, not cc)"
     else
         bad "Tier B cc-free build"; tail -10 /tmp/musl_cf.log
@@ -162,7 +162,7 @@ if command -v ld.lld >/dev/null 2>&1 && [ -r /usr/lib/crt1.o ]; then
     if sh scripts/build_musl_floor.sh "$floor" >/tmp/musl_floor.log 2>&1; then
         if PATH="$ccfree" "$HULL" build "$WORKDIR/static" --no-verify-platform \
                 --linker=lld-static -o "$WORKDIR/bundle" >/tmp/musl_bn.log 2>&1 \
-           && "$WORKDIR/bundle" --no-sandbox >/dev/null 2>&1; then
+           && "$WORKDIR/bundle" --hull-no-sandbox >/dev/null 2>&1; then
             ok "Tier B self-contained via installed libc-musl-$arch bundle (no cc, no HULL_LIBC_DIR)"
         else
             bad "Tier B bundle build"; tail -10 /tmp/musl_bn.log

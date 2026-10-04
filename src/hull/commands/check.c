@@ -20,12 +20,22 @@
 
 int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
 {
+    /* One app directory for every step: the positional (as the test and
+     * verify steps take it), else --app-dir. Steps 1-2 used --app-dir
+     * (default ".") while 3-4 used the positional, so `hull check
+     * services/api` from a monorepo root validated the ROOT app's manifest
+     * and imports and passed a CI gate for the wrong app. */
+    const char *app_dir = env->app_dir;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] != '-') { app_dir = argv[i]; break; }
+    }
+
     /* Step 1: load the app's manifest and print declared modules.
      * Surfaces top-level load errors (unparseable manifest, missing
      * entry point) before the test runner has to. */
     fprintf(stderr, "[hull:check] validating manifest...\n");
     {
-        const char *list_argv[3] = { "check", "list", env->app_dir };
+        const char *list_argv[3] = { "check", "list", app_dir };
         int rc = hl_cmd_modules(3, (char **)(uintptr_t)list_argv, env);  /* hl_cmd_modules does not modify argv */
         if (rc != 0) {
             fprintf(stderr, "[hull:check] manifest validation failed\n");
@@ -40,7 +50,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
      * executes); unused declarations are advisory only. */
     fprintf(stderr, "[hull:check] analyzing imports...\n");
     {
-        const char *analyze_argv[3] = { "check", "analyze", env->app_dir };
+        const char *analyze_argv[3] = { "check", "analyze", app_dir };
         int rc = hl_cmd_modules(3, (char **)(uintptr_t)analyze_argv, env);  /* hl_cmd_modules does not modify argv */
         if (rc != 0) {
             fprintf(stderr, "[hull:check] import analysis failed\n");

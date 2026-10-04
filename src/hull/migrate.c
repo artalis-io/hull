@@ -14,8 +14,13 @@
 #include "hull/utils/alloc.h"
 #include "hull/vfs.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/crypto.h"   /* hl_cap_crypto_sha256 */
+#include "utils/hex.h"        /* hl_hex_encode */
 
 #include <dirent.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,8 +44,15 @@
 static const char *CREATE_TABLE_SQL =
     "CREATE TABLE IF NOT EXISTS _hull_migrations ("
     "  name VARCHAR(255) NOT NULL PRIMARY KEY,"
-    "  applied_at TEXT NOT NULL"
+    "  applied_at TEXT NOT NULL,"
+    "  checksum VARCHAR(64)"
     ")";
+
+static int noop_row_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    (void)ctx; (void)cols; (void)ncols;
+    return 1;
+}
 
 static int ensure_tracking_table(HlDbHandle *h)
 {
@@ -49,32 +61,83 @@ static int ensure_tracking_table(HlDbHandle *h)
                   hl_db_errmsg(h));
         return -1;
     }
+    /* A table made before the checksum column existed gets it (nullable;
+     * such rows are backfilled from the SQL as it is now). */
+    if (hl_db_query(h, "SELECT checksum FROM _hull_migrations WHERE 1 = 0",
+                    NULL, 0, noop_row_cb, NULL, NULL) != 0 &&
+        hl_db_exec(h, "ALTER TABLE _hull_migrations ADD COLUMN checksum VARCHAR(64)",
+                   NULL, 0) < 0) {
+        log_error("[hull:migrate] cannot add the checksum column: %s",
+                  hl_db_errmsg(h));
+        return -1;
+    }
     return 0;
+}
+
+/* sha256 hex of a migration's SQL. */
+static void sql_checksum(const char *sql, size_t len, char hex[65])
+{
+    uint8_t d[32];
+    if (hl_cap_crypto_sha256(sql, len, d) != 0) { hex[0] = '\0'; return; }
+    hl_hex_encode(d, 32, hex, 65);
 }
 
 /* ── Check if a migration has been applied ────────────────────────── */
 
+typedef struct {
+    int  found;
+    int  has_sum;
+    char sum[65];
+} AppliedRow;
+
 static int migrate_found_cb(void *ctx, HlColumn *cols, int ncols)
 {
-    (void)cols; (void)ncols;
-    *(int *)ctx = 1;
+    AppliedRow *r = (AppliedRow *)ctx;
+    r->found = 1;
+    if (ncols > 0 && (cols[0].value.type == HL_TYPE_TEXT ||
+                      cols[0].value.type == HL_TYPE_BLOB) &&
+        cols[0].value.len == 64) {
+        memcpy(r->sum, cols[0].value.s, 64);
+        r->sum[64] = '\0';
+        r->has_sum = 1;
+    }
     return 1;   /* one row is enough; stop the scan */
 }
 
 /* 1 applied, 0 not, -1 when the lookup itself failed. A failed lookup read
  * as "not applied" and ran the migration again - on a dropped connection, a
  * locked database, a timeout - against a schema that already had it. */
-static int is_applied(HlDbHandle *h, const char *name)
+/* An applied migration's SQL is compared with what was applied: an edit
+ * used to be skipped without a word, so the schema the code expects and
+ * the one the database has drifted apart silently. Not re-run (that is
+ * what a new migration is for) - reported. A row from before checksums is
+ * backfilled. */
+static int is_applied(HlDbHandle *h, const char *name, const char *sql, size_t len)
 {
     HlValue p = { .type = HL_TYPE_TEXT, .s = name, .len = strlen(name) };
-    int found = 0;
-    if (hl_db_query(h, "SELECT 1 FROM _hull_migrations WHERE name = ?",
-                    &p, 1, migrate_found_cb, &found, NULL) != 0) {
+    AppliedRow r = { 0, 0, { 0 } };
+    if (hl_db_query(h, "SELECT checksum FROM _hull_migrations WHERE name = ?",
+                    &p, 1, migrate_found_cb, &r, NULL) != 0) {
         log_error("[migrate] could not check whether %s is applied: %s",
                   name, hl_db_errmsg(h));
         return -1;
     }
-    return found;
+    if (!r.found) return 0;
+    char now[65];
+    sql_checksum(sql, len, now);
+    if (!r.has_sum) {
+        HlValue up[2] = {
+            { .type = HL_TYPE_TEXT, .s = now,  .len = strlen(now) },
+            { .type = HL_TYPE_TEXT, .s = name, .len = strlen(name) },
+        };
+        (void)hl_db_exec(h, "UPDATE _hull_migrations SET checksum = ? "
+                            "WHERE name = ? AND checksum IS NULL", up, 2);
+    } else if (strcmp(now, r.sum) != 0) {
+        log_warn("[hull:migrate] %s was CHANGED after it was applied - the "
+                 "change is NOT applied (applied migrations never re-run). "
+                 "Put schema changes in a new migration.", name);
+    }
+    return 1;
 }
 
 /* ── Record a migration as applied ────────────────────────────────── */
@@ -90,16 +153,19 @@ static void iso_now(char *buf, size_t len)
         buf[0] = '\0';
 }
 
-static int record_migration(HlDbHandle *h, const char *name)
+static int record_migration(HlDbHandle *h, const char *name,
+                            const char *sql, size_t len)
 {
-    char ts[32];
+    char ts[32], sum[65];
     iso_now(ts, sizeof ts);
-    HlValue params[2] = {
+    sql_checksum(sql, len, sum);
+    HlValue params[3] = {
         { .type = HL_TYPE_TEXT, .s = name, .len = strlen(name) },
         { .type = HL_TYPE_TEXT, .s = ts,   .len = strlen(ts) },
+        { .type = HL_TYPE_TEXT, .s = sum,  .len = strlen(sum) },
     };
-    if (hl_db_exec(h, "INSERT INTO _hull_migrations (name, applied_at) "
-                      "VALUES (?, ?)", params, 2) < 0)
+    if (hl_db_exec(h, "INSERT INTO _hull_migrations (name, applied_at, checksum) "
+                      "VALUES (?, ?, ?)", params, 3) < 0)
         return -1;
     return 0;
 }
@@ -141,7 +207,7 @@ static int execute_migration(HlDbHandle *h, const char *name,
         return -1;
     }
 
-    if (record_migration(h, name) != 0) {
+    if (record_migration(h, name, sql, sql_len) != 0) {
         log_error("[hull:migrate] %s: failed to record migration", name);
         hl_db_rollback(h);
         return -1;
@@ -259,8 +325,15 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
         snprintf(filepath, sizeof(filepath), "%s/migrations/%s",
                  root_dir, ml->names[i]);
 
-        FILE *f = fopen(filepath, "r");
+        /* A regular file only, opened without blocking: a FIFO named
+         * NNN_x.sql hung startup in fopen. */
+        int mfd = open(filepath, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        struct stat mst;
+        FILE *f = NULL;
+        if (mfd >= 0 && fstat(mfd, &mst) == 0 && S_ISREG(mst.st_mode))
+            f = fdopen(mfd, "r");
         if (!f) {
+            if (mfd >= 0) close(mfd);
             log_error("[hull:migrate] cannot read %s", filepath);
             migration_list_free(ml);
             return -1;
@@ -336,7 +409,8 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
         int applied = 0;
         for (size_t i = 0; i < mig_count; i++) {
             const char *mig_name = first[i].name + 11; /* strip "migrations/" */
-            int ia = is_applied(handle, mig_name);
+            int ia = is_applied(handle, mig_name, (const char *)first[i].data,
+                                first[i].len);
             if (ia < 0)
                 return HL_MIGRATE_ERR;
             if (ia)
@@ -368,7 +442,7 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
 
     int applied = 0;
     for (int i = 0; i < ml.count; i++) {
-        int ia = is_applied(handle, ml.names[i]);
+        int ia = is_applied(handle, ml.names[i], ml.sqls[i], strlen(ml.sqls[i]));
         if (ia < 0) {
             migration_list_free(&ml);
             return HL_MIGRATE_ERR;

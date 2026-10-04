@@ -355,6 +355,10 @@ typedef struct ShSealArena ShSealArena;
  */
 int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena);
 
+/** Bytes hl_manifest_seal will take from an arena for @p src's strings
+ *  (with alignment slack) - to size the arena to the manifest. */
+size_t hl_manifest_seal_bytes(const HlManifest *src);
+
 /*
  * Check every "$VAR" / "${VAR}" reference in the manifest names a variable the
  * manifest declares, in `secrets` or `env`.

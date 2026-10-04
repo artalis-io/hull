@@ -79,7 +79,7 @@ INSUF2="ret=3;filled=2;names=big0,big1;foffs=4294967299,4563402757;first=42;end=
 check() {  # label, workdir, launch argv...
     label="$1"; workdir="$2"; shift 2
     PORT=$((19500 + $$ % 300))
-    ( cd "$workdir" && "$@" -p "$PORT" --no-sandbox -l debug ) >"$TMP/srv.log" 2>&1 &
+    ( cd "$workdir" && "$@" -p "$PORT" --hull-no-sandbox -l debug ) >"$TMP/srv.log" 2>&1 &
     PID=$!; sleep 2
     if ! kill -0 $PID 2>/dev/null; then fail "$label: server start"; cat "$TMP/srv.log"; return; fi
     c3=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/meta?cap=3")

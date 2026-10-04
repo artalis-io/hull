@@ -145,7 +145,7 @@ if [ "$MODE" = "build" ]; then
     echo "── Building example apps for MODE=build ──"
     # --no-verify-platform: this hull's platform lib hasn't been
     # signed (locally built), so verification would fail. Apps
-    # built this way must also be RUN with --no-verify-platform -
+    # built this way must also be RUN with --hull-no-verify-platform -
     # launch_app passes that downstream.
     build_one() {
         # $1=name  $2=source-dir
@@ -191,7 +191,7 @@ launch_app() {
         _wd="$BUILD_OUT_DIR/$_name-work"
         rm -rf "$_wd" && mkdir -p "$_wd/data"
         ( cd "$_wd" && exec "$BUILD_OUT_DIR/$_name" -p "$_port" -d "$_db" \
-            --no-verify-platform ) >"$_log" 2>&1 &
+            --hull-no-verify-platform ) >"$_log" 2>&1 &
     else
         "$HULL" -p "$_port" -d "$_db" "$_appfile" >"$_log" 2>&1 &
     fi

@@ -10,14 +10,61 @@
 #include "hull/utils/compress.h"
 
 #include <string.h>
+#include <strings.h>   /* strncasecmp */
 
-/* Check if "gzip" appears in Accept-Encoding header value */
+/* 1 when the q-value starting at @p q (after "q=") is zero: "0", "0.",
+ * "0.0", "0.00", "0.000". */
+static int qvalue_is_zero(const char *q, const char *end)
+{
+    if (q >= end || *q != '0') return 0;
+    q++;
+    if (q < end && *q == '.') {
+        q++;
+        while (q < end && *q == '0') q++;
+    }
+    while (q < end && (*q == ' ' || *q == '\t')) q++;
+    return q >= end;
+}
+
+/* Does Accept-Encoding accept gzip? Parsed as a list of codings with
+ * parameters, not searched for the substring: "gzip;q=0" is a refusal (it
+ * got gzip), and "x-gzip" / "*" count as asking for it. */
 static int accepts_gzip(KlHttpRequest *req)
 {
     const char *ae = kl_http_request_header(req, "Accept-Encoding");
     if (!ae)
         return 0;
-    return strstr(ae, "gzip") != NULL;
+    int gzip = -1, star = -1;   /* -1 not named, 0 refused, 1 accepted */
+    const char *p = ae;
+    while (*p) {
+        const char *item_end = strchr(p, ',');
+        if (!item_end) item_end = p + strlen(p);
+        while (p < item_end && (*p == ' ' || *p == '\t')) p++;
+        const char *name = p;
+        while (p < item_end && *p != ';' && *p != ' ' && *p != '\t') p++;
+        size_t nlen = (size_t)(p - name);
+        int ok = 1;
+        /* parameters: look for q= */
+        while (p < item_end) {
+            const char *semi = memchr(p, ';', (size_t)(item_end - p));
+            if (!semi) break;
+            p = semi + 1;
+            while (p < item_end && (*p == ' ' || *p == '\t')) p++;
+            if (p + 1 < item_end && (p[0] == 'q' || p[0] == 'Q') && p[1] == '=') {
+                const char *qend = memchr(p, ';', (size_t)(item_end - p));
+                if (!qend) qend = item_end;
+                if (qvalue_is_zero(p + 2, qend)) ok = 0;
+            }
+        }
+        if ((nlen == 4 && strncasecmp(name, "gzip", 4) == 0) ||
+            (nlen == 6 && strncasecmp(name, "x-gzip", 6) == 0))
+            gzip = ok;
+        else if (nlen == 1 && name[0] == '*')
+            star = ok;
+        p = *item_end ? item_end + 1 : item_end;
+    }
+    if (gzip >= 0) return gzip;
+    return star == 1;
 }
 
 void hl_maybe_compress(KlHttpRequest *req, KlHttpResponse *res,

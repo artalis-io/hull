@@ -20,6 +20,9 @@
 #include "hull/tls_transport.h"
 #include <keel/tls.h>
 
+#ifdef __COSMOPOLITAN__
+#include <cosmo.h>   /* GetProgramExecutableName */
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -65,7 +68,16 @@ const char *hl_release_io_platform(void)
 
 int hl_release_io_self_path(char *out, size_t out_sz)
 {
-#if defined(__APPLE__)
+#if defined(__COSMOPOLITAN__)
+    /* An APE knows its own path (any host). Without this the callers fell
+     * back to argv[0] - a bare "hull" when launched via PATH - and `hull
+     * update` replaced ./hull in the working directory, verify-self hashed
+     * it. */
+    const char *p = GetProgramExecutableName();
+    if (!p || !*p) return -1;
+    int n = snprintf(out, out_sz, "%s", p);
+    return (n < 0 || (size_t)n >= out_sz) ? -1 : 0;
+#elif defined(__APPLE__)
     uint32_t sz = (uint32_t)out_sz;
     if (_NSGetExecutablePath(out, &sz) != 0)
         return -1;
@@ -190,10 +202,14 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
     if (!repo || !tag || !alloc || !tls || !out_manifest || !out_manifest_len)
         return -1;
     if (!ua) ua = "hull";
+    if (!hl_release_io_repo_valid(repo) || !hl_release_io_tag_valid(tag)) {
+        fprintf(stderr, "%s: invalid release repo or tag (%s @ %s)\n", ua, repo, tag);
+        return -1;
+    }
     if (out_sig) *out_sig = NULL;
     if (out_sig_len) *out_sig_len = 0;
 
-    char sha_url[256];
+    char sha_url[1024];
     snprintf(sha_url, sizeof(sha_url),
              "https://github.com/%s/releases/download/%s/hull.sha256", repo, tag);
 
@@ -205,7 +221,7 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
     }
 
     if (hl_release_pubkey_configured()) {
-        char sig_url[256];
+        char sig_url[1024];
         snprintf(sig_url, sizeof(sig_url),
                  "https://github.com/%s/releases/download/%s/hull.sha256.sig", repo, tag);
 
@@ -310,6 +326,12 @@ static int local_sha256_file_hex(const char *path, char hex[65])
 
 int hl_release_io_verify_local_asset(const char *dir, const char *asset)
 {
+    return hl_release_io_verify_local_asset_file(dir, asset, NULL);
+}
+
+int hl_release_io_verify_local_asset_file(const char *dir, const char *asset,
+                                          const char *file)
+{
     if (!dir || !asset) return -1;
     char path[PATH_MAX];
     char *manifest = NULL, *sig = NULL;
@@ -360,8 +382,12 @@ int hl_release_io_verify_local_asset(const char *dir, const char *asset)
         fprintf(stderr, "hull platform: %s not in cached manifest (reinstall)\n", asset);
         goto done;
     }
-    if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, asset) >= sizeof(path))
+    if (file) {
+        if ((size_t)snprintf(path, sizeof(path), "%s", file) >= sizeof(path))
+            goto done;
+    } else if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, asset) >= sizeof(path)) {
         goto done;
+    }
     if (local_sha256_file_hex(path, actual) != 0) goto done;
 
     /* 4. Constant-time compare. */
@@ -419,13 +445,17 @@ int hl_release_io_sha256_hex(const unsigned char *data, size_t len,
 
 /* ── Atomic write ────────────────────────────────────────────────── */
 
-/* Write @p data to @p new_path (O_CREAT|O_TRUNC, @p mode), fsync, close, and
+/* Write @p data to a fresh @p new_path (@p mode), fsync, close, and
  * re-chmod (umask defeats the open mode). Unlinks @p new_path on any failure.
  * Shared by atomic_write and self_replace. Returns 0 on success, -1 on failure. */
 static int write_new_file(const char *new_path, const void *data, size_t len,
                           int mode)
 {
-    int fd = open(new_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    /* Created fresh: a leftover <target>.new (a crashed run - or a symlink
+     * planted there) is removed first, and the open neither follows a
+     * symlink nor reuses a file someone else made. O_TRUNC followed one. */
+    (void)unlink(new_path);
+    int fd = open(new_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode);
     if (fd < 0) {
         fprintf(stderr, "release_io: cannot create %s: %s\n",
                 new_path, strerror(errno));
@@ -609,15 +639,23 @@ static int parse_version_ex(const char *s, long v[3], int *ahead, const char **p
     if (*s == 'v') s++;
     for (int i = 0; i < 3; i++) {
         if (*s < '0' || *s > '9') return -1;
-        char *end;
-        v[i] = strtol(s, &end, 10);
-        s = end;
+        /* Bounded by hand: strtol saturated on a huge component, so two
+         * different versions compared equal. */
+        long n = 0;
+        int digits = 0;
+        while (*s >= '0' && *s <= '9') {
+            if (++digits > 9) return -1;
+            n = n * 10 + (*s - '0');
+            s++;
+        }
+        v[i] = n;
         if (i < 2) {
             if (*s != '.') return -1;
             s++;
         }
     }
-    if (*s != '-') { *ahead = 0; return 0; }
+    if (*s == '\0') { *ahead = 0; return 0; }
+    if (*s != '-') return -1;   /* "v1.2.3x" used to read as v1.2.3 */
     const char *suf = s + 1;
     const char *d = suf;
     while (*d >= '0' && *d <= '9') d++;
@@ -649,10 +687,51 @@ int hl_release_io_version_cmp(const char *a, const char *b, int *comparable)
         if (va[i] != vb[i]) return va[i] < vb[i] ? -1 : 1;
     if (aa != ab) return aa < ab ? -1 : 1;   /* pre-release < release < dev */
     if (aa == -1 && pa && pb) {              /* two pre-releases: rc1 < rc2 */
-        int c = strcmp(pa, pb);
-        return c < 0 ? -1 : c > 0 ? 1 : 0;
+        /* Natural order: a run of digits compares by value, so rc10 is
+         * after rc9 (strcmp put it before). */
+        const char *x = pa, *y = pb;
+        while (*x && *y) {
+            if (*x >= '0' && *x <= '9' && *y >= '0' && *y <= '9') {
+                while (*x == '0' && x[1] >= '0' && x[1] <= '9') x++;
+                while (*y == '0' && y[1] >= '0' && y[1] <= '9') y++;
+                const char *xe = x, *ye = y;
+                while (*xe >= '0' && *xe <= '9') xe++;
+                while (*ye >= '0' && *ye <= '9') ye++;
+                if (xe - x != ye - y) return (xe - x) < (ye - y) ? -1 : 1;
+                int c = strncmp(x, y, (size_t)(xe - x));
+                if (c != 0) return c < 0 ? -1 : 1;
+                x = xe; y = ye;
+                continue;
+            }
+            if (*x != *y) return (unsigned char)*x < (unsigned char)*y ? -1 : 1;
+            x++; y++;
+        }
+        if (*x || *y) return *x ? 1 : -1;
     }
     return 0;
+}
+
+int hl_release_io_repo_valid(const char *repo)
+{
+    /* "owner/name": one slash, each side 1..100 of [A-Za-z0-9._-], not "."
+     * or "..". It goes into URL paths: a free-form --repo retargeted the
+     * fetches (still gated by the signed manifest, but to anything). */
+    if (!repo) return 0;
+    const char *slash = strchr(repo, '/');
+    if (!slash || strchr(slash + 1, '/')) return 0;
+    size_t a = (size_t)(slash - repo), b = strlen(slash + 1);
+    if (a == 0 || b == 0 || a > 100 || b > 100) return 0;
+    for (const char *p = repo; *p; p++) {
+        char c = *p;
+        if (c == '/') continue;
+        int ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                 (c >= 'A' && c <= 'Z') || c == '.' || c == '-' || c == '_';
+        if (!ok) return 0;
+    }
+    if ((a == 1 && repo[0] == '.') || (a == 2 && repo[0] == '.' && repo[1] == '.') ||
+        strcmp(slash + 1, ".") == 0 || strcmp(slash + 1, "..") == 0)
+        return 0;
+    return 1;
 }
 
 int hl_release_io_tag_valid(const char *tag)

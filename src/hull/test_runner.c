@@ -53,7 +53,15 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
     }
 
     int grand_total = 0, grand_passed = 0, grand_failed = 0;
-    HlTestCaseResult results[HL_TEST_RUNNER_MAX_RESULTS];
+    /* On the heap: about 1.3 MB, more than a 1 MB main-thread stack
+     * (Windows) holds. */
+    HlTestCaseResult *results = calloc(HL_TEST_RUNNER_MAX_RESULTS, sizeof *results);
+    if (!results) {
+        for (char **fp = test_files; *fp; fp++) free(*fp);
+        free(test_files);
+        kl_http_router_free(&router);
+        return -1;
+    }
 
     for (char **fp = test_files; *fp; fp++) {
         const char *file = *fp;
@@ -65,7 +73,7 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
 
         int file_total = 0, file_passed = 0, file_failed = 0;
         const char *load_err = NULL;
-        memset(results, 0, sizeof(results));
+        memset(results, 0, HL_TEST_RUNNER_MAX_RESULTS * sizeof *results);
 
         int rc = rt->vt->run_test_file(rt, file,
                                        results, HL_TEST_RUNNER_MAX_RESULTS,
@@ -80,8 +88,12 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
             continue;
         }
 
+        /* Only the stored results: a file with more cases than the array
+         * holds reported file_total, and the writers read past its end. */
+        int stored = file_total < HL_TEST_RUNNER_MAX_RESULTS
+                   ? file_total : HL_TEST_RUNNER_MAX_RESULTS;
         if (writer && writer->on_file_end)
-            writer->on_file_end(writer->user, results, file_total,
+            writer->on_file_end(writer->user, results, stored,
                                 file_total, file_passed, file_failed);
 
         grand_total  += file_total;
@@ -90,6 +102,7 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
         free(*fp);
     }
     free(test_files);
+    free(results);
 
     if (writer && writer->on_summary)
         writer->on_summary(writer->user, grand_total, grand_passed, grand_failed);

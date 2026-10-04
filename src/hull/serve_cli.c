@@ -43,6 +43,7 @@
 #include "hull/cap/env.h"
 #include "hull/cap/audit.h"
 #include "hull/signature.h"
+#include "hull/runtime_flags.h"
 #include "hull/vfs.h"
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_registry.h"
@@ -117,6 +118,10 @@ static int cli_parse_args(int argc, char **argv,
     *out_ca_override = NULL;
 
     for (int i = 1; i < argc; i++) {
+        /* --hull-<name> and the built-binary rule: include/hull/runtime_flags.h */
+        int prefixed = hl_runtime_flag_unprefix(&argv[i]);
+        if (hl_runtime_flag_check(argv[i], prefixed, embedded_app_present()) != 0)
+            return -2;
         if (strcmp(argv[i], "--") == 0) {
             *out_app_argv = &argv[i + 1];
             *out_app_argc = argc - i - 1;
@@ -223,6 +228,37 @@ static int cli_parse_args(int argc, char **argv,
         entry_idx = i;
     }
     return entry_idx;
+}
+
+/* --verify-sig: the policy the app runs with must be the one that was
+ * signed (the manifest is re-derived by running app code, which could
+ * declare a wider one when served than when built). */
+typedef struct { const HlResolvedModuleSet *set; } SigModuleSet;
+
+static int sig_has_module(void *ud, const char *name)
+{
+    return hl_module_set_contains_name(((SigModuleSet *)ud)->set, name);
+}
+
+static int hl_check_signed_policy(HlRuntime *rt)
+{
+    char *mj = NULL;
+    size_t ml = 0;
+    if (!rt->vt->manifest_json || rt->vt->manifest_json(rt, &mj, &ml) != 0) {
+        log_error("[hull:cli] --verify-sig: cannot read the app's manifest");
+        return -1;
+    }
+    char err[256];
+    SigModuleSet ms = { rt->module_set };
+    int rc = hl_sig_check_runtime_policy(
+        mj, ml, rt->module_set ? sig_has_module : NULL, &ms,
+        rt->module_set ? hl_module_set_count(rt->module_set) : 0, err, sizeof err);
+    free(mj);
+    if (rc != 0) {
+        log_error("[hull:cli] --verify-sig: %s - refusing to start", err);
+        return -1;
+    }
+    return 0;
 }
 
 /* Weak default: the Keel-free app.main runner. serve.c provides a STRONG
@@ -446,7 +482,9 @@ int hull_serve(int argc, char **argv)
         return 1;
     }
     ShSealArena seal_arena;
-    if (sh_seal_arena_init(&seal_arena, 16 * 1024 + sizeof(HlManifest),
+    if (sh_seal_arena_init(&seal_arena,
+                           2 * sizeof(HlManifest) + 16 * 1024 +   /* see serve.c */
+                           hl_manifest_seal_bytes(&manifest),
                            "manifest-policy") != 0) {
         log_error("[hull:cli] seal arena init failed (mmap)");
         hl_manifest_free(&manifest);
@@ -499,6 +537,15 @@ int hull_serve(int argc, char **argv)
         }
         memcpy(resolved, rt->module_set, sizeof(HlResolvedModuleSet));
         rt->module_set = resolved;
+    }
+    if (xo.verify_sig && hl_check_signed_policy(rt) != 0) {
+        sh_seal_arena_destroy(&seal_arena);
+        hl_app_context_free(ctx);
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
+        return 1;
     }
     /* The manifest STRUCT as well, not only its strings: its pointer arrays
      * and counts are the allowlists (hosts[], hosts_count, ...), and a copy

@@ -115,6 +115,13 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
  */
 int hl_release_io_verify_local_asset(const char *dir, const char *asset);
 
+/** As hl_release_io_verify_local_asset, but hashes @p file (a copy of the
+ *  asset: the one actually linked) instead of <dir>/<asset>. Verifying the
+ *  cached original and then copying it left a window in which the cache
+ *  file could be swapped. NULL @p file = <dir>/<asset>. */
+int hl_release_io_verify_local_asset_file(const char *dir, const char *asset,
+                                          const char *file);
+
 /**
  * Extract a flat `"key":"value"` entry from a JSON blob. Deliberately
  * tiny - sufficient for GitHub release metadata fields like
@@ -202,6 +209,10 @@ int hl_release_io_requires_signed_version(const char *tag);
  * (vMAJOR.MINOR.PATCH[-suffix], [A-Za-z0-9._-] only, < 64 bytes). The tag
  * comes unsigned from the GitHub API and is pasted into download URLs. */
 int hl_release_io_tag_valid(const char *tag);
+
+/** 1 when @p repo is a well-formed GitHub "owner/name" (each side 1..100 of
+ *  [A-Za-z0-9._-]); 0 otherwise. */
+int hl_release_io_repo_valid(const char *repo);
 
 /* The release's own name, signed. `version` is the content of the release's
  * hull.version asset; `manifest` is its (already signature-verified)

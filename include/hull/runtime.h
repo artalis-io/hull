@@ -88,6 +88,11 @@ typedef struct HlRuntimeVtable {
                                 void *(*alloc_fn)(size_t));
     int   (*extract_manifest)(HlRuntime *rt, HlManifest *out);
 
+    /* The declared manifest as JSON (malloc'd into *out, NULL when none is
+     * declared), encoded as the build encodes it - for --verify-sig's
+     * run-time policy check. 0 / -1. */
+    int   (*manifest_json)(HlRuntime *rt, char **out, size_t *out_len);
+
     /* Walk every registered route + middleware. Either callback may be
      * NULL to skip that category. Used by agent_lib::routes for
      * introspection - folds parallel Lua/JS code paths into one. */

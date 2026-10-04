@@ -320,7 +320,10 @@ local function main()
         end
         local path = app_dir .. "/" .. name
         local data = read_file(path)
-        if not data then
+        if not data and name:match("^compute/.+%.aot%.") then
+            -- A build artifact (made in the build's tmpdir, only embedded):
+            -- not beside the source. Covered by binary_hash below.
+        elseif not data then
             missing[#missing + 1] = name
         else
             local actual_hash = hex.encode(crypto.sha256(data))
@@ -351,6 +354,27 @@ local function main()
             tool.stderr("    actual:   " .. m.actual .. "\n")
         end
         issues = issues + #mismatches
+    end
+
+    -- The built binary itself: binary_hash was signed but never compared,
+    -- so embedded content that is not a source file beside the app (AOT
+    -- native code) went unchecked.
+    if sig.binary_hash then
+        local bin = app_dir .. "/app" .. (tool.exe_suffix and tool.exe_suffix() or "")
+        local bdata = read_file(bin)
+        if bdata then
+            local actual = hex.encode(crypto.sha256(bdata))
+            if actual ~= sig.binary_hash then
+                tool.stderr("Binary: MODIFIED - " .. bin .. " does not match binary_hash\n")
+                tool.stderr("    expected: " .. sig.binary_hash .. "\n")
+                tool.stderr("    actual:   " .. actual .. "\n")
+                issues = issues + 1
+            else
+                print("Binary: VALID (" .. bin .. ")")
+            end
+        else
+            print("Binary: not present (" .. bin .. "), binary_hash not checked")
+        end
     end
 
     if issues > 0 then

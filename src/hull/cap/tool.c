@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -100,15 +101,54 @@ void hl_tool_unveil_seal(HlToolUnveilCtx *ctx)
     if (ctx) ctx->sealed = 1;
 }
 
+/* Canonical form of @p path into @p out: realpath when it exists; else the
+ * realpath of its nearest existing ancestor plus the remaining components,
+ * none of which may be "." or "..". -1 when that cannot be done. The check
+ * used to fall back to the RAW path when realpath failed (a leaf not yet
+ * created): "/tmp/../home/u/x" then passed the "/tmp" prefix. */
+static int tool_canonical_path(const char *path, char out[PATH_MAX])
+{
+    if (realpath(path, out) != NULL) return 0;
+    char work[PATH_MAX];
+    int n = snprintf(work, sizeof work, "%s", path);
+    if (n <= 0 || (size_t)n >= sizeof work) return -1;
+    /* Split off trailing components until the rest resolves. */
+    char tail[PATH_MAX];
+    tail[0] = '\0';
+    for (;;) {
+        char *slash = strrchr(work, '/');
+        const char *comp = slash ? slash + 1 : work;
+        if (comp[0] == '\0' || strcmp(comp, ".") == 0 || strcmp(comp, "..") == 0)
+            return -1;
+        char nt[PATH_MAX];
+        int m = tail[0] ? snprintf(nt, sizeof nt, "%s/%s", comp, tail)
+                        : snprintf(nt, sizeof nt, "%s", comp);
+        if (m < 0 || (size_t)m >= sizeof nt) return -1;
+        memcpy(tail, nt, (size_t)m + 1);
+        const char *base;
+        if (!slash)            base = ".";
+        else if (slash == work) base = "/";
+        else { *slash = '\0'; base = work; }
+        char res[PATH_MAX];
+        if (realpath(base, res) != NULL) {
+            int k = strcmp(res, "/") == 0
+                ? snprintf(out, PATH_MAX, "/%s", tail)
+                : snprintf(out, PATH_MAX, "%s/%s", res, tail);
+            return (k < 0 || k >= PATH_MAX) ? -1 : 0;
+        }
+        if (!slash || slash == work) return -1;
+    }
+}
+
 int hl_tool_unveil_check(const HlToolUnveilCtx *ctx, const char *path, char needed)
 {
     if (!ctx || !path) return -1;
 
     /* Resolve the path being checked */
     char resolved[PATH_MAX];
-    const char *check_path = path;
-    if (realpath(path, resolved) != NULL)
-        check_path = resolved;
+    if (tool_canonical_path(path, resolved) != 0)
+        return -1;
+    const char *check_path = resolved;
 
     for (int i = 0; i < ctx->count; i++) {
         const char *unveiled = ctx->entries[i].path;
@@ -720,6 +760,22 @@ static int cosmo_copy(const char *src, const char *dst)
  * symlinked sub-tools resolve their shebang; ignored on failure (busybox's own
  * shebang routing covers the common case, and the drive root is not always
  * writable). Once per process. */
+/* 1 when @p a and @p b have the same bytes. */
+static int cosmo_same_file(const char *a, const char *b)
+{
+    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
+    int same = fa && fb;
+    char x[8192], y[8192];
+    while (same) {
+        size_t na = fread(x, 1, sizeof x, fa), nb = fread(y, 1, sizeof y, fb);
+        if (na != nb || memcmp(x, y, na) != 0) same = 0;
+        else if (na == 0) break;
+    }
+    if (fa) fclose(fa);
+    if (fb) fclose(fb);
+    return same;
+}
+
 static void cosmo_plant_sh(const char *shell)
 {
     static int planted = 0;
@@ -727,6 +783,13 @@ static void cosmo_plant_sh(const char *shell)
     planted = 1;
     (void)mkdir("/bin", 0755);
     (void)cosmo_copy(shell, "/bin/sh.exe");   /* best-effort */
+    /* The drive root is shared: any user can create C:\bin, and cosmocc's
+     * "#!/bin/sh" then runs whatever sh.exe is there - planted or not. When
+     * it is not hull's busybox (the copy was refused), say so. */
+    if (access("/bin/sh.exe", F_OK) == 0 && !cosmo_same_file(shell, "/bin/sh.exe"))
+        fprintf(stderr, "hull: warning: /bin/sh.exe is not hull's busybox and "
+                "could not be replaced - cosmocc's #!/bin/sh scripts run it. "
+                "Check who controls C:\\bin.\n");
 }
 
 static void cosmo_prepare(const char *shell)
@@ -1059,8 +1122,11 @@ int hl_tool_copy(const char *src, const char *dst,
     FILE *in = fopen(src, "rb");
     if (!in) return -1;
 
-    FILE *out = fopen(dst, "wb");
-    if (!out) { fclose(in); return -1; }
+    /* Not through a symlink at the destination: in an app tree it was
+     * planted by the repo, and pointed the write anywhere. */
+    int ofd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    FILE *out = ofd >= 0 ? fdopen(ofd, "wb") : NULL;
+    if (!out) { if (ofd >= 0) close(ofd); fclose(in); return -1; }
 
     char buf[8192];
     size_t n;

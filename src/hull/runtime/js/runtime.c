@@ -1395,6 +1395,33 @@ static int vt_js_extract_manifest(HlRuntime *rt, HlManifest *out)
     return hl_manifest_extract_js(js->ctx, out, js->base.alloc);
 }
 
+/* The declared manifest as JSON - for --verify-sig's policy check. */
+static int vt_js_manifest_json(HlRuntime *rt, char **out, size_t *out_len)
+{
+    HlJS *js = (HlJS *)rt;
+    JSContext *ctx = js->ctx;
+    *out = NULL;
+    *out_len = 0;
+    JSValue g = JS_GetGlobalObject(ctx);
+    JSValue m = JS_GetPropertyStr(ctx, g, "__hull_manifest");
+    JS_FreeValue(ctx, g);
+    if (JS_IsUndefined(m) || JS_IsNull(m)) { JS_FreeValue(ctx, m); return 0; }
+    JSValue j = JS_JSONStringify(ctx, m, JS_UNDEFINED, JS_UNDEFINED);
+    JS_FreeValue(ctx, m);
+    if (JS_IsException(j)) { JS_FreeValue(ctx, JS_GetException(ctx)); return -1; }
+    size_t n = 0;
+    const char *s = JS_ToCStringLen(ctx, &n, j);
+    JS_FreeValue(ctx, j);
+    if (!s) { JS_FreeValue(ctx, JS_GetException(ctx)); return -1; }
+    char *copy = malloc(n + 1);
+    if (copy) { memcpy(copy, s, n); copy[n] = '\0'; }
+    JS_FreeCString(ctx, s);
+    if (!copy) return -1;
+    *out = copy;
+    *out_len = n;
+    return 0;
+}
+
 /* Walk a JS array property of globalThis, calling cb with method+pattern.
  * Shared body for route + middleware enumeration; the visitor differs. */
 typedef struct { const char *method, *pattern; } JsRouteRow;
@@ -1980,6 +2007,7 @@ const HlRuntimeVtable hl_js_vtable = {
     .load_app             = vt_js_load_app,
     .wire_routes_server   = vt_js_wire_routes_server,
     .extract_manifest     = vt_js_extract_manifest,
+    .manifest_json        = vt_js_manifest_json,
     .enumerate_routes     = vt_js_enumerate_routes,
     .enumerate_middleware = vt_js_enumerate_middleware,
     .test_setup           = vt_js_test_setup,

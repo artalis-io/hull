@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/cap/crypto.h"   /* hl_cap_crypto_random */
 #include "hull/commands/dev.h"
 #include "hull/dev_state.h"
 #include "hull/tool.h"
@@ -38,8 +39,61 @@ static void agent_ensure_dir(const char *app_dir)
     mkdir(path, 0755);
 }
 
+/* The session's nonce, and where it is kept outside the app tree:
+ * $HOME/.hull/dev-sessions/<supervisor pid>. `hull agent inspect` serves a
+ * published generation only when dev.json carries that nonce - a repo that
+ * ships its own .hull/dev.json + discovery.json (naming a live pid of the
+ * user's) cannot also plant a file under $HOME. */
+static char g_dev_nonce[65];
+
+static int dev_session_path(char *out, size_t out_sz, int mkdirs)
+{
+    const char *home = getenv("HOME");
+    if (!home || !*home) home = getenv("USERPROFILE");
+    if (!home || !*home) return -1;
+    char dir[PATH_MAX];
+    int n = snprintf(dir, sizeof dir, "%s/.hull/dev-sessions", home);
+    if (n < 0 || (size_t)n >= sizeof dir) return -1;
+    if (mkdirs) {
+        char hd[PATH_MAX];
+        snprintf(hd, sizeof hd, "%s/.hull", home);
+        (void)mkdir(hd, 0700);
+        (void)mkdir(dir, 0700);
+    }
+    n = snprintf(out, out_sz, "%s/%d", dir, (int)getpid());
+    return (n < 0 || (size_t)n >= out_sz) ? -1 : 0;
+}
+
+static void dev_session_remove(void)
+{
+    char p[PATH_MAX];
+    if (g_dev_nonce[0] && dev_session_path(p, sizeof p, 0) == 0) unlink(p);
+}
+
 static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
 {
+    if (!g_dev_nonce[0]) {
+        unsigned char r[32];
+        if (hl_cap_crypto_random(r, sizeof r) == 0) {
+            static const char hx[] = "0123456789abcdef";
+            for (int i = 0; i < 32; i++) {
+                g_dev_nonce[2 * i]     = hx[r[i] >> 4];
+                g_dev_nonce[2 * i + 1] = hx[r[i] & 15];
+            }
+            g_dev_nonce[64] = '\0';
+            char sp[PATH_MAX];
+            if (dev_session_path(sp, sizeof sp, 1) == 0) {
+                (void)unlink(sp);
+                int fd = open(sp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+                if (fd >= 0) {
+                    ssize_t w = write(fd, g_dev_nonce, 64);
+                    (void)w;
+                    close(fd);
+                }
+            }
+        }
+    }
+
     char path[PATH_MAX], tmp[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
     if (n < 0 || (size_t)n >= sizeof(path)) return;
@@ -51,8 +105,9 @@ static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
     /* session_pid = the dev SUPERVISOR pid (stable across reloads); pid = the served
      * child (changes each reload). The supervisor identity lets `hull agent inspect` bind
      * a published discovery generation to THIS live dev session. */
-    fprintf(f, "{\"port\":%d,\"pid\":%d,\"session_pid\":%d,\"started_at\":%ld}\n",
-            port, (int)pid, (int)getpid(), (long)time(NULL));
+    fprintf(f, "{\"port\":%d,\"pid\":%d,\"session_pid\":%d,\"started_at\":%ld,"
+               "\"nonce\":\"%s\"}\n",
+            port, (int)pid, (int)getpid(), (long)time(NULL), g_dev_nonce);
     fclose(f);
     if (rename(tmp, path) != 0) unlink(tmp);   /* atomic publish (tmp + rename) */
 }
@@ -102,6 +157,7 @@ static void agent_publish_discovery(const char *hull_exe, const char *app_dir, l
 
 static void agent_remove_sidecars(const char *app_dir)
 {
+    dev_session_remove();
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
     if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
@@ -570,6 +626,16 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
         }
 
         dev_child_pid = pid;
+        /* A signal between fork() and the line above found no child to
+         * forward to; the loop then broke out and left this one running,
+         * holding the port. Forward it now. */
+        if (dev_got_signal) {
+            kill(pid, dev_got_signal);
+            (void)waitpid(pid, NULL, 0);
+            dev_child_pid = 0;
+            ret = 128 + dev_got_signal;
+            break;
+        }
 
         if (agent_mode) {
             agent_write_dev_json(app_dir, port, pid);
