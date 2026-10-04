@@ -196,7 +196,7 @@ static int l_tar_create(lua_State *L)
      * produced an empty archive instead of nil, err. */
     if (!ents && msg) {
         lua_pushnil(L);
-        lua_pushstring(L, msg ? msg : "tar.create: bad entries");
+        lua_pushstring(L, msg);
         return 2;
     }
 
