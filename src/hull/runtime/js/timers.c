@@ -160,6 +160,8 @@ void hl_js_timer_trampoline(void *user_data)
      * (`await null`, an already-resolved promise). Run them, with the timer
      * still active, so a Hull call they reach takes it - as dispatch.c does
      * for a request. */
+    /* JS_Call above may set last_async_cont (cppcheck cannot see it). */
+    // cppcheck-suppress knownConditionTrueFalse
     if (state == JS_PROMISE_PENDING && !js->last_async_cont) {
         hl_js_run_jobs(js);
         state = JS_PromiseState(ctx, ret);

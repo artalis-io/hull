@@ -76,6 +76,8 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         /* Pending with no continuation yet: run its microtasks before
          * deciding (as dispatch and on_close do) - an `await null` ahead of
          * the first Hull call otherwise left the handler unwired. */
+        /* JS_Call above may set last_async_cont (cppcheck cannot see it). */
+        // cppcheck-suppress knownConditionTrueFalse
         if (state == JS_PROMISE_PENDING && !js->last_async_cont) {
             hl_js_run_jobs(js);
             state = JS_PromiseState(ctx, ret);
@@ -155,6 +157,8 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
         /* Pending with no continuation yet: run its microtasks before
          * deciding (as dispatch and on_close do) - an `await null` ahead of
          * the first Hull call otherwise left the handler unwired. */
+        /* JS_Call above may set last_async_cont (cppcheck cannot see it). */
+        // cppcheck-suppress knownConditionTrueFalse
         if (state == JS_PROMISE_PENDING && !js->last_async_cont) {
             hl_js_run_jobs(js);
             state = JS_PromiseState(ctx, ret);
@@ -252,6 +256,8 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
                  * torn down under every awaiting handler.) A handler that only
                  * awaits microtasks gets them run first, hook still armed, so
                  * a Hull call they make still captures it, as dispatch.c does. */
+                /* JS_Call above may set last_async_cont (cppcheck cannot see it). */
+                // cppcheck-suppress knownConditionTrueFalse
                 if (!js->last_async_cont)
                     hl_js_run_jobs(js);
                 if (JS_PromiseState(ctx, ret) == JS_PROMISE_PENDING) {
