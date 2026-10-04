@@ -49,12 +49,25 @@ typedef struct HlAllocator HlAllocator;
 
 /* ── Instance pool ─────────────────────────────────────────────────── */
 
+/* Which module segment chain an instance carries. `gen` is the module's
+ * chain_gen when the instance was made or last re-attached; `attached` is 1
+ * when the module's chain is attached to it (and counted in
+ * HlWasmModule.chain_attached). An instance whose gen is stale - segments
+ * changed while it was out of the pool (a zero-copy result held it, or it ran
+ * a spans call) - is destroyed on release, never pooled: pooled, it ran
+ * without the segments DATA_INFO advertised. */
+typedef struct {
+    uint32_t gen;
+    int      attached;
+} HlWasmChainRef;
+
 typedef struct {
     void    *instance;      /* wasm_module_inst_t */
     void    *exec_env;      /* wasm_exec_env_t */
     void    *process_fn;    /* wasm_function_inst_t (cached hull_process) */
     uint32_t heap_size;
     uint32_t stack_size;
+    HlWasmChainRef chain;
 } HlWasmPoolEntry;
 
 typedef struct {
@@ -112,6 +125,14 @@ typedef struct {
      * loop thread (async submit/completion + data_load all run there),
      * so it is a plain int and needs no atomics/lock. */
     int inflight_async;
+    /* Bumped (under mutex) on every segment change; see HlWasmChainRef. */
+    uint32_t chain_gen;
+    /* Instances (pooled or not) with the module's segment chain attached -
+     * exactly the attachments WAMR counts on the chain head, in a uint8 that
+     * wraps. Bounded by HL_WASM_MAX_CHAIN_ATTACH; every teardown detaches. A
+     * segment change is refused while any instance outside the pool still
+     * holds the chain (guarded by mutex). */
+    int chain_attached;
 } HlWasmModule;
 
 /* Forward decl - the full ShSealArena type lives in sh_seal_arena.h.
@@ -161,7 +182,13 @@ typedef struct {
     uint32_t stack_size;    /* default: 64 KB, max: 8 MB */
     int64_t  gas;           /* default: 10M, max: 100B instructions.
                              * WAMR's API takes int, so values > INT_MAX
-                             * (~2.1B) are clamped with a log warning. */
+                             * (~2.1B) are clamped with a log warning.
+                             * Meters INTERPRETED code only: WAMR's AOT code
+                             * is never metered. */
+    uint32_t timeout_ms;    /* wall-clock bound on one call (instantiation
+                             * included), enforced by the watchdog for AOT and
+                             * interpreted code alike. 0 = default (10 s),
+                             * max HL_WASM_MAX_TIMEOUT_MS. */
     /* Per-invocation mapped spans. NULL/0 => a plain call (no span
      * set). Invariant: spans != NULL iff span_count > 0, and
      * 0 <= span_count <= HL_WASM_MAX_SPANS. Consumed by the C call layer in item
@@ -174,7 +201,8 @@ typedef struct {
  * cfg_* fields are ceilings - 0 means "use compile-time default". */
 void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
                              uint64_t cfg_max_input, uint64_t cfg_max_output,
-                             uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas);
+                             uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas,
+                             uint32_t cfg_timeout_ms);
 
 /* ── Callback support ──────────────────────────────────────────────── */
 
@@ -245,6 +273,7 @@ typedef enum {
     HL_WASM_ERR_INTERNAL   = -5,
     HL_WASM_ERR_LOAD       = -6,
     HL_WASM_ERR_ABI        = -7,
+    HL_WASM_ERR_TIMEOUT    = -8,   /* the wall-clock watchdog stopped it */
 } HlWasmError;
 
 /* Forward declaration */
@@ -262,6 +291,8 @@ typedef struct HlWasmInstance {
     uint32_t     heap_size;     /* immutable after creation */
     uint32_t     stack_size;    /* immutable after creation */
     int64_t      default_gas;   /* 0 = use HL_WASM_DEFAULT_GAS */
+    uint32_t     default_timeout_ms; /* 0 = use HL_WASM_DEFAULT_TIMEOUT_MS */
+    HlWasmChainRef chain;       /* the module chain it carries (mod->mutex) */
     uint64_t     default_max_input;
     uint64_t     default_max_output;
     int          closed;
@@ -366,18 +397,21 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
                          HlAllocator *alloc, const char **err_msg);
 
 /**
- * Drain all pooled instances for a module. Caller must hold mod->mutex.
+ * Drain all pooled instances for a module (detaching the chain from each).
+ * Caller must hold mod->mutex.
  */
-void hl_wasm_pool_drain(HlWasmPool *pool);
+void hl_wasm_pool_drain(HlWasmModule *mod);
 
 /**
- * Return an instance to the pool, or destroy it.
+ * Return an instance to the pool, or destroy it (detaching the module chain
+ * first). Pooled only on success, a small heap, a free slot and a chain
+ * generation that is still current.
  * Exported for use by wasm_buffer.c when destroying WASM-backed buffers.
  */
 void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
                           void *inst, void *exec_env, void *process_fn,
                           uint32_t heap_size, uint32_t stack_size,
-                          int success);
+                          int success, HlWasmChainRef chain);
 
 /* ── Persistent instance API ───────────────────────────────────────── */
 

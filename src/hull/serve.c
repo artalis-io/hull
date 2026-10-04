@@ -296,6 +296,7 @@ static void usage(const char *prog)
             "  --wasm-heap SIZE     WASM instance heap ceiling (default: 2m, max: ~4g)\n"
             "  --wasm-stack SIZE    WASM stack size ceiling (default: 64k, max: 8m)\n"
             "  --wasm-gas N         WASM instruction gas ceiling (default: 10m, max: 100b)\n"
+            "  --wasm-timeout-ms N  WASM wall-clock ceiling per call (default: 10000, max: 3600000)\n"
             "  --wasm-max-input SIZE  Max compute input size (default: 1m, max: 256m)\n"
             "  --wasm-max-output SIZE Max compute output size (default: 1m, max: 256m)\n"
             "\n"
@@ -344,6 +345,7 @@ typedef struct {
     long instruction_limit;
     long wasm_heap, wasm_stack, wasm_max_input, wasm_max_output;
     long long wasm_gas;
+    long long wasm_timeout_ms;
     int gpu_device;
     int log_level;
     int no_migrate;
@@ -546,6 +548,14 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             cfg->wasm_gas = v;
+        } else if (strcmp(argv[i], "--wasm-timeout-ms") == 0 && i + 1 < argc) {
+            char *end;
+            long long v = strtoll(argv[++i], &end, 10);
+            if (*end != '\0' || v <= 0) {
+                fprintf(stderr, "hull: invalid --wasm-timeout-ms: %s\n", argv[i]);
+                return -1;
+            }
+            cfg->wasm_timeout_ms = v;
         } else if (strcmp(argv[i], "--wasm-max-input") == 0 && i + 1 < argc) {
             long v = hl_parse_size(argv[++i]);
             if (v <= 0) {
@@ -668,6 +678,7 @@ static void hl_resolve_wasm_config(HlRuntime *rt, const HlManifest *manifest,
     uint32_t wh = manifest->wasm_heap;
     uint32_t ws = manifest->wasm_stack;
     int64_t  wg = manifest->wasm_gas > 0 ? manifest->wasm_gas : 0;   /* <= 0: default */
+    uint32_t wt = manifest->wasm_timeout_ms;                          /* 0: default */
     uint32_t wi = manifest->wasm_max_input;
     uint32_t wo = manifest->wasm_max_output;
 
@@ -675,6 +686,9 @@ static void hl_resolve_wasm_config(HlRuntime *rt, const HlManifest *manifest,
     if (cfg->wasm_heap > 0)       wh = (uint32_t)cfg->wasm_heap;
     if (cfg->wasm_stack > 0)      ws = (uint32_t)cfg->wasm_stack;
     if (cfg->wasm_gas > 0)        wg = (int64_t)cfg->wasm_gas;
+    if (cfg->wasm_timeout_ms > 0)
+        wt = cfg->wasm_timeout_ms > (long long)HL_WASM_MAX_TIMEOUT_MS
+           ? HL_WASM_MAX_TIMEOUT_MS : (uint32_t)cfg->wasm_timeout_ms;
     if (cfg->wasm_max_input > 0)  wi = (uint32_t)cfg->wasm_max_input;
     if (cfg->wasm_max_output > 0) wo = (uint32_t)cfg->wasm_max_output;
 
@@ -682,12 +696,14 @@ static void hl_resolve_wasm_config(HlRuntime *rt, const HlManifest *manifest,
     if (wh > (uint32_t)HL_WASM_MAX_HEAP)  wh = (uint32_t)HL_WASM_MAX_HEAP;
     if (ws > (uint32_t)HL_WASM_MAX_STACK) ws = (uint32_t)HL_WASM_MAX_STACK;
     if (wg > HL_WASM_MAX_GAS)             wg = HL_WASM_MAX_GAS;
+    if (wt > HL_WASM_MAX_TIMEOUT_MS)      wt = HL_WASM_MAX_TIMEOUT_MS;
     if (wi > (uint32_t)HL_WASM_MAX_IO_SIZE) wi = (uint32_t)HL_WASM_MAX_IO_SIZE;
     if (wo > (uint32_t)HL_WASM_MAX_IO_SIZE) wo = (uint32_t)HL_WASM_MAX_IO_SIZE;
 
     rt->wasm_config.heap_size  = wh;
     rt->wasm_config.stack_size = ws;
     rt->wasm_config.gas        = wg;
+    rt->wasm_config.timeout_ms = wt;
     rt->wasm_config.max_input  = wi;
     rt->wasm_config.max_output = wo;
 }

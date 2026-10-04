@@ -195,10 +195,16 @@ Compile-time maximums are `#ifndef`-guarded. Override via `make HL_WASM_MAX_HEAP
 
 - WAMR's `WAMR_BUILD_INSTRUCTION_METERING=1` enables instruction counting
 - `wasm_runtime_set_instruction_count_limit(exec_env, limit)` enforces gas budget
-- When budget exhausted, WAMR returns error. Host reports timeout to Lua
-- Synchronous call: Lua blocks until plugin returns (gas-limited, so bounded)
+- When budget exhausted, WAMR returns error. Host reports `gas_exhausted`
+- Gas meters the INTERPRETER only: WAMR never meters AOT code, and nothing
+  meters a module's start / ctor functions. Every call is therefore also
+  bounded by wall-clock time (`timeout_ms`, default 10 s): a watchdog thread
+  (`cap/wasm_watchdog.c`) terminates the instance at the deadline, and WAMR
+  patch 0007 makes that land in interpreted code, AOT loops and instantiation
+  alike (`"timeout"`). See docs/wamr_patches.md "Patch 0007".
+- Synchronous call: Lua blocks until plugin returns (bounded by gas for the
+  interpreter and by the timeout for everything)
 - For short computations (< 10 ms), this is zero-overhead and simple
-- Integration with Hull event loop: not needed for sync calls (they're bounded by gas)
 
 ### Async variant (shipped. Model 1b)
 

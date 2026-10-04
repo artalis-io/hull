@@ -72,7 +72,8 @@ struct HlBlobStore {
 struct HlBlobStoreWriter {
     HlBlobStore *store;
     int          fd;          /* tmp file fd; -1 once finalized/aborted */
-    char        *tmp_path;    /* absolute path of tmp file */
+    int          tmp_dirfd;   /* the store's tmp/ (opened without following) */
+    char         tmp_name[HL_BLOB_STORE_TMP_NAME_SIZE]; /* "" once unlinked */
     size_t       written;
     HlSha256Ctx  hash;
     char         expected[HL_BLOB_STORE_ID_BUF_SIZE];  /* "" if no expected */
@@ -103,61 +104,69 @@ static int validate_id(const char *id)
 
 /* ── Path builders ───────────────────────────────────────────────── */
 
-/* The shard directory a blob goes into: made if missing, and it must be a
- * real directory - a symlink planted in its place (a shared cache root)
- * redirected every write below it. */
-static int ensure_shard(const HlBlobStore *store, const char *shard)
+/* Every write below the root goes through directory descriptors, each
+ * component opened O_NOFOLLOW from the one above it, and the final step is a
+ * renameat between the held tmp/ and shard descriptors. The store's threat
+ * model is a shared (other-writable) cache root: a symlink planted at tmp/,
+ * blobs/ or a shard redirected every write below it, and a path-string check
+ * followed by a later rename(path) was check-then-use - a component swapped
+ * for a symlink in between was still followed. The root itself is the
+ * configured path and may be reached through a symlink (a linked $HOME). */
+
+/* Directory @p name below @p dirfd, made if missing, opened without following
+ * a symlink there. -1 (ELOOP / ENOTDIR) when it is not a real directory. */
+static int open_subdir(int dirfd, const char *name)
 {
-    if (hl_mkdir_p(shard, 0755) < 0) return -1;
-    /* Every component below the root - "blobs", each shard level - must be
-     * a real directory: with shard_depth 2, a symlink at blobs/ab was
-     * followed and lstat("blobs/ab/cd") resolved through it, so the rename
-     * landed outside the store. */
-    size_t start = store->root_len;
-    if (strncmp(shard, store->root, start) != 0 || shard[start] != '/') {
-        errno = EINVAL;
-        return -1;
-    }
-    char part[PATH_MAX];
-    size_t n = strlen(shard);
-    if (n >= sizeof part) { errno = ENAMETOOLONG; return -1; }
-    memcpy(part, shard, n + 1);
-    for (size_t k = start + 1; k <= n; k++) {
-        if (part[k] != '/' && part[k] != '\0') continue;
-        char saved = part[k];
-        part[k] = '\0';
-        struct stat st;
-        int ok = lstat(part, &st) == 0 && S_ISDIR(st.st_mode);
-        part[k] = saved;
-        if (!ok) { errno = ENOTDIR; return -1; }
-    }
-    return 0;
+    if (mkdirat(dirfd, name, 0755) < 0 && errno != EEXIST) return -1;
+    return openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 }
 
-/* Something already at @p dest (not following a symlink there). */
-static int dest_present(const char *dest)
+/* <root>/<name>, opened as above. */
+static int open_root_subdir(const char *root, const char *name)
 {
-    struct stat st;
-    return lstat(dest, &st) == 0;
+    int r = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (r < 0) return -1;
+    int d = open_subdir(r, name);
+    int e = errno;
+    close(r);
+    errno = e;
+    return d;
 }
 
-/* Cross-filesystem fallback for rename(tmp, dest): copy into a file this
- * call CREATES (O_EXCL, O_NOFOLLOW). fopen(dest, "wb") followed a symlink
- * planted at dest and truncated whatever it named. A dest that appeared
- * meanwhile is the race's winner (same content by contract): 1. */
-static int copy_into_place(const char *tmp, const char *dest)
+/* The shard directory blob @p id goes into (blobs/ab, or blobs/ab/cd at
+ * shard depth 2): each level made if missing and opened without following. */
+static int open_shard_dir(const HlBlobStore *s, const char *id)
 {
-    int ofd = open(dest, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                   0644);
+    int fd = open_root_subdir(s->root, "blobs");
+    for (int level = 0; fd >= 0 && level < s->shard_depth; level++) {
+        char part[3] = { id[level * 2], id[level * 2 + 1], '\0' };
+        int next = open_subdir(fd, part);
+        int e = errno;
+        close(fd);
+        errno = e;
+        fd = next;
+    }
+    return fd;
+}
+
+/* Cross-filesystem fallback for renameat: copy into a file this call CREATES
+ * (O_EXCL, O_NOFOLLOW) in the held shard directory. 0 = copied, 1 = something
+ * was already there (the race's winner, same content by contract), -1 =
+ * error. */
+static int copy_into_place(int tmp_dirfd, const char *tmp_name,
+                           int shard_fd, const char *id)
+{
+    int ofd = openat(shard_fd, id,
+                     O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     if (ofd < 0) return errno == EEXIST ? 1 : -1;
     FILE *dst = fdopen(ofd, "wb");
-    if (!dst) { close(ofd); unlink(dest); return -1; }
-    int ifd = open(tmp, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (!dst) { close(ofd); unlinkat(shard_fd, id, 0); return -1; }
+    int ifd = openat(tmp_dirfd, tmp_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     FILE *src = ifd >= 0 ? fdopen(ifd, "rb") : NULL;
     if (!src) {
         if (ifd >= 0) close(ifd);
         fclose(dst);
-        unlink(dest);
+        unlinkat(shard_fd, id, 0);
         return -1;
     }
     char copy_buf[65536];
@@ -169,8 +178,31 @@ static int copy_into_place(const char *tmp, const char *dest)
     if (ferror(src)) err = 1;
     fclose(src);
     if (fclose(dst) != 0) err = 1;
-    if (err) { unlink(dest); return -1; }
+    if (err) { unlinkat(shard_fd, id, 0); return -1; }
     return 0;
+}
+
+/* Move tmp/<tmp_name> into the shard as <id>, relative to the held
+ * descriptors, and unlink the temp file whatever happens. 1 = this call put
+ * the blob in place, 0 = something was already there (same content by
+ * contract), -1 = error. */
+static int place_blob(int tmp_dirfd, const char *tmp_name,
+                      int shard_fd, const char *id)
+{
+    struct stat st;
+    int rc;
+    if (fstatat(shard_fd, id, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+        rc = 0;
+    } else if (renameat(tmp_dirfd, tmp_name, shard_fd, id) == 0) {
+        return 1;
+    } else if (errno != EXDEV) {
+        rc = -1;
+    } else {
+        int c = copy_into_place(tmp_dirfd, tmp_name, shard_fd, id);
+        rc = c < 0 ? -1 : (c == 0 ? 1 : 0);
+    }
+    unlinkat(tmp_dirfd, tmp_name, 0);
+    return rc;
 }
 
 static int build_blob_path(HlBlobStore *s, const char *id,
@@ -188,20 +220,6 @@ static int build_blob_path(HlBlobStore *s, const char *id,
     } else {
         n = snprintf(out, out_cap, "%s/blobs/%c%c/%s",
                      s->root, id[0], id[1], id);
-    }
-    return (n > 0 && (size_t)n < out_cap) ? 0 : -1;
-}
-
-static int build_shard_dir(HlBlobStore *s, const char *id,
-                           char *out, size_t out_cap)
-{
-    int n;
-    if (s->shard_depth >= 2) {
-        n = snprintf(out, out_cap, "%s/blobs/%c%c/%c%c",
-                     s->root, id[0], id[1], id[2], id[3]);
-    } else {
-        n = snprintf(out, out_cap, "%s/blobs/%c%c",
-                     s->root, id[0], id[1]);
     }
     return (n > 0 && (size_t)n < out_cap) ? 0 : -1;
 }
@@ -224,12 +242,13 @@ static int make_tmp_name(char *out, size_t out_cap)
 static void sweep_stale_tmps(const char *root, uint64_t max_age_sec)
 {
     if (max_age_sec == UINT64_MAX) return;
-    char tmp_dir[PATH_MAX];
-    if (snprintf(tmp_dir, sizeof(tmp_dir), "%s/tmp", root) >=
-        (int)sizeof(tmp_dir)) return;
-
-    DIR *d = opendir(tmp_dir);
-    if (!d) return;
+    /* tmp/ through a descriptor opened without following, and every stat /
+     * unlink relative to it: a symlink at tmp/ pointed this unlink sweep at
+     * whatever directory it named. */
+    int tfd = open_root_subdir(root, "tmp");
+    if (tfd < 0) return;
+    DIR *d = fdopendir(tfd);
+    if (!d) { close(tfd); return; }
 
     time_t now = time(NULL);
     struct dirent *ent;
@@ -237,12 +256,9 @@ static void sweep_stale_tmps(const char *root, uint64_t max_age_sec)
         if (strncmp(ent->d_name, HL_BLOB_STORE_TMP_PREFIX,
                     sizeof(HL_BLOB_STORE_TMP_PREFIX) - 1) != 0) continue;
 
-        char path[PATH_MAX];
-        if (snprintf(path, sizeof(path), "%s/%s", tmp_dir, ent->d_name) >=
-            (int)sizeof(path)) continue;
-
         struct stat st;
-        if (stat(path, &st) < 0) continue;
+        if (fstatat(dirfd(d), ent->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0)
+            continue;
 
         /* A future mtime is never stale. (now - st_mtime) is signed, and
          * casting a NEGATIVE difference to uint64_t wraps to a huge value
@@ -257,7 +273,8 @@ static void sweep_stale_tmps(const char *root, uint64_t max_age_sec)
          * how this surfaced: an intermittent CI failure where the sweep ate
          * the file the test had just created. */
         if (st.st_mtime > now) continue;
-        if ((uint64_t)(now - st.st_mtime) >= max_age_sec) unlink(path);
+        if ((uint64_t)(now - st.st_mtime) >= max_age_sec)
+            unlinkat(dirfd(d), ent->d_name, 0);
     }
     closedir(d);
 }
@@ -330,27 +347,26 @@ static int writer_open_full(HlBlobStore *s, const char *expected, int durable,
     char tmp_name[HL_BLOB_STORE_TMP_NAME_SIZE];
     if (make_tmp_name(tmp_name, sizeof(tmp_name)) != 0) return -1;
 
-    size_t tmp_path_len = s->root_len + strlen("/tmp/") + strlen(tmp_name) + 1;
-    char  *tmp_path     = hl_alloc_malloc(s->alloc, tmp_path_len);
-    if (!tmp_path) return -1;
-    snprintf(tmp_path, tmp_path_len, "%s/tmp/%s", s->root, tmp_name);
-
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    int tdir = open_root_subdir(s->root, "tmp");
+    if (tdir < 0) return -1;
+    int fd = openat(tdir, tmp_name,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     if (fd < 0) {
-        hl_alloc_free(s->alloc, tmp_path, tmp_path_len);
+        close(tdir);
         return -1;
     }
 
     HlBlobStoreWriter *w = hl_alloc_malloc(s->alloc, sizeof(*w));
     if (!w) {
         close(fd);
-        unlink(tmp_path);
-        hl_alloc_free(s->alloc, tmp_path, tmp_path_len);
+        unlinkat(tdir, tmp_name, 0);
+        close(tdir);
         return -1;
     }
-    w->store    = s;
-    w->fd       = fd;
-    w->tmp_path = tmp_path;
+    w->store     = s;
+    w->fd        = fd;
+    w->tmp_dirfd = tdir;
+    memcpy(w->tmp_name, tmp_name, sizeof(w->tmp_name));
     w->written  = 0;
     w->durable  = durable;
     hl_cap_crypto_sha256_init(&w->hash);
@@ -400,16 +416,21 @@ int hl_blob_store_writer_write(HlBlobStoreWriter *w,
     return 0;
 }
 
+/* Unlink the writer's temp file (once). */
+static void writer_unlink_tmp(HlBlobStoreWriter *w)
+{
+    if (w->tmp_name[0]) {
+        unlinkat(w->tmp_dirfd, w->tmp_name, 0);
+        w->tmp_name[0] = '\0';
+    }
+}
+
 static void writer_release(HlBlobStoreWriter *w)
 {
     if (!w) return;
     if (w->fd >= 0) close(w->fd);
-    HlAllocator *alloc = w->store->alloc;
-    if (w->tmp_path) {
-        size_t tmp_len = strlen(w->tmp_path) + 1;
-        hl_alloc_free(alloc, w->tmp_path, tmp_len);
-    }
-    hl_alloc_free(alloc, w, sizeof(*w));
+    if (w->tmp_dirfd >= 0) close(w->tmp_dirfd);
+    hl_alloc_free(w->store->alloc, w, sizeof(*w));
 }
 
 int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
@@ -421,7 +442,7 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
     uint8_t digest[32];
     if (hl_cap_crypto_sha256_final(&w->hash, digest) != 0) {
         close(w->fd); w->fd = -1;
-        unlink(w->tmp_path);
+        writer_unlink_tmp(w);
         writer_release(w);
         return -1;
     }
@@ -430,14 +451,14 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
 
     if (w->durable && fsync(w->fd) < 0) {
         close(w->fd); w->fd = -1;
-        unlink(w->tmp_path);
+        writer_unlink_tmp(w);
         writer_release(w);
         return -1;
     }
 
     if (close(w->fd) < 0) {
         w->fd = -1;
-        unlink(w->tmp_path);
+        writer_unlink_tmp(w);
         writer_release(w);
         return -1;
     }
@@ -445,51 +466,27 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
 
     if (w->expected[0] != '\0' &&
         memcmp(w->expected, id, HL_BLOB_STORE_ID_HEX_LEN) != 0) {
-        unlink(w->tmp_path);
+        writer_unlink_tmp(w);
         writer_release(w);
         return -1;
     }
 
-    char dest[PATH_MAX], shard[PATH_MAX];
-    if (build_blob_path(w->store, id, dest, sizeof(dest)) != 0 ||
-        build_shard_dir(w->store, id, shard, sizeof(shard)) != 0) {
-        unlink(w->tmp_path);
+    int shard_fd = open_shard_dir(w->store, id);
+    if (shard_fd < 0) {
+        writer_unlink_tmp(w);
         writer_release(w);
         return -1;
     }
-    if (ensure_shard(w->store, shard) < 0) {
-        unlink(w->tmp_path);
+    int placed = place_blob(w->tmp_dirfd, w->tmp_name, shard_fd, id);
+    w->tmp_name[0] = '\0';   /* place_blob unlinked it */
+    if (placed < 0) {
+        close(shard_fd);
         writer_release(w);
         return -1;
     }
-
-    int renamed_into_place = 0;
-    if (dest_present(dest)) {
-        unlink(w->tmp_path);
-    } else if (rename(w->tmp_path, dest) < 0) {
-        if (errno != EXDEV) {
-            unlink(w->tmp_path);
-            writer_release(w);
-            return -1;
-        }
-        int rc = copy_into_place(w->tmp_path, dest);
-        unlink(w->tmp_path);
-        if (rc < 0) {
-            writer_release(w);
-            return -1;
-        }
-        renamed_into_place = (rc == 0);
-    } else {
-        renamed_into_place = 1;
-    }
-
-    if (w->durable && renamed_into_place) {
-        int dfd = open(shard, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (dfd >= 0) {
-            (void)fsync(dfd);
-            close(dfd);
-        }
-    }
+    if (w->durable && placed == 1)
+        (void)fsync(shard_fd);
+    close(shard_fd);
 
     if (out_id) memcpy(out_id, id, HL_BLOB_STORE_ID_BUF_SIZE);
     if (out_size) *out_size = w->written;
@@ -501,7 +498,7 @@ void hl_blob_store_writer_abort(HlBlobStoreWriter *w)
 {
     if (!w) return;
     if (w->fd >= 0) { close(w->fd); w->fd = -1; }
-    if (w->tmp_path) unlink(w->tmp_path);
+    writer_unlink_tmp(w);
     writer_release(w);
 }
 
@@ -607,59 +604,43 @@ int hl_blob_store_put_keyed(HlBlobStore *s, const char *key,
     char tmp_name[HL_BLOB_STORE_TMP_NAME_SIZE];
     if (make_tmp_name(tmp_name, sizeof(tmp_name)) != 0) return -1;
 
-    char tmp_path[PATH_MAX];
-    if (snprintf(tmp_path, sizeof(tmp_path), "%s/tmp/%s",
-                 s->root, tmp_name) >= (int)sizeof(tmp_path))
-        return -1;
+    int tdir = open_root_subdir(s->root, "tmp");
+    if (tdir < 0) return -1;
+    int fd = openat(tdir, tmp_name,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0) { close(tdir); return -1; }
 
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-    if (fd < 0) return -1;
-
+    int rc = 0;
     size_t put = 0;
     while (put < len) {
         ssize_t w = write(fd, bytes + put, len - put);
         if (w < 0) {
             if (errno == EINTR) continue;
-            close(fd); unlink(tmp_path);
-            return -1;
+            rc = -1;
+            break;
         }
-        if (w == 0) { close(fd); unlink(tmp_path); return -1; }
+        if (w == 0) { rc = -1; break; }
         put += (size_t)w;
     }
-    if (close(fd) < 0) { unlink(tmp_path); return -1; }
-
-    /* We pass a non-empty `key` to validate_id which we already did
-     * above, so build_*_path are safe. */
-    HlBlobStore *mutable_s = (HlBlobStore *)s;
-    char dest[PATH_MAX], shard[PATH_MAX];
-    if (build_blob_path(mutable_s, key, dest, sizeof(dest)) != 0 ||
-        build_shard_dir(mutable_s, key, shard, sizeof(shard)) != 0) {
-        unlink(tmp_path);
-        return -1;
-    }
-    if (ensure_shard(mutable_s, shard) < 0) {
-        unlink(tmp_path);
+    if (close(fd) < 0) rc = -1;
+    if (rc < 0) {
+        unlinkat(tdir, tmp_name, 0);
+        close(tdir);
         return -1;
     }
 
-    /* If a race produced the target between exists() and rename(),
-     * unlink our tmp and accept the winner. Same content by
-     * contract. */
-    if (dest_present(dest)) {
-        unlink(tmp_path);
-        return 0;
-    }
-    if (rename(tmp_path, dest) < 0) {
-        if (errno == EXDEV) {
-            /* Cross-fs fallback: copy + unlink. */
-            int rc = copy_into_place(tmp_path, dest);
-            unlink(tmp_path);
-            return rc < 0 ? -1 : 0;
-        }
-        unlink(tmp_path);
+    /* A race that produced the target between exists() and here is
+     * accepted (place_blob leaves the winner): same content by contract. */
+    int shard_fd = open_shard_dir(s, key);
+    if (shard_fd < 0) {
+        unlinkat(tdir, tmp_name, 0);
+        close(tdir);
         return -1;
     }
-    return 0;
+    int placed = place_blob(tdir, tmp_name, shard_fd, key);
+    close(shard_fd);
+    close(tdir);
+    return placed < 0 ? -1 : 0;
 }
 
 /* ── Reader ──────────────────────────────────────────────────────── */

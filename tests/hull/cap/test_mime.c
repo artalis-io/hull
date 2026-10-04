@@ -438,3 +438,34 @@ UTEST(hl_cap_mime, tag_needs_terminator)
     const char *m = sniff_str("<bxyz is text");
     ASSERT_TRUE(m == NULL || strcmp(m, "text/html") != 0);
 }
+
+/* Audit 5 L3: "<?" / "<!"-led markup the shape checks did not place is never
+ * text/plain - XHTML behind an XML declaration, and SVG pushed past the 4 KiB
+ * window by a padded comment. */
+UTEST(hl_cap_mime, xml_led_markup_is_never_plain_text)
+{
+    ASSERT_STREQ(sniff_str("<?xml version=\"1.0\"?><!DOCTYPE html>"
+                           "<html xmlns=\"http://www.w3.org/1999/xhtml\">"
+                           "<script>alert(1)</script></html>"),
+                 "text/html");
+
+    static char padded[6000];
+    size_t n = 0;
+    const char *head = "<?xml version=\"1.0\"?><!--";
+    const char *tail = "--><svg onload=\"alert(1)\"/>";
+    memcpy(padded + n, head, strlen(head));
+    n += strlen(head);
+    while (n < 5000) padded[n++] = 'a';
+    memcpy(padded + n, tail, strlen(tail));
+    n += strlen(tail);
+    padded[n] = '\0';
+    const char *m = sniff_str(padded);
+    ASSERT_TRUE(m != NULL);
+    ASSERT_STRNE(m, "text/plain");
+
+    ASSERT_STREQ(sniff_str("<?xml version=\"1.0\"?><note>hi</note>"),
+                 "application/xml");
+    ASSERT_STREQ(sniff_str("\xEF\xBB\xBF  <![CDATA[x]]>"), "application/xml");
+    /* A "<" that leads neither is still plain text. */
+    ASSERT_STREQ(sniff_str("<3 you"), "text/plain");
+}

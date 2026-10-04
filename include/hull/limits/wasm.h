@@ -48,6 +48,19 @@
 #define HL_WASM_MAX_GAS            (100LL * 1000 * 1000 * 1000) /* 100B instructions */
 #endif
 
+/* ── WASM wall-clock timeout ───────────────────────────────────────── */
+
+/* Gas meters INTERPRETED instructions only - WAMR's AOT code is never
+ * metered. The timeout is the bound that holds for every guest execution
+ * (AOT, interpreter, and a module's own start / ctor functions): a watchdog
+ * terminates the instance at the deadline (cap/wasm_watchdog.c). */
+#ifndef HL_WASM_DEFAULT_TIMEOUT_MS
+#define HL_WASM_DEFAULT_TIMEOUT_MS  10000u                 /* 10 s */
+#endif
+#ifndef HL_WASM_MAX_TIMEOUT_MS
+#define HL_WASM_MAX_TIMEOUT_MS      3600000u               /* 1 h */
+#endif
+
 /* ── WASM streaming I/O ────────────────────────────────────────────── */
 
 #ifndef HL_WASM_STREAM_MAX_CHUNK
@@ -70,6 +83,13 @@
 
 #ifndef HL_WASM_POOL_MAX
 #define HL_WASM_POOL_MAX            8
+#endif
+/* Live attachments of one module's segment chain (pooled + checked out +
+ * persistent instances). WAMR counts them in a uint8 on the chain head; a
+ * wrap let a segment removal free a heap still attached. Kept well below 255;
+ * an attach past it fails the call ("too_many_instances"). */
+#ifndef HL_WASM_MAX_CHAIN_ATTACH
+#define HL_WASM_MAX_CHAIN_ATTACH    128
 #endif
 #ifndef HL_WASM_POOL_HEAP_THRESHOLD
 #define HL_WASM_POOL_HEAP_THRESHOLD (4 * 1024 * 1024)   /* 4 MB */

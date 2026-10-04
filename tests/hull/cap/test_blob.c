@@ -1098,6 +1098,53 @@ UTEST(hl_blob_store_keyed, reader_refuses_symlink_at_blob_path)
     rm_rf(tmp);
 }
 
+UTEST(hl_blob_store_keyed, writes_refuse_symlinked_tmp_and_blobs)
+{
+    /* Audit 5 L4: <root>/tmp was made but never checked, so a symlink there
+     * redirected every temp-file write (and the stale-tmp sweep's unlinks);
+     * every write now walks tmp/ and blobs/ without following. */
+    char tmp[256];
+    HlBlobStore *s = open_keyed_store(tmp);
+    ASSERT_TRUE(s != NULL);
+
+    char outside[512], tdir[512];
+    snprintf(outside, sizeof outside, "%s/outside", tmp);
+    ASSERT_EQ(mkdir(outside, 0700), 0);
+    snprintf(tdir, sizeof tdir, "%s/tmp", tmp);
+    ASSERT_EQ(rmdir(tdir), 0);
+    if (symlink(outside, tdir) != 0)
+        UTEST_SKIP("symlink() unavailable (needs privilege on this host)");
+
+    const char *key =
+        "ee00000000000000000000000000000000000000000000000000000000000000";
+    const uint8_t payload[] = "payload";
+    ASSERT_NE(hl_blob_store_put_keyed(s, key, payload, sizeof payload), 0);
+    char id[HL_BLOB_STORE_ID_BUF_SIZE];
+    ASSERT_NE(hl_blob_store_put(s, payload, sizeof payload, NULL, id), 0);
+    /* Nothing was written through the link. */
+    DIR *d = opendir(outside);
+    ASSERT_TRUE(d != NULL);
+    struct dirent *ent;
+    int files = 0;
+    while ((ent = readdir(d)) != NULL)
+        if (ent->d_name[0] != '.') files++;
+    closedir(d);
+    ASSERT_EQ(files, 0);
+
+    /* A real tmp/ but a symlinked blobs/: the placement is refused too. */
+    ASSERT_EQ(unlink(tdir), 0);
+    ASSERT_EQ(mkdir(tdir, 0700), 0);
+    char bdir[512];
+    snprintf(bdir, sizeof bdir, "%s/blobs", tmp);
+    rm_rf(bdir);
+    ASSERT_EQ(symlink(outside, bdir), 0);
+    ASSERT_NE(hl_blob_store_put_keyed(s, key, payload, sizeof payload), 0);
+
+    hl_blob_store_close(s);
+    unlink(bdir);
+    rm_rf(tmp);
+}
+
 UTEST(hl_blob_store_keyed, get_rejects_huge_stat_size)
 {
     /* hl_blob_store_get caps at HL_BLOB_STORE_GET_MAX_BYTES (256 MB).

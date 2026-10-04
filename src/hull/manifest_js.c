@@ -174,7 +174,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     }
     JS_FreeValue(ctx, cors_val);
 
-    /* wasm: { heap, stack, gas, maxInput, maxOutput } */
+    /* wasm: { heap, stack, gas, timeoutMs, maxInput, maxOutput } */
     JSValue wasm_val = JS_GetPropertyStr(ctx, manifest, "wasm");
     if (!JS_IsUndefined(wasm_val) && !JS_IsNull(wasm_val)) {
         JSValue v;
@@ -187,6 +187,10 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         JS_FreeValue(ctx, v);
         v = JS_GetPropertyStr(ctx, wasm_val, "gas");
         if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_gas = iv; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, wasm_val, "timeoutMs");
+        if (!JS_IsUndefined(v) && JS_ToInt64(ctx, &iv, v) == 0 && iv > 0)
+            out->wasm_timeout_ms = iv > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)iv;
         JS_FreeValue(ctx, v);
         v = JS_GetPropertyStr(ctx, wasm_val, "maxInput");
         if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_max_input = (uint32_t)iv; }

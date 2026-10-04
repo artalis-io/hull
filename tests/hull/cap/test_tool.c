@@ -292,6 +292,21 @@ UTEST(tool, validate_reject_driver_program_flags)
     const char *gcc_tc[] = { "cc", "--gcc-toolchain=/tmp/tc", NULL };
     ASSERT_NE(hl_tool_validate_args(gcc_tc), 0);
 
+    /* -B's aliases: --prefix (both forms), gcc's abbreviation of it, and
+     * clang's -ccc-install-dir. "--print-file-name" still passes. */
+    const char *pfx_eq[] = { "cc", "--prefix=/tmp/x", "a.c", NULL };
+    ASSERT_NE(hl_tool_validate_args(pfx_eq), 0);
+    const char *pfx_sep[] = { "cc", "--prefix", "/tmp/x", "a.c", NULL };
+    ASSERT_NE(hl_tool_validate_args(pfx_sep), 0);
+    const char *pfx_abbr[] = { "cc", "--pref=/tmp/x", "a.c", NULL };
+    ASSERT_NE(hl_tool_validate_args(pfx_abbr), 0);
+    const char *ccc[] = { "cc", "-ccc-install-dir", "/tmp/x", NULL };
+    ASSERT_NE(hl_tool_validate_args(ccc), 0);
+    const char *xl_abbr[] = { "cc", "--for-link=--plugin=/x", NULL };
+    ASSERT_NE(hl_tool_validate_args(xl_abbr), 0);
+    const char *print[] = { "cc", "--print-file-name=libc.a", NULL };
+    ASSERT_EQ(hl_tool_validate_args(print), 0);
+
     /* -B<dir>: refused unless the directory is a $PATH entry holding an
      * ld.lld - what Hull's own lld backend passes. */
     char tmpl[HL_TEST_PATH_MAX];
@@ -316,6 +331,16 @@ UTEST(tool, validate_reject_driver_program_flags)
     ASSERT_EQ(hl_tool_validate_args(lld), 0);      /* the lld backend's form */
     const char *evil[] = { "cc", "-B/tmp", NULL };
     ASSERT_NE(hl_tool_validate_args(evil), 0);
+
+    /* A relative $PATH entry ("." here) names the cwd - an app directory
+     * holding an ld.lld must not make -B. trusted. */
+    char cwd[PATH_MAX];
+    ASSERT_TRUE(getcwd(cwd, sizeof cwd) != NULL);
+    ASSERT_EQ(chdir(dir), 0);
+    setenv("PATH", ".", 1);
+    const char *rel[] = { "cc", "-B.", "-fuse-ld=lld", NULL };
+    ASSERT_NE(hl_tool_validate_args(rel), 0);
+    ASSERT_EQ(chdir(cwd), 0);
 
     if (saved) { setenv("PATH", saved, 1); free(saved); } else unsetenv("PATH");
     unlink(ldf);

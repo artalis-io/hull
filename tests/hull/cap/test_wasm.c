@@ -11,7 +11,10 @@
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_stream.h"
+#include "hull/cap/wasm_watchdog.h"
 #include "hull/limits/wasm.h"
+#include "wasm_export.h"
+#include <time.h>
 #include "hull/shared/log_lock.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
@@ -235,13 +238,40 @@ static const unsigned char echo64_wasm[] = {
 };
 static const unsigned int echo64_wasm_len = 136;
 
+/* loop_forever.wasm (67 bytes): hull_process = (loop br 0) - never returns.
+ * Hand-assembled; see the watchdog tests below. */
+static const unsigned char loop_forever_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x01, 0x60,
+  0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05,
+  0x03, 0x01, 0x00, 0x01, 0x07, 0x19, 0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f,
+  0x72, 0x79, 0x02, 0x00, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72,
+  0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x00, 0x0a, 0x0a, 0x01, 0x08, 0x00,
+  0x03, 0x40, 0x0c, 0x00, 0x0b, 0x00, 0x0b,
+};
+static const unsigned int loop_forever_wasm_len = 67;
+
+/* start_loop.wasm (78 bytes): a start function that never returns;
+ * hull_process returns 0. */
+static const unsigned char start_loop_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x02, 0x60,
+  0x00, 0x00, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x03,
+  0x02, 0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x19, 0x02, 0x06,
+  0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c, 0x68, 0x75, 0x6c,
+  0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x01, 0x08,
+  0x01, 0x00, 0x0a, 0x0e, 0x02, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b,
+  0x0b, 0x04, 0x00, 0x41, 0x00, 0x0b,
+};
+static const unsigned int start_loop_wasm_len = 78;
+
 /* VFS with embedded WASM modules for testing (sorted by name) */
 static const HlEntry test_entries[] = {
     { "compute/echo.wasm", echo_wasm, echo_wasm_len },
     { "compute/echo64.wasm", echo64_wasm, echo64_wasm_len },
     { "compute/kv_store.wasm", kv_store_wasm, kv_store_wasm_len },
+    { "compute/loop_forever.wasm", loop_forever_wasm, loop_forever_wasm_len },
     { "compute/shared_read.wasm", shared_read_wasm, shared_read_wasm_len },
     { "compute/simd_dot.wasm", simd_dot_wasm, simd_dot_wasm_len },
+    { "compute/start_loop.wasm", start_loop_wasm, start_loop_wasm_len },
     { 0, 0, 0 }
 };
 
@@ -2214,6 +2244,334 @@ UTEST(hl_cap_wasm, shared_data_segment_count)
     ASSERT_EQ(count, (uint32_t)3);
 
     free(output); free(msg);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── Audit 5: segment chain accounting (H1) + pooled chain staleness (M1) ── */
+
+static HlWasmModule *find_mod(HlWasmCache *cache, const char *name)
+{
+    return hl_cap_wasm_module_lookup(cache, name);
+}
+
+/* H1: every teardown detaches the chain, so many failed / unpooled calls leave
+ * no attachment behind (WAMR's uint8 count used to grow by one per destroyed
+ * instance and wrap at 256), and the segment can still be removed, re-added
+ * and read afterwards. */
+UTEST(hl_cap_wasm, chain_detached_on_every_teardown)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    const char *err = NULL;
+
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    "ABCDEFGHIJ", 10, NULL, &vfs, NULL, &err), 0);
+    HlWasmModule *mod = find_mod(&cache, "shared_read");
+    ASSERT_TRUE(mod != NULL);
+
+    size_t msg_len;
+    uint8_t *msg = build_shared_read_msg(0, 2, 5, &msg_len);
+
+    /* 300 failed calls (gas exhaustion): each a fresh, attached instance that
+     * is destroyed, never pooled. */
+    HlWasmCallOpts starve = {0};
+    starve.gas = 1;
+    for (int i = 0; i < 300; i++) {
+        void *out = NULL;
+        size_t out_len = 0;
+        ASSERT_EQ(hl_cap_wasm_call(&cache, "shared_read", msg, msg_len,
+                                   &out, &out_len, &starve, NULL, NULL,
+                                   &vfs, NULL, NULL, &err), HL_WASM_ERR_GAS);
+        free(out);
+    }
+    /* 300 successful calls too large to pool: destroyed on release. */
+    HlWasmCallOpts big = {0};
+    big.heap_size = 8 * 1024 * 1024;
+    for (int i = 0; i < 300; i++) {
+        void *out = NULL;
+        size_t out_len = 0;
+        ASSERT_EQ(hl_cap_wasm_call(&cache, "shared_read", msg, msg_len,
+                                   &out, &out_len, &big, NULL, NULL,
+                                   &vfs, NULL, NULL, &err), 0);
+        ASSERT_EQ(out_len, (size_t)5);
+        free(out);
+    }
+    pthread_mutex_lock(&mod->mutex);
+    int attached = mod->chain_attached;
+    int pooled = mod->pool.count;
+    pthread_mutex_unlock(&mod->mutex);
+    ASSERT_EQ(attached, pooled);   /* only pooled instances hold it */
+
+    /* Removing the segment works (the count is really 0 once drained)... */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    NULL, 0, NULL, &vfs, NULL, &err), 0);
+    ASSERT_EQ(mod->chain_attached, 0);
+    /* ...and so do a re-add and a read through it. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    "ABCDEFGHIJ", 10, NULL, &vfs, NULL, &err), 0);
+    void *out = NULL;
+    size_t out_len = 0;
+    ASSERT_EQ(hl_cap_wasm_call(&cache, "shared_read", msg, msg_len,
+                               &out, &out_len, NULL, NULL, NULL,
+                               &vfs, NULL, NULL, &err), 0);
+    ASSERT_EQ(out_len, (size_t)5);
+    ASSERT_EQ(memcmp(out, "CDEFG", 5), 0);
+    free(out);
+    free(msg);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* H1: live attachments are bounded below WAMR's uint8, and a segment change
+ * is refused - not half-applied - while instances outside the pool hold the
+ * chain. */
+UTEST(hl_cap_wasm, chain_attachments_bounded_and_change_refused_while_held)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    const char *err = NULL;
+
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    "ABCDEFGHIJ", 10, NULL, &vfs, NULL, &err), 0);
+    HlWasmModule *mod = find_mod(&cache, "shared_read");
+    ASSERT_TRUE(mod != NULL);
+
+    enum { N = HL_WASM_MAX_CHAIN_ATTACH + 8 };
+    static HlWasmInstance *insts[N];
+    HlWasmCallOpts small = {0};
+    small.heap_size = 64 * 1024;
+    small.max_input = 64;      /* the I/O buffers must fit the small heap */
+    small.max_output = 64;
+    int made = 0;
+    const char *last_err = NULL;
+    for (int i = 0; i < N; i++) {
+        insts[i] = hl_cap_wasm_instance_create(&cache, "shared_read", &small,
+                                               &vfs, NULL, NULL, &last_err);
+        if (!insts[i]) break;
+        made++;
+    }
+    ASSERT_EQ(made, HL_WASM_MAX_CHAIN_ATTACH);
+    ASSERT_TRUE(last_err != NULL);
+    ASSERT_STREQ(last_err, "too_many_instances");
+    ASSERT_EQ(mod->chain_attached, HL_WASM_MAX_CHAIN_ATTACH);
+
+    /* Held: every kind of change is refused, and the module still works. */
+    err = NULL;
+    ASSERT_NE(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    NULL, 0, NULL, &vfs, NULL, &err), 0);
+    ASSERT_STREQ(err, "segments_in_use");
+    ASSERT_NE(hl_cap_wasm_data_load(&cache, "shared_read", "seg1",
+                                    "XYZ", 3, NULL, &vfs, NULL, &err), 0);
+    ASSERT_STREQ(err, "segments_in_use");
+    size_t msg_len;
+    uint8_t *msg = build_shared_read_msg(0, 2, 5, &msg_len);
+    void *out = NULL;
+    size_t out_len = 0;
+    ASSERT_EQ(hl_cap_wasm_instance_call(insts[0], msg, msg_len, &out, &out_len,
+                                        NULL, NULL, NULL, NULL, &err), 0);
+    ASSERT_EQ(out_len, (size_t)5);
+    ASSERT_EQ(memcmp(out, "CDEFG", 5), 0);
+    free(out);
+
+    for (int i = 0; i < made; i++)
+        hl_cap_wasm_instance_destroy(insts[i]);
+    ASSERT_EQ(mod->chain_attached, 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    NULL, 0, NULL, &vfs, NULL, &err), 0);
+    free(msg);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* M1: an instance a zero-copy result held across a segment change carries no
+ * chain (it was made before the segment existed). Released, it must not go
+ * back to the pool - pooled, the next call ran without the segment DATA_INFO
+ * advertised. */
+UTEST(hl_cap_wasm, stale_chain_instance_never_pooled)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    const char *err = NULL;
+
+    size_t cnt_len;
+    uint8_t *cnt = build_shared_read_msg(0xFF, 0, 0, &cnt_len);
+    HlWasmBuffer *held = NULL;
+    ASSERT_EQ(hl_cap_wasm_call_buf(&cache, "shared_read", cnt, cnt_len, &held,
+                                   NULL, NULL, NULL, &vfs, NULL, NULL, &err), 0);
+    ASSERT_TRUE(held != NULL);
+    ASSERT_EQ(held->kind, HL_WASM_BUF_WASM);   /* instance checked out */
+
+    /* The held instance has no chain attached, so the add is allowed. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    "ABCDEFGHIJ", 10, NULL, &vfs, NULL, &err), 0);
+    HlWasmModule *mod = find_mod(&cache, "shared_read");
+    ASSERT_TRUE(mod != NULL);
+
+    hl_wasm_buffer_close(held);
+    ASSERT_EQ(mod->pool.count, 0);   /* stale: destroyed, not pooled */
+
+    size_t msg_len;
+    uint8_t *msg = build_shared_read_msg(0, 2, 5, &msg_len);
+    void *out = NULL;
+    size_t out_len = 0;
+    ASSERT_EQ(hl_cap_wasm_call(&cache, "shared_read", msg, msg_len,
+                               &out, &out_len, NULL, NULL, NULL,
+                               &vfs, NULL, NULL, &err), 0);
+    ASSERT_EQ(out_len, (size_t)5);
+    ASSERT_EQ(memcmp(out, "CDEFG", 5), 0);
+    free(out);
+
+    /* A persistent instance made before the segment attaches it on its next
+     * call instead of reading addresses nothing backs. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", NULL,
+                                    NULL, 0, NULL, &vfs, NULL, &err), 0);
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "shared_read",
+                                                     NULL, &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    "ABCDEFGHIJ", 10, NULL, &vfs, NULL, &err), 0);
+    out = NULL;
+    ASSERT_EQ(hl_cap_wasm_instance_call(pi, msg, msg_len, &out, &out_len,
+                                        NULL, NULL, NULL, NULL, &err), 0);
+    ASSERT_EQ(out_len, (size_t)5);
+    ASSERT_EQ(memcmp(out, "CDEFG", 5), 0);
+    free(out);
+    hl_cap_wasm_instance_destroy(pi);
+
+    free(msg);
+    free(cnt);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── Audit 5 M2: wall-clock watchdog ─────────────────────────────────── */
+
+static uint64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* With gas effectively out of the way (the maximum), only the watchdog can
+ * stop `(loop br 0)` - exactly the position an AOT module is always in, since
+ * WAMR never meters AOT code. (An AOT build of the same loop takes the
+ * patch-0007 loop-header check; that needs wamrc, absent here.) */
+UTEST(hl_cap_wasm, watchdog_stops_unmetered_loop)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts opts = {0};
+    opts.gas = HL_WASM_MAX_GAS;
+    opts.timeout_ms = 200;
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+    uint64_t t0 = mono_ms();
+    int rc = hl_cap_wasm_call(&cache, "loop_forever", "x", 1, &out, &out_len,
+                              &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+    uint64_t took = mono_ms() - t0;
+    ASSERT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    ASSERT_STREQ(err, "timeout");
+    ASSERT_GE(took, (uint64_t)150);
+    ASSERT_LT(took, (uint64_t)5000);
+    free(out);
+
+    /* Nothing stale is left behind: an ordinary call still runs. */
+    out = NULL;
+    ASSERT_EQ(hl_cap_wasm_call(&cache, "echo", "hello", 5, &out, &out_len,
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err), 0);
+    ASSERT_EQ(out_len, (size_t)5);
+    free(out);
+
+    /* A persistent instance is stopped the same way, and is usable again. */
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "loop_forever",
+                                                     &opts, &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    for (int i = 0; i < 2; i++) {
+        out = NULL;
+        t0 = mono_ms();
+        rc = hl_cap_wasm_instance_call(pi, "x", 1, &out, &out_len, &opts,
+                                       NULL, NULL, NULL, &err);
+        took = mono_ms() - t0;
+        ASSERT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+        ASSERT_LT(took, (uint64_t)5000);
+        free(out);
+    }
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Per-call timeouts are clamped to the configured ceiling, like gas. */
+UTEST(hl_cap_wasm, timeout_clamped_to_ceiling)
+{
+    HlWasmCallOpts o = {0};
+    hl_cap_wasm_clamp_opts(&o, 0, 0, 0, 0, 0, 500);
+    ASSERT_EQ(o.timeout_ms, 500u);          /* unset: the ceiling */
+    o.timeout_ms = 100;
+    hl_cap_wasm_clamp_opts(&o, 0, 0, 0, 0, 0, 500);
+    ASSERT_EQ(o.timeout_ms, 100u);          /* below: kept */
+    o.timeout_ms = 9000;
+    hl_cap_wasm_clamp_opts(&o, 0, 0, 0, 0, 0, 500);
+    ASSERT_EQ(o.timeout_ms, 500u);          /* above: clamped */
+    ASSERT_EQ(hl_wasm_timeout_resolve(0), HL_WASM_DEFAULT_TIMEOUT_MS);
+    ASSERT_EQ(hl_wasm_timeout_resolve((uint64_t)HL_WASM_MAX_TIMEOUT_MS * 10),
+              HL_WASM_MAX_TIMEOUT_MS);
+}
+
+/* A start function runs inside instantiation, where gas never applied: the
+ * watch armed for the call is bound to the new instance while it runs. */
+UTEST(hl_cap_wasm, watchdog_stops_start_function)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    char ebuf[256];
+    uint8_t *copy = malloc(start_loop_wasm_len);
+    ASSERT_TRUE(copy != NULL);
+    memcpy(copy, start_loop_wasm, start_loop_wasm_len);
+    wasm_module_t m = wasm_runtime_load(copy, start_loop_wasm_len,
+                                        ebuf, sizeof ebuf);
+    ASSERT_TRUE(m != NULL);
+
+    HlWasmWatch w = {0};
+    ASSERT_EQ(hl_wasm_watch_arm(&w, 200, NULL), 0);
+    uint64_t t0 = mono_ms();
+    ebuf[0] = '\0';
+    void *inst = hl_wasm_watch_instantiate(&w, m, 8192, 8192, ebuf, sizeof ebuf);
+    uint64_t took = mono_ms() - t0;
+    ASSERT_EQ(hl_wasm_watch_disarm(&w), 1);
+    ASSERT_TRUE(inst == NULL);
+    ASSERT_TRUE(strstr(ebuf, "terminated") != NULL);
+    ASSERT_LT(took, (uint64_t)5000);
+
+    wasm_runtime_unload(m);
+    free(copy);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ...and through the module loader: the load-time probe instantiation is
+ * bounded by the DEFAULT timeout, and a module whose start function outlives
+ * it is refused rather than cached to hang every later call. */
+UTEST(hl_cap_wasm, load_refuses_module_whose_start_never_returns)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    uint64_t t0 = mono_ms();
+    int rc = hl_cap_wasm_load(&cache, "start_loop", &vfs, NULL);
+    uint64_t took = mono_ms() - t0;
+    ASSERT_EQ(rc, HL_WASM_ERR_LOAD);
+    ASSERT_EQ(cache.count, 0);
+    ASSERT_LT(took, (uint64_t)HL_WASM_DEFAULT_TIMEOUT_MS + 5000);
     hl_cap_wasm_destroy(&cache);
 }
 

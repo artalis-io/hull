@@ -84,6 +84,7 @@ HlWasmBuffer *hl_wasm_buffer_create_wasm(
     void *module, void *cache,
     uint64_t wasm_ptr, const void *native_ptr, size_t len,
     uint32_t heap_size, uint32_t stack_size,
+    uint32_t chain_gen, int chain_attached,
     HlAllocator *alloc)
 {
     if (!inst || !exec_env || !module || !cache || !native_ptr) return NULL;
@@ -104,6 +105,8 @@ HlWasmBuffer *hl_wasm_buffer_create_wasm(
     buf->u.wasm.wasm_ptr   = wasm_ptr;
     buf->u.wasm.heap_size  = heap_size;
     buf->u.wasm.stack_size = stack_size;
+    buf->u.wasm.chain_gen      = chain_gen;
+    buf->u.wasm.chain_attached = chain_attached;
 
     return buf;
 }
@@ -172,7 +175,11 @@ void hl_wasm_buffer_destroy(HlWasmBuffer *buf)
         if (buf->u.wasm.wasm_ptr)
             wasm_runtime_module_free(inst, buf->u.wasm.wasm_ptr);
 
-        /* Return instance to pool (success=1 since call succeeded) */
+        /* Return instance to pool (success=1 since call succeeded). A
+         * segment change made while this buffer held the instance makes its
+         * chain generation stale; pool_release then destroys it instead. */
+        HlWasmChainRef chain = { buf->u.wasm.chain_gen,
+                                 buf->u.wasm.chain_attached };
         hl_wasm_pool_release(
             (HlWasmCache *)buf->u.wasm.cache,
             (HlWasmModule *)buf->u.wasm.module,
@@ -181,7 +188,7 @@ void hl_wasm_buffer_destroy(HlWasmBuffer *buf)
             buf->u.wasm.process_fn,
             buf->u.wasm.heap_size,
             buf->u.wasm.stack_size,
-            1);
+            1, chain);
 
         buf->u.wasm.instance = NULL;
         buf->u.wasm.exec_env = NULL;

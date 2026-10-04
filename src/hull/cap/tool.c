@@ -359,7 +359,10 @@ static int tool_bdir_trusted(const char *dir)
     while (!trusted && path && *path) {
         const char *end = strchr(path, ':');
         size_t len = end ? (size_t)(end - path) : strlen(path);
-        if (len > 0 && len < PATH_MAX) {
+        /* Only an absolute entry: "." or a relative one names a directory
+         * relative to the cwd (the app directory), which made `-B.` trusted
+         * whenever that directory held an ld.lld. */
+        if (len > 0 && len < PATH_MAX && path[0] == '/') {
             char comp[PATH_MAX], rcomp[PATH_MAX];
             memcpy(comp, path, len);
             comp[len] = '\0';
@@ -382,6 +385,16 @@ static int tool_bdir_trusted(const char *dir)
     return 0;
 }
 
+/* @p a is long option @p full, or a GNU-style abbreviation of it at least
+ * @p min_len characters long, optionally followed by "=value". gcc accepts any
+ * unambiguous prefix of a long option ("--pref=/x" is "--prefix=/x"), so an
+ * exact-match filter is not enough. */
+static int long_opt_abbrev(const char *a, const char *full, size_t min_len)
+{
+    size_t n = strcspn(a, "=");
+    return n >= min_len && n <= strlen(full) && strncmp(a, full, n) == 0;
+}
+
 int hl_tool_validate_args(const char *const argv[])
 {
     if (!argv) return -1;
@@ -401,8 +414,7 @@ int hl_tool_validate_args(const char *const argv[])
         if (strncmp(a, "-fplugin=", 9) == 0)  return -1; /* GCC plugin= */
         if (strncmp(a, "-fpass-plugin=", 14) == 0) return -1; /* Clang pass plugin */
         if (strcmp(a, "-Xlinker") == 0)       return -1; /* linker pass */
-        if (strcmp(a, "--for-linker") == 0 ||
-            strncmp(a, "--for-linker=", 13) == 0) return -1; /* -Xlinker, spelled out */
+        if (long_opt_abbrev(a, "--for-linker", 6)) return -1; /* -Xlinker, spelled out */
         if (is_linker_plugin_flag(a))          return -1;
         if (strcmp(a, "-wrapper") == 0)       return -1; /* runs a program around each tool */
         if (strncmp(a, "-specs=", 7) == 0 ||
@@ -413,6 +425,12 @@ int hl_tool_validate_args(const char *const argv[])
          * backend's own form passes: a directory already trusted to run
          * programs from, holding the lld it resolved. */
         if (strncmp(a, "-B", 2) == 0 && !tool_bdir_trusted(a + 2)) return -1;
+        /* -B's other spellings: gcc and clang alias --prefix / --prefix= to
+         * it (gcc also takes an abbreviation, "--pref="), and clang's
+         * -ccc-install-dir names where it finds its own tools. Neither form
+         * is one Hull's backends use, so they are refused outright. */
+        if (long_opt_abbrev(a, "--prefix", 6)) return -1;
+        if (strncmp(a, "-ccc-install-dir", 16) == 0) return -1;
         if (strncmp(a, "--gcc-toolchain", 15) == 0 ||
             strncmp(a, "-gcc-toolchain", 14) == 0) return -1;
         /* -fuse-ld=lld picks a linker by name (Hull's lld backend uses it);
