@@ -2372,7 +2372,10 @@ jobs:
           cat > /tmp/ddbmodeb/app.lua <<'EOF'
           app.manifest({
               modules = { "hull/db@1" },
-              fs = { read = { "data/*.csv" } },
+              -- DuckDB's allowed_directories is read+write and recursive, so
+              -- only a directory granted whole in BOTH fs.read and fs.write
+              -- reaches mode B (audit 4; docs/duckdb_backend_design.md).
+              fs = { read = { "data/" }, write = { "data/" } },
               databases = { named = { analytics = "duckdb://:memory:" } },
           })
           app.main(function(ctx)
@@ -2390,6 +2393,25 @@ jobs:
           fi
           cat /tmp/ddbmodeb/out.txt
           grep -q "DUCKDB MODE B OK" /tmp/ddbmodeb/out.txt
+          # A read-only pattern grant is NOT widened (it used to become the
+          # whole app_dir, read+write): the same read must be refused.
+          cat > /tmp/ddbmodeb/ro.lua <<'EOF'
+          app.manifest({
+              modules = { "hull/db@1" },
+              fs = { read = { "data/*.csv" } },
+              databases = { named = { analytics = "duckdb://:memory:" } },
+          })
+          app.main(function(ctx)
+              local d = require("hull.db").connect("analytics")
+              local ok = pcall(d.query, "SELECT id FROM read_csv('/tmp/ddbmodeb/data/test.csv')")
+              if ok then print("DUCKDB RO GLOB WIDENED") return 1 end
+              print("DUCKDB RO GLOB REFUSED")
+              return 0
+          end)
+          EOF
+          ./build/hull /tmp/ddbmodeb/ro.lua > /tmp/ddbmodeb/ro.txt 2>&1 || true
+          cat /tmp/ddbmodeb/ro.txt
+          grep -q "DUCKDB RO GLOB REFUSED" /tmp/ddbmodeb/ro.txt
 
   # DuckDB as a composable FEATURE (not compiled into the base). A separate job
   # with a fresh build tree: it builds a BASE hull (no DuckDB) + the feature

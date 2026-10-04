@@ -67,7 +67,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
 
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);
 
     /* Reset scratch arena for this request */
     sh_arena_reset(lua->scratch);
@@ -231,7 +231,7 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
         return -1;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);
 
     /* Arm the instruction budget for this middleware call */
     HL_LUA_ARM(lua, lua->L);

@@ -11,6 +11,7 @@
  */
 
 #include "hull/cap/pgwire.h"
+#include "hull/utils/secure_zero.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -28,6 +29,9 @@ void hl_pg_writer_init(HlPgWriter *w)
 
 void hl_pg_writer_free(HlPgWriter *w)
 {
+    /* Zeroed: auth messages (cleartext password, SCRAM proof, AUTH /
+     * HELLO) pass through a writer, and were freed as they were. */
+    if (w->buf) hl_secure_zero(w->buf, w->cap);
     free(w->buf);
     w->buf = NULL;
     w->len = 0;

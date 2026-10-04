@@ -60,7 +60,7 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
 
 
     /* Guard stale transactions */
-    hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);
 
     /* Reset scratch arena */
     sh_arena_reset(lua->scratch);

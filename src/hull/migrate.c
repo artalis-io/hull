@@ -187,6 +187,37 @@ static int execute_migration(HlDbHandle *h, const char *name,
         return -1;
     }
 
+    /* Applied by another process since the caller looked? Two instances
+     * starting together both saw the migration as pending; the second then
+     * re-ran it once the first committed and failed ("table already
+     * exists"), so it did not start. Checked again under the transaction:
+     * SQLite's BEGIN IMMEDIATE holds the write lock; on Postgres the table
+     * lock serialises the two. */
+    if (h->backend && h->backend->name && strcmp(h->backend->name, "postgres") == 0 &&
+        hl_db_exec(h, "LOCK TABLE _hull_migrations IN SHARE ROW EXCLUSIVE MODE",
+                   NULL, 0) != 0) {
+        log_error("[hull:migrate] %s: cannot lock _hull_migrations: %s",
+                  name, hl_db_errmsg(h));
+        hl_db_rollback(h);
+        return -1;
+    }
+    {
+        HlValue p = { .type = HL_TYPE_TEXT, .s = name, .len = strlen(name) };
+        AppliedRow r = { 0, 0, { 0 } };
+        if (hl_db_query(h, "SELECT checksum FROM _hull_migrations WHERE name = ?",
+                        &p, 1, migrate_found_cb, &r, NULL) != 0) {
+            log_error("[hull:migrate] %s: cannot re-check: %s",
+                      name, hl_db_errmsg(h));
+            hl_db_rollback(h);
+            return -1;
+        }
+        if (r.found) {
+            hl_db_rollback(h);
+            log_info("[hull:migrate] %s: applied by another process", name);
+            return 0;
+        }
+    }
+
     /* Always copy to ensure NUL-termination (avoids OOB read if VFS
      * entry isn't NUL-terminated).  Migration SQL is small and runs
      * once at startup, so the copy cost is negligible. */

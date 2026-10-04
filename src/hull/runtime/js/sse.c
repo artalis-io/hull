@@ -40,7 +40,7 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
 
 
     /* Guard stale transactions */
-    hl_db_guard_stale_txn(hl_db_registry_default(js->base.db_registry));
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
 
     /* Reset scratch + instruction counter */
     sh_arena_reset(js->scratch);

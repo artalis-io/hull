@@ -91,6 +91,14 @@ int hl_db_registry_seal(HlDbRegistry *reg)
 /* Fast accessor for the already-open "default" connection (opened at startup
  * for migrations, so it is cached). Returns NULL if absent. No open, no error
  * path: this is the per-request hot path used by the stale-txn guards. */
+void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
+{
+    if (!reg) return;
+    for (int i = 0; i < reg->nslots; i++)
+        if (reg->slots[i].open)
+            hl_db_guard_stale_txn(&reg->slots[i].handle);
+}
+
 HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
 {
     if (!reg) return NULL;

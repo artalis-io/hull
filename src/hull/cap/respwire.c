@@ -10,6 +10,7 @@
  */
 
 #include "hull/cap/respwire.h"
+#include "hull/utils/secure_zero.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -19,7 +20,13 @@
 /* ── writer ───────────────────────────────────────────────────────────── */
 
 void hl_resp_writer_init(HlRespWriter *w) { w->buf = NULL; w->len = w->cap = 0; w->err = 0; }
-void hl_resp_writer_free(HlRespWriter *w) { free(w->buf); w->buf = NULL; w->len = w->cap = 0; }
+void hl_resp_writer_free(HlRespWriter *w)
+{
+    /* Zeroed: auth messages (cleartext password, SCRAM proof, AUTH /
+     * HELLO) pass through a writer, and were freed as they were. */
+    if (w->buf) hl_secure_zero(w->buf, w->cap);
+    free(w->buf); w->buf = NULL; w->len = w->cap = 0;
+}
 void hl_resp_writer_reset(HlRespWriter *w) { w->len = 0; w->err = 0; }
 
 static int rw_reserve(HlRespWriter *w, size_t extra) {

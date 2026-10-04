@@ -447,6 +447,20 @@ static int duck_begin(HlDbHandle *h)    { return duck_exec(h, "BEGIN TRANSACTION
 static int duck_commit(HlDbHandle *h)   { return duck_exec(h, "COMMIT", NULL, 0); }
 static int duck_rollback(HlDbHandle *h) { return duck_exec(h, "ROLLBACK", NULL, 0); }
 
+/* See pg_guard_stale_txn. The C API does not report whether a transaction is
+ * open, so ROLLBACK is sent unconditionally and its "no transaction is active"
+ * error dropped (straight to duckdb_query: the connection's error stays). */
+static void duck_guard_stale_txn(HlDbHandle *h)
+{
+    if (!h || !h->ctx) return;
+    HlDbDuckCtx *s = h->ctx;
+    if (!s->con) return;
+    duckdb_result res;
+    if (duckdb_query(s->con, "ROLLBACK", &res) == DuckDBSuccess)
+        fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
+    duckdb_destroy_result(&res);
+}
+
 static int64_t duck_last_id(HlDbHandle *h)
 {
     (void)h;
@@ -626,7 +640,7 @@ const HlDbBackend hl_db_backend_duckdb = {
     .rollback             = duck_rollback,
     .last_id              = duck_last_id,
     .errmsg               = duck_errmsg,
-    .guard_stale_txn      = NULL,
+    .guard_stale_txn      = duck_guard_stale_txn,
     .insert_if_absent     = duck_insert_if_absent,
     .upsert               = duck_upsert,
     .table_columns        = duck_table_columns,

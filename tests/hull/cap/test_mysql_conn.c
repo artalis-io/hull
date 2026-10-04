@@ -17,7 +17,8 @@
 
 /* ── Canned server packets ────────────────────────────────────────── */
 
-static void build_handshake_plugin(HlMyWriter *w, uint8_t seq, const char *plugin)
+static void build_handshake_caps(HlMyWriter *w, uint8_t seq, const char *plugin,
+                                 uint32_t extra_caps)
 {
     size_t m = hl_my_packet_begin(w, seq);
     hl_my_put_u8(w, 10);                       /* protocol v10 */
@@ -27,7 +28,7 @@ static void build_handshake_plugin(HlMyWriter *w, uint8_t seq, const char *plugi
         hl_my_put_u8(w, (uint8_t)(i + 1));     /* auth data part 1 */
     hl_my_put_u8(w, 0);                        /* filler */
     uint32_t caps = HL_MY_CLIENT_SECURE_CONNECTION | HL_MY_CLIENT_PLUGIN_AUTH
-                  | HL_MY_CLIENT_PROTOCOL_41;
+                  | HL_MY_CLIENT_PROTOCOL_41 | extra_caps;
     hl_my_put_u16(w, (uint16_t)(caps & 0xFFFF));
     hl_my_put_u8(w, HL_MY_DEFAULT_CHARSET);
     hl_my_put_u16(w, 2);                       /* status */
@@ -39,6 +40,11 @@ static void build_handshake_plugin(HlMyWriter *w, uint8_t seq, const char *plugi
     hl_my_put_u8(w, 0);                        /* part-2 NUL */
     hl_my_put_cstr(w, plugin);
     hl_my_packet_end(w, m);
+}
+
+static void build_handshake_plugin(HlMyWriter *w, uint8_t seq, const char *plugin)
+{
+    build_handshake_caps(w, seq, plugin, 0);
 }
 
 static void build_handshake(HlMyWriter *w, uint8_t seq)
@@ -158,6 +164,32 @@ static int drive_sslmode(const char *dsn_str, char *out, size_t outsz)
     hl_my_writer_free(&hs);
     close(sv[0]);   /* sv[1] is closed by the failed start */
     return rc;
+}
+
+/* Bytes that follow the greeting before TLS (an on-path attacker's forged OK
+ * in the same segment) are refused, not parsed later as if they came over
+ * TLS (audit 4 H1). */
+UTEST(mysql_conn, tls_refuses_bytes_buffered_before_handshake)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter hs; hl_my_writer_init(&hs);
+    build_handshake_caps(&hs, 0, "mysql_native_password", HL_MY_CLIENT_SSL);
+    build_ok(&hs, 2);                         /* the forged OK, same write */
+    ssize_t w = write(sv[0], hs.buf, hs.len); (void)w;
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://a:pw@localhost/db?sslmode=require",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    int rc = hl_my_conn_start(&conn, sv[1], &dsn);
+    char e[256];
+    snprintf(e, sizeof e, "%s", conn.errmsg);
+    if (rc == 0) hl_my_conn_close(&conn);
+    hl_my_writer_free(&hs);
+    close(sv[0]);
+    ASSERT_EQ(-1, rc);
+    ASSERT_TRUE(strstr(e, "before the TLS handshake") != NULL);
 }
 
 UTEST(mysql_conn, tls_require_no_downgrade)

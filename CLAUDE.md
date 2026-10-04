@@ -637,8 +637,9 @@ carries the sync methods (`query`/`exec`/`batch`/`insert_if_absent`/`upsert`/
 reports its own DSN (`db_call_dsn` / `js_call_dsn`, symmetric with the handle
 resolver) so `conn.async` targets the dynamic database through the worker pool,
 which bounds its per-thread connection cache with an LRU
-(`HL_WORKER_DB_MAX_CONNS`) so churning through many dynamic DSNs never grows
-unbounded. `async`-after-close fails closed (the live-handle guard). `udf` on a
+(`HL_WORKER_DB_MAX_CONNS`); a dynamic DSN's worker connection is not cached at
+all - it closes after the op (`HlWorkerDbOp.no_cache`), so worker threads never
+hold dynamic connections past the 16-connection cap or the app's `close()`. `async`-after-close fails closed (the live-handle guard). `udf` on a
 dynamic handle is intentionally absent (worker-side udf re-registration is keyed
 off the registry a dynamic handle is not in; tracked follow-up). Note the
 `db.async` + `:memory:` caveat above applies: for async use a file-backed
@@ -656,6 +657,15 @@ including the default -- there is no distinguished default-handle field;
 consumers resolve it via `hl_db_registry_default`. `db.connect(name)` resolves
 after startup (the manifest is applied post-load), so call it from `app.main`
 or a handler, not at module top-level; `db.default()` works everywhere.
+
+**Stale transactions.** Before each request, SSE event and timer, every OPEN
+registry connection (default, named, internal) has a transaction a previous
+handler left open rolled back (`hl_db_registry_guard_stale_txns`): SQLite by
+autocommit state, Postgres by `tx_status`, MySQL by `SERVER_STATUS_IN_TRANS`,
+DuckDB by an unconditional `ROLLBACK`. Before audit 4 only SQLite's default
+connection was guarded, so a Postgres handler that raised between `BEGIN` and
+`COMMIT` left every later request inside that transaction (or, after a failed
+statement, failing with "current transaction is aborted").
 
 **`db.async` + `:memory:` (SQLite) caveat.** `db.async` runs on the worker
 pool, where each thread opens its OWN connection to the target DSN (keyed by

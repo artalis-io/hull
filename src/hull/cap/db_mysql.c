@@ -480,6 +480,17 @@ static int mysql_begin(HlDbHandle *h)    { return mysql_txn(h, "START TRANSACTIO
 static int mysql_commit(HlDbHandle *h)   { return mysql_txn(h, "COMMIT"); }
 static int mysql_rollback(HlDbHandle *h) { return mysql_txn(h, "ROLLBACK"); }
 
+/* See pg_guard_stale_txn: a transaction a request left open is rolled back
+ * before the next request runs. */
+static void mysql_guard_stale_txn(HlDbHandle *h)
+{
+    if (!h || !h->ctx) return;
+    HlDbMyCtx *s = h->ctx;
+    if (!(s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS)) return;
+    fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
+    (void)mysql_rollback(h);
+}
+
 static int64_t mysql_last_id(HlDbHandle *h)
 {
     if (!h || !h->ctx) return -1;
@@ -646,6 +657,7 @@ const HlDbBackend hl_db_backend_mysql = {
     .begin                 = mysql_begin,
     .commit                = mysql_commit,
     .rollback              = mysql_rollback,
+    .guard_stale_txn       = mysql_guard_stale_txn,
     .last_id               = mysql_last_id,
     .errmsg                = mysql_errmsg,
     .insert_if_absent      = mysql_insert_if_absent,

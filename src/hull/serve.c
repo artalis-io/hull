@@ -1272,60 +1272,82 @@ static int hl_serve_load_app(HlServerState *s)
  */
 
 #ifdef HL_ENABLE_DUCKDB
-/* Resolve the manifest's fs.read + fs.write patterns to absolute directories
- * and install them as DuckDB's bounded file-access policy (design §3.2 mode B).
- * Each entry's glob tail is stripped, the remainder resolved absolute against
- * app_dir, then mapped to a directory (the path itself if it is one, else its
- * parent). Duplicates are dropped. The array + strings are allocated in the
- * (about-to-be-sealed) policy arena, so DuckDB reads RO memory that outlives
- * the process. A no-op - leaving DuckDB in full lockdown (mode A) - when no fs
- * paths are declared or the arena is exhausted (fail-closed). Must run before
- * the arena is sealed and before any DuckDB connection opens. */
+/* An fs grant as the directory DuckDB may use: the entry must name a whole
+ * directory - bare, or with a trailing "/**" - that exists. 0 and the
+ * absolute path in @p out, or -1 (a file, a pattern, a missing path). */
+static int duckdb_grant_dir(const char *app_dir, const char *e,
+                            char *out, size_t out_sz)
+{
+    char work[4096];
+    int n = snprintf(work, sizeof work, "%s", e);
+    if (n <= 0 || (size_t)n >= sizeof work) return -1;
+    size_t len = (size_t)n;
+    if (len >= 3 && strcmp(work + len - 3, "/**") == 0) work[len - 3] = '\0';
+    while ((len = strlen(work)) > 1 && work[len - 1] == '/') work[len - 1] = '\0';
+    if (!work[0] || strpbrk(work, "*?[")) return -1;
+    char abs[4096];
+    if (work[0] == '/') n = snprintf(abs, sizeof abs, "%s", work);
+    else                n = snprintf(abs, sizeof abs, "%s/%s", app_dir, work);
+    if (n <= 0 || (size_t)n >= sizeof abs) return -1;
+    char real[PATH_MAX];
+    struct stat st;
+    if (!realpath(abs, real) || stat(real, &st) != 0 || !S_ISDIR(st.st_mode))
+        return -1;
+    n = snprintf(out, out_sz, "%s", real);
+    return (n > 0 && (size_t)n < out_sz) ? 0 : -1;
+}
+
+/* DuckDB's allowed_directories grants read AND write, recursively. So a
+ * directory goes in only when the manifest grants it whole for both: one in
+ * fs.read and in fs.write. Before, read and write grants were merged, a file
+ * widened to its parent and a leading glob ("*.csv") to all of app_dir - an
+ * fs.read = {"*.csv"} app could COPY over app.lua or read data.db raw through
+ * a duckdb:// connection. Any other grant is left out (logged), never widened.
+ * The strings live in the (about-to-be-sealed) policy arena; with nothing
+ * usable DuckDB stays in full lockdown (mode A). Must run before the arena is
+ * sealed and before any DuckDB connection opens. */
 static void hl_serve_install_duckdb_fs_policy(HlServerState *s)
 {
     const HlManifest *m = &s->manifest;
-    int total = m->fs_read_count + m->fs_write_count;
-    if (total <= 0) return;
+    if (m->fs_read_count + m->fs_write_count <= 0) return;
 
-    const char *uniq[2 * HL_MANIFEST_MAX_PATHS];
+    const char *uniq[HL_MANIFEST_MAX_PATHS];
     int nuniq = 0;
+    int skipped = 0;
 
-    for (int idx = 0; idx < total; idx++) {
-        const char *e = (idx < m->fs_read_count)
-            ? m->fs_read[idx]
-            : m->fs_write[idx - m->fs_read_count];
-        if (!e || !e[0]) continue;
-
-        /* Strip a glob tail: truncate at the last '/' before the first '*'. */
-        char work[4096];
-        snprintf(work, sizeof work, "%s", e);
-        char *star = strchr(work, '*');
-        if (star) { while (star > work && *star != '/') star--; *star = '\0'; }
-
-        /* Resolve absolute against app_dir. */
-        char abs[4096];
-        if (work[0] == '/') snprintf(abs, sizeof abs, "%s", work);
-        else if (work[0])   snprintf(abs, sizeof abs, "%s/%s", s->app_dir, work);
-        else                snprintf(abs, sizeof abs, "%s", s->app_dir);
-
-        /* Map to a directory: the path itself if it is one, else its parent. */
-        struct stat st;
-        if (!(stat(abs, &st) == 0 && S_ISDIR(st.st_mode))) {
-            char *sl = strrchr(abs, '/');
-            if (sl && sl != abs) *sl = '\0';
-            else                 snprintf(abs, sizeof abs, "%s", s->app_dir);
+    for (int r = 0; r < m->fs_read_count; r++) {
+        const char *re = m->fs_read[r];
+        char rdir[PATH_MAX];
+        if (!re || !re[0] || duckdb_grant_dir(s->app_dir, re, rdir, sizeof rdir) != 0) {
+            skipped++;
+            continue;
         }
+        int writable = 0;
+        for (int w = 0; w < m->fs_write_count && !writable; w++) {
+            char wdir[PATH_MAX];
+            const char *we = m->fs_write[w];
+            if (we && we[0] &&
+                duckdb_grant_dir(s->app_dir, we, wdir, sizeof wdir) == 0 &&
+                strcmp(wdir, rdir) == 0)
+                writable = 1;
+        }
+        if (!writable) { skipped++; continue; }
 
         int dup = 0;
         for (int j = 0; j < nuniq; j++)
-            if (strcmp(uniq[j], abs) == 0) { dup = 1; break; }
+            if (strcmp(uniq[j], rdir) == 0) { dup = 1; break; }
         if (dup) continue;
         if (nuniq >= (int)(sizeof uniq / sizeof uniq[0])) break;
 
-        char *sealed = sh_seal_arena_strdup(&s->seal_arena, abs);
+        char *sealed = sh_seal_arena_strdup(&s->seal_arena, rdir);
         if (!sealed) return;   /* arena OOM -> fail closed (mode A) */
         uniq[nuniq++] = sealed;
     }
+    if (skipped)
+        log_warn("[hull:c] duckdb: %d fs grant(s) give a duckdb:// connection no "
+                 "file access - only a whole directory granted in BOTH fs.read "
+                 "and fs.write is usable (DuckDB cannot limit a directory to "
+                 "reading, or to some of its files)", skipped);
 
     if (nuniq <= 0) return;
     const char **arr = sh_seal_arena_alloc(&s->seal_arena,

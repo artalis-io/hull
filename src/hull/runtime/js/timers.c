@@ -108,7 +108,7 @@ void hl_js_timer_trampoline(void *user_data)
 
     /* Reset scratch arena + guard stale txn */
     sh_arena_reset(js->scratch);
-    hl_db_guard_stale_txn(hl_db_registry_default(js->base.db_registry));
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
 
 
     /* Clear per-request state (no connection) */
