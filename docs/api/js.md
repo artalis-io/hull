@@ -199,7 +199,7 @@ const buf     = fs.mmap("big.bin", { offset, length }); // read-only MappedBuffe
 ```
 
 - `fs.read(path)` -> `ArrayBuffer` (throws on error).
-- `fs.write(path, bytes)` -> `true`; creates missing parents and replaces the file atomically (temp file + fsync + rename): a reader, or the file after a crash, sees the old contents or the new, never a mix. A replaced file keeps its permission bits.
+- `fs.write(path, bytes)` -> `true`; creates missing parents and replaces the file atomically (temp file + fsync + rename): a reader, or the file after a crash, sees the old contents or the new, never a mix. A replaced file keeps its permission bits. A file whose directory refuses the temp file or the rename (read-only directory, bind-mounted single file, another filesystem) is written in place instead, not atomically.
 - `fs.stat(path)` -> `{ type, size, mode, mtime }`, or `null` when the path does not
   exist (so `fs.stat(p) !== null` subsumes an existence check). `type` is `"file"` /
   `"dir"` / `"symlink"` / `"other"`; a terminal symlink is reported as a link (lstat),

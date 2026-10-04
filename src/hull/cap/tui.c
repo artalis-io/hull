@@ -55,6 +55,10 @@ static int       g_atexit_registered = 0;
 
 /* SIGWINCH sets this; cap_tui_poll consumes it on next call. */
 static volatile sig_atomic_t g_winch_pending = 0;
+/* SIGCONT seen: the terminal is put back on the main path (consume_winch).
+ * The handler used to do it itself - memset cell buffers a resize might be
+ * swapping at that moment. */
+static volatile sig_atomic_t g_cont_pending = 0;
 
 /* Saved signal handlers (we chain to them after our restore). */
 static struct sigaction g_prev_sigint;
@@ -209,12 +213,16 @@ static void on_fatal_signal(int sig)
     }
 }
 
+static void suspend_terminal(HlTuiCtx *ctx);
+
 static void on_sigtstp(int sig)
 {
     (void)sig;
-    /* Leave alt screen + restore termios so the parent shell sees a
-     * normal terminal when we're suspended. */
-    if (g_singleton) leave_alt_screen(g_singleton);
+    /* Hand the shell a normal terminal: modes off, alt screen left, and the
+     * saved termios back (it stayed raw). The mode FLAGS stay set, so SIGCONT
+     * turns those modes back on (they never came back). write() and
+     * tcsetattr() are async-signal-safe. */
+    if (g_singleton) suspend_terminal(g_singleton);
     /* Reinstall default SIGTSTP and re-raise so the kernel actually
      * stops us. */
     struct sigaction dfl = {0};
@@ -234,12 +242,9 @@ static void on_sigcont(int sig)
     sigemptyset(&tstp.sa_mask);
     sigaction(SIGTSTP, &tstp, NULL);
 
-    if (g_singleton) {
-        enter_alt_screen(g_singleton);
-        hl_cap_tui_invalidate(g_singleton);
-        /* Flush is the caller's job - we just mark for repaint. */
-        g_winch_pending = 1; /* re-probe size, just in case */
-    }
+    /* The rest on the main path (resume_terminal): only flags here. */
+    g_cont_pending = 1;
+    g_winch_pending = 1; /* re-probe size, just in case */
 }
 
 static int install_signal_handlers(void)
@@ -299,6 +304,20 @@ static int set_raw_mode(HlTuiCtx *ctx)
     return 0;
 }
 
+/* Raw mode from the saved termios (set_raw_mode saved it). */
+static void apply_raw(HlTuiCtx *ctx)
+{
+    if (!ctx->termios_saved) return;
+    struct termios raw = ctx->saved_termios;
+    raw.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
+    raw.c_iflag &= ~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
+    raw.c_oflag &= ~(OPOST);
+    raw.c_cflag |=  (CS8);
+    raw.c_cc[VMIN]  = 0;
+    raw.c_cc[VTIME] = 0;
+    (void)tcsetattr(ctx->in_fd, TCSAFLUSH, &raw);
+}
+
 static void restore_termios(HlTuiCtx *ctx)
 {
     if (!ctx || !ctx->termios_saved) return;
@@ -343,6 +362,38 @@ static int leave_alt_screen(HlTuiCtx *ctx)
     return raw_write(ctx->out_fd, seq, sizeof seq - 1);
 }
 
+/* SIGTSTP (signal context): modes off WITHOUT clearing their flags, the
+ * alt screen left, the shell's termios back. */
+static void suspend_terminal(HlTuiCtx *ctx)
+{
+    static const char m[] = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+    static const char pz[] = "\x1b[?2004l";
+    static const char f[] = "\x1b[?1004l";
+    static const char k[] = "\x1b[<u";
+    static const char seq[] = "\x1b[0m\x1b[?25h\x1b[?1049l";
+    if (ctx->mouse_on)     raw_write(ctx->out_fd, m, sizeof m - 1);
+    if (ctx->paste_on)     raw_write(ctx->out_fd, pz, sizeof pz - 1);
+    if (ctx->focus_on)     raw_write(ctx->out_fd, f, sizeof f - 1);
+    if (ctx->kitty_kbd_on) raw_write(ctx->out_fd, k, sizeof k - 1);
+    raw_write(ctx->out_fd, seq, sizeof seq - 1);
+    if (ctx->termios_saved)
+        (void)tcsetattr(ctx->in_fd, TCSANOW, &ctx->saved_termios);
+}
+
+/* After SIGCONT (main path): raw mode, the alt screen and every mode still
+ * flagged on, back; then a full repaint. */
+static void resume_terminal(HlTuiCtx *ctx)
+{
+    apply_raw(ctx);
+    enter_alt_screen(ctx);
+    if (ctx->mouse_on)
+        raw_write(ctx->out_fd, "\x1b[?1000h\x1b[?1002h\x1b[?1006h", 24);
+    if (ctx->paste_on)     raw_write(ctx->out_fd, "\x1b[?2004h", 8);
+    if (ctx->focus_on)     raw_write(ctx->out_fd, "\x1b[?1004h", 8);
+    if (ctx->kitty_kbd_on) raw_write(ctx->out_fd, "\x1b[>15u", 7);
+    hl_cap_tui_invalidate(ctx);
+}
+
 static int raw_write(int fd, const char *s, size_t n)
 {
     while (n > 0) {
@@ -379,7 +430,13 @@ static int alloc_cells(HlTuiCtx *ctx, int cols, int rows)
 {
     size_t need = (size_t)cols * (size_t)rows;
     if (need == 0) return 0;
-    if (need == ctx->cells_alloc) return 0;
+    /* Any change of GEOMETRY starts over, not only of area: 80x24 -> 120x16
+     * kept both buffers laid out row-major for the old width. And the
+     * screen is cleared - the old glyphs stayed on it. */
+    if (need == ctx->cells_alloc && cols == ctx->cols && rows == ctx->rows)
+        return 0;
+    if (ctx->cells_alloc)
+        raw_write(ctx->out_fd, "\x1b[2J", 4);
 
     HlTuiCell *new_shadow  = calloc(need, sizeof(HlTuiCell));
     HlTuiCell *new_pending = calloc(need, sizeof(HlTuiCell));
@@ -568,11 +625,15 @@ int hl_cap_tui_release(HlTuiCtx *ctx)
     restore_signal_handlers();
     restore_termios(ctx);
 
+    /* The parser's heap text (queued events, a paste in progress) leaked
+     * on every acquire/release cycle. */
+    hl_tui_parser_free(&ctx->parser);
     free(ctx->shadow);
     free(ctx->pending);
     free(ctx->out_buf);
     free(ctx);
     g_singleton = NULL;
+    g_cont_pending = 0;
     return 0;
 }
 
@@ -885,6 +946,10 @@ int hl_cap_tui_flush(HlTuiCtx *ctx)
  * event was enqueued, 0 otherwise. */
 static int consume_winch(HlTuiCtx *ctx)
 {
+    if (g_cont_pending) {
+        g_cont_pending = 0;
+        resume_terminal(ctx);
+    }
     if (!g_winch_pending) return 0;
     g_winch_pending = 0;
     int old_cols = ctx->cols, old_rows = ctx->rows;

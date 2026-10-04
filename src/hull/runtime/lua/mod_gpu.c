@@ -1273,6 +1273,11 @@ static int l_gpu_pipeline(lua_State *L)
                     lua_getfield(L, -1, "buffer");
                     outputs[i].buffer = (int)luaL_optinteger(L, -1, 1) - 1;
                     lua_pop(L, 1);
+                } else {
+                    /* Not a table: the defaults a table entry gets (it left
+                     * the slot uninitialized - stack garbage). */
+                    outputs[i].stage = stage_count - 1;
+                    outputs[i].buffer = 0;
                 }
                 lua_pop(L, 1);
             }
@@ -1433,6 +1438,11 @@ static int l_gpu_async_pipeline(lua_State *L)
                     lua_getfield(L, -1, "buffer");
                     outputs[i].buffer = (int)luaL_optinteger(L, -1, 1) - 1;
                     lua_pop(L, 1);
+                } else {
+                    /* Not a table: the defaults a table entry gets (it left
+                     * the slot uninitialized - stack garbage). */
+                    outputs[i].stage = stage_count - 1;
+                    outputs[i].buffer = 0;
                 }
                 lua_pop(L, 1);
             }

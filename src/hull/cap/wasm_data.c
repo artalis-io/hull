@@ -199,14 +199,28 @@ int hl_wasm_free_shared_data(HlWasmModule *mod)
     return -1;
 }
 
-void hl_wasm_attach_shared_heap(void *inst, void *chain_head)
+static char wasm_chain_broken;
+
+void *hl_wasm_chain_snapshot(const HlWasmSharedData *sd)
 {
+    if (!sd || sd->count == 0) return NULL;
+    return sd->chain_head ? sd->chain_head : (void *)&wasm_chain_broken;
+}
+
+int hl_wasm_attach_shared_heap(void *inst, void *chain_head)
+{
+    if (chain_head == (void *)&wasm_chain_broken) {
+        log_error("[wasm] segments present but their chain could not be built");
+        return -1;
+    }
     if (chain_head) {
         if (!wasm_runtime_attach_shared_heap(
                 (wasm_module_inst_t)inst, (wasm_shared_heap_t)chain_head)) {
             log_error("[wasm] failed to attach shared heap to instance");
+            return -1;
         }
     }
+    return 0;
 }
 
 /* ── Option clamping ───────────────────────────────────────────────── */
@@ -547,6 +561,12 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
     memset(&heap_args, 0, sizeof(heap_args));
     heap_args.size = (uint32_t)alloc_size;
     heap_args.pre_allocated_addr = backing;
+    /* Read-only to the guest (patch 0002, as span heaps are): a page-aligned
+     * mmap segment IS the PROT_READ file mapping, so a guest store into it
+     * killed the process with SIGSEGV; and a copied segment, shared by every
+     * pooled instance, let one call's writes leak into the next. A store now
+     * traps. */
+    heap_args.read_only = true;
 
     wasm_shared_heap_t heap = wasm_runtime_create_shared_heap(&heap_args);
     if (!heap) {

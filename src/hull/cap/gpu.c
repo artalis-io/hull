@@ -180,6 +180,11 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
     hl_assert_on_event_loop("hl_cap_gpu_compile (gpu.compile/load)");
     if (!ctx || !name || !wgsl)
         return HL_GPU_ERR_INTERNAL;
+    /* A name must fit its slot: stored truncated but looked up in full,
+     * it never matched, and each call took a new slot until the device's
+     * table was full. */
+    if (strlen(name) >= HL_GPU_NAME_MAX)
+        return HL_GPU_ERR_INTERNAL;
     if (ctx->device_count == 0)
         return HL_GPU_ERR_NOT_AVAILABLE;
 
@@ -373,6 +378,11 @@ int hl_cap_gpu_buffer_create(HlGpuCtx *ctx, int device, const char *name,
 {
     if (!ctx || !name || size == 0)
         return HL_GPU_ERR_INTERNAL;
+    /* A name must fit its slot: stored truncated but looked up in full,
+     * it never matched, and each call took a new slot until the device's
+     * table was full. */
+    if (strlen(name) >= HL_GPU_NAME_MAX)
+        return HL_GPU_ERR_INTERNAL;
     if (ctx->device_count == 0)
         return HL_GPU_ERR_NOT_AVAILABLE;
 
@@ -508,6 +518,11 @@ int hl_cap_gpu_texture_create(HlGpuCtx *ctx, int device, const char *name,
                                int filter, int address_u, int address_v)
 {
     if (!ctx || !name || width == 0 || height == 0)
+        return HL_GPU_ERR_INTERNAL;
+    /* A name must fit its slot: stored truncated but looked up in full,
+     * it never matched, and each call took a new slot until the device's
+     * table was full. */
+    if (strlen(name) >= HL_GPU_NAME_MAX)
         return HL_GPU_ERR_INTERNAL;
     if (width > HL_GPU_MAX_TEXTURE_DIM || height > HL_GPU_MAX_TEXTURE_DIM)
         return HL_GPU_ERR_BUFFER;

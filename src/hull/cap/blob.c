@@ -156,7 +156,7 @@ void hl_cap_blob_writer_abort(HlBlobWriter *w)
 int hl_cap_blob_get(HlBlob *b, const char *id, int track_access,
                     uint8_t **out_buf, size_t *out_len)
 {
-    return hl_blob_store_get(b, id, track_access, out_buf, out_len);
+    return hl_blob_store_get_verified(b, id, track_access, out_buf, out_len);
 }
 
 int hl_cap_blob_reader_open(HlBlob *b, const char *id, int track_access,

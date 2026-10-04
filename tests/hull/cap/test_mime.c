@@ -404,3 +404,37 @@ UTEST(hl_cap_mime_fixture, html)
 }
 
 UTEST_MAIN()
+
+/* Active content that sniffed as text/plain (audit 4 F1): an allowlist that
+ * admits text but bans html/svg accepted it. */
+static const char *sniff_str(const char *s)
+{
+    return hl_cap_mime_sniff((const uint8_t *)s, strlen(s));
+}
+
+UTEST(hl_cap_mime, bom_before_html_is_html)
+{
+    ASSERT_STREQ(sniff_str("\xEF\xBB\xBF<html><script>x</script>"), "text/html");
+}
+
+UTEST(hl_cap_mime, doctype_svg_and_comment_svg_are_svg)
+{
+    ASSERT_STREQ(sniff_str("<!DOCTYPE svg PUBLIC \"x\"><svg onload=\"x\"/>"),
+                 "image/svg+xml");
+    ASSERT_STREQ(sniff_str("<!-- c --><svg onload=\"x\"/>"), "image/svg+xml");
+}
+
+UTEST(hl_cap_mime, active_tags_are_html)
+{
+    ASSERT_STREQ(sniff_str("<iframe srcdoc=x>"), "text/html");
+    ASSERT_STREQ(sniff_str("<img src=x onerror=alert(1)>"), "text/html");
+    ASSERT_STREQ(sniff_str("<a href=x>y</a>"), "text/html");
+    ASSERT_STREQ(sniff_str("<b>bold</b>"), "text/html");
+}
+
+UTEST(hl_cap_mime, tag_needs_terminator)
+{
+    /* "<bxyz" is not a tag from the list. */
+    const char *m = sniff_str("<bxyz is text");
+    ASSERT_TRUE(m == NULL || strcmp(m, "text/html") != 0);
+}

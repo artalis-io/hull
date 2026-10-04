@@ -104,14 +104,28 @@ static int l_tool_spawn(lua_State *L)
 
     for (int i = 1; i <= n; i++) {
         lua_rawgeti(L, 1, i);
-        argv[i - 1] = lua_tostring(L, -1);
+        /* A real string, held by the table after the pop: a number was
+         * converted on the stack and its string freed by the pop, leaving
+         * a dangling argv entry for execvp and the audit record. */
+        argv[i - 1] = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+        lua_pop(L, 1);
         if (!argv[i - 1]) {
             free(argv);
             return luaL_error(L, "tool.spawn: argument %d must be a string", i);
         }
-        lua_pop(L, 1);
     }
     argv[n] = NULL;
+    /* A program named by path must lie where the tool sandbox grants
+     * execute: only its basename met the allowlist, so on a host with no
+     * kernel unveil (macOS, Windows) ~/Downloads/evil/cc ran. */
+    if (argv[0] && (strchr(argv[0], '/') || strchr(argv[0], '\\'))) {
+        HlToolUnveilCtx *uctx = get_unveil_ctx(L);
+        if (uctx && hl_tool_unveil_check(uctx, argv[0], 'x') != 0) {
+            const char *prog = argv[0];   /* a Lua string: outlives argv */
+            free(argv);
+            return luaL_error(L, "tool.spawn: %s is outside the tool sandbox", prog);
+        }
+    }
 
     /* Optional arg 2: an env table { KEY = VALUE, ... } applied in the child
      * before exec (e.g. ZIG_GLOBAL_CACHE_DIR for a sandbox-writable zig cache).
@@ -180,14 +194,28 @@ static int l_tool_spawn_read(lua_State *L)
 
     for (int i = 1; i <= n; i++) {
         lua_rawgeti(L, 1, i);
-        argv[i - 1] = lua_tostring(L, -1);
+        /* A real string, held by the table after the pop: a number was
+         * converted on the stack and its string freed by the pop, leaving
+         * a dangling argv entry for execvp and the audit record. */
+        argv[i - 1] = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+        lua_pop(L, 1);
         if (!argv[i - 1]) {
             free(argv);
             return luaL_error(L, "tool.spawn_read: argument %d must be a string", i);
         }
-        lua_pop(L, 1);
     }
     argv[n] = NULL;
+    /* A program named by path must lie where the tool sandbox grants
+     * execute: only its basename met the allowlist, so on a host with no
+     * kernel unveil (macOS, Windows) ~/Downloads/evil/cc ran. */
+    if (argv[0] && (strchr(argv[0], '/') || strchr(argv[0], '\\'))) {
+        HlToolUnveilCtx *uctx = get_unveil_ctx(L);
+        if (uctx && hl_tool_unveil_check(uctx, argv[0], 'x') != 0) {
+            const char *prog = argv[0];   /* a Lua string: outlives argv */
+            free(argv);
+            return luaL_error(L, "tool.spawn_read: %s is outside the tool sandbox", prog);
+        }
+    }
 
     size_t out_len = 0;
     char *output = hl_tool_spawn_read(argv, &out_len);

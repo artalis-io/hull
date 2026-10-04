@@ -96,53 +96,76 @@ static int contains_ci(const uint8_t *buf, size_t len, const char *needle,
     return 0;
 }
 
-/* SVG: literal "<svg" within the first 4 KiB, optionally preceded by
- * a "<?xml ... ?>" declaration and whitespace. Case-insensitive. */
+/* Offset past a UTF-8 BOM and leading whitespace. A BOM used to stop both
+ * detectors at byte 0, so "\xEF\xBB\xBF<html><script>..." sniffed as text. */
+static size_t skip_bom_ws(const uint8_t *buf, size_t len)
+{
+    size_t off = 0;
+    if (len >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF)
+        off = 3;
+    return off + skip_whitespace(buf + off, len - off);
+}
+
+/* A WHATWG "HTML signature": the tag, case-insensitive, then a
+ * tag-terminating byte (space or '>'; also tab / newline / '/'), or the end.
+ * Without the terminator check "<p" matched only as "<p>" / "<p ", and
+ * "<b", "<a", "<br" ... were never tried. */
+static int ci_tag(const uint8_t *p, size_t plen, const char *tag)
+{
+    size_t n = strlen(tag);
+    if (!ci_starts_with(p, plen, tag)) return 0;
+    if (plen == n) return 1;
+    uint8_t c = p[n];
+    return c == ' ' || c == '>' || c == '\t' || c == '\n' || c == '\r' ||
+           c == '/' || c == '\f';
+}
+
+/* SVG: "<svg" at the start, or after an XML declaration, a doctype or a
+ * leading comment within the first 4 KiB. Case-insensitive. "<!DOCTYPE svg
+ * ...><svg onload=...>" and a comment-led SVG sniffed as text, so an
+ * allowlist that permits text but bans svg accepted them. */
 static int looks_like_svg(const uint8_t *buf, size_t len)
 {
     if (!len) return 0;
-    size_t off = skip_whitespace(buf, len);
+    size_t off = skip_bom_ws(buf, len);
     if (off >= len) return 0;
 
-    /* Direct match: bytes start with "<svg" */
     if (ci_starts_with(buf + off, len - off, "<svg"))
         return 1;
-
-    /* Indirect match: starts with "<?xml" and "<svg" appears nearby */
-    if (ci_starts_with(buf + off, len - off, "<?xml"))
+    if (ci_starts_with(buf + off, len - off, "<?xml") ||
+        ci_starts_with(buf + off, len - off, "<!doctype svg") ||
+        ci_starts_with(buf + off, len - off, "<!--"))
         return contains_ci(buf, len, "<svg", HL_MIME_SNIFF_WINDOW);
-
     return 0;
 }
 
-/* HTML: common openers, case-insensitive, with leading-whitespace
- * tolerance. Mirrors WhatWG sniffing's "HTML signatures" subset. */
+/* HTML: the WHATWG HTML-signature list, plus the other tags that run or
+ * load active content (img/object/embed/form/meta/link/base/frame...),
+ * after a BOM and whitespace. "<iframe srcdoc=...>" and "<img src=x
+ * onerror=...>" sniffed as text. */
 static int looks_like_html(const uint8_t *buf, size_t len)
 {
     if (!len) return 0;
-    size_t off = skip_whitespace(buf, len);
+    size_t off = skip_bom_ws(buf, len);
     if (off >= len) return 0;
     const uint8_t *p = buf + off;
     size_t plen = len - off;
 
-    static const char *const HTML_PREFIXES[] = {
-        "<!doctype html",
-        "<html",
-        "<head",
-        "<body",
-        "<script",
-        "<title",
-        "<table",
-        "<div",
-        "<p>",
-        "<p ",
-        "<!--",
+    static const char *const HTML_TAGS[] = {
+        "<!doctype html", "<html", "<head", "<script", "<iframe", "<h1",
+        "<div", "<font", "<table", "<a", "<style", "<title", "<b", "<body",
+        "<br", "<p",
+        "<img", "<object", "<embed", "<form", "<input", "<meta", "<link",
+        "<base", "<frameset", "<frame", "<math", "<video", "<audio",
+        "<svg", "<template", "<button", "<details", "<marquee", "<isindex",
         NULL,
     };
-    for (size_t i = 0; HTML_PREFIXES[i]; i++) {
-        if (ci_starts_with(p, plen, HTML_PREFIXES[i]))
+    for (size_t i = 0; HTML_TAGS[i]; i++) {
+        if (ci_tag(p, plen, HTML_TAGS[i]))
             return 1;
     }
+    if (ci_starts_with(p, plen, "<!--"))   /* a comment: no terminator needed */
+        return 1;
     return 0;
 }
 

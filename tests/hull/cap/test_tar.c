@@ -47,16 +47,29 @@ static void tar_put_header(unsigned char *b, const char *name, size_t size) {
     b[156] = '0';                                              /* regular file */
 }
 
+/* The header checksum, computed last (after the typeflag / linkname): the
+ * parser verifies it. */
+static void tar_seal(unsigned char *b) {
+    unsigned sum = 0;
+    memset(b + 148, ' ', 8);
+    for (int i = 0; i < 512; i++) sum += b[i];
+    snprintf((char *)(b + 148), 7, "%06o", sum);
+    b[154] = '\0';
+    b[155] = ' ';
+}
+
 /* A ustar directory entry (typeflag '5', no data). */
 static void tar_add_dir(unsigned char *buf, size_t *off, const char *name) {
     tar_put_header(buf + *off, name, 0);
     buf[*off + 156] = '5';   /* directory */
+    tar_seal(buf + *off);
     *off += 512;
 }
 
 static void tar_add_file(unsigned char *buf, size_t *off,
                          const char *name, const char *data, size_t len) {
     tar_put_header(buf + *off, name, len);
+    tar_seal(buf + *off);
     *off += 512;
     memcpy(buf + *off, data, len);
     *off += (len + 511) & ~(size_t)511;
@@ -68,7 +81,41 @@ static void tar_add_symlink(unsigned char *buf, size_t *off,
     tar_put_header(buf + *off, name, 0);
     buf[*off + 156] = '2';                          /* symlink typeflag */
     strncpy((char *)(buf + *off + 157), target, 99);
+    tar_seal(buf + *off);
     *off += 512;
+}
+
+static int count_entries_cb(const HlTarEntry *e, void *ctx) {
+    (void)e;
+    ++*(int *)ctx;
+    return 0;
+}
+
+/* A header whose checksum does not match is not parsed: any block (a
+ * member's data, say) was taken as a header. */
+UTEST(tar_parse, rejects_bad_checksum) {
+    unsigned char buf[4096] = {0};
+    size_t off = 0;
+    tar_add_file(buf, &off, "a.txt", "hello", 5);
+    buf[0] ^= 0x01;                         /* the name changes; the sum does not */
+    int seen = 0;
+    ASSERT_NE(hl_tar_parse(buf, off + 1024, count_entries_cb, &seen), 0);
+    ASSERT_EQ(seen, 0);
+}
+
+/* A GNU base-256 size (high bit set) is refused, not read as 0 - which
+ * parsed the member's data as the following headers. */
+UTEST(tar_parse, rejects_base256_size) {
+    unsigned char buf[4096] = {0};
+    size_t off = 0;
+    tar_add_file(buf, &off, "a.txt", "hello", 5);
+    memset(buf + 124, 0, 12);
+    buf[124] = 0x80;
+    buf[135] = 5;
+    tar_seal(buf);
+    int seen = 0;
+    ASSERT_NE(hl_tar_parse(buf, off + 1024, count_entries_cb, &seen), 0);
+    ASSERT_EQ(seen, 0);
 }
 
 /* ── Fixture: per-test sandbox under /tmp ───────────────────────────── */

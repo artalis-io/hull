@@ -143,6 +143,12 @@ void hl_blob_store_writer_abort(HlBlobStoreWriter *w);
 int hl_blob_store_get(HlBlobStore *s, const char *id, int track_access,
                       uint8_t **out_buf, size_t *out_len);
 
+/** As hl_blob_store_get, for a content-addressed (non-keyed) store: the
+ *  bytes must hash to @p id, or -1 (nothing returned). A file in a shared
+ *  or damaged store is otherwise returned as whatever blob it is named. */
+int hl_blob_store_get_verified(HlBlobStore *s, const char *id, int track_access,
+                               uint8_t **out_buf, size_t *out_len);
+
 /** Opaque streaming-reader handle. */
 typedef struct HlBlobStoreReader HlBlobStoreReader;
 
