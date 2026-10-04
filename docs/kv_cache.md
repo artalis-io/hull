@@ -131,7 +131,13 @@ CREATE TABLE _hull_kv (
   `INSERT ... ON CONFLICT DO NOTHING` for set-if-absent) - genuinely atomic, not
   a read-then-write. `incr` is an optimistic version-guarded retry loop.
 - Cache-over-SQL eviction (`max_items`) is expressed as SQL
-  (`DELETE ... ORDER BY updated_at LIMIT`), never in C.
+  (`DELETE ... ORDER BY updated_at LIMIT`), never in C. It is
+  least-recently-WRITTEN first (a `get` does not refresh a row - that would
+  make every hit a write). Expired rows are purged before counting, and the
+  `COUNT(*)` is amortised: it runs only once a handle's upper-bound estimate
+  passes `max_items`, and an eviction goes down to 90% of it, so the table
+  briefly holds up to `max_items` rows plus whatever other handles (another
+  process, on Postgres) wrote since the last count.
 - TTL is a lazily-filtered `expires_at` (`WHERE expires_at > now`); `cleanup()`
   deletes expired rows.
 

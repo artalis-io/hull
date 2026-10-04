@@ -10,7 +10,7 @@
 
   One physical table `_hull_kv` (namespace + key primary key) serves both
   hull.kv (durable, no eviction) and hull.cache (SQL-expressed max_items
-  eviction) via policy. Protected from app code by the `_hull_` prefix
+  eviction, least-recently-WRITTEN first - see evict_items) via policy. Protected from app code by the `_hull_` prefix
   (stdlib callers bypass the namespace guard).
 
   Internal module. SPDX-License-Identifier: AGPL-3.0-or-later
@@ -86,20 +86,37 @@ end
 
 function Store:has(k) return self:get(k) ~= nil end
 
--- Enforce max_items for a cache-over-SQL store by deleting the oldest rows.
+-- Enforce max_items for a cache-over-SQL store.
+--
+-- * Expired rows go first: they still held a row each, so COUNT(*) counted
+--   them as live and eviction dropped live rows while the dead ones stayed.
+-- * Eviction is by LAST WRITE (updated_at - a put, cas or incr), not by read:
+--   refreshing recency on get() would make every cache hit a write.
+-- * The COUNT is amortised. `self.est` is an upper bound on this handle's rows
+--   (each put may add one); the COUNT runs only once it passes max_items, and
+--   an eviction goes down to 90% of max_items, so the next COUNT is a tenth of
+--   the cap of puts away - instead of a COUNT(*) on every put. Rows written by
+--   other handles (another process on Postgres) are seen at the next COUNT.
 local function evict_items(self)
     if not self.evict or self.max_items <= 0 then return end
+    self.est = (self.est or self.max_items) + 1
+    if self.est <= self.max_items then return end
+    local now = u.now_ms()
+    self.conn.exec("DELETE FROM _hull_kv WHERE ns = ? AND expires_at <= ?",
+                   { self.ns, now })
     local rows = self.conn.query(
         "SELECT COUNT(*) AS n FROM _hull_kv WHERE ns = ?", { self.ns })
     local n = rows and rows[1] and tonumber(rows[1].n) or 0
-    if n <= self.max_items then return end
-    local over = n - self.max_items
-    -- Delete the `over` least-recently-updated keys in this namespace.
+    if n <= self.max_items then self.est = n; return end
+    local target = math.floor(self.max_items * 0.9)
+    local over = n - target
+    -- Delete the `over` least-recently-written keys in this namespace.
     self.conn.exec(
         "DELETE FROM _hull_kv WHERE ns = ? AND k IN ("
         .. "SELECT k FROM _hull_kv WHERE ns = ? ORDER BY updated_at ASC LIMIT "
         .. string.format("%d", over) .. ")",
         { self.ns, self.ns })
+    self.est = target
 end
 
 function Store:put(k, v, ttl)

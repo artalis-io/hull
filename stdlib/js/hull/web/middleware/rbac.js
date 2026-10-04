@@ -58,10 +58,19 @@ function init(opts) {
 // SQL layer would either insert "null"/"undefined" literals (via String
 // coercion in the binding) or fail with a NOT NULL constraint error
 // that obscures the API misuse.
+// At most 255 characters: the VARCHAR(255) key columns (strict MySQL raised).
+const MAX_NAME = 255;
 function requireName(value, what) {
     if (typeof value !== "string" || value.length === 0)
         throw new Error("rbac: " + what + " is required");
+    if (value.length > MAX_NAME)
+        throw new Error("rbac: " + what + " is longer than " + MAX_NAME + " characters");
     return value;
+}
+
+// A lookup by a name that cannot exist answers false rather than throwing.
+function validName(value) {
+    return typeof value === "string" && value.length > 0 && value.length <= MAX_NAME;
 }
 
 /**
@@ -202,6 +211,7 @@ function permissions(userId) {
  * @returns {boolean}
  */
 function hasRole(userId, role) {
+    if (!validName(role)) return false;
     const rows = db.query(
         "SELECT 1 FROM _hull_user_roles WHERE user_id = ? AND role = ?",
         [normalizeUserId(userId), role]
@@ -216,6 +226,7 @@ function hasRole(userId, role) {
  * @returns {boolean}
  */
 function hasPermission(userId, permission) {
+    if (!validName(permission)) return false;
     const rows = db.query(
         "SELECT 1 FROM _hull_user_roles ur " +
         "JOIN _hull_role_permissions rp ON ur.role = rp.role " +

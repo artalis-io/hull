@@ -34,44 +34,54 @@ local DEFAULT_MAX = 1000
 -- @treturn table  Instance with get/set/fetch/has/delete/clear/size.
 function cache.new(opts)
     opts = opts or {}
-    local store = {}          -- key -> { value, expires (ms|nil), seq }
+    -- key -> entry { key, value, expires (ms|nil), prev, next }. The entries
+    -- also form a doubly-linked list in recency order (head = most recently
+    -- used, tail = least), so a touch and an eviction are O(1). Eviction used
+    -- to scan every entry for the lowest sequence number: with ratelimit's
+    -- 10,000-bucket cap a flood of distinct keys paid a 10k scan per request.
+    local store = {}
     local count = 0
-    local seq = 0
+    local head, tail = nil, nil
     local max = opts.max_entries or DEFAULT_MAX
     local default_ttl = opts.default_ttl
 
-    local function next_seq() seq = seq + 1; return seq end
+    local function unlink(e)
+        if e.prev then e.prev.next = e.next else head = e.next end
+        if e.next then e.next.prev = e.prev else tail = e.prev end
+        e.prev, e.next = nil, nil
+    end
+
+    local function push_front(e)
+        e.prev, e.next = nil, head
+        if head then head.prev = e else tail = e end
+        head = e
+    end
+
+    local function touch(e)
+        if head ~= e then unlink(e); push_front(e) end
+    end
+
+    local function remove(key, e)
+        unlink(e)
+        store[key] = nil
+        count = count - 1
+    end
 
     -- Return the entry if live; drop + return nil if it has expired.
     local function live(key)
         local e = store[key]
         if not e then return nil end
         if e.expires ~= nil and time.now_ms() >= e.expires then
-            store[key] = nil
-            count = count - 1
+            remove(key, e)
             return nil
         end
         return e
     end
 
-    -- Make room: drop an expired entry if any, else the least-recently-used.
+    -- Make room: drop the least-recently-used entry (the list's tail). An
+    -- expired one is dropped lazily on access, or here once it reaches the tail.
     local function evict_one()
-        local now = time.now_ms()
-        local lru_key, lru_seq
-        for k, e in pairs(store) do
-            if e.expires ~= nil and now >= e.expires then
-                store[k] = nil
-                count = count - 1
-                return
-            end
-            if lru_seq == nil or e.seq < lru_seq then
-                lru_key, lru_seq = k, e.seq
-            end
-        end
-        if lru_key ~= nil then
-            store[lru_key] = nil
-            count = count - 1
-        end
+        if tail then remove(tail.key, tail) end
     end
 
     local self = {}
@@ -80,7 +90,7 @@ function cache.new(opts)
     function self.get(key)
         local e = live(key)
         if not e then return nil end
-        e.seq = next_seq()
+        touch(e)
         return e.value
     end
 
@@ -99,12 +109,14 @@ function cache.new(opts)
         local e = store[key]
         if e == nil then
             if count >= max then evict_one() end
-            store[key] = { value = value, expires = expires, seq = next_seq() }
+            e = { key = key, value = value, expires = expires }
+            store[key] = e
             count = count + 1
+            push_front(e)
         else
             e.value = value
             e.expires = expires
-            e.seq = next_seq()
+            touch(e)
         end
         return value
     end
@@ -119,7 +131,7 @@ function cache.new(opts)
         end
         local e = live(key)
         if e then
-            e.seq = next_seq()
+            touch(e)
             return e.value
         end
         local v = fn()
@@ -129,9 +141,9 @@ function cache.new(opts)
 
     --- Remove `key`. Returns true if it was present.
     function self.delete(key)
-        if store[key] ~= nil then
-            store[key] = nil
-            count = count - 1
+        local e = store[key]
+        if e ~= nil then
+            remove(key, e)
             return true
         end
         return false
@@ -141,6 +153,7 @@ function cache.new(opts)
     function self.clear()
         store = {}
         count = 0
+        head, tail = nil, nil
     end
 
     --- Current entry count (may include not-yet-swept expired entries).
