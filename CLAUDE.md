@@ -1491,7 +1491,8 @@ its own directory (`WorkingDirectory=`, `WORKDIR`).
 
 **Tool-mode sandbox (`hl_tool_sandbox_init`).** Kernel unveil only where it enforces (OpenBSD,
 Linux with Landlock, a cosmo APE on those two hosts); pledge wherever available (Linux without
-Landlock too); a failed unveil / pledge there is fatal, not logged-and-ignored. Elsewhere
+Landlock too); a failed unveil there is fatal, not logged-and-ignored, while pledge stays
+best effort (a pledge already in force is never widened, so its refusal is logged). Elsewhere
 (macOS, Windows, the other BSDs) only the userspace allowlist the tool bindings check applies,
 and the log says so. The invocation directory is never granted when it is `/`. Tool writes
 (`tool.write_file`, `tool.copy`) do not follow a symlink at the destination, and the unveil

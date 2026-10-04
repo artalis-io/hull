@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -336,13 +337,14 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
             kfail++;
         }
     }
-    /* Pledge for tool mode: needs proc + exec for fork/execvp. Applies
-     * wherever the kernel offers it - on Linux without Landlock too. */
+    /* Pledge for tool mode: needs proc + exec for fork/execvp. Applied
+     * wherever the kernel offers it - on Linux without Landlock too. Best
+     * effort, unlike unveil: a pledge already in force (a narrower one is
+     * not widened - pledge only ever reduces) refuses this call, and the
+     * process then stays under that one. */
     if (sb_pledge_supported() &&
-        pledge("stdio rpath wpath cpath proc exec fattr", NULL) != 0) {
-        log_error("[sandbox] tool mode: pledge failed");
-        kfail++;
-    }
+        pledge("stdio rpath wpath cpath proc exec fattr", NULL) != 0)
+        log_warn("[sandbox] tool mode: pledge not applied: %s", strerror(errno));
     if (kfail) {
         log_error("[sandbox] tool mode: kernel sandbox NOT applied "
                   "(%d failure(s)) - refusing to continue", kfail);
