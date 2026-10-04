@@ -184,6 +184,24 @@ app.post("/attachments/:id/delete", function(req, res)
     res:json({ ok = ok })
 end)
 
+-- Audit 5 DA-M1: a delete inside the app's own transaction that then
+-- rolls back must leave the blob (the row comes back with the rollback).
+app.post("/attachments/:id/delete-rollback", function(req, res)
+    local db = require("hull.db").default()
+    pcall(function()
+        db.batch(function()
+            attachment.delete(req.params.id)
+            error("rollback")
+        end)
+    end)
+    res:json({ ok = true })
+end)
+
+-- Unlink everything queued, whatever its age.
+app.post("/attachments/sweep", function(_, res)
+    res:json({ n = attachment.sweep({ grace = 0 }) })
+end)
+
 -- PR 2: read_to_file - materialise to disk under the fs.write allowlist.
 app.post("/attachments/:id/dump", function(req, res)
     local n = attachment.read_to_file(req.params.id, "data/dumped.bin")
@@ -221,6 +239,7 @@ import { attachmentServe } from "hull:web:attachment-serve";
 import { blob } from "hull:blob";
 import { crypto } from "hull:crypto";
 import { encoding } from "hull:encoding";
+import { db as dbm } from "hull:db";
 
 app.manifest({
     name: "att-e2e-js", version: "0.0.1",
@@ -286,6 +305,23 @@ app.post("/attachments/:id/delete", (req, res) => {
     res.json({ ok });
 });
 
+// Audit 5 DA-M1: a delete inside the app's own transaction that then
+// rolls back must leave the blob (the row comes back with the rollback).
+app.post("/attachments/:id/delete-rollback", (req, res) => {
+    try {
+        dbm.default().batch(() => {
+            attachment["delete"](req.params.id);
+            throw new Error("rollback");
+        });
+    } catch (_) { /* expected */ }
+    res.json({ ok: true });
+});
+
+// Unlink everything queued, whatever its age.
+app.post("/attachments/sweep", (_, res) => {
+    res.json({ n: attachment.sweep({ grace: 0 }) });
+});
+
 // PR 2: readToFile - materialise to disk under the fs.write allowlist.
 app.post("/attachments/:id/dump", (req, res) => {
     const n = attachment.readToFile(req.params.id, "data/dumped.bin");
@@ -295,17 +331,17 @@ app.post("/attachments/:id/dump", (req, res) => {
 
 // PR 2: attachmentServe.serve with various authCheck shapes.
 app.get("/serve/allow/:id", (req, res) => {
-    attachmentServe.serve(req, res, req.params.id, {
+    return attachmentServe.serve(req, res, req.params.id, {
         authCheck: (_req, _meta) => true,
     });
 });
 
 app.get("/serve/deny/:id", (req, res) => {
-    attachmentServe.serve(req, res, req.params.id, {});
+    return attachmentServe.serve(req, res, req.params.id, {});
 });
 
 app.get("/serve/explicit-deny/:id", (req, res) => {
-    attachmentServe.serve(req, res, req.params.id, {
+    return attachmentServe.serve(req, res, req.params.id, {
         authCheck: (_req, _meta) => false,
     });
 });
@@ -512,9 +548,19 @@ run_suite() {
     SHA1_AFTER=$(curl -s "http://127.0.0.1:$PORT/attachments/$ID1/sha")
     contains "$SUITE delete dup: ID1 blob alive"  "\"sha256\":\"$IMG_SHA\"" "$SHA1_AFTER"
 
+    # A delete of the last reference inside an app transaction that rolls
+    # back keeps the row AND the blob, even through a forced sweep.
+    curl -s -X POST "http://127.0.0.1:$PORT/attachments/$ID1/delete-rollback" >/dev/null
+    curl -s -X POST "http://127.0.0.1:$PORT/attachments/sweep" >/dev/null
+    SHA1_RB=$(curl -s "http://127.0.0.1:$PORT/attachments/$ID1/sha")
+    contains "$SUITE delete rolled back: blob survives" "\"sha256\":\"$IMG_SHA\"" "$SHA1_RB"
+
     # Now delete the last reference. Blob should be unlinked underneath.
     D1=$(curl -s -X POST "http://127.0.0.1:$PORT/attachments/$ID1/delete")
     contains "$SUITE delete last: ok"             '"ok":true'        "$D1"
+    # The blob was queued, not unlinked: a sweep with no grace takes it.
+    SW=$(curl -s -X POST "http://127.0.0.1:$PORT/attachments/sweep")
+    contains "$SUITE delete last: sweep unlinks the blob" '"n":1'     "$SW"
 
     M1=$(curl -s -o /dev/null -w '%{http_code}' \
         "http://127.0.0.1:$PORT/attachments/$ID1/metadata")

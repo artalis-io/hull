@@ -80,7 +80,7 @@ end
 -- @tparam string id
 -- @tparam[opt] table opts
 --   `auth_check` - `function(req, metadata) -> bool`. REQUIRED for
---     non-403 responses. Receives the live metadata row so the
+--     non-403 responses; only a return of exactly `true` serves. Receives the live metadata row so the
 --     check can do per-tenant / per-user gating. Omit to deny
 --     unconditionally.
 function M.serve(req, res, id, opts)
@@ -93,9 +93,11 @@ function M.serve(req, res, id, opts)
     end
 
     -- Default-deny: caller must explicitly supply auth_check AND it
-    -- must return truthy. Missing function, false, or nil → 403.
+    -- must return exactly `true` (JS parity: a check written as
+    -- `return "not the owner"` used to serve the file). Missing
+    -- function, or any other value → 403.
     if type(opts.auth_check) ~= "function" or
-       not opts.auth_check(req, meta) then
+       opts.auth_check(req, meta) ~= true then
         res:status(403):json({ error = "forbidden" })
         return
     end
