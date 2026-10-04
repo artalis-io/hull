@@ -635,8 +635,14 @@ static void tools_put_header(unsigned char *b, const char *name, size_t size,
     strncpy((char *)b, name, 99);
     snprintf((char *)(b + 100), 8, "%07o", mode);
     snprintf((char *)(b + 124), 12, "%011o", (unsigned)size);
-    memset(b + 148, ' ', 8);
     b[156] = '0';
+    /* The header checksum, computed last: the parser verifies it. */
+    unsigned sum = 0;
+    memset(b + 148, ' ', 8);
+    for (int i = 0; i < 512; i++) sum += b[i];
+    snprintf((char *)(b + 148), 7, "%06o", sum);
+    b[154] = ' ';
+    b[155] = ' ';
 }
 
 UTEST_F(tools_fixture, extracted_bundle_resolves_like_doctor_resolves) {
