@@ -222,7 +222,8 @@ function M.new(opts)
     -- Messages that arrived while another channel was being read: already
     -- applied to this channel's state, waiting for its owner to take them.
     c.inbox, c.inbox_head = {}, 1
-    c.inbox_ctl = 0      -- queued messages that are not window-charged data
+    c.inbox_ctl = 0      -- queued request replies (see hull.ssh.session)
+    c.queued_once = {}   -- one-shot events already queued (eof, close, exit-*)
     return c
 end
 

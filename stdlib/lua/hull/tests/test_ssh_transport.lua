@@ -1039,11 +1039,14 @@ test("without strict KEX a packet before KEXINIT is still tolerated", function()
     assert_eq(out, "bad_kex_point", "reached the exchange:")
 end)
 
-test("strict KEX, decided by the first exchange, holds for a rekey", function()
-    -- The markers only mean anything in the initial KEXINIT. Recomputing
-    -- strictness per exchange made every rekey lenient again, so an IGNORE
-    -- injected mid-rekey was skipped.
-    local t = transport.new(fake_stream(server_kexinit(false) .. IGNORE .. ecdh_reply(), 16),
+test("strict KEX, decided by the first exchange, still bounds a rekey", function()
+    -- The markers only mean anything in the initial KEXINIT, and the strict
+    -- rule itself (no message outside the exchange) applies to the initial
+    -- exchange only: a rekey may carry transport messages 1-19 (RFC 4253
+    -- 7.1; audit 5 SSH-L3), but nothing from 50 up.
+    local t = transport.new(fake_stream(server_kexinit(false)
+                                        .. plain(string.char(94) .. "x")
+                                        .. ecdh_reply(), 16),
                             kex_crypto())
     t.session_id = "sid"
     t.strict_kex = true              -- as the first exchange left it
@@ -2013,7 +2016,7 @@ test("a send while another is in flight is refused before sealing", function()
         return true
     end
     t:send_packet("\2")
-    assert_eq(tostring(nested):find("busy", 1, true) ~= nil, true, tostring(nested))
+    assert_eq(type(nested) == "table" and nested.code, "busy", tostring(nested))
     assert_eq(t.send_seq, 1, "the refused send must not count:")
     assert_eq(#s.written, 1)
     assert_eq(t.dead, nil, "a refused second sender does not kill the connection:")
@@ -2058,21 +2061,160 @@ test("the sftp window is granted back only as data is consumed", function()
     assert_eq(ch.recv_window, 500)
 end)
 
-test("control messages queued for an idle channel are capped", function()
+-- audit 5 ---------------------------------------------------------------------
+
+-- An idle channel (an sftp session) beside a reader (a long exec).
+local function idle_and_reader()
     local channel = require('hull.ssh.channel')
-    local t = transport.new(fake_stream("", 4), stub_crypto())
+    local s = fake_stream("", 4)
+    local t = transport.new(s, stub_crypto())
     local idle = channel.new({ id = 5 })
     idle.open, idle.remote_id = true, 9
     t.channels[5] = idle
-    local reader = channel.new({ id = 1 })
-    local err = assert_raises(function()
-        for _ = 1, 10000 do
-            t:route(reader, { type = "request", recipient = 5, name = "x",
-                              want_reply = false })
+    return t, s, idle, channel.new({ id = 1 })
+end
+
+test("keepalives at an idle channel are answered, not queued (SSH-M1)", function()
+    -- OpenSSH's ClientAliveInterval sends keepalive@openssh.com on the FIRST
+    -- open channel - the idle sftp one - every interval. Each was refused,
+    -- then queued and counted, and the 257th killed the exec reading beside
+    -- it: about an hour at 15 s.
+    local t, s, idle, reader = idle_and_reader()
+    for _ = 1, 1000 do
+        t:route(reader, { type = "request", recipient = 5,
+                          request = "keepalive@openssh.com", want_reply = true })
+    end
+    assert_eq(#idle.inbox, 0, "nothing queued:")
+    assert_eq(t.dead, nil)
+    local failures = 0
+    for _, ty in ipairs(written_types(s)) do
+        if ty == 100 then failures = failures + 1 end
+    end
+    assert_eq(failures, 1000, "every keepalive answered:")
+end)
+
+test("unknown requests without a reply are applied, not queued (SSH-M1)", function()
+    local t, _, idle, reader = idle_and_reader()
+    for _ = 1, 10000 do
+        t:route(reader, { type = "request", recipient = 5, request = "x",
+                          want_reply = false })
+    end
+    assert_eq(#idle.inbox, 0)
+    assert_eq(t.dead, nil)
+end)
+
+test("eof, close and exit-status are queued once each for their owner (SSH-M1)", function()
+    local t, _, idle, reader = idle_and_reader()
+    for _ = 1, 3 do
+        t:route(reader, { type = "request", recipient = 5, request = "exit-status",
+                          want_reply = false, exit_status = 3 })
+        t:route(reader, { type = "eof", recipient = 5 })
+        t:route(reader, { type = "close", recipient = 5 })
+    end
+    assert_eq(#idle.inbox, 3, "one of each:")
+    assert_eq(idle.closed, true)
+    assert_eq(idle.exit_status, 3)
+    -- The owner still sees the close it waits for.
+    local seen = {}
+    for _ = 1, 3 do
+        local m = t:read_for(idle)
+        assert_eq(m.routed, true)
+        seen[#seen + 1] = m.type
+    end
+    assert_eq(seen[3], "close")
+end)
+
+test("a flood of replies kills the connection, not the unrelated reader (SSH-M1)", function()
+    local t, s, idle, reader = idle_and_reader()
+    for _ = 1, 64 do
+        t:route(reader, { type = "request_success", recipient = 5 })
+    end
+    assert_eq(t.dead, nil, "64 replies are tolerated:")
+    -- One more: no raise inside route (it is somebody else's read) ...
+    local ok, err = pcall(t.route, t, reader, { type = "request_success", recipient = 5 })
+    assert_eq(ok, true, tostring(err))
+    -- ... the connection is marked dead and closed instead.
+    assert_eq(t.dead and t.dead.code, "protocol_error")
+    assert_eq(s.closed, true)
+    assert_eq(#idle.inbox, 64)
+    local sok, serr = pcall(t.send_packet, t, "\2")
+    assert_eq(sok, false)
+    assert_eq(type(serr) == "table" and serr.code, "protocol_error")
+end)
+
+test("a stream call refused as busy leaves the flag to its owner (SSH-L1)", function()
+    -- Coroutine B's read, refused while A is parked in one, used to clear
+    -- io_busy on its way out - under A's call - so the next send sealed.
+    local s = fake_stream(plain("\2x"), 64)
+    local t = transport.new(s, stub_crypto())
+    local orig = s.read
+    local nested_err, busy_during
+    s.read = function(self, n)
+        if nested_err == nil then
+            local _, e = pcall(t.stream_call, t, "read", 4)
+            nested_err = e
+            busy_during = t.io_busy
         end
-    end)
-    assert_eq(err:find("too many messages queued", 1, true) ~= nil, true, err)
-    assert_eq(#idle.inbox <= 256, true, "queued " .. tostring(#idle.inbox))
+        return orig(self, n)
+    end
+    t:stream_call("read", 4)
+    assert_eq(type(nested_err) == "table" and nested_err.code, "busy", tostring(nested_err))
+    assert_eq(busy_during, true, "the owner's flag survives the refusal:")
+    assert_eq(t.io_busy, false, "and is cleared by the owner:")
+end)
+
+test("a rekey refused as busy leaves the connection usable (SSH-L2)", function()
+    local t = transport.new(fake_stream("", 4), stub_crypto())
+    t.session_id = "sid"
+    t.io_busy = true          -- another coroutine is parked in a stream call
+    local ran = false
+    t.run_kex = function() ran = true; return true end
+    local ok, err = t:rekey()
+    assert_eq(ok, nil)
+    assert_eq(err.code, "busy")
+    assert_eq(ran, false, "no exchange started:")
+    assert_eq(t.dead, nil, "a busy refusal is not a failed exchange:")
+    assert_eq(not t.in_kex, true, "in_kex untouched under the parked reader:")
+    -- maybe_rekey: due, but busy - not an error either.
+    local due = { rekey_due = function() return true end }
+    t.c2s, t.s2c = due, due
+    assert_eq(t:maybe_rekey(), false)
+    assert_eq(t.dead, nil)
+end)
+
+test("a rekey under strict KEX tolerates IGNORE and DEBUG (SSH-L3)", function()
+    -- Strict KEX's no-chatter rule is for the INITIAL exchange; on a rekey
+    -- RFC 4253 7.1 still allows messages 1-19.
+    local s = fake_stream(plain(string.char(2) .. "pad")
+                          .. plain(string.char(4) .. "\0\0\0\0\0\0\0\0\0\0\0\0")
+                          .. plain(string.char(21)), 4)
+    local t = transport.new(s, stub_crypto())
+    assert_eq(t:expect(21, "NEWKEYS", "rekey"):byte(1), 21)
+    -- ... but nothing from 50 up.
+    local open = wire.writer():byte(90):string("x11"):uint32(1):uint32(0)
+                     :uint32(0):build()
+    local s2 = fake_stream(plain(open) .. plain(string.char(21)), 4)
+    local t2 = transport.new(s2, stub_crypto())
+    local err = assert_raises(function() t2:expect(21, "NEWKEYS", "rekey") end)
+    assert_eq(err:find("strict KEX", 1, true) ~= nil, true, err)
+end)
+
+test("run_kex applies the full strict rule only to the first exchange (SSH-L3)", function()
+    local offer = {}
+    for k, v in pairs(kexinit.DEFAULT_OFFER) do offer[k] = v end
+    offer.kex = { "curve25519-sha256", kexinit.STRICT_S }
+    local server = kexinit.build(offer, string.rep("\0", 16))
+    local function filter_seen(rekey)
+        local t = transport.new(fake_stream("", 4), full_crypto({}))
+        if rekey then t.session_id, t.strict_kex = "sid", true
+        else t.recv_seq = 1 end
+        local seen
+        t.expect = function(_, _, _, strict) seen = strict; error("stop") end
+        pcall(t.run_kex, t, { offer = kexinit.DEFAULT_OFFER }, server)
+        return seen
+    end
+    assert_eq(filter_seen(false), true, "first exchange:")
+    assert_eq(filter_seen(true), "rekey", "rekey:")
 end)
 
 return {pass = pass, fail = fail}

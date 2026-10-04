@@ -189,6 +189,15 @@ function Transport:stream_call(method, arg)
     else
         error("ssh: unknown stream call " .. tostring(method))
     end
+    -- Another coroutine's call is in flight: refused HERE, with the flag left
+    -- as it is. Letting it through to the binding (which refuses it too) and
+    -- then clearing the flag on the way out cleared it under the parked call,
+    -- so a later send_packet passed its busy check and sealed - advancing the
+    -- cipher state under a write still in flight. Only the call that set the
+    -- flag clears it.
+    if self.io_busy then
+        fail("busy", "another coroutine is using this connection")
+    end
     self.io_busy = true
     local ok, a, b, c = pcall(call)
     self.io_busy = false
@@ -295,7 +304,7 @@ function Transport:send_packet(payload)
              .. (self.dead.detail and (": " .. tostring(self.dead.detail)) or ""))
     end
     if self.io_busy then
-        error("ssh: busy - another coroutine is using this connection")
+        fail("busy", "another coroutine is using this connection")
     end
     if self.c2s then
         local sealed = self.c2s:seal(self.aead, payload, self.crypto.random,
@@ -435,7 +444,15 @@ function Transport:handle_packet(p, strict)
         -- DISCONNECT, which is reported below. Only the chatter used to be
         -- refused here; a CHANNEL_OPEN or REQUEST_SUCCESS / FAILURE injected
         -- into the exchange was absorbed (and a refusal SENT mid-exchange).
-        if strict and m ~= SSH_MSG_DISCONNECT
+        -- `strict == "rekey"`: a rekey on a strict-KEX connection, where the
+        -- transport messages 1-19 are legal again (see run_kex) but nothing
+        -- from 50 up - user auth, connection protocol - may arrive.
+        if strict == "rekey" then
+            if m >= 50 then
+                error("ssh: message " .. tostring(m)
+                      .. " is not permitted during key exchange (strict KEX)")
+            end
+        elseif strict and m ~= SSH_MSG_DISCONNECT
            and not (m == SSH_MSG_KEXINIT or m == kex.SSH_MSG_NEWKEYS
                     or (m >= 30 and m <= 49)) then
             error("ssh: message " .. tostring(m)
@@ -709,9 +726,18 @@ function Transport:run_kex(opts, i_s)
             error("ssh: strict KEX: the server's KEXINIT was not its first packet")
         end
     end
+    -- What the exchange's own reads tolerate. Strict KEX's rule - nothing but
+    -- the exchange itself - is defined for the INITIAL exchange; on a rekey
+    -- RFC 4253 section 7.1 still lets the peer send transport messages 1-19
+    -- (IGNORE, DEBUG, ...), and refusing them killed the connection to a
+    -- strict-KEX server that is not OpenSSH. A rekey under strict KEX refuses
+    -- only messages 50 and above (handle_packet's "rekey" mode). The
+    -- sequence-number resets at NEWKEYS stay on every exchange (below).
+    local filter = self.strict_kex
+    if rekey and self.strict_kex then filter = "rekey" end
 
     if kexinit.guess_was_wrong(server, neg) then
-        self:read_message(self.strict_kex)   -- discard the guess (RFC 4253 7.1)
+        self:read_message(filter)   -- discard the guess (RFC 4253 7.1)
     end
 
     -- curve25519 exchange
@@ -720,7 +746,7 @@ function Transport:run_kex(opts, i_s)
 
     local reply = kex.parse_ecdh_reply(
         self:expect(kex.SSH_MSG_KEX_ECDH_REPLY, "KEX_ECDH_REPLY",
-                    self.strict_kex))
+                    filter))
 
     local k_raw, kerr = self.crypto.x25519(sk, reply.q_s)
     if not k_raw then return nil, { code = "bad_kex_point", detail = kerr } end
@@ -796,7 +822,7 @@ function Transport:run_kex(opts, i_s)
     -- nothing that crossed the wire before the keys changed can be counted
     -- after it.
     if self.strict_kex then self.send_seq = 0 end
-    self:expect(kex.SSH_MSG_NEWKEYS, "NEWKEYS", self.strict_kex)
+    self:expect(kex.SSH_MSG_NEWKEYS, "NEWKEYS", filter)
     if self.strict_kex then self.recv_seq = 0 end
     self.c2s = self:new_cipher(neg.cipher_c2s, keys.key_c2s, keys.iv_c2s)
     self.s2c = self:new_cipher(neg.cipher_s2c, keys.key_s2c, keys.iv_s2c)
@@ -848,6 +874,14 @@ function Transport:rekey()
     if not self.session_id then return nil, { code = "not_handshaken" } end
     if self.dead then return nil, self.dead end
     if self.in_kex then return true end          -- one is already running
+    -- Another coroutine is parked in a stream call: the KEXINIT would be
+    -- refused before anything went out. Said so up front, with in_kex left
+    -- alone under that reader (it gates what it may skip and send) and the
+    -- connection still good - nothing about it has failed.
+    if self.io_busy then
+        return nil, { code = "busy",
+                      detail = "another coroutine is using this connection" }
+    end
     self.in_kex = true
     -- A raise here comes from the stream or from a failed authentication of
     -- the exchange; either way the connection is finished. It is marked dead
@@ -883,6 +917,12 @@ function Transport:maybe_rekey()
         return false
     end
     local ok, why = self:rekey()
+    if not ok and why and why.code == "busy" then
+        -- Not a failed exchange: none was started. The caller's own next
+        -- send is refused as busy in turn; the rekey happens on a later
+        -- operation, when the connection is free.
+        return false
+    end
     if not ok then
         -- Same response as a failed absorbed rekey: continuing would mean
         -- encrypting past the limit the key was chosen for.
