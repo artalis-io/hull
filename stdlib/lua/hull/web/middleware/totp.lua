@@ -481,9 +481,12 @@ end
 --
 -- `lockout_remaining` returns the number of seconds the user is
 -- still locked for (0 if free). `bump_failed_attempt` increments the
--- counter; on threshold, sets `locked_until = now + lockout_duration`
--- and resets the counter so the NEXT lockout window starts from a
--- clean 5. `clear_failed_attempts` is called on success.
+-- counter, which is cumulative: every max_failed_attempts-th failure
+-- locks for lockout_duration * 2^(n-1), capped by max_lockout_duration
+-- (escalation). The row goes on a successful verify or a confirmed
+-- (re-)enrolment, and `opts.on_lockout(user_id, locked_until, n)` lets
+-- the app tell the user when a lockout starts - a password holder can
+-- otherwise keep the owner out of TOTP and recovery codes silently.
 
 local function lockout_remaining(user_id)
     local r = db.query(
@@ -496,6 +499,7 @@ end
 
 local function bump_failed_attempt(user_id)
     local now = time.now()
+    local new_lockout
     -- Read-modify-write under db.batch so two concurrent failed
     -- verifies don't both think they're the threshold-crossing one
     -- and double-lock.
@@ -517,6 +521,7 @@ local function bump_failed_attempt(user_id)
             local cap = math.max(_state.max_lockout_duration or 0,
                                  _state.lockout_duration)
             locked_until = now + math.floor(math.min(dur, cap))
+            new_lockout = { locked_until, n }
         end
         -- db.upsert writes each backend's own dialect. A hand-written
         -- INSERT ... ON CONFLICT is not MySQL syntax: there every wrong code
@@ -525,6 +530,13 @@ local function bump_failed_attempt(user_id)
             { "user_id", "failed_count", "last_failed_at", "locked_until" },
             { user_id, new_fc, now, locked_until })
     end)
+    if new_lockout and _state.on_lockout then
+        local ok, err = pcall(_state.on_lockout, user_id, new_lockout[1],
+                              new_lockout[2])
+        if not ok then
+            require("hull.log").warn("totp: on_lockout failed: " .. tostring(err))
+        end
+    end
 end
 
 local function clear_failed_attempts(user_id)
@@ -697,6 +709,10 @@ function totp.init(opts)
     _state.digits         = opts.digits         or _state.digits
     _state.period         = opts.period         or _state.period
     _state.max_lockout_duration = opts.max_lockout_duration or _state.max_lockout_duration
+    if opts.on_lockout ~= nil and type(opts.on_lockout) ~= "function" then
+        error("totp.init: on_lockout must be a function(user_id, locked_until, n)")
+    end
+    _state.on_lockout     = opts.on_lockout
     _state.window         = opts.window         or _state.window
     _state.recovery_codes = opts.recovery_codes or _state.recovery_codes
     _state.max_failed_attempts = opts.max_failed_attempts
@@ -1000,6 +1016,11 @@ function totp.confirm(user_id, code)
                 db.exec(
                     "DELETE FROM _hull_totp_pending_recovery "
                     .. "WHERE user_id = ?", { user_id })
+                -- A fresh enrolment starts a fresh failure count: the
+                -- escalation is cumulative, and a count kept from the old
+                -- secret locked the new one out early.
+                db.exec("DELETE FROM _hull_totp_attempts WHERE user_id = ?",
+                        { user_id })
             end)
             return true
         end
@@ -1305,6 +1326,7 @@ totp._test = {
         _state.max_failed_attempts = 5
         _state.lockout_duration    = 15 * 60
         _state.max_lockout_duration = 24 * 60 * 60
+        _state.on_lockout          = nil
         _state.max_failed_attempts_per_ip = 20
         _state.lockout_duration_per_ip    = 15 * 60
         _state.trust_xff                  = false

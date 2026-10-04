@@ -788,6 +788,36 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   in the DB-backed stdlib (and the `_hull_migrations` tracking table) is
   `VARCHAR(255)`, not `TEXT` (TEXT affinity on SQLite, varchar on Postgres,
   indexable on MySQL); data-only columns stay `TEXT`.
+- **Binary collation on `_hull_*` tables (existing deployments: migrate by
+  hand).** `db_mysql.c` appends `DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`
+  to every `CREATE TABLE _hull_*` it runs, so role names, inbox ids, dedup
+  keys and job / cron names compare exactly (under MySQL 8's default
+  `utf8mb4_0900_ai_ci`, `'Admin' = 'admin'` and `'josé' = 'jose'`). That only
+  reaches tables created after the change: `CREATE TABLE IF NOT EXISTS` leaves
+  an existing table as it was, and nothing converts or warns. An existing
+  deployment converts them once (converting to `_bin` only makes keys
+  stricter, so no unique key can newly collide; FK checks are off for the
+  duration because the rbac join tables reference `_hull_roles` /
+  `_hull_permissions`):
+  ```sql
+  SET FOREIGN_KEY_CHECKS = 0;
+  -- generate one statement per Hull table in this schema:
+  SELECT CONCAT('ALTER TABLE `', table_name,
+                '` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;')
+    FROM information_schema.tables
+   WHERE table_schema = DATABASE() AND table_name LIKE '\_hull\_%';
+  -- run the statements it prints, e.g.:
+  ALTER TABLE `_hull_roles` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+  ALTER TABLE `_hull_permissions` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+  ALTER TABLE `_hull_user_roles` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+  ALTER TABLE `_hull_role_permissions` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+  ALTER TABLE `_hull_inbox_processed` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+  ALTER TABLE `_hull_jobs` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+  SET FOREIGN_KEY_CHECKS = 1;
+  ```
+  Check the current state with `SELECT table_name, table_collation FROM
+  information_schema.tables WHERE table_schema = DATABASE() AND table_name
+  LIKE '\_hull\_%';`.
 - **SQLite-only features under MySQL:** `db.udf` and `hull/search` (FTS5) are
   SQLite-only and fail with a clear error on a MySQL connection (checking
   `conn.udf ~= nil` is the capability probe).
@@ -1886,9 +1916,9 @@ pg_dsn, pg_rewrite, mysqlwire, mysql_dsn) run 60s each in CI.
 | `e2e_install.sh` | `install.sh` dry-run across platform/flavor/prefix; shell-completion syntax + behavior |
 | `e2e_ca_bundle.sh` | Doctor output; real HTTPS handshake to `example.com` via embedded CA bundle (sandbox-active) |
 | `e2e_update.sh` | `hull update --check` against real public repo; full GitHub-API + JSON parse + version compare via embedded CA bundle |
-| `e2e_auth_flows.sh` | Auth flows: register → verify → login → logout → magic-link → password-reset → email-change, with replay/tamper assertions and the pre-registration-hijack case (a foreign-browser verify voids the registrant's password), against `tests/fixtures/auth_flows_{lua,js}` (26 assertions per runtime) |
-| `e2e_auth_flows_2fa.sh` | Auth flows + TOTP composition: enroll → confirm → login (returns `pending_2fa` + `totp_token`) → wrong-code retry → right-code completes → totp_token single-use-on-success → recovery code path → magic-link with 2FA rendering default form, against `tests/fixtures/auth_flows_2fa_{lua,js}` (15 assertions per runtime) |
-| `e2e_auth_flows_hardening.sh` | Auth flows hardening: re-send verify (incl. enumeration-safe silence post-verify) → account lockout after N failed logins (429 + `Retry-After`; correct password during window still locked; auto-clears after window) → email-change notify+revoke (revoke link aborts pending change; subsequent confirm fails 400) → pwned-password check via a localhost HIBP mock (rejects "password", accepts random). 20 assertions per runtime; fixtures at `tests/fixtures/auth_flows_hardening_{lua,js}` |
+| `e2e_auth_flows.sh` | Auth flows: register → verify → login → logout → magic-link → password-reset → email-change, with replay/tamper assertions. Verify is two-step: a scanner GET renders the form and consumes nothing, a wrong password is a 401 that leaves the token usable, the right one keeps the password, `new_password` replaces a pre-registrant's, and a magic link to an unverified account with a password shows the verify form instead of signing in. Against `tests/fixtures/auth_flows_{lua,js}` (35 assertions per runtime) |
+| `e2e_auth_flows_2fa.sh` | Auth flows + TOTP composition: enroll → confirm → login (returns `pending_2fa` + `totp_token`) → wrong-code retry → right-code completes → totp_token single-use-on-success → recovery code path → magic-link with 2FA rendering default form → a pre-registrant's TOTP enrolment removed when the owner verifies with `new_password` (`totp_disable`), against `tests/fixtures/auth_flows_2fa_{lua,js}` (18 assertions per runtime) |
+| `e2e_auth_flows_hardening.sh` | Auth flows hardening: re-send verify (its link verifies through the same POST flow; incl. enumeration-safe silence post-verify) → account lockout after N failed logins (429 + `Retry-After`; correct password during window still locked; auto-clears after window) → email-change notify+revoke (revoke link aborts pending change; subsequent confirm fails 400) → pwned-password check via a localhost HIBP mock (rejects "password", accepts random). 21 assertions per runtime; fixtures at `tests/fixtures/auth_flows_hardening_{lua,js}` |
 | `e2e_sign_in_events.sh` | Sign-in events + device management: login from "browser A" emits one new-device alert; login from "browser B" (different UA + IP) emits a second; re-login from A doesn't re-fire; email-change recorded as `email_changed`; `session.list_for_user` + `audit_log.list_devices` surface 2 devices; `destroy_others` kills B leaves A; password reset cascade kills A via `on_password_reset`. 20 assertions per runtime; fixtures at `tests/fixtures/sign_in_events_{lua,js}` |
 | `e2e_htmx_playwright.sh` | Browser-side E2E for `examples/htmx_widgets_register` (every §1.5.g widget) + `examples/hypermedia_photos` (Lua AND JS runtimes) via headless Chromium driven by Playwright. Catches things curl can't: CSS actually applies, htmx swaps fire, widget JS runs under `csp = "htmx"`, confirm dialog opens only for `hx-confirm` elements, sort widget Enter/Space keyboard activation, full CRUD round-trip with CSRF+session, and `@axe-core/playwright` WCAG scan (FAILs on `critical`/`serious`, logs `moderate`/`minor`). Runs in two MODE-controlled flavors against an identical 31-assertion suite: **dev** (`make e2e-htmx-playwright`) launches `hull <app.lua>` so files come off disk; **build** (`make e2e-htmx-playwright-build`) runs `hull build` on each example first then launches the standalone binary, exercising the embedded-VFS code path. On failure: writes playwright traces + final-page screenshots to `build/playwright-artifacts/` and CI uploads via `actions/upload-artifact@v4`. Skips cleanly when node/npm absent; first run downloads ~150 MB to `tests/.playwright/` (gitignored, cached in CI). |
 

@@ -225,6 +225,13 @@ test("fn: boolean true passes, false fails", () => {
     assertEq(ok4, false, "a non-boolean non-string return fails closed");
 });
 
+// "" (a missing translation) fails with the default message, as in Lua.
+test("fn: empty-string return fails with the default message", () => {
+    const [ok, errs] = validate.check({ x: "v" }, { x: { fn: () => "" } });
+    assertEq(ok, false);
+    assertEq(errs.x, "is invalid");
+});
+
 test("fn: null return passes", () => {
     const [ok] = validate.check({ x: "ok" }, { x: { fn: () => null } });
     assertEq(ok, true);

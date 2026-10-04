@@ -210,6 +210,19 @@ test("redirect refuses non-http(s) schemes and control chars", () => {
     }
 });
 
+// A protocol-relative target is another site, not a relative path (audit 5).
+test("redirect refuses //host unless opted in", () => {
+    const req = { headers: { "hx-request": "true" } };
+    let res = mockRes();
+    let threw = false;
+    try { htmx.redirect(req, res, "//evil.example/x"); } catch (e) { threw = true; }
+    if (!threw) throw new Error("accepted //evil.example/x");
+    assertEq(res.headersSet["HX-Redirect"], undefined);
+    res = mockRes();
+    htmx.redirect(req, res, "//cdn.example/x", { allowProtocolRelative: true });
+    assertEq(res.headersSet["HX-Redirect"], "//cdn.example/x");
+});
+
 test("redirect on plain request falls back to res.redirect", () => {
     const req = { headers: {} };
     const res = mockRes();

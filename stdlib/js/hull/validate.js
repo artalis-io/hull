@@ -217,7 +217,9 @@ function check(data, schema) {
         if (rules.fn) {
             const verdict = rules.fn(value, field, data);
             if (typeof verdict === "string")
-                err = verdict;
+                // "" (a missing translation) still fails the field - it used
+                // to pass here and fail in Lua - with the default message.
+                err = verdict !== "" ? verdict : (customMsg || "is invalid");
             else if (verdict !== undefined && verdict !== null && verdict !== true)
                 err = customMsg || "is invalid";
         }

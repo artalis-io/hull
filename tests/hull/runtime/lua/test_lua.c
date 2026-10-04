@@ -4536,6 +4536,22 @@ UTEST(lua_stdlib, email_suite)
     cleanup_lua_caps();
 }
 
+/* hull.cache / hull.kv memory + SQL stores and rbac names (audit 5 DA-L3..L6):
+ * needs time + db, so the caps-bearing state. */
+UTEST(lua_stdlib, kv_cache_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_kv_cache.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, ws_stream_suite)
 {
     long long pass = 0, fail = -1;
@@ -5152,6 +5168,59 @@ UTEST(lua_stdlib, audit4_jobs_kv_cache_rbac)
         "  local id2 = jobs.enqueue('a4', {}, { dedup_key = 'k1' }) "
         "  if not id2 or id2 == id then return 12 end "
         "  if jobs.enqueue('a4', {}, { dedup_key = 'k1' }) ~= nil then return 13 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
+/* Audit 5 (jobs reaper). Returns 0, or the number of the first check that
+ * failed. */
+UTEST(lua_stdlib, audit5_jobs_reaper)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local jobs = require('hull.jobs') "
+        "  jobs.init({ backoff = function() return 0 end }) "
+        /* 1-2: more than one reaper pass of exhausted rows (500) are all
+         *      dead-lettered; none is re-pended by the reclaim */
+        "  for i = 1, 505 do "
+        "    jobs.enqueue('a5bulk', {}, { queue = 'a5bulk', max_attempts = 1 }) "
+        "  end "
+        "  while #jobs.claim({ queue = 'a5bulk', batch = 200 }) > 0 do end "
+        "  jobs.reap({ visibility_timeout = 0 }) "
+        "  local st = jobs.stats({ queue = 'a5bulk' }) "
+        "  if st.dead ~= 505 then return 1 end "
+        "  if st.pending ~= 0 or st.running ~= 0 then return 2 end "
+        /* 3-8: a workflow whose worker is lost on its last attempt still
+         *      runs its saga compensations, once, and dead-letters */
+        "  local log = {} "
+        "  jobs.workflow('a5wf', function(ctx) "
+        "    ctx.step('charge', function() log[#log + 1] = 'charge'; return 1 end, "
+        "      { compensate = function() log[#log + 1] = 'refund' end }) "
+        "    ctx.step('ship', function() log[#log + 1] = 'ship'; error('boom') end) "
+        "  end) "
+        "  local id = jobs.start('a5wf', {}, { queue = 'a5wf', max_attempts = 2 }) "
+        "  jobs.work({ queue = 'a5wf' }) "             /* attempt 1: ship fails */
+        "  if table.concat(log, ',') ~= 'charge,ship' then return 3 end "
+        "  if #jobs.claim({ queue = 'a5wf', batch = 1 }) ~= 1 then return 4 end "
+        "  jobs.reap({ visibility_timeout = 0 }) "      /* attempt 2 lost */
+        "  local j = jobs.get(id) "
+        "  if not j or j.status ~= 'pending' then return 5 end "
+        "  jobs.work({ queue = 'a5wf' }) "             /* compensation run */
+        "  if table.concat(log, ',') ~= 'charge,ship,refund' then return 6 end "
+        "  j = jobs.get(id) "
+        "  if not j or j.status ~= 'dead' then return 7 end "
+        /* 8-9: a compensation run that is itself lost dead-letters */
+        "  local id2 = jobs.start('a5wf', {}, { queue = 'a5wf2', max_attempts = 1 }) "
+        "  if #jobs.claim({ queue = 'a5wf2', batch = 1 }) ~= 1 then return 8 end "
+        "  jobs.reap({ visibility_timeout = 0 }) "
+        "  if #jobs.claim({ queue = 'a5wf2', batch = 1 }) ~= 1 then return 9 end "
+        "  jobs.reap({ visibility_timeout = 0 }) "
+        "  local j2 = jobs.get(id2) "
+        "  if not j2 or j2.status ~= 'dead' then return 10 end "
         "  return 0 "
         "end)()");
     EXPECT_EQ(step, 0);

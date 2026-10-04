@@ -130,16 +130,21 @@ function fromQuery(req, opts) {
  */
 function render(total, opts) {
     opts = opts || {};
-    // ?? not || so caller-supplied 0 doesn't silently collapse.
-    const perPage = opts.per_page ?? 20;
-    const defaultPerPage = opts.defaultPerPage ?? perPage;
+    // Numbers, coerced: an app passing req.query.page straight through
+    // handed a string, and "5" + 2 is "52" - the window loop below then ran
+    // to about page*10 (9e6 iterations for ?page=999999) and the string page
+    // produced a duplicate link. Lua coerces arithmetically.
+    const perPage = Math.max(1, toInt(opts.per_page, 20));
+    const defaultPerPage = toInt(opts.defaultPerPage, perPage);
     const base = opts.baseUrl ?? "";
-    let window = opts.window == null ? 2 : opts.window;
-    if (window < 0) window = 0;
-    if (total < 0) total = 0;
+    total = Number(total);
+    if (!Number.isFinite(total) || total < 0) total = 0;
 
     const pages = Math.max(1, Math.ceil(total / perPage));
-    const page = clamp(opts.page ?? 1, 1, pages);
+    const page = clamp(toInt(opts.page, 1), 1, pages);
+    // Wider than the page count adds nothing but loop iterations.
+    let window = opts.window == null ? 2 : (toInt(opts.window, 0));
+    if (window > pages) window = pages;
 
     // Collect target page numbers as a set, then sort numerically.
     const targets = new Set([1, pages, page]);

@@ -50,6 +50,11 @@ await (async () => {
         { from: "bad", to: "y@z.com", subject: "s", body: "b" }, "invalid_argument", "invalid from address");
     await expectCode("invalid to address throws",
         { from: "x@y.com", to: "bad", subject: "s", body: "b" }, "invalid_argument", "invalid to address");
+    // One address only (audit 5): a comma-joined second recipient is refused.
+    await expectCode("comma-joined to address throws",
+        { from: "x@y.com", to: "a@x.co,b", subject: "s", body: "b" }, "invalid_argument", "invalid to address");
+    await expectCode("angle-bracket to address throws",
+        { from: "x@y.com", to: "A <a@x.co>", subject: "s", body: "b" }, "invalid_argument", "invalid to address");
 
     await expectCode("over-long to address throws",
         { from: "x@y.com", to: "a@" + "b".repeat(300) + ".com", subject: "s", body: "b" },

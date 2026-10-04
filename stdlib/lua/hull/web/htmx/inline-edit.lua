@@ -18,10 +18,12 @@
 --   PATCH save_url    → validate, persist, return inline_edit.cell(...)
 --   GET   cancel_url  → return inline_edit.cell(...)
 --
--- A tiny client JS (~15 LOC at /static/hull/htmx/inline-edit/
--- inline-edit.js) handles the one thing pure htmx can't: focusing
--- the input after the edit fragment is swapped in. Esc-to-cancel
--- is handled via `hx-trigger` on the Cancel button - no JS.
+-- A tiny client JS (/static/hull/htmx/inline-edit/inline-edit.js)
+-- focuses the input after the edit fragment is swapped in and
+-- handles the keys: Enter / Space on the display span start an edit,
+-- Escape in the editor clicks its Cancel button. (These are not
+-- htmx `keyup[...]` trigger filters: under the CSP htmx cannot
+-- evaluate a filter and treats it as true.)
 --
 -- Setup:
 --

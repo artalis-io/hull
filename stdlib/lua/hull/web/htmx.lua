@@ -114,14 +114,22 @@ end
 -- `path` must be an http(s) URL or a scheme-less relative one: htmx
 -- assigns HX-Redirect to `location.href`, so a `javascript:` URL (an
 -- app's open redirect passing a user value through) ran script. Any
--- other scheme, a control character or whitespace raises.
+-- other scheme, a control character or whitespace raises. So does a
+-- protocol-relative `//host/...`: it is not a relative path but another
+-- site (an open redirect when the value comes from the request), unless
+-- `opts.allow_protocol_relative` is set.
 --
 -- @tparam table req   Request object (used to detect htmx).
 -- @tparam table res   Response object.
 -- @tparam string path Target URL.
-local function redirect_target_ok(path)
+-- @tparam[opt] table opts  `{ allow_protocol_relative = true }`.
+local function redirect_target_ok(path, opts)
     if type(path) ~= "string" or path == "" then return false end
     if path:find("[%c%s\\]") then return false end
+    if path:sub(1, 2) == "//"
+       and not (type(opts) == "table" and opts.allow_protocol_relative == true) then
+        return false
+    end
     local lower = path:lower()
     if lower:sub(1, 7) == "http://" or lower:sub(1, 8) == "https://" then
         return true
@@ -131,8 +139,8 @@ local function redirect_target_ok(path)
     return not head:find(":", 1, true)
 end
 
-function htmx.redirect(req, res, path)
-    if not redirect_target_ok(path) then
+function htmx.redirect(req, res, path, opts)
+    if not redirect_target_ok(path, opts) then
         error("htmx.redirect: target must be an http(s) URL or a relative path", 2)
     end
     if htmx.is(req) then

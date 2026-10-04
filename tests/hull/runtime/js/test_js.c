@@ -3221,6 +3221,56 @@ UTEST(js_cap, stdlib_helpers_do_not_lend_their_identity)
     cleanup_js_caps();
 }
 
+/* retry.run awaits its predicates (audit 5): an async retryOn returned a
+ * truthy Promise, so every success was repeated maxAttempts times, and an
+ * async retryOnError made a non-retryable error retryable. */
+UTEST(js_cap, retry_awaits_async_predicates)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { retry } from 'hull:retry';\n"
+        "async function run() {\n"
+        "  let calls = 0;\n"
+        "  const v = await retry.run(() => { calls++; return 7; },\n"
+        "    { maxAttempts: 3, retryOn: async (r) => r !== 7 });\n"
+        "  if (v !== 7 || calls !== 1) return 1;\n"
+        "  calls = 0;\n"
+        "  let threw = false;\n"
+        "  try {\n"
+        "    await retry.run(() => { calls++; throw new Error('x'); },\n"
+        "      { maxAttempts: 3, retryOnError: async () => false });\n"
+        "  } catch (e) { threw = true; }\n"
+        "  if (!threw || calls !== 1) return 2;\n"
+        "  return 0;\n"
+        "}\n"
+        "run().then(v => { globalThis.__retry = v; }, () => { globalThis.__retry = 99; });\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__retry"), 0);
+    cleanup_js_caps();
+}
+
+/* pagination.render coerces a string page (audit 5): "5" + 2 was "52", so
+ * the window loop ran to ~page*10 and the page link was duplicated. */
+UTEST(js_cap, pagination_render_coerces_string_page)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { pagination } from 'hull:web:pagination';\n"
+        "function run() {\n"
+        "  const r = pagination.render(100, { page: '5', per_page: 10 });\n"
+        "  if (r.page !== 5) return 1;\n"
+        "  const nums = r.links.filter(l => !l.ellipsis).map(l => l.page);\n"
+        "  if (nums.join(',') !== '1,3,4,5,6,7,10') return 2;\n"
+        "  const big = pagination.render(10, { page: '1', per_page: '0', window: 1e9 });\n"
+        "  if (big.pages !== 10 || big.links.length !== 10) return 3;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__pg = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__pg"), 0);
+    cleanup_js_caps();
+}
+
 /* No route back to the Function constructors: deleting the global left
  * (() => 0).constructor - and the async / generator ones - compiling strings
  * into code. Their names survive, for the usual "is this async?" test. */
@@ -3280,6 +3330,27 @@ UTEST(js_stdlib, audit2_stdlib_fixes)
         "}\n"
         "globalThis.__audit2 = run();\n";
     ASSERT_EQ(js_run_steps(code, "globalThis.__audit2"), 0);
+    cleanup_js_caps();
+}
+
+/* Template loop variables named after the globals the generated code calls
+ * (audit 5): `{% for Array in xs %}` hit the TDZ in its own header, and a
+ * variable named String or Object broke the loop body. */
+UTEST(js_stdlib, template_loop_vars_do_not_shadow_codegen_globals)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { template } from 'hull:template';\n"
+        "function run() {\n"
+        "  const d = { xs: ['a', 'b'], m: { k: 'v' } };\n"
+        "  if (template.renderString('{% for Array in xs %}{{ Array }}{% endfor %}', d) !== 'ab') return 1;\n"
+        "  if (template.renderString('{% for String in xs %}{{ String | raw }}{% endfor %}', d) !== 'ab') return 2;\n"
+        "  if (template.renderString('{% for Object, v in m %}{{ Object }}={{ v }}{% endfor %}', d) !== 'k=v') return 3;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__tplshadow = run();\n";
+    ASSERT_EQ(js_run_steps(code, "globalThis.__tplshadow"), 0);
     cleanup_js_caps();
 }
 
@@ -4886,6 +4957,21 @@ UTEST(js_stdlib, search_suite)
     cleanup_js_caps();
 }
 
+/* hull:cache / hull:kv memory + SQL stores, rbac names (audit 5 DA-L3..L6). */
+UTEST(js_stdlib, kv_cache_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_kv_cache.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, toast_suite)
 {
     init_js_with_caps();
@@ -5150,6 +5236,69 @@ UTEST(js_stdlib, audit4_jobs_kv_cache_rbac)
 
     /* typeof guard: an undefined (a module that threw) also reads as 0 */
     ASSERT_EQ(eval_int("typeof globalThis.__test_a4 === 'number' ? globalThis.__test_a4 : -1"), 0);
+
+    cleanup_js_caps();
+}
+
+/* Audit 5 (jobs reaper). __test_a5 is 0, or the number of the first check
+ * that failed (-2: the async body threw). */
+UTEST(js_stdlib, audit5_jobs_reaper)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { jobs } from 'hull:jobs';\n"
+        "(async () => {\n"
+        "  jobs.init({ backoff: () => 0 });\n"
+        /* 1-2: more than one reaper pass of exhausted rows (500) are all
+         *      dead-lettered; none is re-pended by the reclaim */
+        "  for (let i = 0; i < 505; i++)\n"
+        "    jobs.enqueue('a5bulk', {}, { queue: 'a5bulk', maxAttempts: 1 });\n"
+        "  while (jobs.claim({ queue: 'a5bulk', batch: 200 }).length > 0) {}\n"
+        "  jobs.reap({ visibilityTimeout: 0 });\n"
+        "  const st = jobs.stats({ queue: 'a5bulk' });\n"
+        "  if (st.dead !== 505) return 1;\n"
+        "  if (st.pending !== 0 || st.running !== 0) return 2;\n"
+        /* 3-7: a workflow whose worker is lost on its last attempt still
+         *      runs its saga compensations, once, and dead-letters */
+        "  const log = [];\n"
+        "  jobs.workflow('a5wf', async (ctx) => {\n"
+        "    await ctx.step('charge', () => { log.push('charge'); return 1; },\n"
+        "      { compensate: () => { log.push('refund'); } });\n"
+        "    await ctx.step('ship', () => { log.push('ship'); throw new Error('boom'); });\n"
+        "  });\n"
+        "  const id = jobs.start('a5wf', {}, { queue: 'a5wf', maxAttempts: 2 });\n"
+        "  await jobs.work({ queue: 'a5wf' });\n"
+        "  if (log.join(',') !== 'charge,ship') return 3;\n"
+        "  if (jobs.claim({ queue: 'a5wf', batch: 1 }).length !== 1) return 4;\n"
+        "  jobs.reap({ visibilityTimeout: 0 });\n"
+        "  let j = jobs.get(id);\n"
+        "  if (!j || j.status !== 'pending') return 5;\n"
+        "  await jobs.work({ queue: 'a5wf' });\n"
+        "  if (log.join(',') !== 'charge,ship,refund') return 6;\n"
+        "  j = jobs.get(id);\n"
+        "  if (!j || j.status !== 'dead') return 7;\n"
+        /* 8-10: a compensation run that is itself lost dead-letters */
+        "  const id2 = jobs.start('a5wf', {}, { queue: 'a5wf2', maxAttempts: 1 });\n"
+        "  if (jobs.claim({ queue: 'a5wf2', batch: 1 }).length !== 1) return 8;\n"
+        "  jobs.reap({ visibilityTimeout: 0 });\n"
+        "  if (jobs.claim({ queue: 'a5wf2', batch: 1 }).length !== 1) return 9;\n"
+        "  jobs.reap({ visibilityTimeout: 0 });\n"
+        "  const j2 = jobs.get(id2);\n"
+        "  if (!j2 || j2.status !== 'dead') return 10;\n"
+        "  return 0;\n"
+        "})().then((v) => { globalThis.__test_a5 = v; },\n"
+        "          (e) => { console.log(String(e && e.stack || e)); globalThis.__test_a5 = -2; });\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("typeof globalThis.__test_a5 === 'number' ? globalThis.__test_a5 : -1"), 0);
 
     cleanup_js_caps();
 }

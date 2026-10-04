@@ -69,6 +69,14 @@ expect_code("invalid to address throws",
     { from = "x@y.com", to = "not-an-email", subject = "s", body = "b" },
     "invalid_argument", "invalid to address")
 
+-- One address only (audit 5): a comma-joined second recipient is refused.
+expect_code("comma-joined to address throws",
+    { from = "x@y.com", to = "a@x.co,b", subject = "s", body = "b" },
+    "invalid_argument", "invalid to address")
+expect_code("angle-bracket to address throws",
+    { from = "x@y.com", to = "A <a@x.co>", subject = "s", body = "b" },
+    "invalid_argument", "invalid to address")
+
 -- An over-long address is refused before the (backtracking) pattern runs.
 expect_code("over-long to address throws",
     { from = "x@y.com", to = "a@" .. string.rep("b", 300) .. ".com",

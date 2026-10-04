@@ -62,8 +62,9 @@ retry.backoff = function(attempt, opts) {
  * @param {Object} [opts]
  *   - `maxAttempts` (default 3) total attempts incl. the first.
  *   - `baseMs` / `factor` / `capMs` / `jitter` - see backoff.
- *   - `retryOn(result) -> boolean` - retry on a "bad" success value.
- *   - `retryOnError(err) -> boolean` - return false to re-throw immediately (no retry).
+ *   - `retryOn(result) -> boolean | Promise<boolean>` - retry on a "bad" success value.
+ *   - `retryOnError(err) -> boolean | Promise<boolean>` - return false to re-throw
+ *     immediately (no retry). Both predicates may be async; they are awaited.
  *   - `onRetry(attempt, ok, value)` - called before each backoff sleep.
  * @returns {Promise<*>} The successful (or last) result; re-throws the last
  *   error if all attempts threw.
@@ -77,10 +78,13 @@ retry.run = async function(fn, opts) {
         try { val = await fn(); ok = true; }
         catch (e) { ok = false; val = e; }
         lastOk = ok; lastVal = val;
+        // The predicates are awaited: an async one returned a Promise, which
+        // is truthy - every success counted as "bad" and was repeated (a
+        // charge sent maxAttempts times), and every error as retryable.
         if (ok) {
-            if (!(opts.retryOn && opts.retryOn(val))) return val;
+            if (!(opts.retryOn && (await opts.retryOn(val)))) return val;
         } else {
-            if (opts.retryOnError && !opts.retryOnError(val)) throw val;
+            if (opts.retryOnError && !(await opts.retryOnError(val))) throw val;
         }
         if (attempt < max) {
             if (opts.onRetry) opts.onRetry(attempt, ok, val);

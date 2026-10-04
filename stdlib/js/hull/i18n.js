@@ -166,18 +166,27 @@ function tIn(loc, key, params) {
     return interpolate(val, params);
 }
 
+// The format object of locale `name` (null/unknown -> none: the defaults).
+function formatOf(name) {
+    const loc = name && Object.prototype.hasOwnProperty.call(locales, name)
+        ? locales[name] : null;
+    return loc && loc.format;
+}
+
 /**
- * Format a number using the active locale's separators.
+ * Stateless `number`: format with locale `loc`'s separators, whatever the
+ * active locale is (use it in handlers that await, as `tIn`).
+ * @param {?string} loc
  * @param {number} n
  * @returns {string}
  */
-function number(n) {
+function numberIn(loc, n) {
     if (typeof n !== "number") return String(n);
+    if (!Number.isFinite(n)) return String(n);
 
-    const loc = active && locales[active];
-    const fmt = loc && loc.format;
-    const decSep = (fmt && fmt.decimalSep) || ".";
-    const thousSep = (fmt && fmt.thousandsSep) || ",";
+    const fmt = formatOf(loc);
+    const decSep = (fmt && (fmt.decimalSep || fmt.decimal_sep)) || ".";
+    const thousSep = (fmt && (fmt.thousandsSep || fmt.thousands_sep)) || ",";
 
     const negative = n < 0;
     if (negative) n = -n;
@@ -200,19 +209,24 @@ function number(n) {
 }
 
 /**
- * Format a Unix timestamp using the locale's `datePattern`.
- *
- * Supports `YYYY`/`MM`/`DD`/`HH`/`mm`/`ss` tokens.
- *
+ * Format a number using the active locale's separators.
+ * @param {number} n
+ * @returns {string}
+ */
+function number(n) { return numberIn(active, n); }
+
+/**
+ * Stateless `date`: locale `loc`'s pattern.
+ * @param {?string} loc
  * @param {number} timestamp  Seconds since epoch.
  * @returns {string}
  */
-function date(timestamp) {
-    if (typeof timestamp !== "number") return String(timestamp);
+function dateIn(loc, timestamp) {
+    if (typeof timestamp !== "number" || !Number.isFinite(timestamp))
+        return String(timestamp);
 
-    const loc = active && locales[active];
-    const fmt = loc && loc.format;
-    const pattern = (fmt && fmt.datePattern) || "YYYY-MM-DD";
+    const fmt = formatOf(loc);
+    const pattern = (fmt && (fmt.datePattern || fmt.date_pattern)) || "YYYY-MM-DD";
 
     const dt = epochToUtc(timestamp);
     let result = pattern;
@@ -226,21 +240,34 @@ function date(timestamp) {
 }
 
 /**
- * Format an amount in a given currency per the active locale.
+ * Format a Unix timestamp using the locale's `datePattern`.
+ *
+ * Supports `YYYY`/`MM`/`DD`/`HH`/`mm`/`ss` tokens.
+ *
+ * @param {number} timestamp  Seconds since epoch.
+ * @returns {string}
+ */
+function date(timestamp) { return dateIn(active, timestamp); }
+
+/**
+ * Stateless `currency`: locale `loc`'s currency table.
+ * @param {?string} loc
  * @param {number} amount
  * @param {string} code   ISO 4217 (e.g. `"USD"`).
  * @returns {string}
  */
-function currency(amount, code) {
+function currencyIn(loc, amount, code) {
     if (typeof amount !== "number" || typeof code !== "string")
         return String(amount);
+    if (!Number.isFinite(amount)) return String(amount) + " " + code;
 
-    const loc = active && locales[active];
-    const fmt = loc && loc.format;
-    const cur = fmt && fmt.currency && fmt.currency[code];
+    const fmt = formatOf(loc);
+    const cur = fmt && fmt.currency
+        && Object.prototype.hasOwnProperty.call(fmt.currency, code)
+        ? fmt.currency[code] : null;
 
     if (!cur)
-        return number(amount) + " " + code;
+        return numberIn(loc, amount) + " " + code;
 
     // Same as the Lua sibling: either spelling of the option, the sign taken
     // off first, and the magnitude rounded half away from zero in whole minor
@@ -252,6 +279,10 @@ function currency(amount, code) {
     const decSep = (fmt && (fmt.decimalSep || fmt.decimal_sep)) || ".";
     const thousSep = (fmt && (fmt.thousandsSep || fmt.thousands_sep)) || ",";
 
+    // Past 2^53 minor units the integer split is no longer exact (Lua's %d
+    // raised there): fall back to the plain number, as the Lua sibling.
+    if (Math.abs(amount) * scale >= 9007199254740992)
+        return numberIn(loc, amount) + " " + code;
     let neg = amount < 0;
     const units = Math.floor(Math.abs(amount) * scale + 0.5);
     const intPart = Math.floor(units / scale);
@@ -273,6 +304,14 @@ function currency(amount, code) {
         return result + " " + symbol;
     return symbol + result;
 }
+
+/**
+ * Format an amount in a given currency per the active locale.
+ * @param {number} amount
+ * @param {string} code   ISO 4217 (e.g. `"USD"`).
+ * @returns {string}
+ */
+function currency(amount, code) { return currencyIn(active, amount, code); }
 
 /**
  * Pick the best matching locale from `Accept-Language` (RFC 7231 q-pairs).
@@ -315,5 +354,6 @@ function reset() {
     active = null;
 }
 
-const i18n = { load, locale, t, tIn, number, date, currency, detect, reset };
+const i18n = { load, locale, t, tIn, number, numberIn, date, dateIn,
+               currency, currencyIn, detect, reset };
 export { i18n };

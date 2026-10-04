@@ -104,16 +104,24 @@ function init(opts) {
     const existing = {};
     const cols = db.tableColumns("_hull_sessions") || [];
     for (let i = 0; i < cols.length; i++) existing[cols[i]] = true;
-    if (!existing.user_id)
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id VARCHAR(255)");
-    if (!existing.ip)
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN ip TEXT");
-    if (!existing.user_agent)
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_agent TEXT");
+    // A failed ALTER (a concurrent instance added the column first: two
+    // instances starting together on Postgres / MySQL) is re-checked against
+    // the column set and thrown only when the column is still absent.
+    const addColumn = (name, ddl) => {
+        if (existing[name]) return;
+        try {
+            db.exec("ALTER TABLE _hull_sessions ADD COLUMN " + ddl);
+        } catch (e) {
+            const now = db.tableColumns("_hull_sessions") || [];
+            if (now.indexOf(name) < 0) throw e;
+        }
+    };
+    addColumn("user_id", "user_id VARCHAR(255)");
+    addColumn("ip", "ip TEXT");
+    addColumn("user_agent", "user_agent TEXT");
     // The session's own sliding TTL, when create() was given one (see the Lua
     // sibling). NULL = the module TTL.
-    if (!existing.ttl)
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN ttl INTEGER");
+    addColumn("ttl", "ttl INTEGER");
     db.exec(
         "CREATE INDEX IF NOT EXISTS idx__hull_sessions_user_id " +
         "ON _hull_sessions(user_id)");

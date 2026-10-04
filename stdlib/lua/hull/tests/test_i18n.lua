@@ -325,5 +325,35 @@ test("non-string value at key returns key", function()
     assert_eq(i18n.t("invoice"), "invoice")
 end)
 
+-- ── stateless *_in variants + non-finite amounts (audit 5) ───────────
+
+test("number_in / date_in / currency_in ignore the active locale", function()
+    i18n.load("en", en)
+    i18n.load("hu", hu)
+    i18n.locale("en")
+    assert_eq(i18n.number_in("hu", 1234567.5), "1 234 567,5")
+    assert_eq(i18n.date_in("hu", 0), "1970.01.01.")
+    assert_eq(i18n.currency_in("hu", 1500, "HUF"), "1 500 Ft")
+    -- the active locale is untouched
+    assert_eq(i18n.locale(), "en")
+    assert_eq(i18n.number(1234.5), "1,234.5")
+    -- unknown locale -> defaults
+    assert_eq(i18n.number_in("xx", 1234), "1,234")
+end)
+
+test("currency with inf / NaN / huge does not raise", function()
+    i18n.load("en", en)
+    i18n.locale("en")
+    local ok1, r1 = pcall(i18n.currency, math.huge, "USD")
+    assert_eq(ok1, true, "inf")
+    assert_eq(type(r1), "string")
+    local ok2 = pcall(i18n.currency, 0/0, "USD")
+    assert_eq(ok2, true, "nan")
+    local ok3 = pcall(i18n.currency, 1e300, "USD")
+    assert_eq(ok3, true, "huge")
+    local ok4 = pcall(i18n.number, -math.huge)
+    assert_eq(ok4, true, "number -inf")
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

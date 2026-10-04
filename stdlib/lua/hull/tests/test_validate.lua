@@ -211,6 +211,13 @@ test("fn: boolean true passes, false fails", function()
     assert_eq(ok4, false, "a non-boolean non-string return fails closed")
 end)
 
+-- "" (a missing translation) fails with the default message, as in JS.
+test("fn: empty-string return fails with the default message", function()
+    local ok, errs = validate.check({ x = "v" }, { x = { fn = function() return "" end } })
+    assert_eq(ok, false)
+    assert_eq(errs.x, "is invalid")
+end)
+
 test("fn: nil return passes", function()
     local ok = validate.check({ x = "ok" }, { x = { fn = function() return nil end } })
     assert_eq(ok, true)

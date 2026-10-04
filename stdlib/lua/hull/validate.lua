@@ -206,7 +206,9 @@ function validate.check(data, schema)
         if rules.fn then
             local verdict = rules.fn(value, field, data)
             if type(verdict) == "string" then
-                err = verdict
+                -- An empty message (a missing translation) still fails the
+                -- field, with the default message; JS did the same.
+                err = verdict ~= "" and verdict or (custom_msg or "is invalid")
             elseif verdict ~= nil and verdict ~= true then
                 err = custom_msg or "is invalid"
             end

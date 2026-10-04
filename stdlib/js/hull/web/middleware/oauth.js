@@ -161,10 +161,17 @@ const PRESETS = {
             jwksUri:               base + "/discovery/v2.0/keys",
             issuer:                base + "/v2.0",
         };
-        if (tenant === "common" || tenant === "organizations"
-            || tenant === "consumers") {
+        // Personal accounts all live in one tenant: `consumers` accepts
+        // exactly its issuer, `organizations` any tenant but that one, and
+        // only `common` every tenant (see the Lua sibling).
+        const msaIssuer = "https://login.microsoftonline.com/"
+                          + "9188040d-6c67-4c5b-b112-36a304b66dad/v2.0";
+        if (tenant === "consumers") {
+            cfg.issuer = msaIssuer;
+        } else if (tenant === "common" || tenant === "organizations") {
             cfg.issuerPattern =
                 /^https:\/\/login\.microsoftonline\.com\/[\w\-\.]+\/v2\.0$/;
+            if (tenant === "organizations") cfg.issuerDeny = msaIssuer;
         }
         return cfg;
     },
@@ -530,7 +537,8 @@ async function handleCallback(req, res) {
     let issOk = (claims.iss === cfg.issuer);
     if (!issOk && cfg.issuerPattern instanceof RegExp
         && typeof claims.iss === "string") {
-        issOk = cfg.issuerPattern.test(claims.iss);
+        issOk = cfg.issuerPattern.test(claims.iss)
+                && claims.iss !== cfg.issuerDeny;
     }
     if (!issOk) {
         log.warn("oauth: iss mismatch: " + String(claims.iss));
@@ -664,7 +672,7 @@ function init(opts) {
         // An explicit issuer pins it: the preset's multi-tenant pattern
         // (tenant defaults to "common") otherwise still accepted a token
         // from any tenant or personal account.
-        if (p.issuer) delete resolved.issuerPattern;
+        if (p.issuer) { delete resolved.issuerPattern; delete resolved.issuerDeny; }
         for (const k of ["authorizationEndpoint", "tokenEndpoint",
                           "jwksUri", "issuer"]) {
             if (typeof resolved[k] !== "string") {

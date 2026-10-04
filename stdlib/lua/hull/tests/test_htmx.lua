@@ -213,6 +213,17 @@ test("redirect refuses non-http(s) schemes and control chars", function()
     end
 end)
 
+-- A protocol-relative target is another site, not a relative path (audit 5).
+test("redirect refuses //host unless opted in", function()
+    local req = { headers = { ["hx-request"] = "true" } }
+    local res = mock_res()
+    assert_eq(pcall(htmx.redirect, req, res, "//evil.example/x"), false)
+    assert_eq(res.headers_set["HX-Redirect"], nil)
+    res = mock_res()
+    htmx.redirect(req, res, "//cdn.example/x", { allow_protocol_relative = true })
+    assert_eq(res.headers_set["HX-Redirect"], "//cdn.example/x")
+end)
+
 test("redirect on plain request falls back to res:redirect", function()
     local req = { headers = {} }
     local res = mock_res()
