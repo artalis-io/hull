@@ -965,10 +965,11 @@ UTEST(lua_runtime, require_vendor_json)
 {
     init_lua();
 
-    /* require('vendor.json') should work (internal vendor namespace) */
+    /* vendor.* is internal to the stdlib (audit 5 M6): app code cannot
+     * require it; the stdlib's own json still works. */
     int result = eval_int(
-        "(function() local j = require('vendor.json') "
-        "return type(j) == 'table' and type(j.encode) == 'function' and 1 or 0 end)()");
+        "(function() local ok = pcall(require, 'vendor.json') "
+        "return ok and 0 or 1 end)()");
     ASSERT_EQ(result, 1);
 
     cleanup_lua();
@@ -7456,8 +7457,8 @@ UTEST(lua_audit4, tar_entry_raise_is_clean)
     ASSERT_TRUE(lua_initialized);
     int v = eval_int(
         "(function() "
-        "  local ok, tar = pcall(require, 'hull.tar') "
-        "  if not ok then return 0 end "
+        "  local ok, tar = pcall(require, 'hull.archive.tar') "
+        "  if not ok then return 9 end "   /* the wrong name used to pass */
         "  local bad = setmetatable({}, { __index = function() error('boom') end }) "
         "  local ok2, err = pcall(tar.create, { { name = 'a', data = 'x' }, bad }) "
         "  if ok2 or not tostring(err):find('boom', 1, true) then return 1 end "
@@ -7609,12 +7610,18 @@ UTEST(lua_audit5, vendor_modules_are_stdlib_only)
  * archive (audit 5 L1). */
 UTEST(lua_audit5, tar_create_reports_shape_errors)
 {
-    char err[512];
-    EXPECT_EQ(limited_run(
-        "local tar = require('hull.tar') "
-        "local out, e = tar.create({ { mode = 1 } }) "
-        "assert(out == nil and type(e) == 'string', 'shape error ignored')",
-        err, sizeof err), LUA_OK);
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local ok, tar = pcall(require, 'hull.archive.tar') "
+        "  if not ok then return 9 end "
+        "  local out, e = tar.create({ { mode = 1 } }) "
+        "  if out ~= nil or type(e) ~= 'string' then return 1 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
 }
 
 UTEST_MAIN();
