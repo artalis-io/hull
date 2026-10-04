@@ -150,6 +150,81 @@ static int mysql_create_index_shim(HlDbMyCtx *s, const char *sql, int *handled)
     return -1;
 }
 
+/*
+ * Hull's own tables (`_hull_*`) are created with a binary collation. The
+ * stdlib keys them on VARCHAR columns (role names, inbox ids, dedup keys,
+ * job / cron / subscription names) whose comparisons must be exact; under
+ * MySQL 8's default utf8mb4_0900_ai_ci, 'Admin' = 'admin' and 'josé' =
+ * 'jose', so rbac.has_role matched a role differing in case and two inbox
+ * ids differing in case were one duplicate. Every `CREATE TABLE [IF NOT
+ * EXISTS] _hull_...(...)` in @p sql gets `DEFAULT CHARSET=utf8mb4
+ * COLLATE=utf8mb4_bin` after its column list, unless it names a collation
+ * already. Tables created before keep theirs. Returns a malloc'd rewrite, or
+ * NULL when nothing changed (or out of memory: the SQL then runs as given).
+ */
+static char *mysql_bin_collate_hull_tables(const char *sql)
+{
+    static const char opt[] = " DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin";
+    size_t len = strlen(sql);
+    char *out = NULL;
+    size_t olen = 0, ocap = 0, copied = 0;
+    const char *p = sql;
+    while ((p = ci_strstr(p, "create table")) != NULL) {
+        const char *q = p + strlen("create table");
+        p = q;
+        while (isspace((unsigned char)*q)) q++;
+        if (strncasecmp(q, "if not exists", 13) == 0) {
+            q += 13;
+            while (isspace((unsigned char)*q)) q++;
+        }
+        if (*q == '`' || *q == '"') q++;
+        if (strncasecmp(q, "_hull_", 6) != 0) continue;
+        const char *lp = strchr(q, '(');
+        if (!lp) break;
+        /* The column list's closing parenthesis, past quoted text. */
+        int depth = 0;
+        char quote = 0;
+        const char *r = lp;
+        for (; *r; r++) {
+            if (quote) { if (*r == quote) quote = 0; continue; }
+            if (*r == '\'' || *r == '"' || *r == '`') { quote = *r; continue; }
+            if (*r == '(') depth++;
+            else if (*r == ')' && --depth == 0) break;
+        }
+        if (*r != ')') break;
+        const char *stmt_end = strchr(r, ';');
+        size_t tail = stmt_end ? (size_t)(stmt_end - r) : strlen(r);
+        int named = 0;
+        for (size_t i = 0; i + 7 <= tail; i++)
+            if (strncasecmp(r + i, "collate", 7) == 0) { named = 1; break; }
+        p = r + 1;
+        if (named) continue;
+        size_t chunk = (size_t)(r + 1 - (sql + copied));
+        size_t need = olen + chunk + sizeof opt;
+        if (need > ocap) {
+            size_t ncap = ocap ? ocap * 2 : len + 256;
+            while (ncap < need) ncap *= 2;
+            char *nb = realloc(out, ncap);
+            if (!nb) { free(out); return NULL; }
+            out = nb; ocap = ncap;
+        }
+        memcpy(out + olen, sql + copied, chunk);
+        olen += chunk;
+        memcpy(out + olen, opt, sizeof opt - 1);
+        olen += sizeof opt - 1;
+        copied = (size_t)(r + 1 - sql);
+    }
+    if (!out) return NULL;
+    size_t rest = len - copied;
+    if (olen + rest + 1 > ocap) {
+        char *nb = realloc(out, olen + rest + 1);
+        if (!nb) { free(out); return NULL; }
+        out = nb;
+    }
+    memcpy(out + olen, sql + copied, rest + 1);
+    return out;
+}
+
 /* ── Text value -> HlValue by column type ─────────────────────────── */
 
 static void decode_my_value(uint8_t type, const char *text, size_t len,
@@ -423,10 +498,12 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
     if (ready != 0) return ready > 0 ? 0 : -1;
     int64_t affected = 0;
 
+    char *collated = NULL;
     if (nparams == 0) {
         int handled = 0;
         int shim = mysql_create_index_shim(s, sql, &handled);
         if (handled) return shim == 0 ? 0 : -1;   /* DDL: 0 rows affected */
+        collated = mysql_bin_collate_hull_tables(sql);
     }
 
     if (nparams > 0) {
@@ -439,7 +516,10 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
         return (int)(affected < 0 ? 0 : affected);
     }
 
-    if (hl_my_conn_query(&s->conn, sql, NULL, NULL, NULL, &affected) != 0) {
+    int qrc = hl_my_conn_query(&s->conn, collated ? collated : sql,
+                               NULL, NULL, NULL, &affected);
+    free(collated);
+    if (qrc != 0) {
         if (s->conn.broken && sql_is_rollback(sql)) {   /* see mysql_txn */
             s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
             return 0;
@@ -457,7 +537,10 @@ static int mysql_exec_script(HlDbHandle *h, const char *sql)
     HlDbMyCtx *s = h->ctx;
     int ready = my_ready(s, sql);
     if (ready != 0) return ready > 0 ? 0 : -1;
-    return hl_my_conn_exec_multi(&s->conn, sql);
+    char *collated = mysql_bin_collate_hull_tables(sql);
+    int rc = hl_my_conn_exec_multi(&s->conn, collated ? collated : sql);
+    free(collated);
+    return rc;
 }
 
 static int mysql_txn(HlDbHandle *h, const char *sql)

@@ -110,6 +110,10 @@ function init(opts) {
         db.exec("ALTER TABLE _hull_sessions ADD COLUMN ip TEXT");
     if (!existing.user_agent)
         db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_agent TEXT");
+    // The session's own sliding TTL, when create() was given one (see the Lua
+    // sibling). NULL = the module TTL.
+    if (!existing.ttl)
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN ttl INTEGER");
     db.exec(
         "CREATE INDEX IF NOT EXISTS idx__hull_sessions_user_id " +
         "ON _hull_sessions(user_id)");
@@ -186,9 +190,11 @@ function create(data, opts) {
     db.exec(
         "INSERT INTO _hull_sessions "
         + "(id, data, created_at, last_accessed, expires_at, "
-        + " user_id, ip, user_agent) "
-        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [id, encoded, now, now, now + ttl, userId, ip, ua]
+        + " user_id, ip, user_agent, ttl) "
+        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        // ttl stored only when the caller chose one; null = module TTL.
+        [id, encoded, now, now, now + ttl, userId, ip, ua,
+         (opts && opts.ttl !== undefined) ? ttl : null]
     );
 
     return id;
@@ -217,7 +223,7 @@ function load(sessionId, opts) {
 
     const now = time.now();
     const rows = db.query(
-        "SELECT data, expires_at, created_at FROM _hull_sessions "
+        "SELECT data, expires_at, created_at, ttl FROM _hull_sessions "
         + "WHERE id = ?",
         [sessionId]
     );
@@ -239,8 +245,10 @@ function load(sessionId, opts) {
         return null;
     }
 
-    // Touch: update last_accessed and extend expiration
-    const ttl = (opts && opts.ttl !== undefined) ? opts.ttl : sessionTtl;
+    // Touch: update last_accessed and extend expiration - by the caller's
+    // ttl, else the session's own (create's), else the module TTL.
+    const ttl = (opts && opts.ttl !== undefined) ? opts.ttl
+        : (typeof rows[0].ttl === "number" ? rows[0].ttl : sessionTtl);
     db.exec(
         "UPDATE _hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
         [now, now + ttl, sessionId]
@@ -280,11 +288,17 @@ function update(sessionId, data, opts) {
     // and given its user by update() was invisible to destroyAll /
     // destroyOthers / listForUser, so a password reset left it alive.
     const userId = _request.userId(data && typeof data === "object" ? data.user_id : null);
-    const affected = db.exec(
-        "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ?, "
-        + "user_id = ? WHERE id = ? AND expires_at > ?",
-        [encoded, now, now + ttl, userId, sessionId, now]
-    );
+    // Without a caller ttl the session's own applies, read in SQL.
+    const affected = (opts && opts.ttl !== undefined)
+        ? db.exec(
+            "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ?, "
+            + "user_id = ? WHERE id = ? AND expires_at > ?",
+            [encoded, now, now + ttl, userId, sessionId, now])
+        : db.exec(
+            "UPDATE _hull_sessions SET data = ?, last_accessed = ?, "
+            + "expires_at = ? + COALESCE(ttl, ?), "
+            + "user_id = ? WHERE id = ? AND expires_at > ?",
+            [encoded, now, now, sessionTtl, userId, sessionId, now]);
 
     return affected > 0;
 }

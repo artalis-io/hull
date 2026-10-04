@@ -218,6 +218,10 @@ function verify(token, keyOrResolver, opts) {
     const alg = header.alg;
     if (!alg || alg === "none")
         return [null, "alg 'none' rejected"];
+    // RFC 7515 4.1.11: no critical extension is understood here, so a token
+    // naming any is refused (it was accepted with the extension ignored).
+    if (header.crit !== undefined)
+        return [null, "unsupported critical header"];
     if (!SUPPORTED_ALGS.has(alg))
         return [null, "unsupported algorithm: " + String(alg)];
 

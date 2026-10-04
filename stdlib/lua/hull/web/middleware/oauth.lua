@@ -707,6 +707,10 @@ function oauth.init(opts)
                             "jwks_uri", "issuer"}) do
             if p[k] then resolved[k] = p[k] end
         end
+        -- An explicit issuer pins it: the multi-tenant pattern of the preset
+        -- (tenant defaults to "common") went on accepting a token from ANY
+        -- tenant or personal account whose iss missed the pinned one.
+        if p.issuer then resolved.issuer_pattern = nil end
         for _, k in ipairs({"authorization_endpoint", "token_endpoint",
                             "jwks_uri", "issuer"}) do
             if type(resolved[k]) ~= "string" then

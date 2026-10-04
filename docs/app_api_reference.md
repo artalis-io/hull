@@ -193,11 +193,18 @@ Register with `app.use(method, pattern, mw)`:
 **auth.jwt_middleware(opts)**. JWT Bearer token authentication.
 - `opts.secret`. HMAC-SHA256 secret (required)
 - `opts.optional`. Continue without token (default: `false`)
+- `opts.require_exp` / `requireExp` (default `true`). A token without an
+  `exp` claim is refused; pass `false` to accept non-expiring tokens.
+  (Before audit 4 the default was `false`, so `jwt.sign` without `exp`
+  minted a token the middleware honoured forever.)
 - Reads `Authorization: Bearer <token>` header.
 - Sets `req.ctx.user` (decoded payload).
 - Returns `1` on auth failure (sends 401 + JSON), `0` on success.
 
 **auth.login(req, res, user_data, opts)**. Creates session, sets cookie. Returns `session_id`.
+`opts.ttl` bounds both: the cookie's `Max-Age` and the session itself, which
+slides by that ttl on every load rather than by the module TTL
+(`session.create(data, { ttl })` stores a per-session ttl).
 
 **auth.logout(req, res, opts)**. Destroys session, clears cookie.
 
@@ -243,9 +250,14 @@ Authy, 1Password - supports).
   `_hull_totp_recovery` tables.
   - `opts.issuer` (default `"Hull"`) - label shown in authenticator.
   - `opts.digits` (default `6`; also accepts `8`).
-  - `opts.period` (default `30s`, RFC default).
+  - `opts.period` (default `30s`, RFC default). Applies to new enrolments;
+    an existing one keeps the period it was enrolled with.
   - `opts.window` (default `±1` step → ~90s clock-skew tolerance).
   - `opts.recovery_codes` (default `10`).
+  - `opts.max_failed_attempts` (default `5`), `opts.lockout_duration`
+    (default `900`s), `opts.max_lockout_duration` (default `86400`s): every
+    `max_failed_attempts` wrong codes lock the user out, each lockout twice
+    as long as the last, up to the cap. A successful verify resets it.
   - `opts.encryption_key` - optional 32-byte string. When set,
     secrets are NaCl-secretbox-encrypted at rest with a fresh nonce
     per enrollment. Caller manages the key (env, fs.read, etc.).
@@ -392,6 +404,18 @@ verify step between successful first-factor auth and `on_login` when
   `/verify/resend` is enumeration-safe - always returns `{ok:true}`
   whether the user exists, is unverified, or is already verified.
   Apps SHOULD rate-limit it (per-email key) to bound mail volume.
+  **Verifying keeps the password only in the browser that registered.**
+  `/register` sets a `hull_af_reg` cookie (HttpOnly, SameSite=Lax, scoped
+  to `prefix`) whose hash the welcome token carries. A verify from that
+  browser keeps the password; any other - another browser or device, or a
+  `/verify/resend` link - verifies the address but voids the password (as a
+  magic-link verify of an unverified account does), drops any pending
+  email change, calls `on_password_reset`, and redirects to
+  `opts.verify_reset_redirect` (default `verify_redirect`), where the owner
+  sets a password by reset. Without this, anyone could register the
+  owner's address with a password of their own and have the owner's click
+  verify it. A password reset also drops a pending email change, and an
+  email-change confirm link must be the pending change's latest one.
 - `authflows.send_verify_email(user, url_prefix)`,
   `authflows.send_password_reset(email, url_prefix)`,
   `authflows.send_magic_link(email, url_prefix)`. Standalone helpers
@@ -442,6 +466,8 @@ verify step between successful first-factor auth and `on_login` when
 **jwt**. JWT sign/verify (HS256 only, not middleware).
 - `jwt.sign(payload, secret)` → token string. Auto-sets `iat`.
 - `jwt.verify(token, secret)` → payload table, or `nil, "error reason"`.
+  A token whose header lists `crit` extensions is refused (none are
+  implemented; RFC 7515 §4.1.11).
 - `jwt.decode(token)` → payload table or nil (no signature check).
 
 **logger.middleware(opts)**. Request logging with logfmt output and auto-assigned request IDs.
@@ -474,6 +500,11 @@ verify step between successful first-factor auth and `on_login` when
 **transaction**. Wraps handlers in SQLite transactions.
 - `transaction.middleware()`. Post-body middleware that sets `req.ctx._txn = true` for downstream use.
 - `transaction.run(fn)`. Wraps `fn` in `db.batch()` (BEGIN IMMEDIATE → fn() → COMMIT, ROLLBACK on error).
+  A `db.batch` inside another on the same connection runs in a SAVEPOINT of
+  the outer transaction (DuckDB: joins it): its writes commit with the outer
+  one and its error rolls back only its own writes. (It used to issue its
+  own BEGIN / COMMIT, committing the caller's transaction early on Postgres
+  and MySQL.)
 - `transaction.try(fn)` → `(ok, err)`. Like `run` but returns error instead of throwing.
 
 **idempotency**. Idempotency-Key middleware with response caching.

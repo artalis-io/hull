@@ -153,8 +153,10 @@ run_flow() {
     PW1="hunter22hunter22"
     PW2="newpassword12345"
 
-    # 1. Register
-    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+    # 1. Register. The jar is the registering browser: its cookie lets the
+    #    verify below keep the password (audit 4 A-M1).
+    REGJAR="$TMPDIR_WORK/reg_$_label.txt"
+    R=$(curl -sS -c "$REGJAR" -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_A\",\"password\":\"$PW1\"}" \
         "$BASE/auth/register")
     check_contains "$_label: register returns ok" "$R" '"ok":true'
@@ -172,8 +174,8 @@ run_flow() {
         "$BASE/auth/login")
     check_status "$_label: login pre-verify is 403" "$S" "403"
 
-    # 3. Click verify link
-    S=$(curl -sS -o /dev/null -w '%{http_code}' "$VERIFY_URL")
+    # 3. Click verify link (in the registering browser)
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$REGJAR" "$VERIFY_URL")
     check_status "$_label: verify returns 302" "$S" "302"
 
     # 4. Login after verify
@@ -272,6 +274,24 @@ run_flow() {
     # 16. Replay verify token from step 3 → reject
     S=$(curl -sS -o /dev/null -w '%{http_code}' "$VERIFY_URL")
     check_status "$_label: verify token replay rejected" "$S" "400"
+
+    # 17. Pre-registration hijack (audit 4 A-M1): someone registers the
+    #     owner's address with a password of their own; the owner clicks the
+    #     welcome link in THEIR browser. The address is verified, but the
+    #     registrant's password no longer logs in.
+    EMAIL_C="carol@example.test"
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL_C\",\"password\":\"$PW1\"}" \
+        "$BASE/auth/register" > /dev/null
+    TEXT=$(last_email_text "$PORT" "$EMAIL_C")
+    HIJACK_URL=$(extract_url "$TEXT")
+    S=$(curl -sS -o /dev/null -w '%{http_code}' "$HIJACK_URL")
+    check_status "$_label: foreign-browser verify still verifies" "$S" "302"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL_C\",\"password\":\"$PW1\"}" \
+        "$BASE/auth/login")
+    check_status "$_label: registrant password voided by foreign verify" "$S" "401"
 
     stop_pid "$HULL_PID"; HULL_PID=""
 }

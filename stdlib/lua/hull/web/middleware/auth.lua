@@ -136,7 +136,9 @@ function auth.jwt_middleware(opts)
     local optional = opts.optional or false
     local exclude_paths = opts.exclude_paths or {}
     local verify_opts = {
-        require_exp = opts.require_exp, iss = opts.iss,
+        -- A token must expire unless the app says otherwise: jwt.sign
+        -- without exp minted a token the middleware honoured forever.
+        require_exp = opts.require_exp ~= false, iss = opts.iss,
         aud = opts.aud, leeway = opts.leeway,
     }
 
@@ -226,7 +228,11 @@ function auth.login(_req, res, user_data, opts)
         cookie_opts = merged
     end
 
-    local session_id = session.create(user_data)
+    -- The session lives as long as the cookie: ttl also bounds it server
+    -- side (it used to set only the cookie's Max-Age, while the session row
+    -- slid on for the module TTL).
+    local session_id = session.create(user_data,
+                                      opts.ttl and { ttl = opts.ttl } or nil)
 
     -- Set the session cookie
     local serialized = cookie.serialize(cookie_name, session_id, cookie_opts)

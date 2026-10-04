@@ -2878,6 +2878,41 @@ UTEST(lua_stdlib, totp_key_rotation_lazy_on_verify)
     cleanup_lua_caps();
 }
 
+/* A db.batch inside another is a savepoint of the outer transaction (audit 4
+ * C-M2): an inner error rolls back only the inner writes, and the outer
+ * batch's error rolls back everything - nothing commits early. */
+UTEST(lua_stdlib, nested_batch_is_a_savepoint)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int ok = eval_int(
+        "(function() "
+        "  local db = require('hull.db').default() "
+        "  db.exec('CREATE TABLE nb (x INTEGER)') "
+        "  db.batch(function() "
+        "    db.exec('INSERT INTO nb VALUES (1)') "
+        "    local inner_ok = pcall(db.batch, function() "
+        "      db.exec('INSERT INTO nb VALUES (2)') error('inner') end) "
+        "    if inner_ok then error('the inner batch should have failed') end "
+        "    db.batch(function() db.exec('INSERT INTO nb VALUES (3)') end) "
+        "  end) "
+        "  local r = db.query('SELECT x FROM nb ORDER BY x') "
+        "  if #r ~= 2 or r[1].x ~= 1 or r[2].x ~= 3 then return 0 end "
+        "  local outer_ok = pcall(db.batch, function() "
+        "    db.exec('INSERT INTO nb VALUES (4)') "
+        "    db.batch(function() db.exec('INSERT INTO nb VALUES (5)') end) "
+        "    error('outer') end) "
+        "  if outer_ok then return 0 end "
+        "  r = db.query('SELECT COUNT(*) AS n FROM nb') "
+        "  if r[1].n ~= 2 then return 0 end "
+        "  db.batch(function() db.exec('INSERT INTO nb VALUES (6)') end) "
+        "  r = db.query('SELECT COUNT(*) AS n FROM nb') "
+        "  return r[1].n == 3 and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, totp_rekey_batch_helper)
 {
     init_lua_with_caps();

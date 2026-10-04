@@ -111,6 +111,9 @@ local _state = {
     -- Brute-force lockout (round-8). See header §Security.
     max_failed_attempts = 5,
     lockout_duration    = 15 * 60,
+    -- Each further lockout doubles the last, up to this: a flat 15 minutes
+    -- per 5 codes let a password holder try ~175k codes a year.
+    max_lockout_duration = 24 * 60 * 60,
     -- Round-9 HIGH-4: per-IP lockout (in addition to per-user).
     -- Pre-round-9 an attacker with one stolen password could fire 5
     -- bad TOTP codes per victim user_id, locking arbitrary accounts
@@ -452,8 +455,12 @@ local function mark_step_used(user_id, step)
         { step, time.now(), user_id, step })
 end
 
-local function current_step()
-    return otp.step(time.now(), _state.period)
+-- The step under the enrolment's own period: a changed `period` option
+-- applied to rows enrolled under the old one locked every user out.
+local function current_step(period)
+    local p = tonumber(period)
+    if not p or p <= 0 then p = _state.period end
+    return otp.step(time.now(), p)
 end
 
 local function check_initialized()
@@ -501,9 +508,15 @@ local function bump_failed_attempt(user_id)
         -- 0, not nil, for "not locked": lockout_remaining reads anything not
         -- in the future as unlocked, and a nil would end the values array.
         local locked_until = (r and r[1] and r[1].locked_until) or 0
-        if new_fc >= _state.max_failed_attempts then
-            locked_until = now + _state.lockout_duration
-            new_fc = 0  -- reset; next bad code restarts the counter
+        -- The count is kept across lockouts (a success deletes the row), so
+        -- the n-th lockout lasts lockout_duration * 2^(n-1), capped.
+        local max = _state.max_failed_attempts
+        if max > 0 and new_fc % max == 0 then
+            local n = new_fc // max
+            local dur = _state.lockout_duration * (2 ^ math.min(n - 1, 20))
+            local cap = math.max(_state.max_lockout_duration or 0,
+                                 _state.lockout_duration)
+            locked_until = now + math.floor(math.min(dur, cap))
         end
         -- db.upsert writes each backend's own dialect. A hand-written
         -- INSERT ... ON CONFLICT is not MySQL syntax: there every wrong code
@@ -683,6 +696,7 @@ function totp.init(opts)
     _state.issuer         = opts.issuer         or _state.issuer
     _state.digits         = opts.digits         or _state.digits
     _state.period         = opts.period         or _state.period
+    _state.max_lockout_duration = opts.max_lockout_duration or _state.max_lockout_duration
     _state.window         = opts.window         or _state.window
     _state.recovery_codes = opts.recovery_codes or _state.recovery_codes
     _state.max_failed_attempts = opts.max_failed_attempts
@@ -834,7 +848,10 @@ function totp.cleanup()
     -- Attempts tables: drop rows whose lockout window expired and
     -- whose last failure is older than the cutoff. COALESCE handles
     -- rows that never tripped a lockout (locked_until IS NULL).
-    local attempts_cutoff = now - (_state.lockout_duration or 0) * 2
+    -- Kept as long as an escalated lockout can last, or the escalation
+    -- would be forgotten as soon as a lockout ended.
+    local attempts_cutoff = now - math.max(_state.lockout_duration or 0,
+                                           _state.max_lockout_duration or 0) * 2
     db.exec(
         "DELETE FROM _hull_totp_attempts "
         .. "WHERE (locked_until IS NULL OR locked_until < ?) "
@@ -951,7 +968,7 @@ function totp.confirm(user_id, code)
         return false
     end
 
-    local now_step = current_step()
+    local now_step = current_step(pending.period)
     for offset = -_state.window, _state.window do
         local step = now_step + offset
         if ct_eq(totp_at_step(pending.secret,
@@ -1043,7 +1060,7 @@ function totp.verify_with_kind(user_id, code, req)
     -- The `mark_step_used` atomic update enforces replay protection:
     -- if a concurrent verify already consumed this step, the UPDATE
     -- affects 0 rows and we reject.
-    local now_step = current_step()
+    local now_step = current_step(row.period)
     for offset = -_state.window, _state.window do
         local step = now_step + offset
         -- ct_eq matches the constant-time compare in totp.confirm
@@ -1063,7 +1080,9 @@ function totp.verify_with_kind(user_id, code, req)
                 -- the rekey path doesn't block the user.
                 if _state.current_key_version
                    and row.version ~= _state.current_key_version then
-                    rekey_row(user_id, row.secret)
+                    -- pcall, as the comment on rekey_row says: a DB error
+                    -- here burned an already-accepted code with a 500.
+                    pcall(rekey_row, user_id, row.secret)
                 end
                 return true, "totp"
             end
@@ -1094,7 +1113,7 @@ function totp.verify_with_kind(user_id, code, req)
             -- migrate it forward.
             if _state.current_key_version
                and row.version ~= _state.current_key_version then
-                rekey_row(user_id, row.secret)
+                pcall(rekey_row, user_id, row.secret)
             end
             return true, "recovery"
         end
@@ -1285,6 +1304,7 @@ totp._test = {
         _state.recovery_codes      = 10
         _state.max_failed_attempts = 5
         _state.lockout_duration    = 15 * 60
+        _state.max_lockout_duration = 24 * 60 * 60
         _state.max_failed_attempts_per_ip = 20
         _state.lockout_duration_per_ip    = 15 * 60
         _state.trust_xff                  = false

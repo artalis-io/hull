@@ -98,6 +98,9 @@ const _state = {
     emailRateLimit:         { limit: 3, window: 900 },
     emailRateLimitMaxEntries: 10000,
     verifyRedirect:      "/",
+    // Where a verify that voided the password lands (another browser, or a
+    // resend's link). Defaults to verifyRedirect.
+    verifyResetRedirect: null,
     loginRedirect:       "/",
     initialized:         false,
 };
@@ -256,6 +259,9 @@ function renderTemplate(name, ctx) {
 // lower-cased recipient. Blocked sends are dropped silently so
 // the response shape stays enumeration-safe.
 let _emailRl = new Map();
+// See the Lua sibling: the next sweep runs past this size, so a map held
+// over the cap by saturated buckets does not re-sweep for every new key.
+let _emailRlSweepAt = 0;
 
 function emailRateAllow(to) {
     const cfg = _state.emailRateLimit;
@@ -271,7 +277,7 @@ function emailRateAllow(to) {
         bucket = { ts: [] };
         _emailRl.set(key, bucket);
         const max = _state.emailRateLimitMaxEntries || 10000;
-        if (_emailRl.size > max) {
+        if (_emailRl.size > Math.max(_emailRlSweepAt, max)) {
             // Avoid `for (const [k, b] of _emailRl)` - QuickJS's
             // js_parse_destructuring_element has an MSan use-of-
             // uninitialized-value in its destructuring parser that
@@ -304,6 +310,19 @@ function emailRateAllow(to) {
                 for (let i = 0; i < order.length && _emailRl.size > target; i++)
                     _emailRl.delete(order[i].k);
             }
+            // Hard ceiling: past twice the cap, saturated buckets go too,
+            // oldest first, down to the cap.
+            if (_emailRl.size > 2 * max) {
+                const sat = [];
+                _emailRl.forEach((b, k) => {
+                    if (k !== key)
+                        sat.push({ k, t: b.ts.length ? b.ts[b.ts.length - 1] : 0 });
+                });
+                sat.sort((x, y) => x.t - y.t);
+                for (let i = 0; i < sat.length && _emailRl.size > max; i++)
+                    _emailRl.delete(sat[i].k);
+            }
+            _emailRlSweepAt = _emailRl.size + Math.max(1, Math.floor(max / 10));
         }
     }
     bucket.ts = bucket.ts.filter(t => t > cutoff);
@@ -558,6 +577,78 @@ function isEmailIsh(s) {
 
 function genericOk(res) { res.json({ ok: true }); }
 
+// Registration browser binding - see the Lua sibling (REG_COOKIE). The
+// register response sets a nonce cookie and the welcome token carries its
+// hash; a verify from that browser keeps the password, any other verify (a
+// different browser, or a resend's token) voids it as a magic-link verify does.
+const REG_COOKIE = "hull_af_reg";
+
+function regCookieSecure(req) {
+    const po = _state.publicOrigin;
+    if (typeof po === "string" && po.startsWith("https://")) return true;
+    return requestProto((req && req.headers) || {}, "http") === "https";
+}
+
+function regCookieSet(req, res, nonce, maxAge) {
+    res.header("Set-Cookie", REG_COOKIE + "=" + nonce
+        + "; Path=" + (_state.prefix !== "" ? _state.prefix : "/")
+        + "; Max-Age=" + String(Math.floor(maxAge))
+        + "; HttpOnly; SameSite=Lax"
+        + (regCookieSecure(req) ? "; Secure" : ""));
+}
+
+function regCookieGet(req) {
+    const c = req && req.headers && req.headers["cookie"];
+    if (typeof c !== "string") return null;
+    for (const part of c.split(";")) {
+        const m = /^\s*([^=\s]+)\s*=\s*([A-Za-z0-9_-]+)\s*$/.exec(part);
+        if (m && m[1] === REG_COOKIE) return m[2];
+    }
+    return null;
+}
+
+function regBinding(nonce) {
+    return encoding.hex.encode(crypto.sha256("reg\0" + nonce)).slice(0, 32);
+}
+
+// The pending email change of a user, deleted whenever the password is reset
+// or voided: started from a hijacked session, its confirm link otherwise still
+// moved the account to the attacker's address after the owner's reset.
+function dropPendingEmailChange(uid) {
+    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?", [uid]);
+}
+
+// A callback whose answer gates authentication must answer synchronously:
+// a Promise is truthy, so an async totpVerify passed every code (2FA bypass)
+// and an async userTotpEnrolled sent everyone to the 2FA step. A thenable is
+// refused (its rejection observed, so it is not unhandled) - the caller fails
+// closed with a 500.
+function isThenable(v) {
+    if (v && typeof v.then === "function") {
+        try { v.then(() => {}, () => {}); } catch (_) { /* not a real promise */ }
+        return true;
+    }
+    return false;
+}
+
+function totpEnrolled(user) {
+    const v = _state.userTotpEnrolled(userId(user));
+    if (isThenable(v)) {
+        log.error("auth-flows: userTotpEnrolled returned a Promise; it must be synchronous");
+        return null;
+    }
+    return !!v;
+}
+
+function runOnPasswordReset(req, res, user) {
+    if (!_state.onPasswordReset) return;
+    try {
+        _state.onPasswordReset(req, res, user);
+    } catch (e) {
+        log.warn("auth-flows: onPasswordReset threw: " + (e && e.message ? e.message : e));
+    }
+}
+
 // Apply the three security headers that every auth-flow HTML
 // response wants: clickjacking, cache, referrer. No opt-out because
 // there's no legitimate reason to frame your own auth flow, cache
@@ -672,6 +763,9 @@ async function handleRegister(req, res) {
     // which ones already have an account.
     const pwHash = crypto.hashPassword(body.password);
     const existing = _state.userFindByEmail(body.email);
+    // Both branches set the cookie: its presence must not say which one ran.
+    const regNonce = crypto.randomToken(24);
+    regCookieSet(req, res, regNonce, _state.verifyTtl);
     if (existing) return genericOk(res);
     const uid = _state.userCreate(body.email, pwHash);
     const user = _state.userGet(uid);
@@ -681,8 +775,9 @@ async function handleRegister(req, res) {
     }
 
     const origin = originFor(req);
+    const rb = regBinding(regNonce);
     afterResponse(() => {
-        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
+        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl, { rb });
         if (origin) {
             const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
             sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
@@ -718,9 +813,29 @@ function handleVerify(req, res) {
     if (!result[0]) {
         return secureHtml(res).status(400).html("verification failed: " + (result[1] || "?"));
     }
-    _state.userSetEmailVerified(result[0].sub, true);
+    const env = result[0];
+    const user = _state.userGet(env.sub);
+    if (!user) return secureHtml(res).status(400).html("verification failed");
+    if (user.email_verified) {
+        gcExpired();
+        return res.redirect(_state.verifyRedirect);
+    }
+    // See REG_COOKIE: the password stays only when this browser registered
+    // the account; otherwise it is voided like a magic-link verify's.
+    const nonce = regCookieGet(req);
+    const keep = typeof env.rb === "string" && nonce !== null
+        && crypto.constantTimeEq(regBinding(nonce), env.rb);
+    _state.userSetEmailVerified(env.sub, true);
+    if (!keep) {
+        _state.userSetPassword(env.sub, crypto.hashPassword(
+            encoding.hex.encode(crypto.random(32))));
+        dropPendingEmailChange(env.sub);
+        user.email_verified = true;
+        runOnPasswordReset(req, res, user);
+    }
+    regCookieSet(req, res, "x", 0);   // spent
     gcExpired();
-    res.redirect(_state.verifyRedirect);
+    res.redirect(keep ? _state.verifyRedirect : _state.verifyResetRedirect);
 }
 
 // Minimal HTML form rendered on a magic-link click when 2FA is
@@ -807,8 +922,11 @@ function handleLogin(req, res) {
     }
     clearFailedLogins(ipKey);
     clearFailedLogins(uid);
-    if (_state.enableTotp && _state.userTotpEnrolled(userId(user))) {
-        return startTotpPending(req, res, user);
+    if (_state.enableTotp) {
+        const enrolled = totpEnrolled(user);
+        if (enrolled === null)
+            return res.status(500).json({ error: "auth-flows misconfigured" });
+        if (enrolled) return startTotpPending(req, res, user);
     }
     finishLogin(req, res, user, "password");
 }
@@ -869,6 +987,7 @@ function handleMagicLinkConsume(req, res) {
         _state.userSetEmailVerified(userId(user), true);
         _state.userSetPassword(userId(user), crypto.hashPassword(
             encoding.hex.encode(crypto.random(32))));
+        dropPendingEmailChange(userId(user));
         user.email_verified = true;
         if (_state.onPasswordReset) {
             try {
@@ -879,8 +998,11 @@ function handleMagicLinkConsume(req, res) {
         }
     }
     gcExpired();
-    if (_state.enableTotp && _state.userTotpEnrolled(userId(user))) {
-        return startTotpPending(req, res, user);
+    if (_state.enableTotp) {
+        const enrolled = totpEnrolled(user);
+        if (enrolled === null)
+            return res.status(500).json({ error: "auth-flows misconfigured" });
+        if (enrolled) return startTotpPending(req, res, user);
     }
     finishLogin(req, res, user, "magic_link");
 }
@@ -912,7 +1034,11 @@ function handleTotpVerify(req, res) {
     if (!user) return res.status(400).json({ error: "totp failed" });
     // Round-9 HIGH-4: pass `req` so totpVerify can gate per-IP too.
     const ok = _state.totpVerify(user, body.code, req);
-    if (!ok) return res.status(401).json({ error: "invalid code" });
+    if (isThenable(ok)) {
+        log.error("auth-flows: totpVerify returned a Promise; it must be synchronous");
+        return res.status(500).json({ error: "auth-flows misconfigured" });
+    }
+    if (ok !== true) return res.status(401).json({ error: "invalid code" });
     // Round-8 MEDIUM-6: prior code discarded markTokenUsed's return,
     // so two concurrent verifies with the same {token, code} both
     // minted a session from one pending-2FA token. Act on the return
@@ -966,6 +1092,7 @@ async function handlePasswordResetConfirm(req, res) {
     if (!user || !resetBindingHolds(result[0], user))
         return res.status(400).json({ error: "reset failed" });
     _state.userSetPassword(result[0].sub, crypto.hashPassword(body.password));
+    dropPendingEmailChange(result[0].sub);
     // A successful reset demonstrates email control; clear any
     // outstanding lockout so the new password works immediately.
     clearAllFailedLogins(result[0].sub);
@@ -1079,10 +1206,15 @@ function handleEmailChangeConfirm(req, res) {
     const env = result[0];
     const user = _state.userGet(env.sub);
     if (!user) return secureHtml(res).status(400).html("email change failed");
+    // The stored token_hash must be THIS token's: only the latest link of
+    // the pending change confirms it, and none once the row is gone.
     const rows = db.query(
-        "SELECT new_email FROM _hull_auth_pending_email_changes "
+        "SELECT new_email, token_hash FROM _hull_auth_pending_email_changes "
         + "WHERE user_id = ?", [env.sub]);
-    if (!rows || rows.length === 0 || rows[0].new_email !== env.new_email) {
+    const th = encoding.hex.encode(crypto.sha256(token));
+    if (!rows || rows.length === 0 || rows[0].new_email !== env.new_email
+        || typeof rows[0].token_hash !== "string"
+        || !crypto.constantTimeEq(rows[0].token_hash, th)) {
         return secureHtml(res).status(400).html("email change failed");
     }
     const oldEmail = user.email;
@@ -1404,6 +1536,7 @@ function init(opts) {
     _state.emailChangeTtl  = opts.emailChangeTtl  || _state.emailChangeTtl;
     _state.prefix          = opts.prefix          || _state.prefix;
     _state.verifyRedirect  = opts.verifyRedirect  || _state.verifyRedirect;
+    _state.verifyResetRedirect = opts.verifyResetRedirect || _state.verifyRedirect;
     _state.loginRedirect   = opts.loginRedirect   || _state.loginRedirect;
     if (opts.enumerationSafe     !== undefined) _state.enumerationSafe     = opts.enumerationSafe;
     if (opts.magicLinkAutoSignup !== undefined) _state.magicLinkAutoSignup = opts.magicLinkAutoSignup;

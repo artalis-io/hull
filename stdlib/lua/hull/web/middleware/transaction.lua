@@ -5,8 +5,10 @@
 -- happens in `transaction.run(fn)` / `transaction.try(fn)`, which call
 -- `db.batch()` (BEGIN IMMEDIATE → fn → COMMIT, with ROLLBACK on error).
 --
--- SQLite does not support nested transactions, so wrapping handlers that
--- are already inside a `db.batch` is a no-op via the batch semantics.
+-- A batch inside another batch (on the same connection) is a SAVEPOINT in
+-- the outer transaction: its writes commit with the outer one, and its error
+-- rolls back only its own writes before reaching the outer fn. (On DuckDB,
+-- which has no savepoints, it simply joins the outer transaction.)
 --
 -- @module hull.web.middleware.transaction
 -- @license AGPL-3.0-or-later
@@ -45,7 +47,8 @@ end
 --- Run `fn` inside `BEGIN IMMEDIATE..COMMIT`.
 --
 -- On error, the transaction is rolled back and the error re-raised.
--- If already inside a `db.batch`, `fn` runs without an extra BEGIN.
+-- If already inside a `db.batch`, `fn` runs in a savepoint of that
+-- transaction (see the module header), not a transaction of its own.
 --
 -- @function transaction.run
 -- @tparam function fn  Function whose DB writes should be atomic.

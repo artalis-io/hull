@@ -46,6 +46,8 @@ const _state = {
     // Brute-force lockout (round-8). See Lua sibling header.
     maxFailedAttempts:  5,
     lockoutDuration:    15 * 60,
+    // Each further lockout doubles the last, up to this (see the Lua sibling).
+    maxLockoutDuration: 24 * 60 * 60,
     // Round-9 HIGH-4: per-IP lockout (in addition to per-user). See
     // Lua sibling for the threat model. Looser default (20 vs 5)
     // because shared-NAT / mobile-carrier IPs aggregate users.
@@ -321,8 +323,10 @@ function markStepUsed(userId, step) {
         [step, time.now(), userId, step]);
 }
 
-function currentStep() {
-    return otp.step(time.now(), _state.period);
+// The step under the enrolment's own period (see the Lua sibling).
+function currentStep(period) {
+    const p = Number(period);
+    return otp.step(time.now(), p > 0 ? p : _state.period);
 }
 
 function checkInitialized() {
@@ -355,9 +359,14 @@ function bumpFailedAttempt(userId) {
         // 0 for "not locked", as the Lua twin stores it: lockoutRemaining
         // reads anything not in the future as unlocked.
         let lockedUntil = (r && r[0] && r[0].locked_until) || 0;
-        if (newFc >= _state.maxFailedAttempts) {
-            lockedUntil = now + _state.lockoutDuration;
-            newFc = 0;
+        // The count is kept across lockouts (a success deletes the row), so
+        // the n-th lockout lasts lockoutDuration * 2^(n-1), capped.
+        const max = _state.maxFailedAttempts;
+        if (max > 0 && newFc % max === 0) {
+            const n = Math.floor(newFc / max);
+            const dur = _state.lockoutDuration * Math.pow(2, Math.min(n - 1, 20));
+            const cap = Math.max(_state.maxLockoutDuration || 0, _state.lockoutDuration);
+            lockedUntil = now + Math.floor(Math.min(dur, cap));
         }
         // db.upsert writes each backend's own dialect. A hand-written
         // INSERT ... ON CONFLICT is not MySQL syntax: there every wrong code
@@ -508,6 +517,8 @@ function init(opts) {
                                || _state.maxFailedAttempts;
     _state.lockoutDuration   = opts.lockoutDuration
                                || _state.lockoutDuration;
+    _state.maxLockoutDuration = opts.maxLockoutDuration
+                                || _state.maxLockoutDuration;
     _state.maxFailedAttemptsPerIp = opts.maxFailedAttemptsPerIp
                                     || _state.maxFailedAttemptsPerIp;
     _state.lockoutDurationPerIp   = opts.lockoutDurationPerIp
@@ -618,7 +629,9 @@ function cleanup() {
             }
         });
     }
-    const attemptsCutoff = now - (_state.lockoutDuration || 0) * 2;
+    // Kept as long as an escalated lockout can last (see the Lua sibling).
+    const attemptsCutoff = now - Math.max(_state.lockoutDuration || 0,
+                                          _state.maxLockoutDuration || 0) * 2;
     db.exec(
         "DELETE FROM _hull_totp_attempts "
         + "WHERE (locked_until IS NULL OR locked_until < ?) "
@@ -716,7 +729,7 @@ function confirm(userId, code) {
         return false;
     }
 
-    const nowStep = currentStep();
+    const nowStep = currentStep(pending.period);
     for (let offset = -_state.window; offset <= _state.window; offset++) {
         const step = nowStep + offset;
         if (ctEq(totpAtStep(pending.secret, step, pending.digits), code)) {
@@ -784,7 +797,7 @@ function verifyWithKind(userId, code, req) {
     const row = loadSecret(userId);
     if (!row || row.confirmed !== 1) return [false, null];
 
-    const nowStep = currentStep();
+    const nowStep = currentStep(row.period);
     for (let offset = -_state.window; offset <= _state.window; offset++) {
         const step = nowStep + offset;
         if (step > row.lastUsedStep
@@ -968,6 +981,7 @@ const _test = {
         _state.recoveryCodes      = 10;
         _state.maxFailedAttempts  = 5;
         _state.lockoutDuration    = 15 * 60;
+        _state.maxLockoutDuration = 24 * 60 * 60;
         _state.maxFailedAttemptsPerIp = 20;
         _state.lockoutDurationPerIp   = 15 * 60;
         _state.trustXff               = false;

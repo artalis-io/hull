@@ -2715,6 +2715,48 @@ UTEST(js_stdlib, totp_key_rotation_lazy_on_verify_js)
     cleanup_js_caps();
 }
 
+/* A db.batch inside another is a savepoint (audit 4 C-M2). */
+UTEST(js_stdlib, nested_batch_is_a_savepoint)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { db as dbm } from 'hull:db';\n"
+        "function run() {\n"
+        "  const db = dbm.default();\n"
+        "  db.exec('CREATE TABLE nbj (x INTEGER)');\n"
+        "  db.batch(() => {\n"
+        "    db.exec('INSERT INTO nbj VALUES (1)');\n"
+        "    let innerOk = true;\n"
+        "    try { db.batch(() => { db.exec('INSERT INTO nbj VALUES (2)'); throw new Error('inner'); }); }\n"
+        "    catch (e) { innerOk = false; }\n"
+        "    if (innerOk) throw new Error('the inner batch should have failed');\n"
+        "    db.batch(() => { db.exec('INSERT INTO nbj VALUES (3)'); });\n"
+        "  });\n"
+        "  let r = db.query('SELECT x FROM nbj ORDER BY x');\n"
+        "  if (r.length !== 2 || r[0].x !== 1 || r[1].x !== 3) return 0;\n"
+        "  let outerOk = true;\n"
+        "  try { db.batch(() => { db.exec('INSERT INTO nbj VALUES (4)');\n"
+        "        db.batch(() => { db.exec('INSERT INTO nbj VALUES (5)'); });\n"
+        "        throw new Error('outer'); }); }\n"
+        "  catch (e) { outerOk = false; }\n"
+        "  if (outerOk) return 0;\n"
+        "  r = db.query('SELECT COUNT(*) AS n FROM nbj');\n"
+        "  if (r[0].n !== 2) return 0;\n"
+        "  db.batch(() => { db.exec('INSERT INTO nbj VALUES (6)'); });\n"
+        "  r = db.query('SELECT COUNT(*) AS n FROM nbj');\n"
+        "  return r[0].n === 3 ? 1 : 0;\n"
+        "}\n"
+        "globalThis.__nested_batch = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    ASSERT_EQ(eval_int("globalThis.__nested_batch"), 1);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, totp_rekey_batch_helper_js)
 {
     init_js_with_caps();
