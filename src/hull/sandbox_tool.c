@@ -337,14 +337,26 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
             kfail++;
         }
     }
-    /* Pledge for tool mode: needs proc + exec for fork/execvp. Applied
-     * wherever the kernel offers it - on Linux without Landlock too. Best
-     * effort, unlike unveil: a pledge already in force (a narrower one is
-     * not widened - pledge only ever reduces) refuses this call, and the
-     * process then stays under that one. */
-    if (sb_pledge_supported() &&
-        pledge("stdio rpath wpath cpath proc exec fattr", NULL) != 0)
-        log_warn("[sandbox] tool mode: pledge not applied: %s", strerror(errno));
+    /* Pledge for tool mode (proc + exec, for the spawned toolchain) applies
+     * on OpenBSD only. The Linux polyfill refuses "exec" without
+     * execpromises (EINVAL), and those become a seccomp filter on every
+     * compiler and linker the tool runs - a subset of these promises that
+     * must still let gcc / lld / zig map executable code and start threads.
+     * Broad enough for that, it would block next to nothing; so on Linux
+     * tool mode rests on the Landlock unveil above plus the spawn
+     * allowlist. (Before, the call was made there and its EINVAL ignored.) */
+#if defined(__COSMOPOLITAN__)
+    int tool_pledge = IsOpenbsd();
+#elif defined(__OpenBSD__)
+    int tool_pledge = 1;
+#else
+    int tool_pledge = 0;
+#endif
+    if (tool_pledge && sb_pledge_supported() &&
+        pledge("stdio rpath wpath cpath proc exec fattr", NULL) != 0) {
+        log_error("[sandbox] tool mode: pledge failed: %s", strerror(errno));
+        kfail++;
+    }
     if (kfail) {
         log_error("[sandbox] tool mode: kernel sandbox NOT applied "
                   "(%d failure(s)) - refusing to continue", kfail);
