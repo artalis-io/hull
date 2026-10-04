@@ -16,6 +16,7 @@
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
+#include "hull/utils/secure_zero.h"
 
 #include <keel/thread_pool.h>
 #include <keel/async.h>
@@ -64,7 +65,7 @@ static void worker_db_destructor(void *ptr)
         WorkerConnNode *next = n->next;
         if (n->wdb.handle.backend)
             n->wdb.handle.backend->close(&n->wdb.handle);
-        free(n->dsn);
+        hl_secure_free_str(n->dsn);
         free(n);
         n = next;
     }
@@ -155,7 +156,7 @@ HlWorkerDb *hl_worker_db_get_for(const char *dsn)
         if (p) p->next = NULL; else head = NULL;
         if (t->wdb.handle.backend)
             t->wdb.handle.backend->close(&t->wdb.handle);
-        free(t->dsn);
+        hl_secure_free_str(t->dsn);
         free(t);
     }
 
@@ -166,9 +167,11 @@ HlWorkerDb *hl_worker_db_get_for(const char *dsn)
 
     node->wdb.handle.backend = be;
     if (be->open(&node->wdb.handle.ctx, key, NULL) != 0) {
-        log_error("[hull:worker_db] %s open failed: dsn=%s errno=%d",
-                  be->name, key, errno);
-        free(node->dsn);
+        /* Not the DSN: for Postgres / MySQL it carries the password - a
+         * "$VAR" secret resolved - and every retry during an outage wrote it
+         * to the log. */
+        log_error("[hull:worker_db] %s open failed (errno=%d)", be->name, errno);
+        hl_secure_free_str(node->dsn);
         free(node);
         return NULL;
     }
@@ -200,7 +203,7 @@ void hl_worker_db_invalidate(const char *dsn)
             }
             if (n->wdb.handle.backend)
                 n->wdb.handle.backend->close(&n->wdb.handle);
-            free(n->dsn);
+            hl_secure_free_str(n->dsn);
             free(n);
             return;
         }
@@ -352,9 +355,18 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
 
 /* ── KlWorkItem callbacks ──────────────────────────────────────────── */
 
+static void db_work_run(HlWorkerDbOp *op);
+
 static void db_work_fn(void *ud)
 {
     HlWorkerDbOp *op = (HlWorkerDbOp *)ud;
+    db_work_run(op);
+    if (op->no_cache && op->dsn)
+        hl_worker_db_invalidate(op->dsn);
+}
+
+static void db_work_run(HlWorkerDbOp *op)
+{
     HlWorkerDb *wdb = hl_worker_db_get_for(op->dsn);
     if (!wdb) {
         op->error = 1;
@@ -494,7 +506,7 @@ void hl_worker_db_op_free(HlWorkerDbOp *op)
 {
     if (!op) return;
     free(op->sql);
-    free(op->dsn);
+    hl_secure_free_str(op->dsn);
     free(op->channel);
     if (op->params) {
         for (int i = 0; i < op->nparams; i++) {

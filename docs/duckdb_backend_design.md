@@ -136,9 +136,9 @@ SET allow_unsigned_extensions    = false;
 -- (A) no fs.read / fs.write in the manifest  ->  full lockdown (SQLite-equivalent):
 SET enable_external_access = false;      -- DB file + :memory: only
 
--- (B) fs.read / fs.write declared  ->  bounded LOCAL access, still no network:
+-- (B) a directory granted whole for read AND write  ->  bounded LOCAL access, still no network:
 SET enable_external_access = true;
-SET allowed_directories = ['<absolute dirs from fs.read/fs.write>'];  -- post-connect
+SET allowed_directories = ['<whole dirs granted in BOTH fs.read and fs.write>'];  -- post-connect
 
 -- finally, in BOTH cases (post-connect):
 SET lock_configuration = true;           -- app SQL can no longer re-enable anything
@@ -150,16 +150,21 @@ SET lock_configuration = true;           -- app SQL can no longer re-enable anyt
 - **Network is off structurally**: httpfs / S3 are never linked or loaded, so
   there is no outbound path even before config. (No `disabled_filesystems` SET
   is needed - the filesystems simply do not exist in the binary.)
-- **File access reuses `fs.read` / `fs.write`** (no new capability concept):
-  serve.c resolves each declared fs path to its absolute containing directory
-  (glob tail stripped; the path itself if it is a directory, else its parent),
-  dedups, and installs the set as DuckDB's `allowed_directories`. A
-  `read_parquet('/x')` on an ungranted path fails closed exactly like
-  `fs.read('/x')`; the same fs paths are also unveiled/seatbelt'd, so the kernel
-  sandbox and DuckDB agree. The DB *file* itself (the DSN path) is gated by the
-  existing DB-path sandbox, same as a SQLite file. DuckDB introduces zero new
-  capability surface. (Directory granularity, not per-file `allowed_paths`, in
-  this pass: a declared file grants its containing directory.)
+- **File access reuses `fs.read` / `fs.write`** (no new capability concept),
+  but only where DuckDB can honour the grant exactly. `allowed_directories`
+  permits reading AND writing (`COPY ... TO`), recursively, so a directory is
+  admitted only when the manifest grants it WHOLE - bare, or with a trailing
+  `/**` - in BOTH `fs.read` and `fs.write`. A read-only grant, a file, or a
+  pattern (`*.csv`, `data/*.parquet`) gives a `duckdb://` connection no file
+  access at all (startup logs a WARN with the count); none is widened to a
+  parent directory or to `app_dir`. (Audit 4: the earlier merge of read and
+  write grants, with files widened to their parent and a leading glob to all of
+  `app_dir`, let `fs.read = {"*.csv"}` reach `COPY t TO 'app.lua'` and a raw
+  read of `data.db`.) A `read_parquet('/x')` on an ungranted path fails closed
+  exactly like `fs.read('/x')`; the same fs paths are also unveiled/seatbelt'd,
+  so the kernel sandbox and DuckDB agree. The DB *file* itself (the DSN path) is
+  gated by the existing DB-path sandbox, same as a SQLite file. DuckDB
+  introduces zero new capability surface.
 
 **Implementation (status: done) - mode B is a named/dynamic-connection feature.**
 The policy is computed once at boot from the sealed manifest

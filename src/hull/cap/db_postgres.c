@@ -420,6 +420,19 @@ static int pg_begin(HlDbHandle *h)    { return pg_exec(h, "BEGIN", NULL, 0); }
 static int pg_commit(HlDbHandle *h)   { return pg_exec(h, "COMMIT", NULL, 0); }
 static int pg_rollback(HlDbHandle *h) { return pg_exec(h, "ROLLBACK", NULL, 0); }
 
+/* A transaction a request left open ('T', or 'E' after a failed statement) is
+ * rolled back before the next request runs: without it every later request ran
+ * inside it (its writes lost at the eventual rollback, its locks held) or, in
+ * 'E', failed with "current transaction is aborted" until a restart. */
+static void pg_guard_stale_txn(HlDbHandle *h)
+{
+    if (!h || !h->ctx) return;
+    HlDbPgCtx *s = h->ctx;
+    if (s->conn.tx_status == 'I' || s->conn.tx_status == 0) return;
+    fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
+    (void)pg_rollback(h);   /* a lost connection: pg_ready takes the ROLLBACK */
+}
+
 static int64_t pg_last_id(HlDbHandle *h)
 {
     (void)h;
@@ -651,7 +664,7 @@ const HlDbBackend hl_db_backend_postgres = {
     .rollback             = pg_rollback,
     .last_id              = pg_last_id,
     .errmsg               = pg_errmsg,
-    .guard_stale_txn      = NULL,
+    .guard_stale_txn      = pg_guard_stale_txn,
     .insert_if_absent     = pg_insert_if_absent,
     .upsert               = pg_upsert,
     .table_columns        = pg_table_columns,

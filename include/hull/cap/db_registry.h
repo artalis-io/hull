@@ -53,6 +53,19 @@ static inline HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
 #endif
 
 /*
+ * The per-request stale-transaction guard over EVERY open connection - the
+ * default, named ones and the internal one - not only "default": a handler
+ * that raised between BEGIN and COMMIT on a named connection left it in the
+ * transaction for every later request. Opens nothing.
+ */
+#ifdef HL_ENABLE_DB
+void hl_db_registry_guard_stale_txns(HlDbRegistry *reg);
+#else
+static inline void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
+{ (void)reg; }
+#endif
+
+/*
  * Point the registry at the app's databases map. The manifest is only known
  * after the app runs app.manifest(), which is after the registry is created
  * at db-open time, so the serve path injects the sealed manifest here once it

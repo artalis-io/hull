@@ -8,6 +8,7 @@
 #include "mod_buffer.h"
 #include "internal.h"   /* hl_lua_source_is_stdlib */
 #include "protected.h"  /* rows built without raising inside the backend */
+#include "hull/utils/secure_zero.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
@@ -906,6 +907,8 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
      * connection. The worker opens its own per-thread connection per DSN. */
     {
         const char *dsn = db_call_dsn(L);
+        op->no_cache = luaL_testudata(L, lua_upvalueindex(1),
+                                      HL_LUA_DB_OWNED_MT) != NULL;
         if (dsn) {
             op->dsn = strdup(dsn);
             if (!op->dsn) {
@@ -1110,7 +1113,7 @@ static int lua_owned_conn_gc(lua_State *L)
 {
     HlLuaOwnedConn *o = luaL_testudata(L, 1, HL_LUA_DB_OWNED_MT);
     owned_conn_release(o);
-    if (o) { free(o->dsn); o->dsn = NULL; }
+    if (o) { hl_secure_free_str(o->dsn); o->dsn = NULL; }
     return 0;
 }
 

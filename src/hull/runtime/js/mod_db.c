@@ -9,6 +9,7 @@
 #include "mod_buffer.h"
 #include "mod_db.h"               /* js_call_handle / new_bound_subobject seam */
 #include "log.h"
+#include "hull/utils/secure_zero.h"
 #include "hull/manifest.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
@@ -298,7 +299,7 @@ static void js_db_owned_conn_finalizer(JSRuntime *rt, JSValue val)
     if (!box) return;
     if (--box->refcount > 0) return;   /* another sharer still alive */
     if (box->h) hl_db_dynamic_close(box->h);
-    free(box->dsn);
+    hl_secure_free_str(box->dsn);
     free(box);
 }
 static const JSClassDef js_db_owned_conn_class = {
@@ -902,6 +903,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
      * whichever carrier this_val is; NULL (unknown) yields the worker default. */
     {
         const char *dsn = js_call_dsn(ctx, this_val);
+        op->no_cache = JS_GetOpaque(this_val, hull_db_owned_conn_class_id) != NULL;
         if (dsn) {
             op->dsn = strdup(dsn);
             if (!op->dsn) {
@@ -1182,7 +1184,7 @@ static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h,
     }
     JSValue obj = JS_NewObjectClass(ctx, (int)hull_db_owned_conn_class_id);
     if (JS_IsException(obj)) {
-        free(box->dsn);
+        hl_secure_free_str(box->dsn);
         free(box);
         hl_db_dynamic_close(h);
         return obj;

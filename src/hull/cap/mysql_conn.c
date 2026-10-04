@@ -449,6 +449,15 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
     uint8_t resp_seq = (uint8_t)(f.seq + 1);
 
     if (sslmode != HL_MY_SSL_DISABLE && server_ssl) {
+        /* Nothing may follow the greeting before TLS: bytes already in rbuf
+         * were parsed later as if they had come over TLS, so an on-path
+         * attacker appended a forged OK to the real greeting and verify-full
+         * "authenticated" on it (the libpq CVE-2021-23214 class). */
+        if (conn->rlen != conn->consumed) {
+            conn_set_err(conn, "server sent data before the TLS handshake");
+            hl_my_conn_close(conn); return -1;
+        }
+        conn->rlen = conn->consumed = 0;
         caps |= HL_MY_CLIENT_SSL;
         HlMyWriter sw; hl_my_writer_init(&sw);
         hl_my_build_ssl_request(&sw, (uint8_t)(f.seq + 1), caps, charset);

@@ -11,6 +11,7 @@
  */
 
 #include "hull/cap/mysqlwire.h"
+#include "hull/utils/secure_zero.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -25,6 +26,9 @@ void hl_my_writer_init(HlMyWriter *w)
 
 void hl_my_writer_free(HlMyWriter *w)
 {
+    /* Zeroed: auth messages (cleartext password, SCRAM proof, AUTH /
+     * HELLO) pass through a writer, and were freed as they were. */
+    if (w->buf) hl_secure_zero(w->buf, w->cap);
     free(w->buf);
     w->buf = NULL; w->len = 0; w->cap = 0; w->err = 0;
 }
