@@ -10,7 +10,8 @@
 -- of credential-managed apps:
 --
 --   POST  /auth/register                 -- email + password signup
---   GET   /auth/verify?token=...         -- click-to-verify email
+--   GET   /auth/verify?token=...         -- verify page (never consumes)
+--   POST  /auth/verify                   -- {token, password | new_password}
 --   POST  /auth/login                    -- email + password
 --   POST  /auth/logout                   -- clears app's session
 --   POST  /auth/magic-link               -- request a one-tap login
@@ -267,9 +268,15 @@ local _state = {
 
     -- Optional post-action redirects.
     verify_redirect       = "/",
-    -- Where a verify that voided the password lands (another browser, or a
-    -- resend's link): the owner sets one by reset. Defaults to verify_redirect.
-    verify_reset_redirect = nil,
+    -- GET /verify renders a default form (confirm the password, or set a new
+    -- one). Set this to an app page to render your own: it is redirected to
+    -- with ?token=... appended, and POSTs {token, password | new_password} to
+    -- <prefix>/verify. See handle_verify.
+    verify_form_redirect  = nil,
+    -- `function(user_id)` that removes a TOTP enrolment (typically
+    -- totp.disable). Called when the mailbox holder sets the password of an
+    -- account that was not verified yet: see drop_preverify_totp.
+    totp_disable          = nil,
     login_redirect        = "/",
     _initialized          = false,
 }
@@ -934,8 +941,14 @@ local function is_email_ish(s)
         local b = string.byte(s, i)
         if b < 0x20 or b == 0x7f then return false end
     end
+    -- One address, exactly: a single '@' and none of the characters that
+    -- separate or quote addresses. "victim@x.com,attacker@evil.com" passed
+    -- the shape check, and an app whose email_send hands the string to an
+    -- HTTP provider (which splits on commas) mailed the link to both.
+    if s:find('[,;<>"()%s]') then return false end
     local at = s:find("@", 1, true)
     if not at or at == 1 or at == #s then return false end
+    if s:find("@", at + 1, true) then return false end
     local dot = s:find(".", at, true)
     if not dot or dot == at + 1 or dot == #s then return false end
     return true
@@ -948,49 +961,66 @@ local function generic_ok(res)
     res:json({ ok = true })
 end
 
--- Registration browser binding. Anyone can register any address and choose
--- its password; when the owner then clicks the verify link, the account must
--- not come out verified with the registrant's password. The register response
--- sets a nonce cookie and the welcome token carries its hash: a verify from
--- the browser that registered (the cookie matches) keeps the password; any
--- other verify - another browser, or a resend's token, which proves nothing
--- about who set the password - verifies the address but voids the password,
--- as a magic-link verify does, and the owner sets one by reset.
-local REG_COOKIE = "hull_af_reg"
-
-local function reg_cookie_secure(req)
-    local po = _state.public_origin
-    if type(po) == "string" and po:find("^https://") then return true end
-    return request_proto((req and req.headers) or {}, "http") == "https"
-end
-
-local function reg_cookie_set(req, res, nonce, max_age)
-    res:header("Set-Cookie", REG_COOKIE .. "=" .. nonce
-        .. "; Path=" .. (_state.prefix ~= "" and _state.prefix or "/")
-        .. "; Max-Age=" .. tostring(math.floor(max_age))
-        .. "; HttpOnly; SameSite=Lax"
-        .. (reg_cookie_secure(req) and "; Secure" or ""))
-end
-
-local function reg_cookie_get(req)
-    local c = req and req.headers and req.headers["cookie"]
-    if type(c) ~= "string" then return nil end
-    for part in c:gmatch("[^;]+") do
-        local k, v = part:match("^%s*([^=%s]+)%s*=%s*([%w%-_]+)%s*$")
-        if k == REG_COOKIE then return v end
-    end
-    return nil
-end
-
 -- The pending email change of @p user_id, if any, deleted: whenever the
--- password is reset or voided (see handle_password_reset_confirm).
+-- password is reset or replaced (see handle_password_reset_confirm).
 local function drop_pending_email_change(user_id)
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             { user_id })
 end
 
-local function reg_binding(nonce)
-    return encoding.hex.encode(crypto.sha256("reg\0" .. nonce)):sub(1, 32)
+-- Run the app's on_password_reset (typically session.destroy_all). Logged,
+-- not swallowed: the recommended body revokes every session, so a throw means
+-- a suspected-compromise cleanup did not run - an operator must see it.
+local function run_on_password_reset(req, res, user)
+    if not _state.on_password_reset then return end
+    local ok, cb_err = pcall(_state.on_password_reset, req, res, user)
+    if not ok then
+        require("hull.log").warn("auth-flows: on_password_reset failed: "
+                                 .. tostring(cb_err))
+    end
+end
+
+-- A second factor enrolled on an account before its address was verified
+-- may be the pre-registrant's: whoever registered someone else's address
+-- (with require_verified_email = false they can sign in unverified) could
+-- enrol TOTP and keep the recovery codes. When the mailbox holder sets the
+-- password at verification (or by reset), that enrolment goes too, through
+-- `totp_disable(user_id)` - typically `totp.disable`. Without the hook an
+-- enrolment that exists is only logged: the app's on_password_reset must
+-- then remove it.
+local function drop_preverify_totp(uid)
+    if _state.totp_disable then
+        local ok, err = pcall(_state.totp_disable, uid)
+        if not ok then
+            require("hull.log").warn("auth-flows: totp_disable failed: "
+                                     .. tostring(err))
+        end
+        return
+    end
+    if _state.enable_totp then
+        local ok, enrolled = pcall(_state.user_totp_enrolled, uid)
+        if ok and enrolled then
+            require("hull.log").warn("auth-flows: account " .. tostring(uid)
+                .. " has a TOTP enrolment made before its email was verified "
+                .. "and no totp_disable hook is configured; remove it in "
+                .. "on_password_reset (pass totp_disable = totp.disable)")
+        end
+    end
+end
+
+-- The mailbox holder chose @p new_hash for an account that was not verified
+-- yet (a verify with new_password, or a reset). Everything a pre-registrant
+-- could have attached goes first - the password, a pending email change, a
+-- second factor, sessions - and the address is marked verified LAST, so a
+-- failure part way never leaves a verified account with the old password.
+local function replace_unverified_credentials(req, res, user, uid, new_hash)
+    _state.user_set_password(uid, new_hash)
+    drop_pending_email_change(uid)
+    drop_preverify_totp(uid)
+    clear_all_failed_logins(uid)
+    run_on_password_reset(req, res, user)
+    _state.user_set_email_verified(uid, true)
+    user.email_verified = true
 end
 
 -- Apply the three security headers that every auth-flow HTML
@@ -1036,9 +1066,6 @@ local function handle_register(req, res)
     -- which ones already have an account.
     local pw_hash = crypto.hash_password(body.password)
     local existing = _state.user_find_by_email(body.email)
-    -- Both branches set the cookie: its presence must not say which one ran.
-    local reg_nonce = crypto.random_token(24)
-    reg_cookie_set(req, res, reg_nonce, _state.verify_ttl)
     if existing then return generic_ok(res) end
     local user_id = _state.user_create(body.email, pw_hash)
     local user = _state.user_get(user_id)
@@ -1047,10 +1074,9 @@ local function handle_register(req, res)
     end
 
     local origin = origin_for(req)
-    local rb = reg_binding(reg_nonce)
     after_response(function()
         local token = issue_token(user_id,
-            ACTIONS.verify_email, _state.verify_ttl, { rb = rb })
+            ACTIONS.verify_email, _state.verify_ttl)
         if origin then
             local verify_url = origin .. _state.prefix
                                .. "/verify?token=" .. token
@@ -1092,42 +1118,172 @@ local function handle_verify_resend(req, res)
     res:json({ ok = true })
 end
 
-local function handle_verify(req, res)
+-- ── Email verification ─────────────────────────────────────────────
+--
+-- Anyone can register any address and choose its password, so a click on
+-- the welcome link proves only that the clicker reads the mailbox - not who
+-- chose the password. Verification therefore takes two steps:
+--
+--   GET  <prefix>/verify?token=...   never consumes the token (mail scanners
+--        such as Safe Links prefetch every link). It renders a small form, or
+--        redirects to `verify_form_redirect?token=...` for an app-rendered one.
+--   POST <prefix>/verify {token, password}      the mailbox holder also knows
+--        the account's password: the address is verified, the password kept.
+--        A wrong password answers 401 (offering new_password), leaves the
+--        token usable, and counts toward the login lockout - so it is no
+--        better a password oracle than /login.
+--   POST <prefix>/verify {token, new_password}  proves the mailbox only: the
+--        password is replaced, and with it everything a pre-registrant could
+--        have attached (pending email change, a TOTP enrolment, sessions).
+--
+-- An already-verified account just consumes the token. Nothing is ever
+-- voided silently; the owner always chooses.
+
+-- Is this request a JSON API call (answer JSON) or a browser form (answer a
+-- page / redirect)?
+local function wants_json(req)
+    local ct = (req.headers and req.headers["content-type"]) or ""
+    return ct:find("application/json", 1, true) ~= nil
+end
+
+-- The default verification page. The token is a verified envelope (base64url
+-- body, '.', hex tag: a fixed alphabet), so it needs no escaping; the error
+-- strings are module constants. No script; the token in the body is what a
+-- cross-site form cannot supply, as with the default TOTP form.
+local function default_verify_form_html(token, err)
+    local action = _state.prefix .. "/verify"
+    return '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        .. '<title>Verify your email</title></head>'
+        .. '<body style="font-family:sans-serif;max-width:400px;margin:4em auto;">'
+        .. '<h1>Verify your email</h1>'
+        .. (err and ('<p role="alert"><strong>' .. err .. '</strong></p>') or '')
+        .. '<form method="POST" action="' .. action .. '">'
+        .. '<input type="hidden" name="token" value="' .. token .. '">'
+        .. '<p><label>Your password: <input type="password" name="password" '
+        .. 'autocomplete="current-password" required></label></p>'
+        .. '<button type="submit">Verify</button></form>'
+        .. '<h2>Did not choose a password, or forgot it?</h2>'
+        .. '<form method="POST" action="' .. action .. '">'
+        .. '<input type="hidden" name="token" value="' .. token .. '">'
+        .. '<p><label>New password: <input type="password" name="new_password" '
+        .. 'autocomplete="new-password" minlength="8" maxlength="256" required>'
+        .. '</label></p>'
+        .. '<button type="submit">Set password and verify</button></form>'
+        .. '<p style="color:#666;font-size:smaller">Setting a new password '
+        .. 'signs out every session of this account.</p></body></html>'
+end
+
+local function verify_fail(req, res, status, msg)
+    if wants_json(req) then
+        return res:status(status):json({ error = msg })
+    end
+    return secure_html(res):status(status):html(msg)
+end
+
+local function verify_ok(req, res)
+    gc_expired()
+    if wants_json(req) then
+        return res:json({ ok = true, redirect = _state.verify_redirect })
+    end
+    return res:redirect(_state.verify_redirect, 303)
+end
+
+local function handle_verify_page(req, res)
     local token = req.query and req.query.token
-    local env, err = consume_token(token, ACTIONS.verify_email)
+    local env, err = parse_token(token, ACTIONS.verify_email)
     if not env then
         return secure_html(res):status(400):html("verification failed: " .. (err or "?"))
+    end
+    if token_already_used(token) then
+        return secure_html(res):status(400):html("verification failed: replayed")
     end
     local user = _state.user_get(env.sub)
     if not user then
         return secure_html(res):status(400):html("verification failed")
     end
     if user.email_verified then
-        gc_expired()
         return res:redirect(_state.verify_redirect)
     end
-    -- See REG_COOKIE: the password stays only when this browser registered
-    -- the account; otherwise it is voided like a magic-link verify's.
-    local nonce = reg_cookie_get(req)
-    local keep = type(env.rb) == "string" and nonce ~= nil
-                 and crypto.constant_time_eq(reg_binding(nonce), env.rb)
-    _state.user_set_email_verified(env.sub, true)
-    if not keep then
-        _state.user_set_password(env.sub, crypto.hash_password(
-            encoding.hex.encode(crypto.random(32))))
-        drop_pending_email_change(env.sub)
-        user.email_verified = true
-        if _state.on_password_reset then
-            local ok, cb_err = pcall(_state.on_password_reset, req, res, user)
-            if not ok then
-                require("hull.log").warn(
-                    "auth-flows: on_password_reset failed: " .. tostring(cb_err))
-            end
-        end
+    if _state.verify_form_redirect then
+        local sep = _state.verify_form_redirect:find("?", 1, true) and "&" or "?"
+        return res:redirect(_state.verify_form_redirect .. sep .. "token=" .. token)
     end
-    reg_cookie_set(req, res, "x", 0)   -- spent
-    gc_expired()
-    res:redirect(keep and _state.verify_redirect or _state.verify_reset_redirect)
+    secure_html(res):html(default_verify_form_html(token))
+end
+
+local VERIFY_WRONG_PASSWORD = "password does not match; to set a new password "
+    .. "instead, submit new_password"
+
+local function handle_verify(req, res)
+    local body = parse_body(req)
+    local token = body.token
+    local env, err = parse_token(token, ACTIONS.verify_email)
+    if not env then
+        return verify_fail(req, res, 400, "verification failed: " .. (err or "?"))
+    end
+    if token_already_used(token) then
+        return verify_fail(req, res, 400, "verification failed: replayed")
+    end
+    local user = _state.user_get(env.sub)
+    if not user then
+        return verify_fail(req, res, 400, "verification failed")
+    end
+    local uid = user_uid(user)
+    if user.email_verified then
+        mark_token_used(token, env.exp)
+        return verify_ok(req, res)
+    end
+
+    if body.new_password ~= nil then
+        local pw = body.new_password
+        if type(pw) ~= "string" or #pw < 8 or #pw > 256 then
+            return verify_fail(req, res, 400, "invalid password length")
+        end
+        if check_pwned(pw) then
+            return verify_fail(req, res, 400,
+                "password appears in known data breaches; choose another")
+        end
+        local new_hash = crypto.hash_password(pw)
+        if not mark_token_used(token, env.exp) then
+            return verify_fail(req, res, 400, "verification failed: replayed")
+        end
+        replace_unverified_credentials(req, res, user, uid, new_hash)
+        emit_event(uid, "password_reset_completed", req,
+                   { metadata = { via = "verify" } })
+        return verify_ok(req, res)
+    end
+
+    local pw = body.password
+    if type(pw) ~= "string" then
+        return verify_fail(req, res, 400, "password or new_password required")
+    end
+    -- The same lockout rows as /login: a wrong password here counts there,
+    -- and a locked account answers as a wrong password would, without the
+    -- check - this route must not be a second, unthrottled oracle.
+    local ip_key = attempt_ip_key(uid, req)
+    local locked = lockout_remaining(ip_key) > 0 or lockout_remaining(uid) > 0
+    local ok = not locked and #pw <= 256 and type(user.password_hash) == "string"
+               and crypto.verify_password(pw, user.password_hash)
+    if not ok then
+        if not locked then
+            bump_failed_login(ip_key, _state.max_failed_logins)
+            bump_failed_login(uid, _state.max_failed_logins_per_account)
+        end
+        if wants_json(req) then
+            return res:status(401):json({ error = VERIFY_WRONG_PASSWORD,
+                                          new_password_allowed = true })
+        end
+        return secure_html(res):status(401):html(
+            default_verify_form_html(token, "That password does not match. "
+                .. "Try again, or set a new password below."))
+    end
+    if not mark_token_used(token, env.exp) then
+        return verify_fail(req, res, 400, "verification failed: replayed")
+    end
+    clear_failed_logins(ip_key)
+    clear_failed_logins(uid)
+    _state.user_set_email_verified(uid, true)
+    return verify_ok(req, res)
 end
 
 -- Build the minimal default HTML form rendered when a magic-link
@@ -1293,24 +1449,26 @@ local function handle_magic_link_consume(req, res)
     if not user or env.eb ~= email_binding(user) then
         return secure_html(res):status(400):html("magic link failed")
     end
-    -- Magic-link clicks count as proof of email ownership. On an account
-    -- that was not yet verified, they also void the password: anyone could
-    -- have registered this address and set it, and verifying here would
-    -- hand them the owner's account. The owner sets one by reset; existing
-    -- sessions go too (on_password_reset, when the app wires it).
+    -- Magic-link clicks count as proof of email ownership. An account that
+    -- was not verified yet and HAS a password may carry one somebody else
+    -- chose (anyone can register any address): signing in here would hand
+    -- that somebody the owner's account, and silently replacing it would
+    -- lock out an owner who chose it. So the click goes through the verify
+    -- step instead - confirm that password or set a new one (handle_verify).
+    -- A passwordless account (magic_link_auto_signup) has nothing to keep.
     if not user.email_verified then
-        _state.user_set_email_verified(user_uid(user), true)
-        _state.user_set_password(user_uid(user), crypto.hash_password(
-            encoding.hex.encode(crypto.random(32))))
-        drop_pending_email_change(user_uid(user))
-        user.email_verified = true
-        if _state.on_password_reset then
-            local ok, cb_err = pcall(_state.on_password_reset, req, res, user)
-            if not ok then
-                require("hull.log").warn(
-                    "auth-flows: on_password_reset failed: " .. tostring(cb_err))
+        local uid = user_uid(user)
+        if type(user.password_hash) == "string" and user.password_hash ~= "" then
+            local vtok = issue_token(uid, ACTIONS.verify_email, _state.verify_ttl)
+            gc_expired()
+            if _state.verify_form_redirect then
+                local sep = _state.verify_form_redirect:find("?", 1, true) and "&" or "?"
+                return res:redirect(_state.verify_form_redirect .. sep .. "token=" .. vtok)
             end
+            return secure_html(res):html(default_verify_form_html(vtok))
         end
+        _state.user_set_email_verified(uid, true)
+        user.email_verified = true
     end
     gc_expired()
     if _state.enable_totp
@@ -1415,7 +1573,17 @@ local function handle_password_reset_confirm(req, res)
     if not user or not reset_binding_holds(env, user) then
         return res:status(400):json({ error = "reset failed" })
     end
-    _state.user_set_password(env.sub, crypto.hash_password(body.password))
+    local new_hash = crypto.hash_password(body.password)
+    if not user.email_verified then
+        -- The reset link proves the mailbox and its holder chose this
+        -- password: the account is verified, as a verify with new_password
+        -- does - and loses what a pre-registrant could have attached.
+        replace_unverified_credentials(req, res, user, env.sub, new_hash)
+        emit_event(env.sub, "password_reset_completed", req)
+        gc_expired()
+        return res:json({ ok = true })
+    end
+    _state.user_set_password(env.sub, new_hash)
     -- A pending email change goes with the old password: started from a
     -- hijacked session, its confirm link otherwise still moved the account
     -- to the attacker's address after the owner reset the password.
@@ -1431,15 +1599,7 @@ local function handle_password_reset_confirm(req, res)
     -- apps that want to keep the current session can filter it
     -- out via session.destroy_others instead.
     emit_event(env.sub, "password_reset_completed", req)
-    if _state.on_password_reset then
-        -- Log rather than fully swallow: the recommended body revokes all
-        -- sessions (session.destroy_all), so a throw here means a suspected-
-        -- compromise cleanup silently didn't run -- an operator must see it.
-        local ok, cb_err = pcall(_state.on_password_reset, req, res, user)
-        if not ok then
-            require("hull.log").warn("auth-flows: on_password_reset failed: " .. tostring(cb_err))
-        end
-    end
+    run_on_password_reset(req, res, user)
     gc_expired()
     res:json({ ok = true })
 end
@@ -1623,7 +1783,8 @@ local function register_routes(app)
     end
 
     app.post(p .. "/register",                 handle_register)
-    app.get (p .. "/verify",                   handle_verify)
+    app.get (p .. "/verify",                   handle_verify_page)
+    app.post(p .. "/verify",                   handle_verify)
     app.post(p .. "/verify/resend",            handle_verify_resend)
     app.post(p .. "/login",                    handle_login)
     app.post(p .. "/logout",                   handle_logout)
@@ -1678,7 +1839,15 @@ function M.standard_users(opts)
     -- reserved word (e.g. "user", "order") or a future MySQL backend (backtick)
     -- is safe. The default connection is open by the time this runs, so its
     -- backend dialect is known.
-    local tbl    = db.quote_identifier(opts.table or "users")
+    local name = opts.table or "users"
+    -- The adapter runs on the stdlib's internal connection with stdlib
+    -- identity, which the _hull_* namespace guard lets through: a _hull_
+    -- table name here would read and write the module tables themselves.
+    if type(name) ~= "string" or name == "" or name:lower():find("^_hull_") then
+        error("auth-flows.standard_users: table must be a non-empty name "
+              .. "outside the reserved _hull_ namespace")
+    end
+    local tbl    = db.quote_identifier(name)
     local id_gen = opts.id_gen or function()
         return crypto.random_token(16, "hex")
     end
@@ -1936,7 +2105,15 @@ function M.init(opts)
     _state.email_change_ttl = opts.email_change_ttl or _state.email_change_ttl
     _state.prefix           = opts.prefix           or _state.prefix
     _state.verify_redirect  = opts.verify_redirect  or _state.verify_redirect
-    _state.verify_reset_redirect = opts.verify_reset_redirect or _state.verify_redirect
+    if opts.verify_form_redirect ~= nil
+       and type(opts.verify_form_redirect) ~= "string" then
+        error("auth-flows.init: verify_form_redirect must be a path string")
+    end
+    _state.verify_form_redirect = opts.verify_form_redirect
+    if opts.totp_disable ~= nil and type(opts.totp_disable) ~= "function" then
+        error("auth-flows.init: totp_disable must be a function(user_id)")
+    end
+    _state.totp_disable = opts.totp_disable
     _state.login_redirect   = opts.login_redirect   or _state.login_redirect
     if opts.enumeration_safe ~= nil then
         _state.enumeration_safe = opts.enumeration_safe
@@ -2081,6 +2258,8 @@ M._test = {
         _state.user_totp_enrolled      = nil
         _state.totp_verify             = nil
         _state.totp_pending_redirect   = nil
+        _state.verify_form_redirect    = nil
+        _state.totp_disable            = nil
         _state.check_pwned_passwords   = false
         _state.pwned_endpoint          = nil
         _state.max_failed_logins       = 5
