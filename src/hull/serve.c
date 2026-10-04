@@ -100,6 +100,7 @@
 #include <string.h>
 #include <strings.h>   /* strncasecmp (sandbox_db_path) */
 #include <stdarg.h>
+#include <fcntl.h>     /* open (last_error.json) */
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
