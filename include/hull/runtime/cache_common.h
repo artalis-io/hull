@@ -119,4 +119,35 @@ HlBlobStore *hl_runtime_cache_singleton(const char         *kind,
  */
 void hl_runtime_cache_singleton_reset(HlRuntimeCacheSlot *slot);
 
+/**
+ * @brief Read / write a cache entry that is loaded as code (Lua or QuickJS
+ *        bytecode): sealed with an HMAC-SHA256.
+ *
+ * The runtimes load these entries as binary chunks, and neither Lua nor
+ * QuickJS verifies bytecode - a crafted chunk corrupts memory and can carry
+ * a stdlib source name. Anything able to write the cache directory (another
+ * app of the same user, an app whose fs.write grant covers it) could plant
+ * one under a stdlib module's key. Each entry is stored as MAC || bytes,
+ * the MAC keyed by a per-user secret kept OUTSIDE the cache directory
+ * ($HOME/.hull/cache.key, 0600, made on first use and read once, before the
+ * sandbox narrows file access). A missing key, or a key file others can
+ * read, turns these caches off.
+ *
+ * get: 0 with *out (malloc'd, caller frees) / *out_len when the entry
+ * exists and its MAC verifies; -1 otherwise (an entry that fails to verify
+ * is deleted). put: best-effort.
+ */
+int  hl_runtime_cache_get_sealed(HlBlobStore *store, const char *key,
+                                 uint8_t **out, size_t *out_len);
+void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *key,
+                                 const uint8_t *data, size_t len);
+
+/**
+ * @brief Load (or create) the seal key now. Called by runtime init, which
+ *        runs before the kernel sandbox narrows file access: read lazily,
+ *        an app whose first cache use came after that found the key out of
+ *        reach and silently ran with its code caches off. Idempotent.
+ */
+void hl_runtime_cache_seal_prepare(void);
+
 #endif /* HL_RUNTIME_CACHE_COMMON_H */

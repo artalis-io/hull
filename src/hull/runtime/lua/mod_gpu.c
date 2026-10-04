@@ -762,10 +762,10 @@ static int l_gpu_texture_read(lua_State *L)
         return 2;
     }
 
-    HlImage **udata = (HlImage **)lua_newuserdata(L, sizeof(HlImage *));
-    *udata = img;
-    luaL_getmetatable(L, HL_IMAGE_MT);
-    lua_setmetatable(L, -2);
+    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
+        hl_image_free(img);   /* made before its userdata */
+        return luaL_error(L, "not enough memory for the image");
+    }
     return 1;
 }
 #endif /* HL_ENABLE_IMAGE */

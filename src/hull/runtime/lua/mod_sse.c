@@ -30,11 +30,17 @@ static int stream_dead(const HlSseStreamUD *ud)
     return ud->closed || !hl_req_life_live(ud->life);
 }
 
+/* The finalizer. Releasing the life also closes the stream: a NULL life
+ * reads as "live" (hl_req_life_live), so a stream whose life was released
+ * early - `stream:__gc()` reached the finalizer through __index - stayed
+ * writable after its request was gone. It is no longer reachable that way
+ * either (methods are a separate table, the metatable is locked). */
 static int lua_sse_gc(lua_State *L)
 {
     HlSseStreamUD *ud = (HlSseStreamUD *)luaL_checkudata(L, 1, HL_SSE_STREAM_MT);
     hl_req_life_release(ud->life);
     ud->life = NULL;
+    ud->closed = 1;
     return 0;
 }
 
@@ -93,11 +99,13 @@ static const luaL_Reg sse_stream_methods[] = {
 void hl_lua_sse_register_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_SSE_STREAM_MT);
+    lua_newtable(L);
     luaL_setfuncs(L, sse_stream_methods, 0);
-    lua_pushvalue(L, -1);
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, lua_sse_gc);
     lua_setfield(L, -2, "__gc");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1); /* pop metatable */
 }
 

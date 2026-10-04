@@ -9,11 +9,19 @@
 #include "hull/shared/cache_dir.h"
 #include "../utils/hex.h"
 
+#include "hull/shared/host.h"
+#include "hull/cap/crypto.h"
+
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 const char *hl_runtime_cache_arch_tag(void)
 {
@@ -122,4 +130,121 @@ void hl_runtime_cache_singleton_reset(HlRuntimeCacheSlot *slot)
      * docstring. The atexit handler stays armed; re-opening a
      * slot must not re-register or we'd double-close on exit. */
     pthread_mutex_unlock(&g_singleton_mutex);
+}
+
+/* ── Sealed entries (see cache_common.h) ─────────────────────────────── */
+
+#define SEAL_MAC_LEN 32
+
+static pthread_once_t g_seal_once = PTHREAD_ONCE_INIT;
+static int            g_seal_ok;
+static uint8_t        g_seal_key[32];
+
+static int seal_read_key(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat st;
+    int bad = fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+              st.st_size != (off_t)sizeof g_seal_key;
+    if (!bad && !hl_host_is_windows())
+        bad = st.st_uid != geteuid() || (st.st_mode & (S_IRWXG | S_IRWXO));
+    size_t got = 0;
+    while (!bad && got < sizeof g_seal_key) {
+        ssize_t n = read(fd, g_seal_key + got, sizeof g_seal_key - got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { bad = 1; break; }
+        got += (size_t)n;
+    }
+    close(fd);
+    return bad ? -1 : 0;
+}
+
+static void seal_init(void)
+{
+    const char *home = getenv("HOME");
+    if (!home || !*home) return;
+    char dir[PATH_MAX], path[PATH_MAX];
+    if ((size_t)snprintf(dir, sizeof dir, "%s/.hull", home) >= sizeof dir ||
+        (size_t)snprintf(path, sizeof path, "%s/cache.key", dir) >= sizeof path)
+        return;
+    if (seal_read_key(path) == 0) { g_seal_ok = 1; return; }
+
+    /* First use: make one. O_EXCL - a racing process that made it first
+     * wins, and its key is read back. */
+    (void)mkdir(dir, 0700);
+    uint8_t k[32];
+    if (hl_cap_crypto_random(k, sizeof k) != 0) return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        size_t off = 0;
+        int bad = fchmod(fd, 0600) != 0;
+        while (!bad && off < sizeof k) {
+            ssize_t n = write(fd, k + off, sizeof k - off);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) { bad = 1; break; }
+            off += (size_t)n;
+        }
+        if (close(fd) != 0) bad = 1;
+        if (bad) unlink(path);
+    }
+    memset(k, 0, sizeof k);
+    if (seal_read_key(path) == 0) g_seal_ok = 1;
+}
+
+static int seal_key(void)
+{
+    pthread_once(&g_seal_once, seal_init);
+    return g_seal_ok;
+}
+
+void hl_runtime_cache_seal_prepare(void)
+{
+    (void)seal_key();
+}
+
+int hl_runtime_cache_get_sealed(HlBlobStore *store, const char *key,
+                                uint8_t **out, size_t *out_len)
+{
+    *out = NULL;
+    *out_len = 0;
+    if (!store || !key || !seal_key()) return -1;
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    if (hl_blob_store_get(store, key, /*track_access=*/1, &buf, &len) != 0)
+        return -1;
+    uint8_t mac[SEAL_MAC_LEN];
+    int ok = len > SEAL_MAC_LEN &&
+             hl_cap_crypto_hmac_sha256(g_seal_key, sizeof g_seal_key,
+                                       buf + SEAL_MAC_LEN, len - SEAL_MAC_LEN,
+                                       mac) == 0;
+    if (ok) {
+        uint8_t diff = 0;
+        for (size_t i = 0; i < SEAL_MAC_LEN; i++) diff |= (uint8_t)(mac[i] ^ buf[i]);
+        ok = diff == 0;
+    }
+    if (!ok) {
+        free(buf);
+        (void)hl_blob_store_delete(store, key);   /* not ours: drop it */
+        return -1;
+    }
+    memmove(buf, buf + SEAL_MAC_LEN, len - SEAL_MAC_LEN);
+    *out = buf;
+    *out_len = len - SEAL_MAC_LEN;
+    return 0;
+}
+
+void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *key,
+                                 const uint8_t *data, size_t len)
+{
+    if (!store || !key || !data || len == 0 || !seal_key()) return;
+    if (len > SIZE_MAX - SEAL_MAC_LEN) return;
+    uint8_t *buf = malloc(len + SEAL_MAC_LEN);
+    if (!buf) return;
+    if (hl_cap_crypto_hmac_sha256(g_seal_key, sizeof g_seal_key, data, len,
+                                  buf) == 0) {
+        memcpy(buf + SEAL_MAC_LEN, data, len);
+        (void)hl_blob_store_put_keyed(store, key, buf, len + SEAL_MAC_LEN);
+    }
+    free(buf);
 }

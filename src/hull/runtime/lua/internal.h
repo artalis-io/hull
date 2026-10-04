@@ -117,11 +117,22 @@ struct HlLuaSseRoute {
 };
 
 /* Clamp int64_t instruction count to int for lua_sethook */
-#define INSTR_COUNT(x) ((x) > INT_MAX ? INT_MAX : (int)(x))
 
 /* ── Promoted: defined in runtime.c, used in dispatch.c/timers.c/ws.c/sse.c
  * Lua instruction-count hook (gas metering). */
 void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar);
+
+/* The instruction budget (budget.c). install: once per VM - registers @p b
+ * and replaces pcall / xpcall with versions that do not swallow a trip.
+ * arm: at each entry point, on the thread about to run - resets the budget
+ * to @p limit (0 = none). tripped: whether the current run went over. */
+void hl_lua_budget_install(lua_State *L, HlLuaBudget *b);
+void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit);
+int  hl_lua_budget_tripped(lua_State *L);
+
+/* Arm the runtime's budget on @p thread for a new run. */
+#define HL_LUA_ARM(lua, thread) \
+    hl_lua_budget_arm((thread), &(lua)->budget, (lua)->max_instructions)
 
 /* Keep the value at `idx` reachable until the binding returns, by storing it
  * in the anchor table at absolute index `anchor` (a lua_newtable the binding
@@ -147,6 +158,22 @@ int hl_lua_check_can_wait(lua_State *L, const char *what);
 /* Wrap coroutine.resume / coroutine.close so they refuse a coroutine the
  * runtime has parked on a Hull operation (async.c). */
 void hl_lua_guard_coroutine_lib(lua_State *L);
+
+/* The status to act on after a runtime lua_resume of @p co: a LUA_YIELD
+ * that no Hull operation caused (a bare coroutine.yield()) becomes
+ * LUA_ERRRUN, with the coroutine closed and a message on its top. */
+int hl_lua_resume_status(lua_State *co, int status);
+
+/* Start an event-loop entry protected (runtime.c): a new coroutine holding
+ * the handler from registry table @p table at @p handler_id, then the
+ * arguments @p push builds on the (main) state it is given - all under one
+ * lua_pcall, so a memory error fails this entry, not the process. Returns
+ * the coroutine (anchored by *thread_ref) with handler + *nargs arguments on
+ * it, or NULL (logged; nothing to clean up). @p push returns its count. */
+typedef int (*HlLuaPushArgs)(lua_State *L, void *ud);
+lua_State *hl_lua_entry_prepare(HlLua *lua, const char *table, int handler_id,
+                                HlLuaPushArgs push, void *ud,
+                                int *thread_ref, int *nargs);
 
 /* The text of the error value at `idx` on `from`, into `buf` (always
  * returned, always terminated). A string or number as is; anything else
@@ -198,8 +225,10 @@ void hl_lua_request_register(lua_State *L);
 /* Install `req.multipart` closure on the request table at -1 when the
  * route was registered with kl_http_server_route_streaming. No-op for
  * non-streaming routes (body_reader is not a multipart wrapper). */
+struct HlReqLife;
 void hl_lua_request_install_multipart(lua_State *L, HlLua *lua,
-                                       struct KlHttpBodyReader *body_reader);
+                                      struct KlHttpBodyReader *body_reader,
+                                      struct HlReqLife *life, KlHttpConn *conn);
 
 
 /* ── Chunk names ──────────────────────────────────────────────────

@@ -122,10 +122,10 @@ static int l_image_new(lua_State *L)
     if (!img)
         return luaL_error(L, "image.new: invalid dimensions or data size");
 
-    HlImage **udata = (HlImage **)lua_newuserdata(L, sizeof(HlImage *));
-    *udata = img;
-    luaL_getmetatable(L, HL_IMAGE_MT);
-    lua_setmetatable(L, -2);
+    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
+        hl_image_free(img);   /* made before its userdata */
+        return luaL_error(L, "not enough memory for the image");
+    }
     return 1;
 }
 
@@ -186,10 +186,10 @@ static int l_image_from_buffer(lua_State *L)
     if (!img)
         return luaL_error(L, "image.from_buffer: invalid dimensions or data size");
 
-    HlImage **udata = (HlImage **)lua_newuserdata(L, sizeof(HlImage *));
-    *udata = img;
-    luaL_getmetatable(L, HL_IMAGE_MT);
-    lua_setmetatable(L, -2);
+    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
+        hl_image_free(img);   /* made before its userdata */
+        return luaL_error(L, "not enough memory for the image");
+    }
     return 1;
 }
 
@@ -211,10 +211,10 @@ static int l_image_decode(lua_State *L)
         return 2;
     }
 
-    HlImage **udata = (HlImage **)lua_newuserdata(L, sizeof(HlImage *));
-    *udata = img;
-    luaL_getmetatable(L, HL_IMAGE_MT);
-    lua_setmetatable(L, -2);
+    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
+        hl_image_free(img);   /* made before its userdata */
+        return luaL_error(L, "not enough memory for the image");
+    }
     return 1;
 }
 
@@ -329,9 +329,10 @@ static int l_image_from_wasm(lua_State *L)
     HlImage *img = hl_image_new(w, h, fmt, data + 9, expected, NULL);
     if (!img) return luaL_error(L, "image.from_wasm: failed to create image");
 
-    HlImage **ud = (HlImage **)lua_newuserdata(L, sizeof(HlImage *));
-    *ud = img;
-    luaL_setmetatable(L, HL_IMAGE_MT);
+    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
+        hl_image_free(img);   /* made before its userdata */
+        return luaL_error(L, "not enough memory for the image");
+    }
     return 1;
 }
 

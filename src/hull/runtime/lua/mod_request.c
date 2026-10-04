@@ -32,6 +32,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/shared/async.h"
 #include "hull/cap/body.h"
+#include "hull/shared/req_life.h"
 
 #include <keel/http_body_reader.h>
 #include <keel/http_body_reader_multipart.h>
@@ -49,6 +50,7 @@
 #define HL_MP_ITER_MT   "HlMpIter"
 #define HL_MP_PART_MT   "HlMpPart"
 #define HL_MP_CHUNKS_MT "HlMpChunks"
+#define HL_MP_OWNER_MT  "HlMpOwner"
 
 /* ── Internal state ─────────────────────────────────────────────────── */
 
@@ -68,6 +70,8 @@ typedef struct {
     KlHttpBodyReader *inner;       /* inner kl_http_body_reader_multipart for kl_http_multipart_next */
     HlLua        *lua;         /* runtime - for allocator + async-cont creation */
     HlAllocator  *alloc;       /* shorthand for lua->base.alloc */
+    HlReqLife    *life;        /* the request's life (a reference) */
+    KlHttpConn   *conn;        /* the connection the request came on */
 
     int           done;        /* parser hit DONE; subsequent iter:step returns nil */
     int           errored;     /* parser/IO error - iter:step raises */
@@ -155,6 +159,42 @@ static int mp_iter_copy_meta(HlMpIter *it, const KlHttpMultipartPartMeta *meta)
     return 0;
 }
 
+/* ── Ownership ──────────────────────────────────────────────────────────
+ * The reader pointers belong to one request. The request table (and with it
+ * the `multipart` closure), an iterator, a part or a chunks iterator can all
+ * be kept past it - in a global, by another request's handler - and every
+ * later call used a body reader Keel had freed. Each holds the request's
+ * life, and is usable only while it is live and only from its own request's
+ * handler (that connection is the active one): parking also suspends the
+ * ACTIVE connection, which must be this request's. */
+
+typedef struct {
+    KlHttpBodyReader *wrapper;
+    HlLua            *lua;
+    HlReqLife        *life;     /* a reference */
+    KlHttpConn       *conn;
+} HlMpOwner;
+
+static int mp_owner_gc(lua_State *L)
+{
+    HlMpOwner *o = (HlMpOwner *)luaL_checkudata(L, 1, HL_MP_OWNER_MT);
+    hl_req_life_release(o->life);
+    o->life = NULL;
+    return 0;
+}
+
+static int mp_owned(HlLua *lua, HlReqLife *life, KlHttpConn *conn)
+{
+    return life && hl_req_life_live(life) && lua && lua->active_conn == conn;
+}
+
+static void mp_check_usable(lua_State *L, HlMpIter *it)
+{
+    if (!mp_owned(it->lua, it->life, it->conn))
+        luaL_error(L, "req:multipart(): the request is over, or this is "
+                      "not its handler");
+}
+
 /* ── Yield/resume helper ────────────────────────────────────────────── */
 
 /* Forward to the existing Lua async-resume machinery - extern from async.c
@@ -190,11 +230,24 @@ static int mp_park_and_yield(lua_State *L, HlMpIter *it,
      * it isn't set we have nothing to park against (e.g. an in-process
      * test harness call). Fail loudly rather than hang. */
     hl_lua_check_can_wait(L, "req:multipart()");
+    mp_check_usable(L, it);
     KlHttpConn *conn = it->lua->active_conn;
     if (!conn)
         return luaL_error(L,
             "req:multipart(): no active connection - streaming routes "
             "require a live server (hull dev / built binary)");
+
+    /* The parser wants more, but none can come: the body ended (a client
+     * that never sent the closing boundary) or failed. Parking would fire
+     * its callback inline and resume this coroutine while it is running -
+     * the 500 went out and the request ended mid-handler. */
+    int st = hl_cap_multipart_state(it->wrapper);
+    if (st != 0) {
+        it->errored = 1;
+        return luaL_error(L, st == 1
+            ? "req:multipart(): the request body ended inside a part"
+            : "req:multipart(): reading the request body failed");
+    }
 
     HlAsyncCont *cont = hl_lua_async_cont_create(it->lua, it->alloc, NULL);
     if (!cont)
@@ -244,6 +297,8 @@ static int mp_part_read_pump(lua_State *L)
 {
     HlMpPart *p = check_part(L, 1);
     HlMpIter *it = p->iter;
+
+    mp_check_usable(L, it);
 
     luaL_Buffer b;
     luaL_buffinit(L, &b);
@@ -357,6 +412,7 @@ static int mp_chunks_drive(lua_State *L)
         lua_pushnil(L);
         return 1;
     }
+    mp_check_usable(L, it);
 
     for (;;) {
         if (it->errored)
@@ -459,6 +515,7 @@ static int mp_iter_drive(lua_State *L)
     if (it->done) { lua_pushnil(L); return 1; }
     if (it->errored)
         return luaL_error(L, "req:multipart(): parser error");
+    mp_check_usable(L, it);
 
     for (;;) {
         KlHttpMultipartPartMeta meta;
@@ -519,23 +576,25 @@ static int mp_iter_gc(lua_State *L)
 {
     HlMpIter *it = (HlMpIter *)luaL_checkudata(L, 1, HL_MP_ITER_MT);
     mp_iter_clear_meta(it);
+    hl_req_life_release(it->life);
+    it->life = NULL;
     return 0;
 }
 
-/* req:multipart() entry point. Captured upvalues:
- *   1 = lightuserdata: KlHttpBodyReader * (the wrapper)
- *   2 = lightuserdata: HlLua *
- */
+/* req:multipart() entry point. Upvalue 1 = the request's HlMpOwner. */
 static int lua_req_multipart(lua_State *L)
 {
-    KlHttpBodyReader *wrapper =
-        (KlHttpBodyReader *)lua_touserdata(L, lua_upvalueindex(1));
-    HlLua *lua =
-        (HlLua *)lua_touserdata(L, lua_upvalueindex(2));
+    HlMpOwner *o = (HlMpOwner *)luaL_checkudata(L, lua_upvalueindex(1),
+                                                 HL_MP_OWNER_MT);
+    KlHttpBodyReader *wrapper = o->wrapper;
+    HlLua *lua = o->lua;
 
     if (!wrapper || !lua)
         return luaL_error(L,
             "req:multipart(): no body reader (not a streaming-multipart route?)");
+    if (!mp_owned(lua, o->life, o->conn))
+        return luaL_error(L, "req:multipart(): the request is over, or this "
+                             "is not its handler");
 
     KlHttpBodyReader *inner = hl_cap_multipart_inner(wrapper);
     if (!inner)
@@ -544,11 +603,14 @@ static int lua_req_multipart(lua_State *L)
 
     HlMpIter *it = (HlMpIter *)lua_newuserdatauv(L, sizeof(*it), 0);
     memset(it, 0, sizeof(*it));
+    luaL_setmetatable(L, HL_MP_ITER_MT);
     it->wrapper = wrapper;
     it->inner   = inner;
     it->lua     = lua;
     it->alloc   = lua->base.alloc;
-    luaL_setmetatable(L, HL_MP_ITER_MT);
+    it->conn    = o->conn;
+    it->life    = o->life;
+    hl_req_life_retain(it->life);     /* released by mp_iter_gc */
 
     /* Return the step closure capturing the iter userdata as upvalue 1. */
     lua_pushcclosure(L, mp_iter_drive, 1);
@@ -566,14 +628,21 @@ static int lua_req_multipart(lua_State *L)
  * No-op if body_reader isn't a streaming-multipart wrapper.
  */
 void hl_lua_request_install_multipart(lua_State *L, HlLua *lua,
-                                       KlHttpBodyReader *body_reader)
+                                       KlHttpBodyReader *body_reader,
+                                       HlReqLife *life, KlHttpConn *conn)
 {
     if (!body_reader || !hl_cap_multipart_inner(body_reader))
         return; /* not a streaming-multipart route - skip silently */
 
-    lua_pushlightuserdata(L, body_reader);
-    lua_pushlightuserdata(L, lua);
-    lua_pushcclosure(L, lua_req_multipart, 2);
+    HlMpOwner *o = (HlMpOwner *)lua_newuserdatauv(L, sizeof *o, 0);
+    memset(o, 0, sizeof *o);
+    luaL_setmetatable(L, HL_MP_OWNER_MT);
+    o->wrapper = body_reader;
+    o->lua     = lua;
+    o->conn    = conn;
+    o->life    = life;
+    hl_req_life_retain(life);          /* released by mp_owner_gc */
+    lua_pushcclosure(L, lua_req_multipart, 1);
     lua_setfield(L, -2, "multipart");
 }
 
@@ -590,6 +659,13 @@ void hl_lua_request_register(lua_State *L)
     luaL_newmetatable(L, HL_MP_ITER_MT);
     lua_pushcfunction(L, mp_iter_gc);
     lua_setfield(L, -2, "__gc");
+    lua_pop(L, 1);
+
+    luaL_newmetatable(L, HL_MP_OWNER_MT);
+    lua_pushcfunction(L, mp_owner_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
 
     /* HlMpPart - __index dispatches name/filename/content_type/read/chunks. */

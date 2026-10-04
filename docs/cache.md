@@ -12,6 +12,22 @@ For the low-level CAS primitive shared across every cache, see
 trust chain that backs the `tools` store, see
 [docs/tools_install.md](tools_install.md).
 
+
+## Sealed code caches
+
+The Lua caches that are loaded as code - `lua-bytecode` and
+`templates` - are sealed: each entry is stored as an
+HMAC-SHA256 followed by the bytes, keyed by a per-user secret at
+`$HOME/.hull/cache.key` (32 random bytes, mode 0600, created on first use).
+Neither Lua nor QuickJS verifies bytecode, so an unsealed cache let anything
+able to write the cache directory (another app of the same user, an app
+whose `fs.write` grant covers it) plant a chunk under a stdlib module's key.
+An entry that fails to verify is deleted and recompiled from source. The key
+lives outside the cache directory, so `HULL_CACHE_DIR` does not move it; a key
+file that other users can read (or that another user owns) turns these
+caches off rather than trusting it. Deleting the key invalidates every sealed
+entry (they are dropped as they are next read).
+
 ## Why a cache layer
 
 Hull recompiles a lot. On every cold start a single app can run:

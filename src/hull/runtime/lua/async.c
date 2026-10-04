@@ -44,6 +44,7 @@ typedef struct HlLuaAsyncCont {
      * core to any subsystem. Called once on LUA_OK / error completion. */
     void             (*on_complete)(HlLua *lua, void *ctx);
     void              *on_complete_ctx;
+    int                settled;       /* resumed or cancelled */
 } HlLuaAsyncCont;
 
 /*
@@ -91,7 +92,9 @@ static int hl_lua_thread_is_parked(lua_State *co)
 }
 
 /* coroutine.resume / coroutine.close, refusing a parked coroutine; the
- * original function is upvalue 1. */
+ * original function is upvalue 1. A failure that was the instruction budget
+ * running out is re-raised, not returned as (false, err): returned, a loop
+ * resuming coroutine after coroutine never ended (budget.c). */
 static int hl_lua_co_guarded(lua_State *L)
 {
     lua_State *co = lua_tothread(L, 1);
@@ -101,7 +104,25 @@ static int hl_lua_co_guarded(lua_State *L)
     lua_pushvalue(L, lua_upvalueindex(1));
     lua_insert(L, 1);
     lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+    if (hl_lua_budget_tripped(L))
+        return luaL_error(L, "instruction limit exceeded");
     return lua_gettop(L);
+}
+
+int hl_lua_resume_status(lua_State *co, int status)
+{
+    if (status != LUA_YIELD || hl_lua_thread_is_parked(co))
+        return status;
+    /* Yielded with no Hull operation behind it: a bare coroutine.yield()
+     * in the handler. Taken as "suspended", nothing would ever resume it -
+     * the request's life never ended (its `res` stayed usable over a
+     * response Keel had already sent and reused), a timer stayed in
+     * flight for good. It ends here, as an error. Closed first, so a
+     * reference the app kept to it cannot run it again. */
+    (void)lua_closethread(co, NULL);
+    lua_pushliteral(co, "coroutine.yield() in a handler: only a Hull "
+                        "operation may suspend it");
+    return LUA_ERRRUN;
 }
 
 void hl_lua_guard_coroutine_lib(lua_State *L)
@@ -139,6 +160,7 @@ static int hl_lua_async_push_k(lua_State *L)
 static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 {
     HlLuaAsyncCont *lc = (HlLuaAsyncCont *)self;
+    lc->settled = 1;
     HlLua *lua = lc->lua;
     lua_State *co = lc->co;
     KlHttpConn *conn = lc->conn;
@@ -197,7 +219,9 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
          * that, whatever is on top - hl_lua_error_text reads any value). */
         status = LUA_ERRMEM;
     } else {
+        HL_LUA_ARM(lua, co);   /* a new run: budget.c */
         status = lua_resume(co, lua->L, nargs, &nres);
+        status = hl_lua_resume_status(co, status);
     }
 
     lua->active_timer           = saved_timer;
@@ -322,6 +346,7 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
 {
     HlLuaAsyncCont *lc = (HlLuaAsyncCont *)self;
     HlLua *lua = lc->lua;
+    lc->settled = 1;
     hl_lua_set_parked(lc->co, 0);
 
     if (lc->thread_ref != LUA_NOREF) {
@@ -346,6 +371,12 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
 static void hl_lua_async_destroy(HlAsyncCont *self)
 {
     HlLuaAsyncCont *lc = (HlLuaAsyncCont *)self;
+    /* Destroyed before it was ever resumed or cancelled: the operation that
+     * made it failed to arm, and the handler carries on (it got an error).
+     * Its coroutine is not waiting on anything - left marked parked, it
+     * refused coroutine.resume / close for good. */
+    if (!lc->settled)
+        hl_lua_set_parked(lc->co, 0);
     hl_alloc_free(lc->alloc, lc, sizeof(HlLuaAsyncCont));
 }
 
@@ -376,6 +407,7 @@ HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
     lc->timer_ctx  = lua->active_timer;  /* inherit timer ctx if in timer callback */
     lc->on_complete     = lua->active_on_complete;     /* deferred-teardown hook */
     lc->on_complete_ctx = lua->active_on_complete_ctx;
+    lc->settled         = 0;
     hl_lua_set_parked(lc->co, 1);
 
     return &lc->base;
@@ -532,6 +564,7 @@ int lua_hull_spawn(lua_State *L)
 
     int nres = 0;
     int sr   = lua_resume(co, L, 0, &nres);
+    sr = hl_lua_resume_status(co, sr);   /* a bare yield: an error */
 
     if (sr == LUA_OK) {
         luaL_unref(L, LUA_REGISTRYINDEX, co_ref);

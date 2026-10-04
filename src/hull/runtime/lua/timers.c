@@ -116,27 +116,26 @@ void hl_lua_timer_trampoline(void *user_data)
     lua->active_co = NULL;
     lua->active_timer = t;
 
-    /* Create coroutine for this timer invocation */
-    lua_State *co = lua_newthread(lua->L);
-    int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+    /* The coroutine with the timer's handler on it, built protected: a
+     * memory error here used to abort the process. */
+    int thread_ref = LUA_NOREF, nargs = 0;
+    lua_State *co = hl_lua_entry_prepare(lua, "__hull_timers", t->handler_id,
+                                         NULL, NULL, &thread_ref, &nargs);
+    if (!co) {
+        lua->active_timer = NULL;
+        t->in_flight = 0;
+        hl_lua_timer_reschedule(t);
+        return;
+    }
     lua->active_co = co;
     lua->active_thread_ref = thread_ref;
 
-    /* Look up handler */
-    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_timers");
-    lua_rawgeti(lua->L, -1, t->handler_id);
-    lua_xmove(lua->L, co, 1);
-    lua_pop(lua->L, 1); /* pop __hull_timers */
-
     /* Re-arm instruction limit for this callback */
-    if (lua->max_instructions > 0) {
-        lua_sethook(co, NULL, 0, 0); /* clear first */
-        lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    INSTR_COUNT(lua->max_instructions));
-    }
+    HL_LUA_ARM(lua, co);
 
     int nres = 0;
     int status = lua_resume(co, lua->L, 0, &nres);
+    status = hl_lua_resume_status(co, status);
 
     if (status == LUA_OK) {
         /* Synchronous completion */

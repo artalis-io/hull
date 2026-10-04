@@ -15,6 +15,7 @@
 #include "internal.h"
 
 #include "hull/utils/alloc.h"
+#include "hull/runtime/cache_common.h"   /* hl_runtime_cache_seal_prepare */
 #include "hull/http_feature.h"  /* hl_http_ws_registry_free (HTTP-feature seam) */
 #include "hull/shared/async_backend.h"
 #include "hull/manifest.h"
@@ -44,12 +45,74 @@
 /* Forward declaration for hull async cont (defined in lua/async.c) */
 extern int luaopen_hull_hull(lua_State *L);
 
-/* ── Instruction limit hook ─────────────────────────────────────────── */
+/* ── Protected entry setup ───────────────────────────────────────────
+ * Every event-loop entry (a request, an SSE stream, a ws callback, a timer)
+ * makes a coroutine and builds its arguments - allocations, some sized by
+ * the remote peer (the request, a ws message). Done straight on the main
+ * state, or on the not-yet-running coroutine, an allocation failure had no
+ * protected call to unwind to anywhere: Lua aborted the whole process. Here
+ * all of it runs inside one lua_pcall on the main state, and the handler and
+ * its arguments are then moved onto the coroutine. */
 
-void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar)
+typedef struct {
+    const char    *table;    /* registry table holding the handlers */
+    int            id;
+    HlLuaPushArgs  push;
+    void          *ud;
+    lua_State     *co;
+    int            ref;
+    int            nargs;
+} HlLuaEntryCtx;
+
+static int entry_prepare_k(lua_State *L)
 {
-    (void)ar;
-    luaL_error(L, "instruction limit exceeded");
+    HlLuaEntryCtx *e = (HlLuaEntryCtx *)lua_touserdata(L, 1);
+    lua_settop(L, 0);
+    lua_State *co = lua_newthread(L);
+    e->ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    e->co = co;
+    if (!lua_checkstack(co, 16))
+        return luaL_error(L, "not enough memory");
+    lua_getfield(L, LUA_REGISTRYINDEX, e->table);
+    if (!lua_istable(L, -1))
+        return luaL_error(L, "no %s table", e->table);
+    lua_rawgeti(L, -1, e->id);
+    lua_remove(L, -2);
+    if (!lua_isfunction(L, -1))
+        return luaL_error(L, "handler %d is not a function", e->id);
+    e->nargs = e->push ? e->push(L, e->ud) : 0;
+    if (e->nargs > 15)
+        return luaL_error(L, "too many handler arguments");
+    return 1 + e->nargs;
+}
+
+lua_State *hl_lua_entry_prepare(HlLua *lua, const char *table, int handler_id,
+                                HlLuaPushArgs push, void *ud,
+                                int *thread_ref, int *nargs)
+{
+    lua_State *M = lua->L;
+    HlLuaEntryCtx e = { table, handler_id, push, ud, NULL, LUA_NOREF, 0 };
+    *thread_ref = LUA_NOREF;
+    *nargs = 0;
+    if (!lua_checkstack(M, 20)) {
+        log_error("[hull:c] cannot start a handler: out of memory");
+        return NULL;
+    }
+    int base = lua_gettop(M);
+    lua_pushcfunction(M, entry_prepare_k);
+    lua_pushlightuserdata(M, &e);
+    if (lua_pcall(M, 1, LUA_MULTRET, 0) != LUA_OK) {
+        char ebuf[256];
+        log_error("[hull:c] cannot start a handler: %s",
+                  hl_lua_error_text(lua, M, -1, ebuf, sizeof ebuf));
+        lua_settop(M, base);
+        if (e.ref != LUA_NOREF) luaL_unref(M, LUA_REGISTRYINDEX, e.ref);
+        return NULL;
+    }
+    lua_xmove(M, e.co, lua_gettop(M) - base);   /* handler, then its args */
+    *thread_ref = e.ref;
+    *nargs = e.nargs;
+    return e.co;
 }
 
 /* ── Error values ───────────────────────────────────────────────────── */
@@ -214,12 +277,6 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     if (!lua->L)
         return -1;
 
-    /* Arm instruction limit hook */
-    if (lua->max_instructions > 0) {
-        lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    INSTR_COUNT(lua->max_instructions));
-    }
-
     if (cfg->sandbox) {
         /* Open safe standard libraries only */
         luaL_requiref(lua->L, "_G", luaopen_base, 1);
@@ -259,6 +316,13 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     /* Replace print with stderr version */
     lua_pushcfunction(lua->L, hl_lua_print);
     lua_setglobal(lua->L, "print");
+
+    /* The instruction budget: after the base library (it replaces pcall
+     * and xpcall), before anything runs. */
+    hl_lua_budget_install(lua->L, &lua->budget);
+    if (cfg->sandbox)
+        hl_runtime_cache_seal_prepare();   /* before the sandbox (see header) */
+    HL_LUA_ARM(lua, lua->L);
 
     /* Store HlLua pointer in registry for C functions to access */
     lua_pushlightuserdata(lua->L, (void *)lua);
@@ -829,7 +893,12 @@ static int lua_coerce_exit_code(lua_State *co)
             if (i > 255) i = i & 0xff;
             return (int)i;
         }
-        return (int)lua_tonumber(co, -1);
+        /* A float: NaN, an infinity or a value past int's range made the
+         * cast undefined behaviour. Clamped like the integer case. */
+        lua_Number d = lua_tonumber(co, -1);
+        if (!(d > 0)) return 0;             /* negative, zero or NaN */
+        if (d >= 2147483647.0) return 255;  /* huge or +inf */
+        return ((int)d) & 0xff;
     }
     const char *s = lua_tostring(co, -1);
     fprintf(stderr, "[hull:main] non-numeric return: %s\n",
@@ -909,9 +978,12 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     lua->active_conn       = NULL;       /* detached - no HTTP conn */
     lua->active_thread_ref = co_ref;
 
-    /* First resume: main runs until it returns or yields. */
+    /* First resume: main runs until it returns or yields. Its own run of
+     * the instruction budget (budget.c), apart from load time. */
+    HL_LUA_ARM(lua, co);
     int nres = 0;
     int status = lua_resume(co, L, 1, &nres);
+    status = hl_lua_resume_status(co, status);
 
     if (status == LUA_YIELD) {
         /* Main yielded - async op in flight. Mark this coroutine so

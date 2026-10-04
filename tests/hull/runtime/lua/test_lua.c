@@ -25,6 +25,8 @@
 #include "hull/shared/cache_dir.h"   /* hl_hull_cache_dir / _subdir */
 #include "hull/shared/host.h"        /* hl_host_is_windows */
 #include "hull/runtime/lua_template_cache.h"
+#include "hull/runtime/cache_common.h"
+#include "hull/shared/blob_store.h"
 #include "hull/reqctx.h"
 #include "hull/vfs.h"
 #include "hull/stdlib_feature.h"
@@ -1224,6 +1226,13 @@ UTEST(lua_runtime, instruction_limit_catches_infinite_loop)
     ASSERT_NE(err, NULL);
     ASSERT_NE(strstr(err, "instruction limit"), NULL);
     lua_pop(limited_lua.L, 1);
+
+    /* The trip is sticky until the next entry arms the budget again (each
+     * run - a request, a resume, a timer - gets the whole limit). */
+    rc = luaL_dostring(limited_lua.L, "return 1 + 1");
+    ASSERT_NE(rc, LUA_OK);
+    lua_pop(limited_lua.L, 1);
+    HL_LUA_ARM(&limited_lua, limited_lua.L);
 
     /* VM should still be functional after the error */
     rc = luaL_dostring(limited_lua.L, "return 1 + 1");
@@ -7206,6 +7215,175 @@ UTEST(lua_audit3, a_writable_cache_dir_is_not_used)
     EXPECT_EQ(hl_hull_cache_dir(sub, sizeof sub), 0);
     bc_cleanup_tmp_home(tmpdir);
     hl_lua_bytecode_cache_reset();
+}
+
+/* ── Audit 4: the Lua runtime ─────────────────────────────────────────── */
+
+/* A limited VM whose top level runs `code`; returns its status, leaving the
+ * error message (if any) in errbuf. */
+static int limited_run(const char *code, char *errbuf, size_t n)
+{
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 100000;
+    HlLua lim;
+    memset(&lim, 0, sizeof lim);
+    if (hl_lua_init(&lim, &cfg) != 0) return -100;
+    int rc = luaL_dostring(lim.L, code);
+    errbuf[0] = '\0';
+    if (rc != LUA_OK) {
+        const char *e = lua_tostring(lim.L, -1);
+        snprintf(errbuf, n, "%s", e ? e : "");
+    }
+    hl_lua_free(&lim);
+    return rc;
+}
+
+/* pcall / xpcall / coroutine.resume used to catch the instruction-limit
+ * error, after which the hook - already spent - never fired again: an
+ * unbounded loop behind one pcall. */
+UTEST(lua_audit4, instruction_limit_survives_pcall)
+{
+    char err[512];
+    static const char *const cases[] = {
+        "pcall(function() while true do end end) while true do end",
+        "for i = 1, 3 do pcall(function() while true do end end) end return 1",
+        "xpcall(function() while true do end end, function(e) return e end) return 1",
+        "local co = coroutine.create(function() while true do end end) "
+        "coroutine.resume(co) return 1",
+        "pcall(coroutine.wrap(function() while true do end end)) return 1",
+        NULL
+    };
+    for (int i = 0; cases[i]; i++) {
+        int rc = limited_run(cases[i], err, sizeof err);
+        EXPECT_NE(rc, LUA_OK);
+        EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    }
+    /* A pcall that catches an ordinary error still works. */
+    EXPECT_EQ(limited_run("local ok = pcall(error, 'x') assert(not ok) return 1",
+                          err, sizeof err), LUA_OK);
+}
+
+/* A coroutine that yields with nothing parked (a bare coroutine.yield() in a
+ * handler) is an error, not a request left hanging forever. */
+UTEST(lua_audit4, bare_yield_is_an_error)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    lua_State *co = lua_newthread(L);
+    ASSERT_EQ(luaL_loadstring(co, "coroutine.yield() return 1"), LUA_OK);
+    int nres = 0;
+    int st = lua_resume(co, L, 0, &nres);
+    ASSERT_EQ(st, LUA_YIELD);
+    st = hl_lua_resume_status(co, st);
+    EXPECT_EQ(st, LUA_ERRRUN);
+    lua_pop(L, 1);
+    cleanup_lua();
+}
+
+/* The stdlib runs in a private environment: an app replacing a library
+ * function, or reaching the string metatable, does not change what the
+ * stdlib calls. */
+UTEST(lua_audit4, stdlib_env_is_private)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  if getmetatable('') ~= 'locked' then return 1 end "
+        "  local json = require('hull.json') "
+        "  local real_concat, real_format = table.concat, string.format "
+        "  table.concat = function() return 'APP' end "
+        "  string.format = function() return 'APP' end "
+        "  local out = json.encode({ a = 1, b = 'x' }) "
+        "  table.concat, string.format = real_concat, real_format "
+        "  if out:find('APP', 1, true) then return 2 end "
+        "  if not out:find('\"a\":1', 1, true) then return 3 end "
+        "  if ('ab'):rep(2) ~= 'abab' then return 4 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
+/* Query params are read raw: a params table's __len (app code that could
+ * close the connection under the call) is not run. */
+UTEST(lua_audit4, db_params_ignore_len)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local called = false "
+        "  local p = setmetatable({ 7 }, { __len = function() called = true return 1 end }) "
+        "  local rows = db.query('SELECT ? AS v', p) "
+        "  if called then return 1 end "
+        "  if not rows[1] or rows[1].v ~= 7 then return 2 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
+/* tar.create / tar.pack: an entry whose __index raises is an ordinary error
+ * (the entry array is Lua-owned now; it leaked before - visible under ASan). */
+UTEST(lua_audit4, tar_entry_raise_is_clean)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local ok, tar = pcall(require, 'hull.tar') "
+        "  if not ok then return 0 end "
+        "  local bad = setmetatable({}, { __index = function() error('boom') end }) "
+        "  local ok2, err = pcall(tar.create, { { name = 'a', data = 'x' }, bad }) "
+        "  if ok2 or not tostring(err):find('boom', 1, true) then return 1 end "
+        "  local bytes = tar.create({ { name = 'a', data = 'x' } }) "
+        "  if type(bytes) ~= 'string' or #bytes < 512 then return 2 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
+/* Code-cache entries are sealed: an entry written without the MAC (a
+ * planted chunk) is refused and dropped; a sealed one reads back. */
+UTEST(lua_audit4, code_cache_entries_are_sealed)
+{
+    char tmp[512];
+    ASSERT_NE(hl_test_mkdtemp(tmp, sizeof tmp, "hull-seal"), NULL);
+    HlBlobStore *st = NULL;
+    ASSERT_EQ(hl_blob_store_open(&st, NULL, tmp, 1, 0), 0);
+    const char *key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    static const uint8_t data[] = "bytecode-ish payload";
+
+    /* Planted: raw bytes under the key. */
+    ASSERT_EQ(hl_blob_store_put_keyed(st, key, data, sizeof data), 0);
+    uint8_t *out = NULL;
+    size_t out_len = 0;
+    EXPECT_EQ(hl_runtime_cache_get_sealed(st, key, &out, &out_len), -1);
+    EXPECT_EQ(out, NULL);
+    uint8_t *raw = NULL;
+    size_t raw_len = 0;
+    EXPECT_NE(hl_blob_store_get(st, key, 0, &raw, &raw_len), 0);   /* dropped */
+    free(raw);
+
+    /* Sealed: round trip (skipped where no key file can be made). */
+    hl_runtime_cache_put_sealed(st, key, data, sizeof data);
+    if (hl_runtime_cache_get_sealed(st, key, &out, &out_len) == 0) {
+        EXPECT_EQ(out_len, sizeof data);
+        EXPECT_EQ(memcmp(out, data, sizeof data), 0);
+        free(out);
+        /* One flipped byte of the stored entry and it no longer verifies. */
+        ASSERT_EQ(hl_blob_store_get(st, key, 0, &raw, &raw_len), 0);
+        raw[raw_len - 1] ^= 1;
+        ASSERT_GE(hl_blob_store_delete(st, key), 0);   /* a keyed put keeps an existing entry */
+        ASSERT_EQ(hl_blob_store_put_keyed(st, key, raw, raw_len), 0);
+        free(raw);
+        EXPECT_EQ(hl_runtime_cache_get_sealed(st, key, &out, &out_len), -1);
+    }
+    hl_blob_store_close(st);
+    bc_cleanup_tmp_home(tmp);
 }
 
 UTEST_MAIN();

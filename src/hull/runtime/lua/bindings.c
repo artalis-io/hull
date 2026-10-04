@@ -72,7 +72,8 @@ static void request_peer_ip(KlHttpRequest *req, char *buf, size_t buflen)
  *     ctx     = {}
  *   }
  */
-void hl_lua_make_request(lua_State *L, KlHttpRequest *req)
+void hl_lua_make_request(lua_State *L, KlHttpRequest *req,
+                         struct HlReqLife *life)
 {
     lua_newtable(L);
 
@@ -212,7 +213,8 @@ void hl_lua_make_request(lua_State *L, KlHttpRequest *req)
      * (no-op otherwise). Defined in mod_request.c. */
     if (is_multipart_stream)
         hl_lua_request_install_multipart(L, get_hl_lua_from_L(L),
-                                          req->body_reader);
+                                          req->body_reader, life,
+                                          kl_http_request_conn(req));
 
     /* ctx - per-request context table (middleware → handler).
      * If req->ctx carries a native Lua ref, retrieve it directly;

@@ -806,7 +806,8 @@ static int lua_sha256_hasher_gc(lua_State *L)
     /* If digest() wasn't called, scrub the in-flight state - it may
      * contain partial input bytes. _final zeros the ctx on success;
      * do the same here for the abandoned-without-final path. */
-    if (!h->done) memset(&h->ctx, 0, sizeof(h->ctx));
+    if (!h->done) secure_zero(&h->ctx, sizeof(h->ctx));
+    h->done = 1;   /* reached early (as a method), it ends the hasher */
     return 0;
 }
 

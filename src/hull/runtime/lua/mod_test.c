@@ -69,6 +69,84 @@ static int l_test_call(lua_State *L)
 
 /* ── test.get/post/put/delete/patch ────────────────────────────────── */
 
+typedef struct {
+    HlTestResult *result;
+    HlLua        *lua;
+} HlTestBuild;
+
+/* (arg: HlTestBuild) -> the result table. Under lua_pcall (l_test_http). */
+static int test_build_result_k(lua_State *L)
+{
+    HlTestBuild *tb = (HlTestBuild *)lua_touserdata(L, 1);
+    HlTestResult *r = tb->result;
+    lua_settop(L, 0);
+    lua_newtable(L);
+
+    lua_pushinteger(L, r->status);
+    lua_setfield(L, -2, "status");
+
+    if (r->body && r->body_len > 0) {
+        lua_pushlstring(L, r->body, r->body_len);
+        lua_setfield(L, -2, "body");
+
+        /* Auto-decode JSON if body looks like JSON */
+        if (r->body[0] == '{' || r->body[0] == '[') {
+            /* The runtime's own json (registry stash), not require(): the
+             * harness decodes for every test, declared hull/json or not, and
+             * a require from here runs with the test file as its caller - app
+             * code, which the module gate refuses an undeclared module. */
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
+            if (lua_istable(L, -1)) {
+                lua_getfield(L, -1, "decode");
+                lua_pushlstring(L, r->body, r->body_len);
+                if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
+                    lua_setfield(L, -3, "json");
+                } else {
+                    lua_pop(L, 1); /* pop error */
+                }
+                lua_pop(L, 1); /* pop json module */
+            } else {
+                lua_pop(L, 1);
+            }
+        }
+
+    }
+
+    /* Parse response headers into a table */
+    if (r->hdr_buf && r->hdr_len > 0) {
+        lua_newtable(L);
+        const char *p = r->hdr_buf;
+        const char *end = p + r->hdr_len;
+        while (p < end) {
+            const char *colon = memchr(p, ':', (size_t)(end - p));
+            if (!colon) break;
+            const char *eol = memchr(colon, '\r', (size_t)(end - colon));
+            if (!eol) eol = memchr(colon, '\n', (size_t)(end - colon));
+            if (!eol) eol = end;
+            /* Skip ": " after colon */
+            const char *val = colon + 1;
+            while (val < eol && *val == ' ') val++;
+            /* Push lowercase header name as key */
+            size_t name_len = (size_t)(colon - p);
+            /* Lowercased in a Lua buffer: a malloc'd copy leaked when the
+             * push after it raised. */
+            luaL_Buffer lb;
+            char *lower = luaL_buffinitsize(L, &lb, name_len);
+            for (size_t i = 0; i < name_len; i++)
+                lower[i] = (char)(p[i] >= 'A' && p[i] <= 'Z' ? p[i] + 32 : p[i]);
+            luaL_pushresultsize(&lb, name_len);
+            lua_pushlstring(L, val, (size_t)(eol - val));
+            lua_settable(L, -3);
+            /* Advance past \r\n */
+            p = eol;
+            while (p < end && (*p == '\r' || *p == '\n')) p++;
+        }
+        lua_setfield(L, -2, "headers");
+    }
+
+    return 1;
+}
+
 static int l_test_http(lua_State *L, const char *method)
 {
     const char *path = luaL_checkstring(L, 1);
@@ -88,6 +166,13 @@ static int l_test_http(lua_State *L, const char *method)
     const char *ctx_json = NULL;
     int run_middleware = 0;
 
+    /* 3: anchors. The body and header strings are held here, not only by
+     * the opts table: encoding opts.ctx runs app metamethods, which could
+     * clear those fields and collect the strings before dispatch reads
+     * them. */
+    lua_settop(L, 2);
+    lua_newtable(L);
+
     if (lua_istable(L, 2)) {
         /* opts.middleware */
         lua_getfield(L, 2, "middleware");
@@ -100,8 +185,11 @@ static int l_test_http(lua_State *L, const char *method)
          * the popped stack slot alone - and dispatch runs Lua, so it could be
          * collected before the body was read. */
         lua_getfield(L, 2, "body");
-        if (lua_type(L, -1) == LUA_TSTRING)
+        if (lua_type(L, -1) == LUA_TSTRING) {
             body_str = lua_tolstring(L, -1, &body_len);
+            lua_pushvalue(L, -1);
+            lua_rawseti(L, 3, (lua_Integer)lua_rawlen(L, 3) + 1);
+        }
         lua_pop(L, 1);
 
         /* opts.headers */
@@ -117,6 +205,10 @@ static int l_test_http(lua_State *L, const char *method)
                     header_names[num_headers] = lua_tostring(L, -2);
                     header_values[num_headers] = lua_tostring(L, -1);
                     num_headers++;
+                    lua_pushvalue(L, -2);
+                    lua_rawseti(L, 3, (lua_Integer)lua_rawlen(L, 3) + 1);
+                    lua_pushvalue(L, -1);
+                    lua_rawseti(L, 3, (lua_Integer)lua_rawlen(L, 3) + 1);
                 }
                 lua_pop(L, 1);
             }
@@ -160,76 +252,22 @@ static int l_test_http(lua_State *L, const char *method)
         return luaL_error(L, "test dispatch failed");
     }
 
-    /* Build result table */
-    lua_newtable(L);
-
-    lua_pushinteger(L, result.status);
-    lua_setfield(L, -2, "status");
-
-    if (result.body && result.body_len > 0) {
-        lua_pushlstring(L, result.body, result.body_len);
-        lua_setfield(L, -2, "body");
-
-        /* Auto-decode JSON if body looks like JSON */
-        if (result.body[0] == '{' || result.body[0] == '[') {
-            /* The runtime's own json (registry stash), not require(): the
-             * harness decodes for every test, declared hull/json or not, and
-             * a require from here runs with the test file as its caller - app
-             * code, which the module gate refuses an undeclared module. */
-            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
-            if (lua_istable(L, -1)) {
-                lua_getfield(L, -1, "decode");
-                lua_pushlstring(L, result.body, result.body_len);
-                if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
-                    lua_setfield(L, -3, "json");
-                } else {
-                    lua_pop(L, 1); /* pop error */
-                }
-                lua_pop(L, 1); /* pop json module */
-            } else {
-                lua_pop(L, 1);
-            }
-        }
-
-        hl_alloc_free_const(lua->base.alloc, result.body,
-                      result.body_len + 1);
+    /* The result table is built under lua_pcall, and the result's C buffers
+     * are freed after it either way: built directly, a raise while pushing
+     * (out of memory) skipped the frees. */
+    HlTestBuild tb = { &result, lua };
+    int built = lua_checkstack(L, 4);
+    if (built) {
+        lua_pushcfunction(L, test_build_result_k);
+        lua_pushlightuserdata(L, &tb);
+        built = lua_pcall(L, 1, 1, 0) == LUA_OK;
     }
-
-    /* Parse response headers into a table */
-    if (result.hdr_buf && result.hdr_len > 0) {
-        lua_newtable(L);
-        const char *p = result.hdr_buf;
-        const char *end = p + result.hdr_len;
-        while (p < end) {
-            const char *colon = memchr(p, ':', (size_t)(end - p));
-            if (!colon) break;
-            const char *eol = memchr(colon, '\r', (size_t)(end - colon));
-            if (!eol) eol = memchr(colon, '\n', (size_t)(end - colon));
-            if (!eol) eol = end;
-            /* Skip ": " after colon */
-            const char *val = colon + 1;
-            while (val < eol && *val == ' ') val++;
-            /* Push lowercase header name as key */
-            size_t name_len = (size_t)(colon - p);
-            char *lower = (char *)hl_alloc_malloc(lua->base.alloc, name_len + 1);
-            if (lower) {
-                for (size_t i = 0; i < name_len; i++)
-                    lower[i] = (char)(p[i] >= 'A' && p[i] <= 'Z' ? p[i] + 32 : p[i]);
-                lower[name_len] = '\0';
-                lua_pushlstring(L, lower, name_len);
-                lua_pushlstring(L, val, (size_t)(eol - val));
-                lua_settable(L, -3);
-                hl_alloc_free(lua->base.alloc, lower, name_len + 1);
-            }
-            /* Advance past \r\n */
-            p = eol;
-            while (p < end && (*p == '\r' || *p == '\n')) p++;
-        }
-        lua_setfield(L, -2, "headers");
-        hl_alloc_free_const(lua->base.alloc, result.hdr_buf,
-                      result.hdr_len + 1);
-    }
-
+    if (result.body)
+        hl_alloc_free_const(lua->base.alloc, result.body, result.body_len + 1);
+    if (result.hdr_buf)
+        hl_alloc_free_const(lua->base.alloc, result.hdr_buf, result.hdr_len + 1);
+    if (!built)
+        return lua_error(L);
     return 1;
 }
 

@@ -55,6 +55,7 @@ void hl_lua_worker_register_init(HlLuaWorkerInitFn fn)
 typedef struct {
     size_t used;
     size_t limit;   /* 0 = none */
+    HlLuaBudget budget;   /* the VM's instruction budget (budget.c) */
 } WorkerHeap;
 
 /* The app's heap limit, counted per VM. Deliberately not the server's
@@ -86,16 +87,16 @@ static lua_State *worker_vm_new(WorkerHeap *heap,
     lua_State *L = lua_newstate(worker_alloc, heap);
     if (!L) return NULL;
 
-    /* The same instruction budget a request handler gets: without it
-     * `while true do end` held a pool thread for good, and a few of those
-     * starved every db.async / compute.async / smtp job. */
-    if (op->max_instructions > 0)
-        lua_sethook(L, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    INSTR_COUNT(op->max_instructions));
-
     /* Open minimal standard libraries */
     luaL_requiref(L, "_G", luaopen_base, 1);
     lua_pop(L, 1);
+
+    /* The same instruction budget a request handler gets: without it
+     * `while true do end` held a pool thread for good, and a few of those
+     * starved every db.async / compute.async / smtp job. Shared and sticky
+     * (budget.c): a pcall around the loop no longer swallows it. */
+    hl_lua_budget_install(L, &heap->budget);
+    hl_lua_budget_arm(L, &heap->budget, op->max_instructions);
     luaL_requiref(L, "string", luaopen_string, 1);
     lua_pop(L, 1);
     luaL_requiref(L, "table", luaopen_table, 1);
