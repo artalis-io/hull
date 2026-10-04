@@ -148,8 +148,9 @@ int hl_lua_template_compile_cached(lua_State *L,
     /* ── Cache hit: load the dumped render function directly. ──── */
     uint8_t *bc     = NULL;
     size_t   bc_len = 0;
-    if (hl_blob_store_get(store, key, /*track_access=*/1, &bc, &bc_len) == 0) {
-        /* Binary: the cache holds what this runtime dumped. */
+    if (hl_runtime_cache_get_sealed(store, key, &bc, &bc_len) == 0) {
+        /* Binary: the cache holds what this runtime dumped, sealed
+         * (cache_common.h). */
         int rc = luaL_loadbufferx(L, (const char *)bc, bc_len, chunkname, "b");
         free(bc);
         if (rc == LUA_OK) return LUA_OK;
@@ -176,7 +177,7 @@ int hl_lua_template_compile_cached(lua_State *L,
     }
 
     /* Best-effort persist; failures are silent. */
-    (void)hl_blob_store_put_keyed(store, key, acc.buf, acc.len);
+    hl_runtime_cache_put_sealed(store, key, acc.buf, acc.len);
     free(acc.buf);
     return LUA_OK;
 }

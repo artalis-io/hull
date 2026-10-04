@@ -140,6 +140,15 @@ KlHttpBodyReader *hl_cap_multipart_inner(KlHttpBodyReader *wrapper)
     return ((HlMultipartWrapper *)wrapper)->inner;
 }
 
+int hl_cap_multipart_state(KlHttpBodyReader *wrapper)
+{
+    if (!wrapper || wrapper->on_data != mp_wrap_on_data) return -1;
+    HlMultipartWrapper *w = (HlMultipartWrapper *)wrapper;
+    if (w->errored) return 2;
+    if (w->stream_ended) return 1;
+    return 0;
+}
+
 int hl_cap_multipart_park(KlHttpBodyReader *wrapper,
                           HlMultipartResumeFn on_resume,
                           void *ctx)

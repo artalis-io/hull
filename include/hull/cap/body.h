@@ -116,4 +116,10 @@ int hl_cap_multipart_park(KlHttpBodyReader *wrapper,
                           HlMultipartResumeFn on_resume,
                           void *ctx);
 
+/* Whether the body behind @p wrapper can still deliver anything: 0 more may
+ * arrive, 1 the stream has ended, 2 it failed, -1 not a multipart wrapper.
+ * Checked before parking: park fires its callback INLINE when the stream is
+ * already over, which resumed the caller's own running coroutine. */
+int hl_cap_multipart_state(KlHttpBodyReader *wrapper);
+
 #endif /* HL_CAP_BODY_H */

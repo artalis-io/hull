@@ -34,6 +34,14 @@ typedef struct HlAsyncCtx HlAsyncCtx;
  * references.
  */
 
+/* The instruction budget of one VM, charged by every thread's count hook
+ * and re-armed at each entry point (runtime/lua/budget.c). */
+typedef struct HlLuaBudget {
+    int64_t limit;      /* 0 = none */
+    int64_t used;
+    int     tripped;    /* sticky until re-armed */
+} HlLuaBudget;
+
 /* ── Configuration ──────────────────────────────────────────────────── */
 
 typedef struct {
@@ -72,6 +80,7 @@ typedef struct HlLua {
     size_t          mem_used;
     size_t          mem_limit;
     int64_t         max_instructions;  /* 0 = no limit */
+    HlLuaBudget     budget;            /* shared by all threads of L */
 
     /* Module search paths */
     const char     *app_dir;         /* application root directory */
@@ -252,7 +261,11 @@ void hl_lua_dump_error(HlLua *lua);
 /*
  * Push a Lua table representing the HTTP request onto the stack.
  */
-void hl_lua_make_request(lua_State *L, KlHttpRequest *req);
+struct HlReqLife;
+/* @p life: the request's life (may be NULL outside a request), held by the
+ * objects in the table that point into the request (req.multipart). */
+void hl_lua_make_request(lua_State *L, KlHttpRequest *req,
+                         struct HlReqLife *life);
 
 /*
  * Push a Lua userdata representing the HTTP response onto the stack.

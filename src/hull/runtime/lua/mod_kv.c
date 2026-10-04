@@ -210,9 +210,15 @@ static int l_kv_close(lua_State *L)
     return 0;
 }
 
+/* The finalizer honours a scan in progress like close() does: a finalizer
+ * that ran during one of the scan's own pushes freed the connection under
+ * hl_cap_kv_scan. (The real finalizer cannot run on a userdata the running
+ * scan holds; this guards an early call, though the locked metatable keeps
+ * __gc out of app reach as well.) */
 static int l_kv_gc(lua_State *L)
 {
     HlLuaKvConn *o = luaL_checkudata(L, 1, HL_LUA_KV_MT);
+    if (o->scanning) { o->close_pending = 1; return 0; }
     if (o->c) { hl_cap_kv_close(o->c); o->c = NULL; }
     return 0;
 }
@@ -230,15 +236,14 @@ static int l_kv_open(lua_State *L)
     if (hl_cap_kv_check_dsn(lua ? lua->base.kv_policy : NULL, dsn, err, sizeof err) != 0)
         return luaL_error(L, "%s", err);
 
-    HlKvConn *c = NULL;
-    if (hl_cap_kv_open(&c, dsn, timeout_ms, lua ? lua->base.alloc : NULL,
-                       err, sizeof err) != 0)
-        return luaL_error(L, "%s", err);
-
+    /* The userdata first: opened first, a memory error making it raised
+     * past a live connection. */
     HlLuaKvConn *o = lua_newuserdatauv(L, sizeof *o, 0);
     memset(o, 0, sizeof *o);
-    o->c = c;
     luaL_setmetatable(L, HL_LUA_KV_MT);   /* installs __gc + method __index */
+    if (hl_cap_kv_open(&o->c, dsn, timeout_ms, lua ? lua->base.alloc : NULL,
+                       err, sizeof err) != 0)
+        return luaL_error(L, "%s", err);
     return 1;
 }
 
@@ -266,6 +271,8 @@ int luaopen_hull_kv_native(lua_State *L)
     lua_newtable(L);
     luaL_setfuncs(L, kv_methods, 0);
     lua_setfield(L, -2, "__index");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);   /* pop the metatable */
 
     lua_newtable(L);

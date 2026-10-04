@@ -204,6 +204,11 @@ static int lua_worker_dispatch(lua_State *L)
         return luaL_error(L, "worker.dispatch requires an active event loop");
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
+    /* ctx's type before anything is malloc'd: checked after the dump, a
+     * ctx that was not a table raised past the dumped bytecode, leaking it
+     * on every such call. */
+    if (!lua_isnoneornil(L, 2))
+        luaL_checktype(L, 2, LUA_TTABLE);
 
     /* Serialize function to bytecode via lua_dump */
     LuaBytecodeWriter bw = {0};

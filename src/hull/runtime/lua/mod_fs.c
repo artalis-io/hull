@@ -680,6 +680,17 @@ static int require_impl(lua_State *L, int trusted)
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
     lua_getfield(L, -1, name);
     if (!lua_isnil(L, -1) && (trusted || !cached_but_undeclared(L, lua, name))) {
+        /* Before the manifest is wired, a hit is still an import the app
+         * made: record it, as the miss path does. hull.json is always
+         * cached (the runtime preloads it), so a top-of-file
+         * require("hull.json") was never checked against the manifest. */
+        if (!trusted && lua && !lua->base.module_set) {
+            const HlModuleSpec *spec = hl_module_registry_find_runtime(name, '.');
+            lua_Debug ar;
+            if (spec && lua_getstack(L, 1, &ar) && lua_getinfo(L, "S", &ar) &&
+                ar.source && !hl_lua_source_is_stdlib(ar.source))
+                hl_import_tracker_record(&lua->base, spec->name);
+        }
         lua_remove(L, -2); /* remove __hull_loaded table */
         return 1;          /* return cached module */
     }
@@ -1020,6 +1031,85 @@ static int hl_lua_require(lua_State *L) { return require_impl(L, 0); }
 
 int hl_lua_require_trusted(lua_State *L) { return require_impl(L, 1); }
 
+/* ── The stdlib's own environment ──────────────────────────────────────
+ * The `_hull_*` guard trusts a query whose caller is a stdlib chunk. The
+ * stdlib built that SQL with globals the app shares and can replace: with
+ * `table.concat` (or string.format, or a method through the string
+ * metatable) swapped for its own, an app had a stdlib frame submit SQL it
+ * chose - `jobs.events()` read _hull_sessions. Stdlib chunks now run in an
+ * environment of their own: copies, taken at startup, of the base functions
+ * and the standard libraries, with anything else read through to _G. And
+ * string methods resolve through a private copy of the string library,
+ * behind a locked string metatable. An app's changes to its globals no
+ * longer reach stdlib code. */
+
+static void copy_table_into(lua_State *L, int src, int dst)
+{
+    src = lua_absindex(L, src);
+    dst = lua_absindex(L, dst);
+    lua_pushnil(L);
+    while (lua_next(L, src)) {
+        lua_pushvalue(L, -2);
+        lua_insert(L, -2);
+        lua_rawset(L, dst);
+    }
+}
+
+/* Leaves the environment table on the stack. */
+static void build_stdlib_env(lua_State *L)
+{
+    lua_newtable(L);                                   /* env */
+    int env = lua_gettop(L);
+
+    /* Base functions (pcall here is the budget's, require is Hull's). */
+    lua_pushglobaltable(L);
+    lua_pushnil(L);
+    while (lua_next(L, -2)) {
+        if (lua_type(L, -1) == LUA_TFUNCTION && lua_type(L, -2) == LUA_TSTRING) {
+            lua_pushvalue(L, -2);
+            lua_insert(L, -2);
+            lua_rawset(L, env);
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);                                     /* _G */
+
+    /* Libraries: a private copy each. */
+    static const char *const libs[] = {
+        "table", "math", "utf8", "coroutine", "string", NULL
+    };
+    for (int i = 0; libs[i]; i++) {
+        lua_getglobal(L, libs[i]);
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+        lua_newtable(L);
+        copy_table_into(L, -2, -1);
+        lua_setfield(L, env, libs[i]);
+        lua_pop(L, 1);
+    }
+
+    /* String methods ("x"):rep(...) through the private copy, behind a
+     * locked metatable (getmetatable("") returns a string, so the table
+     * the methods come from is out of the app's reach). */
+    lua_pushliteral(L, "");
+    if (lua_getmetatable(L, -1)) {
+        lua_getfield(L, env, "string");
+        lua_setfield(L, -2, "__index");
+        lua_pushliteral(L, "locked");
+        lua_setfield(L, -2, "__metatable");
+        lua_pop(L, 1);                                 /* metatable */
+    }
+    lua_pop(L, 1);                                     /* "" */
+
+    /* Anything else (hull globals, _G itself) reads and writes through. */
+    lua_newtable(L);
+    lua_pushglobaltable(L);
+    lua_setfield(L, -2, "__index");
+    lua_pushglobaltable(L);
+    lua_setfield(L, -2, "__newindex");
+    lua_setmetatable(L, env);
+}
+
 int hl_lua_register_stdlib(HlLua *lua)
 {
     if (!lua || !lua->L)
@@ -1093,11 +1183,29 @@ int hl_lua_register_stdlib(HlLua *lua)
         }
     }
 
-    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_modules");
-
     /* Register require as a global function */
     lua_pushcfunction(L, hl_lua_require);
     lua_setglobal(L, "require");
+
+    /* Give every stdlib chunk the stdlib's own environment (above): a main
+     * chunk's first upvalue is its _ENV. */
+    if (lua->base.platform_vfs) {
+        int mods = lua_gettop(L);
+        build_stdlib_env(L);
+        int env = lua_gettop(L);
+        for (size_t i = 0; i < lua->base.platform_vfs->count; i++) {
+            const HlEntry *e = &lua->base.platform_vfs->entries[i];
+            if (lua_getfield(L, mods, e->name) == LUA_TFUNCTION) {
+                lua_pushvalue(L, env);
+                if (!lua_setupvalue(L, -2, 1))
+                    lua_pop(L, 1);
+            }
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);                                 /* env */
+    }
+
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_modules");
 
     /* Pre-load hull.json into the Lua registry under
      * __hull_json_internal for runtime-internal use (request-context

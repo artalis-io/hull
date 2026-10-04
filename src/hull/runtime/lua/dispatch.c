@@ -31,6 +31,34 @@
 #include <limits.h>
 #include <string.h>
 
+/* Free the request ctx a middleware left (a registry ref or JSON). */
+static void free_req_ctx(HlLua *lua, KlHttpRequest *req)
+{
+    if (!req->ctx) return;
+    HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+    if (rctx->kind == HL_REQCTX_LUA_REF)
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, rctx->lua_ref);
+    else if (rctx->kind == HL_REQCTX_JSON)
+        hl_alloc_free(lua->base.alloc, rctx->json.data, rctx->json.len + 1);
+    hl_alloc_free(lua->base.alloc, rctx, sizeof(HlReqCtx));
+    req->ctx = NULL;
+}
+
+typedef struct {
+    KlHttpRequest  *req;
+    KlHttpResponse *res;
+    HlReqLife      *life;
+} HlReqArgs;
+
+/* Under the protected entry (hl_lua_entry_prepare): req, res. */
+static int push_req_res(lua_State *L, void *ud)
+{
+    HlReqArgs *a = (HlReqArgs *)ud;
+    hl_lua_make_request(L, a->req, a->life);
+    hl_lua_make_response_life(L, a->res, a->life);
+    return 2;
+}
+
 int hl_lua_dispatch(HlLua *lua, int handler_id,
                        KlHttpRequest *req, KlHttpResponse *res)
 {
@@ -41,11 +69,6 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
 
-    /* Re-arm instruction limit for this request */
-    if (lua->max_instructions > 0)
-        lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    INSTR_COUNT(lua->max_instructions));
-
     /* Reset scratch arena for this request */
     sh_arena_reset(lua->scratch);
 
@@ -53,52 +76,34 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua->active_conn = kl_http_request_conn(req);
     lua->active_req = req;
 
-    /* Get the handler function from the route registry */
-    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
-    if (!lua_istable(lua->L, -1)) {
-        lua_pop(lua->L, 1);
-        lua->active_conn = NULL;
-        lua->active_req = NULL;
-        return -1;
-    }
-
-    lua_rawgeti(lua->L, -1, handler_id);
-    if (!lua_isfunction(lua->L, -1)) {
-        lua_pop(lua->L, 2); /* pop function + routes table */
-        lua->active_conn = NULL;
-        lua->active_req = NULL;
-        return -1;
-    }
-
     /* The request's life: `res` holds it, and it ends when this handler is
      * done (below, or in the async continuation's completion / cancel). */
     HlReqLife *life = hl_req_life_new();
     if (!life) {
-        lua_pop(lua->L, 2); /* pop function + routes table */
         lua->active_conn = NULL;
         lua->active_req = NULL;
         return -1;
     }
 
-    /* Create coroutine for this handler invocation */
-    lua_State *co = lua_newthread(lua->L);
-    int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
-
-    /* Move handler function from main state to coroutine */
-    lua_xmove(lua->L, co, 1);
-
-    /* Build request and response objects on the coroutine stack */
-    hl_lua_make_request(co, req);
-    hl_lua_make_response_life(co, res, life);
+    /* The coroutine with handler(req, res) on it, built protected. */
+    HlReqArgs args = { req, res, life };
+    int thread_ref = LUA_NOREF, nargs = 0;
+    lua_State *co = hl_lua_entry_prepare(lua, "__hull_routes", handler_id,
+                                         push_req_res, &args,
+                                         &thread_ref, &nargs);
+    if (!co) {
+        hl_req_life_end(life);
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
+        return -1;
+    }
 
     /* Set coroutine state for async C functions */
     lua->active_co = co;
     lua->active_thread_ref = thread_ref;
 
-    /* Re-arm instruction hook on coroutine */
-    if (lua->max_instructions > 0)
-        lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    INSTR_COUNT(lua->max_instructions));
+    /* Arm the instruction budget for this run */
+    HL_LUA_ARM(lua, co);
 
     /* A continuation created while the handler runs captures this, so the
      * life ends when the handler finally completes, or is cancelled. */
@@ -107,7 +112,8 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
 
     /* Resume coroutine: handler(req, res) */
     int nres = 0;
-    int status = lua_resume(co, lua->L, 2, &nres);
+    int status = lua_resume(co, lua->L, nargs, &nres);
+    status = hl_lua_resume_status(co, status);
 
     lua->active_on_complete     = NULL;
     lua->active_on_complete_ctx = NULL;
@@ -122,30 +128,18 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         lua->active_conn = NULL;
         lua->active_req = NULL;
 
-        /* Pop any return values and routes table */
+        /* Pop any return values */
         if (nres > 0)
             lua_settop(co, 0);
-        lua_pop(lua->L, 1); /* pop routes table */
 
-        /* Free ctx if middleware set it */
-        if (req->ctx) {
-            HlReqCtx *rctx = (HlReqCtx *)req->ctx;
-            if (rctx->kind == HL_REQCTX_LUA_REF)
-                luaL_unref(lua->L, LUA_REGISTRYINDEX, rctx->lua_ref);
-            else if (rctx->kind == HL_REQCTX_JSON)
-                hl_alloc_free(lua->base.alloc, rctx->json.data, rctx->json.len + 1);
-            hl_alloc_free(lua->base.alloc, rctx, sizeof(HlReqCtx));
-            req->ctx = NULL;
-        }
+        free_req_ctx(lua, req);   /* free ctx if middleware set it */
         return 0;
     }
 
     if (status == LUA_YIELD) {
         /* Handler yielded - connection is suspended.
          * Don't clean up coroutine ref, don't free ctx.
-         * kl_async_suspend already removed client FD from event loop.
-         * Routes table stays on main state stack - cleaned up on resume. */
-        lua_pop(lua->L, 1); /* pop routes table */
+         * kl_async_suspend already removed client FD from event loop. */
         return 1; /* signal: handler suspended */
     }
 
@@ -159,18 +153,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua->active_conn = NULL;
     lua->active_req = NULL;
 
-    lua_pop(lua->L, 1); /* pop routes table */
-
-    /* Free ctx if middleware set it */
-    if (req->ctx) {
-        HlReqCtx *rctx = (HlReqCtx *)req->ctx;
-        if (rctx->kind == HL_REQCTX_LUA_REF)
-            luaL_unref(lua->L, LUA_REGISTRYINDEX, rctx->lua_ref);
-        else if (rctx->kind == HL_REQCTX_JSON)
-            hl_alloc_free(lua->base.alloc, rctx->json.data, rctx->json.len + 1);
-        hl_alloc_free(lua->base.alloc, rctx, sizeof(HlReqCtx));
-        req->ctx = NULL;
-    }
+    free_req_ctx(lua, req);   /* free ctx if middleware set it */
     return -1;
 }
 
@@ -193,6 +176,54 @@ void hl_lua_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
 
 /* ── Middleware dispatch ────────────────────────────────────────────── */
 
+/* Middleware runs to completion on the main state. Everything that
+ * allocates - building req / res, reading back req.ctx, the registry ref
+ * that carries ctx to the next stage - runs inside this one protected
+ * call: done unprotected around it, a memory error (or an error from an
+ * __index the middleware put on req) had nothing to unwind to and aborted
+ * the process. Results: (status code, ctx-ref or nil). */
+typedef struct {
+    HlLua          *lua;
+    KlHttpRequest  *req;
+    KlHttpResponse *res;
+    HlReqLife      *life;
+    int             handler_id;
+    int             ctx_ref;     /* out: registry ref to req.ctx, or LUA_NOREF */
+    int             result;      /* out: 0 continue, non-zero short-circuit */
+} HlMwRun;
+
+static int mw_run_k(lua_State *L)
+{
+    HlMwRun *m = (HlMwRun *)lua_touserdata(L, 1);
+    lua_settop(L, 0);
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_routes");
+    if (!lua_istable(L, -1))
+        return luaL_error(L, "no route table");
+    lua_rawgeti(L, -1, m->handler_id);
+    if (!lua_isfunction(L, -1))
+        return luaL_error(L, "middleware %d is not a function", m->handler_id);
+    hl_lua_make_request(L, m->req, m->life);              /* 3 */
+    lua_pushvalue(L, -1);                                 /* 4: req, kept */
+    lua_insert(L, 2);                                     /* routes,req,fn,req */
+    hl_lua_make_response_life(L, m->res, m->life);        /* ..., res */
+    lua_call(L, 2, 1);                                    /* routes,req,ret */
+
+    /* 0 = continue, non-zero = short-circuit */
+    if (lua_isnumber(L, -1))
+        m->result = (int)lua_tointeger(L, -1);
+    else if (lua_isboolean(L, -1))
+        m->result = lua_toboolean(L, -1) ? 1 : 0;
+    lua_pop(L, 1);
+
+    /* req.ctx, read raw: an __index (or a __newindex trap) on req is the
+     * middleware's own code and does not run here. */
+    lua_pushliteral(L, "ctx");
+    lua_rawget(L, 2);
+    if (lua_istable(L, -1))
+        m->ctx_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    return 0;
+}
+
 int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
                                KlHttpRequest *req, KlHttpResponse *res)
 {
@@ -202,104 +233,54 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
 
-    /* Re-arm instruction limit for this middleware call */
-    if (lua->max_instructions > 0)
-        lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    INSTR_COUNT(lua->max_instructions));
+    /* Arm the instruction budget for this middleware call */
+    HL_LUA_ARM(lua, lua->L);
 
     /* Reset scratch arena for this middleware call */
     sh_arena_reset(lua->scratch);
 
-    /* Get the handler function from the route registry */
-    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
-    if (!lua_istable(lua->L, -1)) {
-        lua_pop(lua->L, 1);
-        return -1;
-    }
-
-    lua_rawgeti(lua->L, -1, handler_id);
-    if (!lua_isfunction(lua->L, -1)) {
-        lua_pop(lua->L, 2); /* pop function + routes table */
-        return -1;
-    }
-
     /* Middleware runs to completion (lua_pcall, no yield), so its `res`
      * belongs to this call alone: the life ends as soon as it returns. */
     HlReqLife *life = hl_req_life_new();
-    if (!life) {
-        lua_pop(lua->L, 2); /* pop function + routes table */
+    if (!life)
+        return -1;
+
+    HlMwRun m = { lua, req, res, life, handler_id, LUA_NOREF, 0 };
+    lua_State *L = lua->L;
+    int base = lua_gettop(L);
+    if (!lua_checkstack(L, 8)) {
+        hl_req_life_end(life);
         return -1;
     }
-
-    /* Build request and response objects */
-    hl_lua_make_request(lua->L, req);
-    hl_lua_make_response_life(lua->L, res, life);
-
-    /* Save a reference to the req table in the registry so we can
-     * read ctx after pcall (which consumes the arguments). */
-    lua_pushvalue(lua->L, -2); /* copy req table */
-    lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
-
-    /* Call handler(req, res) - expect 1 return value */
-    int mw_rc = lua_pcall(lua->L, 2, 1, 0);
+    lua_pushcfunction(L, mw_run_k);
+    lua_pushlightuserdata(L, &m);
+    int mw_rc = lua_pcall(L, 1, 0, 0);
     hl_req_life_end(life);
     if (mw_rc != LUA_OK) {
         char ebuf[512];
         log_error("[hull:c] lua middleware error: %s",
-                  hl_lua_error_text(lua, lua->L, -1, ebuf, sizeof(ebuf)));
-        lua_pop(lua->L, 1); /* pop error message */
-        lua_pop(lua->L, 1); /* pop routes table */
-        /* Clean up registry ref */
-        lua_pushnil(lua->L);
-        lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
+                  hl_lua_error_text(lua, L, -1, ebuf, sizeof(ebuf)));
+        lua_settop(L, base);
+        if (m.ctx_ref != LUA_NOREF)
+            luaL_unref(L, LUA_REGISTRYINDEX, m.ctx_ref);
         return -1;
     }
-
-    /* Capture return value: 0 = continue, non-zero = short-circuit */
-    int result = 0;
-    if (lua_isnumber(lua->L, -1))
-        result = (int)lua_tointeger(lua->L, -1);
-    else if (lua_isboolean(lua->L, -1))
-        result = lua_toboolean(lua->L, -1) ? 1 : 0;
-    lua_pop(lua->L, 1); /* pop return value */
+    lua_settop(L, base);
 
     /* Store req.ctx as a Lua registry ref so the next middleware
      * or handler can retrieve the table directly (no JSON round-trip). */
-    lua_checkstack(lua->L, 4);
-    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
-    lua_getfield(lua->L, -1, "ctx");
-    if (lua_istable(lua->L, -1)) {
-        /* Free previous ctx if any */
-        if (req->ctx) {
-            HlReqCtx *old = (HlReqCtx *)req->ctx;
-            if (old->kind == HL_REQCTX_LUA_REF)
-                luaL_unref(lua->L, LUA_REGISTRYINDEX, old->lua_ref);
-            else if (old->kind == HL_REQCTX_JSON)
-                hl_alloc_free(lua->base.alloc, old->json.data, old->json.len + 1);
-            hl_alloc_free(lua->base.alloc, old, sizeof(HlReqCtx));
-            req->ctx = NULL;
-        }
-        /* Create registry ref to the ctx table */
-        int ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+    if (m.ctx_ref != LUA_NOREF) {
+        free_req_ctx(lua, req);   /* the previous stage's */
         HlReqCtx *rctx = hl_alloc_malloc(lua->base.alloc, sizeof(HlReqCtx));
         if (rctx) {
             rctx->kind = HL_REQCTX_LUA_REF;
-            rctx->lua_ref = ref;
+            rctx->lua_ref = m.ctx_ref;
             req->ctx = rctx;
         } else {
-            luaL_unref(lua->L, LUA_REGISTRYINDEX, ref);
+            luaL_unref(L, LUA_REGISTRYINDEX, m.ctx_ref);
         }
-    } else {
-        lua_pop(lua->L, 1); /* pop non-table ctx */
     }
-    lua_pop(lua->L, 1); /* pop saved req table */
-
-    /* Clean up registry ref */
-    lua_pushnil(lua->L);
-    lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
-
-    lua_pop(lua->L, 1); /* pop routes table */
-    return result;
+    return m.result;
 }
 
 int hl_lua_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data)

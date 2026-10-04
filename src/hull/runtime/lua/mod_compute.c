@@ -123,9 +123,12 @@ static void lua_register_wasm_buf_metatable(lua_State *L)
 /* Helper: push an HlWasmBuffer* as Lua userdata. Takes ownership of buf. */
 void lua_push_wasm_buffer(lua_State *L, HlWasmBuffer *buf)
 {
-    HlWasmBuffer **pp = lua_newuserdata(L, sizeof(HlWasmBuffer *));
-    *pp = buf;
-    luaL_setmetatable(L, HL_WASM_BUF_MT);
+    /* The userdata cannot be made first (callers already hold buf), so it
+     * is made without raising: a failure releases buf, then raises. */
+    if (hl_lua_push_slot_safe(L, HL_WASM_BUF_MT, buf) != 0) {
+        hl_wasm_buffer_close(buf);
+        luaL_error(L, "not enough memory for the buffer");
+    }
 }
 
 /* compute.buffer(string) -> WasmBuffer(OWNED) */
@@ -1003,9 +1006,10 @@ static int lua_compute_instance(lua_State *L)
         return 2;
     }
 
-    HlWasmInstance **pp = lua_newuserdata(L, sizeof(HlWasmInstance *));
-    *pp = pi;
-    luaL_setmetatable(L, HL_WASM_INST_MT);
+    if (hl_lua_push_slot_safe(L, HL_WASM_INST_MT, pi) != 0) {
+        hl_cap_wasm_instance_destroy(pi);
+        return luaL_error(L, "not enough memory for the instance");
+    }
     return 1;
 }
 

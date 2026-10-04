@@ -23,6 +23,7 @@
 #include "protected.h"   /* pushes that cannot leak the C buffer */
 
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 
 /* ── tar.parse ─────────────────────────────────────────────────────── */
@@ -104,10 +105,25 @@ static int l_tar_parse(lua_State *L)
 
 /* ── tar.create ────────────────────────────────────────────────────── */
 
+/* A HlTarEntry array as a userdata, pushed on the stack: Lua owns it, so a
+ * raise while it is filled (an entry's __index, a bad `mode` for
+ * luaL_optinteger) leaves it to the GC. calloc'd, every such raise leaked
+ * it outside the VM's memory limit. */
+static HlTarEntry *push_entry_array(lua_State *L, size_t n)
+{
+    if (n > SIZE_MAX / sizeof(HlTarEntry)) {
+        luaL_error(L, "tar: too many entries");
+        return NULL;
+    }
+    HlTarEntry *ents = (HlTarEntry *)lua_newuserdatauv(L, n * sizeof(HlTarEntry), 0);
+    memset(ents, 0, n * sizeof(HlTarEntry));
+    return ents;
+}
+
 /* Read the entries array at stack index 1 into a C HlTarEntry array. The
- * borrowed name/data pointers stay valid while arg 1 (and its nested strings)
- * remain on the stack. Returns a malloc'd array (caller frees) + count, or
- * NULL on a shape error (msg set). */
+ * borrowed name/data pointers stay valid while their strings are anchored.
+ * Pushes the array (push_entry_array) and returns it + count, or NULL on a
+ * shape error (msg set) or for an empty array (*out_n == 0). */
 static HlTarEntry *read_entries(lua_State *L, int idx, size_t *out_n,
                                 const char **msg, int anchor)
 {
@@ -115,18 +131,17 @@ static HlTarEntry *read_entries(lua_State *L, int idx, size_t *out_n,
         *msg = "tar.create: arg 1 must be a table of entries";
         return NULL;
     }
-    lua_Integer n = luaL_len(L, idx);
-    if (n < 0) { *msg = "tar.create: bad entry count"; return NULL; }
+    lua_Unsigned rn = lua_rawlen(L, idx);   /* raw: no __len */
+    if (rn > (lua_Unsigned)INT_MAX) { *msg = "tar.create: bad entry count"; return NULL; }
+    lua_Integer n = (lua_Integer)rn;
     if (n == 0) { *out_n = 0; return NULL; }   /* empty -> caller handles */
 
-    HlTarEntry *ents = (HlTarEntry *)calloc((size_t)n, sizeof(HlTarEntry));
-    if (!ents) { *msg = "out_of_memory"; return NULL; }
+    HlTarEntry *ents = push_entry_array(L, (size_t)n);
 
     for (lua_Integer i = 1; i <= n; i++) {
         lua_geti(L, idx, i);                    /* entry table */
         if (lua_type(L, -1) != LUA_TTABLE) {
             lua_pop(L, 1);
-            free(ents);
             *msg = "tar.create: each entry must be a table";
             return NULL;
         }
@@ -138,7 +153,6 @@ static HlTarEntry *read_entries(lua_State *L, int idx, size_t *out_n,
         lua_pop(L, 1);
         if (!e->name) {
             lua_pop(L, 1);
-            free(ents);
             *msg = "tar.create: entry missing 'name'";
             return NULL;
         }
@@ -185,8 +199,7 @@ static int l_tar_create(lua_State *L)
 
     unsigned char *out = NULL;
     size_t out_len = 0;
-    int rc = hl_tar_create(ents, n, &out, &out_len);
-    free(ents);
+    int rc = hl_tar_create(ents, n, &out, &out_len);   /* ents: Lua-owned */
     if (rc != 0) {
         lua_pushnil(L);
         lua_pushstring(L, "tar.create: unsafe name or out of memory");
@@ -277,26 +290,21 @@ static int l_tar_pack(lua_State *L)
         lua_pushstring(L, "tar.pack: arg 1 must be an array of files");
         return 2;
     }
-    lua_Integer n = luaL_len(L, 1);
-    if (n <= 0) {
+    lua_Unsigned rn = lua_rawlen(L, 1);     /* raw: no __len */
+    if (rn == 0 || rn > (lua_Unsigned)INT_MAX) {
         lua_pushnil(L);
         lua_pushstring(L, "tar.pack: no files");
         return 2;
     }
+    lua_Integer n = (lua_Integer)rn;
 
-    HlTarEntry *ents = (HlTarEntry *)calloc((size_t)n, sizeof(HlTarEntry));
-    /* Parallel arrays of read buffers and entry names to free after create.
-     * The names are copies: hl_tar_create runs after the loop, when nothing
-     * on the stack references them any more (an __index may have produced
-     * them, and a number is converted in place). */
-    char **bufs = (char **)calloc((size_t)n, sizeof(char *));
-    char **names = (char **)calloc((size_t)n, sizeof(char *));
-    if (!ents || !bufs || !names) {
-        free(ents); free(bufs); free(names);
-        lua_pushnil(L);
-        lua_pushstring(L, "out_of_memory");
-        return 2;
-    }
+    /* Everything the entries point into is Lua-owned and anchored: the
+     * entry array, each file's contents (a userdata buffer) and each name
+     * (the string itself). Malloc'd, an entry's __index that raised - or a
+     * memory error - leaked every file read so far. */
+    lua_settop(L, 1);
+    lua_newtable(L);                    /* 2: anchors */
+    HlTarEntry *ents = push_entry_array(L, (size_t)n);   /* 3 */
 
     const char *err = NULL;
     lua_Integer built = 0;
@@ -311,28 +319,27 @@ static int l_tar_pack(lua_State *L)
             lua_getfield(L, -1, "path"); path = lua_tostring(L, -1);
             lua_getfield(L, -2, "name"); name = lua_tostring(L, -1);
             pushed = 3;
-            if (!name) name = path;
+            if (!name) { name = path; }
+            else hl_lua_anchor(L, 2, -1);   /* the name string */
         }
         if (!path) { lua_pop(L, pushed); err = "tar.pack: entry needs a path"; break; }
-        names[i - 1] = strdup(name);
-        if (!names[i - 1]) { lua_pop(L, pushed); err = "out_of_memory"; break; }
+        hl_lua_anchor(L, 2, pushed == 3 ? -2 : -1);   /* the path string */
 
         int64_t size = hl_cap_fs_read(lua->base.fs_cfg, path, NULL, 0, &err);
         if (size < 0) { lua_pop(L, pushed); break; }
-        char *buf = (char *)malloc(size ? (size_t)size : 1);
-        if (!buf) { lua_pop(L, pushed); err = "out_of_memory"; break; }
+        char *buf = (char *)lua_newuserdatauv(L, size ? (size_t)size : 1, 0);
+        hl_lua_anchor(L, 2, -1);
+        lua_pop(L, 1);
         int64_t got = 0;
         if (size > 0) {
             got = hl_cap_fs_read(lua->base.fs_cfg, path, buf, (size_t)size, &err);
-            if (got < 0) { free(buf); lua_pop(L, pushed); break; }
+            if (got < 0) { lua_pop(L, pushed); break; }
         }
-        bufs[i - 1] = buf;
         HlTarEntry *e = &ents[i - 1];
-        e->name = names[i - 1];
+        e->name = name;
         e->data = (const unsigned char *)buf;
         /* What was read, not the size probed before it: a file that shrank
-         * in between left the rest of the malloc'd buffer - uninitialised
-         * heap - in the archive. */
+         * in between left the rest of the buffer in the archive. */
         e->size = (size_t)got;
         e->mode = 0644;
         e->is_dir = 0;
@@ -345,11 +352,6 @@ static int l_tar_pack(lua_State *L)
     int rc = -1;
     if (!err && built == n)
         rc = hl_tar_create(ents, (size_t)n, &out, &out_len);
-
-    for (lua_Integer i = 0; i < n; i++) { free(bufs[i]); free(names[i]); }
-    free(bufs);
-    free(names);
-    free(ents);
 
     if (rc != 0) {
         lua_pushnil(L);

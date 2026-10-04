@@ -104,9 +104,12 @@ static char *dup_str(const char *s, size_t n)
 }
 
 /* (args: manifest) -> json */
+/* Not a "hull."-named chunk: that name is the stdlib's identity, and this
+ * runs beside the app's own code. The encoder comes from the runtime's
+ * internal stash (passed in), not through the app-replaceable `require`. */
 static const char ENCODE_CHUNK[] =
-    "local m = ...\n"
-    "return require('hull.json').encode(m)\n";
+    "local m, json = ...\n"
+    "return json.encode(m)\n";
 
 int hl_lua_extract_manifest_json(const char *path, const HlVfs *platform_vfs,
                                  char **out_json, size_t *out_len, char **out_err)
@@ -173,10 +176,11 @@ int hl_lua_extract_manifest_json(const char *path, const HlVfs *platform_vfs,
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
     if (lua_istable(L, -1)) {
         int mi = lua_gettop(L);
-        if (luaL_loadbuffer(L, ENCODE_CHUNK, sizeof ENCODE_CHUNK - 1,
-                            "=hull.extract") == LUA_OK) {
+        if (luaL_loadbufferx(L, ENCODE_CHUNK, sizeof ENCODE_CHUNK - 1,
+                             "=manifest-extract", "t") == LUA_OK) {
             lua_pushvalue(L, mi);
-            if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_type(L, -1) == LUA_TSTRING) {
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
+            if (lua_pcall(L, 2, 1, 0) == LUA_OK && lua_type(L, -1) == LUA_TSTRING) {
                 size_t jlen = 0;
                 const char *j = lua_tolstring(L, -1, &jlen);
                 *out_json = dup_str(j, jlen);

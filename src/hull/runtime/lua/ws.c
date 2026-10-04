@@ -27,6 +27,40 @@
 
 #include <limits.h>
 
+/* Arguments for a ws callback, pushed under the protected entry
+ * (hl_lua_entry_prepare): the conn, then - for a message - the bytes and the
+ * binary flag, or - for a close - the code and the reason. The message is
+ * the peer's, of the peer's size: pushed unprotected, a memory error there
+ * aborted the process. */
+typedef struct {
+    HlWsConn   *conn;
+    int         kind;        /* 0 open, 1 message, 2 close */
+    const char *data;
+    size_t      len;
+    int         is_binary;
+    uint16_t    code;
+} HlWsArgs;
+
+static int push_ws_args(lua_State *L, void *ud)
+{
+    HlWsArgs *a = (HlWsArgs *)ud;
+    hl_lua_ws_push_conn(L, a->conn);
+    if (a->kind == 1) {
+        lua_pushlstring(L, a->data ? a->data : "", a->data ? a->len : 0);
+        lua_pushboolean(L, a->is_binary);
+        return 3;
+    }
+    if (a->kind == 2) {
+        lua_pushinteger(L, a->code);
+        if (a->data && a->len > 0)
+            lua_pushlstring(L, a->data, a->len);
+        else
+            lua_pushnil(L);
+        return 3;
+    }
+    return 1;
+}
+
 void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
 {
     HlLuaWsRoute *route = (HlLuaWsRoute *)user_data;
@@ -41,34 +75,25 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     if (route->on_open_id < 0)
         return;
 
-    /* Create coroutine for this callback */
-
-    lua_State *co = lua_newthread(lua->L);
-    int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+    /* The coroutine with on_open(conn) on it, built protected. */
+    HlWsArgs args = { conn, 0, NULL, 0, 0, 0 };
+    int thread_ref = LUA_NOREF, nargs = 0;
+    lua_State *co = hl_lua_entry_prepare(lua, "__hull_routes", route->on_open_id,
+                                         push_ws_args, &args, &thread_ref, &nargs);
+    if (!co)
+        return;
     lua->active_co = co;
     lua->active_thread_ref = thread_ref;
     lua->active_conn = NULL; /* detached - no HTTP connection */
     lua->active_req = NULL;
     lua->active_timer = NULL;
 
-    /* Push handler function */
-    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
-    lua_rawgeti(lua->L, -1, route->on_open_id);
-    lua_xmove(lua->L, co, 1);
-    lua_pop(lua->L, 1); /* pop __hull_routes */
-
-    /* Push conn userdata */
-    hl_lua_ws_push_conn(co, conn);
-
-    /* Re-arm instruction limit */
-    if (lua->max_instructions > 0) {
-        lua_sethook(co, NULL, 0, 0);
-        lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    INSTR_COUNT(lua->max_instructions));
-    }
+    /* Arm the instruction budget for this run */
+    HL_LUA_ARM(lua, co);
 
     int nres = 0;
-    int status = lua_resume(co, lua->L, 1, &nres);
+    int status = lua_resume(co, lua->L, nargs, &nres);
+    status = hl_lua_resume_status(co, status);
 
     if (status == LUA_OK) {
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
@@ -102,34 +127,25 @@ void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
         return;
 
 
-    lua_State *co = lua_newthread(lua->L);
-    int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+    /* The coroutine with on_message(conn, data, is_binary), protected. */
+    HlWsArgs args = { conn, 1, data, len, is_binary, 0 };
+    int thread_ref = LUA_NOREF, nargs = 0;
+    lua_State *co = hl_lua_entry_prepare(lua, "__hull_routes", route->on_message_id,
+                                         push_ws_args, &args, &thread_ref, &nargs);
+    if (!co)
+        return;
     lua->active_co = co;
     lua->active_thread_ref = thread_ref;
     lua->active_conn = NULL; /* detached */
     lua->active_req = NULL;
     lua->active_timer = NULL;
 
-    /* Push handler function */
-    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
-    lua_rawgeti(lua->L, -1, route->on_message_id);
-    lua_xmove(lua->L, co, 1);
-    lua_pop(lua->L, 1);
-
-    /* Push conn userdata, message, is_binary */
-    hl_lua_ws_push_conn(co, conn);
-    lua_pushlstring(co, data, len);
-    lua_pushboolean(co, is_binary);
-
-    /* Re-arm instruction limit */
-    if (lua->max_instructions > 0) {
-        lua_sethook(co, NULL, 0, 0);
-        lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    INSTR_COUNT(lua->max_instructions));
-    }
+    /* Arm the instruction budget for this run */
+    HL_LUA_ARM(lua, co);
 
     int nres = 0;
-    int status = lua_resume(co, lua->L, 3, &nres);
+    int status = lua_resume(co, lua->L, nargs, &nres);
+    status = hl_lua_resume_status(co, status);
 
     if (status == LUA_OK) {
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
@@ -172,35 +188,20 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
 
     conn->closed = 1;
 
-    if (route->on_close_id >= 0) {
-
-        lua_State *co = lua_newthread(lua->L);
-        int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+    HlWsArgs args = { conn, 2, reason, reason_len, 0, code };
+    int thread_ref = LUA_NOREF, nargs = 0;
+    lua_State *co = route->on_close_id >= 0
+        ? hl_lua_entry_prepare(lua, "__hull_routes", route->on_close_id,
+                               push_ws_args, &args, &thread_ref, &nargs)
+        : NULL;
+    if (co) {
         lua->active_co = co;
         lua->active_thread_ref = thread_ref;
         lua->active_conn = NULL;
         lua->active_req = NULL;
         lua->active_timer = NULL;
 
-        /* Push handler function */
-        lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
-        lua_rawgeti(lua->L, -1, route->on_close_id);
-        lua_xmove(lua->L, co, 1);
-        lua_pop(lua->L, 1);
-
-        /* Push conn, code, reason */
-        hl_lua_ws_push_conn(co, conn);
-        lua_pushinteger(co, code);
-        if (reason && reason_len > 0)
-            lua_pushlstring(co, reason, reason_len);
-        else
-            lua_pushnil(co);
-
-        if (lua->max_instructions > 0) {
-            lua_sethook(co, NULL, 0, 0);
-            lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                        INSTR_COUNT(lua->max_instructions));
-        }
+        HL_LUA_ARM(lua, co);
 
         /* Arm the deferred-teardown hook: if the handler yields (async op),
          * hl_lua_async_cont_create captures it so the teardown below runs
@@ -210,7 +211,8 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         lua->active_on_complete_ctx = conn;
 
         int nres = 0;
-        int status = lua_resume(co, lua->L, 3, &nres);
+        int status = lua_resume(co, lua->L, nargs, &nres);
+        status = hl_lua_resume_status(co, status);
 
         lua->active_on_complete     = NULL;
         lua->active_on_complete_ctx = NULL;

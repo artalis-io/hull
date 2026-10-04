@@ -235,7 +235,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 - **Prevention:**
   - QuickJS: Instruction-count interrupt handler via `JS_SetInterruptHandler`. Configurable `max_instructions` limit (default 100M). Exceeding → JS exception.
-  - Lua: Instruction-count hook via `lua_sethook(LUA_MASKCOUNT)`. Same configurable `max_instructions` limit (default 100M). Exceeding → `luaL_error("instruction limit exceeded")`. Hook is re-applied on every dispatch, coroutine resume, and async continuation.
+  - Lua: Instruction-count hook via `lua_sethook(LUA_MASKCOUNT)`. Same configurable `max_instructions` limit (default 100M). Exceeding → `luaL_error("instruction limit exceeded")`. The budget is armed afresh on every entry (dispatch, middleware, timer, ws/SSE callback, async continuation, `app.main`), so the limit applies per uninterrupted run. Once it trips it stays tripped until the next entry: `pcall`, `xpcall`, `coroutine.resume` and `coroutine.wrap` re-raise it (before, a `pcall` caught the error and the spent hook never fired again).
   - Both: Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var.
 
 **Attack: Exfiltrate data to unauthorized hosts**
@@ -1840,7 +1840,7 @@ These are real, not theoretical:
 | Limitation | Impact | Mitigation |
 |------------|--------|------------|
 | macOS Seatbelt returns EPERM, not SIGKILL | App survives sandbox violations (operation denied, process continues) | C-level caps also return errors; net effect is the same |
-| Lua instruction hook is per-VM, not per-coroutine-instruction | Hook fires every N VM instructions globally; coroutine yields reset the counter | Both runtimes enforce the same default 100M instruction limit |
+| Lua instruction budget is per uninterrupted run, not per request | Every entry re-arms the whole limit, so a request that yields to async I/O many times may execute more than `max_instructions` in total | Each run is bounded and the trip cannot be caught; the wall-clock bound is the request / async timeouts |
 | Canary is not foolproof | Attacker could embed magic bytes in custom binary | Reproducible builds (`make reproducible-check`, CI-gated) eliminate this |
 | `realpath()` is TOCTOU | Race between check and use | Kernel unveil prevents actual access |
 | Default CSP blocks client-side JS | Apps needing fetch/AJAX must customize CSP | `app.manifest({ csp = "default-src 'self'; connect-src 'self'" })` |

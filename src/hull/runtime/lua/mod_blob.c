@@ -60,7 +60,11 @@ typedef struct {
     HlBlob *b;
 } LuaBlobUd;
 
-/* Fetch the singleton; raise if blob.init() hasn't been called. */
+/* Fetch the singleton; raise if blob.init() hasn't been called. The
+ * store's userdata is LEFT ON THE STACK, anchoring the store for the rest of
+ * the call: popped, an __index on an options table could run blob.init
+ * (replacing the registry's store) and collectgarbage() (finalizing the old
+ * one), and the HlBlob in hand was then used after it was freed. */
 static HlBlob *get_store(lua_State *L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, HL_BLOB_REG_KEY);
@@ -71,7 +75,6 @@ static HlBlob *get_store(lua_State *L)
     }
     LuaBlobUd *s = (LuaBlobUd *)luaL_checkudata(L, -1, HL_BLOB_MT);
     HlBlob *b = s ? s->b : NULL;
-    lua_pop(L, 1);
     if (!b) {
         luaL_error(L, "blob: store unavailable (was freed)");
         return NULL;
@@ -109,17 +112,18 @@ static int lua_blob_init(lua_State *L)
     uint64_t tmp_max_age = lua_isnil(L, -1) ? 0
                                             : (uint64_t)luaL_checkinteger(L, -1);
 
-    HlBlob *b = NULL;
-    int rc = hl_cap_blob_init(&b, lua->base.fs_cfg, lua->base.alloc,
+    /* The userdata first, the store after: made the other way round, a
+     * memory error creating the userdata leaked the HlBlob. */
+    LuaBlobUd *s = (LuaBlobUd *)lua_newuserdatauv(L, sizeof(*s), 0);
+    s->b = NULL;
+    luaL_setmetatable(L, HL_BLOB_MT);
+    int rc = hl_cap_blob_init(&s->b, lua->base.fs_cfg, lua->base.alloc,
                                 dir, shard_depth, tmp_max_age);
     if (rc != 0)
         return luaL_error(L, "blob.init: failed (check fs.write declares '%s')", dir);
 
     /* Drop any previous singleton (re-init is allowed). The old
      * userdata's __gc will fire on GC, freeing the old HlBlob. */
-    LuaBlobUd *s = (LuaBlobUd *)lua_newuserdatauv(L, sizeof(*s), 0);
-    s->b = b;
-    luaL_setmetatable(L, HL_BLOB_MT);
     lua_pushvalue(L, -1);
     lua_setfield(L, LUA_REGISTRYINDEX, HL_BLOB_REG_KEY);
     lua_pop(L, 1);                /* pop our local ref */
@@ -213,6 +217,7 @@ static HlBlobWriterLua *check_writer_ud(lua_State *L, int idx)
 static int lua_blob_writer_new(lua_State *L)
 {
     HlBlob *b = get_store(L);
+    int store_idx = lua_gettop(L);
     const char *expected = NULL;
     int durable = 0;
     if (lua_istable(L, 1)) {
@@ -225,22 +230,22 @@ static int lua_blob_writer_new(lua_State *L)
         lua_pop(L, 1);
     }
 
-    HlBlobWriter *w = NULL;
-    int open_rc = durable
-        ? hl_cap_blob_writer_open_durable(b, expected, &w)
-        : hl_cap_blob_writer_open(b, expected, &w);
-    if (open_rc != 0)
-        return luaL_error(L, "blob.writer: open failed");
-
-    /* One user value: the store, kept alive while the writer is. A later
-     * blob.init replaces the registry's store; its __gc then freed the
-     * HlBlob this writer still used. */
+    /* One user value: the store, kept alive while the writer is - the one
+     * this call holds (store_idx), not the registry's, which an options
+     * __index above may have replaced. The userdata is made before the
+     * writer, so a memory error cannot leak an open writer. */
     HlBlobWriterLua *ud = (HlBlobWriterLua *)
         lua_newuserdatauv(L, sizeof(*ud), 1);
-    ud->w = w;
+    ud->w = NULL;
     luaL_setmetatable(L, HL_BLOB_WRITER_MT);
-    lua_getfield(L, LUA_REGISTRYINDEX, HL_BLOB_REG_KEY);
+    lua_pushvalue(L, store_idx);
     lua_setiuservalue(L, -2, 1);
+
+    int open_rc = durable
+        ? hl_cap_blob_writer_open_durable(b, expected, &ud->w)
+        : hl_cap_blob_writer_open(b, expected, &ud->w);
+    if (open_rc != 0)
+        return luaL_error(L, "blob.writer: open failed");
     return 1;
 }
 
@@ -315,20 +320,20 @@ static int read_track_access(lua_State *L, int idx)
 static int lua_blob_reader_new(lua_State *L)
 {
     HlBlob *b = get_store(L);
+    int store_idx = lua_gettop(L);
     const char *id = check_id(L, 1);
     int track = read_track_access(L, 2);
 
-    HlBlobReader *r = NULL;
-    if (hl_cap_blob_reader_open(b, id, track, &r) != 0)
-        return luaL_error(L, "blob.reader: blob not found");
-
-    /* One user value: the store, kept alive while the reader is. */
+    /* One user value: the store this call holds (see the writer). The
+     * userdata first, so a memory error cannot leak an open reader. */
     HlBlobReaderLua *ud = (HlBlobReaderLua *)
         lua_newuserdatauv(L, sizeof(*ud), 1);
-    ud->r = r;
+    ud->r = NULL;
     luaL_setmetatable(L, HL_BLOB_READER_MT);
-    lua_getfield(L, LUA_REGISTRYINDEX, HL_BLOB_REG_KEY);
+    lua_pushvalue(L, store_idx);
     lua_setiuservalue(L, -2, 1);
+    if (hl_cap_blob_reader_open(b, id, track, &ud->r) != 0)
+        return luaL_error(L, "blob.reader: blob not found");
     return 1;
 }
 
@@ -534,6 +539,17 @@ static int lua_blob_iter(lua_State *L)
     HlBlob *b = get_store(L);
     HlLua *lua = get_hl_lua(L);
 
+    /* The state's userdata first, owning nothing yet: made after the walk,
+     * a memory error creating it leaked the collected array. */
+    IterState *st = (IterState *)lua_newuserdatauv(L, sizeof(*st), 0);
+    memset(st, 0, sizeof *st);
+    st->alloc = lua->base.alloc;
+    if (luaL_newmetatable(L, "HlBlobIterState")) {
+        lua_pushcfunction(L, lua_iter_state_gc);
+        lua_setfield(L, -2, "__gc");
+    }
+    lua_setmetatable(L, -2);
+
     IterAcc acc = { lua->base.alloc, NULL, 0, 0 };
     if (hl_cap_blob_iter(b, iter_collect_cb, &acc) != 0) {
         if (acc.items)
@@ -542,20 +558,11 @@ static int lua_blob_iter(lua_State *L)
         return luaL_error(L, "blob.iter: walk failed");
     }
 
-    /* Move the collected array into a userdata so __gc cleans it. */
-    IterState *st = (IterState *)lua_newuserdatauv(L, sizeof(*st), 0);
-    st->alloc    = acc.alloc;
+    /* Hand the collected array to the state, whose __gc cleans it. */
     st->items    = acc.items;
     st->count    = acc.count;
     st->capacity = acc.capacity;
     st->pos      = 0;
-
-    /* Metatable with __gc. */
-    if (luaL_newmetatable(L, "HlBlobIterState")) {
-        lua_pushcfunction(L, lua_iter_state_gc);
-        lua_setfield(L, -2, "__gc");
-    }
-    lua_setmetatable(L, -2);
 
     /* Push the iterator function with the state as upvalue. */
     lua_pushcclosure(L, lua_iter_step, 1);

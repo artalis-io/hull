@@ -13,6 +13,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"   /* HL_LUA_ARM */
 #include "hull/cap/http.h"
 #include "hull/utils/alloc.h"
 
@@ -104,6 +105,19 @@ static int lua_ws_client_ping(lua_State *L)
     return 0;
 }
 
+static void unref_slot(lua_State *L, int *ref)
+{
+    if (*ref != LUA_NOREF) {
+        luaL_unref(L, LUA_REGISTRYINDEX, *ref);
+        *ref = LUA_NOREF;
+    }
+}
+
+/* The finalizer. Not reachable from app code: the metatable is locked and
+ * methods live in a separate table. As a method (`conn:__gc()`), it freed a
+ * KlWsClientConn Keel still dispatched to, and the real finalizer then
+ * unref'd the same refs a second time, corrupting the registry. Each ref is
+ * reset once released, so a second call is harmless anyway. */
 static int lua_ws_client_gc(lua_State *L)
 {
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
@@ -112,16 +126,11 @@ static int lua_ws_client_gc(lua_State *L)
         kl_ws_client_free(ud->client);
         ud->client = NULL;
     }
-    if (ud->on_open_ref != LUA_NOREF)
-        luaL_unref(L, LUA_REGISTRYINDEX, ud->on_open_ref);
-    if (ud->on_message_ref != LUA_NOREF)
-        luaL_unref(L, LUA_REGISTRYINDEX, ud->on_message_ref);
-    if (ud->on_close_ref != LUA_NOREF)
-        luaL_unref(L, LUA_REGISTRYINDEX, ud->on_close_ref);
-    if (ud->on_error_ref != LUA_NOREF)
-        luaL_unref(L, LUA_REGISTRYINDEX, ud->on_error_ref);
-    if (ud->self_ref != LUA_NOREF)
-        luaL_unref(L, LUA_REGISTRYINDEX, ud->self_ref);
+    unref_slot(L, &ud->on_open_ref);
+    unref_slot(L, &ud->on_message_ref);
+    unref_slot(L, &ud->on_close_ref);
+    unref_slot(L, &ud->on_error_ref);
+    unref_slot(L, &ud->self_ref);
     return 0;
 }
 
@@ -130,17 +139,83 @@ static const luaL_Reg ws_client_conn_methods[] = {
     {"send_binary", lua_ws_client_send_binary},
     {"close",       lua_ws_client_close},
     {"ping",        lua_ws_client_ping},
-    {"__gc",        lua_ws_client_gc},
     {NULL, NULL}
 };
 
 static void hl_lua_ws_register_client_conn_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_WS_CLIENT_CONN_MT);
+    lua_pushcfunction(L, lua_ws_client_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_newtable(L);
     luaL_setfuncs(L, ws_client_conn_methods, 0);
-    lua_pushvalue(L, -1);
     lua_setfield(L, -2, "__index");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
+}
+
+/* A client callback, run as one protected call on the main state: the
+ * callback, self, and the event's values (a message is the peer's, of the
+ * peer's size) are pushed inside it. Pushed before lua_pcall, a memory error
+ * had nothing to unwind to and aborted the process. Each is its own run of
+ * the instruction budget. */
+typedef struct {
+    int         fn_ref;
+    int         self_ref;
+    int         kind;       /* 0 open, 1 message, 2 close, 3 error */
+    const char *data;
+    size_t      len;
+    int         flag;       /* message: is_binary */
+    int         code;       /* close: code */
+} HlWscCall;
+
+static int ws_client_call_k(lua_State *L)
+{
+    HlWscCall *c = (HlWscCall *)lua_touserdata(L, 1);
+    lua_settop(L, 0);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, c->fn_ref);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, c->self_ref);
+    int n = 1;
+    switch (c->kind) {
+    case 1:
+        lua_pushlstring(L, c->data ? c->data : "", c->data ? c->len : 0);
+        lua_pushboolean(L, c->flag);
+        n = 3;
+        break;
+    case 2:
+        lua_pushinteger(L, c->code);
+        if (c->data && c->len > 0) lua_pushlstring(L, c->data, c->len);
+        else                       lua_pushnil(L);
+        n = 3;
+        break;
+    case 3:
+        lua_pushstring(L, c->data ? c->data : "unknown");
+        n = 2;
+        break;
+    default:
+        break;
+    }
+    lua_call(L, n, 0);
+    return 0;
+}
+
+static void ws_client_call(HlLuaWsClientUD *ud, HlWscCall *c, const char *what)
+{
+    lua_State *L = ud->L;
+    if (!lua_checkstack(L, 8)) {
+        log_error("[hull:ws:client] %s: out of memory", what);
+        return;
+    }
+    HL_LUA_ARM(ud->lua, L);
+    lua_pushcfunction(L, ws_client_call_k);
+    lua_pushlightuserdata(L, c);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        char ebuf[512];
+        log_error("[hull:ws:client] %s error: %s", what,
+                  hl_lua_error_text(ud->lua, L, -1, ebuf, sizeof ebuf));
+        lua_pop(L, 1);
+    }
 }
 
 /* Client callbacks */
@@ -152,13 +227,8 @@ static void lua_ws_client_on_open(KlWsClientConn *ws, void *user_data)
     if (ud->on_open_ref == LUA_NOREF)
         return;
 
-    lua_rawgeti(ud->L, LUA_REGISTRYINDEX, ud->on_open_ref);
-    lua_rawgeti(ud->L, LUA_REGISTRYINDEX, ud->self_ref);
-    if (lua_pcall(ud->L, 1, 0, 0) != LUA_OK) {
-        const char *err = lua_tostring(ud->L, -1);
-        log_error("[hull:ws:client] on_open error: %s", err ? err : "unknown");
-        lua_pop(ud->L, 1);
-    }
+    HlWscCall c = { ud->on_open_ref, ud->self_ref, 0, NULL, 0, 0, 0 };
+    ws_client_call(ud, &c, "on_open");
 }
 
 static void lua_ws_client_on_message(KlWsClientConn *ws, const char *data,
@@ -170,16 +240,9 @@ static void lua_ws_client_on_message(KlWsClientConn *ws, const char *data,
     if (ud->on_message_ref == LUA_NOREF)
         return;
 
-    lua_rawgeti(ud->L, LUA_REGISTRYINDEX, ud->on_message_ref);
-    lua_rawgeti(ud->L, LUA_REGISTRYINDEX, ud->self_ref);
-    lua_pushlstring(ud->L, data, len);
-    lua_pushboolean(ud->L, is_binary);
-    if (lua_pcall(ud->L, 3, 0, 0) != LUA_OK) {
-        const char *err = lua_tostring(ud->L, -1);
-        log_error("[hull:ws:client] on_message error: %s",
-                  err ? err : "unknown");
-        lua_pop(ud->L, 1);
-    }
+    HlWscCall c = { ud->on_message_ref, ud->self_ref, 1, data, len,
+                    is_binary, 0 };
+    ws_client_call(ud, &c, "on_message");
 }
 
 /* The connection is over (closed, or failed - Keel closes it before calling
@@ -206,19 +269,9 @@ static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
 
     if (ud->on_close_ref != LUA_NOREF) {
-        lua_rawgeti(ud->L, LUA_REGISTRYINDEX, ud->on_close_ref);
-        lua_rawgeti(ud->L, LUA_REGISTRYINDEX, ud->self_ref);
-        lua_pushinteger(ud->L, code);
-        if (reason && reason_len > 0)
-            lua_pushlstring(ud->L, reason, reason_len);
-        else
-            lua_pushnil(ud->L);
-        if (lua_pcall(ud->L, 3, 0, 0) != LUA_OK) {
-            const char *err = lua_tostring(ud->L, -1);
-            log_error("[hull:ws:client] on_close error: %s",
-                      err ? err : "unknown");
-            lua_pop(ud->L, 1);
-        }
+        HlWscCall c = { ud->on_close_ref, ud->self_ref, 2, reason, reason_len,
+                        0, code };
+        ws_client_call(ud, &c, "on_close");
     }
 
     lua_ws_client_finish(ud);
@@ -235,15 +288,8 @@ static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
         return;
     }
 
-    lua_rawgeti(ud->L, LUA_REGISTRYINDEX, ud->on_error_ref);
-    lua_rawgeti(ud->L, LUA_REGISTRYINDEX, ud->self_ref);
-    lua_pushstring(ud->L, msg ? msg : "unknown");
-    if (lua_pcall(ud->L, 2, 0, 0) != LUA_OK) {
-        const char *err = lua_tostring(ud->L, -1);
-        log_error("[hull:ws:client] on_error callback error: %s",
-                  err ? err : "unknown");
-        lua_pop(ud->L, 1);
-    }
+    HlWscCall c = { ud->on_error_ref, ud->self_ref, 3, msg, 0, 0, 0 };
+    ws_client_call(ud, &c, "on_error");
     /* Terminal: Keel closed the connection and will not call on_close, so
      * this is where the client is released (it stayed pinned until VM
      * teardown). */

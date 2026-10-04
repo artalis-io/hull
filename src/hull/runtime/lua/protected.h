@@ -25,6 +25,7 @@
 #define HL_RUNTIME_LUA_PROTECTED_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "hull/cap/types.h"   /* HlColumn */
 #include "lua.h"
@@ -55,6 +56,34 @@ static inline int hl_lua_pushlstring_safe(lua_State *L, const void *p, size_t n)
         lua_pop(L, 1);
         return -1;
     }
+    return 0;
+}
+
+static inline int hl_lua_newslot_k(lua_State *L)
+{
+    const char *mt = (const char *)lua_touserdata(L, 1);
+    void **slot = (void **)lua_newuserdatauv(L, sizeof(void *), 0);
+    *slot = NULL;
+    luaL_setmetatable(L, mt);
+    return 1;
+}
+
+/* Push a new pointer-slot userdata with metatable @p mt and store @p obj in
+ * it. 0 when pushed; -1 when it could not be (out of memory), with nothing
+ * pushed and @p obj NOT stored - the caller frees it, then raises. Made the
+ * plain way, the C object was created first and a failure making its
+ * userdata raised past it (a WASM / GPU output buffer, a decoded image). */
+static inline int hl_lua_push_slot_safe(lua_State *L, const char *mt, void *obj)
+{
+    if (!lua_checkstack(L, 2))
+        return -1;
+    lua_pushcfunction(L, hl_lua_newslot_k);
+    lua_pushlightuserdata(L, (void *)(uintptr_t)mt);
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        lua_pop(L, 1);
+        return -1;
+    }
+    *(void **)lua_touserdata(L, -1) = obj;
     return 0;
 }
 
