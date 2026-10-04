@@ -17,6 +17,7 @@
  */
 
 #include "hull/runtime/lua.h"
+#include "internal.h"   /* hl_lua_manifest_json */
 #include "hull/module_registry.h"
 #include "hull/utils/alloc.h"
 
@@ -103,13 +104,6 @@ static char *dup_str(const char *s, size_t n)
     return out;
 }
 
-/* (args: manifest) -> json */
-/* Not a "hull."-named chunk: that name is the stdlib's identity, and this
- * runs beside the app's own code. The encoder comes from the runtime's
- * internal stash (passed in), not through the app-replaceable `require`. */
-static const char ENCODE_CHUNK[] =
-    "local m, json = ...\n"
-    "return json.encode(m)\n";
 
 int hl_lua_extract_manifest_json(const char *path, const HlVfs *platform_vfs,
                                  char **out_json, size_t *out_len, char **out_err)
@@ -173,26 +167,22 @@ int hl_lua_extract_manifest_json(const char *path, const HlVfs *platform_vfs,
     /* Whatever app.manifest() captured counts, even when the top level raised
      * later (a later line touching a capability that has no backing here). */
     int rc = 0;
+    /* Encoded in C from the stored table (manifest_json.c), as the runtime
+     * encodes it for --verify-sig: the Lua json.encode is the very table the
+     * app's own code gets from require("hull.json") and can rewrite, so a
+     * replaced encode had a benign manifest signed while the real one
+     * applied. */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
-    if (lua_istable(L, -1)) {
-        int mi = lua_gettop(L);
-        if (luaL_loadbufferx(L, ENCODE_CHUNK, sizeof ENCODE_CHUNK - 1,
-                             "=manifest-extract", "t") == LUA_OK) {
-            lua_pushvalue(L, mi);
-            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
-            if (lua_pcall(L, 2, 1, 0) == LUA_OK && lua_type(L, -1) == LUA_TSTRING) {
-                size_t jlen = 0;
-                const char *j = lua_tolstring(L, -1, &jlen);
-                *out_json = dup_str(j, jlen);
-                if (*out_json && out_len) *out_len = jlen;
-            } else {
-                free(run_err);
-                run_err = dup_str("app.manifest() is not serialisable", 34);
-            }
+    int has_manifest = lua_istable(L, -1);
+    lua_pop(L, 1);
+    if (has_manifest) {
+        size_t jlen = 0;
+        if (hl_lua_manifest_json(L, out_json, &jlen) == 0) {
+            if (out_len) *out_len = jlen;
+        } else {
+            free(run_err);
+            run_err = dup_str("app.manifest() is not serialisable", 34);
         }
-        lua_settop(L, mi - 1);
-    } else {
-        lua_pop(L, 1);
     }
     if (!*out_json && run_err)
         rc = -1;            /* no manifest, and the app did not load */

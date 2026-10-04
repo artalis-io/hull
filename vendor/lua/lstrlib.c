@@ -361,6 +361,8 @@ typedef struct MatchState {
   const char *p_end;  /* end ('\0') of pattern */
   lua_State *L;
   int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */
+  int hl_steps;    /* HULL PATCH 0002: match() calls since the last charge */
+  int hl_stride;   /* HULL PATCH 0002: the count hook's period (0 = none) */
   unsigned char level;  /* total number of captures (finished or unfinished) */
   struct {
     const char *init;
@@ -371,6 +373,26 @@ typedef struct MatchState {
 
 /* recursive function */
 static const char *match (MatchState *ms, const char *s, const char *p);
+
+
+/*
+** HULL PATCH 0002 (docs/lua_patches.md): matching runs entirely in C, where
+** the count hook - Hull's instruction budget - never fires, so one
+** `string.find(s, "a-a-a-...b")` backtracked for minutes on the event loop.
+** Every hook-period of match() steps, the thread's own count hook is called
+** as if that many instructions had run; a tripped budget raises out of the
+** matcher, as "pattern too complex" already does.
+*/
+static void hl_match_charge (MatchState *ms) {
+  lua_State *L = ms->L;
+  lua_Hook h = lua_gethook(L);
+  ms->hl_steps = 0;
+  if (h != NULL && (lua_gethookmask(L) & LUA_MASKCOUNT)) {
+    lua_Debug ar;
+    ar.event = LUA_HOOKCOUNT;
+    h(L, &ar);
+  }
+}
 
 
 /* maximum recursion depth for 'match' */
@@ -570,6 +592,8 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
 static const char *match (MatchState *ms, const char *s, const char *p) {
   if (l_unlikely(ms->matchdepth-- == 0))
     luaL_error(ms->L, "pattern too complex");
+  if (ms->hl_stride > 0 && l_unlikely(++ms->hl_steps >= ms->hl_stride))
+    hl_match_charge(ms);  /* HULL PATCH 0002 */
   init: /* using goto to optimize tail recursion */
   if (p != ms->p_end) {  /* end of pattern? */
     switch (*p) {
@@ -758,6 +782,8 @@ static void prepstate (MatchState *ms, lua_State *L,
                        const char *s, size_t ls, const char *p, size_t lp) {
   ms->L = L;
   ms->matchdepth = MAXCCALLS;
+  ms->hl_steps = 0;                                  /* HULL PATCH 0002 */
+  ms->hl_stride = (lua_gethookmask(L) & LUA_MASKCOUNT) ? lua_gethookcount(L) : 0;
   ms->src_init = s;
   ms->src_end = s + ls;
   ms->p_end = p + lp;

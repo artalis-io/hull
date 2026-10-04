@@ -916,7 +916,13 @@ static void GCTM (lua_State *L) {
     lu_byte oldah = L->allowhook;
     int oldgcstp  = g->gcstp;
     g->gcstp |= GCSTPGC;  /* avoid GC steps */
-    L->allowhook = 0;  /* stop debug hooks during GC metamethod */
+    /* HULL PATCH 0001 (docs/lua_patches.md): a COUNT hook - Hull's
+    ** instruction budget - stays on inside finalizers. With every hook
+    ** off, `__gc = function() while true do end end` ran unmetered and pinned
+    ** the event loop (or a worker VM at lua_close). A budget trip inside a
+    ** finalizer is caught by the luaD_pcall below like any __gc error, and
+    ** the trip is sticky, so the code that triggered the GC stops too. */
+    L->allowhook = (L->hookmask & LUA_MASKCOUNT) ? oldah : 0;
     setobj2s(L, L->top.p++, tm);  /* push finalizer... */
     setobj2s(L, L->top.p++, &v);  /* ... and its argument */
     L->ci->callstatus |= CIST_FIN;  /* will run a finalizer */

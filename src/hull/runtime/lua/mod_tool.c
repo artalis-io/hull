@@ -1449,7 +1449,7 @@ static int l_tool_blob_store_get_to(lua_State *L)
      * next app built from it as a "cache hit". */
     uint8_t *bytes = NULL;
     size_t   len   = 0;
-    if (hl_runtime_cache_get_sealed(s, key, &bytes, &len) != 0) {
+    if (hl_runtime_cache_get_sealed(s, kind, key, &bytes, &len) != 0) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -1512,7 +1512,7 @@ static int l_tool_blob_store_put_from(lua_State *L)
         free(bytes); lua_pushboolean(L, 0); return 1;
     }
 
-    hl_runtime_cache_put_sealed(s, key, bytes, (size_t)sz);   /* see get_to */
+    hl_runtime_cache_put_sealed(s, kind, key, bytes, (size_t)sz);   /* see get_to */
     free(bytes);
     lua_pushboolean(L, 1);
     return 1;

@@ -79,13 +79,15 @@ static void *worker_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
     return p;
 }
 
-static lua_State *worker_vm_new(WorkerHeap *heap,
-                                const HlLuaWorkerDispatchOp *op)
+/* (args: lightuserdata WorkerHeap, boolean with_db) - the VM's libraries,
+ * budget and hooks, set up protected: a fresh VM is close to its memory limit
+ * when the ctx is large, and running out unprotected panicked - abort() of
+ * the whole server. */
+static int worker_vm_setup_k(lua_State *L)
 {
-    heap->used = 0;
-    heap->limit = op->mem_limit;
-    lua_State *L = lua_newstate(worker_alloc, heap);
-    if (!L) return NULL;
+    WorkerHeap *heap = (WorkerHeap *)lua_touserdata(L, 1);
+    int with_db = lua_toboolean(L, 2);
+    lua_settop(L, 0);
 
     /* Open minimal standard libraries */
     luaL_requiref(L, "_G", luaopen_base, 1);
@@ -94,9 +96,9 @@ static lua_State *worker_vm_new(WorkerHeap *heap,
     /* The same instruction budget a request handler gets: without it
      * `while true do end` held a pool thread for good, and a few of those
      * starved every db.async / compute.async / smtp job. Shared and sticky
-     * (budget.c): a pcall around the loop no longer swallows it. */
+     * (budget.c): a pcall around the loop no longer swallows it. Armed by
+     * worker_vm_new once setup is done. */
     hl_lua_budget_install(L, &heap->budget);
-    hl_lua_budget_arm(L, &heap->budget, op->max_instructions);
     luaL_requiref(L, "string", luaopen_string, 1);
     lua_pop(L, 1);
     luaL_requiref(L, "table", luaopen_table, 1);
@@ -116,15 +118,32 @@ static lua_State *worker_vm_new(WorkerHeap *heap,
     lua_pushnil(L); lua_setglobal(L, "require");
 
     /* The registered hooks install `db`: only for an app that declared it. */
-    if (op->with_db) {
+    if (with_db) {
         for (int i = 0; i < init_hook_count; i++) {
-            if (init_hooks[i](L) != 0) {
-                log_error("[hull:worker] init hook %d failed", i);
-                lua_close(L);
-                return NULL;
-            }
+            if (init_hooks[i](L) != 0)
+                return luaL_error(L, "init hook %d failed", i);
         }
     }
+    return 0;
+}
+
+static lua_State *worker_vm_new(WorkerHeap *heap,
+                                const HlLuaWorkerDispatchOp *op)
+{
+    heap->used = 0;
+    heap->limit = op->mem_limit;
+    lua_State *L = lua_newstate(worker_alloc, heap);
+    if (!L) return NULL;
+    lua_pushcfunction(L, worker_vm_setup_k);
+    lua_pushlightuserdata(L, heap);
+    lua_pushboolean(L, op->with_db != 0);
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        const char *msg = lua_tostring(L, -1);
+        log_error("[hull:worker] VM setup failed: %s", msg ? msg : "(unknown)");
+        lua_close(L);
+        return NULL;
+    }
+    hl_lua_budget_arm(L, &heap->budget, op->max_instructions);
     return L;
 }
 
@@ -293,47 +312,45 @@ static void lua_dispatch_work_fn(void *ud)
     lua_close(L);
 }
 
-static void lua_dispatch_run(lua_State *L, HlLuaWorkerDispatchOp *op)
+/* (args: lightuserdata op) - load, ctx, call and result capture, all
+ * protected: building the ctx table, or converting a result, can run out of
+ * the VM's memory, and unprotected that panicked (abort()). Load and call
+ * failures raise with their stage in the message. */
+static int lua_dispatch_body_k(lua_State *L)
 {
-
-    /* Load the bytecode */
+    HlLuaWorkerDispatchOp *op = (HlLuaWorkerDispatchOp *)lua_touserdata(L, 1);
+    lua_settop(L, 0);
     /* Binary: lua_worker_dispatch dumped this from a function value
      * (luaL_checktype LUA_TFUNCTION) - never bytes the app supplied. */
-    int rc = luaL_loadbufferx(L, (const char *)op->bytecode,
-                              op->bytecode_len, "dispatch", "b");
-    if (rc != LUA_OK) {
-        op->error = 1;
-        const char *msg = lua_tostring(L, -1);
-        snprintf(op->error_msg, sizeof(op->error_msg),
-                 "load: %s", msg ? msg : "(unknown)");
-        lua_pop(L, 1);
-        return;
+    if (luaL_loadbufferx(L, (const char *)op->bytecode, op->bytecode_len,
+                         "dispatch", "b") != LUA_OK) {
+        const char *m = lua_tostring(L, -1);
+        return luaL_error(L, "load: %s", m ? m : "(unknown)");
     }
-
     /* Reconstruct ctx table from HlKV array */
-    if (op->ctx_kvs && op->ctx_count > 0) {
+    if (op->ctx_kvs && op->ctx_count > 0)
         push_kv_table(L, op->ctx_kvs, op->ctx_count);
-    } else {
+    else
         lua_newtable(L); /* empty ctx */
+    lua_call(L, 1, 1);   /* fn(ctx) - an error propagates to our pcall */
+    if (capture_result(L, op) != 0) {
+        op->error = 1;
+        snprintf(op->error_msg, sizeof(op->error_msg), "out of memory");
     }
+    return 0;
+}
 
-    /* Call fn(ctx) */
-    rc = lua_pcall(L, 1, 1, 0);
-    if (rc != LUA_OK) {
+static void lua_dispatch_run(lua_State *L, HlLuaWorkerDispatchOp *op)
+{
+    lua_pushcfunction(L, lua_dispatch_body_k);
+    lua_pushlightuserdata(L, op);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
         op->error = 1;
         const char *msg = lua_tostring(L, -1);
         snprintf(op->error_msg, sizeof(op->error_msg),
                  "dispatch: %s", msg ? msg : "(unknown)");
         lua_pop(L, 1);
-        return;
     }
-
-    /* Capture the return value */
-    if (capture_result(L, op) != 0) {
-        op->error = 1;
-        snprintf(op->error_msg, sizeof(op->error_msg), "out of memory");
-    }
-    lua_pop(L, 1); /* pop result */
 }
 
 static void lua_dispatch_done_fn(void *ud)

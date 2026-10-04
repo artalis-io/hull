@@ -174,7 +174,7 @@ int hl_lua_load_cached(lua_State *L,
     /* ── Cache hit. ─────────────────────────────────────────────── */
     uint8_t *bc      = NULL;
     size_t   bc_len  = 0;
-    if (hl_runtime_cache_get_sealed(store, key, &bc, &bc_len) == 0) {
+    if (hl_runtime_cache_get_sealed(store, BC_STORE_KIND, key, &bc, &bc_len) == 0) {
         /* Binary: the cache holds what this runtime dumped, sealed under a
          * key the cache directory does not hold (cache_common.h). */
         int rc = luaL_loadbufferx(L, (const char *)bc, bc_len, chunkname, "b");
@@ -201,7 +201,7 @@ int hl_lua_load_cached(lua_State *L,
 
     /* Best-effort persist. Failure (disk full, race) is silent -
      * the compiled function is already on the stack. */
-    hl_runtime_cache_put_sealed(store, key, acc.buf, acc.len);
+    hl_runtime_cache_put_sealed(store, BC_STORE_KIND, key, acc.buf, acc.len);
     free(acc.buf);
     return LUA_OK;
 }

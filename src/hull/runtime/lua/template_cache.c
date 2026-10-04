@@ -38,7 +38,10 @@
 
 #define TC_STORE_KIND  "templates"
 
-static int compute_key(const char *code, size_t code_len,
+/* The chunk name is part of the key: a dump keeps the name it was compiled
+ * under, so identical template code rendered under two names shared one
+ * entry, and a traceback named the wrong template. */
+static int compute_key(const char *code, size_t code_len, const char *chunkname,
                        char hex_out[HL_BLOB_STORE_ID_BUF_SIZE])
 {
     HlSha256Ctx ctx;
@@ -53,6 +56,9 @@ static int compute_key(const char *code, size_t code_len,
     if (hl_cap_crypto_sha256_update(&ctx, arch, strlen(arch))  != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, "|", 1)              != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, end, strlen(end))    != 0) return -1;
+    if (hl_cap_crypto_sha256_update(&ctx, "|", 1)              != 0) return -1;
+    if (chunkname &&
+        hl_cap_crypto_sha256_update(&ctx, chunkname, strlen(chunkname)) != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, "|", 1)              != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, code, code_len)      != 0) return -1;
 
@@ -141,14 +147,14 @@ int hl_lua_template_compile_cached(lua_State *L,
     if (!store) return fresh_compile(L, code, code_len, chunkname);
 
     char key[HL_BLOB_STORE_ID_BUF_SIZE];
-    if (compute_key(code, code_len, key) != 0) {
+    if (compute_key(code, code_len, chunkname, key) != 0) {
         return fresh_compile(L, code, code_len, chunkname);
     }
 
     /* ── Cache hit: load the dumped render function directly. ──── */
     uint8_t *bc     = NULL;
     size_t   bc_len = 0;
-    if (hl_runtime_cache_get_sealed(store, key, &bc, &bc_len) == 0) {
+    if (hl_runtime_cache_get_sealed(store, TC_STORE_KIND, key, &bc, &bc_len) == 0) {
         /* Binary: the cache holds what this runtime dumped, sealed
          * (cache_common.h). */
         int rc = luaL_loadbufferx(L, (const char *)bc, bc_len, chunkname, "b");
@@ -186,7 +192,7 @@ int hl_lua_template_compile_cached(lua_State *L,
     }
 
     /* Best-effort persist; failures are silent. */
-    hl_runtime_cache_put_sealed(store, key, acc.buf, acc.len);
+    hl_runtime_cache_put_sealed(store, TC_STORE_KIND, key, acc.buf, acc.len);
     free(acc.buf);
     return LUA_OK;
 }

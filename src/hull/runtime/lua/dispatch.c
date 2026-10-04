@@ -139,7 +139,15 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     if (status == LUA_YIELD) {
         /* Handler yielded - connection is suspended.
          * Don't clean up coroutine ref, don't free ctx.
-         * kl_async_suspend already removed client FD from event loop. */
+         * kl_async_suspend already removed client FD from event loop.
+         * The continuation captured co / conn / req; the globals no longer
+         * describe a running handler. Left set, the next middleware's
+         * res:json compressed by THIS request's Accept-Encoding and its
+         * multipart check took this connection for its own. */
+        lua->active_co = NULL;
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
         return 1; /* signal: handler suspended */
     }
 
@@ -252,9 +260,19 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
         hl_req_life_end(life);
         return -1;
     }
+    /* The middleware's own request, for as long as it runs (it cannot
+     * yield): res:json / html / text decide compression from active_req, and
+     * multipart ownership is checked against active_conn. Both were left
+     * describing whatever request ran last. */
+    KlHttpRequest *saved_req  = lua->active_req;
+    KlHttpConn    *saved_conn = lua->active_conn;
+    lua->active_req  = req;
+    lua->active_conn = kl_http_request_conn(req);
     lua_pushcfunction(L, mw_run_k);
     lua_pushlightuserdata(L, &m);
     int mw_rc = lua_pcall(L, 1, 0, 0);
+    lua->active_req  = saved_req;
+    lua->active_conn = saved_conn;
     hl_req_life_end(life);
     if (mw_rc != LUA_OK) {
         char ebuf[512];

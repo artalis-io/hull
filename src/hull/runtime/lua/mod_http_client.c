@@ -67,13 +67,17 @@ static int lua_parse_http_headers(lua_State *L, int idx,
             const char *v = lua_tolstring(L, -1, &vlen);
             char *nc = sh_arena_alloc(scratch, nlen + 1);
             char *vc = sh_arena_alloc(scratch, vlen + 1);
-            if (nc && vc) {
-                memcpy(nc, n, nlen + 1);
-                memcpy(vc, v, vlen + 1);
-                hdrs[i].name = nc;
-                hdrs[i].value = vc;
-                i++;
+            if (!nc || !vc) {
+                /* Out of scratch space: fail, never send the request without
+                 * the header (an Authorization quietly dropped). */
+                lua_pop(L, 2);   /* value and key: the traversal ends here */
+                return -1;
             }
+            memcpy(nc, n, nlen + 1);
+            memcpy(vc, v, vlen + 1);
+            hdrs[i].name = nc;
+            hdrs[i].value = vc;
+            i++;
         }
         lua_pop(L, 1); /* pop value, keep key */
     }
@@ -208,8 +212,9 @@ static int lua_http_get(lua_State *L)
         lua_getfield(L, 2, "headers");
         if (lua_istable(L, -1)) {
             int hdr_idx = lua_gettop(L);
-            lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
-                                    lua->scratch);
+            if (lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
+                                       lua->scratch) != 0)
+                return luaL_error(L, "invalid headers table (or out of scratch space)");
         }
         lua_pop(L, 1);
     }
@@ -246,8 +251,9 @@ static int lua_http_body_method(lua_State *L, const char *method)
         lua_getfield(L, 3, "headers");
         if (lua_istable(L, -1)) {
             int hdr_idx = lua_gettop(L);
-            lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
-                                    lua->scratch);
+            if (lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
+                                       lua->scratch) != 0)
+                return luaL_error(L, "invalid headers table (or out of scratch space)");
         }
         lua_pop(L, 1);
     }
@@ -284,8 +290,9 @@ static int lua_http_delete(lua_State *L)
         lua_getfield(L, 2, "headers");
         if (lua_istable(L, -1)) {
             int hdr_idx = lua_gettop(L);
-            lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
-                                    lua->scratch);
+            if (lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
+                                       lua->scratch) != 0)
+                return luaL_error(L, "invalid headers table (or out of scratch space)");
         }
         lua_pop(L, 1);
     }
@@ -376,8 +383,9 @@ static int lua_http_fetch(lua_State *L)
         lua_getfield(L, 3, "headers");
         if (lua_istable(L, -1)) {
             int hdr_idx = lua_gettop(L);
-            lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
-                                    lua->scratch);
+            if (lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
+                                       lua->scratch) != 0)
+                return luaL_error(L, "invalid headers table (or out of scratch space)");
         }
         lua_pop(L, 1);
     }

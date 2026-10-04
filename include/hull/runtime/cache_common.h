@@ -136,11 +136,15 @@ void hl_runtime_cache_singleton_reset(HlRuntimeCacheSlot *slot);
  * get: 0 with *out (malloc'd, caller frees) / *out_len when the entry
  * exists and its MAC verifies; -1 otherwise (an entry that fails to verify
  * is deleted). put: best-effort.
+ *
+ * The MAC covers the cache KIND and KEY as well as the bytes, so a valid
+ * entry moved to another key (or another cache) fails to verify. @p kind is
+ * the store's kind ("lua-bytecode", "templates", ...).
  */
-int  hl_runtime_cache_get_sealed(HlBlobStore *store, const char *key,
-                                 uint8_t **out, size_t *out_len);
-void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *key,
-                                 const uint8_t *data, size_t len);
+int  hl_runtime_cache_get_sealed(HlBlobStore *store, const char *kind,
+                                 const char *key, uint8_t **out, size_t *out_len);
+void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *kind,
+                                 const char *key, const uint8_t *data, size_t len);
 
 /**
  * @brief Load (or create) the seal key now. Called by runtime init, which

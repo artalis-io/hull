@@ -288,7 +288,7 @@ static void tui_poll_push_result(lua_State *co, void *driver)
 /* free_driver: invoked after resume. */
 static void tui_poll_free(void *driver) { free(driver); }
 
-static void tui_poll_schedule(TuiPollOp *op);
+static int tui_poll_schedule(TuiPollOp *op);
 
 static void tui_poll_complete(TuiPollOp *op)
 {
@@ -337,15 +337,18 @@ static void tui_poll_tick(void *user)
     /* No event yet. Decrement remaining and either reschedule or
      * resolve with timeout. */
     op->remaining_ms -= HL_TUI_POLL_SLICE_MS;
-    if (op->remaining_ms <= 0) {
+    /* Out of time, or no timer for the next slice: resolve as a timeout. An
+     * unarmed reschedule left the coroutine parked with nothing to resume
+     * it - the op, its context and continuation leaked with it. */
+    if (op->remaining_ms <= 0 || tui_poll_schedule(op) != 0) {
         op->has_event = 0;
         tui_poll_complete(op);
         return;
     }
-    tui_poll_schedule(op);
 }
 
-static void tui_poll_schedule(TuiPollOp *op)
+/* 0, or -1 when no timer could be armed (nothing would resume the poll). */
+static int tui_poll_schedule(TuiPollOp *op)
 {
     const HlAsyncBackend *be = hl_async_backend();
     uint64_t slice = (op->remaining_ms < HL_TUI_POLL_SLICE_MS)
@@ -354,6 +357,7 @@ static void tui_poll_schedule(TuiPollOp *op)
     if (slice == 0) slice = 1;   /* never schedule a 0ms one-shot */
     op->timer_id = be->timer_add(op->lua->base.async_ctx, slice,
                                   tui_poll_tick, op);
+    return op->timer_id ? 0 : -1;
 }
 
 static int lua_tui_poll(lua_State *L)
@@ -416,7 +420,14 @@ static int lua_tui_poll(lua_State *L)
     async->detached    = 1;
     op->async_ctx      = async;
 
-    tui_poll_schedule(op);
+    if (tui_poll_schedule(op) != 0) {   /* nothing could resume a yield */
+        async->cont = NULL;
+        async->driver = NULL;
+        cont->destroy(cont);
+        hl_async_ctx_free(async);
+        free(op);
+        return luaL_error(L, "tui.poll: could not arm a timer");
+    }
     return lua_yieldk(L, 0, 0, NULL);
 }
 

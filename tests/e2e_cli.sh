@@ -250,6 +250,50 @@ JS
 run_fs_statlist "lua" "lua"
 run_fs_statlist "js"  "js"
 
+# ── app.main as a startup hook that waits, then serve (audit 5 C1) ──
+# The main coroutine's registry ref was released twice when main yielded:
+# Lua's free list then handed one slot to two requests, and the first one's
+# parked coroutine was collected and resumed from freed memory.
+run_main_hook_then_serve() {
+    echo "--- app.main waits, then two overlapping parked requests (lua) ---"
+    d=$(mktemp -d)
+    port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null || echo 19877)
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/http-server@1" } })
+app.main(function() hull.sleep(5) return 0 end)
+app.get("/slow", function(req, res)
+    hull.sleep(400)
+    res:text("slow-ok")
+end)
+app.get("/gc", function(req, res)
+    collectgarbage(); collectgarbage()
+    res:text("gc-ok")
+end)
+LUA
+    "${HULL_BIN}" -p "${port}" -d "${d}/data.db" "${d}/app.lua" > "${d}/log" 2>&1 &
+    pid=$!
+    i=0
+    while [ $i -lt 50 ] && ! curl -s -o /dev/null "http://127.0.0.1:${port}/gc"; do
+        sleep 0.2; i=$((i + 1))
+    done
+    curl -s -m 10 "http://127.0.0.1:${port}/slow" > "${d}/a" &
+    ca=$!
+    sleep 0.05
+    curl -s -m 10 "http://127.0.0.1:${port}/slow" > "${d}/b" &
+    cb=$!
+    sleep 0.05
+    curl -s -m 10 "http://127.0.0.1:${port}/gc" > /dev/null
+    wait $ca; wait $cb
+    expect_eq "lua parked request A survives (main hook waited)" "slow-ok" "$(cat "${d}/a")"
+    expect_eq "lua parked request B survives (main hook waited)" "slow-ok" "$(cat "${d}/b")"
+    if kill -0 "$pid" 2>/dev/null; then pass "lua server alive after overlapping parked requests"
+    else fail "lua server died: $(tail -5 "${d}/log")"; fi
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    rm -rf "${d}"
+}
+
+run_main_hook_then_serve
+
 echo
 echo "${PASS}/$((PASS + FAIL)) CLI e2e tests passed"
 [ "${FAIL}" -eq 0 ]

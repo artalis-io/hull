@@ -509,6 +509,14 @@ static int lua_ssh_connect(lua_State *L)
     require_stdlib_caller(L);
 
     luaL_checktype(L, 1, LUA_TTABLE);
+    lua_settop(L, 1);
+    /* The handle first, holding no stream yet: made after hl_cap_ssh_open,
+     * running out of memory for it raised past a live stream (descriptor +
+     * connect op), which then leaked. __gc copes with a NULL stream. */
+    HlLuaSshStream *o = lua_newuserdatauv(L, sizeof *o, 1);
+    memset(o, 0, sizeof *o);
+    o->want = 4096;
+    luaL_setmetatable(L, HL_LUA_SSH_MT);
     int base = lua_gettop(L);
 
     lua_getfield(L, 1, "host");
@@ -591,11 +599,7 @@ static int lua_ssh_connect(lua_State *L)
         return push_net_err(L, rc);
     }
 
-    HlLuaSshStream *o = lua_newuserdatauv(L, sizeof *o, 1);
-    memset(o, 0, sizeof *o);
-    o->s    = s;
-    o->want = 4096;
-    luaL_setmetatable(L, HL_LUA_SSH_MT);
+    o->s = s;                            /* the handle at `base` owns it now */
     hl_net_stream_set_user(s, o);
 
     return ssh_connect_step(L, o);
@@ -653,6 +657,10 @@ int luaopen_hull_ssh_stream(lua_State *L)
     luaL_newmetatable(L, HL_LUA_SSH_MT);
     lua_pushcfunction(L, lua_ssh_gc);
     lua_setfield(L, -2, "__gc");
+    /* Locked: with getmetatable(h).__gc reachable, a handle's stream could be
+     * freed while a coroutine is parked on it. */
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     luaL_newlib(L, ssh_stream_methods);
     lua_setfield(L, -2, "__index");
     lua_pop(L, 1);

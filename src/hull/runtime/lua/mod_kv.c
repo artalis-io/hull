@@ -61,7 +61,7 @@ static int l_kv_get(lua_State *L)
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
     const uint8_t *val; size_t vlen; int found = 0;
     if (hl_cap_kv_get(c, (const uint8_t *)key, klen, &val, &vlen, &found) != 0)
-        return luaL_error(L, "%s", hl_cap_kv_error(c));
+        return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     if (!found) { lua_pushnil(L); return 1; }
     lua_pushlstring(L, (const char *)val, vlen);   /* COPY: borrow-copy guard */
     return 1;
@@ -76,7 +76,7 @@ static int l_kv_set(lua_State *L)
     const char *val = luaL_checklstring(L, 3, &vlen);
     int64_t ttl = kv_opt_ttl_ms(L, 4);
     if (hl_cap_kv_set(c, (const uint8_t *)key, klen, (const uint8_t *)val, vlen, ttl) != 0)
-        return luaL_error(L, "%s", hl_cap_kv_error(c));
+        return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -88,7 +88,7 @@ static int l_kv_del(lua_State *L)
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
     int deleted = 0;
     if (hl_cap_kv_del(c, (const uint8_t *)key, klen, &deleted) != 0)
-        return luaL_error(L, "%s", hl_cap_kv_error(c));
+        return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     lua_pushboolean(L, deleted);
     return 1;
 }
@@ -100,7 +100,7 @@ static int l_kv_has(lua_State *L)
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
     int present = 0;
     if (hl_cap_kv_exists(c, (const uint8_t *)key, klen, &present) != 0)
-        return luaL_error(L, "%s", hl_cap_kv_error(c));
+        return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     lua_pushboolean(L, present);
     return 1;
 }
@@ -114,7 +114,7 @@ static int l_kv_incr(lua_State *L)
     int64_t ttl = kv_opt_ttl_ms(L, 4);
     int64_t nv = 0;
     if (hl_cap_kv_incr(c, (const uint8_t *)key, klen, by, ttl, &nv) != 0)
-        return luaL_error(L, "%s", hl_cap_kv_error(c));
+        return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     lua_pushinteger(L, (lua_Integer)nv);
     return 1;
 }
@@ -133,7 +133,7 @@ static int l_kv_cas(lua_State *L)
     HlKvCasResult r = hl_cap_kv_cas(c, (const uint8_t *)key, klen,
                                     (const uint8_t *)expected, elen, has_expected,
                                     (const uint8_t *)newv, nlen, ttl);
-    if (r == HL_KV_CAS_ERROR) return luaL_error(L, "%s", hl_cap_kv_error(c));
+    if (r == HL_KV_CAS_ERROR) return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     lua_pushinteger(L, (lua_Integer)r);   /* 0/1/2 */
     return 1;
 }
@@ -145,7 +145,7 @@ static int l_kv_clear(lua_State *L)
     size_t plen; const char *prefix = luaL_checklstring(L, 2, &plen);
     int64_t removed = 0;
     if (hl_cap_kv_clear(c, (const uint8_t *)prefix, plen, &removed) != 0)
-        return luaL_error(L, "%s", hl_cap_kv_error(c));
+        return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     lua_pushinteger(L, (lua_Integer)removed);
     return 1;
 }
@@ -156,10 +156,15 @@ struct kv_scan_lua { lua_State *L; int tbl; lua_Integer n; int oom; };
 static int kv_scan_lua_cb(void *ctx, const uint8_t *key, size_t klen)
 {
     struct kv_scan_lua *s = (struct kv_scan_lua *)ctx;
-    /* COPY inside the callback, protected: running out of heap here raised
-     * through the backend's scan loop (a longjmp past its cleanup). */
-    if (hl_lua_pushlstring_safe(s->L, key, klen) != 0) { s->oom = 1; return 1; }
-    lua_rawseti(s->L, s->tbl, ++s->n);
+    /* COPY inside the callback, and the table store too, both protected:
+     * running out of heap here raised through the backend's scan loop (a
+     * longjmp past its cleanup, the Valkey reply left half read, and
+     * `scanning` never cleared - the connection busy for good). */
+    if (hl_lua_append_lstring(s->L, s->tbl, s->n + 1, key, klen) != 0) {
+        s->oom = 1;
+        return 1;
+    }
+    s->n++;
     return 0;
 }
 
@@ -183,7 +188,7 @@ static int l_kv_scan(lua_State *L)
     }
     if (s.oom) return luaL_error(L, "kv.scan: not enough memory for the result");
     if (rc != 0)
-        return luaL_error(L, "%s", hl_cap_kv_error(c));
+        return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     return 1;   /* the table is on top */
 }
 
