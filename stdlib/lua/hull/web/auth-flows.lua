@@ -267,6 +267,9 @@ local _state = {
 
     -- Optional post-action redirects.
     verify_redirect       = "/",
+    -- Where a verify that voided the password lands (another browser, or a
+    -- resend's link): the owner sets one by reset. Defaults to verify_redirect.
+    verify_reset_redirect = nil,
     login_redirect        = "/",
     _initialized          = false,
 }
@@ -457,6 +460,10 @@ end
 -- the response shape stays enumeration-safe.
 local _email_rl = {}
 local _email_rl_count = 0
+-- The size at which the next sweep runs. Raised past the table's size after
+-- each sweep: saturated buckets survive a sweep, so with the threshold at
+-- the cap every new recipient re-ran a full O(n) sweep (and sort).
+local _email_rl_sweep_at = 0
 
 local function email_rate_allow(to)
     local cfg = _state.email_rate_limit
@@ -473,7 +480,8 @@ local function email_rate_allow(to)
         -- Soft cap on table size: when over the max, drop the
         -- oldest buckets in one sweep. Anti-abuse memory bound;
         -- the legitimate working-set is small.
-        if _email_rl_count > (_state.email_rate_limit_max_entries or 10000) then
+        if _email_rl_count > math.max(_email_rl_sweep_at,
+                                      _state.email_rate_limit_max_entries or 10000) then
             local kept = {}
             local kept_n = 0
             for k, b in pairs(_email_rl) do
@@ -527,6 +535,23 @@ local function email_rate_allow(to)
                     i = i + 1
                 end
             end
+            -- A hard ceiling: past twice the cap, saturated buckets go too,
+            -- oldest first, down to the cap - memory stays bounded however
+            -- many addresses an attacker saturates.
+            if _email_rl_count > 2 * cap then
+                local sat = {}
+                for k, b in pairs(_email_rl) do
+                    if k ~= key then sat[#sat + 1] = { k = k, t = b.ts[#b.ts] or 0 } end
+                end
+                table.sort(sat, function(x, y) return x.t < y.t end)
+                local i = 1
+                while _email_rl_count > cap and i <= #sat do
+                    _email_rl[sat[i].k] = nil
+                    _email_rl_count = _email_rl_count - 1
+                    i = i + 1
+                end
+            end
+            _email_rl_sweep_at = _email_rl_count + math.max(1, math.floor(cap / 10))
         end
     end
     local fresh = {}
@@ -923,6 +948,51 @@ local function generic_ok(res)
     res:json({ ok = true })
 end
 
+-- Registration browser binding. Anyone can register any address and choose
+-- its password; when the owner then clicks the verify link, the account must
+-- not come out verified with the registrant's password. The register response
+-- sets a nonce cookie and the welcome token carries its hash: a verify from
+-- the browser that registered (the cookie matches) keeps the password; any
+-- other verify - another browser, or a resend's token, which proves nothing
+-- about who set the password - verifies the address but voids the password,
+-- as a magic-link verify does, and the owner sets one by reset.
+local REG_COOKIE = "hull_af_reg"
+
+local function reg_cookie_secure(req)
+    local po = _state.public_origin
+    if type(po) == "string" and po:find("^https://") then return true end
+    return request_proto((req and req.headers) or {}, "http") == "https"
+end
+
+local function reg_cookie_set(req, res, nonce, max_age)
+    res:header("Set-Cookie", REG_COOKIE .. "=" .. nonce
+        .. "; Path=" .. (_state.prefix ~= "" and _state.prefix or "/")
+        .. "; Max-Age=" .. tostring(math.floor(max_age))
+        .. "; HttpOnly; SameSite=Lax"
+        .. (reg_cookie_secure(req) and "; Secure" or ""))
+end
+
+local function reg_cookie_get(req)
+    local c = req and req.headers and req.headers["cookie"]
+    if type(c) ~= "string" then return nil end
+    for part in c:gmatch("[^;]+") do
+        local k, v = part:match("^%s*([^=%s]+)%s*=%s*([%w%-_]+)%s*$")
+        if k == REG_COOKIE then return v end
+    end
+    return nil
+end
+
+-- The pending email change of @p user_id, if any, deleted: whenever the
+-- password is reset or voided (see handle_password_reset_confirm).
+local function drop_pending_email_change(user_id)
+    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
+            { user_id })
+end
+
+local function reg_binding(nonce)
+    return encoding.hex.encode(crypto.sha256("reg\0" .. nonce)):sub(1, 32)
+end
+
 -- Apply the three security headers that every auth-flow HTML
 -- response wants: clickjacking, cache, referrer. No opt-out because
 -- there's no legitimate reason to frame your own auth flow, cache
@@ -966,6 +1036,9 @@ local function handle_register(req, res)
     -- which ones already have an account.
     local pw_hash = crypto.hash_password(body.password)
     local existing = _state.user_find_by_email(body.email)
+    -- Both branches set the cookie: its presence must not say which one ran.
+    local reg_nonce = crypto.random_token(24)
+    reg_cookie_set(req, res, reg_nonce, _state.verify_ttl)
     if existing then return generic_ok(res) end
     local user_id = _state.user_create(body.email, pw_hash)
     local user = _state.user_get(user_id)
@@ -974,9 +1047,10 @@ local function handle_register(req, res)
     end
 
     local origin = origin_for(req)
+    local rb = reg_binding(reg_nonce)
     after_response(function()
         local token = issue_token(user_id,
-            ACTIONS.verify_email, _state.verify_ttl)
+            ACTIONS.verify_email, _state.verify_ttl, { rb = rb })
         if origin then
             local verify_url = origin .. _state.prefix
                                .. "/verify?token=" .. token
@@ -1024,9 +1098,36 @@ local function handle_verify(req, res)
     if not env then
         return secure_html(res):status(400):html("verification failed: " .. (err or "?"))
     end
+    local user = _state.user_get(env.sub)
+    if not user then
+        return secure_html(res):status(400):html("verification failed")
+    end
+    if user.email_verified then
+        gc_expired()
+        return res:redirect(_state.verify_redirect)
+    end
+    -- See REG_COOKIE: the password stays only when this browser registered
+    -- the account; otherwise it is voided like a magic-link verify's.
+    local nonce = reg_cookie_get(req)
+    local keep = type(env.rb) == "string" and nonce ~= nil
+                 and crypto.constant_time_eq(reg_binding(nonce), env.rb)
     _state.user_set_email_verified(env.sub, true)
+    if not keep then
+        _state.user_set_password(env.sub, crypto.hash_password(
+            encoding.hex.encode(crypto.random(32))))
+        drop_pending_email_change(env.sub)
+        user.email_verified = true
+        if _state.on_password_reset then
+            local ok, cb_err = pcall(_state.on_password_reset, req, res, user)
+            if not ok then
+                require("hull.log").warn(
+                    "auth-flows: on_password_reset failed: " .. tostring(cb_err))
+            end
+        end
+    end
+    reg_cookie_set(req, res, "x", 0)   -- spent
     gc_expired()
-    res:redirect(_state.verify_redirect)
+    res:redirect(keep and _state.verify_redirect or _state.verify_reset_redirect)
 end
 
 -- Build the minimal default HTML form rendered when a magic-link
@@ -1201,6 +1302,7 @@ local function handle_magic_link_consume(req, res)
         _state.user_set_email_verified(user_uid(user), true)
         _state.user_set_password(user_uid(user), crypto.hash_password(
             encoding.hex.encode(crypto.random(32))))
+        drop_pending_email_change(user_uid(user))
         user.email_verified = true
         if _state.on_password_reset then
             local ok, cb_err = pcall(_state.on_password_reset, req, res, user)
@@ -1314,6 +1416,10 @@ local function handle_password_reset_confirm(req, res)
         return res:status(400):json({ error = "reset failed" })
     end
     _state.user_set_password(env.sub, crypto.hash_password(body.password))
+    -- A pending email change goes with the old password: started from a
+    -- hijacked session, its confirm link otherwise still moved the account
+    -- to the attacker's address after the owner reset the password.
+    drop_pending_email_change(env.sub)
     -- A successful reset also unlocks the account: the user
     -- demonstrably controls the email, so any prior lockout is
     -- moot. (If they don't reset, the lockout window expires
@@ -1461,11 +1567,16 @@ local function handle_email_change_confirm(req, res)
     -- in the envelope matches it (defense in depth - the token
     -- envelope IS the authority but a stale pending row should
     -- still get cleaned up).
+    -- The stored token_hash must be THIS token's: only the latest link of
+    -- the pending change confirms it, and none once the row is gone.
     local rows = db.query(
-        "SELECT new_email FROM _hull_auth_pending_email_changes "
+        "SELECT new_email, token_hash FROM _hull_auth_pending_email_changes "
         .. "WHERE user_id = ?", { env.sub })
+    local th = encoding.hex.encode(crypto.sha256(token))
     if not rows or #rows == 0
-       or rows[1].new_email ~= env.new_email then
+       or rows[1].new_email ~= env.new_email
+       or type(rows[1].token_hash) ~= "string"
+       or not crypto.constant_time_eq(rows[1].token_hash, th) then
         return secure_html(res):status(400):html("email change failed")
     end
     local old_email = user.email
@@ -1825,6 +1936,7 @@ function M.init(opts)
     _state.email_change_ttl = opts.email_change_ttl or _state.email_change_ttl
     _state.prefix           = opts.prefix           or _state.prefix
     _state.verify_redirect  = opts.verify_redirect  or _state.verify_redirect
+    _state.verify_reset_redirect = opts.verify_reset_redirect or _state.verify_redirect
     _state.login_redirect   = opts.login_redirect   or _state.login_redirect
     if opts.enumeration_safe ~= nil then
         _state.enumeration_safe = opts.enumeration_safe

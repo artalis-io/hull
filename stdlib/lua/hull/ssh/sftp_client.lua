@@ -10,6 +10,7 @@
 -- hands out a handle rather than this object.
 
 local channel = require('hull.ssh.channel')
+local wire    = require('hull.ssh.wire')
 local sftp    = require('hull.ssh.sftp')
 
 local M = {}
@@ -71,8 +72,10 @@ function M.open(t, opts)
     if not ok then t:close_channel(ch); error(replied, 0) end
     if not replied then return fail({ code = "sftp_unavailable" }) end
 
-    local s = setmetatable({ t = t, ch = ch, buf = "", id = 0,
-                             reply_ms = reply_ms }, Sftp)
+    -- buf: bytes being parsed; chunks / chunked: data received since,
+    -- not yet joined onto buf (see recv).
+    local s = setmetatable({ t = t, ch = ch, buf = "", chunks = {},
+                             chunked = 0, id = 0, reply_ms = reply_ms }, Sftp)
     local vok, ver = pcall(function()
         s:send(sftp.build_init())
         return s:recv()
@@ -91,6 +94,9 @@ end
 -- a peer advertising a 16 KiB packet size, or a window not yet topped up when
 -- the next write went out, made a write raise part way through a file.
 function Sftp:send(payload)
+    -- A session already given up on says so first, rather than whatever the
+    -- connection under it now reports.
+    if self.broken then error(self.broken, 0) end
     local bytes, off = sftp.frame(payload), 1
     while off <= #bytes do
         local room = self.ch:sendable()
@@ -106,6 +112,19 @@ function Sftp:send(payload)
     end
 end
 
+-- Bytes received for this session and not yet consumed.
+function Sftp:held()
+    return #self.buf + self.chunked
+end
+
+-- Top up the window we grant, by what has been CONSUMED (see
+-- Channel:window_adjustment): what is held stays charged against it, so the
+-- peer can never have more than one window of unread data outstanding.
+function Sftp:grant()
+    local adj = self.ch:window_adjustment(self:held())
+    if adj then self.t:send_packet(adj) end
+end
+
 -- Read one connection message for this session's channel: keep its data for
 -- recv, and top up the window we grant.
 function Sftp:pump()
@@ -119,12 +138,25 @@ function Sftp:pump()
         error(m, 0)
     end
     if m.type == "data" then
-        self.buf = self.buf .. m.data
+        -- Kept as a list, joined once a whole frame is in (recv): appended
+        -- to a string per message, a frame delivered a byte at a time cost
+        -- its length squared in copying, on the event loop.
+        if #m.data > 0 then
+            self.chunks[#self.chunks + 1] = m.data
+            self.chunked = self.chunked + #m.data
+        end
+        -- Never more than one frame plus the window we granted: the channel
+        -- refuses data past the window, so this only fails if that bound
+        -- itself is broken - and then it fails here, not in an OOM error
+        -- that could land in another coroutine of this VM.
+        if self:held() > sftp.MAX_PACKET + 4 + self.ch.recv_initial then
+            self.broken = "ssh.sftp: the server sent more than the window allows"
+            error(self.broken, 0)
+        end
     elseif m.type == "close" then
         error("ssh.sftp: the channel closed mid-request")
     end
-    local adj = self.ch:window_adjustment()
-    if adj then self.t:send_packet(adj) end
+    self:grant()
 end
 
 -- Send one request and return ITS reply.
@@ -195,14 +227,25 @@ function Sftp:close_handle(handle)
 end
 
 -- Pull one SFTP message, feeding the channel as data arrives.
+--
+-- Received data is joined onto `buf` only once enough is held for the next
+-- step of the parse - the 4-byte length, then the whole frame it declares
+-- (bounded by sftp.MAX_PACKET before any wait) - so each byte is copied a
+-- bounded number of times however finely the server splits its messages.
 function Sftp:recv()
     for _ = 1, 100000 do
+        if self.chunked > 0 then
+            self.buf = self.buf .. table.concat(self.chunks)
+            self.chunks, self.chunked = {}, 0
+        end
         local p, used = sftp.parse_frame(self.buf)
         if p then
             self.buf = self.buf:sub(used + 1)
+            self:grant()   -- that frame is consumed: its bytes may come again
             return sftp.parse(p)
         end
-        self:pump()
+        local need = #self.buf < 4 and 4 or wire.peek_uint32(self.buf) + 4
+        while self:held() < need do self:pump() end
     end
     error("ssh.sftp: no response")
 end

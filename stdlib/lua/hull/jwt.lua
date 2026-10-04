@@ -232,6 +232,12 @@ function jwt.verify(token, key_or_resolver, opts)
     if not alg or alg == "none" then
         return nil, "alg 'none' rejected"
     end
+    -- RFC 7515 4.1.11: a token naming extensions the recipient must
+    -- understand is refused unless it understands them - and this verifier
+    -- implements none. They were ignored, so the token was accepted anyway.
+    if header.crit ~= nil then
+        return nil, "unsupported critical header"
+    end
     if not SUPPORTED_ALGS[alg] then
         return nil, "unsupported algorithm: " .. tostring(alg)
     end

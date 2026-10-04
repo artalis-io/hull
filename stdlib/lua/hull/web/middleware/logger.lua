@@ -80,7 +80,11 @@ end
 function logger.middleware(opts)
     opts = opts or {}
     local skip = opts.skip
-    local include_headers = opts.include_headers
+    -- `includeHeaders` is the documented JS-style alias (it was ignored here).
+    local include_headers = opts.include_headers or opts.includeHeaders
+    if include_headers ~= nil and type(include_headers) ~= "table" then
+        error("logger.middleware: include_headers must be a list of header names", 2)
+    end
 
     return function(req, res)
         if logger.should_skip(req.path, skip) then

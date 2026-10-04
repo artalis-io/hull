@@ -159,12 +159,13 @@ run_flow() {
     : > "$COOKIES_A"; : > "$COOKIES_B"
 
     # 1. Register + verify
-    curl -sS -X POST -H 'Content-Type: application/json' \
+    REGJAR="$TMPDIR_WORK/reg_$_label.txt"   # the registering browser
+    curl -sS -c "$REGJAR" -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" \
         "$BASE/auth/register" > /dev/null
     TEXT=$(last_email_text "$PORT" "$EMAIL")
     VERIFY_URL=$(extract_url "$TEXT")
-    S=$(curl -sS -o /dev/null -w '%{http_code}' "$VERIFY_URL")
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$REGJAR" "$VERIFY_URL")
     check_status "$_label: register+verify" "$S" "302"
 
     # 2. Login from browser A.

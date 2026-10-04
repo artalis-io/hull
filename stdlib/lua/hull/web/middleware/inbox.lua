@@ -113,11 +113,14 @@ function inbox.is_duplicate(message_id, source)
         return false
     end
 
-    -- Expired: clean up and treat as new
+    -- Expired: clean up and treat as new. Only while it is still expired: a
+    -- concurrent mark since the SELECT is a fresh row, and the unguarded
+    -- DELETE removed it, so the duplicate it recorded was processed again.
     if rows[1].expires_at <= now then
         db.exec(
-            "DELETE FROM _hull_inbox_processed WHERE source = ? AND message_id = ?",
-            { source, message_id }
+            "DELETE FROM _hull_inbox_processed WHERE source = ? AND message_id = ? "
+            .. "AND expires_at <= ?",
+            { source, message_id, now }
         )
         return false
     end

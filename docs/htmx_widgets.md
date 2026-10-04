@@ -309,7 +309,11 @@ fragment for short queries.
 Click-to-edit single field. Canonical htmx round-trip: GET fetches
 edit form, PATCH saves and returns display fragment. The cell is
 keyboard-activatable (Enter/Space/click); the editor input auto-
-focuses + selects after swap; Esc cancels.
+focuses + selects after swap; Esc cancels. Enter / Space and Esc are
+handled by `inline-edit.js`, not by htmx `keyup[key==...]` trigger
+filters: under `csp = "htmx"` (allowEval:false) htmx treats such a
+filter as always true, so any keystroke in the editor used to cancel
+the edit.
 
 Three endpoints per editable field - display cell GET, edit form GET,
 save PATCH:

@@ -124,6 +124,13 @@ function load(name, tbl) {
 
 /**
  * Get or set the active locale.
+ *
+ * The active locale is PROCESS-GLOBAL: every request shares it. Set it
+ * and translate within one synchronous stretch only - a handler that
+ * sets it and then awaits (db.async, http.fetch, a timer) can resume to
+ * find another request's locale. Concurrent requests should pass the
+ * locale explicitly with `tIn`.
+ *
  * @param {string} [name]  When passed, sets the active locale.
  * @returns {string|null}  Current locale name after the call.
  */
@@ -140,8 +147,21 @@ function locale(name) {
  * @returns {string}  Translation, or the key itself when missing.
  */
 function t(key, params) {
-    if (!active || !locales[active]) return key;
-    const val = deepGet(locales[active], key);
+    return tIn(active, key, params);
+}
+
+/**
+ * Translate a key in an EXPLICIT locale - stateless, so safe across an
+ * await: `i18n.tIn(req.locale, "greeting", { name })`. Same lookup,
+ * interpolation and fallback (the key itself) as `t`.
+ * @param {string|null} loc  Locale name (null / unknown -> the key).
+ * @param {string} key
+ * @param {Object} [params]
+ * @returns {string}
+ */
+function tIn(loc, key, params) {
+    if (typeof loc !== "string" || !locales[loc]) return key;
+    const val = deepGet(locales[loc], key);
     if (typeof val !== "string") return key;
     return interpolate(val, params);
 }
@@ -222,21 +242,26 @@ function currency(amount, code) {
     if (!cur)
         return number(amount) + " " + code;
 
-    const digits = (cur.decimalDigits !== undefined) ? cur.decimalDigits : 2;
-    const factor = Math.pow(10, digits);
-    const rounded = Math.round(amount * factor) / factor;
+    // Same as the Lua sibling: either spelling of the option, the sign taken
+    // off first, and the magnitude rounded half away from zero in whole minor
+    // units (Math.round rounds -x.5 toward +inf, so the runtimes disagreed).
+    const dd = cur.decimalDigits !== undefined ? cur.decimalDigits : cur.decimal_digits;
+    const digits = dd !== undefined ? dd : 2;
+    const scale = Math.pow(10, digits);
 
-    const decSep = (fmt && fmt.decimalSep) || ".";
-    const thousSep = (fmt && fmt.thousandsSep) || ",";
+    const decSep = (fmt && (fmt.decimalSep || fmt.decimal_sep)) || ".";
+    const thousSep = (fmt && (fmt.thousandsSep || fmt.thousands_sep)) || ",";
 
-    let intPart = Math.floor(Math.abs(rounded));
-    const fracPart = Math.abs(rounded) - intPart;
-    const neg = rounded < 0;
+    let neg = amount < 0;
+    const units = Math.floor(Math.abs(amount) * scale + 0.5);
+    const intPart = Math.floor(units / scale);
+    const fracPart = units - intPart * scale;
+    if (units === 0) neg = false;   // no "-0.00"
 
     let result = formatInt(String(intPart), thousSep);
 
     if (digits > 0) {
-        let fracStr = String(Math.round(fracPart * factor));
+        let fracStr = String(fracPart);
         while (fracStr.length < digits) fracStr = "0" + fracStr;
         result += decSep + fracStr;
     }
@@ -290,5 +315,5 @@ function reset() {
     active = null;
 }
 
-const i18n = { load, locale, t, number, date, currency, detect, reset };
+const i18n = { load, locale, t, tIn, number, date, currency, detect, reset };
 export { i18n };

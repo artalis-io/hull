@@ -661,6 +661,10 @@ function init(opts) {
                           "jwksUri", "issuer"]) {
             if (p[k]) resolved[k] = p[k];
         }
+        // An explicit issuer pins it: the preset's multi-tenant pattern
+        // (tenant defaults to "common") otherwise still accepted a token
+        // from any tenant or personal account.
+        if (p.issuer) delete resolved.issuerPattern;
         for (const k of ["authorizationEndpoint", "tokenEndpoint",
                           "jwksUri", "issuer"]) {
             if (typeof resolved[k] !== "string") {

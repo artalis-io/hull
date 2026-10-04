@@ -501,7 +501,8 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
 
     HlDbHandle *h = js_call_handle(ctx, this_val);
 
-    if (hl_db_begin(h) != 0)
+    /* Nested inside another batch: a savepoint (see hl_db_batch_enter). */
+    if (hl_db_batch_enter(h) != 0)
         return JS_ThrowInternalError(ctx, "BEGIN failed: %s",
                                      hl_db_errmsg(h));
 
@@ -510,7 +511,7 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
     /* Resolve again: fn may have closed a db.open handle, freeing h. */
     h = js_call_handle(ctx, this_val);
     if (JS_IsException(result)) {
-        if (h) hl_db_rollback(h);
+        if (h) (void)hl_db_batch_leave(h, 0);
         return result; /* propagate exception */
     }
     JS_FreeValue(ctx, result);
@@ -518,11 +519,9 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx,
             "db.batch: the connection was closed inside the batch");
 
-    if (hl_db_commit(h) != 0) {
-        hl_db_rollback(h);
+    if (hl_db_batch_leave(h, 1) != 0)
         return JS_ThrowInternalError(ctx, "COMMIT failed: %s",
                                      hl_db_errmsg(h));
-    }
 
     return JS_UNDEFINED;
 }

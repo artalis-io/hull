@@ -48,7 +48,28 @@ function emailError(code, message) {
 
 // Provider adapters: each takes (opts), returns true on success, throws on
 // failure (delivery_failed / invalid_argument).
-const providers = {};
+// No prototype: `provider` comes from config or env, and on a plain {}
+// "toString" / "constructor" resolved to Object.prototype's functions - the
+// send "succeeded" and nothing went out.
+const providers = Object.create(null);
+
+// An address: at most 254 characters (RFC 5321's path limit), checked before
+// the pattern.
+const MAX_ADDR = 254;
+function addrOk(a) {
+    return typeof a === "string" && a.length <= MAX_ADDR && ADDR_RE.test(a);
+}
+
+// opts.cc as a list of strings; a string is one recipient.
+function ccList(cc) {
+    if (cc === undefined || cc === null) return null;
+    const list = typeof cc === "string" ? [cc] : cc;
+    if (!Array.isArray(list))
+        emailError("invalid_argument", "cc must be a string or a list of strings");
+    for (const a of list)
+        if (!addrOk(a)) emailError("invalid_argument", "invalid cc address");
+    return list.length > 0 ? list.slice() : null;
+}
 
 providers.smtp = async function(opts) {
     // smtp.send returns a Promise resolving to {ok,error} (model 2: it yields to
@@ -64,7 +85,7 @@ providers.smtp = async function(opts) {
             tls: opts.smtp_tls !== false,
             from: opts.from,
             to: opts.to,
-            cc: opts.cc,
+            cc: ccList(opts.cc) || undefined,
             reply_to: opts.reply_to,
             subject: opts.subject,
             body: opts.body,
@@ -89,11 +110,8 @@ providers.postmark = async function(opts) {
         To: opts.to,
         Subject: opts.subject,
     };
-    // Accept either array or string for `cc`.
-    if (Array.isArray(opts.cc))
-        payload.Cc = opts.cc.join(",");
-    else if (typeof opts.cc === "string")
-        payload.Cc = opts.cc;
+    const cc = ccList(opts.cc);
+    if (cc) payload.Cc = cc.join(",");
     if (opts.reply_to)
         payload.ReplyTo = opts.reply_to;
     if (opts.content_type === "text/html")
@@ -139,6 +157,9 @@ providers.sendgrid = async function(opts) {
     };
     if (opts.reply_to)
         payload.reply_to = { email: opts.reply_to };
+    // cc rides in the personalization; it used to be dropped silently.
+    const cc = ccList(opts.cc);
+    if (cc) payload.personalizations[0].cc = cc.map((email) => ({ email }));
 
     let resp;
     try {
@@ -177,8 +198,8 @@ providers.resend = async function(opts) {
         payload.text = opts.body;
     if (opts.reply_to) payload.reply_to = opts.reply_to;
     // Resend accepts cc as an array of strings; accept a single string too.
-    if (Array.isArray(opts.cc)) payload.cc = opts.cc;
-    else if (typeof opts.cc === "string") payload.cc = [opts.cc];
+    const cc = ccList(opts.cc);
+    if (cc) payload.cc = cc;
 
     let resp;
     try {
@@ -246,13 +267,16 @@ email.send = async function(opts) {
     if (!opts.body) emailError("invalid_argument", "body required");
 
     // Basic email format validation (parity with the Lua module).
-    if (!ADDR_RE.test(opts.from))
+    if (!addrOk(opts.from))
         emailError("invalid_argument", "invalid from address");
-    if (!ADDR_RE.test(opts.to))
+    if (!addrOk(opts.to))
         emailError("invalid_argument", "invalid to address");
+    ccList(opts.cc);   // validated up front, for every provider
 
     const provider = opts.provider || "smtp";
-    const fn = providers[provider];
+    const fn = (typeof provider === "string"
+                && Object.prototype.hasOwnProperty.call(providers, provider))
+        ? providers[provider] : null;
     if (!fn)
         emailError("unknown_provider", "unknown provider: " + String(provider));
     return await fn(opts);

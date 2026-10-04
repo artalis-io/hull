@@ -134,7 +134,9 @@ function jwtMiddleware(opts) {
     // Passed to jwt.verify: require an expiry, the issuer, the audience; clock
     // skew in seconds.
     const verifyOpts = {
-        requireExp: o.requireExp === true || o.require_exp === true,
+        // A token must expire unless the app opts out (requireExp: false):
+        // jwt.sign without exp minted a token honoured forever.
+        requireExp: !(o.requireExp === false || o.require_exp === false),
         iss: o.iss, aud: o.aud, leeway: o.leeway,
     };
 
@@ -222,7 +224,9 @@ function login(req, res, userData, opts) {
     if (cookieOpts.maxAge === undefined && o.ttl)
         cookieOpts.maxAge = o.ttl;
 
-    const sessionId = session.create(userData || {});
+    // ttl bounds the session server side too, not only the cookie's Max-Age.
+    const sessionId = session.create(userData || {},
+                                     o.ttl ? { ttl: o.ttl } : undefined);
 
     const setCookie = cookie.serialize(cookieName, sessionId, cookieOpts);
     res.header("Set-Cookie", setCookie);

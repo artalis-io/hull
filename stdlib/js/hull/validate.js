@@ -69,7 +69,12 @@ function utf8ByteLenExceeds(s, cap) {
  * (all optional): `required`, `trim`, `type` (`"string"|"number"|"integer"|"boolean"`),
  * `min` / `max` (string length or numeric bound), `pattern` (regex),
  * `oneof` (array of allowed values), `email` (boolean), `fn`
- * (`value => boolean`), `message` (custom error message).
+ * (`(value, field, data) => true | false | string | null`: `true` /
+ * `null` / `undefined` is valid, `false` is invalid with `message` or
+ * "is invalid", a string is the error message, anything else fails
+ * closed), `message` (custom error message). Every truthy return -
+ * `true` included - used to be taken as the error, so a validator
+ * written to the old `value => boolean` doc accepted what it rejected.
  *
  * @param {Object} data    Input. Non-object input is treated as `{}`.
  * @param {Object} schema  Rules. Non-object → `[true, null]`.
@@ -210,9 +215,11 @@ function check(data, schema) {
 
         // 9. fn (custom validator)
         if (rules.fn) {
-            const fnErr = rules.fn(value, field, data);
-            if (fnErr)
-                err = fnErr;
+            const verdict = rules.fn(value, field, data);
+            if (typeof verdict === "string")
+                err = verdict;
+            else if (verdict !== undefined && verdict !== null && verdict !== true)
+                err = customMsg || "is invalid";
         }
 
         if (err) { setError(); continue; }

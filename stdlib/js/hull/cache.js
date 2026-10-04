@@ -33,6 +33,10 @@ import kvSql from "hull:kv:_sql";
 import kvValkey from "hull:kv:_valkey";
 
 const DEFAULT_MAX = 1000;
+// Bounds cache.open applies when the caller gives neither maxItems nor
+// maxBytes (the byte bound only on the memory backend).
+const DEFAULT_OPEN_MAX_ITEMS = 10000;
+const DEFAULT_OPEN_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
  * Create an isolated cache instance.
@@ -42,13 +46,17 @@ const DEFAULT_MAX = 1000;
  */
 function newCache(opts) {
     opts = opts || {};
-    let store = new Map();     // key -> { value, expires (ms|null), seq }
-    let count = 0;
-    let seq = 0;
+    // key -> { value, expires (ms|null) }. The Map's insertion order IS the
+    // LRU order: a touched entry is deleted and re-inserted at the end, so the
+    // first key is always the least recently used and eviction is O(1). It
+    // used to walk every entry for the lowest sequence number - a full scan per
+    // new key once full, which ratelimit (10k buckets, a new one per client
+    // address) paid on every request from a spread of addresses.
+    let store = new Map();
     const max = opts.maxEntries || DEFAULT_MAX;
     const defaultTtl = opts.defaultTtl;
 
-    const nextSeq = () => ++seq;
+    const touch = (key, e) => { store.delete(key); store.set(key, e); };
 
     // Return the entry if live; drop + return null if it has expired.
     const live = (key) => {
@@ -56,42 +64,21 @@ function newCache(opts) {
         if (!e) return null;
         if (e.expires != null && time.nowMs() >= e.expires) {
             store.delete(key);
-            count -= 1;
             return null;
         }
         return e;
     };
 
-    // Make room: drop an expired entry if any, else the least-recently-used.
+    // Make room: drop the least-recently-used entry (the first key).
     const evictOne = () => {
-        const now = time.nowMs();
-        let lruKey, lruSeq;
-        // Iterate keys + store.get, NOT `for (const [k, e] of store)`: QuickJS's
-        // parser trips a known MSan use-of-uninit false-positive on array
-        // destructuring in a for-of (same issue jwt.js avoids by index access).
-        // Deleting the current key mid-iteration then returning is spec-safe.
-        for (const k of store.keys()) {
-            const e = store.get(k);
-            if (e.expires != null && now >= e.expires) {
-                store.delete(k);
-                count -= 1;
-                return;
-            }
-            if (lruSeq === undefined || e.seq < lruSeq) {
-                lruKey = k;
-                lruSeq = e.seq;
-            }
-        }
-        if (lruKey !== undefined) {
-            store.delete(lruKey);
-            count -= 1;
-        }
+        const first = store.keys().next();
+        if (!first.done) store.delete(first.value);
     };
 
     const get = (key) => {
         const e = live(key);
         if (!e) return null;
-        e.seq = nextSeq();
+        touch(key, e);
         return e.value;
     };
 
@@ -101,16 +88,12 @@ function newCache(opts) {
         if (ttl === undefined) ttl = defaultTtl;
         let expires = null;
         if (ttl != null) expires = time.nowMs() + ttl * 1000;
-        const e = store.get(key);
-        if (e === undefined) {
-            if (count >= max) evictOne();
-            store.set(key, { value, expires, seq: nextSeq() });
-            count += 1;
-        } else {
-            e.value = value;
-            e.expires = expires;
-            e.seq = nextSeq();
+        if (store.has(key)) {
+            store.delete(key);
+        } else if (store.size >= max) {
+            evictOne();
         }
+        store.set(key, { value, expires });
         return value;
     };
 
@@ -121,7 +104,7 @@ function newCache(opts) {
         }
         const e = live(key);
         if (e) {
-            e.seq = nextSeq();
+            touch(key, e);
             return e.value;
         }
         const v = fn();
@@ -129,21 +112,11 @@ function newCache(opts) {
         return v;
     };
 
-    const del = (key) => {
-        if (store.has(key)) {
-            store.delete(key);
-            count -= 1;
-            return true;
-        }
-        return false;
-    };
+    const del = (key) => store.delete(key);
 
-    const clear = () => {
-        store = new Map();
-        count = 0;
-    };
+    const clear = () => { store = new Map(); };
 
-    const size = () => count;
+    const size = () => store.size;
 
     return { get, has, set, fetch, delete: del, clear, size };
 }
@@ -193,11 +166,21 @@ cache.open = function (opts) {
     const namespace = opts.namespace || "default";
     const storeNs = "cache:" + namespace; // isolated from hull:kv's "kv:" namespaces
 
+    // A cache is bounded unless the caller says otherwise: with neither bound
+    // given, the memory and SQL caches defaulted to NONE, so keying one by
+    // request path grew it until the VM's memory limit (or the SQL table
+    // forever). An explicit 0 still means "no limit".
+    let maxItems = opts.maxItems, maxBytes = opts.maxBytes;
+    if ((maxItems === undefined || maxItems === null) &&
+        (maxBytes === undefined || maxBytes === null)) {
+        maxItems = DEFAULT_OPEN_MAX_ITEMS;
+        if (backend === "memory") maxBytes = DEFAULT_OPEN_MAX_BYTES;
+    }
+
     let store, bname;
     if (backend === "memory") {
         store = kvMemstore.get(storeNs, {
-            evict: true, defaultTtl: opts.defaultTtl,
-            maxBytes: opts.maxBytes, maxItems: opts.maxItems,
+            evict: true, defaultTtl: opts.defaultTtl, maxBytes, maxItems,
         });
         bname = "memory";
     } else if (backend === "sqlite") {
@@ -205,7 +188,7 @@ cache.open = function (opts) {
         if (!conn || typeof conn.exec !== "function")
             kvUtil.error("invalid_argument", "cache.open: sqlite backend needs database: <db connection>");
         store = kvSql.new(conn, storeNs, {
-            evict: true, defaultTtl: opts.defaultTtl, maxItems: opts.maxItems,
+            evict: true, defaultTtl: opts.defaultTtl, maxItems,
         });
         bname = conn.backendName || "sqlite";
     } else if (backend === "valkey" || backend === "redis") {

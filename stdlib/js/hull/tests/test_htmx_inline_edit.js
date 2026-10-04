@@ -32,11 +32,12 @@ test("cell is keyboard-activatable", () => {
     assertMatch(s, 'tabindex="0"');
 });
 
-test("cell triggers on click, Enter, Space", () => {
+// Plain click only: an htmx keyup[key==...] filter evaluates as
+// always-true under csp = "htmx". Enter / Space are inline-edit.js's.
+test("cell triggers on click only (keys handled by the widget script)", () => {
     const s = inlineEdit.cell({ value: "x", editUrl: "/x/edit" });
-    assertMatch(s, "click");
-    assertMatch(s, "Enter");
-    assertMatch(s, "key==' '");
+    assertMatch(s, 'hx-trigger="click"');
+    assertNoMatch(s, "keyup[");
 });
 
 test("cell emits hx-get pointing at editUrl", () => {
@@ -129,11 +130,10 @@ test("editor Cancel button points at cancelUrl", () => {
     );
 });
 
-test("editor wires Esc-to-cancel", () => {
-    assertMatch(
-        inlineEdit.editor({ value: "x", saveUrl: "/x", cancelUrl: "/x/view" }),
-        "Escape",
-    );
+test("editor cancel has no key filter (Esc is the widget script's)", () => {
+    const s = inlineEdit.editor({ value: "x", saveUrl: "/x", cancelUrl: "/x/view" });
+    assertNoMatch(s, "keyup[");
+    assertMatch(s, 'class="hull-inline-edit-cancel"');
 });
 
 test("editor escapes value (XSS in pre-fill)", () => {

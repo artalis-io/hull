@@ -75,6 +75,11 @@ function cors.middleware(opts)
     end
 
     return function(req, res)
+        -- Every response depends on Origin, including one that carries no
+        -- CORS headers (no or a disallowed Origin): sent only on allowed
+        -- responses, a shared cache could store the header-less copy and
+        -- serve it to an allowed origin, which then failed CORS.
+        res:header("Vary", "Origin")
         local origin = req.headers["origin"]
         if not origin then return 0 end
 
@@ -86,7 +91,6 @@ function cors.middleware(opts)
         if not cors.is_allowed_origin(origin, origins) then return 0 end
 
         res:header("Access-Control-Allow-Origin", origin)
-        res:header("Vary", "Origin")
 
         if credentials then
             res:header("Access-Control-Allow-Credentials", "true")

@@ -84,10 +84,12 @@ function contentDisposition(name) {
  * @param {Object} res
  * @param {string} id
  * @param {Object} [opts]
- * @param {function(Object, Object): boolean} [opts.authCheck]
+ * @param {function(Object, Object): (boolean|Promise<boolean>)} [opts.authCheck]
  *   REQUIRED for non-403 responses. Receives the live metadata
  *   row so the check can do per-tenant / per-user gating. Omit
- *   to deny unconditionally.
+ *   to deny unconditionally. Only `true` (or a Promise of `true`)
+ *   serves; a rejected Promise answers 500. Returns that Promise when
+ *   the check is async.
  */
 function serve(req, res, id, opts) {
     const o = opts || {};
@@ -99,13 +101,27 @@ function serve(req, res, id, opts) {
         return;
     }
 
-    // Default-deny: caller must explicitly supply authCheck AND it
-    // must return truthy. Missing function, false, or undefined → 403.
-    if (typeof o.authCheck !== "function" || !o.authCheck(req, meta)) {
-        res.status(403);
-        res.json({ error: "forbidden" });
-        return;
+    // Default-deny: caller must explicitly supply authCheck AND it must
+    // return exactly true. Missing function, false, undefined, or any other
+    // value → 403. An async check is awaited: its Promise was truthy, so the
+    // gate stood open for every caller.
+    if (typeof o.authCheck !== "function") return forbid(res);
+    const allowed = o.authCheck(req, meta);
+    if (allowed && typeof allowed.then === "function") {
+        return allowed.then(
+            (v) => (v === true ? serveAllowed(req, res, meta) : forbid(res)),
+            () => { res.status(500); res.json({ error: "authorization check failed" }); });
     }
+    if (allowed !== true) return forbid(res);
+    return serveAllowed(req, res, meta);
+}
+
+function forbid(res) {
+    res.status(403);
+    res.json({ error: "forbidden" });
+}
+
+function serveAllowed(req, res, meta) {
 
     // Strong ETag from full blob_id SHA - content-addressed dedup
     // means this is a genuine cryptographic fingerprint of the bytes.

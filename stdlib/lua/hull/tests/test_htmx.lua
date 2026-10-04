@@ -195,6 +195,24 @@ test("redirect on htmx request sets HX-Redirect + 204", function()
     assert_eq(res.get_body(), "")
 end)
 
+-- htmx assigns HX-Redirect to location.href: a javascript: URL ran script.
+test("redirect refuses non-http(s) schemes and control chars", function()
+    local req = { headers = { ["hx-request"] = "true" } }
+    for _, bad in ipairs({ "javascript:alert(1)", "JavaScript:x", "data:text/html,x",
+                           " javascript:x", "java\tscript:x", "/a\nb", "", "\\evil" }) do
+        local res = mock_res()
+        local ok = pcall(htmx.redirect, req, res, bad)
+        assert_eq(ok, false, "accepted " .. bad)
+        assert_eq(res.headers_set["HX-Redirect"], nil)
+    end
+    for _, good in ipairs({ "/x", "x/y", "?page=2", "#top", "https://a.example/p",
+                            "HTTP://a.example", "/a:b" }) do
+        local res = mock_res()
+        htmx.redirect(req, res, good)
+        assert_eq(res.headers_set["HX-Redirect"], good)
+    end
+end)
+
 test("redirect on plain request falls back to res:redirect", function()
     local req = { headers = {} }
     local res = mock_res()

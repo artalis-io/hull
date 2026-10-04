@@ -143,6 +143,12 @@ function session.init(opts)
     if not existing.user_agent then
         db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_agent TEXT")
     end
+    -- The session's own sliding TTL, when create() was given one: load()
+    -- extended every session by the module TTL, so auth.login(..., {ttl})
+    -- bounded the cookie and only the first idle period. NULL = module TTL.
+    if not existing.ttl then
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN ttl INTEGER")
+    end
     db.exec(
         "CREATE INDEX IF NOT EXISTS idx__hull_sessions_user_id "
         .. "ON _hull_sessions(user_id)")
@@ -224,13 +230,25 @@ function session.create(data, opts)
         end
     end
 
-    db.exec(
-        "INSERT INTO _hull_sessions "
-        .. "(id, data, created_at, last_accessed, expires_at, "
-        .. " user_id, ip, user_agent) "
-        .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        { id, encoded, now, now, now + ttl, user_id, ip, ua }
-    )
+    -- The ttl column is written only when the caller chose one (the values
+    -- array cannot carry a nil in the middle; NULL means the module TTL).
+    if opts and opts.ttl ~= nil then
+        db.exec(
+            "INSERT INTO _hull_sessions "
+            .. "(id, data, created_at, last_accessed, expires_at, "
+            .. " user_id, ip, user_agent, ttl) "
+            .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            { id, encoded, now, now, now + ttl, user_id, ip, ua, ttl }
+        )
+    else
+        db.exec(
+            "INSERT INTO _hull_sessions "
+            .. "(id, data, created_at, last_accessed, expires_at, "
+            .. " user_id, ip, user_agent) "
+            .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            { id, encoded, now, now, now + ttl, user_id, ip, ua }
+        )
+    end
 
     return id
 end
@@ -257,7 +275,7 @@ function session.load(session_id, opts)
 
     local now = time.now()
     local rows = db.query(
-        "SELECT data, expires_at, created_at FROM _hull_sessions "
+        "SELECT data, expires_at, created_at, ttl FROM _hull_sessions "
         .. "WHERE id = ?",
         { session_id }
     )
@@ -285,11 +303,13 @@ function session.load(session_id, opts)
         return nil
     end
 
-    -- Update last_accessed and extend expiry
+    -- Update last_accessed and extend expiry: by the caller's ttl, else the
+    -- session's own (create's), else the module TTL.
     -- Explicit nil check (not `or`): a caller-supplied ttl = 0 is legal and
     -- must not be silently replaced by the default. Matches session.init and
     -- the JS sibling. (In Lua 0 is truthy, so `x and 0 or d` keeps the 0.)
-    local ttl = (opts and opts.ttl ~= nil) and opts.ttl or _ttl
+    local ttl = (opts and opts.ttl ~= nil) and opts.ttl
+                or (type(row.ttl) == "number" and row.ttl) or _ttl
     db.exec(
         "UPDATE _hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
         { now, now + ttl, session_id }
@@ -330,11 +350,22 @@ function session.update(session_id, data, opts)
     -- and given its user by update() was invisible to destroy_all /
     -- destroy_others / list_for_user, so a password reset left it alive.
     local user_id = _request.user_id(type(data) == "table" and data.user_id or nil)
-    local affected = db.exec(
-        "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ?, "
-        .. "user_id = ? WHERE id = ? AND expires_at > ?",
-        { encoded, now, now + ttl, user_id, session_id, now }
-    )
+    -- Without a caller ttl the session's own (see load) applies, read in SQL.
+    local affected
+    if opts and opts.ttl ~= nil then
+        affected = db.exec(
+            "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ?, "
+            .. "user_id = ? WHERE id = ? AND expires_at > ?",
+            { encoded, now, now + ttl, user_id, session_id, now }
+        )
+    else
+        affected = db.exec(
+            "UPDATE _hull_sessions SET data = ?, last_accessed = ?, "
+            .. "expires_at = ? + COALESCE(ttl, ?), "
+            .. "user_id = ? WHERE id = ? AND expires_at > ?",
+            { encoded, now, now, _ttl, user_id, session_id, now }
+        )
+    end
     return (affected or 0) > 0
 end
 

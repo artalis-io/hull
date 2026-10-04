@@ -11,10 +11,10 @@
 --     <script nonce="{{ csp_nonce }}">...</script>
 --     <style nonce="{{ csp_nonce }}">...</style>
 --
--- Three named profiles are provided. All three include the same
--- non-nonce directives (default-src 'self', img-src 'self' data:,
--- form-action 'self', frame-ancestors 'none', base-uri 'self') and
--- differ only in how strictly they treat inline styles:
+-- Two named profiles are provided (identical to the JS side). Both
+-- include the same non-nonce directives (default-src 'self', img-src
+-- 'self' data:, form-action 'self', frame-ancestors 'none', base-uri
+-- 'self') and differ only in how strictly they treat inline styles:
 --
 -- * `csp.htmx()`. The Pico-compatible profile. Allows inline HTML
 --   `style="…"` attributes via `style-src-attr 'unsafe-inline'`.
@@ -24,9 +24,13 @@
 -- * `csp.strict()`. The strictest profile. No `style-src-attr`
 --   escape; inline styles are blocked entirely. Use when you control
 --   every template + ship a CSS framework without inline styles.
--- * `csp.custom(opts)`. Build your own. See `opts` shape below.
 --
--- All three middlewares set the header on the response and continue
+-- There is no `csp.custom`: it was documented here but never existed (a
+-- call raised "attempt to call a nil value"). Apps needing fully custom
+-- directives build their own `Content-Security-Policy` header in a
+-- middleware - the two presets cover the common cases.
+--
+-- Both middlewares set the header on the response and continue
 -- (return 0). Failure modes are limited to `crypto.random` failure,
 -- which is treated as a server error (return 1, 500 response).
 

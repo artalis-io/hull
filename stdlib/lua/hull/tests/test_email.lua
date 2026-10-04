@@ -69,6 +69,27 @@ expect_code("invalid to address throws",
     { from = "x@y.com", to = "not-an-email", subject = "s", body = "b" },
     "invalid_argument", "invalid to address")
 
+-- An over-long address is refused before the (backtracking) pattern runs.
+expect_code("over-long to address throws",
+    { from = "x@y.com", to = "a@" .. string.rep("b", 300) .. ".com",
+      subject = "s", body = "b" },
+    "invalid_argument", "invalid to address")
+
+expect_code("invalid cc address throws",
+    { from = "x@y.com", to = "y@z.com", cc = { "ok@z.com", "bad" },
+      subject = "s", body = "b" },
+    "invalid_argument", "invalid cc address")
+
+expect_code("non-list cc throws",
+    { from = "x@y.com", to = "y@z.com", cc = 42, subject = "s", body = "b" },
+    "invalid_argument", "cc must be")
+
+-- A string cc is one recipient (postmark used to raise on it).
+expect_code("string cc passes validation (fails later on api_key)",
+    { provider = "postmark", from = "a@b.com", to = "c@d.com", cc = "e@f.com",
+      subject = "s", body = "b" },
+    "invalid_argument", "api_key required")
+
 -- ── provider dispatch ───────────────────────────────────────────────
 
 expect_code("unknown provider throws",

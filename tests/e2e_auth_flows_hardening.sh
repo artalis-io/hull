@@ -174,14 +174,16 @@ run_flow() {
     EMAIL_NEW="alice.new@example.test"
     PW="hunter22hunter22"
 
-    # 1. Register with a clean password.
-    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+    # 1. Register with a clean password (the jar is the registering browser).
+    REGJAR="$TMPDIR_WORK/reg_$_label.txt"
+    R=$(curl -sS -c "$REGJAR" -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" \
         "$BASE/auth/register")
     check_contains "$_label: register ok" "$R" '"ok":true'
     TEXT=$(last_email_text "$PORT" "$EMAIL")
     [ -n "$TEXT" ] && pass "$_label: welcome email captured" \
         || fail "$_label: no welcome email captured"
+    WELCOME_URL=$(extract_url "$TEXT")
 
     # 2. Resend verify.
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null
@@ -195,8 +197,11 @@ run_flow() {
     # 2b. Resend for ALREADY-VERIFIED user (after step 3) is
     # enumeration-safe - covered after verify.
 
-    # 3. Verify + login.
-    S=$(curl -sS -o /dev/null -w '%{http_code}' "$VERIFY_URL")
+    # 3. Verify through the welcome link, from the registering browser: a
+    #    resend's link verifies too, but voids the password (audit 4 A-M1 -
+    #    a resend proves nothing about who set it), and the steps below log
+    #    in with it.
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$REGJAR" "$WELCOME_URL")
     check_status "$_label: verify 302" "$S" "302"
     # Re-send AFTER verify should still ok-respond but emit no
     # new email (enumeration-safe).

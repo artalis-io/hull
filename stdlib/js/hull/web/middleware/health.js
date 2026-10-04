@@ -83,7 +83,18 @@ function runChecks(opts) {
         try {
             const result = _checks[name]();
             const latency = Math.round((time.clock() - t0) * 10) / 10;
-            if (result === false) {
+            if (result !== null && result !== undefined
+                && typeof result.then === "function") {
+                // An async check: its Promise was truthy, so it reported
+                // "ok" whatever it later did - and a rejection went
+                // unhandled while /ready kept answering 200. Checks are
+                // synchronous; this one fails (and its rejection is caught).
+                if (typeof result.catch === "function") result.catch(() => {});
+                results[name] = { status: "fail",
+                                  error: "check returned a Promise (checks must be synchronous)",
+                                  latency_ms: latency };
+                allOk = false;
+            } else if (result === false) {
                 results[name] = { status: "fail", error: "check returned false", latency_ms: latency };
                 allOk = false;
             } else {
@@ -120,6 +131,10 @@ function setDb(dbModule) {
  * @param {string} [opts.pathHealth="/health"]
  * @param {string} [opts.pathReady="/ready"]
  * @param {boolean}[opts.dbCheck=true]  Include DB ping in `/ready`.
+ * @param {boolean}[opts.details=false]  Also return each check's error
+ *   text and latency, and the server stats. Off by default: `/ready` is
+ *   normally unauthenticated, and raw error strings (DB driver errors)
+ *   and server stats went to any caller. Enable only behind auth.
  * @param {Object} [opts.db]  Inject the db module (alternative to `setDb`).
  * @returns {(req, res) => number}
  */
@@ -128,6 +143,7 @@ function middleware(opts) {
     const pathHealth = o.pathHealth || "/health";
     const pathReady = o.pathReady || "/ready";
     const doDbCheck = o.dbCheck !== false;
+    const details = o.details === true;
 
     /* Accept db module via opts for apps that have a database */
     if (o.db) _dbMod = o.db;
@@ -151,18 +167,21 @@ function middleware(opts) {
         if (req.path === pathReady) {
             const result = runChecks({ dbCheck: doDbCheck });
 
+            let checks = result.checks;
+            if (!details) {
+                checks = {};
+                for (const name of Object.keys(result.checks))
+                    checks[name] = { status: result.checks[name].status };
+            }
             const body = {
                 status: result.allOk ? "ok" : "fail",
-                checks: result.checks,
+                checks,
                 uptime,
             };
 
-            // Include server stats if available. Pre-fix used `server`
-            // (an undeclared identifier - a ReferenceError the moment
-            // httpServer.stats existed), so the docstring's promised stats
-            // block never reached /ready responses. Mirrors the Lua fix in
-            // health.lua.
-            if (httpServer && httpServer.stats) {
+            // Server stats, with details only. (Pre-fix used `server`, an
+            // undeclared identifier.)
+            if (details && httpServer && httpServer.stats) {
                 body.stats = httpServer.stats();
             }
 

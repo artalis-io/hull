@@ -59,12 +59,28 @@ local function ttl_ms(self, ttl)
     if type(ttl) ~= "number" or ttl < 0 then
         u.error("invalid_argument", "kv: ttl must be a non-negative number of seconds")
     end
-    return math.floor(ttl * 1000)
+    -- Rounded UP, to at least 1 ms: the native layer sets PX only for a
+    -- positive value, so ttl = 0 (and anything under a millisecond, floored to
+    -- 0) set the key with NO expiry - where the memory and SQL backends expire
+    -- it at once. A revocation written with ttl = 0 lived forever on Valkey.
+    -- (put turns ttl = 0 into a delete; see Store:put.)
+    local ms = math.ceil(ttl * 1000)
+    if ms < 1 then ms = 1 end
+    return ms
+end
+
+-- ttl = 0, resolved: the value expires the moment it is written.
+local function expires_now(self, ttl)
+    if ttl == nil then ttl = self.default_ttl end
+    return ttl == 0
 end
 
 function Store:get(k) return self.c:get(self.pfx .. k) end
 
-function Store:put(k, v, ttl) self.c:set(self.pfx .. k, v, ttl_ms(self, ttl)) end
+function Store:put(k, v, ttl)
+    if expires_now(self, ttl) then self.c:del(self.pfx .. k); return end
+    self.c:set(self.pfx .. k, v, ttl_ms(self, ttl))
+end
 
 function Store:del(k) return self.c:del(self.pfx .. k) end
 

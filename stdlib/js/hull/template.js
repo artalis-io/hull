@@ -33,6 +33,14 @@ import { _template } from "hull:_template";
 // ── Limits ──────────────────────────────────────────────────────────
 
 const MAX_INCLUDE_DEPTH  = 16;
+// Control blocks (if / for / block) nest independently of includes: they
+// used to count against the include depth, so 16 nested ifs failed with
+// "include depth limit exceeded".
+const MAX_NEST_DEPTH     = 128;
+// Include fan-out: a partial included N times side by side is expanded N
+// times. Bounded by the total source read and the number of includes.
+const MAX_INCLUDE_BYTES  = 8 * 1024 * 1024;
+const MAX_INCLUDE_COUNT  = 4096;
 const MAX_EXTENDS_DEPTH  = 8;
 const MAX_CACHE_SIZE     = 1024;
 
@@ -75,6 +83,20 @@ function htmlEscape(s) {
 
 // ── Built-in filters ────────────────────────────────────────────────
 
+const NAMED_REFS = { colon: ":", tab: "\t", newline: "\n", sol: "/",
+                     quest: "?", num: "#", amp: "&" };
+
+function decodeRefs(s) {
+    const ascii = (n) => (Number.isFinite(n) && n < 0x80) ? String.fromCharCode(n) : "";
+    return s
+        .replace(/&#[xX]([0-9a-fA-F]+);?/g, (_, h) => ascii(parseInt(h, 16)))
+        .replace(/&#([0-9]+);?/g, (_, d) => ascii(parseInt(d, 10)))
+        .replace(/&([A-Za-z]+);?/g, (m, name) => {
+            const k = name.toLowerCase();
+            return Object.prototype.hasOwnProperty.call(NAMED_REFS, k) ? NAMED_REFS[k] : m;
+        });
+}
+
 const filters = {
     upper(val) { return String(val ?? "").toUpperCase(); },
     lower(val) { return String(val ?? "").toLowerCase(); },
@@ -91,9 +113,14 @@ const filters = {
     // JSON.stringify(undefined) - a missing variable, or a function - is
     // undefined, not a string, and the .replace below threw: one absent key
     // failed the whole render. It is null, as in Lua.
+    // <, >, & and ' as \u escapes (valid JSON, same value): escaping only
+    // "<" kept a script tag closed, but raw ({{{ x | json }}}) in a
+    // single-quoted attribute a "'" ended the attribute.
     json(val) {
         const s = JSON.stringify(val);
-        return (s === undefined ? "null" : s).replace(/</g, "\\u003c");
+        return (s === undefined ? "null" : s).replace(/[<>&']/g, (c) =>
+            c === "<" ? "\\u003c" : c === ">" ? "\\u003e"
+                : c === "&" ? "\\u0026" : "\\u0027");
     },
     raw(val) { return val; },
     // For a URL placed in an attribute (href, src, action): HTML escaping
@@ -102,12 +129,20 @@ const filters = {
     // ...) becomes "#". Browsers ignore whitespace and control characters
     // inside a scheme, so they are removed before the scheme is read. The
     // result is still escaped.
+    //
+    // Character references are decoded before the scheme is read: in raw
+    // output ({{{ u | safe_url }}}) the browser decodes "javascript&colon;x"
+    // or "jav&#x61;script:x" into a javascript: URL, and they used to pass
+    // as scheme-less. A reference left in the scheme part is refused.
     safe_url(val) {
         const s = String(val ?? "");
-        const probe = s.replace(/[\u0000-\u0020\u007f]/g, "").toLowerCase();
+        const probe = decodeRefs(s).replace(/[\u0000-\u0020\u007f]/g, "").toLowerCase();
         const m = /^([a-z][a-z0-9+.-]*):/.exec(probe);
-        if (!m || m[1] === "http" || m[1] === "https" || m[1] === "mailto") return s;
-        return "#";
+        if (m) {
+            return (m[1] === "http" || m[1] === "https" || m[1] === "mailto") ? s : "#";
+        }
+        const head = /^[^/?#]*/.exec(probe)[0];
+        return head.indexOf("&") < 0 ? s : "#";
     },
 };
 
@@ -353,12 +388,19 @@ function cloneSet(obj) {
     return Object.assign({}, obj);
 }
 
-function resolveIncludes(ast, loadFn, visited, depth) {
+// `depth` counts nested INCLUDES only; `nest` counts control blocks (if /
+// for / block); `budget` is shared by the whole expansion.
+function resolveIncludes(ast, loadFn, visited, depth, nest, budget) {
     visited = visited || Object.create(null);
     depth = depth || 0;
+    nest = nest || 0;
+    budget = budget || { bytes: 0, count: 0 };
 
     if (depth >= MAX_INCLUDE_DEPTH) {
         throw new Error("include depth limit exceeded (max " + MAX_INCLUDE_DEPTH + ")");
+    }
+    if (nest >= MAX_NEST_DEPTH) {
+        throw new Error("template nesting limit exceeded (max " + MAX_NEST_DEPTH + ")");
     }
 
     const result = [];
@@ -368,8 +410,14 @@ function resolveIncludes(ast, loadFn, visited, depth) {
             visited[node.name] = true;
             const source = loadFn(node.name);
             if (source == null) throw new Error("template not found: " + node.name);
+            budget.count += 1;
+            budget.bytes += String(source).length;
+            if (budget.count > MAX_INCLUDE_COUNT || budget.bytes > MAX_INCLUDE_BYTES) {
+                throw new Error("template include expansion too large (max "
+                    + MAX_INCLUDE_COUNT + " includes, " + MAX_INCLUDE_BYTES + " bytes)");
+            }
             let incAst = parse(lex(source));
-            incAst = resolveIncludes(incAst, loadFn, visited, depth + 1);
+            incAst = resolveIncludes(incAst, loadFn, visited, depth + 1, nest, budget);
             // `visited` is the chain of includes being expanded, not every
             // include seen: leave it on the way out, so including the same
             // partial twice (in a loop, a block, side by side) is not a cycle.
@@ -379,19 +427,21 @@ function resolveIncludes(ast, loadFn, visited, depth) {
             // Clone visited per branch so same partial can appear in mutually exclusive branches
             const newBranches = node.branches.map(b => ({
                 cond: b.cond, negated: b.negated,
-                body: resolveIncludes(b.body, loadFn, cloneSet(visited), depth + 1)
+                body: resolveIncludes(b.body, loadFn, cloneSet(visited), depth, nest + 1, budget)
             }));
-            const newElse = node.elseBody ? resolveIncludes(node.elseBody, loadFn, cloneSet(visited), depth + 1) : null;
+            const newElse = node.elseBody
+                ? resolveIncludes(node.elseBody, loadFn, cloneSet(visited), depth, nest + 1, budget)
+                : null;
             result.push({ kind: "if", branches: newBranches, elseBody: newElse });
         } else if (node.kind === "for") {
             result.push({ kind: "for", var: node.var, expr: node.expr,
-                          body: resolveIncludes(node.body, loadFn, visited, depth + 1) });
+                          body: resolveIncludes(node.body, loadFn, visited, depth, nest + 1, budget) });
         } else if (node.kind === "for_kv") {
             result.push({ kind: "for_kv", key: node.key, val: node.val, expr: node.expr,
-                          body: resolveIncludes(node.body, loadFn, visited, depth + 1) });
+                          body: resolveIncludes(node.body, loadFn, visited, depth, nest + 1, budget) });
         } else if (node.kind === "block") {
             result.push({ kind: "block", name: node.name,
-                          body: resolveIncludes(node.body, loadFn, visited, depth + 1) });
+                          body: resolveIncludes(node.body, loadFn, visited, depth, nest + 1, budget) });
         } else {
             result.push(node);
         }

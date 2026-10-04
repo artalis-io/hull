@@ -2878,6 +2878,41 @@ UTEST(lua_stdlib, totp_key_rotation_lazy_on_verify)
     cleanup_lua_caps();
 }
 
+/* A db.batch inside another is a savepoint of the outer transaction (audit 4
+ * C-M2): an inner error rolls back only the inner writes, and the outer
+ * batch's error rolls back everything - nothing commits early. */
+UTEST(lua_stdlib, nested_batch_is_a_savepoint)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int ok = eval_int(
+        "(function() "
+        "  local db = require('hull.db').default() "
+        "  db.exec('CREATE TABLE nb (x INTEGER)') "
+        "  db.batch(function() "
+        "    db.exec('INSERT INTO nb VALUES (1)') "
+        "    local inner_ok = pcall(db.batch, function() "
+        "      db.exec('INSERT INTO nb VALUES (2)') error('inner') end) "
+        "    if inner_ok then error('the inner batch should have failed') end "
+        "    db.batch(function() db.exec('INSERT INTO nb VALUES (3)') end) "
+        "  end) "
+        "  local r = db.query('SELECT x FROM nb ORDER BY x') "
+        "  if #r ~= 2 or r[1].x ~= 1 or r[2].x ~= 3 then return 0 end "
+        "  local outer_ok = pcall(db.batch, function() "
+        "    db.exec('INSERT INTO nb VALUES (4)') "
+        "    db.batch(function() db.exec('INSERT INTO nb VALUES (5)') end) "
+        "    error('outer') end) "
+        "  if outer_ok then return 0 end "
+        "  r = db.query('SELECT COUNT(*) AS n FROM nb') "
+        "  if r[1].n ~= 2 then return 0 end "
+        "  db.batch(function() db.exec('INSERT INTO nb VALUES (6)') end) "
+        "  r = db.query('SELECT COUNT(*) AS n FROM nb') "
+        "  return r[1].n == 3 and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, totp_rekey_batch_helper)
 {
     init_lua_with_caps();
@@ -5070,6 +5105,58 @@ UTEST(lua_stdlib, rbac_has_permission)
     cleanup_lua_caps();
 }
 
+/* Audit 4 (stdlib, jobs / kv / cache / rbac). Returns 0, or the number of the
+ * first check that failed. */
+UTEST(lua_stdlib, audit4_jobs_kv_cache_rbac)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local db = require('hull.db').default() "
+        /* 1: rbac.grant / assign create the rows their foreign keys need
+         *    (foreign keys on, as on Postgres / MySQL) */
+        "  db.exec('PRAGMA foreign_keys = ON') "
+        "  local rbac = require('hull.web.middleware.rbac') "
+        "  rbac.init() "
+        "  if not pcall(rbac.grant, 'ghost', 'ghost.read') then return 1 end "
+        "  if not pcall(rbac.assign, 'u1', 'ghost') then return 2 end "
+        "  if not rbac.has_permission('u1', 'ghost.read') then return 3 end "
+        "  db.exec('PRAGMA foreign_keys = OFF') "
+        /* 4: memstore scan limit 0 = unlimited */
+        "  local kv = require('hull.kv') "
+        "  local h = kv.open{ namespace = 'a4scan' } "
+        "  h:set('a', '1'); h:set('b', '2'); h:set('c', '3') "
+        "  if #h:scan('', { limit = 0 }) ~= 3 then return 4 end "
+        "  if #h:scan('', { limit = 2 }) ~= 2 then return 5 end "
+        /* 6-8: cache.open is bounded by default; an explicit 0 is not */
+        "  local cache = require('hull.cache') "
+        "  local c = cache.open{ namespace = 'a4bound' } "
+        "  if c._s.max_items ~= cache.DEFAULT_MAX_ITEMS then return 6 end "
+        "  if c._s.max_bytes ~= cache.DEFAULT_MAX_BYTES then return 7 end "
+        "  local u = cache.open{ namespace = 'a4unbound', max_items = 0 } "
+        "  if u._s.max_items ~= 0 or u._s.max_bytes ~= 0 then return 8 end "
+        /* 9-11: a job whose worker vanished on its last attempt is
+         *       dead-lettered by the reaper, not re-pended */
+        "  local jobs = require('hull.jobs') "
+        "  jobs.init() "
+        "  local id = jobs.enqueue('a4', {}, { max_attempts = 1, dedup_key = 'k1' }) "
+        "  if not id then return 9 end "
+        "  if #jobs.claim({ batch = 1 }) ~= 1 then return 10 end "
+        "  jobs.reap({ visibility_timeout = 0 }) "
+        "  local j = jobs.get(id) "
+        "  if not j or j.status ~= 'dead' then return 11 end "
+        /* 12-13: a finished job's dedup_key no longer blocks a re-enqueue,
+         *        and an unfinished one's still does */
+        "  local id2 = jobs.enqueue('a4', {}, { dedup_key = 'k1' }) "
+        "  if not id2 or id2 == id then return 12 end "
+        "  if jobs.enqueue('a4', {}, { dedup_key = 'k1' }) ~= nil then return 13 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, rbac_middleware_deny)
 {
     init_lua_with_caps();
@@ -5442,6 +5529,42 @@ UTEST(lua_template_cache, miss_then_hit_populates_disk)
     ASSERT_STREQ("17", lua_tostring(L, -1));
     lua_pop(L, 1);
 
+    lua_close(L);
+    nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+/* A render function with an upvalue besides _ENV is not cached (audit 4):
+ * lua_dump drops upvalue values, so on a hit the outer chunk's local came
+ * back as the globals table ("attempt to call a table value"). */
+static const char *TC_UPVALUE_CODE =
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "local cat = table.concat\n"
+    "return function(data)\n"
+    "    return cat({ 'a', tostring(data and data.x or 0) })\n"
+    "end\n";
+
+UTEST(lua_template_cache, render_fn_with_upvalues_not_cached)
+{
+    char tmp[256];
+    tc_with_tmp_home(tmp, sizeof tmp);
+    lua_State *L = luaL_newstate();
+    ASSERT_NE_MSG((void *)L, NULL, "newstate");
+    luaL_openlibs(L);
+    for (int round = 0; round < 2; round++) {
+        int rc = hl_lua_template_compile_cached(L, TC_UPVALUE_CODE,
+                                                strlen(TC_UPVALUE_CODE),
+                                                "=tpl_upv");
+        ASSERT_EQ(LUA_OK, rc);
+        lua_newtable(L);
+        lua_pushinteger(L, 5);
+        lua_setfield(L, -2, "x");
+        ASSERT_EQ(LUA_OK, lua_pcall(L, 1, 1, 0));
+        ASSERT_STREQ("a5", lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+    ASSERT_EQ(0, tc_count(tmp));
     lua_close(L);
     nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
 }

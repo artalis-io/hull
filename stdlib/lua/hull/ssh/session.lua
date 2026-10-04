@@ -139,6 +139,15 @@ function Session:channel_message(ch)
     return m
 end
 
+-- Messages other than data that may wait for one idle channel. A command's
+-- whole life sends a handful (exit-status, eof, close); this is generous.
+local MAX_QUEUED_CONTROL = 256
+
+-- Whether `m` is charged against the receive window (and so bounded by it).
+local function is_windowed(m)
+    return m.type == "data" or m.type == "extended_data"
+end
+
 -- The next channel message for `ch`, with the others on the connection kept
 -- where they belong.
 --
@@ -148,8 +157,9 @@ end
 -- adjust, an EOF, a close - and a request that wants a reply is refused at
 -- once, since the server may be waiting on it (OpenSSH's keepalive). One its
 -- owner needs to see is queued for it, and handed over the next time that
--- channel is read. The queue cannot outgrow the receive window we granted:
--- the window only reopens as the owner consumes. A message for a channel
+-- channel is read. Queued data cannot outgrow the receive window we granted:
+-- the window only reopens as the owner consumes; anything else is capped
+-- (MAX_QUEUED_CONTROL). A message for a channel
 -- that is not open is returned as it is, and fails where it lands - the
 -- mix-up Channel:handle reports.
 --
@@ -161,6 +171,9 @@ function Session:read_for(ch)
         local m = q[ch.inbox_head]
         q[ch.inbox_head] = nil
         ch.inbox_head = ch.inbox_head + 1
+        if not is_windowed(m) then
+            ch.inbox_ctl = (ch.inbox_ctl or 1) - 1
+        end
         if ch.inbox_head > #q then ch.inbox, ch.inbox_head = {}, 1 end
         return m
     end
@@ -180,6 +193,18 @@ function Session:route(ch, m)
         self:send_packet(channel.build_failure(other.remote_id))
     end
     if m.type ~= "window_adjust" then
+        -- Data is bounded by the window we granted; nothing else is. A server
+        -- flooding CHANNEL_REQUESTs at an idle channel grew its queue until
+        -- the VM ran out of memory - so those are counted, and a channel
+        -- that holds more than any honest peer sends is a protocol error.
+        if not is_windowed(m) then
+            local n = (other.inbox_ctl or 0) + 1
+            if n > MAX_QUEUED_CONTROL then
+                error("ssh: too many messages queued for channel "
+                      .. tostring(other.local_id) .. " (protocol abuse)")
+            end
+            other.inbox_ctl = n
+        end
         m.routed = true
         other.inbox[#other.inbox + 1] = m
     end

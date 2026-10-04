@@ -45,12 +45,14 @@ test("cell is keyboard-activatable (role=button, tabindex)", function()
     assert_match(s, 'tabindex="0"')
 end)
 
-test("cell triggers on click, Enter, Space", function()
+-- Plain click only: an htmx keyup[key==...] filter evaluates as
+-- always-true under csp = "htmx" (allowEval:false). Enter / Space are
+-- the widget script's (inline-edit.js).
+test("cell triggers on click only (keys handled by the widget script)", function()
     local s = inline_edit.cell({ value = "x", edit_url = "/x/edit" })
-    assert_match(s, 'click')
-    assert_match(s, "Enter")
-    -- Space - the literal char appears in the trigger
-    assert_match(s, "key==' '")
+    assert_match(s, 'hx-trigger="click"')
+    assert_no_match(s, "keyup[")
+    assert_match(s, 'class="hull-inline-edit-view"')
 end)
 
 test("cell emits hx-get pointing at edit_url", function()
@@ -145,11 +147,13 @@ test("editor Cancel button hx-get points at cancel_url", function()
     assert_match(s, 'hx-get="/x/view"')
 end)
 
-test("editor wires Esc-to-cancel via hx-trigger", function()
+test("editor cancel has no key filter (Esc is the widget script's)", function()
     local s = inline_edit.editor({
         value = "x", save_url = "/x", cancel_url = "/x/view",
     })
-    assert_match(s, "Escape")
+    assert_no_match(s, "keyup[")
+    assert_match(s, 'class="hull-inline-edit-cancel"')
+    assert_match(s, 'hx-trigger="click"')
 end)
 
 test("editor escapes value (XSS in pre-fill)", function()

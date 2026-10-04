@@ -344,6 +344,40 @@ end
 -- entered string on enter, nil on escape/ctrl+c.
 --
 -- opts = { initial = "", prompt = "", max_len = 1024, password = false }
+--
+-- Editing is by codepoint, not byte: the cursor is a byte index that
+-- always sits on a character boundary. It used to step one byte, so
+-- backspace after "é" removed half of it and the result was invalid
+-- UTF-8. `max_len` is in bytes and never splits a character.
+
+local function is_cont(s, i)
+    local b = string.byte(s, i)
+    return b ~= nil and b >= 0x80 and b < 0xC0
+end
+
+-- Byte index where the character before byte position `i` starts.
+local function prev_char(s, i)
+    local j = i - 1
+    while j > 1 and is_cont(s, j) do j = j - 1 end
+    return j
+end
+
+-- Byte index just past the character that starts at `i`.
+local function next_char(s, i)
+    local j = i + 1
+    while j <= #s and is_cont(s, j) do j = j + 1 end
+    return j
+end
+
+-- Characters (codepoints) in s[1 .. i-1]; a malformed byte counts as one.
+local function chars_before(s, i)
+    local n, j = 0, 1
+    while j < i do
+        n = n + 1
+        j = next_char(s, j)
+    end
+    return n
+end
 
 function tui.input(prompt, opts)
     opts = opts or {}
@@ -361,15 +395,16 @@ function tui.input(prompt, opts)
             t:print(1, 1, prompt_str)
             local display
             if password then
-                display = string.rep("*", #buf)
+                display = string.rep("*", chars_before(buf, #buf + 1))
             else
                 display = buf
             end
-            local x = #prompt_str + 1
+            local x = chars_before(prompt_str, #prompt_str + 1) + 1
             t:print(x, 1, display)
             -- Show the cursor by moving there; the terminal's actual
-            -- cursor follows tui.move via the flush.
-            t:move(x + cursor - 1, 1)
+            -- cursor follows tui.move via the flush. (A column count, so
+            -- characters, not bytes.)
+            t:move(x + chars_before(buf, cursor), 1)
         end,
         on_event = function(ev)
             if ev.kind ~= "key" then return end
@@ -378,17 +413,19 @@ function tui.input(prompt, opts)
             elseif k == "escape" or k == "ctrl+c" then return false
             elseif k == "backspace" then
                 if cursor > 1 then
-                    buf = string.sub(buf, 1, cursor - 2) .. string.sub(buf, cursor)
-                    cursor = cursor - 1
+                    local p = prev_char(buf, cursor)
+                    buf = string.sub(buf, 1, p - 1) .. string.sub(buf, cursor)
+                    cursor = p
                 end
             elseif k == "delete" then
                 if cursor <= #buf then
-                    buf = string.sub(buf, 1, cursor - 1) .. string.sub(buf, cursor + 1)
+                    buf = string.sub(buf, 1, cursor - 1)
+                          .. string.sub(buf, next_char(buf, cursor))
                 end
             elseif k == "left" then
-                if cursor > 1 then cursor = cursor - 1 end
+                if cursor > 1 then cursor = prev_char(buf, cursor) end
             elseif k == "right" then
-                if cursor <= #buf then cursor = cursor + 1 end
+                if cursor <= #buf then cursor = next_char(buf, cursor) end
             elseif k == "home" then
                 cursor = 1
             elseif k == "end" then
@@ -399,12 +436,12 @@ function tui.input(prompt, opts)
             elseif k == "ctrl+k" then
                 buf = string.sub(buf, 1, cursor - 1)
             elseif is_printable_cp(ev.codepoint) and not ev.ctrl and not ev.alt then
-                if #buf < max_len then
-                    -- Encode codepoint as UTF-8 (use the key string
-                    -- which already has it encoded). is_printable_cp
-                    -- has filtered out C0/DEL/C1 ranges so ev.key
-                    -- can't carry an ANSI-injection payload here.
-                    local ch = ev.key
+                -- Encode codepoint as UTF-8 (use the key string which
+                -- already has it encoded). is_printable_cp has filtered
+                -- out C0/DEL/C1 ranges so ev.key can't carry an
+                -- ANSI-injection payload here.
+                local ch = ev.key
+                if type(ch) == "string" and #buf + #ch <= max_len then
                     buf = string.sub(buf, 1, cursor - 1) .. ch .. string.sub(buf, cursor)
                     cursor = cursor + #ch
                 end

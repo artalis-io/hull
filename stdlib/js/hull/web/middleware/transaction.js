@@ -42,8 +42,10 @@ function middleware(opts) {
  * Run `fn` inside `BEGIN IMMEDIATE..COMMIT`.
  *
  * On error the transaction is rolled back and the error is re-thrown.
- * SQLite doesn't support nested transactions - calling this while
- * already inside a `db.batch` will error.
+ * Inside another `db.batch` on the same connection it runs in a
+ * savepoint of that transaction: its writes commit with the outer one,
+ * and its error rolls back only its own writes before propagating
+ * (on DuckDB, which has no savepoints, it joins the outer transaction).
  *
  * @param {() => void} fn  Function whose DB writes should be atomic.
  * @throws Re-throws any error from `fn` after rollback.

@@ -207,6 +207,19 @@ test("date default pattern without locale format", () => {
     assertEq(i18n.date(1705320000), "2024-01-15");
 });
 
+// ── tIn() ────────────────────────────────────────────────────────────
+
+test("tIn translates in an explicit locale, ignoring the active one", () => {
+    i18n.load("en", en);
+    i18n.load("hu", hu);
+    i18n.locale("en");
+    assertEq(i18n.tIn("hu", "invoice.title"), hu.invoice.title);
+    assertEq(i18n.t("invoice.title"), "Invoice");
+    assertEq(i18n.tIn("xx", "invoice.title"), "invoice.title");
+    assertEq(i18n.tIn(null, "invoice.title"), "invoice.title");
+    assertEq(i18n.tIn("constructor", "invoice.title"), "invoice.title");
+});
+
 // ── currency() ───────────────────────────────────────────────────────
 
 test("currency HUF (after, 0 digits)", () => {
@@ -225,6 +238,14 @@ test("currency USD (before, 2 digits)", () => {
     i18n.load("en", en);
     i18n.locale("en");
     assertEq(i18n.currency(99.9, "USD"), "$99.90");
+});
+
+test("currency negatives round like the Lua sibling", () => {
+    i18n.load("en", en);
+    i18n.locale("en");
+    assertEq(i18n.currency(-1.5, "USD"), "$-1.50");
+    assertEq(i18n.currency(-0.25, "USD"), "$-0.25");
+    assertEq(i18n.currency(-0.001, "USD"), "$0.00");
 });
 
 test("currency unknown code fallback", () => {

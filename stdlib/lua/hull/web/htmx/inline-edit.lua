@@ -122,8 +122,12 @@ end
 --
 -- The span uses `outerHTML` swap so the entire cell is replaced
 -- by the editor fragment on click. `role="button"` + `tabindex=0`
--- make it keyboard-activatable; Enter / Space on the focused
--- span fires the click (browser default for role=button).
+-- make it focusable; Enter / Space on the focused span are turned
+-- into a click by the widget script (inline-edit.js), not by an
+-- htmx `keyup[key==...]` filter: under `csp = "htmx"`
+-- (allowEval:false) htmx cannot evaluate those filters and treats
+-- them as always true, so in the editor any keystroke fired the
+-- cancel request and the edit was lost.
 --
 -- @tparam table opts
 -- @treturn string  HTML, ready for `| raw` splicing.
@@ -138,7 +142,7 @@ function inline_edit.cell(opts)
     return '<span class="hull-inline-edit-view" role="button" tabindex="0"'
         .. ' aria-label="' .. label .. '" title="' .. label .. '"'
         .. ' hx-get="' .. edit_url .. '"'
-        .. ' hx-trigger="click, keyup[key==\'Enter\'] from:this, keyup[key==\' \'] from:this"'
+        .. ' hx-trigger="click"'
         .. ' hx-swap="outerHTML">'
         .. value
         .. '</span>'
@@ -167,7 +171,8 @@ end
 --
 -- Submit (Enter or Save button) PATCHes save_url; the server
 -- response replaces the form via outerHTML swap. Cancel button
--- (or Esc on the input) GETs cancel_url for the same swap.
+-- (or Esc in the form, which inline-edit.js turns into a click
+-- on Cancel) GETs cancel_url for the same swap.
 --
 -- @tparam table opts
 -- @treturn string  HTML, ready for `| raw` splicing.
@@ -187,8 +192,8 @@ function inline_edit.editor(opts)
     local label        = esc(opts.label or "Edit value")
     local save_label   = esc(opts.save_label or "Save")
     local cancel_label = esc(opts.cancel_label or "Cancel")
-    -- Esc-to-cancel: htmx trigger on the form watches keyup
-    -- bubbling from anywhere within (Esc on the input cancels).
+    -- Esc-to-cancel is the widget script's (a click on Cancel): see
+    -- inline_edit.cell for why it is not an htmx key filter.
     return '<form class="hull-inline-edit-form"'
         .. ' hx-patch="' .. save_url .. '"'
         .. ' hx-target="this" hx-swap="outerHTML">'
@@ -198,7 +203,7 @@ function inline_edit.editor(opts)
         .. save_label .. '</button>'
         .. '<button type="button" class="hull-inline-edit-cancel"'
         .. ' hx-get="' .. cancel_url .. '"'
-        .. ' hx-trigger="click, keyup[key==\'Escape\'] from:closest form"'
+        .. ' hx-trigger="click"'
         .. ' hx-target="closest form" hx-swap="outerHTML">'
         .. cancel_label .. '</button>'
         .. '</form>'

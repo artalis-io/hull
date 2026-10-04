@@ -2715,6 +2715,48 @@ UTEST(js_stdlib, totp_key_rotation_lazy_on_verify_js)
     cleanup_js_caps();
 }
 
+/* A db.batch inside another is a savepoint (audit 4 C-M2). */
+UTEST(js_stdlib, nested_batch_is_a_savepoint)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { db as dbm } from 'hull:db';\n"
+        "function run() {\n"
+        "  const db = dbm.default();\n"
+        "  db.exec('CREATE TABLE nbj (x INTEGER)');\n"
+        "  db.batch(() => {\n"
+        "    db.exec('INSERT INTO nbj VALUES (1)');\n"
+        "    let innerOk = true;\n"
+        "    try { db.batch(() => { db.exec('INSERT INTO nbj VALUES (2)'); throw new Error('inner'); }); }\n"
+        "    catch (e) { innerOk = false; }\n"
+        "    if (innerOk) throw new Error('the inner batch should have failed');\n"
+        "    db.batch(() => { db.exec('INSERT INTO nbj VALUES (3)'); });\n"
+        "  });\n"
+        "  let r = db.query('SELECT x FROM nbj ORDER BY x');\n"
+        "  if (r.length !== 2 || r[0].x !== 1 || r[1].x !== 3) return 0;\n"
+        "  let outerOk = true;\n"
+        "  try { db.batch(() => { db.exec('INSERT INTO nbj VALUES (4)');\n"
+        "        db.batch(() => { db.exec('INSERT INTO nbj VALUES (5)'); });\n"
+        "        throw new Error('outer'); }); }\n"
+        "  catch (e) { outerOk = false; }\n"
+        "  if (outerOk) return 0;\n"
+        "  r = db.query('SELECT COUNT(*) AS n FROM nbj');\n"
+        "  if (r[0].n !== 2) return 0;\n"
+        "  db.batch(() => { db.exec('INSERT INTO nbj VALUES (6)'); });\n"
+        "  r = db.query('SELECT COUNT(*) AS n FROM nbj');\n"
+        "  return r[0].n === 3 ? 1 : 0;\n"
+        "}\n"
+        "globalThis.__nested_batch = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    ASSERT_EQ(eval_int("globalThis.__nested_batch"), 1);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, totp_rekey_batch_helper_js)
 {
     init_js_with_caps();
@@ -4963,6 +5005,68 @@ UTEST(js_stdlib, search_tokenize_grammar_parity)
     ASSERT_EQ(eval_int("globalThis.__tk_b6"), 1);
     ASSERT_EQ(eval_int("globalThis.__tk_b7"), 1);
     ASSERT_EQ(eval_int("globalThis.__tk_b8"), 1);
+
+    cleanup_js_caps();
+}
+
+/* Audit 4 (stdlib, jobs / kv / cache / rbac). __test_a4 is 0, or the
+ * number of the first check that failed. */
+UTEST(js_stdlib, audit4_jobs_kv_cache_rbac)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { rbac } from 'hull:web:middleware:rbac';\n"
+        "import { cache } from 'hull:cache';\n"
+        "import { jobs } from 'hull:jobs';\n"
+        "import { db as dbm } from 'hull:db';\n"
+        "globalThis.__test_a4 = (() => {\n"
+        "  const db = dbm.default();\n"
+        /* 1-3: grant / assign create the rows their foreign keys need */
+        "  db.exec('PRAGMA foreign_keys = ON');\n"
+        "  rbac.init();\n"
+        "  try { rbac.grant('ghost', 'ghost.read'); } catch (e) { return 1; }\n"
+        "  try { rbac.assign('u1', 'ghost'); } catch (e) { return 2; }\n"
+        "  if (!rbac.hasPermission('u1', 'ghost.read')) return 3;\n"
+        "  db.exec('PRAGMA foreign_keys = OFF');\n"
+        /* 4-6: cache.new is an LRU: a read refreshes, the oldest goes */
+        "  const c = cache.new({ maxEntries: 2 });\n"
+        "  c.set('a', 1); c.set('b', 2);\n"
+        "  if (c.get('a') !== 1) return 4;\n"
+        "  c.set('c', 3);\n"
+        "  if (c.has('b') || !c.has('a') || !c.has('c')) return 5;\n"
+        "  if (c.size() !== 2) return 6;\n"
+        /* 7-8: cache.open is bounded by default; an explicit 0 is not */
+        "  const o = cache.open({ namespace: 'a4bound' });\n"
+        "  if (!(o._store.maxItems > 0)) return 7;\n"
+        "  const u = cache.open({ namespace: 'a4unbound', maxItems: 0 });\n"
+        "  if (u._store.maxItems !== 0) return 8;\n"
+        /* 9-11: a job whose worker vanished on its last attempt is
+         *       dead-lettered by the reaper */
+        "  jobs.init();\n"
+        "  const id = jobs.enqueue('a4', {}, { maxAttempts: 1, dedupKey: 'k1' });\n"
+        "  if (!id) return 9;\n"
+        "  if (jobs.claim({ batch: 1 }).length !== 1) return 10;\n"
+        "  jobs.reap({ visibilityTimeout: 0 });\n"
+        "  const j = jobs.get(id);\n"
+        "  if (!j || j.status !== 'dead') return 11;\n"
+        /* 12-13: a finished job's dedupKey no longer blocks a re-enqueue */
+        "  const id2 = jobs.enqueue('a4', {}, { dedupKey: 'k1' });\n"
+        "  if (!id2 || id2 === id) return 12;\n"
+        "  if (jobs.enqueue('a4', {}, { dedupKey: 'k1' }) !== null) return 13;\n"
+        "  return 0;\n"
+        "})();\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    /* typeof guard: an undefined (a module that threw) also reads as 0 */
+    ASSERT_EQ(eval_int("typeof globalThis.__test_a4 === 'number' ? globalThis.__test_a4 : -1"), 0);
 
     cleanup_js_caps();
 }

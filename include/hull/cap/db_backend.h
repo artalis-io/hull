@@ -14,6 +14,8 @@
 #include "hull/cap/types.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 
 /* Forward declarations */
 typedef struct HlAllocator HlAllocator;
@@ -200,6 +202,7 @@ typedef struct HlDbBackend {
 struct HlDbHandle {
     const HlDbBackend *backend;
     void              *ctx;
+    int                batch_depth;   /* open db.batch levels (hl_db_batch_*) */
 };
 
 /* ── Inline wrappers ──────────────────────────────────────────────── */
@@ -382,5 +385,62 @@ const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err);
  * so it displaces the weak default. See docs/features_and_flavors.md §3.2.
  */
 const HlDbBackend *const *hl_db_feature_backends(size_t *count);
+
+/* ── Nested db.batch ────────────────────────────────────────────────
+ *
+ * db.batch opens a transaction; a batch run inside another one (a stdlib
+ * helper that batches, called from the app's batch) is a SAVEPOINT in the
+ * outer transaction. It used to issue its own BEGIN and COMMIT: on Postgres
+ * the inner COMMIT committed the caller's transaction early (the nested BEGIN
+ * is only a warning), on MySQL START TRANSACTION commits the open one, and
+ * SQLite raised. DuckDB has no savepoints, so there an inner batch joins the
+ * outer transaction (its error still reaches the outer batch's fn).
+ *
+ * enter: 0, or -1 with the backend error in hl_db_errmsg.
+ * leave(ok): commits / releases when ok, rolls back otherwise; 0, or -1 when
+ * the commit or release failed (the transaction is then rolled back). */
+static inline int hl_db_batch_savepoints_(const HlDbHandle *h)
+{
+    return !(h->backend && h->backend->name &&
+             strcmp(h->backend->name, "duckdb") == 0);
+}
+
+static inline void hl_db_batch_spname_(char *buf, size_t sz, const char *verb,
+                                       int level)
+{
+    snprintf(buf, sz, "%s hull_batch_%d", verb, level);
+}
+
+static inline int hl_db_batch_enter(HlDbHandle *h)
+{
+    if (h->batch_depth == 0) {
+        if (hl_db_begin(h) != 0) return -1;
+    } else if (hl_db_batch_savepoints_(h)) {
+        char sql[64];
+        hl_db_batch_spname_(sql, sizeof sql, "SAVEPOINT", h->batch_depth);
+        if (hl_db_exec(h, sql, NULL, 0) < 0) return -1;
+    }
+    h->batch_depth++;
+    return 0;
+}
+
+static inline int hl_db_batch_leave(HlDbHandle *h, int ok)
+{
+    if (h->batch_depth <= 0) return -1;
+    int level = --h->batch_depth;
+    if (level == 0) {
+        if (!ok) { hl_db_rollback(h); return 0; }
+        if (hl_db_commit(h) != 0) { hl_db_rollback(h); return -1; }
+        return 0;
+    }
+    if (!hl_db_batch_savepoints_(h)) return 0;
+    char sql[64];
+    if (!ok) {
+        hl_db_batch_spname_(sql, sizeof sql, "ROLLBACK TO SAVEPOINT", level);
+        (void)hl_db_exec(h, sql, NULL, 0);
+    }
+    hl_db_batch_spname_(sql, sizeof sql, "RELEASE SAVEPOINT", level);
+    return hl_db_exec(h, sql, NULL, 0) < 0 ? -1 : 0;
+}
 
 #endif /* HL_CAP_DB_BACKEND_H */

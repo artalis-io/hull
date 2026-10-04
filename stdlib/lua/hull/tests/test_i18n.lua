@@ -232,6 +232,33 @@ test("currency unknown code fallback", function()
     assert_eq(i18n.currency(100, "GBP"), "100 GBP")
 end)
 
+-- floor() ran before the sign came off: -1.5 rendered as "-2.50".
+test("currency negative amounts", function()
+    i18n.load("en", en)
+    i18n.load("hu", hu)
+    i18n.locale("en")
+    assert_eq(i18n.currency(-1.5, "USD"), "$-1.50")
+    assert_eq(i18n.currency(-1234.56, "USD"), "$-1,234.56")
+    assert_eq(i18n.currency(-0.001, "USD"), "$0.00")
+    assert_eq(i18n.currency(0.005, "USD"), "$0.01")
+    i18n.locale("hu")
+    assert_eq(i18n.currency(-1500.4, "HUF"), "-1 500 Ft")
+end)
+
+-- ── t_in() ───────────────────────────────────────────────────────────
+
+test("t_in translates in an explicit locale, ignoring the active one", function()
+    i18n.load("en", en)
+    i18n.load("hu", hu)
+    i18n.locale("en")
+    assert_eq(i18n.t_in("hu", "invoice.title"), "Sz\xc3\xa1mla")
+    assert_eq(i18n.t_in("hu", "invoice.total", { amount = "5" }),
+              "\xc3\x96sszesen: 5 Ft")
+    assert_eq(i18n.t("invoice.title"), "Invoice")       -- active unchanged
+    assert_eq(i18n.t_in("xx", "invoice.title"), "invoice.title")
+    assert_eq(i18n.t_in(nil, "invoice.title"), "invoice.title")
+end)
+
 -- ── detect() ─────────────────────────────────────────────────────────
 
 test("detect exact match", function()

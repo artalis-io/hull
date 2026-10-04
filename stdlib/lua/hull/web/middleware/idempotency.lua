@@ -60,6 +60,13 @@ local function completed_expiry(req)
     return time.now() + (req.ctx._idem_ttl or _ttl)
 end
 
+-- A completion writes only the claim it belongs to: still in flight, with this
+-- request's fingerprint and claim time. A handler that ran past its lease had
+-- its row reclaimed by a retry (possibly with another body); completing later,
+-- it overwrote that row, so replays of the retry returned the first
+-- handler's response.
+local CLAIM_GUARD = " AND state = 'inflight' AND fingerprint = ? AND created_at = ?"
+
 -- M-3: allowlist of headers safe to replay/cache. Excludes credential
 -- and session-binding headers (Set-Cookie, WWW-Authenticate, etc.) so a
 -- stored Set-Cookie can't outlive a revoked session.
@@ -284,10 +291,13 @@ function idempotency.middleware(opts)
         if #rows > 0 then
             local row = rows[1]
 
-            -- Expired: delete and treat as new
+            -- Expired: delete and treat as new. Only while it is still
+            -- expired: a concurrent request may have replaced it with a fresh
+            -- claim since the SELECT, and an unguarded DELETE removed that.
             if row.expires_at <= now then
-                db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
-                        { principal_id, key })
+                db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ? "
+                        .. "AND expires_at <= ?",
+                        { principal_id, key, now })
             else
                 -- Fingerprint comparison. Fingerprints are SHA-256(public
                 -- inputs) - not secrets - so timing leaks are not exploitable.
@@ -346,7 +356,8 @@ function idempotency.middleware(opts)
 
                 -- State is "complete" but no status cached: let handler re-run
                 -- (handler didn't use idempotency.respond() last time)
-                db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
+                db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ? "
+                        .. "AND state = 'complete' AND status IS NULL",
                         { principal_id, key })
             end
         end
@@ -373,6 +384,9 @@ function idempotency.middleware(opts)
         req.ctx._idem_key = key
         req.ctx._idem_principal = principal_id
         req.ctx._idem_ttl = ttl
+        -- This request's claim, for the completing UPDATE (see claim_guard).
+        req.ctx._idem_fingerprint = fingerprint
+        req.ctx._idem_created = now
 
         return 0
     end
@@ -431,9 +445,11 @@ local function cache_and_send(req, res, status_code, body_str, content_type, ext
         end
         local headers_str = json.encode(filtered)
         db.exec(
-            "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, response_body = ?, response_headers = ?, expires_at = ? WHERE principal_id = ? AND key = ?",
+            "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, response_body = ?, response_headers = ?, expires_at = ? WHERE principal_id = ? AND key = ?"
+            .. CLAIM_GUARD,
             { status_code, body_str, headers_str, completed_expiry(req),
-              req.ctx._idem_principal, req.ctx._idem_key }
+              req.ctx._idem_principal, req.ctx._idem_key,
+              req.ctx._idem_fingerprint, req.ctx._idem_created }
         )
     end
 end
@@ -479,8 +495,10 @@ end
 function idempotency.complete(req)
     if req.ctx._idem_key then
         db.exec(
-            "UPDATE _hull_idempotency_keys SET state = 'complete', expires_at = ? WHERE principal_id = ? AND key = ?",
-            { completed_expiry(req), req.ctx._idem_principal, req.ctx._idem_key }
+            "UPDATE _hull_idempotency_keys SET state = 'complete', expires_at = ? WHERE principal_id = ? AND key = ?"
+            .. CLAIM_GUARD,
+            { completed_expiry(req), req.ctx._idem_principal, req.ctx._idem_key,
+              req.ctx._idem_fingerprint, req.ctx._idem_created }
         )
     end
 end

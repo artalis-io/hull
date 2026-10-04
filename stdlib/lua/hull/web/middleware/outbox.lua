@@ -218,11 +218,16 @@ function outbox.flush(opts)
         -- send them again. The claim pushes next_attempt_at out by a lease;
         -- only the flush whose UPDATE changed the row delivers it. If this
         -- process dies mid-send the lease runs out and the row is retried.
-        local lease = now + CLAIM_LEASE
+        -- The lease starts at the claim, not at the flush: items are claimed
+        -- one at a time, each before its own awaited delivery, so with slow
+        -- deliveries ahead of it a later item got a lease that had already
+        -- run out - another flush reclaimed it at once and sent it again.
+        local claim_now = time.now()
+        local lease = claim_now + CLAIM_LEASE
         local claimed = db.exec(
             "UPDATE _hull_outbox SET next_attempt_at = ? WHERE id = ? " ..
             "AND state = 'pending' AND next_attempt_at <= ?",
-            { lease, item.id, now })
+            { lease, item.id, claim_now })
         if claimed == 1 then
             local ok, err = deliver_item(item)
 

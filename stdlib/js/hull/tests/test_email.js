@@ -51,10 +51,24 @@ await (async () => {
     await expectCode("invalid to address throws",
         { from: "x@y.com", to: "bad", subject: "s", body: "b" }, "invalid_argument", "invalid to address");
 
+    await expectCode("over-long to address throws",
+        { from: "x@y.com", to: "a@" + "b".repeat(300) + ".com", subject: "s", body: "b" },
+        "invalid_argument", "invalid to address");
+    await expectCode("invalid cc address throws",
+        { from: "x@y.com", to: "y@z.com", cc: ["ok@z.com", "bad"], subject: "s", body: "b" },
+        "invalid_argument", "invalid cc address");
+
     // ── provider dispatch ───────────────────────────────────────────
     await expectCode("unknown provider throws",
         { provider: "unknown", from: "a@b.com", to: "c@d.com", subject: "s", body: "b" },
         "unknown_provider", "unknown provider");
+    // An inherited Object.prototype name is not a provider (it "sent" nothing
+    // and resolved).
+    for (const p of ["toString", "constructor", "__proto__", "hasOwnProperty"]) {
+        await expectCode("prototype name '" + p + "' is not a provider",
+            { provider: p, from: "a@b.com", to: "c@d.com", subject: "s", body: "b" },
+            "unknown_provider", "unknown provider");
+    }
 
     // ── api provider validation ─────────────────────────────────────
     await expectCode("postmark requires api_key",

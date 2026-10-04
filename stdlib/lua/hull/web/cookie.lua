@@ -77,6 +77,11 @@ function cookie.serialize(name, value, opts)
     local path = opts.path
     if path == nil then path = "/" end
     if path then
+        -- A path from user input could otherwise add attributes
+        -- ("/; Domain=evil.com"). Same refusal as the JS sibling.
+        if type(path) ~= "string" or path:find("[%c;]") then
+            error("cookie: invalid path (contains ';' or a control character)")
+        end
         parts[#parts + 1] = "Path=" .. path
     end
 
@@ -98,12 +103,22 @@ function cookie.serialize(name, value, opts)
     local samesite = opts.samesite
     if samesite == nil then samesite = "Lax" end
     if samesite then
-        parts[#parts + 1] = "SameSite=" .. samesite
+        local canon = type(samesite) == "string"
+            and ({ strict = "Strict", lax = "Lax", none = "None" })[samesite:lower()]
+        if not canon then
+            error("cookie: samesite must be Strict, Lax or None")
+        end
+        parts[#parts + 1] = "SameSite=" .. canon
     end
 
-    -- Max-Age
-    if opts.max_age then
-        parts[#parts + 1] = "Max-Age=" .. tostring(opts.max_age)
+    -- Max-Age: an integer (a string went in verbatim, attributes and all)
+    if opts.max_age ~= nil then
+        local n = tonumber(opts.max_age)
+        if type(opts.max_age) ~= "number" or not n or n ~= n
+           or n == math.huge or n == -math.huge then
+            error("cookie: max_age must be a number")
+        end
+        parts[#parts + 1] = "Max-Age=" .. string.format("%d", math.floor(n))
     end
 
     -- Domain - RFC 6265 attribute syntax. Accepts an optional leading "."

@@ -29,8 +29,9 @@ function isAllowedOrigin(origin, origins) {
  * Build a CORS middleware function for `app.use()`.
  *
  * The middleware skips requests without an `Origin` header, rejects
- * disallowed origins silently (browser blocks), and on allowed origins
- * emits `Access-Control-Allow-Origin` + `Vary` + (when `credentials`)
+ * disallowed origins silently (browser blocks) - `Vary: Origin` is set
+ * on every response - and on allowed origins
+ * emits `Access-Control-Allow-Origin` + (when `credentials`)
  * `Access-Control-Allow-Credentials`. On `OPTIONS` preflight: emits
  * methods/headers/max-age and replies 204 (short-circuit, returns 1).
  *
@@ -75,13 +76,16 @@ function middleware(opts) {
     }
 
     return function corsMiddleware(req, res) {
+        // Every response depends on Origin, including one that carries no
+        // CORS headers: sent only on allowed responses, a shared cache could
+        // store the header-less copy and serve it to an allowed origin.
+        res.header("Vary", "Origin");
         const origin = req.header("Origin");
         if (!origin) return 0;
 
         if (!isAllowedOrigin(origin, origins)) return 0;
 
         res.header("Access-Control-Allow-Origin", origin);
-        res.header("Vary", "Origin");
 
         if (credentials) {
             res.header("Access-Control-Allow-Credentials", "true");

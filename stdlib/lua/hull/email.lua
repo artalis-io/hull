@@ -54,6 +54,34 @@ local function email_error(code, message)
     error(setmetatable({ code = code, message = message }, _err_mt), 0)
 end
 
+-- An address: a string of at most 254 bytes (RFC 5321's path limit), checked
+-- BEFORE the pattern - "[^%s@]+%.[^%s@]+" backtracks quadratically, so a long
+-- dotless domain took seconds on the event loop.
+local MAX_ADDR = 254
+
+local function addr_ok(a)
+    return type(a) == "string" and #a <= MAX_ADDR
+       and a:match("^[^%s@]+@[^%s@]+%.[^%s@]+$") ~= nil
+end
+
+-- opts.cc as a list of strings: a string is one recipient. (postmark raised
+-- on a string - table.concat of a string - and sendgrid dropped cc.)
+local function cc_list(cc)
+    if cc == nil then return nil end
+    if type(cc) == "string" then cc = { cc } end
+    if type(cc) ~= "table" then
+        email_error("invalid_argument", "cc must be a string or a list of strings")
+    end
+    local out = {}
+    for _, a in ipairs(cc) do
+        if not addr_ok(a) then
+            email_error("invalid_argument", "invalid cc address")
+        end
+        out[#out + 1] = a
+    end
+    return #out > 0 and out or nil
+end
+
 -- Provider adapters: each takes (opts), returns true on success, throws on
 -- failure (delivery_failed / invalid_argument).
 local providers = {}
@@ -67,7 +95,7 @@ function providers.smtp(opts)
         tls = opts.smtp_tls ~= false,
         from = opts.from,
         to = opts.to,
-        cc = opts.cc,
+        cc = cc_list(opts.cc),
         reply_to = opts.reply_to,
         subject = opts.subject,
         body = opts.body,
@@ -91,8 +119,9 @@ function providers.postmark(opts)
         To = opts.to,
         Subject = opts.subject,
     }
-    if opts.cc then
-        payload.Cc = table.concat(opts.cc, ",")
+    local cc = cc_list(opts.cc)
+    if cc then
+        payload.Cc = table.concat(cc, ",")
     end
     if opts.reply_to then
         payload.ReplyTo = opts.reply_to
@@ -143,6 +172,13 @@ function providers.sendgrid(opts)
     if opts.reply_to then
         payload.reply_to = { email = opts.reply_to }
     end
+    -- cc rides in the personalization; it used to be dropped silently.
+    local cc = cc_list(opts.cc)
+    if cc then
+        local list = {}
+        for i, a in ipairs(cc) do list[i] = { email = a } end
+        payload.personalizations[1].cc = list
+    end
 
     local ok, resp = pcall(http_client.async.post,
         "https://api.sendgrid.com/v3/mail/send",
@@ -182,7 +218,7 @@ function providers.resend(opts)
         payload.text = opts.body
     end
     if opts.reply_to then payload.reply_to = opts.reply_to end
-    if opts.cc then payload.cc = opts.cc end
+    payload.cc = cc_list(opts.cc)
 
     local ok, resp = pcall(http_client.async.post,
         "https://api.resend.com/emails",
@@ -239,12 +275,13 @@ function email.send(opts)
     if not opts.body then email_error("invalid_argument", "body required") end
 
     -- Basic email format validation
-    if not opts.from:match("^[^%s@]+@[^%s@]+%.[^%s@]+$") then
+    if not addr_ok(opts.from) then
         email_error("invalid_argument", "invalid from address")
     end
-    if not opts.to:match("^[^%s@]+@[^%s@]+%.[^%s@]+$") then
+    if not addr_ok(opts.to) then
         email_error("invalid_argument", "invalid to address")
     end
+    cc_list(opts.cc)   -- validated up front, for every provider
 
     local provider = opts.provider or "smtp"
     local fn = providers[provider]

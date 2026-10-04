@@ -94,9 +94,13 @@ function isDuplicate(messageId, source) {
         return false;
 
     if (rows[0].expires_at <= now) {
+        // Only while it is still expired: a concurrent mark since the SELECT
+        // is a fresh row, and the unguarded DELETE removed it, so the
+        // duplicate it recorded was processed again.
         db.exec(
-            "DELETE FROM _hull_inbox_processed WHERE source = ? AND message_id = ?",
-            [source, messageId]
+            "DELETE FROM _hull_inbox_processed WHERE source = ? AND message_id = ? " +
+            "AND expires_at <= ?",
+            [source, messageId, now]
         );
         return false;
     }

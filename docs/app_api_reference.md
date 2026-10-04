@@ -193,11 +193,18 @@ Register with `app.use(method, pattern, mw)`:
 **auth.jwt_middleware(opts)**. JWT Bearer token authentication.
 - `opts.secret`. HMAC-SHA256 secret (required)
 - `opts.optional`. Continue without token (default: `false`)
+- `opts.require_exp` / `requireExp` (default `true`). A token without an
+  `exp` claim is refused; pass `false` to accept non-expiring tokens.
+  (Before audit 4 the default was `false`, so `jwt.sign` without `exp`
+  minted a token the middleware honoured forever.)
 - Reads `Authorization: Bearer <token>` header.
 - Sets `req.ctx.user` (decoded payload).
 - Returns `1` on auth failure (sends 401 + JSON), `0` on success.
 
 **auth.login(req, res, user_data, opts)**. Creates session, sets cookie. Returns `session_id`.
+`opts.ttl` bounds both: the cookie's `Max-Age` and the session itself, which
+slides by that ttl on every load rather than by the module TTL
+(`session.create(data, { ttl })` stores a per-session ttl).
 
 **auth.logout(req, res, opts)**. Destroys session, clears cookie.
 
@@ -243,9 +250,14 @@ Authy, 1Password - supports).
   `_hull_totp_recovery` tables.
   - `opts.issuer` (default `"Hull"`) - label shown in authenticator.
   - `opts.digits` (default `6`; also accepts `8`).
-  - `opts.period` (default `30s`, RFC default).
+  - `opts.period` (default `30s`, RFC default). Applies to new enrolments;
+    an existing one keeps the period it was enrolled with.
   - `opts.window` (default `±1` step → ~90s clock-skew tolerance).
   - `opts.recovery_codes` (default `10`).
+  - `opts.max_failed_attempts` (default `5`), `opts.lockout_duration`
+    (default `900`s), `opts.max_lockout_duration` (default `86400`s): every
+    `max_failed_attempts` wrong codes lock the user out, each lockout twice
+    as long as the last, up to the cap. A successful verify resets it.
   - `opts.encryption_key` - optional 32-byte string. When set,
     secrets are NaCl-secretbox-encrypted at rest with a fresh nonce
     per enrollment. Caller manages the key (env, fs.read, etc.).
@@ -392,6 +404,18 @@ verify step between successful first-factor auth and `on_login` when
   `/verify/resend` is enumeration-safe - always returns `{ok:true}`
   whether the user exists, is unverified, or is already verified.
   Apps SHOULD rate-limit it (per-email key) to bound mail volume.
+  **Verifying keeps the password only in the browser that registered.**
+  `/register` sets a `hull_af_reg` cookie (HttpOnly, SameSite=Lax, scoped
+  to `prefix`) whose hash the welcome token carries. A verify from that
+  browser keeps the password; any other - another browser or device, or a
+  `/verify/resend` link - verifies the address but voids the password (as a
+  magic-link verify of an unverified account does), drops any pending
+  email change, calls `on_password_reset`, and redirects to
+  `opts.verify_reset_redirect` (default `verify_redirect`), where the owner
+  sets a password by reset. Without this, anyone could register the
+  owner's address with a password of their own and have the owner's click
+  verify it. A password reset also drops a pending email change, and an
+  email-change confirm link must be the pending change's latest one.
 - `authflows.send_verify_email(user, url_prefix)`,
   `authflows.send_password_reset(email, url_prefix)`,
   `authflows.send_magic_link(email, url_prefix)`. Standalone helpers
@@ -442,6 +466,8 @@ verify step between successful first-factor auth and `on_login` when
 **jwt**. JWT sign/verify (HS256 only, not middleware).
 - `jwt.sign(payload, secret)` → token string. Auto-sets `iat`.
 - `jwt.verify(token, secret)` → payload table, or `nil, "error reason"`.
+  A token whose header lists `crit` extensions is refused (none are
+  implemented; RFC 7515 §4.1.11).
 - `jwt.decode(token)` → payload table or nil (no signature check).
 
 **logger.middleware(opts)**. Request logging with logfmt output and auto-assigned request IDs.
@@ -453,7 +479,7 @@ verify step between successful first-factor auth and `on_login` when
 
 **validate.check(data, schema)**. Declarative input validation.
 - `schema` maps field names to rule tables.
-- Rules: `required`, `trim`, `type` (`"string"`, `"number"`, `"integer"`, `"boolean"`), `min`, `max`, `pattern`, `oneof`, `email`, `fn` (custom validator), `message` (custom error).
+- Rules: `required`, `trim`, `type` (`"string"`, `"number"`, `"integer"`, `"boolean"`), `min`, `max`, `pattern`, `oneof`, `email`, `fn` (custom validator: return `true` / `nil` for valid, `false` for invalid - the error is `message` or "is invalid" - or a string error message; any other return fails closed), `message` (custom error).
 - `min`/`max` apply to string length or numeric value depending on field type.
 - Returns `(ok, errors)` where `errors` maps field names to error strings.
 
@@ -464,8 +490,9 @@ verify step between successful first-factor auth and `on_login` when
 
 **i18n**. Internationalization: locale detection, message bundles, formatting.
 - `i18n.load(name, tbl)`. Register a locale with translations and format rules.
-- `i18n.locale(name?)`. Get or set the active locale.
+- `i18n.locale(name?)`. Get or set the active locale. **Process-global**: every request shares it, so a handler that sets it and then yields or awaits (`db.async`, `http.fetch`, a timer) can resume to another request's locale. Use it only for single-request code; pass the locale explicitly with `t_in` otherwise.
 - `i18n.t(key, params?)` → translated string. Supports `${variable}` interpolation and dot-path keys.
+- `i18n.t_in(locale, key, params?)` (JS `i18n.tIn`) → the same, in an explicit locale, without touching the active one - safe across a yield.
 - `i18n.number(n)` → formatted number (locale-specific decimal/thousands separators).
 - `i18n.date(timestamp)` → formatted date string.
 - `i18n.currency(amount, code)` → formatted currency string (symbol + locale rules).
@@ -474,6 +501,11 @@ verify step between successful first-factor auth and `on_login` when
 **transaction**. Wraps handlers in SQLite transactions.
 - `transaction.middleware()`. Post-body middleware that sets `req.ctx._txn = true` for downstream use.
 - `transaction.run(fn)`. Wraps `fn` in `db.batch()` (BEGIN IMMEDIATE → fn() → COMMIT, ROLLBACK on error).
+  A `db.batch` inside another on the same connection runs in a SAVEPOINT of
+  the outer transaction (DuckDB: joins it): its writes commit with the outer
+  one and its error rolls back only its own writes. (It used to issue its
+  own BEGIN / COMMIT, committing the caller's transaction early on Postgres
+  and MySQL.)
 - `transaction.try(fn)` → `(ok, err)`. Like `run` but returns error instead of throwing.
 
 **idempotency**. Idempotency-Key middleware with response caching.
@@ -647,13 +679,14 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `rbac.require_permission(perm)` → middleware function (403 on denial).
 
 **health**. Liveness (`/health`) and readiness (`/ready`) endpoints with DB ping, custom checks, and server stats.
-- `health.register(name, fn)`. Register a custom health check. `fn()` returns `true` or `false`.
+- `health.register(name, fn)`. Register a custom health check. `fn()` returns `true` or `false`. Checks are synchronous: in JS a check that returns a Promise fails (its Promise used to read as `ok`).
 - `health.unregister(name)`. Remove a registered check.
 - `health.run_checks(opts)` → `{ checks, all_ok }`. `opts.db_check` (default: `true`).
 - `health.middleware(opts)`. Returns middleware that intercepts `/health` and `/ready`.
   - `opts.path_health`. Liveness path (default: `"/health"`). Returns `{ status: "ok", uptime }`.
-  - `opts.path_ready`. Readiness path (default: `"/ready"`). Returns status, checks, uptime, server stats.
+  - `opts.path_ready`. Readiness path (default: `"/ready"`). Returns status, per-check status, uptime.
   - `opts.db_check`. Include DB ping (default: `true`).
+  - `opts.details` (default `false`). Also return each check's error text and latency, and the server stats. `/ready` is normally unauthenticated, so the raw error strings (DB driver errors) and stats are opt-in; enable them only behind auth or on a private listener.
   - Returns `1` on health/ready paths, `0` otherwise (passes through to next handler).
   - Readiness returns 503 if any check fails.
 - **JS only:** `health.setDb(dbModule)`. Pass the db module explicitly (ES modules can't conditionally import). Also accepts `opts.db` in middleware options.

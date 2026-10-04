@@ -446,7 +446,8 @@ static int lua_db_batch(lua_State *L)
 
     HlDbHandle *h = db_call_handle(L);
 
-    if (hl_db_begin(h) != 0)
+    /* Nested inside another batch: a savepoint (see hl_db_batch_enter). */
+    if (hl_db_batch_enter(h) != 0)
         return luaL_error(L, "BEGIN failed: %s", hl_db_errmsg(h));
 
     lua_pushvalue(L, 1); /* push the function */
@@ -455,16 +456,14 @@ static int lua_db_batch(lua_State *L)
     /* Resolve again: fn may have closed a db.open handle, freeing h. */
     h = db_call_handle(L);
     if (rc != LUA_OK) {
-        if (h) hl_db_rollback(h);
+        if (h) (void)hl_db_batch_leave(h, 0);
         return lua_error(L); /* re-raise the error */
     }
     if (!h)
         return luaL_error(L, "db.batch: the connection was closed inside the batch");
 
-    if (hl_db_commit(h) != 0) {
-        hl_db_rollback(h);
+    if (hl_db_batch_leave(h, 1) != 0)
         return luaL_error(L, "COMMIT failed: %s", hl_db_errmsg(h));
-    }
 
     return 0;
 }
