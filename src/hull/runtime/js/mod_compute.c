@@ -7,6 +7,7 @@
 #ifdef HL_ENABLE_WASM
 
 #include "mod_buffer.h"
+#include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_spans.h" /* HL_WASM_MAX_SPANS */
 #include "hull/cap/wasm_buffer.h"
@@ -478,6 +479,8 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "compute.async not available (no thread pool)");
     if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx, "compute.async requires an active event loop");
+    if (hl_js_async_gate(ctx, js, "compute.async") != 0)
+        return JS_EXCEPTION;
     if (!js->base.wasm_cache)
         return JS_ThrowInternalError(ctx, "compute.async.call: WASM runtime not initialized");
 
@@ -668,8 +671,7 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
 
     /* Suspend the FD (attached only). */
     if (!actx->detached &&
-        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn,
-                          (HlSuspendOp *)&actx->op) < 0) {
+        hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
         /* Never armed: destroy frees resolve / reject. cancel() would also
          * end the still-running handler's request life. */
@@ -896,6 +898,8 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: no thread pool");
     if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: requires an active event loop");
+    if (hl_js_async_gate(ctx, js, "WasmInstance.asyncCall") != 0)
+        return JS_EXCEPTION;
 
     HlWasmInstance *pi = JS_GetOpaque2(ctx, this_val, js_wasm_inst_class_id);
     if (!pi || pi->closed)
@@ -1075,7 +1079,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     }
 
     if (!actx->detached &&
-        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+        hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
         /* busy stays set: the job is already on a worker, and its done /
          * cancel callback clears it (and finishes a deferred close).
          * Clearing it here let close() or GC free the instance - or a
@@ -1502,6 +1506,12 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, cb_ctx.func);
     JS_FreeCString(ctx, name);
 
+    /* The output callback threw: that exception is still pending - rethrow
+     * it, not a new InternalError. Replacing it turned an instruction-limit
+     * interrupt (uncatchable) into an error the app could catch and loop on,
+     * and an app's own error into "callback_failed". */
+    if (cb_ctx.error)
+        return JS_EXCEPTION;
     if (rc != HL_WASM_OK)
         return JS_ThrowInternalError(ctx, "compute.stream: %s",
                                      err ? err : "stream_failed");

@@ -68,14 +68,19 @@ static const JSClassDef hl_response_class = {
     .finalizer = hl_response_finalizer,
 };
 
-/* NULL - with a TypeError pending - once the response's request is over.
- * Every method checks the NULL and returns JS_EXCEPTION. */
+/* NULL - with a TypeError pending - once the response's request is over, or
+ * for a receiver that is not a response. Every method checks the NULL and
+ * returns JS_EXCEPTION (which with nothing thrown reached the app as `null`,
+ * or as a stale error left pending earlier). */
 static KlHttpResponse *get_response(JSContext *ctx, JSValueConst this_val)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     HlJsResBox *box = (HlJsResBox *)JS_GetOpaque(this_val,
                                                  (JSClassID)js->response_class_id);
-    if (!box || !box->res) return NULL;
+    if (!box || !box->res) {
+        JS_ThrowTypeError(ctx, "res: not a response object");
+        return NULL;
+    }
     if (!hl_req_life_live(box->life)) {
         JS_ThrowTypeError(ctx, "res: the request this response belongs to has finished");
         return NULL;
@@ -116,8 +121,10 @@ static JSValue js_res_status(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
     KlHttpResponse *res = get_response(ctx, this_val);
-    if (!res || argc < 1)
+    if (!res)
         return JS_EXCEPTION;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "res.status requires (code)");
 
     int32_t code;
     if (JS_ToInt32(ctx, &code, argv[0]))
@@ -132,20 +139,26 @@ static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
     KlHttpResponse *res = get_response(ctx, this_val);
-    if (!res || argc < 2)
+    if (!res)
         return JS_EXCEPTION;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "res.header requires (name, value)");
 
     const char *name = JS_ToCString(ctx, argv[0]);
-    const char *value = JS_ToCString(ctx, argv[1]);
+    const char *value = name ? JS_ToCString(ctx, argv[1]) : NULL;
+    if (!name || !value) {   /* a conversion threw: report it */
+        if (name) JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
 
     /* Rejected for a CR or LF (the header-injection guard). Not named in the
      * log: the name may be the part carrying the CR/LF. */
-    if (name && value && kl_http_response_header(res, name, value) != 0)
+    if (kl_http_response_header(res, name, value) != 0)
         log_warn("[hull] res.header: a header was dropped - its name or value "
                  "contains CR or LF");
 
-    if (value) JS_FreeCString(ctx, value);
-    if (name) JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, value);
+    JS_FreeCString(ctx, name);
 
     return JS_DupValue(ctx, this_val); /* chainable */
 }
@@ -155,8 +168,10 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     KlHttpResponse *res = get_response(ctx, this_val);
-    if (!res || argc < 1)
+    if (!res)
         return JS_EXCEPTION;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "res.json requires (data, code?)");
 
     /* Optional status code */
     if (argc >= 2) {
@@ -198,8 +213,10 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     KlHttpResponse *res = get_response(ctx, this_val);
-    if (!res || argc < 1)
+    if (!res)
         return JS_EXCEPTION;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "res.html requires (string)");
 
     const char *html = JS_ToCString(ctx, argv[0]);
     if (html) {
@@ -228,8 +245,10 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     KlHttpResponse *res = get_response(ctx, this_val);
-    if (!res || argc < 1)
+    if (!res)
         return JS_EXCEPTION;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "res.text requires (string)");
 
     const char *text = JS_ToCString(ctx, argv[0]);
     if (text) {
@@ -257,8 +276,10 @@ static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
     KlHttpResponse *res = get_response(ctx, this_val);
-    if (!res || argc < 1)
+    if (!res)
         return JS_EXCEPTION;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "res.bytes requires (buffer)");
 
     HlBufferView view = {0};
     const char *str = NULL;
@@ -279,8 +300,10 @@ static JSValue js_res_redirect(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
     KlHttpResponse *res = get_response(ctx, this_val);
-    if (!res || argc < 1)
+    if (!res)
         return JS_EXCEPTION;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "res.redirect requires (url, code?)");
 
     int32_t code = 302; /* default */
     if (argc >= 2)

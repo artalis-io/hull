@@ -7,6 +7,7 @@
 
 #include "hull/cap/fs_resolve.h"  /* hl_fs_fopen_read */
 #include "mod_buffer.h"
+#include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/gpu.h"
 #include "hull/cap/image.h"
 #include "hull/worker_gpu.h"
@@ -869,6 +870,8 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.async not available (no thread pool)");
     if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx, "gpu.async requires an active event loop");
+    if (hl_js_async_gate(ctx, js, "gpu.async.dispatch") != 0)
+        return JS_EXCEPTION;
     if (!js->base.gpu_ctx)
         return JS_ThrowInternalError(ctx, "gpu.async.dispatch: GPU not initialized");
 
@@ -1099,7 +1102,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     }
 
     if (!actx->detached &&
-        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+        hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         /* Never armed: destroy frees resolve / reject. cancel() would also
          * end the still-running handler's request life. */
@@ -1370,6 +1373,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.async not available (no thread pool)");
     if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx, "gpu.async requires an active event loop");
+    if (hl_js_async_gate(ctx, js, "gpu.async.pipeline") != 0)
+        return JS_EXCEPTION;
     if (!js->base.gpu_ctx)
         return JS_ThrowInternalError(ctx, "gpu.async.pipeline: GPU not initialized");
     if (argc < 1 || !JS_IsArray(ctx, argv[0]))
@@ -1689,7 +1694,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
     }
 
     if (!actx->detached &&
-        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+        hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         /* Never armed: destroy frees resolve / reject. cancel() would also
          * end the still-running handler's request life. */

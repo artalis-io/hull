@@ -581,6 +581,10 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
         int idx = *total;
         (*total)++;
 
+        /* Each case is a run of its own: one that hits the instruction limit
+         * fails alone, instead of every later case failing at its first
+         * step (the trip is sticky until the next entry re-arms it). */
+        hl_js_budget_arm(js);
         JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, 0, NULL);
         char err_buf[512];
 
@@ -609,6 +613,8 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                  * backend tick advances those). */
                 while ((pstate = JS_PromiseState(ctx, ret)) == JS_PROMISE_PENDING) {
                     hl_js_run_jobs(js);
+                    if (js && js->budget_tripped)   /* never settles now */
+                        break;
                     if (async_ctx && backend->tick)
                         backend->tick(async_ctx, 10);
                     if (timeout_ms > 0 && backend->monotonic_ms() >= deadline)
@@ -630,6 +636,11 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                     JSValue reason = JS_PromiseResult(ctx, ret);
                     extract_error_string(ctx, reason, err_buf, sizeof(err_buf));
                     JS_FreeValue(ctx, reason);
+                    record_fail(out, results, max_results, idx, desc, err_buf);
+                    (*failed)++;
+                } else if (js && js->budget_tripped) {
+                    snprintf(err_buf, sizeof(err_buf),
+                             "instruction limit exceeded");
                     record_fail(out, results, max_results, idx, desc, err_buf);
                     (*failed)++;
                 } else {

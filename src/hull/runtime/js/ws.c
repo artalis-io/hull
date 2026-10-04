@@ -42,7 +42,7 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     js->active_timer = NULL;
     js->last_async_cont = NULL;
     js->async_pending = 0;
-    js->instruction_count = 0;
+    hl_js_budget_arm(js);
 
     /* Look up handler */
     JSValue global = JS_GetGlobalObject(ctx);
@@ -83,11 +83,7 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
             state = JS_PromiseState(ctx, ret);
         }
         if (state == JS_PROMISE_PENDING && js->last_async_cont) {
-            extern void hl_js_async_cont_set_handler_promise(
-                HlAsyncCont *cont, JSContext *c, JSValue promise);
-            hl_js_async_cont_set_handler_promise(
-                (HlAsyncCont *)js->last_async_cont, ctx, ret);
-            js->last_async_cont = NULL;
+            hl_js_run_drop(js, hl_js_run_attach(js, ret));
             JS_FreeValue(ctx, ret);
             return;
         }
@@ -118,7 +114,7 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     js->active_timer = NULL;
     js->last_async_cont = NULL;
     js->async_pending = 0;
-    js->instruction_count = 0;
+    hl_js_budget_arm(js);
 
     /* Look up handler */
     JSValue global = JS_GetGlobalObject(ctx);
@@ -164,11 +160,7 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
             state = JS_PromiseState(ctx, ret);
         }
         if (state == JS_PROMISE_PENDING && js->last_async_cont) {
-            extern void hl_js_async_cont_set_handler_promise(
-                HlAsyncCont *cont, JSContext *c, JSValue promise);
-            hl_js_async_cont_set_handler_promise(
-                (HlAsyncCont *)js->last_async_cont, ctx, ret);
-            js->last_async_cont = NULL;
+            hl_js_run_drop(js, hl_js_run_attach(js, ret));
             JS_FreeValue(ctx, ret);
             return;
         }
@@ -210,7 +202,7 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         js->active_timer = NULL;
         js->last_async_cont = NULL;
         js->async_pending = 0;
-        js->instruction_count = 0;
+        hl_js_budget_arm(js);
 
         /* Arm the deferred-teardown hook: if the handler awaits, the
          * continuation captures it so the conn teardown runs at completion,
@@ -262,11 +254,7 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
                     hl_js_run_jobs(js);
                 if (JS_PromiseState(ctx, ret) == JS_PROMISE_PENDING) {
                     if (js->last_async_cont) {
-                        extern void hl_js_async_cont_set_handler_promise(
-                            HlAsyncCont *cont, JSContext *c, JSValue promise);
-                        hl_js_async_cont_set_handler_promise(
-                            (HlAsyncCont *)js->last_async_cont, ctx, ret);
-                        js->last_async_cont = NULL;
+                        hl_js_run_drop(js, hl_js_run_attach(js, ret));
                         deferred = 1;
                     } else {
                         log_warn("[hull:ws] on_close awaits a promise Hull does "

@@ -5,6 +5,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/http.h"
 #include "hull/cap/http_async.h"
 #include "hull/shared/async.h"
@@ -369,6 +370,8 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx,
             "http.fetch() requires an active event loop");
+    if (hl_js_async_gate(ctx, js, "http.fetch()") != 0)
+        return JS_EXCEPTION;
 
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "http.fetch requires (method, url, opts?)");

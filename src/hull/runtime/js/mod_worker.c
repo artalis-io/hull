@@ -186,6 +186,8 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
     if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx,
             "worker.dispatch requires an active event loop");
+    if (hl_js_async_gate(ctx, js, "worker.dispatch") != 0)
+        return JS_EXCEPTION;
 
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
         return JS_ThrowTypeError(ctx,
@@ -309,7 +311,7 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
 
     /* Suspend the FD (attached only). */
     if (!actx->detached &&
-        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+        hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
         /* Never armed: destroy frees resolve / reject. cancel() would also
          * end the still-running handler's request life. */

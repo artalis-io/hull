@@ -73,9 +73,19 @@ typedef struct HlJS {
     JSRuntime      *rt;
     JSContext      *ctx;
 
-    /* Interrupt / gas metering */
+    /* Interrupt / gas metering. The budget is per uninterrupted run: every
+     * entry point re-arms it (hl_js_budget_arm). budget_tripped is sticky
+     * until then - once over, every later poll of the run interrupts again,
+     * so an async body or promise job that turned the interrupt into a
+     * rejection cannot let its caller keep running. */
     int64_t         instruction_count;
     int64_t         max_instructions;
+    int             budget_tripped;
+
+    /* 1 while a middleware runs (and its microtasks drain). Middleware is
+     * synchronous: an async op started now would suspend the connection the
+     * rest of the chain and the handler still run on, so the ops refuse. */
+    int             in_middleware;
 
     /* Module search paths */
     const char     *app_dir;         /* application root directory */
@@ -227,6 +237,15 @@ void hl_js_gc(HlJS *js);
  * Call before each request dispatch.
  */
 void hl_js_reset_request(HlJS *js);
+
+/*
+ * Re-arm the instruction budget for a new run: count zero, trip cleared (and
+ * any interrupt a tripped run left pending on the context dropped). Every
+ * entry point calls it - dispatch and middleware (via hl_js_reset_request),
+ * a timer, an SSE / ws / ws-client callback, an async or multipart resume,
+ * app.main, a hull test case.
+ */
+void hl_js_budget_arm(HlJS *js);
 
 /*
  * Destroy the QuickJS runtime and free all resources.

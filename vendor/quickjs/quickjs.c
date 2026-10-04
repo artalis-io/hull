@@ -6814,6 +6814,12 @@ static no_inline __exception int __js_poll_interrupts(JSContext *ctx)
     ctx->interrupt_counter = JS_INTERRUPT_COUNTER_INIT;
     if (rt->interrupt_handler) {
         if (rt->interrupt_handler(rt, rt->interrupt_opaque)) {
+            /* HULL PATCH 0003: poll again at the very next step (call or
+               backward jump), not JS_INTERRUPT_COUNTER_INIT steps later. An
+               async function body or a promise job turns this error into a
+               rejection, so the caller keeps running; polled again at once,
+               it is interrupted too, wherever it is. */
+            ctx->interrupt_counter = 1;
             /* XXX: should set a specific flag to avoid catching */
             JS_ThrowInternalError(ctx, "interrupted");
             JS_SetUncatchableError(ctx, ctx->rt->current_exception, TRUE);

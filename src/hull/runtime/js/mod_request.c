@@ -180,9 +180,22 @@ typedef struct HlJsMpCont {
     JSValue       owner;
     /* The handler's request life (shared/req_life.h), reference held. */
     HlReqLife    *life;
+    int           parked;         /* counted in life->parked */
 } HlJsMpCont;
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
+
+/* The cont is (no longer) parked on the body reader. While it is, the
+ * connection is in the body-reading state an attached async op's suspend
+ * would overwrite (and vice versa): the async gate refuses one then. */
+static void mp_cont_set_parked(HlJsMpCont *jc, int parked)
+{
+    if (jc->parked == parked) return;
+    jc->parked = parked;
+    if (!jc->life) return;
+    if (parked) jc->life->parked++;
+    else if (jc->life->parked > 0) jc->life->parked--;
+}
 
 static void hl_mp_iter_unref(HlJsMpIter *it);
 
@@ -545,6 +558,13 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     JSContext *ctx = js->ctx;
     KlHttpConn *conn = jc->conn;
 
+    /* The park fired: no longer parked (a re-park below parks again). */
+    mp_cont_set_parked(jc, 0);
+
+    /* An entry point: this resume's run gets a budget of its own. */
+    hl_js_budget_arm(js);
+    js->active_timer = NULL;
+
     /* Restore per-request context: a re-park, or a nested op, reads both
      * (left as it was, active_req named another request - or none). */
     js->active_conn = conn;
@@ -566,8 +586,15 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     if (!s.ready) {
         /* Still NEED_DATA. Re-park; cont survives unchanged. (This runs from
          * the wrapper's own callback, which cleared its registration, and
-         * the parser only asks for more while the body is still open.) */
-        hl_cap_multipart_park(jc->iter->wrapper, mp_js_park_thunk, jc);
+         * the parser only asks for more while the body is still open.) The
+         * run is waiting again: the next entry (another request, a timer)
+         * must not find this request active - it suspended this connection,
+         * or completed it, from its own ops. */
+        js->active_conn = NULL;
+        js->active_req  = NULL;
+        mp_cont_set_parked(jc, 1);
+        if (hl_cap_multipart_park(jc->iter->wrapper, mp_js_park_thunk, jc) != 0)
+            mp_cont_set_parked(jc, 0);
         return;
     }
 
@@ -595,6 +622,16 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     JSPromiseStateEnum state = JS_PROMISE_PENDING;
     if (!JS_IsUndefined(jc->link.handler_promise))
         state = JS_PromiseState(ctx, jc->link.handler_promise);
+
+    /* Over the instruction budget (now or earlier in the run): the handler's
+     * promise never settles, so finish the run as failed - see
+     * hl_js_async_resume. */
+    if (js->budget_tripped && jc->link.once) jc->link.once->tripped = 1;
+    int tripped = js->budget_tripped ||
+                  (jc->link.once && jc->link.once->tripped);
+    if (tripped && state == JS_PROMISE_PENDING &&
+        !JS_IsUndefined(jc->link.handler_promise))
+        state = JS_PROMISE_REJECTED;
 
     /* Another continuation of this run already completed the handler. */
     if ((state == JS_PROMISE_FULFILLED || state == JS_PROMISE_REJECTED) &&
@@ -630,14 +667,18 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
             kl_http_request_send_response(jc->req);
         }
     } else if (state == JS_PROMISE_REJECTED) {
-        JSValue err = JS_PromiseResult(ctx, jc->link.handler_promise);
-        const char *msg = JS_ToCString(ctx, err);
-        /* log via stderr to match the standard async-resume path */
-        if (msg) {
-            fprintf(stderr, "[hull:c] async js handler error: %s\n", msg);
-            JS_FreeCString(ctx, msg);
+        const char *msg = NULL;
+        if (!tripped) {   /* a tripped run can run no toString */
+            JSValue err = JS_PromiseResult(ctx, jc->link.handler_promise);
+            msg = JS_ToCString(ctx, err);
+            JS_FreeValue(ctx, err);
+            JS_FreeValue(ctx, JS_GetException(ctx));
         }
-        JS_FreeValue(ctx, err);
+        /* log via stderr to match the standard async-resume path */
+        fprintf(stderr, "[hull:c] async js handler error: %s\n",
+                msg ? msg : tripped ? "instruction limit exceeded"
+                                    : "(unknown)");
+        if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, jc->link.handler_promise);
         jc->link.handler_promise = JS_UNDEFINED;
         jc->conn = NULL;
@@ -664,9 +705,15 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         JS_FreeValue(ctx, jc->link.handler_promise);
         jc->link.handler_promise = JS_UNDEFINED;
         jc->conn = NULL;
-        js->active_conn = NULL;
-        js->active_req  = NULL;
     }
+
+    /* Every way out: the run is waiting, or over. Left set (a park whose
+     * handler promise was never wired takes none of the branches above),
+     * the next entry found this request active, and an op it made suspended
+     * this connection; a continuation it made chained into this run. */
+    js->active_conn = NULL;
+    js->active_req  = NULL;
+    js->last_async_cont = NULL;
 
     /* Done. Free the cont. */
     self->destroy(self);
@@ -698,6 +745,7 @@ static void mp_js_cont_cancel(HlAsyncCont *self)
         jc->js->active_req  = NULL;
     }
     jc->conn = NULL;
+    mp_cont_set_parked(jc, 0);
     hl_req_life_kill(jc->life);   /* the connection, and its request, are gone */
 }
 
@@ -716,6 +764,7 @@ static void mp_js_cont_destroy(HlAsyncCont *self)
     }
     if (jc->js && jc->js->ctx)
         JS_FreeValue(jc->js->ctx, jc->owner);
+    mp_cont_set_parked(jc, 0);
     hl_req_life_release(jc->life);
     jc->life = NULL;
     /* Never leave dispatch a pointer to a freed continuation (and keep the
@@ -746,6 +795,19 @@ static const char *mp_park_refusal(const HlJsMpIter *it)
     if (!it->js->active_conn)
         return "req.multipart(): no active connection (streaming routes "
                "require a live server)";
+    if (it->js->in_middleware)
+        return "req.multipart(): cannot wait for the request body in "
+               "middleware (middleware is synchronous)";
+    /* Parking sets the connection reading the body. An attached async op on
+     * it (hull.sleep, db.async, http.fetch, ...) has it suspended - or, in
+     * that op's own resume, about to be sent: Keel re-arms no read there,
+     * and the upload stalled until the body timeout, then the handler was
+     * cancelled. Refused with an error instead. */
+    if (it->js->active_life && it->js->active_life->attached > 0)
+        return "req.multipart(): cannot wait for more of the request body "
+               "while an async operation on this request is in flight or "
+               "has just resumed (read the body before awaiting hull.sleep / "
+               "db.async / http.fetch, or after the multipart loop)";
     /* The parser wants more, but none can come: parked, the callback fired
      * inline and resumed the handler from inside this call. */
     int st = hl_cap_multipart_state(it->wrapper);
@@ -790,6 +852,7 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
     jc->life            = js->active_life;
     hl_req_life_retain(jc->life);
 
+    mp_cont_set_parked(jc, 1);   /* before: a park can fire inline */
     int prc = hl_cap_multipart_park(it->wrapper, mp_js_park_thunk, jc);
     if (prc != 0) {
         jc->resolve = jc->reject = JS_UNDEFINED;   /* the caller frees them */
@@ -975,6 +1038,7 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
 
     /* Not ready - park */
     const char *why = mp_park_refusal(it);
+    if (!why) mp_cont_set_parked(jc, 1);   /* before: a park can fire inline */
     int prc = why ? -1 : hl_cap_multipart_park(it->wrapper, mp_js_park_thunk, jc);
     if (prc != 0) {
         if (!why)

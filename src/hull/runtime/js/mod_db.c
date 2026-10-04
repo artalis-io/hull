@@ -7,6 +7,7 @@
 #ifdef HL_ENABLE_DB
 
 #include "mod_buffer.h"
+#include "internal.h"            /* async gate, instruction budget */
 #include "mod_db.h"               /* js_call_handle / new_bound_subobject seam */
 #include "log.h"
 #include "hull/utils/secure_zero.h"
@@ -406,6 +407,10 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
 
     if (rc != 0) {
         JS_FreeValue(ctx, qc.array);
+        /* A UDF hit the instruction limit: re-raise the interrupt, not a
+         * catchable SQL error (try/catch around the query looped on). */
+        if (js->budget_tripped)
+            return hl_js_budget_throw(ctx);
         return JS_ThrowInternalError(ctx, "query failed: %s",
                                      hl_db_errmsg(h));
     }
@@ -461,9 +466,12 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
 
-    if (rc < 0)
+    if (rc < 0) {
+        if (js->budget_tripped)   /* a UDF hit the limit: see query */
+            return hl_js_budget_throw(ctx);
         return JS_ThrowInternalError(ctx, "exec failed: %s",
                                      hl_db_errmsg(h));
+    }
 
     return JS_NewInt32(ctx, rc);
 }
@@ -800,6 +808,8 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx,
             "db.async requires an active event loop");
+    if (hl_js_async_gate(ctx, js, "db.async") != 0)
+        return JS_EXCEPTION;
     /* Require a live bound connection: a closed db.open() handle resolves to
      * NULL here, so async-after-close fails closed instead of silently
      * targeting the default database. */
@@ -973,7 +983,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
 
     /* Suspend the FD (attached only). */
     if (!actx->detached &&
-        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+        hl_js_op_suspend(js, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
         /* Never armed: destroy frees resolve / reject. cancel() would also
          * end the still-running handler's request life. */

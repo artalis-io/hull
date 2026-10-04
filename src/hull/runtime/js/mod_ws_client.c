@@ -13,6 +13,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/http.h"
 #include "hull/utils/alloc.h"
 
@@ -177,6 +178,46 @@ static const JSCFunctionListEntry js_ws_client_conn_proto_funcs[] = {
 
 /* ── Client callbacks ──────────────────────────────────────────────── */
 
+/* Every callback is an entry point, like the ws-server ones (ws.c): no
+ * request is active - left as the last run had it, an op the callback made
+ * suspended (and later completed) that request's connection, mid-upload -
+ * nothing chains into an earlier run, the budget is the callback's own, and
+ * its microtasks are drained before it returns. Left queued, they ran in the
+ * next HTTP request's drain, with that request's connection and life
+ * active. */
+static void js_ws_client_call(HlJSWsClientUD *ud, JSValueConst fn,
+                              int argc, JSValueConst *argv, const char *what)
+{
+    JSContext *ctx = ud->ctx;
+    HlJS *js = ud->js;
+    if (js) {
+        js->active_conn = NULL;
+        js->active_req = NULL;
+        js->active_timer = NULL;
+        js->active_life = NULL;
+        js->active_on_complete = NULL;
+        js->active_on_complete_ctx = NULL;
+        js->last_async_cont = NULL;
+        js->async_pending = 0;
+        hl_js_budget_arm(js);
+    }
+    JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, argc, argv);
+    if (JS_IsException(ret)) {
+        int tripped = js && js->budget_tripped;
+        JSValue exc = JS_GetException(ctx);
+        const char *msg = tripped ? NULL : JS_ToCString(ctx, exc);
+        log_error("[hull:ws:client] %s error: %s", what,
+                  msg ? msg : tripped ? "instruction limit exceeded" : "unknown");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, exc);
+    }
+    JS_FreeValue(ctx, ret);
+    if (js) {
+        hl_js_run_jobs(js);
+        js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
+    }
+}
+
 static void js_ws_client_on_open(KlWsClientConn *ws, void *user_data)
 {
     (void)ws;
@@ -185,16 +226,8 @@ static void js_ws_client_on_open(KlWsClientConn *ws, void *user_data)
         return;
 
     JSValue conn_obj = JS_DupValue(ud->ctx, ud->self_ref);
-    JSValue ret = JS_Call(ud->ctx, ud->on_open, JS_UNDEFINED, 1, &conn_obj);
+    js_ws_client_call(ud, ud->on_open, 1, &conn_obj, "on_open");
     JS_FreeValue(ud->ctx, conn_obj);
-    if (JS_IsException(ret)) {
-        JSValue exc = JS_GetException(ud->ctx);
-        const char *msg = JS_ToCString(ud->ctx, exc);
-        log_error("[hull:ws:client] on_open error: %s", msg ? msg : "unknown");
-        if (msg) JS_FreeCString(ud->ctx, msg);
-        JS_FreeValue(ud->ctx, exc);
-    }
-    JS_FreeValue(ud->ctx, ret);
 }
 
 static void js_ws_client_on_message(KlWsClientConn *ws, const char *data,
@@ -215,18 +248,10 @@ static void js_ws_client_on_message(KlWsClientConn *ws, const char *data,
     JSValue is_bin_val = JS_NewBool(ud->ctx, is_binary);
 
     JSValue args[3] = { conn_obj, msg_val, is_bin_val };
-    JSValue ret = JS_Call(ud->ctx, ud->on_message, JS_UNDEFINED, 3, args);
+    js_ws_client_call(ud, ud->on_message, 3, args, "on_message");
     JS_FreeValue(ud->ctx, conn_obj);
     JS_FreeValue(ud->ctx, msg_val);
     JS_FreeValue(ud->ctx, is_bin_val);
-    if (JS_IsException(ret)) {
-        JSValue exc = JS_GetException(ud->ctx);
-        const char *msg2 = JS_ToCString(ud->ctx, exc);
-        log_error("[hull:ws:client] on_message error: %s", msg2 ? msg2 : "unknown");
-        if (msg2) JS_FreeCString(ud->ctx, msg2);
-        JS_FreeValue(ud->ctx, exc);
-    }
-    JS_FreeValue(ud->ctx, ret);
 }
 
 /* The deferred half of on_close: drop the self-reference on the loop turn
@@ -283,18 +308,10 @@ static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
                                  : JS_NULL;
 
         JSValue args[3] = { conn_obj, code_val, reason_val };
-        JSValue ret = JS_Call(ud->ctx, ud->on_close, JS_UNDEFINED, 3, args);
+        js_ws_client_call(ud, ud->on_close, 3, args, "on_close");
         JS_FreeValue(ud->ctx, conn_obj);
         JS_FreeValue(ud->ctx, code_val);
         JS_FreeValue(ud->ctx, reason_val);
-        if (JS_IsException(ret)) {
-            JSValue exc = JS_GetException(ud->ctx);
-            const char *msg = JS_ToCString(ud->ctx, exc);
-            log_error("[hull:ws:client] on_close error: %s", msg ? msg : "unknown");
-            if (msg) JS_FreeCString(ud->ctx, msg);
-            JS_FreeValue(ud->ctx, exc);
-        }
-        JS_FreeValue(ud->ctx, ret);
     }
 
     js_ws_client_finish(ud);
@@ -315,18 +332,9 @@ static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
     JSValue msg_val = JS_NewString(ud->ctx, msg ? msg : "unknown");
 
     JSValue args[2] = { conn_obj, msg_val };
-    JSValue ret = JS_Call(ud->ctx, ud->on_error, JS_UNDEFINED, 2, args);
+    js_ws_client_call(ud, ud->on_error, 2, args, "on_error callback");
     JS_FreeValue(ud->ctx, conn_obj);
     JS_FreeValue(ud->ctx, msg_val);
-    if (JS_IsException(ret)) {
-        JSValue exc = JS_GetException(ud->ctx);
-        const char *emsg = JS_ToCString(ud->ctx, exc);
-        log_error("[hull:ws:client] on_error callback error: %s",
-                  emsg ? emsg : "unknown");
-        if (emsg) JS_FreeCString(ud->ctx, emsg);
-        JS_FreeValue(ud->ctx, exc);
-    }
-    JS_FreeValue(ud->ctx, ret);
     /* Terminal: Keel closed the connection and will not call on_close, so
      * this is where the client is released (it stayed pinned until VM
      * teardown). */

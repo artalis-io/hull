@@ -54,6 +54,7 @@ typedef struct {
     JSRuntime *rt;
     int64_t    instructions;
     int64_t    max_instructions;   /* 0 = none */
+    int        tripped;            /* sticky for the dispatch: see below */
 } HlJsWorkerCtx;
 
 static pthread_key_t  js_worker_key;
@@ -74,14 +75,21 @@ static void js_worker_key_create(void)
 
 /* The same instruction budget a request handler gets: without it
  * `while (true) {}` held a pool thread for good, and a few of those starved
- * every db.async / compute.async / smtp job. */
+ * every db.async / compute.async / smtp job. Sticky like the main runtime's
+ * (runtime.c): once over, every poll interrupts until the next dispatch, so
+ * an async function or a promise job - which turn the interrupt into a
+ * rejection - cannot let the dispatch keep running. */
 static int js_worker_interrupt(JSRuntime *rt, void *opaque)
 {
     (void)rt;
     HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)opaque;
+    if (wctx->tripped)
+        return 1;
     wctx->instructions += HL_JS_INTERRUPT_WEIGHT;   /* see internal.h */
-    return wctx->max_instructions > 0 &&
-           wctx->instructions > wctx->max_instructions;
+    if (wctx->max_instructions > 0 &&
+        wctx->instructions > wctx->max_instructions)
+        wctx->tripped = 1;
+    return wctx->tripped;
 }
 
 static HlJsWorkerCtx *get_js_worker_rt(void)
@@ -115,6 +123,7 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
         JS_SetMaxStackSize(wctx->rt, op->max_stack_bytes);
     JS_UpdateStackTop(wctx->rt);
     wctx->instructions = 0;
+    wctx->tripped = 0;
     wctx->max_instructions = op->max_instructions;
 
     JSContext *ctx = JS_NewContext(wctx->rt);
@@ -329,7 +338,23 @@ static int capture_result(JSContext *ctx, JSValue val,
 
 /* ── KlWorkItem callbacks ──────────────────────────────────────────── */
 
-static void js_dispatch_run(JSContext *ctx, HlJsWorkerDispatchOp *op);
+static void js_dispatch_run(HlJsWorkerCtx *wctx, JSContext *ctx,
+                            HlJsWorkerDispatchOp *op);
+
+/* Run the dispatch's pending promise jobs until none is left. Bounded by
+ * the budget: every job runs JS, and once the budget trips every job fails
+ * at its first call (QuickJS HULL PATCH 0003) without settling anything
+ * that would queue more - which is also how leftovers are discarded. */
+static void js_worker_drain(JSRuntime *rt)
+{
+    JSContext *ctx1;
+    for (;;) {
+        int ret = JS_ExecutePendingJob(rt, &ctx1);
+        if (ret == 0) break;
+        if (ret < 0 && ctx1)
+            JS_FreeValue(ctx1, JS_GetException(ctx1));
+    }
+}
 
 static void js_dispatch_work_fn(void *ud)
 {
@@ -343,12 +368,40 @@ static void js_dispatch_work_fn(void *ud)
                  "failed to create worker JS VM");
         return;
     }
-    js_dispatch_run(ctx, op);
+    js_dispatch_run(wctx, ctx, op);
+    /* The runtime outlives the context, and so did a job left in its queue
+     * (`Promise.resolve().then(...)` the function did not wait for): it held
+     * the freed context alive through its function's realm, so every such
+     * dispatch leaked a whole context against the heap limit until the pool
+     * thread failed every dispatch with out-of-memory. Discard them - as
+     * over budget, so none runs app code - before the context goes. */
+    wctx->tripped = 1;
+    js_worker_drain(wctx->rt);
+    JS_FreeValue(ctx, JS_GetException(ctx));
     JS_FreeContext(ctx);
     JS_RunGC(wctx->rt);   /* cycles the dispatch left behind */
 }
 
-static void js_dispatch_run(JSContext *ctx, HlJsWorkerDispatchOp *op)
+/* Message for a failed dispatch: the error's text, or the limit. A tripped
+ * run cannot run a toString. */
+static void js_dispatch_fail(HlJsWorkerCtx *wctx, JSContext *ctx,
+                             HlJsWorkerDispatchOp *op, JSValueConst err)
+{
+    op->error = 1;
+    if (wctx->tripped) {
+        snprintf(op->error_msg, sizeof(op->error_msg),
+                 "dispatch: interrupted (instruction limit exceeded)");
+        return;
+    }
+    const char *msg = JS_ToCString(ctx, err);
+    snprintf(op->error_msg, sizeof(op->error_msg),
+             "dispatch: %s", msg ? msg : "(unknown)");
+    if (msg) JS_FreeCString(ctx, msg);
+    else JS_FreeValue(ctx, JS_GetException(ctx));
+}
+
+static void js_dispatch_run(HlJsWorkerCtx *wctx, JSContext *ctx,
+                            HlJsWorkerDispatchOp *op)
 {
     /* Compile function source text: wrap in parens to get an expression.
      * Source comes from fn.toString(), e.g. "(ctx) => { ... }" or
@@ -394,14 +447,44 @@ static void js_dispatch_run(JSContext *ctx, HlJsWorkerDispatchOp *op)
     JS_FreeValue(ctx, eval_fn);
 
     if (JS_IsException(result)) {
-        op->error = 1;
         JSValue exc = JS_GetException(ctx);
-        const char *msg = JS_ToCString(ctx, exc);
-        snprintf(op->error_msg, sizeof(op->error_msg),
-                 "dispatch: %s", msg ? msg : "(unknown)");
-        if (msg) JS_FreeCString(ctx, msg);
+        js_dispatch_fail(wctx, ctx, op, exc);
         JS_FreeValue(ctx, exc);
         return;
+    }
+
+    /* Run the function's own promise jobs: an async function's body past
+     * its first await, a .then it chained. Its result is the settled value
+     * of the promise it returned - which used to come back as a Promise
+     * object (captured as {}), its jobs never run. */
+    js_worker_drain(wctx->rt);
+    if (wctx->tripped) {
+        JS_FreeValue(ctx, result);
+        js_dispatch_fail(wctx, ctx, op, JS_UNDEFINED);
+        return;
+    }
+    JSPromiseStateEnum st = JS_PromiseState(ctx, result);
+    if (st == JS_PROMISE_REJECTED) {
+        JSValue reason = JS_PromiseResult(ctx, result);
+        js_dispatch_fail(wctx, ctx, op, reason);
+        JS_FreeValue(ctx, reason);
+        JS_FreeValue(ctx, result);
+        return;
+    }
+    if (st == JS_PROMISE_PENDING) {
+        /* Nothing in a worker VM can settle it later: no event loop, no
+         * Hull async ops. */
+        JS_FreeValue(ctx, result);
+        op->error = 1;
+        snprintf(op->error_msg, sizeof(op->error_msg),
+                 "dispatch: the function's promise never settled (a worker "
+                 "has no event loop to await anything on)");
+        return;
+    }
+    if (st == JS_PROMISE_FULFILLED) {
+        JSValue v = JS_PromiseResult(ctx, result);
+        JS_FreeValue(ctx, result);
+        result = v;
     }
 
     /* Capture the return value */

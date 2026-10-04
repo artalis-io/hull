@@ -15,6 +15,7 @@
 #ifdef HL_ENABLE_SQLITE
 
 #include "mod_buffer.h"            /* get_hl_js, HlJS */
+#include "internal.h"              /* instruction budget */
 #include "mod_db.h"                /* js_call_handle, new_bound_subobject */
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
@@ -107,6 +108,26 @@ static void js_to_sqlite_result(JSContext *ctx, sqlite3_context *sctx,
     }
 }
 
+/* The UDF's function threw: make it the statement's error. When it was the
+ * instruction limit, say so, and run no toString (a tripped run cannot) -
+ * conn.query / conn.exec then re-raise the interrupt, uncatchable, rather
+ * than report an ordinary SQL error the app could catch and loop on. */
+static void js_udf_report_error(JSContext *ctx, sqlite3_context *sctx,
+                                const char *fallback)
+{
+    JSValue exc = JS_GetException(ctx);
+    HlJS *js = get_hl_js(ctx);
+    if (js && js->budget_tripped) {
+        sqlite3_result_error(sctx, "instruction limit exceeded", -1);
+    } else {
+        const char *err = JS_ToCString(ctx, exc);
+        sqlite3_result_error(sctx, err ? err : fallback, -1);
+        if (err) JS_FreeCString(ctx, err);
+        else JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    JS_FreeValue(ctx, exc);
+}
+
 /* Scalar JS UDF callback */
 static void js_scalar_udf_func(sqlite3_context *sctx, int argc,
                                 sqlite3_value **argv)
@@ -132,11 +153,7 @@ static void js_scalar_udf_func(sqlite3_context *sctx, int argc,
     js_free(ctx, args);
 
     if (JS_IsException(result)) {
-        JSValue exc = JS_GetException(ctx);
-        const char *err = JS_ToCString(ctx, exc);
-        sqlite3_result_error(sctx, err ? err : "JS UDF error", -1);
-        if (err) JS_FreeCString(ctx, err);
-        JS_FreeValue(ctx, exc);
+        js_udf_report_error(ctx, sctx, "JS UDF error");
     } else {
         js_to_sqlite_result(ctx, sctx, result);
     }
@@ -191,13 +208,8 @@ static void js_agg_step_func(sqlite3_context *sctx, int argc,
         JS_FreeValue(ctx, args[i]);
     js_free(ctx, args);
 
-    if (JS_IsException(result)) {
-        JSValue exc = JS_GetException(ctx);
-        const char *err = JS_ToCString(ctx, exc);
-        sqlite3_result_error(sctx, err ? err : "JS UDF step error", -1);
-        if (err) JS_FreeCString(ctx, err);
-        JS_FreeValue(ctx, exc);
-    }
+    if (JS_IsException(result))
+        js_udf_report_error(ctx, sctx, "JS UDF step error");
     JS_FreeValue(ctx, result);
 }
 
@@ -219,11 +231,7 @@ static void js_agg_finalize_func(sqlite3_context *sctx)
     JS_FreeValue(ctx, arg);
 
     if (JS_IsException(result)) {
-        JSValue exc = JS_GetException(ctx);
-        const char *err = JS_ToCString(ctx, exc);
-        sqlite3_result_error(sctx, err ? err : "JS UDF finalize error", -1);
-        if (err) JS_FreeCString(ctx, err);
-        JS_FreeValue(ctx, exc);
+        js_udf_report_error(ctx, sctx, "JS UDF finalize error");
     } else {
         js_to_sqlite_result(ctx, sctx, result);
     }
