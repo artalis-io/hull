@@ -232,7 +232,7 @@ function i18n.currency(amount, code)
         return i18n.number(amount) .. " " .. code
     end
 
-    local digits = cur.decimal_digits or 2
+    local digits = cur.decimal_digits or cur.decimalDigits or 2
 
     -- Format the number part
     local dec_sep = fmt.decimalSep or fmt.decimal_sep or "."

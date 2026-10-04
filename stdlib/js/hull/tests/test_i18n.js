@@ -240,6 +240,14 @@ test("currency USD (before, 2 digits)", () => {
     assertEq(i18n.currency(99.9, "USD"), "$99.90");
 });
 
+test("currency negatives round like the Lua sibling", () => {
+    i18n.load("en", en);
+    i18n.locale("en");
+    assertEq(i18n.currency(-1.5, "USD"), "$-1.50");
+    assertEq(i18n.currency(-0.25, "USD"), "$-0.25");
+    assertEq(i18n.currency(-0.001, "USD"), "$0.00");
+});
+
 test("currency unknown code fallback", () => {
     i18n.load("en", en);
     i18n.locale("en");
