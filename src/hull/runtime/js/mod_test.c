@@ -613,7 +613,7 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                  * backend tick advances those). */
                 while ((pstate = JS_PromiseState(ctx, ret)) == JS_PROMISE_PENDING) {
                     hl_js_run_jobs(js);
-                    if (js->budget_tripped)   /* never settles now */
+                    if (js && js->budget_tripped)   /* never settles now */
                         break;
                     if (async_ctx && backend->tick)
                         backend->tick(async_ctx, 10);
@@ -638,7 +638,7 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                     JS_FreeValue(ctx, reason);
                     record_fail(out, results, max_results, idx, desc, err_buf);
                     (*failed)++;
-                } else if (js->budget_tripped) {
+                } else if (js && js->budget_tripped) {
                     snprintf(err_buf, sizeof(err_buf),
                              "instruction limit exceeded");
                     record_fail(out, results, max_results, idx, desc, err_buf);
