@@ -31,13 +31,22 @@
 typedef struct HlDbMyCtx {
     HlMyConn conn;
     char    *dsn;       /* to reconnect (secret: scrubbed on close) */
+    /* InnoDB rolled the open transaction back under a failed statement (a
+     * deadlock): later statements would each autocommit and the eventual
+     * COMMIT would succeed, so calls refuse until a ROLLBACK (my_ready). */
+    int      txn_aborted;
 } HlDbMyCtx;
 
 static int my_connect(HlMyConn *conn, const char *dsn)
 {
     HlMyDsn parsed;
     char err[128];
-    if (hl_my_dsn_parse(dsn, &parsed, err, sizeof err) != 0) return -1;
+    if (hl_my_dsn_parse(dsn, &parsed, err, sizeof err) != 0) {
+        /* A parse that failed part-way (a bad port after the password) has
+         * already copied the password into @p parsed. */
+        hl_my_dsn_scrub(&parsed);
+        return -1;
+    }
     int rc = hl_my_conn_open(conn, &parsed, 10000 /* 10s connect */);
     hl_my_dsn_scrub(&parsed);   /* password is secret material */
     return rc;
@@ -76,6 +85,17 @@ static void scrub_free(char *s)
  * Returns 0 to go ahead, 1 done, -1 refused. */
 static int my_ready(HlDbMyCtx *s, const char *sql)
 {
+    if (s->txn_aborted) {
+        if (sql_is_rollback(sql)) {   /* the server already rolled back */
+            s->txn_aborted = 0;
+            s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+            return 1;
+        }
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "the server rolled this transaction back (deadlock), so none "
+                 "of its statements were applied; roll back and retry");
+        return -1;
+    }
     if (!s->conn.broken)
         return 0;
     if ((s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS) && sql_is_rollback(sql)) {
@@ -437,9 +457,9 @@ static void mysql_close(HlDbHandle *h)
     h->ctx = NULL;
 }
 
-static int mysql_query(HlDbHandle *h, const char *sql,
-                       const HlValue *params, int nparams,
-                       HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
+static int mysql_query_raw(HlDbHandle *h, const char *sql,
+                           const HlValue *params, int nparams,
+                           HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
 {
     (void)params; (void)alloc;
     if (!h || !h->ctx) return -1;
@@ -489,8 +509,8 @@ static int mysql_query(HlDbHandle *h, const char *sql,
     return rc;
 }
 
-static int mysql_exec(HlDbHandle *h, const char *sql,
-                      const HlValue *params, int nparams)
+static int mysql_exec_raw(HlDbHandle *h, const char *sql,
+                          const HlValue *params, int nparams)
 {
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
@@ -529,6 +549,45 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
     return (int)(affected < 0 ? 0 : affected);
 }
 
+/* A statement that failed inside a transaction with ER_LOCK_DEADLOCK took
+ * the whole transaction with it (InnoDB rolls back the victim entirely, not
+ * only the statement). The server status still read "in a transaction" from
+ * the last OK, and nothing told the app: its next statements autocommitted
+ * and COMMIT succeeded with the earlier writes gone. Remember it instead. */
+static void my_note_failure(HlDbMyCtx *s, int was_in_trans, int rc)
+{
+    if (rc < 0 && was_in_trans && !s->conn.broken &&
+        s->conn.last_err_code == HL_MY_ER_LOCK_DEADLOCK) {
+        s->txn_aborted = 1;
+        s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+    }
+}
+
+static int my_in_trans(const HlDbHandle *h)
+{
+    const HlDbMyCtx *s = h ? h->ctx : NULL;
+    return s && (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS);
+}
+
+static int mysql_query(HlDbHandle *h, const char *sql,
+                       const HlValue *params, int nparams,
+                       HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
+{
+    int was = my_in_trans(h);
+    int rc = mysql_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
+    if (h && h->ctx) my_note_failure(h->ctx, was, rc);
+    return rc;
+}
+
+static int mysql_exec(HlDbHandle *h, const char *sql,
+                      const HlValue *params, int nparams)
+{
+    int was = my_in_trans(h);
+    int rc = mysql_exec_raw(h, sql, params, nparams);
+    if (h && h->ctx) my_note_failure(h->ctx, was, rc);
+    return rc;
+}
+
 static int mysql_exec_script(HlDbHandle *h, const char *sql)
 {
     /* Migrations are multi-statement; the connection advertises
@@ -543,7 +602,7 @@ static int mysql_exec_script(HlDbHandle *h, const char *sql)
     return rc;
 }
 
-static int mysql_txn(HlDbHandle *h, const char *sql)
+static int mysql_txn_raw(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
@@ -559,17 +618,31 @@ static int mysql_txn(HlDbHandle *h, const char *sql)
     return rc;
 }
 
+static int mysql_txn(HlDbHandle *h, const char *sql)
+{
+    int was = my_in_trans(h);
+    int rc = mysql_txn_raw(h, sql);
+    if (h && h->ctx) my_note_failure(h->ctx, was, rc);
+    return rc;
+}
+
 static int mysql_begin(HlDbHandle *h)    { return mysql_txn(h, "START TRANSACTION"); }
 static int mysql_commit(HlDbHandle *h)   { return mysql_txn(h, "COMMIT"); }
 static int mysql_rollback(HlDbHandle *h) { return mysql_txn(h, "ROLLBACK"); }
 
 /* See pg_guard_stale_txn: a transaction a request left open is rolled back
  * before the next request runs. */
+static int mysql_in_txn(HlDbHandle *h)
+{
+    if (!h || !h->ctx) return 0;
+    HlDbMyCtx *s = h->ctx;
+    return (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS) ||
+           s->txn_aborted;
+}
+
 static void mysql_guard_stale_txn(HlDbHandle *h)
 {
-    if (!h || !h->ctx) return;
-    HlDbMyCtx *s = h->ctx;
-    if (!(s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS)) return;
+    if (!mysql_in_txn(h)) return;
     fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
     (void)mysql_rollback(h);
 }
@@ -741,6 +814,7 @@ const HlDbBackend hl_db_backend_mysql = {
     .commit                = mysql_commit,
     .rollback              = mysql_rollback,
     .guard_stale_txn       = mysql_guard_stale_txn,
+    .in_txn                = mysql_in_txn,
     .last_id               = mysql_last_id,
     .errmsg                = mysql_errmsg,
     .insert_if_absent      = mysql_insert_if_absent,

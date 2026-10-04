@@ -6,6 +6,7 @@
 
 
 #include "hull/cap/fs_resolve.h"  /* hl_fs_fopen_read */
+#include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "mod_buffer.h"
 #include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/gpu.h"
@@ -883,6 +884,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.async requires an active event loop");
     if (hl_js_async_gate(ctx, js, "gpu.async.dispatch") != 0)
         return JS_EXCEPTION;
+    if (hl_js_db_refuse_wait(ctx, "gpu.async")) return JS_EXCEPTION;
     if (!js->base.gpu_ctx)
         return JS_ThrowInternalError(ctx, "gpu.async.dispatch: GPU not initialized");
 
@@ -1386,6 +1388,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.async requires an active event loop");
     if (hl_js_async_gate(ctx, js, "gpu.async.pipeline") != 0)
         return JS_EXCEPTION;
+    if (hl_js_db_refuse_wait(ctx, "gpu.async")) return JS_EXCEPTION;
     if (!js->base.gpu_ctx)
         return JS_ThrowInternalError(ctx, "gpu.async.pipeline: GPU not initialized");
     if (argc < 1 || !JS_IsArray(ctx, argv[0]))

@@ -15,6 +15,7 @@
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
+#include "hull/cap/db_registry.h"   /* hl_db_registry_open_txn */
 
 #include "lua.h"
 #include "lualib.h"
@@ -453,6 +454,17 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
                           "app.main - not while a module loads, inside a C "
                           "callback such as string.gsub or table.sort, or in "
                           "a coroutine the app created", what);
+    /* Another request, SSE event or timer runs while this one is parked, on
+     * the SAME connection: a transaction held across the wait was rolled
+     * back under it (or joined by the other entry), and the rest of this
+     * handler then autocommitted (audit 5 M1, db_registry.h). */
+    const char *txn = hl_db_registry_open_txn(lua->base.db_registry);
+    if (txn)
+        return luaL_error(L, "%s cannot wait while a transaction is open on "
+                          "database connection '%s': other requests use the "
+                          "same connection while this one waits. Commit or "
+                          "roll back first (and do the waiting outside "
+                          "db.batch)", what, txn);
     return 0;
 }
 

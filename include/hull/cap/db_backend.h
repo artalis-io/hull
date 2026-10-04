@@ -197,12 +197,25 @@ typedef struct HlDbBackend {
      * db.async worker pool, not the event-loop thread. See
      * docs/jobs_events_phase4_design.md. */
     int    (*wait_notify)(HlDbHandle *h, const char *channel, int timeout_ms);
+
+    /* Whether the connection is inside a transaction (1) or in autocommit
+     * (0), from the backend's own state - SQLite's autocommit flag, Postgres'
+     * ReadyForQuery status, MySQL's SERVER_STATUS_IN_TRANS, DuckDB's tracked
+     * BEGIN / COMMIT / ROLLBACK. A connection lost inside a transaction
+     * counts as inside one until the app rolls back. No I/O. NULL = unknown
+     * (treated as 0). Used to refuse a wait while a transaction is open on a
+     * shared connection (hl_db_registry_open_txn) and by hl_db_batch_*. */
+    int    (*in_txn)(HlDbHandle *h);
 } HlDbBackend;
 
 struct HlDbHandle {
     const HlDbBackend *backend;
     void              *ctx;
     int                batch_depth;   /* open db.batch levels (hl_db_batch_*) */
+    /* A static message for the last hl_db_batch_* failure that the backend
+     * did not report itself (its transaction ended underneath the batch).
+     * hl_db_errmsg returns it until the next statement. */
+    const char        *batch_err;
 };
 
 /* ── Inline wrappers ──────────────────────────────────────────────── */
@@ -213,6 +226,7 @@ static inline int hl_db_query(HlDbHandle *h, const char *sql,
                               HlAllocator *alloc)
 {
     if (!h || !h->backend) return -1;
+    h->batch_err = NULL;
     return h->backend->query(h, sql, params, nparams,
                              cb, cb_ctx, alloc);
 }
@@ -221,6 +235,7 @@ static inline int hl_db_exec(HlDbHandle *h, const char *sql,
                              const HlValue *params, int nparams)
 {
     if (!h || !h->backend) return -1;
+    h->batch_err = NULL;
     return h->backend->exec(h, sql, params, nparams);
 }
 
@@ -259,13 +274,27 @@ static inline int64_t hl_db_last_id(HlDbHandle *h)
 static inline const char *hl_db_errmsg(HlDbHandle *h)
 {
     if (!h || !h->backend) return "no database";
+    if (h->batch_err) return h->batch_err;
     return h->backend->errmsg(h);
 }
 
+/* 1 inside a transaction, 0 in autocommit or unknown (no in_txn method). */
+static inline int hl_db_in_txn(HlDbHandle *h)
+{
+    if (!h || !h->backend || !h->backend->in_txn) return 0;
+    return h->backend->in_txn(h) ? 1 : 0;
+}
+
+/* Roll back a transaction left open by an entry that has finished. Any
+ * db.batch bookkeeping goes with it: a batch cannot legitimately span an
+ * entry (its fn cannot wait), so a depth still set here belongs to the
+ * transaction just rolled back, and keeping it would turn the next batch's
+ * BEGIN into a SAVEPOINT outside any transaction (audit 5 L1). */
 static inline void hl_db_guard_stale_txn(HlDbHandle *h)
 {
-    if (!h || !h->backend || !h->backend->guard_stale_txn) return;
-    h->backend->guard_stale_txn(h);
+    if (!h || !h->backend) return;
+    if (h->backend->guard_stale_txn) h->backend->guard_stale_txn(h);
+    h->batch_depth = 0;
 }
 
 /* Low-latency LISTEN/NOTIFY wait. Returns 1 (notified), 0 (timeout), or -1
@@ -411,8 +440,29 @@ static inline void hl_db_batch_spname_(char *buf, size_t sz, const char *verb,
     snprintf(buf, sz, "%s hull_batch_%d", verb, level);
 }
 
+/* The transaction an open batch relies on has ended underneath it: the
+ * batch's fn ran a raw COMMIT / ROLLBACK, or an in-process nested dispatch
+ * (hull test's test.post inside a batch) ran the stale-transaction guard.
+ * Only knowable on a backend with in_txn. */
+static inline int hl_db_batch_lost_(HlDbHandle *h)
+{
+    return h->batch_depth > 0 && h->backend && h->backend->in_txn &&
+           !hl_db_in_txn(h);
+}
+
+#define HL_DB_BATCH_LOST_MSG \
+    "the batch's transaction was ended inside the batch (a COMMIT or " \
+    "ROLLBACK statement, or a nested request), so its statements were not " \
+    "applied as one transaction"
+
 static inline int hl_db_batch_enter(HlDbHandle *h)
 {
+    h->batch_err = NULL;
+    /* An enclosing batch whose transaction is gone: a SAVEPOINT now would run
+     * outside any transaction (SQLite silently opens one that RELEASE then
+     * commits; Postgres refuses). Start this batch as a fresh transaction;
+     * the enclosing batch's leave reports the loss. */
+    if (hl_db_batch_lost_(h)) h->batch_depth = 0;
     if (h->batch_depth == 0) {
         if (hl_db_begin(h) != 0) return -1;
     } else if (hl_db_batch_savepoints_(h)) {
@@ -426,11 +476,29 @@ static inline int hl_db_batch_enter(HlDbHandle *h)
 
 static inline int hl_db_batch_leave(HlDbHandle *h, int ok)
 {
-    if (h->batch_depth <= 0) return -1;
+    h->batch_err = NULL;
+    if (h->batch_depth <= 0) {
+        /* The depth was reset under this batch (the guard, or a nested batch
+         * that found the transaction gone): its transaction is gone. */
+        if (ok) h->batch_err = HL_DB_BATCH_LOST_MSG;
+        return ok ? -1 : 0;
+    }
+    if (hl_db_batch_lost_(h)) {
+        h->batch_depth--;
+        if (!ok) return 0;
+        h->batch_err = HL_DB_BATCH_LOST_MSG;
+        return -1;
+    }
     int level = --h->batch_depth;
     if (level == 0) {
         if (!ok) { hl_db_rollback(h); return 0; }
-        if (hl_db_commit(h) != 0) { hl_db_rollback(h); return -1; }
+        if (hl_db_commit(h) != 0) {
+            /* Roll back only what is still open: a COMMIT the server refused
+             * (Postgres / MySQL) already ended the transaction, and a needless
+             * ROLLBACK would replace the commit's error message. */
+            if (!h->backend->in_txn || hl_db_in_txn(h)) hl_db_rollback(h);
+            return -1;
+        }
         return 0;
     }
     if (!hl_db_batch_savepoints_(h)) return 0;

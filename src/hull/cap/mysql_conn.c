@@ -405,7 +405,10 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
 {
     memset(conn, 0, sizeof *conn);
     conn->transport = t;
-    int tls_active = 0;   /* set once the TLS session is attached to the transport */
+    /* Set once a TLS session whose certificate chain and host name were
+     * VERIFIED (sslmode=verify-ca / verify-full) is attached to the transport:
+     * the only channel the password itself may cross (caching_sha2 full auth). */
+    int tls_verified = 0;
 
     HlMyFrame f;
     if (conn_next_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
@@ -484,7 +487,7 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
                      "TLS handshake with %s failed", dsn->host);
             hl_my_conn_close(conn); return -1;
         }
-        tls_active = 1;
+        tls_verified = verify;
         resp_seq = (uint8_t)(f.seq + 2);   /* response follows the SSLRequest */
     } else if (sslmode >= HL_MY_SSL_REQUIRE) {
         conn_set_err(conn, "server does not support TLS but sslmode requires it");
@@ -561,10 +564,14 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
             if (status == HL_MY_CACHING_SHA2_FAST_SUCCESS)
                 continue;                    /* cache hit; an OK packet follows */
             if (status == HL_MY_CACHING_SHA2_FULL_AUTH) {
-                if (tls_active) {
-                    /* Over TLS the password goes as cleartext, NUL-terminated.
-                     * dsn->password is already NUL-terminated, so send strlen+1
-                     * bytes directly (no plaintext copy on the heap). */
+                if (tls_verified) {
+                    /* Over verified TLS the password goes as cleartext,
+                     * NUL-terminated. Not over unverified TLS (sslmode prefer /
+                     * require): an on-path attacker completes that handshake
+                     * with any self-signed certificate and answers FULL_AUTH to
+                     * collect the password (audit 5 M4). dsn->password is
+                     * already NUL-terminated, so send strlen+1 bytes directly
+                     * (no plaintext copy on the heap). */
                     size_t plen = strlen(dsn->password);
                     if (send_auth_data(conn, (uint8_t)(f.seq + 1),
                                        (const uint8_t *)dsn->password,
@@ -575,8 +582,12 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
                     continue;                /* read the OK / ERR result */
                 }
                 conn_set_err(conn,
-                    "caching_sha2_password full auth needs TLS: set sslmode=require "
-                    "(RSA public-key exchange is not yet supported)");
+                    "caching_sha2_password full authentication sends the password "
+                    "itself, which Hull does only over TLS whose server certificate "
+                    "was verified: set sslmode=verify-full or verify-ca (RSA "
+                    "public-key exchange is not supported). Once the server has "
+                    "cached the account's hash (any verified login), the fast "
+                    "path works under any sslmode");
                 hl_my_conn_close(conn); return -1;
             }
             conn_set_err(conn, "unexpected caching_sha2 auth data");
@@ -713,6 +724,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
         return -1;
     }
     conn->broken = 1;                           /* until the reply is read */
+    conn->last_err_code = 0;
     int se = conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send query"); return -1; }
@@ -737,6 +749,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
             snprintf(conn->errmsg, sizeof conn->errmsg, "query failed: %.*s",
                      (int)e.message_len, e.message);
         else conn_set_err(conn, "query failed");
+        conn->last_err_code = (hl_my_parse_err(&f, 1, &e) == 0) ? e.code : 0;
         conn->broken = 0;                       /* an ERR ends the reply */
         return -1;
     }
@@ -794,6 +807,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
                 snprintf(conn->errmsg, sizeof conn->errmsg, "query failed: %.*s",
                          (int)e.message_len, e.message);
             else conn_set_err(conn, "query failed mid-result");
+            conn->last_err_code = (hl_my_parse_err(&f, 1, &e) == 0) ? e.code : 0;
             conn->broken = 0;                   /* an ERR ends the reply */
             goto fail;
         }
@@ -998,6 +1012,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
         return -1;
     }
     conn->broken = 1;                           /* until the reply is read */
+    conn->last_err_code = 0;
     int se = conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send prepare"); return -1; }
@@ -1010,6 +1025,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
             snprintf(conn->errmsg, sizeof conn->errmsg, "prepare failed: %.*s",
                      (int)e.message_len, e.message);
         else conn_set_err(conn, "prepare failed");
+        conn->last_err_code = (hl_my_parse_err(&f, 1, &e) == 0) ? e.code : 0;
         conn->broken = 0;                       /* an ERR ends the reply */
         return -1;
     }
@@ -1072,6 +1088,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
             snprintf(conn->errmsg, sizeof conn->errmsg, "execute failed: %.*s",
                      (int)e.message_len, e.message);
         else conn_set_err(conn, "execute failed");
+        conn->last_err_code = (hl_my_parse_err(&f, 1, &e) == 0) ? e.code : 0;
         conn->broken = 0;                       /* an ERR ends the reply */
         goto close_stmt;
     }
@@ -1120,6 +1137,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
                 snprintf(conn->errmsg, sizeof conn->errmsg, "execute failed: %.*s",
                          (int)e.message_len, e.message);
             else conn_set_err(conn, "execute failed mid-result");
+            conn->last_err_code = (hl_my_parse_err(&f, 1, &e) == 0) ? e.code : 0;
             conn->broken = 0;                   /* an ERR ends the reply */
             goto close_stmt;
         }
@@ -1241,6 +1259,7 @@ int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql)
         return -1;
     }
     conn->broken = 1;                           /* until the reply is read */
+    conn->last_err_code = 0;
     int se = conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send script"); return -1; }

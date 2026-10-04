@@ -209,6 +209,20 @@ UTEST(pg_conn, handshake_cleartext_without_tls_refused)
     close(sv[0]);
 }
 
+/* Cleartext password auth needs a VERIFIED TLS session or an explicit
+ * sslmode=disable: prefer and require verify nothing, so an on-path attacker
+ * completes TLS with a self-signed certificate and asks for the password
+ * (audit 5 M4). Pure predicate - runs everywhere. */
+UTEST(pg_conn, cleartext_allowed_only_verified_or_disable)
+{
+    EXPECT_EQ(0, hl_pg_cleartext_allowed(0, HL_PG_SSLMODE_PREFER));
+    EXPECT_EQ(0, hl_pg_cleartext_allowed(0, HL_PG_SSLMODE_REQUIRE));
+    EXPECT_EQ(0, hl_pg_cleartext_allowed(0, HL_PG_SSLMODE_VERIFY));
+    EXPECT_NE(0, hl_pg_cleartext_allowed(1, HL_PG_SSLMODE_VERIFY));
+    EXPECT_NE(0, hl_pg_cleartext_allowed(0, HL_PG_SSLMODE_DISABLE));
+    EXPECT_EQ(0, hl_pg_cleartext_allowed(0, hl_pg_sslmode_parse("")));
+}
+
 /* A server that starts SCRAM and then sends AuthenticationOk without the
  * SASLFinal never proved it knows the password: refused. */
 UTEST(pg_conn, handshake_scram_without_final_refused)

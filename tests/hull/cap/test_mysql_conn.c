@@ -686,6 +686,75 @@ UTEST(mysql_conn, query_later_statement_error_fails)
     close(sv[0]);
 }
 
+/* A server ERR records its code (the backend reads ER_LOCK_DEADLOCK from it to
+ * learn that InnoDB rolled the whole transaction back), and a new command
+ * clears it. */
+UTEST(mysql_conn, query_error_records_server_code)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);                                   /* auth OK */
+    build_err(&s, 1, HL_MY_ER_LOCK_DEADLOCK,
+              "Deadlock found when trying to get lock");
+    put_ok_more(&s, 1, 0);                             /* the next command */
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    EXPECT_NE(0, hl_my_conn_query(&conn, "UPDATE a SET x=1", NULL, NULL, NULL, NULL));
+    EXPECT_EQ(HL_MY_ER_LOCK_DEADLOCK, (int)conn.last_err_code);
+    EXPECT_EQ(0, conn.broken);
+    EXPECT_EQ(0, hl_my_conn_query(&conn, "SELECT 1", NULL, NULL, NULL, NULL));
+    EXPECT_EQ(0, (int)conn.last_err_code);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* caching_sha2 full authentication sends the password itself: never without
+ * a verified TLS session. (Here there is no TLS at all; the unverified-TLS
+ * case - sslmode prefer / require against a forged certificate - takes the
+ * same branch, since only a verify-* handshake sets tls_verified.) */
+UTEST(mysql_conn, caching_sha2_full_auth_needs_verified_tls)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake_plugin(&s, 0, "caching_sha2_password");
+    { size_t m = hl_my_packet_begin(&s, 2);
+      hl_my_put_u8(&s, HL_MY_AUTH_MORE_DATA);
+      hl_my_put_u8(&s, HL_MY_CACHING_SHA2_FULL_AUTH);
+      hl_my_packet_end(&s, m); }
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://alice:Sup3rSecretPw@localhost/shop",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(-1, hl_my_conn_start(&conn, sv[1], &dsn));
+    EXPECT_TRUE(strstr(conn.errmsg, "verify-full") != NULL);
+
+    /* Only the HandshakeResponse41 (a scramble, not the password) went out. */
+    uint8_t got[1024];
+    ssize_t n = read(sv[0], got, sizeof got);
+    ASSERT_TRUE(n > 0);
+    int leaked = 0;
+    for (ssize_t i = 0; i + 13 <= n; i++)
+        if (memcmp(got + i, "Sup3rSecretPw", 13) == 0) leaked = 1;
+    EXPECT_EQ(0, leaked);
+
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 /* A single-statement script must stop after one result (no MORE_RESULTS). */
 UTEST(mysql_conn, exec_multi_single)
 {

@@ -39,9 +39,19 @@ static int rw_reserve(HlRespWriter *w, size_t extra) {
         if (ncap > SIZE_MAX / 2) { ncap = need; break; }
         ncap *= 2;
     }
-    uint8_t *nb = realloc(w->buf, ncap);
+    /* Not realloc: a moved block is freed as it is, and auth messages
+     * (cleartext password, SCRAM proof, AUTH / HELLO) grow past a boundary
+     * after the secret is written - a copy of it was left in freed heap
+     * (audit 5 L2). Copy, zero the old block, then free it. */
+    uint8_t *nb = malloc(ncap);
     if (!nb) { w->err = 1; return -1; }
-    w->buf = nb; w->cap = ncap;
+    if (w->buf) {
+        if (w->len) memcpy(nb, w->buf, w->len);
+        hl_secure_zero(w->buf, w->cap);
+        free(w->buf);
+    }
+    w->buf = nb;
+    w->cap = ncap;
     return 0;
 }
 

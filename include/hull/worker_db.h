@@ -113,10 +113,12 @@ typedef struct HlWorkerDbOp {
                             * right database. */
     HlValue       *params;
     int            nparams;
-    /* A db.open (dynamic) DSN: the worker closes its connection after the
-     * op instead of caching it. Cached, each worker thread kept up to 32
-     * per-tenant connections past the app's close(), well beyond the
-     * process-wide cap of 16 dynamic connections. */
+    /* A db.open (dynamic) DSN: the worker closes the connection it opened
+     * for the op instead of caching it. Cached, each worker thread kept up to
+     * 32 per-tenant connections past the app's close(), well beyond the
+     * process-wide cap of 16 dynamic connections. A connection the thread
+     * already had for the same DSN (a named / default connection's) is left
+     * alone, and a WAIT_NOTIFY keeps its LISTEN connection. */
     int            no_cache;
 
     /* WAIT_NOTIFY input: LISTEN channel (owned) + wait bound in ms. */

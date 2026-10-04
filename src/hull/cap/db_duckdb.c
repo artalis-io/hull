@@ -46,6 +46,11 @@ typedef struct HlDbDuckCtx {
     duckdb_database    db;
     duckdb_connection  con;
     HlAllocator       *alloc;
+    /* Whether a transaction is open. DuckDB's C API cannot report it, so it
+     * is tracked from the TRANSACTION statements this connection runs (an
+     * explicit BEGIN opens one; COMMIT / ROLLBACK / ABORT / END end it, also
+     * when they fail - a failed COMMIT still ends DuckDB's transaction). */
+    int                in_txn;
     char               errmsg[512];
 } HlDbDuckCtx;
 
@@ -163,7 +168,25 @@ static int duck_apply_allowed_dirs(duckdb_connection con)
     int ok = (duckdb_query(con, sql, &r) == DuckDBSuccess);
     duckdb_destroy_result(&r);
     free(sql);
-    return ok ? 0 : -1;
+    if (!ok) return -1;
+
+    /* The list is INERT while external access is on: DuckDB's
+     * DBConfig::CanAccessFile returns "allowed" for every path as long as
+     * enable_external_access is true, and consults allowed_directories /
+     * allowed_paths only once it is false (they are the exceptions to a
+     * disabled external access). External access had to be on at config time
+     * so the SET above is accepted (DuckDB refuses to change
+     * allowed_directories with external access off); turning it off at run
+     * time is permitted (only re-ENABLING it is refused). Without this every
+     * file the process can reach was readable / writable from SQL, and a path
+     * the kernel sandbox refused reached DuckDB as EACCES and aborted the
+     * process. lock_configuration (next, in duck_open) freezes both. */
+    if (duckdb_query(con, "SET enable_external_access = false", &r) != DuckDBSuccess) {
+        duckdb_destroy_result(&r);
+        return -1;
+    }
+    duckdb_destroy_result(&r);
+    return 0;
 }
 
 /* ── Open / close ─────────────────────────────────────────────────── */
@@ -351,6 +374,31 @@ static void duck_decode(duckdb_type type, void *data, idx_t row, HlValue *out)
 
 /* ── Query / exec ─────────────────────────────────────────────────── */
 
+/* Case-insensitive: does @p sql start with keyword @p kw (a word boundary
+ * after it)? */
+static int duck_sql_starts(const char *sql, const char *kw)
+{
+    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
+    for (; *kw; kw++, sql++) {
+        char c = *sql;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != *kw) return 0;
+    }
+    char c = *sql;
+    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_');
+}
+
+/* After a TRANSACTION statement ran (@p ok = it succeeded). */
+static void duck_track_txn(HlDbDuckCtx *s, const char *sql, int ok)
+{
+    if (duck_sql_starts(sql, "begin") || duck_sql_starts(sql, "start")) {
+        if (ok) s->in_txn = 1;
+    } else if (duck_sql_starts(sql, "commit") || duck_sql_starts(sql, "end") ||
+               duck_sql_starts(sql, "rollback") || duck_sql_starts(sql, "abort")) {
+        s->in_txn = 0;
+    }
+}
+
 static int duck_query(HlDbHandle *h, const char *sql,
                       const HlValue *params, int nparams,
                       HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
@@ -371,13 +419,17 @@ static int duck_query(HlDbHandle *h, const char *sql,
         return -1;
     }
 
+    int is_txn_stmt =
+        duckdb_prepared_statement_type(stmt) == DUCKDB_STATEMENT_TYPE_TRANSACTION;
     duckdb_result result;
     if (duckdb_execute_prepared(stmt, &result) != DuckDBSuccess) {
         duck_set_err(s, duckdb_result_error(&result));
         duckdb_destroy_result(&result);
         duckdb_destroy_prepare(&stmt);
+        if (is_txn_stmt) duck_track_txn(s, sql, 0);
         return -1;
     }
+    if (is_txn_stmt) duck_track_txn(s, sql, 1);
 
     int rc = 0;
     if (cb) {
@@ -459,6 +511,13 @@ static void duck_guard_stale_txn(HlDbHandle *h)
     if (duckdb_query(s->con, "ROLLBACK", &res) == DuckDBSuccess)
         fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
     duckdb_destroy_result(&res);
+    s->in_txn = 0;
+}
+
+static int duck_in_txn(HlDbHandle *h)
+{
+    if (!h || !h->ctx) return 0;
+    return ((HlDbDuckCtx *)h->ctx)->in_txn;
 }
 
 static int64_t duck_last_id(HlDbHandle *h)
@@ -641,6 +700,7 @@ const HlDbBackend hl_db_backend_duckdb = {
     .last_id              = duck_last_id,
     .errmsg               = duck_errmsg,
     .guard_stale_txn      = duck_guard_stale_txn,
+    .in_txn               = duck_in_txn,
     .insert_if_absent     = duck_insert_if_absent,
     .upsert               = duck_upsert,
     .table_columns        = duck_table_columns,

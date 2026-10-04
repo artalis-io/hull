@@ -2758,6 +2758,88 @@ UTEST(js_stdlib, nested_batch_is_a_savepoint)
     cleanup_js_caps();
 }
 
+/* db.batch(fn) refuses an async fn / a returned thenable (audit 5 M2): it
+ * used to COMMIT as soon as JS_Call returned the Promise, so the statements
+ * after the first await ran in autocommit and a rejection became an
+ * unhandled one after the COMMIT. Now it rolls back and throws a TypeError. */
+UTEST(js_stdlib, batch_refuses_an_async_fn)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { db as dbm } from 'hull:db';\n"
+        "function run() {\n"
+        "  const db = dbm.default();\n"
+        "  db.exec('CREATE TABLE abj (x INTEGER)');\n"
+        "  let err = null;\n"
+        "  try { db.batch(async () => { db.exec('INSERT INTO abj VALUES (1)'); }); }\n"
+        "  catch (e) { err = e; }\n"
+        "  if (!(err instanceof TypeError)) return 2;\n"
+        "  if (!String(err.message).includes('must be synchronous')) return 3;\n"
+        "  if (db.query('SELECT COUNT(*) AS n FROM abj')[0].n !== 0) return 4;\n"
+        "  err = null;\n"
+        "  try { db.batch(() => { db.exec('INSERT INTO abj VALUES (2)'); return { then() {} }; }); }\n"
+        "  catch (e) { err = e; }\n"
+        "  if (!(err instanceof TypeError)) return 5;\n"
+        "  if (db.query('SELECT COUNT(*) AS n FROM abj')[0].n !== 0) return 6;\n"
+        "  db.batch(() => { db.exec('INSERT INTO abj VALUES (3)'); return 42; });\n"
+        "  if (db.query('SELECT COUNT(*) AS n FROM abj')[0].n !== 1) return 7;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__async_batch = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    ASSERT_EQ(eval_int("globalThis.__async_batch"), 1);
+    cleanup_js_caps();
+}
+
+/* A wait while a registry connection is inside a transaction is refused
+ * (audit 5 M1): another request would run on the shared connection while
+ * this one is parked. After COMMIT the wait is allowed again. */
+UTEST(js_stdlib, a_wait_inside_a_transaction_is_refused)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    js.base.async_ctx = actx;
+
+    const char *code =
+        "import { db as dbm } from 'hull:db';\n"
+        "function run() {\n"
+        "  const db = dbm.default();\n"
+        "  db.exec('CREATE TABLE wtj (x INTEGER)');\n"
+        "  db.exec('BEGIN');\n"
+        "  db.exec('INSERT INTO wtj VALUES (1)');\n"
+        "  let msg = '';\n"
+        "  try { hull.sleep(5); } catch (e) { msg = String(e && e.message); }\n"
+        "  if (!msg.includes('transaction is open') || !msg.includes(\"'default'\")) return 2;\n"
+        "  db.exec('COMMIT');\n"
+        "  globalThis.__slept = hull.sleep(5).then(() => 1);\n"
+        "  if (db.query('SELECT COUNT(*) AS n FROM wtj')[0].n !== 1) return 3;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__wait_txn = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    for (int i = 0; i < 20; i++) {   /* let the allowed sleep finish */
+        be->tick(actx, 20);
+        hl_js_run_jobs(&js);
+    }
+    ASSERT_EQ(eval_int("globalThis.__wait_txn"), 1);
+    be->tick(actx, 0);
+    cleanup_js_caps();
+    be->free(actx);
+}
+
 UTEST(js_stdlib, totp_rekey_batch_helper_js)
 {
     init_js_with_caps();

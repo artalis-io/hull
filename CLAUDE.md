@@ -662,10 +662,26 @@ or a handler, not at module top-level; `db.default()` works everywhere.
 registry connection (default, named, internal) has a transaction a previous
 handler left open rolled back (`hl_db_registry_guard_stale_txns`): SQLite by
 autocommit state, Postgres by `tx_status`, MySQL by `SERVER_STATUS_IN_TRANS`,
-DuckDB by an unconditional `ROLLBACK`. Before audit 4 only SQLite's default
-connection was guarded, so a Postgres handler that raised between `BEGIN` and
-`COMMIT` left every later request inside that transaction (or, after a failed
-statement, failing with "current transaction is aborted").
+DuckDB by an unconditional `ROLLBACK`; the handle's `db.batch` depth goes with
+it. Before audit 4 only SQLite's default connection was guarded, so a Postgres
+handler that raised between `BEGIN` and `COMMIT` left every later request
+inside that transaction (or, after a failed statement, failing with "current
+transaction is aborted").
+
+**No transaction across a wait.** The guard cannot tell a dead owner from one
+parked on `http.fetch` / `db.async` / `hull.sleep`, and a parked handler's
+transaction is on a connection other entries are using meanwhile: the guard
+rolled it back under the handler, whose remaining statements then autocommitted
+and whose COMMIT "succeeded" (audit 5 M1). So every Hull wait refuses while a
+registry connection is in a transaction (`hl_db_registry_open_txn`, the
+backend's `in_txn` vtable method; Lua: `hl_lua_check_can_wait`; JS:
+`hl_js_db_refuse_wait` in `runtime/js/db_wait.h`, called by each parking
+operation before it arms anything - a new JS wait primitive must call it).
+Under that invariant every transaction the guard finds is orphaned. JS
+`db.batch(fn)` refuses an async fn / returned thenable (TypeError, rolled back).
+`hl_db_batch_enter/leave` detect a transaction that ended under an open batch
+(a raw COMMIT / ROLLBACK in fn, a nested in-process dispatch): leave fails with
+a clear message, a nested batch starts a fresh transaction.
 
 **`db.async` + `:memory:` (SQLite) caveat.** `db.async` runs on the worker
 pool, where each thread opens its OWN connection to the target DSN (keyed by
@@ -682,7 +698,15 @@ roadmap §2.9.)
 
 **PostgreSQL specifics** (`HL_ENABLE_POSTGRES=1`):
 - **Auth:** SCRAM-SHA-256 (the postgres:16 default) and `trust` / cleartext.
-  MD5 is rejected. Reuses `cap/crypto` (SHA-256 / HMAC / PBKDF2).
+  MD5 is rejected. A cleartext password is sent only over TLS whose server
+  certificate was VERIFIED (`verify-ca` / `verify-full`) or under an explicit
+  `sslmode=disable` (`hl_pg_cleartext_allowed`): `prefer` / `require` verify
+  nothing, so a MITM could finish TLS with a self-signed cert and ask (audit 5
+  M4). Reuses `cap/crypto` (SHA-256 / HMAC / PBKDF2).
+- **Aborted transactions:** a COMMIT in state `E` (an earlier statement
+  failed) gets a "ROLLBACK" tag and no error from the server; the backend
+  reports it as a failure, so `db.batch` no longer returns normally with every
+  write discarded.
 - **TLS:** `sslmode=disable|prefer|require|verify-ca|verify-full` in the DSN
   (`?sslmode=...`), default `prefer`. `verify-full` checks the chain +
   hostname against the resolved trust anchor (`--ca-bundle`, the system store,
@@ -695,7 +719,10 @@ roadmap §2.9.)
   matching SQLite.
 - **Migrations** run through the vtable; multi-statement migration files use
   the Postgres simple-query protocol. The `_hull_migrations` tracking table is
-  dialect-portable (name PK, host-generated ISO-8601 `applied_at`).
+  dialect-portable (name PK, host-generated ISO-8601 `applied_at`). The whole
+  run holds a session lock on the network backends - `pg_advisory_lock` /
+  MySQL `GET_LOCK('hull_migrate')` - so instances starting together neither
+  race the first `CREATE TABLE` nor re-run a migration (audit 5 L3).
 - **SQLite-only features under Postgres:** `db.udf` and `hull/search` (FTS5)
   are SQLite-only and fail with a clear error on a Postgres connection.
 - **Lost connections (Postgres and MySQL):** every read is bounded by the
@@ -717,8 +744,16 @@ protocol). Codec (`cap/mysqlwire.c`) is little-endian, 3-byte-length +
 parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
 - **Auth:** `mysql_native_password` (SHA-1 challenge-response) and
   `caching_sha2_password` (MySQL 8 default: SHA-256 fast path always;
-  full-auth sends the cleartext password over TLS; the plaintext RSA
-  public-key exchange is deferred with a "set `sslmode=require`" hint). The
+  full-auth sends the cleartext password, only over TLS whose server
+  certificate was VERIFIED - `sslmode=verify-ca` / `verify-full` - since
+  `prefer` / `require` would hand it to any MITM (audit 5 M4); otherwise it
+  fails with a hint. The RSA public-key exchange is not implemented. Once the
+  server has cached the account's hash, the fast path works under any
+  sslmode).
+- **Deadlocks:** an `ER_LOCK_DEADLOCK` (1213) inside a transaction means
+  InnoDB rolled the WHOLE transaction back; the backend then refuses every call
+  but `ROLLBACK` (as for a connection lost mid-transaction), so later
+  statements cannot autocommit and the COMMIT cannot "succeed". The
   server-named handshake plugin drives which is used, and AuthSwitchRequest
   re-dispatches through the same path. `client_ed25519` (MariaDB) is not yet
   supported and fails with a clear hint pointing at the two supported plugins

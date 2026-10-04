@@ -137,8 +137,9 @@ SET allow_unsigned_extensions    = false;
 SET enable_external_access = false;      -- DB file + :memory: only
 
 -- (B) a directory granted whole for read AND write  ->  bounded LOCAL access, still no network:
-SET enable_external_access = true;
+SET enable_external_access = true;       -- config time: needed so the next SET is accepted
 SET allowed_directories = ['<whole dirs granted in BOTH fs.read and fs.write>'];  -- post-connect
+SET enable_external_access = false;      -- post-connect: the list now ENFORCES
 
 -- finally, in BOTH cases (post-connect):
 SET lock_configuration = true;           -- app SQL can no longer re-enable anything
@@ -229,13 +230,20 @@ real ceiling for large OLAP, so a manifest option to tune them is tracked
 regardless). A large scan that spills to a temp dir still needs that dir in the
 sandbox's write set - separate from the read path proven here.
 
-**The fs bound is enforced by the kernel unveil.** DuckDB may only open files
-under the unveiled `fs.read` / `fs.write` directories, so an undeclared
-`read_csv('/x')` is blocked at the syscall. DuckDB's `SET allowed_directories`
-is set post-connect as intended defense-in-depth, but it is runtime-SET-only
-(not accepted by `duckdb_set_config` at config time) and does **not** enforce on
-Linux (it does on macOS - a DuckDB platform quirk), so the kernel unveil is the
-authoritative bound.
+**The fs bound is enforced by DuckDB itself, with the kernel unveil behind
+it.** DuckDB consults `allowed_directories` only while `enable_external_access`
+is **false** (`DBConfig::CanAccessFile` returns "allowed" for every path while it
+is true; the list is the set of exceptions to a disabled external access). Mode
+B therefore needs external access ON at config time - DuckDB refuses to change
+`allowed_directories` with it off, and the list is runtime-SET-only - then runs
+`SET allowed_directories = [...]`, then `SET enable_external_access = false`
+(turning it off at run time is allowed; only re-enabling is refused), then
+`lock_configuration`. Before audit 5 the third step was missing, so the list was
+inert: DuckDB SQL could read and write every file the process could reach (the
+app's SQLite file included), and the earlier "does not enforce on Linux" note in
+this document was that bug, not a platform quirk. Now an undeclared
+`read_csv('/x')` / `COPY ... TO '/x'` is a catchable DuckDB error on every OS,
+and the kernel unveil remains the second, independent bound.
 
 That list is also coarser than the grants: it is directory-granular (a file
 grant becomes its parent directory) and has no read-only form, so on its own it
@@ -246,15 +254,19 @@ layer is exact on both counts - each declared path is unveiled itself, `r` for
 file grant stays that file. With `--no-sandbox` there is no such bound, for
 DuckDB as for everything else.
 
-**Known limitation - apps must only read declared paths.** Because
-`allowed_directories` does not pre-empt the open on Linux, an undeclared read
-reaches the kernel, gets `EACCES`, and DuckDB **aborts the process** (NULL-deref
-on the denied open) instead of returning a catchable error. Security holds (no
-data leaks - the read is blocked), but a read of an undeclared path crashes the
-DuckDB process rather than erroring. App SQL must therefore reference only
-paths the manifest declares; a path derived from untrusted input is an app bug
-(and a crash, not a leak). Making an undeclared read a clean error would need
-`allowed_directories` to enforce on Linux (an upstream DuckDB fix) - tracked.
+**Undeclared paths are a clean error.** Because DuckDB now refuses an
+ungranted path before opening it, an undeclared read no longer reaches the
+kernel's `EACCES` (which DuckDB answered with a NULL-deref abort - a server-kill
+for any query naming an undeclared path). CI's mode-B job asserts a read of a
+file in the app dir outside the grant, a read of `/etc/hosts` and a `COPY ... TO`
+outside the grant are each refused with a catchable error, and that the
+connection keeps working afterwards.
+
+**Symlinks.** A directory is admitted only when its `realpath()` lies inside the
+app root's `realpath()`, so a symlinked `data -> /srv/shared` is not granted
+(audit 5). DuckDB's own check is a string prefix on the path it is given, so a
+symlink placed INSIDE a granted directory is followed; the kernel unveil still
+bounds where it can lead. Hull's fs API cannot create symlinks.
 
 ### 3.3 Packaging (side-loaded, on-demand)
 

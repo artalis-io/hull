@@ -6320,6 +6320,67 @@ static int run_task_script(const char *body, char *out, size_t outsz)
     return 0;
 }
 
+/* run_task_script with the database capability (a registry whose "default"
+ * is an in-memory SQLite connection). */
+static int run_task_script_db(const char *body, char *out, size_t outsz)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    if (!be) return 1;
+    init_lua_with_caps();
+    if (!lua_initialized) return 4;
+    if (be->init(&lua_rt.base.async_ctx, NULL) != 0) return 2;
+
+    size_t n = strlen(TASK_PRELUDE) + strlen(body) + 64;
+    char *src = malloc(n);
+    if (!src) return 3;
+    snprintf(src, n, "%s%s\nOUT = 'ok'\n", TASK_PRELUDE, body);
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt, src, &co);
+    free(src);
+    if (st == LUA_YIELD) ssh_tick_until_done(be, lua_rt.base.async_ctx, co);
+    st = lua_status(co);
+
+    lua_getglobal(lua_rt.L, "OUT");
+    const char *o = lua_tostring(lua_rt.L, -1);
+    snprintf(out, outsz, "%s", o ? o
+             : (st != LUA_OK && lua_tostring(co, -1)) ? lua_tostring(co, -1)
+             : "(no verdict)");
+    lua_pop(lua_rt.L, 1);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua_caps();
+    be->tick(actx, 0);
+    be->free(actx);
+    return 0;
+}
+
+/* A wait while a registry connection is inside a transaction is refused
+ * (audit 5 M1): the connection is shared, so while this coroutine was parked
+ * another request ran on it and the stale-transaction guard rolled this
+ * transaction back; the rest of the handler then autocommitted. Once the
+ * transaction ends the wait works again, and the writes are intact. */
+UTEST(lua_async, a_wait_inside_a_transaction_is_refused)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE wt (x INTEGER)')\n"
+        "local t = hull.async(function() hull.sleep(20); return 1 end)\n"
+        "db.exec('BEGIN')\n"
+        "db.exec('INSERT INTO wt VALUES (1)')\n"
+        "local ok, e = pcall(hull.sleep, 5)\n"
+        "check(not ok and tostring(e):find('transaction is open', 1, true)\n"
+        "      and tostring(e):find(\"'default'\", 1, true), 'sleep in txn: '..tostring(e))\n"
+        "ok, e = pcall(function() return t:wait() end)\n"
+        "check(not ok and tostring(e):find('transaction is open', 1, true), 'wait in txn: '..tostring(e))\n"
+        "db.exec('COMMIT')\n"
+        "check(t:wait() == 1, 'the task is joinable after COMMIT')\n"
+        "hull.sleep(5)\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM wt')[1].n == 1, 'the write survived')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
 #define TASK_CASE(name, body)                                   \
     UTEST(lua_async, name)                                      \
     {                                                           \

@@ -99,6 +99,16 @@ void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
             hl_db_guard_stale_txn(&reg->slots[i].handle);
 }
 
+const char *hl_db_registry_open_txn(HlDbRegistry *reg)
+{
+    if (!reg) return NULL;
+    for (int i = 0; i < reg->nslots; i++)
+        if (reg->slots[i].open && hl_db_in_txn(&reg->slots[i].handle))
+            return strcmp(reg->slots[i].name, INTERNAL_NAME) == 0
+                   ? "internal" : reg->slots[i].name;
+    return NULL;
+}
+
 HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
 {
     if (!reg) return NULL;

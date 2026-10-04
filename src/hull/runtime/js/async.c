@@ -9,6 +9,7 @@
 
 #include "hull/runtime/js.h"
 #include "internal.h"
+#include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "hull/shared/req_life.h"
 #include "hull/http_feature.h"  /* hl_js_http_error_response (HTTP-feature seam) */
 #include "hull/shared/async.h"
@@ -647,6 +648,7 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
             "hull.sleep() requires an active event loop");
     if (hl_js_async_gate(ctx, js, "hull.sleep()") != 0)
         return JS_EXCEPTION;
+    if (hl_js_db_refuse_wait(ctx, "hull.sleep()")) return JS_EXCEPTION;
 
     KlHttpServer *server = js->server;
     KlHttpConn *conn = js->active_conn;

@@ -112,8 +112,11 @@ static const char *worker_db_resolve_key(const char *dsn, const HlDbBackend *be,
     return dsn;
 }
 
-HlWorkerDb *hl_worker_db_get_for(const char *dsn)
+/* @p fresh (optional) is set to 1 when this call opened the connection, 0 on
+ * a cache hit. */
+static HlWorkerDb *worker_db_get(const char *dsn, int *fresh)
 {
+    if (fresh) *fresh = 0;
     if (!dsn) dsn = worker_db_dsn;
     if (!dsn) return NULL;
 
@@ -178,7 +181,13 @@ HlWorkerDb *hl_worker_db_get_for(const char *dsn)
 
     node->next = head;
     pthread_setspecific(worker_db_key, node);
+    if (fresh) *fresh = 1;
     return &node->wdb;
+}
+
+HlWorkerDb *hl_worker_db_get_for(const char *dsn)
+{
+    return worker_db_get(dsn, NULL);
 }
 
 void hl_worker_db_invalidate(const char *dsn)
@@ -355,19 +364,26 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
 
 /* ── KlWorkItem callbacks ──────────────────────────────────────────── */
 
-static void db_work_run(HlWorkerDbOp *op);
+static void db_work_run(HlWorkerDbOp *op, int *fresh);
 
+/* A db.open (no_cache) op closes the connection it opened, and only that one
+ * (audit 5 L5): the close was keyed by DSN, so a db.open whose DSN equalled a
+ * named or the default connection's closed this thread's cached connection
+ * for it - the jobs worker's LISTEN connection included. A WAIT_NOTIFY keeps
+ * its connection: closing it dropped the LISTEN between waits, losing the
+ * notifications sent in between (the LRU cap still bounds it). */
 static void db_work_fn(void *ud)
 {
     HlWorkerDbOp *op = (HlWorkerDbOp *)ud;
-    db_work_run(op);
-    if (op->no_cache && op->dsn)
+    int fresh = 0;
+    db_work_run(op, &fresh);
+    if (op->no_cache && fresh && op->dsn && op->kind != HL_WORK_DB_WAIT_NOTIFY)
         hl_worker_db_invalidate(op->dsn);
 }
 
-static void db_work_run(HlWorkerDbOp *op)
+static void db_work_run(HlWorkerDbOp *op, int *fresh)
 {
-    HlWorkerDb *wdb = hl_worker_db_get_for(op->dsn);
+    HlWorkerDb *wdb = worker_db_get(op->dsn, fresh);
     if (!wdb) {
         op->error = 1;
         snprintf(op->error_msg, sizeof(op->error_msg),

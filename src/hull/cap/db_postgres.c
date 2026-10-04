@@ -37,8 +37,12 @@ static int pg_connect(HlPgConn *conn, const char *dsn)
 {
     HlPgDsn parsed;
     char err[128];
-    if (hl_pg_dsn_parse(dsn, &parsed, err, sizeof err) != 0)
+    if (hl_pg_dsn_parse(dsn, &parsed, err, sizeof err) != 0) {
+        /* A parse that failed part-way (a bad port after the password) has
+         * already copied the password into @p parsed. */
+        hl_pg_dsn_scrub(&parsed);
         return -1;
+    }
     int rc = hl_pg_conn_open(conn, &parsed, 10000 /* 10s connect */);
     hl_pg_dsn_scrub(&parsed);   /* password is secret material */
     return rc;
@@ -47,18 +51,25 @@ static int pg_connect(HlPgConn *conn, const char *dsn)
 /* 1 when @p sql is a bare ROLLBACK (any case, surrounding space, optional ';').
  * A connection lost inside a transaction lost the transaction with it - the
  * server rolled it back - so a ROLLBACK for it has already happened. */
-static int sql_is_rollback(const char *sql)
+static int sql_is_bare(const char *sql, const char *kw)
 {
     if (!sql) return 0;
     while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
-    static const char kw[] = "rollback";
-    for (size_t i = 0; i < sizeof kw - 1; i++, sql++) {
+    for (; *kw; kw++, sql++) {
         char c = *sql;
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        if (c != kw[i]) return 0;
+        if (c != *kw) return 0;
     }
     while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r' || *sql == ';') sql++;
     return *sql == '\0';
+}
+
+static int sql_is_rollback(const char *sql) { return sql_is_bare(sql, "rollback"); }
+
+/* COMMIT, and its Postgres synonym END. */
+static int sql_is_commit(const char *sql)
+{
+    return sql_is_bare(sql, "commit") || sql_is_bare(sql, "end");
 }
 
 static void scrub_free(char *s)
@@ -355,6 +366,14 @@ static int pg_query(HlDbHandle *h, const char *sql,
     int ready = pg_ready(s, sql);
     if (ready != 0) return ready > 0 ? 0 : -1;
 
+    /* COMMIT of a transaction an earlier statement aborted ('E'): the server
+     * answers with a "ROLLBACK" CommandComplete and NO error, so it used to
+     * read as a successful commit - db.batch returned normally with every
+     * write discarded (an app that caught a statement error inside the
+     * batch, as works on SQLite). Send it (it ends the transaction), then
+     * report the rollback as the failure it is. */
+    int commit_aborted = (s->conn.tx_status == 'E' && sql_is_commit(sql));
+
     char **scratch = NULL;
     HlPgParam *pp = encode_params(params, nparams, &scratch);
     if (nparams > 0 && !pp) return -1;
@@ -390,6 +409,13 @@ static int pg_query(HlDbHandle *h, const char *sql,
     free(pp);
 
     if (rc != 0) return rc;   /* error path unchanged */
+    if (commit_aborted) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "COMMIT rolled back: the transaction was aborted by an "
+                 "earlier error in it, so none of its statements were "
+                 "applied");
+        return -1;
+    }
     /* exec path (no row callback): return the affected-row count (0 when the
      * command has no numeric tag, e.g. BEGIN). The query path returns 0 - its
      * rows were delivered via the callback, and callers use the row set, not
@@ -431,6 +457,15 @@ static void pg_guard_stale_txn(HlDbHandle *h)
     if (s->conn.tx_status == 'I' || s->conn.tx_status == 0) return;
     fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
     (void)pg_rollback(h);   /* a lost connection: pg_ready takes the ROLLBACK */
+}
+
+/* 'T' (in a transaction) or 'E' (in a failed one); a connection lost inside
+ * a transaction keeps its last status until the app rolls back (pg_ready). */
+static int pg_in_txn(HlDbHandle *h)
+{
+    if (!h || !h->ctx) return 0;
+    HlDbPgCtx *s = h->ctx;
+    return s->conn.tx_status == 'T' || s->conn.tx_status == 'E';
 }
 
 static int64_t pg_last_id(HlDbHandle *h)
@@ -665,6 +700,7 @@ const HlDbBackend hl_db_backend_postgres = {
     .last_id              = pg_last_id,
     .errmsg               = pg_errmsg,
     .guard_stale_txn      = pg_guard_stale_txn,
+    .in_txn               = pg_in_txn,
     .insert_if_absent     = pg_insert_if_absent,
     .upsert               = pg_upsert,
     .table_columns        = pg_table_columns,

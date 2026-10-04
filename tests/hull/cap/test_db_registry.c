@@ -242,4 +242,37 @@ UTEST(db_registry, a_network_default_without_internal_is_reported)
     hl_db_registry_destroy(sq);
 }
 
+/* hl_db_registry_open_txn names a registry connection inside a transaction
+ * (what the runtimes refuse to wait across), and the guard rolls it back -
+ * batch bookkeeping included (audit 5 M1 / L1). */
+UTEST(db_registry, open_txn_names_the_connection_and_guard_clears_it)
+{
+    HlManifest m = {0};
+    m.databases.named[0].name = "cache";
+    m.databases.named[0].dsn = ":memory:";
+    m.databases.named_count = 1;
+
+    HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_TRUE(hl_db_registry_open_txn(reg) == NULL);   /* nothing open */
+
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_registry_get(reg, "cache", &err);
+    ASSERT_TRUE(h != NULL);
+    ASSERT_TRUE(hl_db_exec(h, "CREATE TABLE c (x INTEGER)", NULL, 0) >= 0);
+    EXPECT_TRUE(hl_db_registry_open_txn(reg) == NULL);   /* autocommit */
+
+    ASSERT_EQ(0, hl_db_batch_enter(h));
+    ASSERT_TRUE(hl_db_exec(h, "INSERT INTO c VALUES (1)", NULL, 0) >= 0);
+    const char *open = hl_db_registry_open_txn(reg);
+    ASSERT_TRUE(open != NULL);
+    EXPECT_STREQ(open, "cache");
+
+    hl_db_registry_guard_stale_txns(reg);
+    EXPECT_TRUE(hl_db_registry_open_txn(reg) == NULL);
+    EXPECT_EQ(0, h->batch_depth);
+
+    hl_db_registry_destroy(reg);
+}
+
 UTEST_MAIN()

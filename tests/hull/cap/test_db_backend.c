@@ -84,7 +84,7 @@ UTEST(db_backend, sqlite_no_notify)
 
 UTEST(db_backend, sqlite_exec_via_vtable)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -104,7 +104,7 @@ UTEST(db_backend, sqlite_exec_via_vtable)
 
 UTEST(db_backend, sqlite_query_via_vtable)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -135,7 +135,7 @@ UTEST(db_backend, sqlite_query_via_vtable)
 
 UTEST(db_backend, sqlite_transaction_rollback)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -159,7 +159,7 @@ UTEST(db_backend, sqlite_transaction_rollback)
 
 UTEST(db_backend, sqlite_transaction_commit)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -183,7 +183,7 @@ UTEST(db_backend, sqlite_transaction_commit)
 
 UTEST(db_backend, sqlite_last_id)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -208,7 +208,7 @@ UTEST(db_backend, sqlite_last_id)
 
 UTEST(db_backend, sqlite_errmsg)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -225,7 +225,7 @@ UTEST(db_backend, sqlite_errmsg)
 
 UTEST(db_backend, sqlite_raw_accessor)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -237,7 +237,7 @@ UTEST(db_backend, sqlite_raw_accessor)
 
 UTEST(db_backend, native_handle_tag)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -282,7 +282,7 @@ UTEST(db_backend, null_backend_safety)
 
 UTEST(db_backend, guard_stale_txn)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -417,7 +417,7 @@ UTEST(db_backend, null_backend_ptr_safety)
 
 UTEST(db_backend, query_with_params)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
@@ -637,6 +637,73 @@ UTEST(db_backend, dialect_helpers_null_handle_safe)
     ASSERT_TRUE(hl_db_insert_if_absent(&h, "t", cols, 1, cols, vals, 1) < 0);
     ASSERT_TRUE(hl_db_upsert(&h, "t", cols, 1, cols, vals, 1) < 0);
     ASSERT_TRUE(hl_db_table_columns(&h, "t", NULL, NULL) < 0);
+}
+
+/* ── Transaction state + db.batch bookkeeping (audit 5 M1 / L1) ────── */
+
+UTEST(db_backend, sqlite_in_txn_tracks_autocommit)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+    EXPECT_EQ(0, hl_db_in_txn(&h));
+    ASSERT_EQ(0, hl_db_begin(&h));
+    EXPECT_EQ(1, hl_db_in_txn(&h));
+    ASSERT_EQ(0, hl_db_commit(&h));
+    EXPECT_EQ(0, hl_db_in_txn(&h));
+    HlDbHandle none = {0};
+    EXPECT_EQ(0, hl_db_in_txn(&none));   /* no backend: not in one */
+    hl_db_backend_sqlite.close(&h);
+}
+
+/* The guard ends the transaction an open batch relied on: the depth goes with
+ * it, so the next batch BEGINs instead of issuing a SAVEPOINT outside any
+ * transaction. */
+UTEST(db_backend, guard_resets_batch_depth)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+    ASSERT_EQ(0, hl_db_batch_enter(&h));
+    ASSERT_EQ(1, h.batch_depth);
+    hl_db_guard_stale_txn(&h);
+    EXPECT_EQ(0, h.batch_depth);
+    EXPECT_EQ(0, hl_db_in_txn(&h));
+    ASSERT_EQ(0, hl_db_batch_enter(&h));     /* a fresh BEGIN */
+    EXPECT_EQ(1, hl_db_in_txn(&h));
+    EXPECT_EQ(0, hl_db_batch_leave(&h, 1));
+    hl_db_backend_sqlite.close(&h);
+}
+
+/* A raw COMMIT inside the batch's fn ends its transaction: the batch reports
+ * that rather than "committing" nothing, and a nested batch starts a fresh
+ * transaction instead of a SAVEPOINT that SQLite would silently turn into
+ * one. */
+UTEST(db_backend, batch_reports_a_transaction_ended_inside_it)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+    ASSERT_TRUE(hl_db_exec(&h, "CREATE TABLE t (id INTEGER)", NULL, 0) >= 0);
+
+    ASSERT_EQ(0, hl_db_batch_enter(&h));
+    ASSERT_TRUE(hl_db_exec(&h, "INSERT INTO t VALUES (1)", NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(&h, "COMMIT", NULL, 0) >= 0);   /* app's raw COMMIT */
+    EXPECT_EQ(-1, hl_db_batch_leave(&h, 1));
+    EXPECT_TRUE(strstr(hl_db_errmsg(&h), "ended inside the batch") != NULL);
+    EXPECT_EQ(0, h.batch_depth);
+
+    /* Nested: the outer transaction is gone before the inner batch. */
+    ASSERT_EQ(0, hl_db_batch_enter(&h));
+    ASSERT_TRUE(hl_db_exec(&h, "ROLLBACK", NULL, 0) >= 0);
+    ASSERT_EQ(0, hl_db_batch_enter(&h));                 /* fresh BEGIN */
+    EXPECT_EQ(1, hl_db_in_txn(&h));
+    ASSERT_TRUE(hl_db_exec(&h, "INSERT INTO t VALUES (2)", NULL, 0) >= 0);
+    EXPECT_EQ(0, hl_db_batch_leave(&h, 1));              /* inner commits */
+    EXPECT_EQ(-1, hl_db_batch_leave(&h, 1));             /* outer: lost */
+    EXPECT_EQ(0, h.batch_depth);
+
+    /* The next statement clears the batch message. */
+    ASSERT_TRUE(hl_db_exec(&h, "SELECT 1", NULL, 0) >= 0);
+    EXPECT_TRUE(strstr(hl_db_errmsg(&h), "ended inside the batch") == NULL);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST_MAIN();

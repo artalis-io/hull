@@ -439,7 +439,84 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
     return 0;
 }
 
+/* ── Cross-process migration lock ─────────────────────────────────── */
+
+/* Two instances starting together against one network database both saw a
+ * migration pending. SQLite's BEGIN IMMEDIATE and Postgres' LOCK TABLE (in
+ * execute_migration) serialise the per-migration re-check, but not on MySQL,
+ * where the re-check is a non-locking consistent read and DDL commits
+ * implicitly: the second instance re-ran the migration and failed to start
+ * ("table exists", a duplicate key in _hull_migrations). Nor did anything
+ * cover the first CREATE TABLE IF NOT EXISTS _hull_migrations, which two
+ * Postgres sessions racing fail with a pg_type unique violation. So the whole
+ * run holds a session-level named lock on the network backends (audit 5 L3):
+ * Postgres pg_advisory_lock, MySQL GET_LOCK. Both are released with the
+ * session if the process dies. */
+#define HL_MIGRATE_PG_LOCK_KEY  "5216458419349063506"   /* "HULLMIGR" */
+#define HL_MIGRATE_MY_LOCK_NAME "hull_migrate"
+#define HL_MIGRATE_MY_LOCK_WAIT "300"                    /* seconds */
+
+typedef enum { MIG_LOCK_NONE = 0, MIG_LOCK_PG, MIG_LOCK_MY } MigLockKind;
+
+static MigLockKind mig_lock_kind(const HlDbHandle *h)
+{
+    const char *n = h->backend ? h->backend->name : NULL;
+    if (!n) return MIG_LOCK_NONE;
+    if (strcmp(n, "postgres") == 0) return MIG_LOCK_PG;
+    if (strcmp(n, "mysql") == 0)    return MIG_LOCK_MY;
+    return MIG_LOCK_NONE;
+}
+
+/* GET_LOCK answers 1 (acquired), 0 (timed out) or NULL (error). */
+static int mig_first_int_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    int *out = (int *)ctx;
+    if (ncols > 0) {
+        if (cols[0].value.type == HL_TYPE_INT)
+            *out = (int)cols[0].value.i;
+        else if (cols[0].value.type == HL_TYPE_TEXT && cols[0].value.len == 1)
+            *out = cols[0].value.s[0] == '1' ? 1 : 0;
+    }
+    return 1;
+}
+
+static int mig_lock(HlDbHandle *h, MigLockKind kind)
+{
+    if (kind == MIG_LOCK_PG) {
+        if (hl_db_query(h, "SELECT pg_advisory_lock(" HL_MIGRATE_PG_LOCK_KEY ")",
+                        NULL, 0, noop_row_cb, NULL, NULL) != 0) {
+            log_error("[hull:migrate] cannot take the migration lock: %s",
+                      hl_db_errmsg(h));
+            return -1;
+        }
+    } else if (kind == MIG_LOCK_MY) {
+        int got = -1;
+        if (hl_db_query(h, "SELECT GET_LOCK('" HL_MIGRATE_MY_LOCK_NAME "', "
+                           HL_MIGRATE_MY_LOCK_WAIT ")",
+                        NULL, 0, mig_first_int_cb, &got, NULL) != 0 || got != 1) {
+            log_error("[hull:migrate] cannot take the migration lock%s%s",
+                      got == 0 ? ": another instance held it for "
+                                 HL_MIGRATE_MY_LOCK_WAIT "s" : ": ",
+                      got == 0 ? "" : hl_db_errmsg(h));
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void mig_unlock(HlDbHandle *h, MigLockKind kind)
+{
+    if (kind == MIG_LOCK_PG)
+        (void)hl_db_query(h, "SELECT pg_advisory_unlock(" HL_MIGRATE_PG_LOCK_KEY ")",
+                          NULL, 0, noop_row_cb, NULL, NULL);
+    else if (kind == MIG_LOCK_MY)
+        (void)hl_db_query(h, "SELECT RELEASE_LOCK('" HL_MIGRATE_MY_LOCK_NAME "')",
+                          NULL, 0, noop_row_cb, NULL, NULL);
+}
+
 /* ── Public API: run migrations ───────────────────────────────────── */
+
+static int migrate_run_locked(HlDbHandle *handle, const HlVfs *vfs);
 
 int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
 {
@@ -448,6 +525,16 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
      * backend at all (compute-only build / --no-db) means nothing to do. */
     if (!handle || !handle->backend)
         return 0;
+    MigLockKind kind = mig_lock_kind(handle);
+    if (mig_lock(handle, kind) != 0)
+        return HL_MIGRATE_ERR;
+    int rc = migrate_run_locked(handle, vfs);
+    mig_unlock(handle, kind);
+    return rc;
+}
+
+static int migrate_run_locked(HlDbHandle *handle, const HlVfs *vfs)
+{
     if (ensure_tracking_table(handle) != 0)
         return HL_MIGRATE_ERR;
 

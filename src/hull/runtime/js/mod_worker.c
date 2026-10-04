@@ -6,6 +6,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"
+#include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "hull/worker_db.h"
 #include "hull/module_resolver.h"
 #include "hull/shared/async.h"
@@ -188,6 +189,7 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
             "worker.dispatch requires an active event loop");
     if (hl_js_async_gate(ctx, js, "worker.dispatch") != 0)
         return JS_EXCEPTION;
+    if (hl_js_db_refuse_wait(ctx, "worker.dispatch()")) return JS_EXCEPTION;
 
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
         return JS_ThrowTypeError(ctx,

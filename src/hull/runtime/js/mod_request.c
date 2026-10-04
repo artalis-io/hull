@@ -53,6 +53,7 @@
 
 #include "quickjs.h"
 #include "internal.h"   /* HlJsRunLink and the run helpers */
+#include "db_wait.h"   /* hl_js_db_refuse_wait */
 
 #include <stdlib.h>
 #include <stddef.h>   /* offsetof */
@@ -949,6 +950,7 @@ static JSValue js_iter_next(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Need data - allocate the real cont + Promise + park */
+    if (hl_js_db_refuse_wait(ctx, "a multipart body read")) return JS_EXCEPTION;
     JSValue resolving[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving);
     if (JS_IsException(promise)) return JS_EXCEPTION;
@@ -987,6 +989,7 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
 
     /* Allocate a real cont upfront - read() accumulates across yields,
      * so the staging-on-stack trick doesn't help. */
+    if (hl_js_db_refuse_wait(ctx, "part.read()")) return JS_EXCEPTION;
     JSValue resolving[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving);
     if (JS_IsException(promise)) return JS_EXCEPTION;
@@ -1085,6 +1088,7 @@ static JSValue js_chunks_next(JSContext *ctx, JSValueConst this_val,
         return resolve_with(ctx, s.result);
     }
 
+    if (hl_js_db_refuse_wait(ctx, "a multipart body read")) return JS_EXCEPTION;
     JSValue resolving[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving);
     if (JS_IsException(promise)) return JS_EXCEPTION;
