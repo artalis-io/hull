@@ -678,12 +678,16 @@ static int lua_app_manifest(lua_State *L)
     return 0;
 }
 
-/* app.get_manifest() - retrieve manifest table (for build tools) */
+/* app.get_manifest() - a COPY of the stored manifest (for build tools).
+ * The stored table is what --verify-sig serialises and what the runtime
+ * enforces; handed out, the app could give it a metatable or change it
+ * after the fact (app.manifest copied it for exactly that reason). */
 static int lua_app_get_manifest(lua_State *L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
-    if (lua_isnil(L, -1))
+    if (!lua_istable(L, -1))
         return 1; /* returns nil */
+    manifest_copy(L, -1, 0);
     return 1;
 }
 

@@ -129,7 +129,8 @@ int hl_lua_wire_routes(HlLua *lua, KlHttpRouter *router)
                  * resolves under `hull test`. The in-process harness pre-feeds
                  * the whole body to this factory's wrapper (hl_cap_test_dispatch),
                  * so the handler iterates synchronously without a live socket. */
-                lua_getfield(L, -4, "multipart");
+                lua_pushliteral(L, "multipart");   /* raw: the app's opts table */
+                lua_rawget(L, -5);
                 int is_streaming = lua_istable(L, -1);
                 if (is_streaming) {
                     route->multipart_config = lua_build_multipart_config(lua);
@@ -243,7 +244,11 @@ int hl_lua_wire_routes(HlLua *lua, KlHttpRouter *router)
  * config; we round-trip through lua_Integer to reject negatives. */
 static size_t lua_read_size_field(lua_State *L, const char *key)
 {
-    lua_getfield(L, -1, key);
+    /* Raw: this table is the app's own opts.multipart, read at wire time
+     * outside any pcall - an __index there ran app code at boot, and one
+     * that raised aborted the process. */
+    lua_pushstring(L, key);
+    lua_rawget(L, -2);
     size_t v = 0;
     if (lua_isnumber(L, -1)) {
         lua_Integer i = lua_tointeger(L, -1);
@@ -256,7 +261,8 @@ static size_t lua_read_size_field(lua_State *L, const char *key)
 /* Same as lua_read_size_field but returns int (for max_parts). */
 static int lua_read_int_field(lua_State *L, const char *key)
 {
-    lua_getfield(L, -1, key);
+    lua_pushstring(L, key);   /* raw, as lua_read_size_field */
+    lua_rawget(L, -2);
     int v = 0;
     if (lua_isnumber(L, -1)) {
         lua_Integer i = lua_tointeger(L, -1);
@@ -348,7 +354,8 @@ int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
                 route->multipart_config = NULL;
 
                 /* Peek def.multipart - present → streaming route. */
-                lua_getfield(L, -4, "multipart");
+                lua_pushliteral(L, "multipart");   /* raw: the app's opts table */
+                lua_rawget(L, -5);
                 int is_streaming = lua_istable(L, -1);
                 if (is_streaming) {
                     route->multipart_config = lua_build_multipart_config(lua);

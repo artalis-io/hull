@@ -125,7 +125,7 @@ static JSValue compile_persist_run(JSContext *ctx,
     uint8_t *bytecode = JS_WriteObject(ctx, &out_len, chunk,
                                        JS_WRITE_OBJ_BYTECODE);
     if (bytecode) {
-        hl_runtime_cache_put_sealed(store, key, bytecode, out_len);
+        hl_runtime_cache_put_sealed(store, JTC_STORE_KIND, key, bytecode, out_len);
         js_free(ctx, bytecode);
     }
     /* JS_EvalFunction consumes `chunk` - no JS_FreeValue afterward. */
@@ -163,7 +163,7 @@ JSValue hl_js_template_compile_cached(JSContext *ctx,
      * `function` literal. */
     uint8_t *bc     = NULL;
     size_t   bc_len = 0;
-    if (hl_runtime_cache_get_sealed(store, key, &bc, &bc_len) == 0) {
+    if (hl_runtime_cache_get_sealed(store, JTC_STORE_KIND, key, &bc, &bc_len) == 0) {
         /* Defensive: empty/NULL blob would dereference NULL inside
          * JS_ReadObject. Evict + recompile rather than crash. */
         if (bc && bc_len > 0) {

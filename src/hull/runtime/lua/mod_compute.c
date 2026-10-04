@@ -168,6 +168,18 @@ static void wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
  * stay reachable). An ASYNC caller must deep-copy names + array and pin each
  * buffer before submit (item D); it must NOT forward these borrowed pointers into
  * a worker op. */
+/* The input as a string, which it must already be. luaL_checklstring would
+ * convert a number - an allocation that can run a GC step, and with it an app
+ * finalizer that closes a MappedBuffer a span (parsed just before, kept as a
+ * raw pointer) names: the call then read freed memory. A string is never
+ * converted, so nothing runs between the span parse and the call. */
+static const char *compute_input_string(lua_State *L, size_t *len)
+{
+    if (lua_type(L, 2) != LUA_TSTRING)
+        luaL_typeerror(L, 2, "string, WasmBuffer or MappedBuffer");
+    return lua_tolstring(L, 2, len);
+}
+
 static int lua_parse_spans(lua_State *L, int opts_idx, HlWasmSpanReq *reqs)
 {
     /* Raw reads throughout: an __index here is app code that could close a
@@ -299,7 +311,7 @@ static int lua_compute_call(lua_State *L)
             input = (*mmap_pp)->addr;
             input_len = (*mmap_pp)->len;
         } else {
-            input = luaL_checklstring(L, 2, &input_len);
+            input = compute_input_string(L, &input_len);
         }
     }
     wasm_clamp_opts(&opts, &lua->base);
@@ -396,9 +408,14 @@ static void lua_push_worker_wasm_result(lua_State *L, void *driver)
         return;
     }
     if (op->output_buf) {
-        /* Buffer mode: push WasmBuffer userdata, transfer ownership */
-        lua_push_wasm_buffer(L, op->output_buf);
-        op->output_buf = NULL; /* prevent hl_worker_wasm_op_free from destroying */
+        /* Buffer mode: push WasmBuffer userdata, transfer ownership. The op
+         * gives the buffer up BEFORE the push: lua_push_wasm_buffer frees it
+         * and raises when the userdata cannot be made, and the raise is
+         * caught by the protected result push, so clearing it afterwards was
+         * skipped and op teardown freed the buffer a second time. */
+        HlWasmBuffer *buf = op->output_buf;
+        op->output_buf = NULL;
+        lua_push_wasm_buffer(L, buf);
         return;
     }
     if (op->output && op->output_len > 0)
@@ -490,7 +507,7 @@ static int lua_compute_async_call(lua_State *L)
             input = (*mmap_pp)->addr;
             input_len = (*mmap_pp)->len;
         } else {
-            input = luaL_checklstring(L, 2, &input_len);
+            input = compute_input_string(L, &input_len);
         }
     }
     wasm_clamp_opts(&opts, &lua->base);
@@ -661,7 +678,7 @@ static int lua_wasm_inst_call(lua_State *L)
             input = (*mmap_pp)->addr;
             input_len = (*mmap_pp)->len;
         } else {
-            input = luaL_checklstring(L, 2, &input_len);
+            input = compute_input_string(L, &input_len);
         }
     }
     /* opts __index (app code) can also inst:close(), freeing the instance:
@@ -764,7 +781,7 @@ static int lua_wasm_inst_async_call(lua_State *L)
             input = (*mmap_pp)->addr;
             input_len = (*mmap_pp)->len;
         } else {
-            input = luaL_checklstring(L, 2, &input_len);
+            input = compute_input_string(L, &input_len);
         }
     }
     /* opts __index (app code) can also inst:close() - freeing the

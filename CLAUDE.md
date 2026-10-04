@@ -791,7 +791,7 @@ All vendored. No external dependencies:
 | Library | Location | Purpose |
 |---------|----------|---------|
 | Keel | `vendor/keel/` (git submodule) | HTTP server library (async primitives, thread pool) |
-| Lua 5.4 | `vendor/lua/` | Application scripting |
+| Lua 5.4 | `vendor/lua/` | Application scripting. **Patched in tree** (two fixes, marked `HULL PATCH`: the instruction budget stays on inside `__gc` finalizers, and pattern matching is charged to it); re-apply on upgrade, see [docs/lua_patches.md](docs/lua_patches.md) |
 | QuickJS | `vendor/quickjs/` | ES2023 JavaScript runtime. **Patched in tree** (one fix, marked `HULL PATCH`); re-apply on upgrade, see [docs/quickjs_patches.md](docs/quickjs_patches.md) |
 | SQLite | `vendor/sqlite/` | Embedded database |
 | mbedTLS | `vendor/mbedtls/` | TLS client |
@@ -1485,8 +1485,11 @@ Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sa
 
 **`--verify-sig` enforces the signed policy.** The runtime re-derives its manifest by running
 app code, so after load it compares the manifest the app actually declared (`app.manifest()`
-keeps a plain deep copy - no metatables in Lua, frozen and non-writable in JS) with the signed
-`manifest`, structurally, and the resolved module set with `modules_resolved`
+keeps a plain deep copy - no metatables in Lua, frozen and non-writable in JS; in Lua app code
+cannot reach it, `app.get_manifest()` returns another copy) with the signed `manifest`,
+structurally, and the resolved module set with `modules_resolved`. In Lua both that JSON and the
+JSON `hull build` signs are encoded in C from the stored copy with raw accessors
+(`runtime/lua/manifest_json.c`), never by the app-replaceable `json` module
 (`hl_sig_check_runtime_policy`); any difference refuses to start. The signature is verified,
 and the phase-1 sandbox applied, before the app context runs migrations. §5b also requires the
 per-arch `arch_hashes` (the platform archive the build cross-checked) to be present and to match
@@ -1539,7 +1542,7 @@ tracked follow-up, and would add protection rather than only honesty.
 - **No shell invocation:** Tool mode uses `hl_tool_spawn()` with compiler allowlist. No `system()`/`popen()`. Arguments that make a driver run another program are refused (`-wrapper`, `-specs=`, `--ld-path=`, `-fuse-ld=/path`, plugins, `@file`, `--gcc-toolchain`, and `-B<dir>` unless the dir is a `$PATH` / `~/.hull/tools` entry holding the lld Hull resolved); a spawn may set only `ZIG_*_CACHE_DIR`, `TMPDIR`/`TMP`/`TEMP` and `SOURCE_DATE_EPOCH`.
 - **Key material zeroed:** `hull_secure_zero()` (volatile memset) scrubs crypto material from stack buffers.
 - **Instruction limits:** Both Lua and JS runtimes enforce per-request instruction limits (default 100M). Lua uses `lua_sethook(LUA_MASKCOUNT)`, JS uses `JS_SetInterruptHandler`. Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var. Lua's budget (`runtime/lua/budget.c`) is per VM and per **uninterrupted run**: every entry (a request, a middleware, a timer, an async resume, `app.main`) arms the whole limit again. A trip is sticky until then: `pcall` / `xpcall` / `coroutine.resume` / `coroutine.wrap` re-raise it, so app code cannot catch the limit and keep looping. QuickJS polls its interrupt handler once per 10000 countdown steps (calls and backward jumps), so each poll is charged `HL_JS_INTERRUPT_WEIGHT` (10000, `runtime/js/internal.h`) - counted one per poll, the limit used to be ~10^4 times weaker than its value. Hull's own init code runs before the limit applies.
-- **Stdlib runs in a private Lua environment:** stdlib chunks see their own copies of the base functions and of `table` / `string` / `math` / `utf8` / `coroutine`, and string methods resolve through that private `string` behind a locked metatable (`getmetatable("")` returns `"locked"`). An app replacing `table.concat` or `string.format` - which the `_hull_*` SQL guard's callers use - no longer changes what the stdlib runs. Residual: the stdlib still concatenates app values that may carry metamethods; the real boundary for `_hull_*` tables is `databases.internal`.
+- **Stdlib runs in a private Lua environment:** stdlib chunks see their own copies of the base functions and of `table` / `string` / `math` / `utf8` / `coroutine`, and string methods resolve through that private `string` behind a locked metatable (`getmetatable("")` returns `"locked"`). An app replacing `table.concat` or `string.format` - which the `_hull_*` SQL guard's callers use - no longer changes what the stdlib runs. Residual: the stdlib still concatenates app values that may carry metamethods, and the module tables `require` returns are shared and writable (nothing security-relevant is built from them: the manifest JSON that `--verify-sig` checks is encoded in C); the real boundary for `_hull_*` tables is `databases.internal`.
 - **Code caches are sealed:** Lua and QuickJS bytecode and compiled-template cache entries are stored as HMAC-SHA256 || bytes, keyed by a per-user secret at `$HOME/.hull/cache.key` (0600, made on first use, outside the cache dir). An entry that fails to verify is deleted and recompiled; a key file others can read turns these caches off.
 - **Audit logging:** `--audit` flag or `HULL_AUDIT=1` env var enables structured JSON logging of all capability calls to stderr. Off by default (zero overhead. Single branch on `hl_audit_enabled` global). Uses `ShJsonWriter` for streaming output with proper escaping. No heap allocation.
 

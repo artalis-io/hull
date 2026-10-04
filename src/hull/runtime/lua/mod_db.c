@@ -374,7 +374,7 @@ static int lua_db_query_impl(lua_State *L)
         return luaL_error(L, "db.query: not enough memory for the result");
     if (rc != 0) {
         lua_pop(L, 1); /* pop result table */
-        return luaL_error(L, "query failed: %s", hl_db_errmsg(h));
+        return hl_lua_raise_copy(L, "query failed: ", hl_db_errmsg(h));
     }
 
     return 1; /* result table already on stack */
@@ -414,7 +414,7 @@ static int lua_db_exec_impl(lua_State *L)
     lua_free_hl_values(L, params, nparams);
 
     if (rc < 0)
-        return luaL_error(L, "exec failed: %s", hl_db_errmsg(h));
+        return hl_lua_raise_copy(L, "exec failed: ", hl_db_errmsg(h));
 
     lua_pushinteger(L, rc);
     return 1;
@@ -448,7 +448,7 @@ static int lua_db_batch(lua_State *L)
 
     /* Nested inside another batch: a savepoint (see hl_db_batch_enter). */
     if (hl_db_batch_enter(h) != 0)
-        return luaL_error(L, "BEGIN failed: %s", hl_db_errmsg(h));
+        return hl_lua_raise_copy(L, "BEGIN failed: ", hl_db_errmsg(h));
 
     lua_pushvalue(L, 1); /* push the function */
     int rc = lua_pcall(L, 0, 0, 0);
@@ -463,7 +463,7 @@ static int lua_db_batch(lua_State *L)
         return luaL_error(L, "db.batch: the connection was closed inside the batch");
 
     if (hl_db_batch_leave(h, 1) != 0)
-        return luaL_error(L, "COMMIT failed: %s", hl_db_errmsg(h));
+        return hl_lua_raise_copy(L, "COMMIT failed: ", hl_db_errmsg(h));
 
     return 0;
 }
@@ -599,7 +599,7 @@ static int lua_db_insert_if_absent(lua_State *L)
     int rc = hl_db_insert_if_absent(h, table, conflict_cols, n_conflict,
                                      cols, vals, n_cols);
     if (rc < 0) {
-        return luaL_error(L, "db.insert_if_absent: %s", hl_db_errmsg(h));
+        return hl_lua_raise_copy(L, "db.insert_if_absent: ", hl_db_errmsg(h));
     }
     lua_pushinteger(L, rc);
     return 1;
@@ -635,7 +635,7 @@ static int lua_db_upsert(lua_State *L)
     int rc = hl_db_upsert(h, table, conflict_cols, n_conflict,
                            cols, vals, n_cols);
     if (rc < 0) {
-        return luaL_error(L, "db.upsert: %s", hl_db_errmsg(h));
+        return hl_lua_raise_copy(L, "db.upsert: ", hl_db_errmsg(h));
     }
     lua_pushinteger(L, rc);
     return 1;
@@ -708,7 +708,7 @@ static int lua_db_table_columns(lua_State *L)
     if (fwd.failed)
         return luaL_error(L, "db.table_columns: not enough memory for the result");
     if (rc < 0) {
-        return luaL_error(L, "db.table_columns: %s", hl_db_errmsg(h));
+        return hl_lua_raise_copy(L, "db.table_columns: ", hl_db_errmsg(h));
     }
     return 1;
 }

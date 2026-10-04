@@ -203,21 +203,39 @@ void hl_runtime_cache_seal_prepare(void)
     (void)seal_key();
 }
 
-int hl_runtime_cache_get_sealed(HlBlobStore *store, const char *key,
-                                uint8_t **out, size_t *out_len)
+/* The MAC binds the entry to WHERE it is stored, not only to its bytes:
+ * HMAC(key, kind || 0 || cache key || 0 || SHA-256(bytes)). A MAC over the
+ * bytes alone let anything that can write the cache directory move a valid
+ * entry to another key - app-chosen template code (it compiles to a sealed
+ * Lua dump) planted as a stdlib module's bytecode. */
+static int seal_mac(const char *kind, const char *key, const uint8_t *data,
+                    size_t len, uint8_t mac[SEAL_MAC_LEN])
+{
+    uint8_t digest[32];
+    if (hl_cap_crypto_sha256(data, len, digest) != 0) return -1;
+    size_t kl = strlen(kind), keyl = strlen(key);
+    if (kl > 256 || keyl > 1024) return -1;
+    uint8_t msg[256 + 1 + 1024 + 1 + 32];
+    size_t off = 0;
+    memcpy(msg + off, kind, kl);  off += kl;  msg[off++] = 0;
+    memcpy(msg + off, key, keyl); off += keyl; msg[off++] = 0;
+    memcpy(msg + off, digest, sizeof digest); off += sizeof digest;
+    return hl_cap_crypto_hmac_sha256(g_seal_key, sizeof g_seal_key, msg, off, mac);
+}
+
+int hl_runtime_cache_get_sealed(HlBlobStore *store, const char *kind,
+                                const char *key, uint8_t **out, size_t *out_len)
 {
     *out = NULL;
     *out_len = 0;
-    if (!store || !key || !seal_key()) return -1;
+    if (!store || !kind || !key || !seal_key()) return -1;
     uint8_t *buf = NULL;
     size_t len = 0;
     if (hl_blob_store_get(store, key, /*track_access=*/1, &buf, &len) != 0)
         return -1;
     uint8_t mac[SEAL_MAC_LEN];
     int ok = len > SEAL_MAC_LEN &&
-             hl_cap_crypto_hmac_sha256(g_seal_key, sizeof g_seal_key,
-                                       buf + SEAL_MAC_LEN, len - SEAL_MAC_LEN,
-                                       mac) == 0;
+             seal_mac(kind, key, buf + SEAL_MAC_LEN, len - SEAL_MAC_LEN, mac) == 0;
     if (ok) {
         uint8_t diff = 0;
         for (size_t i = 0; i < SEAL_MAC_LEN; i++) diff |= (uint8_t)(mac[i] ^ buf[i]);
@@ -234,15 +252,14 @@ int hl_runtime_cache_get_sealed(HlBlobStore *store, const char *key,
     return 0;
 }
 
-void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *key,
-                                 const uint8_t *data, size_t len)
+void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *kind,
+                                 const char *key, const uint8_t *data, size_t len)
 {
-    if (!store || !key || !data || len == 0 || !seal_key()) return;
+    if (!store || !kind || !key || !data || len == 0 || !seal_key()) return;
     if (len > SIZE_MAX - SEAL_MAC_LEN) return;
     uint8_t *buf = malloc(len + SEAL_MAC_LEN);
     if (!buf) return;
-    if (hl_cap_crypto_hmac_sha256(g_seal_key, sizeof g_seal_key, data, len,
-                                  buf) == 0) {
+    if (seal_mac(kind, key, data, len, buf) == 0) {
         memcpy(buf + SEAL_MAC_LEN, data, len);
         (void)hl_blob_store_put_keyed(store, key, buf, len + SEAL_MAC_LEN);
     }

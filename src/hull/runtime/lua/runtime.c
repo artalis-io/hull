@@ -606,18 +606,9 @@ static int vt_lua_extract_manifest(HlRuntime *rt, HlManifest *out)
     return hl_manifest_extract_lua(lua->L, out, lua->base.alloc);
 }
 
-static int manifest_json_k(lua_State *L)
-{
-    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
-    if (!lua_istable(L, -1)) return luaL_error(L, "no json encoder");
-    lua_getfield(L, -1, "encode");
-    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
-    lua_call(L, 1, 1);
-    return 1;
-}
-
-/* The declared manifest, encoded as manifest extraction at build encodes it
- * (the runtime's json, sorted keys) - for --verify-sig's policy check. */
+/* The declared manifest as JSON - for --verify-sig's policy check - made in
+ * C from the stored table (manifest_json.c), exactly as the build makes the
+ * JSON it signs. The Lua json.encode used before is app-replaceable. */
 static int vt_lua_manifest_json(HlRuntime *rt, char **out, size_t *out_len)
 {
     HlLua *lua = (HlLua *)rt;
@@ -628,20 +619,7 @@ static int vt_lua_manifest_json(HlRuntime *rt, char **out, size_t *out_len)
     int has = lua_istable(L, -1);
     lua_pop(L, 1);
     if (!has) return 0;
-    lua_pushcfunction(L, manifest_json_k);
-    if (lua_pcall(L, 0, 1, 0) != LUA_OK || lua_type(L, -1) != LUA_TSTRING) {
-        lua_pop(L, 1);
-        return -1;
-    }
-    size_t n = 0;
-    const char *s = lua_tolstring(L, -1, &n);
-    char *copy = malloc(n + 1);
-    if (copy) { memcpy(copy, s, n); copy[n] = '\0'; }
-    lua_pop(L, 1);
-    if (!copy) return -1;
-    *out = copy;
-    *out_len = n;
-    return 0;
+    return hl_lua_manifest_json(L, out, out_len);
 }
 
 /* Walk __hull_route_defs in the Lua registry, calling cb for each entry. */

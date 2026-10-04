@@ -9,6 +9,7 @@
 
 #include "hull/runtime/lua.h"
 #include "internal.h"
+#include "protected.h"
 #include "hull/http_feature.h"  /* hl_lua_http_error_response (HTTP-feature seam) */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
@@ -120,8 +121,13 @@ int hl_lua_resume_status(lua_State *co, int status)
      * flight for good. It ends here, as an error. Closed first, so a
      * reference the app kept to it cannot run it again. */
     (void)lua_closethread(co, NULL);
-    lua_pushliteral(co, "coroutine.yield() in a handler: only a Hull "
-                        "operation may suspend it");
+    /* Pushed protected: out of memory here aborted the process (no panic
+     * handler). Without room for the message, nil stands in - the callers
+     * read the error object with hl_lua_error_text, which takes any value. */
+    static const char msg[] = "coroutine.yield() in a handler: only a Hull "
+                              "operation may suspend it";
+    if (hl_lua_pushlstring_safe(co, msg, sizeof msg - 1) != 0)
+        lua_pushnil(co);
     return LUA_ERRRUN;
 }
 
@@ -242,12 +248,20 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
          * gated at registration). */
         int was_main = (lua->cli_main_co == co);
 
-        luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
+        /* The main coroutine's registry ref belongs to vt_lua_run_main, which
+         * reads its results once the loop stops and then releases it. Released
+         * here as well, the same slot went onto Lua's free list twice: the
+         * next two luaL_ref calls returned one slot, so a later request's
+         * parked coroutine lost its only reference and was resumed from freed
+         * memory. */
+        if (!was_main)
+            luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
         lc->thread_ref = LUA_NOREF;
         lc->co = NULL;
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_conn = NULL;
+        lua->active_req = NULL;
 
         /* Handler that yielded has now completed - run any deferred-teardown
          * hook (e.g. ws on_close conn teardown). */
@@ -298,17 +312,18 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         if (conn)
             log_error("[hull:c] async lua handler error: %s",
                       msg ? msg : "(unknown)");
-        else if (was_main)
-            log_error("[hull:main] error: %s", msg ? msg : "(unknown)");
-        else
+        else if (!was_main)   /* main: vt_lua_run_main reports it */
             log_error("[hull:timer] error: %s", msg ? msg : "(unknown)");
 
-        luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
+        /* As on success: the main coroutine's ref is vt_lua_run_main's. */
+        if (!was_main)
+            luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
         lc->thread_ref = LUA_NOREF;
         lc->co = NULL;
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_conn = NULL;
+        lua->active_req = NULL;
 
         /* Run any deferred-teardown hook (handler errored after yielding). */
         if (lc->on_complete) {

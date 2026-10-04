@@ -30,6 +30,7 @@
 #include "hull/cap/types.h"   /* HlColumn */
 #include "lua.h"
 #include "lauxlib.h"
+#include <stdio.h>
 
 typedef struct {
     const char *p;
@@ -136,6 +137,54 @@ static inline int hl_lua_append_row(lua_State *L, int result_idx, lua_Integer ro
         return -1;
     }
     return 0;
+}
+
+/* (args: lightuserdata HlLuaStrItem, table) */
+typedef struct {
+    const void  *s;
+    size_t       len;
+    lua_Integer  idx;
+} HlLuaStrItem;
+
+static inline int hl_lua_append_lstring_k(lua_State *L)
+{
+    const HlLuaStrItem *it = (const HlLuaStrItem *)lua_touserdata(L, 1);
+    lua_pushlstring(L, (const char *)it->s, it->len);
+    lua_rawseti(L, 2, it->idx);
+    return 0;
+}
+
+/* Store a copy of s[0..len) at tbl[idx] - both the string and the table
+ * growth protected, for a callback that runs inside a C loop (a backend's
+ * scan) and so must not raise. 0, or -1 when out of memory. */
+static inline int hl_lua_append_lstring(lua_State *L, int tbl, lua_Integer idx,
+                                        const void *s, size_t len)
+{
+    if (!lua_checkstack(L, 3))
+        return -1;
+    tbl = lua_absindex(L, tbl);
+    HlLuaStrItem it = { s, len, idx };
+    lua_pushcfunction(L, hl_lua_append_lstring_k);
+    lua_pushlightuserdata(L, &it);
+    lua_pushvalue(L, tbl);
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        lua_pop(L, 1);
+        return -1;
+    }
+    return 0;
+}
+
+/* Raise "<prefix><msg>" with msg COPIED first. luaL_error formats lazily,
+ * after luaL_where has allocated - a GC step that can run an app finalizer
+ * which closes the connection msg points into (hl_db_errmsg /
+ * hl_cap_kv_error), so the format then read freed memory. */
+static inline int hl_lua_raise_copy(lua_State *L, const char *prefix,
+                                    const char *msg)
+{
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s%s", prefix ? prefix : "",
+             msg ? msg : "(unknown error)");
+    return luaL_error(L, "%s", buf);
 }
 
 #endif /* HL_RUNTIME_LUA_PROTECTED_H */

@@ -50,9 +50,19 @@ static void budget_hook(lua_State *L, lua_Debug *ar)
     (void)ar;
     HlLuaBudget *b = budget_of(L);
     if (b && !b->tripped) {
-        b->used += lua_gethookcount(L);
-        if (b->limit <= 0 || b->used < b->limit)
+        int count = lua_gethookcount(L);
+        b->used += count;
+        if (b->limit <= 0 || b->used < b->limit) {
+            /* A thread that tripped in an earlier run still has the count-1
+             * hook below; the next arm re-arms only its own entry thread.
+             * Back to the stride, or such a coroutine (kept in a global)
+             * ran this hook on every instruction for good. */
+            int stride = b->limit > 0 && b->limit < HL_LUA_BUDGET_STRIDE
+                         ? (int)b->limit : HL_LUA_BUDGET_STRIDE;
+            if (count == 1 && stride > 1)
+                lua_sethook(L, budget_hook, LUA_MASKCOUNT, stride);
             return;
+        }
         b->tripped = 1;
     }
     /* Every further instruction of this thread raises again. */

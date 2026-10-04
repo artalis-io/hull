@@ -191,7 +191,10 @@ static int l_tar_create(lua_State *L)
     lua_settop(L, 1);
     lua_newtable(L);
     HlTarEntry *ents = read_entries(L, 1, &n, &msg, 2);
-    if (!ents && n != 0) {          /* real error (n==0 is the empty-array case) */
+    /* An error sets msg; the empty array (n == 0, no message) is not one.
+     * Tested on n before, which a shape error leaves at 0: `{{mode=1}}`
+     * produced an empty archive instead of nil, err. */
+    if (!ents && msg) {
         lua_pushnil(L);
         lua_pushstring(L, msg ? msg : "tar.create: bad entries");
         return 2;

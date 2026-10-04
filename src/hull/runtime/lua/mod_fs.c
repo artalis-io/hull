@@ -148,9 +148,12 @@ static int lua_fs_mmap(lua_State *L)
         return 2;
     }
 
-    HlMappedBuffer **pp = lua_newuserdata(L, sizeof(HlMappedBuffer *));
-    *pp = buf;
-    luaL_setmetatable(L, HL_MMAP_MT);
+    /* The userdata made protected: made plain, running out of memory raised
+     * past the mapping just created, and the mapping and its struct leaked. */
+    if (hl_lua_push_slot_safe(L, HL_MMAP_MT, buf) != 0) {
+        hl_cap_fs_munmap(buf);
+        return luaL_error(L, "fs.mmap: out of memory");
+    }
     return 1;
 }
 
@@ -670,6 +673,44 @@ static int require_impl(lua_State *L, int trusted)
     if (!trusted && lua && strncmp(name, "hull.", 5) == 0 &&
         strstr(name, "._") && !require_named_by_stdlib(L))
         return luaL_error(L, "module '%s' is internal to the Hull stdlib", name);
+
+    /* 0b. Names outside the registry that the stdlib ships anyway. vendor.*
+     * (the json encoder the runtime uses internally) is stdlib-only; and a
+     * hull.* sub-module (hull.ssh.transport, ...) is gated by the nearest
+     * registered parent it belongs to (hull/ssh). Both fell through the gate,
+     * which only knows registry names: the 16 hull.ssh.* modules loaded with
+     * no hull/ssh declaration, and require("vendor.json") handed app code the
+     * shared encoder with no manifest trace at all. */
+    if (!trusted && lua && !require_named_by_stdlib(L)) {
+        if (strncmp(name, "vendor.", 7) == 0)
+            return luaL_error(L, "module '%s' is internal to the Hull stdlib", name);
+        if (strncmp(name, "hull.", 5) == 0 &&
+            !hl_module_registry_find_runtime(name, '.')) {
+            char parent[256];
+            size_t nl = strlen(name);
+            const HlModuleSpec *pspec = NULL;
+            if (nl < sizeof parent) {
+                memcpy(parent, name, nl + 1);
+                char *dot;
+                while (!pspec && (dot = strrchr(parent, '.')) != NULL &&
+                       dot > parent + 4) {
+                    *dot = '\0';
+                    pspec = hl_module_registry_find_runtime(parent, '.');
+                }
+            }
+            if (pspec) {
+                if (lua->base.module_set) {
+                    if (!hl_module_set_contains_spec(lua->base.module_set, pspec))
+                        return luaL_error(L,
+                            "module '%s' is part of '%s', which is not declared "
+                            "in app.manifest (add \"%s@%d\" to modules)",
+                            name, pspec->name, pspec->name, pspec->api_major);
+                } else {
+                    hl_import_tracker_record(&lua->base, pspec->name);
+                }
+            }
+        }
+    }
 
     /* 1. Check cache (registry "__hull_loaded"). A cached first-party module
      * is NOT returned to app code that has not declared it: the runtime

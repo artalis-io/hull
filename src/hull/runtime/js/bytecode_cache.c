@@ -120,7 +120,7 @@ JSValue hl_js_compile_module_cached(JSContext *ctx,
     /* ── Cache hit: deserialize via JS_ReadObject. ─────────────── */
     uint8_t *bc     = NULL;
     size_t   bc_len = 0;
-    if (hl_runtime_cache_get_sealed(store, key, &bc, &bc_len) == 0) {
+    if (hl_runtime_cache_get_sealed(store, JBC_STORE_KIND, key, &bc, &bc_len) == 0) {
         /* Defensive: an empty or NULL blob slips past JS_ReadObject's
          * version-check (it dereferences buf to read BC_VERSION).
          * blob_store doesn't currently produce zero-byte entries on
@@ -158,7 +158,7 @@ JSValue hl_js_compile_module_cached(JSContext *ctx,
         /* Best-effort persist. Failures (disk full, race) are
          * silent - the compiled module function is already in
          * hand and the runtime keeps moving. */
-        hl_runtime_cache_put_sealed(store, key, bytecode, out_len);
+        hl_runtime_cache_put_sealed(store, JBC_STORE_KIND, key, bytecode, out_len);
         js_free(ctx, bytecode);
     }
     return func;

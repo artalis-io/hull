@@ -890,7 +890,7 @@ static int lua_crypto_key_from_env(lua_State *L)
 
 static int lua_crypto_key_secretbox(lua_State *L)
 {
-    const HlCryptoKey *k = live_key(L, 1);
+    (void)live_key(L, 1);   /* type check now; the pointer is taken below */
     size_t msg_len, nonce_len;
     const char *msg   = luaL_checklstring(L, 2, &msg_len);
     const char *nonce = luaL_checklstring(L, 3, &nonce_len);
@@ -900,6 +900,10 @@ static int lua_crypto_key_secretbox(lua_State *L)
     size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
     luaL_Buffer b;
     uint8_t *ct = (uint8_t *)luaL_buffinitsize(L, &b, ct_len);
+    /* The key is resolved AFTER the allocations: a large buffer is a box
+     * userdata, and making it can run a GC step - an app finalizer that
+     * calls key:destroy() then freed the key a pointer taken earlier read. */
+    const HlCryptoKey *k = live_key(L, 1);
     if (hl_cap_crypto_key_secretbox(k, ct, msg, msg_len, (const uint8_t *)nonce) != 0)
         return luaL_error(L, "key:secretbox failed");
     luaL_pushresultsize(&b, ct_len);
@@ -909,7 +913,7 @@ static int lua_crypto_key_secretbox(lua_State *L)
 /* key:secretbox_open(ciphertext, nonce) -> msg | nil */
 static int lua_crypto_key_secretbox_open(lua_State *L)
 {
-    const HlCryptoKey *k = live_key(L, 1);
+    (void)live_key(L, 1);   /* type check now; the pointer is taken below */
     size_t ct_len, nonce_len;
     const char *ct    = luaL_checklstring(L, 2, &ct_len);
     const char *nonce = luaL_checklstring(L, 3, &nonce_len);
@@ -918,6 +922,7 @@ static int lua_crypto_key_secretbox_open(lua_State *L)
     size_t msg_len = ct_len - HL_SECRETBOX_MACBYTES;
     luaL_Buffer b;
     uint8_t *msg = (uint8_t *)luaL_buffinitsize(L, &b, msg_len + 1);
+    const HlCryptoKey *k = live_key(L, 1);   /* after the allocation: see above */
     if (hl_cap_crypto_key_secretbox_open(k, msg, ct, ct_len, (const uint8_t *)nonce) != 0) {
         luaL_pushresultsize(&b, 0);
         lua_pop(L, 1);

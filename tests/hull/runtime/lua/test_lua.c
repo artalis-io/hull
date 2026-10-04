@@ -7484,7 +7484,7 @@ UTEST(lua_audit4, code_cache_entries_are_sealed)
     ASSERT_EQ(hl_blob_store_put_keyed(st, key, data, sizeof data), 0);
     uint8_t *out = NULL;
     size_t out_len = 0;
-    EXPECT_EQ(hl_runtime_cache_get_sealed(st, key, &out, &out_len), -1);
+    EXPECT_EQ(hl_runtime_cache_get_sealed(st, "lua-bytecode", key, &out, &out_len), -1);
     EXPECT_EQ(out, NULL);
     uint8_t *raw = NULL;
     size_t raw_len = 0;
@@ -7492,8 +7492,8 @@ UTEST(lua_audit4, code_cache_entries_are_sealed)
     free(raw);
 
     /* Sealed: round trip (skipped where no key file can be made). */
-    hl_runtime_cache_put_sealed(st, key, data, sizeof data);
-    if (hl_runtime_cache_get_sealed(st, key, &out, &out_len) == 0) {
+    hl_runtime_cache_put_sealed(st, "lua-bytecode", key, data, sizeof data);
+    if (hl_runtime_cache_get_sealed(st, "lua-bytecode", key, &out, &out_len) == 0) {
         EXPECT_EQ(out_len, sizeof data);
         EXPECT_EQ(memcmp(out, data, sizeof data), 0);
         free(out);
@@ -7503,10 +7503,118 @@ UTEST(lua_audit4, code_cache_entries_are_sealed)
         ASSERT_GE(hl_blob_store_delete(st, key), 0);   /* a keyed put keeps an existing entry */
         ASSERT_EQ(hl_blob_store_put_keyed(st, key, raw, raw_len), 0);
         free(raw);
-        EXPECT_EQ(hl_runtime_cache_get_sealed(st, key, &out, &out_len), -1);
+        EXPECT_EQ(hl_runtime_cache_get_sealed(st, "lua-bytecode", key, &out, &out_len), -1);
     }
     hl_blob_store_close(st);
     bc_cleanup_tmp_home(tmp);
+}
+
+/* A sealed entry is bound to its kind and key (audit 5 M1): copied to
+ * another key, or read as another cache's entry, it no longer verifies. */
+UTEST(lua_audit5, sealed_entry_bound_to_kind_and_key)
+{
+    char tmp[512];
+    ASSERT_NE(hl_test_mkdtemp(tmp, sizeof tmp, "hull-seal5"), NULL);
+    HlBlobStore *st = NULL;
+    ASSERT_EQ(hl_blob_store_open(&st, NULL, tmp, 1, 0), 0);
+    const char *k1 = "1111111111111111111111111111111111111111111111111111111111111111";
+    const char *k2 = "2222222222222222222222222222222222222222222222222222222222222222";
+    static const uint8_t data[] = "template dump";
+    hl_runtime_cache_put_sealed(st, "templates", k1, data, sizeof data);
+    uint8_t *out = NULL, *raw = NULL;
+    size_t out_len = 0, raw_len = 0;
+    if (hl_blob_store_get(st, k1, 0, &raw, &raw_len) == 0) {   /* sealing on */
+        /* Relocated to another key: refused. */
+        ASSERT_EQ(hl_blob_store_put_keyed(st, k2, raw, raw_len), 0);
+        EXPECT_EQ(hl_runtime_cache_get_sealed(st, "templates", k2, &out, &out_len), -1);
+        /* Read as another cache's entry under its own key: refused. */
+        EXPECT_EQ(hl_runtime_cache_get_sealed(st, "lua-bytecode", k1, &out, &out_len), -1);
+        free(raw);
+    }
+    hl_blob_store_close(st);
+    bc_cleanup_tmp_home(tmp);
+}
+
+/* A finalizer is metered (audit 5 H4, HULL PATCH 0001): an endless __gc no
+ * longer pins the VM, and the trip stops the code that ran the collection. */
+UTEST(lua_audit5, finalizer_loop_hits_the_limit)
+{
+    char err[512];
+    int rc = limited_run(
+        "setmetatable({}, {__gc = function() while true do end end}) "
+        "collectgarbage() collectgarbage() while true do end", err, sizeof err);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+}
+
+/* Pattern matching is charged to the budget (audit 5 M2, HULL PATCH 0002). */
+UTEST(lua_audit5, backtracking_pattern_hits_the_limit)
+{
+    char err[512];
+    int rc = limited_run(
+        "local s = string.rep('a', 4000) "
+        "return string.find(s, string.rep('a-', 12) .. 'b')", err, sizeof err);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* A plain match still works under the limit. */
+    EXPECT_EQ(limited_run("assert(string.find('hello', 'l+') == 3) return 1",
+                          err, sizeof err), LUA_OK);
+}
+
+/* app.get_manifest() is a copy, and the policy JSON is encoded in C: neither
+ * a metatable on the returned table nor a replaced json.encode changes it
+ * (audit 5 H1/H2). */
+UTEST(lua_audit5, manifest_json_ignores_app_tampering)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({ modules = { 'hull/json@1' }, env = { 'PORT' } }) "
+        "local m = app.get_manifest() "
+        "setmetatable(m, { __index = { hosts = { '*' } } }) "
+        "m.fs = { read = { '/' } } "
+        "local ok, json = pcall(require, 'hull.json') "
+        "if ok and json then json.encode = function() return '{}' end end"), LUA_OK);
+    char *j = NULL;
+    size_t jl = 0;
+    ASSERT_EQ(hl_lua_manifest_json(L, &j, &jl), 0);
+    ASSERT_NE(j, NULL);
+    EXPECT_NE(strstr(j, "\"env\":[\"PORT\"]"), NULL);
+    EXPECT_EQ(strstr(j, "hosts"), NULL);
+    EXPECT_EQ(strstr(j, "\"fs\""), NULL);
+    free(j);
+    /* The stored copy has no metatable either. */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    EXPECT_FALSE(lua_getmetatable(L, -1));
+    lua_settop(L, 0);
+}
+
+/* vendor.* is stdlib-only (audit 5 M6). */
+UTEST(lua_audit5, vendor_modules_are_stdlib_only)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    int rc = luaL_dostring(L, "return require('vendor.json')");
+    EXPECT_NE(rc, LUA_OK);
+    if (rc != LUA_OK) {
+        const char *e = lua_tostring(L, -1);
+        EXPECT_NE(e ? strstr(e, "internal to the Hull stdlib") : NULL, NULL);
+    }
+    lua_settop(L, 0);
+}
+
+/* tar.create reports an entry's shape error instead of returning an empty
+ * archive (audit 5 L1). */
+UTEST(lua_audit5, tar_create_reports_shape_errors)
+{
+    char err[512];
+    EXPECT_EQ(limited_run(
+        "local tar = require('hull.tar') "
+        "local out, e = tar.create({ { mode = 1 } }) "
+        "assert(out == nil and type(e) == 'string', 'shape error ignored')",
+        err, sizeof err), LUA_OK);
 }
 
 UTEST_MAIN();

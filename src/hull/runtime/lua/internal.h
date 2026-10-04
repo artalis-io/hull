@@ -21,6 +21,7 @@
 #include "hull/cap/types.h"   /* HlKV for worker dispatch op */
 #include "hull/limits/core.h" /* HL_WORKER_ERR_SIZE */
 #include "lua.h"
+#include <sh_arena.h>
 
 /* Forward declarations to keep internal.h small. */
 typedef struct HlAsyncCtx     HlAsyncCtx;
@@ -130,9 +131,22 @@ void hl_lua_budget_install(lua_State *L, HlLuaBudget *b);
 void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit);
 int  hl_lua_budget_tripped(lua_State *L);
 
+/* The stored manifest (registry "__hull_manifest") as JSON, encoded in C with
+ * raw accessors - what the build signs and --verify-sig compares
+ * (manifest_json.c). 0 with *out malloc'd, or -1. */
+int hl_lua_manifest_json(lua_State *L, char **out, size_t *out_len);
+
 /* Arm the runtime's budget on @p thread for a new run. */
-#define HL_LUA_ARM(lua, thread) \
-    hl_lua_budget_arm((thread), &(lua)->budget, (lua)->max_instructions)
+/* A new run also starts with an empty scratch arena: only the HTTP entry
+ * points used to reset it, so ws / ws-client / app.main / async-resumed
+ * code filled it for good, and http.fetch then dropped headers it could not
+ * copy (an Authorization lost). Every entry point arms the budget, so this
+ * is the one place none can miss. No run reads scratch data across a yield
+ * (another request's dispatch resets it meanwhile already). */
+#define HL_LUA_ARM(lua, thread) do {                                         \
+        hl_lua_budget_arm((thread), &(lua)->budget, (lua)->max_instructions); \
+        if ((lua)->scratch) sh_arena_reset((lua)->scratch);                   \
+    } while (0)
 
 /* Keep the value at `idx` reachable until the binding returns, by storing it
  * in the anchor table at absolute index `anchor` (a lua_newtable the binding
