@@ -160,7 +160,9 @@ function jobs.init(opts)
     ]])
 
     -- Idempotent enqueue: a non-null dedup_key is unique per queue. NULLs are
-    -- distinct on every backend, so un-deduped jobs never collide.
+    -- distinct on every backend, so un-deduped jobs never collide. A finished
+    -- (done / dead / compensated) job releases its key on the next enqueue of
+    -- it (jobs.enqueue), so a key only blocks while a job with it is unfinished.
     db.exec([[
         CREATE UNIQUE INDEX IF NOT EXISTS idx_hull_jobs_dedup
         ON _hull_jobs(queue, dedup_key)
@@ -540,6 +542,14 @@ function jobs.enqueue(job_type, data, opts)
     end
     local id
     if opts.dedup_key ~= nil then
+        -- A key dedups against jobs that have not finished. The unique index
+        -- also covered done / dead rows, so a completed job's key refused every
+        -- re-enqueue until cleanup purged the row (7 days). A finished job
+        -- gives its key up here: one statement, portable (MySQL has no partial
+        -- index), and it needs no change to an existing database's index.
+        db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? "
+            .. "AND status IN ('done', 'dead', 'compensated')",
+            { opts.queue or "default", opts.dedup_key })
         -- INSERT ... ON CONFLICT(queue,dedup_key) DO NOTHING / INSERT OR IGNORE.
         local n = db.insert_if_absent("_hull_jobs", { "queue", "dedup_key" }, cols, vals)
         if not (n and n > 0) then
@@ -1016,6 +1026,14 @@ end
 -- dependents twice. Such a transition changes nothing and returns "lost".
 local CLAIMED = " AND claim_token=? AND status='running'"
 
+-- The durable-workflow yield markers, keyed by tables private to this module.
+-- They were plain string fields (`__hull_wf_yield`), so a handler that
+-- returned parsed external JSON - {"__hull_wf_yield":true,"wake_at":1} from a
+-- remote - parked its job forever, the attempt refunded on every run. JSON
+-- cannot produce these keys, and they are read with rawget.
+local YIELD = {}      -- thrown by ctx.sleep / ctx.wait_signal
+local WF_YIELD = {}   -- returned by the workflow handler to the work loop
+
 local function mark_done(job, result)
     local id = job.id
     local n = db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? "
@@ -1091,9 +1109,12 @@ local function finish(job, info, transition)
 end
 
 --- Reclaim jobs stuck in `running` past the visibility timeout - a worker that
--- claimed them died before completing. Reset to `pending` for reclaim (their
--- incremented attempts persist, so a job that keeps killing its worker still
--- dead-letters). `jobs.work` runs this each call.
+-- claimed them died before completing. One whose attempts are used up is
+-- dead-lettered here (its dependents resolved as failed, a `dead` event
+-- emitted); the rest go back to `pending` for reclaim. Before, every stale row
+-- was re-pended whatever its attempts, so a job that kept killing (or hanging)
+-- its worker never dead-lettered and crash-looped the fleet. `jobs.work` runs
+-- this each call.
 -- @tparam[opt] table opts  { visibility_timeout = <cfg default> }
 function jobs.reap(opts)
     opts = opts or {}
@@ -1106,6 +1127,33 @@ function jobs.reap(opts)
         "UPDATE _hull_jobs SET status='pending', updated_at=? "
         .. "WHERE status='waiting' AND run_at > 0 AND run_at <= ?",
         { now, now })
+    local exhausted = db.query(
+        "SELECT id, type, queue, attempts, claim_token FROM _hull_jobs "
+        .. "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts "
+        .. "LIMIT 500",
+        { now - vt })
+    for _, row in ipairs(exhausted) do
+        local err = "visibility timeout: worker lost after the last attempt"
+        local outcome
+        db.batch(function()
+            -- Claim-guarded like every other transition: a worker that
+            -- finished in the meantime keeps its outcome.
+            local n = db.exec(
+                "UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, "
+                .. "updated_at=? WHERE id=? AND status='running' AND claimed_at <= ? "
+                .. "AND claim_token" .. (row.claim_token and "=?" or " IS NULL"),
+                row.claim_token and { err, now, row.id, now - vt, row.claim_token }
+                                or { err, now, row.id, now - vt })
+            if (n or 0) == 0 then return end
+            resolve_deps(row.id, false)
+            db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { row.id })
+            emit_durable("dead", row, { error = err, attempt = row.attempts })
+            outcome = "dead"
+        end)
+        if outcome then
+            emit("dead", row, { error = err, attempt = row.attempts })
+        end
+    end
     local reclaimed = db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? "
         .. "WHERE status='running' AND claimed_at <= ?",
@@ -1402,7 +1450,7 @@ function jobs.work(opts)
             end)
         else
             local ok, result = pcall(h, job)
-            if ok and type(result) == "table" and result.__hull_wf_yield then
+            if ok and type(result) == "table" and rawget(result, WF_YIELD) then
                 -- Durable workflow yielded - no terminal outcome, no event. A
                 -- yield is not a failed attempt, so undo the claim's attempt
                 -- increment (a workflow may sleep / wait many times without
@@ -1883,7 +1931,7 @@ local function run_sleep(workflow_id, n, seconds)
             { workflow_id, key, tostring(wake_at), time.now() })
     end
     if time.now() >= wake_at then return end   -- elapsed: continue
-    error({ __hull_yield = true, wake_at = wake_at })   -- caught by the runner
+    error({ [YIELD] = true, wake_at = wake_at })   -- caught by the runner
 end
 
 -- Wait for an external signal (jobs.signal). If the named signal is present it is
@@ -1922,7 +1970,7 @@ local function run_wait_signal(workflow_id, name, opts)
         end
         if time.now() >= deadline then return nil end   -- timed out, no signal
     end
-    error({ __hull_yield = true, waiting = true, signal_name = name, deadline = deadline })
+    error({ [YIELD] = true, waiting = true, signal_name = name, deadline = deadline })
 end
 
 -- Run the compensations of completed steps in reverse order (saga rollback). Each
@@ -2071,8 +2119,8 @@ function jobs.workflow(name, fn)
             if res == jobs.DEAD then run_compensations(ctx._comps, job.id) end
             return res
         end
-        if type(res) == "table" and res.__hull_yield then
-            return { __hull_wf_yield = true, wake_at = res.wake_at,
+        if type(res) == "table" and rawget(res, YIELD) then
+            return { [WF_YIELD] = true, wake_at = res.wake_at,
                      waiting = res.waiting, signal_name = res.signal_name,
                      deadline = res.deadline }
         end

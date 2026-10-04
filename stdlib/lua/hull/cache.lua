@@ -168,6 +168,11 @@ end
 --   c:fetch(k, 60, function() return render() end)   -- get-or-compute (bytes)
 --   c.stats()   -- { hits, misses, evictions, items, bytes }
 -- ---------------------------------------------------------------------------
+--- Bounds cache.open applies when the caller gives neither max_items nor
+-- max_bytes (the byte bound only on the memory backend).
+cache.DEFAULT_MAX_ITEMS = 10000
+cache.DEFAULT_MAX_BYTES = 16 * 1024 * 1024
+
 function cache.open(opts)
     local u      = require("hull.kv._util")
     local handle = require("hull.kv._handle")
@@ -184,13 +189,23 @@ function cache.open(opts)
     local ns = opts.namespace or "default"
     local store_ns = "cache:" .. ns   -- isolated from hull.kv's "kv:" namespaces
 
+    -- A cache is bounded unless the caller says otherwise: with neither bound
+    -- given, the memory and SQL caches defaulted to NONE, so keying one by
+    -- request path grew it until the VM's memory limit (or the SQL table
+    -- forever). An explicit 0 still means "no limit".
+    local max_items, max_bytes = opts.max_items, opts.max_bytes
+    if max_items == nil and max_bytes == nil then
+        max_items = cache.DEFAULT_MAX_ITEMS
+        if backend == "memory" then max_bytes = cache.DEFAULT_MAX_BYTES end
+    end
+
     local store, bname
     if backend == "memory" then
         store = require("hull.kv._memstore").get(store_ns, {
             evict       = true,                 -- CACHE: LRU eviction ON
             default_ttl = opts.default_ttl,
-            max_bytes   = opts.max_bytes,
-            max_items   = opts.max_items,
+            max_bytes   = max_bytes,
+            max_items   = max_items,
         })
         bname = "memory"
     elseif backend == "sqlite" then
@@ -200,7 +215,7 @@ function cache.open(opts)
                 "cache.open: sqlite backend needs database = <db connection>")
         end
         store = require("hull.kv._sql").new(conn, store_ns, {
-            evict = true, default_ttl = opts.default_ttl, max_items = opts.max_items,
+            evict = true, default_ttl = opts.default_ttl, max_items = max_items,
         })
         bname = conn.backend_name or "sqlite"
     elseif backend == "valkey" or backend == "redis" then

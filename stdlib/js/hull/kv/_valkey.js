@@ -51,7 +51,18 @@ function ttlMs(store, ttl) {
     if (ttl === undefined || ttl === null || ttl === false) return undefined;
     if (typeof ttl !== "number" || ttl < 0)
         util.error("invalid_argument", "kv: ttl must be a non-negative number of seconds");
-    return Math.floor(ttl * 1000);
+    // Rounded UP, to at least 1 ms: the native layer sets PX only for a
+    // positive value, so ttl = 0 (and anything under a millisecond, floored to
+    // 0) set the key with NO expiry - where the memory and SQL backends expire
+    // it at once. A revocation written with ttl = 0 lived forever on Valkey.
+    // (put turns ttl = 0 into a delete.)
+    return Math.max(1, Math.ceil(ttl * 1000));
+}
+
+// ttl = 0, resolved: the value expires the moment it is written.
+function expiresNow(store, ttl) {
+    if (ttl === undefined || ttl === null) ttl = store.defaultTtl;
+    return ttl === 0;
 }
 
 function makeStore(conn, storeNs, opts) {
@@ -77,7 +88,10 @@ function makeStore(conn, storeNs, opts) {
             const ab = conn.get(physKey(k));
             return ab === null ? null : fromBuf(ab);
         },
-        put(k, v, ttl) { conn.set(physKey(k), toBuf(v), ttlMs(this, ttl)); },
+        put(k, v, ttl) {
+            if (expiresNow(this, ttl)) { conn.del(physKey(k)); return; }
+            conn.set(physKey(k), toBuf(v), ttlMs(this, ttl));
+        },
         del(k) { return conn.del(physKey(k)); },
         has(k) { return conn.has(physKey(k)); },
         incr(k, by, ttl) { return conn.incr(physKey(k), by, ttlMs(this, ttl)); },

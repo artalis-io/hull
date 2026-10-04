@@ -113,12 +113,13 @@ function normalizeUserId(userId) {
  * @param {string} role
  */
 function assign(userId, role) {
-    db.insertIfAbsent(
-        "_hull_user_roles",
-        ["user_id", "role"],
-        ["user_id", "role"],
-        [normalizeUserId(userId), requireName(role, "role name")]
-    );
+    const r = requireName(role, "role name");
+    const u = normalizeUserId(userId);
+    // The role row first: the foreign key holds on Postgres / MySQL, where
+    // assigning an undefined role raised a violation (SQLite runs with
+    // foreign keys off, so it only worked there).
+    db.insertIfAbsent("_hull_roles", ["name"], ["name"], [r]);
+    db.insertIfAbsent("_hull_user_roles", ["user_id", "role"], ["user_id", "role"], [u, r]);
 }
 
 /**
@@ -139,12 +140,13 @@ function revoke(userId, role) {
  * @param {string} permission
  */
 function grant(role, permission) {
-    db.insertIfAbsent(
-        "_hull_role_permissions",
-        ["role", "permission"],
-        ["role", "permission"],
-        [requireName(role, "role name"), requireName(permission, "permission name")]
-    );
+    const r = requireName(role, "role name");
+    const p = requireName(permission, "permission name");
+    // Both referenced rows first (see assign).
+    db.insertIfAbsent("_hull_roles", ["name"], ["name"], [r]);
+    db.insertIfAbsent("_hull_permissions", ["name"], ["name"], [p]);
+    db.insertIfAbsent("_hull_role_permissions", ["role", "permission"],
+        ["role", "permission"], [r, p]);
 }
 
 /**

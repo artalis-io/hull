@@ -272,15 +272,17 @@ end
 --
 -- Decrements the refcount; at 0 the metadata row is removed AND, if
 -- no other row references the same blob_id, the on-disk blob is
--- unlinked via blob.delete(). The whole operation runs inside a
--- transaction so a partial failure (db error mid-decrement) doesn't
--- leave an orphan or a double-deleted blob.
+-- unlinked via blob.delete(). The row changes commit in one
+-- transaction; the unlink runs after that, in a second transaction
+-- that re-checks the blob is unreferenced, so a failed commit never
+-- leaves a row pointing at a missing blob.
 --
 -- @tparam string id  Attachment id.
 -- @treturn boolean  true if the attachment existed and was
 --   decremented (or fully deleted); false if no such id.
 function attachment.delete(id)
     local removed = false
+    local orphan   -- blob_id whose last row this transaction removed
 
     db.batch(function()
         local meta = attachment.metadata(id)
@@ -306,10 +308,27 @@ function attachment.delete(id)
             "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
             { meta.blob_id })
         if not refs or #refs == 0 then
-            blob.delete(meta.blob_id)
+            orphan = meta.blob_id
         end
         removed = true
     end)
+
+    -- The blob goes only AFTER the commit, and only if no row references it
+    -- then. Unlinked inside the transaction, a failed COMMIT left the row
+    -- pointing at a missing blob. The re-check and unlink run in their own
+    -- transaction: on SQLite its write lock keeps a concurrent upload from
+    -- deduplicating onto the blob in between (on Postgres / MySQL that window
+    -- remains, narrowed to the re-check).
+    if orphan then
+        db.batch(function()
+            local refs = db.query(
+                "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
+                { orphan })
+            if not refs or #refs == 0 then
+                blob.delete(orphan)
+            end
+        end)
+    end
 
     return removed
 end

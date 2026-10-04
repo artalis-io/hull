@@ -15,7 +15,7 @@ differ, and code that confuses them will lose data or leak memory.
 | Lifetime | ephemeral | externally meaningful |
 | Eviction | **expected** (LRU on cap) | **never**, unless you ask (`cleanup`) |
 | Values | recomputable | authoritative |
-| Bounded | yes (`max_bytes` / `max_items`) | unbounded by default |
+| Bounded | yes (`max_bytes` / `max_items`; with neither given, 10,000 items and, in memory, 16 MiB) | unbounded by default |
 | TTL | common | optional |
 | Persistence | no (SQL cache is still evicting) | where the backend provides it |
 | Optimized for | fast local reuse | correctness + durability |
@@ -61,6 +61,13 @@ cache:set(k, bytes); cache:get(k)
 cache:fetch(k, 60, function() return render() end)   -- get-or-compute (bytes)
 cache:stats()                       -- { hits, misses, evictions, items, bytes }
 ```
+
+A `cache.open` with neither `max_items` nor `max_bytes` is bounded anyway:
+`max_items = 10000` (`cache.DEFAULT_MAX_ITEMS`) on every backend that
+evicts locally, plus `max_bytes = 16 MiB` (`cache.DEFAULT_MAX_BYTES`) on the
+memory backend. Pass an explicit `0` for an unbounded cache. (Before, neither
+given meant no bound at all, so a cache keyed by request path grew until the
+VM's memory limit.)
 
 JS mirror (sync; `import { kv } from "hull:kv"`, `import { cache } from "hull:cache"`)
 with camelCase options (`maxBytes`, `defaultTtl`, `maxItems`) and `store.get(k)`

@@ -179,7 +179,9 @@ function Store:scan(prefix, limit)
     for k, e in pairs(self.data) do
         if (not e.exp or u.now_ms() < e.exp) and k:sub(1, #prefix) == prefix then
             out[#out + 1] = k
-            if limit and #out >= limit then break end
+            -- limit = 0 means no limit, as on the SQL backend and in JS
+            -- (0 is truthy in Lua: it returned one key).
+            if limit and limit > 0 and #out >= limit then break end
         end
     end
     return out

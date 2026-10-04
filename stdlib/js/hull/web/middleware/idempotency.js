@@ -42,6 +42,13 @@ const INFLIGHT_LEASE = 300;
 function completedExpiry(req) {
     return time.now() + (req.ctx._idem_ttl !== undefined ? req.ctx._idem_ttl : idemTtl);
 }
+
+// A completion writes only the claim it belongs to: still in flight, with this
+// request's fingerprint and claim time. A handler that ran past its lease had
+// its row reclaimed by a retry (possibly with another body); completing later,
+// it overwrote that row, so replays of the retry returned the first
+// handler's response.
+const CLAIM_GUARD = " AND state = 'inflight' AND fingerprint = ? AND created_at = ?";
 // Matches the `key` column width (VARCHAR(255)); keys over this are rejected.
 const MAX_KEY_LEN = 255;
 
@@ -259,10 +266,14 @@ function middleware(opts) {
             const row = rows[0];
 
             if (row.expires_at <= now) {
-                // Expired: delete and treat as new
+                // Expired: delete and treat as new. Only while it is still
+                // expired: a concurrent request may have replaced it with a
+                // fresh claim since the SELECT, and an unguarded DELETE
+                // removed that.
                 db.exec(
-                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
-                    [principalId, key]
+                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ? " +
+                    "AND expires_at <= ?",
+                    [principalId, key, now]
                 );
             } else {
                 // Fingerprint mismatch. Constant-time comparison even though
@@ -339,7 +350,8 @@ function middleware(opts) {
 
                 // Complete but no cached response: delete and re-run
                 db.exec(
-                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
+                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ? " +
+                    "AND state = 'complete' AND status IS NULL",
                     [principalId, key]
                 );
             }
@@ -365,6 +377,9 @@ function middleware(opts) {
         req.ctx._idem_key = key;
         req.ctx._idem_principal = principalId;
         req.ctx._idem_ttl = ttl;
+        // This request's claim, for the completing UPDATE (see CLAIM_GUARD).
+        req.ctx._idem_fingerprint = fingerprint;
+        req.ctx._idem_created = now;
 
         return 0;
     };
@@ -430,9 +445,10 @@ function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, 
         db.exec(
             "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, " +
             "response_body = ?, response_headers = ?, expires_at = ? " +
-            "WHERE principal_id = ? AND key = ?",
+            "WHERE principal_id = ? AND key = ?" + CLAIM_GUARD,
             [statusCode, bodyStr, headersStr, completedExpiry(req),
-             req.ctx._idem_principal, req.ctx._idem_key]
+             req.ctx._idem_principal, req.ctx._idem_key,
+             req.ctx._idem_fingerprint, req.ctx._idem_created]
         );
     }
 }
@@ -478,8 +494,9 @@ function complete(req) {
     if (req.ctx && req.ctx._idem_key) {
         db.exec(
             "UPDATE _hull_idempotency_keys SET state = 'complete', expires_at = ? " +
-            "WHERE principal_id = ? AND key = ?",
-            [completedExpiry(req), req.ctx._idem_principal, req.ctx._idem_key]
+            "WHERE principal_id = ? AND key = ?" + CLAIM_GUARD,
+            [completedExpiry(req), req.ctx._idem_principal, req.ctx._idem_key,
+             req.ctx._idem_fingerprint, req.ctx._idem_created]
         );
     }
 }

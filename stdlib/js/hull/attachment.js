@@ -262,13 +262,14 @@ function readToFile(id, dst) {
  *
  * Decrements the refcount; at 0 the metadata row is removed AND, if
  * no other row references the same blob_id, the on-disk blob is
- * unlinked via blob.delete(). The whole operation runs inside a
- * transaction so a partial failure doesn't leave an orphan or a
- * double-deleted blob. The blob.delete() call happens INSIDE the
- * BEGIN IMMEDIATE write lock - concurrent transactions can't insert
- * a new row referencing this blob_id between the SELECT and the
- * unlink. Trade-off: holding the SQLite write lock during the FS
- * unlink, which is fine for typical attachment sizes.
+ * unlinked via blob.delete(). The row changes commit in one
+ * transaction; the unlink runs after that commit, in a second
+ * transaction that first re-checks the blob is unreferenced. Unlinked
+ * inside the first transaction, a failed COMMIT left the row pointing
+ * at a missing blob. The second transaction still holds SQLite's
+ * BEGIN IMMEDIATE write lock across the re-check and the unlink, so a
+ * concurrent upload cannot dedup onto the blob in between (on
+ * Postgres / MySQL that window remains, narrowed to the re-check).
  *
  * Exported as `attachment.delete` (bracket-key, since `delete` is
  * a JS reserved operator keyword but a valid property name):
@@ -282,6 +283,7 @@ function readToFile(id, dst) {
  */
 function deleteAttachment(id) {
     let removed = false;
+    let orphan = null;   // blob_id whose last row this transaction removed
 
     db.batch(() => {
         const meta = metadata(id);
@@ -305,11 +307,18 @@ function deleteAttachment(id) {
         const refs = db.query(
             "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
             [meta.blob_id]);
-        if (!refs || refs.length === 0) {
-            blob.delete(meta.blob_id);
-        }
+        if (!refs || refs.length === 0) orphan = meta.blob_id;
         removed = true;
     });
+
+    if (orphan !== null) {
+        db.batch(() => {
+            const refs = db.query(
+                "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
+                [orphan]);
+            if (!refs || refs.length === 0) blob.delete(orphan);
+        });
+    }
 
     return removed;
 }

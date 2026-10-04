@@ -84,7 +84,7 @@ column so MySQL can index it):
 
 Indexes:
 - `(queue, status, run_at, priority, id)` - the claim's scan path.
-- unique `(queue, dedup_key)` where `dedup_key` is non-null - idempotent enqueue.
+- unique `(queue, dedup_key)` where `dedup_key` is non-null - idempotent enqueue. A finished (done / dead / compensated) job gives its key up at the next enqueue of it, so a key blocks only while its job is unfinished.
 - `(status, claimed_at)` - the reaper's scan.
 
 ## The atomic claim (the technical heart)

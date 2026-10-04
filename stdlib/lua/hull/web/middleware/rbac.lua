@@ -104,6 +104,10 @@ end
 -- @tparam string role
 function rbac.assign(user_id, role)
     user_id = uid(user_id)
+    -- The role row first: the foreign key holds on Postgres / MySQL, where
+    -- assigning an undefined role raised a violation (SQLite runs with
+    -- foreign keys off, so it only worked there).
+    db.insert_if_absent("_hull_roles", { "name" }, { "name" }, { role })
     db.insert_if_absent("_hull_user_roles",
         { "user_id", "role" },
         { "user_id", "role" }, { user_id, role })
@@ -126,6 +130,9 @@ end
 -- @tparam string role
 -- @tparam string permission
 function rbac.grant(role, permission)
+    -- Both referenced rows first (see rbac.assign).
+    db.insert_if_absent("_hull_roles", { "name" }, { "name" }, { role })
+    db.insert_if_absent("_hull_permissions", { "name" }, { "name" }, { permission })
     db.insert_if_absent("_hull_role_permissions",
         { "role", "permission" },
         { "role", "permission" }, { role, permission })

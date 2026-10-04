@@ -5009,6 +5009,68 @@ UTEST(js_stdlib, search_tokenize_grammar_parity)
     cleanup_js_caps();
 }
 
+/* Audit 4 (stdlib, jobs / kv / cache / rbac). __test_a4 is 0, or the
+ * number of the first check that failed. */
+UTEST(js_stdlib, audit4_jobs_kv_cache_rbac)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { rbac } from 'hull:web:middleware:rbac';\n"
+        "import { cache } from 'hull:cache';\n"
+        "import { jobs } from 'hull:jobs';\n"
+        "import { db as dbm } from 'hull:db';\n"
+        "globalThis.__test_a4 = (() => {\n"
+        "  const db = dbm.default();\n"
+        /* 1-3: grant / assign create the rows their foreign keys need */
+        "  db.exec('PRAGMA foreign_keys = ON');\n"
+        "  rbac.init();\n"
+        "  try { rbac.grant('ghost', 'ghost.read'); } catch (e) { return 1; }\n"
+        "  try { rbac.assign('u1', 'ghost'); } catch (e) { return 2; }\n"
+        "  if (!rbac.hasPermission('u1', 'ghost.read')) return 3;\n"
+        "  db.exec('PRAGMA foreign_keys = OFF');\n"
+        /* 4-6: cache.new is an LRU: a read refreshes, the oldest goes */
+        "  const c = cache.new({ maxEntries: 2 });\n"
+        "  c.set('a', 1); c.set('b', 2);\n"
+        "  if (c.get('a') !== 1) return 4;\n"
+        "  c.set('c', 3);\n"
+        "  if (c.has('b') || !c.has('a') || !c.has('c')) return 5;\n"
+        "  if (c.size() !== 2) return 6;\n"
+        /* 7-8: cache.open is bounded by default; an explicit 0 is not */
+        "  const o = cache.open({ namespace: 'a4bound' });\n"
+        "  if (!(o._store.maxItems > 0)) return 7;\n"
+        "  const u = cache.open({ namespace: 'a4unbound', maxItems: 0 });\n"
+        "  if (u._store.maxItems !== 0) return 8;\n"
+        /* 9-11: a job whose worker vanished on its last attempt is
+         *       dead-lettered by the reaper */
+        "  jobs.init();\n"
+        "  const id = jobs.enqueue('a4', {}, { maxAttempts: 1, dedupKey: 'k1' });\n"
+        "  if (!id) return 9;\n"
+        "  if (jobs.claim({ batch: 1 }).length !== 1) return 10;\n"
+        "  jobs.reap({ visibilityTimeout: 0 });\n"
+        "  const j = jobs.get(id);\n"
+        "  if (!j || j.status !== 'dead') return 11;\n"
+        /* 12-13: a finished job's dedupKey no longer blocks a re-enqueue */
+        "  const id2 = jobs.enqueue('a4', {}, { dedupKey: 'k1' });\n"
+        "  if (!id2 || id2 === id) return 12;\n"
+        "  if (jobs.enqueue('a4', {}, { dedupKey: 'k1' }) !== null) return 13;\n"
+        "  return 0;\n"
+        "})();\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    /* typeof guard: an undefined (a module that threw) also reads as 0 */
+    ASSERT_EQ(eval_int("typeof globalThis.__test_a4 === 'number' ? globalThis.__test_a4 : -1"), 0);
+
+    cleanup_js_caps();
+}
+
 /* ── hull:web:middleware:rbac tests ───────────────────────────────────────── */
 
 UTEST(js_stdlib, rbac_init_and_assign)

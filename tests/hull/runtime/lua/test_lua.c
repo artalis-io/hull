@@ -5105,6 +5105,58 @@ UTEST(lua_stdlib, rbac_has_permission)
     cleanup_lua_caps();
 }
 
+/* Audit 4 (stdlib, jobs / kv / cache / rbac). Returns 0, or the number of the
+ * first check that failed. */
+UTEST(lua_stdlib, audit4_jobs_kv_cache_rbac)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local db = require('hull.db').default() "
+        /* 1: rbac.grant / assign create the rows their foreign keys need
+         *    (foreign keys on, as on Postgres / MySQL) */
+        "  db.exec('PRAGMA foreign_keys = ON') "
+        "  local rbac = require('hull.web.middleware.rbac') "
+        "  rbac.init() "
+        "  if not pcall(rbac.grant, 'ghost', 'ghost.read') then return 1 end "
+        "  if not pcall(rbac.assign, 'u1', 'ghost') then return 2 end "
+        "  if not rbac.has_permission('u1', 'ghost.read') then return 3 end "
+        "  db.exec('PRAGMA foreign_keys = OFF') "
+        /* 4: memstore scan limit 0 = unlimited */
+        "  local kv = require('hull.kv') "
+        "  local h = kv.open{ namespace = 'a4scan' } "
+        "  h:set('a', '1'); h:set('b', '2'); h:set('c', '3') "
+        "  if #h:scan('', { limit = 0 }) ~= 3 then return 4 end "
+        "  if #h:scan('', { limit = 2 }) ~= 2 then return 5 end "
+        /* 6-8: cache.open is bounded by default; an explicit 0 is not */
+        "  local cache = require('hull.cache') "
+        "  local c = cache.open{ namespace = 'a4bound' } "
+        "  if c._s.max_items ~= cache.DEFAULT_MAX_ITEMS then return 6 end "
+        "  if c._s.max_bytes ~= cache.DEFAULT_MAX_BYTES then return 7 end "
+        "  local u = cache.open{ namespace = 'a4unbound', max_items = 0 } "
+        "  if u._s.max_items ~= 0 or u._s.max_bytes ~= 0 then return 8 end "
+        /* 9-11: a job whose worker vanished on its last attempt is
+         *       dead-lettered by the reaper, not re-pended */
+        "  local jobs = require('hull.jobs') "
+        "  jobs.init() "
+        "  local id = jobs.enqueue('a4', {}, { max_attempts = 1, dedup_key = 'k1' }) "
+        "  if not id then return 9 end "
+        "  if #jobs.claim({ batch = 1 }) ~= 1 then return 10 end "
+        "  jobs.reap({ visibility_timeout = 0 }) "
+        "  local j = jobs.get(id) "
+        "  if not j or j.status ~= 'dead' then return 11 end "
+        /* 12-13: a finished job's dedup_key no longer blocks a re-enqueue,
+         *        and an unfinished one's still does */
+        "  local id2 = jobs.enqueue('a4', {}, { dedup_key = 'k1' }) "
+        "  if not id2 or id2 == id then return 12 end "
+        "  if jobs.enqueue('a4', {}, { dedup_key = 'k1' }) ~= nil then return 13 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, rbac_middleware_deny)
 {
     init_lua_with_caps();

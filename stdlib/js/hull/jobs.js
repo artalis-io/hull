@@ -139,7 +139,9 @@ function init(opts) {
         "ON _hull_jobs(status, claimed_at)");
 
     // Idempotent enqueue: a non-null dedup_key is unique per queue. NULLs are
-    // distinct on every backend, so un-deduped jobs never collide.
+    // distinct on every backend, so un-deduped jobs never collide. A finished
+    // (done / dead / compensated) job releases its key on the next enqueue of
+    // it (enqueue), so a key only blocks while a job with it is unfinished.
     db.exec(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_hull_jobs_dedup " +
         "ON _hull_jobs(queue, dedup_key)");
@@ -502,6 +504,14 @@ function enqueue(jobType, data, opts) {
     }
     let id;
     if (o.dedupKey !== undefined && o.dedupKey !== null) {
+        // A key dedups against jobs that have not finished. The unique index
+        // also covered done / dead rows, so a completed job's key refused every
+        // re-enqueue until cleanup purged the row (7 days). A finished job
+        // gives its key up here: one statement, portable (MySQL has no partial
+        // index), and it needs no change to an existing database's index.
+        db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? " +
+            "AND status IN ('done', 'dead', 'compensated')",
+            [o.queue || "default", o.dedupKey]);
         const n = db.insertIfAbsent("_hull_jobs", ["queue", "dedup_key"], cols, vals);
         if (!(n && n > 0)) return null;   // an un-run job with this (queue, dedupKey) exists
         // Portable id fetch: the unique (queue, dedup_key) identifies the new row.
@@ -951,6 +961,14 @@ function on(event, fn) {
 // returns "lost".
 const CLAIMED = " AND claim_token=? AND status='running'";
 
+// The durable-workflow yield markers: Symbols private to this module. They
+// were plain string properties (`__hullWfYield`), so a handler that returned
+// parsed external JSON - {"__hullWfYield":true,"wakeAt":1} from a remote -
+// parked its job forever, the attempt refunded on every run. JSON cannot
+// produce a Symbol key.
+const YIELD = Symbol("hull.jobs.yield");        // thrown by ctx.sleep / waitSignal
+const WF_YIELD = Symbol("hull.jobs.wfYield");   // returned to the work loop
+
 function markDone(job, result) {
     const id = job.id;
     const n = db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? " +
@@ -1005,8 +1023,11 @@ function emit(event, job, info) {
 
 /**
  * Reclaim jobs stuck in `running` past the visibility timeout (a worker died
- * mid-job). Reset to `pending`; their incremented attempts persist. `jobs.work`
- * runs this each call.
+ * mid-job). One whose attempts are used up is dead-lettered here (dependents
+ * resolved as failed, a `dead` event emitted); the rest go back to `pending`.
+ * Before, every stale row was re-pended whatever its attempts, so a job that
+ * kept killing (or hanging) its worker never dead-lettered. `jobs.work` runs
+ * this each call.
  * @param {object} [opts]  { visibilityTimeout }
  */
 function reap(opts) {
@@ -1020,6 +1041,32 @@ function reap(opts) {
         "UPDATE _hull_jobs SET status='pending', updated_at=? " +
         "WHERE status='waiting' AND run_at > 0 AND run_at <= ?",
         [now, now]);
+    const exhausted = db.query(
+        "SELECT id, type, queue, attempts, claim_token FROM _hull_jobs " +
+        "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts " +
+        "LIMIT 500",
+        [now - vt]) || [];
+    for (const row of exhausted) {
+        const err = "visibility timeout: worker lost after the last attempt";
+        let dead = false;
+        db.batch(() => {
+            // Claim-guarded like every other transition: a worker that
+            // finished in the meantime keeps its outcome.
+            const tokened = row.claim_token !== null && row.claim_token !== undefined;
+            const n = db.exec(
+                "UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, " +
+                "updated_at=? WHERE id=? AND status='running' AND claimed_at <= ? " +
+                "AND claim_token" + (tokened ? "=?" : " IS NULL"),
+                tokened ? [err, now, row.id, now - vt, row.claim_token]
+                        : [err, now, row.id, now - vt]);
+            if ((n || 0) === 0) return;
+            resolveDeps(row.id, false);
+            db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [row.id]);
+            emitDurable("dead", row, { error: err, attempt: row.attempts });
+            dead = true;
+        });
+        if (dead) emit("dead", row, { error: err, attempt: row.attempts });
+    }
     const reclaimed = db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? " +
         "WHERE status='running' AND claimed_at <= ?",
@@ -1288,7 +1335,7 @@ async function work(opts) {
         } else {
         try {
             const result = await h(job);
-            if (result && typeof result === "object" && result.__hullWfYield) {
+            if (result && typeof result === "object" && result[WF_YIELD] === true) {
                 // Durable workflow yielded - no terminal outcome, no event. A
                 // yield is not a failed attempt, so undo the claim's attempt
                 // increment (a workflow may sleep / wait many times without
@@ -1752,7 +1799,7 @@ function runSleep(workflowId, n, seconds) {
     }
     if (time.now() >= wakeAt) return;   // elapsed: continue
     const e = new Error("__hull_yield");   // caught by the runner (Error carries the marker)
-    e.__hullYield = true;
+    e[YIELD] = true;
     e.wakeAt = wakeAt;
     throw e;
 }
@@ -1792,7 +1839,7 @@ function runWaitSignal(workflowId, name, opts) {
         if (time.now() >= deadline) return null;   // timed out, no signal
     }
     const e = new Error("__hull_yield");
-    e.__hullYield = true;
+    e[YIELD] = true;
     e.waiting = true;
     e.signalName = name;
     e.deadline = deadline;
@@ -1917,8 +1964,8 @@ function workflow(name, fn) {
         let res;
         try { res = await fn(ctx); }
         catch (e) {
-            if (e && e.__hullYield) {
-                return { __hullWfYield: true, wakeAt: e.wakeAt,
+            if (e && typeof e === "object" && e[YIELD] === true) {
+                return { [WF_YIELD]: true, wakeAt: e.wakeAt,
                          waiting: e.waiting, signalName: e.signalName, deadline: e.deadline };
             }
             const max = (job.maxAttempts != null) ? job.maxAttempts : _cfg.maxAttempts;

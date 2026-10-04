@@ -506,6 +506,10 @@ Returns the new job id, or `nil` when a `dedup_key` collapsed it (or a
 `throttle` window suppressed it). JS keys are camelCase (`runAt`, `maxAttempts`,
 `dedupKey`, `concurrencyKey`, `concurrencyStrict`). `throttle` is best-effort (keyed by `(queue, type)`, no unique
 constraint - use `dedup_key` for exact-once).
+A `dedup_key` blocks only while a job with it is unfinished: the next enqueue of
+a key whose job is `done`, `dead` or `compensated` releases it from that row and
+inserts a new job. (Before, the finished row kept the key until cleanup purged
+it, 7 days later.)
 
 **Bulk enqueue.** `jobs.enqueue_many(items)` (`enqueueMany` in JS) inserts a list
 of `{ type, data, opts }` in **one transaction** - a single commit/fsync instead
@@ -604,6 +608,11 @@ but the visibility timeout makes the last one sharper):
   a compute job that produces output must write it somewhere (db / blob) for the
   enqueuer to read later. If you need the result inline, call `compute.async` in
   the request handler instead of enqueuing a job.
+- **A job that keeps losing its worker dead-letters.** The reaper re-pends a
+  job whose worker vanished (crashed, or ran past `visibility_timeout`), but
+  once its attempts reach `max_attempts` it moves it to `dead` instead - with
+  its dependents failed and a `dead` event - so a handler that crashes or hangs
+  the process cannot crash-loop the fleet forever.
 - **Heartbeat long jobs.** A job that runs longer than `visibility_timeout`
   (default 300s) is presumed orphaned and re-run. A long WASM/GPU handler should
   call `jobs.heartbeat(job)` periodically (at least every `visibility_timeout/2`
