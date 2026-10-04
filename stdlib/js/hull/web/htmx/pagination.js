@@ -53,14 +53,17 @@ function nav(total, opts) {
     const target  = opts.target || "body";
     const pushUrl = opts.pushUrl !== false;
 
-    // Delegate page-math. The base render() consumes snake_case
-    // opts (per_page, base_url, default_per_page) - map them in.
+    // Delegate page-math. The base render() takes `per_page` but
+    // camelCase `baseUrl` / `defaultPerPage`: passed as base_url /
+    // default_per_page they were ignored, so links were "?page=2" relative
+    // to the current page (the full-page route, not the fragment one) and
+    // per_page was always appended.
     const p = basePagination.render(total, {
-        page:             opts.page,
-        per_page:         opts.perPage,
-        default_per_page: opts.defaultPerPage,
-        base_url:         opts.baseUrl,
-        window:           opts.window,
+        page:           opts.page,
+        per_page:       opts.perPage,
+        defaultPerPage: opts.defaultPerPage,
+        baseUrl:        opts.baseUrl,
+        window:         opts.window,
     });
     if (!p.show) return "";
 

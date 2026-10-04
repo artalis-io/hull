@@ -117,6 +117,12 @@ end
 
 --- Get or set the active locale.
 --
+-- The active locale is PROCESS-GLOBAL: every request shares it. Set it
+-- and translate within one uninterrupted stretch of code only - a
+-- handler that sets it and then yields (db.async, http.fetch, a timer)
+-- can resume to find another request's locale. Concurrent requests
+-- should pass the locale explicitly with @{i18n.t_in}.
+--
 -- @tparam[opt] string name  When non-nil, sets the active locale.
 -- @treturn ?string  Current locale name after the call (or `nil` if none).
 function i18n.locale(name)
@@ -136,8 +142,20 @@ end
 -- @treturn string  Translated string, or the key itself if not found
 --   (standard fallback so missing keys are visible in development).
 function i18n.t(key, params)
-    if not active or not locales[active] then return key end
-    local val = deep_get(locales[active], key)
+    return i18n.t_in(active, key, params)
+end
+
+--- Translate a key in an EXPLICIT locale - stateless, so safe across a
+-- yield: `i18n.t_in(req.locale, "greeting", {name = n})`. Same lookup,
+-- interpolation and fallback (the key itself) as @{i18n.t}.
+--
+-- @tparam ?string locale  Locale name (`nil` or unknown -> the key).
+-- @tparam string key      Translation key.
+-- @tparam[opt] table params  Map of `${var}` substitutions.
+-- @treturn string
+function i18n.t_in(locale, key, params)
+    if not locale or not locales[locale] then return key end
+    local val = deep_get(locales[locale], key)
     if type(val) ~= "string" then return key end
     return interpolate(val, params)
 end
@@ -215,23 +233,26 @@ function i18n.currency(amount, code)
     end
 
     local digits = cur.decimal_digits or 2
-    local rounded = math.floor(amount * 10^digits + 0.5) / 10^digits
 
     -- Format the number part
     local dec_sep = fmt.decimalSep or fmt.decimal_sep or "."
     local thou_sep = fmt.thousandsSep or fmt.thousands_sep or ","
 
-    local int_part = math.floor(rounded)
-    local frac_part = rounded - int_part
-    local neg = int_part < 0
-    if neg then int_part = -int_part end
+    -- The sign is taken off FIRST and the magnitude rounded half away
+    -- from zero in whole minor units: floor() ran on the signed value, so
+    -- -1.5 became -2 + 0.50 and rendered "-2.50". Integer minor units
+    -- also keep the fraction exact (no float remainder to re-round).
+    local neg = amount < 0
+    local scale = math.tointeger(10 ^ digits) or 1
+    local units = math.floor(math.abs(amount) * scale + 0.5)
+    local int_part = units // scale
+    local frac_part = units % scale
+    if units == 0 then neg = false end   -- no "-0.00"
 
-    local result = format_int(tostring(int_part), thou_sep)
+    local result = format_int(string.format("%d", int_part), thou_sep)
 
     if digits > 0 then
-        local frac_str = string.format("%0" .. digits .. "d",
-            math.floor(frac_part * 10^digits + 0.5))
-        result = result .. dec_sep .. frac_str
+        result = result .. dec_sep .. string.format("%0" .. digits .. "d", frac_part)
     end
 
     if neg then result = "-" .. result end

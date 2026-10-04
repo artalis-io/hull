@@ -37,6 +37,15 @@ local template = {}
 
 local MAX_INCLUDE_DEPTH  = 16
 local MAX_EXTENDS_DEPTH  = 8
+-- Control blocks (if / for / block) nest independently of includes: they
+-- used to count against the include depth, so 16 nested ifs failed with
+-- "include depth limit exceeded".
+local MAX_NEST_DEPTH     = 128
+-- Include fan-out: a partial included N times side by side is expanded N
+-- times (and each of those may include more). Bounded by the total source
+-- the expansion may read, and by the number of includes.
+local MAX_INCLUDE_BYTES  = 8 * 1024 * 1024
+local MAX_INCLUDE_COUNT  = 4096
 local MAX_CACHE_SIZE     = 1024
 
 -- Native bridge for parse/codegen (private - not in module registry).
@@ -46,9 +55,25 @@ local _template = require("hull._template")
 
 -- ── Validation ──────────────────────────────────────────────────────
 
+-- Lua keywords cannot be a generated local or field name (a compile error
+-- deep in codegen), and `_ENV` as a loop variable would rebind the chunk's
+-- globals.
+local LUA_RESERVED = {
+    ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true,
+    ["elseif"] = true, ["end"] = true, ["false"] = true, ["for"] = true,
+    ["function"] = true, ["goto"] = true, ["if"] = true, ["in"] = true,
+    ["local"] = true, ["nil"] = true, ["not"] = true, ["or"] = true,
+    ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
+    ["until"] = true, ["while"] = true, ["_ENV"] = true,
+}
+
 local function validate_ident(s, context)
     if not s:match("^[%a_][%w_]*$") then
         error("invalid identifier in template " .. (context or "expression") .. ": " .. s)
+    end
+    if LUA_RESERVED[s] then
+        error("identifier in template " .. (context or "expression")
+              .. " is a reserved word: " .. s)
     end
     -- Must NOT start with `__` (parity with the JS sibling): those names are
     -- reserved for codegen helpers (`__p` output buffer, `__d` data, `__e`
@@ -117,7 +142,13 @@ end
 function filters.json(val)
     -- Post-escape "<" so `{{ data | json }}` embedded in a <script> block
     -- cannot break out via "</script>" (parity with JS's < escaping).
-    return (json.encode(val):gsub("<", "\\u003c"))
+    -- <, >, & and ' as \u escapes (valid JSON, same value): escaping only
+    -- "<" kept a script tag closed, but raw ({{{ x | json }}}) in a
+    -- single-quoted attribute a "'" ended the attribute.
+    return (json.encode(val):gsub("[<>&']", {
+        ["<"] = "\\u003c", [">"] = "\\u003e",
+        ["&"] = "\\u0026", ["'"] = "\\u0027",
+    }))
 end
 
 function filters.raw(val)
@@ -129,13 +160,39 @@ end
 -- relative URLs; anything else (javascript:, data:, vbscript:, ...) becomes
 -- "#". Browsers ignore whitespace and control characters inside a scheme, so
 -- they are removed before the scheme is read. The result is still escaped.
+-- Character references are decoded before the scheme is read: in raw
+-- output ({{{ u | safe_url }}}) the browser decodes "javascript&colon;x" or
+-- "jav&#x61;script:x" into a javascript: URL, and they used to pass as
+-- scheme-less. A reference left in the scheme part that is not decoded here
+-- is refused rather than guessed at.
+local NAMED_REFS = { colon = ":", tab = "\t", newline = "\n", sol = "/",
+                     quest = "?", num = "#", amp = "&" }
+
+local function decode_refs(s)
+    s = s:gsub("&#[xX](%x+);?", function(h)
+        local n = tonumber(h, 16)
+        return (n and n < 0x80) and string.char(n) or ""
+    end)
+    s = s:gsub("&#(%d+);?", function(d)
+        local n = tonumber(d)
+        return (n and n < 0x80) and string.char(n) or ""
+    end)
+    s = s:gsub("&(%a+);?", function(name)
+        return NAMED_REFS[name:lower()]
+    end)
+    return s
+end
+
 function filters.safe_url(val)
     local s = tostring(val or "")
-    local probe = s:gsub("[%c%s]", ""):lower()
+    local probe = decode_refs(s):gsub("[%c%s]", ""):lower()
     local scheme = probe:match("^([%a][%w+.-]*):")
-    if scheme == nil or scheme == "http" or scheme == "https"
-       or scheme == "mailto" then
+    if scheme == "http" or scheme == "https" or scheme == "mailto" then
         return s
+    end
+    if scheme == nil then
+        local head = probe:match("^[^/?#]*")
+        if not head:find("&", 1, true) then return s end
     end
     return "#"
 end
@@ -296,13 +353,13 @@ local function parse_tag(tag)
     end
 
     -- for key, val in expr
-    local fk, fv, fexpr = tag:match("^for%s+(%w+)%s*,%s*(%w+)%s+in%s+(.+)$")
+    local fk, fv, fexpr = tag:match("^for%s+([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s+in%s+(.+)$")
     if fk then
         return { kind = "for_kv", key = fk, val = fv, expr = fexpr }
     end
 
     -- for item in expr
-    local fvar, fexpr2 = tag:match("^for%s+(%w+)%s+in%s+(.+)$")
+    local fvar, fexpr2 = tag:match("^for%s+([%a_][%w_]*)%s+in%s+(.+)$")
     if fvar then
         return { kind = "for", var = fvar, expr = fexpr2 }
     end
@@ -486,13 +543,20 @@ local function clone_set(t)
     return copy
 end
 
--- Resolve includes (inline)
-local function resolve_includes(ast, load_fn, visited, depth)
+-- Resolve includes (inline). `depth` counts nested INCLUDES only; `nest`
+-- counts control blocks (if / for / block); `budget` is shared by the whole
+-- expansion (see MAX_INCLUDE_BYTES / MAX_INCLUDE_COUNT).
+local function resolve_includes(ast, load_fn, visited, depth, nest, budget)
     visited = visited or {}
     depth = depth or 0
+    nest = nest or 0
+    budget = budget or { bytes = 0, count = 0 }
 
     if depth >= MAX_INCLUDE_DEPTH then
         error("include depth limit exceeded (max " .. MAX_INCLUDE_DEPTH .. ")")
+    end
+    if nest >= MAX_NEST_DEPTH then
+        error("template nesting limit exceeded (max " .. MAX_NEST_DEPTH .. ")")
     end
 
     local result = {}
@@ -507,9 +571,17 @@ local function resolve_includes(ast, load_fn, visited, depth)
             if not source then
                 error("template not found: " .. node.name)
             end
+            budget.count = budget.count + 1
+            budget.bytes = budget.bytes + #source
+            if budget.count > MAX_INCLUDE_COUNT
+               or budget.bytes > MAX_INCLUDE_BYTES then
+                error("template include expansion too large (max "
+                      .. MAX_INCLUDE_COUNT .. " includes, "
+                      .. MAX_INCLUDE_BYTES .. " bytes)")
+            end
             local inc_tokens = lex(source)
             local inc_ast = parse(inc_tokens)
-            inc_ast = resolve_includes(inc_ast, load_fn, visited, depth + 1)
+            inc_ast = resolve_includes(inc_ast, load_fn, visited, depth + 1, nest, budget)
             -- `visited` is the chain of includes being expanded, not every
             -- include seen: leave it on the way out, so including the same
             -- partial twice (in a loop, a block, side by side) is not a cycle.
@@ -524,20 +596,25 @@ local function resolve_includes(ast, load_fn, visited, depth)
                 new_branches[#new_branches + 1] = {
                     cond = branch.cond,
                     negated = branch.negated,
-                    body = resolve_includes(branch.body, load_fn, clone_set(visited), depth + 1)
+                    body = resolve_includes(branch.body, load_fn, clone_set(visited),
+                                            depth, nest + 1, budget)
                 }
             end
-            local new_else = node.else_body and resolve_includes(node.else_body, load_fn, clone_set(visited), depth + 1) or nil
+            local new_else = node.else_body and resolve_includes(node.else_body, load_fn,
+                clone_set(visited), depth, nest + 1, budget) or nil
             result[#result + 1] = { kind = "if", branches = new_branches, else_body = new_else }
         elseif node.kind == "for" then
             result[#result + 1] = { kind = "for", var = node.var, expr = node.expr,
-                                     body = resolve_includes(node.body, load_fn, visited, depth + 1) }
+                                     body = resolve_includes(node.body, load_fn, visited,
+                                                             depth, nest + 1, budget) }
         elseif node.kind == "for_kv" then
             result[#result + 1] = { kind = "for_kv", key = node.key, val = node.val, expr = node.expr,
-                                     body = resolve_includes(node.body, load_fn, visited, depth + 1) }
+                                     body = resolve_includes(node.body, load_fn, visited,
+                                                             depth, nest + 1, budget) }
         elseif node.kind == "block" then
             result[#result + 1] = { kind = "block", name = node.name,
-                                     body = resolve_includes(node.body, load_fn, visited, depth + 1) }
+                                     body = resolve_includes(node.body, load_fn, visited,
+                                                             depth, nest + 1, budget) }
         else
             result[#result + 1] = node
         end
@@ -692,7 +769,7 @@ local function codegen(ast)
                 emit("__p[#__p+1] = " .. gen_expr(node.expr, true, locals_set))
 
             elseif node.kind == "raw" then
-                emit("__p[#__p+1] = tostring(" .. gen_expr(node.expr, false, locals_set) .. " or \"\")")
+                emit("__p[#__p+1] = __tostring(" .. gen_expr(node.expr, false, locals_set) .. " or \"\")")
 
             elseif node.kind == "if" then
                 for i, branch in ipairs(node.branches) do
@@ -719,7 +796,7 @@ local function codegen(ast)
                 -- than error, matching JS's `Array.isArray(it) ? it : []`.
                 -- The dot-path is pure, so evaluating it twice is safe.
                 local for_src = gen_dot_path(node.expr, nil, locals_set)
-                emit("for _, " .. node.var .. " in ipairs(type(" .. for_src ..
+                emit("for _, " .. node.var .. " in __ipairs(__type(" .. for_src ..
                      ") == \"table\" and " .. for_src .. " or {}) do")
                 locals_set[node.var] = (locals_set[node.var] or 0) + 1
                 indent = indent + 1
@@ -733,7 +810,7 @@ local function codegen(ast)
                 validate_ident(node.key, "for loop key")
                 validate_ident(node.val, "for loop value")
                 local forkv_src = gen_dot_path(node.expr, nil, locals_set)
-                emit("for " .. node.key .. ", " .. node.val .. " in pairs(type(" .. forkv_src ..
+                emit("for " .. node.key .. ", " .. node.val .. " in __pairs(__type(" .. forkv_src ..
                      ") == \"table\" and " .. forkv_src .. " or {}) do")
                 locals_set[node.key] = (locals_set[node.key] or 0) + 1
                 locals_set[node.val] = (locals_set[node.val] or 0) + 1
@@ -753,10 +830,15 @@ local function codegen(ast)
         end
     end
 
+    -- The globals the generated code calls, captured under reserved "__"
+    -- names: a loop variable named `type`, `pairs`, `tostring` or `table`
+    -- shadowed the global and broke the render.
+    lines[#lines + 1] = "local __ipairs, __pairs, __type, __tostring, __concat"
+                        .. " = ipairs, pairs, type, tostring, table.concat"
     lines[#lines + 1] = "return function(__d, __e, __f)"
     lines[#lines + 1] = "  local __p = {}"
     gen_body(ast)
-    lines[#lines + 1] = "  return table.concat(__p)"
+    lines[#lines + 1] = "  return __concat(__p)"
     lines[#lines + 1] = "end"
 
     return table.concat(lines, "\n")

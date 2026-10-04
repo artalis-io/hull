@@ -55,46 +55,52 @@ end
 
 --- Run `fn` with retries.
 --
--- @tparam function fn  The operation. Its return value is passed through on
---   success; a raised error or a `retry_on`-flagged result triggers a retry.
+-- @tparam function fn  The operation. ALL its return values are passed
+--   through on success; a raised error or a `retry_on`-flagged result
+--   triggers a retry. A failure must RAISE (or be flagged by `retry_on`): a
+--   Lua-style `return nil, err` is a successful call that returned nil. To
+--   retry those, pass `retry_on = function(v, err) return v == nil end`.
+--   (Only the first value used to come back, so `nil, err` arrived as plain
+--   `nil` with the reason lost.)
 -- @tparam[opt] table opts
 --   - `max_attempts`   (integer, default 3) total attempts, including the first.
 --   - `base_ms` / `factor` / `cap_ms` / `jitter` - see @{retry.backoff}.
---   - `retry_on`       `function(result) -> boolean` - retry on a "bad" success
---                      value (e.g. an HTTP 5xx). Absent: only a raised error
+--   - `retry_on`       `function(...) -> boolean` - called with every value
+--                      `fn` returned; retry on a "bad" success (e.g. an HTTP
+--                      5xx, or `nil, err`). Absent: only a raised error
 --                      retries.
 --   - `retry_on_error` `function(err) -> boolean` - return false to treat an
 --                      error as PERMANENT and re-raise immediately (no retry).
 --                      Absent: every error retries.
 --   - `on_retry`       `function(attempt, ok, value)` - called before each
 --                      backoff sleep (for logging / metrics).
--- @return The successful (or last) result of `fn`. Re-raises the last error if
---   all attempts errored.
+-- @return Every value the successful (or last) call of `fn` returned.
+--   Re-raises the last error if all attempts errored.
 function retry.run(fn, opts)
     opts = opts or {}
     local max = opts.max_attempts or DEFAULTS.max_attempts
-    local last_ok, last_val = false, nil
+    local last = { n = 1, false }
     for attempt = 1, max do
-        local ok, val = pcall(fn)
-        last_ok, last_val = ok, val
-        if ok then
-            if not (opts.retry_on and opts.retry_on(val)) then
-                return val
+        local r = table.pack(pcall(fn))
+        last = r
+        if r[1] then
+            if not (opts.retry_on and opts.retry_on(table.unpack(r, 2, r.n))) then
+                return table.unpack(r, 2, r.n)
             end
         else
-            if opts.retry_on_error and not opts.retry_on_error(val) then
-                error(val)
+            if opts.retry_on_error and not opts.retry_on_error(r[2]) then
+                error(r[2])
             end
         end
         if attempt < max then
-            if opts.on_retry then opts.on_retry(attempt, ok, val) end
+            if opts.on_retry then opts.on_retry(attempt, r[1], r[2]) end
             hull.sleep(retry.backoff(attempt, opts))
         end
     end
     -- Exhausted. A trailing error re-raises; a retry_on-flagged success returns
-    -- the last value (the caller's predicate can inspect it).
-    if last_ok then return last_val end
-    error(last_val)
+    -- the last values (the caller's predicate can inspect them).
+    if last[1] then return table.unpack(last, 2, last.n) end
+    error(last[2])
 end
 
 return retry

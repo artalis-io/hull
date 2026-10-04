@@ -62,7 +62,13 @@ end
 --   - `pattern` (string) - Lua pattern the value must match.
 --   - `oneof` (`{any,...}`) - value must equal one of the listed values.
 --   - `email` (boolean) - practical RFC-5322 subset (good for form screening).
---   - `fn` (`function(value) -> boolean`) - custom validator.
+--   - `fn` (`function(value, field, data)`) - custom validator. Return
+--     `true` or `nil` when the value is valid, `false` when it is not
+--     (the error is `message` or "is invalid"), or a string, which is
+--     the error message. Any other return fails closed ("is invalid").
+--     (A boolean was documented here, but every truthy return - `true`
+--     included - used to be taken as the error, so a validator written to
+--     the documentation accepted exactly what it meant to reject.)
 --   - `message` (string) - override the default error message.
 --
 -- @tparam table data    Input. Non-table input is treated as `{}`.
@@ -198,9 +204,11 @@ function validate.check(data, schema)
 
         -- 9. fn (custom validator)
         if rules.fn then
-            local fn_err = rules.fn(value, field, data)
-            if fn_err then
-                err = fn_err
+            local verdict = rules.fn(value, field, data)
+            if type(verdict) == "string" then
+                err = verdict
+            elseif verdict ~= nil and verdict ~= true then
+                err = custom_msg or "is invalid"
             end
         end
 

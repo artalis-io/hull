@@ -37,7 +37,10 @@ const esc = htmx.escape;
  *
  * role="button" + tabindex="0" make the cell keyboard-
  * activatable; Enter and Space on the focused span fire the
- * click (browser default for role="button"). Swap is outerHTML
+ * click via the widget script (inline-edit.js) - not an htmx
+ * keyup[key==...] filter, which under csp = "htmx" (allowEval:false)
+ * evaluates as always true, so any keystroke in the editor fired the
+ * cancel request and lost the edit. Swap is outerHTML
  * so the entire cell is replaced by the editor fragment.
  */
 function cell(opts) {
@@ -48,7 +51,7 @@ function cell(opts) {
     return '<span class="hull-inline-edit-view" role="button" tabindex="0"'
         + ` aria-label="${label}" title="${label}"`
         + ` hx-get="${editUrl}"`
-        + ` hx-trigger="click, keyup[key=='Enter'] from:this, keyup[key==' '] from:this"`
+        + ' hx-trigger="click"'
         + ' hx-swap="outerHTML">'
         + value
         + '</span>';
@@ -83,7 +86,7 @@ function editor(opts) {
         + saveLabel + '</button>'
         + '<button type="button" class="hull-inline-edit-cancel"'
         + ` hx-get="${cancelUrl}"`
-        + ` hx-trigger="click, keyup[key=='Escape'] from:closest form"`
+        + ' hx-trigger="click"'
         + ' hx-target="closest form" hx-swap="outerHTML">'
         + cancelLabel + '</button>'
         + '</form>';

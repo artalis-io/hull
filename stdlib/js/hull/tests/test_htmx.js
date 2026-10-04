@@ -3,6 +3,7 @@
 // Lua parity: same coverage as stdlib/lua/hull/tests/test_htmx.lua.
 
 import { htmx } from "hull:web:htmx";
+import { pagination as htmxPagination } from "hull:web:htmx:pagination";
 
 let pass = 0;
 let fail = 0;
@@ -190,6 +191,25 @@ test("redirect on htmx request sets HX-Redirect + 204", () => {
     assertEq(res.getBody(), "");
 });
 
+// htmx assigns HX-Redirect to location.href: a javascript: URL ran script.
+test("redirect refuses non-http(s) schemes and control chars", () => {
+    const req = { headers: { "hx-request": "true" } };
+    for (const bad of ["javascript:alert(1)", "JavaScript:x", "data:text/html,x",
+                       " javascript:x", "java\tscript:x", "/a\nb", "", "\\evil", null]) {
+        const res = mockRes();
+        let threw = false;
+        try { htmx.redirect(req, res, bad); } catch (e) { threw = true; }
+        if (!threw) throw new Error("accepted " + bad);
+        if (res.headersSet["HX-Redirect"] !== undefined) throw new Error("header set for " + bad);
+    }
+    for (const good of ["/x", "x/y", "?page=2", "#top", "https://a.example/p",
+                        "HTTP://a.example", "/a:b"]) {
+        const res = mockRes();
+        htmx.redirect(req, res, good);
+        assertEq(res.headersSet["HX-Redirect"], good);
+    }
+});
+
 test("redirect on plain request falls back to res.redirect", () => {
     const req = { headers: {} };
     const res = mockRes();
@@ -197,6 +217,20 @@ test("redirect on plain request falls back to res.redirect", () => {
     assertEq(res.headersSet.__redirect_to, "/after-login");
     if (res.headersSet["HX-Redirect"] !== undefined)
         throw new Error("HX-Redirect should not be set on plain request");
+});
+
+// ── htmx pagination nav ─────────────────────────────────────────────
+
+// baseUrl / defaultPerPage reach the page math: they were passed as
+// base_url / default_per_page, which render() ignores, so the links were
+// "?page=2" (the current page's route) with per_page always appended.
+test("pagination.nav honours baseUrl and defaultPerPage", () => {
+    const s = htmxPagination.nav(100, { page: 1, perPage: 10, defaultPerPage: 10,
+                                        baseUrl: "/todos/rows", target: "#rows" });
+    if (s.indexOf('hx-get="/todos/rows?page=2"') < 0)
+        throw new Error("expected a link to /todos/rows?page=2 in " + s);
+    if (s.indexOf("per_page=") >= 0)
+        throw new Error("per_page appended although it is the default: " + s);
 });
 
 // ── Done ─────────────────────────────────────────────────────────────

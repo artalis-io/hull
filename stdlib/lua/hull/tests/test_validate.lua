@@ -193,6 +193,24 @@ end)
 
 -- ── custom fn ────────────────────────────────────────────────────────
 
+-- A boolean validator works as documented: true passes, false fails.
+-- Every truthy return used to be taken as the error, so this one
+-- accepted "admin" and rejected everything else.
+test("fn: boolean true passes, false fails", function()
+    local schema = { role = { fn = function(v) return v ~= "admin" end } }
+    local ok1 = validate.check({ role = "user" }, schema)
+    assert_eq(ok1, true, "true return should pass")
+    local ok2, errs = validate.check({ role = "admin" }, schema)
+    assert_eq(ok2, false, "false return should fail")
+    assert_eq(errs.role, "is invalid")
+    local ok3, errs3 = validate.check({ role = "admin" },
+        { role = { fn = function() return false end, message = "nope" } })
+    assert_eq(ok3, false)
+    assert_eq(errs3.role, "nope")
+    local ok4 = validate.check({ x = 1 }, { x = { fn = function() return {} end } })
+    assert_eq(ok4, false, "a non-boolean non-string return fails closed")
+end)
+
 test("fn: nil return passes", function()
     local ok = validate.check({ x = "ok" }, { x = { fn = function() return nil end } })
     assert_eq(ok, true)

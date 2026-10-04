@@ -124,12 +124,18 @@ end
 -- @tparam[opt="/health"] string opts.path_health  Liveness path.
 -- @tparam[opt="/ready"]  string opts.path_ready   Readiness path.
 -- @tparam[opt=true]      boolean opts.db_check    Include DB ping in `/ready`.
+-- @tparam[opt=false]     boolean opts.details     Also return each check's
+--   error text and latency, and the server stats. Off by default: `/ready`
+--   is normally unauthenticated, and the raw error strings (DB driver
+--   errors, a check's message) and server stats went to any caller. Turn
+--   it on only behind auth or a private listener.
 -- @treturn function(req, res) -> 0|1
 function health.middleware(opts)
     opts = opts or {}
     local path_health = opts.path_health or "/health"
     local path_ready  = opts.path_ready or "/ready"
     local do_db_check = opts.db_check ~= false
+    local details     = opts.details == true
 
     if not _start_time then
         _start_time = time.now()
@@ -151,17 +157,22 @@ function health.middleware(opts)
         if req.path == path_ready then
             local result = health.run_checks({ db_check = do_db_check })
 
+            local checks = result.checks
+            if not details then
+                checks = {}
+                for name, r in pairs(result.checks) do
+                    checks[name] = { status = r.status }
+                end
+            end
             local body = {
                 status = result.all_ok and "ok" or "fail",
-                checks = result.checks,
+                checks = checks,
                 uptime = uptime,
             }
 
-            -- Include server stats if available. Pre-fix used
-            -- `server` (undefined free global, always nil in the
-            -- sandboxed VM) so the branch was dead and the docstring's
-            -- promised stats block never reached /ready responses.
-            if http_server and http_server.stats then
+            -- Server stats, with details only. (Pre-fix used `server`,
+            -- an undefined free global, so this branch was dead.)
+            if details and http_server and http_server.stats then
                 body.stats = http_server.stats()
             end
 

@@ -207,6 +207,19 @@ test("date default pattern without locale format", () => {
     assertEq(i18n.date(1705320000), "2024-01-15");
 });
 
+// ── tIn() ────────────────────────────────────────────────────────────
+
+test("tIn translates in an explicit locale, ignoring the active one", () => {
+    i18n.load("en", en);
+    i18n.load("hu", hu);
+    i18n.locale("en");
+    assertEq(i18n.tIn("hu", "invoice.title"), hu.invoice.title);
+    assertEq(i18n.t("invoice.title"), "Invoice");
+    assertEq(i18n.tIn("xx", "invoice.title"), "invoice.title");
+    assertEq(i18n.tIn(null, "invoice.title"), "invoice.title");
+    assertEq(i18n.tIn("constructor", "invoice.title"), "invoice.title");
+});
+
 // ── currency() ───────────────────────────────────────────────────────
 
 test("currency HUF (after, 0 digits)", () => {

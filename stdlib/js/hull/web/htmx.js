@@ -82,8 +82,23 @@ function triggerName(req) {
  *
  * For htmx requests, sets HX-Redirect (htmx navigates the browser).
  * For plain requests, falls back to a normal HTTP 302.
+ *
+ * `path` must be an http(s) URL or a scheme-less relative one: htmx
+ * assigns HX-Redirect to `location.href`, so a `javascript:` URL ran
+ * script. Any other scheme, a control character or whitespace throws.
  */
+function redirectTargetOk(path) {
+    if (typeof path !== "string" || path === "") return false;
+    if (/[\u0000-\u0020\u007f\\]/.test(path)) return false;
+    const lower = path.toLowerCase();
+    if (lower.startsWith("http://") || lower.startsWith("https://")) return true;
+    const head = path.match(/^[^/?#]*/)[0];
+    return head.indexOf(":") < 0;
+}
+
 function redirect(req, res, path) {
+    if (!redirectTargetOk(path))
+        throw new TypeError("htmx.redirect: target must be an http(s) URL or a relative path");
     if (is(req)) {
         res.header("HX-Redirect", path);
         res.status(204);

@@ -124,6 +124,13 @@ function load(name, tbl) {
 
 /**
  * Get or set the active locale.
+ *
+ * The active locale is PROCESS-GLOBAL: every request shares it. Set it
+ * and translate within one synchronous stretch only - a handler that
+ * sets it and then awaits (db.async, http.fetch, a timer) can resume to
+ * find another request's locale. Concurrent requests should pass the
+ * locale explicitly with `tIn`.
+ *
  * @param {string} [name]  When passed, sets the active locale.
  * @returns {string|null}  Current locale name after the call.
  */
@@ -140,8 +147,21 @@ function locale(name) {
  * @returns {string}  Translation, or the key itself when missing.
  */
 function t(key, params) {
-    if (!active || !locales[active]) return key;
-    const val = deepGet(locales[active], key);
+    return tIn(active, key, params);
+}
+
+/**
+ * Translate a key in an EXPLICIT locale - stateless, so safe across an
+ * await: `i18n.tIn(req.locale, "greeting", { name })`. Same lookup,
+ * interpolation and fallback (the key itself) as `t`.
+ * @param {string|null} loc  Locale name (null / unknown -> the key).
+ * @param {string} key
+ * @param {Object} [params]
+ * @returns {string}
+ */
+function tIn(loc, key, params) {
+    if (typeof loc !== "string" || !locales[loc]) return key;
+    const val = deepGet(locales[loc], key);
     if (typeof val !== "string") return key;
     return interpolate(val, params);
 }
@@ -290,5 +310,5 @@ function reset() {
     active = null;
 }
 
-const i18n = { load, locale, t, number, date, currency, detect, reset };
+const i18n = { load, locale, t, tIn, number, date, currency, detect, reset };
 export { i18n };

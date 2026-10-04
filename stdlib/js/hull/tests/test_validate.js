@@ -209,6 +209,22 @@ test("email: no domain fails", () => {
 
 // ── custom fn ────────────────────────────────────────────────────────
 
+// A boolean validator works as documented: true passes, false fails.
+test("fn: boolean true passes, false fails", () => {
+    const schema = { role: { fn: (v) => v !== "admin" } };
+    const [ok1] = validate.check({ role: "user" }, schema);
+    assertEq(ok1, true, "true return should pass");
+    const [ok2, errs] = validate.check({ role: "admin" }, schema);
+    assertEq(ok2, false, "false return should fail");
+    assertEq(errs.role, "is invalid");
+    const [ok3, errs3] = validate.check({ role: "admin" },
+        { role: { fn: () => false, message: "nope" } });
+    assertEq(ok3, false);
+    assertEq(errs3.role, "nope");
+    const [ok4] = validate.check({ x: 1 }, { x: { fn: () => ({}) } });
+    assertEq(ok4, false, "a non-boolean non-string return fails closed");
+});
+
 test("fn: null return passes", () => {
     const [ok] = validate.check({ x: "ok" }, { x: { fn: () => null } });
     assertEq(ok, true);

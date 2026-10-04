@@ -111,10 +111,30 @@ end
 -- the browser to `path` after receiving the response. For plain
 -- requests, falls back to a normal HTTP 302.
 --
+-- `path` must be an http(s) URL or a scheme-less relative one: htmx
+-- assigns HX-Redirect to `location.href`, so a `javascript:` URL (an
+-- app's open redirect passing a user value through) ran script. Any
+-- other scheme, a control character or whitespace raises.
+--
 -- @tparam table req   Request object (used to detect htmx).
 -- @tparam table res   Response object.
 -- @tparam string path Target URL.
+local function redirect_target_ok(path)
+    if type(path) ~= "string" or path == "" then return false end
+    if path:find("[%c%s\\]") then return false end
+    local lower = path:lower()
+    if lower:sub(1, 7) == "http://" or lower:sub(1, 8) == "https://" then
+        return true
+    end
+    -- Scheme-less: no ":" before the first "/", "?" or "#".
+    local head = path:match("^[^/?#]*")
+    return not head:find(":", 1, true)
+end
+
 function htmx.redirect(req, res, path)
+    if not redirect_target_ok(path) then
+        error("htmx.redirect: target must be an http(s) URL or a relative path", 2)
+    end
     if htmx.is(req) then
         res:header("HX-Redirect", path)
         res:status(204)

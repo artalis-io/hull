@@ -479,7 +479,7 @@ verify step between successful first-factor auth and `on_login` when
 
 **validate.check(data, schema)**. Declarative input validation.
 - `schema` maps field names to rule tables.
-- Rules: `required`, `trim`, `type` (`"string"`, `"number"`, `"integer"`, `"boolean"`), `min`, `max`, `pattern`, `oneof`, `email`, `fn` (custom validator), `message` (custom error).
+- Rules: `required`, `trim`, `type` (`"string"`, `"number"`, `"integer"`, `"boolean"`), `min`, `max`, `pattern`, `oneof`, `email`, `fn` (custom validator: return `true` / `nil` for valid, `false` for invalid - the error is `message` or "is invalid" - or a string error message; any other return fails closed), `message` (custom error).
 - `min`/`max` apply to string length or numeric value depending on field type.
 - Returns `(ok, errors)` where `errors` maps field names to error strings.
 
@@ -490,8 +490,9 @@ verify step between successful first-factor auth and `on_login` when
 
 **i18n**. Internationalization: locale detection, message bundles, formatting.
 - `i18n.load(name, tbl)`. Register a locale with translations and format rules.
-- `i18n.locale(name?)`. Get or set the active locale.
+- `i18n.locale(name?)`. Get or set the active locale. **Process-global**: every request shares it, so a handler that sets it and then yields or awaits (`db.async`, `http.fetch`, a timer) can resume to another request's locale. Use it only for single-request code; pass the locale explicitly with `t_in` otherwise.
 - `i18n.t(key, params?)` → translated string. Supports `${variable}` interpolation and dot-path keys.
+- `i18n.t_in(locale, key, params?)` (JS `i18n.tIn`) → the same, in an explicit locale, without touching the active one - safe across a yield.
 - `i18n.number(n)` → formatted number (locale-specific decimal/thousands separators).
 - `i18n.date(timestamp)` → formatted date string.
 - `i18n.currency(amount, code)` → formatted currency string (symbol + locale rules).
@@ -678,13 +679,14 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `rbac.require_permission(perm)` → middleware function (403 on denial).
 
 **health**. Liveness (`/health`) and readiness (`/ready`) endpoints with DB ping, custom checks, and server stats.
-- `health.register(name, fn)`. Register a custom health check. `fn()` returns `true` or `false`.
+- `health.register(name, fn)`. Register a custom health check. `fn()` returns `true` or `false`. Checks are synchronous: in JS a check that returns a Promise fails (its Promise used to read as `ok`).
 - `health.unregister(name)`. Remove a registered check.
 - `health.run_checks(opts)` → `{ checks, all_ok }`. `opts.db_check` (default: `true`).
 - `health.middleware(opts)`. Returns middleware that intercepts `/health` and `/ready`.
   - `opts.path_health`. Liveness path (default: `"/health"`). Returns `{ status: "ok", uptime }`.
-  - `opts.path_ready`. Readiness path (default: `"/ready"`). Returns status, checks, uptime, server stats.
+  - `opts.path_ready`. Readiness path (default: `"/ready"`). Returns status, per-check status, uptime.
   - `opts.db_check`. Include DB ping (default: `true`).
+  - `opts.details` (default `false`). Also return each check's error text and latency, and the server stats. `/ready` is normally unauthenticated, so the raw error strings (DB driver errors) and stats are opt-in; enable them only behind auth or on a private listener.
   - Returns `1` on health/ready paths, `0` otherwise (passes through to next handler).
   - Readiness returns 503 if any check fails.
 - **JS only:** `health.setDb(dbModule)`. Pass the db module explicitly (ES modules can't conditionally import). Also accepts `opts.db` in middleware options.
