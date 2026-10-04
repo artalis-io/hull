@@ -392,6 +392,13 @@ test("a rekey presenting another host key is refused as host_changed_midsession"
               true, "fingerprints:")
     -- Refused before B's signature was looked at.
     assert_eq(#calls, 1, "only the first exchange verified a signature:")
+    -- And the connection is finished: the exchange is half done, so nothing
+    -- may be sent on it - a later exec used to send CHANNEL_OPEN into it.
+    assert_eq(t.dead ~= nil, true, "a failed rekey leaves the connection usable:")
+    local och, oerr = t:open_session()
+    assert_eq(och, nil)
+    assert_eq(oerr.code, "host_changed_midsession")
+    assert_raises(function() t:send_packet("\2") end, "send after a failed rekey")
 end)
 
 -- The host key algorithms in the first KEXINIT this client sent.
@@ -1968,6 +1975,104 @@ test("a single key is still accepted as a key, not a list", function()
     local t = authenticating(accept_service() .. auth_success(), signed)
     assert_eq(t:authenticate("u", ED_KEY), true)
     assert_eq(t:stats().auth_key, 1)
+end)
+
+-- audit 4 ---------------------------------------------------------------------
+
+test("strict KEX refuses a CHANNEL_OPEN injected into the exchange", function()
+    -- Only the chatter used to be refused: a CHANNEL_OPEN (or a REQUEST_SUCCESS)
+    -- was absorbed, and a refusal sent, in the middle of the exchange.
+    local open = wire.writer():byte(90):string("x11"):uint32(1):uint32(0)
+                     :uint32(0):build()
+    local s = fake_stream(plain(open) .. plain(string.char(21)), 4)
+    local t = transport.new(s, stub_crypto())
+    local err = assert_raises(function() t:expect(21, "NEWKEYS", true) end)
+    assert_eq(err:find("strict KEX", 1, true) ~= nil, true, err)
+    assert_eq(#s.written, 0, "nothing may be sent mid-exchange:")
+end)
+
+test("strict KEX refuses a REQUEST_SUCCESS injected into the exchange", function()
+    local s = fake_stream(plain(string.char(81)) .. plain(string.char(21)), 4)
+    local t = transport.new(s, stub_crypto())
+    local err = assert_raises(function() t:expect(21, "NEWKEYS", true) end)
+    assert_eq(err:find("strict KEX", 1, true) ~= nil, true, err)
+end)
+
+test("a send while another is in flight is refused before sealing", function()
+    -- The binding refuses a second coroutine's write as busy, but only after
+    -- the packet was sealed: the nonce had advanced, and the connection died
+    -- at the server. Now the transport refuses first, with nothing touched.
+    local s = fake_stream("", 4)
+    local t = transport.new(s, stub_crypto())
+    local nested
+    s.write = function(self, b)
+        if nested == nil then
+            nested = select(2, pcall(t.send_packet, t, "\2"))
+        end
+        self.written[#self.written + 1] = b
+        return true
+    end
+    t:send_packet("\2")
+    assert_eq(tostring(nested):find("busy", 1, true) ~= nil, true, tostring(nested))
+    assert_eq(t.send_seq, 1, "the refused send must not count:")
+    assert_eq(#s.written, 1)
+    assert_eq(t.dead, nil, "a refused second sender does not kill the connection:")
+end)
+
+test("a sealed packet that cannot be written marks the connection dead", function()
+    local s = fake_stream("", 4)
+    s.write = function() return nil, "boom", "error" end
+    local t = transport.new(s, stub_crypto())
+    t.c2s = { seal = function() return "sealed" end }
+    assert_raises(function() t:send_packet("\2") end)
+    assert_eq(t.dead and t.dead.code, "send_failed")
+    local ok, err = pcall(t.send_packet, t, "\2")
+    assert_eq(ok, false)
+    assert_eq(type(err) == "table" and err.code, "send_failed")
+end)
+
+test("an sftp reply sent a byte at a time is assembled", function()
+    -- One CHANNEL_DATA per byte: appending each to a string cost the frame's
+    -- length squared in copying; the chunks are now joined once it is whole.
+    local function bytewise(payload)
+        local bytes, out = sftp_codec.frame(payload), {}
+        for i = 1, #bytes do out[#out + 1] = data(bytes:sub(i, i)) end
+        return table.concat(out)
+    end
+    local f = sftp_over(bytewise(wire.writer():byte(105):uint32(1)
+                         :raw(sftp_codec.encode_attrs({ size = 77 })):build()), 64)
+    local a = assert(f:stat("x"))
+    assert_eq(a.size, 77)
+end)
+
+test("the sftp window is granted back only as data is consumed", function()
+    local channel = require('hull.ssh.channel')
+    local ch = channel.new({ window = 1000 })
+    ch.open, ch.remote_id = true, 0
+    ch.recv_window = 100              -- 900 received
+    -- All 900 still held by the reader: nothing may be granted.
+    assert_eq(ch:window_adjustment(900), nil)
+    -- 400 consumed: exactly that comes back.
+    local adj = ch:window_adjustment(500)
+    assert_eq(adj ~= nil, true)
+    assert_eq(ch.recv_window, 500)
+end)
+
+test("control messages queued for an idle channel are capped", function()
+    local channel = require('hull.ssh.channel')
+    local t = transport.new(fake_stream("", 4), stub_crypto())
+    local idle = channel.new({ id = 5 })
+    idle.open, idle.remote_id = true, 9
+    t.channels[5] = idle
+    local reader = channel.new({ id = 1 })
+    local err = assert_raises(function()
+        for _ = 1, 10000 do
+            t:route(reader, { type = "request", recipient = 5, name = "x",
+                              want_reply = false })
+        end
+    end)
+    assert_eq(err:find("too many messages queued", 1, true) ~= nil, true, err)
+    assert_eq(#idle.inbox <= 256, true, "queued " .. tostring(#idle.inbox))
 end)
 
 return {pass = pass, fail = fail}

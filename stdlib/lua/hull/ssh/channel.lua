@@ -222,6 +222,7 @@ function M.new(opts)
     -- Messages that arrived while another channel was being read: already
     -- applied to this channel's state, waiting for its owner to take them.
     c.inbox, c.inbox_head = {}, 1
+    c.inbox_ctl = 0      -- queued messages that are not window-charged data
     return c
 end
 
@@ -357,10 +358,16 @@ end
 -- Half the initial window is the usual threshold: often enough that a sender
 -- streaming at full rate never stalls, rare enough that a small command does
 -- not generate adjust traffic of its own.
-function Channel:window_adjustment()
+--
+-- `unconsumed` is what the caller has received but not yet taken in (bytes
+-- sitting in its own buffer). They still count against the window: granted
+-- back on RECEIPT, a peer that streamed data the reader was not consuming
+-- got the window reopened every time, and the reader's buffer grew without
+-- bound. Granted on consumption, what is held never exceeds the window.
+function Channel:window_adjustment(unconsumed)
     if not self.open or self.closed then return nil end
     if self.recv_window > self.recv_initial // 2 then return nil end
-    local add = self.recv_initial - self.recv_window
+    local add = self.recv_initial - self.recv_window - (unconsumed or 0)
     if add <= 0 then return nil end
     self.recv_window = self.recv_window + add
     return M.build_window_adjust(self.remote_id, add)

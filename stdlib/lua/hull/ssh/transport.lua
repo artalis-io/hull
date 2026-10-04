@@ -165,11 +165,27 @@ function Transport:quiet(may_ping)
     self:send_packet(KEEPALIVE)
 end
 
+-- One stream call, with the transport marked as having it in flight for its
+-- duration. A stream call can park the coroutine (the binding yields to the
+-- event loop), and a SECOND coroutine using the connection meanwhile is
+-- refused by the binding as "busy" - but for a send, only after the packet
+-- was sealed, which had already advanced the cipher's nonce: the next packet
+-- then failed authentication at the server and the shared connection died.
+-- send_packet consults this flag first, so that caller's mistake is refused
+-- with the cipher state untouched.
+function Transport:stream_call(method, arg)
+    self.io_busy = true
+    local ok, a, b, c = pcall(self.stream[method], self.stream, arg)
+    self.io_busy = false
+    if not ok then error(a, 0) end
+    return a, b, c
+end
+
 -- One read from the stream, however long the server takes, within the rules
 -- above. Returns 1..max bytes, or "" at EOF.
 function Transport:read_some(max)
     for _ = 1, 1000000 do
-        local chunk, err, code = self.stream:read(max)
+        local chunk, err, code = self:stream_call("read", max)
         if chunk then
             if chunk ~= "" then self.quiet_ms, self.unanswered = 0, 0 end
             return chunk
@@ -212,7 +228,7 @@ end
 -- a read, without a keepalive: the queue a keepalive would join is full.
 function Transport:send_raw(bytes)
     for _ = 1, 1000000 do
-        local ok, err, code = self.stream:write(bytes)
+        local ok, err, code = self:stream_call("write", bytes)
         if ok then return end
         if code == "timeout" then
             self:quiet(false)
@@ -249,10 +265,34 @@ end
 -- Packets -------------------------------------------------------------------
 
 -- Before NEWKEYS: plaintext framing. After: the AEAD.
+--
+-- Sealing advances the cipher's state (GCM's invocation counter), so a packet
+-- that was sealed must reach the wire or the connection is finished: the next
+-- one would be sealed under a nonce the peer never saw used. Hence the busy
+-- check BEFORE sealing (see stream_call), and a connection marked dead when a
+-- sealed packet's write fails after all - rather than left looking usable,
+-- with the next send failing authentication at the server.
 function Transport:send_packet(payload)
+    if self.dead then
+        -- Coded like the failure that killed it (a timeout stays a timeout).
+        fail(self.dead.code or "dead",
+             "the connection is no longer usable"
+             .. (self.dead.detail and (": " .. tostring(self.dead.detail)) or ""))
+    end
+    if self.io_busy then
+        error("ssh: busy - another coroutine is using this connection")
+    end
     if self.c2s then
-        self:send_raw(self.c2s:seal(self.aead, payload, self.crypto.random,
-                                    self.send_seq))
+        local sealed = self.c2s:seal(self.aead, payload, self.crypto.random,
+                                     self.send_seq)
+        local ok, err = pcall(self.send_raw, self, sealed)
+        if not ok then
+            if not self.dead then
+                self.dead = { code = "send_failed",
+                              detail = "a sealed packet could not be written" }
+            end
+            error(err, 0)
+        end
     else
         self:send_raw(packet.frame(payload, 8, self.crypto.random))
     end
@@ -375,9 +415,14 @@ function Transport:handle_packet(p, strict)
     do
         local m = p:byte(1)
 
-        if strict and (m == SSH_MSG_IGNORE or m == SSH_MSG_DEBUG
-                       or m == SSH_MSG_UNIMPLEMENTED
-                       or m == SSH_MSG_GLOBAL_REQUEST) then
+        -- Strict KEX allows nothing but the exchange itself (KEXINIT,
+        -- NEWKEYS, the method messages 30-49) until it completes - and a
+        -- DISCONNECT, which is reported below. Only the chatter used to be
+        -- refused here; a CHANNEL_OPEN or REQUEST_SUCCESS / FAILURE injected
+        -- into the exchange was absorbed (and a refusal SENT mid-exchange).
+        if strict and m ~= SSH_MSG_DISCONNECT
+           and not (m == SSH_MSG_KEXINIT or m == kex.SSH_MSG_NEWKEYS
+                    or (m >= 30 and m <= 49)) then
             error("ssh: message " .. tostring(m)
                   .. " is not permitted during key exchange (strict KEX)")
         end
@@ -398,6 +443,11 @@ function Transport:handle_packet(p, strict)
                 error(ok, 0)
             end
             if not ok then
+                -- A reason (a changed host key, a bad signature) leaves the
+                -- exchange half done: the keys are the old ones, the peer is
+                -- mid-exchange. Nothing may be sent on it again.
+                self.dead = { code = "kex_failed",
+                              detail = (why and why.code) or "unknown" }
                 error("ssh: rekey failed: "
                       .. wire.safe_name((why and why.code) or "unknown"))
             end
@@ -456,7 +506,7 @@ function Transport:message_ready()
     if not self.stream.wait then return false end
 
     self.stream:wait(1)
-    local chunk, err, code = self.stream:read(READ_CHUNK)
+    local chunk, err, code = self:stream_call("read", READ_CHUNK)
     self.stream:wait(self.wait_ms > 0 and self.wait_ms or 0)
     if chunk == nil then
         if code == "timeout" then return false end
@@ -550,7 +600,22 @@ function Transport:handshake(opts)
     opts = prefer_known_key(opts)
     self.kex_opts = opts
 
-    return self:run_kex(opts)
+    -- in_kex for the FIRST exchange too: send_reply holds what it owes the
+    -- peer until the keys are in (it sent an OPEN_FAILURE mid-exchange), and
+    -- every way out of a failed exchange leaves the connection dead, so
+    -- nothing is ever sent on it after.
+    self.in_kex = true
+    local done, ok, why = pcall(self.run_kex, self, opts)
+    self.in_kex = false
+    if not done then
+        self.dead = { code = "kex_failed" }
+        error(ok, 0)
+    end
+    if not ok then
+        self.dead = why or { code = "kex_failed" }
+        return nil, why
+    end
+    return true
 end
 
 -- One key exchange: negotiate, exchange, verify the host key, install keys.
@@ -779,7 +844,14 @@ function Transport:rekey()
         self.dead = { code = "kex_failed" }
         error(ok, 0)
     end
-    if not ok then return nil, why end
+    if not ok then
+        -- Returned rather than raised (host_changed_midsession, a bad
+        -- signature), but the exchange is just as unfinished: the peer is
+        -- waiting for our NEWKEYS under keys we never installed. A later
+        -- exec used to send CHANNEL_OPEN into that.
+        self.dead = why or { code = "kex_failed" }
+        return nil, why
+    end
     return true
 end
 
