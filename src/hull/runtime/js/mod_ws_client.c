@@ -92,7 +92,7 @@ static JSValue js_ws_client_send(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {
     (void)argc;
-    HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque(this_val,
                                                              js_ws_client_conn_class_id);
     if (!ud || !ud->client || ud->closed)
         return JS_ThrowTypeError(ctx, "client connection closed");
@@ -110,13 +110,13 @@ static JSValue js_ws_client_send_binary(JSContext *ctx, JSValueConst this_val,
                                           int argc, JSValueConst *argv)
 {
     (void)argc;
-    HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque(this_val,
                                                              js_ws_client_conn_class_id);
     if (!ud || !ud->client || ud->closed)
         return JS_ThrowTypeError(ctx, "client connection closed");
 
     size_t len;
-    uint8_t *buf = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    uint8_t *buf = hl_js_array_buffer_probe(ctx, &len, argv[0]);
     if (!buf) {
         const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
         if (!data) return JS_EXCEPTION;
@@ -131,7 +131,7 @@ static JSValue js_ws_client_send_binary(JSContext *ctx, JSValueConst this_val,
 static JSValue js_ws_client_close(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv)
 {
-    HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque(this_val,
                                                              js_ws_client_conn_class_id);
     if (!ud || !ud->client || ud->closed)
         return JS_UNDEFINED;
@@ -153,7 +153,7 @@ static JSValue js_ws_client_close(JSContext *ctx, JSValueConst this_val,
 static JSValue js_ws_client_ping(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {
-    HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque(this_val,
                                                              js_ws_client_conn_class_id);
     if (!ud || !ud->client || ud->closed)
         return JS_UNDEFINED;

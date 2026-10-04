@@ -325,13 +325,13 @@ static JSValue js_push_async_http_response(JSContext *ctx, void *driver)
         return JS_UNDEFINED;
 
     JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status));
+    JS_DefinePropertyValueStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status), JS_PROP_C_W_E);
 
     if (resp->body && resp->body_len > 0)
-        JS_SetPropertyStr(ctx, obj, "body",
-                          JS_NewStringLen(ctx, resp->body, resp->body_len));
+        JS_DefinePropertyValueStr(ctx, obj, "body",
+                          JS_NewStringLen(ctx, resp->body, resp->body_len), JS_PROP_C_W_E);
     else
-        JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
+        JS_DefinePropertyValueStr(ctx, obj, "body", JS_NewString(ctx, ""), JS_PROP_C_W_E);
 
     /* Headers as { "name": "value" } - lowercase names */
     JSValue headers = JS_NewObject(ctx);
@@ -345,15 +345,15 @@ static JSValue js_push_async_http_response(JSContext *ctx, void *driver)
                     ? resp->headers[i].name[j] + 32
                     : resp->headers[i].name[j]);
             lower[nlen] = '\0';
-            JS_SetPropertyStr(ctx, headers, lower,
-                              JS_NewString(ctx, resp->headers[i].value));
+            JS_DefinePropertyValueStr(ctx, headers, lower,
+                              JS_NewString(ctx, resp->headers[i].value), JS_PROP_C_W_E);
             js_free(ctx, lower);
         } else {
-            JS_SetPropertyStr(ctx, headers, resp->headers[i].name,
-                              JS_NewString(ctx, resp->headers[i].value));
+            JS_DefinePropertyValueStr(ctx, headers, resp->headers[i].name,
+                              JS_NewString(ctx, resp->headers[i].value), JS_PROP_C_W_E);
         }
     }
-    JS_SetPropertyStr(ctx, obj, "headers", headers);
+    JS_DefinePropertyValueStr(ctx, obj, "headers", headers, JS_PROP_C_W_E);
 
     return obj;
 }
@@ -399,27 +399,20 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    /* Start async HTTP */
-    HlAsyncCtx *async_ctx = hl_async_http_start(
-        js->server, js->active_conn, js->base.net_ctx, js->base.alloc,
-        js->base.http_cfg, method, url, headers, num_headers, body, body_len);
-
-    JS_FreeCString(ctx, method);
-    JS_FreeCString(ctx, url);
-    // cppcheck-suppress knownConditionTrueFalse
-    if (body) JS_FreeCString(ctx, body);
-    js_free_http_headers(ctx, headers, num_headers);
-
-    if (!async_ctx)
-        return JS_ThrowInternalError(ctx, "http.fetch: failed to start request");
-
-    /* Create Promise */
+    /* The promise and continuation first, as the Lua binding does:
+     * created after the request was started (and the connection
+     * suspended), a failed allocation returned with ctx->cont NULL and the
+     * request in flight - its completion dereferenced the NULL cont. */
     JSValue resolving_funcs[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
-    if (JS_IsException(promise))
+    if (JS_IsException(promise)) {
+        JS_FreeCString(ctx, method);
+        JS_FreeCString(ctx, url);
+        if (body) JS_FreeCString(ctx, body);
+        js_free_http_headers(ctx, headers, num_headers);
         return JS_EXCEPTION;
+    }
 
-    /* Create JS continuation */
     extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
         JSValue resolve, JSValue reject, HlAllocator *alloc,
         JSValue (*push_result)(JSContext *, void *));
@@ -432,7 +425,30 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, resolving_funcs[0]);
         JS_FreeValue(ctx, resolving_funcs[1]);
         JS_FreeValue(ctx, promise);
+        JS_FreeCString(ctx, method);
+        JS_FreeCString(ctx, url);
+        if (body) JS_FreeCString(ctx, body);
+        js_free_http_headers(ctx, headers, num_headers);
         return JS_ThrowInternalError(ctx, "http.fetch: out of memory");
+    }
+
+    /* Start async HTTP */
+    HlAsyncCtx *async_ctx = hl_async_http_start(
+        js->server, js->active_conn, js->base.net_ctx, js->base.alloc,
+        js->base.http_cfg, method, url, headers, num_headers, body, body_len);
+
+    JS_FreeCString(ctx, method);
+    JS_FreeCString(ctx, url);
+    // cppcheck-suppress knownConditionTrueFalse
+    if (body) JS_FreeCString(ctx, body);
+    js_free_http_headers(ctx, headers, num_headers);
+
+    if (!async_ctx) {
+        /* Never armed: destroy frees resolve / reject (cancel would also
+         * end this still-running handler's request life). */
+        cont->destroy(cont);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "http.fetch: failed to start request");
     }
     async_ctx->cont = cont;
 

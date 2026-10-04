@@ -127,8 +127,8 @@ static JSValue js_push_worker_dispatch_result(JSContext *ctx, void *driver)
 
     if (op->error) {
         JSValue obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, obj, "error",
-                          JS_NewString(ctx, op->error_msg));
+        JS_DefinePropertyValueStr(ctx, obj, "error",
+                          JS_NewString(ctx, op->error_msg), JS_PROP_C_W_E);
         return obj;
     }
 
@@ -165,7 +165,7 @@ static JSValue js_push_worker_dispatch_result(JSContext *ctx, void *driver)
                 val = JS_NULL;
                 break;
             }
-            JS_SetPropertyStr(ctx, obj, op->result_kvs[i].key, val);
+            JS_DefinePropertyValueStr(ctx, obj, op->result_kvs[i].key, val, JS_PROP_C_W_E);
         }
         return obj;
     }
@@ -311,7 +311,8 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
     if (!actx->detached &&
         hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
-        actx->cont->cancel(actx->cont);
+        /* Never armed: destroy frees resolve / reject. cancel() would also
+         * end the still-running handler's request life. */
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;
         JS_FreeValue(ctx, promise);

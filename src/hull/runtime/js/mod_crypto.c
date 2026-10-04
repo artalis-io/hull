@@ -65,8 +65,8 @@ static JSValue js_keypair_object(JSContext *ctx, const uint8_t *pk, size_t pklen
 {
     JSValue obj = JS_NewObject(ctx);
     if (!JS_IsException(obj)) {
-        JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewArrayBufferCopy(ctx, pk, pklen));
-        JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewArrayBufferCopy(ctx, sk, sklen));
+        JS_DefinePropertyValueStr(ctx, obj, "publicKey", JS_NewArrayBufferCopy(ctx, pk, pklen), JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(ctx, obj, "secretKey", JS_NewArrayBufferCopy(ctx, sk, sklen), JS_PROP_C_W_E);
     }
     secure_zero(sk, sklen);
     return obj;
@@ -92,9 +92,13 @@ static JSValue js_hmac(JSContext *ctx, int argc, JSValueConst *argv,
     int rc = mac(key.view.data, key.view.len, data.view.data, data.view.len, out);
     js_msg_free(ctx, &data);
     js_msg_free(ctx, &key);
-    if (rc != 0)
+    if (rc != 0) {
+        secure_zero(out, outlen);
         return JS_ThrowInternalError(ctx, "%s failed", fn);
-    return JS_NewArrayBufferCopy(ctx, out, outlen);
+    }
+    JSValue ab = JS_NewArrayBufferCopy(ctx, out, outlen);
+    secure_zero(out, outlen);   /* the caller's stack buffer */
+    return ab;
 }
 
 /* crypto.sha256(data) -> ArrayBuffer (32 bytes). `data` is any buffer, or a
@@ -319,6 +323,7 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
 
     uint8_t salt[16];
     if (hex_decode_compat(salt_hex, 32, salt, sizeof(salt)) != 0) {
+        secure_zero(salt, sizeof(salt));
         JS_FreeCString(ctx, pw); return JS_FALSE;
     }
 
@@ -326,14 +331,20 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
     uint8_t computed[32];
     if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
                                (int)iterations, computed, sizeof(computed)) != 0) {
+        secure_zero(computed, sizeof(computed));
+        secure_zero(salt, sizeof(salt));
         JS_FreeCString(ctx, pw);
         return JS_FALSE;
     }
     JS_FreeCString(ctx, pw);
 
     uint8_t stored_hash[32];
-    if (hex_decode_compat(hash_hex, 64, stored_hash, sizeof(stored_hash)) != 0)
+    if (hex_decode_compat(hash_hex, 64, stored_hash, sizeof(stored_hash)) != 0) {
+        secure_zero(computed, sizeof(computed));
+        secure_zero(stored_hash, sizeof(stored_hash));
+        secure_zero(salt, sizeof(salt));
         return JS_FALSE;
+    }
 
     /* Constant-time comparison */
     volatile uint8_t diff = 0;
@@ -752,6 +763,7 @@ static JSValue js_crypto_secretbox_open(JSContext *ctx, JSValueConst this_val,
             if (hl_cap_crypto_secretbox_open(msg, ct.view.data, ct.view.len,
                                              nonce.view.data, key.view.data) == 0)
                 ret = JS_NewArrayBufferCopy(ctx, msg, msg_len);
+            secure_zero(msg, msg_len);   /* decrypted plaintext */
             js_free(ctx, msg);
         }
     }
@@ -840,6 +852,7 @@ static JSValue js_crypto_box_open(JSContext *ctx, JSValueConst this_val,
             if (hl_cap_crypto_box_open(msg, ct.view.data, ct.view.len, nonce.view.data,
                                        pk.view.data, sk.view.data) == 0)
                 ret = JS_NewArrayBufferCopy(ctx, msg, msg_len);
+            secure_zero(msg, msg_len);   /* decrypted plaintext */
             js_free(ctx, msg);
         }
     }

@@ -78,6 +78,10 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
         out->len = ab_len;
         return 1;
     }
+    /* JS_GetArrayBuffer THROWS on anything else: drain that TypeError, or a
+     * typed-array / string match below returned success with it pending,
+     * and a later JS_EXCEPTION return surfaced this stale error instead. */
+    JS_FreeValue(ctx, JS_GetException(ctx));
     /* TypedArray (Uint8Array, Int8Array, Uint16Array, ...). Without
      * this branch a Uint8Array would fall through to the string path
      * and base64url-encode literally "65,66,67" (the toString output)

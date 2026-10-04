@@ -353,7 +353,7 @@ static JSValue js_image_from_wasm(JSContext *ctx, JSValueConst this_val,
     if (argc < 1) return JS_ThrowTypeError(ctx, "image.fromWasm: data required");
 
     size_t len;
-    const uint8_t *data = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    const uint8_t *data = hl_js_array_buffer_probe(ctx, &len, argv[0]);
     const char *str_data = NULL;
     if (!data) {
         /* Try string */

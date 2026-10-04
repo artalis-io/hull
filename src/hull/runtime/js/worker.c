@@ -79,7 +79,7 @@ static int js_worker_interrupt(JSRuntime *rt, void *opaque)
 {
     (void)rt;
     HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)opaque;
-    wctx->instructions++;
+    wctx->instructions += HL_JS_INTERRUPT_WEIGHT;   /* see internal.h */
     return wctx->max_instructions > 0 &&
            wctx->instructions > wctx->max_instructions;
 }

@@ -6535,7 +6535,7 @@ JS_WORKER_CASE(the_function_s_own_toString_is_not_what_runs, (void)0,
     "  const r = await worker.dispatch(f);\n"
     "  check(r === 'real', 'ran ' + r);\n")
 
-JS_WORKER_CASE(a_runaway_dispatch_is_stopped, js.max_instructions = 1000,
+JS_WORKER_CASE(a_runaway_dispatch_is_stopped, js.max_instructions = 1000000,   /* polls weigh 10000 each */
     "  const m = await fails(() => { for (;;) {} });\n"
     "  check(m.includes('interrupted'), m);\n")
 
@@ -6599,5 +6599,112 @@ JS_WORKER_CASE(db_async_rows_are_built_like_db_query_rows,
     "  check(Object.getPrototypeOf(r) === Object.prototype, 'prototype replaced');\n"
     "  const d = Object.getOwnPropertyDescriptor(r, '__proto__');\n"
     "  check(d && d.value === 7, 'no own __proto__ column');\n")
+
+/* ── Audit 4: the JS runtime ──────────────────────────────────────────── */
+
+/* Run a module in the caps-bearing context; 0 on success. */
+static int a4_module(const char *code)
+{
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    int bad = JS_IsException(val);
+    if (bad) hl_js_dump_error(&js);
+    hl_js_run_jobs(&js);
+    /* Module evaluation returns a promise: a throw rejects it. */
+    if (!bad && JS_IsObject(val) &&
+        JS_PromiseState(js.ctx, val) == JS_PROMISE_REJECTED) {
+        JSValue err = JS_PromiseResult(js.ctx, val);
+        const char *m = JS_ToCString(js.ctx, err);
+        fprintf(stderr, "module rejected: %s\n", m ? m : "?");
+        if (m) JS_FreeCString(js.ctx, m);
+        JS_FreeValue(js.ctx, err);
+        bad = 1;
+    }
+    JS_FreeValue(js.ctx, val);
+    return bad ? -1 : 0;
+}
+
+/* The limit counts what it says: QuickJS polls the handler once per 10000
+ * steps, and each poll used to count as one - a 1M limit allowed ~10^10. */
+UTEST(js_audit4, instruction_limit_is_not_ten_thousand_times_weaker)
+{
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    cfg.max_instructions = 1000000;
+    HlJS lim;
+    memset(&lim, 0, sizeof lim);
+    ASSERT_EQ(hl_js_init(&lim, &cfg), 0);
+    const char *code = "let i = 0; while (i < 50000000) i++; i";
+    JSValue v = JS_Eval(lim.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_GLOBAL);
+    EXPECT_TRUE(JS_IsException(v));
+    JS_FreeValue(lim.ctx, v);
+    JS_FreeValue(lim.ctx, JS_GetException(lim.ctx));
+    hl_js_free(&lim);
+}
+
+/* A UDF querying its own connection: the statement cache evicted (or reset)
+ * the statement still being stepped. Refused now, with a clear error. */
+UTEST(js_audit4, udf_cannot_query_its_own_connection)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const c = dbMod.default();\n"
+        "c.exec('CREATE TABLE a4u (x INTEGER)');\n"
+        "c.exec('INSERT INTO a4u VALUES (1), (2)');\n"
+        "c.udf.register('hull_a4f', () => {\n"
+        "  for (let i = 0; i < 40; i++) c.query('SELECT ' + i);\n"
+        "  return 1;\n"
+        "});\n"
+        "let msg = 'no error';\n"
+        "try { c.query('SELECT hull_a4f() FROM a4u'); } catch (e) { msg = String(e && e.message || e); }\n"
+        "globalThis.__a4_udf = msg;\n"
+        "globalThis.__a4_after = c.query('SELECT count(*) AS n FROM a4u')[0].n;\n"
+        /* Before teardown: SQLite releases the function after the runtime. */
+        "c.udf.unregister('hull_a4f');\n"), 0);
+    char *msg = eval_str("globalThis.__a4_udf");
+    ASSERT_NE(msg, NULL);
+    EXPECT_NE(strstr(msg, "own connection"), NULL);
+    free(msg);
+    EXPECT_EQ(eval_int("globalThis.__a4_after"), 2);   /* the connection still works */
+    cleanup_js_caps();
+}
+
+/* A params element whose getter throws fails the call; it was bound NULL. */
+UTEST(js_audit4, db_param_getter_that_throws_fails_the_call)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const c = dbMod.default();\n"
+        "const p = [1];\n"
+        "Object.defineProperty(p, 0, { get() { throw new Error('boom'); } });\n"
+        "let threw = 0;\n"
+        "try { c.query('SELECT ? AS v', p); } catch (e) { threw = 1; }\n"
+        "let big = 0;\n"
+        "const sparse = []; sparse.length = 1e9;\n"
+        "try { c.query('SELECT 1', sparse); } catch (e) { big = 1; }\n"
+        "globalThis.__a4_p = threw * 10 + big;\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a4_p"), 11);
+    cleanup_js_caps();
+}
+
+/* A typed array is stored as its bytes by the buffer protocol, and a
+ * failed ArrayBuffer probe leaves no exception behind. */
+UTEST(js_audit4, buffer_probe_leaves_no_pending_exception)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a4_module(
+        "import { crypto } from 'hull:crypto';\n"
+        "const a = new Uint8Array(crypto.sha256(new Uint8Array([97, 98, 99])));\n"
+        "const b = new Uint8Array(crypto.sha256('abc'));\n"
+        "let same = a.length === b.length;\n"
+        "for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) same = false;\n"
+        "globalThis.__a4_buf = same ? 1 : 0;\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a4_buf"), 1);
+    cleanup_js_caps();
+}
 
 UTEST_MAIN();

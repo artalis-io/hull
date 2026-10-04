@@ -167,6 +167,10 @@ typedef struct HlJS {
     /* Limits applied to worker.dispatch VMs (the app's own). */
     size_t          max_heap_bytes;
     size_t          max_stack_bytes;
+
+    /* hull:blob's current store (HlJsBlobRef*, mod_blob.c): held here, not
+     * on a global an app accessor could swap out from under C. */
+    void           *blob_ref;
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */

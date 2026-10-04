@@ -304,10 +304,13 @@ static int hl_js_ensure_response_class(HlJS *js)
     if (js->response_class_registered)
         return 0;
 
-    JSClassID class_id = 0;
-    JS_NewClassID(&class_id);
+    /* One id for the process (JS_NewClassID assigns only once), the class
+     * registered in each runtime: a fresh id per runtime overwrote the global
+     * the finalizer reads, so an older runtime's finalizer compared against
+     * the wrong id and leaked its boxes (and their life references). */
+    JS_NewClassID(&g_response_class_id);
+    JSClassID class_id = g_response_class_id;
     js->response_class_id = (uint32_t)class_id;
-    g_response_class_id = class_id;
 
     JSRuntime *rt = JS_GetRuntime(js->ctx);
     if (JS_NewClass(rt, class_id, &hl_response_class) < 0)

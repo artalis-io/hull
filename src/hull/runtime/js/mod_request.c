@@ -52,8 +52,10 @@
 #include <keel/http_request.h>
 
 #include "quickjs.h"
+#include "internal.h"   /* HlJsRunLink and the run helpers */
 
 #include <stdlib.h>
+#include <stddef.h>   /* offsetof */
 #include <string.h>
 
 /* ── Forward declarations (cross-runtime helpers) ────────────────────── */
@@ -91,6 +93,13 @@ typedef struct HlJsMpIter {
     KlHttpBodyReader *inner;
     HlJS         *js;
     HlAllocator  *alloc;
+    /* The request it reads: Keel frees the wrapper with the request (a
+     * keep-alive reset, the connection's release), so every use first
+     * checks the request's life (reference held) and that its connection
+     * is the one being served. */
+    HlReqLife    *life;
+    KlHttpConn   *conn;
+    KlHttpRequest *req;
 
     int           done;        /* parser returned DONE */
     int           errored;     /* parser returned ERROR */
@@ -143,11 +152,12 @@ typedef enum {
 
 typedef struct HlJsMpCont {
     HlAsyncCont   base;           /* resume = mp_js_pump */
+    HlJsRunLink   link;           /* second: the HlJsContHead layout - this
+                                   * run's handler promise and chain */
     HlJS         *js;
     HlAllocator  *alloc;
     JSValue       resolve;        /* of the iter.next/chunks.next/read Promise */
     JSValue       reject;
-    JSValue       handler_promise;/* the OUTER (handler) Promise, set by dispatch */
     KlHttpConn       *conn;
     KlHttpRequest    *req;        /* for kl_http_request_send_response at completion */
     HlJsMpIter   *iter;           /* not owned; ref-bumped at construction */
@@ -194,7 +204,17 @@ static void hl_mp_iter_unref(HlJsMpIter *it)
     if (!it) return;
     if (--it->refs > 0) return;
     hl_mp_iter_clear_meta(it);
+    hl_req_life_release(it->life);
     hl_alloc_free(it->alloc, it, sizeof(*it));
+}
+
+/* NULL when the iterator may touch its body reader; otherwise why not. */
+static const char *mp_unusable(const HlJsMpIter *it)
+{
+    if (!hl_req_life_live(it->life) ||
+        (it->conn && it->js->active_conn != it->conn))
+        return "req.multipart(): the request is over";
+    return NULL;
 }
 
 static int hl_mp_iter_copy_meta(HlJsMpIter *it, const KlHttpMultipartPartMeta *meta)
@@ -249,8 +269,8 @@ static JSValue make_iter_result(JSContext *ctx, JSValue value, int done)
 {
     JSValue obj = JS_NewObject(ctx);
     if (JS_IsException(obj)) { JS_FreeValue(ctx, value); return obj; }
-    JS_SetPropertyStr(ctx, obj, "value", value);
-    JS_SetPropertyStr(ctx, obj, "done", JS_NewBool(ctx, done));
+    JS_DefinePropertyValueStr(ctx, obj, "value", value, JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, obj, "done", JS_NewBool(ctx, done), JS_PROP_C_W_E);
     return obj;
 }
 
@@ -308,10 +328,12 @@ static void mp_js_cont_set_handler_promise_impl(HlAsyncCont *self,
                                                   void *ctx_v,
                                                   void *promise_v)
 {
-    HlJsMpCont *jc = (HlJsMpCont *)self;
-    JSContext *ctx = (JSContext *)ctx_v;
-    JSValue promise = *(JSValue *)promise_v;
-    jc->handler_promise = JS_DupValue(ctx, promise);
+    /* Joins the run like a standard continuation: a multipart read
+     * awaited alongside another op (Promise.all) used to sit outside the
+     * chain - resuming last, it held no handler promise and the request
+     * was never answered. */
+    hl_js_run_wire(hl_js_cont_link(self), (JSContext *)ctx_v,
+                   *(JSValue *)promise_v, NULL);
 }
 
 /* Drive the parser; return either:
@@ -523,8 +545,11 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     JSContext *ctx = js->ctx;
     KlHttpConn *conn = jc->conn;
 
-    /* Restore per-request context (in case a nested op inspects it) */
+    /* Restore per-request context: a re-park, or a nested op, reads both
+     * (left as it was, active_req named another request - or none). */
     js->active_conn = conn;
+    js->active_req  = jc->req;
+    js->last_async_cont = NULL;   /* see hl_js_async_resume */
 
     PumpStep s;
     switch (jc->mode) {
@@ -539,7 +564,9 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     }
 
     if (!s.ready) {
-        /* Still NEED_DATA. Re-park; cont survives unchanged. */
+        /* Still NEED_DATA. Re-park; cont survives unchanged. (This runs from
+         * the wrapper's own callback, which cleared its registration, and
+         * the parser only asks for more while the body is still open.) */
         hl_cap_multipart_park(jc->iter->wrapper, mp_js_park_thunk, jc);
         return;
     }
@@ -566,18 +593,31 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
 
     /* Check outer handler-Promise state */
     JSPromiseStateEnum state = JS_PROMISE_PENDING;
-    if (!JS_IsUndefined(jc->handler_promise))
-        state = JS_PromiseState(ctx, jc->handler_promise);
+    if (!JS_IsUndefined(jc->link.handler_promise))
+        state = JS_PromiseState(ctx, jc->link.handler_promise);
+
+    /* Another continuation of this run already completed the handler. */
+    if ((state == JS_PROMISE_FULFILLED || state == JS_PROMISE_REJECTED) &&
+        !hl_js_run_claim(&jc->link)) {
+        JS_FreeValue(ctx, jc->link.handler_promise);
+        jc->link.handler_promise = JS_UNDEFINED;
+        jc->conn = NULL;
+        js->active_conn = NULL;
+        js->active_req  = NULL;
+        self->destroy(self);
+        return;
+    }
 
     if (state == JS_PROMISE_FULFILLED || state == JS_PROMISE_REJECTED)
         hl_req_life_kill(jc->life);   /* the handler is done with its request */
 
     if (state == JS_PROMISE_FULFILLED) {
-        JS_FreeValue(ctx, jc->handler_promise);
-        jc->handler_promise = JS_UNDEFINED;
+        JS_FreeValue(ctx, jc->link.handler_promise);
+        jc->link.handler_promise = JS_UNDEFINED;
         jc->conn = NULL;
         js->async_pending = 0;
         js->active_conn = NULL;
+        js->active_req = NULL;
         if (conn) {
             /* This resume runs from the multipart body reader's on_data (not
              * kl_async_complete), so Hull drives the send: build on
@@ -590,7 +630,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
             kl_http_request_send_response(jc->req);
         }
     } else if (state == JS_PROMISE_REJECTED) {
-        JSValue err = JS_PromiseResult(ctx, jc->handler_promise);
+        JSValue err = JS_PromiseResult(ctx, jc->link.handler_promise);
         const char *msg = JS_ToCString(ctx, err);
         /* log via stderr to match the standard async-resume path */
         if (msg) {
@@ -598,11 +638,12 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
             JS_FreeCString(ctx, msg);
         }
         JS_FreeValue(ctx, err);
-        JS_FreeValue(ctx, jc->handler_promise);
-        jc->handler_promise = JS_UNDEFINED;
+        JS_FreeValue(ctx, jc->link.handler_promise);
+        jc->link.handler_promise = JS_UNDEFINED;
         jc->conn = NULL;
         js->async_pending = 0;
         js->active_conn = NULL;
+        js->active_req = NULL;
         if (conn) {
             KlHttpResponse *res = kl_http_conn_response(conn);
             kl_http_response_status(res, 500);
@@ -610,19 +651,21 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
             kl_http_response_body_borrow(res, "Internal Server Error", 21);
             kl_http_request_send_response(jc->req);
         }
-    } else if (!JS_IsUndefined(jc->handler_promise)) {
+    } else if (!JS_IsUndefined(jc->link.handler_promise)) {
         /* PENDING - handler awaited again. A new cont was created
          * during the microtask drain; transfer the handler-Promise
          * via the cont's vtable (could be HlJsMpCont or the standard
          * HlJsAsyncCont - the slot dispatches to the right setter). */
         if (js->last_async_cont) {
-            hl_js_async_cont_set_handler_promise(
-                (HlAsyncCont *)js->last_async_cont, ctx, jc->handler_promise);
+            hl_js_run_wire(hl_js_cont_link((HlAsyncCont *)js->last_async_cont),
+                           ctx, jc->link.handler_promise, jc->link.once);
             js->last_async_cont = NULL;
         }
-        JS_FreeValue(ctx, jc->handler_promise);
-        jc->handler_promise = JS_UNDEFINED;
+        JS_FreeValue(ctx, jc->link.handler_promise);
+        jc->link.handler_promise = JS_UNDEFINED;
         jc->conn = NULL;
+        js->active_conn = NULL;
+        js->active_req  = NULL;
     }
 
     /* Done. Free the cont. */
@@ -631,9 +674,16 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
 
 static void mp_js_park_thunk(void *ctx, HlMultipartResumeReason reason)
 {
-    (void)reason;
     HlAsyncCont *cont = (HlAsyncCont *)ctx;
-    if (cont && cont->resume) cont->resume(cont, NULL);
+    if (!cont) return;
+    if (reason == HL_MP_RESUME_CANCEL) {
+        /* The reader is being destroyed with the connection: the handler
+         * never resumes. Release the continuation (cancel ends the life). */
+        cont->cancel(cont);
+        cont->destroy(cont);
+        return;
+    }
+    if (cont->resume) cont->resume(cont, NULL);
 }
 
 static void mp_js_cont_cancel(HlAsyncCont *self)
@@ -642,7 +692,11 @@ static void mp_js_cont_cancel(HlAsyncCont *self)
     JSContext *ctx = jc->js->ctx;
     if (!JS_IsUndefined(jc->resolve))         { JS_FreeValue(ctx, jc->resolve);         jc->resolve = JS_UNDEFINED; }
     if (!JS_IsUndefined(jc->reject))          { JS_FreeValue(ctx, jc->reject);          jc->reject  = JS_UNDEFINED; }
-    if (!JS_IsUndefined(jc->handler_promise)) { JS_FreeValue(ctx, jc->handler_promise); jc->handler_promise = JS_UNDEFINED; }
+    if (!JS_IsUndefined(jc->link.handler_promise)) { JS_FreeValue(ctx, jc->link.handler_promise); jc->link.handler_promise = JS_UNDEFINED; }
+    if (jc->js->active_conn == jc->conn) {
+        jc->js->active_conn = NULL;
+        jc->js->active_req  = NULL;
+    }
     jc->conn = NULL;
     hl_req_life_kill(jc->life);   /* the connection, and its request, are gone */
 }
@@ -664,9 +718,13 @@ static void mp_js_cont_destroy(HlAsyncCont *self)
         JS_FreeValue(jc->js->ctx, jc->owner);
     hl_req_life_release(jc->life);
     jc->life = NULL;
-    /* Never leave dispatch a pointer to a freed continuation. */
+    /* Never leave dispatch a pointer to a freed continuation (and keep the
+     * run's chain). */
     if (jc->js && jc->js->last_async_cont == jc)
-        jc->js->last_async_cont = NULL;
+        jc->js->last_async_cont = jc->link.unwired_prev
+            ? (void *)((char *)jc->link.unwired_prev - offsetof(HlJsContHead, link))
+            : NULL;
+    hl_js_run_unlink(&jc->link, jc->js ? jc->js->ctx : NULL);
     hl_alloc_free(jc->alloc, jc, sizeof(*jc));
 }
 
@@ -680,20 +738,35 @@ static void mp_js_cont_destroy(HlAsyncCont *self)
  * and reject; on failure paths the caller is responsible for freeing
  * those + the promise capability themselves before returning.
  */
+/* Why a park cannot be made (NULL: it can). Shared by every park site. */
+static const char *mp_park_refusal(const HlJsMpIter *it)
+{
+    const char *bad = mp_unusable(it);
+    if (bad) return bad;
+    if (!it->js->active_conn)
+        return "req.multipart(): no active connection (streaming routes "
+               "require a live server)";
+    /* The parser wants more, but none can come: parked, the callback fired
+     * inline and resumed the handler from inside this call. */
+    int st = hl_cap_multipart_state(it->wrapper);
+    if (st == 1) return "req.multipart(): the request body ended inside a part";
+    if (st != 0) return "req.multipart(): reading the request body failed";
+    return NULL;
+}
+
 static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
                        HlJsMpPart *part, HlJsMpChunks *chunks,
                        JSValueConst owner,
-                       JSValue resolve, JSValue reject)
+                       JSValue resolve, JSValue reject, const char **why)
 {
     HlJS *js = it->js;
+    *why = mp_park_refusal(it);
+    if (*why) return -1;
     KlHttpConn *conn = js->active_conn;
-    if (!conn) {
-        /* Streaming routes only work behind a live connection. */
-        return -1;
-    }
 
     HlJsMpCont *jc = hl_alloc_malloc(it->alloc, sizeof(*jc));
     if (!jc) return -1;
+    memset(jc, 0, sizeof(*jc));   /* a refused park destroys it before the push */
 
     jc->base.resume              = mp_js_pump;
     jc->base.cancel              = mp_js_cont_cancel;
@@ -703,9 +776,9 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
     jc->alloc           = it->alloc;
     jc->resolve         = resolve;
     jc->reject          = reject;
-    jc->handler_promise = JS_UNDEFINED;
+    jc->link.handler_promise = JS_UNDEFINED;
     jc->conn            = conn;
-    jc->req             = js->active_req;
+    jc->req             = it->req;
     jc->iter            = hl_mp_iter_ref(it);
     jc->mode            = mode;
     jc->read_buf        = NULL;
@@ -717,19 +790,23 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
     jc->life            = js->active_life;
     hl_req_life_retain(jc->life);
 
-    /* Side-effect so dispatch picks up the cont for handler_promise wiring. */
-    js->last_async_cont = jc;
-
-    if (hl_cap_multipart_park(it->wrapper, mp_js_park_thunk, jc) != 0) {
+    int prc = hl_cap_multipart_park(it->wrapper, mp_js_park_thunk, jc);
+    if (prc != 0) {
+        jc->resolve = jc->reject = JS_UNDEFINED;   /* the caller frees them */
         jc->base.destroy(&jc->base);
+        *why = prc == -2 ? "req.multipart(): a read is already pending"
+                         : "req.multipart(): body reader is not multipart";
         return -1;
     }
+    /* Side-effect so dispatch picks up the cont for handler_promise wiring
+     * (only once it is really parked), chained into the run. */
+    hl_js_run_push(js, &jc->base);
 
     /* Keel 3.x streaming-async: park and keep reading the request body; Keel
      * re-enters via the body reader's on_data. Replaces the pre-3.0 internal
      * conn->state = KL_HTTP_CONN_READING_BODY (kl_http_request_await_body is the
      * public "park, keep reading" call added in 3.0.0-rc.2). */
-    kl_http_request_await_body(it->js->active_req);
+    kl_http_request_await_body(it->req);
     (void)ctx;
     return 0;
 }
@@ -786,6 +863,8 @@ static JSValue js_iter_next(JSContext *ctx, JSValueConst this_val,
     (void)argc; (void)argv;
     HlJsMpIter *it = JS_GetOpaque2(ctx, this_val, hl_mp_iter_class_id);
     if (!it) return JS_EXCEPTION;
+    const char *bad = mp_unusable(it);
+    if (bad) return JS_ThrowInternalError(ctx, "%s", bad);
 
     /* Stage a temporary cont struct on the stack to share the pump impl.
      * If the seed call returns ready, we don't allocate the heap cont. */
@@ -795,7 +874,7 @@ static JSValue js_iter_next(JSContext *ctx, JSValueConst this_val,
     stage.alloc           = it->alloc;
     stage.resolve         = JS_UNDEFINED;
     stage.reject          = JS_UNDEFINED;
-    stage.handler_promise = JS_UNDEFINED;
+    stage.link.handler_promise = JS_UNDEFINED;
     stage.conn            = it->js->active_conn;
     stage.iter            = it; /* not refcounted - stage is stack only */
     stage.mode            = MP_MODE_ITER;
@@ -810,14 +889,13 @@ static JSValue js_iter_next(JSContext *ctx, JSValueConst this_val,
     JSValue resolving[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving);
     if (JS_IsException(promise)) return JS_EXCEPTION;
+    const char *why = NULL;
     if (mp_js_park(ctx, it, MP_MODE_ITER, NULL, NULL, JS_UNDEFINED,
-                    resolving[0], resolving[1]) != 0) {
+                    resolving[0], resolving[1], &why) != 0) {
         JS_FreeValue(ctx, resolving[0]);
         JS_FreeValue(ctx, resolving[1]);
         JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx,
-            "req.multipart(): no active connection (streaming routes "
-            "require a live server)");
+        return JS_ThrowInternalError(ctx, "%s", why);
     }
     return promise;
 }
@@ -838,6 +916,8 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     HlJsMpPart *p = JS_GetOpaque2(ctx, this_val, hl_mp_part_class_id);
     if (!p) return JS_EXCEPTION;
     HlJsMpIter *it = p->iter;
+    const char *bad = mp_unusable(it);
+    if (bad) return JS_ThrowInternalError(ctx, "%s", bad);
 
     if (p->spent || !it->in_part)
         return resolve_with(ctx, JS_NewStringLen(ctx, "", 0));
@@ -864,9 +944,9 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     jc->alloc           = it->alloc;
     jc->resolve         = resolving[0];
     jc->reject          = resolving[1];
-    jc->handler_promise = JS_UNDEFINED;
+    jc->link.handler_promise = JS_UNDEFINED;
     jc->conn            = it->js->active_conn;
-    jc->req             = it->js->active_req;
+    jc->req             = it->req;
     jc->iter            = hl_mp_iter_ref(it);
     jc->mode            = MP_MODE_READ;
     jc->part            = p;
@@ -894,24 +974,23 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Not ready - park */
-    KlHttpConn *conn = it->js->active_conn;
-    if (!conn) {
+    const char *why = mp_park_refusal(it);
+    int prc = why ? -1 : hl_cap_multipart_park(it->wrapper, mp_js_park_thunk, jc);
+    if (prc != 0) {
+        if (!why)
+            why = prc == -2 ? "req.multipart(): a read is already pending"
+                            : "req.multipart(): body reader is not multipart";
+        JS_FreeValue(ctx, jc->resolve); jc->resolve = JS_UNDEFINED;
+        JS_FreeValue(ctx, jc->reject);  jc->reject  = JS_UNDEFINED;
         jc->base.destroy(&jc->base);
         JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx,
-            "req.multipart(): no active connection");
+        return JS_ThrowInternalError(ctx, "%s", why);
     }
-    it->js->last_async_cont = jc;
-    if (hl_cap_multipart_park(it->wrapper, mp_js_park_thunk, jc) != 0) {
-        jc->base.destroy(&jc->base);
-        JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx,
-            "req.multipart(): body reader is not multipart");
-    }
+    hl_js_run_push(it->js, &jc->base);
     /* Keel 3.x streaming-async: park and keep reading the request body; Keel
      * re-enters via the body reader's on_data (public kl_http_request_await_body,
      * added in 3.0.0-rc.2, replaces the pre-3.0 internal conn->state write). */
-    kl_http_request_await_body(it->js->active_req);
+    kl_http_request_await_body(it->req);
     return promise;
 }
 
@@ -923,6 +1002,8 @@ static JSValue js_chunks_next(JSContext *ctx, JSValueConst this_val,
     HlJsMpChunks *c = JS_GetOpaque2(ctx, this_val, hl_mp_chunks_class_id);
     if (!c) return JS_EXCEPTION;
     HlJsMpIter *it = c->iter;
+    const char *bad = mp_unusable(it);
+    if (bad) return JS_ThrowInternalError(ctx, "%s", bad);
 
     HlJsMpCont stage;
     memset(&stage, 0, sizeof(stage));
@@ -931,7 +1012,7 @@ static JSValue js_chunks_next(JSContext *ctx, JSValueConst this_val,
     stage.iter   = it;
     stage.mode   = MP_MODE_CHUNKS;
     stage.chunks = c;
-    stage.resolve = stage.reject = stage.handler_promise = JS_UNDEFINED;
+    stage.resolve = stage.reject = stage.link.handler_promise = JS_UNDEFINED;
     stage.conn   = it->js->active_conn;
 
     PumpStep s = pump_chunks_step(ctx, &stage);
@@ -943,13 +1024,13 @@ static JSValue js_chunks_next(JSContext *ctx, JSValueConst this_val,
     JSValue resolving[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving);
     if (JS_IsException(promise)) return JS_EXCEPTION;
+    const char *why = NULL;
     if (mp_js_park(ctx, it, MP_MODE_CHUNKS, NULL, c, this_val,
-                    resolving[0], resolving[1]) != 0) {
+                    resolving[0], resolving[1], &why) != 0) {
         JS_FreeValue(ctx, resolving[0]);
         JS_FreeValue(ctx, resolving[1]);
         JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx,
-            "req.multipart(): no active connection");
+        return JS_ThrowInternalError(ctx, "%s", why);
     }
     return promise;
 }
@@ -1046,12 +1127,31 @@ static const JSClassDef js_chunks_class = { "MultipartChunks", .finalizer = js_c
 
 /* ── req.multipart() entry point ─────────────────────────────────────── */
 
-/*
- * Closure invariants: upvalue 0 = pointer (as a number JSValue) to the
- * KlHttpBodyReader wrapper. QuickJS doesn't expose lightuserdata; we pack
- * the pointer as an Int64 the same way the existing bindings do for the
- * handful of other native-state-bearing closures.
- */
+/* What req.multipart() is bound to: the request's body reader, its life
+ * (reference held) and its connection. It used to carry the reader's
+ * address as a number - kept by the closure past the request, which Keel
+ * then freed under it. */
+typedef struct {
+    KlHttpBodyReader *wrapper;
+    HlReqLife        *life;
+    KlHttpConn       *conn;
+    KlHttpRequest    *req;
+} HlJsMpOwner;
+
+static JSClassID hl_mp_owner_class_id;
+
+static void js_mp_owner_finalizer(JSRuntime *rt, JSValue val)
+{
+    (void)rt;
+    HlJsMpOwner *o = JS_GetOpaque(val, hl_mp_owner_class_id);
+    if (!o) return;
+    hl_req_life_release(o->life);
+    free(o);
+}
+
+static const JSClassDef js_mp_owner_class = {
+    "MultipartOwner", .finalizer = js_mp_owner_finalizer
+};
 
 static JSValue js_req_multipart(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv,
@@ -1059,39 +1159,36 @@ static JSValue js_req_multipart(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv; (void)magic;
 
-    int64_t wrapper_addr;
-    if (JS_ToInt64(ctx, &wrapper_addr, func_data[0]) != 0)
-        return JS_ThrowInternalError(ctx,
-            "req.multipart(): missing body-reader address");
-
-    KlHttpBodyReader *wrapper = (KlHttpBodyReader *)(uintptr_t)wrapper_addr;
-    if (!wrapper)
-        return JS_ThrowInternalError(ctx,
-            "req.multipart(): no body reader");
-
-    KlHttpBodyReader *inner = hl_cap_multipart_inner(wrapper);
-    if (!inner)
-        return JS_ThrowInternalError(ctx,
-            "req.multipart(): body reader is not a streaming-multipart wrapper");
+    HlJsMpOwner *o = JS_GetOpaque(func_data[0], hl_mp_owner_class_id);
+    if (!o || !o->wrapper)
+        return JS_ThrowInternalError(ctx, "req.multipart(): no body reader");
 
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js) return JS_ThrowInternalError(ctx,
         "req.multipart(): no JS runtime context");
 
+    if (!hl_req_life_live(o->life) || (o->conn && js->active_conn != o->conn))
+        return JS_ThrowInternalError(ctx, "req.multipart(): the request is over");
+
+    KlHttpBodyReader *inner = hl_cap_multipart_inner(o->wrapper);
+    if (!inner)
+        return JS_ThrowInternalError(ctx,
+            "req.multipart(): body reader is not a streaming-multipart wrapper");
+
+    JSValue obj = JS_NewObjectClass(ctx, (int)hl_mp_iter_class_id);
+    if (JS_IsException(obj)) return obj;
     HlJsMpIter *it = hl_alloc_malloc(js->base.alloc, sizeof(*it));
-    if (!it) return JS_ThrowOutOfMemory(ctx);
+    if (!it) { JS_FreeValue(ctx, obj); return JS_ThrowOutOfMemory(ctx); }
     memset(it, 0, sizeof(*it));
-    it->wrapper = wrapper;
+    it->wrapper = o->wrapper;
     it->inner   = inner;
     it->js      = js;
     it->alloc   = js->base.alloc;
+    it->life    = o->life;
+    hl_req_life_retain(it->life);
+    it->conn    = o->conn;
+    it->req     = o->req;
     it->refs    = 1; /* the iter JS object holds the first ref */
-
-    JSValue obj = JS_NewObjectClass(ctx, (int)hl_mp_iter_class_id);
-    if (JS_IsException(obj)) {
-        hl_alloc_free(it->alloc, it, sizeof(*it));
-        return obj;
-    }
     JS_SetOpaque(obj, it);
     return obj;
 }
@@ -1104,16 +1201,28 @@ static JSValue js_req_multipart(JSContext *ctx, JSValueConst this_val,
  * (i.e. the route was registered via kl_http_server_route_streaming).
  */
 void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
-                                      KlHttpBodyReader *body_reader)
+                                      KlHttpBodyReader *body_reader,
+                                      HlReqLife *life, KlHttpConn *conn,
+                                      KlHttpRequest *req)
 {
     if (!body_reader || !hl_cap_multipart_inner(body_reader)) return;
 
-    /* Wrapper pointer as Int64 - QuickJS doesn't have lightuserdata. */
-    JSValue addr_val = JS_NewInt64(ctx, (int64_t)(intptr_t)body_reader);
-    JSValueConst func_data[1] = { addr_val };
+    JSValue owner = JS_NewObjectClass(ctx, (int)hl_mp_owner_class_id);
+    if (JS_IsException(owner)) return;
+    HlJsMpOwner *o = calloc(1, sizeof *o);
+    if (!o) { JS_FreeValue(ctx, owner); return; }
+    o->wrapper = body_reader;
+    o->life    = life;
+    hl_req_life_retain(life);
+    o->conn    = conn;
+    o->req     = req;
+    JS_SetOpaque(owner, o);
+
+    JSValueConst func_data[1] = { owner };
     JSValue fn = JS_NewCFunctionData(ctx, js_req_multipart, 0, 0, 1, func_data);
-    JS_FreeValue(ctx, addr_val);
-    JS_SetPropertyStr(ctx, req_obj, "multipart", fn);
+    JS_FreeValue(ctx, owner);
+    if (JS_IsException(fn)) return;
+    JS_DefinePropertyValueStr(ctx, req_obj, "multipart", fn, JS_PROP_C_W_E);
 }
 
 /* ── Class registration ─────────────────────────────────────────────── */
@@ -1130,6 +1239,9 @@ void hl_js_request_register(JSContext *ctx)
 
     JS_NewClassID(&hl_mp_chunks_class_id);
     JS_NewClass(rt, hl_mp_chunks_class_id, &js_chunks_class);
+
+    JS_NewClassID(&hl_mp_owner_class_id);
+    JS_NewClass(rt, hl_mp_owner_class_id, &js_mp_owner_class);
 
     /* MultipartIter prototype: next() + [Symbol.asyncIterator]() */
     {

@@ -246,7 +246,7 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     JSValue uni_val = JS_GetPropertyStr(ctx, opts_val, "uniforms");
     if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
         size_t uni_len;
-        uint8_t *uni_ab = JS_GetArrayBuffer(ctx, &uni_len, uni_val);
+        uint8_t *uni_ab = hl_js_array_buffer_probe(ctx, &uni_len, uni_val);
         if (uni_ab) {
             opts.uniforms = uni_ab;
             opts.uniforms_len = uni_len;
@@ -295,7 +295,7 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
                 JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
                 if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                     size_t dlen;
-                    uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                    uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                     if (dab) {
                         buf_data_vals[buf_count] = JS_DupValue(ctx, dv);
                         bufs[buf_count].data = dab;
@@ -826,7 +826,7 @@ static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
             JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
             if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                 size_t dlen;
-                uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                 if (dab) {
                     keep[i] = JS_DupValue(ctx, dv);
                     descs[i].data = dab;
@@ -918,7 +918,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     size_t uni_len = 0;
     JSValue uni_val = JS_GetPropertyStr(ctx, opts_val, "uniforms");
     if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
-        uint8_t *uni_ab = JS_GetArrayBuffer(ctx, &uni_len, uni_val);
+        uint8_t *uni_ab = hl_js_array_buffer_probe(ctx, &uni_len, uni_val);
         if (uni_ab && uni_len > 0) {
             uni_copy = malloc(uni_len);
             if (uni_copy) memcpy(uni_copy, uni_ab, uni_len);
@@ -979,7 +979,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                     JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
                     if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                         size_t dlen;
-                        uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                        uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                         if (dab && dlen > 0) {
                             buf_data_ptrs[buf_count] = malloc(dlen);
                             if (buf_data_ptrs[buf_count]) {
@@ -1101,7 +1101,8 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     if (!actx->detached &&
         hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
-        actx->cont->cancel(actx->cont);
+        /* Never armed: destroy frees resolve / reject. cancel() would also
+         * end the still-running handler's request life. */
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;
         JS_FreeValue(ctx, promise);
@@ -1181,7 +1182,7 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         JSValue uni = JS_GetPropertyStr(ctx, stage_val, "uniforms");
         if (!JS_IsUndefined(uni) && !JS_IsNull(uni)) {
             size_t ulen;
-            uint8_t *uab = JS_GetArrayBuffer(ctx, &ulen, uni);
+            uint8_t *uab = hl_js_array_buffer_probe(ctx, &ulen, uni);
             if (uab) {
                 js_keep[js_keep_count++] = JS_DupValue(ctx, uni);
                 stages[s].uniforms = uab;
@@ -1227,7 +1228,7 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
                     JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
                     if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                         size_t dlen;
-                        uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                        uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                         if (dab) {
                             js_keep[js_keep_count++] = JS_DupValue(ctx, dv);
                             all_bufs[buf_offset + b].data = dab;
@@ -1467,7 +1468,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         JSValue uni = JS_GetPropertyStr(ctx, stage_val, "uniforms");
         if (!JS_IsUndefined(uni) && !JS_IsNull(uni)) {
             size_t ulen;
-            uint8_t *uab = JS_GetArrayBuffer(ctx, &ulen, uni);
+            uint8_t *uab = hl_js_array_buffer_probe(ctx, &ulen, uni);
             if (uab && ulen > 0) {
                 op->stage_uniforms[s] = malloc(ulen);
                 if (op->stage_uniforms[s]) {
@@ -1521,7 +1522,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                     JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
                     if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                         size_t dlen;
-                        uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                        uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                         if (dab && dlen > 0) {
                             op->buffer_data[buf_off] = malloc(dlen);
                             if (op->buffer_data[buf_off]) {
@@ -1681,7 +1682,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
     if (!actx->detached &&
         hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
-        actx->cont->cancel(actx->cont);
+        /* Never armed: destroy frees resolve / reject. cancel() would also
+         * end the still-running handler's request life. */
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;
         JS_FreeValue(ctx, promise);

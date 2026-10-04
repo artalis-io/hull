@@ -212,10 +212,15 @@ extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
  */
 static void mp_park_resume(void *ctx, HlMultipartResumeReason reason)
 {
-    (void)reason; /* iter's drive loop figures out from the next parser event */
     HlAsyncCont *cont = (HlAsyncCont *)ctx;
     if (!cont) return;
-    if (cont->resume)  cont->resume(cont, NULL);
+    if (reason == HL_MP_RESUME_CANCEL) {
+        /* The connection is going away: the handler never resumes. */
+        if (cont->cancel)  cont->cancel(cont);
+    } else if (cont->resume) {
+        /* iter's drive loop figures the rest out from the next parser event */
+        cont->resume(cont, NULL);
+    }
     if (cont->destroy) cont->destroy(cont);
 }
 

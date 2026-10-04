@@ -42,6 +42,7 @@ typedef enum {
     HL_DB_ERR_EXEC     = -3,  /**< `sqlite3_step` returned an error. */
     HL_DB_ERR_BUSY     = -4,  /**< Lock contention; caller may retry. */
     HL_DB_ERR_DENIED   = -5,  /**< Namespace violation (`_hull_*` table access from user code). */
+    HL_DB_ERR_REENTERED = -6, /**< Called while one of this connection's statements is stepping (from a UDF). */
 } HlDbError;
 
 /* ── Prepared statement cache ──────────────────────────────────────── */
@@ -69,6 +70,12 @@ typedef struct HlStmtCache {
     HlAllocator       *alloc;
     HlStmtCacheEntry   entries[HL_STMT_CACHE_SIZE];
     int                count;
+    /* Set while a statement from this cache is being stepped. A UDF runs
+     * inside that step; a query or exec from it on the same connection
+     * re-entered the cache, whose LRU eviction (or reset, for the same
+     * SQL) finalized the statement still executing - a use-after-free.
+     * Such a call is refused with HL_DB_ERR_REENTERED. */
+    int                stepping;
 } HlStmtCache;
 
 /**

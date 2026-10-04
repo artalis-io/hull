@@ -137,6 +137,7 @@ void hl_js_timer_trampoline(void *user_data)
     }
 
     /* Call handler() */
+    js->last_async_cont = NULL;   /* only this run's continuations chain */
     JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 0, NULL);
     JS_FreeValue(ctx, handler);
 

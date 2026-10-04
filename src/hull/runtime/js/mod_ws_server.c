@@ -126,7 +126,7 @@ static const JSClassDef js_ws_conn_class = {
 
 static JSValue js_ws_conn_get_id(JSContext *ctx, JSValueConst this_val)
 {
-    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque(this_val,
                                                          js_ws_conn_class_id);
     if (!ud || !ud->conn)
         return JS_ThrowTypeError(ctx, "WebSocket connection is closed");
@@ -135,7 +135,7 @@ static JSValue js_ws_conn_get_id(JSContext *ctx, JSValueConst this_val)
 
 static JSValue js_ws_conn_get_path(JSContext *ctx, JSValueConst this_val)
 {
-    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque(this_val,
                                                          js_ws_conn_class_id);
     if (!ud || !ud->conn)
         return JS_ThrowTypeError(ctx, "WebSocket connection is closed");
@@ -144,7 +144,7 @@ static JSValue js_ws_conn_get_path(JSContext *ctx, JSValueConst this_val)
 
 static JSValue js_ws_conn_get_data(JSContext *ctx, JSValueConst this_val)
 {
-    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque(this_val,
                                                          js_ws_conn_class_id);
     if (!ud)
         return JS_UNDEFINED;
@@ -157,7 +157,7 @@ static JSValue js_ws_conn_get_data(JSContext *ctx, JSValueConst this_val)
 static JSValue js_ws_conn_set_data(JSContext *ctx, JSValueConst this_val,
                                      JSValueConst val)
 {
-    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque(this_val,
                                                          js_ws_conn_class_id);
     if (!ud)
         return JS_UNDEFINED;
@@ -173,7 +173,7 @@ static JSValue js_ws_conn_send(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
     (void)argc;
-    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque(this_val,
                                                          js_ws_conn_class_id);
     if (!ud || !ud->conn || ud->conn->closed || !ud->conn->kl_ws)
         return JS_ThrowTypeError(ctx, "connection closed");
@@ -194,13 +194,13 @@ static JSValue js_ws_conn_send_binary(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv)
 {
     (void)argc;
-    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque(this_val,
                                                          js_ws_conn_class_id);
     if (!ud || !ud->conn || ud->conn->closed || !ud->conn->kl_ws)
         return JS_ThrowTypeError(ctx, "connection closed");
 
     size_t len;
-    uint8_t *buf = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    uint8_t *buf = hl_js_array_buffer_probe(ctx, &len, argv[0]);
     if (!buf) {
         /* Try string fallback */
         const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
@@ -217,7 +217,7 @@ static JSValue js_ws_conn_send_binary(JSContext *ctx, JSValueConst this_val,
 static JSValue js_ws_conn_close(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
-    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque(this_val,
                                                          js_ws_conn_class_id);
     if (!ud || !ud->conn || ud->conn->closed || !ud->conn->kl_ws)
         return JS_UNDEFINED;
@@ -241,7 +241,7 @@ static JSValue js_ws_conn_close(JSContext *ctx, JSValueConst this_val,
 static JSValue js_ws_conn_ping(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
-    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque2(ctx, this_val,
+    HlJSWsConnUD *ud = (HlJSWsConnUD *)JS_GetOpaque(this_val,
                                                          js_ws_conn_class_id);
     if (!ud || !ud->conn || ud->conn->closed || !ud->conn->kl_ws)
         return JS_UNDEFINED;

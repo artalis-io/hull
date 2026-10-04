@@ -671,6 +671,10 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `db.udf.register(name, {step, finalize}, opts?)`. Register aggregate UDF.
 - `db.udf.register(name, "module_name", opts?)`. Register WASM-backed UDF.
 - `db.udf.unregister(name)`. Remove a registered UDF.
+- A UDF runs inside the statement that calls it, so it cannot `query` / `exec`
+  on its own connection: such a call is refused ("a user-defined function
+  cannot query its own connection"). Before, it could evict or reset the
+  statement still being stepped.
 - `opts.deterministic`. Boolean, enables SQLite optimizer (default: false)
 - `opts.aggregate`. Boolean, WASM aggregate mode (default: false)
 - `opts.args`. Number of arguments (-1 = variadic, default: 1)
