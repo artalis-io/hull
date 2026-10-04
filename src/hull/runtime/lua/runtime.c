@@ -15,6 +15,7 @@
 #include "internal.h"
 
 #include "hull/utils/alloc.h"
+#include "hull/runtime/cache_common.h"   /* hl_runtime_cache_seal_prepare */
 #include "hull/http_feature.h"  /* hl_http_ws_registry_free (HTTP-feature seam) */
 #include "hull/shared/async_backend.h"
 #include "hull/manifest.h"
