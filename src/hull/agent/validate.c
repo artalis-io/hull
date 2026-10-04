@@ -117,7 +117,9 @@ static int validate_lua(const char *path, const char *content, size_t len,
     int cn = snprintf(chunkbuf, sizeof chunkbuf, "@%s", path);
     if (cn > 0 && (size_t)cn < sizeof chunkbuf)
         chunkname = chunkbuf;
-    int rc = luaL_loadbuffer(L, content, len, chunkname);
+    /* Text only: "bt" loaded precompiled bytecode from an arbitrary file
+     * (QuickJS / Lua do not verify bytecode). */
+    int rc = luaL_loadbufferx(L, content, len, chunkname, "t");
     int ok = (rc == LUA_OK);
     sh_json_write_kv_bool(&w, "ok", ok);
     if (!ok) {

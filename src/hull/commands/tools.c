@@ -93,6 +93,8 @@ static int compose_tag(char *out, size_t out_sz, const char *override)
     if (v[0] == 'v') v++;
     int n = snprintf(out, out_sz, "v%s", v);
     if (n < 0 || (size_t)n >= out_sz) return -1;
+    /* It goes into URL paths: a --tag with "/" or "?" retargeted them. */
+    if (!hl_release_io_tag_valid(out)) return -1;
     return 0;
 }
 
@@ -257,6 +259,31 @@ static void print_unpublished(const HlToolSpec *spec, const char *platform)
     }
 }
 
+/* Recursively remove a file or directory tree (an extracted bundle, which may
+ * be nested - zig's lib/). Depth is bounded by the bundle's real nesting.
+ * Returns 0 on success, -1 on any failure (errno set). */
+static int rm_rf(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(st.st_mode)) return unlink(path) == 0 ? 0 : -1;
+
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    int rc = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        char child[PATH_MAX];
+        int n = snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) { rc = -1; continue; }
+        if (rm_rf(child) != 0) rc = -1;
+    }
+    closedir(d);
+    if (rmdir(path) != 0) rc = -1;
+    return rc;
+}
+
 static int install_one(const HlToolSpec *spec, const char *platform,
                        const char *repo, const char *tag,
                        KlAllocator *alloc, KlTlsCtx *tls,
@@ -283,7 +310,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
     }
 
     /* Download. */
-    char asset_url[256];
+    char asset_url[1024];
     snprintf(asset_url, sizeof(asset_url),
              "https://github.com/%s/releases/download/%s/%s",
              repo, tag, asset);
@@ -364,10 +391,35 @@ static int install_one(const HlToolSpec *spec, const char *platform,
      * executable: extract the just-verified archive into ~/.hull/tools/<name>/
      * and we're done - no blob chmod / symlink dance. */
     if (spec->is_bundle) {
-        char dest[PATH_MAX];
+        /* Into a fresh sibling, then swapped in: extracted over the live
+         * directory, files of the old version survived a reinstall, a
+         * partial extraction still left the driver / sentinel in place (so
+         * the tool read as installed), and an existing symlink there was
+         * followed by the write. */
+        char dest[PATH_MAX], tmp[PATH_MAX], old[PATH_MAX];
         int rc = hl_tools_install_path(spec->name, dest, sizeof(dest));
-        if (rc == 0)
-            rc = hl_tar_extract((const unsigned char *)body, body_len, dest);
+        if (rc == 0) {
+            int n1 = snprintf(tmp, sizeof tmp, "%s.tmp.%ld", dest, (long)getpid());
+            int n2 = snprintf(old, sizeof old, "%s.old.%ld", dest, (long)getpid());
+            if (n1 < 0 || (size_t)n1 >= sizeof tmp ||
+                n2 < 0 || (size_t)n2 >= sizeof old)
+                rc = -1;
+        }
+        if (rc == 0) {
+            (void)rm_rf(tmp);
+            rc = hl_tar_extract((const unsigned char *)body, body_len, tmp);
+        }
+        if (rc == 0) {
+            struct stat dst;
+            int had = lstat(dest, &dst) == 0;
+            if (had && rename(dest, old) != 0) rc = -1;
+            if (rc == 0 && rename(tmp, dest) != 0) {
+                if (had) (void)rename(old, dest);   /* put the old one back */
+                rc = -1;
+            }
+            if (rc == 0 && had) (void)rm_rf(old);
+        }
+        if (rc != 0) (void)rm_rf(tmp);
         hl_blob_store_close(store);
         kl_free(alloc, body, body_len);
         if (rc != 0) {
@@ -548,30 +600,6 @@ static int cmd_install(int argc, char **argv, const char *repo)
 
 /* ── `hull tools uninstall` ──────────────────────────────────────── */
 
-/* Recursively remove a file or directory tree (an extracted bundle, which may
- * be nested - zig's lib/). Depth is bounded by the bundle's real nesting.
- * Returns 0 on success, -1 on any failure (errno set). */
-static int rm_rf(const char *path)
-{
-    struct stat st;
-    if (lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
-    if (!S_ISDIR(st.st_mode)) return unlink(path) == 0 ? 0 : -1;
-
-    DIR *d = opendir(path);
-    if (!d) return -1;
-    int rc = 0;
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-        char child[PATH_MAX];
-        int n = snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
-        if (n < 0 || (size_t)n >= sizeof(child)) { rc = -1; continue; }
-        if (rm_rf(child) != 0) rc = -1;
-    }
-    closedir(d);
-    if (rmdir(path) != 0) rc = -1;
-    return rc;
-}
 
 static int cmd_uninstall(int argc, char **argv)
 {

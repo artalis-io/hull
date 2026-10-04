@@ -192,6 +192,26 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir);
 /** @brief Free arena and reset signature. Idempotent. */
 void hl_sig_free(HlSignature *sig);
 
+/* Membership test for the run-time module set (canonical name). */
+typedef int (*HlSigHasModuleFn)(void *ud, const char *canonical_name);
+
+/**
+ * @brief Check the policy an app actually runs with against what
+ *        --verify-sig verified (call after app load + module resolution).
+ *
+ * The runtime re-derives its manifest by running app code; an app that
+ * behaves differently when built (signed) and when served could otherwise
+ * boot with a wider manifest than the one `hull verify` shows. Requires the
+ * run-time manifest (as JSON, NULL when none is declared) to equal the
+ * signed `manifest` structurally, and the resolved module set to equal the
+ * signed `modules_resolved` (@p has_module answers membership, @p
+ * module_count is the set's size). Uses the copy captured by the last
+ * successful @ref hl_verify_startup. 0 when they match; -1 with @p err set.
+ */
+int hl_sig_check_runtime_policy(const char *manifest_json, size_t manifest_len,
+                                HlSigHasModuleFn has_module, void *ud,
+                                int module_count, char *err, size_t err_size);
+
 /**
  * @brief Full startup verification path.
  *

@@ -137,7 +137,7 @@ elif [ ! -x "$BIN" ]; then
 else
     printf '%s' "$aot_build" | grep -q "AOT compute/memops.wasm" && pass "hull build AOT-compiled memops" || fail "no AOT for memops"
     PORT=$((19900 + $$ % 300))
-    ( cd "$APP" && "$BIN" -p "$PORT" --no-sandbox -l debug >"$TMP/aot.log" 2>&1 ) &
+    ( cd "$APP" && "$BIN" -p "$PORT" --hull-no-sandbox -l debug >"$TMP/aot.log" 2>&1 ) &
     PID=$!; sleep 2
     if ! kill -0 $PID 2>/dev/null; then fail "AOT: binary failed to start"; cat "$TMP/aot.log"; else
         # Load is lazy on the first compute.call, so hit the route first.

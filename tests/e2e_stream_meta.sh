@@ -70,7 +70,7 @@ STREAM="1,0,0;0,0,1;0,1,2"
 check() {  # label, workdir, launch argv...
     label="$1"; workdir="$2"; shift 2
     PORT=$((19300 + $$ % 300))
-    ( cd "$workdir" && "$@" -p "$PORT" --no-sandbox -l debug ) >"$TMP/srv.log" 2>&1 &
+    ( cd "$workdir" && "$@" -p "$PORT" --hull-no-sandbox -l debug ) >"$TMP/srv.log" 2>&1 &
     PID=$!; sleep 2
     if ! kill -0 $PID 2>/dev/null; then fail "$label: server start"; cat "$TMP/srv.log"; return; fi
     s=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/stream")

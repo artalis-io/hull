@@ -298,8 +298,12 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
      * and hl_tool_unveil_add then silently drops adds.) */
     char out_buf[4096];
     const char *output_dir = parse_output_dir(argc, argv, out_buf, sizeof(out_buf));
-    hl_tool_sandbox_init(&unveil_ctx, app_dir,
-                         output_dir ? output_dir : app_dir, platform_dir);
+    if (hl_tool_sandbox_init(&unveil_ctx, app_dir,
+                             output_dir ? output_dir : app_dir,
+                             platform_dir) != 0) {
+        fprintf(stderr, "hull: the tool sandbox could not be applied\n");
+        return 1;
+    }
 
     /* Init unsandboxed Lua VM with tool unveil context */
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;

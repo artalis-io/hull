@@ -95,6 +95,8 @@ static uint64_t parse_duration(const char *s, const char **err)
 {
     *err = NULL;
     if (!s || !*s) { *err = "empty duration"; return 0; }
+    /* Digits first: strtoull took "-1" and wrapped it to 2^64-1. */
+    if (*s < '0' || *s > '9') { *err = "not a number"; return 0; }
 
     char *endp = NULL;
     errno = 0;
@@ -102,7 +104,7 @@ static uint64_t parse_duration(const char *s, const char **err)
     if (errno || endp == s) { *err = "not a number"; return 0; }
 
     uint64_t mult;
-    if (*endp == '\0' || *endp == 's')      mult = 1;
+    if (*endp == '\0' || (*endp == 's' && endp[1] == '\0')) mult = 1;   /* not "30sXYZ" */
     else if (*endp == 'm' && endp[1] == '\0') mult = 60;
     else if (*endp == 'h' && endp[1] == '\0') mult = 3600;
     else if (*endp == 'd' && endp[1] == '\0') mult = 86400;
@@ -129,6 +131,7 @@ static uint64_t parse_size(const char *s, const char **err)
 {
     *err = NULL;
     if (!s || !*s) { *err = "empty size"; return 0; }
+    if (*s < '0' || *s > '9') { *err = "not a number"; return 0; }   /* "-1" wrapped */
 
     char *endp = NULL;
     errno = 0;

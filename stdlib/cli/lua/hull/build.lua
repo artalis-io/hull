@@ -139,6 +139,11 @@ local function parse_args()
             opts.target = a:sub(10)
         elseif a == "--no-verify-platform" then
             opts.verify_platform = false
+        elseif a == "--platform-sig" then
+            i = i + 1
+            opts.platform_sig = arg[i]
+        elseif a:sub(1, 15) == "--platform-sig=" then
+            opts.platform_sig = a:sub(16)
         elseif a == "--flavor" then
             i = i + 1
             opts.flavor = arg[i]
@@ -314,12 +319,11 @@ end
 --   1. $HOME/.hull/tools/wamrc   (canonical install for `hull tools install`)
 --   2. dirname(hull_exe)/wamrc   (ejected / portable installs)
 --   3. wamrc on $PATH            (system / brew install)
--- Build-tree convention `./build/wamrc` is checked as a dev fallback.
+-- Nothing relative to the working directory: a `./build/wamrc` there came
+-- from whatever repo is being built (a cloned one could ship its own) and
+-- ran as the user. A dev build of wamrc goes beside hull or on PATH.
 local function find_wamrc()
-    local p = tool.find_tool("wamrc")
-    if p then return p end
-    if file_exists("build/wamrc") then return "./build/wamrc" end
-    return nil
+    return tool.find_tool("wamrc")
 end
 
 -- Detect if a WASM binary uses Memory64 (64-bit memory addressing).
@@ -531,7 +535,14 @@ end
 
 local function generate_app_registry(app_dir, files)
     local parts = {}
-    local entries = {}
+    local entries = {}   -- { name = <raw entry name>, line = <C initializer> }
+    -- Numbered, not derived from the name: "a-b" and "a_b" (or "a.b") made
+    -- the same identifier, and the build failed to compile.
+    local nvar = 0
+    local function next_var(prefix)
+        nvar = nvar + 1
+        return prefix .. "e" .. nvar
+    end
 
     parts[#parts + 1] = "/* Auto-generated unified app registry by hull build - do not edit */"
     parts[#parts + 1] = ""
@@ -544,16 +555,13 @@ local function generate_app_registry(app_dir, files)
             tool.exit(1)
         end
 
-        local rel = path:sub(#app_dir + 2) -- strip "dir/"
-        -- Force a valid C identifier: map every non-alphanumeric byte to "_"
-        -- (a filename with a dash/space/quote would otherwise emit invalid C).
-        local varname = var_prefix .. rel:gsub("[^%w]", "_")
+        local varname = next_var(var_prefix)
 
         parts[#parts + 1] = xxd_data(varname, data)
         parts[#parts + 1] = ""
 
-        entries[#entries + 1] = string.format(
-            '    { "%s", %s, sizeof(%s) },', c_string_escape(entry_name), varname, varname)
+        entries[#entries + 1] = { name = entry_name, line = string.format(
+            '    { "%s", %s, sizeof(%s) },', c_string_escape(entry_name), varname, varname) }
     end
 
     -- Lua modules: "./path" (no .lua extension)
@@ -623,25 +631,22 @@ local function generate_app_registry(app_dir, files)
                 .. "the corrupt entry.",
                 item.path, item.entry_name))
         end
-        local varname = "aot_" .. item.entry_name:gsub("[^%w]", "_")
+        local varname = next_var("aot_")
         parts[#parts + 1] = xxd_data(varname, data)
         parts[#parts + 1] = ""
-        entries[#entries + 1] = string.format(
-            '    { "%s", %s, sizeof(%s) },', c_string_escape(item.entry_name), varname, varname)
+        entries[#entries + 1] = { name = item.entry_name, line = string.format(
+            '    { "%s", %s, sizeof(%s) },', c_string_escape(item.entry_name), varname, varname) }
     end
 
-    -- Sort entries by name for O(log n) binary search in HlVfs
-    table.sort(entries, function(a, b)
-        -- Extract entry name from '    { "name", ...' format
-        local na = a:match('"([^"]+)"')
-        local nb = b:match('"([^"]+)"')
-        return (na or "") < (nb or "")
-    end)
+    -- Sort by the RAW entry name for HlVfs's binary search (byte order, as
+    -- strcmp). Sorting the escaped C literal put names with escaped bytes
+    -- out of order, and the lookup then missed them.
+    table.sort(entries, function(a, b) return a.name < b.name end)
 
     parts[#parts + 1] = '#include "entry.h"'
     parts[#parts + 1] = "const HlEntry hl_app_entries[] = {"
     for _, e in ipairs(entries) do
-        parts[#parts + 1] = e
+        parts[#parts + 1] = e.line
     end
     parts[#parts + 1] = "    { 0, 0, 0 }"
     parts[#parts + 1] = "};"
@@ -695,10 +700,11 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         sign_fail("hull build: invalid key file format\n", tmpdir, output)
     end
 
-    -- Derive public key
-    local pk_file = key_file:gsub("%.key$", ".pub")
-    local pk_data = read_file(pk_file)
-    local pk_hex = pk_data and pk_data:match("^(%x+)") or ""
+    -- The public key is the secret key's second half (an Ed25519 secret key
+    -- is seed || public key). It used to be read from key_file with ".key"
+    -- swapped for ".pub" - and for a key path not ending in ".key" that was
+    -- the key file itself, publishing the SECRET key in package.sig.
+    local pk_hex = sk_hex:sub(65, 128):lower()
 
     -- Compute file hashes (all embedded file types)
     local file_hashes = {}
@@ -709,6 +715,10 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         files.migrations or {},
         files.static or {},
         files.templates or {},
+        -- Compute modules and shaders run too: unsigned, a tampered
+        -- compute/*.wasm still verified VALID.
+        files.compute or {},
+        files.shaders or {},
     }
     for _, list in ipairs(all_lists) do
         for _, path in ipairs(list) do
@@ -716,6 +726,17 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
             local rel = path:sub(#app_dir + 2)
             file_hashes[rel] = hex.encode(crypto.sha256(data))
         end
+    end
+    -- AOT artifacts are native code, made in the build's tmpdir: signed
+    -- under their embedded entry name (the verifiers skip one that is not
+    -- on disk, as a build artifact never is beside the source).
+    for _, item in ipairs(files.compute_aot or {}) do
+        local data = read_file(item.path)
+        if not data then
+            sign_fail("hull build: cannot read AOT artifact " .. item.path .. "\n",
+                      tmpdir, output)
+        end
+        file_hashes[item.entry_name] = hex.encode(crypto.sha256(data))
     end
 
     -- Capture the app's manifest (shared with main's --flavor validation).
@@ -764,7 +785,13 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
     -- --no-verify-platform was passed but a blob exists (the manifest
     -- + signature get inherited from the building hull but no per-arch
     -- cross-check was performed).
-    if sign_ctx.platform_sig_blob then
+    -- Only with the cross-check's per-arch hashes: without them the block
+    -- bound nothing (the building hull's manifest + signature, verbatim),
+    -- yet runtime --verify-sig accepted it. Omitted, runtime verify rejects
+    -- the app unless --no-verify-platform is passed there too - what the
+    -- build's own warning says.
+    if sign_ctx.platform_sig_blob and sign_ctx.platform_arch_hashes and
+       next(sign_ctx.platform_arch_hashes) ~= nil then
         platform.gethull = {
             manifest  = sign_ctx.platform_sig_blob.manifest,
             signature = sign_ctx.platform_sig_blob.signature,
@@ -782,16 +809,21 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         --   release_domain: externally-installed --with/--flavor libs, whose trust
         --     anchor is the release-key hull.sha256 (already re-verified at compose).
         --     Recorded for provenance; covered by the developer app-signature.
-        local plat_assets, rel_assets = {}, {}
+        --   local_build: --with archives built from source beside this hull -
+        --     under their local name, with no release provenance claimed (they
+        --     were recorded under the release asset name, as if downloaded).
+        local plat_assets, rel_assets, local_assets = {}, {}, {}
         for _, a in ipairs(sign_ctx.composed_assets or {}) do
             local entry = { name = a.name, sha256 = a.sha256 }
             if a.domain == "release" then
                 rel_assets[#rel_assets + 1] = entry
+            elseif a.domain == "local" then
+                local_assets[#local_assets + 1] = entry
             else
                 plat_assets[#plat_assets + 1] = entry
             end
         end
-        if #plat_assets > 0 or #rel_assets > 0 then
+        if #plat_assets > 0 or #rel_assets > 0 or #local_assets > 0 then
             platform.gethull.composed = {
                 platform_domain = {
                     manifest  = sign_ctx.platform_sig_blob.manifest,
@@ -800,6 +832,9 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
                 },
                 release_domain = { assets = rel_assets },
             }
+            if #local_assets > 0 then
+                platform.gethull.composed.local_build = { assets = local_assets }
+            end
         end
     end
 
@@ -1023,6 +1058,18 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             -- straight into tmpdir) is already at `dest`; copying a file onto
             -- itself truncates it to 0 bytes, so guard like the wasm compose.
             if lib ~= dest then tool.copy(lib, dest) end
+            -- The copy is what links and what is recorded: verify IT. The
+            -- cached original was verified on resolve, then copied - and
+            -- could be swapped in between.
+            if from_cache and tool.platform_verify and tool.feature_cache_dir then
+                local fc = tool.feature_cache_dir()
+                if not (fc and asset and tool.platform_verify(fc, asset, dest)) then
+                    tool.stderr("hull build: the '" .. fname .. "' feature lib changed "
+                                .. "after verification; run `hull feature install "
+                                .. fname .. "` again\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+            end
             -- Attestation domain (docs/composed_feature_signing.md): an archive
             -- resolved EMBEDDED (the SQLite engine on an
             -- HL_APP_BASE_SQLITELESS hull) ships INSIDE hull, so it is attested by
@@ -1033,6 +1080,8 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             if from == "embedded" then
                 record_composed("libhull_feature-" .. fname .. "."
                                 .. (plat or "") .. ".a", dest, "platform")
+            elseif from == "local" then
+                record_composed(libname, dest, "local")
             else
                 record_composed(asset or libname, dest, "release")
             end
@@ -1453,9 +1502,15 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
             -- A lib pulled from ~/.hull/platform is re-verified against its
             -- signed manifest (embedded release pubkey) before linking; a
             -- lib the developer built locally is trusted as-is.
+            -- Copied first, then the COPIES verified: they are what links.
+            tool.copy(x86, platform_lib)
+            tool.mkdir(tmpdir .. "/.aarch64")
+            tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
             if from_cache and tool.platform_verify then
-                if not (tool.platform_verify(cache, flavor_asset .. ".x86_64-cosmo.a")
-                    and tool.platform_verify(cache, flavor_asset .. ".aarch64-cosmo.a")) then
+                if not (tool.platform_verify(cache, flavor_asset .. ".x86_64-cosmo.a",
+                                             platform_lib)
+                    and tool.platform_verify(cache, flavor_asset .. ".aarch64-cosmo.a",
+                                             tmpdir .. "/.aarch64/libhull_platform.a")) then
                     tool.stderr("hull build: --flavor=" .. opts.flavor
                         .. ": cached cosmo platform lib failed re-verification; "
                         .. "run `hull flavor install " .. opts.flavor .. "` again\n")
@@ -1463,9 +1518,6 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
                     tool.exit(1)
                 end
             end
-            tool.copy(x86, platform_lib)
-            tool.mkdir(tmpdir .. "/.aarch64")
-            tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
         else
             local cand = {}
             for _, d in ipairs(dirs) do cand[#cand + 1] = d .. flavor_asset .. ".a" end
@@ -1493,8 +1545,9 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
             end
             -- Re-verify a cache-sourced lib against its signed manifest before
             -- linking (locally-built libs are trusted as-is).
+            tool.copy(found, platform_lib)
             if cache_path and found == cache_path and tool.platform_verify then
-                if not tool.platform_verify(cache, cache_asset) then
+                if not tool.platform_verify(cache, cache_asset, platform_lib) then
                     tool.stderr("hull build: --flavor=" .. opts.flavor
                         .. ": cached platform lib failed re-verification; "
                         .. "run `hull flavor install " .. opts.flavor .. "` again\n")
@@ -1502,7 +1555,6 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
                     tool.exit(1)
                 end
             end
-            tool.copy(found, platform_lib)
         end
         platform_extracted = true
         opts.verify_platform = false
@@ -2519,14 +2571,13 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         --      put the .a in tmpdir but the user pre-signed there.
         --   3. dirname(hull_exe)/platform.sig - when the user signed
         --      next to the hull binary itself.
-        --   4. ./build/platform.sig (CWD) - sign-platform's default
-        --      output dir for the source-tree workflow. Catches the
-        --      `hull sign-platform plat && hull build --sign` pattern
-        --      run from the same shell.
-        --   5. ./platform.sig (CWD) - fallback for users who pass
-        --      --dir=. to sign-platform.
-        local platform_sig_path = nil
-        if platform_dir then
+        -- An explicit --platform-sig PATH comes first. Nothing relative to the
+        -- working directory: ./build/platform.sig and ./platform.sig came
+        -- from whatever repo was being built, so a cloned one supplied a
+        -- "self-consistent VALID" platform layer under its own key. (A
+        -- source-tree hull is build/hull, so build/platform.sig is step 3.)
+        local platform_sig_path = opts.platform_sig
+        if not platform_sig_path and platform_dir then
             platform_sig_path = platform_dir .. "platform.sig"
         end
         if not platform_sig_path or not file_exists(platform_sig_path) then
@@ -2541,13 +2592,6 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             if hull_dir ~= "" and file_exists(hull_dir .. "platform.sig") then
                 platform_sig_path = hull_dir .. "platform.sig"
-            end
-        end
-        if not platform_sig_path or not file_exists(platform_sig_path) then
-            if file_exists("build/platform.sig") then
-                platform_sig_path = "build/platform.sig"
-            elseif file_exists("./platform.sig") then
-                platform_sig_path = "./platform.sig"
             end
         end
 
@@ -2584,6 +2628,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             migrations = migration_files,
             static = static_files,
             templates = html_files,
+            compute = compute_files,
+            shaders = shader_files,
+            compute_aot = compute_aot,
         }, tmpdir, opts.output)
     end
 

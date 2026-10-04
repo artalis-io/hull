@@ -83,7 +83,7 @@ printf '%s' "$build_out" | grep -qE "AOT compute/spanread64.wasm.*memory64" \
     && pass "hull build AOT-compiled spanread64 (memory64)" || fail "no mem64 AOT for spanread64"
 
 PORT=$((19910 + $$ % 300))
-( cd "$TMP/app" && "$BIN" -p "$PORT" --no-sandbox -l debug >"$TMP/srv.log" 2>&1 ) &
+( cd "$TMP/app" && "$BIN" -p "$PORT" --hull-no-sandbox -l debug >"$TMP/srv.log" 2>&1 ) &
 PID=$!; sleep 2
 if ! kill -0 $PID 2>/dev/null; then
     fail "app binary failed to start"; cat "$TMP/srv.log"

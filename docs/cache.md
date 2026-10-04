@@ -16,7 +16,8 @@ trust chain that backs the `tools` store, see
 ## Sealed code caches
 
 The caches that are loaded as code - `lua-bytecode`, `js-bytecode`,
-`templates` and `js-templates` - are sealed: each entry is stored as an
+`templates`, `js-templates` and `compute-aot` (native code `hull build`
+embeds) - are sealed: each entry is stored as an
 HMAC-SHA256 followed by the bytes, keyed by a per-user secret at
 `$HOME/.hull/cache.key` (32 random bytes, mode 0600, created on first use).
 Neither Lua nor QuickJS verifies bytecode, so an unsealed cache let anything

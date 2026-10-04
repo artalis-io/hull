@@ -81,6 +81,10 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
             return 2;
         }
     }
+    if (!hl_release_io_repo_valid(repo)) {
+        fprintf(stderr, "hull update: --repo must be OWNER/NAME (got '%s')\n", repo);
+        return 2;
+    }
 
     /* ── 1. Set up TLS using the embedded CA bundle ─────────────── */
     KlAllocator alloc = kl_allocator_default();
@@ -91,7 +95,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     }
 
     /* ── 2. Fetch the latest release metadata ───────────────────── */
-    char api_url[256];
+    char api_url[1024];
     snprintf(api_url, sizeof(api_url),
              "https://api.github.com/repos/%s/releases/latest", repo);
     fprintf(stdout, "hull update: checking %s …\n", repo);
@@ -175,7 +179,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     char asset_name[64];
     snprintf(asset_name, sizeof(asset_name), "hull-%s", plat);
 
-    char asset_url[256];
+    char asset_url[1024];
     snprintf(asset_url, sizeof(asset_url),
              "https://github.com/%s/releases/download/%s/%s",
              repo, latest_tag, asset_name);
@@ -192,7 +196,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     fprintf(stdout, "hull update: downloaded %zu bytes\n", binary_len);
 
     /* ── 4. Verify SHA-256 against the release manifest ─────────── */
-    char sha_url[256];
+    char sha_url[1024];
     snprintf(sha_url, sizeof(sha_url),
              "https://github.com/%s/releases/download/%s/hull.sha256",
              repo, latest_tag);
@@ -218,7 +222,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
      * step with a one-time warning.
      */
     if (hl_release_pubkey_configured()) {
-        char sig_url[256];
+        char sig_url[1024];
         snprintf(sig_url, sizeof(sig_url),
                  "https://github.com/%s/releases/download/%s/hull.sha256.sig",
                  repo, latest_tag);
@@ -262,7 +266,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
      * newer tag is caught here, and the downgrade check above stays honest.
      * Releases published before hull.version existed have no entry. */
     {
-        char ver_url[256];
+        char ver_url[1024];
         snprintf(ver_url, sizeof(ver_url),
                  "https://github.com/%s/releases/download/%s/hull.version",
                  repo, latest_tag);
@@ -351,8 +355,10 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     char self_path[PATH_MAX];
     /* cppcheck-suppress knownConditionTrueFalse */
     if (hl_release_io_self_path(self_path, sizeof(self_path)) != 0) {
-        /* Fall back to env->hull_exe (argv[0] from the dispatch layer). */
-        if (env && env->hull_exe) {
+        /* Fall back to env->hull_exe (argv[0] from the dispatch layer) -
+         * when it is a path: a bare "hull" named ./hull in the working
+         * directory, and that is what was replaced. */
+        if (env && env->hull_exe && strchr(env->hull_exe, '/')) {
             char resolved[PATH_MAX];
             if (realpath(env->hull_exe, resolved))
                 snprintf(self_path, sizeof(self_path), "%s", resolved);

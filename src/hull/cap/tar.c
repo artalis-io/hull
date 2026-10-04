@@ -64,6 +64,10 @@ static unsigned long tar_octal(const unsigned char *p, size_t n)
 static const char *tar_safe_path(char *name)
 {
     if (name[0] == '/') return NULL;
+    /* Windows reads a backslash as a separator and "C:" as a drive, so
+     * "a\..\..\x" or "C:x" escaped the destination there (bundles are
+     * extracted on Windows). */
+    if (strpbrk(name, "\\:")) return NULL;
     while (name[0] == '.' && name[1] == '/') name += 2;
     size_t len = strlen(name);
     while (len > 0 && name[len - 1] == '/') name[--len] = '\0';
@@ -106,6 +110,7 @@ static int tar_member_dir_depth(const char *m)
 static int tar_safe_linkname(const char *member, const char *ln)
 {
     if (!ln || ln[0] == '\0' || ln[0] == '/') return 0;   /* empty / absolute */
+    if (strpbrk(ln, "\\:")) return 0;                     /* see tar_safe_path */
     int depth = tar_member_dir_depth(member);
     for (const char *p = ln; *p; ) {
         const char *slash = strchr(p, '/');

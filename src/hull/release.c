@@ -154,32 +154,32 @@ int hl_release_io_find_checksum(const char *manifest, size_t mlen,
 {
     if (!manifest || !asset || !hex_out) return -1;
     size_t alen = strlen(asset);
-    /* Each line is "<64-hex>  <asset>\n" */
+    /* Each line is "<64-hex>  <asset>\n" ("\r\n" tolerated). The hash must
+     * be hex, the name must end the line, and an asset may appear once: a
+     * NUL after the name, a non-hex hash and the first of two lines for one
+     * asset were all taken. The manifest is signed, so this is hardening. */
+    int found = 0;
     const char *p = manifest;
     const char *end = manifest + mlen;
     while (p < end) {
         const char *eol = memchr(p, '\n', (size_t)(end - p));
         size_t ll = eol ? (size_t)(eol - p) : (size_t)(end - p);
-        if (ll >= 66 + alen) {
-            const char *anchor = p + 64;
-            /* Exact-match guard. Bounds check FIRST so we never
-             * dereference `anchor[2 + alen]` when it points one past
-             * the manifest buffer (the no-trailing-newline edge case).
-             * The `||` short-circuits, so the deref only runs when
-             * the byte is in-bounds. */
-            if (anchor[0] == ' ' && anchor[1] == ' ' &&
-                strncmp(anchor + 2, asset, alen) == 0 &&
-                (anchor + 2 + alen >= end ||
-                 anchor[2 + alen] == '\n' ||
-                 anchor[2 + alen] == '\r' ||
-                 anchor[2 + alen] == '\0')) {
-                memcpy(hex_out, p, 64);
-                hex_out[64] = '\0';
-                return 0;
+        if (ll > 0 && p[ll - 1] == '\r') ll--;
+        if (ll == 66 + alen && p[64] == ' ' && p[65] == ' ' &&
+            memcmp(p + 66, asset, alen) == 0) {
+            int hex = 1;
+            for (int i = 0; i < 64 && hex; i++) {
+                char c = p[i];
+                hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                      (c >= 'A' && c <= 'F');
             }
+            if (!hex || found) return -1;    /* malformed, or a duplicate */
+            memcpy(hex_out, p, 64);
+            hex_out[64] = '\0';
+            found = 1;
         }
         if (!eol) break;
         p = eol + 1;
     }
-    return -1;
+    return found ? 0 : -1;
 }

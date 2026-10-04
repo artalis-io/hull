@@ -375,7 +375,7 @@ else
     # chain all gets exercised at startup. Picks a high port to
     # avoid collision.
     PORT=$((10000 + (RANDOM % 50000)))
-    ./myapp --verify-sig dev.pub --no-sandbox -p "$PORT" app/app.lua >/dev/null 2>&1 &
+    ./myapp --verify-sig dev.pub --hull-no-sandbox -p "$PORT" app/app.lua >/dev/null 2>&1 &
     SVR=$!
     sleep 2
     if kill -0 "$SVR" 2>/dev/null; then

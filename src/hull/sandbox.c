@@ -54,9 +54,11 @@ _Static_assert(SANDBOX_PATH_MAX >= PATH_MAX,
  *      containing "..". Defense-in-depth - manifest parser only
  *      truncates.
  *   2. Concatenate app_dir + "/" + relpath into a temp buffer.
- *   3. mkdir -p so realpath() can canonicalize even when the
- *      app hasn't created the dir yet (hull/blob@1 makes its
- *      root lazily on init).
+ *   3. Pick what the kernel grant covers from the grant's shape: a
+ *      glob's literal directory; a "dir/" grant (created if absent,
+ *      never through a symlink, so a lazily made blob root
+ *      canonicalizes); else the path itself, or its parent when it
+ *      does not exist yet (a file to be created).
  *   4. realpath() the result into out_abs.
  *
  * Returns 0 on success (out_abs filled), -1 on rejection or
@@ -93,25 +95,69 @@ static int sandbox_resolve_manifest_path(const char *app_dir,
     joined[adir_len] = '/';
     memcpy(joined + adir_len + 1, relpath, rel_len + 1);
 
-    /* mkdir -p - best-effort. EEXIST is harmless. */
-    char buf[SANDBOX_PATH_MAX];
+    /* What the kernel grant covers depends on the grant's shape (the
+     * capability layer keeps the precise rule; this is the outer bound):
+     *   - a glob ("data/*.csv"): the literal directory before the first
+     *     pattern component - it was mkdir'd and unveiled as a literal
+     *     "*.csv" directory, so the kernel denied the real files;
+     *   - "dir/" (trailing slash): that directory, created if absent (a
+     *     lazily created blob / upload root);
+     *   - anything else: the path itself when it exists, else its parent -
+     *     a file grant ("out.txt") was created as a DIRECTORY, so the
+     *     write then failed with EISDIR.
+     * Creation never walks through a symlink: mkdir followed one out of
+     * app_dir. */
     size_t jlen = strlen(joined);
-    if (jlen >= sizeof(buf)) return -1;
-    memcpy(buf, joined, jlen + 1);
-    while (jlen > 1 && buf[jlen - 1] == '/') buf[--jlen] = '\0';
-    for (size_t k = 1; k <= jlen; k++) {
-        if (buf[k] == '/' || buf[k] == '\0') {
-            char saved = buf[k];
-            buf[k] = '\0';
-            (void)mkdir(buf, 0755);
-            buf[k] = saved;
+    size_t lit = jlen;                        /* end of the literal prefix */
+    {
+        size_t comp_start = adir_len + 1;
+        for (size_t k = adir_len + 1; k <= jlen; k++) {
+            if (joined[k] == '/' || joined[k] == '\0') {
+                if (memchr(joined + comp_start, '*', k - comp_start) ||
+                    memchr(joined + comp_start, '?', k - comp_start) ||
+                    memchr(joined + comp_start, '[', k - comp_start)) {
+                    lit = comp_start > 0 ? comp_start - 1 : 0;   /* drop "/pat..." */
+                    break;
+                }
+                comp_start = k + 1;
+            }
+        }
+    }
+    int is_glob = lit < jlen;
+    int is_dir = !is_glob && jlen > 0 && joined[jlen - 1] == '/';
+    char buf[SANDBOX_PATH_MAX];
+    if (lit >= sizeof(buf)) return -1;
+    memcpy(buf, joined, lit);
+    buf[lit] = '\0';
+    while (lit > 1 && buf[lit - 1] == '/') buf[--lit] = '\0';
+
+    if (is_dir) {
+        for (size_t k = adir_len + 1; k <= lit; k++) {
+            if (buf[k] == '/' || buf[k] == '\0') {
+                char saved = buf[k];
+                buf[k] = '\0';
+                struct stat st;
+                if (lstat(buf, &st) == 0) {
+                    if (S_ISLNK(st.st_mode)) { buf[k] = saved; return -1; }
+                } else {
+                    (void)mkdir(buf, 0755);
+                }
+                buf[k] = saved;
+            }
+        }
+    } else if (!is_glob) {
+        struct stat st;
+        if (stat(buf, &st) != 0) {            /* absent file: its parent */
+            char *sl = strrchr(buf, '/');
+            if (!sl || (size_t)(sl - buf) < adir_len) return -1;
+            *sl = '\0';
         }
     }
 
-    if (realpath(joined, out_abs) == NULL) {
-        size_t need = strlen(joined) + 1;
+    if (realpath(buf, out_abs) == NULL) {
+        size_t need = strlen(buf) + 1;
         if (need > out_cap) return -1;
-        memcpy(out_abs, joined, need);
+        memcpy(out_abs, buf, need);
     }
     return 0;
 }
@@ -283,6 +329,7 @@ _Static_assert(SEATBELT_PATH_SIZE >= PATH_MAX,
 /* Scratch buffers for derived paths (stack-allocated in caller) */
 typedef struct {
     char db_dir[SEATBELT_PATH_SIZE];
+    char db_file[4][SEATBELT_PATH_SIZE];   /* db, -wal, -shm, -journal */
     char fs_read_keys[HL_MANIFEST_MAX_PATHS][16];    /* "FS_R_0" .. "FS_R_31" */
     char fs_write_keys[HL_MANIFEST_MAX_PATHS][16];   /* "FS_W_0" .. "FS_W_31" */
     char fs_read_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
@@ -379,20 +426,43 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     /* ── SQLite database (4 file variants) ──────────────────── */
 
     if (db_path) {
-        /* Extract parent directory - SQLite needs the dir for locking/fsync,
-         * and subpath covers the db file plus WAL/SHM/journal variants */
-        snprintf(scratch->db_dir, sizeof(scratch->db_dir), "%s", db_path);
+        /* The database and its WAL / SHM / journal siblings, by absolute
+         * path, plus a read of the directory itself (SQLite fsyncs it). The
+         * whole parent directory used to be writable: with -d
+         * app_dir/data.db that was the entire app tree, and a relative path
+         * whose file did not exist yet collapsed the grant to ".". */
+        char abs[SEATBELT_PATH_SIZE];
+        if (!realpath(db_path, abs)) {
+            char dir[SEATBELT_PATH_SIZE];
+            snprintf(dir, sizeof dir, "%s", db_path);
+            char *sl = strrchr(dir, '/');
+            const char *base = sl ? sl + 1 : db_path;
+            if (sl) { if (sl == dir) sl[1] = '\0'; else *sl = '\0'; }
+            char rdir[SEATBELT_PATH_SIZE];
+            if (!realpath(sl ? dir : ".", rdir) ||
+                (size_t)snprintf(abs, sizeof abs, "%s/%s",
+                                 strcmp(rdir, "/") == 0 ? "" : rdir, base) >= sizeof abs)
+                snprintf(abs, sizeof abs, "%s", db_path);
+        }
+        snprintf(scratch->db_dir, sizeof(scratch->db_dir), "%s", abs);
         char *slash = strrchr(scratch->db_dir, '/');
-        if (slash && slash != scratch->db_dir)
-            *slash = '\0';
-        else
-            snprintf(scratch->db_dir, sizeof(scratch->db_dir), ".");
-
+        if (slash && slash != scratch->db_dir) *slash = '\0';
+        else snprintf(scratch->db_dir, sizeof(scratch->db_dir), "/");
+        static const char *const suffix[4] = { "", "-wal", "-shm", "-journal" };
+        static const char *const key[4] = { "DB_F0", "DB_F1", "DB_F2", "DB_F3" };
+        for (int k = 0; k < 4; k++) {
+            snprintf(scratch->db_file[k], sizeof(scratch->db_file[k]), "%s%s",
+                     abs, suffix[k]);
+            PARAM_ADD(key[k], scratch->db_file[k]);
+        }
         PARAM_ADD("DB_DIR", scratch->db_dir);
 
-        SBPL_LIT("; SQLite database directory (covers db, WAL, SHM, journal)\n"
+        SBPL_LIT("; SQLite database: the file, its WAL / SHM / journal, and a\n"
+                 "; read of its directory\n"
                  "(allow file-read* file-write*\n"
-                 "    (subpath (param \"DB_DIR\")))\n\n");
+                 "    (literal (param \"DB_F0\")) (literal (param \"DB_F1\"))\n"
+                 "    (literal (param \"DB_F2\")) (literal (param \"DB_F3\")))\n"
+                 "(allow file-read* (literal (param \"DB_DIR\")))\n\n");
     }
 
     /* ── Manifest fs_read[] paths ───────────────────────────── */
@@ -400,10 +470,18 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     for (int i = 0; i < policy->fs_read_count; i++) {
         snprintf(scratch->fs_read_keys[i],
                  sizeof(scratch->fs_read_keys[i]), "FS_R_%d", i);
-        /* Resolve symlinks - Seatbelt matches real paths */
-        const char *rpath = policy->fs_read[i];
-        if (realpath(rpath, scratch->fs_read_real[i]))
-            rpath = scratch->fs_read_real[i];
+        /* Against app_dir, as fs.write is: realpath() alone resolved a
+         * relative grant against the cwd - `hull /srv/app` run from / with
+         * fs.read={"etc"} gave Seatbelt read access to /etc. */
+        if (sandbox_resolve_manifest_path(app_dir, policy->fs_read[i],
+                                           scratch->fs_read_real[i],
+                                           sizeof(scratch->fs_read_real[i])) != 0) {
+            log_warn("[sandbox] fs.read path '%s' rejected (absolute "
+                     "or contains '..') - skipping. Fix the manifest.",
+                     policy->fs_read[i]);
+            continue;
+        }
+        const char *rpath = scratch->fs_read_real[i];
         PARAM_ADD(scratch->fs_read_keys[i], rpath);
         SBPL_FMT("(allow file-read* (subpath (param \"%s\")))\n",
                   scratch->fs_read_keys[i]);
@@ -679,6 +757,22 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
 {
     if (!policy)
         return 0;
+
+    /* The app directory is unveiled read-only for the app's own files. A
+     * built binary takes it from its working directory, so one started
+     * from / (a systemd unit with no WorkingDirectory, a container whose
+     * WORKDIR is /) unveiled the whole filesystem for reading - and its
+     * relative grants resolved from /. Refused rather than granted. */
+    if (app_dir) {
+        char real[SANDBOX_PATH_MAX];
+        const char *r = realpath(app_dir, real) ? real : app_dir;
+        if (strcmp(r, "/") == 0) {
+            log_error("[sandbox] the app directory is / - that would grant the "
+                      "whole filesystem. Run the app from its own directory "
+                      "(e.g. WorkingDirectory= / WORKDIR).");
+            return -1;
+        }
+    }
 
     /* ── W^X / no-runtime-dynamic-code fail-closed check ───────────
      *

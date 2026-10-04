@@ -77,7 +77,7 @@ printf '%s' "$build_out" | grep -q "AOT compute/segread.wasm"   && pass "hull bu
 PORT=$((19880 + $$ % 300))
 # Run from the app dir so fs.mmap finds the runtime data file (data.bin); the
 # segment bytes are embedded in app.lua, but the span's window is a runtime file.
-( cd "$TMP/app" && "$BIN" -p "$PORT" --no-sandbox -l debug >"$TMP/srv.log" 2>&1 ) &
+( cd "$TMP/app" && "$BIN" -p "$PORT" --hull-no-sandbox -l debug >"$TMP/srv.log" 2>&1 ) &
 PID=$!; sleep 2
 if ! kill -0 $PID 2>/dev/null; then fail "app binary failed to start"; cat "$TMP/srv.log"; else
     span=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/span")

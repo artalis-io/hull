@@ -108,7 +108,7 @@ assert "binary exports hl_app_entries" nm_has hl_app_entries "$WORKDIR/hello_lld
 
 echo "== run the lld-linked binary =="
 run="$WORKDIR/run"; mkdir -p "$run"
-( cd "$run" && "$WORKDIR/hello_lld" -p "$PORT" --no-sandbox ) >"$WORKDIR/srv.log" 2>&1 &
+( cd "$run" && "$WORKDIR/hello_lld" -p "$PORT" --hull-no-sandbox ) >"$WORKDIR/srv.log" 2>&1 &
 SERVER_PID=$!
 sleep 2
 code="$(curl -s -m5 -o "$WORKDIR/body" -w '%{http_code}' "http://127.0.0.1:$PORT/" 2>/dev/null || true)"

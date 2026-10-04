@@ -579,7 +579,7 @@ echo ""
 echo "=== Step 14: --verify-sig ==="
 
 # Start signed app with --verify-sig → should start and serve
-(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/developer.pub" --no-verify-platform -p 19872) >/dev/null 2>&1 &
+(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/developer.pub" --hull-no-verify-platform -p 19872) >/dev/null 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19872; then
@@ -598,7 +598,7 @@ stop_server
 cp "$WORKDIR/myapp/package.sig" "$WORKDIR/myapp/package.sig.bak"
 echo "corrupted" > "$WORKDIR/myapp/package.sig"
 
-(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/developer.pub" --no-verify-platform -p 19873) >/dev/null 2>&1 &
+(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/developer.pub" --hull-no-verify-platform -p 19873) >/dev/null 2>&1 &
 TPID=$!
 sleep 2
 
@@ -622,7 +622,7 @@ mv "$WORKDIR/myapp/package.sig.bak" "$WORKDIR/myapp/package.sig"
 
 # Test with wrong key → should refuse
 "$HULL" keygen "$WORKDIR/wrong_key" >/dev/null 2>&1
-(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/wrong_key.pub" --no-verify-platform -p 19874) >/dev/null 2>&1 &
+(cd "$WORKDIR/myapp" && exec ./myapp --verify-sig "$WORKDIR/wrong_key.pub" --hull-no-verify-platform -p 19874) >/dev/null 2>&1 &
 TPID=$!
 sleep 2
 
@@ -864,9 +864,9 @@ APPEOF
 hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/sigcli/sigcli" "$WORKDIR/sigcli"
 check_exit "build signed CLI app exits 0" 0 $RC
 if [ -x "$WORKDIR/sigcli/sigcli" ]; then
-    GOOD=$(cd "$WORKDIR/sigcli" && ./sigcli --verify-sig "$WORKDIR/developer.pub" --no-verify-platform hello 2>&1)
+    GOOD=$(cd "$WORKDIR/sigcli" && ./sigcli --verify-sig "$WORKDIR/developer.pub" --hull-no-verify-platform hello 2>&1)
     check_contains "right key: the app runs with only its own argv" "$GOOD" "sigcli-ran hello"
-    BAD=$(cd "$WORKDIR/sigcli" && ./sigcli --verify-sig "$WORKDIR/myapp.pub" --no-verify-platform hello 2>&1)
+    BAD=$(cd "$WORKDIR/sigcli" && ./sigcli --verify-sig "$WORKDIR/myapp.pub" --hull-no-verify-platform hello 2>&1)
     case "$BAD" in
         *sigcli-ran*) fail "wrong key: the app ran anyway: $BAD" ;;
         *)            pass "wrong key: the app does not run" ;;

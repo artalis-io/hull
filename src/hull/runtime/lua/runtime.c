@@ -320,8 +320,9 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     /* The instruction budget: after the base library (it replaces pcall
      * and xpcall), before anything runs. */
     hl_lua_budget_install(lua->L, &lua->budget);
-    if (cfg->sandbox)
-        hl_runtime_cache_seal_prepare();   /* before the sandbox (see header) */
+    /* Before any sandbox (see header): the app runtime's caches, and the
+     * tool VM's AOT cache. */
+    hl_runtime_cache_seal_prepare();
     HL_LUA_ARM(lua, lua->L);
 
     /* Store HlLua pointer in registry for C functions to access */
@@ -603,6 +604,44 @@ static int vt_lua_extract_manifest(HlRuntime *rt, HlManifest *out)
 {
     HlLua *lua = (HlLua *)rt;
     return hl_manifest_extract_lua(lua->L, out, lua->base.alloc);
+}
+
+static int manifest_json_k(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
+    if (!lua_istable(L, -1)) return luaL_error(L, "no json encoder");
+    lua_getfield(L, -1, "encode");
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    lua_call(L, 1, 1);
+    return 1;
+}
+
+/* The declared manifest, encoded as manifest extraction at build encodes it
+ * (the runtime's json, sorted keys) - for --verify-sig's policy check. */
+static int vt_lua_manifest_json(HlRuntime *rt, char **out, size_t *out_len)
+{
+    HlLua *lua = (HlLua *)rt;
+    lua_State *L = lua->L;
+    *out = NULL;
+    *out_len = 0;
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    int has = lua_istable(L, -1);
+    lua_pop(L, 1);
+    if (!has) return 0;
+    lua_pushcfunction(L, manifest_json_k);
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK || lua_type(L, -1) != LUA_TSTRING) {
+        lua_pop(L, 1);
+        return -1;
+    }
+    size_t n = 0;
+    const char *s = lua_tolstring(L, -1, &n);
+    char *copy = malloc(n + 1);
+    if (copy) { memcpy(copy, s, n); copy[n] = '\0'; }
+    lua_pop(L, 1);
+    if (!copy) return -1;
+    *out = copy;
+    *out_len = n;
+    return 0;
 }
 
 /* Walk __hull_route_defs in the Lua registry, calling cb for each entry. */
@@ -1064,6 +1103,7 @@ const HlRuntimeVtable hl_lua_vtable = {
     .load_app            = vt_lua_load_app,
     .wire_routes_server  = vt_lua_wire_routes_server,
     .extract_manifest    = vt_lua_extract_manifest,
+    .manifest_json       = vt_lua_manifest_json,
     .enumerate_routes    = vt_lua_enumerate_routes,
     .enumerate_middleware= vt_lua_enumerate_middleware,
     .test_setup          = vt_lua_test_setup,

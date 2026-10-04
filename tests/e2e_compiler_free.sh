@@ -83,7 +83,7 @@ serve_and_check() {
     # Run in a fresh cwd so the app's data.db is new and the embedded migration
     # actually applies (proving a migrations/ registry entry resolves).
     run="$WORKDIR/run_$label"; mkdir -p "$run"
-    ( cd "$run" && "$bin" -p "$PORT" --no-sandbox ) >"$WORKDIR/$label.log" 2>&1 &
+    ( cd "$run" && "$bin" -p "$PORT" --hull-no-sandbox ) >"$WORKDIR/$label.log" 2>&1 &
     SERVER_PID=$!
     sleep 2
     code="$(curl -s -m 5 -o "$WORKDIR/$label.body" -w '%{http_code}' "http://127.0.0.1:$PORT/" 2>/dev/null || true)"

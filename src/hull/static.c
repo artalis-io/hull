@@ -18,6 +18,7 @@
 #include <keel/http_response.h>
 
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,9 +124,42 @@ static int path_is_safe(const char *rel, size_t len)
 
 /* ── ETag helpers ─────────────────────────────────────────────────── */
 
-static int format_etag_embedded(char *buf, size_t cap, size_t content_len)
+/* FNV-1a 64 of an embedded entry, computed once per entry (the data is
+ * static for the process; serving runs on the event-loop thread). */
+static uint64_t embedded_hash(const unsigned char *data, size_t len)
 {
-    return snprintf(buf, cap, "W/\"%zx\"", content_len);
+    static struct { const void *p; uint64_t h; } cache[512];
+    size_t slot = ((uintptr_t)data >> 4) % (sizeof cache / sizeof cache[0]);
+    for (int probe = 0; probe < 8; probe++) {
+        size_t k = (slot + (size_t)probe) % (sizeof cache / sizeof cache[0]);
+        if (cache[k].p == data) return cache[k].h;
+        if (!cache[k].p) { slot = k; break; }
+    }
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < len; i++) { h ^= data[i]; h *= 1099511628211ULL; }
+    cache[slot].p = data;
+    cache[slot].h = h;
+    return h;
+}
+
+/* The length alone: a same-length change after a redeploy was served as a
+ * stale 304. Length and content hash now. */
+static int format_etag_embedded(char *buf, size_t cap,
+                                const unsigned char *data, size_t content_len)
+{
+    return snprintf(buf, cap, "W/\"%zx-%llx\"", content_len,
+                    (unsigned long long)embedded_hash(data, content_len));
+}
+
+/* Headers every static response carries: no sniffing a text/plain or
+ * image into HTML, and an SVG (which runs script when opened directly)
+ * sandboxed. */
+static void static_safety_headers(KlHttpResponse *res, const char *mime)
+{
+    kl_http_response_header(res, "X-Content-Type-Options", "nosniff");
+    if (mime && strncmp(mime, "image/svg+xml", 13) == 0)
+        kl_http_response_header(res, "Content-Security-Policy",
+                                "default-src 'none'; style-src 'unsafe-inline'; sandbox");
 }
 
 static int format_etag_file(char *buf, size_t cap, time_t mtime, off_t size)
@@ -188,7 +222,7 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     if (e) {
         /* ETag check */
         char etag[64];
-        int elen = format_etag_embedded(etag, sizeof(etag), e->len);
+        int elen = format_etag_embedded(etag, sizeof(etag), e->data, e->len);
         if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
             kl_http_response_status(res, 304);
             kl_http_response_header(res, "ETag", etag);
@@ -198,6 +232,7 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
 
         kl_http_response_status(res, 200);
         kl_http_response_header(res, "Content-Type", mime);
+        static_safety_headers(res, mime);
         kl_http_response_header(res, "Cache-Control", "public, max-age=86400");
         if (elen > 0)
             kl_http_response_header(res, "ETag", etag);
@@ -214,7 +249,7 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
         const HlEntry *se = hl_vfs_find(ctx->stdlib_vfs, full_name);
         if (se) {
             char etag[64];
-            int elen = format_etag_embedded(etag, sizeof(etag), se->len);
+            int elen = format_etag_embedded(etag, sizeof(etag), se->data, se->len);
             if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
                 kl_http_response_status(res, 304);
                 kl_http_response_header(res, "ETag", etag);
@@ -224,6 +259,7 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
 
             kl_http_response_status(res, 200);
             kl_http_response_header(res, "Content-Type", mime);
+            static_safety_headers(res, mime);
             /* Stdlib assets are version-pinned by the hull binary's
              * identity; aggressive caching is safe. */
             kl_http_response_header(res, "Cache-Control", "public, max-age=86400");
@@ -245,7 +281,10 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
         if (n < 0)
             return 0;
 
-        int fd = open(fpath, O_RDONLY);
+        /* Non-blocking (a FIFO named like an asset hung the event loop on
+         * open) and not through a symlink (one in static/ served whatever it
+         * named, outside the tree). The S_ISREG check below stays. */
+        int fd = open(fpath, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0)
             return 0;
 
@@ -298,6 +337,7 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
 
         kl_http_response_status(res, 200);
         kl_http_response_header(res, "Content-Type", mime);
+        static_safety_headers(res, mime);
         kl_http_response_header(res, "Cache-Control", "no-cache");
         if (elen > 0)
             kl_http_response_header(res, "ETag", etag);

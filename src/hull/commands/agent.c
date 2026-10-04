@@ -23,6 +23,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/release_io.h"   /* hl_release_io_self_path */
 #include "hull/commands/agent.h"
 #include "hull/agent_lib.h"
 #include "hull/sbom.h"
@@ -823,8 +824,37 @@ static int agent_inspect_stream_live(const char *app_dir)
     char *dev = read_whole_file(dev_path, 64 * 1024, NULL);
     if (!dev) return -1;
     long sp_dev = json_int_field(dev, "session_pid");
+    /* The session's nonce, against the copy the live supervisor keeps under
+     * $HOME (see dev.c): files a repo shipped in .hull/ cannot match it. */
+    char nonce[65] = "";
+    {
+        const char *p = strstr(dev, "\"nonce\":\"");
+        if (p) {
+            p += 9;
+            size_t i = 0;
+            while (i < 64 && ((p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f'))) {
+                nonce[i] = p[i];
+                i++;
+            }
+            nonce[i] = '\0';
+            if (i != 64 || p[64] != '"') nonce[0] = '\0';
+        }
+    }
     free(dev);
-    if (sp_dev <= 0) return -1;
+    if (sp_dev <= 0 || !nonce[0]) return -1;
+    {
+        const char *home = getenv("HOME");
+        if (!home || !*home) home = getenv("USERPROFILE");
+        if (!home || !*home) return -1;
+        char sp[PATH_MAX];
+        int n = snprintf(sp, sizeof sp, "%s/.hull/dev-sessions/%ld", home, sp_dev);
+        if (n < 0 || (size_t)n >= sizeof sp) return -1;
+        size_t kl = 0;
+        char *kept = read_whole_file(sp, 128, &kl);
+        int match = kept && kl == 64 && memcmp(kept, nonce, 64) == 0;
+        free(kept);
+        if (!match) return -1;
+    }
 
     size_t disc_len = 0;
     char *disc = read_whole_file(disc_path, 64 * 1024 * 1024, &disc_len);   /* 64 MB cap */
@@ -967,7 +997,13 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
      * Independent of capability layer; pure compile-time data. */
     if (strcmp(sub, "sbom") == 0) {
         (void)sub_argc; (void)sub_argv;
-        if (env && env->hull_exe) hl_sbom_set_binary_path(env->hull_exe);
+        {   /* this binary: argv[0] only when it is a path (see verify_self.c) */
+            static char self[4096];
+            if (hl_release_io_self_path(self, sizeof self) == 0)
+                hl_sbom_set_binary_path(self);
+            else if (env && env->hull_exe && strchr(env->hull_exe, '/'))
+                hl_sbom_set_binary_path(env->hull_exe);
+        }
         return hl_sbom_format(HL_SBOM_JSON, stdout) == 0 ? 0 : 1;
     }
     /* Composite project summary - one call to orient an agent. */

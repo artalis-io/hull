@@ -50,9 +50,12 @@ local function file_exists(p) return tool.file_exists(p) end
 --     nothing with this tool VM. It used to run here, with `tool` and the
 --     loaders stripped for the window and restored after - and a metatable
 --     the app set on _G saw `tool` come back and kept it;
---   * the KERNEL sandbox is already applied (hl_tool_sandbox_init: unveil +
---     pledge "stdio rpath wpath cpath proc exec fattr"), so the app cannot
---     reach outside the unveiled build region;
+--   * the tool sandbox is already applied (hl_tool_sandbox_init): kernel
+--     unveil where the kernel enforces it (OpenBSD, Linux with Landlock, a
+--     cosmo APE on those two), pledge "stdio rpath wpath cpath proc exec
+--     fattr" where available (Linux without Landlock too). On macOS, Windows
+--     and the other BSDs only the userspace allowlist the tool bindings check
+--     applies - a boundary for the tool API, not for the process;
 --   * capability modules with no backing there (db, compute, gpu, worker)
 --     resolve to no-op stubs, so top-level code touching them neither works
 --     nor escapes;

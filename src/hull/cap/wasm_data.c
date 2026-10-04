@@ -225,7 +225,8 @@ void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
     CLAMP_VAL(heap_size,  cfg_heap);
     CLAMP_VAL(stack_size, cfg_stack);
     #undef CLAMP_VAL
-    if (cfg_gas && (!opts->gas || opts->gas > cfg_gas))
+    if (opts->gas < 0) opts->gas = 0;   /* negative = default, not unmetered */
+    if (cfg_gas > 0 && (!opts->gas || opts->gas > cfg_gas))
         opts->gas = cfg_gas;
 }
 

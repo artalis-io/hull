@@ -739,6 +739,35 @@ static void js_install_app_sse(JSContext *ctx)
     JS_FreeValue(ctx, global);
 }
 
+/* Freeze @p v deeply in C (an app could have replaced Object.freeze):
+ * every own property non-writable and non-configurable, no extensions. */
+static int js_manifest_freeze(JSContext *ctx, JSValueConst v, int depth)
+{
+    if (!JS_IsObject(v)) return 0;
+    if (depth > 16) { JS_ThrowRangeError(ctx, "app.manifest: nested too deeply"); return -1; }
+    JSPropertyEnum *tab = NULL;
+    uint32_t n = 0;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &n, v,
+                               JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) < 0)
+        return -1;
+    int rc = 0;
+    for (uint32_t i = 0; i < n && rc == 0; i++) {
+        JSValue pv = JS_GetProperty(ctx, v, tab[i].atom);
+        if (JS_IsException(pv)) { rc = -1; break; }
+        if (js_manifest_freeze(ctx, pv, depth + 1) != 0) rc = -1;
+        if (rc == 0 &&
+            JS_DefineProperty(ctx, v, tab[i].atom, JS_UNDEFINED, JS_UNDEFINED,
+                              JS_UNDEFINED,
+                              JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+            rc = -1;
+        JS_FreeValue(ctx, pv);
+    }
+    for (uint32_t i = 0; i < n; i++) JS_FreeAtom(ctx, tab[i].atom);
+    js_free(ctx, tab);
+    if (rc == 0 && JS_PreventExtensions(ctx, v) < 0) rc = -1;
+    return rc;
+}
+
 static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
@@ -756,24 +785,53 @@ static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "app.manifest() can only be called once");
     }
 
-    JS_SetPropertyStr(ctx, global, "__hull_manifest", JS_DupValue(ctx, argv[0]));
+    /* A plain, frozen copy (a JSON round trip: data only), defined
+     * non-writable and non-configurable: stored by reference on a writable
+     * global, the app could change or replace it after declaring it, so
+     * the policy extracted at startup differed from what was signed. */
+    JSValue copy;
+    {
+        JSValue txt = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
+        if (JS_IsException(txt)) { JS_FreeValue(ctx, global); return JS_EXCEPTION; }
+        size_t tl = 0;
+        const char *ts = JS_ToCStringLen(ctx, &tl, txt);
+        JS_FreeValue(ctx, txt);
+        if (!ts) { JS_FreeValue(ctx, global); return JS_EXCEPTION; }
+        copy = JS_ParseJSON(ctx, ts, tl, "<manifest>");
+        JS_FreeCString(ctx, ts);
+        if (JS_IsException(copy)) { JS_FreeValue(ctx, global); return JS_EXCEPTION; }
+        int is_obj = JS_IsObject(copy);
+        if (!is_obj || js_manifest_freeze(ctx, copy, 0) != 0) {
+            JS_FreeValue(ctx, copy);
+            JS_FreeValue(ctx, global);
+            return is_obj ? JS_EXCEPTION
+                          : JS_ThrowTypeError(ctx, "app.manifest requires an object");
+        }
+    }
+    if (JS_DefinePropertyValueStr(ctx, global, "__hull_manifest",
+                                  JS_DupValue(ctx, copy), 0) < 0) {
+        JS_FreeValue(ctx, copy);
+        JS_FreeValue(ctx, global);
+        return JS_EXCEPTION;
+    }
     JS_FreeValue(ctx, global);
 
     /* Module-conditional method installation. Each declared module
      * may decorate the `app` intrinsic with additional methods. */
-    if (js_manifest_declares_module(ctx, argv[0], "hull/http-server")) {
+    if (js_manifest_declares_module(ctx, copy, "hull/http-server")) {
         js_install_app_http_server(ctx);
     }
-    if (js_manifest_declares_module(ctx, argv[0], "hull/web/ws-server")) {
+    if (js_manifest_declares_module(ctx, copy, "hull/web/ws-server")) {
         js_install_app_ws_server(ctx);
     }
-    if (js_manifest_declares_module(ctx, argv[0], "hull/web/sse")) {
+    if (js_manifest_declares_module(ctx, copy, "hull/web/sse")) {
         js_install_app_sse(ctx);
     }
-    if (js_manifest_declares_module(ctx, argv[0], "hull/timers")) {
+    if (js_manifest_declares_module(ctx, copy, "hull/timers")) {
         js_install_app_timers(ctx);
     }
 
+    JS_FreeValue(ctx, copy);
     return JS_UNDEFINED;
 }
 

@@ -19,6 +19,17 @@
 
 #include "quickjs.h"
 
+/* As JS_ToCString, but NULL (nothing to free) when the string holds a NUL
+ * byte - see manifest_lua.c's mstr. */
+static const char *mjs_str(JSContext *ctx, JSValueConst v)
+{
+    size_t n = 0;
+    const char *s = JS_ToCStringLen(ctx, &n, v);
+    if (s && strlen(s) != n) { JS_FreeCString(ctx, s); return NULL; }
+    if (!s) JS_FreeValue(ctx, JS_GetException(ctx));
+    return s;
+}
+
 /* Read a string array from a JS object property into a C array.
  * Strings are copied via hl_manifest_strdup; JS strings are freed immediately.
  * Returns number of strings read (capped at max). */
@@ -42,7 +53,7 @@ static int read_js_string_array(JSContext *ctx, JSValueConst obj,
     for (int32_t i = 0; i < len && count < max; i++) {
         JSValue elem = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
         if (JS_IsString(elem)) {
-            const char *s = JS_ToCString(ctx, elem);
+            const char *s = mjs_str(ctx, elem);
             if (s) {
                 const char *copy = hl_manifest_strdup(alloc, s);
                 JS_FreeCString(ctx, s);
@@ -106,7 +117,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     /* csp = "policy-string" or false */
     JSValue csp_val = JS_GetPropertyStr(ctx, manifest, "csp");
     if (JS_IsString(csp_val)) {
-        const char *csp_str = JS_ToCString(ctx, csp_val);
+        const char *csp_str = mjs_str(ctx, csp_val);
         if (csp_str && hl_manifest_csp_is_valid(csp_str)) {
             out->csp = hl_manifest_strdup(alloc, csp_str);
             out->csp_set = 1;
@@ -130,7 +141,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
 
         JSValue methods_val = JS_GetPropertyStr(ctx, cors_val, "methods");
         if (JS_IsString(methods_val)) {
-            const char *s = JS_ToCString(ctx, methods_val);
+            const char *s = mjs_str(ctx, methods_val);
             if (s) {
                 out->cors_methods = hl_manifest_strdup(alloc, s);
                 JS_FreeCString(ctx, s);
@@ -140,7 +151,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
 
         JSValue headers_val = JS_GetPropertyStr(ctx, cors_val, "headers");
         if (JS_IsString(headers_val)) {
-            const char *s = JS_ToCString(ctx, headers_val);
+            const char *s = mjs_str(ctx, headers_val);
             if (s) {
                 out->cors_headers = hl_manifest_strdup(alloc, s);
                 JS_FreeCString(ctx, s);
@@ -252,7 +263,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
              i++) {
             JSValue elem = JS_GetPropertyUint32(ctx, modules_val, (uint32_t)i);
             if (JS_IsString(elem)) {
-                const char *spec = JS_ToCString(ctx, elem);
+                const char *spec = mjs_str(ctx, elem);
                 if (spec) {
                     /* Trailing '?' marks the module optional (skip, not error,
                      * when its build cap is absent); sits after the major. */
@@ -307,7 +318,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                 const char *alias = JS_AtomToCString(ctx, props[i].atom);
                 JSValue v_val = JS_GetProperty(ctx, modules_val, props[i].atom);
                 if (alias && JS_IsString(v_val)) {
-                    const char *spec = JS_ToCString(ctx, v_val);
+                    const char *spec = mjs_str(ctx, v_val);
                     if (spec) {
                         size_t speclen = strlen(spec);
                         int optional = (speclen > 0 && spec[speclen - 1] == '?');
@@ -378,7 +389,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                     JSValue v_val = JS_GetProperty(ctx, named, props[i].atom);
                     const char *dsn_copy = NULL;
                     if (JS_IsString(v_val)) {
-                        const char *s = JS_ToCString(ctx, v_val);
+                        const char *s = mjs_str(ctx, v_val);
                         if (s) { dsn_copy = hl_manifest_strdup(alloc, s);
                                  JS_FreeCString(ctx, s); }
                     }
@@ -418,7 +429,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
 
         JSValue internal = JS_GetPropertyStr(ctx, db_val, "internal");
         if (JS_IsString(internal)) {
-            const char *s = JS_ToCString(ctx, internal);
+            const char *s = mjs_str(ctx, internal);
             if (s && s[0])
                 out->databases.internal = hl_manifest_strdup(alloc, s);
             if (s) JS_FreeCString(ctx, s);

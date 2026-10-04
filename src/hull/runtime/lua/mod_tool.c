@@ -20,6 +20,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/runtime/cache_common.h"   /* sealed cache get/put */
 #include "hull/cap/tool.h"
 #include "hull/shared/cache_dir.h"
 #include "hull/shared/cache_registry.h"
@@ -53,6 +54,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -445,8 +447,13 @@ static int l_tool_write_file(lua_State *L)
         return 1;
     }
 
-    FILE *f = fopen(path, "wb");
+    /* O_NOFOLLOW: a package.sig (or any output) planted in an app tree as a
+     * symlink redirected this write - `hull build --sign` overwrote its
+     * target. */
+    int wfd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    FILE *f = wfd >= 0 ? fdopen(wfd, "wb") : NULL;
     if (!f) {
+        if (wfd >= 0) close(wfd);
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -1243,7 +1250,8 @@ static int l_tool_platform_verify(lua_State *L)
 {
     const char *dir   = luaL_checkstring(L, 1);
     const char *asset = luaL_checkstring(L, 2);
-    lua_pushboolean(L, hl_release_io_verify_local_asset(dir, asset) == 0);
+    const char *file  = luaL_optstring(L, 3, NULL);   /* the copy to hash */
+    lua_pushboolean(L, hl_release_io_verify_local_asset_file(dir, asset, file) == 0);
     return 1;
 }
 
@@ -1407,9 +1415,13 @@ static int l_tool_blob_store_get_to(lua_State *L)
     HlBlobStore *s = tool_store_for(kind);
     if (!s) { lua_pushboolean(L, 0); return 1; }
 
+    /* Sealed (HMAC, cache_common.c): the AOT cache holds native code a
+     * build embeds, in a directory every sandboxed app can write - an
+     * unauthenticated entry under a known .wasm's key was embedded into the
+     * next app built from it as a "cache hit". */
     uint8_t *bytes = NULL;
     size_t   len   = 0;
-    if (hl_blob_store_get(s, key, /*track_access=*/1, &bytes, &len) != 0) {
+    if (hl_runtime_cache_get_sealed(s, key, &bytes, &len) != 0) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -1472,9 +1484,9 @@ static int l_tool_blob_store_put_from(lua_State *L)
         free(bytes); lua_pushboolean(L, 0); return 1;
     }
 
-    int rc = hl_blob_store_put_keyed(s, key, bytes, (size_t)sz);
+    hl_runtime_cache_put_sealed(s, key, bytes, (size_t)sz);   /* see get_to */
     free(bytes);
-    lua_pushboolean(L, rc == 0);
+    lua_pushboolean(L, 1);
     return 1;
 }
 

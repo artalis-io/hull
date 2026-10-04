@@ -1108,6 +1108,11 @@ Table-driven dispatcher in `src/hull/commands/dispatch.c`. 25 commands:
 ```
 hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | tools | flavor | feature | cache | sign-release | verify-release | help
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH
+Every runtime flag also takes the spelling --hull-<name> (--hull-d PATH = -d PATH). In a BUILT binary the flags that weaken
+the process (--no-sandbox, --allow-degraded-sandbox, --no-ca-bundle/--skip-ca-bundle, --ca-bundle, --no-verify-platform,
+--agent-api, --max-instructions) are taken ONLY as --hull-<name>; a bare one is refused, since a built binary cannot tell an
+operator's option from one of its app's arguments (include/hull/runtime_flags.h, docs/cli_mode.md).
+--agent-api additionally requires a loopback bind (its endpoints are unauthenticated).
 Global flags: --version / -v (equivalent to hull version), --help / -h (equivalent to hull help), --verbose, --json, --app-dir
 ```
 
@@ -1342,7 +1347,7 @@ SQL migrations provide versioned schema management for SQLite databases.
 | Auto-run (test) | `test.c` | Runs migrations against `:memory:` database |
 | Embedding | `build.lua` | Embeds `migrations/*.sql` in built binaries |
 
-**Convention:** `migrations/*.sql` files numbered `001_`, `002_`, etc. Each runs in `BEGIN IMMEDIATE` / `COMMIT`. The `_hull_migrations` table tracks applied migrations (name + checksum + timestamp). Opt out with `--no-migrate`. A built binary runs only the migrations embedded in it: the `<app_dir>/migrations` filesystem fallback (and the static-file one) is for development, when the app VFS is empty, so SQL placed beside a built binary never runs.
+**Convention:** `migrations/*.sql` files numbered `001_`, `002_`, etc. Each runs in `BEGIN IMMEDIATE` / `COMMIT`. The `_hull_migrations` table tracks applied migrations (name + checksum + timestamp; the checksum column is added to an older table on first use and backfilled). An applied migration whose SQL has changed is NOT re-run - startup logs a loud WARN naming it (put schema changes in a new migration). Opt out with `--no-migrate`. A built binary runs only the migrations embedded in it: the `<app_dir>/migrations` filesystem fallback (and the static-file one) is for development, when the app VFS is empty, so SQL placed beside a built binary never runs.
 
 **Commands:**
 - `hull migrate [app_dir]`. Run pending migrations
@@ -1467,6 +1472,33 @@ Two-phase sandbox in `sandbox.c`:
 - **macOS:** Builds dynamic SBPL profile from manifest, applies via `sandbox_init_with_parameters()`. Deny-default with selective allows for app_dir, db files, manifest paths, network.
 
 Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sandbox` flag disables kernel enforcement for debugging.
+
+**`--verify-sig` enforces the signed policy.** The runtime re-derives its manifest by running
+app code, so after load it compares the manifest the app actually declared (`app.manifest()`
+keeps a plain deep copy - no metatables in Lua, frozen and non-writable in JS) with the signed
+`manifest`, structurally, and the resolved module set with `modules_resolved`
+(`hl_sig_check_runtime_policy`); any difference refuses to start. The signature is verified,
+and the phase-1 sandbox applied, before the app context runs migrations. §5b also requires the
+per-arch `arch_hashes` (the platform archive the build cross-checked) to be present and to match
+the signed manifest - a `--no-verify-platform` build carries no `gethull` block and needs
+`--no-verify-platform` at run time too. Every embedded VFS entry (compute WASM, AOT code,
+shaders, templates, static files, migrations) must be signed; `hull verify` also checks
+`binary_hash` against the built binary when it is present.
+
+**The app directory may not be `/`.** A built binary takes its app directory from its working
+directory; `hl_sandbox_apply` refuses `/` (that unveiled the whole filesystem) - run it from
+its own directory (`WorkingDirectory=`, `WORKDIR`).
+
+**Tool-mode sandbox (`hl_tool_sandbox_init`).** Kernel unveil only where it enforces (OpenBSD,
+Linux with Landlock, a cosmo APE on those two hosts); pledge wherever available (Linux without
+Landlock too); a failed unveil / pledge there is fatal, not logged-and-ignored. Elsewhere
+(macOS, Windows, the other BSDs) only the userspace allowlist the tool bindings check applies,
+and the log says so. The invocation directory is never granted when it is `/`. Tool writes
+(`tool.write_file`, `tool.copy`) do not follow a symlink at the destination, and the unveil
+check canonicalises a not-yet-existing path through its nearest existing ancestor (a raw
+`/tmp/../x` no longer passes the `/tmp` prefix). Nothing a build or eject executes or links is
+taken from the working directory (`./build/wamrc`, `./build/libhull_platform*.a`,
+`./build/platform.sig`); `hull build --platform-sig PATH` names a platform.sig explicitly.
 
 **A cosmo APE only gets a kernel sandbox on Linux and OpenBSD.** Cosmopolitan's
 `pledge()`/`unveil()` enforce where the host gives them a mechanism (seccomp-bpf

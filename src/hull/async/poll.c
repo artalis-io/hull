@@ -558,7 +558,17 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
          * kernel then reports the new file's readiness under the old
          * registration, which is why deregistering first is the rule. */
         if (re & POLLNVAL) {
-            poll_watcher_del(ctx, snaps[i].fd);
+            /* Only the registration this poll saw (epoch): steps 4-5 ran app
+             * code that may have opened a new socket on the same NUMBER and
+             * registered it - deleting by fd alone removed that one, and its
+             * connection hung. */
+            pthread_mutex_lock(&ctx->lock);
+            ssize_t j = watcher_find(ctx, snaps[i].fd);
+            if (j >= 0 && ctx->watchers[j].epoch == snaps[i].epoch) {
+                ctx->watchers[j] = ctx->watchers[ctx->watcher_count - 1];
+                ctx->watcher_count--;
+            }
+            pthread_mutex_unlock(&ctx->lock);
             continue;
         }
 
@@ -646,7 +656,17 @@ static void poll_timer_cancel(HlAsyncBackendCtx *ctx, uint64_t handle)
      * pay for itself only at much higher counts. */
     for (size_t i = 0; i < ctx->timer_count; i++) {
         if (ctx->timers[i]->id == handle) {
-            ctx->timers[i]->cancelled = 1;
+            /* Removed now, not flagged and left until its deadline: an op
+             * with a long deadline that completed quickly left one behind
+             * each time, so the heap grew with rate x deadline. (A timer
+             * already popped for firing is no longer here.) */
+            PollTimer *t = ctx->timers[i];
+            ctx->timers[i] = ctx->timers[--ctx->timer_count];
+            if (i < ctx->timer_count) {
+                heap_sift_down(ctx, i);
+                heap_sift_up(ctx, i);
+            }
+            free(t);
             break;
         }
     }

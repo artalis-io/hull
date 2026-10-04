@@ -140,7 +140,7 @@ static int cmd_status(const char *app_dir, const char *db_path)
 int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
 {
     const char *app_dir = env->app_dir;
-    const char *db_path = "data.db";
+    const char *db_path = NULL;   /* default: <app_dir>/data.db (below) */
     const char *subcmd = NULL;
     int tui = 0;
 
@@ -170,6 +170,20 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
     /* Dispatch to Lua for 'new' subcommand */
     if (subcmd && strcmp(subcmd, "new") == 0)
         return hull_tool("hull.migrate", argc, argv, env->hull_exe);
+
+    /* The app's database, as `hull agent migrate` / `agent db` open it: the
+     * default was "data.db" in the WORKING directory, so `hull migrate
+     * myapp` migrated (or created) ./data.db rather than myapp/data.db. */
+    char default_db[4096];
+    if (!db_path) {
+        int n = snprintf(default_db, sizeof default_db, "%s/data.db",
+                         app_dir ? app_dir : ".");
+        if (n < 0 || (size_t)n >= sizeof default_db) {
+            fprintf(stderr, "hull migrate: app directory path too long\n");
+            return 1;
+        }
+        db_path = default_db;
+    }
 
     /* Status subcommand */
     if (subcmd && strcmp(subcmd, "status") == 0) {

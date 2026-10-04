@@ -13,6 +13,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/release_io.h"   /* hl_release_io_self_path */
 #include "hull/commands/sbom.h"
 #include "hull/sbom.h"
 
@@ -64,7 +65,13 @@ int hl_cmd_sbom(int argc, char **argv, const HlCommandEnv *env)
      * can emit binary_sha256 in json/cyclonedx/spdx output. argv[0] is
      * usually a usable path (./hull, /usr/local/bin/hull, etc.); if it's
      * just "hull" via $PATH lookup the SHA is silently omitted. */
-    if (env && env->hull_exe) hl_sbom_set_binary_path(env->hull_exe);
+    {   /* this binary: argv[0] only when it is a path (see verify_self.c) */
+        static char self[4096];
+        if (hl_release_io_self_path(self, sizeof self) == 0)
+            hl_sbom_set_binary_path(self);
+        else if (env && env->hull_exe && strchr(env->hull_exe, '/'))
+            hl_sbom_set_binary_path(env->hull_exe);
+    }
 
     HlSbomFormat fmt = HL_SBOM_HUMAN;
     for (int i = 1; i < argc; i++) {

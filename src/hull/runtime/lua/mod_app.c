@@ -607,6 +607,40 @@ static void install_app_ws_server(lua_State *L)
  * The decoration happens here, not at module-init time, because
  * the runtime only knows what modules an app declared once
  * app.manifest is called. */
+/* A plain copy of the manifest value at @p idx, pushed: tables copied
+ * raw (no metatables - an __index / __pairs could show the extractor one
+ * policy and the signature check another), strings / numbers / booleans
+ * as they are, anything else refused. */
+static void manifest_copy(lua_State *L, int idx, int depth)
+{
+    idx = lua_absindex(L, idx);
+    if (depth > 16) luaL_error(L, "app.manifest: nested too deeply");
+    luaL_checkstack(L, 4, "app.manifest");
+    switch (lua_type(L, idx)) {
+    case LUA_TSTRING: case LUA_TNUMBER: case LUA_TBOOLEAN:
+        lua_pushvalue(L, idx);
+        return;
+    case LUA_TTABLE:
+        break;
+    default:
+        luaL_error(L, "app.manifest: a %s is not a manifest value",
+                   luaL_typename(L, idx));
+        return;
+    }
+    lua_newtable(L);
+    int out = lua_gettop(L);
+    lua_pushnil(L);
+    while (lua_next(L, idx)) {          /* raw: no __pairs */
+        int kt = lua_type(L, -2);
+        if (kt != LUA_TSTRING && kt != LUA_TNUMBER)
+            luaL_error(L, "app.manifest: a %s key", lua_typename(L, kt));
+        lua_pushvalue(L, -2);           /* key */
+        manifest_copy(L, -2, depth + 1);
+        lua_rawset(L, out);
+        lua_pop(L, 1);                  /* value */
+    }
+}
+
 static int lua_app_manifest(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -617,6 +651,12 @@ static int lua_app_manifest(lua_State *L)
         return luaL_error(L, "app.manifest() can only be called once");
     lua_pop(L, 1);
 
+    /* Stored as a plain copy, not by reference: the app kept the table and
+     * could change it afterwards, or give it metamethods, so the policy
+     * extracted at startup differed from what was declared (and signed). */
+    lua_settop(L, 1);
+    manifest_copy(L, 1, 0);
+    lua_replace(L, 1);
     lua_pushvalue(L, 1);
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
 

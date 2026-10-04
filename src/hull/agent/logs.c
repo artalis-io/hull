@@ -14,6 +14,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* An error after the result object was started: the error object replaced
+ * it, rather than being appended to a half-written one (malformed JSON for
+ * the agent / MCP client). */
+static int logs_fail(ShJsonBuf *out, const char *msg)
+{
+    out->len = 0;
+    return hl_agent_write_error(out, msg);
+}
+
 int hl_agent_logs(const char *app_dir, int tail_n, ShJsonBuf *out)
 {
     if (!app_dir) app_dir = ".";
@@ -39,19 +48,19 @@ int hl_agent_logs(const char *app_dir, int tail_n, ShJsonBuf *out)
     }
 
     /* Seek to end, read up to MAX_LOG_BYTES from the tail. */
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return hl_agent_write_error(out, "seek failed"); }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return logs_fail(out, "seek failed"); }
     long fsize = ftell(f);
     if (fsize < 0) fsize = 0;
     long start = fsize > HL_AGENT_LOG_TAIL_BYTES ? fsize - HL_AGENT_LOG_TAIL_BYTES : 0;
-    if (fseek(f, start, SEEK_SET) != 0) { fclose(f); return hl_agent_write_error(out, "seek failed"); }
+    if (fseek(f, start, SEEK_SET) != 0) { fclose(f); return logs_fail(out, "seek failed"); }
 
     size_t to_read = (size_t)(fsize - start);
     char *buf = malloc(to_read + 1);
-    if (!buf) { fclose(f); return hl_agent_write_error(out, "out of memory"); }
+    if (!buf) { fclose(f); return logs_fail(out, "out of memory"); }
     size_t got = fread(buf, 1, to_read, f);
     int read_err = ferror(f);
     fclose(f);
-    if (read_err) { free(buf); return hl_agent_write_error(out, "read failed"); }
+    if (read_err) { free(buf); return logs_fail(out, "read failed"); }
     buf[got] = '\0';
 
     /* Count line breaks; emit the last tail_n lines. */
@@ -65,7 +74,7 @@ int hl_agent_logs(const char *app_dir, int tail_n, ShJsonBuf *out)
                 nl_cap = nl_cap ? nl_cap * 2 : HL_AGENT_NL_CAP_INITIAL;
                 long *grow = realloc(nl_offsets, (size_t)nl_cap * sizeof(long));
                 if (!grow) { free(nl_offsets); free(buf);
-                             return hl_agent_write_error(out, "out of memory"); }
+                             return logs_fail(out, "out of memory"); }
                 nl_offsets = grow;
             }
             nl_offsets[nl_count++] = (long)i;

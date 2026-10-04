@@ -119,7 +119,9 @@ static int sha256_file_hex(const char *path, char hex_out[HL_SHA256_HEX_BUF])
 static int resolve_self_path(const HlCommandEnv *env, char *out, size_t out_sz)
 {
     if (hl_release_io_self_path(out, out_sz) == 0) return 0;
-    if (env && env->hull_exe) {
+    /* argv[0] only when it is a path: a bare "hull" (a PATH lookup) named
+     * ./hull in the working directory, not this binary. */
+    if (env && env->hull_exe && strchr(env->hull_exe, '/')) {
         size_t len = strlen(env->hull_exe);
         if (len + 1 > out_sz) return -1;
         memcpy(out, env->hull_exe, len + 1);
