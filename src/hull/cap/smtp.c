@@ -47,6 +47,16 @@ static void smtp_secure_zero(void *p, size_t n)
 
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
+/* An address usable inside <...> on an SMTP command line. */
+static int smtp_envelope_ok(const char *a)
+{
+    if (!a) return 1;   /* optional fields are checked by their callers */
+    for (const unsigned char *p = (const unsigned char *)a; *p; p++)
+        if (*p <= 0x20 || *p == 0x7f || *p == '<' || *p == '>')
+            return 0;
+    return 1;
+}
+
 static int has_crlf(const char *s)
 {
     if (!s) return 0;
@@ -102,8 +112,12 @@ static int smtp_command(HlSmtpTransport *t, const char *cmd,
     int code = hl_smtp_transport_read_reply(t, resp, (int)sizeof(resp), timeout_ms);
 
     if (expected_code > 0 && code != expected_code) {
-        log_warn("smtp: expected %d, got %d for command '%.20s'",
-                 expected_code, code, cmd);
+        /* The verb only: "AUTH PLAIN <base64>" put the start of the encoded
+         * user + password into the log on a refused login. */
+        size_t vlen = strcspn(cmd, " \r\n");
+        if (vlen > 12) vlen = 12;
+        log_warn("smtp: expected %d, got %d for command '%.*s'",
+                 expected_code, code, (int)vlen, cmd);
         return -1;
     }
     return code;
@@ -240,6 +254,17 @@ int hl_smtp_validate_message(const HlSmtpMessage *msg)
             if (has_crlf(msg->cc[i]))
                 return -1;
         }
+    }
+
+    /* Envelope addresses go into MAIL FROM:<%s> / RCPT TO:<%s>: one with
+     * '>' or whitespace appended ESMTP parameters (" NOTIFY=SUCCESS
+     * ORCPT=..."). No angle brackets, whitespace or control bytes. */
+    if (!smtp_envelope_ok(msg->from) || !smtp_envelope_ok(msg->to))
+        return -1;
+    if (msg->cc) {
+        for (int i = 0; i < msg->cc_count; i++)
+            if (!smtp_envelope_ok(msg->cc[i]))
+                return -1;
     }
 
     /* Check port is valid */

@@ -336,13 +336,62 @@ static int zig_subcommand_ok(const char *sub)
     return 0;
 }
 
+/* @p dir, canonical, is a $PATH entry or under $HOME/.hull/tools - where
+ * Hull's lld lookup finds ld.lld - and holds an ld.lld / ld64.lld. */
+static int tool_bdir_trusted(const char *dir)
+{
+    char real[PATH_MAX];
+    if (!dir || !*dir || !realpath(dir, real)) return 0;
+
+    int trusted = 0;
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        char tools[PATH_MAX], rtools[PATH_MAX];
+        int n = snprintf(tools, sizeof tools, "%s/.hull/tools", home);
+        if (n > 0 && (size_t)n < sizeof tools && realpath(tools, rtools)) {
+            size_t tl = strlen(rtools);
+            if (strncmp(real, rtools, tl) == 0 &&
+                (real[tl] == '/' || real[tl] == '\0'))
+                trusted = 1;
+        }
+    }
+    const char *path = getenv("PATH");
+    while (!trusted && path && *path) {
+        const char *end = strchr(path, ':');
+        size_t len = end ? (size_t)(end - path) : strlen(path);
+        if (len > 0 && len < PATH_MAX) {
+            char comp[PATH_MAX], rcomp[PATH_MAX];
+            memcpy(comp, path, len);
+            comp[len] = '\0';
+            if (realpath(comp, rcomp) && strcmp(rcomp, real) == 0)
+                trusted = 1;
+        }
+        path = end ? end + 1 : NULL;
+    }
+    if (!trusted) return 0;
+
+    static const char *const lld[] = { "ld.lld", "ld64.lld", NULL };
+    for (const char *const *l = lld; *l; l++) {
+        char f[PATH_MAX];
+        struct stat st;
+        int n = snprintf(f, sizeof f, "%s/%s", real, *l);
+        if (n > 0 && (size_t)n < sizeof f && stat(f, &st) == 0 &&
+            S_ISREG(st.st_mode))
+            return 1;
+    }
+    return 0;
+}
+
 int hl_tool_validate_args(const char *const argv[])
 {
     if (!argv) return -1;
     if (argv[0]) {
         char named[64];
+        /* A versioned zig ("zig-0.13") is admitted by the allowlist too, and
+         * escaped the subcommand rule: `zig-0.13 build` ran build.zig. */
         if (hl_host_tool_name(argv[0], named, sizeof named) == 0 &&
-            strcmp(named, "zig") == 0 && !zig_subcommand_ok(argv[1]))
+            (strcmp(named, "zig") == 0 || strncmp(named, "zig-", 4) == 0) &&
+            !zig_subcommand_ok(argv[1]))
             return -1;
     }
     for (int i = 1; argv[i]; i++) {
@@ -359,6 +408,13 @@ int hl_tool_validate_args(const char *const argv[])
         if (strncmp(a, "-specs=", 7) == 0 ||
             strncmp(a, "--specs=", 8) == 0)   return -1; /* GCC spec file: arbitrary commands */
         if (strncmp(a, "--ld-path=", 10) == 0) return -1; /* linker named by path */
+        /* -B<dir>: gcc / clang look up cc1, as and ld there - another way to
+         * run a chosen program as part of the compile. Only the lld
+         * backend's own form passes: a directory already trusted to run
+         * programs from, holding the lld it resolved. */
+        if (strncmp(a, "-B", 2) == 0 && !tool_bdir_trusted(a + 2)) return -1;
+        if (strncmp(a, "--gcc-toolchain", 15) == 0 ||
+            strncmp(a, "-gcc-toolchain", 14) == 0) return -1;
         /* -fuse-ld=lld picks a linker by name (Hull's lld backend uses it);
          * -fuse-ld=/tmp/x runs that file as the linker. */
         if (strncmp(a, "-fuse-ld=", 9) == 0 &&
@@ -426,10 +482,28 @@ static int spawn_and_wait(const char *const argv[], const char *const envadd[])
     return exit_code;
 }
 
+/* The variables a tool spawn may set. Any key was accepted - and putenv'd
+ * in the child - so LD_PRELOAD / DYLD_INSERT_LIBRARIES, clang's
+ * CCC_OVERRIDE_OPTIONS (+-fplugin=...), COMPILER_PATH or GCC_EXEC_PREFIX
+ * ran chosen code past the flag filter. */
+static int tool_env_ok(const char *kv)
+{
+    static const char *const ok[] = {
+        "ZIG_GLOBAL_CACHE_DIR=", "ZIG_LOCAL_CACHE_DIR=",
+        "TMPDIR=", "TMP=", "TEMP=", "SOURCE_DATE_EPOCH=", NULL
+    };
+    for (const char *const *p = ok; *p; p++)
+        if (strncmp(kv, *p, strlen(*p)) == 0) return 1;
+    return 0;
+}
+
 int hl_tool_spawn_env(const char *const argv[], const char *const envadd[])
 {
     if (!argv || !argv[0]) return -1;
-    if (hl_tool_check_allowlist(argv[0]) != 0 ||
+    int env_bad = 0;
+    for (int i = 0; envadd && envadd[i]; i++)
+        if (!tool_env_ok(envadd[i])) env_bad = 1;
+    if (env_bad || hl_tool_check_allowlist(argv[0]) != 0 ||
         hl_tool_validate_args(argv) != 0) {
         ShJsonWriter w = hl_audit_begin("tool.spawn");
         sh_json_write_key(&w, "argv");

@@ -570,6 +570,12 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
     /* Inline textures created during dispatch (destroyed in cleanup) */
     HlGpuTexture inline_textures[16];
     int inline_tex_count = 0;
+    /* The texture each opts->textures[i] resolved to (stored or inline),
+     * for output_texture: inline_textures[] is numbered in creation order,
+     * so with stored and inline textures mixed, output_texture=1 read
+     * another texture and output_texture=2 was "not found". */
+    const HlGpuTexture *desc_tex[64];
+    for (int i = 0; i < 64; i++) desc_tex[i] = NULL;
 
     /* Count texture bindings: sampled = 2 (view + sampler), storage = 1 */
     int tex_bindings = 0;
@@ -758,6 +764,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
                 if (err_msg) *err_msg = "texture_not_found";
                 goto cleanup;
             }
+            if (i < 64) desc_tex[i] = tex;
 
             if (tex->storage) {
                 /* Storage texture: single binding (view only) */
@@ -892,19 +899,8 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
     } else if (output && output_len && opts->output_texture >= 0) {
         /* Texture readback */
         int ti = opts->output_texture;
-        const HlGpuTexture *tex = NULL;
-        if (ti < inline_tex_count) {
-            tex = &inline_textures[ti];
-        } else if (ti < opts->texture_count && opts->textures[ti].name &&
-                   persistent_textures) {
-            for (int p = 0; p < persistent_tex_count; p++) {
-                if (persistent_textures[p].name[0] != '\0' &&
-                    strcmp(persistent_textures[p].name, opts->textures[ti].name) == 0) {
-                    tex = &persistent_textures[p];
-                    break;
-                }
-            }
-        }
+        const HlGpuTexture *tex =
+            (ti < opts->texture_count && ti < 64) ? desc_tex[ti] : NULL;
         if (!tex) {
             if (err_msg) *err_msg = "output_texture_not_found";
             goto cleanup;
@@ -1084,6 +1080,12 @@ static WGPUBuffer find_or_create_temp(WgpuDeviceCtx *dctx,
                 return map[i].buf;
         }
     }
+
+    /* Refused when it could not be recorded: a buffer made past the map's
+     * capacity was never destroyed (4 GB of VRAM per call for 16 unnamed
+     * 256 MB buffers past the 64th). */
+    if (*map_count >= HL_GPU_MAX_PIPELINE_BUFFERS)
+        return NULL;
 
     /* Create new temp buffer */
     size_t aligned = size <= SIZE_MAX - 3 ? (size + 3) & ~(size_t)3 : size;
@@ -1593,6 +1595,10 @@ static int wgpu_texture_create(HlGpuDevice *dev, uint32_t width,
         .sampleCount = 1,
     };
 
+    /* Validation errors arrive through the error callback, not the return
+     * value: unchecked, an invalid one (an r8 storage texture) registered
+     * as valid. Checked once everything is made. */
+    wgpu_last_error = 0;
     WGPUTexture texture = wgpuDeviceCreateTexture(dctx->device, &tex_desc);
     if (!texture)
         return HL_GPU_ERR_BUFFER;
@@ -1617,7 +1623,8 @@ static int wgpu_texture_create(HlGpuDevice *dev, uint32_t width,
         .maxAnisotropy = 1,
     };
     WGPUSampler sampler = wgpuDeviceCreateSampler(dctx->device, &sampler_desc);
-    if (!sampler) {
+    if (!sampler || wgpu_last_error) {
+        if (sampler) wgpuSamplerRelease(sampler);
         wgpuTextureViewRelease(view);
         wgpuTextureDestroy(texture);
         wgpuTextureRelease(texture);
@@ -1665,8 +1672,9 @@ static int wgpu_texture_write(HlGpuDevice *dev, HlGpuTexture *tex,
     };
     WGPUExtent3D extent = { tex->width, tex->height, 1 };
 
+    wgpu_last_error = 0;   /* see wgpu_texture_create */
     wgpuQueueWriteTexture(dctx->queue, &dst, data, len, &layout, &extent);
-    return HL_GPU_OK;
+    return wgpu_last_error ? HL_GPU_ERR_BUFFER : HL_GPU_OK;
 }
 
 /* ── wgpu_texture_read ─────────────────────────────────────────────── */
@@ -1825,7 +1833,12 @@ static int wgpu_buffer_copy(HlGpuDevice *dev,
     WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !src || !dst || !src->handle || !dst->handle)
         return HL_GPU_ERR_BUFFER;
+    /* A copy within one buffer is invalid in WebGPU; it was reported as a
+     * success that did nothing. */
+    if (src->handle == dst->handle)
+        return HL_GPU_ERR_BUFFER;
 
+    wgpu_last_error = 0;   /* see wgpu_texture_create */
     WGPUCommandEncoderDescriptor enc_desc = { .label = sv("hull_copy_enc") };
     WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
         dctx->device, &enc_desc);
@@ -1848,7 +1861,8 @@ static int wgpu_buffer_copy(HlGpuDevice *dev,
 
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(encoder);
-    return poll_rc == 0 ? HL_GPU_OK : HL_GPU_ERR_TIMEOUT;
+    if (poll_rc != 0) return HL_GPU_ERR_TIMEOUT;
+    return wgpu_last_error ? HL_GPU_ERR_BUFFER : HL_GPU_OK;
 }
 
 /* ── Backend vtable ────────────────────────────────────────────────── */

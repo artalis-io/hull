@@ -108,7 +108,11 @@ is EXISTING behavior the design must preserve (§4.1), and the absolute-path
 a temp file in the target's directory (created through the same resolver, grant
 and symlink policy), which is fsynced and renamed over the target, and the rename
 is fsynced. The one in-place case left is a target that is an in-root symlink
-under a SUBTREE grant, written through the link as before. Archive extraction
+under a SUBTREE grant, written through the link as before; the other is a
+directory that refuses the temp file (EACCES / EROFS) or the rename (EBUSY /
+EXDEV) - an exact grant on a file in a read-only directory, a bind-mounted
+file - where the file is written in place rather than the write refused.
+Policy denials fail before either fallback. Archive extraction
 uses the atomic path without the fsyncs (`HL_FS_WRITE_NO_SYNC`).
 
 ## 2. Design goals

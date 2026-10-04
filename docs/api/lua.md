@@ -426,7 +426,10 @@ which is fsynced and renamed over the target. A concurrent reader, or the file
 after a crash or a power cut, sees the old contents or the new, never a mix. A
 replaced file keeps its permission bits; its inode changes, so a hard link to it
 keeps the old contents. (A target that is an in-root symlink under a subtree
-grant is written through the link, in place.)
+grant is written through the link, in place. So is a file whose directory will
+not take the temp file or the rename - read-only or not writable, a
+bind-mounted single file, another filesystem - since the file itself may still
+be writable; that write is not atomic.)
 
 The leaf **must be a regular file.** A FIFO, socket, character/block device, or
 directory target is rejected `nil, "not_a_regular_file"` and never blocks (a

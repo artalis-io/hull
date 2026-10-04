@@ -386,7 +386,7 @@ static int pool_acquire(HlWasmModule *mod,
     pthread_mutex_lock(&mod->mutex);
     /* Snapshot shared data under the lock */
     *out_sd = mod->shared_data;
-    *out_chain_head = mod->shared_data ? mod->shared_data->chain_head : NULL;
+    *out_chain_head = hl_wasm_chain_snapshot(mod->shared_data);
     HlWasmPool *pool = &mod->pool;
     for (int i = 0; i < pool->count; i++) {
         HlWasmPoolEntry *e = &pool->entries[i];
@@ -580,9 +580,16 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_NOT_FOUND;
     }
 
-    /* Skip early unlocked cache_find / count check - the authoritative
-     * double-check happens under pool_mutex at the insertion point below.
-     * Unlocked reads of cache->count and modules[] are data races under C11. */
+    /* Already loaded: done. Checked under the lock (an unlocked read is a
+     * data race). Without this every call - compute.async.call runs it on
+     * the event loop per request - re-read the module (up to 256 MB),
+     * re-loaded it and re-ran its ABI probe, only to discard the result at
+     * the double-check below. */
+    pthread_mutex_lock(&cache->pool_mutex);
+    int already = cache_find(cache, name) != NULL;
+    pthread_mutex_unlock(&cache->pool_mutex);
+    if (already)
+        return 0;
 
     uint8_t *buf = NULL;
     uint32_t buf_len = 0;
@@ -714,6 +721,9 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
             if (ver_fn) {
                 wasm_exec_env_t env = wasm_runtime_create_exec_env(tmp_inst, 8192);
                 if (env) {
+                    /* Metered like any call: a hull_version that loops hung
+                     * whatever loaded the module (the event loop). */
+                    wasm_runtime_set_instruction_count_limit(env, HL_WASM_DEFAULT_GAS);
                     uint32_t argv[1] = {0};
                     if (wasm_runtime_call_wasm(env, ver_fn, 0, argv))
                         abi_version = argv[0];
@@ -1020,8 +1030,17 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
      * raced-in segment set applies to future calls, never this one) -- only the
      * span chain is attached below, preserving WAMR's one-chain-per-instance
      * rule. A no-spans call is byte-for-byte the existing segment path. */
-    if (!have_spans)
-        hl_wasm_attach_shared_heap(inst, chain_head_snapshot);
+    /* A pooled instance still has the chain it was created with (a segment
+     * change drains the pool), and WAMR refuses a second attach; only a new
+     * instance attaches. A failed attach destroys the instance (success=0),
+     * so an unattached one never reaches the pool. */
+    if (!have_spans && !from_pool &&
+        hl_wasm_attach_shared_heap(inst, chain_head_snapshot) != 0) {
+        if (err_msg) *err_msg = "segment_attach_failed";
+        hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
+                             heap_size, stack_size, 0);
+        return HL_WASM_ERR_INTERNAL;
+    }
 
     /* Build + attach the per-invocation span set on the executing thread, AFTER
      * instance acquisition. On any add/attach failure, roll the partial set back
@@ -1254,11 +1273,17 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
             return NULL;
         }
     }
+    /* The same rule as compute.call: a Memory64 module needs AOT (the fast
+     * interpreter + memory64 pairing is one WAMR does not support).
+     * compute.instance / compute.stream / a WASM db.udf ran it anyway. */
+    if (mod->is_memory64 && !mod->is_aot) {
+        if (err_msg) *err_msg = "memory64_requires_aot";
+        return NULL;
+    }
     /* Snapshot shared data under per-module mutex */
     {
         pthread_mutex_lock(&mod->mutex);
-        if (mod->shared_data)
-            chain_head_snapshot = mod->shared_data->chain_head;
+        chain_head_snapshot = hl_wasm_chain_snapshot(mod->shared_data);
         pthread_mutex_unlock(&mod->mutex);
     }
 
@@ -1290,7 +1315,12 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     }
 
     /* Attach shared data (snapshotted under mutex) */
-    hl_wasm_attach_shared_heap(inst, chain_head_snapshot);
+    if (hl_wasm_attach_shared_heap(inst, chain_head_snapshot) != 0) {
+        if (err_msg) *err_msg = "segment_attach_failed";
+        wasm_runtime_destroy_exec_env(exec_env);
+        wasm_runtime_deinstantiate(inst);
+        return NULL;
+    }
 
     /* Allocate struct */
     HlWasmInstance *pi = alloc ? hl_alloc_calloc(alloc, 1, sizeof(*pi))

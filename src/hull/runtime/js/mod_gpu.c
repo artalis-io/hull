@@ -1412,6 +1412,15 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                 if (bc < 0) bc = 0;
                 if (bc > 16) bc = 16;
                 total_bufs += bc;
+                /* The pipeline holds at most this many buffers in all (the
+                 * per-stage cap alone allowed 80). */
+                if (total_bufs > HL_GPU_MAX_PIPELINE_BUFFERS) {
+                    JS_FreeValue(ctx, bv);
+                    JS_FreeValue(ctx, sv);
+                    hl_worker_gpu_op_free(op); free(op);
+                    return JS_ThrowRangeError(ctx, "gpu.async.pipeline: more than %d "
+                                              "buffers in all", HL_GPU_MAX_PIPELINE_BUFFERS);
+                }
             }
             JS_FreeValue(ctx, bv);
         }

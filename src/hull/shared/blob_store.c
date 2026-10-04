@@ -106,13 +106,30 @@ static int validate_id(const char *id)
 /* The shard directory a blob goes into: made if missing, and it must be a
  * real directory - a symlink planted in its place (a shared cache root)
  * redirected every write below it. */
-static int ensure_shard(const char *shard)
+static int ensure_shard(const HlBlobStore *store, const char *shard)
 {
     if (hl_mkdir_p(shard, 0755) < 0) return -1;
-    struct stat st;
-    if (lstat(shard, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        errno = ENOTDIR;
+    /* Every component below the root - "blobs", each shard level - must be
+     * a real directory: with shard_depth 2, a symlink at blobs/ab was
+     * followed and lstat("blobs/ab/cd") resolved through it, so the rename
+     * landed outside the store. */
+    size_t start = store->root_len;
+    if (strncmp(shard, store->root, start) != 0 || shard[start] != '/') {
+        errno = EINVAL;
         return -1;
+    }
+    char part[PATH_MAX];
+    size_t n = strlen(shard);
+    if (n >= sizeof part) { errno = ENAMETOOLONG; return -1; }
+    memcpy(part, shard, n + 1);
+    for (size_t k = start + 1; k <= n; k++) {
+        if (part[k] != '/' && part[k] != '\0') continue;
+        char saved = part[k];
+        part[k] = '\0';
+        struct stat st;
+        int ok = lstat(part, &st) == 0 && S_ISDIR(st.st_mode);
+        part[k] = saved;
+        if (!ok) { errno = ENOTDIR; return -1; }
     }
     return 0;
 }
@@ -440,7 +457,7 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
         writer_release(w);
         return -1;
     }
-    if (ensure_shard(shard) < 0) {
+    if (ensure_shard(w->store, shard) < 0) {
         unlink(w->tmp_path);
         writer_release(w);
         return -1;
@@ -620,7 +637,7 @@ int hl_blob_store_put_keyed(HlBlobStore *s, const char *key,
         unlink(tmp_path);
         return -1;
     }
-    if (ensure_shard(shard) < 0) {
+    if (ensure_shard(mutable_s, shard) < 0) {
         unlink(tmp_path);
         return -1;
     }
@@ -748,24 +765,29 @@ int hl_blob_store_get(HlBlobStore *s, const char *id, int track_access,
     *out_buf = NULL;
     *out_len = 0;
 
-    size_t size = 0;
-    if (hl_blob_store_stat(s, id, &size, NULL) != 0) return -1;
+    /* Sized from the OPENED file: a stat() of the path, before the
+     * O_NOFOLLOW open, could see a different file than the one read (a
+     * replace in between, in a shared store), and the first `size` bytes of
+     * the other file came back as this blob. */
+    HlBlobStoreReader *r = NULL;
+    if (hl_blob_store_reader_open(s, id, track_access, &r) != 0) return -1;
+    struct stat fst;
+    if (fstat(r->fd, &fst) != 0 || fst.st_size < 0) {
+        hl_blob_store_reader_close(r);
+        return -1;
+    }
+    size_t size = (size_t)fst.st_size;
 
     if (size > HL_BLOB_STORE_MAX_IN_MEMORY_BYTES) {
+        hl_blob_store_reader_close(r);
         errno = EFBIG;
         return -1;
     }
 
     if (size == 0) {
-        HlBlobStoreReader *r = NULL;
-        if (hl_blob_store_reader_open(s, id, track_access, &r) != 0)
-            return -1;
         hl_blob_store_reader_close(r);
         return 0;
     }
-
-    HlBlobStoreReader *r = NULL;
-    if (hl_blob_store_reader_open(s, id, track_access, &r) != 0) return -1;
 
     uint8_t *buf = hl_alloc_malloc(s->alloc, size);
     if (!buf) { hl_blob_store_reader_close(r); return -1; }
@@ -781,6 +803,11 @@ int hl_blob_store_get(HlBlobStore *s, const char *id, int track_access,
         if (n == 0) break;
         got += n;
     }
+    /* And nothing past it (a file that grew while read). */
+    uint8_t extra;
+    size_t more = 0;
+    if (got == size && hl_blob_store_reader_read(r, &extra, 1, &more) == 0 && more)
+        got = size + 1;
     hl_blob_store_reader_close(r);
 
     if (got != size) {
@@ -789,6 +816,31 @@ int hl_blob_store_get(HlBlobStore *s, const char *id, int track_access,
     }
     *out_buf = buf;
     *out_len = size;
+    return 0;
+}
+
+int hl_blob_store_get_verified(HlBlobStore *s, const char *id, int track_access,
+                               uint8_t **out_buf, size_t *out_len)
+{
+    if (hl_blob_store_get(s, id, track_access, out_buf, out_len) != 0)
+        return -1;
+    uint8_t digest[32];
+    char hex[HL_BLOB_STORE_ID_BUF_SIZE];
+    int ok = hl_cap_crypto_sha256(*out_buf ? *out_buf : (const uint8_t *)"",
+                                  *out_len, digest) == 0;
+    if (ok) {
+        hl_hex_encode(digest, 32, hex, sizeof hex);
+        unsigned char diff = 0;
+        for (size_t i = 0; i < HL_BLOB_STORE_ID_HEX_LEN; i++)
+            diff |= (unsigned char)(hex[i] ^ id[i]);
+        ok = diff == 0;
+    }
+    if (!ok) {
+        if (*out_buf) hl_alloc_free(s->alloc, *out_buf, *out_len);
+        *out_buf = NULL;
+        *out_len = 0;
+        return -1;
+    }
     return 0;
 }
 

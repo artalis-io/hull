@@ -361,6 +361,14 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
     int tfd = hl_fs_open_at_ex(t.anchor_fd, tmprel, HL_FS_OPEN_WRITE, t.sym,
                                0644, &e);
     if (tfd < 0) {
+        /* The directory refuses a new file (read-only, or not writable) -
+         * but the target itself may be writable, as with an EXACT grant on
+         * a file in a read-only directory. Written in place, as before the
+         * atomic write: refusing broke writes that used to work. (Policy
+         * denials fail before here.) */
+        int oserr = errno;
+        if ((e && strcmp(e, "permission") == 0) || oserr == EROFS)
+            return FS_ATOMIC_IN_PLACE;
         if (err_msg) *err_msg = e ? e : "open_failed";
         return FS_ATOMIC_FAILED;
     }
@@ -421,6 +429,12 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
     }
     tfd = -1;
     if (renameat(par.parent_fd, tmpname, par.parent_fd, par.leaf) != 0) {
+        /* The target cannot be replaced, only rewritten: a bind-mounted
+         * single file (EBUSY), or another filesystem (EXDEV). In place. */
+        if (errno == EBUSY || errno == EXDEV) {
+            status = FS_ATOMIC_IN_PLACE;
+            goto out;
+        }
         fail = "write_failed";
         goto out;
     }

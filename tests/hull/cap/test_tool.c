@@ -8,6 +8,7 @@
 #include "hull/cap/tool.h"
 #include "hull/compilers.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -288,9 +289,37 @@ UTEST(tool, validate_reject_driver_program_flags)
     const char *pass_plugin[] = { "cc", "-fpass-plugin=/tmp/p.so", NULL };
     ASSERT_NE(hl_tool_validate_args(pass_plugin), 0);
 
-    /* What Hull's own lld backend passes. */
-    const char *lld[] = { "cc", "-B/opt/lld/bin", "-fuse-ld=lld", NULL };
-    ASSERT_EQ(hl_tool_validate_args(lld), 0);
+    const char *gcc_tc[] = { "cc", "--gcc-toolchain=/tmp/tc", NULL };
+    ASSERT_NE(hl_tool_validate_args(gcc_tc), 0);
+
+    /* -B<dir>: refused unless the directory is a $PATH entry holding an
+     * ld.lld - what Hull's own lld backend passes. */
+    char tmpl[HL_TEST_PATH_MAX];
+    char *dir = hl_test_mkdtemp(tmpl, sizeof tmpl, "hull_bdir");
+    ASSERT_TRUE(dir != NULL);
+    char bflag[PATH_MAX + 3];
+    snprintf(bflag, sizeof bflag, "-B%s", dir);
+    const char *lld[] = { "cc", bflag, "-fuse-ld=lld", NULL };
+    ASSERT_NE(hl_tool_validate_args(lld), 0);      /* not on PATH */
+
+    const char *old = getenv("PATH");
+    char *saved = old ? strdup(old) : NULL;
+    char newpath[PATH_MAX * 2];
+    snprintf(newpath, sizeof newpath, "%s:%s", dir, old ? old : "");
+    setenv("PATH", newpath, 1);
+    ASSERT_NE(hl_tool_validate_args(lld), 0);      /* on PATH, but no lld */
+    char ldf[PATH_MAX];
+    snprintf(ldf, sizeof ldf, "%s/ld.lld", dir);
+    FILE *f = fopen(ldf, "w");
+    ASSERT_TRUE(f != NULL);
+    fclose(f);
+    ASSERT_EQ(hl_tool_validate_args(lld), 0);      /* the lld backend's form */
+    const char *evil[] = { "cc", "-B/tmp", NULL };
+    ASSERT_NE(hl_tool_validate_args(evil), 0);
+
+    if (saved) { setenv("PATH", saved, 1); free(saved); } else unsetenv("PATH");
+    unlink(ldf);
+    rmdir(dir);
 }
 
 UTEST(tool, validate_accept_normal)

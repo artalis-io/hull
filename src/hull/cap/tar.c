@@ -46,6 +46,41 @@
 #define TAR_NUM_FIELD     8                   /* width of octal uid/gid/mode fields */
 #define TAR_NUM12_FIELD  12                   /* width of octal size/mtime fields */
 
+/* A NUL/space-padded octal field, strictly: digits only, then padding.
+ * -1 for anything else - notably a GNU base-256 number (high bit of the
+ * first byte set), which tar_octal read as 0, so a large member's data was
+ * parsed as further headers (a different archive than tar sees). */
+static int tar_octal_strict(const unsigned char *p, size_t n, unsigned long *out)
+{
+    size_t i = 0;
+    unsigned long v = 0;
+    while (i < n && (p[i] == ' ' || p[i] == '\0')) i++;
+    int digits = 0;
+    for (; i < n && p[i] >= '0' && p[i] <= '7'; i++, digits++) {
+        if (v > (ULONG_MAX >> 3)) return -1;
+        v = (v << 3) + (unsigned long)(p[i] - '0');
+    }
+    for (; i < n; i++)
+        if (p[i] != ' ' && p[i] != '\0') return -1;
+    (void)digits;
+    *out = v;
+    return 0;
+}
+
+/* The header's own checksum: the sum of its bytes with the checksum field
+ * read as spaces. Never checked, so any block parsed as a header. */
+static int tar_checksum_ok(const unsigned char *hdr)
+{
+    unsigned long want = 0;
+    if (tar_octal_strict(hdr + TAR_CHKSUM_OFF, TAR_CHKSUM_LEN, &want) != 0)
+        return 0;
+    unsigned long sum = 0;
+    for (int i = 0; i < TAR_BLOCK; i++)
+        sum += (i >= TAR_CHKSUM_OFF && i < TAR_CHKSUM_OFF + TAR_CHKSUM_LEN)
+               ? (unsigned long)' ' : (unsigned long)hdr[i];
+    return sum == want;
+}
+
 /* Parse a NUL/space-padded octal field of `n` bytes. */
 static unsigned long tar_octal(const unsigned char *p, size_t n)
 {
@@ -151,7 +186,10 @@ static int tar_iter(const unsigned char *tar, size_t tar_len,
         name[TAR_NAME_LEN] = '\0';
 
         char typeflag = (char)hdr[TAR_TYPE_OFF];
-        unsigned long size = tar_octal(hdr + TAR_SIZE_OFF, TAR_SIZE_LEN);
+        unsigned long size = 0;
+        if (!tar_checksum_ok(hdr) ||
+            tar_octal_strict(hdr + TAR_SIZE_OFF, TAR_SIZE_LEN, &size) != 0)
+            return -1;                          /* not a (supported) header */
         unsigned mode = (unsigned)(tar_octal(hdr + TAR_MODE_OFF, TAR_MODE_LEN) & 0777);
 
         off += TAR_BLOCK;
