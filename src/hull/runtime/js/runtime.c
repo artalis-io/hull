@@ -14,8 +14,10 @@
  */
 
 #include "internal.h"
+#include "mod_buffer.h"   /* hl_js_blob_release */
 
 #include "hull/runtime/js_bytecode_cache.h"
+#include "hull/runtime/cache_common.h"   /* hl_runtime_cache_seal_prepare */
 #include "hull/utils/alloc.h"
 #include "hull/http_feature.h"  /* hl_http_ws_registry_free (HTTP-feature seam) */
 #include "hull/shared/async_backend.h"
@@ -57,7 +59,7 @@ static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
 {
     (void)rt;
     HlJS *js = (HlJS *)opaque;
-    js->instruction_count++;
+    js->instruction_count += HL_JS_INTERRUPT_WEIGHT;
     if (js->max_instructions > 0 &&
         js->instruction_count > js->max_instructions) {
         return 1; /* interrupt - JS_Eval returns exception */
@@ -775,7 +777,9 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
      * copying it out and back would put its 64 KiB policy span on the
      * stack). */
     memset((char *)js + sizeof(js->base), 0, sizeof(*js) - sizeof(js->base));
-    js->max_instructions = cfg->max_instructions;
+    /* Unlimited while init runs its own setup code; the app's limit applies
+     * from the end of init (a small limit tripped in Hull's own setup). */
+    js->max_instructions = 0;
     js->max_heap_bytes = cfg->max_heap_bytes;
     js->max_stack_bytes = cfg->max_stack_bytes;
 
@@ -818,6 +822,10 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
 
     /* Set interrupt handler for gas metering */
     JS_SetInterruptHandler(js->rt, hl_js_interrupt_handler, js);
+
+    /* The code-cache seal key, read now - before the kernel sandbox
+     * narrows file access (see hl_runtime_cache_seal_prepare). */
+    hl_runtime_cache_seal_prepare();
 
     /* Set module loader */
     JS_SetModuleLoaderFunc(js->rt, hl_js_module_normalize,
@@ -909,6 +917,8 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
 
     js->udf_runtime_alive = 1;
 
+    js->instruction_count = 0;
+    js->max_instructions = cfg->max_instructions;
     return 0;
 }
 
@@ -1294,6 +1304,9 @@ void hl_js_free(HlJS *js)
         JS_FreeRuntime(js->rt);
         js->rt = NULL;
     }
+    /* After the runtime: its writers / readers hold their own references,
+     * so the store goes with the last of them in any order. */
+    hl_js_blob_release(js);
     if (js->app_dir) {
         hl_alloc_free_const(js->base.alloc, js->app_dir, js->app_dir_size);
         js->app_dir = NULL;

@@ -30,11 +30,12 @@
  *   blob.cleanup({ maxTotalSize?, maxAge?, strategy?, dryRun? })
  *                                  → { removed, freedBytes }
  *
- * Singleton: blob.init() creates an HlBlob* wrapped in a Store JSValue;
- * the JSValue is stashed on globalThis under "__hullBlobInternal" so
- * the finalizer fires on context teardown. All other methods retrieve
- * the store from there. Re-init is allowed (drops the previous Store
- * which then gets GC'd, freeing the previous HlBlob).
+ * Singleton: blob.init() creates an HlBlob* held by a C reference count
+ * (HlJsBlobRef) whose current holder is the runtime (HlJS.blob_ref) - not
+ * a global, which app code could redefine with an accessor and drop the
+ * store under C. Writers and readers take a reference too, so a re-init
+ * (or teardown, in whatever order the GC finalizes them) frees a store
+ * only after the last writer / reader on it is gone.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -48,7 +49,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#define HL_BLOB_STASH_PROP "__hullBlobInternal"
 
 /* Accept ArrayBuffer (binary-safe) or string (UTF-8) - mirror of the
  * crypto.sha256 hasher's accept-anything-bytes pattern. The caller is
@@ -56,13 +56,19 @@
 static const uint8_t *bytes_arg(JSContext *ctx, JSValueConst v,
                                   size_t *out_len, const char **free_cstr)
 {
+    /* The shared buffer protocol: a typed array is its bytes (it was stored
+     * as its text, "1,2"), and a failed ArrayBuffer probe leaves no pending
+     * exception behind. */
+    HlBufferView view;
+    int needs_free = 0;
     *free_cstr = NULL;
-    const uint8_t *bytes = JS_GetArrayBuffer(ctx, out_len, v);
-    if (bytes) return bytes;
-    const char *cstr = JS_ToCStringLen(ctx, out_len, v);
-    if (!cstr) return NULL;
-    *free_cstr = cstr;
-    return (const uint8_t *)cstr;
+    if (!js_get_buffer(ctx, v, &view, free_cstr, &needs_free)) {
+        JS_ThrowTypeError(ctx, "blob: data must be a buffer or a string");
+        return NULL;
+    }
+    if (!needs_free) *free_cstr = NULL;
+    *out_len = view.len;
+    return (const uint8_t *)view.data;
 }
 
 /* Validate `id`: 64 lowercase hex chars. Returns NULL on rejection
@@ -113,57 +119,62 @@ static int read_durable(JSContext *ctx, int argc, JSValueConst *argv, int idx)
     return durable;
 }
 
-/* ── Store class (singleton wrapping HlBlob*) ─────────────────────── */
+/* ── The store (refcounted singleton) ────────────────────────────── */
 
-static JSClassID hl_js_blob_store_class_id;
+typedef struct HlJsBlobRef {
+    HlBlob *b;
+    int     refs;
+} HlJsBlobRef;
 
-static void js_blob_store_finalizer(JSRuntime *rt, JSValue val)
+static HlJsBlobRef *blob_ref_retain(HlJsBlobRef *r)
 {
-    (void)rt;
-    HlBlob *b = JS_GetOpaque(val, hl_js_blob_store_class_id);
-    if (b) hl_cap_blob_free(b);
+    if (r) r->refs++;
+    return r;
 }
 
-static const JSClassDef js_blob_store_class = {
-    "HlBlobStore",
-    .finalizer = js_blob_store_finalizer,
-};
+static void blob_ref_release(HlJsBlobRef *r)
+{
+    if (r && --r->refs == 0) {
+        hl_cap_blob_free(r->b);
+        free(r);
+    }
+}
 
-/* Fetch the singleton from globalThis. Throws if blob.init() hasn't
- * been called. Functions call it again right before the cap call, after
- * converting their arguments: a conversion or an options getter is app code,
- * and a blob.init() there replaces the stash - its finalizer then frees the
- * store a pointer fetched earlier still named. */
+void hl_js_blob_release(HlJS *js)
+{
+    if (!js) return;
+    blob_ref_release((HlJsBlobRef *)js->blob_ref);
+    js->blob_ref = NULL;
+}
+
+/* The current store. Throws if blob.init() hasn't been called. Functions
+ * call it again right before the cap call, after converting their
+ * arguments: a conversion or an options getter is app code, and a
+ * blob.init() there replaces the store (freeing the old one unless a
+ * writer / reader still holds it). */
 static HlBlob *get_store(JSContext *ctx)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue stash = JS_GetPropertyStr(ctx, global, HL_BLOB_STASH_PROP);
-    JS_FreeValue(ctx, global);
-    if (JS_IsUndefined(stash) || JS_IsNull(stash)) {
-        JS_FreeValue(ctx, stash);
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    HlJsBlobRef *r = js ? (HlJsBlobRef *)js->blob_ref : NULL;
+    if (!r) {
         JS_ThrowInternalError(ctx, "blob: call blob.init({dir}) first");
         return NULL;
     }
-    HlBlob *b = JS_GetOpaque(stash, hl_js_blob_store_class_id);
-    JS_FreeValue(ctx, stash);
-    if (!b) {
-        JS_ThrowInternalError(ctx, "blob: store unavailable");
-        return NULL;
-    }
-    return b;
+    return r->b;
 }
 
-/* Pin the current store into a writer / reader object, which holds raw
- * per-store state: a hidden read-only own property, so reference counting
- * keeps the store alive as long as the object - a later blob.init() no
- * longer frees it under them. */
-static void pin_store(JSContext *ctx, JSValue obj)
+static HlJsBlobRef *current_ref(JSContext *ctx)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue stash = JS_GetPropertyStr(ctx, global, HL_BLOB_STASH_PROP);
-    JS_FreeValue(ctx, global);
-    JS_DefinePropertyValueStr(ctx, obj, "__hullBlobStore", stash, 0);
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    return js ? (HlJsBlobRef *)js->blob_ref : NULL;
 }
+
+/* A writer's / reader's opaque: the cap handle plus a reference on the
+ * store it was opened on (freed only with the last such reference). */
+typedef struct {
+    void        *h;      /* HlBlobWriter* / HlBlobReader*; NULL once consumed */
+    HlJsBlobRef *ref;
+} HlJsBlobHandle;
 
 /* ── blob.init ───────────────────────────────────────────────────── */
 
@@ -225,16 +236,14 @@ static JSValue js_blob_init(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeCString(ctx, dir);
 
-    /* Wrap in a Store JSValue + stash on globalThis. Replacing any
-     * previous stash drops its refcount → finalizer runs → previous
-     * HlBlob freed. */
-    JSValue store = JS_NewObjectClass(ctx, (int)hl_js_blob_store_class_id);
-    if (JS_IsException(store)) { hl_cap_blob_free(b); return store; }
-    JS_SetOpaque(store, b);
-
-    JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, HL_BLOB_STASH_PROP, store);
-    JS_FreeValue(ctx, global);
+    /* The new store replaces the runtime's reference; the previous one is
+     * freed once no writer / reader holds it either. */
+    HlJsBlobRef *ref = calloc(1, sizeof *ref);
+    if (!ref) { hl_cap_blob_free(b); return JS_ThrowOutOfMemory(ctx); }
+    ref->b = b;
+    ref->refs = 1;
+    blob_ref_release((HlJsBlobRef *)js->blob_ref);
+    js->blob_ref = ref;
 
     return JS_UNDEFINED;
 }
@@ -245,9 +254,9 @@ static JSValue make_put_result(JSContext *ctx, const char *id, size_t size)
 {
     JSValue obj = JS_NewObject(ctx);
     if (JS_IsException(obj)) return obj;
-    JS_SetPropertyStr(ctx, obj, "id",
-                      JS_NewStringLen(ctx, id, HL_BLOB_ID_HEX_LEN));
-    JS_SetPropertyStr(ctx, obj, "size", JS_NewInt64(ctx, (int64_t)size));
+    JS_DefinePropertyValueStr(ctx, obj, "id",
+                      JS_NewStringLen(ctx, id, HL_BLOB_ID_HEX_LEN), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, obj, "size", JS_NewInt64(ctx, (int64_t)size), JS_PROP_C_W_E);
     return obj;
 }
 
@@ -319,11 +328,25 @@ static JSValue js_blob_put_verified(JSContext *ctx, JSValueConst this_val,
 
 static JSClassID hl_js_blob_writer_class_id;
 
+/* Consume the handle's cap object (if any) and drop its store reference. */
+static void blob_handle_done(HlJsBlobHandle *bh, int is_writer)
+{
+    if (!bh) return;
+    if (bh->h) {
+        if (is_writer) hl_cap_blob_writer_abort((HlBlobWriter *)bh->h);
+        else           hl_cap_blob_reader_close((HlBlobReader *)bh->h);
+        bh->h = NULL;
+    }
+    blob_ref_release(bh->ref);
+    bh->ref = NULL;
+}
+
 static void js_blob_writer_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
-    HlBlobWriter *w = JS_GetOpaque(val, hl_js_blob_writer_class_id);
-    if (w) hl_cap_blob_writer_abort(w);   /* silent abort on GC */
+    HlJsBlobHandle *bh = JS_GetOpaque(val, hl_js_blob_writer_class_id);
+    blob_handle_done(bh, 1);              /* silent abort on GC */
+    free(bh);
 }
 
 static const JSClassDef js_blob_writer_class = {
@@ -356,17 +379,23 @@ static JSValue js_blob_writer_new(JSContext *ctx, JSValueConst this_val,
     b = get_store(ctx);   /* again, after the arguments: see get_store */
     if (!b) return JS_EXCEPTION;
 
+    /* The object and its handle first, so nothing made after can leak. */
+    JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_blob_writer_class_id);
+    if (JS_IsException(obj)) return obj;
+    HlJsBlobHandle *bh = calloc(1, sizeof *bh);
+    if (!bh) { JS_FreeValue(ctx, obj); return JS_ThrowOutOfMemory(ctx); }
+    JS_SetOpaque(obj, bh);
+
     HlBlobWriter *w = NULL;
     int open_rc = durable
         ? hl_cap_blob_writer_open_durable(b, expected, &w)
         : hl_cap_blob_writer_open        (b, expected, &w);
-    if (open_rc != 0)
+    if (open_rc != 0) {
+        JS_FreeValue(ctx, obj);
         return JS_ThrowInternalError(ctx, "blob.writer: open failed");
-
-    JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_blob_writer_class_id);
-    if (JS_IsException(obj)) { hl_cap_blob_writer_abort(w); return obj; }
-    JS_SetOpaque(obj, w);
-    pin_store(ctx, obj);
+    }
+    bh->h = w;
+    bh->ref = blob_ref_retain(current_ref(ctx));
     return obj;
 }
 
@@ -384,17 +413,17 @@ static JSValue js_writer_write(JSContext *ctx, JSValueConst this_val,
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
     if (!bytes) return JS_EXCEPTION;
 
-    HlBlobWriter *w = JS_GetOpaque2(ctx, this_val, hl_js_blob_writer_class_id);
-    if (!w) {
+    HlJsBlobHandle *bh = JS_GetOpaque2(ctx, this_val, hl_js_blob_writer_class_id);
+    if (!bh || !bh->h) {
         if (cstr) JS_FreeCString(ctx, cstr);
+        if (!bh) return JS_EXCEPTION;
         return JS_ThrowInternalError(ctx, "blob.writer: write after finalize/abort");
     }
 
-    int rc = hl_cap_blob_writer_write(w, bytes, len);
+    int rc = hl_cap_blob_writer_write((HlBlobWriter *)bh->h, bytes, len);
     if (cstr) JS_FreeCString(ctx, cstr);
     if (rc != 0) {
-        hl_cap_blob_writer_abort(w);
-        JS_SetOpaque(this_val, NULL);
+        blob_handle_done(bh, 1);
         return JS_ThrowInternalError(ctx, "blob.writer: write failed (aborted)");
     }
     return JS_DupValue(ctx, this_val);   /* chainable */
@@ -404,12 +433,14 @@ static JSValue js_writer_finalize(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlBlobWriter *w = JS_GetOpaque2(ctx, this_val, hl_js_blob_writer_class_id);
-    if (!w) return JS_ThrowInternalError(ctx,
+    HlJsBlobHandle *bh = JS_GetOpaque2(ctx, this_val, hl_js_blob_writer_class_id);
+    if (!bh) return JS_EXCEPTION;
+    if (!bh->h) return JS_ThrowInternalError(ctx,
         "blob.writer: already finalized/aborted");
     char id[HL_BLOB_ID_BUF_SIZE]; size_t size = 0;
-    int rc = hl_cap_blob_writer_finalize(w, id, &size);
-    JS_SetOpaque(this_val, NULL);    /* writer always consumed */
+    int rc = hl_cap_blob_writer_finalize((HlBlobWriter *)bh->h, id, &size);
+    bh->h = NULL;                    /* writer always consumed */
+    blob_handle_done(bh, 1);
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "blob.writer: finalize failed");
     return make_put_result(ctx, id, size);
@@ -419,11 +450,9 @@ static JSValue js_writer_abort(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlBlobWriter *w = JS_GetOpaque2(ctx, this_val, hl_js_blob_writer_class_id);
-    if (w) {
-        hl_cap_blob_writer_abort(w);
-        JS_SetOpaque(this_val, NULL);
-    }
+    HlJsBlobHandle *bh = JS_GetOpaque2(ctx, this_val, hl_js_blob_writer_class_id);
+    if (!bh) return JS_EXCEPTION;
+    blob_handle_done(bh, 1);
     return JS_UNDEFINED;
 }
 
@@ -434,8 +463,9 @@ static JSClassID hl_js_blob_reader_class_id;
 static void js_blob_reader_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
-    HlBlobReader *r = JS_GetOpaque(val, hl_js_blob_reader_class_id);
-    if (r) hl_cap_blob_reader_close(r);
+    HlJsBlobHandle *bh = JS_GetOpaque(val, hl_js_blob_reader_class_id);
+    blob_handle_done(bh, 0);
+    free(bh);
 }
 
 static const JSClassDef js_blob_reader_class = {
@@ -458,16 +488,25 @@ static JSValue js_blob_reader_new(JSContext *ctx, JSValueConst this_val,
     b = get_store(ctx);   /* again, after the arguments: see get_store */
     if (!b) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
 
+    JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_blob_reader_class_id);
+    if (JS_IsException(obj)) { JS_FreeCString(ctx, id); return obj; }
+    HlJsBlobHandle *bh = calloc(1, sizeof *bh);
+    if (!bh) {
+        JS_FreeCString(ctx, id);
+        JS_FreeValue(ctx, obj);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    JS_SetOpaque(obj, bh);
+
     HlBlobReader *r = NULL;
     int rc = hl_cap_blob_reader_open(b, id, track, &r);
     JS_FreeCString(ctx, id);
-    if (rc != 0)
+    if (rc != 0) {
+        JS_FreeValue(ctx, obj);
         return JS_ThrowInternalError(ctx, "blob.reader: blob not found");
-
-    JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_blob_reader_class_id);
-    if (JS_IsException(obj)) { hl_cap_blob_reader_close(r); return obj; }
-    JS_SetOpaque(obj, r);
-    pin_store(ctx, obj);
+    }
+    bh->h = r;
+    bh->ref = blob_ref_retain(current_ref(ctx));
     return obj;
 }
 
@@ -480,7 +519,9 @@ static JSValue js_reader_read(JSContext *ctx, JSValueConst this_val,
     if (argc > 0 && !JS_IsUndefined(argv[0]) && JS_ToInt64(ctx, &cap, argv[0]) < 0)
         return JS_EXCEPTION;
 
-    HlBlobReader *r = JS_GetOpaque2(ctx, this_val, hl_js_blob_reader_class_id);
+    HlJsBlobHandle *bh = JS_GetOpaque2(ctx, this_val, hl_js_blob_reader_class_id);
+    if (!bh) return JS_EXCEPTION;
+    HlBlobReader *r = (HlBlobReader *)bh->h;
     if (!r) return JS_ThrowInternalError(ctx, "blob.reader: read after close");
     if (cap <= 0) return JS_NewArrayBufferCopy(ctx, NULL, 0);
 
@@ -504,11 +545,9 @@ static JSValue js_reader_close(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
-    HlBlobReader *r = JS_GetOpaque2(ctx, this_val, hl_js_blob_reader_class_id);
-    if (r) {
-        hl_cap_blob_reader_close(r);
-        JS_SetOpaque(this_val, NULL);
-    }
+    HlJsBlobHandle *bh = JS_GetOpaque2(ctx, this_val, hl_js_blob_reader_class_id);
+    if (!bh) return JS_EXCEPTION;
+    blob_handle_done(bh, 0);
     return JS_UNDEFINED;
 }
 
@@ -680,11 +719,11 @@ static JSValue js_blob_iter(JSContext *ctx, JSValueConst this_val,
             if (acc.items) js_free(ctx, acc.items);
             return item;
         }
-        JS_SetPropertyStr(ctx, item, "id",
-            JS_NewStringLen(ctx, acc.items[i].id, HL_BLOB_ID_HEX_LEN));
-        JS_SetPropertyStr(ctx, item, "size",
-            JS_NewInt64(ctx, (int64_t)acc.items[i].size));
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, item);
+        JS_DefinePropertyValueStr(ctx, item, "id",
+            JS_NewStringLen(ctx, acc.items[i].id, HL_BLOB_ID_HEX_LEN), JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(ctx, item, "size",
+            JS_NewInt64(ctx, (int64_t)acc.items[i].size), JS_PROP_C_W_E);
+        JS_DefinePropertyValueUint32(ctx, arr, (uint32_t)i, item, JS_PROP_C_W_E);
     }
     if (acc.items) js_free(ctx, acc.items);
     return arr;
@@ -759,8 +798,8 @@ static JSValue js_blob_cleanup(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "blob.cleanup: failed");
 
     JSValue out = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, out, "removed", JS_NewInt64(ctx, (int64_t)removed));
-    JS_SetPropertyStr(ctx, out, "freedBytes", JS_NewInt64(ctx, (int64_t)freed));
+    JS_DefinePropertyValueStr(ctx, out, "removed", JS_NewInt64(ctx, (int64_t)removed), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, out, "freedBytes", JS_NewInt64(ctx, (int64_t)freed), JS_PROP_C_W_E);
     return out;
 }
 
@@ -794,13 +833,6 @@ static void register_reader_class(JSContext *ctx)
     JS_SetPropertyStr(ctx, proto, "close",
         JS_NewCFunction(ctx, js_reader_close, "close", 0));
     JS_SetClassProto(ctx, hl_js_blob_reader_class_id, proto);
-}
-
-static void register_store_class(JSContext *ctx)
-{
-    JSRuntime *rt = JS_GetRuntime(ctx);
-    JS_NewClassID(&hl_js_blob_store_class_id);
-    JS_NewClass(rt, hl_js_blob_store_class_id, &js_blob_store_class);
 }
 
 static int js_blob_module_init(JSContext *ctx, JSModuleDef *m)
@@ -845,7 +877,6 @@ static int js_blob_module_init(JSContext *ctx, JSModuleDef *m)
 int hl_js_init_blob_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
-    register_store_class(ctx);
     register_writer_class(ctx);
     register_reader_class(ctx);
 

@@ -66,12 +66,14 @@ static void kv_arg_free(JSContext *ctx, const char *cstr, int needs_free)
 }
 
 /* Optional TTL in milliseconds at argv[i] (undefined/absent/null -> 0). */
-static int64_t kv_opt_ttl_ms(JSContext *ctx, int argc, JSValueConst *argv, int i)
+/* 0 with *out set; -1 with the conversion's exception pending (it was
+ * ignored, and surfaced later as some other call's error). */
+static int kv_opt_ttl_ms(JSContext *ctx, int argc, JSValueConst *argv, int i,
+                         int64_t *out)
 {
+    *out = 0;
     if (i >= argc || JS_IsUndefined(argv[i]) || JS_IsNull(argv[i])) return 0;
-    int64_t t = 0;
-    JS_ToInt64(ctx, &t, argv[i]);
-    return t;
+    return JS_ToInt64(ctx, out, argv[i]) == 0 ? 0 : -1;
 }
 
 /* conn.get(keyBuf) -> ArrayBuffer | null (COPY of the borrowed value). */
@@ -92,7 +94,8 @@ static JSValue js_kv_get(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 /* conn.set(keyBuf, valBuf, ttlMs?) -> true. */
 static JSValue js_kv_set(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    int64_t ttl = kv_opt_ttl_ms(ctx, argc, argv, 2);
+    int64_t ttl = 0;
+    if (kv_opt_ttl_ms(ctx, argc, argv, 2, &ttl) != 0) return JS_EXCEPTION;
     HlBufferView kb, vb; const char *ks, *vs; int kf, vf;
     if (argc < 2 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
     if (!kv_arg(ctx, argv[1], "value", &vb, &vs, &vf)) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
@@ -139,7 +142,8 @@ static JSValue js_kv_incr(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     if (argc < 2) return JS_ThrowTypeError(ctx, "kv: incr requires (key, by [, ttlMs])");
     int64_t by = 0;
     if (JS_ToInt64(ctx, &by, argv[1]) < 0) return JS_EXCEPTION;
-    int64_t ttl = kv_opt_ttl_ms(ctx, argc, argv, 2);
+    int64_t ttl = 0;
+    if (kv_opt_ttl_ms(ctx, argc, argv, 2, &ttl) != 0) return JS_EXCEPTION;
     HlBufferView kb; const char *ks; int kf;
     if (!kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
     HlKvConn *c = kv_self(ctx, this_val);
@@ -155,7 +159,8 @@ static JSValue js_kv_incr(JSContext *ctx, JSValueConst this_val, int argc, JSVal
  * 2 conflict. A transport ERROR throws. */
 static JSValue js_kv_cas(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-    int64_t ttl = kv_opt_ttl_ms(ctx, argc, argv, 3);
+    int64_t ttl = 0;
+    if (kv_opt_ttl_ms(ctx, argc, argv, 3, &ttl) != 0) return JS_EXCEPTION;
     HlBufferView kb, eb, nb; const char *ks, *es = NULL, *ns; int kf, ef = 0, nf;
     if (argc < 3 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
     int has_expected = !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1]);
@@ -273,7 +278,15 @@ static JSValue js_kv_open(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     const char *dsn = JS_ToCString(ctx, argv[0]);
     if (!dsn) return JS_EXCEPTION;
     int timeout_ms = 0;
-    if (argc > 1 && !JS_IsUndefined(argv[1])) { int64_t t = 0; JS_ToInt64(ctx, &t, argv[1]); timeout_ms = (int)t; }
+    if (argc > 1 && !JS_IsUndefined(argv[1])) {
+        int64_t t = 0;
+        if (JS_ToInt64(ctx, &t, argv[1]) != 0) {   /* left pending, it surfaced later */
+            JS_FreeCString(ctx, dsn);
+            return JS_EXCEPTION;
+        }
+        if (t < 0 || t > INT32_MAX) t = 0;
+        timeout_ms = (int)t;
+    }
 
     HlJS *js = get_hl_js(ctx);
     char err[256];
@@ -296,8 +309,9 @@ static JSValue js_kv_open(JSContext *ctx, JSValueConst this_val, int argc, JSVal
 
 static int js_kv_module_init(JSContext *ctx, JSModuleDef *m)
 {
-    if (hull_kv_conn_class_id == 0) {
-        JS_NewClassID(&hull_kv_conn_class_id);
+    /* Registered per runtime, the id once per process (see mod_db.c). */
+    JS_NewClassID(&hull_kv_conn_class_id);
+    if (!JS_IsRegisteredClass(JS_GetRuntime(ctx), hull_kv_conn_class_id)) {
         JS_NewClass(JS_GetRuntime(ctx), hull_kv_conn_class_id, &js_kv_conn_class);
         JSValue proto = JS_NewObject(ctx);
         JS_SetPropertyFunctionList(ctx, proto, js_kv_conn_methods,

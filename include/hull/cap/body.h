@@ -50,7 +50,10 @@ size_t hl_cap_body_data(const KlHttpBodyReader *reader, const char **out_data);
 typedef enum {
     HL_MP_RESUME_DATA = 1,   /**< on_data fired; more bytes available */
     HL_MP_RESUME_DONE,       /**< on_complete fired; no more bytes ever */
-    HL_MP_RESUME_ERROR       /**< on_error fired or parser hit ERROR */
+    HL_MP_RESUME_ERROR,      /**< on_error fired or parser hit ERROR */
+    HL_MP_RESUME_CANCEL      /**< the reader is being destroyed (connection
+                                  released / reset): never resume the handler,
+                                  release what the park holds */
 } HlMultipartResumeReason;
 
 /**

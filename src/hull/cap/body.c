@@ -104,6 +104,11 @@ static void mp_wrap_on_error(KlHttpBodyReader *self)
 static void mp_wrap_destroy(KlHttpBodyReader *self)
 {
     HlMultipartWrapper *w = (HlMultipartWrapper *)self;
+    /* A park still outstanding: Keel is releasing (or resetting) the
+     * connection without the body ever finishing. Fired with CANCEL so the
+     * parked continuation is released - left alone it, its promise, its
+     * owner and the request life leaked, and the life stayed live. */
+    mp_fire_park(w, HL_MP_RESUME_CANCEL);
     if (w->inner) w->inner->destroy(w->inner);
     kl_free(w->alloc, w, sizeof(*w));
 }
@@ -159,6 +164,9 @@ int hl_cap_multipart_park(KlHttpBodyReader *wrapper,
     /* If the stream is already done or errored, fire immediately -
      * the caller's "wait for more data" assumption can't be satisfied. */
     if (on_resume) {
+        /* One park at a time: a second would overwrite the first, whose
+         * continuation then never settled (and leaked). */
+        if (w->on_resume)    return -2;
         if (w->errored)      { on_resume(ctx, HL_MP_RESUME_ERROR); return 0; }
         if (w->stream_ended) { on_resume(ctx, HL_MP_RESUME_DONE);  return 0; }
     }

@@ -93,7 +93,7 @@ static JSValue js_compute_buffer(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "compute.buffer requires (input)");
 
     size_t len = 0;
-    const uint8_t *data = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    const uint8_t *data = hl_js_array_buffer_probe(ctx, &len, argv[0]);
     int is_string = 0;
     if (!data) {
         data = (const uint8_t *)JS_ToCStringLen(ctx, &len, argv[0]);
@@ -350,7 +350,7 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
             input = (const uint8_t *)mmap_buf->addr;
             input_len = mmap_buf->len;
         } else {
-            input = JS_GetArrayBuffer(ctx, &input_len, argv[1]);
+            input = hl_js_array_buffer_probe(ctx, &input_len, argv[1]);
             if (!input) {
                 /* Try as string */
                 input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
@@ -532,7 +532,7 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
             input_len = mmap_in->len;
         } else {
             size_t ab_len;
-            input = JS_GetArrayBuffer(ctx, &ab_len, argv[1]);
+            input = hl_js_array_buffer_probe(ctx, &ab_len, argv[1]);
             if (input) {
                 input_len = ab_len;
             } else {
@@ -671,7 +671,8 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn,
                           (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
-        actx->cont->cancel(actx->cont);
+        /* Never armed: destroy frees resolve / reject. cancel() would also
+         * end the still-running handler's request life. */
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;
         JS_FreeValue(ctx, promise);
@@ -761,7 +762,7 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
             input = (const uint8_t *)mmap_in->addr;
             input_len = mmap_in->len;
         } else {
-            input = JS_GetArrayBuffer(ctx, &input_len, argv[0]);
+            input = hl_js_array_buffer_probe(ctx, &input_len, argv[0]);
             if (!input) {
                 input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[0]);
                 if (!input) {
@@ -940,7 +941,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
             input = (const uint8_t *)mmap_in->addr;
             input_len = mmap_in->len;
         } else {
-            input = JS_GetArrayBuffer(ctx, &input_len, argv[0]);
+            input = hl_js_array_buffer_probe(ctx, &input_len, argv[0]);
             if (!input) {
                 input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[0]);
                 if (!input)
@@ -1075,9 +1076,13 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
 
     if (!actx->detached &&
         hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
-        atomic_store(&pi->busy, 0);
+        /* busy stays set: the job is already on a worker, and its done /
+         * cancel callback clears it (and finishes a deferred close).
+         * Clearing it here let close() or GC free the instance - or a
+         * second call run on its exec env - while the worker still ran. */
         op->cancelled = 1;
-        actx->cont->cancel(actx->cont);
+        /* Never armed: destroy frees resolve / reject. cancel() would also
+         * end the still-running handler's request life. */
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;
         JS_FreeValue(ctx, promise);
@@ -1248,7 +1253,7 @@ static JSValue js_compute_segment(JSContext *ctx, JSValueConst this_val,
             pre_alloc = mmap_buf->addr;
         } else {
             /* Try ArrayBuffer */
-            ab_buf = JS_GetArrayBuffer(ctx, &data_len, argv[2]);
+            ab_buf = hl_js_array_buffer_probe(ctx, &data_len, argv[2]);
             if (ab_buf) {
                 data = ab_buf;
             } else {
@@ -1356,7 +1361,7 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
     if (input.kind != HL_STREAM_IN_FILE) {
         /* Try buffer protocol / ArrayBuffer / string */
         size_t ilen = 0;
-        const uint8_t *idata = JS_GetArrayBuffer(ctx, &ilen, argv[1]);
+        const uint8_t *idata = hl_js_array_buffer_probe(ctx, &ilen, argv[1]);
         if (idata) {
             input.kind = HL_STREAM_IN_BUFFER;
             input.buffer.data = idata;

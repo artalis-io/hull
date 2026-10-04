@@ -234,7 +234,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 **Attack: Infinite loop / CPU exhaustion**
 
 - **Prevention:**
-  - QuickJS: Instruction-count interrupt handler via `JS_SetInterruptHandler`. Configurable `max_instructions` limit (default 100M). Exceeding → JS exception.
+  - QuickJS: Instruction-count interrupt handler via `JS_SetInterruptHandler`. Configurable `max_instructions` limit (default 100M). Exceeding → an uncatchable JS exception. QuickJS calls the handler once per 10000 countdown steps (calls and backward jumps), and each call is charged 10000, so the limit is in the same unit as its value (it was counted one per call, ~10^4 times weaker).
   - Lua: Instruction-count hook via `lua_sethook(LUA_MASKCOUNT)`. Same configurable `max_instructions` limit (default 100M). Exceeding → `luaL_error("instruction limit exceeded")`. The budget is armed afresh on every entry (dispatch, middleware, timer, ws/SSE callback, async continuation, `app.main`), so the limit applies per uninterrupted run. Once it trips it stays tripped until the next entry: `pcall`, `xpcall`, `coroutine.resume` and `coroutine.wrap` re-raise it (before, a `pcall` caught the error and the spent hook never fired again).
   - Both: Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var.
 

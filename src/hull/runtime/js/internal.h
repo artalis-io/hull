@@ -19,6 +19,7 @@
 #include "hull/cap/types.h"   /* HlKV for worker dispatch op */
 #include "hull/limits/core.h" /* HL_WORKER_ERR_SIZE */
 #include "quickjs.h"
+#include "hull/shared/async.h"   /* HlAsyncCont (the run links below) */
 
 /* Forward declarations to keep internal.h small. */
 typedef struct HlAsyncCtx     HlAsyncCtx;
@@ -161,8 +162,59 @@ struct KlHttpBodyReader;
 void hl_js_request_register(JSContext *ctx);
 /* Install req.multipart() on the request object - no-op for non-
  * streaming routes (body_reader is not a multipart wrapper). */
+/* ── One handler run's continuations ─────────────────────────────────
+ *
+ * A handler awaiting several Hull operations at once (Promise.all / race)
+ * has one continuation per operation - standard ones (async.c) and
+ * multipart ones (mod_request.c) alike. Only one may run the completion
+ * (the response, a timer reschedule, a ws teardown), and whichever resumes
+ * LAST must still hold the handler promise. Every JS continuation type
+ * starts with HlJsContHead, so the chain links any of them. */
+typedef struct {
+    int refs;
+    int done;
+} HlJsRunOnce;
+
+typedef struct HlJsRunLink {
+    JSValue             handler_promise;  /* outer handler promise */
+    struct HlJsRunLink *unwired_prev;     /* earlier cont of this run, not yet wired */
+    HlJsRunOnce        *once;             /* shared with the run's other conts */
+} HlJsRunLink;
+
+typedef struct {
+    HlAsyncCont base;
+    HlJsRunLink link;
+} HlJsContHead;
+
+/* The link of a JS continuation (every one js->last_async_cont can hold). */
+static inline HlJsRunLink *hl_js_cont_link(HlAsyncCont *c)
+{
+    return c ? &((HlJsContHead *)c)->link : NULL;
+}
+
+/* async.c: give @p promise to @p last and every unwired continuation made
+ * before it in the run, all sharing @p once (a new one when NULL). */
+void hl_js_run_wire(HlJsRunLink *last, JSContext *ctx, JSValue promise,
+                    HlJsRunOnce *once);
+/* True once per run: the caller runs the handler's completion. */
+int  hl_js_run_claim(HlJsRunLink *link);
+/* Drop the link's references (destroy). */
+void hl_js_run_unlink(HlJsRunLink *link, JSContext *ctx);
+/* Chain a new continuation behind js->last_async_cont and make it the last. */
+void hl_js_run_push(HlJS *js, HlAsyncCont *cont);
+
+/* QuickJS calls the interrupt handler once per JS_INTERRUPT_COUNTER_INIT
+ * (10000, quickjs.c) countdown steps - calls and backward jumps - not once
+ * per instruction. Each call is charged that much, so max_instructions means
+ * what its name says (counted one per call, the default 100M allowed ~10^12
+ * steps: a `while (true) {}` held the event loop for hours). */
+#define HL_JS_INTERRUPT_WEIGHT 10000
+
+struct HlReqLife;
 void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
-                                      struct KlHttpBodyReader *body_reader);
+                                      struct KlHttpBodyReader *body_reader,
+                                      struct HlReqLife *life, KlHttpConn *conn,
+                                      KlHttpRequest *req);
 
 /* Make the four code-compiling constructors unreachable from script. Deleting
  * the `Function` global is not enough: (() => 0).constructor is Function, and

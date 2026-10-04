@@ -71,6 +71,8 @@ static int js_query_row_cb(void *opaque, HlColumn *cols, int ncols)
     return 0;
 }
 
+static void js_free_hl_values(JSContext *ctx, HlValue *params, int count);
+
 /* Marshal JS values to HlValue array for parameter binding */
 static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
                               HlValue **out_params, int *out_count)
@@ -92,8 +94,9 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
     if (len <= 0)
         return 0;
 
-    /* Overflow guard */
-    if ((size_t)len > SIZE_MAX / sizeof(HlValue))
+    /* SQLite's variable limit: a sparse [] with length 1e9 drove a billion
+     * uninterruptible element reads. */
+    if (len > 32766)
         return -1;
 
     HlValue *params = js_mallocz(ctx, (size_t)len * sizeof(HlValue));
@@ -102,6 +105,13 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
 
     for (int32_t i = 0; i < len; i++) {
         JSValue v = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+        if (JS_IsException(v)) {
+            /* A throwing element getter: bound as NULL, it ran the statement
+             * with a value the app never supplied. */
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            js_free_hl_values(ctx, params, i);
+            return -1;
+        }
         int tag = JS_VALUE_GET_NORM_TAG(v);
 
         switch (tag) {
@@ -964,7 +974,8 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     if (!actx->detached &&
         hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
-        actx->cont->cancel(actx->cont);
+        /* Never armed: destroy frees resolve / reject. cancel() would also
+         * end the still-running handler's request life. */
         actx->cont->destroy(actx->cont);
         actx->cont = NULL;   /* destroy() took it off js->last_async_cont */
         JS_FreeValue(ctx, promise);
@@ -1343,15 +1354,18 @@ static JSValue js_db_internal_conn(JSContext *ctx, JSValueConst this_val,
 /* Register the connection-object classes once (idempotent per runtime). */
 static void js_db_register_classes(JSContext *ctx)
 {
-    if (hull_db_conn_class_id == 0) {
-        JS_NewClassID(&hull_db_conn_class_id);
-        JS_NewClass(JS_GetRuntime(ctx), hull_db_conn_class_id, &js_db_conn_class);
-    }
-    if (hull_db_owned_conn_class_id == 0) {
-        JS_NewClassID(&hull_db_owned_conn_class_id);
-        JS_NewClass(JS_GetRuntime(ctx), hull_db_owned_conn_class_id,
-                    &js_db_owned_conn_class);
-    }
+    /* The id is process-wide (JS_NewClassID only assigns once); the class
+     * is registered in EVERY runtime. Registered only in the first, a later
+     * runtime (hull mcp's reload, agent commands) made connection objects
+     * from an unregistered slot: no prototype, and no finalizer, so a
+     * db.open handle was never closed. */
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    JS_NewClassID(&hull_db_conn_class_id);
+    if (!JS_IsRegisteredClass(rt, hull_db_conn_class_id))
+        JS_NewClass(rt, hull_db_conn_class_id, &js_db_conn_class);
+    JS_NewClassID(&hull_db_owned_conn_class_id);
+    if (!JS_IsRegisteredClass(rt, hull_db_owned_conn_class_id))
+        JS_NewClass(rt, hull_db_owned_conn_class_id, &js_db_owned_conn_class);
 }
 
 static int js_db_internal_conn_module_init(JSContext *ctx, JSModuleDef *m)

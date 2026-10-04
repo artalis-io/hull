@@ -55,6 +55,18 @@ static inline void secure_zero(void *p, size_t n)
     while (n--) *vp++ = 0;
 }
 
+/* An ArrayBuffer's bytes, or NULL with NO exception pending. For a probe
+ * that falls back to another type: JS_GetArrayBuffer throws on anything but
+ * an ArrayBuffer, and that TypeError stayed pending through a successful
+ * fallback - a later JS_EXCEPTION return then surfaced the wrong error. */
+static inline uint8_t *hl_js_array_buffer_probe(JSContext *ctx, size_t *len,
+                                                JSValueConst v)
+{
+    uint8_t *p = JS_GetArrayBuffer(ctx, len, v);
+    if (!p) JS_FreeValue(ctx, JS_GetException(ctx));
+    return p;
+}
+
 /* ── Unified buffer protocol ─────────────────────────────────────── */
 
 /*
@@ -84,6 +96,8 @@ int hl_js_init_worker_module(JSContext *ctx, HlJS *js);
 int hl_js_init_server_module(JSContext *ctx, HlJS *js);
 int hl_js_init_fs_module(JSContext *ctx, HlJS *js);
 int hl_js_init_blob_module(JSContext *ctx, HlJS *js);
+/* Drop the runtime's reference on the blob store (hl_js_free). */
+void hl_js_blob_release(HlJS *js);
 int hl_js_init_mime_module(JSContext *ctx, HlJS *js);
 int hl_js_init_image_module(JSContext *ctx, HlJS *js);
 int hl_js_init_tar_module(JSContext *ctx, HlJS *js);

@@ -27,7 +27,7 @@
 #include "log.h"
 
 /* Forward declarations from bindings.c */
-JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req);
+JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife *life);
 
 void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
                                 void *user_data)
@@ -76,7 +76,7 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     }
 
     /* Build request object */
-    JSValue js_req = hl_js_make_request(ctx, req);
+    JSValue js_req = hl_js_make_request(ctx, req, NULL);   /* not a multipart route */
 
     /* The request's life: the stream holds it, and so does every
      * continuation the handler creates. It dies when the handler is done -
@@ -101,6 +101,7 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
 
     /* Call handler(req, stream) */
     JSValue args[2] = { js_req, stream_obj };
+    js->last_async_cont = NULL;   /* only this run's continuations chain */
     js->active_life = life;
     JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 2, args);
     js->active_life = NULL;
@@ -115,6 +116,16 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         hl_js_sse_stream_force_close(ctx, stream_obj);
     } else {
         JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
+        /* Pending with no continuation yet: it awaits microtasks first
+         * (`await null; ...; await hull.sleep()`). Run them - with the life
+         * active, so a Hull call they make takes it - before deciding, as
+         * dispatch does; deciding at once closed such a stream at once. */
+        if (state == JS_PROMISE_PENDING && !js->last_async_cont) {
+            js->active_life = life;
+            hl_js_run_jobs(js);
+            js->active_life = NULL;
+            state = JS_PromiseState(ctx, ret);
+        }
         if (state == JS_PROMISE_PENDING && js->last_async_cont) {
             /* Async SSE handler - wire handler_promise on continuation */
             extern void hl_js_async_cont_set_handler_promise(
@@ -127,7 +138,9 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
             JS_FreeValue(ctx, stream_obj);
             /* The continuation holds the life now; drop ours. */
             hl_req_life_release(life);
-            /* active_conn stays set - async resume will clear */
+            /* The resume restores them; the next run must not see them. */
+            js->active_conn = NULL;
+            js->active_req = NULL;
             return;
         }
         /* Sync completion - close stream if not already */
@@ -143,4 +156,5 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     JS_FreeValue(ctx, stream_obj);
     js->active_conn = NULL;
     js->active_req = NULL;
+    js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
 }

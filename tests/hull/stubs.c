@@ -8,9 +8,9 @@
 #include "quickjs.h"
 
 /* Stub: creates an empty JS object instead of a real request */
-JSValue hl_js_make_request(JSContext *ctx, void *req)
+JSValue hl_js_make_request(JSContext *ctx, void *req, void *life)
 {
-    (void)req;
+    (void)req; (void)life;
     return JS_NewObject(ctx);
 }
 

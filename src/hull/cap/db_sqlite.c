@@ -29,7 +29,12 @@ typedef struct {
     sqlite3     *db;
     HlStmtCache  cache;
     HlAllocator *alloc;
+    const char  *own_err;   /* an error of ours, not SQLite's (errmsg) */
 } HlDbSqliteCtx;
+
+static const char REENTERED_MSG[] =
+    "the connection is running a statement (a user-defined function cannot "
+    "query its own connection)";
 
 /* ── Vtable implementations ──────────────────────────────────────── */
 
@@ -115,15 +120,19 @@ static int sqlite_query(HlDbHandle *h, const char *sql,
                         HlAllocator *alloc)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
-    return hl_cap_db_query(&s->cache, sql, params, nparams,
-                           cb, cb_ctx, alloc);
+    int rc = hl_cap_db_query(&s->cache, sql, params, nparams,
+                             cb, cb_ctx, alloc);
+    s->own_err = rc == HL_DB_ERR_REENTERED ? REENTERED_MSG : NULL;
+    return rc;
 }
 
 static int sqlite_exec(HlDbHandle *h, const char *sql,
                        const HlValue *params, int nparams)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
-    return hl_cap_db_exec(&s->cache, sql, params, nparams);
+    int rc = hl_cap_db_exec(&s->cache, sql, params, nparams);
+    s->own_err = rc == HL_DB_ERR_REENTERED ? REENTERED_MSG : NULL;
+    return rc;
 }
 
 /* Multi-statement script, no params. sqlite3_exec compiles + runs every
@@ -132,6 +141,7 @@ static int sqlite_exec(HlDbHandle *h, const char *sql,
 static int sqlite_exec_script(HlDbHandle *h, const char *sql)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    s->own_err = NULL;
     char *err = NULL;
     int rc = sqlite3_exec(s->db, sql, NULL, NULL, &err);
     if (rc != SQLITE_OK) {
@@ -144,18 +154,21 @@ static int sqlite_exec_script(HlDbHandle *h, const char *sql)
 static int sqlite_begin(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    s->own_err = NULL;
     return hl_cap_db_begin(s->db);
 }
 
 static int sqlite_commit(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    s->own_err = NULL;
     return hl_cap_db_commit(s->db);
 }
 
 static int sqlite_rollback(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    s->own_err = NULL;
     return hl_cap_db_rollback(s->db);
 }
 
@@ -168,6 +181,7 @@ static int64_t sqlite_last_id(HlDbHandle *h)
 static const char *sqlite_errmsg(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (s->own_err) return s->own_err;
     return sqlite3_errmsg(s->db);
 }
 

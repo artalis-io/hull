@@ -27,7 +27,7 @@
 #include <string.h>
 
 /* Forward declarations from bindings.c */
-JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req);
+JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife *life);
 JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res);
 JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res, HlReqLife *life);
 extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
@@ -94,7 +94,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     }
 
     /* Build JS request and response objects */
-    JSValue js_req = hl_js_make_request(js->ctx, req);
+    JSValue js_req = hl_js_make_request(js->ctx, req, life);
     JSValue js_res = hl_js_make_response_life(js, res, life);
 
     /* Call handler(req, res) */
@@ -203,11 +203,16 @@ int hl_js_dispatch(HlJS *js, int handler_id,
             req->ctx = NULL;
         }
     }
-    /* result == 1: handler suspended; async resume completes it */
+    /* result == 1: handler suspended; async resume completes it (and
+     * restores this request as the active one when it does). */
+    js->active_conn = NULL;
+    js->active_req  = NULL;
 
     /* Run any pending microtasks */
     hl_js_run_jobs(js);
 
+    /* Whatever an un-awaited op made in that drain belongs to no run. */
+    js->last_async_cont = NULL;
     return result;
 }
 
@@ -263,8 +268,16 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
         return -1;
     }
 
+    /* This request is the active one while the middleware runs: left as
+     * the previous run had it, res.json compressed for ANOTHER request's
+     * Accept-Encoding, and an async op suspended (or later completed) a
+     * different connection. */
+    js->active_conn = kl_http_request_conn(req);
+    js->active_req  = req;
+    js->last_async_cont = NULL;
+
     /* Build JS request and response objects */
-    JSValue js_req = hl_js_make_request(js->ctx, req);
+    JSValue js_req = hl_js_make_request(js->ctx, req, life);
     JSValue js_res = hl_js_make_response_life(js, res, life);
 
     /* Call handler(req, res) - capture return value */
@@ -320,6 +333,9 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     /* Run any pending microtasks */
     hl_js_run_jobs(js);
 
+    js->active_conn = NULL;
+    js->active_req  = NULL;
+    js->last_async_cont = NULL;   /* middleware is synchronous: nothing chains */
     return result;
 }
 

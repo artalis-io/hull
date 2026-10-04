@@ -318,10 +318,10 @@ static void column_to_value(sqlite3_stmt *stmt, int col, HlValue *out)
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
-int hl_cap_db_query(HlStmtCache *cache, const char *sql,
-                    const HlValue *params, int nparams,
-                    HlRowCallback cb, void *ctx,
-                    HlAllocator *alloc)
+static int db_query_inner(HlStmtCache *cache, const char *sql,
+                          const HlValue *params, int nparams,
+                          HlRowCallback cb, void *ctx,
+                          HlAllocator *alloc)
 {
     if (!cache || !sql || !cb)
         return HL_DB_ERR_PREPARE;
@@ -423,8 +423,8 @@ int hl_cap_db_query(HlStmtCache *cache, const char *sql,
     return result;
 }
 
-int hl_cap_db_exec(HlStmtCache *cache, const char *sql,
-                   const HlValue *params, int nparams)
+static int db_exec_inner(HlStmtCache *cache, const char *sql,
+                         const HlValue *params, int nparams)
 {
     if (!cache || !sql)
         return HL_DB_ERR_PREPARE;
@@ -459,6 +459,33 @@ int hl_cap_db_exec(HlStmtCache *cache, const char *sql,
         hl_audit_end(&w);
     }
     return result;
+}
+
+/* The entry points: refuse a call made from inside one of this cache's own
+ * statements (see HlStmtCache.stepping), and mark the cache for the call's
+ * whole run otherwise. */
+int hl_cap_db_query(HlStmtCache *cache, const char *sql,
+                    const HlValue *params, int nparams,
+                    HlRowCallback cb, void *ctx,
+                    HlAllocator *alloc)
+{
+    if (cache && cache->stepping)
+        return HL_DB_ERR_REENTERED;
+    if (cache) cache->stepping = 1;
+    int rc = db_query_inner(cache, sql, params, nparams, cb, ctx, alloc);
+    if (cache) cache->stepping = 0;
+    return rc;
+}
+
+int hl_cap_db_exec(HlStmtCache *cache, const char *sql,
+                   const HlValue *params, int nparams)
+{
+    if (cache && cache->stepping)
+        return HL_DB_ERR_REENTERED;
+    if (cache) cache->stepping = 1;
+    int rc = db_exec_inner(cache, sql, params, nparams);
+    if (cache) cache->stepping = 0;
+    return rc;
 }
 
 int64_t hl_cap_db_last_id(sqlite3 *db)

@@ -96,7 +96,7 @@ static void hl_request_peer_ip_js(KlHttpRequest *req, char *buf, size_t buflen)
  *     ctx:     {}
  *   }
  */
-JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req)
+JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife *life)
 {
     JSValue obj = JS_NewObject(ctx);
 
@@ -155,8 +155,12 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req)
             if (vlen > 0)
                 vlen = (size_t)hl_url_decode(val, vlen, val, vlen + 1,
                                              HL_URL_FORM);
-            JS_SetPropertyStr(ctx, query_obj, pair,
-                              JS_NewStringLen(ctx, val, vlen));
+            /* Defined, not set (also params and headers below): the keys
+             * are the client's, and a set ran any Object.prototype setter
+             * with them - and dropped a "__proto__" key. */
+            JS_DefinePropertyValueStr(ctx, query_obj, pair,
+                                      JS_NewStringLen(ctx, val, vlen),
+                                      JS_PROP_C_W_E);
             pair = strtok_r(NULL, "&", &saveptr);
         }
     }
@@ -172,8 +176,8 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req)
                       ? param.name_len : HL_PARAM_NAME_MAX - 1;
         memcpy(name, param.name, nlen);
         name[nlen] = '\0';
-        JS_SetPropertyStr(ctx, params_obj, name,
-            JS_NewStringLen(ctx, param.value, param.value_len));
+        JS_DefinePropertyValueStr(ctx, params_obj, name,
+            JS_NewStringLen(ctx, param.value, param.value_len), JS_PROP_C_W_E);
     }
     JS_SetPropertyStr(ctx, obj, "params", params_obj);
 
@@ -193,8 +197,9 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req)
                 name_buf[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
             }
             name_buf[nlen] = '\0';
-            JS_SetPropertyStr(ctx, headers_obj, name_buf,
-                              JS_NewStringLen(ctx, req->headers[i].value, req->headers[i].value_len));
+            JS_DefinePropertyValueStr(ctx, headers_obj, name_buf,
+                              JS_NewStringLen(ctx, req->headers[i].value, req->headers[i].value_len),
+                              JS_PROP_C_W_E);
         }
     }
     JS_SetPropertyStr(ctx, obj, "headers", headers_obj);
@@ -230,7 +235,8 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req)
     /* req.multipart() - only installed for streaming-multipart routes.
      * Defined in mod_request.c. */
     if (is_multipart_stream)
-        hl_js_request_install_multipart(ctx, obj, req->body_reader);
+        hl_js_request_install_multipart(ctx, obj, req->body_reader, life,
+                                        kl_http_request_conn(req), req);
 
     /* ctx - per-request context object (middleware → handler).
      * If req->ctx carries a native JS ref, retrieve it directly;

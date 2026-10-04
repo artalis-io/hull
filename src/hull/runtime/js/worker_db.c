@@ -39,27 +39,46 @@ static int worker_js_to_hl_values(JSContext *ctx, JSValueConst arr,
     if (JS_IsUndefined(arr) || JS_IsNull(arr))
         return 0;
 
+    /* An array, at most SQLite's variable limit: an array-like
+     * { length: 3e9 } drove billions of uninterruptible property reads, and
+     * (int)len then went negative. */
+    if (JS_IsArray(ctx, arr) != 1) {
+        JS_ThrowTypeError(ctx, "db params must be an array");
+        return -1;
+    }
     JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
     if (JS_IsException(len_val))
         return -1;
     int64_t len = 0;
-    JS_ToInt64(ctx, &len, len_val);
+    int lrc = JS_ToInt64(ctx, &len, len_val);
     JS_FreeValue(ctx, len_val);
+    if (lrc != 0)
+        return -1;
     if (len <= 0)
         return 0;
-    if ((size_t)len > SIZE_MAX / sizeof(HlValue))
+    if (len > 32766) {
+        JS_ThrowRangeError(ctx, "db params: too many (at most 32766)");
         return -1;
+    }
 
     HlValue *params = calloc((size_t)len, sizeof(HlValue));
     const char **strs = calloc((size_t)len, sizeof(char *));
     if (!params || !strs) {
         free(params);
         free(strs);
+        JS_ThrowOutOfMemory(ctx);
         return -1;
     }
 
     for (int64_t i = 0; i < len; i++) {
         JSValue elem = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+        if (JS_IsException(elem)) {      /* a throwing element getter */
+            for (int64_t j = 0; j < i; j++)
+                if (strs[j]) JS_FreeCString(ctx, strs[j]);
+            free(strs);
+            free(params);
+            return -1;
+        }
 
         if (JS_IsNull(elem) || JS_IsUndefined(elem)) {
             params[i].type = HL_TYPE_NIL;
@@ -138,8 +157,12 @@ static int worker_js_row_cb(void *opaque, HlColumn *cols, int ncols)
             val = JS_NewFloat64(qc->ctx, cols[i].value.d);
             break;
         case HL_TYPE_TEXT:
-        case HL_TYPE_BLOB:
             val = JS_NewStringLen(qc->ctx, cols[i].value.s, cols[i].value.len);
+            break;
+        case HL_TYPE_BLOB:      /* bytes, as on the main VM (a string was lossy) */
+            val = JS_NewArrayBufferCopy(qc->ctx,
+                                         (const uint8_t *)cols[i].value.s,
+                                         cols[i].value.len);
             break;
         case HL_TYPE_BOOL:
             val = JS_NewBool(qc->ctx, cols[i].value.b);
@@ -149,9 +172,15 @@ static int worker_js_row_cb(void *opaque, HlColumn *cols, int ncols)
             val = JS_NULL;
             break;
         }
-        JS_SetPropertyStr(qc->ctx, row, cols[i].name ? cols[i].name : "?", val);
+        /* Defined, never set (as mod_db.c's row callback): a set runs any
+         * Object.prototype setter - the dispatched function's code, inside
+         * the statement's step loop, where a query could evict the stepping
+         * statement - and a column named __proto__ replaced the prototype. */
+        JS_DefinePropertyValueStr(qc->ctx, row, cols[i].name ? cols[i].name : "?",
+                                  val, JS_PROP_C_W_E);
     }
-    JS_SetPropertyUint32(qc->ctx, qc->rows, (uint32_t)qc->row_num, row);
+    JS_DefinePropertyValueUint32(qc->ctx, qc->rows, (uint32_t)qc->row_num, row,
+                                 JS_PROP_C_W_E);
     qc->row_num++;
     return 0;
 }
@@ -182,7 +211,7 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
     if (argc >= 2) {
         if (worker_js_to_hl_values(ctx, argv[1], &params, &strs, &nparams) != 0) {
             JS_FreeCString(ctx, sql);
-            return JS_ThrowInternalError(ctx, "params must be an array");
+            return JS_EXCEPTION;    /* the conversion threw */
         }
     }
 
@@ -226,7 +255,7 @@ static JSValue worker_js_db_exec(JSContext *ctx, JSValueConst this_val,
     if (argc >= 2) {
         if (worker_js_to_hl_values(ctx, argv[1], &params, &strs, &nparams) != 0) {
             JS_FreeCString(ctx, sql);
-            return JS_ThrowInternalError(ctx, "params must be an array");
+            return JS_EXCEPTION;    /* the conversion threw */
         }
     }
 
