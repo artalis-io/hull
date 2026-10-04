@@ -631,8 +631,16 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         }
     }
 
+    /* The filesystem steps are for development only. A built binary (its
+     * app files embedded) runs the modules it was built with: it used to
+     * fall back to <cwd>/compute/<name>.aot.<arch> - native code, loaded
+     * outside the WASM sandbox and outside any signature - for a name it
+     * did not embed. And under --verify-sig every byte read from disk must
+     * be a signed file (hl_vfs_disk_gate_check). */
+    int disk_ok = !(app_vfs && app_vfs->count > 0);
+
     /* 3. Filesystem AOT: <app_dir>/compute/<name>.aot.<arch> */
-    if (!buf && app_dir && arch) {
+    if (!buf && disk_ok && app_dir && arch) {
         char path[4096];
         int n = snprintf(path, sizeof(path), "%s/compute/%s.aot.%s", app_dir, name, arch);
         FILE *f = (n > 0 && (size_t)n < sizeof(path)) ? fopen(path, "rb") : NULL;
@@ -648,6 +656,17 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                 buf = malloc((size_t)fsize);
                 if (buf) {
                     size_t nr = fread(buf, 1, (size_t)fsize, f);
+                    char rel[600];
+                    int rn = snprintf(rel, sizeof(rel), "compute/%s.aot.%s", name, arch);
+                    if (nr == (size_t)fsize &&
+                        (rn < 0 || (size_t)rn >= sizeof(rel) ||
+                         hl_vfs_disk_gate_check(rel, buf, nr) != 0)) {
+                        log_error("[wasm] refusing compute/%s.aot.%s: not a signed "
+                                  "file (--verify-sig)", name, arch);
+                        free(buf);
+                        fclose(f);
+                        return HL_WASM_ERR_LOAD;
+                    }
                     if (nr == (size_t)fsize) {
                         buf_len = (uint32_t)fsize;
                         is_aot = 1;
@@ -664,7 +683,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     }
 
     /* 4. Filesystem WASM fallback: <app_dir>/compute/<name>.wasm */
-    if (!buf && app_dir) {
+    if (!buf && disk_ok && app_dir) {
         char path[4096];
         int n = snprintf(path, sizeof(path), "%s/compute/%s.wasm", app_dir, name);
         FILE *f = (n > 0 && (size_t)n < sizeof(path)) ? fopen(path, "rb") : NULL;
@@ -680,6 +699,17 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                 buf = malloc((size_t)fsize);
                 if (buf) {
                     size_t nr = fread(buf, 1, (size_t)fsize, f);
+                    char rel[600];
+                    int rn = snprintf(rel, sizeof(rel), "compute/%s.wasm", name);
+                    if (nr == (size_t)fsize &&
+                        (rn < 0 || (size_t)rn >= sizeof(rel) ||
+                         hl_vfs_disk_gate_check(rel, buf, nr) != 0)) {
+                        log_error("[wasm] refusing compute/%s.wasm: not a signed "
+                                  "file (--verify-sig)", name);
+                        free(buf);
+                        fclose(f);
+                        return HL_WASM_ERR_LOAD;
+                    }
                     if (nr == (size_t)fsize) {
                         buf_len = (uint32_t)fsize;
                         log_debug("[wasm] loaded module '%s' from disk (%u bytes)",

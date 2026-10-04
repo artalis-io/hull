@@ -51,7 +51,7 @@ prod:
 
 run:
 	@test -x email || { echo "Build first: make prod"; exit 1; }
-	./email -p $(PORT) -d $(DB) $(ENTRY)
+	./email -p $(PORT) --hull-d $(DB) $(ENTRY)
 
 # ── Tests ─────────────────────────────────────────────────────────
 

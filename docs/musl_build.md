@@ -165,5 +165,12 @@ SHA-256-verified at install (`hull.sha256`); the runtime platform-sig §5c
 composed-archive attestation is skipped for a cross target (the running glibc
 hull can't attest musl archives it doesn't embed, and the musl base is built
 `HL_EMBED_PLATFORM_SIG=0`), so trust comes from the signed install + the
-developer app signature. Without `platform-musl-<arch>` installed, a `-musl`
+developer app signature. Each archive is re-verified at BUILD time, offline
+(`tool.bundle_verify`): `hull tools install` keeps the signed manifest and its
+signature in the bundle directory (`.hull-bundle.*`), and `hull build` checks
+that signature against the embedded release key, reads the signed `.tar` back
+from the content-addressed tools store, and requires the archive it links to be
+byte-identical to that member of the tar - so an archive swapped in
+`~/.hull/tools` after the install is refused (reinstall a bundle installed by an
+older hull, which kept no record). Without `platform-musl-<arch>` installed, a `-musl`
 target fails closed with a `hull tools install` hint (the `#206` guard).

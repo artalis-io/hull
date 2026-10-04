@@ -25,7 +25,7 @@ JOBS      := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 
 dev: certs
 	@test -x "$(HULL)" || $(MAKE) -j$(JOBS) -C $(REPO_ROOT)
 	$(HULL) dev $(ENTRY) -p $(PORT) -d $(DB) \
-		--tls-cert certs/cert.pem --tls-key certs/key.pem
+		--hull-tls-cert certs/cert.pem --hull-tls-key certs/key.pem
 
 # ── Production build ────────────────────────────────────────────────
 #
@@ -64,8 +64,8 @@ endif
 
 run: certs
 	@test -x todo || { echo "Build first: make prod"; exit 1; }
-	./todo -p $(PORT) -d $(DB) \
-		--tls-cert certs/cert.pem --tls-key certs/key.pem \
+	./todo -p $(PORT) --hull-d $(DB) \
+		--hull-tls-cert certs/cert.pem --hull-tls-key certs/key.pem \
 		$(ENTRY)
 
 # ── Tests ───────────────────────────────────────────────────────────

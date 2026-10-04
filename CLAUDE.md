@@ -1120,8 +1120,11 @@ hull keygen | build | verify | inspect | manifest | test | new | init | dev | ej
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH
 Every runtime flag also takes the spelling --hull-<name> (--hull-d PATH = -d PATH). In a BUILT binary the flags that weaken
 the process (--no-sandbox, --allow-degraded-sandbox, --no-ca-bundle/--skip-ca-bundle, --ca-bundle, --no-verify-platform,
---agent-api, --max-instructions) are taken ONLY as --hull-<name>; a bare one is refused, since a built binary cannot tell an
-operator's option from one of its app's arguments (include/hull/runtime_flags.h, docs/cli_mode.md).
+--agent-api, --max-instructions, -b, -d, -m, -M, -s, --tls-cert, --tls-key, --wasm-gas/-heap/-stack/-max-input/-max-output,
+--body-max-size) are taken ONLY as --hull-<name>; a bare one is refused, since a built binary cannot tell an
+operator's option from one of its app's arguments (include/hull/runtime_flags.h, docs/cli_mode.md). A --hull-<name> the
+parser does not take (unknown, or missing its value) is an error, never an app argument, and a one-letter name takes its
+value as the next argument (--hull-d PATH; --hull-d=PATH is refused).
 --agent-api additionally requires a loopback bind (its endpoints are unauthenticated).
 Global flags: --version / -v (equivalent to hull version), --help / -h (equivalent to hull help), --verbose, --json, --app-dir
 ```
@@ -1495,12 +1498,25 @@ and the phase-1 sandbox applied, before the app context runs migrations. §5b al
 per-arch `arch_hashes` (the platform archive the build cross-checked) to be present and to match
 the signed manifest - a `--no-verify-platform` build carries no `gethull` block and needs
 `--no-verify-platform` at run time too. Every embedded VFS entry (compute WASM, AOT code,
-shaders, templates, static files, migrations) must be signed; `hull verify` also checks
-`binary_hash` against the built binary when it is present.
+shaders, templates, static files, migrations) must be signed - matched by name the way
+`build.lua` embeds them (a `./` entry is a module: its rest, or its rest + `.lua`; a bare
+entry such as `templates/base.html` matches exactly) and hashed. Whatever the runtime still
+reads from DISK under `--verify-sig` must be signed too: `hl_verify_startup` arms the loaders'
+signed-file gate (`hl_vfs_disk_gate_*`, `include/hull/vfs.h`), and every disk loader - Lua /
+JS modules, templates, static files, migrations, shaders, compute `.wasm` / `.aot.*` - re-hashes
+the bytes it read against the signature and refuses anything else (a module planted beside
+the app, a file swapped after the startup check). The filesystem-mode startup check also
+refuses an unsigned file in `migrations/`, `compute/`, `shaders/`, `templates/` and
+`static/`. A built binary never loads compute modules or shaders from its working directory
+(as for migrations and static files). `hull verify` also checks `binary_hash` against the
+built binary (`--binary PATH`, default `<app_dir>/app`), fails when AOT entries could only be
+checked through a binary it did not find, and applies the §5b / §5c gethull checks.
 
-**The app directory may not be `/`.** A built binary takes its app directory from its working
-directory; `hl_sandbox_apply` refuses `/` (that unveiled the whole filesystem) - run it from
-its own directory (`WorkingDirectory=`, `WORKDIR`).
+**The app directory may not be `/`, or `$HOME` or above.** A built binary takes its app
+directory from its working directory; `hl_sandbox_apply` refuses `/` (that unveiled the whole
+filesystem) and the user's home or any ancestor of it (every file the user owns) - run it from
+its own directory (`WorkingDirectory=`, `WORKDIR`; the generated Dockerfile sets `WORKDIR /srv`).
+Without `-d`, the database is `<app_dir>/data.db` - the one `hull migrate` opens.
 
 **Tool-mode sandbox (`hl_tool_sandbox_init`).** Kernel unveil only where it enforces (OpenBSD,
 Linux with Landlock, a cosmo APE on those two hosts), and a failed unveil there is fatal,
@@ -1508,7 +1524,13 @@ not logged-and-ignored. Pledge applies on OpenBSD only: the Linux polyfill refus
 without execpromises, which would be a seccomp filter on every spawned compiler/linker, so
 on Linux tool mode rests on Landlock unveil plus the spawn allowlist. Elsewhere
 (macOS, Windows, the other BSDs) only the userspace allowlist the tool bindings check applies,
-and the log says so. The invocation directory is never granted when it is `/`. Tool writes
+and the log says so. The invocation directory is never granted when it is `/`, nor when it is
+`$HOME` or above (except to `hull new` / `hull init`, which run no app code); an output
+directory (`-o`) that is `/` or `$HOME` or above is refused rather than made writable, and
+neither is hull's own directory granted when it is that broad. hull's own directory is in the
+kernel list as well as the userspace one (the manifest-extraction re-exec), and the cache seal
+keys are loaded before the sandbox applies. A cosmo APE on a Linux kernel without Landlock
+(unveil fails ENOSYS) runs with no kernel tool sandbox, as a native build there does. Tool writes
 (`tool.write_file`, `tool.copy`) do not follow a symlink at the destination, and the unveil
 check canonicalises a not-yet-existing path through its nearest existing ancestor (a raw
 `/tmp/../x` no longer passes the `/tmp` prefix). Nothing a build or eject executes or links is
@@ -1544,7 +1566,7 @@ tracked follow-up, and would add protection rather than only honesty.
 - **Instruction limits:** Both Lua and JS runtimes enforce per-request instruction limits (default 100M). Lua uses `lua_sethook(LUA_MASKCOUNT)`, JS uses `JS_SetInterruptHandler`. Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var. Lua's budget (`runtime/lua/budget.c`) is per VM and per **uninterrupted run**: every entry (a request, a middleware, a timer, an async resume, `app.main`) arms the whole limit again. A trip is sticky until then: `pcall` / `xpcall` / `coroutine.resume` / `coroutine.wrap` re-raise it, so app code cannot catch the limit and keep looping. QuickJS polls its interrupt handler once per 10000 countdown steps (calls and backward jumps), so each poll is charged `HL_JS_INTERRUPT_WEIGHT` (10000, `runtime/js/internal.h`) - counted one per poll, the limit used to be ~10^4 times weaker than its value. The JS budget mirrors Lua's: per run, re-armed by `hl_js_budget_arm` at every entry (dispatch, middleware, timer, ws / SSE / ws-client callback, async and multipart resume, `app.main`, a `hull test` case; each worker dispatch has its own), and a trip is sticky (`HlJS.budget_tripped`) - QuickJS HULL PATCH 0003 polls again at the very next step, so an async body or promise job that turned the interrupt into a rejection cannot let its caller run on. A binding whose callback was interrupted (SQL UDF, `compute.stream`) re-raises it uncatchable (`hl_js_budget_throw`), `hl_js_run_jobs` discards a tripped run's jobs, and a tripped run whose promise therefore never settles is completed as failed (`HlJsRunOnce.tripped`). Hull's own init code runs before the limit applies.
 - **JS middleware is synchronous:** `hl_js_dispatch_middleware` answers 500 for a returned Promise / thenable (it coerced to 0, "continue"), and every Hull async op checks `hl_js_async_gate` (`runtime/js/async.c`), which refuses inside middleware (`HlJS.in_middleware`) and while a `req.multipart()` read is parked on the request (`HlReqLife.parked`). A multipart park in turn is refused while an attached op holds the connection or is resuming (`HlReqLife.attached`): Keel re-arms no read for a resumed handler that waits for more body. Add the gate (and `hl_js_op_suspend` for the suspend) to any new async op binding.
 - **Stdlib runs in a private Lua environment:** stdlib chunks see their own copies of the base functions and of `table` / `string` / `math` / `utf8` / `coroutine`, and string methods resolve through that private `string` behind a locked metatable (`getmetatable("")` returns `"locked"`). An app replacing `table.concat` or `string.format` - which the `_hull_*` SQL guard's callers use - no longer changes what the stdlib runs. Residual: the stdlib still concatenates app values that may carry metamethods, and the module tables `require` returns are shared and writable (nothing security-relevant is built from them: the manifest JSON that `--verify-sig` checks is encoded in C); the real boundary for `_hull_*` tables is `databases.internal`.
-- **Code caches are sealed:** Lua and QuickJS bytecode and compiled-template cache entries are stored as HMAC-SHA256 || bytes, keyed by a per-user secret at `$HOME/.hull/cache.key` (0600, made on first use, outside the cache dir). An entry that fails to verify is deleted and recompiled; a key file others can read turns these caches off.
+- **Code caches are sealed:** Lua and QuickJS bytecode and compiled-template cache entries are stored as HMAC-SHA256 || bytes, keyed by a per-user secret at `$HOME/.hull/cache.key` (0600, made on first use, outside the cache dir). An entry that fails to verify is deleted and recompiled; a key file others can read turns these caches off. The compute-AOT cache (native code `hull build` embeds) is sealed under a SEPARATE key, `$HOME/.hull/tool-cache.key`, which only the tool VM loads: every app process holds `cache.key` and can write the shared pool, so with one key an app compromised at native level could forge an AOT entry the next build of another app embedded.
 - **Audit logging:** `--audit` flag or `HULL_AUDIT=1` env var enables structured JSON logging of all capability calls to stderr. Off by default (zero overhead. Single branch on `hl_audit_enabled` global). Uses `ShJsonWriter` for streaming output with proper escaping. No heap allocation.
 
 ### Module Declaration System

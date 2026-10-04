@@ -721,7 +721,7 @@ adapter), let the module own the routes.
 
 ```sh
 hull build .                                    # produces ./app binary
-./app -p 8080 -d /var/lib/myapp/data.db        # run it
+./app -p 8080 --hull-d /var/lib/myapp/data.db        # run it
 ```
 
 **Build flavors.** Your app binary is *already* minimal without a flavor:

@@ -13,6 +13,8 @@
  */
 
 #include "hull/static.h"
+#include "hull/cap/fs_resolve.h"
+#include "hull/vfs.h"
 
 #include <keel/http_request.h>
 #include <keel/http_response.h>
@@ -276,15 +278,27 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     if (ctx->vfs && ctx->vfs->count > 0)
         return 0;
     {
-        char fpath[4096];
-        int n = hl_vfs_path(ctx->vfs, full_name, fpath, sizeof(fpath));
-        if (n < 0)
+        if (!ctx->vfs || !ctx->vfs->root_dir)
             return 0;
 
-        /* Non-blocking (a FIFO named like an asset hung the event loop on
-         * open) and not through a symlink (one in static/ served whatever it
-         * named, outside the tree). The S_ISREG check below stays. */
-        int fd = open(fpath, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        /* Resolved beneath static/, descriptor-relative: static/ itself must
+         * be a real directory (not a symlink), and below it a symlink is
+         * followed only within static/ (one escaping it is re-rooted there).
+         * O_NOFOLLOW on the leaf alone let an intermediate link
+         * (static/x -> ..) serve data.db and .env. The leaf is opened
+         * non-blocking and must be a regular file (a FIFO named like an
+         * asset hung the event loop). */
+        const char *ferr = NULL;
+        int root_fd = hl_fs_open_base(ctx->vfs->root_dir, &ferr);
+        if (root_fd < 0)
+            return 0;
+        int sdir = hl_fs_open_at_ex(root_fd, "static", HL_FS_OPEN_DIR,
+                                    HL_FS_SYMLINK_REFUSE, 0, &ferr);
+        close(root_fd);
+        if (sdir < 0)
+            return 0;
+        int fd = hl_fs_open_at(sdir, full_name + 7, HL_FS_OPEN_READ, 0, &ferr);
+        close(sdir);
         if (fd < 0)
             return 0;
 
@@ -334,6 +348,12 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
         }
         close(fd);
         if (got != st.st_size) { free(buf); return 0; }
+
+        /* --verify-sig: only a signed static file, as signed. */
+        if (hl_vfs_disk_gate_check(full_name, buf, (size_t)got) != 0) {
+            free(buf);
+            return 0;
+        }
 
         kl_http_response_status(res, 200);
         kl_http_response_header(res, "Content-Type", mime);

@@ -129,8 +129,43 @@ end
 -- @tparam table  module    { name, src, wasm } as returned by discover_modules().
 -- @treturn boolean ok      True on success.
 -- @treturn string  err     Error message on failure, nil on success.
+-- A module's sources are the app's (a cloned repo's), compiled by hull build
+-- on the developer's machine. `.incbin` (in an asm statement) and C23
+-- `#embed` make the compiler read ANY file into the .wasm - ~/.ssh/id_rsa,
+-- where nothing but a Landlock tool sandbox stops it - and app code can then
+-- read it back at run time. A compute plugin has no use for either, so their
+-- sources are refused. Lexical, after undoing the joins that hide a word
+-- (adjacent string literals ".inc" "bin", token pasting inc##bin, line
+-- continuations), case-insensitive.
+local function embeds_files(text)
+    local t = text:gsub("\\\r?\n", "")        -- line continuations
+    t = t:gsub("\"%s*\"", "")                 -- "a" "b" -> "ab"
+    t = t:gsub("##", "")                        -- token pasting
+    t = t:lower()
+    if t:find("incbin", 1, true) then return "an .incbin directive" end
+    if t:find("#%s*embed") or t:find("__has_embed", 1, true) then
+        return "an #embed directive"
+    end
+    return nil
+end
+
 function M.compile_module(cc, module)
     local src_dir = module.src:match("(.*)/[^/]+$") or "."
+
+    local sources = { module.src }
+    for _, pat in ipairs({ "*.c", "*.h", "*.inc", "*.s", "*.S" }) do
+        for _, f in ipairs(tool.find_files(src_dir, pat) or {}) do
+            sources[#sources + 1] = f
+        end
+    end
+    for _, f in ipairs(sources) do
+        local text = tool.read_file(f)
+        local what = text and embeds_files(text)
+        if what then
+            return false, f .. " uses " .. what .. ", which can pull a file "
+                .. "from outside the app into the module; compute sources may not"
+        end
+    end
 
     local ok = tool.spawn({
         cc,

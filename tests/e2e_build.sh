@@ -640,6 +640,42 @@ else
     fi
 fi
 
+# ── Step 14a: --verify-sig, an app embedding every kind of file ────
+#
+# Templates, static files, migrations, compute modules and shaders are
+# embedded under their bare app-relative names ("templates/base.html"); the
+# verifier looked up "./" names only, so every such built app refused to start
+# under --verify-sig ("file not found in binary") - the app above has only
+# app.lua, which is why this went unnoticed.
+
+echo ""
+echo "=== Step 14a: --verify-sig with templates/static/migrations/compute ==="
+
+RICH="$WORKDIR/richapp"
+mkdir -p "$RICH/templates" "$RICH/static" "$RICH/migrations" "$RICH/compute" "$RICH/shaders"
+cat > "$RICH/app.lua" << 'APPEOF'
+app.manifest({ modules = {"hull/http-server@1"} })
+app.get("/", function(req, res) res:json({message = "rich app"}) end)
+APPEOF
+printf '<p>{{ x }}</p>\n' > "$RICH/templates/base.html"
+printf 'body { margin: 0 }\n' > "$RICH/static/style.css"
+printf 'CREATE TABLE rich (x INTEGER);\n' > "$RICH/migrations/001_init.sql"
+printf '@compute @workgroup_size(1) fn main() {}\n' > "$RICH/shaders/noop.wgsl"
+cp "$SRCDIR/examples/compute/compute/echo.wasm" "$RICH/compute/echo.wasm"
+
+hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$RICH/richapp" "$RICH"; BUILD_OUT=$OUT
+check_exit "rich signed build exits 0" 0 $RC
+
+(cd "$RICH" && exec ./richapp --verify-sig "$WORKDIR/developer.pub" --hull-no-verify-platform -p 19879) >"$WORKDIR/rich.log" 2>&1 &
+SERVER_PID=$!
+if wait_for_server 19879; then
+    RESP=$(curl -s "http://127.0.0.1:19879/")
+    check_contains "--verify-sig serves an app with every file kind" "$RESP" "rich app"
+else
+    fail "--verify-sig refused an app embedding templates/static/migrations/compute: $(cat "$WORKDIR/rich.log")"
+fi
+stop_server
+
 # ── Step 14b: --verify-sig strict default rejects missing gethull layer ──
 #
 # Apps built by a dev hull (no embedded signed manifest) cannot carry a

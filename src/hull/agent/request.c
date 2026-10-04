@@ -8,6 +8,7 @@
 #include "internal.h"
 
 #include <sh_json.h>
+#include <sh_arena.h>
 
 #include <limits.h>      /* PATH_MAX */
 #include <stdint.h>      /* uint64_t (kl_monotonic_ms timing) */
@@ -138,7 +139,7 @@ int hl_agent_status(const char *app_dir, int port, ShJsonBuf *out)
     char dev_json_path[PATH_MAX];
     snprintf(dev_json_path, sizeof(dev_json_path), "%s/.hull/dev.json", app_dir);
 
-    FILE *f = fopen(dev_json_path, "r");
+    FILE *f = hl_agent_open_sidecar(dev_json_path);
     if (f) {
         char buf[4096];
         size_t n = fread(buf, 1, sizeof(buf) - 1, f);
@@ -173,7 +174,7 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
     char err_path[PATH_MAX];
     snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", app_dir);
 
-    FILE *f = fopen(err_path, "r");
+    FILE *f = hl_agent_open_sidecar(err_path);
     if (!f) {
         ShJsonWriter w;
         sh_json_writer_init(&w, sh_json_buf_write, out);
@@ -204,6 +205,23 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
         return -1;
     }
     buf[n] = '\0';
+
+    /* The file may have been shipped with the repo rather than written by
+     * hull dev: pass it through only when it is JSON, and holds no
+     * terminal control bytes (it is copied to the user's terminal as is). */
+    int ok = hl_agent_text_is_terminal_safe(buf, n);
+    if (ok) {
+        SHArena *arena = sh_arena_create(4096 + 8 * n);
+        ShJsonValue *v = NULL;
+        ok = arena && sh_json_parse(buf, n, arena, &v) == SH_JSON_OK && v &&
+             sh_json_type(v) == SH_JSON_OBJECT;
+        if (arena) sh_arena_free(arena);
+    }
+    if (!ok) {
+        free(buf);
+        return hl_agent_write_error(out, ".hull/last_error.json is not a "
+                                         "valid error record");
+    }
 
     /* Pass through raw JSON - write directly to buffer */
     sh_json_buf_write(out, buf, n);

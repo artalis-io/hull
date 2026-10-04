@@ -68,7 +68,9 @@ static int sb_supported(void)
     return 0;
 #endif
 }
-/* seccomp works without Landlock: pledge still applies. */
+/* The polyfill's pledge (seccomp) works without Landlock - but tool mode does
+ * not use it on Linux (see tool_pledge below): Linux without Landlock has NO
+ * kernel tool sandbox, only the userspace allowlist. */
 static int sb_pledge_supported(void) { return 1; }
 
 #elif defined(__APPLE__)
@@ -120,13 +122,37 @@ static int dir_exists_p(const char *path)
     return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-/* The invocation directory is granted read-write-create - except when it is
- * the filesystem root, where that grant was the whole filesystem. */
-static int cwd_grantable(void)
+/* Is `path` (resolved) the filesystem root, or the user's home directory or
+ * one of its ancestors? A grant there is the whole filesystem, or every
+ * file the user owns (~/.ssh, ~/.bashrc - and ~/.hull/tools, which Landlock
+ * unions into rwc although it is granted rx below). An unresolvable path
+ * counts as broad: there is nothing safe to grant. */
+static int path_too_broad(const char *path)
+{
+    char rp[PATH_MAX];
+    if (!path || !realpath(path, rp)) return 1;
+    if (strcmp(rp, "/") == 0) return 1;
+    const char *home = getenv("HOME");
+    if (!home || !*home) home = getenv("USERPROFILE");   /* Windows */
+    char hr[PATH_MAX];
+    if (home && *home && realpath(home, hr)) {
+        size_t l = strlen(rp);
+        if (strncmp(hr, rp, l) == 0 && (hr[l] == '\0' || hr[l] == '/'))
+            return 1;
+    }
+    return 0;
+}
+
+/* The invocation directory is granted read-write-create - except when that
+ * grant would be the whole filesystem (cwd "/"), or the user's home (a
+ * build run from ~ executes the app's top-level code and the toolchain with
+ * every file in ~ writable). `hull new` / `hull init` (scaffold) only write
+ * their scaffold and run no app code: they still get a cwd of ~, never "/". */
+static int cwd_grantable(int scaffold)
 {
     char cwd[PATH_MAX];
-    char *r = realpath(".", cwd);
-    return r && strcmp(cwd, "/") != 0;
+    if (!realpath(".", cwd) || strcmp(cwd, "/") == 0) return 0;
+    return scaffold || !path_too_broad(cwd);
 }
 
 /* Kernel unveil of one path. An OPTIONAL path that does not exist (a
@@ -144,11 +170,38 @@ static void kunveil(const char *path, const char *perm, int optional, int *faile
 int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
                          const char *app_dir,
                          const char *output_dir,
-                         const char *platform_dir)
+                         const char *platform_dir,
+                         int scaffold)
 {
     if (!ctx) return -1;
 
     hl_tool_unveil_init(ctx);
+
+    /* The output directory is granted read-write-create. `-o /app` made that
+     * "/" - the whole filesystem writable to the app code a build runs (the
+     * generated Dockerfile did exactly this) - and `-o ~/x` the whole home.
+     * Refuse rather than grant it. */
+    if (output_dir && dir_exists_p(output_dir) && path_too_broad(output_dir)) {
+        log_error("[sandbox] tool mode: refusing to make '%s' writable (it is "
+                  "the filesystem root, or your home directory or above); "
+                  "write the output into a subdirectory", output_dir);
+        return -1;
+    }
+
+    /* hull's own directory (the re-exec in manifest_extract_file.c, and the
+     * platform archives beside it), read + execute. Resolved once for both
+     * lists; never a directory that grants too much ("/hull", ~/hull). */
+    char self_dir[PATH_MAX];
+    int have_self_dir = 0;
+    if (hl_release_io_self_path(self_dir, sizeof(self_dir)) == 0) {
+        char *slash = strrchr(self_dir, '/');
+        if (slash && slash != self_dir) {
+            *slash = '\0';
+            have_self_dir = !path_too_broad(self_dir);
+        }
+    }
+    if (platform_dir && path_too_broad(platform_dir))
+        platform_dir = NULL;   /* argv[0] "/hull" made this "/" */
 
     /* App sources: read-only, and only when the path is a real directory
      * (see the output_dir note below). */
@@ -196,7 +249,7 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
      * scaffold relative to it. Unconditional, so `output_dir` is free to
      * carry where `hull build` actually writes rather than doubling as
      * this. */
-    if (cwd_grantable())
+    if (cwd_grantable(scaffold))
         hl_tool_unveil_add(ctx, ".", "rwc");
 
     /* Output directory: write/create. app_dir above is READ-ONLY, so a
@@ -233,16 +286,8 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
      * path and unveil its DIRECTORY (not $HOME, not "/"). Best-effort: cosmo
      * has no self-path route, and the extraction falls back to in-process when
      * the spawn is refused. */
-    {
-        char self[PATH_MAX];
-        if (hl_release_io_self_path(self, sizeof(self)) == 0) {
-            char *slash = strrchr(self, '/');
-            if (slash && slash != self) {   /* skip "/hull": never unveil "/" */
-                *slash = '\0';
-                hl_tool_unveil_add(ctx, self, "rx");
-            }
-        }
-    }
+    if (have_self_dir)
+        hl_tool_unveil_add(ctx, self_dir, "rx");
 
     /* Side-loaded tool assets: $HOME/.hull/tools holds tool binaries (wamrc,
      * lld) that get executed AND the libc-musl-<arch> floor bundle
@@ -283,8 +328,22 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     int kfail = 0;
     int kernel = sb_supported();
     if (kernel) {
+        /* The first rule doubles as the probe a cosmo APE needs: it gates on
+         * IsLinux() alone, and on a Linux kernel without Landlock its
+         * unveil() fails ENOSYS - which made every tool command refuse to
+         * run. ENOSYS means nothing was applied: that host simply has no
+         * kernel tool sandbox, as a native build on it reports. */
+        if (unveil("/tmp", "rwcx") != 0) {
+            if (errno == ENOSYS) {
+                kernel = 0;
+            } else {
+                log_error("[sandbox] tool mode: unveil(/tmp, rwcx) failed");
+                kfail++;
+            }
+        }
+    }
+    if (kernel) {
         if (app_dir && dir_exists_p(app_dir)) kunveil(app_dir, "r", 0, &kfail);
-        kunveil("/tmp", "rwcx", 0, &kfail);
         kunveil("/usr", "rx", 1, &kfail);
 #if defined(__COSMOPOLITAN__) || defined(__linux__)
         kunveil("/bin", "rx", 1, &kfail);   /* APE shebang invokes /bin/sh */
@@ -314,10 +373,14 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
          * moving output_dir off "." quietly removed the CWD's kernel
          * grant on Linux, while Windows - which has no kernel sandbox -
          * looked fine. */
-        if (cwd_grantable()) kunveil(".", "rwc", 0, &kfail);
+        if (cwd_grantable(scaffold)) kunveil(".", "rwc", 0, &kfail);
         if (output_dir && dir_exists_p(output_dir))
             kunveil(output_dir, "rwc", 0, &kfail);
         if (platform_dir) kunveil(platform_dir, "rx", 1, &kfail);
+        /* hull's own directory: it was in the userspace list only, so with
+         * Landlock the #427 re-exec got EACCES and quietly fell back to
+         * in-process manifest extraction. */
+        if (have_self_dir) kunveil(self_dir, "rx", 1, &kfail);
         {
             char cache_path[PATH_MAX];
             if (hl_hull_cache_dir(cache_path, sizeof(cache_path)) == 0)

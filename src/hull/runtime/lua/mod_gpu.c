@@ -204,8 +204,11 @@ static int l_gpu_load(lua_State *L)
     if (entry && entry->data) {
         wgsl = (const char *)entry->data;
         wgsl_len = entry->len;
-    } else if (lua && lua->base.app_vfs && lua->base.app_vfs->root_dir) {
-        /* Try filesystem: <app_dir>/shaders/<name>.wgsl */
+    } else if (lua && lua->base.app_vfs && lua->base.app_vfs->root_dir &&
+               lua->base.app_vfs->count == 0) {
+        /* Try filesystem: <app_dir>/shaders/<name>.wgsl. Development only:
+         * a built binary (app files embedded) runs the shaders it was built
+         * with, not whatever lies under its working directory. */
         char path[4096];
         int pn = snprintf(path, sizeof(path), "%s/shaders/%s.wgsl",
                  lua->base.app_vfs->root_dir, name);
@@ -232,6 +235,14 @@ static int l_gpu_load(lua_State *L)
                 }
             }
             fclose(f);
+            /* --verify-sig: only a signed shader, as signed. */
+            if (wgsl && hl_vfs_disk_gate_check(vfs_name, wgsl, wgsl_len) != 0) {
+                free(file_buf);
+                lua_pushnil(L);
+                lua_pushfstring(L, "shader '%s' is not a signed file (--verify-sig)",
+                                name);
+                return 2;
+            }
         }
     }
 

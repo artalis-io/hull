@@ -2692,6 +2692,106 @@ UTEST(hl_cap_wasm, disabled_placeholder)
 /* Serialize log.c before any concurrent test (concurrent_load, pool_stress,
  * the snapshot-hold test) - vendored log.c is not thread-safe without it. */
 UTEST_STATE();
+/* ── Round 5: the compute loader's disk fallbacks (H2) ─────────────── */
+
+#include "hull/cap/crypto.h"
+#include "../test_tmpdir.h"
+#include <sys/stat.h>
+
+static int wr_file(const char *path, const void *d, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t w = fwrite(d, 1, n, f);
+    return (fclose(f) == 0 && w == n) ? 0 : -1;
+}
+
+static int mk_compute_app(char *dir, size_t n)
+{
+    if (!hl_test_mkdtemp(dir, n, "hull_wasm_disk")) return -1;
+    char p[600];
+    snprintf(p, sizeof p, "%s/compute", dir);
+    if (mkdir(p, 0755) != 0) return -1;
+    snprintf(p, sizeof p, "%s/compute/echo.wasm", dir);
+    return wr_file(p, echo_wasm, echo_wasm_len);
+}
+
+/* A built binary (app files embedded) runs the modules it was built with:
+ * it used to fall back to <cwd>/compute/<name>.aot.<arch> - native code
+ * outside the WASM sandbox and outside any signature - for a name it did
+ * not embed. */
+UTEST(hl_cap_wasm, built_binary_does_not_load_modules_from_disk)
+{
+    char dir[512];
+    ASSERT_EQ(mk_compute_app(dir, sizeof dir), 0);
+    static const HlEntry other[] = {
+        { "compute/echo64.wasm", echo64_wasm, echo64_wasm_len },
+        { 0, 0, 0 }
+    };
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, other, dir);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), HL_WASM_ERR_NOT_FOUND);
+    hl_cap_wasm_destroy(&cache);
+
+    /* In development (nothing embedded) the same file loads. */
+    static const HlEntry none[] = { { 0, 0, 0 } };
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    hl_vfs_init(&vfs, none, dir);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), 0);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Under --verify-sig (the disk gate armed) only a signed module, with its
+ * signed bytes, loads from disk; a planted AOT artifact is refused rather
+ * than run - or skipped in favour of the .wasm. */
+UTEST(hl_cap_wasm, verify_sig_refuses_unsigned_disk_modules)
+{
+    char dir[512];
+    ASSERT_EQ(mk_compute_app(dir, sizeof dir), 0);
+    static const HlEntry none[] = { { 0, 0, 0 } };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, none, dir);
+
+    const char *names[1] = { "compute/echo.wasm" };
+    uint8_t dg[1][32];
+    ASSERT_EQ(hl_cap_crypto_sha256(echo_wasm, echo_wasm_len, dg[0]), 0);
+    ASSERT_EQ(hl_vfs_disk_gate_arm(names, (const uint8_t (*)[32])dg, 1,
+                                   hl_cap_crypto_sha256), 0);
+
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), 0);   /* signed */
+    hl_cap_wasm_destroy(&cache);
+
+    /* A planted AOT artifact beside it. */
+    const char *archs[] = { "x86_64", "aarch64" };
+    for (int k = 0; k < 2; k++) {
+        char p[700];
+        snprintf(p, sizeof p, "%s/compute/echo.aot.%s", dir, archs[k]);
+        ASSERT_EQ(wr_file(p, "NOT-SIGNED-NATIVE", 17), 0);
+    }
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), HL_WASM_ERR_LOAD);
+    hl_cap_wasm_destroy(&cache);
+    for (int k = 0; k < 2; k++) {
+        char p[700];
+        snprintf(p, sizeof p, "%s/compute/echo.aot.%s", dir, archs[k]);
+        unlink(p);
+    }
+
+    /* A module whose bytes differ from the signed ones. */
+    char p[700];
+    snprintf(p, sizeof p, "%s/compute/echo.wasm", dir);
+    ASSERT_EQ(wr_file(p, echo64_wasm, echo64_wasm_len), 0);
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), HL_WASM_ERR_LOAD);
+    hl_cap_wasm_destroy(&cache);
+
+    hl_vfs_disk_gate_reset();
+}
+
 int main(int argc, const char *const argv[])
 {
     hl_log_make_threadsafe();

@@ -76,7 +76,6 @@ struct PollTimer {
     uint64_t       id;            /* monotonically assigned, never reused */
     HlAsyncTimerFn cb;
     void          *user;
-    int            cancelled;     /* set by timer_cancel; freed on next pop */
 };
 
 /* ── FD watcher ─────────────────────────────────────────────────────── */
@@ -254,8 +253,9 @@ static void poll_stop(HlAsyncBackendCtx *ctx)
 /*
  * Pointer-heap so timer ids are stable across heap moves: the
  * PollTimer lives at a fixed allocation, only the heap slot changes.
- * timer_cancel marks the entry without disturbing the heap; the
- * cancelled flag is checked when popping.
+ * timer_cancel removes the entry from the heap (swap-last, then sift
+ * down and up) and frees it; a timer popped for firing is no longer in
+ * the heap, so a cancel can never race the fire into a double free.
  *
  * The locking contract is "ctx->lock held by caller" for sift_* and
  * heap_push/pop; timer_add/cancel take it themselves and wake the
@@ -528,7 +528,7 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
         }
         PollTimer *t = heap_pop(ctx);
         pthread_mutex_unlock(&ctx->lock);
-        if (!t->cancelled && t->cb) t->cb(t->user);
+        if (t->cb) t->cb(t->user);
         free(t);
     }
 

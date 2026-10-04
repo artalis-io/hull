@@ -26,9 +26,49 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
      * services/api` from a monorepo root validated the ROOT app's manifest
      * and imports and passed a CI gate for the wrong app. */
     const char *app_dir = env->app_dir;
+    int positional = 0;
+    /* The options hull check forwards to verify that take a value, which
+     * is not the app directory (`hull check --developer-key k.pub api`). */
+    static const char *const value_flags[] = {
+        "--platform-key", "--developer-key", "--gethull-key", "--binary",
+        "--app-dir", NULL
+    };
+    char *verify_argv[16];
+    int vc = 0;
+    verify_argv[vc++] = (char *)(uintptr_t)"verify";
     for (int i = 1; i < argc; i++) {
-        if (argv[i][0] != '-') { app_dir = argv[i]; break; }
+        const char *a = argv[i];
+        if (a[0] != '-') {
+            if (positional) {
+                fprintf(stderr, "hull check: unexpected argument '%s' "
+                        "(one app directory)\n", a);
+                return 2;
+            }
+            app_dir = a;
+            positional = 1;
+            continue;
+        }
+        int takes = 0;
+        for (int k = 0; value_flags[k]; k++)
+            if (strcmp(a, value_flags[k]) == 0) { takes = 1; break; }
+        if (takes && i + 1 >= argc) {
+            fprintf(stderr, "hull check: %s needs a value\n", a);
+            return 2;
+        }
+        if (strcmp(a, "--app-dir") == 0) { i++; continue; }  /* env has it */
+        if (strcmp(a, "--verbose") == 0 || strcmp(a, "--json") == 0 ||
+            strncmp(a, "--app-dir=", 10) == 0)
+            continue;   /* global flags, read by the dispatcher */
+        /* The rest are verify's (--no-verify-platform, the keys). */
+        if (vc + (takes ? 2 : 1) >= (int)(sizeof verify_argv / sizeof verify_argv[0]) - 1) {
+            fprintf(stderr, "hull check: too many options\n");
+            return 2;
+        }
+        verify_argv[vc++] = argv[i];
+        if (takes) verify_argv[vc++] = argv[++i];
     }
+    verify_argv[vc++] = (char *)(uintptr_t)app_dir;   /* verify takes the LAST positional */
+    verify_argv[vc] = NULL;
 
     /* Step 1: load the app's manifest and print declared modules.
      * Surfaces top-level load errors (unparseable manifest, missing
@@ -60,7 +100,12 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
 
 #ifdef HL_ENABLE_HTTP_SERVER
     fprintf(stderr, "[hull:check] running tests...\n");
-    int rc = hl_cmd_test(argc, argv, env);
+    /* Explicit argv for each step, naming the app directory resolved above:
+     * hl_cmd_test takes argv[1] only, so forwarding the raw argv
+     * (`hull check --no-verify-platform services/api`) tested the ROOT
+     * app, and verify ignored --app-dir. */
+    const char *test_argv[3] = { "test", app_dir, NULL };
+    int rc = hl_cmd_test(2, (char **)(uintptr_t)test_argv, env);  /* does not modify argv */
     if (rc != 0) {
         fprintf(stderr, "[hull:check] tests failed\n");
         return rc;
@@ -71,7 +116,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
 #endif
 
     fprintf(stderr, "[hull:check] running verify...\n");
-    rc = hl_cmd_verify(argc, argv, env);
+    rc = hl_cmd_verify(vc, verify_argv, env);
     if (rc != 0) {
         fprintf(stderr, "[hull:check] verify failed\n");
         return rc;

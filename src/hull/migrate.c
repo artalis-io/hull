@@ -63,10 +63,16 @@ static int ensure_tracking_table(HlDbHandle *h)
     }
     /* A table made before the checksum column existed gets it (nullable;
      * such rows are backfilled from the SQL as it is now). */
-    if (hl_db_query(h, "SELECT checksum FROM _hull_migrations WHERE 1 = 0",
-                    NULL, 0, noop_row_cb, NULL, NULL) != 0 &&
+    static const char probe[] = "SELECT checksum FROM _hull_migrations WHERE 1 = 0";
+    if (hl_db_query(h, probe, NULL, 0, noop_row_cb, NULL, NULL) != 0 &&
         hl_db_exec(h, "ALTER TABLE _hull_migrations ADD COLUMN checksum VARCHAR(64)",
                    NULL, 0) < 0) {
+        /* Two processes on one database at their first start after an
+         * upgrade (a server and a jobs worker) both try the ALTER; the
+         * loser's fails with "duplicate column". The column exists either
+         * way - probe again before refusing to start. */
+        if (hl_db_query(h, probe, NULL, 0, noop_row_cb, NULL, NULL) == 0)
+            return 0;
         log_error("[hull:migrate] cannot add the checksum column: %s",
                   hl_db_errmsg(h));
         return -1;
@@ -413,6 +419,19 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
             sql[0] = '\0';
         }
         fclose(f);
+
+        /* --verify-sig: only a signed migration, as signed (the startup
+         * check hashed it; this is the copy that will run). */
+        char rel[4096];
+        int rn = snprintf(rel, sizeof(rel), "migrations/%s", ml->names[i]);
+        if (rn < 0 || (size_t)rn >= sizeof(rel) ||
+            hl_vfs_disk_gate_check(rel, sql, (size_t)flen) != 0) {
+            log_error("[hull:migrate] %s is not a signed file (--verify-sig)",
+                      ml->names[i]);
+            free(sql);
+            migration_list_free(ml);
+            return -1;
+        }
 
         ml->sqls[i] = sql;
     }

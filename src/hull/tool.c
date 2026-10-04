@@ -16,6 +16,7 @@
 #include "hull/cap/crypto.h"
 #include "hull/cap/tool.h"
 #include "hull/runtime/tool.h"
+#include "hull/runtime/cache_common.h"   /* the cache seal keys */
 #include "hull/sandbox.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
@@ -188,23 +189,23 @@ static const char *parse_app_dir(int argc, char **argv)
      * exist. It went unnoticed because the temp dir and the
      * invocation dir are unveiled separately, and apps normally live
      * under one of them. */
+    /* Options that take their value as the NEXT argument (a --flag=value
+     * form is one token and needs nothing). Their values are not the app
+     * directory: `hull verify --developer-key k.pub app` took "k.pub". */
+    static const char *const value_flags[] = {
+        "--compiler", "--sign", "--runtime", "--output", "-o", "--linker",
+        "--target", "--flavor", "--with", "--platform-sig",
+        "--platform-key", "--developer-key", "--gethull-key", "--binary", NULL
+    };
     for (int i = 1; i < argc; i++) {
         if (!argv[i]) continue;
         if (argv[i][0] != '-')
             return argv[i];
-        /* --flag=value: single token, no consumption */
-        if (strncmp(argv[i], "--compiler=", 11) == 0 ||
-            strncmp(argv[i], "--sign=", 7) == 0 ||
-            strncmp(argv[i], "--runtime=", 10) == 0 ||
-            strncmp(argv[i], "--output=", 9) == 0)
-            continue;
-        /* --flag value: skip value */
-        if (strcmp(argv[i], "--compiler") == 0 ||
-            strcmp(argv[i], "--sign") == 0 ||
-            strcmp(argv[i], "--runtime") == 0 ||
-            strcmp(argv[i], "--output") == 0 ||
-            strcmp(argv[i], "-o") == 0) {
-            i++; /* skip value */
+        for (int k = 0; value_flags[k]; k++) {
+            if (strcmp(argv[i], value_flags[k]) == 0) {
+                i++; /* skip value */
+                break;
+            }
         }
     }
     return ".";
@@ -242,7 +243,12 @@ static const char *parse_output_dir(int argc, char **argv, char *buf, size_t buf
     const char *slash = strrchr(out, '/');
     const char *bslash = strrchr(out, '\\');
     if (bslash > slash) slash = bslash;
-    if (!slash) return NULL;
+    if (!slash) {                          /* a bare name: the cwd */
+        if (bufsz < 2) return NULL;
+        buf[0] = '.';
+        buf[1] = '\0';
+        return buf;
+    }
 
     size_t len = (size_t)(slash - out);
     if (len == 0) len = 1;                 /* "/x" -> "/" */
@@ -298,9 +304,18 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
      * and hl_tool_unveil_add then silently drops adds.) */
     char out_buf[4096];
     const char *output_dir = parse_output_dir(argc, argv, out_buf, sizeof(out_buf));
+
+    /* Load the cache sealing keys now: they live in $HOME/.hull, which the
+     * tool sandbox does not grant, and were read lazily after it applied -
+     * so the tool VM's AOT cache was silently off under a kernel sandbox. */
+    hl_runtime_cache_seal_prepare();
+    hl_tool_cache_seal_prepare();
+
+    int scaffold = strcmp(module, "hull.new") == 0 ||
+                   strcmp(module, "hull.init") == 0;
     if (hl_tool_sandbox_init(&unveil_ctx, app_dir,
                              output_dir ? output_dir : app_dir,
-                             platform_dir) != 0) {
+                             platform_dir, scaffold) != 0) {
         fprintf(stderr, "hull: the tool sandbox could not be applied\n");
         return 1;
     }

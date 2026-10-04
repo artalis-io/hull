@@ -208,14 +208,17 @@ echo ""
 # sorted by their ENTRY name in C byte order - HlVfs's binary search needs it.
 LIST=$(mktemp "${TMPDIR:-/tmp}/hull_reg.XXXXXX") || exit 1
 trap 'rm -f "$LIST"' EXIT
-BAD=$(find "$APP_DIR" \( -name '*.lua' -o -name '*.js' \) -not -path '*/.*' |
+BAD=$(find "$APP_DIR" -type f \( -name '*.lua' -o -name '*.js' \) -not -path '*/.*' |
       grep '[^A-Za-z0-9_./-]')
 if [ -n "$BAD" ]; then
     echo "gen_registry.sh: unsupported character in file name(s):" >&2
     echo "$BAD" >&2
     exit 1
 fi
-find "$APP_DIR" \( -name '*.lua' -o -name '*.js' \) -not -path '*/.*' |
+# Regular files only (-type f matches no symlink): a repo's
+# x.lua -> ~/.ssh/id_rsa was embedded in the ejected binary, which `hull
+# build` (it skips symlinks) never did.
+find "$APP_DIR" -type f \( -name '*.lua' -o -name '*.js' \) -not -path '*/.*' |
 while IFS= read -r f; do
     rel=${f#"$APP_DIR"/}
     case "$rel" in

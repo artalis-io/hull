@@ -39,7 +39,12 @@ typedef struct HlAppContextOpts {
     const char   *entry_point;    /* NULL = auto-detect (app.lua / app.js) */
     const char   *db_path;        /* NULL = ":memory:" */
     int           no_migrate;     /* 1 = skip migrations */
-    int           sandbox;        /* 1 = sandboxed runtime (default) */
+    int           sandbox;        /* NOT READ by the context: the kernel
+                                   * sandbox is applied by the entry point
+                                   * (serve.c / serve_cli.c). Callers that
+                                   * do not apply one - hull test, agent
+                                   * introspection, MCP - run the app's
+                                   * top-level code without it. */
     HlAllocator  *alloc;          /* NULL = use raw malloc */
 
     /* Server-specific runtime wiring (all optional, NULL/0 = not used) */

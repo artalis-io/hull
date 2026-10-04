@@ -164,15 +164,22 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
  *
  *   ctx           - tool unveil context to populate
  *   app_dir       - application source directory (read)
- *   output_dir    - directory for output binary (write/create)
- *   platform_dir  - directory containing libhull_platform.a (read)
+ *   output_dir    - directory for output binary (write/create); refused
+ *                   (-1) when it is "/" or the user's home or above
+ *   platform_dir  - directory containing libhull_platform.a (read); dropped
+ *                   when it is that broad
+ *   scaffold      - 1 for `hull new` / `hull init`, which run no app code:
+ *                   a working directory of $HOME is then still writable
+ *                   (never "/"). Otherwise a cwd of $HOME (or above) is
+ *                   not granted.
  *
  * Returns 0 on success, -1 on error.
  */
 int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
                          const char *app_dir,
                          const char *output_dir,
-                         const char *platform_dir);
+                         const char *platform_dir,
+                         int scaffold);
 
 
 /*

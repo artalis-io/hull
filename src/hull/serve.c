@@ -332,6 +332,7 @@ typedef struct {
     int port;
     const char *bind_addr;
     const char *db_path;
+    int         db_path_is_default;   /* no -d: HL_DEFAULT_DB_PATH, resolved in phase 2 */
     const char *entry_point;
     const char *verify_sig_path;
     const char *tls_cert_path;
@@ -395,7 +396,8 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
     for (int i = 1; i < argc; i++) {
         /* --hull-<name> and the built-binary rule: include/hull/runtime_flags.h */
         int prefixed = hl_runtime_flag_unprefix(&argv[i]);
-        if (hl_runtime_flag_check(argv[i], prefixed, embedded_app_present()) != 0)
+        if (prefixed < 0 ||
+            hl_runtime_flag_check(argv[i], prefixed, embedded_app_present()) != 0)
             return -1;
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             char *end;
@@ -608,6 +610,8 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             }
             cfg->entry_point = argv[i];
         } else {
+            if (prefixed)
+                return hl_runtime_flag_unknown(argv[i]);
             if (embedded_app_present()) {
                 /* An option Hull does not take starts the app's arguments,
                  * as a bare word does: `./tool --help` reaches the tool. */
@@ -698,6 +702,7 @@ typedef struct {
     const char          *entry_point;  /* may alias entry_abs or argv string */
     char                 entry_abs[4096];
     char                 app_dir[4096];
+    char                 default_db[4096 + 16];   /* <app_dir>/data.db */
 
     /* Runtime type (detected from extension) */
     HlRuntimeType        runtime;
@@ -823,8 +828,10 @@ static int hl_serve_parse_args(HlServerState *s, int argc, char **argv)
      * open a SQLite file with no engine. An explicit -d still errors loudly if it
      * names an unavailable backend. */
     if (!s->cfg.no_db && !s->cfg.db_path
-        && hl_db_backend_select(HL_DEFAULT_DB_PATH, NULL))
-        s->cfg.db_path = HL_DEFAULT_DB_PATH;
+        && hl_db_backend_select(HL_DEFAULT_DB_PATH, NULL)) {
+        s->cfg.db_path = HL_DEFAULT_DB_PATH;   /* made <app_dir>/data.db in phase 2 */
+        s->cfg.db_path_is_default = 1;
+    }
 #endif
     return rc; /* 0 = ok, -1 = error, 1 = help shown */
 }
@@ -883,6 +890,19 @@ static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
                 s->app_dir[1] = '\0';
             }
         }
+    }
+
+    /* The default database is the app's <app_dir>/data.db - the one `hull
+     * migrate` and `hull agent db|migrate` open. It was "data.db" in the
+     * WORKING directory, so `hull myapp/app.lua` from a parent directory
+     * served a database `hull migrate myapp` never touched. (A built binary
+     * takes its app directory from its working directory: no change there.) */
+    if (s->cfg.db_path && strcmp(s->cfg.db_path, HL_DEFAULT_DB_PATH) == 0 &&
+        s->cfg.db_path_is_default) {
+        int n = snprintf(s->default_db, sizeof(s->default_db), "%s/%s",
+                         s->app_dir, HL_DEFAULT_DB_PATH);
+        if (n > 0 && (size_t)n < sizeof(s->default_db))
+            s->cfg.db_path = s->default_db;
     }
 
     return 0;
@@ -1216,7 +1236,25 @@ static int hl_serve_load_app(HlServerState *s)
             if (nd > 0 && (size_t)nd < sizeof(err_dir) &&
                 np > 0 && (size_t)np < sizeof(err_path)) {
                 mkdir(err_dir, 0755);
-                FILE *ef = fopen(err_path, "w");
+                /* The app tree may be a cloned repo: write only into a real
+                 * .hull directory of ours, and never through a planted
+                 * link (fopen "w" truncated whatever .hull/last_error.json
+                 * pointed at). */
+                struct stat dst;
+                FILE *ef = NULL;
+                if (lstat(err_dir, &dst) == 0 && S_ISDIR(dst.st_mode)
+#ifndef _WIN32
+                    && dst.st_uid == geteuid()
+#endif
+                   ) {
+                    (void)unlink(err_path);
+                    int efd = open(err_path, O_WRONLY | O_CREAT | O_EXCL |
+                                   O_NOFOLLOW | O_CLOEXEC, 0644);
+                    if (efd >= 0) {
+                        ef = fdopen(efd, "w");
+                        if (!ef) close(efd);
+                    }
+                }
                 if (ef) {
                     /* entry_point is app-config-derived (controlled
                      * today) but routing through sh_json removes the
@@ -1246,7 +1284,12 @@ static int hl_serve_load_app(HlServerState *s)
         char err_path[4096];
         int np = snprintf(err_path, sizeof(err_path),
                           "%s/.hull/last_error.json", s->app_dir);
-        if (np > 0 && (size_t)np < sizeof(err_path))
+        struct stat dst;
+        char err_dir[4096];
+        int nd = snprintf(err_dir, sizeof(err_dir), "%s/.hull", s->app_dir);
+        if (np > 0 && (size_t)np < sizeof(err_path) &&
+            nd > 0 && (size_t)nd < sizeof(err_dir) &&
+            lstat(err_dir, &dst) == 0 && S_ISDIR(dst.st_mode))
             unlink(err_path);
     }
 

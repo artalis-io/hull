@@ -284,7 +284,10 @@ local function gen_dockerfile(opts, info)
     add("# ── App build ───────────────────────────────────────────────────────")
     add("WORKDIR /src")
     add("COPY . .")
-    add("RUN hull build . --output /app")
+    -- The output stays inside the build tree: hull build's tool sandbox
+    -- grants the output's directory read-write, and for "/app" that was "/"
+    -- (it refuses that now).
+    add("RUN hull build . --output /src/app")
 
     if opts.sign then
         add("")
@@ -301,7 +304,10 @@ local function gen_dockerfile(opts, info)
     end
 
     add("")
-    add("COPY --from=build /app /app")
+    add("COPY --from=build /src/app /app")
+    -- A built binary takes its app directory from its working directory and
+    -- refuses "/" (that would unveil the whole filesystem).
+    add("WORKDIR /srv")
 
     -- CA bundle if app makes outbound HTTPS
     if #info.hosts > 0 then
@@ -326,7 +332,9 @@ local function gen_dockerfile(opts, info)
     add("")
     if info.has_database then
         add('ENTRYPOINT ["/app"]')
-        add('CMD ["-p", "' .. opts.port .. '", "-d", "/data/data.db"]')
+        -- -d grants the sandbox a path: a built binary takes it only as
+        -- --hull-d (include/hull/runtime_flags.h).
+        add('CMD ["-p", "' .. opts.port .. '", "--hull-d", "/data/data.db"]')
     else
         add('ENTRYPOINT ["/app"]')
         add('CMD ["-p", "' .. opts.port .. '"]')
@@ -373,7 +381,7 @@ local function gen_systemd_service(opts, info)
 
     local exec = opts.install_dir .. "/app -p " .. opts.port
     if info.has_database then
-        exec = exec .. " -d " .. opts.data_dir .. "/data.db"
+        exec = exec .. " --hull-d " .. opts.data_dir .. "/data.db"
     end
     add("ExecStart=" .. exec)
     add("WorkingDirectory=" .. opts.install_dir)

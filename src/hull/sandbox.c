@@ -57,8 +57,9 @@ _Static_assert(SANDBOX_PATH_MAX >= PATH_MAX,
  *   3. Pick what the kernel grant covers from the grant's shape: a
  *      glob's literal directory; a "dir/" grant (created if absent,
  *      never through a symlink, so a lazily made blob root
- *      canonicalizes); else the path itself, or its parent when it
- *      does not exist yet (a file to be created).
+ *      canonicalizes); for a file WRITE grant its parent directory
+ *      (always - see below); else the path itself, or its parent when
+ *      it does not exist yet. No component may be a symlink.
  *   4. realpath() the result into out_abs.
  *
  * Returns 0 on success (out_abs filled), -1 on rejection or
@@ -72,7 +73,8 @@ _Static_assert(SANDBOX_PATH_MAX >= PATH_MAX,
 static int sandbox_resolve_manifest_path(const char *app_dir,
                                           const char *relpath,
                                           char *out_abs,
-                                          size_t out_cap)
+                                          size_t out_cap,
+                                          int for_write)
 {
     if (!app_dir || !relpath || !out_abs) return -1;
     if (relpath[0] == '/' || relpath[0] == '\0') return -1;
@@ -146,11 +148,35 @@ static int sandbox_resolve_manifest_path(const char *app_dir,
             }
         }
     } else if (!is_glob) {
+        /* A file WRITE grant is always its parent directory, whether or not
+         * the file exists yet. It used to be the parent only while the file
+         * was absent: once it existed (every restart after the first write)
+         * the grant became the file alone, and on Landlock the cap layer's
+         * temp-beside-then-rename write lost MAKE_REG on the parent - and
+         * the in-place O_TRUNC fallback lacked TRUNCATE - so the grant
+         * stopped working. The capability layer keeps the exact rule. A
+         * read grant is the file itself when it exists. */
         struct stat st;
-        if (stat(buf, &st) != 0) {            /* absent file: its parent */
+        if (for_write || stat(buf, &st) != 0) {   /* the parent */
             char *sl = strrchr(buf, '/');
             if (!sl || (size_t)(sl - buf) < adir_len) return -1;
             *sl = '\0';
+        }
+    }
+
+    /* Never through a symlink, in any shape: a glob's or a file's directory
+     * that is a link (an in-tree "data -> /" with fs.read={"data/x.csv"})
+     * was unveiled - followed - as its target. Only "dir/" checked. */
+    size_t blen = strlen(buf);
+    for (size_t k = adir_len + 1; k <= blen; k++) {
+        if (buf[k] == '/' || buf[k] == '\0') {
+            char saved = buf[k];
+            buf[k] = '\0';
+            struct stat lst;
+            int is_link = lstat(buf, &lst) == 0 && S_ISLNK(lst.st_mode);
+            buf[k] = saved;
+            if (is_link) return -1;
+            if (saved == '\0') break;
         }
     }
 
@@ -475,7 +501,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
          * fs.read={"etc"} gave Seatbelt read access to /etc. */
         if (sandbox_resolve_manifest_path(app_dir, policy->fs_read[i],
                                            scratch->fs_read_real[i],
-                                           sizeof(scratch->fs_read_real[i])) != 0) {
+                                           sizeof(scratch->fs_read_real[i]), 0) != 0) {
             log_warn("[sandbox] fs.read path '%s' rejected (absolute "
                      "or contains '..') - skipping. Fix the manifest.",
                      policy->fs_read[i]);
@@ -503,7 +529,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
         const char *wpath = policy->fs_write[i];
         if (sandbox_resolve_manifest_path(app_dir, wpath,
                                            scratch->fs_write_real[i],
-                                           sizeof(scratch->fs_write_real[i])) != 0) {
+                                           sizeof(scratch->fs_write_real[i]), 1) != 0) {
             log_warn("[sandbox] fs.write path '%s' rejected (absolute "
                      "or contains '..') - skipping. Fix the manifest.",
                      wpath);
@@ -772,6 +798,21 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                       "(e.g. WorkingDirectory= / WORKDIR).");
             return -1;
         }
+        /* Nor the user's home, or a directory above it: a built binary
+         * started from ~ unveiled every file the user owns (~/.ssh among
+         * them), and its relative grants resolved from there. */
+        const char *home = getenv("HOME");
+        char hreal[SANDBOX_PATH_MAX];
+        if (home && *home && realpath(home, hreal)) {
+            size_t l = strlen(r);
+            if (strncmp(hreal, r, l) == 0 && (hreal[l] == '\0' || hreal[l] == '/')) {
+                log_error("[sandbox] the app directory is %s - your home directory "
+                          "or above it, which would grant every file in it. Run "
+                          "the app from its own directory (e.g. WorkingDirectory= "
+                          "/ WORKDIR).", r);
+                return -1;
+            }
+        }
     }
 
     /* ── W^X / no-runtime-dynamic-code fail-closed check ───────────
@@ -953,7 +994,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     for (int i = 0; i < policy->fs_read_count; i++) {
         char abs[SANDBOX_PATH_MAX];
         if (sandbox_resolve_manifest_path(app_dir, policy->fs_read[i],
-                                           abs, sizeof(abs)) != 0 ||
+                                           abs, sizeof(abs), 0) != 0 ||
             unveil(abs, "r") != 0) {
             log_warn("[sandbox] unveil failed for read path: %s",
                      policy->fs_read[i]);
@@ -963,7 +1004,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     for (int i = 0; i < policy->fs_write_count; i++) {
         char abs[SANDBOX_PATH_MAX];
         if (sandbox_resolve_manifest_path(app_dir, policy->fs_write[i],
-                                           abs, sizeof(abs)) != 0 ||
+                                           abs, sizeof(abs), 1) != 0 ||
             unveil(abs, "rwc") != 0) {
             log_warn("[sandbox] unveil failed for write path: %s",
                      policy->fs_write[i]);

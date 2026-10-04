@@ -7624,4 +7624,45 @@ UTEST(lua_audit5, tar_create_reports_shape_errors)
     cleanup_lua_caps();
 }
 
+/* Audit 5 M4: the compute-AOT cache a build embeds is sealed under the
+ * TOOL key, which no app runtime loads. With one shared key, an app
+ * compromised at native level held the key (every app process loads it)
+ * and could seal a forged AOT entry the next `hull build` embedded. */
+UTEST(cache_seal, tool_key_is_not_the_runtime_key)
+{
+    char tmp[256];
+    bc_with_tmp_home(tmp, sizeof tmp);
+    ASSERT_NE(tmp[0], '\0');
+    char root[512];
+    snprintf(root, sizeof root, "%s/store", tmp);
+    HlBlobStore *st = NULL;
+    ASSERT_EQ(0, hl_blob_store_open(&st, NULL, root, 1, 0));
+
+    static const char k1[] =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    static const char k2[] =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    static const uint8_t payload[] = "native-code";
+    uint8_t *out = NULL;
+    size_t n = 0;
+
+    /* Sealed with the RUNTIME key: refused (and dropped) under the tool key. */
+    hl_runtime_cache_put_sealed(st, "compute-aot", k1, payload, sizeof payload);
+    EXPECT_EQ(-1, hl_tool_cache_get_sealed(st, "compute-aot", k1, &out, &n));
+    EXPECT_TRUE(out == NULL);
+
+    /* Sealed with the TOOL key: round-trips there, refused as runtime. */
+    hl_tool_cache_put_sealed(st, "compute-aot", k2, payload, sizeof payload);
+    ASSERT_EQ(0, hl_tool_cache_get_sealed(st, "compute-aot", k2, &out, &n));
+    EXPECT_EQ(n, sizeof payload);
+    EXPECT_EQ(0, memcmp(out, payload, sizeof payload));
+    free(out);
+    out = NULL;
+    hl_tool_cache_put_sealed(st, "compute-aot", k2, payload, sizeof payload);
+    EXPECT_EQ(-1, hl_runtime_cache_get_sealed(st, "compute-aot", k2, &out, &n));
+
+    hl_blob_store_close(st);
+    bc_cleanup_tmp_home(tmp);
+}
+
 UTEST_MAIN();

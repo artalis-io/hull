@@ -190,7 +190,7 @@ launch_app() {
         # touching the source tree.
         _wd="$BUILD_OUT_DIR/$_name-work"
         rm -rf "$_wd" && mkdir -p "$_wd/data"
-        ( cd "$_wd" && exec "$BUILD_OUT_DIR/$_name" -p "$_port" -d "$_db" \
+        ( cd "$_wd" && exec "$BUILD_OUT_DIR/$_name" -p "$_port" --hull-d "$_db" \
             --hull-no-verify-platform ) >"$_log" 2>&1 &
     else
         "$HULL" -p "$_port" -d "$_db" "$_appfile" >"$_log" 2>&1 &

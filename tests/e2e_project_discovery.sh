@@ -551,6 +551,44 @@ else
     fi
 fi
 
+# ── hull dev --agent never writes through a planted link (audit 5 M7) ──
+# The app tree is a cloned repo: .hull/dev.json.tmp -> a file of the user's
+# was truncated and overwritten with the session JSON (fopen "w"), and a
+# committed `.hull -> <dir>` redirected the sidecar writes and unlinks.
+TRAP="$TMP/trapapp"
+mkdir -p "$TRAP/.hull"
+cat > "$TRAP/app.lua" <<'EOF'
+---@route GET /
+local function home() end
+return home
+EOF
+VICTIM="$TMP/victim.txt"
+printf 'precious\n' > "$VICTIM"
+if ln -s "$VICTIM" "$TRAP/.hull/dev.json.tmp" 2>/dev/null && [ -L "$TRAP/.hull/dev.json.tmp" ]; then
+    "$HULL" dev --agent -p 39813 "$TRAP/app.lua" >/dev/null 2>&1 &
+    TP=$!
+    i=0; while [ "$i" -lt 20 ] && [ ! -f "$TRAP/.hull/dev.json" ]; do sleep 0.5; i=$((i + 1)); done
+    kill "$TP" 2>/dev/null || true; wait "$TP" 2>/dev/null || true
+    [ "$(cat "$VICTIM")" = "precious" ] \
+        && pass "dev --agent: a planted .hull/dev.json.tmp link is not written through" \
+        || fail "dev --agent wrote through .hull/dev.json.tmp -> $VICTIM"
+
+    TRAP2="$TMP/trapapp2"
+    ELSEWHERE="$TMP/elsewhere"
+    mkdir -p "$TRAP2" "$ELSEWHERE"
+    cp "$TRAP/app.lua" "$TRAP2/app.lua"
+    ln -s "$ELSEWHERE" "$TRAP2/.hull"
+    "$HULL" dev --agent -p 39814 "$TRAP2/app.lua" >/dev/null 2>&1 &
+    TP=$!
+    sleep 3
+    kill "$TP" 2>/dev/null || true; wait "$TP" 2>/dev/null || true
+    [ ! -e "$ELSEWHERE/dev.json" ] \
+        && pass "dev --agent: a .hull that is a symlink is not written into" \
+        || fail "dev --agent wrote sidecars through a symlinked .hull"
+else
+    echo "  SKIP: dev --agent sidecar symlink cases (this shell cannot make symlinks)"
+fi
+
 echo ""
 echo "=== hull agent inspect E2E: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

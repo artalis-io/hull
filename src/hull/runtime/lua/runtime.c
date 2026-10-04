@@ -14,6 +14,7 @@
 
 #include "internal.h"
 
+#include "hull/vfs.h"
 #include "hull/utils/alloc.h"
 #include "hull/runtime/cache_common.h"   /* hl_runtime_cache_seal_prepare */
 #include "hull/http_feature.h"  /* hl_http_ws_registry_free (HTTP-feature seam) */
@@ -361,6 +362,57 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     return 0;
 }
 
+/* luaL_loadfilex's text path, from one read the signed-file gate checked:
+ * a UTF-8 BOM and a leading "#" line are skipped as there (the line's
+ * newline is kept, so line numbers match). Pushes the chunk or an error
+ * message; returns a LUA_* status. */
+static int lua_load_entry_checked(lua_State *L, const char *load_name,
+                                  const char *filename)
+{
+    FILE *f = fopen(load_name, "rb");
+    if (!f) {
+        lua_pushfstring(L, "cannot open %s", load_name);
+        return LUA_ERRFILE;
+    }
+    long size = -1;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        size = ftell(f);
+        if (fseek(f, 0, SEEK_SET) != 0) size = -1;
+    }
+    if (size < 0 || size > HL_MODULE_MAX_SIZE) {
+        fclose(f);
+        lua_pushfstring(L, "cannot read %s", load_name);
+        return LUA_ERRFILE;
+    }
+    char *buf = malloc((size_t)size + 1);
+    size_t n = buf ? fread(buf, 1, (size_t)size, f) : 0;
+    int bad = !buf || ferror(f) || n != (size_t)size;
+    fclose(f);
+    if (bad) {
+        free(buf);
+        lua_pushfstring(L, "cannot read %s", load_name);
+        return LUA_ERRFILE;
+    }
+    const char *base = strrchr(filename, '/');
+    base = base ? base + 1 : filename;
+    if (hl_vfs_disk_gate_check(base, buf, n) != 0) {
+        free(buf);
+        lua_pushfstring(L, "%s is not the signed file (--verify-sig)", filename);
+        return LUA_ERRFILE;
+    }
+    const char *p = buf;
+    size_t len = n;
+    if (len >= 3 && memcmp(p, "\xEF\xBB\xBF", 3) == 0) { p += 3; len -= 3; }
+    if (len > 0 && p[0] == '#') {
+        while (len > 0 && p[0] != '\n') { p++; len--; }
+    }
+    char chunk[4096 + 2];
+    snprintf(chunk, sizeof chunk, "@%s", load_name);
+    int rc = luaL_loadbufferx(L, p, len, chunk, "t");
+    free(buf);
+    return rc;
+}
+
 int hl_lua_load_app(HlLua *lua, const char *filename)
 {
     if (!lua || !lua->L || !filename)
@@ -438,7 +490,16 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
         }
         load_name = entry_path;
     }
-    if (luaL_loadfilex(lua->L, load_name, "t") != LUA_OK ||
+    int load_rc;
+    if (hl_vfs_disk_gate_armed()) {
+        /* --verify-sig: run the bytes that were signed - read once, checked,
+         * loaded from memory (the startup check hashed the file; a reload by
+         * name could see another one). */
+        load_rc = lua_load_entry_checked(lua->L, load_name, filename);
+    } else {
+        load_rc = luaL_loadfilex(lua->L, load_name, "t");
+    }
+    if (load_rc != LUA_OK ||
         lua_pcall(lua->L, 0, LUA_MULTRET, 0) != LUA_OK) {
         hl_lua_dump_error(lua);
         return -1;
