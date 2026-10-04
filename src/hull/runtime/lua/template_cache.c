@@ -163,6 +163,15 @@ int hl_lua_template_compile_cached(lua_State *L,
     int rc = fresh_compile(L, code, code_len, chunkname);
     if (rc != LUA_OK) return rc;     /* error string on stack */
 
+    /* lua_dump does not keep upvalue VALUES: a reloaded function gets the
+     * globals table as its first upvalue and nil for the rest. A render
+     * function with any upvalue besides _ENV would come back from the cache
+     * wired to the wrong values, so it is not cached. */
+    if (lua_getupvalue(L, -1, 2) != NULL) {
+        lua_pop(L, 1);
+        return LUA_OK;  /* keep render fn on stack; skip caching */
+    }
+
     /* lua_dump with strip=0 keeps source-name + line numbers so
      * template tracebacks point at the original `=template:<name>`
      * chunkname rather than "[?]". Templates rarely call into the

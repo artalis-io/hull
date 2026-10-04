@@ -5533,6 +5533,42 @@ UTEST(lua_template_cache, miss_then_hit_populates_disk)
     nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
 }
 
+/* A render function with an upvalue besides _ENV is not cached (audit 4):
+ * lua_dump drops upvalue values, so on a hit the outer chunk's local came
+ * back as the globals table ("attempt to call a table value"). */
+static const char *TC_UPVALUE_CODE =
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "local cat = table.concat\n"
+    "return function(data)\n"
+    "    return cat({ 'a', tostring(data and data.x or 0) })\n"
+    "end\n";
+
+UTEST(lua_template_cache, render_fn_with_upvalues_not_cached)
+{
+    char tmp[256];
+    tc_with_tmp_home(tmp, sizeof tmp);
+    lua_State *L = luaL_newstate();
+    ASSERT_NE_MSG((void *)L, NULL, "newstate");
+    luaL_openlibs(L);
+    for (int round = 0; round < 2; round++) {
+        int rc = hl_lua_template_compile_cached(L, TC_UPVALUE_CODE,
+                                                strlen(TC_UPVALUE_CODE),
+                                                "=tpl_upv");
+        ASSERT_EQ(LUA_OK, rc);
+        lua_newtable(L);
+        lua_pushinteger(L, 5);
+        lua_setfield(L, -2, "x");
+        ASSERT_EQ(LUA_OK, lua_pcall(L, 1, 1, 0));
+        ASSERT_STREQ("a5", lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+    ASSERT_EQ(0, tc_count(tmp));
+    lua_close(L);
+    nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
 UTEST(lua_template_cache, opt_out_via_env_skips_disk)
 {
     char tmp[256];

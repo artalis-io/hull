@@ -832,10 +832,15 @@ local function codegen(ast)
 
     -- The globals the generated code calls, captured under reserved "__"
     -- names: a loop variable named `type`, `pairs`, `tostring` or `table`
-    -- shadowed the global and broke the render.
-    lines[#lines + 1] = "local __ipairs, __pairs, __type, __tostring, __concat"
-                        .. " = ipairs, pairs, type, tostring, table.concat"
+    -- shadowed the global and broke the render. Captured INSIDE the render
+    -- function, not as locals of the outer chunk: the template cache stores
+    -- the render function with lua_dump, which does not keep upvalue values,
+    -- and a reloaded function gets the globals table as its first upvalue -
+    -- so outer-chunk captures broke every cache hit. _ENV must stay its only
+    -- upvalue.
     lines[#lines + 1] = "return function(__d, __e, __f)"
+    lines[#lines + 1] = "  local __ipairs, __pairs, __type, __tostring, __concat"
+                        .. " = ipairs, pairs, type, tostring, table.concat"
     lines[#lines + 1] = "  local __p = {}"
     gen_body(ast)
     lines[#lines + 1] = "  return __concat(__p)"
