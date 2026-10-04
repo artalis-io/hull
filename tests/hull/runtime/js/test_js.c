@@ -32,6 +32,7 @@
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db_registry.h"
 #include "hull/shared/async_backend.h"
+#include "hull/shared/req_life.h"
 #include <stdatomic.h>
 #include "hull/cap/env.h"
 #include "quickjs.h"
@@ -6810,5 +6811,345 @@ UTEST(js_audit4, buffer_probe_leaves_no_pending_exception)
     EXPECT_EQ(eval_int("globalThis.__a4_buf"), 1);
     cleanup_js_caps();
 }
+
+/* ── Audit 5: the JS runtime ──────────────────────────────────────────── */
+
+/* Evaluate a module under @p name; 0 when it ran, -1 when it threw or its
+ * evaluation promise rejected. *msg gets the error text (caller frees). */
+static int a5_module_named(const char *name, const char *code, char **msg)
+{
+    if (msg) *msg = NULL;
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), name, JS_EVAL_TYPE_MODULE);
+    JSValue err = JS_UNDEFINED;
+    int bad = 0;
+    if (JS_IsException(val)) {
+        bad = 1;
+        err = JS_GetException(js.ctx);
+    } else {
+        hl_js_run_jobs(&js);
+        /* Pending counts too: an interrupted run settles nothing. */
+        int st = JS_IsObject(val) ? (int)JS_PromiseState(js.ctx, val) : -1;
+        if (st == JS_PROMISE_REJECTED) {
+            bad = 1;
+            err = JS_PromiseResult(js.ctx, val);
+        } else if (st == JS_PROMISE_PENDING) {
+            bad = 1;
+        }
+    }
+    if (bad && msg) {
+        const char *m = JS_ToCString(js.ctx, err);
+        *msg = strdup(m ? m : "?");
+        if (m) JS_FreeCString(js.ctx, m);
+    }
+    JS_FreeValue(js.ctx, err);
+    JS_FreeValue(js.ctx, val);
+    return bad ? -1 : 0;
+}
+
+/* H1: a relative specifier normalized to a bare "hull:..." name, which
+ * QuickJS then found among the native modules - the stdlib's internal
+ * hull:_template / hull:db:_internal_conn - past the ':_' rule that only
+ * looked at a raw "hull:" specifier. */
+UTEST(js_audit5, relative_import_cannot_reach_internal_modules)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static const struct { const char *importer, *spec; } cases[] = {
+        { "./app.js",        "./hull:_template" },
+        { "routes/x.js",     "./../hull:db:_internal_conn" },
+        { "./app.js",        "./hull:kv:_native" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char code[256];
+        snprintf(code, sizeof code,
+                 "import * as m from '%s';\nglobalThis.__a5_h1 = 1;\n",
+                 cases[i].spec);
+        char *msg = NULL;
+        EXPECT_EQ(a5_module_named(cases[i].importer, code, &msg), -1);
+        EXPECT_TRUE(msg && strstr(msg, "invalid module path"));
+        free(msg);
+    }
+    /* Dynamic import resolves against the calling script the same way. */
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("./dyn.js",
+        "await import('./hull:_template');\n", &msg), -1);
+    EXPECT_TRUE(msg && strstr(msg, "invalid module path"));
+    free(msg);
+    EXPECT_EQ(eval_int("globalThis.__a5_h1 === undefined ? 1 : 0"), 1);
+    cleanup_js_caps();
+}
+
+/* An HlJS with a small budget (polls weigh 10000 each). */
+static int a5_limited(HlJS *lim, int64_t max)
+{
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    cfg.max_instructions = max;
+    memset(lim, 0, sizeof *lim);
+    return hl_js_init(lim, &cfg);
+}
+
+static int a5_eval_throws(HlJS *lim, const char *code)
+{
+    JSValue v = JS_Eval(lim->ctx, code, strlen(code), "<test>",
+                        JS_EVAL_TYPE_GLOBAL);
+    int threw = JS_IsException(v);
+    JS_FreeValue(lim->ctx, v);
+    JS_FreeValue(lim->ctx, JS_GetException(lim->ctx));
+    return threw;
+}
+
+/* H2: an async function body turns the interrupt into a rejection and its
+ * caller carried on - polled 10000 steps later, inside the next call of the
+ * same function, forever. Guard for QuickJS HULL PATCH 0003: without it
+ * this test never returns. */
+UTEST(js_audit5, async_bodies_do_not_escape_the_instruction_limit)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+    EXPECT_TRUE(a5_eval_throws(&lim,
+        "const burn = async () => { for (;;) {} };\n"
+        "for (;;) burn();\n"));
+    EXPECT_EQ(lim.budget_tripped, 1);
+
+    /* Sticky until the next entry re-arms it: then the VM works again. */
+    EXPECT_TRUE(a5_eval_throws(&lim, "1 + 1"));
+    hl_js_reset_request(&lim);
+    EXPECT_EQ(lim.budget_tripped, 0);
+    EXPECT_FALSE(a5_eval_throws(&lim, "1 + 1"));
+    hl_js_free(&lim);
+}
+
+/* H2 / L1: the same through promise jobs - a loop that catches the
+ * rejection of each interrupted call and starts another. The drain ends,
+ * the tripped run's jobs are discarded, and nothing is left pending. */
+UTEST(js_audit5, a_tripped_run_cannot_continue_through_promise_jobs)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+    /* Nothing trips while the script runs: the loop lives in the jobs. */
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "globalThis.after = 0;\n"
+        "(async () => {\n"
+        "  await null;\n"
+        "  for (;;) { try { await (async () => { for (;;) {} })(); } catch (e) {} }\n"
+        "})();\n"
+        "Promise.resolve().then(() => null).then(() => { globalThis.after = 1; });\n"));
+    hl_js_run_jobs(&lim);
+    EXPECT_EQ(lim.budget_tripped, 1);
+    EXPECT_FALSE(JS_IsJobPending(lim.rt));
+    hl_js_reset_request(&lim);
+    JSValue v = JS_Eval(lim.ctx, "globalThis.after", 16, "<t>", JS_EVAL_TYPE_GLOBAL);
+    int32_t after = -1;
+    JS_ToInt32(lim.ctx, &after, v);
+    JS_FreeValue(lim.ctx, v);
+    EXPECT_EQ(after, 0);   /* the discarded job never ran */
+    hl_js_free(&lim);
+}
+
+/* H2: a UDF that hits the limit made conn.query throw an ordinary, catchable
+ * SQL error - `for (;;) try { conn.query('SELECT spin()') } catch {}` held
+ * the event loop for good. The interrupt is re-raised, uncatchable. */
+UTEST(js_audit5, udf_interrupt_is_not_a_catchable_sql_error)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    js.max_instructions = 1000000;
+    hl_js_reset_request(&js);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { db as dbMod } from 'hull:db';\n"
+        "const c = dbMod.default();\n"
+        "c.udf.register('hull_a5_spin', () => { for (;;) {} });\n"
+        "let caught = 0;\n"
+        "for (let i = 0; i < 1000000; i++) {\n"
+        "  try { c.query('SELECT hull_a5_spin()'); }\n"
+        "  catch (e) { globalThis.__a5_caught = 1; caught++; }\n"
+        "}\n"
+        "globalThis.__a5_udf = caught;\n", &msg), -1);
+    free(msg);
+    EXPECT_EQ(js.budget_tripped, 1);
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int("globalThis.__a5_udf === undefined ? 1 : 0"), 1);
+    /* Not even the catch block ran: the query re-raised the interrupt. */
+    EXPECT_EQ(eval_int("globalThis.__a5_caught === undefined ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("(() => { const c = globalThis.db; "
+                       "c.udf.unregister('hull_a5_spin'); return 1; })()"), 1);
+    cleanup_js_caps();
+}
+
+/* Register `handler_src` as middleware and dispatch it. */
+static int a5_middleware(const char *handler_src, KlHttpRequest *req,
+                         KlHttpResponse *res)
+{
+    char code[1024];
+    snprintf(code, sizeof code,
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.use('*', '/*', %s);\n", handler_src);
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    int id = eval_int("globalThis.__hull_middleware["
+                      "globalThis.__hull_middleware.length - 1].handler_id");
+    return hl_js_dispatch_middleware(&js, id, req, res);
+}
+
+/* H3: an async middleware's Promise coerced to 0, "continue" - an auth
+ * middleware that awaited its check let every request through. */
+UTEST(js_audit5, async_middleware_fails_closed)
+{
+    static const char *const srcs[] = {
+        "async (req, res) => { res.status(401); return 1; }",
+        "(req, res) => ({ then(ok) { ok(1); } })",
+        "(req, res) => Promise.resolve(0)",
+    };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        KlHttpRequest req = {0};
+        KlHttpResponse res = {0};
+        EXPECT_EQ(a5_middleware(srcs[i], &req, &res), -1);
+        free_req_ctx(&req);
+        cleanup_js();
+    }
+}
+
+/* H3: a Hull async op in middleware suspended the connection Keel then ran
+ * the rest of the chain and the handler on. Refused, with a clear error. */
+UTEST(js_audit5, async_op_in_middleware_is_refused)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.base.async_ctx = actx;
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => {\n"
+        "  try { hull.sleep(5); globalThis.__a5_mw = 'slept'; }\n"
+        "  catch (e) { globalThis.__a5_mw = String(e.message); }\n"
+        "  return 0; }", &req, &res), 0);
+    char *m = eval_str("globalThis.__a5_mw");
+    EXPECT_TRUE(m && strstr(m, "cannot run in middleware"));
+    free(m);
+    EXPECT_EQ(js.in_middleware, 0);
+    free_req_ctx(&req);
+    cleanup_js();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
+/* M1: an async op cannot start while req.multipart() is parked for more
+ * body on the same request (each takes over the connection's state), and
+ * the gate is what the ops consult. */
+UTEST(js_audit5, async_op_is_refused_while_a_multipart_read_is_parked)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.base.async_ctx = actx;
+    HlReqLife *life = hl_req_life_new();
+    ASSERT_TRUE(life != NULL);
+    life->parked = 1;
+    int dummy_conn;
+    js.active_conn = (KlHttpConn *)(void *)&dummy_conn;
+    js.active_life = life;
+    char *m = eval_str("(() => { try { hull.sleep(5); return 'slept'; }"
+                       " catch (e) { return String(e.message); } })()");
+    js.active_conn = NULL;
+    js.active_life = NULL;
+    EXPECT_TRUE(m && strstr(m, "req.multipart()"));
+    free(m);
+    hl_req_life_end(life);
+    cleanup_js();
+    be->free(actx);
+}
+
+/* H2: a handler over its budget failed only if the trip reached it as an
+ * exception; one that tripped inside an un-awaited async call returned
+ * normally and its request was answered as a success. */
+UTEST(js_audit5, a_handler_over_budget_is_answered_500)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.max_instructions = 1000000;
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.get('/burn', (req, res) => { (async () => { for (;;) {} })(); });\n"
+        "app.get('/ok', (req, res) => { res.status(204); });\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    int last = eval_int("globalThis.__hull_routes.length - 1");
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    EXPECT_EQ(hl_js_dispatch(&js, last - 1, &req, &res), -1);
+    free_req_ctx(&req);
+    /* The next request runs on a fresh budget. */
+    KlHttpRequest req2 = {0};
+    KlHttpResponse res2 = {0};
+    EXPECT_EQ(hl_js_dispatch(&js, last, &req2, &res2), 0);
+    EXPECT_EQ(res2.status, 204);
+    free_req_ctx(&req2);
+    cleanup_js();
+}
+
+/* L2: methods returned JS_EXCEPTION with nothing thrown - the app saw
+ * `null` as the error. L4: req.header / req.headers resolved names through
+ * Object.prototype. L3: a query key was cut at an encoded NUL. */
+UTEST(js_audit5, request_and_response_binding_edges)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    static const char q[] = "admin%00x=1&b=2";
+    KlHttpRequest req = {0};
+    req.query = q;
+    req.query_len = sizeof q - 1;
+    KlHttpResponse res = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => {\n"
+        "  let s = '';\n"
+        "  try { res.status(); s += 'x'; } catch (e) { s += e instanceof TypeError ? 'T' : 'n'; }\n"
+        "  try { res.status.call({}, 200); s += 'x'; } catch (e) { s += e instanceof TypeError ? 'T' : 'n'; }\n"
+        "  s += req.header('constructor') === undefined ? 'U' : 'p';\n"
+        "  s += req.headers.toString === undefined ? 'U' : 'p';\n"
+        "  s += req.query.admin === undefined ? 'U' : 'p';\n"
+        "  s += Object.keys(req.query).includes('admin\\u0000x') ? 'K' : 'k';\n"
+        "  globalThis.__a5_edges = s;\n"
+        "  return 0; }", &req, &res), 0);
+    char *s = eval_str("globalThis.__a5_edges");
+    EXPECT_STREQ(s ? s : "(null)", "TTUUUK");
+    free(s);
+    free_req_ctx(&req);
+    cleanup_js();
+}
+
+/* M4 + H2 in the worker VM: an async dispatch function's result is its
+ * settled value (it came back as {}), a runaway async body is stopped (its
+ * interrupt was a rejection, and the dispatch "succeeded"), and jobs a
+ * dispatch leaves behind are discarded instead of holding its context -
+ * 40 x 1 MiB against a 16 MiB heap ran the pool thread out of memory. */
+JS_WORKER_CASE(an_async_dispatch_settles_and_leaves_nothing_behind,
+    (js.max_instructions = 1000000, js.max_heap_bytes = 16u << 20),
+    "  const r = await worker.dispatch(async () => { await null; return 7; });\n"
+    "  check(r === 7, 'async result ' + JSON.stringify(r));\n"
+    "  const m = await fails(async () => { await null; for (;;) {} });\n"
+    "  check(m.includes('interrupted'), m);\n"
+    "  for (let i = 0; i < 40; i++) {\n"
+    "    const v = await worker.dispatch(() => {\n"
+    "      const big = 'x'.repeat(1 << 20);\n"
+    "      Promise.resolve().then(() => big.length);\n"
+    "      return 1; });\n"
+    "    check(v === 1, 'dispatch ' + i + ': ' + JSON.stringify(v));\n"
+    "  }\n")
 
 UTEST_MAIN();

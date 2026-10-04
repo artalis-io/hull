@@ -5,6 +5,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/smtp.h"
 #include "hull/cap/smtp_op.h"
 #include "hull/cap/smtp_async.h"
@@ -221,6 +222,10 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     /* Active loop: model 2 (regardless of cap). Validate (CR/LF in a header
      * field, missing fields) and authorize the host on the submit side (audited
      * once here) before any reservation or worker submission. */
+    if (hl_js_async_gate(ctx, js, "smtp.send") != 0) {
+        result = JS_EXCEPTION;
+        goto cleanup;
+    }
     if (hl_smtp_validate_message(&msg) != 0) {
         result = js_resolved_result(ctx, 0, "validation_failed");
         goto cleanup;

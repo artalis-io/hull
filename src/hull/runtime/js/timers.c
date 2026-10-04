@@ -28,11 +28,6 @@
 #include <string.h>
 #include <time.h>
 
-/* From async.c */
-extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
-                                                   JSContext *ctx,
-                                                   JSValue promise);
-
 int64_t hl_js_compute_daily_delay_ms(int hour, int minute, int use_local)
 {
     time_t now = time(NULL);
@@ -119,7 +114,7 @@ void hl_js_timer_trampoline(void *user_data)
     js->active_timer = t;
 
     /* Reset instruction counter */
-    js->instruction_count = 0;
+    hl_js_budget_arm(js);
 
     /* Look up handler */
     JSValue global = JS_GetGlobalObject(ctx);
@@ -171,17 +166,19 @@ void hl_js_timer_trampoline(void *user_data)
         if (js->last_async_cont) {
             /* Async handler - wire handler_promise on the continuation; it
              * clears in_flight and reschedules when the handler completes. */
-            hl_js_async_cont_set_handler_promise(
-                (HlAsyncCont *)js->last_async_cont, ctx, ret);
-            js->last_async_cont = NULL;
+            hl_js_run_drop(js, hl_js_run_attach(js, ret));
             JS_FreeValue(ctx, ret);
             js->active_timer = NULL;
             return;
         }
         /* Waiting on something Hull does not drive: nothing will ever clear
-         * in_flight, and the timer used to stop firing for good, silently. */
-        log_warn("[hull:timer] handler awaits a promise Hull does not drive; "
-                 "the timer is rescheduled without waiting for it");
+         * in_flight, and the timer used to stop firing for good, silently.
+         * (Or over its budget: a tripped run's promise never settles.) */
+        if (js->budget_tripped)
+            log_error("[hull:timer] handler exceeded the instruction limit");
+        else
+            log_warn("[hull:timer] handler awaits a promise Hull does not "
+                     "drive; the timer is rescheduled without waiting for it");
         JS_FreeValue(ctx, ret);
         t->in_flight = 0;
         js->active_timer = NULL;
@@ -198,8 +195,9 @@ void hl_js_timer_trampoline(void *user_data)
         JS_FreeValue(ctx, result);
     } else if (state == JS_PROMISE_REJECTED) {
         JSValue result = JS_PromiseResult(ctx, ret);
-        const char *msg = JS_ToCString(ctx, result);
-        log_error("[hull:timer] %s", msg ? msg : "unknown error");
+        const char *msg = js->budget_tripped ? NULL : JS_ToCString(ctx, result);
+        log_error("[hull:timer] %s", msg ? msg : js->budget_tripped
+                  ? "instruction limit exceeded" : "unknown error");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, result);
     } else {

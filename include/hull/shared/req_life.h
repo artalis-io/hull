@@ -26,6 +26,13 @@
 typedef struct HlReqLife {
     int live;   /* 1 until hl_req_life_end */
     int refs;   /* the request's own ref + one per object holding it */
+    /* What currently holds the request's connection (the JS runtime keeps
+     * these; 0 elsewhere). An async op in attached mode suspends the
+     * connection until it completes - counted until its resume is over; a
+     * multipart read parked for more body sets it reading. The two cannot
+     * share a connection: each overwrites the state the other relies on. */
+    int attached;
+    int parked;
 } HlReqLife;
 
 /* A new live record, holding the request's reference. NULL on OOM. */
@@ -35,6 +42,8 @@ static inline HlReqLife *hl_req_life_new(void)
     if (!l) return NULL;
     l->live = 1;
     l->refs = 1;
+    l->attached = 0;
+    l->parked = 0;
     return l;
 }
 

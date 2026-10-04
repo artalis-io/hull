@@ -96,6 +96,17 @@ local mw = mod.middleware(opts)   -- factory returns a middleware function
 --   1 = short-circuit (response already sent)
 ```
 
+Middleware is **synchronous**. Keel runs the next middleware and the handler on
+the connection as soon as it returns, so in JS:
+
+- an `async` middleware, or any middleware returning a Promise / thenable, is an
+  error: the request is answered 500 (its Promise used to coerce to `0`,
+  "continue" - an awaited auth check let every request through);
+- a Hull async op called from middleware (`hull.sleep`, `db.async.*`,
+  `http.fetch`, `compute.async`, `gpu.async`, `worker.dispatch`, `smtp.send`)
+  throws a `TypeError`, and a `req.multipart()` read that must wait for more
+  body fails - do async work in the route handler.
+
 Register with `app.use(method, pattern, mw)`:
 - `"*"` method = match any method
 - `"/*"` pattern = prefix match all paths
@@ -875,6 +886,7 @@ app.post("/upload", async (req, res) => {
 
 **Known limitations:**
 - Live connection required - in-process `hull test` dispatch raises on first `NEED_DATA`. End-to-end coverage is in `tests/e2e_multipart.sh` (run via `make e2e-multipart`).
+- (JS) A multipart read that must wait for more body and an attached async op (`hull.sleep`, `db.async`, `http.fetch`, ...) cannot share the request's connection: each takes over its state (the op suspends it, the park sets it reading). So an op started while a read is parked throws a `TypeError` (`Promise.all([it.next(), hull.sleep(10)])`), and so does a read that needs more body after the handler awaited such an op (`for await (const p of req.multipart()) { await db.async.exec(...) }` once the parser needs the next socket read). Both used to corrupt the connection: a partial response went out mid-upload, or the upload stalled until the body timeout. Read the body first, then await the ops (Keel's async completion re-arms no read for a resumed handler that waits for more body - a Keel follow-up).
 - `Part` is invalidated after the next iter step (parser is forward-only - don't stash parts past their iteration).
 - `chunks(n)` accepts a min-bytes hint that's currently advisory (each parser event = one chunk; coalescing is a follow-up).
 - Mid-stream connection close leaks the parked continuation - production deployments should run behind a reverse proxy with request timeouts.

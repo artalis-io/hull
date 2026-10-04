@@ -173,6 +173,10 @@ void hl_js_request_register(JSContext *ctx);
 typedef struct {
     int refs;
     int done;
+    /* The run went over its instruction budget. Its handler promise will
+     * never settle (a tripped run settles nothing), so the continuation that
+     * resumes next completes the run as failed instead of waiting. */
+    int tripped;
 } HlJsRunOnce;
 
 typedef struct HlJsRunLink {
@@ -202,6 +206,43 @@ int  hl_js_run_claim(HlJsRunLink *link);
 void hl_js_run_unlink(HlJsRunLink *link, JSContext *ctx);
 /* Chain a new continuation behind js->last_async_cont and make it the last. */
 void hl_js_run_push(HlJS *js, HlAsyncCont *cont);
+/* An entry point's handler returned pending with continuations made: give
+ * them @p promise (js->last_async_cont and the run chain behind it), mark the
+ * run tripped if the handler went over its budget, and clear
+ * last_async_cont. Returns the run record with a reference held (release
+ * with hl_js_run_drop), or NULL - for a caller that drains more of the run
+ * afterwards and must mark a trip that happens there. */
+HlJsRunOnce *hl_js_run_attach(HlJS *js, JSValue promise);
+/* Drop a reference hl_js_run_attach returned, marking the run tripped first
+ * when the runtime's budget is now tripped. */
+void hl_js_run_drop(HlJS *js, HlJsRunOnce *run);
+
+/* ── Instruction budget (runtime.c) ─────────────────────────────────── */
+
+/* (hl_js_budget_arm, which re-arms it at each entry point, is in js.h.) */
+/* Throw the instruction-limit interrupt as an uncatchable error: for a C
+ * binding whose callback (a SQL UDF, a compute.stream sink) was interrupted
+ * and would otherwise report it as an ordinary, catchable error. */
+JSValue hl_js_budget_throw(JSContext *ctx);
+
+/* ── Async-op gate (async.c) ────────────────────────────────────────── */
+
+/* Every Hull async op (hull.sleep, db.async, compute.async, gpu.async,
+ * worker.dispatch, http.fetch, smtp.send, ...) calls this before it makes its
+ * continuation. Refuses - throwing, returns -1 - when the op could not be
+ * driven safely: inside middleware (synchronous: an attached op would suspend
+ * the connection the rest of the chain still runs on), or while
+ * req.multipart() is parked for more body on this request (the op's suspend
+ * and the park each take over the connection's state). @p what names the op
+ * in the error. */
+int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what);
+
+/* Suspend js->active_conn for an attached op - hl_net_op_suspend, after the
+ * gate's checks once more: the binding's argument conversions, between the
+ * gate and here, can run app code (a getter) that parked a multipart read.
+ * Returns -1 (nothing suspended) when it may not. */
+struct HlSuspendOp;
+int hl_js_op_suspend(HlJS *js, struct HlSuspendOp *op);
 
 /* QuickJS calls the interrupt handler once per JS_INTERRUPT_COUNTER_INIT
  * (10000, quickjs.c) countdown steps - calls and backward jumps - not once

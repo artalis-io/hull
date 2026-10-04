@@ -44,7 +44,7 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
 
     /* Reset scratch + instruction counter */
     sh_arena_reset(js->scratch);
-    js->instruction_count = 0;
+    hl_js_budget_arm(js);
 
     /* Set per-request async context */
     js->active_conn = kl_http_request_conn(req);
@@ -128,11 +128,7 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         }
         if (state == JS_PROMISE_PENDING && js->last_async_cont) {
             /* Async SSE handler - wire handler_promise on continuation */
-            extern void hl_js_async_cont_set_handler_promise(
-                HlAsyncCont *cont, JSContext *c, JSValue promise);
-            hl_js_async_cont_set_handler_promise(
-                (HlAsyncCont *)js->last_async_cont, ctx, ret);
-            js->last_async_cont = NULL;
+            hl_js_run_drop(js, hl_js_run_attach(js, ret));
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, js_req);
             JS_FreeValue(ctx, stream_obj);
@@ -148,13 +144,15 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
             hl_js_sse_stream_force_close(ctx, stream_obj);
     }
 
-    /* The handler is done with its request (the stream was ended above). */
+    /* The handler is done with its request (the stream was ended above), so
+     * its leftover microtasks run with no request active: an op they start
+     * must not suspend this connection. */
     hl_req_life_end(life);
+    js->active_conn = NULL;
+    js->active_req = NULL;
     hl_js_run_jobs(js);
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, js_req);
     JS_FreeValue(ctx, stream_obj);
-    js->active_conn = NULL;
-    js->active_req = NULL;
     js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
 }

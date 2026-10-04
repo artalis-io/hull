@@ -55,16 +55,45 @@ extern void hl_js_add_hull_global(JSContext *ctx);
 
 /* ── Interrupt handler (gas metering) ───────────────────────────────── */
 
+/* Sticky: once the run is over its budget every poll interrupts again, until
+ * the next entry point re-arms it. With QuickJS HULL PATCH 0003 (the next
+ * step polls at once after an interrupt) a tripped run cannot get further
+ * than a straight line of code - not by catching the error in an async
+ * function or a promise job (which turn it into a rejection), nor by a C
+ * binding that reported it as an ordinary error. */
 static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
 {
     (void)rt;
     HlJS *js = (HlJS *)opaque;
+    if (js->budget_tripped)
+        return 1;
     js->instruction_count += HL_JS_INTERRUPT_WEIGHT;
     if (js->max_instructions > 0 &&
         js->instruction_count > js->max_instructions) {
+        js->budget_tripped = 1;
         return 1; /* interrupt - JS_Eval returns exception */
     }
     return 0;
+}
+
+void hl_js_budget_arm(HlJS *js)
+{
+    if (!js) return;
+    /* A tripped run can leave its interrupt pending on the context (a
+     * resolve call that failed at its first poll): never hand it to the
+     * next, unrelated run as if a binding had just thrown it. */
+    if (js->budget_tripped && js->ctx)
+        JS_FreeValue(js->ctx, JS_GetException(js->ctx));
+    js->instruction_count = 0;
+    js->budget_tripped = 0;
+}
+
+JSValue hl_js_budget_throw(JSContext *ctx)
+{
+    JS_ThrowInternalError(ctx, "interrupted (instruction limit exceeded)");
+    JSValue exc = JS_GetException(ctx);
+    JS_SetUncatchableError(ctx, exc, 1);
+    return JS_Throw(ctx, exc);
 }
 
 /* ── Module loader ──────────────────────────────────────────────────── */
@@ -160,10 +189,26 @@ static char *hl_js_module_normalize(JSContext *ctx,
                 return NULL;
             }
 
+            /* Normalizing drops `.` segments and the leading "./", so a
+             * relative name can collapse to a bare "hull:..." -
+             * "./hull:db:_internal_conn" from "./app.js" - which QuickJS
+             * then finds among the native modules, and the loader serves
+             * from the stdlib, under exactly that name: the ':_' rule above
+             * (checked on the raw specifier) never saw it. A path is never
+             * a hull: module; the stdlib is reached by its hull: name. */
+            if (strncmp(resolved, "hull:", 5) == 0) {
+                js_free(ctx, resolved);
+                JS_ThrowReferenceError(ctx,
+                    "invalid module path: %s (import a Hull module by its "
+                    "hull: name)", name);
+                return NULL;
+            }
             return resolved;
         }
     }
 
+    /* A bare name is used as given; one spelled "hull:" took the branch
+     * above, so this one cannot name a stdlib module. */
     return js_strdup(ctx, name);
 }
 
@@ -1146,13 +1191,42 @@ int hl_js_run_jobs(HlJS *js)
     if (!js || !js->ctx)
         return 0;
 
+    /* A job that fails does not stop the drain: stopping left the rest of
+     * the queue for the next, unrelated drain (another request's dispatch,
+     * with that request's conn and life active) and its exception pending
+     * on the context, where a binding that returns JS_EXCEPTION without
+     * throwing surfaced it as its own. The error is taken and logged.
+     *
+     * Once the run is over its instruction budget the drain still empties
+     * the queue, which discards it: every job fails at its first call
+     * (HULL PATCH 0003), so it neither runs app code nor settles anything
+     * that would queue more. */
     int count = 0;
+    int failed = 0;
     JSContext *ctx1;
     for (;;) {
         int ret = JS_ExecutePendingJob(js->rt, &ctx1);
-        if (ret <= 0)
+        if (ret == 0)
             break;
-        count++;
+        if (ret > 0) {
+            count++;
+            continue;
+        }
+        JSContext *ectx = ctx1 ? ctx1 : js->ctx;
+        JSValue exc = JS_GetException(ectx);
+        if (!js->budget_tripped) {
+            const char *msg = JS_ToCString(ectx, exc);
+            log_error("[hull:js] a promise job failed: %s",
+                      msg ? msg : "(unknown)");
+            if (msg) JS_FreeCString(ectx, msg);
+            /* ToCString can run app code (a toString) that throws. */
+            JS_FreeValue(ectx, JS_GetException(ectx));
+        } else if (!failed) {
+            log_error("[hull:js] instruction limit exceeded; the run's "
+                      "pending promise jobs are discarded");
+        }
+        failed = 1;
+        JS_FreeValue(ectx, exc);
     }
     return count;
 }
@@ -1167,7 +1241,7 @@ void hl_js_reset_request(HlJS *js)
 {
     if (!js)
         return;
-    js->instruction_count = 0;
+    hl_js_budget_arm(js);
     if (js->scratch)
         sh_arena_reset(js->scratch);
 }
@@ -1901,10 +1975,20 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         JS_SetPropertyStr(ctx, ctxobj, streams[i].prop, s);
     }
 
-    /* Call main(ctx). */
+    /* Call main(ctx): an entry point like any other - its own budget, no
+     * request active, and no continuation from earlier to chain to. Each
+     * later resume of main's awaits re-arms the budget (async.c), so a
+     * long-lived CLI is limited per uninterrupted stretch, not in total. */
+    js->active_conn = NULL;
+    js->active_req = NULL;
+    js->active_timer = NULL;
+    js->active_life = NULL;
+    js->last_async_cont = NULL;
+    hl_js_budget_arm(js);
     JSValue call_argv[1] = { ctxobj };
     JSValue ret = JS_Call(ctx, main_fn, JS_UNDEFINED, 1, call_argv);
     JS_FreeValue(ctx, ctxobj);
+    js->last_async_cont = NULL;   /* main's ops are not wired to a promise */
 
     if (JS_IsException(ret)) {
         hl_js_dump_error(js);
@@ -1916,12 +2000,23 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
 
     /* Drain microtasks - resolves any synchronously-resolvable Promise. */
     hl_js_run_jobs(js);
+    js->last_async_cont = NULL;
 
     /* Branch on whether main returned a Promise. */
     JSValue value = ret;
     int owned_value = 0;
     int rejected = 0;
     JSPromiseStateEnum st = JS_PromiseState(ctx, ret);
+
+    if (js->budget_tripped) {
+        /* Over the limit before main settled: its promise never will (a
+         * tripped run settles nothing), so do not wait on it. */
+        fprintf(stderr, "[hull:main] instruction limit exceeded\n");
+        JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, main_fn);
+        JS_FreeValue(ctx, global);
+        return -1;
+    }
 
     if (st == JS_PROMISE_PENDING) {
         /* Async main - attach C-side .then/.catch callbacks that stash
@@ -1955,6 +2050,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         JS_FreeValue(ctx, chained);
 
         hl_js_run_jobs(js);  /* in case both already settled via microtasks */
+        js->last_async_cont = NULL;
 
         if (js->cli_main_active) {
             /* Drive the event loop via the async backend. On HTTP=1

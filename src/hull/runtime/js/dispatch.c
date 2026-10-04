@@ -30,14 +30,6 @@
 JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife *life);
 JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res);
 JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res, HlReqLife *life);
-extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
-                                                 JSContext *ctx,
-                                                 JSValue promise);
-
-/* From async.c */
-extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
-                                                   JSContext *ctx,
-                                                   JSValue promise);
 
 /* ── Request dispatch ───────────────────────────────────────────────── */
 
@@ -105,6 +97,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
 
     int result = 0;
     int attached = 0;   /* a continuation holds the handler promise */
+    HlJsRunOnce *run = NULL;   /* its run record (ref held), for the drain below */
     if (JS_IsException(ret)) {
         hl_js_dump_error(js);
         result = -1;
@@ -114,16 +107,19 @@ int hl_js_dispatch(HlJS *js, int handler_id,
          * the continuation (per-connection, not global) so the resume
          * callback can check when the handler completes. With no
          * continuation yet (a microtask-only await), see after the job
-         * run below. */
+         * run below. A handler already over its budget is marked so: its
+         * promise never settles, and the first resume answers 500. */
         if (js->last_async_cont) {
-            hl_js_async_cont_set_handler_promise(
-                (HlAsyncCont *)js->last_async_cont,
-                js->ctx, ret);
-            js->last_async_cont = NULL;
+            run = hl_js_run_attach(js, ret);
             attached = 1;
         }
         js->async_pending = 1;
         result = 1; /* signal: handler suspended */
+    } else if (js->budget_tripped) {
+        /* Returned (or rejected) after a trip - e.g. an un-awaited async
+         * call that hit the limit: the run still failed. */
+        log_error("[hull:c] handler exceeded the instruction limit");
+        result = -1;
     } else if (JS_PromiseState(js->ctx, ret) == JS_PROMISE_REJECTED) {
         /* Async handler threw before its first await - the Promise is
          * immediately rejected (not an exception).  Log and return -1
@@ -149,12 +145,13 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         hl_js_run_jobs(js);
         js->active_life = NULL;
         if (js->last_async_cont) {
-            hl_js_async_cont_set_handler_promise(
-                (HlAsyncCont *)js->last_async_cont, js->ctx, ret);
-            js->last_async_cont = NULL;
+            run = hl_js_run_attach(js, ret);
         } else {
             int st = JS_PromiseState(js->ctx, ret);
-            if (st == JS_PROMISE_PENDING) {
+            if (js->budget_tripped) {
+                log_error("[hull:c] handler exceeded the instruction limit");
+                result = -1;
+            } else if (st == JS_PROMISE_PENDING) {
                 log_warn("[hull:c] handler awaits a promise Hull does not "
                          "drive; the request ends now and its res is closed");
                 result = 0;
@@ -208,8 +205,12 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     js->active_conn = NULL;
     js->active_req  = NULL;
 
-    /* Run any pending microtasks */
+    /* Run any pending microtasks. A suspended handler's own may be among
+     * them (`const p = hull.sleep(5); await null; for (;;) {}`): a trip in
+     * this drain marks its run, so the sleep's resume answers 500 instead of
+     * waiting forever on a promise that will never settle. */
     hl_js_run_jobs(js);
+    hl_js_run_drop(js, run);
 
     /* Whatever an un-awaited op made in that drain belongs to no run. */
     js->last_async_cont = NULL;
@@ -228,6 +229,24 @@ void hl_js_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data
 }
 
 /* ── Middleware dispatch ────────────────────────────────────────────── */
+
+/* A Promise - or any thenable - returned from middleware: an async
+ * middleware. Reading `then` can throw; that fails closed too. */
+static int hl_js_middleware_is_async(JSContext *ctx, JSValueConst v)
+{
+    if (!JS_IsObject(v))
+        return 0;
+    if ((int)JS_PromiseState(ctx, v) >= 0)
+        return 1;
+    JSValue then = JS_GetPropertyStr(ctx, v, "then");
+    if (JS_IsException(then)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return 1;
+    }
+    int is = JS_IsFunction(ctx, then);
+    JS_FreeValue(ctx, then);
+    return is;
+}
 
 int hl_js_dispatch_middleware(HlJS *js, int handler_id,
                               KlHttpRequest *req, KlHttpResponse *res)
@@ -280,8 +299,13 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     JSValue js_req = hl_js_make_request(js->ctx, req, life);
     JSValue js_res = hl_js_make_response_life(js, res, life);
 
-    /* Call handler(req, res) - capture return value */
+    /* Call handler(req, res) - capture return value. Middleware is
+     * synchronous: Keel runs the next middleware and the handler on this
+     * connection as soon as it returns, so an async op started now - which
+     * suspends the connection - refuses (js->in_middleware, the async gate),
+     * including from the microtasks drained below. */
     JSValue argv[2] = { js_req, js_res };
+    js->in_middleware = 1;
     JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
     hl_req_life_end(life);
 
@@ -289,11 +313,24 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     if (JS_IsException(ret)) {
         hl_js_dump_error(js);
         result = -1;
+    } else if (js->budget_tripped) {
+        log_error("[hull:c] middleware exceeded the instruction limit");
+        result = -1;
+    } else if (hl_js_middleware_is_async(js->ctx, ret)) {
+        /* An async middleware's Promise used to coerce to 0, "continue":
+         * `async (req, res) => { if (!(await ok(req))) return 1; return 0; }`
+         * let every request through - an auth fail-open. Fail closed. */
+        log_error("[hull:c] middleware returned a Promise: middleware must "
+                  "be synchronous (return 0 to continue, non-zero to stop); "
+                  "the request is answered 500");
+        result = -1;
     } else {
         /* Capture return value: 0 = continue, non-zero = short-circuit */
         int32_t val = 0;
         if (JS_ToInt32(js->ctx, &val, ret) == 0)
             result = val;
+        else
+            JS_FreeValue(js->ctx, JS_GetException(js->ctx));
     }
 
     /* Store req.ctx as a JS value ref so the next middleware
@@ -330,12 +367,19 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     JS_FreeValue(js->ctx, handler);
     JS_FreeValue(js->ctx, global);
 
-    /* Run any pending microtasks */
-    hl_js_run_jobs(js);
-
+    /* Run any pending microtasks - with no request active: whatever they
+     * reach is not this middleware's to suspend (and in_middleware still
+     * refuses an async op). */
     js->active_conn = NULL;
     js->active_req  = NULL;
+    hl_js_run_jobs(js);
+    js->in_middleware = 0;
+
     js->last_async_cont = NULL;   /* middleware is synchronous: nothing chains */
+    if (js->budget_tripped && result >= 0) {
+        log_error("[hull:c] middleware exceeded the instruction limit");
+        result = -1;
+    }
     return result;
 }
 

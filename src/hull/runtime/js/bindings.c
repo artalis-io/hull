@@ -44,7 +44,7 @@ static JSValue js_req_header(JSContext *ctx, JSValueConst this_val,
 {
     if (argc < 1) return JS_UNDEFINED;
     const char *name = JS_ToCString(ctx, argv[0]);
-    if (!name) return JS_UNDEFINED;
+    if (!name) return JS_EXCEPTION;   /* the conversion threw: report it */
 
     /* Lowercase the lookup key - reject names that exceed buffer */
     size_t len = strlen(name);
@@ -119,8 +119,12 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
     else
         JS_SetPropertyStr(ctx, obj, "path", JS_NewString(ctx, "/"));
 
-    /* query string → object */
-    JSValue query_obj = JS_NewObject(ctx);
+    /* query string → object. Query, params and headers have no prototype:
+     * the client's names are their only keys, so `req.headers.constructor`
+     * or `req.query.toString` is undefined unless it was sent, and a lookup
+     * by a chosen name (`req.header("hasOwnProperty")`) does not find an
+     * inherited function. */
+    JSValue query_obj = JS_NewObjectProto(ctx, JS_NULL);
     const char *q = req->query;
     size_t q_len = req->query_len;
     if (q && q_len > 0) {
@@ -149,25 +153,31 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
             }
             /* In place, form rules (utils/url.h): never fails here, since the
              * value only shrinks and its NUL slot is already there. */
-            /* The key is used as a C string below, NUL-terminated by the
-             * decode, so its new length is not needed. */
-            (void)hl_url_decode(pair, klen, pair, klen + 1, HL_URL_FORM);
+            long kdec = hl_url_decode(pair, klen, pair, klen + 1, HL_URL_FORM);
             if (vlen > 0)
                 vlen = (size_t)hl_url_decode(val, vlen, val, vlen + 1,
                                              HL_URL_FORM);
-            /* Defined, not set (also params and headers below): the keys
+            /* The key by its decoded LENGTH: as a C string, "admin%00x"
+             * became the key "admin", and a proxy or WAF and the app
+             * disagreed about which parameter was sent.
+             * Defined, not set (also params and headers below): the keys
              * are the client's, and a set ran any Object.prototype setter
              * with them - and dropped a "__proto__" key. */
-            JS_DefinePropertyValueStr(ctx, query_obj, pair,
-                                      JS_NewStringLen(ctx, val, vlen),
-                                      JS_PROP_C_W_E);
+            JSAtom katom = JS_NewAtomLen(ctx, pair,
+                                         kdec >= 0 ? (size_t)kdec : 0);
+            if (katom != JS_ATOM_NULL) {
+                JS_DefinePropertyValue(ctx, query_obj, katom,
+                                       JS_NewStringLen(ctx, val, vlen),
+                                       JS_PROP_C_W_E);
+                JS_FreeAtom(ctx, katom);
+            }
             pair = strtok_r(NULL, "&", &saveptr);
         }
     }
     JS_SetPropertyStr(ctx, obj, "query", query_obj);
 
     /* params - route params from Keel (e.g. :id → params.id) */
-    JSValue params_obj = JS_NewObject(ctx);
+    JSValue params_obj = JS_NewObjectProto(ctx, JS_NULL);
     int n_params = req->num_params;
     for (int i = 0; i < n_params; i++) {
         KlHttpParam param = req->params[i];
@@ -182,7 +192,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
     JS_SetPropertyStr(ctx, obj, "params", params_obj);
 
     /* headers → object (names lowercased for case-insensitive lookup) */
-    JSValue headers_obj = JS_NewObject(ctx);
+    JSValue headers_obj = JS_NewObjectProto(ctx, JS_NULL);
     int n_headers = req->num_headers;
     for (int i = 0; i < n_headers; i++) {
         /* KlHttpRequest is a concrete struct in Keel 3.x; headers[] is read
