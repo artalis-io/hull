@@ -173,9 +173,24 @@ end
 -- then failed authentication at the server and the shared connection died.
 -- send_packet consults this flag first, so that caller's mistake is refused
 -- with the cipher state untouched.
+--
+-- The stream method is called BY NAME (`s:read(...)` / `s:write(...)`) from
+-- this chunk, inside the pcall: the native stream accepts calls only from the
+-- ssh module calling it as a method, and pcall(s.read, s, ...) is a call from
+-- pcall - the direct (no relay) path then failed with "the byte stream is
+-- internal to the SSH module".
 function Transport:stream_call(method, arg)
+    local s = self.stream
+    local call
+    if method == "read" then
+        call = function() return s:read(arg) end
+    elseif method == "write" then
+        call = function() return s:write(arg) end
+    else
+        error("ssh: unknown stream call " .. tostring(method))
+    end
     self.io_busy = true
-    local ok, a, b, c = pcall(self.stream[method], self.stream, arg)
+    local ok, a, b, c = pcall(call)
     self.io_busy = false
     if not ok then error(a, 0) end
     return a, b, c
