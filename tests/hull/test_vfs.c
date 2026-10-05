@@ -335,4 +335,58 @@ UTEST(vfs, composed_array_is_sealed_readonly)
     hl_vfs_composed_free(owned);
 }
 
+/* ── Signed-file gate (--verify-sig disk loads) ───────────────────── */
+
+/* A toy digest: the gate's logic, not SHA-256, is under test here (vfs.c
+ * links without the crypto layer; signature.c arms it with SHA-256). */
+static int toy_digest(const void *data, size_t len, uint8_t out[32])
+{
+    memset(out, 0, 32);
+    const unsigned char *p = data;
+    for (size_t i = 0; i < len; i++) out[i % 32] ^= (uint8_t)(p[i] + i);
+    out[31] ^= (uint8_t)len;
+    return 0;
+}
+
+UTEST(vfs, disk_gate_unarmed_allows_everything)
+{
+    hl_vfs_disk_gate_reset();
+    EXPECT_EQ(hl_vfs_disk_gate_armed(), 0);
+    EXPECT_EQ(hl_vfs_disk_gate_check("compute/x.aot.x86_64", "x", 1), 0);
+}
+
+UTEST(vfs, disk_gate_signed_bytes_only)
+{
+    const char *names[2] = { "app.lua", "compute/s.wasm" };
+    uint8_t d[2][32];
+    toy_digest("print(1)", 8, d[0]);
+    toy_digest("WASM", 4, d[1]);
+    ASSERT_EQ(hl_vfs_disk_gate_arm(names, (const uint8_t (*)[32])d, 2, toy_digest), 0);
+    EXPECT_EQ(hl_vfs_disk_gate_armed(), 1);
+
+    EXPECT_EQ(hl_vfs_disk_gate_check("app.lua", "print(1)", 8), 0);
+    EXPECT_EQ(hl_vfs_disk_gate_check("./app.lua", "print(1)", 8), 0);  /* "./" ignored */
+    EXPECT_EQ(hl_vfs_disk_gate_check("compute/s.wasm", "WASM", 4), 0);
+
+    EXPECT_EQ(hl_vfs_disk_gate_check("app.lua", "print(2)", 8), -1);   /* modified */
+    EXPECT_EQ(hl_vfs_disk_gate_check("compute/s.aot.x86_64", "x", 1), -1); /* unsigned */
+    EXPECT_EQ(hl_vfs_disk_gate_check("lib/app.lua", "print(1)", 8), -1);
+    EXPECT_EQ(hl_vfs_disk_gate_check(NULL, "x", 1), -1);
+    hl_vfs_disk_gate_reset();
+    EXPECT_EQ(hl_vfs_disk_gate_armed(), 0);
+}
+
+/* Arming with bad input leaves the gate armed EMPTY: fail closed. */
+UTEST(vfs, disk_gate_bad_arm_fails_closed)
+{
+    EXPECT_EQ(hl_vfs_disk_gate_arm(NULL, NULL, 3, toy_digest), -1);
+    EXPECT_EQ(hl_vfs_disk_gate_armed(), 1);
+    EXPECT_EQ(hl_vfs_disk_gate_check("app.lua", "", 0), -1);
+    hl_vfs_disk_gate_reset();
+
+    EXPECT_EQ(hl_vfs_disk_gate_arm(NULL, NULL, 0, toy_digest), 0);  /* signed nothing */
+    EXPECT_EQ(hl_vfs_disk_gate_check("app.lua", "", 0), -1);
+    hl_vfs_disk_gate_reset();
+}
+
 UTEST_MAIN();

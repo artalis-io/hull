@@ -39,6 +39,8 @@
 #include "hull/shared/host.h"
 #include "hull/shared/cli_log.h"
 #include "hull/cap/crypto.h"
+#include "hull/cap/tar.h"        /* tool.bundle_verify */
+#include "hull/release.h"        /* hl_release_verify_manifest_sig */
 #include "hull/signature.h"  /* HL_PLATFORM_PUBKEY_HEX */
 #include "hull/manifest_extract_file.h"  /* extract_manifest_js helper */
 #ifdef HL_FRONTEND_JS
@@ -1283,6 +1285,177 @@ static int l_tool_platform_verify(lua_State *L)
     return 1;
 }
 
+/* ── tool.bundle_verify(bundle_dir, member[, copy]) → true | nil, err ──
+ *
+ * Offline re-verify of ONE file of an installed tool bundle (the musl
+ * platform archives a --target=*-musl build links) - the install->build
+ * TOCTOU that tool.platform_verify closes for flavor / feature libs. The
+ * bundle's extracted files carry no signature of their own; the release
+ * signed the .tar. So: `hull tools install` keeps the signed manifest and
+ * the asset's name in the bundle directory (.hull-bundle.*); here the
+ * manifest signature is checked against the EMBEDDED release pubkey, the
+ * tar is read back from the content-addressed tools store and must hash to
+ * the signed digest, and `member` on disk (or `copy`, a copy of it the build
+ * already made - verify what will be linked) must be byte-identical to that
+ * member of the tar. */
+static int bundle_read_small(const char *path, char *buf, size_t cap, size_t *out_len)
+{
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (size_t)st.st_size >= cap) {
+        close(fd);
+        return -1;
+    }
+    size_t got = 0;
+    while (got < (size_t)st.st_size) {
+        ssize_t n = read(fd, buf + got, (size_t)st.st_size - got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+    close(fd);
+    if (got != (size_t)st.st_size) return -1;
+    buf[got] = '\0';
+    *out_len = got;
+    return 0;
+}
+
+typedef struct {
+    const char          *want;
+    const unsigned char *data;
+    size_t               size;
+    int                  found;
+} BundleMemberFind;
+
+static int bundle_member_cb(const HlTarEntry *e, void *ctx)
+{
+    BundleMemberFind *f = (BundleMemberFind *)ctx;
+    if (e->is_dir || strcmp(e->name, f->want) != 0) return 0;
+    f->data = e->data;
+    f->size = e->size;
+    f->found = 1;
+    return 1;
+}
+
+static int l_tool_bundle_verify(lua_State *L)
+{
+    const char *dir    = luaL_checkstring(L, 1);
+    const char *member = luaL_checkstring(L, 2);
+    const char *copy   = luaL_optstring(L, 3, NULL);   /* the copy to hash */
+    const char *why = NULL;
+
+    static char manifest[1 << 20];   /* the release manifest: a few KB */
+    char asset[256], sig[512], path[PATH_MAX];
+    size_t mlen = 0, alen = 0, slen = 0;
+    char expected[65];
+    uint8_t *tar = NULL;
+    size_t tar_len = 0;
+    HlBlobStore *store = NULL;
+
+    if ((size_t)snprintf(path, sizeof path, "%s/.hull-bundle-asset", dir) >= sizeof path ||
+        bundle_read_small(path, asset, sizeof asset, &alen) != 0) {
+        why = "no install record (.hull-bundle-asset) - reinstall the bundle";
+        goto out;
+    }
+    while (alen > 0 && (asset[alen - 1] == '\n' || asset[alen - 1] == '\r'))
+        asset[--alen] = '\0';
+    if (alen == 0 || strchr(asset, '/') || strchr(asset, '\\')) {
+        why = "malformed install record";
+        goto out;
+    }
+    if ((size_t)snprintf(path, sizeof path, "%s/.hull-bundle.sha256", dir) >= sizeof path ||
+        bundle_read_small(path, manifest, sizeof manifest, &mlen) != 0) {
+        why = "no cached signed manifest - reinstall the bundle";
+        goto out;
+    }
+    if (hl_release_pubkey_configured()) {
+        if ((size_t)snprintf(path, sizeof path, "%s/.hull-bundle.sha256.sig", dir) >= sizeof path ||
+            bundle_read_small(path, sig, sizeof sig, &slen) != 0 ||
+            hl_release_verify_manifest_sig(manifest, mlen, sig, slen, NULL) != 0) {
+            why = "the cached manifest's release signature does not verify";
+            goto out;
+        }
+    }
+    if (hl_release_io_find_checksum(manifest, mlen, asset, expected) != 0) {
+        why = "the bundle is not in its signed manifest";
+        goto out;
+    }
+
+    {
+        const HlCacheKind *tools_kind = hl_cache_find("tools");
+        char root[PATH_MAX];
+        if (!tools_kind || hl_cache_resolve_path(tools_kind, root, sizeof root) != 0 ||
+            hl_blob_store_open(&store, NULL, root, /*shard_depth=*/1, 0) != 0) {
+            why = "cannot open the tools store";
+            goto out;
+        }
+        /* Content-addressed: the bytes must hash to the SIGNED digest. */
+        if (hl_blob_store_get_verified(store, expected, 0, &tar, &tar_len) != 0) {
+            why = "the signed bundle archive is missing from the tools store "
+                  "or damaged - reinstall the bundle";
+            goto out;
+        }
+    }
+
+    {
+        BundleMemberFind f = { member, NULL, 0, 0 };
+        if (hl_tar_parse(tar, tar_len, bundle_member_cb, &f) < 0 || !f.found) {
+            why = "the file is not part of the signed bundle";
+            goto out;
+        }
+        if (copy) {
+            if ((size_t)snprintf(path, sizeof path, "%s", copy) >= sizeof path) {
+                why = "path too long";
+                goto out;
+            }
+        } else if ((size_t)snprintf(path, sizeof path, "%s/%s", dir, member) >= sizeof path) {
+            why = "path too long";
+            goto out;
+        }
+        int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat st;
+        if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+            (uint64_t)st.st_size != (uint64_t)f.size) {
+            if (fd >= 0) close(fd);
+            why = "the installed file differs from the signed bundle";
+            goto out;
+        }
+        uint8_t want_h[32], have_h[32];
+        HlSha256Ctx hc;
+        hl_cap_crypto_sha256_init(&hc);
+        unsigned char chunk[65536];
+        size_t total = 0;
+        for (;;) {
+            ssize_t n = read(fd, chunk, sizeof chunk);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            hl_cap_crypto_sha256_update(&hc, chunk, (size_t)n);
+            total += (size_t)n;
+        }
+        close(fd);
+        hl_cap_crypto_sha256_final(&hc, have_h);
+        if (total != f.size ||
+            hl_cap_crypto_sha256(f.data ? (const void *)f.data : "", f.size, want_h) != 0 ||
+            memcmp(want_h, have_h, 32) != 0) {
+            why = "the installed file differs from the signed bundle";
+            goto out;
+        }
+    }
+
+out:
+    free(tar);
+    if (store) hl_blob_store_close(store);
+    if (why) {
+        lua_pushnil(L);
+        lua_pushstring(L, why);
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 /* ── tool.hull_cache_disabled([kind]) → boolean ──
  *
  * Mirrors the C-side `hl_hull_cache_disabled` so Lua callers don't
@@ -1446,10 +1619,12 @@ static int l_tool_blob_store_get_to(lua_State *L)
     /* Sealed (HMAC, cache_common.c): the AOT cache holds native code a
      * build embeds, in a directory every sandboxed app can write - an
      * unauthenticated entry under a known .wasm's key was embedded into the
-     * next app built from it as a "cache hit". */
+     * next app built from it as a "cache hit". Sealed under the TOOL key,
+     * which no app runtime loads: with the runtime key (which every app
+     * process holds) an app could still forge one. */
     uint8_t *bytes = NULL;
     size_t   len   = 0;
-    if (hl_runtime_cache_get_sealed(s, kind, key, &bytes, &len) != 0) {
+    if (hl_tool_cache_get_sealed(s, kind, key, &bytes, &len) != 0) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -1512,7 +1687,7 @@ static int l_tool_blob_store_put_from(lua_State *L)
         free(bytes); lua_pushboolean(L, 0); return 1;
     }
 
-    hl_runtime_cache_put_sealed(s, kind, key, bytes, (size_t)sz);   /* see get_to */
+    hl_tool_cache_put_sealed(s, kind, key, bytes, (size_t)sz);   /* see get_to */
     free(bytes);
     lua_pushboolean(L, 1);
     return 1;
@@ -1843,6 +2018,7 @@ static const luaL_Reg tool_funcs[] = {
     { "exe_suffix",                  l_tool_exe_suffix },
     { "render_exec",                 l_tool_render_exec },
     { "log_app_phase",               l_tool_log_app_phase },
+    { "bundle_verify",               l_tool_bundle_verify },
     { "platform_sig_get",            l_tool_platform_sig_get },
     { "platform_sig_arch_hash",      l_tool_platform_sig_arch_hash },
     { "platform_pubkey",             l_tool_platform_pubkey },

@@ -986,6 +986,16 @@ static int require_impl(lua_State *L, int trusted)
                     return luaL_error(L, "read error: %s", path);
                 }
 
+                /* Under --verify-sig only a signed module, with the bytes
+                 * that were signed, may load (a planted ./plugin.lua that
+                 * signed code requires under pcall, or one swapped after
+                 * the startup check). */
+                if (hl_vfs_disk_gate_check(relpath, buf, nread) != 0) {
+                    lua->scratch->used = arena_saved;
+                    return luaL_error(L, "module %s is not a signed file "
+                                      "(--verify-sig)", relpath);
+                }
+
                 /* JSON file → decode with the runtime's cached
                  * json.decode (registry stash, no manifest gate). */
                 size_t path_len = strlen(path);

@@ -154,4 +154,25 @@ void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *kind,
  */
 void hl_runtime_cache_seal_prepare(void);
 
+/**
+ * @brief The same sealing, under the BUILD TOOL's own key
+ *        ($HOME/.hull/tool-cache.key), for caches whose entries a build
+ *        embeds (the compute-aot cache: native code).
+ *
+ * Every app process loads the runtime key above before its sandbox
+ * applies, and keeps read-write access to the shared cache pool, so an app
+ * compromised at native level could read that key from its own memory and
+ * seal a forged AOT blob under a known .wasm's key - which the next
+ * `hull build` of another app embedded as a "cache hit". The tool key is
+ * loaded only by the tool VM (hull build / eject), never by an app runtime,
+ * and lives outside the cache directory apps can reach.
+ */
+int  hl_tool_cache_get_sealed(HlBlobStore *store, const char *kind,
+                              const char *key, uint8_t **out, size_t *out_len);
+void hl_tool_cache_put_sealed(HlBlobStore *store, const char *kind,
+                              const char *key, const uint8_t *data, size_t len);
+
+/** @brief Load (or create) the tool key now - before the tool sandbox. */
+void hl_tool_cache_seal_prepare(void);
+
 #endif /* HL_RUNTIME_CACHE_COMMON_H */

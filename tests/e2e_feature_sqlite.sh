@@ -81,7 +81,7 @@ if command -v nm >/dev/null 2>&1; then
     w=$(nm "$W/app/bin" 2>/dev/null | grep -cE ' [Tt] _?sqlite3_open$' || true)
     [ "$w" -ge 1 ] || fail "auto-composed app has no SQLite (should come from the archive)"
 fi
-rc=0; "$W/app/bin" -d ":memory:" >/dev/null 2>&1 || rc=$?
+rc=0; "$W/app/bin" --hull-d ":memory:" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "auto-composed db app: db.query should return 42 (exit 0), got $rc"
 echo "ok  auto-inference: plain hull build on a SQLite-less base composes sqlite + db.query runs"
 
@@ -93,7 +93,7 @@ out=$("$HULL" build --no-verify-platform "$W/udf" -o "$W/udf/bin" 2>&1) \
     || fail "hull build (udf app on SQLite-less base): $out"
 echo "$out" | grep -qi "composed SQLite udf bridge" \
     || fail "expected the udf bridge to compose, got: $out"
-rc=0; "$W/udf/bin" -d ":memory:" >/dev/null 2>&1 || rc=$?
+rc=0; "$W/udf/bin" --hull-d ":memory:" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "composed udf app: db.udf should return 42 (exit 0), got $rc"
 echo "ok  udf bridge: composed on the SQLite-less base + db.udf runs"
 

@@ -99,12 +99,19 @@ only before that first word; under `hull` they may appear anywhere before `--`.
 
 The flags that weaken the process - `--no-sandbox`, `--allow-degraded-sandbox`,
 `--no-ca-bundle` / `--skip-ca-bundle`, `--ca-bundle`, `--no-verify-platform`,
-`--agent-api`, `--max-instructions` - take a reserved spelling in a built
-binary: `--hull-no-sandbox`, `--hull-ca-bundle PATH`, and so on. A bare one is
-refused with a hint rather than honoured, because a built binary cannot tell an
-operator's option from one of the app's own arguments (a wrapper forwarding a
-file name that reads `--no-sandbox`). Every Hull flag accepts the
-`--hull-<name>` spelling, under `hull` too (`--hull-d PATH` is `-d PATH`).
+`--agent-api`, `--max-instructions`, the resource limits (`-m`, `-M`, `-s`,
+`--wasm-gas`, `--wasm-heap`, `--wasm-stack`, `--wasm-max-input`,
+`--wasm-max-output`, `--body-max-size`), the exposure options (`-b`,
+`--tls-cert`, `--tls-key`) and the database path `-d` (a sandbox grant) - take a
+reserved spelling in a built binary: `--hull-no-sandbox`, `--hull-ca-bundle
+PATH`, `--hull-d /data/app.db`, and so on. A bare one is refused with a hint
+rather than honoured, because a built binary cannot tell an operator's option
+from one of the app's own arguments (a wrapper forwarding a file name that reads
+`--no-sandbox`). Every Hull flag accepts the `--hull-<name>` spelling, under
+`hull` too (`--hull-d PATH` is `-d PATH`). A `--hull-<name>` that Hull does not
+take (unknown, or missing its value) is an error - never the start of the app's
+arguments - and a one-letter name takes its value as the next argument
+(`--hull-d PATH`; `--hull-d=PATH` is refused).
 
 `ctx` is a flat bag. No methods beyond what's listed. Apps wanting richer
 IO (random-access file read, mmap, fifo) use `require("hull.fs")` exactly as

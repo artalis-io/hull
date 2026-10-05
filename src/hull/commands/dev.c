@@ -39,6 +39,23 @@ static void agent_ensure_dir(const char *app_dir)
     mkdir(path, 0755);
 }
 
+/* <app_dir>/.hull may be written to and unlinked in only when it is a real
+ * directory (not a symlink) owned by this user. The app tree is a cloned
+ * repo: a committed `.hull -> <dir>` symlink redirected the sidecar writes
+ * and the dev.json / discovery.json unlinks into any directory. */
+static int agent_dir_safe(const char *app_dir)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/.hull", app_dir);
+    if (n < 0 || (size_t)n >= sizeof(path)) return 0;
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+#ifndef _WIN32
+    if (st.st_uid != geteuid()) return 0;
+#endif
+    return 1;
+}
+
 /* The session's nonce, and where it is kept outside the app tree:
  * $HOME/.hull/dev-sessions/<supervisor pid>. `hull agent inspect` serves a
  * published generation only when dev.json carries that nonce - a repo that
@@ -99,9 +116,17 @@ static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
     if (n < 0 || (size_t)n >= sizeof(path)) return;
     int m = snprintf(tmp, sizeof(tmp), "%s/.hull/dev.json.tmp", app_dir);
     if (m < 0 || (size_t)m >= sizeof(tmp)) return;
+    if (!agent_dir_safe(app_dir)) return;
 
-    FILE *f = fopen(tmp, "w");
-    if (!f) return;
+    /* A fresh file, never through a link: fopen(tmp, "w") followed a
+     * committed .hull/dev.json.tmp -> ~/.ssh/authorized_keys, truncated the
+     * target and wrote the session JSON into it (the rename then moved only
+     * the link). unlink first, then O_EXCL|O_NOFOLLOW. */
+    (void)unlink(tmp);
+    int tfd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (tfd < 0) return;
+    FILE *f = fdopen(tfd, "w");
+    if (!f) { close(tfd); unlink(tmp); return; }
     /* session_pid = the dev SUPERVISOR pid (stable across reloads); pid = the served
      * child (changes each reload). The supervisor identity lets `hull agent inspect` bind
      * a published discovery generation to THIS live dev session. */
@@ -114,6 +139,7 @@ static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
 
 static void agent_remove_discovery(const char *app_dir)
 {
+    if (!agent_dir_safe(app_dir)) return;
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.hull/discovery.json", app_dir);
     if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
@@ -158,6 +184,7 @@ static void agent_publish_discovery(const char *hull_exe, const char *app_dir, l
 static void agent_remove_sidecars(const char *app_dir)
 {
     dev_session_remove();
+    if (!agent_dir_safe(app_dir)) return;
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
     if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
@@ -609,23 +636,37 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
             break;
         }
 
-        /* Fork child */
+        /* Fork child, with SIGINT/SIGTERM blocked across the fork: a signal
+         * landing in the child before it reset its handlers ran the
+         * parent's (which only records it), so it was swallowed - the child
+         * exec'd anyway and the parent then sat in waitpid. Blocked, it
+         * stays pending: the child resets to SIG_DFL before unblocking (and
+         * dies of it), the parent unblocks once dev_child_pid is set (and
+         * forwards it). */
+        sigset_t blk, prev;
+        sigemptyset(&blk);
+        sigaddset(&blk, SIGINT);
+        sigaddset(&blk, SIGTERM);
+        sigprocmask(SIG_BLOCK, &blk, &prev);
         pid_t pid = fork();
         if (pid < 0) {
+            sigprocmask(SIG_SETMASK, &prev, NULL);
             fprintf(stderr, "[hull:dev] fork failed: %s\n", strerror(errno));
             ret = 1;
             break;
         }
 
         if (pid == 0) {
-            /* Child: restore default signal handlers and exec */
+            /* Child: restore default signal handlers, unblock, and exec */
             signal(SIGINT, SIG_DFL);
             signal(SIGTERM, SIG_DFL);
+            sigprocmask(SIG_SETMASK, &prev, NULL);
             execvp(hull_exe, (char *const *)(uintptr_t)child_argv);  /* POSIX execvp does not modify argv */
             _exit(127);
         }
 
         dev_child_pid = pid;
+        sigprocmask(SIG_SETMASK, &prev, NULL);
         /* A signal between fork() and the line above found no child to
          * forward to; the loop then broke out and left this one running,
          * holding the port. Forward it now. */

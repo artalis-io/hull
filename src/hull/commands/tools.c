@@ -43,6 +43,7 @@
 #include <keel_tls_mbedtls.h>
 
 #include <dirent.h>
+#include <signal.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -284,10 +285,54 @@ static int rm_rf(const char *path)
     return rc;
 }
 
+/* Remove the <dest>.tmp.<pid> / <dest>.old.<pid> siblings an install
+ * killed part-way left behind - those of processes no longer running (a
+ * concurrent install's own are left alone). */
+static void sweep_bundle_debris(const char *dest)
+{
+    char parent[PATH_MAX];
+    if ((size_t)snprintf(parent, sizeof parent, "%s", dest) >= sizeof parent) return;
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent) return;
+    *slash = '\0';
+    const char *base = slash + 1;
+    size_t bl = strlen(base);
+    DIR *d = opendir(parent);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        const char *n = de->d_name;
+        if (strncmp(n, base, bl) != 0) continue;
+        const char *rest = n + bl;
+        const char *pidp = NULL;
+        if (strncmp(rest, ".tmp.", 5) == 0) pidp = rest + 5;
+        else if (strncmp(rest, ".old.", 5) == 0) pidp = rest + 5;
+        if (!pidp || !*pidp) continue;
+        char *end = NULL;
+        long pid = strtol(pidp, &end, 10);
+        if (!end || *end != '\0' || pid <= 0) continue;
+        if (pid != (long)getpid() && kill((pid_t)pid, 0) == 0) continue;  /* live */
+        char victim[PATH_MAX];
+        if ((size_t)snprintf(victim, sizeof victim, "%s/%s", parent, n) < sizeof victim)
+            (void)rm_rf(victim);
+    }
+    closedir(d);
+}
+
+/* Write `len` bytes to dir/name (a new file, never through a link). */
+static int write_bundle_record(const char *dir, const char *name,
+                               const char *data, size_t len)
+{
+    char p[PATH_MAX];
+    if ((size_t)snprintf(p, sizeof p, "%s/%s", dir, name) >= sizeof p) return -1;
+    return hl_release_io_atomic_write(p, data, len, 0644);
+}
+
 static int install_one(const HlToolSpec *spec, const char *platform,
                        const char *repo, const char *tag,
                        KlAllocator *alloc, KlTlsCtx *tls,
-                       const char *manifest, size_t manifest_len)
+                       const char *manifest, size_t manifest_len,
+                       const char *msig, size_t msig_len)
 {
     if (!hl_tools_published_for(spec, platform)) {
         print_unpublished(spec, platform);
@@ -406,9 +451,19 @@ static int install_one(const HlToolSpec *spec, const char *platform,
                 rc = -1;
         }
         if (rc == 0) {
+            sweep_bundle_debris(dest);
             (void)rm_rf(tmp);
             rc = hl_tar_extract((const unsigned char *)body, body_len, tmp);
         }
+        /* The install record `hull build` re-verifies the bundle's files
+         * against (tool.bundle_verify): the asset name and the signed
+         * manifest + its signature. The extracted files are not signed one
+         * by one - the .tar is, and it stays in the tools store. */
+        if (rc == 0 &&
+            (write_bundle_record(tmp, ".hull-bundle-asset", asset, strlen(asset)) != 0 ||
+             write_bundle_record(tmp, ".hull-bundle.sha256", manifest, manifest_len) != 0 ||
+             (msig && write_bundle_record(tmp, ".hull-bundle.sha256.sig", msig, msig_len) != 0)))
+            rc = -1;
         if (rc == 0) {
             struct stat dst;
             int had = lstat(dest, &dst) == 0;
@@ -556,11 +611,11 @@ static int cmd_install(int argc, char **argv, const char *repo)
     }
 
     /* Fetch + verify manifest once, reuse for every asset. */
-    char *manifest = NULL;
-    size_t manifest_len = 0;
+    char *manifest = NULL, *msig = NULL;
+    size_t manifest_len = 0, msig_len = 0;
     if (hl_release_io_fetch_verified_manifest(repo, tag, &alloc, tls,
                                 "hull-tools", &manifest, &manifest_len,
-                                NULL, NULL) != 0) {
+                                &msig, &msig_len) != 0) {
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
@@ -575,7 +630,7 @@ static int cmd_install(int argc, char **argv, const char *repo)
                 continue;
             }
             if (install_one(t, platform, repo, tag, &alloc, tls,
-                            manifest, manifest_len) != 0) {
+                            manifest, manifest_len, msig, msig_len) != 0) {
                 any_failed = 1;
             }
         }
@@ -589,11 +644,12 @@ static int cmd_install(int argc, char **argv, const char *repo)
             rc = 1;
         } else {
             rc = install_one(spec, platform, repo, tag, &alloc, tls,
-                             manifest, manifest_len) == 0 ? 0 : 1;
+                             manifest, manifest_len, msig, msig_len) == 0 ? 0 : 1;
         }
     }
 
     kl_free(&alloc, manifest, manifest_len);
+    if (msig) kl_free(&alloc, msig, msig_len);
     kl_tls_mbedtls_ctx_destroy(tls);
     return rc;
 }

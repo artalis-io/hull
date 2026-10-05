@@ -120,7 +120,8 @@ static int cli_parse_args(int argc, char **argv,
     for (int i = 1; i < argc; i++) {
         /* --hull-<name> and the built-binary rule: include/hull/runtime_flags.h */
         int prefixed = hl_runtime_flag_unprefix(&argv[i]);
-        if (hl_runtime_flag_check(argv[i], prefixed, embedded_app_present()) != 0)
+        if (prefixed < 0 ||
+            hl_runtime_flag_check(argv[i], prefixed, embedded_app_present()) != 0)
             return -2;
         if (strcmp(argv[i], "--") == 0) {
             *out_app_argv = &argv[i + 1];
@@ -185,6 +186,10 @@ static int cli_parse_args(int argc, char **argv,
             }
             x->instruction_limit = v;
             continue;
+        }
+        if (prefixed) {
+            (void)hl_runtime_flag_unknown(argv[i]);
+            return -2;
         }
         if (argv[i][0] == '-') {
             /* Global flags the command dispatcher already read - under hull.

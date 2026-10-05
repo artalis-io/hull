@@ -29,6 +29,13 @@ file that other users can read (or that another user owns) turns these
 caches off rather than trusting it. Deleting the key invalidates every sealed
 entry (they are dropped as they are next read).
 
+`compute-aot` is sealed under its own key, `$HOME/.hull/tool-cache.key`, which
+only the build tool (`hull build` / `hull eject`) loads. Every app process
+loads `cache.key` before its sandbox applies and keeps write access to the
+shared pool, so an app compromised at native level could read that key from
+its own memory and seal a forged AOT blob under a known `.wasm`'s key - native
+code the next `hull build` of another app would have embedded as a cache hit.
+
 ## Why a cache layer
 
 Hull recompiles a lot. On every cold start a single app can run:

@@ -226,6 +226,26 @@ static int keel_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
     KlEventMask kmask = 0;
     if (mask & HL_ASYNC_READ)  kmask |= KL_EVENT_READ;
     if (mask & HL_ASYNC_WRITE) kmask |= KL_EVENT_WRITE;
+
+    /* kl_watcher_add is an upsert: a second add for a watched fd updates
+     * that watcher in place. Reuse this fd's box the same way - a fresh box
+     * per add left the old one in the list (leaked), and the delete then
+     * freed the first match. */
+    for (size_t i = 0; i < ctx->nboxes; i++) {
+        KeelWatchBox *eb = ctx->boxes[i];
+        if (eb->fd != fd) continue;
+        HlAsyncWatcherFn ocb = eb->cb;
+        void *ouser = eb->user;
+        eb->cb = cb;
+        eb->user = user;
+        if (kl_watcher_add(ctx->kel, fd, kmask, keel_watcher_tramp, eb) != 0) {
+            eb->cb = ocb;
+            eb->user = ouser;
+            return -1;
+        }
+        return 0;
+    }
+
     if (ctx->nboxes == ctx->capboxes) {
         size_t nc = ctx->capboxes ? ctx->capboxes * 2 : 16;
         KeelWatchBox **nb = realloc(ctx->boxes, nc * sizeof *nb);

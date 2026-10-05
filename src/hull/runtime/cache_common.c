@@ -136,22 +136,30 @@ void hl_runtime_cache_singleton_reset(HlRuntimeCacheSlot *slot)
 
 #define SEAL_MAC_LEN 32
 
-static pthread_once_t g_seal_once = PTHREAD_ONCE_INIT;
-static int            g_seal_ok;
-static uint8_t        g_seal_key[32];
+/* One sealing key. Two exist (see cache_common.h): the runtime key every
+ * app process loads, and the build-tool key only the tool VM loads. */
+typedef struct {
+    pthread_once_t once;
+    int            ok;
+    uint8_t        key[32];
+    const char    *file;      /* under $HOME/.hull */
+} SealKey;
 
-static int seal_read_key(const char *path)
+static SealKey g_seal_rt   = { PTHREAD_ONCE_INIT, 0, {0}, "cache.key" };
+static SealKey g_seal_tool = { PTHREAD_ONCE_INIT, 0, {0}, "tool-cache.key" };
+
+static int seal_read_key(const char *path, uint8_t key[32])
 {
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return -1;
     struct stat st;
     int bad = fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-              st.st_size != (off_t)sizeof g_seal_key;
+              st.st_size != (off_t)32;
     if (!bad && !hl_host_is_windows())
         bad = st.st_uid != geteuid() || (st.st_mode & (S_IRWXG | S_IRWXO));
     size_t got = 0;
-    while (!bad && got < sizeof g_seal_key) {
-        ssize_t n = read(fd, g_seal_key + got, sizeof g_seal_key - got);
+    while (!bad && got < 32) {
+        ssize_t n = read(fd, key + got, 32 - got);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) { bad = 1; break; }
         got += (size_t)n;
@@ -160,27 +168,27 @@ static int seal_read_key(const char *path)
     return bad ? -1 : 0;
 }
 
-static void seal_init(void)
+static void seal_init_key(SealKey *k)
 {
     const char *home = getenv("HOME");
     if (!home || !*home) return;
     char dir[PATH_MAX], path[PATH_MAX];
     if ((size_t)snprintf(dir, sizeof dir, "%s/.hull", home) >= sizeof dir ||
-        (size_t)snprintf(path, sizeof path, "%s/cache.key", dir) >= sizeof path)
+        (size_t)snprintf(path, sizeof path, "%s/%s", dir, k->file) >= sizeof path)
         return;
-    if (seal_read_key(path) == 0) { g_seal_ok = 1; return; }
+    if (seal_read_key(path, k->key) == 0) { k->ok = 1; return; }
 
     /* First use: make one. O_EXCL - a racing process that made it first
      * wins, and its key is read back. */
     (void)mkdir(dir, 0700);
-    uint8_t k[32];
-    if (hl_cap_crypto_random(k, sizeof k) != 0) return;
+    uint8_t nk[32];
+    if (hl_cap_crypto_random(nk, sizeof nk) != 0) return;
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd >= 0) {
         size_t off = 0;
         int bad = fchmod(fd, 0600) != 0;
-        while (!bad && off < sizeof k) {
-            ssize_t n = write(fd, k + off, sizeof k - off);
+        while (!bad && off < sizeof nk) {
+            ssize_t n = write(fd, nk + off, sizeof nk - off);
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) { bad = 1; break; }
             off += (size_t)n;
@@ -188,19 +196,31 @@ static void seal_init(void)
         if (close(fd) != 0) bad = 1;
         if (bad) unlink(path);
     }
-    memset(k, 0, sizeof k);
-    if (seal_read_key(path) == 0) g_seal_ok = 1;
+    memset(nk, 0, sizeof nk);
+    if (seal_read_key(path, k->key) == 0) k->ok = 1;
 }
 
-static int seal_key(void)
+static void seal_init_rt(void)   { seal_init_key(&g_seal_rt); }
+static void seal_init_tool(void) { seal_init_key(&g_seal_tool); }
+
+static const SealKey *seal_key(int tool)
 {
-    pthread_once(&g_seal_once, seal_init);
-    return g_seal_ok;
+    if (tool) {
+        pthread_once(&g_seal_tool.once, seal_init_tool);
+        return g_seal_tool.ok ? &g_seal_tool : NULL;
+    }
+    pthread_once(&g_seal_rt.once, seal_init_rt);
+    return g_seal_rt.ok ? &g_seal_rt : NULL;
 }
 
 void hl_runtime_cache_seal_prepare(void)
 {
-    (void)seal_key();
+    (void)seal_key(0);
+}
+
+void hl_tool_cache_seal_prepare(void)
+{
+    (void)seal_key(1);
 }
 
 /* The MAC binds the entry to WHERE it is stored, not only to its bytes:
@@ -208,8 +228,8 @@ void hl_runtime_cache_seal_prepare(void)
  * bytes alone let anything that can write the cache directory move a valid
  * entry to another key - app-chosen template code (it compiles to a sealed
  * Lua dump) planted as a stdlib module's bytecode. */
-static int seal_mac(const char *kind, const char *key, const uint8_t *data,
-                    size_t len, uint8_t mac[SEAL_MAC_LEN])
+static int seal_mac(const SealKey *k, const char *kind, const char *key,
+                    const uint8_t *data, size_t len, uint8_t mac[SEAL_MAC_LEN])
 {
     uint8_t digest[32];
     if (hl_cap_crypto_sha256(data, len, digest) != 0) return -1;
@@ -220,22 +240,23 @@ static int seal_mac(const char *kind, const char *key, const uint8_t *data,
     memcpy(msg + off, kind, kl);  off += kl;  msg[off++] = 0;
     memcpy(msg + off, key, keyl); off += keyl; msg[off++] = 0;
     memcpy(msg + off, digest, sizeof digest); off += sizeof digest;
-    return hl_cap_crypto_hmac_sha256(g_seal_key, sizeof g_seal_key, msg, off, mac);
+    return hl_cap_crypto_hmac_sha256(k->key, sizeof k->key, msg, off, mac);
 }
 
-int hl_runtime_cache_get_sealed(HlBlobStore *store, const char *kind,
-                                const char *key, uint8_t **out, size_t *out_len)
+static int cache_get_sealed(int tool, HlBlobStore *store, const char *kind,
+                            const char *key, uint8_t **out, size_t *out_len)
 {
     *out = NULL;
     *out_len = 0;
-    if (!store || !kind || !key || !seal_key()) return -1;
+    const SealKey *k = (store && kind && key) ? seal_key(tool) : NULL;
+    if (!k) return -1;
     uint8_t *buf = NULL;
     size_t len = 0;
     if (hl_blob_store_get(store, key, /*track_access=*/1, &buf, &len) != 0)
         return -1;
     uint8_t mac[SEAL_MAC_LEN];
     int ok = len > SEAL_MAC_LEN &&
-             seal_mac(kind, key, buf + SEAL_MAC_LEN, len - SEAL_MAC_LEN, mac) == 0;
+             seal_mac(k, kind, key, buf + SEAL_MAC_LEN, len - SEAL_MAC_LEN, mac) == 0;
     if (ok) {
         uint8_t diff = 0;
         for (size_t i = 0; i < SEAL_MAC_LEN; i++) diff |= (uint8_t)(mac[i] ^ buf[i]);
@@ -252,16 +273,42 @@ int hl_runtime_cache_get_sealed(HlBlobStore *store, const char *kind,
     return 0;
 }
 
-void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *kind,
-                                 const char *key, const uint8_t *data, size_t len)
+static void cache_put_sealed(int tool, HlBlobStore *store, const char *kind,
+                             const char *key, const uint8_t *data, size_t len)
 {
-    if (!store || !kind || !key || !data || len == 0 || !seal_key()) return;
+    if (!store || !kind || !key || !data || len == 0) return;
+    const SealKey *k = seal_key(tool);
+    if (!k) return;
     if (len > SIZE_MAX - SEAL_MAC_LEN) return;
     uint8_t *buf = malloc(len + SEAL_MAC_LEN);
     if (!buf) return;
-    if (seal_mac(kind, key, data, len, buf) == 0) {
+    if (seal_mac(k, kind, key, data, len, buf) == 0) {
         memcpy(buf + SEAL_MAC_LEN, data, len);
         (void)hl_blob_store_put_keyed(store, key, buf, len + SEAL_MAC_LEN);
     }
     free(buf);
+}
+
+int hl_runtime_cache_get_sealed(HlBlobStore *store, const char *kind,
+                                const char *key, uint8_t **out, size_t *out_len)
+{
+    return cache_get_sealed(0, store, kind, key, out, out_len);
+}
+
+void hl_runtime_cache_put_sealed(HlBlobStore *store, const char *kind,
+                                 const char *key, const uint8_t *data, size_t len)
+{
+    cache_put_sealed(0, store, kind, key, data, len);
+}
+
+int hl_tool_cache_get_sealed(HlBlobStore *store, const char *kind,
+                             const char *key, uint8_t **out, size_t *out_len)
+{
+    return cache_get_sealed(1, store, kind, key, out, out_len);
+}
+
+void hl_tool_cache_put_sealed(HlBlobStore *store, const char *kind,
+                              const char *key, const uint8_t *data, size_t len)
+{
+    cache_put_sealed(1, store, kind, key, data, len);
 }

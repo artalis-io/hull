@@ -660,6 +660,16 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
     }
     buf[nread] = '\0';
 
+    /* Under --verify-sig only a signed module, with the bytes that were
+     * signed, may load (one planted beside the app, or swapped after the
+     * startup check). */
+    if (hl_vfs_disk_gate_check(relpath, buf, nread) != 0) {
+        js_free(ctx, buf);
+        JS_ThrowReferenceError(ctx, "module %s is not a signed file "
+                               "(--verify-sig)", relpath);
+        return NULL;
+    }
+
     /* JSON file → wrap as: export default JSON.parse(`...`)
      * Escape \, ` and ${ so the template literal passes the original
      * JSON bytes through to JSON.parse (same logic as embedded path). */
@@ -1167,6 +1177,18 @@ int hl_js_load_app(HlJS *js, const char *filename)
         return -1;
     }
     buf[nread] = '\0';
+
+    /* --verify-sig: the entry runs with the bytes that were signed (the
+     * startup check hashed the file; this is the read that runs). */
+    {
+        const char *base = strrchr(filename, '/');
+        base = base ? base + 1 : filename;
+        if (hl_vfs_disk_gate_check(base, buf, nread) != 0) {
+            js->scratch->used = arena_saved;
+            log_error("[hull:c] %s is not the signed file (--verify-sig)", filename);
+            return -1;
+        }
+    }
 
     /* Evaluate as ES module. ASYNC so a deferred top-level throw / rejected
      * import is observable as a rejected eval promise (see hl_js_settle_module),

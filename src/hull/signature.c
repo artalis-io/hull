@@ -19,6 +19,7 @@
 #include <sh_arena.h>
 
 #include <dirent.h>
+#include <sys/stat.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -411,101 +412,188 @@ int hl_sig_verify_platform(const HlSignature *sig, const uint8_t pubkey[32])
     return rc;
 }
 
-/* Search the VFS for a file matching sig_name.
- * For .lua entries, the embedded name has the extension stripped,
- * so we try both "./sig_name" and "./sig_name_without_lua". */
-static int sig_find_in_entries(const HlVfs *vfs, const char *sig_name,
-                               const unsigned char **out_data,
-                               unsigned int *out_len)
+/* The signed entry an embedded VFS entry corresponds to, or -1.
+ *
+ * hull build signs every file under its app-relative path ("app.lua",
+ * "lib/x.lua", "data.json", "templates/a.html", "compute/s.wasm",
+ * "compute/s.aot.x86_64") but embeds them under two naming schemes:
+ *   - Lua modules as "./<path without .lua>", JS / JSON as "./<path>";
+ *   - everything else (templates/, static/, migrations/, compute/ incl.
+ *     AOT, shaders/) under the bare app-relative path.
+ * So a "./" entry matches its rest exactly or with ".lua" appended, and a
+ * bare entry matches only exactly. (The verifier used to look up "./" forms
+ * only, so every built app with a template, static file, migration, compute
+ * module or shader failed --verify-sig with "file not found in binary".) */
+static long sig_signed_index(const HlSignature *sig, const char *ename)
 {
-    /* Try "./sig_name" first (exact match for .js/.json) */
-    char lookup[1024];
-    int n = snprintf(lookup, sizeof(lookup), "./%s", sig_name);
-    if (n < 0 || (size_t)n >= sizeof(lookup))
-        return 0;
-
-    const HlEntry *e = hl_vfs_find(vfs, lookup);
-
-    /* For .lua files, embedded name has extension stripped */
-    if (!e) {
-        size_t slen = strlen(sig_name);
-        if (slen > 4 && strcmp(sig_name + slen - 4, ".lua") == 0) {
-            int m = snprintf(lookup, sizeof(lookup), "./%.*s",
-                             (int)(slen - 4), sig_name);
-            if (m > 0 && (size_t)m < sizeof(lookup))
-                e = hl_vfs_find(vfs, lookup);
+    if (ename[0] == '.' && ename[1] == '/') {
+        const char *rest = ename + 2;
+        size_t rl = strlen(rest);
+        for (size_t i = 0; i < sig->entry_count; i++)
+            if (strcmp(sig->entries[i].name, rest) == 0)
+                return (long)i;
+        for (size_t i = 0; i < sig->entry_count; i++) {
+            const char *sn = sig->entries[i].name;
+            if (strlen(sn) == rl + 4 && strncmp(sn, rest, rl) == 0 &&
+                strcmp(sn + rl, ".lua") == 0)
+                return (long)i;
         }
+        return -1;
     }
-
-    if (e) {
-        *out_data = e->data;
-        *out_len = e->len;
-        return 1;
-    }
-    return 0;
-}
-
-/* Check whether an embedded entry name matches any signature entry. */
-static int sig_entry_in_sig(const HlSignature *sig, const char *ename)
-{
-    for (size_t i = 0; i < sig->entry_count; i++) {
-        const char *sig_name = sig->entries[i].name;
-        size_t slen = strlen(sig_name);
-        size_t mlen = slen;
-        if (slen > 4 && strcmp(sig_name + slen - 4, ".lua") == 0)
-            mlen = slen - 4;
-
-        if (strlen(ename) == mlen && strncmp(ename, sig_name, mlen) == 0)
-            return 1;
-    }
-    return 0;
+    for (size_t i = 0; i < sig->entry_count; i++)
+        if (strcmp(sig->entries[i].name, ename) == 0)
+            return (long)i;
+    return -1;
 }
 
 int hl_sig_verify_files_embedded(const HlSignature *sig, const HlVfs *vfs)
 {
     if (!sig || !sig->entries || !vfs) return -1;
+    if (sig->entry_count > (size_t)LONG_MAX) return -1;
 
-    for (size_t i = 0; i < sig->entry_count; i++) {
-        const char *sig_name = sig->entries[i].name;
-        const char *expected_hash = sig->entries[i].hash_hex;
+    /* Driven by the EMBEDDED entries: each must map to a signed name and
+     * hash to it, so no embedded byte goes unchecked (two entries that map
+     * to one signed name are both hashed). Then every signed name must have
+     * been seen. */
+    unsigned char *seen = calloc(sig->entry_count ? sig->entry_count : 1, 1);
+    if (!seen) return -1;
 
-        const unsigned char *data = NULL;
-        unsigned int data_len = 0;
+    int rc = 0;
+    for (size_t i = 0; i < vfs->count; i++) {
+        const HlEntry *e = &vfs->entries[i];
+        if (!e->name) continue;
 
-        if (!sig_find_in_entries(vfs, sig_name, &data, &data_len)) {
-            log_error("[sig] file not found in binary: %s", sig_name);
-            return -1;
+        long si = sig_signed_index(sig, e->name);
+        if (si < 0) {
+            log_error("[sig] extra file in binary not in signature: %s", e->name);
+            rc = -1;
+            break;
         }
 
         uint8_t hash[32];
-        if (hl_cap_crypto_sha256(data, data_len, hash) != 0) return -1;
-
+        if (hl_cap_crypto_sha256(e->data ? (const void *)e->data : "",
+                                 e->len, hash) != 0) {
+            rc = -1;
+            break;
+        }
         char hash_hex[65];
         hl_hex_encode(hash, 32, hash_hex, sizeof(hash_hex));
+        if (strcmp(hash_hex, sig->entries[si].hash_hex) != 0) {
+            log_error("[sig] hash mismatch for %s", sig->entries[si].name);
+            rc = -1;
+            break;
+        }
+        seen[si] = 1;
+    }
 
-        if (strcmp(hash_hex, expected_hash) != 0) {
-            log_error("[sig] hash mismatch for %s", sig_name);
-            return -1;
+    for (size_t i = 0; rc == 0 && i < sig->entry_count; i++) {
+        if (!seen[i]) {
+            log_error("[sig] file not found in binary: %s", sig->entries[i].name);
+            rc = -1;
         }
     }
 
-    /* Every embedded entry must be signed - not only the ./ modules:
-     * compute WASM, AOT native code, shaders, templates, static files and
-     * migrations added after signing were never noticed. */
-    for (size_t i = 0; i < vfs->count; i++) {
-        const char *ename = vfs->entries[i].name;
-        if (!ename) continue;
-        if (ename[0] == '.' && ename[1] == '/')
-            ename += 2;
+    free(seen);
+    return rc;
+}
 
-        if (!sig_entry_in_sig(sig, ename)) {
-            log_error("[sig] extra file in binary not in signature: %s",
-                      vfs->entries[i].name);
-            return -1;
+/* Every file under app_dir/<rel_dir> (recursively when `recurse`) whose name
+ * passes `want` must be a signed one. Returns 0, or -1 (logged). */
+static int sig_scan_unsigned(const HlSignature *sig, const char *app_dir,
+                             const char *rel_dir, int recurse,
+                             int (*want)(const char *name), int depth)
+{
+    if (depth > 16) {
+        log_error("[sig] %s: directory nesting too deep", rel_dir);
+        return -1;
+    }
+    char dir[PATH_MAX];
+    if ((size_t)snprintf(dir, sizeof(dir), "%s/%s", app_dir, rel_dir) >= sizeof(dir))
+        return -1;
+    DIR *d = opendir(dir);
+    if (!d)
+        return 0;   /* no such directory: nothing to load from it */
+
+    int bad = 0;
+    struct dirent *de;
+    while (!bad && (de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+        char rel[PATH_MAX];
+        if ((size_t)snprintf(rel, sizeof(rel), "%s/%s", rel_dir, de->d_name) >= sizeof(rel)) {
+            bad = 1;
+            break;
+        }
+        char full[PATH_MAX];
+        if ((size_t)snprintf(full, sizeof(full), "%s/%s", app_dir, rel) >= sizeof(full)) {
+            bad = 1;
+            break;
+        }
+        struct stat st;
+        if (lstat(full, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (recurse && sig_scan_unsigned(sig, app_dir, rel, recurse, want,
+                                             depth + 1) != 0)
+                bad = 1;
+            continue;
+        }
+        if (want && !want(de->d_name))
+            continue;
+        int signed_one = 0;
+        for (size_t i = 0; i < sig->entry_count; i++)
+            if (strcmp(sig->entries[i].name, rel) == 0) { signed_one = 1; break; }
+        if (!signed_one) {
+            log_error("[sig] file not in signature: %s", rel);
+            bad = 1;
         }
     }
+    closedir(d);
+    return bad ? -1 : 0;
+}
 
-    return 0;
+static int sig_want_sql(const char *n)
+{
+    size_t l = strlen(n);
+    return l >= 5 && strcmp(n + l - 4, ".sql") == 0;
+}
+
+/* compute/<name>.wasm and compute/<name>.aot.<arch>: what hl_cap_wasm_load
+ * reads from disk. (compute/<name>/ holds the module's C source.) */
+static int sig_want_compute(const char *n)
+{
+    size_t l = strlen(n);
+    return (l >= 6 && strcmp(n + l - 5, ".wasm") == 0) || strstr(n, ".aot.") != NULL;
+}
+
+/* Arm the loaders' disk gate (hl_vfs_disk_gate_*) with the signed set:
+ * from here on, every app file read from disk is re-hashed against it. */
+static int sig_arm_disk_gate(const HlSignature *sig)
+{
+    size_t n = sig->entry_count;
+    const char **names = n ? calloc(n, sizeof(*names)) : NULL;
+    uint8_t (*digests)[32] = n ? calloc(n, sizeof(*digests)) : NULL;
+    int rc = -1;
+    if (n == 0 || (names && digests)) {
+        rc = 0;
+        for (size_t i = 0; i < n; i++) {
+            names[i] = sig->entries[i].name;
+            if (!sig->entries[i].hash_hex ||
+                strlen(sig->entries[i].hash_hex) != 64 ||
+                hl_hex_decode(sig->entries[i].hash_hex, 64, digests[i], 32) != 32) {
+                rc = -1;
+                break;
+            }
+        }
+    }
+    if (rc == 0)
+        rc = hl_vfs_disk_gate_arm(names, (const uint8_t (*)[32])digests, n,
+                                  hl_cap_crypto_sha256);
+    else
+        (void)hl_vfs_disk_gate_arm(NULL, NULL, 0, hl_cap_crypto_sha256); /* armed empty */
+    free(names);
+    free(digests);
+    return rc;
 }
 
 int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
@@ -563,39 +651,22 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
         }
     }
 
-    /* Every migration must be a signed one. The runner applies EVERY *.sql in
-     * migrations/ (top level, as hull build signs them), so a file dropped
-     * there beside a signed app ran at startup although --verify-sig passed.
-     * (Modules and templates are loaded by name, from signed code.) This mode
-     * still reads each file again to load it after hashing it here; a built
-     * binary has no such window - it verifies the embedded bytes it runs. */
-    char mdir[PATH_MAX];
-    if ((size_t)snprintf(mdir, sizeof(mdir), "%s/migrations", app_dir) >= sizeof(mdir))
+    /* Every file the runtime would load from these directories must be a
+     * signed one. The migration runner applies EVERY *.sql in migrations/,
+     * and the compute loader reads compute/<name>.aot.<arch> before
+     * compute/<name>.wasm, so a file dropped there beside a signed app ran
+     * (AOT: native code outside the WASM sandbox) although --verify-sig
+     * passed. Templates, static files and shaders are named at run time,
+     * possibly from input. The loaders also re-check each file they read
+     * against the signature (hl_vfs_disk_gate_check, armed by the caller),
+     * which covers modules and closes the hash-then-reload window; this
+     * scan refuses a planted file up front. */
+    if (sig_scan_unsigned(sig, app_dir, "migrations", 0, sig_want_sql, 0) != 0 ||
+        sig_scan_unsigned(sig, app_dir, "compute", 0, sig_want_compute, 0) != 0 ||
+        sig_scan_unsigned(sig, app_dir, "shaders", 1, NULL, 0) != 0 ||
+        sig_scan_unsigned(sig, app_dir, "templates", 1, NULL, 0) != 0 ||
+        sig_scan_unsigned(sig, app_dir, "static", 1, NULL, 0) != 0)
         return -1;
-    DIR *d = opendir(mdir);
-    if (d) {
-        struct dirent *de;
-        int bad = 0;
-        while (!bad && (de = readdir(d)) != NULL) {
-            size_t nl = strlen(de->d_name);
-            if (nl < 5 || strcmp(de->d_name + nl - 4, ".sql") != 0)
-                continue;
-            char rel[PATH_MAX];
-            if ((size_t)snprintf(rel, sizeof(rel), "migrations/%s", de->d_name) >= sizeof(rel)) {
-                bad = 1;
-                break;
-            }
-            int signed_one = 0;
-            for (size_t i = 0; i < sig->entry_count; i++)
-                if (strcmp(sig->entries[i].name, rel) == 0) { signed_one = 1; break; }
-            if (!signed_one) {
-                log_error("[sig] migration not in signature: %s", rel);
-                bad = 1;
-            }
-        }
-        closedir(d);
-        if (bad) return -1;
-    }
 
     return 0;
 }
@@ -1070,6 +1141,13 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
             snprintf(app_dir, sizeof(app_dir), ".");
         }
         rc = hl_sig_verify_files_fs(&sig, app_dir);
+    }
+
+    /* Both modes: whatever the loaders still read from disk (a dev-mode
+     * app's every file; a built binary's fallbacks) must be signed. */
+    if (rc == 0 && sig_arm_disk_gate(&sig) != 0) {
+        log_error("[sig] cannot arm the signed-file gate");
+        rc = -1;
     }
 
     if (rc != 0) {

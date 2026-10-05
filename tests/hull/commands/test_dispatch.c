@@ -60,4 +60,41 @@ UTEST(asset_checksum, fixed64_equal_and_diffs)
     ASSERT_EQ(hl_asset_checksum_eq(a, b), 0);   /* differ at index 63 */
 }
 
+/* ── Tool sandbox: an output directory that grants too much (audit 5 M3) ──
+ *
+ * `hull build -o /app` made the tool sandbox's read-write-create grant "/"
+ * (the generated Dockerfile did exactly that), and `-o ~/x` the whole home.
+ * hl_tool_sandbox_init refuses such an output directory BEFORE it applies
+ * anything, so these calls leave this process unsandboxed. */
+#include "hull/sandbox.h"
+#include "hull/cap/tool.h"
+#include "../test_tmpdir.h"
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+UTEST(tool_sandbox, refuses_root_output_dir)
+{
+    HlToolUnveilCtx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ASSERT_EQ(hl_tool_sandbox_init(&ctx, ".", "/", NULL, 0), -1);
+}
+
+UTEST(tool_sandbox, refuses_home_output_dir)
+{
+    char home[512];
+    ASSERT_TRUE(hl_test_mkdtemp(home, sizeof home, "hull_fakehome") != NULL);
+    const char *old = getenv("HOME");
+    char saved[1024] = "";
+    if (old) snprintf(saved, sizeof saved, "%s", old);
+    setenv("HOME", home, 1);
+
+    HlToolUnveilCtx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    EXPECT_EQ(hl_tool_sandbox_init(&ctx, ".", home, NULL, 0), -1);
+
+    if (old) setenv("HOME", saved, 1); else unsetenv("HOME");
+    rmdir(home);
+}
+
 UTEST_MAIN();

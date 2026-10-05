@@ -52,10 +52,13 @@ local function file_exists(p) return tool.file_exists(p) end
 --     the app set on _G saw `tool` come back and kept it;
 --   * the tool sandbox is already applied (hl_tool_sandbox_init): kernel
 --     unveil where the kernel enforces it (OpenBSD, Linux with Landlock, a
---     cosmo APE on those two), pledge "stdio rpath wpath cpath proc exec
---     fattr" where available (Linux without Landlock too). On macOS, Windows
---     and the other BSDs only the userspace allowlist the tool bindings check
---     applies - a boundary for the tool API, not for the process;
+--     cosmo APE on those two), and pledge "stdio rpath wpath cpath proc exec
+--     fattr" on OpenBSD only (on Linux the polyfill's seccomp form of "exec"
+--     cannot be narrowed enough to matter, so it is not applied: Linux
+--     without Landlock has NO kernel tool sandbox). Elsewhere - Linux
+--     without Landlock, macOS, Windows, the other BSDs - only the userspace
+--     allowlist the tool bindings check applies: a boundary for the tool
+--     API, not for the process;
 --   * capability modules with no backing there (db, compute, gpu, worker)
 --     resolve to no-op stubs, so top-level code touching them neither works
 --     nor escapes;
@@ -234,8 +237,20 @@ function M.resolve_lib(libname, asset_name, ctx)
     -- glibc copy embedded in this hull. Takes precedence over every other
     -- source; the embedded extract above is gated off (and not ctx.musl_dir).
     -- Trust: the whole bundle tar was release-signed + SHA-256-verified at
-    -- install (hull.sha256), same as the libc-musl floor. See docs/musl_build.md.
+    -- install (hull.sha256), and is re-verified HERE, offline, against the
+    -- signed manifest and the tar kept in the tools store
+    -- (tool.bundle_verify) - an archive swapped in ~/.hull/tools after the
+    -- install is refused, as a --with feature's is. See docs/musl_build.md.
     if ctx.musl_dir and file_exists(ctx.musl_dir .. "/" .. libname) then
+        local ok, why = true, nil
+        if ctx.musl_verify ~= false then   -- off only with --no-verify-platform
+            ok, why = tool.bundle_verify(ctx.musl_dir, libname)
+        end
+        if not ok then
+            tool.stderr("hull build: " .. ctx.musl_dir .. "/" .. libname
+                        .. " could not be re-verified: " .. tostring(why) .. "\n")
+            return nil, "bundle-verify-failed"
+        end
         return ctx.musl_dir .. "/" .. libname, "musl"
     end
     -- Only the directory of the hull being run. ./build and ../build were
@@ -562,7 +577,7 @@ end
 function M.plan_mandatory(ctx)
     local rt = ctx.app_rt
     local rctx = { hull_dir = ctx.hull_dir or "", plat = ctx.plat,
-                   musl_dir = ctx.musl_dir }
+                   musl_dir = ctx.musl_dir, musl_verify = ctx.musl_verify }
     local plat_infix = ctx.plat or ""
 
     -- ── Compute the needs-gates (resolver + build-time signals) ──

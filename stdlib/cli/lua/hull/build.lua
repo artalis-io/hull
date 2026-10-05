@@ -638,6 +638,19 @@ local function generate_app_registry(app_dir, files)
             '    { "%s", %s, sizeof(%s) },', c_string_escape(item.entry_name), varname, varname) }
     end
 
+    -- Two files must not embed under one name: "x.json.lua" and "x.json"
+    -- both became "./x.json", and the binary search then served whichever
+    -- it landed on (and the signature check could pass for the other).
+    local seen_names = {}
+    for _, e in ipairs(entries) do
+        if seen_names[e.name] then
+            tool.stderr("hull build: two files embed under the same name '"
+                        .. e.name .. "' (rename one, e.g. x.json.lua vs x.json)\n")
+            tool.exit(1)
+        end
+        seen_names[e.name] = true
+    end
+
     -- Sort by the RAW entry name for HlVfs's binary search (byte order, as
     -- strcmp). Sorting the escaped C literal put names with escaped bytes
     -- out of order, and the lookup then missed them.
@@ -754,7 +767,10 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         if r.ok then
             modules_resolved = r.modules
         else
-            tool.stderr("hull build: warning: module resolver failed: " .. tostring(r.error) .. "\n")
+            -- Not a warning: signed without modules_resolved, the package
+            -- skipped --verify-sig's run-time module-set check altogether.
+            sign_fail("hull build: --sign: module resolver failed: "
+                      .. tostring(r.error) .. "\n", tmpdir, output)
         end
     end
 
@@ -1271,6 +1287,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
                 app_dir = opts.app_dir, app_rt = app_rt, tmpdir = tmpdir,
                 hull_dir = rt_hull_dir, plat = rt_plat, platform_lib = platform_lib,
                 musl_dir = opts.musl_dir,
+                musl_verify = opts.verify_platform ~= false,
                 compute_count = #compute_files, with = opts.with, flavor = opts.flavor,
                 with_list = with_feature_list(opts),
                 on_fail = function(msg)
@@ -1456,6 +1473,23 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
             tool.exit(1)
         end
         tool.copy(src, platform_lib)
+        -- Re-verify the COPY that will be linked against the signed bundle
+        -- (install->build TOCTOU, as for --with archives). A locally built,
+        -- unsigned bundle (a source checkout staging its own) has no install
+        -- record; --no-verify-platform, the existing opt-out for an unsigned
+        -- platform archive, skips the check for it.
+        local ok, why = true, nil
+        if opts.verify_platform ~= false then
+            ok, why = tool.bundle_verify(opts.musl_dir, "libhull_platform.a",
+                                         platform_lib)
+        end
+        if not ok then
+            tool.stderr("hull build: " .. src .. " could not be re-verified: "
+                .. tostring(why) .. "\nhint: re-run `hull tools install platform-musl-"
+                .. target_spec(opts).arch .. "`\n")
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
         return platform_lib, nil, nil, nil
     end
 

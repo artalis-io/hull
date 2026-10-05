@@ -100,7 +100,10 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
     if (entry && entry->data) {
         wgsl = (const char *)entry->data;
         wgsl_len = entry->len;
-    } else if (js && js->base.app_vfs && js->base.app_vfs->root_dir) {
+    } else if (js && js->base.app_vfs && js->base.app_vfs->root_dir &&
+               js->base.app_vfs->count == 0) {
+        /* Development only: a built binary (app files embedded) runs the
+         * shaders it was built with, not whatever lies under its cwd. */
         char path[4096];
         int pn = snprintf(path, sizeof(path), "%s/shaders/%s.wgsl",
                  js->base.app_vfs->root_dir, name);
@@ -126,6 +129,14 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
                 }
             }
             fclose(f);
+            /* --verify-sig: only a signed shader, as signed. */
+            if (wgsl && hl_vfs_disk_gate_check(vfs_name, wgsl, wgsl_len) != 0) {
+                free(file_buf);
+                JSValue err = JS_ThrowInternalError(
+                    ctx, "gpu.load: shader '%s' is not a signed file (--verify-sig)", name);
+                JS_FreeCString(ctx, name);
+                return err;
+            }
         }
     }
 

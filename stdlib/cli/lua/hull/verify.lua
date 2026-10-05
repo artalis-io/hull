@@ -15,6 +15,10 @@
 --                               Note: stricter than verify.js's same-named
 --                               flag, which uses the file as an override
 --                               (JS can't reach the embedded key).
+--   --binary <path>             The built binary to check against binary_hash
+--                               (default <app_dir>/app[.com]). Required when
+--                               the app embeds AOT native code and was built
+--                               to another path: AOT is in the binary only.
 --   --no-verify-platform        Skip the v0.1.3 gethull platform-sig check
 --                               (package.sig.platform.gethull). Use this for
 --                               apps built with a dev hull (no embedded
@@ -58,6 +62,17 @@ local GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER =
 
 local function read_file(path)
     return tool.read_file(path)
+end
+
+-- The hex SHA-256 a sha256sum-style manifest ("<hex>  <name>" lines) lists
+-- for `name`, or nil. Same format hl_platform_sig_extract_for_arch reads.
+local function manifest_hash(manifest, name)
+    if type(manifest) ~= "string" or type(name) ~= "string" then return nil end
+    for line in manifest:gmatch("[^\n]+") do
+        local h, n = line:match("^(%x+)%s+%*?(.-)%s*$")
+        if h and n == name and #h == 64 then return h:lower() end
+    end
+    return nil
 end
 
 -- Resolve a key SOURCE to its hex pubkey. Returns nil ONLY when no source was
@@ -114,6 +129,9 @@ local function parse_args()
         elseif a == "--gethull-key" then
             i = i + 1
             opts.gethull_key = arg[i]
+        elseif a == "--binary" then
+            i = i + 1
+            opts.binary = arg[i]
         elseif a == "--no-verify-platform" then
             opts.no_verify_platform = true
         elseif a:sub(1, 1) ~= "-" then
@@ -201,8 +219,58 @@ local function main()
             sig.platform.gethull.manifest,
             sig.platform.gethull.signature,
             verify_pubkey_hex)
+        -- What `--verify-sig` enforces at run time (signature.c 5b/5c), so a
+        -- package this reports VALID is one a verifying binary will start:
+        -- 5b. the per-arch platform hashes the build cross-checked must be
+        --     present and be the ones in the signed manifest (the manifest
+        --     alone proves only that it is genuine, not that THIS app was
+        --     linked against what it lists);
+        -- 5c. a composed platform_domain block must be signed by the same
+        --     key and list every composed archive's hash.
+        local g = sig.platform.gethull
         if gethull_ok then
-            print("gethull layer: VALID (signed by gethull.dev)")
+            local nah = 0
+            if type(g.arch_hashes) == "table" then
+                for arch, h in pairs(g.arch_hashes) do
+                    nah = nah + 1
+                    local want = manifest_hash(g.manifest, arch)
+                    if type(h) ~= "string" or not want or want ~= h:lower() then
+                        tool.stderr("gethull layer: FAILED - platform hash for '"
+                                    .. tostring(arch) .. "' is not the one in the "
+                                    .. "signed manifest\n")
+                        gethull_ok = false
+                    end
+                end
+            end
+            if nah == 0 then
+                tool.stderr("gethull layer: FAILED - the app does not bind its "
+                            .. "platform library to the signed manifest (no "
+                            .. "arch_hashes; built with --no-verify-platform?)\n")
+                gethull_ok = false
+            end
+            local pd = type(g.composed) == "table" and g.composed.platform_domain
+            if type(pd) == "table" then
+                if not ed25519_verify_hex(pd.manifest, pd.signature, verify_pubkey_hex) then
+                    tool.stderr("gethull layer: FAILED - composed platform_domain "
+                                .. "signature invalid\n")
+                    gethull_ok = false
+                else
+                    for _, e in ipairs(type(pd.assets) == "table" and pd.assets or {}) do
+                        local want = type(e) == "table" and manifest_hash(pd.manifest, e.name)
+                        if not want or type(e.sha256) ~= "string" or want ~= e.sha256:lower() then
+                            tool.stderr("gethull layer: FAILED - composed archive '"
+                                        .. tostring(type(e) == "table" and e.name)
+                                        .. "' is not in the signed manifest\n")
+                            gethull_ok = false
+                        end
+                    end
+                end
+            end
+            if gethull_ok then
+                print("gethull layer: VALID (signed by gethull.dev)")
+            else
+                issues = issues + 1
+            end
         else
             tool.stderr("gethull layer: FAILED - signature invalid\n")
             tool.stderr("  the embedded libhull_platform.a does not " ..
@@ -311,6 +379,7 @@ local function main()
     -- Recompute file hashes
     local mismatches = {}
     local missing = {}
+    local aot_unchecked = 0
     for name, expected_hash in pairs(sig.files) do
         -- Path traversal defense: reject suspicious file names
         if name:find("%.%.") or name:sub(1, 1) == "/" then
@@ -322,7 +391,9 @@ local function main()
         local data = read_file(path)
         if not data and name:match("^compute/.+%.aot%.") then
             -- A build artifact (made in the build's tmpdir, only embedded):
-            -- not beside the source. Covered by binary_hash below.
+            -- not beside the source. Covered by binary_hash below - which
+            -- must then actually be checked.
+            aot_unchecked = aot_unchecked + 1
         elseif not data then
             missing[#missing + 1] = name
         else
@@ -360,7 +431,8 @@ local function main()
     -- so embedded content that is not a source file beside the app (AOT
     -- native code) went unchecked.
     if sig.binary_hash then
-        local bin = app_dir .. "/app" .. (tool.exe_suffix and tool.exe_suffix() or "")
+        local bin = opts.binary
+            or (app_dir .. "/app" .. (tool.exe_suffix and tool.exe_suffix() or ""))
         local bdata = read_file(bin)
         if bdata then
             local actual = hex.encode(crypto.sha256(bdata))
@@ -372,8 +444,20 @@ local function main()
             else
                 print("Binary: VALID (" .. bin .. ")")
             end
+        elseif opts.binary then
+            tool.stderr("Binary: cannot read " .. bin .. "\n")
+            issues = issues + 1
+        elseif aot_unchecked > 0 then
+            -- AOT entries are native code that exists ONLY in the binary:
+            -- with no binary checked they went unverified while this still
+            -- reported OK (e.g. after `hull build -o myapp`).
+            tool.stderr("Binary: not present (" .. bin .. ") - " .. aot_unchecked
+                        .. " AOT module(s) are verifiable only through it; pass "
+                        .. "--binary PATH\n")
+            issues = issues + 1
         else
-            print("Binary: not present (" .. bin .. "), binary_hash not checked")
+            print("Binary: not present (" .. bin .. "), binary_hash not checked "
+                  .. "(pass --binary PATH to check it)")
         end
     end
 

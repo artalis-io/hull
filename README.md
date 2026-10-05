@@ -95,7 +95,7 @@ hull dev app.lua
 hull build -o myapp .
 
 # Run it
-./myapp -p 8080 -d app.db
+./myapp -p 8080 --hull-d app.db
 ```
 
 Default stays flat; modular layouts opt in via `--type`. See
@@ -1474,7 +1474,7 @@ $ hull agent request POST /tasks -d '{"title":"Buy milk"}' -H 'Content-Type: app
 hull build -o myapp .
 
 # The binary is the product. No runtime, no dependencies
-./myapp -p 8080 -d /data/app.db
+./myapp -p 8080 --hull-d /data/app.db
 
 # Cross-platform (Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD)
 hull build -o myapp . CC=cosmocc

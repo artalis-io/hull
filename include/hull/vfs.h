@@ -128,4 +128,41 @@ int hl_vfs_has_prefix(const HlVfs *vfs, const char *prefix);
 int hl_vfs_path(const HlVfs *vfs, const char *name,
                 char *buf, size_t buf_size);
 
+/* ── Signed-file gate (--verify-sig) ─────────────────────────────────
+ *
+ * Under --verify-sig every app file the runtime loads from DISK (a dev-mode
+ * module, template, static file, migration, shader, compute .wasm / AOT)
+ * must be one the signature covers, with the bytes it signed. The startup
+ * check hashes the signed files once; the loaders then re-check the bytes
+ * they actually read here, so a file planted beside a signed app (an
+ * AOT artifact, a module required under pcall, a template named by input)
+ * or swapped after the startup check is refused rather than run.
+ *
+ * Armed once, at startup, before any app code runs; read-only afterwards
+ * (safe from worker threads). Unarmed it allows everything (no
+ * --verify-sig). The digest function is passed in so this leaf module
+ * links without the crypto layer.
+ */
+#include <stdint.h>
+
+typedef int (*HlVfsDigestFn)(const void *data, size_t len, uint8_t out[32]);
+
+/* Arm the gate with the signed names (app-relative, as hull build signs
+ * them: "app.lua", "lib/x.lua", "templates/a.html", "compute/s.wasm") and
+ * their SHA-256 digests. Copies everything. Returns 0, or -1 on bad input /
+ * out of memory (the gate is then armed EMPTY: every disk load is refused). */
+int hl_vfs_disk_gate_arm(const char *const *names, const uint8_t (*digests)[32],
+                         size_t n, HlVfsDigestFn digest);
+
+/* 1 when armed. */
+int hl_vfs_disk_gate_armed(void);
+
+/* Check bytes a loader read from disk under the app-relative name `rel`
+ * (a leading "./" is ignored). Returns 0 when the gate is not armed or the
+ * name is signed with exactly these bytes; -1 otherwise. */
+int hl_vfs_disk_gate_check(const char *rel, const void *data, size_t len);
+
+/* Disarm and free (tests, shutdown). */
+void hl_vfs_disk_gate_reset(void);
+
 #endif /* HL_VFS_H */

@@ -717,6 +717,230 @@ static int rmdir_recursive(const char *path)
     return rmdir(path);
 }
 
+/* ── Round 5: embedded name normalisation (M1), planted files (H2) ── */
+
+static void sha_hex(const void *data, size_t len, char out[65])
+{
+    uint8_t h[32];
+    hl_cap_crypto_sha256(data, len, h);
+    hex_encode(h, 32, out);
+}
+
+/* The embedded app of a non-trivial build: a Lua entry ("./app", .lua
+ * stripped), a JS module and a JSON file ("./" kept), and templates /
+ * static / migrations / compute (wasm + AOT) / shaders under their BARE
+ * app-relative names - exactly as build.lua's generate_app_registry names
+ * them. Sorted in strcmp order (HlVfs binary search). */
+static const char E_APP[]  = "app.get('/', function() end)\n";
+static const char E_JSON[] = "{\"a\":1}\n";
+static const char E_JS[]   = "export const x = 1;\n";
+static const char E_AOT[]  = "AOT-NATIVE-CODE";
+static const char E_WASM[] = "\0asm\1\0\0\0";
+static const char E_SQL[]  = "CREATE TABLE t (x INTEGER);\n";
+static const char E_WGSL[] = "@compute fn main() {}\n";
+static const char E_CSS[]  = "body{}\n";
+static const char E_HTML[] = "<p>{{ x }}</p>\n";
+static const char E_TPLUA[] = "-- a .lua under templates/\n";
+
+#define ENT(n, d) { n, (const unsigned char *)(d), sizeof(d) - 1 }
+static const HlEntry g_emb[] = {
+    ENT("./app", E_APP),
+    ENT("./data.json", E_JSON),
+    ENT("./lib/util.js", E_JS),
+    ENT("compute/score.aot.x86_64", E_AOT),
+    { "compute/score.wasm", (const unsigned char *)E_WASM, sizeof(E_WASM) - 1 },
+    ENT("migrations/001_init.sql", E_SQL),
+    ENT("shaders/s.wgsl", E_WGSL),
+    ENT("static/style.css", E_CSS),
+    ENT("templates/base.html", E_HTML),
+    ENT("templates/x.lua", E_TPLUA),
+    { 0, 0, 0 }
+};
+
+/* package.sig for g_emb, every file under its app-relative (signed) name.
+ * `skip` leaves one name out; `tamper` signs a wrong hash for one. */
+static int emb_sig(const char *dir, const char *skip, const char *tamper,
+                   HlSignature *sig)
+{
+    struct { const char *name; const char *d; size_t n; } f[] = {
+        { "app.lua", E_APP, sizeof(E_APP) - 1 },
+        { "data.json", E_JSON, sizeof(E_JSON) - 1 },
+        { "lib/util.js", E_JS, sizeof(E_JS) - 1 },
+        { "compute/score.aot.x86_64", E_AOT, sizeof(E_AOT) - 1 },
+        { "compute/score.wasm", E_WASM, sizeof(E_WASM) - 1 },
+        { "migrations/001_init.sql", E_SQL, sizeof(E_SQL) - 1 },
+        { "shaders/s.wgsl", E_WGSL, sizeof(E_WGSL) - 1 },
+        { "static/style.css", E_CSS, sizeof(E_CSS) - 1 },
+        { "templates/base.html", E_HTML, sizeof(E_HTML) - 1 },
+        { "templates/x.lua", E_TPLUA, sizeof(E_TPLUA) - 1 },
+    };
+    char files[2048];
+    size_t off = 0;
+    off += (size_t)snprintf(files + off, sizeof files - off, "{");
+    int first = 1;
+    for (size_t i = 0; i < sizeof f / sizeof f[0]; i++) {
+        if (skip && strcmp(skip, f[i].name) == 0) continue;
+        char hx[65];
+        if (tamper && strcmp(tamper, f[i].name) == 0)
+            sha_hex("tampered", 8, hx);
+        else
+            sha_hex(f[i].d, f[i].n, hx);
+        off += (size_t)snprintf(files + off, sizeof files - off, "%s\"%s\":\"%s\"",
+                                first ? "" : ",", f[i].name, hx);
+        first = 0;
+    }
+    snprintf(files + off, sizeof files - off, "}");
+    mkdir(dir, 0755);
+    create_test_package_sig(dir, files, "null", "deadbeef00", "deadbeef00");
+    char p[700];
+    snprintf(p, sizeof p, "%s/package.sig", dir);
+    return hl_sig_read(p, sig);
+}
+
+/* M1: every built app with a template, static file, migration, compute
+ * module or shader failed embedded --verify-sig ("file not found in
+ * binary"): the verifier looked up "./" names only. */
+UTEST(hl_sig, embedded_app_with_every_file_kind_verifies)
+{
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/emb_ok", test_dir);
+    HlSignature sig;
+    ASSERT_EQ(emb_sig(dir, NULL, NULL, &sig), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, g_emb, dir);
+    EXPECT_EQ(hl_sig_verify_files_embedded(&sig, &vfs), 0);
+    hl_sig_free(&sig);
+}
+
+UTEST(hl_sig, embedded_unsigned_entry_is_refused)
+{
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/emb_extra", test_dir);
+    HlSignature sig;
+    ASSERT_EQ(emb_sig(dir, "compute/score.aot.x86_64", NULL, &sig), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, g_emb, dir);
+    EXPECT_EQ(hl_sig_verify_files_embedded(&sig, &vfs), -1);
+    hl_sig_free(&sig);
+}
+
+UTEST(hl_sig, embedded_modified_entry_is_refused)
+{
+    static const char *const names[] = {
+        "app.lua", "lib/util.js", "templates/base.html", "static/style.css",
+        "migrations/001_init.sql", "compute/score.wasm",
+        "compute/score.aot.x86_64", "shaders/s.wgsl", "templates/x.lua", NULL
+    };
+    for (int k = 0; names[k]; k++) {
+        char dir[512];
+        snprintf(dir, sizeof dir, "%s/emb_mod%d", test_dir, k);
+        HlSignature sig;
+        ASSERT_EQ(emb_sig(dir, NULL, names[k], &sig), 0);
+        HlVfs vfs;
+        hl_vfs_init(&vfs, g_emb, dir);
+        EXPECT_EQ(hl_sig_verify_files_embedded(&sig, &vfs), -1);
+        hl_sig_free(&sig);
+    }
+}
+
+/* A signed name with nothing embedded under it is refused too. */
+UTEST(hl_sig, embedded_missing_signed_file_is_refused)
+{
+    static const HlEntry fewer[] = {
+        ENT("./app", E_APP),
+        { 0, 0, 0 }
+    };
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/emb_missing", test_dir);
+    HlSignature sig;
+    ASSERT_EQ(emb_sig(dir, NULL, NULL, &sig), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, fewer, dir);
+    EXPECT_EQ(hl_sig_verify_files_embedded(&sig, &vfs), -1);
+    hl_sig_free(&sig);
+}
+
+static void write_file_str(const char *path, const char *s)
+{
+    FILE *f = fopen(path, "wb");
+    if (f) { fputs(s, f); fclose(f); }
+}
+
+/* H2: in filesystem mode a file the runtime would load from disk - an AOT
+ * artifact (native code, read before the .wasm), a shader, a template, a
+ * static file - planted beside a signed app was never looked at. */
+UTEST(hl_sig, fs_planted_loadable_files_are_refused)
+{
+    static const char *const plant[][2] = {
+        { "compute", "compute/score.aot.x86_64" },
+        { "compute", "compute/score.wasm" },
+        { "shaders", "shaders/evil.wgsl" },
+        { "templates", "templates/sub/evil.html" },
+        { "static", "static/evil.js" },
+    };
+    for (size_t k = 0; k < sizeof plant / sizeof plant[0]; k++) {
+        char dir[512], p[800];
+        snprintf(dir, sizeof dir, "%s/plant%zu", test_dir, k);
+        mkdir(dir, 0755);
+        snprintf(p, sizeof p, "%s/app.lua", dir);
+        write_file_str(p, E_APP);
+        char hx[65], files[256];
+        sha_hex(E_APP, sizeof(E_APP) - 1, hx);
+        snprintf(files, sizeof files, "{\"app.lua\":\"%s\"}", hx);
+        create_test_package_sig(dir, files, "null", "deadbeef00", "deadbeef00");
+        snprintf(p, sizeof p, "%s/package.sig", dir);
+        HlSignature sig;
+        ASSERT_EQ(hl_sig_read(p, &sig), 0);
+        EXPECT_EQ(hl_sig_verify_files_fs(&sig, dir), 0);
+
+        snprintf(p, sizeof p, "%s/%s", dir, plant[k][0]);
+        mkdir(p, 0755);
+        snprintf(p, sizeof p, "%s/templates/sub", dir);
+        if (k == 3) mkdir(p, 0755);
+        snprintf(p, sizeof p, "%s/%s", dir, plant[k][1]);
+        write_file_str(p, "planted");
+        EXPECT_EQ(hl_sig_verify_files_fs(&sig, dir), -1);
+        hl_sig_free(&sig);
+    }
+}
+
+/* The startup check arms the loaders' disk gate with the signed set: a
+ * disk read of a signed file with the signed bytes passes, anything else
+ * (an unsigned name, modified bytes) is refused. */
+UTEST(hl_sig, verify_startup_arms_the_disk_gate)
+{
+    char pk_path[512];
+    snprintf(pk_path, sizeof(pk_path), "%s/test.pub", test_dir);
+    FILE *f = fopen(pk_path, "w");
+    ASSERT_TRUE(f != NULL);
+    fprintf(f, "%s\n", test_pk_hex);
+    fclose(f);
+
+    char files_json[256];
+    snprintf(files_json, sizeof(files_json), "{\"app.lua\":\"%s\"}", app_hash_hex);
+    create_test_package_sig(test_dir, files_json, "null",
+                            "binary0000000000000000000000000000000000000000000000000000000000000000",
+                            "trampoline00000000000000000000000000000000000000000000000000000000");
+    char entry_point[512];
+    snprintf(entry_point, sizeof(entry_point), "%s/app.lua", test_dir);
+    extern const HlEntry hl_app_entries[];
+    HlVfs app_vfs;
+    hl_vfs_init(&app_vfs, hl_app_entries, test_dir);
+
+    hl_vfs_disk_gate_reset();
+    EXPECT_EQ(hl_vfs_disk_gate_check("anything.lua", "x", 1), 0);   /* unarmed */
+    ASSERT_EQ(hl_verify_startup(pk_path, entry_point, &app_vfs, 1), 0);
+    EXPECT_EQ(hl_vfs_disk_gate_armed(), 1);
+
+    const char *app_content = "app.get(\"/\", function(req, res) res:json({ok=true}) end)\n";
+    EXPECT_EQ(hl_vfs_disk_gate_check("app.lua", app_content, strlen(app_content)), 0);
+    EXPECT_EQ(hl_vfs_disk_gate_check("./app.lua", app_content, strlen(app_content)), 0);
+    EXPECT_EQ(hl_vfs_disk_gate_check("app.lua", "tampered", 8), -1);
+    EXPECT_EQ(hl_vfs_disk_gate_check("plugin.lua", app_content, strlen(app_content)), -1);
+    EXPECT_EQ(hl_vfs_disk_gate_check("compute/x.aot.x86_64", "x", 1), -1);
+    hl_vfs_disk_gate_reset();
+}
+
 UTEST(hl_sig, cleanup)
 {
     int rc = rmdir_recursive(test_dir);

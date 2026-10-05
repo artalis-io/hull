@@ -241,3 +241,91 @@ int hl_vfs_path(const HlVfs *vfs, const char *name,
 
     return n;
 }
+
+/* ── Signed-file gate ──────────────────────────────────────────────── */
+
+typedef struct {
+    char   *name;
+    uint8_t digest[32];
+} HlGateEntry;
+
+static HlGateEntry   *g_gate;
+static size_t         g_gate_n;
+static int            g_gate_armed;
+static HlVfsDigestFn  g_gate_digest;
+
+void hl_vfs_disk_gate_reset(void)
+{
+    for (size_t i = 0; i < g_gate_n; i++)
+        free(g_gate[i].name);
+    free(g_gate);
+    g_gate = NULL;
+    g_gate_n = 0;
+    g_gate_armed = 0;
+    g_gate_digest = NULL;
+}
+
+int hl_vfs_disk_gate_arm(const char *const *names, const uint8_t (*digests)[32],
+                         size_t n, HlVfsDigestFn digest)
+{
+    hl_vfs_disk_gate_reset();
+    /* Armed from here on, even on failure below: an armed-but-empty gate
+     * refuses every disk load, which is the fail-closed answer. */
+    g_gate_armed = 1;
+    g_gate_digest = digest;
+    if (!digest || (n > 0 && (!names || !digests)))
+        return -1;
+    if (n == 0)
+        return 0;
+    if (n > SIZE_MAX / sizeof(*g_gate))
+        return -1;
+    HlGateEntry *t = calloc(n, sizeof(*t));
+    if (!t)
+        return -1;
+    for (size_t i = 0; i < n; i++) {
+        const char *nm = names[i];
+        if (!nm) {
+            for (size_t j = 0; j < i; j++) free(t[j].name);
+            free(t);
+            return -1;
+        }
+        while (nm[0] == '.' && nm[1] == '/') nm += 2;
+        size_t l = strlen(nm);
+        t[i].name = malloc(l + 1);
+        if (!t[i].name) {
+            for (size_t j = 0; j < i; j++) free(t[j].name);
+            free(t);
+            return -1;
+        }
+        memcpy(t[i].name, nm, l + 1);
+        memcpy(t[i].digest, digests[i], 32);
+    }
+    g_gate = t;
+    g_gate_n = n;
+    return 0;
+}
+
+int hl_vfs_disk_gate_armed(void)
+{
+    return g_gate_armed;
+}
+
+int hl_vfs_disk_gate_check(const char *rel, const void *data, size_t len)
+{
+    if (!g_gate_armed)
+        return 0;
+    if (!rel || (!data && len > 0) || !g_gate_digest)
+        return -1;
+    while (rel[0] == '.' && rel[1] == '/') rel += 2;
+    for (size_t i = 0; i < g_gate_n; i++) {
+        if (strcmp(g_gate[i].name, rel) != 0)
+            continue;
+        uint8_t d[32];
+        if (g_gate_digest(data ? data : "", len, d) != 0)
+            return -1;
+        /* The digests are public (they sit in package.sig): a plain
+         * compare leaks nothing. */
+        return memcmp(d, g_gate[i].digest, 32) == 0 ? 0 : -1;
+    }
+    return -1;
+}

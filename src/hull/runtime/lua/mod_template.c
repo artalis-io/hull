@@ -157,6 +157,13 @@ static int lua_template_load_raw(lua_State *L)
                     return luaL_error(L, "read error: %s", name);
                 }
 
+                /* --verify-sig: only a signed template, as signed. */
+                if (hl_vfs_disk_gate_check(rel, buf, nread) != 0) {
+                    lua->scratch->used = arena_saved;
+                    return luaL_error(L, "template %s is not a signed file "
+                                      "(--verify-sig)", rel);
+                }
+
                 lua_pushlstring(L, buf, nread);
                 lua->scratch->used = arena_saved;
                 return 1;

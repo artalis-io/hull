@@ -37,7 +37,7 @@ int hl_agent_logs(const char *app_dir, int tail_n, ShJsonBuf *out)
     sh_json_write_object_start(&w);
     sh_json_write_kv_string(&w, "path", path);
 
-    FILE *f = fopen(path, "rb");
+    FILE *f = hl_agent_open_sidecar(path);
     if (!f) {
         sh_json_write_kv_bool(&w, "exists", false);
         sh_json_write_key(&w, "lines");

@@ -88,9 +88,12 @@
    LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK | \
    LANDLOCK_ACCESS_FS_MAKE_SYM)
 
+/* HULL PATCH: TRUNCATE is a file right (Landlock ABI >= 3; masked out by
+ * State.fs_mask below that). Without it a write grant on an existing FILE
+ * could not O_TRUNC it. */
 #define FILE_BITS                                                 \
   (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE | \
-   LANDLOCK_ACCESS_FS_EXECUTE)
+   LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_TRUNCATE)
 
 static struct sock_filter kUnveilBlacklistAbiVersionBelow3[] = {
 #if 0  // Should we have this ? It certainly means things don't work on other

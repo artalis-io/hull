@@ -126,7 +126,7 @@ out=$("$HULL" build --no-verify-platform "$WORK/mig_app" -o "$WORK/mig_app/app" 
     || fail "mig_app should build: $out"
 mkdir -p "$WORK/mig_app/migrations"
 echo "CREATE TABLE planted (x INTEGER);" > "$WORK/mig_app/migrations/001_plant.sql"
-rc=$(cd "$WORK/mig_app" && hull_rc ./app -d plant.db)
+rc=$(cd "$WORK/mig_app" && hull_rc ./app --hull-d plant.db)
 [ "$rc" = 0 ] || fail "a built binary ran a migration from its working directory (exit $rc)"
 pass "a built binary runs no migration it was not built with"
 

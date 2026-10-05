@@ -931,7 +931,7 @@ hull build myapp/ --linker=lld-static # fully static link (musl floor, hull tool
 hull build myapp/ --linker=zig --target=x86_64-linux-musl  # cross-compile via the zig bundle
 
 # The binary is self-contained. Deploy anywhere
-./myapp -p 8080 -d /data/app.db
+./myapp -p 8080 --hull-d /data/app.db
 
 # Verify signatures
 hull verify myapp/

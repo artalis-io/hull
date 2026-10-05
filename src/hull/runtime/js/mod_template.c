@@ -173,6 +173,14 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
                     return JS_ThrowInternalError(ctx, "read error: %s", path);
                 }
 
+                /* --verify-sig: only a signed template, as signed. */
+                if (hl_vfs_disk_gate_check(rel, buf, nread) != 0) {
+                    js_free(ctx, buf);
+                    JS_FreeCString(ctx, name);
+                    return JS_ThrowInternalError(ctx, "template %s is not a "
+                                                 "signed file (--verify-sig)", rel);
+                }
+
                 JSValue result = JS_NewStringLen(ctx, buf, nread);
                 js_free(ctx, buf);
                 JS_FreeCString(ctx, name);
