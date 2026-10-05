@@ -101,6 +101,15 @@ function M.serve(req, res, id, opts)
         res:status(403):json({ error = "forbidden" })
         return
     end
+    -- auth_check may wait (db.async, http.fetch), and the attachment may be
+    -- deleted meanwhile; its blob survives for orphan_grace, so serving from
+    -- the row read before the wait answered 200 for a deleted file. Re-read
+    -- (as the JS twin does).
+    meta = attachment.metadata(id)
+    if not meta then
+        res:status(404):json({ error = "not found" })
+        return
+    end
 
     -- Strong ETag from full blob_id SHA. Content-addressed dedup
     -- means this is a genuine cryptographic fingerprint of the bytes.

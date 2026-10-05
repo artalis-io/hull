@@ -640,7 +640,7 @@ function session.login_handler(cookie_mod, opts)
             end
         end
 
-        respond(res, user, sid)
+        return respond(res, user, sid)
     end
 end
 
@@ -656,6 +656,12 @@ function session.logout_handler(cookie_mod, opts)
     local respond = opts.respond or function(res) res:json({ ok = true }) end
 
     return function(req, res)
+        -- A request the browser marks cross-site (an attacker page posting
+        -- a form here) is refused, as oauth's logout does: the clearing
+        -- Set-Cookie would still sign the victim out.
+        if req.headers and req.headers["sec-fetch-site"] == "cross-site" then
+            return res:status(403):json({ error = "forbidden" })
+        end
         local sid
         if req.ctx and req.ctx.session_id then
             sid = req.ctx.session_id
@@ -665,7 +671,7 @@ function session.logout_handler(cookie_mod, opts)
         end
         if sid then session.destroy(sid) end
         res:header("Set-Cookie", cookie_mod.clear(name, cookie_opts))
-        respond(res)
+        return respond(res)
     end
 end
 

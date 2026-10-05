@@ -339,6 +339,20 @@ run_flow() {
         "$R" 'name="new_password"'
     S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" "$BASE/_me")
     check_status "$_label: ...and does not sign in" "$S" "401"
+    # (The fixture's user_get omits password_hash, so step 18 also proves the
+    # gate reads the hash through user_find_by_email - audit 6 M1 - and its
+    # email_verified is a raw 0 / 1, which Lua used to read as true.)
+
+    # 19. Audit 6: logout refuses a cross-site POST (a forged form would
+    #     still sign the victim out through the clearing Set-Cookie), and
+    #     init refuses require_verified_email = false without
+    #     on_password_reset.
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Sec-Fetch-Site: cross-site' "$BASE/auth/logout")
+    check_status "$_label: cross-site logout refused" "$S" "403"
+    R=$(curl -sS "$BASE/_init_refuses_unverified_login")
+    check_contains "$_label: unverified login without on_password_reset refused" \
+        "$R" '"refused":true'
 
     stop_pid "$HULL_PID"; HULL_PID=""
 }

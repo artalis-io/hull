@@ -63,6 +63,14 @@ function inLocalBlocklist(hashHexUpper) {
     return false;
 }
 
+// The runtime's refusals to wait (runtime/js/db_wait.h, async.c async gate).
+function isWaitRefusal(e) {
+    const s = String(e && e.message !== undefined ? e.message : e);
+    return s.indexOf("cannot wait while a transaction is open") >= 0
+        || s.indexOf("cannot run in middleware") >= 0
+        || s.indexOf("cannot start while req.multipart()") >= 0;
+}
+
 async function check(password, opts) {
     if (typeof password !== "string" || password === "") return false;
     opts = opts || {};
@@ -82,7 +90,12 @@ async function check(password, opts) {
         resp = await httpClient.async.get(endpoint + prefix, {
             headers: { "User-Agent": "hull-pwned-check/1" },
         });
-    } catch (_e) {
+    } catch (e) {
+        // The runtime refusing the wait (a transaction open, middleware, a
+        // parked multipart read) is a bug in the caller, not an HIBP outage:
+        // failing open on it turned the check off, quietly, for every such
+        // call. Re-throw.
+        if (isWaitRefusal(e)) throw e;
         _health.ok            = false;
         _health.last_check_at = time.now();
         _health.last_error    = "HIBP fetch failed";

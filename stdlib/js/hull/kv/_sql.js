@@ -125,7 +125,9 @@ class SqlStore {
                 "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) " +
                 "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",
                 [this.ns, util.hexencode(k), util.b64encode(newVal), expVal, now, now]);
-            return (n || 0) === 1;
+            if ((n || 0) !== 1) return false;
+            this._evictItems();   // a new key counts toward maxItems, as put does
+            return true;
         }
         if (keep) {
             const n = this.conn.exec(
@@ -158,7 +160,7 @@ class SqlStore {
                     "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) " +
                     "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",
                     [this.ns, khex, util.b64encode(String(by)), expVal, now, now]);
-                if ((n || 0) === 1) return by;
+                if ((n || 0) === 1) { this._evictItems(); return by; }
             } else {
                 const cur = util.toInt(util.b64decode(rows[0].v));
                 const ver = Number(rows[0].version);

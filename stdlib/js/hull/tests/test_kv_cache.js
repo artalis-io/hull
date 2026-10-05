@@ -85,6 +85,14 @@ test("sql cache stays bounded", () => {
     assertEq(h.get("k40"), "40");
 });
 
+test("sql cache counts keys cas and incr create (audit 6 L4)", () => {
+    const h = cache.open({ backend: "sqlite", database: db, namespace: "t6-sql3", maxItems: 10 });
+    for (let i = 1; i <= 40; i++) h._store.incr("c" + i, 1);
+    for (let i = 1; i <= 40; i++) h._store.cas("l" + i, null, "x");
+    const n = h._store.stats().items;
+    assertTrue(n <= 10, "bounded: " + n);
+});
+
 // ── rbac names (DA-L6 parity) ──────────────────────────────────────────
 
 test("rbac refuses bad names, lookups answer false", () => {
@@ -93,6 +101,9 @@ test("rbac refuses bad names, lookups answer false", () => {
     assertTrue(threw(() => rbac.assign("u1", 1)));
     assertTrue(threw(() => rbac.defineRole("r".repeat(256))));
     assertTrue(!threw(() => rbac.defineRole("r".repeat(255))));
+    // Counted by codepoint, as Lua counts (audit 6 L6): 255 emoji are 510 units.
+    assertTrue(!threw(() => rbac.defineRole("\u{1F600}".repeat(255))));
+    assertTrue(threw(() => rbac.defineRole("\u{1F600}".repeat(256))));
     rbac.assign("u1", "editor");
     assertTrue(rbac.hasRole("u1", "editor"));
     assertEq(rbac.hasRole("u1", null), false);

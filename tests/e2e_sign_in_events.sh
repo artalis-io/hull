@@ -91,7 +91,9 @@ stop_pid() {
 
 cleanup() {
     stop_pid "$HULL_PID"
-    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal"
+    for _d in "$SRCDIR/tests/fixtures/sign_in_events_lua" "$SRCDIR/tests/fixtures/sign_in_events_js"; do
+        rm -f "$_d/data.db" "$_d/data.db-shm" "$_d/data.db-wal"
+    done
     if [ -n "$TMPDIR_WORK" ] && [ -d "$TMPDIR_WORK" ]; then
         rm -rf "$TMPDIR_WORK"
     fi
@@ -151,7 +153,11 @@ run_flow() {
 
     echo ""
     echo "=== Step ($_label): Start sign-in-events fixture + e2e ==="
-    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal"
+    # The fixture's own database (hull dev runs it with the app's directory as
+    # its app dir): left from an earlier run, its devices made this run's
+    # first login look known, so no new-device alert fired.
+    _fx=$(dirname "$_entry")
+    rm -f "$_fx/data.db" "$_fx/data.db-shm" "$_fx/data.db-wal"
 
     PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
     HULL_LOG="$TMPDIR_WORK/hull_$_label.log"

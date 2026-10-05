@@ -23,22 +23,35 @@ function assertEq(a, b, msg) {
         throw new Error((msg || "") + " expected " + b + ", got " + a);
 }
 
-// Mock response object recording header() / status() / send() / redirect()
-// calls. Mirrors the subset of the Keel response API the helpers use.
+// The methods the real response object has (runtime/js/bindings_response.c).
+// The mock defines exactly these, so a helper calling anything else (an
+// earlier htmx.redirect called res.send, which does not exist, and answered
+// every htmx request 500) fails here too.
+const RES_METHODS = ["status", "header", "json", "html", "text", "bytes", "redirect"];
+
+// Mock response object recording calls into `rec` (data, not methods).
 function mockRes() {
     const headers = {};
-    let statusCode;
-    let body;
-    return {
+    const rec = { status: undefined, body: undefined };
+    const res = {
         headersSet: headers,
-        header(name, value) { headers[name] = value; },
-        status(code) { statusCode = code; },
-        send(s) { body = s; },
-        redirect(path) { headers.__redirect_to = path; },
-        getStatus() { return statusCode; },
-        getBody() { return body; },
+        rec,
+        status(code) { rec.status = code; return res; },
+        header(name, value) { headers[name] = value; return res; },
+        json(v) { rec.body = JSON.stringify(v); return res; },
+        html(s) { rec.body = s; return res; },
+        text(s) { rec.body = s; return res; },
+        bytes(s) { rec.body = s; return res; },
+        redirect(path) { headers.__redirect_to = path; return res; },
     };
+    return res;
 }
+
+test("mock response exposes only the real response methods", () => {
+    const res = mockRes();
+    const fns = Object.keys(res).filter((k) => typeof res[k] === "function").sort();
+    assertEq(fns.join(","), RES_METHODS.slice().sort().join(","));
+});
 
 // ── Request-inspection helpers ────────────────────────────────────────
 
@@ -187,8 +200,8 @@ test("redirect on htmx request sets HX-Redirect + 204", () => {
     const res = mockRes();
     htmx.redirect(req, res, "/after-login");
     assertEq(res.headersSet["HX-Redirect"], "/after-login");
-    assertEq(res.getStatus(), 204);
-    assertEq(res.getBody(), "");
+    assertEq(res.rec.status, 204);
+    assertEq(res.rec.body, "");
 });
 
 // htmx assigns HX-Redirect to location.href: a javascript: URL ran script.

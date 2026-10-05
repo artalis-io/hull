@@ -4980,6 +4980,22 @@ UTEST(js_stdlib, kv_cache_suite)
     cleanup_js_caps();
 }
 
+/* auth loginPath redirect, ratelimit keys, health ping, auditLog kinds,
+ * csrf safeMethods (audit 6 JS M2 / L1 / L5 / L6, c_js audit-log kinds). */
+UTEST(js_stdlib, middleware_audit6_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_middleware_audit6.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, toast_suite)
 {
     init_js_with_caps();

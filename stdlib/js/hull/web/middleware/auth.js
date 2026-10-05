@@ -74,9 +74,7 @@ function sessionMiddleware(opts) {
         if (!sessionId) {
             if (optional) return 0;
             if (loginPath) {
-                res.status(302);
-                res.header("Location", loginPath);
-                res.body("");
+                res.redirect(loginPath);
                 return 1;
             }
             res.status(401);
@@ -90,9 +88,7 @@ function sessionMiddleware(opts) {
             res.header("Set-Cookie", cookie.clear(cookieName, o.cookieOpts));
             if (optional) return 0;
             if (loginPath) {
-                res.status(302);
-                res.header("Location", loginPath);
-                res.body("");
+                res.redirect(loginPath);
                 return 1;
             }
             res.status(401);

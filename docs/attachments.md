@@ -168,8 +168,11 @@ one on-disk blob (the blob layer dedupes by SHA-256).
   same transaction as the row delete
 - then runs `attachment.sweep()`, which unlinks queued blobs that have
   waited `orphan_grace` seconds (`attachment.init({ orphan_grace = N })`,
-  `orphanGrace` in JS; default 300) and that still no row references,
-  each re-checked in its own transaction
+  `orphanGrace` in JS; default 300, must be > 0) and that still no row
+  references, each re-checked in its own transaction. The inline sweep is
+  best-effort: an unlink that fails (EACCES, EROFS) leaves its queue entry
+  for a later sweep and never makes `delete` raise after the delete itself
+  succeeded
 
 Why deferred: `delete` may run inside the app's own `db.batch`, where
 its transaction is only a SAVEPOINT. Unlinking "after our commit" then
@@ -189,6 +192,13 @@ upload") instead of leaving a row pointing at nothing. A row inserted
 inside an app transaction is invisible to another process until it
 commits, so that window is only closed while it stays shorter than
 `orphan_grace` past the delete that queued the blob.
+
+When the metadata INSERT itself fails, `store` queues the new blob for
+the sweep before raising (the sweep keeps it if another row shares it).
+Not covered: a `store` inside an app `db.batch` that later rolls back.
+The row and any queue entry go with the rollback, and the blob stays on
+disk unreferenced; store uploads outside a transaction that may roll
+back, or delete the attachment explicitly on the failure path.
 
 ## Serving over HTTP
 

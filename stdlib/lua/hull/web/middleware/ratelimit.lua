@@ -156,7 +156,14 @@ function ratelimit.middleware(opts)
     end
 
     return function(req, res)
+        -- Buckets are keyed by value: a table is a fresh key on every request
+        -- (and nil cannot index), so nothing was ever limited. Only a string
+        -- or a number is a key.
         local key = key_fn(req)
+        if type(key) == "number" and key == key then key = tostring(key) end
+        if type(key) ~= "string" then
+            error("ratelimit: key must return a string or a number", 2)
+        end
         local now = time.now()
 
         local result = ratelimit.check(buckets, key, limit, window, now, saturated)

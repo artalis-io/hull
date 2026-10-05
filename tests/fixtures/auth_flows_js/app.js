@@ -60,7 +60,12 @@ authFlows.init({
         email_change:   c => ({ subject: "Confirm email change", text: "link: " + c.link }),
     },
     userFindByEmail: email => usersByEmail[email],
-    userGet:         id    => usersById[id],
+    // userGet keeps the hash out of the model (a common adapter habit):
+    // auth-flows must read it through userFindByEmail (audit 6 M1).
+    userGet: (id) => {
+        const u = usersById[id];
+        return u ? { id: u.id, email: u.email, email_verified: u.email_verified } : undefined;
+    },
     userCreate,
     userSetPassword: (id, pwhash) => { usersById[id].password_hash = pwhash; },
     userSetEmail:    (id, email) => {
@@ -97,6 +102,18 @@ app.use("*", "/*", (req, _res) => {
         }
     }
     return 0;
+});
+
+// requireVerifiedEmail: false without onPasswordReset is refused at init
+// (audit 6 M2), before any state changes.
+app.get("/_init_refuses_unverified_login", (_req, res) => {
+    let refused = false;
+    try {
+        authFlows.init({ stateSecret: "fixture-state-secret-aaaaaaaaaaaa",
+                         emailSend: () => {}, templates: {},
+                         requireVerifiedEmail: false });
+    } catch (e) { refused = String(e && e.message).indexOf("onPasswordReset") >= 0; }
+    res.json({ refused });
 });
 
 app.get("/_emails",         (_req, res) => res.json(sentEmails));

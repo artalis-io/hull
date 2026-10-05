@@ -409,12 +409,22 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   delivery - the human-in-the-loop / wait-for-webhook / approval primitive. A
   signal delivered **before** the workflow reaches the wait is stored and
   consumed when it gets there (no lost-signal race). `opts.timeout` (seconds)
-  makes the wait return `nil` if no signal arrives in time.
+  makes the wait return `nil` if no signal arrives in time. The outcome is
+  memoized like a step (a `__sig:<n>:<name>` row, `n` the wait's ordinal in
+  the body, written in the same transaction as the consume; a timeout is
+  recorded too), so every replay - after a later sleep or wait, a retried step,
+  a compensation run - returns what the first run returned instead of parking
+  again on the consumed signal.
 - **Saga compensation:** `ctx.step(name, fn, { compensate = cfn })` registers a
   rollback. If the workflow **fails terminally** (dead-letters), the completed
   steps' `compensate` functions run in **reverse order** (undo the charge if
   shipping can't be arranged). Compensations are at-least-once (idempotent) and
-  recorded, so a crash mid-rollback resumes.
+  recorded, so a crash mid-rollback resumes. A compensation that raises is not
+  marked compensated: its error is appended to the dead letter's `last_error`
+  ("compensation failed: <step>: <error>") and a later `jobs.retry` that ends in
+  rollback again re-runs only the failed ones. `jobs.retry` of a workflow the
+  reaper sent through a compensation run also clears that run's marker and
+  restores its original `max_attempts`, so the requeued run does new work.
 - **Deterministic replay** - the body re-runs from the top on every resume, so
   reading the clock or RNG **directly** would differ each replay and break the
   memo matching. Use the memoized primitives **`ctx.now()`**, **`ctx.random()`**,

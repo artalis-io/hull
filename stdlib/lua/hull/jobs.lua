@@ -1137,7 +1137,7 @@ function jobs.reap(opts)
     local err = "visibility timeout: worker lost after the last attempt"
     while true do
         local exhausted = db.query(
-            "SELECT id, type, queue, attempts, claim_token FROM _hull_jobs "
+            "SELECT id, type, queue, attempts, max_attempts, claim_token FROM _hull_jobs "
             .. "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts "
             .. "LIMIT 500",
             { now - vt })
@@ -1173,8 +1173,8 @@ function jobs.reap(opts)
                         if (n or 0) == 0 then return end
                         db.exec(
                             "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
-                            .. "VALUES (?, ?, NULL, 'compensating', ?)",
-                            { row.id, WF_COMPENSATE_KEY, now })
+                            .. "VALUES (?, ?, ?, 'compensating', ?)",
+                            { row.id, WF_COMPENSATE_KEY, tostring(row.max_attempts), now })
                         outcome = "compensate"
                         return
                     end
@@ -1985,26 +1985,64 @@ end
 -- non-terminal 'waiting' status (re-activated by jobs.signal). With opts.timeout
 -- the wait also arms a deadline (stored once, stable across resumes) so the
 -- reaper wakes it if no signal arrives; a timed-out wait returns nil.
-local function run_wait_signal(workflow_id, name, opts)
+--
+-- The outcome is memoized like a step, under "__sig:<n>:<name>" (`n` is the
+-- ordinal of this wait in the body, as for ctx.sleep). The body re-runs from
+-- the top on every resume (a later sleep or wait, a retried step, a
+-- compensation run), and by then the signal row is consumed: without the memo
+-- the replayed wait parked for good. The memo row is written in the same
+-- transaction as the consume, and a timeout is recorded too, so a replay returns
+-- exactly what the first run returned. A compensation run (`replay_only`) never
+-- consumes a signal: an outcome not recorded yet stops the body there.
+local SIG_TIMEOUT = "T"   -- memo of a timed-out wait; a signal is "S" .. payload
+
+local function decode_payload(enc)
+    if enc == nil or enc == "" then return nil end
+    local ok, decoded = pcall(json.decode, enc)
+    if ok then return decoded end
+    return enc
+end
+
+local function run_wait_signal(workflow_id, n, name, opts, replay_only)
     if type(name) ~= "string" or name == "" then
         error("ctx.wait_signal: name must be a non-empty string")
     end
-    local rows = db.query(
-        "SELECT payload FROM _hull_workflow_signals WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
-        { workflow_id, name })
-    if rows and #rows > 0 then
-        db.exec("UPDATE _hull_workflow_signals SET consumed_at=? WHERE workflow_id=? AND name=?",
-            { time.now(), workflow_id, name })
-        if rows[1].payload == nil then return nil end
-        local ok, decoded = pcall(json.decode, rows[1].payload)
-        if ok then return decoded else return rows[1].payload end
+    local key = "__sig:" .. n .. ":" .. name
+    local memo = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        { workflow_id, key })
+    if memo and #memo > 0 then
+        local m = tostring(memo[1].result or "")
+        if m == SIG_TIMEOUT then return nil end
+        return decode_payload(m:sub(2))
     end
+    if replay_only then error(WF_ABORT, 0) end
+    local got, enc = false, nil
+    db.batch(function()
+        local rows = db.query(
+            "SELECT payload FROM _hull_workflow_signals "
+            .. "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
+            { workflow_id, name })
+        if not (rows and #rows > 0) then return end
+        local changed = db.exec(
+            "UPDATE _hull_workflow_signals SET consumed_at=? "
+            .. "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
+            { time.now(), workflow_id, name })
+        if (changed or 0) == 0 then return end
+        enc = rows[1].payload
+        db.exec(
+            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+            .. "VALUES (?, ?, ?, 'done', ?)",
+            { workflow_id, key, "S" .. (enc or ""), time.now() })
+        got = true
+    end)
+    if got then return decode_payload(enc) end
     local deadline = 0
     if opts and opts.timeout then
-        local key = "__waitdl:" .. name
+        local dkey = "__waitdl:" .. name
         local drows = db.query(
             "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
-            { workflow_id, key })
+            { workflow_id, dkey })
         if drows and #drows > 0 then
             deadline = tonumber(drows[1].result) or 0
         else
@@ -2012,27 +2050,47 @@ local function run_wait_signal(workflow_id, name, opts)
             db.exec(
                 "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
                 .. "VALUES (?, ?, ?, 'waiting', ?)",
-                { workflow_id, key, tostring(deadline), time.now() })
+                { workflow_id, dkey, tostring(deadline), time.now() })
         end
-        if time.now() >= deadline then return nil end   -- timed out, no signal
+        if time.now() >= deadline then   -- timed out, no signal: memoize that
+            db.insert_if_absent("_hull_workflow_steps", { "workflow_id", "step_key" },
+                { "workflow_id", "step_key", "result", "status", "created_at" },
+                { workflow_id, key, SIG_TIMEOUT, "done", time.now() })
+            return nil
+        end
     end
     error({ [YIELD] = true, waiting = true, signal_name = name, deadline = deadline })
 end
 
--- Run the compensations of completed steps in reverse order (saga rollback). Each
--- runs at most once (marked 'compensated'), so a crash mid-rollback resumes.
+-- Run the compensations of completed steps in reverse order (saga rollback). A
+-- compensation that succeeded is marked 'compensated' and never runs again, so a
+-- crash mid-rollback resumes. One that raises keeps its status: the failure is
+-- returned (as "key: error" strings) for the dead-letter's last_error, and a
+-- later jobs.retry that ends in rollback again re-runs only those.
 local function run_compensations(comps, workflow_id)
+    local failed = {}
     for i = #comps, 1, -1 do
         local c = comps[i]
         local done = db.query(
             "SELECT status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
             { workflow_id, c.key })
         if not (done and #done > 0 and done[1].status == "compensated") then
-            pcall(c.fn)   -- at-least-once; compensations must be idempotent
-            db.exec("UPDATE _hull_workflow_steps SET status='compensated' WHERE workflow_id=? AND step_key=?",
-                { workflow_id, c.key })
+            local ok, err = pcall(c.fn)   -- compensations must be idempotent
+            if ok then
+                db.exec("UPDATE _hull_workflow_steps SET status='compensated' "
+                    .. "WHERE workflow_id=? AND step_key=?", { workflow_id, c.key })
+            else
+                failed[#failed + 1] = c.key .. ": " .. tostring(err)
+            end
         end
     end
+    return failed
+end
+
+-- Append a failed-compensation list to a dead-letter error.
+local function with_comp_failures(err, failed)
+    if #failed == 0 then return err end
+    return tostring(err) .. " (compensation failed: " .. table.concat(failed, "; ") .. ")"
 end
 
 -- Build the durable ctx handed to a workflow function. `sleep_n` is a per-run
@@ -2051,8 +2109,8 @@ local function make_ctx(job, name)
     }
     -- Workflow versioning (Temporal-style patching). `frontier` = how many
     -- step-family rows this instance had recorded when THIS run began; `step_pos`
-    -- counts the step-family ops executed so far this run. Sleep / wait-deadline
-    -- rows are excluded from both (they are control rows, not body positions), so
+    -- counts the step-family ops executed so far this run. Sleep, wait-deadline
+    -- and signal-memo rows are excluded from both (they are control rows, not body positions), so
     -- the two stay aligned regardless of how a workflow interleaves sleeps.
     -- ctx.patched compares them to decide old-vs-new (see below).
     local step_pos = 0
@@ -2066,6 +2124,7 @@ local function make_ctx(job, name)
             "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? "
             .. "AND substr(step_key, 1, 8) <> '__sleep:' "
             .. "AND substr(step_key, 1, 9) <> '__waitdl:' "
+            .. "AND substr(step_key, 1, 6) <> '__sig:' "
             .. "AND step_key <> ?",
             { job.id, WF_COMPENSATE_KEY })
         return (r and r[1] and r[1].n) or 0
@@ -2105,8 +2164,10 @@ local function make_ctx(job, name)
         sleep_n = sleep_n + 1
         return no_park(run_sleep, job.id, sleep_n, seconds)
     end
+    local wait_n = 0
     ctx.wait_signal = function(signal_name, opts)
-        return no_park(run_wait_signal, job.id, signal_name, opts)
+        wait_n = wait_n + 1
+        return no_park(run_wait_signal, job.id, wait_n, signal_name, opts, compensating)
     end
     -- Deterministic primitives. A workflow body re-runs from the top on
     -- every resume; reading the clock / RNG directly would return a different
@@ -2199,7 +2260,9 @@ function jobs.workflow(name, fn)
                      deadline = res.deadline }
         end
         local max = job.max_attempts or _cfg.max_attempts
-        if (job.attempts or 0) >= max then run_compensations(ctx._comps, job.id) end
+        if (job.attempts or 0) >= max then
+            res = with_comp_failures(res, run_compensations(ctx._comps, job.id))
+        end
         error(res, 0)
     end)
     return jobs
@@ -2340,11 +2403,32 @@ end
 -- @treturn boolean  true if a dead job was requeued
 function jobs.retry(id)
     local now = time.now()
-    local n = db.exec(
-        "UPDATE _hull_jobs SET status='pending', run_at=?, attempts=0, "
-        .. "claim_token=NULL, claimed_at=NULL, last_error=NULL, updated_at=? "
-        .. "WHERE id=? AND status='dead'",
-        { now, now, id })
+    local n
+    db.batch(function()
+        n = db.exec(
+            "UPDATE _hull_jobs SET status='pending', run_at=?, attempts=0, "
+            .. "claim_token=NULL, claimed_at=NULL, last_error=NULL, updated_at=? "
+            .. "WHERE id=? AND status='dead'",
+            { now, now, id })
+        if (n or 0) == 0 then return end
+        -- A workflow the reaper sent through a compensation run carries its
+        -- marker (and a max_attempts raised by one): without clearing both, the
+        -- requeued run would start in compensation mode and never do new work.
+        local mark = db.query(
+            "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            { id, WF_COMPENSATE_KEY })
+        if mark and #mark > 0 then
+            local orig = tonumber(mark[1].result)
+            if orig and orig >= 1 then
+                db.exec("UPDATE _hull_jobs SET max_attempts=? WHERE id=?", { math.floor(orig), id })
+            else   -- a marker from before the original was recorded
+                db.exec("UPDATE _hull_jobs SET max_attempts=max_attempts-1 "
+                    .. "WHERE id=? AND max_attempts > 1", { id })
+            end
+            db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                { id, WF_COMPENSATE_KEY })
+        end
+    end)
     return (n or 0) > 0
 end
 

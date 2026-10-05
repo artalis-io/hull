@@ -1051,7 +1051,7 @@ function reap(opts) {
     const err = "visibility timeout: worker lost after the last attempt";
     for (;;) {
         const exhausted = db.query(
-            "SELECT id, type, queue, attempts, claim_token FROM _hull_jobs " +
+            "SELECT id, type, queue, attempts, max_attempts, claim_token FROM _hull_jobs " +
             "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts " +
             "LIMIT 500",
             [now - vt]) || [];
@@ -1083,8 +1083,8 @@ function reap(opts) {
                         if ((n || 0) === 0) return;
                         db.exec(
                             "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
-                            "VALUES (?, ?, NULL, 'compensating', ?)",
-                            [row.id, WF_COMPENSATE_KEY, now]);
+                            "VALUES (?, ?, ?, 'compensating', ?)",
+                            [row.id, WF_COMPENSATE_KEY, String(row.max_attempts), now]);
                         outcome = "compensate";
                         return;
                     }
@@ -1849,24 +1849,61 @@ function runSleep(workflowId, n, seconds) {
 // non-terminal 'waiting' status (re-activated by jobs.signal). With opts.timeout
 // the wait also arms a deadline (stored once, stable across resumes) so the
 // reaper wakes it if no signal arrives; a timed-out wait returns null.
-function runWaitSignal(workflowId, name, opts) {
+//
+// The outcome is memoized like a step, under "__sig:<n>:<name>" (`n` is the
+// ordinal of this wait in the body, as for ctx.sleep). The body re-runs from the
+// top on every resume (a later sleep or wait, a retried step, a compensation
+// run), and by then the signal row is consumed: without the memo the replayed
+// wait parked for good. The memo row is written in the same transaction as the
+// consume, and a timeout is recorded too, so a replay returns exactly what the
+// first run returned. A compensation run (`replayOnly`) never consumes a signal:
+// an outcome not recorded yet stops the body there.
+const SIG_TIMEOUT = "T";   // memo of a timed-out wait; a signal is "S" + payload
+
+function decodePayload(enc) {
+    if (enc == null || enc === "") return null;
+    try { return JSON.parse(enc); } catch (e) { return enc; }
+}
+
+function runWaitSignal(workflowId, n, name, opts, replayOnly) {
     if (typeof name !== "string" || name === "")
         throw new Error("ctx.waitSignal: name must be a non-empty string");
-    const rows = db.query(
-        "SELECT payload FROM _hull_workflow_signals WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
-        [workflowId, name]);
-    if (rows.length) {
-        db.exec("UPDATE _hull_workflow_signals SET consumed_at=? WHERE workflow_id=? AND name=?",
-            [time.now(), workflowId, name]);
-        if (rows[0].payload == null) return null;
-        try { return JSON.parse(rows[0].payload); } catch (e) { return rows[0].payload; }
+    const key = "__sig:" + n + ":" + name;
+    const memo = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        [workflowId, key]);
+    if (memo.length) {
+        const m = memo[0].result == null ? "" : String(memo[0].result);
+        if (m === SIG_TIMEOUT) return null;
+        return decodePayload(m.slice(1));
     }
+    if (replayOnly) throw wfAbort();
+    let got = false, enc = null;
+    db.batch(() => {
+        const rows = db.query(
+            "SELECT payload FROM _hull_workflow_signals " +
+            "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
+            [workflowId, name]);
+        if (!rows.length) return;
+        const changed = db.exec(
+            "UPDATE _hull_workflow_signals SET consumed_at=? " +
+            "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
+            [time.now(), workflowId, name]);
+        if ((changed || 0) === 0) return;
+        enc = rows[0].payload;
+        db.exec(
+            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+            "VALUES (?, ?, ?, 'done', ?)",
+            [workflowId, key, "S" + (enc == null ? "" : enc), time.now()]);
+        got = true;
+    });
+    if (got) return decodePayload(enc);
     let deadline = 0;
     if (opts && opts.timeout) {
-        const key = "__waitdl:" + name;
+        const dkey = "__waitdl:" + name;
         const drows = db.query(
             "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
-            [workflowId, key]);
+            [workflowId, dkey]);
         if (drows.length) {
             deadline = Number(drows[0].result) || 0;
         } else {
@@ -1874,9 +1911,14 @@ function runWaitSignal(workflowId, name, opts) {
             db.exec(
                 "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
                 "VALUES (?, ?, ?, 'waiting', ?)",
-                [workflowId, key, String(deadline), time.now()]);
+                [workflowId, dkey, String(deadline), time.now()]);
         }
-        if (time.now() >= deadline) return null;   // timed out, no signal
+        if (time.now() >= deadline) {   // timed out, no signal: memoize that
+            db.insertIfAbsent("_hull_workflow_steps", ["workflow_id", "step_key"],
+                ["workflow_id", "step_key", "result", "status", "created_at"],
+                [workflowId, key, SIG_TIMEOUT, "done", time.now()]);
+            return null;
+        }
     }
     const e = new Error("__hull_yield");
     e[YIELD] = true;
@@ -1886,32 +1928,51 @@ function runWaitSignal(workflowId, name, opts) {
     throw e;
 }
 
-// Run the compensations of completed steps in reverse order (saga rollback). Each
-// runs at most once (marked 'compensated'), so a crash mid-rollback resumes.
+// Run the compensations of completed steps in reverse order (saga rollback). A
+// compensation that succeeded is marked 'compensated' and never runs again, so a
+// crash mid-rollback resumes. One that throws keeps its status: the failure is
+// returned (as "key: error" strings) for the dead-letter's last_error, and a
+// later jobs.retry that ends in rollback again re-runs only those.
 async function runCompensations(comps, workflowId) {
+    const failed = [];
     for (let i = comps.length - 1; i >= 0; i--) {
         const c = comps[i];
         const done = db.query(
             "SELECT status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
             [workflowId, c.key]);
         if (!(done.length && done[0].status === "compensated")) {
-            try { await c.fn(); } catch (e) { /* at-least-once; must be idempotent */ }
+            try {
+                await c.fn();   // compensations must be idempotent
+            } catch (e) {
+                failed.push(c.key + ": " + String(e && e.message !== undefined ? e.message : e));
+                continue;
+            }
             db.exec("UPDATE _hull_workflow_steps SET status='compensated' WHERE workflow_id=? AND step_key=?",
                 [workflowId, c.key]);
         }
     }
+    return failed;
+}
+
+// Append a failed-compensation list to a dead-letter error.
+function withCompFailures(err, failed) {
+    if (!failed.length) return err;
+    const msg = (err && err.message !== undefined ? err.message : String(err)) +
+        " (compensation failed: " + failed.join("; ") + ")";
+    return new Error(msg);
 }
 
 // Build the durable ctx handed to a workflow function. `sleepN` counts sleeps;
 // `comps` collects saga compensations (registered by every ctx.step call that has
 // one, so on the terminal-failure run the list covers all completed steps).
 function makeCtx(job, name) {
-    let sleepN = 0, detN = 0;
+    let sleepN = 0, detN = 0, waitN = 0;
     const comps = [];
     // Workflow versioning (Temporal-style patching). `frontier` = how many
     // step-family rows this instance had recorded when THIS run began; `stepPos`
-    // counts the step-family ops executed so far this run. Sleep / wait-deadline
-    // rows are excluded from both (control rows, not body positions), so the two
+    // counts the step-family ops executed so far this run. Sleep, wait-deadline
+    // and signal-memo rows are excluded from both (control rows, not body
+    // positions), so the two
     // stay aligned regardless of how a workflow interleaves sleeps. ctx.patched
     // compares them to decide old-vs-new (see below).
     let stepPos = 0;
@@ -1925,6 +1986,7 @@ function makeCtx(job, name) {
             "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? " +
             "AND substr(step_key, 1, 8) <> '__sleep:' " +
             "AND substr(step_key, 1, 9) <> '__waitdl:' " +
+            "AND substr(step_key, 1, 6) <> '__sig:' " +
             "AND step_key <> ?",
             [job.id, WF_COMPENSATE_KEY]);
         return (r[0] && r[0].n) || 0;
@@ -1971,7 +2033,11 @@ function makeCtx(job, name) {
             return result;
         },
         sleep: (seconds) => { sleepN += 1; return noPark(() => runSleep(job.id, sleepN, seconds)); },
-        waitSignal: (signalName, opts) => noPark(() => runWaitSignal(job.id, signalName, opts)),
+        waitSignal: (signalName, opts) => {
+            waitN += 1;
+            const n = waitN;
+            return noPark(() => runWaitSignal(job.id, n, signalName, opts, compensating));
+        },
         // Workflow versioning: ctx.patched(patchId) lets a changed workflow branch
         // old-vs-new so in-flight instances finish on the definition they started.
         // Call it ONCE per patchId (no await - returns a boolean). Semantics:
@@ -2033,7 +2099,8 @@ function workflow(name, fn) {
                          waiting: e.waiting, signalName: e.signalName, deadline: e.deadline };
             }
             const max = (job.maxAttempts != null) ? job.maxAttempts : _cfg.maxAttempts;
-            if ((job.attempts || 0) >= max) await runCompensations(ctx._comps, job.id);
+            if ((job.attempts || 0) >= max)
+                e = withCompFailures(e, await runCompensations(ctx._comps, job.id));
             throw e;
         }
         if (res === DEAD) await runCompensations(ctx._comps, job.id);
@@ -2168,11 +2235,32 @@ function dead(opts) {
  */
 function retry(id) {
     const now = time.now();
-    const n = db.exec(
-        "UPDATE _hull_jobs SET status='pending', run_at=?, attempts=0, " +
-        "claim_token=NULL, claimed_at=NULL, last_error=NULL, updated_at=? " +
-        "WHERE id=? AND status='dead'",
-        [now, now, id]);
+    let n = 0;
+    db.batch(() => {
+        n = db.exec(
+            "UPDATE _hull_jobs SET status='pending', run_at=?, attempts=0, " +
+            "claim_token=NULL, claimed_at=NULL, last_error=NULL, updated_at=? " +
+            "WHERE id=? AND status='dead'",
+            [now, now, id]);
+        if ((n || 0) === 0) return;
+        // A workflow the reaper sent through a compensation run carries its
+        // marker (and a max_attempts raised by one): without clearing both, the
+        // requeued run would start in compensation mode and never do new work.
+        const mark = db.query(
+            "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            [id, WF_COMPENSATE_KEY]);
+        if (mark.length) {
+            const orig = Number(mark[0].result);
+            if (mark[0].result != null && Number.isFinite(orig) && orig >= 1) {
+                db.exec("UPDATE _hull_jobs SET max_attempts=? WHERE id=?", [Math.floor(orig), id]);
+            } else {   // a marker from before the original was recorded
+                db.exec("UPDATE _hull_jobs SET max_attempts=max_attempts-1 " +
+                    "WHERE id=? AND max_attempts > 1", [id]);
+            }
+            db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                [id, WF_COMPENSATE_KEY]);
+        }
+    });
     return (n || 0) > 0;
 }
 

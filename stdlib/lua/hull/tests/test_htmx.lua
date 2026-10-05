@@ -24,22 +24,35 @@ local function assert_eq(a, b, msg)
     end
 end
 
--- A mock response object that records header() calls. Mirrors the
--- subset of the Keel response API the htmx helpers use.
+-- The methods the real response object has (runtime/lua/bindings_response.c).
+-- The mock defines exactly these, so a helper calling anything else (an
+-- earlier htmx.redirect called res:send, which does not exist, and answered
+-- every htmx request 500) fails here too.
+local RES_METHODS = { "bytes", "header", "html", "json", "redirect", "status", "text" }
+
+-- A mock response object recording calls into `rec` (data, not methods).
 local function mock_res()
     local headers = {}
-    local status_code
-    local body
-    return {
-        headers_set = headers,
-        header = function(self, name, value) headers[name] = value end,
-        status = function(self, code) status_code = code end,
-        send = function(self, s) body = s end,
-        redirect = function(self, path) headers["__redirect_to"] = path end,
-        get_status = function() return status_code end,
-        get_body = function() return body end,
-    }
+    local rec = {}
+    local res = { headers_set = headers, rec = rec }
+    function res.status(self, code) rec.status = code; return self end
+    function res.header(self, name, value) headers[name] = value; return self end
+    function res.json(self, v) rec.body = v; return self end
+    function res.html(self, s) rec.body = s; return self end
+    function res.text(self, s) rec.body = s; return self end
+    function res.bytes(self, s) rec.body = s; return self end
+    function res.redirect(self, path) headers["__redirect_to"] = path; return self end
+    return res
 end
+
+test("mock response exposes only the real response methods", function()
+    local fns = {}
+    for k, v in pairs(mock_res()) do
+        if type(v) == "function" then fns[#fns + 1] = k end
+    end
+    table.sort(fns)
+    assert_eq(table.concat(fns, ","), table.concat(RES_METHODS, ","))
+end)
 
 -- ── Request-inspection helpers ───────────────────────────────────────
 
@@ -191,8 +204,8 @@ test("redirect on htmx request sets HX-Redirect + 204", function()
     local res = mock_res()
     htmx.redirect(req, res, "/after-login")
     assert_eq(res.headers_set["HX-Redirect"], "/after-login")
-    assert_eq(res.get_status(), 204)
-    assert_eq(res.get_body(), "")
+    assert_eq(res.rec.status, 204)
+    assert_eq(res.rec.body, "")
 end)
 
 -- htmx assigns HX-Redirect to location.href: a javascript: URL ran script.

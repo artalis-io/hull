@@ -85,6 +85,9 @@
 --             password_reset = function(ctx) ... end,
 --             email_change   = function(ctx) ... end,
 --         },
+--         -- user_find_by_email must return password_hash (login and the
+--         -- verify step read it there); user_get need not. email_verified
+--         -- is a boolean (0 / 1 are accepted).
 --         user_find_by_email     = function(email) ... end,
 --         user_get               = function(user_id) ... end,
 --         user_create            = function(email, password_hash) ... end,
@@ -166,7 +169,9 @@ local _state = {
     -- default (Stripe-style). Opt-out with
     -- `require_verified_email = false` to allow login but pass
     -- `email_verified = false` on the user object so the app's
-    -- routes can decide what's gated.
+    -- routes can decide what's gated. That mode requires
+    -- on_password_reset (init refuses without it): it revokes a
+    -- pre-registrant's sessions when the address owner verifies.
     require_verified_email = true,
     email_send            = nil,
     templates             = {},
@@ -337,6 +342,45 @@ local ACTIONS = {
 local function user_uid(user)
     if type(user) ~= "table" then return nil end
     return user.id or user.user_id
+end
+
+-- Password bounds: 8..256 characters, counted by codepoint as the JS twin
+-- counts them (a byte count refused a 100-character CJK passphrase JS took),
+-- plus a byte cap that keeps the PBKDF2 input bounded. Invalid UTF-8 counts
+-- bytes. `min` is false where only the upper bound applies (a login attempt).
+local PW_MIN, PW_MAX, PW_MAX_BYTES = 8, 256, 1024
+local function password_len_ok(pw, min)
+    if type(pw) ~= "string" or #pw > PW_MAX_BYTES then return false end
+    local n = utf8.len(pw) or #pw
+    return n <= PW_MAX and (min == false or n >= PW_MIN)
+end
+
+-- email_verified as JS reads it: an adapter that returns raw rows hands back
+-- 0 / 1, and Lua treats 0 as true - login, the verify step and the magic-link
+-- gate would all take an unverified account for a verified one.
+local function is_verified(user)
+    local v = user and user.email_verified
+    return v == true or (type(v) == "number" and v ~= 0)
+end
+
+-- The account's stored password hash, read the way /login reads it: through
+-- user_find_by_email, whose contract carries password_hash. user_get need not
+-- return it (keeping the hash out of the model is a common habit), and reading
+-- it there made a missing field look like "no password". Returns the hash, nil
+-- when the account has none, or false when it cannot be determined - callers
+-- then treat the account as having one (fail closed).
+local function stored_password_hash(user)
+    local h = user and user.password_hash
+    if type(h) == "string" and h ~= "" then return h end
+    if type(user) ~= "table" or type(user.email) ~= "string" then return false end
+    local found = _state.user_find_by_email(user.email)
+    if type(found) ~= "table"
+       or tostring(user_uid(found)) ~= tostring(user_uid(user)) then
+        return false
+    end
+    h = found.password_hash
+    if type(h) == "string" and h ~= "" then return h end
+    return nil
 end
 
 -- Signature framing (base64url(JSON) || "." || hex(HMAC)) lives
@@ -1046,8 +1090,7 @@ local function handle_register(req, res)
     -- 10 MB submitted password would hash for multiple seconds at
     -- the default 600k iters. 256 covers any realistic passphrase
     -- (bcrypt's hard limit is 72 for comparison).
-    if type(body.password) ~= "string"
-       or #body.password < 8 or #body.password > 256 then
+    if not password_len_ok(body.password) then
         return res:status(400):json({ error = "invalid password length" })
     end
     -- Pwned-password check runs BEFORE user_find_by_email so a
@@ -1101,7 +1144,7 @@ local function handle_verify_resend(req, res)
         return res:status(400):json({ error = "invalid email" })
     end
     local user = _state.user_find_by_email(body.email)
-    if not user or user.email_verified then return generic_ok(res) end
+    if not user or is_verified(user) then return generic_ok(res) end
     local user_id = user_uid(user)
     local origin = origin_for(req)
     after_response(function()
@@ -1201,7 +1244,7 @@ local function handle_verify_page(req, res)
     if not user then
         return secure_html(res):status(400):html("verification failed")
     end
-    if user.email_verified then
+    if is_verified(user) then
         return res:redirect(_state.verify_redirect)
     end
     if _state.verify_form_redirect then
@@ -1229,14 +1272,14 @@ local function handle_verify(req, res)
         return verify_fail(req, res, 400, "verification failed")
     end
     local uid = user_uid(user)
-    if user.email_verified then
+    if is_verified(user) then
         mark_token_used(token, env.exp)
         return verify_ok(req, res)
     end
 
     if body.new_password ~= nil then
         local pw = body.new_password
-        if type(pw) ~= "string" or #pw < 8 or #pw > 256 then
+        if not password_len_ok(pw) then
             return verify_fail(req, res, 400, "invalid password length")
         end
         if check_pwned(pw) then
@@ -1262,8 +1305,8 @@ local function handle_verify(req, res)
     -- check - this route must not be a second, unthrottled oracle.
     local ip_key = attempt_ip_key(uid, req)
     local locked = lockout_remaining(ip_key) > 0 or lockout_remaining(uid) > 0
-    local ok = not locked and #pw <= 256 and type(user.password_hash) == "string"
-               and crypto.verify_password(pw, user.password_hash)
+    local stored = not locked and password_len_ok(pw, false) and stored_password_hash(user)
+    local ok = type(stored) == "string" and crypto.verify_password(pw, stored)
     if not ok then
         if not locked then
             bump_failed_login(ip_key, _state.max_failed_logins)
@@ -1336,8 +1379,7 @@ local function handle_login(req, res)
     -- amplification DoS via mega-passwords. Generic error keeps
     -- enumeration-safety (over-length is just another wrong cred).
     if not is_email_ish(body.email)
-       or type(body.password) ~= "string"
-       or #body.password > 256 then
+       or not password_len_ok(body.password, false) then
         return res:status(400):json({ error = "invalid credentials" })
     end
     local user = _state.user_find_by_email(body.email)
@@ -1374,7 +1416,7 @@ local function handle_login(req, res)
         end
         return res:status(401):json({ error = "invalid credentials" })
     end
-    if _state.require_verified_email and not user.email_verified then
+    if _state.require_verified_email and not is_verified(user) then
         return res:status(403):json({ error = "email not verified" })
     end
     -- Successful auth - clear this address's row and the account-wide one
@@ -1393,11 +1435,18 @@ local function handle_logout(req, res)
     -- session - that's the app's responsibility. Apps that want
     -- a "logout" event in the audit log can call audit_log.record
     -- inside their on_logout callback.
-    if _state.on_logout then
-        _state.on_logout(req, res)
-    else
-        res:redirect("/")
+    -- A cross-site POST (an attacker page auto-submitting a form) is
+    -- refused, as oauth's logout does: SameSite=Lax keeps the session cookie
+    -- off it, but the clearing Set-Cookie in the answer would still sign the
+    -- victim out.
+    local site = req.headers and req.headers["sec-fetch-site"]
+    if site == "cross-site" then
+        return res:status(403):json({ error = "forbidden" })
     end
+    if _state.on_logout then
+        return _state.on_logout(req, res)
+    end
+    res:redirect("/")
 end
 
 local function handle_magic_link(req, res)
@@ -1456,9 +1505,10 @@ local function handle_magic_link_consume(req, res)
     -- lock out an owner who chose it. So the click goes through the verify
     -- step instead - confirm that password or set a new one (handle_verify).
     -- A passwordless account (magic_link_auto_signup) has nothing to keep.
-    if not user.email_verified then
+    -- An account whose hash cannot be read is treated as having one.
+    if not is_verified(user) then
         local uid = user_uid(user)
-        if type(user.password_hash) == "string" and user.password_hash ~= "" then
+        if stored_password_hash(user) ~= nil then
             local vtok = issue_token(uid, ACTIONS.verify_email, _state.verify_ttl)
             gc_expired()
             if _state.verify_form_redirect then
@@ -1554,8 +1604,7 @@ end
 local function handle_password_reset_confirm(req, res)
     local body = parse_body(req)
     -- Same upper bound as handle_register; see comment there.
-    if type(body.password) ~= "string"
-       or #body.password < 8 or #body.password > 256 then
+    if not password_len_ok(body.password) then
         return res:status(400):json({ error = "invalid password length" })
     end
     -- Same pwned-password gate as register so a reset can't be used
@@ -1574,7 +1623,7 @@ local function handle_password_reset_confirm(req, res)
         return res:status(400):json({ error = "reset failed" })
     end
     local new_hash = crypto.hash_password(body.password)
-    if not user.email_verified then
+    if not is_verified(user) then
         -- The reset link proves the mailbox and its holder chose this
         -- password: the account is verified, as a verify with new_password
         -- does - and loses what a pre-registrant could have attached.
@@ -1917,6 +1966,20 @@ function M.init(opts)
     end
     if type(opts.templates) ~= "table" then
         error("auth-flows.init: templates table required")
+    end
+    -- Unverified accounts can sign in, so a pre-registrant (anyone can
+    -- register any address) can hold a session when the mailbox holder sets
+    -- the password at verification. Sessions are the app's: on_password_reset
+    -- is the only place they can be revoked, so it is required here.
+    -- (Checked before any state changes, so a refused init leaves none.)
+    local rve = opts.require_verified_email
+    if rve == nil then rve = _state.require_verified_email end
+    if not rve and type(opts.on_password_reset) ~= "function" then
+        error("auth-flows.init: require_verified_email = false needs "
+            .. "on_password_reset (e.g. function(req, res, user) "
+            .. "session.destroy_all(user.id) end): it is what revokes a "
+            .. "pre-registrant's sessions when the address owner sets the "
+            .. "password; pass a no-op function if the app keeps no sessions")
     end
     -- Round-9 HIGH-1: require ONE of public_origin / trusted_hosts.
     -- See _state.public_origin docstring for the threat model.

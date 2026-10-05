@@ -44,7 +44,7 @@ local function user_create(email, pwhash)
     local id = "u" .. tostring(next_id)
     local u = {
         id = id, email = email, password_hash = pwhash,
-        email_verified = false,
+        email_verified = 0,   -- a raw row: 0 / 1 (audit 6: Lua read 0 as true)
     }
     users_by_email[email] = u
     users_by_id[id] = u
@@ -90,7 +90,13 @@ authflows.init({
         end,
     },
     user_find_by_email = function(email) return users_by_email[email] end,
-    user_get           = function(id)    return users_by_id[id] end,
+    -- user_get keeps the hash out of the model (a common adapter habit):
+    -- auth-flows must read it through user_find_by_email (audit 6 M1).
+    user_get           = function(id)
+        local u = users_by_id[id]
+        if not u then return nil end
+        return { id = u.id, email = u.email, email_verified = u.email_verified }
+    end,
     user_create        = user_create,
     user_set_password  = function(id, pwhash)
         users_by_id[id].password_hash = pwhash
@@ -102,7 +108,7 @@ authflows.init({
         users_by_email[email] = u
     end,
     user_set_email_verified = function(id, v)
-        users_by_id[id].email_verified = v
+        users_by_id[id].email_verified = v and 1 or 0
     end,
     on_login = function(req, res, user)
         local sid = session.create({ user_id = user.id, email = user.email })
@@ -135,6 +141,19 @@ app.use("*", "/*", function(req, _res)
 end)
 
 -- ── Debug endpoints (fixture-only) ──────────────────────────────────
+
+-- require_verified_email = false without on_password_reset is refused at
+-- init (audit 6 M2), before any state changes.
+app.get("/_init_refuses_unverified_login", function(_req, res)
+    local ok, err = pcall(authflows.init, {
+        state_secret = ("fixture-state-secret-aaaaaaaaaaaa"),
+        email_send = function() end,
+        templates = {},
+        require_verified_email = false,
+    })
+    res:json({ refused = not ok
+        and tostring(err):find("on_password_reset", 1, true) ~= nil })
+end)
 
 app.get("/_emails", function(_req, res)
     res:json(sent_emails)

@@ -146,7 +146,13 @@ function middleware(opts) {
     const headerName = o.headerName || "X-CSRF-Token";
     const fieldName = o.fieldName || "_csrf";
     const requireSession = o.requireSession || false;
-    const safeMethods = { "GET": true, "HEAD": true, "OPTIONS": true };
+    // opts.safeMethods was documented (and honoured by Lua) but ignored here.
+    // A null-prototype set, so "constructor" / "__proto__" are not safe.
+    const safeList = Array.isArray(o.safeMethods) ? o.safeMethods : ["GET", "HEAD", "OPTIONS"];
+    const safeMethods = Object.create(null);
+    for (let i = 0; i < safeList.length; i++) {
+        if (typeof safeList[i] === "string") safeMethods[safeList[i]] = true;
+    }
 
     if (!secret)
         throw new Error("csrf.middleware requires opts.secret");

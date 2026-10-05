@@ -146,7 +146,16 @@ function middleware(opts) {
     }
 
     return function ratelimitMiddleware(req, res) {
-        const key = keyFn(req);
+        // Buckets are keyed by identity: an object or a Promise (an async key
+        // function) is a fresh key on every request, so nothing was ever
+        // limited. Only a string or a finite number is a key.
+        let key = keyFn(req);
+        if (typeof key === "number" && Number.isFinite(key)) key = String(key);
+        if (typeof key !== "string") {
+            if (key && typeof key.then === "function") key.then(null, () => {});
+            throw new TypeError("ratelimit: key must return a string or a number "
+                + "(an async key function is not supported: middleware is synchronous)");
+        }
         const now = time.now();
 
         const result = check(buckets, key, limit, window, now, saturated);

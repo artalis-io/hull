@@ -706,6 +706,40 @@ function userId(user) {
     return user.id ?? user.user_id ?? null;
 }
 
+// The account's stored password hash, read the way /login reads it: through
+// userFindByEmail, whose contract carries password_hash. userGet need not
+// return it (keeping the hash out of the model is a common habit), and reading
+// it there made a missing field look like "no password". Returns the hash,
+// null when the account has none, or false when it cannot be determined -
+// callers then treat the account as having one (fail closed).
+function storedPasswordHash(user) {
+    let h = user && user.password_hash;
+    if (typeof h === "string" && h !== "") return h;
+    if (!user || typeof user !== "object" || typeof user.email !== "string") return false;
+    const found = findByEmail(user.email);
+    if (!found || typeof found !== "object"
+        || String(userId(found)) !== String(userId(user))) return false;
+    h = found.password_hash;
+    if (typeof h === "string" && h !== "") return h;
+    return null;
+}
+
+// Password bounds: 8..256 characters counted by codepoint (as the Lua twin
+// counts them; .length counts UTF-16 units), plus a UTF-8 byte cap that keeps
+// the PBKDF2 input bounded. `min` is false where only the upper bound applies
+// (a login attempt).
+const PW_MIN = 8, PW_MAX = 256, PW_MAX_BYTES = 1024;
+function passwordLenOk(pw, min) {
+    if (typeof pw !== "string" || pw.length > PW_MAX_BYTES) return false;
+    let chars = 0, bytes = 0;
+    for (const ch of pw) {
+        const cp = ch.codePointAt(0);
+        chars++;
+        bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    }
+    return chars <= PW_MAX && bytes <= PW_MAX_BYTES && (min === false || chars >= PW_MIN);
+}
+
 // The request's host, strictly: X-Forwarded-Host only behind a trusted
 // proxy (a direct client sets any header it likes), its first entry, and
 // nothing but a hostname or bracketed IPv6 literal plus an optional numeric
@@ -784,8 +818,7 @@ async function handleRegister(req, res) {
     // 10 MB submitted password would hash for multiple seconds at
     // the default 600k iters. 256 covers any realistic passphrase
     // (bcrypt's hard limit is 72 for comparison).
-    if (typeof body.password !== "string"
-        || body.password.length < 8 || body.password.length > 256) {
+    if (!passwordLenOk(body.password)) {
         return res.status(400).json({ error: "invalid password length" });
     }
     // Pwned check runs BEFORE userFindByEmail so the same error
@@ -931,7 +964,7 @@ async function handleVerify(req, res) {
 
     if (body.new_password !== undefined) {
         const pw = body.new_password;
-        if (typeof pw !== "string" || pw.length < 8 || pw.length > 256) {
+        if (!passwordLenOk(pw)) {
             return verifyFail(req, res, 400, "invalid password length");
         }
         if (await checkPwned(pw)) {
@@ -955,8 +988,8 @@ async function handleVerify(req, res) {
     // unthrottled password oracle.
     const ipKey = attemptIpKey(uid, req);
     const locked = lockoutRemaining(ipKey) > 0 || lockoutRemaining(uid) > 0;
-    const ok = !locked && pw.length <= 256 && typeof user.password_hash === "string"
-        && crypto.verifyPassword(pw, user.password_hash);
+    const stored = !locked && passwordLenOk(pw, false) && storedPasswordHash(user);
+    const ok = typeof stored === "string" && crypto.verifyPassword(pw, stored);
     if (!ok) {
         if (!locked) {
             bumpFailedLogin(ipKey, _state.maxFailedLogins);
@@ -1020,8 +1053,7 @@ function handleLogin(req, res) {
     // amplification DoS via mega-passwords. Generic error keeps
     // enumeration-safety (over-length is just another wrong cred).
     if (!isEmailIsh(body.email)
-        || typeof body.password !== "string"
-        || body.password.length > 256) {
+        || !passwordLenOk(body.password, false)) {
         return res.status(400).json({ error: "invalid credentials" });
     }
     const user = findByEmail(body.email);
@@ -1075,8 +1107,15 @@ function handleLogout(req, res) {
     // user_id isn't known here without inspecting the session -
     // app's responsibility. Apps that want a "logout" event can
     // call auditLog.record inside their onLogout callback.
-    if (_state.onLogout) _state.onLogout(req, res);
-    else res.redirect("/");
+    // A cross-site POST (an attacker page auto-submitting a form) is refused,
+    // as oauth's logout does: SameSite=Lax keeps the session cookie off it,
+    // but the clearing Set-Cookie in the answer would still sign the victim
+    // out. An async onLogout is returned so the dispatcher awaits it.
+    if (req.headers && req.headers["sec-fetch-site"] === "cross-site") {
+        return res.status(403).json({ error: "forbidden" });
+    }
+    if (_state.onLogout) return _state.onLogout(req, res);
+    res.redirect("/");
 }
 
 function handleMagicLink(req, res) {
@@ -1125,7 +1164,7 @@ function handleMagicLinkConsume(req, res) {
     // passwordless account (magicLinkAutoSignup) has nothing to keep.
     if (!user.email_verified) {
         const uid = userId(user);
-        if (typeof user.password_hash === "string" && user.password_hash !== "") {
+        if (storedPasswordHash(user) !== null) {
             const vtok = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
             gcExpired();
             if (_state.verifyFormRedirect) {
@@ -1214,8 +1253,7 @@ function handlePasswordResetRequest(req, res) {
 async function handlePasswordResetConfirm(req, res) {
     const body = parseBody(req);
     // Same upper bound as handleRegister; see comment there.
-    if (typeof body.password !== "string"
-        || body.password.length < 8 || body.password.length > 256) {
+    if (!passwordLenOk(body.password)) {
         return res.status(400).json({ error: "invalid password length" });
     }
     if (await checkPwned(body.password)) {
@@ -1516,6 +1554,20 @@ function init(opts) {
     }
     if (!opts.templates || typeof opts.templates !== "object") {
         throw new Error("auth-flows.init: templates object required");
+    }
+    // Unverified accounts can sign in, so a pre-registrant (anyone can
+    // register any address) can hold a session when the mailbox holder sets
+    // the password at verification. Sessions are the app's: onPasswordReset
+    // is the only place they can be revoked, so it is required here.
+    // (Checked before any state changes, so a refused init leaves none.)
+    const rve = opts.requireVerifiedEmail !== undefined
+        ? opts.requireVerifiedEmail : _state.requireVerifiedEmail;
+    if (!rve && typeof opts.onPasswordReset !== "function") {
+        throw new Error("auth-flows.init: requireVerifiedEmail: false needs "
+            + "onPasswordReset (e.g. (req, res, user) => session.destroyAll(user.id)): "
+            + "it is what revokes a pre-registrant's sessions when the address "
+            + "owner sets the password; pass a no-op function if the app keeps "
+            + "no sessions");
     }
     // Round-9 HIGH-1: require ONE of publicOrigin / trustedHosts.
     // See the Lua sibling docstring for the threat model.

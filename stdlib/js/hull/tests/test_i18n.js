@@ -180,6 +180,18 @@ test("small number no grouping", () => {
     assertEq(i18n.number(42), "42");
 });
 
+// Audit 6 L7: no exponent leaks, a rounded fraction carries, 1e21+ is not grouped.
+test("number fraction edge cases", () => {
+    i18n.load("en", en);
+    i18n.locale("en");
+    assertEq(i18n.number(2.00000000001), "2");
+    assertEq(i18n.number(1.99999999999), "2");
+    assertEq(i18n.number(0.1 + 0.2), "0.3");
+    assertEq(i18n.number(1234.5678), "1,234.5678");
+    assertEq(i18n.number(1e21), "1e+21");
+    assertEq(i18n.number(-0.00000000001), "0");
+});
+
 // ── date() ───────────────────────────────────────────────────────────
 
 test("date with known timestamp", () => {
