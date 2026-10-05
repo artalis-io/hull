@@ -150,6 +150,15 @@ test("sql cache stays bounded and evicts the oldest writes", function()
     assert_eq(h:get("k40"), "40")
 end)
 
+test("sql cache counts keys cas and incr create (audit 6 L4)", function()
+    local h = cache.open({ backend = "sqlite", database = db,
+                           namespace = "t6-sql3", max_items = 10 })
+    for i = 1, 40 do h._s:incr("c" .. i, 1) end
+    for i = 1, 40 do h._s:cas("l" .. i, nil, "x") end
+    local n = h._s:stats().items
+    assert_true(n <= 10, "bounded: " .. tostring(n))
+end)
+
 -- ── rbac names (DA-L6) ──────────────────────────────────────────────
 
 test("rbac refuses a missing / non-string / over-long name", function()
@@ -161,6 +170,9 @@ test("rbac refuses a missing / non-string / over-long name", function()
     assert_true(not pcall(rbac.define_role, "ok", { 5 }), "numeric permission")
     assert_true(not pcall(rbac.grant, "admin", nil), "nil permission")
     assert_true(pcall(rbac.define_role, string.rep("r", 255)), "255 bytes ok")
+    -- Counted by character, as JS counts (audit 6 L6): 255 x 2-byte chars.
+    assert_true(pcall(rbac.define_role, string.rep("\u{e9}", 255)), "255 chars ok")
+    assert_true(not pcall(rbac.define_role, string.rep("\u{e9}", 256)), "256 chars")
     rbac.assign("u1", "editor")
     assert_true(rbac.has_role("u1", "editor"))
     assert_eq(rbac.has_role("u1", nil), false)

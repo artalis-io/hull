@@ -73,24 +73,30 @@ function rbac.init(_opts)
     ]])
 end
 
--- A role or permission name: a non-empty string of at most 255 bytes (the
--- VARCHAR(255) key columns). Without the check, assign(u, nil) left a NULL
--- role row on SQLite and then failed the join insert, a numeric role 1 never
--- matched has_role(u, "1"), and an over-long name raised on strict MySQL.
+-- A role or permission name: a non-empty string of at most 255 characters
+-- (the VARCHAR(255) key columns count characters; so does the JS twin, by
+-- codepoint). Without the check, assign(u, nil) left a NULL role row on SQLite
+-- and then failed the join insert, a numeric role 1 never matched
+-- has_role(u, "1"), and an over-long name raised on strict MySQL. A name that
+-- is not valid UTF-8 counts bytes.
 local MAX_NAME = 255
+local function name_len(value)
+    return utf8.len(value) or #value
+end
+
 local function require_name(value, what)
     if type(value) ~= "string" or value == "" then
         error("rbac: " .. what .. " is required (a non-empty string)", 3)
     end
-    if #value > MAX_NAME then
-        error("rbac: " .. what .. " is longer than " .. MAX_NAME .. " bytes", 3)
+    if name_len(value) > MAX_NAME then
+        error("rbac: " .. what .. " is longer than " .. MAX_NAME .. " characters", 3)
     end
     return value
 end
 
 -- A lookup by a name that cannot exist answers false rather than raising.
 local function valid_name(value)
-    return type(value) == "string" and value ~= "" and #value <= MAX_NAME
+    return type(value) == "string" and value ~= "" and name_len(value) <= MAX_NAME
 end
 
 --- Define a role and optionally grant it permissions. Idempotent.

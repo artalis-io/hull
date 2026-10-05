@@ -105,7 +105,7 @@ function redirect(req, res, path, opts) {
     if (is(req)) {
         res.header("HX-Redirect", path);
         res.status(204);
-        res.send("");
+        res.text("");
     } else {
         res.redirect(path);
     }

@@ -43,6 +43,13 @@ local DEFAULT_ENDPOINT = "https://api.pwnedpasswords.com/range/"
 
 local M = {}
 
+-- The runtime's refusals to wait (runtime/lua/async.c hl_lua_check_can_wait).
+local function is_wait_refusal(err)
+    local s = tostring(err)
+    return s:find("cannot wait while a transaction is open", 1, true) ~= nil
+        or s:find("can only wait in a handler", 1, true) ~= nil
+end
+
 -- Health state. Updated after every HIBP attempt. `ok=true` only
 -- when the last attempt produced a real answer (any 200 response).
 -- `last_error` is the textual reason for the most recent failure;
@@ -106,6 +113,10 @@ function M.check(password, opts)
     local ok, resp = pcall(http_client.async.get, endpoint .. prefix, {
         headers = { ["User-Agent"] = "hull-pwned-check/1" },
     })
+    -- The runtime refusing the wait (a transaction open, called where it
+    -- cannot wait) is a bug in the caller, not an HIBP outage: failing open
+    -- on it turned the check off, quietly, for every such call. Re-raise.
+    if not ok and is_wait_refusal(resp) then error(resp, 0) end
     if not ok or not resp or resp.status ~= 200 or not resp.body then
         _health.ok            = false
         _health.last_check_at = time.now()

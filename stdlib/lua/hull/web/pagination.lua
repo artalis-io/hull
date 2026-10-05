@@ -27,8 +27,8 @@ end
 
 local function to_int(x, default)
     local n = tonumber(x)
-    if not n or n ~= math.floor(n) or n < 0 then return default end
-    return n
+    if not n or n == math.huge or n ~= math.floor(n) or n < 0 then return default end
+    return math.tointeger(n) or n
 end
 
 -- Build the URL for a given page, preserving (and not duplicating)
@@ -120,18 +120,20 @@ end
 --   an array of `{ page, url, active }` or `{ ellipsis = true }` entries.
 function pagination.render(total, opts)
     opts = opts or {}
-    local per_page = opts.per_page or 20
-    local default_per_page = opts.default_per_page or per_page
+    -- Integers, coerced as the JS twin coerces them: a string from req.query
+    -- compared with a number raised, a fraction produced a fractional link,
+    -- and per_page = 0 made `pages` infinite (links carried page=inf).
+    local per_page = math.max(1, to_int(opts.per_page, 20))
+    local default_per_page = to_int(opts.default_per_page, per_page)
     local base = opts.base_url or ""
-    local window = math.floor(tonumber(opts.window) or 2)
-    if window < 0 then window = 0 end
-    if total < 0 then total = 0 end
+    local window = opts.window == nil and 2 or to_int(opts.window, 0)
+    total = tonumber(total)
+    if not total or total ~= total or total < 0 or total == math.huge then total = 0 end
 
     local pages = math.max(1, math.ceil(total / per_page))
-    -- An integer page (a string from req.query compared with a number
-    -- raised; a fraction produced a fractional link), and a window no wider
-    -- than the page count (anything more is only loop iterations).
-    local page = clamp(math.floor(tonumber(opts.page) or 1), 1, pages)
+    -- A window no wider than the page count (anything more is only loop
+    -- iterations).
+    local page = clamp(to_int(opts.page, 1), 1, pages)
     if window > pages then window = pages end
 
     -- Collect target page numbers as a set, then sort. Using a set

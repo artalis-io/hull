@@ -1561,6 +1561,142 @@ app.main(async (ctx) => {
 echo "== durable signals: Lua =="; check_signals "lua" "lua" "$LUA_SIGNALS"
 echo "== durable signals: JS =="; check_signals "js" "js" "$JS_SIGNALS"
 
+# ── durable execution: a consumed signal replays (memoized wait) ─────────
+# The body re-runs from the top on every resume, by which time a signal it
+# already took is consumed. Two sequential waits, a step that fails once after
+# them (retry), then a durable sleep: every resume must replay the earlier waits
+# from their memo rows instead of parking for good. Then the reaper's
+# compensation run: a wait before the last completed step must not stop the
+# replay early (that step's compensation runs too), and jobs.retry clears the
+# compensation marker so the requeued run does new work again.
+check_signal_replay() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"REPLAY s1=waiting s2=waiting s3=pending fin=done res=A,B tries=2"*)
+            pass "$label: consumed signals replay (2 waits, retried step, later sleep)" ;;
+        *) fail "$label: signal replay" "$out" ;;
+    esac
+    case "$out" in
+        *"COMP st=dead log=recall,uncharge retried=true fin=done max=2"*)
+            pass "$label: compensation run replays past a wait; retry clears the marker" ;;
+        *) fail "$label: compensation run past a wait" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_SIG_REPLAY='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local tries = 0
+  jobs.workflow("seq", function(w)
+    local a = w.wait_signal("one")
+    local b = w.wait_signal("two")
+    w.step("flaky", function()
+      tries = tries + 1
+      if tries == 1 then error("once") end
+      return 1
+    end)
+    w.sleep(1)
+    return a.v .. "," .. b.v
+  end)
+  local id = jobs.start("seq", {})
+  jobs.work({ batch = 1 })
+  local s1 = jobs.get(id).status
+  jobs.signal(id, "one", { v = "A" }); jobs.work({ batch = 1 })
+  local s2 = jobs.get(id).status
+  jobs.signal(id, "two", { v = "B" }); jobs.work({ batch = 1 })   -- flaky fails
+  jobs.work({ batch = 1 })                                        -- retry: sleeps
+  local s3 = jobs.get(id).status
+  hull.sleep(1500)
+  jobs.work({ batch = 1 })
+  local r = jobs.result(id)
+  ctx.stdout:write(("REPLAY s1=%s s2=%s s3=%s fin=%s res=%s tries=%d\n"):format(
+    s1, s2, s3, r.status, tostring(r.result), tries))
+
+  local log, fail_final = {}, true
+  jobs.workflow("comp", function(w)
+    w.step("charge", function() return 1 end,
+      { compensate = function() log[#log+1] = "uncharge" end })
+    w.wait_signal("ok")
+    w.step("ship", function() return 1 end,
+      { compensate = function() log[#log+1] = "recall" end })
+    w.step("final", function() if fail_final then error("down") end return 1 end)
+    return "ok"
+  end)
+  local c = jobs.start("comp", {}, { max_attempts = 2 })
+  jobs.work({ batch = 1 })                         -- parks on ok
+  jobs.signal(c, "ok"); jobs.work({ batch = 1 })   -- final fails: attempt 1 of 2
+  jobs.claim({ batch = 1 })                        -- attempt 2, worker "lost"
+  jobs.reap({ visibility_timeout = 0 })            -- compensation run queued
+  jobs.work({ batch = 1 })
+  local st = jobs.get(c).status
+  fail_final = false
+  local retried = jobs.retry(c)
+  jobs.work({ batch = 1 })
+  ctx.stdout:write(("COMP st=%s log=%s retried=%s fin=%s max=%d\n"):format(
+    st, table.concat(log, ","), tostring(retried), jobs.get(c).status,
+    jobs.get(c).max_attempts))
+  return 0
+end)'
+
+JS_SIG_REPLAY='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  let tries = 0;
+  jobs.workflow("seq", async (w) => {
+    const a = await w.waitSignal("one");
+    const b = await w.waitSignal("two");
+    await w.step("flaky", () => {
+      tries++;
+      if (tries === 1) throw new Error("once");
+      return 1;
+    });
+    await w.sleep(1);
+    return a.v + "," + b.v;
+  });
+  const id = jobs.start("seq", {});
+  await jobs.work({ batch: 1 });
+  const s1 = jobs.get(id).status;
+  jobs.signal(id, "one", { v: "A" }); await jobs.work({ batch: 1 });
+  const s2 = jobs.get(id).status;
+  jobs.signal(id, "two", { v: "B" }); await jobs.work({ batch: 1 });
+  await jobs.work({ batch: 1 });
+  const s3 = jobs.get(id).status;
+  await hull.sleep(1500);
+  await jobs.work({ batch: 1 });
+  const r = jobs.result(id);
+  ctx.stdout.write(`REPLAY s1=${s1} s2=${s2} s3=${s3} fin=${r.status} res=${r.result} tries=${tries}\n`);
+
+  const log = [];
+  let failFinal = true;
+  jobs.workflow("comp", async (w) => {
+    await w.step("charge", () => 1, { compensate: () => { log.push("uncharge"); } });
+    await w.waitSignal("ok");
+    await w.step("ship", () => 1, { compensate: () => { log.push("recall"); } });
+    await w.step("final", () => { if (failFinal) throw new Error("down"); return 1; });
+    return "ok";
+  });
+  const c = jobs.start("comp", {}, { maxAttempts: 2 });
+  await jobs.work({ batch: 1 });
+  jobs.signal(c, "ok"); await jobs.work({ batch: 1 });
+  jobs.claim({ batch: 1 });
+  await jobs.reap({ visibilityTimeout: 0 });
+  await jobs.work({ batch: 1 });
+  const st = jobs.get(c).status;
+  failFinal = false;
+  const retried = jobs.retry(c);
+  await jobs.work({ batch: 1 });
+  ctx.stdout.write(`COMP st=${st} log=${log.join(",")} retried=${retried} fin=${jobs.get(c).status} max=${jobs.get(c).maxAttempts}\n`);
+  return 0;
+});'
+
+echo "== durable signal replay: Lua =="; check_signal_replay "lua" "lua" "$LUA_SIG_REPLAY"
+echo "== durable signal replay: JS =="; check_signal_replay "js" "js" "$JS_SIG_REPLAY"
+
 # ── durable execution: saga compensation ─────────────────────────
 # A workflow charges (a compensable step), then a later step fails terminally
 # (max_attempts=1). On dead-letter the completed steps' compensations run in

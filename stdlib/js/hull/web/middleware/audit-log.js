@@ -254,10 +254,25 @@ function list(userId, opts) {
     opts = opts || {};
     const limit = opts.limit || 50;
     let rows;
-    if (opts.kinds && opts.kinds.length > 0) {
-        const placeholders = opts.kinds.map(() => "?").join(",");
-        const params = [userId].concat(opts.kinds);
-        params.push(limit);
+    // The IN list is built by a counted loop over a real array of strings,
+    // never by calling the app's `.map` / `.join` (or a patched
+    // Array.prototype): an object posing as `kinds` returned SQL text that
+    // ran with stdlib identity on the internal connection.
+    const kinds = opts.kinds;
+    if (kinds !== undefined && kinds !== null && !Array.isArray(kinds))
+        throw new TypeError("auditLog.list: kinds must be an array of strings");
+    const nk = kinds ? kinds.length : 0;
+    if (nk > 0) {
+        let placeholders = "";
+        const params = [userId];
+        for (let i = 0; i < nk; i++) {
+            const k = kinds[i];
+            if (typeof k !== "string")
+                throw new TypeError("auditLog.list: kinds must be an array of strings");
+            placeholders += (i === 0 ? "?" : ",?");
+            params[i + 1] = k;
+        }
+        params[nk + 1] = limit;
         rows = db.query(
             "SELECT id, event_at, kind, ip, user_agent, fingerprint, "
             + " session_id, metadata FROM _hull_audit_log "

@@ -12,17 +12,28 @@
  *     check registered via `health.register()`. Returns `200` when all
  *     pass, otherwise `503` with a per-check breakdown.
  *
- * ES modules can't conditionally import - pass the `db` module
- * explicitly via `health.setDb(dbModule)` or `opts.db`.
+ * The DB ping uses the default connection (`db.default()`), as the Lua
+ * twin does. `health.setDb(x)` / `opts.db` select another one: `x` is a
+ * connection (`dbModule.connect("name")`) or the `hull:db` module itself,
+ * whose default connection is then used.
  *
  * @license AGPL-3.0-or-later
  */
 
 import { time } from "hull:time";
 import { httpServer } from "hull:http-server";
+import { db as dbModule } from "hull:db";
 
-/* db module is optional - not all apps use a database. */
+/* The connection pinged by /ready: null = the default connection. */
 let _dbMod = null;
+
+// A connection, or the hull:db module (handles-only: it has no query of its
+// own, so pinging it threw and /ready answered 503 for ever).
+function resolveDb(m) {
+    if (m && typeof m.query === "function") return m;
+    if (m && typeof m.default === "function") return m.default();
+    return dbModule.default();
+}
 
 const _checks = {};
 let _startTime = null;
@@ -63,11 +74,11 @@ function runChecks(opts) {
     const results = {};
     let allOk = true;
 
-    // DB check (db module may not be available if app has no database)
-    if (o.dbCheck !== false && _dbMod) {
+    // DB check
+    if (o.dbCheck !== false) {
         const t0 = time.clock();
         try {
-            _dbMod.query("SELECT 1");
+            resolveDb(_dbMod).query("SELECT 1");
             const latency = Math.round((time.clock() - t0) * 10) / 10;
             results.db = { status: "ok", latency_ms: latency };
         } catch (e) {
@@ -111,14 +122,14 @@ function runChecks(opts) {
 }
 
 /**
- * Inject the db module used for the readiness DB ping.
+ * Choose the connection the readiness DB ping uses (default: the default
+ * connection). Equivalent to passing `opts.db` to `middleware()`.
  *
- * Equivalent to passing `opts.db` to `middleware()`.
- *
- * @param {Object} dbModule  The `hull:db` module value.
+ * @param {Object} conn  A connection, or the `hull:db` module (its default
+ *   connection is used).
  */
-function setDb(dbModule) {
-    _dbMod = dbModule;
+function setDb(conn) {
+    _dbMod = conn;
 }
 
 /**
@@ -135,7 +146,7 @@ function setDb(dbModule) {
  *   text and latency, and the server stats. Off by default: `/ready` is
  *   normally unauthenticated, and raw error strings (DB driver errors)
  *   and server stats went to any caller. Enable only behind auth.
- * @param {Object} [opts.db]  Inject the db module (alternative to `setDb`).
+ * @param {Object} [opts.db]  The connection to ping (alternative to `setDb`).
  * @returns {(req, res) => number}
  */
 function middleware(opts) {

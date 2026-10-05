@@ -59,18 +59,26 @@ function init(opts) {
 // coercion in the binding) or fail with a NOT NULL constraint error
 // that obscures the API misuse.
 // At most 255 characters: the VARCHAR(255) key columns (strict MySQL raised).
+// Counted by codepoint, as the columns and the Lua twin count them (.length
+// counts UTF-16 units, so an emoji was two).
 const MAX_NAME = 255;
+function nameLen(value) {
+    let n = 0;
+    for (const _c of value) n++;
+    return n;
+}
+
 function requireName(value, what) {
     if (typeof value !== "string" || value.length === 0)
         throw new Error("rbac: " + what + " is required");
-    if (value.length > MAX_NAME)
+    if (nameLen(value) > MAX_NAME)
         throw new Error("rbac: " + what + " is longer than " + MAX_NAME + " characters");
     return value;
 }
 
 // A lookup by a name that cannot exist answers false rather than throwing.
 function validName(value) {
-    return typeof value === "string" && value.length > 0 && value.length <= MAX_NAME;
+    return typeof value === "string" && value.length > 0 && nameLen(value) <= MAX_NAME;
 }
 
 /**

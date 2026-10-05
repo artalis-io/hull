@@ -59,8 +59,11 @@ function init(opts) {
     const o = opts || {};
     if (o.maxSize !== undefined) maxSize = o.maxSize;
     if (o.orphanGrace !== undefined) {
-        if (typeof o.orphanGrace !== "number" || !(o.orphanGrace >= 0)) {
-            throw new Error("attachment.init: orphanGrace must be a number >= 0");
+        // > 0: delete sweeps inline, and with no grace the blob a delete
+        // queued inside the app's own (uncommitted) db.batch was unlinked at
+        // once - an app rollback then restored a row without its blob.
+        if (typeof o.orphanGrace !== "number" || !(o.orphanGrace > 0)) {
+            throw new Error("attachment.init: orphanGrace must be a number > 0");
         }
         orphanGrace = o.orphanGrace;
     }
@@ -191,14 +194,27 @@ async function store(part, opts) {
     const uploadedBy = o.uploadedBy !== undefined ? o.uploadedBy : null;
 
     const id = generateId();
-    db.exec(
-        "INSERT INTO _hull_attachments " +
-        "(id, blob_id, original_name, mime, declared_mime, " +
-        " size, uploaded_by, uploaded_at, refcount) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
-        [id, blobId, part.filename, sniffed, declared,
-         size, uploadedBy, time.now()]
-    );
+    try {
+        db.exec(
+            "INSERT INTO _hull_attachments " +
+            "(id, blob_id, original_name, mime, declared_mime, " +
+            " size, uploaded_by, uploaded_at, refcount) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+            [id, blobId, part.filename, sniffed, declared,
+             size, uploadedBy, time.now()]
+        );
+    } catch (e) {
+        // The blob was finalised before the row: with no row it was never
+        // queued anywhere, so it stayed on disk for good. Queue it (the sweep
+        // re-checks references, so a deduplicated blob another row uses
+        // survives). In an aborted transaction the queue write fails too;
+        // the original error is what the caller sees either way.
+        try {
+            db.upsert("_hull_attachment_orphans", ["blob_id"],
+                      ["blob_id", "queued_at"], [blobId, time.now()]);
+        } catch (_e) { /* the INSERT's error is the one to report */ }
+        throw e;
+    }
     // Referenced again: no longer an orphan.
     db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?", [blobId]);
     // The blob was finalised (deduplicated onto an existing file) BEFORE the
@@ -303,13 +319,18 @@ function sweep(opts) {
         [time.now() - grace]) || [];
     let n = 0;
     for (const r of rows) {
-        db.batch(() => {
-            db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?", [r.blob_id]);
-            const refs = db.query(
-                "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
-                [r.blob_id]);
-            if (!refs || refs.length === 0) { blob.delete(r.blob_id); n += 1; }
-        });
+        // One failing unlink (EACCES, EROFS) rolls back its own queue removal
+        // and is retried by a later sweep; it no longer throws out of sweep -
+        // and so out of every attachment.delete after it.
+        try {
+            db.batch(() => {
+                db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?", [r.blob_id]);
+                const refs = db.query(
+                    "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
+                    [r.blob_id]);
+                if (!refs || refs.length === 0) { blob.delete(r.blob_id); n += 1; }
+            });
+        } catch (_e) { /* left queued for the next sweep */ }
     }
     return n;
 }
@@ -365,7 +386,10 @@ function deleteAttachment(id) {
         removed = true;
     });
 
-    sweep();
+    // Best-effort: the delete above has committed (or joined the caller's
+    // transaction); a failing sweep must not turn it into an error that a
+    // retrying caller answers with a second decrement.
+    try { sweep(); } catch (_e) { /* retried by the next sweep */ }
     return removed;
 }
 

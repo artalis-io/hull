@@ -85,4 +85,17 @@ print(string.format("\n%d/%d htmx-pagination tests passed", pass, pass + fail))
 -- Results go back to the C harness (tests/hull/lua_script_test.h). NOT
 -- os.exit: this runs in a vanilla lua_State where `os` exists, so exiting
 -- here would terminate the whole test binary instead of failing one suite.
+-- Audit 6 L5: per_page / total are coerced as JS coerces them. per_page = 0
+-- made `pages` infinite (links carried page=inf); a non-numeric string raised.
+local base = require('hull.web.pagination')
+test("render coerces per_page and total", function()
+    local r = base.render(10, { per_page = 0, page = "1" })
+    assert_eq(r.pages, 10, "per_page 0 -> 1")
+    r = base.render("25", { per_page = "abc", page = "2" })
+    assert_eq(r.per_page, 20, "non-numeric per_page -> default")
+    assert_eq(r.pages, 2)
+    r = base.render(-5, { per_page = "10" })
+    assert_eq(r.pages, 1)
+end)
+
 return { pass = pass, fail = fail }

@@ -325,12 +325,20 @@ function audit_log.list(user_id, opts)
     opts = opts or {}
     local limit = opts.limit or 50
     local rows
-    if opts.kinds and #opts.kinds > 0 then
+    -- The IN list comes from the array part only, read raw (an app table's
+    -- __len / __index cannot shape it), and holds strings only.
+    local kinds = type(opts.kinds) == "table" and opts.kinds or nil
+    local nk = kinds and rawlen(kinds) or 0
+    if nk > 0 then
         local placeholders = {}
         local params = { user_id }
-        for _, k in ipairs(opts.kinds) do
-            placeholders[#placeholders + 1] = "?"
-            params[#params + 1] = k
+        for i = 1, nk do
+            local k = rawget(kinds, i)
+            if type(k) ~= "string" then
+                error("audit_log.list: kinds must be an array of strings", 2)
+            end
+            placeholders[i] = "?"
+            params[i + 1] = k
         end
         params[#params + 1] = limit
         rows = db.query(

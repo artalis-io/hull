@@ -181,21 +181,20 @@ local function number_for(loc, n)
     local negative = n < 0
     if negative then n = -n end
 
-    local int_part = math.floor(n)
-    local frac_part = n - int_part
+    -- Past 1e21 a number prints in exponent form; grouping that gave "1e,+21".
+    if n >= 1e21 then return (negative and "-" or "") .. tostring(n) end
 
-    local result = format_int(tostring(int_part), thou_sep)
+    -- Ten fixed decimals, trailing zeros trimmed. The fraction used to be
+    -- printed apart ("%.10g"): a tiny one leaked an exponent
+    -- (2.00000000001 -> "2.000000083e-11"-style output) and one that rounded
+    -- to 1 was dropped instead of carried (1.99999999999 -> "1").
+    local int_s, frac_s = string.format("%.10f", n):match("^(%d+)%.(%d+)$")
+    frac_s = frac_s:gsub("0+$", "")
 
-    if frac_part > 0 then
-        -- Convert fractional part to string, strip leading "0."
-        local frac_str = string.format("%.10g", frac_part)
-        local dot_pos = frac_str:find(".", 1, true)
-        if dot_pos then
-            result = result .. dec_sep .. frac_str:sub(dot_pos + 1)
-        end
-    end
+    local result = format_int(int_s, thou_sep)
+    if frac_s ~= "" then result = result .. dec_sep .. frac_s end
 
-    if negative then result = "-" .. result end
+    if negative and result ~= "0" then result = "-" .. result end
     return result
 end
 

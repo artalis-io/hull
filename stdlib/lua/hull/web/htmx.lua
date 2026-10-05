@@ -146,7 +146,7 @@ function htmx.redirect(req, res, path, opts)
     if htmx.is(req) then
         res:header("HX-Redirect", path)
         res:status(204)
-        res:send("")
+        res:text("")
     else
         res:redirect(path)
     end

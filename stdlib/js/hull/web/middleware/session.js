@@ -523,12 +523,21 @@ function loginHandler(cookieMod, opts) {
         // New-device + audit emission happen AFTER the session row exists
         // so the new-device check sees prior history (not the row we just
         // created), and the audit row carries the canonical session_id.
+        // An async onNewDevice is awaited before respond (so what it writes
+        // lands in this response) and its rejection is logged, not lost.
+        let pendingNewDev = null;
         if (auditLog) {
             if (onNewDev) {
                 try {
                     if (auditLog.isNewDevice(user.id, req)) {
-                        try { onNewDev(req, res, user); }
-                        catch (e) {
+                        try {
+                            const r = onNewDev(req, res, user);
+                            if (r && typeof r.then === "function") {
+                                pendingNewDev = r.then(null, (e) => log.warn(
+                                    "session.loginHandler: onNewDevice callback threw: "
+                                    + (e && e.message || e)));
+                            }
+                        } catch (e) {
                             // Round-11 MEDIUM-5: surface the swallowed
                             // error. The request still succeeds (the
                             // notification is best-effort), but a
@@ -552,7 +561,8 @@ function loginHandler(cookieMod, opts) {
             }
         }
 
-        respond(res, user, sid);
+        if (pendingNewDev) return pendingNewDev.then(() => respond(res, user, sid));
+        return respond(res, user, sid);
     };
 }
 
@@ -570,6 +580,13 @@ function logoutHandler(cookieMod, opts) {
     const respond = opts.respond || (res => res.json({ ok: true }));
 
     return function (req, res) {
+        // A request the browser marks cross-site (an attacker page posting a
+        // form here) is refused, as oauth's logout does: the clearing
+        // Set-Cookie would still sign the victim out.
+        if (req.headers && req.headers["sec-fetch-site"] === "cross-site") {
+            res.status(403).json({ error: "forbidden" });
+            return;
+        }
         let sid = null;
         if (req.ctx && req.ctx.session_id) {
             sid = req.ctx.session_id;
@@ -579,7 +596,7 @@ function logoutHandler(cookieMod, opts) {
         }
         if (sid) destroy(sid);
         res.header("Set-Cookie", cookieMod.clear(name, cookieOpts));
-        respond(res);
+        return respond(res);
     };
 }
 

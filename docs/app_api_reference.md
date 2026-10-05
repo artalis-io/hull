@@ -163,7 +163,7 @@ Register with `app.use(method, pattern, mw)`:
 | `hkdf` | `hull.crypto.hkdf` | `hull:crypto:hkdf` | HKDF-SHA256 (RFC 5869): `derive(ikm, length, { salt?, info? })`, plus `extract(salt, ikm)` / `expand(prk, info, length)`. Several independent keys from one high-entropy secret, each bound to its `info` label (at most 8160 bytes). Not a password hash (`crypto.hash_password` is). Lua returns a byte string, JS an ArrayBuffer |
 | `otp` | `hull.crypto.otp` | `hull:crypto:otp` | HOTP (RFC 4226): `hotp(key, counter, digits?)` and `step(now, period?)` for TOTP (RFC 6238). The algorithm under `hull/web/middleware/totp` |
 | `sealbox` | `hull.crypto.sealbox` | `hull:crypto:sealbox` | Versioned secretbox sealing under a keyring (`keyring` / `seal` / `open`), with an optional context bound into the sealed frame. Keys may be 32-byte strings or `crypto.key_from_env` handles; `keyring_from_env{ keys = { [1] = "VAR" }, current = 1 }` (JS `keyringFromEnv`) builds a keyring of held keys. `open` returns `value, version` or `nil, reason` in Lua and `[value, null, version]` or `[null, reason]` in JS (reason `unknown_version` or `open_failed`). Backs `hull/kv`'s `encrypt` option (see [kv_cache.md](kv_cache.md#encryption-at-rest)) and TOTP's encrypted secrets |
-| `pwned` | `hull.web.pwned` | `hull:web:pwned` | k-anonymity pwned-password check via HIBP range API. Hashes the password SHA-1 client-side, sends only the first 5 hex chars over the wire, scans the returned suffix list locally. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`. Fail-open on HIBP outage. Used internally by `hull/web/auth-flows` when `check_pwned_passwords = true` |
+| `pwned` | `hull.web.pwned` | `hull:web:pwned` | k-anonymity pwned-password check via HIBP range API. Hashes the password SHA-1 client-side, sends only the first 5 hex chars over the wire, scans the returned suffix list locally. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`. Fail-open on HIBP outage (a network failure or non-200); the runtime refusing the wait (called with a transaction open, or from middleware) is re-raised, not taken for an outage. Used internally by `hull/web/auth-flows` when `check_pwned_passwords = true` |
 | `audit-log` | `hull.web.middleware.audit-log` | `hull:web:middleware:audit-log` | Append-only sign-in / auth event log + per-device grouping. `record(user_id, kind, req, opts)`, `list(user_id, opts)`, `list_devices(user_id, opts)`, `is_new_device(user_id, req, opts)`. Fingerprint = `sha256(family_os|ip_prefix)[:16]`. Owns `_hull_audit_log`. Composes with auth-flows (emits events when `sign_in_log = true`), with session (per-device summary via `list_devices`), or standalone for app-recorded kinds (`api_token_issued`, `admin_impersonate`, etc.) |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
@@ -206,7 +206,7 @@ Register with `app.use(method, pattern, mw)`:
 **ratelimit.middleware(opts)**. Per-key request rate limiting (in-memory, resets on restart).
 - `opts.limit`. Max requests per window (default: `60`)
 - `opts.window`. Window in seconds (default: `60`)
-- `opts.key`. String or `function(req) -> string` (default: `"global"`)
+- `opts.key`. String or `function(req) -> string` (default: per client IP). The function must return a string or a number synchronously; anything else (a table / object, a Promise from an `async` key function) raises, since a fresh object per request was a fresh bucket and nothing was limited.
 - Sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` headers.
 - Returns `1` on limit exceeded (sends 429 + JSON), `0` otherwise.
 
@@ -216,7 +216,8 @@ Register with `app.use(method, pattern, mw)`:
 - `opts.max_age`. Max token age in seconds (default: `3600`)
 - `opts.header_name`. Header to read token from (default: `"x-csrf-token"`)
 - `opts.field_name`. Form field name (default: `"_csrf"`)
-- Safe methods (GET/HEAD/OPTIONS): generates token → `req.ctx.csrf_token`.
+- `opts.safe_methods` / `safeMethods`. Methods that skip verification (default: `{"GET","HEAD","OPTIONS"}`; JS honours it too since audit 6).
+- Safe methods: generates token → `req.ctx.csrf_token`.
 - Unsafe methods: verifies token from header or form field.
 - Returns `1` on verification failure (sends 403 + JSON), `0` otherwise.
 - Helpers: `csrf.generate(session_id, secret)`, `csrf.verify(token, session_id, secret, max_age)`.
@@ -364,6 +365,12 @@ verify step between successful first-factor auth and `on_login` when
     DB-backend-agnostic (works on whatever backend `hull/db` is
     wired to). Apps with a custom schema either pass the 6
     callbacks directly or post-process the adapter table.
+    `user_find_by_email` must return `password_hash` (login and the
+    verify step read the hash through it); `user_get` need not, and an
+    account whose hash cannot be read that way is treated as having a
+    password (the verify step is shown, never skipped).
+    `email_verified` is a boolean; `0` / `1` from a raw row are read as
+    false / true in both runtimes.
   - `opts.on_login(req, res, user)` / `opts.on_logout(req, res)`. App
     issues its own session (cookie, JWT, whatever) here. Module is
     session-agnostic. **Shortcut:** wire
@@ -374,7 +381,13 @@ verify step between successful first-factor auth and `on_login` when
     after the find_user split (below).
   - `opts.require_verified_email` (default `true`). Block login until
     email is verified. Opt-out for apps that gate per-route on the
-    `email_verified` flag instead.
+    `email_verified` flag instead. Opting out REQUIRES
+    `opts.on_password_reset` (init raises without it): unverified
+    accounts can then sign in, so a pre-registrant can hold a session
+    when the address owner sets the password at verification, and the
+    app's `on_password_reset` (e.g. `session.destroy_all(user.id)`) is
+    the only place those sessions can be revoked. Pass a no-op function
+    if the app keeps no sessions.
   - `opts.magic_link_auto_signup` (default `false`). Silent no-op
     when magic-link is requested for an unknown email (enumeration-
     safe). Opt-in to auto-create a passwordless user instead.
@@ -524,7 +537,7 @@ verify step between successful first-factor auth and `on_login` when
 - `session.destroy(session_id)`. Deletes session.
 - `session.cleanup()` → count of deleted expired sessions.
 - **Device management** - `session.list_for_user(user_id)` → array of `{id, created_at, last_accessed, ip, user_agent}`; `session.destroy_others(current_sid, user_id)` → "sign out everywhere else"; `session.destroy_all(user_id)` → "sign out everywhere" (used by auth-flows on password reset cascade).
-- **Login/logout factories** - `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user, ctx?)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name, default `"hull_session"` - same as `auth.session_middleware`), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`), `opts.audit_log` (module ref - when set, records a login event after the session is set), `opts.audit_kind` (default `"login"`), `opts.audit_metadata(user, ctx) -> table` (default derives `{ factors = ctx.factors }` for auth-flows or `{ factors = "oauth:" .. ctx.provider }` for oauth), `opts.on_new_device(req, res, user)` (requires `audit_log` - called before record when `audit_log.is_new_device` returns true). `session.logout_handler(cookie, opts?)` is the matching `on_logout`. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (the audit + new-device seam covers both for free).
+- **Login/logout factories** - `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user, ctx?)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name, default `"hull_session"` - same as `auth.session_middleware`), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`), `opts.audit_log` (module ref - when set, records a login event after the session is set), `opts.audit_kind` (default `"login"`), `opts.audit_metadata(user, ctx) -> table` (default derives `{ factors = ctx.factors }` for auth-flows or `{ factors = "oauth:" .. ctx.provider }` for oauth), `opts.on_new_device(req, res, user)` (requires `audit_log` - called before record when `audit_log.is_new_device` returns true). `session.logout_handler(cookie, opts?)` is the matching `on_logout`; it answers 403 to a request the browser marks `Sec-Fetch-Site: cross-site` (as do auth-flows' `POST /logout` and oauth's logout), since the clearing `Set-Cookie` would sign the victim out. In JS both factories return what `respond` / an async `onNewDevice` returns, so an async callback is awaited. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (the audit + new-device seam covers both for free).
 - `session.rotate(old_sid, data, opts)` - destroy + recreate, session-fixation defense primitive. Used by `login_handler`; apps doing custom on_login can call it directly.
 
 **The `on_login(req, res, user, ctx?)` contract.** Both `hull/web/auth-flows` and `hull/web/middleware/oauth` hand off through this single shape. Guarantees:
@@ -776,7 +789,7 @@ also useful for WiFi codes, contact cards, payment links, etc.
   - `opts.details` (default `false`). Also return each check's error text and latency, and the server stats. `/ready` is normally unauthenticated, so the raw error strings (DB driver errors) and stats are opt-in; enable them only behind auth or on a private listener.
   - Returns `1` on health/ready paths, `0` otherwise (passes through to next handler).
   - Readiness returns 503 if any check fails.
-- **JS only:** `health.setDb(dbModule)`. Pass the db module explicitly (ES modules can't conditionally import). Also accepts `opts.db` in middleware options.
+- The DB ping uses the default connection in both runtimes. **JS:** `health.setDb(x)` (or `opts.db`) selects another: a connection (`dbModule.connect("name")`), or the `hull:db` module itself, whose default connection is then used.
 
 **etag** (ETag response helpers. Not a middleware) provides wrapper functions for route handlers.
 - `etag.json(req, res, data, status?)`. Send JSON response with ETag. Sends 304 if `If-None-Match` matches.

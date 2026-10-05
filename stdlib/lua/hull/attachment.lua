@@ -72,8 +72,12 @@ function attachment.init(opts)
         _max_size = opts.max_size
     end
     if opts.orphan_grace ~= nil then
-        if type(opts.orphan_grace) ~= "number" or opts.orphan_grace < 0 then
-            error("attachment.init: orphan_grace must be a number >= 0")
+        -- > 0: delete sweeps inline, and with no grace the blob a delete
+        -- queued inside the app's own (not yet committed) db.batch was
+        -- unlinked at once - an app rollback then restored a row without
+        -- its blob.
+        if type(opts.orphan_grace) ~= "number" or not (opts.orphan_grace > 0) then
+            error("attachment.init: orphan_grace must be a number > 0")
         end
         _orphan_grace = opts.orphan_grace
     end
@@ -212,13 +216,27 @@ function attachment.store(part, opts)
     end
 
     local id = generate_id()
-    db.exec([[
-        INSERT INTO _hull_attachments
-        (id, blob_id, original_name, mime, declared_mime,
-         size, uploaded_by, uploaded_at, refcount)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-    ]], { id, blob_id, part.filename, sniffed, declared,
-          size, opts.uploaded_by, time.now() })
+    local ins_ok, ins_err = pcall(function()
+        db.exec([[
+            INSERT INTO _hull_attachments
+            (id, blob_id, original_name, mime, declared_mime,
+             size, uploaded_by, uploaded_at, refcount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ]], { id, blob_id, part.filename, sniffed, declared,
+              size, opts.uploaded_by, time.now() })
+    end)
+    if not ins_ok then
+        -- The blob was finalised before the row: with no row it was never
+        -- queued anywhere, so it stayed on disk for good. Queue it (the
+        -- sweep re-checks references, so a deduplicated blob another row
+        -- uses survives). In an aborted transaction the queue write fails
+        -- too; the original error is what the caller sees either way.
+        pcall(function()
+            db.upsert("_hull_attachment_orphans", { "blob_id" },
+                      { "blob_id", "queued_at" }, { blob_id, time.now() })
+        end)
+        error(ins_err, 0)
+    end
     -- Referenced again: no longer an orphan.
     db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?", { blob_id })
     -- The blob was finalised (deduplicated onto an existing file) BEFORE
@@ -321,16 +339,23 @@ function attachment.sweep(opts)
         { time.now() - grace })
     local n = 0
     for _, r in ipairs(rows or {}) do
-        db.batch(function()
-            db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?",
+        -- One failing unlink (EACCES, EROFS) rolls back its own queue
+        -- removal and is retried by a later sweep; it no longer raises out
+        -- of sweep - and so out of every attachment.delete after it.
+        -- (db.batch called by name inside the closure: the _hull_* guard
+        -- requires the stdlib to name the method it calls.)
+        pcall(function()
+            db.batch(function()
+                db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?",
+                        { r.blob_id })
+                local refs = db.query(
+                    "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
                     { r.blob_id })
-            local refs = db.query(
-                "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
-                { r.blob_id })
-            if not refs or #refs == 0 then
-                blob.delete(r.blob_id)
-                n = n + 1
-            end
+                if not refs or #refs == 0 then
+                    blob.delete(r.blob_id)
+                    n = n + 1
+                end
+            end)
         end)
     end
     return n
@@ -378,7 +403,10 @@ function attachment.delete(id)
         removed = true
     end)
 
-    attachment.sweep()
+    -- Best-effort: the delete above has committed (or joined the caller's
+    -- transaction); a failing sweep must not turn it into an error that a
+    -- retrying caller answers with a second decrement.
+    pcall(attachment.sweep)
     return removed
 end
 

@@ -191,20 +191,21 @@ function numberIn(loc, n) {
     const negative = n < 0;
     if (negative) n = -n;
 
-    const intPart = Math.floor(n);
-    const fracPart = n - intPart;
+    // Past 1e21 a number prints in exponent form; grouping that gave "1e,+21".
+    if (n >= 1e21) return (negative ? "-" : "") + String(n);
 
-    let result = formatInt(String(intPart), thousSep);
+    // Ten fixed decimals, trailing zeros trimmed. The fraction used to be
+    // printed apart (toPrecision): a tiny one leaked an exponent
+    // (2.00000000001 -> "2.000000083e-11") and one that rounded to 1 was
+    // dropped instead of carried (1.99999999999 -> "1").
+    const fixed = n.toFixed(10);
+    const dot = fixed.indexOf(".");
+    const fracStr = fixed.substring(dot + 1).replace(/0+$/, "");
 
-    if (fracPart > 0) {
-        // Convert to string and strip leading "0."
-        let fracStr = String(parseFloat(fracPart.toPrecision(10)));
-        const dotPos = fracStr.indexOf(".");
-        if (dotPos >= 0)
-            result += decSep + fracStr.substring(dotPos + 1);
-    }
+    let result = formatInt(fixed.substring(0, dot), thousSep);
+    if (fracStr !== "") result += decSep + fracStr;
 
-    if (negative) result = "-" + result;
+    if (negative && result !== "0") result = "-" + result;
     return result;
 }
 

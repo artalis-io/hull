@@ -166,7 +166,9 @@ function Store:cas(k, expected, new, ttl)
             "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) "
             .. "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",
             { self.ns, kenc(k), venc(new), exp, now, now })
-        return (n or 0) == 1
+        if (n or 0) ~= 1 then return false end
+        evict_items(self)   -- a new key counts toward max_items, as put does
+        return true
     end
     if keep then
         local n = self.conn.exec(
@@ -198,7 +200,7 @@ function Store:incr(k, by, ttl)
                 "INSERT INTO _hull_kv (ns, k, v, expires_at, version, created_at, updated_at) "
                 .. "VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT (ns, k) DO NOTHING",
                 { self.ns, khex, venc(tostring(by)), exp, now, now })
-            if (n or 0) == 1 then return by end
+            if (n or 0) == 1 then evict_items(self); return by end
         else
             local cur = u.to_int(vdec(rows[1].v))
             local ver = tonumber(rows[1].version)

@@ -179,6 +179,18 @@ test("small number no grouping", function()
     assert_eq(i18n.number(42), "42")
 end)
 
+-- Audit 6 L7: no exponent leaks, a rounded fraction carries, 1e21+ is not grouped.
+test("number fraction edge cases", function()
+    i18n.load("en", en)
+    i18n.locale("en")
+    assert_eq(i18n.number(2.00000000001), "2")
+    assert_eq(i18n.number(1.99999999999), "2")
+    assert_eq(i18n.number(0.1 + 0.2), "0.3")
+    assert_eq(i18n.number(1234.5678), "1,234.5678")
+    assert_eq(i18n.number(1e21), "1e+21")
+    assert_eq(i18n.number(-0.00000000001), "0")
+end)
+
 -- ── date() ───────────────────────────────────────────────────────────
 
 test("date with known timestamp", function()
