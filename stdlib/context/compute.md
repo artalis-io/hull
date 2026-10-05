@@ -148,7 +148,8 @@ full toolchain status (`wasm_enabled`, `wamrc`, `clang`, `wasm_ld`,
 | Output size | 1 MiB | 256 MiB | `--wasm-max-output` |
 | Heap | 2 MiB | ~4 GiB (16 GiB with Memory64) | `--wasm-heap` |
 | Stack | 64 KiB | 8 MiB | `--wasm-stack` |
-| Gas | 100M | 100B | `--wasm-gas` |
+| Gas (interpreter only; AOT is never metered) | 10M | 100B | `--wasm-gas` |
+| Wall-clock timeout (`timeout_ms`; AOT, interpreter, start functions) | 10 s | 1 h | `--wasm-timeout-ms` |
 
 Per-call opts override the CLI/manifest ceilings, which override the
 compile-time defaults.

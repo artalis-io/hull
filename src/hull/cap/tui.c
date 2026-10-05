@@ -384,13 +384,18 @@ static void suspend_terminal(HlTuiCtx *ctx)
  * flagged on, back; then a full repaint. */
 static void resume_terminal(HlTuiCtx *ctx)
 {
+    /* Lengths from sizeof, never hand-counted: the kitty sequence was written
+     * with 7 (it is 6 bytes), which sent the literal's NUL to the terminal. */
+    static const char m[]  = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+    static const char pz[] = "\x1b[?2004h";
+    static const char f[]  = "\x1b[?1004h";
+    static const char k[]  = "\x1b[>15u";
     apply_raw(ctx);
     enter_alt_screen(ctx);
-    if (ctx->mouse_on)
-        raw_write(ctx->out_fd, "\x1b[?1000h\x1b[?1002h\x1b[?1006h", 24);
-    if (ctx->paste_on)     raw_write(ctx->out_fd, "\x1b[?2004h", 8);
-    if (ctx->focus_on)     raw_write(ctx->out_fd, "\x1b[?1004h", 8);
-    if (ctx->kitty_kbd_on) raw_write(ctx->out_fd, "\x1b[>15u", 7);
+    if (ctx->mouse_on)     raw_write(ctx->out_fd, m, sizeof m - 1);
+    if (ctx->paste_on)     raw_write(ctx->out_fd, pz, sizeof pz - 1);
+    if (ctx->focus_on)     raw_write(ctx->out_fd, f, sizeof f - 1);
+    if (ctx->kitty_kbd_on) raw_write(ctx->out_fd, k, sizeof k - 1);
     hl_cap_tui_invalidate(ctx);
 }
 

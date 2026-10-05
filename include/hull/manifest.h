@@ -231,6 +231,7 @@ typedef struct HlManifest {
     uint32_t    wasm_heap;        /* 0 = not set */
     uint32_t    wasm_stack;
     int64_t     wasm_gas;
+    uint32_t    wasm_timeout_ms;  /* wall-clock bound per compute call */
     uint32_t    wasm_max_input;
     uint32_t    wasm_max_output;
 

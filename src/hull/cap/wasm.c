@@ -13,6 +13,7 @@
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_data.h"
 #include "hull/cap/wasm_spans.h"
+#include "hull/cap/wasm_watchdog.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
 #include "hull/limits/wasm.h"
@@ -80,6 +81,12 @@ static int wasm_is_gas_exception(const char *exc)
 {
     return exc && (strstr(exc, "instruction limit") ||
                    strstr(exc, "instruction count"));
+}
+
+/* The trap wasm_runtime_terminate() raises - the wall-clock watchdog's. */
+static int wasm_is_timeout_exception(const char *exc)
+{
+    return exc && strstr(exc, "terminated by user") != NULL;
 }
 
 /* ── Thread-local callback context for host_call ───────────────────── */
@@ -350,50 +357,87 @@ HlWasmModule *hl_cap_wasm_module_lookup(HlWasmCache *cache, const char *name)
 
 /* ── Instance pool ─────────────────────────────────────────────────── */
 
-/* Drain all pooled instances for a module. Caller must hold mod->mutex. */
-void hl_wasm_pool_drain(HlWasmPool *pool)
+/* Attach the module's CURRENT segment chain to @p inst and count it. Caller
+ * holds mod->mutex. On return @p ref says what the instance carries. Reading
+ * the chain under the lock that segment changes take means the attach can
+ * never pick up a chain a concurrent change is tearing down. 0, or -1 with
+ * *err set (the instance then carries nothing of the module's). */
+static int chain_attach_locked(HlWasmModule *mod, wasm_module_inst_t inst,
+                               HlWasmChainRef *ref, const char **err)
 {
+    void *head = hl_wasm_chain_snapshot(mod->shared_data);
+    ref->gen = mod->chain_gen;
+    ref->attached = 0;
+    if (!head)
+        return 0;
+    /* WAMR counts the attachments in a uint8 on the chain head: once it
+     * wrapped, removing a segment freed a heap still attached. */
+    if (mod->chain_attached >= HL_WASM_MAX_CHAIN_ATTACH) {
+        log_error("[wasm] '%s': %d instances already hold its segments",
+                  mod->name, mod->chain_attached);
+        *err = "too_many_instances";
+        return -1;
+    }
+    if (hl_wasm_attach_shared_heap(inst, head) != 0) {
+        *err = "segment_attach_failed";
+        return -1;
+    }
+    mod->chain_attached++;
+    ref->attached = 1;
+    return 0;
+}
+
+/* Undo whatever shared heap @p inst carries before it is deinstantiated -
+ * WAMR's deinstantiate does NOT detach, so the chain head's attached_count
+ * stayed raised by every instance destroyed attached (every failed call, every
+ * large-heap call, every release into a full pool) until the uint8 wrapped.
+ * A no-op when nothing is attached. Caller holds mod->mutex. */
+static void chain_detach_locked(HlWasmModule *mod, wasm_module_inst_t inst,
+                                const HlWasmChainRef *ref)
+{
+    wasm_runtime_detach_shared_heap(inst);
+    if (ref->attached && mod->chain_attached > 0)
+        mod->chain_attached--;
+}
+
+/* Drain all pooled instances for a module. Caller must hold mod->mutex. */
+void hl_wasm_pool_drain(HlWasmModule *mod)
+{
+    HlWasmPool *pool = &mod->pool;
     for (int i = 0; i < pool->count; i++) {
         HlWasmPoolEntry *e = &pool->entries[i];
-        /* Detach any attached shared heap (the module's segment chain) BEFORE
-         * deinstantiate. WAMR's deinstantiate does NOT auto-detach, so the
-         * chain-head heap's attached_count would otherwise stay inflated by every
-         * drained-but-attached instance -- and both wasm_runtime_unchain_shared_heaps
-         * and the patch-0003 wasm_runtime_destroy_shared_heap require
-         * attached_count == 0. Detaching here makes the count return to 0 whenever a
-         * segment mutation drains the pool, so the teardown in
-         * hl_wasm_free_segment / hl_wasm_free_shared_data can actually reclaim the
-         * descriptor. No-op for instances with nothing attached (fresh, or a
-         * span instance already detached by its per-call teardown). */
-        wasm_runtime_detach_shared_heap((wasm_module_inst_t)e->instance);
+        /* Detach BEFORE deinstantiate (see chain_detach_locked): both the
+         * unchain and the patch-0003 destroy of a segment require the chain
+         * head's attached_count to be back at 0. */
+        chain_detach_locked(mod, (wasm_module_inst_t)e->instance, &e->chain);
         wasm_runtime_destroy_exec_env((wasm_exec_env_t)e->exec_env);
         wasm_runtime_deinstantiate((wasm_module_inst_t)e->instance);
     }
     pool->count = 0;
 }
 
-/* Try to acquire a pooled instance matching (heap_size, stack_size).
- * Returns 1 and fills out_inst/out_env/out_fn on hit, 0 on miss.
- * Always snapshots shared data pointers under mod->mutex for thread safety. */
+/* Try to acquire a pooled instance matching (heap_size, stack_size) and
+ * carrying the module's current chain. Returns 1 and fills out_* on hit, 0
+ * on miss. Always snapshots the shared data pointer under mod->mutex. */
 static int pool_acquire(HlWasmModule *mod,
                         uint32_t heap_size, uint32_t stack_size,
                         wasm_module_inst_t *out_inst,
                         wasm_exec_env_t *out_env,
                         wasm_function_inst_t *out_fn,
-                        const HlWasmSharedData **out_sd,
-                        void **out_chain_head)
+                        HlWasmChainRef *out_chain,
+                        const HlWasmSharedData **out_sd)
 {
     pthread_mutex_lock(&mod->mutex);
-    /* Snapshot shared data under the lock */
     *out_sd = mod->shared_data;
-    *out_chain_head = hl_wasm_chain_snapshot(mod->shared_data);
     HlWasmPool *pool = &mod->pool;
     for (int i = 0; i < pool->count; i++) {
         HlWasmPoolEntry *e = &pool->entries[i];
-        if (e->heap_size == heap_size && e->stack_size == stack_size) {
-            *out_inst = (wasm_module_inst_t)e->instance;
-            *out_env  = (wasm_exec_env_t)e->exec_env;
-            *out_fn   = (wasm_function_inst_t)e->process_fn;
+        if (e->heap_size == heap_size && e->stack_size == stack_size &&
+            e->chain.gen == mod->chain_gen) {
+            *out_inst  = (wasm_module_inst_t)e->instance;
+            *out_env   = (wasm_exec_env_t)e->exec_env;
+            *out_fn    = (wasm_function_inst_t)e->process_fn;
+            *out_chain = e->chain;
             /* Swap-remove */
             pool->entries[i] = pool->entries[pool->count - 1];
             pool->count--;
@@ -406,33 +450,42 @@ static int pool_acquire(HlWasmModule *mod,
 }
 
 /* Return an instance to the pool, or destroy it.
- * Only pools on success, small heaps, and when pool isn't full. */
+ * Pools only on success, small heaps, a free slot, and a chain generation
+ * that is still current: an instance that was out of the pool (a zero-copy
+ * result held it) across a segment change carries the old chain - or none -
+ * and pooled, the next call ran without the segments DATA_INFO advertised. */
 void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
                           void *inst_v, void *exec_env_v, void *process_fn_v,
                           uint32_t heap_size, uint32_t stack_size,
-                          int success)
+                          int success, HlWasmChainRef chain)
 {
     (void)cache;
     wasm_module_inst_t inst = (wasm_module_inst_t)inst_v;
     wasm_exec_env_t exec_env = (wasm_exec_env_t)exec_env_v;
 
-    if (success && heap_size <= HL_WASM_POOL_HEAP_THRESHOLD) {
-        pthread_mutex_lock(&mod->mutex);
-        HlWasmPool *pool = &mod->pool;
-        if (pool->count < HL_WASM_POOL_MAX) {
-            /* Clear any stale exception before returning to pool */
-            wasm_runtime_clear_exception(inst);
-            HlWasmPoolEntry *e = &pool->entries[pool->count++];
-            e->instance   = inst_v;
-            e->exec_env   = exec_env_v;
-            e->process_fn = process_fn_v;
-            e->heap_size  = heap_size;
-            e->stack_size = stack_size;
-            pthread_mutex_unlock(&mod->mutex);
-            return;
-        }
+    pthread_mutex_lock(&mod->mutex);
+    HlWasmPool *pool = &mod->pool;
+    /* Carries the module chain exactly when the module has one: a spans-call
+     * instance (never given the chain) must not be pooled while segments
+     * exist, whatever its generation. */
+    int want_chain = hl_wasm_chain_snapshot(mod->shared_data) != NULL;
+    if (success && heap_size <= HL_WASM_POOL_HEAP_THRESHOLD &&
+        chain.gen == mod->chain_gen && chain.attached == want_chain &&
+        pool->count < HL_WASM_POOL_MAX) {
+        /* Clear any stale exception before returning to pool */
+        wasm_runtime_clear_exception(inst);
+        HlWasmPoolEntry *e = &pool->entries[pool->count++];
+        e->instance   = inst_v;
+        e->exec_env   = exec_env_v;
+        e->process_fn = process_fn_v;
+        e->heap_size  = heap_size;
+        e->stack_size = stack_size;
+        e->chain      = chain;
         pthread_mutex_unlock(&mod->mutex);
+        return;
     }
+    chain_detach_locked(mod, inst, &chain);
+    pthread_mutex_unlock(&mod->mutex);
     /* process_fn is owned by the instance - no separate cleanup needed */
     (void)process_fn_v;
     wasm_runtime_destroy_exec_env(exec_env);
@@ -508,6 +561,11 @@ int hl_cap_wasm_init(HlWasmCache *cache)
         return -1;
     }
 
+    /* The wall-clock watchdog binds to an instance while its start / ctor
+     * functions run (WAMR patch 0007); install its hook before any
+     * instantiation. */
+    hl_wasm_watchdog_install();
+
     /* WAMR has now sorted host_symbols in place.  Seal the arena -
      * post-seal, the entire mapping is RO and any write fault. */
     if (sh_seal_arena_seal(arena) != 0) {
@@ -541,7 +599,7 @@ void hl_cap_wasm_destroy(HlWasmCache *cache)
     for (int i = 0; i < cache->count; i++) {
         HlWasmModule *m = &cache->modules[i];
         pthread_mutex_lock(&m->mutex);
-        hl_wasm_pool_drain(&m->pool);
+        hl_wasm_pool_drain(m);
         hl_wasm_free_shared_data(m);
         if (m->module)
             wasm_runtime_unload((wasm_module_t)m->module);
@@ -739,12 +797,23 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_LOAD;
     }
 
-    /* Probe ABI version and Memory64 flag before taking the lock */
+    /* Probe ABI version and Memory64 flag before taking the lock. The probe
+     * runs guest code - the module's own start / ctor functions at
+     * instantiation, then hull_version - on whatever thread loads the module
+     * (the event loop), so all of it runs under the wall-clock watchdog: gas
+     * meters only the interpreter, and nothing meters a start function. */
     uint32_t abi_version = 0;
     int detected_memory64 = 0;
     {
-        wasm_module_inst_t tmp_inst = wasm_runtime_instantiate(
-            module, 8192, 8192, error_buf, sizeof(error_buf));
+        HlWasmWatch watch = {0};
+        if (hl_wasm_watch_arm(&watch, 0, NULL) != 0) {
+            wasm_runtime_unload(module);
+            free(buf);
+            return HL_WASM_ERR_INTERNAL;
+        }
+        error_buf[0] = '\0';
+        wasm_module_inst_t tmp_inst = hl_wasm_watch_instantiate(
+            &watch, module, 8192, 8192, error_buf, sizeof(error_buf));
         if (tmp_inst) {
             wasm_function_inst_t ver_fn = wasm_runtime_lookup_function(
                 tmp_inst, "hull_version");
@@ -755,8 +824,10 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                      * whatever loaded the module (the event loop). */
                     wasm_runtime_set_instruction_count_limit(env, HL_WASM_DEFAULT_GAS);
                     uint32_t argv[1] = {0};
+                    hl_wasm_watch_bind(&watch, tmp_inst);
                     if (wasm_runtime_call_wasm(env, ver_fn, 0, argv))
                         abi_version = argv[0];
+                    hl_wasm_watch_bind(&watch, NULL);
                     wasm_runtime_destroy_exec_env(env);
                 }
             }
@@ -767,6 +838,16 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
             if (wasm_runtime_memory_is_memory64(mem))
                 detected_memory64 = 1;
             wasm_runtime_deinstantiate(tmp_inst);
+        }
+        hl_wasm_watch_disarm(&watch);
+        /* A start function that runs past the deadline would do so again at
+         * every instantiation: refuse the module outright. */
+        if (!tmp_inst && wasm_is_timeout_exception(error_buf)) {
+            log_error("[wasm] module '%s': its start function did not finish "
+                      "within the compute timeout", name);
+            wasm_runtime_unload(module);
+            free(buf);
+            return HL_WASM_ERR_LOAD;
         }
     }
 
@@ -895,13 +976,18 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
 
 /* ── Call module (buffer output) ───────────────────────────────────── */
 
-int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
+static const char *const err_timeout = "timeout";
+
+/* The call, under @p watch (armed by hl_cap_wasm_call_buf, unbound): bound to
+ * the instance during instantiation and during the hull_process call only. */
+static int call_buf_impl(HlWasmCache *cache, const char *name,
                          const void *input, size_t input_len,
                          HlWasmBuffer **output_buf,
                          const HlWasmCallOpts *opts,
                          HlWasmCallbackFn callback_fn, void *callback_ctx,
                          const struct HlVfs *app_vfs, const char *app_dir,
-                         HlAllocator *alloc, const char **err_msg)
+                         HlAllocator *alloc, const char **err_msg,
+                         HlWasmWatch *watch)
 {
     static const char *err_internal  = "internal_error";
     static const char *err_not_found = "not_found";
@@ -1022,18 +1108,25 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     wasm_exec_env_t exec_env = NULL;
     wasm_function_inst_t process_fn = NULL;
     const HlWasmSharedData *sd_snapshot = NULL;
-    void *chain_head_snapshot = NULL;
+    HlWasmChainRef chain = { 0, 0 };
     int from_pool = pool_acquire(mod, heap_size, stack_size,
                                  &inst, &exec_env, &process_fn,
-                                 &sd_snapshot, &chain_head_snapshot);
+                                 &chain, &sd_snapshot);
 
     if (!from_pool) {
         char error_buf[256];
-        inst = wasm_runtime_instantiate(
-            (wasm_module_t)mod->module, stack_size, heap_size,
+        error_buf[0] = '\0';
+        /* The instance's own start / ctor functions run here, under the
+         * call's watch (they are not metered by gas). */
+        inst = hl_wasm_watch_instantiate(
+            watch, mod->module, stack_size, heap_size,
             error_buf, sizeof(error_buf));
         if (!inst) {
             log_error("[wasm] instantiate '%s' failed: %s", name, error_buf);
+            if (wasm_is_timeout_exception(error_buf)) {
+                if (err_msg) *err_msg = err_timeout;
+                return HL_WASM_ERR_TIMEOUT;
+            }
             if (err_msg) *err_msg = err_internal;
             return HL_WASM_ERR_INTERNAL;
         }
@@ -1055,22 +1148,38 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
         }
     }
 
-    /* Attach shared data (snapshotted under mutex). For a spans call the segment
-     * chain is NOT attached (D1 guaranteed no segments at decision time; a
-     * raced-in segment set applies to future calls, never this one) -- only the
-     * span chain is attached below, preserving WAMR's one-chain-per-instance
-     * rule. A no-spans call is byte-for-byte the existing segment path. */
-    /* A pooled instance still has the chain it was created with (a segment
-     * change drains the pool), and WAMR refuses a second attach; only a new
-     * instance attaches. A failed attach destroys the instance (success=0),
-     * so an unattached one never reaches the pool. */
-    if (!have_spans && !from_pool &&
-        hl_wasm_attach_shared_heap(inst, chain_head_snapshot) != 0) {
-        if (err_msg) *err_msg = "segment_attach_failed";
-        hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
-                             heap_size, stack_size, 0);
-        return HL_WASM_ERR_INTERNAL;
+    /* Attach the module's segment chain to a NEW instance, reading it under
+     * mod->mutex (the lock segment changes take) and counting the attach. A
+     * pooled instance already carries the current chain: pool_acquire only
+     * hands out one whose generation is current, and WAMR refuses a second
+     * attach. For a spans call the segment chain is NOT attached (D1
+     * guaranteed no segments at decision time; a raced-in segment set applies
+     * to future calls, never this one) -- only the span chain is attached
+     * below, preserving WAMR's one-chain-per-instance rule; the instance then
+     * carries no module chain and is not pooled while segments exist. A failed
+     * attach destroys the instance (success=0). */
+    if (!from_pool) {
+        const char *attach_err = NULL;
+        pthread_mutex_lock(&mod->mutex);
+        int arc = 0;
+        if (have_spans) {
+            chain.gen = mod->chain_gen;
+            chain.attached = 0;
+        } else {
+            arc = chain_attach_locked(mod, inst, &chain, &attach_err);
+            sd_snapshot = mod->shared_data;
+        }
+        pthread_mutex_unlock(&mod->mutex);
+        if (arc != 0) {
+            if (err_msg) *err_msg = attach_err;
+            hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
+                                 heap_size, stack_size, 0, chain);
+            return HL_WASM_ERR_INTERNAL;
+        }
     }
+    /* DATA_INFO describes the module chain; a spans call has none attached. */
+    if (have_spans)
+        sd_snapshot = NULL;
 
     /* Build + attach the per-invocation span set on the executing thread, AFTER
      * instance acquisition. On any add/attach failure, roll the partial set back
@@ -1092,7 +1201,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
             hl_wasm_span_set_teardown(&span_set);
             if (err_msg) *err_msg = span_err ? span_err : "span_attach_failed";
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
-                                 heap_size, stack_size, 0);
+                                 heap_size, stack_size, 0, chain);
             return HL_WASM_ERR_INTERNAL;
         }
         spans_active = 1;
@@ -1118,7 +1227,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
             if (err_msg) *err_msg = err_internal;
             if (spans_active) hl_wasm_span_set_teardown(&span_set);
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
-                         heap_size, stack_size, 0);
+                         heap_size, stack_size, 0, chain);
             return HL_WASM_ERR_INTERNAL;
         }
         memcpy(native_in, input, input_len);
@@ -1135,7 +1244,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
             if (spans_active) hl_wasm_span_set_teardown(&span_set);
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
-                         heap_size, stack_size, 0);
+                         heap_size, stack_size, 0, chain);
             return HL_WASM_ERR_INTERNAL;
         }
     }
@@ -1171,12 +1280,23 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
         argc = 4;
     }
 
-    if (!wasm_runtime_call_wasm(exec_env, process_fn, (uint32_t)argc, argv)) {
+    /* The watch covers the call itself: bound to the instance only while
+     * guest code runs, so the watchdog can never touch the instance after it
+     * goes back to the pool or is destroyed. */
+    hl_wasm_watch_bind(watch, inst);
+    int call_ok = wasm_runtime_call_wasm(exec_env, process_fn,
+                                         (uint32_t)argc, argv);
+    hl_wasm_watch_bind(watch, NULL);
+    if (!call_ok) {
         const char *exception = wasm_runtime_get_exception(inst);
         if (wasm_is_gas_exception(exception)) {
             log_warn("[wasm] gas exhausted for '%s'", name);
             if (err_msg) *err_msg = err_gas;
             ret = HL_WASM_ERR_GAS;
+        } else if (wasm_is_timeout_exception(exception)) {
+            log_warn("[wasm] '%s' stopped by the compute timeout", name);
+            if (err_msg) *err_msg = err_timeout;
+            ret = HL_WASM_ERR_TIMEOUT;
         } else {
             log_error("[wasm] call '%s' failed: %s", name,
                       exception ? exception : "unknown");
@@ -1218,7 +1338,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
             *output_buf = hl_wasm_buffer_create_wasm(
                 inst, exec_env, process_fn, mod, cache,
                 wasm_out_ptr, native_out, (size_t)result,
-                heap_size, stack_size, alloc);
+                heap_size, stack_size, chain.gen, chain.attached, alloc);
             if (*output_buf)
                 return HL_WASM_OK; /* instance stays checked out */
             /* RL-1: When hl_wasm_buffer_create_wasm fails, we fall through to the
@@ -1235,7 +1355,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     int ok = (*output_buf != NULL);
     hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
-                 heap_size, stack_size, ok);
+                 heap_size, stack_size, ok, chain);
 
     return ok ? HL_WASM_OK : HL_WASM_ERR_INTERNAL;
 
@@ -1245,8 +1365,31 @@ cleanup_bufs_err:
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
-                 heap_size, stack_size, 0);
+                 heap_size, stack_size, 0, chain);
     return ret;
+}
+
+int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
+                         const void *input, size_t input_len,
+                         HlWasmBuffer **output_buf,
+                         const HlWasmCallOpts *opts,
+                         HlWasmCallbackFn callback_fn, void *callback_ctx,
+                         const struct HlVfs *app_vfs, const char *app_dir,
+                         HlAllocator *alloc, const char **err_msg)
+{
+    /* Gas bounds interpreted code only; this wall-clock watch bounds the
+     * whole call - AOT code and the instance's start / ctor functions too. */
+    HlWasmWatch watch = {0};
+    if (hl_wasm_watch_arm(&watch, opts ? opts->timeout_ms : 0, NULL) != 0) {
+        if (output_buf) *output_buf = NULL;
+        if (err_msg) *err_msg = "watchdog_unavailable";
+        return HL_WASM_ERR_INTERNAL;
+    }
+    int rc = call_buf_impl(cache, name, input, input_len, output_buf, opts,
+                           callback_fn, callback_ctx, app_vfs, app_dir,
+                           alloc, err_msg, &watch);
+    hl_wasm_watch_disarm(&watch);
+    return rc;
 }
 
 /* ── Persistent instance: create ───────────────────────────────────── */
@@ -1281,9 +1424,8 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     if (heap_size > (uint32_t)HL_WASM_MAX_HEAP)  heap_size = (uint32_t)HL_WASM_MAX_HEAP;
     if (stack_size > (uint32_t)HL_WASM_MAX_STACK) stack_size = (uint32_t)HL_WASM_MAX_STACK;
 
-    /* Lazy-load module + snapshot shared data under mod->mutex */
+    /* Lazy-load module */
     HlWasmModule *mod = NULL;
-    void *chain_head_snapshot = NULL;
     {
         pthread_mutex_lock(&cache->pool_mutex);
         mod = cache_find(cache, name);
@@ -1310,21 +1452,25 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         if (err_msg) *err_msg = "memory64_requires_aot";
         return NULL;
     }
-    /* Snapshot shared data under per-module mutex */
-    {
-        pthread_mutex_lock(&mod->mutex);
-        chain_head_snapshot = hl_wasm_chain_snapshot(mod->shared_data);
-        pthread_mutex_unlock(&mod->mutex);
-    }
 
-    /* Instantiate - NOT from pool, this is exclusively owned */
+    /* Instantiate - NOT from pool, this is exclusively owned. The instance's
+     * own start / ctor functions run here, under a wall-clock watch. */
     char error_buf[256];
-    wasm_module_inst_t inst = wasm_runtime_instantiate(
-        (wasm_module_t)mod->module, stack_size, heap_size,
+    error_buf[0] = '\0';
+    HlWasmWatch watch = {0};
+    if (hl_wasm_watch_arm(&watch, opts ? opts->timeout_ms : 0, NULL) != 0) {
+        if (err_msg) *err_msg = "watchdog_unavailable";
+        return NULL;
+    }
+    wasm_module_inst_t inst = hl_wasm_watch_instantiate(
+        &watch, mod->module, stack_size, heap_size,
         error_buf, sizeof(error_buf));
+    hl_wasm_watch_disarm(&watch);
     if (!inst) {
         log_error("[wasm] persistent instantiate '%s' failed: %s", name, error_buf);
-        if (err_msg) *err_msg = err_internal;
+        if (err_msg)
+            *err_msg = wasm_is_timeout_exception(error_buf) ? err_timeout
+                                                            : err_internal;
         return NULL;
     }
 
@@ -1344,9 +1490,15 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         return NULL;
     }
 
-    /* Attach shared data (snapshotted under mutex) */
-    if (hl_wasm_attach_shared_heap(inst, chain_head_snapshot) != 0) {
-        if (err_msg) *err_msg = "segment_attach_failed";
+    /* Attach the module's current segment chain, read and counted under
+     * mod->mutex (a persistent instance holds it until destroyed). */
+    HlWasmChainRef chain = { 0, 0 };
+    const char *attach_err = NULL;
+    pthread_mutex_lock(&mod->mutex);
+    int arc = chain_attach_locked(mod, inst, &chain, &attach_err);
+    pthread_mutex_unlock(&mod->mutex);
+    if (arc != 0) {
+        if (err_msg) *err_msg = attach_err;
         wasm_runtime_destroy_exec_env(exec_env);
         wasm_runtime_deinstantiate(inst);
         return NULL;
@@ -1359,7 +1511,9 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         if (err_msg) *err_msg = err_internal;
         wasm_runtime_destroy_exec_env(exec_env);
         /* detach the chain attached just above before tearing the instance down */
-        wasm_runtime_detach_shared_heap(inst);
+        pthread_mutex_lock(&mod->mutex);
+        chain_detach_locked(mod, inst, &chain);
+        pthread_mutex_unlock(&mod->mutex);
         wasm_runtime_deinstantiate(inst);
         return NULL;
     }
@@ -1373,10 +1527,12 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     pi->heap_size  = heap_size;
     pi->stack_size = stack_size;
     pi->alloc      = alloc;
+    pi->chain      = chain;
 
     /* Store optional defaults from opts */
     if (opts) {
         pi->default_gas        = opts->gas;
+        pi->default_timeout_ms = opts->timeout_ms;
         pi->default_max_input  = opts->max_input;
         pi->default_max_output = opts->max_output;
     }
@@ -1395,13 +1551,13 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
  * busy flag itself is owned by the async submission lifecycle (binding sets it at
  * submit; done_fn/cancel_fn clear it exactly once); this function never mutates
  * it. See hl_cap_wasm_instance_call_buf / _async below. */
-static int instance_call_buf_impl(HlWasmInstance *pi,
-                                   const void *input, size_t input_len,
-                                   HlWasmBuffer **output_buf,
-                                   const HlWasmCallOpts *opts,
-                                   HlWasmCallbackFn callback_fn, void *callback_ctx,
-                                   HlAllocator *alloc, const char **err_msg,
-                                   int busy_owned)
+static int instance_call_buf_run(HlWasmInstance *pi,
+                                  const void *input, size_t input_len,
+                                  HlWasmBuffer **output_buf,
+                                  const HlWasmCallOpts *opts,
+                                  HlWasmCallbackFn callback_fn, void *callback_ctx,
+                                  HlAllocator *alloc, const char **err_msg,
+                                  int busy_owned, HlWasmWatch *watch)
 {
     static const char *err_internal  = "internal_error";
     static const char *err_gas       = "gas_exhausted";
@@ -1544,18 +1700,32 @@ static int instance_call_buf_impl(HlWasmInstance *pi,
         }
     }
 
+    /* The instance's segment chain must be the module's current one, or
+     * DATA_INFO advertises segments that are not attached: one created
+     * before compute.segment() added any attaches them now (a change is
+     * refused while an instance holds the chain, so an attached instance is
+     * always current). A spans call carries no module chain (D1 above). */
+    const HlWasmSharedData *pi_sd = NULL;
+    if (pi->module && !have_spans) {
+        const char *attach_err = NULL;
+        int arc = 0;
+        pthread_mutex_lock(&pi->module->mutex);
+        if (pi->chain.gen != pi->module->chain_gen && !pi->chain.attached)
+            arc = chain_attach_locked(pi->module, inst, &pi->chain, &attach_err);
+        pi_sd = pi->module->shared_data;
+        pthread_mutex_unlock(&pi->module->mutex);
+        if (arc != 0) {
+            if (err_msg) *err_msg = attach_err;
+            if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
+            if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
+            return HL_WASM_ERR_INTERNAL;
+        }
+    }
+
     /* Save and set thread-local callback context */
     HlHostCallCtx saved_ctx = tl_host_ctx;
     tl_host_ctx.fn = callback_fn;
     tl_host_ctx.ctx = callback_ctx;
-    /* Persistent instance's shared data was attached at creation time.
-     * Read shared_data under per-module mutex for thread safety. */
-    const HlWasmSharedData *pi_sd = NULL;
-    if (pi->module) {
-        pthread_mutex_lock(&pi->module->mutex);
-        pi_sd = pi->module->shared_data;
-        pthread_mutex_unlock(&pi->module->mutex);
-    }
     tl_host_ctx.shared_data = pi_sd;
     tl_host_ctx.spans = spans_active ? &span_set : NULL;
 
@@ -1580,11 +1750,19 @@ static int instance_call_buf_impl(HlWasmInstance *pi,
         argc_call = 4;
     }
 
-    if (!wasm_runtime_call_wasm(exec_env, process_fn, (uint32_t)argc_call, argv)) {
+    hl_wasm_watch_bind(watch, inst);
+    int call_ok = wasm_runtime_call_wasm(exec_env, process_fn,
+                                         (uint32_t)argc_call, argv);
+    hl_wasm_watch_bind(watch, NULL);
+    if (!call_ok) {
         const char *exception = wasm_runtime_get_exception(inst);
         if (wasm_is_gas_exception(exception)) {
             if (err_msg) *err_msg = err_gas;
             ret = HL_WASM_ERR_GAS;
+        } else if (wasm_is_timeout_exception(exception)) {
+            log_warn("[wasm] '%s' stopped by the compute timeout", pi->name);
+            if (err_msg) *err_msg = err_timeout;
+            ret = HL_WASM_ERR_TIMEOUT;
         } else {
             if (err_msg) *err_msg = err_call;
         }
@@ -1628,6 +1806,31 @@ cleanup_bufs_err:
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     return ret;
+}
+
+/* instance_call_buf_run under a wall-clock watch: per-call timeout_ms, else
+ * the instance's, else the default. */
+static int instance_call_buf_impl(HlWasmInstance *pi,
+                                   const void *input, size_t input_len,
+                                   HlWasmBuffer **output_buf,
+                                   const HlWasmCallOpts *opts,
+                                   HlWasmCallbackFn callback_fn, void *callback_ctx,
+                                   HlAllocator *alloc, const char **err_msg,
+                                   int busy_owned)
+{
+    uint32_t timeout_ms = opts && opts->timeout_ms ? opts->timeout_ms
+                        : pi ? pi->default_timeout_ms : 0;
+    HlWasmWatch watch = {0};
+    if (hl_wasm_watch_arm(&watch, timeout_ms, NULL) != 0) {
+        if (output_buf) *output_buf = NULL;
+        if (err_msg) *err_msg = "watchdog_unavailable";
+        return HL_WASM_ERR_INTERNAL;
+    }
+    int rc = instance_call_buf_run(pi, input, input_len, output_buf, opts,
+                                   callback_fn, callback_ctx, alloc, err_msg,
+                                   busy_owned, &watch);
+    hl_wasm_watch_disarm(&watch);
+    return rc;
 }
 
 /* Public synchronous entry: rejects when a call is in flight (busy). */
@@ -1750,7 +1953,15 @@ void hl_cap_wasm_instance_destroy(HlWasmInstance *pi)
          * makes the later hl_wasm_free_shared_data destroy fail and RETAIN the
          * whole HlWasmSharedData (a leak). Mirrors hl_wasm_pool_drain. No-op when
          * nothing is attached. */
-        wasm_runtime_detach_shared_heap((wasm_module_inst_t)pi->instance);
+        if (pi->module) {
+            pthread_mutex_lock(&pi->module->mutex);
+            chain_detach_locked(pi->module, (wasm_module_inst_t)pi->instance,
+                                &pi->chain);
+            pthread_mutex_unlock(&pi->module->mutex);
+        } else {
+            wasm_runtime_detach_shared_heap((wasm_module_inst_t)pi->instance);
+        }
+        pi->chain.attached = 0;
         wasm_runtime_deinstantiate((wasm_module_inst_t)pi->instance);
     }
 

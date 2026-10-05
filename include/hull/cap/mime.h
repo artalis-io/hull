@@ -16,6 +16,9 @@
  *   - image/png, image/jpeg, image/gif, image/webp  (binary magic)
  *   - application/pdf                                (binary magic)
  *   - image/svg+xml, text/html                       (text shape)
+ *   - application/xml  (any other "<?" / "<!"-led markup: an XML
+ *                       declaration or doctype whose root the shape checks
+ *                       did not place - never text/plain)
  *   - text/plain                                     (UTF-8 fallback)
  *
  * JSON / CSV are NOT distinguished from text/plain - they're valid

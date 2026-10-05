@@ -59,6 +59,8 @@ typedef struct HlWasmBuffer {
             uint64_t wasm_ptr;      /* WASM-space address (for module_free) */
             uint32_t heap_size;
             uint32_t stack_size;
+            uint32_t chain_gen;     /* HlWasmChainRef of the checked-out instance */
+            int      chain_attached;
         } wasm;                                            /* pool_release() */
     } u;
 } HlWasmBuffer;
@@ -96,6 +98,7 @@ HlWasmBuffer *hl_wasm_buffer_create_wasm(
     void *module, void *cache,
     uint64_t wasm_ptr, const void *native_ptr, size_t len,
     uint32_t heap_size, uint32_t stack_size,
+    uint32_t chain_gen, int chain_attached,
     HlAllocator *alloc);
 
 /**

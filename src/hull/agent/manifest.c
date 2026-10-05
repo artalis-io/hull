@@ -126,13 +126,14 @@ static int emit_manifest_json(const HlManifest *m, ShJsonBuf *out,
     }
 
     /* wasm caps (only if any are set) */
-    if (m->wasm_heap || m->wasm_stack || m->wasm_gas ||
+    if (m->wasm_heap || m->wasm_stack || m->wasm_gas || m->wasm_timeout_ms ||
         m->wasm_max_input || m->wasm_max_output) {
         sh_json_write_key(&w, "wasm");
         sh_json_write_object_start(&w);
         if (m->wasm_heap)        sh_json_write_kv_int(&w, "heap", m->wasm_heap);
         if (m->wasm_stack)       sh_json_write_kv_int(&w, "stack", m->wasm_stack);
         if (m->wasm_gas)         sh_json_write_kv_int(&w, "gas", m->wasm_gas);
+        if (m->wasm_timeout_ms)  sh_json_write_kv_int(&w, "timeout_ms", m->wasm_timeout_ms);
         if (m->wasm_max_input)   sh_json_write_kv_int(&w, "max_input", m->wasm_max_input);
         if (m->wasm_max_output)  sh_json_write_kv_int(&w, "max_output", m->wasm_max_output);
         sh_json_write_object_end(&w);

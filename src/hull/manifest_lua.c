@@ -186,7 +186,8 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop cors */
 
-    /* wasm = { heap = N, stack = N, gas = N, max_input = N, max_output = N } */
+    /* wasm = { heap = N, stack = N, gas = N, timeout_ms = N, max_input = N,
+     *          max_output = N } */
     lua_getfield(L, manifest_idx, "wasm");
     if (lua_istable(L, -1)) {
         int wasm_idx = lua_gettop(L);
@@ -198,6 +199,11 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         lua_pop(L, 1);
         lua_getfield(L, wasm_idx, "gas");
         if (lua_isinteger(L, -1)) out->wasm_gas = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, wasm_idx, "timeout_ms");
+        if (lua_isinteger(L, -1) && lua_tointeger(L, -1) > 0)
+            out->wasm_timeout_ms = lua_tointeger(L, -1) > (lua_Integer)UINT32_MAX
+                ? UINT32_MAX : (uint32_t)lua_tointeger(L, -1);
         lua_pop(L, 1);
         lua_getfield(L, wasm_idx, "max_input");
         if (lua_isinteger(L, -1)) out->wasm_max_input = (uint32_t)lua_tointeger(L, -1);

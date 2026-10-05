@@ -84,13 +84,19 @@ int hl_wasm_rebuild_chain(HlWasmModule *mod)
     wasm_shared_heap_t chain = (wasm_shared_heap_t)sd->segments[sd->count - 1].shared_heap;
 
     for (int i = sd->count - 2; i >= 0; i--) {
-        chain = wasm_runtime_chain_shared_heaps(
+        wasm_shared_heap_t next = wasm_runtime_chain_shared_heaps(
             (wasm_shared_heap_t)sd->segments[i].shared_heap, chain);
-        if (!chain) {
+        if (!next) {
             log_error("[wasm] failed to chain shared heaps");
+            /* Undo the links already made, so every heap is standalone again
+             * (destroyable, and chainable by a later rebuild) rather than
+             * left half-chained under a NULL head. */
+            if (i < sd->count - 2)
+                wasm_runtime_unchain_shared_heaps(chain, true);
             sd->chain_head = NULL;
             return -1;
         }
+        chain = next;
     }
 
     sd->chain_head = chain;
@@ -227,7 +233,8 @@ int hl_wasm_attach_shared_heap(void *inst, void *chain_head)
 
 void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
                              uint64_t cfg_max_input, uint64_t cfg_max_output,
-                             uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas)
+                             uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas,
+                             uint32_t cfg_timeout_ms)
 {
     if (!opts) return;
     #define CLAMP_VAL(field, cfg) do { \
@@ -238,6 +245,9 @@ void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
     CLAMP_VAL(max_output, cfg_max_output);
     CLAMP_VAL(heap_size,  cfg_heap);
     CLAMP_VAL(stack_size, cfg_stack);
+    /* The operator's / manifest's timeout is a ceiling, like gas: a call may
+     * ask for less, never more; unset, the call gets the ceiling. */
+    CLAMP_VAL(timeout_ms, cfg_timeout_ms);
     #undef CLAMP_VAL
     if (opts->gas < 0) opts->gas = 0;   /* negative = default, not unmetered */
     if (cfg_gas > 0 && (!opts->gas || opts->gas > cfg_gas))
@@ -299,6 +309,7 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
     static const char *err_too_large = "data_too_large";
     static const char *err_bad_name  = "segment_name_too_long";
     static const char *err_busy      = "async_calls_in_flight";
+    static const char *err_in_use    = "segments_in_use";
 
     /* Segment mutation is event-loop-only; the inflight_async guard below
      * is correct only because this never races an async submit/complete. */
@@ -352,9 +363,28 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
 
     pthread_mutex_lock(&mod->mutex);
 
+    /* Drain the pool FIRST: it detaches the current chain from every pooled
+     * instance - the precondition for unchaining it and for destroying any
+     * of its heaps. Held under mod->mutex, so the pool stays empty through
+     * whatever follows (no call can acquire). */
+    hl_wasm_pool_drain(mod);
+
+    /* An instance OUTSIDE the pool may still hold the chain: a persistent
+     * compute.instance, or one checked out by a zero-copy result. WAMR then
+     * refuses the unchain / destroy / re-chain, and carrying on left the
+     * module half-torn-down (no chain over live segments: every later call
+     * failed). Refuse the change instead, before touching anything. */
+    if (mod->chain_attached > 0) {
+        pthread_mutex_unlock(&mod->mutex);
+        if (err_msg) *err_msg = err_in_use;
+        return -1;
+    }
+    /* Whatever happens below, the chain is not the one any instance outside
+     * the pool was given: none of them may come back into the pool. */
+    mod->chain_gen++;
+
     /* Case 1: segment_name==NULL && data==NULL → remove all segments */
     if (!segment_name && !data) {
-        hl_wasm_pool_drain(&mod->pool);
         int frc = hl_wasm_free_shared_data(mod);
         pthread_mutex_unlock(&mod->mutex);
         if (frc != 0) {
@@ -388,11 +418,10 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
             HlWasmSharedData *sd = mod->shared_data;
             for (int i = 0; i < sd->count; i++) {
                 if (strcmp(sd->segments[i].name, segment_name) == 0) {
-                    /* Drain FIRST so the chain is detached (attached_count -> 0),
-                     * a precondition for both the unchain and the per-heap destroy
-                     * below. Then unchain (a multi-segment chain) so every heap is
-                     * standalone, then free (which destroys the removed heap). */
-                    hl_wasm_pool_drain(&mod->pool);
+                    /* The pool is drained and nothing else holds the chain
+                     * (checked above), so attached_count is 0: unchain (a
+                     * multi-segment chain) so every heap is standalone, then
+                     * free (which destroys the removed heap). */
                     if (sd->chain_head && sd->count > 1) {
                         wasm_runtime_unchain_shared_heaps(
                             (wasm_shared_heap_t)sd->chain_head, true);
@@ -484,13 +513,7 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
         return -1;
     }
 
-    /* Drain the pool FIRST: it detaches the current chain (attached_count -> 0),
-     * a precondition for the unchain and for destroying the replaced slot's heap
-     * below. Held under mod->mutex, so the pool stays empty through the rebuild
-     * (no call can acquire), making the later re-drain unnecessary. */
-    hl_wasm_pool_drain(&mod->pool);
-
-    /* Unchain existing chain before modifying */
+    /* Unchain existing chain before modifying (the pool was drained above). */
     if (sd->chain_head && sd->count > 1) {
         wasm_runtime_unchain_shared_heaps(
             (wasm_shared_heap_t)sd->chain_head, true);
@@ -611,6 +634,12 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
                 mod->shared_data = NULL;
             }
         }
+        /* Re-chain the segments that survive: the failed rebuild left
+         * chain_head NULL over them - the broken-chain marker - so every new
+         * instance failed segment_attach_failed until all were removed and
+         * re-added. (The case-3 replace abort above already does this.) */
+        if (mod->shared_data && mod->shared_data->count > 0)
+            hl_wasm_rebuild_chain(mod);
         pthread_mutex_unlock(&mod->mutex);
         if (err_msg) *err_msg = err_internal;
         return -1;
@@ -634,8 +663,14 @@ void hl_cap_wasm_data_unload(HlWasmCache *cache, const char *module_name)
 
     if (mod) {
         pthread_mutex_lock(&mod->mutex);
-        hl_wasm_pool_drain(&mod->pool);
-        hl_wasm_free_shared_data(mod);
+        hl_wasm_pool_drain(mod);
+        mod->chain_gen++;
+        /* A heap still attached to an instance outside the pool is retained
+         * by hl_wasm_free_shared_data (never freed under it). */
+        if (hl_wasm_free_shared_data(mod) != 0)
+            log_warn("[wasm] '%s': segments still held by %d instance(s); "
+                     "kept until they are released", module_name,
+                     mod->chain_attached);
         pthread_mutex_unlock(&mod->mutex);
     }
 }

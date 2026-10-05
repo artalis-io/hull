@@ -153,7 +153,15 @@ static void wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
     hl_cap_wasm_clamp_opts(opts,
         base->wasm_config.max_input, base->wasm_config.max_output,
         base->wasm_config.heap_size, base->wasm_config.stack_size,
-        base->wasm_config.gas);
+        base->wasm_config.gas, base->wasm_config.timeout_ms);
+}
+
+/* opts.timeout_ms: a positive number of milliseconds; anything else is "the
+ * default" (never "unbounded" - a negative cast to uint32_t became ~49 days). */
+static uint32_t wasm_timeout_arg(lua_Integer v)
+{
+    if (v <= 0) return 0;
+    return v > (lua_Integer)UINT32_MAX ? UINT32_MAX : (uint32_t)v;
 }
 
 /* Parse opts.spans = { {name=, buffer=<MappedBuffer>}, ... } into reqs[] (cap
@@ -276,6 +284,9 @@ static int lua_compute_call(lua_State *L)
         lua_getfield(L, 3, "gas");
         if (lua_isinteger(L, -1))
             opts.gas = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "timeout_ms");
+        if (lua_isinteger(L, -1)) opts.timeout_ms = wasm_timeout_arg(lua_tointeger(L, -1));
         lua_pop(L, 1);
 
         lua_getfield(L, 3, "buffer");
@@ -479,6 +490,9 @@ static int lua_compute_async_call(lua_State *L)
         lua_getfield(L, 3, "gas");
         if (lua_isinteger(L, -1)) opts.gas = lua_tointeger(L, -1);
         lua_pop(L, 1);
+        lua_getfield(L, 3, "timeout_ms");
+        if (lua_isinteger(L, -1)) opts.timeout_ms = wasm_timeout_arg(lua_tointeger(L, -1));
+        lua_pop(L, 1);
 
         lua_getfield(L, 3, "buffer");
         if (lua_toboolean(L, -1)) want_buffer = 1;
@@ -641,6 +655,9 @@ static int lua_wasm_inst_call(lua_State *L)
         lua_getfield(L, 3, "gas");
         if (lua_isinteger(L, -1)) opts.gas = lua_tointeger(L, -1);
         lua_pop(L, 1);
+        lua_getfield(L, 3, "timeout_ms");
+        if (lua_isinteger(L, -1)) opts.timeout_ms = wasm_timeout_arg(lua_tointeger(L, -1));
+        lua_pop(L, 1);
         lua_getfield(L, 3, "max_input");
         if (lua_isinteger(L, -1)) opts.max_input = (uint32_t)lua_tointeger(L, -1);
         lua_pop(L, 1);
@@ -751,6 +768,9 @@ static int lua_wasm_inst_async_call(lua_State *L)
     if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "gas");
         if (lua_isinteger(L, -1)) opts.gas = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "timeout_ms");
+        if (lua_isinteger(L, -1)) opts.timeout_ms = wasm_timeout_arg(lua_tointeger(L, -1));
         lua_pop(L, 1);
         lua_getfield(L, 3, "max_input");
         if (lua_isinteger(L, -1)) opts.max_input = (uint32_t)lua_tointeger(L, -1);
@@ -999,6 +1019,9 @@ static int lua_compute_instance(lua_State *L)
         lua_pop(L, 1);
         lua_getfield(L, 2, "gas");
         if (lua_isinteger(L, -1)) opts.gas = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "timeout_ms");
+        if (lua_isinteger(L, -1)) opts.timeout_ms = wasm_timeout_arg(lua_tointeger(L, -1));
         lua_pop(L, 1);
         lua_getfield(L, 2, "max_input");
         if (lua_isinteger(L, -1)) opts.max_input = (uint32_t)lua_tointeger(L, -1);
@@ -1290,6 +1313,9 @@ static int lua_compute_stream(lua_State *L)
         lua_getfield(L, opts_arg, "gas");
         if (!lua_isnil(L, -1))
             stream_opts.call_opts.gas = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, opts_arg, "timeout_ms");
+        if (lua_isinteger(L, -1)) stream_opts.call_opts.timeout_ms = wasm_timeout_arg(lua_tointeger(L, -1));
         lua_pop(L, 1);
 
         lua_getfield(L, opts_arg, "heap");

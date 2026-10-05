@@ -268,6 +268,23 @@ const char *hl_cap_mime_sniff(const uint8_t *buf, size_t len)
     if (looks_like_svg(buf, len))  return "image/svg+xml";
     if (looks_like_html(buf, len)) return "text/html";
 
+    /* 2b. Markup that neither detector placed. An XML declaration or a
+     *     "<!" construct (doctype, CDATA) leads XHTML and SVG as well, and
+     *     both detectors look only so far: "<?xml ...><!DOCTYPE html><html
+     *     xmlns=...><script>" and an SVG pushed past the 4 KiB window by a
+     *     padded comment sniffed as text/plain, which a text-only allowlist
+     *     accepted. Such a buffer is never plain text: XHTML whose root is
+     *     in the window is html, anything else is XML. */
+    {
+        size_t off = skip_bom_ws(buf, len);
+        if (off + 1 < len && buf[off] == '<' &&
+            (buf[off + 1] == '?' || buf[off + 1] == '!')) {
+            if (contains_ci(buf, len, "<html", HL_MIME_SNIFF_WINDOW))
+                return "text/html";
+            return "application/xml";
+        }
+    }
+
     /* 3. UTF-8 plain-text fallback. JSON / CSV / config files all land
      *    here - they're valid text by construction. */
     if (is_plain_text(buf, len)) return "text/plain";

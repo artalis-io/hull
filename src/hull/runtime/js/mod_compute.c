@@ -140,7 +140,15 @@ static void js_wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
     hl_cap_wasm_clamp_opts(opts,
         base->wasm_config.max_input, base->wasm_config.max_output,
         base->wasm_config.heap_size, base->wasm_config.stack_size,
-        base->wasm_config.gas);
+        base->wasm_config.gas, base->wasm_config.timeout_ms);
+}
+
+/* opts.timeoutMs: a positive number of milliseconds; anything else is "the
+ * default" (never "unbounded"). */
+static uint32_t js_wasm_timeout_arg(int64_t v)
+{
+    if (v <= 0) return 0;
+    return v > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)v;
 }
 
 /* Free the OWNED (JS_ToCString) name copies in reqs[0..n). Idempotent. */
@@ -307,6 +315,9 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
         if (!JS_IsUndefined(val)) {
             int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v;
         }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "timeoutMs");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
         JS_FreeValue(ctx, val);
 
         val = JS_GetPropertyStr(ctx, argv[2], "buffer");
@@ -510,6 +521,9 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, val);
         val = JS_GetPropertyStr(ctx, argv[2], "gas");
         if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "timeoutMs");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
         JS_FreeValue(ctx, val);
         val = JS_GetPropertyStr(ctx, argv[2], "buffer");
         if (JS_ToBool(ctx, val)) want_buffer = 1;
@@ -720,6 +734,9 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
         val = JS_GetPropertyStr(ctx, argv[1], "gas");
         if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
         JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[1], "timeoutMs");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
+        JS_FreeValue(ctx, val);
         val = JS_GetPropertyStr(ctx, argv[1], "maxInput");
         if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
         JS_FreeValue(ctx, val);
@@ -916,6 +933,9 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         JSValue val;
         val = JS_GetPropertyStr(ctx, argv[1], "gas");
         if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[1], "timeoutMs");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
         JS_FreeValue(ctx, val);
         val = JS_GetPropertyStr(ctx, argv[1], "maxInput");
         if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
@@ -1155,6 +1175,9 @@ static JSValue js_compute_instance(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, val);
         val = JS_GetPropertyStr(ctx, argv[1], "gas");
         if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[1], "timeoutMs");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
         JS_FreeValue(ctx, val);
         val = JS_GetPropertyStr(ctx, argv[1], "maxInput");
         if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
@@ -1462,6 +1485,9 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
             int64_t v; JS_ToInt64(ctx, &v, val);
             stream_opts.call_opts.gas = v;
         }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[opts_idx], "timeoutMs");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); stream_opts.call_opts.timeout_ms = js_wasm_timeout_arg(v); }
         JS_FreeValue(ctx, val);
 
         val = JS_GetPropertyStr(ctx, argv[opts_idx], "heap");
