@@ -217,6 +217,8 @@ int hl_js_run_defer_to_holder(HlJS *js, HlJsRunLink *link, HlReqLife *life)
 int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run)
 {
     const char *txn = hl_db_registry_open_txn(js->base.db_registry);
+    /* Always NULL only in a DB-less build (the inline stub). */
+    // cppcheck-suppress knownConditionTrueFalse
     if (!txn) return 0;
     log_error("[hull:c] a handler waited while a transaction was open on "
               "database connection '%s': other requests use the same "
