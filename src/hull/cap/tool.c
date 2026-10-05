@@ -933,7 +933,11 @@ static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
                              const char *const envadd[], int out_fd,
                              int close_fd)
 {
+    /* Freed by ownership, never by comparing with environ: posix_spawn can
+     * replace environ itself (cosmo on a GitHub Windows runner does), and
+     * "envp != environ" then freed the process's own environment array. */
     char **envp = environ;
+    char **owned = NULL;
     if (envadd && envadd[0]) {
         size_t nenv = 0;
         for (char **e = environ; *e; e++) nenv++;
@@ -945,6 +949,7 @@ static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
         for (size_t j = 0; j < nadd; j++) envp[i++] = (char *)(uintptr_t)envadd[j];
         for (char **e = environ; *e; e++) envp[i++] = *e;   /* envadd overrides */
         envp[i] = NULL;
+        owned = envp;
     }
 
     posix_spawn_file_actions_t fa;
@@ -964,7 +969,7 @@ static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
         rc = posix_spawnp(pid, argv[0], have_fa ? &fa : NULL, NULL,
                           (char *const *)(uintptr_t)argv, envp);
     if (have_fa) posix_spawn_file_actions_destroy(&fa);
-    if (envp != environ) free(envp);
+    free(owned);
     return rc;
 }
 
