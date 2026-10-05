@@ -7535,9 +7535,31 @@ static const char *get_prop_string(JSContext *ctx, JSValueConst obj, JSAtom prop
 
 /* if filename != NULL, an additional level is added with the filename
    and line number information (used for parse error). */
+static void build_backtrace1(JSContext *ctx, JSValueConst error_obj,
+                             const char *filename, int line_num, int col_num,
+                             int backtrace_flags);
+
+/* HULL PATCH 0004: callers pass rt->current_exception without a reference
+   of their own (JS_CallInternal's exception path, the parser's and the
+   module loader's error paths). build_backtrace allocates - the frames'
+   function names, the stack string - and an allocation that runs out of
+   memory throws, which REPLACES rt->current_exception and frees the error
+   object still being decorated: the final JS_DefinePropertyValue of `stack`
+   then wrote through freed memory (found by the deep JS-source fuzzer under
+   a heap limit). Hold a reference for the duration. See
+   docs/quickjs_patches.md. */
 static void build_backtrace(JSContext *ctx, JSValueConst error_obj,
                             const char *filename, int line_num, int col_num,
                             int backtrace_flags)
+{
+    JSValue keep = JS_DupValue(ctx, error_obj);
+    build_backtrace1(ctx, keep, filename, line_num, col_num, backtrace_flags);
+    JS_FreeValue(ctx, keep);
+}
+
+static void build_backtrace1(JSContext *ctx, JSValueConst error_obj,
+                             const char *filename, int line_num, int col_num,
+                             int backtrace_flags)
 {
     JSStackFrame *sf;
     JSValue str;

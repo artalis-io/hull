@@ -130,3 +130,27 @@ now provides `JS_SetUncatchableException`, which `hl_js_budget_throw` uses.
 **Guard:** `tests/hull/runtime/js/test_js.c`,
 `js_audit5.async_bodies_do_not_escape_the_instruction_limit`. Without the patch
 the async-burn loop is never interrupted and the test hangs.
+
+## Patch 0004 - build_backtrace holds its own reference to the error
+
+**File:** `vendor/quickjs/quickjs.c`, `build_backtrace` (wrapping the original
+body, renamed `build_backtrace1`)
+**Found by:** the nightly deep JS-source fuzzer (`fuzz/fuzz_js_source.c`), on
+QuickJS 2026-06-04, as an ASan SEGV in `find_own_property` under
+`build_backtrace` -> `JS_DefinePropertyValue(..., JS_ATOM_stack, ...)`.
+**Upstream:** not reported upstream yet.
+
+Three callers pass `rt->current_exception` without a reference of their own:
+`JS_CallInternal`'s exception path, the parser's error path and the module
+loader's. `build_backtrace` allocates while it works (each frame's function
+name, the stack string), and an allocation that runs out of memory throws "out
+of memory", which replaces `rt->current_exception` and frees the error object
+still being decorated. The final `JS_DefinePropertyValue` of `stack` then wrote
+through freed memory. Hull's JS source analyzer runs in a heap-limited QuickJS
+session, so malformed app source that exhausts it reached this path.
+
+The patch makes `build_backtrace` a wrapper that takes a reference to the
+error object for the duration of the call (`JS_DupValue` / `JS_FreeValue`).
+
+**Guard:** `fuzz/corpus_js_source/regress_backtrace_oom_uaf`, the fuzzer's
+crashing input, replayed by the per-PR JS-source fuzz job.
