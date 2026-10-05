@@ -144,6 +144,17 @@ static void js_wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
         base->wasm_config.gas, base->wasm_config.timeout_ms);
 }
 
+/* The same ceilings for a call on a persistent instance, without filling the
+ * fields the call left unset: those take the instance's own defaults, already
+ * clamped at compute.instance() (round-6 L2). */
+static void js_wasm_cap_call_opts(HlWasmCallOpts *opts, const HlRuntime *base)
+{
+    hl_cap_wasm_cap_call_opts(opts,
+        base->wasm_config.max_input, base->wasm_config.max_output,
+        base->wasm_config.heap_size, base->wasm_config.stack_size,
+        base->wasm_config.gas, base->wasm_config.timeout_ms);
+}
+
 /* opts.timeoutMs: a positive number of milliseconds; anything else is "the
  * default" (never "unbounded"). */
 static uint32_t js_wasm_timeout_arg(int64_t v)
@@ -795,7 +806,7 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
         }
     }
 
-    if (js) js_wasm_clamp_opts(&opts, &js->base);
+    if (js) js_wasm_cap_call_opts(&opts, &js->base);
 
     /* Option and span getters and the input's toString are app code and can
      * close this instance, which frees it: `pi` must not be read until the
@@ -985,7 +996,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         if (input_is_string) JS_FreeCString(ctx, (const char *)input);
         return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: instance closed");
     }
-    js_wasm_clamp_opts(&opts, &js->base);
+    js_wasm_cap_call_opts(&opts, &js->base);
 
     /* Allocate op */
     HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));

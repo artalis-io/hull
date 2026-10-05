@@ -21,10 +21,90 @@ diff --git a/core/iwasm/aot/aot_runtime.c b/core/iwasm/aot/aot_runtime.c
  
  #if WASM_ENABLE_MEMORY_TRACING != 0
      wasm_runtime_dump_module_inst_mem_consumption(
+diff --git a/core/iwasm/aot/aot_runtime.h b/core/iwasm/aot/aot_runtime.h
+--- a/core/iwasm/aot/aot_runtime.h
++++ b/core/iwasm/aot/aot_runtime.h
+@@ -36,6 +36,17 @@
+ #define WASM_FEATURE_FRAME_PER_FUNCTION (1 << 12)
+ #define WASM_FEATURE_FRAME_NO_FUNC_IDX (1 << 13)
+ 
++/* Hull ext (patch 0007): wamrc writes this into AOTTargetInfo.reserved of every
++ * AOT file, vouching that its code carries the loop-header terminate check
++ * (aot_compile_check_terminate). The loader ignores the field; the embedder
++ * (Hull: include/hull/cap/wasm_aot_stamp.h) refuses AOT code without it. High
++ * 32 bits "HULL", low 32 bits the stamp version - bump it in both places when
++ * the contract changes. */
++#define HULL_AOT_STAMP_MAGIC 0x48554C4CU
++#define HULL_AOT_STAMP_VERSION 1U
++#define HULL_AOT_STAMP \
++    (((uint64)HULL_AOT_STAMP_MAGIC << 32) | (uint64)HULL_AOT_STAMP_VERSION)
++
+ typedef enum AOTSectionType {
+     AOT_SECTION_TYPE_TARGET_INFO = 0,
+     AOT_SECTION_TYPE_INIT_DATA = 1,
 diff --git a/core/iwasm/common/wasm_runtime_common.c b/core/iwasm/common/wasm_runtime_common.c
 --- a/core/iwasm/common/wasm_runtime_common.c
 +++ b/core/iwasm/common/wasm_runtime_common.c
-@@ -3342,6 +3342,24 @@
+@@ -492,12 +492,45 @@
+ }
+ #endif /* end of OS_ENABLE_HW_BOUND_CHECK */
+ 
++#if WASM_ENABLE_THREAD_MGR == 0
++/* Hull ext (patch 0007): exception_lock() without a thread manager. One
++ * process-wide mutex: exceptions are rare, and the only cross-thread writer
++ * is an embedder's watchdog (wasm_runtime_terminate). Not taken before the
++ * runtime env is up or after it is destroyed (single-threaded then). */
++static korp_mutex hull_exception_lock;
++static bool hull_exception_lock_ready = false;
++
++void
++exception_lock(WASMModuleInstance *module_inst)
++{
++    (void)module_inst;
++    if (hull_exception_lock_ready)
++        os_mutex_lock(&hull_exception_lock);
++}
++
++void
++exception_unlock(WASMModuleInstance *module_inst)
++{
++    (void)module_inst;
++    if (hull_exception_lock_ready)
++        os_mutex_unlock(&hull_exception_lock);
++}
++#endif
++
+ static bool
+ wasm_runtime_env_init(void)
+ {
+     if (bh_platform_init() != 0)
+         return false;
+ 
++#if WASM_ENABLE_THREAD_MGR == 0
++    if (BHT_OK != os_mutex_init(&hull_exception_lock)) {
++        bh_platform_destroy();
++        return false;
++    }
++    hull_exception_lock_ready = true;
++#endif
++
+     if (wasm_native_init() == false) {
+         goto fail1;
+     }
+@@ -733,6 +766,12 @@
+ #endif
+ 
+     wasm_native_destroy();
++#if WASM_ENABLE_THREAD_MGR == 0
++    if (hull_exception_lock_ready) {
++        hull_exception_lock_ready = false;
++        os_mutex_destroy(&hull_exception_lock);
++    }
++#endif
+     bh_platform_destroy();
+ 
+     wasm_runtime_memory_destroy();
+@@ -3342,6 +3381,24 @@
      wasm_runtime_set_exception(module_inst_comm, NULL);
  }
  
@@ -64,6 +144,19 @@ diff --git a/core/iwasm/common/wasm_runtime_common.h b/core/iwasm/common/wasm_ru
  /* Internal API */
  void
  wasm_runtime_set_custom_data_internal(WASMModuleInstanceCommon *module_inst,
+diff --git a/core/iwasm/compilation/aot_emit_aot_file.c b/core/iwasm/compilation/aot_emit_aot_file.c
+--- a/core/iwasm/compilation/aot_emit_aot_file.c
++++ b/core/iwasm/compilation/aot_emit_aot_file.c
+@@ -4513,6 +4513,9 @@
+     if (!comp_ctx->call_stack_features.func_idx) {
+         obj_data->target_info.feature_flags |= WASM_FEATURE_FRAME_NO_FUNC_IDX;
+     }
++    /* Hull ext (patch 0007): stamp the file as carrying the loop-header
++     * terminate check (see HULL_AOT_STAMP in aot_runtime.h). */
++    obj_data->target_info.reserved = HULL_AOT_STAMP;
+ 
+     bh_print_time("Begin to resolve object file info");
+ 
 diff --git a/core/iwasm/compilation/aot_emit_control.c b/core/iwasm/compilation/aot_emit_control.c
 --- a/core/iwasm/compilation/aot_emit_control.c
 +++ b/core/iwasm/compilation/aot_emit_control.c
@@ -164,10 +257,34 @@ diff --git a/core/iwasm/compilation/aot_emit_function.h b/core/iwasm/compilation
 diff --git a/core/iwasm/include/wasm_export.h b/core/iwasm/include/wasm_export.h
 --- a/core/iwasm/include/wasm_export.h
 +++ b/core/iwasm/include/wasm_export.h
-@@ -1376,6 +1376,20 @@
+@@ -1338,6 +1338,22 @@
+ WASM_RUNTIME_API_EXTERN const char *
+ wasm_runtime_get_exception(wasm_module_inst_t module_inst);
+ 
++/**
++ * Hull ext (patch 0007): copy the instance's current exception under
++ * exception_lock, for an embedder whose watchdog thread may raise one
++ * concurrently (wasm_runtime_terminate). wasm_runtime_get_exception returns
++ * the live buffer unlocked.
++ *
++ * @param module_inst the WASM module instance
++ * @param exception_buf NULL to only test for an exception; otherwise a
++ *        buffer of at least 128 bytes (the instance's exception buffer size)
++ *
++ * @return true if an exception is set
++ */
++WASM_RUNTIME_API_EXTERN bool
++wasm_runtime_copy_exception(wasm_module_inst_t module_inst,
++                            char *exception_buf);
++
+ /**
+  * Set exception info of the WASM module instance.
+  *
+@@ -1375,6 +1391,20 @@
+ WASM_RUNTIME_API_EXTERN void
  wasm_runtime_terminate(wasm_module_inst_t module_inst);
  
- /**
++/**
 + * Hull ext (patch 0007): a process-wide hook called around the functions an
 + * instantiation runs itself - the start function, __post_instantiate and
 + * __wasm_call_ctors - with @p entering = true just before them and false just
@@ -181,22 +298,22 @@ diff --git a/core/iwasm/include/wasm_export.h b/core/iwasm/include/wasm_export.h
 +WASM_RUNTIME_API_EXTERN void
 +wasm_runtime_set_post_instantiate_hook(wasm_post_instantiate_hook_t hook);
 +
-+/**
+ /**
   * Set custom data to WASM module instance.
   * Note:
-  *  If WAMR_BUILD_LIB_PTHREAD is enabled, this API
 diff --git a/core/iwasm/interpreter/wasm_interp_fast.c b/core/iwasm/interpreter/wasm_interp_fast.c
 --- a/core/iwasm/interpreter/wasm_interp_fast.c
 +++ b/core/iwasm/interpreter/wasm_interp_fast.c
-@@ -128,13 +128,21 @@
+@@ -128,13 +128,22 @@
      } while (0)
  
  #if WASM_ENABLE_INSTRUCTION_METERING != 0
 +/* Hull ext (patch 0007): every 4096 dispatched instructions, also stop when
 + * another thread has raised an exception on this instance -
 + * wasm_runtime_terminate() from a watchdog. Without a thread manager nothing
-+ * else ever looks at it while a loop runs, so a terminate never landed. A
-+ * volatile read: the store comes from the watchdog thread. */
++ * else ever looks at it while a loop runs, so a terminate never landed. The
++ * read takes exception_lock (wasm_copy_exception): the store comes from the
++ * watchdog thread. */
  #define CHECK_INSTRUCTION_LIMIT()                                 \
      if (instructions_left == 0) {                                 \
          wasm_set_exception(module, "instruction limit exceeded"); \
@@ -206,12 +323,12 @@ diff --git a/core/iwasm/interpreter/wasm_interp_fast.c b/core/iwasm/interpreter/
 -        instructions_left--;
 +        instructions_left--;                                      \
 +    if ((++hull_terminate_tick & 0xFFFu) == 0                     \
-+        && *(volatile char *)module->cur_exception != '\0')       \
++        && wasm_copy_exception(module, NULL))                     \
 +        goto got_exception;
  
  #else
  #define CHECK_INSTRUCTION_LIMIT() (void)0
-@@ -1579,6 +1587,7 @@
+@@ -1579,6 +1588,7 @@
  
  #if WASM_ENABLE_INSTRUCTION_METERING != 0
      int instructions_left = -1;
@@ -242,3 +359,26 @@ diff --git a/core/iwasm/interpreter/wasm_runtime.c b/core/iwasm/interpreter/wasm
  
  #if WASM_ENABLE_MEMORY_TRACING != 0
      wasm_runtime_dump_module_inst_mem_consumption(
+diff --git a/core/iwasm/interpreter/wasm_runtime.h b/core/iwasm/interpreter/wasm_runtime.h
+--- a/core/iwasm/interpreter/wasm_runtime.h
++++ b/core/iwasm/interpreter/wasm_runtime.h
+@@ -895,15 +895,14 @@
+ wasm_propagate_wasi_args(WASMModule *module);
+ #endif
+ 
+-#if WASM_ENABLE_THREAD_MGR != 0
++/* Hull ext (patch 0007): real functions in every build. Without a thread
++ * manager they serialise on one process-wide mutex (wasm_runtime_common.c):
++ * an embedder's watchdog thread writes cur_exception through
++ * wasm_runtime_terminate() while the executing thread sets and reads it. */
+ void
+ exception_lock(WASMModuleInstance *module_inst);
+ void
+ exception_unlock(WASMModuleInstance *module_inst);
+-#else
+-#define exception_lock(module_inst) (void)(module_inst)
+-#define exception_unlock(module_inst) (void)(module_inst)
+-#endif
+ 
+ bool
+ wasm_check_utf8_str(const uint8 *str, uint32 len);

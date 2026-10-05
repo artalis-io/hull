@@ -60,6 +60,13 @@
 #ifndef HL_WASM_MAX_TIMEOUT_MS
 #define HL_WASM_MAX_TIMEOUT_MS      3600000u               /* 1 h */
 #endif
+/* After a deadline passes, the watchdog terminates the instance again at this
+ * interval for as long as guest code still runs on it: a host call can replace
+ * the pending trap with its own exception and clear that, erasing the
+ * terminate (round-6 M1). */
+#ifndef HL_WASM_WATCHDOG_REASSERT_MS
+#define HL_WASM_WATCHDOG_REASSERT_MS 10u
+#endif
 
 /* ── WASM streaming I/O ────────────────────────────────────────────── */
 

@@ -201,7 +201,18 @@ Compile-time maximums are `#ifndef`-guarded. Override via `make HL_WASM_MAX_HEAP
   bounded by wall-clock time (`timeout_ms`, default 10 s): a watchdog thread
   (`cap/wasm_watchdog.c`) terminates the instance at the deadline, and WAMR
   patch 0007 makes that land in interpreted code, AOT loops and instantiation
-  alike (`"timeout"`). See docs/wamr_patches.md "Patch 0007".
+  alike (`"timeout"`). See docs/wamr_patches.md "Patch 0007". The watchdog
+  terminates an expired instance again every 10 ms for as long as guest code
+  still runs on it (a host call can overwrite and clear the pending trap), and
+  its deadlines are CLOCK_MONOTONIC on every host, macOS included.
+- AOT code is bounded only because Hull's patched `wamrc` emits the loop-header
+  check, so every AOT file it writes carries a stamp (the target-info
+  `reserved` field: "HULL" + a version, `include/hull/cap/wasm_aot_stamp.h`).
+  `hl_cap_wasm_load` refuses an unstamped `.aot` and falls back to the
+  module's `.wasm` (interpreted: gas and the watchdog both bound it); with no
+  `.wasm` the load fails. `hull build` checks the stamp of every AOT it
+  compiles or takes from the AOT cache and, on the first unstamped one, stops
+  compiling AOT with an unpatched `wamrc` (the modules ship as `.wasm`).
 - Synchronous call: Lua blocks until plugin returns (bounded by gas for the
   interpreter and by the timeout for everything)
 - For short computations (< 10 ms), this is zero-overhead and simple

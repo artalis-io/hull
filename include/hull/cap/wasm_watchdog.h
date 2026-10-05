@@ -34,8 +34,9 @@ typedef struct HlWasmWatch {
     void     *inst;        /* wasm_module_inst_t to terminate; NULL = none bound */
     uint64_t  deadline_ms; /* monotonic */
     int       armed;
-    int       expired;     /* the deadline passed */
-    int       terminated;  /* wasm_runtime_terminate() was called on an instance */
+    int       expired;     /* the deadline passed: the bound instance is
+                            * terminated, and terminated again every
+                            * HL_WASM_WATCHDOG_REASSERT_MS until unbound */
 } HlWasmWatch;
 
 /* Install the WAMR post-instantiate hook. Called once by hl_cap_wasm_init,
@@ -49,7 +50,7 @@ void hl_wasm_watchdog_install(void);
 int hl_wasm_watch_arm(HlWasmWatch *w, uint32_t timeout_ms, void *inst);
 
 /* Bind @p w to @p inst (NULL unbinds). An already expired watch terminates
- * the instance at once. */
+ * the instance at once, and keeps re-terminating it until it is unbound. */
 void hl_wasm_watch_bind(HlWasmWatch *w, void *inst);
 
 /* Disarm @p w. Once this returns, the watchdog never touches the instance

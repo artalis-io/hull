@@ -197,12 +197,54 @@ typedef struct {
     int                  span_count;
 } HlWasmCallOpts;
 
-/* Clamp call options to configured maximums (CLI > manifest > defaults).
- * cfg_* fields are ceilings - 0 means "use compile-time default". */
-void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
-                             uint64_t cfg_max_input, uint64_t cfg_max_output,
-                             uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas,
-                             uint32_t cfg_timeout_ms);
+/* Clamp options to the configured ceilings (rt->wasm_config: CLI > manifest >
+ * compile-time). cfg_* = 0 is "no ceiling configured". A value above its
+ * ceiling comes down to it, and with @p fill_unset an unset one (0) takes the
+ * ceiling. Header-inline so the base's db.udf bindings use it without the
+ * composed wasm feature. */
+static inline void hl_cap_wasm_clamp_impl(HlWasmCallOpts *opts, int fill_unset,
+                                          uint64_t cfg_max_input,
+                                          uint64_t cfg_max_output,
+                                          uint32_t cfg_heap, uint32_t cfg_stack,
+                                          int64_t cfg_gas, uint32_t cfg_timeout_ms)
+{
+    if (!opts) return;
+    #define HL_WASM_CLAMP_VAL(field, cfg) do {         if ((cfg) && (opts->field ? opts->field > (cfg) : fill_unset))             opts->field = (cfg);     } while (0)
+    HL_WASM_CLAMP_VAL(max_input,  cfg_max_input);
+    HL_WASM_CLAMP_VAL(max_output, cfg_max_output);
+    HL_WASM_CLAMP_VAL(heap_size,  cfg_heap);
+    HL_WASM_CLAMP_VAL(stack_size, cfg_stack);
+    HL_WASM_CLAMP_VAL(timeout_ms, cfg_timeout_ms);
+    #undef HL_WASM_CLAMP_VAL
+    if (opts->gas < 0) opts->gas = 0;   /* negative = default, not unmetered */
+    if (cfg_gas > 0 && (opts->gas ? opts->gas > cfg_gas : fill_unset))
+        opts->gas = cfg_gas;
+}
+
+/* A one-off call, or an instance being created: a call may ask for less than
+ * the ceiling, never more; unset, it gets the ceiling. */
+static inline void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
+                                          uint64_t cfg_max_input,
+                                          uint64_t cfg_max_output,
+                                          uint32_t cfg_heap, uint32_t cfg_stack,
+                                          int64_t cfg_gas, uint32_t cfg_timeout_ms)
+{
+    hl_cap_wasm_clamp_impl(opts, 1, cfg_max_input, cfg_max_output, cfg_heap,
+                           cfg_stack, cfg_gas, cfg_timeout_ms);
+}
+
+/* A call on a persistent instance: only lowers what the call set, so an unset
+ * field falls to the instance's own default (itself clamped at creation) -
+ * per-call, then instance default, the ceiling over both (round-6 L2). */
+static inline void hl_cap_wasm_cap_call_opts(HlWasmCallOpts *opts,
+                                             uint64_t cfg_max_input,
+                                             uint64_t cfg_max_output,
+                                             uint32_t cfg_heap, uint32_t cfg_stack,
+                                             int64_t cfg_gas, uint32_t cfg_timeout_ms)
+{
+    hl_cap_wasm_clamp_impl(opts, 0, cfg_max_input, cfg_max_output, cfg_heap,
+                           cfg_stack, cfg_gas, cfg_timeout_ms);
+}
 
 /* ── Callback support ──────────────────────────────────────────────── */
 
@@ -537,11 +579,6 @@ int hl_cap_wasm_data_load_pinned(HlWasmCache *cache, const char *module_name,
                            const struct HlVfs *app_vfs, const char *app_dir,
                            const char **err_msg,
                                   void *pin, void (*pin_release)(void *));
-
-/**
- * Remove all shared data for a module.
- */
-void hl_cap_wasm_data_unload(HlWasmCache *cache, const char *module_name);
 
 /* ── Streaming I/O context ─────────────────────────────────────────── */
 

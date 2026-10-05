@@ -326,6 +326,28 @@ local function find_wamrc()
     return tool.find_tool("wamrc")
 end
 
+-- Round-6 M2: an AOT file is usable only with the stamp Hull's patched wamrc
+-- (WAMR patch 0007) writes into the target-info section's `reserved` u64,
+-- vouching for the loop-header terminate check the compute timeout relies on.
+-- Mirrors include/hull/cap/wasm_aot_stamp.h (the runtime refuses the same
+-- files): magic "\0aot" at 0, target-info section (type 0, size 48) at 8, the
+-- stamp at 40 - version (u32 LE) then "HULL" (0x48554C4C).
+local AOT_STAMP_VERSION = 1
+local function aot_stamp_status(path)
+    local data = tool.read_file(path)
+    if not data or #data < 64 then return "not an AOT file" end
+    local magic, _, sec_type, sec_size = string.unpack("<I4I4I4I4", data, 1)
+    if magic ~= 0x746F6100 or sec_type ~= 0 or sec_size ~= 48 then
+        return "not an AOT file"
+    end
+    local version, stamp = string.unpack("<I4I4", data, 41)
+    if stamp ~= 0x48554C4C then return "no Hull terminate-check stamp" end
+    if version ~= AOT_STAMP_VERSION then
+        return "stamp version " .. version .. ", expected " .. AOT_STAMP_VERSION
+    end
+    return nil
+end
+
 -- Detect if a WASM binary uses Memory64 (64-bit memory addressing).
 -- Checks the memory section (ID 5) limits flags for bit 2 (0x04).
 local function is_memory64_wasm(path)
@@ -2220,8 +2242,10 @@ local function main()
                 end
                 local cache_hits = 0
                 local cache_writes = 0
+                local unpatched_wamrc = false
 
                 for _, wasm_path in ipairs(wasm_only) do
+                    if unpatched_wamrc then break end
                     local rel = wasm_path:sub(#opts.app_dir + 2) -- e.g. "compute/score.wasm"
                     for _, arch in ipairs(targets) do
                         local aot_name = rel:gsub("%.wasm$", ".aot." .. arch) -- "compute/score.aot.x86_64"
@@ -2272,11 +2296,35 @@ local function main()
                                   " -> " .. arch ..
                                   (mem64 and " (memory64)" or ""))
                             ok = tool.spawn(wamrc_args)
+                            -- An unpatched wamrc (no terminate-check stamp):
+                            -- its code would not stop at the compute timeout,
+                            -- and the runtime refuses it. Stop compiling AOT;
+                            -- the modules ship as .wasm (interpreter).
+                            local why = ok and aot_stamp_status(aot_path)
+                            if why then
+                                tool.remove_file(aot_path)
+                                print("hull build: warning: " .. wamrc ..
+                                      " is not Hull's patched wamrc (" .. why ..
+                                      "); skipping AOT - modules run in the " ..
+                                      "interpreter. Install Hull's with " ..
+                                      "`hull tools install wamrc` (or `make wamrc`).")
+                                unpatched_wamrc = true
+                                break
+                            end
                             if ok and cache_enabled and key then
                                 if aot_cache.store(key, aot_path) then
                                     cache_writes = cache_writes + 1
                                 end
                             end
+                        end
+
+                        -- Never embed an unstamped AOT, from wamrc or the cache.
+                        local why = ok and aot_stamp_status(aot_path)
+                        if why then
+                            tool.remove_file(aot_path)
+                            print("hull build: warning: not embedding AOT for " ..
+                                  rel .. " (" .. why .. ")")
+                            ok = false
                         end
 
                         if ok then

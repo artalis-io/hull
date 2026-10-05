@@ -1,7 +1,7 @@
 /*
  * hull_cap_wasm_data.c - WASM shared data management
  *
- * Shared heap segments, chain rebuild, option clamping, data load/unload.
+ * Shared heap segments, chain rebuild, data load.
  * Split from wasm.c to keep the module manageable.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -227,31 +227,6 @@ int hl_wasm_attach_shared_heap(void *inst, void *chain_head)
         }
     }
     return 0;
-}
-
-/* ── Option clamping ───────────────────────────────────────────────── */
-
-void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
-                             uint64_t cfg_max_input, uint64_t cfg_max_output,
-                             uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas,
-                             uint32_t cfg_timeout_ms)
-{
-    if (!opts) return;
-    #define CLAMP_VAL(field, cfg) do { \
-        if ((cfg) && (!(opts->field) || (opts->field) > (cfg))) \
-            opts->field = (cfg); \
-    } while(0)
-    CLAMP_VAL(max_input,  cfg_max_input);
-    CLAMP_VAL(max_output, cfg_max_output);
-    CLAMP_VAL(heap_size,  cfg_heap);
-    CLAMP_VAL(stack_size, cfg_stack);
-    /* The operator's / manifest's timeout is a ceiling, like gas: a call may
-     * ask for less, never more; unset, the call gets the ceiling. */
-    CLAMP_VAL(timeout_ms, cfg_timeout_ms);
-    #undef CLAMP_VAL
-    if (opts->gas < 0) opts->gas = 0;   /* negative = default, not unmetered */
-    if (cfg_gas > 0 && (!opts->gas || opts->gas > cfg_gas))
-        opts->gas = cfg_gas;
 }
 
 /* ── Shared data public API ─────────────────────────────────────────── */
@@ -650,29 +625,6 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
     log_debug("[wasm] loaded segment '%s' for '%s' (%zu bytes, mmap=%d)",
               segment_name, module_name, data_len, is_mmap_backing);
     return 0;
-}
-
-void hl_cap_wasm_data_unload(HlWasmCache *cache, const char *module_name)
-{
-    if (!cache || !cache->initialized || !module_name)
-        return;
-
-    pthread_mutex_lock(&cache->pool_mutex);
-    HlWasmModule *mod = cache_find(cache, module_name);
-    pthread_mutex_unlock(&cache->pool_mutex);
-
-    if (mod) {
-        pthread_mutex_lock(&mod->mutex);
-        hl_wasm_pool_drain(mod);
-        mod->chain_gen++;
-        /* A heap still attached to an instance outside the pool is retained
-         * by hl_wasm_free_shared_data (never freed under it). */
-        if (hl_wasm_free_shared_data(mod) != 0)
-            log_warn("[wasm] '%s': segments still held by %d instance(s); "
-                     "kept until they are released", module_name,
-                     mod->chain_attached);
-        pthread_mutex_unlock(&mod->mutex);
-    }
 }
 
 #endif /* HL_ENABLE_WASM */

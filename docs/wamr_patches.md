@@ -435,7 +435,7 @@ audit). Deterministic apply/verify + CI dry-run live in that script.
 | 0004 | `0004-shared-heap-guarded-subrange.patch` | 12856 | Guarded-subrange read-only spans (Design B; design: `docs/wamr_shared_heap_guarded_subrange_design.md`). Adds a per-heap valid sub-window (`WASMSharedHeap.valid_offset`/`valid_size`, `SharedHeapInitArgs.valid_offset`/`valid_size`) so a pre-allocated heap exposes only `[valid_offset, valid_offset+valid_size)` inside the reserved `[0, size)` region; native base = `map_base`, reserved size = `map_len`, so the reserved range always sits inside the mmap (a missed guard is an in-mapping over-read, never SIGBUS). Placement/overlap keep the reserved `size` (`start_off`, chaining); only the access bound moves: `update_last_used_shared_heap` derives the cached lower bound `start_off+valid_offset` and upper bound `+valid_size-1` (interp + AOT read them as runtime fields, so NO emitted-code change and NO AOT version bump), plus the `is_app_addr`/`is_native_addr` chain-walk valid sub-window and the reset memset. `valid_size==0` => full heap (back-compat; runtime-managed forced full). `create` rejects nonzero-offset-with-full-size, `valid_offset+valid_size>size`, overflow, and a sub-window on a non-pre-allocated heap. Three files: `core/iwasm/interpreter/wasm_runtime.h`, `core/iwasm/include/wasm_export.h`, `core/iwasm/common/wasm_memory.c`. | `e5bf6e04b89d878745198421ad9cbf94ac567edf07297887354b35d98b7f4dbd` |
 | 0005 | `0005-memory64-public-accessor.patch` | 2053 | Public read of the internal `is_memory64` flag (`wasm_runtime_memory_is_memory64`), so `cap/wasm.c` detects Memory64 without a WAMR-internal header. `core/iwasm/common/wasm_memory.c`, `core/iwasm/include/wasm_export.h`. | `b7d211638ebb9fc44602819134111709fe88c0f89a2533aac776ce0b002f9924` |
 | 0006 | `0006-quick-aot-signature-msan-unpoison.patch` | ~1.7K | **MSan shadow-gap false-positive suppression (NOT a C uninitialized-read defect).** `wasm_native_lookup_quick_aot_entry` builds `char signature[16] = {0}` via indexed writes and `strcmp`s it (through `bsearch`). `= {0}` zero-initializes all 16 bytes → **no UB**. WAMR objects are **intentionally not `-fsanitize=memory`-instrumented** (mk/vendor/wamr.mk; sanitizer instrumentation is an explicit `WAMR_TSAN=1` opt-in with no MSan analog - proven by the actual compile command, not comments), so the MSan-intercepted `strcmp` reads shadow this TU never maintained and reports it uninitialized - a **shadow-gap false positive**. (An explicit terminator AND an `__has_feature`-guarded un-poison were both tried and proved ineffective - the former is redundant, the latter compiles out because `__has_feature(memory_sanitizer)` is false in the uninstrumented WAMR TU.) Fix: pass a build-level `-DHL_MSAN` to WAMR under the msan target (`mk/tests.mk`) and, guarded on `#if defined(HL_MSAN)`, `__msan_unpoison(signature, sizeof(signature))` the complete buffer immediately before `bsearch` (the MSan runtime is linked because Hull TUs are instrumented). Keeps `test_wasm_spans` under MSan; **zero** in normal builds (verified: no `__msan_unpoison` symbol). Two hunks (guarded include + call) + the `mk/tests.mk` define. See "Patch 0006" below. | `a9b72f211084737317d39a5872161db27d799f09a59cd4d1c16acc4bb53379d2` |
-| 0007 | `0007-hull-terminate-and-post-instantiate-hook.patch` | ~9K | **Wall-clock termination that lands (audit 5 M2).** Without a thread manager `wasm_runtime_terminate` only sets the instance exception, which nothing reads while a loop runs, and WAMR meters no AOT code - so an AOT `(loop br 0)` ran forever. The fast interpreter now polls the exception every 4096 dispatched instructions (in `CHECK_INSTRUCTION_LIMIT`, volatile read); wamrc emits a volatile check of `cur_exception[0]` at every loop header (`aot_compile_check_terminate`, branching to the function's exception return); and `wasm_runtime_set_post_instantiate_hook` brackets the start / `__post_instantiate` / `__wasm_call_ctors` functions an instantiation runs, so an embedder can bind a watchdog to the not-yet-returned instance. Hull's watchdog is `cap/wasm_watchdog.c`. See "Patch 0007" below. | `a59abacc6541994f8b8e6dbbba9a88b7926a7c597303029255ad73862007c749` |
+| 0007 | `0007-hull-terminate-and-post-instantiate-hook.patch` | ~9K | **Wall-clock termination that lands (audit 5 M2).** Without a thread manager `wasm_runtime_terminate` only sets the instance exception, which nothing reads while a loop runs, and WAMR meters no AOT code - so an AOT `(loop br 0)` ran forever. The fast interpreter now polls the exception every 4096 dispatched instructions (in `CHECK_INSTRUCTION_LIMIT`, read under `exception_lock`); wamrc emits a volatile check of `cur_exception[0]` at every loop header (`aot_compile_check_terminate`, branching to the function's exception return); and `wasm_runtime_set_post_instantiate_hook` brackets the start / `__post_instantiate` / `__wasm_call_ctors` functions an instantiation runs, so an embedder can bind a watchdog to the not-yet-returned instance; and wamrc stamps every AOT file it writes (`HULL_AOT_STAMP` in the target-info `reserved` field) so the runtime and `hull build` can refuse AOT code from an unpatched wamrc (round-6 M2). Without a thread manager `exception_lock` / `exception_unlock` were no-op macros, so the watchdog's terminate and the executing thread's own exception writes raced on `cur_exception` (TSan); they now serialise on one process-wide mutex made with the runtime env, and `wasm_runtime_copy_exception` (locked) is exported for the embedder's own reads. Hull's watchdog is `cap/wasm_watchdog.c`. See "Patch 0007" below. | `1a783e2f3aa3ecfcbe26ce94e0d70ace4770c33184309aeb9499b5edd3701897` |
 
 The three patches are kept SEPARATE so the test-harness portability change (0001),
 the read-only enforcement (0002), and the lifecycle/reclamation change (0003) are
@@ -588,12 +588,35 @@ writes the instance's `cur_exception`, so on its own it never stopped anything.
   `entering = true` just before `execute_post_instantiate_functions` and
   `false` right after (also on its failure path), on the instantiating thread,
   with the new instance.
+- `compilation/aot_emit_aot_file.c` + `aot/aot_runtime.h` (round-6 M2): wamrc
+  writes `HULL_AOT_STAMP` - `"HULL"` (0x48554C4C) in the high 32 bits, the
+  stamp version (1) in the low 32 - into the target-info section's `reserved`
+  u64 of every AOT file. Upstream writes 0 there and its loader reads and
+  ignores the field, so the format and the loader are unchanged.
 
 **Consequence.** An `.aot` produced by a wamrc without this patch has no
-loop-header check: the watchdog then stops it only at its next host call.
-`hull build`'s AOT cache keys on the wamrc binary's content, so a rebuilt
-wamrc recompiles every module.
+loop-header check, and nothing in the file used to say so: the watchdog could
+stop such code only at its next host call, so a `(loop br 0)` ran forever.
+The stamp makes the provenance checkable. `hl_cap_wasm_load` reads it
+(`include/hull/cap/wasm_aot_stamp.h`, header-only, unit-tested on hand-made
+AOT headers in `test_wasm.c` `aot_stamp_check` /
+`unstamped_aot_refused_with_wasm_fallback`) and refuses an `.aot` without the
+current stamp - from the VFS or, in development, from disk - falling back to
+the module's `.wasm` in the interpreter when there is one (gas and the
+watchdog bound it, so the fallback is safe) and failing the load otherwise.
+`hull build` (`aot_stamp_status` in `build.lua`) checks every AOT it compiles
+or takes from the AOT cache: the first unstamped output means the `wamrc` it
+found is not Hull's, so it warns, deletes the output, stops compiling AOT and
+ships the `.wasm`; an unstamped file is never embedded. The AOT cache keys on
+the wamrc binary's content, so entries from another wamrc are never hits.
+**Bump** `HULL_AOT_STAMP_VERSION` here and `HL_AOT_STAMP_VERSION` in the
+header together whenever the code-generation contract changes. The stamp
+guards against an UNPATCHED wamrc, not a hostile one (whoever supplies native
+code can stamp it); provenance of embedded AOT is the app signature's job.
 
 **Covered by** `tests/hull/cap/test_wasm.c` (`watchdog_stops_unmetered_loop`,
 `watchdog_stops_start_function`, `load_refuses_module_whose_start_never_returns`)
-on the interpreter; the AOT loop-header path needs wamrc.
+on the interpreter, and `wasm_spans.watchdog_stop_survives_span_info_validate`
+(a host call that used to erase the terminate); the AOT loop-header path and
+the stamp a real wamrc writes need wamrc (CI's wamrc jobs), the stamp parser
+and the refusal run on hand-made headers everywhere.

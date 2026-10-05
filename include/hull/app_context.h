@@ -30,6 +30,7 @@ typedef struct HlVfs HlVfs;
 typedef struct HlStmtCache HlStmtCache;
 typedef struct HlWasmCache HlWasmCache;
 typedef struct HlGpuCtx HlGpuCtx;
+typedef struct HlWasmCliLimits HlWasmCliLimits;
 typedef struct HlDbHandle HlDbHandle;
 typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 struct KlCompressConfig;
@@ -60,6 +61,11 @@ typedef struct HlAppContextOpts {
     /* External WASM/GPU caches (server owns these, context just wires them) */
     HlWasmCache  *wasm_cache;       /* NULL = init internal cache */
     HlGpuCtx     *gpu_ctx;          /* NULL = no GPU */
+    /* The operator's --wasm-* overrides (NULL = none). With gate_modules the
+     * context resolves them with the manifest's `wasm` limits onto
+     * rt->wasm_config (include/hull/wasm_config.h), the ceilings the compute
+     * bindings clamp to - as serve.c does for the server. */
+    const HlWasmCliLimits *wasm_cli;
     int           gpu_device;       /* -1 = default */
 
     /* Pure compute mode: 1 = skip database entirely.

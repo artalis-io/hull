@@ -156,6 +156,17 @@ static void wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
         base->wasm_config.gas, base->wasm_config.timeout_ms);
 }
 
+/* The same ceilings for a call on a persistent instance, without filling the
+ * fields the call left unset: those take the instance's own defaults, already
+ * clamped at compute.instance() (round-6 L2). */
+static void wasm_cap_call_opts(HlWasmCallOpts *opts, const HlRuntime *base)
+{
+    hl_cap_wasm_cap_call_opts(opts,
+        base->wasm_config.max_input, base->wasm_config.max_output,
+        base->wasm_config.heap_size, base->wasm_config.stack_size,
+        base->wasm_config.gas, base->wasm_config.timeout_ms);
+}
+
 /* opts.timeout_ms: a positive number of milliseconds; anything else is "the
  * default" (never "unbounded" - a negative cast to uint32_t became ~49 days). */
 static uint32_t wasm_timeout_arg(lua_Integer v)
@@ -702,7 +713,7 @@ static int lua_wasm_inst_call(lua_State *L)
      * check the userdata still holds it before using pi. */
     if (check_wasm_inst(L, 1) != pi || pi->closed)
         return luaL_error(L, "WasmInstance:call: instance closed");
-    if (lua) wasm_clamp_opts(&opts, &lua->base);
+    if (lua) wasm_cap_call_opts(&opts, &lua->base);
 
     if (want_buffer) {
         HlWasmBuffer *out_buf = NULL;
@@ -808,7 +819,7 @@ static int lua_wasm_inst_async_call(lua_State *L)
      * instance - or start a call on it: check again before using pi. */
     if (check_wasm_inst(L, 1) != pi || pi->closed || atomic_load(&pi->busy))
         return luaL_error(L, "WasmInstance:async_call: instance closed or busy");
-    wasm_clamp_opts(&opts, &lua->base);
+    wasm_cap_call_opts(&opts, &lua->base);
 
     /* Allocate worker op */
     HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));

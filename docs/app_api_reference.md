@@ -1255,9 +1255,16 @@ Default 10 s, maximum 1 h. Both are ceilings configured the same way: per call
 (`gas`, `timeout_ms`), in the manifest (`wasm = { gas = N, timeout_ms = N }`,
 JS `wasm: { gas, timeoutMs }`), and by the operator (`--wasm-gas N`,
 `--wasm-timeout-ms N`); a per-call value may lower the ceiling, never raise
-it. `compute.instance` takes `timeout_ms` as its per-call default. An AOT
-artifact compiled by a `wamrc` older than patch 0007 has no loop-header
-check, so only a call into the host can stop it - rebuild it.
+it. The ceilings apply on every entry point - the server, an `app.main`
+program, `hull test` and `hull agent` - and to `compute.stream` and WASM
+`db.udf` instances too. `compute.instance` takes `timeout_ms` / `gas` as its
+per-call defaults: a call on the instance that sets neither uses them (the
+ceiling still caps both). An AOT artifact without the stamp of Hull's patched
+`wamrc` (an upstream / distro `wamrc`, or one older than patch 0007) has no
+loop-header terminate check, so the runtime refuses it and runs the module's
+`.wasm` in the interpreter instead (or fails to load it when there is no
+`.wasm`), and `hull build` does not embed one - rebuild it with Hull's
+`wamrc` (`hull tools install wamrc`).
 
 **Sync vs Async:** Use `compute.call()` for fast/small computations (sub-ms) and in tests/timers. Use `compute.async.call()` in request handlers for expensive computations. It yields to the event loop so other requests are served concurrently. The async variant follows the same pattern as `db.async.query()`.
 

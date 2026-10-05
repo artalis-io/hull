@@ -57,6 +57,9 @@ typedef struct {
     int         is_aggregate;   /* 1 = step + finalize */
     uint32_t    heap_size;      /* 0 = default */
     uint32_t    stack_size;     /* 0 = default */
+    uint32_t    timeout_ms;     /* wall-clock bound per call, 0 = default; the
+                                 * bindings clamp gas / heap / stack / timeout
+                                 * to the manifest / CLI ceiling */
 } HlDbUdfOpts;
 
 /**
