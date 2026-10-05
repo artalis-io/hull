@@ -31,6 +31,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <signal.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ── Unveil path table ─────────────────────────────────────────────── */
@@ -993,7 +995,14 @@ static int cosmocc_reroute_read(const char *const argv[],
  * emulated fork is the mechanism Hull already had to route around on Windows
  * (see cosmo_spawn_wait), and posix_spawn maps to a direct CreateProcess. That
  * is also why argv[0] must be a real path - posix_spawn does no PATH search. */
-int hl_tool_spawn_self(const char *const argv[])
+static uint64_t spawn_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+int hl_tool_spawn_self(const char *const argv[], unsigned timeout_ms)
 {
     if (!argv || !argv[0] || !*argv[0]) return HL_TOOL_SPAWN_NOSTART;
     if (hl_tool_validate_args(argv) != 0) {
@@ -1024,8 +1033,30 @@ int hl_tool_spawn_self(const char *const argv[])
     }
 #endif
 
-    int status;
-    if (waitpid(pid, &status, 0) < 0) return -1;
+    int status = 0;
+    if (timeout_ms == 0) {
+        if (waitpid(pid, &status, 0) < 0) return -1;
+    } else {
+        /* Bounded: a child that never exits (a hung JS runtime) must not hang
+         * `hull build` with it. Poll, and kill it once the deadline passes. */
+        uint64_t deadline = spawn_now_ms() + timeout_ms;
+        for (;;) {
+            pid_t r = waitpid(pid, &status, WNOHANG);
+            if (r == pid) break;
+            if (r < 0) return -1;
+            if (spawn_now_ms() >= deadline) {
+                (void)kill(pid, SIGKILL);
+                (void)waitpid(pid, &status, 0);
+                ShJsonWriter w = hl_audit_begin("tool.spawn_self");
+                sh_json_write_kv_string(&w, "argv0", argv[0]);
+                sh_json_write_kv_string(&w, "result", "timeout");
+                hl_audit_end(&w);
+                return HL_TOOL_SPAWN_TIMEOUT;
+            }
+            struct timespec nap = { 0, 10 * 1000 * 1000 };   /* 10 ms */
+            (void)nanosleep(&nap, NULL);
+        }
+    }
     int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     {
         ShJsonWriter w = hl_audit_begin("tool.spawn_self");
