@@ -519,6 +519,12 @@ run_suite() {
         # bytes). Final: r__sum____________.png (22 chars).
         contains "$SUITE unicode: ASCII fallback" 'filename="r__sum____________.png"' "$UNI_HDRS"
     fi
+    # The unicode file is a copy of img.png, so its row shares ID1's blob.
+    # Drop it here: the delete checks below rely on ID1 being the blob's
+    # last reference (a second one keeps the blob off the orphan queue).
+    if [ -n "$ID_UNI" ]; then
+        curl -s -X POST "http://127.0.0.1:$PORT/attachments/$ID_UNI/delete" >/dev/null
+    fi
 
     # ── PR 2: read_to_file - materialise to disk + verify SHA ───────
     DUMP=$(curl -s -X POST "http://127.0.0.1:$PORT/attachments/$ID1/dump")
