@@ -1114,8 +1114,10 @@ int hl_blob_store_cleanup(HlBlobStore *s,
     StoreEntries e;
     if (collect_entries(s, &e) != 0) return -1;
 
-    qsort(e.items, e.count, sizeof(StoreEntry),
-          opts->strategy == HL_BLOB_STORE_FIFO ? cmp_fifo : cmp_lru);
+    /* An empty store leaves items NULL, which qsort may not be handed. */
+    if (e.count > 1)
+        qsort(e.items, e.count, sizeof(StoreEntry),
+              opts->strategy == HL_BLOB_STORE_FIFO ? cmp_fifo : cmp_lru);
 
     uint64_t total = 0;
     for (size_t i = 0; i < e.count; i++) total += e.items[i].size;
