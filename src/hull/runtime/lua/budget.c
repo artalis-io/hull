@@ -15,6 +15,19 @@
  * timer, ws / sse callback, worker dispatch) re-arms the budget with
  * hl_lua_budget_arm, so the limit is per uninterrupted run.
  *
+ * The trip is raised from inside the count hook, where Lua has every hook
+ * turned off (L->allowhook = 0). Whatever Lua code runs before the error
+ * leaves the hook runs unmetered, so the raise must run none:
+ *   - it allocates nothing. luaL_error built "chunk:line: message", and the
+ *     allocation could take a GC step that ran pending __gc finalizers -
+ *     still with hooks off (HULL PATCH 0001 now turns the count hook back on
+ *     in finalizers regardless; docs/lua_patches.md). The message is a
+ *     string made once at install and kept in the registry.
+ *   - xpcall's message handler is skipped on a trip: Lua calls it before
+ *     the error leaves the hook, so an app handler ran with no limit at all
+ *     (`xpcall(spin, function() while true do end end)`). The trip is
+ *     re-raised whatever the handler returns, so nothing is lost.
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -30,6 +43,7 @@
 #define HL_LUA_BUDGET_STRIDE 10000
 
 static const char hl_lua_budget_key = 0;
+static const char hl_lua_budget_err_key = 0;   /* the trip's message */
 
 static HlLuaBudget *budget_of(lua_State *L)
 {
@@ -67,7 +81,16 @@ static void budget_hook(lua_State *L, lua_Debug *ar)
     }
     /* Every further instruction of this thread raises again. */
     lua_sethook(L, budget_hook, LUA_MASKCOUNT, 1);
-    luaL_error(L, "instruction limit exceeded");
+    hl_lua_budget_raise(L);
+}
+
+int hl_lua_budget_raise(lua_State *L)
+{
+    /* A registry read: no allocation (luaD_hook left LUA_MINSTACK free). */
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &hl_lua_budget_err_key) == LUA_TSTRING)
+        return lua_error(L);
+    lua_pop(L, 1);
+    return luaL_error(L, "instruction limit exceeded");   /* not installed */
 }
 
 void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar)
@@ -115,10 +138,24 @@ static int budget_pcall(lua_State *L)
     return budget_finishpcall(L, status, 0);
 }
 
+/* xpcall's message handler, upvalue 1: not run on a trip (see the top). */
+static int budget_msgh(lua_State *L)
+{
+    if (hl_lua_budget_tripped(L))
+        return 1;                          /* the error object, as it is */
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, lua_gettop(L) - 1, 1);
+    return 1;
+}
+
 static int budget_xpcall(lua_State *L)
 {
     int n = lua_gettop(L);
     luaL_checktype(L, 2, LUA_TFUNCTION);
+    lua_pushvalue(L, 2);
+    lua_pushcclosure(L, budget_msgh, 1);
+    lua_replace(L, 2);
     lua_pushboolean(L, 1);
     lua_pushvalue(L, 1);
     lua_rotate(L, 3, 2);
@@ -130,6 +167,8 @@ void hl_lua_budget_install(lua_State *L, HlLuaBudget *b)
 {
     lua_pushlightuserdata(L, b);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &hl_lua_budget_key);
+    lua_pushliteral(L, "instruction limit exceeded");
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &hl_lua_budget_err_key);
     lua_pushcfunction(L, budget_pcall);
     lua_setglobal(L, "pcall");
     lua_pushcfunction(L, budget_xpcall);

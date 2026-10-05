@@ -328,6 +328,11 @@ int luaE_resetthread (lua_State *L, int status) {
   if (status == LUA_YIELD)
     status = LUA_OK;
   L->status = LUA_OK;  /* so it can run __close metamethods */
+  /* HULL PATCH 0003 (docs/lua_patches.md): a coroutine that died by an
+  ** error raised from a hook (Hull's instruction budget) kept
+  ** allowhook == 0, so the __close handlers coroutine.close runs here were
+  ** unmetered. A reset thread starts with hooks allowed, as a new one does. */
+  L->allowhook = 1;
   status = luaD_closeprotected(L, 1, status);
   if (status != LUA_OK)  /* errors? */
     luaD_seterrorobj(L, status, L->stack.p + 1);

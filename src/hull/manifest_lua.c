@@ -142,8 +142,10 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     /* csp = "policy-string" or false */
     lua_getfield(L, manifest_idx, "csp");
     if (lua_isstring(L, -1)) {
+        /* A NUL byte (mstr NULL) is an invalid policy, not "disabled":
+         * hl_manifest_csp_is_valid(NULL) means "no policy string". */
         const char *csp_str = mstr(L, -1);
-        if (hl_manifest_csp_is_valid(csp_str)) {
+        if (csp_str && hl_manifest_csp_is_valid(csp_str)) {
             out->csp = hl_manifest_strdup(alloc, csp_str);
             out->csp_set = 1;
         }
@@ -276,8 +278,13 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     break;
                 }
                 lua_rawgeti(L, modules_idx, i);
-                if (lua_type(L, -1) == LUA_TSTRING) {
-                    const char *spec = mstr(L, -1);
+                const char *spec = lua_type(L, -1) == LUA_TSTRING ? mstr(L, -1) : NULL;
+                if (lua_type(L, -1) == LUA_TSTRING && !spec) {
+                    /* A NUL byte: app.manifest refuses it, so only a
+                     * manifest set some other way reaches here. */
+                    log_warn("[manifest] modules[%lld] holds a NUL byte, ignored",
+                             (long long)i);
+                } else if (spec) {
                     /* Trailing '?' marks the module optional (skip, not error,
                      * when its build cap is absent). It sits after the major,
                      * so the name length (before '@') is unaffected. */
@@ -333,6 +340,11 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     }
                     const char *alias = mstr(L, -2);
                     const char *spec  = mstr(L, -1);
+                    if (!alias || !spec) {
+                        log_warn("[manifest] a modules entry holds a NUL byte, ignored");
+                        lua_pop(L, 1);
+                        continue;
+                    }
                     size_t speclen = strlen(spec);
                     int optional = (speclen > 0 && spec[speclen - 1] == '?');
                     const char *at    = strchr(spec, '@');

@@ -47,6 +47,7 @@ typedef struct HlLuaAsyncCont {
     void             (*on_complete)(HlLua *lua, void *ctx);
     void              *on_complete_ctx;
     int                settled;       /* resumed or cancelled */
+    int                is_main;       /* co is app.main's: its ref is vt_lua_run_main's */
 } HlLuaAsyncCont;
 
 /*
@@ -107,7 +108,7 @@ static int hl_lua_co_guarded(lua_State *L)
     lua_insert(L, 1);
     lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
     if (hl_lua_budget_tripped(L))
-        return luaL_error(L, "instruction limit exceeded");
+        return hl_lua_budget_raise(L);
     return lua_gettop(L);
 }
 
@@ -363,12 +364,25 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
     HlLuaAsyncCont *lc = (HlLuaAsyncCont *)self;
     HlLua *lua = lc->lua;
     lc->settled = 1;
-    hl_lua_set_parked(lc->co, 0);
 
-    if (lc->thread_ref != LUA_NOREF) {
-        luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
+    if (lc->is_main) {
+        /* app.main's coroutine is owned by vt_lua_run_main, which releases
+         * its ref once the loop stops. A cancel at shutdown (pool teardown,
+         * the SMTP sweep) comes after that: unref'd here as well, the slot
+         * went onto the free list twice, and the parked mark was written
+         * into a coroutine that may already have been collected. Touched
+         * only while main is still alive. */
+        if (lua->cli_main_co == lc->co)
+            hl_lua_set_parked(lc->co, 0);
         lc->thread_ref = LUA_NOREF;
         lc->co = NULL;
+    } else {
+        hl_lua_set_parked(lc->co, 0);
+        if (lc->thread_ref != LUA_NOREF) {
+            luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
+            lc->thread_ref = LUA_NOREF;
+            lc->co = NULL;
+        }
     }
     lc->conn = NULL;
     /* The handler will never complete, so this is its end too: run the
@@ -391,7 +405,7 @@ static void hl_lua_async_destroy(HlAsyncCont *self)
      * made it failed to arm, and the handler carries on (it got an error).
      * Its coroutine is not waiting on anything - left marked parked, it
      * refused coroutine.resume / close for good. */
-    if (!lc->settled)
+    if (!lc->settled && (!lc->is_main || lc->lua->cli_main_co == lc->co))
         hl_lua_set_parked(lc->co, 0);
     hl_alloc_free(lc->alloc, lc, sizeof(HlLuaAsyncCont));
 }
@@ -424,6 +438,7 @@ HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
     lc->on_complete     = lua->active_on_complete;     /* deferred-teardown hook */
     lc->on_complete_ctx = lua->active_on_complete_ctx;
     lc->settled         = 0;
+    lc->is_main         = (lc->co != NULL && lc->co == lua->cli_main_co);
     hl_lua_set_parked(lc->co, 1);
 
     return &lc->base;

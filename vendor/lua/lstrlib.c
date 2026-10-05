@@ -361,7 +361,7 @@ typedef struct MatchState {
   const char *p_end;  /* end ('\0') of pattern */
   lua_State *L;
   int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */
-  int hl_steps;    /* HULL PATCH 0002: match() calls since the last charge */
+  size_t hl_steps; /* HULL PATCH 0002: work since the last charge */
   int hl_stride;   /* HULL PATCH 0002: the count hook's period (0 = none) */
   unsigned char level;  /* total number of captures (finished or unfinished) */
   struct {
@@ -379,20 +379,35 @@ static const char *match (MatchState *ms, const char *s, const char *p);
 ** HULL PATCH 0002 (docs/lua_patches.md): matching runs entirely in C, where
 ** the count hook - Hull's instruction budget - never fires, so one
 ** `string.find(s, "a-a-a-...b")` backtracked for minutes on the event loop.
-** Every hook-period of match() steps, the thread's own count hook is called
-** as if that many instructions had run; a tripped budget raises out of the
-** matcher, as "pattern too complex" already does.
+** Work is counted in the MatchState - one per match() call and per subject
+** byte a single step scans (a class test, a %b balance, a back-reference, a
+** plain find's candidates) - and every hook period of it, the thread's own
+** count hook is called as if that many instructions had run; a tripped
+** budget raises out of the matcher, as "pattern too complex" already does.
+** Counting only match() calls charged `string.find(s, "%b()")` n steps for
+** O(n^2) bytes scanned, and a plain find nothing at all.
 */
 static void hl_match_charge (MatchState *ms) {
   lua_State *L = ms->L;
-  lua_Hook h = lua_gethook(L);
-  ms->hl_steps = 0;
-  if (h != NULL && (lua_gethookmask(L) & LUA_MASKCOUNT)) {
+  while (ms->hl_stride > 0 && ms->hl_steps >= (size_t)ms->hl_stride) {
+    lua_Hook h = lua_gethook(L);
+    ms->hl_steps -= (size_t)ms->hl_stride;
+    if (h == NULL || !(lua_gethookmask(L) & LUA_MASKCOUNT)) {
+      ms->hl_stride = 0;  /* hook gone: nothing to charge any more */
+      break;
+    }
     lua_Debug ar;
     ar.event = LUA_HOOKCOUNT;
     h(L, &ar);
+    ms->hl_stride = lua_gethookcount(L);  /* the hook may change its period */
   }
 }
+
+/* charge 'n' units of work (HULL PATCH 0002) */
+#define hl_match_work(ms,n) \
+  do { if ((ms)->hl_stride > 0 && \
+           l_unlikely(((ms)->hl_steps += (size_t)(n)) >= (size_t)(ms)->hl_stride)) \
+         hl_match_charge(ms); } while (0)
 
 
 /* maximum recursion depth for 'match' */
@@ -495,6 +510,8 @@ static int singlematch (MatchState *ms, const char *s, const char *p,
     return 0;
   else {
     int c = uchar(*s);
+    /* HULL PATCH 0002: a byte tested; a [set] costs its length */
+    hl_match_work(ms, (*p == '[') ? (size_t)(ep - p) : 1);
     switch (*p) {
       case '.': return 1;  /* matches any char */
       case L_ESC: return match_class(c, uchar(*(p+1)));
@@ -514,12 +531,17 @@ static const char *matchbalance (MatchState *ms, const char *s,
     int b = *p;
     int e = *(p+1);
     int cont = 1;
+    const char *s0 = s;
     while (++s < ms->src_end) {
       if (*s == e) {
-        if (--cont == 0) return s+1;
+        if (--cont == 0) {
+          hl_match_work(ms, s - s0);  /* HULL PATCH 0002: bytes scanned */
+          return s+1;
+        }
       }
       else if (*s == b) cont++;
     }
+    hl_match_work(ms, s - s0);  /* HULL PATCH 0002: bytes scanned */
   }
   return NULL;  /* string ends out of balance */
 }
@@ -582,8 +604,10 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
   size_t len;
   l = check_capture(ms, l);
   len = ms->capture[l].len;
-  if ((size_t)(ms->src_end-s) >= len &&
-      memcmp(ms->capture[l].init, s, len) == 0)
+  if ((size_t)(ms->src_end-s) < len)  /* (a position capture is huge here) */
+    return NULL;
+  hl_match_work(ms, len);  /* HULL PATCH 0002: the compare below */
+  if (memcmp(ms->capture[l].init, s, len) == 0)
     return s+len;
   else return NULL;
 }
@@ -592,8 +616,7 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
 static const char *match (MatchState *ms, const char *s, const char *p) {
   if (l_unlikely(ms->matchdepth-- == 0))
     luaL_error(ms->L, "pattern too complex");
-  if (ms->hl_stride > 0 && l_unlikely(++ms->hl_steps >= ms->hl_stride))
-    hl_match_charge(ms);  /* HULL PATCH 0002 */
+  hl_match_work(ms, 1);  /* HULL PATCH 0002 */
   init: /* using goto to optimize tail recursion */
   if (p != ms->p_end) {  /* end of pattern? */
     switch (*p) {
@@ -694,7 +717,9 @@ static const char *match (MatchState *ms, const char *s, const char *p) {
 
 
 
-static const char *lmemfind (const char *s1, size_t l1,
+/* HULL PATCH 0002: 'ms' (prepared by prepstate) is charged the bytes each
+** candidate costs - an O(n*m) search ran with no charge at all. */
+static const char *lmemfind (MatchState *ms, const char *s1, size_t l1,
                                const char *s2, size_t l2) {
   if (l2 == 0) return s1;  /* empty strings are everywhere */
   else if (l2 > l1) return NULL;  /* avoids a negative 'l1' */
@@ -703,6 +728,7 @@ static const char *lmemfind (const char *s1, size_t l1,
     l2--;  /* 1st char will be checked by 'memchr' */
     l1 = l1-l2;  /* 's2' cannot be found after that */
     while (l1 > 0 && (init = (const char *)memchr(s1, *s2, l1)) != NULL) {
+      hl_match_work(ms, (size_t)(init - s1) + l2 + 1);  /* HULL PATCH 0002 */
       init++;   /* 1st char is already checked */
       if (memcmp(init, s2+1, l2) == 0)
         return init-1;
@@ -808,7 +834,9 @@ static int str_find_aux (lua_State *L, int find) {
   /* explicit request or no special characters? */
   if (find && (lua_toboolean(L, 4) || nospecials(p, lp))) {
     /* do a plain search */
-    const char *s2 = lmemfind(s + init, ls - init, p, lp);
+    MatchState ms;
+    prepstate(&ms, L, s, ls, p, lp);                 /* HULL PATCH 0002 */
+    const char *s2 = lmemfind(&ms, s + init, ls - init, p, lp);
     if (s2) {
       lua_pushinteger(L, (s2 - s) + 1);
       lua_pushinteger(L, (s2 - s) + lp);

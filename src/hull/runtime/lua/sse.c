@@ -43,16 +43,24 @@ static int push_req_stream(lua_State *L, void *ud)
 {
     HlSseArgs *a = (HlSseArgs *)ud;
     hl_lua_make_request(L, a->req, a->life);
-    /* Create SSE stream userdata (calls kl_http_sse_begin) */
-    a->stream = hl_lua_sse_push_stream(L, a->res, a->life);
-    if (!a->stream)
-        return luaL_error(L, "SSE init failed");
     /* Rooted for as long as the dispatcher reads it: the handler's
      * parameter was its only reference, so `stream = nil; collectgarbage()`
      * freed it, and the dispatcher then ended the stream through memory the
-     * app could refill (an app-chosen pointer written through). */
-    lua_pushvalue(L, -1);
+     * app could refill (an app-chosen pointer written through). The slot is
+     * taken (and the stack room checked) BEFORE the stream exists, so
+     * nothing can raise between creating it and rooting it: a raise there
+     * (out of memory in luaL_ref) left a->stream pointing at an unrooted
+     * userdata that the failure path then ended. */
+    luaL_checkstack(L, 2, "SSE init");
+    lua_pushboolean(L, 0);
     a->stream_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    /* Create SSE stream userdata (calls kl_http_sse_begin) */
+    struct HlSseStreamUD *stream = hl_lua_sse_push_stream(L, a->res, a->life);
+    if (!stream)
+        return luaL_error(L, "SSE init failed");
+    lua_pushvalue(L, -1);
+    lua_rawseti(L, LUA_REGISTRYINDEX, a->stream_ref);  /* existing slot: no allocation */
+    a->stream = stream;
     return 2;
 }
 
@@ -93,6 +101,9 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     lua_State *co = hl_lua_entry_prepare(lua, "__hull_routes", route->handler_id,
                                          push_req_stream, &args,
                                          &thread_ref, &nargs);
+    /* The handler's req table holds ctx now (or the entry failed): a
+     * middleware's ctx was never forgotten on an SSE route before. */
+    hl_lua_free_req_ctx(lua, req);
     struct HlSseStreamUD *stream_ud = args.stream;
     if (!co) {
         /* A stream that began is ended; one that never did gets a 500. */

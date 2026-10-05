@@ -921,8 +921,11 @@ static void GCTM (lua_State *L) {
     ** off, `__gc = function() while true do end end` ran unmetered and pinned
     ** the event loop (or a worker VM at lua_close). A budget trip inside a
     ** finalizer is caught by the luaD_pcall below like any __gc error, and
-    ** the trip is sticky, so the code that triggered the GC stops too. */
-    L->allowhook = (L->hookmask & LUA_MASKCOUNT) ? oldah : 0;
+    ** the trip is sticky, so the code that triggered the GC stops too.
+    ** Turned ON, not left as it was: a GC step taken while a hook runs
+    ** (the budget's own raise, or a C message handler it reaches) has
+    ** allowhook == 0, and keeping that ran the finalizer unmetered. */
+    L->allowhook = (L->hookmask & LUA_MASKCOUNT) ? 1 : 0;
     setobj2s(L, L->top.p++, tm);  /* push finalizer... */
     setobj2s(L, L->top.p++, &v);  /* ... and its argument */
     L->ci->callstatus |= CIST_FIN;  /* will run a finalizer */
