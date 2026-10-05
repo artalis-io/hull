@@ -600,9 +600,15 @@ function parseInternal(bytes, opts, inject) {
         expectP("{", true);
         while (!isP("}") && !atEof()) {
             if (eatP(";", true)) continue;
+            const before = cur.start;
             const m = parseClassMember();
             if (m) c.body.push(m);
-            else if (!isP("}")) advance(true);
+            // A member that consumed nothing (e.g. `async . x`: the key parse
+            // fails on `.` without advancing) must still move the loop on:
+            // retried at the same token it pushed an error node per pass
+            // until the session heap ran out.
+            if (cur.start === before && !isP("}") && !atEof()) advance(true);
+            else if (!m && !isP("}")) advance(true);
         }
         expectP("}", type === "ClassDeclaration");   // class DECLARATION -> statement; expr -> value
         return fin(c);

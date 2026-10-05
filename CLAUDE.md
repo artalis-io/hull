@@ -897,7 +897,7 @@ All vendored. No external dependencies:
 |---------|----------|---------|
 | Keel | `vendor/keel/` (git submodule) | HTTP server library (async primitives, thread pool) |
 | Lua 5.4 | `vendor/lua/` | Application scripting. **Patched in tree** (three fixes, marked `HULL PATCH`: the instruction budget stays on inside `__gc` finalizers and the `__close` handlers of a reset thread, and pattern matching is charged to it per byte scanned); re-apply on upgrade, see [docs/lua_patches.md](docs/lua_patches.md) |
-| QuickJS | `vendor/quickjs/` | ES2023+ JavaScript runtime, Bellard release 2026-06-04 (its regexp engine polls the interrupt handler, so backtracking is charged to the instruction limit). **Patched in tree** (two fixes, each marked `HULL PATCH`); re-apply on upgrade, see [docs/quickjs_patches.md](docs/quickjs_patches.md) |
+| QuickJS | `vendor/quickjs/` | ES2023+ JavaScript runtime, Bellard release 2026-06-04 (its regexp engine polls the interrupt handler, so backtracking is charged to the instruction limit). **Patched in tree** (three fixes, each marked `HULL PATCH`); re-apply on upgrade, see [docs/quickjs_patches.md](docs/quickjs_patches.md) |
 | SQLite | `vendor/sqlite/` | Embedded database |
 | mbedTLS | `vendor/mbedtls/` | TLS client |
 | TweetNaCl | `vendor/tweetnacl/` | Ed25519 + NaCl crypto |

@@ -127,6 +127,27 @@ UTEST(js_parser, classes)
     hl_js_session_destroy(s);
 }
 
+/* A class member that consumes nothing must not stall the class-body loop: the
+ * nightly deep fuzzer's `async . async . x` pushed an error node per pass at the
+ * same token until the session heap ran out (js.limit.heap). It is now a plain
+ * syntax error, and the members after it still parse. */
+UTEST(js_parser, class_member_that_consumes_nothing_terminates)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = parse_str(s, "const {a, ...r} = o;[x, [y, z]] = xs;\n"
+                           "class C extends B { async . async . x ;*eld 0; } }\n");
+    EXPECT_TRUE(o != NULL);
+    EXPECT_FALSE(has(o, "js.limit.heap"));
+    EXPECT_TRUE(has(o, "\"code\":\"js.syntax\""));
+    free(o); o = NULL;
+    o = parse_str(s, "class D { async . x; m() { return 1; } }");
+    EXPECT_FALSE(has(o, "js.limit.heap"));
+    EXPECT_TRUE(has(o, "\"name\":\"m\""));   /* recovered past the bad member */
+    free(o);
+    hl_js_session_destroy(s);
+}
+
 UTEST(js_parser, member_call_optional_chaining)
 {
     HlJsSession *s = hl_js_session_create(NULL);
