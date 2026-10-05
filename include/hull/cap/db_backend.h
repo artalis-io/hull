@@ -216,6 +216,10 @@ struct HlDbHandle {
      * did not report itself (its transaction ended underneath the batch).
      * hl_db_errmsg returns it until the next statement. */
     const char        *batch_err;
+    /* Set while the session holds state a new connection would not have
+     * (the migration lock: hl_migrate_run). A network backend then refuses
+     * to reconnect a lost connection instead of going on without it. */
+    int                session_pinned;
 };
 
 /* ── Inline wrappers ──────────────────────────────────────────────── */
@@ -452,8 +456,8 @@ static inline int hl_db_batch_lost_(HlDbHandle *h)
 
 #define HL_DB_BATCH_LOST_MSG \
     "the batch's transaction was ended inside the batch (a COMMIT or " \
-    "ROLLBACK statement, or a nested request), so its statements were not " \
-    "applied as one transaction"
+    "ROLLBACK statement, a nested request, or on MySQL a DDL statement in a " \
+    "nested batch), so its statements were not applied as one transaction"
 
 static inline int hl_db_batch_enter(HlDbHandle *h)
 {

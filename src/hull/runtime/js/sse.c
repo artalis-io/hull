@@ -141,6 +141,7 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
             /* The resume restores them; the next run must not see them. */
             js->active_conn = NULL;
             js->active_req = NULL;
+            hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
             return;
         }
         /* Sync completion - close stream if not already */
@@ -159,4 +160,5 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     JS_FreeValue(ctx, js_req);
     JS_FreeValue(ctx, stream_obj);
     js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 }

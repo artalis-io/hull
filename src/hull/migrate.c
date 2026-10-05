@@ -528,8 +528,13 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
     MigLockKind kind = mig_lock_kind(handle);
     if (mig_lock(handle, kind) != 0)
         return HL_MIGRATE_ERR;
+    /* The lock belongs to the session: a transparent reconnect would run the
+     * rest of the migrations without it (audit 6 L5). */
+    int pinned = handle->session_pinned;
+    if (kind != MIG_LOCK_NONE) handle->session_pinned = 1;
     int rc = migrate_run_locked(handle, vfs);
     mig_unlock(handle, kind);
+    handle->session_pinned = pinned;
     return rc;
 }
 

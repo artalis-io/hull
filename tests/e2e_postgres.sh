@@ -177,6 +177,23 @@ app.get("/reconnect", function(req, res)
     local after_tx = settles()   -- dave's insert went with the transaction
     res:json({ replaced = replaced, tx_failed = not tx_ok, after_tx = after_tx })
 end)
+-- Audit 6. L6: COMMIT WORK / END TRANSACTION / a comment-prefixed COMMIT of
+-- an aborted transaction is a rollback the server answers without an error;
+-- each must fail, as a bare COMMIT does. M3: BEGIN through db.async is
+-- refused rather than left open on the pooled worker connection.
+app.get("/txn6", function(req, res)
+    local failed = 0
+    for _, commit in ipairs({ "COMMIT WORK", "END TRANSACTION", "/* c */ COMMIT" }) do
+        db.exec("BEGIN")
+        pcall(db.exec, "SELECT 1/0")             -- aborts the transaction ('E')
+        if not pcall(db.exec, commit) then failed = failed + 1 end
+    end
+    local async_ok, async_err = pcall(db.async.exec, "BEGIN")
+    res:json({
+        aborted_commits_failed = failed,
+        async_begin_refused = (not async_ok) and tostring(async_err):find("cannot span", 1, true) ~= nil,
+    })
+end)
 -- bytea arrives in text format as "\x<hex>" and decodes to a blob.
 app.get("/bytea", function(req, res)
     local b = db.query("SELECT decode('00ff41', 'hex') AS b")[1].b
@@ -281,6 +298,11 @@ echo "reconnect response: $RESP_RC"
 echo "$RESP_RC" | grep -q '"replaced":true'  || { echo "::error dropped connection not replaced"; fail=1; }
 echo "$RESP_RC" | grep -q '"tx_failed":true' || { echo "::error transaction survived its connection"; fail=1; }
 echo "$RESP_RC" | grep -q '"after_tx":true'  || { echo "::error no recovery after a lost transaction"; fail=1; }
+
+RESP_T6=$(curl -fsS "http://127.0.0.1:${PORT}/txn6" || echo FAIL)
+echo "txn6 response: $RESP_T6"
+echo "$RESP_T6" | grep -q '"aborted_commits_failed":3'  || { echo "::error a COMMIT spelling of an aborted transaction read as success"; fail=1; }
+echo "$RESP_T6" | grep -q '"async_begin_refused":true'  || { echo "::error BEGIN through db.async was not refused"; fail=1; }
 
 RESP_BYTEA=$(curl -fsS "http://127.0.0.1:${PORT}/bytea" || echo FAIL)
 echo "bytea response: $RESP_BYTEA"

@@ -227,9 +227,11 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
          * that, whatever is on top - hl_lua_error_text reads any value). */
         status = LUA_ERRMEM;
     } else {
+        hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
         HL_LUA_ARM(lua, co);   /* a new run: budget.c */
         status = lua_resume(co, lua->L, nargs, &nres);
         status = hl_lua_resume_status(co, status);
+        hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
     }
 
     lua->active_timer           = saved_timer;

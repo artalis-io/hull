@@ -54,6 +54,10 @@ run_case() {
     # closed after close().
     assert_line "$out" "async_x"           "7"      "$label: async targets the dynamic DB"
     assert_line "$out" "async_after_close" "denied" "$label: async-after-close fails closed"
+    # A db.open handle is shared like a registry connection (it can live at
+    # module level), so a wait refuses while it holds a transaction (audit 6
+    # L7), naming it.
+    assert_line "$out" "wait_in_txn"    "refused" "$label: wait refused while a db.open handle is in a transaction"
 }
 
 # ── Lua ────────────────────────────────────────────────────────────────
@@ -88,6 +92,13 @@ app.main(function()
     f.close()
     local ok_a = pcall(function() f.async.query("SELECT 1") end)
     print("async_after_close=" .. (ok_a and "ok" or "denied"))
+    local w = db.open(":memory:")
+    w.exec("BEGIN")
+    local ok_w, err_w = pcall(function() hull.sleep(1) end)
+    print("wait_in_txn=" .. ((not ok_w and tostring(err_w):find("db.open", 1, true))
+                             and "refused" or "allowed"))
+    w.exec("ROLLBACK")
+    w.close()
     return 0
 end)
 LUA
@@ -126,6 +137,13 @@ app.main(async () => {
     f.close();
     let aa = "ok"; try { await f.async.query("SELECT 1"); } catch (e) { aa = "denied"; }
     console.log("async_after_close=" + aa);
+    const w = dbMod.open(":memory:");
+    w.exec("BEGIN");
+    let wt = "allowed";
+    try { await hull.sleep(1); } catch (e) { if (String(e && e.message || e).includes("db.open")) wt = "refused"; }
+    console.log("wait_in_txn=" + wt);
+    w.exec("ROLLBACK");
+    w.close();
     return 0;
 });
 JS

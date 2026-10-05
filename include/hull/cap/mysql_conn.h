@@ -214,6 +214,16 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
  * migration / DDL path. Returns 0 / -1 with conn->errmsg set.
  */
 int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql);
+
+/*
+ * COM_PING, to learn the server status after an ERR: an ERR packet carries no
+ * status flags, so conn->server_status still says what the last OK said - and
+ * MySQL commits the open transaction before a DDL statement even when the DDL
+ * then fails. Updates conn->server_status from the OK; keeps conn->errmsg and
+ * conn->last_err_code (the failed statement's). Returns 0 / -1 (the
+ * connection is then marked broken).
+ */
+int hl_my_conn_ping(HlMyConn *conn);
 #endif
 
 #endif /* HL_CAP_MYSQL_CONN_H */

@@ -13,16 +13,65 @@
 #include "hull/manifest.h"
 #include "hull/host_match.h"
 
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* Process-wide cap on concurrent dynamic connections (fd-exhaustion backstop).
- * db.open / close run on the event-loop thread, so a plain int is race-free. */
+ * db.open / close run on the event-loop thread, so the handle table needs no
+ * lock. Each open handle also has an id, published in g_dynamic_id for the
+ * db.async workers (hl_db_dynamic_id_live); 0 marks a free slot. */
 #define HL_DB_DYNAMIC_MAX 16
-static int g_dynamic_open_count;
+static HlDbHandle      *g_dynamic[HL_DB_DYNAMIC_MAX];
+static _Atomic uint64_t g_dynamic_id[HL_DB_DYNAMIC_MAX];
+static uint64_t         g_dynamic_next_id;
 
-int hl_db_dynamic_open_count(void) { return g_dynamic_open_count; }
+int hl_db_dynamic_open_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < HL_DB_DYNAMIC_MAX; i++)
+        if (g_dynamic[i]) n++;
+    return n;
+}
+
+static int dynamic_slot(const HlDbHandle *h)
+{
+    for (int i = 0; h && i < HL_DB_DYNAMIC_MAX; i++)
+        if (g_dynamic[i] == h) return i;
+    return -1;
+}
+
+uint64_t hl_db_dynamic_id(const HlDbHandle *h)
+{
+    int i = dynamic_slot(h);
+    return i < 0 ? 0 : atomic_load(&g_dynamic_id[i]);
+}
+
+int hl_db_dynamic_id_live(uint64_t id)
+{
+    if (id == 0) return 0;
+    for (int i = 0; i < HL_DB_DYNAMIC_MAX; i++)
+        if (atomic_load(&g_dynamic_id[i]) == id) return 1;
+    return 0;
+}
+
+/* An app may keep a db.open handle at module level and use it from every
+ * request, so it is shared exactly like a registry connection: the same
+ * stale-transaction guard and wait refusal apply (audit 6 L7). */
+void hl_db_dynamic_guard_stale_txns(void)
+{
+    for (int i = 0; i < HL_DB_DYNAMIC_MAX; i++)
+        if (g_dynamic[i]) hl_db_guard_stale_txn(g_dynamic[i]);
+}
+
+int hl_db_dynamic_in_txn(void)
+{
+    for (int i = 0; i < HL_DB_DYNAMIC_MAX; i++)
+        if (g_dynamic[i] && hl_db_in_txn(g_dynamic[i])) return 1;
+    return 0;
+}
 
 /* Lowercased scheme (the text before "://") into @p buf; "" when the DSN has no
  * "://" (a bare path or ":memory:"). */
@@ -89,7 +138,10 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
         if (err) *err = "db.open requires a databases.dynamic policy in the manifest";
         return NULL;
     }
-    if (g_dynamic_open_count >= HL_DB_DYNAMIC_MAX) {
+    int slot = -1;
+    for (int i = 0; slot < 0 && i < HL_DB_DYNAMIC_MAX; i++)
+        if (!g_dynamic[i]) slot = i;
+    if (slot < 0) {
         if (err) *err = "db.open: too many open dynamic connections (close some first)";
         return NULL;
     }
@@ -186,7 +238,8 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
         free(h);
         return NULL;
     }
-    g_dynamic_open_count++;
+    g_dynamic[slot] = h;
+    atomic_store(&g_dynamic_id[slot], ++g_dynamic_next_id);
     if (opened && opened_size) {
         if (strlen(open_dsn) >= opened_size) {
             /* The caller could not name this database again; do not hand it
@@ -203,11 +256,14 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
 void hl_db_dynamic_close(HlDbHandle *h)
 {
     if (!h) return;
+    int i = dynamic_slot(h);
+    if (i >= 0) {
+        g_dynamic[i] = NULL;
+        atomic_store(&g_dynamic_id[i], 0);
+    }
     if (h->backend)
         h->backend->close(h);
     free(h);
-    if (g_dynamic_open_count > 0)
-        g_dynamic_open_count--;
 }
 
 #endif /* HL_ENABLE_DB */

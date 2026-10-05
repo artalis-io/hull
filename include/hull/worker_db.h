@@ -118,8 +118,11 @@ typedef struct HlWorkerDbOp {
      * 32 per-tenant connections past the app's close(), well beyond the
      * process-wide cap of 16 dynamic connections. A connection the thread
      * already had for the same DSN (a named / default connection's) is left
-     * alone, and a WAIT_NOTIFY keeps its LISTEN connection. */
+     * alone. A WAIT_NOTIFY keeps its LISTEN connection, tagged with
+     * @p dyn_id (hl_db_dynamic_id), only while that handle stays open: once
+     * the app closes it, the worker closes the connection (audit 6 L7). */
     int            no_cache;
+    uint64_t       dyn_id;
 
     /* WAIT_NOTIFY input: LISTEN channel (owned) + wait bound in ms. */
     char          *channel;

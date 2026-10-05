@@ -15,6 +15,7 @@
 #include "mod_buffer.h"
 #include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/http.h"
+#include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "hull/utils/alloc.h"
 
 #include <keel/keel.h>
@@ -200,6 +201,7 @@ static void js_ws_client_call(HlJSWsClientUD *ud, JSValueConst fn,
         js->last_async_cont = NULL;
         js->async_pending = 0;
         hl_js_budget_arm(js);
+        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
     }
     JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, argc, argv);
     if (JS_IsException(ret)) {
@@ -215,6 +217,7 @@ static void js_ws_client_call(HlJSWsClientUD *ud, JSValueConst fn,
     if (js) {
         hl_js_run_jobs(js);
         js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
+        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
     }
 }
 

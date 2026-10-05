@@ -15,6 +15,7 @@
 
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_postgres.h"
+#include "hull/cap/db_sql_kw.h"
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/types.h"
 #include "hull/utils/alloc.h"
@@ -48,28 +49,13 @@ static int pg_connect(HlPgConn *conn, const char *dsn)
     return rc;
 }
 
-/* 1 when @p sql is a bare ROLLBACK (any case, surrounding space, optional ';').
- * A connection lost inside a transaction lost the transaction with it - the
- * server rolled it back - so a ROLLBACK for it has already happened. */
-static int sql_is_bare(const char *sql, const char *kw)
+/* 1 when @p sql is a ROLLBACK (or ABORT) of the whole transaction - comments
+ * and ROLLBACK WORK included, ROLLBACK TO SAVEPOINT not. A connection lost
+ * inside a transaction lost the transaction with it - the server rolled it
+ * back - so a ROLLBACK for it has already happened. */
+static int sql_is_rollback(const char *sql)
 {
-    if (!sql) return 0;
-    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
-    for (; *kw; kw++, sql++) {
-        char c = *sql;
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        if (c != *kw) return 0;
-    }
-    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r' || *sql == ';') sql++;
-    return *sql == '\0';
-}
-
-static int sql_is_rollback(const char *sql) { return sql_is_bare(sql, "rollback"); }
-
-/* COMMIT, and its Postgres synonym END. */
-static int sql_is_commit(const char *sql)
-{
-    return sql_is_bare(sql, "commit") || sql_is_bare(sql, "end");
+    return hl_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK;
 }
 
 static void scrub_free(char *s)
@@ -88,8 +74,10 @@ static void scrub_free(char *s)
  * that transaction back when the connection went, and statements run on a new
  * connection would each commit alone; so every call refuses until a ROLLBACK
  * (@p sql), which has in effect already happened and returns 1 (done).
- * Returns 0 to go ahead, 1 done, -1 refused. */
-static int pg_ready(HlDbPgCtx *s, const char *sql)
+ * Returns 0 to go ahead, 1 done, -1 refused. A @p pinned handle (it holds a
+ * session-scoped lock: hl_migrate_run) is not reconnected either: the lock
+ * went with the session, and the run would go on without it (audit 6 L5). */
+static int pg_ready(HlDbPgCtx *s, const char *sql, int pinned)
 {
     if (!s->conn.broken)
         return 0;
@@ -101,6 +89,12 @@ static int pg_ready(HlDbPgCtx *s, const char *sql)
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
                  "the connection was lost inside a transaction, which the "
                  "server rolled back; roll back and retry");
+        return -1;
+    }
+    if (pinned) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "the connection was lost while it held a session lock (the "
+                 "migration lock), which went with it; not reconnecting");
         return -1;
     }
     HlPgConn fresh;
@@ -363,7 +357,7 @@ static int pg_query(HlDbHandle *h, const char *sql,
     (void)alloc;
     if (!h || !h->ctx) return -1;
     HlDbPgCtx *s = h->ctx;
-    int ready = pg_ready(s, sql);
+    int ready = pg_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
 
     /* COMMIT of a transaction an earlier statement aborted ('E'): the server
@@ -371,8 +365,12 @@ static int pg_query(HlDbHandle *h, const char *sql,
      * read as a successful commit - db.batch returned normally with every
      * write discarded (an app that caught a statement error inside the
      * batch, as works on SQLite). Send it (it ends the transaction), then
-     * report the rollback as the failure it is. */
-    int commit_aborted = (s->conn.tx_status == 'E' && sql_is_commit(sql));
+     * report the rollback as the failure it is. Decided on the reply, not
+     * the spelling (audit 6 L6: COMMIT WORK, END TRANSACTION, a comment in
+     * front): in 'E' only a rollback, a commit or ROLLBACK TO succeeds, and a
+     * statement that succeeded, left the transaction ('I') and was not a
+     * rollback was a commit the server turned into one. */
+    int was_aborted = (s->conn.tx_status == 'E');
 
     char **scratch = NULL;
     HlPgParam *pp = encode_params(params, nparams, &scratch);
@@ -409,7 +407,7 @@ static int pg_query(HlDbHandle *h, const char *sql,
     free(pp);
 
     if (rc != 0) return rc;   /* error path unchanged */
-    if (commit_aborted) {
+    if (was_aborted && s->conn.tx_status == 'I' && !sql_is_rollback(sql)) {
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
                  "COMMIT rolled back: the transaction was aborted by an "
                  "earlier error in it, so none of its statements were "
@@ -437,7 +435,7 @@ static int pg_exec_script(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->ctx) return -1;
     HlDbPgCtx *s = h->ctx;
-    int ready = pg_ready(s, sql);
+    int ready = pg_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
     return hl_pg_exec_simple(&s->conn, sql);
 }
@@ -655,7 +653,7 @@ static int pg_wait_notify(HlDbHandle *h, const char *channel, int timeout_ms)
 {
     HlDbPgCtx *s = h->ctx;
     if (!pg_channel_ok(channel)) return -1;
-    if (pg_ready(s, NULL) != 0) return -1;
+    if (pg_ready(s, NULL, h->session_pinned) != 0) return -1;
     if (!s->listening) {
         char sql[80];
         snprintf(sql, sizeof sql, "LISTEN %s", channel);

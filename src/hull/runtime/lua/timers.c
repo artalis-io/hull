@@ -136,6 +136,7 @@ void hl_lua_timer_trampoline(void *user_data)
     int nres = 0;
     int status = lua_resume(co, lua->L, 0, &nres);
     status = hl_lua_resume_status(co, status);
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
     if (status == LUA_OK) {
         /* Synchronous completion */

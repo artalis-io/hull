@@ -23,6 +23,7 @@
 
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_duckdb.h"
+#include "hull/cap/db_sql_kw.h"
 #include "hull/cap/types.h"
 #include "hull/utils/alloc.h"
 
@@ -374,28 +375,24 @@ static void duck_decode(duckdb_type type, void *data, idx_t row, HlValue *out)
 
 /* ── Query / exec ─────────────────────────────────────────────────── */
 
-/* Case-insensitive: does @p sql start with keyword @p kw (a word boundary
- * after it)? */
-static int duck_sql_starts(const char *sql, const char *kw)
-{
-    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
-    for (; *kw; kw++, sql++) {
-        char c = *sql;
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        if (c != *kw) return 0;
-    }
-    char c = *sql;
-    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_');
-}
-
-/* After a TRANSACTION statement ran (@p ok = it succeeded). */
+/* After a TRANSACTION statement ran (@p ok = it succeeded). The C API
+ * reports no transaction state, so it is read from the statement: comments
+ * and every spelling are recognised (hl_sql_txn_kind), and a TRANSACTION
+ * statement in a form not recognised is taken to have opened one when it
+ * succeeded - a missed BEGIN let a wait run inside a transaction, a spurious
+ * one only refuses a wait until the next guard rolls it back (audit 6 L6). */
 static void duck_track_txn(HlDbDuckCtx *s, const char *sql, int ok)
 {
-    if (duck_sql_starts(sql, "begin") || duck_sql_starts(sql, "start")) {
-        if (ok) s->in_txn = 1;
-    } else if (duck_sql_starts(sql, "commit") || duck_sql_starts(sql, "end") ||
-               duck_sql_starts(sql, "rollback") || duck_sql_starts(sql, "abort")) {
+    switch (hl_sql_txn_kind(sql)) {
+    case HL_SQL_TXN_COMMIT:
+    case HL_SQL_TXN_ROLLBACK:
         s->in_txn = 0;
+        break;
+    case HL_SQL_TXN_SAVEPOINT:
+        break;
+    default:   /* BEGIN, or a form not recognised */
+        if (ok) s->in_txn = 1;
+        break;
     }
 }
 

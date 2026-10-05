@@ -16,6 +16,7 @@
 #include "hull/cap/db_backend.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct HlManifestDbDynamic HlManifestDbDynamic;
 
@@ -57,5 +58,19 @@ void hl_db_dynamic_close(HlDbHandle *h);
 
 /* Current count of open dynamic connections (tests / diagnostics). */
 int hl_db_dynamic_open_count(void);
+
+/* The id of an open dynamic handle (0 when @p h is not one). Ids are never
+ * reused; a db.async op on the handle carries it to the worker. */
+uint64_t hl_db_dynamic_id(const HlDbHandle *h);
+
+/* Whether the handle with @p id is still open. Safe from any thread: a
+ * db.async worker drops the connections it keeps for a closed handle. */
+int hl_db_dynamic_id_live(uint64_t id);
+
+/* The stale-transaction guard / open-transaction test over every open
+ * dynamic handle. Event-loop thread only. hl_db_registry_guard_stale_txns /
+ * hl_db_registry_open_txn include these. */
+void hl_db_dynamic_guard_stale_txns(void);
+int  hl_db_dynamic_in_txn(void);
 
 #endif /* HL_CAP_DB_DYNAMIC_H */

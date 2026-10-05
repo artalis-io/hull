@@ -121,6 +121,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
     status = hl_lua_resume_status(co, status);
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
     lua->active_on_complete     = NULL;
     lua->active_on_complete_ctx = NULL;
@@ -279,6 +280,7 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     lua_pushcfunction(L, mw_run_k);
     lua_pushlightuserdata(L, &m);
     int mw_rc = lua_pcall(L, 1, 0, 0);
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
     lua->active_req  = saved_req;
     lua->active_conn = saved_conn;
     hl_req_life_end(life);

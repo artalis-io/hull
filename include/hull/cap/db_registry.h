@@ -53,10 +53,17 @@ static inline HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
 #endif
 
 /*
- * The per-request stale-transaction guard over EVERY open connection - the
- * default, named ones and the internal one - not only "default": a handler
- * that raised between BEGIN and COMMIT on a named connection left it in the
- * transaction for every later request. Opens nothing.
+ * The stale-transaction guard over EVERY open connection - the default, named
+ * ones, the internal one and every open db.open handle - not only "default":
+ * a handler that raised between BEGIN and COMMIT on a named connection left it
+ * in the transaction for every later request. Opens nothing.
+ *
+ * The runtimes run it when an entry (a request, middleware, SSE event, timer,
+ * ws-server or ws-client callback) starts and when it returns, raises or
+ * parks, and before a parked continuation resumes (audit 6 M1). No
+ * transaction may span a wait (below), so at each of those points any open
+ * transaction belongs to no running entry: run only at the start, a
+ * transaction a failed entry left open was joined by whatever resumed next.
  */
 #ifdef HL_ENABLE_DB
 void hl_db_registry_guard_stale_txns(HlDbRegistry *reg);
@@ -67,7 +74,8 @@ static inline void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
 
 /*
  * The name of an open registry connection that is inside a transaction
- * ("internal" for the stdlib's internal one), or NULL when none is. No I/O.
+ * ("internal" for the stdlib's internal one, "db.open" for a dynamic handle),
+ * or NULL when none is. No I/O.
  *
  * The runtimes refuse to WAIT (http.fetch, db.async, hull.sleep, ...) while
  * this is non-NULL. Every registry connection is shared by all requests, SSE

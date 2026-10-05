@@ -151,6 +151,7 @@ void hl_js_timer_trampoline(void *user_data)
         js->active_timer = NULL;
         hl_js_run_jobs(js);
         js->last_async_cont = NULL;
+        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
         hl_js_timer_reschedule(t);
         return;
     }
@@ -177,6 +178,7 @@ void hl_js_timer_trampoline(void *user_data)
             hl_js_run_drop(js, run);
             JS_FreeValue(ctx, ret);
             js->active_timer = NULL;
+            hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
             return;
         }
         /* Waiting on something Hull does not drive: nothing will ever clear
@@ -190,6 +192,7 @@ void hl_js_timer_trampoline(void *user_data)
         JS_FreeValue(ctx, ret);
         t->in_flight = 0;
         js->active_timer = NULL;
+        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
         hl_js_timer_reschedule(t);
         return;
     }
@@ -222,6 +225,7 @@ void hl_js_timer_trampoline(void *user_data)
     JS_FreeValue(ctx, ret);
     t->in_flight = 0;
     js->active_timer = NULL;
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     if (!cancelled)
         hl_js_timer_reschedule(t);

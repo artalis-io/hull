@@ -283,6 +283,41 @@ end)
 -- INSERT ... ON CONFLICT, which MySQL rejects: every wrong code failed instead
 -- of being counted and the lockout never came. Drive both counters past their
 -- thresholds and check each lockout is in force.
+-- Audit 6. L1: a DDL statement inside a batch commits the transaction even
+-- when it fails (here: the CREATE INDEX shim's swallowed duplicate, and a
+-- CREATE TABLE that exists); the batch must reopen one, so its later write
+-- still rolls back. L3: in a NESTED batch it cannot (the savepoints went with
+-- the commit), so the batch fails as lost rather than committing the inner
+-- writes with the outer batch. M3: BEGIN through db.async is refused.
+app.get("/txn6", function(req, res)
+    db.exec("CREATE TABLE IF NOT EXISTS t6 (id BIGINT)")
+    db.exec("CREATE INDEX IF NOT EXISTS ix6 ON t6 (id)")
+    db.exec("DELETE FROM t6")
+    pcall(db.batch, function()
+        db.exec("CREATE INDEX IF NOT EXISTS ix6 ON t6 (id)")   -- exists: swallowed
+        db.exec("INSERT INTO t6 (id) VALUES (1)")
+        error("roll back")
+    end)
+    pcall(db.batch, function()
+        pcall(db.exec, "CREATE TABLE t6 (id BIGINT)")          -- exists: fails
+        db.exec("INSERT INTO t6 (id) VALUES (2)")
+        error("roll back")
+    end)
+    local after_ddl = tonumber(db.query("SELECT count(*) AS c FROM t6")[1].c)
+    local outer_ok, outer_err = pcall(db.batch, function()
+        pcall(db.batch, function()
+            db.exec("CREATE TABLE IF NOT EXISTS t6b (id BIGINT)")
+            db.exec("INSERT INTO t6 (id) VALUES (3)")
+            error("inner fails")
+        end)
+    end)
+    local async_ok, async_err = pcall(db.async.exec, "START TRANSACTION")
+    res:json({
+        after_ddl   = after_ddl,
+        nested_lost = (not outer_ok) and tostring(outer_err):find("ended inside the batch", 1, true) ~= nil,
+        async_begin_refused = (not async_ok) and tostring(async_err):find("cannot span", 1, true) ~= nil,
+    })
+end)
 app.get("/totp", function(req, res)
     local t = totp._test
     for _ = 1, 5 do t.bump_failed_attempt("totp-user") end
@@ -339,6 +374,13 @@ echo "$RESP_STDLIB" | grep -q '"session_role":"admin"'  || { echo "::error sessi
 echo "$RESP_STDLIB" | grep -q '"outbox_pending":1'      || { echo "::error outbox enqueue"; fail=1; }
 echo "$RESP_STDLIB" | grep -q '"sessions_ok":true'      || { echo "::error auth-health table probe"; fail=1; }
 echo "$RESP_STDLIB" | grep -q '"search_guarded":true'   || { echo "::error search SQLite-only guard"; fail=1; }
+
+# Implicit commits around DDL in a batch, nested batches, db.async BEGIN.
+RESP_T6=$(curl -fsS "http://127.0.0.1:${PORT}/txn6" || echo FAIL)
+echo "txn6 response: $RESP_T6"
+echo "$RESP_T6" | grep -q '"after_ddl":0'               || { echo "::error a write after a failed DDL in a batch was not rolled back"; fail=1; }
+echo "$RESP_T6" | grep -q '"nested_lost":true'          || { echo "::error a nested batch with DDL did not report its transaction lost"; fail=1; }
+echo "$RESP_T6" | grep -q '"async_begin_refused":true'  || { echo "::error BEGIN through db.async was not refused"; fail=1; }
 
 # TOTP lockout counters are written on MySQL, so the lockout engages.
 RESP_TOTP=$(curl -fsS "http://127.0.0.1:${PORT}/totp" || echo FAIL)

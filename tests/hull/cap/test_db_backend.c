@@ -10,6 +10,7 @@
 #include "utest.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
+#include "hull/cap/db_sql_kw.h"
 #include "hull/cap/db.h"
 #include "hull/cap/types.h"
 #include <sqlite3.h>
@@ -704,6 +705,37 @@ UTEST(db_backend, batch_reports_a_transaction_ended_inside_it)
     ASSERT_TRUE(hl_db_exec(&h, "SELECT 1", NULL, 0) >= 0);
     EXPECT_TRUE(strstr(hl_db_errmsg(&h), "ended inside the batch") == NULL);
     hl_db_backend_sqlite.close(&h);
+}
+
+/* The transaction-statement reader (audit 6 L6): every spelling, comments in
+ * front, and nothing mistaken for one. */
+UTEST(db_backend, sql_txn_kind)
+{
+    EXPECT_EQ(HL_SQL_TXN_BEGIN,    hl_sql_txn_kind("BEGIN"));
+    EXPECT_EQ(HL_SQL_TXN_BEGIN,    hl_sql_txn_kind("  begin immediate"));
+    EXPECT_EQ(HL_SQL_TXN_BEGIN,    hl_sql_txn_kind("/* tx */ BEGIN TRANSACTION"));
+    EXPECT_EQ(HL_SQL_TXN_BEGIN,    hl_sql_txn_kind("-- note\nSTART TRANSACTION"));
+    EXPECT_EQ(HL_SQL_TXN_BEGIN,    hl_sql_txn_kind("/* a /* nested */ b */begin"));
+    EXPECT_EQ(HL_SQL_TXN_COMMIT,   hl_sql_txn_kind("COMMIT"));
+    EXPECT_EQ(HL_SQL_TXN_COMMIT,   hl_sql_txn_kind("commit work;"));
+    EXPECT_EQ(HL_SQL_TXN_COMMIT,   hl_sql_txn_kind("END TRANSACTION"));
+    EXPECT_EQ(HL_SQL_TXN_COMMIT,   hl_sql_txn_kind("/* x */ COMMIT AND NO CHAIN"));
+    EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind("COMMIT AND CHAIN"));
+    EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind("COMMIT PREPARED 'x'"));
+    EXPECT_EQ(HL_SQL_TXN_ROLLBACK, hl_sql_txn_kind("ROLLBACK"));
+    EXPECT_EQ(HL_SQL_TXN_ROLLBACK, hl_sql_txn_kind(" rollback transaction ; "));
+    EXPECT_EQ(HL_SQL_TXN_ROLLBACK, hl_sql_txn_kind("ABORT"));
+    EXPECT_EQ(HL_SQL_TXN_SAVEPOINT, hl_sql_txn_kind("ROLLBACK TO SAVEPOINT s"));
+    EXPECT_EQ(HL_SQL_TXN_SAVEPOINT, hl_sql_txn_kind("rollback work to s"));
+    EXPECT_EQ(HL_SQL_TXN_SAVEPOINT, hl_sql_txn_kind("SAVEPOINT s"));
+    EXPECT_EQ(HL_SQL_TXN_SAVEPOINT, hl_sql_txn_kind("RELEASE SAVEPOINT s"));
+    EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind("COMMITTED"));
+    EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind("SELECT 1"));
+    EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind("START SLAVE"));
+    EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind("endpoint"));
+    EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind(""));
+    EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind(NULL));
+    EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind("/* unterminated BEGIN"));
 }
 
 UTEST_MAIN();
