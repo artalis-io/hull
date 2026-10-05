@@ -70,7 +70,7 @@ sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
         extern const HlEntry hl_app_entries[];
         HlVfs app_vfs;
         hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
-        HlDbHandle tmp_handle;
+        HlDbHandle tmp_handle = {0};
         if (hl_db_sqlite_wrap(&tmp_handle, db) == 0) {
             hl_migrate_run(&tmp_handle, &app_vfs);
             hl_db_sqlite_unwrap(&tmp_handle);

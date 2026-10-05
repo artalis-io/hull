@@ -11,6 +11,7 @@
 #include "mod_db.h"               /* js_call_handle / new_bound_subobject seam */
 #include "log.h"
 #include "hull/utils/secure_zero.h"
+#include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "hull/manifest.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
@@ -516,6 +517,28 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
 
     JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
+    /* An async fn (or one returning a promise / thenable) has not finished
+     * when JS_Call returns: committing here committed only the statements
+     * before its first await, ran the rest in autocommit, and turned its
+     * errors into an unhandled rejection after the COMMIT. Roll back and say
+     * so instead. Checked before the handle is re-resolved: reading `then`
+     * can run a getter (app code). */
+    int async_result = 0;
+    if (!JS_IsException(result) && JS_IsObject(result)) {
+        if ((int)JS_PromiseState(ctx, result) >= 0) {
+            async_result = 1;
+        } else {
+            JSValue then = JS_GetPropertyStr(ctx, result, "then");
+            if (JS_IsException(then)) {
+                JS_FreeValue(ctx, result);
+                result = JS_EXCEPTION;
+            } else {
+                async_result = JS_IsFunction(ctx, then);
+                JS_FreeValue(ctx, then);
+            }
+        }
+    }
+
     /* Resolve again: fn may have closed a db.open handle, freeing h. */
     h = js_call_handle(ctx, this_val);
     if (JS_IsException(result)) {
@@ -523,6 +546,13 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
         return result; /* propagate exception */
     }
     JS_FreeValue(ctx, result);
+    if (async_result) {
+        if (h) (void)hl_db_batch_leave(h, 0);
+        return JS_ThrowTypeError(ctx,
+            "db.batch: fn must be synchronous - it returned a Promise, so its "
+            "statements after the first await would run outside the "
+            "transaction (the batch was rolled back)");
+    }
     if (!h)
         return JS_ThrowInternalError(ctx,
             "db.batch: the connection was closed inside the batch");
@@ -810,6 +840,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
             "db.async requires an active event loop");
     if (hl_js_async_gate(ctx, js, "db.async") != 0)
         return JS_EXCEPTION;
+    if (hl_js_db_refuse_wait(ctx, "db.async")) return JS_EXCEPTION;
     /* Require a live bound connection: a closed db.open() handle resolves to
      * NULL here, so async-after-close fails closed instead of silently
      * targeting the default database. */

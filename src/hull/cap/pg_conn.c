@@ -514,10 +514,12 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
  * attached the session to @p transport, so every byte tunnels through it
  * transparently. SIGPIPE suppression is the transport's job (adopt / connect set
  * SO_NOSIGPIPE on the descriptor). */
-/* `tls_active`: the transport carries a TLS session (cleartext auth is only
- * sent over one, unless the DSN said sslmode=disable). */
+/* `tls_verified`: the transport carries a TLS session whose certificate chain
+ * and host name were verified (sslmode=verify-ca / verify-full). Cleartext auth
+ * is only sent over one, unless the DSN said sslmode=disable (see
+ * hl_pg_cleartext_allowed). */
 static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn,
-                    int tls_active)
+                    int tls_verified)
 {
     memset(conn, 0, sizeof(*conn));
     conn->transport = transport;
@@ -593,19 +595,21 @@ static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn
                 authenticated = 1;
             } else if (sub == HL_PG_AUTH_CLEARTEXT) {
                 /* A cleartext request hands over the password itself. Refuse it
-                 * mid-SCRAM (a downgrade), and on a connection without TLS
-                 * unless the DSN chose plaintext (sslmode=disable): under the
-                 * default `prefer`, whoever can strip the TLS offer could ask
-                 * for the password and get it. */
-                int allowed = tls_active ||
-                    hl_pg_sslmode_parse(dsn->sslmode) == HL_PG_SSLMODE_DISABLE;
+                 * mid-SCRAM (a downgrade), and unless the session is verified
+                 * TLS or the DSN chose plaintext (sslmode=disable): see
+                 * hl_pg_cleartext_allowed. */
+                int allowed = hl_pg_cleartext_allowed(
+                    tls_verified, hl_pg_sslmode_parse(dsn->sslmode));
 #ifndef HL_PG_NO_SCRAM
                 if (scram.started) allowed = 0;
 #endif
                 if (!allowed) {
                     set_err(conn->errmsg, sizeof conn->errmsg,
-                            "server asked for the password in cleartext without "
-                            "TLS; refused (use TLS, or sslmode=disable to allow it)");
+                            "server asked for the password in cleartext over a "
+                            "connection whose server identity was not verified; "
+                            "refused (use sslmode=verify-full or verify-ca, a "
+                            "SCRAM-SHA-256 server, or sslmode=disable on a "
+                            "trusted network)");
                     conn_teardown(conn); return -1;
                 }
                 HlPgWriter pw;
@@ -702,6 +706,11 @@ int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
 
 /* Pure: maps a DSN sslmode string to the enum. Stays outside the transport guard
  * so the pure-parser fuzzers reach it. */
+int hl_pg_cleartext_allowed(int tls_verified, int sslmode)
+{
+    return tls_verified || sslmode == HL_PG_SSLMODE_DISABLE;
+}
+
 int hl_pg_sslmode_parse(const char *s)
 {
     if (!s || !s[0])                   return HL_PG_SSLMODE_PREFER;
@@ -814,7 +823,7 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
                 hl_db_transport_close(t);
                 return -1;
             }
-            return pg_start(conn, t, dsn, 1);
+            return pg_start(conn, t, dsn, verify);
         }
         /* PLAINTEXT: server declined TLS and sslmode permits fallback. */
     }

@@ -7,6 +7,7 @@
 #include "mod_buffer.h"
 #include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/smtp.h"
+#include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "hull/cap/smtp_op.h"
 #include "hull/cap/smtp_async.h"
 #include "hull/shared/async.h"
@@ -114,6 +115,7 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.smtp_cfg)
         return JS_ThrowInternalError(ctx, "smtp not configured (no hosts in manifest)");
+    if (hl_js_db_refuse_wait(ctx, "smtp.send()")) return JS_EXCEPTION;
 
     if (argc < 1 || !JS_IsObject(argv[0]))
         return JS_ThrowTypeError(ctx, "smtp.send requires an options object");

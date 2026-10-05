@@ -66,6 +66,28 @@ static inline void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
 #endif
 
 /*
+ * The name of an open registry connection that is inside a transaction
+ * ("internal" for the stdlib's internal one), or NULL when none is. No I/O.
+ *
+ * The runtimes refuse to WAIT (http.fetch, db.async, hull.sleep, ...) while
+ * this is non-NULL. Every registry connection is shared by all requests, SSE
+ * events and timers, so while a handler is parked another one runs on the
+ * same connection: it used to roll the parked handler's transaction back
+ * (the stale-transaction guard above, which cannot tell a parked owner from
+ * a dead one), after which the parked handler's remaining statements
+ * autocommitted and its COMMIT "succeeded" with half its writes gone. With
+ * no transaction ever held across a wait, every transaction the guard finds
+ * open at the start of an entry belongs to an entry that has finished, so
+ * rolling it back is always right (audit 5 M1).
+ */
+#ifdef HL_ENABLE_DB
+const char *hl_db_registry_open_txn(HlDbRegistry *reg);
+#else
+static inline const char *hl_db_registry_open_txn(HlDbRegistry *reg)
+{ (void)reg; return (const char *)0; }
+#endif
+
+/*
  * Point the registry at the app's databases map. The manifest is only known
  * after the app runs app.manifest(), which is after the registry is created
  * at db-open time, so the serve path injects the sealed manifest here once it

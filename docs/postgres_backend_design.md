@@ -131,8 +131,13 @@ concurrency design:
   DDL, row description + data row decoding, error/notice handling,
   transaction status.
 - **Auth.** SCRAM-SHA-256 (the PG 14+ default) built from Hull's own
-  `hl_cap_crypto` SHA-256 / HMAC-SHA-256 / PBKDF2; `md5` and
-  `password` (cleartext, TLS-only) as fallbacks. No new crypto.
+  `hl_cap_crypto` SHA-256 / HMAC-SHA-256 / PBKDF2; `password`
+  (cleartext) as a fallback, sent only over a TLS session whose server
+  certificate was VERIFIED (`sslmode=verify-ca` / `verify-full`) or with an
+  explicit `sslmode=disable` - `prefer` / `require` verify nothing, so an
+  on-path attacker could complete TLS with a self-signed certificate and ask
+  for the password (audit 5; `hl_pg_cleartext_allowed`). `md5` is rejected.
+  No new crypto.
 - **TLS.** The `SSLRequest` probe then a standard mbedTLS handshake,
   verifying the server cert against the **embedded Mozilla CA bundle**
   (the same trust path as HTTPS). An `sslmode` DSN parameter controls

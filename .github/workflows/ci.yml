@@ -1990,8 +1990,9 @@ jobs:
   # parameterized db.exec / db.query (binary prepared statements) -> typed
   # decode; multi-statement migrations; db.async on a worker connection; the
   # DB-backed stdlib (session / outbox / inbox / rbac / audit-log / transaction
-  # / insert_if_absent) on the MySQL dialect; and caching_sha2 full-auth over
-  # TLS. Self-builds with HL_ENABLE_MYSQL=1; skips cleanly without Docker.
+  # / insert_if_absent) on the MySQL dialect; caching_sha2 full-auth refused
+  # over unverified TLS (sslmode=require), then the fast path over TLS.
+  # Self-builds with HL_ENABLE_MYSQL=1; skips cleanly without Docker.
   mysql:
     needs: [classify]
     if: needs.classify.outputs.run_db_mysql == 'true'
@@ -2369,6 +2370,10 @@ jobs:
           # -d connection opens in phase 6 (pre-sandbox) and stays mode A. §3.2/§6.
           mkdir -p /tmp/ddbmodeb/data
           printf 'id,name\n1,alice\n2,bob\n' > /tmp/ddbmodeb/data/test.csv
+          # A file in the app dir but OUTSIDE the granted data/ (the kernel
+          # unveil admits it: app_dir is readable), standing in for the app's
+          # SQLite file. DuckDB itself must refuse it.
+          printf 'id,name\n9,secret\n' > /tmp/ddbmodeb/outside.csv
           cat > /tmp/ddbmodeb/app.lua <<'EOF'
           app.manifest({
               modules = { "hull/db@1" },
@@ -2382,6 +2387,18 @@ jobs:
               local d = require("hull.db").connect("analytics")
               local rows = d.query("SELECT id, name FROM read_csv('/tmp/ddbmodeb/data/test.csv')")
               assert(rows and #rows == 2 and rows[1].name == "alice", "declared-dir read failed")
+              -- allowed_directories enforces only with enable_external_access
+              -- off (audit 5 H1): reads OUTSIDE the granted dir must be a
+              -- catchable DuckDB error, not a read and not a process abort.
+              local ok1 = pcall(d.query, "SELECT * FROM read_csv('/tmp/ddbmodeb/outside.csv')")
+              assert(not ok1, "read outside the granted dir (app dir) was NOT refused")
+              local ok2 = pcall(d.query, "SELECT * FROM read_csv('/etc/hosts')")
+              assert(not ok2, "read outside the granted dir (/etc/hosts) was NOT refused")
+              local ok3 = pcall(d.exec, "COPY (SELECT 1 AS id) TO '/tmp/ddbmodeb/outside.csv'")
+              assert(not ok3, "write outside the granted dir was NOT refused")
+              -- The process survived the refusals and the connection still works.
+              local again = d.query("SELECT count(*) AS n FROM read_csv('/tmp/ddbmodeb/data/test.csv')")
+              assert(again and again[1].n == 2, "connection unusable after refusals")
               print("DUCKDB MODE B OK")
               return 0
           end)
@@ -2393,6 +2410,8 @@ jobs:
           fi
           cat /tmp/ddbmodeb/out.txt
           grep -q "DUCKDB MODE B OK" /tmp/ddbmodeb/out.txt
+          if grep -q "secret" /tmp/ddbmodeb/out.txt; then echo "outside file leaked"; exit 1; fi
+          grep -q 'secret' /tmp/ddbmodeb/outside.csv || { echo "outside file overwritten"; exit 1; }
           # A read-only pattern grant is NOT widened (it used to become the
           # whole app_dir, read+write): the same read must be refused.
           cat > /tmp/ddbmodeb/ro.lua <<'EOF'

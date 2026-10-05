@@ -99,11 +99,16 @@ typedef struct HlMyConn {
      * so every later command refuses and the backend reconnects. */
     int      broken;
     uint16_t server_status; /* status flags of the latest OK / EOF */
+    uint16_t last_err_code; /* server error code of the latest command's ERR, or 0 */
     char     errmsg[HL_MY_ERRMSG_SIZE];
 } HlMyConn;
 
 /* SERVER_STATUS_IN_TRANS: a transaction is open on the connection. */
 #define HL_MY_SERVER_STATUS_IN_TRANS 0x0001
+
+/* ER_LOCK_DEADLOCK: InnoDB chose this transaction as the deadlock victim and
+ * rolled ALL of it back (not only the failing statement). */
+#define HL_MY_ER_LOCK_DEADLOCK 1213
 
 /*
  * Connect to dsn->host:port and run the handshake (mysql_native_password +

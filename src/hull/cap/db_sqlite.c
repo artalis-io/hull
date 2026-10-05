@@ -191,6 +191,12 @@ static void sqlite_guard_stale_txn(HlDbHandle *h)
     hl_cap_db_guard_stale_txn(s->db);
 }
 
+static int sqlite_in_txn(HlDbHandle *h)
+{
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    return s && s->db && !sqlite3_get_autocommit(s->db);
+}
+
 /* ── Dialect-aware SQL helpers ───────────────────────────────────────
  *
  * These keep the stdlib (auth-flows, audit-log, session, rbac, etc.)
@@ -418,6 +424,7 @@ const HlDbBackend hl_db_backend_sqlite = {
     .last_id               = sqlite_last_id,
     .errmsg                = sqlite_errmsg,
     .guard_stale_txn       = sqlite_guard_stale_txn,
+    .in_txn                = sqlite_in_txn,
     .insert_if_absent      = sqlite_insert_if_absent,
     .upsert                = sqlite_upsert,
     .table_columns         = sqlite_table_columns,
@@ -457,6 +464,7 @@ int hl_db_sqlite_wrap(HlDbHandle *out, sqlite3 *db)
     s->db    = db;       /* borrowed - caller owns lifetime */
     s->alloc = NULL;
     hl_stmt_cache_init(&s->cache, db, NULL);
+    memset(out, 0, sizeof *out);   /* no stale batch depth / message */
     out->backend = &hl_db_backend_sqlite;
     out->ctx     = s;
     return 0;

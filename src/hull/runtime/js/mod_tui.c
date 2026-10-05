@@ -12,6 +12,7 @@
 #ifdef HL_ENABLE_TUI
 
 #include "hull/utils/alloc.h"
+#include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/cap/tui.h"
@@ -367,6 +368,7 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
         return event_to_js(ctx, &ev);
     }
 
+    if (hl_js_db_refuse_wait(ctx, "tui.poll()")) return JS_EXCEPTION;
     if (timeout_ms < 0) timeout_ms = INT_MAX;
 
     TuiPollOpJs *op = calloc(1, sizeof *op);

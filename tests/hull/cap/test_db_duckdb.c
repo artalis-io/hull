@@ -76,7 +76,7 @@ static int count_cb(void *ctx, HlColumn *cols, int ncols)
 
 UTEST(db_duckdb, open_bind_decode_types)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     ASSERT_EQ(duck_open_mem(&h), 0);
 
     ASSERT_EQ(hl_db_exec(&h,
@@ -109,7 +109,7 @@ UTEST(db_duckdb, open_bind_decode_types)
  * duckdb_string_t). */
 UTEST(db_duckdb, null_bind_and_long_string)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     ASSERT_EQ(duck_open_mem(&h), 0);
     ASSERT_EQ(hl_db_exec(&h, "CREATE TABLE n (id INTEGER, name VARCHAR)", NULL, 0), 0);
 
@@ -146,7 +146,7 @@ UTEST(db_duckdb, null_bind_and_long_string)
 /* BEGIN + INSERT + ROLLBACK leaves no row; a COMMITted one persists. */
 UTEST(db_duckdb, transaction_commit_and_rollback)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     ASSERT_EQ(duck_open_mem(&h), 0);
     ASSERT_EQ(hl_db_exec(&h, "CREATE TABLE tx (v INTEGER)", NULL, 0), 0);
 
@@ -175,7 +175,7 @@ UTEST(db_duckdb, transaction_commit_and_rollback)
  * locked, so neither reading a local file nor re-enabling access succeeds. */
 UTEST(db_duckdb, security_lockdown)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     ASSERT_EQ(duck_open_mem(&h), 0);
 
     /* read_csv on a real local file must fail (enable_external_access=false). */
@@ -212,7 +212,7 @@ UTEST(db_duckdb, dialect_descriptor)
  * silently ignored (ON CONFLICT DO NOTHING), leaving the original value. */
 UTEST(db_duckdb, insert_if_absent)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     ASSERT_EQ(duck_open_mem(&h), 0);
     ASSERT_EQ(hl_db_exec(&h,
         "CREATE TABLE kv (k INTEGER PRIMARY KEY, v INTEGER)", NULL, 0), 0);
@@ -241,7 +241,7 @@ UTEST(db_duckdb, insert_if_absent)
  * the non-key columns (ON CONFLICT DO UPDATE SET v = excluded.v). */
 UTEST(db_duckdb, upsert)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     ASSERT_EQ(duck_open_mem(&h), 0);
     ASSERT_EQ(hl_db_exec(&h,
         "CREATE TABLE kv (k INTEGER PRIMARY KEY, v INTEGER)", NULL, 0), 0);
@@ -285,7 +285,7 @@ static void colname_cb(void *ctx, const char *name)
  * NUL-terminate path in duck_table_columns_row. */
 UTEST(db_duckdb, table_columns)
 {
-    HlDbHandle h;
+    HlDbHandle h = {0};
     ASSERT_EQ(duck_open_mem(&h), 0);
     ASSERT_EQ(hl_db_exec(&h,
         "CREATE TABLE cols (id INTEGER, twelve_bytes VARCHAR, note VARCHAR)",

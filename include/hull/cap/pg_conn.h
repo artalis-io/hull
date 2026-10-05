@@ -105,10 +105,22 @@ typedef enum HlPgSslDecision {
     HL_PG_SSL_FAIL      = -1,   /* negotiation failed (errbuf set)          */
 } HlPgSslDecision;
 
-/* Map a DSN sslmode string to the enum. Empty defaults to DISABLE for now
- * (3b.2 will move the default to PREFER once the handshake exists). Returns
+/* Map a DSN sslmode string to the enum. Empty defaults to PREFER. Returns
  * -1 for an unknown mode. */
 int hl_pg_sslmode_parse(const char *s);
+
+/*
+ * Whether the client may answer AuthenticationCleartextPassword (send the
+ * password itself). Only over a TLS session whose certificate chain and host
+ * name were VERIFIED (@p tls_verified, sslmode=verify-ca / verify-full), or
+ * when the DSN opted into plaintext (@p sslmode HL_PG_SSLMODE_DISABLE, a
+ * trusted network). `prefer` and `require` verify nothing, so an on-path
+ * attacker can complete TLS with any self-signed certificate and then ask
+ * for the password in cleartext (audit 5 M4); stripping the TLS offer was
+ * already refused. SCRAM-SHA-256 never sends the password and checks the
+ * server's proof, so it is unaffected.
+ */
+int hl_pg_cleartext_allowed(int tls_verified, int sslmode);
 
 /*
  * Send an SSLRequest over @p t (the pre-TLS plaintext probe rides the transport)

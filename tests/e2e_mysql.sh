@@ -594,51 +594,7 @@ if [ "${SKIP_TLS:-0}" = 1 ]; then
     exit 0
 fi
 
-# ── TLS + caching_sha2_password phase ─────────────────────────────────
-# MySQL 8 ships TLS on by default (auto-generated certs). Switch the user to
-# caching_sha2_password so its cache is empty, then connect over TLS: the
-# full-auth path sends the cleartext password over the encrypted channel.
-echo "=== switching user to caching_sha2_password ==="
-docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e \
-    "ALTER USER 'hull'@'%' IDENTIFIED WITH caching_sha2_password BY 's3cretpw';" >/dev/null 2>&1
-
-APPDIR_TLS=$(mktemp -d)
-cat > "$APPDIR_TLS/app.lua" <<'LUA'
-app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })
-local db = require("hull.db").default()
-app.get("/", function(req, res)
-    -- Ssl_cipher is non-empty only when THIS session is over TLS.
-    local r = db.query("SHOW SESSION STATUS LIKE 'Ssl_cipher'")
-    local n = db.query("SELECT count(*) AS c FROM e2e")
-    res:json({ cipher = r[1] and r[1].Value or "", count = n[1].c })
-end)
-LUA
-
-echo "=== running app over TLS (sslmode=require + caching_sha2 full auth) ==="
-./build/hull -d "$DSN_TLS" -p "$PORT" "$APPDIR_TLS/app.lua" >"$APPDIR_TLS/serve.log" 2>&1 &
-SVR=$!
-wait_for_server "$APPDIR_TLS/serve.log" || exit 1
-
-RESP_TLS=$(curl -fsS "http://127.0.0.1:${PORT}/" || echo FAIL)
-echo "response: $RESP_TLS"
-
-tfail=0
-echo "$RESP_TLS" | grep -q '"cipher":""' && { echo "::error connection not over TLS (empty cipher)"; tfail=1; }
-echo "$RESP_TLS" | grep -q '"cipher":"' || { echo "::error no cipher field"; tfail=1; }
-echo "$RESP_TLS" | grep -q '"count":3'  || { echo "::error query over TLS failed"; tfail=1; }
-
-if [ "$tfail" = 0 ]; then
-    echo "PASS: mysql TLS end-to-end (SSLRequest -> handshake -> caching_sha2 full auth over TLS -> encrypted query)"
-    rm -rf "$APPDIR_TLS"
-else
-    echo "--- server log ---"; cat "$APPDIR_TLS/serve.log" 2>/dev/null || true
-    exit 1
-fi
-
-# Free $PORT for the refusal phases below.
-kill "$SVR" 2>/dev/null || true; SVR=
-
-# ── sslmode security matrix: verify-* must reject an untrusted cert ────────
+# ── connection-refusal helper (used by the TLS phases below) ──────────
 # The default -d connection opens EAGERLY at app-context init, so a DSN that must
 # not connect makes `hull` exit at startup rather than serve. That startup failure
 # IS the proof the connection was refused: a silent success (a plaintext downgrade,
@@ -668,6 +624,68 @@ assert_connect_refused() {
         echo "::error $_lbl: expected a connection-failure log"; rm -rf "$_d"; exit 1
     fi
 }
+
+# ── TLS + caching_sha2_password phase ─────────────────────────────────
+# MySQL 8 ships TLS on by default (auto-generated certs). Switch the user to
+# caching_sha2_password so its cache is empty: full auth (the password itself)
+# must be refused over sslmode=require, which does not verify the server; once
+# the hash is cached the fast path connects over TLS.
+echo "=== switching user to caching_sha2_password ==="
+docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e \
+    "ALTER USER 'hull'@'%' IDENTIFIED WITH caching_sha2_password BY 's3cretpw';" >/dev/null 2>&1
+
+# With the account's hash not yet cached, the server asks for FULL auth - the
+# password itself. sslmode=require encrypts but verifies nothing (the server's
+# certificate is self-signed), so an on-path attacker could be the one asking:
+# Hull refuses rather than send it (audit 5 M4).
+echo "=== sslmode=require refuses caching_sha2 FULL auth (password over unverified TLS) ==="
+assert_connect_refused "caching_sha2 full auth over unverified TLS" "$DSN_TLS"
+
+# A login over a channel the server trusts caches the hash (here the mysql
+# client inside the container); from then on Hull takes the fast path, a
+# scramble, never the password.
+echo "=== warming the caching_sha2 cache with a client login ==="
+docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw -h127.0.0.1 --protocol=TCP \
+    -e "SELECT 1" hulldb >/dev/null 2>&1 || {
+    echo "::error could not warm the caching_sha2 cache"; exit 1; }
+
+APPDIR_TLS=$(mktemp -d)
+cat > "$APPDIR_TLS/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })
+local db = require("hull.db").default()
+app.get("/", function(req, res)
+    -- Ssl_cipher is non-empty only when THIS session is over TLS.
+    local r = db.query("SHOW SESSION STATUS LIKE 'Ssl_cipher'")
+    local n = db.query("SELECT count(*) AS c FROM e2e")
+    res:json({ cipher = r[1] and r[1].Value or "", count = n[1].c })
+end)
+LUA
+
+echo "=== running app over TLS (sslmode=require + caching_sha2 fast auth) ==="
+./build/hull -d "$DSN_TLS" -p "$PORT" "$APPDIR_TLS/app.lua" >"$APPDIR_TLS/serve.log" 2>&1 &
+SVR=$!
+wait_for_server "$APPDIR_TLS/serve.log" || exit 1
+
+RESP_TLS=$(curl -fsS "http://127.0.0.1:${PORT}/" || echo FAIL)
+echo "response: $RESP_TLS"
+
+tfail=0
+echo "$RESP_TLS" | grep -q '"cipher":""' && { echo "::error connection not over TLS (empty cipher)"; tfail=1; }
+echo "$RESP_TLS" | grep -q '"cipher":"' || { echo "::error no cipher field"; tfail=1; }
+echo "$RESP_TLS" | grep -q '"count":3'  || { echo "::error query over TLS failed"; tfail=1; }
+
+if [ "$tfail" = 0 ]; then
+    echo "PASS: mysql TLS end-to-end (SSLRequest -> handshake -> caching_sha2 fast auth over TLS -> encrypted query)"
+    rm -rf "$APPDIR_TLS"
+else
+    echo "--- server log ---"; cat "$APPDIR_TLS/serve.log" 2>/dev/null || true
+    exit 1
+fi
+
+# Free $PORT for the refusal phases below.
+kill "$SVR" 2>/dev/null || true; SVR=
+
+# ── sslmode security matrix: verify-* must reject an untrusted cert ────────
 
 # MySQL 8 serves TLS with an auto-generated self-signed cert that is NOT in the
 # embedded Mozilla CA bundle, so sslmode=verify-ca (chain) and sslmode=verify-full

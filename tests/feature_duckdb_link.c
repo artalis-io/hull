@@ -27,7 +27,7 @@ int main(void)
         fprintf(stderr, "feature link-smoke: open failed\n");
         return 1;
     }
-    HlDbHandle h;
+    HlDbHandle h = {0};
     h.backend = &hl_db_backend_duckdb;
     h.ctx = ctx;
 

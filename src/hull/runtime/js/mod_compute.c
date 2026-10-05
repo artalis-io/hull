@@ -9,6 +9,7 @@
 #include "mod_buffer.h"
 #include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/wasm.h"
+#include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "hull/cap/wasm_spans.h" /* HL_WASM_MAX_SPANS */
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_stream.h"
@@ -492,6 +493,7 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "compute.async requires an active event loop");
     if (hl_js_async_gate(ctx, js, "compute.async") != 0)
         return JS_EXCEPTION;
+    if (hl_js_db_refuse_wait(ctx, "compute.async.call()")) return JS_EXCEPTION;
     if (!js->base.wasm_cache)
         return JS_ThrowInternalError(ctx, "compute.async.call: WASM runtime not initialized");
 
@@ -917,6 +919,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: requires an active event loop");
     if (hl_js_async_gate(ctx, js, "WasmInstance.asyncCall") != 0)
         return JS_EXCEPTION;
+    if (hl_js_db_refuse_wait(ctx, "instance.asyncCall()")) return JS_EXCEPTION;
 
     HlWasmInstance *pi = JS_GetOpaque2(ctx, this_val, js_wasm_inst_class_id);
     if (!pi || pi->closed)

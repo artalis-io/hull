@@ -1333,8 +1333,17 @@ static int hl_serve_load_app(HlServerState *s)
 
 #ifdef HL_ENABLE_DUCKDB
 /* An fs grant as the directory DuckDB may use: the entry must name a whole
- * directory - bare, or with a trailing "/**" - that exists. 0 and the
- * absolute path in @p out, or -1 (a file, a pattern, a missing path). */
+ * directory - bare, or with a trailing "/**" - that exists INSIDE the app
+ * root. 0 and the absolute path in @p out, or -1 (a file, a pattern, a
+ * missing path, an absolute grant, or one that resolves outside the root).
+ *
+ * The fs capability resolves a subtree grant contained-follow: a symlink's
+ * target is clamped inside the app root. realpath() follows it anywhere, so
+ * a `data -> /srv/shared` link would hand DuckDB /srv/shared (audit 5 L4).
+ * The resolved directory must therefore lie under realpath(app_dir), and an
+ * absolute grant - which the fs policy refuses to parse - is refused here too.
+ * DuckDB's own check is a string prefix, so a symlink INSIDE a granted
+ * directory is still followed by DuckDB (the kernel unveil bounds it). */
 static int duckdb_grant_dir(const char *app_dir, const char *e,
                             char *out, size_t out_sz)
 {
@@ -1344,15 +1353,20 @@ static int duckdb_grant_dir(const char *app_dir, const char *e,
     size_t len = (size_t)n;
     if (len >= 3 && strcmp(work + len - 3, "/**") == 0) work[len - 3] = '\0';
     while ((len = strlen(work)) > 1 && work[len - 1] == '/') work[len - 1] = '\0';
-    if (!work[0] || strpbrk(work, "*?[")) return -1;
+    if (!work[0] || work[0] == '/' || strpbrk(work, "*?[")) return -1;
     char abs[4096];
-    if (work[0] == '/') n = snprintf(abs, sizeof abs, "%s", work);
-    else                n = snprintf(abs, sizeof abs, "%s/%s", app_dir, work);
+    n = snprintf(abs, sizeof abs, "%s/%s", app_dir, work);
     if (n <= 0 || (size_t)n >= sizeof abs) return -1;
     char real[PATH_MAX];
+    char root[PATH_MAX];
     struct stat st;
-    if (!realpath(abs, real) || stat(real, &st) != 0 || !S_ISDIR(st.st_mode))
+    if (!realpath(app_dir, root) || !realpath(abs, real) ||
+        stat(real, &st) != 0 || !S_ISDIR(st.st_mode))
         return -1;
+    size_t rlen = strlen(root);
+    if (rlen > 1 && (strncmp(real, root, rlen) != 0 ||
+                     (real[rlen] != '\0' && real[rlen] != '/')))
+        return -1;   /* resolves outside the app root */
     n = snprintf(out, out_sz, "%s", real);
     return (n > 0 && (size_t)n < out_sz) ? 0 : -1;
 }

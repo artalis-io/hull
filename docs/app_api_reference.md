@@ -32,6 +32,21 @@ const tmp = dbModule.open(dsn);           // caller-owned dynamic connection
 tmp.query(...); tmp.close();
 ```
 
+**Transactions never span a wait.** The default, named and internal
+connections are each ONE connection shared by every request, SSE event and
+timer. While a handler waits (`http.fetch`, `db.async`, `hull.sleep`,
+`compute.async`, `worker.dispatch`, `smtp.send`, a multipart body read, a
+task's `wait`) other handlers run on the same connection, so a transaction
+cannot stay open across the wait: the wait raises `... cannot wait while a
+transaction is open on database connection 'NAME'`. Commit or roll back
+first, do the waiting outside, or put the transaction on a `db.open`
+connection of its own. For the same reason `db.batch(fn)` takes a
+synchronous `fn`: in JS an `async` function (or one returning a Promise /
+thenable) is refused with a `TypeError` and the batch rolled back (it used to
+commit at the first `await`, running the rest in autocommit). A transaction a
+handler leaves open when it finishes is rolled back before the next request,
+SSE event or timer runs.
+
 Named and dynamic connections are declared in the manifest. A DSN of exactly
 `"$VAR"` / `"${VAR}"` is an env reference resolved at open time.
 
