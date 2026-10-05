@@ -242,7 +242,10 @@ function M.resolve_lib(libname, asset_name, ctx)
     -- (tool.bundle_verify) - an archive swapped in ~/.hull/tools after the
     -- install is refused, as a --with feature's is. See docs/musl_build.md.
     if ctx.musl_dir and file_exists(ctx.musl_dir .. "/" .. libname) then
-        local ok, why = tool.bundle_verify(ctx.musl_dir, libname)
+        local ok, why = true, nil
+        if ctx.musl_verify ~= false then   -- off only with --no-verify-platform
+            ok, why = tool.bundle_verify(ctx.musl_dir, libname)
+        end
         if not ok then
             tool.stderr("hull build: " .. ctx.musl_dir .. "/" .. libname
                         .. " could not be re-verified: " .. tostring(why) .. "\n")
@@ -574,7 +577,7 @@ end
 function M.plan_mandatory(ctx)
     local rt = ctx.app_rt
     local rctx = { hull_dir = ctx.hull_dir or "", plat = ctx.plat,
-                   musl_dir = ctx.musl_dir }
+                   musl_dir = ctx.musl_dir, musl_verify = ctx.musl_verify }
     local plat_infix = ctx.plat or ""
 
     -- ── Compute the needs-gates (resolver + build-time signals) ──

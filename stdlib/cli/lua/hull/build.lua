@@ -1287,6 +1287,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
                 app_dir = opts.app_dir, app_rt = app_rt, tmpdir = tmpdir,
                 hull_dir = rt_hull_dir, plat = rt_plat, platform_lib = platform_lib,
                 musl_dir = opts.musl_dir,
+                musl_verify = opts.verify_platform ~= false,
                 compute_count = #compute_files, with = opts.with, flavor = opts.flavor,
                 with_list = with_feature_list(opts),
                 on_fail = function(msg)
@@ -1473,9 +1474,15 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
         end
         tool.copy(src, platform_lib)
         -- Re-verify the COPY that will be linked against the signed bundle
-        -- (install->build TOCTOU, as for --with archives).
-        local ok, why = tool.bundle_verify(opts.musl_dir, "libhull_platform.a",
-                                           platform_lib)
+        -- (install->build TOCTOU, as for --with archives). A locally built,
+        -- unsigned bundle (a source checkout staging its own) has no install
+        -- record; --no-verify-platform, the existing opt-out for an unsigned
+        -- platform archive, skips the check for it.
+        local ok, why = true, nil
+        if opts.verify_platform ~= false then
+            ok, why = tool.bundle_verify(opts.musl_dir, "libhull_platform.a",
+                                         platform_lib)
+        end
         if not ok then
             tool.stderr("hull build: " .. src .. " could not be re-verified: "
                 .. tostring(why) .. "\nhint: re-run `hull tools install platform-musl-"

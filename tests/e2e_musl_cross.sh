@@ -97,7 +97,9 @@ esac
 
 echo "== hull build --target=x86_64-linux-musl --linker=zig =="
 BIN="$WORKDIR/app-musl"
-OUT="$("$HULL" build "$APP" --target=x86_64-linux-musl --linker=zig -o "$BIN" 2>&1 || true)"
+# --no-verify-platform: the bundle staged above was built here, not installed
+# from a signed release, so it has no install record to re-verify against.
+OUT="$("$HULL" build "$APP" --target=x86_64-linux-musl --linker=zig --no-verify-platform -o "$BIN" 2>&1 || true)"
 echo "$OUT" | sed 's/^/    /'
 assert "build wrote the binary"        [ -f "$BIN" ]
 if [ -f "$BIN" ]; then
