@@ -129,7 +129,8 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
             params[i].d = d;
             break;
         }
-        case JS_TAG_STRING: {
+        case JS_TAG_STRING:
+        case JS_TAG_STRING_ROPE: { /* a concatenation result (QuickJS 2025+) */
             size_t slen;
             const char *s = JS_ToCStringLen(ctx, &slen, v);
             params[i].type = HL_TYPE_TEXT;

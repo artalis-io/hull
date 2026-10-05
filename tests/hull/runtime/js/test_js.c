@@ -7150,6 +7150,29 @@ UTEST(js_audit5, async_bodies_do_not_escape_the_instruction_limit)
     hl_js_free(&lim);
 }
 
+/* Audit 6 H5: catastrophic regexp backtracking runs inside one native
+ * RegExp.prototype.exec call, where the bytecode poll never fires. QuickJS
+ * 2025-04+ polls the interrupt handler from the backtracking loop
+ * (lre_check_timeout); a tripped budget aborts the match, uncatchably, and
+ * the trip is sticky afterwards (HULL PATCH 0003 in JS_ThrowInterrupted). */
+UTEST(js_audit6, catastrophic_regexp_trips_the_instruction_limit)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+    EXPECT_TRUE(a5_eval_throws(&lim,
+        "let caught = 0;\n"
+        "try { /^(a+)+$/.test('a'.repeat(40) + '!'); } catch (e) { caught = 1; }\n"
+        "globalThis.after = caught;\n"));
+    EXPECT_EQ(lim.budget_tripped, 1);
+    hl_js_reset_request(&lim);
+    JSValue v = JS_Eval(lim.ctx, "globalThis.after", 16, "<t>", JS_EVAL_TYPE_GLOBAL);
+    EXPECT_TRUE(JS_IsUndefined(v));   /* the catch never ran */
+    JS_FreeValue(lim.ctx, v);
+    /* An ordinary regexp still works once re-armed. */
+    EXPECT_FALSE(a5_eval_throws(&lim, "if (!/^(a+)+$/.test('aaa')) throw 1;"));
+    hl_js_free(&lim);
+}
+
 /* H2 / L1: the same through promise jobs - a loop that catches the
  * rejection of each interrupted call and starts another. The drain ends,
  * the tripped run's jobs are discarded, and nothing is left pending. */

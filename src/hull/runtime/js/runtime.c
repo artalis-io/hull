@@ -91,9 +91,8 @@ void hl_js_budget_arm(HlJS *js)
 JSValue hl_js_budget_throw(JSContext *ctx)
 {
     JS_ThrowInternalError(ctx, "interrupted (instruction limit exceeded)");
-    JSValue exc = JS_GetException(ctx);
-    JS_SetUncatchableError(ctx, exc, 1);
-    return JS_Throw(ctx, exc);
+    JS_SetUncatchableException(ctx, 1);
+    return JS_EXCEPTION;
 }
 
 /* ── Module loader ──────────────────────────────────────────────────── */

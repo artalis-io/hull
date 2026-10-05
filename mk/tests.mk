@@ -938,8 +938,8 @@ WAMR_CFLAGS += -DHL_MSAN
 # at. Debug info costs a sanitizer-only build nothing and is the difference
 # between a diagnosable report and a guess. (The other vendor blocks below
 # have the same gap; adding it where a report actually landed.)
-QJS_CFLAGS := -std=c11 -g -O1 -w -fsanitize=memory -fno-omit-frame-pointer \
-              -DCONFIG_VERSION=\"$(QJS_VERSION)\" -DCONFIG_BIGNUM -D_GNU_SOURCE
+QJS_CFLAGS := -std=gnu11 -g -O1 -w -fsanitize=memory -fno-omit-frame-pointer \
+              -DCONFIG_VERSION=\"$(QJS_VERSION)\" -D_GNU_SOURCE -fwrapv
 CFLAGS    += -DHL_QJS_VERSION=\"$(QJS_VERSION)\"
 LUA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer \
               -DLUA_USE_POSIX
@@ -1229,8 +1229,8 @@ QJS_FUZZ_OBJS := $(patsubst $(QJS_DIR)/%.c,$(QJS_FUZZ_DIR)/qjs_%.o,$(QJS_SRCS))
 $(QJS_FUZZ_DIR):
 	@mkdir -p $@
 $(QJS_FUZZ_DIR)/qjs_%.o: $(QJS_DIR)/%.c | $(QJS_FUZZ_DIR)
-	$(CC) -std=c11 -O1 -g -w -fsanitize=fuzzer-no-link,address -fno-omit-frame-pointer \
-	      -DCONFIG_VERSION=\"$(QJS_VERSION)\" -DCONFIG_BIGNUM -D_GNU_SOURCE -I$(QJS_DIR) -c -o $@ $<
+	$(CC) -std=gnu11 -O1 -g -w -fsanitize=fuzzer-no-link,address -fno-omit-frame-pointer \
+	      -DCONFIG_VERSION=\"$(QJS_VERSION)\" -D_GNU_SOURCE -fwrapv -I$(QJS_DIR) -c -o $@ $<
 
 fuzz/fuzz_js_source: fuzz/fuzz_js_source.c $(SRCDIR)/hull/frontend/js_session.c $(STDLIB_JS_CLI_TEST_REGISTRY_C) $(QJS_FUZZ_OBJS)
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/quickjs -Ibuild -o $@ \

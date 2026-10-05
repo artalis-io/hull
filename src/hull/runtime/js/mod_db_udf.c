@@ -86,7 +86,8 @@ static void js_to_sqlite_result(JSContext *ctx, sqlite3_context *sctx,
         sqlite3_result_double(sctx, d);
         break;
     }
-    case JS_TAG_STRING: {
+    case JS_TAG_STRING:
+    case JS_TAG_STRING_ROPE: { /* a concatenation result (QuickJS 2025+) */
         size_t len;
         const char *s = JS_ToCStringLen(ctx, &len, val);
         if (s) {

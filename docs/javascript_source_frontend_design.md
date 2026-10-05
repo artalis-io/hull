@@ -138,7 +138,7 @@ templates, optional catch binding, rest/spread-in-formal-syntax (code uses `.sli
 
 ### Q10 - Compile-only conformance against vendored QuickJS
 
-Oracle = the vendored QuickJS `2024-01-13` (`mk/vendor/quickjs.mk:18`), compile-only:
+Oracle = the vendored QuickJS `2026-06-04` (`mk/vendor/quickjs.mk:18`), compile-only:
 `JS_Eval(ctx, src, len, path, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY)`
 (`quickjs.h:296-307,784`; production precedent `bytecode_cache.c:91-96`). Returns a
 bytecode/module object on accept, an exception (`JS_IsException`) on reject, **without
