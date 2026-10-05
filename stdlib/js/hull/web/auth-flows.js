@@ -98,9 +98,15 @@ const _state = {
     emailRateLimit:         { limit: 3, window: 900 },
     emailRateLimitMaxEntries: 10000,
     verifyRedirect:      "/",
-    // Where a verify that voided the password lands (another browser, or a
-    // resend's link). Defaults to verifyRedirect.
-    verifyResetRedirect: null,
+    // GET /verify renders a default form (confirm the password, or set a new
+    // one). Set this to an app page to render your own: it is redirected to
+    // with ?token=... appended, and POSTs {token, password | new_password}
+    // to <prefix>/verify. See handleVerify.
+    verifyFormRedirect:  null,
+    // `(userId) => ...` removing a TOTP enrolment (typically totp.disable),
+    // called when the mailbox holder sets the password of an account that was
+    // not verified yet. See dropPreverifyTotp.
+    totpDisable:         null,
     loginRedirect:       "/",
     initialized:         false,
 };
@@ -177,7 +183,7 @@ function resetTokenExtra(user) { return { pwb: passwordBinding(user) }; }
 
 function resetBindingHolds(env, user) {
     const current = user && typeof user.email === "string"
-        ? _state.userFindByEmail(user.email) : null;
+        ? findByEmail(user.email) : null;
     return !!current && env.pwb === passwordBinding(current);
 }
 
@@ -536,7 +542,10 @@ function finishLogin(req, res, user, factors) {
     // in the session payload, which is JSON-encoded + persisted +
     // re-read on every load; a leaked hash would persist on disk
     // and surface in session.listForUser output.
-    _state.onLogin(req, res, stripUserSecrets(user), { factors: factors });
+    // Returned, and every caller returns it: an async onLogin (one that sets
+    // the session cookie after an await) is then awaited by the dispatcher
+    // instead of the request ending empty, without its cookie.
+    return _state.onLogin(req, res, stripUserSecrets(user), { factors: factors });
 }
 
 function parseBody(req) {
@@ -568,48 +577,18 @@ function isEmailIsh(s) {
         const c = s.charCodeAt(i);
         if (c < 0x20 || c === 0x7f) return false;
     }
+    // One address, exactly: a single '@' and none of the characters that
+    // separate or quote addresses (see the Lua sibling).
+    if (/[,;<>"()\s]/.test(s)) return false;
     const at = s.indexOf("@");
     if (at < 1 || at === s.length - 1) return false;
+    if (s.indexOf("@", at + 1) >= 0) return false;
     const dot = s.indexOf(".", at);
     if (dot < 0 || dot === at + 1 || dot === s.length - 1) return false;
     return true;
 }
 
 function genericOk(res) { res.json({ ok: true }); }
-
-// Registration browser binding - see the Lua sibling (REG_COOKIE). The
-// register response sets a nonce cookie and the welcome token carries its
-// hash; a verify from that browser keeps the password, any other verify (a
-// different browser, or a resend's token) voids it as a magic-link verify does.
-const REG_COOKIE = "hull_af_reg";
-
-function regCookieSecure(req) {
-    const po = _state.publicOrigin;
-    if (typeof po === "string" && po.startsWith("https://")) return true;
-    return requestProto((req && req.headers) || {}, "http") === "https";
-}
-
-function regCookieSet(req, res, nonce, maxAge) {
-    res.header("Set-Cookie", REG_COOKIE + "=" + nonce
-        + "; Path=" + (_state.prefix !== "" ? _state.prefix : "/")
-        + "; Max-Age=" + String(Math.floor(maxAge))
-        + "; HttpOnly; SameSite=Lax"
-        + (regCookieSecure(req) ? "; Secure" : ""));
-}
-
-function regCookieGet(req) {
-    const c = req && req.headers && req.headers["cookie"];
-    if (typeof c !== "string") return null;
-    for (const part of c.split(";")) {
-        const m = /^\s*([^=\s]+)\s*=\s*([A-Za-z0-9_-]+)\s*$/.exec(part);
-        if (m && m[1] === REG_COOKIE) return m[2];
-    }
-    return null;
-}
-
-function regBinding(nonce) {
-    return encoding.hex.encode(crypto.sha256("reg\0" + nonce)).slice(0, 32);
-}
 
 // The pending email change of a user, deleted whenever the password is reset
 // or voided: started from a hijacked session, its confirm link otherwise still
@@ -640,13 +619,71 @@ function totpEnrolled(user) {
     return !!v;
 }
 
-function runOnPasswordReset(req, res, user) {
+// The user lookups answer synchronously: an async userFindByEmail returned a
+// truthy Promise, so resend / magic-link / reset mailed a sub=null token to
+// any address submitted. A thenable is a misconfiguration: throw (the
+// dispatcher answers 500).
+function findByEmail(email) {
+    const u = _state.userFindByEmail(email);
+    if (isThenable(u)) {
+        throw new Error("auth-flows: userFindByEmail returned a Promise; it must be synchronous");
+    }
+    return u;
+}
+
+function getUser(id) {
+    const u = _state.userGet(id);
+    if (isThenable(u)) {
+        throw new Error("auth-flows: userGet returned a Promise; it must be synchronous");
+    }
+    return u;
+}
+
+// onPasswordReset may be async (a revocation that awaits a db.async call):
+// it is awaited, so its failure is caught and logged here rather than left
+// as an unobserved rejection. Logged, not swallowed: the recommended body
+// revokes every session, so an operator must see a failure.
+async function runOnPasswordReset(req, res, user) {
     if (!_state.onPasswordReset) return;
     try {
-        _state.onPasswordReset(req, res, user);
+        await _state.onPasswordReset(req, res, user);
     } catch (e) {
         log.warn("auth-flows: onPasswordReset threw: " + (e && e.message ? e.message : e));
     }
+}
+
+// A TOTP enrolment made before the address was verified may be the
+// pre-registrant's (see the Lua sibling, drop_preverify_totp). Removed via
+// totpDisable when configured; otherwise an existing one is only logged.
+async function dropPreverifyTotp(uid) {
+    if (_state.totpDisable) {
+        try { await _state.totpDisable(uid); }
+        catch (e) { log.warn("auth-flows: totpDisable threw: " + (e && e.message ? e.message : e)); }
+        return;
+    }
+    if (_state.enableTotp) {
+        let enrolled = false;
+        try { enrolled = _state.userTotpEnrolled(uid); } catch (_) { enrolled = false; }
+        if (isThenable(enrolled)) enrolled = true;
+        if (enrolled) {
+            log.warn("auth-flows: account " + String(uid) + " has a TOTP enrolment "
+                + "made before its email was verified and no totpDisable hook is "
+                + "configured; remove it in onPasswordReset (pass totpDisable: totp.disable)");
+        }
+    }
+}
+
+// The mailbox holder chose newHash for a not-yet-verified account. What a
+// pre-registrant could have attached goes first; verified is set LAST, so a
+// failure part way never leaves a verified account with the old password.
+async function replaceUnverifiedCredentials(req, res, user, uid, newHash) {
+    _state.userSetPassword(uid, newHash);
+    dropPendingEmailChange(uid);
+    await dropPreverifyTotp(uid);
+    clearAllFailedLogins(uid);
+    await runOnPasswordReset(req, res, user);
+    _state.userSetEmailVerified(uid, true);
+    user.email_verified = true;
 }
 
 // Apply the three security headers that every auth-flow HTML
@@ -762,22 +799,18 @@ async function handleRegister(req, res) {
     // running it only for new addresses let response time tell an attacker
     // which ones already have an account.
     const pwHash = crypto.hashPassword(body.password);
-    const existing = _state.userFindByEmail(body.email);
-    // Both branches set the cookie: its presence must not say which one ran.
-    const regNonce = crypto.randomToken(24);
-    regCookieSet(req, res, regNonce, _state.verifyTtl);
+    const existing = findByEmail(body.email);
     if (existing) return genericOk(res);
     const uid = _state.userCreate(body.email, pwHash);
-    const user = _state.userGet(uid);
+    const user = getUser(uid);
     if (!user) {
         return res.status(500).json({
             error: "user_create returned an id that user_get cannot resolve" });
     }
 
     const origin = originFor(req);
-    const rb = regBinding(regNonce);
     afterResponse(() => {
-        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl, { rb });
+        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
         if (origin) {
             const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
             sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
@@ -793,7 +826,7 @@ function handleVerifyResend(req, res) {
     if (!isEmailIsh(body.email)) {
         return res.status(400).json({ error: "invalid email" });
     }
-    const user = _state.userFindByEmail(body.email);
+    const user = findByEmail(body.email);
     if (!user || user.email_verified) return genericOk(res);
     const uid = userId(user);
     const origin = originFor(req);
@@ -807,35 +840,142 @@ function handleVerifyResend(req, res) {
     res.json({ ok: true });
 }
 
-function handleVerify(req, res) {
-    const token = req.query && req.query.token;
-    const result = consumeToken(token, ACTIONS.verify_email);
-    if (!result[0]) {
-        return secureHtml(res).status(400).html("verification failed: " + (result[1] || "?"));
-    }
-    const env = result[0];
-    const user = _state.userGet(env.sub);
-    if (!user) return secureHtml(res).status(400).html("verification failed");
-    if (user.email_verified) {
-        gcExpired();
-        return res.redirect(_state.verifyRedirect);
-    }
-    // See REG_COOKIE: the password stays only when this browser registered
-    // the account; otherwise it is voided like a magic-link verify's.
-    const nonce = regCookieGet(req);
-    const keep = typeof env.rb === "string" && nonce !== null
-        && crypto.constantTimeEq(regBinding(nonce), env.rb);
-    _state.userSetEmailVerified(env.sub, true);
-    if (!keep) {
-        _state.userSetPassword(env.sub, crypto.hashPassword(
-            encoding.hex.encode(crypto.random(32))));
-        dropPendingEmailChange(env.sub);
-        user.email_verified = true;
-        runOnPasswordReset(req, res, user);
-    }
-    regCookieSet(req, res, "x", 0);   // spent
+// ── Email verification ─────────────────────────────────────────────
+// Two steps; see the Lua sibling for the design. GET never consumes the
+// token (mail scanners prefetch links): it renders a form or redirects to
+// verifyFormRedirect. POST {token, password} keeps a password the mailbox
+// holder also knows (wrong: 401, token still usable, counts toward the login
+// lockout); POST {token, new_password} replaces it and everything a
+// pre-registrant could have attached. Nothing is voided silently.
+
+function wantsJson(req) {
+    const ct = (req.headers && req.headers["content-type"]) || "";
+    return ct.indexOf("application/json") >= 0;
+}
+
+// The token is a verified envelope (fixed alphabet) and the error strings
+// are module constants, so nothing here needs escaping. No script; the
+// token in the body is what a cross-site form cannot supply.
+function defaultVerifyFormHtml(token, err) {
+    const action = _state.prefix + "/verify";
+    return '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        + '<title>Verify your email</title></head>'
+        + '<body style="font-family:sans-serif;max-width:400px;margin:4em auto;">'
+        + '<h1>Verify your email</h1>'
+        + (err ? ('<p role="alert"><strong>' + err + '</strong></p>') : '')
+        + '<form method="POST" action="' + action + '">'
+        + '<input type="hidden" name="token" value="' + token + '">'
+        + '<p><label>Your password: <input type="password" name="password" '
+        + 'autocomplete="current-password" required></label></p>'
+        + '<button type="submit">Verify</button></form>'
+        + '<h2>Did not choose a password, or forgot it?</h2>'
+        + '<form method="POST" action="' + action + '">'
+        + '<input type="hidden" name="token" value="' + token + '">'
+        + '<p><label>New password: <input type="password" name="new_password" '
+        + 'autocomplete="new-password" minlength="8" maxlength="256" required>'
+        + '</label></p>'
+        + '<button type="submit">Set password and verify</button></form>'
+        + '<p style="color:#666;font-size:smaller">Setting a new password '
+        + 'signs out every session of this account.</p></body></html>';
+}
+
+function verifyFail(req, res, status, msg) {
+    if (wantsJson(req)) return res.status(status).json({ error: msg });
+    return secureHtml(res).status(status).html(msg);
+}
+
+function verifyOk(req, res) {
     gcExpired();
-    res.redirect(keep ? _state.verifyRedirect : _state.verifyResetRedirect);
+    if (wantsJson(req)) return res.json({ ok: true, redirect: _state.verifyRedirect });
+    return res.redirect(_state.verifyRedirect, 303);
+}
+
+function handleVerifyPage(req, res) {
+    const token = req.query && req.query.token;
+    const r = parseToken(token, ACTIONS.verify_email);
+    if (!r[0]) {
+        return secureHtml(res).status(400).html("verification failed: " + (r[1] || "?"));
+    }
+    if (tokenAlreadyUsed(token)) {
+        return secureHtml(res).status(400).html("verification failed: replayed");
+    }
+    const user = getUser(r[0].sub);
+    if (!user) return secureHtml(res).status(400).html("verification failed");
+    if (user.email_verified) return res.redirect(_state.verifyRedirect);
+    if (_state.verifyFormRedirect) {
+        const sep = _state.verifyFormRedirect.indexOf("?") >= 0 ? "&" : "?";
+        return res.redirect(_state.verifyFormRedirect + sep + "token=" + token);
+    }
+    secureHtml(res).html(defaultVerifyFormHtml(token));
+}
+
+const VERIFY_WRONG_PASSWORD = "password does not match; to set a new password "
+    + "instead, submit new_password";
+
+async function handleVerify(req, res) {
+    const body = parseBody(req);
+    const token = body.token;
+    const r = parseToken(token, ACTIONS.verify_email);
+    if (!r[0]) return verifyFail(req, res, 400, "verification failed: " + (r[1] || "?"));
+    const env = r[0];
+    if (tokenAlreadyUsed(token)) {
+        return verifyFail(req, res, 400, "verification failed: replayed");
+    }
+    const user = getUser(env.sub);
+    if (!user) return verifyFail(req, res, 400, "verification failed");
+    const uid = userId(user);
+    if (user.email_verified) {
+        markTokenUsed(token, env.exp);
+        return verifyOk(req, res);
+    }
+
+    if (body.new_password !== undefined) {
+        const pw = body.new_password;
+        if (typeof pw !== "string" || pw.length < 8 || pw.length > 256) {
+            return verifyFail(req, res, 400, "invalid password length");
+        }
+        if (await checkPwned(pw)) {
+            return verifyFail(req, res, 400,
+                "password appears in known data breaches; choose another");
+        }
+        const newHash = crypto.hashPassword(pw);
+        if (!markTokenUsed(token, env.exp)) {
+            return verifyFail(req, res, 400, "verification failed: replayed");
+        }
+        await replaceUnverifiedCredentials(req, res, user, uid, newHash);
+        emitEvent(uid, "password_reset_completed", req, { metadata: { via: "verify" } });
+        return verifyOk(req, res);
+    }
+
+    const pw = body.password;
+    if (typeof pw !== "string") {
+        return verifyFail(req, res, 400, "password or new_password required");
+    }
+    // The same lockout rows as /login (see the Lua sibling): no second,
+    // unthrottled password oracle.
+    const ipKey = attemptIpKey(uid, req);
+    const locked = lockoutRemaining(ipKey) > 0 || lockoutRemaining(uid) > 0;
+    const ok = !locked && pw.length <= 256 && typeof user.password_hash === "string"
+        && crypto.verifyPassword(pw, user.password_hash);
+    if (!ok) {
+        if (!locked) {
+            bumpFailedLogin(ipKey, _state.maxFailedLogins);
+            bumpFailedLogin(uid, _state.maxFailedLoginsPerAccount);
+        }
+        if (wantsJson(req)) {
+            return res.status(401).json({ error: VERIFY_WRONG_PASSWORD,
+                                          new_password_allowed: true });
+        }
+        return secureHtml(res).status(401).html(defaultVerifyFormHtml(token,
+            "That password does not match. Try again, or set a new password below."));
+    }
+    if (!markTokenUsed(token, env.exp)) {
+        return verifyFail(req, res, 400, "verification failed: replayed");
+    }
+    clearFailedLogins(ipKey);
+    clearFailedLogins(uid);
+    _state.userSetEmailVerified(uid, true);
+    return verifyOk(req, res);
 }
 
 // Minimal HTML form rendered on a magic-link click when 2FA is
@@ -884,7 +1024,7 @@ function handleLogin(req, res) {
         || body.password.length > 256) {
         return res.status(400).json({ error: "invalid credentials" });
     }
-    const user = _state.userFindByEmail(body.email);
+    const user = findByEmail(body.email);
     // Lockout: when the user exists AND is currently locked, short-
     // circuit to the SAME 401 + "invalid credentials" the wrong-
     // password branch returns. Round-8 HIGH-4: prior code returned
@@ -928,7 +1068,7 @@ function handleLogin(req, res) {
             return res.status(500).json({ error: "auth-flows misconfigured" });
         if (enrolled) return startTotpPending(req, res, user);
     }
-    finishLogin(req, res, user, "password");
+    return finishLogin(req, res, user, "password");
 }
 
 function handleLogout(req, res) {
@@ -944,11 +1084,11 @@ function handleMagicLink(req, res) {
     if (!isEmailIsh(body.email)) {
         return res.status(400).json({ error: "invalid email" });
     }
-    let user = _state.userFindByEmail(body.email);
+    let user = findByEmail(body.email);
     if (!user) {
         if (!_state.magicLinkAutoSignup) return genericOk(res);
         const uid = _state.userCreate(body.email, null);
-        user = _state.userGet(uid);
+        user = getUser(uid);
         // Guard the create->get race / adapter inconsistency: a nil user here
         // would mint a magic-link token with sub=null and then throw in
         // sendEmail(user...). Stay enumeration-safe (same shape as the
@@ -973,29 +1113,29 @@ function handleMagicLinkConsume(req, res) {
     if (!result[0]) {
         return secureHtml(res).status(400).html("magic link failed: " + (result[1] || "?"));
     }
-    const user = _state.userGet(result[0].sub);
+    const user = getUser(result[0].sub);
     // A magic link is bound to the address it was sent to: after an email
     // change, one still sitting in the old mailbox no longer signs in.
     if (!user || result[0].eb !== emailBinding(user))
         return secureHtml(res).status(400).html("magic link failed");
-    // Magic-link clicks count as proof of email ownership. On an account
-    // that was not yet verified, they also void the password: anyone could
-    // have registered this address and set it, and verifying here would
-    // hand them the owner's account. The owner sets one by reset; existing
-    // sessions go too (onPasswordReset, when the app wires it).
+    // Magic-link clicks count as proof of email ownership. An unverified
+    // account that HAS a password may carry one somebody else chose: the
+    // click goes through the verify step (confirm it or set a new one, see
+    // handleVerify) rather than signing in or silently replacing it. A
+    // passwordless account (magicLinkAutoSignup) has nothing to keep.
     if (!user.email_verified) {
-        _state.userSetEmailVerified(userId(user), true);
-        _state.userSetPassword(userId(user), crypto.hashPassword(
-            encoding.hex.encode(crypto.random(32))));
-        dropPendingEmailChange(userId(user));
-        user.email_verified = true;
-        if (_state.onPasswordReset) {
-            try {
-                _state.onPasswordReset(req, res, user);
-            } catch (e) {
-                log.warn("auth-flows: onPasswordReset threw: " + (e && e.message ? e.message : e));
+        const uid = userId(user);
+        if (typeof user.password_hash === "string" && user.password_hash !== "") {
+            const vtok = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
+            gcExpired();
+            if (_state.verifyFormRedirect) {
+                const sep = _state.verifyFormRedirect.indexOf("?") >= 0 ? "&" : "?";
+                return res.redirect(_state.verifyFormRedirect + sep + "token=" + vtok);
             }
+            return secureHtml(res).html(defaultVerifyFormHtml(vtok));
         }
+        _state.userSetEmailVerified(uid, true);
+        user.email_verified = true;
     }
     gcExpired();
     if (_state.enableTotp) {
@@ -1004,7 +1144,7 @@ function handleMagicLinkConsume(req, res) {
             return res.status(500).json({ error: "auth-flows misconfigured" });
         if (enrolled) return startTotpPending(req, res, user);
     }
-    finishLogin(req, res, user, "magic_link");
+    return finishLogin(req, res, user, "magic_link");
 }
 
 // POST /auth/totp-verify { token, code } - second factor.
@@ -1030,7 +1170,7 @@ function handleTotpVerify(req, res) {
         return res.status(400).json({ error: "totp token already used" });
     }
     const env = r[0];
-    const user = _state.userGet(env.sub);
+    const user = getUser(env.sub);
     if (!user) return res.status(400).json({ error: "totp failed" });
     // Round-9 HIGH-4: pass `req` so totpVerify can gate per-IP too.
     const ok = _state.totpVerify(user, body.code, req);
@@ -1048,7 +1188,7 @@ function handleTotpVerify(req, res) {
         return res.status(400).json({ error: "totp token already used" });
     }
     gcExpired();
-    finishLogin(req, res, user, "password+totp");
+    return finishLogin(req, res, user, "password+totp");
 }
 
 function handlePasswordResetRequest(req, res) {
@@ -1056,7 +1196,7 @@ function handlePasswordResetRequest(req, res) {
     if (!isEmailIsh(body.email)) {
         return res.status(400).json({ error: "invalid email" });
     }
-    const user = _state.userFindByEmail(body.email);
+    const user = findByEmail(body.email);
     if (!user) return genericOk(res);
     const origin = originFor(req);
     afterResponse(() => {
@@ -1088,10 +1228,19 @@ async function handlePasswordResetConfirm(req, res) {
         return res.status(400).json({
             error: "reset failed: " + (result[1] || "?") });
     }
-    const user = _state.userGet(result[0].sub);
+    const user = getUser(result[0].sub);
     if (!user || !resetBindingHolds(result[0], user))
         return res.status(400).json({ error: "reset failed" });
-    _state.userSetPassword(result[0].sub, crypto.hashPassword(body.password));
+    const newHash = crypto.hashPassword(body.password);
+    if (!user.email_verified) {
+        // The reset link proves the mailbox and its holder chose this
+        // password: verified, as a verify with new_password - see Lua.
+        await replaceUnverifiedCredentials(req, res, user, result[0].sub, newHash);
+        emitEvent(result[0].sub, "password_reset_completed", req);
+        gcExpired();
+        return res.json({ ok: true });
+    }
+    _state.userSetPassword(result[0].sub, newHash);
     dropPendingEmailChange(result[0].sub);
     // A successful reset demonstrates email control; clear any
     // outstanding lockout so the new password works immediately.
@@ -1099,16 +1248,7 @@ async function handlePasswordResetConfirm(req, res) {
     // Audit + app-side session revocation. Recommended onPasswordReset
     // body: `(req, res, user) => session.destroyAll(user.id)`.
     emitEvent(result[0].sub, "password_reset_completed", req);
-    if (_state.onPasswordReset) {
-        // Log rather than fully swallow: the recommended body revokes all
-        // sessions (session.destroyAll), so a throw here means a suspected-
-        // compromise cleanup silently didn't run, so an operator must see it.
-        try {
-            _state.onPasswordReset(req, res, user);
-        } catch (e) {
-            log.warn("auth-flows: onPasswordReset threw: " + (e && e.message ? e.message : e));
-        }
-    }
+    await runOnPasswordReset(req, res, user);
     gcExpired();
     res.json({ ok: true });
 }
@@ -1120,7 +1260,7 @@ function handleEmailChange(req, res) {
     if (!isEmailIsh(body.new_email)) {
         return res.status(400).json({ error: "invalid email" });
     }
-    if (_state.userFindByEmail(body.new_email)) {
+    if (findByEmail(body.new_email)) {
         return res.status(409).json({ error: "email already in use" });
     }
 
@@ -1156,7 +1296,7 @@ function handleEmailChange(req, res) {
         ["user_id", "new_email", "token_hash", "created_at", "expires_at"],
         [uid, body.new_email, tokenHash, now, now + _state.emailChangeTtl]);
 
-    const user = _state.userGet(uid);
+    const user = getUser(uid);
     const link = origin + _state.prefix
         + "/email-change/confirm?token=" + token;
     sendEmail(body.new_email, "email_change", {
@@ -1204,7 +1344,7 @@ function handleEmailChangeConfirm(req, res) {
         return secureHtml(res).status(400).html("email change failed: " + (result[1] || "?"));
     }
     const env = result[0];
-    const user = _state.userGet(env.sub);
+    const user = getUser(env.sub);
     if (!user) return secureHtml(res).status(400).html("email change failed");
     // The stored token_hash must be THIS token's: only the latest link of
     // the pending change confirms it, and none once the row is gone.
@@ -1257,7 +1397,8 @@ function registerRoutes(app) {
     }
 
     app.post(p + "/register",                 handleRegister);
-    app.get (p + "/verify",                   handleVerify);
+    app.get (p + "/verify",                   handleVerifyPage);
+    app.post(p + "/verify",                   handleVerify);
     app.post(p + "/verify/resend",            handleVerifyResend);
     app.post(p + "/login",                    handleLogin);
     app.post(p + "/logout",                   handleLogout);
@@ -1300,7 +1441,14 @@ function standardUsers(opts) {
     // Quote the app-supplied table name for the connection's dialect so a
     // reserved word ("user", "order") or a future MySQL backend (backtick) is
     // safe. The default connection's backend is known by the time this runs.
-    const tbl = db.quoteIdentifier(opts.table || "users");
+    const name = opts.table || "users";
+    // The adapter runs on the internal connection with stdlib identity, which
+    // the _hull_* namespace guard lets through: refuse the reserved names.
+    if (typeof name !== "string" || name === "" || /^_hull_/i.test(name)) {
+        throw new Error("auth-flows.standardUsers: table must be a non-empty "
+            + "name outside the reserved _hull_ namespace");
+    }
+    const tbl = db.quoteIdentifier(name);
     const idGen = opts.idGen || (() => crypto.randomToken(16, "hex"));
 
     function row(r) {
@@ -1536,7 +1684,16 @@ function init(opts) {
     _state.emailChangeTtl  = opts.emailChangeTtl  || _state.emailChangeTtl;
     _state.prefix          = opts.prefix          || _state.prefix;
     _state.verifyRedirect  = opts.verifyRedirect  || _state.verifyRedirect;
-    _state.verifyResetRedirect = opts.verifyResetRedirect || _state.verifyRedirect;
+    if (opts.verifyFormRedirect !== undefined && opts.verifyFormRedirect !== null
+        && typeof opts.verifyFormRedirect !== "string") {
+        throw new Error("auth-flows.init: verifyFormRedirect must be a path string");
+    }
+    _state.verifyFormRedirect = opts.verifyFormRedirect || null;
+    if (opts.totpDisable !== undefined && opts.totpDisable !== null
+        && typeof opts.totpDisable !== "function") {
+        throw new Error("auth-flows.init: totpDisable must be a function(userId)");
+    }
+    _state.totpDisable = opts.totpDisable || null;
     _state.loginRedirect   = opts.loginRedirect   || _state.loginRedirect;
     if (opts.enumerationSafe     !== undefined) _state.enumerationSafe     = opts.enumerationSafe;
     if (opts.magicLinkAutoSignup !== undefined) _state.magicLinkAutoSignup = opts.magicLinkAutoSignup;
@@ -1573,7 +1730,7 @@ function sendVerifyEmail(user, verifyUrlPrefix) {
 function sendPasswordReset(email, resetUrlPrefix) {
     if (!_state.initialized) throw new Error("auth-flows: call init() first");
     if (!isEmailIsh(email)) throw new Error("auth-flows.sendPasswordReset: invalid email");
-    const user = _state.userFindByEmail(email);
+    const user = findByEmail(email);
     if (!user) return;
     const uid = userId(user);
     const token = issueToken(uid, ACTIONS.password_reset, _state.resetTtl,
@@ -1586,11 +1743,11 @@ function sendPasswordReset(email, resetUrlPrefix) {
 function sendMagicLink(email, magicUrlPrefix) {
     if (!_state.initialized) throw new Error("auth-flows: call init() first");
     if (!isEmailIsh(email)) throw new Error("auth-flows.sendMagicLink: invalid email");
-    let user = _state.userFindByEmail(email);
+    let user = findByEmail(email);
     if (!user) {
         if (!_state.magicLinkAutoSignup) return;
         const uid = _state.userCreate(email, null);
-        user = _state.userGet(uid);
+        user = getUser(uid);
         // create->get race guard (see handleMagicLink): a nil user would mint
         // a sub=null token and throw in sendEmail.
         if (!user) return;
@@ -1639,6 +1796,8 @@ const _test = {
         _state.userTotpEnrolled     = null;
         _state.totpVerify           = null;
         _state.totpPendingRedirect  = null;
+        _state.verifyFormRedirect   = null;
+        _state.totpDisable          = null;
         _state.checkPwnedPasswords  = false;
         _state.pwnedEndpoint        = null;
         _state.maxFailedLogins      = 5;

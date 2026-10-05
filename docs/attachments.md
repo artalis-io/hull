@@ -96,7 +96,8 @@ previously-set values. Pass the full config in a single call.
 | `attachment.metadata(id)` | `attachment.metadata(id)` | Returns the metadata row, or `nil`/`null` if missing. |
 | `attachment.read(id)` | `attachment.read(id)` | Materialise full bytes in memory. Returns `nil`/`null` if missing. |
 | `attachment.read_to_file(id, dst)` | `attachment.readToFile(id, dst)` | Stream to a file path under `fs.write`. |
-| `attachment.delete(id)` | `attachment.delete(id)` | Decrement refcount; unlink blob if last reference. |
+| `attachment.delete(id)` | `attachment.delete(id)` | Decrement refcount; queue the blob for unlink if last reference. |
+| `attachment.sweep(opts)` | `attachment.sweep(opts)` | Unlink queued blobs older than `grace` (default `orphan_grace`) that no row references. Returns the count. |
 
 Naming: JS is camelCase, Lua is snake_case. `attachment.delete` works
 in both runtimes (JS exposes it via a bracket-key export since
@@ -163,14 +164,31 @@ one on-disk blob (the blob layer dedupes by SHA-256).
 `delete(id)`:
 - decrements refcount on the metadata row
 - at 0: removes the row AND, if no other row references the same
-  `blob_id`, calls `blob.delete(blob_id)` to unlink the on-disk file
-- runs entirely inside a `BEGIN IMMEDIATE` transaction so a
-  concurrent `store` of the same bytes can't race the unlink
+  `blob_id`, queues the blob in `_hull_attachment_orphans` - in the
+  same transaction as the row delete
+- then runs `attachment.sweep()`, which unlinks queued blobs that have
+  waited `orphan_grace` seconds (`attachment.init({ orphan_grace = N })`,
+  `orphanGrace` in JS; default 300) and that still no row references,
+  each re-checked in its own transaction
 
-There is **no GC pass** and no `pending_gc` column. The unlink is
-synchronous. If you want an undo window, layer it in your app (e.g.
-a `is_trashed` flag on the join table; defer the `attachment.delete`
-call until the trash is emptied).
+Why deferred: `delete` may run inside the app's own `db.batch`, where
+its transaction is only a SAVEPOINT. Unlinking "after our commit" then
+unlinked before the app's real COMMIT, and an app rollback restored a
+row whose blob was gone (410 for good). Queued, the rollback takes the
+queue entry with it. `orphan_grace` must therefore outlast the longest
+app transaction that deletes attachments (the sweep cannot tell an
+uncommitted delete from a committed one). Schedule `attachment.sweep()`
+(e.g. `app.every`) if deletes are rare and you want the disk back
+promptly; `sweep({ grace = 0 })` unlinks everything queued.
+
+`store` finalises the content-addressed blob before inserting its row,
+so a sweep in another process could unlink a blob a concurrent upload
+just deduplicated onto. `store` re-checks the blob exists after its
+insert and, if it was reclaimed, removes the row and raises ("retry the
+upload") instead of leaving a row pointing at nothing. A row inserted
+inside an app transaction is invisible to another process until it
+commits, so that window is only closed while it stays shorter than
+`orphan_grace` past the delete that queued the blob.
 
 ## Serving over HTTP
 
@@ -195,7 +213,10 @@ end)
 import { attachmentServe } from "hull:web:attachment-serve";
 
 app.get("/files/:id", (req, res) => {
-    attachmentServe.serve(req, res, req.params.id, {
+    // serve() always returns a Promise: RETURN (or await) it. With an
+    // async authCheck the response is written only when the check
+    // settles; a dropped Promise ends the request empty.
+    return attachmentServe.serve(req, res, req.params.id, {
         authCheck: (req, meta) => req.ctx.user_id === meta.uploaded_by,
     });
 });
@@ -220,7 +241,8 @@ Response codes:
 |---|---|
 | **200** | auth allowed, blob present |
 | **304** | client's `If-None-Match` includes the current ETag |
-| **403** | `auth_check` omitted, returned false, or wasn't a function |
+| **403** | `auth_check` omitted, wasn't a function, or returned anything but exactly `true` (JS: or a Promise not resolving to `true`) |
+| **500** | JS: the `authCheck` Promise rejected |
 | **404** | no metadata row for that id |
 | **410** | metadata says the blob exists but `blob.get` can't find it (signal to caches to drop their copy) |
 

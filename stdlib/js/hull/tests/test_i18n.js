@@ -329,6 +329,29 @@ test("non-string value at key returns key", () => {
     assertEq(i18n.t("invoice"), "invoice");
 });
 
+// ── stateless *In variants + non-finite amounts (audit 5) ─────────────
+
+test("numberIn / dateIn / currencyIn ignore the active locale", () => {
+    i18n.load("en", en);
+    i18n.load("hu", hu);
+    i18n.locale("en");
+    assertEq(i18n.numberIn("hu", 1234567.5), "1 234 567,5");
+    assertEq(i18n.dateIn("hu", 0), "1970.01.01.");
+    assertEq(i18n.currencyIn("hu", 1500, "HUF"), "1 500 Ft");
+    assertEq(i18n.locale(), "en");
+    assertEq(i18n.number(1234.5), "1,234.5");
+    assertEq(i18n.numberIn("xx", 1234), "1,234");
+});
+
+test("currency / number with Infinity / NaN / huge", () => {
+    i18n.load("en", en);
+    i18n.locale("en");
+    assertEq(i18n.currency(Infinity, "USD"), "Infinity USD");
+    assertEq(i18n.currency(NaN, "USD"), "NaN USD");
+    assertEq(i18n.number(-Infinity), "-Infinity");
+    assertEq(typeof i18n.currency(1e300, "USD"), "string");
+});
+
 // Counts go back to the C harness (run_js_test in
 // tests/hull/runtime/js/test_js.c), which reads them off the global object --
 // a module's default export is not reachable from there.

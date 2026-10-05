@@ -61,6 +61,20 @@ check_status() {
     else fail "$1 - expected status $3, got $2"
     fi
 }
+# POST /auth/verify {token, <field>: <password>} for the token in a verify
+# URL (audit 5: GET never consumes; the POST does). Echoes the response
+# body followed by a line holding the HTTP status.
+verify_post() {
+    _base="$1"; _url="$2"; _field="$3"; _pw="$4"
+    _tok=$(printf '%s\n' "$_url" | sed 's/.*token=//')
+    curl -sS -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$_tok\",\"$_field\":\"$_pw\"}" \
+        "$_base/auth/verify"
+}
+# The status line a `curl -w '\n%{http_code}'` appended / the body before it.
+resp_status() { printf '%s\n' "$1" | tail -n 1; }
+resp_body()   { printf '%s\n' "$1" | sed '$d'; }
+
 check_contains() {
     case "$2" in *"$3"*) pass "$1" ;;
                  *) fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;;
@@ -174,9 +188,8 @@ run_flow() {
     EMAIL_NEW="alice.new@example.test"
     PW="hunter22hunter22"
 
-    # 1. Register with a clean password (the jar is the registering browser).
-    REGJAR="$TMPDIR_WORK/reg_$_label.txt"
-    R=$(curl -sS -c "$REGJAR" -X POST -H 'Content-Type: application/json' \
+    # 1. Register with a clean password.
+    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" \
         "$BASE/auth/register")
     check_contains "$_label: register ok" "$R" '"ok":true'
@@ -197,12 +210,11 @@ run_flow() {
     # 2b. Resend for ALREADY-VERIFIED user (after step 3) is
     # enumeration-safe - covered after verify.
 
-    # 3. Verify through the welcome link, from the registering browser: a
-    #    resend's link verifies too, but voids the password (audit 4 A-M1 -
-    #    a resend proves nothing about who set it), and the steps below log
-    #    in with it.
-    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$REGJAR" "$WELCOME_URL")
-    check_status "$_label: verify 302" "$S" "302"
+    # 3. Verify through the RESEND's link: it uses the same flow as the
+    #    welcome link (confirm the password, and keep it), so the steps
+    #    below log in with it.
+    R=$(verify_post "$BASE" "$VERIFY_URL" password "$PW")
+    check_status "$_label: verify via resend link 200" "$(resp_status "$R")" "200"
     # Re-send AFTER verify should still ok-respond but emit no
     # new email (enumeration-safe).
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null

@@ -132,23 +132,32 @@ function session.init(opts)
     for _, name in ipairs(db.table_columns("_hull_sessions") or {}) do
         existing[name] = true
     end
-    if not existing.user_id then
-        -- VARCHAR (not TEXT): this column is indexed below, and MySQL cannot
-        -- index a TEXT column without a prefix length.
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id VARCHAR(255)")
+    -- Two instances starting together (a rolling deploy on Postgres or
+    -- MySQL) both see a column missing; the second ALTER then fails with
+    -- "duplicate column". A failed ALTER is therefore re-checked against the
+    -- column set and raised only when the column is still absent. (A
+    -- closure, not pcall(db.exec, ...): the _hull_* guard reads db.exec's
+    -- immediate caller.)
+    local function add_column(name, ddl)
+        if existing[name] then return end
+        local ok, err = pcall(function()
+            db.exec("ALTER TABLE _hull_sessions ADD COLUMN " .. ddl)
+        end)
+        if ok then return end
+        for _, n in ipairs(db.table_columns("_hull_sessions") or {}) do
+            if n == name then return end
+        end
+        error(err, 0)
     end
-    if not existing.ip then
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN ip TEXT")
-    end
-    if not existing.user_agent then
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_agent TEXT")
-    end
+    -- VARCHAR (not TEXT): this column is indexed below, and MySQL cannot
+    -- index a TEXT column without a prefix length.
+    add_column("user_id", "user_id VARCHAR(255)")
+    add_column("ip", "ip TEXT")
+    add_column("user_agent", "user_agent TEXT")
     -- The session's own sliding TTL, when create() was given one: load()
     -- extended every session by the module TTL, so auth.login(..., {ttl})
     -- bounded the cookie and only the first idle period. NULL = module TTL.
-    if not existing.ttl then
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN ttl INTEGER")
-    end
+    add_column("ttl", "ttl INTEGER")
     db.exec(
         "CREATE INDEX IF NOT EXISTS idx__hull_sessions_user_id "
         .. "ON _hull_sessions(user_id)")

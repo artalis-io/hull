@@ -350,6 +350,7 @@ function lockoutRemaining(userId) {
 
 function bumpFailedAttempt(userId) {
     const now = time.now();
+    let newLockout = null;
     db.batch(() => {
         const r = db.query(
             "SELECT failed_count, locked_until FROM _hull_totp_attempts "
@@ -367,6 +368,7 @@ function bumpFailedAttempt(userId) {
             const dur = _state.lockoutDuration * Math.pow(2, Math.min(n - 1, 20));
             const cap = Math.max(_state.maxLockoutDuration || 0, _state.lockoutDuration);
             lockedUntil = now + Math.floor(Math.min(dur, cap));
+            newLockout = [lockedUntil, n];
         }
         // db.upsert writes each backend's own dialect. A hand-written
         // INSERT ... ON CONFLICT is not MySQL syntax: there every wrong code
@@ -375,6 +377,17 @@ function bumpFailedAttempt(userId) {
             ["user_id", "failed_count", "last_failed_at", "locked_until"],
             [userId, newFc, now, lockedUntil]);
     });
+    // Tell the app a lockout started (see the Lua sibling): a password
+    // holder can otherwise keep the owner out silently.
+    if (newLockout && _state.onLockout) {
+        try {
+            const r = _state.onLockout(userId, newLockout[0], newLockout[1]);
+            if (r && typeof r.then === "function")
+                r.then(null, (e) => log.warn("totp: onLockout failed: " + (e && e.message || e)));
+        } catch (e) {
+            log.warn("totp: onLockout failed: " + (e && e.message || e));
+        }
+    }
 }
 
 function clearFailedAttempts(userId) {
@@ -517,8 +530,16 @@ function init(opts) {
                                || _state.maxFailedAttempts;
     _state.lockoutDuration   = opts.lockoutDuration
                                || _state.lockoutDuration;
-    _state.maxLockoutDuration = opts.maxLockoutDuration
-                                || _state.maxLockoutDuration;
+    // !== undefined, not ||: 0 means "no escalation" (each lockout lasts
+    // lockoutDuration), as in Lua; || replaced it with the 24 h default.
+    _state.maxLockoutDuration = opts.maxLockoutDuration !== undefined
+                                ? opts.maxLockoutDuration
+                                : _state.maxLockoutDuration;
+    if (opts.onLockout !== undefined && opts.onLockout !== null
+        && typeof opts.onLockout !== "function") {
+        throw new Error("totp.init: onLockout must be a function(userId, lockedUntil, n)");
+    }
+    _state.onLockout = opts.onLockout || null;
     _state.maxFailedAttemptsPerIp = opts.maxFailedAttemptsPerIp
                                     || _state.maxFailedAttemptsPerIp;
     _state.lockoutDurationPerIp   = opts.lockoutDurationPerIp
@@ -756,6 +777,10 @@ function confirm(userId, code) {
                 db.exec(
                     "DELETE FROM _hull_totp_pending_recovery "
                     + "WHERE user_id = ?", [userId]);
+                // A fresh enrolment starts a fresh failure count (the
+                // escalation is cumulative; see the Lua sibling).
+                db.exec("DELETE FROM _hull_totp_attempts WHERE user_id = ?",
+                        [userId]);
             });
             return true;
         }
@@ -982,6 +1007,7 @@ const _test = {
         _state.maxFailedAttempts  = 5;
         _state.lockoutDuration    = 15 * 60;
         _state.maxLockoutDuration = 24 * 60 * 60;
+        _state.onLockout          = null;
         _state.maxFailedAttemptsPerIp = 20;
         _state.lockoutDurationPerIp   = 15 * 60;
         _state.trustXff               = false;

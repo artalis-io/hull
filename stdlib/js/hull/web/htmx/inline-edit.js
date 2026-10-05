@@ -15,10 +15,11 @@
  *   PATCH saveUrl    → validate, persist, return inline_edit.cell(...)
  *   GET   cancelUrl  → return inline_edit.cell(...)
  *
- * A tiny client JS (~15 LOC) at /static/hull/htmx/inline-edit/
- * inline-edit.js handles input focus after the editor swaps in.
- * Esc-to-cancel is wired via hx-trigger on the Cancel button -
- * no JS for that.
+ * A tiny client JS at /static/hull/htmx/inline-edit/inline-edit.js
+ * focuses the input after the editor swaps in and handles the keys:
+ * Enter / Space on the display span start an edit, Escape in the
+ * editor clicks Cancel (not htmx keyup[...] filters, which the CSP
+ * turns into "always true").
  *
  * Lua parity: same surface as `hull.web.htmx.inline-edit`. Names
  * map snake_case (Lua) → camelCase (JS).

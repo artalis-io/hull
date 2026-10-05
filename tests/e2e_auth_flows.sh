@@ -65,6 +65,20 @@ check_status() {
     fi
 }
 
+# POST /auth/verify {token, <field>: <password>} for the token in a verify
+# URL (audit 5: GET never consumes; the POST does). Echoes the response
+# body followed by a line holding the HTTP status.
+verify_post() {
+    _base="$1"; _url="$2"; _field="$3"; _pw="$4"
+    _tok=$(printf '%s\n' "$_url" | sed 's/.*token=//')
+    curl -sS -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$_tok\",\"$_field\":\"$_pw\"}" \
+        "$_base/auth/verify"
+}
+# The status line a `curl -w '\n%{http_code}'` appended / the body before it.
+resp_status() { printf '%s\n' "$1" | tail -n 1; }
+resp_body()   { printf '%s\n' "$1" | sed '$d'; }
+
 check_contains() {
     case "$2" in *"$3"*) pass "$1" ;;
                  *) fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;;
@@ -153,10 +167,8 @@ run_flow() {
     PW1="hunter22hunter22"
     PW2="newpassword12345"
 
-    # 1. Register. The jar is the registering browser: its cookie lets the
-    #    verify below keep the password (audit 4 A-M1).
-    REGJAR="$TMPDIR_WORK/reg_$_label.txt"
-    R=$(curl -sS -c "$REGJAR" -X POST -H 'Content-Type: application/json' \
+    # 1. Register.
+    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_A\",\"password\":\"$PW1\"}" \
         "$BASE/auth/register")
     check_contains "$_label: register returns ok" "$R" '"ok":true'
@@ -174,9 +186,20 @@ run_flow() {
         "$BASE/auth/login")
     check_status "$_label: login pre-verify is 403" "$S" "403"
 
-    # 3. Click verify link (in the registering browser)
-    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$REGJAR" "$VERIFY_URL")
-    check_status "$_label: verify returns 302" "$S" "302"
+    # 3. Verify (audit 5). A GET - a mail scanner prefetching the link -
+    #    renders the form and consumes nothing; a wrong password is a 401
+    #    that leaves the token usable; the right one verifies and keeps it.
+    R=$(curl -sS -w '\n%{http_code}' "$VERIFY_URL")
+    check_status "$_label: verify GET renders the form" "$(resp_status "$R")" "200"
+    check_contains "$_label: verify form offers new_password" \
+        "$(resp_body "$R")" 'name="new_password"'
+    R=$(curl -sS -w '\n%{http_code}' "$VERIFY_URL")
+    check_status "$_label: scanner GET did not consume the token" "$(resp_status "$R")" "200"
+    R=$(verify_post "$BASE" "$VERIFY_URL" password "wrongpassword99")
+    check_status "$_label: verify with wrong password is 401" "$(resp_status "$R")" "401"
+    check_contains "$_label: 401 offers new_password" "$(resp_body "$R")" 'new_password'
+    R=$(verify_post "$BASE" "$VERIFY_URL" password "$PW1")
+    check_status "$_label: token still usable after 401; verify ok" "$(resp_status "$R")" "200"
 
     # 4. Login after verify
     R=$(curl -sS -c "$COOKIES" -X POST -H 'Content-Type: application/json' \
@@ -271,27 +294,51 @@ run_flow() {
         "$BASE/auth/login")
     check_contains "$_label: login with new email ok" "$R" '"ok":true'
 
-    # 16. Replay verify token from step 3 → reject
+    # 16. Replay verify token from step 3 → reject (GET and POST)
     S=$(curl -sS -o /dev/null -w '%{http_code}' "$VERIFY_URL")
-    check_status "$_label: verify token replay rejected" "$S" "400"
+    check_status "$_label: verify token replay rejected (GET)" "$S" "400"
+    R=$(verify_post "$BASE" "$VERIFY_URL" password "$PW2")
+    check_status "$_label: verify token replay rejected (POST)" "$(resp_status "$R")" "400"
 
-    # 17. Pre-registration hijack (audit 4 A-M1): someone registers the
-    #     owner's address with a password of their own; the owner clicks the
-    #     welcome link in THEIR browser. The address is verified, but the
-    #     registrant's password no longer logs in.
+    # 17. Pre-registration hijack: someone registers the owner's address
+    #     with a password of their own. The owner, who does not know it,
+    #     verifies by setting a new password: the registrant's password no
+    #     longer logs in, the owner's does.
     EMAIL_C="carol@example.test"
+    PW_C="carolsownpassword1"
     curl -sS -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_C\",\"password\":\"$PW1\"}" \
         "$BASE/auth/register" > /dev/null
     TEXT=$(last_email_text "$PORT" "$EMAIL_C")
     HIJACK_URL=$(extract_url "$TEXT")
-    S=$(curl -sS -o /dev/null -w '%{http_code}' "$HIJACK_URL")
-    check_status "$_label: foreign-browser verify still verifies" "$S" "302"
+    R=$(verify_post "$BASE" "$HIJACK_URL" new_password "$PW_C")
+    check_status "$_label: verify with new_password ok" "$(resp_status "$R")" "200"
     S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
         -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_C\",\"password\":\"$PW1\"}" \
         "$BASE/auth/login")
-    check_status "$_label: registrant password voided by foreign verify" "$S" "401"
+    check_status "$_label: pre-registrant password replaced" "$S" "401"
+    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL_C\",\"password\":\"$PW_C\"}" \
+        "$BASE/auth/login")
+    check_contains "$_label: owner logs in with the new password" "$R" '"ok":true'
+
+    # 18. A magic link to an unverified account that has a password goes
+    #     through the same verify step instead of signing in.
+    EMAIL_D="dave@example.test"
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL_D\",\"password\":\"$PW1\"}" \
+        "$BASE/auth/register" > /dev/null
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL_D\"}" "$BASE/auth/magic-link" > /dev/null
+    TEXT=$(last_email_text "$PORT" "$EMAIL_D")
+    DMAGIC_URL=$(extract_url "$TEXT")
+    : > "$COOKIES"
+    R=$(curl -sS -c "$COOKIES" "$DMAGIC_URL")
+    check_contains "$_label: magic link to unverified account renders verify form" \
+        "$R" 'name="new_password"'
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" "$BASE/_me")
+    check_status "$_label: ...and does not sign in" "$S" "401"
 
     stop_pid "$HULL_PID"; HULL_PID=""
 }

@@ -85,19 +85,22 @@ function triggerName(req) {
  *
  * `path` must be an http(s) URL or a scheme-less relative one: htmx
  * assigns HX-Redirect to `location.href`, so a `javascript:` URL ran
- * script. Any other scheme, a control character or whitespace throws.
+ * script. Any other scheme, a control character or whitespace throws, and
+ * so does a protocol-relative `//host/...` (another site, not a relative
+ * path) unless `opts.allowProtocolRelative` is set.
  */
-function redirectTargetOk(path) {
+function redirectTargetOk(path, opts) {
     if (typeof path !== "string" || path === "") return false;
     if (/[\u0000-\u0020\u007f\\]/.test(path)) return false;
+    if (path.startsWith("//") && !(opts && opts.allowProtocolRelative === true)) return false;
     const lower = path.toLowerCase();
     if (lower.startsWith("http://") || lower.startsWith("https://")) return true;
     const head = path.match(/^[^/?#]*/)[0];
     return head.indexOf(":") < 0;
 }
 
-function redirect(req, res, path) {
-    if (!redirectTargetOk(path))
+function redirect(req, res, path, opts) {
+    if (!redirectTargetOk(path, opts))
         throw new TypeError("htmx.redirect: target must be an http(s) URL or a relative path");
     if (is(req)) {
         res.header("HX-Redirect", path);

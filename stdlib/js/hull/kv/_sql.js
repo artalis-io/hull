@@ -58,18 +58,28 @@ class SqlStore {
 
     has(k) { return this.get(k) !== null; }
 
+    // Enforce maxItems (see the Lua sibling): expired rows are purged before
+    // counting, eviction is by last write (updated_at), and the COUNT(*) is
+    // amortised - this._est bounds this handle's rows from above, the COUNT
+    // runs only past maxItems, and an eviction goes down to 90% of it.
     _evictItems() {
         if (!this.evict || this.maxItems <= 0) return;
+        this._est = (this._est === undefined ? this.maxItems : this._est) + 1;
+        if (this._est <= this.maxItems) return;
+        this.conn.exec("DELETE FROM _hull_kv WHERE ns = ? AND expires_at <= ?",
+                       [this.ns, util.nowMs()]);
         const rows = this.conn.query(
             "SELECT COUNT(*) AS n FROM _hull_kv WHERE ns = ?", [this.ns]);
         const n = rows && rows[0] ? Number(rows[0].n) : 0;
-        if (n <= this.maxItems) return;
-        const over = n - this.maxItems;
+        if (n <= this.maxItems) { this._est = n; return; }
+        const target = Math.floor(this.maxItems * 0.9);
+        const over = n - target;
         this.conn.exec(
             "DELETE FROM _hull_kv WHERE ns = ? AND k IN (" +
             "SELECT k FROM _hull_kv WHERE ns = ? ORDER BY updated_at ASC LIMIT " +
             String(over) + ")",
             [this.ns, this.ns]);
+        this._est = target;
     }
 
     put(k, v, ttl) {

@@ -61,7 +61,10 @@ local MAX_ADDR = 254
 
 local function addr_ok(a)
     return type(a) == "string" and #a <= MAX_ADDR
-       and a:match("^[^%s@]+@[^%s@]+%.[^%s@]+$") ~= nil
+       -- One address: no control byte, and none of the characters that
+       -- separate or quote addresses ("a@x.co,b" was one address with one
+       -- '@'; an HTTP provider that splits on commas mailed both).
+       and a:match('^[^%s%c@,;<>"()]+@[^%s%c@,;<>"()]+%.[^%s%c@,;<>"()]+$') ~= nil
 end
 
 -- opts.cc as a list of strings: a string is one recipient. (postmark raised

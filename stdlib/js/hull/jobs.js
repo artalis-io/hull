@@ -1021,6 +1021,11 @@ function emit(event, job, info) {
     }
 }
 
+// Workflow job types and the step-store marker of a compensation run (see
+// reap and workflow).
+const WF_TYPE_PREFIX = "__wf:";
+const WF_COMPENSATE_KEY = "__compensate";
+
 /**
  * Reclaim jobs stuck in `running` past the visibility timeout (a worker died
  * mid-job). One whose attempts are used up is dead-lettered here (dependents
@@ -1041,35 +1046,66 @@ function reap(opts) {
         "UPDATE _hull_jobs SET status='pending', updated_at=? " +
         "WHERE status='waiting' AND run_at > 0 AND run_at <= ?",
         [now, now]);
-    const exhausted = db.query(
-        "SELECT id, type, queue, attempts, claim_token FROM _hull_jobs " +
-        "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts " +
-        "LIMIT 500",
-        [now - vt]) || [];
-    for (const row of exhausted) {
-        const err = "visibility timeout: worker lost after the last attempt";
-        let dead = false;
-        db.batch(() => {
-            // Claim-guarded like every other transition: a worker that
-            // finished in the meantime keeps its outcome.
-            const tokened = row.claim_token !== null && row.claim_token !== undefined;
-            const n = db.exec(
-                "UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, " +
-                "updated_at=? WHERE id=? AND status='running' AND claimed_at <= ? " +
-                "AND claim_token" + (tokened ? "=?" : " IS NULL"),
-                tokened ? [err, now, row.id, now - vt, row.claim_token]
-                        : [err, now, row.id, now - vt]);
-            if ((n || 0) === 0) return;
-            resolveDeps(row.id, false);
-            db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [row.id]);
-            emitDurable("dead", row, { error: err, attempt: row.attempts });
-            dead = true;
-        });
-        if (dead) emit("dead", row, { error: err, attempt: row.attempts });
+    // Exhausted rows, in passes of 500 until none is left (one pass used to
+    // leave the rest to the reclaim below, which re-pended them).
+    const err = "visibility timeout: worker lost after the last attempt";
+    for (;;) {
+        const exhausted = db.query(
+            "SELECT id, type, queue, attempts, claim_token FROM _hull_jobs " +
+            "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts " +
+            "LIMIT 500",
+            [now - vt]) || [];
+        let progressed = 0;
+        for (const row of exhausted) {
+            let outcome = null;
+            db.batch(() => {
+                // Claim-guarded like every other transition: a worker that
+                // finished in the meantime keeps its outcome.
+                const tokened = row.claim_token !== null && row.claim_token !== undefined;
+                const guard = "WHERE id=? AND status='running' AND claimed_at <= ? AND claim_token"
+                    + (tokened ? "=?" : " IS NULL");
+                const gargs = tokened ? [row.id, now - vt, row.claim_token] : [row.id, now - vt];
+                // A workflow's saga compensations are closures its body
+                // registers as it runs (see the Lua sibling): the first loss on
+                // the last attempt grants ONE more attempt, marked as a
+                // compensation run that replays the memoized steps, stops at
+                // the first one that never completed, compensates and
+                // dead-letters. A second loss dead-letters.
+                if (String(row.type).startsWith(WF_TYPE_PREFIX)) {
+                    const marked = db.query(
+                        "SELECT 1 FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                        [row.id, WF_COMPENSATE_KEY]);
+                    if (!(marked && marked.length)) {
+                        const n = db.exec(
+                            "UPDATE _hull_jobs SET status='pending', last_error=?, " +
+                            "claim_token=NULL, run_at=?, updated_at=?, " +
+                            "max_attempts=attempts+1 " + guard, [err, now, now, ...gargs]);
+                        if ((n || 0) === 0) return;
+                        db.exec(
+                            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+                            "VALUES (?, ?, NULL, 'compensating', ?)",
+                            [row.id, WF_COMPENSATE_KEY, now]);
+                        outcome = "compensate";
+                        return;
+                    }
+                }
+                const n = db.exec(
+                    "UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, " +
+                    "updated_at=? " + guard, [err, now, ...gargs]);
+                if ((n || 0) === 0) return;
+                resolveDeps(row.id, false);
+                db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [row.id]);
+                emitDurable("dead", row, { error: err, attempt: row.attempts });
+                outcome = "dead";
+            });
+            if (outcome) progressed += 1;
+            if (outcome === "dead") emit("dead", row, { error: err, attempt: row.attempts });
+        }
+        if (exhausted.length < 500 || progressed === 0) break;
     }
     const reclaimed = db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? " +
-        "WHERE status='running' AND claimed_at <= ?",
+        "WHERE status='running' AND claimed_at <= ? AND attempts < max_attempts",
         [now, now - vt]) || 0;
     // Reconcile strict-concurrency counters to the true running count. This frees
     // a slot leaked by a crashed worker (its job was just reclaimed) and returns a
@@ -1750,7 +1786,11 @@ async function await_(id, opts) {
 // the top), completed steps return their stored result instead of re-executing,
 // so the body resumes where it left off. Design:
 // docs/jobs_durable_execution_design.md.
-const WF_PREFIX = "__wf:";
+const WF_PREFIX = WF_TYPE_PREFIX;
+// Thrown by a compensation run (see reap) at the first step that never
+// completed: the body stops there and the handler compensates.
+const WF_ABORT = Symbol("hull.jobs.wfAbort");
+function wfAbort() { const e = new Error("__hull_wf_abort"); e[WF_ABORT] = true; return e; }
 
 // Run (or replay) one memoized step. Returns fn()'s value; on a re-run of the
 // workflow the value comes from the store and fn is NOT called again.
@@ -1884,14 +1924,30 @@ function makeCtx(job, name) {
         const r = db.query(
             "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? " +
             "AND substr(step_key, 1, 8) <> '__sleep:' " +
-            "AND substr(step_key, 1, 9) <> '__waitdl:'",
-            [job.id]);
+            "AND substr(step_key, 1, 9) <> '__waitdl:' " +
+            "AND step_key <> ?",
+            [job.id, WF_COMPENSATE_KEY]);
         return (r[0] && r[0].n) || 0;
     })();
+    // A compensation run (the reaper's extra attempt after a lost last one):
+    // replay only what completed; never start new work.
+    const compRows = db.query(
+        "SELECT 1 FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        [job.id, WF_COMPENSATE_KEY]);
+    const compensating = !!(compRows && compRows.length);
+    const noPark = (f) => {
+        if (!compensating) return f();
+        try { return f(); }
+        catch (e) {
+            if (e && typeof e === "object" && e[YIELD] === true) throw wfAbort();
+            throw e;
+        }
+    };
     return {
         id: job.id,
         name,
         input: job.data,
+        _compensating: compensating,
         trace: job.trace,   // trace-context propagation (observability design)
         _comps: comps,
         // Deterministic primitives: a workflow body re-runs from the top
@@ -1904,12 +1960,18 @@ function makeCtx(job, name) {
         uuid: () => { detN += 1; stepPos += 1; return runStep(job.id, "__uuid:" + detN, () => crypto.randomToken(16)); },
         step: async (stepKey, fn, opts) => {
             stepPos += 1;
+            if (compensating) {
+                const r = db.query(
+                    "SELECT 1 FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                    [job.id, stepKey]);
+                if (!(r && r.length)) throw wfAbort();
+            }
             const result = await runStep(job.id, stepKey, fn);
             if (opts && typeof opts.compensate === "function") comps.push({ key: stepKey, fn: opts.compensate });
             return result;
         },
-        sleep: (seconds) => { sleepN += 1; return runSleep(job.id, sleepN, seconds); },
-        waitSignal: (signalName, opts) => runWaitSignal(job.id, signalName, opts),
+        sleep: (seconds) => { sleepN += 1; return noPark(() => runSleep(job.id, sleepN, seconds)); },
+        waitSignal: (signalName, opts) => noPark(() => runWaitSignal(job.id, signalName, opts)),
         // Workflow versioning: ctx.patched(patchId) lets a changed workflow branch
         // old-vs-new so in-flight instances finish on the definition they started.
         // Call it ONCE per patchId (no await - returns a boolean). Semantics:
@@ -1964,7 +2026,9 @@ function workflow(name, fn) {
         let res;
         try { res = await fn(ctx); }
         catch (e) {
-            if (e && typeof e === "object" && e[YIELD] === true) {
+            if (e && typeof e === "object" && e[WF_ABORT] === true) {
+                e = new Error("visibility timeout: worker lost after the last attempt (compensated)");
+            } else if (e && typeof e === "object" && e[YIELD] === true) {
                 return { [WF_YIELD]: true, wakeAt: e.wakeAt,
                          waiting: e.waiting, signalName: e.signalName, deadline: e.deadline };
             }

@@ -160,14 +160,21 @@ function i18n.t_in(locale, key, params)
     return interpolate(val, params)
 end
 
---- Format a number using the active locale's separators.
---
--- @tparam number n
--- @treturn string  Formatted; e.g. `1_234_567.89` → `"1,234,567.89"` in en-US.
-function i18n.number(n)
-    if type(n) ~= "number" then return tostring(n) end
+-- The format table of locale @p loc (nil -> none: the built-in defaults).
+local function format_of(loc)
+    return loc and locales[loc] and locales[loc].format
+end
 
-    local fmt = locales[active] and locales[active].format
+-- NaN or +-inf: printed as Lua prints them, never grouped or rounded.
+local function non_finite(n)
+    return n ~= n or n == math.huge or n == -math.huge
+end
+
+local function number_for(loc, n)
+    if type(n) ~= "number" then return tostring(n) end
+    if non_finite(n) then return tostring(n) end
+
+    local fmt = format_of(loc)
     local dec_sep = fmt and (fmt.decimalSep or fmt.decimal_sep) or "."
     local thou_sep = fmt and (fmt.thousandsSep or fmt.thousands_sep) or ","
 
@@ -192,15 +199,23 @@ function i18n.number(n)
     return result
 end
 
---- Format a Unix timestamp using the locale's `date_pattern`.
+--- Format a number using the active locale's separators.
 --
--- @tparam integer timestamp  Seconds since epoch.
--- @treturn string  Formatted; supports `YYYY`/`MM`/`DD`/`HH`/`mm`/`ss`
---   tokens in the pattern.
-function i18n.date(timestamp)
-    if type(timestamp) ~= "number" then return tostring(timestamp) end
+-- @tparam number n
+-- @treturn string  Formatted; e.g. `1_234_567.89` → `"1,234,567.89"` in en-US.
+function i18n.number(n) return number_for(active, n) end
 
-    local fmt = locales[active] and locales[active].format
+--- Stateless @{i18n.number}: format with locale @p locale's separators
+-- (nil or unknown -> the defaults), whatever the process-wide active locale
+-- is. Use it in a handler that yields, as @{i18n.t_in}.
+function i18n.number_in(locale, n) return number_for(locale, n) end
+
+local function date_for(loc, timestamp)
+    if type(timestamp) ~= "number" or non_finite(timestamp) then
+        return tostring(timestamp)
+    end
+
+    local fmt = format_of(loc)
     local pattern = fmt and (fmt.datePattern or fmt.date_pattern) or "YYYY-MM-DD"
 
     local dt = epoch_to_utc(timestamp)
@@ -214,22 +229,30 @@ function i18n.date(timestamp)
     return result
 end
 
---- Format an amount in a given currency.
+--- Format a Unix timestamp using the locale's `date_pattern`.
 --
--- @tparam number amount  Numeric value.
--- @tparam string code    ISO 4217 code (e.g. `"USD"`, `"EUR"`, `"HUF"`).
--- @treturn string  Formatted per the active locale's `currency` table.
-function i18n.currency(amount, code)
+-- @tparam integer timestamp  Seconds since epoch.
+-- @treturn string  Formatted; supports `YYYY`/`MM`/`DD`/`HH`/`mm`/`ss`
+--   tokens in the pattern.
+function i18n.date(timestamp) return date_for(active, timestamp) end
+
+--- Stateless @{i18n.date}: locale @p locale's pattern.
+function i18n.date_in(locale, timestamp) return date_for(locale, timestamp) end
+
+local function currency_for(loc, amount, code)
     if type(amount) ~= "number" or type(code) ~= "string" then
         return tostring(amount)
     end
+    -- %d on a value with no integer form raised ("no integer
+    -- representation"): NaN, an infinity, or more minor units than 2^53.
+    if non_finite(amount) then return tostring(amount) .. " " .. code end
 
-    local fmt = locales[active] and locales[active].format
+    local fmt = format_of(loc)
     local cur = fmt and fmt.currency and fmt.currency[code]
 
     if not cur then
         -- Fallback: formatted number + code
-        return i18n.number(amount) .. " " .. code
+        return number_for(loc, amount) .. " " .. code
     end
 
     local digits = cur.decimal_digits or cur.decimalDigits or 2
@@ -244,6 +267,9 @@ function i18n.currency(amount, code)
     -- also keep the fraction exact (no float remainder to re-round).
     local neg = amount < 0
     local scale = math.tointeger(10 ^ digits) or 1
+    if math.abs(amount) * scale >= 2^53 then
+        return number_for(loc, amount) .. " " .. code
+    end
     local units = math.floor(math.abs(amount) * scale + 0.5)
     local int_part = units // scale
     local frac_part = units % scale
@@ -263,6 +289,18 @@ function i18n.currency(amount, code)
     else
         return symbol .. result
     end
+end
+
+--- Format an amount in a given currency.
+--
+-- @tparam number amount  Numeric value.
+-- @tparam string code    ISO 4217 code (e.g. `"USD"`, `"EUR"`, `"HUF"`).
+-- @treturn string  Formatted per the active locale's `currency` table.
+function i18n.currency(amount, code) return currency_for(active, amount, code) end
+
+--- Stateless @{i18n.currency}: locale @p locale's currency table.
+function i18n.currency_in(locale, amount, code)
+    return currency_for(locale, amount, code)
 end
 
 --- Pick the best matching locale from an `Accept-Language` header.

@@ -2,7 +2,9 @@
  * hull:kv:_memstore - native in-process byte store (JS mirror of
  * hull.kv._memstore). One physical store, two policies: hull.kv memory
  * (eviction off) and hull.cache memory (LRU eviction on). Byte-string keys and
- * values; lazy TTL expiry; byte + item accounting; LRU by access sequence.
+ * values; lazy TTL expiry; byte + item accounting; LRU by Map insertion
+ * order (a touch deletes and re-inserts, so the first key is the least
+ * recently used and eviction is O(1)).
  * Single-threaded (event-loop affinity); no locking. Stores are keyed by
  * namespace at module level, so same-namespace opens share state.
  *
@@ -16,8 +18,7 @@ const ENTRY_OVERHEAD = 48;
 
 class Store {
     constructor(policy) {
-        this.data = new Map(); // key -> { v, exp(ms|null), bytes, seq }
-        this.seq = 0;
+        this.data = new Map(); // key -> { v, exp(ms|null), bytes }, in recency order
         this.items = 0;
         this.bytes = 0;
         this.maxBytes = util.checkCount(policy.maxBytes, "max_bytes") || 0;
@@ -45,31 +46,38 @@ class Store {
         return e;
     }
 
-    _makeRoom(addBytes, addingItem) {
+    _touch(k, e) { this.data.delete(k); this.data.set(k, e); }
+
+    // Evict least-recently-used entries until the incoming bytes fit. `keep`
+    // (the key being overwritten) is never evicted - see the Lua sibling.
+    _makeRoom(addBytes, addingItem, keep) {
         const over = () =>
             (this.maxItems > 0 && this.items + (addingItem ? 1 : 0) > this.maxItems) ||
             (this.maxBytes > 0 && this.bytes + addBytes > this.maxBytes);
         if (!over()) return;
         if (!this.evict)
             util.error("capacity_exceeded", "kv: in-memory store is full (eviction disabled)");
-        while (over() && this.items > 0) {
-            let lruK, lruSeq;
-            for (const k of this.data.keys()) {
-                const e = this.data.get(k);
-                if (lruSeq === undefined || e.seq < lruSeq) { lruK = k; lruSeq = e.seq; }
-            }
-            if (lruK === undefined) break;
-            this._drop(lruK, this.data.get(lruK));
+        const it = this.data.keys();
+        while (over()) {
+            const n = it.next();
+            if (n.done) break;
+            if (n.value === keep) continue;
+            this._drop(n.value, this.data.get(n.value));
             this.st.evictions += 1;
         }
         if (over())
             util.error("capacity_exceeded", "kv: value larger than the cache byte budget");
     }
 
+    _checkFits(nb) {
+        if (this.maxBytes > 0 && nb > this.maxBytes)
+            util.error("capacity_exceeded", "kv: value larger than the cache byte budget");
+    }
+
     get(k) {
         const e = this._live(k);
         if (!e) { this.st.misses += 1; return null; }
-        this.seq += 1; e.seq = this.seq;
+        this._touch(k, e);
         this.st.hits += 1;
         return e.v;
     }
@@ -79,19 +87,18 @@ class Store {
     put(k, v, ttl) {
         const exp = util.expiryMs(ttl, this.defaultTtl);
         const nb = k.length + v.length + ENTRY_OVERHEAD;
+        this._checkFits(nb);
         const old = this.data.get(k);
         if (old) {
-            // Bump to MRU first so make_room never evicts the key being updated.
-            this.seq += 1; old.seq = this.seq;
             const delta = nb - old.bytes;
-            if (delta > 0) this._makeRoom(delta, false);
+            if (delta > 0) this._makeRoom(delta, false, k);
+            this._touch(k, old);
             this.bytes = this.bytes - old.bytes + nb;
             old.v = v; old.exp = exp; old.bytes = nb;
             return v;
         }
         this._makeRoom(nb, true);
-        this.seq += 1;
-        this.data.set(k, { v, exp, bytes: nb, seq: this.seq });
+        this.data.set(k, { v, exp, bytes: nb });
         this.items += 1; this.bytes += nb;
         return v;
     }
@@ -111,8 +118,9 @@ class Store {
             const newv = String(util.toInt(e.v) + by);
             const nb = k.length + newv.length + ENTRY_OVERHEAD;
             const delta = nb - e.bytes;
-            this.seq += 1; e.seq = this.seq;
-            if (delta > 0) this._makeRoom(delta, false);
+            this._checkFits(nb);
+            if (delta > 0) this._makeRoom(delta, false, k);
+            this._touch(k, e);
             this.bytes = this.bytes - e.bytes + nb;
             e.v = newv; e.bytes = nb;
             return util.toInt(newv);

@@ -73,12 +73,36 @@ function rbac.init(_opts)
     ]])
 end
 
+-- A role or permission name: a non-empty string of at most 255 bytes (the
+-- VARCHAR(255) key columns). Without the check, assign(u, nil) left a NULL
+-- role row on SQLite and then failed the join insert, a numeric role 1 never
+-- matched has_role(u, "1"), and an over-long name raised on strict MySQL.
+local MAX_NAME = 255
+local function require_name(value, what)
+    if type(value) ~= "string" or value == "" then
+        error("rbac: " .. what .. " is required (a non-empty string)", 3)
+    end
+    if #value > MAX_NAME then
+        error("rbac: " .. what .. " is longer than " .. MAX_NAME .. " bytes", 3)
+    end
+    return value
+end
+
+-- A lookup by a name that cannot exist answers false rather than raising.
+local function valid_name(value)
+    return type(value) == "string" and value ~= "" and #value <= MAX_NAME
+end
+
 --- Define a role and optionally grant it permissions. Idempotent.
 --
 -- @function rbac.define_role
 -- @tparam string name         Role name (e.g. `"admin"`, `"editor"`).
 -- @tparam[opt] table permissions  Array of permission names to grant.
 function rbac.define_role(name, permissions)
+    require_name(name, "role name")
+    if permissions then
+        for _, perm in ipairs(permissions) do require_name(perm, "permission name") end
+    end
     db.insert_if_absent("_hull_roles", { "name" }, { "name" }, { name })
     if permissions then
         for _, perm in ipairs(permissions) do
@@ -95,6 +119,7 @@ end
 -- @function rbac.define_permission
 -- @tparam string name
 function rbac.define_permission(name)
+    require_name(name, "permission name")
     db.insert_if_absent("_hull_permissions", { "name" }, { "name" }, { name })
 end
 
@@ -104,6 +129,7 @@ end
 -- @tparam string role
 function rbac.assign(user_id, role)
     user_id = uid(user_id)
+    require_name(role, "role name")
     -- The role row first: the foreign key holds on Postgres / MySQL, where
     -- assigning an undefined role raised a violation (SQLite runs with
     -- foreign keys off, so it only worked there).
@@ -119,6 +145,7 @@ end
 -- @tparam string role
 function rbac.revoke(user_id, role)
     user_id = uid(user_id)
+    require_name(role, "role name")
     db.exec(
         "DELETE FROM _hull_user_roles WHERE user_id = ? AND role = ?",
         { user_id, role }
@@ -130,6 +157,8 @@ end
 -- @tparam string role
 -- @tparam string permission
 function rbac.grant(role, permission)
+    require_name(role, "role name")
+    require_name(permission, "permission name")
     -- Both referenced rows first (see rbac.assign).
     db.insert_if_absent("_hull_roles", { "name" }, { "name" }, { role })
     db.insert_if_absent("_hull_permissions", { "name" }, { "name" }, { permission })
@@ -143,6 +172,8 @@ end
 -- @tparam string role
 -- @tparam string permission
 function rbac.ungrant(role, permission)
+    require_name(role, "role name")
+    require_name(permission, "permission name")
     db.exec(
         "DELETE FROM _hull_role_permissions WHERE role = ? AND permission = ?",
         { role, permission }
@@ -192,6 +223,7 @@ end
 -- @treturn boolean
 function rbac.has_role(user_id, role)
     user_id = uid(user_id)
+    if not valid_name(role) then return false end
     local rows = db.query(
         "SELECT 1 FROM _hull_user_roles WHERE user_id = ? AND role = ? LIMIT 1",
         { user_id, role }
@@ -206,6 +238,7 @@ end
 -- @treturn boolean
 function rbac.has_permission(user_id, permission)
     user_id = uid(user_id)
+    if not valid_name(permission) then return false end
     local rows = db.query(
         [[SELECT 1 FROM _hull_user_roles ur
           JOIN _hull_role_permissions rp ON ur.role = rp.role

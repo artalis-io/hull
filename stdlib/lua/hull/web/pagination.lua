@@ -123,12 +123,16 @@ function pagination.render(total, opts)
     local per_page = opts.per_page or 20
     local default_per_page = opts.default_per_page or per_page
     local base = opts.base_url or ""
-    local window = opts.window or 2
+    local window = math.floor(tonumber(opts.window) or 2)
     if window < 0 then window = 0 end
     if total < 0 then total = 0 end
 
     local pages = math.max(1, math.ceil(total / per_page))
-    local page = clamp(opts.page or 1, 1, pages)
+    -- An integer page (a string from req.query compared with a number
+    -- raised; a fraction produced a fractional link), and a window no wider
+    -- than the page count (anything more is only loop iterations).
+    local page = clamp(math.floor(tonumber(opts.page) or 1), 1, pages)
+    if window > pages then window = pages end
 
     -- Collect target page numbers as a set, then sort. Using a set
     -- naturally dedupes when the window overlaps the boundaries.

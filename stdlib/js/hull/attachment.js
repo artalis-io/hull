@@ -31,6 +31,7 @@ import { time } from "hull:time";
 
 let maxSize = null;          // null = unlimited per upload
 let mimeAllowlist = null;    // null = any MIME allowed
+let orphanGrace = 300;       // seconds an orphaned blob waits before unlink
 
 /**
  * Initialize attachment storage.
@@ -42,6 +43,9 @@ let mimeAllowlist = null;    // null = any MIME allowed
  *
  * @param {Object} [opts]
  * @param {number} [opts.maxSize]  Per-attachment byte cap. Default: unlimited.
+ * @param {number} [opts.orphanGrace]  Seconds an unreferenced blob stays
+ *   queued before `attachment.sweep` may unlink it (default 300). Must
+ *   outlast the longest app transaction that deletes attachments.
  * @param {string[]} [opts.mimeAllowlist]  Array of allowed sniffed MIMEs.
  *   Default: unlimited. Sniffed MIME is checked first; declared
  *   `Content-Type` is recorded separately for audit but NOT trusted
@@ -54,6 +58,12 @@ let mimeAllowlist = null;    // null = any MIME allowed
 function init(opts) {
     const o = opts || {};
     if (o.maxSize !== undefined) maxSize = o.maxSize;
+    if (o.orphanGrace !== undefined) {
+        if (typeof o.orphanGrace !== "number" || !(o.orphanGrace >= 0)) {
+            throw new Error("attachment.init: orphanGrace must be a number >= 0");
+        }
+        orphanGrace = o.orphanGrace;
+    }
     if (o.mimeAllowlist !== undefined) {
         mimeAllowlist = new Set(o.mimeAllowlist);
     }
@@ -74,6 +84,13 @@ function init(opts) {
     db.exec(
         "CREATE INDEX IF NOT EXISTS idx__hull_attachments_blob_id " +
         "ON _hull_attachments(blob_id)"
+    );
+    // Blobs whose last row was deleted, waiting for attachment.sweep.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_attachment_orphans (" +
+        "  blob_id VARCHAR(255) PRIMARY KEY," +
+        "  queued_at INTEGER NOT NULL" +
+        ")"
     );
 }
 
@@ -182,6 +199,15 @@ async function store(part, opts) {
         [id, blobId, part.filename, sniffed, declared,
          size, uploadedBy, time.now()]
     );
+    // Referenced again: no longer an orphan.
+    db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?", [blobId]);
+    // The blob was finalised (deduplicated onto an existing file) BEFORE the
+    // row existed, so a sweep in another process could have unlinked it in
+    // between: refuse rather than leave a row pointing at nothing (see Lua).
+    if (!blob.exists(blobId)) {
+        db.exec("DELETE FROM _hull_attachments WHERE id = ?", [id]);
+        throw new Error("attachment.store: the blob was reclaimed concurrently; retry the upload");
+    }
 
     return id;
 }
@@ -258,18 +284,46 @@ function readToFile(id, dst) {
 }
 
 /**
+ * Unlink blobs whose last attachment row is gone: up to `opts.limit`
+ * (default 100) queue entries older than `opts.grace` seconds (default:
+ * init's `orphanGrace`), each re-checked for references in its own
+ * transaction. `attachment.delete` runs it after every delete; an app may
+ * also schedule it (app.every).
+ * @param {Object} [opts]  { grace, limit }
+ * @returns {number}  blobs unlinked
+ */
+function sweep(opts) {
+    const o = opts || {};
+    const grace = o.grace !== undefined ? o.grace : orphanGrace;
+    const limit = Math.floor(Number(o.limit !== undefined ? o.limit : 100));
+    if (!(limit >= 1)) return 0;
+    const rows = db.query(
+        "SELECT blob_id FROM _hull_attachment_orphans WHERE queued_at <= ? " +
+        "ORDER BY queued_at LIMIT " + limit,
+        [time.now() - grace]) || [];
+    let n = 0;
+    for (const r of rows) {
+        db.batch(() => {
+            db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?", [r.blob_id]);
+            const refs = db.query(
+                "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
+                [r.blob_id]);
+            if (!refs || refs.length === 0) { blob.delete(r.blob_id); n += 1; }
+        });
+    }
+    return n;
+}
+
+/**
  * Delete an attachment by id.
  *
- * Decrements the refcount; at 0 the metadata row is removed AND, if
- * no other row references the same blob_id, the on-disk blob is
- * unlinked via blob.delete(). The row changes commit in one
- * transaction; the unlink runs after that commit, in a second
- * transaction that first re-checks the blob is unreferenced. Unlinked
- * inside the first transaction, a failed COMMIT left the row pointing
- * at a missing blob. The second transaction still holds SQLite's
- * BEGIN IMMEDIATE write lock across the re-check and the unlink, so a
- * concurrent upload cannot dedup onto the blob in between (on
- * Postgres / MySQL that window remains, narrowed to the re-check).
+ * Decrements the refcount; at 0 the metadata row is removed and, if no
+ * other row references the same blob_id, the blob is queued for
+ * `attachment.sweep` IN THE SAME transaction; the unlink waits for the
+ * sweep (`orphanGrace` seconds later). Unlinked at delete time, a delete
+ * inside the app's own db.batch (a SAVEPOINT - "our" commit commits
+ * nothing) lost the blob when the app's transaction rolled back and
+ * restored the row; queued, the rollback takes the queue entry with it.
  *
  * Exported as `attachment.delete` (bracket-key, since `delete` is
  * a JS reserved operator keyword but a valid property name):
@@ -283,7 +337,6 @@ function readToFile(id, dst) {
  */
 function deleteAttachment(id) {
     let removed = false;
-    let orphan = null;   // blob_id whose last row this transaction removed
 
     db.batch(() => {
         const meta = metadata(id);
@@ -297,33 +350,26 @@ function deleteAttachment(id) {
             return;
         }
 
-        // Last reference. Drop metadata row first so any concurrent
-        // "is blob still referenced?" probe sees the accurate count.
         db.exec("DELETE FROM _hull_attachments WHERE id = ?", [id]);
 
         // Other rows referencing this blob_id? Two attachments uploaded
-        // the same bytes share one blob; only when the LAST row is
-        // gone do we unlink.
+        // the same bytes share one blob; only when the LAST row is gone is
+        // it queued.
         const refs = db.query(
             "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
             [meta.blob_id]);
-        if (!refs || refs.length === 0) orphan = meta.blob_id;
+        if (!refs || refs.length === 0) {
+            db.upsert("_hull_attachment_orphans", ["blob_id"],
+                      ["blob_id", "queued_at"], [meta.blob_id, time.now()]);
+        }
         removed = true;
     });
 
-    if (orphan !== null) {
-        db.batch(() => {
-            const refs = db.query(
-                "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
-                [orphan]);
-            if (!refs || refs.length === 0) blob.delete(orphan);
-        });
-    }
-
+    sweep();
     return removed;
 }
 
 export const attachment = {
-    init, store, metadata, read, readToFile,
+    init, store, metadata, read, readToFile, sweep,
     "delete": deleteAttachment,
 };

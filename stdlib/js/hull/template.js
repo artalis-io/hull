@@ -541,7 +541,7 @@ function codegen(ast) {
             } else if (node.kind === "var") {
                 emit("__p.push(" + genExpr(node.expr, true, localsSet) + ");");
             } else if (node.kind === "raw") {
-                emit("__p.push(String(" + genExpr(node.expr, false, localsSet) + " ?? \"\"));");
+                emit("__p.push(__String(" + genExpr(node.expr, false, localsSet) + " ?? \"\"));");
             } else if (node.kind === "if") {
                 for (let i = 0; i < node.branches.length; i++) {
                     const b = node.branches[i];
@@ -569,7 +569,7 @@ function codegen(ast) {
                 validateIdent(node.var, "for loop variable");
                 const expr = genDotPath(node.expr, null, localsSet);
                 emit("{ const __it = " + expr + ";");
-                emit("for (const " + node.var + " of (Array.isArray(__it) ? __it : [])) {");
+                emit("for (const " + node.var + " of (__isArray(__it) ? __it : [])) {");
                 localsSet[node.var] = true;
                 indent++;
                 genBody(node.body);
@@ -584,7 +584,7 @@ function codegen(ast) {
                 validateIdent(node.val, "for loop value");
                 const expr2 = genDotPath(node.expr, null, localsSet);
                 emit("{ const __it = " + expr2 + ";");
-                emit("for (const [" + node.key + ", " + node.val + "] of Object.entries((__it && typeof __it === \"object\") ? __it : {})) {");
+                emit("for (const [" + node.key + ", " + node.val + "] of __entries((__it && typeof __it === \"object\") ? __it : {})) {");
                 localsSet[node.key] = true;
                 localsSet[node.val] = true;
                 indent++;
@@ -601,6 +601,12 @@ function codegen(ast) {
 
     lines.push("(function(__d, __e, __f) {");
     lines.push("  const __p = [];");
+    // The globals the generated code calls, captured before any loop: a loop
+    // variable named Array, String or Object shadowed them inside its body
+    // (`{% for Array in xs %}` hit the TDZ in its own header). Locals of the
+    // render function, re-read on every call - nothing for a cache to lose.
+    // Names starting "__" are reserved, so no template variable can take these.
+    lines.push("  const __isArray = Array.isArray, __String = String, __entries = Object.entries;");
     genBody(ast);
     lines.push("  return __p.join(\"\");");
     lines.push("})");

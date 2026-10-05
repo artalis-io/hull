@@ -220,6 +220,12 @@ function auth.login(_req, res, user_data, opts)
     opts = opts or {}
     local cookie_name = opts.name or opts.cookie_name or "hull_session"
     local cookie_opts = opts.cookie_opts or {}
+    -- A ttl, when given, is a positive number of seconds in both runtimes:
+    -- 0 made a session that was already expired here and was ignored in JS.
+    if opts.ttl ~= nil and not (type(opts.ttl) == "number" and opts.ttl > 0
+                               and opts.ttl < math.huge) then
+        error("auth.login: ttl must be a positive number of seconds", 2)
+    end
     if cookie_opts.max_age == nil and opts.ttl then
         -- Copy on write so we don't mutate the caller's table.
         local merged = {}

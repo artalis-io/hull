@@ -139,13 +139,41 @@ function Session:channel_message(ch)
     return m
 end
 
--- Messages other than data that may wait for one idle channel. A command's
--- whole life sends a handful (exit-status, eof, close); this is generous.
-local MAX_QUEUED_CONTROL = 256
+-- Replies to channel requests (CHANNEL_SUCCESS / FAILURE) that may wait for
+-- one idle channel. Each answers a request THIS side sent, of which there are
+-- a handful per channel; a peer sending more is not answering anything.
+local MAX_QUEUED_REPLIES = 64
 
 -- Whether `m` is charged against the receive window (and so bounded by it).
 local function is_windowed(m)
     return m.type == "data" or m.type == "extended_data"
+end
+
+-- What the owner of an idle channel needs to see of a message that arrived
+-- while another channel was being read, beyond its effect on the channel's
+-- state (already applied by Channel:handle):
+--   "data"   window-charged data: queued, bounded by the window we granted
+--   "once"   eof, close, exit-status, exit-signal, open confirmation/failure:
+--            queued the FIRST time only - a repeat changes nothing the owner
+--            has not been told, so the queue holds at most one of each
+--   "reply"  a reply to a request we sent: queued, capped (MAX_QUEUED_REPLIES)
+--   nil      everything else - a window adjust, a request route() has already
+--            answered or that this client does not act on (keepalive@openssh.com
+--            arrives every ClientAliveInterval for as long as a session lives,
+--            so counting those killed long sessions): applied, not queued
+local ONCE_REQUESTS = { ["exit-status"] = true, ["exit-signal"] = true }
+local function queue_kind(m)
+    local ty = m.type
+    if is_windowed(m) then return "data" end
+    if ty == "eof" or ty == "close" or ty == "open_confirmation"
+       or ty == "open_failure" then
+        return "once", ty
+    end
+    if ty == "request" and ONCE_REQUESTS[m.request] then
+        return "once", m.request
+    end
+    if ty == "request_success" or ty == "request_failure" then return "reply" end
+    return nil
 end
 
 -- The next channel message for `ch`, with the others on the connection kept
@@ -158,8 +186,8 @@ end
 -- once, since the server may be waiting on it (OpenSSH's keepalive). One its
 -- owner needs to see is queued for it, and handed over the next time that
 -- channel is read. Queued data cannot outgrow the receive window we granted:
--- the window only reopens as the owner consumes; anything else is capped
--- (MAX_QUEUED_CONTROL). A message for a channel
+-- the window only reopens as the owner consumes; anything else is bounded by
+-- queue_kind. A message for a channel
 -- that is not open is returned as it is, and fails where it lands - the
 -- mix-up Channel:handle reports.
 --
@@ -171,7 +199,7 @@ function Session:read_for(ch)
         local m = q[ch.inbox_head]
         q[ch.inbox_head] = nil
         ch.inbox_head = ch.inbox_head + 1
-        if not is_windowed(m) then
+        if queue_kind(m) == "reply" then
             ch.inbox_ctl = (ch.inbox_ctl or 1) - 1
         end
         if ch.inbox_head > #q then ch.inbox, ch.inbox_head = {}, 1 end
@@ -180,6 +208,11 @@ function Session:read_for(ch)
     while true do
         local m = self:route(ch, channel.parse(self:next_message()))
         if m then return m end
+        -- route() may have found the connection finished (a peer abusing
+        -- the protocol): this read fails as the connection does, coded.
+        if self.dead then
+            error({ code = self.dead.code, detail = self.dead.detail }, 0)
+        end
     end
 end
 
@@ -192,22 +225,36 @@ function Session:route(ch, m)
     if m.type == "request" and m.want_reply and other.remote_id then
         self:send_packet(channel.build_failure(other.remote_id))
     end
-    if m.type ~= "window_adjust" then
-        -- Data is bounded by the window we granted; nothing else is. A server
-        -- flooding CHANNEL_REQUESTs at an idle channel grew its queue until
-        -- the VM ran out of memory - so those are counted, and a channel
-        -- that holds more than any honest peer sends is a protocol error.
-        if not is_windowed(m) then
-            local n = (other.inbox_ctl or 0) + 1
-            if n > MAX_QUEUED_CONTROL then
-                error("ssh: too many messages queued for channel "
-                      .. tostring(other.local_id) .. " (protocol abuse)")
+    -- Data is bounded by the window we granted; the rest is bounded here (see
+    -- queue_kind): a server flooding CHANNEL_REQUESTs at an idle channel once
+    -- grew its queue until the VM ran out of memory.
+    local kind, key = queue_kind(m)
+    if kind == "once" then
+        other.queued_once = other.queued_once or {}
+        if other.queued_once[key] then return nil end
+        other.queued_once[key] = true
+    elseif kind == "reply" then
+        local n = (other.inbox_ctl or 0) + 1
+        if n > MAX_QUEUED_REPLIES then
+            -- More replies than requests we sent: the peer is not following
+            -- the protocol. The CONNECTION is finished - marked dead and
+            -- closed, so every user of it fails the same way - rather than
+            -- this one message raising inside whichever unrelated read
+            -- happened to take it in.
+            if not self.dead then
+                self.dead = { code = "protocol_error",
+                              detail = "too many replies queued for channel "
+                                       .. tostring(other.local_id) }
             end
-            other.inbox_ctl = n
+            pcall(self.close, self)
+            return nil
         end
-        m.routed = true
-        other.inbox[#other.inbox + 1] = m
+        other.inbox_ctl = n
+    elseif kind == nil then
+        return nil
     end
+    m.routed = true
+    other.inbox[#other.inbox + 1] = m
     return nil
 end
 
@@ -225,6 +272,9 @@ function Session:poll_channel(ch)
                     self:send_packet(channel.build_failure(ch.remote_id))
                 end
                 return m
+            end
+            if self.dead then
+                error({ code = self.dead.code, detail = self.dead.detail }, 0)
             end
         end
     end

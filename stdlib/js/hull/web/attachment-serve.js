@@ -80,6 +80,17 @@ function contentDisposition(name) {
 /**
  * Serve an attachment over HTTP.
  *
+ * ALWAYS returns a Promise, and the route handler MUST return (or await)
+ * it:
+ *
+ *     app.get("/files/:id", (req, res) =>
+ *         attachmentServe.serve(req, res, req.params.id, { authCheck }));
+ *
+ * With an async `authCheck` the response is written only once the check
+ * settles. A handler that drops the Promise returns before that, so the
+ * dispatcher ends the request at once with an empty 200 (fails closed - no
+ * bytes - but broken).
+ *
  * @param {Object} req
  * @param {Object} res
  * @param {string} id
@@ -88,18 +99,22 @@ function contentDisposition(name) {
  *   REQUIRED for non-403 responses. Receives the live metadata
  *   row so the check can do per-tenant / per-user gating. Omit
  *   to deny unconditionally. Only `true` (or a Promise of `true`)
- *   serves; a rejected Promise answers 500. Returns that Promise when
- *   the check is async.
+ *   serves; a rejected Promise answers 500.
+ * @returns {Promise<void>}
  */
 function serve(req, res, id, opts) {
+    try {
+        return Promise.resolve(serveImpl(req, res, id, opts));
+    } catch (e) {
+        return Promise.reject(e);
+    }
+}
+
+function serveImpl(req, res, id, opts) {
     const o = opts || {};
 
     const meta = attachment.metadata(id);
-    if (!meta) {
-        res.status(404);
-        res.json({ error: "not found" });
-        return;
-    }
+    if (!meta) return notFound(res);
 
     // Default-deny: caller must explicitly supply authCheck AND it must
     // return exactly true. Missing function, false, undefined, or any other
@@ -109,11 +124,23 @@ function serve(req, res, id, opts) {
     const allowed = o.authCheck(req, meta);
     if (allowed && typeof allowed.then === "function") {
         return allowed.then(
-            (v) => (v === true ? serveAllowed(req, res, meta) : forbid(res)),
+            (v) => {
+                if (v !== true) return forbid(res);
+                // The row was read before the await: read it again, so an
+                // attachment deleted while the check ran is not served.
+                const fresh = attachment.metadata(id);
+                if (!fresh) return notFound(res);
+                return serveAllowed(req, res, fresh);
+            },
             () => { res.status(500); res.json({ error: "authorization check failed" }); });
     }
     if (allowed !== true) return forbid(res);
     return serveAllowed(req, res, meta);
+}
+
+function notFound(res) {
+    res.status(404);
+    res.json({ error: "not found" });
 }
 
 function forbid(res) {

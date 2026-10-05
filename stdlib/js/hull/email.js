@@ -223,7 +223,10 @@ providers.resend = async function(opts) {
     emailError("delivery_failed", "resend: " + (resp.body || "unknown error"));
 };
 
-const ADDR_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// One address: no control character, and none of the characters that
+// separate or quote addresses ("a@x.co,b" passed; an HTTP provider that
+// splits on commas mailed both). Lua parity.
+const ADDR_RE = /^[^\s\x00-\x1f\x7f@,;<>"()]+@[^\s\x00-\x1f\x7f@,;<>"()]+\.[^\s\x00-\x1f\x7f@,;<>"()]+$/;
 
 /**
  * Send an email via the selected provider.

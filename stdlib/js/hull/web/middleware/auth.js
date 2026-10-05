@@ -219,14 +219,19 @@ function login(req, res, userData, opts) {
     const o = opts || {};
     const cookieName = o.name || o.cookieName || "hull_session";
     const cookieOpts = copyCookieOpts(o.cookieOpts);
+    // A ttl, when given, is a positive number of seconds in both runtimes:
+    // 0 made an already-expired session in Lua and was ignored here.
+    const hasTtl = o.ttl !== undefined && o.ttl !== null;
+    if (hasTtl && !(typeof o.ttl === "number" && Number.isFinite(o.ttl) && o.ttl > 0))
+        throw new TypeError("auth.login: ttl must be a positive number of seconds");
 
     // Set Max-Age from session TTL if not explicitly provided
-    if (cookieOpts.maxAge === undefined && o.ttl)
+    if (cookieOpts.maxAge === undefined && hasTtl)
         cookieOpts.maxAge = o.ttl;
 
     // ttl bounds the session server side too, not only the cookie's Max-Age.
     const sessionId = session.create(userData || {},
-                                     o.ttl ? { ttl: o.ttl } : undefined);
+                                     hasTtl ? { ttl: o.ttl } : undefined);
 
     const setCookie = cookie.serialize(cookieName, sessionId, cookieOpts);
     res.header("Set-Cookie", setCookie);

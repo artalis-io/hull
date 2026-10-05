@@ -12,10 +12,14 @@
 -- The attachment id is fresh per upload - refcount tracks how many
 -- callers own it. `attachment.delete(id)` decrements; at 0, the
 -- metadata row is removed and, if no other row references the same
--- `blob_id`, the on-disk blob is deleted via `blob.delete()`
--- synchronously (no deferred GC - kept the module small and the
--- behavior obvious; an undo grace period can be added later if a use
--- case appears).
+-- `blob_id`, the blob is queued in `_hull_attachment_orphans` in the
+-- SAME transaction. The on-disk blob is unlinked later, by
+-- `attachment.sweep()` (run opportunistically by every delete), once it
+-- has been queued for `orphan_grace` seconds (default 300) and still no
+-- row references it. Unlinked at delete time, a delete inside the app's
+-- own `db.batch` (a SAVEPOINT, so "our" commit commits nothing) lost the
+-- blob when the app's transaction then rolled back and restored the row;
+-- queued, the rollback takes the queue entry with it.
 --
 -- Lives flat at `hull/attachment` rather than under `hull/web/` - the
 -- core API (store / read / metadata / delete) is FS + DB only, with
@@ -39,6 +43,7 @@ local attachment = {}
 -- Module-level config set by attachment.init.
 local _max_size = nil          -- nil = unlimited (per upload)
 local _mime_allowlist = nil    -- nil = any MIME allowed; otherwise set<string>
+local _orphan_grace = 300      -- seconds an orphaned blob waits before unlink
 
 --- Initialize attachment storage.
 --
@@ -49,6 +54,10 @@ local _mime_allowlist = nil    -- nil = any MIME allowed; otherwise set<string>
 --
 -- @tparam[opt] table opts
 --   `max_size` - per-attachment byte cap (integer, default unlimited).
+--   `orphan_grace` - seconds an unreferenced blob stays queued before
+--     `attachment.sweep` may unlink it (default 300). It must outlast the
+--     longest app transaction that deletes attachments: the sweep cannot
+--     tell an uncommitted delete from a committed one.
 --   `mime_allowlist` - array of allowed sniffed-MIME strings
 --     (default unlimited). Sniffed MIME is checked first; declared
 --     `Content-Type` is recorded separately for audit but NOT trusted
@@ -61,6 +70,12 @@ function attachment.init(opts)
     opts = opts or {}
     if opts.max_size ~= nil then
         _max_size = opts.max_size
+    end
+    if opts.orphan_grace ~= nil then
+        if type(opts.orphan_grace) ~= "number" or opts.orphan_grace < 0 then
+            error("attachment.init: orphan_grace must be a number >= 0")
+        end
+        _orphan_grace = opts.orphan_grace
     end
     if opts.mime_allowlist ~= nil then
         _mime_allowlist = {}
@@ -86,6 +101,13 @@ function attachment.init(opts)
     db.exec([[
         CREATE INDEX IF NOT EXISTS idx__hull_attachments_blob_id
         ON _hull_attachments(blob_id)
+    ]])
+    -- Blobs whose last row was deleted, waiting for attachment.sweep.
+    db.exec([[
+        CREATE TABLE IF NOT EXISTS _hull_attachment_orphans (
+            blob_id VARCHAR(255) PRIMARY KEY,
+            queued_at INTEGER NOT NULL
+        )
     ]])
 end
 
@@ -197,6 +219,17 @@ function attachment.store(part, opts)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
     ]], { id, blob_id, part.filename, sniffed, declared,
           size, opts.uploaded_by, time.now() })
+    -- Referenced again: no longer an orphan.
+    db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?", { blob_id })
+    -- The blob was finalised (deduplicated onto an existing file) BEFORE
+    -- the row existed, so a sweep in another process could have unlinked
+    -- it in between. Then the row would point at nothing: refuse instead.
+    -- (A row inserted inside an app transaction is invisible to another
+    -- process until that commits; keep orphan_grace above such windows.)
+    if not blob.exists(blob_id) then
+        db.exec("DELETE FROM _hull_attachments WHERE id = ?", { id })
+        error("attachment.store: the blob was reclaimed concurrently; retry the upload")
+    end
 
     return id
 end
@@ -268,21 +301,55 @@ function attachment.read_to_file(id, dst)
     return total
 end
 
+--- Unlink blobs whose last attachment row is gone.
+--
+-- Takes up to `opts.limit` (default 100) entries of `_hull_attachment_orphans`
+-- queued at least `opts.grace` seconds ago (default: init's `orphan_grace`),
+-- and for each, in its own transaction, re-checks that no row references
+-- the blob, drops the queue entry and unlinks the blob. `attachment.delete`
+-- runs it after every delete; an app may also schedule it (app.every).
+-- @tparam[opt] table opts  { grace, limit }
+-- @treturn integer  number of blobs unlinked
+function attachment.sweep(opts)
+    opts = opts or {}
+    local grace = opts.grace or _orphan_grace
+    local limit = math.floor(tonumber(opts.limit) or 100)
+    if limit < 1 then return 0 end
+    local rows = db.query(
+        "SELECT blob_id FROM _hull_attachment_orphans WHERE queued_at <= ? "
+        .. "ORDER BY queued_at LIMIT " .. limit,
+        { time.now() - grace })
+    local n = 0
+    for _, r in ipairs(rows or {}) do
+        db.batch(function()
+            db.exec("DELETE FROM _hull_attachment_orphans WHERE blob_id = ?",
+                    { r.blob_id })
+            local refs = db.query(
+                "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
+                { r.blob_id })
+            if not refs or #refs == 0 then
+                blob.delete(r.blob_id)
+                n = n + 1
+            end
+        end)
+    end
+    return n
+end
+
 --- Delete an attachment by id.
 --
--- Decrements the refcount; at 0 the metadata row is removed AND, if
--- no other row references the same blob_id, the on-disk blob is
--- unlinked via blob.delete(). The row changes commit in one
--- transaction; the unlink runs after that, in a second transaction
--- that re-checks the blob is unreferenced, so a failed commit never
--- leaves a row pointing at a missing blob.
+-- Decrements the refcount; at 0 the metadata row is removed and, if no
+-- other row references the same blob_id, the blob is queued for
+-- `attachment.sweep` in the same transaction. The unlink waits for the
+-- sweep (`orphan_grace` seconds later): the delete may run inside the
+-- app's own db.batch, whose rollback restores the row - and takes the
+-- queue entry with it, so the blob survives too.
 --
 -- @tparam string id  Attachment id.
 -- @treturn boolean  true if the attachment existed and was
 --   decremented (or fully deleted); false if no such id.
 function attachment.delete(id)
     local removed = false
-    local orphan   -- blob_id whose last row this transaction removed
 
     db.batch(function()
         local meta = attachment.metadata(id)
@@ -296,40 +363,22 @@ function attachment.delete(id)
             return
         end
 
-        -- Last reference. Drop the metadata row first so any
-        -- concurrent "is blob still referenced?" probe sees the
-        -- accurate row count.
         db.exec("DELETE FROM _hull_attachments WHERE id = ?", { id })
 
-        -- Other rows still referencing this blob_id? Refcount-by-dedup
-        -- - two attachments uploaded the same bytes share one blob;
-        -- only when the LAST attachment row is gone do we unlink.
+        -- Other rows still referencing this blob_id? Two attachments
+        -- uploaded the same bytes share one blob; only when the LAST row
+        -- is gone is it queued.
         local refs = db.query(
             "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
             { meta.blob_id })
         if not refs or #refs == 0 then
-            orphan = meta.blob_id
+            db.upsert("_hull_attachment_orphans", { "blob_id" },
+                      { "blob_id", "queued_at" }, { meta.blob_id, time.now() })
         end
         removed = true
     end)
 
-    -- The blob goes only AFTER the commit, and only if no row references it
-    -- then. Unlinked inside the transaction, a failed COMMIT left the row
-    -- pointing at a missing blob. The re-check and unlink run in their own
-    -- transaction: on SQLite its write lock keeps a concurrent upload from
-    -- deduplicating onto the blob in between (on Postgres / MySQL that window
-    -- remains, narrowed to the re-check).
-    if orphan then
-        db.batch(function()
-            local refs = db.query(
-                "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
-                { orphan })
-            if not refs or #refs == 0 then
-                blob.delete(orphan)
-            end
-        end)
-    end
-
+    attachment.sweep()
     return removed
 end
 

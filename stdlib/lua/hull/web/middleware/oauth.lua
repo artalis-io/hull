@@ -198,12 +198,22 @@ local PRESETS = {
             jwks_uri               = base .. "/discovery/v2.0/keys",
             issuer                 = base .. "/v2.0",
         }
-        if tenant == "common" or tenant == "organizations"
-           or tenant == "consumers" then
+        -- Personal Microsoft accounts all live in one tenant, so its issuer
+        -- is fixed: `consumers` accepts exactly that one, and
+        -- `organizations` accepts any tenant BUT that one. Only `common`
+        -- accepts every tenant. (The pattern alone let a `consumers` app
+        -- take any work tenant's token, and an `organizations` app a
+        -- personal account's.)
+        local msa_issuer = "https://login.microsoftonline.com/"
+                           .. "9188040d-6c67-4c5b-b112-36a304b66dad/v2.0"
+        if tenant == "consumers" then
+            cfg.issuer = msa_issuer
+        elseif tenant == "common" or tenant == "organizations" then
             -- Lua pattern: matches /{guid or domain}/v2.0 - Microsoft
             -- emits either a 36-char tenant GUID OR a verified domain.
             cfg.issuer_pattern =
                 "^https://login%.microsoftonline%.com/[%w%-%.]+/v2%.0$"
+            if tenant == "organizations" then cfg.issuer_deny = msa_issuer end
         end
         return cfg
     end,
@@ -566,6 +576,7 @@ local function handle_callback(req, res)
     if not iss_ok and type(cfg.issuer_pattern) == "string"
        and type(claims.iss) == "string" then
         iss_ok = claims.iss:match(cfg.issuer_pattern) ~= nil
+                 and claims.iss ~= cfg.issuer_deny
     end
     if not iss_ok then
         log.warn("oauth: iss mismatch: " .. tostring(claims.iss))
@@ -710,7 +721,10 @@ function oauth.init(opts)
         -- An explicit issuer pins it: the multi-tenant pattern of the preset
         -- (tenant defaults to "common") went on accepting a token from ANY
         -- tenant or personal account whose iss missed the pinned one.
-        if p.issuer then resolved.issuer_pattern = nil end
+        if p.issuer then
+            resolved.issuer_pattern = nil
+            resolved.issuer_deny = nil
+        end
         for _, k in ipairs({"authorization_endpoint", "token_endpoint",
                             "jwks_uri", "issuer"}) do
             if type(resolved[k]) ~= "string" then

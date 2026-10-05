@@ -1108,6 +1108,11 @@ local function finish(job, info, transition)
     return outcome
 end
 
+-- Workflow job types and the step-store marker of a compensation run (see
+-- jobs.reap and jobs.workflow).
+local WF_TYPE_PREFIX = "__wf:"
+local WF_COMPENSATE_KEY = "__compensate"
+
 --- Reclaim jobs stuck in `running` past the visibility timeout - a worker that
 -- claimed them died before completing. One whose attempts are used up is
 -- dead-lettered here (its dependents resolved as failed, a `dead` event
@@ -1127,36 +1132,74 @@ function jobs.reap(opts)
         "UPDATE _hull_jobs SET status='pending', updated_at=? "
         .. "WHERE status='waiting' AND run_at > 0 AND run_at <= ?",
         { now, now })
-    local exhausted = db.query(
-        "SELECT id, type, queue, attempts, claim_token FROM _hull_jobs "
-        .. "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts "
-        .. "LIMIT 500",
-        { now - vt })
-    for _, row in ipairs(exhausted) do
-        local err = "visibility timeout: worker lost after the last attempt"
-        local outcome
-        db.batch(function()
-            -- Claim-guarded like every other transition: a worker that
-            -- finished in the meantime keeps its outcome.
-            local n = db.exec(
-                "UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, "
-                .. "updated_at=? WHERE id=? AND status='running' AND claimed_at <= ? "
-                .. "AND claim_token" .. (row.claim_token and "=?" or " IS NULL"),
-                row.claim_token and { err, now, row.id, now - vt, row.claim_token }
-                                or { err, now, row.id, now - vt })
-            if (n or 0) == 0 then return end
-            resolve_deps(row.id, false)
-            db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { row.id })
-            emit_durable("dead", row, { error = err, attempt = row.attempts })
-            outcome = "dead"
-        end)
-        if outcome then
-            emit("dead", row, { error = err, attempt = row.attempts })
+    -- Exhausted rows, in passes of 500 until none is left (one pass used to
+    -- leave the rest to the reclaim below, which re-pended them).
+    local err = "visibility timeout: worker lost after the last attempt"
+    while true do
+        local exhausted = db.query(
+            "SELECT id, type, queue, attempts, claim_token FROM _hull_jobs "
+            .. "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts "
+            .. "LIMIT 500",
+            { now - vt })
+        local progressed = 0
+        for _, row in ipairs(exhausted or {}) do
+            local outcome
+            db.batch(function()
+                -- Claim-guarded like every other transition: a worker that
+                -- finished in the meantime keeps its outcome.
+                local guard = "WHERE id=? AND status='running' AND claimed_at <= ? AND claim_token"
+                    .. (row.claim_token and "=?" or " IS NULL")
+                local gargs = row.claim_token and { row.id, now - vt, row.claim_token }
+                                              or { row.id, now - vt }
+                -- A workflow's saga compensations are closures its body
+                -- registers as it runs, so only running the handler again can
+                -- run them. The first time its worker is lost on the last
+                -- attempt it gets ONE more attempt, marked as a compensation
+                -- run: the body replays its memoized steps (registering their
+                -- compensations), stops at the first step that never
+                -- completed, and the handler compensates and dead-letters it.
+                -- A second loss (the compensation run itself lost) dead-letters.
+                if tostring(row.type):sub(1, #WF_TYPE_PREFIX) == WF_TYPE_PREFIX then
+                    local marked = db.query(
+                        "SELECT 1 FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                        { row.id, WF_COMPENSATE_KEY })
+                    if not (marked and #marked > 0) then
+                        local args = { err, now, now }
+                        for _, a in ipairs(gargs) do args[#args + 1] = a end
+                        local n = db.exec(
+                            "UPDATE _hull_jobs SET status='pending', last_error=?, "
+                            .. "claim_token=NULL, run_at=?, updated_at=?, "
+                            .. "max_attempts=attempts+1 " .. guard, args)
+                        if (n or 0) == 0 then return end
+                        db.exec(
+                            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+                            .. "VALUES (?, ?, NULL, 'compensating', ?)",
+                            { row.id, WF_COMPENSATE_KEY, now })
+                        outcome = "compensate"
+                        return
+                    end
+                end
+                local args = { err, now }
+                for _, a in ipairs(gargs) do args[#args + 1] = a end
+                local n = db.exec(
+                    "UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, "
+                    .. "updated_at=? " .. guard, args)
+                if (n or 0) == 0 then return end
+                resolve_deps(row.id, false)
+                db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { row.id })
+                emit_durable("dead", row, { error = err, attempt = row.attempts })
+                outcome = "dead"
+            end)
+            if outcome then progressed = progressed + 1 end
+            if outcome == "dead" then
+                emit("dead", row, { error = err, attempt = row.attempts })
+            end
         end
+        if #(exhausted or {}) < 500 or progressed == 0 then break end
     end
     local reclaimed = db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? "
-        .. "WHERE status='running' AND claimed_at <= ?",
+        .. "WHERE status='running' AND claimed_at <= ? AND attempts < max_attempts",
         { now, now - vt }) or 0
     -- Reconcile strict-concurrency counters to the true running count. This frees
     -- a slot leaked by a crashed worker (its job was just reclaimed) and returns a
@@ -1881,7 +1924,10 @@ end
 -- from the top), completed steps return their stored result instead of
 -- re-executing, so the body resumes where it left off. Design:
 -- docs/jobs_durable_execution_design.md.
-local WF_PREFIX = "__wf:"
+local WF_PREFIX = WF_TYPE_PREFIX
+-- Raised by a compensation run (see jobs.reap) at the first step that never
+-- completed: the body stops there and the handler compensates.
+local WF_ABORT = {}
 
 -- Run (or replay) one memoized step. Returns fn()'s value; on a re-run of the
 -- workflow the value comes from the store and fn is NOT called again.
@@ -2019,23 +2065,49 @@ local function make_ctx(job, name)
         local r = db.query(
             "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? "
             .. "AND substr(step_key, 1, 8) <> '__sleep:' "
-            .. "AND substr(step_key, 1, 9) <> '__waitdl:'",
-            { job.id })
+            .. "AND substr(step_key, 1, 9) <> '__waitdl:' "
+            .. "AND step_key <> ?",
+            { job.id, WF_COMPENSATE_KEY })
         return (r and r[1] and r[1].n) or 0
     end)()
+    -- A compensation run (the reaper's extra attempt after a lost last one):
+    -- replay only what completed; never start new work.
+    local compensating = (function()
+        local r = db.query(
+            "SELECT 1 FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            { job.id, WF_COMPENSATE_KEY })
+        return r ~= nil and #r > 0
+    end)()
+    ctx._compensating = compensating
     ctx.step = function(step_key, fn, opts)
         step_pos = step_pos + 1
+        if compensating then
+            local r = db.query(
+                "SELECT 1 FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                { job.id, step_key })
+            if not (r and #r > 0) then error(WF_ABORT, 0) end
+        end
         local result = run_step(job.id, step_key, fn)
         if opts and type(opts.compensate) == "function" then
             comps[#comps + 1] = { key = step_key, fn = opts.compensate }
         end
         return result
     end
+    -- In a compensation run a wait that would park the workflow stops it.
+    local function no_park(f, ...)
+        if not compensating then return f(...) end
+        local ok, r = pcall(f, ...)
+        if ok then return r end
+        if type(r) == "table" and rawget(r, YIELD) then error(WF_ABORT, 0) end
+        error(r, 0)
+    end
     ctx.sleep = function(seconds)
         sleep_n = sleep_n + 1
-        return run_sleep(job.id, sleep_n, seconds)
+        return no_park(run_sleep, job.id, sleep_n, seconds)
     end
-    ctx.wait_signal = function(signal_name, opts) return run_wait_signal(job.id, signal_name, opts) end
+    ctx.wait_signal = function(signal_name, opts)
+        return no_park(run_wait_signal, job.id, signal_name, opts)
+    end
     -- Deterministic primitives. A workflow body re-runs from the top on
     -- every resume; reading the clock / RNG directly would return a different
     -- value each replay and break memo-key matching. These memoize their value
@@ -2119,7 +2191,9 @@ function jobs.workflow(name, fn)
             if res == jobs.DEAD then run_compensations(ctx._comps, job.id) end
             return res
         end
-        if type(res) == "table" and rawget(res, YIELD) then
+        if res == WF_ABORT then
+            res = "visibility timeout: worker lost after the last attempt (compensated)"
+        elseif type(res) == "table" and rawget(res, YIELD) then
             return { [WF_YIELD] = true, wake_at = res.wake_at,
                      waiting = res.waiting, signal_name = res.signal_name,
                      deadline = res.deadline }

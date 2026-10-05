@@ -4,7 +4,8 @@
   One physical store backs two policies: hull.kv memory (eviction OFF, KV
   semantics) and hull.cache memory (LRU eviction ON, cache semantics). Keys
   and values are arbitrary bytes (Lua strings, binary-safe as table keys).
-  Lazy TTL expiry on access, byte + item accounting, LRU by access sequence.
+  Lazy TTL expiry on access, byte + item accounting, LRU through a doubly-
+  linked recency list (touch and eviction are O(1)).
   Single-threaded (event-loop affinity); no locking.
 
   Stores are keyed by namespace at MODULE level, so two opens of the same
@@ -31,8 +32,9 @@ function M.get(namespace, policy)
     if s then return s end
     policy = policy or {}
     s = setmetatable({
-        data        = {},   -- key -> { v, exp(ms|nil), bytes, seq }
-        seq         = 0,
+        data        = {},   -- key -> { k, v, exp(ms|nil), bytes, prev, next }
+        head        = nil,  -- most recently used entry
+        tail        = nil,  -- least recently used entry
         items       = 0,
         bytes       = 0,
         max_bytes   = u.check_count(policy.max_bytes, "max_bytes") or 0,
@@ -50,7 +52,25 @@ function M.get(namespace, policy)
     return s
 end
 
+-- Recency list: head = most recently used, tail = least.
+local function unlink(self, e)
+    if e.prev then e.prev.next = e.next else self.head = e.next end
+    if e.next then e.next.prev = e.prev else self.tail = e.prev end
+    e.prev, e.next = nil, nil
+end
+
+local function push_front(self, e)
+    e.prev, e.next = nil, self.head
+    if self.head then self.head.prev = e else self.tail = e end
+    self.head = e
+end
+
+local function touch(self, e)
+    if self.head ~= e then unlink(self, e); push_front(self, e) end
+end
+
 local function drop(self, k, e)
+    unlink(self, e)
     self.data[k] = nil
     self.items = self.items - 1
     self.bytes = self.bytes - e.bytes
@@ -68,9 +88,12 @@ local function live(self, k)
     return e
 end
 
--- Evict least-recently-used live entries until the incoming entry fits, or
--- (eviction disabled) raise once a cap would be exceeded.
-local function make_room(self, add_bytes, adding_item)
+-- Evict least-recently-used entries until the incoming bytes fit, or
+-- (eviction disabled) raise once a cap would be exceeded. `keep` is the key
+-- being overwritten: it is never evicted - an overwrite larger than the
+-- budget used to evict its own key (the only entry) and then account the new
+-- value against a store that no longer held it, driving `bytes` negative.
+local function make_room(self, add_bytes, adding_item, keep)
     local function over()
         return (self.max_items > 0 and self.items + (adding_item and 1 or 0) > self.max_items)
             or (self.max_bytes > 0 and self.bytes + add_bytes > self.max_bytes)
@@ -79,15 +102,14 @@ local function make_room(self, add_bytes, adding_item)
     if not self.evict then
         u.error("capacity_exceeded", "kv: in-memory store is full (eviction disabled)")
     end
-    -- Evict lowest-seq (LRU) entries until within caps or empty.
-    while over() and self.items > 0 do
-        local lru_k, lru_seq
-        for k, e in pairs(self.data) do
-            if not lru_seq or e.seq < lru_seq then lru_k, lru_seq = k, e.seq end
+    local e = self.tail
+    while over() and e do
+        local prev = e.prev
+        if e.k ~= keep then
+            drop(self, e.k, e)
+            self.st.evictions = self.st.evictions + 1
         end
-        if not lru_k then break end
-        drop(self, lru_k, self.data[lru_k])
-        self.st.evictions = self.st.evictions + 1
+        e = prev
     end
     if over() then
         -- A single value larger than the whole budget.
@@ -95,10 +117,18 @@ local function make_room(self, add_bytes, adding_item)
     end
 end
 
+-- An entry that alone exceeds the byte budget can never fit: refuse it before
+-- anything is evicted for it.
+local function check_fits(self, nb)
+    if self.max_bytes > 0 and nb > self.max_bytes then
+        u.error("capacity_exceeded", "kv: value larger than the cache byte budget")
+    end
+end
+
 function Store:get(k)
     local e = live(self, k)
     if not e then self.st.misses = self.st.misses + 1; return nil end
-    self.seq = self.seq + 1; e.seq = self.seq
+    touch(self, e)
     self.st.hits = self.st.hits + 1
     return e.v
 end
@@ -108,21 +138,22 @@ function Store:has(k) return live(self, k) ~= nil end
 function Store:put(k, v, ttl)
     local exp = u.expiry_ms(ttl, self.default_ttl)
     local nb = #k + #v + ENTRY_OVERHEAD
+    check_fits(self, nb)
     local old = self.data[k]
     if old then
-        -- Overwrite: bump to MRU first so make_room never evicts the key we are
-        -- updating, then account only the byte delta.
-        self.seq = self.seq + 1
-        old.seq = self.seq
+        -- Overwrite: make room for the byte delta without evicting the key
+        -- being updated (make_room's `keep`), then bump it to MRU.
         local delta = nb - old.bytes
-        if delta > 0 then make_room(self, delta, false) end
+        if delta > 0 then make_room(self, delta, false, k) end
+        touch(self, old)
         self.bytes = self.bytes - old.bytes + nb
         old.v, old.exp, old.bytes = v, exp, nb
         return v
     end
     make_room(self, nb, true)
-    self.seq = self.seq + 1
-    self.data[k] = { v = v, exp = exp, bytes = nb, seq = self.seq }
+    local e = { k = k, v = v, exp = exp, bytes = nb }
+    self.data[k] = e
+    push_front(self, e)
     self.items = self.items + 1
     self.bytes = self.bytes + nb
     return v
@@ -143,9 +174,9 @@ function Store:incr(k, by, ttl)
         local newv = tostring(u.to_int(e.v) + by)
         local nb = #k + #newv + ENTRY_OVERHEAD
         local delta = nb - e.bytes
-        self.seq = self.seq + 1
-        e.seq = self.seq
-        if delta > 0 then make_room(self, delta, false) end
+        check_fits(self, nb)
+        if delta > 0 then make_room(self, delta, false, k) end
+        touch(self, e)
         self.bytes = self.bytes - e.bytes + nb
         e.v, e.bytes = newv, nb
         return u.to_int(newv)
@@ -171,6 +202,7 @@ end
 
 function Store:clear()
     self.data, self.items, self.bytes = {}, 0, 0
+    self.head, self.tail = nil, nil
 end
 
 function Store:scan(prefix, limit)

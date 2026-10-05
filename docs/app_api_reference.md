@@ -75,6 +75,15 @@ app.manifest({
 })
 ```
 
+**MySQL / MariaDB: `_hull_*` collation.** Hull creates its own tables with
+`COLLATE utf8mb4_bin` so role names, inbox ids and dedup keys compare
+exactly (the server default `utf8mb4_0900_ai_ci` makes `'Admin' = 'admin'`).
+Tables created by an older Hull keep the case- and accent-insensitive
+collation - nothing converts them and nothing warns. Convert them once with
+`ALTER TABLE <t> CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin` for
+each `_hull_*` table (with `FOREIGN_KEY_CHECKS = 0` around it); CLAUDE.md
+("MySQL/MariaDB specifics") has the generator query.
+
 **`databases.internal`** (optional). Where the stdlib keeps its own `_hull_*`
 tables: sessions, auth-flows tokens and lockouts, TOTP, the audit log, RBAC,
 idempotency keys and attachment metadata. Point it at a database (or a
@@ -227,7 +236,7 @@ Register with `app.use(method, pattern, mw)`:
 - Sets `req.ctx.user` (decoded payload).
 - Returns `1` on auth failure (sends 401 + JSON), `0` on success.
 
-**auth.login(req, res, user_data, opts)**. Creates session, sets cookie. Returns `session_id`.
+**auth.login(req, res, user_data, opts)**. Creates session, sets cookie. Returns `session_id`. `opts.ttl`, when given, must be a positive number of seconds (it bounds both the cookie and the session); `0` or a negative value raises in both runtimes.
 `opts.ttl` bounds both: the cookie's `Max-Age` and the session itself, which
 slides by that ttl on every load rather than by the module TTL
 (`session.create(data, { ttl })` stores a per-session ttl).
@@ -250,7 +259,10 @@ cross-provider or by a CSRF.
   data for callers that need it), `on_logout(req, res) -> path?`.
 - `oauth.routes(app)`. Mounts the three routes on the given app.
 - Provider config. Either `preset = "google" | "microsoft"` (plus
-  `client_id`, optional `client_secret`, `scopes`, `tenant` for Microsoft)
+  `client_id`, optional `client_secret`, `scopes`, `tenant` for Microsoft:
+  `common` accepts any tenant's issuer, `consumers` only the personal-
+  account tenant's, `organizations` any tenant but that one, a GUID or
+  domain only its own)
   or fully-explicit `{ authorization_endpoint, token_endpoint, jwks_uri,
   issuer, client_id, client_secret?, scopes? }`.
 - Allowed signing algs: `RS256 / RS384 / RS512 / PS256 / ES256 / ES384`
@@ -283,7 +295,12 @@ Authy, 1Password - supports).
   - `opts.max_failed_attempts` (default `5`), `opts.lockout_duration`
     (default `900`s), `opts.max_lockout_duration` (default `86400`s): every
     `max_failed_attempts` wrong codes lock the user out, each lockout twice
-    as long as the last, up to the cap. A successful verify resets it.
+    as long as the last, up to the cap (`0` = no escalation, in both
+    runtimes). A successful verify or a confirmed (re-)enrolment resets
+    it. `opts.on_lockout(user_id, locked_until, n)` (`onLockout`) is
+    called when a lockout starts, so the app can tell the user: someone
+    holding the password can otherwise keep them out of TOTP and recovery
+    codes without notice.
   - `opts.encryption_key` - optional 32-byte string. When set,
     secrets are NaCl-secretbox-encrypted at rest with a fresh nonce
     per enrollment. Caller manages the key (env, fs.read, etc.).
@@ -416,12 +433,13 @@ verify step between successful first-factor auth and `on_login` when
       typically sends a "you signed in from a new device" email.
     - `opts.on_password_reset(req, res, user)` (optional). Fires
       after a successful `password-reset/confirm` updates the
-      hash. Recommended implementation:
+      hash, and after a verify with `new_password`. May be async in JS
+      (it is awaited; a throw or rejection is logged). Recommended implementation:
       `function(req, res, user) session.destroy_all(user.id) end`
       - revokes every existing session because a reset is the
       standard recovery move after a suspected compromise.
 - `authflows.routes(app)`. Mounts the routes under `prefix`:
-  POST `/register`, GET `/verify`, POST `/verify/resend`,
+  POST `/register`, GET + POST `/verify`, POST `/verify/resend`,
   POST `/login`, POST `/logout`, POST `/magic-link`,
   GET `/magic-link/consume`, POST `/password-reset/request`,
   POST `/password-reset/confirm`, POST `/email-change`,
@@ -430,18 +448,38 @@ verify step between successful first-factor auth and `on_login` when
   `/verify/resend` is enumeration-safe - always returns `{ok:true}`
   whether the user exists, is unverified, or is already verified.
   Apps SHOULD rate-limit it (per-email key) to bound mail volume.
-  **Verifying keeps the password only in the browser that registered.**
-  `/register` sets a `hull_af_reg` cookie (HttpOnly, SameSite=Lax, scoped
-  to `prefix`) whose hash the welcome token carries. A verify from that
-  browser keeps the password; any other - another browser or device, or a
-  `/verify/resend` link - verifies the address but voids the password (as a
-  magic-link verify of an unverified account does), drops any pending
-  email change, calls `on_password_reset`, and redirects to
-  `opts.verify_reset_redirect` (default `verify_redirect`), where the owner
-  sets a password by reset. Without this, anyone could register the
-  owner's address with a password of their own and have the owner's click
-  verify it. A password reset also drops a pending email change, and an
-  email-change confirm link must be the pending change's latest one.
+  **Email verification is two steps, and the owner always chooses.**
+  Anyone can register any address and choose its password, so a click on
+  the welcome (or resend) link proves only that the clicker reads the
+  mailbox. `GET /verify?token=` never consumes the token - mail scanners
+  (Safe Links, Proofpoint, Mimecast) prefetch every link - and renders a
+  small form (no script; `secure_html` headers), or redirects to
+  `opts.verify_form_redirect` (`verifyFormRedirect`) with `?token=`
+  appended so the app renders its own. The form, or the app's page, POSTs
+  to `/verify` (form-encoded or JSON; JSON gets JSON back, a form gets a
+  303 to `verify_redirect` or the page again):
+  - `{token, password}`: the password must match the account's. On a
+    match the address is verified and the password kept. A wrong one is a
+    401 (`{error, new_password_allowed: true}`) that leaves the token
+    usable and counts toward the login lockout (the same 401 while the
+    account is locked), so this is no better a password oracle than
+    `/login`.
+  - `{token, new_password}` (length + pwned rules as `/register`): proves
+    the mailbox only, so the password is replaced and everything a
+    pre-registrant could have attached goes with it - a pending email
+    change, the lockout rows, a TOTP enrolment (through
+    `opts.totp_disable(user_id)`, typically `totp.disable`; without the
+    hook an existing enrolment is only logged and `on_password_reset` must
+    remove it), and sessions (`on_password_reset`). Verified is set last.
+  An already-verified account just consumes the token. A magic link to an
+  unverified account that has a password shows the same verify step
+  instead of signing in (a passwordless account is simply verified), and
+  a password reset of an unverified account verifies it the same way as
+  `new_password` does. Nothing is replaced silently. A password reset
+  also drops a pending email change, and an email-change confirm link
+  must be the pending change's latest one. `standard_users` refuses a
+  `_hull_*` table name. Addresses must be a single address: one `@`, none
+  of `, ; < > " ( )` or whitespace.
 - `authflows.send_verify_email(user, url_prefix)`,
   `authflows.send_password_reset(email, url_prefix)`,
   `authflows.send_magic_link(email, url_prefix)`. Standalone helpers
@@ -456,7 +494,11 @@ verify step between successful first-factor auth and `on_login` when
   and is only burned on a successful code verify.
 - JS API: camelCase keys (`stateSecret`, `emailSend`, `userFindByEmail`,
   `onLogin`, `magicLinkAutoSignup`, `requireVerifiedEmail`, `enableTotp`,
-  `userTotpEnrolled`, `totpVerify`, `totpPendingTtl`, `totpPendingRedirect`).
+  `userTotpEnrolled`, `totpVerify`, `totpPendingTtl`, `totpPendingRedirect`,
+  `verifyFormRedirect`, `totpDisable`). The `user*` lookups, `totpVerify` and
+  `userTotpEnrolled` must answer synchronously (a Promise is a 500 / fails
+  closed); `onLogin`, `onPasswordReset` and `totpDisable` may be async and
+  are awaited.
   `totp.verify(userId, code)` returns a bare boolean (the historical
   `[ok, kind]` tuple lives behind `totp.verifyWithKind` now - see
   the TOTP section), so a `totpVerify: (user, code) => totp.verify(
@@ -522,6 +564,11 @@ verify step between successful first-factor auth and `on_login` when
 - `i18n.number(n)` → formatted number (locale-specific decimal/thousands separators).
 - `i18n.date(timestamp)` → formatted date string.
 - `i18n.currency(amount, code)` → formatted currency string (symbol + locale rules).
+  NaN / infinities / amounts past 2^53 minor units fall back to a plain
+  rendering instead of raising.
+- `i18n.number_in(locale, n)`, `i18n.date_in(locale, ts)`,
+  `i18n.currency_in(locale, amount, code)` (JS `numberIn` / `dateIn` /
+  `currencyIn`) → the same in an explicit locale, safe across a yield.
 - `i18n.detect(accept_language_header)` → best matching locale name or nil.
 
 **transaction**. Wraps handlers in SQLite transactions.

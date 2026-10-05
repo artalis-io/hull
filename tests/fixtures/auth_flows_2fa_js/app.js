@@ -67,6 +67,9 @@ authFlows.init({
     userSetEmailVerified: (id, v) => { usersById[id].email_verified = v; },
     enableTotp:       true,
     userTotpEnrolled: userId => totp.enrolled(userId),
+    // An enrolment made before verification goes when the mailbox holder
+    // sets the password at verify (audit 5).
+    totpDisable:      userId => totp.disable(userId),
     // Round-9 HIGH-4: pass req for per-IP gate (see Lua sibling).
     totpVerify:       (user, code, req) => totp.verify(user.id || user.user_id, code, req),
     onLogin: (req, res, user) => {

@@ -58,6 +58,20 @@ check_status()   { [ "$2" = "$3" ] && pass "$1" || fail "$1 - expected status $3
 check_contains() { case "$2" in *"$3"*) pass "$1" ;; *) fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;; esac }
 check_eq()       { [ "$2" = "$3" ] && pass "$1" || fail "$1 - expected $3, got $2"; }
 
+# POST /auth/verify {token, <field>: <password>} for the token in a verify
+# URL (audit 5: GET never consumes; the POST does). Echoes the response
+# body followed by a line holding the HTTP status.
+verify_post() {
+    _base="$1"; _url="$2"; _field="$3"; _pw="$4"
+    _tok=$(printf '%s\n' "$_url" | sed 's/.*token=//')
+    curl -sS -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$_tok\",\"$_field\":\"$_pw\"}" \
+        "$_base/auth/verify"
+}
+# The status line a `curl -w '\n%{http_code}'` appended / the body before it.
+resp_status() { printf '%s\n' "$1" | tail -n 1; }
+resp_body()   { printf '%s\n' "$1" | sed '$d'; }
+
 wait_for_server() {
     for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         if curl -sS -o /dev/null -m 1 "http://127.0.0.1:$1/" 2>/dev/null; then
@@ -158,15 +172,14 @@ run_flow() {
     COOKIES_B="$TMPDIR_WORK/cookies_${_label}_B.txt"
     : > "$COOKIES_A"; : > "$COOKIES_B"
 
-    # 1. Register + verify
-    REGJAR="$TMPDIR_WORK/reg_$_label.txt"   # the registering browser
-    curl -sS -c "$REGJAR" -X POST -H 'Content-Type: application/json' \
+    # 1. Register + verify (POST the link's token with the password)
+    curl -sS -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" \
         "$BASE/auth/register" > /dev/null
     TEXT=$(last_email_text "$PORT" "$EMAIL")
     VERIFY_URL=$(extract_url "$TEXT")
-    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$REGJAR" "$VERIFY_URL")
-    check_status "$_label: register+verify" "$S" "302"
+    R=$(verify_post "$BASE" "$VERIFY_URL" password "$PW")
+    check_status "$_label: register+verify" "$(resp_status "$R")" "200"
 
     # 2. Login from browser A.
     R=$(curl -sS -c "$COOKIES_A" \

@@ -505,7 +505,7 @@ app.post("/entries/:id/photos", async (req, res) => {
 app.get("/entries/:id/photos/:att_id", (req, res) => {
     const entryId = Number.parseInt(req.params.id, 10);
     const attId = req.params.att_id;
-    attachmentServe.serve(req, res, attId, {
+    return attachmentServe.serve(req, res, attId, {
         authCheck: (_req, _meta) =>
             Number.isInteger(entryId) && ownsAttachment(entryId, attId),
     });

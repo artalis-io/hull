@@ -90,6 +90,9 @@ authflows.init({
     -- transparently (canonicalized post-M2).
     enable_totp        = true,
     user_totp_enrolled = function(user_id) return totp.enrolled(user_id) end,
+    -- An enrolment made before verification goes when the mailbox holder
+    -- sets the password at verify (audit 5).
+    totp_disable       = function(user_id) return totp.disable(user_id) end,
     -- Round-9 HIGH-4: pass req through so totp.verify can apply the
     -- per-IP lockout. Tests bind a single source IP (localhost) and
     -- stay well under the default 20-attempts/15min cap.
