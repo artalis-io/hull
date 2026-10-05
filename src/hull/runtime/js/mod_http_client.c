@@ -417,6 +417,21 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         js_free_http_headers(ctx, headers, num_headers);
         return JS_EXCEPTION;
     }
+    /* Again, now that app code has run (the method / url toString, the
+     * opts.body / opts.headers getters): a getter could have parked a
+     * multipart read or opened a transaction, and hl_async_http_start
+     * suspends the connection without hl_js_op_suspend's re-check (M1). */
+    if (hl_js_async_gate(ctx, js, "http.fetch()") != 0 ||
+        hl_js_db_refuse_wait(ctx, "http.fetch()")) {
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        JS_FreeValue(ctx, promise);
+        JS_FreeCString(ctx, method);
+        JS_FreeCString(ctx, url);
+        if (body) JS_FreeCString(ctx, body);
+        js_free_http_headers(ctx, headers, num_headers);
+        return JS_EXCEPTION;
+    }
 
     extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
         JSValue resolve, JSValue reject, HlAllocator *alloc,

@@ -141,12 +141,9 @@ int hl_manifest_extract_js_in_process(const char *path,
 
     {
         JSContext *ctx = js->ctx;
-        JSValue global = JS_GetGlobalObject(ctx);
-        JSValue manifest = JS_GetPropertyStr(ctx, global, "__hull_manifest");
-        JS_FreeValue(ctx, global);
-
-        int have_manifest = !(JS_IsException(manifest) ||
-                              JS_IsUndefined(manifest) || JS_IsNull(manifest));
+        /* What app.manifest() stored (HlJS.manifest), never a global the app
+         * could have defined itself. */
+        int have_manifest = js->manifest != NULL;
 
         /* Capture-then-tolerate, parity with the Lua extractor: if app.manifest
          * was called we HAVE the authoritative composition info and use it even
@@ -155,7 +152,6 @@ int hl_manifest_extract_js_in_process(const char *path,
          * extraction failure - fatal, since extraction drives composition; a
          * SUCCESSFUL run with no app.manifest() is a valid manifest-less app. */
         if (!have_manifest) {
-            JS_FreeValue(ctx, manifest);
             if (load_rc != 0) {
                 if (out_err) *out_err = strdup_safe(
                     "failed to load app (syntax error, throw at top-level, "
@@ -165,7 +161,6 @@ int hl_manifest_extract_js_in_process(const char *path,
             goto cleanup;   /* rc stays 0 for a valid manifest-less app */
         }
 
-        JS_FreeValue(ctx, manifest);
         /* The same C encoder the runtime's --verify-sig check uses
          * (hl_manifest_json_js: own data properties, no toJSON), so the
          * manifest signed here is the one compared at startup. */

@@ -309,21 +309,25 @@ void hl_manifest_free(HlManifest *m);
 typedef struct JSContext JSContext;
 
 /*
- * Extract manifest from globalThis.__hull_manifest in QuickJS.
+ * Extract the manifest app.manifest() stored (HlJS.manifest, a frozen copy
+ * held in C; @p ctx's opaque must be its HlJS). Fields are read as OWN data
+ * properties only, and a field that must be an object is ignored when it is
+ * an array - nothing is inherited from Object.prototype / Array.prototype.
  * All strings are copied into Hull-owned allocations via `alloc`.
  * Returns 0 on success, -1 if no manifest was declared.
  */
 int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc);
 
 /*
- * The declared manifest (globalThis.__hull_manifest) as JSON, encoded in C
+ * The declared manifest (the same HlJS.manifest value) as JSON, encoded in C
  * from OWN data properties only - for --verify-sig's policy check and for
  * the manifest `hull build` signs. JSON.stringify consults `toJSON` through
  * the prototype chain, so an app that set Object.prototype.toJSON after
  * declaring its manifest changed the JSON the runtime compared.
  * 0 with *out = malloc'd JSON (caller frees), or *out = NULL when no
  * manifest was declared; -1 on an unencodable value (an accessor, a
- * function, a non-finite number, nesting deeper than 32).
+ * function, a non-finite number, nesting deeper than 32, a key holding a
+ * NUL byte).
  */
 int hl_manifest_json_js(JSContext *ctx, char **out, size_t *out_len);
 

@@ -77,6 +77,7 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
 
     /* Build request object */
     JSValue js_req = hl_js_make_request(ctx, req, NULL);   /* not a multipart route */
+    hl_js_req_ctx_free(js, req);   /* js_req.ctx holds its own reference */
 
     /* The request's life: the stream holds it, and so does every
      * continuation the handler creates. It dies when the handler is done -
@@ -112,6 +113,7 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         const char *msg = JS_ToCString(ctx, exc);
         log_error("[hull:web:sse] handler error: %s", msg ? msg : "unknown");
         if (msg) JS_FreeCString(ctx, msg);
+        else JS_FreeValue(ctx, JS_GetException(ctx));   /* a throwing toString (L2) */
         JS_FreeValue(ctx, exc);
         hl_js_sse_stream_force_close(ctx, stream_obj);
     } else {
@@ -128,7 +130,9 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         }
         if (state == JS_PROMISE_PENDING && js->last_async_cont) {
             /* Async SSE handler - wire handler_promise on continuation */
-            hl_js_run_drop(js, hl_js_run_attach(js, ret));
+            HlJsRunOnce *run = hl_js_run_attach(js, ret);
+            hl_js_run_yield_check(js, run);
+            hl_js_run_drop(js, run);
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, js_req);
             JS_FreeValue(ctx, stream_obj);

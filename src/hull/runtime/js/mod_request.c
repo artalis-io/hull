@@ -572,8 +572,16 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     js->active_req  = jc->req;
     js->last_async_cont = NULL;   /* see hl_js_async_resume */
 
+    /* The run waited holding a transaction (rolled back then): fail it
+     * without continuing the handler (hl_js_run_yield_check). */
+    int aborted = jc->link.once && jc->link.once->txn_held;
+
     PumpStep s;
-    switch (jc->mode) {
+    if (aborted) {
+        s.ready = 1;
+        s.result = JS_UNDEFINED;
+        s.error = JS_UNDEFINED;
+    } else switch (jc->mode) {
     case MP_MODE_ITER:   s = pump_iter_step(ctx, jc);   break;
     case MP_MODE_CHUNKS: s = pump_chunks_step(ctx, jc); break;
     case MP_MODE_READ:   s = pump_read_step(ctx, jc);   break;
@@ -593,6 +601,8 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
          * or completed it, from its own ops. */
         js->active_conn = NULL;
         js->active_req  = NULL;
+        /* Waiting again: not while holding a transaction (audit 6 M2). */
+        hl_js_run_yield_check(js, jc->link.once);
         mp_cont_set_parked(jc, 1);
         if (hl_cap_multipart_park(jc->iter->wrapper, mp_js_park_thunk, jc) != 0)
             mp_cont_set_parked(jc, 0);
@@ -600,7 +610,9 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     }
 
     /* Resolve or reject the iter Promise */
-    if (!JS_IsUndefined(s.error)) {
+    if (aborted) {
+        /* resolve / reject are freed below, uncalled */
+    } else if (!JS_IsUndefined(s.error)) {
         JSValue ret = JS_Call(ctx, jc->reject, JS_UNDEFINED, 1, &s.error);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, s.error);
@@ -616,7 +628,8 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
 
     /* Drain microtasks - the for-await loop body runs here. */
     js->active_life = jc->life;
-    hl_js_run_jobs(js);
+    if (!aborted)
+        hl_js_run_jobs(js);
     js->active_life = NULL;
 
     /* Check outer handler-Promise state */
@@ -630,9 +643,15 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     if (js->budget_tripped && jc->link.once) jc->link.once->tripped = 1;
     int tripped = js->budget_tripped ||
                   (jc->link.once && jc->link.once->tripped);
-    if (tripped && state == JS_PROMISE_PENDING &&
+    if ((tripped || aborted) && state == JS_PROMISE_PENDING &&
         !JS_IsUndefined(jc->link.handler_promise))
         state = JS_PROMISE_REJECTED;
+
+    /* Done, but an op started in this resume still holds the connection:
+     * it completes the run when it resumes (see hl_js_async_resume). */
+    if ((state == JS_PROMISE_FULFILLED || state == JS_PROMISE_REJECTED) &&
+        conn && hl_js_run_defer_to_holder(js, &jc->link, jc->life))
+        state = JS_PROMISE_PENDING;
 
     /* Another continuation of this run already completed the handler. */
     if ((state == JS_PROMISE_FULFILLED || state == JS_PROMISE_REJECTED) &&
@@ -669,7 +688,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         }
     } else if (state == JS_PROMISE_REJECTED) {
         const char *msg = NULL;
-        if (!tripped) {   /* a tripped run can run no toString */
+        if (!tripped && !aborted) {   /* a tripped run can run no toString */
             JSValue err = JS_PromiseResult(ctx, jc->link.handler_promise);
             msg = JS_ToCString(ctx, err);
             JS_FreeValue(ctx, err);
@@ -678,6 +697,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         /* log via stderr to match the standard async-resume path */
         fprintf(stderr, "[hull:c] async js handler error: %s\n",
                 msg ? msg : tripped ? "instruction limit exceeded"
+                          : aborted ? "waited holding a database transaction"
                                     : "(unknown)");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, jc->link.handler_promise);
@@ -699,8 +719,9 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
          * via the cont's vtable (could be HlJsMpCont or the standard
          * HlJsAsyncCont - the slot dispatches to the right setter). */
         if (js->last_async_cont) {
-            hl_js_run_wire(hl_js_cont_link((HlAsyncCont *)js->last_async_cont),
-                           ctx, jc->link.handler_promise, jc->link.once);
+            HlJsRunLink *nl = hl_js_cont_link((HlAsyncCont *)js->last_async_cont);
+            hl_js_run_wire(nl, ctx, jc->link.handler_promise, jc->link.once);
+            hl_js_run_yield_check(js, nl->once);
             js->last_async_cont = NULL;
         }
         JS_FreeValue(ctx, jc->link.handler_promise);

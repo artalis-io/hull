@@ -1351,7 +1351,7 @@ Tasks (target v0.1.10):
       app_vfs, filesystem dev mode) in `runtime/js/runtime.c`
       with a one-line swap from `JS_Eval(...)` to the cached
       helper.
-      QJS_TAG (currently `"qjs-2024-01-13"`) tracks the
+      QJS_TAG (currently `"qjs-2026-06-04"`) tracks the
       vendored snapshot - must bump together with any
       `vendor/quickjs/` change to avoid loading stale bytecode
       into an incompatible runtime.

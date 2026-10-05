@@ -31,6 +31,28 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
 JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res);
 JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res, HlReqLife *life);
 
+/* Free the request's middleware ctx (req->ctx: the JS value a middleware
+ * left on req.ctx, or a test dispatch's JSON). Called wherever the request's
+ * script work ends - once the handler's req object holds its own reference,
+ * when a middleware short-circuits, and for an SSE route - since Keel resets
+ * the request (dropping the pointer) without telling the runtime: before,
+ * only a synchronous handler freed it, and every suspended, rejected or SSE
+ * request pinned its ctx object in the JS heap for good (audit 6 H4). */
+void hl_js_req_ctx_free(HlJS *js, KlHttpRequest *req)
+{
+    if (!js || !req || !req->ctx) return;
+    HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+    if (rctx->kind == HL_REQCTX_JS_VAL) {
+        JSValue val;
+        memcpy(&val, rctx->js_val_bytes, sizeof(val));
+        if (js->ctx) JS_FreeValue(js->ctx, val);
+    } else if (rctx->kind == HL_REQCTX_JSON) {
+        hl_alloc_free(js->base.alloc, rctx->json.data, rctx->json.len + 1);
+    }
+    hl_alloc_free(js->base.alloc, rctx, sizeof(HlReqCtx));
+    req->ctx = NULL;
+}
+
 /* ── Request dispatch ───────────────────────────────────────────────── */
 
 int hl_js_dispatch(HlJS *js, int handler_id,
@@ -88,6 +110,9 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     /* Build JS request and response objects */
     JSValue js_req = hl_js_make_request(js->ctx, req, life);
     JSValue js_res = hl_js_make_response_life(js, res, life);
+    /* js_req.ctx holds its own reference now: nothing reads req->ctx after
+     * the handler is called, however the handler ends. */
+    hl_js_req_ctx_free(js, req);
 
     /* Call handler(req, res) */
     JSValue argv[2] = { js_req, js_res };
@@ -112,6 +137,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         if (js->last_async_cont) {
             run = hl_js_run_attach(js, ret);
             attached = 1;
+            hl_js_run_yield_check(js, run);
         }
         js->async_pending = 1;
         result = 1; /* signal: handler suspended */
@@ -129,6 +155,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         log_error("[hull:c] async handler rejected: %s",
                   msg ? msg : "(unknown)");
         if (msg) JS_FreeCString(js->ctx, msg);
+        else JS_FreeValue(js->ctx, JS_GetException(js->ctx));   /* L2 */
         JS_FreeValue(js->ctx, err);
         result = -1;
     }
@@ -146,6 +173,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         js->active_life = NULL;
         if (js->last_async_cont) {
             run = hl_js_run_attach(js, ret);
+            hl_js_run_yield_check(js, run);
         } else {
             int st = JS_PromiseState(js->ctx, ret);
             if (js->budget_tripped) {
@@ -161,6 +189,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
                 log_error("[hull:c] async handler rejected: %s",
                           msg ? msg : "(unknown)");
                 if (msg) JS_FreeCString(js->ctx, msg);
+                else JS_FreeValue(js->ctx, JS_GetException(js->ctx));   /* L2 */
                 JS_FreeValue(js->ctx, err);
                 result = -1;
             } else {
@@ -182,24 +211,6 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         hl_req_life_kill(life);
     hl_req_life_release(life);
 
-    if (result != 1) {
-        /* Sync path - clean up middleware ctx */
-        js->active_conn = NULL;
-        js->active_req = NULL;
-
-        if (req->ctx) {
-            HlReqCtx *rctx = (HlReqCtx *)req->ctx;
-            if (rctx->kind == HL_REQCTX_JS_VAL) {
-                JSValue val;
-                memcpy(&val, rctx->js_val_bytes, sizeof(val));
-                JS_FreeValue(js->ctx, val);
-            } else if (rctx->kind == HL_REQCTX_JSON) {
-                hl_alloc_free(js->base.alloc, rctx->json.data, rctx->json.len + 1);
-            }
-            hl_alloc_free(js->base.alloc, rctx, sizeof(HlReqCtx));
-            req->ctx = NULL;
-        }
-    }
     /* result == 1: handler suspended; async resume completes it (and
      * restores this request as the active one when it does). */
     js->active_conn = NULL;
@@ -380,6 +391,9 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
         log_error("[hull:c] middleware exceeded the instruction limit");
         result = -1;
     }
+    /* Short-circuited (or failed): no later middleware or handler reads it. */
+    if (result != 0)
+        hl_js_req_ctx_free(js, req);
     return result;
 }
 

@@ -5,49 +5,58 @@ WAMR, which is a submodule patched into `build/wamr-patched/`; see
 [wamr_patches.md](wamr_patches.md)). Every local change is marked in the source
 with a `HULL PATCH` comment and listed here.
 
+**Vendored version:** Bellard QuickJS **2026-06-04**
+(`https://bellard.org/quickjs/quickjs-2026-06-04.tar.xz`, SHA-256
+`b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a`; upstream
+publishes no checksum, so this is the hash of the tarball as fetched). The
+version string lives in one place, `QJS_VERSION` in `mk/vendor/quickjs.mk`
+(it feeds `CONFIG_VERSION` and the bytecode / template cache keys).
+
 **On a QuickJS upgrade:** grep the new tree for `HULL PATCH`, confirm each entry
-below is still needed against upstream, and re-apply the ones that are.
+below is still needed against upstream, and re-apply the ones that are. Then
+check the interrupt cadence (`JS_INTERRUPT_COUNTER_INIT` in `quickjs.c`,
+`INTERRUPT_COUNTER_INIT` in `libregexp.c`) against `HL_JS_INTERRUPT_WEIGHT`
+(`runtime/js/internal.h`), and any C code that switches on `JS_VALUE_GET_TAG`.
 
-## Patch 0001 - initialise `label_lvalue` in array destructuring
+## Upgrade 2024-01-13 -> 2026-06-04 (audit 6 H5)
 
-**File:** `vendor/quickjs/quickjs.c`, `js_parse_destructuring_element`
-**Found by:** MSan, via `stdlib/js/hull/tests/*.js` being wired into the test
-run for the first time (#547)
-**Upstream:** should go upstream; not yet reported.
+The reason for the upgrade: in 2024-01-13 a regular expression's
+backtracking ran inside one native `RegExp.prototype.exec` call that never
+polled the interrupt handler, so `/^(a+)+$/.test("a".repeat(40) + "!")`
+held the event loop for exponential time, under any instruction limit.
+QuickJS 2025-04-26 added the poll, and 2026-06-04 keeps it:
+`libregexp.c` `lre_poll_timeout` decrements a counter on every backtracking
+step and every `INTERRUPT_COUNTER_INIT` (10000) steps calls
+`lre_check_timeout(opaque)`, which `quickjs.c` implements by calling the
+runtime's interrupt handler; a non-zero answer returns `LRE_RET_TIMEOUT`,
+and `js_regexp_exec` / `js_regexp_Symbol_replace` raise it through
+`JS_ThrowInterrupted` (uncatchable). Hull's handler charges each of those
+polls `HL_JS_INTERRUPT_WEIGHT` (10000), the same as a bytecode poll, so the
+weight is unchanged: both pollers still run 10000 steps per poll.
+Guard: `test_js.c`, `js_audit6.catastrophic_regexp_trips_the_instruction_limit`.
 
-`js_parse_destructuring_element` handles both object and array destructuring.
-For the declaration form (`tok` non-zero: `var` / `let` / `const`), the two
-object branches set three locals together:
+What else changed for Hull:
 
-```c
-opcode = OP_scope_get_var;
-scope = s->cur_func->scope_level;
-label_lvalue = -1;
-```
+- `libbf.c` is gone (the bignum extensions were removed upstream) and
+  `dtoa.c` is new; `CONFIG_BIGNUM` is no longer defined.
+- QuickJS is compiled `-std=gnu11` (it uses the `asm` keyword) and `-fwrapv`,
+  as upstream's own Makefile does; Hull's own code stays `-std=c11`.
+- Uncatchability is now a property of the pending exception
+  (`JS_SetUncatchableException(ctx, flag)`), not of the error object:
+  `hl_js_budget_throw` uses it, and the 0003 export of
+  `JS_SetUncatchableError` is no longer needed.
+- Concatenated strings may be ropes (`JS_TAG_STRING_ROPE`); `JS_IsString`
+  covers them, and the two tag switches in `mod_db.c` / `mod_db_udf.c` now
+  take both tags (a concatenated SQL parameter used to bind as NULL).
+- Patch 0001 is dropped: upstream now initialises `label_lvalue` in the array
+  branch of `js_parse_destructuring_element` (the `enum_depth = 0` branch sets
+  `label_lvalue = -1` alongside `opcode` / `scope`).
 
-The array branch set only the first two. `label_lvalue` then reached the
-`put_lvalue(s, opcode, scope, var_name, label_lvalue, ...)` call at the bottom
-of the loop never having been written, so any array-destructuring declaration,
-`const [a, b] = x`, read an uninitialised variable.
+## Patch 0001 - dropped at 2026-06-04 (fixed upstream)
 
-**Effect: none observable.** `put_lvalue` reads its `label` argument only under
-`case OP_get_ref_value`, and this path is `OP_scope_get_var`, so the garbage is
-passed and discarded. No miscompilation, no memory unsafety.
-
-**Why patch it anyway.** It is still a read of an uninitialised variable, which
-is UB, and MSan is correct to flag it. Left alone it also fails CI: `const [ok,
-errors] = ...` is ordinary JS, present both in Hull's JS test suites and in
-seven shipped stdlib modules (`jobs`, `path`, `tui`, `web/flash`,
-`web/htmx/sort`, `web/middleware/oauth`, `web/middleware/outbox`), so the MSan
-job trips on every run once those are parsed.
-
-The fix is the one line the object branches already have, in the branch that
-was missing it.
-
-**Guard:** the MSan CI job. If an upgrade drops this patch, `MSan + UBSan` fails
-again with `use-of-uninitialized-value ... in js_parse_destructuring_element`.
-Note that the report is only readable because `QJS_CFLAGS` under `MSAN` carries
-`-g` (mk/tests.mk); without it the trace names the function and no line.
+Initialised `label_lvalue` in the array-destructuring branch of
+`js_parse_destructuring_element` (found by MSan, #547). Upstream 2026-06-04
+sets it there itself, so the patch is gone; the MSan CI job remains its guard.
 
 ## Patch 0002 - a stack frame for bound-function calls
 
@@ -85,8 +94,8 @@ bound-`retryOn` case runs the `_hull_*` statement and the test fails.
 
 ## Patch 0003 - an interrupt is polled again at the very next step
 
-**Files:** `vendor/quickjs/quickjs.c`, `__js_poll_interrupts`;
-`vendor/quickjs/quickjs.h` (declares `JS_SetUncatchableError`)
+**File:** `vendor/quickjs/quickjs.c`, `JS_ThrowInterrupted` (since 2026-06-04;
+it was in `__js_poll_interrupts` before)
 **Found by:** the fifth runtime audit (instruction-limit bypass, H2)
 **Upstream:** Hull-specific; upstream relies on the error being uncatchable.
 
@@ -111,9 +120,12 @@ and a resolve / reject call is itself a call, so a tripped run settles nothing
 further: its promise jobs fail at their first step, which is how
 `hl_js_run_jobs` discards them.
 
-It also exports `JS_SetUncatchableError` (defined but not declared upstream) so
-a binding that caught the interrupt in C (a SQL UDF, a `compute.stream`
-callback) can re-raise it as uncatchable instead of as an ordinary error.
+Since 2026-06-04 the patch sits in `JS_ThrowInterrupted`, which both
+interrupt sources reach - the bytecode poll and the regexp backtracking poll
+(`LRE_RET_TIMEOUT`) - so a trip inside a regexp is sticky the same way. The
+earlier version also exported `JS_SetUncatchableError` for bindings that
+re-raise a caught interrupt (a SQL UDF, a `compute.stream` callback); upstream
+now provides `JS_SetUncatchableException`, which `hl_js_budget_throw` uses.
 
 **Guard:** `tests/hull/runtime/js/test_js.c`,
 `js_audit5.async_bodies_do_not_escape_the_instruction_limit`. Without the patch

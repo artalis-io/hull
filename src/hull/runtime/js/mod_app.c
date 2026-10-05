@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "internal.h"
 #include "mod_buffer.h"
 
 /* Returns 1 if app.main was already registered. */
@@ -741,12 +742,11 @@ static void js_install_app_sse(JSContext *ctx)
 
 /* Freeze @p v deeply in C (an app could have replaced Object.freeze):
  * every own property non-writable and non-configurable, no extensions.
- * A plain object also loses its prototype: the policy is read with
- * JS_GetPropertyStr (manifest_js.c), which looks up the prototype chain, so
- * an app that set Object.prototype.hosts after declaring a manifest without
- * `hosts` widened the enforced policy beyond the signed one. Arrays keep
- * Array.prototype (a parsed JSON array has no holes, so every index and
- * `length` read is its own) so getManifest().modules.map still works. */
+ * A plain object also loses its prototype, so an app reading getManifest()
+ * never sees an inherited Object.prototype.hosts. (manifest_js.c reads own
+ * properties only in any case: an inherited field never reaches the
+ * enforced policy.) Arrays keep Array.prototype so getManifest().modules.map
+ * still works. */
 static int js_manifest_freeze(JSContext *ctx, JSValueConst v, int depth)
 {
     if (!JS_IsObject(v)) return 0;
@@ -779,53 +779,79 @@ static int js_manifest_freeze(JSContext *ctx, JSValueConst v, int depth)
     return rc;
 }
 
+/* globalThis.__hull_manifest's getter: the C-held manifest, or undefined. */
+static JSValue js_manifest_global_get(JSContext *ctx, JSValueConst this_val)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->manifest) return JS_UNDEFINED;
+    return JS_DupValue(ctx, *(JSValue *)js->manifest);
+}
+
+int hl_js_define_manifest_global(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSAtom a = JS_NewAtom(ctx, "__hull_manifest");
+    JSCFunctionType ft;
+    ft.getter = js_manifest_global_get;
+    JSValue getter = JS_NewCFunction2(ctx, ft.generic, "__hull_manifest", 0,
+                                      JS_CFUNC_getter, 0);
+    /* Neither configurable nor enumerable, no setter: assignment fails, and
+     * so do defineProperty and delete. */
+    int rc = JS_IsException(getter) ? -1
+           : JS_DefinePropertyGetSet(ctx, global, a, getter, JS_UNDEFINED,
+                                     JS_PROP_HAS_GET | JS_PROP_HAS_SET |
+                                     JS_PROP_HAS_CONFIGURABLE |
+                                     JS_PROP_HAS_ENUMERABLE | JS_PROP_THROW);
+    if (rc < 0) JS_FreeValue(ctx, JS_GetException(ctx));
+    JS_FreeAtom(ctx, a);
+    JS_FreeValue(ctx, global);
+    return rc < 0 ? -1 : 0;
+}
+
 static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
     (void)this_val;
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "app.manifest requires an object");
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js)
+        return JS_ThrowInternalError(ctx, "app.manifest: no runtime");
 
     /* Reject second call - manifest is immutable once declared */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue existing = JS_GetPropertyStr(ctx, global, "__hull_manifest");
-    int already_set = !JS_IsUndefined(existing) && !JS_IsNull(existing);
-    JS_FreeValue(ctx, existing);
-    if (already_set) {
-        JS_FreeValue(ctx, global);
+    if (js->manifest)
         return JS_ThrowTypeError(ctx, "app.manifest() can only be called once");
-    }
 
-    /* A plain, frozen copy (a JSON round trip: data only), defined
-     * non-writable and non-configurable: stored by reference on a writable
-     * global, the app could change or replace it after declaring it, so
-     * the policy extracted at startup differed from what was signed. */
+    /* A plain, frozen copy (a JSON round trip: data only), held in C: the
+     * policy extractor and the --verify-sig encoder read this one value, and
+     * nothing app code can reach replaces it. An array is not a manifest:
+     * its fields would be read through Array.prototype. */
     JSValue copy;
     {
         JSValue txt = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
-        if (JS_IsException(txt)) { JS_FreeValue(ctx, global); return JS_EXCEPTION; }
+        if (JS_IsException(txt)) return JS_EXCEPTION;
         size_t tl = 0;
         const char *ts = JS_ToCStringLen(ctx, &tl, txt);
         JS_FreeValue(ctx, txt);
-        if (!ts) { JS_FreeValue(ctx, global); return JS_EXCEPTION; }
+        if (!ts) return JS_EXCEPTION;
         copy = JS_ParseJSON(ctx, ts, tl, "<manifest>");
         JS_FreeCString(ctx, ts);
-        if (JS_IsException(copy)) { JS_FreeValue(ctx, global); return JS_EXCEPTION; }
-        int is_obj = JS_IsObject(copy);
+        if (JS_IsException(copy)) return JS_EXCEPTION;
+        int is_obj = JS_IsObject(copy) && JS_IsArray(ctx, copy) == 0;
         if (!is_obj || js_manifest_freeze(ctx, copy, 0) != 0) {
             JS_FreeValue(ctx, copy);
-            JS_FreeValue(ctx, global);
             return is_obj ? JS_EXCEPTION
                           : JS_ThrowTypeError(ctx, "app.manifest requires an object");
         }
     }
-    if (JS_DefinePropertyValueStr(ctx, global, "__hull_manifest",
-                                  JS_DupValue(ctx, copy), 0) < 0) {
+    JSValue *slot = malloc(sizeof *slot);
+    if (!slot) {
         JS_FreeValue(ctx, copy);
-        JS_FreeValue(ctx, global);
-        return JS_EXCEPTION;
+        return JS_ThrowOutOfMemory(ctx);
     }
-    JS_FreeValue(ctx, global);
+    *slot = JS_DupValue(ctx, copy);
+    js->manifest = slot;
 
     /* Module-conditional method installation. Each declared module
      * may decorate the `app` intrinsic with additional methods. */
@@ -852,13 +878,10 @@ static JSValue js_app_get_manifest(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
 
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue manifest = JS_GetPropertyStr(ctx, global, "__hull_manifest");
-    JS_FreeValue(ctx, global);
-
-    if (JS_IsUndefined(manifest))
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->manifest)
         return JS_NULL;
-    return manifest;
+    return JS_DupValue(ctx, *(JSValue *)js->manifest);
 }
 
 /* app.main(fn) - register a startup hook.

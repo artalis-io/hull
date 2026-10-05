@@ -487,10 +487,16 @@ static void js_dispatch_run(HlJsWorkerCtx *wctx, JSContext *ctx,
         result = v;
     }
 
-    /* Capture the return value */
-    if (capture_result(ctx, result, op) != 0) {
+    /* Capture the return value. Its getters run app code: one that went
+     * over the budget left a partly captured result (the rest read as
+     * null), which used to be reported as success (L4). */
+    if (capture_result(ctx, result, op) != 0 && !wctx->tripped) {
         op->error = 1;
         snprintf(op->error_msg, sizeof(op->error_msg), "out of memory");
+    }
+    if (wctx->tripped) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        js_dispatch_fail(wctx, ctx, op, JS_UNDEFINED);
     }
     JS_FreeValue(ctx, result);
 }

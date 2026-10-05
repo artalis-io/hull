@@ -1,5 +1,6 @@
 /*
- * manifest_js.c - Extract HlManifest from QuickJS globalThis.__hull_manifest
+ * manifest_js.c - Extract HlManifest from the manifest app.manifest() stored
+ * (HlJS.manifest; globalThis.__hull_manifest is a read-only view of it)
  *
  * Split from manifest.c as part of architectural roadmap item G.
  * Compiles to an empty translation unit when HL_ENABLE_JS is not set.
@@ -20,6 +21,7 @@
 #ifdef HL_ENABLE_JS
 
 #include "quickjs.h"
+#include "hull/runtime/js.h"   /* HlJS.manifest */
 
 /* As JS_ToCString, but NULL (nothing to free) when the string holds a NUL
  * byte - see manifest_lua.c's mstr. */
@@ -32,6 +34,73 @@ static const char *mjs_str(JSContext *ctx, JSValueConst v)
     return s;
 }
 
+/* The manifest app.manifest() stored (HlJS.manifest, a frozen plain-data
+ * copy held in C), or undefined. Never a global: an app could define
+ * globalThis.__hull_manifest itself - a Proxy showing this extractor one
+ * policy and the JSON encoder below another. */
+static JSValue mjs_stored(JSContext *ctx)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->manifest) return JS_UNDEFINED;
+    return JS_DupValue(ctx, *(JSValue *)js->manifest);
+}
+
+/* An OWN data property of @p obj, or undefined: never inherited (a field
+ * declared as an array was read through Array.prototype, so
+ * `fs: []` + `Array.prototype.write = ["."]` widened fs.write), never a
+ * getter. */
+static JSValue mjs_own_atom(JSContext *ctx, JSValueConst obj, JSAtom a)
+{
+    if (!JS_IsObject(obj)) return JS_UNDEFINED;
+    JSPropertyDescriptor d;
+    int has = JS_GetOwnProperty(ctx, &d, obj, a);
+    if (has < 0) { JS_FreeValue(ctx, JS_GetException(ctx)); return JS_UNDEFINED; }
+    if (!has) return JS_UNDEFINED;
+    JS_FreeValue(ctx, d.getter);
+    JS_FreeValue(ctx, d.setter);
+    if (d.flags & JS_PROP_GETSET) { JS_FreeValue(ctx, d.value); return JS_UNDEFINED; }
+    return d.value;
+}
+
+static JSValue mjs_own(JSContext *ctx, JSValueConst obj, const char *name)
+{
+    JSAtom a = JS_NewAtom(ctx, name);
+    if (a == JS_ATOM_NULL) { JS_FreeValue(ctx, JS_GetException(ctx)); return JS_UNDEFINED; }
+    JSValue v = mjs_own_atom(ctx, obj, a);
+    JS_FreeAtom(ctx, a);
+    return v;
+}
+
+/* A plain object (not an array, not null): where the manifest expects an
+ * object, an array is treated as absent. */
+static int mjs_is_obj(JSContext *ctx, JSValueConst v)
+{
+    return JS_IsObject(v) && JS_IsArray(ctx, v) == 0;
+}
+
+/* An own array's length (0 when it is not an array). */
+static int32_t mjs_len(JSContext *ctx, JSValueConst arr)
+{
+    JSValue len_val = mjs_own(ctx, arr, "length");
+    int32_t len = 0;
+    if (JS_ToInt32(ctx, &len, len_val) != 0) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        len = 0;
+    }
+    JS_FreeValue(ctx, len_val);
+    return len < 0 ? 0 : len;
+}
+
+/* An own array element (undefined for a hole). */
+static JSValue mjs_elem(JSContext *ctx, JSValueConst arr, uint32_t i)
+{
+    JSAtom a = JS_NewAtomUInt32(ctx, i);
+    if (a == JS_ATOM_NULL) { JS_FreeValue(ctx, JS_GetException(ctx)); return JS_UNDEFINED; }
+    JSValue v = mjs_own_atom(ctx, arr, a);
+    JS_FreeAtom(ctx, a);
+    return v;
+}
+
 /* Read a string array from a JS object property into a C array.
  * Strings are copied via hl_manifest_strdup; JS strings are freed immediately.
  * Returns number of strings read (capped at max). */
@@ -41,19 +110,17 @@ static int read_js_string_array(JSContext *ctx, JSValueConst obj,
                                  HlAllocator *alloc)
 {
     int count = 0;
-    JSValue arr = JS_GetPropertyStr(ctx, obj, field);
-    if (JS_IsUndefined(arr) || !JS_IsArray(ctx, arr)) {
+    if (!mjs_is_obj(ctx, obj)) return 0;
+    JSValue arr = mjs_own(ctx, obj, field);
+    if (JS_IsArray(ctx, arr) != 1) {
         JS_FreeValue(ctx, arr);
         return 0;
     }
 
-    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
-    int32_t len = 0;
-    JS_ToInt32(ctx, &len, len_val);
-    JS_FreeValue(ctx, len_val);
+    int32_t len = mjs_len(ctx, arr);
 
     for (int32_t i = 0; i < len && count < max; i++) {
-        JSValue elem = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+        JSValue elem = mjs_elem(ctx, arr, (uint32_t)i);
         if (JS_IsString(elem)) {
             const char *s = mjs_str(ctx, elem);
             if (s) {
@@ -78,20 +145,22 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     memset(out, 0, sizeof(*out));
     out->alloc = alloc;
 
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue manifest = JS_GetPropertyStr(ctx, global, "__hull_manifest");
-    JS_FreeValue(ctx, global);
+    JSValue manifest = mjs_stored(ctx);
 
     if (JS_IsUndefined(manifest) || JS_IsNull(manifest)) {
         JS_FreeValue(ctx, manifest);
         return -1; /* no manifest declared */
     }
+    if (!mjs_is_obj(ctx, manifest)) {   /* app.manifest refuses one too */
+        JS_FreeValue(ctx, manifest);
+        return -1;
+    }
 
     out->present = 1;
 
     /* fs = { read: [...], write: [...] } */
-    JSValue fs = JS_GetPropertyStr(ctx, manifest, "fs");
-    if (!JS_IsUndefined(fs) && !JS_IsNull(fs)) {
+    JSValue fs = mjs_own(ctx, manifest, "fs");
+    if (mjs_is_obj(ctx, fs)) {
         out->fs_read_count = read_js_string_array(ctx, fs, "read",
                                                     out->fs_read,
                                                     HL_MANIFEST_MAX_PATHS, alloc);
@@ -117,7 +186,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                                               HL_MANIFEST_MAX_HOSTS, alloc);
 
     /* csp = "policy-string" or false */
-    JSValue csp_val = JS_GetPropertyStr(ctx, manifest, "csp");
+    JSValue csp_val = mjs_own(ctx, manifest, "csp");
     if (JS_IsString(csp_val)) {
         const char *csp_str = mjs_str(ctx, csp_val);
         if (csp_str && hl_manifest_csp_is_valid(csp_str)) {
@@ -133,15 +202,15 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
 
     /* cors = { origins: [...], methods: "...", headers: "...",
      *          credentials: true, maxAge: 86400 } */
-    JSValue cors_val = JS_GetPropertyStr(ctx, manifest, "cors");
-    if (!JS_IsUndefined(cors_val) && !JS_IsNull(cors_val)) {
+    JSValue cors_val = mjs_own(ctx, manifest, "cors");
+    if (mjs_is_obj(ctx, cors_val)) {
         out->cors_set = 1;
         out->cors_origin_count = read_js_string_array(ctx, cors_val, "origins",
                                                         out->cors_origins,
                                                         HL_MANIFEST_MAX_CORS_ORIGINS,
                                                         alloc);
 
-        JSValue methods_val = JS_GetPropertyStr(ctx, cors_val, "methods");
+        JSValue methods_val = mjs_own(ctx, cors_val, "methods");
         if (JS_IsString(methods_val)) {
             const char *s = mjs_str(ctx, methods_val);
             if (s) {
@@ -151,7 +220,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         }
         JS_FreeValue(ctx, methods_val);
 
-        JSValue headers_val = JS_GetPropertyStr(ctx, cors_val, "headers");
+        JSValue headers_val = mjs_own(ctx, cors_val, "headers");
         if (JS_IsString(headers_val)) {
             const char *s = mjs_str(ctx, headers_val);
             if (s) {
@@ -161,12 +230,12 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         }
         JS_FreeValue(ctx, headers_val);
 
-        JSValue creds_val = JS_GetPropertyStr(ctx, cors_val, "credentials");
+        JSValue creds_val = mjs_own(ctx, cors_val, "credentials");
         if (JS_IsBool(creds_val))
             out->cors_credentials = JS_ToBool(ctx, creds_val);
         JS_FreeValue(ctx, creds_val);
 
-        JSValue age_val = JS_GetPropertyStr(ctx, cors_val, "maxAge");
+        JSValue age_val = mjs_own(ctx, cors_val, "maxAge");
         if (JS_IsNumber(age_val)) {
             int32_t age = 0;
             JS_ToInt32(ctx, &age, age_val);
@@ -177,44 +246,41 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     JS_FreeValue(ctx, cors_val);
 
     /* wasm: { heap, stack, gas, timeoutMs, maxInput, maxOutput } */
-    JSValue wasm_val = JS_GetPropertyStr(ctx, manifest, "wasm");
-    if (!JS_IsUndefined(wasm_val) && !JS_IsNull(wasm_val)) {
+    JSValue wasm_val = mjs_own(ctx, manifest, "wasm");
+    if (mjs_is_obj(ctx, wasm_val)) {
         JSValue v;
         int64_t iv;
-        v = JS_GetPropertyStr(ctx, wasm_val, "heap");
+        v = mjs_own(ctx, wasm_val, "heap");
         if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_heap = (uint32_t)iv; }
         JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, wasm_val, "stack");
+        v = mjs_own(ctx, wasm_val, "stack");
         if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_stack = (uint32_t)iv; }
         JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, wasm_val, "gas");
+        v = mjs_own(ctx, wasm_val, "gas");
         if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_gas = iv; }
         JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, wasm_val, "timeoutMs");
+        v = mjs_own(ctx, wasm_val, "timeoutMs");
         if (!JS_IsUndefined(v) && JS_ToInt64(ctx, &iv, v) == 0 && iv > 0)
             out->wasm_timeout_ms = iv > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)iv;
         JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, wasm_val, "maxInput");
+        v = mjs_own(ctx, wasm_val, "maxInput");
         if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_max_input = (uint32_t)iv; }
         JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, wasm_val, "maxOutput");
+        v = mjs_own(ctx, wasm_val, "maxOutput");
         if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_max_output = (uint32_t)iv; }
         JS_FreeValue(ctx, v);
     }
     JS_FreeValue(ctx, wasm_val);
 
     /* gpu: true  OR  gpu: { devices: [0, 1] } */
-    JSValue gpu_val = JS_GetPropertyStr(ctx, manifest, "gpu");
-    if (JS_IsObject(gpu_val) && !JS_IsNull(gpu_val)) {
+    JSValue gpu_val = mjs_own(ctx, manifest, "gpu");
+    if (mjs_is_obj(ctx, gpu_val)) {
         out->gpu = 1;
-        JSValue devs = JS_GetPropertyStr(ctx, gpu_val, "devices");
-        if (JS_IsArray(ctx, devs)) {
-            JSValue len_val = JS_GetPropertyStr(ctx, devs, "length");
-            int32_t len = 0;
-            JS_ToInt32(ctx, &len, len_val);
-            JS_FreeValue(ctx, len_val);
+        JSValue devs = mjs_own(ctx, gpu_val, "devices");
+        if (JS_IsArray(ctx, devs) == 1) {
+            int32_t len = mjs_len(ctx, devs);
             for (int32_t i = 0; i < len && out->gpu_device_count < HL_GPU_MAX_DEVICES; i++) {
-                JSValue elem = JS_GetPropertyUint32(ctx, devs, (uint32_t)i);
+                JSValue elem = mjs_elem(ctx, devs, (uint32_t)i);
                 if (JS_IsNumber(elem)) {
                     int32_t d = 0;
                     JS_ToInt32(ctx, &d, elem);
@@ -230,13 +296,13 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     JS_FreeValue(ctx, gpu_val);
 
     /* compute: true */
-    JSValue compute_val = JS_GetPropertyStr(ctx, manifest, "compute");
+    JSValue compute_val = mjs_own(ctx, manifest, "compute");
     if (JS_IsBool(compute_val))
         out->compute = JS_ToBool(ctx, compute_val);
     JS_FreeValue(ctx, compute_val);
 
     /* tui: true */
-    JSValue tui_val = JS_GetPropertyStr(ctx, manifest, "tui");
+    JSValue tui_val = mjs_own(ctx, manifest, "tui");
     if (JS_IsBool(tui_val))
         out->tui = JS_ToBool(ctx, tui_val);
     JS_FreeValue(ctx, tui_val);
@@ -252,14 +318,11 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
      *
      * Presence of `modules` (array OR object, even empty) sets
      * `modules_declared = 1`. */
-    JSValue modules_val = JS_GetPropertyStr(ctx, manifest, "modules");
+    JSValue modules_val = mjs_own(ctx, manifest, "modules");
 
-    if (JS_IsArray(ctx, modules_val)) {
+    if (JS_IsArray(ctx, modules_val) == 1) {
         out->modules_declared = 1;
-        JSValue len_val = JS_GetPropertyStr(ctx, modules_val, "length");
-        int32_t len = 0;
-        JS_ToInt32(ctx, &len, len_val);
-        JS_FreeValue(ctx, len_val);
+        int32_t len = mjs_len(ctx, modules_val);
         if (len > HL_MANIFEST_MAX_MODULES)
             log_warn("[manifest] modules array exceeds "
                      "HL_MANIFEST_MAX_MODULES (%d), truncated",
@@ -267,7 +330,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         for (int32_t i = 0;
              i < len && out->modules_count < HL_MANIFEST_MAX_MODULES;
              i++) {
-            JSValue elem = JS_GetPropertyUint32(ctx, modules_val, (uint32_t)i);
+            JSValue elem = mjs_elem(ctx, modules_val, (uint32_t)i);
             if (JS_IsString(elem)) {
                 const char *spec = mjs_str(ctx, elem);
                 if (spec) {
@@ -307,7 +370,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
             }
             JS_FreeValue(ctx, elem);
         }
-    } else if (JS_IsObject(modules_val) && !JS_IsNull(modules_val)) {
+    } else if (mjs_is_obj(ctx, modules_val)) {
         out->modules_declared = 1;
         JSPropertyEnum *props = NULL;
         uint32_t prop_count = 0;
@@ -322,7 +385,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                     break;
                 }
                 const char *alias = JS_AtomToCString(ctx, props[i].atom);
-                JSValue v_val = JS_GetProperty(ctx, modules_val, props[i].atom);
+                JSValue v_val = mjs_own_atom(ctx, modules_val, props[i].atom);
                 if (alias && JS_IsString(v_val)) {
                     const char *spec = mjs_str(ctx, v_val);
                     if (spec) {
@@ -372,12 +435,12 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
      * named: name -> DSN string (a "$VAR"/"${VAR}" value is an env ref resolved
      *   at open; a value that merely contains '$' is literal).
      * dynamic: the db.open(dsn) allowlist. Mirror of the Lua parser. */
-    JSValue db_val = JS_GetPropertyStr(ctx, manifest, "databases");
-    if (JS_IsObject(db_val) && !JS_IsNull(db_val) && !JS_IsArray(ctx, db_val)) {
+    JSValue db_val = mjs_own(ctx, manifest, "databases");
+    if (mjs_is_obj(ctx, db_val)) {
         out->databases.declared = 1;
 
-        JSValue named = JS_GetPropertyStr(ctx, db_val, "named");
-        if (JS_IsObject(named) && !JS_IsNull(named) && !JS_IsArray(ctx, named)) {
+        JSValue named = mjs_own(ctx, db_val, "named");
+        if (mjs_is_obj(ctx, named)) {
             JSPropertyEnum *props = NULL;
             uint32_t prop_count = 0;
             if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, named,
@@ -391,8 +454,13 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                             JS_FreeAtom(ctx, props[j].atom);
                         break;
                     }
-                    const char *name = JS_AtomToCString(ctx, props[i].atom);
-                    JSValue v_val = JS_GetProperty(ctx, named, props[i].atom);
+                    size_t name_len = 0;
+                    const char *name = JS_AtomToCStringLen(ctx, &name_len, props[i].atom);
+                    if (name && memchr(name, '\0', name_len)) {   /* "a\0b" is not "a" */
+                        JS_FreeCString(ctx, name);
+                        name = NULL;
+                    }
+                    JSValue v_val = mjs_own_atom(ctx, named, props[i].atom);
                     const char *dsn_copy = NULL;
                     if (JS_IsString(v_val)) {
                         const char *s = mjs_str(ctx, v_val);
@@ -419,8 +487,8 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         }
         JS_FreeValue(ctx, named);
 
-        JSValue dyn = JS_GetPropertyStr(ctx, db_val, "dynamic");
-        if (JS_IsObject(dyn) && !JS_IsNull(dyn) && !JS_IsArray(ctx, dyn)) {
+        JSValue dyn = mjs_own(ctx, db_val, "dynamic");
+        if (mjs_is_obj(ctx, dyn)) {
             out->databases.dynamic.declared = 1;
             out->databases.dynamic.host_count =
                 read_js_string_array(ctx, dyn, "hosts",
@@ -433,7 +501,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         }
         JS_FreeValue(ctx, dyn);
 
-        JSValue internal = JS_GetPropertyStr(ctx, db_val, "internal");
+        JSValue internal = mjs_own(ctx, db_val, "internal");
         if (JS_IsString(internal)) {
             const char *s = mjs_str(ctx, internal);
             if (s && s[0])
@@ -454,11 +522,11 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     /* kv: { dynamic: { hosts: [...], schemes: [...] } }
      * The kv.open({backend:"valkey", dsn}) allowlist (mirror of databases.dynamic
      * and the Lua parser). Every KV scheme is a network scheme gated by hosts. */
-    JSValue kv_val = JS_GetPropertyStr(ctx, manifest, "kv");
-    if (JS_IsObject(kv_val) && !JS_IsNull(kv_val) && !JS_IsArray(ctx, kv_val)) {
+    JSValue kv_val = mjs_own(ctx, manifest, "kv");
+    if (mjs_is_obj(ctx, kv_val)) {
         out->kv.declared = 1;
-        JSValue kdyn = JS_GetPropertyStr(ctx, kv_val, "dynamic");
-        if (JS_IsObject(kdyn) && !JS_IsNull(kdyn) && !JS_IsArray(ctx, kdyn)) {
+        JSValue kdyn = mjs_own(ctx, kv_val, "dynamic");
+        if (mjs_is_obj(ctx, kdyn)) {
             out->kv.dynamic.declared = 1;
             out->kv.dynamic.host_count =
                 read_js_string_array(ctx, kdyn, "hosts",
@@ -476,10 +544,10 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     /* allowDynamicCode: true - opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox.
      * Also accept the snake_case form for parity with the Lua manifest. */
-    JSValue adc_val = JS_GetPropertyStr(ctx, manifest, "allowDynamicCode");
+    JSValue adc_val = mjs_own(ctx, manifest, "allowDynamicCode");
     if (JS_IsUndefined(adc_val)) {
         JS_FreeValue(ctx, adc_val);
-        adc_val = JS_GetPropertyStr(ctx, manifest, "allow_dynamic_code");
+        adc_val = mjs_own(ctx, manifest, "allow_dynamic_code");
     }
     if (JS_IsBool(adc_val))
         out->allow_dynamic_code = JS_ToBool(ctx, adc_val);
@@ -489,10 +557,10 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                  "will fail closed unless --no-sandbox is set");
 
     /* allowDynamicLibraries: true - opt-in to dlopen() of native libs. */
-    JSValue adl_val = JS_GetPropertyStr(ctx, manifest, "allowDynamicLibraries");
+    JSValue adl_val = mjs_own(ctx, manifest, "allowDynamicLibraries");
     if (JS_IsUndefined(adl_val)) {
         JS_FreeValue(ctx, adl_val);
-        adl_val = JS_GetPropertyStr(ctx, manifest, "allow_dynamic_libraries");
+        adl_val = mjs_own(ctx, manifest, "allow_dynamic_libraries");
     }
     if (JS_IsBool(adl_val))
         out->allow_dynamic_libraries = JS_ToBool(ctx, adl_val);
@@ -599,9 +667,16 @@ static int mj_value(JSContext *ctx, MjBuf *b, JSValueConst v, int depth)
             if (!first) mj_put(b, ",", 1);
             first = 0;
             if (!is_arr) {
-                const char *k = JS_AtomToCString(ctx, tab[i].atom);
+                /* Length-exact: a key with a NUL ("hosts\0") was cut at
+                 * the NUL and encoded as a second "hosts" (L3). */
+                size_t kl = 0;
+                const char *k = JS_AtomToCStringLen(ctx, &kl, tab[i].atom);
                 if (!k) { JS_FreeValue(ctx, JS_GetException(ctx)); rc = -1; }
-                else { mj_str(b, k, strlen(k)); mj_put(b, ":", 1); JS_FreeCString(ctx, k); }
+                else {
+                    if (memchr(k, '\0', kl)) rc = -1;
+                    else { mj_str(b, k, kl); mj_put(b, ":", 1); }
+                    JS_FreeCString(ctx, k);
+                }
             }
             if (rc == 0) rc = mj_value(ctx, b, d.value, depth + 1);
         }
@@ -619,24 +694,13 @@ int hl_manifest_json_js(JSContext *ctx, char **out, size_t *out_len)
 {
     *out = NULL;
     *out_len = 0;
-    JSValue g = JS_GetGlobalObject(ctx);
-    JSAtom a = JS_NewAtom(ctx, "__hull_manifest");
-    JSPropertyDescriptor d;
-    int has = JS_GetOwnProperty(ctx, &d, g, a);
-    JS_FreeAtom(ctx, a);
-    JS_FreeValue(ctx, g);
-    if (has < 0) { JS_FreeValue(ctx, JS_GetException(ctx)); return -1; }
-    if (!has) return 0;
-    JS_FreeValue(ctx, d.getter);
-    JS_FreeValue(ctx, d.setter);
-    if ((d.flags & JS_PROP_GETSET) || JS_IsUndefined(d.value) || JS_IsNull(d.value)) {
-        int bad = (d.flags & JS_PROP_GETSET) != 0;
-        JS_FreeValue(ctx, d.value);
-        return bad ? -1 : 0;
-    }
+    /* The same C-held value the extractor reads (mjs_stored). */
+    JSValue m = mjs_stored(ctx);
+    if (JS_IsUndefined(m)) return 0;
+    if (!mjs_is_obj(ctx, m)) { JS_FreeValue(ctx, m); return -1; }
     MjBuf b = {0};
-    int rc = mj_value(ctx, &b, d.value, 0);
-    JS_FreeValue(ctx, d.value);
+    int rc = mj_value(ctx, &b, m, 0);
+    JS_FreeValue(ctx, m);
     if (rc != 0 || b.oom || !b.p) { free(b.p); return -1; }
     *out = b.p;
     *out_len = b.len;

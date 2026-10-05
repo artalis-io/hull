@@ -129,7 +129,8 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
             params[i].d = d;
             break;
         }
-        case JS_TAG_STRING: {
+        case JS_TAG_STRING:
+        case JS_TAG_STRING_ROPE: { /* a concatenation result (QuickJS 2025+) */
             size_t slen;
             const char *s = JS_ToCStringLen(ctx, &slen, v);
             params[i].type = HL_TYPE_TEXT;
@@ -1115,6 +1116,43 @@ static void js_set_dialect(JSContext *ctx, JSValue obj, const HlDbBackend *be)
     JS_SetPropertyStr(ctx, obj, "dialect", d);
 }
 
+/* Make a connection object tamper-proof: every own property non-writable
+ * and non-configurable, no new ones, and the same for its async / udf /
+ * dialect sub-objects. The `_hull_*` check trusts a call whose `this` is a
+ * real connection and whose caller is a stdlib frame; an extensible
+ * connection let app code store `exec` under an option's name
+ * (`c.retryOn = c.exec`) and hand the connection to a stdlib helper that
+ * calls that option as a method - running app SQL with stdlib identity
+ * (audit 6 H2). Returns 0, or -1 with an exception pending. */
+static int js_db_seal(JSContext *ctx, JSValueConst obj, int depth)
+{
+    if (depth > 4) return 0;
+    JSPropertyEnum *tab = NULL;
+    uint32_t n = 0;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &n, obj,
+                               JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) < 0)
+        return -1;
+    int rc = 0;
+    for (uint32_t i = 0; i < n && rc == 0; i++) {
+        JSValue v = JS_GetProperty(ctx, obj, tab[i].atom);
+        if (JS_IsException(v)) { rc = -1; break; }
+        if (JS_IsObject(v) && !JS_IsFunction(ctx, v) &&
+            js_db_seal(ctx, v, depth + 1) != 0)
+            rc = -1;
+        JS_FreeValue(ctx, v);
+        if (rc == 0 &&
+            JS_DefineProperty(ctx, obj, tab[i].atom, JS_UNDEFINED, JS_UNDEFINED,
+                              JS_UNDEFINED,
+                              JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE |
+                              JS_PROP_THROW) < 0)
+            rc = -1;
+    }
+    for (uint32_t i = 0; i < n; i++) JS_FreeAtom(ctx, tab[i].atom);
+    js_free(ctx, tab);
+    if (rc == 0 && JS_PreventExtensions(ctx, obj) < 0) rc = -1;
+    return rc;
+}
+
 static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
 {
     JSValue obj = JS_NewObjectClass(ctx, (int)hull_db_conn_class_id);
@@ -1166,6 +1204,10 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
                                         ? be->dialect.identity_column
                                         : "INTEGER PRIMARY KEY"));
     js_set_dialect(ctx, obj, be);
+    if (js_db_seal(ctx, obj, 0) != 0) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
     return obj;
 }
 
@@ -1273,6 +1315,10 @@ static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h,
                                         ? be->dialect.identity_column
                                         : "INTEGER PRIMARY KEY"));
     js_set_dialect(ctx, obj, be);
+    if (js_db_seal(ctx, obj, 0) != 0) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
     return obj;
 }
 
