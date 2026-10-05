@@ -42,6 +42,7 @@
 #include "hull/cap/fs.h"
 #include "hull/cap/env.h"
 #include "hull/cap/audit.h"
+#include "hull/cap/policy_seal.h"   /* hl_policy_seal_* - every build seals its policy */
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
 #include "hull/vfs.h"
@@ -56,7 +57,6 @@
 #include "hull/cap/http.h"
 #include "hull/ca_trust.h"
 #include "hull/cacert.h"
-#include "hull/cap/policy_seal.h"
 #include <keel/http_client.h>
 #include "hull/tls_transport.h"
 #endif

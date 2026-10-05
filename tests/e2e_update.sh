@@ -22,6 +22,12 @@ set -u
 
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 HULL="$SRCDIR/build/hull"
+
+# On Windows an APE's exit status reaches this shell shifted left by 8, so
+# `$?` is 0 for every outcome (jart/cosmopolitan#1521); hull_run recovers the
+# real one. A direct call everywhere else.
+. "$SRCDIR/tests/lib/hull_rc.sh"
+hull_rc_init "$HULL"
 PASS=0
 FAIL=0
 
@@ -124,8 +130,9 @@ echo ""
 echo "── unknown flags ──"
 # Refused up front (it used to be ignored, so a typo did nothing silently),
 # before any network access.
-RC=0
-OUT=$("$HULL" update --unknown-flag 2>&1) || RC=$?
+RC_OUT="${TMPDIR:-/tmp}/hull_update_rc.$$"
+RC=$(hull_run "$RC_OUT" "$HULL" update --unknown-flag)
+OUT=$(cat "$RC_OUT"); rm -f "$RC_OUT"
 assert_contains "unknown flag refused" "$OUT" "unknown option '--unknown-flag'"
 if [ "$RC" -ne 0 ]; then
     echo "  ok  unknown flag exits non-zero"; PASS=$((PASS + 1))
