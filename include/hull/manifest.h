@@ -315,6 +315,18 @@ typedef struct JSContext JSContext;
  */
 int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc);
 
+/*
+ * The declared manifest (globalThis.__hull_manifest) as JSON, encoded in C
+ * from OWN data properties only - for --verify-sig's policy check and for
+ * the manifest `hull build` signs. JSON.stringify consults `toJSON` through
+ * the prototype chain, so an app that set Object.prototype.toJSON after
+ * declaring its manifest changed the JSON the runtime compared.
+ * 0 with *out = malloc'd JSON (caller frees), or *out = NULL when no
+ * manifest was declared; -1 on an unencodable value (an accessor, a
+ * function, a non-finite number, nesting deeper than 32).
+ */
+int hl_manifest_json_js(JSContext *ctx, char **out, size_t *out_len);
+
 #endif /* HL_ENABLE_JS */
 
 /* Forward decl for the sealed-arena helper below. */

@@ -1525,9 +1525,12 @@ Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sa
 app code, so after load it compares the manifest the app actually declared (`app.manifest()`
 keeps a plain deep copy - no metatables in Lua, frozen and non-writable in JS; in Lua app code
 cannot reach it, `app.get_manifest()` returns another copy) with the signed `manifest`,
-structurally, and the resolved module set with `modules_resolved`. In Lua both that JSON and the
-JSON `hull build` signs are encoded in C from the stored copy with raw accessors
-(`runtime/lua/manifest_json.c`), never by the app-replaceable `json` module
+structurally, and the resolved module set with `modules_resolved`. Both that JSON and the
+JSON `hull build` signs are encoded in C from the stored copy, never by app-reachable code: in Lua
+with raw accessors (`runtime/lua/manifest_json.c`), not the app-replaceable `json` module; in JS
+from own data properties (`hl_manifest_json_js`, `manifest_js.c`), not `JSON.stringify` (which
+follows `Object.prototype.toJSON`). The JS copy's plain objects also have a null prototype, so an
+inherited `Object.prototype.hosts` never reaches the enforced policy
 (`hl_sig_check_runtime_policy`); any difference refuses to start. The signature is verified,
 and the phase-1 sandbox applied, before the app context runs migrations. §5b also requires the
 per-arch `arch_hashes` (the platform archive the build cross-checked) to be present and to match

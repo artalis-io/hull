@@ -7188,6 +7188,51 @@ UTEST(js_audit5, a_handler_over_budget_is_answered_500)
 /* L2: methods returned JS_EXCEPTION with nothing thrown - the app saw
  * `null` as the error. L4: req.header / req.headers resolved names through
  * Object.prototype. L3: a query key was cut at an encoded NUL. */
+/* The manifest JSON --verify-sig compares (and hull build signs) is encoded
+ * in C from own data properties, and the stored copy's plain objects have no
+ * prototype: an app that later sets Object.prototype.toJSON or
+ * Object.prototype.hosts changes neither the JSON nor the enforced policy
+ * (audit 5 H1, JS side). */
+UTEST(js_audit5, manifest_ignores_prototype_tampering)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ env: ['PORT'], fs: { read: ['/data'] } });\n"
+        "Object.prototype.toJSON = function () { return {}; };\n"
+        "Object.prototype.hosts = ['*'];\n"
+        "Object.prototype.write = ['/'];\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *j = NULL;
+    size_t jl = 0;
+    ASSERT_EQ(hl_manifest_json_js(js.ctx, &j, &jl), 0);
+    ASSERT_NE(j, NULL);
+    EXPECT_NE(strstr(j, "\"env\":[\"PORT\"]"), NULL);
+    EXPECT_EQ(strstr(j, "hosts"), NULL);
+    EXPECT_EQ(strstr(j, "write"), NULL);
+    free(j);
+
+    HlManifest m;
+    ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+    EXPECT_EQ(m.hosts_count, 0);
+    EXPECT_EQ(m.fs_write_count, 0);
+    EXPECT_EQ(m.env_count, 1);
+    hl_manifest_free(&m);
+
+    static const char undo[] =
+        "delete Object.prototype.toJSON; delete Object.prototype.hosts;"
+        "delete Object.prototype.write;";
+    JS_FreeValue(js.ctx, JS_Eval(js.ctx, undo, sizeof undo - 1, "<c>",
+                                 JS_EVAL_TYPE_GLOBAL));
+    cleanup_js();
+}
+
 UTEST(js_audit5, request_and_response_binding_edges)
 {
     init_js();

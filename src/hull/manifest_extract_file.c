@@ -60,6 +60,7 @@ int hl_manifest_extract_write_result(const char *out_path, const char *status,
 #ifdef HL_ENABLE_JS
 
 #include "hull/runtime/js.h"
+#include "hull/manifest.h"         /* hl_manifest_json_js */
 #include "hull/stdlib_feature.h"   /* hl_platform_vfs_init / _dispose */
 #include "hull/vfs.h"              /* HlVfs */
 #include "quickjs.h"
@@ -164,40 +165,20 @@ int hl_manifest_extract_js_in_process(const char *path,
             goto cleanup;   /* rc stays 0 for a valid manifest-less app */
         }
 
-        JSValue json = JS_JSONStringify(ctx, manifest, JS_UNDEFINED, JS_UNDEFINED);
         JS_FreeValue(ctx, manifest);
-        if (JS_IsException(json)) {
-            JS_FreeValue(ctx, json);
-            if (out_err) *out_err = strdup_safe("JSON.stringify(manifest) failed");
-            rc = -1;
-            goto cleanup;
-        }
-
-        const char *json_str = JS_ToCStringLen(ctx, &json_len, json);
-        if (!json_str) {
-            JS_FreeValue(ctx, json);
-            if (out_err) *out_err = strdup_safe(
-                "cannot convert JSON value to string");
-            rc = -1;
-            goto cleanup;
-        }
-
-        /* Heap-copy the JSON BEFORE tearing down the JS runtime - the
-         * cstring lifetime ends with JS_FreeCString. */
-        copy = malloc(json_len + 1);
-        if (!copy) {
-            JS_FreeCString(ctx, json_str);
-            JS_FreeValue(ctx, json);
-            if (out_err) *out_err = strdup_safe("out of memory");
+        /* The same C encoder the runtime's --verify-sig check uses
+         * (hl_manifest_json_js: own data properties, no toJSON), so the
+         * manifest signed here is the one compared at startup. */
+        if (hl_manifest_json_js(ctx, &copy, &json_len) != 0 || !copy) {
+            free(copy);
+            copy = NULL;
             json_len = 0;
+            if (out_err) *out_err = strdup_safe(
+                "app.manifest holds a value that is not plain JSON data "
+                "(an accessor, a function or a non-finite number)");
             rc = -1;
             goto cleanup;
         }
-        memcpy(copy, json_str, json_len);
-        copy[json_len] = '\0';
-
-        JS_FreeCString(ctx, json_str);
-        JS_FreeValue(ctx, json);
     }
 
 cleanup:
