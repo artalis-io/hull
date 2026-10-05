@@ -629,6 +629,11 @@ $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 $(BUILDDIR)/test_runtime_flags: $(TESTDIR)/hull/test_runtime_flags.c $(INCDIR)/hull/runtime_flags.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $<
 
+# The kernel-grant resolver (hl_sandbox_resolve_grant) in sandbox.c.
+$(BUILDDIR)/test_sandbox_grant: $(TESTDIR)/hull/test_sandbox_grant.c $(SANDBOX_OBJ) $(PLEDGE_OBJS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
+		$(SANDBOX_OBJ) $(PLEDGE_OBJS) $(TEST_COMMON_LIBS) $(LDFLAGS)
+
 $(BUILDDIR)/test_hex: $(TESTDIR)/hull/test_hex.c $(HEX_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HEX_OBJ)
 

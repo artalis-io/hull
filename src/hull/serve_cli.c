@@ -118,10 +118,13 @@ static int cli_parse_args(int argc, char **argv,
     *out_ca_override = NULL;
 
     for (int i = 1; i < argc; i++) {
-        /* --hull-<name> and the built-binary rule: include/hull/runtime_flags.h */
+        /* --hull-<name> and the built-binary rule: include/hull/runtime_flags.h.
+         * Only the downgrade options this runner implements are reserved; the
+         * rest (-s, -m, --tls-cert, ...) are a built app's own arguments. */
         int prefixed = hl_runtime_flag_unprefix(&argv[i]);
         if (prefixed < 0 ||
-            hl_runtime_flag_check(argv[i], prefixed, embedded_app_present()) != 0)
+            hl_runtime_flag_check(argv[i], prefixed, embedded_app_present(),
+                                  hl_runtime_flag_cli_taken()) != 0)
             return -2;
         if (strcmp(argv[i], "--") == 0) {
             *out_app_argv = &argv[i + 1];
@@ -264,6 +267,32 @@ static int hl_check_signed_policy(HlRuntime *rt)
         return -1;
     }
     return 0;
+}
+
+/* Every error exit after the app context exists, in the one order teardown
+ * may run in. The runtime's async pointers are detached while the runtime
+ * still exists (it lives in a page hl_app_context_free unmaps, so writing it
+ * afterwards was a use-after-free); the pool goes before the context and the
+ * backend after it (the runtime's finalizers still use the loop); the seal
+ * arenas go LAST, because the runtime's module_set, and the cap configs and
+ * policy roots, point into them until the context is gone. NULL arenas /
+ * manifest are skipped. Always returns 1 (the exit code). */
+static int cli_fail(HlAppContext *ctx, HlRuntime *rt,
+                    const HlAsyncBackend *be, HlAsyncBackendCtx *async_ctx,
+                    HlAsyncBackendPool *pool, HlManifest *manifest,
+                    ShSealArena *cfg_arena, ShSealArena *seal_arena)
+{
+    if (rt) {
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+    }
+    if (pool) be->pool_free(pool);
+    if (manifest) hl_manifest_free(manifest);
+    hl_app_context_free(ctx);
+    be->free(async_ctx);
+    if (cfg_arena) sh_seal_arena_destroy(cfg_arena);
+    if (seal_arena) sh_seal_arena_destroy(seal_arena);
+    return 1;
 }
 
 /* Weak default: the Keel-free app.main runner. serve.c provides a STRONG
@@ -444,12 +473,7 @@ int hull_serve(int argc, char **argv)
             "compiled with HL_ENABLE_HTTP_SERVER=0 and cannot serve "
             "HTTP. Either add app.main(fn) to your app, or rebuild "
             "hull with HL_ENABLE_HTTP_SERVER=1.\n");
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-        if (pool) be->pool_free(pool);
-        hl_app_context_free(ctx);
-        be->free(async_ctx);   /* last: the runtime's finalizers still use it */
-        return 1;
+        return cli_fail(ctx, rt, be, async_ctx, pool, NULL, NULL, NULL);
     }
 
     /* Sandbox: extract manifest + apply policy. The runtime gates were
@@ -478,13 +502,7 @@ int hull_serve(int argc, char **argv)
     char ref_err[512];
     if (hl_manifest_check_env_refs(&manifest, ref_err, sizeof ref_err) != 0) {
         log_error("[hull:cli] %s", ref_err);
-        hl_manifest_free(&manifest);
-        hl_app_context_free(ctx);
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-        if (pool) be->pool_free(pool);
-        be->free(async_ctx);
-        return 1;
+        return cli_fail(ctx, rt, be, async_ctx, pool, &manifest, NULL, NULL);
     }
     ShSealArena seal_arena;
     if (sh_seal_arena_init(&seal_arena,
@@ -492,13 +510,7 @@ int hull_serve(int argc, char **argv)
                            hl_manifest_seal_bytes(&manifest),
                            "manifest-policy") != 0) {
         log_error("[hull:cli] seal arena init failed (mmap)");
-        hl_manifest_free(&manifest);
-        hl_app_context_free(ctx);
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-        if (pool) be->pool_free(pool);
-        be->free(async_ctx);
-        return 1;
+        return cli_fail(ctx, rt, be, async_ctx, pool, &manifest, NULL, NULL);
     }
     /* An app with no manifest runs with the zeroed, deny-everything policy:
      * there are no strings to seal (hl_manifest_seal refuses an absent one,
@@ -507,14 +519,8 @@ int hull_serve(int argc, char **argv)
         HlManifest sealed;
         if (hl_manifest_seal(&sealed, &manifest, &seal_arena) != 0) {
             log_error("[hull:cli] manifest seal failed (arena OOM?)");
-            sh_seal_arena_destroy(&seal_arena);
-            hl_manifest_free(&manifest);
-            hl_app_context_free(ctx);
-            rt->async_ctx = NULL;
-            rt->thread_pool = NULL;
-            if (pool) be->pool_free(pool);
-            be->free(async_ctx);
-            return 1;
+            return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                            NULL, &seal_arena);
         }
         /* Free the allocator-backed strings, then take the sealed copy. Its
          * `alloc` is NULL, so the hl_manifest_free below is a safe no-op for
@@ -532,26 +538,15 @@ int hull_serve(int argc, char **argv)
                                 _Alignof(HlResolvedModuleSet));
         if (!resolved) {
             log_error("[hull:cli] seal arena alloc(module_set) failed");
-            sh_seal_arena_destroy(&seal_arena);
-            hl_app_context_free(ctx);
-            rt->async_ctx = NULL;
-            rt->thread_pool = NULL;
-            if (pool) be->pool_free(pool);
-            be->free(async_ctx);
-            return 1;
+            return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                            NULL, &seal_arena);
         }
         memcpy(resolved, rt->module_set, sizeof(HlResolvedModuleSet));
         rt->module_set = resolved;
     }
-    if (xo.verify_sig && hl_check_signed_policy(rt) != 0) {
-        sh_seal_arena_destroy(&seal_arena);
-        hl_app_context_free(ctx);
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-        if (pool) be->pool_free(pool);
-        be->free(async_ctx);
-        return 1;
-    }
+    if (xo.verify_sig && hl_check_signed_policy(rt) != 0)
+        return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                        NULL, &seal_arena);
     /* The manifest STRUCT as well, not only its strings: its pointer arrays
      * and counts are the allowlists (hosts[], hosts_count, ...), and a copy
      * on the stack let a write re-count or repoint one. Everything wired
@@ -561,23 +556,13 @@ int hull_serve(int argc, char **argv)
                                                     sizeof manifest);
     if (!policy) {
         log_error("[hull:cli] seal arena alloc(manifest) failed");
-        sh_seal_arena_destroy(&seal_arena);
-        hl_app_context_free(ctx);
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-        if (pool) be->pool_free(pool);
-        be->free(async_ctx);
-        return 1;
+        return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                        NULL, &seal_arena);
     }
     if (sh_seal_arena_seal(&seal_arena) != 0) {
         log_error("[hull:cli] manifest seal (mprotect) failed");
-        sh_seal_arena_destroy(&seal_arena);
-        hl_app_context_free(ctx);
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-        if (pool) be->pool_free(pool);
-        be->free(async_ctx);
-        return 1;
+        return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                        NULL, &seal_arena);
     }
 
     /* Wire per-capability configs from the manifest. serve.c does this in
@@ -679,14 +664,8 @@ int hull_serve(int argc, char **argv)
     if (hl_ca_bundle_seal_active() != 0) {
         log_error("[hull:cli] could not seal the CA trust anchor");
         if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-        if (pool) be->pool_free(pool);
-        hl_manifest_free(&manifest);
-        hl_app_context_free(ctx);
-        be->free(async_ctx);   /* last: the runtime's finalizers still use it */
-        sh_seal_arena_destroy(&seal_arena);
-        return 1;
+        return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                        NULL, &seal_arena);
     }
 
     if (manifest.hosts_count > 0) {
@@ -708,14 +687,8 @@ int hull_serve(int argc, char **argv)
 #ifdef HL_ENABLE_HTTP_CLIENT
         if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
 #endif
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-        if (pool) be->pool_free(pool);
-        hl_manifest_free(&manifest);
-        hl_app_context_free(ctx);
-        be->free(async_ctx);   /* last: the runtime's finalizers still use it */
-        sh_seal_arena_destroy(&seal_arena);
-        return 1;
+        return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                        NULL, &seal_arena);
     }
     /* Then the roots that point at all of it (cap/policy_seal.h). */
     if (hl_policy_seal_runtime(rt) != 0
@@ -727,15 +700,8 @@ int hull_serve(int argc, char **argv)
 #ifdef HL_ENABLE_HTTP_CLIENT
         if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
 #endif
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-        if (pool) be->pool_free(pool);
-        hl_manifest_free(&manifest);
-        hl_app_context_free(ctx);
-        be->free(async_ctx);   /* last: the runtime's finalizers still use it */
-        sh_seal_arena_destroy(&cfg_arena);
-        sh_seal_arena_destroy(&seal_arena);
-        return 1;
+        return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                        &cfg_arena, &seal_arena);
     }
 
     if (!no_sandbox) {
@@ -751,16 +717,8 @@ int hull_serve(int argc, char **argv)
 #ifdef HL_ENABLE_HTTP_CLIENT
             if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
 #endif
-            rt->async_ctx = NULL;
-            rt->thread_pool = NULL;
-            if (pool) be->pool_free(pool);
-            hl_manifest_free(&manifest);
-            hl_app_context_free(ctx);
-            be->free(async_ctx);   /* last: the runtime's finalizers still use it */
-            /* The arenas outlive every consumer that aliases them. */
-            sh_seal_arena_destroy(&cfg_arena);
-            sh_seal_arena_destroy(&seal_arena);
-            return 1;
+            return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                            &cfg_arena, &seal_arena);
         }
     }
 

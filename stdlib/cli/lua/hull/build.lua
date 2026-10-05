@@ -2649,11 +2649,10 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             composed_assets = composed_assets,
         }
 
-        -- Compute binary_hash (SHA256 of the linked output binary)
-        local binary_data = read_file(opts.output)
-        if binary_data then
-            sign_ctx.binary_hash = hex.encode(crypto.sha256(binary_data))
-        end
+        -- Compute binary_hash (SHA256 of the linked output binary), streamed
+        -- in C: the binary can exceed the tool VM's 64 MB heap (a
+        -- --with=duckdb app), which reading it whole would need.
+        sign_ctx.binary_hash = tool.sha256_file(opts.output)
 
         sign_app(opts.app_dir, opts.sign, sign_ctx, {
             js = js_files,

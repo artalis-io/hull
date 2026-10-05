@@ -1189,9 +1189,12 @@ hull keygen | build | verify | inspect | manifest | test | new | init | dev | ej
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH
 Every runtime flag also takes the spelling --hull-<name> (--hull-d PATH = -d PATH). In a BUILT binary the flags that weaken
 the process (--no-sandbox, --allow-degraded-sandbox, --no-ca-bundle/--skip-ca-bundle, --ca-bundle, --no-verify-platform,
---agent-api, --max-instructions, -b, -d, -m, -M, -s, --tls-cert, --tls-key, --wasm-gas/-heap/-stack/-max-input/-max-output,
---body-max-size) are taken ONLY as --hull-<name>; a bare one is refused, since a built binary cannot tell an
-operator's option from one of its app's arguments (include/hull/runtime_flags.h, docs/cli_mode.md). A --hull-<name> the
+--agent-api, --max-instructions, --max-connections, -b, -d, -m, -M, -s, --tls-cert, --tls-key,
+--wasm-gas/-heap/-stack/-timeout-ms/-max-input/-max-output, --body-max-size) are taken ONLY as --hull-<name>; a bare one
+is refused, since a built binary cannot tell an operator's option from one of its app's arguments
+(include/hull/runtime_flags.h, docs/cli_mode.md). Only the flags the RUNNER implements are reserved: the app.main runner
+(serve_cli.c, a built app without HTTP) has no -s/-m/-M/-b/TLS/WASM/body/connection/agent-api options, so there those are
+the app's own arguments (hl_runtime_flag_cli_taken lists the ones it reserves). A --hull-<name> the
 parser does not take (unknown, or missing its value) is an error, never an app argument, and a one-letter name takes its
 value as the next argument (--hull-d PATH; --hull-d=PATH is refused).
 --agent-api additionally requires a loopback bind (its endpoints are unauthenticated).
@@ -1584,8 +1587,11 @@ the app, a file swapped after the startup check). The filesystem-mode startup ch
 refuses an unsigned file in `migrations/`, `compute/`, `shaders/`, `templates/` and
 `static/`. A built binary never loads compute modules or shaders from its working directory
 (as for migrations and static files). `hull verify` also checks `binary_hash` against the
-built binary (`--binary PATH`, default `<app_dir>/app`), fails when AOT entries could only be
-checked through a binary it did not find, and applies the §5b / §5c gethull checks.
+built binary (`--binary PATH`, default `<app_dir>/app`; hashed by streaming, `tool.sha256_file`,
+as `hull build --sign` computes it, so a binary larger than the tool VM's 64 MB heap is
+fine), fails when AOT entries could only be checked through a binary it did not find, refuses
+an unsigned file in `migrations/`, `compute/`, `shaders/`, `templates/` or `static/` (the scan
+`--verify-sig` runs), and applies the §5b / §5c gethull checks.
 
 **The app directory may not be `/`, or `$HOME` or above.** A built binary takes its app
 directory from its working directory; `hl_sandbox_apply` refuses `/` (that unveiled the whole

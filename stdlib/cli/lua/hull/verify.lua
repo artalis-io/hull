@@ -409,7 +409,54 @@ local function main()
         ::continue_files::
     end
 
+    -- Files the runtime would load from disk that the signature does not
+    -- cover - the scan --verify-sig runs at startup (signature.c
+    -- sig_scan_unsigned). The migration runner applies EVERY *.sql in
+    -- migrations/ and the compute loader prefers compute/<name>.aot.<arch>,
+    -- so a file planted beside a signed app ran although verify said OK.
+    -- (find_files skips dot-entries; the runtime's per-file disk gate still
+    -- refuses those.)
+    local unsigned = {}
+    local scans = {
+        { dir = "migrations", want = function(n)
+            return #n >= 5 and n:sub(-4) == ".sql" end },
+        { dir = "compute", want = function(n)
+            return (#n >= 6 and n:sub(-5) == ".wasm")
+                or n:find(".aot.", 1, true) ~= nil end },
+        { dir = "shaders", recurse = true },
+        { dir = "templates", recurse = true },
+        { dir = "static", recurse = true },
+    }
+    local root_prefix = app_dir .. "/"
+    for _, sc in ipairs(scans) do
+        local found, ferr = tool.find_files(root_prefix .. sc.dir, "*",
+                                            { include_vendor = true })
+        if ferr then
+            tool.stderr("  cannot scan " .. sc.dir .. "/: " .. ferr .. "\n")
+            issues = issues + 1
+        end
+        for _, full in ipairs(found or {}) do
+            local rel = full:sub(1, #root_prefix) == root_prefix
+                and full:sub(#root_prefix + 1) or full
+            local sub = rel:sub(#sc.dir + 2)
+            local base = sub:match("[^/]+$") or sub
+            if (sc.recurse or not sub:find("/", 1, true))
+               and (not sc.want or sc.want(base))
+               and not sig.files[rel] then
+                unsigned[#unsigned + 1] = rel
+            end
+        end
+    end
+
     -- Report file issues
+    if #unsigned > 0 then
+        tool.stderr("Unsigned files (the runtime would load them; "
+                    .. "--verify-sig refuses to start):\n")
+        for _, name in ipairs(unsigned) do
+            tool.stderr("  " .. name .. "\n")
+        end
+        issues = issues + #unsigned
+    end
     if #missing > 0 then
         tool.stderr("Missing files:\n")
         for _, name in ipairs(missing) do
@@ -433,9 +480,11 @@ local function main()
     if sig.binary_hash then
         local bin = opts.binary
             or (app_dir .. "/app" .. (tool.exe_suffix and tool.exe_suffix() or ""))
-        local bdata = read_file(bin)
-        if bdata then
-            local actual = hex.encode(crypto.sha256(bdata))
+        -- Streamed in C: a built binary (a --with=duckdb app) can be larger
+        -- than the tool VM's 64 MB heap, which read_file + crypto.sha256
+        -- would need whole.
+        local actual = tool.sha256_file(bin)
+        if actual then
             if actual ~= sig.binary_hash then
                 tool.stderr("Binary: MODIFIED - " .. bin .. " does not match binary_hash\n")
                 tool.stderr("    expected: " .. sig.binary_hash .. "\n")

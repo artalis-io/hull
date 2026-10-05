@@ -73,13 +73,16 @@ UTEST(runtime_flags, downgrades_need_the_prefix_in_a_built_binary)
         "--no-sandbox", "--ca-bundle=/x", "--max-instructions",
         "-b", "-d", "-m", "-M", "-s", "--tls-cert", "--tls-key",
         "--wasm-gas", "--wasm-heap", "--wasm-stack", "--wasm-max-input",
-        "--wasm-max-output", "--body-max-size", NULL
+        "--wasm-max-output", "--body-max-size",
+        /* Raise the WASM wall-clock bound (to 1 h) / the connection cap. */
+        "--wasm-timeout-ms", "--wasm-timeout-ms=3600000",
+        "--max-connections", NULL
     };
     for (int i = 0; down[i]; i++) {
         EXPECT_EQ(hl_runtime_flag_is_downgrade(down[i]), 1);
-        EXPECT_EQ(hl_runtime_flag_check(down[i], 0, 1), -1);   /* bare, built */
-        EXPECT_EQ(hl_runtime_flag_check(down[i], 1, 1), 0);    /* prefixed */
-        EXPECT_EQ(hl_runtime_flag_check(down[i], 0, 0), 0);    /* under hull */
+        EXPECT_EQ(hl_runtime_flag_check(down[i], 0, 1, NULL), -1);   /* bare, built */
+        EXPECT_EQ(hl_runtime_flag_check(down[i], 1, 1, NULL), 0);    /* prefixed */
+        EXPECT_EQ(hl_runtime_flag_check(down[i], 0, 0, NULL), 0);    /* under hull */
     }
     static const char *const ok[] = {
         "-p", "-l", "--no-migrate", "--verify-sig", "--audit", "-dx",
@@ -87,6 +90,36 @@ UTEST(runtime_flags, downgrades_need_the_prefix_in_a_built_binary)
     };
     for (int i = 0; ok[i]; i++)
         EXPECT_EQ(hl_runtime_flag_is_downgrade(ok[i]), 0);
+}
+
+/* The app.main runner (serve_cli.c) implements only some downgrade options.
+ * The rest are a built CLI tool's own arguments: refusing `./tool -s pat`
+ * protected nothing (the runner has no -s) and left no spelling that reached
+ * the app. The ones it does implement stay reserved. */
+UTEST(runtime_flags, cli_runner_reserves_only_what_it_implements)
+{
+    const char *const *cli = hl_runtime_flag_cli_taken();
+    static const char *const app_owned[] = {
+        "-s", "-m", "-M", "-b", "--tls-cert", "--tls-key", "--wasm-gas",
+        "--wasm-heap", "--wasm-stack", "--wasm-timeout-ms", "--wasm-max-input",
+        "--wasm-max-output", "--body-max-size", "--max-connections",
+        "--agent-api", NULL
+    };
+    for (int i = 0; app_owned[i]; i++) {
+        EXPECT_EQ(hl_runtime_flag_check(app_owned[i], 0, 1, cli), 0);
+        /* serve.c implements them all, so there they stay reserved. */
+        EXPECT_EQ(hl_runtime_flag_check(app_owned[i], 0, 1, NULL), -1);
+    }
+    static const char *const reserved[] = {
+        "--no-sandbox", "--allow-degraded-sandbox", "--no-ca-bundle",
+        "--skip-ca-bundle", "--ca-bundle", "--ca-bundle=/x",
+        "--no-verify-platform", "--max-instructions", "-d", NULL
+    };
+    for (int i = 0; reserved[i]; i++) {
+        EXPECT_EQ(hl_runtime_flag_check(reserved[i], 0, 1, cli), -1);
+        EXPECT_EQ(hl_runtime_flag_check(reserved[i], 1, 1, cli), 0);
+        EXPECT_EQ(hl_runtime_flag_is_downgrade(reserved[i]), 1);
+    }
 }
 
 UTEST(runtime_flags, unknown_prefixed_is_an_error)

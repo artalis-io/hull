@@ -400,7 +400,7 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
         /* --hull-<name> and the built-binary rule: include/hull/runtime_flags.h */
         int prefixed = hl_runtime_flag_unprefix(&argv[i]);
         if (prefixed < 0 ||
-            hl_runtime_flag_check(argv[i], prefixed, embedded_app_present()) != 0)
+            hl_runtime_flag_check(argv[i], prefixed, embedded_app_present(), NULL) != 0)
             return -1;
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             char *end;

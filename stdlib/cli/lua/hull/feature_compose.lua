@@ -241,17 +241,33 @@ function M.resolve_lib(libname, asset_name, ctx)
     -- signed manifest and the tar kept in the tools store
     -- (tool.bundle_verify) - an archive swapped in ~/.hull/tools after the
     -- install is refused, as a --with feature's is. See docs/musl_build.md.
+    -- With ctx.tmpdir (every build), it is copied there FIRST and the copy is
+    -- what is verified and returned, so the bytes linked are the bytes
+    -- checked: verifying in place and linking the bundle path later left a
+    -- window for a swap in between (as build.lua does for the musl platform
+    -- archive).
     if ctx.musl_dir and file_exists(ctx.musl_dir .. "/" .. libname) then
+        local src = ctx.musl_dir .. "/" .. libname
+        local use = src
+        if ctx.tmpdir then
+            use = ctx.tmpdir .. "/" .. libname
+            if not tool.copy(src, use) then
+                tool.stderr("hull build: cannot copy " .. src .. " into the "
+                            .. "build directory\n")
+                return nil, "bundle-verify-failed"
+            end
+        end
         local ok, why = true, nil
         if ctx.musl_verify ~= false then   -- off only with --no-verify-platform
-            ok, why = tool.bundle_verify(ctx.musl_dir, libname)
+            ok, why = tool.bundle_verify(ctx.musl_dir, libname,
+                                         use ~= src and use or nil)
         end
         if not ok then
-            tool.stderr("hull build: " .. ctx.musl_dir .. "/" .. libname
-                        .. " could not be re-verified: " .. tostring(why) .. "\n")
+            tool.stderr("hull build: " .. src .. " could not be re-verified: "
+                        .. tostring(why) .. "\n")
             return nil, "bundle-verify-failed"
         end
-        return ctx.musl_dir .. "/" .. libname, "musl"
+        return use, "musl"
     end
     -- Only the directory of the hull being run. ./build and ../build were
     -- relative to wherever `hull build` was started: a checkout or download
@@ -577,7 +593,8 @@ end
 function M.plan_mandatory(ctx)
     local rt = ctx.app_rt
     local rctx = { hull_dir = ctx.hull_dir or "", plat = ctx.plat,
-                   musl_dir = ctx.musl_dir, musl_verify = ctx.musl_verify }
+                   musl_dir = ctx.musl_dir, musl_verify = ctx.musl_verify,
+                   tmpdir = ctx.tmpdir }
     local plat_infix = ctx.plat or ""
 
     -- ── Compute the needs-gates (resolver + build-time signals) ──

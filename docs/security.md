@@ -526,6 +526,17 @@ C capability layer while explicitly accepting that filesystem paths lack the
 second, kernel-enforced Landlock boundary. This is safer than `--no-sandbox`,
 but it is not equivalent to the full Linux sandbox and is logged as degraded.
 
+**What a manifest `fs.write` grant opens at the kernel** (`hl_sandbox_resolve_grant`,
+the same rule for Landlock and Seatbelt): a `"dir/"` grant is that directory; a
+file grant in a subdirectory (`"out/result.json"`) is its parent directory, so the
+capability layer's temp-beside-then-rename write can create the temp; a file grant
+directly in the app directory (`"out.txt"`) is the file ALONE once it exists - the
+capability layer then rewrites it in place - so one top-level grant does not make
+`app.lua`, `migrations/` or `package.sig` writable. On the first run, before such a
+file exists, there is nothing narrower to grant than the app directory, and startup
+warns; put written files in a subdirectory to avoid that window. The capability
+layer enforces the exact path in every case.
+
 **Allowed pledge promises:** `stdio inet rpath wpath cpath flock dns` (dns only if hosts declared). Notably absent: `prot_exec`, `exec`, `proc`. These grant the very syscalls Hull's W^X policy forbids.
 
 **CVE classes prevented:**
