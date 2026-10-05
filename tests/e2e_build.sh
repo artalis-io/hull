@@ -441,6 +441,17 @@ mv "$WORKDIR/myapp/app.lua.bak" "$WORKDIR/myapp/app.lua"
 hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
 check_exit "verify passes after restore" 0 $RC
 
+# A file the runtime would load but the signature does not cover: --verify-sig
+# refuses to start on it, so verify must not report OK (audit 6 L4).
+mkdir -p "$WORKDIR/myapp/migrations"
+echo 'CREATE TABLE planted(x);' > "$WORKDIR/myapp/migrations/999_planted.sql"
+hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
+check_exit "verify refuses a planted unsigned migration (exit 1)" 1 $RC
+check_contains "verify names the unsigned file" "$VERIFY_OUT" "migrations/999_planted.sql"
+rm -f "$WORKDIR/myapp/migrations/999_planted.sql"
+hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
+check_exit "verify passes once it is removed" 0 $RC
+
 # ── Step 10: Multi-file app ──────────────────────────────────────────
 
 echo ""
