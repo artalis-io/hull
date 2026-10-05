@@ -35,7 +35,7 @@
 /* Buffer size for cross-platform path resolution. Big enough to
  * hold any realpath() output (PATH_MAX-bound) and any reasonable
  * app_dir + relpath concatenation. Used by
- * sandbox_resolve_manifest_path; the Apple-side SeatbeltScratch
+ * hl_sandbox_resolve_grant; the Apple-side SeatbeltScratch
  * has its own equivalent (SEATBELT_PATH_SIZE) for SBPL-time
  * scratch, kept separate so its name still telegraphs context. */
 #define SANDBOX_PATH_MAX  4096
@@ -58,8 +58,9 @@ _Static_assert(SANDBOX_PATH_MAX >= PATH_MAX,
  *      glob's literal directory; a "dir/" grant (created if absent,
  *      never through a symlink, so a lazily made blob root
  *      canonicalizes); for a file WRITE grant its parent directory
- *      (always - see below); else the path itself, or its parent when
- *      it does not exist yet. No component may be a symlink.
+ *      (always - see below) unless that parent is app_dir itself;
+ *      else the path itself, or its parent when it does not exist yet.
+ *      No component may be a symlink.
  *   4. realpath() the result into out_abs.
  *
  * Returns 0 on success (out_abs filled), -1 on rejection or
@@ -70,11 +71,8 @@ _Static_assert(SANDBOX_PATH_MAX >= PATH_MAX,
  * Platform-agnostic - both the seatbelt SBPL build (macOS) and
  * the unveil setup (Linux / OpenBSD / Cosmopolitan) call this.
  */
-static int sandbox_resolve_manifest_path(const char *app_dir,
-                                          const char *relpath,
-                                          char *out_abs,
-                                          size_t out_cap,
-                                          int for_write)
+int hl_sandbox_resolve_grant(const char *app_dir, const char *relpath,
+                             char *out_abs, size_t out_cap, int for_write)
 {
     if (!app_dir || !relpath || !out_abs) return -1;
     if (relpath[0] == '/' || relpath[0] == '\0') return -1;
@@ -148,18 +146,37 @@ static int sandbox_resolve_manifest_path(const char *app_dir,
             }
         }
     } else if (!is_glob) {
-        /* A file WRITE grant is always its parent directory, whether or not
-         * the file exists yet. It used to be the parent only while the file
-         * was absent: once it existed (every restart after the first write)
-         * the grant became the file alone, and on Landlock the cap layer's
-         * temp-beside-then-rename write lost MAKE_REG on the parent - and
-         * the in-place O_TRUNC fallback lacked TRUNCATE - so the grant
-         * stopped working. The capability layer keeps the exact rule. A
-         * read grant is the file itself when it exists. */
+        /* A file WRITE grant in a subdirectory is its parent directory,
+         * whether or not the file exists yet. It used to be the parent only
+         * while the file was absent: once it existed (every restart after
+         * the first write) the grant became the file alone, and on Landlock
+         * the cap layer's temp-beside-then-rename write lost MAKE_REG on the
+         * parent - and the in-place O_TRUNC fallback lacked TRUNCATE - so
+         * the grant stopped working. The capability layer keeps the exact
+         * rule.
+         *
+         * Not when that parent is app_dir itself: then a grant of one file
+         * ("out.txt") made the whole app directory - app.lua, migrations/,
+         * package.sig - kernel-writable for the life of the process. Such a
+         * file, once it exists, is granted alone: the temp beside it is
+         * refused, and the cap layer writes it in place (O_TRUNC, which 'w'
+         * covers). Before it exists there is nothing to grant but app_dir,
+         * so this first run is warned about. A read grant is the file
+         * itself when it exists. */
         struct stat st;
-        if (for_write || stat(buf, &st) != 0) {   /* the parent */
-            char *sl = strrchr(buf, '/');
-            if (!sl || (size_t)(sl - buf) < adir_len) return -1;
+        int exists = lstat(buf, &st) == 0;
+        char *sl = strrchr(buf, '/');
+        if (!sl || (size_t)(sl - buf) < adir_len) return -1;
+        int top_level = (size_t)(sl - buf) == adir_len;
+        if (for_write && top_level && exists && S_ISREG(st.st_mode)) {
+            /* the file alone */
+        } else if (for_write || !exists) {        /* the parent */
+            if (for_write && top_level)
+                log_warn("[sandbox] fs.write '%s' is not an existing file: "
+                         "the whole app directory is writable at the kernel "
+                         "level for this run (once it exists, the file "
+                         "alone). Put written files in a subdirectory to "
+                         "avoid this.", relpath);
             *sl = '\0';
         }
     }
@@ -499,9 +516,9 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
         /* Against app_dir, as fs.write is: realpath() alone resolved a
          * relative grant against the cwd - `hull /srv/app` run from / with
          * fs.read={"etc"} gave Seatbelt read access to /etc. */
-        if (sandbox_resolve_manifest_path(app_dir, policy->fs_read[i],
-                                           scratch->fs_read_real[i],
-                                           sizeof(scratch->fs_read_real[i]), 0) != 0) {
+        if (hl_sandbox_resolve_grant(app_dir, policy->fs_read[i],
+                                      scratch->fs_read_real[i],
+                                      sizeof(scratch->fs_read_real[i]), 0) != 0) {
             log_warn("[sandbox] fs.read path '%s' rejected (absolute "
                      "or contains '..') - skipping. Fix the manifest.",
                      policy->fs_read[i]);
@@ -527,9 +544,9 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
          * so realpath() can canonicalize even for lazily-created
          * directories. */
         const char *wpath = policy->fs_write[i];
-        if (sandbox_resolve_manifest_path(app_dir, wpath,
-                                           scratch->fs_write_real[i],
-                                           sizeof(scratch->fs_write_real[i]), 1) != 0) {
+        if (hl_sandbox_resolve_grant(app_dir, wpath,
+                                      scratch->fs_write_real[i],
+                                      sizeof(scratch->fs_write_real[i]), 1) != 0) {
             log_warn("[sandbox] fs.write path '%s' rejected (absolute "
                      "or contains '..') - skipping. Fix the manifest.",
                      wpath);
@@ -993,8 +1010,8 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      * app_dir under e.g. CI / hull build). */
     for (int i = 0; i < policy->fs_read_count; i++) {
         char abs[SANDBOX_PATH_MAX];
-        if (sandbox_resolve_manifest_path(app_dir, policy->fs_read[i],
-                                           abs, sizeof(abs), 0) != 0 ||
+        if (hl_sandbox_resolve_grant(app_dir, policy->fs_read[i],
+                                      abs, sizeof(abs), 0) != 0 ||
             unveil(abs, "r") != 0) {
             log_warn("[sandbox] unveil failed for read path: %s",
                      policy->fs_read[i]);
@@ -1003,8 +1020,8 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
 
     for (int i = 0; i < policy->fs_write_count; i++) {
         char abs[SANDBOX_PATH_MAX];
-        if (sandbox_resolve_manifest_path(app_dir, policy->fs_write[i],
-                                           abs, sizeof(abs), 1) != 0 ||
+        if (hl_sandbox_resolve_grant(app_dir, policy->fs_write[i],
+                                      abs, sizeof(abs), 1) != 0 ||
             unveil(abs, "rwc") != 0) {
             log_warn("[sandbox] unveil failed for write path: %s",
                      policy->fs_write[i]);

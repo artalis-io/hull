@@ -170,7 +170,10 @@ developer app signature. Each archive is re-verified at BUILD time, offline
 signature in the bundle directory (`.hull-bundle.*`), and `hull build` checks
 that signature against the embedded release key, reads the signed `.tar` back
 from the content-addressed tools store, and requires the archive it links to be
-byte-identical to that member of the tar - so an archive swapped in
+byte-identical to that member of the tar. Each archive (the platform library and
+every feature archive) is first copied into the build's temp directory, and the
+COPY is what is checked and linked, so nothing can swap it between the check and
+the link. An archive swapped in
 `~/.hull/tools` after the install is refused (reinstall a bundle installed by an
 older hull, which kept no record). A bundle you built and staged yourself
 (`scripts/build_musl_platform.sh`) has no install record either; build against it

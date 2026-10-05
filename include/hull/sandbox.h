@@ -194,4 +194,17 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
  */
 int hl_sandbox_kernel_available(void);
 
+/*
+ * The absolute path the kernel grant for a manifest fs.read (@p for_write 0)
+ * or fs.write (1) entry covers, resolved against @p app_dir: a glob's literal
+ * directory, a "dir/" grant (created if absent), a file write grant's parent
+ * directory - or the file alone when that parent is app_dir itself and the
+ * file exists, so one top-level grant does not make the app directory
+ * writable - else the path, or its parent when absent. No component may be a
+ * symlink. Exposed for tests; hl_sandbox_apply is the caller. 0, or -1 when
+ * the entry is refused (absolute, "..", a symlink, too long).
+ */
+int hl_sandbox_resolve_grant(const char *app_dir, const char *relpath,
+                             char *out_abs, size_t out_cap, int for_write);
+
 #endif /* HL_SANDBOX_H */

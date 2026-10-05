@@ -6,14 +6,21 @@
  * (a file name that happens to read "--no-sandbox"). So in a built binary
  * the options that WEAKEN the process - sandbox off, TLS verification off
  * or re-anchored, the platform check off, the agent API on, a resource
- * limit changed (instructions, -m/-M/-s, WASM gas/heap/stack/IO, body
- * size), the server exposed (-b, --tls-cert/--tls-key), a database path
- * granted to the sandbox (-d) - are taken only in their reserved spelling
- * `--hull-<name>` (`--hull-no-sandbox`, `--hull-ca-bundle PATH`,
- * `--hull-d PATH`). A bare one is refused, not passed to the app and not
- * honoured. Every option may be spelled `--hull-<name>`, under hull as well
- * (`--hull-d PATH` is `-d PATH`). A `--hull-<name>` the parser does not
+ * limit changed (instructions, connections, -m/-M/-s, WASM gas/heap/stack/
+ * timeout/IO, body size), the server exposed (-b, --tls-cert/--tls-key), a
+ * database path granted to the sandbox (-d) - are taken only in their
+ * reserved spelling `--hull-<name>` (`--hull-no-sandbox`, `--hull-ca-bundle
+ * PATH`, `--hull-d PATH`). A bare one is refused, not passed to the app and
+ * not honoured. Every option may be spelled `--hull-<name>`, under hull as
+ * well (`--hull-d PATH` is `-d PATH`). A `--hull-<name>` the parser does not
  * take is an error, never an app argument.
+ *
+ * The rule applies only to the options the RUNNER implements. The app.main
+ * runner (serve_cli.c, every built app without HTTP) has no -s, -m, -b, TLS
+ * or WASM options, so refusing those bare protected nothing and only took
+ * them from the app (`./tool -s pattern`): there they are the app's own
+ * arguments, like any option Hull does not take. Each runner passes the list
+ * of downgrade options it implements (serve.c: NULL, all of them).
  *
  * Shared by serve.c and serve_cli.c.
  *
@@ -82,28 +89,50 @@ static inline int hl_runtime_flag_unprefix(char **argp)
     return 1;
 }
 
-/* An option that weakens the process (see the header comment): turns a
- * kernel or TLS protection off, re-anchors trust, exposes the server (-b,
- * TLS key/cert), grants the sandbox a path (-d), or raises a resource
- * limit (-m/-M/-s, instructions, WASM gas/heap/stack/IO, body size). */
-static inline int hl_runtime_flag_is_downgrade(const char *a)
+/* @p a names one of @p names ("--x" or "--x=value"). */
+static inline int hl_runtime_flag_in(const char *a, const char *const *names)
 {
-    static const char *const names[] = {
-        "--no-sandbox", "--allow-degraded-sandbox", "--no-ca-bundle",
-        "--skip-ca-bundle", "--ca-bundle", "--no-verify-platform",
-        "--agent-api", "--max-instructions",
-        "-b", "-d", "-m", "-M", "-s",
-        "--tls-cert", "--tls-key",
-        "--wasm-gas", "--wasm-heap", "--wasm-stack",
-        "--wasm-max-input", "--wasm-max-output", "--body-max-size",
-        NULL
-    };
     for (int i = 0; names[i]; i++) {
         size_t l = strlen(names[i]);
         if (strncmp(a, names[i], l) == 0 && (a[l] == '\0' || a[l] == '='))
             return 1;
     }
     return 0;
+}
+
+/* An option that weakens the process (see the header comment): turns a
+ * kernel or TLS protection off, re-anchors trust, exposes the server (-b,
+ * TLS key/cert), grants the sandbox a path (-d), or raises a resource
+ * limit (-m/-M/-s, instructions, connections, WASM gas/heap/stack/timeout/
+ * IO, body size). */
+static inline int hl_runtime_flag_is_downgrade(const char *a)
+{
+    static const char *const names[] = {
+        "--no-sandbox", "--allow-degraded-sandbox", "--no-ca-bundle",
+        "--skip-ca-bundle", "--ca-bundle", "--no-verify-platform",
+        "--agent-api", "--max-instructions", "--max-connections",
+        "-b", "-d", "-m", "-M", "-s",
+        "--tls-cert", "--tls-key",
+        "--wasm-gas", "--wasm-heap", "--wasm-stack", "--wasm-timeout-ms",
+        "--wasm-max-input", "--wasm-max-output", "--body-max-size",
+        NULL
+    };
+    return hl_runtime_flag_in(a, names);
+}
+
+/* The downgrade options the app.main runner (serve_cli.c) implements. Keep it
+ * in step with cli_parse_args: a name listed here that the runner does not
+ * parse is refused bare for nothing, and one it parses but this list lacks is
+ * honoured bare in a built binary. */
+static inline const char *const *hl_runtime_flag_cli_taken(void)
+{
+    static const char *const names[] = {
+        "--no-sandbox", "--allow-degraded-sandbox", "--no-ca-bundle",
+        "--skip-ca-bundle", "--ca-bundle", "--no-verify-platform",
+        "--max-instructions", "-d",
+        NULL
+    };
+    return names;
 }
 
 /* A --hull-<name> option the parser did not take (unknown, or missing its
@@ -118,11 +147,15 @@ static inline int hl_runtime_flag_unknown(const char *plain)
     return -1;
 }
 
-/* In a built binary: refuse a bare downgrade option. 0 to go on, -1 after
+/* In a built binary: refuse a bare downgrade option that the runner
+ * implements (@p taken, NULL-terminated; NULL = every downgrade option). One
+ * the runner does not implement is left for the app. 0 to go on, -1 after
  * reporting it. */
-static inline int hl_runtime_flag_check(const char *a, int prefixed, int built)
+static inline int hl_runtime_flag_check(const char *a, int prefixed, int built,
+                                        const char *const *taken)
 {
     if (!built || prefixed || !hl_runtime_flag_is_downgrade(a)) return 0;
+    if (taken && !hl_runtime_flag_in(a, taken)) return 0;
     const char *n = a;
     while (*n == '-') n++;
     size_t dashes = (size_t)(n - a);

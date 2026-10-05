@@ -294,6 +294,126 @@ LUA
 
 run_main_hook_then_serve
 
+# ── A BUILT CLI tool (the app.main runner, serve_cli.c) ──────────────
+# `hull <app>` runs on the server runner; only a `hull build` of an app with no
+# HTTP module reaches serve_cli.c, so these build one. Skipped when hull has no
+# compiler it can drive (hull doctor's verdict, as in e2e_build.sh) or no
+# platform library: none embedded and no libhull_platform*.a beside it.
+can_build_cli() {
+    _doc=$("${HULL_BIN}" doctor --json 2>/dev/null || true)
+    case "$_doc" in
+        *'"build_compiler":null'*) return 1 ;;
+        *'"platform_embedded":"none"'*)
+            ls "$(dirname "${HULL_BIN}")"/libhull_platform*.a >/dev/null 2>&1 || return 1 ;;
+    esac
+    return 0
+}
+
+# build_cli <dir> [extra hull build args...] -> the built binary's path, or "".
+build_cli() {
+    _d="$1"; shift
+    _cc=""
+    hull_is_ape "${HULL_BIN}" && _cc="--compiler cosmocc"
+    # shellcheck disable=SC2086
+    "${HULL_BIN}" build --no-verify-platform $_cc "$@" -o "${_d}/tool" "${_d}" \
+        > "${_d}/build.log" 2>&1
+    for _b in "${_d}/tool" "${_d}/tool.com"; do
+        [ -f "$_b" ] && { echo "$_b"; return 0; }
+    done
+    echo ""
+}
+
+run_built_cli() {
+    echo "--- built app.main tool: error paths + its own options ---"
+    if ! can_build_cli; then
+        echo "  SKIP: no build compiler or platform library for hull build"
+        return 0
+    fi
+    hull_abs=$(cd "$(dirname "${HULL_BIN}")" && pwd)/$(basename "${HULL_BIN}")
+
+    # (audit 6 M2) Options the app.main runner does not implement are the
+    # tool's own arguments: they used to be refused as "spelled --hull-s",
+    # and --hull-s was then unknown, so no spelling reached the app.
+    d=$(mktemp -d)
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({})
+app.main(function(ctx)
+    ctx.stdout:write(table.concat(ctx.args, " ") .. "\n")
+    return 0
+end)
+LUA
+    bin=$(build_cli "$d")
+    if [ -z "$bin" ]; then
+        fail "built tool: hull build failed ($(tail -3 "${d}/build.log"))"
+    else
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" -s pattern -m msg --tls-cert c --wasm-gas 9)
+        expect_eq "built tool: -s/-m/--tls-cert/--wasm-gas reach the app (exit)" "0" "$rc"
+        case "$(cat "$HULL_RC_TMP")" in
+            *"-s pattern -m msg --tls-cert c --wasm-gas 9"*) pass "built tool: the app saw its options" ;;
+            *) fail "built tool: app options (got '$(cat "$HULL_RC_TMP")')" ;;
+        esac
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" --no-sandbox x)
+        expect_eq "built tool: a bare --no-sandbox is still refused" "1" "$rc"
+        case "$(cat "$HULL_RC_TMP")" in
+            *"--hull-no-sandbox"*) pass "built tool: refusal names --hull-no-sandbox" ;;
+            *) fail "built tool: --no-sandbox refusal (got '$(cat "$HULL_RC_TMP")')" ;;
+        esac
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" --hull-max-instructions 50000000 -- ok)
+        expect_eq "built tool: a --hull- option it implements is taken" "0" "$rc"
+    fi
+    rm -rf "$d"
+
+    # (audit 6 M1) An undeclared $VAR reference fails after the app context
+    # exists. The error path freed the context, then wrote the runtime it
+    # lived in (unmapped): SIGSEGV instead of exit 1.
+    d=$(mktemp -d)
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ hosts = { "$HULL_E2E_UNDECLARED_VAR" } })
+app.main(function() return 0 end)
+LUA
+    bin=$(build_cli "$d")
+    if [ -z "$bin" ]; then
+        fail "undeclared-ref tool: hull build failed ($(tail -3 "${d}/build.log"))"
+    else
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin")
+        expect_eq "built tool: undeclared \$VAR reference exits 1 (no crash)" "1" "$rc"
+        case "$(cat "$HULL_RC_TMP")" in
+            *HULL_E2E_UNDECLARED_VAR*) pass "built tool: the undeclared variable is named" ;;
+            *) fail "built tool: undeclared ref message (got '$(cat "$HULL_RC_TMP")')" ;;
+        esac
+    fi
+    rm -rf "$d"
+
+    # (audit 6 M1) --verify-sig with a manifest that differs at run time from
+    # the signed one (math.random is seeded per VM): the policy-check failure
+    # path destroyed the seal arena under the live module set, then wrote the
+    # freed runtime.
+    d=$(mktemp -d)
+    (cd "$d" && "$hull_abs" keygen dev >/dev/null 2>&1)
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ env = { "HULL_E2E_" .. math.random(1, 1000000000) } })
+app.main(function() return 0 end)
+LUA
+    if [ ! -f "${d}/dev.key" ]; then
+        fail "verify-sig tool: hull keygen failed"
+    else
+        bin=$(build_cli "$d" --sign "${d}/dev.key")
+        if [ -z "$bin" ]; then
+            fail "verify-sig tool: hull build failed ($(tail -3 "${d}/build.log"))"
+        else
+            rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" --verify-sig "${d}/dev.pub" --hull-no-verify-platform)
+            expect_eq "built tool: --verify-sig policy mismatch exits 1 (no crash)" "1" "$rc"
+            case "$(cat "$HULL_RC_TMP")" in
+                *"refusing to start"*) pass "built tool: the policy mismatch is reported" ;;
+                *) fail "built tool: verify-sig mismatch message (got '$(cat "$HULL_RC_TMP")')" ;;
+            esac
+        fi
+    fi
+    rm -rf "$d"
+}
+
+run_built_cli
+
 echo
 echo "${PASS}/$((PASS + FAIL)) CLI e2e tests passed"
 [ "${FAIL}" -eq 0 ]
