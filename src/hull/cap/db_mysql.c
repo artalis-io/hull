@@ -569,6 +569,41 @@ static int my_in_trans(const HlDbHandle *h)
     return s && (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS);
 }
 
+/* 1 when @p sql starts with the keyword @p kw (case-insensitive, then a
+ * non-identifier character or the end). */
+static int sql_starts_with_kw(const char *sql, const char *kw)
+{
+    if (!sql) return 0;
+    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
+    size_t n = strlen(kw);
+    if (strncasecmp(sql, kw, n) != 0) return 0;
+    char c = sql[n];
+    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+             (c >= '0' && c <= '9') || c == '_');
+}
+
+static int mysql_txn_raw(HlDbHandle *h, const char *sql);
+
+/* MySQL commits implicitly before and after DDL (CREATE / ALTER / DROP ...).
+ * Inside a db.batch that ended the batch's transaction, and every later
+ * statement autocommitted - then the batch reported its transaction lost
+ * (hl_db_batch_lost_), failing the stdlib's own idempotent schema batches.
+ * When a statement that is not itself COMMIT / ROLLBACK ends the transaction
+ * a batch holds, open a new one: what ran before the DDL is committed (MySQL
+ * semantics, which no client can change), and the rest of the batch is
+ * transactional again. A raw COMMIT / ROLLBACK is still reported as lost. */
+static void my_resume_after_implicit_commit(HlDbHandle *h, const char *sql,
+                                            int was, int rc)
+{
+    if (rc < 0 || !was || !h || h->batch_depth <= 0 || my_in_trans(h)) return;
+    HlDbMyCtx *s = h->ctx;
+    if (!s || s->txn_aborted) return;
+    if (sql_starts_with_kw(sql, "commit") || sql_starts_with_kw(sql, "rollback") ||
+        sql_starts_with_kw(sql, "end"))
+        return;
+    (void)mysql_txn_raw(h, "START TRANSACTION");
+}
+
 static int mysql_query(HlDbHandle *h, const char *sql,
                        const HlValue *params, int nparams,
                        HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
@@ -576,6 +611,7 @@ static int mysql_query(HlDbHandle *h, const char *sql,
     int was = my_in_trans(h);
     int rc = mysql_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
     if (h && h->ctx) my_note_failure(h->ctx, was, rc);
+    my_resume_after_implicit_commit(h, sql, was, rc);
     return rc;
 }
 
@@ -585,6 +621,7 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
     int was = my_in_trans(h);
     int rc = mysql_exec_raw(h, sql, params, nparams);
     if (h && h->ctx) my_note_failure(h->ctx, was, rc);
+    my_resume_after_implicit_commit(h, sql, was, rc);
     return rc;
 }
 
