@@ -21,6 +21,27 @@ diff --git a/core/iwasm/aot/aot_runtime.c b/core/iwasm/aot/aot_runtime.c
  
  #if WASM_ENABLE_MEMORY_TRACING != 0
      wasm_runtime_dump_module_inst_mem_consumption(
+diff --git a/core/iwasm/aot/aot_runtime.h b/core/iwasm/aot/aot_runtime.h
+--- a/core/iwasm/aot/aot_runtime.h
++++ b/core/iwasm/aot/aot_runtime.h
+@@ -36,6 +36,17 @@
+ #define WASM_FEATURE_FRAME_PER_FUNCTION (1 << 12)
+ #define WASM_FEATURE_FRAME_NO_FUNC_IDX (1 << 13)
+ 
++/* Hull ext (patch 0007): wamrc writes this into AOTTargetInfo.reserved of every
++ * AOT file, vouching that its code carries the loop-header terminate check
++ * (aot_compile_check_terminate). The loader ignores the field; the embedder
++ * (Hull: include/hull/cap/wasm_aot_stamp.h) refuses AOT code without it. High
++ * 32 bits "HULL", low 32 bits the stamp version - bump it in both places when
++ * the contract changes. */
++#define HULL_AOT_STAMP_MAGIC 0x48554C4CU
++#define HULL_AOT_STAMP_VERSION 1U
++#define HULL_AOT_STAMP \
++    (((uint64)HULL_AOT_STAMP_MAGIC << 32) | (uint64)HULL_AOT_STAMP_VERSION)
++
+ typedef enum AOTSectionType {
+     AOT_SECTION_TYPE_TARGET_INFO = 0,
+     AOT_SECTION_TYPE_INIT_DATA = 1,
 diff --git a/core/iwasm/common/wasm_runtime_common.c b/core/iwasm/common/wasm_runtime_common.c
 --- a/core/iwasm/common/wasm_runtime_common.c
 +++ b/core/iwasm/common/wasm_runtime_common.c
@@ -64,6 +85,19 @@ diff --git a/core/iwasm/common/wasm_runtime_common.h b/core/iwasm/common/wasm_ru
  /* Internal API */
  void
  wasm_runtime_set_custom_data_internal(WASMModuleInstanceCommon *module_inst,
+diff --git a/core/iwasm/compilation/aot_emit_aot_file.c b/core/iwasm/compilation/aot_emit_aot_file.c
+--- a/core/iwasm/compilation/aot_emit_aot_file.c
++++ b/core/iwasm/compilation/aot_emit_aot_file.c
+@@ -4513,6 +4513,9 @@
+     if (!comp_ctx->call_stack_features.func_idx) {
+         obj_data->target_info.feature_flags |= WASM_FEATURE_FRAME_NO_FUNC_IDX;
+     }
++    /* Hull ext (patch 0007): stamp the file as carrying the loop-header
++     * terminate check (see HULL_AOT_STAMP in aot_runtime.h). */
++    obj_data->target_info.reserved = HULL_AOT_STAMP;
+ 
+     bh_print_time("Begin to resolve object file info");
+ 
 diff --git a/core/iwasm/compilation/aot_emit_control.c b/core/iwasm/compilation/aot_emit_control.c
 --- a/core/iwasm/compilation/aot_emit_control.c
 +++ b/core/iwasm/compilation/aot_emit_control.c
@@ -164,10 +198,11 @@ diff --git a/core/iwasm/compilation/aot_emit_function.h b/core/iwasm/compilation
 diff --git a/core/iwasm/include/wasm_export.h b/core/iwasm/include/wasm_export.h
 --- a/core/iwasm/include/wasm_export.h
 +++ b/core/iwasm/include/wasm_export.h
-@@ -1376,6 +1376,20 @@
+@@ -1375,6 +1375,20 @@
+ WASM_RUNTIME_API_EXTERN void
  wasm_runtime_terminate(wasm_module_inst_t module_inst);
  
- /**
++/**
 + * Hull ext (patch 0007): a process-wide hook called around the functions an
 + * instantiation runs itself - the start function, __post_instantiate and
 + * __wasm_call_ctors - with @p entering = true just before them and false just
@@ -181,10 +216,9 @@ diff --git a/core/iwasm/include/wasm_export.h b/core/iwasm/include/wasm_export.h
 +WASM_RUNTIME_API_EXTERN void
 +wasm_runtime_set_post_instantiate_hook(wasm_post_instantiate_hook_t hook);
 +
-+/**
+ /**
   * Set custom data to WASM module instance.
   * Note:
-  *  If WAMR_BUILD_LIB_PTHREAD is enabled, this API
 diff --git a/core/iwasm/interpreter/wasm_interp_fast.c b/core/iwasm/interpreter/wasm_interp_fast.c
 --- a/core/iwasm/interpreter/wasm_interp_fast.c
 +++ b/core/iwasm/interpreter/wasm_interp_fast.c

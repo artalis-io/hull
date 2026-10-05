@@ -38,6 +38,7 @@
  * hl_app_context_factory() getter they build on. */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
+#include "hull/wasm_config.h"
 #endif
 #include "hull/cap/gpu.h"  /* base-resident: gpu_ctx propagates for composed feature too */
 
@@ -365,6 +366,13 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                     ctx->fs_cfg_storage.policy   = &ctx->fs_policy_storage;
                     ctx->rt->fs_cfg = &ctx->fs_cfg_storage;
                 }
+#ifdef HL_ENABLE_WASM
+                /* The manifest's `wasm` ceilings (and the operator's flags),
+                 * as serve.c resolves them for the server: without this an
+                 * app.main app, `hull test` and `hull agent` ran every
+                 * compute call uncapped (round-6 M3). */
+                hl_wasm_config_resolve(ctx->rt, &m, opts->wasm_cli);
+#endif
                 hl_manifest_free(&m);
                 if (rc != 0) {
                     fprintf(stderr, "[app-context] module resolver: %s\n", err);
@@ -374,6 +382,9 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             } else {
                 /* No manifest declared → resolver still admits intrinsics. */
                 hl_module_resolver_resolve(NULL, &ctx->module_set, NULL, 0);
+#ifdef HL_ENABLE_WASM
+                hl_wasm_config_resolve(ctx->rt, NULL, opts->wasm_cli);
+#endif
             }
             ctx->rt->module_set = &ctx->module_set;
             ctx->module_set_wired = 1;

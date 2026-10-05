@@ -75,6 +75,7 @@
 #include "hull/agent_api.h"
 #include "hull/utils/limits.h"
 #include "hull/manifest.h"
+#include "hull/wasm_config.h"
 #include "hull/module_resolver.h"
 #include "hull/utils/parse_size.h"
 #include "hull/sandbox.h"
@@ -675,37 +676,17 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
 static void hl_resolve_wasm_config(HlRuntime *rt, const HlManifest *manifest,
                                     const HlServeConfig *cfg)
 {
-    uint32_t wh = manifest->wasm_heap;
-    uint32_t ws = manifest->wasm_stack;
-    int64_t  wg = manifest->wasm_gas > 0 ? manifest->wasm_gas : 0;   /* <= 0: default */
-    uint32_t wt = manifest->wasm_timeout_ms;                          /* 0: default */
-    uint32_t wi = manifest->wasm_max_input;
-    uint32_t wo = manifest->wasm_max_output;
-
-    /* CLI overrides manifest (operator > developer) */
-    if (cfg->wasm_heap > 0)       wh = (uint32_t)cfg->wasm_heap;
-    if (cfg->wasm_stack > 0)      ws = (uint32_t)cfg->wasm_stack;
-    if (cfg->wasm_gas > 0)        wg = (int64_t)cfg->wasm_gas;
-    if (cfg->wasm_timeout_ms > 0)
-        wt = cfg->wasm_timeout_ms > (long long)HL_WASM_MAX_TIMEOUT_MS
-           ? HL_WASM_MAX_TIMEOUT_MS : (uint32_t)cfg->wasm_timeout_ms;
-    if (cfg->wasm_max_input > 0)  wi = (uint32_t)cfg->wasm_max_input;
-    if (cfg->wasm_max_output > 0) wo = (uint32_t)cfg->wasm_max_output;
-
-    /* Clamp to compile-time maximums */
-    if (wh > (uint32_t)HL_WASM_MAX_HEAP)  wh = (uint32_t)HL_WASM_MAX_HEAP;
-    if (ws > (uint32_t)HL_WASM_MAX_STACK) ws = (uint32_t)HL_WASM_MAX_STACK;
-    if (wg > HL_WASM_MAX_GAS)             wg = HL_WASM_MAX_GAS;
-    if (wt > HL_WASM_MAX_TIMEOUT_MS)      wt = HL_WASM_MAX_TIMEOUT_MS;
-    if (wi > (uint32_t)HL_WASM_MAX_IO_SIZE) wi = (uint32_t)HL_WASM_MAX_IO_SIZE;
-    if (wo > (uint32_t)HL_WASM_MAX_IO_SIZE) wo = (uint32_t)HL_WASM_MAX_IO_SIZE;
-
-    rt->wasm_config.heap_size  = wh;
-    rt->wasm_config.stack_size = ws;
-    rt->wasm_config.gas        = wg;
-    rt->wasm_config.timeout_ms = wt;
-    rt->wasm_config.max_input  = wi;
-    rt->wasm_config.max_output = wo;
+    /* The shared resolver (include/hull/wasm_config.h): the app.main runner
+     * and the app context apply the same ceilings. */
+    HlWasmCliLimits cli = {
+        .heap       = cfg->wasm_heap,
+        .stack      = cfg->wasm_stack,
+        .gas        = cfg->wasm_gas,
+        .timeout_ms = cfg->wasm_timeout_ms,
+        .max_input  = cfg->wasm_max_input,
+        .max_output = cfg->wasm_max_output,
+    };
+    hl_wasm_config_resolve(rt, manifest, &cli);
 }
 #endif
 

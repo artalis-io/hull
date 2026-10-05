@@ -45,6 +45,9 @@
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
 #include "hull/vfs.h"
+#ifdef HL_ENABLE_WASM
+#include "hull/wasm_config.h"
+#endif
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_registry.h"
 #endif
@@ -97,6 +100,9 @@ typedef struct {
     const char *verify_sig;          /* --verify-sig PUBKEY */
     int         no_verify_platform;  /* --no-verify-platform */
     long        instruction_limit;   /* --max-instructions N (0 = default) */
+#ifdef HL_ENABLE_WASM
+    HlWasmCliLimits wasm;            /* --wasm-* ceilings, as serve.c takes them */
+#endif
 } CliOpts;
 
 static int cli_parse_args(int argc, char **argv,
@@ -190,6 +196,13 @@ static int cli_parse_args(int argc, char **argv,
             x->instruction_limit = v;
             continue;
         }
+#ifdef HL_ENABLE_WASM
+        {
+            int w = hl_wasm_cli_flag(argc, argv, &i, &x->wasm);
+            if (w < 0) return -2;
+            if (w > 0) continue;
+        }
+#endif
         if (prefixed) {
             (void)hl_runtime_flag_unknown(argv[i]);
             return -2;
@@ -437,6 +450,9 @@ int hull_serve(int argc, char **argv)
         .sandbox         = !no_sandbox,
         .gate_modules    = 1,
         .instruction_limit = xo.instruction_limit,
+#ifdef HL_ENABLE_WASM
+        .wasm_cli        = &xo.wasm,
+#endif
     };
 #ifdef HL_ENABLE_HTTP_CLIENT
     /* The -d database opens here, before the manifest and the full trust

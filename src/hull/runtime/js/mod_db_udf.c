@@ -352,15 +352,26 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         js_parse_udf_opts(ctx, opts, &deterministic, &nargs, &aggregate,
                           &gas, &heap, &stack_sz);
 
+        /* The manifest / CLI ceilings bind a UDF's instances like any other
+         * compute call (round-6 L2); its own defaults stay below them. */
+        HlWasmCallOpts lim = {
+            .gas = gas > 0 ? gas : HL_UDF_DEFAULT_GAS,
+            .heap_size = heap, .stack_size = stack_sz,
+        };
+        hl_cap_wasm_clamp_opts(&lim, 0, 0,
+            js->base.wasm_config.heap_size, js->base.wasm_config.stack_size,
+            js->base.wasm_config.gas, js->base.wasm_config.timeout_ms);
+
         HlDbUdfOpts udf_opts = {
             .sql_name      = sql_name,
             .module_name   = module_name,
             .nargs         = nargs != -1 ? nargs : 1,
-            .gas_per_call  = gas,
+            .gas_per_call  = lim.gas,
             .deterministic = deterministic,
             .is_aggregate  = aggregate,
-            .heap_size     = heap,
-            .stack_size    = stack_sz,
+            .heap_size     = lim.heap_size,
+            .stack_size    = lim.stack_size,
+            .timeout_ms    = lim.timeout_ms,
         };
 
         const char *err_msg = NULL;

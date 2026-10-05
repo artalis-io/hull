@@ -9,6 +9,7 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_aot_stamp.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_stream.h"
 #include "hull/cap/wasm_watchdog.h"
@@ -1809,8 +1810,9 @@ UTEST(hl_cap_wasm, shared_data_load_unload)
     ASSERT_NE(mod->shared_data, NULL);
     ASSERT_EQ(mod->shared_data->count, 1);
 
-    /* Unload all */
-    hl_cap_wasm_data_unload(&cache, "shared_read");
+    /* Remove all (NULL segment + NULL data) */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", NULL, NULL, 0, NULL,
+                                    &vfs, NULL, &err), 0);
     ASSERT_EQ(mod->shared_data, NULL);
 
     hl_cap_wasm_destroy(&cache);
@@ -2525,6 +2527,49 @@ UTEST(hl_cap_wasm, timeout_clamped_to_ceiling)
               HL_WASM_MAX_TIMEOUT_MS);
 }
 
+/* Round-6 L2: on a persistent instance the ceiling only lowers what a call
+ * set; an unset field falls to the instance's own default, so
+ * compute.instance("m", {timeout_ms = 100}) under a 60 s ceiling stops in
+ * ~100 ms, not 60 s. */
+UTEST(hl_cap_wasm, instance_default_timeout_under_ceiling)
+{
+    HlWasmCallOpts o = {0};
+    hl_cap_wasm_cap_call_opts(&o, 0, 0, 0, 0, 1000, 60000);
+    ASSERT_EQ(o.timeout_ms, 0u);            /* unset stays unset */
+    ASSERT_EQ(o.gas, 0);
+    o.timeout_ms = 90000;
+    o.gas = 5000;
+    hl_cap_wasm_cap_call_opts(&o, 0, 0, 0, 0, 1000, 60000);
+    ASSERT_EQ(o.timeout_ms, 60000u);        /* above: clamped */
+    ASSERT_EQ(o.gas, 1000);
+
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    HlWasmCallOpts create = {0};
+    create.gas = HL_WASM_MAX_GAS;
+    create.timeout_ms = 100;
+    hl_cap_wasm_clamp_opts(&create, 0, 0, 0, 0, 0, 60000);
+    ASSERT_EQ(create.timeout_ms, 100u);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "loop_forever",
+                                                     &create, &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    HlWasmCallOpts call = {0};
+    hl_cap_wasm_cap_call_opts(&call, 0, 0, 0, 0, 0, 60000);
+    void *out = NULL; size_t out_len = 0;
+    uint64_t t0 = mono_ms();
+    int rc = hl_cap_wasm_instance_call(pi, "x", 1, &out, &out_len, &call,
+                                       NULL, NULL, NULL, &err);
+    uint64_t took = mono_ms() - t0;
+    EXPECT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    EXPECT_LT(took, (uint64_t)5000);
+    free(out);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
 /* A start function runs inside instantiation, where gas never applied: the
  * watch armed for the call is bound to the new instance while it runs. */
 UTEST(hl_cap_wasm, watchdog_stops_start_function)
@@ -3148,6 +3193,117 @@ UTEST(hl_cap_wasm, verify_sig_refuses_unsigned_disk_modules)
     hl_cap_wasm_destroy(&cache);
 
     hl_vfs_disk_gate_reset();
+}
+
+/* ── Round-6 M2: AOT provenance stamp ─────────────────────────────────── */
+
+/* A minimal AOT file head: magic, version, target-info section (type 0, size
+ * 48), `reserved` = @p stamp_version | @p stamp_magic << 32, rest zero. */
+static void mk_aot_head(uint8_t *b, size_t n, uint32_t stamp_version,
+                        uint32_t stamp_magic)
+{
+    memset(b, 0, n);
+    const uint32_t w[] = { HL_AOT_FILE_MAGIC, 7u, 0u, HL_AOT_TARGET_INFO_SIZE };
+    for (int i = 0; i < 4; i++)
+        for (int k = 0; k < 4; k++)
+            b[i * 4 + k] = (uint8_t)(w[i] >> (8 * k));
+    for (int k = 0; k < 4; k++) {
+        b[HL_AOT_STAMP_OFFSET + k]     = (uint8_t)(stamp_version >> (8 * k));
+        b[HL_AOT_STAMP_OFFSET + 4 + k] = (uint8_t)(stamp_magic >> (8 * k));
+    }
+}
+
+UTEST(hl_cap_wasm, aot_stamp_check)
+{
+    uint8_t b[96];
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION, HL_AOT_STAMP_MAGIC);
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_OK);
+    EXPECT_EQ(hl_aot_stamp_check(b, 63), HL_AOT_STAMP_NOT_AOT);     /* short */
+    EXPECT_EQ(hl_aot_stamp_check(NULL, 0), HL_AOT_STAMP_NOT_AOT);
+
+    mk_aot_head(b, sizeof b, 0, 0);                  /* upstream wamrc: zero */
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_MISSING);
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION + 1, HL_AOT_STAMP_MAGIC);
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_OLD_VERSION);
+
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION, HL_AOT_STAMP_MAGIC);
+    b[0] = 0x01;                                      /* not "\0aot" */
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_NOT_AOT);
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION, HL_AOT_STAMP_MAGIC);
+    b[8] = 3;                                         /* first section not target info */
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_NOT_AOT);
+
+    /* A plain .wasm is not an AOT file. */
+    EXPECT_EQ(hl_aot_stamp_check(echo_wasm, echo_wasm_len), HL_AOT_STAMP_NOT_AOT);
+}
+
+/* An AOT artifact without the stamp (an unpatched wamrc's) is refused: the
+ * module's .wasm runs in the interpreter instead, and with no .wasm the load
+ * fails rather than run code the compute timeout cannot stop. */
+UTEST(hl_cap_wasm, unstamped_aot_refused_with_wasm_fallback)
+{
+#if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+    static const char *aot_key = "compute/echo.aot.x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    static const char *aot_key = "compute/echo.aot.aarch64";
+#else
+    UTEST_SKIP("no AOT arch");
+#endif
+    static uint8_t unstamped[128];
+    mk_aot_head(unstamped, sizeof unstamped, 0, 0);
+
+    /* With the .wasm beside it: loads, in the interpreter, and runs. */
+    HlEntry with_wasm[] = {
+        { aot_key, unstamped, sizeof unstamped },
+        { "compute/echo.wasm", echo_wasm, echo_wasm_len },
+        { 0, 0, 0 }
+    };
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, with_wasm, NULL);
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+    pthread_mutex_lock(&cache.pool_mutex);
+    int is_aot = cache.count == 1 ? cache.modules[0].is_aot : -1;
+    pthread_mutex_unlock(&cache.pool_mutex);
+    EXPECT_EQ(is_aot, 0);
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    EXPECT_EQ(hl_cap_wasm_call(&cache, "echo", "hi", 2, &out, &out_len,
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err), 0);
+    EXPECT_EQ(out_len, (size_t)2);
+    free(out);
+    hl_cap_wasm_destroy(&cache);
+
+    /* AOT only: refused, not loaded. */
+    HlEntry aot_only[] = { { aot_key, unstamped, sizeof unstamped }, { 0, 0, 0 } };
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    hl_vfs_init(&vfs, aot_only, NULL);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), HL_WASM_ERR_LOAD);
+    hl_cap_wasm_destroy(&cache);
+
+    /* From disk in development: the same. */
+    char dir[512];
+    ASSERT_EQ(mk_compute_app(dir, sizeof dir), 0);
+    const char *archs[] = { "x86_64", "aarch64" };
+    for (int k = 0; k < 2; k++) {
+        char p[700];
+        snprintf(p, sizeof p, "%s/compute/echo.aot.%s", dir, archs[k]);
+        ASSERT_EQ(wr_file(p, unstamped, sizeof unstamped), 0);
+    }
+    static const HlEntry none[] = { { 0, 0, 0 } };
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    hl_vfs_init(&vfs, none, dir);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), 0);
+    pthread_mutex_lock(&cache.pool_mutex);
+    is_aot = cache.count == 1 ? cache.modules[0].is_aot : -1;
+    pthread_mutex_unlock(&cache.pool_mutex);
+    EXPECT_EQ(is_aot, 0);
+    hl_cap_wasm_destroy(&cache);
+    for (int k = 0; k < 2; k++) {
+        char p[700];
+        snprintf(p, sizeof p, "%s/compute/echo.aot.%s", dir, archs[k]);
+        unlink(p);
+    }
 }
 
 int main(int argc, const char *const argv[])

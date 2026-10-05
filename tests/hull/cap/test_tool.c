@@ -405,6 +405,22 @@ UTEST(tool, driver_shell_rejects_dangerous_driver_args)
     ASSERT_EQ(hl_tool_spawn_driver_shell("/bin/sh", "cc", respfile, NULL), -1);
 }
 
+/* Round-6 L4: a clang configuration file is more driver options, read past
+ * every per-argument check - every spelling is refused. */
+UTEST(tool, validate_args_rejects_clang_config_files)
+{
+    const char *sep[]   = { "clang", "--config", "/tmp/x.cfg", "a.c", NULL };
+    const char *eq[]    = { "clang", "--config=/tmp/x.cfg", "a.c", NULL };
+    const char *sysd[]  = { "clang", "--config-system-dir=/tmp", "a.c", NULL };
+    const char *userd[] = { "clang", "--config-user-dir=/tmp", "a.c", NULL };
+    const char *ok[]    = { "clang", "-c", "a.c", "-o", "a.o", NULL };
+    EXPECT_EQ(hl_tool_validate_args(sep), -1);
+    EXPECT_EQ(hl_tool_validate_args(eq), -1);
+    EXPECT_EQ(hl_tool_validate_args(sysd), -1);
+    EXPECT_EQ(hl_tool_validate_args(userd), -1);
+    EXPECT_EQ(hl_tool_validate_args(ok), 0);
+}
+
 /* Positive: run an allowlisted driver THROUGH /bin/sh and prove the $0/$@
  * plumbing reaches it. `sh -c 'exec "$0" "$@"' cc --version` -> `cc --version`.
  * A real cc is standard on the CI hosts; skip cleanly if it is somehow absent. */

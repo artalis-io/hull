@@ -48,6 +48,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "../test_tmpdir.h"
@@ -937,6 +938,75 @@ UTEST(wasm_spans, d2_gas_cleanup)
     teardown_dir();
 }
 
+/* spaninfo_loop.wasm (106 bytes, hand-assembled): hull_process loops forever on
+ *   (loop (drop (call $host_call (i32.const 4) (i32.const 0x40000000)
+ *                                (i32.const 0))) (br 0))
+ * - a SPAN_INFO query for span 0 with a record pointer outside both the linear
+ * memory and the span heap, so every call fails its address validate. */
+static const unsigned char spaninfo_loop_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+  0x01, 0x10, 0x02, 0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f,
+  0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f,
+  0x02, 0x11, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x09, 0x68, 0x6f, 0x73, 0x74,
+  0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x00,
+  0x03, 0x02, 0x01, 0x01,
+  0x05, 0x03, 0x01, 0x00, 0x01,
+  0x07, 0x19, 0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
+  0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73,
+  0x73, 0x00, 0x01,
+  0x0a, 0x17, 0x01, 0x15, 0x00, 0x03, 0x40, 0x41, 0x04, 0x41, 0x80, 0x80,
+  0x80, 0x80, 0x04, 0x41, 0x00, 0x10, 0x00, 0x1a, 0x0c, 0x00, 0x0b, 0x00,
+  0x0b,
+};
+
+static uint64_t spans_mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* ── round-6 M1: a failing SPAN_INFO validate cannot erase the watchdog's stop ─
+ * The validate overwrote the pending "terminated by user" with its own "out of
+ * bounds" exception, which the handler then cleared, and the watchdog never
+ * terminated again: the guest ran on until the gas ran out (or, AOT, forever).
+ * Gas here is far beyond the timeout, so only the watchdog can end the call. */
+UTEST(wasm_spans, watchdog_stop_survives_span_info_validate)
+{
+    setup();
+    static const HlEntry entries[] = {
+        { "compute/spaninfo_loop.wasm", spaninfo_loop_wasm,
+          sizeof(spaninfo_loop_wasm) },
+        { 0, 0, 0 }
+    };
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+    HlWasmCallOpts opts = {0};
+    opts.spans = &req;
+    opts.span_count = 1;
+    opts.gas = 2000LL * 1000 * 1000;   /* tens of seconds of interpretation */
+    opts.timeout_ms = 200;
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    uint64_t t0 = spans_mono_ms();
+    int rc = hl_cap_wasm_call(&cache, "spaninfo_loop", "x", 1, &out, &out_len,
+                              &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+    uint64_t took = spans_mono_ms() - t0;
+    EXPECT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    EXPECT_STREQ(err ? err : "(null)", "timeout");
+    EXPECT_LT(took, (uint64_t)5000);
+    free(out);
+    ASSERT_EQ(buf->borrow_count, 0);
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
 /* ── output alloc failure (tiny heap + big output) tears the span set down ───── */
 UTEST(wasm_spans, d2_output_alloc_fail)
 {
@@ -1171,14 +1241,15 @@ UTEST(wasm_spans, segment_lifecycle_baseline)
                                     NULL, &vfs, NULL, &derr), 0);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base);     /* whole chain reclaimed */
 
-    /* E. reload a chain, then unload the module's shared data (hl_cap_wasm_data_unload)
+    /* E. reload a chain, then remove all of the module's shared data at once
      *    -> same drain + free_shared_data path -> baseline. */
     ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "a", seg, sizeof(seg),
                                     NULL, &vfs, NULL, &derr), 0);
     ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "b", seg, sizeof(seg),
                                     NULL, &vfs, NULL, &derr), 0);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 2);
-    hl_cap_wasm_data_unload(&cache, "echo");
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", NULL, NULL, 0,
+                                    NULL, &vfs, NULL, &derr), 0);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
 
     hl_cap_wasm_destroy(&cache);

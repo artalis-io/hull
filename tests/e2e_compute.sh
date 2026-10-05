@@ -937,6 +937,79 @@ else
 fi
 
 rm -rf "$NODB_DIR"
+echo ""
+echo "=== E2E: manifest wasm.timeout_ms is a ceiling under hull test (both runtimes) ==="
+
+# Round-6 M3: the manifest `wasm = {...}` ceilings reached rt->wasm_config only
+# on the Keel server path; the app context behind `hull test` / `hull agent`
+# and the app.main runner left it zero, so a per-call timeout_ms of an hour ran
+# for an hour. loop_forever never returns: only the 300 ms ceiling can stop it
+# (the per-call gas would take seconds, and the per-call timeout is an hour).
+CEILDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR" "$ASYNCDIR" "$CEILDIR"' EXIT
+mkdir -p "$CEILDIR/compute" "$CEILDIR/tests"
+cp tests/fixtures/compute/loop_forever.wasm "$CEILDIR/compute/loop_forever.wasm"
+
+cat > "$CEILDIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/compute@1"},
+    wasm = { timeout_ms = 300 },
+})
+app.get("/health", function(req, res) res:json({ ok = true }) end)
+EOF
+cat > "$CEILDIR/tests/test_ceiling.lua" << 'EOF'
+local compute = require("hull.compute")
+test("manifest timeout ceiling caps a per-call timeout", function()
+    local out, err = compute.call("loop_forever", "x",
+                                  { timeout_ms = 3600000, gas = 2000000000 })
+    assert(out == nil, "loop_forever returned")
+    assert(err == "timeout", "expected timeout, got " .. tostring(err))
+end)
+EOF
+T0=$(date +%s)
+OUTPUT=$($HULL test "$CEILDIR" 2>&1) || true
+T1=$(date +%s)
+echo "$OUTPUT" | tail -3
+if echo "$OUTPUT" | grep -qE "1 passed|tests passed$" && \
+   ! echo "$OUTPUT" | grep -q "FAIL" && [ $((T1 - T0)) -lt 30 ]; then
+    pass "Lua: manifest wasm.timeout_ms ceiling applied under hull test"
+else
+    fail "Lua: manifest wasm.timeout_ms ceiling applied under hull test ($((T1 - T0))s)"
+fi
+
+rm -f "$CEILDIR/app.lua" "$CEILDIR/tests/test_ceiling.lua"
+cat > "$CEILDIR/app.js" << 'JSEOF'
+import { app } from "hull:app";
+app.manifest({
+    modules: ["hull/http-server@1","hull/compute@1"],
+    wasm: { timeoutMs: 300 },
+});
+app.get("/health", (req, res) => { res.json({ ok: true }); });
+JSEOF
+cat > "$CEILDIR/tests/test_ceiling.js" << 'JSEOF'
+import { compute } from "hull:compute";
+test("manifest timeout ceiling caps a per-call timeout", () => {
+    let msg = "returned";
+    try {
+        compute.call("loop_forever", "x", { timeoutMs: 3600000, gas: 2000000000 });
+    } catch (e) {
+        msg = String(e && e.message ? e.message : e);
+    }
+    test.eq(msg.indexOf("timeout") >= 0, true);
+});
+JSEOF
+T0=$(date +%s)
+OUTPUT=$($HULL test "$CEILDIR" 2>&1) || true
+T1=$(date +%s)
+echo "$OUTPUT" | tail -3
+if echo "$OUTPUT" | grep -qE "1 passed|tests passed$" && \
+   ! echo "$OUTPUT" | grep -q "FAIL" && [ $((T1 - T0)) -lt 30 ]; then
+    pass "JS: manifest wasm.timeoutMs ceiling applied under hull test"
+else
+    fail "JS: manifest wasm.timeoutMs ceiling applied under hull test ($((T1 - T0))s)"
+fi
+rm -rf "$CEILDIR"
+
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed ==="

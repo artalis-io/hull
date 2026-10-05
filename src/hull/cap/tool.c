@@ -439,6 +439,11 @@ int hl_tool_validate_args(const char *const argv[])
             (strchr(a + 9, '/') || strchr(a + 9, '\\'))) return -1;
         if (strncmp(a, "-Wl,", 4) == 0 && check_wl(a + 4) != 0) return -1;
         if (a[0] == '@')                       return -1; /* response file */
+        /* clang configuration files (--config <f>, --config=<f>, and
+         * clang 16's --config-system-dir= / --config-user-dir=): the file's
+         * contents are more driver options - -B, -fplugin, -Xclang -load,
+         * --ld-path - read past every check above (round-6 L4). */
+        if (strncmp(a, "--config", 8) == 0)    return -1;
     }
     return 0;
 }

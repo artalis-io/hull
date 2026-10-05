@@ -1145,6 +1145,57 @@ UTEST(hl_blob_store_keyed, writes_refuse_symlinked_tmp_and_blobs)
     rm_rf(tmp);
 }
 
+UTEST(hl_blob_store_keyed, reads_and_maintenance_refuse_symlinked_shard)
+{
+    /* Round-6 L5: the read and maintenance paths built path strings, so a
+     * planted blobs/ab -> /elsewhere made exists() report hits, reads come
+     * from there, and delete / prune / clear unlink the files there. */
+    char tmp[256];
+    HlBlobStore *s = open_keyed_store(tmp);
+    ASSERT_TRUE(s != NULL);
+
+    const char *key =
+        "ab00000000000000000000000000000000000000000000000000000000000000";
+    char outside[512], victim[700], shard[512];
+    snprintf(outside, sizeof outside, "%s/outside", tmp);
+    ASSERT_EQ(mkdir(outside, 0700), 0);
+    snprintf(victim, sizeof victim, "%s/%s", outside, key);
+    int vfd = open(victim, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT_GE(vfd, 0);
+    ASSERT_EQ(write(vfd, "victim", 6), 6);
+    close(vfd);
+
+    snprintf(shard, sizeof shard, "%s/blobs/ab", tmp);
+    char bdir[512];
+    snprintf(bdir, sizeof bdir, "%s/blobs", tmp);
+    mkdir(bdir, 0700);
+    rmdir(shard);
+    if (symlink(outside, shard) != 0)
+        UTEST_SKIP("symlink() unavailable (needs privilege on this host)");
+
+    EXPECT_EQ(hl_blob_store_exists(s, key), 0);
+    size_t sz = 0;
+    EXPECT_NE(hl_blob_store_stat(s, key, &sz, NULL), 0);
+    HlBlobStoreReader *r = NULL;
+    EXPECT_NE(hl_blob_store_reader_open(s, key, 0, &r), 0);
+    EXPECT_EQ(hl_blob_store_count(s), (uint64_t)0);
+    EXPECT_NE(hl_blob_store_delete(s, key), 1);
+
+    HlBlobStoreCleanupOpts co;
+    memset(&co, 0, sizeof co);
+    co.max_total_size = 1;
+    uint64_t removed = 0, freed = 0;
+    (void)hl_blob_store_cleanup(s, &co, &removed, &freed);
+    EXPECT_EQ(removed, (uint64_t)0);
+
+    struct stat st;
+    EXPECT_EQ(stat(victim, &st), 0);   /* never unlinked through the link */
+
+    hl_blob_store_close(s);
+    unlink(shard);
+    rm_rf(tmp);
+}
+
 UTEST(hl_blob_store_keyed, get_rejects_huge_stat_size)
 {
     /* hl_blob_store_get caps at HL_BLOB_STORE_GET_MAX_BYTES (256 MB).

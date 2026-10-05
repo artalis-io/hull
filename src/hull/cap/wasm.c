@@ -10,6 +10,7 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_aot_stamp.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_data.h"
 #include "hull/cap/wasm_spans.h"
@@ -117,14 +118,15 @@ static void store_u64le(uint8_t *p, uint64_t v)
 { for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i)); }
 
 /* A failed wasm_runtime_validate_app_addr sets an "out of bounds memory access"
- * exception on the instance. Native calls (host_call) are only dispatched during
- * live wasm execution -- WAMR halts and unwinds on any trap/exception and never
- * calls further imports -- so there is NEVER a pending exception when the handler
- * is entered. Thus the only exception present after our validate is the one WE
- * caused; clearing it returns the instance to its pre-call (clean) state so a
- * bad-pointer query returns a clean -1 instead of trapping the whole call. We
- * additionally match the exact "out of bounds" text and clear ONLY that, so a
- * (theoretically impossible) pre-existing exception is never erased. */
+ * exception on the instance; clearing it lets a bad-pointer query return a clean
+ * -1 instead of trapping the whole call. The handler is entered only with no
+ * exception pending (host_call_handler returns at once otherwise), so what is
+ * cleared here is the validate's own - and only its exact "out of bounds" text,
+ * never the watchdog's "terminated by user". The watchdog can still land in the
+ * window between that entry check and the validate, which then overwrites the
+ * terminate before it is cleared: the watchdog re-terminates a bound instance
+ * until it is unbound (cap/wasm_watchdog.c), so the stop is delayed, not lost
+ * (round-6 M1). */
 static void clear_validate_oob_exception(wasm_module_inst_t inst)
 {
     const char *e = wasm_runtime_get_exception(inst);
@@ -155,6 +157,14 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
     atomic_fetch_add_explicit(&hl_wasm_host_call_count, 1, memory_order_relaxed);
 #endif
     wasm_module_inst_t inst = wasm_runtime_get_module_inst(exec_env);
+
+    /* An exception already pending here was raised from another thread - the
+     * wall-clock watchdog's terminate, set while the guest ran up to this
+     * call. Do nothing that could replace it (every validate below sets its
+     * own on failure, and SPAN_INFO then clears that): return, and WAMR
+     * unwinds on it as soon as this native call returns (round-6 M1). */
+    if (wasm_runtime_get_exception(inst))
+        return -1;
 
     if (opcode == HL_WASM_OP_LOG) {
         if (len > 0 && len < 4096) {
@@ -627,6 +637,31 @@ void hl_cap_wasm_destroy(HlWasmCache *cache)
 
 /* ── Load module ───────────────────────────────────────────────────── */
 
+/* Round-6 M2: AOT code is bounded by the watchdog only through the terminate
+ * check WAMR patch 0007 has wamrc emit at every loop header, and the same patch
+ * stamps every AOT file it writes (cap/wasm_aot_stamp.h). An artifact without
+ * the stamp - from a distro / Homebrew wamrc, an older ~/.hull/tools/wamrc, or
+ * built elsewhere - would run an endless loop forever, so it is refused; the
+ * caller falls back to the module's .wasm when there is one (the interpreter
+ * is bounded by gas and by the watchdog alike). Returns 1 when usable. */
+static int aot_stamp_usable(const char *name, const uint8_t *buf, size_t len)
+{
+    int st = hl_aot_stamp_check(buf, len);
+    if (st == HL_AOT_STAMP_OK)
+        return 1;
+    const char *why =
+        st == HL_AOT_STAMP_NOT_AOT ? "it is not a WAMR AOT file" :
+        st == HL_AOT_STAMP_OLD_VERSION
+            ? "it was compiled by an older Hull wamrc (stale terminate-check stamp)"
+            : "it was not compiled by Hull's patched wamrc (no terminate-check "
+              "stamp), so the compute timeout could not stop its loops";
+    log_error("[wasm] refusing the AOT artifact of module '%s': %s. Rebuild it "
+              "with Hull's wamrc (`hull tools install wamrc`, or `make wamrc` "
+              "from source) and `hull build` again; the module's .wasm, when "
+              "present, runs in the interpreter meanwhile", name, why);
+    return 0;
+}
+
 int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                      const struct HlVfs *app_vfs, const char *app_dir)
 {
@@ -652,6 +687,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     uint8_t *buf = NULL;
     uint32_t buf_len = 0;
     int is_aot = 0;
+    int aot_refused = 0;   /* an AOT artifact was found but lacks the stamp */
 
     /* 1. Try AOT from VFS: compute/<name>.aot.<arch> */
     const char *arch = wasm_arch_suffix();
@@ -659,7 +695,10 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         char aot_name[512];
         snprintf(aot_name, sizeof(aot_name), "compute/%s.aot.%s", name, arch);
         const HlEntry *e = hl_vfs_find(app_vfs, aot_name);
-        if (e && e->data && e->len > 0) {
+        if (e && e->data && e->len > 0 &&
+            !aot_stamp_usable(name, (const uint8_t *)e->data, e->len)) {
+            aot_refused = 1;
+        } else if (e && e->data && e->len > 0) {
             /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
             buf = malloc(e->len);
             if (buf) {
@@ -725,7 +764,11 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                         fclose(f);
                         return HL_WASM_ERR_LOAD;
                     }
-                    if (nr == (size_t)fsize) {
+                    if (nr == (size_t)fsize && !aot_stamp_usable(name, buf, nr)) {
+                        aot_refused = 1;
+                        free(buf);
+                        buf = NULL;
+                    } else if (nr == (size_t)fsize) {
                         buf_len = (uint32_t)fsize;
                         is_aot = 1;
                         log_debug("[wasm] loaded AOT module '%s' from disk (%u bytes)",
@@ -783,6 +826,10 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     }
 
     if (!buf) {
+        if (aot_refused) {
+            log_error("[wasm] module '%s': no .wasm to fall back to", name);
+            return HL_WASM_ERR_LOAD;
+        }
         log_warn("[wasm] module '%s' not found", name);
         return HL_WASM_ERR_NOT_FOUND;
     }
@@ -904,7 +951,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
      *
      * Suppress the warning when HULL_QUIET_AOT=1 (set by tests + CI that
      * intentionally exercise the interpreter path). */
-    if (!is_aot && getenv("HULL_QUIET_AOT") == NULL) {
+    if (!is_aot && !aot_refused && getenv("HULL_QUIET_AOT") == NULL) {
         log_warn("[wasm] module '%s' is running in the fast interpreter "
                  "(no AOT artifact found). Compile with `wamrc` (make wamrc) "
                  "and rebuild - AOT is typically ~50x faster.",

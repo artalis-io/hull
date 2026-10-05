@@ -149,6 +149,51 @@ static int open_shard_dir(const HlBlobStore *s, const char *id)
     return fd;
 }
 
+/* The shard directory of the hex prefix @p hex below the held blobs/ fd, for
+ * READING: nothing is made, and no level is followed through a symlink (the
+ * write path's O_NOFOLLOW walk, round-5 L4, now covers reads, metadata,
+ * delete, enumeration and cleanup too - round-6 L5). -1 with errno ENOENT
+ * when a level is missing, ELOOP / ENOTDIR when one is not a real directory. */
+static int lookup_shard_at(int blobs_fd, const char *hex, int depth)
+{
+    int fd = blobs_fd;
+    for (int level = 0; level < depth; level++) {
+        char part[3] = { hex[level * 2], hex[level * 2 + 1], '\0' };
+        int next = openat(fd, part,
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int e = errno;
+        if (fd != blobs_fd) close(fd);
+        errno = e;
+        if (next < 0) return -1;
+        fd = next;
+    }
+    return fd;
+}
+
+/* <root>/blobs, for reading: not made, not followed. */
+static int lookup_blobs_dir(const HlBlobStore *s)
+{
+    int r = open(s->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (r < 0) return -1;
+    int d = openat(r, "blobs", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int e = errno;
+    close(r);
+    errno = e;
+    return d;
+}
+
+/* The shard directory holding blob @p id, for reading (see lookup_shard_at). */
+static int lookup_shard_dir(const HlBlobStore *s, const char *id)
+{
+    int blobs = lookup_blobs_dir(s);
+    if (blobs < 0) return -1;
+    int fd = lookup_shard_at(blobs, id, s->shard_depth >= 2 ? 2 : 1);
+    int e = errno;
+    close(blobs);
+    errno = e;
+    return fd;
+}
+
 /* Cross-filesystem fallback for renameat: copy into a file this call CREATES
  * (O_EXCL, O_NOFOLLOW) in the held shard directory. 0 = copied, 1 = something
  * was already there (the race's winner, same content by contract), -1 =
@@ -659,8 +704,10 @@ int hl_blob_store_reader_open(HlBlobStore *s, const char *id, int track_access,
     if (!s || !id || !out) return -1;
     if (validate_id(id) != 0) return -1;
 
-    char path[PATH_MAX];
-    if (build_blob_path(s, id, path, sizeof(path)) != 0) return -1;
+    /* The shard directory too is reached without following a symlink: a
+     * planted blobs/ab -> /elsewhere redirected every read below it. */
+    int shard_fd = lookup_shard_dir(s, id);
+    if (shard_fd < 0) return -1;
 
     /* O_NOFOLLOW: refuse to follow a symlink at the blob path.
      * Nothing in the legitimate write path ever creates a symlink
@@ -686,10 +733,11 @@ int hl_blob_store_reader_open(HlBlobStore *s, const char *id, int track_access,
      * writer turned up. Blocking mode is restored for the reads. */
     int open_flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
     if (!track_access) open_flags |= O_NOATIME;
-    int fd = open(path, open_flags);
+    int fd = openat(shard_fd, id, open_flags);
     if (fd < 0 && errno == EPERM && !track_access) {
-        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        fd = openat(shard_fd, id, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     }
+    close(shard_fd);
     if (fd < 0) return -1;
     struct stat fst;
     if (fstat(fd, &fst) != 0 || !S_ISREG(fst.st_mode)) { close(fd); return -1; }
@@ -827,37 +875,58 @@ int hl_blob_store_get_verified(HlBlobStore *s, const char *id, int track_access,
 
 /* ── Metadata ────────────────────────────────────────────────────── */
 
+/* lstat of blob @p id through the no-follow shard walk. 0 = a regular file
+ * (st filled), 1 = no such blob - missing, or something that is not a blob (a
+ * planted symlink, a directory) - and -1 on any other error. */
+static int blob_lstat(HlBlobStore *s, const char *id, struct stat *st)
+{
+    int shard_fd = lookup_shard_dir(s, id);
+    if (shard_fd < 0)
+        return (errno == ENOENT || errno == ELOOP || errno == ENOTDIR) ? 1 : -1;
+    int rc = fstatat(shard_fd, id, st, AT_SYMLINK_NOFOLLOW);
+    int e = errno;
+    close(shard_fd);
+    if (rc != 0) return e == ENOENT ? 1 : -1;
+    return S_ISREG(st->st_mode) ? 0 : 1;
+}
+
 int hl_blob_store_exists(HlBlobStore *s, const char *id)
 {
     if (!s || !id || validate_id(id) != 0) return -1;
-    char path[PATH_MAX];
-    if (build_blob_path(s, id, path, sizeof(path)) != 0) return -1;
     struct stat st;
-    if (stat(path, &st) == 0) return 1;
-    if (errno == ENOENT) return 0;
-    return -1;
+    int rc = blob_lstat(s, id, &st);
+    return rc == 0 ? 1 : rc == 1 ? 0 : -1;
 }
 
 int hl_blob_store_stat(HlBlobStore *s, const char *id,
                        size_t *size, int64_t *atime)
 {
     if (!s || !id || validate_id(id) != 0) return -1;
-    char path[PATH_MAX];
-    if (build_blob_path(s, id, path, sizeof(path)) != 0) return -1;
     struct stat st;
-    if (stat(path, &st) != 0) return -1;
+    if (blob_lstat(s, id, &st) != 0) return -1;
     if (size)  *size  = (size_t)st.st_size;
     if (atime) *atime = (int64_t)st.st_atime;
     return 0;
 }
 
+/* unlinkat the name @p id in its shard, reached without following: a
+ * symlinked shard directory pointed the unlink at another tree. */
+static int blob_unlink(HlBlobStore *s, const char *id)
+{
+    int shard_fd = lookup_shard_dir(s, id);
+    if (shard_fd < 0) return -1;
+    int rc = unlinkat(shard_fd, id, 0);
+    int e = errno;
+    close(shard_fd);
+    errno = e;
+    return rc;
+}
+
 int hl_blob_store_delete(HlBlobStore *s, const char *id)
 {
     if (!s || !id || validate_id(id) != 0) return -1;
-    char path[PATH_MAX];
-    if (build_blob_path(s, id, path, sizeof(path)) != 0) return -1;
-    if (unlink(path) == 0) return 1;
-    if (errno == ENOENT) return 0;
+    if (blob_unlink(s, id) == 0) return 1;
+    if (errno == ENOENT || errno == ELOOP || errno == ENOTDIR) return 0;
     return -1;
 }
 
@@ -911,13 +980,18 @@ static void entries_free(StoreEntries *e)
     e->capacity = 0;
 }
 
-static int walk_shard(HlBlobStore *s, const char *shard_path,
+/* Collect the blobs of the shard @p hex below the held blobs/ fd. The shard
+ * and its entries are reached without following a symlink: a planted shard
+ * link made the walk report - and prune / clear unlink - another tree's files. */
+static int walk_shard(int blobs_fd, const char *hex, int depth,
                       StoreEntries *e)
 {
-    (void)s;
-    DIR *d = opendir(shard_path);
+    int sfd = lookup_shard_at(blobs_fd, hex, depth);
+    if (sfd < 0)
+        return (errno == ENOENT || errno == ELOOP || errno == ENOTDIR) ? 0 : -1;
+    DIR *d = fdopendir(sfd);
     if (!d) {
-        if (errno == ENOENT) return 0;
+        close(sfd);
         return -1;
     }
 
@@ -927,11 +1001,8 @@ static int walk_shard(HlBlobStore *s, const char *shard_path,
         if (ent->d_name[0] == '.') continue;
         if (validate_id(ent->d_name) != 0) continue;
 
-        char fpath[PATH_MAX];
-        if (snprintf(fpath, sizeof(fpath), "%s/%s", shard_path, ent->d_name) >=
-            (int)sizeof(fpath)) continue;
         struct stat st;
-        if (stat(fpath, &st) != 0) continue;
+        if (fstatat(dirfd(d), ent->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
         if (!S_ISREG(st.st_mode)) continue;
 
         StoreEntry item;
@@ -953,39 +1024,29 @@ static int collect_entries(HlBlobStore *s, StoreEntries *e)
     e->alloc    = s->alloc;
 
     static const char HEX[] = "0123456789abcdef";
-    char shard_path[PATH_MAX];
+    int blobs = lookup_blobs_dir(s);
+    if (blobs < 0)   /* no blobs/ yet (or not a real directory): empty */
+        return (errno == ENOENT || errno == ELOOP || errno == ENOTDIR) ? 0 : -1;
 
-    if (s->shard_depth >= 2) {
-        for (int i = 0; i < 16; i++) {
-            for (int j = 0; j < 16; j++) {
-                for (int k = 0; k < 16; k++) {
-                    for (int l = 0; l < 16; l++) {
-                        if (snprintf(shard_path, sizeof(shard_path),
-                                "%s/blobs/%c%c/%c%c",
-                                s->root, HEX[i], HEX[j], HEX[k], HEX[l]) >=
-                            (int)sizeof(shard_path)) continue;
-                        if (walk_shard(s, shard_path, e) != 0) {
-                            entries_free(e);
-                            return -1;
-                        }
-                    }
-                }
-            }
+    int depth = s->shard_depth >= 2 ? 2 : 1;
+    int n = depth == 2 ? 65536 : 256;
+    for (int idx = 0; idx < n; idx++) {
+        char hex[5];
+        if (depth == 2) {
+            hex[0] = HEX[(idx >> 12) & 15]; hex[1] = HEX[(idx >> 8) & 15];
+            hex[2] = HEX[(idx >> 4) & 15];  hex[3] = HEX[idx & 15];
+            hex[4] = '\0';
+        } else {
+            hex[0] = HEX[(idx >> 4) & 15];  hex[1] = HEX[idx & 15];
+            hex[2] = '\0';
         }
-    } else {
-        for (int i = 0; i < 16; i++) {
-            for (int j = 0; j < 16; j++) {
-                if (snprintf(shard_path, sizeof(shard_path),
-                        "%s/blobs/%c%c",
-                        s->root, HEX[i], HEX[j]) >= (int)sizeof(shard_path))
-                    continue;
-                if (walk_shard(s, shard_path, e) != 0) {
-                    entries_free(e);
-                    return -1;
-                }
-            }
+        if (walk_shard(blobs, hex, depth, e) != 0) {
+            close(blobs);
+            entries_free(e);
+            return -1;
         }
     }
+    close(blobs);
     return 0;
 }
 
@@ -1079,12 +1140,9 @@ int hl_blob_store_cleanup(HlBlobStore *s,
 
         if (!evict) continue;
 
-        if (!opts->dry_run) {
-            char path[PATH_MAX];
-            if (build_blob_path(s, it->id, path, sizeof(path)) != 0) {
-                rc = -1; continue;
-            }
-            if (unlink(path) != 0 && errno != ENOENT) { rc = -1; continue; }
+        if (!opts->dry_run &&
+            blob_unlink(s, it->id) != 0 && errno != ENOENT) {
+            rc = -1; continue;
         }
         removed++;
         freed += it->size;

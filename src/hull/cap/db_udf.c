@@ -33,6 +33,7 @@ typedef struct {
     int64_t       gas_per_call;
     uint32_t      heap_size;
     uint32_t      stack_size;
+    uint32_t      timeout_ms;   /* each instance's default call timeout */
     int           is_aggregate;
     HlWasmInstance *scalar_inst;  /* non-NULL for scalar UDFs */
 } HlDbUdfCtx;
@@ -253,6 +254,7 @@ static void wasm_step_func(sqlite3_context *ctx, int argc,
             .heap_size  = udf->heap_size,
             .stack_size = udf->stack_size,
             .gas        = udf->gas_per_call,
+            .timeout_ms = udf->timeout_ms,
             .max_input  = HL_UDF_MAX_INPUT_SIZE,
             .max_output = HL_UDF_MAX_INPUT_SIZE,
         };
@@ -430,6 +432,7 @@ int hl_cap_db_udf_register_wasm(HlDbHandle *handle,
                                                      : HL_UDF_DEFAULT_GAS;
     udf_ctx->heap_size    = opts->heap_size;
     udf_ctx->stack_size   = opts->stack_size;
+    udf_ctx->timeout_ms   = opts->timeout_ms;
     udf_ctx->is_aggregate = opts->is_aggregate;
 
     int nargs = opts->nargs != 0 ? opts->nargs : 1;
@@ -440,6 +443,7 @@ int hl_cap_db_udf_register_wasm(HlDbHandle *handle,
             .heap_size  = udf_ctx->heap_size,
             .stack_size = udf_ctx->stack_size,
             .gas        = udf_ctx->gas_per_call,
+            .timeout_ms = udf_ctx->timeout_ms,
             .max_input  = HL_UDF_MAX_INPUT_SIZE,
             .max_output = HL_UDF_MAX_INPUT_SIZE,
         };
