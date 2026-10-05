@@ -459,6 +459,8 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
      * back under it (or joined by the other entry), and the rest of this
      * handler then autocommitted (audit 5 M1, db_registry.h). */
     const char *txn = hl_db_registry_open_txn(lua->base.db_registry);
+    /* Always NULL only in a DB-less build (the inline stub). */
+    // cppcheck-suppress knownConditionTrueFalse
     if (txn)
         return luaL_error(L, "%s cannot wait while a transaction is open on "
                           "database connection '%s': other requests use the "
