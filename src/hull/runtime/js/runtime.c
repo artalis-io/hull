@@ -942,6 +942,15 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     /* Store HlJS pointer in context opaque for C functions to access */
     JS_SetContextOpaque(js->ctx, js);
 
+    /* globalThis.__hull_manifest: reserved before any app code runs - a
+     * non-configurable getter onto the C-held manifest, with no setter. An
+     * app can neither replace it nor define its own before app.manifest(). */
+    if (hl_js_define_manifest_global(js->ctx) != 0) {
+        log_error("[hull:c] could not reserve __hull_manifest");
+        hl_js_free(js);
+        return -1;
+    }
+
     /* Register worker VM init hooks (e.g. db.* for worker.dispatch).
      * Must happen before modules are registered since module init may
      * trigger worker VM creation. */
@@ -1365,6 +1374,11 @@ void hl_js_free(HlJS *js)
         free(js->fn_to_string);
         js->fn_to_string = NULL;
     }
+    if (js->ctx && js->manifest) {
+        JS_FreeValue(js->ctx, *(JSValue *)js->manifest);
+        free(js->manifest);
+        js->manifest = NULL;
+    }
 
     if (js->ctx) {
         /* Free test state opaque data before deleting globals.
@@ -1379,7 +1393,6 @@ void hl_js_free(HlJS *js)
             "console", "hull",
             "__hull_routes", "__hull_route_defs",
             "__hull_middleware", "__hull_post_middleware",
-            "__hull_manifest",
             "__hull_test_state", "__hull_async_promise", "test",
             "__hull_timers", "__hull_timer_defs",
             "__hull_ws_defs", "__hull_sse_defs",
@@ -1989,7 +2002,9 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     js->last_async_cont = NULL;
     hl_js_budget_arm(js);
     JSValue call_argv[1] = { ctxobj };
+    js->active_cli_main = 1;   /* the ops main makes are main's */
     JSValue ret = JS_Call(ctx, main_fn, JS_UNDEFINED, 1, call_argv);
+    js->active_cli_main = 0;
     JS_FreeValue(ctx, ctxobj);
     js->last_async_cont = NULL;   /* main's ops are not wired to a promise */
 
@@ -2002,7 +2017,9 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     }
 
     /* Drain microtasks - resolves any synchronously-resolvable Promise. */
+    js->active_cli_main = 1;
     hl_js_run_jobs(js);
+    js->active_cli_main = 0;
     js->last_async_cont = NULL;
 
     /* Branch on whether main returned a Promise. */

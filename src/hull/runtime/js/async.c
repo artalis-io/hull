@@ -51,6 +51,7 @@ struct HlJsAsyncCont {
     void             *on_complete_ctx;
     HlReqLife        *life;         /* the handler's request life (ref held) */
     int               attached;     /* counted in life->attached */
+    int               cli_main;     /* made by app.main's own code */
 };
 
 /* The op no longer holds the connection (its resume is over, or it was
@@ -108,7 +109,10 @@ void hl_js_run_wire(HlJsRunLink *last, JSContext *ctx, JSValue promise,
 {
     if (!once) {
         once = (HlJsRunOnce *)malloc(sizeof *once);
-        if (once) { once->refs = 0; once->done = 0; once->tripped = 0; }
+        if (once) {
+            once->refs = 0; once->done = 0; once->tripped = 0;
+            once->txn_held = 0;
+        }
     }
     for (HlJsRunLink *c = last; c; ) {
         HlJsRunLink *prev = c->unwired_prev;
@@ -185,7 +189,9 @@ static int hl_js_run_tripped(HlJS *js, HlJsRunLink *link)
 /* app.main's own continuations are wired to no handler promise: main's
  * promise is watched by js_cli_main_settle, which a tripped run never
  * reaches (it settles nothing). Fail main and stop the loop instead of
- * leaving the CLI waiting forever. */
+ * leaving the CLI waiting forever. Only for main's own continuations
+ * (HlJsAsyncCont.cli_main): a detached op of a ws-client callback, or one
+ * nobody awaits, tripping its own budget does not end the CLI. */
 static void hl_js_cli_main_trip(HlJS *js)
 {
     if (!js->cli_main_active || !js->cli_main_value) return;
@@ -196,6 +202,29 @@ static void hl_js_cli_main_trip(HlJS *js)
     js->cli_main_active = 0;
     if (js->base.async_ctx)
         hl_async_backend()->stop(js->base.async_ctx);
+}
+
+int hl_js_run_defer_to_holder(HlJS *js, HlJsRunLink *link, HlReqLife *life)
+{
+    if (!life || life->attached <= 0 || !js->last_async_cont)
+        return 0;
+    hl_js_run_wire(hl_js_cont_link((HlAsyncCont *)js->last_async_cont),
+                   js->ctx, link->handler_promise, link->once);
+    js->last_async_cont = NULL;
+    return 1;
+}
+
+int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run)
+{
+    const char *txn = hl_db_registry_open_txn(js->base.db_registry);
+    if (!txn) return 0;
+    log_error("[hull:c] a handler waited while a transaction was open on "
+              "database connection '%s': other requests use the same "
+              "connection while it waits. Commit or roll back first. The "
+              "transaction is rolled back and the run fails", txn);
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
+    if (run) run->txn_held = 1;
+    return 1;
 }
 
 int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)
@@ -267,7 +296,13 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
      * the thrown case by the returned value and reject with the real exception so
      * `await` throws - catchable by the handler, else its promise rejects and the
      * REJECTED branch below writes a 500. Exactly one of resolve/reject fires. */
-    if (driver && jc->push_result) {
+    /* The run waited holding a transaction (rolled back then): fail it
+     * without continuing the handler (hl_js_run_yield_check). */
+    int aborted = jc->link.once && jc->link.once->txn_held;
+
+    if (aborted) {
+        /* resolve / reject are freed below, uncalled */
+    } else if (driver && jc->push_result) {
         JSValue result = jc->push_result(ctx, driver);
         if (JS_IsException(result)) {
             JSValue exc = JS_GetException(ctx); /* retrieve + clear pending */
@@ -297,7 +332,10 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     js->active_life            = jc->life;
 
     /* Drain microtasks - this continues the handler past the await */
-    hl_js_run_jobs(js);
+    js->active_cli_main = jc->cli_main;
+    if (!aborted)
+        hl_js_run_jobs(js);
+    js->active_cli_main = 0;
 
     js->active_on_complete     = NULL;
     js->active_on_complete_ctx = NULL;
@@ -315,12 +353,24 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
      * failure now (500, timer rescheduled, ws teardown) rather than leave it
      * suspended for good. */
     int tripped = hl_js_run_tripped(js, &jc->link);
-    if (tripped && state == JS_PROMISE_PENDING &&
+    if ((tripped || aborted) && state == JS_PROMISE_PENDING &&
         !JS_IsUndefined(jc->link.handler_promise))
         state = JS_PROMISE_REJECTED;
     if (js->budget_tripped && !conn && !jc->timer_ctx &&
-        JS_IsUndefined(jc->link.handler_promise))
+        JS_IsUndefined(jc->link.handler_promise) && jc->cli_main)
         hl_js_cli_main_trip(js);
+
+    /* The handler is done, but an op it started in this resume and did not
+     * await still holds the connection suspended (`hull.sleep(5000)` left
+     * running before `res.json`). Sending now forced the connection to
+     * SENDING over that live suspension; Keel then released or reused the
+     * slot, and the op's completion later drove whatever the slot had
+     * become (audit 6 H3). The op joins the run instead and sends the
+     * response when it resumes - as the synchronous path does, where Keel
+     * waits for the suspension. */
+    if ((state == JS_PROMISE_FULFILLED || state == JS_PROMISE_REJECTED) &&
+        conn && hl_js_run_defer_to_holder(js, &jc->link, jc->life))
+        state = JS_PROMISE_PENDING;
 
     /* Another continuation of this run already completed the handler (a
      * Promise.race, or an early rejection of a Promise.all): nothing left
@@ -392,14 +442,15 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         /* Handler error - extract message, write 500. A tripped run cannot
          * run a toString, and its promise may not even be rejected. */
         const char *msg = NULL;
-        if (!tripped) {
+        if (!tripped && !aborted) {
             JSValue result = JS_PromiseResult(ctx, jc->link.handler_promise);
             msg = JS_ToCString(ctx, result);
             JS_FreeValue(ctx, result);
             JS_FreeValue(ctx, JS_GetException(ctx));
         }
         const char *shown = msg ? msg : tripped
-            ? "instruction limit exceeded" : "(unknown)";
+            ? "instruction limit exceeded"
+            : aborted ? "waited holding a database transaction" : "(unknown)";
         if (conn)
             log_error("[hull:c] async js handler error: %s", shown);
         else
@@ -450,6 +501,8 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
              * timer_ctx. */
             hl_js_run_wire(hl_js_cont_link(nc), ctx, jc->link.handler_promise,
                            jc->link.once);
+            if (conn || jc->timer_ctx)
+                hl_js_run_yield_check(js, hl_js_cont_link(nc)->once);
             if (nc->set_handler_promise == hl_js_async_cont_set_handler_promise_impl) {
                 HlJsAsyncCont *new_jc = (HlJsAsyncCont *)nc;
                 new_jc->timer_ctx = jc->timer_ctx;
@@ -577,6 +630,7 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
     jc->on_complete     = js->active_on_complete;     /* deferred-teardown hook */
     jc->on_complete_ctx = js->active_on_complete_ctx;
     jc->life            = js->active_life;
+    jc->cli_main        = js->active_cli_main;
     hl_req_life_retain(jc->life);
     /* An attached op holds the request's connection until its resume is
      * over: a multipart park in that time is refused (mod_request.c). */

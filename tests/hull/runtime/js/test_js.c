@@ -7451,4 +7451,227 @@ JS_WORKER_CASE(an_async_dispatch_settles_and_leaves_nothing_behind,
     "    check(v === 1, 'dispatch ' + i + ': ' + JSON.stringify(v));\n"
     "  }\n")
 
+/* ── Audit 6: the JS runtime ──────────────────────────────────────────── */
+
+#include "../../../../src/hull/runtime/js/internal.h"   /* hl_js_run_yield_check */
+
+/* H1: a manifest field read through the prototype chain. `fs: []` plus
+ * Array.prototype.write = ["."] widened fs.write while both the signed and
+ * the runtime JSON said "fs":[]. Fields are read as own properties, and an
+ * array where an object belongs counts as absent. */
+UTEST(js_audit6, manifest_fields_are_read_as_own_properties)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ fs: [], databases: [], kv: [], cors: [], env: ['A'] });\n"
+        "Array.prototype.write = ['.'];\n"
+        "Array.prototype.read = ['/'];\n"
+        "Array.prototype.origins = ['*'];\n"
+        "Array.prototype.dynamic = { schemes: ['sqlite'], hosts: ['*'] };\n"
+        "Array.prototype.named = { x: ':memory:' };\n"
+        "Object.prototype.hosts = ['*'];\n", &msg), 0);
+    free(msg);
+    HlManifest m;
+    ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+    EXPECT_EQ(m.fs_read_count, 0);
+    EXPECT_EQ(m.fs_write_count, 0);
+    EXPECT_EQ(m.hosts_count, 0);
+    EXPECT_EQ(m.cors_origin_count, 0);
+    EXPECT_EQ(m.databases.declared, 0);
+    EXPECT_EQ(m.databases.dynamic.declared, 0);
+    EXPECT_EQ(m.databases.named_count, 0);
+    EXPECT_EQ(m.kv.dynamic.declared, 0);
+    EXPECT_EQ(m.env_count, 1);
+    hl_manifest_free(&m);
+    static const char undo[] =
+        "delete Array.prototype.write; delete Array.prototype.read;"
+        "delete Array.prototype.origins; delete Array.prototype.dynamic;"
+        "delete Array.prototype.named; delete Object.prototype.hosts;";
+    JS_FreeValue(js.ctx, JS_Eval(js.ctx, undo, sizeof undo - 1, "<c>",
+                                 JS_EVAL_TYPE_GLOBAL));
+    cleanup_js();
+}
+
+/* H1: an array is not a manifest (its fields came from Array.prototype). */
+UTEST(js_audit6, an_array_manifest_is_refused)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { app } from 'hull:app';\n"
+        "Array.prototype.hosts = ['*'];\n"
+        "let r = 0;\n"
+        "try { app.manifest([]); } catch (e) { r = e instanceof TypeError ? 1 : 2; }\n"
+        "delete Array.prototype.hosts;\n"
+        "globalThis.__a6 = r;\n", &msg), 0);
+    free(msg);
+    EXPECT_EQ(eval_int("globalThis.__a6"), 1);
+    HlManifest m;
+    EXPECT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), -1);
+    hl_manifest_free(&m);
+    cleanup_js();
+}
+
+/* H1: globalThis.__hull_manifest was an ordinary global an app could set
+ * itself - to a Proxy that showed the JSON encoder one policy and the
+ * extractor another. It is a reserved, read-only view of what app.manifest()
+ * stored; the extractor and encoder read only that stored value. */
+UTEST(js_audit6, hull_manifest_global_is_reserved)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "let r = 0;\n"
+        "const evil = new Proxy({}, { get: () => ['*'] });\n"
+        "try { globalThis.__hull_manifest = evil; } catch (e) { r |= 1; }\n"
+        "try { Object.defineProperty(globalThis, '__hull_manifest',\n"
+        "        { value: { hosts: ['*'] } }); } catch (e) { r |= 2; }\n"
+        "try { delete globalThis.__hull_manifest; } catch (e) { r |= 4; }\n"
+        "if (globalThis.__hull_manifest === undefined) r |= 8;\n"
+        "globalThis.__a6 = r;\n", &msg), 0);
+    free(msg);
+    EXPECT_EQ(eval_int("globalThis.__a6"), 15);
+    HlManifest m;
+    EXPECT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), -1);   /* none declared */
+    hl_manifest_free(&m);
+    char *j = NULL;
+    size_t jl = 0;
+    EXPECT_EQ(hl_manifest_json_js(js.ctx, &j, &jl), 0);
+    EXPECT_TRUE(j == NULL);
+    free(j);
+
+    EXPECT_EQ(a5_module_named("<test2>",
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ hosts: ['a.example'] });\n"
+        "globalThis.__a6 = globalThis.__hull_manifest.hosts[0] === 'a.example'\n"
+        "  && app.getManifest().hosts[0] === 'a.example' ? 1 : 0;\n", &msg), 0);
+    free(msg);
+    EXPECT_EQ(eval_int("globalThis.__a6"), 1);
+    ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+    EXPECT_EQ(m.hosts_count, 1);
+    hl_manifest_free(&m);
+    cleanup_js();
+}
+
+/* L3: a key with a NUL was cut at the NUL - {"hosts\0": [], hosts: ["*"]}
+ * encoded as two "hosts" keys. Refused. */
+UTEST(js_audit6, manifest_key_with_nul_is_refused)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ 'hosts\\u0000': [], hosts: ['*'] });\n", &msg), 0);
+    free(msg);
+    char *j = NULL;
+    size_t jl = 0;
+    EXPECT_EQ(hl_manifest_json_js(js.ctx, &j, &jl), -1);
+    free(j);
+    cleanup_js();
+}
+
+/* H2: a connection object was extensible: `c.retryOn = c.exec` handed to a
+ * stdlib helper that calls opts.retryOn(...) ran app SQL with stdlib
+ * identity (a `hull:` frame, `this` a real connection). Connection objects
+ * and their sub-objects are sealed. */
+UTEST(js_audit6, connection_objects_are_tamper_proof)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { db } from 'hull:db';\n"
+        "const c = db.default();\n"
+        "let r = 0;\n"
+        "try { c.retryOn = c.exec; } catch (e) { r |= 1; }\n"
+        "try { c.exec = () => 0; } catch (e) { r |= 2; }\n"
+        "try { c.async.retryOn = c.async.exec; } catch (e) { r |= 4; }\n"
+        "try { delete c.query; } catch (e) { r |= 8; }\n"
+        "if (c.udf) { try { c.udf.x = 1; } catch (e) { r |= 16; } } else r |= 16;\n"
+        "if (!Object.isExtensible(c) && c.retryOn === undefined) r |= 32;\n"
+        "globalThis.__a6 = r;\n", &msg), 0);
+    free(msg);
+    EXPECT_EQ(eval_int("globalThis.__a6"), 63);
+    cleanup_js_caps();
+}
+
+/* H4: req.ctx was freed only by a synchronous handler; a middleware that
+ * short-circuited (an auth reject) left its ctx object pinned in the JS
+ * heap for good once Keel reset the request. */
+UTEST(js_audit6, short_circuit_frees_req_ctx)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    EXPECT_EQ(a5_middleware("(req, res) => { req.ctx.user = { id: 1 }; return 1; }",
+                            &req, &res), 1);
+    EXPECT_TRUE(req.ctx == NULL);
+    free_req_ctx(&req);
+    cleanup_js();
+
+    /* A middleware that continues hands it on to the handler. */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRequest req2 = {0};
+    KlHttpResponse res2 = {0};
+    EXPECT_EQ(a5_middleware("(req, res) => { req.ctx.user = 1; return 0; }",
+                            &req2, &res2), 0);
+    EXPECT_TRUE(req2.ctx != NULL);
+    hl_js_req_ctx_free(&js, &req2);
+    EXPECT_TRUE(req2.ctx == NULL);
+    cleanup_js();
+}
+
+/* M2: the no-transaction-across-a-wait check ran only when an op was made;
+ * `const p = http.fetch(..); conn.exec("BEGIN"); await p` held the
+ * transaction across the wait. The yield point checks again: the
+ * transaction is rolled back and the run is marked failed. */
+UTEST(js_audit6, a_run_that_waits_in_a_transaction_is_failed)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { db } from 'hull:db';\n"
+        "const c = db.default();\n"
+        "c.exec('CREATE TABLE IF NOT EXISTS a6_t (v INTEGER)');\n"
+        "c.exec('BEGIN');\n"
+        "c.exec('INSERT INTO a6_t (v) VALUES (1)');\n", &msg), 0);
+    free(msg);
+    EXPECT_TRUE(hl_db_registry_open_txn(js.base.db_registry) != NULL);
+    HlJsRunOnce run = {0};
+    EXPECT_EQ(hl_js_run_yield_check(&js, &run), 1);
+    EXPECT_EQ(run.txn_held, 1);
+    EXPECT_TRUE(hl_db_registry_open_txn(js.base.db_registry) == NULL);
+    /* Without a transaction open: nothing to fail. */
+    HlJsRunOnce run2 = {0};
+    EXPECT_EQ(hl_js_run_yield_check(&js, &run2), 0);
+    EXPECT_EQ(run2.txn_held, 0);
+    cleanup_js_caps();
+}
+
+/* L5: res.text / res.html cut the body at the first NUL. */
+UTEST(js_audit6, res_text_keeps_embedded_nul)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(a5_middleware("(req, res) => { res.text('a\\u0000b'); return 1; }",
+                            &req, &res), 1);
+    EXPECT_EQ(res.body_len, (size_t)3);
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+    cleanup_js();
+}
+
 UTEST_MAIN();

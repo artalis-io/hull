@@ -218,9 +218,10 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "res.html requires (string)");
 
-    const char *html = JS_ToCString(ctx, argv[0]);
+    /* Length-exact: strlen cut the body at an embedded NUL (L5). */
+    size_t html_len = 0;
+    const char *html = JS_ToCStringLen(ctx, &html_len, argv[0]);
     if (html) {
-        size_t html_len = strlen(html);
         HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
         kl_http_response_header(res, "Content-Type", "text/html; charset=utf-8");
         /* Skip the default CSP if middleware already wrote one - two
@@ -250,9 +251,9 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "res.text requires (string)");
 
-    const char *text = JS_ToCString(ctx, argv[0]);
+    size_t text_len = 0;
+    const char *text = JS_ToCStringLen(ctx, &text_len, argv[0]);   /* L5 */
     if (text) {
-        size_t text_len = strlen(text);
         HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
         kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
         hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,

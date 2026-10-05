@@ -139,12 +139,18 @@ void hl_js_timer_trampoline(void *user_data)
     if (JS_IsException(ret)) {
         JSValue exception = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exception);
+        if (!msg) JS_FreeValue(ctx, JS_GetException(ctx));   /* a throwing toString (L2) */
         log_error("[hull:timer] %s", msg ? msg : "unknown error");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, exception);
         JS_FreeValue(ctx, ret);
         t->in_flight = 0;
+        /* Jobs the handler queued before it threw run now, with no timer and
+         * no request active - left queued, they ran in the next entry's
+         * drain, where an op they started suspended that request (L1). */
         js->active_timer = NULL;
+        hl_js_run_jobs(js);
+        js->last_async_cont = NULL;
         hl_js_timer_reschedule(t);
         return;
     }
@@ -166,7 +172,9 @@ void hl_js_timer_trampoline(void *user_data)
         if (js->last_async_cont) {
             /* Async handler - wire handler_promise on the continuation; it
              * clears in_flight and reschedules when the handler completes. */
-            hl_js_run_drop(js, hl_js_run_attach(js, ret));
+            HlJsRunOnce *run = hl_js_run_attach(js, ret);
+            hl_js_run_yield_check(js, run);
+            hl_js_run_drop(js, run);
             JS_FreeValue(ctx, ret);
             js->active_timer = NULL;
             return;
@@ -199,6 +207,8 @@ void hl_js_timer_trampoline(void *user_data)
         log_error("[hull:timer] %s", msg ? msg : js->budget_tripped
                   ? "instruction limit exceeded" : "unknown error");
         if (msg) JS_FreeCString(ctx, msg);
+        else if (!js->budget_tripped)
+            JS_FreeValue(ctx, JS_GetException(ctx));   /* L2 */
         JS_FreeValue(ctx, result);
     } else {
         /* Sync return (not a promise) - check for false */

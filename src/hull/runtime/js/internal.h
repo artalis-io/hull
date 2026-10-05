@@ -177,6 +177,12 @@ typedef struct {
      * never settle (a tripped run settles nothing), so the continuation that
      * resumes next completes the run as failed instead of waiting. */
     int tripped;
+    /* The run waited (suspended on an op, or parked on a multipart read)
+     * while a registry connection was inside a transaction. The transaction
+     * was rolled back at that point; the run is failed at its next resume
+     * without being continued - continued, its remaining statements would
+     * autocommit and its COMMIT "succeed" (audit 6 M2). */
+    int txn_held;
 } HlJsRunOnce;
 
 typedef struct HlJsRunLink {
@@ -237,6 +243,22 @@ JSValue hl_js_budget_throw(JSContext *ctx);
  * in the error. */
 int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what);
 
+/* A resume whose handler has settled while an op it started (and did not
+ * await) still holds the request's connection (life->attached): wire the
+ * continuations made in this resume (js->last_async_cont) into the run, so
+ * the holder completes it - the response is never sent over a live
+ * suspension. 1 = deferred (treat the run as still pending), 0 = not. */
+int hl_js_run_defer_to_holder(HlJS *js, HlJsRunLink *link, struct HlReqLife *life);
+
+/* A run is about to wait (its handler returned / re-yielded pending with a
+ * continuation, or a multipart read re-parks). The creation-time check
+ * (hl_js_db_refuse_wait) cannot see a transaction opened AFTER the op was
+ * started and before the await: `const p = http.fetch(..);
+ * conn.exec("BEGIN"); await p`. If a registry connection is in a
+ * transaction now, roll it back, log, and mark @p run (txn_held) so its next
+ * resume fails it instead of continuing it. 1 = the run is failed. */
+int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run);
+
 /* Suspend js->active_conn for an attached op - hl_net_op_suspend, after the
  * gate's checks once more: the binding's argument conversions, between the
  * gate and here, can run app code (a getter) that parked a multipart read.
@@ -265,5 +287,13 @@ void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
  * stub with the same name that throws. Returns 0, or -1 if it could not. Used
  * by the main runtime and the worker VMs. */
 int hl_js_poison_code_constructors(JSContext *ctx);
+
+/* Reserve globalThis.__hull_manifest (mod_app.c): a non-configurable getter
+ * onto HlJS.manifest, defined before any app code runs. 0 / -1. */
+int hl_js_define_manifest_global(JSContext *ctx);
+
+/* Free req->ctx (a middleware's req.ctx, or a test dispatch's JSON) and
+ * clear it (dispatch.c). Idempotent. */
+void hl_js_req_ctx_free(HlJS *js, KlHttpRequest *req);
 
 #endif /* HL_RUNTIME_JS_INTERNAL_H */

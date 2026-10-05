@@ -164,6 +164,11 @@ typedef struct HlJS {
      * heap-allocated JSValue (opaque to this header to avoid pulling
      * in quickjs.h here); owned by the runtime - freed in run_main. */
     int             cli_main_active;     /* 1 = waiting on main's Promise */
+    /* 1 while app.main's own code runs (its call, and the resume of one of
+     * its continuations): a continuation made now is main's, and only a
+     * trip in one of main's continuations ends the CLI - not a trip in a
+     * ws-client callback's op or another detached op (audit 6 M3). */
+    int             active_cli_main;
     int             cli_main_rejected;   /* 1 = Promise rejected, 0 = fulfilled */
     void           *cli_main_value;      /* JSValue * - borrowed in runtime.c */
 
@@ -181,6 +186,15 @@ typedef struct HlJS {
     /* hull:blob's current store (HlJsBlobRef*, mod_blob.c): held here, not
      * on a global an app accessor could swap out from under C. */
     void           *blob_ref;
+
+    /* The manifest app.manifest() declared (JSValue *, owned): a frozen,
+     * plain-data copy, set once and only by app.manifest. The policy
+     * extractor and the --verify-sig JSON encoder (manifest_js.c) both read
+     * THIS value, never a global: globalThis.__hull_manifest is only a
+     * non-configurable getter onto it, so app code cannot define its own
+     * (a Proxy that showed the encoder one policy and the extractor another)
+     * before or instead of calling app.manifest(). */
+    void           *manifest;
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */
