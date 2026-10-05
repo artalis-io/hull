@@ -129,8 +129,10 @@ static void store_u64le(uint8_t *p, uint64_t v)
  * (round-6 M1). */
 static void clear_validate_oob_exception(wasm_module_inst_t inst)
 {
-    const char *e = wasm_runtime_get_exception(inst);
-    if (e && strstr(e, "out of bounds"))
+    /* Copied under exception_lock (WAMR patch 0007): the watchdog thread may
+     * write the buffer concurrently; get_exception hands back the live one. */
+    char e[128];
+    if (wasm_runtime_copy_exception(inst, e) && strstr(e, "out of bounds"))
         wasm_runtime_set_exception(inst, NULL);
 }
 
@@ -163,7 +165,7 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
      * call. Do nothing that could replace it (every validate below sets its
      * own on failure, and SPAN_INFO then clears that): return, and WAMR
      * unwinds on it as soon as this native call returns (round-6 M1). */
-    if (wasm_runtime_get_exception(inst))
+    if (wasm_runtime_copy_exception(inst, NULL))
         return -1;
 
     if (opcode == HL_WASM_OP_LOG) {
