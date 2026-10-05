@@ -76,7 +76,9 @@ function attachment.init(opts)
         -- queued inside the app's own (not yet committed) db.batch was
         -- unlinked at once - an app rollback then restored a row without
         -- its blob.
-        if type(opts.orphan_grace) ~= "number" or not (opts.orphan_grace > 0) then
+        local g = opts.orphan_grace
+        -- g ~= g: NaN, which no comparison with 0 would refuse.
+        if type(g) ~= "number" or g ~= g or g <= 0 then
             error("attachment.init: orphan_grace must be a number > 0")
         end
         _orphan_grace = opts.orphan_grace
