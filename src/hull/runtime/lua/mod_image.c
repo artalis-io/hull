@@ -7,9 +7,9 @@
 #include "mod_buffer.h"
 #include "hull/cap/image.h"
 #include "hull/cap/fs.h"
+#include "protected.h"   /* pushes that cannot leak the C buffer */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
-#include "protected.h"   /* pushes that cannot leak the C buffer */
 #endif
 
 #include <stdlib.h>

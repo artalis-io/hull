@@ -4,6 +4,8 @@
  */
 
 
+#include "hull/cap/fs.h"          /* HlMappedBuffer / HL_MMAP_MT (pinned views); without
+                                   * WASM nothing else brought it in */
 #include "hull/cap/fs_resolve.h"  /* hl_fs_fopen_read */
 #include "mod_buffer.h"
 #include "hull/cap/gpu.h"
@@ -17,10 +19,10 @@
 static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
                                     HlGpuTextureDesc *out, int max, int anchor);
 
+#include "hull/utils/alloc.h"
+#include "internal.h"   /* hl_lua_anchor, hl_lua_check_can_wait */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
-#include "hull/utils/alloc.h"
-#include "internal.h"   /* hl_lua_check_can_wait */
 #endif
 #include "protected.h"   /* pushes that cannot leak the C buffer */
 
