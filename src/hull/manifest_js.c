@@ -12,6 +12,8 @@
 #include "manifest_internal.h"
 #include "log.h"
 
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -500,6 +502,144 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                  "will fail closed unless --no-sandbox is set");
 
     JS_FreeValue(ctx, manifest);
+    return 0;
+}
+
+
+/* ── hl_manifest_json_js ─────────────────────────────────────────────── */
+
+typedef struct { char *p; size_t len, cap; int oom; } MjBuf;
+
+static void mj_put(MjBuf *b, const char *s, size_t n)
+{
+    if (b->oom) return;
+    if (n > SIZE_MAX / 2 - b->len) { b->oom = 1; return; }
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (cap < b->len + n + 1) cap *= 2;
+        char *np = realloc(b->p, cap);
+        if (!np) { b->oom = 1; return; }
+        b->p = np;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = '\0';
+}
+
+static void mj_str(MjBuf *b, const char *s, size_t n)
+{
+    mj_put(b, "\"", 1);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        char esc[8];
+        if (c == '"' || c == '\\') {
+            esc[0] = '\\'; esc[1] = (char)c;
+            mj_put(b, esc, 2);
+        } else if (c < 0x20) {
+            snprintf(esc, sizeof esc, "\\u%04x", c);
+            mj_put(b, esc, 6);
+        } else {
+            mj_put(b, (const char *)&s[i], 1);
+        }
+    }
+    mj_put(b, "\"", 1);
+}
+
+/* Encode @p v. Objects and arrays are walked through their OWN properties
+ * (JS_GetOwnProperty: no getter runs, nothing is inherited); only data
+ * properties holding JSON values are accepted. */
+static int mj_value(JSContext *ctx, MjBuf *b, JSValueConst v, int depth)
+{
+    if (depth > 32) return -1;
+    if (JS_IsNull(v))  { mj_put(b, "null", 4); return 0; }
+    if (JS_IsBool(v))  {
+        if (JS_ToBool(ctx, v)) mj_put(b, "true", 4); else mj_put(b, "false", 5);
+        return 0;
+    }
+    if (JS_IsNumber(v)) {
+        double d = 0;
+        if (JS_ToFloat64(ctx, &d, v) != 0 || d != d || d - d != 0) return -1;
+        size_t n = 0;
+        const char *s = JS_ToCStringLen(ctx, &n, v);   /* a primitive: no user code */
+        if (!s) { JS_FreeValue(ctx, JS_GetException(ctx)); return -1; }
+        mj_put(b, s, n);
+        JS_FreeCString(ctx, s);
+        return 0;
+    }
+    if (JS_IsString(v)) {
+        size_t n = 0;
+        const char *s = JS_ToCStringLen(ctx, &n, v);
+        if (!s) { JS_FreeValue(ctx, JS_GetException(ctx)); return -1; }
+        mj_str(b, s, n);
+        JS_FreeCString(ctx, s);
+        return 0;
+    }
+    if (!JS_IsObject(v) || JS_IsFunction(ctx, v)) return -1;
+
+    int is_arr = JS_IsArray(ctx, v);
+    if (is_arr < 0) { JS_FreeValue(ctx, JS_GetException(ctx)); return -1; }
+    JSPropertyEnum *tab = NULL;
+    uint32_t n = 0;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &n, v,
+                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return -1;
+    }
+    int rc = 0, first = 1;
+    mj_put(b, is_arr ? "[" : "{", 1);
+    for (uint32_t i = 0; i < n && rc == 0; i++) {
+        JSPropertyDescriptor d;
+        int has = JS_GetOwnProperty(ctx, &d, v, tab[i].atom);
+        if (has < 0) { JS_FreeValue(ctx, JS_GetException(ctx)); rc = -1; break; }
+        if (!has) continue;
+        if (d.flags & JS_PROP_GETSET) {
+            rc = -1;                       /* an accessor is not data */
+        } else {
+            if (!first) mj_put(b, ",", 1);
+            first = 0;
+            if (!is_arr) {
+                const char *k = JS_AtomToCString(ctx, tab[i].atom);
+                if (!k) { JS_FreeValue(ctx, JS_GetException(ctx)); rc = -1; }
+                else { mj_str(b, k, strlen(k)); mj_put(b, ":", 1); JS_FreeCString(ctx, k); }
+            }
+            if (rc == 0) rc = mj_value(ctx, b, d.value, depth + 1);
+        }
+        JS_FreeValue(ctx, d.value);
+        JS_FreeValue(ctx, d.getter);
+        JS_FreeValue(ctx, d.setter);
+    }
+    for (uint32_t i = 0; i < n; i++) JS_FreeAtom(ctx, tab[i].atom);
+    js_free(ctx, tab);
+    mj_put(b, is_arr ? "]" : "}", 1);
+    return rc;
+}
+
+int hl_manifest_json_js(JSContext *ctx, char **out, size_t *out_len)
+{
+    *out = NULL;
+    *out_len = 0;
+    JSValue g = JS_GetGlobalObject(ctx);
+    JSAtom a = JS_NewAtom(ctx, "__hull_manifest");
+    JSPropertyDescriptor d;
+    int has = JS_GetOwnProperty(ctx, &d, g, a);
+    JS_FreeAtom(ctx, a);
+    JS_FreeValue(ctx, g);
+    if (has < 0) { JS_FreeValue(ctx, JS_GetException(ctx)); return -1; }
+    if (!has) return 0;
+    JS_FreeValue(ctx, d.getter);
+    JS_FreeValue(ctx, d.setter);
+    if ((d.flags & JS_PROP_GETSET) || JS_IsUndefined(d.value) || JS_IsNull(d.value)) {
+        int bad = (d.flags & JS_PROP_GETSET) != 0;
+        JS_FreeValue(ctx, d.value);
+        return bad ? -1 : 0;
+    }
+    MjBuf b = {0};
+    int rc = mj_value(ctx, &b, d.value, 0);
+    JS_FreeValue(ctx, d.value);
+    if (rc != 0 || b.oom || !b.p) { free(b.p); return -1; }
+    *out = b.p;
+    *out_len = b.len;
     return 0;
 }
 

@@ -740,7 +740,13 @@ static void js_install_app_sse(JSContext *ctx)
 }
 
 /* Freeze @p v deeply in C (an app could have replaced Object.freeze):
- * every own property non-writable and non-configurable, no extensions. */
+ * every own property non-writable and non-configurable, no extensions.
+ * A plain object also loses its prototype: the policy is read with
+ * JS_GetPropertyStr (manifest_js.c), which looks up the prototype chain, so
+ * an app that set Object.prototype.hosts after declaring a manifest without
+ * `hosts` widened the enforced policy beyond the signed one. Arrays keep
+ * Array.prototype (a parsed JSON array has no holes, so every index and
+ * `length` read is its own) so getManifest().modules.map still works. */
 static int js_manifest_freeze(JSContext *ctx, JSValueConst v, int depth)
 {
     if (!JS_IsObject(v)) return 0;
@@ -764,6 +770,11 @@ static int js_manifest_freeze(JSContext *ctx, JSValueConst v, int depth)
     }
     for (uint32_t i = 0; i < n; i++) JS_FreeAtom(ctx, tab[i].atom);
     js_free(ctx, tab);
+    if (rc == 0) {
+        int is_arr = JS_IsArray(ctx, v);
+        if (is_arr < 0 || (!is_arr && JS_SetPrototype(ctx, v, JS_NULL) < 0))
+            rc = -1;
+    }
     if (rc == 0 && JS_PreventExtensions(ctx, v) < 0) rc = -1;
     return rc;
 }
