@@ -90,6 +90,9 @@ int hl_tool_spawn_env(const char *const argv[], const char *const envadd[]);
 
 /** @brief hl_tool_spawn_self(): the child could not be started at all. */
 #define HL_TOOL_SPAWN_NOSTART (-2)
+/** @brief hl_tool_spawn_self(): the child outlived @p timeout_ms and was
+ *  killed. */
+#define HL_TOOL_SPAWN_TIMEOUT (-3)
 
 /**
  * @brief Re-exec the binary that is currently running.
@@ -107,13 +110,16 @@ int hl_tool_spawn_env(const char *const argv[], const char *const envadd[]);
  * @param argv NULL-terminated argv. argv[0] MUST be a resolved path to this
  *             binary (from hl_release_io_self_path, else the caller's argv[0]):
  *             the cosmo path uses posix_spawn, which does no PATH search.
+ * @param timeout_ms Kill the child (SIGKILL) and return
+ *             #HL_TOOL_SPAWN_TIMEOUT once it has run this long; 0 = no limit.
  * @return The child's exit status; -1 if it started but did not exit normally
- *         (killed by a signal); #HL_TOOL_SPAWN_NOSTART if it never started.
+ *         (killed by a signal); #HL_TOOL_SPAWN_NOSTART if it never started;
+ *         #HL_TOOL_SPAWN_TIMEOUT if it was killed for running too long.
  *         The caller MUST distinguish the last two: retrying an aborted run
  *         in-process reproduces the crash the child exists to contain, while
  *         refusing to retry one that never started breaks builds for no reason.
  */
-int hl_tool_spawn_self(const char *const argv[]);
+int hl_tool_spawn_self(const char *const argv[], unsigned timeout_ms);
 
 /*
  * Drive an allowlisted compiler @p driver THROUGH a POSIX shell @p shell,

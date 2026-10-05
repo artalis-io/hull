@@ -250,9 +250,28 @@ js_blob_count() {
 # bounded at 15s more. It proceeds the moment the cache is written, so a
 # quiet runner pays nothing, and a genuinely broken JS cache still FAILS
 # rather than hanging.
+# Workers that have logged "listening on" - the assertion below counts these.
+mixed_listening() {
+    _n=0
+    for _f in "$TMPHOME"/mixed_*.err; do
+        grep -q "listening on" "$_f" 2>/dev/null && _n=$((_n + 1))
+    done
+    echo "$_n"
+}
+
 sleep 2
 waited=0
 while [ "$(js_blob_count)" -eq 0 ] && [ "$waited" -lt 30 ]; do
+    sleep 0.5
+    waited=$((waited + 1))
+done
+# Also wait (bounded) for every worker to finish starting before stopping
+# them. Waiting only for the first JS blob killed workers that were still
+# booting - eight concurrent APE start-ups on a loaded Windows runner are
+# staggered - and they died before logging "listening on", with empty stderr,
+# failing "all 8 mixed-runtime workers actually started" intermittently.
+waited=0
+while [ "$(mixed_listening)" -lt 8 ] && [ "$waited" -lt 60 ]; do
     sleep 0.5
     waited=$((waited + 1))
 done

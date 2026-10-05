@@ -36,6 +36,9 @@ static char *strdup_safe(const char *s)
  * where the macro is NOT defined. Guarding it there left the child command
  * with an undefined reference at link. */
 #define HL_MEXTRACT_MAGIC "HULLMANIFEST1 "
+/* How long the isolated extraction child may run. Extraction itself takes
+ * well under a second; this only bounds a child that would never finish. */
+#define HL_MEXTRACT_CHILD_TIMEOUT_MS 45000u
 
 int hl_manifest_extract_write_result(const char *out_path, const char *status,
                                      const char *payload, size_t payload_len)
@@ -195,6 +198,11 @@ cleanup:
             (void)hl_manifest_extract_write_result(early_result_path, "none",
                                                    NULL, 0);
         }
+        /* The isolated child is done: its result is on disk and the parent
+         * reads only that file. Exit without tearing the runtime down - the
+         * teardown is what aborts (#427), and could equally wedge, while
+         * nothing in it is needed by a process that is about to end. */
+        _exit(rc == 0 ? 0 : 1);
     }
 
     hl_js_free(js);
@@ -322,7 +330,17 @@ int hl_manifest_extract_js_from_file(const char *path,
     /* spawn_SELF, not spawn: the allowlist bounds external tools and cannot
      * name this binary anyway (hull ships as `hull`, `hull.com`,
      * `hull-cosmo.exe`), so routing through it denied the re-exec outright. */
-    int spawn_rc = hl_tool_spawn_self(argv);
+    /* Bounded: extraction takes well under a second; a child that does not
+     * finish (a JS runtime wedged in its job queue or its teardown) is killed
+     * rather than hanging the build with it. */
+    int spawn_rc = hl_tool_spawn_self(argv, HL_MEXTRACT_CHILD_TIMEOUT_MS);
+    if (spawn_rc == HL_TOOL_SPAWN_TIMEOUT) {
+        (void)remove(result_path);
+        if (out_err) *out_err = strdup_safe(
+            "manifest extraction timed out (the app's top level did not "
+            "finish running)");
+        return -1;
+    }
 
     size_t rlen = 0;
     char *raw = read_all(result_path, &rlen);
