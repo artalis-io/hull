@@ -424,6 +424,83 @@ UTEST(tool, validate_args_rejects_clang_config_files)
 /* Positive: run an allowlisted driver THROUGH /bin/sh and prove the $0/$@
  * plumbing reaches it. `sh -c 'exec "$0" "$@"' cc --version` -> `cc --version`.
  * A real cc is standard on the CI hosts; skip cleanly if it is somehow absent. */
+/* ── Spawning a real child ─────────────────────────────────────────
+ *
+ * A child every host can run, Windows included: a copy of this test binary
+ * named "hull" (an allowlisted name). Run with --list-tests it prints every
+ * test name and exits 0. On cosmo these go through posix_spawnp: the
+ * emulated fork() those paths used on Windows could fault in the child before
+ * exec, and the parent then blocked forever reading the child's pipe. */
+
+static char g_self[PATH_MAX];   /* this binary, resolved in main() (realpath: PATH_MAX) */
+
+/* Copy this test binary to <dir>/hull (0755); returns 0 on success. */
+static int copy_self_as_hull(const char *dir, char *out, size_t outsz)
+{
+    if (!g_self[0]) return -1;
+    if ((size_t)snprintf(out, outsz, "%s/hull", dir) >= outsz) return -1;
+    FILE *in = fopen(g_self, "rb");
+    if (!in) return -1;
+    FILE *o = fopen(out, "wb");
+    if (!o) { fclose(in); return -1; }
+    char buf[65536];
+    size_t n;
+    int bad = 0;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, n, o) != n) { bad = 1; break; }
+    if (ferror(in)) bad = 1;
+    fclose(in);
+    if (fclose(o) != 0) bad = 1;
+    if (bad || chmod(out, 0755) != 0) { remove(out); return -1; }
+    return 0;
+}
+
+UTEST(tool, spawn_read_captures_child_stdout)
+{
+    char *dir = make_tmpdir();
+    ASSERT_TRUE(dir != NULL);
+    char exe[HL_TEST_PATH_MAX];
+    if (copy_self_as_hull(dir, exe, sizeof exe) != 0) {
+        rmdir(dir); free(dir);
+        UTEST_SKIP("could not copy this test binary");
+    }
+    const char *argv[] = { exe, "--list-tests", NULL };
+    size_t len = 0;
+    char *out = hl_tool_spawn_read(argv, &len);
+    ASSERT_TRUE(out != NULL);
+    EXPECT_TRUE(len > 0);
+    EXPECT_TRUE(strstr(out, "tool.spawn_read_captures_child_stdout") != NULL);
+    free(out);
+    remove(exe); rmdir(dir); free(dir);
+}
+
+UTEST(tool, spawn_runs_child_and_returns_its_status)
+{
+    char *dir = make_tmpdir();
+    ASSERT_TRUE(dir != NULL);
+    char exe[HL_TEST_PATH_MAX];
+    if (copy_self_as_hull(dir, exe, sizeof exe) != 0) {
+        rmdir(dir); free(dir);
+        UTEST_SKIP("could not copy this test binary");
+    }
+    /* a filter that matches nothing: the child runs no tests and exits 0 */
+    const char *argv[] = { exe, "--filter=tool.matches_nothing_at_all", NULL };
+    EXPECT_EQ(hl_tool_spawn(argv), 0);
+    remove(exe); rmdir(dir); free(dir);
+}
+
+UTEST(tool, spawn_of_a_missing_program_fails)
+{
+    char *dir = make_tmpdir();
+    ASSERT_TRUE(dir != NULL);
+    char exe[HL_TEST_PATH_MAX];
+    ASSERT_TRUE((size_t)snprintf(exe, sizeof exe, "%s/absent/hull", dir) < sizeof exe);
+    const char *argv[] = { exe, "--list-tests", NULL };
+    EXPECT_TRUE(hl_tool_spawn_read(argv, NULL) == NULL);
+    EXPECT_NE(hl_tool_spawn(argv), 0);
+    rmdir(dir); free(dir);
+}
+
 UTEST(tool, driver_shell_runs_driver_through_sh)
 {
     const char *probe[] = { "cc", "--version", NULL };
@@ -848,4 +925,12 @@ UTEST(tool, linker_passthrough_and_plugins_are_refused)
     EXPECT_NE(hl_tool_validate_args(a6), 0);
 }
 
-UTEST_MAIN();
+UTEST_STATE();
+
+int main(int argc, const char *const argv[])
+{
+    /* Resolved now, before any test changes directory: the spawn tests copy
+     * this binary to run it as a child. */
+    if (argc > 0 && argv[0] && !realpath(argv[0], g_self)) g_self[0] = '\0';
+    return utest_main(argc, argv);
+}
