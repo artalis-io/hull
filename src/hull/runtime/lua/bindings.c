@@ -34,6 +34,55 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+/* ── req.ctx between middleware stages and the handler ─────────────────
+ *
+ * A middleware's req.ctx table is kept in one registry table keyed by the
+ * KlHttpRequest's address, and req->ctx is set to the marker below to say
+ * "this request has one". It used to be a registry ref per request, freed
+ * only when a handler completed synchronously: a request that a middleware
+ * answered, an SSE route, a handler that waited on anything, a request whose
+ * body never arrived - Keel reset req->ctx and the ref was pinned for good,
+ * so a stream of requests rejected by an auth middleware grew the heap to
+ * its limit. The handler's entry drops the entry (its req table holds ctx
+ * from then on), and so do a short-circuit and a middleware error. A request
+ * that ends any other way leaves its entry behind, but the next request on
+ * the same connection (the same KlHttpRequest) overwrites it, so what is
+ * left over is bounded by the connection pool, not by the request count. */
+const char hl_lua_req_ctx_key = 0;
+HlReqCtx   hl_lua_req_ctx_marker = { .kind = HL_REQCTX_LUA_REF };
+
+void hl_lua_req_ctx_store(lua_State *L, KlHttpRequest *req, int idx)
+{
+    idx = lua_absindex(L, idx);
+    luaL_checkstack(L, 3, "req.ctx");
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &hl_lua_req_ctx_key) != LUA_TTABLE) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &hl_lua_req_ctx_key);
+    }
+    lua_pushvalue(L, idx);
+    lua_rawsetp(L, -2, req);
+    lua_pop(L, 1);
+}
+
+void hl_lua_req_ctx_drop(lua_State *L, KlHttpRequest *req)
+{
+    /* Never raises: only an existing key is set (to nil), which does not
+     * allocate. */
+    if (!lua_checkstack(L, 2)) return;
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &hl_lua_req_ctx_key) == LUA_TTABLE) {
+        if (lua_rawgetp(L, -1, req) != LUA_TNIL) {
+            lua_pop(L, 1);
+            lua_pushnil(L);
+            lua_rawsetp(L, -2, req);
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+}
+
 /* get_hl_lua_from_L moved to runtime.c (always linked): it is a general
  * lua_State -> HlLua accessor with no HTTP dependency, and mod_tool.c (built in
  * every flavor, including pure-compute) now references it, so it must not live
@@ -222,9 +271,18 @@ void hl_lua_make_request(lua_State *L, KlHttpRequest *req,
      * otherwise start with an empty table. */
     if (req->ctx) {
         HlReqCtx *rctx = (HlReqCtx *)req->ctx;
-        if (rctx->kind == HL_REQCTX_LUA_REF) {
-            /* Native Lua table - retrieve directly from registry */
-            lua_rawgeti(L, LUA_REGISTRYINDEX, rctx->lua_ref);
+        if (rctx == &hl_lua_req_ctx_marker) {
+            /* A middleware's table, kept under this request's key. */
+            lua_rawgetp(L, LUA_REGISTRYINDEX, &hl_lua_req_ctx_key);
+            if (lua_istable(L, -1))
+                lua_rawgetp(L, -1, req);
+            else
+                lua_pushnil(L);
+            lua_remove(L, -2);
+            if (!lua_istable(L, -1)) {
+                lua_pop(L, 1);
+                lua_newtable(L);
+            }
         } else if (rctx->kind == HL_REQCTX_JSON) {
             /* JSON string (from test dispatch) - parse it via the
              * runtime's cached decoder (no manifest gate). */

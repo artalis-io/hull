@@ -58,6 +58,7 @@
 #include <unistd.h>
 #include <time.h>
 #include "hull/shared/async_backend.h"
+#include "hull/shared/async.h"      /* HlAsyncCont */
 #include "hull/worker_db.h"   /* hl_deep_copy_params */
 #include "hull/utils/alloc.h"   /* hl_free_const */
 #include "../../test_tmpdir.h"
@@ -132,9 +133,12 @@ static void free_lua_req_ctx(KlHttpRequest *req)
 {
     if (!req->ctx) return;
     HlReqCtx *rctx = (HlReqCtx *)req->ctx;
-    if (rctx->kind == HL_REQCTX_LUA_REF && lua_initialized)
-        luaL_unref(lua_rt.L, LUA_REGISTRYINDEX, rctx->lua_ref);
-    else if (rctx->kind == HL_REQCTX_JSON)
+    if (rctx == &hl_lua_req_ctx_marker) {   /* a middleware's table */
+        if (lua_initialized) hl_lua_req_ctx_drop(lua_rt.L, req);
+        req->ctx = NULL;
+        return;
+    }
+    if (rctx->kind == HL_REQCTX_JSON)
         free(rctx->json.data);
     free(rctx);
     req->ctx = NULL;
@@ -7793,6 +7797,315 @@ UTEST(cache_seal, tool_key_is_not_the_runtime_key)
 
     hl_blob_store_close(st);
     bc_cleanup_tmp_home(tmp);
+}
+
+/* ── Audit 6: the Lua runtime ─────────────────────────────────────────── */
+
+/* A limited VM whose top level runs `code`, then (if @p second is set, after
+ * re-arming the budget as a new entry would) `second`. Returns the status of
+ * the last chunk run; *out gets integer global @p global (0 when unset). */
+static int limited_run_global(const char *code, const char *second,
+                              const char *global, lua_Integer *out)
+{
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 100000;
+    HlLua lim;
+    memset(&lim, 0, sizeof lim);
+    if (hl_lua_init(&lim, &cfg) != 0) return -100;
+    int rc = luaL_dostring(lim.L, code);
+    lua_settop(lim.L, 0);
+    if (second) {
+        HL_LUA_ARM(&lim, lim.L);
+        rc = luaL_dostring(lim.L, second);
+        lua_settop(lim.L, 0);
+    }
+    lua_getglobal(lim.L, global);
+    *out = lua_isinteger(lim.L, -1) ? lua_tointeger(lim.L, -1) : 0;
+    lua_pop(lim.L, 1);
+    hl_lua_free(&lim);
+    return rc;
+}
+
+/* H1: the trip is raised from inside the count hook, where every hook is
+ * off. luaL_error allocated there, and a GC step it took ran pending
+ * finalizers with no metering. A finalizer that finishes its 300000-step
+ * loop (far over the 100000 limit) ran unmetered. */
+UTEST(lua_audit6, finalizers_in_the_trip_raise_are_metered)
+{
+    lua_Integer done = -1;
+    int rc = limited_run_global(
+        /* Finalizable garbage, armed after it is made. The loop then grows
+         * a table only (no instruction that runs a GC check), so the debt
+         * is past the threshold when the trip raises: the raise's own
+         * allocation took the young collection, which ran every pending
+         * finalizer. */
+        "FIN_DONE = 0 ARMED = false "
+        "collectgarbage('generational') "
+        "local mt = { __gc = function() if not ARMED then return end "
+        "  for i = 1, 300000 do end FIN_DONE = FIN_DONE + 1 end } "
+        "for i = 1, 20 do setmetatable({}, mt) end "
+        "ARMED = true "
+        "local t = {} local i = 0 "
+        "while true do i = i + 1 t[i] = i end",
+        NULL, "FIN_DONE", &done);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_EQ(done, 0);
+}
+
+/* H1: xpcall's message handler ran inside the hook's raise, with hooks off:
+ * `xpcall(spin, function() while true do end end)` was unbounded. It is not
+ * run on a trip (the trip is re-raised whatever it returns). */
+UTEST(lua_audit6, xpcall_handler_not_run_on_a_trip)
+{
+    lua_Integer done = -1;
+    int rc = limited_run_global(
+        "H_DONE = 0 "
+        "xpcall(function() while true do end end, "
+        "       function(e) for i = 1, 300000 do end H_DONE = H_DONE + 1 return e end)",
+        NULL, "H_DONE", &done);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_EQ(done, 0);
+    /* An ordinary error still reaches the handler. */
+    rc = limited_run_global(
+        "H_DONE = 0 "
+        "local ok, e = xpcall(error, function(e) H_DONE = 1 return 'h:' .. e end, 'x') "
+        "assert(not ok and e == 'h:x')",
+        NULL, "H_DONE", &done);
+    EXPECT_EQ(rc, LUA_OK);
+    EXPECT_EQ(done, 1);
+}
+
+/* H1 (HULL PATCH 0003): a coroutine that died by the trip kept hooks off,
+ * so the __close handlers a later coroutine.close ran were unmetered. */
+UTEST(lua_audit6, close_of_a_tripped_coroutine_is_metered)
+{
+    lua_Integer done = -1;
+    int rc = limited_run_global(
+        "CLOSED = 0 "
+        "CO = coroutine.create(function() "
+        "  local x <close> = setmetatable({}, { __close = function() "
+        "    for i = 1, 300000 do end CLOSED = CLOSED + 1 end }) "
+        "  while true do end "
+        "end) "
+        "coroutine.resume(CO)",
+        "coroutine.close(CO)", "CLOSED", &done);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_EQ(done, 0);
+}
+
+/* M1: Patch 0002 charged match() calls only. `%b` scans to the end of the
+ * subject per call (O(n^2) for n match() calls), and a plain find made no
+ * match() call at all. Both now trip. */
+UTEST(lua_audit6, scanned_bytes_hit_the_limit)
+{
+    char err[512];
+    int rc = limited_run(
+        "local s = string.rep('(', 20000) return string.find(s, '%b()')",
+        err, sizeof err);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    rc = limited_run(
+        "local s = string.rep('a', 100000) "
+        "return string.find(s, string.rep('a', 2000) .. 'b', 1, true)",
+        err, sizeof err);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* Small ones still work under the limit, and a position capture's
+     * back-reference is no huge charge. */
+    EXPECT_EQ(limited_run(
+        "assert(string.find('x(a(b)c)y', '%b()') == 2) "
+        "assert(string.find('hello world', 'o w', 1, true) == 5) "
+        "assert(string.find('abab', '(ab)%1') == 1) "
+        "assert(not string.find('abc', '()%1')) return 1",
+        err, sizeof err), LUA_OK);
+}
+
+/* M2 / L1: a NUL in a manifest string is refused by app.manifest: in a
+ * modules entry it crashed extraction (strlen(NULL)), in csp it turned
+ * CSP off while the signed JSON showed a policy. */
+UTEST(lua_audit6, manifest_nul_strings_refused)
+{
+    static const char *const cases[] = {
+        "app.manifest({ modules = { 'hull/db@1\\0' } })",
+        "app.manifest({ csp = \"default-src 'self'\\0\" })",
+        "app.manifest({ hosts = { 'a.example\\0.b' } })",
+        "app.manifest({ ['env\\0x'] = { 'PORT' } })",
+        NULL
+    };
+    for (int i = 0; cases[i]; i++) {
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        int rc = luaL_dostring(lua_rt.L, cases[i]);
+        EXPECT_NE(rc, LUA_OK);
+        if (rc != LUA_OK) {
+            const char *e = lua_tostring(lua_rt.L, -1);
+            EXPECT_TRUE(e && strstr(e, "NUL") != NULL);
+        }
+        cleanup_lua();
+    }
+}
+
+/* M2 / L1, the extractor's own guard: a stored manifest that holds NUL
+ * strings anyway (set without app.manifest) is read without crashing, the
+ * bad module is skipped, and a bad csp means the default CSP, not none. */
+UTEST(lua_audit6, manifest_extractor_skips_nul_strings)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    lua_newtable(L);
+    lua_newtable(L);
+    lua_pushlstring(L, "hull/db@1\0x", 11);
+    lua_rawseti(L, -2, 1);
+    lua_pushliteral(L, "hull/json@1");
+    lua_rawseti(L, -2, 2);
+    lua_setfield(L, -2, "modules");
+    lua_pushlstring(L, "default-src 'self'\0", 19);
+    lua_setfield(L, -2, "csp");
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+
+    HlManifest m;
+    ASSERT_EQ(hl_manifest_extract_lua(L, &m, NULL), 0);
+    EXPECT_EQ(m.modules_count, 1);
+    if (m.modules_count == 1) EXPECT_STREQ(m.modules[0].name, "hull/json");
+    EXPECT_EQ(m.csp_set, 0);
+    hl_manifest_free(&m);
+
+    /* The legacy keyed form too. */
+    lua_newtable(L);
+    lua_newtable(L);
+    lua_pushlstring(L, "hull/db@1\0x", 11);
+    lua_setfield(L, -2, "db");
+    lua_setfield(L, -2, "modules");
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    ASSERT_EQ(hl_manifest_extract_lua(L, &m, NULL), 0);
+    EXPECT_EQ(m.modules_count, 0);
+    hl_manifest_free(&m);
+    cleanup_lua();
+}
+
+/* L2: app.main's coroutine ref belongs to vt_lua_run_main. A continuation
+ * of main's wait cancelled after run_main released it (pool teardown at
+ * shutdown) unref'd the same slot again: the next two refs then shared one
+ * slot. */
+UTEST(lua_audit6, cancel_of_mains_wait_does_not_unref_twice)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    lua_State *co = lua_newthread(L);
+    int co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
+                                                 HlLuaPushResultFn);
+    lua_rt.cli_main_co = co;              /* as vt_lua_run_main sets it */
+    lua_rt.active_co = co;
+    lua_rt.active_thread_ref = co_ref;
+    HlAsyncCont *cont = hl_lua_async_cont_create(&lua_rt, lua_rt.base.alloc, NULL);
+    ASSERT_NE(cont, NULL);
+    lua_rt.active_co = NULL;
+    lua_rt.active_thread_ref = LUA_NOREF;
+
+    /* run_main returns: it releases main's ref, then the loop is torn down. */
+    lua_rt.cli_main_co = NULL;
+    luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
+    cont->cancel(cont);
+    cont->destroy(cont);
+
+    lua_pushboolean(L, 1);
+    int a = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_pushboolean(L, 1);
+    int b = luaL_ref(L, LUA_REGISTRYINDEX);
+    EXPECT_NE(a, b);
+    luaL_unref(L, LUA_REGISTRYINDEX, a);
+    luaL_unref(L, LUA_REGISTRYINDEX, b);
+    cleanup_lua();
+}
+
+/* L3: after main returns, hull._running is read raw and protected: a `hull`
+ * global whose __index raises aborted the process (lua_atpanic). */
+UTEST(lua_audit6, main_replacing_hull_global_keeps_exit_code)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.main(function() "
+        "  hull = setmetatable({}, { __index = function() error('x') end }) "
+        "  return 3 "
+        "end)");
+    ASSERT_EQ(rc, LUA_OK);
+    int exit_code = 0;
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code);
+    EXPECT_EQ(run_rc, 0);
+    EXPECT_EQ(exit_code, 3);
+    cleanup_lua();
+}
+
+/* Entries in the req.ctx table (bindings.c). */
+static int req_ctx_entries(lua_State *L)
+{
+    int n = 0;
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &hl_lua_req_ctx_key) == LUA_TTABLE) {
+        lua_pushnil(L);
+        while (lua_next(L, -2)) { n++; lua_pop(L, 1); }
+    }
+    lua_pop(L, 1);
+    return n;
+}
+
+static int first_mw_handler_id(lua_State *L, int i)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_middleware");
+    lua_rawgeti(L, -1, i);
+    lua_getfield(L, -1, "handler_id");
+    int id = (int)lua_tointeger(L, -1);
+    lua_pop(L, 3);
+    return id;
+}
+
+/* c_js H4, the Lua side: each middleware stage's req.ctx was a registry ref
+ * freed only when a handler completed synchronously - a request a
+ * middleware answered (or an SSE route, a waiting handler, a body that
+ * never came) pinned it for good. A short-circuit now forgets it, the next
+ * stage still sees it, and a request that ends any other way is overwritten
+ * by the next one on the same KlHttpRequest. */
+UTEST(lua_audit6, req_ctx_not_retained_past_its_request)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.use('*', '/*', function(req, res) req.ctx.user = 'u' return 0 end)\n"
+        "app.use('*', '/*', function(req, res) SEEN = req.ctx.user return 1 end)\n"),
+        LUA_OK);
+    int first = first_mw_handler_id(L, 1);
+    int second = first_mw_handler_id(L, 2);
+
+    for (int i = 0; i < 100; i++) {
+        KlHttpRequest req = {0};
+        KlHttpResponse res = {0};
+        ASSERT_EQ(hl_lua_dispatch_middleware(&lua_rt, first, &req, &res), 0);
+        EXPECT_TRUE(req.ctx == &hl_lua_req_ctx_marker);
+        ASSERT_EQ(hl_lua_dispatch_middleware(&lua_rt, second, &req, &res), 1);
+        EXPECT_TRUE(req.ctx == NULL);              /* answered: forgotten */
+    }
+    EXPECT_EQ(req_ctx_entries(L), 0);
+    lua_getglobal(L, "SEEN");
+    EXPECT_STREQ(lua_tostring(L, -1), "u");        /* the handoff still works */
+    lua_pop(L, 1);
+
+    /* A request abandoned after the first stage (Keel then resets req->ctx):
+     * the next request on the same KlHttpRequest replaces its entry. */
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    for (int i = 0; i < 100; i++) {
+        req.ctx = NULL;                            /* Keel's reset */
+        ASSERT_EQ(hl_lua_dispatch_middleware(&lua_rt, first, &req, &res), 0);
+    }
+    EXPECT_EQ(req_ctx_entries(L), 1);
+    free_lua_req_ctx(&req);
+    EXPECT_EQ(req_ctx_entries(L), 0);
+    cleanup_lua();
 }
 
 UTEST_MAIN();

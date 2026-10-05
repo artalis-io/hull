@@ -130,6 +130,9 @@ void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar);
 void hl_lua_budget_install(lua_State *L, HlLuaBudget *b);
 void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit);
 int  hl_lua_budget_tripped(lua_State *L);
+/* Raise the trip's error. The message is a string made at install, so the
+ * raise allocates nothing (budget.c explains why that matters). */
+int  hl_lua_budget_raise(lua_State *L);
 
 /* The stored manifest (registry "__hull_manifest") as JSON, encoded in C with
  * raw accessors - what the build signs and --verify-sig compares
@@ -275,6 +278,21 @@ int hl_lua_require_trusted(lua_State *L);
  * (shared/req_life.h): the handler that owned it has finished, failed, or
  * was cancelled because the client went away. */
 void hl_lua_req_life_end_cb(struct HlLua *lua, void *life);
+
+/* req.ctx carried from a middleware stage to the next stage / the handler
+ * (bindings.c): kept under the request's address in one registry table,
+ * with req->ctx == &hl_lua_req_ctx_marker saying the request has one.
+ * _store (may raise) keeps the table at @p idx for @p req; _drop (never
+ * raises) forgets it. */
+struct HlReqCtx;
+struct KlHttpRequest;
+extern const char       hl_lua_req_ctx_key;
+extern struct HlReqCtx  hl_lua_req_ctx_marker;
+void hl_lua_req_ctx_store(lua_State *L, struct KlHttpRequest *req, int idx);
+void hl_lua_req_ctx_drop(lua_State *L, struct KlHttpRequest *req);
+/* Forget whatever req->ctx carries (dispatch.c). Never raises. Called once
+ * the request's req table is built, or once a middleware answered it. */
+void hl_lua_free_req_ctx(struct HlLua *lua, struct KlHttpRequest *req);
 
 /* The chunkname for an APP file loaded from disk. A chunkname starting with
  * "hull." is what marks the stdlib (hl_lua_source_is_stdlib), and a dev-mode

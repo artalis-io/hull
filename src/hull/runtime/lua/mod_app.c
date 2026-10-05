@@ -610,14 +610,29 @@ static void install_app_ws_server(lua_State *L)
 /* A plain copy of the manifest value at @p idx, pushed: tables copied
  * raw (no metatables - an __index / __pairs could show the extractor one
  * policy and the signature check another), strings / numbers / booleans
- * as they are, anything else refused. */
+ * as they are, anything else refused. A string (value or key) holding a
+ * NUL byte is refused too: the signed JSON keeps the whole string while
+ * the C extractor reads it as a C string, so the two disagreed - a NUL in
+ * a modules entry crashed extraction, one in `csp` turned CSP off. */
+static void manifest_check_str(lua_State *L, int idx)
+{
+    size_t n = 0;
+    const char *s = lua_tolstring(L, idx, &n);
+    if (strlen(s) != n)
+        luaL_error(L, "app.manifest: a string holds a NUL byte");
+}
+
 static void manifest_copy(lua_State *L, int idx, int depth)
 {
     idx = lua_absindex(L, idx);
     if (depth > 16) luaL_error(L, "app.manifest: nested too deeply");
     luaL_checkstack(L, 4, "app.manifest");
     switch (lua_type(L, idx)) {
-    case LUA_TSTRING: case LUA_TNUMBER: case LUA_TBOOLEAN:
+    case LUA_TSTRING:
+        manifest_check_str(L, idx);
+        lua_pushvalue(L, idx);
+        return;
+    case LUA_TNUMBER: case LUA_TBOOLEAN:
         lua_pushvalue(L, idx);
         return;
     case LUA_TTABLE:
@@ -634,6 +649,8 @@ static void manifest_copy(lua_State *L, int idx, int depth)
         int kt = lua_type(L, -2);
         if (kt != LUA_TSTRING && kt != LUA_TNUMBER)
             luaL_error(L, "app.manifest: a %s key", lua_typename(L, kt));
+        if (kt == LUA_TSTRING)
+            manifest_check_str(L, -2);  /* type-checked: no in-place conversion */
         lua_pushvalue(L, -2);           /* key */
         manifest_copy(L, -2, depth + 1);
         lua_rawset(L, out);

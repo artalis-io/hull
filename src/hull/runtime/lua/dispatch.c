@@ -31,17 +31,20 @@
 #include <limits.h>
 #include <string.h>
 
-/* Free the request ctx a middleware left (a registry ref or JSON). */
-static void free_req_ctx(HlLua *lua, KlHttpRequest *req)
+/* Forget the request ctx a middleware left (its table, kept by
+ * bindings.c), or the JSON one the test harness injected. Never raises. */
+void hl_lua_free_req_ctx(HlLua *lua, KlHttpRequest *req)
 {
     if (!req->ctx) return;
     HlReqCtx *rctx = (HlReqCtx *)req->ctx;
-    if (rctx->kind == HL_REQCTX_LUA_REF)
-        luaL_unref(lua->L, LUA_REGISTRYINDEX, rctx->lua_ref);
-    else if (rctx->kind == HL_REQCTX_JSON)
+    req->ctx = NULL;
+    if (rctx == &hl_lua_req_ctx_marker) {
+        hl_lua_req_ctx_drop(lua->L, req);
+        return;
+    }
+    if (rctx->kind == HL_REQCTX_JSON)
         hl_alloc_free(lua->base.alloc, rctx->json.data, rctx->json.len + 1);
     hl_alloc_free(lua->base.alloc, rctx, sizeof(HlReqCtx));
-    req->ctx = NULL;
 }
 
 typedef struct {
@@ -91,6 +94,10 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua_State *co = hl_lua_entry_prepare(lua, "__hull_routes", handler_id,
                                          push_req_res, &args,
                                          &thread_ref, &nargs);
+    /* The handler's req table holds ctx now; nothing reads req->ctx again.
+     * Forgotten here rather than when the handler ends, which a handler
+     * that waits on anything never did (the continuation has no req). */
+    hl_lua_free_req_ctx(lua, req);
     if (!co) {
         hl_req_life_end(life);
         lua->active_conn = NULL;
@@ -131,14 +138,12 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         /* Pop any return values */
         if (nres > 0)
             lua_settop(co, 0);
-
-        free_req_ctx(lua, req);   /* free ctx if middleware set it */
         return 0;
     }
 
     if (status == LUA_YIELD) {
         /* Handler yielded - connection is suspended.
-         * Don't clean up coroutine ref, don't free ctx.
+         * Don't clean up coroutine ref.
          * kl_async_suspend already removed client FD from event loop.
          * The continuation captured co / conn / req; the globals no longer
          * describe a running handler. Left set, the next middleware's
@@ -160,8 +165,6 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua->active_co = NULL;
     lua->active_conn = NULL;
     lua->active_req = NULL;
-
-    free_req_ctx(lua, req);   /* free ctx if middleware set it */
     return -1;
 }
 
@@ -196,7 +199,7 @@ typedef struct {
     KlHttpResponse *res;
     HlReqLife      *life;
     int             handler_id;
-    int             ctx_ref;     /* out: registry ref to req.ctx, or LUA_NOREF */
+    int             has_ctx;     /* out: req.ctx was a table, kept for req */
     int             result;      /* out: 0 continue, non-zero short-circuit */
 } HlMwRun;
 
@@ -227,8 +230,10 @@ static int mw_run_k(lua_State *L)
      * middleware's own code and does not run here. */
     lua_pushliteral(L, "ctx");
     lua_rawget(L, 2);
-    if (lua_istable(L, -1))
-        m->ctx_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    if (lua_istable(L, -1)) {
+        hl_lua_req_ctx_store(L, m->req, -1);
+        m->has_ctx = 1;
+    }
     return 0;
 }
 
@@ -250,14 +255,17 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     /* Middleware runs to completion (lua_pcall, no yield), so its `res`
      * belongs to this call alone: the life ends as soon as it returns. */
     HlReqLife *life = hl_req_life_new();
-    if (!life)
+    if (!life) {
+        hl_lua_free_req_ctx(lua, req);   /* answered here: a 500 */
         return -1;
+    }
 
-    HlMwRun m = { lua, req, res, life, handler_id, LUA_NOREF, 0 };
+    HlMwRun m = { lua, req, res, life, handler_id, 0, 0 };
     lua_State *L = lua->L;
     int base = lua_gettop(L);
     if (!lua_checkstack(L, 8)) {
         hl_req_life_end(life);
+        hl_lua_free_req_ctx(lua, req);
         return -1;
     }
     /* The middleware's own request, for as long as it runs (it cannot
@@ -279,25 +287,23 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
         log_error("[hull:c] lua middleware error: %s",
                   hl_lua_error_text(lua, L, -1, ebuf, sizeof(ebuf)));
         lua_settop(L, base);
-        if (m.ctx_ref != LUA_NOREF)
-            luaL_unref(L, LUA_REGISTRYINDEX, m.ctx_ref);
+        /* Answered here (a 500): no later stage reads ctx. One stored
+         * before the error is under req's key, marker or not. */
+        hl_lua_free_req_ctx(lua, req);
+        hl_lua_req_ctx_drop(L, req);
         return -1;
     }
     lua_settop(L, base);
 
-    /* Store req.ctx as a Lua registry ref so the next middleware
-     * or handler can retrieve the table directly (no JSON round-trip). */
-    if (m.ctx_ref != LUA_NOREF) {
-        free_req_ctx(lua, req);   /* the previous stage's */
-        HlReqCtx *rctx = hl_alloc_malloc(lua->base.alloc, sizeof(HlReqCtx));
-        if (rctx) {
-            rctx->kind = HL_REQCTX_LUA_REF;
-            rctx->lua_ref = m.ctx_ref;
-            req->ctx = rctx;
-        } else {
-            luaL_unref(L, LUA_REGISTRYINDEX, m.ctx_ref);
-        }
+    /* req.ctx is kept for this request (bindings.c), so the next middleware
+     * or the handler gets the table itself (no JSON round-trip). */
+    if (m.has_ctx && req->ctx != &hl_lua_req_ctx_marker) {
+        hl_lua_free_req_ctx(lua, req);   /* the test harness's JSON one */
+        req->ctx = &hl_lua_req_ctx_marker;
     }
+    /* A short-circuit answers the request here: no later stage reads it. */
+    if (m.result != 0)
+        hl_lua_free_req_ctx(lua, req);
     return m.result;
 }
 

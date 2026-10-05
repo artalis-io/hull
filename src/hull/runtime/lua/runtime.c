@@ -984,6 +984,25 @@ static int lua_coerce_exit_code(lua_State *co)
     return 1;
 }
 
+/* lua_pcall body: hull._running (how many hull.async tasks are live) into
+ * the lua_Integer whose address is arg 1. Read raw and protected: done
+ * unprotected on the main state, an app that replaced the `hull` global
+ * with a table whose __index raises reached lua_atpanic and aborted
+ * instead of exiting with main's code. */
+static int run_main_running_k(lua_State *L)
+{
+    lua_Integer *out = (lua_Integer *)lua_touserdata(L, 1);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
+    lua_pushliteral(L, "hull");
+    lua_rawget(L, -2);
+    if (lua_istable(L, -1)) {
+        lua_pushliteral(L, "_running");
+        lua_rawget(L, -2);
+        if (lua_isinteger(L, -1)) *out = lua_tointeger(L, -1);
+    }
+    return 0;
+}
+
 static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
                             int argc, char **argv,
                             const char *const *env_allowlist,
@@ -1055,6 +1074,9 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     lua->active_co         = co;
     lua->active_conn       = NULL;       /* detached - no HTTP conn */
     lua->active_thread_ref = co_ref;
+    /* Set before the first resume, so the continuation of main's first wait
+     * knows it is main's (hl_lua_async_cont_create): its ref is ours. */
+    lua->cli_main_co       = co;
 
     /* First resume: main runs until it returns or yields. Its own run of
      * the instruction budget (budget.c), apart from load time. */
@@ -1064,11 +1086,9 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     status = hl_lua_resume_status(co, status);
 
     if (status == LUA_YIELD) {
-        /* Main yielded - async op in flight. Mark this coroutine so
-         * hl_lua_async_resume knows to stop the server when it
-         * eventually completes, then enter the event loop. */
-        lua->cli_main_co = co;
-
+        /* Main yielded - async op in flight. cli_main_co (set above) tells
+         * hl_lua_async_resume to stop the server when it eventually
+         * completes; enter the event loop. */
         if (!lua->base.async_ctx) {
             fprintf(stderr, "[hull:main] internal: no event loop available\n");
             luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
@@ -1120,17 +1140,17 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
      * registered, in which case the serve loop keeps them running. Say so
      * rather than letting their work vanish silently. */
     if (rc != 0 || !vt_lua_has_server_handlers(rt)) {
-        lua_getglobal(L, "hull");
-        if (lua_istable(L, -1)) {
-            lua_getfield(L, -1, "_running");
-            lua_Integer n = lua_isinteger(L, -1) ? lua_tointeger(L, -1) : 0;
-            if (n > 0)
-                log_warn("[hull:async] app.main returned with %lld task(s) still "
-                         "running; they were abandoned (join them with task:wait, "
-                         "hull.gather or hull.map)", (long long)n);
-            lua_pop(L, 1);
+        lua_Integer n = 0;
+        if (lua_checkstack(L, 2)) {
+            lua_pushcfunction(L, run_main_running_k);
+            lua_pushlightuserdata(L, &n);
+            if (lua_pcall(L, 1, 0, 0) != LUA_OK)
+                lua_pop(L, 1);
         }
-        lua_pop(L, 1);
+        if (n > 0)
+            log_warn("[hull:async] app.main returned with %lld task(s) still "
+                     "running; they were abandoned (join them with task:wait, "
+                     "hull.gather or hull.map)", (long long)n);
     }
 
     *exit_code_out = rc;
