@@ -55,6 +55,38 @@ UTEST(db_dynamic, sqlite_memory_open_close)
     ASSERT_EQ(hl_db_dynamic_open_count(), before);
 }
 
+/* A db.open handle is shared like a registry connection, so the stale guard
+ * and the wait refusal cover it (audit 6 L7); its id stays live until close,
+ * which is how a db.async worker learns to drop the connection it keeps. */
+UTEST(db_dynamic, guard_and_ids_cover_open_handles)
+{
+    HlManifestDbDynamic p = policy_sqlite();
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_dynamic_open(":memory:", &p, NULL, &err);
+    ASSERT_TRUE(h != NULL);
+    uint64_t id = hl_db_dynamic_id(h);
+    EXPECT_NE(0u, id);
+    EXPECT_EQ(1, hl_db_dynamic_id_live(id));
+    EXPECT_EQ(0u, hl_db_dynamic_id(NULL));
+
+    EXPECT_EQ(0, hl_db_dynamic_in_txn());
+    ASSERT_EQ(0, hl_db_begin(h));
+    EXPECT_EQ(1, hl_db_dynamic_in_txn());
+    hl_db_dynamic_guard_stale_txns();
+    EXPECT_EQ(0, hl_db_in_txn(h));
+    EXPECT_EQ(0, hl_db_dynamic_in_txn());
+
+    hl_db_dynamic_close(h);
+    EXPECT_EQ(0, hl_db_dynamic_id_live(id));
+
+    /* Ids are not reused: a new handle in the same slot gets a new one. */
+    HlDbHandle *h2 = hl_db_dynamic_open(":memory:", &p, NULL, &err);
+    ASSERT_TRUE(h2 != NULL);
+    EXPECT_NE(id, hl_db_dynamic_id(h2));
+    EXPECT_EQ(0, hl_db_dynamic_id_live(id));
+    hl_db_dynamic_close(h2);
+}
+
 /* A DSN whose scheme isn't in databases.dynamic.schemes is rejected. */
 UTEST(db_dynamic, scheme_not_allowed)
 {

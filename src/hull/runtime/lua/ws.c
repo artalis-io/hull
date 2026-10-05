@@ -13,6 +13,7 @@
 #include "internal.h"
 
 #include "hull/cap/ws.h"
+#include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 
 #include "mod_buffer.h"
 
@@ -88,12 +89,14 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     lua->active_req = NULL;
     lua->active_timer = NULL;
 
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
     /* Arm the instruction budget for this run */
     HL_LUA_ARM(lua, co);
 
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
     status = hl_lua_resume_status(co, status);
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
     if (status == LUA_OK) {
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
@@ -140,12 +143,14 @@ void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     lua->active_req = NULL;
     lua->active_timer = NULL;
 
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
     /* Arm the instruction budget for this run */
     HL_LUA_ARM(lua, co);
 
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
     status = hl_lua_resume_status(co, status);
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
     if (status == LUA_OK) {
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
@@ -201,6 +206,7 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         lua->active_req = NULL;
         lua->active_timer = NULL;
 
+        hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
         HL_LUA_ARM(lua, co);
 
         /* Arm the deferred-teardown hook: if the handler yields (async op),
@@ -213,6 +219,7 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         int nres = 0;
         int status = lua_resume(co, lua->L, nargs, &nres);
         status = hl_lua_resume_status(co, status);
+        hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
         lua->active_on_complete     = NULL;
         lua->active_on_complete_ctx = NULL;

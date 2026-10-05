@@ -718,6 +718,83 @@ UTEST(mysql_conn, query_error_records_server_code)
     close(sv[0]);
 }
 
+/* A deadlock in a LATER statement of a multi-statement COM_QUERY records its
+ * code too (audit 6 L2): it is what tells the backend the whole transaction
+ * was rolled back. */
+UTEST(mysql_conn, later_statement_error_records_server_code)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);                                   /* auth OK */
+    put_ok_more(&s, 1, HL_MY_SERVER_MORE_RESULTS |
+                       HL_MY_SERVER_STATUS_IN_TRANS);  /* statement 1 */
+    build_err(&s, 2, HL_MY_ER_LOCK_DEADLOCK,
+              "Deadlock found when trying to get lock");   /* statement 2 */
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    EXPECT_NE(0, hl_my_conn_query(&conn, "UPDATE a SET x=1; UPDATE b SET x=1",
+                                  NULL, NULL, NULL, NULL));
+    EXPECT_EQ(HL_MY_ER_LOCK_DEADLOCK, (int)conn.last_err_code);
+    EXPECT_EQ(0, conn.broken);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* An ERR carries no status flags, so after one the connection still reads
+ * "in a transaction" from the last OK - though MySQL committed it before a
+ * failing DDL statement. COM_PING learns the real status, and keeps the
+ * failed statement's message and code (audit 6 L1). */
+UTEST(mysql_conn, ping_refreshes_status_after_error)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);                                   /* auth OK */
+    put_ok_more(&s, 1, HL_MY_SERVER_STATUS_IN_TRANS);  /* START TRANSACTION */
+    build_err(&s, 1, 1050, "Table 't' already exists");   /* CREATE TABLE */
+    put_ok_more(&s, 1, 0x0002);                        /* PING: autocommit */
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    ASSERT_EQ(0, hl_my_conn_query(&conn, "START TRANSACTION", NULL, NULL, NULL, NULL));
+    EXPECT_TRUE(conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS);
+    EXPECT_NE(0, hl_my_conn_query(&conn, "CREATE TABLE t (id INT)",
+                                  NULL, NULL, NULL, NULL));
+    EXPECT_TRUE(conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS);   /* stale */
+    EXPECT_EQ(0, hl_my_conn_ping(&conn));
+    EXPECT_FALSE(conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS);
+    EXPECT_TRUE(strstr(conn.errmsg, "already exists") != NULL);
+    EXPECT_EQ(1050, (int)conn.last_err_code);
+    EXPECT_EQ(0, conn.broken);
+
+    /* The PING went out as a one-byte COM_PING after the two queries. */
+    uint8_t got[512];
+    ssize_t n = read(sv[0], got, sizeof got);
+    ASSERT_TRUE(n >= 5);
+    EXPECT_EQ(HL_MY_COM_PING, got[n - 1]);
+    EXPECT_EQ(1, got[n - 5]);                          /* payload length 1 */
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 /* caching_sha2 full authentication sends the password itself: never without
  * a verified TLS session. (Here there is no TLS at all; the unverified-TLS
  * case - sslmode prefer / require against a forged certificate - takes the

@@ -1206,6 +1206,9 @@ static int drain_one_result(HlMyConn *conn, int *more)
             snprintf(conn->errmsg, sizeof conn->errmsg, "script failed: %.*s",
                      (int)e.message_len, e.message);
         else conn_set_err(conn, "script failed");
+        /* A later statement of a multi-statement COM_QUERY failing as a
+         * deadlock victim must reach my_note_failure (audit 6 L2). */
+        conn->last_err_code = (hl_my_parse_err(&f, 1, &e) == 0) ? e.code : 0;
         return -2;
     }
     if (hdr == HL_MY_PKT_LOCAL_INFILE) {
@@ -1236,10 +1239,43 @@ static int drain_one_result(HlMyConn *conn, int *more)
                 snprintf(conn->errmsg, sizeof conn->errmsg, "script failed: %.*s",
                          (int)e.message_len, e.message);
             else conn_set_err(conn, "script failed mid-result");
+            conn->last_err_code = (hl_my_parse_err(&f, 1, &e) == 0) ? e.code : 0;
             return -2;
         }
         /* otherwise a data row: discarded */
     }
+}
+
+int hl_my_conn_ping(HlMyConn *conn)
+{
+    if (refuse_if_broken(conn) != 0) return -1;
+    /* Keep the failed statement's message and code for the caller: the ping
+     * is bookkeeping, not the call the app made. */
+    char saved[sizeof conn->errmsg];
+    memcpy(saved, conn->errmsg, sizeof saved);
+    uint16_t saved_code = conn->last_err_code;
+
+    HlMyWriter w; hl_my_writer_init(&w);
+    size_t m = hl_my_packet_begin(&w, 0);
+    hl_my_put_u8(&w, HL_MY_COM_PING);
+    hl_my_packet_end(&w, m);
+    int rc = -1;
+    if (!w.err) {
+        conn->broken = 1;                       /* until the reply is read */
+        int se = conn_send(conn, w.buf, w.len);
+        HlMyFrame f;
+        HlMyOk ok;
+        if (!se && conn_next_frame(conn, &f) == 0 && f.body_len > 0 &&
+            f.body[0] == HL_MY_PKT_OK && hl_my_parse_ok(&f, &ok) == 0) {
+            conn->server_status = ok.status_flags;
+            conn->broken = 0;
+            rc = 0;
+        }
+    }
+    hl_my_writer_free(&w);
+    memcpy(conn->errmsg, saved, sizeof saved);
+    conn->last_err_code = saved_code;
+    return rc;
 }
 
 int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql)

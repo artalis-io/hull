@@ -225,6 +225,9 @@ int hl_js_dispatch(HlJS *js, int handler_id,
 
     /* Whatever an un-awaited op made in that drain belongs to no run. */
     js->last_async_cont = NULL;
+    /* The entry is over (or parked, which no transaction may span): a
+     * transaction still open is stale (audit 6 M1). */
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
     return result;
 }
 
@@ -385,6 +388,7 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     js->active_req  = NULL;
     hl_js_run_jobs(js);
     js->in_middleware = 0;
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     js->last_async_cont = NULL;   /* middleware is synchronous: nothing chains */
     if (js->budget_tripped && result >= 0) {

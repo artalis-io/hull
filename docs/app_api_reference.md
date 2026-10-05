@@ -39,13 +39,23 @@ timer. While a handler waits (`http.fetch`, `db.async`, `hull.sleep`,
 task's `wait`) other handlers run on the same connection, so a transaction
 cannot stay open across the wait: the wait raises `... cannot wait while a
 transaction is open on database connection 'NAME'`. Commit or roll back
-first, do the waiting outside, or put the transaction on a `db.open`
-connection of its own. For the same reason `db.batch(fn)` takes a
-synchronous `fn`: in JS an `async` function (or one returning a Promise /
-thenable) is refused with a `TypeError` and the batch rolled back (it used to
-commit at the first `await`, running the rest in autocommit). A transaction a
-handler leaves open when it finishes is rolled back before the next request,
-SSE event or timer runs.
+first, or do the waiting outside. A `db.open` handle counts too (`'db.open'`):
+an app may keep one at module level and use it from every request, so it is
+shared just the same. For the same reason `db.batch(fn)` takes a synchronous
+`fn`: in JS an `async` function is refused with a `TypeError` before the batch
+begins, and a function that returns a Promise / thenable is refused with the
+batch rolled back (it used to commit at the first `await`, running the rest in
+autocommit). A transaction an entry leaves open - a request, middleware, SSE
+event, timer or WebSocket callback that returned, raised or parked - is rolled
+back right then, and again before any entry starts or a parked handler
+resumes, so no other code ever runs inside it.
+
+**`db.async` runs one statement on a pooled worker connection**, which the next
+`db.async` op on that thread reuses. A transaction cannot span ops there: an op
+that leaves its worker connection inside a transaction (`BEGIN`, `START
+TRANSACTION`, a multi-statement string that opens one) has it rolled back and
+fails with `a transaction cannot span db.async operations ...`. Use `db.batch`
+on the connection for a transaction.
 
 Named and dynamic connections are declared in the manifest. A DSN of exactly
 `"$VAR"` / `"${VAR}"` is an env reference resolved at open time.
@@ -578,7 +588,11 @@ verify step between successful first-factor auth and `on_login` when
   the outer transaction (DuckDB: joins it): its writes commit with the outer
   one and its error rolls back only its own writes. (It used to issue its
   own BEGIN / COMMIT, committing the caller's transaction early on Postgres
-  and MySQL.)
+  and MySQL.) MySQL commits the open transaction around every DDL statement
+  (even one that fails). In a top-level batch the backend then opens a new
+  transaction for the rest of it (what ran before the DDL stays committed);
+  in a nested batch it cannot - the outer batches' savepoints went with the
+  commit - so the batches report their transaction lost and fail.
 - `transaction.try(fn)` → `(ok, err)`. Like `run` but returns error instead of throwing.
 
 **idempotency**. Idempotency-Key middleware with response caching.

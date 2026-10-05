@@ -565,6 +565,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     /* An entry point: this resume's run gets a budget of its own. */
     hl_js_budget_arm(js);
     js->active_timer = NULL;
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     /* Restore per-request context: a re-park, or a nested op, reads both
      * (left as it was, active_req named another request - or none). */
@@ -736,6 +737,9 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     js->active_conn = NULL;
     js->active_req  = NULL;
     js->last_async_cont = NULL;
+    /* Roll back a transaction left open (audit 6 M1) - after the re-wait's
+     * hl_js_run_yield_check above, which must see it first (audit 6 M2). */
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
 
     /* Done. Free the cont. */
     self->destroy(self);

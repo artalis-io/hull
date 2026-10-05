@@ -908,6 +908,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         const char *dsn = db_call_dsn(L);
         op->no_cache = luaL_testudata(L, lua_upvalueindex(1),
                                       HL_LUA_DB_OWNED_MT) != NULL;
+        if (op->no_cache) op->dyn_id = hl_db_dynamic_id(db_resolve_handle(L));
         if (dsn) {
             op->dsn = strdup(dsn);
             if (!op->dsn) {

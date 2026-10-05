@@ -14,6 +14,7 @@
 
 #include "hull/shared/async.h"
 #include "hull/cap/ws.h"
+#include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 
 #include "mod_buffer.h"
 
@@ -43,6 +44,7 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     js->last_async_cont = NULL;
     js->async_pending = 0;
     hl_js_budget_arm(js);
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     /* Look up handler */
     JSValue global = JS_GetGlobalObject(ctx);
@@ -85,12 +87,14 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         if (state == JS_PROMISE_PENDING && js->last_async_cont) {
             hl_js_run_drop(js, hl_js_run_attach(js, ret));
             JS_FreeValue(ctx, ret);
+            hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
             return;
         }
     }
 
     hl_js_run_jobs(js);
     JS_FreeValue(ctx, ret);
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 }
 
 void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
@@ -115,6 +119,7 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     js->last_async_cont = NULL;
     js->async_pending = 0;
     hl_js_budget_arm(js);
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     /* Look up handler */
     JSValue global = JS_GetGlobalObject(ctx);
@@ -162,12 +167,14 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
         if (state == JS_PROMISE_PENDING && js->last_async_cont) {
             hl_js_run_drop(js, hl_js_run_attach(js, ret));
             JS_FreeValue(ctx, ret);
+            hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
             return;
         }
     }
 
     hl_js_run_jobs(js);
     JS_FreeValue(ctx, ret);
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 }
 
 /* Deferred-teardown hook (HlJS::active_on_complete): invalidate the conn
@@ -203,6 +210,7 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         js->last_async_cont = NULL;
         js->async_pending = 0;
         hl_js_budget_arm(js);
+        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
         /* Arm the deferred-teardown hook: if the handler awaits, the
          * continuation captures it so the conn teardown runs at completion,
@@ -265,6 +273,7 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
             if (!deferred)
                 hl_js_run_jobs(js);
             JS_FreeValue(ctx, ret);
+            hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
             if (deferred) {
                 JS_FreeValue(ctx, handler);

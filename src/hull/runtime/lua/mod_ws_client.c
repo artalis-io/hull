@@ -14,6 +14,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"   /* HL_LUA_ARM */
+#include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "hull/cap/http.h"
 #include "hull/utils/alloc.h"
 
@@ -207,10 +208,15 @@ static void ws_client_call(HlLuaWsClientUD *ud, HlWscCall *c, const char *what)
         log_error("[hull:ws:client] %s: out of memory", what);
         return;
     }
+    /* An entry like a ws-server callback: it neither joins nor leaves a
+     * stale transaction (audit 6 M1). */
+    hl_db_registry_guard_stale_txns(ud->lua->base.db_registry);
     HL_LUA_ARM(ud->lua, L);
     lua_pushcfunction(L, ws_client_call_k);
     lua_pushlightuserdata(L, c);
-    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+    int prc = lua_pcall(L, 1, 0, 0);
+    hl_db_registry_guard_stale_txns(ud->lua->base.db_registry);
+    if (prc != LUA_OK) {
         char ebuf[512];
         log_error("[hull:ws:client] %s error: %s", what,
                   hl_lua_error_text(ud->lua, L, -1, ebuf, sizeof ebuf));

@@ -658,12 +658,17 @@ consumers resolve it via `hl_db_registry_default`. `db.connect(name)` resolves
 after startup (the manifest is applied post-load), so call it from `app.main`
 or a handler, not at module top-level; `db.default()` works everywhere.
 
-**Stale transactions.** Before each request, SSE event and timer, every OPEN
-registry connection (default, named, internal) has a transaction a previous
-handler left open rolled back (`hl_db_registry_guard_stale_txns`): SQLite by
-autocommit state, Postgres by `tx_status`, MySQL by `SERVER_STATUS_IN_TRANS`,
-DuckDB by an unconditional `ROLLBACK`; the handle's `db.batch` depth goes with
-it. Before audit 4 only SQLite's default connection was guarded, so a Postgres
+**Stale transactions.** Every OPEN registry connection (default, named,
+internal) and every open `db.open` handle has a transaction an entry left open
+rolled back (`hl_db_registry_guard_stale_txns`): SQLite by autocommit state,
+Postgres by `tx_status`, MySQL by `SERVER_STATUS_IN_TRANS`, DuckDB by an
+unconditional `ROLLBACK`; the handle's `db.batch` depth goes with it. The
+runtimes run it when an entry (request, middleware, SSE event, timer,
+ws-server / ws-client callback) starts, when it returns, raises or parks, and
+before a parked continuation (Lua `hl_lua_async_resume`, JS
+`hl_js_async_resume` / the multipart pump) resumes - audit 6 M1: run only at
+the start, a resumed handler or a WebSocket callback joined the transaction a
+failed entry had left. A new entry or resume path must call it at both ends. Before audit 4 only SQLite's default connection was guarded, so a Postgres
 handler that raised between `BEGIN` and `COMMIT` left every later request
 inside that transaction (or, after a failed statement, failing with "current
 transaction is aborted").
@@ -673,8 +678,9 @@ parked on `http.fetch` / `db.async` / `hull.sleep`, and a parked handler's
 transaction is on a connection other entries are using meanwhile: the guard
 rolled it back under the handler, whose remaining statements then autocommitted
 and whose COMMIT "succeeded" (audit 5 M1). So every Hull wait refuses while a
-registry connection is in a transaction (`hl_db_registry_open_txn`, the
-backend's `in_txn` vtable method; Lua: `hl_lua_check_can_wait`; JS:
+registry connection or `db.open` handle is in a transaction
+(`hl_db_registry_open_txn`, the backend's `in_txn` vtable method; Lua:
+`hl_lua_check_can_wait`; JS:
 `hl_js_db_refuse_wait` in `runtime/js/db_wait.h`, called by each parking
 operation before it arms anything - a new JS wait primitive must call it).
 In JS the check runs again where the run actually yields (`hl_js_run_yield_check`: dispatch,
@@ -682,7 +688,24 @@ SSE, timers, an async or multipart resume that waits again), since a transaction
 the op was made (`const p = http.fetch(..); conn.exec("BEGIN"); await p`): the transaction is
 rolled back there and the run is failed at its next resume (500) without being continued.
 Under that invariant every transaction the guard finds is orphaned. JS
-`db.batch(fn)` refuses an async fn / returned thenable (TypeError, rolled back).
+`db.batch(fn)` refuses an async fn before BEGIN (prototype check against the
+intrinsic AsyncFunction / AsyncGeneratorFunction) and a returned thenable
+after (TypeError, rolled back). The backends that read transaction state from
+the SQL text (DuckDB tracking, the Postgres / MySQL ROLLBACK and COMMIT
+checks) share `cap/db_sql_kw.h`, which skips comments and knows every
+spelling (`COMMIT WORK`, `END TRANSACTION`, `ABORT`, ...); a Postgres COMMIT
+in state `E` is judged by the reply (it left the transaction and was not a
+rollback), not by its spelling.
+
+**`db.async` never leaves a transaction on a worker connection** (audit 6
+M3). Worker connections are per-thread and reused by every later op, so after
+each op `worker_end_txn` (`worker_db.c`) rolls back a transaction the op left
+open (`BEGIN` through `db.async`) and fails it with "a transaction cannot span
+db.async operations"; a connection whose rollback did not take is dropped. A
+WAIT_NOTIFY on a `db.open` handle keeps its LISTEN connection only while the
+handle is open: the op carries the handle's id (`hl_db_dynamic_id`) and every
+op sweeps the thread's connections whose handle was closed
+(`hl_db_dynamic_id_live`).
 `hl_db_batch_enter/leave` detect a transaction that ended under an open batch
 (a raw COMMIT / ROLLBACK in fn, a nested in-process dispatch): leave fails with
 a clear message, a nested batch starts a fresh transaction.
@@ -726,7 +749,10 @@ roadmap §2.9.)
   dialect-portable (name PK, host-generated ISO-8601 `applied_at`). The whole
   run holds a session lock on the network backends - `pg_advisory_lock` /
   MySQL `GET_LOCK('hull_migrate')` - so instances starting together neither
-  race the first `CREATE TABLE` nor re-run a migration (audit 5 L3).
+  race the first `CREATE TABLE` nor re-run a migration (audit 5 L3). While it
+  is held the handle is `session_pinned`: a connection lost mid-run is not
+  transparently reconnected (the lock went with the session), so the run
+  fails instead of going on unlocked (audit 6 L5).
 - **SQLite-only features under Postgres:** `db.udf` and `hull/search` (FTS5)
   are SQLite-only and fail with a clear error on a Postgres connection.
 - **Lost connections (Postgres and MySQL):** every read is bounded by the
@@ -757,8 +783,18 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
 - **Deadlocks:** an `ER_LOCK_DEADLOCK` (1213) inside a transaction means
   InnoDB rolled the WHOLE transaction back; the backend then refuses every call
   but `ROLLBACK` (as for a connection lost mid-transaction), so later
-  statements cannot autocommit and the COMMIT cannot "succeed". The
-  server-named handshake plugin drives which is used, and AuthSwitchRequest
+  statements cannot autocommit and the COMMIT cannot "succeed". A deadlock
+  in a later statement of a multi-statement `exec` counts too (its ERR code
+  is recorded while the reply is drained, audit 6 L2).
+- **Implicit commits:** MySQL commits the open transaction around DDL, and
+  before a DDL statement that then fails. An ERR carries no status flags, so
+  after a failed statement inside a transaction (and after the `CREATE INDEX`
+  shim swallows a duplicate-index error) the backend sends `COM_PING`
+  (`hl_my_conn_ping`) to learn whether the transaction survived (audit 6 L1).
+  A top-level `db.batch` whose transaction a DDL statement ended opens a new
+  one for the rest of it; a NESTED one does not (the outer savepoints went
+  with the commit), so the batches report the transaction lost (audit 6 L3).
+  The server-named handshake plugin drives which is used, and AuthSwitchRequest
   re-dispatches through the same path. `client_ed25519` (MariaDB) is not yet
   supported and fails with a clear hint pointing at the two supported plugins
   (it needs ed25519 group-ops TweetNaCl keeps private; tracked follow-up).

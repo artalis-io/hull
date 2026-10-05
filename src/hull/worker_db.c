@@ -11,6 +11,7 @@
 
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_dynamic.h"   /* hl_db_dynamic_id_live */
 #include "hull/shared/async.h"
 #include "hull/shared/thread_affinity.h"
 #include "hull/shared/async_backend.h"
@@ -23,6 +24,8 @@
 
 #include <pthread.h>
 #include <limits.h>
+#include <stddef.h>   /* offsetof */
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -46,11 +49,15 @@
  * knows nothing about named vs dynamic. The cap is generous, so the small
  * manifest-bounded named/default set (<= HL_DB_REGISTRY_MAX) never evicts in
  * practice. Eviction between work items is safe: async ops are atomic (one
- * query/exec each, no transaction spans pooled ops). */
+ * query/exec each), and no transaction outlives the op that opened it
+ * (worker_end_txn). */
 #define HL_WORKER_DB_MAX_CONNS 32
 typedef struct WorkerConnNode {
     char                  *dsn;   /* owned; resolved DSN this connection opened from */
     HlWorkerDb             wdb;   /* embedded backend handle */
+    /* A db.open handle's LISTEN connection (hl_db_dynamic_id), kept only
+     * while that handle is open; 0 for every other connection. */
+    uint64_t               dyn_id;
     struct WorkerConnNode *next;
 } WorkerConnNode;
 
@@ -219,6 +226,28 @@ void hl_worker_db_invalidate(const char *dsn)
     }
 }
 
+/* Close this thread's connections kept for db.open handles the app has
+ * closed since (audit 6 L7: a WAIT_NOTIFY's LISTEN connection outlived the
+ * handle, outside the process-wide cap on dynamic connections). */
+static void worker_db_sweep_closed_dynamic(void)
+{
+    WorkerConnNode *head = (WorkerConnNode *)pthread_getspecific(worker_db_key);
+    WorkerConnNode **link = &head;
+    while (*link) {
+        WorkerConnNode *n = *link;
+        if (n->dyn_id && !hl_db_dynamic_id_live(n->dyn_id)) {
+            *link = n->next;
+            if (n->wdb.handle.backend)
+                n->wdb.handle.backend->close(&n->wdb.handle);
+            hl_secure_free_str(n->dsn);
+            free(n);
+        } else {
+            link = &n->next;
+        }
+    }
+    pthread_setspecific(worker_db_key, head);
+}
+
 HlWorkerDb *hl_worker_db_get(void)
 {
     return hl_worker_db_get_for(NULL);
@@ -364,31 +393,63 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
 
 /* ── KlWorkItem callbacks ──────────────────────────────────────────── */
 
-static void db_work_run(HlWorkerDbOp *op, int *fresh);
+static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh);
 
 /* A db.open (no_cache) op closes the connection it opened, and only that one
  * (audit 5 L5): the close was keyed by DSN, so a db.open whose DSN equalled a
  * named or the default connection's closed this thread's cached connection
  * for it - the jobs worker's LISTEN connection included. A WAIT_NOTIFY keeps
- * its connection: closing it dropped the LISTEN between waits, losing the
- * notifications sent in between (the LRU cap still bounds it). */
+ * its connection while its handle is open (closing it dropped the LISTEN
+ * between waits, losing the notifications sent in between), tagged with the
+ * handle's id so the sweep closes it once the app closes the handle. */
 static void db_work_fn(void *ud)
 {
     HlWorkerDbOp *op = (HlWorkerDbOp *)ud;
     int fresh = 0;
-    db_work_run(op, &fresh);
-    if (op->no_cache && fresh && op->dsn && op->kind != HL_WORK_DB_WAIT_NOTIFY)
-        hl_worker_db_invalidate(op->dsn);
+    worker_db_sweep_closed_dynamic();
+    HlWorkerDb *wdb = db_work_run(op, &fresh);
+    if (op->no_cache && fresh && op->dsn) {
+        if (wdb && op->kind == HL_WORK_DB_WAIT_NOTIFY &&
+            hl_db_dynamic_id_live(op->dyn_id)) {
+            WorkerConnNode *n = (WorkerConnNode *)(void *)
+                ((char *)wdb - offsetof(WorkerConnNode, wdb));
+            n->dyn_id = op->dyn_id;
+        } else {
+            hl_worker_db_invalidate(op->dsn);
+        }
+    }
 }
 
-static void db_work_run(HlWorkerDbOp *op, int *fresh)
+/* A transaction must not outlive the op that opened it (audit 6 M3): the
+ * connection is this thread's, reused by every later op that lands here, so a
+ * BEGIN through db.async left each of them inside it - never committed, and
+ * on SQLite holding the write lock against every other writer until restart.
+ * Roll it back and fail the op. Returns 1 when the connection must be dropped
+ * (the rollback did not end the transaction). */
+static int worker_end_txn(HlWorkerDbOp *op, HlDbHandle *h)
+{
+    if (!hl_db_in_txn(h)) return 0;
+    int lost = hl_db_rollback(h) != 0 || hl_db_in_txn(h);
+    if (op->kind == HL_WORK_DB_QUERY) hl_db_result_free(&op->result);
+    if (!op->error)   /* a statement's own error says more */
+        snprintf(op->error_msg, sizeof(op->error_msg),
+                 "a transaction cannot span db.async operations (each runs "
+                 "on a pooled worker connection); it was rolled back - use "
+                 "db.batch on the connection instead");
+    op->error = 1;
+    return lost;
+}
+
+/* Returns the connection the op ran on, or NULL when there was none or it
+ * was dropped. */
+static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh)
 {
     HlWorkerDb *wdb = worker_db_get(op->dsn, fresh);
     if (!wdb) {
         op->error = 1;
         snprintf(op->error_msg, sizeof(op->error_msg),
                  "failed to open worker DB connection");
-        return;
+        return NULL;
     }
     HlDbHandle *h = &wdb->handle;
 
@@ -402,7 +463,11 @@ static void db_work_run(HlWorkerDbOp *op, int *fresh)
             op->exec_changes = changes;
             op->last_id = hl_db_last_id(h);
         }
-        return;
+        if (worker_end_txn(op, h)) {
+            hl_worker_db_invalidate(op->dsn);
+            return NULL;
+        }
+        return wdb;
     }
 
     if (op->kind == HL_WORK_DB_WAIT_NOTIFY) {
@@ -418,9 +483,11 @@ static void db_work_run(HlWorkerDbOp *op, int *fresh)
          * wait reopens a fresh connection and re-issues LISTEN (R2). Reopen
          * failure (DB still down) surfaces as an op error on the next call,
          * which run_worker degrades to a plain sleep. */
-        if (n < 0)
+        if (n < 0) {
             hl_worker_db_invalidate(op->dsn);
-        return;
+            return NULL;
+        }
+        return wdb;
     }
 
     /* HL_WORK_DB_QUERY: materialize all rows through the vtable. */
@@ -437,6 +504,11 @@ static void db_work_run(HlWorkerDbOp *op, int *fresh)
         snprintf(op->error_msg, sizeof(op->error_msg),
                  "query: %s", hl_db_errmsg(h));
     }
+    if (worker_end_txn(op, h)) {
+        hl_worker_db_invalidate(op->dsn);
+        return NULL;
+    }
+    return wdb;
 }
 
 static void db_done_fn(void *ud)

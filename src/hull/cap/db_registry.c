@@ -11,6 +11,7 @@
 #ifdef HL_ENABLE_DB
 
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db_dynamic.h"   /* hl_db_dynamic_guard_stale_txns */
 #include "hull/manifest.h"
 #include "hull/utils/env_ref.h"   /* hl_env_ref */
 #include "hull/cap/policy_seal.h"  /* hl_policy_page_* */
@@ -88,11 +89,9 @@ int hl_db_registry_seal(HlDbRegistry *reg)
     return 0;
 }
 
-/* Fast accessor for the already-open "default" connection (opened at startup
- * for migrations, so it is cached). Returns NULL if absent. No open, no error
- * path: this is the per-request hot path used by the stale-txn guards. */
 void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
 {
+    hl_db_dynamic_guard_stale_txns();
     if (!reg) return;
     for (int i = 0; i < reg->nslots; i++)
         if (reg->slots[i].open)
@@ -101,6 +100,7 @@ void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
 
 const char *hl_db_registry_open_txn(HlDbRegistry *reg)
 {
+    if (hl_db_dynamic_in_txn()) return "db.open";
     if (!reg) return NULL;
     for (int i = 0; i < reg->nslots; i++)
         if (reg->slots[i].open && hl_db_in_txn(&reg->slots[i].handle))
@@ -109,6 +109,9 @@ const char *hl_db_registry_open_txn(HlDbRegistry *reg)
     return NULL;
 }
 
+/* Fast accessor for the already-open "default" connection (opened at startup
+ * for migrations, so it is cached). Returns NULL if absent. No open, no error
+ * path. */
 HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
 {
     if (!reg) return NULL;

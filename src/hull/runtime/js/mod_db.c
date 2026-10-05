@@ -498,6 +498,32 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, hl_db_last_id(js_call_handle(ctx, this_val)));
 }
 
+/* 1 when @p fn is an async (or async generator) function, 0 when not, -1 on
+ * an exception (a Proxy's getPrototypeOf trap). QuickJS exports no class id,
+ * so its prototype is compared with the intrinsic ones, taken from a fresh
+ * async function made by host code (not from app-reachable globals). */
+static int js_fn_is_async(JSContext *ctx, JSValueConst fn)
+{
+    static const char src[] = "[async function(){}, async function*(){}]";
+    JSValue proto = JS_GetPrototype(ctx, fn);
+    if (JS_IsException(proto)) return -1;
+    JSValue probe = JS_Eval(ctx, src, sizeof src - 1, "<hull:batch>",
+                            JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(probe)) { JS_FreeValue(ctx, proto); return -1; }
+    int is = 0;
+    for (uint32_t i = 0; i < 2 && !is; i++) {
+        JSValue f = JS_GetPropertyUint32(ctx, probe, i);
+        JSValue p = JS_GetPrototype(ctx, f);
+        is = JS_IsObject(proto) && JS_IsObject(p) &&
+             JS_VALUE_GET_PTR(p) == JS_VALUE_GET_PTR(proto);
+        JS_FreeValue(ctx, p);
+        JS_FreeValue(ctx, f);
+    }
+    JS_FreeValue(ctx, probe);
+    JS_FreeValue(ctx, proto);
+    return is;
+}
+
 /* db.batch(fn) - execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
 static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
@@ -508,6 +534,17 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
 
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
         return JS_ThrowTypeError(ctx, "db.batch requires a function argument");
+
+    /* An async fn is refused before BEGIN (audit 6 L4): refused after it
+     * returned its promise, the rollback was right but the fn kept running,
+     * and its statements after the first await autocommitted. */
+    int is_async = js_fn_is_async(ctx, argv[0]);
+    if (is_async < 0) return JS_EXCEPTION;
+    if (is_async)
+        return JS_ThrowTypeError(ctx,
+            "db.batch: fn must be synchronous - an async function's "
+            "statements after its first await would run outside the "
+            "transaction");
 
     HlDbHandle *h = js_call_handle(ctx, this_val);
 
@@ -945,6 +982,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     {
         const char *dsn = js_call_dsn(ctx, this_val);
         op->no_cache = JS_GetOpaque(this_val, hull_db_owned_conn_class_id) != NULL;
+        if (op->no_cache) op->dyn_id = hl_db_dynamic_id(js_call_handle(ctx, this_val));
         if (dsn) {
             op->dsn = strdup(dsn);
             if (!op->dsn) {

@@ -21,6 +21,7 @@
 #include "hull/cap/db_mysql.h"
 #include "hull/cap/mysql_conn.h"
 #include "hull/cap/mysqlwire.h"
+#include "hull/cap/db_sql_kw.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -52,21 +53,13 @@ static int my_connect(HlMyConn *conn, const char *dsn)
     return rc;
 }
 
-/* 1 when @p sql is a bare ROLLBACK (any case, surrounding space, optional ';').
- * A connection lost inside a transaction lost the transaction with it - the
- * server rolled it back - so a ROLLBACK for it has already happened. */
+/* 1 when @p sql is a ROLLBACK of the whole transaction (comments and
+ * ROLLBACK WORK included; not ROLLBACK TO SAVEPOINT). A connection lost inside
+ * a transaction lost the transaction with it - the server rolled it back - so
+ * a ROLLBACK for it has already happened. */
 static int sql_is_rollback(const char *sql)
 {
-    if (!sql) return 0;
-    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
-    static const char kw[] = "rollback";
-    for (size_t i = 0; i < sizeof kw - 1; i++, sql++) {
-        char c = *sql;
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        if (c != kw[i]) return 0;
-    }
-    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r' || *sql == ';') sql++;
-    return *sql == '\0';
+    return hl_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK;
 }
 
 static void scrub_free(char *s)
@@ -82,8 +75,10 @@ static void scrub_free(char *s)
  * server rolled the transaction back when the connection went, and statements
  * run on a new connection would each commit alone, so every call refuses until
  * a ROLLBACK (@p sql), which has in effect already happened and returns 1.
- * Returns 0 to go ahead, 1 done, -1 refused. */
-static int my_ready(HlDbMyCtx *s, const char *sql)
+ * Returns 0 to go ahead, 1 done, -1 refused. A @p pinned handle (it holds a
+ * session-scoped lock: hl_migrate_run) is not reconnected either: the lock
+ * went with the session, and the run would go on without it (audit 6 L5). */
+static int my_ready(HlDbMyCtx *s, const char *sql, int pinned)
 {
     if (s->txn_aborted) {
         if (sql_is_rollback(sql)) {   /* the server already rolled back */
@@ -106,6 +101,12 @@ static int my_ready(HlDbMyCtx *s, const char *sql)
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
                  "the connection was lost inside a transaction, which the "
                  "server rolled back; roll back and retry");
+        return -1;
+    }
+    if (pinned) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "the connection was lost while it held a session lock (the "
+                 "migration lock), which went with it; not reconnecting");
         return -1;
     }
     HlMyConn fresh;
@@ -166,7 +167,13 @@ static int mysql_create_index_shim(HlDbMyCtx *s, const char *sql, int *handled)
     int rc = hl_my_conn_query(&s->conn, rw, NULL, NULL, NULL, NULL);
     free(rw);
     if (rc == 0) return 0;
-    if (ci_strstr(s->conn.errmsg, "Duplicate key name") != NULL) return 0;  /* already present */
+    if (ci_strstr(s->conn.errmsg, "Duplicate key name") != NULL) {
+        /* Already present. The DDL still committed the open transaction
+         * before it failed, which the ERR does not say (audit 6 L1). */
+        if (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS)
+            (void)hl_my_conn_ping(&s->conn);
+        return 0;
+    }
     return -1;
 }
 
@@ -464,7 +471,7 @@ static int mysql_query_raw(HlDbHandle *h, const char *sql,
     (void)params; (void)alloc;
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
-    int ready = my_ready(s, sql);
+    int ready = my_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
 
     /* Parameterized: bind through the binary prepared-statement protocol so the
@@ -514,7 +521,7 @@ static int mysql_exec_raw(HlDbHandle *h, const char *sql,
 {
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
-    int ready = my_ready(s, sql);
+    int ready = my_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
     int64_t affected = 0;
 
@@ -560,7 +567,13 @@ static void my_note_failure(HlDbMyCtx *s, int was_in_trans, int rc)
         s->conn.last_err_code == HL_MY_ER_LOCK_DEADLOCK) {
         s->txn_aborted = 1;
         s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+        return;
     }
+    /* Any other failure inside a transaction: an ERR carries no status, and a
+     * failed DDL statement had already committed the transaction - ask
+     * (audit 6 L1), so the implicit-commit resume and the batch see it. */
+    if (rc < 0 && was_in_trans && !s->conn.broken && !s->txn_aborted)
+        (void)hl_my_conn_ping(&s->conn);
 }
 
 static int my_in_trans(const HlDbHandle *h)
@@ -569,37 +582,31 @@ static int my_in_trans(const HlDbHandle *h)
     return s && (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS);
 }
 
-/* 1 when @p sql starts with the keyword @p kw (case-insensitive, then a
- * non-identifier character or the end). */
-static int sql_starts_with_kw(const char *sql, const char *kw)
-{
-    if (!sql) return 0;
-    while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
-    size_t n = strlen(kw);
-    if (strncasecmp(sql, kw, n) != 0) return 0;
-    char c = sql[n];
-    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-             (c >= '0' && c <= '9') || c == '_');
-}
-
 static int mysql_txn_raw(HlDbHandle *h, const char *sql);
 
-/* MySQL commits implicitly before and after DDL (CREATE / ALTER / DROP ...).
- * Inside a db.batch that ended the batch's transaction, and every later
- * statement autocommitted - then the batch reported its transaction lost
- * (hl_db_batch_lost_), failing the stdlib's own idempotent schema batches.
- * When a statement that is not itself COMMIT / ROLLBACK ends the transaction
- * a batch holds, open a new one: what ran before the DDL is committed (MySQL
- * semantics, which no client can change), and the rest of the batch is
- * transactional again. A raw COMMIT / ROLLBACK is still reported as lost. */
+/* MySQL commits implicitly before and after DDL (CREATE / ALTER / DROP ...),
+ * and before a DDL statement that then fails. Inside a db.batch that ended the
+ * batch's transaction, and every later statement autocommitted - then the
+ * batch reported its transaction lost (hl_db_batch_lost_), failing the
+ * stdlib's own idempotent schema batches. When a statement that is not itself
+ * COMMIT / ROLLBACK ends the transaction a batch holds, open a new one: what
+ * ran before the DDL is committed (MySQL semantics, which no client can
+ * change), and the rest of the batch is transactional again. A raw COMMIT /
+ * ROLLBACK is still reported as lost.
+ *
+ * Not inside a NESTED batch (audit 6 L3): the commit also dropped the outer
+ * batches' savepoints, so the inner batch could no longer roll back on its
+ * own - its writes after the DDL committed with the outer batch even when it
+ * failed. The transaction stays ended instead, and every enclosing batch's
+ * leave reports it lost. */
 static void my_resume_after_implicit_commit(HlDbHandle *h, const char *sql,
-                                            int was, int rc)
+                                            int was)
 {
-    if (rc < 0 || !was || !h || h->batch_depth <= 0 || my_in_trans(h)) return;
+    if (!was || !h || h->batch_depth != 1 || my_in_trans(h)) return;
     HlDbMyCtx *s = h->ctx;
-    if (!s || s->txn_aborted) return;
-    if (sql_starts_with_kw(sql, "commit") || sql_starts_with_kw(sql, "rollback") ||
-        sql_starts_with_kw(sql, "end"))
+    if (!s || s->txn_aborted || s->conn.broken) return;
+    HlSqlTxnKind k = hl_sql_txn_kind(sql);
+    if (k == HL_SQL_TXN_COMMIT || k == HL_SQL_TXN_ROLLBACK || k == HL_SQL_TXN_OTHER)
         return;
     (void)mysql_txn_raw(h, "START TRANSACTION");
 }
@@ -611,7 +618,7 @@ static int mysql_query(HlDbHandle *h, const char *sql,
     int was = my_in_trans(h);
     int rc = mysql_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
     if (h && h->ctx) my_note_failure(h->ctx, was, rc);
-    my_resume_after_implicit_commit(h, sql, was, rc);
+    my_resume_after_implicit_commit(h, sql, was);
     return rc;
 }
 
@@ -621,7 +628,7 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
     int was = my_in_trans(h);
     int rc = mysql_exec_raw(h, sql, params, nparams);
     if (h && h->ctx) my_note_failure(h->ctx, was, rc);
-    my_resume_after_implicit_commit(h, sql, was, rc);
+    my_resume_after_implicit_commit(h, sql, was);
     return rc;
 }
 
@@ -631,7 +638,7 @@ static int mysql_exec_script(HlDbHandle *h, const char *sql)
      * CLIENT_MULTI_STATEMENTS so the whole script runs as one COM_QUERY. */
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
-    int ready = my_ready(s, sql);
+    int ready = my_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
     char *collated = mysql_bin_collate_hull_tables(sql);
     int rc = hl_my_conn_exec_multi(&s->conn, collated ? collated : sql);
@@ -643,7 +650,7 @@ static int mysql_txn_raw(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
-    int ready = my_ready(s, sql);
+    int ready = my_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
     int rc = hl_my_conn_query(&s->conn, sql, NULL, NULL, NULL, NULL);
     /* A ROLLBACK that failed because the connection went: the server rolled
