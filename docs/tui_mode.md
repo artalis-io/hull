@@ -50,7 +50,15 @@ This document is the design plan. Status: not yet implemented.
   apps (`app.get/post/use/...`) cannot also call `tui.run`. Same
   rationale as CLI mode itself. If a server app wants a console, it
   uses `hull dev`'s interactive console (which is a TUI client of the
-  server, not in-process).
+  server, not in-process). Enforced at the call, not by the module
+  resolver: every JS `tui.*` call made while an HTTP request is being
+  served (a route handler or middleware) throws, and `tui.poll` also
+  takes the async-op gate (audit 8 M9 - a `tui.poll` in a handler used to
+  answer the request at once, empty, then let the handler write into a
+  recycled connection). The resolver does not reject `hull/tui` beside
+  the HTTP-server modules, because a TUI app may legitimately declare
+  one - `hull/web/ws-client` (a chat client) requires the HTTP-server
+  capability.
 - **Dual API surface (C cap + script).** Hull's own commands
   (`hull dev`, `hull doctor`, `hull agent`) go through the same Lua
   tool-module pattern `hull init` already uses, calling the script

@@ -95,6 +95,10 @@ static void hl_request_peer_ip_js(KlHttpRequest *req, char *buf, size_t buflen)
  *     body:    "..." or parsed object,
  *     ctx:     {}
  *   }
+ *
+ * Every property is defined, not set: a set runs an inherited setter (one an
+ * app put on Object.prototype), and app code run while `req` is built - with
+ * the connection active - could start an op there (audit 8 H1).
  */
 JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife *life)
 {
@@ -106,18 +110,18 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
      * fields otherwise.  See vendor/keel/include/keel/http_request.h. */
     const char *m = req->method;
     if (m)
-        JS_SetPropertyStr(ctx, obj, "method",
-                          JS_NewStringLen(ctx, m, req->method_len));
+        JS_DefinePropertyValueStr(ctx, obj, "method",
+                          JS_NewStringLen(ctx, m, req->method_len), JS_PROP_C_W_E);
     else
-        JS_SetPropertyStr(ctx, obj, "method", JS_NewString(ctx, "GET"));
+        JS_DefinePropertyValueStr(ctx, obj, "method", JS_NewString(ctx, "GET"), JS_PROP_C_W_E);
 
     /* path */
     const char *p = req->path;
     if (p)
-        JS_SetPropertyStr(ctx, obj, "path",
-                          JS_NewStringLen(ctx, p, req->path_len));
+        JS_DefinePropertyValueStr(ctx, obj, "path",
+                          JS_NewStringLen(ctx, p, req->path_len), JS_PROP_C_W_E);
     else
-        JS_SetPropertyStr(ctx, obj, "path", JS_NewString(ctx, "/"));
+        JS_DefinePropertyValueStr(ctx, obj, "path", JS_NewString(ctx, "/"), JS_PROP_C_W_E);
 
     /* query string → object. Query, params and headers have no prototype:
      * the client's names are their only keys, so `req.headers.constructor`
@@ -174,7 +178,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
             pair = strtok_r(NULL, "&", &saveptr);
         }
     }
-    JS_SetPropertyStr(ctx, obj, "query", query_obj);
+    JS_DefinePropertyValueStr(ctx, obj, "query", query_obj, JS_PROP_C_W_E);
 
     /* params - route params from Keel (e.g. :id → params.id) */
     JSValue params_obj = JS_NewObjectProto(ctx, JS_NULL);
@@ -189,7 +193,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
         JS_DefinePropertyValueStr(ctx, params_obj, name,
             JS_NewStringLen(ctx, param.value, param.value_len), JS_PROP_C_W_E);
     }
-    JS_SetPropertyStr(ctx, obj, "params", params_obj);
+    JS_DefinePropertyValueStr(ctx, obj, "params", params_obj, JS_PROP_C_W_E);
 
     /* headers → object (names lowercased for case-insensitive lookup) */
     JSValue headers_obj = JS_NewObjectProto(ctx, JS_NULL);
@@ -212,7 +216,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
                               JS_PROP_C_W_E);
         }
     }
-    JS_SetPropertyStr(ctx, obj, "headers", headers_obj);
+    JS_DefinePropertyValueStr(ctx, obj, "headers", headers_obj, JS_PROP_C_W_E);
 
     /* remote_addr: numeric peer IP from the socket, absent when unavailable.
      * The un-spoofable client address; IP-gating middleware uses it as the
@@ -221,7 +225,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
         char peer[INET6_ADDRSTRLEN];
         hl_request_peer_ip_js(req, peer, sizeof peer);
         if (peer[0])
-            JS_SetPropertyStr(ctx, obj, "remote_addr", JS_NewString(ctx, peer));
+            JS_DefinePropertyValueStr(ctx, obj, "remote_addr", JS_NewString(ctx, peer), JS_PROP_C_W_E);
     }
 
     /* body - extract from buffer reader if available. Streaming-multipart
@@ -234,12 +238,12 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
         const char *data;
         size_t len = hl_cap_body_data(req->body_reader, &data);
         if (len > 0)
-            JS_SetPropertyStr(ctx, obj, "body",
-                              JS_NewStringLen(ctx, data, len));
+            JS_DefinePropertyValueStr(ctx, obj, "body",
+                              JS_NewStringLen(ctx, data, len), JS_PROP_C_W_E);
         else
-            JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
+            JS_DefinePropertyValueStr(ctx, obj, "body", JS_NewString(ctx, ""), JS_PROP_C_W_E);
     } else {
-        JS_SetPropertyStr(ctx, obj, "body", JS_NULL);
+        JS_DefinePropertyValueStr(ctx, obj, "body", JS_NULL, JS_PROP_C_W_E);
     }
 
     /* req.multipart() - only installed for streaming-multipart routes.
@@ -258,27 +262,27 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
             /* Native JS object - reconstruct JSValue from stored bytes */
             JSValue val;
             memcpy(&val, rctx->js_val_bytes, sizeof(val));
-            JS_SetPropertyStr(ctx, obj, "ctx", JS_DupValue(ctx, val));
+            JS_DefinePropertyValueStr(ctx, obj, "ctx", JS_DupValue(ctx, val), JS_PROP_C_W_E);
         } else if (rctx->kind == HL_REQCTX_JSON) {
             /* JSON string (from test dispatch) - parse it */
             JSValue parsed = JS_ParseJSON(ctx, rctx->json.data,
                                           rctx->json.len, "<ctx>");
             if (JS_IsException(parsed)) {
                 JS_FreeValue(ctx, JS_GetException(ctx));
-                JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
+                JS_DefinePropertyValueStr(ctx, obj, "ctx", JS_NewObject(ctx), JS_PROP_C_W_E);
             } else {
-                JS_SetPropertyStr(ctx, obj, "ctx", parsed);
+                JS_DefinePropertyValueStr(ctx, obj, "ctx", parsed, JS_PROP_C_W_E);
             }
         } else {
-            JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
+            JS_DefinePropertyValueStr(ctx, obj, "ctx", JS_NewObject(ctx), JS_PROP_C_W_E);
         }
     } else {
-        JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
+        JS_DefinePropertyValueStr(ctx, obj, "ctx", JS_NewObject(ctx), JS_PROP_C_W_E);
     }
 
     /* req.header(name) - convenience method for case-insensitive lookup */
-    JS_SetPropertyStr(ctx, obj, "header",
-                      JS_NewCFunction(ctx, js_req_header, "header", 1));
+    JS_DefinePropertyValueStr(ctx, obj, "header",
+                      JS_NewCFunction(ctx, js_req_header, "header", 1), JS_PROP_C_W_E);
 
     return obj;
 }

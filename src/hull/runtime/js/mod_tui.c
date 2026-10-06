@@ -13,6 +13,7 @@
 
 #include "hull/utils/alloc.h"
 #include "db_wait.h"   /* hl_js_db_refuse_wait */
+#include "internal.h"  /* hl_js_async_gate */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/cap/tui.h"
@@ -28,6 +29,18 @@ static HlTuiCtx *g_ctx = NULL;
 
 static int ensure_acquired(JSContext *ctx)
 {
+    /* TUI is CLI mode only (docs/tui_mode.md): an HTTP request's handler or
+     * middleware may not drive the terminal. tui.poll there made a
+     * continuation counted as the op holding the request's connection that
+     * never suspended it: the client got an empty 200 at once, and the
+     * handler's res.json later wrote into the recycled slot (audit 8 M9). */
+    const HlJS *js = (const HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->active_conn) {
+        JS_ThrowTypeError(ctx,
+            "tui: the terminal UI is for app.main (CLI mode); it cannot be "
+            "used while serving an HTTP request");
+        return -1;
+    }
     if (g_ctx) return 0;
     int rc = hl_cap_tui_acquire(&g_ctx);
     if (rc != 0) {
@@ -349,7 +362,7 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
     if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
     int32_t timeout_ms = 0;
     if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
-        JS_ToInt32(ctx, &timeout_ms, argv[0]);
+        if (JS_ToInt32(ctx, &timeout_ms, argv[0])) return JS_EXCEPTION;
 
     /* Fast path: try non-blocking. */
     HlTuiEvent ev = {0};
@@ -368,6 +381,7 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
         return event_to_js(ctx, &ev);
     }
 
+    if (hl_js_async_gate(ctx, js, "tui.poll()") != 0) return JS_EXCEPTION;
     if (hl_js_db_refuse_wait(ctx, "tui.poll()")) return JS_EXCEPTION;
     if (timeout_ms < 0) timeout_ms = INT_MAX;
 
@@ -428,7 +442,7 @@ static JSValue js_tui_poll_sync(JSContext *ctx, JSValueConst this_val,
     if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
     int32_t timeout_ms = -1;
     if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
-        JS_ToInt32(ctx, &timeout_ms, argv[0]);
+        if (JS_ToInt32(ctx, &timeout_ms, argv[0])) return JS_EXCEPTION;
     HlTuiEvent ev = {0};
     int rc = hl_cap_tui_poll(g_ctx, timeout_ms, &ev);
     if (rc < 0) return JS_ThrowInternalError(ctx, "tui.pollSync failed");

@@ -214,6 +214,16 @@ static void hl_js_cli_main_trip(HlJS *js, const char *why)
         hl_async_backend()->stop(js->base.async_ctx);
 }
 
+int hl_js_conn_held_elsewhere(HlJS *js, KlHttpConn *conn)
+{
+    if (!conn || !hl_net_op_holder(js->base.net_ctx, (HlReqHandle *)conn))
+        return 0;
+    log_error("[hull:c] a resumed request's connection is suspended by an "
+              "operation its run does not own; its response is left to that "
+              "operation's completion");
+    return 1;
+}
+
 int hl_js_run_defer_to_holder(HlJS *js, HlJsRunLink *link, HlReqLife *life)
 {
     if (!life || !hl_req_life_live(life) || !life->held ||
@@ -334,8 +344,16 @@ int hl_js_entry_park(HlJS *js, JSValue ret, int *state)
         st = (int)JS_PromiseState(js->ctx, ret);
     }
     *state = st;
-    if (st != JS_PROMISE_PENDING || !js->last_async_cont)
+    if (st != JS_PROMISE_PENDING)
         return 0;
+    if (!js->last_async_cont) {
+        /* Waiting on a promise Hull does not drive: the entry ends now, but
+         * the handler may yet resume - from whichever later entry settles
+         * the promise, inside that entry's transaction. Not holding one of
+         * its own: the check says so and rolls it back (audit 8 c_db L1). */
+        hl_js_run_yield_check(js, NULL);
+        return 0;
+    }
     HlJsRunOnce *run = hl_js_run_attach(js, ret);
     hl_js_run_yield_check(js, run);
     hl_js_run_drop(js, run);
@@ -378,8 +396,10 @@ int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)
 
 int hl_js_op_suspend(HlJS *js, struct HlSuspendOp *op)
 {
-    if (!js || !js->active_conn || js->in_middleware ||
-        (js->active_life && js->active_life->parked > 0))
+    /* Only for the active request's own op: a connection active with no
+     * live life is never suspended (audit 8 H1, hl_js_async_cont_create). */
+    if (!js || !js->active_conn || js->in_middleware || !js->active_life ||
+        !hl_req_life_live(js->active_life) || js->active_life->parked > 0)
         return -1;
     return hl_net_op_suspend(js->base.net_ctx,
                              (HlReqHandle *)js->active_conn, op);
@@ -410,15 +430,16 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     /* The request is over (its run completed, or the client went away): an
      * op left running past it resumes with no request - the connection may
      * already serve another client. */
-    if (conn && jc->life && !hl_req_life_live(jc->life)) {
+    if (jc->life && !hl_req_life_live(jc->life)) {
         conn = NULL;
         jc->conn = NULL;
+        jc->req  = NULL;   /* names whatever request the slot serves now */
     }
 
     /* Restore per-request context so C functions called during resume
      * (e.g., another http.async.get) can find the active connection and
-     * request (a re-yield's new cont captures js->active_req; response
-     * compression reads it). Mirrors the Lua path. */
+     * request (a re-yield's new cont captures js->active_req). Mirrors the
+     * Lua path. */
     js->active_conn = conn;
     js->active_req  = jc->req;
     /* A continuation made before this resume (an un-awaited op a finished
@@ -426,6 +447,18 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
      * it, the stale one was handed this run's handler promise and could
      * complete it on its own connection. */
     js->last_async_cont = NULL;
+
+    /* The whole entry is active - its life, timer and teardown hook - before
+     * any app code runs: settling the promise below can run some (a `then`
+     * getter on Object.prototype, read from an object result), and an op it
+     * made with the connection active but no life suspended the connection
+     * unaccounted for (audit 8 H1). A re-await inside the handler carries
+     * them onto every continuation it makes. */
+    js->active_on_complete     = jc->on_complete;
+    js->active_on_complete_ctx = jc->on_complete_ctx;
+    js->active_life            = jc->life;
+    js->active_timer           = jc->timer_ctx;
+    js->active_cli_main        = jc->cli_main;
 
     /* Settle the inner promise with the driver result.
      *
@@ -470,15 +503,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     jc->resolve = JS_UNDEFINED;
     jc->reject = JS_UNDEFINED;
 
-    /* Re-arm the deferred-teardown hook (and the timer) so a re-await inside
-     * the handler carries them onto every continuation it makes. */
-    js->active_on_complete     = jc->on_complete;
-    js->active_on_complete_ctx = jc->on_complete_ctx;
-    js->active_life            = jc->life;
-    js->active_timer           = jc->timer_ctx;
-
     /* Drain microtasks - this continues the handler past the await */
-    js->active_cli_main = jc->cli_main;
     if (!aborted)
         hl_js_run_jobs(js);
     js->active_cli_main = 0;
@@ -506,6 +531,11 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         state = JS_PROMISE_REJECTED;
     if (js->budget_tripped && !conn && !jc->timer_ctx && !wired && jc->cli_main)
         hl_js_cli_main_trip(js, "instruction limit exceeded");
+    /* The handler waits again (not a settled one deferred to its holder,
+     * below): checked whether or not this resume started a new op - one made
+     * before a BEGIN it ran now (`await pa; BEGIN; ...; await pb`) waits
+     * across it all the same (audit 8 M7). */
+    int waits_again = state == JS_PROMISE_PENDING && wired;
 
     /* The handler is done, but an op of its run still has the connection
      * suspended (`hull.sleep(5000)` left running before `res.json`). Sending
@@ -574,7 +604,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
          * ends a streamed body and transitions the conn to SENDING (required on
          * the poll backend). Mirrors the Lua path (runtime/lua/async.c). An
          * op that ran detached sends through the run's hold op instead. */
-        if (conn && was_holder)
+        if (conn && was_holder && !hl_js_conn_held_elsewhere(js, conn))
             hl_js_http_resume_send(conn, jc->req);
 #endif
         if (conn && !was_holder && jc->link.once) {
@@ -635,7 +665,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         }
 
 #ifdef HL_ENABLE_HTTP_SERVER
-        if (conn && was_holder)
+        if (conn && was_holder && !hl_js_conn_held_elsewhere(js, conn))
             hl_js_http_resume_error(conn, jc->req);  /* 500 + send, behind the seam */
 #endif
         if (conn && !was_holder && jc->link.once) {
@@ -657,21 +687,23 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
          * new continuations - of either type, HlJsAsyncCont or HlJsMpCont -
          * join THIS run, so the run still completes exactly once across old
          * and new continuations. */
+        HlJsRunOnce *run = jc->link.once;
         if (js->last_async_cont) {
             HlAsyncCont *nc = (HlAsyncCont *)js->last_async_cont;
             hl_js_run_wire(hl_js_cont_link(nc), ctx, jc->link.handler_promise,
                            jc->link.once);
-            /* A run an entry waits on (a request, a timer, a ws or ws-client
-             * callback, app.main) waits again: not holding a transaction. */
-            if (wired)
-                hl_js_run_yield_check(js, hl_js_cont_link(nc)->once);
+            if (!run) run = hl_js_cont_link(nc)->once;
             js->last_async_cont = NULL;
         }
+        /* A run an entry waits on (a request, a timer, a ws or ws-client
+         * callback, app.main) waits again: not holding a transaction - on a
+         * new op, an earlier one, or a promise Hull does not drive. */
+        if (waits_again)
+            hl_js_run_yield_check(js, run);
         /* A request still waiting must keep its connection suspended until
          * the run completes: Keel otherwise sends the response as it stands
          * when this resume returns (an empty 200), while the handler goes on
          * to write into a connection that serves another client by then. */
-        HlJsRunOnce *run = jc->link.once;
         if (conn && wired && jc->life && hl_req_life_live(jc->life)) {
             if (!jc->life->held && !was_holder) {
                 /* Nothing suspends it, and this resume is not inside Keel's
@@ -688,7 +720,8 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
                         hl_req_life_kill(jc->life);
                         if (run) run->done = 1;
 #ifdef HL_ENABLE_HTTP_SERVER
-                        hl_js_http_resume_error(conn, jc->req);
+                        if (!hl_js_conn_held_elsewhere(js, conn))
+                            hl_js_http_resume_error(conn, jc->req);
 #endif
                     }
                 } else {
@@ -840,21 +873,30 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
     jc->life            = js->active_life;
     jc->cli_main        = js->active_cli_main;
     hl_req_life_retain(jc->life);
+    /* An op belongs to a request only while the request's live life is the
+     * active one. App code can run while a connection is active and its life
+     * is not - an Object.prototype `then` getter that a resume's resolve
+     * reads, an inherited setter - and an op made there suspended the
+     * connection uncounted in life->held / attached: the response then went
+     * out over that live suspension, and the op's completion drove whatever
+     * the slot served next (audit 8 H1). Such an op runs detached. */
+    if (!jc->life || !hl_req_life_live(jc->life)) {
+        jc->conn = NULL;
+        jc->req  = NULL;
+    }
     /* An op of a request counts until its resume is over: a multipart park
      * in that time is refused (mod_request.c). The first one suspends the
      * connection (hl_js_cont_suspend_conn); one made while another has it
      * suspended runs detached and still belongs to the request's run. */
     jc->attached        = 0;
     jc->holds           = 0;
-    if (jc->conn && jc->life) {
+    if (jc->conn) {
         jc->attached = 1;
         jc->life->attached++;
         if (!jc->life->held) {
             jc->holds = 1;
             jc->life->held = 1;
         }
-    } else if (jc->conn) {
-        jc->holds = 1;
     }
     /* Chained behind an earlier, not yet wired continuation of the same
      * run (a parallel await, of either type), and made the last one so

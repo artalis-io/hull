@@ -1446,16 +1446,25 @@ void hl_js_dump_error(HlJS *js)
     if (str) {
         log_error("[hull:c] js error: %s", str);
         JS_FreeCString(js->ctx, str);
+    } else {
+        /* A throwing toString: report it without leaving its own exception
+         * pending for whatever runs next. */
+        log_error("[hull:c] js error: (an error that cannot be shown)");
+        JS_FreeValue(js->ctx, JS_GetException(js->ctx));
     }
 
     /* Print stack trace if available */
     if (JS_IsError(js->ctx, exception)) {
         JSValue stack = JS_GetPropertyStr(js->ctx, exception, "stack");
-        if (!JS_IsUndefined(stack)) {
+        if (JS_IsException(stack)) {
+            JS_FreeValue(js->ctx, JS_GetException(js->ctx));
+        } else if (!JS_IsUndefined(stack)) {
             const char *stack_str = JS_ToCString(js->ctx, stack);
             if (stack_str) {
                 log_error("[hull:c] %s", stack_str);
                 JS_FreeCString(js->ctx, stack_str);
+            } else {
+                JS_FreeValue(js->ctx, JS_GetException(js->ctx));
             }
         }
         JS_FreeValue(js->ctx, stack);

@@ -8094,4 +8094,140 @@ UTEST(js_audit7, res_json_propagates_a_stringify_error)
     cleanup_js();
 }
 
+/* ── Audit 8 ─────────────────────────────────────────────────────────── */
+
+struct HlSuspendOp;
+int hl_js_op_suspend(HlJS *jsp, struct HlSuspendOp *op);   /* internal.h */
+
+/* H1: an op made while a connection is active but no request life is (app
+ * code a resume's resolve or an inherited setter ran) took the connection
+ * as its own - holds = 1, counted nowhere - and suspended it. It runs
+ * detached now: no suspend is even attempted. */
+UTEST(js_audit8, an_op_made_with_no_request_life_runs_detached)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.base.async_ctx = actx;
+    int dummy_conn;
+    js.active_conn = (KlHttpConn *)(void *)&dummy_conn;
+    js.active_life = NULL;
+    char *m = eval_str(
+        "(() => { try { hull.sleep(5).then(() => { globalThis.__a8_done = 1; });"
+        " return 'detached'; } catch (e) { return String(e.message); } })()");
+    js.active_conn = NULL;
+    js.last_async_cont = NULL;
+    EXPECT_TRUE(m && strcmp(m, "detached") == 0);
+    free(m);
+    /* hl_js_op_suspend refuses outright without a life, too. */
+    js.active_conn = (KlHttpConn *)(void *)&dummy_conn;
+    KlAsyncOp op;
+    memset(&op, 0, sizeof op);
+    EXPECT_EQ(hl_js_op_suspend(&js, (struct HlSuspendOp *)&op), -1);
+    js.active_conn = NULL;
+    for (int i = 0; i < 200 && eval_int("globalThis.__a8_done ? 1 : 0") != 1; i++)
+        be->tick(actx, 5);
+    EXPECT_EQ(eval_int("globalThis.__a8_done ? 1 : 0"), 1);
+    cleanup_js();
+    be->free(actx);
+}
+
+/* H1: `req` was built with property SETS, which ran a setter an app put on
+ * Object.prototype - app code, with the connection active, before the
+ * handler (or, in middleware, before the async gate was armed). Every
+ * property is defined now. */
+UTEST(js_audit8, building_req_runs_no_inherited_setter)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    static const char reg[] =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.use('*', '/*', (req, res) => { globalThis.__a8_m ="
+        " typeof req.method + ':' + typeof req.headers + ':' +"
+        " typeof req.header; return 0; });\n";
+    JSValue val = JS_Eval(js.ctx, reg, strlen(reg), "<test>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    int id = eval_int("globalThis.__hull_middleware["
+                      "globalThis.__hull_middleware.length - 1].handler_id");
+    /* Armed after registration: only the request build can reach them. */
+    char *m = eval_str(
+        "globalThis.__a8_set = 0;\n"
+        "for (const k of ['method', 'path', 'query', 'params', 'headers',\n"
+        "                 'body', 'ctx', 'header', 'remote_addr'])\n"
+        "  Object.defineProperty(Object.prototype, k, { configurable: true,\n"
+        "    set(v) { globalThis.__a8_set++; } });\n"
+        "'ok'");
+    EXPECT_TRUE(m && strcmp(m, "ok") == 0);
+    free(m);
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, id, &req, &res), 0);
+    EXPECT_EQ(eval_int("globalThis.__a8_set"), 0);
+    char *seen = eval_str("globalThis.__a8_m");
+    EXPECT_TRUE(seen && strcmp(seen, "string:object:function") == 0);
+    free(seen);
+    free_req_ctx(&req);
+    cleanup_js();
+}
+
+/* L1: res.json's code argument and res.redirect's code / url conversions
+ * were not checked - the body went out with the old status, or nothing was
+ * sent and undefined returned - with the exception left pending. */
+UTEST(js_audit8, res_conversions_that_throw_propagate)
+{
+    static const char *const srcs[] = {
+        "(req, res) => { try { res.json({ a: 1 }, { valueOf() { throw new"
+        " Error('code'); } }); globalThis.__a8_e = 'none'; } catch (e) {"
+        " globalThis.__a8_e = e.message; } return 1; }",
+        "(req, res) => { try { res.redirect('/x', { valueOf() { throw new"
+        " Error('code'); } }); globalThis.__a8_e = 'none'; } catch (e) {"
+        " globalThis.__a8_e = e.message; } return 1; }",
+        "(req, res) => { try { res.redirect({ toString() { throw new"
+        " Error('url'); } }); globalThis.__a8_e = 'none'; } catch (e) {"
+        " globalThis.__a8_e = e.message; } return 1; }",
+    };
+    static const char *const want[] = { "code", "code", "url" };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        KlAllocator alloc = kl_allocator_default();
+        KlHttpResponse res;
+        ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+        KlHttpRequest req = {0};
+        EXPECT_EQ(a5_middleware(srcs[i], &req, &res), 1);
+        char *e = eval_str("globalThis.__a8_e");
+        EXPECT_TRUE(e && strcmp(e, want[i]) == 0);
+        free(e);
+        EXPECT_EQ(res.body_len, (size_t)0);   /* nothing was written */
+        EXPECT_FALSE(JS_HasException(js.ctx));
+        free_req_ctx(&req);
+        kl_http_response_free(&res);
+        cleanup_js();
+    }
+}
+
+/* L1: a middleware that made req.ctx a throwing accessor left the exception
+ * pending past the dispatch (it surfaced in the next unrelated error). The
+ * request fails instead, and nothing is left pending. */
+UTEST(js_audit8, a_throwing_req_ctx_getter_fails_the_middleware)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => { Object.defineProperty(req, 'ctx', { get() {"
+        " throw new Error('boom'); } }); return 0; }", &req, &res), -1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_TRUE(req.ctx == NULL);
+    free_req_ctx(&req);
+    cleanup_js();
+}
+
 UTEST_MAIN();

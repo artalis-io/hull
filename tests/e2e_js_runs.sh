@@ -19,6 +19,17 @@
 #   M6  A timer's queued jobs ran later inside another entry's context.
 #   c_db L2  db.batch(async fn) in a worker VM committed at once.
 #
+# Audit 8:
+#   H1  An op made while a connection was active but its request life was
+#       not (an Object.prototype `then` getter read by a resume's resolve, an
+#       inherited setter while `req` was built) suspended the connection
+#       uncounted; it belongs to the run now, and `req` runs no setter.
+#   M7  A resumed handler that waits, in a transaction, on an op it made
+#       before the BEGIN is checked too.
+#   M9  tui.poll in an HTTP handler is refused.
+#   L2  A stashed res is compressed for its own request.
+#   c_db L1  A wait on a promise Hull does not drive is checked too.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -149,6 +160,77 @@ app.every(100, async () => {
 });
 app.get("/ticks", (_req, res) => res.json({ ticks }));
 
+/* Audit 8 H1: an op made while a resume settles its promise - a `then`
+ * getter on Object.prototype, read from db.async's row array by the
+ * resolve - suspended the connection uncounted: the response went out at
+ * once and the op later completed on a recycled slot. It belongs to the
+ * run now, which waits for it. */
+let thenArmed = false, thenFired = 0;
+Object.defineProperty(Object.prototype, "then", { configurable: true,
+    get() { if (thenArmed) { thenArmed = false; thenFired++; hull.sleep(300); }
+            return undefined; } });
+app.get("/h1then", async (_req, res) => {
+    const p = conn.async.query("SELECT 1 AS one");
+    thenArmed = true;
+    res.json(await p);
+});
+app.get("/h1then-fired", (_req, res) => res.json({ fired: thenFired }));
+
+/* ...and an inherited setter run while `req` is built (in middleware, before
+ * the async gate was armed): `req` is built with defined properties now. */
+let setArmed = false, setFired = 0;
+Object.defineProperty(Object.prototype, "remote_addr", { configurable: true,
+    set(v) {
+        Object.defineProperty(this, "remote_addr", { value: v, writable: true,
+                                                     enumerable: true, configurable: true });
+        if (setArmed) { setArmed = false; setFired++; try { hull.sleep(1000); } catch (_e) {} }
+    } });
+app.get("/h1set-arm", (_req, res) => { setArmed = true; res.text("armed"); });
+app.get("/h1set-fired", (_req, res) => res.json({ fired: setFired }));
+
+/* Audit 8 M7: a resumed handler that opens a transaction and then waits on an
+ * op made BEFORE it (no new op in that segment) was not checked: the
+ * transaction was rolled back unseen and the rest autocommitted. */
+app.get("/txn2", async (_req, res) => {
+    const pa = hull.sleep(10), pb = hull.sleep(150);
+    await pa;
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('c')");
+    await pb;
+    conn.exec("INSERT INTO t VALUES ('d')");
+    conn.exec("COMMIT");
+    res.json({ done: 1 });
+});
+
+/* Audit 8 c_db L1: waiting on a promise Hull does not drive, in a
+ * transaction: reported (and rolled back) like any other wait. */
+let undriven = null;
+app.get("/txn3", async (_req, res) => {
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('e')");
+    await new Promise((r) => { undriven = r; });
+    try { conn.exec("COMMIT"); } catch (_e) {}
+});
+app.get("/txn3-go", (_req, res) => {
+    if (undriven) { undriven(); undriven = null; }
+    res.text("ok");
+});
+
+/* Audit 8 L2: a `res` stashed by one request and answered from another's
+ * handler is compressed for ITS request's Accept-Encoding, not the active
+ * one's. */
+const waiters = [];
+app.get("/l2wait", async (_req, res) => {
+    const w = { res, done: false };
+    waiters.push(w);
+    while (!w.done) await hull.sleep(30);
+});
+app.get("/l2pub", (_req, res) => {
+    const big = { s: "z".repeat(8000) };
+    for (const w of waiters.splice(0)) { w.res.json(big); w.done = true; }
+    res.text("published");
+});
+
 app.get("/wbatch", async (_req, res) => {
     const r = await worker.dispatch(() => {
         try {
@@ -239,6 +321,87 @@ case "$out" in
     *) pass "nothing of either transaction is committed" ;;
 esac
 
+echo "=== audit 8 H1: an op made while a resume settles its promise ==="
+# A keep-alive client (one connection, many requests) runs meanwhile: the
+# stray op used to complete on a slot it was being served from.
+KA_URLS=""
+i=0
+while [ $i -lt 40 ]; do KA_URLS="$KA_URLS $URL/fast"; i=$((i + 1)); done
+# shellcheck disable=SC2086
+( curl -s -m 30 $KA_URLS >"$TMPDIR/ka.out" ) &
+KA=$!
+HT_PIDS=""
+for i in 1 2 3; do
+    curl -s -m 10 -w ' %{http_code} %{time_total}' "$URL/h1then" >"$TMPDIR/ht.$i" &
+    HT_PIDS="$HT_PIDS $!"
+    sleep 0.1
+done
+for p in $HT_PIDS; do wait "$p" || true; done
+wait $KA || true
+for i in 1 2 3; do
+    out=$(cat "$TMPDIR/ht.$i")
+    body=${out%% *}
+    t=$(printf '%s' "$out" | awk '{print $3}')
+    if [ "$body" = '[{"one":1}]' ] && awk "BEGIN{exit !($t >= 0.28)}"; then
+        pass "/h1then #$i answered after the op its resolve started (${t}s)"
+    else
+        fail "/h1then #$i answered after the op its resolve started" "$out"
+    fi
+done
+out=$(curl -s -m 10 "$URL/h1then-fired")
+[ "$out" = '{"fired":3}' ] && pass "the getter ran in each resume" || fail "the getter ran in each resume" "$out"
+nka=$(grep -o fast "$TMPDIR/ka.out" | wc -l | tr -d ' ')
+[ "$nka" = 40 ] && pass "the keep-alive client got all 40 of its own responses" \
+    || fail "the keep-alive client got its own responses" "$nka: $(cat "$TMPDIR/ka.out")"
+sleep 0.4
+out=$(curl -s -m 10 "$URL/fast")
+[ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
+
+echo "=== audit 8 H1: an inherited setter while req is built ==="
+curl -s -m 10 -o /dev/null "$URL/h1set-arm"
+code=$(curl -s -m 10 -o "$TMPDIR/h1set" -w '%{http_code}' "$URL/fast")
+[ "$code" = 200 ] && [ "$(cat "$TMPDIR/h1set")" = fast ] \
+    && pass "the next request is served" || fail "the next request is served" "$code"
+out=$(curl -s -m 10 "$URL/h1set-fired")
+[ "$out" = '{"fired":0}' ] && pass "building req ran no setter" || fail "building req ran no setter" "$out"
+
+echo "=== audit 8 M7: waiting, in a transaction, on an op made before it ==="
+before=$(grep -c "waited while a transaction was open" "$TMPDIR/log" || true)
+code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$URL/txn2")
+[ "$code" = 500 ] && pass "the run is failed (500)" || fail "the run is failed (500)" "$code"
+out=$(curl -s -m 10 "$URL/rows")
+case "$out" in
+    *'"c"'*|*'"d"'*) fail "nothing after the wait is committed" "$out" ;;
+    *) pass "nothing after the wait is committed" ;;
+esac
+after=$(grep -c "waited while a transaction was open" "$TMPDIR/log" || true)
+[ "$after" -gt "$before" ] && pass "the wait is reported" || fail "the wait is reported" "$before -> $after"
+
+echo "=== audit 8 c_db L1: waiting on an undriven promise in a transaction ==="
+before=$after
+curl -s -m 10 -o /dev/null "$URL/txn3"
+curl -s -m 10 -o /dev/null "$URL/txn3-go"
+after=$(grep -c "waited while a transaction was open" "$TMPDIR/log" || true)
+[ "$after" -gt "$before" ] && pass "the wait is reported" || fail "the wait is reported" "$before -> $after"
+out=$(curl -s -m 10 "$URL/rows")
+case "$out" in
+    *'"e"'*) fail "nothing of the transaction is committed" "$out" ;;
+    *) pass "nothing of the transaction is committed" ;;
+esac
+
+echo "=== audit 8 L2: a stashed res answered from another request ==="
+curl -s -m 10 -D "$TMPDIR/l2.hdr" -o "$TMPDIR/l2.body" "$URL/l2wait" &
+L2=$!
+sleep 0.3
+out=$(curl -s -m 10 -H 'Accept-Encoding: gzip' "$URL/l2pub")
+wait $L2 || true
+if [ "$out" = published ] && ! grep -qi '^content-encoding' "$TMPDIR/l2.hdr" \
+   && grep -q zzzz "$TMPDIR/l2.body"; then
+    pass "not compressed for the publisher's Accept-Encoding"
+else
+    fail "not compressed for the publisher's Accept-Encoding" "$out $(cat "$TMPDIR/l2.hdr")"
+fi
+
 echo "=== H2: middleware ctx of requests that never reach a handler ==="
 i=0
 while [ $i -lt 400 ]; do
@@ -302,6 +465,43 @@ case "$out" in
     *) pass "nothing committed" ;;
 esac
 
+kill "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=""
+
+echo "=== audit 8 M9: tui.poll in an HTTP handler ==="
+# tui.poll's continuation was counted as the op holding the request's
+# connection but never suspended it: an empty 200 at once, then res.json
+# into a recycled slot. The terminal UI is refused while serving a request.
+mkdir -p "$TMPDIR/tui"
+cat > "$TMPDIR/tui/app.js" <<'EOF'
+import { app } from "hull:app";
+import { tui } from "hull:tui";
+app.manifest({ tui: true, modules: ["hull/http-server@1", "hull/tui@1?"] });
+app.get("/fast", (_req, res) => res.text("fast"));
+app.get("/k", async (_req, res) => {
+    if (!tui) { res.text("absent"); return; }
+    try { const ev = await tui.poll(500); res.json({ ev }); }
+    catch (e) { res.text(String(e.message)); }
+});
+EOF
+TPORT=$((PORT + 1))
+"$HULL" --no-sandbox -p "$TPORT" "$TMPDIR/tui/app.js" </dev/null >"$TMPDIR/tui.log" 2>&1 &
+SERVER_PID=$!
+up=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if curl -s -m 10 -o /dev/null "http://127.0.0.1:$TPORT/fast"; then up=1; break; fi
+    sleep 0.5
+done
+if [ "$up" = 1 ]; then
+    out=$(curl -s -m 10 "http://127.0.0.1:$TPORT/k")
+    case "$out" in
+        absent) echo "  SKIP: hull/tui is not in this build" ;;
+        *"cannot be used while serving an HTTP request"*) pass "tui.poll is refused in a handler" ;;
+        *) fail "tui.poll is refused in a handler" "$out" ;;
+    esac
+else
+    fail "the tui app starts" "$(tail -5 "$TMPDIR/tui.log")"
+fi
 kill "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=""
 
