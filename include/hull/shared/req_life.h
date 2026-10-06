@@ -27,11 +27,15 @@ typedef struct HlReqLife {
     int live;   /* 1 until hl_req_life_end */
     int refs;   /* the request's own ref + one per object holding it */
     /* What currently holds the request's connection (the JS runtime keeps
-     * these; 0 elsewhere). An async op in attached mode suspends the
-     * connection until it completes - counted until its resume is over; a
-     * multipart read parked for more body sets it reading. The two cannot
-     * share a connection: each overwrites the state the other relies on. */
+     * these; 0 elsewhere). `attached` counts the request's async ops in
+     * flight - each until its resume is over; `held` is 1 while one of them
+     * (or the runtime's hold op) has the connection suspended in Keel, which
+     * only one op at a time can do, so the others run detached and still
+     * belong to the request; a multipart read parked for more body sets it
+     * reading. The two cannot share a connection: each overwrites the state
+     * the other relies on. */
     int attached;
+    int held;
     int parked;
 } HlReqLife;
 
@@ -43,6 +47,7 @@ static inline HlReqLife *hl_req_life_new(void)
     l->live = 1;
     l->refs = 1;
     l->attached = 0;
+    l->held = 0;
     l->parked = 0;
     return l;
 }

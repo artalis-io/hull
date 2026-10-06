@@ -105,10 +105,10 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     js->last_async_cont = NULL;   /* only this run's continuations chain */
     js->active_life = life;
     JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 2, args);
-    js->active_life = NULL;
     JS_FreeValue(ctx, handler);
 
     if (JS_IsException(ret)) {
+        js->active_life = NULL;
         JSValue exc = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exc);
         log_error("[hull:web:sse] handler error: %s", msg ? msg : "unknown");
@@ -117,22 +117,15 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         JS_FreeValue(ctx, exc);
         hl_js_sse_stream_force_close(ctx, stream_obj);
     } else {
-        JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
-        /* Pending with no continuation yet: it awaits microtasks first
-         * (`await null; ...; await hull.sleep()`). Run them - with the life
-         * active, so a Hull call they make takes it - before deciding, as
-         * dispatch does; deciding at once closed such a stream at once. */
-        if (state == JS_PROMISE_PENDING && !js->last_async_cont) {
-            js->active_life = life;
-            hl_js_run_jobs(js);
-            js->active_life = NULL;
-            state = JS_PromiseState(ctx, ret);
-        }
-        if (state == JS_PROMISE_PENDING && js->last_async_cont) {
-            /* Async SSE handler - wire handler_promise on continuation */
-            HlJsRunOnce *run = hl_js_run_attach(js, ret);
-            hl_js_run_yield_check(js, run);
-            hl_js_run_drop(js, run);
+        /* Its code after an `await` of something already settled runs now,
+         * with the request and its life active (`await null; ...; await
+         * hull.sleep()` - deciding at once closed such a stream at once, and
+         * an op that code started was detached and never waited for), then
+         * every continuation is wired into the run (audit 7 H1 / M6). */
+        int st;
+        int waiting = hl_js_entry_park(js, ret, &st);
+        js->active_life = NULL;
+        if (waiting) {
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, js_req);
             JS_FreeValue(ctx, stream_obj);

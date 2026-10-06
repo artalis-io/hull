@@ -71,6 +71,28 @@ static JSValue mjs_own(JSContext *ctx, JSValueConst obj, const char *name)
     return v;
 }
 
+/* A `wasm` limit: a number of at least 1, capped at @p max; anything else
+ * (absent, an array, a string, an object, 0, a negative number, NaN) is
+ * absent - 0, the default. Never converted through ToPrimitive: an array
+ * reached the app-replaceable Array.prototype.valueOf, which picked the
+ * enforced number while the signed JSON showed the array, and `{}` left an
+ * exception pending; -1 was cast to unsigned and enforced as the maximum
+ * (audit 7 c_core L1). */
+static int64_t mjs_wasm_limit(JSContext *ctx, JSValueConst wasm,
+                              const char *name, int64_t max)
+{
+    JSValue v = mjs_own(ctx, wasm, name);
+    int64_t out = 0;
+    if (JS_IsNumber(v)) {
+        double d = 0;
+        JS_ToFloat64(ctx, &d, v);   /* a number: runs no app code */
+        if (d >= 1)                 /* false for NaN */
+            out = d >= (double)max ? max : (int64_t)d;
+    }
+    JS_FreeValue(ctx, v);
+    return out;
+}
+
 /* A plain object (not an array, not null): where the manifest expects an
  * object, an array is treated as absent. */
 static int mjs_is_obj(JSContext *ctx, JSValueConst v)
@@ -248,27 +270,13 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     /* wasm: { heap, stack, gas, timeoutMs, maxInput, maxOutput } */
     JSValue wasm_val = mjs_own(ctx, manifest, "wasm");
     if (mjs_is_obj(ctx, wasm_val)) {
-        JSValue v;
-        int64_t iv;
-        v = mjs_own(ctx, wasm_val, "heap");
-        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_heap = (uint32_t)iv; }
-        JS_FreeValue(ctx, v);
-        v = mjs_own(ctx, wasm_val, "stack");
-        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_stack = (uint32_t)iv; }
-        JS_FreeValue(ctx, v);
-        v = mjs_own(ctx, wasm_val, "gas");
-        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_gas = iv; }
-        JS_FreeValue(ctx, v);
-        v = mjs_own(ctx, wasm_val, "timeoutMs");
-        if (!JS_IsUndefined(v) && JS_ToInt64(ctx, &iv, v) == 0 && iv > 0)
-            out->wasm_timeout_ms = iv > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)iv;
-        JS_FreeValue(ctx, v);
-        v = mjs_own(ctx, wasm_val, "maxInput");
-        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_max_input = (uint32_t)iv; }
-        JS_FreeValue(ctx, v);
-        v = mjs_own(ctx, wasm_val, "maxOutput");
-        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_max_output = (uint32_t)iv; }
-        JS_FreeValue(ctx, v);
+        const int64_t u32 = (int64_t)UINT32_MAX;
+        out->wasm_heap       = (uint32_t)mjs_wasm_limit(ctx, wasm_val, "heap", u32);
+        out->wasm_stack      = (uint32_t)mjs_wasm_limit(ctx, wasm_val, "stack", u32);
+        out->wasm_gas        = mjs_wasm_limit(ctx, wasm_val, "gas", INT64_MAX / 2);
+        out->wasm_timeout_ms = (uint32_t)mjs_wasm_limit(ctx, wasm_val, "timeoutMs", u32);
+        out->wasm_max_input  = (uint32_t)mjs_wasm_limit(ctx, wasm_val, "maxInput", u32);
+        out->wasm_max_output = (uint32_t)mjs_wasm_limit(ctx, wasm_val, "maxOutput", u32);
     }
     JS_FreeValue(ctx, wasm_val);
 

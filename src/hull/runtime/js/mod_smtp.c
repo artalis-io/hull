@@ -272,16 +272,17 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
         result = JS_ThrowInternalError(ctx, "smtp.send: out of memory");
         goto cleanup;
     }
+    KlHttpConn *oconn = hl_js_cont_suspend_conn(cont);   /* NULL: detached */
     actx->cont     = cont;
-    actx->detached = (js->active_conn == NULL);
+    actx->detached = (oconn == NULL);
 
     HlSmtpAsyncReq areq = {
         .server     = js->base.smtp_async,
         .pool       = js->base.thread_pool,
         .net_ctx    = js->base.net_ctx,
         .actx       = actx,
-        .req_handle = js->active_conn,
-        .detached   = (js->active_conn == NULL),
+        .req_handle = oconn,
+        .detached   = (oconn == NULL),
         .inputs     = op,
     };
     HlSmtpAsyncOutcome aout;

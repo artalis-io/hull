@@ -156,31 +156,21 @@ void hl_js_timer_trampoline(void *user_data)
         return;
     }
 
-    JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
-
-    /* Pending with no continuation: the handler awaits only microtasks so far
-     * (`await null`, an already-resolved promise). Run them, with the timer
-     * still active, so a Hull call they reach takes it - as dispatch.c does
-     * for a request. */
-    /* JS_Call above may set last_async_cont (cppcheck cannot see it). */
-    // cppcheck-suppress knownConditionTrueFalse
-    if (state == JS_PROMISE_PENDING && !js->last_async_cont) {
-        hl_js_run_jobs(js);
-        state = JS_PromiseState(ctx, ret);
+    /* An async handler's code after an `await` of something already settled
+     * runs now, with the timer still active, so an op it starts belongs to
+     * this run - left queued, it ran inside the next entry's drain with that
+     * entry's request active (audit 7 M6). Then its continuations are wired
+     * into one run, and the wait is checked after that code ran. */
+    int st;
+    if (hl_js_entry_park(js, ret, &st)) {
+        /* It clears in_flight and reschedules when the handler completes. */
+        JS_FreeValue(ctx, ret);
+        js->active_timer = NULL;
+        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+        return;
     }
 
-    if (state == JS_PROMISE_PENDING) {
-        if (js->last_async_cont) {
-            /* Async handler - wire handler_promise on the continuation; it
-             * clears in_flight and reschedules when the handler completes. */
-            HlJsRunOnce *run = hl_js_run_attach(js, ret);
-            hl_js_run_yield_check(js, run);
-            hl_js_run_drop(js, run);
-            JS_FreeValue(ctx, ret);
-            js->active_timer = NULL;
-            hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
-            return;
-        }
+    if (st == JS_PROMISE_PENDING) {
         /* Waiting on something Hull does not drive: nothing will ever clear
          * in_flight, and the timer used to stop firing for good, silently.
          * (Or over its budget: a tripped run's promise never settles.) */
@@ -192,6 +182,7 @@ void hl_js_timer_trampoline(void *user_data)
         JS_FreeValue(ctx, ret);
         t->in_flight = 0;
         js->active_timer = NULL;
+        js->last_async_cont = NULL;
         hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
         hl_js_timer_reschedule(t);
         return;
@@ -199,12 +190,12 @@ void hl_js_timer_trampoline(void *user_data)
 
     /* Synchronous completion */
     int cancelled = 0;
-    if (state == JS_PROMISE_FULFILLED) {
+    if (st == JS_PROMISE_FULFILLED) {
         JSValue result = JS_PromiseResult(ctx, ret);
         if (JS_IsBool(result) && JS_ToBool(ctx, result) == 0)
             cancelled = 1;
         JS_FreeValue(ctx, result);
-    } else if (state == JS_PROMISE_REJECTED) {
+    } else if (st == JS_PROMISE_REJECTED) {
         JSValue result = JS_PromiseResult(ctx, ret);
         const char *msg = js->budget_tripped ? NULL : JS_ToCString(ctx, result);
         log_error("[hull:timer] %s", msg ? msg : js->budget_tripped
@@ -219,12 +210,13 @@ void hl_js_timer_trampoline(void *user_data)
             cancelled = 1;
     }
 
-    /* Drain microtasks */
+    /* Drain microtasks - with no timer active: the run is over. */
+    js->active_timer = NULL;
     hl_js_run_jobs(js);
+    js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
 
     JS_FreeValue(ctx, ret);
     t->in_flight = 0;
-    js->active_timer = NULL;
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     if (!cancelled)

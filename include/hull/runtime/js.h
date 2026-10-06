@@ -15,6 +15,7 @@
 #include "hull/limits/runtime.h"  /* transitively pulls in core.h */
 #include "hull/runtime.h"
 #include "hull/cap/types.h"
+#include "hull/reqctx.h"          /* HlReqCtxList */
 
 /* Forward declarations */
 typedef struct JSRuntime JSRuntime;
@@ -152,6 +153,13 @@ typedef struct HlJS {
      * a continuation created now takes a reference, and kills it when the
      * handler completes or the continuation is cancelled. */
     struct HlReqLife *active_life;
+
+    /* Every middleware req.ctx stored on a request (reqctx.h), so one whose
+     * request ended without reaching a handler is freed (dispatch.c). */
+    HlReqCtxList    req_ctxs;
+    /* 1 while app.manifest() runs (mod_app.c): a nested call - from a
+     * toJSON, a getter, a Proxy trap its argument runs - is refused. */
+    int             manifest_busy;
 
     /* UDF lifecycle: 1 while JS runtime is valid, 0 before JS_FreeRuntime.
      * UDF destroy callbacks check this before calling JS_FreeValue. */

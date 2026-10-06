@@ -75,8 +75,8 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
         } else if (JS_IsNumber(val)) {
             double d;
             JS_ToFloat64(ctx, &d, val);
-            if (d == (double)(int64_t)d && d >= -9007199254740992.0 &&
-                d <= 9007199254740992.0) {
+            if (d >= -9007199254740992.0 && d <= 9007199254740992.0 &&  /* range first: casting NaN / out-of-range is UB */
+                d == (double)(int64_t)d) {
                 kvs[count].value.type = HL_TYPE_INT;
                 kvs[count].value.i = (int64_t)d;
             } else {
@@ -295,7 +295,7 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_js_worker_dispatch_op_free_all;
     actx->op.on_cancel = hl_js_worker_dispatch_cancel;
-    actx->detached = (js->active_conn == NULL);
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
 
     op->async_ctx = actx;
     op->cancelled = 0;

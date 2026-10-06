@@ -43,10 +43,11 @@ typedef struct HlJsSession HlJsSession;
  *
  * `max_instructions` note: QuickJS invokes the interrupt handler once per
  * JS_INTERRUPT_COUNTER_INIT (= 10000) interpreter poll-points (loop back-edges and calls),
- * NOT once per bytecode instruction. So `max_instructions` counts interrupt-handler
- * invocations -- a COARSE budget of roughly 10000 poll-points each, not literal
- * instructions -- and the interrupt error QuickJS raises is uncatchable, so a runaway
- * tool cannot swallow it. */
+ * NOT once per bytecode instruction, so each invocation is charged 10000: the budget
+ * counts poll-points (granular to 10000), as the app runtime's limit does. The
+ * interrupt error QuickJS raises is uncatchable, so a runaway tool cannot swallow it.
+ * The default (1e9) is about a minute of tooling on a Windows/cosmo -O0 build, and
+ * leaves a 1 MB source file well inside it. */
 typedef struct {
     size_t  max_heap_bytes;    /* QuickJS heap limit (JS_SetMemoryLimit) -> js.limit.heap */
     size_t  max_stack_bytes;   /* QuickJS stack limit (JS_SetMaxStackSize) -> js.limit.stack */
@@ -58,7 +59,7 @@ typedef struct {
 #define HL_JS_SESSION_LIMITS_DEFAULT {                 \
     .max_heap_bytes   = (size_t)128 * 1024 * 1024,     \
     .max_stack_bytes  = (size_t)1 * 1024 * 1024,       \
-    .max_instructions = (int64_t)150 * 1000 * 1000,    \
+    .max_instructions = (int64_t)1000 * 1000 * 1000,   \
     .max_source_bytes = (size_t)4 * 1024 * 1024,       \
     .max_result_bytes = (size_t)16 * 1024 * 1024,      \
 }

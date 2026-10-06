@@ -17,6 +17,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 /* tiny substring helper for the JSON result assertions (the result is small, flat JSON) */
 static int has(const char *hay, const char *needle) { return hay && strstr(hay, needle) != NULL; }
@@ -269,13 +270,33 @@ UTEST(js_session, limit_source_size)
 UTEST(js_session, limit_instructions)
 {
     HlJsSessionLimits lim = HL_JS_SESSION_LIMITS_DEFAULT;
-    lim.max_instructions = 50;   /* 50 interrupt polls */
+    lim.max_instructions = 50;   /* less than one interrupt poll */
     HlJsSession *s = hl_js_session_create(&lim);
     ASSERT_TRUE(s != NULL);
     char *out = NULL; size_t out_len = 0;
     int rc = analyze(s, "spin", (const uint8_t *)"x", 1, "a.js", &out, &out_len);
     ASSERT_EQ(rc, -1);
     EXPECT_TRUE(has(out, "\"code\":\"js.limit.instructions\""));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
+/* Each interrupt poll is charged the 10000 steps it stands for (audit 7 M5):
+ * counted one per poll, a budget of 2M let a spin run 2e10 steps - minutes -
+ * where it now stops after 2M. */
+UTEST(js_session, limit_instructions_counts_steps_not_polls)
+{
+    HlJsSessionLimits lim = HL_JS_SESSION_LIMITS_DEFAULT;
+    lim.max_instructions = 2 * 1000 * 1000;
+    HlJsSession *s = hl_js_session_create(&lim);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    time_t t0 = time(NULL);
+    int rc = analyze(s, "spin", (const uint8_t *)"x", 1, "a.js", &out, &out_len);
+    time_t t1 = time(NULL);
+    ASSERT_EQ(rc, -1);
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.instructions\""));
+    EXPECT_LT((double)(t1 - t0), 20.0);
     free(out);
     hl_js_session_destroy(s);
 }

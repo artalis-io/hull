@@ -183,6 +183,12 @@ typedef struct {
      * without being continued - continued, its remaining statements would
      * autocommit and its COMMIT "succeed" (audit 6 M2). */
     int txn_held;
+    /* A request run waiting only on ops that run detached (the one op that
+     * had the connection suspended has resumed): the hold op (HlAsyncCtx *)
+     * that keeps the connection suspended until the run completes, or NULL.
+     * Without it Keel sent the response as it stood - an empty 200 - and the
+     * handler's later res.json wrote into a recycled connection slot. */
+    void *hold;
 } HlJsRunOnce;
 
 typedef struct HlJsRunLink {
@@ -223,6 +229,29 @@ HlJsRunOnce *hl_js_run_attach(HlJS *js, JSValue promise);
  * when the runtime's budget is now tripped. */
 void hl_js_run_drop(HlJS *js, HlJsRunOnce *run);
 
+/* An entry point's handler returned @p ret (not an exception). Run the jobs
+ * it queued with the entry still active - the caller keeps js->active_* (the
+ * request, its life, the timer, the teardown hook) set - so its own code
+ * after an `await` runs as part of it, and an op that code starts belongs to
+ * it; left for a later drain they ran with no entry active (a detached op the
+ * run never waited for: an early, empty response, then res.json into a
+ * recycled connection slot) or inside another entry's. Then, when the
+ * handler is still pending with continuations made, wire them all into one
+ * run and check the wait (hl_js_run_yield_check) - after the drain, which may
+ * open the transaction. Returns 1 when the run now waits on its
+ * continuations, else 0; *state is the handler's promise state after the
+ * drain (-1 when @p ret is not a promise, in which case nothing is drained).
+ * Continuations made by a handler that settled are left in
+ * js->last_async_cont for the caller (they belong to no run). */
+int hl_js_entry_park(HlJS *js, JSValue ret, int *state);
+
+/* The connection an op made by @p cont must suspend (attached mode), or NULL
+ * when it runs detached: outside a request, or while another op of the same
+ * request already has the connection suspended - then the op still belongs to
+ * the request's run (it completes it if it resumes last). @p cont is an
+ * HlJsAsyncCont (hl_js_async_cont_create). */
+KlHttpConn *hl_js_cont_suspend_conn(HlAsyncCont *cont);
+
 /* ── Instruction budget (runtime.c) ─────────────────────────────────── */
 
 /* (hl_js_budget_arm, which re-arms it at each entry point, is in js.h.) */
@@ -243,11 +272,12 @@ JSValue hl_js_budget_throw(JSContext *ctx);
  * in the error. */
 int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what);
 
-/* A resume whose handler has settled while an op it started (and did not
- * await) still holds the request's connection (life->attached): wire the
- * continuations made in this resume (js->last_async_cont) into the run, so
- * the holder completes it - the response is never sent over a live
- * suspension. 1 = deferred (treat the run as still pending), 0 = not. */
+/* A resume whose handler has settled while an op of its run (one it did not
+ * await) still has the request's connection suspended (life->held, and not
+ * by the run's hold op): wire the continuations made in this resume
+ * (js->last_async_cont) into the run, so the holder completes it - the
+ * response is never sent over a live suspension. 1 = deferred (treat the run
+ * as still pending), 0 = not. */
 int hl_js_run_defer_to_holder(HlJS *js, HlJsRunLink *link, struct HlReqLife *life);
 
 /* A run is about to wait (its handler returned / re-yielded pending with a
@@ -279,6 +309,14 @@ void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
                                       struct HlReqLife *life, KlHttpConn *conn,
                                       KlHttpRequest *req);
 
+/* db.batch's synchronous-fn checks (mod_db.c), shared with the worker VM's
+ * batch (worker_db.c). hl_js_fn_is_async: 1 when @p fn is an async (or
+ * async generator) function. hl_js_is_thenable: 1 when @p v is a promise or
+ * has a callable `then` (reading it can run a getter). Both 0 when not, -1
+ * on an exception. */
+int hl_js_fn_is_async(JSContext *ctx, JSValueConst fn);
+int hl_js_is_thenable(JSContext *ctx, JSValueConst v);
+
 /* Make the four code-compiling constructors unreachable from script. Deleting
  * the `Function` global is not enough: (() => 0).constructor is Function, and
  * the async / generator / async-generator prototypes reach their own
@@ -293,7 +331,8 @@ int hl_js_poison_code_constructors(JSContext *ctx);
 int hl_js_define_manifest_global(JSContext *ctx);
 
 /* Free req->ctx (a middleware's req.ctx, or a test dispatch's JSON) and
- * clear it (dispatch.c). Idempotent. */
+ * clear it, and any ctx an earlier request on the same connection slot left
+ * tracked (dispatch.c). Idempotent. */
 void hl_js_req_ctx_free(HlJS *js, KlHttpRequest *req);
 
 #endif /* HL_RUNTIME_JS_INTERNAL_H */

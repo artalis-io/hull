@@ -208,8 +208,8 @@ static int capture_result(JSContext *ctx, JSValue val,
         double d;
         JS_ToFloat64(ctx, &d, val);
         /* Check if it's an integer */
-        if (d == (double)(int64_t)d && d >= -9007199254740992.0 &&
-            d <= 9007199254740992.0) {
+        if (d >= -9007199254740992.0 && d <= 9007199254740992.0 &&  /* range first: casting NaN / out-of-range is UB */
+            d == (double)(int64_t)d) {
             op->result_kind = 2;
             op->result_int = (int64_t)d;
         } else {
@@ -290,8 +290,8 @@ static int capture_result(JSContext *ctx, JSValue val,
             } else if (JS_IsNumber(pval)) {
                 double dv;
                 JS_ToFloat64(ctx, &dv, pval);
-                if (dv == (double)(int64_t)dv && dv >= -9007199254740992.0 &&
-                    dv <= 9007199254740992.0) {
+                if (dv >= -9007199254740992.0 && dv <= 9007199254740992.0 &&  /* range first: casting NaN / out-of-range is UB */
+                    dv == (double)(int64_t)dv) {
                     op->result_kvs[idx].value.type = HL_TYPE_INT;
                     op->result_kvs[idx].value.i = (int64_t)dv;
                 } else {

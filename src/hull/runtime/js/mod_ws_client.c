@@ -212,6 +212,14 @@ static void js_ws_client_call(HlJSWsClientUD *ud, JSValueConst fn,
                   msg ? msg : tripped ? "instruction limit exceeded" : "unknown");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, exc);
+    } else if (js) {
+        /* An async callback is a run like any other entry's: its queued
+         * code runs now, its continuations are wired to its promise, and
+         * its wait is checked - a transaction open across it is rolled back
+         * and the callback failed at its next resume, not continued in
+         * autocommit (audit 7 M3). */
+        int st;
+        (void)hl_js_entry_park(js, ret, &st);
     }
     JS_FreeValue(ctx, ret);
     if (js) {

@@ -1379,6 +1379,18 @@ void hl_js_free(HlJS *js)
         free(js->manifest);
         js->manifest = NULL;
     }
+    /* Middleware ctxs whose requests never reached a handler (dispatch.c
+     * frees them as their connection slots are reused). */
+    while (js->req_ctxs.head) {
+        HlReqCtx *rc = js->req_ctxs.head;
+        hl_reqctx_untrack(&js->req_ctxs, rc);
+        if (rc->kind == HL_REQCTX_JS_VAL && js->ctx) {
+            JSValue v;
+            memcpy(&v, rc->js_val_bytes, sizeof v);
+            JS_FreeValue(js->ctx, v);
+        }
+        hl_alloc_free(js->base.alloc, rc, sizeof(HlReqCtx));
+    }
 
     if (js->ctx) {
         /* Free test state opaque data before deleting globals.
@@ -2004,11 +2016,11 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     JSValue call_argv[1] = { ctxobj };
     js->active_cli_main = 1;   /* the ops main makes are main's */
     JSValue ret = JS_Call(ctx, main_fn, JS_UNDEFINED, 1, call_argv);
-    js->active_cli_main = 0;
     JS_FreeValue(ctx, ctxobj);
-    js->last_async_cont = NULL;   /* main's ops are not wired to a promise */
 
     if (JS_IsException(ret)) {
+        js->active_cli_main = 0;
+        js->last_async_cont = NULL;
         hl_js_dump_error(js);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
@@ -2016,9 +2028,15 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         return -1;
     }
 
-    /* Drain microtasks - resolves any synchronously-resolvable Promise. */
-    js->active_cli_main = 1;
-    hl_js_run_jobs(js);
+    /* Drain microtasks - resolves any synchronously-resolvable Promise -
+     * then, when main waits, wire its continuations into one run and check
+     * the wait: a transaction open across it is rolled back and main fails
+     * at its next resume (exit 1), instead of going on in autocommit with
+     * its COMMIT "succeeding" (audit 7 M3). */
+    int park_st;
+    (void)hl_js_entry_park(js, ret, &park_st);
+    if (park_st != JS_PROMISE_PENDING)
+        hl_js_run_jobs(js);   /* a sync main's queued jobs */
     js->active_cli_main = 0;
     js->last_async_cont = NULL;
 

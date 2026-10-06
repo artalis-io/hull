@@ -88,8 +88,8 @@ static int worker_js_to_hl_values(JSContext *ctx, JSValueConst arr,
         } else if (JS_IsNumber(elem)) {
             double d = 0;
             JS_ToFloat64(ctx, &d, elem);
-            if (d == (double)(int64_t)d && d >= -9007199254740992.0 &&
-                d <= 9007199254740992.0) {
+            if (d >= -9007199254740992.0 && d <= 9007199254740992.0 &&  /* range first: casting NaN / out-of-range is UB */
+                d == (double)(int64_t)d) {
                 params[i].type = HL_TYPE_INT;
                 params[i].i = (int64_t)d;
             } else {
@@ -284,6 +284,18 @@ static JSValue worker_js_db_batch(JSContext *ctx, JSValueConst this_val,
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
         return JS_ThrowTypeError(ctx, "db.batch requires a function");
 
+    /* As on the event loop (mod_db.c, audit 7 c_db L2): an async fn is
+     * refused before BEGIN, and a promise returned is rolled back - here the
+     * COMMIT ran at once and the worker's drain ran the rest of fn in
+     * autocommit, its earlier writes already committed if it then threw. */
+    int is_async = hl_js_fn_is_async(ctx, argv[0]);
+    if (is_async < 0) return JS_EXCEPTION;
+    if (is_async)
+        return JS_ThrowTypeError(ctx,
+            "db.batch: fn must be synchronous - an async function's "
+            "statements after its first await would run outside the "
+            "transaction");
+
     if (hl_db_begin(h) != 0)
         return JS_ThrowInternalError(ctx, "BEGIN failed: %s", hl_db_errmsg(h));
 
@@ -292,6 +304,16 @@ static JSValue worker_js_db_batch(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(result)) {
         hl_db_rollback(h);
         return JS_EXCEPTION;
+    }
+    int thenable = hl_js_is_thenable(ctx, result);
+    if (thenable != 0) {
+        hl_db_rollback(h);
+        JS_FreeValue(ctx, result);
+        if (thenable < 0) return JS_EXCEPTION;
+        return JS_ThrowTypeError(ctx,
+            "db.batch: fn must be synchronous - it returned a Promise, so its "
+            "statements after the first await would run outside the "
+            "transaction (the batch was rolled back)");
     }
 
     if (hl_db_commit(h) != 0) {
