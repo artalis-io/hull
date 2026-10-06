@@ -42,6 +42,7 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -95,6 +96,12 @@ typedef struct {
      * tear down the iter's meta-copies on spend - that happens when the
      * NEXT PART_BEGIN snapshot overwrites them, or on iter GC. */
     int       spent;
+    /* part:read()'s accumulator, kept across parks: allocated through the
+     * VM's allocator (so it counts against the Lua memory limit), grown
+     * geometrically, freed once the value is pushed or by __gc. */
+    char     *acc;
+    size_t    acc_len;
+    size_t    acc_cap;
 } HlMpPart;
 
 /* Chunks-iterator userdata. Holds a borrowed pointer to the parent
@@ -289,34 +296,66 @@ static HlMpPart *check_part(lua_State *L, int idx)
 static int mp_part_read(lua_State *L);
 static int mp_part_read_continue(lua_State *L, int status, lua_KContext ctx);
 
+static void mp_part_acc_free(lua_State *L, HlMpPart *p)
+{
+    if (p->acc) {
+        void *ud;
+        lua_Alloc f = lua_getallocf(L, &ud);
+        f(ud, p->acc, p->acc_cap, 0);
+    }
+    p->acc = NULL;
+    p->acc_len = 0;
+    p->acc_cap = 0;
+}
+
+/* Append to the accumulator. Geometric growth, so a field read across many
+ * parks is copied O(n) times in all: it used to be re-copied whole into a
+ * new Lua string at every park, O(n^2) for a field sent slowly. The bytes
+ * are charged to the instruction budget (one unit per 64). */
+static void mp_part_acc_add(lua_State *L, HlMpPart *p, const char *data,
+                            size_t n)
+{
+    if (n > p->acc_cap - p->acc_len) {
+        if (n > SIZE_MAX / 2 - p->acc_len)
+            luaL_error(L, "req:multipart(): part too large");
+        size_t need = p->acc_len + n;
+        size_t cap = p->acc_cap ? p->acc_cap : 4096;
+        while (cap < need) cap *= 2;
+        void *ud;
+        lua_Alloc f = lua_getallocf(L, &ud);
+        char *nb = (char *)f(ud, p->acc, p->acc ? p->acc_cap : 0, cap);
+        if (!nb)
+            luaL_error(L, "req:multipart(): out of memory reading a part");
+        p->acc = nb;
+        p->acc_cap = cap;
+    }
+    memcpy(p->acc + p->acc_len, data, n);
+    p->acc_len += n;
+    lua_hlcharge(L, 0, n);
+}
+
+/* Push the accumulated value and release the accumulator (a failed push
+ * leaves it to __gc). */
+static int mp_part_acc_push(lua_State *L, HlMpPart *p)
+{
+    lua_pushlstring(L, p->acc ? p->acc : "", p->acc_len);
+    mp_part_acc_free(L, p);
+    return 1;
+}
+
 /* Shared drive loop for read(). Stack contract:
- *   in : Part at index 1, plus (only on a continuation) the accumulator at
- *        index 2: a Lua string holding the bytes read before the park.
+ *   in : Part at index 1 (a continuation may find resume values above it).
  *   out: pushes one result (the assembled Lua string) and returns 1, OR
- *        parks + yields with exactly [Part, accumulator] on the stack
- *        (continuation re-enters this function).
- *
- * The accumulator is read BEFORE luaL_buffinit, which pushes a placeholder
- * of its own: testing the top after it saw the placeholder, so each park
- * dropped the bytes so far and left one more value on the stack. */
-static int mp_part_read_pump(lua_State *L, int resumed)
+ *        parks + yields with exactly [Part] on the stack (the continuation
+ *        re-enters this function). The bytes read so far stay in the
+ *        Part's accumulator across the park. */
+static int mp_part_read_pump(lua_State *L)
 {
     HlMpPart *p = check_part(L, 1);
     HlMpIter *it = p->iter;
 
     mp_check_usable(L, it);
-
-    int has_acc = resumed && lua_type(L, 2) == LUA_TSTRING;
-    lua_settop(L, has_acc ? 2 : 1);
-    luaL_checkstack(L, 4, "req:multipart()");
-
-    luaL_Buffer b;
-    luaL_buffinit(L, &b);
-    if (has_acc) {
-        size_t plen = 0;
-        const char *p_bytes = lua_tolstring(L, 2, &plen);
-        if (p_bytes && plen > 0) luaL_addlstring(&b, p_bytes, plen);
-    }
+    lua_settop(L, 1);
 
     for (;;) {
         if (it->errored)
@@ -324,8 +363,7 @@ static int mp_part_read_pump(lua_State *L, int resumed)
 
         if (p->spent || !it->in_part) {
             /* Already drained for this part (e.g. called twice). */
-            luaL_pushresult(&b);
-            return 1;
+            return mp_part_acc_push(L, p);
         }
 
         KlHttpMultipartPartMeta meta;
@@ -336,21 +374,14 @@ static int mp_part_read_pump(lua_State *L, int resumed)
         switch (ev) {
         case KL_HTTP_MP_EVT_PART_DATA:
             if (data && data_len > 0)
-                luaL_addlstring(&b, data, data_len);
+                mp_part_acc_add(L, p, data, data_len);
             continue;
         case KL_HTTP_MP_EVT_PART_END:
             it->in_part = 0;
             p->spent = 1;
-            luaL_pushresult(&b);
-            return 1;
+            return mp_part_acc_push(L, p);
         case KL_HTTP_MP_EVT_NEED_DATA:
-            /* Stash the partial as a Lua string at the stack top so the
-             * continuation can re-prepend it. luaL_Buffer is C-stack
-             * scoped and would lose its contents across the yield. The
-             * previous accumulator (index 2, below the buffer) goes once
-             * the new one is pushed, so a park leaves [Part, acc]. */
-            luaL_pushresult(&b);
-            if (has_acc) lua_remove(L, 2);
+            /* The bytes so far stay in p->acc: a park leaves [Part]. */
             return mp_park_and_yield(L, it, mp_part_read_continue, 0);
         case KL_HTTP_MP_EVT_DONE:
             /* DONE mid-part is unexpected (the parser should emit
@@ -358,8 +389,7 @@ static int mp_part_read_pump(lua_State *L, int resumed)
             it->in_part = 0;
             it->done = 1;
             p->spent = 1;
-            luaL_pushresult(&b);
-            return 1;
+            return mp_part_acc_push(L, p);
         case KL_HTTP_MP_EVT_ERROR:
             it->errored = 1;
             return luaL_error(L, "req:multipart(): parser error (code %d)",
@@ -376,13 +406,19 @@ static int mp_part_read_pump(lua_State *L, int resumed)
 
 static int mp_part_read(lua_State *L)
 {
-    return mp_part_read_pump(L, 0);
+    return mp_part_read_pump(L);
 }
 
 static int mp_part_read_continue(lua_State *L, int status, lua_KContext ctx)
 {
     (void)status; (void)ctx;
-    return mp_part_read_pump(L, 1);
+    return mp_part_read_pump(L);
+}
+
+static int mp_part_gc(lua_State *L)
+{
+    mp_part_acc_free(L, (HlMpPart *)luaL_checkudata(L, 1, HL_MP_PART_MT));
+    return 0;
 }
 
 /* part:chunks([min_bytes]) - returns a chunks iterator. min_bytes is
@@ -539,8 +575,8 @@ static int mp_iter_drive(lua_State *L)
             it->in_part = 1;
 
             HlMpPart *p = (HlMpPart *)lua_newuserdatauv(L, sizeof(*p), 1);
+            memset(p, 0, sizeof(*p));
             p->iter = it;
-            p->spent = 0;
             luaL_setmetatable(L, HL_MP_PART_MT);
             /* Anchor iter against GC for the Part's lifetime. */
             lua_pushvalue(L, lua_upvalueindex(1));
@@ -676,10 +712,17 @@ void hl_lua_request_register(lua_State *L)
     lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
 
-    /* HlMpPart - __index dispatches name/filename/content_type/read/chunks. */
+    /* HlMpPart - __index dispatches name/filename/content_type/read/chunks;
+     * __gc frees a read() accumulator its request left behind (an error,
+     * or a connection that went away mid-part). Locked, so app code
+     * cannot take the __gc away. */
     luaL_newmetatable(L, HL_MP_PART_MT);
     lua_pushcfunction(L, mp_part_index);
     lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, mp_part_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
 
     /* HlMpChunks - opaque, no methods. (The closure returned by

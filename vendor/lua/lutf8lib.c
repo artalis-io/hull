@@ -140,6 +140,7 @@ static int codepoint (lua_State *L) {
     return luaL_error(L, "string slice too long");
   n = (int)(pose -  posi) + 1;  /* upper bound for number of returns */
   luaL_checkstack(L, n, "string slice too long");
+  lua_hlwork(L, (size_t)n, 0);  /* HULL PATCH 0004: a decode step per byte */
   n = 0;  /* count the number of returns */
   se = s + pose;  /* string end */
   for (s += posi - 1; s < se;) {
@@ -191,9 +192,11 @@ static int byteoffset (lua_State *L) {
   const char *s = luaL_checklstring(L, 1, &len);
   lua_Integer n  = luaL_checkinteger(L, 2);
   lua_Integer posi = (n >= 0) ? 1 : len + 1;
+  lua_Integer posi0;  /* HULL PATCH 0004 */
   posi = u_posrelat(luaL_optinteger(L, 3, posi), len);
   luaL_argcheck(L, 1 <= posi && --posi <= (lua_Integer)len, 3,
                    "position out of bounds");
+  posi0 = posi;
   if (n == 0) {
     /* find beginning of current byte sequence */
     while (posi > 0 && iscontp(s + posi)) posi--;
@@ -219,6 +222,8 @@ static int byteoffset (lua_State *L) {
        }
      }
   }
+  /* HULL PATCH 0004 (docs/lua_patches.md): a step per byte stepped over */
+  lua_hlcharge(L, (size_t)(posi > posi0 ? posi - posi0 : posi0 - posi), 0);
   if (n == 0)  /* did it find given character? */
     lua_pushinteger(L, posi + 1);
   else  /* no such character */
@@ -232,7 +237,9 @@ static int iter_aux (lua_State *L, int strict) {
   const char *s = luaL_checklstring(L, 1, &len);
   lua_Unsigned n = (lua_Unsigned)lua_tointeger(L, 2);
   if (n < len) {
+    lua_Unsigned n0 = n;
     while (iscontp(s + n)) n++;  /* go to next character */
+    lua_hlcharge(L, (size_t)(n - n0), 0);  /* HULL PATCH 0004: bytes skipped */
   }
   if (n >= len)  /* (also handles original 'n' being negative) */
     return 0;  /* no more codepoints */

@@ -101,6 +101,7 @@ static int luaB_tonumber (lua_State *L) {
     luaL_checktype(L, 1, LUA_TSTRING);  /* no numbers as strings */
     s = lua_tolstring(L, 1, &l);
     luaL_argcheck(L, 2 <= base && base <= 36, 2, "base out of range");
+    lua_hlcharge(L, l, 0);  /* HULL PATCH 0004: a step per byte scanned */
     if (b_str2int(s, (int)base, &n) == s + l) {
       lua_pushinteger(L, n);
       return 1;
@@ -204,16 +205,6 @@ static int luaB_collectgarbage (lua_State *L) {
     LUA_GCCOUNT, LUA_GCSTEP, LUA_GCSETPAUSE, LUA_GCSETSTEPMUL,
     LUA_GCISRUNNING, LUA_GCGEN, LUA_GCINC};
   int o = optsnum[luaL_checkoption(L, 1, "collect", opts)];
-  if (o == LUA_GCCOLLECT || o == LUA_GCSTEP) {
-    /* HULL PATCH 0004 (docs/lua_patches.md): a collection traverses the
-    ** heap within one instruction; charge it (a step, its size in KB) */
-    size_t heap = (size_t)lua_gc(L, LUA_GCCOUNT);
-    if (o == LUA_GCSTEP) {
-      lua_Integer kb = luaL_optinteger(L, 2, 0);
-      if (kb >= 0 && (lua_Unsigned)kb < (lua_Unsigned)heap) heap = (size_t)kb;
-    }
-    lua_hlcharge(L, 0, heap * 1024);
-  }
   switch (o) {
     case LUA_GCCOUNT: {
       int k = lua_gc(L, o);

@@ -386,11 +386,41 @@ void luaE_hlbytes (lua_State *L, size_t n) {
 }
 
 
+/*
+** HULL PATCH 0004 (docs/lua_patches.md): move what thread 'L' ran but
+** has not reported to its count hook - the part of the current hook
+** period it used, the work past it, the bytes below a unit - onto 'to',
+** the thread that resumed it, and start 'L' on a full period again. The
+** hook only reports a whole period, so a coroutine that ran less than one
+** and then returned or yielded was never charged: a loop of 9900-
+** instruction 'coroutine.wrap' bodies ran ~400x past the limit. Only
+** when 'to' is itself inside a call (code running on it resumed 'L'): a
+** host that resumes a thread from its event loop, with 'to' idle at its
+** base level, starts a run of its own and re-arms the hook for it, and
+** the charge would sit on the idle thread for whatever ran on it next.
+*/
+void luaE_hltransfer (lua_State *L, lua_State *to) {
+  size_t ran;
+  if (to == NULL || to->ci == &to->base_ci ||
+      !(L->hookmask & LUA_MASKCOUNT) || L->hookcount <= 0)
+    return;
+  ran = (L->hookcount < L->basehookcount)
+      ? cast_sizet(L->basehookcount - L->hookcount) : 0;
+  luaE_hlcharge(to, ran);
+  luaE_hlcharge(to, L->hlowed);
+  luaE_hlbytes(to, L->hlbytes);
+  resethookcount(L);
+  L->hlowed = 0;
+  L->hlbytes = 0;
+}
+
+
 LUA_API int lua_closethread (lua_State *L, lua_State *from) {
   int status;
   lua_lock(L);
   L->nCcalls = (from) ? getCcalls(from) : 0;
   status = luaE_resetthread(L, L->status);
+  luaE_hltransfer(L, from);  /* HULL PATCH 0004: its '__close' handlers */
   lua_unlock(L);
   return status;
 }
@@ -444,6 +474,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud) {
   g->totalbytes = sizeof(LG);
   g->GCdebt = 0;
   g->lastatomic = 0;
+  g->hlgcwork = 0;  /* HULL PATCH 0004 */
   setivalue(&g->nilvalue, 0);  /* to signal that state is not yet built */
   setgcparam(g->gcpause, LUAI_GCPAUSE);
   setgcparam(g->gcstepmul, LUAI_GCMUL);

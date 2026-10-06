@@ -106,6 +106,29 @@
 
 static void reallymarkobject (global_State *g, GCObject *o);
 static lu_mem atomic (lua_State *L);
+
+
+/*
+** HULL PATCH 0004 (docs/lua_patches.md): the collector's work is charged
+** to the count hook of the thread that ran it, one unit per unit of
+** 'work' (slots marked, objects swept or visited). A collection runs
+** inside one instruction - an allocation, an emergency collection after
+** a failed one, a 'collectgarbage' mode switch - so the app could buy a
+** full traversal of a large heap for a few instructions:
+** 'pcall(function() return a .. a end)' that fails for want of memory
+** ran an emergency full collection, and 'setpause' / 'setstepmul' raise
+** the work done per byte allocated. The loops add to 'g->hlgcwork';
+** each entry point charges it once at the end (allocation-free).
+*/
+#define hl_gcwork(g,n)	((g)->hlgcwork += cast(lu_mem, (n)))
+
+static void hl_gccharge (lua_State *L) {
+  global_State *g = G(L);
+  if (g->hlgcwork > 0) {
+    luaE_hlcharge(L, cast_sizet(g->hlgcwork));
+    g->hlgcwork = 0;
+  }
+}
 static void entersweep (lua_State *L);
 
 
@@ -700,8 +723,9 @@ static void convergeephemerons (global_State *g) {
       Table *h = gco2t(w);
       next = h->gclist;  /* list is rebuilt during loop */
       nw2black(h);  /* out of the list (for now) */
+      hl_gcwork(g, 1 + luaH_realasize(h) + sizenode(h));  /* HULL PATCH 0004 */
       if (traverseephemeron(g, h, dir)) {  /* marked some value? */
-        propagateall(g);  /* propagate changes */
+        hl_gcwork(g, propagateall(g));  /* propagate changes (HULL PATCH 0004) */
         changed = 1;  /* will have to revisit all ephemeron tables */
       }
     }
@@ -727,6 +751,7 @@ static void clearbykeys (global_State *g, GCObject *l) {
     Table *h = gco2t(l);
     Node *limit = gnodelast(h);
     Node *n;
+    hl_gcwork(g, sizenode(h));  /* HULL PATCH 0004 */
     for (n = gnode(h, 0); n < limit; n++) {
       if (iscleared(g, gckeyN(n)))  /* unmarked key? */
         setempty(gval(n));  /* remove entry */
@@ -747,6 +772,7 @@ static void clearbyvalues (global_State *g, GCObject *l, GCObject *f) {
     Node *n, *limit = gnodelast(h);
     unsigned int i;
     unsigned int asize = luaH_realasize(h);
+    hl_gcwork(g, asize + sizenode(h));  /* HULL PATCH 0004 */
     for (i = 0; i < asize; i++) {
       TValue *o = &h->array[i];
       if (iscleared(g, gcvalueN(o)))  /* value was collected? */
@@ -1089,6 +1115,7 @@ static void sweep2old (lua_State *L, GCObject **p) {
   GCObject *curr;
   global_State *g = G(L);
   while ((curr = *p) != NULL) {
+    hl_gcwork(g, 1);  /* HULL PATCH 0004 */
     if (iswhite(curr)) {  /* is 'curr' dead? */
       lua_assert(isdead(g, curr));
       *p = curr->next;  /* remove 'curr' from list */
@@ -1135,6 +1162,7 @@ static GCObject **sweepgen (lua_State *L, global_State *g, GCObject **p,
   int white = luaC_white(g);
   GCObject *curr;
   while ((curr = *p) != limit) {
+    hl_gcwork(g, 1);  /* HULL PATCH 0004 */
     if (iswhite(curr)) {  /* is 'curr' dead? */
       lua_assert(!isold(curr) && isdead(g, curr));
       *p = curr->next;  /* remove 'curr' from list */
@@ -1164,8 +1192,10 @@ static GCObject **sweepgen (lua_State *L, global_State *g, GCObject **p,
 */
 static void whitelist (global_State *g, GCObject *p) {
   int white = luaC_white(g);
-  for (; p != NULL; p = p->next)
+  for (; p != NULL; p = p->next) {
+    hl_gcwork(g, 1);  /* HULL PATCH 0004 */
     p->marked = cast_byte((p->marked & ~maskgcbits) | white);
+  }
 }
 
 
@@ -1230,6 +1260,7 @@ static void correctgraylists (global_State *g) {
 static void markold (global_State *g, GCObject *from, GCObject *to) {
   GCObject *p;
   for (p = from; p != to; p = p->next) {
+    hl_gcwork(g, 1);  /* HULL PATCH 0004 */
     if (getage(p) == G_OLD1) {
       lua_assert(!iswhite(p));
       changeage(p, G_OLD1, G_OLD);  /* now they are old */
@@ -1375,6 +1406,7 @@ void luaC_changemode (lua_State *L, int newmode) {
       enterinc(g);  /* entering incremental mode */
   }
   g->lastatomic = 0;
+  hl_gccharge(L);  /* HULL PATCH 0004 */
 }
 
 
@@ -1570,6 +1602,7 @@ static lu_mem atomic (lua_State *L) {
   luaS_clearcache(g);
   g->currentwhite = cast_byte(otherwhite(g));  /* flip current white */
   lua_assert(g->gray == NULL);
+  hl_gcwork(g, work);  /* HULL PATCH 0004 */
   return work;  /* estimate of slots marked by 'atomic' */
 }
 
@@ -1595,6 +1628,7 @@ static lu_mem singlestep (lua_State *L) {
   global_State *g = G(L);
   lu_mem work;
   lua_assert(!g->gcstopem);  /* collector is not reentrant */
+  int hlatomic = (g->gcstate == GCSenteratomic);  /* HULL PATCH 0004 */
   g->gcstopem = 1;  /* no emergency collections while collecting */
   switch (g->gcstate) {
     case GCSpause: {
@@ -1650,6 +1684,8 @@ static lu_mem singlestep (lua_State *L) {
     default: lua_assert(0); return 0;
   }
   g->gcstopem = 0;
+  if (!hlatomic)  /* HULL PATCH 0004 ('atomic' counts its own) */
+    hl_gcwork(g, work);
   return work;
 }
 
@@ -1706,6 +1742,7 @@ void luaC_step (lua_State *L) {
     else
       incstep(L, g);
   }
+  hl_gccharge(L);  /* HULL PATCH 0004 */
 }
 
 
@@ -1745,6 +1782,7 @@ void luaC_fullgc (lua_State *L, int isemergency) {
   else
     fullgen(L, g);
   g->gcemergency = 0;
+  hl_gccharge(L);  /* HULL PATCH 0004 */
 }
 
 /* }====================================================== */

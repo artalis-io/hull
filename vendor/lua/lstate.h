@@ -258,6 +258,7 @@ typedef struct global_State {
   l_mem GCdebt;  /* bytes allocated not yet compensated by the collector */
   lu_mem GCestimate;  /* an estimate of the non-garbage memory in use */
   lu_mem lastatomic;  /* see function 'genstep' in file 'lgc.c' */
+  lu_mem hlgcwork;  /* HULL PATCH 0004: collector work not yet charged */
   stringtable strt;  /* hash table for strings */
   TValue l_registry;
   TValue nilvalue;  /* a nil value */
@@ -406,6 +407,11 @@ LUAI_FUNC void luaE_warnerror (lua_State *L, const char *where);
 LUAI_FUNC int luaE_resetthread (lua_State *L, int status);
 LUAI_FUNC void luaE_hlcharge (lua_State *L, size_t units);   /* HULL PATCH 0004 */
 LUAI_FUNC void luaE_hlbytes (lua_State *L, size_t n);        /* HULL PATCH 0004 */
+LUAI_FUNC void luaE_hltransfer (lua_State *L, lua_State *to);  /* HULL PATCH 0004 */
+
+/* HULL PATCH 0004: values copied (results moved, varargs fetched) that
+** are not charged; past it, every copy is */
+#define HL_FREE_COPIES	16
 
 
 #endif

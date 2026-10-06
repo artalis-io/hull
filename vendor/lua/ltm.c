@@ -260,6 +260,8 @@ void luaT_getvarargs (lua_State *L, CallInfo *ci, StkId where, int wanted) {
   int nextra = ci->u.l.nextraargs;
   if (wanted < 0) {
     wanted = nextra;  /* get all extra arguments available */
+    if (l_unlikely(nextra > HL_FREE_COPIES))  /* HULL PATCH 0004 */
+      luaE_hlcharge(L, cast_sizet(nextra));  /* a copy per vararg */
     checkstackGCp(L, nextra, where);  /* ensure stack space */
     L->top.p = where + nextra;  /* next instruction will need top */
   }

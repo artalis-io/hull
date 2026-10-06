@@ -177,6 +177,7 @@ static void addfield (lua_State *L, luaL_Buffer *b, lua_Integer i) {
 
 static int tconcat (lua_State *L) {
   luaL_Buffer b;
+  lua_Unsigned k = 0;  /* HULL PATCH 0004 */
   lua_Integer last = aux_getn(L, 1, TAB_R);
   size_t lsep;
   const char *sep = luaL_optlstring(L, 2, "", &lsep);
@@ -186,7 +187,9 @@ static int tconcat (lua_State *L) {
   for (; i < last; i++) {
     addfield(L, &b, i);
     luaL_addlstring(&b, sep, lsep);
+    hl_tabstep(L, k);  /* HULL PATCH 0004: empty strings copy nothing */
   }
+  hl_tabdone(L, k);
   if (i == last)  /* add last value (if interval was not empty) */
     addfield(L, &b, i);
   luaL_pushresult(&b);
@@ -222,6 +225,7 @@ static int tunpack (lua_State *L) {
   if (l_unlikely(n >= (unsigned int)INT_MAX  ||
                  !lua_checkstack(L, (int)(++n))))
     return luaL_error(L, "too many results to unpack");
+  lua_hlwork(L, (size_t)n, 0);  /* HULL PATCH 0004: a unit per value */
   for (; i < e; i++) {  /* push arg[i..e - 1] (to avoid overflows) */
     lua_geti(L, 1, i);
   }

@@ -119,7 +119,8 @@ HASH_EMPTY=$(hash_file  "$TMPDIR_WORK/empty.bin")
 
 # Drip-feeding client for scenario 17: sends one text field of 4000 bytes
 # in 80 segments with a pause between them, so the handler parks on
-# NEED_DATA dozens of times inside one part:read().
+# NEED_DATA dozens of times inside one part:read(). Optional arguments
+# (count of 7-digit numbers, segment size, pause) make the large variant.
 PY=""
 for p in python3 python; do
     if command -v "$p" >/dev/null 2>&1 && "$p" -c "import socket" >/dev/null 2>&1; then
@@ -129,7 +130,12 @@ done
 cat > "$TMPDIR_WORK/drip.py" <<'EOF'
 import socket, sys, time
 port = int(sys.argv[1])
-value = "".join("%04d" % i for i in range(1000))   # 4000 bytes, every offset distinct
+if len(sys.argv) > 2:
+    value = "".join("%07d" % i for i in range(int(sys.argv[2])))
+    step, pause = int(sys.argv[3]), float(sys.argv[4])
+else:
+    value = "".join("%04d" % i for i in range(1000))   # 4000 bytes, every offset distinct
+    step, pause = 50, 0.01
 b = "dripboundary"
 body = ("--%s\r\nContent-Disposition: form-data; name=\"drip\"\r\n\r\n%s\r\n--%s--\r\n"
         % (b, value, b)).encode()
@@ -139,10 +145,9 @@ head = ("POST /upload HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
 s = socket.create_connection(("127.0.0.1", port), timeout=20)
 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 s.sendall(head)
-step = 50
 for off in range(0, len(body), step):
     s.sendall(body[off:off + step])
-    time.sleep(0.01)
+    time.sleep(pause)
 resp = b""
 while True:
     chunk = s.recv(65536)
@@ -649,6 +654,10 @@ run_multipart_tests() {
     if [ -n "$PY" ]; then
         DRIP=$("$PY" "$TMPDIR_WORK/drip.py" "$PORT" 2>&1)
         check_contains "$LABEL drip-fed field: whole value" "$DRIP" "drip-ok"
+        # A 2.1 MB field over ~130 parks: the accumulator grows across
+        # them (it used to be re-copied whole at every park, O(n^2)).
+        DRIP=$("$PY" "$TMPDIR_WORK/drip.py" "$PORT" 300000 16384 0.005 2>&1)
+        check_contains "$LABEL drip-fed large field: whole value" "$DRIP" "drip-ok"
     else
         echo "  SKIP: $LABEL drip-fed field (needs python)"
     fi

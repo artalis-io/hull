@@ -465,6 +465,8 @@ l_sinline void moveresults (lua_State *L, StkId res, int nres, int wanted) {
       break;
   }
   /* generic case */
+  if (l_unlikely(nres > HL_FREE_COPIES))  /* HULL PATCH 0004 (lua_patches.md) */
+    luaE_hlcharge(L, cast_sizet(nres));  /* a copy per result moved */
   firstresult = L->top.p - nres;  /* index of first result */
   if (nres > wanted)  /* extra results? */
     nres = wanted;  /* don't need them */
@@ -862,6 +864,7 @@ LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
   }
   *nresults = (status == LUA_YIELD) ? L->ci->u2.nyield
                                     : cast_int(L->top.p - (L->ci->func.p + 1));
+  luaE_hltransfer(L, from);  /* HULL PATCH 0004: what this run cost */
   lua_unlock(L);
   return status;
 }
