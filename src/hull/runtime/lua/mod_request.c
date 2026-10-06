@@ -315,17 +315,22 @@ static void mp_part_acc_free(lua_State *L, HlMpPart *p)
 static void mp_part_acc_add(lua_State *L, HlMpPart *p, const char *data,
                             size_t n)
 {
+    if (n == 0) return;   /* nothing to copy (and acc may still be NULL) */
     if (n > p->acc_cap - p->acc_len) {
-        if (n > SIZE_MAX / 2 - p->acc_len)
+        if (n > SIZE_MAX / 2 - p->acc_len) {
             luaL_error(L, "req:multipart(): part too large");
+            return;   /* not reached: luaL_error does not return */
+        }
         size_t need = p->acc_len + n;
         size_t cap = p->acc_cap ? p->acc_cap : 4096;
         while (cap < need) cap *= 2;
         void *ud;
         lua_Alloc f = lua_getallocf(L, &ud);
         char *nb = (char *)f(ud, p->acc, p->acc ? p->acc_cap : 0, cap);
-        if (!nb)
+        if (!nb) {
             luaL_error(L, "req:multipart(): out of memory reading a part");
+            return;   /* not reached */
+        }
         p->acc = nb;
         p->acc_cap = cap;
     }
