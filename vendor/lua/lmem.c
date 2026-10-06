@@ -185,6 +185,8 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
   }
   lua_assert((nsize == 0) == (newblock == NULL));
   g->GCdebt = (g->GCdebt + nsize) - osize;
+  if (nsize > osize)  /* HULL PATCH 0004: a block that grew was filled */
+    luaE_hlbytes(L, nsize);
   return newblock;
 }
 
@@ -210,6 +212,7 @@ void *luaM_malloc_ (lua_State *L, size_t size, int tag) {
         luaM_error(L);
     }
     g->GCdebt += size;
+    luaE_hlbytes(L, size);  /* HULL PATCH 0004: a new block is filled */
     return newblock;
   }
 }

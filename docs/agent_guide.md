@@ -1173,7 +1173,7 @@ significant changes.
 
 ```lua
 -- tests/test_users.lua
-local test = require("hull.test")
+-- `test` is a global in test files (there is no hull.test module to require)
 
 test("GET /users returns empty array initially", function(req, res)
     local r = req("GET", "/users")

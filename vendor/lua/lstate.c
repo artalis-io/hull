@@ -259,6 +259,8 @@ static void preinit_thread (lua_State *L, global_State *g) {
   L->basehookcount = 0;
   L->allowhook = 1;
   resethookcount(L);
+  L->hlbytes = 0;  /* HULL PATCH 0004 */
+  L->hlowed = 0;
   L->openupval = NULL;
   L->status = LUA_OK;
   L->errfunc = 0;
@@ -341,6 +343,46 @@ int luaE_resetthread (lua_State *L, int status) {
   ci->top.p = L->top.p + LUA_MINSTACK;
   luaD_reallocstack(L, cast_int(ci->top.p - L->stack.p), 0);
   return status;
+}
+
+
+/*
+** HULL PATCH 0004 (docs/lua_patches.md): charge work done inside one
+** instruction to the count hook. A long-string '==', a '..' or a
+** 'string.rep' over tens of MB costs one VM instruction, so the count hook
+** (Hull's instruction budget) did not bound a run's wall time. 'units' are
+** instruction equivalents: they come off 'hookcount', so the hook runs
+** that much sooner - at the next instruction once they reach it - and what
+** goes past it is kept in 'hlowed' for the hook to collect
+** (lua_hltakeowed). No allocation, no error: callable from anywhere.
+*/
+void luaE_hlcharge (lua_State *L, size_t units) {
+  if (units == 0 || !(L->hookmask & LUA_MASKCOUNT) || L->hookcount <= 0)
+    return;
+  if (units < cast_sizet(L->hookcount)) {
+    L->hookcount -= cast_int(units);
+    return;
+  }
+  units -= cast_sizet(L->hookcount - 1);
+  L->hookcount = 1;  /* the hook runs at the next instruction */
+  L->hlowed = (units > MAX_SIZE - L->hlowed) ? MAX_SIZE : L->hlowed + units;
+}
+
+
+/* bulk bytes (copied, compared, allocated): one unit per HL_BYTES_PER_UNIT */
+#define HL_BYTES_PER_UNIT	64
+
+void luaE_hlbytes (lua_State *L, size_t n) {
+  if (!(L->hookmask & LUA_MASKCOUNT))
+    return;
+  if (n > MAX_SIZE - L->hlbytes)
+    n = MAX_SIZE - L->hlbytes;
+  L->hlbytes += n;
+  if (L->hlbytes >= HL_BYTES_PER_UNIT) {
+    size_t units = L->hlbytes / HL_BYTES_PER_UNIT;
+    L->hlbytes %= HL_BYTES_PER_UNIT;
+    luaE_hlcharge(L, units);
+  }
 }
 
 

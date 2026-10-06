@@ -409,6 +409,16 @@ static void hl_match_charge (MatchState *ms) {
            l_unlikely(((ms)->hl_steps += (size_t)(n)) >= (size_t)(ms)->hl_stride)) \
          hl_match_charge(ms); } while (0)
 
+/* HULL PATCH 0004: the work below one hook period is charged to the thread
+** when the operation ends. Dropped, it made each call free up to a period
+** (10000 units), so a loop of small finds ran ~2000x past the limit. */
+static void hl_match_flush (MatchState *ms) {
+  if (ms->hl_steps > 0) {
+    lua_hlcharge(ms->L, ms->hl_steps, 0);
+    ms->hl_steps = 0;
+  }
+}
+
 
 /* maximum recursion depth for 'match' */
 #if !defined(MAXCCALLS)
@@ -727,7 +737,12 @@ static const char *lmemfind (MatchState *ms, const char *s1, size_t l1,
     const char *init;  /* to search for a '*s2' inside 's1' */
     l2--;  /* 1st char will be checked by 'memchr' */
     l1 = l1-l2;  /* 's2' cannot be found after that */
-    while (l1 > 0 && (init = (const char *)memchr(s1, *s2, l1)) != NULL) {
+    while (l1 > 0) {
+      init = (const char *)memchr(s1, *s2, l1);
+      if (init == NULL) {
+        hl_match_work(ms, l1);  /* HULL PATCH 0004: the scan that missed */
+        break;
+      }
       hl_match_work(ms, (size_t)(init - s1) + l2 + 1);  /* HULL PATCH 0002 */
       init++;   /* 1st char is already checked */
       if (memcmp(init, s2+1, l2) == 0)
@@ -822,11 +837,14 @@ static void reprepstate (MatchState *ms) {
 }
 
 
+/* HULL PATCH 0004: one MatchState for both paths, flushed (hl_match_flush)
+** on every way out but an error. */
 static int str_find_aux (lua_State *L, int find) {
   size_t ls, lp;
   const char *s = luaL_checklstring(L, 1, &ls);
   const char *p = luaL_checklstring(L, 2, &lp);
   size_t init = posrelatI(luaL_optinteger(L, 3, 1), ls) - 1;
+  MatchState ms;
   if (init > ls) {  /* start after string's end? */
     luaL_pushfail(L);  /* cannot find anything */
     return 1;
@@ -834,9 +852,10 @@ static int str_find_aux (lua_State *L, int find) {
   /* explicit request or no special characters? */
   if (find && (lua_toboolean(L, 4) || nospecials(p, lp))) {
     /* do a plain search */
-    MatchState ms;
+    const char *s2;
     prepstate(&ms, L, s, ls, p, lp);                 /* HULL PATCH 0002 */
-    const char *s2 = lmemfind(&ms, s + init, ls - init, p, lp);
+    s2 = lmemfind(&ms, s + init, ls - init, p, lp);
+    hl_match_flush(&ms);
     if (s2) {
       lua_pushinteger(L, (s2 - s) + 1);
       lua_pushinteger(L, (s2 - s) + lp);
@@ -844,7 +863,6 @@ static int str_find_aux (lua_State *L, int find) {
     }
   }
   else {
-    MatchState ms;
     const char *s1 = s + init;
     int anchor = (*p == '^');
     if (anchor) {
@@ -855,6 +873,7 @@ static int str_find_aux (lua_State *L, int find) {
       const char *res;
       reprepstate(&ms);
       if ((res=match(&ms, s1, p)) != NULL) {
+        hl_match_flush(&ms);
         if (find) {
           lua_pushinteger(L, (s1 - s) + 1);  /* start */
           lua_pushinteger(L, res - s);   /* end */
@@ -864,6 +883,7 @@ static int str_find_aux (lua_State *L, int find) {
           return push_captures(&ms, s1, res);
       }
     } while (s1++ < ms.src_end && !anchor);
+    hl_match_flush(&ms);
   }
   luaL_pushfail(L);  /* not found */
   return 1;
@@ -898,9 +918,11 @@ static int gmatch_aux (lua_State *L) {
     reprepstate(&gm->ms);
     if ((e = match(&gm->ms, src, gm->p)) != NULL && e != gm->lastmatch) {
       gm->src = gm->lastmatch = e;
+      hl_match_flush(&gm->ms);  /* HULL PATCH 0004 */
       return push_captures(&gm->ms, src, e);
     }
   }
+  hl_match_flush(&gm->ms);  /* HULL PATCH 0004 */
   return 0;  /* not found */
 }
 
@@ -1026,6 +1048,7 @@ static int str_gsub (lua_State *L) {
     else break;  /* end of subject */
     if (anchor) break;
   }
+  hl_match_flush(&ms);  /* HULL PATCH 0004 */
   if (!changed)  /* no changes? */
     lua_pushvalue(L, 1);  /* return original string */
   else {  /* something changed */

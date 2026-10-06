@@ -74,6 +74,16 @@ typedef enum {
 
 #define luaV_rawequalobj(t1,t2)		luaV_equalobj(NULL,t1,t2)
 
+/*
+** HULL PATCH 0004 (docs/lua_patches.md): charge the count hook for the
+** memcmp a long-string equality runs (distinct strings of equal length).
+*/
+#define luaV_hlchargeeq(L,t1,t2) \
+  { if (ttislngstring(t1) && ttislngstring(t2) && \
+        tsvalue(t1) != tsvalue(t2) && \
+        tsvalue(t1)->u.lnglen == tsvalue(t2)->u.lnglen) \
+      luaE_hlbytes(L, tsvalue(t1)->u.lnglen); }
+
 
 /*
 ** fast track for 'gettable': if 't' is a table and 't[k]' is present,

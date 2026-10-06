@@ -328,7 +328,39 @@ LUA_API int lua_isuserdata (lua_State *L, int idx) {
 LUA_API int lua_rawequal (lua_State *L, int index1, int index2) {
   const TValue *o1 = index2value(L, index1);
   const TValue *o2 = index2value(L, index2);
-  return (isvalid(L, o1) && isvalid(L, o2)) ? luaV_rawequalobj(o1, o2) : 0;
+  if (!(isvalid(L, o1) && isvalid(L, o2)))
+    return 0;
+  luaV_hlchargeeq(L, o1, o2);  /* HULL PATCH 0004 */
+  return luaV_rawequalobj(o1, o2);
+}
+
+
+/* HULL PATCH 0004 (docs/lua_patches.md) */
+LUA_API void lua_hlcharge (lua_State *L, size_t units, size_t bytes) {
+  luaE_hlcharge(L, units);
+  luaE_hlbytes(L, bytes);
+}
+
+
+/*
+** Charge, then run the count hook now if the charge made it due: for a C
+** function whose own loop can run long, where waiting for the next VM
+** instruction would wait for the whole loop. Only from a C function (the
+** hook may raise).
+*/
+LUA_API void lua_hlwork (lua_State *L, size_t units, size_t bytes) {
+  lua_hlcharge(L, units, bytes);
+  if ((L->hookmask & LUA_MASKCOUNT) && L->hookcount <= 1 && L->allowhook) {
+    resethookcount(L);
+    luaD_hook(L, LUA_HOOKCOUNT, -1, 0, 0);
+  }
+}
+
+
+LUA_API size_t lua_hltakeowed (lua_State *L) {
+  size_t owed = L->hlowed;
+  L->hlowed = 0;
+  return owed;
 }
 
 

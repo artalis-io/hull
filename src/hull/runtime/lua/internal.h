@@ -288,8 +288,12 @@ struct HlReqCtx;
 struct KlHttpRequest;
 extern const char       hl_lua_req_ctx_key;
 extern struct HlReqCtx  hl_lua_req_ctx_marker;
+/* Registry key set (true) in the tool VM only: the VM that loads the CLI
+ * plugins (stdlib/cli/lua) and may require them by name. */
+#define HL_LUA_TOOL_VM_KEY "__hull_tool_vm"
+
 void hl_lua_req_ctx_store(lua_State *L, struct KlHttpRequest *req, int idx);
-void hl_lua_req_ctx_drop(lua_State *L, struct KlHttpRequest *req);
+void hl_lua_req_ctx_drop(lua_State *L, const struct KlHttpRequest *req);
 /* Forget whatever req->ctx carries (dispatch.c). Never raises. Called once
  * the request's req table is built, or once a middleware answered it. */
 void hl_lua_free_req_ctx(struct HlLua *lua, struct KlHttpRequest *req);

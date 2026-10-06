@@ -981,6 +981,23 @@ static int hl_serve_init_logging(HlServerState *s)
 
 /* Phase 6 (DB init) - now handled inside hl_app_context_init. */
 
+/* Keel's access-log hook, called once a response is fully sent - the one
+ * per-request end Keel reports, including the 404 / 405 it answers itself
+ * after the pre-body middleware ran. The runtime drops what it kept for the
+ * request (a middleware's req.ctx): freed only where a handler or a
+ * middleware short-circuit ran, a ctx stored for a request that never
+ * reached its handler stayed until that connection slot was reused. */
+static void hl_serve_request_done(const KlHttpRequest *req, int status,
+                                  size_t body_bytes, double duration_ms,
+                                  void *user_data)
+{
+    (void)status; (void)body_bytes; (void)duration_ms;
+    HlServerState *s = (HlServerState *)user_data;
+    HlRuntime *rt = s && s->app ? hl_app_context_runtime(s->app) : NULL;
+    if (rt && rt->vt && rt->vt->request_done)
+        rt->vt->request_done(rt, req);
+}
+
 /* Phase 7: Create KlHttpServer with optional TLS.
  * Depends on: init_logging (kl_alloc), parse_args (port, bind, TLS paths). */
 static int hl_serve_init_server(HlServerState *s)
@@ -996,6 +1013,8 @@ static int hl_serve_init_server(HlServerState *s)
         .alloc = &s->kl_alloc,
         .log_fn = hl_keel_log_bridge,
         .log_user_data = NULL,
+        .access_log = hl_serve_request_done,
+        .access_log_data = s,
     };
 
     /* Set up server TLS if cert/key provided */

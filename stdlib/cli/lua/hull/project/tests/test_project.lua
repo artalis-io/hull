@@ -159,6 +159,14 @@ do
     local caps = {}; for _, c in ipairs(lua_e.capabilities) do caps[c] = true end
     ok(caps["semantics"], "lua frontend advertises the 'semantics' capability")
     ok(js_e and not js_e.analyzable and #js_e.capabilities == 0, "javascript reserved: analyzable=false, no capabilities")
+    -- load() requires only the frontends FRONTENDS names: a row is caller data, and
+    -- the require runs with the stdlib's identity (round-7 H3 reached hull._template
+    -- and hull.db._internal_conn through it).
+    ok(registry.load({ analyzable = true, frontend_module = "hull._template" }) == nil,
+       "load() refuses a module name that is not a registered frontend")
+    ok(registry.load({ analyzable = true, frontend_module = "hull.db._internal_conn" }) == nil,
+       "load() refuses the internal-connection module")
+    ok(registry.load(registry.for_ext("lua")) ~= nil, "load() still loads the lua frontend")
 end
 
 -- ── orchestrator end-to-end (stubbed tool over an in-memory tree) ────

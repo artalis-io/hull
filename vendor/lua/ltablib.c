@@ -58,6 +58,18 @@ static void checktab (lua_State *L, int arg, int what) {
 }
 
 
+/*
+** HULL PATCH 0004 (docs/lua_patches.md): a shifting / moving loop runs in
+** C, one VM instruction however long it is - and its length comes from
+** '#' or an argument ('__len' can say 1e15, 'table.move' takes any range).
+** One unit per element, the count hook run as it comes due.
+*/
+#define HL_TAB_CHUNK	1024
+#define hl_tabstep(L,k) \
+  { if ((++(k) & (HL_TAB_CHUNK - 1)) == 0) lua_hlwork(L, HL_TAB_CHUNK, 0); }
+#define hl_tabdone(L,k)	lua_hlcharge(L, (size_t)((k) & (HL_TAB_CHUNK - 1)), 0)
+
+
 static int tinsert (lua_State *L) {
   lua_Integer pos;  /* where to insert new element */
   lua_Integer e = aux_getn(L, 1, TAB_RW);
@@ -69,6 +81,7 @@ static int tinsert (lua_State *L) {
     }
     case 3: {
       lua_Integer i;
+      lua_Unsigned k = 0;  /* HULL PATCH 0004 */
       pos = luaL_checkinteger(L, 2);  /* 2nd argument is the position */
       /* check whether 'pos' is in [1, e] */
       luaL_argcheck(L, (lua_Unsigned)pos - 1u < (lua_Unsigned)e, 2,
@@ -76,7 +89,9 @@ static int tinsert (lua_State *L) {
       for (i = e; i > pos; i--) {  /* move up elements */
         lua_geti(L, 1, i - 1);
         lua_seti(L, 1, i);  /* t[i] = t[i - 1] */
+        hl_tabstep(L, k);
       }
+      hl_tabdone(L, k);
       break;
     }
     default: {
@@ -95,11 +110,14 @@ static int tremove (lua_State *L) {
     /* check whether 'pos' is in [1, size + 1] */
     luaL_argcheck(L, (lua_Unsigned)pos - 1u <= (lua_Unsigned)size, 2,
                      "position out of bounds");
+  lua_Unsigned k = 0;  /* HULL PATCH 0004 */
   lua_geti(L, 1, pos);  /* result = t[pos] */
   for ( ; pos < size; pos++) {
     lua_geti(L, 1, pos + 1);
     lua_seti(L, 1, pos);  /* t[pos] = t[pos + 1] */
+    hl_tabstep(L, k);
   }
+  hl_tabdone(L, k);
   lua_pushnil(L);
   lua_seti(L, 1, pos);  /* remove entry t[pos] */
   return 1;
@@ -121,6 +139,7 @@ static int tmove (lua_State *L) {
   checktab(L, tt, TAB_W);
   if (e >= f) {  /* otherwise, nothing to move */
     lua_Integer n, i;
+    lua_Unsigned k = 0;  /* HULL PATCH 0004 */
     luaL_argcheck(L, f > 0 || e < LUA_MAXINTEGER + f, 3,
                   "too many elements to move");
     n = e - f + 1;  /* number of elements to move */
@@ -130,14 +149,17 @@ static int tmove (lua_State *L) {
       for (i = 0; i < n; i++) {
         lua_geti(L, 1, f + i);
         lua_seti(L, tt, t + i);
+        hl_tabstep(L, k);
       }
     }
     else {
       for (i = n - 1; i >= 0; i--) {
         lua_geti(L, 1, f + i);
         lua_seti(L, tt, t + i);
+        hl_tabstep(L, k);
       }
     }
+    hl_tabdone(L, k);
   }
   lua_pushvalue(L, tt);  /* return destination table */
   return 1;
@@ -378,6 +400,7 @@ static void auxsort (lua_State *L, IdxT lo, IdxT up,
     lua_pushvalue(L, -1);  /* push Pivot */
     lua_geti(L, 1, up - 1);  /* push a[up - 1] */
     set2(L, p, up - 1);  /* swap Pivot (a[p]) with a[up - 1] */
+    lua_hlwork(L, (size_t)(up - lo), 0);  /* HULL PATCH 0004: the partition */
     p = partition(L, lo, up);
     /* a[lo .. p - 1] <= a[p] == P <= a[p + 1 .. up] */
     if (p - lo < up - p) {  /* lower interval is smaller? */

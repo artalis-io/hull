@@ -22,6 +22,7 @@
 #include "utest.h"
 #include "hull/runtime/lua.h"
 #include "hull/runtime/lua_bytecode_cache.h"
+#include "hull/runtime/test.h"           /* hl_lua_test_clear / _run */
 #include "hull/shared/cache_dir.h"   /* hl_hull_cache_dir / _subdir */
 #include "hull/shared/host.h"        /* hl_host_is_windows */
 #include "hull/runtime/lua_template_cache.h"
@@ -979,6 +980,47 @@ UTEST(lua_runtime, require_vendor_json)
         "(function() local ok = pcall(require, 'vendor.json') "
         "return ok and 0 or 1 end)()");
     ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+}
+
+/* Round-7 H3: the CLI plugins (stdlib/cli/lua) are not loaded into an app
+ * VM, and a hull.* name outside the registry is refused - whoever asks.
+ * hull.project.registry.load used to require a module name its caller
+ * passed, with the stdlib's identity, which reached hull._template and
+ * hull.db._internal_conn from app code. */
+static int expose_stdlib_require(lua_State *L)
+{
+    const char *src =
+        "__sr = function(n) return pcall(function() return require(n) end) end";
+    if (luaL_loadbuffer(L, src, strlen(src), "@hull.tests.stdlib_require") != LUA_OK)
+        return -1;
+    return lua_pcall(L, 0, 0, 0);
+}
+
+UTEST(lua_runtime, require_cli_plugin_refused)
+{
+    init_lua();
+    ASSERT_EQ(expose_stdlib_require(lua_rt.L), LUA_OK);
+    int result = eval_int(
+        "(function() "
+        "  local a = pcall(function() return require('hull.project.registry') end) "
+        "  local b = pcall(function() return require('hull.build') end) "
+        "  local c = pcall(function() return require('hull.no_such_module') end) "
+        /* not even from a stdlib chunk: the plugins are not in this VM */
+        "  local d = __sr('hull.project.registry') "
+        "  local e = __sr('hull.source.lua') "
+        "  return (not a and not b and not c and not d and not e) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(result, 1);
+
+    /* the refusal names the rule, not a lookup miss */
+    int rc = luaL_dostring(lua_rt.L, "require('hull.project.registry')");
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "not a Hull module"), NULL);
+    lua_pop(lua_rt.L, 1);
 
     cleanup_lua();
 }
@@ -7992,6 +8034,72 @@ UTEST(lua_audit6, scanned_bytes_hit_the_limit)
         err, sizeof err), LUA_OK);
 }
 
+/* ── Audit 7: work inside one instruction (HULL PATCH 0004) ────────────── */
+
+/* Each case passes far under the 100000 limit in VM instructions alone, and
+ * trips once the work its instructions do is charged. */
+UTEST(lua_audit7, work_inside_an_instruction_hits_the_limit)
+{
+    static const char *const cases[] = {
+        /* M1: a plain find's final scan that misses, and the work below one
+         * hook period each call left uncharged */
+        "local s = string.rep('a', 1000000) string.find(s, 'b', 1, true) return 1",
+        "local s = string.rep('a', 5000) "
+        "for i = 1, 1000 do string.find(s, 'b', 1, true) end return 1",
+        "local s = string.rep('a', 5000) "
+        "for i = 1, 1000 do string.find(s, '[b]') end return 1",
+        /* M2: a long-string compare, a concatenation, a collection */
+        "local a = string.rep('x', 1000000) local b = a:sub(1, -2) .. 'x' "
+        "for i = 1, 2000 do local _ = (a == b) end return 1",
+        "local a = string.rep('x', 1000000) local b = a:sub(1, -2) .. 'y' "
+        "for i = 1, 2000 do local _ = (a < b) end return 1",
+        "local a = string.rep('x', 100000) "
+        "for i = 1, 500 do local _ = a .. 'y' end return 1",
+        "local s = string.rep('x', 3000000) "
+        "for i = 1, 50 do collectgarbage() end return 1",
+        "local s = string.rep('\\xe4\\xb8\\x80', 200000) "
+        "for i = 1, 100 do utf8.len(s) end return 1",
+        /* loops in C whose length an argument or __len decides: these ran
+         * for good inside one instruction */
+        "table.move({}, 1, 1000000000000, 2) return 1",
+        "local t = setmetatable({}, { __len = function() return 1e12 end }) "
+        "table.insert(t, 1, 'x') return 1",
+        "local t = setmetatable({}, { __len = function() return 1e12 end }) "
+        "table.remove(t, 1) return 1",
+        NULL
+    };
+    char err[512];
+    for (int i = 0; cases[i]; i++) {
+        int rc = limited_run(cases[i], err, sizeof err);
+        EXPECT_NE_MSG(rc, LUA_OK, cases[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, cases[i]);
+    }
+
+    /* The same operations at ordinary sizes stay well under the limit. */
+    EXPECT_EQ(limited_run(
+        "local a = string.rep('x', 1000) local b = a:sub(1, -2) .. 'x' "
+        "assert(a == b and not (a < b)) "
+        "assert(not string.find(a, 'y', 1, true) and utf8.len(a) == 1000) "
+        "local t = {} for i = 1, 100 do table.insert(t, 1, i) end "
+        "table.sort(t) table.move(t, 1, 100, 2) assert(#t == 101) "
+        "collectgarbage() return 1",
+        err, sizeof err), LUA_OK);
+}
+
+/* The charge reaches the budget the hook keeps (lua_hltakeowed): one big
+ * compare past the remaining count still counts in full. */
+UTEST(lua_audit7, work_past_the_hook_count_is_collected)
+{
+    char err[512];
+    /* 2 x ~15600 units of compare per iteration, 5 iterations: ~156000 */
+    int rc = limited_run(
+        "local a = string.rep('x', 1000000) local b = a:sub(1, -2) .. 'x' "
+        "for i = 1, 5 do local _ = (a == b) local _ = (a == b) end return 1",
+        err, sizeof err);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+}
+
 /* M2 / L1: a NUL in a manifest string is refused by app.manifest: in a
  * modules entry it crashed extraction (strlen(NULL)), in csp it turned
  * CSP off while the signed JSON showed a policy. */
@@ -8179,5 +8287,67 @@ UTEST(lua_audit6, req_ctx_not_retained_past_its_request)
     EXPECT_EQ(req_ctx_entries(L), 0);
     cleanup_lua();
 }
+
+/* Round-7 H2 (Lua side): a request that passes the middleware but never
+ * reaches a handler - a 404 / 405 Keel answers itself - kept its req.ctx
+ * until its connection slot served another request through a middleware.
+ * serve.c now reports every sent response (Keel's access-log hook) and the
+ * runtime drops the entry there. */
+UTEST(lua_audit7, req_ctx_dropped_when_the_response_is_sent)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.use('*', '/*', function(req, res) "
+        "  req.ctx.big = string.rep('x', 4096) return 0 end)\n"), LUA_OK);
+    int mw = first_mw_handler_id(L, 1);
+    ASSERT_TRUE(hl_lua_vtable.request_done != NULL);
+
+    enum { N = 64 };                 /* N connection slots, one 404 each */
+    static KlHttpRequest reqs[N];
+    for (int i = 0; i < N; i++) {
+        KlHttpResponse res = {0};
+        memset(&reqs[i], 0, sizeof reqs[i]);
+        ASSERT_EQ(hl_lua_dispatch_middleware(&lua_rt, mw, &reqs[i], &res), 0);
+    }
+    EXPECT_EQ(req_ctx_entries(L), N);
+    for (int i = 0; i < N; i++)      /* Keel sent each 404 */
+        hl_lua_vtable.request_done(&lua_rt.base, &reqs[i]);
+    EXPECT_EQ(req_ctx_entries(L), 0);
+    /* a request with nothing kept, and a repeat, are no-ops */
+    hl_lua_vtable.request_done(&lua_rt.base, &reqs[0]);
+    EXPECT_EQ(req_ctx_entries(L), 0);
+    for (int i = 0; i < N; i++) reqs[i].ctx = NULL;
+    cleanup_lua();
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Round-7 L10: `hull test` ran every case of a file on one budget, never
+ * re-armed: a case that tripped the sticky limit failed every later case. */
+UTEST(lua_audit7, test_cases_each_get_their_own_budget)
+{
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 100000;
+    HlLua lim;
+    memset(&lim, 0, sizeof lim);
+    ASSERT_EQ(hl_lua_init(&lim, &cfg), 0);
+    hl_lua_test_clear(lim.L);
+    ASSERT_EQ(luaL_dostring(lim.L,
+        "local cases = {} "
+        "cases[1] = { desc = 'spins', fn = function() while true do end end } "
+        "cases[2] = { desc = 'fine',  fn = function() for i = 1, 50000 do end end } "
+        "cases[3] = { desc = 'fine too', fn = function() for i = 1, 50000 do end end } "
+        "return cases"), LUA_OK);
+    lua_setfield(lim.L, LUA_REGISTRYINDEX, "__hull_test_cases");
+    int total = 0, passed = 0, failed = 0;
+    hl_lua_test_run(lim.L, &total, &passed, &failed, NULL, NULL, 0);
+    EXPECT_EQ(total, 3);
+    EXPECT_EQ(failed, 1);
+    EXPECT_EQ(passed, 2);
+    hl_lua_free(&lim);
+}
+#endif
 
 UTEST_MAIN();
