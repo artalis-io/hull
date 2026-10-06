@@ -132,6 +132,10 @@ static const char **tool_spawn_argv(lua_State *L, const char *what)
 
 static int l_tool_spawn(lua_State *L)
 {
+    /* Fix the argument slots first: the argv list is left on the stack, and
+     * with one argument it would otherwise sit at index 2 and be read as the
+     * env table. */
+    lua_settop(L, 2);
     const char **argv = tool_spawn_argv(L, "tool.spawn");
     if (!argv) {
         lua_pushboolean(L, 0);
@@ -1116,6 +1120,7 @@ static int l_linker_is_available(lua_State *L) {
 }
 
 static int l_linker_link(lua_State *L) {
+    lua_settop(L, 5);   /* the lists below go on the stack after the optional args */
     const char *output = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);
     luaL_checktype(L, 3, LUA_TTABLE);
