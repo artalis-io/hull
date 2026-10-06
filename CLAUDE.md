@@ -1664,7 +1664,11 @@ not logged-and-ignored. Pledge applies on OpenBSD only: the Linux polyfill refus
 without execpromises, which would be a seccomp filter on every spawned compiler/linker, so
 on Linux tool mode rests on Landlock unveil plus the spawn allowlist. Elsewhere
 (macOS, Windows, the other BSDs) only the userspace allowlist the tool bindings check applies,
-and the log says so. The invocation directory is never granted when it is `/`, nor when it is
+and the log says so. That allowlist reaches the bindings through `HlLua.tool_unveil_ctx`,
+which `hl_lua_init` keeps for the tool VM (it used to zero it, so every binding saw NULL and
+the allowlist was never checked). The app directory is the first positional argument that
+names an existing directory (`hull deploy dockerfile <dir>`, not "dockerfile"), granted
+read-only, and never when it is `/` or `$HOME` or above. The invocation directory is never granted when it is `/`, nor when it is
 `$HOME` or above (except to `hull new` / `hull init`, which run no app code); an output
 directory (`-o`) that is `/` or `$HOME` or above is refused rather than made writable, and
 neither is hull's own directory granted when it is that broad. hull's own directory is in the

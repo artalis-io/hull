@@ -38,6 +38,7 @@
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db_registry.h"
 #include "hull/cap/env.h"
+#include "hull/cap/tool.h"          /* HlToolUnveilCtx (tool-VM sandbox test) */
 
 #include "lua.h"
 #include "lualib.h"
@@ -8349,5 +8350,90 @@ UTEST(lua_audit7, test_cases_each_get_their_own_budget)
     hl_lua_free(&lim);
 }
 #endif
+
+/* The tool VM's userspace sandbox is the caller-set unveil context reaching
+ * the tool bindings through hl_lua_init. hl_lua_init used to zero it with the
+ * rest of the struct, so every binding saw NULL and skipped its check: tool
+ * mode read and wrote anything on the hosts without a kernel sandbox (macOS,
+ * Windows). Set up exactly as tool.c does; a file outside the granted
+ * directory must not be readable. */
+static int tool_vm_write(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    int ok = fputs(text, f) >= 0;
+    return (fclose(f) == 0 && ok) ? 0 : -1;
+}
+
+UTEST(lua_tool_vm, unveil_context_reaches_the_tool_bindings)
+{
+    char granted[HL_TEST_PATH_MAX], other[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(granted, sizeof granted, "hull_tv_in") != NULL);
+    ASSERT_TRUE(hl_test_mkdtemp(other, sizeof other, "hull_tv_out") != NULL);
+    char in_file[HL_TEST_PATH_MAX + 16], out_file[HL_TEST_PATH_MAX + 16];
+    snprintf(in_file, sizeof in_file, "%s/in.txt", granted);
+    snprintf(out_file, sizeof out_file, "%s/out.txt", other);
+    ASSERT_EQ(tool_vm_write(in_file, "granted"), 0);
+    ASSERT_EQ(tool_vm_write(out_file, "secret"), 0);
+
+    HlToolUnveilCtx uctx;
+    hl_tool_unveil_init(&uctx);
+    ASSERT_EQ(hl_tool_unveil_add(&uctx, granted, "r"), 0);
+    hl_tool_unveil_seal(&uctx);
+
+    HlVfs pvfs;
+    void *pvfs_owned = NULL;
+    hl_platform_vfs_init(&pvfs, &pvfs_owned);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.sandbox = 0;                       /* tool mode, as tool.c */
+    HlLua tv;
+    memset(&tv, 0, sizeof tv);
+    tv.tool_unveil_ctx = &uctx;
+    tv.base.platform_vfs = &pvfs;
+    ASSERT_EQ(hl_lua_init(&tv, &cfg), 0);
+    EXPECT_TRUE(tv.tool_unveil_ctx == &uctx);
+
+    lua_State *L = tv.L;
+    lua_getglobal(L, "tool");
+    ASSERT_TRUE(lua_istable(L, -1));
+    lua_getfield(L, -1, "read_file");
+    lua_pushstring(L, in_file);
+    ASSERT_EQ(lua_pcall(L, 1, 1, 0), LUA_OK);
+    EXPECT_TRUE(lua_isstring(L, -1) && strcmp(lua_tostring(L, -1), "granted") == 0);
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "read_file");
+    lua_pushstring(L, out_file);
+    ASSERT_EQ(lua_pcall(L, 1, 1, 0), LUA_OK);
+    EXPECT_TRUE(lua_isnil(L, -1));         /* outside the grant: refused */
+    lua_pop(L, 2);
+
+    hl_lua_free(&tv);
+    hl_tool_unveil_free(&uctx);
+    hl_platform_vfs_dispose(pvfs_owned);
+    remove(in_file); remove(out_file);
+    rmdir(granted); rmdir(other);
+}
+
+/* The app runtime never carries a tool context, even when the caller's struct
+ * held one (the field is only kept in tool mode). */
+UTEST(lua_tool_vm, app_runtime_drops_a_stray_unveil_context)
+{
+    HlToolUnveilCtx uctx;
+    hl_tool_unveil_init(&uctx);
+    hl_tool_unveil_seal(&uctx);
+    HlVfs pvfs;
+    void *pvfs_owned = NULL;
+    hl_platform_vfs_init(&pvfs, &pvfs_owned);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;    /* sandboxed app runtime */
+    HlLua app;
+    memset(&app, 0, sizeof app);
+    app.tool_unveil_ctx = &uctx;
+    app.base.platform_vfs = &pvfs;
+    ASSERT_EQ(hl_lua_init(&app, &cfg), 0);
+    EXPECT_TRUE(app.tool_unveil_ctx == NULL);
+    hl_lua_free(&app);
+    hl_tool_unveil_free(&uctx);
+    hl_platform_vfs_dispose(pvfs_owned);
+}
 
 UTEST_MAIN();

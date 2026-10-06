@@ -269,7 +269,12 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     /* Zero everything after the caller-set base (base is the first member;
      * copying it out and back would put its 64 KiB policy span on the
      * stack). */
+    /* The tool VM's unveil context is caller-set too (tool.c). Zeroed with the
+     * rest, every tool binding saw NULL and skipped its path check: tool mode
+     * had no userspace sandbox at all on the hosts without a kernel one. */
+    HlToolUnveilCtx *tool_unveil_ctx = lua->tool_unveil_ctx;
     memset((char *)lua + sizeof(lua->base), 0, sizeof(*lua) - sizeof(lua->base));
+    lua->tool_unveil_ctx = cfg->sandbox ? NULL : tool_unveil_ctx;   /* tool VM only */
     lua->mem_limit = cfg->max_heap_bytes;
     lua->max_instructions = cfg->max_instructions;
 
