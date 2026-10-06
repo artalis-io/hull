@@ -453,12 +453,15 @@ UTEST(js_parser, nested_async_parses_in_linear_time)
     EXPECT_FALSE(has(o, "\"type\":\"CallExpression\""));
     EXPECT_TRUE(has(o, "\"valid\":true"));
     free(o); free(src);
-    /* the audit's input (fuzz/corpus_js_source/regress-nested-async-call) */
+    /* the audit's input (fuzz/corpus_js_source/regress-nested-async-call) - it used to take
+     * hours. Whether 40 levels fit the session's stack depends on the host (Windows stops near
+     * 16-20, macOS parses all 40), so either outcome is right; returning at all is the test. */
     src = nest("", "async(a=", 40, "0", ")", "\n");
     ASSERT_TRUE(src != NULL);
     o = parse_str(s, src);
     ASSERT_TRUE(o != NULL);
-    EXPECT_TRUE(has(o, "js.limit.stack"));
+    EXPECT_TRUE(has(o, "js.limit.stack") ||
+                count(o, "\"type\":\"CallExpression\"") == 40);
     free(o); free(src);
     hl_js_session_destroy(s);
 }
