@@ -1161,10 +1161,14 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     return (status == LUA_OK) ? 0 : -1;
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Only serve.c calls it, and only with the HTTP server built in: a
+ * pure-compute build links neither hl_lua_request_done nor its weak stub. */
 static void vt_lua_request_done(HlRuntime *rt, const KlHttpRequest *req)
 {
     hl_lua_request_done((HlLua *)rt, req);
 }
+#endif
 
 const HlRuntimeVtable hl_lua_vtable = {
     .init                = vt_lua_init,
@@ -1183,5 +1187,7 @@ const HlRuntimeVtable hl_lua_vtable = {
     .has_main            = vt_lua_has_main,
     .has_server_handlers = vt_lua_has_server_handlers,
     .run_main            = vt_lua_run_main,
+#ifdef HL_ENABLE_HTTP_SERVER
     .request_done        = vt_lua_request_done,
+#endif
 };
