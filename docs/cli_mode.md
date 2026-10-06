@@ -99,8 +99,10 @@ only before that first word; under `hull` they may appear anywhere before `--`.
 
 The flags that weaken the process - `--no-sandbox`, `--allow-degraded-sandbox`,
 `--no-ca-bundle` / `--skip-ca-bundle`, `--ca-bundle`, `--no-verify-platform`,
-`--agent-api`, `--max-instructions`, the resource limits (`-m`, `-M`, `-s`,
-`--max-connections`, `--wasm-gas`, `--wasm-heap`, `--wasm-stack`,
+`--agent-api`, `--agent` (sidecar files written into the app directory),
+`--max-instructions`, the resource limits (`-m`, `-M`, `-s`,
+`--max-connections`, `--read-timeout`, `--workers`, `--queue-capacity`,
+`--drain-timeout`, `--wasm-gas`, `--wasm-heap`, `--wasm-stack`,
 `--wasm-timeout-ms`, `--wasm-max-input`, `--wasm-max-output`,
 `--body-max-size`), the exposure options (`-b`, `--tls-cert`, `--tls-key`) and
 the database path `-d` (a sandbox grant) - take a reserved spelling in a built
@@ -117,14 +119,23 @@ one-letter name takes its value as the next argument (`--hull-d PATH`;
 The reservation covers only the flags the runner actually implements. A built
 app WITHOUT HTTP runs on the `app.main` runner, which takes `--no-sandbox`,
 `--allow-degraded-sandbox`, `--no-ca-bundle` / `--skip-ca-bundle`,
-`--ca-bundle`, `--no-verify-platform`, `--max-instructions` and `-d` (reserved
-as above), plus `--verify-sig`, `--no-migrate` and `--audit`. It has no server,
-TLS-listener, WASM-limit or body options, so `-s`, `-m`, `-M`, `-b`,
-`--tls-cert`, `--tls-key`, `--wasm-*`, `--body-max-size`, `--max-connections`
+`--ca-bundle`, `--no-verify-platform`, `--max-instructions`, `-d` and (when
+WASM is compiled in) the six `--wasm-*` compute ceilings - all reserved as
+above - plus `--verify-sig`, `--no-migrate` and `--audit`. It has no server,
+TLS-listener or body options, so `-s`, `-m`, `-M`, `-b`, `-p`, `-l`,
+`--tls-cert`, `--tls-key`, `--body-max-size`, `--max-connections`,
+`--read-timeout`, `--workers`, `--queue-capacity`, `--drain-timeout`, `--agent`
 and `--agent-api` are the app's own arguments there (`./grep -s pattern`,
 `./commit -m "msg"` reach `ctx.args` unchanged), and their `--hull-` spellings
 are errors. A built app WITH HTTP runs on the server runner, which implements
 all of them.
+
+Which runner takes which flag, and which flags are reserved, is one table:
+`hl_runtime_flags()` in `include/hull/runtime_flags.h`. Both parsers consult it
+before any branch, so a flag can only be parsed by a runner whose row names it,
+and the reservation is derived from the same rows (`test_runtime_flags` also
+checks every option literal in both parsers against the table). Adding a flag
+means adding its row and deciding there whether it weakens the process.
 
 `ctx` is a flat bag. No methods beyond what's listed. Apps wanting richer
 IO (random-access file read, mmap, fifo) use `require("hull.fs")` exactly as

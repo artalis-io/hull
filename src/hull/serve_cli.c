@@ -125,18 +125,23 @@ static int cli_parse_args(int argc, char **argv,
 
     for (int i = 1; i < argc; i++) {
         /* --hull-<name> and the built-binary rule: include/hull/runtime_flags.h.
-         * Only the downgrade options this runner implements are reserved; the
-         * rest (-s, -m, --tls-cert, ...) are a built app's own arguments. */
+         * Only the downgrade options this runner takes are reserved; the rest
+         * (-s, -m, --tls-cert, ...) are a built app's own arguments. */
         int prefixed = hl_runtime_flag_unprefix(&argv[i]);
         if (prefixed < 0 ||
             hl_runtime_flag_check(argv[i], prefixed, embedded_app_present(),
-                                  hl_runtime_flag_cli_taken()) != 0)
+                                  HL_RF_CLI) != 0)
             return -2;
         if (strcmp(argv[i], "--") == 0) {
             *out_app_argv = &argv[i + 1];
             *out_app_argc = argc - i - 1;
             break;
         }
+        /* An option the table does not give this runner is not Hull's: no
+         * branch below may take it, so what the runner parses and what it
+         * reserves cannot drift apart. */
+        if (argv[i][0] == '-' && !hl_runtime_flag_takes(argv[i], HL_RF_CLI))
+            goto not_ours;
         if (strcmp(argv[i], "--no-migrate") == 0) {
             *out_no_migrate = 1;
             continue;
@@ -203,6 +208,7 @@ static int cli_parse_args(int argc, char **argv,
             if (w > 0) continue;
         }
 #endif
+    not_ours:
         if (prefixed) {
             (void)hl_runtime_flag_unknown(argv[i]);
             return -2;

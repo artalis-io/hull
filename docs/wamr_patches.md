@@ -607,7 +607,11 @@ watchdog bound it, so the fallback is safe) and failing the load otherwise.
 `hull build` (`aot_stamp_status` in `build.lua`) checks every AOT it compiles
 or takes from the AOT cache: the first unstamped output means the `wamrc` it
 found is not Hull's, so it warns, deletes the output, stops compiling AOT and
-ships the `.wasm`; an unstamped file is never embedded. The AOT cache keys on
+ships the `.wasm`; an unstamped file it compiled is never embedded. WAMR
+selects the AOT loader by the file's magic, not its name, so the runtime and
+`hull build` classify by the bytes: AOT code under a `.wasm` name is held to
+the stamp (`unstamped_aot_named_wasm_refused`; the build fails on one), and
+`hull build` warns about a committed `*.aot.*` without it. The AOT cache keys on
 the wamrc binary's content, so entries from another wamrc are never hits.
 **Bump** `HULL_AOT_STAMP_VERSION` here and `HL_AOT_STAMP_VERSION` in the
 header together whenever the code-generation contract changes. The stamp

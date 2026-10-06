@@ -85,15 +85,48 @@ int hl_sandbox_resolve_grant(const char *app_dir, const char *relpath,
     }
 
     size_t adir_len = strlen(app_dir);
-    size_t rel_len  = strlen(relpath);
     while (adir_len > 1 && app_dir[adir_len - 1] == '/') adir_len--;
+
+    /* Spell the grant the way the capability layer reads it
+     * (hl_fs_grant_parse): "." and empty components dropped, a trailing
+     * slash kept. Every decision below is made on the joined string, so
+     * "./out.txt" (joined "app/./out.txt") was not seen as top-level: its
+     * parent "app/." was granted, and realpath made that app_dir itself -
+     * the whole app directory kernel-writable, with no warning, for a grant
+     * the cap layer compiles to the one file "out.txt". */
+    char rel[SANDBOX_PATH_MAX];
+    size_t rel_len = 0;
+    for (const char *p = relpath; *p; ) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *c = p;
+        while (*p && *p != '/') p++;
+        size_t cl = (size_t)(p - c);
+        if (cl == 1 && c[0] == '.') continue;
+        if (rel_len + (rel_len ? 1 : 0) + cl + 2 > sizeof(rel)) return -1;
+        if (rel_len) rel[rel_len++] = '/';
+        memcpy(rel + rel_len, c, cl);
+        rel_len += cl;
+    }
+    if (rel_len == 0) {
+        /* "." / "./": the cap layer's base-root grant, the app directory and
+         * everything under it - asked for in so many words. */
+        if (realpath(app_dir, out_abs) == NULL) {
+            if (adir_len + 1 > out_cap) return -1;
+            memcpy(out_abs, app_dir, adir_len);
+            out_abs[adir_len] = '\0';
+        }
+        return 0;
+    }
+    if (relpath[strlen(relpath) - 1] == '/') rel[rel_len++] = '/';
+    rel[rel_len] = '\0';
     if (adir_len + 1 + rel_len + 1 > out_cap) return -1;
 
     char joined[SANDBOX_PATH_MAX];
     if (adir_len + 1 + rel_len + 1 > sizeof(joined)) return -1;
     memcpy(joined, app_dir, adir_len);
     joined[adir_len] = '/';
-    memcpy(joined + adir_len + 1, relpath, rel_len + 1);
+    memcpy(joined + adir_len + 1, rel, rel_len + 1);
 
     /* What the kernel grant covers depends on the grant's shape (the
      * capability layer keeps the precise rule; this is the outer bound):
@@ -162,21 +195,28 @@ int hl_sandbox_resolve_grant(const char *app_dir, const char *relpath,
          * refused, and the cap layer writes it in place (O_TRUNC, which 'w'
          * covers). Before it exists there is nothing to grant but app_dir,
          * so this first run is warned about. A read grant is the file
-         * itself when it exists. */
+         * itself when it exists.
+         *
+         * An existing DIRECTORY named without the trailing slash ("data") is
+         * what the cap layer compiles it to: that directory's subtree. It
+         * used to fall to the parent too - app_dir for a top-level one,
+         * under a warning about a file. */
         struct stat st;
         int exists = lstat(buf, &st) == 0;
         char *sl = strrchr(buf, '/');
         if (!sl || (size_t)(sl - buf) < adir_len) return -1;
         int top_level = (size_t)(sl - buf) == adir_len;
-        if (for_write && top_level && exists && S_ISREG(st.st_mode)) {
+        if (exists && S_ISDIR(st.st_mode)) {
+            /* the directory itself */
+        } else if (for_write && top_level && exists && S_ISREG(st.st_mode)) {
             /* the file alone */
         } else if (for_write || !exists) {        /* the parent */
             if (for_write && top_level)
-                log_warn("[sandbox] fs.write '%s' is not an existing file: "
-                         "the whole app directory is writable at the kernel "
-                         "level for this run (once it exists, the file "
-                         "alone). Put written files in a subdirectory to "
-                         "avoid this.", relpath);
+                log_warn("[sandbox] fs.write '%s' is not an existing file "
+                         "or directory: the whole app directory is writable "
+                         "at the kernel level for this run (once it exists, "
+                         "the file alone). Put written files in a "
+                         "subdirectory to avoid this.", relpath);
             *sl = '\0';
         }
     }

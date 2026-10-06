@@ -534,8 +534,12 @@ directly in the app directory (`"out.txt"`) is the file ALONE once it exists - t
 capability layer then rewrites it in place - so one top-level grant does not make
 `app.lua`, `migrations/` or `package.sig` writable. On the first run, before such a
 file exists, there is nothing narrower to grant than the app directory, and startup
-warns; put written files in a subdirectory to avoid that window. The capability
-layer enforces the exact path in every case.
+warns; put written files in a subdirectory to avoid that window. An existing
+directory named without the trailing slash (`"data"`) is that directory, as the
+capability layer compiles it. The grant is classified on the spelling the
+capability layer reads (`.` and empty components dropped), so `"./out.txt"` is the
+same top-level file grant as `"out.txt"`. The capability layer enforces the exact
+path in every case.
 
 **Allowed pledge promises:** `stdio inet rpath wpath cpath flock dns` (dns only if hosts declared). Notably absent: `prot_exec`, `exec`, `proc`. These grant the very syscalls Hull's W^X policy forbids.
 

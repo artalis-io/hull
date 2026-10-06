@@ -210,9 +210,14 @@ Compile-time maximums are `#ifndef`-guarded. Override via `make HL_WASM_MAX_HEAP
   `reserved` field: "HULL" + a version, `include/hull/cap/wasm_aot_stamp.h`).
   `hl_cap_wasm_load` refuses an unstamped `.aot` and falls back to the
   module's `.wasm` (interpreted: gas and the watchdog both bound it); with no
-  `.wasm` the load fails. `hull build` checks the stamp of every AOT it
-  compiles or takes from the AOT cache and, on the first unstamped one, stops
-  compiling AOT with an unpatched `wamrc` (the modules ship as `.wasm`).
+  `.wasm` the load fails. WAMR picks its loader by the magic (`\0aot`), not
+  the name, so the check is made on the bytes: AOT code saved as
+  `compute/<name>.wasm` is held to the same stamp (refused without it - there
+  is no bytecode to fall back to). `hull build` checks the stamp of every AOT
+  it compiles or takes from the AOT cache and, on the first unstamped one, stops
+  compiling AOT with an unpatched `wamrc` (the modules ship as `.wasm`); it
+  fails on a `compute/*.wasm` holding unstamped AOT code and names a committed
+  `compute/*.aot.*` without the stamp.
 - Synchronous call: Lua blocks until plugin returns (bounded by gas for the
   interpreter and by the timeout for everything)
 - For short computations (< 10 ms), this is zero-overhead and simple
