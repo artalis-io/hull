@@ -242,21 +242,25 @@ static int worker_lua_db_batch(lua_State *L)
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
 
-    if (hl_db_begin(h) != 0)
+    /* The event loop's batch machinery (mod_db.c): a nested batch is a
+     * savepoint and a transaction ended under the batch fails it. Raw
+     * BEGIN / COMMIT here let a nested batch commit the outer's writes on
+     * Postgres / MySQL and a raising outer batch stay committed (audit 8
+     * c_db M2). h is the thread's default connection, which fn cannot
+     * close, so it stays valid across the call. */
+    if (hl_db_batch_enter(h) != 0)
         return hl_lua_raise_copy(L, "BEGIN failed: ", hl_db_errmsg(h));
 
     lua_pushvalue(L, 1);
     int rc = lua_pcall(L, 0, LUA_MULTRET, 0);
 
     if (rc != LUA_OK) {
-        hl_db_rollback(h);
+        (void)hl_db_batch_leave(h, 0);
         return lua_error(L);
     }
 
-    if (hl_db_commit(h) != 0) {
-        hl_db_rollback(h);
+    if (hl_db_batch_leave(h, 1) != 0)
         return hl_lua_raise_copy(L, "COMMIT failed: ", hl_db_errmsg(h));
-    }
 
     return lua_gettop(L) - 1; /* return whatever fn returned */
 }

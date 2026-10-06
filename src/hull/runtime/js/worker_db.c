@@ -296,18 +296,24 @@ static JSValue worker_js_db_batch(JSContext *ctx, JSValueConst this_val,
             "statements after its first await would run outside the "
             "transaction");
 
-    if (hl_db_begin(h) != 0)
+    /* The event loop's batch machinery (mod_db.c): a nested batch is a
+     * savepoint and a transaction ended under the batch fails it. Raw
+     * BEGIN / COMMIT here let a nested batch commit the outer's writes on
+     * Postgres / MySQL and a throwing outer batch stay committed (audit 8
+     * c_db M2). h is the thread's default connection, which fn cannot
+     * close, so it stays valid across the call. */
+    if (hl_db_batch_enter(h) != 0)
         return JS_ThrowInternalError(ctx, "BEGIN failed: %s", hl_db_errmsg(h));
 
     JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
     if (JS_IsException(result)) {
-        hl_db_rollback(h);
+        (void)hl_db_batch_leave(h, 0);
         return JS_EXCEPTION;
     }
     int thenable = hl_js_is_thenable(ctx, result);
     if (thenable != 0) {
-        hl_db_rollback(h);
+        (void)hl_db_batch_leave(h, 0);
         JS_FreeValue(ctx, result);
         if (thenable < 0) return JS_EXCEPTION;
         return JS_ThrowTypeError(ctx,
@@ -316,8 +322,7 @@ static JSValue worker_js_db_batch(JSContext *ctx, JSValueConst this_val,
             "transaction (the batch was rolled back)");
     }
 
-    if (hl_db_commit(h) != 0) {
-        hl_db_rollback(h);
+    if (hl_db_batch_leave(h, 1) != 0) {
         JS_FreeValue(ctx, result);
         return JS_ThrowInternalError(ctx, "COMMIT failed: %s", hl_db_errmsg(h));
     }

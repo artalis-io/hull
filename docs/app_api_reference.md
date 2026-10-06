@@ -58,7 +58,10 @@ resumes, so no other code ever runs inside it.
 that leaves its worker connection inside a transaction (`BEGIN`, `START
 TRANSACTION`, a multi-statement string that opens one) has it rolled back and
 fails with `a transaction cannot span db.async operations ...`. Use `db.batch`
-on the connection for a transaction.
+on the connection for a transaction. Inside a `worker.dispatch` function,
+`db.batch` works as it does on the event loop: a nested batch is a savepoint,
+and a batch that raises rolls back everything it wrote, nested batches
+included.
 
 Named and dynamic connections are declared in the manifest. A DSN of exactly
 `"$VAR"` / `"${VAR}"` is an env reference resolved at open time.
