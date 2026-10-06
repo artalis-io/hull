@@ -8408,6 +8408,7 @@ UTEST(lua_tool_vm, unveil_context_reaches_the_tool_bindings)
     lua_pop(L, 2);
 
     hl_lua_free(&tv);
+    hl_tool_unveil_free(&uctx);
     hl_platform_vfs_dispose(pvfs_owned);
     remove(in_file); remove(out_file);
     rmdir(granted); rmdir(other);
@@ -8431,6 +8432,7 @@ UTEST(lua_tool_vm, app_runtime_drops_a_stray_unveil_context)
     ASSERT_EQ(hl_lua_init(&app, &cfg), 0);
     EXPECT_TRUE(app.tool_unveil_ctx == NULL);
     hl_lua_free(&app);
+    hl_tool_unveil_free(&uctx);
     hl_platform_vfs_dispose(pvfs_owned);
 }
 
