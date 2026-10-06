@@ -19,6 +19,9 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#ifdef __COSMOPOLITAN__
+#include <spawn.h>
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,12 +157,82 @@ static void agent_remove_discovery(const char *app_dir)
  * On ANY failure (fork / exec / non-zero exit) the previous same-session discovery sidecar
  * is REMOVED so `hull agent inspect` falls back to a standalone analysis rather than
  * serving a stale generation as current. */
+#ifdef __COSMOPOLITAN__
+/* Start a hull child with posix_spawnp - never fork()+execvp() - on cosmo. On
+ * Windows cosmo's fork() is EMULATED (a CreateProcess plus a copy of this
+ * process's memory), and that child can fault before it reaches exec; it then
+ * sits in cosmo's crash handler holding whatever pipe it inherited. See
+ * cosmo_spawn_start in cap/tool.c, which measured it. posix_spawn is a direct
+ * CreateProcess.
+ *
+ * The child gets SIGINT/SIGTERM at their defaults (what each fork child here
+ * set before exec) and, when @p mask is non-NULL, that signal mask. Each
+ * DEV_IO_* names what becomes the child's stdin / stdout / stderr: inherit,
+ * /dev/null, or @p pipe_fd; @p pipe_fd and @p close_fd (when >= 0) are then
+ * closed in the child. Returns the pid, or -1 with errno set. */
+enum { DEV_IO_INHERIT, DEV_IO_NULL, DEV_IO_PIPE };
+
+static pid_t dev_spawn(const char *exe, const char *const argv[],
+                       const sigset_t *mask, int in, int out, int err,
+                       int pipe_fd, int close_fd)
+{
+    extern char **environ;
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t at;
+    int rc = posix_spawn_file_actions_init(&fa);
+    if (rc != 0) { errno = rc; return -1; }
+    rc = posix_spawnattr_init(&at);
+    if (rc != 0) { posix_spawn_file_actions_destroy(&fa); errno = rc; return -1; }
+
+    sigset_t def;
+    sigemptyset(&def);
+    sigaddset(&def, SIGINT);
+    sigaddset(&def, SIGTERM);
+    short flags = POSIX_SPAWN_SETSIGDEF;
+    rc = posix_spawnattr_setsigdefault(&at, &def);
+    if (rc == 0 && mask) {
+        flags |= POSIX_SPAWN_SETSIGMASK;
+        rc = posix_spawnattr_setsigmask(&at, mask);
+    }
+    if (rc == 0) rc = posix_spawnattr_setflags(&at, flags);
+
+    const int which[3] = { in, out, err };
+    for (int fd = 0; rc == 0 && fd < 3; fd++) {
+        if (which[fd] == DEV_IO_NULL)
+            rc = posix_spawn_file_actions_addopen(&fa, fd, "/dev/null",
+                                                  fd == 0 ? O_RDONLY : O_WRONLY, 0);
+        else if (which[fd] == DEV_IO_PIPE)
+            rc = posix_spawn_file_actions_adddup2(&fa, pipe_fd, fd);
+    }
+    if (rc == 0 && pipe_fd > 2)
+        rc = posix_spawn_file_actions_addclose(&fa, pipe_fd);
+    if (rc == 0 && close_fd > 2)
+        rc = posix_spawn_file_actions_addclose(&fa, close_fd);
+
+    pid_t pid = -1;
+    if (rc == 0)
+        rc = posix_spawnp(&pid, exe, &fa, &at,
+                          (char *const *)(uintptr_t)argv, environ);
+    posix_spawnattr_destroy(&at);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) { errno = rc; return -1; }
+    return pid;
+}
+#endif
+
 static void agent_publish_discovery(const char *hull_exe, const char *app_dir, long generation)
 {
     char gen_arg[64], sp_arg[64];
     snprintf(gen_arg, sizeof(gen_arg), "--generation=%ld", generation);
     snprintf(sp_arg, sizeof(sp_arg), "--session-pid=%d", (int)getpid());
 
+    const char *pargv[] = { hull_exe, "agent", "inspect",
+                            app_dir, gen_arg, sp_arg, NULL };
+#ifdef __COSMOPOLITAN__
+    pid_t pid = dev_spawn(hull_exe, pargv, NULL, DEV_IO_INHERIT, DEV_IO_NULL,
+                          DEV_IO_NULL, -1, -1);
+    if (pid < 0) { agent_remove_discovery(app_dir); return; }
+#else
     pid_t pid = fork();
     if (pid < 0) { agent_remove_discovery(app_dir); return; }
     if (pid == 0) {
@@ -171,11 +244,10 @@ static void agent_publish_discovery(const char *hull_exe, const char *app_dir, l
             dup2(devnull, STDERR_FILENO);
             if (devnull > 2) close(devnull);
         }
-        const char *pargv[] = { hull_exe, "agent", "inspect",
-                                app_dir, gen_arg, sp_arg, NULL };
         execvp(hull_exe, (char *const *)(uintptr_t)pargv);   /* POSIX execvp does not modify argv */
         _exit(127);
     }
+#endif
     int status = 0;
     if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
         agent_remove_discovery(app_dir);
@@ -435,6 +507,15 @@ int hl_dev_state_reload(HlDevState *s)
     s->pipe_fd = new_pipe[0];
     pfd_for_child = new_pipe[1];
 
+#ifdef __COSMOPOLITAN__
+    pid_t pid = dev_spawn(s->hull_exe, (const char *const *)s->child_argv, NULL,
+                          DEV_IO_NULL, DEV_IO_PIPE, DEV_IO_PIPE,
+                          pfd_for_child, s->pipe_fd);
+    if (pid < 0) {
+        close(pfd_for_child);
+        return -1;
+    }
+#else
     pid_t pid = fork();
     if (pid < 0) {
         close(pfd_for_child);
@@ -459,6 +540,7 @@ int hl_dev_state_reload(HlDevState *s)
         execvp(s->hull_exe, (char *const *)(uintptr_t)s->child_argv);  /* POSIX execvp does not modify argv */
         _exit(127);
     }
+#endif
     close(pfd_for_child);
     s->child_pid       = pid;
     s->reload_count   += 1;
@@ -648,6 +730,17 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
         sigaddset(&blk, SIGINT);
         sigaddset(&blk, SIGTERM);
         sigprocmask(SIG_BLOCK, &blk, &prev);
+#ifdef __COSMOPOLITAN__
+        pid_t pid = dev_spawn(hull_exe, (const char *const *)child_argv, &prev,
+                              DEV_IO_INHERIT, DEV_IO_INHERIT, DEV_IO_INHERIT,
+                              -1, -1);
+        if (pid < 0) {
+            sigprocmask(SIG_SETMASK, &prev, NULL);
+            fprintf(stderr, "[hull:dev] spawn failed: %s\n", strerror(errno));
+            ret = 1;
+            break;
+        }
+#else
         pid_t pid = fork();
         if (pid < 0) {
             sigprocmask(SIG_SETMASK, &prev, NULL);
@@ -664,6 +757,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
             execvp(hull_exe, (char *const *)(uintptr_t)child_argv);  /* POSIX execvp does not modify argv */
             _exit(127);
         }
+#endif
 
         dev_child_pid = pid;
         sigprocmask(SIG_SETMASK, &prev, NULL);

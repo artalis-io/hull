@@ -462,6 +462,10 @@ static int cosmocc_reroute_exec(const char *const argv[],
                                 const char *const envadd[], int *rc);
 static int cosmocc_reroute_read(const char *const argv[],
                                 char **out, size_t *out_len);
+static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
+                             const char *const envadd[], int out_fd,
+                             int close_fd);
+static int cosmo_spawn_wait(const char *const argv[], const char *const envadd[]);
 #endif
 
 int hl_tool_spawn(const char *const argv[])
@@ -469,11 +473,15 @@ int hl_tool_spawn(const char *const argv[])
     return hl_tool_spawn_env(argv, NULL);
 }
 
-/* fork + (env) + execvp + wait + audit. NO allowlist/arg validation: callers
+/* fork + (env) + execvp + wait + audit (posix_spawnp on cosmo - see
+ * cosmo_spawn_start). NO allowlist/arg validation: callers
  * validate BEFORE calling (hl_tool_spawn_env on argv[0]; the shell-driver path
  * on its shell + driver + args). */
 static int spawn_and_wait(const char *const argv[], const char *const envadd[])
 {
+#ifdef __COSMOPOLITAN__
+    return cosmo_spawn_wait(argv, envadd);
+#else
     pid_t pid = fork();
     if (pid < 0) return -1;
 
@@ -505,6 +513,7 @@ static int spawn_and_wait(const char *const argv[], const char *const envadd[])
         hl_audit_end(&w);
     }
     return exit_code;
+#endif
 }
 
 /* The variables a tool spawn may set. Any key was accepted - and putenv'd
@@ -635,14 +644,23 @@ int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
     return rc;
 }
 
-/* fork + pipe + read child stdout. NO allowlist check (callers validate first,
- * or route a validated shell-driver argv here). Returns malloc'd output or NULL
- * (child failed / OOM). */
+/* fork + pipe + read child stdout (posix_spawnp on cosmo - see
+ * cosmo_spawn_start). NO allowlist check (callers validate first, or route a
+ * validated shell-driver argv here). Returns malloc'd output or NULL (child
+ * failed / OOM). */
 static char *spawn_read_argv(const char *const argv[], size_t *out_len)
 {
     int pipefd[2];
     if (pipe(pipefd) < 0) return NULL;
 
+#ifdef __COSMOPOLITAN__
+    pid_t pid;
+    if (cosmo_spawn_start(&pid, argv, NULL, pipefd[1], pipefd[0]) != 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return NULL;
+    }
+#else
     pid_t pid = fork();
     if (pid < 0) {
         close(pipefd[0]);
@@ -658,6 +676,7 @@ static char *spawn_read_argv(const char *const argv[], size_t *out_len)
         execvp(argv[0], (char *const *)(uintptr_t)argv);  /* POSIX execvp takes char*const[] but does not modify argv */
         _exit(127);
     }
+#endif
 
     /* Parent: read from pipe */
     close(pipefd[1]);
@@ -897,31 +916,70 @@ static void cosmo_prepare(const char *shell)
     cosmo_plant_sh(shell);
 }
 
-/* Spawn + wait via posix_spawn instead of fork()+execvp(). On cosmo/Windows,
- * fork() is EMULATED and its handle inheritance to a native child's descendants
- * doesn't preserve the pipes cosmocc's driver needs for out2=$(mktemper) (the
- * capture comes back empty). posix_spawn maps to a direct CreateProcess, which
- * inherits the standard handles cleanly. envp = environ + envadd. Same audit +
- * return-code contract as spawn_and_wait. */
+/* Start a child with posix_spawnp - never fork()+execvp() - on cosmo. On
+ * Windows cosmo's fork() is EMULATED: a CreateProcess plus a copy of this
+ * process's memory. That child can fault before it reaches exec (measured:
+ * the compiler probe's child died in RtlAllocateHeap in about one `hull build`
+ * in 30 on a fresh $HOME); it then sat in cosmo's crash handler holding any
+ * pipe it had inherited, so a parent reading that pipe blocked for good. The
+ * emulated fork also loses the pipe handles cosmocc's driver needs for
+ * out2=$(mktemper) (the capture comes back empty). posix_spawn is a direct
+ * CreateProcess, which inherits the standard handles cleanly; posix_spawnp
+ * searches PATH the way execvp did. envp = envadd (overriding) + environ.
+ * When @p out_fd >= 0 it becomes the child's stdout, and it and @p close_fd
+ * (>= 0) are closed in the child. Returns 0, or an errno value. */
 extern char **environ;
+static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
+                             const char *const envadd[], int out_fd,
+                             int close_fd)
+{
+    /* Freed by ownership, never by comparing with environ: posix_spawn can
+     * replace environ itself (cosmo on a GitHub Windows runner does), and
+     * "envp != environ" then freed the process's own environment array. */
+    char **envp = environ;
+    char **owned = NULL;
+    if (envadd && envadd[0]) {
+        size_t nenv = 0;
+        for (char **e = environ; *e; e++) nenv++;
+        size_t nadd = 0;
+        while (envadd[nadd]) nadd++;
+        envp = (char **)calloc(nenv + nadd + 1, sizeof(char *));
+        if (!envp) return ENOMEM;
+        size_t i = 0;
+        for (size_t j = 0; j < nadd; j++) envp[i++] = (char *)(uintptr_t)envadd[j];
+        for (char **e = environ; *e; e++) envp[i++] = *e;   /* envadd overrides */
+        envp[i] = NULL;
+        owned = envp;
+    }
+
+    posix_spawn_file_actions_t fa;
+    int have_fa = 0, rc = 0;
+    if (out_fd >= 0) {
+        rc = posix_spawn_file_actions_init(&fa);
+        if (rc == 0) {
+            have_fa = 1;
+            rc = posix_spawn_file_actions_adddup2(&fa, out_fd, STDOUT_FILENO);
+            if (rc == 0 && out_fd != STDOUT_FILENO)
+                rc = posix_spawn_file_actions_addclose(&fa, out_fd);
+            if (rc == 0 && close_fd >= 0)
+                rc = posix_spawn_file_actions_addclose(&fa, close_fd);
+        }
+    }
+    if (rc == 0)
+        rc = posix_spawnp(pid, argv[0], have_fa ? &fa : NULL, NULL,
+                          (char *const *)(uintptr_t)argv, envp);
+    if (have_fa) posix_spawn_file_actions_destroy(&fa);
+    free(owned);
+    return rc;
+}
+
+/* Spawn + wait (cosmo_spawn_start). Same audit + return-code contract as
+ * spawn_and_wait, except that a child that could not be started at all is
+ * -1 rather than an exit of 127. */
 static int cosmo_spawn_wait(const char *const argv[], const char *const envadd[])
 {
-    size_t nenv = 0;
-    for (char **e = environ; *e; e++) nenv++;
-    size_t nadd = 0;
-    if (envadd) while (envadd[nadd]) nadd++;
-    char **envp = (char **)calloc(nenv + nadd + 1, sizeof(char *));
-    if (!envp) return -1;
-    size_t i = 0;
-    for (size_t j = 0; j < nadd; j++) envp[i++] = (char *)(uintptr_t)envadd[j];
-    for (char **e = environ; *e; e++) envp[i++] = *e;   /* envadd overrides */
-    envp[i] = NULL;
-
     pid_t pid;
-    int rc = posix_spawn(&pid, argv[0], NULL, NULL,
-                         (char *const *)(uintptr_t)argv, envp);
-    free(envp);
-    if (rc != 0) return -1;
+    if (cosmo_spawn_start(&pid, argv, envadd, -1, -1) != 0) return -1;
 
     int status;
     if (waitpid(pid, &status, 0) < 0) return -1;
@@ -959,8 +1017,6 @@ static int cosmocc_reroute_exec(const char *const argv[],
     const char *tmpdir = (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0) ? td : NULL;
     const char **sv = build_shell_argv(shell, argv[0], argv + 1, tmpdir);
     if (!sv) { *rc = -1; return 1; }
-    /* posix_spawn, not fork()+execvp(): cosmo's emulated fork drops the pipe
-     * handles cosmocc's driver needs for its $(mktemper) capture on Windows. */
     *rc = cosmo_spawn_wait(sv, envadd);
     free((void *)(uintptr_t)sv);
     return 1;
