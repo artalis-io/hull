@@ -10,6 +10,9 @@
 #include "utest.h"
 #include "hull/cap/mysql_conn.h"
 #include "hull/cap/mysqlwire.h"
+/* The backend itself, for its static transaction bookkeeping (the build
+ * leaves cap_db_mysql.o out of this test's link). */
+#include "../../../src/hull/cap/db_mysql.c"
 
 #include <string.h>
 #include <sys/socket.h>
@@ -852,6 +855,82 @@ UTEST(mysql_conn, exec_multi_single)
     ASSERT_EQ(0, hl_my_conn_exec_multi(&conn, "CREATE TABLE a (id INT)"));
 
     hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* ── The backend (db_mysql.c, compiled into this test) ─────────────── */
+
+/* Start a backend handle on a socketpair whose server side has @p srv
+ * queued after the handshake. */
+static int my_backend_start(HlDbHandle *h, HlDbMyCtx *ctx, int sv[2],
+                            HlMyWriter *srv)
+{
+    memset(h, 0, sizeof *h);
+    memset(ctx, 0, sizeof *ctx);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -1;
+    if (write(sv[0], srv->buf, srv->len) != (ssize_t)srv->len) return -1;
+    HlMyDsn dsn; char err[128];
+    if (hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err) != 0)
+        return -1;
+    if (hl_my_conn_start(&ctx->conn, sv[1], &dsn) != 0) return -1;
+    h->backend = &hl_db_backend_mysql;
+    h->ctx = ctx;
+    h->batch_depth = 1;   /* inside a db.batch */
+    return 0;
+}
+
+/* A failed non-DDL statement after which the transaction is gone was a
+ * server rollback (a lock-wait timeout under innodb_rollback_on_timeout),
+ * not a DDL implicit commit: the resume opened a new transaction and the
+ * batch committed what followed without what came before (audit 7 L1). */
+UTEST(mysql_backend, rollback_under_a_failed_statement_is_not_resumed)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);                                   /* auth OK */
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    build_err(&s, 1, 1205, "Lock wait timeout exceeded");        /* UPDATE */
+    put_ok_more(&s, 1, 0x0002);                        /* PING: autocommit */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+    EXPECT_EQ(-1, mysql_exec(&h, "UPDATE a SET x = 1", NULL, 0));
+    EXPECT_EQ(1, ctx.txn_aborted);
+    EXPECT_TRUE(mysql_in_txn(&h));
+    /* Refused without a round trip (nothing more is queued) */
+    EXPECT_EQ(-1, mysql_exec(&h, "INSERT INTO a VALUES (1)", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "rolled this transaction back") != NULL);
+    EXPECT_EQ(0, mysql_rollback(&h));
+    EXPECT_EQ(0, ctx.txn_aborted);
+    EXPECT_FALSE(mysql_in_txn(&h));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A failed DDL statement still committed the transaction first: that one
+ * resumes, so the rest of the batch is transactional again. */
+UTEST(mysql_backend, failed_ddl_commit_is_resumed)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    build_err(&s, 1, 1050, "Table 't' already exists");          /* CREATE */
+    put_ok_more(&s, 1, 0x0002);                        /* PING: autocommit */
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* resume */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+    EXPECT_EQ(-1, mysql_exec(&h, "/* c */ CREATE TABLE t (id INT)", NULL, 0));
+    EXPECT_EQ(0, ctx.txn_aborted);
+    EXPECT_TRUE(my_in_trans(&h));
+
+    hl_my_conn_close(&ctx.conn);
     hl_my_writer_free(&s);
     close(sv[0]);
 }

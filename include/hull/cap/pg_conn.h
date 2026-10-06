@@ -218,7 +218,13 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql);
  *   0  the timeout elapsed with no notification (fall back to a poll),
  *  -1  the connection is dead (EOF / error; caller should reconnect + re-LISTEN).
  * A latency primitive only: correctness must ride the timeout, never the wake.
+ *
+ * Only a notification on @p channel (compared without case; NULL = any)
+ * returns 1. One for another channel LISTENed on the same connection is
+ * passed to @p on_other (may be NULL) and the wait goes on to its deadline.
  */
-int hl_pg_wait_notify(HlPgConn *conn, int timeout_ms);
+typedef void (*HlPgNotifyOtherFn)(void *ud, const char *channel);
+int hl_pg_wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
+                      HlPgNotifyOtherFn on_other, void *ud);
 
 #endif /* HL_CAP_PG_CONN_H */

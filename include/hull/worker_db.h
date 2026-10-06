@@ -65,6 +65,16 @@ HlWorkerDb *hl_worker_db_get_for(const char *dsn);
 void hl_worker_db_invalidate(const char *dsn);
 
 /*
+ * End of a worker.dispatch job on this thread: roll back any transaction
+ * the job left open on this thread's pooled connections (dropping one whose
+ * rollback does not take), so it cannot hold locks or run later jobs and
+ * db.async ops inside it. Returns 1 when one was open, with a message for
+ * the failed job in @p err (may be NULL); 0 otherwise. Never opens a
+ * connection.
+ */
+int hl_worker_db_end_job(char *err, size_t errsz);
+
+/*
  * Shared "get worker DB + check internal-table namespace" helper for the
  * per-thread runtime bindings (runtime/{lua,js}/worker_db.c). Returns the
  * worker's backend handle on success, or NULL with *out_err set to a static

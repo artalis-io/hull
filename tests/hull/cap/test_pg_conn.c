@@ -16,6 +16,7 @@
 #include "hull/cap/pgwire.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -520,14 +521,62 @@ UTEST(pg_query, wait_notify)
     ASSERT_TRUE(conn.transport != NULL);
 
     /* 1. A notification is queued -> 1. */
-    ASSERT_EQ(1, hl_pg_wait_notify(&conn, 1000));
+    ASSERT_EQ(1, hl_pg_wait_notify(&conn, NULL, 1000, NULL, NULL));
     /* 2. Nothing more -> times out to 0 (a short bound, no real delay needed). */
-    ASSERT_EQ(0, hl_pg_wait_notify(&conn, 20));
+    ASSERT_EQ(0, hl_pg_wait_notify(&conn, NULL, 20, NULL, NULL));
     /* 3. Peer closed -> connection dead -> -1. */
     close(sv[0]);
-    ASSERT_EQ(-1, hl_pg_wait_notify(&conn, 1000));
+    ASSERT_EQ(-1, hl_pg_wait_notify(&conn, NULL, 1000, NULL, NULL));
 
     hl_pg_conn_close(&conn);
+}
+
+static void put_notify(HlPgWriter *s, const char *channel)
+{
+    size_t m = hl_pg_msg_begin(s, 'A');
+    hl_pg_put_i32(s, 4321);
+    hl_pg_put_cstr(s, channel);
+    hl_pg_put_cstr(s, "");
+    hl_pg_msg_end(s, m);
+}
+
+static void note_other(void *ud, const char *channel)
+{
+    snprintf((char *)ud, 64, "%s", channel);
+}
+
+/* Only the waited channel's notification wakes a wait; one for another
+ * channel on the same connection is handed back and the wait goes on
+ * (audit 7 L4: any notification woke any waiter). */
+UTEST(pg_query, wait_notify_wakes_only_its_channel)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    put_notify(&s, "orders");
+    put_notify(&s, "hull_jobs");
+    put_notify(&s, "orders");
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.transport = hl_db_transport_adopt("pg", NULL, sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    ASSERT_TRUE(conn.transport != NULL);
+
+    char other[64] = "";
+    ASSERT_EQ(1, hl_pg_wait_notify(&conn, "HULL_JOBS", 1000, note_other, other));
+    EXPECT_STREQ(other, "orders");
+    /* The second "orders" does not wake a hull_jobs wait. */
+    other[0] = '\0';
+    ASSERT_EQ(0, hl_pg_wait_notify(&conn, "hull_jobs", 20, note_other, other));
+    EXPECT_STREQ(other, "orders");
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
 }
 
 UTEST(pg_query, server_error_then_ready)

@@ -702,6 +702,11 @@ M3). Worker connections are per-thread and reused by every later op, so after
 each op `worker_end_txn` (`worker_db.c`) rolls back a transaction the op left
 open (`BEGIN` through `db.async`) and fails it with "a transaction cannot span
 db.async operations"; a connection whose rollback did not take is dropped. A
+`worker.dispatch` job's `db` runs on the same pooled connection, so the job's
+end does the same (`hl_worker_db_end_job`, after the worker VM is closed):
+a transaction the job left open - forgotten, or raised / over budget between
+`BEGIN` and `COMMIT` - is rolled back and the dispatch fails with "a
+transaction cannot outlive a worker.dispatch job" (audit 7 M4). A
 WAIT_NOTIFY on a `db.open` handle keeps its LISTEN connection only while the
 handle is open: the op carries the handle's id (`hl_db_dynamic_id`) and every
 op sweeps the thread's connections whose handle was closed
@@ -785,7 +790,10 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   but `ROLLBACK` (as for a connection lost mid-transaction), so later
   statements cannot autocommit and the COMMIT cannot "succeed". A deadlock
   in a later statement of a multi-statement `exec` counts too (its ERR code
-  is recorded while the reply is drained, audit 6 L2).
+  is recorded while the reply is drained, audit 6 L2). So does any other
+  failed non-DDL statement after which `COM_PING` finds the transaction gone
+  (a lock-wait timeout under `innodb_rollback_on_timeout=ON`): only a DDL
+  statement's implicit commit is resumed (audit 7 L1).
 - **Implicit commits:** MySQL commits the open transaction around DDL, and
   before a DDL statement that then fails. An ERR carries no status flags, so
   after a failed statement inside a transaction (and after the `CREATE INDEX`

@@ -26,11 +26,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp */
+
+/* A channel LISTENed on a connection, and whether a notification for it
+ * arrived while a wait on another channel held the connection. */
+#define HL_PG_MAX_LISTEN 8
+typedef struct HlPgListen {
+    char name[64];            /* pg_channel_ok bounds a name to 63 */
+    int  pending;
+} HlPgListen;
 
 typedef struct HlDbPgCtx {
     HlPgConn     conn;
     HlAllocator *alloc;
-    int          listening;   /* 1 once LISTEN was issued on this connection */
+    HlPgListen   listen[HL_PG_MAX_LISTEN];   /* LISTENed on this connection */
+    int          nlisten;
     char        *dsn;         /* to reconnect (secret: scrubbed on close) */
 } HlDbPgCtx;
 
@@ -107,7 +117,7 @@ static int pg_ready(HlDbPgCtx *s, const char *sql, int pinned)
     }
     hl_pg_conn_close(&s->conn);
     s->conn = fresh;
-    s->listening = 0;
+    s->nlisten = 0;   /* a new session listens to nothing */
     return 0;
 }
 
@@ -643,24 +653,54 @@ static int pg_channel_ok(const char *ch)
     return 1;
 }
 
-/* Optional low-latency wakeup. LISTEN once per connection, then block up to
- * timeout_ms for a NotificationResponse. Returns 1 (notified), 0 (timeout),
- * -1 (bad channel or dead connection). Blocking: runs on the db.async worker
- * pool, never the event-loop thread. On a -1 from the wait the connection is
- * dead; the worker's per-DSN cache reopens a fresh handle (listening resets to
- * 0 on the new ctx) and re-LISTENs on the next call. */
+static HlPgListen *pg_listen_find(HlDbPgCtx *s, const char *channel)
+{
+    for (int i = 0; i < s->nlisten; i++)
+        if (strcasecmp(s->listen[i].name, channel) == 0) return &s->listen[i];
+    return NULL;
+}
+
+/* A notification for another channel on this connection arrived during a
+ * wait: it is that channel's next wait's wake-up. */
+static void pg_listen_note(void *ud, const char *channel)
+{
+    HlPgListen *l = pg_listen_find((HlDbPgCtx *)ud, channel);
+    if (l) l->pending = 1;
+}
+
+/* Optional low-latency wakeup. LISTEN once per channel per connection, then
+ * block up to timeout_ms for a NotificationResponse on THAT channel: the
+ * connection is a worker thread's, shared by every channel waited on through
+ * it (audit 7 L4: a second channel never LISTENed, and any notification woke
+ * any waiter). One for another channel marks it pending for that channel's
+ * next wait. Past HL_PG_MAX_LISTEN channels a channel is LISTENed again on
+ * each wait (idempotent) and its notifications are not kept between waits.
+ * Returns 1 (notified), 0 (timeout), -1 (bad channel or dead connection).
+ * Blocking: runs on the db.async worker pool, never the event-loop thread.
+ * On a -1 from the wait the connection is dead; the next call reconnects
+ * (listening to nothing) and re-LISTENs. */
 static int pg_wait_notify(HlDbHandle *h, const char *channel, int timeout_ms)
 {
     HlDbPgCtx *s = h->ctx;
     if (!pg_channel_ok(channel)) return -1;
     if (pg_ready(s, NULL, h->session_pinned) != 0) return -1;
-    if (!s->listening) {
+    HlPgListen *l = pg_listen_find(s, channel);
+    if (!l) {
         char sql[80];
         snprintf(sql, sizeof sql, "LISTEN %s", channel);
         if (hl_pg_exec_simple(&s->conn, sql) != 0) return -1;
-        s->listening = 1;
+        if (s->nlisten < HL_PG_MAX_LISTEN) {
+            l = &s->listen[s->nlisten++];
+            snprintf(l->name, sizeof l->name, "%s", channel);
+            l->pending = 0;
+        }
     }
-    int rc = hl_pg_wait_notify(&s->conn, timeout_ms);
+    if (l && l->pending) {
+        l->pending = 0;
+        return 1;
+    }
+    int rc = hl_pg_wait_notify(&s->conn, channel, timeout_ms,
+                               pg_listen_note, s);
     if (rc < 0) s->conn.broken = 1;   /* reconnected (and re-LISTENed) next call */
     return rc;
 }

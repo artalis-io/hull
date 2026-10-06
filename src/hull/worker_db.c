@@ -49,8 +49,8 @@
  * knows nothing about named vs dynamic. The cap is generous, so the small
  * manifest-bounded named/default set (<= HL_DB_REGISTRY_MAX) never evicts in
  * practice. Eviction between work items is safe: async ops are atomic (one
- * query/exec each), and no transaction outlives the op that opened it
- * (worker_end_txn). */
+ * query/exec each), and no transaction outlives the op or worker.dispatch
+ * job that opened it (worker_end_txn, hl_worker_db_end_job). */
 #define HL_WORKER_DB_MAX_CONNS 32
 typedef struct WorkerConnNode {
     char                  *dsn;   /* owned; resolved DSN this connection opened from */
@@ -251,6 +251,45 @@ static void worker_db_sweep_closed_dynamic(void)
 HlWorkerDb *hl_worker_db_get(void)
 {
     return hl_worker_db_get_for(NULL);
+}
+
+/* A worker.dispatch job's `db` runs on this thread's pooled connection, the
+ * one later jobs and db.async ops on the thread reuse (audit 7 M4): a
+ * transaction the job left open (forgotten, or the job raised / tripped its
+ * budget between BEGIN and COMMIT) held the SQLite write lock against every
+ * writer, ran later jobs inside it, and was rolled back - their writes with
+ * it - by the next db.async op, which failed with an error about itself.
+ * Roll back every open transaction on the thread; a connection whose
+ * rollback did not end it is dropped. */
+int hl_worker_db_end_job(char *err, size_t errsz)
+{
+    if (!worker_db_dsn) return 0;   /* never initialized: no connections */
+    WorkerConnNode *head = (WorkerConnNode *)pthread_getspecific(worker_db_key);
+    WorkerConnNode **link = &head;
+    int found = 0;
+    while (*link) {
+        WorkerConnNode *n = *link;
+        HlDbHandle *h = &n->wdb.handle;
+        if (h->backend && hl_db_in_txn(h)) {
+            found = 1;
+            if (hl_db_rollback(h) != 0 || hl_db_in_txn(h)) {
+                *link = n->next;
+                h->backend->close(h);
+                hl_secure_free_str(n->dsn);
+                free(n);
+                continue;
+            }
+        }
+        link = &n->next;
+    }
+    pthread_setspecific(worker_db_key, head);
+    if (found && err && errsz)
+        snprintf(err, errsz,
+                 "dispatch: a transaction cannot outlive a worker.dispatch "
+                 "job (it runs on the worker thread's pooled connection); it "
+                 "was rolled back - COMMIT before the function returns, or "
+                 "use db.batch");
+    return found;
 }
 
 /* ── Shared "get + namespace check" for the runtime bindings ──────── */

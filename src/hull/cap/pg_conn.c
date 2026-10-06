@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>     /* strcasecmp */
 #include <time.h>        /* clock_gettime(CLOCK_MONOTONIC) */
 #include <unistd.h>
 
@@ -1385,7 +1386,25 @@ static int64_t mono_ms(void)
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-int hl_pg_wait_notify(HlPgConn *conn, int timeout_ms)
+/* 1 when the NotificationResponse @p f is for @p channel (NULL = any). The
+ * server reports the folded name of the channel LISTEN registered; Hull's
+ * channels are plain identifiers, so compare without case. A body that does
+ * not parse matches nothing. */
+static int notify_is_for(const HlPgFrame *f, const char *channel, char *got,
+                         size_t gotsz)
+{
+    if (got && gotsz) got[0] = '\0';
+    HlPgCursor c;
+    hl_pg_cursor_init(&c, f);
+    (void)hl_pg_get_i32(&c);                        /* sender pid */
+    const char *ch = hl_pg_get_cstr(&c);
+    if (!ch || hl_pg_cursor_err(&c)) return 0;
+    if (got && gotsz) snprintf(got, gotsz, "%s", ch);
+    return !channel || strcasecmp(ch, channel) == 0;
+}
+
+int hl_pg_wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
+                      HlPgNotifyOtherFn on_other, void *ud)
 {
     if (!conn || !conn->transport) return -1;
     int fd = hl_db_transport_fd(conn->transport);
@@ -1413,7 +1432,13 @@ int hl_pg_wait_notify(HlPgConn *conn, int timeout_ms)
         if (r == HL_PG_OK) {
             uint8_t type = f.type;
             conn->consumed = consumed;   /* compacted at the top of the next loop */
-            if (type == HL_PG_B_NOTIFY) return 1;
+            if (type == HL_PG_B_NOTIFY) {
+                char got[64];
+                if (notify_is_for(&f, channel, got, sizeof got)) return 1;
+                /* Another channel LISTENed on this connection: it did not
+                 * wake this wait (audit 7 L4). Report it and keep waiting. */
+                if (on_other && got[0]) on_other(ud, got);
+            }
             continue;   /* a stray Notice / ParameterStatus: skip, check for more */
         }
 

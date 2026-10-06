@@ -6960,6 +6960,38 @@ JS_WORKER_CASE(db_async_rows_are_built_like_db_query_rows,
     "  const d = Object.getOwnPropertyDescriptor(r, '__proto__');\n"
     "  check(d && d.value === 7, 'no own __proto__ column');\n")
 
+/* Audit 7 M4: a transaction a job left open stayed open on the worker
+ * thread's pooled connection (write lock held, later jobs inside it, rolled
+ * back with their writes by the next db.async op). It ends with the job. */
+static HlResolvedModuleSet a7_worker_set;
+static void a7_worker_db(void)
+{
+    a3_worker_db();
+    /* The dispatch gives the worker VM `db` only for an app declaring it. */
+    hl_module_set_clear(&a7_worker_set);
+    static const char *const mods[] = { "db", "worker" };
+    for (size_t i = 0; i < 2; i++) {
+        int idx = hl_module_registry_index(hl_module_registry_find_short(mods[i]));
+        if (idx < 0) return;
+        a7_worker_set.bits[idx / 64] |= (uint64_t)1 << (idx % 64);
+    }
+    js.base.module_set = &a7_worker_set;
+}
+
+JS_WORKER_CASE(a_transaction_does_not_outlive_its_job,
+    a7_worker_db(),
+    "  await worker.dispatch(() => { db.exec('CREATE TABLE a7 (x INTEGER)'); return 0; });\n"
+    "  const m1 = await fails(() => {\n"
+    "    db.exec('BEGIN'); db.exec('INSERT INTO a7 VALUES (1)'); return 1; });\n"
+    "  check(m1.includes('cannot outlive a worker.dispatch job'), m1);\n"
+    "  const m2 = await fails(() => {\n"
+    "    db.exec('BEGIN'); db.exec('INSERT INTO a7 VALUES (2)'); throw new Error('boom'); });\n"
+    "  check(m2.includes('boom'), m2);\n"
+    /* BEGIN fails inside an open transaction */
+    "  const n = await worker.dispatch(() => { db.exec('BEGIN'); db.exec('COMMIT');\n"
+    "    return db.query('SELECT count(*) AS n FROM a7')[0].n; });\n"
+    "  check(n === 0, 'count ' + JSON.stringify(n));\n")
+
 /* ── Audit 4: the JS runtime ──────────────────────────────────────────── */
 
 /* Run a module in the caps-bearing context; 0 on success. */

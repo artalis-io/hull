@@ -284,12 +284,13 @@ $(BUILDDIR)/test_mysqlwire: $(TESTDIR)/hull/cap/test_mysqlwire.c $(SRCDIR)/hull/
 # do not collide. -DHL_MY_NO_TLS is DROPPED (the connection layer + transport are
 # now linked). Only reached under HL_ENABLE_MYSQL=1. The socketpair handshake
 # tests stay plaintext (the adopt path drives the descriptor directly), so no TLS
-# server is needed.
-MY_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_LIBS))
-MY_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_DEPS))
+# server is needed. The test also #includes cap/db_mysql.c (the backend's static
+# transaction bookkeeping), so cap_db_mysql.o is filtered out too.
+MY_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_db_transport.o $(BUILDDIR)/cap_db_mysql.o,$(TEST_COMMON_LIBS))
+MY_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o $(BUILDDIR)/cap_db_transport.o $(BUILDDIR)/cap_db_mysql.o,$(TEST_COMMON_DEPS))
 $(BUILDDIR)/test_mysql_conn: $(TESTDIR)/hull/cap/test_mysql_conn.c \
     $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/cap/db_transport.c \
-    $(MY_CONN_TEST_DEPS) | $(BUILDDIR)
+    $(SRCDIR)/hull/cap/db_mysql.c $(MY_CONN_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c \
 		$(SRCDIR)/hull/cap/db_transport.c $(MY_CONN_TEST_LIBS) $(LDFLAGS)

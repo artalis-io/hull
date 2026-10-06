@@ -33,7 +33,8 @@ typedef struct HlDbMyCtx {
     HlMyConn conn;
     char    *dsn;       /* to reconnect (secret: scrubbed on close) */
     /* InnoDB rolled the open transaction back under a failed statement (a
-     * deadlock): later statements would each autocommit and the eventual
+     * deadlock, or a lock-wait timeout under innodb_rollback_on_timeout):
+     * later statements would each autocommit and the eventual
      * COMMIT would succeed, so calls refuse until a ROLLBACK (my_ready). */
     int      txn_aborted;
 } HlDbMyCtx;
@@ -87,8 +88,9 @@ static int my_ready(HlDbMyCtx *s, const char *sql, int pinned)
             return 1;
         }
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
-                 "the server rolled this transaction back (deadlock), so none "
-                 "of its statements were applied; roll back and retry");
+                 "the server rolled this transaction back (a deadlock or a "
+                 "lock-wait timeout), so none of its statements were "
+                 "applied; roll back and retry");
         return -1;
     }
     if (!s->conn.broken)
@@ -561,7 +563,29 @@ static int mysql_exec_raw(HlDbHandle *h, const char *sql,
  * only the statement). The server status still read "in a transaction" from
  * the last OK, and nothing told the app: its next statements autocommitted
  * and COMMIT succeeded with the earlier writes gone. Remember it instead. */
-static void my_note_failure(HlDbMyCtx *s, int was_in_trans, int rc)
+/* 1 when @p sql starts with a statement MySQL commits the open transaction
+ * before running - so before it fails, too: DDL, LOCK / UNLOCK TABLES,
+ * account management, the table-maintenance and administration statements.
+ * A failure of anything else that ends the transaction was a rollback. Only
+ * the first statement of a multi-statement text is read, so a later DDL
+ * statement that failed is taken for a rollback: refused, not resumed. */
+static int my_sql_commits_implicitly(const char *sql)
+{
+    static const char *const kw[] = {
+        "alter", "analyze", "cache", "change", "check", "create", "drop",
+        "flush", "grant", "install", "load", "lock", "optimize", "purge",
+        "rename", "repair", "reset", "revoke", "stop", "truncate",
+        "uninstall", "unlock",
+    };
+    char w[16];
+    (void)hl_sql_next_word(sql ? sql : "", w, sizeof w);
+    for (size_t i = 0; i < sizeof kw / sizeof kw[0]; i++)
+        if (strcmp(w, kw[i]) == 0) return 1;
+    return 0;
+}
+
+static void my_note_failure(HlDbMyCtx *s, const char *sql, int was_in_trans,
+                            int rc)
 {
     if (rc < 0 && was_in_trans && !s->conn.broken &&
         s->conn.last_err_code == HL_MY_ER_LOCK_DEADLOCK) {
@@ -572,8 +596,21 @@ static void my_note_failure(HlDbMyCtx *s, int was_in_trans, int rc)
     /* Any other failure inside a transaction: an ERR carries no status, and a
      * failed DDL statement had already committed the transaction - ask
      * (audit 6 L1), so the implicit-commit resume and the batch see it. */
-    if (rc < 0 && was_in_trans && !s->conn.broken && !s->txn_aborted)
-        (void)hl_my_conn_ping(&s->conn);
+    if (rc < 0 && was_in_trans && !s->conn.broken && !s->txn_aborted) {
+        if (hl_my_conn_ping(&s->conn) != 0 ||
+            (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS))
+            return;
+        /* Gone, and not committed by a DDL statement: the server rolled the
+         * whole transaction back under the failed statement (a lock-wait
+         * timeout under innodb_rollback_on_timeout, ...). The resume would
+         * have opened a new one and let the batch commit what followed
+         * without what came before (audit 7 L1): refuse until a ROLLBACK, as
+         * for a deadlock. A COMMIT / ROLLBACK / savepoint statement ends or
+         * keeps the transaction on its own terms. */
+        if (hl_sql_txn_kind(sql) == HL_SQL_TXN_NONE &&
+            !my_sql_commits_implicitly(sql))
+            s->txn_aborted = 1;
+    }
 }
 
 static int my_in_trans(const HlDbHandle *h)
@@ -617,7 +654,7 @@ static int mysql_query(HlDbHandle *h, const char *sql,
 {
     int was = my_in_trans(h);
     int rc = mysql_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
-    if (h && h->ctx) my_note_failure(h->ctx, was, rc);
+    if (h && h->ctx) my_note_failure(h->ctx, sql, was, rc);
     my_resume_after_implicit_commit(h, sql, was);
     return rc;
 }
@@ -627,7 +664,7 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
 {
     int was = my_in_trans(h);
     int rc = mysql_exec_raw(h, sql, params, nparams);
-    if (h && h->ctx) my_note_failure(h->ctx, was, rc);
+    if (h && h->ctx) my_note_failure(h->ctx, sql, was, rc);
     my_resume_after_implicit_commit(h, sql, was);
     return rc;
 }
@@ -666,7 +703,7 @@ static int mysql_txn(HlDbHandle *h, const char *sql)
 {
     int was = my_in_trans(h);
     int rc = mysql_txn_raw(h, sql);
-    if (h && h->ctx) my_note_failure(h->ctx, was, rc);
+    if (h && h->ctx) my_note_failure(h->ctx, sql, was, rc);
     return rc;
 }
 

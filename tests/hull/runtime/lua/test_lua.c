@@ -181,6 +181,10 @@ static void init_lua_with_caps(void)
     lua_rt.base.db_registry = test_db_registry;
     lua_rt.base.env_cfg = &env_cfg;
     lua_rt.base.platform_vfs = &platform_vfs;
+    lua_rt.base.async_ctx   = pending_async_ctx;
+    lua_rt.base.thread_pool = pending_thread_pool;
+    pending_async_ctx   = NULL;
+    pending_thread_pool = NULL;
     int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
     if (lua_initialized) install_test_globals(lua_rt.L);
@@ -7359,6 +7363,65 @@ UTEST(lua_worker, db_is_absent_unless_declared)
         "  function() return db == nil end))\n", out, sizeof out);
     EXPECT_STREQ(out, "true");
     lua_worker_close(&f);
+}
+
+/* Audit 7 M4: a transaction a job left open stayed open on the worker
+ * thread's pooled connection - holding the SQLite write lock, running later
+ * jobs inside it, and rolled back with their writes by the next db.async op
+ * on the thread. Now each job's transaction ends with the job. */
+static char lua_a7_worker_dsn[HL_TEST_PATH_MAX + 16];
+
+UTEST(lua_worker, a_transaction_does_not_outlive_its_job)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a7wdb"), NULL);
+    /* A file: the worker keeps the DSN pointer, and cosmo's realpath turns
+     * ":memory:" into a path it cannot open on Windows. */
+    snprintf(lua_a7_worker_dsn, sizeof lua_a7_worker_dsn, "%s/w.db", dir);
+    hl_worker_db_init(lua_a7_worker_dsn);
+
+    LuaWorkerFix f;
+    memset(&f, 0, sizeof f);
+    f.be = hl_async_backend();
+    ASSERT_EQ(f.be->init(&f.actx, NULL), 0);
+    ASSERT_EQ(f.be->pool_create(&f.pool, f.actx, 1, 16), 0);
+    pending_async_ctx   = f.actx;
+    pending_thread_pool = f.pool;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    /* The dispatch gives the worker VM `db` only for an app declaring it. */
+    HlResolvedModuleSet set;
+    hl_module_set_clear(&set);
+    static const char *const mods[] = { "db", "worker" };
+    for (size_t i = 0; i < 2; i++) {
+        int idx = hl_module_registry_index(hl_module_registry_find_short(mods[i]));
+        ASSERT_GE(idx, 0);
+        set.bits[idx / 64] |= (uint64_t)1 << (idx % 64);
+    }
+    lua_rt.base.module_set = &set;
+
+    char out[512];
+    lua_worker_run(&f,
+        "local w = require('hull.worker')\n"
+        "local function msg(r) return type(r) == 'table' and r.error or tostring(r) end\n"
+        "w.dispatch(function() db.exec('CREATE TABLE a7 (x INTEGER)') return 0 end)\n"
+        "local r1 = w.dispatch(function()\n"
+        "  db.exec('BEGIN') db.exec('INSERT INTO a7 VALUES (1)') return 1 end)\n"
+        "local r2 = w.dispatch(function()\n"
+        "  db.exec('BEGIN') db.exec('INSERT INTO a7 VALUES (2)') error('boom') end)\n"
+        /* BEGIN fails inside an open transaction */
+        "local r3 = w.dispatch(function() db.exec('BEGIN') db.exec('COMMIT')\n"
+        "  return db.query('SELECT count(*) AS n FROM a7')[1].n end)\n"
+        "return msg(r1) .. '|' .. msg(r2) .. '|' .. msg(r3)\n", out, sizeof out);
+    EXPECT_NE_MSG(strstr(out, "cannot outlive a worker.dispatch job"), NULL, out);
+    EXPECT_NE_MSG(strstr(out, "boom"), NULL, out);
+    EXPECT_NE_MSG(strstr(out, "|0"), NULL, out);
+
+    lua_rt.base.module_set = NULL;
+    cleanup_lua_caps();
+    f.be->tick(f.actx, 0);
+    f.be->pool_free(f.pool);
+    f.be->free(f.actx);
 }
 
 /* ── audit 3: runtime fixes ──────────────────────────────────────────── */
