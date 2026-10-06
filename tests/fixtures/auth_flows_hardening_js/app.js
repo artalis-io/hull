@@ -86,6 +86,9 @@ authFlows.init({
         res.header("Set-Cookie", cookie.clear("session", { path: "/" }));
         res.json({ ok: true });
     },
+    // Session revocation: a reset, and an email change undone from the old
+    // address, sign out every session of the account.
+    onPasswordReset: (req, res, user) => { session.destroyAll(user.id); },
     maxFailedLogins:     3,
     lockoutDuration:     2,
     checkPwnedPasswords: true,

@@ -100,6 +100,9 @@ authflows.init({
         res:header("Set-Cookie", cookie.clear("session", { path = "/" }))
         res:json({ ok = true })
     end,
+    -- Session revocation: a reset, and an email change undone from the old
+    -- address, sign out every session of the account.
+    on_password_reset = function(_req, _res, user) session.destroy_all(user.id) end,
     -- Hardening config.
     max_failed_logins     = 3,    -- tighter for fast tests
     lockout_duration      = 2,    -- 2 seconds - survives the test

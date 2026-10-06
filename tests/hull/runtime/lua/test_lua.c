@@ -3578,6 +3578,43 @@ UTEST(lua_stdlib, auth_flows_origin_is_built_from_the_allowlist)
     cleanup_lua_caps();
 }
 
+/* Login CSRF (audit 8): the guard on every session-setting POST. Sec-Fetch-
+ * Site same-origin / none passes, cross-site and same-site do not; without it
+ * Origin, then Referer, must name the app; with neither, only a body that is
+ * JSON by its Content-Type essence passes. */
+UTEST(lua_stdlib, auth_flows_cross_site_guard)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  local g = af._test.same_origin_request "
+        "  local st = af._test.state "
+        "  st.trust_request_host = false; st.trusted_hosts = { 'app.example.com' } "
+        "  local form = 'application/x-www-form-urlencoded' "
+        "  local function req(h, body) h['content-type'] = h['content-type'] or form "
+        "    return { headers = h, body = body or 'email=a%40b.co&password=x' } end "
+        "  if not g(req{ ['sec-fetch-site']='same-origin' }) then return 1 end "
+        "  if g(req{ ['sec-fetch-site']='cross-site' }) then return 2 end "
+        "  if g(req{ ['sec-fetch-site']='same-site' }) then return 3 end "
+        "  if g(req{ host='app.example.com' }) then return 4 end "
+        "  if not g(req{ host='app.example.com', origin='https://app.example.com' }) then return 5 end "
+        "  if g(req{ host='app.example.com', origin='https://evil.example' }) then return 6 end "
+        "  if g(req{ host='app.example.com', origin='null' }) then return 7 end "
+        "  if not g(req{ host='x.test:81', referer='http://x.test:81/login' }) then return 8 end "
+        "  if g(req({ ['content-type']='text/plain; x=application/json' }, '{\"email\":\"a\"}')) then return 9 end "
+        "  if not g(req({ ['content-type']='application/json; charset=utf-8' }, '{\"email\":\"a\"}')) then return 10 end "
+        "  if g(req({ ['content-type']='application/json' }, 'email=a')) then return 11 end "
+        "  if g(req{ ['sec-fetch-site']='cross-site', origin='https://app.example.com' }) then return 12 end "
+        "  if not g({ headers = {}, body = '' }, true) then return 13 end "
+        "  if g(req{ origin='https://app.example.com.evil.test' }) then return 14 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, auth_flows_token_round_trip)
 {
     init_lua_with_caps();

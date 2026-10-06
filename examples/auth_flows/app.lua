@@ -173,7 +173,7 @@ app.get("/", function(_req, res)
   <li><code>POST /auth/magic-link {email}</code></li>
   <li><code>POST /auth/password-reset/request {email}</code></li>
   <li><code>POST /auth/password-reset/confirm {token, password}</code></li>
-  <li><code>POST /auth/email-change {new_email}</code> (must be logged in)</li>
+  <li><code>POST /auth/email-change {new_email, password}</code> (must be logged in)</li>
   <li><code>POST /auth/logout</code></li>
   <li><code>GET /me</code></li>
 </ul>
