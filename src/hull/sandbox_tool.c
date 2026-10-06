@@ -204,7 +204,16 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
         platform_dir = NULL;   /* argv[0] "/hull" made this "/" */
 
     /* App sources: read-only, and only when the path is a real directory
-     * (see the output_dir note below). */
+     * (see the output_dir note below) that is not "/" or $HOME or above -
+     * the app code a build loads would otherwise read every file the user
+     * owns. A command pointed there still reads the invocation directory if
+     * that is grantable. */
+    if (app_dir && dir_exists_p(app_dir) && path_too_broad(app_dir)) {
+        log_warn("[sandbox] tool mode: not granting '%s' (the filesystem "
+                 "root, or your home directory or above) as the app "
+                 "directory", app_dir);
+        app_dir = NULL;
+    }
     if (app_dir && dir_exists_p(app_dir))
         hl_tool_unveil_add(ctx, app_dir, "r");
 

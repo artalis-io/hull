@@ -177,9 +177,24 @@ static const char *parse_linker_option(int argc, char **argv)
 }
 
 /*
- * Extract app_dir from argv (first positional arg not starting with '-').
- * Returns "." if not found.
+ * Extract app_dir from argv: the first positional argument (not an option or
+ * an option's value) that names an existing directory. Returns "." if none
+ * does.
+ *
+ * Not simply the first positional: where the app directory sits depends on
+ * the subcommand - `hull deploy dockerfile <dir>`, `hull compute test <name>`
+ * - and "dockerfile" is not a directory. With the tool sandbox enforcing its
+ * allowlist, the app the command was pointed at was then never granted:
+ * `hull deploy` could not read it ("no app.lua or app.js found") and could
+ * not write the Dockerfile into it. Only a directory the caller named is
+ * granted, and hl_tool_sandbox_init refuses "/" and $HOME or above.
  */
+static int parse_app_dir_is_dir(const char *p)
+{
+    struct stat st;
+    return p && *p && stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 static const char *parse_app_dir(int argc, char **argv)
 {
     /* From i=1: argv[0] is the SUBCOMMAND ("build"), which
@@ -199,8 +214,11 @@ static const char *parse_app_dir(int argc, char **argv)
     };
     for (int i = 1; i < argc; i++) {
         if (!argv[i]) continue;
-        if (argv[i][0] != '-')
-            return argv[i];
+        if (argv[i][0] != '-') {
+            if (parse_app_dir_is_dir(argv[i]))
+                return argv[i];
+            continue;
+        }
         for (int k = 0; value_flags[k]; k++) {
             if (strcmp(argv[i], value_flags[k]) == 0) {
                 i++; /* skip value */
