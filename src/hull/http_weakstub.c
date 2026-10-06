@@ -155,4 +155,9 @@ __attribute__((weak)) void hl_js_timer_reschedule(struct HlJSTimer *t)
 {
     (void)t;
 }
+
+__attribute__((weak)) void hl_js_request_done(HlJS *js, const KlHttpRequest *req)
+{
+    (void)js; (void)req;
+}
 #endif /* HL_ENABLE_JS */

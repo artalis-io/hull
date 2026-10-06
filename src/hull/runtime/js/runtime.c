@@ -2136,6 +2136,15 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     return rejected ? -1 : 0;
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Only serve.c calls it, and only with the HTTP server built in: a
+ * pure-compute build links neither hl_js_request_done nor its weak stub. */
+static void vt_js_request_done(HlRuntime *rt, const KlHttpRequest *req)
+{
+    hl_js_request_done((HlJS *)rt, req);
+}
+#endif
+
 const HlRuntimeVtable hl_js_vtable = {
     .init                 = vt_js_init,
     .load_app             = vt_js_load_app,
@@ -2153,4 +2162,7 @@ const HlRuntimeVtable hl_js_vtable = {
     .has_main             = vt_js_has_main,
     .has_server_handlers  = vt_js_has_server_handlers,
     .run_main             = vt_js_run_main,
+#ifdef HL_ENABLE_HTTP_SERVER
+    .request_done         = vt_js_request_done,
+#endif
 };

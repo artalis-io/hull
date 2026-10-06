@@ -312,7 +312,10 @@ typedef struct {
 - Instruction counter reset before each dispatch
 
 **Middleware context (`req.ctx`):**
-- Same serialization model as Lua. JSON round-trip through `KlRequest.ctx`
+- Stored as the JS value itself (no JSON round-trip) on `KlRequest.ctx`, tracked per request
+- Freed once the handler's `req` holds its own reference, on a middleware short-circuit, or when
+  the response is sent (`HlRuntimeVtable.request_done`) - so a 404 / 405 Keel answers after a
+  passing middleware keeps nothing, even on a connection that stays open
 - Auth middleware attaches `{ sessionId, session }` or `{ token, claims }` to ctx
 
 ---
