@@ -17,6 +17,7 @@
 #include "wasm_export.h"
 #include <time.h>
 #include "hull/shared/log_lock.h"
+#include "log.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
 #include "gen_echo64_aot.h" /* build-generated: echo64_aot[] + _len (0 if no wamrc) */
@@ -3304,6 +3305,64 @@ UTEST(hl_cap_wasm, unstamped_aot_refused_with_wasm_fallback)
         snprintf(p, sizeof p, "%s/compute/echo.aot.%s", dir, archs[k]);
         unlink(p);
     }
+}
+
+/* Counts the loader's "holds AOT" refusals (log.c has no callback removal,
+ * so it is registered once and stays). */
+static int g_aot_as_wasm_refusals;
+static void count_aot_as_wasm(log_Event *ev)
+{
+    if (ev->fmt && strstr(ev->fmt, "holds AOT"))
+        g_aot_as_wasm_refusals++;
+}
+
+/* Round 7 (L2): WAMR loads AOT code from any file whose bytes start "\0aot",
+ * whatever its name. AOT bytes saved as compute/<name>.wasm used to load
+ * without the stamp check (is_aot = 0): the loader classifies by magic. */
+UTEST(hl_cap_wasm, unstamped_aot_named_wasm_refused)
+{
+    static int registered;
+    if (!registered) {
+        ASSERT_EQ(log_add_callback(count_aot_as_wasm, NULL, LOG_ERROR), 0);
+        registered = 1;
+    }
+    static uint8_t unstamped[128];
+    mk_aot_head(unstamped, sizeof unstamped, 0, 0);
+
+    /* Embedded. */
+    HlEntry as_wasm[] = {
+        { "compute/echo.wasm", unstamped, sizeof unstamped },
+        { 0, 0, 0 }
+    };
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, as_wasm, NULL);
+    int before = g_aot_as_wasm_refusals;
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), HL_WASM_ERR_LOAD);
+    EXPECT_EQ(g_aot_as_wasm_refusals, before + 1);
+    hl_cap_wasm_destroy(&cache);
+
+    /* From disk in development. */
+    char dir[512];
+    ASSERT_EQ(mk_compute_app(dir, sizeof dir), 0);
+    char p[700];
+    snprintf(p, sizeof p, "%s/compute/echo.wasm", dir);
+    ASSERT_EQ(wr_file(p, unstamped, sizeof unstamped), 0);
+    static const HlEntry none[] = { { 0, 0, 0 } };
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    hl_vfs_init(&vfs, none, dir);
+    before = g_aot_as_wasm_refusals;
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), HL_WASM_ERR_LOAD);
+    EXPECT_EQ(g_aot_as_wasm_refusals, before + 1);
+    hl_cap_wasm_destroy(&cache);
+
+    /* Bytecode under the same name still loads, in the interpreter. */
+    ASSERT_EQ(wr_file(p, echo_wasm, echo_wasm_len), 0);
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    hl_vfs_init(&vfs, none, dir);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), 0);
+    hl_cap_wasm_destroy(&cache);
 }
 
 int main(int argc, const char *const argv[])

@@ -346,12 +346,24 @@ LUA
     if [ -z "$bin" ]; then
         fail "built tool: hull build failed ($(tail -3 "${d}/build.log"))"
     else
-        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" -s pattern -m msg --tls-cert c --wasm-gas 9)
-        expect_eq "built tool: -s/-m/--tls-cert/--wasm-gas reach the app (exit)" "0" "$rc"
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" -s pattern -m msg --tls-cert c --read-timeout 9)
+        expect_eq "built tool: -s/-m/--tls-cert/--read-timeout reach the app (exit)" "0" "$rc"
         case "$(cat "$HULL_RC_TMP")" in
-            *"-s pattern -m msg --tls-cert c --wasm-gas 9"*) pass "built tool: the app saw its options" ;;
+            *"-s pattern -m msg --tls-cert c --read-timeout 9"*) pass "built tool: the app saw its options" ;;
             *) fail "built tool: app options (got '$(cat "$HULL_RC_TMP")')" ;;
         esac
+        # (audit 7 M2) The runner parses the --wasm-* ceilings (round 6), so
+        # they are reserved like every downgrade it implements: a bare
+        # --wasm-timeout-ms used to lift the manifest's compute ceilings to
+        # the compile-time maxima from the tool's argv.
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" --wasm-timeout-ms 3600000 x)
+        expect_eq "built tool: a bare --wasm-timeout-ms is refused" "1" "$rc"
+        case "$(cat "$HULL_RC_TMP")" in
+            *"--hull-wasm-timeout-ms"*) pass "built tool: refusal names --hull-wasm-timeout-ms" ;;
+            *) fail "built tool: --wasm-timeout-ms refusal (got '$(cat "$HULL_RC_TMP")')" ;;
+        esac
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" --hull-wasm-gas 1000000 -- ok)
+        expect_eq "built tool: --hull-wasm-gas is taken" "0" "$rc"
         rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" --no-sandbox x)
         expect_eq "built tool: a bare --no-sandbox is still refused" "1" "$rc"
         case "$(cat "$HULL_RC_TMP")" in
@@ -408,6 +420,60 @@ LUA
                 *) fail "built tool: verify-sig mismatch message (got '$(cat "$HULL_RC_TMP")')" ;;
             esac
         fi
+    fi
+    rm -rf "$d"
+
+    # (audit 7 L3) A built SERVER binary reserves every resource option it
+    # parses: a bare --read-timeout / --workers / --queue-capacity /
+    # --drain-timeout used to be honoured (a forwarded --read-timeout 600000
+    # holds each idle connection for ten minutes). The refusal happens while
+    # the arguments are parsed, before anything listens.
+    d=$(mktemp -d)
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/http-server@1" } })
+app.get("/", function(_req, res) res:text("ok") end)
+LUA
+    bin=$(build_cli "$d")
+    if [ -z "$bin" ]; then
+        fail "built server: hull build failed ($(tail -3 "${d}/build.log"))"
+    else
+        for opt in --read-timeout --workers --queue-capacity --drain-timeout; do
+            rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" "$opt" 2)
+            expect_eq "built server: a bare $opt is refused" "1" "$rc"
+            case "$(cat "$HULL_RC_TMP")" in
+                *"--hull-${opt#--}"*) pass "built server: refusal names --hull-${opt#--}" ;;
+                *) fail "built server: $opt refusal (got '$(cat "$HULL_RC_TMP")')" ;;
+            esac
+        done
+    fi
+    rm -rf "$d"
+
+    # (audit 7 caps L2) WAMR loads AOT code from any file that starts with
+    # its magic, whatever the name, so hull build checks compute/*.wasm by
+    # its bytes: unstamped AOT under a .wasm name (an unpatched wamrc's
+    # `-o x.wasm`) has no bytecode to fall back to, and fails the build.
+    d=$(mktemp -d)
+    mkdir -p "${d}/compute"
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/compute@1" } })
+app.main(function() return 0 end)
+LUA
+    # "\0aot", version 7, target-info section (type 0, size 48), no stamp.
+    printf '\000aot\007\000\000\000\000\000\000\000\060\000\000\000' > "${d}/compute/x.wasm"
+    head -c 112 /dev/zero >> "${d}/compute/x.wasm"
+    _cc=""
+    hull_is_ape "${HULL_BIN}" && _cc="--compiler cosmocc"
+    # shellcheck disable=SC2086
+    hull_run "$HULL_RC_TMP" "${HULL_BIN}" build --no-verify-platform --no-aot $_cc \
+        -o "${d}/tool" "$d" >/dev/null
+    case "$(cat "$HULL_RC_TMP")" in
+        *"holds AOT code"*) pass "hull build: unstamped AOT named .wasm is refused" ;;
+        *) fail "hull build: AOT-as-.wasm (got '$(tail -3 "$HULL_RC_TMP")')" ;;
+    esac
+    if [ -f "${d}/tool" ] || [ -f "${d}/tool.com" ]; then
+        fail "hull build: produced a binary embedding unstamped AOT"
+    else
+        pass "hull build: no binary produced"
     fi
     rm -rf "$d"
 }

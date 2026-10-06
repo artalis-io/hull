@@ -28,6 +28,7 @@ static void cleanup(const char *app)
     snprintf(p, sizeof p, "%s/out.txt", app);   unlink(p);
     snprintf(p, sizeof p, "%s/sub/res.json", app); unlink(p);
     snprintf(p, sizeof p, "%s/sub", app);       rmdir(p);
+    snprintf(p, sizeof p, "%s/data", app);      rmdir(p);
     rmdir(app);
 }
 
@@ -78,6 +79,70 @@ UTEST(sandbox_grant, nested_write_is_its_parent)
 
     ASSERT_EQ(hl_sandbox_resolve_grant(app, "sub/res.json", out, sizeof out, 1), 0);
     snprintf(want, sizeof want, "%s/sub", real_app);
+    EXPECT_STREQ(out, want);
+
+    cleanup(app);
+}
+
+/* Round 7 (L2): the grant is classified on the spelling the cap layer
+ * compiles, so "./out.txt" is the top-level file "out.txt". It joined to
+ * "app/./out.txt", was not seen as top-level, and its parent "app/." - the
+ * app directory itself after realpath - was granted, with no warning. */
+UTEST(sandbox_grant, dot_spellings_are_the_same_grant)
+{
+    char app[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(app, sizeof app, "hull_grant") != NULL);
+    char real_app[PATH_MAX];
+    ASSERT_TRUE(realpath(app, real_app) != NULL);
+
+    char p[PATH_MAX + 16], out[PATH_MAX], want[PATH_MAX + 16];
+    snprintf(p, sizeof p, "%s/out.txt", app);
+    touch(p);
+    snprintf(want, sizeof want, "%s/out.txt", real_app);
+    static const char *const spell[] = {
+        "./out.txt", ".//out.txt", "././out.txt", "out.txt", NULL
+    };
+    for (int i = 0; spell[i]; i++) {
+        ASSERT_EQ(hl_sandbox_resolve_grant(app, spell[i], out, sizeof out, 1), 0);
+        EXPECT_STREQ(out, want);
+    }
+
+    snprintf(p, sizeof p, "%s/sub", app);
+    ASSERT_EQ(mkdir(p, 0755), 0);
+    snprintf(p, sizeof p, "%s/sub/res.json", app);
+    touch(p);
+    snprintf(want, sizeof want, "%s/sub", real_app);
+    ASSERT_EQ(hl_sandbox_resolve_grant(app, "./sub/./res.json", out, sizeof out, 1), 0);
+    EXPECT_STREQ(out, want);
+
+    /* "." / "./" is the cap layer's base-root grant: the app directory, as
+     * asked. */
+    ASSERT_EQ(hl_sandbox_resolve_grant(app, "./", out, sizeof out, 1), 0);
+    EXPECT_STREQ(out, real_app);
+
+    cleanup(app);
+}
+
+/* An existing directory named without the trailing slash is that directory
+ * (the cap layer compiles it to its subtree), not its parent: top-level
+ * "data" used to open the whole app directory, under a warning that called
+ * it a file. */
+UTEST(sandbox_grant, existing_directory_without_slash_is_itself)
+{
+    char app[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(app, sizeof app, "hull_grant") != NULL);
+    char real_app[PATH_MAX];
+    ASSERT_TRUE(realpath(app, real_app) != NULL);
+
+    char p[PATH_MAX + 16], out[PATH_MAX], want[PATH_MAX + 16];
+    snprintf(p, sizeof p, "%s/data", app);
+    ASSERT_EQ(mkdir(p, 0755), 0);
+    snprintf(want, sizeof want, "%s/data", real_app);
+    ASSERT_EQ(hl_sandbox_resolve_grant(app, "data", out, sizeof out, 1), 0);
+    EXPECT_STREQ(out, want);
+    ASSERT_EQ(hl_sandbox_resolve_grant(app, "./data", out, sizeof out, 1), 0);
+    EXPECT_STREQ(out, want);
+    ASSERT_EQ(hl_sandbox_resolve_grant(app, "data", out, sizeof out, 0), 0);
     EXPECT_STREQ(out, want);
 
     cleanup(app);

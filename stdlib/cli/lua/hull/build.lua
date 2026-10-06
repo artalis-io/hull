@@ -348,6 +348,14 @@ local function aot_stamp_status(path)
     return nil
 end
 
+-- WAMR picks its loader by these four bytes ("\0aot"), not by the file name,
+-- so AOT code saved as compute/<name>.wasm runs as AOT (round 7).
+local function has_aot_magic(path)
+    local data = tool.read_file(path)
+    return data ~= nil and #data >= 4 and
+           string.unpack("<I4", data, 1) == 0x746F6100
+end
+
 -- Detect if a WASM binary uses Memory64 (64-bit memory addressing).
 -- Checks the memory section (ID 5) limits flags for bit 2 (0x04).
 local function is_memory64_wasm(path)
@@ -1930,14 +1938,41 @@ typedef struct {
         end
     end
 
+    -- The runtime classifies a compute module by its bytes and refuses AOT
+    -- code without the stamp of Hull's patched wamrc (cap/wasm.c): check the
+    -- same here, so a build does not ship, unannounced, a module the runtime
+    -- refuses. A committed *.aot.* without the stamp is named (it is still
+    -- embedded and signed - everything under compute/ is - but the runtime
+    -- runs the module's .wasm instead); a *.wasm holding unstamped AOT
+    -- code has nothing to fall back to, so the build fails. Stamped AOT under
+    -- a .wasm name loads as AOT and is not fed to wamrc again.
     local compute_files = {}
     if file_exists(compute_dir) then
         local wasm = tool.find_files(compute_dir, "*.wasm")
         for _, f in ipairs(wasm) do
+            if has_aot_magic(f) then
+                local why = aot_stamp_status(f)
+                if why then
+                    tool.stderr("hull build: " .. f .. " holds AOT code, not " ..
+                                "WebAssembly bytecode (" .. why .. "); the " ..
+                                "runtime refuses it. Ship the module's bytecode " ..
+                                "as .wasm - hull build compiles the AOT with " ..
+                                "Hull's wamrc.\n")
+                    tool.rmdir(tmpdir)
+                    tool.exit(1)
+                end
+            end
             compute_files[#compute_files + 1] = f
         end
         local aot = tool.find_files(compute_dir, "*.aot.*")
         for _, f in ipairs(aot) do
+            local why = aot_stamp_status(f)
+            if why then
+                print("hull build: warning: " .. f .. " is unusable (" ..
+                      why .. "): the runtime refuses it and runs the " ..
+                      "module's .wasm in the interpreter. Delete it, or " ..
+                      "rebuild it with Hull's wamrc (`hull tools install wamrc`).")
+            end
             compute_files[#compute_files + 1] = f
         end
     end
@@ -2209,7 +2244,9 @@ local function main()
     local compute_aot = {} -- {path=..., entry_name=...} for generated AOT files
     local wasm_only = {}
     for _, f in ipairs(compute_files) do
-        if f:match("%.wasm$") then wasm_only[#wasm_only + 1] = f end
+        if f:match("%.wasm$") and not has_aot_magic(f) then
+            wasm_only[#wasm_only + 1] = f
+        end
     end
 
     if opts.aot and #wasm_only > 0 then

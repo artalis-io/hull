@@ -836,6 +836,24 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_NOT_FOUND;
     }
 
+    /* WAMR picks its loader by the magic, not the name: AOT bytes saved as
+     * compute/<name>.wasm (`wamrc -o x.wasm`, a "precompiled" plugin) loaded
+     * as native code with is_aot = 0, past the stamp check the .aot.<arch>
+     * steps make (round 7). Classify by the bytes; such a module has no
+     * bytecode to fall back to, so an unstamped one is refused. */
+    if (!is_aot && buf_len >= 4 && hl_aot_le32(buf) == HL_AOT_FILE_MAGIC) {
+        if (hl_aot_stamp_check(buf, buf_len) != HL_AOT_STAMP_OK) {
+            log_error("[wasm] refusing module '%s': compute/%s.wasm holds AOT "
+                      "code without the current Hull wamrc stamp, so the "
+                      "compute timeout could not stop its loops. Ship "
+                      "WebAssembly bytecode as .wasm, and AOT compiled by "
+                      "Hull's wamrc as .aot.<arch>", name, name);
+            free(buf);
+            return HL_WASM_ERR_LOAD;
+        }
+        is_aot = 1;
+    }
+
     /* Load into WAMR */
     char error_buf[256];
     wasm_module_t module = wasm_runtime_load(buf, buf_len,

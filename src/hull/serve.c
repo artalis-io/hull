@@ -401,8 +401,15 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
         /* --hull-<name> and the built-binary rule: include/hull/runtime_flags.h */
         int prefixed = hl_runtime_flag_unprefix(&argv[i]);
         if (prefixed < 0 ||
-            hl_runtime_flag_check(argv[i], prefixed, embedded_app_present(), NULL) != 0)
+            hl_runtime_flag_check(argv[i], prefixed, embedded_app_present(),
+                                  HL_RF_SERVE) != 0)
             return -1;
+        /* An option the table does not give this runner is not Hull's: no
+         * branch below may take it, so what the server parses and what it
+         * reserves in a built binary cannot drift apart. */
+        if (argv[i][0] == '-' && strcmp(argv[i], "--") != 0 &&
+            !hl_runtime_flag_takes(argv[i], HL_RF_SERVE))
+            goto not_ours;
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             char *end;
             long p = strtol(argv[++i], &end, 10);
@@ -622,26 +629,29 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             }
             cfg->entry_point = argv[i];
         } else {
-            if (prefixed)
-                return hl_runtime_flag_unknown(argv[i]);
-            if (embedded_app_present()) {
-                /* An option Hull does not take starts the app's arguments,
-                 * as a bare word does: `./tool --help` reaches the tool. */
-                cfg->app_args = &argv[i];
-                cfg->app_argc = argc - i;
-                break;
-            }
-            /* It used to be skipped without a word, so a misspelt option
-             * (--no-sandbx) or one missing its value (a trailing -p) did
-             * nothing and said nothing. */
-            fprintf(stderr,
-                "hull: unknown option '%s' (or it needs a value) - see "
-                "`hull --help`; options for the app go after --:\n"
-                "  hull %s -- %s\n",
-                argv[i], cfg->entry_point ? cfg->entry_point : "app.lua",
-                argv[i]);
-            return -1;
+            goto not_ours;
         }
+        continue;
+    not_ours:
+        if (prefixed)
+            return hl_runtime_flag_unknown(argv[i]);
+        if (embedded_app_present()) {
+            /* An option Hull does not take starts the app's arguments, as a
+             * bare word does: `./tool --help` reaches the tool. */
+            cfg->app_args = &argv[i];
+            cfg->app_argc = argc - i;
+            break;
+        }
+        /* It used to be skipped without a word, so a misspelt option
+         * (--no-sandbx) or one missing its value (a trailing -p) did nothing
+         * and said nothing. */
+        fprintf(stderr,
+            "hull: unknown option '%s' (or it needs a value) - see "
+            "`hull --help`; options for the app go after --:\n"
+            "  hull %s -- %s\n",
+            argv[i], cfg->entry_point ? cfg->entry_point : "app.lua",
+            argv[i]);
+        return -1;
     }
 
     /* Check HULL_AUDIT env var */
