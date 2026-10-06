@@ -968,6 +968,7 @@ const CLAIMED = " AND claim_token=? AND status='running'";
 // produce a Symbol key.
 const YIELD = Symbol("hull.jobs.yield");        // thrown by ctx.sleep / waitSignal
 const WF_YIELD = Symbol("hull.jobs.wfYield");   // returned to the work loop
+const WF_DEAD = Symbol("hull.jobs.wfDead");     // jobs.DEAD + compensation failures
 
 function markDone(job, result) {
     const id = job.id;
@@ -1403,8 +1404,9 @@ async function work(opts) {
                         "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
                         [result.wakeAt || now, now, job.id, job.claimToken]);
                 }
-            } else if (result === DEAD) {
-                errStr = "handler returned jobs.DEAD";
+            } else if (result === DEAD ||
+                       (result && typeof result === "object" && result[WF_DEAD] === true)) {
+                errStr = result === DEAD ? "handler returned jobs.DEAD" : result.error;
                 outcome = finish(job, { error: errStr }, () => markDead(job, errStr));
             } else if (result === RETRY) {
                 errStr = "handler requested retry";
@@ -1900,7 +1902,9 @@ function runWaitSignal(workflowId, n, name, opts, replayOnly) {
     if (got) return decodePayload(enc);
     let deadline = 0;
     if (opts && opts.timeout) {
-        const dkey = "__waitdl:" + name;
+        // Per wait, like the memo key: a later timed wait on the same name
+        // must not read this one's (expired) deadline.
+        const dkey = "__waitdl:" + n + ":" + name;
         const drows = db.query(
             "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
             [workflowId, dkey]);
@@ -2103,8 +2107,13 @@ function workflow(name, fn) {
                 e = withCompFailures(e, await runCompensations(ctx._comps, job.id));
             throw e;
         }
-        if (res === DEAD) await runCompensations(ctx._comps, job.id);
-        return res;
+        if (res !== DEAD) return res;
+        // A compensation that failed is recorded in the dead letter, as on the
+        // last-attempt error path above.
+        const failed = await runCompensations(ctx._comps, job.id);
+        if (!failed.length) return res;
+        return { [WF_DEAD]: true,
+                 error: withCompFailures(new Error("handler returned jobs.DEAD"), failed).message };
     });
     return jobs;
 }
@@ -2127,9 +2136,12 @@ function start(name, input, opts) {
 
 /**
  * Deliver a signal to a durable workflow (see ctx.waitSignal). Records the named
- * payload (first delivery per name wins) and re-activates the workflow if it is
- * parked waiting for it. Safe to call before the workflow reaches the wait (the
- * signal is stored and consumed when it gets there) - no lost-signal race.
+ * payload and re-activates the workflow if it is parked waiting for it. Safe to
+ * call before the workflow reaches the wait (the signal is stored and consumed
+ * when it gets there) - no lost-signal race. One delivery per name is held at a
+ * time: a signal sent while an earlier one of the same name is still unconsumed
+ * is dropped; once a wait has consumed it, the next one is held for the next
+ * wait on that name.
  * @param {number} id       the workflow id
  * @param {string} name     the signal name
  * @param {*} [payload]
@@ -2140,8 +2152,16 @@ function signal(id, name, payload) {
         throw new Error("jobs.signal: name must be a non-empty string");
     const enc = payload !== undefined && payload !== null ? json.encode(payload) : null;
     const now = time.now();
-    db.insertIfAbsent("_hull_workflow_signals", ["workflow_id", "name"],
+    const n = db.insertIfAbsent("_hull_workflow_signals", ["workflow_id", "name"],
         ["workflow_id", "name", "payload", "created_at"], [id, name, enc, now]);
+    if (!n) {
+        // The name was signalled before. Once that delivery has been consumed
+        // (by an earlier wait), this one is stored for the next wait on the
+        // name; while it is still pending, this one is dropped.
+        db.exec("UPDATE _hull_workflow_signals SET payload=?, created_at=?, consumed_at=NULL " +
+            "WHERE workflow_id=? AND name=? AND consumed_at IS NOT NULL",
+            [enc, now, id, name]);
+    }
     // Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
     // 'pending' workflow is left alone: it finds the stored signal on its own.
     db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, updated_at=? " +
@@ -2230,6 +2250,7 @@ function dead(opts) {
  * Requeue a dead-lettered job for another run. Resets it to pending with a
  * fresh attempt budget (attempts=0) and clears the last error. No-op unless the
  * job exists and is currently dead (so it can't double-requeue a live job).
+ * For a workflow, the steps its saga compensations undid run again.
  * @param {number} id
  * @returns {boolean}  true if a dead job was requeued
  */
@@ -2260,6 +2281,12 @@ function retry(id) {
             db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
                 [id, WF_COMPENSATE_KEY]);
         }
+        // A step whose compensation ran was undone: the requeued run must
+        // execute it again, not replay its memo as done (a refunded charge
+        // replayed, the steps after it run on an unpaid order). A step whose
+        // compensation failed keeps its row - its effect still stands.
+        db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND status='compensated'",
+            [id]);
     });
     return (n || 0) > 0;
 }

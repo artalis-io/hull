@@ -195,8 +195,10 @@ The human-in-the-loop / wait-for-webhook / approval primitive.
   its payload (memoized - consumed once); else **yield** with `status='waiting'`.
 - `jobs.signal(id, name, payload)`: INSERT the signal row, then flip the workflow
   job `waiting -> pending` so a worker re-runs it; the `wait_signal` now finds the
-  signal and proceeds. Idempotent-ish: a duplicate signal name is either ignored
-  or last-wins (design choice; default: first delivery wins, extras ignored).
+  signal and proceeds. One delivery per name is held at a time: a signal sent
+  while an earlier one of that name is unconsumed is ignored; once a wait has
+  consumed it, the next delivery is stored for the next wait on that name (each
+  wait is memoized and has its deadline under its ordinal).
 - `opts.timeout`: a `wait_signal` with a timeout also arms a `ctx.sleep`-style
   wake, returning `nil` / a timeout marker if no signal arrives in time.
 - Signals can be delivered **before** the workflow reaches the wait (stored and

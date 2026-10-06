@@ -1568,7 +1568,8 @@ echo "== durable signals: JS =="; check_signals "js" "js" "$JS_SIGNALS"
 # from their memo rows instead of parking for good. Then the reaper's
 # compensation run: a wait before the last completed step must not stop the
 # replay early (that step's compensation runs too), and jobs.retry clears the
-# compensation marker so the requeued run does new work again.
+# compensation marker so the requeued run does new work again - including the
+# steps the compensations undid, which run again instead of replaying as done.
 check_signal_replay() {
     label="$1"; ext="$2"; app="$3"
     T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
@@ -1579,8 +1580,8 @@ check_signal_replay() {
         *) fail "$label: signal replay" "$out" ;;
     esac
     case "$out" in
-        *"COMP st=dead log=recall,uncharge retried=true fin=done max=2"*)
-            pass "$label: compensation run replays past a wait; retry clears the marker" ;;
+        *"COMP st=dead log=charge,ship,recall,uncharge,charge,ship retried=true fin=done max=2"*)
+            pass "$label: compensation run replays past a wait; retry clears the marker and re-runs the compensated steps" ;;
         *) fail "$label: compensation run past a wait" "$out" ;;
     esac
     rm -rf "$T"
@@ -1618,10 +1619,10 @@ app.main(function(ctx)
 
   local log, fail_final = {}, true
   jobs.workflow("comp", function(w)
-    w.step("charge", function() return 1 end,
+    w.step("charge", function() log[#log+1] = "charge"; return 1 end,
       { compensate = function() log[#log+1] = "uncharge" end })
     w.wait_signal("ok")
-    w.step("ship", function() return 1 end,
+    w.step("ship", function() log[#log+1] = "ship"; return 1 end,
       { compensate = function() log[#log+1] = "recall" end })
     w.step("final", function() if fail_final then error("down") end return 1 end)
     return "ok"
@@ -1674,9 +1675,9 @@ app.main(async (ctx) => {
   const log = [];
   let failFinal = true;
   jobs.workflow("comp", async (w) => {
-    await w.step("charge", () => 1, { compensate: () => { log.push("uncharge"); } });
+    await w.step("charge", () => { log.push("charge"); return 1; }, { compensate: () => { log.push("uncharge"); } });
     await w.waitSignal("ok");
-    await w.step("ship", () => 1, { compensate: () => { log.push("recall"); } });
+    await w.step("ship", () => { log.push("ship"); return 1; }, { compensate: () => { log.push("recall"); } });
     await w.step("final", () => { if (failFinal) throw new Error("down"); return 1; });
     return "ok";
   });
@@ -1696,6 +1697,126 @@ app.main(async (ctx) => {
 
 echo "== durable signal replay: Lua =="; check_signal_replay "lua" "lua" "$LUA_SIG_REPLAY"
 echo "== durable signal replay: JS =="; check_signal_replay "js" "js" "$JS_SIG_REPLAY"
+
+# ── durable execution: repeated waits on one name; DEAD + failed compensation ──
+# A second wait_signal on a name takes the second delivery of that name (the
+# first is consumed, not a permanent "already signalled"), each timed wait has
+# its own deadline (a later wait must not read an earlier one's expired
+# deadline and time out at once), and a compensation that fails on the
+# explicit jobs.DEAD path is named in the dead letter.
+check_signal_repeat() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"REPEAT mid=waiting fin=done res=1,2"*)
+            pass "$label: a second wait on one name takes the second signal" ;;
+        *) fail "$label: repeated wait_signal" "$out" ;;
+    esac
+    case "$out" in
+        *"TIMED first=timeout second=waiting third=x"*)
+            pass "$label: each timed wait on one name has its own deadline" ;;
+        *) fail "$label: repeated timed wait" "$out" ;;
+    esac
+    case "$out" in
+        *"DEADCOMP st=dead err_has_comp=true"*)
+            pass "$label: jobs.DEAD records a failed compensation in last_error" ;;
+        *) fail "$label: jobs.DEAD compensation failure" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_SIG_REPEAT='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  jobs.workflow("two_rounds", function(w)
+    local a = w.wait_signal("approve")
+    local b = w.wait_signal("approve")
+    return a.n .. "," .. b.n
+  end)
+  local id = jobs.start("two_rounds", {})
+  jobs.signal(id, "approve", { n = 1 }); jobs.work({ batch = 1 })   -- parks on wait 2
+  local mid = jobs.get(id).status
+  jobs.signal(id, "approve", { n = 2 }); jobs.work({ batch = 1 })
+  local r = jobs.result(id)
+  ctx.stdout:write(("REPEAT mid=%s fin=%s res=%s\n"):format(mid, r.status, tostring(r.result)))
+
+  jobs.workflow("timed", function(w)
+    local a = w.wait_signal("tick", { timeout = 1 })
+    w.step("mark", function() return 1 end)
+    local b = w.wait_signal("tick", { timeout = 60 })
+    return (a == nil and "timeout" or "sig") .. "," .. tostring(b and b.v)
+  end)
+  local t = jobs.start("timed", {})
+  jobs.work({ batch = 1 })                 -- parks on the first timed wait
+  hull.sleep(1500)
+  jobs.reap({})                            -- wakes the timed-out wait
+  jobs.work({ batch = 1 })                 -- first times out, second parks
+  local second = jobs.get(t).status
+  jobs.signal(t, "tick", { v = "x" }); jobs.work({ batch = 1 })
+  local tr = tostring(jobs.result(t).result)
+  ctx.stdout:write(("TIMED first=%s second=%s third=%s\n"):format(
+    tr:match("^([^,]*)"), second, tr:match(",(.*)$")))
+
+  jobs.workflow("dead_comp", function(w)
+    w.step("charge", function() return 1 end,
+      { compensate = function() error("refund 503") end })
+    return jobs.DEAD
+  end)
+  local d = jobs.start("dead_comp", {})
+  jobs.work({ batch = 1 })
+  local dj = jobs.get(d)
+  ctx.stdout:write(("DEADCOMP st=%s err_has_comp=%s\n"):format(dj.status,
+    tostring((dj.last_error or ""):find("compensation failed: charge", 1, true) ~= nil)))
+  return 0
+end)'
+
+JS_SIG_REPEAT='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  jobs.workflow("two_rounds", async (w) => {
+    const a = await w.waitSignal("approve");
+    const b = await w.waitSignal("approve");
+    return a.n + "," + b.n;
+  });
+  const id = jobs.start("two_rounds", {});
+  jobs.signal(id, "approve", { n: 1 }); await jobs.work({ batch: 1 });
+  const mid = jobs.get(id).status;
+  jobs.signal(id, "approve", { n: 2 }); await jobs.work({ batch: 1 });
+  const r = jobs.result(id);
+  ctx.stdout.write(`REPEAT mid=${mid} fin=${r.status} res=${r.result}\n`);
+
+  jobs.workflow("timed", async (w) => {
+    const a = await w.waitSignal("tick", { timeout: 1 });
+    await w.step("mark", () => 1);
+    const b = await w.waitSignal("tick", { timeout: 60 });
+    return (a == null ? "timeout" : "sig") + "," + (b && b.v);
+  });
+  const t = jobs.start("timed", {});
+  await jobs.work({ batch: 1 });
+  await hull.sleep(1500);
+  await jobs.reap({});
+  await jobs.work({ batch: 1 });
+  const second = jobs.get(t).status;
+  jobs.signal(t, "tick", { v: "x" }); await jobs.work({ batch: 1 });
+  const tr = String(jobs.result(t).result).split(",");
+  ctx.stdout.write(`TIMED first=${tr[0]} second=${second} third=${tr[1]}\n`);
+
+  jobs.workflow("dead_comp", async (w) => {
+    await w.step("charge", () => 1, { compensate: () => { throw new Error("refund 503"); } });
+    return jobs.DEAD;
+  });
+  const d = jobs.start("dead_comp", {});
+  await jobs.work({ batch: 1 });
+  const dj = jobs.get(d);
+  ctx.stdout.write(`DEADCOMP st=${dj.status} err_has_comp=${(dj.lastError || "").includes("compensation failed: charge")}\n`);
+  return 0;
+});'
+
+echo "== durable repeated waits / DEAD compensation: Lua =="; check_signal_repeat "lua" "lua" "$LUA_SIG_REPEAT"
+echo "== durable repeated waits / DEAD compensation: JS =="; check_signal_repeat "js" "js" "$JS_SIG_REPEAT"
 
 # ── durable execution: saga compensation ─────────────────────────
 # A workflow charges (a compensable step), then a later step fails terminally

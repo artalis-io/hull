@@ -414,15 +414,21 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   the body, written in the same transaction as the consume; a timeout is
   recorded too), so every replay - after a later sleep or wait, a retried step,
   a compensation run - returns what the first run returned instead of parking
-  again on the consumed signal.
+  again on the consumed signal. Waits may repeat a name (a multi-round
+  approval): each wait takes the next delivery of it, and each timed wait has
+  its own deadline. One delivery per name is held at a time - a signal sent
+  while an earlier one of that name is still unconsumed is dropped.
 - **Saga compensation:** `ctx.step(name, fn, { compensate = cfn })` registers a
   rollback. If the workflow **fails terminally** (dead-letters), the completed
   steps' `compensate` functions run in **reverse order** (undo the charge if
   shipping can't be arranged). Compensations are at-least-once (idempotent) and
   recorded, so a crash mid-rollback resumes. A compensation that raises is not
   marked compensated: its error is appended to the dead letter's `last_error`
-  ("compensation failed: <step>: <error>") and a later `jobs.retry` that ends in
-  rollback again re-runs only the failed ones. `jobs.retry` of a workflow the
+  ("compensation failed: <step>: <error>", on the last-attempt and the
+  `jobs.DEAD` paths alike) and a later `jobs.retry` that ends in rollback again
+  re-runs only the failed ones. `jobs.retry` runs the steps whose compensation
+  succeeded again (they were undone, so their memo no longer stands); a step
+  whose compensation failed keeps its memo. `jobs.retry` of a workflow the
   reaper sent through a compensation run also clears that run's marker and
   restores its original `max_attempts`, so the requeued run does new work.
 - **Deterministic replay** - the body re-runs from the top on every resume, so
