@@ -845,7 +845,7 @@ static const char *mp_park_refusal(const HlJsMpIter *it)
      * that op's own resume, about to be sent: Keel re-arms no read there,
      * and the upload stalled until the body timeout, then the handler was
      * cancelled. Refused with an error instead. */
-    if (it->js->active_life && it->js->active_life->attached > 0)
+    if (it->js->active_life->attached > 0)   /* active_life: checked above */
         return "req.multipart(): cannot wait for more of the request body "
                "while an async operation on this request is in flight or "
                "has just resumed (read the body before awaiting hull.sleep / "
