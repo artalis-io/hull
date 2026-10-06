@@ -191,6 +191,15 @@ test("number fraction edge cases", function()
     assert_eq(i18n.number(-0.00000000001), "0")
 end)
 
+-- Audit 7 L3: negating math.mininteger wraps, so it stayed negative and the
+-- format match failed (a 500 from i18n.number(tonumber(req.query.n))).
+test("number extreme integers", function()
+    i18n.load("en", en)
+    i18n.locale("en")
+    assert_eq(i18n.number(math.mininteger), "-9,223,372,036,854,775,808")
+    assert_eq(i18n.number(math.maxinteger), "9,223,372,036,854,775,808")
+end)
+
 -- ── date() ───────────────────────────────────────────────────────────
 
 test("date with known timestamp", function()

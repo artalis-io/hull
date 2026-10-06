@@ -178,8 +178,9 @@ local function number_for(loc, n)
     local dec_sep = fmt and (fmt.decimalSep or fmt.decimal_sep) or "."
     local thou_sep = fmt and (fmt.thousandsSep or fmt.thousands_sep) or ","
 
+    -- Negate as a float: integer negation wraps math.mininteger to itself.
     local negative = n < 0
-    if negative then n = -n end
+    if negative then n = -(n + 0.0) end
 
     -- Past 1e21 a number prints in exponent form; grouping that gave "1e,+21".
     if n >= 1e21 then return (negative and "-" or "") .. tostring(n) end
