@@ -337,6 +337,14 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
                               void *(*alloc_fn)(size_t));
 
 /*
+ * The request's response has been sent (HlRuntimeVtable.request_done):
+ * free the req.ctx a middleware left for it, if it is still kept (a 404 /
+ * 405 after a passing middleware never reaches the handler that takes it).
+ * Never raises.
+ */
+void hl_js_request_done(HlJS *js, const KlHttpRequest *req);
+
+/*
  * Dispatch a middleware call to the JS handler.
  * Returns 0 (continue), positive (short-circuit), or -1 (error).
  */

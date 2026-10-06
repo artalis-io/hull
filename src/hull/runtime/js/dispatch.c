@@ -24,6 +24,7 @@
 
 #include "log.h"
 
+#include <stdint.h>
 #include <string.h>
 
 /* Forward declarations from bindings.c */
@@ -39,7 +40,7 @@ JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res, HlReqLife *life)
  * only a synchronous handler freed it, and every suspended, rejected or SSE
  * request pinned its ctx object in the JS heap for good (audit 6 H4). A
  * request that passed middleware but never reached a handler is covered by
- * the tracking below (audit 7 H2). */
+ * request_done and the tracking below (audit 7 H2). */
 static void req_ctx_release(HlJS *js, HlReqCtx *rctx)
 {
     hl_reqctx_untrack(&js->req_ctxs, rctx);
@@ -55,8 +56,9 @@ static void req_ctx_release(HlJS *js, HlReqCtx *rctx)
 
 /* @p req carries no ctx: any ctx still tracked for it was stored for an
  * earlier request on the same connection slot that never reached a handler
- * (a 404, an upgrade, a body error, a client gone mid-body - Keel zeroed the
- * request without telling the runtime, audit 7 H2). Free those. */
+ * and whose end request_done did not see (an upgrade, a client gone
+ * mid-body - Keel zeroed the request without telling the runtime, audit 7
+ * H2). Free those. */
 static void req_ctx_sweep(HlJS *js, KlHttpRequest *req)
 {
     if (req->ctx) return;
@@ -73,6 +75,19 @@ void hl_js_req_ctx_free(HlJS *js, KlHttpRequest *req)
         req->ctx = NULL;
     }
     req_ctx_sweep(js, req);
+}
+
+/* The response is sent, so nothing reads this request's ctx again: a
+ * handler that ran holds its own reference (js_req.ctx), and no middleware
+ * runs after the response. Frees the ctx of a request that passed
+ * middleware but never reached a handler (a 404 / 405, a body error) now
+ * rather than when its connection slot is next used. Keel's request object
+ * is not const (the hook's signature only promises not to change it):
+ * req->ctx is cleared so it never points at the freed ctx. */
+void hl_js_request_done(HlJS *js, const KlHttpRequest *req)
+{
+    if (js && js->ctx && req)
+        hl_js_req_ctx_free(js, (KlHttpRequest *)(uintptr_t)req);
 }
 
 /* ── Request dispatch ───────────────────────────────────────────────── */

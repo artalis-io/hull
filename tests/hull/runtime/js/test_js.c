@@ -7840,4 +7840,165 @@ UTEST(js_audit7, wasm_limits_are_numbers_only)
     cleanup_js();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* H2 follow-up: the ctx of a request that passed middleware and was then
+ * answered by Keel itself (a 404 / 405) stayed until its connection slot
+ * ran another middleware - one per slot, for good on an idle keep-alive or
+ * a slot nothing reuses. serve.c reports every sent response
+ * (HlRuntimeVtable.request_done) and JS frees the ctx there. */
+UTEST(js_audit7, req_ctx_freed_when_the_response_is_sent)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_TRUE(hl_js_vtable.request_done != NULL);
+    enum { N = 64 };                 /* N connection slots, one 404 each */
+    static KlHttpRequest reqs[N];
+    memset(reqs, 0, sizeof reqs);
+    KlHttpResponse res = {0};
+    JSMemoryUsage base, held, after;
+    JS_RunGC(js.rt);
+    JS_ComputeMemoryUsage(js.rt, &base);
+    ASSERT_EQ(a5_middleware("(req, res) => { req.ctx.big = 'x'.repeat(200000);"
+                            " return 0; }", &reqs[0], &res), 0);
+    int id = eval_int("globalThis.__hull_middleware["
+                      "globalThis.__hull_middleware.length - 1].handler_id");
+    for (int i = 1; i < N; i++)
+        ASSERT_EQ(hl_js_dispatch_middleware(&js, id, &reqs[i], &res), 0);
+    EXPECT_EQ(a7_tracked_ctxs(), (size_t)N);
+    JS_RunGC(js.rt);
+    JS_ComputeMemoryUsage(js.rt, &held);
+    /* 64 x 200 KB */
+    EXPECT_GT(held.malloc_size, base.malloc_size + (int64_t)(10 << 20));
+
+    for (int i = 0; i < N; i++)      /* Keel sent each 404 */
+        hl_js_vtable.request_done(&js.base, &reqs[i]);
+    EXPECT_EQ(a7_tracked_ctxs(), (size_t)0);
+    for (int i = 0; i < N; i++)
+        EXPECT_TRUE(reqs[i].ctx == NULL);
+    JS_RunGC(js.rt);
+    JS_ComputeMemoryUsage(js.rt, &after);
+    EXPECT_LT(after.malloc_size, base.malloc_size + (int64_t)(2 << 20));
+    /* a request with nothing kept, and a repeat, are no-ops */
+    hl_js_vtable.request_done(&js.base, &reqs[0]);
+    EXPECT_EQ(a7_tracked_ctxs(), (size_t)0);
+    cleanup_js();
+}
+
+/* A handler that is still running when its response goes out (a parked
+ * run, an un-awaited promise) keeps req.ctx: its req object holds its own
+ * reference, and request_done frees only the request's copy. */
+UTEST(js_audit7, request_done_leaves_a_running_handler_its_ctx)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    ASSERT_EQ(a5_module_named("<test>",
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.use('*', '/*', (req, res) => { req.ctx.v = { n: 7 }; return 0; });\n"
+        "app.get('/x', (req, res) => { globalThis.__kept = req; res.status(204); });\n",
+        &msg), 0);
+    free(msg);
+    int mw = eval_int("globalThis.__hull_middleware["
+                      "globalThis.__hull_middleware.length - 1].handler_id");
+    int route = eval_int("globalThis.__hull_routes.length - 1");
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    ASSERT_EQ(hl_js_dispatch_middleware(&js, mw, &req, &res), 0);
+    ASSERT_EQ(hl_js_dispatch(&js, route, &req, &res), 0);
+    hl_js_vtable.request_done(&js.base, &req);
+    JS_RunGC(js.rt);
+    EXPECT_EQ(eval_int("globalThis.__kept.ctx.v.n"), 7);
+    EXPECT_EQ(a7_tracked_ctxs(), (size_t)0);
+    cleanup_js();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
+/* L3 (JS side): hl_maybe_compress reports a body it could not store, and
+ * res.json / res.html / res.text ignored that: the response went out with
+ * its status and headers and no body. They raise now, as Lua's do. */
+static void *a7_small_malloc(void *ctx, size_t size)
+{
+    (void)ctx;
+    return size >= 4096 ? NULL : malloc(size);
+}
+
+static void *a7_small_realloc(void *ctx, void *ptr, size_t old_size,
+                              size_t new_size)
+{
+    (void)ctx; (void)old_size;
+    return new_size >= 4096 ? NULL : realloc(ptr, new_size);
+}
+
+static void a7_small_free(void *ctx, void *ptr, size_t size)
+{
+    (void)ctx; (void)size;
+    free(ptr);
+}
+
+UTEST(js_audit7, a_body_that_cannot_be_stored_raises)
+{
+    static const char *const srcs[] = {
+        "(req, res) => { try { res.json({ s: 'x'.repeat(8000) }); }"
+        " catch (e) { globalThis.__err = String(e); } return 1; }",
+        "(req, res) => { try { res.html('x'.repeat(8000)); }"
+        " catch (e) { globalThis.__err = String(e); } return 1; }",
+        "(req, res) => { try { res.text('x'.repeat(8000)); }"
+        " catch (e) { globalThis.__err = String(e); } return 1; }",
+    };
+    static const char *const names[] = { "res.json", "res.html", "res.text" };
+    KlAllocator alloc = { a7_small_malloc, a7_small_realloc, a7_small_free, NULL };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        KlHttpResponse res;
+        ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+        KlHttpRequest req = {0};
+        EXPECT_EQ(a5_middleware(srcs[i], &req, &res), 1);
+        EXPECT_EQ(res.body_len, (size_t)0);
+        char check[128];
+        snprintf(check, sizeof check,
+                 "String(globalThis.__err).includes('%s: out of memory') ? 1 : 0",
+                 names[i]);
+        EXPECT_EQ(eval_int(check), 1);
+        free_req_ctx(&req);
+        kl_http_response_free(&res);
+        cleanup_js();
+    }
+
+    /* A body that fits is stored as before. */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(a5_middleware("(req, res) => { res.text('ok'); return 1; }",
+                            &req, &res), 1);
+    EXPECT_EQ(res.body_len, (size_t)2);
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+    cleanup_js();
+}
+
+/* res.json used to swallow a throwing JSON.stringify (a cycle): it returned
+ * undefined with the exception left pending. */
+UTEST(js_audit7, res_json_propagates_a_stringify_error)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => { const o = {}; o.o = o;"
+        " try { res.json(o); } catch (e) { globalThis.__err = e instanceof TypeError; }"
+        " return 1; }", &req, &res), 1);
+    EXPECT_EQ(eval_int("globalThis.__err === true ? 1 : 0"), 1);
+    EXPECT_EQ(res.body_len, (size_t)0);
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+    cleanup_js();
+}
+
 UTEST_MAIN();

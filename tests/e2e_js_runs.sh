@@ -11,7 +11,9 @@
 #       the run, which keeps the request waiting until it completes - so
 #       several Hull ops can also be awaited at once (Promise.all / race).
 #   H2  req.ctx stored by middleware leaked for every request that never
-#       reached a handler (a 404): a few hundred exhausted the JS heap.
+#       reached a handler (a 404): a few hundred exhausted the JS heap. Freed
+#       when the response is sent (request_done), even on a connection that
+#       stays open.
 #   M3  A transaction opened in that drain (`await null; BEGIN; ...; await p`)
 #       slipped past the wait check; app.main never checked at all.
 #   M6  A timer's queued jobs ran later inside another entry's context.
@@ -95,6 +97,8 @@ app.get("/wsseen", (_req, res) => res.text(wsSeen + "/" + wsControl));
 
 /* Every request passes this, 404s included: ~200 KB on req.ctx. */
 app.use("*", "/*", (req, res) => { req.ctx.blob = "x".repeat(200000); return 0; });
+/* ...and these another 1 MB: 80 held open would be 96 MB of a 64 MB heap. */
+app.use("*", "/big/*", (req, res) => { req.ctx.big = "y".repeat(1000000); return 0; });
 
 app.get("/fast", (_req, res) => res.text("fast"));
 
@@ -245,6 +249,43 @@ code=$(curl -s -m 10 -o "$TMPDIR/after404" -w '%{http_code}' "$URL/fast")
 [ "$code" = 200 ] && [ "$(cat "$TMPDIR/after404")" = fast ] \
     && pass "400 x 404 behind a 200 KB ctx leave the heap usable" \
     || fail "400 x 404 behind a 200 KB ctx leave the heap usable" "$code $(cat "$TMPDIR/after404")"
+
+# Connections that stay open after their 404: no later request on their slot
+# frees the ctx, so it has to go when the response is sent (request_done).
+if command -v python3 >/dev/null 2>&1; then
+    cat > "$TMPDIR/hold.py" <<'EOF'
+import socket, sys
+port, n = int(sys.argv[1]), int(sys.argv[2])
+crlf = bytes([13, 10])
+def get(s, path):
+    s.sendall(b"GET " + path + b" HTTP/1.1" + crlf + b"Host: 127.0.0.1" + crlf + crlf)
+    data = b""
+    while crlf + crlf not in data:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+    parts = data.split(b" ")
+    return parts[1].decode() if len(parts) > 1 else "none"
+held, codes = [], {}
+for i in range(n):
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    c = get(s, b"/big/no-such-" + str(i).encode())
+    codes[c] = codes.get(c, 0) + 1
+    held.append(s)
+f = socket.create_connection(("127.0.0.1", port), timeout=10)
+print(" ".join("%s:%d" % kv for kv in sorted(codes.items())), "fast:" + get(f, b"/fast"))
+f.close()
+for s in held:
+    s.close()
+EOF
+    out=$(python3 "$TMPDIR/hold.py" "$PORT" 80 2>&1 || true)
+    [ "$out" = "404:80 fast:200" ] \
+        && pass "80 open connections after a 404 behind a 1.2 MB ctx hold none of it" \
+        || fail "80 open connections after a 404 behind a 1.2 MB ctx hold none of it" "$out"
+else
+    echo "  SKIP: python3 not found (open-connection 404 case)"
+fi
 
 echo "=== M6: an async timer's queued jobs are its own ==="
 out=$(curl -s -m 10 "$URL/ticks")

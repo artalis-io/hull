@@ -45,10 +45,13 @@ typedef struct HlReqCtx {
  * then zeroes the request without telling the runtime: the ctx (a JS value,
  * a Lua reference) was pinned in the script heap for good, one per such
  * request (audit 7 H2). The runtime tracks every ctx it stores by its
- * request; Keel zeroes a request before reusing it, so the next time a
- * middleware or handler sees that request with no ctx, any ctx still
+ * request and frees it when the response has been sent
+ * (HlRuntimeVtable.request_done, Keel's access-log hook). As a backstop for
+ * a request that ends with no response sent (a WebSocket upgrade, a client
+ * gone mid-body): Keel zeroes a request before reusing it, so the next time
+ * a middleware or handler sees that request with no ctx, any ctx still
  * tracked for it is left over from an earlier request and is freed. At most
- * one ctx per connection slot is ever left over. */
+ * one ctx per connection slot is ever left over that way. */
 
 typedef struct HlReqCtxList {
     HlReqCtx *head;

@@ -186,25 +186,31 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
     JSValue stringify = JS_GetPropertyStr(ctx, json_obj, "stringify");
 
     JSValue result = JS_Call(ctx, stringify, json_obj, 1, (JSValue *)argv);
-
-    if (!JS_IsException(result)) {
-        const char *json_str = JS_ToCString(ctx, result);
-        if (json_str) {
-            size_t json_len = strlen(json_str);
-            HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-            kl_http_response_header(res, "Content-Type", "application/json");
-            hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
-                              js_rt ? js_rt->base.compress : NULL,
-                              json_str, json_len);
-            JS_FreeCString(ctx, json_str);
-        }
-    }
-
-    JS_FreeValue(ctx, result);
     JS_FreeValue(ctx, stringify);
     JS_FreeValue(ctx, json_obj);
     JS_FreeValue(ctx, global);
 
+    /* A stringify that threw (a cycle, a BigInt, a throwing toJSON) or a
+     * failed conversion propagates: it used to return undefined with the
+     * exception still pending, and the response went out without a body. */
+    if (JS_IsException(result))
+        return JS_EXCEPTION;
+    size_t json_len = 0;
+    const char *json_str = JS_ToCStringLen(ctx, &json_len, result);
+    JS_FreeValue(ctx, result);
+    if (!json_str)
+        return JS_EXCEPTION;
+
+    HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
+    kl_http_response_header(res, "Content-Type", "application/json");
+    /* A failed body copy leaves the response with no body: raise rather
+     * than let it go out as a 200 with nothing in it. */
+    int rc = hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
+                               js_rt ? js_rt->base.compress : NULL,
+                               json_str, json_len);
+    JS_FreeCString(ctx, json_str);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "res.json: out of memory");
     return JS_UNDEFINED;
 }
 
@@ -221,23 +227,24 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
     /* Length-exact: strlen cut the body at an embedded NUL (L5). */
     size_t html_len = 0;
     const char *html = JS_ToCStringLen(ctx, &html_len, argv[0]);
-    if (html) {
-        HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-        kl_http_response_header(res, "Content-Type", "text/html; charset=utf-8");
-        /* Skip the default CSP if middleware already wrote one - two
-         * CSP headers cause browsers to enforce the strict intersection
-         * (typically blocking the page's own scripts). The app-supplied
-         * one wins. */
-        if (js_rt && js_rt->base.csp_policy &&
-            !hl_response_has_header(res, "Content-Security-Policy"))
-            kl_http_response_header(res, "Content-Security-Policy",
-                               js_rt->base.csp_policy);
-        hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
-                          js_rt ? js_rt->base.compress : NULL,
-                          html, html_len);
-        JS_FreeCString(ctx, html);
-    }
-
+    if (!html)
+        return JS_EXCEPTION;   /* a throwing toString: it was left pending */
+    HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
+    kl_http_response_header(res, "Content-Type", "text/html; charset=utf-8");
+    /* Skip the default CSP if middleware already wrote one - two
+     * CSP headers cause browsers to enforce the strict intersection
+     * (typically blocking the page's own scripts). The app-supplied
+     * one wins. */
+    if (js_rt && js_rt->base.csp_policy &&
+        !hl_response_has_header(res, "Content-Security-Policy"))
+        kl_http_response_header(res, "Content-Security-Policy",
+                           js_rt->base.csp_policy);
+    int rc = hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
+                               js_rt ? js_rt->base.compress : NULL,
+                               html, html_len);
+    JS_FreeCString(ctx, html);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "res.html: out of memory");
     return JS_UNDEFINED;
 }
 
@@ -253,15 +260,16 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
 
     size_t text_len = 0;
     const char *text = JS_ToCStringLen(ctx, &text_len, argv[0]);   /* L5 */
-    if (text) {
-        HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-        kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
-        hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
-                          js_rt ? js_rt->base.compress : NULL,
-                          text, text_len);
-        JS_FreeCString(ctx, text);
-    }
-
+    if (!text)
+        return JS_EXCEPTION;
+    HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
+    kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+    int rc = hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
+                               js_rt ? js_rt->base.compress : NULL,
+                               text, text_len);
+    JS_FreeCString(ctx, text);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "res.text: out of memory");
     return JS_UNDEFINED;
 }
 
