@@ -166,7 +166,7 @@ Register with `app.use(method, pattern, mw)`:
 | `hkdf` | `hull.crypto.hkdf` | `hull:crypto:hkdf` | HKDF-SHA256 (RFC 5869): `derive(ikm, length, { salt?, info? })`, plus `extract(salt, ikm)` / `expand(prk, info, length)`. Several independent keys from one high-entropy secret, each bound to its `info` label (at most 8160 bytes). Not a password hash (`crypto.hash_password` is). Lua returns a byte string, JS an ArrayBuffer |
 | `otp` | `hull.crypto.otp` | `hull:crypto:otp` | HOTP (RFC 4226): `hotp(key, counter, digits?)` and `step(now, period?)` for TOTP (RFC 6238). The algorithm under `hull/web/middleware/totp` |
 | `sealbox` | `hull.crypto.sealbox` | `hull:crypto:sealbox` | Versioned secretbox sealing under a keyring (`keyring` / `seal` / `open`), with an optional context bound into the sealed frame. Keys may be 32-byte strings or `crypto.key_from_env` handles; `keyring_from_env{ keys = { [1] = "VAR" }, current = 1 }` (JS `keyringFromEnv`) builds a keyring of held keys. `open` returns `value, version` or `nil, reason` in Lua and `[value, null, version]` or `[null, reason]` in JS (reason `unknown_version` or `open_failed`). Backs `hull/kv`'s `encrypt` option (see [kv_cache.md](kv_cache.md#encryption-at-rest)) and TOTP's encrypted secrets |
-| `pwned` | `hull.web.pwned` | `hull:web:pwned` | k-anonymity pwned-password check via HIBP range API. Hashes the password SHA-1 client-side, sends only the first 5 hex chars over the wire, scans the returned suffix list locally. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`. Fail-open on HIBP outage (a network failure or non-200); the runtime refusing the wait (called with a transaction open, or from middleware) is re-raised, not taken for an outage. Used internally by `hull/web/auth-flows` when `check_pwned_passwords = true` |
+| `pwned` | `hull.web.pwned` | `hull:web:pwned` | k-anonymity pwned-password check via HIBP range API. Hashes the password SHA-1 client-side, sends only the first 5 hex chars over the wire, scans the returned suffix list locally. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`. Fail-open on HIBP outage (a network failure or non-200); the runtime refusing the wait (called with a transaction open, or from middleware), and a `manifest.hosts` that certainly does not admit the endpoint, are raised, not taken for an outage. Used internally by `hull/web/auth-flows` when `check_pwned_passwords = true` |
 | `audit-log` | `hull.web.middleware.audit-log` | `hull:web:middleware:audit-log` | Append-only sign-in / auth event log + per-device grouping. `record(user_id, kind, req, opts)`, `list(user_id, opts)`, `list_devices(user_id, opts)`, `is_new_device(user_id, req, opts)`. Fingerprint = `sha256(family_os|ip_prefix)[:16]`. Owns `_hull_audit_log`. Composes with auth-flows (emits events when `sign_in_log = true`), with session (per-device summary via `list_devices`), or standalone for app-recorded kinds (`api_token_issued`, `admin_impersonate`, etc.) |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
@@ -373,7 +373,8 @@ verify step between successful first-factor auth and `on_login` when
     account whose hash cannot be read that way is treated as having a
     password (the verify step is shown, never skipped).
     `email_verified` is a boolean; `0` / `1` from a raw row are read as
-    false / true in both runtimes.
+    false / true in both runtimes. Anything else (a string `"0"` /
+    `"1"` / `"true"` from a TEXT column) reads as NOT verified in both.
   - `opts.on_login(req, res, user)` / `opts.on_logout(req, res)`. App
     issues its own session (cookie, JWT, whatever) here. Module is
     session-agnostic. **Shortcut:** wire
@@ -400,6 +401,13 @@ verify step between successful first-factor auth and `on_login` when
   - `opts.verify_ttl` (86400s), `opts.reset_ttl` (3600s),
     `opts.magic_link_ttl` (600s), `opts.email_change_ttl` (86400s).
   - `opts.prefix` (default `"/auth"`).
+  - Emailed links need an origin: `opts.public_origin` (one canonical
+    URL), or `opts.trusted_hosts` (the request's Host must match an entry
+    exactly; the link is built from that entry, never from the request,
+    so a bare host gives a link without a port and an entry
+    `"host:port"` - which matches a request on that port only - gives
+    that port), or `opts.trust_request_host = true` (dev / tests only:
+    the request's host and port as sent).
   - `opts.enable_totp` (default `false`). Opt in to TOTP-as-second-
     factor on successful password login OR magic-link click. Requires
     `opts.user_totp_enrolled(user_id) -> boolean` and
@@ -409,10 +417,11 @@ verify step between successful first-factor auth and `on_login` when
     accepts both 6-digit and recovery codes.
   - `opts.totp_pending_ttl` (default `300`). Lifetime of the pending-
     2FA token issued between first-factor success and `/totp-verify`.
-  - `opts.totp_pending_redirect`. When set, magic-link clicks that
-    require 2FA redirect to `<redirect>?token=<totp_token>` instead
-    of rendering the module's default minimal HTML form. POST-based
-    `/login` always responds with JSON
+  - `opts.totp_pending_redirect`. When set, magic-link sign-ins (the
+    page's form POST) that require 2FA redirect to
+    `<redirect>?token=<totp_token>` instead of rendering the module's
+    default minimal HTML form. `/login`, and a JSON magic-link POST,
+    always respond with JSON
     `{ ok: true, pending_2fa: true, totp_token: "…" }`.
   - **Hardening options** (all opt-in via init):
     - `opts.max_failed_logins` (default `5`) + `opts.lockout_duration`
@@ -437,13 +446,16 @@ verify step between successful first-factor auth and `on_login` when
     - `opts.check_pwned_passwords` (default `false`). Routes
       register + password-reset-confirm through `hull/web/pwned`
       (HIBP k-anonymity). Apps must add `api.pwnedpasswords.com`
-      to `manifest.hosts`. Fail-open on HIBP outage. Tests can
-      override the endpoint via `opts.pwned_endpoint`.
+      to `manifest.hosts`: a hosts list that does not admit the
+      endpoint raises (500), it is not taken for an outage. Fail-open
+      on HIBP outage. Tests can override the endpoint via
+      `opts.pwned_endpoint`.
     - **Email-change notify+revoke** activates implicitly when the
       app provides a `templates.email_change_notify` template. A
       revoke link is sent to the OLD address on every email-change
-      request; the OLD-address holder can click it to delete the
-      pending change (`/email-change/revoke?token=…`) within
+      request; the OLD-address holder can click it (and submit the
+      page it opens) to delete the pending change
+      (`/email-change/revoke?token=…`) within
       `email_change_ttl` even if the attacker holds a valid
       session cookie.
     - `opts.sign_in_log` (default `false`). Routes every login /
@@ -467,10 +479,24 @@ verify step between successful first-factor auth and `on_login` when
 - `authflows.routes(app)`. Mounts the routes under `prefix`:
   POST `/register`, GET + POST `/verify`, POST `/verify/resend`,
   POST `/login`, POST `/logout`, POST `/magic-link`,
-  GET `/magic-link/consume`, POST `/password-reset/request`,
+  GET + POST `/magic-link/consume`, POST `/password-reset/request`,
   POST `/password-reset/confirm`, POST `/email-change`,
-  GET `/email-change/confirm`, GET `/email-change/revoke`,
+  GET + POST `/email-change/confirm`, GET + POST `/email-change/revoke`,
   POST `/totp-verify` (404s when `enable_totp` is off).
+  **A mailed single-use link is consumed by POST, never by GET.** Mail
+  scanners prefetch every link: a GET that consumed a magic link signed
+  the scanner in (the user's own click then answered "replayed"), and one
+  that consumed an email-change confirm or revoke link changed or
+  cancelled the change with nobody reading it. The GET of
+  `/magic-link/consume`, `/email-change/confirm` and `/email-change/revoke`
+  checks the token without using it and renders a one-button page (no
+  script; `secure_html` headers) whose form POSTs `token` back to the
+  same path; a JSON client POSTs `{token}` itself and gets JSON back. A
+  magic-link POST marked `Sec-Fetch-Site: cross-site` is refused (403:
+  it would sign the victim in to the attacker's account), and a
+  confirmed email change answers like `/verify` (a 303 to
+  `verify_redirect`, or `{ok, redirect}` for JSON). An app with a
+  global CSRF middleware must exempt these POSTs, as it does `/verify`.
   `/verify/resend` is enumeration-safe - always returns `{ok:true}`
   whether the user exists, is unverified, or is already verified.
   Apps SHOULD rate-limit it (per-email key) to bound mail volume.

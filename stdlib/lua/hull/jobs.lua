@@ -1033,6 +1033,7 @@ local CLAIMED = " AND claim_token=? AND status='running'"
 -- cannot produce these keys, and they are read with rawget.
 local YIELD = {}      -- thrown by ctx.sleep / ctx.wait_signal
 local WF_YIELD = {}   -- returned by the workflow handler to the work loop
+local WF_DEAD = {}    -- jobs.DEAD from a workflow, carrying its compensation failures
 
 local function mark_done(job, result)
     local id = job.id
@@ -1532,8 +1533,10 @@ function jobs.work(opts)
                 err_str = tostring(result)
                 outcome = finish(job, { error = err_str, attempt = job.attempts },
                     function() return mark_retry(job, err_str) end)
-            elseif result == jobs.DEAD then
-                err_str = "handler returned jobs.DEAD"
+            elseif result == jobs.DEAD
+                or (type(result) == "table" and rawget(result, WF_DEAD)) then
+                err_str = result == jobs.DEAD and "handler returned jobs.DEAD"
+                    or rawget(result, "error")
                 outcome = finish(job, { error = err_str }, function()
                     return mark_dead(job, err_str)
                 end)
@@ -2039,7 +2042,9 @@ local function run_wait_signal(workflow_id, n, name, opts, replay_only)
     if got then return decode_payload(enc) end
     local deadline = 0
     if opts and opts.timeout then
-        local dkey = "__waitdl:" .. name
+        -- Per wait, like the memo key: a later timed wait on the same name
+        -- must not read this one's (expired) deadline.
+        local dkey = "__waitdl:" .. n .. ":" .. name
         local drows = db.query(
             "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
             { workflow_id, dkey })
@@ -2249,8 +2254,13 @@ function jobs.workflow(name, fn)
         local ctx = make_ctx(job, name)
         local ok, res = pcall(fn, ctx)
         if ok then
-            if res == jobs.DEAD then run_compensations(ctx._comps, job.id) end
-            return res
+            if res ~= jobs.DEAD then return res end
+            -- A compensation that failed is recorded in the dead letter, as on
+            -- the last-attempt error path below.
+            local failed = run_compensations(ctx._comps, job.id)
+            if #failed == 0 then return res end
+            return { [WF_DEAD] = true,
+                     error = with_comp_failures("handler returned jobs.DEAD", failed) }
         end
         if res == WF_ABORT then
             res = "visibility timeout: worker lost after the last attempt (compensated)"
@@ -2284,9 +2294,12 @@ function jobs.start(name, input, opts)
 end
 
 --- Deliver a signal to a durable workflow (see ctx.wait_signal). Records the
--- named payload (first delivery per name wins) and re-activates the workflow if
--- it is parked waiting for it. Safe to call before the workflow reaches the wait
--- (the signal is stored and consumed when it gets there) - no lost-signal race.
+-- named payload and re-activates the workflow if it is parked waiting for it.
+-- Safe to call before the workflow reaches the wait (the signal is stored and
+-- consumed when it gets there) - no lost-signal race. One delivery per name is
+-- held at a time: a signal sent while an earlier one of the same name is still
+-- unconsumed is dropped; once a wait has consumed it, the next one is held for
+-- the next wait on that name.
 -- Returns true.
 -- @tparam number id       the workflow id
 -- @tparam string name     the signal name
@@ -2298,8 +2311,16 @@ function jobs.signal(id, name, payload)
     end
     local enc = payload ~= nil and json.encode(payload) or nil
     local now = time.now()
-    db.insert_if_absent("_hull_workflow_signals", { "workflow_id", "name" },
+    local n = db.insert_if_absent("_hull_workflow_signals", { "workflow_id", "name" },
         { "workflow_id", "name", "payload", "created_at" }, { id, name, enc, now })
+    if (n or 0) == 0 then
+        -- The name was signalled before. Once that delivery has been consumed
+        -- (by an earlier wait), this one is stored for the next wait on the
+        -- name; while it is still pending, this one is dropped.
+        db.exec("UPDATE _hull_workflow_signals SET payload=?, created_at=?, consumed_at=NULL "
+            .. "WHERE workflow_id=? AND name=? AND consumed_at IS NOT NULL",
+            { enc, now, id, name })
+    end
     -- Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
     -- 'pending' workflow is left alone: it finds the stored signal on its own.
     db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, updated_at=? "
@@ -2399,6 +2420,7 @@ end
 --- Requeue a dead-lettered job for another run. Resets it to `pending` with a
 -- fresh attempt budget (attempts=0) and clears the last error. No-op unless the
 -- job exists and is currently `dead` (so it can't double-requeue a live job).
+-- For a workflow, the steps its saga compensations undid run again.
 -- @tparam number id
 -- @treturn boolean  true if a dead job was requeued
 function jobs.retry(id)
@@ -2428,6 +2450,12 @@ function jobs.retry(id)
             db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
                 { id, WF_COMPENSATE_KEY })
         end
+        -- A step whose compensation ran was undone: the requeued run must
+        -- execute it again, not replay its memo as done (a refunded charge
+        -- replayed, the steps after it run on an unpaid order). A step whose
+        -- compensation failed keeps its row - its effect still stands.
+        db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND status='compensated'",
+            { id })
     end)
     return (n or 0) > 0
 end

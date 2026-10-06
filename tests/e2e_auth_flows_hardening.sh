@@ -143,6 +143,15 @@ for e in reversed(emails):
         print(e.get('text', '')); break
 "
 }
+# A mailed single-use link (magic link, email-change confirm / revoke): its GET
+# shows a page and consumes nothing (mail scanners prefetch links); the page's
+# form POSTs the token back. Extra curl options go after the URL.
+link_post() {
+    _lurl="$1"; shift
+    _ltok=$(printf '%s\n' "$_lurl" | sed 's/.*token=//')
+    curl -sS "$@" -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data "token=$_ltok" "${_lurl%%\?*}"
+}
 extract_url() {
     printf '%s\n' "$1" | python3 -c "
 import re, sys
@@ -280,11 +289,16 @@ run_flow() {
     check_contains "$_label: NEW address got confirm link" "$CONFIRM_URL" "/email-change/confirm?token="
     check_contains "$_label: OLD address got revoke link" "$REVOKE_URL" "/email-change/revoke?token="
 
-    # 6b. Click revoke.
-    R=$(curl -sS "$REVOKE_URL")
+    # 6b. A prefetch of the revoke link (GET) cancels nothing; the click
+    #     (its form's POST) does.
+    S=$(curl -sS -o /dev/null -w '%{http_code}' "$REVOKE_URL")
+    check_status "$_label: revoke GET renders the page" "$S" "200"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' "$CONFIRM_URL")
+    check_status "$_label: change still pending after a revoke GET" "$S" "200"
+    R=$(link_post "$REVOKE_URL")
     check_contains "$_label: revoke succeeds" "$R" "canceled"
     # 6c. Confirm now fails - pending row deleted.
-    S=$(curl -sS -o /dev/null -w '%{http_code}' "$CONFIRM_URL")
+    S=$(link_post "$CONFIRM_URL" -o /dev/null -w '%{http_code}')
     check_status "$_label: confirm post-revoke fails (400)" "$S" "400"
 
     # 7. Re-request change, this time click confirm.
@@ -294,8 +308,8 @@ run_flow() {
         "$BASE/auth/email-change" > /dev/null
     NEW_TEXT=$(last_email_text "$PORT" "$EMAIL_NEW")
     CONFIRM_URL=$(extract_url "$NEW_TEXT")
-    S=$(curl -sS -o /dev/null -w '%{http_code}' "$CONFIRM_URL")
-    check_status "$_label: email-change confirm 302" "$S" "302"
+    S=$(link_post "$CONFIRM_URL" -o /dev/null -w '%{http_code}')
+    check_status "$_label: email-change confirm 303" "$S" "303"
     # Login with new email works.
     R=$(curl -sS -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_NEW\",\"password\":\"$PW\"}" \
@@ -312,6 +326,11 @@ run_flow() {
         -d '{"email":"bob@example.test","password":"freshrandompw99"}' \
         "$BASE/auth/register")
     check_contains "$_label: clean password ok" "$R" '"ok":true'
+    # 8c. An HIBP endpoint manifest.hosts does not admit is a
+    #     misconfiguration, not an outage: the check raises instead of
+    #     failing open.
+    R=$(curl -sS "$BASE/_pwned_misconfig")
+    check_contains "$_label: pwned check raises on an unadmitted host" "$R" '"raised":true'
 
     stop_pid "$HULL_PID"; HULL_PID=""
     stop_pid "$HIBP_PID"; HIBP_PID=""

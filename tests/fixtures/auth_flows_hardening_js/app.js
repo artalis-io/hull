@@ -4,6 +4,7 @@ import { app }       from "hull:app";
 import { authFlows } from "hull:web:auth-flows";
 import { session }   from "hull:web:middleware:session";
 import { cookie }    from "hull:web:cookie";
+import { pwned }     from "hull:web:pwned";
 
 // The e2e binds its HIBP mock to this fixed port so the fixture
 // can hardcode the endpoint. Hull's env cap isn't wired during
@@ -104,6 +105,18 @@ app.use("*", "/*", (req, _res) => {
         }
     }
     return 0;
+});
+
+// An HIBP endpoint manifest.hosts does not admit: pwned.check must throw
+// (a misconfiguration), not fail open as for an outage (audit 7).
+app.get("/_pwned_misconfig", async (_r, res) => {
+    try {
+        await pwned.check("not-in-the-blocklist-7f3a9c",
+            { endpoint: "https://not-admitted.example/range/" });
+        res.json({ raised: false });
+    } catch (e) {
+        res.json({ raised: true, error: String(e && e.message) });
+    }
 });
 
 app.get("/_emails",        (_r, res) => res.json(sentEmails));

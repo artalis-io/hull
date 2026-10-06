@@ -219,23 +219,38 @@ export function attach(ast, comments, bytes, linemap, budget, path) {
         }
 
         // 3. walk the AST; attach the leading comment-only run to each recognized declaration.
-        function attachRun(node, effStart) {
-            const declLine = lineOf(linemap, effStart);
+        //    The run depends only on the declaration's LINE, so it is computed once per line
+        //    and shared by every declaration there (`var a; var b;` both get it): recomputed per
+        //    declaration, each re-classified the whole comment region above and re-scanned the
+        //    comments from the first - ~10^10 steps for 100k declarations under 100k comment
+        //    lines. A region is walked once (distinct declaration lines have disjoint regions:
+        //    a declaration's line holds code, which ends the region above it).
+        const runs = new Map();                               // declLine -> { list, byName } | null
+        function firstStartingAt(off) {                       // first index in `sorted` with start >= off
+            let lo = 0, hi = sorted.length;
+            while (lo < hi) { const mid = (lo + hi) >> 1; if (sorted[mid].start < off) lo = mid + 1; else hi = mid; }
+            return lo;
+        }
+        function runFor(declLine) {
             let top = declLine;
             while (top - 1 >= 1 && isCommentLine(top - 1)) top--;   // maximal contiguous comment region above
-            if (top === declLine) return;
+            if (top === declLine) return null;
             // Every comment that STARTS in [top, declLine-1] contributes, in source order; ALL
             // comments on a shared line are collected (fixes same-line comment-group loss).
             const list = [], byName = {};
-            for (let i = 0; i < sorted.length; i++) {
+            const end = linemap[declLine - 1];                // first byte of the declaration's line
+            for (let i = firstStartingAt(linemap[top - 1]); i < sorted.length && sorted[i].start < end; i++) {
                 const c = sorted[i];
-                const sl = lineOf(linemap, c.start);
-                if (sl < top) continue;
-                if (sl > declLine - 1) break;                 // sorted by start -> no later comment qualifies
                 const tags = (c.kind === "jsdoc" && Array.isArray(c.annotationList)) ? c.annotationList : [];
                 for (let t = 0; t < tags.length; t++) { const a = tags[t]; list.push(a); if (byName[a.name] === undefined) byName[a.name] = a; }
             }
-            if (list.length > 0) { node.annotationList = list; node.annotations = byName; }
+            return list.length > 0 ? { list: list, byName: byName } : null;
+        }
+        function attachRun(node, effStart) {
+            const declLine = lineOf(linemap, effStart);
+            let run = runs.get(declLine);
+            if (run === undefined) { run = runFor(declLine); runs.set(declLine, run); }
+            if (run) { node.annotationList = run.list; node.annotations = run.byName; }
         }
         function isTarget(t) { return t === "VariableDeclaration" || t === "FunctionDeclaration" || t === "ClassDeclaration"; }
         // Nodes carry FLAT start/stop (1-based byte offsets); this half-open pair IS the range.

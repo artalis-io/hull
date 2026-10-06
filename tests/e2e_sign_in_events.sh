@@ -116,6 +116,15 @@ for e in reversed(emails):
         print(e.get('text', '')); break
 "
 }
+# A mailed single-use link (magic link, email-change confirm / revoke): its GET
+# shows a page and consumes nothing (mail scanners prefetch links); the page's
+# form POSTs the token back. Extra curl options go after the URL.
+link_post() {
+    _lurl="$1"; shift
+    _ltok=$(printf '%s\n' "$_lurl" | sed 's/.*token=//')
+    curl -sS "$@" -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data "token=$_ltok" "${_lurl%%\?*}"
+}
 extract_url() {
     printf '%s\n' "$1" | python3 -c "
 import re, sys
@@ -230,8 +239,8 @@ run_flow() {
         "$BASE/auth/email-change" > /dev/null
     NEW_TEXT=$(last_email_text "$PORT" "$EMAIL_NEW")
     CONFIRM_URL=$(extract_url "$NEW_TEXT")
-    S=$(curl -sS -o /dev/null -w '%{http_code}' "$CONFIRM_URL")
-    check_status "$_label: email-change confirm 302" "$S" "302"
+    S=$(link_post "$CONFIRM_URL" -o /dev/null -w '%{http_code}')
+    check_status "$_label: email-change confirm 303" "$S" "303"
     EVENTS=$(curl -sS -b "$COOKIES_A" \
         -H "User-Agent: $UA_A" -H "X-Forwarded-For: $IP_A" \
         "$BASE/_devices" | python3 -c "

@@ -25,7 +25,8 @@
 --            AND the embedded blocklist did not hit (fail-open).
 --
 -- Apps consuming this module MUST add the HIBP host (or their
--- override) to manifest.hosts:
+-- override) to manifest.hosts - check() raises when the hosts list
+-- certainly does not admit it (a misconfiguration, not an outage):
 --
 --   app.manifest({
 --       modules = { "hull/web/pwned@1", ... },
@@ -48,6 +49,30 @@ local function is_wait_refusal(err)
     local s = tostring(err)
     return s:find("cannot wait while a transaction is open", 1, true) ~= nil
         or s:find("can only wait in a handler", 1, true) ~= nil
+end
+
+-- Could manifest.hosts admit the endpoint's host? Read only after a fetch
+-- failed to start, to tell a misconfiguration from an outage. Conservative:
+-- an entry that MIGHT admit it ("*", a "$VAR" reference, a CIDR, a glob)
+-- counts, so only a list that certainly refuses the host answers false.
+local function hosts_may_admit(endpoint)
+    local host = endpoint:match("^%a[%w+.-]*://%[?([^/:%]]+)")
+    if not host then return true end
+    host = host:lower()
+    local okm, m = pcall(function() return app.get_manifest() end)
+    if not okm or type(m) ~= "table" then return true end
+    if type(m.hosts) ~= "table" then return false end
+    for _, h in ipairs(m.hosts) do
+        if type(h) ~= "string" then return true end
+        local e = h:lower()
+        if e == "*" or e == host or e:sub(1, 1) == "$" or e:find("/", 1, true) then
+            return true
+        end
+        if e:sub(1, 2) == "*." and (host == e:sub(3) or host:sub(-(#e - 1)) == e:sub(2)) then
+            return true
+        end
+    end
+    return false
 end
 
 -- Health state. Updated after every HIBP attempt. `ok=true` only
@@ -117,6 +142,12 @@ function M.check(password, opts)
     -- cannot wait) is a bug in the caller, not an HIBP outage: failing open
     -- on it turned the check off, quietly, for every such call. Re-raise.
     if not ok and is_wait_refusal(resp) then error(resp, 0) end
+    -- Neither is a host the manifest does not admit: failing open on it
+    -- turned the check off for the life of the process, behind one warning.
+    if not ok and not hosts_may_admit(endpoint) then
+        error("pwned: manifest.hosts does not admit the HIBP endpoint " .. endpoint
+            .. " - add its host to manifest.hosts", 0)
+    end
     if not ok or not resp or resp.status ~= 200 or not resp.body then
         _health.ok            = false
         _health.last_check_at = time.now()

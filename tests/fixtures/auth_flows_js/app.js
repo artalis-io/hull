@@ -61,10 +61,12 @@ authFlows.init({
     },
     userFindByEmail: email => usersByEmail[email],
     // userGet keeps the hash out of the model (a common adapter habit):
-    // auth-flows must read it through userFindByEmail (audit 6 M1).
+    // auth-flows must read it through userFindByEmail (audit 6 M1). Its
+    // email_verified is a TEXT-column-style "0" when unverified (audit 7:
+    // JS read any truthy value, so "0" counted as verified) and 1 when verified.
     userGet: (id) => {
         const u = usersById[id];
-        return u ? { id: u.id, email: u.email, email_verified: u.email_verified } : undefined;
+        return u ? { id: u.id, email: u.email, email_verified: u.email_verified ? 1 : "0" } : undefined;
     },
     userCreate,
     userSetPassword: (id, pwhash) => { usersById[id].password_hash = pwhash; },

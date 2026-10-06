@@ -588,22 +588,24 @@ export function createTokenizer(bytes, opts) {
         return lastToken;
     }
 
-    // Checkpoint/restore the tokenizer's full lexical state so the parser can SPECULATIVELY parse
-    // arbitrary content (e.g. arrow parameters that may contain a regex or a division) with real
-    // grammatical slash goals and rewind on a wrong guess. Comments accumulated during a rewound
-    // speculation are dropped (truncated back to the saved length); diagnostics are owned by the
-    // shared budget and rolled back by the parser via budget.mark/reset.
-    function checkpoint() {
-        return { p: p, exprAllowed: exprAllowed, prev: prev, nlPending: nlPending, tokenCount: tokenCount, done: done, lastToken: lastToken, ctx: ctx.slice(), commentsLen: comments.length };
+    // Mark/rewind ONE next() call, so the parser can peek a token under a guessed slash goal and
+    // take it back when the guess was wrong (the label peek). One next() pushes or pops at most
+    // one ctx entry (or replaces the top: a template middle), and entries are never mutated, so
+    // the stack's length and top restore it - O(1). (A full copy of the stack per peek was
+    // quadratic over a deeply nested file's statements.) Comments lexed meanwhile are dropped;
+    // diagnostics are owned by the shared budget and rolled back by the parser.
+    function peekMark() {
+        return { p: p, exprAllowed: exprAllowed, prev: prev, nlPending: nlPending, tokenCount: tokenCount, done: done, lastToken: lastToken,
+            ctxLen: ctx.length, ctxTop: ctx.length ? ctx[ctx.length - 1] : null, commentsLen: comments.length };
     }
-    function restore(cp) {
-        p = cp.p; exprAllowed = cp.exprAllowed; prev = cp.prev; nlPending = cp.nlPending; tokenCount = cp.tokenCount; done = cp.done; lastToken = cp.lastToken;
-        ctx.length = 0; for (let i = 0; i < cp.ctx.length; i++) ctx.push(cp.ctx[i]);
-        comments.length = cp.commentsLen;
+    function peekRewind(m) {
+        p = m.p; exprAllowed = m.exprAllowed; prev = m.prev; nlPending = m.nlPending; tokenCount = m.tokenCount; done = m.done; lastToken = m.lastToken;
+        ctx.length = m.ctxLen; if (m.ctxLen) ctx[m.ctxLen - 1] = m.ctxTop;
+        comments.length = m.commentsLen;
     }
 
     const _linemap = buildLinemap(bytes);
-    return { next: next, comments: comments, diagnostics: budget.list, linemap: _linemap, checkpoint: checkpoint, restore: restore };
+    return { next: next, comments: comments, diagnostics: budget.list, linemap: _linemap, peekMark: peekMark, peekRewind: peekRewind };
 }
 
 // lex(bytes, opts) -> { tokens, comments, diagnostics, linemap }. Convenience that drives the

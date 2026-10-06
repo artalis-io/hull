@@ -411,6 +411,127 @@ UTEST(js_parser, async_arrow_slash_defaults)
     hl_js_session_destroy(s);
 }
 
+/* "<open>" x n + mid + "<close>" x n, malloc'd. */
+static char *nest(const char *pre, const char *open, int n, const char *mid, const char *close, const char *post)
+{
+    size_t len = strlen(pre) + n * (strlen(open) + strlen(close)) + strlen(mid) + strlen(post) + 1;
+    char *b = malloc(len);
+    if (!b) return NULL;
+    strcpy(b, pre);
+    for (int i = 0; i < n; i++) strcat(b, open);
+    strcat(b, mid);
+    for (int i = 0; i < n; i++) strcat(b, close);
+    strcat(b, post);
+    return b;
+}
+
+/* Audit 7 M5: `async (` was parsed speculatively as arrow parameters, then rewound and parsed
+ * again as a call when no `=>` followed - every nested `async(` twice per enclosing one, so
+ * ~330 bytes of `async(a=` x 40 never finished (`hull agent inspect` / `hull dev --agent` hung).
+ * The list is now parsed once (the cover grammar): 15 levels of either shape (2^15 parses
+ * before) parse at once, and the 40-level input ends at once too - on the session's stack
+ * limit, a clean js.limit.stack verdict, instead of never. */
+UTEST(js_parser, nested_async_parses_in_linear_time)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *src = nest("const v = ", "async(a=", 15, "0", ")", ";");
+    ASSERT_TRUE(src != NULL);
+    char *o = parse_str(s, src);
+    ASSERT_TRUE(o != NULL);
+    EXPECT_EQ(count(o, "\"type\":\"CallExpression\""), 15);
+    EXPECT_FALSE(has(o, "\"type\":\"ArrowFunctionExpression\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); free(src);
+    /* the same nesting as real async arrows: every default is itself an arrow */
+    src = nest("const f = ", "async(a=", 15, "0", ")=>0", ";");
+    ASSERT_TRUE(src != NULL);
+    o = parse_str(s, src);
+    ASSERT_TRUE(o != NULL);
+    EXPECT_EQ(count(o, "\"type\":\"ArrowFunctionExpression\""), 15);
+    EXPECT_EQ(count(o, "\"type\":\"AssignmentPattern\""), 15);
+    EXPECT_FALSE(has(o, "\"type\":\"CallExpression\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); free(src);
+    /* the audit's input (fuzz/corpus_js_source/regress-nested-async-call) - it used to take
+     * hours. Whether 40 levels fit the session's stack depends on the host (Windows stops near
+     * 16-20, macOS parses all 40), so either outcome is right; returning at all is the test. */
+    src = nest("", "async(a=", 40, "0", ")", "\n");
+    ASSERT_TRUE(src != NULL);
+    o = parse_str(s, src);
+    ASSERT_TRUE(o != NULL);
+    EXPECT_TRUE(has(o, "js.limit.stack") ||
+                count(o, "\"type\":\"CallExpression\"") == 40);
+    free(o); free(src);
+    hl_js_session_destroy(s);
+}
+
+/* The cover grammar builds the same parameter nodes the params parse did, and refuses what is
+ * no binding; `new async(x)` keeps `(x)` as the new's arguments. */
+UTEST(js_parser, async_arrow_cover_grammar)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = parse_str(s, "const f = async ({ a, b = 1, c: [d, ...e] }, [g = 2, , h], ...i) => a;");
+    EXPECT_TRUE(has(o, "\"type\":\"ObjectPattern\""));
+    EXPECT_TRUE(has(o, "\"type\":\"ArrayPattern\""));
+    EXPECT_EQ(count(o, "\"type\":\"RestElement\""), 2);
+    EXPECT_EQ(count(o, "\"type\":\"AssignmentPattern\""), 2);
+    EXPECT_FALSE(has(o, "\"type\":\"ObjectExpression\""));
+    EXPECT_FALSE(has(o, "\"type\":\"ArrayExpression\""));
+    EXPECT_FALSE(has(o, "\"type\":\"SpreadElement\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o);
+    static const char *const bad[] = {
+        "const f = async (a.b) => 1;",
+        "const f = async (g()) => 1;",
+        "const f = async (1) => 1;",
+        "const f = async (eval) => 1;",
+        "const f = async (...a, b) => 1;",
+        "const f = async (...a,) => 1;",
+        "const f = async (...a = 1) => 1;",
+        "const f = async ({ m() {} }) => 1;",
+        "const f = async ({ ...[a] }) => 1;",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        o = parse_str(s, bad[i]);
+        EXPECT_TRUE(has(o, "\"valid\":false"));
+        EXPECT_TRUE(has(o, "js.syntax"));
+        free(o);
+    }
+    o = parse_str(s, "const n = new async(x);");
+    EXPECT_TRUE(has(o, "\"type\":\"NewExpression\""));
+    EXPECT_FALSE(has(o, "\"type\":\"CallExpression\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Audit 7 L5 / L6: annotation attachment computed each declaration's run from scratch (the
+ * whole comment region above, then every comment from the first) - super-quadratic for many
+ * declarations on one line under many comment lines - and the label peek copied the lexer's
+ * whole context stack per identifier-led statement. A run is now computed once per line and
+ * the peek is O(1): this finishes at once, and every declaration still gets the run. */
+UTEST(js_parser, annotation_attach_is_linear)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    enum { N = 5000 };
+    size_t cap = 64 + (size_t)N * 16;
+    char *src = malloc(cap);
+    ASSERT_TRUE(src != NULL);
+    size_t len = 0;
+    len += (size_t)snprintf(src + len, cap - len, "/** @route x */\n");
+    for (int i = 0; i < N; i++) len += (size_t)snprintf(src + len, cap - len, "//\n");
+    for (int i = 0; i < N; i++) len += (size_t)snprintf(src + len, cap - len, "var a%d;", i);
+    char *o = parse_str(s, src);
+    ASSERT_TRUE(o != NULL);
+    EXPECT_EQ(count(o, "\"annotations\":{\"route\""), N);
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); free(src);
+    hl_js_session_destroy(s);
+}
+
 /* Blocker #2 -- the combined budget is authoritative across BOTH producers even when a lexical
  * diagnostic is emitted AFTER a parser one: `const a = ;` (parser) then `@` (late lexer) then
  * `const b = ;` (parser). Budgets 0/1/2 keep exactly 0/1/2 ordinary diagnostics + a terminal. */
