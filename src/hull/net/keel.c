@@ -64,6 +64,19 @@ static void keel_op_cancel(HlNetBackendCtx *ctx, HlSuspendOp *op)
     kl_async_cancel(w->server, (KlAsyncOp *)op);
 }
 
+/* The server's active-ops list holds exactly the ops that have a connection
+ * suspended now (an op is unlinked when it is retired, before its resume). */
+static HlSuspendOp *keel_op_holder(HlNetBackendCtx *ctx, HlReqHandle *req)
+{
+    if (!ctx || !req) return NULL;
+    struct kl_wrap *w = (struct kl_wrap *)ctx;
+    if (!w->server) return NULL;
+    for (KlAsyncOp *op = w->server->async_ops; op; op = op->next)
+        if (op->conn == (KlHttpConn *)req)
+            return (HlSuspendOp *)op;
+    return NULL;
+}
+
 /* ── Vtable + getter ───────────────────────────────────────────────── */
 
 /*
@@ -79,6 +92,7 @@ static const HlNetBackend keel_backend = {
     .op_suspend  = keel_op_suspend,
     .op_complete = keel_op_complete,
     .op_cancel   = keel_op_cancel,
+    .op_holder   = keel_op_holder,
 };
 
 const HlNetBackend *hl_net_backend(void)
@@ -101,6 +115,11 @@ void hl_net_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
 void hl_net_op_cancel(HlNetBackendCtx *ctx, HlSuspendOp *op)
 {
     keel_op_cancel(ctx, op);
+}
+
+HlSuspendOp *hl_net_op_holder(HlNetBackendCtx *ctx, HlReqHandle *req)
+{
+    return keel_op_holder(ctx, req);
 }
 
 /* ── Wrap / unwrap ─────────────────────────────────────────────────── */

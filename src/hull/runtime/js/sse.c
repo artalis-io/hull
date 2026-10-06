@@ -75,20 +75,23 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         return;
     }
 
-    /* Build request object */
-    JSValue js_req = hl_js_make_request(ctx, req, NULL);   /* not a multipart route */
-    hl_js_req_ctx_free(js, req);   /* js_req.ctx holds its own reference */
-
     /* The request's life: the stream holds it, and so does every
      * continuation the handler creates. It dies when the handler is done -
      * including when the client goes away mid-stream - so a stream kept for
-     * fan-out fails closed instead of writing into a connection that is gone. */
+     * fan-out fails closed instead of writing into a connection that is gone.
+     * Active before any app code can run (audit 8 H1, see dispatch.c). */
     HlReqLife *life = hl_req_life_new();
+    js->active_life = life;
+
+    /* Build request object */
+    JSValue js_req = hl_js_make_request(ctx, req, NULL);   /* not a multipart route */
+    hl_js_req_ctx_free(js, req);   /* js_req.ctx holds its own reference */
 
     /* Create SSE stream object (calls kl_http_sse_begin) */
     JSValue stream_obj = life ? hl_js_sse_create_stream(ctx, res, life)
                               : JS_EXCEPTION;
     if (JS_IsException(stream_obj)) {
+        js->active_life = NULL;
         hl_req_life_end(life);
         JS_FreeValue(ctx, handler);
         JS_FreeValue(ctx, js_req);
@@ -102,8 +105,6 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
 
     /* Call handler(req, stream) */
     JSValue args[2] = { js_req, stream_obj };
-    js->last_async_cont = NULL;   /* only this run's continuations chain */
-    js->active_life = life;
     JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 2, args);
     JS_FreeValue(ctx, handler);
 

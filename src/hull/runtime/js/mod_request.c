@@ -572,6 +572,10 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     js->active_conn = conn;
     js->active_req  = jc->req;
     js->last_async_cont = NULL;   /* see hl_js_async_resume */
+    /* The life with them, before the resolve below can run app code (a
+     * `then` getter read from the iterator result): an op made with the
+     * connection active and no life was unaccounted for (audit 8 H1). */
+    js->active_life = jc->life;
 
     /* The run waited holding a transaction (rolled back then): fail it
      * without continuing the handler (hl_js_run_yield_check). */
@@ -602,6 +606,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
          * or completed it, from its own ops. */
         js->active_conn = NULL;
         js->active_req  = NULL;
+        js->active_life = NULL;
         /* Waiting again: not while holding a transaction (audit 6 M2). */
         hl_js_run_yield_check(js, jc->link.once);
         mp_cont_set_parked(jc, 1);
@@ -628,7 +633,6 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     jc->reject  = JS_UNDEFINED;
 
     /* Drain microtasks - the for-await loop body runs here. */
-    js->active_life = jc->life;
     if (!aborted)
         hl_js_run_jobs(js);
     js->active_life = NULL;
@@ -647,6 +651,8 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     if ((tripped || aborted) && state == JS_PROMISE_PENDING &&
         !JS_IsUndefined(jc->link.handler_promise))
         state = JS_PROMISE_REJECTED;
+    int handler_pending = state == JS_PROMISE_PENDING &&
+                          !JS_IsUndefined(jc->link.handler_promise);
 
     /* Done, but an op started in this resume still holds the connection:
      * it completes the run when it resumes (see hl_js_async_resume). */
@@ -676,7 +682,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         js->async_pending = 0;
         js->active_conn = NULL;
         js->active_req = NULL;
-        if (conn) {
+        if (conn && !hl_js_conn_held_elsewhere(js, conn)) {
             /* This resume runs from the multipart body reader's on_data (not
              * kl_async_complete), so Hull drives the send: build on
              * kl_http_conn_response(conn), end any stream, then
@@ -707,7 +713,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         js->async_pending = 0;
         js->active_conn = NULL;
         js->active_req = NULL;
-        if (conn) {
+        if (conn && !hl_js_conn_held_elsewhere(js, conn)) {
             KlHttpResponse *res = kl_http_conn_response(conn);
             kl_http_response_status(res, 500);
             kl_http_response_header(res, "Content-Type", "text/plain");
@@ -719,12 +725,17 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
          * during the microtask drain; transfer the handler-Promise
          * via the cont's vtable (could be HlJsMpCont or the standard
          * HlJsAsyncCont - the slot dispatches to the right setter). */
+        HlJsRunOnce *run = jc->link.once;
         if (js->last_async_cont) {
             HlJsRunLink *nl = hl_js_cont_link((HlAsyncCont *)js->last_async_cont);
             hl_js_run_wire(nl, ctx, jc->link.handler_promise, jc->link.once);
-            hl_js_run_yield_check(js, nl->once);
+            if (!run) run = nl->once;
             js->last_async_cont = NULL;
         }
+        /* Waiting again - on a new op or one made earlier (audit 8 M7): not
+         * holding a transaction. A run deferred to its holder has settled. */
+        if (handler_pending)
+            hl_js_run_yield_check(js, run);
         JS_FreeValue(ctx, jc->link.handler_promise);
         jc->link.handler_promise = JS_UNDEFINED;
         jc->conn = NULL;
@@ -821,6 +832,11 @@ static const char *mp_park_refusal(const HlJsMpIter *it)
     if (!it->js->active_conn)
         return "req.multipart(): no active connection (streaming routes "
                "require a live server)";
+    /* The connection is active but not as a request's run (app code a
+     * resolve or a property write ran): nothing would account for the park
+     * (audit 8 H1). */
+    if (!it->js->active_life)
+        return "req.multipart(): no request is active here";
     if (it->js->in_middleware)
         return "req.multipart(): cannot wait for the request body in "
                "middleware (middleware is synchronous)";
@@ -829,7 +845,7 @@ static const char *mp_park_refusal(const HlJsMpIter *it)
      * that op's own resume, about to be sent: Keel re-arms no read there,
      * and the upload stalled until the body timeout, then the handler was
      * cancelled. Refused with an error instead. */
-    if (it->js->active_life && it->js->active_life->attached > 0)
+    if (it->js->active_life->attached > 0)   /* active_life: checked above */
         return "req.multipart(): cannot wait for more of the request body "
                "while an async operation on this request is in flight or "
                "has just resumed (read the body before awaiting hull.sleep / "

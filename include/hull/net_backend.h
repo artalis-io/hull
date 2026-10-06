@@ -226,6 +226,12 @@ typedef struct HlNetBackend {
      * SMTP sweep) so it never relies on the backend's own free-time cancel loop,
      * which would run after the runtime is gone. */
     void   (*op_cancel)  (HlNetBackendCtx *ctx, HlSuspendOp *op);
+
+    /* The op that has @p req's connection suspended now, or NULL. Lets a
+     * runtime check, before it sends a resumed request's response, that no
+     * op it does not account for still holds the connection (sending would
+     * drive the connection over that live suspension). */
+    HlSuspendOp *(*op_holder)(HlNetBackendCtx *ctx, HlReqHandle *req);
 } HlNetBackend;
 
 /* ── Convenience wrappers ─────────────────────────────────────────────
@@ -236,6 +242,7 @@ typedef struct HlNetBackend {
 int  hl_net_op_suspend(HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *op);
 void hl_net_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op);
 void hl_net_op_cancel(HlNetBackendCtx *ctx, HlSuspendOp *op);
+HlSuspendOp *hl_net_op_holder(HlNetBackendCtx *ctx, HlReqHandle *req);
 
 /* ── Backend getter ────────────────────────────────────────────────── */
 

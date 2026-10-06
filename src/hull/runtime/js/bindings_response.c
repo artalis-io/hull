@@ -48,6 +48,7 @@
  * connection that may be gone. */
 typedef struct {
     KlHttpResponse *res;
+    KlHttpRequest  *req;    /* its request: the Accept-Encoding it answers */
     HlReqLife      *life;   /* NULL: not tracked (always live) */
 } HlJsResBox;
 
@@ -72,7 +73,8 @@ static const JSClassDef hl_response_class = {
  * for a receiver that is not a response. Every method checks the NULL and
  * returns JS_EXCEPTION (which with nothing thrown reached the app as `null`,
  * or as a stale error left pending earlier). */
-static KlHttpResponse *get_response(JSContext *ctx, JSValueConst this_val)
+static KlHttpResponse *get_response_box(JSContext *ctx, JSValueConst this_val,
+                                        KlHttpRequest **req_out)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     HlJsResBox *box = (HlJsResBox *)JS_GetOpaque(this_val,
@@ -85,7 +87,13 @@ static KlHttpResponse *get_response(JSContext *ctx, JSValueConst this_val)
         JS_ThrowTypeError(ctx, "res: the request this response belongs to has finished");
         return NULL;
     }
+    if (req_out) *req_out = box->req;
     return box->res;
+}
+
+static KlHttpResponse *get_response(JSContext *ctx, JSValueConst this_val)
+{
+    return get_response_box(ctx, this_val, NULL);
 }
 
 /* Has a header with this name (case-insensitive) already been added to
@@ -167,17 +175,21 @@ static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
-    KlHttpResponse *res = get_response(ctx, this_val);
+    KlHttpRequest *req = NULL;
+    KlHttpResponse *res = get_response_box(ctx, this_val, &req);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "res.json requires (data, code?)");
 
-    /* Optional status code */
+    /* Optional status code. A conversion that throws propagates before
+     * anything is written: it used to send the body with the old status
+     * and leave the exception pending (audit 8 L1). */
     if (argc >= 2) {
         int32_t code;
-        if (!JS_ToInt32(ctx, &code, argv[1]))
-            kl_http_response_status(res, code);
+        if (JS_ToInt32(ctx, &code, argv[1]))
+            return JS_EXCEPTION;
+        kl_http_response_status(res, code);
     }
 
     /* JSON.stringify the data */
@@ -204,8 +216,11 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
     kl_http_response_header(res, "Content-Type", "application/json");
     /* A failed body copy leaves the response with no body: raise rather
-     * than let it go out as a 200 with nothing in it. */
-    int rc = hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
+     * than let it go out as a 200 with nothing in it. Compressed for the
+     * response's own request: the active one may be another's - a `res`
+     * stashed by one request and answered from another's handler was
+     * encoded for the wrong client's Accept-Encoding (audit 8 L2). */
+    int rc = hl_maybe_compress(req, res,
                                js_rt ? js_rt->base.compress : NULL,
                                json_str, json_len);
     JS_FreeCString(ctx, json_str);
@@ -218,7 +233,8 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
-    KlHttpResponse *res = get_response(ctx, this_val);
+    KlHttpRequest *req = NULL;
+    KlHttpResponse *res = get_response_box(ctx, this_val, &req);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -239,7 +255,7 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
         !hl_response_has_header(res, "Content-Security-Policy"))
         kl_http_response_header(res, "Content-Security-Policy",
                            js_rt->base.csp_policy);
-    int rc = hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
+    int rc = hl_maybe_compress(req, res,   /* the response's own request (L2) */
                                js_rt ? js_rt->base.compress : NULL,
                                html, html_len);
     JS_FreeCString(ctx, html);
@@ -252,7 +268,8 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
-    KlHttpResponse *res = get_response(ctx, this_val);
+    KlHttpRequest *req = NULL;
+    KlHttpResponse *res = get_response_box(ctx, this_val, &req);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -264,7 +281,7 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
     kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
-    int rc = hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
+    int rc = hl_maybe_compress(req, res,   /* the response's own request (L2) */
                                js_rt ? js_rt->base.compress : NULL,
                                text, text_len);
     JS_FreeCString(ctx, text);
@@ -314,17 +331,20 @@ static JSValue js_res_redirect(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "res.redirect requires (url, code?)");
 
+    /* A conversion that throws propagates (audit 8 L1): a failed code was
+     * ignored, and a failed url returned undefined with nothing sent and
+     * the exception left pending. */
     int32_t code = 302; /* default */
-    if (argc >= 2)
-        JS_ToInt32(ctx, &code, argv[1]);
+    if (argc >= 2 && JS_ToInt32(ctx, &code, argv[1]))
+        return JS_EXCEPTION;
 
     const char *url = JS_ToCString(ctx, argv[0]);
-    if (url) {
-        kl_http_response_status(res, code);
-        kl_http_response_header(res, "Location", url);
-        kl_http_response_body_borrow(res, "", 0);
-        JS_FreeCString(ctx, url);
-    }
+    if (!url)
+        return JS_EXCEPTION;
+    kl_http_response_status(res, code);
+    kl_http_response_header(res, "Location", url);
+    kl_http_response_body_borrow(res, "", 0);
+    JS_FreeCString(ctx, url);
 
     return JS_UNDEFINED;
 }
@@ -348,22 +368,25 @@ static int hl_js_ensure_response_class(HlJS *js)
     if (JS_NewClass(rt, class_id, &hl_response_class) < 0)
         return -1;
 
-    /* Create prototype with methods */
+    /* Create prototype with methods - defined, not set: the class is
+     * registered on the first request, and a set ran any setter an app put
+     * on Object.prototype, with that request's connection active (audit 8
+     * H1). */
     JSValue proto = JS_NewObject(js->ctx);
-    JS_SetPropertyStr(js->ctx, proto, "status",
-                      JS_NewCFunction(js->ctx, js_res_status, "status", 1));
-    JS_SetPropertyStr(js->ctx, proto, "header",
-                      JS_NewCFunction(js->ctx, js_res_header, "header", 2));
-    JS_SetPropertyStr(js->ctx, proto, "json",
-                      JS_NewCFunction(js->ctx, js_res_json, "json", 2));
-    JS_SetPropertyStr(js->ctx, proto, "html",
-                      JS_NewCFunction(js->ctx, js_res_html, "html", 1));
-    JS_SetPropertyStr(js->ctx, proto, "text",
-                      JS_NewCFunction(js->ctx, js_res_text, "text", 1));
-    JS_SetPropertyStr(js->ctx, proto, "bytes",
-                      JS_NewCFunction(js->ctx, js_res_bytes, "bytes", 1));
-    JS_SetPropertyStr(js->ctx, proto, "redirect",
-                      JS_NewCFunction(js->ctx, js_res_redirect, "redirect", 2));
+    JS_DefinePropertyValueStr(js->ctx, proto, "status",
+                      JS_NewCFunction(js->ctx, js_res_status, "status", 1), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(js->ctx, proto, "header",
+                      JS_NewCFunction(js->ctx, js_res_header, "header", 2), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(js->ctx, proto, "json",
+                      JS_NewCFunction(js->ctx, js_res_json, "json", 2), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(js->ctx, proto, "html",
+                      JS_NewCFunction(js->ctx, js_res_html, "html", 1), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(js->ctx, proto, "text",
+                      JS_NewCFunction(js->ctx, js_res_text, "text", 1), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(js->ctx, proto, "bytes",
+                      JS_NewCFunction(js->ctx, js_res_bytes, "bytes", 1), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(js->ctx, proto, "redirect",
+                      JS_NewCFunction(js->ctx, js_res_redirect, "redirect", 2), JS_PROP_C_W_E);
 
     JS_SetClassProto(js->ctx, class_id, proto);
     js->response_class_registered = 1;
@@ -373,8 +396,8 @@ static int hl_js_ensure_response_class(HlJS *js)
 
 /* ── Public: create JS request/response objects ─────────────────────── */
 
-JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res,
-                                 HlReqLife *life)
+JSValue hl_js_make_response_life(HlJS *js, KlHttpRequest *req,
+                                 KlHttpResponse *res, HlReqLife *life)
 {
     if (hl_js_ensure_response_class(js) != 0)
         return JS_ThrowInternalError(js->ctx, "failed to register Response class");
@@ -387,6 +410,7 @@ JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res,
         return JS_ThrowOutOfMemory(js->ctx);
     }
     box->res = res;
+    box->req = req;
     box->life = life;
     hl_req_life_retain(life);
     JS_SetOpaque(obj, box);
@@ -395,7 +419,7 @@ JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res,
 
 JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res)
 {
-    return hl_js_make_response_life(js, res, NULL);
+    return hl_js_make_response_life(js, NULL, res, NULL);
 }
 
 /* ── HTTP-feature seam: 500-error response ──────────────────────────── */

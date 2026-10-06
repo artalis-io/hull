@@ -691,9 +691,19 @@ ws-client callbacks, `app.main` - parks through `hl_js_entry_park` (`runtime/js/
 first runs the jobs the handler queued, with the entry still active (its code after `await
 null` is the entry's own: an op it starts belongs to the run, and a `BEGIN` it runs is seen),
 then wires every continuation into one run and checks; an async or multipart resume that waits
-again checks too. Audit 7 H1 / M3 / M6: run after the entry returned, those jobs ran with no
-request active (an op they started was detached and never waited for: an empty 200, then
-`res.json` into a recycled connection slot), or inside another entry's drain.
+again checks too - whether or not it started a new op (`await pa; BEGIN; ...; await pb` with
+`pb` made before the BEGIN waits across it all the same, audit 8 M7) - and so does an entry
+left waiting on a promise Hull does not drive (audit 8 c_db L1). Audit 7 H1 / M3 / M6: run after
+the entry returned, those jobs ran with no request active (an op they started was detached and
+never waited for: an empty 200, then `res.json` into a recycled connection slot), or inside
+another entry's drain. An op belongs to a request only while the request's live life is the
+active one (`hl_js_async_cont_create`; `hl_js_op_suspend` refuses otherwise): a resume makes
+its whole entry active before it settles the op's promise, dispatch and SSE before `req` is
+built, middleware sets `in_middleware` before it, and `req` is built with defined (not set)
+properties - app code run in any of those windows (an `Object.prototype` `then` getter, an
+inherited setter) made an op that suspended the connection uncounted (audit 8 H1). As defence
+in depth a resume never sends while Keel still has the connection suspended by an op
+(`hl_js_conn_held_elsewhere`, over `hl_net_op_holder`).
 Under that invariant every transaction the guard finds is orphaned. JS
 `db.batch(fn)` refuses an async fn before BEGIN (prototype check against the
 intrinsic AsyncFunction / AsyncGeneratorFunction) and a returned thenable

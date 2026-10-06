@@ -1086,4 +1086,11 @@ void hl_net_op_cancel(HlNetBackendCtx *ctx, HlSuspendOp *op)
 {
     (void)ctx; (void)op;
 }
+
+__attribute__((weak))
+HlSuspendOp *hl_net_op_holder(HlNetBackendCtx *ctx, HlReqHandle *req)
+{
+    (void)ctx; (void)req;
+    return NULL;     /* nothing is ever suspended */
+}
 #endif

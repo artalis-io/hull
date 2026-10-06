@@ -280,6 +280,15 @@ int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what);
  * as still pending), 0 = not. */
 int hl_js_run_defer_to_holder(HlJS *js, HlJsRunLink *link, struct HlReqLife *life);
 
+/* Defence in depth (audit 8 H1): 1 - logged - when an op still has @p conn
+ * suspended in Keel at the point a resume would send its request's response.
+ * The run's own ops are deferred to before that (hl_js_run_defer_to_holder,
+ * the hold op), so this one is not accounted for: sending drove the
+ * connection to SENDING over its live suspension, and its completion later
+ * drove a recycled slot (audit 6 H3). The caller does not send; Keel sends
+ * the response as it stands when that op completes. */
+int hl_js_conn_held_elsewhere(HlJS *js, KlHttpConn *conn);
+
 /* A run is about to wait (its handler returned / re-yielded pending with a
  * continuation, or a multipart read re-parks). The creation-time check
  * (hl_js_db_refuse_wait) cannot see a transaction opened AFTER the op was

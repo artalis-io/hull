@@ -29,8 +29,8 @@
 
 /* Forward declarations from bindings.c */
 JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife *life);
-JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res);
-JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res, HlReqLife *life);
+JSValue hl_js_make_response_life(HlJS *js, KlHttpRequest *req,
+                                 KlHttpResponse *res, HlReqLife *life);
 
 /* Free the request's middleware ctx (req->ctx: the JS value a middleware
  * left on req.ctx, or a test dispatch's JSON). Called wherever the request's
@@ -144,16 +144,20 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         return -1;
     }
 
+    /* The life is active from here on, before any app code can run: an op
+     * made while the connection is active and its life is not suspended the
+     * connection unaccounted for (audit 8 H1). */
+    js->active_life = life;
+
     /* Build JS request and response objects */
     JSValue js_req = hl_js_make_request(js->ctx, req, life);
-    JSValue js_res = hl_js_make_response_life(js, res, life);
+    JSValue js_res = hl_js_make_response_life(js, req, res, life);
     /* js_req.ctx holds its own reference now: nothing reads req->ctx after
      * the handler is called, however the handler ends. */
     hl_js_req_ctx_free(js, req);
 
     /* Call handler(req, res) */
     JSValue argv[2] = { js_req, js_res };
-    js->active_life = life;
     JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
 
     int result = 0;
@@ -313,17 +317,19 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     js->active_req  = req;
     js->last_async_cont = NULL;
 
+    /* Middleware is synchronous: Keel runs the next middleware and the
+     * handler on this connection as soon as it returns, so an async op
+     * started now - which suspends the connection - refuses (js->in_middleware,
+     * the async gate), including from the microtasks drained below. Set
+     * before `req` is built: app code can run there too (audit 8 H1). */
+    js->in_middleware = 1;
+
     /* Build JS request and response objects */
     JSValue js_req = hl_js_make_request(js->ctx, req, life);
-    JSValue js_res = hl_js_make_response_life(js, res, life);
+    JSValue js_res = hl_js_make_response_life(js, req, res, life);
 
-    /* Call handler(req, res) - capture return value. Middleware is
-     * synchronous: Keel runs the next middleware and the handler on this
-     * connection as soon as it returns, so an async op started now - which
-     * suspends the connection - refuses (js->in_middleware, the async gate),
-     * including from the microtasks drained below. */
+    /* Call handler(req, res) - capture return value. */
     JSValue argv[2] = { js_req, js_res };
-    js->in_middleware = 1;
     JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
     hl_req_life_end(life);
 
@@ -354,7 +360,13 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     /* Store req.ctx as a JS value ref so the next middleware
      * or handler can retrieve the object directly (no JSON round-trip). */
     JSValue ctx_val = JS_GetPropertyStr(js->ctx, js_req, "ctx");
-    if (JS_IsObject(ctx_val)) {
+    if (JS_IsException(ctx_val)) {
+        /* A ctx accessor the middleware defined threw: fail the request
+         * rather than leave the exception pending for the next unrelated
+         * error report (audit 8 L1). */
+        hl_js_dump_error(js);
+        result = -1;
+    } else if (JS_IsObject(ctx_val)) {
         /* Free previous ctx if any */
         if (req->ctx) {
             req_ctx_release(js, (HlReqCtx *)req->ctx);
