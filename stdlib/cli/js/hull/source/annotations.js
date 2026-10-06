@@ -66,7 +66,11 @@ function decodeSpan(bytes, start1, stop1) {
         else { s += "\uFFFD"; continue; }
         let ok = true;
         for (let k = 1; k < len; k++) { const cc = bytes[i + k]; if (cc === undefined || (cc & 0xc0) !== 0x80) { ok = false; break; } cp = (cp << 6) | (cc & 0x3f); }
-        if (!ok) { s += "\uFFFD"; continue; }
+        // A well-formed sequence still fails when it is overlong, a surrogate or past U+10FFFF
+        // (an F5..F7 lead decodes up to 0x1FFFFF): String.fromCodePoint threw RangeError there,
+        // and annotation attachment surfaced it as js.internal.
+        const min = len === 2 ? 0x80 : len === 3 ? 0x800 : 0x10000;
+        if (!ok || cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) { s += "\uFFFD"; continue; }
         s += String.fromCodePoint(cp);
         i += len - 1;
     }
