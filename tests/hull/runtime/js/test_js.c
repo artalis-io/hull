@@ -7070,6 +7070,30 @@ JS_WORKER_CASE(a_transaction_does_not_outlive_its_job,
     "    return db.query('SELECT count(*) AS n FROM a7')[0].n; });\n"
     "  check(n === 0, 'count ' + JSON.stringify(n));\n")
 
+/* Audit 8 c_db M2: the worker db.batch ran raw BEGIN / COMMIT, so a nested
+ * batch was no savepoint (SQLite refused it; Postgres / MySQL committed the
+ * outer batch's writes early) and a throwing outer batch stayed committed.
+ * It now runs the event loop's batch machinery. */
+JS_WORKER_CASE(a_nested_batch_is_a_savepoint,
+    a7_worker_db(),
+    "  await worker.dispatch(() => { db.exec('CREATE TABLE a8b (x INTEGER)'); return 0; });\n"
+    "  const m = await fails(() => db.batch(() => {\n"
+    "    db.exec('INSERT INTO a8b VALUES (1)');\n"
+    "    db.batch(() => db.exec('INSERT INTO a8b VALUES (2)'));\n"
+    "    db.exec('INSERT INTO a8b VALUES (3)');\n"
+    "    throw new Error('outer'); }));\n"
+    "  check(m.includes('outer'), m);\n"
+    "  const r = await worker.dispatch(() => {\n"
+    "    db.batch(() => {\n"
+    "      db.exec('INSERT INTO a8b VALUES (10)');\n"
+    "      db.batch(() => db.exec('INSERT INTO a8b VALUES (11)'));\n"
+    "      try { db.batch(() => { db.exec('INSERT INTO a8b VALUES (12)');\n"
+    "                             throw new Error('inner'); }); } catch (e) {}\n"
+    "      db.exec('INSERT INTO a8b VALUES (13)'); });\n"
+    "    const row = db.query('SELECT count(*) AS n, sum(x) AS s FROM a8b')[0];\n"
+    "    return row.n + ',' + row.s; });\n"
+    "  check(r === '3,34', 'rows ' + JSON.stringify(r));\n")
+
 /* ── Audit 4: the JS runtime ──────────────────────────────────────────── */
 
 /* Run a module in the caps-bearing context; 0 on success. */

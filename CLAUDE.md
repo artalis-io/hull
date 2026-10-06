@@ -716,7 +716,11 @@ db.async operations"; a connection whose rollback did not take is dropped. A
 end does the same (`hl_worker_db_end_job`, after the worker VM is closed):
 a transaction the job left open - forgotten, or raised / over budget between
 `BEGIN` and `COMMIT` - is rolled back and the dispatch fails with "a
-transaction cannot outlive a worker.dispatch job" (audit 7 M4). A
+transaction cannot outlive a worker.dispatch job" (audit 7 M4). A worker
+VM's `db.batch` goes through the same `hl_db_batch_enter/leave` as the event
+loop's (a nested batch is a savepoint; audit 8 M2 - raw BEGIN / COMMIT let a
+nested batch commit the outer's writes on Postgres / MySQL), and the job's
+end and `worker_end_txn` reset the handle's batch depth. A
 WAIT_NOTIFY on a `db.open` handle keeps its LISTEN connection only while the
 handle is open: the op carries the handle's id (`hl_db_dynamic_id`) and every
 op sweeps the thread's connections whose handle was closed
@@ -803,7 +807,11 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   is recorded while the reply is drained, audit 6 L2). So does any other
   failed non-DDL statement after which `COM_PING` finds the transaction gone
   (a lock-wait timeout under `innodb_rollback_on_timeout=ON`): only a DDL
-  statement's implicit commit is resumed (audit 7 L1).
+  statement's implicit commit is resumed (audit 7 L1). The classifier
+  (`my_sql_commits_implicitly`) follows MySQL 8's implicit-commit list and
+  reads past the first keyword: `CREATE` / `DROP TEMPORARY TABLE` and
+  `LOAD DATA` commit nothing, so they are refused, not resumed (audit 8 L2);
+  an unrecognised statement is always refused.
 - **Implicit commits:** MySQL commits the open transaction around DDL, and
   before a DDL statement that then fails. An ERR carries no status flags, so
   after a failed statement inside a transaction (and after the `CREATE INDEX`

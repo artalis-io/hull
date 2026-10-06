@@ -935,4 +935,69 @@ UTEST(mysql_backend, failed_ddl_commit_is_resumed)
     close(sv[0]);
 }
 
+/* The implicit-commit classifier reads past the first keyword (audit 8
+ * c_db L2): CREATE / DROP TEMPORARY TABLE and LOAD DATA commit nothing, so
+ * a transaction gone after one failed was a server rollback. */
+UTEST(mysql_backend, implicit_commit_classifier)
+{
+    static const char *const commits[] = {
+        "CREATE TABLE t (id INT)", "create index i on t (x)",
+        "CREATE DATABASE d", "CREATE USER u", "CREATE OR REPLACE VIEW v AS SELECT 1",
+        "DROP TABLE t", "drop view v", "DROP USER u",
+        "ALTER TABLE t ADD c INT", "ALTER USER u IDENTIFIED BY 'x'",
+        "RENAME TABLE a TO b", "TRUNCATE TABLE t", "GRANT SELECT ON t TO u",
+        "REVOKE SELECT ON t FROM u", "SET PASSWORD = 'x'",
+        "LOCK TABLES t WRITE", "lock table t read", "UNLOCK TABLES",
+        "ANALYZE TABLE t", "CHECK TABLE t", "OPTIMIZE TABLE t",
+        "REPAIR TABLE t", "CACHE INDEX t IN c", "LOAD INDEX INTO CACHE t",
+        "FLUSH PRIVILEGES", "RESET MASTER", "INSTALL PLUGIN p SONAME 'x.so'",
+        "UNINSTALL PLUGIN p", "START REPLICA", "STOP SLAVE",
+        "CHANGE MASTER TO MASTER_HOST = 'h'",
+        "CHANGE REPLICATION SOURCE TO SOURCE_HOST = 'h'",
+        "/* c */ create table t (id int)",
+    };
+    static const char *const no_commit[] = {
+        "CREATE TEMPORARY TABLE snap SELECT * FROM accounts",
+        "create /* c */ temporary table t (id int)",
+        "DROP TEMPORARY TABLE IF EXISTS snap",
+        "LOAD DATA INFILE 'x' INTO TABLE t", "LOAD XML INFILE 'x' INTO TABLE t",
+        "RESET PERSIST", "RESET", "START GROUP_REPLICATION",
+        "CHANGE REPLICATION FILTER REPLICATE_DO_DB = (d)",
+        "SET autocommit = 0", "PURGE BINARY LOGS TO 'x'", "CHECKSUM TABLE t",
+        "INSTALL COMPONENT 'file://c'", "LOCK INSTANCE FOR BACKUP",
+        "UPDATE a SET x = 1", "INSERT INTO t VALUES (1)", "SELECT 1", "", NULL,
+    };
+    for (size_t i = 0; i < sizeof commits / sizeof commits[0]; i++)
+        EXPECT_EQ_MSG(1, my_sql_commits_implicitly(commits[i]), commits[i]);
+    for (size_t i = 0; i < sizeof no_commit / sizeof no_commit[0]; i++)
+        EXPECT_EQ_MSG(0, my_sql_commits_implicitly(no_commit[i]),
+                      no_commit[i] ? no_commit[i] : "(null)");
+}
+
+/* A lock-wait timeout in CREATE TEMPORARY TABLE ... SELECT (shared locks on
+ * the source rows) under innodb_rollback_on_timeout took the transaction:
+ * refused until ROLLBACK, not resumed as DDL. */
+UTEST(mysql_backend, temporary_table_rollback_is_not_resumed)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    build_err(&s, 1, 1205, "Lock wait timeout exceeded");        /* CREATE */
+    put_ok_more(&s, 1, 0x0002);                        /* PING: autocommit */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+    EXPECT_EQ(-1, mysql_exec(&h,
+        "CREATE TEMPORARY TABLE snap SELECT * FROM accounts", NULL, 0));
+    EXPECT_EQ(1, ctx.txn_aborted);
+    EXPECT_TRUE(mysql_in_txn(&h));
+    EXPECT_EQ(0, mysql_rollback(&h));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 UTEST_MAIN()

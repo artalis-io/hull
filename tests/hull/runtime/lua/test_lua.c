@@ -7513,6 +7513,68 @@ UTEST(lua_worker, a_transaction_does_not_outlive_its_job)
     f.be->free(f.actx);
 }
 
+/* Audit 8 c_db M2: the worker db.batch ran raw BEGIN / COMMIT, so a nested
+ * batch was no savepoint (SQLite refused it; Postgres / MySQL committed the
+ * outer batch's writes early) and a raising outer batch stayed committed.
+ * It now runs the event loop's batch machinery. */
+static char lua_a8_worker_dsn[HL_TEST_PATH_MAX + 16];
+
+UTEST(lua_worker, a_nested_batch_is_a_savepoint)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a8wdb"), NULL);
+    snprintf(lua_a8_worker_dsn, sizeof lua_a8_worker_dsn, "%s/w.db", dir);
+    hl_worker_db_init(lua_a8_worker_dsn);
+
+    LuaWorkerFix f;
+    memset(&f, 0, sizeof f);
+    f.be = hl_async_backend();
+    ASSERT_EQ(f.be->init(&f.actx, NULL), 0);
+    ASSERT_EQ(f.be->pool_create(&f.pool, f.actx, 1, 16), 0);
+    pending_async_ctx   = f.actx;
+    pending_thread_pool = f.pool;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlResolvedModuleSet set;
+    hl_module_set_clear(&set);
+    static const char *const mods[] = { "db", "worker" };
+    for (size_t i = 0; i < 2; i++) {
+        int idx = hl_module_registry_index(hl_module_registry_find_short(mods[i]));
+        ASSERT_GE(idx, 0);
+        set.bits[idx / 64] |= (uint64_t)1 << (idx % 64);
+    }
+    lua_rt.base.module_set = &set;
+
+    char out[512];
+    lua_worker_run(&f,
+        "local w = require('hull.worker')\n"
+        "local function msg(r) return type(r) == 'table' and r.error or tostring(r) end\n"
+        "w.dispatch(function() db.exec('CREATE TABLE a8b (x INTEGER)') return 0 end)\n"
+        "local r1 = w.dispatch(function() db.batch(function()\n"
+        "  db.exec('INSERT INTO a8b VALUES (1)')\n"
+        "  db.batch(function() db.exec('INSERT INTO a8b VALUES (2)') end)\n"
+        "  db.exec('INSERT INTO a8b VALUES (3)')\n"
+        "  error('outer') end) end)\n"
+        "local r2 = w.dispatch(function()\n"
+        "  db.batch(function()\n"
+        "    db.exec('INSERT INTO a8b VALUES (10)')\n"
+        "    db.batch(function() db.exec('INSERT INTO a8b VALUES (11)') end)\n"
+        "    pcall(db.batch, function() db.exec('INSERT INTO a8b VALUES (12)')\n"
+        "                               error('inner') end)\n"
+        "    db.exec('INSERT INTO a8b VALUES (13)') end)\n"
+        "  local row = db.query('SELECT count(*) AS n, sum(x) AS s FROM a8b')[1]\n"
+        "  return row.n .. ',' .. row.s end)\n"
+        "return msg(r1) .. '|' .. msg(r2)\n", out, sizeof out);
+    EXPECT_NE_MSG(strstr(out, "outer"), NULL, out);
+    EXPECT_NE_MSG(strstr(out, "|3,34"), NULL, out);
+
+    lua_rt.base.module_set = NULL;
+    cleanup_lua_caps();
+    f.be->tick(f.actx, 0);
+    f.be->pool_free(f.pool);
+    f.be->free(f.actx);
+}
+
 /* ── audit 3: runtime fixes ──────────────────────────────────────────── */
 
 /* A coroutine waiting on a Hull operation could be resumed (or closed) by

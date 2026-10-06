@@ -270,6 +270,9 @@ int hl_worker_db_end_job(char *err, size_t errsz)
     while (*link) {
         WorkerConnNode *n = *link;
         HlDbHandle *h = &n->wdb.handle;
+        /* No batch spans jobs: a depth still set belongs to a transaction
+         * that ended with the job (the hl_db_guard_stale_txn rule). */
+        h->batch_depth = 0;
         if (h->backend && hl_db_in_txn(h)) {
             found = 1;
             if (hl_db_rollback(h) != 0 || hl_db_in_txn(h)) {
@@ -467,6 +470,7 @@ static void db_work_fn(void *ud)
  * (the rollback did not end the transaction). */
 static int worker_end_txn(HlWorkerDbOp *op, HlDbHandle *h)
 {
+    h->batch_depth = 0;   /* no batch spans ops (hl_db_guard_stale_txn) */
     if (!hl_db_in_txn(h)) return 0;
     int lost = hl_db_rollback(h) != 0 || hl_db_in_txn(h);
     if (op->kind == HL_WORK_DB_QUERY) hl_db_result_free(&op->result);
