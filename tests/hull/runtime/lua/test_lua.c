@@ -8414,6 +8414,67 @@ UTEST(lua_tool_vm, unveil_context_reaches_the_tool_bindings)
     rmdir(granted); rmdir(other);
 }
 
+/* audit 8 c_caps L2: tool.rename removes the source's directory entry, so it
+ * needs write + create on the source as well as the destination - 'r' let a
+ * read-only grant (the app directory, ~/.hull/tools) lose files where only
+ * the userspace list applies. */
+UTEST(lua_tool_vm, rename_needs_write_on_the_source)
+{
+    char ro[HL_TEST_PATH_MAX], rw[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(ro, sizeof ro, "hull_tv_ro") != NULL);
+    ASSERT_TRUE(hl_test_mkdtemp(rw, sizeof rw, "hull_tv_rw") != NULL);
+    char src_ro[HL_TEST_PATH_MAX + 16], src_rw[HL_TEST_PATH_MAX + 16];
+    char dst[HL_TEST_PATH_MAX + 16], dst2[HL_TEST_PATH_MAX + 16];
+    snprintf(src_ro, sizeof src_ro, "%s/a.txt", ro);
+    snprintf(src_rw, sizeof src_rw, "%s/b.txt", rw);
+    snprintf(dst, sizeof dst, "%s/moved.txt", rw);
+    snprintf(dst2, sizeof dst2, "%s/c.txt", ro);
+    ASSERT_EQ(tool_vm_write(src_ro, "a"), 0);
+    ASSERT_EQ(tool_vm_write(src_rw, "b"), 0);
+
+    HlToolUnveilCtx uctx;
+    hl_tool_unveil_init(&uctx);
+    ASSERT_EQ(hl_tool_unveil_add(&uctx, ro, "r"), 0);
+    ASSERT_EQ(hl_tool_unveil_add(&uctx, rw, "rwc"), 0);
+    hl_tool_unveil_seal(&uctx);
+
+    HlVfs pvfs;
+    void *pvfs_owned = NULL;
+    hl_platform_vfs_init(&pvfs, &pvfs_owned);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.sandbox = 0;
+    HlLua tv;
+    memset(&tv, 0, sizeof tv);
+    tv.tool_unveil_ctx = &uctx;
+    tv.base.platform_vfs = &pvfs;
+    ASSERT_EQ(hl_lua_init(&tv, &cfg), 0);
+
+    lua_State *L = tv.L;
+    const char *cases[3][2] = {
+        { src_ro, dst },     /* out of a read-only grant: refused */
+        { src_rw, dst2 },    /* into a read-only grant: refused */
+        { src_rw, dst },     /* both writable: done */
+    };
+    int expect[3] = { 0, 0, 1 };
+    for (int i = 0; i < 3; i++) {
+        lua_getglobal(L, "tool");
+        lua_getfield(L, -1, "rename");
+        lua_pushstring(L, cases[i][0]);
+        lua_pushstring(L, cases[i][1]);
+        ASSERT_EQ(lua_pcall(L, 2, 1, 0), LUA_OK);
+        EXPECT_EQ(lua_toboolean(L, -1), expect[i]);
+        lua_pop(L, 2);
+    }
+    struct stat st;
+    EXPECT_EQ(stat(src_ro, &st), 0);       /* still where it was */
+
+    hl_lua_free(&tv);
+    hl_tool_unveil_free(&uctx);
+    hl_platform_vfs_dispose(pvfs_owned);
+    remove(src_ro); remove(src_rw); remove(dst); remove(dst2);
+    rmdir(ro); rmdir(rw);
+}
+
 /* The app runtime never carries a tool context, even when the caller's struct
  * held one (the field is only kept in tool mode). */
 UTEST(lua_tool_vm, app_runtime_drops_a_stray_unveil_context)

@@ -248,8 +248,11 @@ local function main()
         tool.exit(1)
     end
 
-    -- Check if directory already exists
-    if tool.file_exists(opts.name) then
+    -- Check if directory already exists. hull_tool creates the target before
+    -- the tool sandbox applies (so the sandbox grants it, not its parent) and
+    -- names it tool.scaffold_dir - as it does an EMPTY directory already
+    -- there (one an earlier failed run left). Anything else is refused.
+    if tool.file_exists(opts.name) and opts.name ~= tool.scaffold_dir then
         tool.stderr("hull new: directory '" .. opts.name .. "' already exists\n")
         tool.exit(1)
     end

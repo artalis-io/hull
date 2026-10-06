@@ -1666,12 +1666,24 @@ on Linux tool mode rests on Landlock unveil plus the spawn allowlist. Elsewhere
 (macOS, Windows, the other BSDs) only the userspace allowlist the tool bindings check applies,
 and the log says so. That allowlist reaches the bindings through `HlLua.tool_unveil_ctx`,
 which `hl_lua_init` keeps for the tool VM (it used to zero it, so every binding saw NULL and
-the allowlist was never checked). The app directory is the first positional argument that
-names an existing directory (`hull deploy dockerfile <dir>`, not "dockerfile"), granted
-read-only, and never when it is `/` or `$HOME` or above. The invocation directory is never granted when it is `/`, nor when it is
-`$HOME` or above (except to `hull new` / `hull init`, which run no app code); an output
-directory (`-o`) that is `/` or `$HOME` or above is refused rather than made writable, and
-neither is hull's own directory granted when it is that broad. hull's own directory is in the
+the allowlist was never checked). Both lists come from ONE plan (`hl_tool_sandbox_plan`,
+applied to the userspace ctx and as kernel unveil), so they cannot drift - see
+[docs/security.md](docs/security.md) "Tool mode" for the grant table. The app directory is
+the first positional argument that names an existing directory and is not a symlink
+(`hull deploy dockerfile <dir>`, not "dockerfile"; option values such as `--install-dir`
+skipped; a planted `build -> ~/.ssh` is not taken), granted read-only, and never when it is
+`/` or `$HOME` or above. The invocation directory is never granted when it is `/`, nor when
+it is `$HOME` or above; the output directory (`-o`'s, else the named app dir) that is `/` or
+`$HOME` or above is refused rather than made writable, and neither is hull's own directory
+granted when it is that broad. `hull new <name>` / `hull init [dir]` get their target, which
+`hull_tool` creates before the sandbox applies (exposed as `tool.scaffold_dir`), so
+`cd ~ && hull new myapp` grants `~/myapp` and never `~`. Read-only grants also cover
+`~/.hull/feature`, `~/.hull/platform`, `~/.hull/blobs/tools`, and each FILE named by
+`--sign` / `--platform-sig` / `--platform-key` / `--developer-key` / `--gethull-key` /
+`--binary` (a key in `~/.hull/keys` is readable; its directory is not). `$HOME` comparisons
+ignore case on Windows; the unveil check refuses `..` in any spelling (backslash pieces too)
+in the not-yet-existing tail of a path; `tool.rename` needs write + create on both ends; and
+the PATH walk (`hl_host_find_in_path_ex`) skips `.` and relative components. hull's own directory is in the
 kernel list as well as the userspace one (the manifest-extraction re-exec), and the cache seal
 keys are loaded before the sandbox applies. A cosmo APE on a Linux kernel without Landlock
 (unveil fails ENOSYS) runs with no kernel tool sandbox, as a native build there does. Tool writes

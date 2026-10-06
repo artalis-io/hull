@@ -33,7 +33,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -141,6 +144,129 @@ int hull_keygen(int argc, char **argv)
     return 0;
 }
 
+/* ── What a tool command's argv names (the tool sandbox's grants) ──── */
+
+/* Options that take their value as the NEXT argument (a --flag=value form
+ * is one token and needs nothing), across the tool modules. Their values
+ * are not the app directory: `hull verify --developer-key k.pub app` took
+ * "k.pub", and `hull deploy systemd --install-dir /usr/local/bin app` made
+ * /usr/local/bin the writable output. `hull deploy --sign` is a switch. */
+static int argv_value_flag(const char *module, const char *a)
+{
+    static const char *const value_flags[] = {
+        "--compiler", "--sign", "--runtime", "--output", "-o", "--linker",
+        "--target", "--flavor", "--with", "--platform-sig",
+        "--platform-key", "--developer-key", "--gethull-key", "--binary",
+        "--type", "--profile", "--lang", "--name", "--port", "-p", "--user",
+        "--install-dir", "--data-dir", "--region", "--memory", NULL
+    };
+    if (strcmp(a, "--sign") == 0 && module && strcmp(module, "hull.deploy") == 0)
+        return 0;
+    for (int k = 0; value_flags[k]; k++)
+        if (strcmp(a, value_flags[k]) == 0) return 1;
+    return 0;
+}
+
+/* An existing directory that is not a symbolic link (trailing separators
+ * dropped first: lstat("link/") follows the link). */
+static int argv_real_dir(const char *p)
+{
+    char buf[PATH_MAX];
+    size_t n = p ? strlen(p) : 0;
+    if (n == 0 || n >= sizeof buf) return 0;
+    memcpy(buf, p, n + 1);
+    while (n > 1 && (buf[n - 1] == '/' || buf[n - 1] == '\\')) buf[--n] = '\0';
+    struct stat st;
+    if (lstat(buf, &st) != 0) return 0;
+    if (S_ISLNK(st.st_mode)) {
+        fprintf(stderr, "hull: '%s' is a symbolic link; not using it as the "
+                "app directory (name the directory it points to)\n", p);
+        return 0;
+    }
+    return S_ISDIR(st.st_mode);
+}
+
+/*
+ * Not simply the first positional: where the app directory sits depends on
+ * the subcommand - `hull deploy dockerfile <dir>`, `hull compute test <name>`
+ * - and "dockerfile" is not a directory. Only a directory the caller named
+ * is granted, and hl_tool_sandbox_plan refuses "/" and $HOME or above.
+ * From i=1: argv[0] is the SUBCOMMAND ("build").
+ */
+const char *hl_tool_argv_app_dir(const char *module, int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i]) continue;
+        if (argv[i][0] != '-') {
+            if (argv_real_dir(argv[i]))
+                return argv[i];
+            continue;
+        }
+        if (argv_value_flag(module, argv[i])) i++;   /* skip its value */
+    }
+    return NULL;
+}
+
+const char *hl_tool_argv_scaffold_target(const char *module, int argc, char **argv)
+{
+    if (!module) return NULL;
+    int is_new = strcmp(module, "hull.new") == 0;
+    if (!is_new && strcmp(module, "hull.init") != 0) return NULL;
+    const char *target = is_new ? NULL : ".";
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i]) continue;
+        if (argv[i][0] != '-') target = argv[i];          /* last one wins */
+        else if (argv_value_flag(module, argv[i])) i++;
+    }
+    return target;
+}
+
+int hl_tool_argv_read_files(const char *module, int argc, char **argv,
+                            char **out, int max)
+{
+    static const char *const file_flags[] = {
+        "--sign", "--platform-sig", "--platform-key", "--developer-key",
+        "--gethull-key", "--binary", NULL
+    };
+    int n = 0;
+    int sign_platform = module && strcmp(module, "hull.sign_platform") == 0;
+    for (int i = 1; i < argc && n < max; i++) {
+        const char *a = argv[i];
+        if (!a) continue;
+        if (a[0] != '-') {
+            /* `hull sign-platform [--dir DIR] <key_prefix>` reads
+             * <key_prefix>.key and <key_prefix>.pub. */
+            if (sign_platform) {
+                static const char *const ext[] = { ".key", ".pub" };
+                for (int e = 0; e < 2 && n < max; e++) {
+                    size_t l = strlen(a) + strlen(ext[e]) + 1;
+                    char *s = malloc(l);
+                    if (!s) break;
+                    snprintf(s, l, "%s%s", a, ext[e]);
+                    out[n++] = s;
+                }
+            }
+            continue;
+        }
+        if (sign_platform && strcmp(a, "--dir") == 0) { i++; continue; }
+        const char *val = NULL;
+        for (int k = 0; file_flags[k]; k++) {
+            size_t fl = strlen(file_flags[k]);
+            if (strncmp(a, file_flags[k], fl) != 0) continue;
+            if (a[fl] == '=') val = a + fl + 1;
+            else if (a[fl] == '\0' && argv_value_flag(module, a) && i + 1 < argc)
+                val = argv[++i];
+            break;
+        }
+        if (!val) {
+            if (argv_value_flag(module, a)) i++;
+            continue;
+        }
+        if (*val && (out[n] = strdup(val)) != NULL) n++;
+    }
+    return n;
+}
+
 /* ── hull tool (Lua) ───────────────────────────────────────────────── */
 
 #ifdef HL_ENABLE_LUA
@@ -176,57 +302,21 @@ static const char *parse_linker_option(int argc, char **argv)
     return NULL;
 }
 
-/*
- * Extract app_dir from argv: the first positional argument (not an option or
- * an option's value) that names an existing directory. Returns "." if none
- * does.
- *
- * Not simply the first positional: where the app directory sits depends on
- * the subcommand - `hull deploy dockerfile <dir>`, `hull compute test <name>`
- * - and "dockerfile" is not a directory. With the tool sandbox enforcing its
- * allowlist, the app the command was pointed at was then never granted:
- * `hull deploy` could not read it ("no app.lua or app.js found") and could
- * not write the Dockerfile into it. Only a directory the caller named is
- * granted, and hl_tool_sandbox_init refuses "/" and $HOME or above.
- */
-static int parse_app_dir_is_dir(const char *p)
+/* A directory with no entries but "." and "..". */
+static int tool_dir_is_empty(const char *path)
 {
-    struct stat st;
-    return p && *p && stat(p, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-static const char *parse_app_dir(int argc, char **argv)
-{
-    /* From i=1: argv[0] is the SUBCOMMAND ("build"), which
-     * hl_command_dispatch passes through as argv[0] of the handler.
-     * Scanning from 0 returned "build" as the app dir, so the
-     * read-only app unveil pointed at a relative path that does not
-     * exist. It went unnoticed because the temp dir and the
-     * invocation dir are unveiled separately, and apps normally live
-     * under one of them. */
-    /* Options that take their value as the NEXT argument (a --flag=value
-     * form is one token and needs nothing). Their values are not the app
-     * directory: `hull verify --developer-key k.pub app` took "k.pub". */
-    static const char *const value_flags[] = {
-        "--compiler", "--sign", "--runtime", "--output", "-o", "--linker",
-        "--target", "--flavor", "--with", "--platform-sig",
-        "--platform-key", "--developer-key", "--gethull-key", "--binary", NULL
-    };
-    for (int i = 1; i < argc; i++) {
-        if (!argv[i]) continue;
-        if (argv[i][0] != '-') {
-            if (parse_app_dir_is_dir(argv[i]))
-                return argv[i];
-            continue;
-        }
-        for (int k = 0; value_flags[k]; k++) {
-            if (strcmp(argv[i], value_flags[k]) == 0) {
-                i++; /* skip value */
-                break;
-            }
+    DIR *d = opendir(path);
+    if (!d) return 0;
+    int empty = 1;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) {
+            empty = 0;
+            break;
         }
     }
-    return ".";
+    closedir(d);
+    return empty;
 }
 
 /*
@@ -294,8 +384,9 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         return 1;
     }
 
-    /* Set up tool-mode unveil context */
-    const char *app_dir = parse_app_dir(argc, argv);
+    /* Set up tool-mode unveil context. app_dir is what the caller NAMED;
+     * the VFS below roots at "." when nothing was. */
+    const char *app_dir = hl_tool_argv_app_dir(module, argc, argv);
     HlToolUnveilCtx unveil_ctx;
 
     /* Derive platform directory from hull binary path */
@@ -313,15 +404,46 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         }
     }
 
-    /* Where `hull build` actually writes. This used to be the literal ".",
-     * i.e. the invocation directory, which is only the app dir when you
-     * happen to build from inside it - see parse_output_dir. The
-     * invocation dir is unveiled unconditionally inside
-     * hl_tool_sandbox_init now, so nothing is lost by naming the real
-     * one here. (It must be passed IN: the context is sealed on return,
-     * and hl_tool_unveil_add then silently drops adds.) */
+    /* Where the command writes: `-o`'s directory, else the app directory
+     * the caller named. The literal "." (the invocation directory, which is
+     * only the app dir when you happen to build from inside it) is granted
+     * separately by hl_tool_sandbox_plan; making it the OUTPUT too turned a
+     * run from ~ - `hull new myapp`, `hull doctor --tui` - into a refusal to
+     * make ~ writable. (It must be passed IN: the context is sealed on
+     * return, and hl_tool_unveil_add then silently drops adds.) */
     char out_buf[4096];
     const char *output_dir = parse_output_dir(argc, argv, out_buf, sizeof(out_buf));
+    if (!output_dir) output_dir = app_dir;
+
+    /* `hull new <name>` / `hull init [dir]`: the scaffold target is the
+     * output, and the only thing they write. Created HERE, before the
+     * sandbox applies, so that it - and not its parent, typically ~ - is
+     * what gets granted. new.lua accepts it as fresh through
+     * tool.scaffold_dir (an empty directory, made now or left by an earlier
+     * failed run). */
+    const char *scaffold_dir = NULL;
+    int scaffold_created = 0;
+    const char *target = hl_tool_argv_scaffold_target(module, argc, argv);
+    if (target) {
+        struct stat st;
+        if (stat(target, &st) != 0) {
+            if (errno == ENOENT && hl_tool_mkdir(target, NULL) == 0) {
+                scaffold_dir = target;
+                scaffold_created = 1;
+            }
+        } else if (S_ISDIR(st.st_mode) && tool_dir_is_empty(target)) {
+            scaffold_dir = target;
+        }
+        app_dir = NULL;
+        output_dir = target;
+    }
+
+    /* Files named on the command line (keys, --platform-sig, --binary):
+     * granted read-only, each file alone. */
+    char *read_files[HL_TOOL_SANDBOX_MAX_FILES + 1];
+    int nread = hl_tool_argv_read_files(module, argc, argv, read_files,
+                                        HL_TOOL_SANDBOX_MAX_FILES);
+    read_files[nread] = NULL;
 
     /* Load the cache sealing keys now: they live in $HOME/.hull, which the
      * tool sandbox does not grant, and were read lazily after it applied -
@@ -329,11 +451,10 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     hl_runtime_cache_seal_prepare();
     hl_tool_cache_seal_prepare();
 
-    int scaffold = strcmp(module, "hull.new") == 0 ||
-                   strcmp(module, "hull.init") == 0;
-    if (hl_tool_sandbox_init(&unveil_ctx, app_dir,
-                             output_dir ? output_dir : app_dir,
-                             platform_dir, scaffold) != 0) {
+    int sb = hl_tool_sandbox_init(&unveil_ctx, app_dir, output_dir,
+                                  platform_dir, (const char *const *)read_files);
+    for (int i = 0; i < nread; i++) free(read_files[i]);
+    if (sb != 0) {
         fprintf(stderr, "hull: the tool sandbox could not be applied\n");
         return 1;
     }
@@ -349,7 +470,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     HlVfs platform_vfs, app_vfs;
     void    *platform_vfs_owned = NULL;
     hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
-    hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
+    hl_vfs_init(&app_vfs, hl_app_entries, app_dir ? app_dir : ".");
 
     HlLua lua;
     memset(&lua, 0, sizeof(lua));
@@ -371,9 +492,9 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
      * which then applies requiring-module-relative resolution + canonical ./..
      * collapse + app-root containment. That root is set on demand by
      * tool.set_app_dir(dir) from the extraction code, which knows the real app
-     * directory; parse_app_dir() above is a sandbox-unveil heuristic that
-     * returns the first positional (the SUBCOMMAND, e.g. "build", for a
-     * `hull build <dir>` invocation) and is NOT a reliable module root. See
+     * directory; hl_tool_argv_app_dir() above is a sandbox-unveil heuristic
+     * (the first positional that names a directory) and is NOT a reliable
+     * module root. See
      * l_tool_set_app_dir in mod_tool.c and fcompose.extract_manifest. */
 
     /* Tool-mode native-module exposure.
@@ -447,6 +568,12 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         lua_setfield(L, -2, "cc");
         lua_pushstring(L, HL_DEFAULT_CC);
         lua_setfield(L, -2, "default_cc");
+        if (scaffold_dir) {
+            lua_pushstring(L, scaffold_dir);
+            lua_setfield(L, -2, "scaffold_dir");
+            lua_pushboolean(L, scaffold_created);
+            lua_setfield(L, -2, "scaffold_created");
+        }
     }
     lua_pop(L, 1);
 

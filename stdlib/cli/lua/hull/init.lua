@@ -1686,7 +1686,9 @@ local function main()
     end
 
     -- Create target directory if needed
-    local dir_created = false
+    -- (hull_tool creates a missing target before the tool sandbox applies,
+    -- so it is granted rather than its parent: tool.scaffold_created.)
+    local dir_created = tool.scaffold_created == true and dir == tool.scaffold_dir
     if not file_exists(dir) then
         tool.mkdir(dir)
         dir_created = true

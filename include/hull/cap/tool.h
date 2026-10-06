@@ -30,7 +30,7 @@
  * single extra unveil pushed it over and the LAST add - the temp dir - was
  * the one lost, which broke every `hull compute test` because those run
  * entirely out of a tempdir. */
-#define HL_TOOL_MAX_UNVEILED 64
+#define HL_TOOL_MAX_UNVEILED 96
 
 typedef struct {
     const char *path;

@@ -158,20 +158,60 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                       const char *tls_key_path);
 
 /*
- * Initialize tool-mode unveil context for `hull build`.
- * Populates the HlToolUnveilCtx with allowed paths for build operations.
- * Also calls kernel-level unveil() on supported platforms.
+ * The tool sandbox's grants, computed once. hl_tool_sandbox_init applies the
+ * SAME plan to both lists - the userspace allowlist the tool bindings check
+ * (the only tool sandbox on macOS, Windows and the other BSDs) and the kernel
+ * unveil (OpenBSD, Linux with Landlock) - so the two cannot drift: grants
+ * that reached only one of them were how a feature archive under
+ * ~/.hull/feature, or a key under ~/.hull/keys, went unreadable on one host
+ * family and not the other. grant[0] is always "/tmp" (the kernel probe).
+ */
+#define HL_TOOL_SANDBOX_MAX_GRANTS 40
+#define HL_TOOL_SANDBOX_MAX_FILES  8
+
+typedef struct {
+    char *path;       /* as granted (resolved where it exists); owned */
+    char  perms[8];   /* "r", "rx", "rwc", "rwcx" */
+    int   optional;   /* kernel: skipped when the path does not exist */
+} HlToolGrant;
+
+typedef struct {
+    HlToolGrant g[HL_TOOL_SANDBOX_MAX_GRANTS];
+    int         n;
+} HlToolSandboxPlan;
+
+/*
+ * Compute the plan (no side effects beyond the cache-dir mkdir that
+ * hl_hull_cache_dir always does).
  *
- *   ctx           - tool unveil context to populate
- *   app_dir       - application source directory (read)
- *   output_dir    - directory for output binary (write/create); refused
- *                   (-1) when it is "/" or the user's home or above
- *   platform_dir  - directory containing libhull_platform.a (read); dropped
- *                   when it is that broad
- *   scaffold      - 1 for `hull new` / `hull init`, which run no app code:
- *                   a working directory of $HOME is then still writable
- *                   (never "/"). Otherwise a cwd of $HOME (or above) is
- *                   not granted.
+ *   app_dir       - application source directory the caller NAMED (read);
+ *                   NULL when none was. Dropped when it is "/" or the
+ *                   user's home or above.
+ *   output_dir    - directory written into (read-write-create): `-o`'s
+ *                   directory, a named app directory, or the scaffold
+ *                   target; NULL for none. Refused (-1) when it is "/" or
+ *                   the user's home or above.
+ *   platform_dir  - directory containing libhull_platform.a (read+exec);
+ *                   dropped when it is that broad
+ *   read_files    - NULL-terminated list of single FILES named on the
+ *                   command line (signing keys, --platform-sig, --binary),
+ *                   granted read-only each; a path that is not a regular
+ *                   file is not granted. At most HL_TOOL_SANDBOX_MAX_FILES.
+ *
+ * The invocation directory is granted read-write-create unless it is "/" or
+ * the user's home or above. Returns 0, or -1 (nothing allocated).
+ */
+int  hl_tool_sandbox_plan(HlToolSandboxPlan *plan,
+                          const char *app_dir,
+                          const char *output_dir,
+                          const char *platform_dir,
+                          const char *const *read_files);
+void hl_tool_sandbox_plan_free(HlToolSandboxPlan *plan);
+
+/*
+ * Initialize tool-mode unveil context for `hull build` and the other tool
+ * commands: compute the plan above, load it into ctx (sealed), and apply it
+ * as kernel unveil on hosts that enforce one. Same arguments as the plan.
  *
  * Returns 0 on success, -1 on error.
  */
@@ -179,7 +219,15 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
                          const char *app_dir,
                          const char *output_dir,
                          const char *platform_dir,
-                         int scaffold);
+                         const char *const *read_files);
+
+/*
+ * Is `path` (resolved) the filesystem root, or the user's home directory
+ * ($HOME, else %USERPROFILE%) or one of its ancestors? Compared without
+ * regard to case on a Windows host, whose filesystem ignores it. An
+ * unresolvable path counts as broad.
+ */
+int hl_tool_path_too_broad(const char *path);
 
 
 /*

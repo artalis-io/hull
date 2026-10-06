@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -103,14 +104,43 @@ void hl_tool_unveil_seal(HlToolUnveilCtx *ctx)
     if (ctx) ctx->sealed = 1;
 }
 
+/* Is @p comp - one '/'-delimited component of the part of a path that does
+ * not exist yet - unsafe to append to a resolved ancestor? Windows splits on
+ * '\\' too and resolves the result when it opens it, so
+ * "<grant>/nx\..\..\secret" (nx missing, so realpath fails) passed the
+ * prefix check and opened a file outside every grant (audit 8). So a piece
+ * between backslashes may not be "." or "..", on EVERY host: on a POSIX one
+ * '\\' is an ordinary byte and such a name harmless, but refusing it costs
+ * nothing (no tool writes one) and keeps the check host-independent.
+ * Windows also drops trailing dots and spaces ("..." and ".. " are "..") and
+ * reads ':' as a drive or a stream, so a piece there may not end in either
+ * or contain ':'. */
+static int tool_tail_comp_unsafe(const char *comp, int win)
+{
+    if (comp[0] == '\0') return 1;
+    for (const char *p = comp;;) {
+        const char *bs = strchr(p, '\\');
+        size_t len = bs ? (size_t)(bs - p) : strlen(p);
+        if ((len == 1 && p[0] == '.') || (len == 2 && p[0] == '.' && p[1] == '.'))
+            return 1;
+        if (win && len > 0 &&
+            (p[len - 1] == '.' || p[len - 1] == ' ' || memchr(p, ':', len)))
+            return 1;
+        if (!bs) return 0;
+        p = bs + 1;
+    }
+}
+
 /* Canonical form of @p path into @p out: realpath when it exists; else the
  * realpath of its nearest existing ancestor plus the remaining components,
- * none of which may be "." or "..". -1 when that cannot be done. The check
- * used to fall back to the RAW path when realpath failed (a leaf not yet
- * created): "/tmp/../home/u/x" then passed the "/tmp" prefix. */
+ * none of which may be "." or ".." in any spelling (tool_tail_comp_unsafe).
+ * -1 when that cannot be done. The check used to fall back to the RAW path
+ * when realpath failed (a leaf not yet created): "/tmp/../home/u/x" then
+ * passed the "/tmp" prefix. */
 static int tool_canonical_path(const char *path, char out[PATH_MAX])
 {
     if (realpath(path, out) != NULL) return 0;
+    int win = hl_host_is_windows();
     char work[PATH_MAX];
     int n = snprintf(work, sizeof work, "%s", path);
     if (n <= 0 || (size_t)n >= sizeof work) return -1;
@@ -120,7 +150,7 @@ static int tool_canonical_path(const char *path, char out[PATH_MAX])
     for (;;) {
         char *slash = strrchr(work, '/');
         const char *comp = slash ? slash + 1 : work;
-        if (comp[0] == '\0' || strcmp(comp, ".") == 0 || strcmp(comp, "..") == 0)
+        if (tool_tail_comp_unsafe(comp, win))
             return -1;
         char nt[PATH_MAX];
         int m = tail[0] ? snprintf(nt, sizeof nt, "%s/%s", comp, tail)
@@ -151,13 +181,17 @@ int hl_tool_unveil_check(const HlToolUnveilCtx *ctx, const char *path, char need
     if (tool_canonical_path(path, resolved) != 0)
         return -1;
     const char *check_path = resolved;
+    int win = hl_host_is_windows();
 
     for (int i = 0; i < ctx->count; i++) {
         const char *unveiled = ctx->entries[i].path;
         size_t ulen = strlen(unveiled);
 
-        /* Check if path is under unveiled prefix */
-        if (strncmp(check_path, unveiled, ulen) != 0)
+        /* Check if path is under unveiled prefix. Without regard to case on
+         * Windows: its filesystem ignores case, and cosmo's realpath keeps
+         * the caller's spelling ("/c/users/x" vs "/C/Users/x"). */
+        if ((win ? strncasecmp(check_path, unveiled, ulen)
+                 : strncmp(check_path, unveiled, ulen)) != 0)
             continue;
 
         /* Must be exact match or have a / separator */

@@ -212,6 +212,32 @@ NEWOUT=$("$HULL" new "$WORKDIR/scaffold" 2>&1 || true)
 assert_not_contains "hull new prints no C source path" "$NEWOUT" "src/hull/"
 assert_not_contains "hull new prints no sandbox chatter" "$NEWOUT" "[sandbox]"
 
+# The scaffolding quick start, run from the home directory (audit 8 M1): the
+# app-dir fallback "." became the tool sandbox's OUTPUT, and an output of ~ is
+# refused, so `cd ~ && hull new myapp` died with "the tool sandbox could not
+# be applied". The target is now created before the sandbox and granted
+# alone; ~ itself is never made writable (`hull init` IN ~ is refused).
+# Asserted on artifacts and output, not exit status (Windows APE status).
+echo ""
+echo "── hull new / init from the home directory ──"
+FAKEHOME="$WORKDIR/home"
+mkdir -p "$FAKEHOME"
+HNOUT=$(cd "$FAKEHOME" && HOME="$FAKEHOME" "$HULL" new myapp 2>&1 || true)
+assert_not_contains "hull new from ~ applies the sandbox" "$HNOUT" "could not be applied"
+assert "hull new from ~ scaffolds ~/myapp" [ -f "$FAKEHOME/myapp/app.lua" ]
+HROUT=$(cd "$FAKEHOME" && HOME="$FAKEHOME" "$HULL" new --type rest restapp 2>&1 || true)
+assert "hull new --type rest from ~ scaffolds" [ -f "$FAKEHOME/restapp/app.lua" ]
+HXOUT=$(cd "$FAKEHOME" && HOME="$FAKEHOME" "$HULL" new myapp 2>&1 || true)
+assert_contains "hull new still refuses an existing app" "$HXOUT" "already exists"
+mkdir -p "$FAKEHOME/emptydir"
+(cd "$FAKEHOME" && HOME="$FAKEHOME" "$HULL" new emptydir >/dev/null 2>&1 || true)
+assert "hull new fills an empty directory" [ -f "$FAKEHOME/emptydir/app.lua" ]
+HIOUT=$(cd "$FAKEHOME" && HOME="$FAKEHOME" "$HULL" init sub 2>&1 || true)
+assert "hull init <dir> from ~ scaffolds ~/sub" [ -f "$FAKEHOME/sub/app.lua" ]
+HHOUT=$(cd "$FAKEHOME" && HOME="$FAKEHOME" "$HULL" init 2>&1 || true)
+assert_contains "hull init IN ~ is refused" "$HHOUT" "refusing to make"
+assert "and writes nothing into ~" [ ! -f "$FAKEHOME/app.lua" ]
+
 MANOUT=$("$HULL" manifest "$WORKDIR/app" 2>&1 || true)
 assert_not_contains "hull manifest prints no C source path" "$MANOUT" "src/hull/"
 assert_not_contains "hull manifest prints no .c line refs" "$MANOUT" ".c:"
