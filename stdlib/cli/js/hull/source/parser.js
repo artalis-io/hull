@@ -181,17 +181,17 @@ function parseInternal(bytes, opts, inject) {
     function isKw(v) { return cur.type === "identifier" && cur.value === v && !cur.escaped; }
     function nl() { return cur.nlBefore; }
 
-    // Full speculative-parse checkpoint: the tokenizer's lexical state + the parser's token
-    // window (cur/prev/lookahead) + the shared diagnostic budget. Restoring rewinds EVERY
-    // producer, so a failed speculative parse (e.g. an arrow guess) leaves no lexical
-    // disagreement or stray diagnostic, no matter what content it lexed.
-    function saveState() { return { tk: tk.checkpoint(), cur: cur, prev: prev, la: la.slice(), budget: budget.mark(), depth: depth, errored: errored,
-        ctx: ctxStack.map(function (f) { return { kind: f.kind, region: f.region, arrow: f.arrow, gen: f.gen }; }), atModuleItem: atModuleItem }; }
-    function restoreState(st) {
-        tk.restore(st.tk); cur = st.cur; prev = st.prev;
-        la.length = 0; for (let i = 0; i < st.la.length; i++) la.push(st.la[i]);
-        budget.reset(st.budget); depth = st.depth; errored = st.errored;
-        ctxStack.length = 0; for (let i = 0; i < st.ctx.length; i++) ctxStack.push(st.ctx[i]); atModuleItem = st.atModuleItem;
+    // Peek the token after cur under a GUESSED slash goal, and take it back unless `keep(tok)`
+    // accepts it - rewinding the tokenizer, the lookahead buffer and the diagnostic budget, so a
+    // wrong guess leaves no lexical disagreement or stray diagnostic. O(1): the parser makes no
+    // other speculation (the `async (` cover grammar below parses its list once).
+    function peekOrRewind(goal, keep) {
+        if (la.length > 0) return keep(la[0]);       // already lexed: nothing to take back
+        const m = tk.peekMark(), b = budget.mark();
+        const t = peekTok(1, goal);
+        if (keep(t)) return true;
+        tk.peekRewind(m); la.length = 0; budget.reset(b);
+        return false;
     }
 
     // Every parser diagnostic flows through the ONE shared budget so the combined tokenizer +
@@ -265,12 +265,9 @@ function parseInternal(bytes, opts, inject) {
             // LabeledStatement: LabelIdentifier `:` Statement (`outer: for (...) ...`,
             // `label: { ... }`). Peeking the token after the identifier can lex a following `/`
             // under the WRONG slash goal (e.g. `await /re/` -> `/` as division, cached), which
-            // would then corrupt the real parse. Guard the peek with save/restore: on a
-            // non-label, restore rewinds the tokenizer + lookahead so the real parse re-lexes.
-            const _lblState = saveState();
-            const lblNext = peekTok(1, false);
-            const isLabel = (lblNext.type === "punctuator" && lblNext.value === ":");
-            if (!isLabel) restoreState(_lblState);
+            // would then corrupt the real parse: on a non-label the peek is taken back so the
+            // real parse re-lexes.
+            const isLabel = peekOrRewind(false, function (t) { return t.type === "punctuator" && t.value === ":"; });
             if (isLabel) {
                 const lbl = mk("LabeledStatement", cur.start);
                 lbl.label = parseIdentifier(); advance(true);   // label, then past `:`
@@ -854,7 +851,7 @@ function parseInternal(bytes, opts, inject) {
     function parseNew() {
         const start = cur.start; advance(true);
         if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "new"; if (cur.type === "identifier" && cur.value === "target" && !cur.escaped) { meta.property = "target"; advance(false); if (!newTargetAllowed()) synErr("'new.target' is only valid inside a function", meta); return parseCallMemberTail(fin(meta), true); } synErr("the only valid meta-property for 'new' is 'new.target'"); return errNode(start); }
-        let callee = isKw("new") ? parseNew() : parsePrimary();
+        let callee = isKw("new") ? parseNew() : parsePrimary(true);
         callee = parseCallMemberTail(callee, false);   // member tail but no call
         const node = mk("NewExpression", start); node.callee = callee; node.arguments = [];
         if (isP("(")) node.arguments = parseArguments();
@@ -888,16 +885,87 @@ function parseInternal(bytes, opts, inject) {
         return e;
     }
 
-    function parseArguments() {
+    // `info` (optional) learns whether a spread was followed by a comma, which an arrow's
+    // parameter list (the `async (` cover grammar) refuses: a rest parameter is last, with no
+    // trailing comma.
+    function parseArguments(info) {
         const args = [];
         advance(true);                              // past `(`
         while (!isP(")") && !atEof()) {
-            if (isP("...")) { const sp = mk("SpreadElement", cur.start); advance(true); sp.argument = parseAssignment(); args.push(fin(sp)); }
+            const spread = isP("...");
+            if (spread) { const sp = mk("SpreadElement", cur.start); advance(true); sp.argument = parseAssignment(); args.push(fin(sp)); }
             else args.push(parseAssignment());
             if (!eatP(",", true)) break;
+            if (spread && info) info.spreadComma = true;
         }
         expectP(")", false);                        // a call `)` -> a value (division)
         return args;
+    }
+
+    // Reinterpret a parsed `async (...)` argument list as arrow parameters - the cover grammar
+    // (CoverCallExpressionAndAsyncArrowHead). Builds the nodes parseParams builds (Identifier,
+    // AssignmentPattern, ArrayPattern / ObjectPattern, RestElement) and refuses what is no
+    // binding (a member access, a call, a literal, `eval`, a rest that is not last).
+    function argsToParams(args, info) {
+        const params = [];
+        for (let i = 0; i < args.length; i++) {
+            const a = args[i];
+            if (a.type === "SpreadElement") {
+                if (info.spreadComma) synErr("a rest parameter must be last, with no trailing comma", a);
+                params.push(toRest(a, false));
+            } else params.push(toBinding(a, true));
+        }
+        return params;
+    }
+    function toRest(sp, idOnly) {
+        const r = { type: "RestElement", start: sp.start, stop: sp.stop };
+        r.argument = toBinding(sp.argument, false);
+        if (idOnly && r.argument.type !== "Identifier" && r.argument.type !== "Error") synErr("an object rest element must be a name", sp.argument);
+        return r;
+    }
+    // `withDefault`: the node may be `target = default`.
+    function toBinding(n, withDefault) {
+        switch (n.type) {
+            case "Error": return n;                 // already diagnosed
+            case "Identifier":
+                if (BINDING_RESTRICTED.has(n.name)) synErr("'" + n.name + "' may not be a binding name in module code", n);
+                return n;
+            case "AssignmentExpression":
+                if (n.operator === "=" && withDefault) return { type: "AssignmentPattern", start: n.start, stop: n.stop, left: toBinding(n.left, false), right: n.right };
+                break;
+            case "AssignmentPattern":               // `{ a = 1 }` shorthand, already a pattern
+                if (withDefault) return { type: "AssignmentPattern", start: n.start, stop: n.stop, left: toBinding(n.left, false), right: n.right };
+                break;
+            case "ArrayExpression": {
+                const ap = { type: "ArrayPattern", start: n.start, stop: n.stop, elements: [] };
+                for (let i = 0; i < n.elements.length; i++) {
+                    const el = n.elements[i];
+                    if (el === null) { ap.elements.push(null); continue; }
+                    if (el.type === "SpreadElement") {
+                        if (i !== n.elements.length - 1) synErr("a rest element must be last", el);
+                        ap.elements.push(toRest(el, false));
+                    } else ap.elements.push(toBinding(el, true));
+                }
+                return ap;
+            }
+            case "ObjectExpression": {
+                const op = { type: "ObjectPattern", start: n.start, stop: n.stop, properties: [] };
+                for (let i = 0; i < n.properties.length; i++) {
+                    const pr = n.properties[i];
+                    if (pr.type === "SpreadElement") {
+                        if (i !== n.properties.length - 1) synErr("a rest element must be last", pr);
+                        op.properties.push(toRest(pr, true));
+                        continue;
+                    }
+                    if (pr.method || pr.kind === "get" || pr.kind === "set") { synErr("invalid destructuring target", pr); continue; }
+                    op.properties.push({ type: "Property", start: pr.start, stop: pr.stop, computed: pr.computed, key: pr.key,
+                        value: toBinding(pr.value, true), shorthand: pr.shorthand });
+                }
+                return op;
+            }
+        }
+        synErr("invalid arrow function parameter", n);
+        return n;
     }
 
     function isExprStartTok(t) {
@@ -910,13 +978,14 @@ function parseInternal(bytes, opts, inject) {
     // A punctuator that means "the identifier just seen is a property key/name, not a modifier".
     function isKeyBoundary(t) { return t.type === "punctuator" && (t.value === ":" || t.value === "," || t.value === "}" || t.value === "(" || t.value === "="); }
 
-    function parsePrimary() {
+    // `noCall`: the primary is a `new` callee, whose `(...)` is the new's own argument list.
+    function parsePrimary(noCall) {
         const start = cur.start;
         switch (cur.type) {
             case "number": case "string": return parseLiteral();
             case "regex": { const n = mk("Literal", start); n.regex = { pattern: cur.pattern, flags: cur.flags }; n.raw = cur.raw; advance(false); return fin(n); }
             case "template": return parseTemplate();
-            case "identifier": return parseIdentifierExpr();
+            case "identifier": return parseIdentifierExpr(noCall === true);
             case "punctuator":
                 if (cur.value === "(") return parseParenOrArrow();
                 if (cur.value === "[") return parseArrayExpr();
@@ -929,7 +998,7 @@ function parseInternal(bytes, opts, inject) {
         return e;
     }
 
-    function parseIdentifierExpr() {
+    function parseIdentifierExpr(noCall) {
         const v = cur.value, start = cur.start;
         if (v === "function") return parseFunctionExpr(false);
         if (v === "class") return parseClassExpr();
@@ -949,17 +1018,20 @@ function parseInternal(bytes, opts, inject) {
                     const id = parseIdentifier();
                     return finishArrow(start, [id], true);
                 }
-                // `async ( ... ) =>` -- the parenthesized content may hold default expressions
-                // with a regex OR a division, so it cannot be pre-scanned with one slash goal.
-                // SPECULATIVELY parse the params with real grammar (correct goals per token); if
-                // no `=>` follows, fully rewind the tokenizer + parser and parse `async(...)` as a
-                // call. This is a tokenizer-checkpoint speculation, not a lookahead pre-lex.
-                if (nx.type === "punctuator" && nx.value === "(") {
-                    const st = saveState();
-                    advance(true);                  // consume `async` -> cur is `(`
-                    const params = parseParams();
-                    if (isP("=>") && !nl()) return finishArrow(start, params, true);
-                    restoreState(st);               // not an arrow -> rewind; parse as a call below
+                // `async ( ... )` -- an async arrow's parameters or a call's arguments. The list
+                // is parsed ONCE, as arguments (each slash lexed under its real grammatical goal:
+                // a default may hold a regex OR a division), and reinterpreted as parameters when
+                // `=>` follows: the cover grammar, as a parenthesized expression's. (A params
+                // parse that was rewound and re-parsed as a call when no `=>` followed did every
+                // nested `async (` twice per enclosing one - exponential: ~330 bytes of nested
+                // `async(a=` never finished parsing.) A `new` callee's `(...)` is the new's.
+                if (nx.type === "punctuator" && nx.value === "(" && !noCall) {
+                    const callee = parseIdentifier();   // `async` -> cur is `(`
+                    const info = { spreadComma: false };
+                    const args = parseArguments(info);
+                    if (isP("=>") && !nl()) return finishArrow(start, argsToParams(args, info), true);
+                    const call = mk("CallExpression", start); call.callee = callee; call.optional = false; call.arguments = args;
+                    return fin(call);
                 }
             }
             // otherwise `async` is an ordinary identifier -> fall through
