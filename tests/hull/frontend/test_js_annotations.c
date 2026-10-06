@@ -138,6 +138,26 @@ UTEST(js_annotations, malformed_tags_deterministic)
 }
 
 /* Multi-declarator: attaches to the VariableDeclaration statement, not the declarators. */
+/* A doc comment holding invalid UTF-8 - here an F5 lead, which decodes past U+10FFFF - is a
+ * syntax diagnostic, never js.internal: the tag decoder threw RangeError from
+ * String.fromCodePoint (found by the nightly deep JS-source fuzzer). */
+UTEST(js_annotations, invalid_utf8_in_a_tag_is_not_internal)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    static const char src[] =
+        "/** @quer=y users\xe5\xd5\xd0\xf5\x9a\x87\x8f\x90rt const q = 1 */\n"
+        "const q = 1;\n"
+        "/** @tag \xf4\x90\x80\x80 \xed\xa0\x80 \xc0\xaf */\n"     /* > U+10FFFF, surrogate, overlong */
+        "const r = 2;\n";
+    char *o = parse_str(s, src);
+    ASSERT_TRUE(o != NULL);
+    EXPECT_FALSE(has(o, "js.internal"));
+    EXPECT_TRUE(has(o, "\"code\":\"js.syntax\""));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
 UTEST(js_annotations, multi_declarator)
 {
     HlJsSession *s = hl_js_session_create(NULL);
