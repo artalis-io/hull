@@ -16,6 +16,7 @@
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
+#include "hull/worker_db.h"   /* hl_worker_db_end_job */
 
 #include <keel/thread_pool.h>
 #include <keel/async.h>
@@ -380,6 +381,12 @@ static void js_dispatch_work_fn(void *ud)
     JS_FreeValue(ctx, JS_GetException(ctx));
     JS_FreeContext(ctx);
     JS_RunGC(wctx->rt);   /* cycles the dispatch left behind */
+#ifdef HL_ENABLE_DB
+    if (op->with_db &&
+        hl_worker_db_end_job(op->error ? NULL : op->error_msg,
+                             sizeof(op->error_msg)))
+        op->error = 1;
+#endif
 }
 
 /* Message for a failed dispatch: the error's text, or the limit. A tripped
