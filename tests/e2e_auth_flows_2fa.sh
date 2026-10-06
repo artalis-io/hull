@@ -142,6 +142,15 @@ for e in reversed(emails):
         print(e.get('text', '')); break
 "
 }
+# A mailed single-use link (magic link, email-change confirm / revoke): its GET
+# shows a page and consumes nothing (mail scanners prefetch links); the page's
+# form POSTs the token back. Extra curl options go after the URL.
+link_post() {
+    _lurl="$1"; shift
+    _ltok=$(printf '%s\n' "$_lurl" | sed 's/.*token=//')
+    curl -sS "$@" -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data "token=$_ltok" "${_lurl%%\?*}"
+}
 extract_url() {
     printf '%s\n' "$1" | python3 -c "
 import re, sys
@@ -274,15 +283,16 @@ run_flow() {
         "$BASE/auth/totp-verify")
     check_contains "$_label: recovery code accepted" "$R" '"ok":true'
 
-    # 10. Magic-link path with 2FA - click the link, expect default
-    #     HTML form. Submit it to /auth/totp-verify with a fresh code.
+    # 10. Magic-link path with 2FA - click the link (submit its page's
+    #     form), expect the default TOTP form. Submit it to
+    #     /auth/totp-verify with a fresh code.
     : > "$COOKIES"
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null
     curl -sS -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\"}" "$BASE/auth/magic-link" > /dev/null
     TEXT=$(last_email_text "$PORT" "$EMAIL")
     MAGIC_URL=$(extract_url "$TEXT")
-    HTML=$(curl -sS "$MAGIC_URL")
+    HTML=$(link_post "$MAGIC_URL")
     check_contains "$_label: magic-link click renders TOTP form" \
         "$HTML" '/auth/totp-verify'
     TOTP_TOKEN3=$(extract_totp_token_html "$HTML")

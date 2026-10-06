@@ -11,7 +11,9 @@
  *      searched in-process). A hit short-circuits - no network
  *      round-trip needed. Safe for air-gapped deployments.
  *   2. HIBP range API. Fail-open on outage, with a once-per-process
- *      warn so the operator sees the gap.
+ *      warn so the operator sees the gap. A manifest.hosts that
+ *      certainly does not admit the endpoint is a misconfiguration,
+ *      not an outage: check() throws.
  *
  * @license AGPL-3.0-or-later
  */
@@ -63,6 +65,28 @@ function inLocalBlocklist(hashHexUpper) {
     return false;
 }
 
+// Could manifest.hosts admit the endpoint's host? Read only after a fetch
+// failed to start, to tell a misconfiguration from an outage. Conservative:
+// an entry that MIGHT admit it ("*", a "$VAR" reference, a CIDR, a glob)
+// counts, so only a list that certainly refuses the host answers false.
+function hostsMayAdmit(endpoint) {
+    const hm = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/\[?([^\/:\]]+)/.exec(endpoint);
+    if (!hm) return true;
+    const host = hm[1].toLowerCase();
+    let m;
+    try { m = globalThis.__hull_manifest; } catch (e) { return true; }
+    if (!m || typeof m !== "object") return true;
+    if (!Array.isArray(m.hosts)) return false;
+    for (let i = 0; i < m.hosts.length; i++) {
+        const h = m.hosts[i];
+        if (typeof h !== "string") return true;
+        const e = h.toLowerCase();
+        if (e === "*" || e === host || e[0] === "$" || e.indexOf("/") >= 0) return true;
+        if (e.startsWith("*.") && (host === e.slice(2) || host.endsWith(e.slice(1)))) return true;
+    }
+    return false;
+}
+
 // The runtime's refusals to wait (runtime/js/db_wait.h, async.c async gate).
 function isWaitRefusal(e) {
     const s = String(e && e.message !== undefined ? e.message : e);
@@ -96,6 +120,12 @@ async function check(password, opts) {
         // failing open on it turned the check off, quietly, for every such
         // call. Re-throw.
         if (isWaitRefusal(e)) throw e;
+        // Neither is a host the manifest does not admit: failing open on it
+        // turned the check off for the life of the process, behind one warning.
+        if (!hostsMayAdmit(endpoint)) {
+            throw new Error("pwned: manifest.hosts does not admit the HIBP endpoint "
+                + endpoint + " - add its host to manifest.hosts");
+        }
         _health.ok            = false;
         _health.last_check_at = time.now();
         _health.last_error    = "HIBP fetch failed";

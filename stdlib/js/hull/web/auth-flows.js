@@ -706,6 +706,16 @@ function userId(user) {
     return user.id ?? user.user_id ?? null;
 }
 
+// Is the account's address verified? Only `true` or a non-zero number (an
+// adapter returning raw rows hands back 0 / 1). Plain truthiness took a
+// string column ("0", "false", "f") for verified: login skipped
+// requireVerifiedEmail and a magic link signed a pre-registrant's account in.
+// Same test as the Lua sibling's is_verified.
+function isVerified(user) {
+    const v = user && user.email_verified;
+    return v === true || (typeof v === "number" && v !== 0);
+}
+
 // The account's stored password hash, read the way /login reads it: through
 // userFindByEmail, whose contract carries password_hash. userGet need not
 // return it (keeping the hash out of the model is a common habit), and reading
@@ -769,22 +779,24 @@ function requestProto(headers, dflt) {
 function originFor(req) {
     if (_state.publicOrigin) return _state.publicOrigin;
     const headers = (req && req.headers) || {};
-    // The URL is built from the MATCHED ALLOWLIST ENTRY plus the validated
-    // port - never from the header. "app.example.com:@evil.com" used to pass
-    // the allowlist (its host part, cut at ':', matched) and then became the
-    // link itself, sending reset and magic-link tokens to evil.com.
+    // The URL is built from the MATCHED ALLOWLIST ENTRY alone - never from
+    // the header. "app.example.com:@evil.com" used to pass the allowlist (its
+    // host part, cut at ':', matched) and then became the link itself,
+    // sending reset and magic-link tokens to evil.com. Nor is the request's
+    // port copied (audit 7): a client choosing it sent the tokens to whatever
+    // listened on that port of the trusted host; an entry "host:port" pins one.
     const hp = requestHost(headers);
-    const suffix = hp && hp[1] ? ":" + hp[1] : "";
     if (hp && _state.trustedHosts) {
         for (let i = 0; i < _state.trustedHosts.length; i++) {
-            if (hp[0] === _state.trustedHosts[i]) {
-                return requestProto(headers, "https") + "://"
-                    + _state.trustedHosts[i] + suffix;
+            const allowed = _state.trustedHosts[i];
+            if (hp[0] === allowed || (hp[1] !== null && allowed === hp[0] + ":" + hp[1])) {
+                return requestProto(headers, "https") + "://" + allowed;
             }
         }
     }
     if (hp && _state.trustRequestHost) {
-        return requestProto(headers, "http") + "://" + hp[0] + suffix;
+        return requestProto(headers, "http") + "://" + hp[0]
+            + (hp[1] !== null ? ":" + hp[1] : "");
     }
     // Round-11 LOW-10: one-shot warn on first null-return. See Lua
     // sibling. Mute after the first hit so a hostile scanner can't
@@ -860,7 +872,7 @@ function handleVerifyResend(req, res) {
         return res.status(400).json({ error: "invalid email" });
     }
     const user = findByEmail(body.email);
-    if (!user || user.email_verified) return genericOk(res);
+    if (!user || isVerified(user)) return genericOk(res);
     const uid = userId(user);
     const origin = originFor(req);
     afterResponse(() => {
@@ -934,7 +946,7 @@ function handleVerifyPage(req, res) {
     }
     const user = getUser(r[0].sub);
     if (!user) return secureHtml(res).status(400).html("verification failed");
-    if (user.email_verified) return res.redirect(_state.verifyRedirect);
+    if (isVerified(user)) return res.redirect(_state.verifyRedirect);
     if (_state.verifyFormRedirect) {
         const sep = _state.verifyFormRedirect.indexOf("?") >= 0 ? "&" : "?";
         return res.redirect(_state.verifyFormRedirect + sep + "token=" + token);
@@ -957,7 +969,7 @@ async function handleVerify(req, res) {
     const user = getUser(env.sub);
     if (!user) return verifyFail(req, res, 400, "verification failed");
     const uid = userId(user);
-    if (user.email_verified) {
+    if (isVerified(user)) {
         markTokenUsed(token, env.exp);
         return verifyOk(req, res);
     }
@@ -1030,11 +1042,13 @@ function defaultTotpFormHtml(token) {
          + 'Enter a recovery code instead.</p></body></html>';
 }
 
-function startTotpPending(req, res, user) {
+// JSON (login, a JSON magic-link POST), or for a browser (`asPage`: the
+// magic-link page's form) an HTML form or redirect.
+function startTotpPending(req, res, user, asPage) {
     const uid = userId(user);
     const token = issueToken(uid, ACTIONS.totp_pending,
                               _state.totpPendingTtl);
-    if (req.method === "POST") {
+    if (!asPage) {
         return res.json({
             ok: true, pending_2fa: true, totp_token: token,
         });
@@ -1089,7 +1103,7 @@ function handleLogin(req, res) {
         }
         return res.status(401).json({ error: "invalid credentials" });
     }
-    if (_state.requireVerifiedEmail && !user.email_verified) {
+    if (_state.requireVerifiedEmail && !isVerified(user)) {
         return res.status(403).json({ error: "email not verified" });
     }
     clearFailedLogins(ipKey);
@@ -1146,23 +1160,69 @@ function handleMagicLink(req, res) {
     res.json({ ok: true });
 }
 
-function handleMagicLinkConsume(req, res) {
+// ── Single-use links: GET shows, POST consumes ─────────────────────
+// A mailed single-use link (magic link, email-change confirm and revoke) is
+// not consumed by its GET: mail scanners prefetch links, and a prefetch
+// signed the scanner in (the user's own click then answered "replayed"),
+// confirmed a change nobody read, or cancelled it. The GET checks the token
+// without using it and answers a page whose form POSTs it back; the POST
+// consumes it - as the verify flow does. A JSON client POSTs {token} itself.
+
+// The token is a verified envelope (fixed alphabet) and the strings are
+// module constants, so nothing needs escaping. No script.
+function linkFormHtml(path, token, title, button) {
+    return '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        + '<title>' + title + '</title></head>'
+        + '<body style="font-family:sans-serif;max-width:400px;margin:4em auto;">'
+        + '<h1>' + title + '</h1>'
+        + '<form method="POST" action="' + _state.prefix + path + '">'
+        + '<input type="hidden" name="token" value="' + token + '">'
+        + '<button type="submit">' + button + '</button></form></body></html>';
+}
+
+// The GET side: the envelope and its single use, nothing consumed. Returns
+// [token, env] - or null after answering 400.
+function linkPageToken(req, res, action, fail) {
     const token = req.query && req.query.token;
-    const result = consumeToken(token, ACTIONS.magic_link);
+    const r = parseToken(token, action);
+    if (!r[0]) {
+        secureHtml(res).status(400).html(fail + ": " + (r[1] || "?"));
+        return null;
+    }
+    if (tokenAlreadyUsed(token)) {
+        secureHtml(res).status(400).html(fail + ": replayed");
+        return null;
+    }
+    return [token, r[0]];
+}
+
+function handleMagicLinkPage(req, res) {
+    const t = linkPageToken(req, res, ACTIONS.magic_link, "magic link failed");
+    if (!t) return;
+    secureHtml(res).html(linkFormHtml("/magic-link/consume", t[0], "Sign in", "Sign in"));
+}
+
+function handleMagicLinkConsume(req, res) {
+    // A cross-site form would sign the victim in to the attacker's account
+    // with the attacker's own link (login CSRF).
+    if (req.headers && req.headers["sec-fetch-site"] === "cross-site") {
+        return res.status(403).json({ error: "forbidden" });
+    }
+    const result = consumeToken(parseBody(req).token, ACTIONS.magic_link);
     if (!result[0]) {
-        return secureHtml(res).status(400).html("magic link failed: " + (result[1] || "?"));
+        return verifyFail(req, res, 400, "magic link failed: " + (result[1] || "?"));
     }
     const user = getUser(result[0].sub);
     // A magic link is bound to the address it was sent to: after an email
     // change, one still sitting in the old mailbox no longer signs in.
     if (!user || result[0].eb !== emailBinding(user))
-        return secureHtml(res).status(400).html("magic link failed");
+        return verifyFail(req, res, 400, "magic link failed");
     // Magic-link clicks count as proof of email ownership. An unverified
     // account that HAS a password may carry one somebody else chose: the
     // click goes through the verify step (confirm it or set a new one, see
     // handleVerify) rather than signing in or silently replacing it. A
     // passwordless account (magicLinkAutoSignup) has nothing to keep.
-    if (!user.email_verified) {
+    if (!isVerified(user)) {
         const uid = userId(user);
         if (storedPasswordHash(user) !== null) {
             const vtok = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
@@ -1181,7 +1241,7 @@ function handleMagicLinkConsume(req, res) {
         const enrolled = totpEnrolled(user);
         if (enrolled === null)
             return res.status(500).json({ error: "auth-flows misconfigured" });
-        if (enrolled) return startTotpPending(req, res, user);
+        if (enrolled) return startTotpPending(req, res, user, !wantsJson(req));
     }
     return finishLogin(req, res, user, "magic_link");
 }
@@ -1270,7 +1330,7 @@ async function handlePasswordResetConfirm(req, res) {
     if (!user || !resetBindingHolds(result[0], user))
         return res.status(400).json({ error: "reset failed" });
     const newHash = crypto.hashPassword(body.password);
-    if (!user.email_verified) {
+    if (!isVerified(user)) {
         // The reset link proves the mailbox and its holder chose this
         // password: verified, as a verify with new_password - see Lua.
         await replaceUnverifiedCredentials(req, res, user, result[0].sub, newHash);
@@ -1358,42 +1418,65 @@ function handleEmailChange(req, res) {
     res.json({ ok: true });
 }
 
-// GET /auth/email-change/revoke?token=... - old-address holder
-// cancels a pending email change. Single-use via the shared
-// used-tokens table.
+// GET /auth/email-change/revoke?token=... - the page; POST consumes it (see
+// "Single-use links"). The old-address holder cancels a pending email
+// change: single-use via the shared used-tokens table; deletes the pending
+// row, so the change's confirm link stops working too.
+function handleEmailChangeRevokePage(req, res) {
+    const t = linkPageToken(req, res, ACTIONS.email_change_revoke, "revoke failed");
+    if (!t) return;
+    secureHtml(res).html(linkFormHtml("/email-change/revoke", t[0],
+        "Cancel the email change", "Cancel the change"));
+}
+
 function handleEmailChangeRevoke(req, res) {
-    const token = req.query && req.query.token;
-    const result = consumeToken(token, ACTIONS.email_change_revoke);
+    const result = consumeToken(parseBody(req).token, ACTIONS.email_change_revoke);
     if (!result[0]) {
-        return secureHtml(res).status(400).html("revoke failed: " + (result[1] || "?"));
+        return verifyFail(req, res, 400, "revoke failed: " + (result[1] || "?"));
     }
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             [result[0].sub]);
     emitEvent(result[0].sub, "email_change_revoked", req,
               { metadata: { by: "old_address" } });
     gcExpired();
+    if (wantsJson(req)) return res.json({ ok: true });
     secureHtml(res).html("Email change canceled.");
 }
 
-function handleEmailChangeConfirm(req, res) {
-    const token = req.query && req.query.token;
-    const result = consumeToken(token, ACTIONS.email_change);
-    if (!result[0]) {
-        return secureHtml(res).status(400).html("email change failed: " + (result[1] || "?"));
-    }
-    const env = result[0];
-    const user = getUser(env.sub);
-    if (!user) return secureHtml(res).status(400).html("email change failed");
-    // The stored token_hash must be THIS token's: only the latest link of
-    // the pending change confirms it, and none once the row is gone.
+// Does the pending change still match this confirm link? There must be a
+// pending row, for the envelope's new_email, and its token_hash must be THIS
+// token's: only the latest link of the pending change confirms it, and none
+// once the row is gone (revoked, superseded, done).
+function pendingChangeMatches(env, token) {
     const rows = db.query(
         "SELECT new_email, token_hash FROM _hull_auth_pending_email_changes "
         + "WHERE user_id = ?", [env.sub]);
     const th = encoding.hex.encode(crypto.sha256(token));
-    if (!rows || rows.length === 0 || rows[0].new_email !== env.new_email
-        || typeof rows[0].token_hash !== "string"
-        || !crypto.constantTimeEq(rows[0].token_hash, th)) {
+    return !!rows && rows.length > 0 && rows[0].new_email === env.new_email
+        && typeof rows[0].token_hash === "string"
+        && crypto.constantTimeEq(rows[0].token_hash, th);
+}
+
+function handleEmailChangePage(req, res) {
+    const t = linkPageToken(req, res, ACTIONS.email_change, "email change failed");
+    if (!t) return;
+    if (!pendingChangeMatches(t[1], t[0])) {
         return secureHtml(res).status(400).html("email change failed");
+    }
+    secureHtml(res).html(linkFormHtml("/email-change/confirm", t[0],
+        "Confirm your new email address", "Confirm"));
+}
+
+function handleEmailChangeConfirm(req, res) {
+    const token = parseBody(req).token;
+    const result = consumeToken(token, ACTIONS.email_change);
+    if (!result[0]) {
+        return verifyFail(req, res, 400, "email change failed: " + (result[1] || "?"));
+    }
+    const env = result[0];
+    const user = getUser(env.sub);
+    if (!user || !pendingChangeMatches(env, token)) {
+        return verifyFail(req, res, 400, "email change failed");
     }
     const oldEmail = user.email;
     _state.userSetEmail(env.sub, env.new_email);
@@ -1402,8 +1485,7 @@ function handleEmailChangeConfirm(req, res) {
             [env.sub]);
     emitEvent(env.sub, "email_changed", req,
               { metadata: { old_email: oldEmail, new_email: env.new_email } });
-    gcExpired();
-    res.redirect(_state.verifyRedirect);
+    return verifyOk(req, res);
 }
 
 function registerRoutes(app) {
@@ -1441,12 +1523,15 @@ function registerRoutes(app) {
     app.post(p + "/login",                    handleLogin);
     app.post(p + "/logout",                   handleLogout);
     app.post(p + "/magic-link",               handleMagicLink);
-    app.get (p + "/magic-link/consume",       handleMagicLinkConsume);
+    app.get (p + "/magic-link/consume",       handleMagicLinkPage);
+    app.post(p + "/magic-link/consume",       handleMagicLinkConsume);
     app.post(p + "/password-reset/request",   handlePasswordResetRequest);
     app.post(p + "/password-reset/confirm",   handlePasswordResetConfirm);
     app.post(p + "/email-change",             handleEmailChange);
-    app.get (p + "/email-change/confirm",     handleEmailChangeConfirm);
-    app.get (p + "/email-change/revoke",      handleEmailChangeRevoke);
+    app.get (p + "/email-change/confirm",     handleEmailChangePage);
+    app.post(p + "/email-change/confirm",     handleEmailChangeConfirm);
+    app.get (p + "/email-change/revoke",      handleEmailChangeRevokePage);
+    app.post(p + "/email-change/revoke",      handleEmailChangeRevoke);
     // Registered unconditionally; the handler returns 404 when
     // enableTotp is false (clearer than a route-level 404).
     app.post(p + "/totp-verify",              handleTotpVerify);
@@ -1601,19 +1686,20 @@ function init(opts) {
         }
     }
     if (hasHosts) {
-        // Round-11 MEDIUM-4: bare-host enforcement. See Lua sibling.
+        // Each entry is a host or "host:port", the shapes originFor can
+        // match (see the Lua sibling).
         for (let i = 0; i < opts.trustedHosts.length; i++) {
             const h = opts.trustedHosts[i];
             if (typeof h !== "string" || h === "") {
                 throw new Error("auth-flows.init: trustedHosts entries "
                     + "must be non-empty strings (got " + typeof h + ")");
             }
-            if (h.charAt(0) !== "[" && h.indexOf(":") >= 0) {
+            const m = /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::(\d{1,5}))?$/.exec(h);
+            if (!m || (m[1] !== undefined && Number(m[1]) > 65535)) {
                 throw new Error("auth-flows.init: trustedHosts entry '"
-                    + h + "' contains ':' - entries must be bare host "
-                    + "names; the URL preserves the request's port "
-                    + "automatically. IPv6 literals must be bracketed "
-                    + "(e.g. \"[::1]\").");
+                    + h + "' must be a host name or \"host:port\" (IPv6 "
+                    + "literals bracketed, e.g. \"[::1]\"); emailed links "
+                    + "carry only the port an entry names.");
             }
         }
     }

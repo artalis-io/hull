@@ -142,7 +142,10 @@ local _state = {
     --   * `trusted_hosts = {"app.example.com", "alt.example.com"}` -
     --     allowlist. req.headers.host must match (exactly) or the URL
     --     build refuses. Multi-tenant deployments where each customer
-    --     has a different domain.
+    --     has a different domain. The link is built from the matched
+    --     entry, never from the request: a bare host gives a link
+    --     without a port, and an entry "host:port" (which matches a
+    --     request on that port only) gives that port.
     --   * `trust_request_host = true` - DEV/TEST escape hatch. Falls
     --     back to the pre-round-9 behaviour: uses req.headers.host
     --     directly. Logs a one-shot warning at init. NEVER pass this
@@ -355,9 +358,10 @@ local function password_len_ok(pw, min)
     return n <= PW_MAX and (min == false or n >= PW_MIN)
 end
 
--- email_verified as JS reads it: an adapter that returns raw rows hands back
--- 0 / 1, and Lua treats 0 as true - login, the verify step and the magic-link
--- gate would all take an unverified account for a verified one.
+-- Only `true` or a non-zero number (the same test as JS's isVerified): an
+-- adapter that returns raw rows hands back 0 / 1, and Lua treats 0 as true -
+-- login, the verify step and the magic-link gate would all take an unverified
+-- account for a verified one. A string ("0", "false") fails closed.
 local function is_verified(user)
     local v = user and user.email_verified
     return v == true or (type(v) == "number" and v ~= 0)
@@ -684,10 +688,13 @@ end
 -- Round-9 HIGH-1: build a click-through URL origin from validated
 -- sources only. public_origin (when set) wins unconditionally;
 -- otherwise the request's host must match a trusted_hosts entry
--- exactly, and the URL is built from THAT ENTRY (plus the validated
--- port) - never from the header. A header like "app.example.com:@evil.com"
--- used to pass the allowlist (its host part, cut at ':', matched) and then
--- became the link itself, sending reset and magic-link tokens to evil.com.
+-- exactly, and the URL is built from THAT ENTRY alone - never from the
+-- header. The request's port is not copied either (audit 7): a client
+-- choosing it sent reset and magic-link tokens to whatever listened on
+-- that port of the trusted host; an entry "host:port" pins one. A header
+-- like "app.example.com:@evil.com" used to pass the allowlist (its host
+-- part, cut at ':', matched) and then became the link itself, sending
+-- reset and magic-link tokens to evil.com.
 -- If neither check admits a value, return nil - the handler then answers
 -- with the same enumeration-safe response without sending the link.
 local function origin_for(req)
@@ -696,18 +703,17 @@ local function origin_for(req)
     end
     local h = (req and req.headers) or {}
     local host, port = request_host(h)
-    local suffix = port and (":" .. port) or ""
     if host and _state.trusted_hosts then
         for _, allowed in ipairs(_state.trusted_hosts) do
-            if host == allowed then
-                return request_proto(h, "https") .. "://" .. allowed .. suffix
+            if host == allowed or (port and allowed == host .. ":" .. port) then
+                return request_proto(h, "https") .. "://" .. allowed
             end
         end
     end
     -- trust_request_host opt-out (dev/test). Last resort; the init
     -- warning fires once so operators can spot it in startup logs.
     if host and _state.trust_request_host then
-        return request_proto(h, "http") .. "://" .. host .. suffix
+        return request_proto(h, "http") .. "://" .. host .. (port and (":" .. port) or "")
     end
     -- Round-11 LOW-10: one-shot warn the first time this fires, so a
     -- misconfigured trusted_hosts is not silent no-mail. The
@@ -1352,18 +1358,18 @@ local function default_totp_form_html(token)
 end
 
 -- Issue a pending-2FA token and respond appropriately for the
--- channel. POST (JSON login) → JSON; GET (magic-link click) →
--- HTML form or redirect.
-local function start_totp_pending(req, res, user)
+-- channel: JSON (login, a JSON magic-link POST), or for a browser
+-- (`as_page`: the magic-link page's form) an HTML form or redirect.
+local function start_totp_pending(req, res, user, as_page)
     local uid = user_uid(user)
     local token = issue_token(uid, ACTIONS.totp_pending,
                                _state.totp_pending_ttl)
-    if req.method == "POST" then
+    if not as_page then
         return res:json({
             ok = true, pending_2fa = true, totp_token = token,
         })
     end
-    -- Browser GET (magic-link consume).
+    -- Browser form POST (magic-link page).
     if _state.totp_pending_redirect then
         local sep = _state.totp_pending_redirect:find("?", 1, true)
                     and "&" or "?"
@@ -1486,17 +1492,66 @@ local function handle_magic_link(req, res)
     res:json({ ok = true })
 end
 
-local function handle_magic_link_consume(req, res)
+-- ── Single-use links: GET shows, POST consumes ─────────────────────
+-- A mailed single-use link (magic link, email-change confirm and revoke)
+-- is not consumed by its GET: mail scanners prefetch links, and a
+-- prefetch signed the scanner in (the user's own click then answered
+-- "replayed"), confirmed a change nobody read, or cancelled it. The GET
+-- checks the token without using it and answers a page whose form POSTs
+-- it back; the POST consumes it - as the verify flow does. A JSON client
+-- POSTs {token} itself.
+
+-- The token is a verified envelope (fixed alphabet) and the strings are
+-- module constants, so nothing needs escaping. No script.
+local function link_form_html(path, token, title, button)
+    return '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        .. '<title>' .. title .. '</title></head>'
+        .. '<body style="font-family:sans-serif;max-width:400px;margin:4em auto;">'
+        .. '<h1>' .. title .. '</h1>'
+        .. '<form method="POST" action="' .. _state.prefix .. path .. '">'
+        .. '<input type="hidden" name="token" value="' .. token .. '">'
+        .. '<button type="submit">' .. button .. '</button></form></body></html>'
+end
+
+-- The GET side: the envelope and its single use, nothing consumed.
+-- Returns token, env - or nil after answering 400.
+local function link_page_token(req, res, action, fail)
     local token = req.query and req.query.token
+    local env, err = parse_token(token, action)
+    if not env then
+        secure_html(res):status(400):html(fail .. ": " .. (err or "?"))
+        return nil
+    end
+    if token_already_used(token) then
+        secure_html(res):status(400):html(fail .. ": replayed")
+        return nil
+    end
+    return token, env
+end
+
+local function handle_magic_link_page(req, res)
+    local token = link_page_token(req, res, ACTIONS.magic_link, "magic link failed")
+    if not token then return end
+    secure_html(res):html(link_form_html("/magic-link/consume", token,
+        "Sign in", "Sign in"))
+end
+
+local function handle_magic_link_consume(req, res)
+    -- A cross-site form would sign the victim in to the attacker's account
+    -- with the attacker's own link (login CSRF).
+    if req.headers and req.headers["sec-fetch-site"] == "cross-site" then
+        return res:status(403):json({ error = "forbidden" })
+    end
+    local token = parse_body(req).token
     local env, err = consume_token(token, ACTIONS.magic_link)
     if not env then
-        return secure_html(res):status(400):html("magic link failed: " .. (err or "?"))
+        return verify_fail(req, res, 400, "magic link failed: " .. (err or "?"))
     end
     local user = _state.user_get(env.sub)
     -- A magic link is bound to the address it was sent to: after an email
     -- change, one still sitting in the old mailbox no longer signs in.
     if not user or env.eb ~= email_binding(user) then
-        return secure_html(res):status(400):html("magic link failed")
+        return verify_fail(req, res, 400, "magic link failed")
     end
     -- Magic-link clicks count as proof of email ownership. An account that
     -- was not verified yet and HAS a password may carry one somebody else
@@ -1523,7 +1578,7 @@ local function handle_magic_link_consume(req, res)
     gc_expired()
     if _state.enable_totp
        and _state.user_totp_enrolled(user_uid(user)) then
-        return start_totp_pending(req, res, user)
+        return start_totp_pending(req, res, user, not wants_json(req))
     end
     finish_login(req, res, user, "magic_link")
 end
@@ -1743,50 +1798,66 @@ local function handle_email_change(req, res)
     res:json({ ok = true })
 end
 
--- GET /auth/email-change/revoke?token=... - consumed by the
--- OLD-address holder to cancel a pending email change. Single-use
--- via the same _hull_auth_used_tokens table; deletes the pending
--- row and (for paranoia) burns any matching email_change token
--- whose envelope is still in flight by deleting BOTH rows.
+-- GET /auth/email-change/revoke?token=... - the page; POST consumes
+-- it (see "Single-use links"). The OLD-address holder cancels a
+-- pending email change: single-use via the same _hull_auth_used_tokens
+-- table; deletes the pending row, so the change's confirm link stops
+-- working too.
+local function handle_email_change_revoke_page(req, res)
+    local token = link_page_token(req, res, ACTIONS.email_change_revoke, "revoke failed")
+    if not token then return end
+    secure_html(res):html(link_form_html("/email-change/revoke", token,
+        "Cancel the email change", "Cancel the change"))
+end
+
 local function handle_email_change_revoke(req, res)
-    local token = req.query and req.query.token
-    local env, err = consume_token(token, ACTIONS.email_change_revoke)
+    local env, err = consume_token(parse_body(req).token, ACTIONS.email_change_revoke)
     if not env then
-        return secure_html(res):status(400):html("revoke failed: " .. (err or "?"))
+        return verify_fail(req, res, 400, "revoke failed: " .. (err or "?"))
     end
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             { env.sub })
     emit_event(env.sub, "email_change_revoked", req,
                { metadata = { by = "old_address" } })
     gc_expired()
+    if wants_json(req) then return res:json({ ok = true }) end
     secure_html(res):html("Email change canceled.")
 end
 
-local function handle_email_change_confirm(req, res)
-    local token = req.query and req.query.token
-    local env, err = consume_token(token, ACTIONS.email_change)
-    if not env then
-        return secure_html(res):status(400):html("email change failed: " .. (err or "?"))
-    end
-    local user = _state.user_get(env.sub)
-    if not user then
-        return secure_html(res):status(400):html("email change failed")
-    end
-    -- Double-check there's a pending row and that the new_email
-    -- in the envelope matches it (defense in depth - the token
-    -- envelope IS the authority but a stale pending row should
-    -- still get cleaned up).
-    -- The stored token_hash must be THIS token's: only the latest link of
-    -- the pending change confirms it, and none once the row is gone.
+-- Does the pending change still match this confirm link? There must be a
+-- pending row, for the envelope's new_email, and its token_hash must be
+-- THIS token's: only the latest link of the pending change confirms it,
+-- and none once the row is gone (revoked, superseded, done).
+local function pending_change_matches(env, token)
     local rows = db.query(
         "SELECT new_email, token_hash FROM _hull_auth_pending_email_changes "
         .. "WHERE user_id = ?", { env.sub })
     local th = encoding.hex.encode(crypto.sha256(token))
-    if not rows or #rows == 0
-       or rows[1].new_email ~= env.new_email
-       or type(rows[1].token_hash) ~= "string"
-       or not crypto.constant_time_eq(rows[1].token_hash, th) then
+    return rows ~= nil and #rows > 0
+       and rows[1].new_email == env.new_email
+       and type(rows[1].token_hash) == "string"
+       and crypto.constant_time_eq(rows[1].token_hash, th)
+end
+
+local function handle_email_change_page(req, res)
+    local token, env = link_page_token(req, res, ACTIONS.email_change, "email change failed")
+    if not token then return end
+    if not pending_change_matches(env, token) then
         return secure_html(res):status(400):html("email change failed")
+    end
+    secure_html(res):html(link_form_html("/email-change/confirm", token,
+        "Confirm your new email address", "Confirm"))
+end
+
+local function handle_email_change_confirm(req, res)
+    local token = parse_body(req).token
+    local env, err = consume_token(token, ACTIONS.email_change)
+    if not env then
+        return verify_fail(req, res, 400, "email change failed: " .. (err or "?"))
+    end
+    local user = _state.user_get(env.sub)
+    if not user or not pending_change_matches(env, token) then
+        return verify_fail(req, res, 400, "email change failed")
     end
     local old_email = user.email
     _state.user_set_email(env.sub, env.new_email)
@@ -1796,8 +1867,7 @@ local function handle_email_change_confirm(req, res)
     emit_event(env.sub, "email_changed", req,
                { metadata = { old_email = old_email,
                               new_email = env.new_email } })
-    gc_expired()
-    res:redirect(_state.verify_redirect)
+    verify_ok(req, res)
 end
 
 -- Route registration helper.
@@ -1838,12 +1908,15 @@ local function register_routes(app)
     app.post(p .. "/login",                    handle_login)
     app.post(p .. "/logout",                   handle_logout)
     app.post(p .. "/magic-link",               handle_magic_link)
-    app.get (p .. "/magic-link/consume",       handle_magic_link_consume)
+    app.get (p .. "/magic-link/consume",       handle_magic_link_page)
+    app.post(p .. "/magic-link/consume",       handle_magic_link_consume)
     app.post(p .. "/password-reset/request",   handle_password_reset_request)
     app.post(p .. "/password-reset/confirm",   handle_password_reset_confirm)
     app.post(p .. "/email-change",             handle_email_change)
-    app.get (p .. "/email-change/confirm",     handle_email_change_confirm)
-    app.get (p .. "/email-change/revoke",      handle_email_change_revoke)
+    app.get (p .. "/email-change/confirm",     handle_email_change_page)
+    app.post(p .. "/email-change/confirm",     handle_email_change_confirm)
+    app.get (p .. "/email-change/revoke",      handle_email_change_revoke_page)
+    app.post(p .. "/email-change/revoke",      handle_email_change_revoke)
     -- Always registered so the route doesn't 404 with a confusing
     -- "no such route" when an app forgets enable_totp; the handler
     -- itself returns 404 with a clear error in that case.
@@ -2016,24 +2089,23 @@ function M.init(opts)
         end
     end
     if has_hosts then
-        -- Round-11 MEDIUM-4: trusted_hosts entries must be bare hosts
-        -- (no :PORT). origin_for strips :PORT from the incoming Host
-        -- before comparison, so an entry like "app.com:8080" never
-        -- matches and the deployment silently sends zero emails. Catch
-        -- the defensive-typo at init. IPv6 bracketed literals
-        -- ([::1]) are allowed - colons inside the brackets are part
-        -- of the host.
+        -- Each entry is a host or "host:port", the shapes origin_for
+        -- can match (anything else would silently never match, and the
+        -- deployment send zero emails). IPv6 literals are bracketed
+        -- ([::1], [::1]:8443).
         for _, h in ipairs(opts.trusted_hosts) do
             if type(h) ~= "string" or h == "" then
                 error("auth-flows.init: trusted_hosts entries must be "
                       .. "non-empty strings (got " .. type(h) .. ")")
             end
-            if h:sub(1, 1) ~= "[" and h:find(":", 1, true) then
+            local hh, hp = h:match("^(%[[%x:%.]+%])(.*)$")
+            if not hh then hh, hp = h:match("^([%w%.%-]+)(.*)$") end
+            local pn = hp and hp:match("^:(%d%d?%d?%d?%d?)$")
+            if not hh or (hp ~= "" and not (pn and tonumber(pn) <= 65535)) then
                 error("auth-flows.init: trusted_hosts entry '" .. h
-                      .. "' contains ':' - entries must be bare host "
-                      .. "names; the URL preserves the request's port "
-                      .. "automatically. IPv6 literals must be "
-                      .. "bracketed (e.g. \"[::1]\").")
+                      .. "' must be a host name or \"host:port\" (IPv6 "
+                      .. "literals bracketed, e.g. \"[::1]\"); emailed "
+                      .. "links carry only the port an entry names.")
             end
         end
     end

@@ -123,6 +123,15 @@ app.use("*", "/*", function(req, _res)
     return 0
 end)
 
+-- An HIBP endpoint manifest.hosts does not admit: pwned.check must raise
+-- (a misconfiguration), not fail open as for an outage (audit 7).
+local pwned = require("hull.web.pwned")
+app.get("/_pwned_misconfig", function(_r, res)
+    local ok, err = pcall(pwned.check, "not-in-the-blocklist-7f3a9c",
+        { endpoint = "https://not-admitted.example/range/" })
+    res:json({ raised = not ok, error = tostring(err) })
+end)
+
 app.get("/_emails",         function(_r, res) res:json(sent_emails) end)
 app.post("/_emails/clear",  function(_r, res) sent_emails = {}; res:json({ ok = true }) end)
 app.get("/_me", function(req, res)

@@ -3494,7 +3494,8 @@ UTEST(lua_stdlib, crypto_envelope_tag_is_lowercase_only)
 /* Link origins: the Host header is parsed strictly and the URL is built from
  * the allowlist entry, never from the header. "app.example.com:@evil.com"
  * used to pass the allowlist and become the emailed link (token to evil.com).
- * X-Forwarded-Host / -Proto count only behind a trusted proxy. */
+ * The request's port is not copied either (audit 7): a "host:port" entry pins
+ * one. X-Forwarded-Host / -Proto count only behind a trusted proxy. */
 UTEST(lua_stdlib, auth_flows_origin_is_built_from_the_allowlist)
 {
     init_lua_with_caps();
@@ -3511,11 +3512,19 @@ UTEST(lua_stdlib, auth_flows_origin_is_built_from_the_allowlist)
         "  local st = af._test.state "
         "  st.trust_request_host = false; st.trusted_hosts = { 'app.example.com' } "
         "  if o(req{host='app.example.com:@evil.com'}) ~= nil then return 5 end "
-        "  if o(req{host='app.example.com:8443'}) ~= 'https://app.example.com:8443' then return 6 end "
+        "  if o(req{host='app.example.com:8443'}) ~= 'https://app.example.com' then return 6 end "
         "  if o(req{host='evil.com'}) ~= nil then return 7 end "
         "  if o(req{host='app.example.com:99999'}) ~= nil then return 8 end "
+        "  st.trusted_hosts = { 'app.example.com:8443' } "
+        "  if o(req{host='app.example.com:8443'}) ~= 'https://app.example.com:8443' then return 10 end "
+        "  if o(req{host='app.example.com:8444'}) ~= nil then return 11 end "
+        "  if o(req{host='app.example.com'}) ~= nil then return 12 end "
+        "  st.trusted_hosts = { 'app.example.com' } "
         "  st.trust_proxy = true "
         "  if o(req{host='x', ['x-forwarded-host']='app.example.com', ['x-forwarded-proto']='javascript'}) ~= 'https://app.example.com' then return 9 end "
+        "  local ok, e = pcall(af.init, { state_secret = ('a'):rep(32), email_send = function() end, "
+        "    templates = {}, trusted_hosts = { 'app.example.com:x' } }) "
+        "  if ok or not tostring(e):find('host:port', 1, true) then return 13 end "
         "  return 0 "
         "end)()");
     EXPECT_EQ(step, 0);

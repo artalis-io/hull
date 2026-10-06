@@ -129,6 +129,15 @@ for e in reversed(emails):
 }
 
 # Pull the first URL out of a captured email body.
+# A mailed single-use link (magic link, email-change confirm / revoke): its GET
+# shows a page and consumes nothing (mail scanners prefetch links); the page's
+# form POSTs the token back. Extra curl options go after the URL.
+link_post() {
+    _lurl="$1"; shift
+    _ltok=$(printf '%s\n' "$_lurl" | sed 's/.*token=//')
+    curl -sS "$@" -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data "token=$_ltok" "${_lurl%%\?*}"
+}
 extract_url() {
     printf '%s\n' "$1" | python3 -c "
 import re, sys
@@ -258,13 +267,25 @@ run_flow() {
     check_contains "$_label: magic-link email contains URL" \
         "$MAGIC_URL" "/auth/magic-link/consume?token="
 
-    # 11. Click magic link in a FRESH cookie jar (simulate new device)
+    # 11. Click magic link in a FRESH cookie jar (simulate new device). The
+    #     GET (a mail scanner's prefetch) renders a sign-in form and signs
+    #     nobody in; its POST does, once. A cross-site POST is refused.
     : > "$COOKIES"
-    S=$(curl -sS -o /dev/null -w '%{http_code}' -c "$COOKIES" "$MAGIC_URL")
+    R=$(curl -sS -c "$COOKIES" "$MAGIC_URL")
+    check_contains "$_label: magic-link GET renders a sign-in form" \
+        "$R" 'action="/auth/magic-link/consume"'
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" "$BASE/_me")
+    check_status "$_label: magic-link GET does not sign in" "$S" "401"
+    S=$(link_post "$MAGIC_URL" -o /dev/null -w '%{http_code}' \
+        -H 'Sec-Fetch-Site: cross-site')
+    check_status "$_label: cross-site magic-link POST refused" "$S" "403"
+    S=$(link_post "$MAGIC_URL" -o /dev/null -w '%{http_code}' -c "$COOKIES")
     check_status "$_label: magic-link consume returns 200" "$S" "200"
     R=$(curl -sS -b "$COOKIES" "$BASE/_me")
     check_contains "$_label: magic-link grants session" \
         "$R" "\"email\":\"$EMAIL_A\""
+    S=$(link_post "$MAGIC_URL" -o /dev/null -w '%{http_code}')
+    check_status "$_label: magic-link replay rejected" "$S" "400"
 
     # 12. Email-change request (logged in via the magic-link session)
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null
@@ -277,9 +298,12 @@ run_flow() {
     check_contains "$_label: email-change email sent to NEW address" \
         "$EC_URL" "/auth/email-change/confirm?token="
 
-    # 13. Click email-change confirm
-    S=$(curl -sS -o /dev/null -w '%{http_code}' "$EC_URL")
-    check_status "$_label: email-change confirm 302" "$S" "302"
+    # 13. Click email-change confirm: the GET only shows the form.
+    R=$(curl -sS "$EC_URL")
+    check_contains "$_label: email-change GET renders a confirm form" \
+        "$R" 'action="/auth/email-change/confirm"'
+    S=$(link_post "$EC_URL" -o /dev/null -w '%{http_code}')
+    check_status "$_label: email-change confirm 303" "$S" "303"
 
     # 14. Login with OLD email → fail
     S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
@@ -334,14 +358,15 @@ run_flow() {
     TEXT=$(last_email_text "$PORT" "$EMAIL_D")
     DMAGIC_URL=$(extract_url "$TEXT")
     : > "$COOKIES"
-    R=$(curl -sS -c "$COOKIES" "$DMAGIC_URL")
+    R=$(link_post "$DMAGIC_URL" -c "$COOKIES")
     check_contains "$_label: magic link to unverified account renders verify form" \
         "$R" 'name="new_password"'
     S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" "$BASE/_me")
     check_status "$_label: ...and does not sign in" "$S" "401"
     # (The fixture's user_get omits password_hash, so step 18 also proves the
     # gate reads the hash through user_find_by_email - audit 6 M1 - and its
-    # email_verified is a raw 0 / 1, which Lua used to read as true.)
+    # email_verified is a raw 0 / 1, which Lua used to read as true. The JS
+    # fixture's is a string "0", which JS used to read as true - audit 7.)
 
     # 19. Audit 6: logout refuses a cross-site POST (a forged form would
     #     still sign the victim out through the clearing Set-Cookie), and
