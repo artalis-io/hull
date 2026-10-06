@@ -53,6 +53,7 @@ typedef struct HlDbHandle HlDbHandle;
 typedef struct HlDbRegistry HlDbRegistry;
 typedef struct HlWsRegistry HlWsRegistry;
 typedef struct KlHttpServer KlHttpServer;
+typedef struct KlHttpRequest KlHttpRequest;
 typedef struct HlRuntime HlRuntime;
 
 /*
@@ -164,6 +165,14 @@ typedef struct HlRuntimeVtable {
                       int argc, char **argv,
                       const char *const *env_allowlist,
                       int *exit_code_out);
+
+    /* A request's response has been sent (Keel's per-response access-log
+     * hook, wired by serve.c), whether or not it reached a handler: a 404 /
+     * 405 Keel answered itself, a middleware short-circuit, a handler's
+     * response. Drops whatever the runtime still keeps for @p req (a
+     * middleware's req.ctx). Called on the event-loop thread, outside any
+     * script run; must not raise. NULL = nothing kept. */
+    void  (*request_done)(HlRuntime *rt, const KlHttpRequest *req);
 } HlRuntimeVtable;
 
 struct HlRuntime {

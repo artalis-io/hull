@@ -117,6 +117,42 @@ HASH_MEDIUM=$(hash_file "$TMPDIR_WORK/medium.bin")
 HASH_LARGE=$(hash_file  "$TMPDIR_WORK/large.bin")
 HASH_EMPTY=$(hash_file  "$TMPDIR_WORK/empty.bin")
 
+# Drip-feeding client for scenario 17: sends one text field of 4000 bytes
+# in 80 segments with a pause between them, so the handler parks on
+# NEED_DATA dozens of times inside one part:read().
+PY=""
+for p in python3 python; do
+    if command -v "$p" >/dev/null 2>&1 && "$p" -c "import socket" >/dev/null 2>&1; then
+        PY="$p"; break
+    fi
+done
+cat > "$TMPDIR_WORK/drip.py" <<'EOF'
+import socket, sys, time
+port = int(sys.argv[1])
+value = "".join("%04d" % i for i in range(1000))   # 4000 bytes, every offset distinct
+b = "dripboundary"
+body = ("--%s\r\nContent-Disposition: form-data; name=\"drip\"\r\n\r\n%s\r\n--%s--\r\n"
+        % (b, value, b)).encode()
+head = ("POST /upload HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+        "Content-Type: multipart/form-data; boundary=%s\r\nContent-Length: %d\r\n\r\n"
+        % (b, len(body))).encode()
+s = socket.create_connection(("127.0.0.1", port), timeout=20)
+s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+s.sendall(head)
+step = 50
+for off in range(0, len(body), step):
+    s.sendall(body[off:off + step])
+    time.sleep(0.01)
+resp = b""
+while True:
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    resp += chunk
+text = resp.decode("latin-1")
+print("drip-ok" if ('"value":"%s"' % value) in text else "drip-bad: " + text[:300])
+EOF
+
 # ── Lua fixture ──────────────────────────────────────────────────────
 
 cat > "$TMPDIR_WORK/app.lua" <<'EOF'
@@ -604,6 +640,18 @@ run_multipart_tests() {
     RESP=$(curl -sS "http://127.0.0.1:$PORT/hash-update-after-digest")
     check_contains "$LABEL hash update-after-digest: not ok"     "$RESP" '"ok":false'
     check_contains "$LABEL hash update-after-digest: error text" "$RESP" 'after digest'
+
+    # ── Scenario 17: a text field drip-fed across many parks ──
+    # part:read() / part.read() on a field whose bytes arrive one small
+    # segment at a time: every segment is a NEED_DATA park. The value
+    # must come back whole (Lua used to drop the bytes read before each
+    # park and leave one stack slot behind per park).
+    if [ -n "$PY" ]; then
+        DRIP=$("$PY" "$TMPDIR_WORK/drip.py" "$PORT" 2>&1)
+        check_contains "$LABEL drip-fed field: whole value" "$DRIP" "drip-ok"
+    else
+        echo "  SKIP: $LABEL drip-fed field (needs python)"
+    fi
 
     # ── Sanity: post-multipart requests still work (no per-request
     # leak that wedges the connection state) ──

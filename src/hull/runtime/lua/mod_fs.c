@@ -610,6 +610,15 @@ static const char *fs_cache_key(char *buf, size_t cap, const char *path)
 
 /* ── Main require() implementation ────────────────────────────────── */
 
+/* 1 in the tool VM (HL_LUA_TOOL_VM_KEY, set by hl_lua_init). */
+static int is_tool_vm(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, HL_LUA_TOOL_VM_KEY);
+    int tool = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    return tool;
+}
+
 /* 1 when the Lua function calling require() is stdlib code. */
 static int require_caller_is_stdlib(lua_State *L)
 {
@@ -698,16 +707,25 @@ static int require_impl(lua_State *L, int trusted)
                     pspec = hl_module_registry_find_runtime(parent, '.');
                 }
             }
-            if (pspec) {
-                if (lua->base.module_set) {
-                    if (!hl_module_set_contains_spec(lua->base.module_set, pspec))
-                        return luaL_error(L,
-                            "module '%s' is part of '%s', which is not declared "
-                            "in app.manifest (add \"%s@%d\" to modules)",
-                            name, pspec->name, pspec->name, pspec->api_major);
-                } else {
-                    hl_import_tracker_record(&lua->base, pspec->name);
-                }
+            /* Neither a registry module nor part of one: nothing an app may
+             * load. Open, this let app code reach any stdlib chunk the
+             * registry does not list - the CLI plugins among them, whose
+             * stdlib identity lent itself to app input. The tool VM, which
+             * runs only Hull's own CLI code (app manifests are extracted in a
+             * VM of their own), loads its plugins by these names. */
+            if (!pspec) {
+                if (!is_tool_vm(L))
+                    return luaL_error(L,
+                        "module '%s' is not a Hull module an app can require "
+                        "(see `hull modules available`)", name);
+            } else if (lua->base.module_set) {
+                if (!hl_module_set_contains_spec(lua->base.module_set, pspec))
+                    return luaL_error(L,
+                        "module '%s' is part of '%s', which is not declared "
+                        "in app.manifest (add \"%s@%d\" to modules)",
+                        name, pspec->name, pspec->name, pspec->api_major);
+            } else {
+                hl_import_tracker_record(&lua->base, pspec->name);
             }
         }
     }
@@ -1161,48 +1179,58 @@ static void build_stdlib_env(lua_State *L)
     lua_setmetatable(L, env);
 }
 
+/* The name a platform VFS entry is loaded under in this VM, or NULL when the
+ * VM does not load it. A colon marks a JS module (hull:foo) or a context doc
+ * (context:bar); static/ and templates/ are stdlib-shipped assets the
+ * template engine and static server read from the VFS. A "cli/" entry is a
+ * CLI plugin (stdlib/cli/lua: hull.build, hull.project.*, ...): only the tool
+ * VM loads it, under the name without the prefix. In an app VM it was a
+ * stdlib chunk app code could require - and one that requires a module name
+ * it is handed (hull.project.registry.load) lent the stdlib's identity to
+ * the app, past the internal-module rule. */
+static const char *stdlib_entry_module(int tool_vm, const char *name)
+{
+    if (strchr(name, ':')) return NULL;
+    if (strncmp(name, "static/", 7) == 0) return NULL;
+    if (strncmp(name, "templates/", 10) == 0) return NULL;
+    if (strncmp(name, "cli/", 4) == 0)
+        return tool_vm ? name + 4 : NULL;
+    return name;
+}
+
 int hl_lua_register_stdlib(HlLua *lua)
 {
     if (!lua || !lua->L)
         return -1;
 
     lua_State *L = lua->L;
+    int tool_vm = is_tool_vm(L);
 
     /* Create __hull_loaded cache table */
     lua_newtable(L);
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
 
     /* Create __hull_modules table and populate with compiled chunks.
-     * Iterates the platform VFS entries, skipping non-Lua-module
-     * entries - adding a new .lua file requires no C changes.
-     *
-     * Skip conditions:
-     *   - colon in name => JS module (hull:foo) or context doc
-     *     (context:bar). JS modules are loaded by the QuickJS
-     *     loader; context docs are not Lua source.
-     *   - "static/" prefix => stdlib-shipped static asset
-     *     (CSS / JS / image bytes), not Lua source.
-     *   - "templates/" prefix => stdlib-shipped template partial,
-     *     not Lua source. The template engine resolves these via
-     *     hl_vfs_find on the platform VFS at render time. */
+     * Iterates the platform VFS entries, skipping the ones this VM does not
+     * load (stdlib_entry_module) - adding a new .lua file requires no C
+     * changes. */
     lua_newtable(L);
 
     if (lua->base.platform_vfs) {
         for (size_t i = 0; i < lua->base.platform_vfs->count; i++) {
             const HlEntry *e = &lua->base.platform_vfs->entries[i];
-            if (strchr(e->name, ':')) continue;            /* JS / context */
-            if (strncmp(e->name, "static/", 7) == 0) continue;
-            if (strncmp(e->name, "templates/", 10) == 0) continue;
+            const char *mod = stdlib_entry_module(tool_vm, e->name);
+            if (!mod) continue;
             char chunk[HL_MODULE_PATH_MAX + 1];
             if (hl_lua_load_cached(L, (const char *)e->data, e->len,
                                    hl_lua_chunkname(chunk, sizeof chunk,
-                                                    e->name)) != LUA_OK) {
+                                                    mod)) != LUA_OK) {
                 log_error("[hull:c] failed to load stdlib module '%s': %s",
-                          e->name, lua_tostring(L, -1));
+                          mod, lua_tostring(L, -1));
                 lua_pop(L, 2); /* pop error + modules table */
                 return -1;
             }
-            lua_setfield(L, -2, e->name);
+            lua_setfield(L, -2, mod);
         }
     }
 
@@ -1245,8 +1273,10 @@ int hl_lua_register_stdlib(HlLua *lua)
         build_stdlib_env(L);
         int env = lua_gettop(L);
         for (size_t i = 0; i < lua->base.platform_vfs->count; i++) {
-            const HlEntry *e = &lua->base.platform_vfs->entries[i];
-            if (lua_getfield(L, mods, e->name) == LUA_TFUNCTION) {
+            const char *mod = stdlib_entry_module(
+                tool_vm, lua->base.platform_vfs->entries[i].name);
+            if (!mod) continue;
+            if (lua_getfield(L, mods, mod) == LUA_TFUNCTION) {
                 lua_pushvalue(L, env);
                 if (!lua_setupvalue(L, -2, 1))
                     lua_pop(L, 1);

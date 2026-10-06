@@ -329,6 +329,8 @@ struct lua_State {
   int basehookcount;
   int hookcount;
   volatile l_signalT hookmask;
+  size_t hlbytes;  /* HULL PATCH 0004: bulk bytes not yet charged */
+  size_t hlowed;  /* HULL PATCH 0004: work charged past 'hookcount' */
 };
 
 
@@ -402,6 +404,8 @@ LUAI_FUNC void luaE_incCstack (lua_State *L);
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);
 LUAI_FUNC void luaE_warnerror (lua_State *L, const char *where);
 LUAI_FUNC int luaE_resetthread (lua_State *L, int status);
+LUAI_FUNC void luaE_hlcharge (lua_State *L, size_t units);   /* HULL PATCH 0004 */
+LUAI_FUNC void luaE_hlbytes (lua_State *L, size_t n);        /* HULL PATCH 0004 */
 
 
 #endif

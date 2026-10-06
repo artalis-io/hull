@@ -1207,6 +1207,30 @@ typedef struct {
     int        error;
 } LuaStreamCbCtx;
 
+typedef struct {
+    const LuaStreamCbCtx *ctx;
+    const void           *data;
+    size_t                len;
+    uint32_t              index;
+    int                   is_last;
+} LuaStreamChunk;
+
+/* The callback call, pushes and all, under the trampoline's lua_pcall: it
+ * runs inside hl_cap_wasm_stream's loop, and a memory error raised by a
+ * push made outside the pcall (a chunk is up to HL_WASM_STREAM_MAX_CHUNK)
+ * longjmp'd out of that loop, leaking the instance, fds, buffers and the
+ * registry ref - all outside the VM's memory limit. */
+static int lua_stream_cb_call(lua_State *L)
+{
+    const LuaStreamChunk *c = (const LuaStreamChunk *)lua_touserdata(L, 1);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, c->ctx->func_ref);
+    lua_pushlstring(L, (const char *)c->data, c->len);
+    lua_pushinteger(L, (lua_Integer)c->index + 1); /* 1-indexed for Lua */
+    lua_pushboolean(L, c->is_last);
+    lua_call(L, 3, 0);
+    return 0;
+}
+
 static int lua_stream_cb_trampoline(const void *data, size_t len,
                                      uint32_t index, int is_last,
                                      void *user_data)
@@ -1214,12 +1238,14 @@ static int lua_stream_cb_trampoline(const void *data, size_t len,
     LuaStreamCbCtx *ctx = (LuaStreamCbCtx *)user_data;
     if (ctx->error) return -1;
 
-    lua_rawgeti(ctx->L, LUA_REGISTRYINDEX, ctx->func_ref);
-    lua_pushlstring(ctx->L, (const char *)data, len);
-    lua_pushinteger(ctx->L, (lua_Integer)(index + 1)); /* 1-indexed for Lua */
-    lua_pushboolean(ctx->L, is_last);
-
-    if (lua_pcall(ctx->L, 3, 0, 0) != LUA_OK) {
+    LuaStreamChunk chunk = { ctx, data, len, index, is_last };
+    if (!lua_checkstack(ctx->L, 2)) {
+        ctx->error = 1;
+        return -1;
+    }
+    lua_pushcfunction(ctx->L, lua_stream_cb_call);   /* no allocation */
+    lua_pushlightuserdata(ctx->L, &chunk);
+    if (lua_pcall(ctx->L, 1, 0, 0) != LUA_OK) {
         ctx->error = 1;
         lua_pop(ctx->L, 1);
         return -1;

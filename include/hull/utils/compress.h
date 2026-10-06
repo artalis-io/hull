@@ -30,8 +30,10 @@
  * @param cfg   Compression config (NULL = no compression).
  * @param data  Body data.
  * @param len   Body data length.
+ * @return 0, or -1 when the body could not be stored (out of memory): the
+ *         response then has no body, and the caller must not send it as is.
  */
-void hl_maybe_compress(KlHttpRequest *req, KlHttpResponse *res,
+int hl_maybe_compress(KlHttpRequest *req, KlHttpResponse *res,
                        KlCompressConfig *cfg,
                        const char *data, size_t len);
 

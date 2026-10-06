@@ -66,6 +66,7 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "internal.h"          /* get_hl_lua_from_L, HlLua (tool.set_app_dir) */
+#include "protected.h"         /* hl_lua_pushlstring_safe */
 #include "hull/utils/alloc.h"  /* hl_alloc_malloc / hl_alloc_free_const */
 
 /* Registry key for the unveil context pointer */
@@ -82,97 +83,97 @@ static HlToolUnveilCtx *get_unveil_ctx(lua_State *L)
     return ctx;
 }
 
-/* ── tool.spawn(argv_table) → (bool, int) ─────────────────────────── */
+/* ── argv / env for a spawn ───────────────────────────────────────── *
+ * Both live in Lua-owned memory (userdata left on the stack, strings held by
+ * tables on the stack), so a raise anywhere - a bad argument, a conversion,
+ * out of memory - leaks nothing; malloc'd copies leaked on every raise and a
+ * failed env malloc dropped the variable without a word. */
+
+/* The array at @p idx as a NULL-terminated list of its strings: a userdata
+ * left on the stack, the strings held by the table. Raises on a non-string
+ * element. */
+static const char **tool_string_list(lua_State *L, int idx, const char *what)
+{
+    lua_Integer n = luaL_len(L, idx);
+    if (n < 0 || (lua_Unsigned)n > (lua_Unsigned)(SIZE_MAX / sizeof(char *)) - 1)
+        luaL_error(L, "%s: bad list length", what);
+    const char **list = (const char **)lua_newuserdatauv(
+        L, ((size_t)n + 1) * sizeof *list, 0);
+    for (lua_Integer i = 1; i <= n; i++) {
+        lua_rawgeti(L, idx, i);
+        if (lua_type(L, -1) != LUA_TSTRING)
+            luaL_error(L, "%s: element %d must be a string", what, (int)i);
+        list[i - 1] = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    }
+    list[n] = NULL;
+    return list;
+}
+
+/* argv from the array at index 1, or NULL (nothing pushed) for an empty
+ * one. A program named by path must lie where the tool sandbox grants
+ * execute: only its basename met the allowlist, so on a host with no kernel
+ * unveil (macOS, Windows) ~/Downloads/evil/cc ran. */
+static const char **tool_spawn_argv(lua_State *L, const char *what)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    if (luaL_len(L, 1) <= 0)
+        return NULL;
+    const char **argv = tool_string_list(L, 1, what);
+    if (strchr(argv[0], '/') || strchr(argv[0], '\\')) {
+        HlToolUnveilCtx *uctx = get_unveil_ctx(L);
+        if (uctx && hl_tool_unveil_check(uctx, argv[0], 'x') != 0)
+            luaL_error(L, "%s: %s is outside the tool sandbox", what, argv[0]);
+    }
+    return argv;
+}
+
+/* ── tool.spawn(argv_table [, env_table]) → (bool, int) ────────────── */
 
 static int l_tool_spawn(lua_State *L)
 {
-    luaL_checktype(L, 1, LUA_TTABLE);
-
-    /* Count elements */
-    int n = (int)luaL_len(L, 1);
-    if (n <= 0) {
-        lua_pushboolean(L, 0);
-        lua_pushinteger(L, -1);
-        return 2;
-    }
-
-    /* Build argv array */
-    const char **argv = malloc(((size_t)n + 1) * sizeof(const char *));
+    const char **argv = tool_spawn_argv(L, "tool.spawn");
     if (!argv) {
         lua_pushboolean(L, 0);
         lua_pushinteger(L, -1);
         return 2;
     }
 
-    for (int i = 1; i <= n; i++) {
-        lua_rawgeti(L, 1, i);
-        /* A real string, held by the table after the pop: a number was
-         * converted on the stack and its string freed by the pop, leaving
-         * a dangling argv entry for execvp and the audit record. */
-        argv[i - 1] = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
-        lua_pop(L, 1);
-        if (!argv[i - 1]) {
-            free(argv);
-            return luaL_error(L, "tool.spawn: argument %d must be a string", i);
-        }
-    }
-    argv[n] = NULL;
-    /* A program named by path must lie where the tool sandbox grants
-     * execute: only its basename met the allowlist, so on a host with no
-     * kernel unveil (macOS, Windows) ~/Downloads/evil/cc ran. */
-    if (argv[0] && (strchr(argv[0], '/') || strchr(argv[0], '\\'))) {
-        HlToolUnveilCtx *uctx = get_unveil_ctx(L);
-        if (uctx && hl_tool_unveil_check(uctx, argv[0], 'x') != 0) {
-            const char *prog = argv[0];   /* a Lua string: outlives argv */
-            free(argv);
-            return luaL_error(L, "tool.spawn: %s is outside the tool sandbox", prog);
-        }
-    }
-
     /* Optional arg 2: an env table { KEY = VALUE, ... } applied in the child
-     * before exec (e.g. ZIG_GLOBAL_CACHE_DIR for a sandbox-writable zig cache).
-     * Built into a NULL-terminated array of malloc'd "KEY=VALUE" strings. */
+     * before exec (e.g. ZIG_GLOBAL_CACHE_DIR for a sandbox-writable zig cache):
+     * a NULL-terminated array of "KEY=VALUE" strings a table keeps alive. */
     const char **envadd = NULL;
-    int envn = 0;
     if (!lua_isnoneornil(L, 2)) {
         luaL_checktype(L, 2, LUA_TTABLE);
-        int cap = 0;
+        size_t cap = 0;
         lua_pushnil(L);
         while (lua_next(L, 2) != 0) { cap++; lua_pop(L, 1); }
-        envadd = malloc(((size_t)cap + 1) * sizeof(const char *));
-        if (!envadd) { free(argv); return luaL_error(L, "tool.spawn: oom"); }
+        envadd = (const char **)lua_newuserdatauv(L, (cap + 1) * sizeof *envadd, 0);
+        lua_newtable(L);                       /* holds the KEY=VALUE strings */
+        int hold = lua_gettop(L);
+        size_t envn = 0;
         lua_pushnil(L);
-        while (lua_next(L, 2) != 0) {
-            /* Only string KEYS: never call lua_tostring on the key during a
-             * lua_next walk (it converts a numeric key in place and can then
-             * corrupt the traversal - a documented Lua footgun). An env-var name
-             * is always a string anyway; a non-string key is skipped. */
-            const char *k = (lua_type(L, -2) == LUA_TSTRING) ? lua_tostring(L, -2) : NULL;
-            const char *v = lua_tostring(L, -1);
-            if (k && v) {
-                size_t len = strlen(k) + 1 + strlen(v) + 1;
-                char *kv = malloc(len);
-                if (kv) { snprintf(kv, len, "%s=%s", k, v); envadd[envn++] = kv; }
-            }
-            lua_pop(L, 1);
+        while (envn < cap && lua_next(L, 2) != 0) {
+            /* Only string KEYS: never lua_tostring a key during a lua_next
+             * walk (it converts a numeric key in place and can corrupt the
+             * traversal). A non-string key or value is refused. */
+            if (lua_type(L, -2) != LUA_TSTRING ||
+                (lua_type(L, -1) != LUA_TSTRING && lua_type(L, -1) != LUA_TNUMBER))
+                return luaL_error(L, "tool.spawn: env entries must be string = string");
+            const char *k = lua_tostring(L, -2);
+            const char *v = luaL_tolstring(L, -1, NULL);   /* pushes a copy */
+            lua_pushfstring(L, "%s=%s", k, v);
+            lua_remove(L, -2);                 /* the tolstring copy */
+            envadd[envn] = lua_tostring(L, -1);
+            lua_rawseti(L, hold, (lua_Integer)++envn);
+            lua_pop(L, 1);                     /* value */
         }
         envadd[envn] = NULL;
     }
 
     int rc = envadd ? hl_tool_spawn_env(argv, envadd) : hl_tool_spawn(argv);
-    free(argv);
-    if (envadd) {
-        for (int i = 0; i < envn; i++) free((void *)(uintptr_t)envadd[i]);
-        free(envadd);
-    }
-
-    if (rc == 0) {
-        lua_pushboolean(L, 1);
-        lua_pushinteger(L, 0);
-    } else {
-        lua_pushboolean(L, 0);
-        lua_pushinteger(L, rc);
-    }
+    lua_pushboolean(L, rc == 0);
+    lua_pushinteger(L, rc);
     return 2;
 }
 
@@ -180,55 +181,22 @@ static int l_tool_spawn(lua_State *L)
 
 static int l_tool_spawn_read(lua_State *L)
 {
-    luaL_checktype(L, 1, LUA_TTABLE);
-
-    int n = (int)luaL_len(L, 1);
-    if (n <= 0) {
-        lua_pushnil(L);
-        return 1;
-    }
-
-    const char **argv = malloc(((size_t)n + 1) * sizeof(const char *));
+    const char **argv = tool_spawn_argv(L, "tool.spawn_read");
     if (!argv) {
         lua_pushnil(L);
         return 1;
     }
 
-    for (int i = 1; i <= n; i++) {
-        lua_rawgeti(L, 1, i);
-        /* A real string, held by the table after the pop: a number was
-         * converted on the stack and its string freed by the pop, leaving
-         * a dangling argv entry for execvp and the audit record. */
-        argv[i - 1] = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
-        lua_pop(L, 1);
-        if (!argv[i - 1]) {
-            free(argv);
-            return luaL_error(L, "tool.spawn_read: argument %d must be a string", i);
-        }
-    }
-    argv[n] = NULL;
-    /* A program named by path must lie where the tool sandbox grants
-     * execute: only its basename met the allowlist, so on a host with no
-     * kernel unveil (macOS, Windows) ~/Downloads/evil/cc ran. */
-    if (argv[0] && (strchr(argv[0], '/') || strchr(argv[0], '\\'))) {
-        HlToolUnveilCtx *uctx = get_unveil_ctx(L);
-        if (uctx && hl_tool_unveil_check(uctx, argv[0], 'x') != 0) {
-            const char *prog = argv[0];   /* a Lua string: outlives argv */
-            free(argv);
-            return luaL_error(L, "tool.spawn_read: %s is outside the tool sandbox", prog);
-        }
-    }
-
     size_t out_len = 0;
     char *output = hl_tool_spawn_read(argv, &out_len);
-    free(argv);
-
-    if (output) {
-        lua_pushlstring(L, output, out_len);
-        free(output);
-    } else {
+    if (!output) {
         lua_pushnil(L);
+        return 1;
     }
+    int pushed = hl_lua_pushlstring_safe(L, output, out_len);
+    free(output);
+    if (pushed != 0)
+        return luaL_error(L, "tool.spawn_read: out of memory");
     return 1;
 }
 
@@ -237,6 +205,18 @@ static int l_tool_spawn_read(lua_State *L)
  * named "vendor". Useful for `static/vendor/*` asset enumeration;
  * source walks should leave it at the default. node_modules and
  * dotfiles are still always skipped. */
+
+static int find_files_push_k(lua_State *L)
+{
+    char **files = (char **)lua_touserdata(L, 1);
+    lua_newtable(L);
+    lua_Integer idx = 1;
+    for (char **p = files; *p; p++) {
+        lua_pushstring(L, *p);
+        lua_rawseti(L, -2, idx++);
+    }
+    return 1;
+}
 
 static int l_tool_find_files(lua_State *L)
 {
@@ -260,7 +240,10 @@ static int l_tool_find_files(lua_State *L)
                 size_t k = 0;
                 for (size_t i = 1; i <= n; i++) {
                     lua_rawgeti(L, -1, (lua_Integer)i);
-                    const char *s = lua_tostring(L, -1);
+                    /* strings only: converting a number allocates, and a
+                     * raise here would leak 'extra' */
+                    const char *s = lua_type(L, -1) == LUA_TSTRING
+                                  ? lua_tostring(L, -1) : NULL;
                     lua_pop(L, 1);
                     if (!s) continue;
                     char *dup = strdup(s);
@@ -293,15 +276,18 @@ static int l_tool_find_files(lua_State *L)
         return 2;
     }
 
-    lua_newtable(L);
-    int idx = 1;
-    for (char **p = files; *p; p++) {
-        lua_pushstring(L, *p);
-        lua_rawseti(L, -2, idx++);
-        free(*p);
+    /* Built under lua_pcall: a raise mid-way leaked the rest of 'files'. */
+    int ok = lua_checkstack(L, 2);
+    if (ok) {
+        lua_pushcfunction(L, find_files_push_k);
+        lua_pushlightuserdata(L, files);
+        ok = lua_pcall(L, 1, 1, 0) == LUA_OK;
+        if (!ok) lua_pop(L, 1);
     }
+    for (char **p = files; *p; p++) free(*p);
     free(files);
-
+    if (!ok)
+        return luaL_error(L, "tool.find_files: out of memory");
     return 1;
 }
 
@@ -441,25 +427,43 @@ static int l_tool_read_file(lua_State *L)
         return 1;
     }
 
-    FILE *f = fopen(path, "rb");
-    if (!f) {
+    /* Regular files only (O_NONBLOCK: opening a FIFO does not wait for a
+     * writer, and fstat then refuses it), read whole in C, the descriptor
+     * closed before anything can raise: the luaL_Buffer reads raised with
+     * the FILE* open. */
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
         lua_pushnil(L);
         return 1;
     }
-
-    luaL_Buffer b;
-    luaL_buffinit(L, &b);
-    char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
-        luaL_addlstring(&b, buf, n);
-    int read_err = ferror(f);
-    fclose(f);
-    if (read_err) {
+    struct stat st;
+    char *data = NULL;
+    size_t len = 0, cap = 0;
+    int ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode);
+    while (ok) {
+        if (len == cap) {
+            size_t ncap = cap ? cap * 2 : 65536;
+            char *nd = ncap > cap ? (char *)realloc(data, ncap) : NULL;
+            if (!nd) { ok = 0; break; }
+            data = nd;
+            cap = ncap;
+        }
+        ssize_t r = read(fd, data + len, cap - len);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) { ok = 0; break; }
+        if (r == 0) break;
+        len += (size_t)r;
+    }
+    close(fd);
+    if (!ok) {
+        free(data);
         lua_pushnil(L);
         return 1;
     }
-    luaL_pushresult(&b);
+    int pushed = hl_lua_pushlstring_safe(L, data ? data : "", len);
+    free(data);
+    if (pushed != 0)
+        return luaL_error(L, "tool.read_file: out of memory");
     return 1;
 }
 
@@ -638,21 +642,6 @@ static int l_tool_set_app_dir(lua_State *L)
         lua->app_dir_size = n;
     }
     return 0;
-}
-
-/* ── tool.loadfile(path) ───────────────────────────────────────────── */
-
-static int l_tool_loadfile(lua_State *L)
-{
-    const char *path = luaL_checkstring(L, 1);
-    int rc = luaL_loadfilex(L, path, "t");   /* source only, never bytecode */
-    if (rc != LUA_OK) {
-        /* Stack: error message. Return nil, errmsg. */
-        lua_pushnil(L);
-        lua_insert(L, -2);
-        return 2;
-    }
-    return 1; /* chunk function on stack */
 }
 
 /* ── tool.extract_manifest_js(path) → JSON string | nil ────────────── *
@@ -856,6 +845,30 @@ static int l_tool_extract_feature_image_rt(lua_State *L)
  *   dir/.aarch64/libhull_platform.a ← aarch64
  */
 
+/* Create / truncate @p path and write [data, data + len): 0 / -1. A symlink
+ * at @p path is not followed (as tool.write_file), and a short write
+ * removes the file. */
+static int tool_write_nofollow(const char *path, const void *data, size_t len)
+{
+#ifdef O_NOFOLLOW
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
+#else
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+#endif
+    if (fd < 0) return -1;
+    const unsigned char *p = (const unsigned char *)data;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, p + off, len - off);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    int ok = close(fd) == 0 && off == len;
+    if (!ok) unlink(path);
+    return ok ? 0 : -1;
+}
+
 static int l_tool_extract_platform_cosmo(lua_State *L)
 {
     const char *dir = luaL_checkstring(L, 1);
@@ -886,11 +899,10 @@ static int l_tool_extract_platform_cosmo(lua_State *L)
     }
 
     /* Write x86_64 archive */
-    FILE *f = fopen(path, "wb");
-    if (!f) { lua_pushboolean(L, 0); return 1; }
-    size_t w = fwrite(x86->data, 1, x86->len, f);
-    fclose(f);
-    if (w != x86->len) { lua_pushboolean(L, 0); return 1; }
+    if (tool_write_nofollow(path, x86->data, x86->len) != 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
 
     /* Create .aarch64/ subdir. Raw mkdir (single component; the parent `dir` is
      * hull's own build tempdir, already created) - consistent with the raw fopen
@@ -906,11 +918,10 @@ static int l_tool_extract_platform_cosmo(lua_State *L)
 
     /* Write aarch64 archive */
     snprintf(path, sizeof(path), "%s/.aarch64/libhull_platform.a", dir);
-    f = fopen(path, "wb");
-    if (!f) { lua_pushboolean(L, 0); return 1; }
-    w = fwrite(arm->data, 1, arm->len, f);
-    fclose(f);
-    if (w != arm->len) { lua_pushboolean(L, 0); return 1; }
+    if (tool_write_nofollow(path, arm->data, arm->len) != 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
 
     lua_pushboolean(L, 1);
     return 1;
@@ -1027,10 +1038,14 @@ static int l_emit_app_registry(lua_State *L) {
         return 2;
     }
 
+    /* Lua-owned (a userdata on the stack): the loop below reads fields and
+     * can raise, which leaked a calloc'd array. */
     HlEmitEntry *ents = NULL;
     if (n) {
-        ents = (HlEmitEntry *)calloc(n, sizeof(*ents));
-        if (!ents) { lua_pushnil(L); lua_pushstring(L, "out of memory"); return 2; }
+        if (n > SIZE_MAX / sizeof(*ents)) {
+            lua_pushnil(L); lua_pushstring(L, "out of memory"); return 2;
+        }
+        ents = (HlEmitEntry *)lua_newuserdatauv(L, n * sizeof(*ents), 0);
     }
     /* Borrow name/data pointers from the Lua strings kept on the stack (grown
      * above); they stay valid until the C function returns, which is after the
@@ -1043,7 +1058,6 @@ static int l_emit_app_registry(lua_State *L) {
         const char *name = lua_tostring(L, -2);
         const char *data = lua_tolstring(L, -1, &dlen);
         if (!name) {
-            free(ents);
             lua_pushnil(L); lua_pushfstring(L, "entry %d missing name", (int)(i + 1));
             return 2;
         }
@@ -1055,12 +1069,14 @@ static int l_emit_app_registry(lua_State *L) {
 
     unsigned char *obj = NULL; size_t objlen = 0;
     int rc = hl_obj_emit_app_registry(&tgt, ents, n, &obj, &objlen);
-    free(ents);
     if (rc != 0 || !obj) {
+        free(obj);
         lua_pushnil(L); lua_pushstring(L, "object emit failed"); return 2;
     }
-    lua_pushlstring(L, (const char *)obj, objlen);
+    int pushed = hl_lua_pushlstring_safe(L, obj, objlen);
     free(obj);
+    if (pushed != 0)
+        return luaL_error(L, "tool.emit_app_registry: out of memory");
     return 1;
 }
 
@@ -1108,14 +1124,12 @@ static int l_linker_link(lua_State *L) {
     lua_pop(L, 1);
     if (!l) { lua_pushboolean(L, 0); return 1; }
 
-    int nobj = (int)luaL_len(L, 2);
-    int nlib = (int)luaL_len(L, 3);
-    const char **objs = (const char **)malloc(((size_t)nobj + 1) * sizeof(char *));
-    const char **libs = (const char **)malloc(((size_t)nlib + 1) * sizeof(char *));
-    if (!objs || !libs) { free(objs); free(libs); lua_pushboolean(L, 0); return 1; }
-    for (int i = 1; i <= nobj; i++) { lua_rawgeti(L, 2, i); objs[i - 1] = lua_tostring(L, -1); lua_pop(L, 1); }
-    for (int i = 1; i <= nlib; i++) { lua_rawgeti(L, 3, i); libs[i - 1] = lua_tostring(L, -1); lua_pop(L, 1); }
-    objs[nobj] = NULL; libs[nlib] = NULL;
+    /* Lua-owned lists of strings the tables hold (as tool.spawn's argv): a
+     * converted number was popped from under its pointer, a nil cut the
+     * list short, a raise leaked the malloc'd arrays, and a negative length
+     * wrote objs[-1]. */
+    const char **objs = tool_string_list(L, 2, "tool.linker_link");
+    const char **libs = tool_string_list(L, 3, "tool.linker_link");
 
     /* Optional 4th arg: cross target triple ("x86_64-linux-gnu"); 5th: target
      * format ("elf"/"macho"/"coff"). Both feed the zig backend (--target= +
@@ -1131,7 +1145,6 @@ static int l_linker_link(lua_State *L) {
     HlLinkTarget tgt = { fmt, triple };
     int rc = hl_linker_link(l, output, objs, libs,
                             ((triple && *triple) || fmts) ? &tgt : NULL);
-    free(objs); free(libs);
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -1636,16 +1649,8 @@ static int l_tool_blob_store_get_to(lua_State *L)
         return 1;
     }
 
-    FILE *out = fopen(dest, "wb");
-    if (!out) {
-        free(bytes);
-        lua_pushboolean(L, 0);
-        return 1;
-    }
-    size_t wrote = (len > 0) ? fwrite(bytes, 1, len, out) : 0;
-    int ok = (fclose(out) == 0) && (wrote == len);
+    int ok = tool_write_nofollow(dest, bytes, len) == 0;
     free(bytes);
-    if (!ok) unlink(dest);
     lua_pushboolean(L, ok);
     return 1;
 }
@@ -1876,6 +1881,12 @@ static int l_tool_platform_pubkey(lua_State *L)
 static int l_tool_sha256_file(lua_State *L)
 {
     const char *path = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *uctx = get_unveil_ctx(L);
+    if (uctx && hl_tool_unveil_check(uctx, path, 'r') != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "outside the tool sandbox");
+        return 2;
+    }
     FILE *f = fopen(path, "rb");
     if (!f) {
         lua_pushnil(L);
@@ -2037,7 +2048,6 @@ static const luaL_Reg tool_funcs[] = {
     { "file_mtime",             l_tool_file_mtime },
     { "stderr",                 l_tool_stderr },
     { "stdout",                 l_tool_stdout },
-    { "loadfile",               l_tool_loadfile },
     { "set_app_dir",            l_tool_set_app_dir },
     { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_manifest_lua",   l_tool_extract_manifest_lua },

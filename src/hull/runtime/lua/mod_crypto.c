@@ -27,10 +27,20 @@
  * storage format rather than an encoding of a value.
  * ════════════════════════════════════════════════════════════════════ */
 
+/* Charge a digest over @p n bytes to the instruction budget (Lua HULL PATCH
+ * 0004, docs/lua_patches.md): one call hashes up to the whole heap, and it
+ * counted as one instruction, so a loop of them was not bounded in time.
+ * One unit per 8 bytes, a hash costing about an instruction per few bytes. */
+static void crypto_charge(lua_State *L, size_t n)
+{
+    lua_hlcharge(L, n / 8, 0);
+}
+
 static int lua_crypto_sha256(lua_State *L)
 {
     size_t len;
     const char *data = luaL_checklstring(L, 1, &len);
+    crypto_charge(L, len);
     uint8_t hash[32];
     if (hl_cap_crypto_sha256(data, len, hash) != 0)
         return luaL_error(L, "sha256 failed");
@@ -50,6 +60,7 @@ static int lua_crypto_sha1(lua_State *L)
 {
     size_t len;
     const char *data = luaL_checklstring(L, 1, &len);
+    crypto_charge(L, len);
 
     uint8_t hash[20];
     if (hl_cap_crypto_sha1(data, len, hash) != 0)
@@ -286,6 +297,7 @@ static int lua_crypto_ed25519_sign(lua_State *L)
     size_t data_len, sk_len;
     const char *data = luaL_checklstring(L, 1, &data_len);
     const char *sk   = luaL_checklstring(L, 2, &sk_len);
+    crypto_charge(L, data_len);
     if (sk_len != 64)
         return luaL_error(L, "ed25519_sign: secret key must be 64 bytes");
     uint8_t sig[64];
@@ -303,6 +315,7 @@ static int lua_crypto_ed25519_verify(lua_State *L)
     const char *data = luaL_checklstring(L, 1, &data_len);
     const char *sig  = luaL_checklstring(L, 2, &sig_len);
     const char *pk   = luaL_checklstring(L, 3, &pk_len);
+    crypto_charge(L, data_len);
     if (sig_len != 64)
         return luaL_error(L, "ed25519_verify: signature must be 64 bytes");
     if (pk_len != 32)
@@ -338,6 +351,7 @@ static int lua_crypto_verify(lua_State *L)
     const char *pk      = luaL_checklstring(L, 2, &pk_len);
     const char *data    = luaL_checklstring(L, 3, &data_len);
     const char *sig     = luaL_checklstring(L, 4, &sig_len);
+    crypto_charge(L, data_len);
 
     HlCryptoAsymAlg alg = hl_crypto_asym_alg_from_string(alg_str, alg_len);
     if (alg == HL_CRYPTO_ASYM_NONE)
@@ -371,6 +385,7 @@ static int lua_crypto_sign(lua_State *L)
     const char *alg_str = luaL_checklstring(L, 1, &alg_len);
     const char *pk      = luaL_checklstring(L, 2, &pk_len);
     const char *data    = luaL_checklstring(L, 3, &data_len);
+    crypto_charge(L, data_len);
 
     HlCryptoAsymAlg alg = hl_crypto_asym_alg_from_string(alg_str, alg_len);
     if (alg == HL_CRYPTO_ASYM_NONE)
@@ -457,6 +472,7 @@ static int lua_crypto_sha512(lua_State *L)
 {
     size_t len;
     const char *data = luaL_checklstring(L, 1, &len);
+    crypto_charge(L, len);
     uint8_t hash[64];
     if (hl_cap_crypto_sha512(data, len, hash) != 0)
         return luaL_error(L, "sha512 failed");
@@ -472,6 +488,7 @@ static int lua_crypto_auth(lua_State *L)
     size_t msg_len, key_len;
     const char *msg = luaL_checklstring(L, 1, &msg_len);
     const char *key = luaL_checklstring(L, 2, &key_len);
+    crypto_charge(L, msg_len);
     if (key_len != 32)
         return luaL_error(L, "auth: key must be 32 bytes");
     uint8_t tag[32];
@@ -488,6 +505,7 @@ static int lua_crypto_auth_verify(lua_State *L)
     const char *tag = luaL_checklstring(L, 1, &tag_len);
     const char *msg = luaL_checklstring(L, 2, &msg_len);
     const char *key = luaL_checklstring(L, 3, &key_len);
+    crypto_charge(L, msg_len);
     if (tag_len != 32)
         return luaL_error(L, "auth_verify: tag must be 32 bytes");
     if (key_len != 32)
@@ -673,6 +691,7 @@ static int lua_crypto_hmac_sha256(lua_State *L)
     size_t data_len, key_len;
     const char *data = luaL_checklstring(L, 1, &data_len);
     const char *key  = luaL_checklstring(L, 2, &key_len);
+    crypto_charge(L, data_len);
     if (key_len == 0)
         return luaL_error(L, "hmac_sha256: key must not be empty");
     uint8_t out[32];
@@ -691,6 +710,7 @@ static int lua_crypto_hmac_sha1(lua_State *L)
     size_t data_len, key_len;
     const char *data = luaL_checklstring(L, 1, &data_len);
     const char *key  = luaL_checklstring(L, 2, &key_len);
+    crypto_charge(L, data_len);
     if (key_len == 0)
         return luaL_error(L, "hmac_sha1: key must not be empty");
     uint8_t out[20];
@@ -709,6 +729,7 @@ static int lua_crypto_hmac_sha256_verify(lua_State *L)
     const char *data     = luaL_checklstring(L, 1, &data_len);
     const char *key      = luaL_checklstring(L, 2, &key_len);
     const char *expected = luaL_checklstring(L, 3, &expected_len);
+    crypto_charge(L, data_len);
     if (key_len == 0)
         return luaL_error(L, "hmac_sha256_verify: key must not be empty");
     if (expected_len != 32) {
@@ -780,6 +801,7 @@ static int lua_sha256_hasher_update(lua_State *L)
         return luaL_error(L, "sha256:update() after digest()");
     size_t len = 0;
     const char *data = luaL_checklstring(L, 2, &len);
+    crypto_charge(L, len);
     if (hl_cap_crypto_sha256_update(&h->ctx, data, len) != 0)
         return luaL_error(L, "sha256:update() failed");
     /* Return the hasher so calls can chain. */
@@ -807,7 +829,7 @@ static int lua_sha256_hasher_gc(lua_State *L)
      * contain partial input bytes. _final zeros the ctx on success;
      * do the same here for the abandoned-without-final path. */
     if (!h->done) secure_zero(&h->ctx, sizeof(h->ctx));
-    h->done = 1;   /* reached early (as a method), it ends the hasher */
+    h->done = 1;   /* nothing runs on it after this */
     return 0;
 }
 
@@ -820,11 +842,12 @@ static const luaL_Reg sha256_hasher_methods[] = {
 static void register_sha256_hasher_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_SHA256_HASHER_MT);
-    lua_pushvalue(L, -1);
+    luaL_newlib(L, sha256_hasher_methods);   /* methods apart from the mt */
     lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, sha256_hasher_methods, 0);
     lua_pushcfunction(L, lua_sha256_hasher_gc);
     lua_setfield(L, -2, "__gc");
+    lua_pushliteral(L, "locked");            /* app code gets no handle on it */
+    lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
 }
 
@@ -1230,6 +1253,7 @@ static int lua_crypto_poly1305(lua_State *L)
     size_t klen, len;
     const char *key = luaL_checklstring(L, 1, &klen);
     const char *msg = luaL_optlstring(L, 2, "", &len);
+    crypto_charge(L, len);
     if (klen != HL_POLY1305_KEY_LEN)
         return luaL_error(L, "crypto.poly1305: key must be %d bytes, got %d",
                           (int)HL_POLY1305_KEY_LEN, (int)klen);

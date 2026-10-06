@@ -642,25 +642,31 @@ static const luaL_Reg reader_methods[] = {
     {NULL, NULL}
 };
 
+/* Methods live in a table of their own and the metatables are locked: the
+ * metatable used to be its own __index, so app code could reach it through
+ * getmetatable(w) and replace `finalize` / `write` - which the stdlib calls
+ * (attachment.lua records the id finalize returns in _hull_* metadata). */
 static void register_writer_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_BLOB_WRITER_MT);
-    lua_pushvalue(L, -1);
+    luaL_newlib(L, writer_methods);
     lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, writer_methods, 0);
     lua_pushcfunction(L, lua_writer_gc);
     lua_setfield(L, -2, "__gc");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
 }
 
 static void register_reader_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_BLOB_READER_MT);
-    lua_pushvalue(L, -1);
+    luaL_newlib(L, reader_methods);
     lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, reader_methods, 0);
     lua_pushcfunction(L, lua_reader_gc);
     lua_setfield(L, -2, "__gc");
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
 }
 

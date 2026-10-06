@@ -136,6 +136,8 @@ LUA_API void lua_sethook (lua_State *L, lua_Hook func, int mask, int count) {
   L->hook = func;
   L->basehookcount = count;
   resethookcount(L);
+  L->hlbytes = 0;  /* HULL PATCH 0004: a new hook starts owing nothing */
+  L->hlowed = 0;
   L->hookmask = cast_byte(mask);
   if (mask)
     settraps(L->ci);  /* to trace inside 'luaV_execute' */

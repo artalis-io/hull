@@ -104,6 +104,8 @@ static int utflen (lua_State *L) {
                    "initial position out of bounds");
   luaL_argcheck(L, --posj < (lua_Integer)len, 3,
                    "final position out of bounds");
+  if (posi <= posj)  /* HULL PATCH 0004: a decode step per byte, as a match step */
+    lua_hlcharge(L, (size_t)(posj - posi + 1), 0);
   while (posi <= posj) {
     const char *s1 = utf8_decode(s + posi, NULL, !lax);
     if (s1 == NULL) {  /* conversion error? */

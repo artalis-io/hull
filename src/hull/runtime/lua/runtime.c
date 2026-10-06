@@ -311,6 +311,10 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         luaL_requiref(lua->L, LUA_COLIBNAME, luaopen_coroutine, 1);
         lua_pop(lua->L, 1);
         hl_lua_tool_register(lua->L, lua->tool_unveil_ctx);
+        /* Marks the tool VM: only it loads the CLI plugins (mod_fs.c). In
+         * the registry, which script cannot reach. */
+        lua_pushboolean(lua->L, 1);
+        lua_setfield(lua->L, LUA_REGISTRYINDEX, HL_LUA_TOOL_VM_KEY);
         hl_lua_tool_register_orchestration(lua->L);
     }
 
@@ -1157,6 +1161,11 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     return (status == LUA_OK) ? 0 : -1;
 }
 
+static void vt_lua_request_done(HlRuntime *rt, const KlHttpRequest *req)
+{
+    hl_lua_request_done((HlLua *)rt, req);
+}
+
 const HlRuntimeVtable hl_lua_vtable = {
     .init                = vt_lua_init,
     .load_app            = vt_lua_load_app,
@@ -1174,4 +1183,5 @@ const HlRuntimeVtable hl_lua_vtable = {
     .has_main            = vt_lua_has_main,
     .has_server_handlers = vt_lua_has_server_handlers,
     .run_main            = vt_lua_run_main,
+    .request_done        = vt_lua_request_done,
 };

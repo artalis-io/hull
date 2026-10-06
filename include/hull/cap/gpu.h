@@ -64,6 +64,10 @@ typedef enum {
 /* Fire-and-forget sentinel: skip readback when output_buffer == this */
 #define HL_GPU_OUTPUT_NONE      -1
 
+/* Ceiling on an app-supplied dispatch / pipeline `timeout` (ms). A sync
+ * dispatch waits on the event loop, outside the instruction budget. */
+#define HL_GPU_TIMEOUT_MAX_MS   60000
+
 #define HL_GPU_USAGE_READ       0x01
 #define HL_GPU_USAGE_WRITE      0x02
 #define HL_GPU_USAGE_READWRITE  0x03

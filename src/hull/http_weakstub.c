@@ -101,6 +101,11 @@ __attribute__((weak)) void hl_lua_timer_reschedule(struct HlLuaTimer *t)
 {
     (void)t;
 }
+
+__attribute__((weak)) void hl_lua_request_done(HlLua *lua, const KlHttpRequest *req)
+{
+    (void)lua; (void)req;
+}
 #endif /* HL_ENABLE_LUA */
 
 #ifdef HL_ENABLE_JS

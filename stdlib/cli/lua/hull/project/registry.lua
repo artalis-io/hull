@@ -62,10 +62,16 @@ function M.for_ext(ext)
     return r
 end
 
+-- The frontend modules this registry names: the only names M.load will require.
+local FRONTEND_MODULES = {}
+for _, row in pairs(FRONTENDS) do FRONTEND_MODULES[row.frontend_module] = true end
+
 -- Load (require) the frontend module for an analyzable row. Returns the frontend table,
--- or nil for a non-analyzable / unknown row.
+-- or nil for a non-analyzable / unknown row. The module name must be one of FRONTENDS':
+-- a row is caller data, and this require runs with the stdlib's identity.
 function M.load(row)
     if not (row and row.analyzable and row.frontend_module) then return nil end
+    if not FRONTEND_MODULES[row.frontend_module] then return nil end
     return require(row.frontend_module)
 end
 

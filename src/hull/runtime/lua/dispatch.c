@@ -47,6 +47,12 @@ void hl_lua_free_req_ctx(HlLua *lua, KlHttpRequest *req)
     hl_alloc_free(lua->base.alloc, rctx, sizeof(HlReqCtx));
 }
 
+void hl_lua_request_done(HlLua *lua, const KlHttpRequest *req)
+{
+    if (lua && lua->L && req)
+        hl_lua_req_ctx_drop(lua->L, req);
+}
+
 typedef struct {
     KlHttpRequest  *req;
     KlHttpResponse *res;

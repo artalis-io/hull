@@ -290,32 +290,32 @@ static int mp_part_read(lua_State *L);
 static int mp_part_read_continue(lua_State *L, int status, lua_KContext ctx);
 
 /* Shared drive loop for read(). Stack contract:
- *   in : Part at index 1, plus an optional pre-existing accumulator at -1
- *        (a Lua string from a previous park-yield-resume cycle).
+ *   in : Part at index 1, plus (only on a continuation) the accumulator at
+ *        index 2: a Lua string holding the bytes read before the park.
  *   out: pushes one result (the assembled Lua string) and returns 1, OR
- *        parks + yields (continuation re-enters this function).
+ *        parks + yields with exactly [Part, accumulator] on the stack
+ *        (continuation re-enters this function).
  *
- * `seed` (when non-NULL) is appended into the fresh buffer first, so the
- * resume path doesn't lose bytes accumulated before a yield.
- */
-static int mp_part_read_pump(lua_State *L)
+ * The accumulator is read BEFORE luaL_buffinit, which pushes a placeholder
+ * of its own: testing the top after it saw the placeholder, so each park
+ * dropped the bytes so far and left one more value on the stack. */
+static int mp_part_read_pump(lua_State *L, int resumed)
 {
     HlMpPart *p = check_part(L, 1);
     HlMpIter *it = p->iter;
 
     mp_check_usable(L, it);
 
+    int has_acc = resumed && lua_type(L, 2) == LUA_TSTRING;
+    lua_settop(L, has_acc ? 2 : 1);
+    luaL_checkstack(L, 4, "req:multipart()");
+
     luaL_Buffer b;
     luaL_buffinit(L, &b);
-
-    /* If we were resumed after a yield, the top of the stack is the
-     * partial accumulated string. Prepend it into the new buffer so
-     * we don't lose what we already collected. */
-    if (lua_type(L, -1) == LUA_TSTRING) {
+    if (has_acc) {
         size_t plen = 0;
-        const char *p_bytes = lua_tolstring(L, -1, &plen);
+        const char *p_bytes = lua_tolstring(L, 2, &plen);
         if (p_bytes && plen > 0) luaL_addlstring(&b, p_bytes, plen);
-        lua_pop(L, 1);
     }
 
     for (;;) {
@@ -346,8 +346,11 @@ static int mp_part_read_pump(lua_State *L)
         case KL_HTTP_MP_EVT_NEED_DATA:
             /* Stash the partial as a Lua string at the stack top so the
              * continuation can re-prepend it. luaL_Buffer is C-stack
-             * scoped and would lose its contents across the yield. */
+             * scoped and would lose its contents across the yield. The
+             * previous accumulator (index 2, below the buffer) goes once
+             * the new one is pushed, so a park leaves [Part, acc]. */
             luaL_pushresult(&b);
+            if (has_acc) lua_remove(L, 2);
             return mp_park_and_yield(L, it, mp_part_read_continue, 0);
         case KL_HTTP_MP_EVT_DONE:
             /* DONE mid-part is unexpected (the parser should emit
@@ -373,13 +376,13 @@ static int mp_part_read_pump(lua_State *L)
 
 static int mp_part_read(lua_State *L)
 {
-    return mp_part_read_pump(L);
+    return mp_part_read_pump(L, 0);
 }
 
 static int mp_part_read_continue(lua_State *L, int status, lua_KContext ctx)
 {
     (void)status; (void)ctx;
-    return mp_part_read_pump(L);
+    return mp_part_read_pump(L, 1);
 }
 
 /* part:chunks([min_bytes]) - returns a chunks iterator. min_bytes is

@@ -61,7 +61,11 @@ The patch counts work in the `MatchState`: one unit per `match()` call and
 per subject byte a single step scans - a single-char or class test (a
 `[set]` costs its length), a `%b` balance scan, a `%1` back-reference
 compare, and, for a plain `string.find` (no specials, or `plain = true`),
-the bytes each `lmemfind` candidate costs. Counting `match()` calls alone
+the bytes each `lmemfind` candidate costs, and the bytes of the final scan
+that finds nothing (round-7 audit M1: a miss on a 32 MB subject cost ~6
+instructions). What is left below one hook period when the call returns is
+charged to the thread through Patch 0004's `lua_hlcharge` (dropped, it made
+every call free up to 10000 units). Counting `match()` calls alone
 (round-5) charged `string.find(s, "%b()")` n units for O(n^2) bytes
 scanned, and a plain find nothing (round-6 audit M1). Every hook period of
 it (the count hook's own `lua_gethookcount`, captured when the state is
@@ -102,3 +106,56 @@ The patch sets `L->allowhook = 1` before the `__close` handlers run, the state
 a new thread starts in. The handlers already run under `luaD_closeprotected`,
 so a trip there is an ordinary error, and `coroutine.close`'s guard
 (runtime/lua/async.c) re-raises it.
+
+## Patch 0004 - charge work done inside one instruction
+
+**Files:** `vendor/lua/lstate.h` / `lstate.c` (`luaE_hlcharge`, `luaE_hlbytes`,
+the `hlbytes` / `hlowed` thread fields), `lapi.c` + `lua.h` (`lua_hlcharge`,
+`lua_hlwork`, `lua_hltakeowed`, `lua_rawequal`), `ldebug.c` (`lua_sethook`),
+`lmem.c`, `lvm.h` / `lvm.c`, `lstrlib.c`, `ltablib.c`, `lutf8lib.c`,
+`lbaselib.c`
+**Found by:** round-7 C audit (M1, M2)
+**Upstream:** Hull-specific.
+
+The count hook counts VM instructions, and some instructions do work
+proportional to their operands' size: a long-string `==` is a `memcmp`, a
+`..` / `string.rep` / `string.format` copies, `table.insert(t, 1, v)` shifts
+the whole array, `collectgarbage()` traverses the heap. Each cost one
+instruction, so `max_instructions` did not bound a run's wall time:
+
+```lua
+local a = string.rep("x", 3e7); local b = a:sub(1, -2) .. "x"
+while a == b do end               -- 2 instructions per 30 MB memcmp: ~a day
+table.move({}, 1, 1e15, 2)        -- 1e15 iterations in one instruction
+```
+
+The patch charges such work to the thread's count hook, in instruction
+equivalents:
+
+- **Deferred** (`luaE_hlcharge` / `luaE_hlbytes`, public `lua_hlcharge`):
+  the units come off `L->hookcount`, so the hook runs that much sooner - at
+  the very next instruction once they reach it - and what goes past it is
+  kept in `L->hlowed`, which the hook collects with `lua_hltakeowed` (Hull's
+  budget hook adds it to the run's count). No allocation, no error, so it is
+  safe anywhere, including inside the allocator and the VM. Bulk bytes
+  (`luaE_hlbytes`) cost one unit per 64 bytes. Charged: every block Lua
+  allocates or grows (`luaM_malloc_`, a growing `luaM_realloc_` - strings,
+  tables, buffers' results), the `memcmp` of a long-string equality
+  (`luaV_equalobj`, `OP_EQK`, `lua_rawequal`), a string `<` / `<=`, a
+  `collectgarbage("collect")` (the heap) or `("step", n)` (n KB), and a
+  `utf8.len` (one unit per byte decoded, as a match step).
+- **Checked** (`lua_hlwork`, from a C function only): the same charge, then
+  the count hook runs at once if it came due - for a library loop whose
+  length an argument or `__len` decides (`table.insert` / `table.remove`
+  shifts and `table.move`, charged per 1024 elements; `table.sort`, per
+  partition), which would otherwise only be stopped after it finished.
+
+`lua_sethook` clears both fields, so a re-armed hook starts owing nothing.
+A VM with no count hook (the tool VM, tests) behaves exactly as upstream.
+
+**Not covered:** a lookup of a long-string table key that equals the key in
+the table without being the same string object `memcmp`s in `ltable.c`,
+where no `lua_State` is at hand; and Hull's own C bindings charge what they
+allocate, plus, in `hull.crypto`, the bytes a digest / MAC / signature reads
+(`crypto_charge`, one unit per 8 bytes) - a binding that reads a large input
+and allocates little is otherwise charged one instruction.

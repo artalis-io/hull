@@ -78,17 +78,18 @@ static int l_tar_parse(lua_State *L)
      * unmapped under the parser) - or raise out of memory through the C
      * parser. The collector is stopped for the parse (an emergency collection
      * runs no finalizers either), and the parse runs under lua_pcall so the
-     * collector is always restarted. */
-    int gc_was_running = lua_gc(L, LUA_GCISRUNNING);
-    lua_gc(L, LUA_GCSTOP);
-
+     * collector is always restarted. It is stopped only once the buffer is
+     * resolved: lua_get_buffer can raise (a number converted to a string),
+     * which left the collector stopped for good. Nothing between here and
+     * the pcall allocates, so no GC step runs in between. */
     struct tar_parse_job j = { { 0 }, 0 };
     if (!lua_get_buffer(L, 1, &j.view)) {
-        if (gc_was_running) lua_gc(L, LUA_GCRESTART);
         lua_pushnil(L);
         lua_pushstring(L, "tar.parse: arg 1 must be a buffer (string/mmap/wasm)");
         return 2;
     }
+    int gc_was_running = lua_gc(L, LUA_GCISRUNNING);
+    lua_gc(L, LUA_GCSTOP);
     lua_pushcfunction(L, l_tar_parse_k);
     lua_pushlightuserdata(L, &j);
     int st = lua_pcall(L, 1, 1, 0);

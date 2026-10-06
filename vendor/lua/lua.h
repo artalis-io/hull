@@ -470,6 +470,14 @@ LUA_API lua_Hook (lua_gethook) (lua_State *L);
 LUA_API int (lua_gethookmask) (lua_State *L);
 LUA_API int (lua_gethookcount) (lua_State *L);
 
+/* HULL PATCH 0004 (docs/lua_patches.md): work done inside one instruction,
+** charged to the count hook ('units' instruction equivalents plus 'bytes'
+** of bulk work), and the part of it past the hook's count, collected by
+** the count hook itself. */
+LUA_API void (lua_hlcharge) (lua_State *L, size_t units, size_t bytes);
+LUA_API void (lua_hlwork) (lua_State *L, size_t units, size_t bytes);
+LUA_API size_t (lua_hltakeowed) (lua_State *L);
+
 LUA_API int (lua_setcstacklimit) (lua_State *L, unsigned int limit);
 
 struct lua_Debug {

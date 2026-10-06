@@ -67,15 +67,15 @@ static int accepts_gzip(KlHttpRequest *req)
     return star == 1;
 }
 
-void hl_maybe_compress(KlHttpRequest *req, KlHttpResponse *res,
-                       KlCompressConfig *cfg,
-                       const char *data, size_t len)
+int hl_maybe_compress(KlHttpRequest *req, KlHttpResponse *res,
+                      KlCompressConfig *cfg,
+                      const char *data, size_t len)
 {
     if (cfg && len >= HL_COMPRESS_MIN_SIZE && accepts_gzip(req)) {
         if (kl_http_response_body_compress(res, cfg, data, len) == 0)
-            return; /* success - body + Content-Encoding set */
+            return 0; /* success - body + Content-Encoding set */
     }
 
     /* Fallback: uncompressed */
-    kl_http_response_body_copy(res, data, len);
+    return kl_http_response_body_copy(res, data, len) == 0 ? 0 : -1;
 }

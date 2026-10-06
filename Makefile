@@ -1563,10 +1563,11 @@ IMAGE_WEAKSTUB_OBJ := $(BUILDDIR)/image_weakstub.o
 #                                 the user-facing surface.
 #
 # Both trees go through the same xxd pipeline and end up in
-# hl_stdlib_entries[]. The name-strip rule below makes
-# stdlib/cli/lua/hull/build.lua resolve as "hull.build" - same name
-# the C dispatcher and any cross-CLI require already use, so this is
-# a path move with no code change required.
+# hl_stdlib_lua_entries[]. A CLI plugin's entry is named "cli/<module>"
+# (stdlib/cli/lua/hull/build.lua -> "cli/hull.build"): only the tool VM
+# loads those, under the name without the prefix, so `require("hull.build")`
+# works in tool mode and an app can not load a CLI plugin at all (one
+# that ran with the stdlib's identity would lend it to app input).
 
 STDLIB_LUA_USER_FILES := $(shell find stdlib/lua -name '*.lua' -not -path '*/tests/*' 2>/dev/null)
 STDLIB_LUA_CLI_FILES  := $(shell find stdlib/cli/lua -name '*.lua' -not -path '*/tests/*' 2>/dev/null)
@@ -1824,9 +1825,14 @@ $(STDLIB_LUA_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) | $(BUILDDIR)
 	@echo "" >> $@
 	@echo "#include \"hull/entry.h\"" >> $@
 	@echo "const HlEntry hl_stdlib_lua_entries[] = {" >> $@
-	@( for f in $(STDLIB_LUA_FILES); do \
+	@( for f in $(STDLIB_LUA_USER_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
-		modname=$$(echo "$$f" | sed 's|^stdlib/lua/||; s|^stdlib/cli/lua/||; s|\.lua$$||; s|/|.|g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/lua/||; s|\.lua$$||; s|/|.|g'); \
+		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(STDLIB_LUA_CLI_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
+		modname=cli/$$(echo "$$f" | sed 's|^stdlib/cli/lua/||; s|\.lua$$||; s|/|.|g'); \
 		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
 	done ) | LC_ALL=C sort | cut -f2- >> $@
 	@echo "    { 0, 0, 0 }" >> $@

@@ -15,6 +15,8 @@
 #include "hull/runtime/test.h"
 #include "hull/runtime/lua.h"
 #include "hull/utils/alloc.h"
+#include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
+#include "internal.h"               /* HL_LUA_ARM, get_hl_lua_from_L */
 
 #include <keel/http_request.h>
 
@@ -410,8 +412,18 @@ void hl_lua_test_run(lua_State *L, int *total, int *passed, int *failed,
         return;
     }
 
+    HlLua *lua = get_hl_lua_from_L(L);
     int count = (int)luaL_len(L, -1);
     for (int i = 1; i <= count; i++) {
+        /* Each case is a run of its own, as each request is: the budget
+         * re-armed (one case that tripped the sticky limit failed every
+         * later case) and a transaction an earlier case left open rolled
+         * back, so the next case is not inside it (the JS harness does the
+         * same per case). */
+        if (lua) {
+            hl_db_registry_guard_stale_txns(lua->base.db_registry);
+            HL_LUA_ARM(lua, L);
+        }
         lua_rawgeti(L, -1, i);
 
         lua_getfield(L, -1, "desc");
@@ -451,6 +463,8 @@ void hl_lua_test_run(lua_State *L, int *total, int *passed, int *failed,
 
         lua_pop(L, 1); /* pop test case table */
     }
+    if (lua)
+        hl_db_registry_guard_stale_txns(lua->base.db_registry);
 
     lua_pop(L, 1); /* pop test cases table */
 }

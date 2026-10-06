@@ -65,7 +65,12 @@ static void budget_hook(lua_State *L, lua_Debug *ar)
     HlLuaBudget *b = budget_of(L);
     if (b && !b->tripped) {
         int count = lua_gethookcount(L);
-        b->used += count;
+        /* Plus the work charged past the hook's count (HULL PATCH 0004:
+         * a long-string compare, a big allocation, a table shift - work
+         * one instruction did; docs/lua_patches.md). */
+        size_t owed = lua_hltakeowed(L);
+        int64_t room = INT64_MAX - b->used - count;
+        b->used += count + (owed > (uint64_t)room ? room : (int64_t)owed);
         if (b->limit <= 0 || b->used < b->limit) {
             /* A thread that tripped in an earlier run still has the count-1
              * hook below; the next arm re-arms only its own entry thread.

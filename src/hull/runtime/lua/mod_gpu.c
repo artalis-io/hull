@@ -147,6 +147,16 @@ static void gpu_pin_view(lua_State *L, int anchor, int idx, HlBufferView *bv)
  * gpu.buffer_read(name) -> data, err
  * ════════════════════════════════════════════════════════════════════ */
 
+/* opts.timeout (ms) as a dispatch's timeout_ms: 0 (the backend default) for
+ * a non-positive or non-integer value, at most HL_GPU_TIMEOUT_MAX_MS. Cast
+ * straight to uint32_t, -1 waited ~49.7 days on the event loop. */
+static uint32_t gpu_timeout_arg(lua_State *L, int idx)
+{
+    lua_Integer t = lua_tointeger(L, idx);
+    if (t <= 0) return 0;
+    return t > HL_GPU_TIMEOUT_MAX_MS ? HL_GPU_TIMEOUT_MAX_MS : (uint32_t)t;
+}
+
 static HlGpuCtx *lua_get_gpu_ctx(lua_State *L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
@@ -342,7 +352,7 @@ static int l_gpu_dispatch(lua_State *L)
     /* Parse timeout */
     lua_getfield(L, 2, "timeout");
     if (!lua_isnil(L, -1))
-        opts.timeout_ms = (uint32_t)lua_tointeger(L, -1);
+        opts.timeout_ms = gpu_timeout_arg(L, -1);
     lua_pop(L, 1);
 
     /* buffer = true -> return WasmBuffer instead of string (zero-copy GPU->WASM) */
@@ -958,7 +968,7 @@ static int l_gpu_async_dispatch(lua_State *L)
 
     lua_getfield(L, 2, "timeout");
     if (!lua_isnil(L, -1))
-        opts.timeout_ms = (uint32_t)lua_tointeger(L, -1);
+        opts.timeout_ms = gpu_timeout_arg(L, -1);
     lua_pop(L, 1);
 
     /* Every copy below is owned by `tmp` until the op takes it. */
@@ -1307,7 +1317,7 @@ static int l_gpu_pipeline(lua_State *L)
         lua_pop(L, 1);
         lua_getfield(L, 2, "timeout");
         if (!lua_isnil(L, -1))
-            pipe_timeout_ms = (uint32_t)lua_tointeger(L, -1);
+            pipe_timeout_ms = gpu_timeout_arg(L, -1);
         lua_pop(L, 1);
     }
 
@@ -1463,7 +1473,7 @@ static int l_gpu_async_pipeline(lua_State *L)
         lua_pop(L, 1);
         lua_getfield(L, 2, "timeout");
         if (!lua_isnil(L, -1))
-            pipe_timeout_ms = (uint32_t)lua_tointeger(L, -1);
+            pipe_timeout_ms = gpu_timeout_arg(L, -1);
         lua_pop(L, 1);
     }
 

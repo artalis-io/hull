@@ -152,9 +152,10 @@ static int lua_res_json(lua_State *L)
         return luaL_error(L, "res:json - json.encode did not return a string");
     }
     kl_http_response_header(res, "Content-Type", "application/json");
-    hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
-                      hlua ? hlua->base.compress : NULL,
-                      json_str, json_len);
+    if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
+                          hlua ? hlua->base.compress : NULL,
+                          json_str, json_len) != 0)
+        return luaL_error(L, "res:json: out of memory");
     lua_pop(L, 1); /* pop JSON string */
     lua_pop(L, 1); /* pop json table */
 
@@ -177,9 +178,10 @@ static int lua_res_html(lua_State *L)
         !hl_response_has_header(res, "Content-Security-Policy"))
         kl_http_response_header(res, "Content-Security-Policy",
                            hlua->base.csp_policy);
-    hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
-                      hlua ? hlua->base.compress : NULL,
-                      html, len);
+    if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
+                          hlua ? hlua->base.compress : NULL,
+                          html, len) != 0)
+        return luaL_error(L, "res:html: out of memory");
     return 0;
 }
 
@@ -191,9 +193,10 @@ static int lua_res_text(lua_State *L)
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
     kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
-    hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
-                      hlua ? hlua->base.compress : NULL,
-                      text, len);
+    if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
+                          hlua ? hlua->base.compress : NULL,
+                          text, len) != 0)
+        return luaL_error(L, "res:text: out of memory");
     return 0;
 }
 
@@ -256,6 +259,12 @@ static void ensure_response_metatable(lua_State *L)
         lua_setfield(L, -2, "__index");
         lua_pushcfunction(L, lua_res_gc);
         lua_setfield(L, -2, "__gc");
+        /* Locked: Lua decides finalization when the metatable is set, so
+         * `getmetatable(res).__gc = nil` made every later res unfinalized
+         * (one HlReqLife leaked per request), and the methods table the
+         * stdlib calls was the app's to rewrite. */
+        lua_pushliteral(L, "locked");
+        lua_setfield(L, -2, "__metatable");
     }
     lua_pop(L, 1); /* pop metatable */
 }

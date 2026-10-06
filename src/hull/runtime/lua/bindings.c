@@ -44,10 +44,14 @@
  * body never arrived - Keel reset req->ctx and the ref was pinned for good,
  * so a stream of requests rejected by an auth middleware grew the heap to
  * its limit. The handler's entry drops the entry (its req table holds ctx
- * from then on), and so do a short-circuit and a middleware error. A request
- * that ends any other way leaves its entry behind, but the next request on
- * the same connection (the same KlHttpRequest) overwrites it, so what is
- * left over is bounded by the connection pool, not by the request count. */
+ * from then on), and so do a short-circuit, a middleware error and the
+ * response being sent (hl_lua_request_done, Keel's access-log hook: the
+ * 404 / 405 Keel answers after a passing middleware never reaches a
+ * handler). A request that ends with no response sent - a 413 / 415 Keel
+ * writes raw, a WebSocket upgrade, a client gone mid-body - leaves its entry
+ * until the next request on the same connection slot (the same
+ * KlHttpRequest) replaces it: bounded by the connection pool, not by the
+ * request count. */
 const char hl_lua_req_ctx_key = 0;
 HlReqCtx   hl_lua_req_ctx_marker = { .kind = HL_REQCTX_LUA_REF };
 
@@ -66,7 +70,7 @@ void hl_lua_req_ctx_store(lua_State *L, KlHttpRequest *req, int idx)
     lua_pop(L, 1);
 }
 
-void hl_lua_req_ctx_drop(lua_State *L, KlHttpRequest *req)
+void hl_lua_req_ctx_drop(lua_State *L, const KlHttpRequest *req)
 {
     /* Never raises: only an existing key is set (to nil), which does not
      * allocate. */

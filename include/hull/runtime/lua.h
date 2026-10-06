@@ -321,6 +321,14 @@ int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
                                void *(*alloc_fn)(size_t));
 
 /*
+ * The request's response has been sent (HlRuntimeVtable.request_done):
+ * drop the req.ctx a middleware kept for it, if it is still kept (a 404 /
+ * 405 after a passing middleware never reaches the handler that takes it).
+ * Never raises.
+ */
+void hl_lua_request_done(HlLua *lua, const KlHttpRequest *req);
+
+/*
  * Dispatch a middleware call to the Lua handler.
  * Returns 0 (continue), positive (short-circuit), or -1 (error).
  */
