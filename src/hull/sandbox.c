@@ -158,7 +158,9 @@ int hl_sandbox_resolve_grant(const char *app_dir, const char *relpath,
     }
     int is_glob = lit < jlen;
     int is_dir = !is_glob && jlen > 0 && joined[jlen - 1] == '/';
-    char buf[SANDBOX_PATH_MAX];
+    /* Zeroed: only buf[0..lit] is written below, and the symlink walk reads
+     * up to strlen(buf), which the analyzer cannot tie to that prefix. */
+    char buf[SANDBOX_PATH_MAX] = { 0 };
     if (lit >= sizeof(buf)) return -1;
     memcpy(buf, joined, lit);
     buf[lit] = '\0';
