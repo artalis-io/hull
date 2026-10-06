@@ -482,6 +482,12 @@ static void *resizebox (lua_State *L, int idx, size_t newsize) {
     lua_pushliteral(L, "not enough memory");
     lua_error(L);  /* raise a memory error */
   }
+  /* HULL PATCH 0004 (docs/lua_patches.md): the box is allocated outside
+  ** the core's allocator, so charge its growth here; a buffer filled and
+  ** then dropped by an error ('table.concat' of a big string followed by
+  ** a bad value) was never charged, only a pushed result was */
+  if (newsize > box->bsize)
+    lua_hlcharge(L, 0, newsize);
   box->box = temp;
   box->bsize = newsize;
   return temp;

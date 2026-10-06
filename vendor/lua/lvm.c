@@ -87,12 +87,15 @@
 ** are disabled via macro 'cvt2num'), do not modify 'result'
 ** and return 0.
 */
-static int l_strton (const TValue *obj, TValue *result) {
+static int l_strton (lua_State *L, const TValue *obj, TValue *result) {
   lua_assert(obj != result);
   if (!cvt2num(obj))  /* is object not a string? */
     return 0;
   else {
     TString *st = tsvalue(obj);
+    /* HULL PATCH 0004 (docs/lua_patches.md): the conversion scans the
+    ** whole string (spaces, digits, 'strtod'), a step per byte */
+    luaE_hlcharge(L, tsslen(st));
     return (luaO_str2num(getstr(st), result) == tsslen(st) + 1);
   }
 }
@@ -102,13 +105,13 @@ static int l_strton (const TValue *obj, TValue *result) {
 ** Try to convert a value to a float. The float case is already handled
 ** by the macro 'tonumber'.
 */
-int luaV_tonumber_ (const TValue *obj, lua_Number *n) {
+int luaV_tonumber_ (lua_State *L, const TValue *obj, lua_Number *n) {
   TValue v;
   if (ttisinteger(obj)) {
     *n = cast_num(ivalue(obj));
     return 1;
   }
-  else if (l_strton(obj, &v)) {  /* string coercible to number? */
+  else if (l_strton(L, obj, &v)) {  /* string coercible to number? */
     *n = nvalue(&v);  /* convert result of 'luaO_str2num' to a float */
     return 1;
   }
@@ -151,9 +154,10 @@ int luaV_tointegerns (const TValue *obj, lua_Integer *p, F2Imod mode) {
 /*
 ** try to convert a value to an integer.
 */
-int luaV_tointeger (const TValue *obj, lua_Integer *p, F2Imod mode) {
+int luaV_tointeger (lua_State *L, const TValue *obj, lua_Integer *p,
+                    F2Imod mode) {
   TValue v;
-  if (l_strton(obj, &v))  /* does 'obj' point to a numerical string? */
+  if (l_strton(L, obj, &v))  /* does 'obj' point to a numerical string? */
     obj = &v;  /* change it to point to its corresponding number */
   return luaV_tointegerns(obj, p, mode);
 }
@@ -177,7 +181,7 @@ int luaV_tointeger (const TValue *obj, lua_Integer *p, F2Imod mode) {
 */
 static int forlimit (lua_State *L, lua_Integer init, const TValue *lim,
                                    lua_Integer *p, lua_Integer step) {
-  if (!luaV_tointeger(lim, p, (step < 0 ? F2Iceil : F2Ifloor))) {
+  if (!luaV_tointeger(L, lim, p, (step < 0 ? F2Iceil : F2Ifloor))) {
     /* not coercible to in integer */
     lua_Number flim;  /* try to convert to float */
     if (!tonumber(lim, &flim)) /* cannot convert to float? */
@@ -312,7 +316,7 @@ void luaV_finishget (lua_State *L, const TValue *t, TValue *key, StkId val,
       return;
     }
     t = tm;  /* else try to access 'tm[key]' */
-    if (luaV_fastget(L, t, key, slot, luaH_get)) {  /* fast track? */
+    if (luaV_fastgetL(L, t, key, slot)) {  /* fast track? (HULL PATCH 0004) */
       setobj2s(L, val, slot);  /* done */
       return;
     }
@@ -357,7 +361,7 @@ void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
       return;
     }
     t = tm;  /* else repeat assignment over 'tm' */
-    if (luaV_fastget(L, t, key, slot, luaH_get)) {
+    if (luaV_fastgetL(L, t, key, slot)) {  /* HULL PATCH 0004 */
       luaV_finishfastset(L, t, slot, val);
       return;  /* done */
     }
@@ -375,18 +379,36 @@ void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
 ** of the strings. Note that segments can compare equal but still
 ** have different lengths.
 */
-static int l_strcmp (const TString *ts1, const TString *ts2) {
+/*
+** HULL PATCH 0004 (docs/lua_patches.md): the bytes compared are charged to
+** 'L' - the common prefix of the segment that decided, found 64 bytes at a
+** time, plus each whole segment that compared equal. Charging the left
+** operand's length made 'big < "a"' (one byte compared) cost len/64.
+*/
+#define HL_CMP_BLOCK	64
+
+static size_t hl_prefixlen (const char *s1, const char *s2, size_t n) {
+  size_t k = 0;
+  while (n - k >= HL_CMP_BLOCK && memcmp(s1 + k, s2 + k, HL_CMP_BLOCK) == 0)
+    k += HL_CMP_BLOCK;
+  return (n - k < HL_CMP_BLOCK) ? n : k + HL_CMP_BLOCK;
+}
+
+static int l_strcmp (lua_State *L, const TString *ts1, const TString *ts2) {
   const char *s1 = getstr(ts1);
   size_t rl1 = tsslen(ts1);  /* real length */
   const char *s2 = getstr(ts2);
   size_t rl2 = tsslen(ts2);
   for (;;) {  /* for each segment */
     int temp = strcoll(s1, s2);
-    if (temp != 0)  /* not equal? */
+    if (temp != 0) {  /* not equal? */
+      luaE_hlbytes(L, hl_prefixlen(s1, s2, (rl1 < rl2) ? rl1 : rl2));
       return temp;  /* done */
+    }
     else {  /* strings are equal up to a '\0' */
       size_t zl1 = strlen(s1);  /* index of first '\0' in 's1' */
       size_t zl2 = strlen(s2);  /* index of first '\0' in 's2' */
+      luaE_hlbytes(L, zl1 + 1);  /* HULL PATCH 0004: an equal segment */
       if (zl2 == rl2)  /* 's2' is finished? */
         return (zl1 == rl1) ? 0 : 1;  /* check 's1' */
       else if (zl1 == rl1)  /* 's1' is finished? */
@@ -523,10 +545,8 @@ l_sinline int LEnum (const TValue *l, const TValue *r) {
 */
 static int lessthanothers (lua_State *L, const TValue *l, const TValue *r) {
   lua_assert(!ttisnumber(l) || !ttisnumber(r));
-  if (ttisstring(l) && ttisstring(r)) {  /* both are strings? */
-    luaE_hlbytes(L, tsslen(tsvalue(l)));  /* HULL PATCH 0004: the compare */
-    return l_strcmp(tsvalue(l), tsvalue(r)) < 0;
-  }
+  if (ttisstring(l) && ttisstring(r))  /* both are strings? */
+    return l_strcmp(L, tsvalue(l), tsvalue(r)) < 0;  /* HULL PATCH 0004 */
   else
     return luaT_callorderTM(L, l, r, TM_LT);
 }
@@ -547,10 +567,8 @@ int luaV_lessthan (lua_State *L, const TValue *l, const TValue *r) {
 */
 static int lessequalothers (lua_State *L, const TValue *l, const TValue *r) {
   lua_assert(!ttisnumber(l) || !ttisnumber(r));
-  if (ttisstring(l) && ttisstring(r)) {  /* both are strings? */
-    luaE_hlbytes(L, tsslen(tsvalue(l)));  /* HULL PATCH 0004: the compare */
-    return l_strcmp(tsvalue(l), tsvalue(r)) <= 0;
-  }
+  if (ttisstring(l) && ttisstring(r))  /* both are strings? */
+    return l_strcmp(L, tsvalue(l), tsvalue(r)) <= 0;  /* HULL PATCH 0004 */
   else
     return luaT_callorderTM(L, l, r, TM_LE);
 }
@@ -1274,7 +1292,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         lua_Unsigned n;
         if (ttisinteger(rc)  /* fast track for integers? */
             ? (cast_void(n = ivalue(rc)), luaV_fastgeti(L, rb, n, slot))
-            : luaV_fastget(L, rb, rc, slot, luaH_get)) {
+            : luaV_fastgetL(L, rb, rc, slot)) {  /* HULL PATCH 0004 */
           setobj2s(L, ra, slot);
         }
         else
@@ -1330,7 +1348,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         lua_Unsigned n;
         if (ttisinteger(rb)  /* fast track for integers? */
             ? (cast_void(n = ivalue(rb)), luaV_fastgeti(L, s2v(ra), n, slot))
-            : luaV_fastget(L, s2v(ra), rb, slot, luaH_get)) {
+            : luaV_fastgetL(L, s2v(ra), rb, slot)) {  /* HULL PATCH 0004 */
           luaV_finishfastset(L, s2v(ra), slot, rc);
         }
         else
@@ -1388,10 +1406,9 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         StkId ra = RA(i);
         const TValue *slot;
         TValue *rb = vRB(i);
-        TValue *rc = RKC(i);
-        TString *key = tsvalue(rc);  /* key must be a string */
+        TValue *rc = RKC(i);  /* key must be a string */
         setobj2s(L, ra + 1, rb);
-        if (luaV_fastget(L, rb, key, slot, luaH_getstr)) {
+        if (luaV_fastgetL(L, rb, rc, slot)) {  /* HULL PATCH 0004 */
           setobj2s(L, ra, slot);
         }
         else

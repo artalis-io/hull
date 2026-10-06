@@ -49,7 +49,7 @@ typedef enum {
 
 /* convert an object to a float (including string coercion) */
 #define tonumber(o,n) \
-	(ttisfloat(o) ? (*(n) = fltvalue(o), 1) : luaV_tonumber_(o,n))
+	(ttisfloat(o) ? (*(n) = fltvalue(o), 1) : luaV_tonumber_(L,o,n))
 
 
 /* convert an object to a float (without string coercion) */
@@ -61,7 +61,7 @@ typedef enum {
 /* convert an object to an integer (including string coercion) */
 #define tointeger(o,i) \
   (l_likely(ttisinteger(o)) ? (*(i) = ivalue(o), 1) \
-                          : luaV_tointeger(o,i,LUA_FLOORN2I))
+                          : luaV_tointeger(L,o,i,LUA_FLOORN2I))
 
 
 /* convert an object to an integer (without string coercion) */
@@ -100,6 +100,17 @@ typedef enum {
 
 
 /*
+** HULL PATCH 0004 (docs/lua_patches.md): 'luaV_fastget' with 'luaH_getL',
+** which charges 'L' for the memcmp of a long-string key.
+*/
+#define luaV_fastgetL(L,t,k,slot) \
+  (!ttistable(t)  \
+   ? (slot = NULL, 0)  \
+   : (slot = luaH_getL(L, hvalue(t), k),  \
+      !isempty(slot)))
+
+
+/*
 ** Special case of 'luaV_fastget' for integers, inlining the fast case
 ** of 'luaH_getint'.
 */
@@ -130,8 +141,10 @@ typedef enum {
 LUAI_FUNC int luaV_equalobj (lua_State *L, const TValue *t1, const TValue *t2);
 LUAI_FUNC int luaV_lessthan (lua_State *L, const TValue *l, const TValue *r);
 LUAI_FUNC int luaV_lessequal (lua_State *L, const TValue *l, const TValue *r);
-LUAI_FUNC int luaV_tonumber_ (const TValue *obj, lua_Number *n);
-LUAI_FUNC int luaV_tointeger (const TValue *obj, lua_Integer *p, F2Imod mode);
+/* HULL PATCH 0004: 'L' is charged for the string a coercion scans */
+LUAI_FUNC int luaV_tonumber_ (lua_State *L, const TValue *obj, lua_Number *n);
+LUAI_FUNC int luaV_tointeger (lua_State *L, const TValue *obj, lua_Integer *p,
+                              F2Imod mode);
 LUAI_FUNC int luaV_tointegerns (const TValue *obj, lua_Integer *p,
                                 F2Imod mode);
 LUAI_FUNC int luaV_flttointeger (lua_Number n, lua_Integer *p, F2Imod mode);

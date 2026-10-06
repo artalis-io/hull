@@ -152,7 +152,10 @@ static int str_rep (lua_State *L) {
   const char *s = luaL_checklstring(L, 1, &l);
   lua_Integer n = luaL_checkinteger(L, 2);
   const char *sep = luaL_optlstring(L, 3, "", &lsep);
-  if (n <= 0)
+  /* HULL PATCH 0004 (docs/lua_patches.md): 'string.rep("", 1e18)' ran
+  ** its copy loop 1e18 times within one instruction; an empty result
+  ** needs no loop, and every other copy is charged */
+  if (n <= 0 || l + lsep == 0)
     lua_pushliteral(L, "");
   else if (l_unlikely(l + lsep < l || l + lsep > MAXSIZE / n))
     return luaL_error(L, "resulting string too large");
@@ -160,6 +163,7 @@ static int str_rep (lua_State *L) {
     size_t totallen = (size_t)n * l + (size_t)(n - 1) * lsep;
     luaL_Buffer b;
     char *p = luaL_buffinitsize(L, &b, totallen);
+    lua_hlwork(L, (size_t)n, 0);  /* HULL PATCH 0004: a unit per copy */
     while (n-- > 1) {  /* first n-1 copies (followed by separator) */
       memcpy(p, s, l * sizeof(char)); p += l;
       if (lsep > 0) {  /* empty 'memcpy' is not that cheap */
@@ -186,6 +190,7 @@ static int str_byte (lua_State *L) {
     return luaL_error(L, "string slice too long");
   n = (int)(pose -  posi) + 1;
   luaL_checkstack(L, n, "string slice too long");
+  lua_hlwork(L, (size_t)n, 0);  /* HULL PATCH 0004: a unit per value */
   for (i=0; i<n; i++)
     lua_pushinteger(L, uchar(s[posi+i-1]));
   return n;
@@ -1678,10 +1683,12 @@ static void copywithendian (char *dest, const char *src,
 static int str_pack (lua_State *L) {
   luaL_Buffer b;
   Header h;
-  const char *fmt = luaL_checkstring(L, 1);  /* format string */
+  size_t lfmt;
+  const char *fmt = luaL_checklstring(L, 1, &lfmt);  /* format string */
   int arg = 1;  /* current argument to pack */
   size_t totalsize = 0;  /* accumulate total size of result */
   initheader(L, &h);
+  lua_hlwork(L, lfmt, 0);  /* HULL PATCH 0004: a unit per format byte */
   lua_pushnil(L);  /* mark to separate arguments from string buffer */
   luaL_buffinit(L, &b);
   while (*fmt != '\0') {
@@ -1776,9 +1783,11 @@ static int str_pack (lua_State *L) {
 
 static int str_packsize (lua_State *L) {
   Header h;
-  const char *fmt = luaL_checkstring(L, 1);  /* format string */
+  size_t lfmt;
+  const char *fmt = luaL_checklstring(L, 1, &lfmt);  /* format string */
   size_t totalsize = 0;  /* accumulate total size of result */
   initheader(L, &h);
+  lua_hlwork(L, lfmt, 0);  /* HULL PATCH 0004: a unit per format byte */
   while (*fmt != '\0') {
     int size, ntoalign;
     KOption opt = getdetails(&h, totalsize, &fmt, &size, &ntoalign);
@@ -1830,13 +1839,15 @@ static lua_Integer unpackint (lua_State *L, const char *str,
 
 static int str_unpack (lua_State *L) {
   Header h;
-  const char *fmt = luaL_checkstring(L, 1);
+  size_t lfmt;
+  const char *fmt = luaL_checklstring(L, 1, &lfmt);
   size_t ld;
   const char *data = luaL_checklstring(L, 2, &ld);
   size_t pos = posrelatI(luaL_optinteger(L, 3, 1), ld) - 1;
   int n = 0;  /* number of results */
   luaL_argcheck(L, pos <= ld, 3, "initial position out of string");
   initheader(L, &h);
+  lua_hlwork(L, lfmt, 0);  /* HULL PATCH 0004: a unit per format byte */
   while (*fmt != '\0') {
     int size, ntoalign;
     KOption opt = getdetails(&h, pos, &fmt, &size, &ntoalign);

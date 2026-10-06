@@ -402,6 +402,8 @@ LUA_API int lua_compare (lua_State *L, int index1, int index2, int op) {
 
 LUA_API size_t lua_stringtonumber (lua_State *L, const char *s) {
   size_t sz = luaO_str2num(s, s2v(L->top.p));
+  /* HULL PATCH 0004 (docs/lua_patches.md): a step per byte scanned */
+  luaE_hlcharge(L, (sz != 0) ? sz : strlen(s) + 1);
   if (sz != 0)
     api_incr_top(L);
   return sz;
@@ -708,7 +710,7 @@ LUA_API int lua_gettable (lua_State *L, int idx) {
   TValue *t;
   lua_lock(L);
   t = index2value(L, idx);
-  if (luaV_fastget(L, t, s2v(L->top.p - 1), slot, luaH_get)) {
+  if (luaV_fastgetL(L, t, s2v(L->top.p - 1), slot)) {  /* HULL PATCH 0004 */
     setobj2s(L, L->top.p - 1, slot);
   }
   else
@@ -767,7 +769,7 @@ LUA_API int lua_rawget (lua_State *L, int idx) {
   lua_lock(L);
   api_checknelems(L, 1);
   t = gettable(L, idx);
-  val = luaH_get(t, s2v(L->top.p - 1));
+  val = luaH_getL(L, t, s2v(L->top.p - 1));  /* HULL PATCH 0004 */
   L->top.p--;  /* remove key */
   return finishrawget(L, val);
 }
@@ -890,7 +892,7 @@ LUA_API void lua_settable (lua_State *L, int idx) {
   lua_lock(L);
   api_checknelems(L, 2);
   t = index2value(L, idx);
-  if (luaV_fastget(L, t, s2v(L->top.p - 2), slot, luaH_get)) {
+  if (luaV_fastgetL(L, t, s2v(L->top.p - 2), slot)) {  /* HULL PATCH 0004 */
     luaV_finishfastset(L, t, slot, s2v(L->top.p - 1));
   }
   else

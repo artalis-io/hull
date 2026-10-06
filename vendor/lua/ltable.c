@@ -213,7 +213,8 @@ l_sinline Node *mainpositionfromnode (const Table *t, Node *nd) {
 ** positive does not break anything.  (In particular, 'next' will return
 ** some other valid item on the table or nil.)
 */
-static int equalkey (const TValue *k1, const Node *n2, int deadok) {
+static int equalkey (lua_State *L, const TValue *k1, const Node *n2,
+                     int deadok) {
   if ((rawtt(k1) != keytt(n2)) &&  /* not the same variants? */
        !(deadok && keyisdead(n2) && iscollectable(k1)))
    return 0;  /* cannot be same key */
@@ -228,8 +229,14 @@ static int equalkey (const TValue *k1, const Node *n2, int deadok) {
       return pvalue(k1) == pvalueraw(keyval(n2));
     case LUA_VLCF:
       return fvalue(k1) == fvalueraw(keyval(n2));
-    case ctb(LUA_VLNGSTR):
-      return luaS_eqlngstr(tsvalue(k1), keystrval(n2));
+    case ctb(LUA_VLNGSTR): {
+      /* HULL PATCH 0004 (docs/lua_patches.md): the memcmp of two distinct
+      ** long strings of one length, charged when a thread is at hand */
+      TString *a = tsvalue(k1), *b = keystrval(n2);
+      if (L != NULL && a != b && a->u.lnglen == b->u.lnglen)
+        luaE_hlbytes(L, a->u.lnglen);
+      return luaS_eqlngstr(a, b);
+    }
     default:
       return gcvalue(k1) == gcvalueraw(keyval(n2));
   }
@@ -296,10 +303,11 @@ static unsigned int setlimittosize (Table *t) {
 ** which may be in array part, nor for floats with integral values.)
 ** See explanation about 'deadok' in function 'equalkey'.
 */
-static const TValue *getgeneric (Table *t, const TValue *key, int deadok) {
+static const TValue *getgeneric (lua_State *L, Table *t, const TValue *key,
+                                 int deadok) {
   Node *n = mainpositionTV(t, key);
   for (;;) {  /* check whether 'key' is somewhere in the chain */
-    if (equalkey(key, n, deadok))
+    if (equalkey(L, key, n, deadok))
       return gval(n);  /* that's it */
     else {
       int nx = gnext(n);
@@ -336,7 +344,7 @@ static unsigned int findindex (lua_State *L, Table *t, TValue *key,
   if (i - 1u < asize)  /* is 'key' inside array part? */
     return i;  /* yes; that's the index */
   else {
-    const TValue *n = getgeneric(t, key, 1);
+    const TValue *n = getgeneric(L, t, key, 1);  /* HULL PATCH 0004 */
     if (l_unlikely(isabstkey(n)))
       luaG_runerror(L, "invalid key to 'next'");  /* key not found */
     i = cast_int(nodefromval(n) - gnode(t, 0));  /* key index in hash table */
@@ -346,24 +354,37 @@ static unsigned int findindex (lua_State *L, Table *t, TValue *key,
 }
 
 
+/*
+** HULL PATCH 0004 (docs/lua_patches.md): the empty slots a 'next' steps
+** over are charged as bytes scanned. A table whose entries were removed
+** keeps its size, and each 'next' on it scanned the whole of it inside
+** one instruction.
+*/
 int luaH_next (lua_State *L, Table *t, StkId key) {
   unsigned int asize = luaH_realasize(t);
   unsigned int i = findindex(L, t, s2v(key), asize);  /* find original key */
+  unsigned int i0 = i;
   for (; i < asize; i++) {  /* try first array part */
     if (!isempty(&t->array[i])) {  /* a non-empty entry? */
+      luaE_hlbytes(L, cast_sizet(i - i0) * sizeof(TValue));
       setivalue(s2v(key), i + 1);
       setobj2s(L, key + 1, &t->array[i]);
       return 1;
     }
   }
+  if (i > i0)
+    luaE_hlbytes(L, cast_sizet(i - i0) * sizeof(TValue));
+  i0 = i - asize;
   for (i -= asize; cast_int(i) < sizenode(t); i++) {  /* hash part */
     if (!isempty(gval(gnode(t, i)))) {  /* a non-empty entry? */
       Node *n = gnode(t, i);
+      luaE_hlbytes(L, cast_sizet(i - i0) * sizeof(Node));
       getnodekey(L, s2v(key), n);
       setobj2s(L, key + 1, gval(n));
       return 1;
     }
   }
+  luaE_hlbytes(L, cast_sizet(i - i0) * sizeof(Node));
   return 0;  /* no more elements */
 }
 
@@ -792,8 +813,21 @@ const TValue *luaH_getstr (Table *t, TString *key) {
   else {  /* for long strings, use generic case */
     TValue ko;
     setsvalue(cast(lua_State *, NULL), &ko, key);
-    return getgeneric(t, &ko, 0);
+    return getgeneric(NULL, t, &ko, 0);
   }
+}
+
+
+/*
+** HULL PATCH 0004 (docs/lua_patches.md): 'luaH_get' for a caller with a
+** thread, which pays for the memcmp a long-string key costs when it
+** equals a key in the table without being the same string object. The
+** VM and the API use it for keys a script chooses.
+*/
+const TValue *luaH_getL (lua_State *L, Table *t, const TValue *key) {
+  if (ttislngstring(key))
+    return getgeneric(L, t, key, 0);
+  return luaH_get(t, key);
 }
 
 
@@ -812,7 +846,7 @@ const TValue *luaH_get (Table *t, const TValue *key) {
       /* else... */
     }  /* FALLTHROUGH */
     default:
-      return getgeneric(t, key, 0);
+      return getgeneric(NULL, t, key, 0);
   }
 }
 
@@ -837,7 +871,7 @@ void luaH_finishset (lua_State *L, Table *t, const TValue *key,
 ** barrier and invalidate the TM cache.
 */
 void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
-  const TValue *slot = luaH_get(t, key);
+  const TValue *slot = luaH_getL(L, t, key);  /* HULL PATCH 0004 */
   luaH_finishset(L, t, key, slot, value);
 }
 

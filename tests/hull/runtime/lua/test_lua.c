@@ -8040,6 +8040,34 @@ static int limited_run_global(const char *code, const char *second,
     return rc;
 }
 
+/* `setup` with no limit (building large test values is not what is
+ * measured), then `code` as one run under the 100000 limit. */
+static int limited_run_after(const char *setup, const char *code,
+                             char *errbuf, size_t n)
+{
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 100000;
+    HlLua lim;
+    memset(&lim, 0, sizeof lim);
+    if (hl_lua_init(&lim, &cfg) != 0) return -100;
+    lim.max_instructions = 0;
+    HL_LUA_ARM(&lim, lim.L);
+    int rc = luaL_dostring(lim.L, setup);
+    errbuf[0] = '\0';
+    if (rc == LUA_OK) {
+        lua_settop(lim.L, 0);
+        lim.max_instructions = 100000;
+        HL_LUA_ARM(&lim, lim.L);
+        rc = luaL_dostring(lim.L, code);
+    }
+    if (rc != LUA_OK) {
+        const char *e = lua_tostring(lim.L, -1);
+        snprintf(errbuf, n, "%s", e ? e : "");
+    }
+    hl_lua_free(&lim);
+    return rc;
+}
+
 /* H1: the trip is raised from inside the count hook, where every hook is
  * off. luaL_error allocated there, and a GC step it took ran pending
  * finalizers with no metering. A finalizer that finishes its 300000-step
@@ -8191,10 +8219,214 @@ UTEST(lua_audit7, work_inside_an_instruction_hits_the_limit)
 UTEST(lua_audit7, work_past_the_hook_count_is_collected)
 {
     char err[512];
-    /* 2 x ~15600 units of compare per iteration, 5 iterations: ~156000 */
-    int rc = limited_run(
-        "local a = string.rep('x', 1000000) local b = a:sub(1, -2) .. 'x' "
-        "for i = 1, 5 do local _ = (a == b) local _ = (a == b) end return 1",
+    /* 2 x ~15600 units of compare per iteration, 5 iterations: ~156000
+     * (the strings are built set up first, unmetered) */
+    int rc = limited_run_after(
+        "A = string.rep('x', 1000000) B = A:sub(1, -2) .. 'x'",
+        "for i = 1, 5 do local _ = (A == B) local _ = (A == B) end return 1",
+        err, sizeof err);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+}
+
+/* ── Audit 8: the rest of the work inside one instruction ──────────────── */
+
+/* Each case: `setup` runs unmetered (it builds large values), then `code`
+ * runs under the 100000 limit. Every `code` below is a few hundred VM
+ * instructions and allocates almost nothing, so before the audit-8 charges
+ * each passed the limit with room to spare while doing millions of steps
+ * of work in C. */
+UTEST(lua_audit8, non_allocating_loops_hit_the_limit)
+{
+    static const char *const cases[][2] = {
+        /* M10: table.unpack / string.byte / utf8.codepoint push a value
+         * each into a stack that has already grown */
+        { "E = {}",
+          "for i = 1, 100 do local _ = select('#', table.unpack(E, 1, 100000)) end "
+          "return 1" },
+        { "S = string.rep('x', 100000)",
+          "for i = 1, 100 do local _ = select('#', string.byte(S, 1, -1)) end "
+          "return 1" },
+        { "S = string.rep('x', 100000)",
+          "for i = 1, 100 do local _ = select('#', utf8.codepoint(S, 1, -1)) end "
+          "return 1" },
+        /* string.pack / unpack / packsize: a format of no-op options */
+        { "F = string.rep(' ', 100000)",
+          "for i = 1, 100 do string.unpack(F, '') end return 1" },
+        { "F = string.rep(' ', 100000)",
+          "for i = 1, 100 do string.pack(F) string.packsize(F) end return 1" },
+        /* vararg copies and results moved */
+        { "T = {} for i = 1, 30000 do T[i] = i end "
+          "function G(...) for i = 1, 100 do local _ = select('#', ...) end "
+          "return 1 end",
+          "return G(table.unpack(T))" },
+        /* table.concat of empty strings copies nothing */
+        { "T = {} for i = 1, 100000 do T[i] = '' end",
+          "for i = 1, 100 do table.concat(T) end return 1" },
+        /* utf8.offset / an utf8.codes step scan the string */
+        { "S = string.rep('x', 1000000)",
+          "for i = 1, 100 do utf8.offset(S, #S) end return 1" },
+        { "C = 'a' .. string.rep('\\x80', 1000000) F = utf8.codes(C)",
+          "for i = 1, 100 do F(C, 1) end return 1" },
+        /* next() over a hash part whose entries were removed */
+        { "T = {} for i = 1, 200000 do T['k' .. i] = i end "
+          "for k in pairs(T) do T[k] = nil end",
+          "for i = 1, 100 do local _ = next(T) end return 1" },
+        /* a long-string key equal to the table's key, another object: a
+         * memcmp per lookup (get, set, rawget, next) */
+        { "K1 = string.rep('k', 1000000) T = { [K1] = 1 } "
+          "K2 = string.rep('k', 1000000)",
+          "for i = 1, 100 do local _ = T[K2] end return 1" },
+        { "K1 = string.rep('k', 1000000) T = { [K1] = 1 } "
+          "K2 = string.rep('k', 1000000)",
+          "for i = 1, 100 do T[K2] = i end return 1" },
+        { "K1 = string.rep('k', 1000000) T = { [K1] = 1 } "
+          "K2 = string.rep('k', 1000000)",
+          "for i = 1, 100 do local _ = rawget(T, K2) end return 1" },
+        { "K1 = string.rep('k', 1000000) T = { [K1] = 1 } "
+          "K2 = string.rep('k', 1000000)",
+          "for i = 1, 100 do local _ = next(T, K2) end return 1" },
+        /* string -> number coercion scans the whole string */
+        { "S = string.rep(' ', 1000000)",
+          "for i = 1, 100 do local _ = tonumber(S) end return 1" },
+        { "S = string.rep(' ', 1000000)",
+          "for i = 1, 100 do local _ = tonumber(S, 10) end return 1" },
+        { "S = string.rep(' ', 1000000)",
+          "for i = 1, 100 do pcall(function() return S + 0 end) end return 1" },
+        /* string.rep: a copy per repetition */
+        { "",
+          "for i = 1, 100 do local _ = string.rep('a', 10000) end return 1" },
+        /* a luaL_Buffer filled, then dropped by an error */
+        { "BT = { string.rep('x', 1000000), true }",
+          "for i = 1, 100 do pcall(table.concat, BT) end return 1" },
+        { NULL, NULL }
+    };
+    char err[512];
+    for (int i = 0; cases[i][0]; i++) {
+        int rc = limited_run_after(cases[i][0], cases[i][1], err, sizeof err);
+        EXPECT_NE_MSG(rc, LUA_OK, cases[i][1]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, cases[i][1]);
+    }
+
+    /* string.rep of an empty result ran its copy loop n times */
+    EXPECT_EQ(limited_run(
+        "assert(string.rep('', 1e15) == '') "
+        "assert(string.rep('', 1e15, '') == '') return 1",
+        err, sizeof err), LUA_OK);
+
+    /* The same operations at ordinary sizes stay well under the limit. */
+    EXPECT_EQ(limited_run(
+        "local t = { 1, 2, 3 } local a, b, c = table.unpack(t) assert(c == 3) "
+        "assert(select('#', string.byte('hello', 1, -1)) == 5) "
+        "assert(select('#', utf8.codepoint('h\\xc3\\xa9llo', 1, -1)) == 5) "
+        "assert(string.unpack('<i4', string.pack('<i4', 7)) == 7) "
+        "assert(string.packsize('i4i4') == 8) "
+        "local function n(...) return select('#', ...) end "
+        "assert(n(1, 2, 3) == 3) "
+        "assert(table.concat({ 'a', 'b' }, ',') == 'a,b') "
+        "assert(utf8.offset('h\\xc3\\xa9llo', 3) == 4) "
+        "for _, c in utf8.codes('h\\xc3\\xa9') do end "
+        "local h = { a = 1, b = 2 } h.a = nil assert(next(h) == 'b') "
+        "local k = string.rep('k', 50) local kt = { [k] = 1 } "
+        "assert(kt[string.rep('k', 50)] == 1) "
+        "assert(tonumber('  42  ') == 42 and tonumber('ff', 16) == 255) "
+        "assert('10' + 1 == 11) "
+        "assert(string.rep('ab', 3, ',') == 'ab,ab,ab') "
+        "return 1",
+        err, sizeof err), LUA_OK);
+}
+
+/* M11: the collector's work. An emergency full collection after a failed
+ * allocation, a mode switch, or a collector tuned to run on every
+ * allocation each did a full traversal of the live heap for a few
+ * instructions. The setup keeps 20000 tables alive for it to traverse. */
+UTEST(lua_audit8, collector_work_hits_the_limit)
+{
+    static const char *const cases[] = {
+        /* the 48 MB concatenation cannot fit the 64 MB heap: each try runs
+         * an emergency full collection, then a catchable memory error */
+        "for i = 1, 50 do pcall(function() return A .. A end) end return 1",
+        "for i = 1, 50 do collectgarbage('generational') "
+        "collectgarbage('incremental') end return 1",
+        /* pause 0: a whole cycle per allocation once one cycle ends */
+        "collectgarbage('incremental', 1, 1000) collectgarbage('step') "
+        "for i = 1, 10000 do local t = {} end return 1",
+        "for i = 1, 50 do collectgarbage() end return 1",
+        NULL
+    };
+    char err[512];
+    for (int i = 0; cases[i]; i++) {
+        int rc = limited_run_after(
+            "KEEP = {} for i = 1, 20000 do KEEP[i] = {} end "
+            "A = string.rep('x', 24000000)",
+            cases[i], err, sizeof err);
+        EXPECT_NE_MSG(rc, LUA_OK, cases[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, cases[i]);
+    }
+    /* A memory error is still an ordinary, catchable error. */
+    EXPECT_EQ(limited_run_after(
+        "A = string.rep('x', 24000000)",
+        "local ok, e = pcall(function() return A .. A end) "
+        "assert(not ok and tostring(e):find('memory')) return 1",
+        err, sizeof err), LUA_OK);
+    /* Garbage made and collected at an ordinary rate stays under it. */
+    EXPECT_EQ(limited_run(
+        "local keep = {} for i = 1, 1000 do keep[i] = { i } end "
+        "for i = 1, 2000 do local t = { i } end "
+        "collectgarbage() return 1",
+        err, sizeof err), LUA_OK);
+}
+
+/* M12: a coroutine's run is charged when it returns or yields. The hook
+ * reported whole periods (10000 instructions) only, so a coroutine body
+ * shorter than one period was never charged: 100 x 9900 instructions
+ * here ran under a 100000 limit. */
+UTEST(lua_audit8, short_coroutines_are_charged)
+{
+    static const char *const cases[] = {
+        "local f = function() for i = 1, 9900 do end end "
+        "for j = 1, 100 do coroutine.wrap(f)() end return 1",
+        "local f = function() for i = 1, 9900 do end end "
+        "for j = 1, 100 do coroutine.resume(coroutine.create(f)) end return 1",
+        "local f = function() for i = 1, 9900 do end coroutine.yield() end "
+        "for j = 1, 100 do local co = coroutine.create(f) "
+        "coroutine.resume(co) coroutine.close(co) end return 1",
+        /* nested: the inner run reaches the outer thread, then the main */
+        "local f = function() for i = 1, 4900 do end end "
+        "local g = function() for i = 1, 4900 do end coroutine.wrap(f)() end "
+        "for j = 1, 100 do coroutine.wrap(g)() end return 1",
+        NULL
+    };
+    char err[512];
+    for (int i = 0; cases[i]; i++) {
+        int rc = limited_run(cases[i], err, sizeof err);
+        EXPECT_NE_MSG(rc, LUA_OK, cases[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, cases[i]);
+    }
+    /* A few short coroutines stay under it. */
+    EXPECT_EQ(limited_run(
+        "local n = 0 "
+        "for j = 1, 5 do coroutine.wrap(function() for i = 1, 1000 do end "
+        "n = n + 1 end)() end assert(n == 5) return 1",
+        err, sizeof err), LUA_OK);
+}
+
+/* L1: a string '<' is charged the bytes it compared, not the left
+ * operand's length: `big < "b"` decides on the first byte. */
+UTEST(lua_audit8, string_less_than_charges_the_compared_prefix)
+{
+    char err[512];
+    EXPECT_EQ(limited_run_after(
+        "A = string.rep('a', 1000000) T = {} "
+        "for i = 1, 200 do T[i] = string.format('%05d', (i * 7919) % 200) .. "
+        "A:sub(1, 100000) end",
+        "for i = 1, 3000 do local _ = (A < 'b') local _ = (A <= 'b') end "
+        "table.sort(T) return 1",
+        err, sizeof err), LUA_OK);
+    /* A compare that does run through a long common prefix still trips. */
+    int rc = limited_run_after(
+        "A = string.rep('x', 1000000) B = A:sub(1, -2) .. 'y'",
+        "for i = 1, 100 do local _ = (A < B) end return 1",
         err, sizeof err);
     EXPECT_NE(rc, LUA_OK);
     EXPECT_NE(strstr(err, "instruction limit"), NULL);

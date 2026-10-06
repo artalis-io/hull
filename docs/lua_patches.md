@@ -110,11 +110,15 @@ so a trip there is an ordinary error, and `coroutine.close`'s guard
 ## Patch 0004 - charge work done inside one instruction
 
 **Files:** `vendor/lua/lstate.h` / `lstate.c` (`luaE_hlcharge`, `luaE_hlbytes`,
-the `hlbytes` / `hlowed` thread fields), `lapi.c` + `lua.h` (`lua_hlcharge`,
-`lua_hlwork`, `lua_hltakeowed`, `lua_rawequal`), `ldebug.c` (`lua_sethook`),
-`lmem.c`, `lvm.h` / `lvm.c`, `lstrlib.c`, `ltablib.c`, `lutf8lib.c`,
-`lbaselib.c`
-**Found by:** round-7 C audit (M1, M2)
+`luaE_hltransfer`, the `hlbytes` / `hlowed` thread fields, the `hlgcwork`
+global field, `lua_closethread`), `lapi.c` + `lua.h` (`lua_hlcharge`,
+`lua_hlwork`, `lua_hltakeowed`, `lua_rawequal`, `lua_gettable` /
+`lua_settable` / `lua_rawget`, `lua_stringtonumber`), `ldebug.c`
+(`lua_sethook`), `ldo.c` (`moveresults`, `lua_resume`), `lgc.c`, `lmem.c`,
+`ltable.h` / `ltable.c` (`luaH_getL`, `luaH_next`), `ltm.c`
+(`luaT_getvarargs`), `lvm.h` / `lvm.c`, `lauxlib.c` (`resizebox`),
+`lstrlib.c`, `ltablib.c`, `lutf8lib.c`, `lbaselib.c`
+**Found by:** round-7 C audit (M1, M2); extended by round-8 (M1-M3, L1)
 **Upstream:** Hull-specific.
 
 The count hook counts VM instructions, and some instructions do work
@@ -138,24 +142,78 @@ equivalents:
   kept in `L->hlowed`, which the hook collects with `lua_hltakeowed` (Hull's
   budget hook adds it to the run's count). No allocation, no error, so it is
   safe anywhere, including inside the allocator and the VM. Bulk bytes
-  (`luaE_hlbytes`) cost one unit per 64 bytes. Charged: every block Lua
-  allocates or grows (`luaM_malloc_`, a growing `luaM_realloc_` - strings,
-  tables, buffers' results), the `memcmp` of a long-string equality
-  (`luaV_equalobj`, `OP_EQK`, `lua_rawequal`), a string `<` / `<=`, a
-  `collectgarbage("collect")` (the heap) or `("step", n)` (n KB), and a
-  `utf8.len` (one unit per byte decoded, as a match step).
+  (`luaE_hlbytes`) cost one unit per 64 bytes. Charged:
+  - every block Lua allocates or grows (`luaM_malloc_`, a growing
+    `luaM_realloc_` - strings, tables, buffers' results), and the box a
+    `luaL_Buffer` grows (`resizebox`, which allocates outside the core: a
+    buffer filled and then dropped by an error, `pcall(table.concat, {big,
+    true})`, was free);
+  - the bytes a string compare reads: a long-string equality
+    (`luaV_equalobj`, `OP_EQK`, `lua_rawequal`); a string `<` / `<=`, for
+    the prefix it compared (`l_strcmp`: each equal segment, then the
+    deciding one up to its first differing 64-byte block - charging the
+    left operand's length made `big < "a"`, one byte compared, cost
+    len/64, and a `table.sort` of large distinct strings trip the limit);
+    and a long-string table key that equals a key in the table without
+    being the same object (`luaH_getL` / `equalkey`, used for every key a
+    script chooses: `t[k]`, `t[k] = v`, `t:m()`, `rawget`, `next(t, k)`,
+    the `__index` / `__newindex` chain, `luaH_set`);
+  - the empty slots a `next` steps over (`luaH_next`; a table whose
+    entries were removed keeps its size, and each `next` scanned all of it);
+  - values copied in bulk: results moved by a return (`moveresults`) and
+    varargs fetched by `...` (`luaT_getvarargs`), a unit each past the first
+    16 (`HL_FREE_COPIES`);
+  - a string-to-number coercion, a unit per byte (`l_strton` - so
+    `luaV_tonumber_` / `luaV_tointeger` take `L` - and
+    `lua_stringtonumber`, `tonumber(s, base)`): spaces and digits are
+    scanned, and `strtod` reads the whole string;
+  - the collector's work (`lgc.c`, `g->hlgcwork`): every unit of work a
+    step reports, what `atomic` marks, each object `sweepgen` / `sweep2old`
+    / `whitelist` / `markold` visits, each table `convergeephemerons`
+    revisits, each slot `clearbykeys` / `clearbyvalues` scans - charged to
+    the running thread when `luaC_step`, `luaC_fullgc` or
+    `luaC_changemode` returns. A collection runs inside one instruction,
+    and app code chose when: a failing allocation runs an emergency full
+    collection before its (catchable) memory error, so `pcall(function()
+    return a .. a end)` bought a full traversal of a large heap for ~6
+    instructions; `collectgarbage("generational")` / `("incremental")` and
+    the tuning forms (`setpause`, `setstepmul`, mode arguments) did the
+    same, or raised the work done per byte allocated. (This replaces the
+    heap-size charge `collectgarbage("collect"/"step")` had: the work is
+    now charged where it is done, whoever triggers it. Making a memory
+    error sticky was the alternative; charging keeps a caught memory error
+    an ordinary error, and covers the implicit collections too.)
+  - `utf8.len` (one unit per byte decoded, as a match step), and the bytes
+    `utf8.offset` and a `utf8.codes` step skip.
 - **Checked** (`lua_hlwork`, from a C function only): the same charge, then
   the count hook runs at once if it came due - for a library loop whose
-  length an argument or `__len` decides (`table.insert` / `table.remove`
-  shifts and `table.move`, charged per 1024 elements; `table.sort`, per
-  partition), which would otherwise only be stopped after it finished.
+  length an argument or `__len` decides: `table.insert` / `table.remove`
+  shifts, `table.move` and `table.concat`, charged per 1024 elements;
+  `table.sort`, per partition; `table.unpack`, `string.byte` and
+  `utf8.codepoint`, a unit per value pushed, charged before the loop;
+  `string.pack` / `unpack` / `packsize`, a unit per format byte (an option
+  such as `' '` pushes nothing, so a long format looped for free); and
+  `string.rep`, a unit per copy. `string.rep` of an empty result (`s` and
+  `sep` both empty) now returns at once: `string.rep("", 1e18)` ran its copy
+  loop 1e18 times inside one instruction.
+
+**Coroutines** (`luaE_hltransfer`, from `lua_resume` and `lua_closethread`):
+the count hook reports a whole period only (Hull's stride, 10000), and every
+new coroutine starts on a full one. A coroutine that ran less than a period
+and returned was never charged, so `for j = 1, n do coroutine.wrap(f)() end`
+with a 9900-instruction `f` ran ~400x past the limit (round-4 H1, splitting
+work across coroutines, was closed only per period). When a resume returns
+(or yields), the part of the period the coroutine used, plus its owed units
+and sub-unit bytes, is charged to the thread that resumed it, and the
+coroutine starts its next run on a full period. `coroutine.close` does the
+same for its `__close` handlers.
 
 `lua_sethook` clears both fields, so a re-armed hook starts owing nothing.
 A VM with no count hook (the tool VM, tests) behaves exactly as upstream.
 
-**Not covered:** a lookup of a long-string table key that equals the key in
-the table without being the same string object `memcmp`s in `ltable.c`,
-where no `lua_State` is at hand; and Hull's own C bindings charge what they
-allocate, plus, in `hull.crypto`, the bytes a digest / MAC / signature reads
-(`crypto_charge`, one unit per 8 bytes) - a binding that reads a large input
-and allocates little is otherwise charged one instruction.
+**Not covered:** a `lua_getfield` / `lua_setfield` from C with a long C-string
+key (Hull's bindings use short literal names); and Hull's own C bindings
+charge what they allocate, plus, in `hull.crypto`, the bytes a digest / MAC /
+signature reads (`crypto_charge`, one unit per 8 bytes), and `part:read()`
+the bytes it accumulates - a binding that reads a large input and allocates
+little is otherwise charged one instruction.
