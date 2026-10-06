@@ -656,6 +656,62 @@ clause and the C-level capability layer still apply.
 
 **Difference from Linux/Cosmo:** Seatbelt returns EPERM on violation (the operation fails with a permission error) rather than SIGKILL (the process is killed). The app stays alive but the operation is denied. The C capability layer returns errors on violation in all cases, so the practical behavior is identical. The forbidden operation fails.
 
+### Tool mode (`hull build`, `hull new`, `hull verify`, ...)
+
+The tool commands run Hull's own Lua plugins in a separate VM, and `hull
+build` runs the app's top-level code (manifest extraction) and a compiler or
+linker. They get their own sandbox, `hl_tool_sandbox_init`
+(`src/hull/sandbox_tool.c`), built from ONE plan
+(`hl_tool_sandbox_plan`) that is applied twice: as the userspace allowlist
+every `tool.*` file binding checks (`hl_tool_unveil_check`), and as kernel
+unveil on hosts that enforce one (OpenBSD; Linux with Landlock; a cosmo APE
+on those two). On macOS, Windows and the other BSDs the userspace list is the
+only tool sandbox. One plan means a grant cannot reach one list and miss the
+other - which is how, before audit 8, a `hull feature install`ed archive
+failed to link on macOS and a key under `~/.hull/keys` failed on Linux.
+
+What the plan grants:
+
+| Path | Access | Why |
+|---|---|---|
+| `/tmp`, the cosmo-on-Windows build temp | rwcx | staging, toolchain scratch |
+| the app directory the command NAMED | r | sources; never `/`, `$HOME` or above |
+| the invocation directory | rwc | `hull build` from inside the app; never `/`, `$HOME` or above |
+| the output directory (`-o`'s, else the named app dir, else the scaffold target) | rwc | refused outright when `/`, `$HOME` or above |
+| `/usr`, `/bin`, `/lib*`, `/opt`, `~/.cosmocc` (Linux/cosmo), `/opt`, `/Library` (macOS) | rx / r | system toolchains |
+| hull's own directory, the platform dir | rx | the manifest-extraction re-exec, platform archives |
+| the runtime cache root | rwc | AOT cache |
+| `~/.hull/tools` | rx | side-loaded tools, the musl floors |
+| `~/.hull/feature`, `~/.hull/platform`, `~/.hull/blobs/tools` | r | signed `--with` archives + manifests, flavor libs, the tools store `bundle_verify` re-hashes |
+| each file named by `--sign`, `--platform-sig`, `--platform-key`, `--developer-key`, `--gethull-key`, `--binary`, and `hull sign-platform <prefix>`'s `.key` / `.pub` | r, that file only | a key in `~/.hull/keys` is read without opening the directory |
+
+How the paths are chosen:
+
+- **App directory:** the first positional argument that names an existing
+  directory, skipping every option's value (`--install-dir`, `--type`, ...).
+  A symbolic link is never taken (a repo committing `build -> ~/.ssh` would
+  otherwise have its target granted when you run `hull compute build`); name
+  the directory it points to. Nothing named: no app grant, and `hull build`
+  works from the invocation directory.
+- **Scaffolds:** `hull new <name>` / `hull init [dir]` write only their target,
+  so `hull_tool` creates it before the sandbox applies and grants it - not its
+  parent. `cd ~ && hull new myapp` grants `~/myapp`, never `~`. `hull init` in
+  `~` itself is refused (it would make `~` writable).
+- **Sensitive dot-directories** (`~/.ssh`, `~/.aws`) are not refused by name:
+  the only ways one becomes a grant are typing it or a planted symlink, and
+  the symlink route is closed above; refusing them by name would also refuse
+  legitimate outputs such as `-o ~/.local/bin/tool`.
+
+The userspace check canonicalises a path that does not exist yet through its
+nearest existing ancestor and refuses `.` / `..` in the remaining components
+in any spelling - including pieces between backslashes (Windows splits on
+`\` and resolves `..` when it opens the path) and, on Windows, a piece ending
+in a dot or space, or containing `:`. Prefixes compare case-insensitively on
+Windows. `tool.rename` needs write + create on both ends. The toolchain is
+found on `PATH` through absolute components only (`.` and relative ones name
+the app directory). Pledge applies in tool mode on OpenBSD only (the Linux
+polyfill's exec promises would be a seccomp filter on every compiler).
+
 ---
 
 ## 4b. Sealed runtime tables (read-only memory protection)

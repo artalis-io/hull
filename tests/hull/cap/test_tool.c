@@ -859,6 +859,47 @@ UTEST(tool, unveil_check_denied)
     hl_tool_unveil_free(&ctx);
 }
 
+/* audit 8 M3: when a component is missing, realpath fails and the check
+ * canonicalises through the nearest existing ancestor. It split on '/'
+ * only, so on Windows - which splits on '\\' too and resolves ".." when it
+ * opens the path - "<grant>/nx\..\..\secret" passed the prefix check and
+ * read a file outside every grant. Refused on every host now (on a POSIX
+ * host such a name is one harmless file, but nothing needs it). */
+UTEST(tool, unveil_check_refuses_backslash_dotdot)
+{
+    char grant[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(grant, sizeof grant, "hull_bs") != NULL);
+    HlToolUnveilCtx ctx;
+    hl_tool_unveil_init(&ctx);
+    hl_tool_unveil_add(&ctx, grant, "rwc");
+    hl_tool_unveil_seal(&ctx);
+
+    static const char *const bad[] = {
+        "nx\\..\\..\\secret",            /* read outside, via a missing dir */
+        "..\\written.txt",               /* create outside */
+        "nx\\..\\..\\..\\Downloads\\evil\\cc.exe",
+        "nx/sub\\..\\..\\..\\x",
+        "nx\\.\\..\\..\\x",
+        "nx/..",
+        "nx/./x",
+        NULL
+    };
+    char p[PATH_MAX];
+    for (int i = 0; bad[i]; i++) {
+        snprintf(p, sizeof p, "%s/%s", grant, bad[i]);
+        EXPECT_NE(hl_tool_unveil_check(&ctx, p, 'r'), 0);
+        EXPECT_NE(hl_tool_unveil_check(&ctx, p, 'w'), 0);
+    }
+    /* A backslash that climbs nothing stays inside the grant either way. */
+    snprintf(p, sizeof p, "%s/nx\\sub\\file", grant);
+    EXPECT_EQ(hl_tool_unveil_check(&ctx, p, 'w'), 0);
+    snprintf(p, sizeof p, "%s/new.txt", grant);
+    EXPECT_EQ(hl_tool_unveil_check(&ctx, p, 'w'), 0);
+
+    hl_tool_unveil_free(&ctx);
+    rmdir(grant);
+}
+
 UTEST(tool, unveil_enforcement_find_files)
 {
     HlToolUnveilCtx ctx;

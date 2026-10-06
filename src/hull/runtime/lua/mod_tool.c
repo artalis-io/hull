@@ -313,8 +313,11 @@ static int l_tool_copy(lua_State *L)
  * POSIX-atomic rename. Used by the AOT cache (and any other
  * content-addressed writer) to publish a tmp file under the final
  * cache name without observers ever seeing a partially-written
- * artifact. Both paths get unveil-checked: 'r' on the source, 'w'
- * on the destination, so the call respects the tool-mode sandbox.
+ * artifact. Both paths get unveil-checked for write AND create: a
+ * rename removes the source's directory entry and adds the
+ * destination's. 'r' on the source let a read-only grant (the app
+ * directory, hull's own directory, ~/.hull/tools) lose files where only
+ * the userspace list applies; Landlock refused the same call.
  */
 static int l_tool_rename(lua_State *L)
 {
@@ -322,8 +325,10 @@ static int l_tool_rename(lua_State *L)
     const char *dst = luaL_checkstring(L, 2);
     HlToolUnveilCtx *ctx = get_unveil_ctx(L);
     if (ctx) {
-        if (hl_tool_unveil_check(ctx, src, 'r') != 0 ||
-            hl_tool_unveil_check(ctx, dst, 'w') != 0) {
+        if (hl_tool_unveil_check(ctx, src, 'w') != 0 ||
+            hl_tool_unveil_check(ctx, src, 'c') != 0 ||
+            hl_tool_unveil_check(ctx, dst, 'w') != 0 ||
+            hl_tool_unveil_check(ctx, dst, 'c') != 0) {
             lua_pushboolean(L, 0);
             return 1;
         }

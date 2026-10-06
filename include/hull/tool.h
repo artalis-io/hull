@@ -21,6 +21,33 @@
 int hull_tool(const char *module, int argc, char **argv, const char *hull_exe);
 
 /*
+ * What a tool command's argv names, for the tool sandbox's grants. `argv[0]`
+ * is the subcommand; `module` the tool module ("hull.build").
+ *
+ * hl_tool_argv_app_dir: the first positional argument (not an option or an
+ * option's value) that names an existing directory and is not itself a
+ * symbolic link; NULL when none does. A link named like a subcommand word
+ * (`build -> ~/.ssh` in a cloned repo, then `hull compute build`) would
+ * otherwise have its target granted.
+ *
+ * hl_tool_argv_scaffold_target: the directory `hull new <name>` /
+ * `hull init [dir]` scaffolds into (the last positional, as new.lua and
+ * init.lua take it; init defaults to "."); NULL for other modules, or for
+ * `hull new` without a name.
+ *
+ * hl_tool_argv_read_files: the files the command reads by name - the values
+ * of --sign (a key file except for `hull deploy`, where --sign is a switch),
+ * --platform-sig, --platform-key, --developer-key, --gethull-key and
+ * --binary, and `hull sign-platform <prefix>`'s <prefix>.key / .pub. Up to
+ * `max` heap strings into `out` (each freed by the caller); returns the
+ * count.
+ */
+const char *hl_tool_argv_app_dir(const char *module, int argc, char **argv);
+const char *hl_tool_argv_scaffold_target(const char *module, int argc, char **argv);
+int hl_tool_argv_read_files(const char *module, int argc, char **argv,
+                            char **out, int max);
+
+/*
  * Generate an Ed25519 keypair and write to files.
  * Pure C - no Lua VM needed.
  *

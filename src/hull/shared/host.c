@@ -301,6 +301,18 @@ static char component_sep(const char *dir, size_t dlen)
     return hl_host_dir_sep();
 }
 
+/* An absolute PATH component: "/..." anywhere; on Windows also "\\..." and a
+ * drive form "X:\\..." / "X:/..." (a bare "X:" is drive-relative). */
+static int component_is_absolute(const char *dir, size_t dlen, int win)
+{
+    if (dir[0] == '/') return 1;
+    if (!win) return 0;
+    if (dir[0] == '\\') return 1;
+    return dlen >= 3 &&
+           ((dir[0] >= 'A' && dir[0] <= 'Z') || (dir[0] >= 'a' && dir[0] <= 'z')) &&
+           dir[1] == ':' && (dir[2] == '\\' || dir[2] == '/');
+}
+
 static int try_candidate(const char *dir, size_t dlen, char sep,
                          const char *name, const char *ext,
                          char *out, size_t out_sz)
@@ -379,7 +391,11 @@ int hl_host_find_in_path_ex(const char *path_env, const char *name,
          * very common on Windows). An empty component must NOT be probed:
          * joining it would yield a current-directory-relative candidate, so
          * a file in the process's cwd could shadow a real toolchain binary. */
-        if (dlen > 0) {
+        /* Likewise "." and every other RELATIVE component: it names a
+         * directory relative to the cwd - usually the app directory - so a
+         * repo shipping `cc` was run as the compiler for anyone whose PATH
+         * held "." (the same hole tool_bdir_trusted closed for -B). */
+        if (dlen > 0 && component_is_absolute(d, dlen, win)) {
             for (const char **e = exts; *e; e++)
                 if (try_candidate(d, dlen, component_sep(d, dlen),
                                   name, *e, out, out_sz))

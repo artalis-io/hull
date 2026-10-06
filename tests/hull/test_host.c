@@ -424,6 +424,34 @@ UTEST(host, find_in_path_skips_empty_components)
     ASSERT_STREQ("", out);
 }
 
+/* audit 8 c_caps L3: "." and relative components name directories under the
+ * cwd - the app directory a build runs in - so a repo shipping `cc` ran as
+ * the compiler for anyone whose PATH held ".". Skipped like empty ones; the
+ * same directory spelled absolute is still searched. */
+UTEST(host, find_in_path_skips_relative_components)
+{
+    char dir[512];
+    if (!host_make_probe("rel", dir, sizeof(dir), "hullrelprobe"))
+        UTEST_SKIP("cannot create a temp probe");
+    char saved[1024];
+    if (!getcwd(saved, sizeof saved) || chdir(dir) != 0) {
+        host_drop_probe(dir, "hullrelprobe");
+        UTEST_SKIP("cannot enter the probe directory");
+    }
+
+    char sep = hl_host_path_list_sep();
+    char list[256];
+    char out[700];
+    snprintf(list, sizeof(list), ".%c./%c..%c/nonexistent-hull-dir", sep, sep, sep);
+    int rel = hl_host_find_in_path_ex(list, "hullrelprobe", out, sizeof(out));
+    int abs_found = hl_host_find_in_path_ex(dir, "hullrelprobe", out, sizeof(out));
+
+    if (chdir(saved) != 0) { /* nothing better to do */ }
+    host_drop_probe(dir, "hullrelprobe");
+    EXPECT_EQ(0, rel);
+    EXPECT_EQ(1, abs_found);
+}
+
 UTEST(host, find_in_path_ex_handles_an_empty_or_null_list)
 {
     char out[64];
