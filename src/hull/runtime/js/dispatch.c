@@ -37,11 +37,12 @@ JSValue hl_js_make_response_life(HlJS *js, KlHttpResponse *res, HlReqLife *life)
  * when a middleware short-circuits, and for an SSE route - since Keel resets
  * the request (dropping the pointer) without telling the runtime: before,
  * only a synchronous handler freed it, and every suspended, rejected or SSE
- * request pinned its ctx object in the JS heap for good (audit 6 H4). */
-void hl_js_req_ctx_free(HlJS *js, KlHttpRequest *req)
+ * request pinned its ctx object in the JS heap for good (audit 6 H4). A
+ * request that passed middleware but never reached a handler is covered by
+ * the tracking below (audit 7 H2). */
+static void req_ctx_release(HlJS *js, HlReqCtx *rctx)
 {
-    if (!js || !req || !req->ctx) return;
-    HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+    hl_reqctx_untrack(&js->req_ctxs, rctx);
     if (rctx->kind == HL_REQCTX_JS_VAL) {
         JSValue val;
         memcpy(&val, rctx->js_val_bytes, sizeof(val));
@@ -50,7 +51,28 @@ void hl_js_req_ctx_free(HlJS *js, KlHttpRequest *req)
         hl_alloc_free(js->base.alloc, rctx->json.data, rctx->json.len + 1);
     }
     hl_alloc_free(js->base.alloc, rctx, sizeof(HlReqCtx));
-    req->ctx = NULL;
+}
+
+/* @p req carries no ctx: any ctx still tracked for it was stored for an
+ * earlier request on the same connection slot that never reached a handler
+ * (a 404, an upgrade, a body error, a client gone mid-body - Keel zeroed the
+ * request without telling the runtime, audit 7 H2). Free those. */
+static void req_ctx_sweep(HlJS *js, KlHttpRequest *req)
+{
+    if (req->ctx) return;
+    HlReqCtx *stale;
+    while ((stale = hl_reqctx_find(&js->req_ctxs, req)) != NULL)
+        req_ctx_release(js, stale);
+}
+
+void hl_js_req_ctx_free(HlJS *js, KlHttpRequest *req)
+{
+    if (!js || !req) return;
+    if (req->ctx) {
+        req_ctx_release(js, (HlReqCtx *)req->ctx);
+        req->ctx = NULL;
+    }
+    req_ctx_sweep(js, req);
 }
 
 /* ── Request dispatch ───────────────────────────────────────────────── */
@@ -118,84 +140,51 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     JSValue argv[2] = { js_req, js_res };
     js->active_life = life;
     JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
-    js->active_life = NULL;
 
     int result = 0;
-    int attached = 0;   /* a continuation holds the handler promise */
-    HlJsRunOnce *run = NULL;   /* its run record (ref held), for the drain below */
     if (JS_IsException(ret)) {
+        js->active_life = NULL;
         hl_js_dump_error(js);
         result = -1;
-    } else if (JS_PromiseState(js->ctx, ret) == JS_PROMISE_PENDING) {
-        /* Async handler - connection already suspended by hull.sleep
-         * or similar async call. Store the outer handler promise on
-         * the continuation (per-connection, not global) so the resume
-         * callback can check when the handler completes. With no
-         * continuation yet (a microtask-only await), see after the job
-         * run below. A handler already over its budget is marked so: its
-         * promise never settles, and the first resume answers 500. */
-        if (js->last_async_cont) {
-            run = hl_js_run_attach(js, ret);
-            attached = 1;
-            hl_js_run_yield_check(js, run);
-        }
-        js->async_pending = 1;
-        result = 1; /* signal: handler suspended */
-    } else if (js->budget_tripped) {
-        /* Returned (or rejected) after a trip - e.g. an un-awaited async
-         * call that hit the limit: the run still failed. */
-        log_error("[hull:c] handler exceeded the instruction limit");
-        result = -1;
-    } else if (JS_PromiseState(js->ctx, ret) == JS_PROMISE_REJECTED) {
-        /* Async handler threw before its first await - the Promise is
-         * immediately rejected (not an exception).  Log and return -1
-         * so the caller writes a 500 response. */
-        JSValue err = JS_PromiseResult(js->ctx, ret);
-        const char *msg = JS_ToCString(js->ctx, err);
-        log_error("[hull:c] async handler rejected: %s",
-                  msg ? msg : "(unknown)");
-        if (msg) JS_FreeCString(js->ctx, msg);
-        else JS_FreeValue(js->ctx, JS_GetException(js->ctx));   /* L2 */
-        JS_FreeValue(js->ctx, err);
-        result = -1;
-    }
-
-    /* A pending handler with no continuation yet awaits only microtasks (or
-     * something Hull does not drive). Run them now, with the life active so
-     * a Hull call they make (hull.sleep, db.async, ...) takes it too, and
-     * see whether a continuation turned up. If none did, the connection was
-     * never suspended: the response goes out when this returns, so the
-     * request is over whatever the handler does next - and its `res` must
-     * not outlive it (it used to stay usable, onto a finished request). */
-    if (result == 1 && !attached) {
-        js->active_life = life;
-        hl_js_run_jobs(js);
+    } else {
+        /* An async handler: its code after an `await` of something already
+         * settled is still this request's - run it now, with the request and
+         * its life active, so an op it starts belongs to this run; it used to
+         * run in a drain with no request active, its op detached and never
+         * waited for (audit 7 H1). Then wire every continuation into the run
+         * and check the wait. A handler already over its budget is marked
+         * so: its promise never settles, and the first resume answers 500. */
+        int st;
+        int waiting = hl_js_entry_park(js, ret, &st);
         js->active_life = NULL;
-        if (js->last_async_cont) {
-            run = hl_js_run_attach(js, ret);
-            hl_js_run_yield_check(js, run);
-        } else {
-            int st = JS_PromiseState(js->ctx, ret);
-            if (js->budget_tripped) {
-                log_error("[hull:c] handler exceeded the instruction limit");
-                result = -1;
-            } else if (st == JS_PROMISE_PENDING) {
-                log_warn("[hull:c] handler awaits a promise Hull does not "
-                         "drive; the request ends now and its res is closed");
-                result = 0;
-            } else if (st == JS_PROMISE_REJECTED) {
-                JSValue err = JS_PromiseResult(js->ctx, ret);
-                const char *msg = JS_ToCString(js->ctx, err);
-                log_error("[hull:c] async handler rejected: %s",
-                          msg ? msg : "(unknown)");
-                if (msg) JS_FreeCString(js->ctx, msg);
-                else JS_FreeValue(js->ctx, JS_GetException(js->ctx));   /* L2 */
-                JS_FreeValue(js->ctx, err);
-                result = -1;
-            } else {
-                result = 0;
-            }
-            js->async_pending = 0;
+        if (waiting) {
+            /* Suspended: the connection is held by the handler's first op;
+             * the async resume completes the request. */
+            js->async_pending = 1;
+            result = 1;
+        } else if (js->budget_tripped) {
+            /* Returned (or rejected) after a trip - e.g. an un-awaited async
+             * call that hit the limit: the run still failed. */
+            log_error("[hull:c] handler exceeded the instruction limit");
+            result = -1;
+        } else if (st == JS_PROMISE_PENDING) {
+            /* No continuation: the connection was never suspended, so the
+             * response goes out when this returns and the request is over
+             * whatever the handler does next - its `res` must not outlive it
+             * (it used to stay usable, onto a finished request). */
+            log_warn("[hull:c] handler awaits a promise Hull does not "
+                     "drive; the request ends now and its res is closed");
+        } else if (st == JS_PROMISE_REJECTED) {
+            /* Async handler threw - the Promise is rejected (not an
+             * exception). Log and return -1 so the caller writes a 500. */
+            JSValue err = JS_PromiseResult(js->ctx, ret);
+            const char *msg = JS_ToCString(js->ctx, err);
+            log_error("[hull:c] async handler rejected: %s",
+                      msg ? msg : "(unknown)");
+            if (msg) JS_FreeCString(js->ctx, msg);
+            else JS_FreeValue(js->ctx, JS_GetException(js->ctx));   /* L2 */
+            JS_FreeValue(js->ctx, err);
+            result = -1;
         }
     }
 
@@ -216,14 +205,11 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     js->active_conn = NULL;
     js->active_req  = NULL;
 
-    /* Run any pending microtasks. A suspended handler's own may be among
-     * them (`const p = hull.sleep(5); await null; for (;;) {}`): a trip in
-     * this drain marks its run, so the sleep's resume answers 500 instead of
-     * waiting forever on a promise that will never settle. */
+    /* Jobs a synchronous handler queued (an async handler's ran above) run
+     * with no request active: the request is over. */
     hl_js_run_jobs(js);
-    hl_js_run_drop(js, run);
 
-    /* Whatever an un-awaited op made in that drain belongs to no run. */
+    /* Whatever an un-awaited op made belongs to no run. */
     js->last_async_cont = NULL;
     /* The entry is over (or parked, which no transaction may span): a
      * transaction still open is stale (audit 6 M1). */
@@ -272,6 +258,9 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     hl_db_registry_guard_stale_txns(js->base.db_registry);
 
     hl_js_reset_request(js);
+    /* The first middleware of a request: a ctx an earlier request on this
+     * connection slot left behind is freed now. */
+    req_ctx_sweep(js, req);
 
     /* Get the handler function from the route registry */
     JSValue global = JS_GetGlobalObject(js->ctx);
@@ -353,23 +342,18 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     if (JS_IsObject(ctx_val)) {
         /* Free previous ctx if any */
         if (req->ctx) {
-            HlReqCtx *old = (HlReqCtx *)req->ctx;
-            if (old->kind == HL_REQCTX_JS_VAL) {
-                JSValue old_val;
-                memcpy(&old_val, old->js_val_bytes, sizeof(old_val));
-                JS_FreeValue(js->ctx, old_val);
-            } else if (old->kind == HL_REQCTX_JSON) {
-                hl_alloc_free(js->base.alloc, old->json.data, old->json.len + 1);
-            }
-            hl_alloc_free(js->base.alloc, old, sizeof(HlReqCtx));
+            req_ctx_release(js, (HlReqCtx *)req->ctx);
             req->ctx = NULL;
         }
-        /* Store native JS value */
+        /* Store native JS value - tracked, so it is freed even when the
+         * request never reaches a handler (req_ctx_sweep). */
         HlReqCtx *rctx = hl_alloc_malloc(js->base.alloc, sizeof(HlReqCtx));
         if (rctx) {
+            memset(rctx, 0, sizeof *rctx);
             rctx->kind = HL_REQCTX_JS_VAL;
             JSValue dup = JS_DupValue(js->ctx, ctx_val);
             memcpy(rctx->js_val_bytes, &dup, sizeof(dup));
+            hl_reqctx_track(&js->req_ctxs, rctx, req);
             req->ctx = rctx;
         }
     }

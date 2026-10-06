@@ -149,6 +149,7 @@ int hl_cap_test_dispatch(KlHttpRouter *router, const char *method,
         size_t json_len = strlen(ctx_json);
         HlReqCtx *rctx = hl_alloc_malloc(hl_alloc, sizeof(HlReqCtx));
         if (rctx) {
+            memset(rctx, 0, sizeof *rctx);   /* untracked (reqctx.h) */
             rctx->kind = HL_REQCTX_JSON;
             rctx->json.data = hl_alloc_malloc(hl_alloc, json_len + 1);
             if (rctx->json.data) {

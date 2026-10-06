@@ -71,6 +71,17 @@ static int read_string_array(lua_State *L, int table_idx,
  *
  * Shared by ssh.connect and ssh.tunnel - two grants that must read a port
  * list the same way, which is the whole reason this is a function. */
+/* A `wasm` limit field of the table at @p idx: an integer of at least 1,
+ * capped at @p max, else 0 (absent - the default). */
+static lua_Integer lua_wasm_limit(lua_State *L, int idx, const char *name,
+                                  lua_Integer max)
+{
+    lua_getfield(L, idx, name);
+    lua_Integer v = lua_isinteger(L, -1) ? lua_tointeger(L, -1) : 0;
+    lua_pop(L, 1);
+    return v < 1 ? 0 : v > max ? max : v;
+}
+
 static int read_port_array(lua_State *L, int table_idx, int *out)
 {
     int n = 0;
@@ -193,26 +204,16 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     lua_getfield(L, manifest_idx, "wasm");
     if (lua_istable(L, -1)) {
         int wasm_idx = lua_gettop(L);
-        lua_getfield(L, wasm_idx, "heap");
-        if (lua_isinteger(L, -1)) out->wasm_heap = (uint32_t)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        lua_getfield(L, wasm_idx, "stack");
-        if (lua_isinteger(L, -1)) out->wasm_stack = (uint32_t)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        lua_getfield(L, wasm_idx, "gas");
-        if (lua_isinteger(L, -1)) out->wasm_gas = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        lua_getfield(L, wasm_idx, "timeout_ms");
-        if (lua_isinteger(L, -1) && lua_tointeger(L, -1) > 0)
-            out->wasm_timeout_ms = lua_tointeger(L, -1) > (lua_Integer)UINT32_MAX
-                ? UINT32_MAX : (uint32_t)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        lua_getfield(L, wasm_idx, "max_input");
-        if (lua_isinteger(L, -1)) out->wasm_max_input = (uint32_t)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        lua_getfield(L, wasm_idx, "max_output");
-        if (lua_isinteger(L, -1)) out->wasm_max_output = (uint32_t)lua_tointeger(L, -1);
-        lua_pop(L, 1);
+        /* As manifest_js.c: an integer of at least 1, capped; anything else
+         * (0, a negative - once cast to unsigned and enforced as the
+         * maximum) is absent (audit 7 c_core L1). */
+        const lua_Integer u32 = (lua_Integer)UINT32_MAX;
+        out->wasm_heap       = (uint32_t)lua_wasm_limit(L, wasm_idx, "heap", u32);
+        out->wasm_stack      = (uint32_t)lua_wasm_limit(L, wasm_idx, "stack", u32);
+        out->wasm_gas        = lua_wasm_limit(L, wasm_idx, "gas", LUA_MAXINTEGER / 2);
+        out->wasm_timeout_ms = (uint32_t)lua_wasm_limit(L, wasm_idx, "timeout_ms", u32);
+        out->wasm_max_input  = (uint32_t)lua_wasm_limit(L, wasm_idx, "max_input", u32);
+        out->wasm_max_output = (uint32_t)lua_wasm_limit(L, wasm_idx, "max_output", u32);
     }
     lua_pop(L, 1); /* pop wasm */
 

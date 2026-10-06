@@ -679,7 +679,7 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_worker_wasm_op_free_all;
     actx->op.on_cancel = hl_worker_wasm_async_cancel;
-    actx->detached = (js->active_conn == NULL);
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
 
     op->async_ctx = actx;
     op->cancelled = 0;
@@ -1097,7 +1097,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_worker_wasm_op_free_all;
     actx->op.on_cancel = hl_worker_wasm_async_cancel;
-    actx->detached = (js->active_conn == NULL);
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
 
     op->async_ctx = actx;
     op->cancelled = 0;

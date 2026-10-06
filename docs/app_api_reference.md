@@ -45,7 +45,10 @@ shared just the same. For the same reason `db.batch(fn)` takes a synchronous
 `fn`: in JS an `async` function is refused with a `TypeError` before the batch
 begins, and a function that returns a Promise / thenable is refused with the
 batch rolled back (it used to commit at the first `await`, running the rest in
-autocommit). A transaction an entry leaves open - a request, middleware, SSE
+autocommit) - in a `worker.dispatch` function as well. Only the batch is
+rolled back: an async function `fn` called (`() => saveAll()`) still runs, and
+its statements after its first `await` each commit on their own, so call only
+synchronous code inside a batch. A transaction an entry leaves open - a request, middleware, SSE
 event, timer or WebSocket callback that returned, raised or parked - is rolled
 back right then, and again before any entry starts or a parked handler
 resumes, so no other code ever runs inside it.
@@ -1177,7 +1180,12 @@ end, { limit = 8 })            -- default 16; math.huge for no cap
 `Promise.allSettled` (`Promise.all` rejects at the first failure and leaves the
 rest running). The bounded fan-out is
 `await hull.map(items, async (item, i) => ..., { limit: 8 })` (default 16,
-`Infinity` for no cap).
+`Infinity` for no cap). This works in a route handler too: every Hull op the
+handler's own code starts - before or after an `await` - belongs to its
+request, which is answered when the handler completes, however many ops are
+in flight at once (the first one holds the connection; the rest run detached
+until the run is done). An op still running when the handler has completed
+(not awaited) resumes with the request over: its `res` is closed.
 
 - **Failures:** `gather` and `map` let every item finish, then raise the
   first failure (by position) with all of them attached: `err.errors[i]`

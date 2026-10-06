@@ -1102,7 +1102,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_worker_gpu_op_free_all;
     actx->op.on_cancel = hl_worker_gpu_async_cancel;
-    actx->detached = (js->active_conn == NULL);
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
 
     op->async_ctx = actx;
     atomic_store(&op->cancelled, 0);
@@ -1695,7 +1695,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_worker_gpu_op_free_all;
     actx->op.on_cancel = hl_worker_gpu_async_cancel;
-    actx->detached = (js->active_conn == NULL);
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
 
     op->async_ctx = actx;
     atomic_store(&op->cancelled, 0);

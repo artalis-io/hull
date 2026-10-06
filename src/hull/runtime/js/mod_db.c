@@ -502,7 +502,7 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
  * an exception (a Proxy's getPrototypeOf trap). QuickJS exports no class id,
  * so its prototype is compared with the intrinsic ones, taken from a fresh
  * async function made by host code (not from app-reachable globals). */
-static int js_fn_is_async(JSContext *ctx, JSValueConst fn)
+int hl_js_fn_is_async(JSContext *ctx, JSValueConst fn)
 {
     static const char src[] = "[async function(){}, async function*(){}]";
     JSValue proto = JS_GetPrototype(ctx, fn);
@@ -524,6 +524,17 @@ static int js_fn_is_async(JSContext *ctx, JSValueConst fn)
     return is;
 }
 
+int hl_js_is_thenable(JSContext *ctx, JSValueConst v)
+{
+    if (!JS_IsObject(v)) return 0;
+    if ((int)JS_PromiseState(ctx, v) >= 0) return 1;
+    JSValue then = JS_GetPropertyStr(ctx, v, "then");
+    if (JS_IsException(then)) return -1;
+    int is = JS_IsFunction(ctx, then);
+    JS_FreeValue(ctx, then);
+    return is;
+}
+
 /* db.batch(fn) - execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
 static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
@@ -538,7 +549,7 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
     /* An async fn is refused before BEGIN (audit 6 L4): refused after it
      * returned its promise, the rollback was right but the fn kept running,
      * and its statements after the first await autocommitted. */
-    int is_async = js_fn_is_async(ctx, argv[0]);
+    int is_async = hl_js_fn_is_async(ctx, argv[0]);
     if (is_async < 0) return JS_EXCEPTION;
     if (is_async)
         return JS_ThrowTypeError(ctx,
@@ -562,18 +573,11 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
      * so instead. Checked before the handle is re-resolved: reading `then`
      * can run a getter (app code). */
     int async_result = 0;
-    if (!JS_IsException(result) && JS_IsObject(result)) {
-        if ((int)JS_PromiseState(ctx, result) >= 0) {
-            async_result = 1;
-        } else {
-            JSValue then = JS_GetPropertyStr(ctx, result, "then");
-            if (JS_IsException(then)) {
-                JS_FreeValue(ctx, result);
-                result = JS_EXCEPTION;
-            } else {
-                async_result = JS_IsFunction(ctx, then);
-                JS_FreeValue(ctx, then);
-            }
+    if (!JS_IsException(result)) {
+        async_result = hl_js_is_thenable(ctx, result);
+        if (async_result < 0) {
+            JS_FreeValue(ctx, result);
+            result = JS_EXCEPTION;
         }
     }
 
@@ -589,7 +593,9 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx,
             "db.batch: fn must be synchronous - it returned a Promise, so its "
             "statements after the first await would run outside the "
-            "transaction (the batch was rolled back)");
+            "transaction (the batch was rolled back; an async function fn "
+            "called still runs, and its statements after its first await "
+            "commit one by one)");
     }
     if (!h)
         return JS_ThrowInternalError(ctx,
@@ -1033,7 +1039,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_worker_db_op_free_all;
     actx->op.on_cancel = hl_worker_db_async_cancel;
-    actx->detached = (js->active_conn == NULL);
+    actx->detached = (hl_js_cont_suspend_conn(cont) == NULL);
 
     op->async_ctx = actx;
     op->cancelled = 0;

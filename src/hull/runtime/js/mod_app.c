@@ -809,6 +809,9 @@ int hl_js_define_manifest_global(JSContext *ctx)
     return rc < 0 ? -1 : 0;
 }
 
+static JSValue js_app_manifest_store(JSContext *ctx, HlJS *js,
+                                     JSValueConst arg);
+
 static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
@@ -819,17 +822,30 @@ static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
     if (!js)
         return JS_ThrowInternalError(ctx, "app.manifest: no runtime");
 
-    /* Reject second call - manifest is immutable once declared */
-    if (js->manifest)
+    /* Reject second call - manifest is immutable once declared. A call
+     * nested inside this one (from a toJSON, a getter or a Proxy trap the
+     * argument's stringify runs) is refused too: it stored its own manifest
+     * and installed its decorations, then the outer call overwrote the
+     * stored one - app.get / app.every came from a manifest that was not the
+     * signed, enforced one (audit 7 L1). */
+    if (js->manifest || js->manifest_busy)
         return JS_ThrowTypeError(ctx, "app.manifest() can only be called once");
+    js->manifest_busy = 1;
+    JSValue r = js_app_manifest_store(ctx, js, argv[0]);
+    js->manifest_busy = 0;
+    return r;
+}
 
+static JSValue js_app_manifest_store(JSContext *ctx, HlJS *js,
+                                     JSValueConst arg)
+{
     /* A plain, frozen copy (a JSON round trip: data only), held in C: the
      * policy extractor and the --verify-sig encoder read this one value, and
      * nothing app code can reach replaces it. An array is not a manifest:
      * its fields would be read through Array.prototype. */
     JSValue copy;
     {
-        JSValue txt = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
+        JSValue txt = JS_JSONStringify(ctx, arg, JS_UNDEFINED, JS_UNDEFINED);
         if (JS_IsException(txt)) return JS_EXCEPTION;
         size_t tl = 0;
         const char *ts = JS_ToCStringLen(ctx, &tl, txt);

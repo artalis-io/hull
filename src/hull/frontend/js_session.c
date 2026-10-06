@@ -135,11 +135,17 @@ static const JSMallocFunctions HL_JS_MALLOC_FUNCS = {
  * Fires periodically (every JS_INTERRUPT_COUNTER_INIT ops). Returning non-zero raises the
  * UNCATCHABLE "interrupted" error, so an exhausted instruction budget bypasses the frontend's
  * try/catch entirely and reaches the host classifier -- authoritative and non-forgeable. */
+/* Each poll stands for JS_INTERRUPT_COUNTER_INIT (10000, quickjs.c) poll-points, and is
+ * charged that much - as the app runtime's HL_JS_INTERRUPT_WEIGHT. Counted one per poll,
+ * the 150M default allowed ~1.5e12 steps: a non-allocating loop in the bundled tooling on
+ * crafted source held `hull agent inspect` for hours (audit 7 M5). */
+#define HL_JS_SESSION_POLL_WEIGHT 10000
+
 static int session_interrupt(JSRuntime *rt, void *opaque)
 {
     (void)rt;
     HlJsSession *s = (HlJsSession *)opaque;
-    s->instr_count++;
+    s->instr_count += HL_JS_SESSION_POLL_WEIGHT;
     return (s->instr_limit > 0 && s->instr_count > s->instr_limit) ? 1 : 0;
 }
 

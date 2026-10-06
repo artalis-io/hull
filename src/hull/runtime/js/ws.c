@@ -74,18 +74,12 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, exc);
     } else {
-        JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
-        /* Pending with no continuation yet: run its microtasks before
-         * deciding (as dispatch and on_close do) - an `await null` ahead of
-         * the first Hull call otherwise left the handler unwired. */
-        /* JS_Call above may set last_async_cont (cppcheck cannot see it). */
-        // cppcheck-suppress knownConditionTrueFalse
-        if (state == JS_PROMISE_PENDING && !js->last_async_cont) {
-            hl_js_run_jobs(js);
-            state = JS_PromiseState(ctx, ret);
-        }
-        if (state == JS_PROMISE_PENDING && js->last_async_cont) {
-            hl_js_run_drop(js, hl_js_run_attach(js, ret));
+        /* Its code after an `await` of something already settled runs
+         * now, as part of this callback - an op it starts belongs to the
+         * run - then the run's continuations are wired and the wait is
+         * checked: no transaction across it (audit 7 M3 / M6). */
+        int st;
+        if (hl_js_entry_park(js, ret, &st)) {
             JS_FreeValue(ctx, ret);
             hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
             return;
@@ -93,6 +87,7 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     }
 
     hl_js_run_jobs(js);
+    js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
     JS_FreeValue(ctx, ret);
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 }
@@ -154,18 +149,12 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
         if (msg2) JS_FreeCString(ctx, msg2);
         JS_FreeValue(ctx, exc);
     } else {
-        JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
-        /* Pending with no continuation yet: run its microtasks before
-         * deciding (as dispatch and on_close do) - an `await null` ahead of
-         * the first Hull call otherwise left the handler unwired. */
-        /* JS_Call above may set last_async_cont (cppcheck cannot see it). */
-        // cppcheck-suppress knownConditionTrueFalse
-        if (state == JS_PROMISE_PENDING && !js->last_async_cont) {
-            hl_js_run_jobs(js);
-            state = JS_PromiseState(ctx, ret);
-        }
-        if (state == JS_PROMISE_PENDING && js->last_async_cont) {
-            hl_js_run_drop(js, hl_js_run_attach(js, ret));
+        /* Its code after an `await` of something already settled runs
+         * now, as part of this callback - an op it starts belongs to the
+         * run - then the run's continuations are wired and the wait is
+         * checked: no transaction across it (audit 7 M3 / M6). */
+        int st;
+        if (hl_js_entry_park(js, ret, &st)) {
             JS_FreeValue(ctx, ret);
             hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
             return;
@@ -173,6 +162,7 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     }
 
     hl_js_run_jobs(js);
+    js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
     JS_FreeValue(ctx, ret);
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 }
@@ -247,31 +237,26 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
                 log_error("[hull:ws] on_close error: %s", msg ? msg : "unknown");
                 if (msg) JS_FreeCString(ctx, msg);
                 JS_FreeValue(ctx, exc);
-            } else if (JS_PromiseState(ctx, ret) == JS_PROMISE_PENDING) {
-                /* An async close handler. Its continuation captured the
-                 * teardown hook, and is told the handler's promise so the
+            } else {
+                /* An async close handler. Its continuations capture the
+                 * teardown hook, and are told the handler's promise so the
                  * teardown runs when the handler completes - not now, while
                  * it is suspended and still holds the conn. (This used to key
                  * off js->async_pending, which nothing sets, so the conn was
-                 * torn down under every awaiting handler.) A handler that only
-                 * awaits microtasks gets them run first, hook still armed, so
-                 * a Hull call they make still captures it, as dispatch.c does. */
-                /* JS_Call above may set last_async_cont (cppcheck cannot see it). */
-                // cppcheck-suppress knownConditionTrueFalse
-                if (!js->last_async_cont)
-                    hl_js_run_jobs(js);
-                if (JS_PromiseState(ctx, ret) == JS_PROMISE_PENDING) {
-                    if (js->last_async_cont) {
-                        hl_js_run_drop(js, hl_js_run_attach(js, ret));
-                        deferred = 1;
-                    } else {
-                        log_warn("[hull:ws] on_close awaits a promise Hull does "
-                                 "not drive; the connection is closed now");
-                    }
-                }
+                 * torn down under every awaiting handler.) Its queued jobs run
+                 * first, hook still armed, so a Hull call they make still
+                 * captures it, as dispatch.c does. */
+                int st;
+                if (hl_js_entry_park(js, ret, &st))
+                    deferred = 1;
+                else if (st == JS_PROMISE_PENDING)
+                    log_warn("[hull:ws] on_close awaits a promise Hull does "
+                             "not drive; the connection is closed now");
             }
-            if (!deferred)
+            if (!deferred) {
                 hl_js_run_jobs(js);
+                js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
+            }
             JS_FreeValue(ctx, ret);
             hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 

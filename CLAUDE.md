@@ -683,14 +683,24 @@ registry connection or `db.open` handle is in a transaction
 `hl_lua_check_can_wait`; JS:
 `hl_js_db_refuse_wait` in `runtime/js/db_wait.h`, called by each parking
 operation before it arms anything - a new JS wait primitive must call it).
-In JS the check runs again where the run actually yields (`hl_js_run_yield_check`: dispatch,
-SSE, timers, an async or multipart resume that waits again), since a transaction can open after
-the op was made (`const p = http.fetch(..); conn.exec("BEGIN"); await p`): the transaction is
-rolled back there and the run is failed at its next resume (500) without being continued.
+In JS the check runs again where the run actually yields (`hl_js_run_yield_check`), since a
+transaction can open after the op was made (`const p = http.fetch(..); conn.exec("BEGIN");
+await p`): the transaction is rolled back there and the run is failed at its next resume (500;
+`app.main` exits 1) without being continued. Every entry - dispatch, SSE, timers, ws-server and
+ws-client callbacks, `app.main` - parks through `hl_js_entry_park` (`runtime/js/async.c`): it
+first runs the jobs the handler queued, with the entry still active (its code after `await
+null` is the entry's own: an op it starts belongs to the run, and a `BEGIN` it runs is seen),
+then wires every continuation into one run and checks; an async or multipart resume that waits
+again checks too. Audit 7 H1 / M3 / M6: run after the entry returned, those jobs ran with no
+request active (an op they started was detached and never waited for: an empty 200, then
+`res.json` into a recycled connection slot), or inside another entry's drain.
 Under that invariant every transaction the guard finds is orphaned. JS
 `db.batch(fn)` refuses an async fn before BEGIN (prototype check against the
 intrinsic AsyncFunction / AsyncGeneratorFunction) and a returned thenable
-after (TypeError, rolled back). The backends that read transaction state from
+after (TypeError, rolled back) - in a `worker.dispatch` VM too. A sync fn that
+returns an async function's promise (`() => saveAll()`) is caught only by the
+second check: the batch is rolled back, but `saveAll` keeps running and its
+statements after its first `await` commit one by one. The backends that read transaction state from
 the SQL text (DuckDB tracking, the Postgres / MySQL ROLLBACK and COMMIT
 checks) share `cap/db_sql_kw.h`, which skips comments and knows every
 spelling (`COMMIT WORK`, `END TRANSACTION`, `ABORT`, ...); a Postgres COMMIT

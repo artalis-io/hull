@@ -132,6 +132,8 @@ static void free_req_ctx(KlHttpRequest *req)
 {
     if (!req->ctx) return;
     HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+    if (js_initialized)
+        hl_reqctx_untrack(&js.req_ctxs, rctx);   /* dispatch.c tracks it */
     if (rctx->kind == HL_REQCTX_JS_VAL && js_initialized) {
         JSValue val;
         memcpy(&val, rctx->js_val_bytes, sizeof(val));
@@ -7727,6 +7729,107 @@ UTEST(js_audit6, res_text_keeps_embedded_nul)
     EXPECT_EQ(res.body_len, (size_t)3);
     free_req_ctx(&req);
     kl_http_response_free(&res);
+    cleanup_js();
+}
+
+/* ── Audit 7: the JS runtime ──────────────────────────────────────────── */
+
+static size_t a7_tracked_ctxs(void)
+{
+    size_t n = 0;
+    for (HlReqCtx *c = js.req_ctxs.head; c; c = c->next) n++;
+    return n;
+}
+
+/* H2: a middleware's req.ctx was freed only once a handler (or SSE route)
+ * ran, or the middleware short-circuited. A request that passed middleware
+ * and then 404'd (or upgraded, or failed its body) never reached one; Keel
+ * zeroed the request and the ctx stayed in the JS heap for good. The next
+ * middleware on the same request slot now frees it. */
+UTEST(js_audit7, a_ctx_whose_request_ended_early_is_freed)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    EXPECT_EQ(a5_middleware("(req, res) => { req.ctx.big = 'x'.repeat(200000);"
+                            " return 0; }", &req, &res), 0);
+    EXPECT_TRUE(req.ctx != NULL);
+    EXPECT_EQ(a7_tracked_ctxs(), (size_t)1);
+    int id = eval_int("globalThis.__hull_middleware["
+                      "globalThis.__hull_middleware.length - 1].handler_id");
+    JSMemoryUsage before, after;
+    JS_ComputeMemoryUsage(js.rt, &before);
+    for (int i = 0; i < 100; i++) {
+        /* Keel resets the slot for its next request: no handler ran. */
+        memset(&req, 0, sizeof req);
+        EXPECT_EQ(hl_js_dispatch_middleware(&js, id, &req, &res), 0);
+    }
+    JS_RunGC(js.rt);
+    JS_ComputeMemoryUsage(js.rt, &after);
+    EXPECT_EQ(a7_tracked_ctxs(), (size_t)1);
+    /* 100 x 200 KB kept would be 20 MB. */
+    EXPECT_LT(after.malloc_size, before.malloc_size + (int64_t)(2 << 20));
+    hl_js_req_ctx_free(&js, &req);
+    EXPECT_TRUE(req.ctx == NULL);
+    EXPECT_EQ(a7_tracked_ctxs(), (size_t)0);
+
+    /* One left for a slot nothing reuses is freed with the runtime. */
+    KlHttpRequest req2 = {0};
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, id, &req2, &res), 0);
+    EXPECT_EQ(a7_tracked_ctxs(), (size_t)1);
+    cleanup_js();
+}
+
+/* L1: app.manifest() was re-entrant through its argument's toJSON: the
+ * nested call stored its own manifest and installed its decorations, then
+ * the outer call overwrote the stored one. */
+UTEST(js_audit7, app_manifest_is_not_re_entrant)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { app } from 'hull:app';\n"
+        "let inner = 'none';\n"
+        "app.manifest({ toJSON() {\n"
+        "  try { app.manifest({ modules: ['hull/http-server@1', 'hull/timers@1'] });\n"
+        "        inner = 'stored'; } catch (e) { inner = 'refused'; }\n"
+        "  return { modules: [] }; } });\n"
+        "globalThis.__a7 = inner + ':' + typeof app.every + ':' + typeof app.get;\n",
+        &msg), 0);
+    free(msg);
+    char *s = eval_str("globalThis.__a7");
+    EXPECT_STREQ(s, "refused:undefined:undefined");
+    free(s);
+    cleanup_js();
+}
+
+/* c_core L1: the wasm limits went through ToPrimitive: an array reached the
+ * app-replaceable Array.prototype.valueOf (the signed JSON showed the array,
+ * the runtime enforced what valueOf said), `{}` left an exception pending,
+ * and -1 was enforced as the maximum. Only a positive number counts. */
+UTEST(js_audit7, wasm_limits_are_numbers_only)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ wasm: { heap: [5], stack: {}, gas: -1,\n"
+        "                       timeoutMs: 250, maxInput: 1e12, maxOutput: '9' } });\n"
+        "Array.prototype.valueOf = () => 123456789;\n", &msg), 0);
+    free(msg);
+    HlManifest m;
+    ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(m.wasm_heap, (uint32_t)0);
+    EXPECT_EQ(m.wasm_stack, (uint32_t)0);
+    EXPECT_EQ(m.wasm_gas, (int64_t)0);
+    EXPECT_EQ(m.wasm_timeout_ms, (uint32_t)250);
+    EXPECT_EQ(m.wasm_max_input, (uint32_t)UINT32_MAX);
+    EXPECT_EQ(m.wasm_max_output, (uint32_t)0);
+    hl_manifest_free(&m);
     cleanup_js();
 }
 
