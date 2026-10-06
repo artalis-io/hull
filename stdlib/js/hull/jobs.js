@@ -1026,6 +1026,9 @@ function emit(event, job, info) {
 // reap and workflow).
 const WF_TYPE_PREFIX = "__wf:";
 const WF_COMPENSATE_KEY = "__compensate";
+// The step-store row holding a workflow's retry generation (ctx.generation):
+// absent for the first run, bumped by every retry.
+const WF_GEN_KEY = "__gen";
 
 /**
  * Reclaim jobs stuck in `running` past the visibility timeout (a worker died
@@ -1991,9 +1994,21 @@ function makeCtx(job, name) {
             "AND substr(step_key, 1, 8) <> '__sleep:' " +
             "AND substr(step_key, 1, 9) <> '__waitdl:' " +
             "AND substr(step_key, 1, 6) <> '__sig:' " +
-            "AND step_key <> ?",
-            [job.id, WF_COMPENSATE_KEY]);
+            "AND step_key <> ? AND step_key <> ?",
+            [job.id, WF_COMPENSATE_KEY, WF_GEN_KEY]);
         return (r[0] && r[0].n) || 0;
+    })();
+    // The retry generation: 0 on the first run, +1 per retry. A step that is
+    // idempotent on a key (a payment provider's idempotency key) and has a
+    // compensation must put this in the key: after retry re-runs the
+    // compensated step, the same key would only fetch back the original,
+    // since-refunded result. ctx.uuid() folds it in too.
+    const generation = (() => {
+        const r = db.query(
+            "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            [job.id, WF_GEN_KEY]);
+        const g = r && r[0] ? Number(r[0].result) : 0;
+        return Number.isFinite(g) ? g : 0;
     })();
     // A compensation run (the reaper's extra attempt after a lost last one):
     // replay only what completed; never start new work.
@@ -2013,6 +2028,7 @@ function makeCtx(job, name) {
         id: job.id,
         name,
         input: job.data,
+        generation,
         _compensating: compensating,
         trace: job.trace,   // trace-context propagation (observability design)
         _comps: comps,
@@ -2023,7 +2039,13 @@ function makeCtx(job, name) {
         // way to be non-deterministic in a workflow. Hidden from steps_done.
         now: () => { detN += 1; stepPos += 1; return runStep(job.id, "__now:" + detN, () => time.now()); },
         random: () => { detN += 1; stepPos += 1; return runStep(job.id, "__rand:" + detN, () => Math.random()); },
-        uuid: () => { detN += 1; stepPos += 1; return runStep(job.id, "__uuid:" + detN, () => crypto.randomToken(16)); },
+        // Per generation: after a retry every uuid() is new, so one used as an
+        // idempotency key reaches the provider as a new request.
+        uuid: () => {
+            detN += 1; stepPos += 1;
+            const key = generation === 0 ? "__uuid:" + detN : "__uuid:" + generation + "." + detN;
+            return runStep(job.id, key, () => crypto.randomToken(16));
+        },
         step: async (stepKey, fn, opts) => {
             stepPos += 1;
             if (compensating) {
@@ -2142,31 +2164,68 @@ function start(name, input, opts) {
  * time: a signal sent while an earlier one of the same name is still unconsumed
  * is dropped; once a wait has consumed it, the next one is held for the next
  * wait on that name.
+ *
+ * `opts.deliveryId` makes a delivery idempotent: a sender that retries (a
+ * webhook redelivered after a timeout, a double-clicked approval) passes the
+ * same id each time, and a delivery whose id this workflow has already seen for
+ * this name is dropped - whether or not a wait consumed the first. Without one,
+ * a duplicate arriving after a wait consumed the first counts as the next
+ * delivery (it satisfies the next wait on the name). Multi-round waits on one
+ * name should always pass one.
  * @param {number} id       the workflow id
  * @param {string} name     the signal name
  * @param {*} [payload]
- * @returns {boolean}
+ * @param {object} [opts]   { deliveryId: string }
+ * @returns {boolean}  true, or false when dropped as a duplicate deliveryId
  */
-function signal(id, name, payload) {
+function signal(id, name, payload, opts) {
     if (typeof name !== "string" || name === "")
         throw new Error("jobs.signal: name must be a non-empty string");
+    if (opts !== undefined && opts !== null && typeof opts !== "object")
+        throw new Error("jobs.signal: opts must be an object");
+    const delivery = opts ? opts.deliveryId : undefined;
+    if (delivery !== undefined && delivery !== null
+        && (typeof delivery !== "string" || delivery === ""))
+        throw new Error("jobs.signal: opts.deliveryId must be a non-empty string");
     const enc = payload !== undefined && payload !== null ? json.encode(payload) : null;
     const now = time.now();
-    const n = db.insertIfAbsent("_hull_workflow_signals", ["workflow_id", "name"],
-        ["workflow_id", "name", "payload", "created_at"], [id, name, enc, now]);
-    if (!n) {
-        // The name was signalled before. Once that delivery has been consumed
-        // (by an earlier wait), this one is stored for the next wait on the
-        // name; while it is still pending, this one is dropped.
-        db.exec("UPDATE _hull_workflow_signals SET payload=?, created_at=?, consumed_at=NULL " +
-            "WHERE workflow_id=? AND name=? AND consumed_at IS NOT NULL",
-            [enc, now, id, name]);
-    }
-    // Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
-    // 'pending' workflow is left alone: it finds the stored signal on its own.
-    db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, updated_at=? " +
-        "WHERE id=? AND status='waiting'", [now, now, id]);
-    return true;
+    let accepted = true;
+    db.batch(() => {
+        let seenKey = null;
+        if (delivery) {
+            // One row per (name, delivery id) seen, in the step store under the
+            // "__sig:" control prefix (kept out of the patch frontier and
+            // workflowStatus); hashed to fit the key column.
+            const h = Array.from(new Uint8Array(crypto.sha256(name + "\u0000" + delivery)),
+                (b) => b.toString(16).padStart(2, "0")).join("");
+            seenKey = "__sig:d:" + h;
+            const seen = db.insertIfAbsent("_hull_workflow_steps", ["workflow_id", "step_key"],
+                ["workflow_id", "step_key", "result", "status", "created_at"],
+                [id, seenKey, "", "delivered", now]);
+            if (!seen) { accepted = false; return; }
+        }
+        const n = db.insertIfAbsent("_hull_workflow_signals", ["workflow_id", "name"],
+            ["workflow_id", "name", "payload", "created_at"], [id, name, enc, now]);
+        if (!n) {
+            // The name was signalled before. Once that delivery has been consumed
+            // (by an earlier wait), this one is stored for the next wait on the
+            // name; while it is still pending, this one is dropped - and its id
+            // is not kept, so the sender's retry of it can still land.
+            const stored = db.exec("UPDATE _hull_workflow_signals SET payload=?, " +
+                "created_at=?, consumed_at=NULL " +
+                "WHERE workflow_id=? AND name=? AND consumed_at IS NOT NULL",
+                [enc, now, id, name]);
+            if (!stored && seenKey) {
+                db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                    [id, seenKey]);
+            }
+        }
+        // Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
+        // 'pending' workflow is left alone: it finds the stored signal on its own.
+        db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, updated_at=? " +
+            "WHERE id=? AND status='waiting'", [now, now, id]);
+    });
+    return accepted;
 }
 
 /**
@@ -2287,6 +2346,27 @@ function retry(id) {
         // compensation failed keeps its row - its effect still stands.
         db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND status='compensated'",
             [id]);
+        // Running the step again is not enough when it is idempotent on a key
+        // (as steps must be): the same key would fetch back the original,
+        // since-refunded result. The requeued run is a new generation
+        // (ctx.generation, folded into every ctx.uuid), and the old uuid memos
+        // go - prefix compare, not LIKE ('_' is a wildcard there).
+        const t = db.query("SELECT type FROM _hull_jobs WHERE id=?", [id]);
+        if (t && t[0] && String(t[0].type).startsWith(WF_PREFIX)) {
+            const g = db.query(
+                "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                [id, WF_GEN_KEY]);
+            const prev = g && g[0] ? Number(g[0].result) : 0;
+            const gen = (Number.isFinite(prev) ? prev : 0) + 1;
+            db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                [id, WF_GEN_KEY]);
+            db.exec(
+                "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+                "VALUES (?, ?, ?, 'done', ?)",
+                [id, WF_GEN_KEY, String(gen), now]);
+            db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? " +
+                "AND substr(step_key, 1, 7) = '__uuid:'", [id]);
+        }
     });
     return (n || 0) > 0;
 }
