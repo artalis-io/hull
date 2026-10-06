@@ -564,23 +564,46 @@ static int mysql_exec_raw(HlDbHandle *h, const char *sql,
  * the last OK, and nothing told the app: its next statements autocommitted
  * and COMMIT succeeded with the earlier writes gone. Remember it instead. */
 /* 1 when @p sql starts with a statement MySQL commits the open transaction
- * before running - so before it fails, too: DDL, LOCK / UNLOCK TABLES,
- * account management, the table-maintenance and administration statements.
- * A failure of anything else that ends the transaction was a rollback. Only
+ * before running - so before it fails, too (MySQL 8 "Statements That Cause
+ * an Implicit Commit"): DDL, account management, LOCK / UNLOCK TABLES, the
+ * table-maintenance and administration statements, replication control.
+ * A failure of anything else that ends the transaction was a rollback, so
+ * an unrecognised statement is refused (txn_aborted), never resumed: the
+ * list errs on the short side. Not CREATE / DROP TEMPORARY TABLE nor LOAD
+ * DATA / LOAD XML (audit 8 c_db L2): they commit nothing, and a lock-wait
+ * timeout in one under innodb_rollback_on_timeout was resumed as DDL. Only
  * the first statement of a multi-statement text is read, so a later DDL
  * statement that failed is taken for a rollback: refused, not resumed. */
 static int my_sql_commits_implicitly(const char *sql)
 {
-    static const char *const kw[] = {
-        "alter", "analyze", "cache", "change", "check", "create", "drop",
-        "flush", "grant", "install", "load", "lock", "optimize", "purge",
-        "rename", "repair", "reset", "revoke", "stop", "truncate",
-        "uninstall", "unlock",
+    static const char *const any[] = {   /* every form of the statement */
+        "alter", "analyze", "cache", "check", "flush", "grant", "optimize",
+        "rename", "repair", "revoke", "truncate",
     };
-    char w[16];
-    (void)hl_sql_next_word(sql ? sql : "", w, sizeof w);
-    for (size_t i = 0; i < sizeof kw / sizeof kw[0]; i++)
-        if (strcmp(w, kw[i]) == 0) return 1;
+    char w[16], w2[16], w3[16];
+    const char *p = hl_sql_next_word(sql ? sql : "", w, sizeof w);
+    p = hl_sql_next_word(p, w2, sizeof w2);
+    for (size_t i = 0; i < sizeof any / sizeof any[0]; i++)
+        if (strcmp(w, any[i]) == 0) return 1;
+    if (strcmp(w, "create") == 0 || strcmp(w, "drop") == 0)
+        return strcmp(w2, "temporary") != 0;
+    if (strcmp(w, "lock") == 0 || strcmp(w, "unlock") == 0)
+        return strcmp(w2, "tables") == 0 || strcmp(w2, "table") == 0;
+    if (strcmp(w, "load") == 0)           /* LOAD INDEX INTO CACHE */
+        return strcmp(w2, "index") == 0;
+    if (strcmp(w, "install") == 0 || strcmp(w, "uninstall") == 0)
+        return strcmp(w2, "plugin") == 0;
+    if (strcmp(w, "reset") == 0)          /* all but RESET PERSIST */
+        return w2[0] != '\0' && strcmp(w2, "persist") != 0;
+    if (strcmp(w, "start") == 0 || strcmp(w, "stop") == 0)
+        return strcmp(w2, "replica") == 0 || strcmp(w2, "slave") == 0;
+    if (strcmp(w, "change") == 0) {       /* CHANGE MASTER / REPLICATION SOURCE TO */
+        if (strcmp(w2, "master") == 0) return 1;
+        (void)hl_sql_next_word(p, w3, sizeof w3);
+        return strcmp(w2, "replication") == 0 && strcmp(w3, "source") == 0;
+    }
+    if (strcmp(w, "set") == 0)            /* SET PASSWORD (mysql.user) */
+        return strcmp(w2, "password") == 0;
     return 0;
 }
 
