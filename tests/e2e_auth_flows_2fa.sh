@@ -144,11 +144,13 @@ for e in reversed(emails):
 }
 # A mailed single-use link (magic link, email-change confirm / revoke): its GET
 # shows a page and consumes nothing (mail scanners prefetch links); the page's
-# form POSTs the token back. Extra curl options go after the URL.
+# form POSTs the token back, from the app's own page (its Origin: auth-flows
+# refuses a cross-site POST - login CSRF). Extra curl options go after the URL.
 link_post() {
     _lurl="$1"; shift
     _ltok=$(printf '%s\n' "$_lurl" | sed 's/.*token=//')
-    curl -sS "$@" -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+    curl -sS "$@" -X POST -H "Origin: ${_lurl%%/auth/*}" \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
         --data "token=$_ltok" "${_lurl%%\?*}"
 }
 extract_url() {
@@ -301,7 +303,21 @@ run_flow() {
     # Step +1 (login already consumed step 0; magic-link picks the
     # next future step within the ±1 window).
     CODE=$(totp_code "$SECRET" 1)
-    R=$(curl -sS -c "$COOKIES" -X POST \
+    # A cross-site form (login CSRF with someone's own pending token and
+    # code) is refused, same-site too; the app's own form goes through.
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Sec-Fetch-Site: cross-site' \
+        -d "token=$TOTP_TOKEN3&code=$CODE" \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
+        "$BASE/auth/totp-verify")
+    check_status "$_label: cross-site totp-verify form refused" "$S" "403"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Sec-Fetch-Site: same-site' \
+        -d "token=$TOTP_TOKEN3&code=$CODE" \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
+        "$BASE/auth/totp-verify")
+    check_status "$_label: same-site totp-verify form refused" "$S" "403"
+    R=$(curl -sS -c "$COOKIES" -X POST -H "Origin: $BASE" \
         -d "token=$TOTP_TOKEN3&code=$CODE" \
         -H 'Content-Type: application/x-www-form-urlencoded' \
         "$BASE/auth/totp-verify")

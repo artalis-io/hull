@@ -3746,6 +3746,75 @@ UTEST(js_stdlib, auth_flows_token_round_trip)
     cleanup_js_caps();
 }
 
+/* Login CSRF (audit 8): the guard on every session-setting POST - see the
+ * Lua twin auth_flows_cross_site_guard. */
+UTEST(js_stdlib, auth_flows_cross_site_guard)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code = AF_INIT_JS
+        "authFlows.init(defaults());\n"
+        "const g = authFlows._test.sameOriginRequest;\n"
+        "const st = authFlows._test.state;\n"
+        "st.trustRequestHost = false; st.trustedHosts = ['app.example.com'];\n"
+        "const form = 'application/x-www-form-urlencoded';\n"
+        "function req(h, body) { if (!h['content-type']) h['content-type'] = form;\n"
+        "  return { headers: h, body: body === undefined ? 'email=a%40b.co&password=x' : body }; }\n"
+        "function run() {\n"
+        "  if (!g(req({ 'sec-fetch-site': 'same-origin' }))) return 1;\n"
+        "  if (g(req({ 'sec-fetch-site': 'cross-site' }))) return 2;\n"
+        "  if (g(req({ 'sec-fetch-site': 'same-site' }))) return 3;\n"
+        "  if (g(req({ host: 'app.example.com' }))) return 4;\n"
+        "  if (!g(req({ host: 'app.example.com', origin: 'https://app.example.com' }))) return 5;\n"
+        "  if (g(req({ host: 'app.example.com', origin: 'https://evil.example' }))) return 6;\n"
+        "  if (g(req({ host: 'app.example.com', origin: 'null' }))) return 7;\n"
+        "  if (!g(req({ host: 'x.test:81', referer: 'http://x.test:81/login' }))) return 8;\n"
+        "  if (g(req({ 'content-type': 'text/plain; x=application/json' }, '{\"email\":\"a\"}'))) return 9;\n"
+        "  if (!g(req({ 'content-type': 'application/json; charset=utf-8' }, '{\"email\":\"a\"}'))) return 10;\n"
+        "  if (g(req({ 'content-type': 'application/json' }, 'email=a'))) return 11;\n"
+        "  if (g(req({ 'sec-fetch-site': 'cross-site', origin: 'https://app.example.com' }))) return 12;\n"
+        "  if (!g({ headers: {}, body: '' }, true)) return 13;\n"
+        "  if (g(req({ origin: 'https://app.example.com.evil.test' }))) return 14;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__af_xs = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__af_xs"), 0);
+
+    cleanup_js_caps();
+}
+
+/* An emailSend that returns a Promise (email.send is async) has its failure
+ * observed - logged - rather than dropped unhandled (audit 8). */
+UTEST(js_stdlib, auth_flows_async_email_send_failure_observed)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code = AF_INIT_JS
+        "globalThis.__af_obs = 0;\n"
+        "const o = defaults();\n"
+        "o.emailSend = () => ({ then(ok, fail) {\n"
+        "  if (typeof fail === 'function') { globalThis.__af_obs = 1; fail(new Error('smtp 554')); } } });\n"
+        "authFlows.init(o);\n"
+        "authFlows.sendVerifyEmail({ id: 'u1', email: 'a@x.com' }, 'http://t.io');\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__af_obs"), 1);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, auth_flows_register_verify_login)
 {
     init_js_with_caps();

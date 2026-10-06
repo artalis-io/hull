@@ -71,6 +71,12 @@
 --     address in `_hull_auth_pending_email_changes`; the row only
 --     swaps onto the user record after the user clicks the link
 --     sent to the new address. Old email stays active until then.
+--     Starting a change takes the current password (or
+--     email_change_reauth), and with templates.email_change_notify the
+--     old address gets a revoke link that cancels the change - or, once
+--     confirmed, restores the old address - and revokes every session.
+--   * Login CSRF: every POST that signs a browser in or changes the
+--     account refuses a cross-site request (see "Cross-site guard").
 --
 -- ## Usage
 --
@@ -285,6 +291,10 @@ local _state = {
     -- totp.disable). Called when the mailbox holder sets the password of an
     -- account that was not verified yet: see drop_preverify_totp.
     totp_disable          = nil,
+    -- `function(req, user) -> true` when the request proves a recent sign-in
+    -- of its own (or for passwordless accounts): POST /email-change then
+    -- needs no current password. See handle_email_change.
+    email_change_reauth   = nil,
     login_redirect        = "/",
     _initialized          = false,
 }
@@ -299,11 +309,13 @@ CREATE TABLE IF NOT EXISTS _hull_auth_used_tokens (
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
-    user_id     VARCHAR(255) PRIMARY KEY,
-    new_email   TEXT NOT NULL,
-    token_hash  TEXT NOT NULL,
-    created_at  INTEGER NOT NULL,
-    expires_at  INTEGER NOT NULL
+    user_id      VARCHAR(255) PRIMARY KEY,
+    new_email    TEXT NOT NULL,
+    token_hash   TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    old_email    TEXT,
+    confirmed_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
@@ -739,6 +751,87 @@ local function origin_for(req)
     return nil
 end
 
+-- ── Cross-site guard (login CSRF) ──────────────────────────────────
+-- Every POST that signs a browser in or changes the account behind its
+-- session - login, the 2FA step, a magic-link or verify click, a reset, an
+-- email change, its confirm and revoke - must come from the app's own pages.
+-- An attacker page that auto-submits a form to /login with the ATTACKER's
+-- credentials signs the victim in to the attacker's account (whatever the
+-- victim then saves lands there); SameSite cookies do not stop it (a logged-
+-- out victim has no cookie to withhold, and the answer's Set-Cookie is kept),
+-- nor does the CSRF middleware (it passes a request with no session).
+--
+-- Sec-Fetch-Site, which every current browser sends, must be same-origin or
+-- none: cross-site AND same-site are refused (a sibling subdomain is often
+-- less trusted than the app). A browser that sends none (Safari before 16.4)
+-- still sends Origin on a POST: it - or failing that Referer - must name the
+-- app (public_origin, a trusted_hosts entry, or the request's own Host, which
+-- a forged browser request cannot change). With no such header at all the
+-- client is not a browser, and only a JSON body is taken: a cross-site form
+-- cannot send that Content-Type without a CORS preflight.
+
+-- Is the Content-Type JSON? Its essence (before any parameter) must be
+-- application/json: a substring test took "text/plain; x=application/json",
+-- a CORS-safelisted type any cross-site form or no-cors fetch can send.
+local function is_json_ct(req)
+    local ct = req.headers and req.headers["content-type"]
+    if type(ct) ~= "string" then return false end
+    return _text.trim(ct:match("^[^;]*")):lower() == "application/json"
+end
+
+-- "scheme://authority" of an Origin / Referer value, lower-cased; nil for
+-- anything else ("null", a missing or malformed header).
+local function header_origin(v)
+    if type(v) ~= "string" then return nil end
+    local o = v:match("^(https?://[^/?#]+)")
+    return o and o:lower() or nil
+end
+
+local function origin_trusted(o, h)
+    if _state.public_origin and o == header_origin(_state.public_origin) then
+        return true
+    end
+    local authority = o:match("^https?://(.*)$")
+    if _state.trusted_hosts then
+        for _, allowed in ipairs(_state.trusted_hosts) do
+            local a = allowed:lower()
+            if authority == a or authority:match("^(.-):%d+$") == a then
+                return true
+            end
+        end
+    end
+    local host, port = request_host(h)
+    return host ~= nil
+        and authority == (host .. (port and (":" .. port) or "")):lower()
+end
+
+-- `allow_bare`: a request with no provenance header at all is let through
+-- whatever its body (logout, where forcing one only signs a user out).
+local function same_origin_request(req, allow_bare)
+    local h = req.headers or {}
+    local site = h["sec-fetch-site"]
+    if type(site) == "string" and site ~= "" then
+        return site == "same-origin" or site == "none"
+    end
+    if h.origin ~= nil then
+        local o = header_origin(h.origin)
+        return o ~= nil and origin_trusted(o, h)
+    end
+    local r = header_origin(h.referer)
+    if r then return origin_trusted(r, h) end
+    if allow_bare then return true end
+    if not is_json_ct(req) then return false end
+    local ok, t = pcall(json.decode, req.body or "")
+    return ok and type(t) == "table"
+end
+
+-- Answer 403 and return true when the request is cross-site.
+local function refuse_cross_site(req, res, allow_bare)
+    if same_origin_request(req, allow_bare) then return false end
+    res:status(403):json({ error = "forbidden: cross-site request" })
+    return true
+end
+
 local function send_email(to, template_name, ctx)
     if not email_rate_allow(to) then return end
     -- Belt-and-suspenders: scrub user.password_hash in the ctx so a
@@ -954,8 +1047,7 @@ end
 local function parse_body(req)
     local body = req.body or ""
     if #body == 0 then return {} end
-    local ct = (req.headers and req.headers["content-type"]) or ""
-    if ct:find("application/json", 1, true) then
+    if is_json_ct(req) then
         local ok, t = pcall(json.decode, body)
         if ok and type(t) == "table" then return t end
         return {}
@@ -1012,10 +1104,13 @@ local function generic_ok(res)
 end
 
 -- The pending email change of @p user_id, if any, deleted: whenever the
--- password is reset or replaced (see handle_password_reset_confirm).
+-- password is reset or replaced (see handle_password_reset_confirm). A
+-- CONFIRMED change's row stays: it is what lets the old address revoke it
+-- (a session thief who resets the password through the new address must not
+-- erase that).
 local function drop_pending_email_change(user_id)
-    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-            { user_id })
+    db.exec("DELETE FROM _hull_auth_pending_email_changes "
+            .. "WHERE user_id = ? AND confirmed_at IS NULL", { user_id })
 end
 
 -- Run the app's on_password_reset (typically session.destroy_all). Logged,
@@ -1191,8 +1286,7 @@ end
 -- Is this request a JSON API call (answer JSON) or a browser form (answer a
 -- page / redirect)?
 local function wants_json(req)
-    local ct = (req.headers and req.headers["content-type"]) or ""
-    return ct:find("application/json", 1, true) ~= nil
+    return is_json_ct(req)
 end
 
 -- The default verification page. The token is a verified envelope (base64url
@@ -1264,6 +1358,7 @@ local VERIFY_WRONG_PASSWORD = "password does not match; to set a new password "
     .. "instead, submit new_password"
 
 local function handle_verify(req, res)
+    if refuse_cross_site(req, res) then return end
     local body = parse_body(req)
     local token = body.token
     local env, err = parse_token(token, ACTIONS.verify_email)
@@ -1380,6 +1475,8 @@ local function start_totp_pending(req, res, user, as_page)
 end
 
 local function handle_login(req, res)
+    -- Login CSRF: see "Cross-site guard".
+    if refuse_cross_site(req, res) then return end
     local body = parse_body(req)
     -- 256 char upper bound matches register; prevents PBKDF2
     -- amplification DoS via mega-passwords. Generic error keeps
@@ -1444,11 +1541,9 @@ local function handle_logout(req, res)
     -- A cross-site POST (an attacker page auto-submitting a form) is
     -- refused, as oauth's logout does: SameSite=Lax keeps the session cookie
     -- off it, but the clearing Set-Cookie in the answer would still sign the
-    -- victim out.
-    local site = req.headers and req.headers["sec-fetch-site"]
-    if site == "cross-site" then
-        return res:status(403):json({ error = "forbidden" })
-    end
+    -- victim out. A client that sends no provenance header at all is let
+    -- through: forcing a logout is all a forged one could do.
+    if refuse_cross_site(req, res, true) then return end
     if _state.on_logout then
         return _state.on_logout(req, res)
     end
@@ -1539,9 +1634,7 @@ end
 local function handle_magic_link_consume(req, res)
     -- A cross-site form would sign the victim in to the attacker's account
     -- with the attacker's own link (login CSRF).
-    if req.headers and req.headers["sec-fetch-site"] == "cross-site" then
-        return res:status(403):json({ error = "forbidden" })
-    end
+    if refuse_cross_site(req, res) then return end
     local token = parse_body(req).token
     local env, err = consume_token(token, ACTIONS.magic_link)
     if not env then
@@ -1593,6 +1686,8 @@ local function handle_totp_verify(req, res)
     if not _state.enable_totp then
         return res:status(404):json({ error = "totp not enabled" })
     end
+    -- Login CSRF with the attacker's own pending token and code.
+    if refuse_cross_site(req, res) then return end
     local body = parse_body(req)
     if type(body.token) ~= "string" or type(body.code) ~= "string" then
         return res:status(400):json({ error = "missing token or code" })
@@ -1657,6 +1752,7 @@ local function handle_password_reset_request(req, res)
 end
 
 local function handle_password_reset_confirm(req, res)
+    if refuse_cross_site(req, res) then return end
     local body = parse_body(req)
     -- Same upper bound as handle_register; see comment there.
     if not password_len_ok(body.password) then
@@ -1717,9 +1813,44 @@ local function handle_email_change(req, res)
     if not user_id then
         return res:status(401):json({ error = "not authenticated" })
     end
+    if refuse_cross_site(req, res) then return end
     local body = parse_body(req)
     if not is_email_ish(body.new_email) then
         return res:status(400):json({ error = "invalid email" })
+    end
+    -- A session is not enough: whoever stole one would move the account to
+    -- an address they read, confirm it in seconds, and own the account for
+    -- good through a password reset there. The current password (counted
+    -- toward the login lockout, like /login) proves the account holder; an
+    -- app with its own proof of a recent sign-in - or passwordless accounts -
+    -- passes email_change_reauth(req, user) -> true instead.
+    local current = _state.user_get(user_id)
+    if not current then
+        return res:status(401):json({ error = "not authenticated" })
+    end
+    local reauthed = false
+    if _state.email_change_reauth then
+        local ok, r = pcall(_state.email_change_reauth, req, current)
+        reauthed = ok and r == true
+    end
+    if not reauthed then
+        local pw = body.password
+        if type(pw) ~= "string" or pw == "" then
+            return res:status(401):json({ error = "current password required" })
+        end
+        -- The lockout rows /login uses: keyed by the account's own id.
+        local uid = user_uid(current) or user_id
+        local ip_key = attempt_ip_key(uid, req)
+        local locked = lockout_remaining(ip_key) > 0 or lockout_remaining(uid) > 0
+        local stored = not locked and password_len_ok(pw, false)
+                       and stored_password_hash(current)
+        if not (type(stored) == "string" and crypto.verify_password(pw, stored)) then
+            if not locked then
+                bump_failed_login(ip_key, _state.max_failed_logins)
+                bump_failed_login(uid, _state.max_failed_logins_per_account)
+            end
+            return res:status(401):json({ error = "invalid credentials" })
+        end
     end
     -- Reject if the target email is already taken - reveals
     -- existence, but that's a UX call (the alternative is a silent
@@ -1748,11 +1879,19 @@ local function handle_email_change(req, res)
     -- click revoke or wait email_change_ttl. Expired pending rows
     -- are reaped by gc_expired so the user isn't blocked forever
     -- if they abandoned the prior attempt.
+    -- A confirmed change keeps its row until its revoke link expires, and
+    -- blocks a new one meanwhile: a thief must not bury it under a second
+    -- change (whose revoke would restore only the thief's address).
     local existing = db.query(
-        "SELECT new_email FROM _hull_auth_pending_email_changes "
+        "SELECT new_email, confirmed_at FROM _hull_auth_pending_email_changes "
         .. "WHERE user_id = ? AND expires_at > ? LIMIT 1",
         { user_id, time.now() })
     if existing and #existing > 0 then
+        if existing[1].confirmed_at ~= nil then
+            return res:status(409):json({
+                error = "a recent email change can still be revoked; try again later",
+            })
+        end
         return res:status(409):json({
             error = "pending email change exists",
             new_email = existing[1].new_email,
@@ -1763,14 +1902,17 @@ local function handle_email_change(req, res)
     local token = issue_token(user_id, ACTIONS.email_change,
         _state.email_change_ttl, { new_email = body.new_email })
     local token_hash = encoding.hex.encode(crypto.sha256(token))
-    db.upsert(
-        "_hull_auth_pending_email_changes",
-        { "user_id" },
-        { "user_id", "new_email", "token_hash", "created_at", "expires_at" },
-        { user_id, body.new_email, token_hash, now,
-          now + _state.email_change_ttl })
+    -- An expired row (not reaped yet) is replaced whole: an upsert kept its
+    -- old_email / confirmed_at.
+    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
+            { user_id })
+    db.exec("INSERT INTO _hull_auth_pending_email_changes "
+            .. "(user_id, new_email, token_hash, created_at, expires_at) "
+            .. "VALUES (?, ?, ?, ?, ?)",
+            { user_id, body.new_email, token_hash, now,
+              now + _state.email_change_ttl })
 
-    local user = _state.user_get(user_id)
+    local user = current
     local link = origin .. _state.prefix
                  .. "/email-change/confirm?token=" .. token
     -- Send to the NEW address - proves the user controls it.
@@ -1785,8 +1927,12 @@ local function handle_email_change(req, res)
     -- pathological row-deleted-mid-request race): the confirm email above uses
     -- a nil-safe template ctx, but user.email below is a hard deref.
     if user and _state.templates.email_change_notify then
+        -- Bound to THIS change (`ch`, its confirm token's hash): a revoke
+        -- link from an earlier change, in a mailbox the account has since
+        -- left, does not cancel or undo a later one.
         local revoke_tok = issue_token(user_id,
-            ACTIONS.email_change_revoke, _state.email_change_ttl)
+            ACTIONS.email_change_revoke, _state.email_change_ttl,
+            { ch = token_hash })
         local revoke_url = origin .. _state.prefix
             .. "/email-change/revoke?token=" .. revoke_tok
         send_email(user.email, "email_change_notify", {
@@ -1799,41 +1945,79 @@ local function handle_email_change(req, res)
 end
 
 -- GET /auth/email-change/revoke?token=... - the page; POST consumes
--- it (see "Single-use links"). The OLD-address holder cancels a
--- pending email change: single-use via the same _hull_auth_used_tokens
--- table; deletes the pending row, so the change's confirm link stops
--- working too.
+-- it (see "Single-use links"). The OLD-address holder undoes the email
+-- change the link was sent for: a pending one is cancelled (its row
+-- deleted, so its confirm link stops working); one already confirmed is
+-- reversed - the old address restored - for as long as the link lives
+-- (email_change_ttl from the request). Either way every session of the
+-- account is revoked through on_password_reset: the change may have come
+-- from a stolen one.
 local function handle_email_change_revoke_page(req, res)
     local token = link_page_token(req, res, ACTIONS.email_change_revoke, "revoke failed")
     if not token then return end
     secure_html(res):html(link_form_html("/email-change/revoke", token,
-        "Cancel the email change", "Cancel the change"))
+        "Undo the email change", "Undo the change"))
 end
 
 local function handle_email_change_revoke(req, res)
+    if refuse_cross_site(req, res) then return end
     local env, err = consume_token(parse_body(req).token, ACTIONS.email_change_revoke)
     if not env then
         return verify_fail(req, res, 400, "revoke failed: " .. (err or "?"))
     end
+    local rows = db.query(
+        "SELECT token_hash, old_email, confirmed_at FROM _hull_auth_pending_email_changes "
+        .. "WHERE user_id = ?", { env.sub })
+    local row = rows and rows[1]
+    if not row or type(env.ch) ~= "string" or type(row.token_hash) ~= "string"
+       or not crypto.constant_time_eq(row.token_hash, env.ch) then
+        return verify_fail(req, res, 400, "revoke failed")
+    end
+    local user = _state.user_get(env.sub)
+    if not user then return verify_fail(req, res, 400, "revoke failed") end
+    local restored = false
+    if row.confirmed_at ~= nil then
+        local old = row.old_email
+        local holder = type(old) == "string" and _state.user_find_by_email(old)
+        if type(old) ~= "string"
+           or (holder and tostring(user_uid(holder)) ~= tostring(env.sub)) then
+            -- Taken since by another account: nothing to restore to.
+            require("hull.log").warn("auth-flows: email change of account "
+                .. tostring(env.sub) .. " cannot be reverted: its previous "
+                .. "address is in use; sessions revoked")
+            run_on_password_reset(req, res, user)
+            return verify_fail(req, res, 409, "revoke failed: the previous address is in use")
+        end
+        _state.user_set_email(env.sub, old)
+        -- The revoke link reached the old mailbox: it is proven again.
+        _state.user_set_email_verified(env.sub, true)
+        user.email = old
+        restored = true
+    end
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             { env.sub })
+    run_on_password_reset(req, res, user)
     emit_event(env.sub, "email_change_revoked", req,
-               { metadata = { by = "old_address" } })
+               { metadata = { by = "old_address", restored = restored } })
     gc_expired()
-    if wants_json(req) then return res:json({ ok = true }) end
-    secure_html(res):html("Email change canceled.")
+    if wants_json(req) then return res:json({ ok = true, restored = restored }) end
+    secure_html(res):html(restored
+        and "Email change undone: your previous address is restored."
+        or "Email change canceled.")
 end
 
 -- Does the pending change still match this confirm link? There must be a
--- pending row, for the envelope's new_email, and its token_hash must be
--- THIS token's: only the latest link of the pending change confirms it,
--- and none once the row is gone (revoked, superseded, done).
+-- pending (unconfirmed) row, for the envelope's new_email, and its
+-- token_hash must be THIS token's: only the latest link of the pending
+-- change confirms it, and none once the row is gone (revoked, superseded)
+-- or confirmed.
 local function pending_change_matches(env, token)
     local rows = db.query(
-        "SELECT new_email, token_hash FROM _hull_auth_pending_email_changes "
+        "SELECT new_email, token_hash, confirmed_at FROM _hull_auth_pending_email_changes "
         .. "WHERE user_id = ?", { env.sub })
     local th = encoding.hex.encode(crypto.sha256(token))
     return rows ~= nil and #rows > 0
+       and rows[1].confirmed_at == nil
        and rows[1].new_email == env.new_email
        and type(rows[1].token_hash) == "string"
        and crypto.constant_time_eq(rows[1].token_hash, th)
@@ -1850,6 +2034,7 @@ local function handle_email_change_page(req, res)
 end
 
 local function handle_email_change_confirm(req, res)
+    if refuse_cross_site(req, res) then return end
     local token = parse_body(req).token
     local env, err = consume_token(token, ACTIONS.email_change)
     if not env then
@@ -1862,8 +2047,17 @@ local function handle_email_change_confirm(req, res)
     local old_email = user.email
     _state.user_set_email(env.sub, env.new_email)
     _state.user_set_email_verified(env.sub, true)
-    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-            { env.sub })
+    -- With a revoke link out (email_change_notify), the row stays, confirmed
+    -- and holding the old address, until that link expires: the old address
+    -- can still undo the change. Without one there is nothing to undo it with.
+    if _state.templates.email_change_notify then
+        db.exec("UPDATE _hull_auth_pending_email_changes "
+                .. "SET confirmed_at = ?, old_email = ? WHERE user_id = ?",
+                { time.now(), old_email, env.sub })
+    else
+        db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
+                { env.sub })
+    end
     emit_event(env.sub, "email_changed", req,
                { metadata = { old_email = old_email,
                               new_email = env.new_email } })
@@ -2249,6 +2443,10 @@ function M.init(opts)
         error("auth-flows.init: totp_disable must be a function(user_id)")
     end
     _state.totp_disable = opts.totp_disable
+    if opts.email_change_reauth ~= nil and type(opts.email_change_reauth) ~= "function" then
+        error("auth-flows.init: email_change_reauth must be a function(req, user)")
+    end
+    _state.email_change_reauth = opts.email_change_reauth
     _state.login_redirect   = opts.login_redirect   or _state.login_redirect
     if opts.enumeration_safe ~= nil then
         _state.enumeration_safe = opts.enumeration_safe
@@ -2266,6 +2464,29 @@ function M.init(opts)
             if #s > 0 then db.exec(s) end
         end
     end)
+    -- A table made before an email change was kept after its confirm (for
+    -- revoke): add the columns that keep it. A failed ALTER (another instance
+    -- added the column first) is re-checked, as session.lua does. A closure,
+    -- not pcall(db.exec, ...): the _hull_* guard reads db.exec's caller.
+    local cols = {}
+    for _, n in ipairs(db.table_columns("_hull_auth_pending_email_changes") or {}) do
+        cols[n] = true
+    end
+    for _, c in ipairs({ { "old_email", "old_email TEXT" },
+                         { "confirmed_at", "confirmed_at INTEGER" } }) do
+        if not cols[c[1]] then
+            local ok, err = pcall(function()
+                db.exec("ALTER TABLE _hull_auth_pending_email_changes ADD COLUMN " .. c[2])
+            end)
+            if not ok then
+                local found = false
+                for _, n in ipairs(db.table_columns("_hull_auth_pending_email_changes") or {}) do
+                    if n == c[1] then found = true end
+                end
+                if not found then error(err, 0) end
+            end
+        end
+    end
 
     _state._initialized = true
 end
@@ -2366,6 +2587,7 @@ M._test = {
     gc_expired         = gc_expired,
     is_email_ish       = is_email_ish,
     parse_body         = parse_body,
+    same_origin_request = same_origin_request,
     ACTIONS            = ACTIONS,
     email_rate_allow   = function(to) return email_rate_allow(to) end,
     email_rate_reset   = function()
@@ -2395,6 +2617,7 @@ M._test = {
         _state.totp_pending_redirect   = nil
         _state.verify_form_redirect    = nil
         _state.totp_disable            = nil
+        _state.email_change_reauth     = nil
         _state.check_pwned_passwords   = false
         _state.pwned_endpoint          = nil
         _state.max_failed_logins       = 5

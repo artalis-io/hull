@@ -131,11 +131,13 @@ for e in reversed(emails):
 # Pull the first URL out of a captured email body.
 # A mailed single-use link (magic link, email-change confirm / revoke): its GET
 # shows a page and consumes nothing (mail scanners prefetch links); the page's
-# form POSTs the token back. Extra curl options go after the URL.
+# form POSTs the token back, from the app's own page (its Origin: auth-flows
+# refuses a cross-site POST - login CSRF). Extra curl options go after the URL.
 link_post() {
     _lurl="$1"; shift
     _ltok=$(printf '%s\n' "$_lurl" | sed 's/.*token=//')
-    curl -sS "$@" -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+    curl -sS "$@" -X POST -H "Origin: ${_lurl%%/auth/*}" \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
         --data "token=$_ltok" "${_lurl%%\?*}"
 }
 extract_url() {
@@ -220,6 +222,31 @@ run_flow() {
     check_contains "$_label: /_me reflects logged-in email" \
         "$R" "\"email\":\"$EMAIL_A\""
 
+    # 4c. Login CSRF (audit 8): a form POSTed to /login from another site
+    #     would sign the victim in to the attacker's account. Refused when
+    #     Sec-Fetch-Site says cross-site or same-site, when there is no
+    #     provenance header (a form, not JSON), and for a foreign Origin;
+    #     the app's own form (its Origin) signs in.
+    _form="email=$EMAIL_A&password=$PW1"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Sec-Fetch-Site: cross-site' \
+        -H 'Content-Type: application/x-www-form-urlencoded' --data "$_form" "$BASE/auth/login")
+    check_status "$_label: cross-site login form refused" "$S" "403"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Sec-Fetch-Site: same-site' \
+        -H 'Content-Type: application/x-www-form-urlencoded' --data "$_form" "$BASE/auth/login")
+    check_status "$_label: same-site login form refused" "$S" "403"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/x-www-form-urlencoded' --data "$_form" "$BASE/auth/login")
+    check_status "$_label: login form without Origin refused" "$S" "403"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Origin: https://evil.example' \
+        -H 'Content-Type: application/x-www-form-urlencoded' --data "$_form" "$BASE/auth/login")
+    check_status "$_label: login form from a foreign Origin refused" "$S" "403"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: text/plain; x=application/json' \
+        --data "{\"email\":\"$EMAIL_A\",\"password\":\"$PW1\"}" "$BASE/auth/login")
+    check_status "$_label: text/plain 'JSON' login refused" "$S" "403"
+    R=$(curl -sS -X POST -H "Origin: $BASE" \
+        -H 'Content-Type: application/x-www-form-urlencoded' --data "$_form" "$BASE/auth/login")
+    check_contains "$_label: same-origin login form ok" "$R" '"ok":true'
+
     # 5. Logout
     R=$(curl -sS -b "$COOKIES" -c "$COOKIES" -X POST "$BASE/auth/logout")
     check_contains "$_label: logout ok" "$R" '"ok":true'
@@ -289,8 +316,19 @@ run_flow() {
 
     # 12. Email-change request (logged in via the magic-link session)
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null
+    # The session alone does not move the account (audit 8): the current
+    # password is required, and a wrong one refused.
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" -X POST \
+        -H 'Content-Type: application/json' -d "{\"new_email\":\"$EMAIL_B\"}" \
+        "$BASE/auth/email-change")
+    check_status "$_label: email-change without the password refused" "$S" "401"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" -X POST \
+        -H 'Content-Type: application/json' \
+        -d "{\"new_email\":\"$EMAIL_B\",\"password\":\"wrongpassword99\"}" \
+        "$BASE/auth/email-change")
+    check_status "$_label: email-change with a wrong password refused" "$S" "401"
     R=$(curl -sS -b "$COOKIES" -X POST -H 'Content-Type: application/json' \
-        -d "{\"new_email\":\"$EMAIL_B\"}" \
+        -d "{\"new_email\":\"$EMAIL_B\",\"password\":\"$PW2\"}" \
         "$BASE/auth/email-change")
     check_contains "$_label: email-change request ok" "$R" '"ok":true'
     TEXT=$(last_email_text "$PORT" "$EMAIL_B")
@@ -367,6 +405,25 @@ run_flow() {
     # gate reads the hash through user_find_by_email - audit 6 M1 - and its
     # email_verified is a raw 0 / 1, which Lua used to read as true. The JS
     # fixture's is a string "0", which JS used to read as true - audit 7.)
+
+    # 18b. The deferred mail is sent AFTER the response (audit 8): with a
+    #      magic-link template that takes 300 ms, the request for an existing
+    #      account still answers at once (JS attached its timer to the
+    #      request, so the response waited for the render - only for
+    #      existing accounts), and the mail still goes out.
+    curl -sS -X POST "$BASE/_slow_templates" > /dev/null
+    curl -sS -X POST "$BASE/_emails/clear" > /dev/null
+    T=$(curl -sS -o /dev/null -w '%{time_total}' -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL_C\"}" "$BASE/auth/magic-link")
+    if python3 -c "import sys; sys.exit(0 if float('$T') < 0.2 else 1)"; then
+        pass "$_label: magic-link answers before the (slow) mail render"
+    else
+        fail "$_label: magic-link waited for the mail render (${T}s)"
+    fi
+    sleep 0.8
+    TEXT=$(last_email_text "$PORT" "$EMAIL_C")
+    check_contains "$_label: ...and the mail is sent after it" \
+        "$TEXT" "/auth/magic-link/consume?token="
 
     # 19. Audit 6: logout refuses a cross-site POST (a forged form would
     #     still sign the victim out through the clearing Set-Cookie), and

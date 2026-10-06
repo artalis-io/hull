@@ -1113,6 +1113,9 @@ end
 -- jobs.reap and jobs.workflow).
 local WF_TYPE_PREFIX = "__wf:"
 local WF_COMPENSATE_KEY = "__compensate"
+-- The step-store row holding a workflow's retry generation (ctx.generation):
+-- absent for the first run, bumped by every jobs.retry.
+local WF_GEN_KEY = "__gen"
 
 --- Reclaim jobs stuck in `running` past the visibility timeout - a worker that
 -- claimed them died before completing. One whose attempts are used up is
@@ -2130,10 +2133,22 @@ local function make_ctx(job, name)
             .. "AND substr(step_key, 1, 8) <> '__sleep:' "
             .. "AND substr(step_key, 1, 9) <> '__waitdl:' "
             .. "AND substr(step_key, 1, 6) <> '__sig:' "
-            .. "AND step_key <> ?",
-            { job.id, WF_COMPENSATE_KEY })
+            .. "AND step_key <> ? AND step_key <> ?",
+            { job.id, WF_COMPENSATE_KEY, WF_GEN_KEY })
         return (r and r[1] and r[1].n) or 0
     end)()
+    -- The retry generation: 0 on the first run, +1 per jobs.retry. A step
+    -- that is idempotent on a key (a payment provider's idempotency key) and
+    -- has a compensation must put this in the key: after jobs.retry re-runs
+    -- the compensated step, the same key would only fetch back the original,
+    -- since-refunded result. ctx.uuid() folds it in too.
+    local generation = (function()
+        local r = db.query(
+            "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            { job.id, WF_GEN_KEY })
+        return (r and r[1] and tonumber(r[1].result)) or 0
+    end)()
+    ctx.generation = generation
     -- A compensation run (the reaper's extra attempt after a lost last one):
     -- replay only what completed; never start new work.
     local compensating = (function()
@@ -2190,10 +2205,13 @@ local function make_ctx(job, name)
         det_n = det_n + 1; step_pos = step_pos + 1
         return run_step(job.id, "__rand:" .. det_n, function() return math.random() end)
     end
+    -- A uuid is per generation: after jobs.retry every ctx.uuid() is new, so
+    -- one used as an idempotency key reaches the provider as a new request.
     ctx.uuid = function()
         det_n = det_n + 1; step_pos = step_pos + 1
-        return run_step(job.id, "__uuid:" .. det_n,
-            function() return crypto.random_token(16) end)
+        local key = generation == 0 and ("__uuid:" .. det_n)
+                    or ("__uuid:" .. generation .. "." .. det_n)
+        return run_step(job.id, key, function() return crypto.random_token(16) end)
     end
     -- Workflow versioning: ctx.patched(patch_id) lets a changed workflow branch
     -- old-vs-new so in-flight instances finish on the definition they started.
@@ -2300,32 +2318,70 @@ end
 -- held at a time: a signal sent while an earlier one of the same name is still
 -- unconsumed is dropped; once a wait has consumed it, the next one is held for
 -- the next wait on that name.
--- Returns true.
+--
+-- `opts.delivery_id` makes a delivery idempotent: a sender that retries (a
+-- webhook redelivered after a timeout, a double-clicked approval) passes the
+-- same id each time, and a delivery whose id this workflow has already seen
+-- for this name is dropped - whether or not a wait consumed the first. Without
+-- one, a duplicate arriving after a wait consumed the first counts as the next
+-- delivery (it satisfies the next wait on the name). Multi-round waits on one
+-- name should always pass one.
+-- Returns true, or false when the delivery was dropped as a duplicate id.
 -- @tparam number id       the workflow id
 -- @tparam string name     the signal name
 -- @tparam[opt] any payload
+-- @tparam[opt] table opts  { delivery_id = string }
 -- @treturn boolean
-function jobs.signal(id, name, payload)
+function jobs.signal(id, name, payload, opts)
     if type(name) ~= "string" or name == "" then
         error("jobs.signal: name must be a non-empty string")
     end
+    if opts ~= nil and type(opts) ~= "table" then
+        error("jobs.signal: opts must be a table")
+    end
+    local delivery = opts and opts.delivery_id
+    if delivery ~= nil and (type(delivery) ~= "string" or delivery == "") then
+        error("jobs.signal: opts.delivery_id must be a non-empty string")
+    end
     local enc = payload ~= nil and json.encode(payload) or nil
     local now = time.now()
-    local n = db.insert_if_absent("_hull_workflow_signals", { "workflow_id", "name" },
-        { "workflow_id", "name", "payload", "created_at" }, { id, name, enc, now })
-    if (n or 0) == 0 then
-        -- The name was signalled before. Once that delivery has been consumed
-        -- (by an earlier wait), this one is stored for the next wait on the
-        -- name; while it is still pending, this one is dropped.
-        db.exec("UPDATE _hull_workflow_signals SET payload=?, created_at=?, consumed_at=NULL "
-            .. "WHERE workflow_id=? AND name=? AND consumed_at IS NOT NULL",
-            { enc, now, id, name })
-    end
-    -- Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
-    -- 'pending' workflow is left alone: it finds the stored signal on its own.
-    db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, updated_at=? "
-        .. "WHERE id=? AND status='waiting'", { now, now, id })
-    return true
+    local accepted = true
+    db.batch(function()
+        local seen_key
+        if delivery then
+            -- One row per (name, delivery id) seen, in the step store under
+            -- the "__sig:" control prefix (kept out of the patch frontier and
+            -- workflow_status); hashed to fit the key column.
+            seen_key = "__sig:d:" .. crypto.sha256(name .. "\0" .. delivery):gsub(".",
+                function(c) return string.format("%02x", c:byte()) end)
+            local seen = db.insert_if_absent("_hull_workflow_steps",
+                { "workflow_id", "step_key" },
+                { "workflow_id", "step_key", "result", "status", "created_at" },
+                { id, seen_key, "", "delivered", now })
+            if (seen or 0) == 0 then accepted = false; return end
+        end
+        local n = db.insert_if_absent("_hull_workflow_signals", { "workflow_id", "name" },
+            { "workflow_id", "name", "payload", "created_at" }, { id, name, enc, now })
+        if (n or 0) == 0 then
+            -- The name was signalled before. Once that delivery has been consumed
+            -- (by an earlier wait), this one is stored for the next wait on the
+            -- name; while it is still pending, this one is dropped - and its id
+            -- is not kept, so the sender's retry of it can still land.
+            local stored = db.exec("UPDATE _hull_workflow_signals SET payload=?, "
+                .. "created_at=?, consumed_at=NULL "
+                .. "WHERE workflow_id=? AND name=? AND consumed_at IS NOT NULL",
+                { enc, now, id, name })
+            if (stored or 0) == 0 and seen_key then
+                db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                    { id, seen_key })
+            end
+        end
+        -- Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
+        -- 'pending' workflow is left alone: it finds the stored signal on its own.
+        db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, updated_at=? "
+            .. "WHERE id=? AND status='waiting'", { now, now, id })
+    end)
+    return accepted
 end
 
 --- Query a workflow instance's state (DB-derived, so it works even when no
@@ -2456,6 +2512,26 @@ function jobs.retry(id)
         -- compensation failed keeps its row - its effect still stands.
         db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND status='compensated'",
             { id })
+        -- Running the step again is not enough when it is idempotent on a key
+        -- (as steps must be): the same key would fetch back the original,
+        -- since-refunded result. The requeued run is a new generation
+        -- (ctx.generation, folded into every ctx.uuid), and the old uuid memos
+        -- go - prefix compare, not LIKE ('_' is a wildcard there).
+        local t = db.query("SELECT type FROM _hull_jobs WHERE id=?", { id })
+        if t and t[1] and tostring(t[1].type):sub(1, #WF_PREFIX) == WF_PREFIX then
+            local g = db.query(
+                "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                { id, WF_GEN_KEY })
+            local gen = ((g and g[1] and tonumber(g[1].result)) or 0) + 1
+            db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                { id, WF_GEN_KEY })
+            db.exec(
+                "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+                .. "VALUES (?, ?, ?, 'done', ?)",
+                { id, WF_GEN_KEY, tostring(gen), now })
+            db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? "
+                .. "AND substr(step_key, 1, 7) = '__uuid:'", { id })
+        end
     end)
     return (n or 0) > 0
 end

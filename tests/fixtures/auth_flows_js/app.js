@@ -27,6 +27,7 @@ const usersByEmail = {};
 const usersById = {};
 let nextId = 0;
 let sentEmails = [];
+let slowTemplates = false;
 
 function userCreate(email, pwhash) {
     nextId += 1;
@@ -55,7 +56,12 @@ authFlows.init({
     templates: {
         welcome:        c => ({ subject: "Welcome", text: "verify: " + c.verify_url }),
         verify:         c => ({ subject: "Verify",  text: "verify: " + (c.verify_url || c.link || "?") }),
-        magic_link:     c => ({ subject: "Sign in", text: "link: " + c.link }),
+        // POST /_slow_templates: a 300 ms render, so the e2e can tell whether
+        // the mail is sent before or after the response.
+        magic_link:     c => {
+            if (slowTemplates) { const stop = Date.now() + 300; while (Date.now() < stop) { /* spin */ } }
+            return { subject: "Sign in", text: "link: " + c.link };
+        },
         password_reset: c => ({ subject: "Reset",   text: "link: " + c.link }),
         email_change:   c => ({ subject: "Confirm email change", text: "link: " + c.link }),
     },
@@ -120,6 +126,7 @@ app.get("/_init_refuses_unverified_login", (_req, res) => {
 
 app.get("/_emails",         (_req, res) => res.json(sentEmails));
 app.post("/_emails/clear",  (_req, res) => { sentEmails = []; res.json({ ok: true }); });
+app.post("/_slow_templates", (_req, res) => { slowTemplates = true; res.json({ ok: true }); });
 app.get("/_me", (req, res) => {
     if (!req.ctx || !req.ctx.session) {
         return res.status(401).json({ error: "not signed in" });

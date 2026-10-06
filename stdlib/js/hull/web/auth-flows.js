@@ -107,6 +107,10 @@ const _state = {
     // called when the mailbox holder sets the password of an account that was
     // not verified yet. See dropPreverifyTotp.
     totpDisable:         null,
+    // `(req, user) => true` when the request proves a recent sign-in of its
+    // own (or for passwordless accounts): POST /email-change then needs no
+    // current password. See handleEmailChange.
+    emailChangeReauth:   null,
     loginRedirect:       "/",
     initialized:         false,
 };
@@ -119,11 +123,13 @@ CREATE TABLE IF NOT EXISTS _hull_auth_used_tokens (
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
-    user_id     VARCHAR(255) PRIMARY KEY,
-    new_email   TEXT NOT NULL,
-    token_hash  TEXT NOT NULL,
-    created_at  INTEGER NOT NULL,
-    expires_at  INTEGER NOT NULL
+    user_id      VARCHAR(255) PRIMARY KEY,
+    new_email    TEXT NOT NULL,
+    token_hash   TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    old_email    TEXT,
+    confirmed_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
@@ -390,20 +396,49 @@ function stripUserSecrets(user) {
 // answers equally fast. Inline only where there is no loop to defer onto (an
 // in-process test harness, where hull.sleep throws); a failure is logged, not
 // thrown - the response is already sent.
-function afterResponse(fn) {
-    const run = () => {
+//
+// A hull.sleep made in the handler attaches to the request's connection: the
+// response waited for it, then for fn's template and email send (an SMTP op
+// fn started attached too) - for existing accounts only, a timing oracle
+// (audit 8). So fn is queued, and the timer is armed from a promise job: the
+// dispatcher runs the jobs a SYNCHRONOUS handler queued once its request is
+// over, so that timer - and everything fn starts - belongs to no request.
+// Every handler that defers is synchronous for that reason (handleRegister
+// is unless checkPwnedPasswords makes it wait on HIBP; the Lua twin spawns a
+// detached coroutine, which JS has no primitive for).
+const _deferred = [];
+let _deferArmed = false;
+
+function runDeferred() {
+    _deferArmed = false;
+    const batch = _deferred.splice(0, _deferred.length);
+    for (const fn of batch) {
         try { fn(); }
         catch (e) { log.warn("auth-flows: deferred email failed: " + String(e && e.message || e)); }
-    };
+    }
+}
+
+function armDeferred() {
     let wait = null;
     try { wait = hull.sleep(1); } catch (_) { wait = null; }
     if (wait && typeof wait.then === "function") {
-        wait.then(run, run);
+        wait.then(runDeferred, runDeferred);
         return;
     }
-    run();
+    runDeferred();
 }
 
+function afterResponse(fn) {
+    _deferred.push(fn);
+    if (_deferArmed) return;
+    _deferArmed = true;
+    Promise.resolve().then(armDeferred);
+}
+
+// An emailSend that returns a Promise (email.send is async) rejects on a
+// failed send, and nothing observed it: every verification / reset / magic
+// link was dropped without a log line. Its failure is logged here, as the Lua
+// twin's pcall logs one.
 function sendEmail(to, templateName, ctx) {
     if (!emailRateAllow(to)) return;
     if (ctx && typeof ctx === "object" && ctx.user
@@ -411,7 +446,15 @@ function sendEmail(to, templateName, ctx) {
         ctx.user = stripUserSecrets(ctx.user);
     }
     const r = renderTemplate(templateName, ctx);
-    _state.emailSend(to, r.subject, r.html, r.text);
+    const sent = _state.emailSend(to, r.subject, r.html, r.text);
+    if (sent && typeof sent.then === "function") {
+        try {
+            sent.then(undefined, (e) => {
+                log.warn("auth-flows: email send failed: "
+                    + String(e && (e.message || e.code) || e));
+            });
+        } catch (_) { /* a thenable whose then throws: nothing to observe */ }
+    }
 }
 
 function gcExpired() {
@@ -551,8 +594,7 @@ function finishLogin(req, res, user, factors) {
 function parseBody(req) {
     const body = req.body || "";
     if (body.length === 0) return {};
-    const ct = (req.headers && req.headers["content-type"]) || "";
-    if (ct.indexOf("application/json") >= 0) {
+    if (isJsonCt(req)) {
         try { const t = json.decode(body); return (t && typeof t === "object") ? t : {}; }
         catch (_e) { return {}; }
     }
@@ -592,9 +634,11 @@ function genericOk(res) { res.json({ ok: true }); }
 
 // The pending email change of a user, deleted whenever the password is reset
 // or voided: started from a hijacked session, its confirm link otherwise still
-// moved the account to the attacker's address after the owner's reset.
+// moved the account to the attacker's address after the owner's reset. A
+// CONFIRMED change's row stays: it is what lets the old address revoke it.
 function dropPendingEmailChange(uid) {
-    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?", [uid]);
+    db.exec("DELETE FROM _hull_auth_pending_email_changes "
+            + "WHERE user_id = ? AND confirmed_at IS NULL", [uid]);
 }
 
 // A callback whose answer gates authentication must answer synchronously:
@@ -819,9 +863,79 @@ function originFor(req) {
     return null;
 }
 
+// ── Cross-site guard (login CSRF) ──────────────────────────────────
+// Every POST that signs a browser in or changes the account behind its
+// session must come from the app's own pages: an attacker page that
+// auto-submits a form to /login with the ATTACKER's credentials signs the
+// victim in to the attacker's account. See the Lua sibling for the full
+// reasoning. Sec-Fetch-Site must be same-origin or none (cross-site AND
+// same-site refused); without it Origin - or Referer - must name the app
+// (publicOrigin, a trustedHosts entry, or the request's own Host); with no
+// provenance header at all only a JSON body is taken.
+
+// Is the Content-Type JSON? Its essence, not a substring: "text/plain;
+// x=application/json" is a CORS-safelisted type a cross-site form can send.
+function isJsonCt(req) {
+    const ct = req.headers && req.headers["content-type"];
+    if (typeof ct !== "string") return false;
+    return ct.split(";")[0].trim().toLowerCase() === "application/json";
+}
+
+// "scheme://authority" of an Origin / Referer value, lower-cased; null for
+// anything else ("null", a missing or malformed header).
+function headerOrigin(v) {
+    if (typeof v !== "string") return null;
+    const m = /^(https?:\/\/[^/?#]+)/.exec(v);
+    return m ? m[1].toLowerCase() : null;
+}
+
+function originTrusted(o, headers) {
+    if (_state.publicOrigin && o === headerOrigin(_state.publicOrigin)) return true;
+    const authority = o.replace(/^https?:\/\//, "");
+    if (_state.trustedHosts) {
+        const hostOnly = authority.replace(/:\d+$/, "");
+        for (const allowed of _state.trustedHosts) {
+            const a = allowed.toLowerCase();
+            if (authority === a || hostOnly === a) return true;
+        }
+    }
+    const hp = requestHost(headers);
+    return hp !== null
+        && authority === (hp[0] + (hp[1] !== null ? ":" + hp[1] : "")).toLowerCase();
+}
+
+// `allowBare`: a request with no provenance header at all is let through
+// whatever its body (logout, where forcing one only signs a user out).
+function sameOriginRequest(req, allowBare) {
+    const h = req.headers || {};
+    const site = h["sec-fetch-site"];
+    if (typeof site === "string" && site !== "") {
+        return site === "same-origin" || site === "none";
+    }
+    if (h.origin !== undefined && h.origin !== null) {
+        const o = headerOrigin(h.origin);
+        return o !== null && originTrusted(o, h);
+    }
+    const r = headerOrigin(h.referer);
+    if (r !== null) return originTrusted(r, h);
+    if (allowBare) return true;
+    if (!isJsonCt(req)) return false;
+    try {
+        const t = json.decode(req.body || "");
+        return !!t && typeof t === "object";
+    } catch (_) { return false; }
+}
+
+// Answer 403 and return true when the request is cross-site.
+function refuseCrossSite(req, res, allowBare) {
+    if (sameOriginRequest(req, allowBare)) return false;
+    res.status(403).json({ error: "forbidden: cross-site request" });
+    return true;
+}
+
 // ── Route handlers ─────────────────────────────────────────────────
 
-async function handleRegister(req, res) {
+function handleRegister(req, res) {
     const body = parseBody(req);
     if (!isEmailIsh(body.email)) {
         return res.status(400).json({ error: "invalid email" });
@@ -834,12 +948,23 @@ async function handleRegister(req, res) {
         return res.status(400).json({ error: "invalid password length" });
     }
     // Pwned check runs BEFORE userFindByEmail so the same error
-    // returns regardless of whether the email already exists.
-    if (await checkPwned(body.password)) {
-        return res.status(400).json({
-            error: "password appears in known data breaches; choose another",
+    // returns regardless of whether the email already exists. The
+    // handler stays synchronous when the check is off, so the welcome
+    // email is deferred past the response (see afterResponse).
+    if (_state.checkPwnedPasswords) {
+        return checkPwned(body.password).then((bad) => {
+            if (bad) {
+                return res.status(400).json({
+                    error: "password appears in known data breaches; choose another",
+                });
+            }
+            return registerAccount(req, res, body);
         });
     }
+    return registerAccount(req, res, body);
+}
+
+function registerAccount(req, res, body) {
     // Hash FIRST, on both branches: PBKDF2 is by far the slowest step, and
     // running it only for new addresses let response time tell an attacker
     // which ones already have an account.
@@ -894,8 +1019,7 @@ function handleVerifyResend(req, res) {
 // pre-registrant could have attached. Nothing is voided silently.
 
 function wantsJson(req) {
-    const ct = (req.headers && req.headers["content-type"]) || "";
-    return ct.indexOf("application/json") >= 0;
+    return isJsonCt(req);
 }
 
 // The token is a verified envelope (fixed alphabet) and the error strings
@@ -958,6 +1082,7 @@ const VERIFY_WRONG_PASSWORD = "password does not match; to set a new password "
     + "instead, submit new_password";
 
 async function handleVerify(req, res) {
+    if (refuseCrossSite(req, res)) return;
     const body = parseBody(req);
     const token = body.token;
     const r = parseToken(token, ACTIONS.verify_email);
@@ -1062,6 +1187,8 @@ function startTotpPending(req, res, user, asPage) {
 }
 
 function handleLogin(req, res) {
+    // Login CSRF: see "Cross-site guard".
+    if (refuseCrossSite(req, res)) return;
     const body = parseBody(req);
     // 256 char upper bound matches register; prevents PBKDF2
     // amplification DoS via mega-passwords. Generic error keeps
@@ -1124,10 +1251,10 @@ function handleLogout(req, res) {
     // A cross-site POST (an attacker page auto-submitting a form) is refused,
     // as oauth's logout does: SameSite=Lax keeps the session cookie off it,
     // but the clearing Set-Cookie in the answer would still sign the victim
-    // out. An async onLogout is returned so the dispatcher awaits it.
-    if (req.headers && req.headers["sec-fetch-site"] === "cross-site") {
-        return res.status(403).json({ error: "forbidden" });
-    }
+    // out. A client that sends no provenance header at all is let through:
+    // forcing a logout is all a forged one could do. An async onLogout is
+    // returned so the dispatcher awaits it.
+    if (refuseCrossSite(req, res, true)) return;
     if (_state.onLogout) return _state.onLogout(req, res);
     res.redirect("/");
 }
@@ -1205,9 +1332,7 @@ function handleMagicLinkPage(req, res) {
 function handleMagicLinkConsume(req, res) {
     // A cross-site form would sign the victim in to the attacker's account
     // with the attacker's own link (login CSRF).
-    if (req.headers && req.headers["sec-fetch-site"] === "cross-site") {
-        return res.status(403).json({ error: "forbidden" });
-    }
+    if (refuseCrossSite(req, res)) return;
     const result = consumeToken(parseBody(req).token, ACTIONS.magic_link);
     if (!result[0]) {
         return verifyFail(req, res, 400, "magic link failed: " + (result[1] || "?"));
@@ -1256,6 +1381,8 @@ function handleTotpVerify(req, res) {
     if (!_state.enableTotp) {
         return res.status(404).json({ error: "totp not enabled" });
     }
+    // Login CSRF with the attacker's own pending token and code.
+    if (refuseCrossSite(req, res)) return;
     const body = parseBody(req);
     if (typeof body.token !== "string" || typeof body.code !== "string") {
         return res.status(400).json({ error: "missing token or code" });
@@ -1311,6 +1438,7 @@ function handlePasswordResetRequest(req, res) {
 }
 
 async function handlePasswordResetConfirm(req, res) {
+    if (refuseCrossSite(req, res)) return;
     const body = parseBody(req);
     // Same upper bound as handleRegister; see comment there.
     if (!passwordLenOk(body.password)) {
@@ -1354,9 +1482,40 @@ async function handlePasswordResetConfirm(req, res) {
 function handleEmailChange(req, res) {
     const uid = req.ctx && req.ctx.user_id;
     if (!uid) return res.status(401).json({ error: "not authenticated" });
+    if (refuseCrossSite(req, res)) return;
     const body = parseBody(req);
     if (!isEmailIsh(body.new_email)) {
         return res.status(400).json({ error: "invalid email" });
+    }
+    // A session is not enough: whoever stole one would move the account to
+    // an address they read and own it for good through a reset there. The
+    // current password (counted toward the login lockout) proves the account
+    // holder; emailChangeReauth(req, user) -> true replaces it for an app with
+    // its own proof of a recent sign-in, or passwordless accounts.
+    const current = getUser(uid);
+    if (!current) return res.status(401).json({ error: "not authenticated" });
+    let reauthed = false;
+    if (_state.emailChangeReauth) {
+        try { reauthed = _state.emailChangeReauth(req, current) === true; }
+        catch (_) { reauthed = false; }
+    }
+    if (!reauthed) {
+        const pw = body.password;
+        if (typeof pw !== "string" || pw === "") {
+            return res.status(401).json({ error: "current password required" });
+        }
+        // The lockout rows /login uses: keyed by the account's own id.
+        const acct = userId(current) ?? uid;
+        const ipKey = attemptIpKey(acct, req);
+        const locked = lockoutRemaining(ipKey) > 0 || lockoutRemaining(acct) > 0;
+        const stored = !locked && passwordLenOk(pw, false) && storedPasswordHash(current);
+        if (!(typeof stored === "string" && crypto.verifyPassword(pw, stored))) {
+            if (!locked) {
+                bumpFailedLogin(ipKey, _state.maxFailedLogins);
+                bumpFailedLogin(acct, _state.maxFailedLoginsPerAccount);
+            }
+            return res.status(401).json({ error: "invalid credentials" });
+        }
     }
     if (findByEmail(body.new_email)) {
         return res.status(409).json({ error: "email already in use" });
@@ -1373,11 +1532,18 @@ function handleEmailChange(req, res) {
     // Round-11 MEDIUM-9: reject when a pending row already exists.
     // See Lua sibling for the threat model - concurrent submit
     // silently destroyed the prior pending change.
+    // A confirmed change keeps its row until its revoke link expires, and
+    // blocks a new one meanwhile: a thief must not bury it under a second.
     const existing = db.query(
-        "SELECT new_email FROM _hull_auth_pending_email_changes "
+        "SELECT new_email, confirmed_at FROM _hull_auth_pending_email_changes "
         + "WHERE user_id = ? AND expires_at > ? LIMIT 1",
         [uid, time.now()]);
     if (existing && existing.length > 0) {
+        if (existing[0].confirmed_at !== null && existing[0].confirmed_at !== undefined) {
+            return res.status(409).json({
+                error: "a recent email change can still be revoked; try again later",
+            });
+        }
         return res.status(409).json({
             error: "pending email change exists",
             new_email: existing[0].new_email,
@@ -1388,13 +1554,15 @@ function handleEmailChange(req, res) {
     const token = issueToken(uid, ACTIONS.email_change,
         _state.emailChangeTtl, { new_email: body.new_email });
     const tokenHash = encoding.hex.encode(crypto.sha256(token));
-    db.upsert(
-        "_hull_auth_pending_email_changes",
-        ["user_id"],
-        ["user_id", "new_email", "token_hash", "created_at", "expires_at"],
-        [uid, body.new_email, tokenHash, now, now + _state.emailChangeTtl]);
+    // An expired row (not reaped yet) is replaced whole: an upsert kept its
+    // old_email / confirmed_at.
+    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?", [uid]);
+    db.exec("INSERT INTO _hull_auth_pending_email_changes "
+            + "(user_id, new_email, token_hash, created_at, expires_at) "
+            + "VALUES (?, ?, ?, ?, ?)",
+            [uid, body.new_email, tokenHash, now, now + _state.emailChangeTtl]);
 
-    const user = getUser(uid);
+    const user = current;
     const link = origin + _state.prefix
         + "/email-change/confirm?token=" + token;
     sendEmail(body.new_email, "email_change", {
@@ -1406,8 +1574,10 @@ function handleEmailChange(req, res) {
     // passes it through a nil-safe template ctx, but user.email below is a
     // hard deref.
     if (user && _state.templates.email_change_notify) {
+        // Bound to THIS change (`ch`, its confirm token's hash): a revoke link
+        // from an earlier change does not cancel or undo a later one.
         const revokeTok = issueToken(uid, ACTIONS.email_change_revoke,
-            _state.emailChangeTtl);
+            _state.emailChangeTtl, { ch: tokenHash });
         const revokeUrl = origin + _state.prefix
             + "/email-change/revoke?token=" + revokeTok;
         sendEmail(user.email, "email_change_notify", {
@@ -1419,40 +1589,77 @@ function handleEmailChange(req, res) {
 }
 
 // GET /auth/email-change/revoke?token=... - the page; POST consumes it (see
-// "Single-use links"). The old-address holder cancels a pending email
-// change: single-use via the shared used-tokens table; deletes the pending
-// row, so the change's confirm link stops working too.
+// "Single-use links"). The old-address holder undoes the email change the
+// link was sent for: a pending one is cancelled (its row deleted, so its
+// confirm link stops working); one already confirmed is reversed - the old
+// address restored - for as long as the link lives (emailChangeTtl from the
+// request). Either way every session of the account is revoked through
+// onPasswordReset: the change may have come from a stolen one.
 function handleEmailChangeRevokePage(req, res) {
     const t = linkPageToken(req, res, ACTIONS.email_change_revoke, "revoke failed");
     if (!t) return;
     secureHtml(res).html(linkFormHtml("/email-change/revoke", t[0],
-        "Cancel the email change", "Cancel the change"));
+        "Undo the email change", "Undo the change"));
 }
 
-function handleEmailChangeRevoke(req, res) {
+async function handleEmailChangeRevoke(req, res) {
+    if (refuseCrossSite(req, res)) return;
     const result = consumeToken(parseBody(req).token, ACTIONS.email_change_revoke);
     if (!result[0]) {
         return verifyFail(req, res, 400, "revoke failed: " + (result[1] || "?"));
     }
-    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-            [result[0].sub]);
-    emitEvent(result[0].sub, "email_change_revoked", req,
-              { metadata: { by: "old_address" } });
+    const env = result[0];
+    const rows = db.query(
+        "SELECT token_hash, old_email, confirmed_at FROM _hull_auth_pending_email_changes "
+        + "WHERE user_id = ?", [env.sub]);
+    const row = rows && rows[0];
+    if (!row || typeof env.ch !== "string" || typeof row.token_hash !== "string"
+        || !crypto.constantTimeEq(row.token_hash, env.ch)) {
+        return verifyFail(req, res, 400, "revoke failed");
+    }
+    const user = getUser(env.sub);
+    if (!user) return verifyFail(req, res, 400, "revoke failed");
+    let restored = false;
+    if (row.confirmed_at !== null && row.confirmed_at !== undefined) {
+        const old = row.old_email;
+        const holder = typeof old === "string" ? findByEmail(old) : null;
+        if (typeof old !== "string"
+            || (holder && String(userId(holder)) !== String(env.sub))) {
+            // Taken since by another account: nothing to restore to.
+            log.warn("auth-flows: email change of account " + String(env.sub)
+                + " cannot be reverted: its previous address is in use; sessions revoked");
+            await runOnPasswordReset(req, res, user);
+            return verifyFail(req, res, 409, "revoke failed: the previous address is in use");
+        }
+        _state.userSetEmail(env.sub, old);
+        // The revoke link reached the old mailbox: it is proven again.
+        _state.userSetEmailVerified(env.sub, true);
+        user.email = old;
+        restored = true;
+    }
+    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?", [env.sub]);
+    await runOnPasswordReset(req, res, user);
+    emitEvent(env.sub, "email_change_revoked", req,
+              { metadata: { by: "old_address", restored } });
     gcExpired();
-    if (wantsJson(req)) return res.json({ ok: true });
-    secureHtml(res).html("Email change canceled.");
+    if (wantsJson(req)) return res.json({ ok: true, restored });
+    secureHtml(res).html(restored
+        ? "Email change undone: your previous address is restored."
+        : "Email change canceled.");
 }
 
 // Does the pending change still match this confirm link? There must be a
-// pending row, for the envelope's new_email, and its token_hash must be THIS
-// token's: only the latest link of the pending change confirms it, and none
-// once the row is gone (revoked, superseded, done).
+// pending (unconfirmed) row, for the envelope's new_email, and its token_hash
+// must be THIS token's: only the latest link of the pending change confirms
+// it, and none once the row is gone (revoked, superseded) or confirmed.
 function pendingChangeMatches(env, token) {
     const rows = db.query(
-        "SELECT new_email, token_hash FROM _hull_auth_pending_email_changes "
+        "SELECT new_email, token_hash, confirmed_at FROM _hull_auth_pending_email_changes "
         + "WHERE user_id = ?", [env.sub]);
     const th = encoding.hex.encode(crypto.sha256(token));
-    return !!rows && rows.length > 0 && rows[0].new_email === env.new_email
+    return !!rows && rows.length > 0
+        && (rows[0].confirmed_at === null || rows[0].confirmed_at === undefined)
+        && rows[0].new_email === env.new_email
         && typeof rows[0].token_hash === "string"
         && crypto.constantTimeEq(rows[0].token_hash, th);
 }
@@ -1468,6 +1675,7 @@ function handleEmailChangePage(req, res) {
 }
 
 function handleEmailChangeConfirm(req, res) {
+    if (refuseCrossSite(req, res)) return;
     const token = parseBody(req).token;
     const result = consumeToken(token, ACTIONS.email_change);
     if (!result[0]) {
@@ -1481,8 +1689,17 @@ function handleEmailChangeConfirm(req, res) {
     const oldEmail = user.email;
     _state.userSetEmail(env.sub, env.new_email);
     _state.userSetEmailVerified(env.sub, true);
-    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-            [env.sub]);
+    // With a revoke link out (email_change_notify), the row stays, confirmed
+    // and holding the old address, until that link expires: the old address
+    // can still undo the change. Without one there is nothing to undo it with.
+    if (_state.templates.email_change_notify) {
+        db.exec("UPDATE _hull_auth_pending_email_changes "
+                + "SET confirmed_at = ?, old_email = ? WHERE user_id = ?",
+                [time.now(), oldEmail, env.sub]);
+    } else {
+        db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
+                [env.sub]);
+    }
     emitEvent(env.sub, "email_changed", req,
               { metadata: { old_email: oldEmail, new_email: env.new_email } });
     return verifyOk(req, res);
@@ -1832,6 +2049,11 @@ function init(opts) {
         throw new Error("auth-flows.init: totpDisable must be a function(userId)");
     }
     _state.totpDisable = opts.totpDisable || null;
+    if (opts.emailChangeReauth !== undefined && opts.emailChangeReauth !== null
+        && typeof opts.emailChangeReauth !== "function") {
+        throw new Error("auth-flows.init: emailChangeReauth must be a function(req, user)");
+    }
+    _state.emailChangeReauth = opts.emailChangeReauth || null;
     _state.loginRedirect   = opts.loginRedirect   || _state.loginRedirect;
     if (opts.enumerationSafe     !== undefined) _state.enumerationSafe     = opts.enumerationSafe;
     if (opts.magicLinkAutoSignup !== undefined) _state.magicLinkAutoSignup = opts.magicLinkAutoSignup;
@@ -1844,6 +2066,19 @@ function init(opts) {
             if (s.length > 0) db.exec(s);
         }
     });
+    // A table made before a confirmed email change was kept (for revoke):
+    // add the columns that keep it. A failed ALTER (another instance added the
+    // column first) is re-checked, as session.js does.
+    const cols = db.tableColumns("_hull_auth_pending_email_changes") || [];
+    for (const [name, ddl] of [["old_email", "old_email TEXT"],
+                               ["confirmed_at", "confirmed_at INTEGER"]]) {
+        if (cols.includes(name)) continue;
+        try {
+            db.exec("ALTER TABLE _hull_auth_pending_email_changes ADD COLUMN " + ddl);
+        } catch (e) {
+            if (!(db.tableColumns("_hull_auth_pending_email_changes") || []).includes(name)) throw e;
+        }
+    }
 
     _state.initialized = true;
 }
@@ -1910,6 +2145,7 @@ const _test = {
     gcExpired,
     isEmailIsh,
     parseBody,
+    sameOriginRequest,
     ACTIONS,
     emailRateAllow: (to) => emailRateAllow(to),
     emailRateReset: () => { _emailRl = new Map(); },
@@ -1936,6 +2172,7 @@ const _test = {
         _state.totpPendingRedirect  = null;
         _state.verifyFormRedirect   = null;
         _state.totpDisable          = null;
+        _state.emailChangeReauth    = null;
         _state.checkPwnedPasswords  = false;
         _state.pwnedEndpoint        = null;
         _state.maxFailedLogins      = 5;

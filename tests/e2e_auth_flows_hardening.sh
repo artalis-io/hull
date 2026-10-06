@@ -145,11 +145,13 @@ for e in reversed(emails):
 }
 # A mailed single-use link (magic link, email-change confirm / revoke): its GET
 # shows a page and consumes nothing (mail scanners prefetch links); the page's
-# form POSTs the token back. Extra curl options go after the URL.
+# form POSTs the token back, from the app's own page (its Origin: auth-flows
+# refuses a cross-site POST - login CSRF). Extra curl options go after the URL.
 link_post() {
     _lurl="$1"; shift
     _ltok=$(printf '%s\n' "$_lurl" | sed 's/.*token=//')
-    curl -sS "$@" -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+    curl -sS "$@" -X POST -H "Origin: ${_lurl%%/auth/*}" \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
         --data "token=$_ltok" "${_lurl%%\?*}"
 }
 extract_url() {
@@ -276,10 +278,15 @@ run_flow() {
         "$BASE/auth/login")
     check_contains "$_label: login after lockout window ok" "$R" '"ok":true'
 
-    # 6. Email-change with notify+revoke. Capture BOTH emails.
+    # 6. Email-change with notify+revoke. Capture BOTH emails. Starting one
+    #    takes the current password (audit 8): a session thief has none.
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" -X POST \
+        -H 'Content-Type: application/json' -d "{\"new_email\":\"$EMAIL_NEW\"}" \
+        "$BASE/auth/email-change")
+    check_status "$_label: email-change without the password refused" "$S" "401"
     R=$(curl -sS -b "$COOKIES" -X POST -H 'Content-Type: application/json' \
-        -d "{\"new_email\":\"$EMAIL_NEW\"}" \
+        -d "{\"new_email\":\"$EMAIL_NEW\",\"password\":\"$PW\"}" \
         "$BASE/auth/email-change")
     check_contains "$_label: email-change request ok" "$R" '"ok":true'
     NEW_TEXT=$(last_email_text "$PORT" "$EMAIL_NEW")
@@ -297,24 +304,66 @@ run_flow() {
     check_status "$_label: change still pending after a revoke GET" "$S" "200"
     R=$(link_post "$REVOKE_URL")
     check_contains "$_label: revoke succeeds" "$R" "canceled"
+    # The change may have come from a stolen session: revoke signs out
+    # every session of the account.
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" "$BASE/_me")
+    check_status "$_label: revoke signs the account out" "$S" "401"
     # 6c. Confirm now fails - pending row deleted.
     S=$(link_post "$CONFIRM_URL" -o /dev/null -w '%{http_code}')
     check_status "$_label: confirm post-revoke fails (400)" "$S" "400"
 
-    # 7. Re-request change, this time click confirm.
+    # 7. A revoke link is bound to its own change (audit 8): change #2's
+    #    link, left unused when a password reset dropped change #2, does
+    #    not touch change #3.
+    curl -sS -c "$COOKIES" -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" "$BASE/auth/login" > /dev/null
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null
     curl -sS -b "$COOKIES" -X POST -H 'Content-Type: application/json' \
-        -d "{\"new_email\":\"$EMAIL_NEW\"}" \
+        -d "{\"new_email\":\"$EMAIL_NEW\",\"password\":\"$PW\"}" \
+        "$BASE/auth/email-change" > /dev/null
+    CONFIRM2_URL=$(extract_url "$(last_email_text "$PORT" "$EMAIL_NEW")")
+    REVOKE2_URL=$(extract_url "$(last_email_text "$PORT" "$EMAIL")")
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\"}" "$BASE/auth/password-reset/request" > /dev/null
+    RESET_TOK=$(extract_url "$(last_email_text "$PORT" "$EMAIL")" | sed 's/.*token=//')
+    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$RESET_TOK\",\"password\":\"$PW\"}" \
+        "$BASE/auth/password-reset/confirm")
+    check_contains "$_label: password reset ok" "$R" '"ok":true'
+    S=$(link_post "$CONFIRM2_URL" -o /dev/null -w '%{http_code}')
+    check_status "$_label: reset dropped the pending change" "$S" "400"
+    curl -sS -c "$COOKIES" -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" "$BASE/auth/login" > /dev/null
+    curl -sS -X POST "$BASE/_emails/clear" > /dev/null
+    curl -sS -b "$COOKIES" -X POST -H 'Content-Type: application/json' \
+        -d "{\"new_email\":\"$EMAIL_NEW\",\"password\":\"$PW\"}" \
         "$BASE/auth/email-change" > /dev/null
     NEW_TEXT=$(last_email_text "$PORT" "$EMAIL_NEW")
     CONFIRM_URL=$(extract_url "$NEW_TEXT")
+    REVOKE3_URL=$(extract_url "$(last_email_text "$PORT" "$EMAIL")")
+    S=$(link_post "$REVOKE2_URL" -o /dev/null -w '%{http_code}')
+    check_status "$_label: an earlier change's revoke link does not touch a later one" "$S" "400"
     S=$(link_post "$CONFIRM_URL" -o /dev/null -w '%{http_code}')
     check_status "$_label: email-change confirm 303" "$S" "303"
     # Login with new email works.
-    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+    R=$(curl -sS -c "$COOKIES" -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_NEW\",\"password\":\"$PW\"}" \
         "$BASE/auth/login")
     check_contains "$_label: login with new email ok" "$R" '"ok":true'
+
+    # 7b. The old address undoes a CONFIRMED change (audit 8: a thief who
+    #     confirms from an address they read must not keep the account):
+    #     the old address is restored and every session revoked.
+    R=$(link_post "$REVOKE3_URL")
+    check_contains "$_label: revoke after confirm restores the old address" "$R" "restored"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" "$BASE/_me")
+    check_status "$_label: ...and signs the account out" "$S" "401"
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL_NEW\",\"password\":\"$PW\"}" "$BASE/auth/login")
+    check_status "$_label: ...the new address no longer signs in" "$S" "401"
+    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" "$BASE/auth/login")
+    check_contains "$_label: ...the old one does" "$R" '"ok":true'
 
     # 8. Pwned check - try registering with "password".
     R=$(curl -sS -X POST -H 'Content-Type: application/json' \

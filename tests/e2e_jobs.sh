@@ -1818,6 +1818,131 @@ app.main(async (ctx) => {
 echo "== durable repeated waits / DEAD compensation: Lua =="; check_signal_repeat "lua" "lua" "$LUA_SIG_REPEAT"
 echo "== durable repeated waits / DEAD compensation: JS =="; check_signal_repeat "js" "js" "$JS_SIG_REPEAT"
 
+# ── durable execution: retry generation; idempotent signal deliveries ──
+# A compensable step idempotent on a key (a provider that returns its stored
+# response for a repeated key) must charge again after jobs.retry: the key
+# carries ctx.generation, and ctx.uuid() is new in the new generation. A
+# signal delivery retried with the same delivery id after a wait consumed the
+# first is dropped, not counted as the next round's approval.
+check_retry_gen() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"GEN st=dead fin=done res=ch2 charges=2 uuid_new=true gen2=1"*)
+            pass "$label: a retried compensated step runs under a new generation (new key, new uuid)" ;;
+        *) fail "$label: retry generation" "$out" ;;
+    esac
+    case "$out" in
+        *"DUP first=true dup=false mid=waiting res=A,B"*)
+            pass "$label: a duplicate delivery id after the first was consumed is dropped" ;;
+        *) fail "$label: idempotent signal delivery" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_RETRY_GEN='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local provider, charges, keys, fail_final = {}, 0, {}, true
+  local function charge(key)   -- idempotent on key, like a payment API
+    if provider[key] then return provider[key] end
+    charges = charges + 1
+    provider[key] = { id = "ch" .. charges }
+    return provider[key]
+  end
+  jobs.workflow("pay", function(w)
+    local u = w.uuid()
+    local c = w.step("charge", function()
+      keys[#keys + 1] = w.generation .. "/" .. u
+      return charge(w.id .. ":" .. w.generation .. ":charge").id
+    end, { compensate = function() end })
+    w.step("final", function() if fail_final then error("down") end return 1 end)
+    return c
+  end)
+  local id = jobs.start("pay", {}, { max_attempts = 1 })
+  jobs.work({ batch = 1 })
+  local st = jobs.get(id).status
+  fail_final = false
+  jobs.retry(id)
+  jobs.work({ batch = 1 })
+  local r = jobs.result(id)
+  ctx.stdout:write(("GEN st=%s fin=%s res=%s charges=%d uuid_new=%s gen2=%s\n"):format(
+    st, r.status, tostring(r.result), charges,
+    tostring(keys[1]:match("/(.*)$") ~= (keys[2] or ""):match("/(.*)$")),
+    tostring((keys[2] or ""):match("^(%d+)/"))))
+
+  jobs.workflow("approvals", function(w)
+    local a = w.wait_signal("approve")
+    local b = w.wait_signal("approve")
+    return a.by .. "," .. b.by
+  end)
+  local a = jobs.start("approvals", {})
+  local first = jobs.signal(a, "approve", { by = "A" }, { delivery_id = "req-A" })
+  jobs.work({ batch = 1 })                      -- consumes A, parks on round 2
+  local dup = jobs.signal(a, "approve", { by = "A" }, { delivery_id = "req-A" })
+  jobs.work({ batch = 1 })
+  local mid = jobs.get(a).status
+  jobs.signal(a, "approve", { by = "B" }, { delivery_id = "req-B" })
+  jobs.work({ batch = 1 })
+  ctx.stdout:write(("DUP first=%s dup=%s mid=%s res=%s\n"):format(
+    tostring(first), tostring(dup), mid, tostring(jobs.result(a).result)))
+  return 0
+end)'
+
+JS_RETRY_GEN='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  const provider = {}, keys = [];
+  let charges = 0, failFinal = true;
+  const charge = (key) => {
+    if (provider[key]) return provider[key];
+    charges++;
+    provider[key] = { id: "ch" + charges };
+    return provider[key];
+  };
+  jobs.workflow("pay", async (w) => {
+    const u = await w.uuid();
+    const c = await w.step("charge", () => {
+      keys.push(w.generation + "/" + u);
+      return charge(w.id + ":" + w.generation + ":charge").id;
+    }, { compensate: () => {} });
+    await w.step("final", () => { if (failFinal) throw new Error("down"); return 1; });
+    return c;
+  });
+  const id = jobs.start("pay", {}, { maxAttempts: 1 });
+  await jobs.work({ batch: 1 });
+  const st = jobs.get(id).status;
+  failFinal = false;
+  jobs.retry(id);
+  await jobs.work({ batch: 1 });
+  const r = jobs.result(id);
+  const k2 = keys[1] || "";
+  ctx.stdout.write(`GEN st=${st} fin=${r.status} res=${r.result} charges=${charges} ` +
+    `uuid_new=${keys[0].split("/")[1] !== k2.split("/")[1]} gen2=${k2.split("/")[0]}\n`);
+
+  jobs.workflow("approvals", async (w) => {
+    const a = await w.waitSignal("approve");
+    const b = await w.waitSignal("approve");
+    return a.by + "," + b.by;
+  });
+  const a = jobs.start("approvals", {});
+  const first = jobs.signal(a, "approve", { by: "A" }, { deliveryId: "req-A" });
+  await jobs.work({ batch: 1 });
+  const dup = jobs.signal(a, "approve", { by: "A" }, { deliveryId: "req-A" });
+  await jobs.work({ batch: 1 });
+  const mid = jobs.get(a).status;
+  jobs.signal(a, "approve", { by: "B" }, { deliveryId: "req-B" });
+  await jobs.work({ batch: 1 });
+  ctx.stdout.write(`DUP first=${first} dup=${dup} mid=${mid} res=${jobs.result(a).result}\n`);
+  return 0;
+});'
+
+echo "== durable retry generation / signal delivery ids: Lua =="; check_retry_gen "lua" "lua" "$LUA_RETRY_GEN"
+echo "== durable retry generation / signal delivery ids: JS =="; check_retry_gen "js" "js" "$JS_RETRY_GEN"
+
 # ── durable execution: saga compensation ─────────────────────────
 # A workflow charges (a compensable step), then a later step fails terminally
 # (max_attempts=1). On dead-letter the completed steps' compensations run in

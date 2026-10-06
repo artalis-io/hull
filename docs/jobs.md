@@ -418,6 +418,14 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   approval): each wait takes the next delivery of it, and each timed wait has
   its own deadline. One delivery per name is held at a time - a signal sent
   while an earlier one of that name is still unconsumed is dropped.
+  **Duplicate deliveries:** a sender that retries (a webhook redelivered after
+  a timeout, a double-clicked approval button) must pass a delivery id -
+  `jobs.signal(id, name, payload, { delivery_id = "..." })` (`{ deliveryId }`
+  in JS). A delivery whose id the workflow has already seen for that name is
+  dropped (the call returns `false`), whether or not a wait consumed the first.
+  Without an id, a duplicate that arrives after a wait consumed the first is
+  stored as the NEXT delivery and satisfies the next wait on the name - so a
+  multi-round wait on one name must pass ids (or use a name per round).
 - **Saga compensation:** `ctx.step(name, fn, { compensate = cfn })` registers a
   rollback. If the workflow **fails terminally** (dead-letters), the completed
   steps' `compensate` functions run in **reverse order** (undo the charge if
@@ -431,6 +439,17 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   whose compensation failed keeps its memo. `jobs.retry` of a workflow the
   reaper sent through a compensation run also clears that run's marker and
   restores its original `max_attempts`, so the requeued run does new work.
+- **Retry generation (`ctx.generation`)** - 0 on the first run, +1 for every
+  `jobs.retry`. Re-running a compensated step only helps if the step does
+  something new: a step idempotent on a key that is stable across runs (a
+  payment provider's idempotency key built from `ctx.id`) would get the
+  provider's stored response for the ORIGINAL, since-refunded charge, and the
+  workflow would go on as if paid. So the idempotency key of a compensable step
+  must include the generation - `ctx.id .. ":" .. ctx.generation .. ":charge"`,
+  or a `ctx.uuid()`, which is per generation (a retry drops the uuid memos and
+  every `ctx.uuid()` after it is new). A crash-resume within one generation
+  keeps both stable, so the at-least-once re-run of a step still dedupes.
+  A value that must survive a retry belongs in a step's result, not a uuid.
 - **Deterministic replay** - the body re-runs from the top on every resume, so
   reading the clock or RNG **directly** would differ each replay and break the
   memo matching. Use the memoized primitives **`ctx.now()`**, **`ctx.random()`**,

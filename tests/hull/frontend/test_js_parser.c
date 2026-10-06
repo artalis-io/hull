@@ -337,6 +337,19 @@ UTEST(js_parser, speculation_valid_forms)
     EXPECT_TRUE(has(o, "\"type\":\"PropertyDefinition\""));
     EXPECT_TRUE(has(o, "\"name\":\"static\""));
     EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    /* `async` as a plain identifier before `/` is a division, in an expression and at
+     * statement start: the token after `async` was peeked as a regex, so `/ x /` became
+     * one and the file was reported invalid. */
+    o = parse_str(s, "const r = async / x / y;");
+    EXPECT_TRUE(has(o, "\"operator\":\"/\""));
+    EXPECT_FALSE(has(o, "\"regex\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    o = parse_str(s, "async / x / y;");
+    EXPECT_TRUE(has(o, "\"operator\":\"/\""));
+    EXPECT_FALSE(has(o, "\"regex\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
     free(o);
     hl_js_session_destroy(s);
 }

@@ -522,7 +522,7 @@ function parseInternal(bytes, opts, inject) {
         // `async function ...` declaration (no LineTerminator between `async` and `function`);
         // otherwise `async` is an ordinary identifier -> expression statement.
         const start = cur.start;
-        const nx = peekTok(1, true);
+        const nx = peekTok(1, false);
         if (nx.type === "identifier" && nx.value === "function" && !nx.nlBefore) {
             advance(true);                          // consume `async` -> cur is `function`
             return parseFunctionDeclaration(true, start);
@@ -1009,7 +1009,7 @@ function parseInternal(bytes, opts, inject) {
         if (v === "new") return parseNew();
         if (v === "import") { if (cur.escaped) { synErr("'import' is a reserved word and may not be escaped"); advance(false); return errNode(start); } advance(false); if (isP("(")) { const ie = mk("ImportExpression", start); ie.arguments = parseArguments(); return fin(ie); } if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "import"; if (cur.type === "identifier" && cur.value === "meta" && !cur.escaped) { meta.property = "meta"; advance(false); return fin(meta); } synErr("the only valid meta-property for 'import' is 'import.meta'"); return errNode(start); } synErr("unexpected 'import'"); return errNode(start); }
         if (v === "async") {
-            const nx = peekTok(1, true);
+            const nx = peekTok(1, false);
             if (nx.type === "identifier" && nx.value === "function" && !nx.nlBefore) { advance(true); return parseFunctionExpr(true, start); }
             if (!nx.nlBefore) {
                 // `async ident =>`

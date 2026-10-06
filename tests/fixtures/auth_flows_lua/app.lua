@@ -38,6 +38,7 @@ local users_by_email = {}
 local users_by_id    = {}
 local next_id = 0
 local sent_emails = {}
+local slow_templates = false
 
 local function user_create(email, pwhash)
     next_id = next_id + 1
@@ -79,6 +80,12 @@ authflows.init({
                      text = "verify: " .. (ctx.verify_url or ctx.link or "?") }
         end,
         magic_link = function(ctx)
+            -- POST /_slow_templates: a 300 ms render, so the e2e can tell
+            -- whether the mail is sent before or after the response.
+            if slow_templates then
+                local stop = time.now_ms() + 300
+                while time.now_ms() < stop do end
+            end
             return { subject = "Sign in", text = "link: " .. ctx.link }
         end,
         password_reset = function(ctx)
@@ -161,6 +168,11 @@ end)
 
 app.post("/_emails/clear", function(_req, res)
     sent_emails = {}
+    res:json({ ok = true })
+end)
+
+app.post("/_slow_templates", function(_req, res)
+    slow_templates = true
     res:json({ ok = true })
 end)
 

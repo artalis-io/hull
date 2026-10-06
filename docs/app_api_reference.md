@@ -442,7 +442,12 @@ verify step between successful first-factor auth and `on_login` when
       issue their token and send their email **after** the response, on the
       event loop: those steps happen only for some addresses, so doing them
       inline let response time say whether an account exists. A failing
-      `email_send` is logged instead of failing the request.
+      `email_send` is logged instead of failing the request - in JS also an
+      async one (a rejected Promise from `emailSend`). (JS: the handlers
+      that defer are synchronous and the work runs from a timer armed once
+      the request is over. With `checkPwnedPasswords`, `/register` waits on
+      HIBP and its welcome mail is then sent before the response, as JS has
+      no detached-task primitive yet.)
     - `opts.check_pwned_passwords` (default `false`). Routes
       register + password-reset-confirm through `hull/web/pwned`
       (HIBP k-anonymity). Apps must add `api.pwnedpasswords.com`
@@ -450,14 +455,30 @@ verify step between successful first-factor auth and `on_login` when
       endpoint raises (500), it is not taken for an outage. Fail-open
       on HIBP outage. Tests can override the endpoint via
       `opts.pwned_endpoint`.
+    - **Starting an email change takes the current password**
+      (`POST /email-change {new_email, password}`; a wrong one is a 401
+      that counts toward the login lockout). A session alone is not
+      enough: whoever stole one would move the account to an address
+      they read, confirm it in seconds, and keep the account through a
+      password reset there. `opts.email_change_reauth(req, user) -> true`
+      (`emailChangeReauth`) replaces the password for an app with its own
+      proof of a recent sign-in, and is the way for passwordless
+      accounts.
     - **Email-change notify+revoke** activates implicitly when the
       app provides a `templates.email_change_notify` template. A
       revoke link is sent to the OLD address on every email-change
-      request; the OLD-address holder can click it (and submit the
-      page it opens) to delete the pending change
-      (`/email-change/revoke?token=…`) within
-      `email_change_ttl` even if the attacker holds a valid
-      session cookie.
+      request, bound to that request (a link from an earlier change
+      does nothing to a later one). Clicking it (and submitting the
+      page it opens, `/email-change/revoke?token=…`) cancels the change
+      while it is pending, and **after it was confirmed restores the old
+      address** (the row keeps it until the link expires,
+      `email_change_ttl` after the request; a reset or verify does not
+      drop a confirmed change). Either way every session of the account
+      is revoked through `on_password_reset`. Reset and magic links are
+      bound to the address, so those sent to the new one stop working
+      when it is restored. While a confirmed change can still be revoked,
+      a new change answers 409. Without the template a confirmed change
+      is final.
     - `opts.sign_in_log` (default `false`). Routes every login /
       password-reset-completed / email-changed / email-change-
       revoked into `hull/web/middleware/audit-log` so apps can
@@ -471,7 +492,8 @@ verify step between successful first-factor auth and `on_login` when
       typically sends a "you signed in from a new device" email.
     - `opts.on_password_reset(req, res, user)` (optional). Fires
       after a successful `password-reset/confirm` updates the
-      hash, and after a verify with `new_password`. May be async in JS
+      hash, after a verify with `new_password`, and after an email change
+      is revoked from the old address. May be async in JS
       (it is awaited; a throw or rejection is logged). Recommended implementation:
       `function(req, res, user) session.destroy_all(user.id) end`
       - revokes every existing session because a reset is the
@@ -492,11 +514,26 @@ verify step between successful first-factor auth and `on_login` when
   checks the token without using it and renders a one-button page (no
   script; `secure_html` headers) whose form POSTs `token` back to the
   same path; a JSON client POSTs `{token}` itself and gets JSON back. A
-  magic-link POST marked `Sec-Fetch-Site: cross-site` is refused (403:
-  it would sign the victim in to the attacker's account), and a
   confirmed email change answers like `/verify` (a 303 to
   `verify_redirect`, or `{ok, redirect}` for JSON). An app with a
   global CSRF middleware must exempt these POSTs, as it does `/verify`.
+  **Cross-site requests are refused (login CSRF).** Every POST that signs
+  a browser in or changes the account - `/login`, `/totp-verify`,
+  `/magic-link/consume`, `/verify`, `/password-reset/confirm`,
+  `/email-change` and its `/confirm` and `/revoke` - answers 403
+  (`{error = "forbidden: cross-site request"}`) unless it comes from the
+  app's own pages: an attacker page that auto-submits a form with the
+  ATTACKER's credentials would sign the victim in to the attacker's
+  account (and the CSRF middleware passes a request with no session).
+  `Sec-Fetch-Site` must be `same-origin` or `none` - `cross-site` and
+  `same-site` (a sibling subdomain) are refused. Without that header
+  `Origin`, or failing it `Referer`, must name the app: `public_origin`,
+  a `trusted_hosts` entry, or the request's own Host. With no provenance
+  header at all the client is not a browser and only a JSON body is taken
+  (`Content-Type` whose essence is `application/json`, and a body that
+  parses as JSON): a cross-site form cannot send that type without a CORS
+  preflight. `/logout` refuses cross-site / same-site / a foreign Origin
+  the same way but lets a header-less client through.
   `/verify/resend` is enumeration-safe - always returns `{ok:true}`
   whether the user exists, is unverified, or is already verified.
   Apps SHOULD rate-limit it (per-email key) to bound mail volume.
@@ -528,8 +565,8 @@ verify step between successful first-factor auth and `on_login` when
   instead of signing in (a passwordless account is simply verified), and
   a password reset of an unverified account verifies it the same way as
   `new_password` does. Nothing is replaced silently. A password reset
-  also drops a pending email change, and an email-change confirm link
-  must be the pending change's latest one. `standard_users` refuses a
+  also drops a pending (unconfirmed) email change, and an email-change
+  confirm link must be the pending change's latest one. `standard_users` refuses a
   `_hull_*` table name. Addresses must be a single address: one `@`, none
   of `, ; < > " ( )` or whitespace.
 - `authflows.send_verify_email(user, url_prefix)`,

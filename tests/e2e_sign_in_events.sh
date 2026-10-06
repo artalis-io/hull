@@ -118,11 +118,13 @@ for e in reversed(emails):
 }
 # A mailed single-use link (magic link, email-change confirm / revoke): its GET
 # shows a page and consumes nothing (mail scanners prefetch links); the page's
-# form POSTs the token back. Extra curl options go after the URL.
+# form POSTs the token back, from the app's own page (its Origin: auth-flows
+# refuses a cross-site POST - login CSRF). Extra curl options go after the URL.
 link_post() {
     _lurl="$1"; shift
     _ltok=$(printf '%s\n' "$_lurl" | sed 's/.*token=//')
-    curl -sS "$@" -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+    curl -sS "$@" -X POST -H "Origin: ${_lurl%%/auth/*}" \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
         --data "token=$_ltok" "${_lurl%%\?*}"
 }
 extract_url() {
@@ -235,7 +237,7 @@ run_flow() {
     # 5. Email-change flow + audit event.
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null
     curl -sS -b "$COOKIES_A" -X POST -H 'Content-Type: application/json' \
-        -d "{\"new_email\":\"$EMAIL_NEW\"}" \
+        -d "{\"new_email\":\"$EMAIL_NEW\",\"password\":\"$PW\"}" \
         "$BASE/auth/email-change" > /dev/null
     NEW_TEXT=$(last_email_text "$PORT" "$EMAIL_NEW")
     CONFIRM_URL=$(extract_url "$NEW_TEXT")
