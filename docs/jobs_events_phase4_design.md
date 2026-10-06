@@ -66,6 +66,10 @@ is tolerated but lost. Phase 4 adds capture + a bounded wait:
   on error/EOF (dead connection). `LISTEN <channel>` itself is a normal query
   issued once via the existing `hl_pg_exec_simple` before the first wait; the
   channel is a fixed literal (`hull_jobs`), not user input.
+  *(Since audit 7 L4 the signature is `hl_pg_wait_notify(conn, channel,
+  timeout_ms, on_other, ud)`: only a notification on `channel` returns 1, and
+  the backend LISTENs each channel waited on through a connection, keeping a
+  notification for another as pending for that channel's next wait.)*
 - Bounds/hardening already present carry over: the frame reader is length-checked
   over untrusted bytes (mirrors the rest of `pgwire.c`); a hostile 'A' payload is
   read as a bounded cstr and ignored (we only need the *fact* of a notification,
