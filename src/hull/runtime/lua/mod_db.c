@@ -906,6 +906,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
      * connection. The worker opens its own per-thread connection per DSN. */
     {
         const char *dsn = db_call_dsn(L);
+        op->max_instructions = lua->max_instructions;   /* the op's own */
         op->no_cache = luaL_testudata(L, lua_upvalueindex(1),
                                       HL_LUA_DB_OWNED_MT) != NULL;
         if (op->no_cache) op->dyn_id = hl_db_dynamic_id(db_resolve_handle(L));

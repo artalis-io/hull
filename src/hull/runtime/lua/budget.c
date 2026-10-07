@@ -37,6 +37,24 @@
 #include "lua.h"
 #include "lauxlib.h"
 
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_budget.h"
+
+/* SQL work, charged by the SQLite progress handler (cap/db_budget.h): a
+ * statement runs inside one binding call, where the count hook never fires.
+ * Once over, the statement is interrupted and the binding raises the trip
+ * (hl_lua_raise_copy). */
+static int budget_db_charge(void *ud, int64_t units)
+{
+    HlLuaBudget *b = (HlLuaBudget *)ud;
+    if (b->tripped) return 1;
+    if (b->limit <= 0) return 0;
+    b->used = units > INT64_MAX - b->used ? INT64_MAX : b->used + units;
+    if (b->used >= b->limit) b->tripped = 1;
+    return b->tripped;
+}
+#endif
+
 /* Instructions charged per hook call: small enough that a tripped thread
  * notices within a few thousand instructions of the limit, large enough
  * that the hook costs nothing measurable. */
@@ -109,6 +127,10 @@ void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit)
     b->limit = limit;
     b->used = 0;
     b->tripped = 0;
+#ifdef HL_ENABLE_DB
+    /* This thread's SQL is this run's from here on (audit 9 H4). */
+    (void)hl_db_budget_swap(budget_db_charge, b);
+#endif
     if (limit <= 0) {
         lua_sethook(thread, NULL, 0, 0);
         return;

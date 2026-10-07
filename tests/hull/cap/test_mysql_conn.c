@@ -324,7 +324,16 @@ static void put_eof(HlMyWriter *w, uint8_t seq)
     hl_my_packet_end(w, m);
 }
 
+static void put_col_def_flags(HlMyWriter *w, uint8_t seq, const char *name,
+                              uint8_t type, uint16_t flags);
+
 static void put_col_def(HlMyWriter *w, uint8_t seq, const char *name, uint8_t type)
+{
+    put_col_def_flags(w, seq, name, type, 0);
+}
+
+static void put_col_def_flags(HlMyWriter *w, uint8_t seq, const char *name,
+                              uint8_t type, uint16_t flags)
 {
     size_t m = hl_my_packet_begin(w, seq);
     hl_my_put_lenenc_str(w, "def", 3);
@@ -337,7 +346,7 @@ static void put_col_def(HlMyWriter *w, uint8_t seq, const char *name, uint8_t ty
     hl_my_put_u16(w, 63);                              /* charset */
     hl_my_put_u32(w, 11);                              /* column length */
     hl_my_put_u8(w, type);
-    hl_my_put_u16(w, 0);                               /* flags */
+    hl_my_put_u16(w, flags);                           /* flags */
     hl_my_put_u8(w, 0);                                /* decimals */
     hl_my_put_u16(w, 0);                               /* filler */
     hl_my_packet_end(w, m);
@@ -482,6 +491,92 @@ UTEST(mysql_conn, prepared_statement)
     ASSERT_EQ(got.rows, 1);
     ASSERT_STREQ(got.col0, "id");
     ASSERT_EQ((int)got.first_int, 42);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* Binary integer values of UNSIGNED columns are zero-extended (audit 9 M3:
+ * TINYINT UNSIGNED 200 read as -56), a signed one is still sign-extended,
+ * and a BIGINT UNSIGNED above INT64_MAX comes back as its decimal text. */
+typedef struct { int n; HlMyVal v[8]; char s[8][32]; } UCollect;
+
+static int urow(void *ctx, const HlMyVal *vals, int nc)
+{
+    UCollect *g = ctx;
+    for (int i = 0; i < nc && i < 8; i++) {
+        g->v[i] = vals[i];
+        if (vals[i].kind == HL_MY_VAL_STR)
+            snprintf(g->s[i], sizeof g->s[i], "%.*s", (int)vals[i].v.s.len,
+                     vals[i].v.s.ptr);
+    }
+    g->n = nc;
+    return 0;
+}
+
+UTEST(mysql_conn, prepared_unsigned_columns)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    { size_t m = hl_my_packet_begin(&s, 1);           /* PREPARE_OK: 6 cols */
+      hl_my_put_u8(&s, HL_MY_PKT_OK);
+      hl_my_put_u32(&s, 1);
+      hl_my_put_u16(&s, 6);
+      hl_my_put_u16(&s, 0);
+      hl_my_put_u8(&s, 0);
+      hl_my_put_u16(&s, 0);
+      hl_my_packet_end(&s, m); }
+    for (int i = 0; i < 6; i++) put_col_def(&s, (uint8_t)(2 + i), "c", HL_MY_TYPE_TINY);
+    put_eof(&s, 8);
+
+    { size_t m = hl_my_packet_begin(&s, 1);
+      hl_my_put_lenenc_int(&s, 6);
+      hl_my_packet_end(&s, m); }
+    put_col_def_flags(&s, 2, "tu", HL_MY_TYPE_TINY, HL_MY_FLAG_UNSIGNED);
+    put_col_def_flags(&s, 3, "ts", HL_MY_TYPE_TINY, 0);
+    put_col_def_flags(&s, 4, "su", HL_MY_TYPE_SHORT, HL_MY_FLAG_UNSIGNED);
+    put_col_def_flags(&s, 5, "lu", HL_MY_TYPE_LONG, HL_MY_FLAG_UNSIGNED);
+    put_col_def_flags(&s, 6, "bu", HL_MY_TYPE_LONGLONG, HL_MY_FLAG_UNSIGNED);
+    put_col_def_flags(&s, 7, "bs", HL_MY_TYPE_LONGLONG, HL_MY_FLAG_UNSIGNED);
+    put_eof(&s, 8);
+    { size_t m = hl_my_packet_begin(&s, 9);
+      hl_my_put_u8(&s, 0x00);                          /* binary row header */
+      hl_my_put_u8(&s, 0x00);                          /* null bitmap: 6+2 bits */
+      hl_my_put_u8(&s, 200);                           /* tu */
+      hl_my_put_u8(&s, 200);                           /* ts */
+      hl_my_put_u16(&s, 65535);                        /* su */
+      hl_my_put_u32(&s, 4000000000u);                  /* lu */
+      hl_my_put_u32(&s, 0xFFFFFFFFu);                  /* bu = 2^64 - 1 */
+      hl_my_put_u32(&s, 0xFFFFFFFFu);
+      hl_my_put_u32(&s, 7);                            /* bs = 7 (fits) */
+      hl_my_put_u32(&s, 0);
+      hl_my_packet_end(&s, m); }
+    put_eof(&s, 10);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    UCollect got; memset(&got, 0, sizeof got);
+    ASSERT_EQ(0, hl_my_conn_query_prepared(&conn, "SELECT u", NULL, 0,
+                                           NULL, urow, &got, NULL));
+    ASSERT_EQ(6, got.n);
+    EXPECT_EQ((int)HL_MY_VAL_INT, (int)got.v[0].kind);
+    EXPECT_EQ(200, (int)got.v[0].v.i);
+    EXPECT_EQ(-56, (int)got.v[1].v.i);
+    EXPECT_EQ(65535, (int)got.v[2].v.i);
+    EXPECT_EQ(4000000000LL, (long long)got.v[3].v.i);
+    EXPECT_EQ((int)HL_MY_VAL_STR, (int)got.v[4].kind);
+    EXPECT_STREQ("18446744073709551615", got.s[4]);
+    EXPECT_EQ((int)HL_MY_VAL_INT, (int)got.v[5].kind);
+    EXPECT_EQ(7, (int)got.v[5].v.i);
 
     hl_my_conn_close(&conn);
     hl_my_writer_free(&s);
@@ -972,6 +1067,111 @@ UTEST(mysql_backend, implicit_commit_classifier)
     for (size_t i = 0; i < sizeof no_commit / sizeof no_commit[0]; i++)
         EXPECT_EQ_MSG(0, my_sql_commits_implicitly(no_commit[i]),
                       no_commit[i] ? no_commit[i] : "(null)");
+}
+
+/* Text protocol: a BIGINT UNSIGNED above INT64_MAX keeps its text instead
+ * of saturating to INT64_MAX (audit 9 M3). */
+UTEST(mysql_backend, text_bigint_unsigned_out_of_range_is_text)
+{
+    HlValue v;
+    decode_my_value(HL_MY_TYPE_LONGLONG, "18446744073709551615", 20, &v);
+    EXPECT_EQ((int)HL_TYPE_TEXT, (int)v.type);
+    EXPECT_EQ(20, (int)v.len);
+    decode_my_value(HL_MY_TYPE_LONGLONG, "-5", 2, &v);
+    EXPECT_EQ((int)HL_TYPE_INT, (int)v.type);
+    EXPECT_EQ(-5, (int)v.i);
+}
+
+/* MySQL runs an executable comment (slash-star-bang) and skips a '#' comment,
+ * where the shared reader does the opposite: such a statement is never read
+ * as an implicit commit nor as a plain statement to resume after (audit 9
+ * L1). */
+UTEST(mysql_backend, executable_and_hash_comments_are_unrecognised)
+{
+    static const char *const unreadable[] = {
+        "/*! COMMIT */", "/*!50000 COMMIT */", "/*M! COMMIT */",
+        "# c\nCOMMIT", "CREATE /*!99999 TEMPORARY */ TABLE t (id INT)",
+        "CREATE # c\n TEMPORARY TABLE t (id INT)",
+    };
+    for (size_t i = 0; i < sizeof unreadable / sizeof unreadable[0]; i++) {
+        EXPECT_EQ_MSG(0, my_sql_commits_implicitly(unreadable[i]), unreadable[i]);
+        EXPECT_EQ_MSG((int)HL_SQL_TXN_OTHER, (int)my_sql_txn_kind(unreadable[i]),
+                      unreadable[i]);
+    }
+    EXPECT_EQ((int)HL_SQL_TXN_COMMIT, (int)my_sql_txn_kind("/* c */ COMMIT"));
+    EXPECT_EQ((int)HL_SQL_TXN_NONE, (int)my_sql_txn_kind("UPDATE a SET x = 1"));
+}
+
+/* An executable-comment COMMIT ends the batch's transaction: none is opened under
+ * it (the batch reports its transaction lost instead). */
+UTEST(mysql_backend, executable_comment_commit_is_not_resumed)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    put_ok_more(&s, 1, 0x0002);                        /* the COMMIT */
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* a resume */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+    EXPECT_EQ(0, mysql_exec(&h, "/*! COMMIT */", NULL, 0));
+    /* No START TRANSACTION was sent (its queued reply is never read). */
+    EXPECT_FALSE(my_in_trans(&h));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A failed statement with an executable comment whose transaction is gone
+ * is refused until ROLLBACK, like any unrecognised statement - not resumed
+ * as DDL (CREATE disguised by the comment) and not let through to
+ * autocommit the rest of the batch. */
+UTEST(mysql_backend, failed_executable_comment_statement_is_refused)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    build_err(&s, 1, 1205, "Lock wait timeout exceeded");        /* CREATE */
+    put_ok_more(&s, 1, 0x0002);                        /* PING: autocommit */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+    EXPECT_EQ(-1, mysql_exec(&h,
+        "CREATE /*!99999 TEMPORARY */ TABLE snap SELECT * FROM a", NULL, 0));
+    EXPECT_EQ(1, ctx.txn_aborted);
+    EXPECT_EQ(0, mysql_rollback(&h));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* The CREATE INDEX IF NOT EXISTS shim takes a duplicate index by the server's
+ * error code (ER_DUP_KEYNAME), not its message (audit 9 L2): a localized
+ * message is still a duplicate, and another error whose text mentions
+ * "Duplicate key name" is still a failure. */
+UTEST(mysql_backend, create_index_shim_uses_error_code)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    build_err(&s, 1, HL_MY_ER_DUP_KEYNAME, "Doppelter Schluesselname 'i'");
+    build_err(&s, 1, 1146, "Table 'Duplicate key name' doesn't exist");
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    h.batch_depth = 0;
+    EXPECT_EQ(0, mysql_exec(&h, "CREATE INDEX IF NOT EXISTS i ON t (x)", NULL, 0));
+    EXPECT_EQ(-1, mysql_exec(&h, "CREATE INDEX IF NOT EXISTS i ON t (x)", NULL, 0));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
 }
 
 /* A lock-wait timeout in CREATE TEMPORARY TABLE ... SELECT (shared locks on

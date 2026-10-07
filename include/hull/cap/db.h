@@ -276,4 +276,18 @@ void hl_cap_db_guard_stale_txn(sqlite3 *db);
  */
 int hl_cap_db_check_namespace(const char *sql);
 
+/**
+ * @brief Install Hull's SQL guard on a connection: the authorizer that refuses
+ *        ATTACH of a file / VACUUM INTO and the file-moving pragmas,
+ *        SQLITE_DBCONFIG_DEFENSIVE, the progress handler that charges the
+ *        calling run's budget (cap/db_budget.h) and SQLITE_LIMIT_LENGTH.
+ *
+ * Part of @ref hl_cap_db_init; on its own for a connection that must not get
+ * the init's pragmas (a read-only agent connection).
+ *
+ * @return `0`, or `-1` when the guard could not be installed (close the
+ *         connection).
+ */
+int hl_cap_db_guard(sqlite3 *db);
+
 #endif /* HL_CAP_DB_H */

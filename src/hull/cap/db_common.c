@@ -12,7 +12,66 @@
 #ifdef HL_ENABLE_DB
 
 #include "hull/cap/db.h"
+#include "hull/cap/db_budget.h"
+#include <stdatomic.h>
 #include <strings.h>
+
+/* ── The calling run's budget (cap/db_budget.h) ────────────────────── */
+
+static _Thread_local HlDbBudgetFn tl_budget_fn;
+static _Thread_local void        *tl_budget_ud;
+
+HlDbBudgetBinding hl_db_budget_swap(HlDbBudgetFn fn, void *ud)
+{
+    HlDbBudgetBinding prev = { tl_budget_fn, tl_budget_ud };
+    tl_budget_fn = fn;
+    tl_budget_ud = fn ? ud : NULL;
+    return prev;
+}
+
+void hl_db_budget_restore(HlDbBudgetBinding prev)
+{
+    tl_budget_fn = prev.fn;
+    tl_budget_ud = prev.ud;
+}
+
+void hl_db_budget_unbind(const void *ud)
+{
+    if (tl_budget_fn && tl_budget_ud == ud) {
+        tl_budget_fn = NULL;
+        tl_budget_ud = NULL;
+    }
+}
+
+int hl_db_budget_charge(int64_t units)
+{
+    return tl_budget_fn ? tl_budget_fn(tl_budget_ud, units) : 0;
+}
+
+int hl_db_op_budget_charge(void *ud, int64_t units)
+{
+    HlDbOpBudget *b = (HlDbOpBudget *)ud;
+    if (b->tripped) return 1;
+    if (b->limit <= 0) return 0;
+    b->used = units > INT64_MAX - b->used ? INT64_MAX : b->used + units;
+    if (b->used > b->limit) b->tripped = 1;
+    return b->tripped;
+}
+
+static _Atomic size_t g_max_value_bytes;
+
+void hl_db_note_heap_limit(size_t bytes)
+{
+    size_t cur = atomic_load(&g_max_value_bytes);
+    while (bytes > cur &&
+           !atomic_compare_exchange_weak(&g_max_value_bytes, &cur, bytes))
+        ;
+}
+
+size_t hl_db_max_value_bytes(void)
+{
+    return atomic_load(&g_max_value_bytes);
+}
 
 /* ── Namespace protection ──────────────────────────────────────────── */
 

@@ -62,6 +62,14 @@ sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
             if (db) sqlite3_close(db);
             return NULL;
         }
+        /* READONLY covers this file only: ATTACH read any other the user
+         * can, and VACUUM INTO wrote a copy anywhere (audit 9 M2). The app
+         * connections' guard, without hl_cap_db_init's pragmas (WAL and the
+         * rest would write). */
+        if (hl_cap_db_guard(db) != 0) {
+            sqlite3_close(db);
+            return NULL;
+        }
     } else {
         if (sqlite3_open(":memory:", &db) != SQLITE_OK)
             return NULL;

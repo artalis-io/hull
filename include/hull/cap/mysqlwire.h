@@ -225,7 +225,12 @@ typedef struct HlMyColumn {
     const char *name;
     size_t      name_len;
     uint8_t     type;       /* HL_MY_TYPE_* */
+    uint16_t    flags;      /* HL_MY_FLAG_* (column definition flags) */
 } HlMyColumn;
+
+/* Column definition flag: an integer column is UNSIGNED, so its binary value
+ * is zero-extended, not sign-extended. */
+#define HL_MY_FLAG_UNSIGNED 0x0020
 
 /* Parse a ColumnDefinition41 packet body. Returns 0 / -1 (malformed). */
 int hl_my_parse_column_def(const HlMyFrame *f, HlMyColumn *out);

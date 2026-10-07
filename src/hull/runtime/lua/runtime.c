@@ -26,6 +26,7 @@
 #include "hull/runtime/test.h"
 #include "hull/cap/ws.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
+#include "hull/cap/db_budget.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -277,6 +278,9 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     memset((char *)lua + sizeof(lua->base), 0, sizeof(*lua) - sizeof(lua->base));
     lua->tool_unveil_ctx = cfg->sandbox ? NULL : tool_unveil_ctx;   /* tool VM only */
     lua->mem_limit = cfg->max_heap_bytes;
+#ifdef HL_ENABLE_DB
+    hl_db_note_heap_limit(cfg->max_heap_bytes);   /* SQLITE_LIMIT_LENGTH */
+#endif
     lua->max_instructions = cfg->max_instructions;
 
     /* Create Lua state with custom allocator */
@@ -525,6 +529,9 @@ void hl_lua_free(HlLua *lua)
 {
     if (!lua)
         return;
+#ifdef HL_ENABLE_DB
+    hl_db_budget_unbind(&lua->budget);   /* bound by every arm */
+#endif
 
     /* Cancel and free tracked timers - via async backend vtable. */
     {

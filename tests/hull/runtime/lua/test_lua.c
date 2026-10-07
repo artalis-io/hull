@@ -2965,6 +2965,29 @@ UTEST(lua_stdlib, nested_batch_is_a_savepoint)
     cleanup_lua_caps();
 }
 
+/* One statement is charged to the run's instruction budget (audit 9 H4): a
+ * recursive CTE in one db.query held the event loop for good, and a pcall
+ * around it does not catch the limit. */
+void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit);
+
+UTEST(db_audit9, lua_a_runaway_query_hits_the_instruction_limit)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 1000000);
+    int rc = luaL_dostring(lua_rt.L,
+        "local ok, e = pcall(db.query, 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) AS n FROM c') "
+        "return 'caught: ' .. tostring(e)");
+    EXPECT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    EXPECT_NE_MSG(strstr(err ? err : "", "instruction limit"), NULL, err ? err : "");
+    lua_settop(lua_rt.L, 0);
+    /* The next run is armed afresh, and its queries run. */
+    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 1000000);
+    EXPECT_EQ(eval_int("db.query('SELECT 7 AS n')[1].n"), 7);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, totp_rekey_batch_helper)
 {
     init_lua_with_caps();

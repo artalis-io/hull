@@ -20,6 +20,7 @@
 #include "hull/cap/db.h"   /* HlDbError codes + check_namespace decl */
 #include <ctype.h>
 #include <stddef.h>
+#include <stdio.h>    /* snprintf (hl_db_dsn_redact) */
 #include <string.h>
 
 /* Extract the DSN scheme (the text before "://") lowercased into @p buf.
@@ -206,6 +207,24 @@ const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err)
         *err = "this hull has no default (SQLite) backend for a scheme-less "
                "DSN; use an explicit scheme (e.g. postgres:// or duckdb://)";
     return NULL;
+}
+
+size_t hl_db_dsn_redact(const char *dsn, char *out, size_t outsz)
+{
+    if (!out || outsz == 0) return 0;
+    out[0] = '\0';
+    if (!dsn) return 0;
+    const char *sep = strstr(dsn, "://");
+    if (!sep) return (size_t)snprintf(out, outsz, "%s", dsn);
+    /* The authority ends at the path, query or fragment; the host is what
+     * follows its last '@' (the password may itself contain '@'). */
+    const char *auth = sep + 3;
+    size_t alen = strcspn(auth, "/?#");
+    const char *host = auth;
+    for (size_t i = 0; i < alen; i++)
+        if (auth[i] == '@') host = auth + i + 1;
+    return (size_t)snprintf(out, outsz, "%.*s://%.*s", (int)(sep - dsn), dsn,
+                            (int)(alen - (size_t)(host - auth)), host);
 }
 
 /* hl_cap_db_check_namespace (the backend-agnostic _hull_* guard) moved to

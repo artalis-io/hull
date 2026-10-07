@@ -17,6 +17,7 @@
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
 #include "hull/worker_db.h"   /* hl_worker_db_end_job */
+#include "hull/cap/db_budget.h"   /* hl_db_budget_unbind */
 
 #include <keel/thread_pool.h>
 #include <keel/async.h>
@@ -312,6 +313,7 @@ static void lua_dispatch_work_fn(void *ud)
     lua_dispatch_run(L, op);
     lua_close(L);
 #ifdef HL_ENABLE_DB
+    hl_db_budget_unbind(&heap.budget);   /* bound by worker_vm_new's arm */
     /* After the close: a finalizer may have run db.* too. */
     if (op->with_db &&
         hl_worker_db_end_job(op->error ? NULL : op->error_msg,

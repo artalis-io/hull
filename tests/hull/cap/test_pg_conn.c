@@ -527,6 +527,8 @@ UTEST(pg_query, wait_notify)
     /* 3. Peer closed -> connection dead -> -1. */
     close(sv[0]);
     ASSERT_EQ(-1, hl_pg_wait_notify(&conn, NULL, 1000, NULL, NULL));
+    /* ... and the failed wait marks the connection broken (audit 9 L5). */
+    ASSERT_EQ(1, conn.broken);
 
     hl_pg_conn_close(&conn);
 }

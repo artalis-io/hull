@@ -14,6 +14,8 @@
 #include "hull/utils/alloc.h"
 #include "hull/vfs.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db.h"       /* hl_cap_db_check_namespace */
+#include "hull/cap/db_budget.h"
 #include "hull/cap/crypto.h"   /* hl_cap_crypto_sha256 */
 #include "utils/hex.h"        /* hl_hex_encode */
 
@@ -187,9 +189,30 @@ static int execute_migration(HlDbHandle *h, const char *name,
         return 0;
     }
 
+    /* Always copy to ensure NUL-termination (avoids OOB read if VFS
+     * entry isn't NUL-terminated).  Migration SQL is small and runs
+     * once at startup, so the copy cost is negligible. */
+    if (sql_len > SIZE_MAX / 2) return -1;
+    char *sql_copy = malloc(sql_len + 1);
+    if (!sql_copy) return -1;
+    memcpy(sql_copy, sql, sql_len);
+    sql_copy[sql_len] = '\0';
+
+    /* Migration files are app SQL: held to the same _hull_* namespace check
+     * as conn.exec (audit 9 M1). A migration could otherwise create a view
+     * or trigger over _hull_sessions that app queries read freely. Hull's own
+     * tracking statements (_hull_migrations) do not come through here. */
+    if (hl_cap_db_check_namespace(sql_copy) != 0) {
+        log_error("[hull:migrate] %s: refused - migrations may not reference "
+                  "Hull's internal _hull_* tables", name);
+        free(sql_copy);
+        return -1;
+    }
+
     if (hl_db_begin(h) != 0) {
         log_error("[hull:migrate] %s: cannot begin transaction: %s",
                   name, hl_db_errmsg(h));
+        free(sql_copy);
         return -1;
     }
 
@@ -205,6 +228,7 @@ static int execute_migration(HlDbHandle *h, const char *name,
         log_error("[hull:migrate] %s: cannot lock _hull_migrations: %s",
                   name, hl_db_errmsg(h));
         hl_db_rollback(h);
+        free(sql_copy);
         return -1;
     }
     {
@@ -215,23 +239,16 @@ static int execute_migration(HlDbHandle *h, const char *name,
             log_error("[hull:migrate] %s: cannot re-check: %s",
                       name, hl_db_errmsg(h));
             hl_db_rollback(h);
+            free(sql_copy);
             return -1;
         }
         if (r.found) {
             hl_db_rollback(h);
+            free(sql_copy);
             log_info("[hull:migrate] %s: applied by another process", name);
             return 0;
         }
     }
-
-    /* Always copy to ensure NUL-termination (avoids OOB read if VFS
-     * entry isn't NUL-terminated).  Migration SQL is small and runs
-     * once at startup, so the copy cost is negligible. */
-    if (sql_len > SIZE_MAX / 2) { hl_db_rollback(h); return -1; }
-    char *sql_copy = malloc(sql_len + 1);
-    if (!sql_copy) { hl_db_rollback(h); return -1; }
-    memcpy(sql_copy, sql, sql_len);
-    sql_copy[sql_len] = '\0';
 
     /* Migration files can bundle several ;-separated statements, so use the
      * script path (sqlite3_exec / PG simple Query), not the single-statement
@@ -532,7 +549,11 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
      * rest of the migrations without it (audit 6 L5). */
     int pinned = handle->session_pinned;
     if (kind != MIG_LOCK_NONE) handle->session_pinned = 1;
+    /* Startup work, not an app run: a large data migration is not charged
+     * to (nor stopped by) the budget the app's load left bound (H4). */
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
     int rc = migrate_run_locked(handle, vfs);
+    hl_db_budget_restore(budget);
     mig_unlock(handle, kind);
     handle->session_pinned = pinned;
     return rc;

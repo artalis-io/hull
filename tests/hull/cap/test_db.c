@@ -11,6 +11,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
+#include "hull/cap/db_budget.h"
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/db_udf.h"
 #endif
@@ -396,6 +397,76 @@ UTEST(hl_cap_db, stmt_cache_reuse)
 }
 
 /* ── Namespace check tests ──────────────────────────────────────────── */
+
+/* ── Audit 9 H4: SQL charged to the calling run's budget ─────────────── */
+
+static int count_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    if (ncols > 0) *(int64_t *)ctx = cols[0].value.i;
+    return 0;
+}
+
+UTEST(hl_cap_db, runaway_statement_is_interrupted_by_the_bound_budget)
+{
+    setup_db();
+    HlDbOpBudget b = { 200000, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    int64_t n = 0;
+    int rc = hl_cap_db_query(&test_cache,
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) AS n FROM c", NULL, 0, count_cb, &n, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_NE(0, rc);
+    EXPECT_EQ(1, b.tripped);
+    EXPECT_EQ(SQLITE_INTERRUPT, sqlite3_errcode(test_db));
+    /* Sticky: the next statement of the run is refused too. */
+    prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    EXPECT_NE(0, hl_cap_db_query(&test_cache,
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c "
+        "LIMIT 10000) SELECT count(*) FROM c", NULL, 0, count_cb, &n, NULL));
+    hl_db_budget_restore(prev);
+    teardown_db();
+}
+
+UTEST(hl_cap_db, no_bound_budget_never_interrupts)
+{
+    setup_db();
+    HlDbBudgetBinding prev = hl_db_budget_swap(NULL, NULL);
+    int64_t n = 0;
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache,
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c "
+        "LIMIT 100000) SELECT count(*) FROM c", NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(100000, (int)n);
+    hl_db_budget_restore(prev);
+    teardown_db();
+}
+
+/* randomblob / zeroblob built values up to SQLite's 1 GB outside the VM heap
+ * limit: a connection is capped at the largest heap a runtime reported. */
+UTEST(hl_cap_db, value_length_is_capped_at_the_heap_limit)
+{
+    hl_db_note_heap_limit(1u << 20);
+    setup_db();
+    int64_t n = 0;
+    EXPECT_NE(0, hl_cap_db_query(&test_cache,
+        "SELECT length(zeroblob(2000000))", NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(SQLITE_TOOBIG, sqlite3_errcode(test_db));
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache,
+        "SELECT length(randomblob(1000))", NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(1000, (int)n);
+    teardown_db();
+}
+
+/* hl_cap_db_guard alone (the read-only agent connection, audit 9 M2) still
+ * refuses ATTACH of a file and VACUUM INTO. */
+UTEST(hl_cap_db, guard_alone_refuses_attach_and_vacuum_into)
+{
+    sqlite3 *db = NULL;
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(":memory:", &db));
+    ASSERT_EQ(0, hl_cap_db_guard(db));
+    EXPECT_NE(SQLITE_OK, sqlite3_exec(db, "ATTACH 'other.db' AS o", NULL, NULL, NULL));
+    EXPECT_NE(SQLITE_OK, sqlite3_exec(db, "VACUUM INTO 'copy.db'", NULL, NULL, NULL));
+    sqlite3_close(db);
+}
 
 UTEST(hl_cap_db, namespace_check_blocks_hull_tables)
 {

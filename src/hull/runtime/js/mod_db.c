@@ -601,9 +601,12 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx,
             "db.batch: the connection was closed inside the batch");
 
-    if (hl_db_batch_leave(h, 1) != 0)
+    if (hl_db_batch_leave(h, 1) != 0) {
+        if (js->budget_tripped)   /* see query */
+            return hl_js_budget_throw(ctx);
         return JS_ThrowInternalError(ctx, "COMMIT failed: %s",
                                      hl_db_errmsg(h));
+    }
 
     return JS_UNDEFINED;
 }
@@ -689,9 +692,12 @@ static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
     js_free_string_array(ctx, conflict_cols, n_conflict);
     JS_FreeCString(ctx, table);
 
-    if (rc < 0)
+    if (rc < 0) {
+        if (js->budget_tripped)   /* see query */
+            return hl_js_budget_throw(ctx);
         return JS_ThrowInternalError(ctx, "%s failed: %s",
                                      name, hl_db_errmsg(h));
+    }
 
     return JS_NewInt32(ctx, rc);
 }
@@ -758,6 +764,8 @@ static JSValue js_db_table_columns(JSContext *ctx, JSValueConst this_val,
 
     if (rc != 0) {
         JS_FreeValue(ctx, cc.array);
+        if (js->budget_tripped)   /* see query */
+            return hl_js_budget_throw(ctx);
         return JS_ThrowInternalError(ctx, "db.tableColumns failed: %s",
                                      hl_db_errmsg(h));
     }
@@ -987,6 +995,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
      * whichever carrier this_val is; NULL (unknown) yields the worker default. */
     {
         const char *dsn = js_call_dsn(ctx, this_val);
+        op->max_instructions = js->max_instructions;   /* the op's own */
         op->no_cache = JS_GetOpaque(this_val, hull_db_owned_conn_class_id) != NULL;
         if (op->no_cache) op->dyn_id = hl_db_dynamic_id(js_call_handle(ctx, this_val));
         if (dsn) {

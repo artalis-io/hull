@@ -12,6 +12,7 @@
 
 #include "hull/cap/db.h"
 #include "hull/cap/audit.h"
+#include "hull/cap/db_budget.h"
 #include "hull/utils/alloc.h"
 #include <sqlite3.h>
 #include <limits.h>
@@ -222,13 +223,37 @@ int hl_cap_db_init(sqlite3 *db)
     /* REQUIRED, and last, so the pragmas above are not subject to it: a
      * connection that cannot refuse ATTACH / VACUUM INTO would let SQL write
      * outside the fs grants, so a failure here aborts the open. */
+    return hl_cap_db_guard(db);
+}
+
+/* Every HL_DB_PROGRESS_OPS SQLite instructions: charge the calling run's
+ * budget, and interrupt the statement once it is exhausted (audit 9 H4). */
+static int db_progress(void *ud)
+{
+    (void)ud;
+    return hl_db_budget_charge(HL_DB_PROGRESS_OPS);
+}
+
+int hl_cap_db_guard(sqlite3 *db)
+{
+    if (!db)
+        return -1;
     if (sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, 1, (int *)NULL) != SQLITE_OK ||
         sqlite3_set_authorizer(db, db_authorizer, NULL) != SQLITE_OK) {
         fprintf(stderr, "hull: sqlite could not install its SQL guard: %s\n",
                 sqlite3_errmsg(db));
         return -1;
     }
-
+    /* One statement used to run unmetered: a recursive CTE held the event
+     * loop for good. With no budget bound (migrations, tooling) the handler
+     * never interrupts. */
+    sqlite3_progress_handler(db, HL_DB_PROGRESS_OPS, db_progress, NULL);
+    /* randomblob(1e9) / zeroblob(1e9) / a long replace() built a value of up
+     * to SQLite's 1 GB default outside the VM heap limit; nothing larger
+     * than a VM could hold is any use to it. */
+    size_t max = hl_db_max_value_bytes();
+    if (max > 0 && max < (size_t)INT_MAX)
+        sqlite3_limit(db, SQLITE_LIMIT_LENGTH, (int)max);
     return 0;
 }
 
