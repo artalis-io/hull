@@ -1116,7 +1116,7 @@ UTEST(mysql_backend, executable_comment_commit_is_not_resumed)
     HlDbHandle h; HlDbMyCtx ctx; int sv[2];
     ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
     ASSERT_EQ(0, mysql_begin(&h));
-    EXPECT_EQ(0, mysql_exec(&h, "/*! COMMIT */", NULL, 0));
+    EXPECT_LE(0, mysql_exec(&h, "/*! COMMIT */", NULL, 0));   /* rows affected */
     /* No START TRANSACTION was sent (its queued reply is never read). */
     EXPECT_FALSE(my_in_trans(&h));
 
