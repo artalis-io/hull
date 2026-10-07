@@ -8503,6 +8503,22 @@ static const HlEntry a9_wasm_entries[] = {
     { 0, 0, 0 }
 };
 
+/* hull:compute registers only when a WASM cache exists at init. */
+static void a9_init_js_wasm(HlWasmCache *cache, HlVfs *vfs)
+{
+    if (js_initialized)
+        hl_js_free(&js);
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    memset(&js, 0, sizeof(js));
+    js.base.platform_vfs = &platform_vfs;
+    js.base.wasm_cache = cache;
+    js.base.app_vfs = vfs;
+    js_initialized = (hl_js_init(&js, &cfg) == 0);
+    if (js_initialized) install_test_js_globals(&js);
+}
+
 /* H1: compute.stream read a plain ArrayBuffer input through a pointer taken
  * before the output callback - app code that runs between chunks - and
  * ArrayBuffer.prototype.transfer() there freed the backing store: every
@@ -8510,14 +8526,12 @@ static const HlEntry a9_wasm_entries[] = {
  * the stream carries on with the bytes it was given. */
 UTEST(js_audit9, compute_stream_copies_an_arraybuffer_input)
 {
-    init_js();
-    ASSERT_TRUE(js_initialized);
     HlWasmCache cache;
     ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
     HlVfs vfs;
     hl_vfs_init(&vfs, a9_wasm_entries, NULL);
-    js.base.wasm_cache = &cache;
-    js.base.app_vfs = &vfs;
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
     char *r = eval_str(
         "(() => {\n"
         "  const ab = new ArrayBuffer(1024);\n"
@@ -8533,7 +8547,7 @@ UTEST(js_audit9, compute_stream_copies_an_arraybuffer_input)
         "  if (out.length !== 1024) return 'len ' + out.length;\n"
         "  for (let i = 0; i < 1024; i++)\n"
         "    if (out[i] !== ((i * 7) & 255)) return 'byte ' + i;\n"
-        "  return 'ok ' + calls + ' ' + ab.detached;\n"
+        "  return 'ok ' + calls + ' ' + (ab.byteLength === 0);\n"
         "})()");
     EXPECT_TRUE(r && strcmp(r, "ok 4 true") == 0);
     if (r && strcmp(r, "ok 4 true") != 0) printf("  got: %s\n", r);
@@ -8548,14 +8562,12 @@ UTEST(js_audit9, compute_stream_copies_an_arraybuffer_input)
  * detaches the input no longer leaves a pointer to freed memory behind. */
 UTEST(js_audit9, compute_stream_resolves_input_after_options)
 {
-    init_js();
-    ASSERT_TRUE(js_initialized);
     HlWasmCache cache;
     ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
     HlVfs vfs;
     hl_vfs_init(&vfs, a9_wasm_entries, NULL);
-    js.base.wasm_cache = &cache;
-    js.base.app_vfs = &vfs;
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
     char *r = eval_str(
         "(() => {\n"
         "  const ab = new ArrayBuffer(512);\n"
