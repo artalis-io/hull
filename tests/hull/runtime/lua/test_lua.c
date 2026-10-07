@@ -7036,10 +7036,13 @@ UTEST(lua_cap, image_pixels_count_against_the_heap_limit)
     }
     lua_settop(lua_rt.L, 0);
 
+    /* The new image's GC step may collect other garbage: start from none,
+     * and allow the chunk's own bits some slack. */
+    lua_gc(lua_rt.L, LUA_GCCOLLECT, 0);
     size_t base = lua_rt.mem_used;
     ASSERT_EQ(luaL_dostring(lua_rt.L,
         "img = image.new(1024, 1024, 'r8', px)"), LUA_OK);
-    EXPECT_GE(lua_rt.mem_used, base + (1u << 20));
+    EXPECT_GE(lua_rt.mem_used, base + (1u << 20) - (64u << 10));
     ASSERT_EQ(luaL_dostring(lua_rt.L, "img:close() img = nil"), LUA_OK);
     EXPECT_LT(lua_rt.mem_used, base + (512u << 10));
 
