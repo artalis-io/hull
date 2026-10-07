@@ -140,6 +140,24 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
         memcpy(abspath, override, olen);
         abspath[olen] = '\0';
         if (hl_mkdir_p(abspath, 0700) != 0) return -1;
+        /* The cache directory is granted read-write-create to the app and
+         * tool sandboxes, so HULL_CACHE_DIR=/ or =$HOME made the filesystem
+         * or every file the user owns writable, and =~/.hull the cache and
+         * tool-cache keys (audit 9). Refused with the caches off, as for an
+         * untrusted directory. */
+        if (hl_host_path_too_broad(abspath) ||
+            hl_host_path_covers_home(abspath, ".hull")) {
+            static int warned_broad;
+            if (!warned_broad) {
+                warned_broad = 1;
+                log_warn("[cache] HULL_CACHE_DIR %s is the filesystem root, "
+                         "your home directory or above, or ~/.hull or above; "
+                         "the bytecode / template / AOT caches are off (set "
+                         "it to a directory of its own)", abspath);
+            }
+            errno = EPERM;
+            return -1;
+        }
         if (!cache_dir_trusted(abspath)) return -1;
         return 0;
     }

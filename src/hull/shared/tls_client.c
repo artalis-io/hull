@@ -197,8 +197,17 @@ HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
         kl_tls_mbedtls_ctx_destroy(ctx);
         return NULL;
     }
-    if (host && host[0] && tls->set_hostname)
-        tls->set_hostname(tls, host);
+    /* A hostname that did not take leaves the handshake checking the chain
+     * but not the name - any certificate the anchor signed would do. Failed
+     * closed when verifying, as Keel's own HTTP client does (audit 9). */
+    if (host && host[0] && tls->set_hostname &&
+        tls->set_hostname(tls, host) != 0 && verify) {
+        log_error("[hull:tls] could not set the server name '%s' for "
+                  "certificate verification; connection refused", host);
+        tls->destroy(tls);
+        kl_tls_mbedtls_ctx_destroy(ctx);
+        return NULL;
+    }
 
     HlTlsClient *c = NULL;
     if (tls_handshake_loop(tls, fd, timeout_ms) != 0 ||
@@ -220,8 +229,15 @@ HlTlsClient *hl_tls_client_handshake_cfg(int fd, const char *host,
     KlTls *tls = cfg->factory(cfg->ctx, default_alloc());
     if (!tls)
         return NULL;
-    if (host && host[0] && tls->set_hostname)
-        tls->set_hostname(tls, host);
+    /* The caller's config may verify: a name that did not take must not
+     * leave the handshake to accept any certificate the anchor signed. */
+    if (host && host[0] && tls->set_hostname &&
+        tls->set_hostname(tls, host) != 0) {
+        log_error("[hull:tls] could not set the server name '%s' for "
+                  "certificate verification; connection refused", host);
+        tls->destroy(tls);
+        return NULL;
+    }
 
     /* ctx is user-owned (cfg->ctx): wrap with ctx=NULL so free leaves it. */
     HlTlsClient *c = NULL;

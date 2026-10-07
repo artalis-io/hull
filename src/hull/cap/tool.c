@@ -474,6 +474,11 @@ int hl_tool_validate_args(const char *const argv[])
         if (strncmp(a, "-fuse-ld=", 9) == 0 &&
             (strchr(a + 9, '/') || strchr(a + 9, '\\'))) return -1;
         if (strncmp(a, "-Wl,", 4) == 0 && check_wl(a + 4) != 0) return -1;
+        /* -Wp,<opts>: each comma piece goes to the preprocessor (cc1)
+         * unchecked, so "-Wp,-load,evil.so" and "-Wp,-fplugin=evil.so"
+         * loaded a plugin past every check above (audit 9). No backend
+         * passes preprocessor options this way. */
+        if (strncmp(a, "-Wp,", 4) == 0)        return -1;
         if (a[0] == '@')                       return -1; /* response file */
         /* clang configuration files (--config <f>, --config=<f>, and
          * clang 16's --config-system-dir= / --config-user-dir=): the file's

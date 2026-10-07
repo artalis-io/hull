@@ -177,4 +177,30 @@ int hl_host_tool_name(const char *invocation, char *out, size_t out_sz);
 int hl_host_find_in_path_ex(const char *path_list, const char *name,
                             char *out, size_t out_sz);
 
+/**
+ * @brief The user's home directory: $HOME, else $USERPROFILE (a Windows
+ *        shell that is not MSYS2 exports only the latter). NULL when neither
+ *        is set.
+ */
+const char *hl_host_home(void);
+
+/**
+ * @brief 1 when @p path names a directory a sandbox must never grant whole:
+ *        the filesystem root, a bare drive root on Windows ("/C", "C:/"),
+ *        or the user's home directory or any directory above it.
+ *
+ * Both sides are realpath'd; on Windows the compare ignores case (cosmo's
+ * realpath keeps the caller's spelling, so "/c/users/mark" and
+ * "/C/Users/Mark" are the same home). A path that does not resolve is
+ * reported broad (1): the caller cannot tell what it would grant.
+ */
+int hl_host_path_too_broad(const char *path);
+
+/**
+ * @brief 1 when @p path is $HOME/<sub> or a directory above it (both
+ *        realpath'd where they exist; <sub> need not exist). With @p sub
+ *        NULL, the home directory itself. Case-insensitive on Windows.
+ */
+int hl_host_path_covers_home(const char *path, const char *sub);
+
 #endif /* HL_SHARED_HOST_H */

@@ -30,4 +30,12 @@ typedef struct {
  */
 int hl_agent_api_register(KlHttpServer *server, HlAgentApiCtx *ctx);
 
+/*
+ * 1 when the Host header value (@p len bytes, not NUL-terminated) names
+ * loopback: localhost, 127.0.0.1 or [::1], each with an optional port.
+ * Every agent API request must carry one, and none may carry an Origin
+ * (DNS rebinding: a page on an attacker's name resolved to 127.0.0.1).
+ */
+int hl_agent_api_host_ok(const char *host, size_t len);
+
 #endif /* HL_AGENT_API_H */

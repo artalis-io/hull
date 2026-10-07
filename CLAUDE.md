@@ -40,7 +40,9 @@ the embedded bundle (with one ERROR saying so). `--no-ca-bundle` publishes
 nothing: it turns verification off for `http.fetch`, the SSH tunnel and
 synchronous SMTP only. The clients that read the published anchor - a DSN
 asking for `sslmode=verify-full`, and the async SMTP workers - still verify,
-against the embedded bundle.
+against the embedded bundle. `shared/tls_client.c` fails a verifying handshake
+whose server name could not be set (it would check the chain but not the name;
+audit 9), as Keel's own HTTP client does.
 
 `hull doctor` reports both system and embedded availability. The new Keel API `kl_tls_mbedtls_client_ctx_create_from_buf()` loads PEM/DER directly from memory.
 
@@ -262,7 +264,17 @@ net DSN), so a sandboxed DB-only app can reach its database.
 **same trust chain** as `hull flavor install` / `hull tools install` /
 `hull update`, no new keys. The registry is the `FEATURES[]` table in
 `src/hull/commands/feature.c` (the single registration point: one row per
-feature + which native platforms publish it).
+feature + which native platforms publish it). The verified manifest must also
+NAME the release asked for (its signed `hull.version` entry,
+`hl_release_io_check_release_tag`, which the shared fetch runs for every caller
+- before audit 9 only `hull update` checked, so an older release's signed
+manifest + assets served under the current tag installed); the install caches
+`hull.version` beside the manifest (`<asset>.version`), and the `hull build`
+re-verify (`tool.platform_verify` → `hl_release_io_verify_local_asset_release`)
+requires the cached manifest to name THIS hull's release - so a cache-sourced
+feature works only with a release-build hull (a source build composes from its
+own `make feature-<name>` archive), and a feature installed before audit 9 is
+reinstalled once.
 
 **Build from source:** `make feature-duckdb` / `make feature-gpu`. Each
 re-invokes make with `HL_ENABLE_DUCKDB=1` / `HL_ENABLE_GPU=1` so the backend
@@ -1274,7 +1286,9 @@ before any branch, so it cannot parse an option the table does not give it, and 
 rows (test_runtime_flags also scans both parsers' option literals against it). A new runtime flag = a table row. A --hull-<name> the
 parser does not take (unknown, or missing its value) is an error, never an app argument, and a one-letter name takes its
 value as the next argument (--hull-d PATH; --hull-d=PATH is refused).
---agent-api additionally requires a loopback bind (its endpoints are unauthenticated).
+--agent-api additionally requires a loopback bind (its endpoints are unauthenticated), and answers only a request whose
+Host is localhost / 127.0.0.1 / [::1] (any port) and that carries no Origin - DNS rebinding let a web page read it
+through a name resolved to 127.0.0.1 (audit 9; 403 otherwise).
 Global flags: --version / -v (equivalent to hull version), --help / -h (equivalent to hull help), --verbose, --json, --app-dir
 ```
 
@@ -1357,7 +1371,7 @@ The live install path is intentionally not tested in CI (it would need the just-
 
 **Cache eviction is manual.** No automatic TTL / background sweep / on-write cap. Stale entries are harmless (content-keyed → orphans never serve incorrect data), and the caches are tiny per entry, so correctness doesn't depend on freshness. The only automatic hygiene is `hl_blob_store_open`'s `tmp_max_age_sec` sweep (default 1 hour) which removes abandoned `tmp/.blob-*.tmp` files from crashed writers. `hull doctor` surfaces a `⚠ large` mark next to any cache kind that passes 250 MB or runtime total past 1 GB and prints an actionable `hull cache prune --max-age=30d --strategy=lru` hint - but does not act on it. Disk-pressure users who want fully automatic eviction wire `hull cache prune` into cron / a systemd timer.
 
-**`HULL_CACHE_DIR` (per-app cache isolation).** `HULL_CACHE_DIR=/absolute/path` redirects the entire runtime cache pool from `$HOME/.hull/blobs/runtime/` to the given directory. Use on multi-tenant boxes or under systemd / k8s / Docker so each deployment has its own cache and never reads / writes another deployment's blobs. Must be an absolute path; the sandbox auto-allows the resolved path. All `HULL_NO_*_CACHE` opt-outs (below) still apply on top. The tools store (`$HOME/.hull/blobs/tools/`) is intentionally NOT redirected - those are signed durable downloads with a stable system home, not per-app caches. Layer C (automatic per-app isolation derived from app identity) is a planned follow-up; the override here is the manual / deployment-controlled equivalent. See [docs/blob.md §"Per-app cache isolation"](docs/blob.md).
+**`HULL_CACHE_DIR` (per-app cache isolation).** `HULL_CACHE_DIR=/absolute/path` redirects the entire runtime cache pool from `$HOME/.hull/blobs/runtime/` to the given directory. Use on multi-tenant boxes or under systemd / k8s / Docker so each deployment has its own cache and never reads / writes another deployment's blobs. Must be an absolute path; the sandbox auto-allows the resolved path (read-write-create, in the app AND tool sandboxes), so `/`, a drive root, `$HOME` or above, and `~/.hull` or above (the cache keys) are refused with the caches off and one WARN (audit 9; `hl_host_path_too_broad` / `hl_host_path_covers_home`). All `HULL_NO_*_CACHE` opt-outs (below) still apply on top. The tools store (`$HOME/.hull/blobs/tools/`) is intentionally NOT redirected - those are signed durable downloads with a stable system home, not per-app caches. Layer C (automatic per-app isolation derived from app identity) is a planned follow-up; the override here is the manual / deployment-controlled equivalent. See [docs/blob.md §"Per-app cache isolation"](docs/blob.md).
 
 ### Cache environment variables
 
@@ -1674,6 +1688,11 @@ an unsigned file in `migrations/`, `compute/`, `shaders/`, `templates/` or `stat
 directory from its working directory; `hl_sandbox_apply` refuses `/` (that unveiled the whole
 filesystem) and the user's home or any ancestor of it (every file the user owns) - run it from
 its own directory (`WorkingDirectory=`, `WORKDIR`; the generated Dockerfile sets `WORKDIR /srv`).
+One rule with the tool sandbox (`hl_host_path_too_broad`, `shared/host.c`): home is `$HOME`, else
+`$USERPROFILE`, compared without case on Windows, and a bare drive root (`/C`) is a root (audit 9).
+A top-level `fs.write` glob (`"*.log"`) can only be granted as the whole app directory at the kernel
+level; that is warned about, as for a top-level file that does not exist yet - put written files in a
+subdirectory.
 Without `-d`, the database is `<app_dir>/data.db` - the one `hull migrate` opens.
 
 **Tool-mode sandbox (`hl_tool_sandbox_init`).** Kernel unveil only where it enforces (OpenBSD,
@@ -1735,7 +1754,7 @@ tracked follow-up, and would add protection rather than only honesty.
 - **Host allowlist enforced:** `hl_cap_http_request()` validates target host against manifest's `hosts` array. Since §2.8 the check delegates to the shared matcher `hl_host_match_any_env` (`src/hull/utils/host_match.c`), so `hosts` entries may be an exact hostname (case-insensitive), `"*"` (any), a `"*.suffix"` subdomain glob, a CIDR (matches only IP-literal hosts, never a DNS name), or a `"$VAR"` / `"${VAR}"` env reference resolved at match time. The same matcher gates `ws.connect` (shares the http config) and `smtp.send` (`hl_smtp_check_host`), and `databases.dynamic.hosts` - one convention across every outbound host allowlist.
 - **Env allowlist enforced:** `hl_cap_env_get()` checks against manifest's `env` array (max 32 entries). A `$VAR` reference elsewhere in the manifest must name a variable in `env` or `secrets` (checked at load by `hl_manifest_check_env_refs`).
 - **SQL cannot reach other files (SQLite):** `hl_cap_db_init` installs an authorizer that refuses `ATTACH` of any real file (and so `VACUUM INTO`, which SQLite runs as an internal ATTACH), `writable_schema` and the `*_store_directory` pragmas, plus `SQLITE_DBCONFIG_DEFENSIVE`.
-- **No shell invocation:** Tool mode uses `hl_tool_spawn()` with compiler allowlist. No `system()`/`popen()`. Arguments that make a driver run another program are refused (`-wrapper`, `-specs=`, `--ld-path=`, `-fuse-ld=/path`, plugins, `@file`, clang `--config*` files, `--gcc-toolchain`, and `-B<dir>` unless the dir is a `$PATH` / `~/.hull/tools` entry holding the lld Hull resolved); a spawn may set only `ZIG_*_CACHE_DIR`, `TMPDIR`/`TMP`/`TEMP` and `SOURCE_DATE_EPOCH`.
+- **No shell invocation:** Tool mode uses `hl_tool_spawn()` with compiler allowlist. No `system()`/`popen()`. Arguments that make a driver run another program are refused (`-wrapper`, `-specs=`, `--ld-path=`, `-fuse-ld=/path`, plugins, `-Wp,` (its pieces reach cc1 unchecked: `-Wp,-load,x.so`), `@file`, clang `--config*` files, `--gcc-toolchain`, and `-B<dir>` unless the dir is a `$PATH` / `~/.hull/tools` entry holding the lld Hull resolved); a spawn may set only `ZIG_*_CACHE_DIR`, `TMPDIR`/`TMP`/`TEMP` and `SOURCE_DATE_EPOCH`.
 - **Key material zeroed:** `hull_secure_zero()` (volatile memset) scrubs crypto material from stack buffers.
 - **Instruction limits:** Both Lua and JS runtimes enforce per-request instruction limits (default 100M). Lua uses `lua_sethook(LUA_MASKCOUNT)`, JS uses `JS_SetInterruptHandler`. Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var. Lua's budget (`runtime/lua/budget.c`) is per VM and per **uninterrupted run**: every entry (a request, a middleware, a timer, an async resume, `app.main`) arms the whole limit again. A trip is sticky until then: `pcall` / `xpcall` / `coroutine.resume` / `coroutine.wrap` re-raise it, so app code cannot catch the limit and keep looping. Work one Lua instruction does on a large operand counts too (Lua HULL PATCH 0004, docs/lua_patches.md): allocation (1 unit / 64 bytes, `luaL_Buffer` growth included), string compares (the bytes compared) and long-string table keys, `table.insert` / `remove` / `move` / `sort` / `concat` / `unpack` loops, `string.byte` / `rep` / `pack` / `unpack`, `utf8.len` / `offset` / `codepoint`, `next` over emptied slots, vararg and result copies, string-to-number coercion, the collector's work (incremental steps, the emergency collection a failed allocation runs, mode switches), and pattern matching including a plain `find` miss; a coroutine's run is charged to its resumer when it returns or yields, so short coroutines are not free - so the limit bounds a run's wall time, not only its instruction count. QuickJS polls its interrupt handler once per 10000 countdown steps (calls and backward jumps, and regexp backtracking steps), so each poll is charged `HL_JS_INTERRUPT_WEIGHT` (10000, `runtime/js/internal.h`) - counted one per poll, the limit used to be ~10^4 times weaker than its value. The JS budget mirrors Lua's: per run, re-armed by `hl_js_budget_arm` at every entry (dispatch, middleware, timer, ws / SSE / ws-client callback, async and multipart resume, `app.main`, a `hull test` case, a detached `hull:_task` task; each worker dispatch has its own), and a trip is sticky (`HlJS.budget_tripped`) - QuickJS HULL PATCH 0003 polls again at the very next step, so an async body or promise job that turned the interrupt into a rejection cannot let its caller run on. A binding whose callback was interrupted (SQL UDF, `compute.stream`) re-raises it uncatchable (`hl_js_budget_throw`), `hl_js_run_jobs` discards a tripped run's jobs, and a tripped run whose promise therefore never settles is completed as failed (`HlJsRunOnce.tripped`). Hull's own init code runs before the limit applies.
 - **WASM compute bounds: gas vs timeout.** `gas` is WAMR instruction metering - exact, but INTERPRETER-only: WAMR never meters AOT code, and nothing meters the start / `__wasm_call_ctors` functions an instantiation runs. `timeout_ms` (default 10 s, max 1 h; per call, manifest `wasm.timeout_ms` / `timeoutMs`, CLI `--wasm-timeout-ms`, clamped like gas) is the wall-clock bound that holds for everything: `cap/wasm_watchdog.c` (one thread) calls `wasm_runtime_terminate` on the instance at the deadline, and WAMR patch 0007 makes that land - the fast interpreter polls the instance's exception every 4096 instructions, wamrc emits a volatile check at every loop header, and a post-instantiate hook binds the watch while start / ctor functions run (a module whose start function outlives the default at load is refused). An expired watch re-terminates its instance every 10 ms until unbound (a host call can erase a pending trap: round-6 M1), and deadlines are CLOCK_MONOTONIC on every host. Patch 0007 also has wamrc stamp every AOT file (`include/hull/cap/wasm_aot_stamp.h`); `hl_cap_wasm_load` refuses an unstamped `.aot` (an unpatched wamrc's: its loops cannot be stopped) and falls back to the `.wasm`, and `hull build` neither embeds one it compiled nor keeps compiling AOT with that wamrc. WAMR picks AOT vs bytecode by the magic (`\0aot`), not the name, so both check the BYTES: AOT code saved as `compute/<name>.wasm` is held to the stamp too (the runtime refuses an unstamped one, `hull build` fails on it), and `hull build` warns about a committed unstamped `*.aot.*`. The manifest / CLI ceilings (`include/hull/wasm_config.h`) apply on every entry point - serve.c, the `app.main` runner, `hull test` / `hull agent` - and to `compute.stream` and WASM `db.udf` instances; a call on a `compute.instance` falls to the instance's own defaults, under the ceiling. A watch is bound to an instance only while guest code runs, so the watchdog never touches a pooled or destroyed instance. Segment chains: every instance teardown detaches the module chain before deinstantiate (WAMR does not, and counts attachments in a uint8 that wrapped); `HlWasmModule.chain_attached` bounds live attachments at `HL_WASM_MAX_CHAIN_ATTACH` (128); a segment change is refused (`segments_in_use`) while an out-of-pool instance holds the chain; and a per-module `chain_gen` keeps an instance that was out of the pool across a change from being pooled stale.

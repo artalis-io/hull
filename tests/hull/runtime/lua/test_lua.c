@@ -7689,6 +7689,32 @@ UTEST(lua_audit3, a_writable_cache_dir_is_not_used)
     hl_lua_bytecode_cache_reset();
 }
 
+/* HULL_CACHE_DIR is granted read-write-create to the app and tool sandboxes:
+ * the root, $HOME and ~/.hull (the cache keys) are refused, a directory of
+ * its own is used (audit 9). */
+UTEST(lua_audit9, a_broad_cache_dir_override_is_refused)
+{
+    char tmpdir[512];
+    bc_with_tmp_home(tmpdir, sizeof tmpdir);
+    ASSERT_NE(tmpdir[0], 0);
+    char out[1024], ovr[1024];
+
+    setenv("HULL_CACHE_DIR", "/", 1);
+    EXPECT_EQ(hl_hull_cache_dir(out, sizeof out), -1);
+    setenv("HULL_CACHE_DIR", tmpdir, 1);
+    EXPECT_EQ(hl_hull_cache_dir(out, sizeof out), -1);
+    snprintf(ovr, sizeof ovr, "%s/.hull", tmpdir);
+    setenv("HULL_CACHE_DIR", ovr, 1);
+    EXPECT_EQ(hl_hull_cache_dir(out, sizeof out), -1);
+    snprintf(ovr, sizeof ovr, "%s/app-cache", tmpdir);
+    setenv("HULL_CACHE_DIR", ovr, 1);
+    EXPECT_EQ(hl_hull_cache_dir(out, sizeof out), 0);
+
+    unsetenv("HULL_CACHE_DIR");
+    bc_cleanup_tmp_home(tmpdir);
+    hl_lua_bytecode_cache_reset();
+}
+
 /* ── Audit 4: the Lua runtime ─────────────────────────────────────────── */
 
 /* A limited VM whose top level runs `code`; returns its status, leaving the

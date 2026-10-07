@@ -445,3 +445,74 @@ int hl_host_normalize_path(const char *path, char *out, size_t out_sz)
     out[n] = 0;
     return 1;
 }
+
+/* -- How much a directory grant covers ------------------------------ */
+
+const char *hl_host_home(void)
+{
+    const char *home = getenv("HOME");
+    if (!home || !*home) home = getenv("USERPROFILE");
+    return (home && *home) ? home : NULL;
+}
+
+/* realpath in the rooted form ("C:\x" -> "/C/x"), trailing '/' dropped. */
+static int host_realpath(const char *path, char *out)
+{
+    char norm[HL_HOST_PATH_MAX];
+    if (!path || hl_host_normalize_path(path, norm, sizeof norm) < 0) return -1;
+    if (!realpath(norm, out)) return -1;
+    size_t n = strlen(out);
+    while (n > 1 && out[n - 1] == '/') out[--n] = 0;
+    return 0;
+}
+
+/* Is the resolved @p rp an ancestor of (or equal to) the resolved @p target? */
+static int host_rp_covers(const char *rp, const char *target)
+{
+    if (strcmp(rp, "/") == 0) return 1;
+    size_t l = strlen(rp);
+    int same;
+    if (hl_host_is_windows()) {
+        same = 1;
+        for (size_t i = 0; i < l; i++) {
+            char a = rp[i], b = target[i];
+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (a != b || !target[i]) { same = 0; break; }
+        }
+    } else {
+        same = strncmp(rp, target, l) == 0;
+    }
+    return same && (target[l] == '\0' || target[l] == '/');
+}
+
+int hl_host_path_covers_home(const char *path, const char *sub)
+{
+    char rp[PATH_MAX], hr[PATH_MAX];
+    const char *home = hl_host_home();
+    if (!home || host_realpath(path, rp) != 0 || host_realpath(home, hr) != 0)
+        return 0;
+    if (sub && *sub) {
+        size_t n = strlen(hr);
+        if (n + 1 + strlen(sub) + 1 > sizeof hr) return 0;
+        if (strcmp(hr, "/") != 0) hr[n++] = '/';
+        memcpy(hr + n, sub, strlen(sub) + 1);
+    }
+    return host_rp_covers(rp, hr);
+}
+
+int hl_host_path_too_broad(const char *path)
+{
+    char rp[PATH_MAX];
+    if (host_realpath(path, rp) != 0) return 1;
+    if (strcmp(rp, "/") == 0) return 1;
+    /* A bare drive root: cosmo spells it "/C", a native build "C:" / "C:/". */
+    if (hl_host_is_windows()) {
+        int letter = (rp[1] >= 'A' && rp[1] <= 'Z') || (rp[1] >= 'a' && rp[1] <= 'z');
+        if (rp[0] == '/' && letter && rp[2] == '\0') return 1;
+        letter = (rp[0] >= 'A' && rp[0] <= 'Z') || (rp[0] >= 'a' && rp[0] <= 'z');
+        if (letter && rp[1] == ':' && (rp[2] == '\0' || (rp[2] == '/' && rp[3] == '\0')))
+            return 1;
+    }
+    return hl_host_path_covers_home(rp, NULL);
+}

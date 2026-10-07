@@ -259,7 +259,10 @@ hull dev
 When set, every runtime cache lives under `$HULL_CACHE_DIR/<kind>/`
 instead of `$HOME/.hull/blobs/runtime/<kind>/`. The sandbox (Linux
 unveil, macOS Seatbelt) auto-allows the override path so caching keeps
-working under the kernel sandbox. The `tools/` store is **not**
+working under the kernel sandbox. Because that grant is read-write-create,
+an override that is `/`, a drive root, your home directory or above, or
+`~/.hull` or above (where the cache keys live) is refused: the caches turn
+off with one warning (audit 9). Give it a directory of its own. The `tools/` store is **not**
 redirected - it's a signed download cache that benefits from being
 shared across all apps, and rotating it per-app would force every app
 to re-download `wamrc` (and pay the verify cost) on first use.

@@ -166,4 +166,37 @@ UTEST(tls_handshake, result_after_deadline_is_rejected)
     close(sv[0]); close(sv[1]);
 }
 
+/* A server name that did not take must fail the connection before any
+ * handshake: the chain alone would then be checked, not the name (audit 9). */
+static int g_destroyed;
+static int fake_set_hostname_fails(KlTls *self, const char *h)
+{
+    (void)self; (void)h;
+    return -1;
+}
+static void fake_destroy(KlTls *self) { (void)self; g_destroyed++; }
+static KlTls g_factory_tls;
+static KlTls *fake_factory(KlTlsCtx *ctx, KlAllocator *alloc)
+{
+    (void)ctx; (void)alloc;
+    g_factory_tls = make_fake_tls();
+    g_factory_tls.set_hostname = fake_set_hostname_fails;
+    g_factory_tls.destroy = fake_destroy;
+    return &g_factory_tls;
+}
+UTEST(tls_handshake, set_hostname_failure_fails_closed)
+{
+    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    seam_reset();
+    g_hs_seq[0] = KL_TLS_OK; g_hs_n = 1;        /* would succeed if reached */
+    g_destroyed = 0;
+    KlTlsConfig cfg; memset(&cfg, 0, sizeof cfg);
+    cfg.factory = fake_factory;
+    ASSERT_TRUE(hl_tls_client_handshake_cfg(sv[0], "db.example", &cfg, 100) == NULL);
+    ASSERT_EQ(g_hs_calls, 0);                    /* no handshake without the name */
+    ASSERT_EQ(g_destroyed, 1);                   /* the session was released */
+    tls_test_fcntl = NULL;
+    close(sv[0]); close(sv[1]);
+}
+
 UTEST_MAIN()

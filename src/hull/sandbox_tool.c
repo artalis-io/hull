@@ -127,32 +127,17 @@ static int dir_exists_p(const char *path)
 /* The user's home directory: $HOME, else %USERPROFILE% (Windows). */
 static const char *tool_home(void)
 {
-    const char *home = getenv("HOME");
-    if (!home || !*home) home = getenv("USERPROFILE");
-    return (home && *home) ? home : NULL;
+    return hl_host_home();
 }
 
 /* A grant there is the whole filesystem, or every file the user owns
  * (~/.ssh, ~/.bashrc - and ~/.hull/tools, which Landlock unions into rwc
- * although it is granted rx below). On Windows cosmo's realpath keeps the
- * caller's spelling ("c:/users/mark" -> "/c/users/mark") while $HOME
- * resolves to "/C/Users/Mark", so a case-sensitive compare called the home
- * directory "not broad" when spelled in another case. */
+ * although it is granted rx below). One rule with the app sandbox's
+ * app-directory check (hl_host_path_too_broad: USERPROFILE fallback,
+ * case-insensitive on Windows, a bare drive root counts as the root). */
 int hl_tool_path_too_broad(const char *path)
 {
-    char rp[PATH_MAX];
-    if (!path || !realpath(path, rp)) return 1;
-    if (strcmp(rp, "/") == 0) return 1;
-    const char *home = tool_home();
-    char hr[PATH_MAX];
-    if (home && realpath(home, hr)) {
-        size_t l = strlen(rp);
-        int same = hl_host_is_windows() ? strncasecmp(hr, rp, l) == 0
-                                        : strncmp(hr, rp, l) == 0;
-        if (same && (hr[l] == '\0' || hr[l] == '/'))
-            return 1;
-    }
-    return 0;
+    return hl_host_path_too_broad(path);
 }
 
 /* The invocation directory is granted read-write-create - except when that

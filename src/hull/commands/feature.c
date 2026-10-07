@@ -242,11 +242,12 @@ static int cmd_install(const char *name, const char *repo)
         return 1;
     }
 
-    char *manifest = NULL, *sig = NULL;
-    size_t manifest_len = 0, sig_len = 0;
+    char *manifest = NULL, *sig = NULL, *ver = NULL;
+    size_t manifest_len = 0, sig_len = 0, ver_len = 0;
     if (hl_release_io_fetch_verified_manifest(repo, tag, &alloc, tls, "hull-feature",
                                               &manifest, &manifest_len,
-                                              &sig, &sig_len) != 0) {
+                                              &sig, &sig_len,
+                                              &ver, &ver_len) != 0) {
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
@@ -273,6 +274,13 @@ static int cmd_install(const char *name, const char *repo)
                                     cache_dir, asset) >= sizeof(p) ||
                    hl_release_io_atomic_write(p, sig, sig_len, 0644) != 0;
         }
+        /* The release's signed name: `hull build` checks the cached manifest
+         * is this hull's release, not another signed one (audit 9). */
+        if (ver) {
+            bad |= (size_t)snprintf(p, sizeof(p), "%s/%s.version",
+                                    cache_dir, asset) >= sizeof(p) ||
+                   hl_release_io_atomic_write(p, ver, ver_len, 0644) != 0;
+        }
         bad |= (size_t)snprintf(p, sizeof(p), "%s/%s.sha256", cache_dir, asset) >= sizeof(p) ||
                hl_release_io_atomic_write(p, manifest, manifest_len, 0644) != 0;
         if (bad) {
@@ -288,11 +296,15 @@ static int cmd_install(const char *name, const char *repo)
                 (void)hl_release_io_atomic_write(p, sig, sig_len, 0644);
             if ((size_t)snprintf(p, sizeof(p), "%s/hull.sha256", cache_dir) < sizeof(p))
                 (void)hl_release_io_atomic_write(p, manifest, manifest_len, 0644);
+            if (ver && (size_t)snprintf(p, sizeof(p), "%s/hull.version",
+                                        cache_dir) < sizeof(p))
+                (void)hl_release_io_atomic_write(p, ver, ver_len, 0644);
         }
     }
 
     kl_free(&alloc, manifest, manifest_len);
     if (sig) kl_free(&alloc, sig, sig_len);
+    if (ver) kl_free(&alloc, ver, ver_len);
     kl_tls_mbedtls_ctx_destroy(tls);
 
     if (rc == 0)

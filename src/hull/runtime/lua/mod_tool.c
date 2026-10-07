@@ -55,6 +55,9 @@
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#ifndef HL_VERSION
+#define HL_VERSION "dev"
+#endif
 #include <stdlib.h>
 #include <fcntl.h>
 #include <string.h>
@@ -1304,7 +1307,20 @@ static int l_tool_platform_verify(lua_State *L)
     const char *dir   = luaL_checkstring(L, 1);
     const char *asset = luaL_checkstring(L, 2);
     const char *file  = luaL_optstring(L, 3, NULL);   /* the copy to hash */
-    lua_pushboolean(L, hl_release_io_verify_local_asset_file(dir, asset, file) == 0);
+    /* And the cached manifest must be THIS hull's release (audit 9): the
+     * install fetched from that tag, so another signed release's manifest
+     * and asset in its place is refused. A hull that is not a release
+     * build installs nothing and so verifies nothing from the cache. */
+    char tag[64];
+    if (hl_release_io_self_tag(tag, sizeof tag) != 0) {
+        fprintf(stderr, "hull build: this hull (%s) is not a release build, so "
+                        "a library cached by `hull feature|flavor install` "
+                        "cannot be checked against its release; build the "
+                        "library from source instead\n", HL_VERSION);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    lua_pushboolean(L, hl_release_io_verify_local_asset_release(dir, asset, file, tag) == 0);
     return 1;
 }
 
