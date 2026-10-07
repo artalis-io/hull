@@ -53,7 +53,7 @@ static int mj_value(lua_State *L, int idx, ShJsonWriter *w, int depth);
 /* The table at idx: array or object, per json.lua's rule. */
 static int mj_table(lua_State *L, int idx, ShJsonWriter *w, int depth)
 {
-    if (depth > MJ_MAX_DEPTH || !lua_checkstack(L, 4))
+    if (depth > MJ_MAX_DEPTH || !lua_checkstack(L, 5))
         return -1;
     idx = lua_absindex(L, idx);
 
@@ -86,39 +86,44 @@ static int mj_table(lua_State *L, int idx, ShJsonWriter *w, int depth)
     }
 
     /* Object: string keys, sorted. The key strings stay alive in the table
-     * (it is not modified), so their pointers hold while we write. */
-    size_t cap = 8, cnt = 0;
-    MjKey *keys = malloc(cap * sizeof *keys);
-    if (!keys) return -1;
+     * (it is not modified), so their pointers hold while we write.
+     *
+     * The key array is a userdata on the stack, not malloc'd (audit 9 L3):
+     * this runs under lua_pcall, and the push below (and the userdata itself)
+     * can raise a memory error, which skipped the free(). Counted first, so
+     * it is allocated once at its size. */
+    size_t cnt = 0;
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0) {
+        lua_pop(L, 1);
+        if (lua_type(L, -1) != LUA_TSTRING) { lua_pop(L, 1); return -1; }
+        cnt++;
+    }
+    if (cnt > SIZE_MAX / sizeof(MjKey)) return -1;
+    MjKey *keys = (MjKey *)lua_newuserdatauv(L, cnt ? cnt * sizeof *keys : 1, 0);
+    int keys_idx = lua_gettop(L);
+    size_t n = 0;
     lua_pushnil(L);
     while (lua_next(L, idx) != 0) {
         lua_pop(L, 1);
         size_t kl = 0;
-        if (lua_type(L, -1) != LUA_TSTRING) { lua_pop(L, 1); free(keys); return -1; }
         const char *k = lua_tolstring(L, -1, &kl);
-        if (memchr(k, '\0', kl)) { lua_pop(L, 1); free(keys); return -1; }
-        if (cnt == cap) {
-            MjKey *nk = (cap > SIZE_MAX / 2 / sizeof *keys) ? NULL
-                      : realloc(keys, cap * 2 * sizeof *keys);
-            if (!nk) { lua_pop(L, 1); free(keys); return -1; }
-            keys = nk;
-            cap *= 2;
-        }
-        keys[cnt].s = k;
-        keys[cnt].len = kl;
-        cnt++;
+        if (n == cnt || memchr(k, '\0', kl)) { lua_settop(L, keys_idx - 1); return -1; }
+        keys[n].s = k;
+        keys[n].len = kl;
+        n++;
     }
-    qsort(keys, cnt, sizeof *keys, mj_key_cmp);
+    qsort(keys, n, sizeof *keys, mj_key_cmp);
     sh_json_write_object_start(w);
     int rc = 0;
-    for (size_t i = 0; i < cnt && rc == 0; i++) {
+    for (size_t i = 0; i < n && rc == 0; i++) {
         sh_json_write_key(w, keys[i].s);
         lua_pushlstring(L, keys[i].s, keys[i].len);
         lua_rawget(L, idx);
         rc = mj_value(L, -1, w, depth + 1);
         lua_pop(L, 1);
     }
-    free(keys);
+    lua_settop(L, keys_idx - 1);   /* the key array */
     if (rc != 0) return -1;
     sh_json_write_object_end(w);
     return 0;

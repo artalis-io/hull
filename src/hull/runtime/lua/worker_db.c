@@ -22,6 +22,7 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -41,9 +42,14 @@ static int worker_lua_to_hl_values(lua_State *L, int idx,
     if (!lua_istable(L, idx))
         return -1;
 
-    int len = (int)luaL_len(L, idx);
-    if (len <= 0)
+    /* Raw, as mod_db.c reads params (audit 9 L4): luaL_len ran the table's
+     * __len, app code inside this marshalling, with any result it liked. */
+    lua_Unsigned rl = lua_rawlen(L, idx);
+    if (rl == 0)
         return 0;
+    if (rl > (lua_Unsigned)INT_MAX)
+        return -1;
+    int len = (int)rl;
     if ((size_t)len > SIZE_MAX / sizeof(HlValue))
         return -1;
 

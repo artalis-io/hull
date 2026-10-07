@@ -104,6 +104,10 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         lua->active_co = NULL;
     } else if (status == LUA_YIELD) {
         /* Handler yielded - async op in flight (detached mode). */
+        /* The continuation captured the coroutine; the globals no longer
+         * describe a running handler (audit 9 L6, as dispatch.c). */
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
     } else {
         char ebuf[512];
         log_error("[hull:ws] on_open error: %s",
@@ -158,6 +162,10 @@ void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
         lua->active_co = NULL;
     } else if (status == LUA_YIELD) {
         /* Async op in flight */
+        /* The continuation captured the coroutine; the globals no longer
+         * describe a running handler (audit 9 L6, as dispatch.c). */
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
     } else {
         char ebuf[512];
         log_error("[hull:ws] on_message error: %s",
@@ -232,7 +240,9 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
             /* Async op in flight - the continuation captured `conn`; the
              * teardown is deferred to hl_lua_async_resume's completion. Do
              * NOT invalidate/remove the conn here while the handler still
-             * references it. */
+             * references it. The globals are cleared (audit 9 L6). */
+            lua->active_thread_ref = LUA_NOREF;
+            lua->active_co = NULL;
             return;
         } else {
             char ebuf[512];

@@ -4,7 +4,8 @@
 -- module the first time one of them is touched). Built on three private
 -- primitives from runtime/lua/async.c:
 --
---   hull._spawn(fn)   run fn on its own coroutine on the event loop
+--   hull._spawn(fn, on_fail)  run fn on its own coroutine on the event loop;
+--                     on_fail(err) runs if that coroutine dies uncaught
 --   hull._token()     a wake token
 --   hull._park(tok)   suspend until tok is woken; hull._wake(tok) wakes it
 --
@@ -23,6 +24,34 @@ H._running = H._running or 0
 local Task = {}
 Task.__index = Task
 
+-- Settle a task once: record its outcome, uncount it, and hand back its
+-- waiters (nil if it was already settled).
+local function settle(task, failed, value)
+    if task._done then return nil end
+    if failed then
+        task._failed, task._error = true, value
+    else
+        task._results = value
+    end
+    task._done = true
+    if task._counted then
+        task._counted = nil
+        H._running = H._running - 1
+    end
+    local waiters = task._waiters
+    task._waiters = nil
+    return waiters
+end
+
+-- Wake every waiter; the tokens no wake could be scheduled for.
+local function wake_all(waiters)
+    local pending = {}
+    for _, tok in ipairs(waiters) do
+        if not pcall(H._wake, tok) then pending[#pending + 1] = tok end
+    end
+    return pending
+end
+
 --- Run fn(...) concurrently. Returns a task; task:wait() returns what fn
 --- returned, or raises what it raised.
 function M.async(fn, ...)
@@ -35,35 +64,39 @@ function M.async(fn, ...)
     -- before running it leaves the count alone.
     H._spawn(function()
         H._running = H._running + 1
+        task._counted = true
         local r = table.pack(pcall(fn, table.unpack(args, 1, args.n)))
+        local waiters
         if r[1] then
-            task._results = table.pack(table.unpack(r, 2, r.n))
+            waiters = settle(task, false, table.pack(table.unpack(r, 2, r.n)))
         else
-            task._failed, task._error = true, r[2]
+            waiters = settle(task, true, r[2])
         end
-        task._done = true
-        H._running = H._running - 1
-        local waiters = task._waiters
-        task._waiters = nil
+        if not waiters then return end
         -- One wake that cannot be scheduled must not keep the rest asleep.
-        local pending = {}
-        for _, tok in ipairs(waiters) do
-            if not pcall(H._wake, tok) then pending[#pending + 1] = tok end
-        end
+        local pending = wake_all(waiters)
         -- Nor may it be dropped: its waiter would stay parked for good. A
         -- wake fails only when its timer cannot be allocated, so try again
         -- on later ticks, and if that never works, say so.
         for _ = 1, 20 do
             if #pending == 0 then break end
             pcall(H.sleep, 50)
-            local still = {}
-            for _, tok in ipairs(pending) do
-                if not pcall(H._wake, tok) then still[#still + 1] = tok end
-            end
-            pending = still
+            pending = wake_all(pending)
         end
         if #pending > 0 then
             error(("hull.async: %d waiter(s) of a finished task could not be "
+                   .. "woken"):format(#pending), 0)
+        end
+    end, function(err)
+        -- The body died without reaching settle: an error pcall does not
+        -- catch (a tripped instruction budget, which it re-raises). The
+        -- runtime calls this once that run is over, as a run of its own, so
+        -- the task still finishes and its waiters wake (audit 9 M3).
+        local waiters = settle(task, true, err)
+        if not waiters then return end
+        local pending = wake_all(waiters)
+        if #pending > 0 then
+            error(("hull.async: %d waiter(s) of a failed task could not be "
                    .. "woken"):format(#pending), 0)
         end
     end)

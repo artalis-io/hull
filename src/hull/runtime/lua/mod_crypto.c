@@ -36,6 +36,35 @@ static void crypto_charge(lua_State *L, size_t n)
     lua_hlcharge(L, n / 8, 0);
 }
 
+/* Charge a key derivation of @p rounds rounds at @p per_round units each,
+ * BEFORE it runs (audit 9 H3). lua_hlwork runs the budget hook at once when
+ * the charge made it due, so a run over its budget raises here instead of
+ * first deriving: verify_password takes its iteration count from the stored
+ * string (up to HL_PBKDF2_MAX_ITERATIONS, 10M), and one call held the event
+ * loop for seconds while counting as a single instruction. */
+static void crypto_charge_kdf(lua_State *L, uint64_t rounds, uint64_t per_round)
+{
+    uint64_t u = (per_round && rounds > UINT64_MAX / per_round)
+                     ? UINT64_MAX : rounds * per_round;
+    lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
+}
+
+/* One PBKDF2-HMAC-SHA256 iteration per 32-byte output block is two SHA-256
+ * compressions (inner + outer HMAC) of 64 bytes: crypto_charge's rate. */
+#define HL_LUA_PBKDF2_UNITS_PER_ITER  ((2u * 64u) / 8u)
+
+/* bcrypt_pbkdf runs one bcrypt_hash per round per 32-byte output block, and
+ * a bcrypt_hash is ~130 Blowfish key expansions (~5M cycles): charged as
+ * 2^17 instructions, well under its real cost. */
+#define HL_LUA_BCRYPT_UNITS_PER_HASH  (1u << 17)
+
+static void crypto_charge_bcrypt(lua_State *L, lua_Integer rounds,
+                                 lua_Integer outlen)
+{
+    uint64_t blocks = ((uint64_t)outlen + 31u) / 32u;
+    crypto_charge_kdf(L, (uint64_t)rounds * blocks, HL_LUA_BCRYPT_UNITS_PER_HASH);
+}
+
 static int lua_crypto_sha256(lua_State *L)
 {
     size_t len;
@@ -124,6 +153,10 @@ static int lua_crypto_hash_password(lua_State *L)
     size_t pw_len;
     const char *pw = luaL_checklstring(L, 1, &pw_len);
 
+    /* Charged before the derivation (audit 9 H3). */
+    crypto_charge(L, pw_len);
+    crypto_charge_kdf(L, HL_PBKDF2_ITERATIONS, HL_LUA_PBKDF2_UNITS_PER_ITER);
+
     /* Generate 16-byte salt */
     uint8_t salt[16];
     if (hl_cap_crypto_random(salt, sizeof(salt)) != 0)
@@ -209,6 +242,11 @@ static int lua_crypto_verify_password(lua_State *L)
     if (hex_decode(salt_hex, 32, salt, sizeof(salt)) != 0) {
         lua_pushboolean(L, 0); return 1;
     }
+
+    /* Charged before the derivation, for the count the STORED string names
+     * (audit 9 H3): a tripped budget raises here, with nothing derived. */
+    crypto_charge(L, pw_len);
+    crypto_charge_kdf(L, (uint64_t)iterations, HL_LUA_PBKDF2_UNITS_PER_ITER);
 
     /* Recompute hash */
     uint8_t computed[32];
@@ -532,6 +570,7 @@ static int lua_crypto_secretbox(lua_State *L)
         return luaL_error(L, "secretbox: key must be 32 bytes");
     if (msg_len > SIZE_MAX - HL_SECRETBOX_MACBYTES)
         return luaL_error(L, "secretbox: message too large");
+    crypto_charge(L, msg_len);   /* audit 9 H3 */
     size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
     luaL_Buffer b;
     uint8_t *ct = (uint8_t *)luaL_buffinitsize(L, &b, ct_len);
@@ -553,6 +592,7 @@ static int lua_crypto_secretbox_open(lua_State *L)
         return luaL_error(L, "secretbox_open: nonce must be 24 bytes");
     if (key_len != 32)
         return luaL_error(L, "secretbox_open: key must be 32 bytes");
+    crypto_charge(L, ct_len);   /* audit 9 H3 */
     if (ct_len < HL_SECRETBOX_MACBYTES) {
         lua_pushnil(L);
         return 1;
@@ -591,6 +631,7 @@ static int lua_crypto_box(lua_State *L)
         return luaL_error(L, "box: secret key must be 32 bytes");
     if (msg_len > SIZE_MAX - HL_BOX_MACBYTES)
         return luaL_error(L, "box: message too large");
+    crypto_charge(L, msg_len);   /* audit 9 H3 */
     size_t ct_len = msg_len + HL_BOX_MACBYTES;
     luaL_Buffer b;
     uint8_t *ct = (uint8_t *)luaL_buffinitsize(L, &b, ct_len);
@@ -615,6 +656,7 @@ static int lua_crypto_box_open(lua_State *L)
         return luaL_error(L, "box_open: public key must be 32 bytes");
     if (sk_len != 32)
         return luaL_error(L, "box_open: secret key must be 32 bytes");
+    crypto_charge(L, ct_len);   /* audit 9 H3 */
     if (ct_len < HL_BOX_MACBYTES) {
         lua_pushnil(L);
         return 1;
@@ -756,6 +798,7 @@ static int lua_crypto_constant_time_eq(lua_State *L)
     const char *a = luaL_checklstring(L, 1, &alen);
     const char *b = luaL_checklstring(L, 2, &blen);
     if (alen != blen) { lua_pushboolean(L, 0); return 1; }
+    crypto_charge(L, alen);   /* audit 9 H3 */
     unsigned diff = 0;
     for (size_t i = 0; i < alen; i++)
         diff |= (unsigned)((unsigned char)a[i] ^ (unsigned char)b[i]);
@@ -920,6 +963,7 @@ static int lua_crypto_key_secretbox(lua_State *L)
     if (nonce_len != 24) return luaL_error(L, "key:secretbox: nonce must be 24 bytes");
     if (msg_len > SIZE_MAX - HL_SECRETBOX_MACBYTES)
         return luaL_error(L, "key:secretbox: message too large");
+    crypto_charge(L, msg_len);   /* audit 9 H3 */
     size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
     luaL_Buffer b;
     uint8_t *ct = (uint8_t *)luaL_buffinitsize(L, &b, ct_len);
@@ -941,6 +985,7 @@ static int lua_crypto_key_secretbox_open(lua_State *L)
     const char *ct    = luaL_checklstring(L, 2, &ct_len);
     const char *nonce = luaL_checklstring(L, 3, &nonce_len);
     if (nonce_len != 24) return luaL_error(L, "key:secretbox_open: nonce must be 24 bytes");
+    crypto_charge(L, ct_len);   /* audit 9 H3 */
     if (ct_len < HL_SECRETBOX_MACBYTES) { lua_pushnil(L); return 1; }
     size_t msg_len = ct_len - HL_SECRETBOX_MACBYTES;
     luaL_Buffer b;
@@ -1043,6 +1088,10 @@ static int lua_crypto_bcrypt_pbkdf(lua_State *L)
     if (!pass_len) return luaL_error(L, "crypto.bcrypt_pbkdf: empty passphrase");
     if (!salt_len) return luaL_error(L, "crypto.bcrypt_pbkdf: empty salt");
 
+    /* Charged before the derivation (audit 9 H3). */
+    crypto_charge(L, pass_len + salt_len);
+    crypto_charge_bcrypt(L, rounds, outlen);
+
     luaL_Buffer b;
     char *out = luaL_buffinitsize(L, &b, (size_t)outlen);
     if (hl_cap_crypto_bcrypt_pbkdf(pass, pass_len, salt, salt_len,
@@ -1107,6 +1156,10 @@ static int lua_crypto_bcrypt_pbkdf_env(lua_State *L)
     if (crypto_bcrypt_args_ok(rounds, outlen, &why) != 0)
         return luaL_error(L, "crypto.bcrypt_pbkdf_env: %s", why);
     if (!salt_len) return luaL_error(L, "crypto.bcrypt_pbkdf_env: empty salt");
+
+    /* Charged before the passphrase is read (audit 9 H3). */
+    crypto_charge(L, salt_len);
+    crypto_charge_bcrypt(L, rounds, outlen);
 
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.env_cfg)
@@ -1189,6 +1242,7 @@ static int lua_crypto_aes256ctr(lua_State *L)
         return luaL_error(L, "crypto.aes256ctr: iv must be %d bytes, got %d",
                           (int)HL_AES_CTR_IV_LEN, (int)ivlen);
     if (!len) { lua_pushliteral(L, ""); return 1; }
+    crypto_charge(L, len);   /* audit 9 H3 */
 
     luaL_Buffer b;
     char *out = luaL_buffinitsize(L, &b, len);
@@ -1232,6 +1286,7 @@ static int lua_crypto_chacha20(lua_State *L)
     if (ctr < 0 || ctr > 0xFFFFFFFFLL)
         return luaL_error(L, "crypto.chacha20: counter must be 0..2^32-1");
     if (!len) { lua_pushliteral(L, ""); return 1; }
+    crypto_charge(L, len);   /* audit 9 H3 */
 
     luaL_Buffer b;
     char *out = luaL_buffinitsize(L, &b, len);
@@ -1298,6 +1353,8 @@ static int lua_crypto_gcm_seal(lua_State *L)
         return luaL_error(L, "crypto.gcm_seal: iv must be %d bytes, got %d",
                           (int)HL_AEAD_IV_LEN, (int)ivlen);
 
+    crypto_charge(L, aad_len);   /* audit 9 H3 */
+    crypto_charge(L, pt_len);
     uint8_t tag[HL_AEAD_TAG_LEN];
     luaL_Buffer b;
     char *out = luaL_buffinitsize(L, &b, pt_len ? pt_len : 1);
@@ -1338,6 +1395,8 @@ static int lua_crypto_gcm_open(lua_State *L)
      * controlled input on the receive path, and raising there would turn a
      * forged packet into a crash instead of a rejection. */
     if (tag_len != HL_AEAD_TAG_LEN) { lua_pushnil(L); return 1; }
+    crypto_charge(L, aad_len);   /* audit 9 H3 */
+    crypto_charge(L, ct_len);
 
     luaL_Buffer b;
     char *out = luaL_buffinitsize(L, &b, ct_len ? ct_len : 1);

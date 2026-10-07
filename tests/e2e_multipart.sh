@@ -207,6 +207,17 @@ app.post("/upload", function(req, res)
     res:json({ ok = true, parts = parts })
 end, { multipart = { max_part_size = 64 * 1024 * 1024 } })
 
+-- A Part the iterator has moved past is refused (audit 9 L5): its
+-- read() used to consume the NEXT part's body.
+app.post("/upload-stale", function(req, res)
+    local step = req:multipart()
+    local first = step()
+    local second = step()
+    local ok, err = pcall(first.read, first)
+    res:json({ stale_refused = not ok, error = tostring(err),
+               second = second:read() })
+end, { multipart = { max_part_size = 64 * 1024 * 1024 } })
+
 -- Size-capped route - anything over 1 KiB rejected mid-stream. We
 -- expect a 5xx (the handler raises on parser error, dispatch writes
 -- 500) and the test asserts on it.
@@ -660,6 +671,15 @@ run_multipart_tests() {
         check_contains "$LABEL drip-fed large field: whole value" "$DRIP" "drip-ok"
     else
         echo "  SKIP: $LABEL drip-fed field (needs python)"
+    fi
+
+    # ── Scenario 18 (Lua): a stale Part is refused (audit 9 L5) ──
+    if [ "$LABEL" = "lua" ]; then
+        RESP=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload-stale" \
+            -F "a=one" -F "b=two")
+        check_contains "$LABEL stale part: read refused" "$RESP" '"stale_refused":true'
+        check_contains "$LABEL stale part: error text"   "$RESP" 'no longer current'
+        check_contains "$LABEL stale part: next intact"  "$RESP" '"second":"two"'
     fi
 
     # ── Sanity: post-multipart requests still work (no per-request

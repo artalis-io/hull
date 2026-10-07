@@ -77,6 +77,7 @@ typedef struct {
     int           done;        /* parser hit DONE; subsequent iter:step returns nil */
     int           errored;     /* parser/IO error - iter:step raises */
     int           in_part;     /* between PART_BEGIN..PART_END for the active Part */
+    unsigned      gen;         /* bumped at every PART_BEGIN: the current Part's */
 
     /* Snapshot of the active Part's metadata. NULL when no part is active. */
     char         *name;
@@ -96,6 +97,10 @@ typedef struct {
      * tear down the iter's meta-copies on spend - that happens when the
      * NEXT PART_BEGIN snapshot overwrites them, or on iter GC. */
     int       spent;
+    /* The iterator's gen when this Part began (audit 9 L5): a Part the outer
+     * iterator has moved past is not the current one, and its read() /
+     * chunks() consumed the NEXT part's body. */
+    unsigned  gen;
     /* part:read()'s accumulator, kept across parks: allocated through the
      * VM's allocator (so it counts against the Lua memory limit), grown
      * geometrically, freed once the value is pushed or by __gc. */
@@ -290,6 +295,16 @@ static HlMpPart *check_part(lua_State *L, int idx)
     return (HlMpPart *)luaL_checkudata(L, idx, HL_MP_PART_MT);
 }
 
+/* Refuse a Part that is no longer the iterator's current one (audit 9 L5):
+ * the parser is on a later part, which its read() / chunks() would read. */
+static void mp_part_check_current(lua_State *L, HlMpPart *p)
+{
+    if (!p->spent && p->gen != p->iter->gen) {
+        luaL_error(L, "req:multipart(): this part is no longer current "
+                      "(the iterator has moved to a later part)");
+    }
+}
+
 /* part:read() - accumulate every PART_DATA event until PART_END, return
  * one big string. Convenience for small fields; large uploads should use
  * part:chunks() instead. */
@@ -360,6 +375,7 @@ static int mp_part_read_pump(lua_State *L)
     HlMpIter *it = p->iter;
 
     mp_check_usable(L, it);
+    mp_part_check_current(L, p);
     lua_settop(L, 1);
 
     for (;;) {
@@ -457,7 +473,12 @@ static int mp_chunks_drive(lua_State *L)
     HlMpPart *p = c->part;
     HlMpIter *it = p->iter;
 
-    if (c->ended || p->spent || !it->in_part) {
+    if (c->ended || p->spent) {
+        lua_pushnil(L);
+        return 1;
+    }
+    mp_part_check_current(L, p);
+    if (!it->in_part) {
         lua_pushnil(L);
         return 1;
     }
@@ -578,10 +599,12 @@ static int mp_iter_drive(lua_State *L)
                 return luaL_error(L,
                     "req:multipart(): out of memory copying part metadata");
             it->in_part = 1;
+            it->gen++;
 
             HlMpPart *p = (HlMpPart *)lua_newuserdatauv(L, sizeof(*p), 1);
             memset(p, 0, sizeof(*p));
             p->iter = it;
+            p->gen = it->gen;
             luaL_setmetatable(L, HL_MP_PART_MT);
             /* Anchor iter against GC for the Part's lifetime. */
             lua_pushvalue(L, lua_upvalueindex(1));

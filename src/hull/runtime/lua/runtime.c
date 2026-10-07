@@ -25,6 +25,7 @@
 #include "hull/tool_orchestration.h"
 #include "hull/runtime/test.h"
 #include "hull/cap/ws.h"
+#include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 
 #include "lua.h"
 #include "lualib.h"
@@ -1012,6 +1013,57 @@ static int run_main_running_k(lua_State *L)
     return 0;
 }
 
+/* main's coroutine, main itself and its ctx table, under lua_pcall
+ * (vt_lua_run_main, audit 9 L2). Returns main and ctx on L. */
+typedef struct {
+    int                argc;
+    char             **argv;
+    const char *const *env;
+    lua_State         *co;
+    int                ref;
+} HlLuaMainPrep;
+
+static int main_prepare_k(lua_State *L)
+{
+    HlLuaMainPrep *p = (HlLuaMainPrep *)lua_touserdata(L, 1);
+    lua_settop(L, 0);
+    lua_State *co = lua_newthread(L);
+    p->ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    p->co = co;
+    if (!lua_checkstack(co, 4))
+        return luaL_error(L, "not enough memory");
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_main");
+    if (!lua_isfunction(L, -1))
+        return luaL_error(L, "app.main is not a function");
+
+    lua_newtable(L);                    /* ctx */
+
+    lua_newtable(L);
+    for (int i = 0; i < p->argc; i++) {
+        lua_pushstring(L, p->argv[i] ? p->argv[i] : "");
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_setfield(L, -2, "args");
+
+    lua_newtable(L);
+    if (p->env) {
+        for (int i = 0; p->env[i]; i++) {
+            const char *name = p->env[i];
+            const char *val = getenv(name);
+            if (val) {
+                lua_pushstring(L, val);
+                lua_setfield(L, -2, name);
+            }
+        }
+    }
+    lua_setfield(L, -2, "env");
+
+    cli_push_stream(L, 0, cli_stdin_methods);   lua_setfield(L, -2, "stdin");
+    cli_push_stream(L, 1, cli_writer_methods);  lua_setfield(L, -2, "stdout");
+    cli_push_stream(L, 2, cli_writer_methods);  lua_setfield(L, -2, "stderr");
+    return 2;
+}
+
 static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
                             int argc, char **argv,
                             const char *const *env_allowlist,
@@ -1032,48 +1084,27 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
      * The same machinery the HTTP dispatch uses applies here - only the
      * "what to do when the coroutine finally terminates" differs.
      *
-     * Stack: [_] → after setup [thread] (pinned via registry ref). */
-    lua_State *co = lua_newthread(L);
-    int co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    if (co_ref == LUA_REFNIL) {
+     * The coroutine, main and its ctx table are made under one lua_pcall on
+     * the main state (audit 9 L2), as hl_lua_entry_prepare does for the
+     * other entries: built straight onto the not-yet-running coroutine, a
+     * memory error had no handler and Lua aborted the process. */
+    HlLuaMainPrep prep = { argc, argv, env_allowlist, NULL, LUA_NOREF };
+    if (!lua_checkstack(L, 4))
+        return -1;
+    int base = lua_gettop(L);
+    lua_pushcfunction(L, main_prepare_k);
+    lua_pushlightuserdata(L, &prep);
+    if (lua_pcall(L, 1, 2, 0) != LUA_OK) {
+        char ebuf[256];
+        fprintf(stderr, "[hull:main] cannot start main: %s\n",
+                hl_lua_error_text(lua, L, -1, ebuf, sizeof ebuf));
+        lua_settop(L, base);
+        if (prep.ref != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, prep.ref);
         return -1;
     }
-
-    /* Push main onto the coroutine stack. */
-    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_main");
-    if (!lua_isfunction(L, -1)) {
-        lua_pop(L, 1);
-        luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
-        return -1;
-    }
-    lua_xmove(L, co, 1);  /* L: ... → co: [main_fn] */
-
-    /* Build the ctx table directly on the coroutine. */
-    lua_newtable(co);
-
-    lua_newtable(co);
-    for (int i = 0; i < argc; i++) {
-        lua_pushstring(co, argv[i] ? argv[i] : "");
-        lua_rawseti(co, -2, i + 1);
-    }
-    lua_setfield(co, -2, "args");
-
-    lua_newtable(co);
-    if (env_allowlist) {
-        for (int i = 0; env_allowlist[i]; i++) {
-            const char *name = env_allowlist[i];
-            const char *val = getenv(name);
-            if (val) {
-                lua_pushstring(co, val);
-                lua_setfield(co, -2, name);
-            }
-        }
-    }
-    lua_setfield(co, -2, "env");
-
-    cli_push_stream(co, 0, cli_stdin_methods);   lua_setfield(co, -2, "stdin");
-    cli_push_stream(co, 1, cli_writer_methods);  lua_setfield(co, -2, "stdout");
-    cli_push_stream(co, 2, cli_writer_methods);  lua_setfield(co, -2, "stderr");
+    lua_State *co = prep.co;
+    int co_ref = prep.ref;
+    lua_xmove(L, co, 2);  /* co: [main_fn, ctx] */
 
     /* Set active state so async ops see the right coroutine/conn. */
     lua_State *saved_co       = lua->active_co;
@@ -1089,10 +1120,12 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
 
     /* First resume: main runs until it returns or yields. Its own run of
      * the instruction budget (budget.c), apart from load time. */
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 9 L1: an entry */
     HL_LUA_ARM(lua, co);
     int nres = 0;
     int status = lua_resume(co, L, 1, &nres);
     status = hl_lua_resume_status(co, status);
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 9 L1: any open txn is stale now */
 
     if (status == LUA_YIELD) {
         /* Main yielded - async op in flight. cli_main_co (set above) tells

@@ -25,6 +25,8 @@
 
 #include "log.h"
 
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -69,6 +71,8 @@ typedef struct HlLuaAsyncCont {
 /* Forward declarations for timer reschedule (defined in timers.c -
  * dropped under HL_ENABLE_HTTP=0; the corresponding call sites are
  * guarded so the symbol is never referenced in CLI builds). */
+static void hl_lua_task_failed_now(HlLua *lua, int thread_ref, const char *msg);
+
 #ifdef HL_ENABLE_HTTP_SERVER
 void hl_lua_timer_reschedule(HlLuaTimer *t);
 #endif
@@ -307,7 +311,12 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     } else if (status == LUA_YIELD) {
         /* Handler yielded again - new HlAsyncCtx already set up. The new
          * continuation captured co/conn/thread_ref, and the timer through
-         * active_timer set above. */
+         * active_timer set above; the globals no longer describe a running
+         * handler (audit 9 L6, as dispatch.c). */
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
     } else {
         /* Error */
         char ebuf[512];
@@ -318,6 +327,11 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
                       msg ? msg : "(unknown)");
         else if (!was_main)   /* main: vt_lua_run_main reports it */
             log_error("[hull:timer] error: %s", msg ? msg : "(unknown)");
+
+        /* A hull.async task that died uncaught: finish it, so its waiters
+         * wake (audit 9 M3). A no-op for anything without a hook. */
+        if (!was_main && !conn)
+            hl_lua_task_failed_now(lua, lc->thread_ref, msg);
 
         /* As on success: the main coroutine's ref is vt_lua_run_main's. */
         if (!was_main)
@@ -558,6 +572,153 @@ static int lua_hull_sleep(lua_State *L)
     return lua_yieldk(L, 0, 0, NULL);
 }
 
+/* ── A task's failure hook (audit 9 M3) ───────────────────────────── */
+
+/* hull._spawn(fn, on_fail): when fn's coroutine dies with an error that its
+ * own code did not catch - a tripped instruction budget, which pcall
+ * re-raises, or a memory error in the task wrapper - on_fail(message) runs
+ * as an entry of its own, on the main thread, under a freshly armed budget.
+ *
+ * hull._async marks a task done from inside the task, after pcall(fn): a
+ * task that tripped the budget after its first yield never got there, so its
+ * waiters (task:wait, hull.gather / map, jobs.run_worker) stayed parked for
+ * good and hull._running stayed raised. Lua cannot finish the task from the
+ * dead coroutine - the trip is sticky for that run - so the runtime calls the
+ * hook once the run is over.
+ *
+ * The hooks live in a weak-keyed registry table, keyed by the task's thread:
+ * a task that returns is unreferenced and its entry goes with it. */
+static const char hl_lua_task_fail_key = 0;
+
+/* Pushes and removes the failure hook of the thread at the top of L's stack
+ * (popping the thread): 1 with the hook on the stack, 0 with nothing pushed.
+ * Allocates nothing. */
+static int task_take_hook(lua_State *L)
+{
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &hl_lua_task_fail_key) != LUA_TTABLE) {
+        lua_pop(L, 2);
+        return 0;
+    }
+    lua_pushvalue(L, -2);                /* thread */
+    if (lua_rawget(L, -2) != LUA_TFUNCTION) {
+        lua_pop(L, 3);
+        return 0;
+    }
+    lua_pushvalue(L, -3);                /* thread */
+    lua_pushnil(L);
+    lua_rawset(L, -4);                   /* t[thread] = nil: an existing key */
+    lua_replace(L, -3);                  /* hook where the thread was */
+    lua_pop(L, 1);                       /* the table */
+    return 1;
+}
+
+static int task_hook_call(lua_State *L)
+{
+    const char *msg = (const char *)lua_touserdata(L, 2);
+    lua_settop(L, 1);
+    lua_pushstring(L, msg ? msg : "(an error)");
+    lua_call(L, 1, 0);
+    return 0;
+}
+
+/* Run the hook at the top of lua->L's stack (popped) with msg, as an entry. */
+static void task_hook_run(HlLua *lua, const char *msg)
+{
+    lua_State *L = lua->L;
+    if (!lua_checkstack(L, 3)) {
+        lua_pop(L, 1);
+        log_error("[hull:async] a failed task's waiters could not be woken");
+        return;
+    }
+    /* Nothing of the run that ended is active while the hook runs. */
+    lua_State     *saved_co   = lua->active_co;
+    int            saved_ref  = lua->active_thread_ref;
+    KlHttpConn    *saved_conn = lua->active_conn;
+    KlHttpRequest *saved_req  = lua->active_req;
+    void          *saved_tmr  = lua->active_timer;
+    lua->active_co         = NULL;
+    lua->active_thread_ref = LUA_NOREF;
+    lua->active_conn       = NULL;
+    lua->active_req        = NULL;
+    lua->active_timer      = NULL;
+
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);
+    HL_LUA_ARM(lua, L);   /* a run of its own: the task's run is over */
+    lua_pushcfunction(L, task_hook_call);
+    lua_insert(L, -2);
+    lua_pushlightuserdata(L, (void *)(uintptr_t)msg);   /* read only */
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        char ebuf[512];
+        log_error("[hull:async] failed task: %s",
+                  hl_lua_error_text(lua, L, -1, ebuf, sizeof(ebuf)));
+        lua_pop(L, 1);
+    }
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);
+
+    lua->active_co         = saved_co;
+    lua->active_thread_ref = saved_ref;
+    lua->active_conn       = saved_conn;
+    lua->active_req        = saved_req;
+    lua->active_timer      = saved_tmr;
+}
+
+/* From the end of a resumed run (hl_lua_async_resume's error branch): the
+ * coroutine `thread_ref` names died with msg. */
+static void hl_lua_task_failed_now(HlLua *lua, int thread_ref, const char *msg)
+{
+    lua_State *L = lua->L;
+    if (thread_ref == LUA_NOREF || thread_ref == LUA_REFNIL ||
+        !lua_checkstack(L, 4))
+        return;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, thread_ref);
+    if (task_take_hook(L))
+        task_hook_run(lua, msg);
+}
+
+typedef struct {
+    HlLua *lua;
+    int    hook_ref;
+    char   msg[512];
+} HlLuaTaskFail;
+
+static void task_fail_fire(void *user_data)
+{
+    HlLuaTaskFail *f = (HlLuaTaskFail *)user_data;
+    lua_State *L = f->lua->L;
+    if (lua_checkstack(L, 4)) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, f->hook_ref);
+        luaL_unref(L, LUA_REGISTRYINDEX, f->hook_ref);
+        task_hook_run(f->lua, f->msg);
+    } else {
+        luaL_unref(L, LUA_REGISTRYINDEX, f->hook_ref);
+    }
+    free(f);
+}
+
+/* From inside the spawner's run (lua_hull_spawn's first resume failed): the
+ * spawner's run may be the one that tripped, so the hook runs later, from
+ * the loop. The thread is at the top of L's stack (popped). */
+static void hl_lua_task_failed_later(HlLua *lua, lua_State *L, const char *msg)
+{
+    if (!task_take_hook(L))
+        return;
+    HlLuaTaskFail *f = calloc(1, sizeof *f);
+    if (!f || !lua->base.async_ctx) {
+        free(f);
+        lua_pop(L, 1);
+        return;   /* no loop: nothing can be waiting on the task */
+    }
+    f->lua = lua;
+    snprintf(f->msg, sizeof f->msg, "%s", msg ? msg : "(an error)");
+    f->hook_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    if (hl_async_backend()->timer_add(lua->base.async_ctx, 0,
+                                      task_fail_fire, f) == 0) {
+        luaL_unref(L, LUA_REGISTRYINDEX, f->hook_ref);
+        free(f);
+        log_error("[hull:async] a failed task's waiters could not be woken");
+    }
+}
+
 /* hull._spawn(fn) - spawn fn in a detached coroutine running on the event loop.
  *
  * Private: apps reach it through hull.async (hull._async), which wraps the body
@@ -574,6 +735,10 @@ static int lua_hull_sleep(lua_State *L)
 int lua_hull_spawn(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TFUNCTION);
+    int has_hook = !lua_isnoneornil(L, 2);
+    if (has_hook)
+        luaL_checktype(L, 2, LUA_TFUNCTION);
+    lua_settop(L, 2);
 
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
     HlLua *lua = (HlLua *)lua_touserdata(L, -1);
@@ -582,6 +747,23 @@ int lua_hull_spawn(lua_State *L)
         return luaL_error(L, "hull._spawn: no runtime context");
 
     lua_State *co = lua_newthread(L);
+    if (has_hook) {
+        /* The failure hook (audit 9 M3), keyed by the thread, weakly. */
+        if (lua_rawgetp(L, LUA_REGISTRYINDEX, &hl_lua_task_fail_key) != LUA_TTABLE) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_newtable(L);
+            lua_pushliteral(L, "k");
+            lua_setfield(L, -2, "__mode");
+            lua_setmetatable(L, -2);
+            lua_pushvalue(L, -1);
+            lua_rawsetp(L, LUA_REGISTRYINDEX, &hl_lua_task_fail_key);
+        }
+        lua_pushvalue(L, -2);   /* the thread */
+        lua_pushvalue(L, 2);    /* the hook */
+        lua_rawset(L, -3);
+        lua_pop(L, 1);
+    }
     int co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
     lua_pushvalue(L, 1);
@@ -618,8 +800,13 @@ int lua_hull_spawn(lua_State *L)
         /* Bg yielded; hl_lua_async_resume owns cleanup when it returns. */
     } else {
         char ebuf[512];
-        log_error("[hull:async] coroutine error: %s",
-                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
+        const char *msg = hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf));
+        log_error("[hull:async] coroutine error: %s", msg);
+        /* A task's failure hook runs later, from the loop (audit 9 M3). */
+        if (lua_checkstack(L, 4)) {
+            lua_rawgeti(L, LUA_REGISTRYINDEX, co_ref);
+            hl_lua_task_failed_later(lua, L, msg);
+        }
         luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
     }
 
