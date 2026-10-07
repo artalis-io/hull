@@ -242,12 +242,22 @@ end
 -- update the visible URL after the swap. Pass `false` to suppress
 -- a default push that htmx would otherwise do.
 --
+-- `url` is held to the rules of @{redirect} (audit 9): an http(s) URL or a
+-- scheme-less relative one, no control characters, whitespace or `\`, and
+-- no protocol-relative `//host` unless `opts.allow_protocol_relative`. Any
+-- other value raises - an app passing a request value through must not hand
+-- the client a `javascript:` URL or another site's address.
+--
 -- @tparam table       res  Response object.
 -- @tparam string|bool url  URL to push, or `false` to suppress.
-function htmx.push_url(res, url)
+-- @tparam[opt] table  opts `{ allow_protocol_relative = true }`.
+function htmx.push_url(res, url, opts)
     if url == false then
         res:header("HX-Push-Url", "false")
     else
+        if not redirect_target_ok(url, opts) then
+            error("htmx.push_url: url must be an http(s) URL or a relative path", 2)
+        end
         res:header("HX-Push-Url", url)
     end
 end
@@ -257,12 +267,18 @@ end
 -- Sets `HX-Replace-Url`. Like `push_url` but uses
 -- `history.replaceState` instead of `pushState`.
 --
+-- `url` is validated as for @{push_url}.
+--
 -- @tparam table       res  Response object.
 -- @tparam string|bool url  URL to replace, or `false` to suppress.
-function htmx.replace_url(res, url)
+-- @tparam[opt] table  opts `{ allow_protocol_relative = true }`.
+function htmx.replace_url(res, url, opts)
     if url == false then
         res:header("HX-Replace-Url", "false")
     else
+        if not redirect_target_ok(url, opts) then
+            error("htmx.replace_url: url must be an http(s) URL or a relative path", 2)
+        end
         res:header("HX-Replace-Url", url)
     end
 end
@@ -274,10 +290,19 @@ end
 -- target = "#main", swap = "outerHTML" }`). The htmx client
 -- performs a navigation as if the user had triggered it.
 --
+-- The path (the string, or the table's `path`) is validated as for
+-- @{redirect}; anything else raises (audit 9).
+--
 -- @tparam table         res             Response object.
 -- @tparam string|table  path_or_opts    Path string OR context table.
-function htmx.location(res, path_or_opts)
+-- @tparam[opt] table    opts            `{ allow_protocol_relative = true }`.
+function htmx.location(res, path_or_opts, opts)
     local value
+    local path = path_or_opts
+    if type(path_or_opts) == "table" then path = path_or_opts.path end
+    if not redirect_target_ok(path, opts) then
+        error("htmx.location: path must be an http(s) URL or a relative path", 2)
+    end
     if type(path_or_opts) == "table" then
         value = require("hull.json").encode(path_or_opts)
     else

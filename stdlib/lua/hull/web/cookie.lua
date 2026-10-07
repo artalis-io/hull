@@ -7,9 +7,40 @@ local _text = require("hull._text")   -- linear trims (see hull._text)
 
 local cookie = {}
 
+-- A value as the JS sibling (and so a browser's document.cookie user)
+-- decodes it: surrounding double quotes stripped, then %XX escapes decoded.
+-- A malformed escape, or bytes that do not decode to UTF-8, leave the value
+-- as it was - what decodeURIComponent's throw does in JS. The two runtimes
+-- used to read one cookie differently (audit 9).
+local function decode_value(v)
+    if #v >= 2 and v:sub(1, 1) == '"' and v:sub(-1) == '"' then
+        v = v:sub(2, -2)
+    end
+    if not v:find("%", 1, true) then return v end
+    for pos in v:gmatch("()%%") do
+        if not v:sub(pos + 1, pos + 2):match("^%x%x$") then return v end
+    end
+    local out = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+    if not utf8.len(out) then return v end
+    return out
+end
+
+-- encodeURIComponent's set: everything but A-Z a-z 0-9 - _ . ! ~ * ' ( )
+-- is written %XX (upper-case hex), as the JS sibling's serialize writes it.
+local function encode_value(v)
+    return (v:gsub("[^%w%-_%.!~%*'%(%)]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
 --- Parse a `Cookie` header string into a name-value table.
 --
--- Each cookie is split on `=`, trimmed of surrounding whitespace.
+-- Each cookie is split on `=`, trimmed of surrounding whitespace, and its
+-- value decoded as the JS sibling decodes it (quotes stripped, %XX escapes
+-- decoded; a malformed one leaves the value as sent). When a name appears
+-- more than once the FIRST occurrence wins (audit 9): browsers send the
+-- cookie with the most specific path first, and a later duplicate - one a
+-- sibling subdomain or a path-scoped page set - used to override it.
 -- Empty input or `nil` returns an empty table (never errors).
 --
 -- @tparam string|nil header_string  Value of the inbound `Cookie` header.
@@ -31,8 +62,8 @@ function cookie.parse(header_string)
             if eq then
                 local name = _text.trim(pair:sub(1, eq - 1))
                 local value = _text.trim(pair:sub(eq + 1))
-                if name ~= "" then
-                    result[name] = value
+                if name ~= "" and result[name] == nil then
+                    result[name] = decode_value(value)
                 end
             end
         end
@@ -44,7 +75,9 @@ end
 --- Serialize a cookie into a `Set-Cookie` header value.
 --
 -- @tparam string name   Cookie name.
--- @tparam string value  Cookie value. Caller is responsible for any encoding.
+-- @tparam string value  Cookie value. Written percent-encoded (the
+--   encodeURIComponent set, as the JS sibling writes it), so @{parse} - in
+--   either runtime - reads back exactly this value.
 -- @tparam[opt] table opts  Options:
 --
 --   - `path`     (string, default `"/"`)
@@ -71,7 +104,7 @@ function cookie.serialize(name, value, opts)
         error("cookie: invalid cookie value")
     end
 
-    local parts = { name .. "=" .. (value or "") }
+    local parts = { name .. "=" .. encode_value(value or "") }
 
     -- Path (default "/")
     local path = opts.path

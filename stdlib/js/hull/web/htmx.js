@@ -177,8 +177,12 @@ function refresh(res) {
  * Push a new URL into the browser history.
  *
  * Pass `false` to suppress a default push that htmx would otherwise do.
+ * Any other value is held to the rules of `redirect` (audit 9): an http(s)
+ * URL or a scheme-less relative one, else a TypeError.
  */
-function pushUrl(res, url) {
+function pushUrl(res, url, opts) {
+    if (url !== false && !redirectTargetOk(url, opts))
+        throw new TypeError("htmx.pushUrl: url must be an http(s) URL or a relative path");
     res.header("HX-Push-Url", url === false ? "false" : url);
 }
 
@@ -187,7 +191,9 @@ function pushUrl(res, url) {
  *
  * Pass `false` to suppress.
  */
-function replaceUrl(res, url) {
+function replaceUrl(res, url, opts) {
+    if (url !== false && !redirectTargetOk(url, opts))
+        throw new TypeError("htmx.replaceUrl: url must be an http(s) URL or a relative path");
     res.header("HX-Replace-Url", url === false ? "false" : url);
 }
 
@@ -197,10 +203,12 @@ function replaceUrl(res, url) {
  * `pathOrOpts` is either a plain path string or an htmx LocationContext
  * object `{ path: "/x", target: "#main", swap: "outerHTML" }`.
  */
-function location(res, pathOrOpts) {
-    const value = (typeof pathOrOpts === "object" && pathOrOpts !== null)
-        ? JSON.stringify(pathOrOpts)
-        : pathOrOpts;
+function location(res, pathOrOpts, opts) {
+    const isObj = typeof pathOrOpts === "object" && pathOrOpts !== null;
+    // The path is validated as for `redirect` (audit 9).
+    if (!redirectTargetOk(isObj ? pathOrOpts.path : pathOrOpts, opts))
+        throw new TypeError("htmx.location: path must be an http(s) URL or a relative path");
+    const value = isObj ? JSON.stringify(pathOrOpts) : pathOrOpts;
     res.header("HX-Location", value);
 }
 

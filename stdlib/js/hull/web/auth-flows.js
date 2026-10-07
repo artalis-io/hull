@@ -130,7 +130,8 @@ CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
     created_at   INTEGER NOT NULL,
     expires_at   INTEGER NOT NULL,
     old_email    TEXT,
-    confirmed_at INTEGER
+    confirmed_at INTEGER,
+    old_verified INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
@@ -158,6 +159,11 @@ const ACTIONS = {
     // typo); burned on a successful code verify.
     totp_pending:   "totp_pending",
 };
+
+// The token_hash of the row an undone (confirmed, then revoked) email change
+// leaves behind: no link hashes to it, and while it lives (emailChangeTtl from
+// the undo) it refuses a new change. See handleEmailChangeRevoke.
+const UNDONE_MARK = "undone";
 
 import { encoding } from "hull:encoding";
 
@@ -346,12 +352,10 @@ function emailRateAllow(to) {
 
 // Round-9 MEDIUM-6: strict allowlist + optional userSanitize hook.
 // See Lua sibling for the threat model.
-const SAFE_USER_FIELDS = {
-    id:             true,
-    user_id:        true,
-    email:          true,
-    email_verified: true,
-};
+// A Set, and only the user's OWN keys are read (audit 9): an object literal
+// looked fields up through Object.prototype, and for-in walked inherited
+// enumerable properties too.
+const SAFE_USER_FIELDS = new Set(["id", "user_id", "email", "email_verified"]);
 
 function stripUserSecrets(user) {
     if (!user || typeof user !== "object") return user;
@@ -384,8 +388,8 @@ function stripUserSecrets(user) {
         }
     }
     const out = {};
-    for (const k in user) {
-        if (SAFE_USER_FIELDS[k]) out[k] = user[k];
+    for (const k of Object.keys(user)) {
+        if (SAFE_USER_FIELDS.has(k)) out[k] = user[k];
     }
     return out;
 }
@@ -454,10 +458,20 @@ function gcExpired() {
 // ── Lockout helpers ─────────────────────────────────────────────
 // Mirror of the Lua module. See its header for the design.
 
+// A user id as the _hull_auth_* tables key it: text, through
+// _request.userId (as session, totp and rbac do). The raw id stays what the
+// app's callbacks and a token's `sub` carry; only the module's own rows are
+// keyed by this. A numeric id reached the VARCHAR user_id column as a number,
+// and MySQL then compared numerically: the per-IP lockout row '5<US>1.2.3.4'
+// equalled 5 (see the Lua sibling, uid_key).
+function uidKey(id) {
+    return _request.userId(id) ?? String(id);
+}
+
 function lockoutRemaining(userIdStr) {
     const rows = db.query(
         "SELECT locked_until FROM _hull_auth_login_attempts WHERE user_id = ?",
-        [userIdStr]);
+        [uidKey(userIdStr)]);
     if (!rows || rows.length === 0) return 0;
     const lu = rows[0].locked_until;
     if (!lu) return 0;
@@ -466,6 +480,7 @@ function lockoutRemaining(userIdStr) {
 }
 
 function bumpFailedLogin(userIdStr, max) {
+    userIdStr = uidKey(userIdStr);
     const now = time.now();
     // Portable conditional upsert. The original used INSERT ... ON CONFLICT
     // DO UPDATE, which MySQL spells differently (ON DUPLICATE KEY UPDATE), so
@@ -515,19 +530,20 @@ function bumpFailedLogin(userIdStr, max) {
 
 function clearFailedLogins(userIdStr) {
     db.exec("DELETE FROM _hull_auth_login_attempts WHERE user_id = ?",
-            [userIdStr]);
+            [uidKey(userIdStr)]);
 }
 
 // The lockout rows a login touches: (account, client IP), keyed
 // `<user_id> \x1f <ip>` in the same column, and the account-wide one.
 const IP_SEP = "\x1f";
 function attemptIpKey(uid, req) {
-    return uid + IP_SEP + (_request.limitKey(_request.clientIp(req, _state.trustProxy)) || "_anon");
+    return uidKey(uid) + IP_SEP + (_request.limitKey(_request.clientIp(req, _state.trustProxy)) || "_anon");
 }
 
 // Every row for an account, after a password reset proves control of it.
 function clearAllFailedLogins(uid) {
-    const pat = String(uid).replace(/[!%_]/g, "!$&") + IP_SEP + "%";
+    uid = uidKey(uid);
+    const pat = uid.replace(/[!%_]/g, "!$&") + IP_SEP + "%";
     db.exec("DELETE FROM _hull_auth_login_attempts "
             + "WHERE user_id = ? OR user_id LIKE ? ESCAPE '!'",
             [uid, pat]);
@@ -620,7 +636,7 @@ function genericOk(res) { res.json({ ok: true }); }
 // CONFIRMED change's row stays: it is what lets the old address revoke it.
 function dropPendingEmailChange(uid) {
     db.exec("DELETE FROM _hull_auth_pending_email_changes "
-            + "WHERE user_id = ? AND confirmed_at IS NULL", [uid]);
+            + "WHERE user_id = ? AND confirmed_at IS NULL", [uidKey(uid)]);
 }
 
 // A callback whose answer gates authentication must answer synchronously:
@@ -665,6 +681,25 @@ function getUser(id) {
     return u;
 }
 
+// The user setters (and userCreate) answer synchronously too (audit 9): their
+// result was neither awaited nor checked, so an async userSetPassword let a
+// reset answer ok before - or without - the write, and a rejection went
+// unobserved. A thenable is a misconfiguration: throw (500), as for the
+// lookups above. (The write a Promise stands for may still happen later; the
+// request does not wait for it.)
+function syncResult(name, v) {
+    if (isThenable(v)) {
+        throw new Error("auth-flows: " + name + " returned a Promise; it must be synchronous");
+    }
+    return v;
+}
+function setPassword(id, hash) { syncResult("userSetPassword", _state.userSetPassword(id, hash)); }
+function setEmail(id, email) { syncResult("userSetEmail", _state.userSetEmail(id, email)); }
+function setEmailVerified(id, v) {
+    syncResult("userSetEmailVerified", _state.userSetEmailVerified(id, v));
+}
+function createUser(email, hash) { return syncResult("userCreate", _state.userCreate(email, hash)); }
+
 // onPasswordReset may be async (a revocation that awaits a db.async call):
 // it is awaited, so its failure is caught and logged here rather than left
 // as an unobserved rejection. Logged, not swallowed: the recommended body
@@ -703,12 +738,12 @@ async function dropPreverifyTotp(uid) {
 // pre-registrant could have attached goes first; verified is set LAST, so a
 // failure part way never leaves a verified account with the old password.
 async function replaceUnverifiedCredentials(req, res, user, uid, newHash) {
-    _state.userSetPassword(uid, newHash);
+    setPassword(uid, newHash);
     dropPendingEmailChange(uid);
     await dropPreverifyTotp(uid);
     clearAllFailedLogins(uid);
     await runOnPasswordReset(req, res, user);
-    _state.userSetEmailVerified(uid, true);
+    setEmailVerified(uid, true);
     user.email_verified = true;
 }
 
@@ -754,7 +789,7 @@ function storedPasswordHash(user) {
     if (!user || typeof user !== "object" || typeof user.email !== "string") return false;
     const found = findByEmail(user.email);
     if (!found || typeof found !== "object"
-        || String(userId(found)) !== String(userId(user))) return false;
+        || uidKey(userId(found)) !== uidKey(userId(user))) return false;
     h = found.password_hash;
     if (typeof h === "string" && h !== "") return h;
     return null;
@@ -953,15 +988,17 @@ function registerAccount(req, res, body) {
     const pwHash = crypto.hashPassword(body.password);
     const existing = findByEmail(body.email);
     if (existing) return genericOk(res);
-    const uid = _state.userCreate(body.email, pwHash);
-    const user = getUser(uid);
-    if (!user) {
-        return res.status(500).json({
-            error: "user_create returned an id that user_get cannot resolve" });
-    }
 
+    // Creating the account is deferred too (audit 9; see the Lua sibling):
+    // userCreate / userGet are work only a NEW address paid for, so inline
+    // they still told it from an existing one by response time. The lookup
+    // is repeated in the task so two racing registrations create one account.
     const origin = originFor(req);
     afterResponse(() => {
+        if (findByEmail(body.email)) return;
+        const uid = createUser(body.email, pwHash);
+        const user = getUser(uid);
+        if (!user) throw new Error("userCreate returned an id that userGet cannot resolve");
         const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
         if (origin) {
             const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
@@ -1126,7 +1163,7 @@ async function handleVerify(req, res) {
     }
     clearFailedLogins(ipKey);
     clearFailedLogins(uid);
-    _state.userSetEmailVerified(uid, true);
+    setEmailVerified(uid, true);
     return verifyOk(req, res);
 }
 
@@ -1153,8 +1190,13 @@ function defaultTotpFormHtml(token) {
 // magic-link page's form) an HTML form or redirect.
 function startTotpPending(req, res, user, asPage) {
     const uid = userId(user);
+    // Bound to the password (and address) the first factor was checked
+    // against, as a reset token is (audit 9; see the Lua sibling): a pending
+    // token taken before a password reset no longer completes the sign-in.
+    const current = typeof user.email === "string" ? findByEmail(user.email) : null;
     const token = issueToken(uid, ACTIONS.totp_pending,
-                              _state.totpPendingTtl);
+                              _state.totpPendingTtl,
+                              { pwb: passwordBinding(current || user) });
     if (!asPage) {
         return res.json({
             ok: true, pending_2fa: true, totp_token: token,
@@ -1249,7 +1291,7 @@ function handleMagicLink(req, res) {
     let user = findByEmail(body.email);
     if (!user) {
         if (!_state.magicLinkAutoSignup) return genericOk(res);
-        const uid = _state.userCreate(body.email, null);
+        const uid = createUser(body.email, null);
         user = getUser(uid);
         // Guard the create->get race / adapter inconsistency: a nil user here
         // would mint a magic-link token with sub=null and then throw in
@@ -1340,7 +1382,7 @@ function handleMagicLinkConsume(req, res) {
             }
             return secureHtml(res).html(defaultVerifyFormHtml(vtok));
         }
-        _state.userSetEmailVerified(uid, true);
+        setEmailVerified(uid, true);
         user.email_verified = true;
     }
     gcExpired();
@@ -1379,7 +1421,9 @@ function handleTotpVerify(req, res) {
     }
     const env = r[0];
     const user = getUser(env.sub);
-    if (!user) return res.status(400).json({ error: "totp failed" });
+    if (!user || !resetBindingHolds(env, user)) {
+        return res.status(400).json({ error: "totp failed" });
+    }
     // Round-9 HIGH-4: pass `req` so totpVerify can gate per-IP too.
     const ok = _state.totpVerify(user, body.code, req);
     if (isThenable(ok)) {
@@ -1448,7 +1492,7 @@ async function handlePasswordResetConfirm(req, res) {
         gcExpired();
         return res.json({ ok: true });
     }
-    _state.userSetPassword(result[0].sub, newHash);
+    setPassword(result[0].sub, newHash);
     dropPendingEmailChange(result[0].sub);
     // A successful reset demonstrates email control; clear any
     // outstanding lockout so the new password works immediately.
@@ -1516,11 +1560,17 @@ function handleEmailChange(req, res) {
     // silently destroyed the prior pending change.
     // A confirmed change keeps its row until its revoke link expires, and
     // blocks a new one meanwhile: a thief must not bury it under a second.
+    const key = uidKey(uid);
     const existing = db.query(
-        "SELECT new_email, confirmed_at FROM _hull_auth_pending_email_changes "
+        "SELECT new_email, token_hash, confirmed_at FROM _hull_auth_pending_email_changes "
         + "WHERE user_id = ? AND expires_at > ? LIMIT 1",
-        [uid, time.now()]);
+        [key, time.now()]);
     if (existing && existing.length > 0) {
+        if (existing[0].token_hash === UNDONE_MARK) {
+            return res.status(409).json({
+                error: "email changes are paused after an undone change; try again later",
+            });
+        }
         if (existing[0].confirmed_at !== null && existing[0].confirmed_at !== undefined) {
             return res.status(409).json({
                 error: "a recent email change can still be revoked; try again later",
@@ -1538,11 +1588,11 @@ function handleEmailChange(req, res) {
     const tokenHash = encoding.hex.encode(crypto.sha256(token));
     // An expired row (not reaped yet) is replaced whole: an upsert kept its
     // old_email / confirmed_at.
-    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?", [uid]);
+    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?", [key]);
     db.exec("INSERT INTO _hull_auth_pending_email_changes "
             + "(user_id, new_email, token_hash, created_at, expires_at) "
             + "VALUES (?, ?, ?, ?, ?)",
-            [uid, body.new_email, tokenHash, now, now + _state.emailChangeTtl]);
+            [key, body.new_email, tokenHash, now, now + _state.emailChangeTtl]);
 
     const user = current;
     const link = origin + _state.prefix
@@ -1591,9 +1641,10 @@ async function handleEmailChangeRevoke(req, res) {
         return verifyFail(req, res, 400, "revoke failed: " + (result[1] || "?"));
     }
     const env = result[0];
+    const key = uidKey(env.sub);
     const rows = db.query(
-        "SELECT token_hash, old_email, confirmed_at FROM _hull_auth_pending_email_changes "
-        + "WHERE user_id = ?", [env.sub]);
+        "SELECT token_hash, old_email, confirmed_at, old_verified "
+        + "FROM _hull_auth_pending_email_changes WHERE user_id = ?", [key]);
     const row = rows && rows[0];
     if (!row || typeof env.ch !== "string" || typeof row.token_hash !== "string"
         || !crypto.constantTimeEq(row.token_hash, env.ch)) {
@@ -1606,27 +1657,46 @@ async function handleEmailChangeRevoke(req, res) {
         const old = row.old_email;
         const holder = typeof old === "string" ? findByEmail(old) : null;
         if (typeof old !== "string"
-            || (holder && String(userId(holder)) !== String(env.sub))) {
+            || (holder && uidKey(userId(holder)) !== key)) {
             // Taken since by another account: nothing to restore to.
             log.warn("auth-flows: email change of account " + String(env.sub)
                 + " cannot be reverted: its previous address is in use; sessions revoked");
             await runOnPasswordReset(req, res, user);
             return verifyFail(req, res, 409, "revoke failed: the previous address is in use");
         }
-        _state.userSetEmail(env.sub, old);
-        // The revoke link reached the old mailbox: it is proven again.
-        _state.userSetEmailVerified(env.sub, true);
+        // Undoing a confirmed change (audit 9; the reasoning is in the Lua
+        // sibling): the old address gets back the verified state it had at
+        // confirm (a row without one counts as unverified), the password is
+        // made unusable until a reset through that address, lockout rows go,
+        // and the row stays, marked undone, pausing new changes for
+        // emailChangeTtl. A TOTP enrolment made in the window is not removed
+        // here; onPasswordReset (run below) is where an app can drop it.
+        const ov = row.old_verified;
+        const wasVerified = ov !== null && ov !== undefined && Number(ov) !== 0;
+        setEmail(env.sub, old);
+        setEmailVerified(env.sub, wasVerified);
+        setPassword(env.sub, crypto.hashPassword(crypto.randomToken(32)));
+        clearAllFailedLogins(env.sub);
         user.email = old;
+        user.email_verified = wasVerified;
         restored = true;
+        const now = time.now();
+        db.exec("UPDATE _hull_auth_pending_email_changes SET token_hash = ?, "
+                + "new_email = ?, confirmed_at = ?, expires_at = ? WHERE user_id = ?",
+                [UNDONE_MARK, old, now, now + _state.emailChangeTtl, key]);
+    } else {
+        db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?", [key]);
     }
-    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?", [env.sub]);
     await runOnPasswordReset(req, res, user);
     emitEvent(env.sub, "email_change_revoked", req,
               { metadata: { by: "old_address", restored } });
     gcExpired();
-    if (wantsJson(req)) return res.json({ ok: true, restored });
+    if (wantsJson(req)) {
+        return res.json({ ok: true, restored, password_reset_required: restored });
+    }
     secureHtml(res).html(restored
-        ? "Email change undone: your previous address is restored."
+        ? "Email change undone: your previous address is restored. "
+          + "Set a new password with a password reset to sign in again."
         : "Email change canceled.");
 }
 
@@ -1637,7 +1707,7 @@ async function handleEmailChangeRevoke(req, res) {
 function pendingChangeMatches(env, token) {
     const rows = db.query(
         "SELECT new_email, token_hash, confirmed_at FROM _hull_auth_pending_email_changes "
-        + "WHERE user_id = ?", [env.sub]);
+        + "WHERE user_id = ?", [uidKey(env.sub)]);
     const th = encoding.hex.encode(crypto.sha256(token));
     return !!rows && rows.length > 0
         && (rows[0].confirmed_at === null || rows[0].confirmed_at === undefined)
@@ -1659,6 +1729,15 @@ function handleEmailChangePage(req, res) {
 function handleEmailChangeConfirm(req, res) {
     if (refuseCrossSite(req, res)) return;
     const token = parseBody(req).token;
+    // The new address must still be free (audit 9; see the Lua sibling).
+    // Checked before the token is consumed.
+    const pre = parseToken(token, ACTIONS.email_change)[0];
+    if (pre && typeof pre.new_email === "string") {
+        const holder = findByEmail(pre.new_email);
+        if (holder && uidKey(userId(holder)) !== uidKey(pre.sub)) {
+            return verifyFail(req, res, 409, "email change failed: the address is in use");
+        }
+    }
     const result = consumeToken(token, ACTIONS.email_change);
     if (!result[0]) {
         return verifyFail(req, res, 400, "email change failed: " + (result[1] || "?"));
@@ -1669,18 +1748,19 @@ function handleEmailChangeConfirm(req, res) {
         return verifyFail(req, res, 400, "email change failed");
     }
     const oldEmail = user.email;
-    _state.userSetEmail(env.sub, env.new_email);
-    _state.userSetEmailVerified(env.sub, true);
+    const oldVerified = isVerified(user) ? 1 : 0;
+    setEmail(env.sub, env.new_email);
+    setEmailVerified(env.sub, true);
     // With a revoke link out (email_change_notify), the row stays, confirmed
     // and holding the old address, until that link expires: the old address
     // can still undo the change. Without one there is nothing to undo it with.
     if (_state.templates.email_change_notify) {
         db.exec("UPDATE _hull_auth_pending_email_changes "
-                + "SET confirmed_at = ?, old_email = ? WHERE user_id = ?",
-                [time.now(), oldEmail, env.sub]);
+                + "SET confirmed_at = ?, old_email = ?, old_verified = ? WHERE user_id = ?",
+                [time.now(), oldEmail, oldVerified, uidKey(env.sub)]);
     } else {
         db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-                [env.sub]);
+                [uidKey(env.sub)]);
     }
     emitEvent(env.sub, "email_changed", req,
               { metadata: { old_email: oldEmail, new_email: env.new_email } });
@@ -2053,7 +2133,8 @@ function init(opts) {
     // column first) is re-checked, as session.js does.
     const cols = db.tableColumns("_hull_auth_pending_email_changes") || [];
     for (const [name, ddl] of [["old_email", "old_email TEXT"],
-                               ["confirmed_at", "confirmed_at INTEGER"]]) {
+                               ["confirmed_at", "confirmed_at INTEGER"],
+                               ["old_verified", "old_verified INTEGER"]]) {
         if (cols.includes(name)) continue;
         try {
             db.exec("ALTER TABLE _hull_auth_pending_email_changes ADD COLUMN " + ddl);
@@ -2101,7 +2182,7 @@ function sendMagicLink(email, magicUrlPrefix) {
     let user = findByEmail(email);
     if (!user) {
         if (!_state.magicLinkAutoSignup) return;
-        const uid = _state.userCreate(email, null);
+        const uid = createUser(email, null);
         user = getUser(uid);
         // create->get race guard (see handleMagicLink): a nil user would mint
         // a sub=null token and throw in sendEmail.
@@ -2128,6 +2209,16 @@ const _test = {
     isEmailIsh,
     parseBody,
     sameOriginRequest,
+    uidKey,
+    stripUserSecrets,
+    handlers: {
+        register: handleRegister,
+        login: handleLogin,
+        totpVerify: handleTotpVerify,
+        emailChange: handleEmailChange,
+        emailChangeConfirm: handleEmailChangeConfirm,
+        emailChangeRevoke: handleEmailChangeRevoke,
+    },
     ACTIONS,
     emailRateAllow: (to) => emailRateAllow(to),
     emailRateReset: () => { _emailRl = new Map(); },

@@ -29,6 +29,7 @@ import { crypto } from "hull:crypto";
 import { encoding } from "hull:encoding";
 import { time } from "hull:time";
 import { json } from "hull:json";
+import { log } from "hull:log";
 
 let idemTtl = 86400;
 const HEADER_NAME = "idempotency-key";
@@ -176,10 +177,11 @@ function computeFingerprint(req) {
  *
  * @param {Object} [opts]
  * @param {(req) => string} [opts.getPrincipal]
- *   Returns a stable per-user key for scoping. Default:
- *   the session's `user_id`, else the JWT user's `sub` / `id` / `user_id`
- *   (`req.ctx.user`, set by auth.jwtMiddleware), else `"__anon"` - which every
- *   anonymous caller shares, so mount it after authentication.
+ *   Returns a stable per-user key for scoping. Default: `"session:"` + the
+ *   session's `user_id`, else `"user:"` + the JWT user's `sub` / `id` /
+ *   `user_id` (`req.ctx.user`, set by auth.jwtMiddleware), else `"__anon"` -
+ *   which every anonymous caller shares, so mount it after authentication (a
+ *   warning is logged once when 20 keyed requests in a row were anonymous).
  * @param {number}   [opts.ttl]        Override module TTL for this instance.
  * @param {string}   [opts.headerName="idempotency-key"]
  * @param {string[]} [opts.methods=["POST"]]
@@ -190,26 +192,48 @@ function computeFingerprint(req) {
  *     getPrincipal: (req) => req.ctx?.session?.user_id || "__anon",
  * }));
  */
+// The default principal: "session:<user_id>" for a session user, else
+// "user:<id>" for a JWT user, else "__anon". The two kinds of user are
+// prefixed apart (audit 9; see the Lua sibling).
+function defaultPrincipal(req) {
+    // User id 0 is a user: a truthiness test sent it to the shared
+    // "__anon" principal, where anonymous callers could replay or squat
+    // its keys.
+    const sid = req.ctx && req.ctx.session ? req.ctx.session.user_id : undefined;
+    if (sid !== undefined && sid !== null && sid !== "")
+        return "session:" + String(sid);
+    // A JWT-authenticated user (auth.jwtMiddleware). Without this every
+    // bearer-token user shared "__anon", so one could replay another's
+    // stored response, or squat their key, by knowing key and body.
+    const u = req.ctx && req.ctx.user;
+    if (u && typeof u === "object") {
+        const id = u.sub !== undefined ? u.sub
+                 : u.id !== undefined ? u.id : u.user_id;
+        if (id !== undefined && id !== null) return "user:" + String(id);
+    }
+    return "__anon";
+}
+
+// Keyed requests in a row that may all be "__anon" before the default
+// principal warns, once per middleware (see the Lua sibling).
+const ANON_WARN_AFTER = 20;
+
 function middleware(opts) {
     const o = opts || {};
 
+    let anonRun = 0, anonWarned = false;
     const getPrincipal = o.getPrincipal || function(req) {
-        // User id 0 is a user: a truthiness test sent it to the shared
-        // "__anon" principal, where anonymous callers could replay or squat
-        // its keys.
-        const sid = req.ctx && req.ctx.session ? req.ctx.session.user_id : undefined;
-        if (sid !== undefined && sid !== null && sid !== "")
-            return String(sid);
-        // A JWT-authenticated user (auth.jwtMiddleware). Without this every
-        // bearer-token user shared "__anon", so one could replay another's
-        // stored response, or squat their key, by knowing key and body.
-        const u = req.ctx && req.ctx.user;
-        if (u && typeof u === "object") {
-            const id = u.sub !== undefined ? u.sub
-                     : u.id !== undefined ? u.id : u.user_id;
-            if (id !== undefined && id !== null) return "user:" + String(id);
+        const p = defaultPrincipal(req);
+        if (p !== "__anon") {
+            anonRun = 0;
+        } else if (!anonWarned && ++anonRun >= ANON_WARN_AFTER) {
+            anonWarned = true;
+            log.warn("idempotency: the last " + ANON_WARN_AFTER + " keyed requests "
+                + "had no session or JWT user, so they all share the '__anon' "
+                + "principal (one caller can replay another's stored response). "
+                + "Mount the middleware after authentication, or pass getPrincipal.");
         }
-        return "__anon";
+        return p;
     };
 
     const ttl = o.ttl !== undefined ? o.ttl : idemTtl;
@@ -513,5 +537,6 @@ function cleanup() {
     return db.exec("DELETE FROM _hull_idempotency_keys WHERE expires_at <= ?", [now]);
 }
 
-const idempotency = { init, middleware, respond, respondHtml, complete, cleanup };
+const idempotency = { init, middleware, respond, respondHtml, complete, cleanup,
+                      _defaultPrincipal: defaultPrincipal };
 export { idempotency };

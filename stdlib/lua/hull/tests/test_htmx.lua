@@ -197,6 +197,29 @@ test("location with table encodes as JSON context", function()
     assert_eq(string.find(v, '"#main"') ~= nil, true)
 end)
 
+-- Audit 9: HX-Push-Url / HX-Replace-Url / HX-Location take the same
+-- targets as HX-Redirect - no javascript: URL, no other site.
+test("push_url / replace_url / location refuse what redirect refuses", function()
+    for _, bad in ipairs({ "javascript:alert(1)", "data:text/html,x", "//evil.example/x",
+                           "/a\nb", "", "\\evil" }) do
+        local res = mock_res()
+        assert_eq(pcall(htmx.push_url, res, bad), false, "push_url " .. bad)
+        assert_eq(pcall(htmx.replace_url, res, bad), false, "replace_url " .. bad)
+        assert_eq(pcall(htmx.location, res, bad), false, "location " .. bad)
+        assert_eq(pcall(htmx.location, res, { path = bad, target = "#m" }), false,
+                  "location table " .. bad)
+        assert_eq(res.headers_set["HX-Push-Url"], nil)
+        assert_eq(res.headers_set["HX-Replace-Url"], nil)
+        assert_eq(res.headers_set["HX-Location"], nil)
+    end
+    local res = mock_res()
+    assert_eq(pcall(htmx.push_url, res, nil), false, "push_url nil")
+    htmx.push_url(res, "https://app.example/x")
+    assert_eq(res.headers_set["HX-Push-Url"], "https://app.example/x")
+    htmx.replace_url(res, "//cdn.example/x", { allow_protocol_relative = true })
+    assert_eq(res.headers_set["HX-Replace-Url"], "//cdn.example/x")
+end)
+
 -- ── Redirect (the dual-mode helper) ──────────────────────────────────
 
 test("redirect on htmx request sets HX-Redirect + 204", function()

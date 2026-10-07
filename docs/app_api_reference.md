@@ -215,6 +215,9 @@ Register with `app.use(method, pattern, mw)`:
 - `opts.key`. String or `function(req) -> string` (default: per client IP). The function must return a string or a number synchronously; anything else (a table / object, a Promise from an `async` key function) raises, since a fresh object per request was a fresh bucket and nothing was limited.
 - Sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` headers.
 - Returns `1` on limit exceeded (sends 429 + JSON), `0` otherwise.
+- A key whose allowance is spent (`count >= limit`, not only one already
+  refused) is kept apart from the LRU bucket store until its window ends, so
+  flooding other keys to evict it does not buy a fresh allowance.
 
 **csrf.middleware(opts)**. Stateless CSRF protection using HMAC tokens.
 - `opts.secret`. HMAC secret (required)
@@ -275,11 +278,25 @@ cross-provider or by a CSRF.
   wires both; `ctx = { provider, claims, tokens }` exposes OIDC-specific
   data for callers that need it), `on_logout(req, res) -> path?`.
 - `oauth.routes(app)`. Mounts the three routes on the given app.
+- **Key `find_user` on the issuer and subject, never on `email`.** An email
+  claim is not unique across IdPs or tenants (a multi-tenant Microsoft app
+  sees every tenant's users, and each tenant's admin sets their addresses).
+  Use `(claims.iss, claims.sub)`; for Microsoft `(claims.tid, claims.sub)` or
+  `claims.oid`.
+- `/auth/logout` provenance: `Sec-Fetch-Site` must be `same-origin` or
+  `none` (`same-site` and `cross-site` answer 403); without it `Origin` or
+  `Referer` must name the request's host or `base_url`. A header-less
+  **POST** passes (a non-browser client); a header-less **GET** is refused,
+  since an `<img>` or a `rel=noreferrer` link on another site sends no
+  header at all. Log out with a POST, or a link on the app's own pages.
 - Provider config. Either `preset = "google" | "microsoft"` (plus
   `client_id`, optional `client_secret`, `scopes`, `tenant` for Microsoft:
   `common` accepts any tenant's issuer, `consumers` only the personal-
   account tenant's, `organizations` any tenant but that one, a GUID or
-  domain only its own)
+  domain only its own; under `common` / `organizations` the token's `iss`
+  must also be the issuer of its own `tid` claim -
+  `https://login.microsoftonline.com/<tid>/v2.0` - and a token without `tid`
+  is refused)
   or fully-explicit `{ authorization_endpoint, token_endpoint, jwks_uri,
   issuer, client_id, client_secret?, scopes? }`.
 - Allowed signing algs: `RS256 / RS384 / RS512 / PS256 / ES256 / ES384`
@@ -482,6 +499,35 @@ verify step between successful first-factor auth and `on_login` when
       when it is restored. While a confirmed change can still be revoked,
       a new change answers 409. Without the template a confirmed change
       is final.
+      **Undoing a confirmed change** (the change most likely came from
+      someone who knows the password) also:
+      - restores the old address's verified state as it was when the
+        change was confirmed - an address that was not verified stays
+        unverified (it may be a pre-registrant's), and the owner's password
+        reset then verifies it the way a `new_password` verify does,
+        dropping what a pre-registrant attached;
+      - makes the password unusable (a random one) and clears the lockout
+        rows: the owner sets a new password with a reset mailed to the
+        restored address (JSON answers `{ok, restored, password_reset_required}`);
+      - keeps the row, marked undone, for `email_change_ttl`: a new change
+        meanwhile answers 409 ("email changes are paused...").
+      A TOTP enrolment made during the window is **not** removed (the module
+      cannot tell it from the owner's); an app that wants it gone does it in
+      `on_password_reset`, which the undo runs.
+    - An email-change confirm whose new address another account has taken
+      since the request answers 409 and leaves the link usable.
+    - A pending-2FA token (`totp_token`) is bound to the password and
+      address the first factor was checked against, as a reset token is: a
+      password reset or an undone email change voids it (400).
+    - `/register` creates the account (`user_create` + `user_get`) after the
+      response too, with the welcome mail, so a new address costs no more
+      response time than an existing one. A `user_get` that cannot resolve
+      the new id is logged instead of a 500.
+    - The lockout and pending-email-change rows are keyed by the text form
+      of the user id (`hull.web._request.user_id`, as session, totp and rbac
+      key theirs): an INTEGER primary key used to reach MySQL as a number,
+      which compared the VARCHAR column numerically and let one account-wide
+      lookup hit every per-IP row.
     - `opts.sign_in_log` (default `false`). Routes every login /
       password-reset-completed / email-changed / email-change-
       revoked into `hull/web/middleware/audit-log` so apps can
@@ -589,12 +635,24 @@ verify step between successful first-factor auth and `on_login` when
   `userTotpEnrolled`, `totpVerify`, `totpPendingTtl`, `totpPendingRedirect`,
   `verifyFormRedirect`, `totpDisable`). The `user*` lookups, `totpVerify` and
   `userTotpEnrolled` must answer synchronously (a Promise is a 500 / fails
-  closed); `onLogin`, `onPasswordReset` and `totpDisable` may be async and
-  are awaited.
+  closed), and so must `userCreate`, `userSetPassword`, `userSetEmail` and
+  `userSetEmailVerified` (their result was neither awaited nor checked, so
+  an async setter let a reset answer ok before its write); `onLogin`,
+  `onPasswordReset` and `totpDisable` may be async and are awaited.
   `totp.verify(userId, code)` returns a bare boolean (the historical
   `[ok, kind]` tuple lives behind `totp.verifyWithKind` now - see
   the TOTP section), so a `totpVerify: (user, code) => totp.verify(
   user.id, code)` delegate is safe by default.
+- **Upgrading (audit 9).** `init` adds an `old_verified INTEGER` column to
+  `_hull_auth_pending_email_changes` (as it added `old_email` /
+  `confirmed_at`; a concurrent ALTER by another instance is tolerated). A
+  confirmed change recorded before the upgrade has no `old_verified`: undone,
+  its old address is restored unverified (fail closed) and the owner's reset
+  verifies it. An undone change now leaves a row behind (token_hash
+  `"undone"`) until `email_change_ttl` passes. Lockout rows carry over (the
+  column always stored the id's text; only the comparisons changed).
+  Pending-2FA tokens issued before the
+  upgrade carry no password binding and are refused: sign in again.
 - Email-change flow re-verifies on the NEW address - old email stays
   active until the user clicks the link sent to the new one.
 
@@ -606,7 +664,7 @@ verify step between successful first-factor auth and `on_login` when
 - `session.destroy(session_id)`. Deletes session.
 - `session.cleanup()` → count of deleted expired sessions.
 - **Device management** - `session.list_for_user(user_id)` → array of `{id, created_at, last_accessed, ip, user_agent}`; `session.destroy_others(current_sid, user_id)` → "sign out everywhere else"; `session.destroy_all(user_id)` → "sign out everywhere" (used by auth-flows on password reset cascade).
-- **Login/logout factories** - `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user, ctx?)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name, default `"hull_session"` - same as `auth.session_middleware`), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`), `opts.audit_log` (module ref - when set, records a login event after the session is set), `opts.audit_kind` (default `"login"`), `opts.audit_metadata(user, ctx) -> table` (default derives `{ factors = ctx.factors }` for auth-flows or `{ factors = "oauth:" .. ctx.provider }` for oauth), `opts.on_new_device(req, res, user)` (requires `audit_log` - called before record when `audit_log.is_new_device` returns true). `session.logout_handler(cookie, opts?)` is the matching `on_logout`; it answers 403 to a request the browser marks `Sec-Fetch-Site: cross-site` (as do auth-flows' `POST /logout` and oauth's logout), since the clearing `Set-Cookie` would sign the victim out. In JS both factories return what `respond` / an async `onNewDevice` returns, so an async callback is awaited. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (the audit + new-device seam covers both for free).
+- **Login/logout factories** - `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user, ctx?)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name, default `"hull_session"` - same as `auth.session_middleware`), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`), `opts.audit_log` (module ref - when set, records a login event after the session is set), `opts.audit_kind` (default `"login"`), `opts.audit_metadata(user, ctx) -> table` (default derives `{ factors = ctx.factors }` for auth-flows or `{ factors = "oauth:" .. ctx.provider }` for oauth), `opts.on_new_device(req, res, user)` (requires `audit_log` - called before record when `audit_log.is_new_device` returns true). `session.logout_handler(cookie, opts?)` is the matching `on_logout`; since the clearing `Set-Cookie` would sign the victim out, it checks provenance as auth-flows' `POST /logout` does: `Sec-Fetch-Site` must be `same-origin` or `none` (`cross-site` and `same-site` answer 403), and without it `Origin` - or `Referer` - must name the request's own host (`X-Forwarded-Host` with `opts.trust_proxy`) or one of `opts.origins` (`{"https://app.example.com"}`); a client sending none of these headers passes. In JS both factories return what `respond` / an async `onNewDevice` returns, so an async callback is awaited. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (the audit + new-device seam covers both for free).
 - `session.rotate(old_sid, data, opts)` - destroy + recreate, session-fixation defense primitive. Used by `login_handler`; apps doing custom on_login can call it directly.
 
 **The `on_login(req, res, user, ctx?)` contract.** Both `hull/web/auth-flows` and `hull/web/middleware/oauth` hand off through this single shape. Guarantees:
@@ -618,8 +676,15 @@ verify step between successful first-factor auth and `on_login` when
 **Audit-metadata scrub at the session.login_handler seam.** When `audit_log` is wired, the factory calls your `audit_metadata(user, ctx)` and then **strips** these keys from the result before passing it to `audit_log.record`: `tokens`, `token`, `access_token`, `refresh_token`, `id_token`, `claims`, `password`, `password_hash`, `pwhash`, `secret`. This is defense in depth - the **OAuth ctx already contains `claims` and `tokens`** (the raw IdP tokens), so a `audit_metadata = function(_,c) return c end` override would otherwise persist access_token + refresh_token in `_hull_audit_log.metadata` for `retain_days` (default 365). The scrub is top-level only; if you need to log claim details, pull them out by name in your custom `audit_metadata` (e.g. `return { factors = "oauth:" .. ctx.provider, sub = ctx.claims.sub }`) - never pass the raw `ctx` through.
 
 **cookie**. Cookie helpers (not middleware).
-- `cookie.parse(header)` → table `{ name = value, ... }`.
-- `cookie.serialize(name, value, opts)` → `Set-Cookie` header string.
+- `cookie.parse(header)` → table `{ name = value, ... }`. When a name
+  appears more than once the **first** occurrence wins (browsers send the
+  most specific path first). Values are decoded the same way in both
+  runtimes: surrounding double quotes stripped, `%XX` escapes decoded; a
+  malformed escape (or bytes that are not UTF-8) leaves the value as sent.
+- `cookie.serialize(name, value, opts)` → `Set-Cookie` header string. The
+  value is percent-encoded (the `encodeURIComponent` set) in both runtimes,
+  so `parse` reads back exactly the value given. (Lua wrote it raw before:
+  a value with characters outside that set now goes out encoded.)
   - `opts.path` (default: `"/"`), `opts.httponly` (default: `true`), `opts.secure`, `opts.samesite` (default: `"Lax"`), `opts.max_age`, `opts.domain`.
 - `cookie.clear(name, opts)` → `Set-Cookie` header with `Max-Age=0`.
 
@@ -681,7 +746,7 @@ verify step between successful first-factor auth and `on_login` when
 - `idempotency.init(opts)`. Creates `_hull_idempotency_keys` table. `opts.ttl` = key lifetime in seconds (default: `86400`).
 - `idempotency.middleware(opts)`. Post-body middleware intercepting POST (configurable via `opts.methods`).
   - `opts.header_name`. Header to read key from (default: `"idempotency-key"`).
-  - `opts.get_principal`. `function(req) -> string` for per-user scoping (default: `"__anon"`).
+  - `opts.get_principal`. `function(req) -> string` for per-user scoping. Default: `"session:" ..` the session's `user_id`, else `"user:" ..` the JWT user's `sub` / `id` / `user_id`, else `"__anon"` (shared by every anonymous caller: mount the middleware after authentication; it logs a warning once when 20 keyed requests in a row were anonymous). Session principals were the bare `user_id` before audit 9, so a session user whose id read `user:5` shared JWT user 5's keys; a key stored for a session user before the upgrade is not replayed after it (it simply expires).
   - Cache hit + same fingerprint → returns cached response (handler skipped).
   - Cache hit + different fingerprint → returns 409 Conflict.
   - Fingerprint: `SHA-256(method + path + body)`.

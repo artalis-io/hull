@@ -89,5 +89,48 @@ function userId(id) {
     return null;
 }
 
-export const _request = { clientIp, limitKey, userId };
+/**
+ * Did a state-changing request come from the app's own pages? For a request a
+ * forged form or an `<img>` on another site could make (logout). Same rules as
+ * hull.web._request.same_origin: `Sec-Fetch-Site` must be `same-origin` or
+ * `none` (cross-site and same-site refused); without it `Origin` - or failing
+ * it `Referer` - must name the request's own host (`X-Forwarded-Host` behind a
+ * trusted proxy) or one of `opts.origins`; with no provenance header at all
+ * the request passes only with `opts.allowBare`.
+ *
+ * @param {object} req
+ * @param {{allowBare?: boolean, trustProxy?: boolean, origins?: string[]}} [opts]
+ * @returns {boolean}
+ */
+function sameOrigin(req, opts) {
+    const o = opts || {};
+    const h = (req && req.headers) || {};
+    const site = h["sec-fetch-site"];
+    if (typeof site === "string" && site !== "") {
+        return site === "same-origin" || site === "none";
+    }
+    let v = h.origin;
+    if (v === undefined || v === null) v = h.referer;
+    if (v === undefined || v === null) return o.allowBare === true;
+    const originOf = (x) => {
+        const m = typeof x === "string" ? /^(https?:\/\/[^/?#]+)/.exec(x) : null;
+        return m ? m[1].toLowerCase() : null;
+    };
+    const origin = originOf(v);
+    if (origin === null) return false;
+    const authority = origin.replace(/^https?:\/\//, "");
+    const hosts = [h.host];
+    if (o.trustProxy && typeof h["x-forwarded-host"] === "string") {
+        hosts.push(h["x-forwarded-host"].split(",")[0]);
+    }
+    for (const host of hosts) {
+        if (typeof host === "string" && authority === host.trim().toLowerCase()) return true;
+    }
+    for (const allowed of (Array.isArray(o.origins) ? o.origins : [])) {
+        if (originOf(allowed) === origin) return true;
+    }
+    return false;
+}
+
+export const _request = { clientIp, limitKey, userId, sameOrigin };
 export default _request;

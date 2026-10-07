@@ -74,7 +74,10 @@
 --     Starting a change takes the current password (or
 --     email_change_reauth), and with templates.email_change_notify the
 --     old address gets a revoke link that cancels the change - or, once
---     confirmed, restores the old address - and revokes every session.
+--     confirmed, restores the old address (with the verified state it
+--     had), makes the password unusable until a reset through that
+--     address, and pauses new changes for email_change_ttl - and revokes
+--     every session.
 --   * Login CSRF: every POST that signs a browser in or changes the
 --     account refuses a cross-site request (see "Cross-site guard").
 --
@@ -315,7 +318,8 @@ CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
     created_at   INTEGER NOT NULL,
     expires_at   INTEGER NOT NULL,
     old_email    TEXT,
-    confirmed_at INTEGER
+    confirmed_at INTEGER,
+    old_verified INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
@@ -350,6 +354,12 @@ local ACTIONS = {
     totp_pending      = "totp_pending",
 }
 
+-- The token_hash of the row an undone (confirmed, then revoked) email change
+-- leaves behind: no confirm or revoke link hashes to it, and while the row
+-- lives (email_change_ttl from the undo) it refuses a new change. See
+-- handle_email_change_revoke.
+local UNDONE_MARK = "undone"
+
 -- Tolerate either `user.id` (canonical) or `user.user_id` (legacy)
 -- on app-supplied user objects. Centralized so the contract is one
 -- line to revisit if we ever want to harden it. JS mirrors this
@@ -357,6 +367,19 @@ local ACTIONS = {
 local function user_uid(user)
     if type(user) ~= "table" then return nil end
     return user.id or user.user_id
+end
+
+-- A user id as the _hull_auth_* tables key it: text, through
+-- _request.user_id (as session, totp and rbac do). The raw id stays what the
+-- app's own callbacks (user_get, user_set_*) and a token's `sub` carry; only
+-- the module's own rows are keyed by this. An INTEGER primary key reached the
+-- VARCHAR user_id column as a number, and MySQL then compared the column
+-- numerically: the per-IP lockout row '5<US>1.2.3.4' equalled 5, so clearing
+-- or reading the account-wide row hit the per-IP ones too (a ~10x larger
+-- guessing budget). Anything _request.user_id refuses (a float, say) is still
+-- bound as text, never as a number.
+local function uid_key(id)
+    return _request.user_id(id) or tostring(id)
 end
 
 -- Password bounds: 8..256 characters, counted by codepoint as the JS twin
@@ -391,7 +414,7 @@ local function stored_password_hash(user)
     if type(user) ~= "table" or type(user.email) ~= "string" then return false end
     local found = _state.user_find_by_email(user.email)
     if type(found) ~= "table"
-       or tostring(user_uid(found)) ~= tostring(user_uid(user)) then
+       or uid_key(user_uid(found)) ~= uid_key(user_uid(user)) then
         return false
     end
     h = found.password_hash
@@ -897,7 +920,7 @@ end
 local function lockout_remaining(user_id)
     local rows = db.query(
         "SELECT locked_until FROM _hull_auth_login_attempts WHERE user_id = ?",
-        { user_id })
+        { uid_key(user_id) })
     if not rows or #rows == 0 then return 0 end
     local lu = rows[1].locked_until
     if not lu or lu == 0 then return 0 end
@@ -907,6 +930,7 @@ local function lockout_remaining(user_id)
 end
 
 local function bump_failed_login(user_id, max)
+    user_id = uid_key(user_id)
     local now = time.now()
     -- Portable conditional upsert. The original used INSERT ... ON CONFLICT
     -- DO UPDATE, which MySQL spells differently (ON DUPLICATE KEY UPDATE), so
@@ -966,7 +990,7 @@ end
 
 local function clear_failed_logins(user_id)
     db.exec("DELETE FROM _hull_auth_login_attempts WHERE user_id = ?",
-            { user_id })
+            { uid_key(user_id) })
 end
 
 -- The lockout rows a login touches: one for (account, client IP), keyed
@@ -974,13 +998,14 @@ end
 -- account-wide one keyed by the user id alone.
 local IP_SEP = "\31"
 local function attempt_ip_key(uid, req)
-    return tostring(uid) .. IP_SEP
+    return uid_key(uid) .. IP_SEP
            .. (_request.limit_key(_request.client_ip(req, _state.trust_proxy)) or "_anon")
 end
 
 -- Every row for an account, after a password reset proves control of it.
 local function clear_all_failed_logins(uid)
-    local pat = tostring(uid):gsub("[!%%_]", "!%0") .. IP_SEP .. "%"
+    uid = uid_key(uid)
+    local pat = uid:gsub("[!%%_]", "!%0") .. IP_SEP .. "%"
     db.exec("DELETE FROM _hull_auth_login_attempts "
             .. "WHERE user_id = ? OR user_id LIKE ? ESCAPE '!'",
             { uid, pat })
@@ -1110,7 +1135,7 @@ end
 -- erase that).
 local function drop_pending_email_change(user_id)
     db.exec("DELETE FROM _hull_auth_pending_email_changes "
-            .. "WHERE user_id = ? AND confirmed_at IS NULL", { user_id })
+            .. "WHERE user_id = ? AND confirmed_at IS NULL", { uid_key(user_id) })
 end
 
 -- Run the app's on_password_reset (typically session.destroy_all). Logged,
@@ -1211,14 +1236,22 @@ local function handle_register(req, res)
     local pw_hash = crypto.hash_password(body.password)
     local existing = _state.user_find_by_email(body.email)
     if existing then return generic_ok(res) end
-    local user_id = _state.user_create(body.email, pw_hash)
-    local user = _state.user_get(user_id)
-    if not user then
-        return res:status(500):json({ error = "user_create returned an id that user_get cannot resolve" })
-    end
 
+    -- Creating the account is deferred too (audit 9): user_create and
+    -- user_get are writes and reads only a NEW address pays for, so inline
+    -- they still told an existing address from a new one by response time.
+    -- Both branches now answer after the hash and one lookup. The lookup is
+    -- repeated in the task: two registrations of one address racing past the
+    -- check above create one account, not two. A user_get that cannot resolve
+    -- the new id is logged (the response has gone) instead of a 500.
     local origin = origin_for(req)
     after_response(function()
+        if _state.user_find_by_email(body.email) then return end
+        local user_id = _state.user_create(body.email, pw_hash)
+        local user = _state.user_get(user_id)
+        if not user then
+            error("user_create returned an id that user_get cannot resolve")
+        end
         local token = issue_token(user_id,
             ACTIONS.verify_email, _state.verify_ttl)
         if origin then
@@ -1457,8 +1490,16 @@ end
 -- (`as_page`: the magic-link page's form) an HTML form or redirect.
 local function start_totp_pending(req, res, user, as_page)
     local uid = user_uid(user)
+    -- Bound to the password (and address) the first factor was checked
+    -- against, as a reset token is (audit 9): a pending token taken before a
+    -- password reset - or an email change undone from the old address - no
+    -- longer completes the sign-in with a code afterwards. Read through
+    -- user_find_by_email, as handle_totp_verify reads it back.
+    local current = type(user.email) == "string"
+                    and _state.user_find_by_email(user.email) or nil
     local token = issue_token(uid, ACTIONS.totp_pending,
-                               _state.totp_pending_ttl)
+                               _state.totp_pending_ttl,
+                               { pwb = password_binding(current or user) })
     if not as_page then
         return res:json({
             ok = true, pending_2fa = true, totp_token = token,
@@ -1700,7 +1741,7 @@ local function handle_totp_verify(req, res)
         return res:status(400):json({ error = "totp token already used" })
     end
     local user = _state.user_get(env.sub)
-    if not user then
+    if not user or not reset_binding_holds(env, user) then
         return res:status(400):json({ error = "totp failed" })
     end
     -- Round-9 HIGH-4: pass `req` through so the totp_verify callback
@@ -1882,11 +1923,17 @@ local function handle_email_change(req, res)
     -- A confirmed change keeps its row until its revoke link expires, and
     -- blocks a new one meanwhile: a thief must not bury it under a second
     -- change (whose revoke would restore only the thief's address).
+    local key = uid_key(user_id)
     local existing = db.query(
-        "SELECT new_email, confirmed_at FROM _hull_auth_pending_email_changes "
+        "SELECT new_email, token_hash, confirmed_at FROM _hull_auth_pending_email_changes "
         .. "WHERE user_id = ? AND expires_at > ? LIMIT 1",
-        { user_id, time.now() })
+        { key, time.now() })
     if existing and #existing > 0 then
+        if existing[1].token_hash == UNDONE_MARK then
+            return res:status(409):json({
+                error = "email changes are paused after an undone change; try again later",
+            })
+        end
         if existing[1].confirmed_at ~= nil then
             return res:status(409):json({
                 error = "a recent email change can still be revoked; try again later",
@@ -1905,11 +1952,11 @@ local function handle_email_change(req, res)
     -- An expired row (not reaped yet) is replaced whole: an upsert kept its
     -- old_email / confirmed_at.
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-            { user_id })
+            { key })
     db.exec("INSERT INTO _hull_auth_pending_email_changes "
             .. "(user_id, new_email, token_hash, created_at, expires_at) "
             .. "VALUES (?, ?, ?, ?, ?)",
-            { user_id, body.new_email, token_hash, now,
+            { key, body.new_email, token_hash, now,
               now + _state.email_change_ttl })
 
     local user = current
@@ -1965,9 +2012,10 @@ local function handle_email_change_revoke(req, res)
     if not env then
         return verify_fail(req, res, 400, "revoke failed: " .. (err or "?"))
     end
+    local key = uid_key(env.sub)
     local rows = db.query(
-        "SELECT token_hash, old_email, confirmed_at FROM _hull_auth_pending_email_changes "
-        .. "WHERE user_id = ?", { env.sub })
+        "SELECT token_hash, old_email, confirmed_at, old_verified "
+        .. "FROM _hull_auth_pending_email_changes WHERE user_id = ?", { key })
     local row = rows and rows[1]
     if not row or type(env.ch) ~= "string" or type(row.token_hash) ~= "string"
        or not crypto.constant_time_eq(row.token_hash, env.ch) then
@@ -1980,7 +2028,7 @@ local function handle_email_change_revoke(req, res)
         local old = row.old_email
         local holder = type(old) == "string" and _state.user_find_by_email(old)
         if type(old) ~= "string"
-           or (holder and tostring(user_uid(holder)) ~= tostring(env.sub)) then
+           or (holder and uid_key(user_uid(holder)) ~= key) then
             -- Taken since by another account: nothing to restore to.
             require("hull.log").warn("auth-flows: email change of account "
                 .. tostring(env.sub) .. " cannot be reverted: its previous "
@@ -1988,21 +2036,53 @@ local function handle_email_change_revoke(req, res)
             run_on_password_reset(req, res, user)
             return verify_fail(req, res, 409, "revoke failed: the previous address is in use")
         end
+        -- Undoing a confirmed change (audit 9):
+        --  * The old address gets back exactly the verified state it had
+        --    when the change was confirmed (old_verified), not `true`: an
+        --    unverified address may be a pre-registrant's (anyone can register
+        --    any address), and marking it verified on this click handed the
+        --    owner an account whose password somebody else chose. A row from
+        --    before the column existed counts as unverified (fail closed);
+        --    the owner then sets a password through a reset, which verifies an
+        --    unverified account the replace_unverified_credentials way.
+        --  * The password is made unusable (a random one): the change most
+        --    likely came from a thief who knows it, and sessions alone being
+        --    revoked let them sign straight back in and change the address
+        --    again. The owner sets a new one through a password reset, mailed
+        --    to the restored address. Lockout rows are cleared.
+        --  * The row is kept, marked undone, for email_change_ttl: a new
+        --    change is refused meanwhile (handle_email_change).
+        -- A TOTP enrolment the thief added during the window is NOT removed
+        -- here (the module cannot tell it from the owner's): the app's
+        -- on_password_reset - run below - is where to drop it if it wants to.
+        local was_verified = (tonumber(row.old_verified) or 0) ~= 0
         _state.user_set_email(env.sub, old)
-        -- The revoke link reached the old mailbox: it is proven again.
-        _state.user_set_email_verified(env.sub, true)
+        _state.user_set_email_verified(env.sub, was_verified)
+        _state.user_set_password(env.sub,
+            crypto.hash_password(crypto.random_token(32)))
+        clear_all_failed_logins(env.sub)
         user.email = old
+        user.email_verified = was_verified
         restored = true
+        local now = time.now()
+        db.exec("UPDATE _hull_auth_pending_email_changes SET token_hash = ?, "
+                .. "new_email = ?, confirmed_at = ?, expires_at = ? WHERE user_id = ?",
+                { UNDONE_MARK, old, now, now + _state.email_change_ttl, key })
+    else
+        db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
+                { key })
     end
-    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-            { env.sub })
     run_on_password_reset(req, res, user)
     emit_event(env.sub, "email_change_revoked", req,
                { metadata = { by = "old_address", restored = restored } })
     gc_expired()
-    if wants_json(req) then return res:json({ ok = true, restored = restored }) end
+    if wants_json(req) then
+        return res:json({ ok = true, restored = restored,
+                          password_reset_required = restored })
+    end
     secure_html(res):html(restored
-        and "Email change undone: your previous address is restored."
+        and ("Email change undone: your previous address is restored. "
+             .. "Set a new password with a password reset to sign in again.")
         or "Email change canceled.")
 end
 
@@ -2014,7 +2094,7 @@ end
 local function pending_change_matches(env, token)
     local rows = db.query(
         "SELECT new_email, token_hash, confirmed_at FROM _hull_auth_pending_email_changes "
-        .. "WHERE user_id = ?", { env.sub })
+        .. "WHERE user_id = ?", { uid_key(env.sub) })
     local th = encoding.hex.encode(crypto.sha256(token))
     return rows ~= nil and #rows > 0
        and rows[1].confirmed_at == nil
@@ -2036,6 +2116,17 @@ end
 local function handle_email_change_confirm(req, res)
     if refuse_cross_site(req, res) then return end
     local token = parse_body(req).token
+    -- The new address must still be free (audit 9): another account may have
+    -- taken it since the change was requested, and swapping it in then gave
+    -- two accounts one address. Checked before the token is consumed, so the
+    -- link stays usable if the address is freed again within its lifetime.
+    local penv = parse_token(token, ACTIONS.email_change)
+    if penv and type(penv.new_email) == "string" then
+        local holder = _state.user_find_by_email(penv.new_email)
+        if holder and uid_key(user_uid(holder)) ~= uid_key(penv.sub) then
+            return verify_fail(req, res, 409, "email change failed: the address is in use")
+        end
+    end
     local env, err = consume_token(token, ACTIONS.email_change)
     if not env then
         return verify_fail(req, res, 400, "email change failed: " .. (err or "?"))
@@ -2045,18 +2136,20 @@ local function handle_email_change_confirm(req, res)
         return verify_fail(req, res, 400, "email change failed")
     end
     local old_email = user.email
+    local old_verified = is_verified(user) and 1 or 0
     _state.user_set_email(env.sub, env.new_email)
     _state.user_set_email_verified(env.sub, true)
     -- With a revoke link out (email_change_notify), the row stays, confirmed
-    -- and holding the old address, until that link expires: the old address
-    -- can still undo the change. Without one there is nothing to undo it with.
+    -- and holding the old address and its verified state, until that link
+    -- expires: the old address can still undo the change. Without one there
+    -- is nothing to undo it with.
     if _state.templates.email_change_notify then
         db.exec("UPDATE _hull_auth_pending_email_changes "
-                .. "SET confirmed_at = ?, old_email = ? WHERE user_id = ?",
-                { time.now(), old_email, env.sub })
+                .. "SET confirmed_at = ?, old_email = ?, old_verified = ? WHERE user_id = ?",
+                { time.now(), old_email, old_verified, uid_key(env.sub) })
     else
         db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-                { env.sub })
+                { uid_key(env.sub) })
     end
     emit_event(env.sub, "email_changed", req,
                { metadata = { old_email = old_email,
@@ -2473,7 +2566,8 @@ function M.init(opts)
         cols[n] = true
     end
     for _, c in ipairs({ { "old_email", "old_email TEXT" },
-                         { "confirmed_at", "confirmed_at INTEGER" } }) do
+                         { "confirmed_at", "confirmed_at INTEGER" },
+                         { "old_verified", "old_verified INTEGER" } }) do
         if not cols[c[1]] then
             local ok, err = pcall(function()
                 db.exec("ALTER TABLE _hull_auth_pending_email_changes ADD COLUMN " .. c[2])
@@ -2588,6 +2682,16 @@ M._test = {
     is_email_ish       = is_email_ish,
     parse_body         = parse_body,
     same_origin_request = same_origin_request,
+    uid_key            = uid_key,
+    strip_user_secrets = strip_user_secrets,
+    handlers           = {
+        register             = handle_register,
+        login                = handle_login,
+        totp_verify          = handle_totp_verify,
+        email_change         = handle_email_change,
+        email_change_confirm = handle_email_change_confirm,
+        email_change_revoke  = handle_email_change_revoke,
+    },
     ACTIONS            = ACTIONS,
     email_rate_allow   = function(to) return email_rate_allow(to) end,
     email_rate_reset   = function()

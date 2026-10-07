@@ -112,6 +112,24 @@ test("pushUrl sets HX-Push-Url", () => {
     assertEq(res.headersSet["HX-Push-Url"], "/items/42");
 });
 
+// Audit 9: HX-Push-Url / HX-Replace-Url / HX-Location take the same targets
+// as HX-Redirect - no javascript: URL, no other site.
+test("pushUrl / replaceUrl / location refuse what redirect refuses", () => {
+    const threw = (fn) => { try { fn(); return false; } catch (_e) { return true; } };
+    for (const bad of ["javascript:alert(1)", "data:text/html,x", "//evil.example/x",
+                       "/a\nb", "", "\\evil", undefined]) {
+        const res = mockRes();
+        if (!threw(() => htmx.pushUrl(res, bad))) throw new Error("pushUrl " + bad);
+        if (!threw(() => htmx.replaceUrl(res, bad))) throw new Error("replaceUrl " + bad);
+        if (!threw(() => htmx.location(res, bad))) throw new Error("location " + bad);
+        if (!threw(() => htmx.location(res, { path: bad, target: "#m" })))
+            throw new Error("location object " + bad);
+    }
+    const res = mockRes();
+    htmx.pushUrl(res, "https://app.example/x");
+    htmx.replaceUrl(res, "//cdn.example/x", { allowProtocolRelative: true });
+});
+
 test("pushUrl(false) suppresses default push", () => {
     const res = mockRes();
     htmx.pushUrl(res, false);

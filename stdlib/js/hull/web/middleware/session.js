@@ -579,11 +579,15 @@ function logoutHandler(cookieMod, opts) {
     const cookieOpts = opts.cookieOpts || DEFAULT_LOGIN_HANDLER_OPTS.cookieOpts;
     const respond = opts.respond || (res => res.json({ ok: true }));
 
+    // Provenance as auth-flows checks it (audit 9; see the Lua sibling):
+    // same-site refused too, Origin / Referer checked without Sec-Fetch-Site,
+    // a header-less client let through.
+    const provenance = { allowBare: true, trustProxy: opts.trustProxy === true,
+                         origins: opts.origins };
     return function (req, res) {
-        // A request the browser marks cross-site (an attacker page posting a
-        // form here) is refused, as oauth's logout does: the clearing
-        // Set-Cookie would still sign the victim out.
-        if (req.headers && req.headers["sec-fetch-site"] === "cross-site") {
+        // A forged request (an attacker page posting a form here) is refused:
+        // the clearing Set-Cookie would still sign the victim out.
+        if (!_request.sameOrigin(req, provenance)) {
             res.status(403).json({ error: "forbidden" });
             return;
         }

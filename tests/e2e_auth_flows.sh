@@ -391,6 +391,12 @@ run_flow() {
     curl -sS -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_D\",\"password\":\"$PW1\"}" \
         "$BASE/auth/register" > /dev/null
+    # The account is created after the response (audit 9), together with
+    # its welcome mail: wait for the mail before asking for a magic link.
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        [ -n "$(last_email_text "$PORT" "$EMAIL_D")" ] && break
+        sleep 0.2
+    done
     curl -sS -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_D\"}" "$BASE/auth/magic-link" > /dev/null
     TEXT=$(last_email_text "$PORT" "$EMAIL_D")

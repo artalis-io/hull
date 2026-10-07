@@ -221,11 +221,24 @@ s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
     TAMPER_STATUS=$(echo "$TAMPER_RESP" | awk 'NR==1{print $2}')
     check_status "$_label: tampered cookie rejected" "$TAMPER_STATUS" "400"
 
-    # 6. Logout clears the state cookie and redirects.
-    LO_RESP=$(curl -sS -i -b "$COOKIES" \
+    # 6. Logout clears the state cookie and redirects. A GET must show
+    #    where it came from (audit 9): an <img> or a noreferrer link on
+    #    another site sends no provenance header at all, and a sibling
+    #    subdomain is same-site, not same-origin. A header-less POST is a
+    #    non-browser client and passes.
+    LO_RESP=$(curl -sS -i -b "$COOKIES" -H 'Sec-Fetch-Site: same-origin' \
         "http://127.0.0.1:$CLIENT_PORT/auth/logout")
     LO_STATUS=$(echo "$LO_RESP" | awk 'NR==1{print $2}')
     check_status "$_label: /auth/logout is 302" "$LO_STATUS" "302"
+    LO_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" \
+        "http://127.0.0.1:$CLIENT_PORT/auth/logout")
+    check_status "$_label: a GET logout with no provenance is refused" "$LO_STATUS" "403"
+    LO_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" \
+        -H 'Sec-Fetch-Site: same-site' "http://127.0.0.1:$CLIENT_PORT/auth/logout")
+    check_status "$_label: a same-site logout is refused" "$LO_STATUS" "403"
+    LO_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" -X POST \
+        "http://127.0.0.1:$CLIENT_PORT/auth/logout")
+    check_status "$_label: a header-less POST logout passes" "$LO_STATUS" "302"
 
     stop_pid "$HULL_PID"; HULL_PID=""
 }

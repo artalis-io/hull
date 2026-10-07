@@ -52,38 +52,43 @@ function ratelimit.check(buckets, key, limit, window, now, saturated)
         -- Live window: bump in place. buckets.get already refreshed this
         -- bucket's LRU rank, so an active key won't be the eviction victim.
         bucket.count = bucket.count + 1
-        if saturated and bucket.count > limit and saturated.map[key] ~= bucket then
-            -- Kept apart from the cache, so eviction cannot reset it. Recorded
-            -- whenever the map holds a DIFFERENT bucket for the key: testing
-            -- only for presence kept the first window's (expired) entry, so
-            -- from the second window on the restore above found nothing live.
-            if not saturated.map[key] then saturated.n = saturated.n + 1 end
-            saturated.map[key] = bucket
-            if saturated.n > MAX_BUCKETS then
-                -- Drop expired entries; if every entry is live (an attacker
-                -- spending `limit + 1` requests per key), drop the ones
-                -- closest to expiry down to 90% of the cap, so the map has a
-                -- hard bound and each new key does not pay a full sweep.
-                local live = {}
-                for k, b in pairs(saturated.map) do
-                    if (now - b.window_start) >= window then
-                        saturated.map[k] = nil
-                    else
-                        live[#live + 1] = k
-                    end
-                end
-                if #live > MAX_BUCKETS then
-                    local m = saturated.map
-                    table.sort(live, function(a, b)
-                        return m[a].window_start < m[b].window_start
-                    end)
-                    for i = 1, #live - math.floor(MAX_BUCKETS * 0.9) do
-                        m[live[i]] = nil
-                    end
-                    saturated.n = math.floor(MAX_BUCKETS * 0.9)
+    end
+    -- A bucket whose allowance is SPENT (count >= limit, audit 9) is kept
+    -- apart too, not only one already over it: recorded at count > limit, a
+    -- client that sent exactly `limit` requests, flooded the bucket out of
+    -- the cache and came back had a fresh allowance every round - without
+    -- ever being refused, so it was never recorded.
+    if saturated and bucket.count >= limit and saturated.map[key] ~= bucket then
+        -- Kept apart from the cache, so eviction cannot reset it. Recorded
+        -- whenever the map holds a DIFFERENT bucket for the key: testing
+        -- only for presence kept the first window's (expired) entry, so
+        -- from the second window on the restore above found nothing live.
+        if not saturated.map[key] then saturated.n = saturated.n + 1 end
+        saturated.map[key] = bucket
+        if saturated.n > MAX_BUCKETS then
+            -- Drop expired entries; if every entry is live (an attacker
+            -- spending `limit` requests per key), drop the ones
+            -- closest to expiry down to 90% of the cap, so the map has a
+            -- hard bound and each new key does not pay a full sweep.
+            local live = {}
+            for k, b in pairs(saturated.map) do
+                if (now - b.window_start) >= window then
+                    saturated.map[k] = nil
                 else
-                    saturated.n = #live
+                    live[#live + 1] = k
                 end
+            end
+            if #live > MAX_BUCKETS then
+                local m = saturated.map
+                table.sort(live, function(a, b)
+                    return m[a].window_start < m[b].window_start
+                end)
+                for i = 1, #live - math.floor(MAX_BUCKETS * 0.9) do
+                    m[live[i]] = nil
+                end
+                saturated.n = math.floor(MAX_BUCKETS * 0.9)
+            else
+                saturated.n = #live
             end
         end
     end

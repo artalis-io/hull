@@ -22,7 +22,11 @@
 #      Click revoke. Then click confirm - expect 'email change
 #      failed' (revoke already deleted the pending row).
 #   7. Email-change again, NEW link confirmed → expect 302
-#      and login with new email works.
+#      and login with new email works. Undoing that confirmed change
+#      from the old address restores it, makes the password unusable
+#      (a reset through the old address sets a new one) and pauses new
+#      changes. A confirm to an address another account took since the
+#      request answers 409 (step 5b).
 #   8. Pwned-password check: register attempt with "password"
 #      (HIBP-known) → 400 with pwned error. Register with a
 #      random password → ok. With a 300 ms welcome render, the
@@ -280,6 +284,32 @@ run_flow() {
         "$BASE/auth/login")
     check_contains "$_label: login after lockout window ok" "$R" '"ok":true'
 
+    # 5b. Audit 9: a confirm whose new address another account took since
+    #     the change was requested answers 409 (two accounts must not share
+    #     an address) and does not consume the link. The change is then
+    #     cancelled from the old address, which signs the account out.
+    EMAIL_TAKEN="alice.taken@example.test"
+    curl -sS -X POST "$BASE/_emails/clear" > /dev/null
+    curl -sS -b "$COOKIES" -X POST -H 'Content-Type: application/json' \
+        -d "{\"new_email\":\"$EMAIL_TAKEN\",\"password\":\"$PW\"}" \
+        "$BASE/auth/email-change" > /dev/null
+    TAKEN_CONFIRM_URL=$(extract_url "$(last_email_text "$PORT" "$EMAIL_TAKEN")")
+    TAKEN_REVOKE_URL=$(extract_url "$(last_email_text "$PORT" "$EMAIL")")
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL_TAKEN\",\"password\":\"someoneelse99\"}" \
+        "$BASE/auth/register" > /dev/null
+    # The account is created after the response (with its welcome mail).
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        case "$(last_email_text "$PORT" "$EMAIL_TAKEN")" in *verify:*) break ;; esac
+        sleep 0.2
+    done
+    S=$(link_post "$TAKEN_CONFIRM_URL" -o /dev/null -w '%{http_code}')
+    check_status "$_label: confirm to an address taken since answers 409" "$S" "409"
+    R=$(link_post "$TAKEN_REVOKE_URL")
+    check_contains "$_label: ...and the change can still be cancelled" "$R" "canceled"
+    curl -sS -c "$COOKIES" -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" "$BASE/auth/login" > /dev/null
+
     # 6. Email-change with notify+revoke. Capture BOTH emails. Starting one
     #    takes the current password (audit 8): a session thief has none.
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null
@@ -363,9 +393,29 @@ run_flow() {
     S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_NEW\",\"password\":\"$PW\"}" "$BASE/auth/login")
     check_status "$_label: ...the new address no longer signs in" "$S" "401"
-    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+    # Audit 9: the undo also makes the password unusable - the change most
+    # likely came from someone who knows it - so the old address does not
+    # sign in with it either; the owner resets it through the restored
+    # mailbox. New changes stay paused for email_change_ttl.
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" "$BASE/auth/login")
-    check_contains "$_label: ...the old one does" "$R" '"ok":true'
+    check_status "$_label: ...nor does the old password (it was replaced)" "$S" "401"
+    PW2="hunter33hunter33"
+    curl -sS -X POST "$BASE/_emails/clear" > /dev/null
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\"}" "$BASE/auth/password-reset/request" > /dev/null
+    RESET_TOK=$(extract_url "$(last_email_text "$PORT" "$EMAIL")" | sed 's/.*token=//')
+    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$RESET_TOK\",\"password\":\"$PW2\"}" \
+        "$BASE/auth/password-reset/confirm")
+    check_contains "$_label: ...a reset through the restored address works" "$R" '"ok":true'
+    R=$(curl -sS -c "$COOKIES" -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\",\"password\":\"$PW2\"}" "$BASE/auth/login")
+    check_contains "$_label: ...and the old address signs in with the new password" "$R" '"ok":true'
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIES" -X POST \
+        -H 'Content-Type: application/json' \
+        -d "{\"new_email\":\"$EMAIL_NEW\",\"password\":\"$PW2\"}" "$BASE/auth/email-change")
+    check_status "$_label: ...while new email changes stay paused" "$S" "409"
 
     # 8. Pwned check - try registering with "password".
     R=$(curl -sS -X POST -H 'Content-Type: application/json' \

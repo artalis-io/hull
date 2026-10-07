@@ -11,6 +11,10 @@
 /**
  * Parse a `Cookie` header string into a name-value object.
  *
+ * When a name appears more than once the FIRST occurrence wins (audit 9):
+ * browsers send the most specific path first, and a later duplicate used to
+ * override it. Values are decoded as the Lua sibling decodes them.
+ *
  * Empty or non-string input returns an empty object (never throws).
  *
  * @param {string|null|undefined} headerString  Value of the inbound `Cookie` header.
@@ -37,6 +41,7 @@ function parse(headerString) {
 
         const name = pair.substring(0, eqIdx).trim();
         if (name.length === 0) continue;
+        if (Object.prototype.hasOwnProperty.call(result, name)) continue;
 
         let value = pair.substring(eqIdx + 1).trim();
 
