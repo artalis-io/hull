@@ -102,6 +102,19 @@ else
     HEADERS=$(curl -sI "http://127.0.0.1:$PORT_API/_hull/agent/routes")
     check_contains "api content-type json" "$HEADERS" 'application/json'
 
+    # DNS rebinding (audit 9): a page on an attacker's name resolved to
+    # 127.0.0.1 sends that name as Host, and a browser adds Origin.
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: rebind.example:$PORT_API" \
+        "http://127.0.0.1:$PORT_API/_hull/agent/routes")
+    if [ "$STATUS" = "403" ]; then pass "api refuses a foreign Host"
+    else fail "api foreign Host returned $STATUS (expected 403)"; fi
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Origin: http://rebind.example" \
+        "http://127.0.0.1:$PORT_API/_hull/agent/routes")
+    if [ "$STATUS" = "403" ]; then pass "api refuses a request with Origin"
+    else fail "api Origin request returned $STATUS (expected 403)"; fi
+    OUT=$(curl -s -H "Host: localhost:$PORT_API" "http://127.0.0.1:$PORT_API/_hull/agent/routes")
+    check_contains "api accepts Host localhost" "$OUT" '"routes"'
+
     stop_server
 fi
 rm -rf "$TMPDIR_API"

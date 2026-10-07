@@ -251,6 +251,18 @@ UTEST(tool, validate_reject_wl)
     ASSERT_NE(hl_tool_validate_args(argv), 0);
 }
 
+/* -Wp, hands its comma pieces to the preprocessor unchecked: a plugin load
+ * spelled through it bypassed the -load / -fplugin checks (audit 9). */
+UTEST(tool, validate_reject_wp)
+{
+    const char *a1[] = { "cc", "-Wp,-load,evil.so", NULL };
+    ASSERT_NE(hl_tool_validate_args(a1), 0);
+    const char *a2[] = { "cc", "-Wp,-fplugin=evil.so", NULL };
+    ASSERT_NE(hl_tool_validate_args(a2), 0);
+    const char *a3[] = { "cc", "-Wp,-DX=1", NULL };
+    ASSERT_NE(hl_tool_validate_args(a3), 0);
+}
+
 UTEST(tool, validate_reject_response_file)
 {
     const char *argv[] = { "cc", "@commands.txt", NULL };

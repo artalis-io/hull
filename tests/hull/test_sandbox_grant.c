@@ -8,6 +8,7 @@
 #include "utest.h"
 #include "hull/sandbox.h"
 #include "test_tmpdir.h"
+#include "log.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -144,6 +145,47 @@ UTEST(sandbox_grant, existing_directory_without_slash_is_itself)
     EXPECT_STREQ(out, want);
     ASSERT_EQ(hl_sandbox_resolve_grant(app, "data", out, sizeof out, 0), 0);
     EXPECT_STREQ(out, want);
+
+    cleanup(app);
+}
+
+/* A top-level write glob has only the app directory as its literal part, so
+ * the kernel grant is all of it: said, as for a top-level file that does not
+ * exist yet (audit 9). A nested glob, or a read glob, is not. */
+static int g_glob_warns;
+static void count_glob_warn(log_Event *ev)
+{
+    if (ev->level == LOG_WARN && ev->fmt && strstr(ev->fmt, "is a pattern"))
+        g_glob_warns++;
+}
+
+UTEST(sandbox_grant, top_level_write_glob_is_warned)
+{
+    static int registered;
+    if (!registered) {
+        ASSERT_EQ(log_add_callback(count_glob_warn, NULL, LOG_WARN), 0);
+        registered = 1;
+    }
+    char app[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(app, sizeof app, "hull_grant") != NULL);
+    char real_app[PATH_MAX];
+    ASSERT_TRUE(realpath(app, real_app) != NULL);
+    char out[PATH_MAX];
+
+    g_glob_warns = 0;
+    ASSERT_EQ(hl_sandbox_resolve_grant(app, "*.log", out, sizeof out, 1), 0);
+    EXPECT_STREQ(out, real_app);
+    EXPECT_EQ(g_glob_warns, 1);
+    ASSERT_EQ(hl_sandbox_resolve_grant(app, "./*.log", out, sizeof out, 1), 0);
+    EXPECT_EQ(g_glob_warns, 2);
+
+    ASSERT_EQ(hl_sandbox_resolve_grant(app, "*.log", out, sizeof out, 0), 0);
+    EXPECT_EQ(g_glob_warns, 2);                /* a read glob */
+    char p[PATH_MAX + 16];
+    snprintf(p, sizeof p, "%s/data", app);
+    ASSERT_EQ(mkdir(p, 0755), 0);
+    ASSERT_EQ(hl_sandbox_resolve_grant(app, "data/*.log", out, sizeof out, 1), 0);
+    EXPECT_EQ(g_glob_warns, 2);                /* nested: its directory */
 
     cleanup(app);
 }

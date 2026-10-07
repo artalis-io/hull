@@ -90,6 +90,61 @@ UTEST(verify_local, tamper_and_signature_fail_closed) {
     rmdir(dir);
 }
 
+/* The build-time re-verify binds a cached manifest to the release this hull
+ * installs from (audit 9): another release's signed manifest + asset in the
+ * cache dir verified as well as the right one. */
+int hl_release_io_test_check_cached_release(const char *dir, const char *mname,
+                                            const char *manifest, size_t mlen,
+                                            const char *tag);
+
+UTEST(verify_local, cached_manifest_names_this_release) {
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hlvl") != NULL);
+
+    const char *ver = "v0.16.0\n";
+    char hex[65];
+    ASSERT_EQ(hl_release_io_sha256_hex((const unsigned char *)ver, strlen(ver), hex), 0);
+    char manifest[256];
+    snprintf(manifest, sizeof(manifest),
+             "%s  hull.version\n%064d  libhull_feature-x.a\n", hex, 0);
+    size_t ml = strlen(manifest);
+    const char *m = "libhull_feature-x.a.sha256";
+
+    /* No cached hull.version: refused. */
+    EXPECT_EQ(hl_release_io_test_check_cached_release(dir, m, manifest, ml, "v0.16.0"), -1);
+    vl_write(dir, "libhull_feature-x.a.version", ver);
+    EXPECT_EQ(hl_release_io_test_check_cached_release(dir, m, manifest, ml, "v0.16.0"), 0);
+    /* This hull is another release. */
+    EXPECT_EQ(hl_release_io_test_check_cached_release(dir, m, manifest, ml, "v0.17.0"), -1);
+    /* A cached hull.version rewritten to name this hull: its digest is wrong. */
+    vl_write(dir, "libhull_feature-x.a.version", "v0.17.0\n");
+    EXPECT_EQ(hl_release_io_test_check_cached_release(dir, m, manifest, ml, "v0.17.0"), -1);
+    vl_rm(dir, "libhull_feature-x.a.version");
+
+    /* The shared hull.sha256 reads the shared hull.version. */
+    vl_write(dir, "hull.version", ver);
+    EXPECT_EQ(hl_release_io_test_check_cached_release(dir, "hull.sha256", manifest, ml, "v0.16.0"), 0);
+    vl_rm(dir, "hull.version");
+
+    /* No entry: only a release from before it existed. */
+    const char *old = "0000000000000000000000000000000000000000000000000000000000000000  libhull_feature-x.a\n";
+    EXPECT_EQ(hl_release_io_test_check_cached_release(dir, m, old, strlen(old), "v0.15.0"), 0);
+    EXPECT_EQ(hl_release_io_test_check_cached_release(dir, m, old, strlen(old), "v0.16.0"), -1);
+
+    rmdir(dir);
+}
+
+/* The tag this hull installs from never doubles the "v". */
+UTEST(release_io, self_tag_shape) {
+    char tag[64];
+    if (hl_release_io_self_tag(tag, sizeof tag) == 0) {
+        EXPECT_EQ(tag[0], 'v');
+        EXPECT_NE(tag[1], 'v');
+        EXPECT_TRUE(hl_release_io_tag_valid(tag));
+    }
+    EXPECT_EQ(hl_release_io_self_tag(tag, 1), -1);
+}
+
 /* ── platform ─────────────────────────────────────────────────────── */
 
 /* hull.version, hashed into the signed manifest, names the release: the tag

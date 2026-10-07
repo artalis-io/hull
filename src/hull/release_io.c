@@ -189,6 +189,70 @@ int hl_release_io_get(const char *url,
     return 0;
 }
 
+/* ── The signed manifest names the release ───────────────────────────── */
+
+int hl_release_io_check_release_tag(const char *repo, const char *tag,
+                                    const char *manifest, size_t manifest_len,
+                                    KlAllocator *alloc, KlTlsCtx *tls,
+                                    const char *ua,
+                                    char **out_version,
+                                    size_t *out_version_len)
+{
+    if (out_version) *out_version = NULL;
+    if (out_version_len) *out_version_len = 0;
+    if (!repo || !tag || !manifest || !alloc || !tls) return -1;
+    if (!ua) ua = "hull";
+
+    /* The tag is the caller's (unsigned) choice. hull.version, hashed into
+     * the signed manifest, says which release these bytes are: an old
+     * signed release served under the tag asked for is caught here.
+     * Releases published before hull.version existed have no entry. */
+    char *ver = NULL;
+    size_t ver_len = 0;
+    int vrc = 1;
+    if (hl_release_io_check_signed_version(manifest, manifest_len, NULL, 0, tag) != 1) {
+        char ver_url[1024];
+        snprintf(ver_url, sizeof(ver_url),
+                 "https://github.com/%s/releases/download/%s/hull.version",
+                 repo, tag);
+        if (hl_release_io_get(ver_url, &ver, &ver_len, alloc, tls, ua) != 0) {
+            ver = NULL;
+            ver_len = 0;
+        }
+        vrc = hl_release_io_check_signed_version(manifest, manifest_len,
+                                                 ver, ver_len, tag);
+    }
+    if (vrc < 0) {
+        fprintf(stderr,
+                "%s: the signed manifest does not name the release %s\n"
+                "  (hull.version missing or different); refusing to proceed\n",
+                ua, tag);
+        if (ver) kl_free(alloc, ver, ver_len);
+        return -1;
+    }
+    if (vrc == 1 && hl_release_io_requires_signed_version(tag)) {
+        /* A release this new carries the entry. Its absence means the
+         * bytes are an older signed release under this newer tag. */
+        fprintf(stderr,
+                "%s: the signed manifest for %s has no hull.version entry,\n"
+                "  which every release since %s carries; refusing to proceed\n",
+                ua, tag, HL_RELEASE_SIGNED_VERSION_SINCE);
+        return -1;
+    }
+    if (vrc == 0)
+        fprintf(stdout, "%s: signed manifest names %s\n", ua, tag);
+    else
+        fprintf(stdout, "%s: %s predates the signed version entry; "
+                        "trusting the release tag\n", ua, tag);
+    if (ver && out_version) {
+        *out_version = ver;
+        if (out_version_len) *out_version_len = ver_len;
+    } else if (ver) {
+        kl_free(alloc, ver, ver_len);
+    }
+    return 0;
+}
+
 /* ── Verified release manifest (shared trust chain) ──────────────────── */
 
 int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
@@ -197,7 +261,9 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
                                           char **out_manifest,
                                           size_t *out_manifest_len,
                                           char **out_sig,
-                                          size_t *out_sig_len)
+                                          size_t *out_sig_len,
+                                          char **out_version,
+                                          size_t *out_version_len)
 {
     if (!repo || !tag || !alloc || !tls || !out_manifest || !out_manifest_len)
         return -1;
@@ -208,6 +274,8 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
     }
     if (out_sig) *out_sig = NULL;
     if (out_sig_len) *out_sig_len = 0;
+    if (out_version) *out_version = NULL;
+    if (out_version_len) *out_version_len = 0;
 
     char sha_url[1024];
     snprintf(sha_url, sizeof(sha_url),
@@ -257,6 +325,22 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
         fprintf(stderr,
                 "%s: WARNING: no embedded release public key; skipping Ed25519 "
                 "signature check (SHA-256 only)\n", ua);
+    }
+
+    /* Any release-key-signed manifest verified above, so an old release's
+     * manifest and assets served under this tag installed the old (signed,
+     * possibly vulnerable) assets: only `hull update` checked that the
+     * manifest names its release. Every caller does now (audit 9). */
+    if (hl_release_io_check_release_tag(repo, tag, manifest, manifest_len,
+                                        alloc, tls, ua,
+                                        out_version, out_version_len) != 0) {
+        if (out_sig && *out_sig) {
+            kl_free(alloc, *out_sig, out_sig_len ? *out_sig_len : 0);
+            *out_sig = NULL;
+            if (out_sig_len) *out_sig_len = 0;
+        }
+        kl_free(alloc, manifest, manifest_len);
+        return -1;
     }
 
     *out_manifest = manifest;
@@ -332,6 +416,72 @@ int hl_release_io_verify_local_asset(const char *dir, const char *asset)
 int hl_release_io_verify_local_asset_file(const char *dir, const char *asset,
                                           const char *file)
 {
+    return hl_release_io_verify_local_asset_release(dir, asset, file, NULL);
+}
+
+int hl_release_io_self_tag(char *out, size_t out_sz)
+{
+    if (!out || out_sz < 2) return -1;
+    const char *v = HL_VERSION;
+    if (v[0] == 'v') v++;
+    int n = snprintf(out, out_sz, "v%s", v);
+    if (n < 0 || (size_t)n >= out_sz) return -1;
+    return hl_release_io_tag_valid(out) ? 0 : -1;
+}
+
+/* The cached manifest names the release @p tag: its hull.version entry
+ * matches the cached copy of that file (<manifest stem>.version) and names
+ * @p tag, or the release predates the entry. */
+static int local_check_release(const char *dir, const char *mname,
+                               const char *manifest, size_t mlen,
+                               const char *tag)
+{
+    int have = hl_release_io_check_signed_version(manifest, mlen, NULL, 0, tag) != 1;
+    if (!have) {
+        if (!hl_release_io_requires_signed_version(tag)) return 0;
+        fprintf(stderr, "hull platform: the cached manifest %s/%s has no "
+                        "hull.version entry, which every release since %s "
+                        "carries (reinstall)\n",
+                dir, mname, HL_RELEASE_SIGNED_VERSION_SINCE);
+        return -1;
+    }
+    char vname[PATH_MAX], path[PATH_MAX];
+    size_t ml = strlen(mname), sl = strlen(".sha256");
+    if (ml < sl || strcmp(mname + ml - sl, ".sha256") != 0 ||
+        (size_t)snprintf(vname, sizeof vname, "%.*s.version",
+                         (int)(ml - sl), mname) >= sizeof vname ||
+        (size_t)snprintf(path, sizeof path, "%s/%s", dir, vname) >= sizeof path)
+        return -1;
+    char *ver = NULL;
+    size_t vlen = 0;
+    int rc = -1;
+    if (local_read_file(path, &ver, &vlen) == 0)
+        rc = hl_release_io_check_signed_version(manifest, mlen, ver, vlen, tag);
+    free(ver);
+    if (rc != 0)
+        fprintf(stderr, "hull platform: the cached manifest %s/%s is not the "
+                        "signed manifest of release %s, the release this hull "
+                        "installs from (reinstall)\n", dir, mname, tag);
+    return rc == 0 ? 0 : -1;
+}
+
+#ifdef HL_RELEASE_IO_TEST_HOOKS
+/* test_release_io: the release binding alone (a real release key makes the
+ * signature step before it unreachable from a test). */
+int hl_release_io_test_check_cached_release(const char *dir, const char *mname,
+                                            const char *manifest, size_t mlen,
+                                            const char *tag);
+int hl_release_io_test_check_cached_release(const char *dir, const char *mname,
+                                            const char *manifest, size_t mlen,
+                                            const char *tag)
+{
+    return local_check_release(dir, mname, manifest, mlen, tag);
+}
+#endif
+
+int hl_release_io_verify_local_asset_release(const char *dir, const char *asset,
+                                             const char *file, const char *tag)
+{
     if (!dir || !asset) return -1;
     char path[PATH_MAX];
     char *manifest = NULL, *sig = NULL;
@@ -375,6 +525,12 @@ int hl_release_io_verify_local_asset_file(const char *dir, const char *asset,
             goto done;
         }
     }
+
+    /* 2b. The manifest is the release this hull installs from, not another
+     *     signed release's put in its place (audit 9) - the install checked
+     *     the same against the network copy. */
+    if (tag && local_check_release(dir, mname, manifest, mlen, tag) != 0)
+        goto done;
 
     /* 3. Expected digest from the now-verified manifest, actual from disk. */
     char expected[65], actual[65];

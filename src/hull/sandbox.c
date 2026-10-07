@@ -17,6 +17,7 @@
 
 #include "hull/sandbox.h"
 #include "hull/shared/cache_dir.h"
+#include "hull/shared/host.h"   /* hl_host_path_too_broad */
 #include "log.h"
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_backend.h"   /* hl_db_feature_backends: detect a composed DuckDB feature */
@@ -158,6 +159,16 @@ int hl_sandbox_resolve_grant(const char *app_dir, const char *relpath,
     }
     int is_glob = lit < jlen;
     int is_dir = !is_glob && jlen > 0 && joined[jlen - 1] == '/';
+    /* A top-level write glob ("*.log") has no literal directory but the app
+     * directory itself, so the kernel grant is the whole of it - app.lua,
+     * migrations/, package.sig - for every run. Said, as for a top-level
+     * file that does not exist yet (audit 9); the cap layer still limits
+     * the app to the pattern. */
+    if (is_glob && for_write && lit <= adir_len)
+        log_warn("[sandbox] fs.write '%s' is a pattern directly in the app "
+                 "directory: the whole app directory is writable at the "
+                 "kernel level. Put written files in a subdirectory "
+                 "(\"logs/*.log\") to avoid this.", relpath);
     /* Zeroed: only buf[0..lit] is written below, and the symlink walk reads
      * up to strlen(buf), which the analyzer cannot tie to that prefix. */
     char buf[SANDBOX_PATH_MAX] = { 0 };
@@ -859,18 +870,16 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         }
         /* Nor the user's home, or a directory above it: a built binary
          * started from ~ unveiled every file the user owns (~/.ssh among
-         * them), and its relative grants resolved from there. */
-        const char *home = getenv("HOME");
-        char hreal[SANDBOX_PATH_MAX];
-        if (home && *home && realpath(home, hreal)) {
-            size_t l = strlen(r);
-            if (strncmp(hreal, r, l) == 0 && (hreal[l] == '\0' || hreal[l] == '/')) {
-                log_error("[sandbox] the app directory is %s - your home directory "
-                          "or above it, which would grant every file in it. Run "
-                          "the app from its own directory (e.g. WorkingDirectory= "
-                          "/ WORKDIR).", r);
-                return -1;
-            }
+         * them), and its relative grants resolved from there. The same rule
+         * as the tool sandbox's (hl_host_path_too_broad): $USERPROFILE when
+         * $HOME is unset, case-insensitive on Windows, and a bare drive
+         * root is a root (audit 9). */
+        if (r == real && hl_host_path_too_broad(r)) {
+            log_error("[sandbox] the app directory is %s - a drive root, or "
+                      "your home directory or above it, which would grant every "
+                      "file in it. Run the app from its own directory (e.g. "
+                      "WorkingDirectory= / WORKDIR).", r);
+            return -1;
         }
     }
 

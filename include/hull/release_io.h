@@ -86,6 +86,10 @@ int hl_release_io_get(const char *url,
  * `hull platform install` cache the signed manifest for a later offline
  * re-verify (see hl_release_io_verify_local_asset).
  *
+ * The verified manifest must also name @p tag (hl_release_io_check_release_tag,
+ * below); @p out_version / @p out_version_len receive the release's
+ * `hull.version` bytes for caching (NULL to ignore).
+ *
  * @returns 0 on success, -1 on any download/verification failure (a message
  *          prefixed with @p ua is printed to stderr).
  */
@@ -95,7 +99,33 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
                                           char **out_manifest,
                                           size_t *out_manifest_len,
                                           char **out_sig,
-                                          size_t *out_sig_len);
+                                          size_t *out_sig_len,
+                                          char **out_version,
+                                          size_t *out_version_len);
+
+/**
+ * The verified manifest names the release @p tag (audit 9: before, only
+ * `hull update` checked, so tools / feature / flavor install accepted ANY
+ * release-key-signed manifest under the tag asked for - an older release's,
+ * with its older assets). Fetches the release's `hull.version` when the
+ * manifest has an entry for it and requires its digest to match and its
+ * content to name @p tag; a manifest without the entry is accepted only for
+ * a release older than HL_RELEASE_SIGNED_VERSION_SINCE.
+ * hl_release_io_fetch_verified_manifest runs this itself.
+ *
+ * When @p out_version is non-NULL the `hull.version` bytes are handed back
+ * (caller kl_free()s; NULL when the release predates the entry), so an
+ * install can cache them for the offline re-verify
+ * (hl_release_io_verify_local_asset_release).
+ *
+ * @returns 0 when the manifest names @p tag, -1 otherwise (message printed).
+ */
+int hl_release_io_check_release_tag(const char *repo, const char *tag,
+                                    const char *manifest, size_t manifest_len,
+                                    KlAllocator *alloc, KlTlsCtx *tls,
+                                    const char *ua,
+                                    char **out_version,
+                                    size_t *out_version_len);
 
 /**
  * Offline: re-verify an already-installed asset against a locally-cached
@@ -121,6 +151,19 @@ int hl_release_io_verify_local_asset(const char *dir, const char *asset);
  *  file could be swapped. NULL @p file = <dir>/<asset>. */
 int hl_release_io_verify_local_asset_file(const char *dir, const char *asset,
                                           const char *file);
+
+/** As hl_release_io_verify_local_asset_file, and the cached manifest must
+ *  name the release @p tag: its hull.version entry must match the cached
+ *  copy (<manifest stem>.version, written by the install) and name @p tag,
+ *  or the release must predate the entry (HL_RELEASE_SIGNED_VERSION_SINCE).
+ *  Without it a cache dir could hold ANOTHER signed release's manifest and
+ *  asset (audit 9). NULL @p tag skips this step. */
+int hl_release_io_verify_local_asset_release(const char *dir, const char *asset,
+                                             const char *file, const char *tag);
+
+/** The release tag this hull installs from: "v" + HL_VERSION (a leading "v"
+ *  not doubled). Returns -1 when it is not a release tag (a source build). */
+int hl_release_io_self_tag(char *out, size_t out_sz);
 
 /**
  * Extract a flat `"key":"value"` entry from a JSON blob. Deliberately

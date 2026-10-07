@@ -676,4 +676,106 @@ UTEST(host, normalize_path_ignores_a_drive_letter_without_a_separator)
     ASSERT_STREQ("D:foo", buf);
 }
 
+/* ── Directory breadth (sandbox grants) ───────────────────────────── */
+
+typedef struct {
+    char dir[HL_TEST_PATH_MAX];
+    char home[1024], prof[1024];
+    int  had_home, had_prof;
+} BroadEnv;
+
+static int broad_enter(BroadEnv *e)
+{
+    if (!hl_test_mkdtemp(e->dir, sizeof e->dir, "hull_broad")) return -1;
+    const char *h = getenv("HOME"), *p = getenv("USERPROFILE");
+    e->had_home = h != NULL;
+    e->had_prof = p != NULL;
+    snprintf(e->home, sizeof e->home, "%s", h ? h : "");
+    snprintf(e->prof, sizeof e->prof, "%s", p ? p : "");
+    setenv("HOME", e->dir, 1);
+    unsetenv("USERPROFILE");
+    return 0;
+}
+
+static void broad_leave(BroadEnv *e)
+{
+    char p[HL_TEST_PATH_MAX + 32];
+    snprintf(p, sizeof p, "%s/proj", e->dir);       rmdir(p);
+    snprintf(p, sizeof p, "%s/.hull/keys", e->dir); rmdir(p);
+    snprintf(p, sizeof p, "%s/.hull", e->dir);      rmdir(p);
+    rmdir(e->dir);
+    if (e->had_home) setenv("HOME", e->home, 1); else unsetenv("HOME");
+    if (e->had_prof) setenv("USERPROFILE", e->prof, 1); else unsetenv("USERPROFILE");
+}
+
+/* The root, the home directory and everything above it are too broad to
+ * grant; a directory of its own below home is not. The app sandbox used a
+ * $HOME-only, case-sensitive copy of this rule (audit 9). */
+UTEST(host, path_too_broad_root_and_home)
+{
+    BroadEnv e;
+    ASSERT_EQ(broad_enter(&e), 0);
+    char sub[HL_TEST_PATH_MAX + 32];
+    snprintf(sub, sizeof sub, "%s/proj", e.dir);
+    ASSERT_EQ(mkdir(sub, 0755), 0);
+
+    EXPECT_EQ(hl_host_path_too_broad("/"), 1);
+    EXPECT_EQ(hl_host_path_too_broad(e.dir), 1);
+    EXPECT_EQ(hl_host_path_too_broad(sub), 0);
+    EXPECT_EQ(hl_host_path_too_broad(NULL), 1);
+    EXPECT_EQ(hl_host_path_too_broad("/no/such/dir/hull_broad"), 1);
+
+    /* No $HOME: $USERPROFILE is the home. */
+    unsetenv("HOME");
+    setenv("USERPROFILE", e.dir, 1);
+    EXPECT_EQ(hl_host_path_too_broad(e.dir), 1);
+    EXPECT_EQ(hl_host_path_too_broad(sub), 0);
+    unsetenv("USERPROFILE");
+    setenv("HOME", e.dir, 1);
+
+    if (hl_host_is_windows()) {
+        /* The home spelled in another case is still the home. */
+        char other[HL_TEST_PATH_MAX];
+        snprintf(other, sizeof other, "%s", e.dir);
+        for (char *c = other; *c; c++) {
+            if (*c >= 'a' && *c <= 'z') *c = (char)(*c - 'a' + 'A');
+            else if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
+        }
+        EXPECT_EQ(hl_host_path_too_broad(other), 1);
+        /* A bare drive root is a root. */
+        char drive[4] = { '/', 0, 0, 0 };
+        char cwd[HL_TEST_PATH_MAX];
+        if (getcwd(cwd, sizeof cwd) && cwd[0] == '/' && cwd[1] && cwd[2] == '/') {
+            drive[1] = cwd[1];
+            EXPECT_EQ(hl_host_path_too_broad(drive), 1);
+        }
+    }
+    broad_leave(&e);
+}
+
+/* ~/.hull and every directory above it hold the cache keys; a directory
+ * below it does not cover it. ~/.hull need not exist. */
+UTEST(host, path_covers_home_sub)
+{
+    BroadEnv e;
+    ASSERT_EQ(broad_enter(&e), 0);
+    char sub[HL_TEST_PATH_MAX + 32], dot[HL_TEST_PATH_MAX + 32];
+    char keys[HL_TEST_PATH_MAX + 32];
+    snprintf(sub, sizeof sub, "%s/proj", e.dir);
+    snprintf(dot, sizeof dot, "%s/.hull", e.dir);
+    snprintf(keys, sizeof keys, "%s/.hull/keys", e.dir);
+    ASSERT_EQ(mkdir(sub, 0755), 0);
+
+    EXPECT_EQ(hl_host_path_covers_home(e.dir, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_covers_home("/", ".hull"), 1);
+    EXPECT_EQ(hl_host_path_covers_home(sub, ".hull"), 0);
+    ASSERT_EQ(mkdir(dot, 0700), 0);
+    ASSERT_EQ(mkdir(keys, 0700), 0);
+    EXPECT_EQ(hl_host_path_covers_home(dot, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_covers_home(keys, ".hull"), 0);
+    EXPECT_EQ(hl_host_path_covers_home(e.dir, NULL), 1);
+    EXPECT_EQ(hl_host_path_covers_home(sub, NULL), 0);
+    broad_leave(&e);
+}
+
 UTEST_MAIN()

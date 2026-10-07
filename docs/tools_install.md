@@ -221,7 +221,13 @@ hull tools install wamrc
    `api.github.com/repos/artalis-io/hull/releases/tags/v<VERSION>`
    (NOT `latest`. We want the wamrc that matches the running hull).
 4. Download `hull.sha256` + `hull.sha256.sig`.
-5. Verify signature via `hl_release_verify_manifest_sig()`.
+5. Verify signature via `hl_release_verify_manifest_sig()`, then that
+   the manifest names the release asked for: its signed `hull.version`
+   entry must match the release's `hull.version` and name the tag
+   (`hl_release_io_check_release_tag`, the same check `hull update`
+   runs). Without it any release-key-signed manifest - an older
+   release's, with its older tool binaries - verified under the tag
+   (audit 9).
 6. Locate the asset entry in the parsed manifest. If absent for this
    platform: "no wamrc binary published for hull v<VERSION> on
    <platform>".

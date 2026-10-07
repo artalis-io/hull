@@ -6,6 +6,7 @@
 
 #include "utest.h"
 #include "hull/commands/dispatch.h"
+#include "hull/agent_api.h"   /* hl_agent_api_host_ok */
 
 /* ── Dispatch tests ───────────────────────────────────────────────── */
 
@@ -408,5 +409,29 @@ UTEST(tool_argv, read_files)
     EXPECT_STREQ(out[1], "keys/platform.pub");
     for (int i = 0; i < n; i++) free(out[i]);
 }
+
+#if defined(HL_ENABLE_HTTP_SERVER) && !defined(HL_KEEL_FEATURE)
+/* --agent-api answers only a Host naming loopback (DNS rebinding sends the
+ * attacker's own name): audit 9. */
+static int host_ok(const char *h) { return hl_agent_api_host_ok(h, strlen(h)); }
+UTEST(agent_api, host_must_name_loopback)
+{
+    EXPECT_TRUE(host_ok("localhost"));
+    EXPECT_TRUE(host_ok("LocalHost:8080"));
+    EXPECT_TRUE(host_ok("127.0.0.1"));
+    EXPECT_TRUE(host_ok("127.0.0.1:3000"));
+    EXPECT_TRUE(host_ok("[::1]"));
+    EXPECT_TRUE(host_ok("[::1]:65535"));
+    EXPECT_FALSE(host_ok(""));
+    EXPECT_FALSE(host_ok("evil.example"));
+    EXPECT_FALSE(host_ok("evil.example:3000"));
+    EXPECT_FALSE(host_ok("localhost.evil.example"));
+    EXPECT_FALSE(host_ok("127.0.0.1.nip.io"));
+    EXPECT_FALSE(host_ok("localhost:"));
+    EXPECT_FALSE(host_ok("localhost:80x"));
+    EXPECT_FALSE(host_ok("localhost:1234567"));
+    EXPECT_FALSE(hl_agent_api_host_ok(NULL, 0));
+}
+#endif
 
 UTEST_MAIN();
