@@ -137,6 +137,10 @@ void hl_js_timer_trampoline(void *user_data)
     JS_FreeValue(ctx, handler);
 
     if (JS_IsException(ret)) {
+        /* The error's toString is app code: the run is over, so no timer is
+         * active while it runs - an op it made was taken for this finished
+         * timer run's (audit 9 M1). */
+        js->active_timer = NULL;
         JSValue exception = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exception);
         if (!msg) JS_FreeValue(ctx, JS_GetException(ctx));   /* a throwing toString (L2) */
@@ -188,7 +192,10 @@ void hl_js_timer_trampoline(void *user_data)
         return;
     }
 
-    /* Synchronous completion */
+    /* Synchronous completion: the run is over, so no timer is active while
+     * a rejection's toString (app code) runs, nor in the drain after it
+     * (audit 9 M1). */
+    js->active_timer = NULL;
     int cancelled = 0;
     if (st == JS_PROMISE_FULFILLED) {
         JSValue result = JS_PromiseResult(ctx, ret);

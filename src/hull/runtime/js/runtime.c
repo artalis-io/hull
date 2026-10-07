@@ -95,6 +95,25 @@ JSValue hl_js_budget_throw(JSContext *ctx)
     return JS_EXCEPTION;
 }
 
+int hl_js_budget_charge(JSContext *ctx, uint64_t units)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js) return 0;   /* a worker.dispatch VM: no HlJS, its own budget */
+    if (!js->budget_tripped) {
+        uint64_t room = (uint64_t)(INT64_MAX - js->instruction_count);
+        js->instruction_count = units > room
+            ? INT64_MAX : js->instruction_count + (int64_t)units;
+        if (js->max_instructions > 0 &&
+            js->instruction_count > js->max_instructions)
+            js->budget_tripped = 1;
+    }
+    if (js->budget_tripped) {
+        hl_js_budget_throw(ctx);
+        return -1;
+    }
+    return 0;
+}
+
 /* ── Module loader ──────────────────────────────────────────────────── */
 
 /*

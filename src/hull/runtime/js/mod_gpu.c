@@ -17,15 +17,63 @@
 #include "hull/utils/alloc.h"
 #include "hull/vfs.h"
 
+#include <keel/http_server.h>
+#include <stdio.h>
+#include <stdatomic.h>
+
+/* ── Two-pass ArrayBuffer views (audit 9 H1) ──────────────────────
+ *
+ * A synchronous call parses its options with getters, valueOf and toString
+ * - app code - and an ArrayBuffer whose bytes were taken early in the parse
+ * can be transfer()ed or resize()d by a later one, which frees or moves the
+ * backing store: the dispatch then read freed memory. Holding the JS object
+ * does not prevent that. So the parse only RECORDS each ArrayBuffer (held
+ * by the caller's keep array) and where its pointer goes; once the last
+ * piece of app code has run, js_gpu_retake_views takes every pointer again.
+ * A buffer detached or resized in between fails the call. (The async calls
+ * copy every byte as they parse, so they need none of this.) */
+typedef struct {
+    JSValueConst  ab;     /* the ArrayBuffer (a reference the caller holds) */
+    const void  **slot;   /* where its bytes go */
+    size_t        len;    /* its length when the parse saw it */
+} HlJsGpuView;
+
+static void js_gpu_note_view(HlJsGpuView *views, int *n, int max,
+                             JSValueConst ab, const void **slot, size_t len)
+{
+    if (*n < max) {
+        views[*n].ab = ab;
+        views[*n].slot = slot;
+        views[*n].len = len;
+        (*n)++;
+    }
+}
+
+/* Re-take every recorded view. No app code may run between this and the
+ * cap call that reads them. -1 with a TypeError pending on a buffer that
+ * was detached or resized. */
+static int js_gpu_retake_views(JSContext *ctx, const HlJsGpuView *views,
+                               int n, const char *what)
+{
+    for (int i = 0; i < n; i++) {
+        size_t len = 0;
+        uint8_t *p = hl_js_array_buffer_probe(ctx, &len, views[i].ab);
+        if (!p || len != views[i].len) {
+            JS_ThrowTypeError(ctx, "%s: an ArrayBuffer was detached or resized "
+                                   "while the arguments were read", what);
+            return -1;
+        }
+        *views[i].slot = p;
+    }
+    return 0;
+}
+
 /* Forward declaration */
 static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
                                    HlGpuTextureDesc *descs, int max_descs,
                                    const char **tracked_strs, int *str_count,
-                                   int str_max, JSValue *keep);
-
-#include <keel/http_server.h>
-#include <stdio.h>
-#include <stdatomic.h>
+                                   int str_max, JSValue *keep,
+                                   HlJsGpuView *views, int *nviews, int max_views);
 
 static HlGpuCtx *js_get_gpu_ctx(JSContext *ctx)
 {
@@ -254,6 +302,11 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeValue(ctx, timeout_val);
 
+    /* Every ArrayBuffer pointer is re-taken after the last getter (see
+     * HlJsGpuView): uniforms + 16 buffers + 8 textures. */
+    HlJsGpuView views[1 + 16 + 8];
+    int nviews = 0;
+
     /* Parse uniforms (string or ArrayBuffer) */
     const char *uni_str = NULL;  /* non-NULL if JS_ToCStringLen was used */
     JSValue uni_val = JS_GetPropertyStr(ctx, opts_val, "uniforms");
@@ -263,6 +316,8 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
         if (uni_ab) {
             opts.uniforms = uni_ab;
             opts.uniforms_len = uni_len;
+            js_gpu_note_view(views, &nviews, 1 + 16 + 8, uni_val,
+                             &opts.uniforms, uni_len);
         } else {
             uni_str = JS_ToCStringLen(ctx, &uni_len, uni_val);
             if (uni_str) {
@@ -314,6 +369,9 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
                         bufs[buf_count].data = dab;
                         bufs[buf_count].data_len = dlen;
                         bufs[buf_count].size = dlen;
+                        js_gpu_note_view(views, &nviews, 1 + 16 + 8,
+                                         buf_data_vals[buf_count],
+                                         &bufs[buf_count].data, dlen);
                     } else {
                         buf_data_strs[buf_count] = JS_ToCStringLen(ctx, &dlen, dv);
                         if (buf_data_strs[buf_count]) {
@@ -369,7 +427,8 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     JSValue tex_arr = JS_GetPropertyStr(ctx, opts_val, "textures");
     int tex_count = js_parse_texture_descs(ctx, tex_arr, tex_descs, 8,
                                             tex_strs, &tex_str_count, 32,
-                                            tex_keep);
+                                            tex_keep, views, &nviews,
+                                            1 + 16 + 8);
     JS_FreeValue(ctx, tex_arr);
     opts.textures = tex_descs;
     opts.texture_count = tex_count;
@@ -393,7 +452,11 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     size_t *out_len_ptr = (opts.output_buffer >= 0 || opts.output_texture >= 0)
                            ? &output_len : NULL;
 
-    int rc = hl_cap_gpu_dispatch(gpu, name, &opts,
+    /* The last getter has run: take the ArrayBuffers' bytes now. */
+    int retake_failed = js_gpu_retake_views(ctx, views, nviews,
+                                            "gpu.dispatch") != 0;
+    int rc = retake_failed ? HL_GPU_OK
+           : hl_cap_gpu_dispatch(gpu, name, &opts,
                                  out_ptr, out_len_ptr, &err_msg);
 
     /* Free uniform string if we used JS_ToCStringLen */
@@ -416,6 +479,8 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
 
     JS_FreeCString(ctx, name);
 
+    if (retake_failed)
+        return JS_EXCEPTION;
     if (rc != HL_GPU_OK)
         return JS_ThrowInternalError(ctx, "gpu.dispatch: %s",
                                      err_msg ? err_msg : "dispatch_failed");
@@ -792,7 +857,8 @@ static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
 static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
                                    HlGpuTextureDesc *descs, int max_descs,
                                    const char **tracked_strs, int *str_count,
-                                   int str_max, JSValue *keep)
+                                   int str_max, JSValue *keep,
+                                   HlJsGpuView *views, int *nviews, int max_views)
 {
     if (!JS_IsArray(ctx, arr))
         return 0;
@@ -844,6 +910,8 @@ static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
                     keep[i] = JS_DupValue(ctx, dv);
                     descs[i].data = dab;
                     descs[i].data_len = dlen;
+                    js_gpu_note_view(views, nviews, max_views, keep[i],
+                                     &descs[i].data, dlen);
                 } else {
                     const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
                     if (ds) {
@@ -1170,6 +1238,10 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
      * its value is released. At most one per stage uniform and per buffer. */
     JSValue js_keep[HL_GPU_MAX_PIPELINE_STAGES + HL_GPU_MAX_PIPELINE_BUFFERS];
     int js_keep_count = 0;
+    /* ...and where each one's bytes go, re-taken after the last getter. */
+    HlJsGpuView views[HL_GPU_MAX_PIPELINE_STAGES + HL_GPU_MAX_PIPELINE_BUFFERS];
+    int nviews = 0;
+    const int max_views = HL_GPU_MAX_PIPELINE_STAGES + HL_GPU_MAX_PIPELINE_BUFFERS;
 
     for (int32_t s = 0; s < stage_count; s++) {
         JSValue stage_val = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)s);
@@ -1200,7 +1272,11 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
             size_t ulen;
             uint8_t *uab = hl_js_array_buffer_probe(ctx, &ulen, uni);
             if (uab) {
-                js_keep[js_keep_count++] = JS_DupValue(ctx, uni);
+                js_keep[js_keep_count] = JS_DupValue(ctx, uni);
+                js_gpu_note_view(views, &nviews, max_views,
+                                 js_keep[js_keep_count],
+                                 &stages[s].uniforms, ulen);
+                js_keep_count++;
                 stages[s].uniforms = uab;
                 stages[s].uniforms_len = ulen;
             } else {
@@ -1246,7 +1322,12 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
                         size_t dlen;
                         uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                         if (dab) {
-                            js_keep[js_keep_count++] = JS_DupValue(ctx, dv);
+                            js_keep[js_keep_count] = JS_DupValue(ctx, dv);
+                            js_gpu_note_view(views, &nviews, max_views,
+                                             js_keep[js_keep_count],
+                                             &all_bufs[buf_offset + b].data,
+                                             dlen);
+                            js_keep_count++;
                             all_bufs[buf_offset + b].data = dab;
                             all_bufs[buf_offset + b].data_len = dlen;
                             all_bufs[buf_offset + b].size = dlen;
@@ -1340,7 +1421,11 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
 
     HlGpuPipelineResult result;
     const char *err_msg = NULL;
-    int rc = hl_cap_gpu_pipeline(gpu, &opts, &result, &err_msg);
+    /* The last getter has run: take the ArrayBuffers' bytes now. */
+    int retake_failed = js_gpu_retake_views(ctx, views, nviews,
+                                            "gpu.pipeline") != 0;
+    int rc = retake_failed ? HL_GPU_OK
+           : hl_cap_gpu_pipeline(gpu, &opts, &result, &err_msg);
 
     /* Free tracked JS strings, and release the kept ArrayBuffers */
     for (int i = 0; i < js_string_count; i++)
@@ -1348,6 +1433,9 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
     for (int i = 0; i < js_keep_count; i++)
         JS_FreeValue(ctx, js_keep[i]);
     #undef JS_TRACK_STR
+
+    if (retake_failed)
+        return JS_EXCEPTION;
 
     if (rc != HL_GPU_OK)
         return JS_ThrowInternalError(ctx, "gpu.pipeline: %s",

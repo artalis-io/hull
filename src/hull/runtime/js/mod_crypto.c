@@ -5,6 +5,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"            /* hl_js_budget_charge */
 #include "hull/cap/crypto.h"
 #include "hull/cap/crypto_key.h"
 #include "hull/cap/env.h"
@@ -13,6 +14,28 @@
 #include "../../utils/hex.h"
 
 #include <stdio.h>
+
+/* Charge work over @p bytes to the instruction budget before doing it
+ * (audit 9, parity with Lua's crypto_charge): one call hashes, MACs or
+ * encrypts up to the whole heap, and the interrupt handler counted it as one
+ * step, so a loop of them was not bounded in time. One unit per 8 bytes, as
+ * in Lua. -1 with the uncatchable interrupt pending: the caller frees its
+ * arguments and returns JS_EXCEPTION. */
+static int js_crypto_charge(JSContext *ctx, size_t bytes)
+{
+    return hl_js_budget_charge(ctx, (uint64_t)bytes / 8);
+}
+
+/* PBKDF2-HMAC-SHA256: each iteration is two SHA-256 compressions (128 bytes
+ * of hashing) per 32-byte output block. Charged BEFORE the derivation:
+ * verifyPassword takes the count from the stored string (up to
+ * HL_PBKDF2_MAX_ITERATIONS, seconds of work), so a run over its budget must
+ * not start it. */
+static int js_pbkdf2_charge(JSContext *ctx, long iterations, size_t out_len)
+{
+    size_t blocks = (out_len + 31) / 32;
+    return js_crypto_charge(ctx, (size_t)iterations * blocks * 128);
+}
 
 /* A message argument: the bytes of any buffer (ArrayBuffer, typed array,
  * MappedBuffer, WasmBuffer), or a string's UTF-8 bytes - a string is text.
@@ -89,6 +112,11 @@ static JSValue js_hmac(JSContext *ctx, int argc, JSValueConst *argv,
         js_msg_free(ctx, &key);
         return JS_ThrowTypeError(ctx, "crypto.%s: key must be a non-empty buffer or string", fn);
     }
+    if (js_crypto_charge(ctx, data.view.len + key.view.len)) {
+        js_msg_free(ctx, &data);
+        js_msg_free(ctx, &key);
+        return JS_EXCEPTION;
+    }
     int rc = mac(key.view.data, key.view.len, data.view.data, data.view.len, out);
     js_msg_free(ctx, &data);
     js_msg_free(ctx, &key);
@@ -110,6 +138,7 @@ static JSValue js_crypto_sha256(JSContext *ctx, JSValueConst this_val,
     JsMsg m;
     if (argc < 1 || !js_msg_get(ctx, argv[0], &m))
         return JS_ThrowTypeError(ctx, "crypto.sha256 requires (data)");
+    if (js_crypto_charge(ctx, m.view.len)) { js_msg_free(ctx, &m); return JS_EXCEPTION; }
     uint8_t hash[32];
     int rc = hl_cap_crypto_sha256((const char *)m.view.data, m.view.len, hash);
     js_msg_free(ctx, &m);
@@ -131,6 +160,7 @@ static JSValue js_crypto_sha1(JSContext *ctx, JSValueConst this_val,
     JsMsg m;
     if (argc < 1 || !js_msg_get(ctx, argv[0], &m))
         return JS_ThrowTypeError(ctx, "crypto.sha1 requires (data)");
+    if (js_crypto_charge(ctx, m.view.len)) { js_msg_free(ctx, &m); return JS_EXCEPTION; }
     uint8_t hash[20];
     int rc = hl_cap_crypto_sha1((const char *)m.view.data, m.view.len, hash);
     js_msg_free(ctx, &m);
@@ -242,6 +272,10 @@ static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
     /* PBKDF2-HMAC-SHA256, 32-byte output */
     uint8_t hash[32];
     int iterations = HL_PBKDF2_ITERATIONS;
+    if (js_pbkdf2_charge(ctx, iterations, sizeof hash)) {
+        JS_FreeCString(ctx, pw);
+        return JS_EXCEPTION;
+    }
     if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
                                iterations, hash, sizeof(hash)) != 0) {
         JS_FreeCString(ctx, pw);
@@ -327,8 +361,13 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, pw); return JS_FALSE;
     }
 
-    /* Recompute hash */
+    /* Recompute hash: charged first - the count came from the stored string */
     uint8_t computed[32];
+    if (js_pbkdf2_charge(ctx, iterations, sizeof computed)) {
+        secure_zero(salt, sizeof(salt));
+        JS_FreeCString(ctx, pw);
+        return JS_EXCEPTION;
+    }
     if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
                                (int)iterations, computed, sizeof(computed)) != 0) {
         secure_zero(computed, sizeof(computed));
@@ -386,6 +425,11 @@ static JSValue js_crypto_ed25519_sign(JSContext *ctx, JSValueConst this_val,
         js_msg_free(ctx, &data);
         return JS_EXCEPTION;
     }
+    if (js_crypto_charge(ctx, data.view.len)) {
+        js_msg_free(ctx, &data);
+        js_msg_free(ctx, &sk);
+        return JS_EXCEPTION;
+    }
     uint8_t sig[64];
     int rc = hl_cap_crypto_ed25519_sign(data.view.data, data.view.len,
                                         sk.view.data, sig);
@@ -413,6 +457,12 @@ static JSValue js_crypto_ed25519_verify(JSContext *ctx, JSValueConst this_val,
     if (!js_fixed_arg(ctx, argv[2], &pk, 32, "ed25519Verify", "public key")) {
         js_msg_free(ctx, &data);
         js_msg_free(ctx, &sig);
+        return JS_EXCEPTION;
+    }
+    if (js_crypto_charge(ctx, data.view.len)) {
+        js_msg_free(ctx, &data);
+        js_msg_free(ctx, &sig);
+        js_msg_free(ctx, &pk);
         return JS_EXCEPTION;
     }
     int rc = hl_cap_crypto_ed25519_verify(data.view.data, data.view.len,
@@ -463,6 +513,11 @@ static JSValue js_crypto_sign(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "crypto.sign: data must be a buffer or a string");
     }
 
+    if (js_crypto_charge(ctx, data.view.len)) {
+        JS_FreeCString(ctx, pk);
+        js_msg_free(ctx, &data);
+        return JS_EXCEPTION;
+    }
     uint8_t sig[HL_CRYPTO_SIGN_MAX];
     size_t sig_len = 0;
     int rc = hl_cap_crypto_asym_sign_default(pk, pk_len, alg,
@@ -562,7 +617,9 @@ static JSValue js_crypto_verify(JSContext *ctx, JSValueConst this_val,
 
     HlCryptoAsymAlg alg = hl_crypto_asym_alg_from_string(alg_str, alg_len);
     JSValue out;
-    if (alg == HL_CRYPTO_ASYM_NONE) {
+    if (js_crypto_charge(ctx, data_view.len)) {
+        out = JS_EXCEPTION;
+    } else if (alg == HL_CRYPTO_ASYM_NONE) {
         out = JS_ThrowTypeError(ctx,
             "crypto.verify: unsupported alg '%.*s' (use one of "
             "RS256/RS384/RS512/PS256/ES256/ES384; HS256 is "
@@ -628,6 +685,7 @@ static JSValue js_crypto_sha512(JSContext *ctx, JSValueConst this_val,
     JsMsg m;
     if (argc < 1 || !js_msg_get(ctx, argv[0], &m))
         return JS_ThrowTypeError(ctx, "crypto.sha512 requires (data)");
+    if (js_crypto_charge(ctx, m.view.len)) { js_msg_free(ctx, &m); return JS_EXCEPTION; }
     uint8_t hash[64];
     int rc = hl_cap_crypto_sha512((const char *)m.view.data, m.view.len, hash);
     js_msg_free(ctx, &m);
@@ -650,6 +708,11 @@ static JSValue js_crypto_auth(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "crypto.auth: msg must be a buffer or a string");
     if (!js_fixed_arg(ctx, argv[1], &key, 32, "auth", "key")) {
         js_msg_free(ctx, &msg);
+        return JS_EXCEPTION;
+    }
+    if (js_crypto_charge(ctx, msg.view.len)) {
+        js_msg_free(ctx, &msg);
+        js_msg_free(ctx, &key);
         return JS_EXCEPTION;
     }
     uint8_t tag[32];
@@ -679,6 +742,12 @@ static JSValue js_crypto_auth_verify(JSContext *ctx, JSValueConst this_val,
     if (!js_fixed_arg(ctx, argv[2], &key, 32, "authVerify", "key")) {
         js_msg_free(ctx, &tag);
         js_msg_free(ctx, &msg);
+        return JS_EXCEPTION;
+    }
+    if (js_crypto_charge(ctx, msg.view.len)) {
+        js_msg_free(ctx, &tag);
+        js_msg_free(ctx, &msg);
+        js_msg_free(ctx, &key);
         return JS_EXCEPTION;
     }
     int rc = hl_cap_crypto_auth_verify(tag.view.data, (const char *)msg.view.data,
@@ -712,7 +781,9 @@ static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
     JSValue ret;
-    if (msg.view.len > SIZE_MAX - HL_SECRETBOX_MACBYTES) {
+    if (js_crypto_charge(ctx, msg.view.len)) {
+        ret = JS_EXCEPTION;
+    } else if (msg.view.len > SIZE_MAX - HL_SECRETBOX_MACBYTES) {
         ret = JS_ThrowRangeError(ctx, "crypto.secretbox: message too large");
     } else {
         size_t ct_len = msg.view.len + HL_SECRETBOX_MACBYTES;
@@ -754,7 +825,9 @@ static JSValue js_crypto_secretbox_open(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
     JSValue ret = JS_NULL;
-    if (ct.view.len >= HL_SECRETBOX_MACBYTES) {
+    if (js_crypto_charge(ctx, ct.view.len)) {
+        ret = JS_EXCEPTION;
+    } else if (ct.view.len >= HL_SECRETBOX_MACBYTES) {
         size_t msg_len = ct.view.len - HL_SECRETBOX_MACBYTES;
         uint8_t *msg = js_malloc(ctx, msg_len + 1);
         if (!msg) {
@@ -799,7 +872,9 @@ static JSValue js_crypto_box(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
     JSValue ret;
-    if (msg.view.len > SIZE_MAX - HL_BOX_MACBYTES) {
+    if (js_crypto_charge(ctx, msg.view.len)) {
+        ret = JS_EXCEPTION;
+    } else if (msg.view.len > SIZE_MAX - HL_BOX_MACBYTES) {
         ret = JS_ThrowRangeError(ctx, "crypto.box: message too large");
     } else {
         size_t ct_len = msg.view.len + HL_BOX_MACBYTES;
@@ -843,7 +918,9 @@ static JSValue js_crypto_box_open(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
     JSValue ret = JS_NULL;
-    if (ct.view.len >= HL_BOX_MACBYTES) {
+    if (js_crypto_charge(ctx, ct.view.len)) {
+        ret = JS_EXCEPTION;
+    } else if (ct.view.len >= HL_BOX_MACBYTES) {
         size_t msg_len = ct.view.len - HL_BOX_MACBYTES;
         uint8_t *msg = js_malloc(ctx, msg_len + 1);
         if (!msg) {
@@ -954,6 +1031,12 @@ static JSValue js_crypto_hmac_sha256_verify(JSContext *ctx, JSValueConst this_va
         js_msg_free(ctx, &key);
         return JS_ThrowTypeError(ctx, "crypto.hmacSha256Verify: expected must be a buffer");
     }
+    if (js_crypto_charge(ctx, data.view.len + key.view.len)) {
+        js_msg_free(ctx, &data);
+        js_msg_free(ctx, &key);
+        js_msg_free(ctx, &exp);
+        return JS_EXCEPTION;
+    }
     int ok = exp.view.len == 32
         && hl_cap_crypto_hmac_sha256_verify(key.view.data, key.view.len,
                                             data.view.data, data.view.len,
@@ -982,6 +1065,11 @@ static JSValue js_crypto_constant_time_eq(JSContext *ctx, JSValueConst this_val,
     if (!js_msg_get(ctx, argv[1], &m_b)) {
         js_msg_free(ctx, &m_a);
         return JS_ThrowTypeError(ctx, "crypto.constantTimeEq: argument 2 must be a buffer or a string");
+    }
+    if (js_crypto_charge(ctx, m_a.view.len)) {
+        js_msg_free(ctx, &m_a);
+        js_msg_free(ctx, &m_b);
+        return JS_EXCEPTION;
     }
     const char *a = (const char *)m_a.view.data;
     size_t alen = m_a.view.len;
@@ -1044,7 +1132,8 @@ static JSValue js_sha256_hasher_update(JSContext *ctx, JSValueConst this_val,
     JsMsg m;
     if (!js_msg_get(ctx, argv[0], &m))
         return JS_ThrowTypeError(ctx, "sha256.update: data must be a buffer or a string");
-    int rc = hl_cap_crypto_sha256_update(&h->ctx, m.view.data, m.view.len);
+    if (js_crypto_charge(ctx, m.view.len)) { js_msg_free(ctx, &m); return JS_EXCEPTION; }
+    int rc =hl_cap_crypto_sha256_update(&h->ctx, m.view.data, m.view.len);
     js_msg_free(ctx, &m);
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "sha256.update() failed");
@@ -1153,7 +1242,9 @@ static JSValue js_crypto_key_secretbox(JSContext *ctx, JSValueConst this_val,
     /* The key last: converting the arguments can run app code, which can
      * key.destroy() - the key resolved first was then freed under us. */
     const HlCryptoKey *k = js_live_key(ctx, this_val);
-    if (!k) { js_msg_free(ctx, &msg); js_msg_free(ctx, &nonce); return JS_EXCEPTION; }
+    if (!k || js_crypto_charge(ctx, msg.view.len)) {
+        js_msg_free(ctx, &msg); js_msg_free(ctx, &nonce); return JS_EXCEPTION;
+    }
     JSValue ret = JS_EXCEPTION;
     size_t ct_len = msg.view.len + HL_SECRETBOX_MACBYTES;
     uint8_t *ct = js_malloc(ctx, ct_len);
@@ -1184,7 +1275,9 @@ static JSValue js_crypto_key_secretbox_open(JSContext *ctx, JSValueConst this_va
     }
     /* The key last: see key.secretbox. */
     const HlCryptoKey *k = js_live_key(ctx, this_val);
-    if (!k) { js_msg_free(ctx, &ct); js_msg_free(ctx, &nonce); return JS_EXCEPTION; }
+    if (!k || js_crypto_charge(ctx, ct.view.len)) {
+        js_msg_free(ctx, &ct); js_msg_free(ctx, &nonce); return JS_EXCEPTION;
+    }
     JSValue ret = JS_NULL;
     if (ct.view.len >= HL_SECRETBOX_MACBYTES) {
         size_t msg_len = ct.view.len - HL_SECRETBOX_MACBYTES;

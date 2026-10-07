@@ -48,6 +48,10 @@
 
 #include "hull/worker_db.h"   /* hl_worker_db_init */
 #include "log.h"              /* log_add_callback (js_task tests) */
+#include "hull/entry.h"       /* HlEntry (js_audit9 compute.stream) */
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm.h"    /* HlWasmCache (js_audit9 compute.stream) */
+#endif
 #include "../../test_tmpdir.h"
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -8474,6 +8478,239 @@ UTEST(js_task, stdlib_only_needs_a_loop_and_is_freed_unrun)
     EXPECT_TRUE(js.tasks != NULL);
     cleanup_js();
     be->free(actx);
+}
+
+/* ── Audit 9 ───────────────────────────────────────────────────────── */
+
+#ifdef HL_ENABLE_WASM
+/* echo.wasm (tests/hull/cap/test_wasm.c): copies its input to its output. */
+static const unsigned char a9_echo_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
+  0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e,
+  0x76, 0x09, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00,
+  0x00, 0x03, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+  0x28, 0x03, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c,
+  0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73,
+  0x00, 0x01, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x76, 0x65, 0x72, 0x73,
+  0x69, 0x6f, 0x6e, 0x00, 0x02, 0x0a, 0x20, 0x02, 0x19, 0x00, 0x20, 0x01,
+  0x20, 0x03, 0x4b, 0x04, 0x40, 0x41, 0x7e, 0x0f, 0x0b, 0x20, 0x02, 0x20,
+  0x00, 0x20, 0x01, 0xfc, 0x0a, 0x00, 0x00, 0x20, 0x01, 0x0b, 0x04, 0x00,
+  0x41, 0x01, 0x0b
+};
+static const HlEntry a9_wasm_entries[] = {
+    { "compute/echo.wasm", a9_echo_wasm, sizeof a9_echo_wasm },
+    { 0, 0, 0 }
+};
+
+/* H1: compute.stream read a plain ArrayBuffer input through a pointer taken
+ * before the output callback - app code that runs between chunks - and
+ * ArrayBuffer.prototype.transfer() there freed the backing store: every
+ * later chunk was a use-after-free read (ASan). The input is copied now, so
+ * the stream carries on with the bytes it was given. */
+UTEST(js_audit9, compute_stream_copies_an_arraybuffer_input)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    js.base.wasm_cache = &cache;
+    js.base.app_vfs = &vfs;
+    char *r = eval_str(
+        "(() => {\n"
+        "  const ab = new ArrayBuffer(1024);\n"
+        "  const u = new Uint8Array(ab);\n"
+        "  for (let i = 0; i < 1024; i++) u[i] = (i * 7) & 255;\n"
+        "  const out = []; let calls = 0;\n"
+        "  compute.stream('echo', ab, (chunk) => {\n"
+        "    calls++;\n"
+        "    if (ab.byteLength) ab.transfer(0);   /* frees the backing store */\n"
+        "    new Array(4096).fill(0x5a);           /* reuse the freed memory */\n"
+        "    for (const b of new Uint8Array(chunk)) out.push(b);\n"
+        "  }, { chunkSize: 256 });\n"
+        "  if (out.length !== 1024) return 'len ' + out.length;\n"
+        "  for (let i = 0; i < 1024; i++)\n"
+        "    if (out[i] !== ((i * 7) & 255)) return 'byte ' + i;\n"
+        "  return 'ok ' + calls + ' ' + ab.detached;\n"
+        "})()");
+    EXPECT_TRUE(r && strcmp(r, "ok 4 true") == 0);
+    if (r && strcmp(r, "ok 4 true") != 0) printf("  got: %s\n", r);
+    free(r);
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* H1: the input is resolved after the options - a getter there that
+ * detaches the input no longer leaves a pointer to freed memory behind. */
+UTEST(js_audit9, compute_stream_resolves_input_after_options)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    js.base.wasm_cache = &cache;
+    js.base.app_vfs = &vfs;
+    char *r = eval_str(
+        "(() => {\n"
+        "  const ab = new ArrayBuffer(512);\n"
+        "  new Uint8Array(ab).fill(0x41);\n"
+        "  const opts = { get chunkSize() { ab.transfer(0); return 256; } };\n"
+        "  const got = new Uint8Array(compute.stream('echo', ab, opts));\n"
+        "  /* Detached first: the input is no longer the 512 bytes of 'A'. */\n"
+        "  return got.length === 512 ? 'stale' : 'fresh';\n"
+        "})()");
+    EXPECT_TRUE(r && strcmp(r, "fresh") == 0);
+    free(r);
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
+#endif /* HL_ENABLE_WASM */
+
+/* M1: a rejection's toString is app code, and the resume ran it after its
+ * last drain - a job it queued ran in the NEXT entry's drain, attached to
+ * that entry's request. The resume drains after it now. */
+UTEST(js_audit9, a_rejections_tostring_jobs_run_in_its_own_resume)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.base.async_ctx = actx;
+    task_log_reset();
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("hull:tests:a9_m1",
+        "import { _task } from 'hull:_task';\n"
+        "_task.spawn(async () => {\n"
+        "  await hull.sleep(2);\n"
+        "  throw { toString() {\n"
+        "    Promise.resolve().then(() => { globalThis.__a9_job = 1; });\n"
+        "    return 'a9-m1-reason'; } };\n"
+        "});\n", &msg), 0);
+    free(msg);
+    for (int i = 0; i < 400 && !strstr(g_task_log, "a9-m1-reason"); i++)
+        be->tick(actx, 5);
+    EXPECT_TRUE(strstr(g_task_log, "a9-m1-reason") != NULL);
+    /* No entry ran since the resume: only its own drain can have run it. */
+    EXPECT_EQ(eval_int("globalThis.__a9_job === 1 ? 1 : 0"), 1);
+    cleanup_js();
+    be->free(actx);
+}
+
+/* L1: a task fired inside `hull test`'s promise pump re-armed the parked
+ * case's budget and cleared its active state. It puts both back now - even
+ * after tripping its own budget. */
+UTEST(js_audit9, a_task_restores_the_run_it_interrupted)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.base.async_ctx = actx;
+    js.max_instructions = 1000000;   /* polls weigh 10000 each */
+    hl_js_reset_request(&js);
+    task_log_reset();
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("hull:tests:a9_l1",
+        "import { _task } from 'hull:_task';\n"
+        "_task.spawn(() => { globalThis.__a9_spin = 1; for (;;) {} });\n",
+        &msg), 0);
+    free(msg);
+    HlReqLife *life = hl_req_life_new();
+    ASSERT_TRUE(life != NULL);
+    int dummy_conn, dummy_timer;
+    js.active_conn  = (KlHttpConn *)(void *)&dummy_conn;
+    js.active_life  = life;
+    js.active_timer = &dummy_timer;
+    js.instruction_count = 4242;
+    js.budget_tripped = 0;
+    for (int i = 0; i < 400 && !strstr(g_task_log, "instruction limit"); i++)
+        be->tick(actx, 5);
+    EXPECT_TRUE(strstr(g_task_log, "instruction limit exceeded") != NULL);
+    EXPECT_TRUE(js.active_conn == (KlHttpConn *)(void *)&dummy_conn);
+    EXPECT_TRUE(js.active_life == life);
+    EXPECT_TRUE(js.active_timer == (void *)&dummy_timer);
+    EXPECT_EQ(js.instruction_count, (int64_t)4242);
+    EXPECT_EQ(js.budget_tripped, 0);
+    js.active_conn = NULL;
+    js.active_life = NULL;
+    js.active_timer = NULL;
+    EXPECT_EQ(eval_int("globalThis.__a9_spin|0"), 1);
+    hl_req_life_end(life);
+    cleanup_js();
+    be->free(actx);
+}
+
+/* L2: conn.dialect inherited from Object.prototype - a key the backend
+ * leaves out (identitySequence on SQLite) read whatever app code had put
+ * there. It has no prototype now, and is frozen with the connection. */
+UTEST(js_audit9, conn_dialect_has_no_prototype)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    char *r = eval_str(
+        "(() => {\n"
+        "  Object.prototype.identitySequence = 'evil';\n"
+        "  const d = globalThis.db.dialect;\n"
+        "  const out = [Object.getPrototypeOf(d) === null,\n"
+        "               d.identitySequence === undefined,\n"
+        "               typeof d.supportsReturning === 'boolean',\n"
+        "               Object.isFrozen(d)].join(',');\n"
+        "  delete Object.prototype.identitySequence;\n"
+        "  return out;\n"
+        "})()");
+    EXPECT_TRUE(r && strcmp(r, "true,true,true,true") == 0);
+    if (r && strcmp(r, "true,true,true,true") != 0) printf("  got: %s\n", r);
+    free(r);
+    cleanup_js_caps();
+}
+
+/* Parity with Lua (G5 H3): verifyPassword ran a PBKDF2 of up to 10M
+ * iterations - the count read from the stored string - in one uncharged
+ * call, and a loop of digests over megabytes was charged a step per call.
+ * Both are charged now, before the work: over the budget, the call is an
+ * uncatchable interrupt and does no derivation. */
+UTEST(js_audit9, crypto_work_is_charged_to_the_budget)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.max_instructions = 1000000;
+    hl_js_reset_request(&js);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    EXPECT_EQ(eval_int(
+        "(() => { try { return crypto.verifyPassword('x', 'pbkdf2:10000000:'"
+        " + '0'.repeat(32) + ':' + '0'.repeat(64)) ? 1 : 2; }"
+        " catch (e) { return 3; } })()"), -9999);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    EXPECT_EQ(js.budget_tripped, 1);
+    /* Refused before deriving: 10M iterations take seconds. */
+    long ms = (long)(t1.tv_sec - t0.tv_sec) * 1000 +
+              (long)(t1.tv_nsec - t0.tv_nsec) / 1000000;
+    EXPECT_LT(ms, 1500L);
+
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int(
+        "(() => { const s = 'x'.repeat(1 << 20); let n = 0;"
+        " try { for (let i = 0; i < 1000; i++) { crypto.sha256(s); n++; } }"
+        " catch (e) {} return n; })()"), -9999);
+    EXPECT_EQ(js.budget_tripped, 1);
+
+    /* An ordinary hash-and-verify fits a normal budget. */
+    js.max_instructions = 100000000;
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int(
+        "crypto.verifyPassword('pw', crypto.hashPassword('pw')) ? 1 : 0"), 1);
+    cleanup_js();
 }
 
 UTEST_MAIN();

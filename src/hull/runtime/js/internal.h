@@ -269,6 +269,15 @@ void hl_js_tasks_free(HlJS *js);
  * and would otherwise report it as an ordinary, catchable error. */
 JSValue hl_js_budget_throw(JSContext *ctx);
 
+/* Charge @p units to the run's instruction budget before a C binding does
+ * work one call cannot otherwise be charged for (a hash over megabytes, a
+ * PBKDF2 derivation): the interrupt handler only counts calls and backward
+ * jumps, so a loop of them was not bounded in time. Trips the budget (sticky)
+ * when that goes over it; then -1 with the uncatchable interrupt pending,
+ * and the binding returns JS_EXCEPTION without doing the work. The Lua twin
+ * is lua_hlcharge (runtime/lua/mod_crypto.c crypto_charge). */
+int hl_js_budget_charge(JSContext *ctx, uint64_t units);
+
 /* ── Async-op gate (async.c) ────────────────────────────────────────── */
 
 /* Every Hull async op (hull.sleep, db.async, compute.async, gpu.async,

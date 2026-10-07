@@ -271,11 +271,16 @@ static JSValue js_blob_put(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "blob.put requires (bytes)");
 
+    /* The options first, the bytes last: the `durable` getter is app code,
+     * and could transfer() / resize() an ArrayBuffer (or close a
+     * WasmBuffer / MappedBuffer) whose bytes were already taken - the put
+     * then hashed and wrote freed memory. Nothing runs app code after
+     * bytes_arg (it never calls an object's toString). */
+    int durable = read_durable(ctx, argc, argv, 1);
     size_t len = 0;
     const char *cstr = NULL;
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
     if (!bytes) return JS_EXCEPTION;
-    int durable = read_durable(ctx, argc, argv, 1);
     b = get_store(ctx);   /* again, after the arguments: see get_store */
     if (!b) { if (cstr) JS_FreeCString(ctx, cstr); return JS_EXCEPTION; }
 
@@ -298,13 +303,15 @@ static JSValue js_blob_put_verified(JSContext *ctx, JSValueConst this_val,
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "blob.putVerified requires (bytes, sha)");
 
+    /* The sha (its toString) and the options (a getter) are app code: both
+     * are read before the bytes are taken, as in blob.put. */
+    const char *expected = check_id(ctx, argv[1]);
+    if (!expected) return JS_EXCEPTION;
+    int durable = read_durable(ctx, argc, argv, 2);
     size_t len = 0;
     const char *cstr = NULL;
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
-    if (!bytes) return JS_EXCEPTION;
-    const char *expected = check_id(ctx, argv[1]);
-    if (!expected) { if (cstr) JS_FreeCString(ctx, cstr); return JS_EXCEPTION; }
-    int durable = read_durable(ctx, argc, argv, 2);
+    if (!bytes) { JS_FreeCString(ctx, expected); return JS_EXCEPTION; }
     b = get_store(ctx);   /* again, after the arguments: see get_store */
     if (!b) {
         JS_FreeCString(ctx, expected);

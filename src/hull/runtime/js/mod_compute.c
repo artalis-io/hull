@@ -1363,6 +1363,19 @@ static int js_stream_cb_trampoline(const void *data, size_t len,
     return 0;
 }
 
+/* Release compute.stream's parsed arguments (every path out after parsing). */
+static void js_stream_free_args(JSContext *ctx, JsStreamCbCtx *cb,
+                                int has_output, HlStreamOutKind out_kind,
+                                const char *in_file_str,
+                                const char *out_file_str, const char *name)
+{
+    if (in_file_str) JS_FreeCString(ctx, in_file_str);
+    if (out_file_str) JS_FreeCString(ctx, out_file_str);
+    if (has_output && out_kind == HL_STREAM_OUT_CALLBACK)
+        JS_FreeValue(ctx, cb->func);
+    JS_FreeCString(ctx, name);
+}
+
 /* compute.stream(name, input, [output], [opts]) -> ArrayBuffer | true */
 static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
@@ -1393,51 +1406,6 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
         }
         JS_FreeValue(ctx, fv);
     }
-    /* A WasmBuffer / MappedBuffer input is borrowed for the whole stream:
-     * the options' getters and the output callback (both app code) run while
-     * the stream reads it, and either could close() it - unmapping memory the
-     * next chunk was read from. Released after the stream returns. */
-    HlWasmBuffer   *in_wbuf = NULL;
-    HlMappedBuffer *in_mmap = NULL;
-    if (input.kind != HL_STREAM_IN_FILE) {
-        /* Try buffer protocol / ArrayBuffer / string */
-        size_t ilen = 0;
-        const uint8_t *idata = hl_js_array_buffer_probe(ctx, &ilen, argv[1]);
-        if (idata) {
-            input.kind = HL_STREAM_IN_BUFFER;
-            input.buffer.data = idata;
-            input.buffer.len = ilen;
-        } else {
-            HlWasmBuffer *wbuf = JS_GetOpaque(argv[1], js_wasm_buf_class_id);
-            if (wbuf && !wbuf->closed) {
-                input.kind = HL_STREAM_IN_BUFFER;
-                input.buffer.data = hl_wasm_buffer_data(wbuf);
-                input.buffer.len = hl_wasm_buffer_len(wbuf);
-                in_wbuf = wbuf;
-                hl_wasm_buffer_borrow(in_wbuf);
-            } else {
-                HlMappedBuffer *mmap = JS_GetOpaque(argv[1], js_mmap_class_id);
-                if (mmap && !mmap->closed) {
-                    input.kind = HL_STREAM_IN_BUFFER;
-                    input.buffer.data = mmap->addr;
-                    input.buffer.len = mmap->len;
-                    in_mmap = mmap;
-                    hl_cap_fs_mmap_borrow(in_mmap);
-                } else {
-                    const char *s = JS_ToCStringLen(ctx, &ilen, argv[1]);
-                    if (!s) {
-                        JS_FreeCString(ctx, name);
-                        return JS_ThrowTypeError(ctx, "compute.stream: invalid input");
-                    }
-                    input.kind = HL_STREAM_IN_BUFFER;
-                    input.buffer.data = s;
-                    input.buffer.len = ilen;
-                    input_is_string = 1;
-                }
-            }
-        }
-    }
-
     /* ── Parse output (arg 2) and opts (arg 2 or 3) ──────────────── */
     HlStreamOutput out_storage = {0};
     HlStreamOutput *out_ptr = NULL;
@@ -1521,6 +1489,65 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
 
     js_wasm_clamp_opts(&stream_opts.call_opts, &js->base);
 
+    /* ── Resolve the input buffer (after output + opts) ──────────── */
+    /* Resolved after the output's and the options' getters (app code), and
+     * the bytes must outlive the output callback, which is app code too and
+     * runs between chunks. A WasmBuffer / MappedBuffer is borrowed for the
+     * whole stream (close() then defers the free). An ArrayBuffer is COPIED:
+     * ArrayBuffer.prototype.transfer() / resize() free or move its backing
+     * store and nothing pins it, so a borrowed pointer was a use-after-free
+     * read on the next chunk. A string's C form is owned and immutable. */
+    HlWasmBuffer   *in_wbuf = NULL;
+    HlMappedBuffer *in_mmap = NULL;
+    uint8_t        *in_copy = NULL;
+    if (input.kind != HL_STREAM_IN_FILE) {
+        size_t ilen = 0;
+        const uint8_t *idata = hl_js_array_buffer_probe(ctx, &ilen, argv[1]);
+        if (idata) {
+            in_copy = malloc(ilen ? ilen : 1);
+            if (!in_copy) {
+                js_stream_free_args(ctx, &cb_ctx, has_output, out_storage.kind,
+                                    in_file_str, out_file_str, name);
+                return JS_ThrowInternalError(ctx, "compute.stream: out of memory");
+            }
+            if (ilen) memcpy(in_copy, idata, ilen);
+            input.kind = HL_STREAM_IN_BUFFER;
+            input.buffer.data = in_copy;
+            input.buffer.len = ilen;
+        } else {
+            HlWasmBuffer *wbuf = JS_GetOpaque(argv[1], js_wasm_buf_class_id);
+            if (wbuf && !wbuf->closed) {
+                input.kind = HL_STREAM_IN_BUFFER;
+                input.buffer.data = hl_wasm_buffer_data(wbuf);
+                input.buffer.len = hl_wasm_buffer_len(wbuf);
+                in_wbuf = wbuf;
+                hl_wasm_buffer_borrow(in_wbuf);
+            } else {
+                HlMappedBuffer *mmap = JS_GetOpaque(argv[1], js_mmap_class_id);
+                if (mmap && !mmap->closed) {
+                    input.kind = HL_STREAM_IN_BUFFER;
+                    input.buffer.data = mmap->addr;
+                    input.buffer.len = mmap->len;
+                    in_mmap = mmap;
+                    hl_cap_fs_mmap_borrow(in_mmap);
+                } else {
+                    /* An object's toString is app code: nothing is held yet. */
+                    const char *s = JS_ToCStringLen(ctx, &ilen, argv[1]);
+                    if (!s) {
+                        js_stream_free_args(ctx, &cb_ctx, has_output,
+                                            out_storage.kind, in_file_str,
+                                            out_file_str, name);
+                        return JS_ThrowTypeError(ctx, "compute.stream: invalid input");
+                    }
+                    input.kind = HL_STREAM_IN_BUFFER;
+                    input.buffer.data = s;
+                    input.buffer.len = ilen;
+                    input_is_string = 1;
+                }
+            }
+        }
+    }
+
     /* ── Call stream API ─────────────────────────────────────────── */
     const char *err = NULL;
     HlStreamResult res = {0};
@@ -1536,15 +1563,11 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
     /* Cleanup */
     if (in_wbuf) hl_wasm_buffer_release(in_wbuf);
     if (in_mmap) hl_cap_fs_mmap_release(in_mmap);
+    free(in_copy);
     if (input_is_string)
         JS_FreeCString(ctx, (const char *)input.buffer.data);
-    if (in_file_str)
-        JS_FreeCString(ctx, in_file_str);
-    if (out_file_str)
-        JS_FreeCString(ctx, out_file_str);
-    if (has_output && out_storage.kind == HL_STREAM_OUT_CALLBACK)
-        JS_FreeValue(ctx, cb_ctx.func);
-    JS_FreeCString(ctx, name);
+    js_stream_free_args(ctx, &cb_ctx, has_output, out_storage.kind,
+                        in_file_str, out_file_str, name);
 
     /* The output callback threw: that exception is still pending - rethrow
      * it, not a new InternalError. Replacing it turned an instruction-limit

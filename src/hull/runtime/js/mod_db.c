@@ -1130,34 +1130,42 @@ JSValue new_bound_subobject(JSContext *ctx, HlDbHandle *h)
 /* Set obj.dialect: a read-only snapshot of the backend's SQL dialect descriptor
  * (the single home for quoting / placeholder / upsert / RETURNING / identity
  * DDL that the query & schema builders read). */
+/* No prototype, and every property DEFINED (audit 9 L2): with
+ * Object.prototype behind it, a key the backend leaves out
+ * (`identitySequence` on SQLite) read whatever app code had put on
+ * Object.prototype - into the DDL the stdlib builds from it - and a set
+ * could run an inherited setter. js_db_seal freezes it with the connection. */
 static void js_set_dialect(JSContext *ctx, JSValue obj, const HlDbBackend *be)
 {
-    JSValue d = JS_NewObject(ctx);
+    JSValue d = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(d)) return;   /* OOM: no dialect (the stdlib defaults) */
     char qs[2] = { (be && be->dialect.identifier_quote)
                    ? be->dialect.identifier_quote : '"', '\0' };
-    JS_SetPropertyStr(ctx, d, "identifierQuote", JS_NewString(ctx, qs));
-    JS_SetPropertyStr(ctx, d, "placeholder",
-                      JS_NewString(ctx, (be && be->dialect.placeholder)
-                                        ? be->dialect.placeholder : "?"));
-    JS_SetPropertyStr(ctx, d, "upsertStyle",
-                      JS_NewString(ctx, (be && be->dialect.upsert_style)
-                                        ? be->dialect.upsert_style : "on_conflict"));
-    JS_SetPropertyStr(ctx, d, "supportsReturning",
-                      JS_NewBool(ctx, be && be->dialect.supports_returning));
-    JS_SetPropertyStr(ctx, d, "supportsIndexIfNotExists",
-                      JS_NewBool(ctx, be && be->dialect.supports_index_if_not_exists));
-    JS_SetPropertyStr(ctx, d, "supportsSkipLocked",
-                      JS_NewBool(ctx, be && be->dialect.supports_skip_locked));
-    JS_SetPropertyStr(ctx, d, "supportsNotify",
-                      JS_NewBool(ctx, be && be->dialect.supports_notify));
-    JS_SetPropertyStr(ctx, d, "identityColumn",
-                      JS_NewString(ctx, (be && be->dialect.identity_column)
-                                        ? be->dialect.identity_column
-                                        : "INTEGER PRIMARY KEY"));
+#define DIALECT_SET(k, v) JS_DefinePropertyValueStr(ctx, d, (k), (v), JS_PROP_C_W_E)
+    DIALECT_SET("identifierQuote", JS_NewString(ctx, qs));
+    DIALECT_SET("placeholder",
+                JS_NewString(ctx, (be && be->dialect.placeholder)
+                                  ? be->dialect.placeholder : "?"));
+    DIALECT_SET("upsertStyle",
+                JS_NewString(ctx, (be && be->dialect.upsert_style)
+                                  ? be->dialect.upsert_style : "on_conflict"));
+    DIALECT_SET("supportsReturning",
+                JS_NewBool(ctx, be && be->dialect.supports_returning));
+    DIALECT_SET("supportsIndexIfNotExists",
+                JS_NewBool(ctx, be && be->dialect.supports_index_if_not_exists));
+    DIALECT_SET("supportsSkipLocked",
+                JS_NewBool(ctx, be && be->dialect.supports_skip_locked));
+    DIALECT_SET("supportsNotify",
+                JS_NewBool(ctx, be && be->dialect.supports_notify));
+    DIALECT_SET("identityColumn",
+                JS_NewString(ctx, (be && be->dialect.identity_column)
+                                  ? be->dialect.identity_column
+                                  : "INTEGER PRIMARY KEY"));
     if (be && be->dialect.identity_sequence)
-        JS_SetPropertyStr(ctx, d, "identitySequence",
-                          JS_NewString(ctx, be->dialect.identity_sequence));
-    JS_SetPropertyStr(ctx, obj, "dialect", d);
+        DIALECT_SET("identitySequence",
+                    JS_NewString(ctx, be->dialect.identity_sequence));
+#undef DIALECT_SET
+    JS_DefinePropertyValueStr(ctx, obj, "dialect", d, JS_PROP_C_W_E);
 }
 
 /* Make a connection object tamper-proof: every own property non-writable

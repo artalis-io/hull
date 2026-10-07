@@ -630,10 +630,21 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
          * run a toString, and its promise may not even be rejected. */
         const char *msg = NULL;
         if (!tripped && !aborted) {
+            /* The rejection's toString is app code, run after this resume's
+             * drain: with no request active (the life, timer and app.main
+             * flag are already cleared), and its jobs drained right after -
+             * left queued they ran in the next entry's drain, with that
+             * entry's request active (audit 9 M1). The request is over: its
+             * res is closed to them. */
+            js->active_conn = NULL;
+            js->active_req  = NULL;
+            hl_req_life_kill(jc->life);
             JSValue result = JS_PromiseResult(ctx, jc->link.handler_promise);
             msg = JS_ToCString(ctx, result);
             JS_FreeValue(ctx, result);
             JS_FreeValue(ctx, JS_GetException(ctx));
+            hl_js_run_jobs(js);
+            js->last_async_cont = NULL;
         }
         const char *shown = msg ? msg : tripped
             ? "instruction limit exceeded"
@@ -1092,6 +1103,23 @@ static void js_task_fire(void *user)
     js_task_unlink(t);
     hl_alloc_free(js->base.alloc, t, sizeof *t);
 
+    /* What this clobbers, put back after (audit 9 L1). From the event loop
+     * nothing is active. But `hull test` pumps the loop while an async case
+     * is parked on a promise, so the task fires inside the case's run: it
+     * re-armed the case's budget (and a task that tripped failed the case
+     * as over the limit) and cleared the case's active state. */
+    KlHttpConn   *save_conn        = js->active_conn;
+    KlHttpRequest *save_req        = js->active_req;
+    void         *save_timer       = js->active_timer;
+    struct HlReqLife *save_life    = js->active_life;
+    void        (*save_on_complete)(struct HlJS *, void *) = js->active_on_complete;
+    void         *save_on_complete_ctx = js->active_on_complete_ctx;
+    int           save_cli_main    = js->active_cli_main;
+    void         *save_last_cont   = js->last_async_cont;
+    int           save_pending     = js->async_pending;
+    int64_t       save_count       = js->instruction_count;
+    int           save_tripped     = js->budget_tripped;
+
     /* Nothing of whatever ran last is active (an op made now captures all
      * of it), and the run has a budget of its own. */
     js->active_conn            = NULL;
@@ -1127,6 +1155,22 @@ static void js_task_fire(void *user)
     hl_js_run_jobs(js);
     js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+
+    /* Back to whatever run the task interrupted (see above). Its own trip
+     * left nothing pending: the logs above drained the exception. */
+    if (js->budget_tripped)
+        JS_FreeValue(ctx, JS_GetException(ctx));
+    js->active_conn            = save_conn;
+    js->active_req             = save_req;
+    js->active_timer           = save_timer;
+    js->active_life            = save_life;
+    js->active_on_complete     = save_on_complete;
+    js->active_on_complete_ctx = save_on_complete_ctx;
+    js->active_cli_main        = save_cli_main;
+    js->last_async_cont        = save_last_cont;
+    js->async_pending          = save_pending;
+    js->instruction_count      = save_count;
+    js->budget_tripped         = save_tripped;
 }
 
 static JSValue js_task_spawn(JSContext *ctx, JSValueConst this_val,
