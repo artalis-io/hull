@@ -41,7 +41,13 @@ const _cfg = {
     history:           false, // attempt-history recording: true | { queues:[...] } | false
     historyRetention:  null,  // seconds to keep attempt rows (null = jobs.cleanup default)
     events:            false, // durable fleet-wide event log (jobs.subscribe / jobs.events)
+    eventsGrace:       null,  // seconds a subscription drain holds back young events
+                              // (null = 0 on SQLite, EVENTS_GRACE_DEFAULT elsewhere)
 };
+
+// Default commit-order grace for subscription drains on a backend whose
+// auto-increment ids can commit out of order (Postgres / MySQL; see eventsDrain).
+const EVENTS_GRACE_DEFAULT = 5;
 
 // Exponential backoff: 2^attempt * 10s, capped at 1h (shared with outbox math).
 function defaultBackoff(attempt) {
@@ -98,6 +104,11 @@ function init(opts) {
     if (o.history !== undefined) _cfg.history = o.history;
     if (o.historyRetention !== undefined) _cfg.historyRetention = o.historyRetention;
     if (o.events !== undefined) _cfg.events = o.events;
+    if (o.eventsGrace !== undefined && o.eventsGrace !== null) {
+        if (typeof o.eventsGrace !== "number" || !(o.eventsGrace >= 0))
+            throw new Error("jobs.init: eventsGrace must be a non-negative number of seconds");
+        _cfg.eventsGrace = o.eventsGrace;
+    }
     if (o.backoff !== undefined) _cfg.backoff = o.backoff;
 
     // Keyed/indexed text columns are VARCHAR(255) so MySQL can index them;
@@ -1029,6 +1040,39 @@ const WF_COMPENSATE_KEY = "__compensate";
 // The step-store row holding a workflow's retry generation (ctx.generation):
 // absent for the first run, bumped by every retry.
 const WF_GEN_KEY = "__gen";
+// The step-store row holding a workflow's patch-frontier floor: the number of
+// body positions the instance had recorded when retry deleted some of them
+// (see wfFrontier).
+const WF_FRONTIER_KEY = "__frontier";
+
+// How many body positions (step-family rows) a workflow has recorded, for the
+// ctx.patched frontier. Sleep, wait-deadline, signal and the other control rows
+// are excluded (they are not body positions). The excludes are a prefix
+// compare, not LIKE: '__sleep:' / '__waitdl:' contain '_' (a LIKE wildcard) and
+// no portable ESCAPE clause exists - MySQL processes backslash escapes at the
+// string-literal level, and "ESCAPE '\'" there is a mangled quote. substr
+// prefix compare is wildcard-free and identical on SQLite / PG / MySQL.
+//
+// retry deletes rows the old run counted (its uuid memos, the steps its
+// compensations undid) and records the count it had in a floor row, so the
+// frontier never shrinks below what the old code actually ran past: without it
+// a retried run reached a patch "fresh" at a position the old run had already
+// passed under the old branch, and adopted the new one.
+function wfFrontier(id) {
+    const r = db.query(
+        "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? " +
+        "AND substr(step_key, 1, 8) <> '__sleep:' " +
+        "AND substr(step_key, 1, 9) <> '__waitdl:' " +
+        "AND substr(step_key, 1, 6) <> '__sig:' " +
+        "AND step_key <> ? AND step_key <> ? AND step_key <> ?",
+        [id, WF_COMPENSATE_KEY, WF_GEN_KEY, WF_FRONTIER_KEY]);
+    const n = Number((r[0] && r[0].n) || 0) || 0;
+    const f = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        [id, WF_FRONTIER_KEY]);
+    const floor = Number((f[0] && f[0].result) || 0) || 0;
+    return n > floor ? n : floor;
+}
 
 /**
  * Reclaim jobs stuck in `running` past the visibility timeout (a worker died
@@ -1364,7 +1408,16 @@ async function work(opts) {
         _lastEdrain = now;
     }
     const batch = claim(o);
-    for (const job of batch) {
+    for (let i = 0; i < batch.length; i++) {
+        const job = batch[i];
+        // The whole batch was claimed with one claimed_at but runs one job at a
+        // time, so a later job can sit past visibilityTimeout before it
+        // starts: the reaper re-pends it, another worker runs it, and this one
+        // ran it again (or the reaper dead-lettered it as "worker lost").
+        // Refresh the claim before starting each job after the first, and skip
+        // one whose claim is already gone - its new owner holds it (and its
+        // strict-concurrency slot).
+        if (i > 0 && !heartbeat(job)) { job._lost = true; continue; }
         job.deps = loadDeps(job.id);   // workflow: dependency results, in order
         const h = _handlers[job.type] || _default;
         const startedMs = time.nowMs();   // attempt timing (used only if history on)
@@ -1381,18 +1434,24 @@ async function work(opts) {
                 // increment (a workflow may sleep / wait many times without
                 // exhausting maxAttempts).
                 const now = time.now();
+                // Claim-guarded like every transition: 0 rows means the job
+                // was reaped (and maybe re-claimed) while the body ran, so the
+                // run that owns it now also owns its concurrency slot and its
+                // signal re-check - this one leaves both alone.
+                let parked;
                 if (result.waiting) {
                     // ctx.waitSignal: park in the non-terminal 'waiting' status
                     // (excluded by the claim query). run_at carries the optional
                     // timeout deadline (0 = none); the reaper wakes a timed-out
                     // wait, jobs.signal wakes a delivered one.
-                    db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, " +
+                    parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, " +
                         "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
                         [result.deadline || 0, now, job.id, job.claimToken]);
+                    if (!parked) job._lost = true;
                     // Close the deliver-before-park race: a signal delivered in the
                     // check->park window couldn't re-activate us (we were 'running'),
                     // so re-check now that we are 'waiting'.
-                    if (result.signalName) {
+                    if (result.signalName && !job._lost) {
                         const sig = db.query("SELECT 1 AS x FROM _hull_workflow_signals " +
                             "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
                             [job.id, result.signalName]);
@@ -1403,9 +1462,10 @@ async function work(opts) {
                     }
                 } else {
                     // ctx.sleep: future-dated pending job.
-                    db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
+                    parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
                         "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
                         [result.wakeAt || now, now, job.id, job.claimToken]);
+                    if (!parked) job._lost = true;
                 }
             } else if (result === DEAD ||
                        (result && typeof result === "object" && result[WF_DEAD] === true)) {
@@ -1983,21 +2043,7 @@ function makeCtx(job, name) {
     // stay aligned regardless of how a workflow interleaves sleeps. ctx.patched
     // compares them to decide old-vs-new (see below).
     let stepPos = 0;
-    const frontier = (() => {
-        // Exclude the sleep / wait-deadline control rows with a prefix compare, not
-        // LIKE: '__sleep:' / '__waitdl:' contain '_' (a LIKE wildcard) and no
-        // portable ESCAPE clause exists - MySQL processes backslash escapes at the
-        // string-literal level, and "ESCAPE '\'" there is a mangled quote. substr
-        // prefix compare is wildcard-free and identical on SQLite / PG / MySQL.
-        const r = db.query(
-            "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? " +
-            "AND substr(step_key, 1, 8) <> '__sleep:' " +
-            "AND substr(step_key, 1, 9) <> '__waitdl:' " +
-            "AND substr(step_key, 1, 6) <> '__sig:' " +
-            "AND step_key <> ? AND step_key <> ?",
-            [job.id, WF_COMPENSATE_KEY, WF_GEN_KEY]);
-        return (r[0] && r[0].n) || 0;
-    })();
+    const frontier = wfFrontier(job.id);
     // The retry generation: 0 on the first run, +1 per retry. A step that is
     // idempotent on a key (a payment provider's idempotency key) and has a
     // compensation must put this in the key: after retry re-runs the
@@ -2047,6 +2093,11 @@ function makeCtx(job, name) {
             return runStep(job.id, key, () => crypto.randomToken(16));
         },
         step: async (stepKey, fn, opts) => {
+            // "__" names the step store's control rows (__gen, __compensate,
+            // __sig:..., __uuid:..., __patch:...); a step under one would be
+            // read back as - or overwrite - workflow state.
+            if (typeof stepKey === "string" && stepKey.startsWith("__"))
+                throw new Error("ctx.step: step names starting with '__' are reserved");
             stepPos += 1;
             if (compensating) {
                 const r = db.query(
@@ -2176,7 +2227,9 @@ function start(name, input, opts) {
  * @param {string} name     the signal name
  * @param {*} [payload]
  * @param {object} [opts]   { deliveryId: string }
- * @returns {boolean}  true, or false when dropped as a duplicate deliveryId
+ * @returns {boolean}  true when the delivery was stored, false when it was
+ *   dropped - as a duplicate deliveryId, or because an earlier delivery of the
+ *   name is still pending (the sender may retry it once a wait consumed that one)
  */
 function signal(id, name, payload, opts) {
     if (typeof name !== "string" || name === "")
@@ -2215,9 +2268,13 @@ function signal(id, name, payload, opts) {
                 "created_at=?, consumed_at=NULL " +
                 "WHERE workflow_id=? AND name=? AND consumed_at IS NOT NULL",
                 [enc, now, id, name]);
-            if (!stored && seenKey) {
-                db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
-                    [id, seenKey]);
+            if (!stored) {
+                // Nothing was stored: report it (the caller may retry later).
+                accepted = false;
+                if (seenKey) {
+                    db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                        [id, seenKey]);
+                }
             }
         }
         // Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
@@ -2323,6 +2380,9 @@ function retry(id) {
             "WHERE id=? AND status='dead'",
             [now, now, id]);
         if ((n || 0) === 0) return;
+        // The ctx.patched frontier as the old run left it, taken before the
+        // deletes below shrink it (recorded as a floor for a workflow).
+        const frontier = wfFrontier(id);
         // A workflow the reaper sent through a compensation run carries its
         // marker (and a max_attempts raised by one): without clearing both, the
         // requeued run would start in compensation mode and never do new work.
@@ -2358,6 +2418,16 @@ function retry(id) {
                 [id, WF_GEN_KEY]);
             const prev = g && g[0] ? Number(g[0].result) : 0;
             const gen = (Number.isFinite(prev) ? prev : 0) + 1;
+            // Keep the ctx.patched frontier where the old run left it: the
+            // compensated-step delete above and the uuid one below shrink the
+            // live count, which alone let the new run adopt a patch the old
+            // code had already run past.
+            db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                [id, WF_FRONTIER_KEY]);
+            db.exec(
+                "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+                "VALUES (?, ?, ?, 'done', ?)",
+                [id, WF_FRONTIER_KEY, String(frontier), now]);
             db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
                 [id, WF_GEN_KEY]);
             db.exec(
@@ -2470,7 +2540,8 @@ function unsubscribe(name) {
 // Synchronous drain seam (the testability keystone): lease the
 // subscription, deliver new events in id order, advance the cursor, release the
 // lease. No timers/sleeps - work() drives it. Returns { delivered, cursor,
-// leased }. Test seams: opts.now (clock), opts.batch, opts.commitCursor (false =
+// leased }. Test seams: opts.now (clock), opts.batch, opts.grace (the
+// commit-order horizon, overriding eventsGrace), opts.commitCursor (false =
 // deliver but don't advance -> models a crash before the cursor write),
 // opts.releaseLease (false = hold the lease -> models a worker death mid-drain).
 function eventsDrain(name, opts) {
@@ -2494,6 +2565,26 @@ function eventsDrain(name, opts) {
     const failures = row[0].failures || 0;
     const maxFailures = row[0].max_failures;
     const where = ["id > ?"], params = [cursor];
+    // Commit-order horizon. An event id is allocated at INSERT, not at commit,
+    // so on Postgres / MySQL a lower id can become visible after a higher one
+    // (two transitions committing out of order); once the cursor passed the
+    // higher id, the lower one was never delivered. So hold back every event at
+    // or after the first one younger than `grace` seconds: a missing lower id
+    // is then an insert at least `grace` seconds old that has not committed -
+    // or a rolled-back one, which never will. Residual: a transaction that
+    // holds an emitted event uncommitted for longer than `grace` (or clocks
+    // skewed by more than that between workers) can still be passed over.
+    // SQLite serializes writers, so ids commit in order there and the default
+    // grace is 0 (no added latency).
+    let grace = o.grace !== undefined && o.grace !== null ? o.grace : _cfg.eventsGrace;
+    if (grace === null || grace === undefined)
+        grace = db.backendName === "sqlite" ? 0 : EVENTS_GRACE_DEFAULT;
+    if (grace > 0) {
+        const y = db.query("SELECT MIN(id) AS m FROM _hull_job_events WHERE id > ? AND ts > ?",
+            [cursor, now - grace]);
+        const young = y[0] ? y[0].m : null;
+        if (young !== null && young !== undefined) { where.push("id < ?"); params.push(young); }
+    }
     if (row[0].types) {
         const parts = String(row[0].types).split(",").filter((s) => s.length);
         if (parts.length) {
