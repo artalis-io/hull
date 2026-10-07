@@ -46,6 +46,12 @@ static inline void secure_zero(void *p, size_t n)
  */
 int lua_get_buffer(lua_State *L, int idx, HlBufferView *out);
 
+/* The allocator an HlImage's pixels come from: this VM's lua_Alloc, so they
+ * count against its heap limit. Bound to the main thread, which outlives
+ * every image (its __gc runs before lua_close frees the state). */
+struct HlImageAlloc;
+void hl_lua_image_alloc(lua_State *L, struct HlImageAlloc *out);
+
 /* ── Module openers - called from hl_lua_register_modules() ──────── */
 
 int luaopen_hull_app(lua_State *L);

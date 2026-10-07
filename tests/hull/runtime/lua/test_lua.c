@@ -7018,6 +7018,53 @@ UTEST(lua_stdlib, client_ip_matrix)
     cleanup_lua();
 }
 
+#ifdef HL_ENABLE_IMAGE
+/* Audit 9 M2: an image's pixels were plain malloc (decoded ones stb's),
+ * outside the VM's heap limit - an app could hold any number of 256 MB
+ * images. They now come from the VM allocator: counted in mem_used, refused
+ * past mem_limit, and handed back when the image is closed. A loop that
+ * drops images keeps running: the collector is told about the pixels. */
+UTEST(lua_cap, image_pixels_count_against_the_heap_limit)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "px = string.rep('a', 1 << 20) return image ~= nil"), LUA_OK);
+    if (!lua_toboolean(lua_rt.L, -1)) {   /* image compiled out */
+        cleanup_lua();
+        return;
+    }
+    lua_settop(lua_rt.L, 0);
+
+    size_t base = lua_rt.mem_used;
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "img = image.new(1024, 1024, 'r8', px)"), LUA_OK);
+    EXPECT_GE(lua_rt.mem_used, base + (1u << 20));
+    ASSERT_EQ(luaL_dostring(lua_rt.L, "img:close() img = nil"), LUA_OK);
+    EXPECT_LT(lua_rt.mem_used, base + (512u << 10));
+
+    size_t saved = lua_rt.mem_limit;
+    lua_rt.mem_limit = lua_rt.mem_used + (512u << 10);
+    int rc = luaL_dostring(lua_rt.L,
+        "local ok, err = pcall(image.new, 1024, 1024, 'r8', px) "
+        "return ok and 'made' or tostring(err)");
+    ASSERT_EQ(rc, LUA_OK);
+    const char *msg = lua_tostring(lua_rt.L, -1);
+    EXPECT_TRUE_MSG(msg && strstr(msg, "out of memory") != NULL, msg);
+    lua_settop(lua_rt.L, 0);
+
+    /* Room for a few at a time, not 64: garbage ones must be collected. */
+    lua_rt.mem_limit = lua_rt.mem_used + (8u << 20);
+    rc = luaL_dostring(lua_rt.L,
+        "for i = 1, 64 do local im = image.new(1024, 1024, 'r8', px) end "
+        "return 'done'");
+    EXPECT_EQ_MSG(rc, LUA_OK, lua_tostring(lua_rt.L, -1));
+    lua_settop(lua_rt.L, 0);
+    lua_rt.mem_limit = saved;
+    cleanup_lua();
+}
+#endif /* HL_ENABLE_IMAGE */
+
 /* Running out of Lua heap while a query's rows are being built raised from
  * inside the backend's read loop - on Postgres / MySQL that left the reply on
  * the wire, and the next query on the connection returned this one's rows.

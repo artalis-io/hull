@@ -768,7 +768,9 @@ static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.textureRead failed");
 
     /* Create HlImage, then wrap as JS object */
-    HlImage *img = hl_image_new(w, h, (HlImageFormat)fmt, data, len, NULL);
+    HlImageAlloc ia;
+    hl_js_image_alloc(ctx, &ia);
+    HlImage *img = hl_image_new(w, h, (HlImageFormat)fmt, data, len, &ia);
     free(data);
     if (!img)
         return JS_ThrowInternalError(ctx, "gpu.textureRead: image creation failed");

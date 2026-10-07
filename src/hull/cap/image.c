@@ -82,13 +82,30 @@ static int image_byte_size(uint32_t w, uint32_t h, int bpp, size_t *out)
     return 0;
 }
 
+/* ── Pixel memory ──────────────────────────────────────────────────── */
+
+/* Owned pixels come from the caller's allocator (the VM's, in the runtimes):
+ * they were plain malloc, outside the app's 64 MB heap limit, so an app could
+ * hold any number of 256 MB images. */
+static void *pixels_alloc(const HlImageAlloc *a, size_t size)
+{
+    return (a && a->malloc) ? a->malloc(a->ctx, size) : malloc(size);
+}
+
+static void pixels_free(const HlImageAlloc *a, void *p, size_t size)
+{
+    if (a && a->malloc)
+        a->free(a->ctx, p, size);
+    else
+        free(p);
+}
+
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
 HlImage *hl_image_new(uint32_t w, uint32_t h, HlImageFormat fmt,
                        const void *pixels, size_t pixel_len,
-                       HlAllocator *alloc)
+                       const HlImageAlloc *alloc)
 {
-    (void)alloc;
     int bpp = hl_image_bpp(fmt);
     size_t expected;
     if (image_byte_size(w, h, bpp, &expected) != 0)
@@ -99,7 +116,7 @@ HlImage *hl_image_new(uint32_t w, uint32_t h, HlImageFormat fmt,
     HlImage *img = calloc(1, sizeof(*img));
     if (!img) return NULL;
 
-    img->pixels = malloc(expected);
+    img->pixels = pixels_alloc(alloc, expected);
     if (!img->pixels) {
         free(img);
         return NULL;
@@ -110,15 +127,13 @@ HlImage *hl_image_new(uint32_t w, uint32_t h, HlImageFormat fmt,
     img->format    = fmt;
     img->pixel_len = expected;
     img->owned     = 1;
-    img->alloc     = alloc;
+    if (alloc) img->pixel_alloc = *alloc;
     return img;
 }
 
 HlImage *hl_image_from_view(uint32_t w, uint32_t h, HlImageFormat fmt,
-                             const void *data, size_t len,
-                             HlAllocator *alloc)
+                             const void *data, size_t len)
 {
-    (void)alloc;
     int bpp = hl_image_bpp(fmt);
     size_t expected;
     if (image_byte_size(w, h, bpp, &expected) != 0)
@@ -135,7 +150,6 @@ HlImage *hl_image_from_view(uint32_t w, uint32_t h, HlImageFormat fmt,
     img->format    = fmt;
     img->pixel_len = expected;
     img->owned     = 0;
-    img->alloc     = alloc;
     return img;
 }
 
@@ -153,7 +167,7 @@ static int format_channels(HlImageFormat fmt)
 
 HlImage *hl_image_decode(const void *data, size_t len,
                           const char *fmt_name,
-                          HlAllocator *alloc, const char **err_msg)
+                          const HlImageAlloc *alloc, const char **err_msg)
 {
     ensure_stb_init();
 
@@ -188,7 +202,7 @@ HlImage *hl_image_decode(const void *data, size_t len,
     uint32_t w = 0, h = 0;
     /* Decode as RGBA8 (4 channels) by default */
     int channels = 4;
-    if (codec->decode(data, len, &pixels, &w, &h, channels, alloc) != 0) {
+    if (codec->decode(data, len, &pixels, &w, &h, channels, NULL) != 0) {
         if (err_msg) *err_msg = "decode_failed";
         return NULL;
     }
@@ -200,24 +214,15 @@ HlImage *hl_image_decode(const void *data, size_t len,
         return NULL;
     }
 
-    HlImage *img = calloc(1, sizeof(*img));
+    /* The codec's buffer (stb's own malloc, bounded per decode by
+     * image_stb.c) lives only until the copy: what the image keeps is in
+     * the caller's allocator, under the app's heap limit. */
+    HlImage *img = hl_image_new(w, h, HL_IMAGE_RGBA8, pixels, expected, alloc);
+    codec->free_pixels(pixels);
     if (!img) {
-        codec->free_pixels(pixels);
         if (err_msg) *err_msg = "out_of_memory";
         return NULL;
     }
-
-    img->width     = w;
-    img->height    = h;
-    img->format    = HL_IMAGE_RGBA8;
-    img->pixels    = pixels;
-    img->pixel_len = expected;
-    img->owned     = 1;
-    img->alloc     = alloc;
-    /* Decoded pixels were allocated by the codec's allocator (stb uses its
-     * own), so free them through the codec, not plain free(). */
-    img->free_pixels = codec->free_pixels;
-
     return img;
 }
 
@@ -274,13 +279,7 @@ void hl_image_free(HlImage *img)
      * pointer; for owned images this is NULL. */
     if (img->on_free)
         img->on_free(img->on_free_ctx);
-    if (img->owned && img->pixels) {
-        /* Decoded pixels are freed through the codec's allocator;
-         * image.new() pixels (free_pixels == NULL) use plain free(). */
-        if (img->free_pixels)
-            img->free_pixels(img->pixels);
-        else
-            free(img->pixels);
-    }
+    if (img->owned && img->pixels)
+        pixels_free(&img->pixel_alloc, img->pixels, img->pixel_len);
     free(img);
 }

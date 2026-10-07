@@ -22,7 +22,7 @@
 __attribute__((weak)) HlImage *hl_image_new(uint32_t w, uint32_t h,
                                             HlImageFormat fmt,
                                             const void *pixels, size_t pixel_len,
-                                            HlAllocator *alloc)
+                                            const HlImageAlloc *alloc)
 {
     (void)w; (void)h; (void)fmt; (void)pixels; (void)pixel_len; (void)alloc;
     return NULL;   /* image feature not composed; only satisfies the link */

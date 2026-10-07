@@ -78,6 +78,11 @@ static inline uint8_t *hl_js_array_buffer_probe(JSContext *ctx, size_t *len,
 int js_get_buffer(JSContext *ctx, JSValueConst val,
                   HlBufferView *out, const char **str_out, int *needs_free);
 
+/* The allocator an HlImage's pixels come from: this runtime's js_malloc_rt,
+ * so they count against JS_SetMemoryLimit (and the GC threshold). */
+struct HlImageAlloc;
+void hl_js_image_alloc(JSContext *ctx, struct HlImageAlloc *out);
+
 /* ── Module init functions ───────────────────────────────────────── */
 
 int hl_js_init_app_module(JSContext *ctx, HlJS *js);

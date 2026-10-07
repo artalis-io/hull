@@ -6967,6 +6967,46 @@ JS_WORKER_CASE(a_dispatch_does_not_see_what_the_last_one_left, (void)0,
     "  const r = await worker.dispatch(() => typeof LEAK + ',' + typeof [].leak);\n"
     "  check(r === 'undefined,undefined', r);\n")
 
+#ifdef HL_ENABLE_IMAGE
+/* Audit 9 M2: an image's pixels were plain malloc (decoded ones stb's),
+ * outside JS_SetMemoryLimit - an app could hold any number of 256 MB images.
+ * They now come from js_malloc_rt: counted, refused past the limit, and
+ * handed back when the image is closed. */
+static size_t js_test_malloc_size(void)
+{
+    JSMemoryUsage u;
+    JS_ComputeMemoryUsage(js.rt, &u);
+    return (size_t)u.malloc_size;
+}
+
+UTEST(js_runtime, image_pixels_count_against_the_heap_limit)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    if (eval_int("typeof image === 'object' && image !== null ? 1 : 0") != 1) {
+        cleanup_js();   /* image compiled out */
+        return;
+    }
+    ASSERT_EQ(eval_int("globalThis.px = new ArrayBuffer(1 << 20); 1"), 1);
+
+    size_t base = js_test_malloc_size();
+    ASSERT_EQ(eval_int("globalThis.img = image.new(1024, 1024, 'r8', px); 1"), 1);
+    EXPECT_GE(js_test_malloc_size(), base + (1u << 20));
+    ASSERT_EQ(eval_int("img.close(); globalThis.img = null; 1"), 1);
+    EXPECT_LT(js_test_malloc_size(), base + (512u << 10));
+
+    JSMemoryUsage u;
+    JS_ComputeMemoryUsage(js.rt, &u);
+    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_size + (512u << 10));
+    char *r = eval_str("(() => { try { image.new(1024, 1024, 'r8', px); "
+                       "return 'made'; } catch (e) { return 'refused'; } })()");
+    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_limit);
+    EXPECT_STREQ(r ? r : "(null)", "refused");
+    free(r);
+    cleanup_js();
+}
+#endif /* HL_ENABLE_IMAGE */
+
 JS_WORKER_CASE(the_function_s_own_toString_is_not_what_runs, (void)0,
     /* An overridden toString was compiled in the worker: an eval. */
     "  const f = Object.assign(() => 'real',\n"

@@ -12,6 +12,7 @@
 #include "hull/cap/wasm_buffer.h"
 #endif
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -101,6 +102,22 @@ static int l_image_tostring(lua_State *L)
 
 /* ── Module functions ──────────────────────────────────────────────── */
 
+/* Push a new image (freeing it if the push fails). The pixels count against
+ * the VM's heap limit, but the collector sees only the small userdata, so
+ * tell it about them: without the step, a loop dropping images ran into the
+ * limit long before a cycle collected the garbage ones. */
+static int push_image(lua_State *L, HlImage *img)
+{
+    size_t kb = img->owned ? img->pixel_len >> 10 : 0;   /* borrowed: free */
+    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
+        hl_image_free(img);   /* made before its userdata */
+        return luaL_error(L, "not enough memory for the image");
+    }
+    if (kb > 0)
+        lua_gc(L, LUA_GCSTEP, kb > INT_MAX ? INT_MAX : (int)kb);
+    return 1;
+}
+
 /* image.new(w, h, format_str, data) -> HlImage userdata */
 static int l_image_new(lua_State *L)
 {
@@ -116,17 +133,15 @@ static int l_image_new(lua_State *L)
     if (!lua_get_buffer(L, 4, &view))
         return luaL_error(L, "image.new: arg 4 must be a buffer (string, MappedBuffer, or WasmBuffer)");
 
+    HlImageAlloc ia;
+    hl_lua_image_alloc(L, &ia);
     HlImage *img = hl_image_new((uint32_t)w, (uint32_t)h,
                                  (HlImageFormat)fmt,
-                                 view.data, view.len, NULL);
+                                 view.data, view.len, &ia);
     if (!img)
-        return luaL_error(L, "image.new: invalid dimensions or data size");
+        return luaL_error(L, "image.new: invalid dimensions or data size, or out of memory");
 
-    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
-        hl_image_free(img);   /* made before its userdata */
-        return luaL_error(L, "not enough memory for the image");
-    }
-    return 1;
+    return push_image(L, img);
 }
 
 /* image.from_buffer(buf, w, h, format_str) -> HlImage userdata (borrowed) */
@@ -161,7 +176,7 @@ static int l_image_from_buffer(lua_State *L)
     HlImage *img;
     if (mmap_src) {
         img = hl_image_from_view((uint32_t)w, (uint32_t)h, (HlImageFormat)fmt,
-                                 view.data, view.len, NULL);
+                                 view.data, view.len);
         if (img) {
             hl_cap_fs_mmap_borrow(mmap_src);
             img->on_free = hl_cap_fs_mmap_release;
@@ -171,7 +186,7 @@ static int l_image_from_buffer(lua_State *L)
 #ifdef HL_ENABLE_WASM
     else if (wasm_src) {
         img = hl_image_from_view((uint32_t)w, (uint32_t)h, (HlImageFormat)fmt,
-                                 view.data, view.len, NULL);
+                                 view.data, view.len);
         if (img) {
             hl_wasm_buffer_borrow(wasm_src);
             img->on_free = hl_wasm_buffer_release;
@@ -180,17 +195,15 @@ static int l_image_from_buffer(lua_State *L)
     }
 #endif
     else {
+        HlImageAlloc ia;
+        hl_lua_image_alloc(L, &ia);
         img = hl_image_new((uint32_t)w, (uint32_t)h, (HlImageFormat)fmt,
-                           view.data, view.len, NULL);
+                           view.data, view.len, &ia);
     }
     if (!img)
-        return luaL_error(L, "image.from_buffer: invalid dimensions or data size");
+        return luaL_error(L, "image.from_buffer: invalid dimensions or data size, or out of memory");
 
-    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
-        hl_image_free(img);   /* made before its userdata */
-        return luaL_error(L, "not enough memory for the image");
-    }
-    return 1;
+    return push_image(L, img);
 }
 
 /* image.decode(data, format?) -> HlImage userdata */
@@ -203,19 +216,17 @@ static int l_image_decode(lua_State *L)
     const char *fmt_name = luaL_optstring(L, 2, NULL);
     const char *err_msg = NULL;
 
+    HlImageAlloc ia;
+    hl_lua_image_alloc(L, &ia);
     HlImage *img = hl_image_decode(view.data, view.len,
-                                    fmt_name, NULL, &err_msg);
+                                    fmt_name, &ia, &err_msg);
     if (!img) {
         lua_pushnil(L);
         lua_pushstring(L, err_msg ? err_msg : "decode failed");
         return 2;
     }
 
-    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
-        hl_image_free(img);   /* made before its userdata */
-        return luaL_error(L, "not enough memory for the image");
-    }
-    return 1;
+    return push_image(L, img);
 }
 
 /* image.encode(img, format, opts?) -> string */
@@ -326,14 +337,12 @@ static int l_image_from_wasm(lua_State *L)
     if (pixel_len < expected)
         return luaL_error(L, "image.from_wasm: pixel data too short (%zu < %zu)", pixel_len, expected);
 
-    HlImage *img = hl_image_new(w, h, fmt, data + 9, expected, NULL);
+    HlImageAlloc ia;
+    hl_lua_image_alloc(L, &ia);
+    HlImage *img = hl_image_new(w, h, fmt, data + 9, expected, &ia);
     if (!img) return luaL_error(L, "image.from_wasm: failed to create image");
 
-    if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
-        hl_image_free(img);   /* made before its userdata */
-        return luaL_error(L, "not enough memory for the image");
-    }
-    return 1;
+    return push_image(L, img);
 }
 
 static const luaL_Reg image_funcs[] = {
