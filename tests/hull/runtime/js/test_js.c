@@ -47,6 +47,7 @@
 #include <time.h>
 
 #include "hull/worker_db.h"   /* hl_worker_db_init */
+#include "log.h"              /* log_add_callback (js_task tests) */
 #include "../../test_tmpdir.h"
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -8228,6 +8229,251 @@ UTEST(js_audit8, a_throwing_req_ctx_getter_fails_the_middleware)
     EXPECT_TRUE(req.ctx == NULL);
     free_req_ctx(&req);
     cleanup_js();
+}
+
+/* ── hull:_task - detached tasks ───────────────────────────────────── */
+
+/* The task errors the runtime logged (log.c has no callback removal, so the
+ * collector is registered once and stays). */
+static char g_task_log[4096];
+static void task_log_collect(log_Event *ev)
+{
+    if (!ev->fmt || (!strstr(ev->fmt, "spawned task error") &&
+                     !strstr(ev->fmt, "async callback error")))
+        return;
+    size_t n = strlen(g_task_log);
+    if (n + 2 >= sizeof g_task_log) return;
+    vsnprintf(g_task_log + n, sizeof g_task_log - n - 1, ev->fmt, ev->ap);
+    n = strlen(g_task_log);
+    g_task_log[n] = '\n';
+    g_task_log[n + 1] = '\0';
+}
+
+static void task_log_reset(void)
+{
+    static int registered;
+    if (!registered) {
+        log_add_callback(task_log_collect, NULL, LOG_ERROR);
+        registered = 1;
+    }
+    g_task_log[0] = '\0';
+}
+
+/* Tick the loop until `cond` (a JS expression) is true, or give up. */
+static int task_tick_until(const HlAsyncBackend *be, HlAsyncBackendCtx *actx,
+                           const char *cond)
+{
+    for (int i = 0; i < 400; i++) {
+        if (eval_int(cond) == 1) return 1;
+        be->tick(actx, 5);
+    }
+    return eval_int(cond) == 1;
+}
+
+/* The task runs after the entry that spawned it, and as no request: an op it
+ * makes runs detached even though a request was active when it was spawned
+ * (and is still marked active when the loop runs the task). */
+UTEST(js_task, runs_after_its_entry_and_detached)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.base.async_ctx = actx;
+    HlReqLife *life = hl_req_life_new();
+    ASSERT_TRUE(life != NULL);
+    int dummy_conn;
+    js.active_conn = (KlHttpConn *)(void *)&dummy_conn;
+    js.active_life = life;
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("hull:tests:task_order",
+        "import { _task } from 'hull:_task';\n"
+        "globalThis.__tk = [];\n"
+        "_task.spawn(() => {\n"
+        "  globalThis.__tk.push('task');\n"
+        "  hull.sleep(5).then(() => { globalThis.__tk.push('slept'); });\n"
+        "});\n"
+        "Promise.resolve().then(() => globalThis.__tk.push('job'));\n"
+        "globalThis.__tk.push('entry');\n", &msg), 0);
+    free(msg);
+    char *seen = eval_str("globalThis.__tk.join(',')");
+    EXPECT_TRUE(seen && strcmp(seen, "entry,job") == 0);
+    free(seen);
+    /* The request is still marked active when the loop runs the task. */
+    js.active_conn = (KlHttpConn *)(void *)&dummy_conn;
+    js.active_life = life;
+    EXPECT_TRUE(task_tick_until(be, actx, "globalThis.__tk.length === 4 ? 1 : 0"));
+    seen = eval_str("globalThis.__tk.join(',')");
+    EXPECT_TRUE(seen && strcmp(seen, "entry,job,task,slept") == 0);
+    free(seen);
+    EXPECT_EQ(life->attached, 0);   /* the sleep never belonged to it */
+    EXPECT_EQ(life->held, 0);
+    js.active_conn = NULL;
+    js.active_life = NULL;
+    hl_req_life_end(life);
+    cleanup_js();
+    be->free(actx);
+}
+
+/* A throw, an early rejection and a rejection after a wait are logged; none
+ * reaches the code that spawned the task, which carried on. */
+UTEST(js_task, errors_are_logged_not_raised)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.base.async_ctx = actx;
+    task_log_reset();
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("hull:tests:task_errors",
+        "import { _task } from 'hull:_task';\n"
+        "_task.spawn(() => { throw new Error('tk-sync'); });\n"
+        "_task.spawn(async () => { throw new Error('tk-early'); });\n"
+        "_task.spawn(async () => { await hull.sleep(2);"
+        " globalThis.__tk_late = 1; throw new Error('tk-late'); });\n"
+        "globalThis.__tk_spawner = 'done';\n", &msg), 0);
+    free(msg);
+    char *s = eval_str("globalThis.__tk_spawner");
+    EXPECT_TRUE(s && strcmp(s, "done") == 0);
+    free(s);
+    EXPECT_TRUE(task_tick_until(be, actx, "globalThis.__tk_late === 1 ? 1 : 0"));
+    for (int i = 0; i < 20 && !strstr(g_task_log, "tk-late"); i++)
+        be->tick(actx, 5);
+    EXPECT_TRUE(strstr(g_task_log, "tk-sync") != NULL);
+    EXPECT_TRUE(strstr(g_task_log, "tk-early") != NULL);
+    EXPECT_TRUE(strstr(g_task_log, "tk-late") != NULL);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    cleanup_js();
+    be->free(actx);
+}
+
+/* Each task is a run with a budget of its own: a runaway one is stopped and
+ * logged, and neither its spawner nor the next task is charged for it. */
+UTEST(js_task, has_a_budget_of_its_own)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.base.async_ctx = actx;
+    js.max_instructions = 1000000;   /* polls weigh 10000 each */
+    hl_js_reset_request(&js);
+    task_log_reset();
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("hull:tests:task_budget",
+        "import { _task } from 'hull:_task';\n"
+        "_task.spawn(() => { globalThis.__tk_spin = 1; for (;;) {} });\n"
+        "_task.spawn(() => { globalThis.__tk_next = 1; });\n"
+        "globalThis.__tk_spawned = 1;\n", &msg), 0);
+    free(msg);
+    EXPECT_EQ(eval_int("globalThis.__tk_spawned|0"), 1);
+    EXPECT_EQ(eval_int("globalThis.__tk_spin === undefined ? 1 : 0"), 1);
+    EXPECT_TRUE(task_tick_until(be, actx, "globalThis.__tk_next === 1 ? 1 : 0"));
+    EXPECT_EQ(eval_int("globalThis.__tk_spin|0"), 1);
+    EXPECT_TRUE(strstr(g_task_log, "instruction limit exceeded") != NULL);
+    cleanup_js();
+    be->free(actx);
+}
+
+/* A transaction a task leaves open is rolled back when it ends. */
+UTEST(js_task, an_open_transaction_is_rolled_back)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    pending_async_ctx = actx;
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("hull:tests:task_txn",
+        "import { _task } from 'hull:_task';\n"
+        "import { db as dbMod } from 'hull:db';\n"
+        "const c = dbMod.default();\n"
+        "c.exec('CREATE TABLE tk_txn (x INTEGER)');\n"
+        "_task.spawn(() => { c.exec('BEGIN');"
+        " c.exec('INSERT INTO tk_txn VALUES (1)'); globalThis.__tk_txn = 1; });\n",
+        &msg), 0);
+    free(msg);
+    EXPECT_TRUE(task_tick_until(be, actx, "globalThis.__tk_txn === 1 ? 1 : 0"));
+    EXPECT_TRUE(hl_db_registry_open_txn(js.base.db_registry) == NULL);
+    EXPECT_EQ(eval_int("(() => { const r = globalThis.db.query("
+                       "'SELECT COUNT(*) AS n FROM tk_txn'); return r[0].n; })()"), 0);
+    cleanup_js_caps();
+    be->free(actx);
+}
+
+/* A task runs after its spawner's request is over: a `res` its closure
+ * captured is closed by then, and writes nothing into that response. */
+UTEST(js_task, cannot_write_its_spawners_response)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js.base.async_ctx = actx;
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("hull:tests:task_res",
+        "import { _task } from 'hull:_task';\n"
+        "globalThis.__tk_spawn = _task.spawn;\n", &msg), 0);
+    free(msg);
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => { globalThis.__tk_spawn(() => {"
+        " try { res.json({ late: 1 }); globalThis.__tk_res = 'wrote'; }"
+        " catch (e) { globalThis.__tk_res = 'refused'; } }); return 0; }",
+        &req, &res), 0);
+    EXPECT_TRUE(task_tick_until(be, actx,
+                                "globalThis.__tk_res !== undefined ? 1 : 0"));
+    char *r = eval_str("globalThis.__tk_res");
+    EXPECT_TRUE(r && strcmp(r, "refused") == 0);
+    free(r);
+    EXPECT_EQ(res.body_len, (size_t)0);
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+    cleanup_js();
+    be->free(actx);
+}
+
+/* Stdlib-only; refused without a loop; a task that never ran is released
+ * with the runtime (the context would otherwise free with a live object). */
+UTEST(js_task, stdlib_only_needs_a_loop_and_is_freed_unrun)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { _task } from 'hull:_task';\n"
+        "globalThis.__tk_app = 1;\n", &msg), -1);
+    EXPECT_TRUE(msg && strstr(msg, "internal to the Hull stdlib") != NULL);
+    free(msg);
+    EXPECT_EQ(eval_int("globalThis.__tk_app === undefined ? 1 : 0"), 1);
+
+    EXPECT_EQ(a5_module_named("hull:tests:task_noloop",
+        "import { _task } from 'hull:_task';\n"
+        "_task.spawn(() => {});\n", &msg), -1);
+    EXPECT_TRUE(msg && strstr(msg, "requires an active event loop") != NULL);
+    free(msg);
+
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    js.base.async_ctx = actx;
+    EXPECT_EQ(a5_module_named("hull:tests:task_unrun",
+        "import { _task } from 'hull:_task';\n"
+        "const big = { data: new Array(1000).fill('x') };\n"
+        "_task.spawn(() => big);\n", &msg), 0);
+    free(msg);
+    EXPECT_TRUE(js.tasks != NULL);
+    cleanup_js();
+    be->free(actx);
 }
 
 UTEST_MAIN();

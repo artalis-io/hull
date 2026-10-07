@@ -75,6 +75,10 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_template_module(js->ctx, js) != 0)
         return -1;
 
+    /* Register hull:_task - detached tasks for the stdlib (async.c) */
+    if (hl_js_init_task_module(js->ctx, js) != 0)
+        return -1;
+
     /* Register hull:worker module (only if thread pool is available) */
     if (js->base.thread_pool) {
         if (hl_js_init_worker_module(js->ctx, js) != 0)

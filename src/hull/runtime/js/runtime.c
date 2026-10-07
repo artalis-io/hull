@@ -1369,6 +1369,9 @@ void hl_js_free(HlJS *js)
      * on a dead runtime */
     js->udf_runtime_alive = 0;
 
+    /* Spawned tasks that never got their loop turn. */
+    hl_js_tasks_free(js);
+
     if (js->ctx && js->fn_to_string) {
         JS_FreeValue(js->ctx, *(JSValue *)js->fn_to_string);
         free(js->fn_to_string);

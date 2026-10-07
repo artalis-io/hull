@@ -5,6 +5,7 @@ import { authFlows } from "hull:web:auth-flows";
 import { session }   from "hull:web:middleware:session";
 import { cookie }    from "hull:web:cookie";
 import { pwned }     from "hull:web:pwned";
+import { time }      from "hull:time";
 
 // The e2e binds its HIBP mock to this fixed port so the fixture
 // can hardcode the endpoint. Hull's env cap isn't wired during
@@ -32,6 +33,9 @@ const usersByEmail = {};
 const usersById    = {};
 let nextId         = 0;
 let sentEmails     = [];
+// POST /_slow_templates: see the Lua fixture.
+let slowTemplates  = false;
+let renderDoneMs   = 0;
 
 function userCreate(email, pwhash) {
     nextId += 1;
@@ -52,7 +56,14 @@ authFlows.init({
         sentEmails.push({ to, subject, text: text || html });
     },
     templates: {
-        welcome:             c => ({ subject: "Welcome", text: "verify: " + c.verify_url }),
+        welcome:             c => {
+            if (slowTemplates) {
+                const stop = time.nowMs() + 300;
+                while (time.nowMs() < stop) { /* spin */ }
+                renderDoneMs = time.nowMs();
+            }
+            return { subject: "Welcome", text: "verify: " + c.verify_url };
+        },
         verify:              c => ({ subject: "Verify",  text: "verify: " + (c.verify_url || c.link || "?") }),
         magic_link:          c => ({ subject: "Sign in", text: "link: " + c.link }),
         password_reset:      c => ({ subject: "Reset",   text: "link: " + c.link }),
@@ -124,6 +135,8 @@ app.get("/_pwned_misconfig", async (_r, res) => {
 
 app.get("/_emails",        (_r, res) => res.json(sentEmails));
 app.post("/_emails/clear", (_r, res) => { sentEmails = []; res.json({ ok: true }); });
+app.post("/_slow_templates", (_r, res) => { slowTemplates = true; res.json({ ok: true }); });
+app.get("/_render_done",     (_r, res) => res.json({ at: renderDoneMs }));
 app.get("/_me", (req, res) => {
     if (!req.ctx || !req.ctx.session) {
         return res.status(401).json({ error: "not signed in" });

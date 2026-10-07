@@ -22,6 +22,7 @@ import { auditLog }  from "hull:web:middleware:audit-log";
 import { log }       from "hull:log";
 import { ratelimit } from "hull:web:middleware:ratelimit";
 import { _request }  from "hull:web:_request";
+import { _task }     from "hull:_task";
 import { internal as dbInternal } from "hull:db:_internal";
 const db = dbInternal.connection();
 import { time }     from "hull:time";
@@ -394,45 +395,26 @@ function stripUserSecrets(user) {
 // email send is a network round trip: done inline, response time said
 // whether an account exists. Deferred onto the event loop, every outcome
 // answers equally fast. Inline only where there is no loop to defer onto (an
-// in-process test harness, where hull.sleep throws); a failure is logged, not
-// thrown - the response is already sent.
+// in-process test harness); a failure is logged, not thrown - the response
+// is already sent.
 //
-// A hull.sleep made in the handler attaches to the request's connection: the
-// response waited for it, then for fn's template and email send (an SMTP op
-// fn started attached too) - for existing accounts only, a timing oracle
-// (audit 8). So fn is queued, and the timer is armed from a promise job: the
-// dispatcher runs the jobs a SYNCHRONOUS handler queued once its request is
-// over, so that timer - and everything fn starts - belongs to no request.
-// Every handler that defers is synchronous for that reason (handleRegister
-// is unless checkPwnedPasswords makes it wait on HIBP; the Lua twin spawns a
-// detached coroutine, which JS has no primitive for).
-const _deferred = [];
-let _deferArmed = false;
-
-function runDeferred() {
-    _deferArmed = false;
-    const batch = _deferred.splice(0, _deferred.length);
-    for (const fn of batch) {
-        try { fn(); }
-        catch (e) { log.warn("auth-flows: deferred email failed: " + String(e && e.message || e)); }
-    }
-}
-
-function armDeferred() {
-    let wait = null;
-    try { wait = hull.sleep(1); } catch (_) { wait = null; }
-    if (wait && typeof wait.then === "function") {
-        wait.then(runDeferred, runDeferred);
-        return;
-    }
-    runDeferred();
+// fn runs as a detached task (hull:_task, the twin of the Lua side's
+// hull._spawn): on a loop turn of its own, after the handler's entry, with no
+// request active - so nothing it does (a template render, an SMTP send)
+// makes the response wait, whether the handler was synchronous or resumed
+// after an await (register with checkPwnedPasswords). A timer armed from the
+// handler itself attached to the request and held the response (audit 8).
+function runDeferred(fn) {
+    try { fn(); }
+    catch (e) { log.warn("auth-flows: deferred email failed: " + String(e && e.message || e)); }
 }
 
 function afterResponse(fn) {
-    _deferred.push(fn);
-    if (_deferArmed) return;
-    _deferArmed = true;
-    Promise.resolve().then(armDeferred);
+    try {
+        _task.spawn(() => runDeferred(fn));
+        return;
+    } catch (_) { /* no event loop: run it inline */ }
+    runDeferred(fn);
 }
 
 // An emailSend that returns a Promise (email.send is async) rejects on a
@@ -948,9 +930,9 @@ function handleRegister(req, res) {
         return res.status(400).json({ error: "invalid password length" });
     }
     // Pwned check runs BEFORE userFindByEmail so the same error
-    // returns regardless of whether the email already exists. The
-    // handler stays synchronous when the check is off, so the welcome
-    // email is deferred past the response (see afterResponse).
+    // returns regardless of whether the email already exists. Either
+    // way the welcome email is deferred past the response (see
+    // afterResponse).
     if (_state.checkPwnedPasswords) {
         return checkPwned(body.password).then((bad) => {
             if (bad) {

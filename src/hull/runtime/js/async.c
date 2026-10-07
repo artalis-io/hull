@@ -1034,6 +1034,166 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
     return promise;
 }
 
+/* ── hull:_task - detached tasks ─────────────────────────────────── */
+
+/*
+ * _task.spawn(fn) - run fn later, on a loop turn of its own, as a run that
+ * belongs to nothing: no request, timer, ws callback or app.main is active
+ * while it runs, so every op it makes runs detached and nothing it does
+ * reaches its spawner's connection, response or completion. The JS twin of
+ * Lua's hull._spawn, except that the body never starts inside the
+ * spawner's entry: it is queued on a zero-delay loop timer, so it runs
+ * after that entry - and the response a synchronous handler produced - is
+ * over.
+ *
+ * The task is an entry like any other: its own instruction budget, a
+ * stale transaction rolled back before and after it, its queued jobs
+ * drained, an async body's continuations wired into one run (whose wait is
+ * checked for an open transaction). A throw or a rejection is logged, never
+ * raised into the spawner, which has moved on.
+ *
+ * Stdlib-only (an underscore module): auth-flows defers its mail with it,
+ * so that work runs after the response in every path.
+ */
+
+typedef struct HlJsTask {
+    struct HlJsTask *next;
+    struct HlJsTask *prev;
+    HlJS            *js;
+    JSValue          fn;
+    uint64_t         timer_id;
+} HlJsTask;
+
+static void js_task_unlink(HlJsTask *t)
+{
+    if (t->prev) t->prev->next = t->next;
+    else         t->js->tasks = t->next;
+    if (t->next) t->next->prev = t->prev;
+    t->next = t->prev = NULL;
+}
+
+static void js_task_log(HlJS *js, JSValueConst err)
+{
+    const char *msg = js->budget_tripped ? NULL : JS_ToCString(js->ctx, err);
+    log_error("[hull:js] spawned task error: %s",
+              msg ? msg : js->budget_tripped ? "instruction limit exceeded"
+                                             : "(unknown)");
+    if (msg) JS_FreeCString(js->ctx, msg);
+    /* A toString can throw: leave nothing pending for the next run. */
+    JS_FreeValue(js->ctx, JS_GetException(js->ctx));
+}
+
+static void js_task_fire(void *user)
+{
+    HlJsTask *t = (HlJsTask *)user;
+    HlJS *js = t->js;
+    JSContext *ctx = js->ctx;
+    JSValue fn = t->fn;
+    js_task_unlink(t);
+    hl_alloc_free(js->base.alloc, t, sizeof *t);
+
+    /* Nothing of whatever ran last is active (an op made now captures all
+     * of it), and the run has a budget of its own. */
+    js->active_conn            = NULL;
+    js->active_req             = NULL;
+    js->active_timer           = NULL;
+    js->active_life            = NULL;
+    js->active_on_complete     = NULL;
+    js->active_on_complete_ctx = NULL;
+    js->active_cli_main        = 0;
+    js->last_async_cont        = NULL;
+    js->async_pending          = 0;
+    hl_js_budget_arm(js);
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+
+    JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, 0, NULL);
+    JS_FreeValue(ctx, fn);
+    if (JS_IsException(ret)) {
+        JSValue exc = JS_GetException(ctx);
+        js_task_log(js, exc);
+        JS_FreeValue(ctx, exc);
+    } else {
+        /* An async body is a run: its continuations are wired to its
+         * promise, whose rejection after a wait the resume logs. */
+        int st;
+        (void)hl_js_entry_park(js, ret, &st);
+        if (st == JS_PROMISE_REJECTED) {
+            JSValue reason = JS_PromiseResult(ctx, ret);
+            js_task_log(js, reason);
+            JS_FreeValue(ctx, reason);
+        }
+    }
+    JS_FreeValue(ctx, ret);
+    hl_js_run_jobs(js);
+    js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
+    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+}
+
+static JSValue js_task_spawn(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
+        return JS_ThrowTypeError(ctx, "_task.spawn requires (fn)");
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.async_ctx)
+        return JS_ThrowInternalError(ctx,
+            "_task.spawn() requires an active event loop");
+
+    HlJsTask *t = hl_alloc_malloc(js->base.alloc, sizeof *t);
+    if (!t)
+        return JS_ThrowInternalError(ctx, "_task.spawn(): out of memory");
+    t->js   = js;
+    t->fn   = JS_DupValue(ctx, argv[0]);
+    t->prev = NULL;
+    t->next = (HlJsTask *)js->tasks;
+    if (t->next) t->next->prev = t;
+    js->tasks = t;
+    t->timer_id = hl_async_backend()->timer_add(js->base.async_ctx, 0,
+                                                js_task_fire, t);
+    if (t->timer_id == 0) {
+        js_task_unlink(t);
+        JS_FreeValue(ctx, t->fn);
+        hl_alloc_free(js->base.alloc, t, sizeof *t);
+        return JS_ThrowInternalError(ctx, "_task.spawn(): failed to add timer");
+    }
+    return JS_UNDEFINED;
+}
+
+void hl_js_tasks_free(HlJS *js)
+{
+    if (!js) return;
+    const HlAsyncBackend *be = hl_async_backend();
+    while (js->tasks) {
+        HlJsTask *t = (HlJsTask *)js->tasks;
+        js_task_unlink(t);
+        if (js->base.async_ctx)
+            be->timer_cancel(js->base.async_ctx, t->timer_id);
+        if (js->ctx)
+            JS_FreeValue(js->ctx, t->fn);
+        hl_alloc_free(js->base.alloc, t, sizeof *t);
+    }
+}
+
+static int js_task_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    JSValue task = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, task, "spawn",
+                      JS_NewCFunction(ctx, js_task_spawn, "spawn", 1));
+    JS_SetModuleExport(ctx, m, "_task", task);
+    return 0;
+}
+
+int hl_js_init_task_module(JSContext *ctx, HlJS *js)
+{
+    (void)js;
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:_task", js_task_module_init);
+    if (!m)
+        return -1;
+    JS_AddModuleExport(ctx, m, "_task");
+    return 0;
+}
+
 /* ── Global registration ─────────────────────────────────────────── */
 
 void hl_js_add_hull_global(JSContext *ctx)

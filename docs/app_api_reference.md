@@ -446,11 +446,11 @@ verify step between successful first-factor auth and `on_login` when
       event loop: those steps happen only for some addresses, so doing them
       inline let response time say whether an account exists. A failing
       `email_send` is logged instead of failing the request - in JS also an
-      async one (a rejected Promise from `emailSend`). (JS: the handlers
-      that defer are synchronous and the work runs from a timer armed once
-      the request is over. With `checkPwnedPasswords`, `/register` waits on
-      HIBP and its welcome mail is then sent before the response, as JS has
-      no detached-task primitive yet.)
+      async one (a rejected Promise from `emailSend`). The deferred work
+      runs as a detached task (Lua `hull._spawn`, JS the stdlib-internal
+      `hull:_task`) that belongs to no request, so it never holds the
+      response - also when the handler waited first (`/register` with
+      `check_pwned_passwords`, which waits on HIBP).
     - `opts.check_pwned_passwords` (default `false`). Routes
       register + password-reset-confirm through `hull/web/pwned`
       (HIBP k-anonymity). Apps must add `api.pwnedpasswords.com`

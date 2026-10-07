@@ -252,6 +252,15 @@ int hl_js_entry_park(HlJS *js, JSValue ret, int *state);
  * HlJsAsyncCont (hl_js_async_cont_create). */
 KlHttpConn *hl_js_cont_suspend_conn(HlAsyncCont *cont);
 
+/* ── Detached tasks: hull:_task (async.c) ───────────────────────────── */
+
+/* Register the stdlib-only hull:_task module (`_task.spawn(fn)`). */
+int hl_js_init_task_module(JSContext *ctx, HlJS *js);
+
+/* Cancel every spawned task that has not run yet and release its function.
+ * Called by hl_js_free while the context is still alive. */
+void hl_js_tasks_free(HlJS *js);
+
 /* ── Instruction budget (runtime.c) ─────────────────────────────────── */
 
 /* (hl_js_budget_arm, which re-arms it at each entry point, is in js.h.) */
