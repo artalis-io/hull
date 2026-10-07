@@ -119,6 +119,16 @@ import base64, hmac, hashlib, struct, sys, time
 b32 = sys.argv[1]
 off = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 key = base64.b32decode(b32 + "=" * (-len(b32) % 8))
+# Never hand out a code in the last MARGIN seconds of a step: the
+# request that carries it must reach the server in the SAME step, or
+# the offset shifts by one (a -1 code generated at 29.9 s arrives as a
+# -2 code, outside the +/-1 window). Waiting out the tail of the step
+# makes the offset the server sees exactly the one asked for.
+MARGIN = 5
+now = time.time()
+left = 30 - (now % 30)
+if left < MARGIN:
+    time.sleep(left + 0.05)
 step = int(time.time()) // 30 + off
 msg = struct.pack(">Q", step)
 mac = hmac.new(key, msg, hashlib.sha1).digest()
@@ -129,7 +139,11 @@ EOF
 # Each step is consumed once by the totp module's last_used_step
 # guard, so the e2e walks monotonically through offsets:
 #   confirm = -1, login = 0, magic-link = +1
-# (All within the default ±1 verification window.)
+# The offsets are deliberate: -1 and +1 also exercise the server's
+# default +/-1 skew window. The helper generates each code with at
+# least MARGIN seconds left in its step, so the server evaluates it at
+# exactly that offset (a code straddling a step boundary used to turn
+# the -1 into a -2 and fail the confirm).
 totp_code() { python3 "$TOTP_PY" "$1" "${2:-0}"; }
 
 # Read latest email body for an address (text field).
@@ -338,9 +352,11 @@ run_flow() {
         -d "{\"email\":\"$EMAIL_P\"}" "$BASE/_totp_enroll")
     PSECRET=$(echo "$ENROLL" | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])')
     CODE=$(totp_code "$PSECRET" 0)
-    curl -sS -X POST -H 'Content-Type: application/json' \
+    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL_P\",\"code\":\"$CODE\"}" \
-        "$BASE/_totp_confirm" > /dev/null
+        "$BASE/_totp_confirm")
+    # Without the enrolment the "TOTP removed" check below proves nothing.
+    check_contains "$_label: pre-registrant TOTP enrolled" "$R" '"ok":true'
     R=$(verify_post "$BASE" "$PRE_URL" new_password "$PW_NEW")
     check_contains "$_label: verify with new_password ok" "$(resp_body "$R")" '"ok":true'
     R=$(curl -sS -X POST -H 'Content-Type: application/json' \

@@ -143,8 +143,13 @@ test("base32: strict, and lenient for pasted secrets", () => {
 
 test("large values encode and decode in linear time", () => {
     // Building output with `out += piece` is quadratic in this QuickJS. Rather
-    // than a wall-clock bound (machine-dependent), compare two sizes: 4x the
-    // input should cost about 4x the time; quadratic building costs about 16x.
+    // than a wall-clock bound (machine-dependent), compare two sizes: 8x the
+    // input should cost about 8x the time; quadratic building costs about 64x.
+    // The threshold sits between the two (24x), and each size's time is the
+    // best of three runs, interleaved, so a GC pause or a descheduling on a
+    // loaded CI runner inflates one sample, not the verdict. The smaller size
+    // is large enough that Date.now()'s millisecond granularity is a small
+    // fraction of it (a 4x ratio over a ~2 ms sample once read as 11x).
     function roundTrip(n) {
         const big = ALL.repeat(n / 256);
         const t0 = Date.now();
@@ -155,9 +160,13 @@ test("large values encode and decode in linear time", () => {
         return Math.max(1, Date.now() - t0);
     }
     roundTrip(4096);                                  // warm up
-    const small = roundTrip(16384), large = roundTrip(65536);
-    if (large > small * 10) {
-        throw new Error("4x input took " + (large / small).toFixed(1) + "x the time");
+    let small = Infinity, large = Infinity;
+    for (let k = 0; k < 3; k++) {
+        small = Math.min(small, roundTrip(32768));
+        large = Math.min(large, roundTrip(262144));
+    }
+    if (large > small * 24) {
+        throw new Error("8x input took " + (large / small).toFixed(1) + "x the time");
     }
 });
 
