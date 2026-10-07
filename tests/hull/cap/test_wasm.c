@@ -13,6 +13,7 @@
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_stream.h"
 #include "hull/cap/wasm_watchdog.h"
+#include "hull/utils/alloc.h"
 #include "hull/limits/wasm.h"
 #include "wasm_export.h"
 #include <time.h>
