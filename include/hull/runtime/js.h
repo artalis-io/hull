@@ -195,6 +195,11 @@ typedef struct HlJS {
      * on a global an app accessor could swap out from under C. */
     void           *blob_ref;
 
+    /* Detached tasks spawned through hull:_task and not yet run (an
+     * HlJsTask list, async.c): each holds its function until its loop turn,
+     * and hl_js_free releases the ones that never got one. */
+    void           *tasks;
+
     /* The manifest app.manifest() declared (JSValue *, owned): a frozen,
      * plain-data copy, set once and only by app.manifest. The policy
      * extractor and the --verify-sig JSON encoder (manifest_js.c) both read

@@ -32,6 +32,7 @@ app.manifest({
 local authflows = require("hull.web.auth-flows")
 local session   = require("hull.web.middleware.session")
 local cookie    = require("hull.web.cookie")
+local time      = require("hull.time")
 
 session.init()
 
@@ -39,6 +40,11 @@ local users_by_email = {}
 local users_by_id    = {}
 local next_id        = 0
 local sent_emails    = {}
+-- POST /_slow_templates: the welcome render takes 300 ms and then records
+-- when it finished (GET /_render_done), so the e2e can tell whether the
+-- response went out before the deferred mail work or waited for it.
+local slow_templates = false
+local render_done_ms = 0
 
 local function user_create(email, pwhash)
     next_id = next_id + 1
@@ -62,7 +68,14 @@ authflows.init({
         }
     end,
     templates = {
-        welcome             = function(c) return { subject = "Welcome", text = "verify: " .. c.verify_url } end,
+        welcome             = function(c)
+            if slow_templates then
+                local stop = time.now_ms() + 300
+                while time.now_ms() < stop do end
+                render_done_ms = time.now_ms()
+            end
+            return { subject = "Welcome", text = "verify: " .. c.verify_url }
+        end,
         verify              = function(c) return { subject = "Verify",  text = "verify: " .. (c.verify_url or c.link or "?") } end,
         magic_link          = function(c) return { subject = "Sign in", text = "link: " .. c.link } end,
         password_reset      = function(c) return { subject = "Reset",   text = "link: " .. c.link } end,
@@ -137,6 +150,8 @@ end)
 
 app.get("/_emails",         function(_r, res) res:json(sent_emails) end)
 app.post("/_emails/clear",  function(_r, res) sent_emails = {}; res:json({ ok = true }) end)
+app.post("/_slow_templates", function(_r, res) slow_templates = true; res:json({ ok = true }) end)
+app.get("/_render_done",     function(_r, res) res:json({ at = render_done_ms }) end)
 app.get("/_me", function(req, res)
     if not (req.ctx and req.ctx.session) then
         return res:status(401):json({ error = "not signed in" })

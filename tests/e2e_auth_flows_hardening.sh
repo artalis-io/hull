@@ -25,7 +25,9 @@
 #      and login with new email works.
 #   8. Pwned-password check: register attempt with "password"
 #      (HIBP-known) → 400 with pwned error. Register with a
-#      random password → ok.
+#      random password → ok. With a 300 ms welcome render, the
+#      response to a pwned-checked register arrives before the
+#      render ends (the mail is deferred past it in both runtimes).
 #
 # Uses a Python-spawned HIBP mock on localhost. The mock returns
 # the SHA-1 suffix for "password" only; other prefixes get empty
@@ -375,6 +377,34 @@ run_flow() {
         -d '{"email":"bob@example.test","password":"freshrandompw99"}' \
         "$BASE/auth/register")
     check_contains "$_label: clean password ok" "$R" '"ok":true'
+    # 8b2. With the pwned check on, /register waits on HIBP before it
+    #      defers the welcome mail - and JS used to send that mail before
+    #      the response then (audit 8). The welcome render now takes 300 ms
+    #      and records when it ended: the response must have arrived before
+    #      that (an ordering check on one clock, not a wall-clock budget).
+    curl -sS -X POST "$BASE/_slow_templates" > /dev/null
+    T_RESP=$(python3 -c "
+import json, time, urllib.request
+req = urllib.request.Request('$BASE/auth/register', method='POST',
+    data=json.dumps({'email': 'carol@example.test',
+                     'password': 'freshrandompw99'}).encode(),
+    headers={'Content-Type': 'application/json'})
+body = urllib.request.urlopen(req, timeout=60).read()
+print(int(time.time() * 1000) if b'\"ok\":true' in body else 0)
+")
+    T_DONE=0
+    for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        T_DONE=$(curl -sS "$BASE/_render_done" | python3 -c "import json,sys; print(json.load(sys.stdin)['at'])")
+        [ "$T_DONE" != "0" ] && break
+        sleep 0.2
+    done
+    if python3 -c "import sys; r, d = $T_RESP, $T_DONE; sys.exit(0 if r > 0 and d > 0 and r < d else 1)"; then
+        pass "$_label: pwned-checked register answers before the (slow) welcome render"
+    else
+        fail "$_label: pwned-checked register waited for the welcome render (response at $T_RESP, render done at $T_DONE)"
+    fi
+    TEXT=$(last_email_text "$PORT" "carol@example.test")
+    check_contains "$_label: ...and the welcome mail is sent after it" "$TEXT" "verify: "
     # 8c. An HIBP endpoint manifest.hosts does not admit is a
     #     misconfiguration, not an outage: the check raises instead of
     #     failing open.
