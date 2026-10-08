@@ -14,6 +14,12 @@
  * Parameters: pass `--params '{"id": 42}'` and named placeholders
  * (`:id`, `:limit`) bind to JSON object values.
  *
+ * A named query is READ-ONLY, held to the same gate as `hull agent db query`
+ * (hl_agent_prepare_readonly: SQLite's read-only verdict, no transaction
+ * control): it runs on the warm context's own connection, which is not opened
+ * read-only, and queries.json sits in the app directory an agent may be able
+ * to write (audit 10). Writes belong in migrations or the app itself.
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -22,10 +28,13 @@
 #include "internal.h"
 #include "limits.h"
 #include "hull/app_context.h"
+#include "hull/cap/db_budget.h"
 
 #include <sh_json.h>
 #include <sh_arena.h>
 #include <sqlite3.h>
+
+#include <limits.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,8 +70,8 @@ static char *read_queries_file(const char *app_dir, size_t *out_len)
     return NULL;
 }
 
-int hl_agent_sql_named_ctx(HlAppContext *ctx, const char *query_name,
-                           const char *params_json, ShJsonBuf *out)
+static int sql_named_ctx(HlAppContext *ctx, const char *query_name,
+                         const char *params_json, ShJsonBuf *out)
 {
     if (!query_name)
         return hl_agent_write_error(out, "query name required");
@@ -113,8 +122,9 @@ int hl_agent_sql_named_ctx(HlAppContext *ctx, const char *query_name,
     }
 
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql, (int)sql_len, &stmt, NULL) != SQLITE_OK) {
-        const char *err = sqlite3_errmsg(db);
+    const char *err = NULL;
+    if (sql_len > (size_t)INT_MAX ||
+        hl_agent_prepare_readonly(db, sql, (int)sql_len, &stmt, &err) != 0) {
         int rc = hl_agent_write_error(out, err ? err : "prepare failed");
         sh_arena_free(arena);
         free(qf);
@@ -207,6 +217,17 @@ int hl_agent_sql_named_ctx(HlAppContext *ctx, const char *query_name,
     sh_arena_free(arena);
     free(qf);
     return 0;
+}
+
+/* Not an app run: never charged to, or stopped by, a budget a run left
+ * bound on this thread (audit 10; cap/db_budget.h). */
+int hl_agent_sql_named_ctx(HlAppContext *ctx, const char *query_name,
+                           const char *params_json, ShJsonBuf *out)
+{
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+    int rc = sql_named_ctx(ctx, query_name, params_json, out);
+    hl_db_budget_restore(budget);
+    return rc;
 }
 
 #else /* !HL_ENABLE_DB */

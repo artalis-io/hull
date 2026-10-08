@@ -16,6 +16,7 @@
 #include "hull/utils/alloc.h"
 #include <sqlite3.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,25 +108,131 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
  *
  * writable_schema lets SQL rewrite sqlite_schema directly (DEFENSIVE below
  * disables it as well), and the *_store_directory pragmas move where SQLite
- * writes its files. None of these has a use in application SQL. */
+ * writes its files. None of these has a use in application SQL.
+ *
+ * Nor do the pragmas that SET how much memory or how many threads SQLite uses
+ * (audit 10 H3): hard_heap_limit / soft_heap_limit are process-wide (one app
+ * statement changed them for every connection), cache_size / cache_spill let
+ * a connection hold up to its whole database in memory across runs,
+ * temp_store moves temp b-trees out of the charged heap into files, and
+ * threads starts helper threads whose allocations no run's budget sees.
+ * Reading them stays legal (a2 is NULL then).
+ *
+ * @p ud non-NULL (hl_cap_db_refuse_txn_control): transaction control is
+ * refused too - SQLite reports it here at prepare time, whatever comments or
+ * spelling the text uses. */
 static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
                          const char *a3, const char *a4)
 {
-    (void)ud; (void)a2; (void)a3; (void)a4;
+    (void)a3; (void)a4;
+    static const char *const set_refused[] = {
+        "hard_heap_limit", "soft_heap_limit", "cache_size", "cache_spill",
+        "temp_store", "threads",
+    };
     switch (action) {
     case SQLITE_ATTACH:
         if (a1 && (a1[0] == '\0' || strcmp(a1, ":memory:") == 0))
             return SQLITE_OK;
         return SQLITE_DENY;
     case SQLITE_PRAGMA:
-        if (a1 && (strcasecmp(a1, "writable_schema") == 0 ||
-                   strcasecmp(a1, "temp_store_directory") == 0 ||
-                   strcasecmp(a1, "data_store_directory") == 0))
+        if (!a1) return SQLITE_OK;
+        if (strcasecmp(a1, "writable_schema") == 0 ||
+            strcasecmp(a1, "temp_store_directory") == 0 ||
+            strcasecmp(a1, "data_store_directory") == 0)
             return SQLITE_DENY;
+        if (a2)
+            for (size_t i = 0; i < sizeof set_refused / sizeof set_refused[0]; i++)
+                if (strcasecmp(a1, set_refused[i]) == 0)
+                    return SQLITE_DENY;
         return SQLITE_OK;
+    case SQLITE_TRANSACTION:
+    case SQLITE_SAVEPOINT:
+        return ud ? SQLITE_DENY : SQLITE_OK;
     default:
         return SQLITE_OK;
     }
+}
+
+/* A non-NULL authorizer argument: refuse transaction control. */
+static char db_refuse_txn_tag;
+
+void hl_cap_db_refuse_txn_control(sqlite3 *db, int on)
+{
+    if (db)
+        (void)sqlite3_set_authorizer(db, db_authorizer,
+                                     on ? &db_refuse_txn_tag : NULL);
+}
+
+/* ── Process-wide setup: every SQLite allocation is charged (audit 10 H3) ──
+ *
+ * The progress handler counts opcodes, and one opcode can do unbounded work:
+ * randomblob / zeroblob / replace / printf build their value in one step, a
+ * sorter sorts in one, and under temp_store=MEMORY a temp b-tree grows in the
+ * heap. None of it touched the VM heap or the budget. SQLite's allocator is
+ * wrapped instead: each allocation (and each realloc's growth) is charged to
+ * the calling thread's bound budget (hl_db_budget_charge - none bound, none
+ * charged), and once that budget is exhausted the allocation fails, so the
+ * statement stops with SQLITE_NOMEM there and then; the runtimes see their
+ * budget tripped and raise the limit, not the SQL error. Process-wide: a
+ * thread with no binding (the tool VM, migrations, a pool thread between ops)
+ * is never charged or refused, and the rollbacks Hull runs on a run's behalf
+ * run unbound (hl_cap_db_rollback). */
+static sqlite3_mem_methods g_sqlite_mem;   /* SQLite's own allocator */
+
+static int db_mem_charge(int64_t bytes)
+{
+    if (bytes <= 0) return 0;
+    return hl_db_budget_charge((bytes + HL_DB_ALLOC_UNIT_BYTES - 1) /
+                               HL_DB_ALLOC_UNIT_BYTES);
+}
+
+static void *db_mem_malloc(int n)
+{
+    if (db_mem_charge(n)) return NULL;
+    return g_sqlite_mem.xMalloc(n);
+}
+
+static void *db_mem_realloc(void *p, int n)
+{
+    int64_t old = p ? g_sqlite_mem.xSize(p) : 0;
+    if (n > old && db_mem_charge((int64_t)n - old)) return NULL;
+    return g_sqlite_mem.xRealloc(p, n);
+}
+
+static void db_mem_free(void *p)      { g_sqlite_mem.xFree(p); }
+static int  db_mem_size(void *p)      { return g_sqlite_mem.xSize(p); }
+static int  db_mem_roundup(int n)     { return g_sqlite_mem.xRoundup(n); }
+static int  db_mem_init(void *ud)     { (void)ud; return g_sqlite_mem.xInit(g_sqlite_mem.pAppData); }
+static void db_mem_shutdown(void *ud) { (void)ud; g_sqlite_mem.xShutdown(g_sqlite_mem.pAppData); }
+
+static pthread_once_t g_sqlite_setup_once = PTHREAD_ONCE_INIT;
+
+static void db_sqlite_setup_once(void)
+{
+    /* sqlite3_config works only before sqlite3_initialize: every Hull open
+     * path calls the setup first, so nothing should have initialized SQLite
+     * yet. If something did, say so - allocations then go uncharged (the
+     * progress handler and the heap limits still apply). */
+    int ok = sqlite3_config(SQLITE_CONFIG_GETMALLOC, &g_sqlite_mem) == SQLITE_OK &&
+             g_sqlite_mem.xMalloc && g_sqlite_mem.xRealloc && g_sqlite_mem.xSize;
+    if (ok) {
+        sqlite3_mem_methods wrap = {
+            db_mem_malloc, db_mem_free, db_mem_realloc, db_mem_size,
+            db_mem_roundup, db_mem_init, db_mem_shutdown, NULL,
+        };
+        ok = sqlite3_config(SQLITE_CONFIG_MALLOC, &wrap) == SQLITE_OK;
+    }
+    if (!ok)
+        fprintf(stderr, "hull: WARN sqlite was initialized before Hull could "
+                        "install its allocator; SQL allocations are not "
+                        "charged to the instruction budget\n");
+    (void)sqlite3_hard_heap_limit64(HL_DB_SQLITE_HARD_HEAP_LIMIT);
+    (void)sqlite3_soft_heap_limit64(HL_DB_SQLITE_SOFT_HEAP_LIMIT);
+}
+
+void hl_cap_db_sqlite_setup(void)
+{
+    (void)pthread_once(&g_sqlite_setup_once, db_sqlite_setup_once);
 }
 
 int hl_cap_db_init(sqlite3 *db)
@@ -262,12 +369,16 @@ void hl_cap_db_shutdown(sqlite3 *db)
     if (!db)
         return;
 
+    /* Not a run's work (the thread may still hold a tripped run's binding). */
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+
     /* Run PRAGMA optimize - lets SQLite update internal statistics */
     sqlite3_exec(db, "PRAGMA optimize", NULL, NULL, NULL);
 
     /* Final WAL checkpoint - merge WAL back into main DB file */
     sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE,
                               NULL, NULL);
+    hl_db_budget_restore(budget);
 }
 
 /* ── Internal: bind HlValue array to a prepared statement ─────────── */
@@ -542,19 +653,25 @@ int hl_cap_db_commit(sqlite3 *db)
     return HL_DB_ERR_EXEC;
 }
 
+/* A rollback is cleanup a run's budget must not stop: the batch whose fn hit
+ * the limit, the stale-transaction guard after a tripped entry, the end of a
+ * db.async op. It runs unbound, so neither the allocation wrapper nor the
+ * progress handler refuses it (audit 10 H3). */
 int hl_cap_db_rollback(sqlite3 *db)
 {
     if (!db)
         return HL_DB_ERR_EXEC;
-    return sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL)
-               == SQLITE_OK ? HL_DB_OK : HL_DB_ERR_EXEC;
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+    int rc = sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    hl_db_budget_restore(budget);
+    return rc == SQLITE_OK ? HL_DB_OK : HL_DB_ERR_EXEC;
 }
 
 void hl_cap_db_guard_stale_txn(sqlite3 *db)
 {
     if (db && !sqlite3_get_autocommit(db)) {
         fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        (void)hl_cap_db_rollback(db);
     }
 }
 

@@ -12,7 +12,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_budget.h"
-#include "hull/cap/db_sql_kw.h"   /* hl_sql_txn_kind */
+#include "hull/cap/db_sql_kw.h"   /* hl_sql_txn_kind_ex */
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap */
 #include "hull/cap/tool.h"
 #include "hull/migrate.h"
@@ -113,7 +113,18 @@ static int db_schema_impl(sqlite3 *db, int close_db, ShJsonBuf *out)
     return 0;
 }
 
-int hl_agent_db_schema_ctx(HlAppContext *ctx, const char *db_path, ShJsonBuf *out)
+/* The agent's SQL is not an app run: never charged to, or stopped by, a
+ * budget a run left bound on this thread (audit 10; cap/db_budget.h). Each
+ * public entry point runs its whole body - the open included - unbound. */
+#define AGENT_UNMETERED(expr)                                          \
+    do {                                                               \
+        HlDbBudgetBinding budget_ = hl_db_budget_swap(NULL, NULL);     \
+        int rc_ = (expr);                                              \
+        hl_db_budget_restore(budget_);                                 \
+        return rc_;                                                    \
+    } while (0)
+
+static int db_schema_ctx(HlAppContext *ctx, const char *db_path, ShJsonBuf *out)
 {
     if (db_path) {
         /* Explicit db_path: open a separate read-only connection */
@@ -126,7 +137,12 @@ int hl_agent_db_schema_ctx(HlAppContext *ctx, const char *db_path, ShJsonBuf *ou
     return db_schema_impl(hl_app_context_db(ctx), 0, out);
 }
 
-int hl_agent_db_schema(const char *app_dir, const char *db_path, ShJsonBuf *out)
+int hl_agent_db_schema_ctx(HlAppContext *ctx, const char *db_path, ShJsonBuf *out)
+{
+    AGENT_UNMETERED(db_schema_ctx(ctx, db_path, out));
+}
+
+static int db_schema(const char *app_dir, const char *db_path, ShJsonBuf *out)
 {
     sqlite3 *db = hl_agent_open_app_db(app_dir, db_path);
     if (!db)
@@ -134,34 +150,61 @@ int hl_agent_db_schema(const char *app_dir, const char *db_path, ShJsonBuf *out)
     return db_schema_impl(db, 1, out);
 }
 
+int hl_agent_db_schema(const char *app_dir, const char *db_path, ShJsonBuf *out)
+{
+    AGENT_UNMETERED(db_schema(app_dir, db_path, out));
+}
+
 /* ── hl_agent_db_query ─────────────────────────────────────────────── */
+
+/* A read-only query (audit 9 M2). Without a db_path this is the warm
+ * context's own connection, which is not opened read-only at all: an INSERT /
+ * DROP / CREATE TEMP went straight in. A transaction-control statement is
+ * read-only to SQLite, but a BEGIN left the app's connection inside it; the
+ * text check alone was misled by a comment it nested and SQLite does not
+ * ("slash-star slash-star star-slash BEGIN"), so the authorizer refuses
+ * transaction control at prepare time too, and the text is read with
+ * SQLite's own comment rule (audit 10). */
+int hl_agent_prepare_readonly(sqlite3 *db, const char *sql, int len,
+                              sqlite3_stmt **out, const char **err)
+{
+    *out = NULL;
+    *err = NULL;
+    if (!db || !sql) { *err = "no SQL statement"; return -1; }
+    sqlite3_stmt *stmt = NULL;
+    hl_cap_db_refuse_txn_control(db, 1);
+    int rc = sqlite3_prepare_v2(db, sql, len, &stmt, NULL);
+    hl_cap_db_refuse_txn_control(db, 0);
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        /* SQLITE_AUTH: the guard refused it (transaction control, ATTACH,
+         * a memory pragma) - none of which a read-only query may run. */
+        *err = rc == SQLITE_AUTH ? "only read-only statements are allowed"
+                                 : sqlite3_errmsg(db);
+        return -1;
+    }
+    if (!stmt || !sqlite3_stmt_readonly(stmt) ||
+        hl_sql_txn_kind_ex(sqlite3_sql(stmt), 0) != HL_SQL_TXN_NONE) {
+        *err = stmt ? "only read-only statements are allowed"
+                    : "no SQL statement";
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    *out = stmt;
+    return 0;
+}
 
 static int db_query_impl(sqlite3 *db, int close_db, const char *sql,
                           ShJsonBuf *out)
 {
     sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        int ret = hl_agent_write_error(out, sqlite3_errmsg(db));
+    const char *perr = NULL;
+    int rc;
+    if (hl_agent_prepare_readonly(db, sql, -1, &stmt, &perr) != 0) {
+        int ret = hl_agent_write_error(out, perr ? perr : "prepare failed");
         if (close_db) sqlite3_close(db);
         return ret;
     }
-    /* A read-only query (audit 9 M2). Without a db_path this is the warm
-     * context's own connection, which is not opened read-only at all: an
-     * INSERT / DROP / CREATE TEMP went straight in. A transaction-control
-     * statement is read-only to SQLite, but a BEGIN left the app's connection
-     * inside it. */
-    if (!stmt || !sqlite3_stmt_readonly(stmt) ||
-        hl_sql_txn_kind(sql) != HL_SQL_TXN_NONE) {
-        sqlite3_finalize(stmt);
-        int ret = hl_agent_write_error(out,
-            stmt ? "only read-only statements are allowed"
-                 : "no SQL statement");
-        if (close_db) sqlite3_close(db);
-        return ret;
-    }
-    /* Not an app run: not charged to (or stopped by) a run's budget. */
-    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
 
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);
@@ -217,13 +260,12 @@ static int db_query_impl(sqlite3 *db, int close_db, const char *sql,
 
     sh_json_write_object_end(&w);
     sqlite3_finalize(stmt);
-    hl_db_budget_restore(budget);
     if (close_db) sqlite3_close(db);
     return 0;
 }
 
-int hl_agent_db_query_ctx(HlAppContext *ctx, const char *db_path,
-                          const char *sql, ShJsonBuf *out)
+static int db_query_ctx(HlAppContext *ctx, const char *db_path,
+                        const char *sql, ShJsonBuf *out)
 {
     if (!sql)
         return hl_agent_write_error(out, "SQL argument required");
@@ -237,8 +279,14 @@ int hl_agent_db_query_ctx(HlAppContext *ctx, const char *db_path,
     return db_query_impl(hl_app_context_db(ctx), 0, sql, out);
 }
 
-int hl_agent_db_query(const char *app_dir, const char *db_path,
-                      const char *sql, ShJsonBuf *out)
+int hl_agent_db_query_ctx(HlAppContext *ctx, const char *db_path,
+                          const char *sql, ShJsonBuf *out)
+{
+    AGENT_UNMETERED(db_query_ctx(ctx, db_path, sql, out));
+}
+
+static int db_query(const char *app_dir, const char *db_path,
+                    const char *sql, ShJsonBuf *out)
 {
     if (!sql)
         return hl_agent_write_error(out, "SQL argument required");
@@ -247,6 +295,12 @@ int hl_agent_db_query(const char *app_dir, const char *db_path,
     if (!db)
         return hl_agent_write_error(out, "cannot open database");
     return db_query_impl(db, 1, sql, out);
+}
+
+int hl_agent_db_query(const char *app_dir, const char *db_path,
+                      const char *sql, ShJsonBuf *out)
+{
+    AGENT_UNMETERED(db_query(app_dir, db_path, sql, out));
 }
 
 /* ── hl_agent_request ──────────────────────────────────────────────── */
@@ -293,8 +347,8 @@ static int migrate_status_impl(sqlite3 *db, int close_db, const HlVfs *vfs,
     return 0;
 }
 
-int hl_agent_migrate_status_ctx(HlAppContext *ctx, const char *db_path,
-                                ShJsonBuf *out)
+static int migrate_status_ctx(HlAppContext *ctx, const char *db_path,
+                              ShJsonBuf *out)
 {
     if (db_path) {
         sqlite3 *db = hl_agent_open_app_db(hl_app_context_app_dir(ctx), db_path);
@@ -306,8 +360,14 @@ int hl_agent_migrate_status_ctx(HlAppContext *ctx, const char *db_path,
                                hl_app_context_app_vfs(ctx), out);
 }
 
-int hl_agent_migrate_status(const char *app_dir, const char *db_path,
-                            ShJsonBuf *out)
+int hl_agent_migrate_status_ctx(HlAppContext *ctx, const char *db_path,
+                                ShJsonBuf *out)
+{
+    AGENT_UNMETERED(migrate_status_ctx(ctx, db_path, out));
+}
+
+static int migrate_status(const char *app_dir, const char *db_path,
+                          ShJsonBuf *out)
 {
     sqlite3 *db = hl_agent_open_app_db(app_dir, db_path);
     if (!db)
@@ -318,6 +378,12 @@ int hl_agent_migrate_status(const char *app_dir, const char *db_path,
     hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
 
     return migrate_status_impl(db, 1, &app_vfs, out);
+}
+
+int hl_agent_migrate_status(const char *app_dir, const char *db_path,
+                            ShJsonBuf *out)
+{
+    AGENT_UNMETERED(migrate_status(app_dir, db_path, out));
 }
 
 /* (Removed: an earlier draft had a `count_files_in_dir` helper here.

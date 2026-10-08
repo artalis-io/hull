@@ -84,6 +84,9 @@ void hl_js_worker_dispatch_op_free_all(void *ptr);
 void hl_js_worker_dispatch_cancel(KlAsyncOp *op, void *user_data);
 #ifdef HL_ENABLE_DB
 void hl_js_worker_db_init(void);
+/* 1 while this pool thread's worker.dispatch is over its instruction budget
+ * (its db bindings then throw the uncatchable interrupt). */
+int  hl_js_worker_budget_tripped(void);
 #endif
 
 /* Forward declaration for Keel WS server connection (avoid pulling

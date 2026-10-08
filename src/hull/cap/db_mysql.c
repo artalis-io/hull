@@ -55,15 +55,6 @@ static int my_connect(HlMyConn *conn, const char *dsn)
     return rc;
 }
 
-/* 1 when @p sql is a ROLLBACK of the whole transaction (comments and
- * ROLLBACK WORK included; not ROLLBACK TO SAVEPOINT). A connection lost inside
- * a transaction lost the transaction with it - the server rolled it back - so
- * a ROLLBACK for it has already happened. */
-static int sql_is_rollback(const char *sql)
-{
-    return hl_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK;
-}
-
 /* 1 when @p sql has text MySQL runs or skips differently from the shared
  * reader (cap/db_sql_kw.h): an executable comment (slash-star-bang, and
  * MariaDB's slash-star-M-bang), which MySQL runs though the reader skips it, or a
@@ -81,7 +72,67 @@ static int my_sql_unreadable(const char *sql)
  * ended is reported lost by the batch. */
 static HlSqlTxnKind my_sql_txn_kind(const char *sql)
 {
-    return my_sql_unreadable(sql) ? HL_SQL_TXN_OTHER : hl_sql_txn_kind(sql);
+    /* MySQL's block comments do not nest (audit 10). */
+    return my_sql_unreadable(sql) ? HL_SQL_TXN_OTHER : hl_sql_txn_kind_ex(sql, 0);
+}
+
+/* 1 when @p sql is a ROLLBACK of the whole transaction (comments and
+ * ROLLBACK WORK included; not ROLLBACK TO SAVEPOINT). A connection lost inside
+ * a transaction lost the transaction with it - the server rolled it back - so
+ * a ROLLBACK for it has already happened. */
+static int sql_is_rollback(const char *sql)
+{
+    return my_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK;
+}
+
+/* 1 when @p sql is ONE statement (a trailing ';', whitespace and comments
+ * allowed). The connection runs with CLIENT_MULTI_STATEMENTS, and every
+ * classifier here reads the first statement only: "CREATE TABLE t (x INT);
+ * COMMIT" ended the batch's transaction by its COMMIT, and the resume opened a
+ * new one under the DDL's name, so the batch never saw its transaction go
+ * (audit 10). Anything this scanner cannot read the way MySQL does - a
+ * backslash in a quoted string (its meaning follows NO_BACKSLASH_ESCAPES), a
+ * '#' or executable comment, a "--" MySQL would not take as a comment, an
+ * unterminated quote or comment - is not one statement either. */
+static int my_sql_single_statement(const char *sql)
+{
+    if (!sql || my_sql_unreadable(sql)) return 0;
+    int ended = 0;
+    const char *p = sql;
+    while (*p) {
+        char c = *p;
+        if (c == '\'' || c == '"' || c == '`') {
+            if (ended) return 0;
+            p++;
+            for (;;) {
+                if (!*p) return 0;
+                if (*p == '\\' && c != '`') return 0;
+                if (*p == c) {
+                    if (p[1] == c) { p += 2; continue; }   /* doubled quote */
+                    p++;
+                    break;
+                }
+                p++;
+            }
+            continue;
+        }
+        if (c == '/' && p[1] == '*') {          /* MySQL: no nesting */
+            const char *e = strstr(p + 2, "*/");
+            if (!e) return 0;
+            p = e + 2;
+            continue;
+        }
+        if (c == '-' && p[1] == '-') {
+            if (!(p[2] == ' ' || p[2] == '\t' || p[2] == '\n' || p[2] == '\r'))
+                return 0;
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+        if (c == ';') { ended = 1; p++; continue; }
+        if (ended && !isspace((unsigned char)c)) return 0;
+        p++;
+    }
+    return 1;
 }
 
 static void scrub_free(char *s)
@@ -603,19 +654,20 @@ static int mysql_exec_raw(HlDbHandle *h, const char *sql,
  * an unrecognised statement is refused (txn_aborted), never resumed: the
  * list errs on the short side. Not CREATE / DROP TEMPORARY TABLE nor LOAD
  * DATA / LOAD XML (audit 8 c_db L2): they commit nothing, and a lock-wait
- * timeout in one under innodb_rollback_on_timeout was resumed as DDL. Only
- * the first statement of a multi-statement text is read, so a later DDL
- * statement that failed is taken for a rollback: refused, not resumed. */
+ * timeout in one under innodb_rollback_on_timeout was resumed as DDL. A
+ * multi-statement text is never one (audit 10): refused, not resumed. */
 static int my_sql_commits_implicitly(const char *sql)
 {
     static const char *const any[] = {   /* every form of the statement */
         "alter", "analyze", "cache", "check", "flush", "grant", "optimize",
         "rename", "repair", "revoke", "truncate",
     };
-    if (my_sql_unreadable(sql)) return 0;   /* refused, never resumed */
+    /* Unreadable, or more than one statement (audit 10): refused, never
+     * resumed. */
+    if (!my_sql_single_statement(sql)) return 0;
     char w[16], w2[16], w3[16];
-    const char *p = hl_sql_next_word(sql ? sql : "", w, sizeof w);
-    p = hl_sql_next_word(p, w2, sizeof w2);
+    const char *p = hl_sql_next_word_ex(sql, w, sizeof w, 0);
+    p = hl_sql_next_word_ex(p, w2, sizeof w2, 0);
     for (size_t i = 0; i < sizeof any / sizeof any[0]; i++)
         if (strcmp(w, any[i]) == 0) return 1;
     if (strcmp(w, "create") == 0 || strcmp(w, "drop") == 0)
@@ -632,7 +684,7 @@ static int my_sql_commits_implicitly(const char *sql)
         return strcmp(w2, "replica") == 0 || strcmp(w2, "slave") == 0;
     if (strcmp(w, "change") == 0) {       /* CHANGE MASTER / REPLICATION SOURCE TO */
         if (strcmp(w2, "master") == 0) return 1;
-        (void)hl_sql_next_word(p, w3, sizeof w3);
+        (void)hl_sql_next_word_ex(p, w3, sizeof w3, 0);
         return strcmp(w2, "replication") == 0 && strcmp(w3, "source") == 0;
     }
     if (strcmp(w, "set") == 0)            /* SET PASSWORD (mysql.user) */
@@ -664,7 +716,7 @@ static void my_note_failure(HlDbMyCtx *s, const char *sql, int was_in_trans,
          * for a deadlock. A COMMIT / ROLLBACK / savepoint statement ends or
          * keeps the transaction on its own terms. */
         if (my_sql_unreadable(sql) ||   /* unrecognised: refused (audit 9 L1) */
-            (hl_sql_txn_kind(sql) == HL_SQL_TXN_NONE &&
+            (my_sql_txn_kind(sql) == HL_SQL_TXN_NONE &&
              !my_sql_commits_implicitly(sql)))
             s->txn_aborted = 1;
     }
@@ -692,16 +744,20 @@ static int mysql_txn_raw(HlDbHandle *h, const char *sql);
  * batches' savepoints, so the inner batch could no longer roll back on its
  * own - its writes after the DDL committed with the outer batch even when it
  * failed. The transaction stays ended instead, and every enclosing batch's
- * leave reports it lost. */
+ * leave reports it lost.
+ *
+ * Only after ONE statement that commits implicitly (audit 10): the resume
+ * used to follow anything that was not itself a COMMIT / ROLLBACK, read by
+ * its first word - so "SELECT 1; COMMIT" (the connection runs multi-statement
+ * texts) ended the batch's transaction and had a new one opened under it,
+ * and the batch committed the rest as if nothing had happened. */
 static void my_resume_after_implicit_commit(HlDbHandle *h, const char *sql,
                                             int was)
 {
     if (!was || !h || h->batch_depth != 1 || my_in_trans(h)) return;
     HlDbMyCtx *s = h->ctx;
     if (!s || s->txn_aborted || s->conn.broken) return;
-    HlSqlTxnKind k = my_sql_txn_kind(sql);
-    if (k == HL_SQL_TXN_COMMIT || k == HL_SQL_TXN_ROLLBACK || k == HL_SQL_TXN_OTHER)
-        return;
+    if (!my_sql_commits_implicitly(sql)) return;
     (void)mysql_txn_raw(h, "START TRANSACTION");
 }
 

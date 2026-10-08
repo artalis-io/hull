@@ -1297,6 +1297,38 @@ int hl_sandbox_dsn_is_network(const char *dsn)
         || strncasecmp(dsn, "valkeys://",    10) == 0;
 }
 
+/* Map a database DSN to the local filesystem path the kernel sandbox must gate,
+ * or NULL when there is no local file to gate: an in-memory database
+ * (":memory:") or a network backend (postgres:// / mysql:// / mariadb://).
+ * Without this the sandbox would treat the raw DSN string as a path and try to
+ * unveil e.g. "duckdb://:memory:", which fails (a harmless warning) or, for a
+ * scheme-qualified file DSN, gates the wrong directory. A scheme-less DSN (a
+ * bare path, ":memory:", or a "file:" URI) is returned unchanged so existing
+ * SQLite behavior is untouched. Returns a pointer into @p dsn.
+ *
+ * Shared by both entry points (serve.c, and the app.main runner in
+ * serve_cli.c, which passed the raw -d DSN - a network DSN with its password
+ * then reached unveil and the sandbox's log lines; audit 10). */
+const char *hl_sandbox_db_path(const char *dsn)
+{
+    if (!dsn) return NULL;
+    const char *sep = strstr(dsn, "://");
+    if (!sep) return dsn;   /* scheme-less: unchanged existing behavior */
+    size_t n = (size_t)(sep - dsn);
+    /* Network backends have no local file to sandbox. */
+    if ((n == 8  && strncasecmp(dsn, "postgres",   8)  == 0) ||
+        (n == 10 && strncasecmp(dsn, "postgresql", 10) == 0) ||
+        (n == 5  && strncasecmp(dsn, "mysql",      5)  == 0) ||
+        (n == 7  && strncasecmp(dsn, "mariadb",    7)  == 0))
+        return NULL;
+    /* File backends (sqlite:// / duckdb:// / file://): the target follows
+     * "://". An in-memory or empty target needs no file gating. */
+    const char *path = sep + 3;
+    if (*path == '\0' || strcmp(path, ":memory:") == 0)
+        return NULL;
+    return path;
+}
+
 /* A KV dynamic scheme that dials the network (all of them: Valkey/Redis are
  * always networked). */
 static int kv_scheme_is_network(const char *s)

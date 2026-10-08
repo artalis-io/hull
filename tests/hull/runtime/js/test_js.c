@@ -1517,6 +1517,32 @@ UTEST(db_audit9, js_a_runaway_query_hits_the_instruction_limit)
     cleanup_js_caps();
 }
 
+/* Audit 10 H3: SQL allocations are charged by size, so a loop of
+ * allocation-heavy one-opcode queries hits the limit. */
+UTEST(db_audit10, js_sql_allocations_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    js.max_instructions = 2000000;
+    hl_js_budget_arm(&js);
+
+    const char *code =
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
+        "try { for (let i = 0; i < 5000; i++) db.query('SELECT length(randomblob(200000)) AS n'); } catch (e) { globalThis.__caught = 1; }\n"
+        "globalThis.__after = 1;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(1, js.budget_tripped);
+
+    js.max_instructions = 0;
+    hl_js_budget_arm(&js);
+    EXPECT_EQ(0, eval_int("globalThis.__caught === undefined ? 0 : 1"));
+    EXPECT_EQ(0, eval_int("globalThis.__after === undefined ? 0 : 1"));
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, db_parameterized_query)
 {
     init_js_with_caps();
@@ -7215,6 +7241,32 @@ JS_WORKER_CASE(a_nested_batch_is_a_savepoint,
     "    const row = db.query('SELECT count(*) AS n, sum(x) AS s FROM a8b')[0];\n"
     "    return row.n + ',' + row.s; });\n"
     "  check(r === '3,34', 'rows ' + JSON.stringify(r));\n")
+
+/* Audit 10: a db call that failed because the dispatch went over its budget
+ * threw a catchable InternalError, and the dispatch's own catch went on. It
+ * throws the uncatchable interrupt, from a query, an exec and a batch. */
+static void a10_worker_db_limited(void)
+{
+    a7_worker_db();
+    js.max_instructions = 2000000;   /* small: three runaway queries must fit the harness wait under MSan */
+    hl_js_budget_arm(&js);
+}
+
+JS_WORKER_CASE(a_db_call_over_the_limit_is_not_catchable,
+    a10_worker_db_limited(),
+    /* the dispatched fn runs in its own VM: no closure over the SQL */
+    "  const m1 = await fails(() => {\n"
+    "    try { db.query('WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) AS n FROM c'); }\n"
+    "    catch (e) { return 'caught: ' + e; } return 'ran'; });\n"
+    "  check(m1.includes('instruction limit'), 'query: ' + m1);\n"
+    "  const m2 = await fails(() => {\n"
+    "    try { db.exec('CREATE TABLE IF NOT EXISTS a10 AS WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) AS n FROM c'); }\n"
+    "    catch (e) { return 'caught: ' + e; } return 'ran'; });\n"
+    "  check(m2.includes('instruction limit'), 'exec: ' + m2);\n"
+    "  const m3 = await fails(() => {\n"
+    "    try { db.batch(() => db.query('WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) AS n FROM c')); }\n"
+    "    catch (e) { return 'caught: ' + e; } return 'ran'; });\n"
+    "  check(m3.includes('instruction limit'), 'batch: ' + m3);\n")
 
 /* ── Audit 4: the JS runtime ──────────────────────────────────────────── */
 

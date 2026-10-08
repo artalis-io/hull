@@ -177,6 +177,29 @@ check_exit     "db query write exit"        "$EXIT_CODE" "1"
 EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "BEGIN" examples/rest_api)
 OUT=$(cat "$RC_TMP")
 check_contains "db query refuses BEGIN"     "$OUT" 'read-only'
+# SQLite's block comments do not nest: the first star-slash ends this one, so
+# SQLite runs the BEGIN that a nesting reader took for comment (audit 10).
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "/* /* */ BEGIN; -- */" examples/rest_api)
+OUT=$(cat "$RC_TMP")
+check_contains "db query refuses a BEGIN behind a nested comment" "$OUT" 'read-only'
+
+# Named queries are held to the same read-only gate (audit 10): they ran on
+# the app's own writable connection.
+NAMED_DIR=$(mktemp -d)
+cp -R examples/rest_api/. "$NAMED_DIR/"
+cat > "$NAMED_DIR/queries.json" <<'QEOF'
+{ "wipe": "DELETE FROM tasks", "open": "BEGIN", "count": "SELECT count(*) AS n FROM tasks" }
+QEOF
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent sql named wipe "$NAMED_DIR")
+OUT=$(cat "$RC_TMP")
+check_contains "sql named refuses a write"  "$OUT" 'read-only'
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent sql named open "$NAMED_DIR")
+OUT=$(cat "$RC_TMP")
+check_contains "sql named refuses BEGIN"    "$OUT" 'read-only'
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent sql named count "$NAMED_DIR")
+OUT=$(cat "$RC_TMP")
+check_contains "sql named runs a read"      "$OUT" '"count"'
+rm -rf "$NAMED_DIR"
 
 AGENT_DB_DIR=$(mktemp -d)
 $HULL migrate -d "$AGENT_DB_DIR/app.db" examples/rest_api >/dev/null 2>&1 || true

@@ -290,4 +290,31 @@ int hl_cap_db_check_namespace(const char *sql);
  */
 int hl_cap_db_guard(sqlite3 *db);
 
+/**
+ * @brief Process-wide SQLite setup, before the first connection opens: the
+ *        SQLITE_CONFIG_MALLOC wrapper that charges every allocation to the
+ *        calling thread's bound budget (cap/db_budget.h) and fails it once
+ *        that budget is exhausted, and the process heap limits (audit 10 H3).
+ *
+ * Idempotent and thread-safe; every Hull path that opens a SQLite connection
+ * calls it first (sqlite3_config only works before sqlite3_initialize).
+ */
+void hl_cap_db_sqlite_setup(void);
+
+/** The hard heap limit SQLite as a whole may use (sqlite3_hard_heap_limit64):
+ *  past it every SQLite allocation in the process fails (SQLITE_NOMEM), so a
+ *  statement that holds a lot of memory at once - a big in-memory sort or temp
+ *  b-tree - cannot take the process down. The soft limit makes SQLite shed page
+ *  cache before it gets there. */
+#define HL_DB_SQLITE_HARD_HEAP_LIMIT ((long long)1 << 30)   /* 1 GiB */
+#define HL_DB_SQLITE_SOFT_HEAP_LIMIT ((long long)256 << 20) /* 256 MiB */
+
+/**
+ * @brief While @p on, the connection's authorizer also refuses transaction
+ *        control (BEGIN / COMMIT / ROLLBACK / SAVEPOINT / RELEASE) at prepare
+ *        time - for the read-only agent queries, where a text check alone can
+ *        be misled by comments (audit 10).
+ */
+void hl_cap_db_refuse_txn_control(sqlite3 *db, int on);
+
 #endif /* HL_CAP_DB_H */
