@@ -214,6 +214,24 @@ function defaultPrincipal(req) {
     return "__anon";
 }
 
+// The principal as the principal_id column (VARCHAR(255)) stores it, for the
+// default and a custom getPrincipal alike (audit 10; see the Lua sibling):
+// null / undefined / false / "" is "__anon", a number its String(), anything
+// over the column width (or already spelled like a hashed one) "sha256:<hex>"
+// of itself, and any other type (an object, a Promise) an error.
+function normPrincipal(p) {
+    if (p === undefined || p === null || p === false || p === "") return "__anon";
+    if (typeof p === "number" || typeof p === "bigint") {
+        p = String(p);
+    } else if (typeof p !== "string") {
+        throw new TypeError("idempotency: getPrincipal must return a string or a number, got "
+            + typeof p);
+    }
+    if (p.length > MAX_KEY_LEN || p.startsWith("sha256:"))
+        return "sha256:" + encoding.hex.encode(crypto.sha256(p));
+    return p;
+}
+
 // Keyed requests in a row that may all be "__anon" before the default
 // principal warns, once per middleware (see the Lua sibling).
 const ANON_WARN_AFTER = 20;
@@ -267,7 +285,7 @@ function middleware(opts) {
 
         if (!req.ctx) req.ctx = {};
 
-        const principalId = getPrincipal(req);
+        const principalId = normPrincipal(getPrincipal(req));
         const fingerprint = computeFingerprint(req);
         const endpoint = req.method + " " + req.path;
         const now = time.now();
@@ -538,5 +556,6 @@ function cleanup() {
 }
 
 const idempotency = { init, middleware, respond, respondHtml, complete, cleanup,
-                      _defaultPrincipal: defaultPrincipal };
+                      _defaultPrincipal: defaultPrincipal,
+                      _normPrincipal: normPrincipal };
 export { idempotency };

@@ -25,8 +25,9 @@
 #      and login with new email works. Undoing that confirmed change
 #      from the old address restores it, makes the password unusable
 #      (a reset through the old address sets a new one) and pauses new
-#      changes. A confirm to an address another account took since the
-#      request answers 409 (step 5b).
+#      changes. While it can be undone, registering the vacated old
+#      address creates nothing (step 7a, audit 10). A confirm to an
+#      address another account took since the request answers 409 (step 5b).
 #   8. Pwned-password check: register attempt with "password"
 #      (HIBP-known) → 400 with pwned error. Register with a
 #      random password → ok. With a 300 ms welcome render, the
@@ -382,6 +383,21 @@ run_flow() {
         -d "{\"email\":\"$EMAIL_NEW\",\"password\":\"$PW\"}" \
         "$BASE/auth/login")
     check_contains "$_label: login with new email ok" "$R" '"ok":true'
+
+    # 7a. Audit 10: while the change can be undone, the vacated old address
+    #     is reserved for the undo. Registering it answers the usual ok but
+    #     creates no account (and mails nothing) - before, the registration
+    #     took the address and the undo below then had nothing to restore to.
+    curl -sS -X POST "$BASE/_emails/clear" > /dev/null
+    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\",\"password\":\"squatter-pw-99\"}" \
+        "$BASE/auth/register")
+    check_contains "$_label: registering the vacated old address answers ok" "$R" '"ok":true'
+    sleep 1   # the account would be created after the response
+    N=$(curl -sS "$BASE/_emails" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+    if [ "$N" = "0" ]; then pass "$_label: ...but creates no account (no welcome mail)"
+    else fail "$_label: registering the vacated address mailed $N message(s)"
+    fi
 
     # 7b. The old address undoes a CONFIRMED change (audit 8: a thief who
     #     confirms from an address they read must not keep the account):

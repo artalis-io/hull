@@ -49,6 +49,19 @@ local function norm_id(message_id)
     return message_id
 end
 
+-- A source as stored (audit 10), checked as message_id is: nil is "default",
+-- an integer its decimal string, any other non-string an error. A number
+-- reached the VARCHAR column as a number - MySQL then compared it
+-- numerically - and `#` on one raised.
+local function norm_source(source)
+    if source == nil then return "default" end
+    if math.type(source) == "integer" then return tostring(source) end
+    if type(source) ~= "string" then
+        error("inbox: source must be a string or an integer", 3)
+    end
+    return source
+end
+
 local function check_id_len(message_id, source)
     if message_id and #message_id > MAX_ID_LEN then
         error("inbox: message_id too long (max " .. MAX_ID_LEN .. ")", 3)
@@ -100,7 +113,7 @@ function inbox.is_duplicate(message_id, source)
     if not message_id or message_id == "" then
         return false
     end
-    source = source or "default"
+    source = norm_source(source)
     check_id_len(message_id, source)
 
     local now = time.now()
@@ -142,7 +155,7 @@ function inbox.mark_processed(message_id, source, opts)
     if not message_id or message_id == "" then
         return
     end
-    source = source or "default"
+    source = norm_source(source)
     check_id_len(message_id, source)
     opts = opts or {}
 
@@ -172,7 +185,7 @@ function inbox.check_and_mark(message_id, source, opts)
     if not message_id or message_id == "" then
         return false
     end
-    source = source or "default"
+    source = norm_source(source)
     check_id_len(message_id, source)
     opts = opts or {}
     local now = time.now()

@@ -658,10 +658,14 @@ function session.logout_handler(cookie_mod, opts)
     -- Provenance as auth-flows checks it (audit 9): Sec-Fetch-Site must be
     -- same-origin or none - a sibling subdomain (same-site) is refused too -
     -- and without it Origin / Referer must name the request's own host
-    -- (opts.trust_proxy: X-Forwarded-Host) or one of opts.origins. A client
-    -- sending none of them passes: forcing a logout is all a forged one does.
+    -- (opts.trust_proxy: X-Forwarded-Host), one of opts.origins, or a host in
+    -- opts.trusted_hosts - and the origins auth-flows.init registered (audit
+    -- 10: auth-flows' /logout, which runs this as its on_logout, checks
+    -- against its public_origin / trusted_hosts, and the two now agree). A
+    -- client sending none of them passes: forcing a logout is all a forged
+    -- one does.
     local provenance = { allow_bare = true, trust_proxy = opts.trust_proxy == true,
-                         origins = opts.origins }
+                         origins = opts.origins, hosts = opts.trusted_hosts }
     return function(req, res)
         -- A forged request (an attacker page posting a form here) is refused:
         -- the clearing Set-Cookie would still sign the victim out.

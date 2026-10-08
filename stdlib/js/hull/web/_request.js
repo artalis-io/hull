@@ -95,11 +95,15 @@ function userId(id) {
  * hull.web._request.same_origin: `Sec-Fetch-Site` must be `same-origin` or
  * `none` (cross-site and same-site refused); without it `Origin` - or failing
  * it `Referer` - must name the request's own host (`X-Forwarded-Host` behind a
- * trusted proxy) or one of `opts.origins`; with no provenance header at all
- * the request passes only with `opts.allowBare`.
+ * trusted proxy) or one of `opts.origins`, or its host (with or without a
+ * port) is one of `opts.hosts`; with no provenance header at all the request
+ * passes only with `opts.allowBare`. What registerAppOrigins registered
+ * (auth-flows' publicOrigin / trustedHosts / trustProxy) is trusted on every
+ * call too (audit 10; see the Lua sibling): auth-flows' /logout and the
+ * session / oauth logout it hands the request to now agree.
  *
  * @param {object} req
- * @param {{allowBare?: boolean, trustProxy?: boolean, origins?: string[]}} [opts]
+ * @param {{allowBare?: boolean, trustProxy?: boolean, origins?: string[], hosts?: string[]}} [opts]
  * @returns {boolean}
  */
 function sameOrigin(req, opts) {
@@ -120,17 +124,38 @@ function sameOrigin(req, opts) {
     if (origin === null) return false;
     const authority = origin.replace(/^https?:\/\//, "");
     const hosts = [h.host];
-    if (o.trustProxy && typeof h["x-forwarded-host"] === "string") {
+    if ((o.trustProxy || _app.trustProxy) && typeof h["x-forwarded-host"] === "string") {
         hosts.push(h["x-forwarded-host"].split(",")[0]);
     }
     for (const host of hosts) {
         if (typeof host === "string" && authority === host.trim().toLowerCase()) return true;
     }
-    for (const allowed of (Array.isArray(o.origins) ? o.origins : [])) {
+    const origins = (Array.isArray(o.origins) ? o.origins : []).concat(_app.origins);
+    for (const allowed of origins) {
         if (originOf(allowed) === origin) return true;
+    }
+    const noPort = /^(.*):\d+$/.exec(authority);
+    const trusted = (Array.isArray(o.hosts) ? o.hosts : []).concat(_app.hosts);
+    for (const allowed of trusted) {
+        if (typeof allowed !== "string") continue;
+        const a = allowed.toLowerCase();
+        if (authority === a || (noPort && noPort[1] === a)) return true;
     }
     return false;
 }
 
-export const _request = { clientIp, limitKey, userId, sameOrigin };
+// The app's own origins, registered by auth-flows.init (see sameOrigin).
+let _app = { origins: [], hosts: [], trustProxy: false };
+
+/**
+ * Register the app's own origins: `{ origins, hosts, trustProxy }`. Replaces
+ * what an earlier call registered; null clears it.
+ */
+function registerAppOrigins(t) {
+    const x = t || {};
+    const strs = (a) => (Array.isArray(a) ? a : []).filter((v) => typeof v === "string");
+    _app = { origins: strs(x.origins), hosts: strs(x.hosts), trustProxy: x.trustProxy === true };
+}
+
+export const _request = { clientIp, limitKey, userId, sameOrigin, registerAppOrigins };
 export default _request;

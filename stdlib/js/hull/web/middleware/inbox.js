@@ -36,6 +36,18 @@ function normId(messageId) {
     return messageId;
 }
 
+// A source as stored (audit 10; see the Lua sibling): unset or "" is
+// "default", an integer its decimal string, any other non-string an error. A
+// number had no .length (the cap never applied) and reached the VARCHAR
+// column as a number, which MySQL compared numerically.
+function normSource(source) {
+    if (source === undefined || source === null || source === "") return "default";
+    if (typeof source === "number" && Number.isSafeInteger(source)) return String(source);
+    if (typeof source !== "string")
+        throw new Error("inbox: source must be a string or an integer");
+    return source;
+}
+
 function checkIdLen(messageId, source) {
     if (messageId && messageId.length > MAX_ID_LEN)
         throw new Error("inbox: messageId too long (max " + MAX_ID_LEN + ")");
@@ -81,7 +93,7 @@ function isDuplicate(messageId, source) {
     messageId = normId(messageId);
     if (messageId === null || messageId === undefined || messageId === "")
         return false;
-    if (!source) source = "default";
+    source = normSource(source);
     checkIdLen(messageId, source);
 
     const now = time.now();
@@ -122,7 +134,7 @@ function markProcessed(messageId, source, opts) {
     messageId = normId(messageId);
     if (messageId === null || messageId === undefined || messageId === "")
         return;
-    if (!source) source = "default";
+    source = normSource(source);
     checkIdLen(messageId, source);
     const o = opts || {};
 
@@ -157,7 +169,7 @@ function checkAndMark(messageId, source, opts) {
     messageId = normId(messageId);
     if (messageId === null || messageId === undefined || messageId === "")
         return false;
-    if (!source) source = "default";
+    source = normSource(source);
     checkIdLen(messageId, source);
     const o = opts || {};
     const now = time.now();

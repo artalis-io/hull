@@ -581,9 +581,11 @@ function logoutHandler(cookieMod, opts) {
 
     // Provenance as auth-flows checks it (audit 9; see the Lua sibling):
     // same-site refused too, Origin / Referer checked without Sec-Fetch-Site,
-    // a header-less client let through.
+    // a header-less client let through. opts.trustedHosts and the origins
+    // auth-flows.init registered are trusted too (audit 10), so auth-flows'
+    // /logout, which runs this as its onLogout, and this check agree.
     const provenance = { allowBare: true, trustProxy: opts.trustProxy === true,
-                         origins: opts.origins };
+                         origins: opts.origins, hosts: opts.trustedHosts };
     return function (req, res) {
         // A forged request (an attacker page posting a form here) is refused:
         // the clearing Set-Cookie would still sign the victim out.

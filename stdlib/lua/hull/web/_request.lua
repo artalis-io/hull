@@ -113,6 +113,43 @@ function M.user_id(user_id)
 end
 
 
+-- The app's own origins, registered by auth-flows.init (see same_origin).
+local _app = { origins = {}, hosts = {}, trust_proxy = false }
+
+--- Register the app's own origins (auth-flows.init): `{ origins, hosts,
+-- trust_proxy }`. Replaces what an earlier call registered; `nil` clears it.
+function M.register_app_origins(t)
+    t = t or {}
+    local origins, hosts = {}, {}
+    for _, o in ipairs(t.origins or {}) do
+        if type(o) == "string" then origins[#origins + 1] = o end
+    end
+    for _, h in ipairs(t.hosts or {}) do
+        if type(h) == "string" then hosts[#hosts + 1] = h end
+    end
+    _app = { origins = origins, hosts = hosts, trust_proxy = t.trust_proxy == true }
+end
+
+local function origin_listed(o, list)
+    for _, allowed in ipairs(list or {}) do
+        local a = type(allowed) == "string" and allowed:match("^(https?://[^/?#]+)")
+        if a and o == a:lower() then return true end
+    end
+    return false
+end
+
+local function host_listed(authority, list)
+    for _, allowed in ipairs(list or {}) do
+        if type(allowed) == "string" then
+            local a = allowed:lower()
+            if authority == a or authority:match("^(.-):%d+$") == a then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 --- Did a state-changing request come from the app's own pages?
 --
 -- For a request a forged form or an `<img>` on another site could make
@@ -121,11 +158,19 @@ end
 -- `cross-site` AND `same-site` (a sibling subdomain, often less trusted than
 -- the app) are refused. Without it, `Origin` - or failing it `Referer` - must
 -- name the request's own host (`X-Forwarded-Host` behind a trusted proxy) or
--- one of `opts.origins`. With no provenance header at all the client is not a
+-- one of `opts.origins`, or its host (with or without a port) is one of
+-- `opts.hosts`. With no provenance header at all the client is not a
 -- browser: it passes only with `opts.allow_bare`.
 --
+-- What the app registered through `M.register_app_origins` (auth-flows'
+-- public_origin / trusted_hosts / trust_proxy) is trusted on every call too
+-- (audit 10): auth-flows' /logout checks provenance against those and then
+-- hands the request to its on_logout - typically session.logout_handler,
+-- whose own check knew only the Host header and refused an app behind a
+-- proxy that auth-flows had just let through. The two checks now agree.
+--
 -- @tparam table req
--- @tparam[opt] table opts  `{ allow_bare, trust_proxy, origins = {"https://app.example.com", ...} }`
+-- @tparam[opt] table opts  `{ allow_bare, trust_proxy, origins = {"https://app.example.com", ...}, hosts = {"app.example.com", ...} }`
 -- @treturn boolean
 function M.same_origin(req, opts)
     opts = opts or {}
@@ -142,7 +187,8 @@ function M.same_origin(req, opts)
     o = o:lower()
     local authority = o:match("^https?://(.*)$")
     local hosts = { h.host }
-    if opts.trust_proxy and type(h["x-forwarded-host"]) == "string" then
+    if (opts.trust_proxy or _app.trust_proxy)
+       and type(h["x-forwarded-host"]) == "string" then
         hosts[#hosts + 1] = h["x-forwarded-host"]:match("^[^,]*")
     end
     for _, host in ipairs(hosts) do
@@ -150,11 +196,8 @@ function M.same_origin(req, opts)
             return true
         end
     end
-    for _, allowed in ipairs(opts.origins or {}) do
-        local a = type(allowed) == "string" and allowed:match("^(https?://[^/?#]+)")
-        if a and o == a:lower() then return true end
-    end
-    return false
+    return origin_listed(o, opts.origins) or origin_listed(o, _app.origins)
+        or host_listed(authority, opts.hosts) or host_listed(authority, _app.hosts)
 end
 
 return M
