@@ -6,6 +6,7 @@
 
 #include "utest.h"
 #include "hull/cap/image.h"
+#include "hull/utils/alloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -111,7 +112,7 @@ UTEST(hull_cap_image, from_view)
     memset(pixels, 0xCD, sizeof(pixels));
 
     HlImage *img = hl_image_from_view(2, 1, HL_IMAGE_RGBA8,
-                                       pixels, sizeof(pixels), NULL);
+                                       pixels, sizeof(pixels));
     ASSERT_TRUE(img != NULL);
     ASSERT_EQ(2u, img->width);
     ASSERT_EQ(1u, img->height);
@@ -133,7 +134,7 @@ UTEST(hull_cap_image, on_free_hook_runs_once)
     memset(pixels, 0xAB, sizeof(pixels));
 
     HlImage *img = hl_image_from_view(2, 1, HL_IMAGE_RGBA8,
-                                       pixels, sizeof(pixels), NULL);
+                                       pixels, sizeof(pixels));
     ASSERT_TRUE(img != NULL);
     ASSERT_EQ(0, img->owned);
 
@@ -308,6 +309,67 @@ UTEST(hull_cap_image, roundtrip_png)
     free(encoded);
     hl_image_free(img);
     hl_image_free(decoded);
+}
+
+/* Audit 9 M2: owned pixels come from the caller's allocator (the VM's, in
+ * the runtimes), so they count against its limit and are handed back on
+ * free. They were plain malloc - and decoded ones stb's - outside the app's
+ * 64 MB heap limit. A tracking HlAllocator stands in for the VM here. */
+static void *test_px_malloc(void *ctx, size_t size)
+{
+    return hl_alloc_malloc((HlAllocator *)ctx, size);
+}
+
+static void test_px_free(void *ctx, void *ptr, size_t size)
+{
+    hl_alloc_free((HlAllocator *)ctx, ptr, size);
+}
+
+UTEST(hull_cap_image, new_pixels_counted_against_allocator)
+{
+    HlAllocator a;
+    hl_alloc_init(&a, 64);
+    HlImageAlloc ia = { test_px_malloc, test_px_free, &a };
+
+    uint8_t pixels[256];
+    memset(pixels, 0x5A, sizeof pixels);
+
+    /* 4x4 RGBA8 = 64 bytes: fits, and is charged. */
+    HlImage *img = hl_image_new(4, 4, HL_IMAGE_RGBA8, pixels, sizeof pixels, &ia);
+    ASSERT_TRUE(img != NULL);
+    ASSERT_EQ((size_t)64, hl_alloc_used(&a));
+    ASSERT_EQ(0, memcmp(img->pixels, pixels, 64));
+
+    /* A second one would pass the limit: refused, nothing leaks. */
+    HlImage *over = hl_image_new(1, 1, HL_IMAGE_RGBA8, pixels, 4, &ia);
+    ASSERT_TRUE(over == NULL);
+    ASSERT_EQ((size_t)64, hl_alloc_used(&a));
+
+    hl_image_free(img);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+}
+
+UTEST(hull_cap_image, decoded_pixels_counted_against_allocator)
+{
+    HlAllocator a;
+    hl_alloc_init(&a, 0);
+    HlImageAlloc ia = { test_px_malloc, test_px_free, &a };
+    const char *err = NULL;
+
+    HlImage *img = hl_image_decode(minimal_png, sizeof(minimal_png),
+                                    NULL, &ia, &err);
+    ASSERT_TRUE(img != NULL);
+    ASSERT_EQ((size_t)4, hl_alloc_used(&a));   /* 1x1 RGBA8 */
+    hl_image_free(img);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+
+    /* Over the limit: a clean failure, not an image outside it. */
+    hl_alloc_init(&a, 3);
+    err = NULL;
+    img = hl_image_decode(minimal_png, sizeof(minimal_png), NULL, &ia, &err);
+    ASSERT_TRUE(img == NULL);
+    ASSERT_STREQ("out_of_memory", err);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
 }
 
 UTEST_MAIN();

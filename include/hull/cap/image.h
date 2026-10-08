@@ -21,6 +21,16 @@
 
 typedef struct HlAllocator HlAllocator;
 
+/* Where an image's OWNED pixels are allocated: the runtime passes its VM
+ * allocator (Lua's lua_Alloc, QuickJS's js_malloc_rt), so pixel buffers count
+ * against the app's heap limit like any other VM memory. `free` gets the size
+ * `malloc` was asked for. NULL = plain malloc/free (tools, tests). */
+typedef struct HlImageAlloc {
+    void *(*malloc)(void *ctx, size_t size);
+    void  (*free)(void *ctx, void *ptr, size_t size);
+    void  *ctx;
+} HlImageAlloc;
+
 /* ── Pixel formats ─────────────────────────────────────────────────── */
 
 typedef enum {
@@ -39,11 +49,10 @@ typedef struct HlImage {
     void         *pixels;
     size_t        pixel_len;
     int           owned;      /* 1 = we allocated pixels */
-    HlAllocator  *alloc;
-    /* Codec-specific pixel free. Decoded images own pixels allocated by
-     * the codec's allocator (stb uses its own); NULL means the pixels
-     * came from plain malloc (image.new) and hl_image_free uses free(). */
-    void        (*free_pixels)(void *pixels);
+    /* Owned pixels came from here (pixel_len bytes); a zero `malloc` means
+     * plain malloc. Decoded pixels are copied out of the codec's buffer into
+     * it, so every owned buffer is freed the same way. */
+    HlImageAlloc  pixel_alloc;
     /* Optional borrow-release hook. Called by hl_image_free regardless of
      * `owned`, BEFORE the pixels/struct are freed. image.from_buffer uses it
      * to release a refcounted zero-copy source (HlMappedBuffer / HlWasmBuffer)
@@ -80,20 +89,21 @@ const char *hl_image_format_name(HlImageFormat fmt);
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
-/* Create from raw pixels (copies data) */
+/* Create from raw pixels (copies data into @p alloc's memory). NULL on bad
+ * dimensions / short data, or when @p alloc refuses the pixel buffer. */
 HlImage *hl_image_new(uint32_t w, uint32_t h, HlImageFormat fmt,
                        const void *pixels, size_t pixel_len,
-                       HlAllocator *alloc);
+                       const HlImageAlloc *alloc);
 
 /* Create from buffer view (borrows - caller keeps source alive) */
 HlImage *hl_image_from_view(uint32_t w, uint32_t h, HlImageFormat fmt,
-                             const void *data, size_t len,
-                             HlAllocator *alloc);
+                             const void *data, size_t len);
 
-/* Decode from encoded bytes (auto-detects format if fmt_name is NULL) */
+/* Decode from encoded bytes (auto-detects format if fmt_name is NULL). The
+ * pixels end up in @p alloc's memory ("out_of_memory" when it refuses). */
 HlImage *hl_image_decode(const void *data, size_t len,
                           const char *fmt_name,
-                          HlAllocator *alloc, const char **err_msg);
+                          const HlImageAlloc *alloc, const char **err_msg);
 
 /* Encode to bytes */
 int hl_image_encode(const HlImage *img, const char *fmt_name,

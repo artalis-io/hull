@@ -11,6 +11,31 @@
 #include "hull/cap/wasm_buffer.h"
 #endif
 
+/* -- Image pixel allocator -- */
+
+static void *lua_image_px_malloc(void *ctx, size_t size)
+{
+    void *ud;
+    lua_Alloc f = lua_getallocf((lua_State *)ctx, &ud);
+    return f(ud, NULL, 0, size);
+}
+
+static void lua_image_px_free(void *ctx, void *ptr, size_t size)
+{
+    void *ud;
+    lua_Alloc f = lua_getallocf((lua_State *)ctx, &ud);
+    f(ud, ptr, size, 0);
+}
+
+void hl_lua_image_alloc(lua_State *L, HlImageAlloc *out)
+{
+    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+    out->ctx = lua_tothread(L, -1);
+    lua_pop(L, 1);
+    out->malloc = lua_image_px_malloc;
+    out->free   = lua_image_px_free;
+}
+
 /* ── Unified buffer protocol ──────────────────────────────────────── */
 
 int lua_get_buffer(lua_State *L, int idx, HlBufferView *out)

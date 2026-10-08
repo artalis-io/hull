@@ -954,6 +954,7 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `image.from_buffer(buf, w, h, format)` → HlImage. Zero-copy borrow from a `MappedBuffer`/`WasmBuffer` (the source's bytes back the image directly). The borrow is refcounted: closing the source (`buf:close()`) while the image is alive is safe and defers the source's actual munmap/free until the last borrowing image is freed (no dangling pixels). Other sources (string, `ArrayBuffer`/typed array, another image) have no refcountable object to pin and are copied.
 - `image.decode(data, format?)` → HlImage. Auto-detects PNG/JPEG/BMP from magic bytes.
 - `image.encode(img, format, opts?)` → bytes. `opts.quality` for JPEG (default 90).
+- An image's own pixels (`image.new`, a copying `from_buffer`, `decode`, `from_wasm`, `gpu.texture_read`) are allocated from the VM's heap, so they count against its memory limit (64 MB by default): an image that does not fit fails like any other allocation (`decode` fails with `out_of_memory`). A borrowing `from_buffer` costs nothing extra.
 - `img:width()`, `img:height()`, `img:format()`, `img:size()`. Properties.
 - `img:pixels()`. Raw pixel bytes.
 - `img:close()`. Explicit free (GC handles it otherwise).

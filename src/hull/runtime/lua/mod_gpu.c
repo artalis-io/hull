@@ -777,7 +777,9 @@ static int l_gpu_texture_read(lua_State *L)
     }
 
     /* Wrap as HlImage (takes ownership of data) */
-    HlImage *img = hl_image_new(w, h, (HlImageFormat)fmt, data, len, NULL);
+    HlImageAlloc ia;
+    hl_lua_image_alloc(L, &ia);
+    HlImage *img = hl_image_new(w, h, (HlImageFormat)fmt, data, len, &ia);
     free(data);
     if (!img) {
         lua_pushnil(L);

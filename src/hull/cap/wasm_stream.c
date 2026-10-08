@@ -297,8 +297,25 @@ cleanup:
         if (err_msg) *err_msg = "write_failed";
     }
 
-    /* Set output for BUFFER mode */
-    if (rc == HL_WASM_OK && out_buf &&
+    /* Set output for BUFFER mode. The caller frees the buffer with the
+     * length it is handed, so hand over a buffer of exactly that size: one
+     * still at its grown capacity left cap - len charged to the allocator
+     * for good (with no output, the whole first chunk). No output at all
+     * hands over nothing and frees the buffer below. */
+    if (rc == HL_WASM_OK && out_buf && out_buf_len > 0 &&
+        out_buf_len < out_buf_cap &&
+        output && output->kind == HL_STREAM_OUT_BUFFER) {
+        uint8_t *exact = hl_alloc_realloc(alloc, out_buf, out_buf_cap,
+                                          out_buf_len);
+        if (exact) {
+            out_buf = exact;
+            out_buf_cap = out_buf_len;
+        } else {
+            rc = HL_WASM_ERR_INTERNAL;
+            if (err_msg) *err_msg = "alloc_failed";
+        }
+    }
+    if (rc == HL_WASM_OK && out_buf && out_buf_len > 0 &&
         output && output->kind == HL_STREAM_OUT_BUFFER &&
         output->buffer.data && output->buffer.len) {
         *output->buffer.data = out_buf;

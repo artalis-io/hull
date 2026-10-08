@@ -132,12 +132,14 @@ static JSValue js_image_new(JSContext *ctx, JSValueConst this_val,
     if (!js_get_buffer(ctx, argv[3], &view, &str_out, &needs_free))
         return JS_ThrowTypeError(ctx, "image.new: arg 4 must be a buffer");
 
+    HlImageAlloc ia;
+    hl_js_image_alloc(ctx, &ia);
     HlImage *img = hl_image_new(w, h, (HlImageFormat)fmt,
-                                 view.data, view.len, NULL);
+                                 view.data, view.len, &ia);
     if (needs_free) JS_FreeCString(ctx, str_out);
 
     if (!img)
-        return JS_ThrowRangeError(ctx, "image.new: invalid dimensions or data size");
+        return JS_ThrowRangeError(ctx, "image.new: invalid dimensions or data size, or out of memory");
 
     return js_wrap_image(ctx, img);
 }
@@ -187,7 +189,7 @@ static JSValue js_image_from_buffer(JSContext *ctx, JSValueConst this_val,
     HlImage *img;
     if (mmap_src) {
         img = hl_image_from_view(w, h, (HlImageFormat)fmt,
-                                 view.data, view.len, NULL);
+                                 view.data, view.len);
         if (img) {
             hl_cap_fs_mmap_borrow(mmap_src);
             img->on_free = hl_cap_fs_mmap_release;
@@ -197,7 +199,7 @@ static JSValue js_image_from_buffer(JSContext *ctx, JSValueConst this_val,
 #ifdef HL_ENABLE_WASM
     else if (wasm_src) {
         img = hl_image_from_view(w, h, (HlImageFormat)fmt,
-                                 view.data, view.len, NULL);
+                                 view.data, view.len);
         if (img) {
             hl_wasm_buffer_borrow(wasm_src);
             img->on_free = hl_wasm_buffer_release;
@@ -206,12 +208,14 @@ static JSValue js_image_from_buffer(JSContext *ctx, JSValueConst this_val,
     }
 #endif
     else {
-        img = hl_image_new(w, h, (HlImageFormat)fmt, view.data, view.len, NULL);
+        HlImageAlloc ia;
+        hl_js_image_alloc(ctx, &ia);
+        img = hl_image_new(w, h, (HlImageFormat)fmt, view.data, view.len, &ia);
     }
     if (needs_free) JS_FreeCString(ctx, str_out);
 
     if (!img)
-        return JS_ThrowRangeError(ctx, "image.fromBuffer: invalid dimensions or data size");
+        return JS_ThrowRangeError(ctx, "image.fromBuffer: invalid dimensions or data size, or out of memory");
 
     return js_wrap_image(ctx, img);
 }
@@ -241,8 +245,10 @@ static JSValue js_image_decode_fn(JSContext *ctx, JSValueConst this_val,
     }
 
     const char *err_msg = NULL;
+    HlImageAlloc ia;
+    hl_js_image_alloc(ctx, &ia);
     HlImage *img = hl_image_decode(view.data, view.len,
-                                    fmt_name, NULL, &err_msg);
+                                    fmt_name, &ia, &err_msg);
     if (needs_free) JS_FreeCString(ctx, str_out);
     if (fmt_name) JS_FreeCString(ctx, fmt_name);
 
@@ -392,7 +398,9 @@ static JSValue js_image_from_wasm(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowRangeError(ctx, "image.fromWasm: pixel data too short");
     }
 
-    HlImage *img = hl_image_new(w, h, fmt, data + 9, expected, NULL);
+    HlImageAlloc ia;
+    hl_js_image_alloc(ctx, &ia);
+    HlImage *img = hl_image_new(w, h, fmt, data + 9, expected, &ia);
     if (str_data) JS_FreeCString(ctx, str_data);
     if (!img) return JS_ThrowInternalError(ctx, "image.fromWasm: create failed");
 

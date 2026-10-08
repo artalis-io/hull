@@ -13,6 +13,7 @@
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_stream.h"
 #include "hull/cap/wasm_watchdog.h"
+#include "hull/utils/alloc.h"
 #include "hull/limits/wasm.h"
 #include "wasm_export.h"
 #include <time.h>
@@ -2985,6 +2986,69 @@ UTEST(hl_cap_wasm, stream_empty_input)
 
     free(out_data);
     hl_cap_wasm_destroy(&cache);
+}
+
+/* Audit 9 M1: a BUFFER-mode result is handed over at exactly the length
+ * reported, so the caller's hl_alloc_free(alloc, data, len) - what both
+ * runtimes do - returns the allocator to where it was. The buffer used to
+ * keep its grown capacity (1024 for 1000 bytes here), and an empty result
+ * handed over the whole first chunk with len 0, charged for good. */
+static int stream_alloc_roundtrip(const char *input, size_t input_len,
+                                  size_t expect_len)
+{
+    int bad = 0;
+    HlWasmCache cache;
+    if (hl_cap_wasm_init(&cache) != 0) return 1;
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlStreamInput in = {0};
+    in.kind = HL_STREAM_IN_BUFFER;
+    in.buffer.data = input;
+    in.buffer.len = input_len;
+    HlStreamOpts opts = {0};
+    opts.chunk_size = 256;
+
+    HlAllocator alloc;
+    hl_alloc_init(&alloc, 0);
+    for (int round = 0; round < 2; round++) {
+        void *out_data = NULL;
+        size_t out_len = 0;
+        HlStreamOutput out = {0};
+        out.kind = HL_STREAM_OUT_BUFFER;
+        out.buffer.data = &out_data;
+        out.buffer.len = &out_len;
+        HlStreamResult res = {0};
+        const char *err = NULL;
+        size_t before = atomic_load(&alloc.used);
+        int rc = hl_cap_wasm_stream(&cache, "echo", &in, &out, &opts,
+                                    NULL, &vfs, NULL, &alloc, &res, &err);
+        if (rc != HL_WASM_OK || out_len != expect_len ||
+            (expect_len && memcmp(out_data, input, expect_len) != 0)) {
+            bad = 1;
+            free(out_data);
+            break;
+        }
+        if (expect_len == 0 && out_data != NULL) bad = 1;
+        hl_alloc_free(&alloc, out_data, out_len);
+        /* Round 0 may warm the module cache; round 1 must net to zero. */
+        if (round == 1 && atomic_load(&alloc.used) != before)
+            bad = 1;
+    }
+    hl_cap_wasm_destroy(&cache);
+    return bad;
+}
+
+UTEST(hl_cap_wasm, stream_buffer_handover_exact_len)
+{
+    char input[1000];
+    for (int i = 0; i < 1000; i++) input[i] = (char)(i & 0xFF);
+    ASSERT_EQ(stream_alloc_roundtrip(input, sizeof input, sizeof input), 0);
+}
+
+UTEST(hl_cap_wasm, stream_buffer_handover_empty_output)
+{
+    ASSERT_EQ(stream_alloc_roundtrip(NULL, 0, 0), 0);
 }
 
 UTEST(hl_cap_wasm, stream_gas_exhaustion)

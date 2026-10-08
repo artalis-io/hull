@@ -20,6 +20,26 @@ JSClassID js_image_class_id;
 JSClassID js_wasm_buf_class_id;
 #endif
 
+/* -- Image pixel allocator -- */
+
+static void *js_image_px_malloc(void *ctx, size_t size)
+{
+    return js_malloc_rt((JSRuntime *)ctx, size);
+}
+
+static void js_image_px_free(void *ctx, void *ptr, size_t size)
+{
+    (void)size;
+    js_free_rt((JSRuntime *)ctx, ptr);
+}
+
+void hl_js_image_alloc(JSContext *ctx, HlImageAlloc *out)
+{
+    out->malloc = js_image_px_malloc;
+    out->free   = js_image_px_free;
+    out->ctx    = JS_GetRuntime(ctx);
+}
+
 /* ── Unified buffer protocol (JS) ─────────────────────────────────── */
 
 /*
