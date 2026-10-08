@@ -43,7 +43,14 @@ local _cfg = {
     history            = false, -- attempt-history recording: true | { queues={...} } | false
     history_retention  = nil,   -- seconds to keep attempt rows (nil = jobs.cleanup default)
     events             = false, -- durable fleet-wide event log (jobs.subscribe / jobs.events)
+    events_grace       = nil,   -- seconds a subscription drain holds back young events
+                                -- (nil = 0 on SQLite, EVENTS_GRACE_DEFAULT elsewhere)
 }
+
+-- Default commit-order grace for subscription drains on a backend whose
+-- auto-increment ids can commit out of order (Postgres / MySQL; see
+-- jobs._events_drain).
+local EVENTS_GRACE_DEFAULT = 5
 
 -- Exponential backoff: 2^attempt * 10s, capped at 1h (shared with outbox math).
 local function default_backoff(attempt)
@@ -117,6 +124,12 @@ function jobs.init(opts)
     if opts.history ~= nil then _cfg.history = opts.history end
     if opts.history_retention ~= nil then _cfg.history_retention = opts.history_retention end
     if opts.events ~= nil then _cfg.events = opts.events end
+    if opts.events_grace ~= nil then
+        if type(opts.events_grace) ~= "number" or opts.events_grace < 0 then
+            error("jobs.init: events_grace must be a non-negative number of seconds")
+        end
+        _cfg.events_grace = opts.events_grace
+    end
 
     -- Keyed / indexed text columns are VARCHAR(255) so MySQL can index them;
     -- data-only columns (payload, last_error) stay TEXT. status/type/queue are
@@ -1116,6 +1129,39 @@ local WF_COMPENSATE_KEY = "__compensate"
 -- The step-store row holding a workflow's retry generation (ctx.generation):
 -- absent for the first run, bumped by every jobs.retry.
 local WF_GEN_KEY = "__gen"
+-- The step-store row holding a workflow's patch-frontier floor: the number of
+-- body positions the instance had recorded when jobs.retry deleted some of
+-- them (see wf_frontier).
+local WF_FRONTIER_KEY = "__frontier"
+
+-- How many body positions (step-family rows) a workflow has recorded, for the
+-- ctx.patched frontier. Sleep, wait-deadline, signal and the other control
+-- rows are excluded (they are not body positions). The excludes are a prefix
+-- compare, not LIKE: '__sleep:' / '__waitdl:' contain '_' (a LIKE wildcard)
+-- and no portable ESCAPE clause exists - MySQL processes backslash escapes at
+-- the string-literal level, and "ESCAPE '\'" there is a mangled quote. substr
+-- prefix compare is wildcard-free and identical on SQLite / PG / MySQL.
+--
+-- jobs.retry deletes rows the old run counted (its uuid memos, the steps its
+-- compensations undid) and records the count it had in a floor row, so the
+-- frontier never shrinks below what the old code actually ran past: without
+-- it a retried run reached a patch "fresh" at a position the old run had
+-- already passed under the old branch, and adopted the new one.
+local function wf_frontier(id)
+    local r = db.query(
+        "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? "
+        .. "AND substr(step_key, 1, 8) <> '__sleep:' "
+        .. "AND substr(step_key, 1, 9) <> '__waitdl:' "
+        .. "AND substr(step_key, 1, 6) <> '__sig:' "
+        .. "AND step_key <> ? AND step_key <> ? AND step_key <> ?",
+        { id, WF_COMPENSATE_KEY, WF_GEN_KEY, WF_FRONTIER_KEY })
+    local n = tonumber(r and r[1] and r[1].n) or 0
+    local f = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        { id, WF_FRONTIER_KEY })
+    local floor = tonumber(f and f[1] and f[1].result) or 0
+    return n > floor and n or floor
+end
 
 --- Reclaim jobs stuck in `running` past the visibility timeout - a worker that
 -- claimed them died before completing. One whose attempts are used up is
@@ -1485,7 +1531,18 @@ function jobs.work(opts)
         _last_edrain = now
     end
     local batch = jobs.claim(opts)
-    for _, job in ipairs(batch) do
+    for i, job in ipairs(batch) do
+        -- The whole batch was claimed with one claimed_at but runs one job at a
+        -- time, so a later job can sit past visibility_timeout before it
+        -- starts: the reaper re-pends it, another worker runs it, and this one
+        -- ran it again (or the reaper dead-lettered it as "worker lost").
+        -- Refresh the claim before starting each job after the first, and skip
+        -- one whose claim is already gone - its new owner holds it (and its
+        -- strict-concurrency slot).
+        if i > 1 and not jobs.heartbeat(job) then
+            job._lost = true
+            goto continue
+        end
         job.deps = load_deps(job.id)   -- workflow: dependency results, in order
         local h = _handlers[job.type] or _default
         local started_ms = time.now_ms()   -- attempt timing (used only if history on)
@@ -1503,19 +1560,25 @@ function jobs.work(opts)
                 -- increment (a workflow may sleep / wait many times without
                 -- exhausting max_attempts).
                 local wf_now = time.now()
+                -- Claim-guarded like every transition: 0 rows means the job
+                -- was reaped (and maybe re-claimed) while the body ran, so the
+                -- run that owns it now also owns its concurrency slot and its
+                -- signal re-check - this one leaves both alone.
+                local parked
                 if result.waiting then
                     -- ctx.wait_signal: park in the non-terminal 'waiting' status
                     -- (excluded by the claim query). run_at carries the optional
                     -- timeout deadline (0 = none); the reaper wakes a timed-out
                     -- wait, jobs.signal wakes a delivered one.
-                    db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
+                    parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
                         .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
                         .. CLAIMED,
                         { result.deadline or 0, wf_now, job.id, job.claim_token })
+                    if (parked or 0) == 0 then job._lost = true end
                     -- Close the deliver-before-park race: a signal delivered in the
                     -- check->park window couldn't re-activate us (we were 'running'),
                     -- so re-check now that we are 'waiting'.
-                    if result.signal_name then
+                    if result.signal_name and not job._lost then
                         local sig = db.query("SELECT 1 AS x FROM _hull_workflow_signals "
                             .. "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
                             { job.id, result.signal_name })
@@ -1527,10 +1590,11 @@ function jobs.work(opts)
                     end
                 else
                     -- ctx.sleep: future-dated pending job.
-                    db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
+                    parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
                         .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
                         .. CLAIMED,
                         { result.wake_at or wf_now, wf_now, job.id, job.claim_token })
+                    if (parked or 0) == 0 then job._lost = true end
                 end
             elseif not ok then
                 err_str = tostring(result)
@@ -1570,6 +1634,7 @@ function jobs.work(opts)
         if job._conc_strict == 1 and job._conc_key ~= nil and not job._lost then
             conc_release(job._conc_key)
         end
+        ::continue::
     end
     return #batch
 end
@@ -2122,21 +2187,7 @@ local function make_ctx(job, name)
     -- the two stay aligned regardless of how a workflow interleaves sleeps.
     -- ctx.patched compares them to decide old-vs-new (see below).
     local step_pos = 0
-    local frontier = (function()
-        -- Exclude the sleep / wait-deadline control rows with a prefix compare, not
-        -- LIKE: '__sleep:' / '__waitdl:' contain '_' (a LIKE wildcard) and no
-        -- portable ESCAPE clause exists - MySQL processes backslash escapes at the
-        -- string-literal level, and "ESCAPE '\'" there is a mangled quote. substr
-        -- prefix compare is wildcard-free and identical on SQLite / PG / MySQL.
-        local r = db.query(
-            "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? "
-            .. "AND substr(step_key, 1, 8) <> '__sleep:' "
-            .. "AND substr(step_key, 1, 9) <> '__waitdl:' "
-            .. "AND substr(step_key, 1, 6) <> '__sig:' "
-            .. "AND step_key <> ? AND step_key <> ?",
-            { job.id, WF_COMPENSATE_KEY, WF_GEN_KEY })
-        return (r and r[1] and r[1].n) or 0
-    end)()
+    local frontier = wf_frontier(job.id)
     -- The retry generation: 0 on the first run, +1 per jobs.retry. A step
     -- that is idempotent on a key (a payment provider's idempotency key) and
     -- has a compensation must put this in the key: after jobs.retry re-runs
@@ -2159,6 +2210,12 @@ local function make_ctx(job, name)
     end)()
     ctx._compensating = compensating
     ctx.step = function(step_key, fn, opts)
+        -- "__" names the step store's control rows (__gen, __compensate,
+        -- __sig:..., __uuid:..., __patch:...); a step under one would be
+        -- read back as - or overwrite - workflow state.
+        if type(step_key) == "string" and step_key:sub(1, 2) == "__" then
+            error("ctx.step: step names starting with '__' are reserved", 2)
+        end
         step_pos = step_pos + 1
         if compensating then
             local r = db.query(
@@ -2326,7 +2383,9 @@ end
 -- one, a duplicate arriving after a wait consumed the first counts as the next
 -- delivery (it satisfies the next wait on the name). Multi-round waits on one
 -- name should always pass one.
--- Returns true, or false when the delivery was dropped as a duplicate id.
+-- Returns true when the delivery was stored, false when it was dropped - as a
+-- duplicate id, or because an earlier delivery of the name is still pending
+-- (the sender may retry it once a wait has consumed that one).
 -- @tparam number id       the workflow id
 -- @tparam string name     the signal name
 -- @tparam[opt] any payload
@@ -2371,9 +2430,13 @@ function jobs.signal(id, name, payload, opts)
                 .. "created_at=?, consumed_at=NULL "
                 .. "WHERE workflow_id=? AND name=? AND consumed_at IS NOT NULL",
                 { enc, now, id, name })
-            if (stored or 0) == 0 and seen_key then
-                db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
-                    { id, seen_key })
+            if (stored or 0) == 0 then
+                -- Nothing was stored: report it (the caller may retry later).
+                accepted = false
+                if seen_key then
+                    db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                        { id, seen_key })
+                end
             end
         end
         -- Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
@@ -2489,6 +2552,9 @@ function jobs.retry(id)
             .. "WHERE id=? AND status='dead'",
             { now, now, id })
         if (n or 0) == 0 then return end
+        -- The ctx.patched frontier as the old run left it, taken before the
+        -- deletes below shrink it (recorded as a floor for a workflow).
+        local frontier = wf_frontier(id)
         -- A workflow the reaper sent through a compensation run carries its
         -- marker (and a max_attempts raised by one): without clearing both, the
         -- requeued run would start in compensation mode and never do new work.
@@ -2523,6 +2589,16 @@ function jobs.retry(id)
                 "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
                 { id, WF_GEN_KEY })
             local gen = ((g and g[1] and tonumber(g[1].result)) or 0) + 1
+            -- Keep the ctx.patched frontier where the old run left it: the
+            -- compensated-step delete above and the uuid one below shrink the
+            -- live count, which alone let the new run adopt a patch the old
+            -- code had already run past.
+            db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                { id, WF_FRONTIER_KEY })
+            db.exec(
+                "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+                .. "VALUES (?, ?, ?, 'done', ?)",
+                { id, WF_FRONTIER_KEY, tostring(frontier), now })
             db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
                 { id, WF_GEN_KEY })
             db.exec(
@@ -2636,7 +2712,8 @@ end
 -- Synchronous drain seam (the testability keystone): lease the
 -- subscription, deliver new events in id order, advance the cursor, release the
 -- lease. No timers/sleeps - jobs.work drives it. Returns { delivered, cursor,
--- leased }. Test seams: opts.now (clock), opts.batch, opts.commit_cursor (false =
+-- leased }. Test seams: opts.now (clock), opts.batch, opts.grace (the
+-- commit-order horizon, overriding events_grace), opts.commit_cursor (false =
 -- deliver but don't advance -> models a crash before the cursor write),
 -- opts.release_lease (false = hold the lease -> models a worker death mid-drain).
 function jobs._events_drain(name, opts)
@@ -2665,6 +2742,27 @@ function jobs._events_drain(name, opts)
     local max_failures = row[1].max_failures
     -- Fetch events past the cursor, filtered by the subscription's types.
     local where, params = { "id > ?" }, { cursor }
+    -- Commit-order horizon. An event id is allocated at INSERT, not at commit,
+    -- so on Postgres / MySQL a lower id can become visible after a higher one
+    -- (two transitions committing out of order); once the cursor passed the
+    -- higher id, the lower one was never delivered. So hold back every event
+    -- at or after the first one younger than `grace` seconds: a missing lower
+    -- id is then an insert at least `grace` seconds old that has not
+    -- committed - or a rolled-back one, which never will. Residual: a
+    -- transaction that holds an emitted event uncommitted for longer than
+    -- `grace` (or clocks skewed by more than that between workers) can still
+    -- be passed over. SQLite serializes writers, so ids commit in order there
+    -- and the default grace is 0 (no added latency).
+    local grace = opts.grace or _cfg.events_grace
+    if grace == nil then grace = (db.backend_name == "sqlite") and 0 or EVENTS_GRACE_DEFAULT end
+    if grace > 0 then
+        local y = db.query("SELECT MIN(id) AS m FROM _hull_job_events WHERE id > ? AND ts > ?",
+            { cursor, now - grace })
+        local young = y[1] and y[1].m
+        if young ~= nil then
+            where[#where + 1] = "id < ?"; params[#params + 1] = young
+        end
+    end
     if row[1].types and row[1].types ~= "" then
         local ph = {}
         for t in tostring(row[1].types):gmatch("[^,]+") do ph[#ph + 1] = "?"; params[#params + 1] = t end

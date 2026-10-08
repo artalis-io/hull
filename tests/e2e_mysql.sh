@@ -534,7 +534,8 @@ jobs_reset_my
 EVDIR=$(mktemp -d)
 cat > "$EVDIR/ev.lua" <<'LUA'
 local jobs = require("hull.jobs")
-app.manifest({ modules = { "hull/db@1", "hull/jobs@1" } })
+local time = require("hull.time")
+app.manifest({ modules = { "hull/db@1", "hull/jobs@1", "hull/time@1" } })
 app.main(function(ctx)
   jobs.init({ events = true })
   jobs.handler("ok",  function(j) return { r = 1 } end)
@@ -550,15 +551,21 @@ app.main(function(ctx)
   -- row count (no RETURNING). deliv == the full log => the lease was acquired.
   local seen = 0
   jobs.subscribe("s", function(ev) seen = seen + 1 end, { from = "beginning" })
-  local d = jobs._events_drain("s", { now = 1000, batch = 100 })
-  ctx.stdout:write(("JEV e=%d c=%d d=%d x=%d deliv=%d seen=%d\n"):format(
-    n.enqueued or 0, n.completed or 0, n.dead or 0, n.cancelled or 0, d.delivered, seen))
+  -- Commit-order horizon: ids can commit out of order here, so a drain
+  -- holds back events younger than the default grace (5 s) and delivers
+  -- them once they are older.
+  local now = time.now()
+  local h = jobs._events_drain("s", { now = now, batch = 100 })
+  local d = jobs._events_drain("s", { now = now + 60, batch = 100 })
+  ctx.stdout:write(("JEV e=%d c=%d d=%d x=%d held=%d deliv=%d seen=%d\n"):format(
+    n.enqueued or 0, n.completed or 0, n.dead or 0, n.cancelled or 0, h.delivered,
+    d.delivered, seen))
   return 0
 end)
 LUA
 evout=$(./build/hull "$EVDIR/ev.lua" -d "$DSN" 2>/dev/null)
 case "$evout" in
-    *"JEV e=4 c=1 d=2 x=1 deliv=8 seen=8"*)
+    *"JEV e=4 c=1 d=2 x=1 held=0 deliv=8 seen=8"*)
         echo "PASS: jobs durable events + subscription lease drain (MySQL)"
         rm -rf "$EVDIR" ;;
     *)  echo "::error jobs events on MySQL: $evout"; exit 1 ;;

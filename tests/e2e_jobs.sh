@@ -2254,6 +2254,222 @@ app.main(async (ctx) => {
 echo "== observability B: Lua =="; check_history "lua" "lua" "$LUA_HISTORY"
 echo "== observability B: JS =="; check_history "js" "js" "$JS_HISTORY"
 
+# ── audit 9: batch claim refresh, lost yield, signal drops, patch frontier,
+#    event drain horizon ────────────────────────────────────────────────────
+# BATCH: a batch is claimed with one claimed_at but runs one job at a time; a
+#   later job whose claim was reaped while an earlier one ran is skipped (its
+#   new owner runs it), not run here as well - b2 runs once in total.
+# LOSTYIELD: a workflow whose claim is reaped and re-claimed mid-body, then
+#   yields on ctx.sleep, does not release the strict-concurrency slot the new
+#   owner holds - a second job on the key stays unclaimable.
+# SIG: jobs.signal returns false when it drops a delivery because one of the
+#   name is still pending.
+# PATCHRETRY: jobs.retry deletes rows the old run counted (its uuid memo, the
+#   compensated step); the patch frontier keeps the old run's count, so a
+#   ctx.patched the old code had already run past keeps the old branch.
+# HORIZON: with a commit-order grace, a drain holds back events younger than
+#   the grace and delivers them once they are older.
+check_audit9() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"BATCH mid=0 st=pending total=1"*)
+            pass "$label: a batch job whose claim was reaped before it started is skipped" ;;
+        *) fail "$label: batch claim refresh" "$out" ;;
+    esac
+    case "$out" in
+        *"LOSTYIELD reclaimed=1 other=0"*)
+            pass "$label: a lost workflow yield keeps the new owner's concurrency slot" ;;
+        *) fail "$label: lost workflow yield" "$out" ;;
+    esac
+    case "$out" in
+        *"SIG first=true pending_dup=false res=one"*)
+            pass "$label: jobs.signal returns false for a delivery dropped while one is pending" ;;
+        *) fail "$label: signal return value" "$out" ;;
+    esac
+    case "$out" in
+        *"PATCHRETRY st=dead res=old"*)
+            pass "$label: the patch frontier survives jobs.retry's deletes" ;;
+        *) fail "$label: patch frontier after retry" "$out" ;;
+    esac
+    case "$out" in
+        *"HORIZON young=0 old=3 cfg_young=0"*)
+            pass "$label: a subscription drain holds back events younger than the grace" ;;
+        *) fail "$label: event drain horizon" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_AUDIT9='local jobs = require("hull.jobs")
+local time = require("hull.time")
+app.manifest({ modules = { "hull/jobs@1", "hull/time@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end, events = true })
+  local ran, reaped = {}, false
+  jobs.handler("b1", function()
+    if not reaped then reaped = true; jobs.reap({ visibility_timeout = 0 }) end
+  end)
+  jobs.handler("b2", function() ran.b2 = (ran.b2 or 0) + 1 end)
+  jobs.enqueue("b1", {}, { priority = 10 })
+  local id2 = jobs.enqueue("b2", {})
+  jobs.work({ batch = 2 })
+  local mid, st = ran.b2 or 0, jobs.get(id2).status
+  jobs.work({ batch = 2 })
+  ctx.stdout:write(("BATCH mid=%d st=%s total=%d\n"):format(mid, st, ran.b2 or 0))
+
+  local stolen, reclaimed = false, 0
+  jobs.workflow("lostyield", function(w)
+    w.step("s", function()
+      if not stolen then
+        stolen = true
+        jobs.reap({ visibility_timeout = 0 })       -- this run loses its claim
+        reclaimed = #jobs.claim({ batch = 1 })      -- and another run takes it
+      end
+      return 1
+    end)
+    w.sleep(3600)
+    return "x"
+  end)
+  local strict = { concurrency_key = "L", concurrency = 1, concurrency_strict = true }
+  jobs.start("lostyield", {}, strict)
+  jobs.work({ batch = 1 })
+  jobs.enqueue("other", {}, strict)
+  local other = #jobs.claim({ batch = 5 })
+  ctx.stdout:write(("LOSTYIELD reclaimed=%d other=%d\n"):format(reclaimed, other))
+
+  jobs.workflow("sig", function(w) return w.wait_signal("x").v end)
+  local s = jobs.start("sig", {}, { queue = "sig" })   -- own queue: "other" above stays parked
+  local first = jobs.signal(s, "x", { v = "one" })
+  local dup = jobs.signal(s, "x", { v = "two" })
+  jobs.work({ queue = "sig", batch = 1 })
+  ctx.stdout:write(("SIG first=%s pending_dup=%s res=%s\n"):format(
+    tostring(first), tostring(dup), tostring(jobs.result(s).result)))
+
+  local fail_final = true
+  jobs.workflow("pr", function(w)
+    w.uuid()
+    w.step("s1", function() return 1 end)
+    w.step("charge", function() return 1 end, { compensate = function() end })
+    w.step("final", function() if fail_final then error("down") end return 1 end)
+    return "v1"
+  end)
+  local p = jobs.start("pr", {}, { max_attempts = 1, queue = "pr" })
+  jobs.work({ queue = "pr", batch = 1 })
+  local pst = jobs.get(p).status
+  jobs.workflow("pr", function(w)                 -- redeploy: patch before charge
+    w.uuid()
+    w.step("s1", function() return 1 end)
+    local np = w.patched("p")
+    if np then w.step("charge2", function() return 1 end)
+    else w.step("charge", function() return 1 end, { compensate = function() end }) end
+    w.step("final", function() return 1 end)
+    return np and "new" or "old"
+  end)
+  jobs.retry(p)
+  jobs.work({ queue = "pr", batch = 1 })
+  ctx.stdout:write(("PATCHRETRY st=%s res=%s\n"):format(pst, tostring(jobs.result(p).result)))
+
+  local got = 0
+  jobs.subscribe("h", function() got = got + 1 end, { from = "now" })
+  jobs.enqueue("e1", {}); jobs.enqueue("e2", {}); jobs.enqueue("e3", {})
+  local now = time.now()
+  local y = jobs._events_drain("h", { now = now, grace = 5 }).delivered
+  local o = jobs._events_drain("h", { now = now + 60, grace = 5 }).delivered
+  jobs.init({ events_grace = 5 })
+  jobs.subscribe("h2", function() end, { from = "now" })
+  jobs.enqueue("e4", {})
+  local cy = jobs._events_drain("h2", { now = now }).delivered
+  ctx.stdout:write(("HORIZON young=%d old=%d cfg_young=%d\n"):format(y, o, cy))
+  return 0
+end)'
+
+JS_AUDIT9='import { app } from "hull:app"; import { jobs } from "hull:jobs"; import { time } from "hull:time";
+app.manifest({ modules: ["hull/jobs@1", "hull/time@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0, events: true });
+  let b2 = 0, reaped = false;
+  jobs.handler("b1", () => {
+    if (!reaped) { reaped = true; jobs.reap({ visibilityTimeout: 0 }); }
+  });
+  jobs.handler("b2", () => { b2++; });
+  jobs.enqueue("b1", {}, { priority: 10 });
+  const id2 = jobs.enqueue("b2", {});
+  await jobs.work({ batch: 2 });
+  const mid = b2, st = jobs.get(id2).status;
+  await jobs.work({ batch: 2 });
+  ctx.stdout.write(`BATCH mid=${mid} st=${st} total=${b2}\n`);
+
+  let stolen = false, reclaimed = 0;
+  jobs.workflow("lostyield", async (w) => {
+    await w.step("s", () => {
+      if (!stolen) {
+        stolen = true;
+        jobs.reap({ visibilityTimeout: 0 });
+        reclaimed = jobs.claim({ batch: 1 }).length;
+      }
+      return 1;
+    });
+    await w.sleep(3600);
+    return "x";
+  });
+  const strict = { concurrencyKey: "L", concurrency: 1, concurrencyStrict: true };
+  jobs.start("lostyield", {}, strict);
+  await jobs.work({ batch: 1 });
+  jobs.enqueue("other", {}, strict);
+  const other = jobs.claim({ batch: 5 }).length;
+  ctx.stdout.write(`LOSTYIELD reclaimed=${reclaimed} other=${other}\n`);
+
+  jobs.workflow("sig", async (w) => (await w.waitSignal("x")).v);
+  const s = jobs.start("sig", {}, { queue: "sig" });
+  const first = jobs.signal(s, "x", { v: "one" });
+  const dup = jobs.signal(s, "x", { v: "two" });
+  await jobs.work({ queue: "sig", batch: 1 });
+  ctx.stdout.write(`SIG first=${first} pending_dup=${dup} res=${jobs.result(s).result}\n`);
+
+  let failFinal = true;
+  jobs.workflow("pr", async (w) => {
+    await w.uuid();
+    await w.step("s1", () => 1);
+    await w.step("charge", () => 1, { compensate: () => {} });
+    await w.step("final", () => { if (failFinal) throw new Error("down"); return 1; });
+    return "v1";
+  });
+  const p = jobs.start("pr", {}, { maxAttempts: 1, queue: "pr" });
+  await jobs.work({ queue: "pr", batch: 1 });
+  const pst = jobs.get(p).status;
+  jobs.workflow("pr", async (w) => {
+    await w.uuid();
+    await w.step("s1", () => 1);
+    const np = w.patched("p");
+    if (np) await w.step("charge2", () => 1);
+    else await w.step("charge", () => 1, { compensate: () => {} });
+    await w.step("final", () => 1);
+    return np ? "new" : "old";
+  });
+  jobs.retry(p);
+  await jobs.work({ queue: "pr", batch: 1 });
+  ctx.stdout.write(`PATCHRETRY st=${pst} res=${jobs.result(p).result}\n`);
+
+  let got = 0;
+  jobs.subscribe("h", () => { got++; }, { from: "now" });
+  jobs.enqueue("e1", {}); jobs.enqueue("e2", {}); jobs.enqueue("e3", {});
+  const now = time.now();
+  const y = jobs._eventsDrain("h", { now, grace: 5 }).delivered;
+  const o = jobs._eventsDrain("h", { now: now + 60, grace: 5 }).delivered;
+  jobs.init({ eventsGrace: 5 });
+  jobs.subscribe("h2", () => {}, { from: "now" });
+  jobs.enqueue("e4", {});
+  const cy = jobs._eventsDrain("h2", { now }).delivered;
+  ctx.stdout.write(`HORIZON young=${y} old=${o} cfg_young=${cy}\n`);
+  return 0;
+});'
+
+echo "== audit 9 (batch claim, lost yield, signal drop, patch frontier, horizon): Lua =="
+check_audit9 "lua" "lua" "$LUA_AUDIT9"
+echo "== audit 9 (batch claim, lost yield, signal drop, patch frontier, horizon): JS =="
+check_audit9 "js" "js" "$JS_AUDIT9"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"

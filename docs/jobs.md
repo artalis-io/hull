@@ -184,6 +184,20 @@ jobs.subscribe("fulfillment", (ev) => { if (ev.type === "completed") webhook.not
 - **`from`**: `"now"` (default) starts at the current head (skip history);
   `"beginning"` replays the whole retained log.
 - **Ordered per subscription** (by event id); no cross-subscription order promise.
+- **Commit-order horizon (Postgres / MySQL).** An event id is allocated when the
+  event is inserted, not when its transaction commits, so two transitions can
+  commit their events out of id order. A drain therefore holds back every event
+  at or after the first one younger than a grace period - `events_grace`
+  seconds (`eventsGrace` in JS) in `jobs.init`, default **5** on Postgres /
+  MySQL and **0** on SQLite, whose single writer commits ids in order. A lower
+  id still missing behind an older event is then an insert that has been open
+  for longer than the grace, or one that rolled back. Delivery is at least
+  `events_grace` seconds behind the event on those backends. Residual: an event
+  whose transaction stays uncommitted for longer than the grace after a later
+  event was written (or worker clocks skewed by more than the grace) can still
+  be passed over by the cursor - it remains in the log (`jobs.events`), but the
+  subscription does not see it. Raise `events_grace` if transitions can sit in
+  long transactions (a `db.batch` around a slow handler call).
 - **Retention is subscription-aware**: `jobs.cleanup` never truncates the log past
   the slowest subscription's cursor, so a lagging consumer keeps its unseen events.
 - **Poison events don't wedge a subscription.** By default a handler that keeps
@@ -392,7 +406,8 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   `_hull_workflow_steps`; on any re-run (retry or crash-resume) the step returns
   the stored result **without** re-executing `fn`. Steps are **at-least-once**
   (idempotent, same contract as a handler): a crash between the side effect and
-  the memo write re-runs the step.
+  the memo write re-runs the step. Step names starting with `__` are reserved
+  for the step store's own rows and raise.
 - **`ctx.input`** is the payload from `jobs.start`; **`ctx.id`** is the workflow
   id. The body between steps re-runs on each resume, so keep it cheap and put all
   side effects inside steps.
@@ -417,7 +432,9 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   again on the consumed signal. Waits may repeat a name (a multi-round
   approval): each wait takes the next delivery of it, and each timed wait has
   its own deadline. One delivery per name is held at a time - a signal sent
-  while an earlier one of that name is still unconsumed is dropped.
+  while an earlier one of that name is still unconsumed is dropped, and the
+  call returns `false` (it returns `true` only when it stored the delivery), so
+  a sender can retry once a wait has consumed the pending one.
   **Duplicate deliveries:** a sender that retries (a webhook redelivered after
   a timeout, a double-clicked approval button) must pass a delivery id -
   `jobs.signal(id, name, payload, { delivery_id = "..." })` (`{ deliveryId }`
@@ -500,6 +517,11 @@ const price = ctx.patched("use-v2-pricing")
   patch is inert (the recorded markers are harmless).
 - It is durable and backend-portable (the decision lives in the step store, same
   as `ctx.step`); no schema change.
+- **Across `jobs.retry`.** A retry deletes step rows the old run recorded (its
+  `ctx.uuid` memos, the steps its compensations undid), so the retried run
+  re-executes them. The position the old run had reached is kept (a `__frontier`
+  row), so a `ctx.patched` the old code had already run past still returns
+  `false` in the retried run instead of adopting the new branch mid-history.
 
 ## Handler contract
 
@@ -648,6 +670,13 @@ but the visibility timeout makes the last one sharper):
   once its attempts reach `max_attempts` it moves it to `dead` instead - with
   its dependents failed and a `dead` event - so a handler that crashes or hangs
   the process cannot crash-loop the fleet forever.
+- **A claimed batch is re-checked job by job.** `jobs.work` claims up to `batch`
+  jobs at once but runs them one after another, so before it starts each job
+  after the first it extends that job's claim (a `jobs.heartbeat`). A job whose
+  claim is already gone - the reaper re-pended it while earlier jobs ran - is
+  skipped, not run a second time beside its new owner. Keep
+  `batch x (typical handler time)` well under `visibility_timeout` all the same:
+  a job skipped this way has had an attempt counted.
 - **Heartbeat long jobs.** A job that runs longer than `visibility_timeout`
   (default 300s) is presumed orphaned and re-run. A long WASM/GPU handler should
   call `jobs.heartbeat(job)` periodically (at least every `visibility_timeout/2`
