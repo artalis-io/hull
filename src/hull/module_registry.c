@@ -739,8 +739,10 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/middleware/idempotency",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* Key fingerprint (crypto), JSON payload caching, TTL clock. */
-        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/encoding", "hull/json", "hull/time", 0},
+        /* Key fingerprint (crypto), JSON payload caching, TTL clock;
+         * hull/log for the all-anonymous-principal warning. */
+        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/encoding", "hull/json", "hull/time",
+                 "hull/log", 0},
     },
     {
         .name = "hull/web/middleware/inbox",

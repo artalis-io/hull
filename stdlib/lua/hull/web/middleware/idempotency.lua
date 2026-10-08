@@ -45,6 +45,7 @@ local crypto = require("hull.crypto")
 local encoding = require("hull.encoding")
 local db = require("hull.db._internal").connection()
 local time = require("hull.time")
+local log = require("hull.log")
 
 local idempotency = {}
 
@@ -209,30 +210,61 @@ end
 -- @function idempotency.middleware
 -- @tparam[opt] table opts
 -- @tparam[opt] function(req)->string opts.get_principal
---   Returns a stable per-user key for scoping. Default: the session's
---   `user_id`, else the JWT user's `sub` / `id` / `user_id`
---   (`req.ctx.user`, set by auth.jwt_middleware), else `"__anon"` - which
---   every anonymous caller shares, so mount it after authentication.
+--   Returns a stable per-user key for scoping. Default: `"session:" ..` the
+--   session's `user_id`, else `"user:" ..` the JWT user's `sub` / `id` /
+--   `user_id` (`req.ctx.user`, set by auth.jwt_middleware), else `"__anon"` -
+--   which every anonymous caller shares, so mount it after authentication
+--   (it logs a warning once when 20 keyed requests in a row were all anonymous).
 -- @tparam[opt] number opts.ttl  Override module-level TTL for this instance.
 -- @tparam[opt="idempotency-key"] string opts.header_name  Header to read.
 -- @tparam[opt={"POST"}] table opts.methods  Methods to intercept.
 -- @treturn function(req, res) -> 0|1
+-- The default principal: "session:<user_id>" for a session user, else
+-- "user:<id>" for a JWT user (`req.ctx.user`, auth.jwt_middleware), else
+-- "__anon". The two kinds of user are prefixed apart (audit 9): a session
+-- user_id was used bare, so a session user whose id was the string "user:5"
+-- shared JWT user 5's principal and could replay or squat their keys.
+local function default_principal(req)
+    if req.ctx and req.ctx.session and req.ctx.session.user_id then
+        return "session:" .. tostring(req.ctx.session.user_id)
+    end
+    -- A JWT-authenticated user (auth.jwt_middleware). Without this every
+    -- bearer-token user shared "__anon", so one could replay another's
+    -- stored response, or squat their key, by knowing key and body.
+    local u = req.ctx and req.ctx.user
+    if type(u) == "table" then
+        local id = u.sub or u.id or u.user_id
+        if id ~= nil then return "user:" .. tostring(id) end
+    end
+    return "__anon"
+end
+idempotency._default_principal = default_principal
+
+-- How many keyed requests in a row may all be "__anon" before the default
+-- principal warns (once per middleware) that it is mounted where no
+-- authentication ran: every caller then shares one principal.
+local ANON_WARN_AFTER = 20
+
 function idempotency.middleware(opts)
     opts = opts or {}
 
+    local anon_run, anon_warned = 0, false
     local get_principal = opts.get_principal or function(req)
-        if req.ctx and req.ctx.session and req.ctx.session.user_id then
-            return tostring(req.ctx.session.user_id)
+        local p = default_principal(req)
+        if p ~= "__anon" then
+            anon_run = 0
+        elseif not anon_warned then
+            anon_run = anon_run + 1
+            if anon_run >= ANON_WARN_AFTER then
+                anon_warned = true
+                log.warn("idempotency: the last " .. ANON_WARN_AFTER .. " keyed "
+                    .. "requests had no session or JWT user, so they all share the "
+                    .. "'__anon' principal (one caller can replay another's stored "
+                    .. "response). Mount the middleware after authentication, or "
+                    .. "pass get_principal.")
+            end
         end
-        -- A JWT-authenticated user (auth.jwt_middleware). Without this every
-        -- bearer-token user shared "__anon", so one could replay another's
-        -- stored response, or squat their key, by knowing key and body.
-        local u = req.ctx and req.ctx.user
-        if type(u) == "table" then
-            local id = u.sub or u.id or u.user_id
-            if id ~= nil then return "user:" .. tostring(id) end
-        end
-        return "__anon"
+        return p
     end
 
     -- L-3: dropped the leading underscore - Lua convention reserves `_x`

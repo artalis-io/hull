@@ -5068,6 +5068,23 @@ UTEST(js_stdlib, middleware_audit6_suite)
     cleanup_js_caps();
 }
 
+/* Web stdlib regressions from audit 9 (auth-flows email-change undo, lockout
+ * id keys, sync setters, ratelimit, cookie, session logout, idempotency,
+ * oauth). */
+UTEST(js_stdlib, web_audit9_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_web_audit9.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, toast_suite)
 {
     init_js_with_caps();

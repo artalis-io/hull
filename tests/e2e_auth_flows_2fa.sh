@@ -299,6 +299,26 @@ run_flow() {
         "$BASE/auth/totp-verify")
     check_contains "$_label: recovery code accepted" "$R" '"ok":true'
 
+    # 8b. Audit 9: a pending-2FA token is bound to the password it was
+    #     issued against. Taken before a password reset, it no longer
+    #     completes the sign-in afterwards (400 before the code is checked).
+    R=$(curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" \
+        "$BASE/auth/login")
+    STALE_TOKEN=$(extract_totp_token_json "$R")
+    curl -sS -X POST "$BASE/_emails/clear" > /dev/null
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"email\":\"$EMAIL\"}" "$BASE/auth/password-reset/request" > /dev/null
+    RESET_TOK=$(extract_url "$(last_email_text "$PORT" "$EMAIL")" | sed 's/.*token=//')
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$RESET_TOK\",\"password\":\"${PW}2\"}" \
+        "$BASE/auth/password-reset/confirm" > /dev/null
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$STALE_TOKEN\",\"code\":\"000000\"}" \
+        "$BASE/auth/totp-verify")
+    check_status "$_label: pending-2FA token dies with the password reset" "$S" "400"
+
     # 10. Magic-link path with 2FA - click the link (submit its page's
     #     form), expect the default TOTP form. Submit it to
     #     /auth/totp-verify with a fresh code.

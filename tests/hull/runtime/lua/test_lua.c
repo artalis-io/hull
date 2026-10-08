@@ -4649,6 +4649,23 @@ UTEST(lua_stdlib, kv_cache_suite)
     cleanup_lua_caps();
 }
 
+/* Web stdlib regressions from audit 9 (auth-flows email-change undo, lockout
+ * id keys, ratelimit, cookie, session logout, idempotency, oauth): auth-flows
+ * and session need the db, so the caps-bearing state. */
+UTEST(lua_stdlib, web_audit9_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_web_audit9.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, ws_stream_suite)
 {
     long long pass = 0, fail = -1;

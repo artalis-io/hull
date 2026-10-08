@@ -112,4 +112,49 @@ function M.user_id(user_id)
     return nil
 end
 
+
+--- Did a state-changing request come from the app's own pages?
+--
+-- For a request a forged form or an `<img>` on another site could make
+-- (logout: the clearing Set-Cookie signs the victim out). `Sec-Fetch-Site`,
+-- which every current browser sends, must be `same-origin` or `none`:
+-- `cross-site` AND `same-site` (a sibling subdomain, often less trusted than
+-- the app) are refused. Without it, `Origin` - or failing it `Referer` - must
+-- name the request's own host (`X-Forwarded-Host` behind a trusted proxy) or
+-- one of `opts.origins`. With no provenance header at all the client is not a
+-- browser: it passes only with `opts.allow_bare`.
+--
+-- @tparam table req
+-- @tparam[opt] table opts  `{ allow_bare, trust_proxy, origins = {"https://app.example.com", ...} }`
+-- @treturn boolean
+function M.same_origin(req, opts)
+    opts = opts or {}
+    local h = (req and req.headers) or {}
+    local site = h["sec-fetch-site"]
+    if type(site) == "string" and site ~= "" then
+        return site == "same-origin" or site == "none"
+    end
+    local v = h.origin
+    if v == nil then v = h.referer end
+    if v == nil then return opts.allow_bare == true end
+    local o = type(v) == "string" and v:match("^(https?://[^/?#]+)")
+    if not o then return false end
+    o = o:lower()
+    local authority = o:match("^https?://(.*)$")
+    local hosts = { h.host }
+    if opts.trust_proxy and type(h["x-forwarded-host"]) == "string" then
+        hosts[#hosts + 1] = h["x-forwarded-host"]:match("^[^,]*")
+    end
+    for _, host in ipairs(hosts) do
+        if type(host) == "string" and authority == _text.trim(host):lower() then
+            return true
+        end
+    end
+    for _, allowed in ipairs(opts.origins or {}) do
+        local a = type(allowed) == "string" and allowed:match("^(https?://[^/?#]+)")
+        if a and o == a:lower() then return true end
+    end
+    return false
+end
+
 return M

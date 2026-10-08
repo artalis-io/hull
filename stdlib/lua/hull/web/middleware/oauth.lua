@@ -92,8 +92,13 @@
 --                 client_secret = env.get("GOOGLE_CLIENT_SECRET"),
 --             },
 --         },
+--         -- Key the account on the issuer + subject, never on the email
+--         -- claim: an email is not unique across IdPs or tenants (a
+--         -- multi-tenant Microsoft app sees every tenant's users, and a
+--         -- tenant admin sets their users' addresses). For Microsoft use
+--         -- (claims.tid, claims.sub) - or claims.oid - as the key.
 --         find_user = function(provider, claims)
---             return find_or_create_user(claims.sub, claims.email)
+--             return find_or_create_user(claims.iss, claims.sub, claims.email)
 --         end,
 --         -- on_login matches hull/web/auth-flows shape so a single
 --         -- session.login_handler(cookie) wires both.
@@ -111,6 +116,7 @@ local json        = require("hull.json")
 local jwt         = require("hull.jwt")
 local time        = require("hull.time")
 local http_client = require("hull.http-client")
+local _request    = require("hull.web._request")
 local log         = require("hull.log")
 
 local oauth = {}
@@ -213,6 +219,12 @@ local PRESETS = {
             -- emits either a 36-char tenant GUID OR a verified domain.
             cfg.issuer_pattern =
                 "^https://login%.microsoftonline%.com/[%w%-%.]+/v2%.0$"
+            -- ...and it must be the issuer of the token's OWN tenant (audit
+            -- 9; Microsoft's multi-tenant validation rule): `iss` is checked
+            -- against this template with {tid} = claims.tid, so a token
+            -- whose tid is missing or names another tenant is refused.
+            cfg.issuer_tid_template =
+                "https://login.microsoftonline.com/{tid}/v2.0"
             if tenant == "organizations" then cfg.issuer_deny = msa_issuer end
         end
         return cfg
@@ -221,6 +233,30 @@ local PRESETS = {
 
 -- ── Helpers ────────────────────────────────────────────────────────
 
+
+-- Is the ID token's `iss` the provider's? Exactly its issuer, or for a
+-- multi-tenant preset (Microsoft `common` / `organizations`) one matching
+-- issuer_pattern that is not issuer_deny AND is the issuer of the token's own
+-- tenant: issuer_tid_template with {tid} = claims.tid (audit 9). Without that
+-- last check any tenant-shaped iss passed, whatever tenant the token said it
+-- came from.
+local function issuer_ok(cfg, claims)
+    if claims.iss == cfg.issuer then return true end
+    if type(cfg.issuer_pattern) ~= "string" or type(claims.iss) ~= "string" then
+        return false
+    end
+    if claims.iss:match(cfg.issuer_pattern) == nil or claims.iss == cfg.issuer_deny then
+        return false
+    end
+    local tpl = cfg.issuer_tid_template
+    if tpl == nil then return true end
+    local tid = claims.tid
+    if type(tid) ~= "string" or tid == "" or tid:find("[^%w%-%.]") then
+        return false
+    end
+    local a, b = tpl:find("{tid}", 1, true)
+    return claims.iss == tpl:sub(1, a - 1) .. tid .. tpl:sub(b + 1)
+end
 
 -- Cryptographically-random URL-safe string (base64url-encoded).
 local function random_urlsafe(n_bytes)
@@ -572,13 +608,7 @@ local function handle_callback(req, res)
     -- Round-10 HIGH-3: when the preset is multi-tenant (Microsoft
     -- `common` / `organizations` / `consumers`), cfg.issuer_pattern
     -- accepts any matching per-tenant issuer.
-    local iss_ok = (claims.iss == cfg.issuer)
-    if not iss_ok and type(cfg.issuer_pattern) == "string"
-       and type(claims.iss) == "string" then
-        iss_ok = claims.iss:match(cfg.issuer_pattern) ~= nil
-                 and claims.iss ~= cfg.issuer_deny
-    end
-    if not iss_ok then
+    if not issuer_ok(cfg, claims) then
         log.warn("oauth: iss mismatch: " .. tostring(claims.iss))
         return res:status(400):html("auth failed")
     end
@@ -626,11 +656,17 @@ end
 -- GET or POST /auth/logout
 local function handle_logout(req, res)
     -- Logout changes state, so another site must not trigger it with an
-    -- <img src="/auth/logout"> or a link: refuse a request the browser marks
-    -- as cross-site. (Same-site, same-origin, a typed URL - "none" - and
-    -- non-browser clients that send no header pass.)
-    local site = req.headers and req.headers["sec-fetch-site"]
-    if site == "cross-site" then
+    -- <img src="/auth/logout"> or a link (audit 9): Sec-Fetch-Site must be
+    -- same-origin or none (a typed URL) - same-site is refused too - and
+    -- without it Origin / Referer must name the app (its Host, base_url).
+    -- A POST with no provenance header at all is a non-browser client and
+    -- passes; a GET must show where it came from, since an <img> or a link
+    -- with rel=noreferrer sends no header either.
+    if not _request.same_origin(req, {
+        allow_bare  = req.method == "POST",
+        trust_proxy = _state.trust_proxy,
+        origins     = _state.base_url and { _state.base_url } or nil,
+    }) then
         return res:status(403):html("forbidden")
     end
     res:header("Set-Cookie",
@@ -724,6 +760,7 @@ function oauth.init(opts)
         if p.issuer then
             resolved.issuer_pattern = nil
             resolved.issuer_deny = nil
+            resolved.issuer_tid_template = nil
         end
         for _, k in ipairs({"authorization_endpoint", "token_endpoint",
                             "jwks_uri", "issuer"}) do
@@ -768,6 +805,8 @@ oauth._test = {
     verify_state    = verify_state,
     refresh_jwks    = refresh_jwks,
     safe_return_to  = safe_return_to,
+    issuer_ok       = issuer_ok,
+    presets         = PRESETS,
     reset = function()
         _state.state_secret = nil
         _state.providers        = {}

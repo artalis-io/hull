@@ -85,9 +85,16 @@ Pure functions. No state. Both runtimes (snake_case in Lua, camelCase in JS. Lua
 | `htmx.reswap(res, mode)` | Sets `HX-Reswap`. Overrides the swap mode. |
 | `htmx.trigger(res, event, payload?, opts?)` | Sets `HX-Trigger`. Fires a client-side event. `opts.timing = "swap"` → `HX-Trigger-After-Swap`; `opts.timing = "settle"` → `HX-Trigger-After-Settle`. Multi-event form: `htmx.trigger(res, { e1 = p1, e2 = p2 }, opts?)`. |
 | `htmx.refresh(res)` | Sets `HX-Refresh: true`. Hard reload. |
-| `htmx.push_url(res, url)` | Sets `HX-Push-Url`. Pushes to browser history. |
-| `htmx.replace_url(res, url)` | Sets `HX-Replace-Url`. Replaces in browser history. |
-| `htmx.location(res, path_or_opts)` | Sets `HX-Location`. Client-side nav without reload. |
+| `htmx.push_url(res, url, opts?)` | Sets `HX-Push-Url`. Pushes to browser history. `false` suppresses a push. |
+| `htmx.replace_url(res, url, opts?)` | Sets `HX-Replace-Url`. Replaces in browser history. |
+| `htmx.location(res, path_or_opts, opts?)` | Sets `HX-Location`. Client-side nav without reload. |
+
+`redirect`, `push_url`, `replace_url` and `location` (its string, or the
+table's `path`) take only an http(s) URL or a scheme-less relative path: a
+`javascript:` / `data:` URL, a control character, whitespace or `\`, and a
+protocol-relative `//host/...` (unless `opts.allow_protocol_relative`,
+`allowProtocolRelative` in JS) raise. An app passing a request value through
+must not hand the browser a script URL or another site's address.
 
 ---
 

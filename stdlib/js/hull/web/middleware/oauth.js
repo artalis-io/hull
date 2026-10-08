@@ -86,6 +86,7 @@ import { jwt }        from "hull:jwt";
 import { time }       from "hull:time";
 import { httpClient } from "hull:http-client";
 import { log }        from "hull:log";
+import { _request }   from "hull:web:_request";
 
 // ── Module state ───────────────────────────────────────────────────
 
@@ -171,6 +172,9 @@ const PRESETS = {
         } else if (tenant === "common" || tenant === "organizations") {
             cfg.issuerPattern =
                 /^https:\/\/login\.microsoftonline\.com\/[\w\-\.]+\/v2\.0$/;
+            // ...and it must be the issuer of the token's OWN tenant (audit 9;
+            // see the Lua sibling): iss === template with {tid} = claims.tid.
+            cfg.issuerTidTemplate = "https://login.microsoftonline.com/{tid}/v2.0";
             if (tenant === "organizations") cfg.issuerDeny = msaIssuer;
         }
         return cfg;
@@ -178,6 +182,21 @@ const PRESETS = {
 };
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+// Is the ID token's `iss` the provider's? Exactly its issuer, or for a
+// multi-tenant preset one matching issuerPattern that is not issuerDeny AND is
+// the issuer of the token's own tenant (issuerTidTemplate with {tid} =
+// claims.tid, audit 9). See the Lua sibling.
+function issuerOk(cfg, claims) {
+    if (claims.iss === cfg.issuer) return true;
+    if (!(cfg.issuerPattern instanceof RegExp) || typeof claims.iss !== "string") return false;
+    if (!cfg.issuerPattern.test(claims.iss) || claims.iss === cfg.issuerDeny) return false;
+    const tpl = cfg.issuerTidTemplate;
+    if (tpl === undefined || tpl === null) return true;
+    const tid = claims.tid;
+    if (typeof tid !== "string" || tid === "" || /[^\w\-.]/.test(tid)) return false;
+    return claims.iss === tpl.replace("{tid}", () => tid);
+}
 
 import { encoding } from "hull:encoding";
 
@@ -534,13 +553,7 @@ async function handleCallback(req, res) {
     // 5. OIDC claim checks beyond signature + exp.
     // Round-10 HIGH-3: multi-tenant presets fall back to a regex
     // pattern when strict equality misses. See Lua sibling.
-    let issOk = (claims.iss === cfg.issuer);
-    if (!issOk && cfg.issuerPattern instanceof RegExp
-        && typeof claims.iss === "string") {
-        issOk = cfg.issuerPattern.test(claims.iss)
-                && claims.iss !== cfg.issuerDeny;
-    }
-    if (!issOk) {
+    if (!issuerOk(cfg, claims)) {
         log.warn("oauth: iss mismatch: " + String(claims.iss));
         res.status(400).html("auth failed"); return;
     }
@@ -584,8 +597,13 @@ async function handleLogout(req, res) {
     // <img src="/auth/logout"> or a link: refuse a request the browser marks
     // as cross-site. (Same-site, same-origin, a typed URL - "none" - and
     // non-browser clients that send no header pass.)
-    const site = req.headers && req.headers["sec-fetch-site"];
-    if (site === "cross-site") { res.status(403).html("forbidden"); return; }
+    // Audit 9 (see the Lua sibling): same-site refused too, Origin / Referer
+    // checked without Sec-Fetch-Site, and a GET must show where it came from.
+    if (!_request.sameOrigin(req, {
+        allowBare: req.method === "POST",
+        trustProxy: _state.trustProxy,
+        origins: _state.baseUrl ? [_state.baseUrl] : [],
+    })) { res.status(403).html("forbidden"); return; }
     res.header("Set-Cookie", cookie.clear(_state.stateCookie,
                               { path: _state.stateCookiePath }));
     let target = "/";
@@ -672,7 +690,10 @@ function init(opts) {
         // An explicit issuer pins it: the preset's multi-tenant pattern
         // (tenant defaults to "common") otherwise still accepted a token
         // from any tenant or personal account.
-        if (p.issuer) { delete resolved.issuerPattern; delete resolved.issuerDeny; }
+        if (p.issuer) {
+            delete resolved.issuerPattern; delete resolved.issuerDeny;
+            delete resolved.issuerTidTemplate;
+        }
         for (const k of ["authorizationEndpoint", "tokenEndpoint",
                           "jwksUri", "issuer"]) {
             if (typeof resolved[k] !== "string") {
@@ -712,6 +733,8 @@ const _test = {
     verifyState,
     refreshJwks,
     safeReturnTo,
+    issuerOk,
+    presets: PRESETS,
     reset: () => {
         _state.stateSecret = null;
         _state.providers      = Object.create(null);

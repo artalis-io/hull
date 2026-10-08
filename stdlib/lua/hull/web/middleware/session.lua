@@ -655,11 +655,17 @@ function session.logout_handler(cookie_mod, opts)
     local cookie_opts = opts.cookie_opts or DEFAULT_LOGIN_HANDLER_OPTS.cookie_opts
     local respond = opts.respond or function(res) res:json({ ok = true }) end
 
+    -- Provenance as auth-flows checks it (audit 9): Sec-Fetch-Site must be
+    -- same-origin or none - a sibling subdomain (same-site) is refused too -
+    -- and without it Origin / Referer must name the request's own host
+    -- (opts.trust_proxy: X-Forwarded-Host) or one of opts.origins. A client
+    -- sending none of them passes: forcing a logout is all a forged one does.
+    local provenance = { allow_bare = true, trust_proxy = opts.trust_proxy == true,
+                         origins = opts.origins }
     return function(req, res)
-        -- A request the browser marks cross-site (an attacker page posting
-        -- a form here) is refused, as oauth's logout does: the clearing
-        -- Set-Cookie would still sign the victim out.
-        if req.headers and req.headers["sec-fetch-site"] == "cross-site" then
+        -- A forged request (an attacker page posting a form here) is refused:
+        -- the clearing Set-Cookie would still sign the victim out.
+        if not _request.same_origin(req, provenance) then
             return res:status(403):json({ error = "forbidden" })
         end
         local sid
