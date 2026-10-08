@@ -203,4 +203,10 @@ int hl_host_path_too_broad(const char *path);
  */
 int hl_host_path_covers_home(const char *path, const char *sub);
 
+/**
+ * @brief 1 when @p path is $HOME/<sub> or a directory below it (realpath'd;
+ *        <sub> need not exist). Case-insensitive on Windows.
+ */
+int hl_host_path_under_home(const char *path, const char *sub);
+
 #endif /* HL_SHARED_HOST_H */

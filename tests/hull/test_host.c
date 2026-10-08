@@ -778,4 +778,28 @@ UTEST(host, path_covers_home_sub)
     broad_leave(&e);
 }
 
+/* ~/.hull and every directory inside it (keys, the tool store) are under
+ * it; home, its siblings and the root are not (audit 10: HULL_CACHE_DIR). */
+UTEST(host, path_under_home_sub)
+{
+    BroadEnv e;
+    ASSERT_EQ(broad_enter(&e), 0);
+    char sub[HL_TEST_PATH_MAX + 32], dot[HL_TEST_PATH_MAX + 32];
+    char keys[HL_TEST_PATH_MAX + 32];
+    snprintf(sub, sizeof sub, "%s/proj", e.dir);
+    snprintf(dot, sizeof dot, "%s/.hull", e.dir);
+    snprintf(keys, sizeof keys, "%s/.hull/keys", e.dir);
+    ASSERT_EQ(mkdir(sub, 0755), 0);
+    ASSERT_EQ(mkdir(dot, 0700), 0);
+    ASSERT_EQ(mkdir(keys, 0700), 0);
+
+    EXPECT_EQ(hl_host_path_under_home(dot, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_under_home(keys, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_under_home(sub, ".hull"), 0);
+    EXPECT_EQ(hl_host_path_under_home(e.dir, ".hull"), 0);
+    EXPECT_EQ(hl_host_path_under_home("/", ".hull"), 0);
+    EXPECT_EQ(hl_host_path_under_home(sub, NULL), 1);
+    broad_leave(&e);
+}
+
 UTEST_MAIN()

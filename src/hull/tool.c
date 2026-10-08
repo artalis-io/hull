@@ -484,18 +484,12 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         return 1;
     }
 
-    /* Manifest extraction resolves an app's relative local modules the SAME way
-     * the runtime does: extraction (`hull build`, `hull manifest`, ...) executes
-     * the app entry via tool.loadfile + pcall, and a modular app's top-level
-     * require("./routes/users") (+ nested ./../models/user) only reaches the
-     * filesystem-fallback resolver in hl_lua_require when lua->app_dir is set,
-     * which then applies requiring-module-relative resolution + canonical ./..
-     * collapse + app-root containment. That root is set on demand by
-     * tool.set_app_dir(dir) from the extraction code, which knows the real app
-     * directory; hl_tool_argv_app_dir() above is a sandbox-unveil heuristic
-     * (the first positional that names a directory) and is NOT a reliable
-     * module root. See
-     * l_tool_set_app_dir in mod_tool.c and fcompose.extract_manifest. */
+    /* Manifest extraction never runs app code in this VM: it has no
+     * load / loadfile / dofile (runtime.c). tool.extract_manifest_lua runs the
+     * entry in a fresh sandboxed runtime whose app root is the entry's
+     * directory, so a modular app's relative requires resolve as they do at
+     * run time (hl_lua_extract_manifest_json); the JS entry is extracted in a
+     * re-exec'd child. */
 
     /* Tool-mode native-module exposure.
      *

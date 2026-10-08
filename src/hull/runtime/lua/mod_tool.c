@@ -68,9 +68,8 @@
 
 #include "lua.h"
 #include "lauxlib.h"
-#include "internal.h"          /* get_hl_lua_from_L, HlLua (tool.set_app_dir) */
+#include "internal.h"          /* get_hl_lua_from_L, HlLua */
 #include "protected.h"         /* hl_lua_pushlstring_safe */
-#include "hull/utils/alloc.h"  /* hl_alloc_malloc / hl_alloc_free_const */
 
 /* Registry key for the unveil context pointer */
 #define TOOL_UNVEIL_KEY "__hull_tool_unveil"
@@ -84,6 +83,20 @@ static HlToolUnveilCtx *get_unveil_ctx(lua_State *L)
     HlToolUnveilCtx *ctx = (HlToolUnveilCtx *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     return ctx;
+}
+
+/* The path argument at @p idx of a binding that writes there (a file, or a
+ * directory it fills), or NULL when the tool sandbox does not grant writing
+ * and creating it. Audit 10: these bindings wrote wherever the script named,
+ * past the allowlist every other tool write checks. */
+static const char *tool_out_path(lua_State *L, int idx)
+{
+    const char *path = luaL_checkstring(L, idx);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    if (ctx && (hl_tool_unveil_check(ctx, path, 'w') != 0 ||
+                hl_tool_unveil_check(ctx, path, 'c') != 0))
+        return NULL;
+    return path;
 }
 
 /* ── argv / env for a spawn ───────────────────────────────────────── *
@@ -403,6 +416,11 @@ static int l_tool_tmpdir(lua_State *L)
     if (hl_tool_cosmo_tmpdir(cosmo_td, sizeof(cosmo_td)) == 0)
         base = cosmo_td;   /* forward-slash shared dir on cosmo/Windows */
 #endif
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    if (ctx && hl_tool_unveil_check(ctx, base, 'c') != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
     char tmpl[600];
     int n = snprintf(tmpl, sizeof(tmpl), "%s/hull_XXXXXX", base);
     if (n < 0 || (size_t)n >= sizeof(tmpl)) {
@@ -624,38 +642,6 @@ static int l_tool_stdout(lua_State *L)
     return 0;
 }
 
-/* ── tool.set_app_dir(dir) ─────────────────────────────────────────────
- *
- * Set the tool VM's module-resolution root (lua->app_dir) so manifest
- * extraction resolves an app's relative local modules the SAME way the runtime
- * does: a modular app's top-level require("./routes/users") (and its nested
- * ./../models/user) only reaches the filesystem-fallback resolver in
- * hl_lua_require when lua->app_dir is set, which then applies requiring-module-
- * relative resolution + canonical ./.. collapse + app-root containment. The
- * extraction code knows the real app directory; parse_app_dir() (used for the
- * sandbox unveil) returns the first positional - the SUBCOMMAND, e.g. "build" -
- * so it is not a reliable module root. Idempotent: frees any prior root first.
- */
-static int l_tool_set_app_dir(lua_State *L)
-{
-    const char *dir = luaL_checkstring(L, 1);
-    HlLua *lua = get_hl_lua_from_L(L);
-    if (!lua) return 0;
-    if (lua->app_dir) {
-        hl_alloc_free_const(lua->base.alloc, lua->app_dir, lua->app_dir_size);
-        lua->app_dir = NULL;
-        lua->app_dir_size = 0;
-    }
-    size_t n = strlen(dir) + 1;
-    char *copy = hl_alloc_malloc(lua->base.alloc, n);  /* NULL alloc -> malloc */
-    if (copy) {
-        memcpy(copy, dir, n);
-        lua->app_dir = copy;
-        lua->app_dir_size = n;
-    }
-    return 0;
-}
-
 /* ── tool.extract_manifest_js(path) → JSON string | nil ────────────── *
  *
  * Used by build.lua / manifest.lua / inspect.lua to read
@@ -669,6 +655,10 @@ static int l_tool_set_app_dir(lua_State *L)
 static int l_tool_extract_manifest_js(lua_State *L)
 {
     const char *path = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *uctx = get_unveil_ctx(L);
+    if (uctx && hl_tool_unveil_check(uctx, path, 'r') != 0)
+        return luaL_error(L, "tool.extract_manifest_js: %s: not readable in "
+                          "the tool sandbox", path);
 
     char  *json = NULL;
     size_t json_len = 0;
@@ -713,6 +703,12 @@ static int l_tool_extract_manifest_js(lua_State *L)
 static int l_tool_extract_manifest_lua(lua_State *L)
 {
     const char *path = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    if (ctx && hl_tool_unveil_check(ctx, path, 'r') != 0) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s: not readable in the tool sandbox", path);
+        return 2;
+    }
     HlLua *lua = get_hl_lua_from_L(L);
     char *json = NULL, *err = NULL;
     size_t json_len = 0;
@@ -729,8 +725,8 @@ static int l_tool_extract_manifest_lua(lua_State *L)
 
 static int l_tool_extract_platform(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
-    int rc = hl_build_extract_platform(dir);
+    const char *dir = tool_out_path(L, 1);
+    int rc = dir ? hl_build_extract_platform(dir) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -739,9 +735,9 @@ static int l_tool_extract_platform(lua_State *L)
 
 static int l_tool_extract_feature_runtime(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
+    const char *dir = tool_out_path(L, 1);
     const char *rt  = luaL_checkstring(L, 2);
-    int rc = hl_build_extract_feature_runtime(dir, rt);
+    int rc = dir ? hl_build_extract_feature_runtime(dir, rt) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -750,8 +746,8 @@ static int l_tool_extract_feature_runtime(lua_State *L)
 
 static int l_tool_extract_feature_http(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
-    int rc = hl_build_extract_feature_http(dir);
+    const char *dir = tool_out_path(L, 1);
+    int rc = dir ? hl_build_extract_feature_http(dir) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -760,9 +756,9 @@ static int l_tool_extract_feature_http(lua_State *L)
 
 static int l_tool_extract_feature_http_rt(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
+    const char *dir = tool_out_path(L, 1);
     const char *rt  = luaL_checkstring(L, 2);
-    int rc = hl_build_extract_feature_http_rt(dir, rt);
+    int rc = dir ? hl_build_extract_feature_http_rt(dir, rt) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -771,9 +767,9 @@ static int l_tool_extract_feature_http_rt(lua_State *L)
 
 static int l_tool_extract_feature_tui_rt(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
+    const char *dir = tool_out_path(L, 1);
     const char *rt  = luaL_checkstring(L, 2);
-    int rc = hl_build_extract_feature_tui_rt(dir, rt);
+    int rc = dir ? hl_build_extract_feature_tui_rt(dir, rt) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -782,50 +778,50 @@ static int l_tool_extract_feature_tui_rt(lua_State *L)
 
 static int l_tool_extract_feature_wasm(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
-    int rc = hl_build_extract_feature_wasm(dir);
+    const char *dir = tool_out_path(L, 1);
+    int rc = dir ? hl_build_extract_feature_wasm(dir) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
 
 static int l_tool_extract_feature_wasm_rt(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
+    const char *dir = tool_out_path(L, 1);
     const char *rt  = luaL_checkstring(L, 2);
-    int rc = hl_build_extract_feature_wasm_rt(dir, rt);
+    int rc = dir ? hl_build_extract_feature_wasm_rt(dir, rt) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
 
 static int l_tool_extract_feature_sqlite_rt(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
+    const char *dir = tool_out_path(L, 1);
     const char *rt  = luaL_checkstring(L, 2);
-    int rc = hl_build_extract_feature_sqlite_rt(dir, rt);
+    int rc = dir ? hl_build_extract_feature_sqlite_rt(dir, rt) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
 
 static int l_tool_extract_feature_sqlite(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
-    int rc = hl_build_extract_feature_sqlite(dir);
+    const char *dir = tool_out_path(L, 1);
+    int rc = dir ? hl_build_extract_feature_sqlite(dir) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
 
 static int l_tool_extract_feature_tls(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
-    int rc = hl_build_extract_feature_tls(dir);
+    const char *dir = tool_out_path(L, 1);
+    int rc = dir ? hl_build_extract_feature_tls(dir) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
 
 static int l_tool_extract_feature_keel(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
-    int rc = hl_build_extract_feature_keel(dir);
+    const char *dir = tool_out_path(L, 1);
+    int rc = dir ? hl_build_extract_feature_keel(dir) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -834,17 +830,17 @@ static int l_tool_extract_feature_keel(lua_State *L)
 
 static int l_tool_extract_feature_image(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
-    int rc = hl_build_extract_feature_image(dir);
+    const char *dir = tool_out_path(L, 1);
+    int rc = dir ? hl_build_extract_feature_image(dir) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
 
 static int l_tool_extract_feature_image_rt(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
+    const char *dir = tool_out_path(L, 1);
     const char *rt  = luaL_checkstring(L, 2);
-    int rc = hl_build_extract_feature_image_rt(dir, rt);
+    int rc = dir ? hl_build_extract_feature_image_rt(dir, rt) : -1;
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -883,7 +879,11 @@ static int tool_write_nofollow(const char *path, const void *data, size_t len)
 
 static int l_tool_extract_platform_cosmo(lua_State *L)
 {
-    const char *dir = luaL_checkstring(L, 1);
+    const char *dir = tool_out_path(L, 1);
+    if (!dir) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
 
     const HlEmbeddedPlatform *platforms = NULL;
     int count = hl_build_get_platforms(&platforms);
@@ -992,12 +992,12 @@ static int l_compiler_version(lua_State *L) {
 
 static int l_compiler_compile(lua_State *L) {
     const char *src = luaL_checkstring(L, 1);
-    const char *obj = luaL_checkstring(L, 2);
+    const char *obj = tool_out_path(L, 2);
     const char *inc = lua_isstring(L, 3) ? lua_tostring(L, 3) : NULL;
     lua_getfield(L, LUA_REGISTRYINDEX, TOOL_COMPILER_KEY);
     HlCompiler *c = (HlCompiler *)lua_touserdata(L, -1);
     lua_pop(L, 1);
-    if (!c) { lua_pushboolean(L, 0); return 1; }
+    if (!c || !obj) { lua_pushboolean(L, 0); return 1; }
     lua_pushboolean(L, hl_compiler_compile(c, src, obj, inc) == 0);
     return 1;
 }
@@ -1129,13 +1129,13 @@ static int l_linker_is_available(lua_State *L) {
 
 static int l_linker_link(lua_State *L) {
     lua_settop(L, 5);   /* the lists below go on the stack after the optional args */
-    const char *output = luaL_checkstring(L, 1);
+    const char *output = tool_out_path(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);
     luaL_checktype(L, 3, LUA_TTABLE);
     lua_getfield(L, LUA_REGISTRYINDEX, TOOL_LINKER_KEY);
     HlLinker *l = (HlLinker *)lua_touserdata(L, -1);
     lua_pop(L, 1);
-    if (!l) { lua_pushboolean(L, 0); return 1; }
+    if (!l || !output) { lua_pushboolean(L, 0); return 1; }
 
     /* Lua-owned lists of strings the tables hold (as tool.spawn's argv): a
      * converted number was popped from under its pointer, a nil cut the
@@ -2074,7 +2074,6 @@ static const luaL_Reg tool_funcs[] = {
     { "file_mtime",             l_tool_file_mtime },
     { "stderr",                 l_tool_stderr },
     { "stdout",                 l_tool_stdout },
-    { "set_app_dir",            l_tool_set_app_dir },
     { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_manifest_lua",   l_tool_extract_manifest_lua },
     { "extract_platform",       l_tool_extract_platform },

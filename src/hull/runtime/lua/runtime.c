@@ -251,7 +251,7 @@ static int hl_lua_print(lua_State *L)
 
 /* General lua_State -> HlLua accessor (registry "__hull_lua", set in
  * hl_lua_init below). Lives here - always linked in every flavor - because
- * consumers outside the HTTP web bindings (mod_tool.c's tool.set_app_dir) need
+ * consumers outside the HTTP web bindings (mod_tool.c's manifest extraction) need
  * it; it previously sat in the HTTP-gated bindings.c and broke the pure-compute
  * link. Declared in internal.h. */
 HlLua *get_hl_lua_from_L(lua_State *L)
@@ -320,6 +320,16 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         lua_pop(lua->L, 1);
         luaL_requiref(lua->L, LUA_COLIBNAME, luaopen_coroutine, 1);
         lua_pop(lua->L, 1);
+        /* No source loading from script (audit 10): load / loadfile /
+         * dofile read and compiled any file - bytecode included - past the
+         * unveil allowlist. The plugins never call them; app code reaches
+         * the tool through tool.extract_manifest_*, which runs it in a
+         * fresh sandboxed runtime. */
+        static const char *const no_load[] = { "load", "loadfile", "dofile" };
+        for (size_t i = 0; i < sizeof no_load / sizeof no_load[0]; i++) {
+            lua_pushnil(lua->L);
+            lua_setglobal(lua->L, no_load[i]);
+        }
         hl_lua_tool_register(lua->L, lua->tool_unveil_ctx);
         /* Marks the tool VM: only it loads the CLI plugins (mod_fs.c). In
          * the registry, which script cannot reach. */

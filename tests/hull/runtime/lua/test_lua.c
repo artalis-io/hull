@@ -8957,6 +8957,58 @@ UTEST(lua_tool_vm, rename_needs_write_on_the_source)
     rmdir(ro); rmdir(rw);
 }
 
+/* audit 10 G1: the tool VM compiles no source from script (load / loadfile /
+ * dofile read any file past the allowlist), tool.set_app_dir is gone, and the
+ * bindings that read an app entry or create files check the allowlist too. */
+UTEST(lua_tool_vm, no_load_and_bindings_check_the_allowlist)
+{
+    char other[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(other, sizeof other, "hull_tv_out") != NULL);
+    char app[HL_TEST_PATH_MAX + 16];
+    snprintf(app, sizeof app, "%s/app.lua", other);
+    ASSERT_EQ(tool_vm_write(app, "return 1\n"), 0);
+
+    HlToolUnveilCtx uctx;
+    hl_tool_unveil_init(&uctx);
+    hl_tool_unveil_seal(&uctx);                 /* nothing granted */
+
+    HlVfs pvfs;
+    void *pvfs_owned = NULL;
+    hl_platform_vfs_init(&pvfs, &pvfs_owned);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.sandbox = 0;
+    HlLua tv;
+    memset(&tv, 0, sizeof tv);
+    tv.tool_unveil_ctx = &uctx;
+    tv.base.platform_vfs = &pvfs;
+    ASSERT_EQ(hl_lua_init(&tv, &cfg), 0);
+    lua_State *L = tv.L;
+
+    lua_pushstring(L, app);
+    lua_setglobal(L, "APP");
+    lua_pushstring(L, other);
+    lua_setglobal(L, "OUT");
+    const char *chunk =
+        "assert(load == nil and loadfile == nil and dofile == nil)\n"
+        "assert(tool.set_app_dir == nil)\n"
+        "local m, err = tool.extract_manifest_lua(APP)\n"
+        "assert(m == nil and err:find('not readable'), tostring(err))\n"
+        "assert(tool.tmpdir() == nil)\n"
+        "assert(tool.extract_platform(OUT) == false)\n"
+        "return true\n";
+    ASSERT_EQ(luaL_loadstring(L, chunk), LUA_OK);
+    int rc = lua_pcall(L, 0, 1, 0);
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(L, -1));
+    EXPECT_EQ(rc, LUA_OK);
+    lua_pop(L, 1);
+
+    hl_lua_free(&tv);
+    hl_tool_unveil_free(&uctx);
+    hl_platform_vfs_dispose(pvfs_owned);
+    remove(app);
+    rmdir(other);
+}
+
 /* The app runtime never carries a tool context, even when the caller's struct
  * held one (the field is only kept in tool mode). */
 UTEST(lua_tool_vm, app_runtime_drops_a_stray_unveil_context)
