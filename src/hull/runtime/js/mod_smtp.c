@@ -15,44 +15,6 @@
 
 #include <stdio.h>
 
-/* Helper: extract JS string array from an Array object */
-static int js_get_string_array(JSContext *ctx, JSValueConst arr,
-                               const char ***out, int *out_count)
-{
-    *out = NULL;
-    *out_count = 0;
-
-    if (JS_IsUndefined(arr) || JS_IsNull(arr))
-        return 0;
-
-    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
-    int32_t len = 0;
-    JS_ToInt32(ctx, &len, len_val);
-    JS_FreeValue(ctx, len_val);
-
-    if (len <= 0)
-        return 0;
-
-    const char **strs = js_mallocz(ctx, (size_t)len * sizeof(const char *));
-    if (!strs)
-        return -1;
-
-    int count = 0;
-    for (int32_t i = 0; i < len; i++) {
-        JSValue v = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
-        if (JS_IsString(v)) {
-            strs[count] = JS_ToCString(ctx, v);
-            if (strs[count])
-                count++;
-        }
-        JS_FreeValue(ctx, v);
-    }
-
-    *out = strs;
-    *out_count = count;
-    return 0;
-}
-
 static void js_free_string_array(JSContext *ctx, const char **strs, int count)
 {
     if (!strs) return;
@@ -61,6 +23,69 @@ static void js_free_string_array(JSContext *ctx, const char **strs, int count)
             JS_FreeCString(ctx, strs[i]);
     }
     js_free(ctx, strs);
+}
+
+/* Recipients past this many are refused (parity with Lua): SMTP servers cap
+ * RCPT TO at 100 per message (RFC 5321 4.5.3.1.8's minimum). */
+#define HL_JS_SMTP_CC_MAX 1000
+
+/* Helper: copy the strings of an Array. Every entry is copied or the whole
+ * call fails (audit 10): it used to drop - silently - a non-string entry and
+ * one whose conversion failed (leaving that exception pending), and its
+ * result was never checked, so a message went out to fewer recipients than
+ * asked. 0 on success; -1 with an exception thrown, nothing allocated. */
+static int js_get_string_array(JSContext *ctx, JSValueConst arr,
+                               const char *what,
+                               const char ***out, int *out_count)
+{
+    *out = NULL;
+    *out_count = 0;
+
+    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    if (JS_IsException(len_val))
+        return -1;
+    int64_t len = 0;
+    int bad = JS_ToInt64(ctx, &len, len_val);
+    JS_FreeValue(ctx, len_val);
+    if (bad)
+        return -1;
+    if (len <= 0)
+        return 0;
+    if (len > HL_JS_SMTP_CC_MAX) {
+        JS_ThrowRangeError(ctx, "smtp.send: %s has more than %d entries",
+                           what, HL_JS_SMTP_CC_MAX);
+        return -1;
+    }
+
+    const char **strs = js_mallocz(ctx, (size_t)len * sizeof(const char *));
+    if (!strs)
+        return -1;
+
+    int count = 0;
+    for (int64_t i = 0; i < len; i++) {
+        JSValue v = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+        if (JS_IsException(v))
+            goto fail;
+        if (!JS_IsString(v)) {
+            JS_FreeValue(ctx, v);
+            JS_ThrowTypeError(ctx, "smtp.send: %s[%d] must be a string",
+                              what, (int)i);
+            goto fail;
+        }
+        strs[count] = JS_ToCString(ctx, v);
+        JS_FreeValue(ctx, v);
+        if (!strs[count])
+            goto fail;
+        count++;
+    }
+
+    *out = strs;
+    *out_count = count;
+    return 0;
+
+fail:
+    js_free_string_array(ctx, strs, count);
+    return -1;
 }
 
 /* Build the { ok, error? } SMTP result object. */
@@ -159,11 +184,21 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     const char *content_type = JS_IsString(v_ct) ? JS_ToCString(ctx, v_ct) : NULL;
     const char *reply_to = JS_IsString(v_rto) ? JS_ToCString(ctx, v_rto) : NULL;
 
-    /* CC array */
+    /* CC array: copied whole, or smtp.send throws (audit 10). */
     const char **cc = NULL;
     int cc_count = 0;
-    if (JS_IsArray(ctx, v_cc))
-        js_get_string_array(ctx, v_cc, &cc, &cc_count);
+    int cc_failed = 0;
+    if (!JS_IsUndefined(v_cc) && !JS_IsNull(v_cc)) {
+        int is_arr = JS_IsArray(ctx, v_cc);
+        if (is_arr < 0) {
+            cc_failed = 1;
+        } else if (!is_arr) {
+            JS_ThrowTypeError(ctx, "smtp.send: cc must be an array of strings");
+            cc_failed = 1;
+        } else if (js_get_string_array(ctx, v_cc, "cc", &cc, &cc_count) != 0) {
+            cc_failed = 1;
+        }
+    }
 
     /* Free JS values */
     JS_FreeValue(ctx, v_host);
@@ -182,6 +217,10 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     /* smtp.send ALWAYS returns a Promise for SMTP outcomes (resolving to
      * {ok,error}); it rejects/throws only for argument/type/binding failures. */
     JSValue result;
+    if (cc_failed) {
+        result = JS_EXCEPTION;
+        goto cleanup;
+    }
 
     /* Missing required field: an SMTP-outcome-style {ok:false} (parity with Lua),
      * returned as an already-resolved Promise - NOT a reject. */

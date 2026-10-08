@@ -98,6 +98,10 @@ static int lua_fs_write(lua_State *L)
     const char *path = luaL_checkstring(L, 1);
     size_t len;
     const char *bytes = luaL_checklstring(L, 2, &len);
+    /* Charged BEFORE the write (audit 10): one call writes up to the whole
+     * heap and counted as one instruction. One unit per 8 bytes, as blob.put;
+     * lua_hlwork raises at once when the run is over, with nothing written. */
+    lua_hlwork(L, len / 8, 0);
 
     const char *err_msg = NULL;
     int rc = hl_cap_fs_write(lua->base.fs_cfg, path, bytes, len, &err_msg);

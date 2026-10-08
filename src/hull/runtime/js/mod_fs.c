@@ -11,6 +11,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
+#include "internal.h"   /* hl_js_budget_charge */
 
 static void js_mmap_finalizer(JSRuntime *rt, JSValue val)
 {
@@ -119,6 +120,13 @@ static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, path);
         return JS_ThrowTypeError(ctx,
             "fs.write: bytes must be an ArrayBuffer, TypedArray, or string");
+    }
+    /* Charged BEFORE the write (audit 10, parity with Lua): one call writes
+     * up to the whole heap and counted as one step. One unit per 8 bytes. */
+    if (hl_js_budget_charge(ctx, (uint64_t)view.len / 8)) {
+        if (needs_free && str) JS_FreeCString(ctx, str);
+        JS_FreeCString(ctx, path);
+        return JS_EXCEPTION;
     }
 
     const char *err_msg = NULL;

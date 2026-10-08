@@ -89,8 +89,18 @@ int hl_db_registry_seal(HlDbRegistry *reg)
     return 0;
 }
 
+/* hl_db_registry_guard_hold's count. Event-loop thread only, as the guard. */
+static int g_guard_hold;
+
+void hl_db_registry_guard_hold(int delta)
+{
+    g_guard_hold += delta;
+    if (g_guard_hold < 0) g_guard_hold = 0;
+}
+
 void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
 {
+    if (g_guard_hold > 0) return;   /* a test case's live transaction */
     hl_db_dynamic_guard_stale_txns();
     if (!reg) return;
     for (int i = 0; i < reg->nslots; i++)
