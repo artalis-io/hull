@@ -123,7 +123,9 @@ function cache.new(opts)
 
     --- Get `key`, or compute it: on miss run `fn()`, store the result under
     -- `ttl`, and return it. Call as `fetch(key, ttl, fn)` or `fetch(key, fn)`.
-    -- `fn` is synchronous; for async producers compose get + set.
+    -- `fn` is synchronous; for async producers compose get + set. A nil result
+    -- is a miss, not a value: it is returned but not cached, so the next fetch
+    -- runs `fn` again (a cached nil read as a hit forever, until the ttl).
     function self.fetch(key, ttl, fn)
         if fn == nil and type(ttl) == "function" then
             fn = ttl
@@ -135,7 +137,7 @@ function cache.new(opts)
             return e.value
         end
         local v = fn()
-        self.set(key, v, ttl)
+        if v ~= nil then self.set(key, v, ttl) end
         return v
     end
 

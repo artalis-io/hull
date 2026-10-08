@@ -241,6 +241,19 @@ test("url: a malformed escape, or escapes that are not UTF-8, leave the value as
     assertEq(url.decode("100%"), "100%");
     assertEq(url.decode("x+%g1", { form: true }), "x %g1");
     assertEq(url.decode("%FF"), "%FF");
+    assertEq(url.decode("a%C3"), "a%C3");
+    assertEq(url.decode("%C0%AF"), "%C0%AF");
+    assertEq(url.decode("%ED%A0%80"), "%ED%A0%80");
+    assertEq(url.decode("x+%FF", { form: true }), "x %FF");
+});
+
+// A lone surrogate has no UTF-8 form; url.decode used to throw on it (audit 10).
+test("url: a text with a lone surrogate comes back as it is", () => {
+    const { url } = encoding;
+    assertEq(url.decode("a%20\ud800"), "a%20\ud800");
+    assertEq(url.decode("\udc00%41"), "\udc00%41");
+    assertEq(url.decode("%41\ud83d"), "%41\ud83d");
+    assertEq(url.decode("%41\ud83d\ude00"), "A\ud83d\ude00");
 });
 
 test("url: text round trips", () => {

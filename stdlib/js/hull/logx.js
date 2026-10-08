@@ -34,9 +34,11 @@ const logx = {};
 const LEVELS = ["info", "warn", "error", "debug"];
 
 // Format a fields object as a leading-space logfmt fragment " k=v k2=v2". Keys
-// sorted for deterministic, cross-runtime-identical output. Value escaping +
-// quoting is the shared hull:web:_logfmt rule (escapes \ CR LF ", quotes when
-// needed) - the logger middleware uses the same one.
+// sorted for deterministic, cross-runtime-identical output. Key + value
+// escaping and quoting is the shared hull:web:_logfmt rule (keys reduced to
+// [A-Za-z0-9_.-], values with \ " and control characters escaped, quoted when
+// needed) - the logger middleware uses the same one. The message's control
+// characters are escaped too (_logfmt.message).
 function fmt(fields) {
     if (!fields) return "";
     const keys = Object.keys(fields).sort();
@@ -62,7 +64,7 @@ function make(fields) {
     const self = {};
     for (let i = 0; i < LEVELS.length; i++) {
         const lvl = LEVELS[i];
-        self[lvl] = (msg) => log[lvl](String(msg == null ? "" : msg) + fmt(fields));
+        self[lvl] = (msg) => log[lvl](_logfmt.message(msg == null ? "" : msg) + fmt(fields));
     }
     self.with = (more) => make(Object.assign({}, fields, more || {}));
     return self;

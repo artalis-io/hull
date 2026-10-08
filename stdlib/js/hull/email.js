@@ -275,6 +275,10 @@ email.send = async function(opts) {
     if (!addrOk(opts.to))
         emailError("invalid_argument", "invalid to address");
     ccList(opts.cc);   // validated up front, for every provider
+    // Reply-To goes into a header (SMTP) or a provider's JSON like to/from, so
+    // it is held to the same address rule: no CR/LF, comma or second address.
+    if (opts.reply_to !== undefined && opts.reply_to !== null && !addrOk(opts.reply_to))
+        emailError("invalid_argument", "invalid reply_to address");
 
     const provider = opts.provider || "smtp";
     const fn = (typeof provider === "string"

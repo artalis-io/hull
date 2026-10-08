@@ -88,6 +88,20 @@ expect_code("invalid cc address throws",
       subject = "s", body = "b" },
     "invalid_argument", "invalid cc address")
 
+-- Reply-To is held to the same one-address rule (audit 10), for every provider.
+expect_code("header-injecting reply_to throws",
+    { provider = "postmark", from = "x@y.com", to = "y@z.com",
+      reply_to = "a@x.co\r\nBcc: v@w.co", subject = "s", body = "b" },
+    "invalid_argument", "invalid reply_to address")
+expect_code("comma-joined reply_to throws",
+    { from = "x@y.com", to = "y@z.com", reply_to = "a@x.co,b@y.co",
+      subject = "s", body = "b" },
+    "invalid_argument", "invalid reply_to address")
+expect_code("valid reply_to passes validation (fails later on api_key)",
+    { provider = "postmark", from = "a@b.com", to = "c@d.com",
+      reply_to = "r@s.com", subject = "s", body = "b" },
+    "invalid_argument", "api_key required")
+
 expect_code("non-list cc throws",
     { from = "x@y.com", to = "y@z.com", cc = 42, subject = "s", body = "b" },
     "invalid_argument", "cc must be")

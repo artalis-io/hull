@@ -5,6 +5,24 @@
  * @license AGPL-3.0-or-later
  */
 
+// The separator and the quote are each ONE ASCII character, neither CR nor
+// LF, and not the same one (as Lua). A multi-character separator never
+// matched in parse (it compares one character at a time) while encode joined
+// with it.
+function delims(opts, fn) {
+    const sep = (opts && opts.separator) || ",";
+    const quo = (opts && opts.quote) || '"';
+    const check = (name, v) => {
+        if (typeof v !== "string" || v.length !== 1 || v.charCodeAt(0) >= 0x80 ||
+            v === "\r" || v === "\n")
+            throw new Error(fn + ": opts." + name + " must be one ASCII character (not CR / LF)");
+    };
+    check("separator", sep);
+    check("quote", quo);
+    if (sep === quo) throw new Error(fn + ": opts.separator and opts.quote must differ");
+    return [sep, quo];
+}
+
 /**
  * Parse a CSV string.
  *
@@ -19,9 +37,12 @@
  */
 function parse(text, opts) {
     if (typeof text !== "string" || text.length === 0) return [];
-
-    const sep = (opts && opts.separator) || ",";
-    const quo = (opts && opts.quote) || '"';
+    const d = delims(opts, "csv.parse");
+    const sep = d[0];
+    const quo = d[1];
+    // A leading byte-order mark (Excel writes one) is not data: it became
+    // part of the first header name.
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
     const useHeaders = !!(opts && opts.headers);
     // L-3: accept Lua-style `max_rows` as well as the canonical
     // `maxRows`. `??` preserves an explicit 0 (the prior `||` would
@@ -140,9 +161,9 @@ function parse(text, opts) {
  */
 function encode(rows, opts) {
     if (!Array.isArray(rows) || rows.length === 0) return "";
-
-    const sep = (opts && opts.separator) || ",";
-    const quo = (opts && opts.quote) || '"';
+    const d = delims(opts, "csv.encode");
+    const sep = d[0];
+    const quo = d[1];
     const useHeaders = !!(opts && opts.headers);
     // CSV formula-injection defense, ON by default (Lua-parity alias:
     // sanitize_formulas): a cell beginning with = + - @ (or a leading tab/CR)

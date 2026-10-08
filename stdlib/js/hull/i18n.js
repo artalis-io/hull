@@ -65,11 +65,15 @@ function formatInt(s, sep) {
 }
 
 // Pure-arithmetic epoch (seconds) to UTC date components.
+// Floor modulo (Lua's %): JS's % keeps the dividend's sign, so a timestamp
+// before 1970 had a negative second / minute / hour.
+function fmod(a, n) { return ((a % n) + n) % n; }
+
 function epochToUtc(ts) {
     ts = Math.floor(ts);
-    const sec = ts % 60; ts = (ts - sec) / 60;
-    const min = ts % 60; ts = (ts - min) / 60;
-    const hour = ts % 24; ts = (ts - hour) / 24;
+    const sec = fmod(ts, 60); ts = (ts - sec) / 60;
+    const min = fmod(ts, 60); ts = (ts - min) / 60;
+    const hour = fmod(ts, 24); ts = (ts - hour) / 24;
     // ts is now days since 1970-01-01
     const z = ts + 719468;
     const era = Math.floor(z / 146097);
@@ -95,11 +99,15 @@ function parseAcceptLanguage(header) {
         if (!match) continue;
         const lang = match[1];
         let q = 1.0;
+        // Number(), not parseFloat(): "1.2.3" is unparseable (q 0, dropped),
+        // as Lua's tonumber has it - parseFloat read it as 1.2.
         const qMatch = match[2].match(/;\s*q\s*=\s*([0-9.]+)/);
-        if (qMatch) q = parseFloat(qMatch[1]) || 0;
-        entries.push({ lang: lang, q: q });
+        if (qMatch) q = Number(qMatch[1]) || 0;
+        // q <= 0 is "not acceptable": dropped.
+        if (q > 0) entries.push({ lang: lang, q: q, i: entries.length });
     }
-    entries.sort(function(a, b) { return b.q - a.q; });
+    // q descending, then position in the header (the Lua side's order).
+    entries.sort(function(a, b) { return b.q !== a.q ? b.q - a.q : a.i - b.i; });
     return entries;
 }
 
@@ -222,21 +230,31 @@ function number(n) { return numberIn(active, n); }
  * @param {number} timestamp  Seconds since epoch.
  * @returns {string}
  */
+// The timestamps date() formats: years 0000 through 9999 (as Lua). Outside it
+// the value is returned as text, like a non-finite one.
+const DATE_MIN = -62167219200;   // 0000-01-01T00:00:00Z
+const DATE_MAX = 253402300799;   // 9999-12-31T23:59:59Z
+
 function dateIn(loc, timestamp) {
-    if (typeof timestamp !== "number" || !Number.isFinite(timestamp))
+    if (typeof timestamp !== "number" || !Number.isFinite(timestamp)
+        || timestamp < DATE_MIN || timestamp >= DATE_MAX + 1)
         return String(timestamp);
 
     const fmt = formatOf(loc);
-    const pattern = (fmt && (fmt.datePattern || fmt.date_pattern)) || "YYYY-MM-DD";
+    let pattern = (fmt && (fmt.datePattern || fmt.date_pattern)) || "YYYY-MM-DD";
+    if (typeof pattern !== "string") pattern = "YYYY-MM-DD";
 
+    // Every occurrence of a token is replaced (String.replace with a string
+    // replaced only the first; Lua's gsub replaced all). split/join, not a
+    // replacement string, so no "$" pattern in it is interpreted.
     const dt = epochToUtc(timestamp);
     let result = pattern;
-    result = result.replace("YYYY", pad(dt.year, 4));
-    result = result.replace("MM", pad(dt.month, 2));
-    result = result.replace("DD", pad(dt.day, 2));
-    result = result.replace("HH", pad(dt.hour, 2));
-    result = result.replace("mm", pad(dt.min, 2));
-    result = result.replace("ss", pad(dt.sec, 2));
+    result = result.split("YYYY").join(pad(dt.year, 4));
+    result = result.split("MM").join(pad(dt.month, 2));
+    result = result.split("DD").join(pad(dt.day, 2));
+    result = result.split("HH").join(pad(dt.hour, 2));
+    result = result.split("mm").join(pad(dt.min, 2));
+    result = result.split("ss").join(pad(dt.sec, 2));
     return result;
 }
 
@@ -339,12 +357,22 @@ function detect(headerOrReq) {
         const base = lang.split("-")[0];
         if (locales[base]) return base;
     }
-    // Second pass: match any locale starting with base
+    // Second pass: a loaded locale whose base is this base ("en" matches
+    // "en-GB" / "en_GB", not "end"), the loaded names walked in sorted order
+    // so the pick is deterministic and the Lua side's.
+    const keys = Object.keys(locales).sort(function(a, b) {
+        return a < b ? -1 : a > b ? 1 : 0;
+    });
     for (let i = 0; i < entries.length; i++) {
         const base = entries[i].lang.split("-")[0];
-        const keys = Object.keys(locales);
+        if (base === "") continue;
         for (let j = 0; j < keys.length; j++) {
-            if (keys[j].indexOf(base) === 0) return keys[j];
+            const name = keys[j];
+            if (name === base) return name;
+            if (name.length > base.length && name.indexOf(base) === 0) {
+                const sep = name.charAt(base.length);
+                if (sep === "-" || sep === "_") return name;
+            }
         }
     }
     return null;

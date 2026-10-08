@@ -185,7 +185,12 @@ function Store:cas(k, expected, new, ttl)
 end
 
 -- Atomic increment via an optimistic version-guarded retry loop (portable;
--- needs no row locks). A fresh key starts at 0.
+-- needs no row locks). A fresh key starts at 0. The UPDATE is guarded by the
+-- row being live and still holding the value read: a row that expired between
+-- the SELECT and the UPDATE was incremented in place (the count went to a dead
+-- row), and one dropped and re-inserted meanwhile restarts at version 1, so a
+-- version match alone could add to a stale value. A miss retries, and the
+-- next SELECT treats the expired key as fresh.
 function Store:incr(k, by, ttl)
     local khex = kenc(k)
     for _ = 1, 16 do
@@ -207,8 +212,8 @@ function Store:incr(k, by, ttl)
             local nv = cur + by
             local n = self.conn.exec(
                 "UPDATE _hull_kv SET v = ?, version = version + 1, updated_at = ? "
-                .. "WHERE ns = ? AND k = ? AND version = ?",
-                { venc(tostring(nv)), now, self.ns, khex, ver })
+                .. "WHERE ns = ? AND k = ? AND version = ? AND v = ? AND expires_at > ?",
+                { venc(tostring(nv)), now, self.ns, khex, ver, rows[1].v, now })
             if (n or 0) == 1 then return nv end
         end
         -- lost the race; re-read and retry

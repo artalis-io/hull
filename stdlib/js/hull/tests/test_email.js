@@ -63,6 +63,18 @@ await (async () => {
         { from: "x@y.com", to: "y@z.com", cc: ["ok@z.com", "bad"], subject: "s", body: "b" },
         "invalid_argument", "invalid cc address");
 
+    // Reply-To is held to the same one-address rule (audit 10).
+    await expectCode("header-injecting reply_to throws",
+        { provider: "postmark", from: "x@y.com", to: "y@z.com",
+          reply_to: "a@x.co\r\nBcc: v@w.co", subject: "s", body: "b" },
+        "invalid_argument", "invalid reply_to address");
+    await expectCode("comma-joined reply_to throws",
+        { from: "x@y.com", to: "y@z.com", reply_to: "a@x.co,b@y.co", subject: "s", body: "b" },
+        "invalid_argument", "invalid reply_to address");
+    await expectCode("valid reply_to passes validation (fails later on api_key)",
+        { provider: "postmark", from: "a@b.com", to: "c@d.com", reply_to: "r@s.com",
+          subject: "s", body: "b" },
+        "invalid_argument", "api_key required");
     // ── provider dispatch ───────────────────────────────────────────
     await expectCode("unknown provider throws",
         { provider: "unknown", from: "a@b.com", to: "c@d.com", subject: "s", body: "b" },
