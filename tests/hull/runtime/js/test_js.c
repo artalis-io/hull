@@ -5116,6 +5116,23 @@ UTEST(js_stdlib, web_audit9_suite)
     cleanup_js_caps();
 }
 
+/* Auth stdlib regressions from audit 10 (the vacated address of an undoable
+ * email change is reserved, undo resets / totpDisable, deferred magic-link
+ * signup, logout origins, idempotency principal, inbox source). */
+UTEST(js_stdlib, auth_audit10_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_auth_audit10.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, toast_suite)
 {
     init_js_with_caps();

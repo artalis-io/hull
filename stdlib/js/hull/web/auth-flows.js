@@ -106,7 +106,8 @@ const _state = {
     verifyFormRedirect:  null,
     // `(userId) => ...` removing a TOTP enrolment (typically totp.disable),
     // called when the mailbox holder sets the password of an account that was
-    // not verified yet. See dropPreverifyTotp.
+    // not verified yet (see dropPreverifyTotp), and when the old address
+    // undoes a confirmed email change (see handleEmailChangeRevoke).
     totpDisable:         null,
     // `(req, user) => true` when the request proves a recent sign-in of its
     // own (or for passwordless accounts): POST /email-change then needs no
@@ -408,6 +409,9 @@ function stripUserSecrets(user) {
 // makes the response wait, whether the handler was synchronous or resumed
 // after an await (register with checkPwnedPasswords). A timer armed from the
 // handler itself attached to the request and held the response (audit 8).
+// The task's turn comes after the handler's db.batch, if it ran in one, has
+// committed or rolled back, so its writes are never part of that transaction
+// (audit 10: the Lua twin cannot leave one and refuses instead).
 function runDeferred(fn) {
     try { fn(); }
     catch (e) { log.warn("auth-flows: deferred email failed: " + String(e && e.message || e)); }
@@ -637,6 +641,23 @@ function genericOk(res) { res.json({ ok: true }); }
 function dropPendingEmailChange(uid) {
     db.exec("DELETE FROM _hull_auth_pending_email_changes "
             + "WHERE user_id = ? AND confirmed_at IS NULL", [uidKey(uid)]);
+}
+
+// Is email the previous address of an account whose CONFIRMED email change
+// can still be undone (audit 10; see the Lua sibling, old_email_reserved)?
+// Then it is the undo's to restore and counts as taken. exceptKey (a uidKey)
+// skips that account's own row.
+function oldEmailReserved(email, exceptKey) {
+    if (typeof email !== "string") return false;
+    const rows = db.query(
+        "SELECT user_id FROM _hull_auth_pending_email_changes "
+        + "WHERE LOWER(old_email) = LOWER(?) AND confirmed_at IS NOT NULL "
+        + "AND token_hash <> ? AND expires_at > ?",
+        [email, UNDONE_MARK, time.now()]);
+    for (const r of rows || []) {
+        if (exceptKey === undefined || String(r.user_id) !== exceptKey) return true;
+    }
+    return false;
 }
 
 // A callback whose answer gates authentication must answer synchronously:
@@ -993,9 +1014,11 @@ function registerAccount(req, res, body) {
     // userCreate / userGet are work only a NEW address paid for, so inline
     // they still told it from an existing one by response time. The lookup
     // is repeated in the task so two racing registrations create one account.
+    // An address an undoable email change vacated is taken too (audit 10).
     const origin = originFor(req);
     afterResponse(() => {
         if (findByEmail(body.email)) return;
+        if (oldEmailReserved(body.email)) return;
         const uid = createUser(body.email, pwHash);
         const user = getUser(uid);
         if (!user) throw new Error("userCreate returned an id that userGet cannot resolve");
@@ -1289,18 +1312,21 @@ function handleMagicLink(req, res) {
         return res.status(400).json({ error: "invalid email" });
     }
     let user = findByEmail(body.email);
-    if (!user) {
-        if (!_state.magicLinkAutoSignup) return genericOk(res);
-        const uid = createUser(body.email, null);
-        user = getUser(uid);
-        // Guard the create->get race / adapter inconsistency: a nil user here
-        // would mint a magic-link token with sub=null and then throw in
-        // sendEmail(user...). Stay enumeration-safe (same shape as the
-        // unknown-email path above) rather than 500.
-        if (!user) return genericOk(res);
-    }
+    if (!user && !_state.magicLinkAutoSignup) return genericOk(res);
     const origin = originFor(req);
     afterResponse(() => {
+        if (!user) {
+            // Opt-in passwordless signup, after the response (audit 10; see
+            // the Lua sibling): re-checked, refused for an address an
+            // undoable email change vacated, created with a null hash.
+            user = findByEmail(body.email);
+            if (!user) {
+                if (oldEmailReserved(body.email)) return;
+                const uid = createUser(body.email, null);
+                user = getUser(uid);
+                if (!user) throw new Error("userCreate returned an id that userGet cannot resolve");
+            }
+        }
         const token = issueToken(userId(user), ACTIONS.magic_link,
             _state.magicLinkTtl, { eb: emailBinding(user) });
         if (origin) {
@@ -1543,7 +1569,9 @@ function handleEmailChange(req, res) {
             return res.status(401).json({ error: "invalid credentials" });
         }
     }
-    if (findByEmail(body.new_email)) {
+    // An address an undoable confirmed change of ANOTHER account vacated is
+    // taken too (audit 10; see oldEmailReserved).
+    if (findByEmail(body.new_email) || oldEmailReserved(body.new_email, uidKey(uid))) {
         return res.status(409).json({ error: "email already in use" });
     }
 
@@ -1658,10 +1686,23 @@ async function handleEmailChangeRevoke(req, res) {
         const holder = typeof old === "string" ? findByEmail(old) : null;
         if (typeof old !== "string"
             || (holder && uidKey(userId(holder)) !== key)) {
-            // Taken since by another account: nothing to restore to.
+            // Taken since by another account (an app may create accounts
+            // itself): nothing to restore to. The rest of the undo still
+            // happens (audit 10; see the Lua sibling): unusable password,
+            // lockout rows cleared, row marked undone, sessions revoked.
             log.warn("auth-flows: email change of account " + String(env.sub)
-                + " cannot be reverted: its previous address is in use; sessions revoked");
+                + " cannot be reverted: its previous address is in use; "
+                + "password reset and sessions revoked");
+            setPassword(env.sub, crypto.hashPassword(crypto.randomToken(32)));
+            clearAllFailedLogins(env.sub);
+            const now = time.now();
+            db.exec("UPDATE _hull_auth_pending_email_changes SET token_hash = ?, "
+                    + "new_email = ?, confirmed_at = ?, expires_at = ? WHERE user_id = ?",
+                    [UNDONE_MARK, String(user.email || ""), now,
+                     now + _state.emailChangeTtl, key]);
             await runOnPasswordReset(req, res, user);
+            emitEvent(env.sub, "email_change_revoked", req,
+                      { metadata: { by: "old_address", restored: false } });
             return verifyFail(req, res, 409, "revoke failed: the previous address is in use");
         }
         // Undoing a confirmed change (audit 9; the reasoning is in the Lua
@@ -1669,14 +1710,20 @@ async function handleEmailChangeRevoke(req, res) {
         // confirm (a row without one counts as unverified), the password is
         // made unusable until a reset through that address, lockout rows go,
         // and the row stays, marked undone, pausing new changes for
-        // emailChangeTtl. A TOTP enrolment made in the window is not removed
-        // here; onPasswordReset (run below) is where an app can drop it.
+        // emailChangeTtl. The second factor goes through totpDisable when
+        // configured (audit 10): one the thief enrolled in the window would
+        // lock the owner out after the reset; without the hook,
+        // onPasswordReset (run below) is where an app must drop it.
         const ov = row.old_verified;
         const wasVerified = ov !== null && ov !== undefined && Number(ov) !== 0;
         setEmail(env.sub, old);
         setEmailVerified(env.sub, wasVerified);
         setPassword(env.sub, crypto.hashPassword(crypto.randomToken(32)));
         clearAllFailedLogins(env.sub);
+        if (_state.totpDisable) {
+            try { await _state.totpDisable(env.sub); }
+            catch (e) { log.warn("auth-flows: totpDisable threw: " + (e && e.message ? e.message : e)); }
+        }
         user.email = old;
         user.email_verified = wasVerified;
         restored = true;
@@ -1734,7 +1781,8 @@ function handleEmailChangeConfirm(req, res) {
     const pre = parseToken(token, ACTIONS.email_change)[0];
     if (pre && typeof pre.new_email === "string") {
         const holder = findByEmail(pre.new_email);
-        if (holder && uidKey(userId(holder)) !== uidKey(pre.sub)) {
+        if ((holder && uidKey(userId(holder)) !== uidKey(pre.sub))
+            || oldEmailReserved(pre.new_email, uidKey(pre.sub))) {
             return verifyFail(req, res, 409, "email change failed: the address is in use");
         }
     }
@@ -2042,6 +2090,13 @@ function init(opts) {
     // allowlisted host, http for the trustRequestHost dev path) is used
     // otherwise.
     _state.trustProxy = opts.trustProxy === true;
+    // The same origins back every logout provenance check (audit 10; see the
+    // Lua sibling): session / oauth logout now agree with /logout's.
+    _request.registerAppOrigins({
+        origins: _state.publicOrigin ? [_state.publicOrigin] : [],
+        hosts: _state.trustedHosts || [],
+        trustProxy: _state.trustProxy,
+    });
     // Round-12 MEDIUM-1: reset the one-shot host-mismatch warn so a
     // hot-reload that fixes / changes the allowlist gets a fresh
     // diagnostic on the next bad host. See Lua sibling.
@@ -2182,6 +2237,8 @@ function sendMagicLink(email, magicUrlPrefix) {
     let user = findByEmail(email);
     if (!user) {
         if (!_state.magicLinkAutoSignup) return;
+        // An address an undoable email change vacated is taken (audit 10).
+        if (oldEmailReserved(email)) return;
         const uid = createUser(email, null);
         user = getUser(uid);
         // create->get race guard (see handleMagicLink): a nil user would mint
@@ -2214,6 +2271,7 @@ const _test = {
     handlers: {
         register: handleRegister,
         login: handleLogin,
+        magicLink: handleMagicLink,
         totpVerify: handleTotpVerify,
         emailChange: handleEmailChange,
         emailChangeConfirm: handleEmailChangeConfirm,
@@ -2227,6 +2285,7 @@ const _test = {
         _state.emailSend      = null;
         _state.publicOrigin   = null;
         _state.trustedHosts   = null;
+        _request.registerAppOrigins(null);
         _state.trustRequestHost = false;
         _state.userSanitize   = null;
         _state.warnedHostMismatch = false;

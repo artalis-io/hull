@@ -414,7 +414,10 @@ verify step between successful first-factor auth and `on_login` when
     if the app keeps no sessions.
   - `opts.magic_link_auto_signup` (default `false`). Silent no-op
     when magic-link is requested for an unknown email (enumeration-
-    safe). Opt-in to auto-create a passwordless user instead.
+    safe). Opt-in to auto-create a passwordless user instead - after
+    the response, as `/register` creates accounts (the lookup is
+    repeated there, and a `user_get` that cannot resolve the new id is
+    logged).
   - `opts.enumeration_safe` (default `true`). Register / reset /
     magic-link / email-change return identical success shapes
     regardless of whether the email exists.
@@ -468,6 +471,14 @@ verify step between successful first-factor auth and `on_login` when
       `hull:_task`) that belongs to no request, so it never holds the
       response - also when the handler waited first (`/register` with
       `check_pwned_passwords`, which waits on HIBP).
+      It never runs inside the request's transaction: mount the routes
+      outside `db.batch` / `transaction.run`. In JS the task runs on a loop
+      turn after the handler's transaction has ended; in Lua a task cannot
+      leave an open transaction (every wait is refused there), so such a
+      route now raises (500, the batch rolled back) instead of running the
+      deferred work inline - where it ran inside the transaction, on the
+      response's clock, and an async mail send was refused and dropped
+      (audit 10).
     - `opts.check_pwned_passwords` (default `false`). Routes
       register + password-reset-confirm through `hull/web/pwned`
       (HIBP k-anonymity). Apps must add `api.pwnedpasswords.com`
@@ -511,9 +522,28 @@ verify step between successful first-factor auth and `on_login` when
         restored address (JSON answers `{ok, restored, password_reset_required}`);
       - keeps the row, marked undone, for `email_change_ttl`: a new change
         meanwhile answers 409 ("email changes are paused...").
-      A TOTP enrolment made during the window is **not** removed (the module
-      cannot tell it from the owner's); an app that wants it gone does it in
-      `on_password_reset`, which the undo runs.
+      - removes the second factor through `opts.totp_disable(user_id)`
+        (`totpDisable`, typically `totp.disable`) when configured (audit
+        10): one the thief enrolled during the window would otherwise lock
+        the owner out after the reset. The module cannot tell it from the
+        owner's own, so the owner re-enrols. Without the hook an app that
+        uses TOTP removes it in `on_password_reset`, which the undo runs.
+      If the old address has been taken by another account meanwhile (an
+      account the app created itself - the module's own paths keep off it,
+      below), the undo answers 409 and cannot restore it, but still makes
+      the password unusable, clears the lockout rows, marks the row undone
+      (new changes paused) and revokes every session (audit 10), so whoever
+      made the change cannot sign straight back in and move the account
+      again.
+    - **While a confirmed change can still be undone, its old address is
+      reserved** for the undo (audit 10): `/register` answers its usual
+      `{ok:true}` but creates no account (and mails nothing), magic-link
+      auto-signup (and `send_magic_link`) creates none, and another
+      account's email change to it - its request or its confirm - answers
+      409 as for an address in use. The address is compared
+      case-insensitively. Before, registering the vacated address took it,
+      and the undo then had nothing to restore to: the thief kept the
+      account.
     - An email-change confirm whose new address another account has taken
       since the request answers 409 and leaves the link usable.
     - A pending-2FA token (`totp_token`) is bound to the password and
@@ -664,7 +694,7 @@ verify step between successful first-factor auth and `on_login` when
 - `session.destroy(session_id)`. Deletes session.
 - `session.cleanup()` → count of deleted expired sessions.
 - **Device management** - `session.list_for_user(user_id)` → array of `{id, created_at, last_accessed, ip, user_agent}`; `session.destroy_others(current_sid, user_id)` → "sign out everywhere else"; `session.destroy_all(user_id)` → "sign out everywhere" (used by auth-flows on password reset cascade).
-- **Login/logout factories** - `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user, ctx?)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name, default `"hull_session"` - same as `auth.session_middleware`), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`), `opts.audit_log` (module ref - when set, records a login event after the session is set), `opts.audit_kind` (default `"login"`), `opts.audit_metadata(user, ctx) -> table` (default derives `{ factors = ctx.factors }` for auth-flows or `{ factors = "oauth:" .. ctx.provider }` for oauth), `opts.on_new_device(req, res, user)` (requires `audit_log` - called before record when `audit_log.is_new_device` returns true). `session.logout_handler(cookie, opts?)` is the matching `on_logout`; since the clearing `Set-Cookie` would sign the victim out, it checks provenance as auth-flows' `POST /logout` does: `Sec-Fetch-Site` must be `same-origin` or `none` (`cross-site` and `same-site` answer 403), and without it `Origin` - or `Referer` - must name the request's own host (`X-Forwarded-Host` with `opts.trust_proxy`) or one of `opts.origins` (`{"https://app.example.com"}`); a client sending none of these headers passes. In JS both factories return what `respond` / an async `onNewDevice` returns, so an async callback is awaited. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (the audit + new-device seam covers both for free).
+- **Login/logout factories** - `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user, ctx?)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name, default `"hull_session"` - same as `auth.session_middleware`), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`), `opts.audit_log` (module ref - when set, records a login event after the session is set), `opts.audit_kind` (default `"login"`), `opts.audit_metadata(user, ctx) -> table` (default derives `{ factors = ctx.factors }` for auth-flows or `{ factors = "oauth:" .. ctx.provider }` for oauth), `opts.on_new_device(req, res, user)` (requires `audit_log` - called before record when `audit_log.is_new_device` returns true). `session.logout_handler(cookie, opts?)` is the matching `on_logout`; since the clearing `Set-Cookie` would sign the victim out, it checks provenance as auth-flows' `POST /logout` does: `Sec-Fetch-Site` must be `same-origin` or `none` (`cross-site` and `same-site` answer 403), and without it `Origin` - or `Referer` - must name the request's own host (`X-Forwarded-Host` with `opts.trust_proxy`) or one of `opts.origins` (`{"https://app.example.com"}`), or its host (any port) is in `opts.trusted_hosts` (`trustedHosts`); a client sending none of these headers passes. The origins `auth-flows.init` was given (`public_origin`, `trusted_hosts`, and `trust_proxy` for `X-Forwarded-Host`) are trusted too, here and by oauth's logout (audit 10): auth-flows' `/logout` checks against them and then runs `on_logout`, and an app behind a proxy (Host the upstream name, Origin the public one) used to pass the first check and get 403 from this one. In JS both factories return what `respond` / an async `onNewDevice` returns, so an async callback is awaited. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (the audit + new-device seam covers both for free).
 - `session.rotate(old_sid, data, opts)` - destroy + recreate, session-fixation defense primitive. Used by `login_handler`; apps doing custom on_login can call it directly.
 
 **The `on_login(req, res, user, ctx?)` contract.** Both `hull/web/auth-flows` and `hull/web/middleware/oauth` hand off through this single shape. Guarantees:
@@ -746,7 +776,7 @@ verify step between successful first-factor auth and `on_login` when
 - `idempotency.init(opts)`. Creates `_hull_idempotency_keys` table. `opts.ttl` = key lifetime in seconds (default: `86400`).
 - `idempotency.middleware(opts)`. Post-body middleware intercepting POST (configurable via `opts.methods`).
   - `opts.header_name`. Header to read key from (default: `"idempotency-key"`).
-  - `opts.get_principal`. `function(req) -> string` for per-user scoping. Default: `"session:" ..` the session's `user_id`, else `"user:" ..` the JWT user's `sub` / `id` / `user_id`, else `"__anon"` (shared by every anonymous caller: mount the middleware after authentication; it logs a warning once when 20 keyed requests in a row were anonymous). Session principals were the bare `user_id` before audit 9, so a session user whose id read `user:5` shared JWT user 5's keys; a key stored for a session user before the upgrade is not replayed after it (it simply expires).
+  - `opts.get_principal`. `function(req) -> string|number` for per-user scoping. Whatever it (or the default) returns is stored as text (audit 10): `nil` / `false` / `""` is `"__anon"`, a number its decimal string (a number reached MySQL's VARCHAR column as a number, which compared it numerically), a principal over 255 characters - or one already spelled `sha256:...` - becomes `"sha256:" ..` the hex SHA-256 of itself (it failed the insert, or a lax MySQL truncated it so two principals shared keys), and any other type (a table / object, a Promise) is an error. Default: `"session:" ..` the session's `user_id`, else `"user:" ..` the JWT user's `sub` / `id` / `user_id`, else `"__anon"` (shared by every anonymous caller: mount the middleware after authentication; it logs a warning once when 20 keyed requests in a row were anonymous). Session principals were the bare `user_id` before audit 9, so a session user whose id read `user:5` shared JWT user 5's keys; a key stored for a session user before the upgrade is not replayed after it (it simply expires).
   - Cache hit + same fingerprint → returns cached response (handler skipped).
   - Cache hit + different fingerprint → returns 409 Conflict.
   - Fingerprint: `SHA-256(method + path + body)`.
@@ -782,7 +812,7 @@ verify step between successful first-factor auth and `on_login` when
 
 **inbox**. Inbox deduplication for incoming events/webhooks.
 - `inbox.init(opts)`. Creates `_hull_inbox_processed` table. `opts.ttl` = record lifetime (default: `86400`).
-- `inbox.is_duplicate(message_id, source?)` → boolean. Default source: `"default"`.
+- `inbox.is_duplicate(message_id, source?)` → boolean. Default source: `"default"`. `message_id` and `source` are strings or integers (an integer is stored as its decimal string, so `42` and `"42"` are the same source); any other type, or one over 255 characters, raises (audit 10 added the check for `source`).
 - `inbox.mark_processed(message_id, source?, opts?)`. Record as processed.
 - `inbox.check_and_mark(message_id, source?, opts?)` → boolean (true = duplicate, false = new + marked).
 - `inbox.cleanup()` → count of deleted expired records.

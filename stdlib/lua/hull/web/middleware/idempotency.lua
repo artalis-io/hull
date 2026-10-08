@@ -240,6 +240,30 @@ local function default_principal(req)
 end
 idempotency._default_principal = default_principal
 
+-- The principal as the principal_id column (VARCHAR(255)) stores it, for the
+-- default and a custom get_principal alike (audit 10). A number reached the
+-- column as a number, and MySQL then compared the VARCHAR column numerically
+-- ('5abc' = 5); a principal over 255 characters failed the insert on
+-- Postgres and was truncated by a lax MySQL - two principals sharing a
+-- prefix shared their keys. So: nil / false / "" is "__anon", an integer is
+-- its decimal string, anything over the column width (or already spelled
+-- like a hashed one) becomes "sha256:<hex>" of itself, and any other type is
+-- an error.
+local function norm_principal(p)
+    if p == nil or p == false or p == "" then return "__anon" end
+    if type(p) == "number" then
+        p = math.type(p) == "integer" and tostring(p) or string.format("%.17g", p)
+    elseif type(p) ~= "string" then
+        error("idempotency: get_principal must return a string or a number, got "
+              .. type(p))
+    end
+    if #p > MAX_KEY_LEN or p:sub(1, 7) == "sha256:" then
+        return "sha256:" .. encoding.hex.encode(crypto.sha256(p))
+    end
+    return p
+end
+idempotency._norm_principal = norm_principal
+
 -- How many keyed requests in a row may all be "__anon" before the default
 -- principal warns (once per middleware) that it is mounted where no
 -- authentication ran: every caller then shares one principal.
@@ -302,7 +326,7 @@ function idempotency.middleware(opts)
             return 1
         end
 
-        local principal_id = get_principal(req)
+        local principal_id = norm_principal(get_principal(req))
         local fingerprint = compute_fingerprint(req)
         local endpoint = req.method .. " " .. req.path
         local now = time.now()

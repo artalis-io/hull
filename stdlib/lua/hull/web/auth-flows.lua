@@ -292,7 +292,9 @@ local _state = {
     verify_form_redirect  = nil,
     -- `function(user_id)` that removes a TOTP enrolment (typically
     -- totp.disable). Called when the mailbox holder sets the password of an
-    -- account that was not verified yet: see drop_preverify_totp.
+    -- account that was not verified yet (see drop_preverify_totp), and when
+    -- the old address undoes a confirmed email change (the thief may have
+    -- enrolled one; see handle_email_change_revoke).
     totp_disable          = nil,
     -- `function(req, user) -> true` when the request proves a recent sign-in
     -- of its own (or for passwordless accounts): POST /email-change then
@@ -874,6 +876,16 @@ end
 -- answers equally fast. Inline only where there is no loop to defer onto
 -- (an in-process test harness); a failure is logged, not raised - the
 -- response is already sent.
+--
+-- Never inside the request's transaction (audit 10). A handler the app runs
+-- under db.batch (transaction.run) cannot wait: the task's hull.sleep is
+-- refused, and the work used to run inline - inside that transaction, on the
+-- response's clock, with an async mail send refused too and so silently
+-- dropped. A Lua task cannot leave the transaction (every way to yield to the
+-- loop is refused while it is open), so that case raises instead, before
+-- anything was written: the batch rolls back and the request answers 500.
+-- Mount the auth-flows routes outside a transaction. (JS defers through a
+-- loop timer and is not affected.)
 local function after_response(fn)
     local H = hull
     local run = function()
@@ -884,10 +896,22 @@ local function after_response(fn)
         end
     end
     if H and H.async and H.sleep then
+        local in_txn = false
         local spawned = pcall(H.async, function()
-            pcall(H.sleep, 1)   -- yields to the loop; fails without one
+            -- Yields to the loop; fails without one, or inside a transaction.
+            local ok, err = pcall(H.sleep, 1)
+            if not ok and tostring(err):find("transaction is open", 1, true) then
+                in_txn = true
+                return
+            end
             run()
         end)
+        if in_txn then
+            error("auth-flows: this route ran inside a database transaction "
+                  .. "(db.batch / transaction.run); its deferred work cannot "
+                  .. "leave the transaction - mount the auth-flows routes "
+                  .. "outside it", 2)
+        end
         if spawned then return end
     end
     run()
@@ -1138,6 +1162,28 @@ local function drop_pending_email_change(user_id)
             .. "WHERE user_id = ? AND confirmed_at IS NULL", { uid_key(user_id) })
 end
 
+-- Is @p email the previous address of an account whose CONFIRMED email
+-- change can still be undone (audit 10)? While it can, the address is the
+-- undo's to restore, and it counts as taken: registering it, a magic-link
+-- auto-signup or another account's email change would otherwise claim the
+-- vacated address first, and the undo then had nothing to restore to - the
+-- thief kept the account. Compared case-insensitively (an app's lookup may
+-- be); @p except_key (a uid_key) skips that account's own row.
+local function old_email_reserved(email, except_key)
+    if type(email) ~= "string" then return false end
+    local rows = db.query(
+        "SELECT user_id FROM _hull_auth_pending_email_changes "
+        .. "WHERE LOWER(old_email) = LOWER(?) AND confirmed_at IS NOT NULL "
+        .. "AND token_hash <> ? AND expires_at > ?",
+        { email, UNDONE_MARK, time.now() })
+    for _, r in ipairs(rows or {}) do
+        if except_key == nil or tostring(r.user_id) ~= except_key then
+            return true
+        end
+    end
+    return false
+end
+
 -- Run the app's on_password_reset (typically session.destroy_all). Logged,
 -- not swallowed: the recommended body revokes every session, so a throw means
 -- a suspected-compromise cleanup did not run - an operator must see it.
@@ -1243,10 +1289,13 @@ local function handle_register(req, res)
     -- Both branches now answer after the hash and one lookup. The lookup is
     -- repeated in the task: two registrations of one address racing past the
     -- check above create one account, not two. A user_get that cannot resolve
-    -- the new id is logged (the response has gone) instead of a 500.
+    -- the new id is logged (the response has gone) instead of a 500. An
+    -- address an undoable email change vacated is taken too (audit 10):
+    -- nothing is created, and the answer is the same ok.
     local origin = origin_for(req)
     after_response(function()
         if _state.user_find_by_email(body.email) then return end
+        if old_email_reserved(body.email) then return end
         local user_id = _state.user_create(body.email, pw_hash)
         local user = _state.user_get(user_id)
         if not user then
@@ -1597,23 +1646,31 @@ local function handle_magic_link(req, res)
         return res:status(400):json({ error = "invalid email" })
     end
     local user = _state.user_find_by_email(body.email)
-    if not user then
-        if not _state.magic_link_auto_signup then
-            -- Enumeration-safe: silently succeed without sending.
-            return generic_ok(res)
-        end
-        -- Opt-in passwordless signup. Create the user with a NULL
-        -- password_hash; the app's user_create must accept that.
-        local user_id = _state.user_create(body.email, nil)
-        user = _state.user_get(user_id)
-        -- Guard the create->get race / adapter inconsistency: a nil user here
-        -- would issue a magic-link token with sub=nil and then error in
-        -- send_email(user...). Stay enumeration-safe (matches the guarded
-        -- sibling sites in handle_register / handle_magic_link_consume).
-        if not user then return generic_ok(res) end
+    if not user and not _state.magic_link_auto_signup then
+        -- Enumeration-safe: silently succeed without sending.
+        return generic_ok(res)
     end
     local origin = origin_for(req)
     after_response(function()
+        if not user then
+            -- Opt-in passwordless signup, after the response (audit 10), as
+            -- /register creates accounts: inline, user_create and user_get
+            -- were work only a new address paid for, so response time told
+            -- it from an existing one. The lookup is repeated here (two
+            -- racing requests create one account), and an address an
+            -- undoable email change vacated is taken. The user is created
+            -- with a NULL password_hash; the app's user_create must accept
+            -- that.
+            user = _state.user_find_by_email(body.email)
+            if not user then
+                if old_email_reserved(body.email) then return end
+                local user_id = _state.user_create(body.email, nil)
+                user = _state.user_get(user_id)
+                if not user then
+                    error("user_create returned an id that user_get cannot resolve")
+                end
+            end
+        end
         local token = issue_token(user_uid(user),
             ACTIONS.magic_link, _state.magic_link_ttl,
             { eb = email_binding(user) })
@@ -1896,7 +1953,10 @@ local function handle_email_change(req, res)
     -- Reject if the target email is already taken - reveals
     -- existence, but that's a UX call (the alternative is a silent
     -- accept that confuses the user).
-    if _state.user_find_by_email(body.new_email) then
+    -- An address an undoable confirmed change of ANOTHER account vacated is
+    -- taken too (audit 10; see old_email_reserved).
+    if _state.user_find_by_email(body.new_email)
+       or old_email_reserved(body.new_email, uid_key(user_id)) then
         return res:status(409):json({ error = "email already in use" })
     end
 
@@ -2029,11 +2089,28 @@ local function handle_email_change_revoke(req, res)
         local holder = type(old) == "string" and _state.user_find_by_email(old)
         if type(old) ~= "string"
            or (holder and uid_key(user_uid(holder)) ~= key) then
-            -- Taken since by another account: nothing to restore to.
+            -- Taken since by another account (old_email_reserved keeps the
+            -- stdlib's own paths off it, but an app may create accounts
+            -- itself): nothing to restore to. The rest of the undo still
+            -- happens (audit 10) - the password is made unusable, lockout
+            -- rows go, the row is marked undone (new changes paused) and
+            -- every session is revoked - so whoever made the change cannot
+            -- sign back in with the password they knew and move the account
+            -- again.
             require("hull.log").warn("auth-flows: email change of account "
                 .. tostring(env.sub) .. " cannot be reverted: its previous "
-                .. "address is in use; sessions revoked")
+                .. "address is in use; password reset and sessions revoked")
+            _state.user_set_password(env.sub,
+                crypto.hash_password(crypto.random_token(32)))
+            clear_all_failed_logins(env.sub)
+            local now = time.now()
+            db.exec("UPDATE _hull_auth_pending_email_changes SET token_hash = ?, "
+                    .. "new_email = ?, confirmed_at = ?, expires_at = ? WHERE user_id = ?",
+                    { UNDONE_MARK, tostring(user.email or ""), now,
+                      now + _state.email_change_ttl, key })
             run_on_password_reset(req, res, user)
+            emit_event(env.sub, "email_change_revoked", req,
+                       { metadata = { by = "old_address", restored = false } })
             return verify_fail(req, res, 409, "revoke failed: the previous address is in use")
         end
         -- Undoing a confirmed change (audit 9):
@@ -2052,15 +2129,24 @@ local function handle_email_change_revoke(req, res)
         --    to the restored address. Lockout rows are cleared.
         --  * The row is kept, marked undone, for email_change_ttl: a new
         --    change is refused meanwhile (handle_email_change).
-        -- A TOTP enrolment the thief added during the window is NOT removed
-        -- here (the module cannot tell it from the owner's): the app's
-        -- on_password_reset - run below - is where to drop it if it wants to.
+        --  * The second factor goes through totp_disable when configured
+        --    (audit 10): one the thief enrolled during the window would
+        --    otherwise lock the owner out after the reset (the module cannot
+        --    tell it from the owner's own, so the owner re-enrols). Without
+        --    the hook the app's on_password_reset - run below - must do it.
         local was_verified = (tonumber(row.old_verified) or 0) ~= 0
         _state.user_set_email(env.sub, old)
         _state.user_set_email_verified(env.sub, was_verified)
         _state.user_set_password(env.sub,
             crypto.hash_password(crypto.random_token(32)))
         clear_all_failed_logins(env.sub)
+        if _state.totp_disable then
+            local ok, terr = pcall(_state.totp_disable, env.sub)
+            if not ok then
+                require("hull.log").warn("auth-flows: totp_disable failed: "
+                                         .. tostring(terr))
+            end
+        end
         user.email = old
         user.email_verified = was_verified
         restored = true
@@ -2123,7 +2209,8 @@ local function handle_email_change_confirm(req, res)
     local penv = parse_token(token, ACTIONS.email_change)
     if penv and type(penv.new_email) == "string" then
         local holder = _state.user_find_by_email(penv.new_email)
-        if holder and uid_key(user_uid(holder)) ~= uid_key(penv.sub) then
+        if (holder and uid_key(user_uid(holder)) ~= uid_key(penv.sub))
+           or old_email_reserved(penv.new_email, uid_key(penv.sub)) then
             return verify_fail(req, res, 409, "email change failed: the address is in use")
         end
     end
@@ -2452,6 +2539,15 @@ function M.init(opts)
     _state.trusted_hosts    = opts.trusted_hosts
     _state.trust_request_host = opts.trust_request_host == true
     _state.trust_proxy = opts.trust_proxy == true
+    -- The same origins back every logout provenance check (audit 10): /logout
+    -- checks against them and then runs on_logout - typically
+    -- session.logout_handler, whose own check would otherwise know only the
+    -- Host header and refuse what this one let through.
+    _request.register_app_origins({
+        origins     = _state.public_origin and { _state.public_origin } or nil,
+        hosts       = _state.trusted_hosts,
+        trust_proxy = _state.trust_proxy,
+    })
     -- Round-12 MEDIUM-1: reset the one-shot host-mismatch warn so a
     -- hot-reload that fixes / changes the allowlist gets a fresh
     -- diagnostic on the next bad host. Without this, the warn fires
@@ -2650,6 +2746,8 @@ function M.send_magic_link(email, magic_url_prefix)
     local user = _state.user_find_by_email(email)
     if not user then
         if not _state.magic_link_auto_signup then return end
+        -- An address an undoable email change vacated is taken (audit 10).
+        if old_email_reserved(email) then return end
         local user_id = _state.user_create(email, nil)
         user = _state.user_get(user_id)
         -- create->get race guard (see handle_magic_link): a nil user would
@@ -2687,6 +2785,7 @@ M._test = {
     handlers           = {
         register             = handle_register,
         login                = handle_login,
+        magic_link           = handle_magic_link,
         totp_verify          = handle_totp_verify,
         email_change         = handle_email_change,
         email_change_confirm = handle_email_change_confirm,
@@ -2703,6 +2802,7 @@ M._test = {
         _state.email_send       = nil
         _state.public_origin    = nil
         _state.trusted_hosts    = nil
+        _request.register_app_origins(nil)
         _state.trust_request_host = false
         _state.user_sanitize    = nil
         _state.warned_host_mismatch = false
