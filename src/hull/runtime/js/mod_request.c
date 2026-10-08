@@ -105,6 +105,7 @@ typedef struct HlJsMpIter {
     int           done;        /* parser returned DONE */
     int           errored;     /* parser returned ERROR */
     int           in_part;     /* between PART_BEGIN..PART_END for the active part */
+    unsigned      gen;         /* bumped at every PART_BEGIN: the current part's */
 
     /* Snapshot of the active Part's metadata. The borrowed pointers
      * returned by kl_http_multipart_next() are valid only until the next
@@ -120,7 +121,16 @@ typedef struct HlJsMpIter {
 typedef struct {
     HlJsMpIter *iter;
     int         spent;          /* PART_END reached for this Part */
+    /* The iterator's gen when this Part began (audit 9, the twin of Lua's
+     * L5): a Part the iterator has moved past is not the current one, and
+     * its read() / chunks() consumed the NEXT part's body. */
+    unsigned    gen;
 } HlJsMpPart;
+
+/* What read() / chunks() of a Part the iterator has moved past raise (the
+ * Lua twin's wording). */
+#define MP_STALE_PART "req.multipart(): this part is no longer current " \
+                      "(the iterator has moved to a later part)"
 
 /* Chunks-iter view: pumps PART_DATA events out of iter for one part.
  *
@@ -135,6 +145,7 @@ typedef struct {
 typedef struct {
     HlJsMpIter *iter;
     int         ended;          /* PART_END consumed; further next() = done */
+    unsigned    gen;            /* its Part's gen (see HlJsMpPart) */
 } HlJsMpChunks;
 
 /* ── Continuation type ──────────────────────────────────────────────── */
@@ -313,11 +324,12 @@ static JSValue make_js_part(JSContext *ctx, HlJsMpIter *it)
     if (!p) { JS_FreeValue(ctx, obj); return JS_ThrowOutOfMemory(ctx); }
     p->iter = hl_mp_iter_ref(it);
     p->spent = 0;
+    p->gen = it->gen;
     JS_SetOpaque(obj, p);
     return obj;
 }
 
-static JSValue make_js_chunks(JSContext *ctx, HlJsMpIter *it)
+static JSValue make_js_chunks(JSContext *ctx, HlJsMpIter *it, unsigned gen)
 {
     JSValue obj = JS_NewObjectClass(ctx, (int)hl_mp_chunks_class_id);
     if (JS_IsException(obj)) return obj;
@@ -325,6 +337,7 @@ static JSValue make_js_chunks(JSContext *ctx, HlJsMpIter *it)
     if (!c) { JS_FreeValue(ctx, obj); return JS_ThrowOutOfMemory(ctx); }
     c->iter  = hl_mp_iter_ref(it);
     c->ended = 0;
+    c->gen   = gen;
     JS_SetOpaque(obj, c);
     return obj;
 }
@@ -389,6 +402,7 @@ static PumpStep pump_iter_step(JSContext *ctx, HlJsMpCont *jc)
                 return s;
             }
             it->in_part = 1;
+            it->gen++;
             s.ready = 1;
             s.result = make_iter_result(ctx, make_js_part(ctx, it), 0);
             return s;
@@ -1033,6 +1047,8 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     HlJsMpIter *it = p->iter;
     const char *bad = mp_unusable(it);
     if (bad) return JS_ThrowInternalError(ctx, "%s", bad);
+    if (!p->spent && p->gen != it->gen)
+        return JS_ThrowInternalError(ctx, "%s", MP_STALE_PART);
 
     if (p->spent || !it->in_part)
         return resolve_with(ctx, JS_NewStringLen(ctx, "", 0));
@@ -1121,6 +1137,8 @@ static JSValue js_chunks_next(JSContext *ctx, JSValueConst this_val,
     HlJsMpIter *it = c->iter;
     const char *bad = mp_unusable(it);
     if (bad) return JS_ThrowInternalError(ctx, "%s", bad);
+    if (!c->ended && c->gen != it->gen)
+        return JS_ThrowInternalError(ctx, "%s", MP_STALE_PART);
 
     HlJsMpCont stage;
     memset(&stage, 0, sizeof(stage));
@@ -1172,7 +1190,15 @@ static JSValue js_part_chunks(JSContext *ctx, JSValueConst this_val,
         int64_t hint;
         if (JS_ToInt64(ctx, &hint, argv[0]) != 0) return JS_EXCEPTION;
     }
-    return make_js_chunks(ctx, p->iter);
+    if (!p->spent && p->gen != p->iter->gen)
+        return JS_ThrowInternalError(ctx, "%s", MP_STALE_PART);
+    JSValue obj = make_js_chunks(ctx, p->iter, p->gen);
+    if (p->spent && !JS_IsException(obj)) {
+        /* A drained part's chunks are done, whatever the iterator does next. */
+        HlJsMpChunks *c = JS_GetOpaque(obj, hl_mp_chunks_class_id);
+        if (c) c->ended = 1;
+    }
+    return obj;
 }
 
 /* Part getters: name / filename / contentType */

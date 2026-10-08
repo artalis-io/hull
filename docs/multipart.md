@@ -205,9 +205,15 @@ end
 
 `Part` (and the JS object returned from `req.multipart()`) is valid
 **only until the next `iter.next()` call.** The parser is forward-only
-and there is no way to rewind; holding a part across the next iteration
-and then calling `part.read()` or `part.chunks()` on it will read from
-whatever part is current - almost certainly the wrong thing.
+and there is no way to rewind. Holding a part across the next iteration
+and then calling `part.read()` or `part.chunks()` on it raises
+`req.multipart(): this part is no longer current (the iterator has moved
+to a later part)` (both runtimes; JS throws synchronously, and a
+`chunks()` iterator of such a part throws on its next `next()`). They used
+to read the CURRENT part's body, consuming the bytes the next `read()` was
+meant to get (audit 9). A part that was already read to its end just
+returns empty. Its `name` / `filename` / content type still reflect the
+current part, so read them before moving on.
 
 In practice this is the natural shape of a `for ... of` loop, so it
 takes effort to misuse. Don't stash the part in an outer-scope

@@ -17,6 +17,8 @@
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
 #include "hull/http_feature.h"    /* hl_js_http_error_response (seam strong) */
 #include "mod_buffer.h"           /* js_get_buffer + HlBufferView (res.bytes) */
+#include "internal.h"             /* hl_js_budget_charge */
+#include "hull/shared/res_headers.h" /* header cap, has / re-encode helpers */
 #include "quickjs.h"
 
 #include <keel/http_response.h>
@@ -24,7 +26,6 @@
 #include <keel/http_request.h>     /* kl_http_request_send_response (finalize seam) */
 
 #include <string.h>
-#include <strings.h>  /* strncasecmp */
 
 /* ── Response object ────────────────────────────────────────────────── */
 
@@ -96,32 +97,58 @@ static KlHttpResponse *get_response(JSContext *ctx, JSValueConst this_val)
     return get_response_box(ctx, this_val, NULL);
 }
 
-/* Has a header with this name (case-insensitive) already been added to
- * the response? Used by js_res_html to avoid stamping Hull's default
- * CSP on top of one already set by application middleware - without
- * this the browser sees two Content-Security-Policy headers and
- * enforces the strict intersection, which typically blocks the page's
- * own scripts. Scans res->hdr_buf line by line; headers are appended
- * as "Name: value\r\n" by kl_http_response_header. Sibling of Lua's
- * hl_response_has_header in src/hull/runtime/lua/bindings.c. */
-static int hl_response_has_header(KlHttpResponse *res, const char *name)
+/* Room for one more "Name: value\r\n" in the response's headers, charged
+ * (audit 9 M1, the twin of Lua's res_header_room). Keel's header buffer is
+ * outside the script heap, so neither the heap limit nor the interrupt
+ * handler saw it grow: a loop of res.header grew it to all of memory. -1
+ * with an exception pending past HL_RES_HEADER_BYTES_MAX, or when the
+ * charge tripped the budget. Every header counts - the app's and the ones
+ * Hull adds (Content-Type, the default CSP, Location). */
+static int res_header_room(JSContext *ctx, KlHttpResponse *res,
+                           const char *what, size_t name_len,
+                           size_t value_len)
 {
-    if (!res || !res->hdr_buf || !name) return 0;
-    size_t name_len = strlen(name);
-    if (res->hdr_len < name_len + 2) return 0;
-    const char *p   = res->hdr_buf;
-    const char *end = res->hdr_buf + res->hdr_len;
-    while (p < end) {
-        const char *eol = memchr(p, '\n', (size_t)(end - p));
-        size_t line_len = eol ? (size_t)(eol - p) : (size_t)(end - p);
-        if (line_len > name_len && p[name_len] == ':' &&
-            strncasecmp(p, name, name_len) == 0) {
-            return 1;
-        }
-        if (!eol) break;
-        p = eol + 1;
+    /* The bytes it copies, at the allocation rate (Lua: lua_hlcharge). */
+    if (hl_js_budget_charge(ctx, ((uint64_t)name_len + value_len) / 64))
+        return -1;
+    if (!hl_res_header_fits(res, name_len, value_len)) {
+        JS_ThrowRangeError(ctx, "%s: the response's headers would exceed %d bytes",
+                           what, (int)HL_RES_HEADER_BYTES_MAX);
+        return -1;
     }
     return 0;
+}
+
+/* Add a header Hull itself sets, under the same cap as res.header. */
+static int res_set_header(JSContext *ctx, KlHttpResponse *res,
+                          const char *what, const char *name,
+                          const char *value)
+{
+    if (res_header_room(ctx, res, what, strlen(name), strlen(value)))
+        return -1;
+    (void)kl_http_response_header(res, name, value);
+    return 0;
+}
+
+/* The Content-Type res.json / html / text set, unless the response already
+ * has one: an app's res.header("Content-Type", ...) before res.text wins (as
+ * the CSP does), and a second res.text no longer adds a second header - each
+ * call used to append one (audit 9). */
+static int res_default_content_type(JSContext *ctx, KlHttpResponse *res,
+                                    const char *what, const char *value)
+{
+    if (hl_res_header_has(res, "Content-Type"))
+        return 0;
+    return res_set_header(ctx, res, what, "Content-Type", value);
+}
+
+/* A body set by res.json / html / text is copied out of the heap and may be
+ * gzipped, inside one call (audit 9 M2): charged BEFORE the work at a unit
+ * per 8 bytes, Lua's rate (res_charge_body), so a loop of them is bounded by
+ * the instruction limit. -1 with the uncatchable interrupt pending. */
+static int res_charge_body(JSContext *ctx, size_t len)
+{
+    return hl_js_budget_charge(ctx, (uint64_t)len / 8);
 }
 
 /* res.status(code) */
@@ -152,10 +179,18 @@ static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "res.header requires (name, value)");
 
-    const char *name = JS_ToCString(ctx, argv[0]);
-    const char *value = name ? JS_ToCString(ctx, argv[1]) : NULL;
+    size_t name_len = 0, value_len = 0;
+    const char *name = JS_ToCStringLen(ctx, &name_len, argv[0]);
+    const char *value = name ? JS_ToCStringLen(ctx, &value_len, argv[1]) : NULL;
     if (!name || !value) {   /* a conversion threw: report it */
         if (name) JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
+    /* After the conversions (app code): the cap is checked against the
+     * buffer as it is now. */
+    if (res_header_room(ctx, res, "res.header", name_len, value_len)) {
+        JS_FreeCString(ctx, value);
+        JS_FreeCString(ctx, name);
         return JS_EXCEPTION;
     }
 
@@ -214,7 +249,12 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-    kl_http_response_header(res, "Content-Type", "application/json");
+    if (res_charge_body(ctx, json_len) ||
+        res_default_content_type(ctx, res, "res.json", "application/json")) {
+        JS_FreeCString(ctx, json_str);
+        return JS_EXCEPTION;
+    }
+    hl_res_body_reencode(res);
     /* A failed body copy leaves the response with no body: raise rather
      * than let it go out as a 200 with nothing in it. Compressed for the
      * response's own request: the active one may be another's - a `res`
@@ -246,15 +286,24 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
     if (!html)
         return JS_EXCEPTION;   /* a throwing toString: it was left pending */
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-    kl_http_response_header(res, "Content-Type", "text/html; charset=utf-8");
+    if (res_charge_body(ctx, html_len) ||
+        res_default_content_type(ctx, res, "res.html",
+                                 "text/html; charset=utf-8")) {
+        JS_FreeCString(ctx, html);
+        return JS_EXCEPTION;
+    }
     /* Skip the default CSP if middleware already wrote one - two
      * CSP headers cause browsers to enforce the strict intersection
      * (typically blocking the page's own scripts). The app-supplied
      * one wins. */
     if (js_rt && js_rt->base.csp_policy &&
-        !hl_response_has_header(res, "Content-Security-Policy"))
-        kl_http_response_header(res, "Content-Security-Policy",
-                           js_rt->base.csp_policy);
+        !hl_res_header_has(res, "Content-Security-Policy") &&
+        res_set_header(ctx, res, "res.html", "Content-Security-Policy",
+                       js_rt->base.csp_policy)) {
+        JS_FreeCString(ctx, html);
+        return JS_EXCEPTION;
+    }
+    hl_res_body_reencode(res);
     int rc = hl_maybe_compress(req, res,   /* the response's own request (L2) */
                                js_rt ? js_rt->base.compress : NULL,
                                html, html_len);
@@ -280,7 +329,13 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
     if (!text)
         return JS_EXCEPTION;
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-    kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+    if (res_charge_body(ctx, text_len) ||
+        res_default_content_type(ctx, res, "res.text",
+                                 "text/plain; charset=utf-8")) {
+        JS_FreeCString(ctx, text);
+        return JS_EXCEPTION;
+    }
+    hl_res_body_reencode(res);
     int rc = hl_maybe_compress(req, res,   /* the response's own request (L2) */
                                js_rt ? js_rt->base.compress : NULL,
                                text, text_len);
@@ -314,6 +369,11 @@ static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx,
             "res.bytes: expected ArrayBuffer, TypedArray, or string");
 
+    /* The copy, charged before it (audit 9 M2; Lua: lua_hlwork(L, 0, len)). */
+    if (hl_js_budget_charge(ctx, (uint64_t)view.len / 64)) {
+        if (needs_free && str) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
     int rc = kl_http_response_body_copy(res, (const char *)view.data, view.len);
     if (needs_free && str) JS_FreeCString(ctx, str);
     if (rc != 0)
@@ -341,8 +401,11 @@ static JSValue js_res_redirect(JSContext *ctx, JSValueConst this_val,
     const char *url = JS_ToCString(ctx, argv[0]);
     if (!url)
         return JS_EXCEPTION;
+    if (res_set_header(ctx, res, "res.redirect", "Location", url)) {
+        JS_FreeCString(ctx, url);
+        return JS_EXCEPTION;
+    }
     kl_http_response_status(res, code);
-    kl_http_response_header(res, "Location", url);
     kl_http_response_body_borrow(res, "", 0);
     JS_FreeCString(ctx, url);
 

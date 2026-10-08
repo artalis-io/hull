@@ -16,6 +16,7 @@
 #include "hull/http_feature.h"    /* hl_lua_http_error_response (seam strong) */
 #include "internal.h"             /* get_hl_lua_from_L (shared with bindings.c) */
 #include "hull/limits/runtime.h"  /* HL_RES_HEADER_BYTES_MAX */
+#include "hull/shared/res_headers.h" /* the cap, has / re-encode helpers */
 
 #include "lua.h"
 #include "lualib.h"
@@ -26,7 +27,6 @@
 #include <keel/http_request.h>     /* kl_http_request_send_response (finalize seam) */
 
 #include <string.h>
-#include <strings.h>  /* strncasecmp */
 
 /* ── Response metatable name ────────────────────────────────────────── */
 
@@ -70,46 +70,17 @@ static int lua_res_gc(lua_State *L)
     return 0;
 }
 
-/* Has a header with this name (case-insensitive) already been added to
- * the response? Used by res:html to avoid stamping Hull's default CSP
- * on top of one already set by application middleware - without this
- * the browser sees two Content-Security-Policy headers and enforces
- * the strict intersection, which typically blocks the page's own
- * scripts. Scans res->hdr_buf line by line; headers are appended as
- * "Name: value\r\n" by kl_http_response_header. */
-static int hl_response_has_header(KlHttpResponse *res, const char *name)
-{
-    if (!res || !res->hdr_buf || !name) return 0;
-    size_t name_len = strlen(name);
-    if (res->hdr_len < name_len + 2) return 0;
-    const char *p   = res->hdr_buf;
-    const char *end = res->hdr_buf + res->hdr_len;
-    while (p < end) {
-        const char *eol = memchr(p, '\n', (size_t)(end - p));
-        size_t line_len = eol ? (size_t)(eol - p) : (size_t)(end - p);
-        if (line_len > name_len && p[name_len] == ':' &&
-            strncasecmp(p, name, name_len) == 0) {
-            return 1;
-        }
-        if (!eol) break;
-        p = eol + 1;
-    }
-    return 0;
-}
-
 /* Room for one more "Name: value\r\n" in the response's headers, charged
  * (audit 9 M1). The header buffer is Keel's, outside the script heap, so
  * neither the heap limit nor the allocation charge saw it grow: a loop of
- * res:header - or of res:text, which adds a Content-Type each call - grew it
- * to all of memory. Raises past HL_RES_HEADER_BYTES_MAX. */
+ * res:header grew it to all of memory. Raises past HL_RES_HEADER_BYTES_MAX
+ * (hull/shared/res_headers.h, shared with the JS twin). */
 static void res_header_room(lua_State *L, KlHttpResponse *res,
                             const char *what, size_t name_len,
                             size_t value_len)
 {
     lua_hlcharge(L, 0, name_len + value_len);
-    if (name_len > HL_RES_HEADER_BYTES_MAX ||
-        value_len > HL_RES_HEADER_BYTES_MAX ||
-        res->hdr_len + name_len + value_len + 4 > HL_RES_HEADER_BYTES_MAX)
+    if (!hl_res_header_fits(res, name_len, value_len))
         luaL_error(L, "%s: the response's headers would exceed %d bytes",
                    what, (int)HL_RES_HEADER_BYTES_MAX);
 }
@@ -122,6 +93,17 @@ static void res_set_header(lua_State *L, KlHttpResponse *res,
 {
     res_header_room(L, res, what, strlen(name), strlen(value));
     (void)kl_http_response_header(res, name, value);
+}
+
+/* The Content-Type res:json / html / text set, unless the response already
+ * has one: an app's res:header("Content-Type", ...) before res:text wins (as
+ * the CSP below), and a second res:text no longer adds a second header -
+ * each call used to append one (audit 9). */
+static void res_default_content_type(lua_State *L, KlHttpResponse *res,
+                                     const char *what, const char *value)
+{
+    if (!hl_res_header_has(res, "Content-Type"))
+        res_set_header(L, res, what, "Content-Type", value);
 }
 
 /* A body set by res:json / res:html / res:text is copied out of the heap and
@@ -190,8 +172,9 @@ static int lua_res_json(lua_State *L)
         lua_pop(L, 2);
         return luaL_error(L, "res:json - json.encode did not return a string");
     }
-    res_set_header(L, res, "res:json", "Content-Type", "application/json");
+    res_default_content_type(L, res, "res:json", "application/json");
     res_charge_body(L, json_len);
+    hl_res_body_reencode(res);
     if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                           hlua ? hlua->base.compress : NULL,
                           json_str, json_len) != 0)
@@ -209,17 +192,18 @@ static int lua_res_html(lua_State *L)
     HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
-    res_set_header(L, res, "res:html", "Content-Type",
-                   "text/html; charset=utf-8");
+    res_default_content_type(L, res, "res:html",
+                             "text/html; charset=utf-8");
     /* Skip the default CSP if middleware already wrote one - two CSP
      * headers cause browsers to enforce the strict intersection
      * (typically blocking the page's own scripts). The app-supplied
      * one wins. */
     if (hlua && hlua->base.csp_policy &&
-        !hl_response_has_header(res, "Content-Security-Policy"))
+        !hl_res_header_has(res, "Content-Security-Policy"))
         res_set_header(L, res, "res:html", "Content-Security-Policy",
                        hlua->base.csp_policy);
     res_charge_body(L, len);
+    hl_res_body_reencode(res);
     if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                           hlua ? hlua->base.compress : NULL,
                           html, len) != 0)
@@ -234,9 +218,10 @@ static int lua_res_text(lua_State *L)
     HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
-    res_set_header(L, res, "res:text", "Content-Type",
-                   "text/plain; charset=utf-8");
+    res_default_content_type(L, res, "res:text",
+                             "text/plain; charset=utf-8");
     res_charge_body(L, len);
+    hl_res_body_reencode(res);
     if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                           hlua ? hlua->base.compress : NULL,
                           text, len) != 0)
