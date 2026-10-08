@@ -74,29 +74,28 @@ static void crypto_charge_bcrypt(lua_State *L, lua_Integer rounds,
  *
  * One scalar multiplication (keypair, sign, verify, x25519, box's shared
  * key, an ECDSA sign / verify) is HL_LUA_ASYM_UNITS (2^14). RSA is
- * (bits / 1024)^3 * 2^14, never less than one scalar multiplication, with
- * bits capped at 8192 (mbedTLS's MPI ceiling). The key's size is not known
- * before mbedTLS parses it, so it comes from what the caller handed in:
- * for a verify, the signature (an RSA signature is exactly the modulus
- * long, and a shorter one is refused before any exponentiation); for a
- * sign, the PEM: a PEM private key carries at least n, d, p and q, three
- * modulus-lengths of DER and so four of base64, so its modulus has at most
- * 2 bits per PEM byte. The same numbers as the JS runtime. */
+ * (bits / 1024)^3 * 2^14, bits rounded up to a multiple of 1024 (so never
+ * less than one scalar multiplication) and capped at 16384. The key's size
+ * is not known before mbedTLS parses it, so it comes from what the caller
+ * handed in: for a verify, the signature (an RSA signature is exactly the
+ * modulus long, and a shorter one is refused before any exponentiation);
+ * for a sign, the PEM: a PKCS#1 / PKCS#8 private key carries n, d, p, q and
+ * the CRT values, so bits ~= PEM length * 4/3, an upper bound for a real
+ * key. The same numbers as the JS runtime (runtime/js/mod_crypto.c). */
 #define HL_LUA_ASYM_UNITS      ((size_t)1 << 14)
-#define HL_LUA_RSA_MAX_BITS    8192u
+#define HL_LUA_RSA_MAX_BITS    16384u
 
 static void crypto_charge_asym(lua_State *L)
 {
     lua_hlwork(L, HL_LUA_ASYM_UNITS, 0);
 }
 
-/* (bits / 1024)^3 * 2^14 = bits^3 / 2^16, at least one scalar mult. */
+/* ceil(bits / 1024)^3 * 2^14, at least one scalar multiplication. */
 static void crypto_charge_rsa_bits(lua_State *L, uint64_t bits)
 {
     if (bits > HL_LUA_RSA_MAX_BITS) bits = HL_LUA_RSA_MAX_BITS;
-    uint64_t u = (bits * bits * bits) >> 16;
-    if (u < HL_LUA_ASYM_UNITS) u = HL_LUA_ASYM_UNITS;
-    lua_hlwork(L, (size_t)u, 0);
+    uint64_t k = bits ? (bits + 1023) / 1024 : 1;
+    lua_hlwork(L, (size_t)(k * k * k * HL_LUA_ASYM_UNITS), 0);
 }
 
 static int crypto_alg_is_rsa(HlCryptoAsymAlg alg)
@@ -479,9 +478,9 @@ static int lua_crypto_sign(lua_State *L)
             "crypto.sign: unsupported alg '%.*s' (use one of "
             "RS256/RS384/RS512/PS256/ES256/ES384)", (int)alg_len, alg_str);
 
-    /* audit 10: at most 2 modulus bits per PEM byte (see the top). */
+    /* audit 10: the modulus from the PEM's length (see the top). */
     if (crypto_alg_is_rsa(alg))
-        crypto_charge_rsa_bits(L, (uint64_t)pk_len * 2u);
+        crypto_charge_rsa_bits(L, (uint64_t)(pk_len / 3) * 4u);
     else
         crypto_charge_asym(L);
     uint8_t sig[HL_CRYPTO_SIGN_MAX];

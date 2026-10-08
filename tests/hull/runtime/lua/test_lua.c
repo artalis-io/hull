@@ -9177,7 +9177,7 @@ static int audit10_run(const char *code, int64_t limit, char *err, size_t n)
 /* M: every public-key operation counted as one instruction - a loop of
  * Ed25519 signs, X25519s or RSA-8192 signs ran far past the limit. Each is
  * charged before the work now: 2^14 units per scalar multiplication, RSA
- * (bits / 1024)^3 * 2^14. */
+ * ceil(bits / 1024)^3 * 2^14. */
 UTEST(lua_audit10, asymmetric_crypto_is_charged)
 {
     init_lua_with_caps();
@@ -9211,9 +9211,10 @@ UTEST(lua_audit10, asymmetric_crypto_is_charged)
         "assert(crypto.ed25519_verify('m', s, pk)) return 1",
         1000000, err, sizeof err), LUA_OK);
 
-    /* RSA is charged by size before the key is parsed: an 8192-bit sign or
-     * verify is 2^23 units, over the limit at once (the junk key would
-     * otherwise be refused, or the signature be false). */
+    /* RSA is charged by size before the key is parsed: a 5000-byte PEM is
+     * ~6.7k bits (7^3 * 2^14 units), a 1024-byte signature 8192 bits (8^3 *
+     * 2^14), both over the limit at once (the junk key would otherwise be
+     * refused, or the signature be false). */
     EXPECT_NE(audit10_run(
         "return crypto.sign('RS256', string.rep('A', 5000), 'm')",
         1000000, err, sizeof err), LUA_OK);
