@@ -45,6 +45,8 @@ typedef struct {
  * binding it replaces, for hl_db_budget_restore. */
 HlDbBudgetBinding hl_db_budget_swap(HlDbBudgetFn fn, void *ud);
 void hl_db_budget_restore(HlDbBudgetBinding prev);
+/* This thread's binding, to put back with hl_db_budget_restore. */
+HlDbBudgetBinding hl_db_budget_current(void);
 
 /* Drop this thread's binding when it is @p ud's (the budget is going away). */
 void hl_db_budget_unbind(const void *ud);

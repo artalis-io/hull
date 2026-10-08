@@ -29,6 +29,12 @@ HlDbBudgetBinding hl_db_budget_swap(HlDbBudgetFn fn, void *ud)
     return prev;
 }
 
+HlDbBudgetBinding hl_db_budget_current(void)
+{
+    HlDbBudgetBinding cur = { tl_budget_fn, tl_budget_ud };
+    return cur;
+}
+
 void hl_db_budget_restore(HlDbBudgetBinding prev)
 {
     tl_budget_fn = prev.fn;
