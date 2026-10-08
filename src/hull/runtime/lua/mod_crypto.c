@@ -65,6 +65,46 @@ static void crypto_charge_bcrypt(lua_State *L, lua_Integer rounds,
     crypto_charge_kdf(L, (uint64_t)rounds * blocks, HL_LUA_BCRYPT_UNITS_PER_HASH);
 }
 
+/* Public-key operations (audit 10): an Ed25519 / X25519 / ECDSA scalar
+ * multiplication is ~100k-300k cycles and an RSA private operation grows
+ * with the cube of the modulus (an RSA-8192 sign takes most of a second),
+ * yet each call counted as one instruction, so a loop of them was not
+ * bounded in time. Each is charged a fixed cost BEFORE it runs (lua_hlwork,
+ * as crypto_charge_kdf: a run over its budget raises with nothing done).
+ *
+ * One scalar multiplication (keypair, sign, verify, x25519, box's shared
+ * key, an ECDSA sign / verify) is HL_LUA_ASYM_UNITS (2^14). RSA is
+ * (bits / 1024)^3 * 2^14, never less than one scalar multiplication, with
+ * bits capped at 8192 (mbedTLS's MPI ceiling). The key's size is not known
+ * before mbedTLS parses it, so it comes from what the caller handed in:
+ * for a verify, the signature (an RSA signature is exactly the modulus
+ * long, and a shorter one is refused before any exponentiation); for a
+ * sign, the PEM: a PEM private key carries at least n, d, p and q, three
+ * modulus-lengths of DER and so four of base64, so its modulus has at most
+ * 2 bits per PEM byte. The same numbers as the JS runtime. */
+#define HL_LUA_ASYM_UNITS      ((size_t)1 << 14)
+#define HL_LUA_RSA_MAX_BITS    8192u
+
+static void crypto_charge_asym(lua_State *L)
+{
+    lua_hlwork(L, HL_LUA_ASYM_UNITS, 0);
+}
+
+/* (bits / 1024)^3 * 2^14 = bits^3 / 2^16, at least one scalar mult. */
+static void crypto_charge_rsa_bits(lua_State *L, uint64_t bits)
+{
+    if (bits > HL_LUA_RSA_MAX_BITS) bits = HL_LUA_RSA_MAX_BITS;
+    uint64_t u = (bits * bits * bits) >> 16;
+    if (u < HL_LUA_ASYM_UNITS) u = HL_LUA_ASYM_UNITS;
+    lua_hlwork(L, (size_t)u, 0);
+}
+
+static int crypto_alg_is_rsa(HlCryptoAsymAlg alg)
+{
+    return alg == HL_CRYPTO_ASYM_RS256 || alg == HL_CRYPTO_ASYM_RS384 ||
+           alg == HL_CRYPTO_ASYM_RS512 || alg == HL_CRYPTO_ASYM_PS256;
+}
+
 static int lua_crypto_sha256(lua_State *L)
 {
     size_t len;
@@ -323,6 +363,7 @@ static int crypto_push_keypair(lua_State *L, const char *pub, size_t publen,
 static int lua_crypto_ed25519_keypair(lua_State *L)
 {
     uint8_t pk[32], sk[64];
+    crypto_charge_asym(L);   /* audit 10 */
     if (hl_cap_crypto_ed25519_keypair(pk, sk) != 0)
         return luaL_error(L, "ed25519 keypair generation failed");
     return crypto_push_keypair(L, (const char *)pk, sizeof pk,
@@ -338,6 +379,7 @@ static int lua_crypto_ed25519_sign(lua_State *L)
     crypto_charge(L, data_len);
     if (sk_len != 64)
         return luaL_error(L, "ed25519_sign: secret key must be 64 bytes");
+    crypto_charge_asym(L);   /* audit 10 */
     uint8_t sig[64];
     if (hl_cap_crypto_ed25519_sign((const uint8_t *)data, data_len,
                                    (const uint8_t *)sk, sig) != 0)
@@ -358,6 +400,7 @@ static int lua_crypto_ed25519_verify(lua_State *L)
         return luaL_error(L, "ed25519_verify: signature must be 64 bytes");
     if (pk_len != 32)
         return luaL_error(L, "ed25519_verify: public key must be 32 bytes");
+    crypto_charge_asym(L);   /* audit 10 */
     int rc = hl_cap_crypto_ed25519_verify((const uint8_t *)data, data_len,
                                           (const uint8_t *)sig, (const uint8_t *)pk);
     lua_pushboolean(L, rc == 0);
@@ -399,6 +442,11 @@ static int lua_crypto_verify(lua_State *L)
             "crypto.hmac_sha256_verify; 'none' is rejected)",
             (int)alg_len, alg_str);
 
+    /* audit 10: an RSA signature is the modulus long (see the top). */
+    if (crypto_alg_is_rsa(alg))
+        crypto_charge_rsa_bits(L, (uint64_t)sig_len * 8u);
+    else
+        crypto_charge_asym(L);
     int rc = hl_cap_crypto_asym_verify_default(pk, pk_len, alg,
                                          data, data_len, sig, sig_len);
     /* rc == 0 -> verified. rc < 0 -> any failure (bad sig, bad PEM,
@@ -431,6 +479,11 @@ static int lua_crypto_sign(lua_State *L)
             "crypto.sign: unsupported alg '%.*s' (use one of "
             "RS256/RS384/RS512/PS256/ES256/ES384)", (int)alg_len, alg_str);
 
+    /* audit 10: at most 2 modulus bits per PEM byte (see the top). */
+    if (crypto_alg_is_rsa(alg))
+        crypto_charge_rsa_bits(L, (uint64_t)pk_len * 2u);
+    else
+        crypto_charge_asym(L);
     uint8_t sig[HL_CRYPTO_SIGN_MAX];
     size_t sig_len = 0;
     int rc = hl_cap_crypto_asym_sign_default(pk, pk_len, alg, data, data_len,
@@ -461,6 +514,9 @@ static int lua_crypto_rsa_private_pem(lua_State *L)
     parts.p = (const uint8_t *)luaL_checklstring(L, 4, &n); parts.p_len = n;
     parts.q = (const uint8_t *)luaL_checklstring(L, 5, &n); parts.q_len = n;
 
+    /* audit 10: deriving the CRT values and checking the key is modular
+     * arithmetic on n-sized numbers, charged as an RSA operation on n. */
+    crypto_charge_rsa_bits(L, (uint64_t)parts.n_len * 8u);
     char pem[HL_CRYPTO_RSA_PEM_MAX];
     size_t pem_len = 0;
     int rc = hl_cap_crypto_rsa_private_pem(&parts, pem, sizeof pem, &pem_len);
@@ -632,6 +688,7 @@ static int lua_crypto_box(lua_State *L)
     if (msg_len > SIZE_MAX - HL_BOX_MACBYTES)
         return luaL_error(L, "box: message too large");
     crypto_charge(L, msg_len);   /* audit 9 H3 */
+    crypto_charge_asym(L);       /* the shared key (audit 10) */
     size_t ct_len = msg_len + HL_BOX_MACBYTES;
     luaL_Buffer b;
     uint8_t *ct = (uint8_t *)luaL_buffinitsize(L, &b, ct_len);
@@ -657,6 +714,7 @@ static int lua_crypto_box_open(lua_State *L)
     if (sk_len != 32)
         return luaL_error(L, "box_open: secret key must be 32 bytes");
     crypto_charge(L, ct_len);   /* audit 9 H3 */
+    crypto_charge_asym(L);      /* the shared key (audit 10) */
     if (ct_len < HL_BOX_MACBYTES) {
         lua_pushnil(L);
         return 1;
@@ -680,6 +738,7 @@ static int lua_crypto_box_open(lua_State *L)
 static int lua_crypto_x25519_keypair(lua_State *L)
 {
     uint8_t pk[32], sk[32];
+    crypto_charge_asym(L);   /* audit 10 */
     if (hl_cap_crypto_x25519_keypair(pk, sk) != 0)
         return luaL_error(L, "x25519 keypair generation failed");
     return crypto_push_keypair(L, (const char *)pk, sizeof pk,
@@ -700,6 +759,7 @@ static int lua_crypto_x25519(lua_State *L)
         return luaL_error(L, "x25519: secret key must be 32 bytes");
     if (pk_len != 32)
         return luaL_error(L, "x25519: public key must be 32 bytes");
+    crypto_charge_asym(L);   /* audit 10 */
     uint8_t shared[32];
     int rc = hl_cap_crypto_x25519(shared, (const uint8_t *)sk, (const uint8_t *)pk);
     if (rc == -2) {
@@ -720,6 +780,7 @@ static int lua_crypto_x25519(lua_State *L)
 static int lua_crypto_box_keypair(lua_State *L)
 {
     uint8_t pk[32], sk[32];
+    crypto_charge_asym(L);   /* audit 10 */
     if (hl_cap_crypto_box_keypair(pk, sk) != 0)
         return luaL_error(L, "box keypair generation failed");
     return crypto_push_keypair(L, (const char *)pk, sizeof pk,

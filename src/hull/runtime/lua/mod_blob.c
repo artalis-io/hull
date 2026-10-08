@@ -154,6 +154,16 @@ static const char *check_id(lua_State *L, int idx)
 
 /* ── blob.put / blob.put_verified ────────────────────────────────── */
 
+/* Charge hashing + writing @p len bytes to the instruction budget BEFORE the
+ * work (audit 10): one put SHA-256s and writes up to the whole heap, and
+ * counted as one instruction, so a loop of them was not bounded in time.
+ * One unit per 8 bytes, crypto_charge's rate; lua_hlwork raises at once
+ * when the charge takes the run over, with nothing written. */
+static void blob_charge(lua_State *L, size_t len)
+{
+    lua_hlwork(L, len / 8, 0);
+}
+
 /* Read `durable` from an optional opts table at `idx` (1 = true, 0 = false). */
 static int read_durable_opt(lua_State *L, int idx)
 {
@@ -170,6 +180,7 @@ static int lua_blob_put(lua_State *L)
     size_t len = 0;
     const char *bytes = luaL_checklstring(L, 1, &len);
     int durable = read_durable_opt(L, 2);
+    blob_charge(L, len);
 
     char id[HL_BLOB_ID_BUF_SIZE];
     int rc = durable
@@ -190,6 +201,7 @@ static int lua_blob_put_verified(lua_State *L)
     const char *bytes = luaL_checklstring(L, 1, &len);
     const char *expected = check_id(L, 2);
     int durable = read_durable_opt(L, 3);
+    blob_charge(L, len);
 
     char id[HL_BLOB_ID_BUF_SIZE];
     int rc = durable
@@ -255,6 +267,7 @@ static int lua_writer_write(lua_State *L)
     if (!ud->w) return luaL_error(L, "blob.writer: write after finalize/abort");
     size_t len = 0;
     const char *bytes = luaL_checklstring(L, 2, &len);
+    blob_charge(L, len);
     if (hl_cap_blob_writer_write(ud->w, (const uint8_t *)bytes, len) != 0) {
         hl_cap_blob_writer_abort(ud->w);
         ud->w = NULL;

@@ -96,6 +96,22 @@ static inline const char *hl_db_registry_open_txn(HlDbRegistry *reg)
 #endif
 
 /*
+ * Hold the stale-transaction guard off (hold: +1, release: -1; nests) on the
+ * event-loop thread. Only for the in-process test request (test.get & co):
+ * it runs the app's dispatch, which guards at its start and end, INSIDE a
+ * test case - and a case may have a transaction open (`db.batch(function()
+ * ... test.get(...) ... end)`), which is live, not stale: the guard rolled
+ * it back under the case (audit 10). The test binding holds the guard only
+ * while the case has a transaction open, so a transaction the request
+ * itself leaves open is still rolled back otherwise.
+ */
+#ifdef HL_ENABLE_DB
+void hl_db_registry_guard_hold(int delta);
+#else
+static inline void hl_db_registry_guard_hold(int delta) { (void)delta; }
+#endif
+
+/*
  * Point the registry at the app's databases map. The manifest is only known
  * after the app runs app.manifest(), which is after the registry is created
  * at db-open time, so the serve path injects the sealed manifest here once it

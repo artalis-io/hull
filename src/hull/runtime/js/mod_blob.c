@@ -44,6 +44,7 @@
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
+#include "internal.h"   /* hl_js_budget_charge */
 
 #include <limits.h>
 #include <stdio.h>
@@ -262,6 +263,16 @@ static JSValue make_put_result(JSContext *ctx, const char *id, size_t size)
 
 /* ── blob.put / blob.putVerified ─────────────────────────────────── */
 
+/* Charge hashing + writing @p len bytes to the instruction budget BEFORE the
+ * work (audit 10, parity with Lua): one put SHA-256s and writes up to the
+ * whole heap, and the interrupt handler counted it as one step. One unit per
+ * 8 bytes. -1 with the uncatchable interrupt pending: the caller frees what
+ * it holds and returns JS_EXCEPTION. */
+static int blob_charge(JSContext *ctx, size_t len)
+{
+    return hl_js_budget_charge(ctx, (uint64_t)len / 8);
+}
+
 static JSValue js_blob_put(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
@@ -282,7 +293,10 @@ static JSValue js_blob_put(JSContext *ctx, JSValueConst this_val,
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
     if (!bytes) return JS_EXCEPTION;
     b = get_store(ctx);   /* again, after the arguments: see get_store */
-    if (!b) { if (cstr) JS_FreeCString(ctx, cstr); return JS_EXCEPTION; }
+    if (!b || blob_charge(ctx, len)) {
+        if (cstr) JS_FreeCString(ctx, cstr);
+        return JS_EXCEPTION;
+    }
 
     char id[HL_BLOB_ID_BUF_SIZE];
     int rc = durable
@@ -313,7 +327,7 @@ static JSValue js_blob_put_verified(JSContext *ctx, JSValueConst this_val,
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
     if (!bytes) { JS_FreeCString(ctx, expected); return JS_EXCEPTION; }
     b = get_store(ctx);   /* again, after the arguments: see get_store */
-    if (!b) {
+    if (!b || blob_charge(ctx, len)) {
         JS_FreeCString(ctx, expected);
         if (cstr) JS_FreeCString(ctx, cstr);
         return JS_EXCEPTION;
@@ -425,6 +439,10 @@ static JSValue js_writer_write(JSContext *ctx, JSValueConst this_val,
         if (cstr) JS_FreeCString(ctx, cstr);
         if (!bh) return JS_EXCEPTION;
         return JS_ThrowInternalError(ctx, "blob.writer: write after finalize/abort");
+    }
+    if (blob_charge(ctx, len)) {
+        if (cstr) JS_FreeCString(ctx, cstr);
+        return JS_EXCEPTION;
     }
 
     int rc = hl_cap_blob_writer_write((HlBlobWriter *)bh->h, bytes, len);

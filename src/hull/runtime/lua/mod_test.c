@@ -149,6 +149,30 @@ static int test_build_result_k(lua_State *L)
     return 1;
 }
 
+/* After an in-process request: the case's budget again, charged with what
+ * the request used (it ran on the case's time), and tripped when over. */
+static void test_budget_rejoin(HlLua *lua, const HlLuaBudget *saved)
+{
+    int64_t nested = lua->budget.used;
+    int nested_tripped = lua->budget.tripped;
+    lua->budget = *saved;
+    lua->budget.used = nested > INT64_MAX - saved->used
+                       ? INT64_MAX : saved->used + nested;
+    if (nested_tripped ||
+        (lua->budget.limit > 0 && lua->budget.used >= lua->budget.limit))
+        lua->budget.tripped = 1;
+}
+
+static void test_result_free(HlLua *lua, HlTestResult *result)
+{
+    if (result->body)
+        hl_alloc_free_const(lua->base.alloc, result->body, result->body_len + 1);
+    if (result->hdr_buf)
+        hl_alloc_free_const(lua->base.alloc, result->hdr_buf, result->hdr_len + 1);
+    result->body = NULL;
+    result->hdr_buf = NULL;
+}
+
 static int l_test_http(lua_State *L, const char *method)
 {
     const char *path = luaL_checkstring(L, 1);
@@ -246,12 +270,27 @@ static int l_test_http(lua_State *L, const char *method)
         }
     }
 
+    /* The request runs inside this test case (audit 10). Its dispatch is an
+     * entry and re-arms the budget, which reset the case's count: a case
+     * looping over test.get never hit the limit. The case's count is kept
+     * and the request's added to it. And the dispatch's stale-transaction
+     * guard rolled back a transaction the case has open (a test.get inside
+     * db.batch lost the batch's writes): held off while the case has one. */
+    HlLuaBudget saved_budget = lua->budget;
+    int hold = hl_db_registry_open_txn(lua->base.db_registry) != NULL;
+    if (hold) hl_db_registry_guard_hold(1);
     HlTestResult result;
-    if (hl_cap_test_dispatch(router, method, path, body_str, body_len,
+    int drc = hl_cap_test_dispatch(router, method, path, body_str, body_len,
                       header_names, header_values, num_headers,
                       ctx_json, lua->base.alloc, run_middleware,
-                      &result) != 0) {
+                      &result);
+    if (hold) hl_db_registry_guard_hold(-1);
+    test_budget_rejoin(lua, &saved_budget);
+    if (drc != 0)
         return luaL_error(L, "test dispatch failed");
+    if (lua->budget.tripped) {
+        test_result_free(lua, &result);
+        return hl_lua_budget_raise(L);
     }
 
     /* The result table is built under lua_pcall, and the result's C buffers
@@ -264,10 +303,7 @@ static int l_test_http(lua_State *L, const char *method)
         lua_pushlightuserdata(L, &tb);
         built = lua_pcall(L, 1, 1, 0) == LUA_OK;
     }
-    if (result.body)
-        hl_alloc_free_const(lua->base.alloc, result.body, result.body_len + 1);
-    if (result.hdr_buf)
-        hl_alloc_free_const(lua->base.alloc, result.hdr_buf, result.hdr_len + 1);
+    test_result_free(lua, &result);
     if (!built)
         return lua_error(L);
     return 1;

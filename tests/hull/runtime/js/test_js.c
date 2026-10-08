@@ -8975,4 +8975,146 @@ UTEST(js_audit9, response_bodies_are_charged)
     }
 }
 
+/* ── Audit 10 (the JS twins of the Lua runtime items) ─────────────────── */
+
+#include "hull/cap/smtp.h"   /* HlSmtpConfig */
+#include "hull/cap/fs.h"     /* HlFsConfig */
+
+/* Run @p code as a module under a budget of @p limit; 1 if the run went
+ * over it. */
+static int a10_run_tripped(const char *code, int64_t limit)
+{
+    js.max_instructions = limit;
+    hl_js_budget_arm(&js);
+    JSValue v = JS_Eval(js.ctx, code, strlen(code), "<a10>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+    int tripped = js.budget_tripped;
+    js.max_instructions = 0;
+    hl_js_budget_arm(&js);
+    return tripped;
+}
+
+/* L: fs.write wrote up to the whole heap as one interrupt step. Charged
+ * before the write now (one unit per 8 bytes), so the charge holds even for
+ * a write the policy then refuses. */
+UTEST(js_audit10, fs_write_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a10"), NULL);
+    HlFsConfig fs = { tmpdir, strlen(tmpdir), NULL };   /* no grants */
+    js.base.fs_cfg = &fs;
+    EXPECT_EQ(a10_run_tripped("globalThis.BIG = 'x'.repeat(8 * 1000000);", 0), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 10; i++) { try { fs.write('a.bin', BIG); } catch (e) {} }",
+        200000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "try { fs.write('a.bin', 'x'); } catch (e) {} globalThis.__a10_small = 1;",
+        200000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a10_small|0"), 1);
+    js.base.fs_cfg = NULL;
+    cleanup_js_caps();
+    rmdir(tmpdir);
+}
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+/* L: smtp.send dropped, silently, a cc entry that was not a string or whose
+ * conversion failed, and never checked the copy: the message went out to
+ * fewer recipients than asked. Every entry is copied now, or it throws. */
+UTEST(js_audit10, smtp_cc_is_copied_whole_or_refused)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlSmtpConfig smtp = {0};
+    js.base.smtp_cfg = &smtp;
+    static const char *const pre =
+        "(() => { const o = { host: 'mail.invalid', from: 'a@x.test', "
+        "  to: 'b@x.test', subject: 's', body: 'b' }; ";
+    char code[1024];
+
+    snprintf(code, sizeof code, "%s o.cc = ['c@x.test', 42]; "
+             "try { smtp.send(o); return 0; } catch (e) { "
+             "  return /cc\\[1\\] must be a string/.test(e.message) ? 1 : 2; } })()",
+             pre);
+    EXPECT_EQ(eval_int(code), 1);
+
+    snprintf(code, sizeof code, "%s o.cc = 'c@x.test'; "
+             "try { smtp.send(o); return 0; } catch (e) { "
+             "  return /cc must be an array/.test(e.message) ? 1 : 2; } })()", pre);
+    EXPECT_EQ(eval_int(code), 1);
+
+    snprintf(code, sizeof code, "%s o.cc = ['c@x.test', { toString() { "
+             "throw new Error('boom'); } }]; "
+             "try { smtp.send(o); return 0; } catch (e) { return 1; } })()", pre);
+    EXPECT_EQ(eval_int(code), 1);
+
+    js.base.smtp_cfg = NULL;
+    cleanup_js_caps();
+}
+#endif
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* L: test.get runs the app's dispatch, an entry: it re-armed the budget (a
+ * case looping over test.get never hit the limit) and its stale-transaction
+ * guard rolled back a transaction the CASE had open. The case's budget is
+ * kept and charged with the request's work now, and the guard is held off
+ * while the case has a transaction. */
+UTEST(js_audit10, nested_test_request_keeps_the_case_budget_and_txn)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *app =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "db.exec('CREATE TABLE a10 (x INTEGER)');\n"
+        "app.get('/spin', (req, res) => { "
+        "  for (let i = 0; i < 300000; i++) {} res.json({ ok: true }); });\n"
+        "app.get('/write', (req, res) => { "
+        "  db.exec('INSERT INTO a10 VALUES (2)'); res.json({ ok: true }); });\n";
+    JSValue v = JS_Eval(js.ctx, app, strlen(app), "<a10app>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    KlHttpRouter router;
+    KlAllocator kalloc = kl_allocator_default();
+    kl_http_router_init(&router, &kalloc);
+    ASSERT_EQ(hl_js_wire_routes(&js, &router), 0);
+    hl_js_test_register(js.ctx, &router, &js);
+    const char *cases =
+        "test('loops over test.get', () => { "
+        "  for (let i = 0; i < 10; i++) test.get('/spin'); });\n"
+        "test('one request fits', () => { "
+        "  if (test.get('/spin').status !== 200) throw new Error('status'); });\n"
+        "test('inside db.batch', () => { "
+        "  db.batch(() => { "
+        "    db.exec('INSERT INTO a10 VALUES (1)'); "
+        "    if (test.get('/write').status !== 200) throw new Error('status'); "
+        "  }); "
+        "  const rows = db.query('SELECT x FROM a10 ORDER BY x'); "
+        "  if (rows.length !== 2) throw new Error('rows: ' + rows.length); });\n";
+    v = JS_Eval(js.ctx, cases, strlen(cases), "<a10cases>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+
+    js.max_instructions = 1000000;   /* polls weigh 10000 each */
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[4];
+    memset(results, 0, sizeof results);
+    hl_js_test_run(js.ctx, &total, &passed, &failed, NULL, results, 4);
+    js.max_instructions = 0;
+    hl_js_budget_arm(&js);
+    EXPECT_EQ(total, 3);
+    EXPECT_FALSE(results[0].passed);
+    EXPECT_NE(strstr(results[0].error, "instruction limit"), NULL);
+    EXPECT_TRUE_MSG(results[1].passed, results[1].error);
+    EXPECT_TRUE_MSG(results[2].passed, results[2].error);
+
+    kl_http_router_free(&router);
+    cleanup_js_caps();
+}
+#endif
+
 UTEST_MAIN();

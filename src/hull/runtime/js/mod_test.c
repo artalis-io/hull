@@ -16,6 +16,8 @@
 #include "hull/runtime/js.h"
 #include "hull/utils/alloc.h"
 #include "hull/shared/async_backend.h"
+#include "hull/cap/db_registry.h"   /* hl_db_registry_guard_hold */
+#include "internal.h"              /* hl_js_budget_throw */
 
 #include <keel/http_request.h>
 
@@ -170,11 +172,30 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
         JS_FreeValue(ctx, ctx_val);
     }
 
+    /* The request runs inside this test case (audit 10, parity with Lua).
+     * Its dispatch is an entry and re-arms the budget, which reset the
+     * case's count: a case looping over test.get never hit the limit. The
+     * case's count is kept and the request's added to it. And the dispatch's
+     * stale-transaction guard rolled back a transaction the case has open:
+     * held off while the case has one. */
+    HlJS *tjs = state->js;
+    int64_t saved_count = tjs->instruction_count;
+    int hold = hl_db_registry_open_txn(tjs->base.db_registry) != NULL;
+    if (hold) hl_db_registry_guard_hold(1);
     HlTestResult result;
     int rc = hl_cap_test_dispatch(state->router, method, path, body_str, body_len,
                            header_names, header_values, num_headers,
-                           ctx_json, state->js->base.alloc, run_middleware,
+                           ctx_json, tjs->base.alloc, run_middleware,
                            &result);
+    if (hold) hl_db_registry_guard_hold(-1);
+    {
+        int64_t nested = tjs->instruction_count;
+        tjs->instruction_count = nested > INT64_MAX - saved_count
+                                 ? INT64_MAX : saved_count + nested;
+        if (tjs->max_instructions > 0 &&
+            tjs->instruction_count > tjs->max_instructions)
+            tjs->budget_tripped = 1;
+    }
 
     /* Free C strings */
     // cppcheck-suppress knownConditionTrueFalse
@@ -190,6 +211,14 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
 
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "test dispatch failed");
+    if (tjs->budget_tripped) {
+        /* The request took the case over its budget: the case stops here. */
+        if (result.body)
+            hl_alloc_free_const(tjs->base.alloc, result.body, result.body_len + 1);
+        if (result.hdr_buf)
+            hl_alloc_free_const(tjs->base.alloc, result.hdr_buf, result.hdr_len + 1);
+        return hl_js_budget_throw(ctx);
+    }
 
     /* Build result object */
     JSValue obj = JS_NewObject(ctx);

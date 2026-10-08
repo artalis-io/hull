@@ -9151,4 +9151,197 @@ UTEST(lua_audit9, a_task_that_trips_the_budget_still_finishes)
     be->free(actx);
 }
 
+/* ── Audit 10: the Lua runtime ────────────────────────────────────────── */
+
+#include "hull/cap/smtp.h"   /* HlSmtpConfig */
+#include "hull/cap/fs.h"     /* HlFsConfig */
+
+/* Run @p code under a budget of @p limit on the caps runtime; the error
+ * text, if any, lands in @p err. */
+static int audit10_run(const char *code, int64_t limit, char *err, size_t n)
+{
+    lua_rt.max_instructions = limit;
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    int rc = luaL_dostring(lua_rt.L, code);
+    err[0] = '\0';
+    if (rc != LUA_OK) {
+        const char *e = lua_tostring(lua_rt.L, -1);
+        snprintf(err, n, "%s", e ? e : "");
+    }
+    lua_settop(lua_rt.L, 0);
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    return rc;
+}
+
+/* M: every public-key operation counted as one instruction - a loop of
+ * Ed25519 signs, X25519s or RSA-8192 signs ran far past the limit. Each is
+ * charged before the work now: 2^14 units per scalar multiplication, RSA
+ * (bits / 1024)^3 * 2^14. */
+UTEST(lua_audit10, asymmetric_crypto_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    static const char *const loops[] = {
+        "local pk, sk = crypto.ed25519_keypair() "
+        "for i = 1, 200 do crypto.ed25519_sign('m', sk) end return 1",
+        "local pk, sk = crypto.ed25519_keypair() local s = crypto.ed25519_sign('m', sk) "
+        "for i = 1, 200 do crypto.ed25519_verify('m', s, pk) end return 1",
+        "for i = 1, 200 do crypto.ed25519_keypair() end return 1",
+        "for i = 1, 200 do crypto.x25519_keypair() end return 1",
+        "for i = 1, 200 do crypto.box_keypair() end return 1",
+        "local pk, sk = crypto.x25519_keypair() local p2 = crypto.x25519_keypair() "
+        "for i = 1, 200 do crypto.x25519(sk, p2) end return 1",
+        "local pk, sk = crypto.box_keypair() local n = string.rep('n', 24) "
+        "for i = 1, 200 do crypto.box('m', n, pk, sk) end return 1",
+        NULL
+    };
+    /* 200 operations: 3.3M units, over a 1M limit; the loops themselves are
+     * a few thousand instructions. */
+    for (int i = 0; loops[i]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 1000000, err, sizeof err),
+                      LUA_OK, loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    /* A few operations fit. */
+    EXPECT_EQ(audit10_run(
+        "local pk, sk = crypto.ed25519_keypair() "
+        "local s = crypto.ed25519_sign('m', sk) "
+        "assert(crypto.ed25519_verify('m', s, pk)) return 1",
+        1000000, err, sizeof err), LUA_OK);
+
+    /* RSA is charged by size before the key is parsed: an 8192-bit sign or
+     * verify is 2^23 units, over the limit at once (the junk key would
+     * otherwise be refused, or the signature be false). */
+    EXPECT_NE(audit10_run(
+        "return crypto.sign('RS256', string.rep('A', 5000), 'm')",
+        1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_NE(audit10_run(
+        "return crypto.verify('RS256', 'junk', 'm', string.rep('s', 1024))",
+        1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* An ES256 verify is one scalar multiplication. */
+    EXPECT_EQ(audit10_run(
+        "return crypto.verify('ES256', 'junk', 'm', string.rep('s', 64))",
+        1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+}
+
+/* L: fs.write wrote up to the whole heap as one instruction. Charged before
+ * the write now (one unit per 8 bytes), so the charge holds even for a
+ * write the policy then refuses. */
+UTEST(lua_audit10, fs_write_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a10"), NULL);
+    HlFsConfig fs = { tmpdir, strlen(tmpdir), NULL };   /* no grants */
+    lua_rt.base.fs_cfg = &fs;
+    char err[512];
+    ASSERT_EQ(audit10_run("BIG = string.rep('x', 8 * 1000000) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(audit10_run("for i = 1, 10 do fs.write('a.bin', BIG) end return 1",
+                          200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* A small write is cheap (and refused: no grant). */
+    EXPECT_EQ(audit10_run("local ok = fs.write('a.bin', 'x') assert(ok == nil) return 1",
+                          200000, err, sizeof err), LUA_OK);
+    lua_rt.base.fs_cfg = NULL;
+    cleanup_lua_caps();
+    rmdir(tmpdir);
+}
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+/* L: smtp.send read cc's length through __len and dropped, silently, any
+ * entry it could not copy (a non-string, or one the scratch arena had no
+ * room for): the message went out to fewer recipients than asked. Every
+ * entry is copied now, or the call raises. */
+UTEST(lua_audit10, smtp_cc_is_copied_whole_or_refused)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlSmtpConfig smtp = {0};
+    lua_rt.base.smtp_cfg = &smtp;
+    char err[512];
+    static const char *const base =
+        "local o = { host = 'mail.invalid', from = 'a@x.test', to = 'b@x.test', "
+        "            subject = 's', body = 'b' } ";
+    char code[1024];
+
+    snprintf(code, sizeof code, "%s o.cc = { 'c@x.test', 42 } "
+             "return smtp.send(o)", base);
+    EXPECT_NE(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "cc[2] must be a string"), NULL);
+
+    snprintf(code, sizeof code, "%s o.cc = 'c@x.test' return smtp.send(o)", base);
+    EXPECT_NE(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "cc must be an array"), NULL);
+
+    /* __len is not consulted: the raw length is. */
+    snprintf(code, sizeof code, "%s o.cc = setmetatable({}, { __len = function() "
+             "return 1e9 end }) local r = smtp.send(o) "
+             "assert(type(r) == 'table') return 1", base);
+    EXPECT_EQ(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+
+    lua_rt.base.smtp_cfg = NULL;
+    cleanup_lua_caps();
+}
+#endif
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* L: test.get runs the app's dispatch, an entry: it re-armed the budget (a
+ * case looping over test.get never hit the limit) and its stale-transaction
+ * guard rolled back a transaction the CASE had open. The case's budget is
+ * kept and charged with the request's work now, and the guard is held off
+ * while the case has a transaction. */
+UTEST(lua_audit10, nested_test_request_keeps_the_case_budget_and_txn)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "db.exec('CREATE TABLE a10 (x INTEGER)')\n"
+        "app.get('/spin', function(req, res) "
+        "  for i = 1, 30000 do end res:json({ ok = true }) end)\n"
+        "app.get('/write', function(req, res) "
+        "  db.exec('INSERT INTO a10 VALUES (2)') res:json({ ok = true }) end)\n"),
+        LUA_OK);
+    KlHttpRouter router;
+    KlAllocator kalloc = kl_allocator_default();
+    kl_http_router_init(&router, &kalloc);
+    ASSERT_EQ(hl_lua_wire_routes(&lua_rt, &router), 0);
+    hl_lua_test_register(L, &router, &lua_rt);
+    ASSERT_EQ(luaL_dostring(L,
+        "test('loops over test.get', function() "
+        "  for i = 1, 10 do test.get('/spin') end end)\n"
+        "test('one request fits', function() "
+        "  local r = test.get('/spin') assert(r.status == 200) end)\n"
+        "test('inside db.batch', function() "
+        "  db.batch(function() "
+        "    db.exec('INSERT INTO a10 VALUES (1)') "
+        "    local r = test.get('/write') assert(r.status == 200) "
+        "  end) "
+        "  local rows = db.query('SELECT x FROM a10 ORDER BY x') "
+        "  assert(#rows == 2, 'rows: ' .. #rows) end)\n"), LUA_OK);
+    lua_rt.max_instructions = 100000;
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[4];
+    memset(results, 0, sizeof results);
+    hl_lua_test_run(L, &total, &passed, &failed, NULL, results, 4);
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    EXPECT_EQ(total, 3);
+    EXPECT_FALSE(results[0].passed);
+    EXPECT_NE(strstr(results[0].error, "instruction limit"), NULL);
+    EXPECT_TRUE_MSG(results[1].passed, results[1].error);
+    EXPECT_TRUE_MSG(results[2].passed, results[2].error);
+
+    kl_http_router_free(&router);   /* the route contexts: hl_lua_free */
+    cleanup_lua_caps();
+}
+#endif
+
 UTEST_MAIN();

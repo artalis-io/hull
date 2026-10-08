@@ -21,48 +21,55 @@
  * smtp.send(opts) → { ok = true } or { ok = false, error = "..." }
  * ════════════════════════════════════════════════════════════════════ */
 
-/* Helper: extract string array from Lua table at stack index */
-static int lua_get_string_array(lua_State *L, int idx,
-                                const char ***out, int *out_count)
+/* Recipients past this many are refused: SMTP servers cap RCPT TO at 100
+ * per message (RFC 5321 4.5.3.1.8 sets that as the minimum a server must
+ * take), and the list is copied into the scratch arena. */
+#define HL_LUA_SMTP_CC_MAX 1000
+
+/* Helper: copy the string array at stack index @p idx into the scratch
+ * arena. Every entry is copied or the whole call fails (audit 10): it used
+ * to read the length through __len (app code, and an int cast of whatever it
+ * returned) and to drop - silently - a non-string entry or one the arena had
+ * no room for, so a message went out to fewer recipients than asked. Raises
+ * on a bad entry or a full arena. */
+static void lua_get_string_array(lua_State *L, int idx, const char *what,
+                                 const char ***out, int *out_count)
 {
     *out = NULL;
     *out_count = 0;
 
-    if (!lua_istable(L, idx))
-        return 0;
+    size_t len = (size_t)lua_rawlen(L, idx);
+    if (len == 0)
+        return;
+    if (len > HL_LUA_SMTP_CC_MAX)
+        luaL_error(L, "smtp.send: %s has more than %d entries", what,
+                   HL_LUA_SMTP_CC_MAX);
 
-    int len = (int)luaL_len(L, idx);
-    if (len <= 0)
-        return 0;
-
-    /* Allocate array on Lua stack (will be GC'd) - use scratch arena */
+    /* Copied into the scratch arena (reset at the next run). */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->scratch)
-        return -1;
+        luaL_error(L, "smtp.send: no scratch space for %s", what);
 
-    const char **arr = sh_arena_calloc(lua->scratch, (size_t)len,
-                                       sizeof(const char *));
+    const char **arr = sh_arena_calloc(lua->scratch, len, sizeof(const char *));
     if (!arr)
-        return -1;
+        luaL_error(L, "smtp.send: out of scratch space for %s", what);
 
-    int count = 0;
-    for (int i = 1; i <= len; i++) {
-        lua_rawgeti(L, idx, i);
-        if (lua_isstring(L, -1)) {
-            size_t slen;
-            const char *s = lua_tolstring(L, -1, &slen);
-            char *copy = sh_arena_alloc(lua->scratch, slen + 1);
-            if (copy) {
-                memcpy(copy, s, slen + 1);
-                arr[count++] = copy;
-            }
-        }
+    for (size_t i = 1; i <= len; i++) {
+        lua_rawgeti(L, idx, (lua_Integer)i);
+        if (lua_type(L, -1) != LUA_TSTRING)
+            luaL_error(L, "smtp.send: %s[%d] must be a string", what, (int)i);
+        size_t slen;
+        const char *s = lua_tolstring(L, -1, &slen);
+        char *copy = sh_arena_alloc(lua->scratch, slen + 1);
+        if (!copy)
+            luaL_error(L, "smtp.send: out of scratch space for %s", what);
+        memcpy(copy, s, slen + 1);
+        arr[i - 1] = copy;
         lua_pop(L, 1);
     }
 
     *out = arr;
-    *out_count = count;
-    return 0;
+    *out_count = (int)len;
 }
 
 /* Push a { ok = false, error = "..." } failure table (leaves it on the stack). */
@@ -146,10 +153,10 @@ static int lua_smtp_send(lua_State *L)
     const char **cc = NULL;
     int cc_count = 0;
     lua_getfield(L, 1, "cc");
-    if (lua_istable(L, -1)) {
-        int cc_idx = lua_gettop(L);
-        lua_get_string_array(L, cc_idx, &cc, &cc_count);
-    }
+    if (lua_istable(L, -1))
+        lua_get_string_array(L, lua_gettop(L), "cc", &cc, &cc_count);
+    else if (!lua_isnil(L, -1))
+        return luaL_error(L, "smtp.send: cc must be an array of strings");
 
     /* Validate required fields */
     if (!host)    { lua_newtable(L); lua_pushboolean(L, 0); lua_setfield(L, -2, "ok"); lua_pushstring(L, "host required"); lua_setfield(L, -2, "error"); return 1; }
