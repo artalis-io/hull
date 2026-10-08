@@ -695,11 +695,20 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         }
     } else if (state == JS_PROMISE_REJECTED) {
         const char *msg = NULL;
+        /* (the life was killed above: the request's res is closed) */
         if (!tripped && !aborted) {   /* a tripped run can run no toString */
+            /* The rejection's toString is app code, run after the drain
+             * above: with no request active, and its jobs drained right
+             * after - left queued they ran in the next entry's drain, with
+             * that entry's request active (audit 9 M1). */
+            js->active_conn = NULL;
+            js->active_req  = NULL;
             JSValue err = JS_PromiseResult(ctx, jc->link.handler_promise);
             msg = JS_ToCString(ctx, err);
             JS_FreeValue(ctx, err);
             JS_FreeValue(ctx, JS_GetException(ctx));
+            hl_js_run_jobs(js);
+            js->last_async_cont = NULL;
         }
         /* log via stderr to match the standard async-resume path */
         fprintf(stderr, "[hull:c] async js handler error: %s\n",
