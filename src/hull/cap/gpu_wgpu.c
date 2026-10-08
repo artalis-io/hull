@@ -580,7 +580,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
     /* Count texture bindings: sampled = 2 (view + sampler), storage = 1 */
     int tex_bindings = 0;
     for (int i = 0; i < opts->texture_count; i++)
-        tex_bindings += opts->textures[i].storage ? 1 : 2;
+        tex_bindings += hl_gpu_tex_binding_slots(opts->textures[i].storage);
 
     int has_uniforms = (opts->uniforms && opts->uniforms_len > 0);
     int binding_offset = has_uniforms ? 1 : 0;
@@ -765,6 +765,13 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
                 goto cleanup;
             }
             if (i < 64) desc_tex[i] = tex;
+
+            /* The entry array was sized from td->storage; a texture of the
+             * other kind would write past it (audit 10 H1). */
+            if (hl_gpu_tex_binding_check(td->storage, tex->storage,
+                                         tex_binding, total_bindings,
+                                         err_msg) < 0)
+                goto cleanup;
 
             if (tex->storage) {
                 /* Storage texture: single binding (view only) */
@@ -1195,7 +1202,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
         /* Count texture bindings: sampled = 2 (view + sampler), storage = 1 */
         int stage_tex_bindings = 0;
         for (int t = 0; t < stage->texture_count; t++)
-            stage_tex_bindings += stage->textures[t].storage ? 1 : 2;
+            stage_tex_bindings += hl_gpu_tex_binding_slots(stage->textures[t].storage);
 
         int total_bindings = stage->buffer_count + binding_offset + stage_tex_bindings;
 
@@ -1326,6 +1333,13 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                     if (err_msg) *err_msg = "texture_not_found_in_pipeline";
                     goto cleanup;
                 }
+
+                /* entries[] holds total_bindings slots, counted from
+                 * td->storage (audit 10 H1). */
+                if (hl_gpu_tex_binding_check(td->storage, tex->storage,
+                                             tex_bind, total_bindings,
+                                             err_msg) < 0)
+                    goto cleanup;
 
                 if (tex->storage) {
                     entries[tex_bind] = (WGPUBindGroupEntry){

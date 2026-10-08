@@ -20,6 +20,14 @@
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
+/* Charge a decode / encode to the instruction budget before it runs (audit
+ * 10): one binding call over up to 268 MB of pixels counted as one
+ * instruction. lua_hlwork raises at once when that puts the run over. */
+static void image_charge(lua_State *L, uint64_t units)
+{
+    lua_hlwork(L, units > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)units, 0);
+}
+
 static HlImage **check_image(lua_State *L, int idx)
 {
     return (HlImage **)luaL_checkudata(L, idx, HL_IMAGE_MT);
@@ -216,6 +224,13 @@ static int l_image_decode(lua_State *L)
     const char *fmt_name = luaL_optstring(L, 2, NULL);
     const char *err_msg = NULL;
 
+    /* Sized from the header; a header no codec reads fails fast, so only
+     * the input is charged. */
+    uint32_t iw = 0, ih = 0;
+    if (hl_image_info(view.data, view.len, fmt_name, &iw, &ih) != 0)
+        iw = ih = 0;
+    image_charge(L, hl_image_codec_units(iw, ih, view.len));
+
     HlImageAlloc ia;
     hl_lua_image_alloc(L, &ia);
     HlImage *img = hl_image_decode(view.data, view.len,
@@ -244,6 +259,8 @@ static int l_image_encode(lua_State *L)
             quality = (int)lua_tointeger(L, -1);
         lua_pop(L, 1);
     }
+
+    image_charge(L, hl_image_codec_units((*imgp)->width, (*imgp)->height, 0));
 
     void *out = NULL;
     size_t out_len = 0;

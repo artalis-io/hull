@@ -1044,6 +1044,10 @@ static int lua_compute_instance(lua_State *L)
 
     wasm_clamp_opts(&opts, &lua->base);
 
+    /* The heap + stack it reserves, charged before (audit 10). */
+    uint64_t units = hl_wasm_instance_units(&opts);
+    lua_hlwork(L, units > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)units, 0);
+
     const char *err_msg = NULL;
     HlWasmInstance *pi = hl_cap_wasm_instance_create(
         lua->base.wasm_cache, name, &opts,

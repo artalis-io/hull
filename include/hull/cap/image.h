@@ -67,6 +67,10 @@ typedef struct HlImage {
 typedef struct HlImageCodec {
     const char *name;
     int (*can_decode)(const void *header, size_t len);
+    /* Dimensions from the header alone, without decoding (0 / -1). Optional:
+     * with it, hl_image_decode reserves the pixel buffer in the caller's
+     * allocator BEFORE the codec's own (off-heap) decode buffers exist. */
+    int (*info)(const void *src, size_t src_len, uint32_t *w, uint32_t *h);
     int (*decode)(const void *src, size_t src_len,
                   void **pixels, uint32_t *w, uint32_t *h,
                   int requested_channels, HlAllocator *alloc);
@@ -104,6 +108,20 @@ HlImage *hl_image_from_view(uint32_t w, uint32_t h, HlImageFormat fmt,
 HlImage *hl_image_decode(const void *data, size_t len,
                           const char *fmt_name,
                           const HlImageAlloc *alloc, const char **err_msg);
+
+/* Dimensions of encoded bytes from their header, without decoding (same codec
+ * selection as hl_image_decode). 0, or -1 when no codec reads the header or
+ * the dimensions are over the limits below. The runtimes use it to charge a
+ * decode to the instruction budget before it runs. */
+int hl_image_info(const void *data, size_t len, const char *fmt_name,
+                  uint32_t *w, uint32_t *h);
+
+/* Instruction-budget units for decoding / encoding a w x h image from / to
+ * @p coded_len encoded bytes: one unit per 8 bytes of RGBA pixels plus one
+ * per 8 encoded bytes - the rate the runtimes charge hashing at. A codec call
+ * is one binding call, so without it a loop of 8192 x 8192 decodes held the
+ * event loop for seconds per iteration (audit 10). Saturates. */
+uint64_t hl_image_codec_units(uint32_t w, uint32_t h, size_t coded_len);
 
 /* Encode to bytes */
 int hl_image_encode(const HlImage *img, const char *fmt_name,

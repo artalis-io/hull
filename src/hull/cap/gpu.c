@@ -151,6 +151,26 @@ void hl_cap_gpu_destroy(HlGpuCtx *ctx)
     memset(ctx, 0, sizeof(*ctx));
 }
 
+int hl_gpu_tex_binding_slots(int storage)
+{
+    return storage ? 1 : 2;
+}
+
+int hl_gpu_tex_binding_check(int desc_storage, int tex_storage,
+                             int cursor, int end, const char **err)
+{
+    if ((desc_storage != 0) != (tex_storage != 0)) {
+        if (err) *err = "texture_storage_mismatch";
+        return -1;
+    }
+    int slots = hl_gpu_tex_binding_slots(tex_storage);
+    if (cursor < 0 || end < 0 || cursor > end || end - cursor < slots) {
+        if (err) *err = "too_many_bindings";
+        return -1;
+    }
+    return slots;
+}
+
 int hl_cap_gpu_available(HlGpuCtx *ctx)
 {
     return ctx && ctx->device_count > 0;

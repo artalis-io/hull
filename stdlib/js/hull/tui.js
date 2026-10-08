@@ -110,6 +110,10 @@ function run(opts) {
                     if (r !== undefined && r !== null) exitToken = r;
                 }
                 if (exitToken !== null) break;
+                /* The terminal went away: every later poll returns
+                 * "hangup" at once, so the loop would spin (audit 10).
+                 * Exit with null unless onEvent chose a token. */
+                if (ev.kind === "hangup") break;
             }
             if (exitToken === null) {
                 draw(ctx);

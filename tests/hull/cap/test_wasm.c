@@ -1339,6 +1339,80 @@ UTEST(hl_cap_wasm, instance_create_destroy)
     hl_cap_wasm_destroy(&cache);
 }
 
+/* Audit 10: live persistent instances are bounded per cache (each reserves
+ * linear memory + an exec-env stack outside the VM heap limit), and closing
+ * one hands its slot back. */
+UTEST(hl_cap_wasm, instance_live_count_bounded)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts small = {0};
+    small.heap_size = 64 * 1024;
+    small.max_input = 64;
+    small.max_output = 64;
+    enum { N = HL_WASM_MAX_LIVE_INSTANCES };
+    static HlWasmInstance *insts[N];
+    const char *err = NULL;
+    for (int i = 0; i < N; i++) {
+        insts[i] = hl_cap_wasm_instance_create(&cache, "echo", &small,
+                                               &vfs, NULL, NULL, &err);
+        ASSERT_TRUE(insts[i] != NULL);
+    }
+    ASSERT_EQ(cache.live_instances, N);
+
+    err = NULL;
+    ASSERT_TRUE(hl_cap_wasm_instance_create(&cache, "echo", &small,
+                                            &vfs, NULL, NULL, &err) == NULL);
+    ASSERT_STREQ("too_many_instances", err);
+    ASSERT_EQ(cache.live_instances, N);
+
+    hl_cap_wasm_instance_destroy(insts[0]);
+    ASSERT_EQ(cache.live_instances, N - 1);
+    insts[0] = hl_cap_wasm_instance_create(&cache, "echo", &small,
+                                           &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(insts[0] != NULL);
+
+    for (int i = 0; i < N; i++)
+        hl_cap_wasm_instance_destroy(insts[i]);
+    ASSERT_EQ(cache.live_instances, 0);
+    ASSERT_EQ(cache.live_instance_bytes, (uint64_t)0);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* The byte budget refuses a second instance past it, never the first. */
+UTEST(hl_cap_wasm, instance_live_bytes_bounded)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    /* Pretend earlier instances hold all but 1 KB of the budget. */
+    cache.live_instances = 1;
+    cache.live_instance_bytes = HL_WASM_MAX_LIVE_INSTANCE_BYTES - 1024;
+    HlWasmCallOpts small = {0};
+    small.heap_size = 64 * 1024;
+    small.max_input = 64;
+    small.max_output = 64;
+    const char *err = NULL;
+    ASSERT_TRUE(hl_cap_wasm_instance_create(&cache, "echo", &small,
+                                            &vfs, NULL, NULL, &err) == NULL);
+    ASSERT_STREQ("too_many_instances", err);
+
+    /* With none live, the same instance is allowed. */
+    cache.live_instances = 0;
+    cache.live_instance_bytes = 0;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", &small,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    hl_cap_wasm_instance_destroy(pi);
+    ASSERT_EQ(cache.live_instances, 0);
+    hl_cap_wasm_destroy(&cache);
+}
+
 UTEST(hl_cap_wasm, instance_call_echo)
 {
     HlWasmCache cache;
@@ -2345,6 +2419,9 @@ UTEST(hl_cap_wasm, chain_attachments_bounded_and_change_refused_while_held)
 
     enum { N = HL_WASM_MAX_CHAIN_ATTACH + 8 };
     static HlWasmInstance *insts[N];
+    /* the live-instance cap (audit 10) is below the chain bound; lift it so
+     * the chain bound is what this test reaches */
+    cache.max_live_instances = N + 1;
     HlWasmCallOpts small = {0};
     small.heap_size = 64 * 1024;
     small.max_input = 64;      /* the I/O buffers must fit the small heap */

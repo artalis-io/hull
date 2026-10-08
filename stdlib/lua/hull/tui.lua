@@ -152,6 +152,12 @@ function tui.run(opts)
                     has_exit = true
                 end
             end
+            -- The terminal went away: every later poll returns "hangup"
+            -- at once, so the loop would spin (audit 10). Exit with nil
+            -- unless on_event chose a token.
+            if ev.kind == "hangup" and not has_exit then
+                has_exit = true
+            end
         end
         if not has_exit then
             ok, err = pcall(draw, ctx)

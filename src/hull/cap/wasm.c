@@ -1461,6 +1461,36 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
 
 /* ── Persistent instance: create ───────────────────────────────────── */
 
+/* Live persistent-instance accounting (audit 10, HL_WASM_MAX_LIVE_*). The
+ * byte budget never refuses the first instance. */
+static int live_instance_reserve(HlWasmCache *cache, uint64_t bytes)
+{
+    int max = cache->max_live_instances > 0 ? cache->max_live_instances
+                                            : HL_WASM_MAX_LIVE_INSTANCES;
+    int rc = 0;
+    pthread_mutex_lock(&cache->pool_mutex);
+    if (cache->live_instances >= max ||
+        (cache->live_instances > 0 &&
+         (bytes > HL_WASM_MAX_LIVE_INSTANCE_BYTES ||
+          cache->live_instance_bytes > HL_WASM_MAX_LIVE_INSTANCE_BYTES - bytes))) {
+        rc = -1;
+    } else {
+        cache->live_instances++;
+        cache->live_instance_bytes += bytes;
+    }
+    pthread_mutex_unlock(&cache->pool_mutex);
+    return rc;
+}
+
+static void live_instance_release(HlWasmCache *cache, uint64_t bytes)
+{
+    pthread_mutex_lock(&cache->pool_mutex);
+    if (cache->live_instances > 0) cache->live_instances--;
+    cache->live_instance_bytes = cache->live_instance_bytes >= bytes
+                                     ? cache->live_instance_bytes - bytes : 0;
+    pthread_mutex_unlock(&cache->pool_mutex);
+}
+
 HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
                                              const char *name,
                                              const HlWasmCallOpts *opts,
@@ -1520,12 +1550,22 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         return NULL;
     }
 
+    /* Reserve a live-instance slot and its heap + stack bytes before
+     * instantiating (audit 10): handed back on every failure below and when
+     * the instance is destroyed. */
+    uint64_t inst_bytes = (uint64_t)heap_size + (uint64_t)stack_size;
+    if (live_instance_reserve(cache, inst_bytes) != 0) {
+        if (err_msg) *err_msg = "too_many_instances";
+        return NULL;
+    }
+
     /* Instantiate - NOT from pool, this is exclusively owned. The instance's
      * own start / ctor functions run here, under a wall-clock watch. */
     char error_buf[256];
     error_buf[0] = '\0';
     HlWasmWatch watch = {0};
     if (hl_wasm_watch_arm(&watch, opts ? opts->timeout_ms : 0, NULL) != 0) {
+        live_instance_release(cache, inst_bytes);
         if (err_msg) *err_msg = "watchdog_unavailable";
         return NULL;
     }
@@ -1534,6 +1574,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         error_buf, sizeof(error_buf));
     hl_wasm_watch_disarm(&watch);
     if (!inst) {
+        live_instance_release(cache, inst_bytes);
         log_error("[wasm] persistent instantiate '%s' failed: %s", name, error_buf);
         if (err_msg)
             *err_msg = wasm_is_timeout_exception(error_buf) ? err_timeout
@@ -1543,6 +1584,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
 
     wasm_function_inst_t process_fn = wasm_runtime_lookup_function(inst, "hull_process");
     if (!process_fn) {
+        live_instance_release(cache, inst_bytes);
         log_error("[wasm] module '%s' missing hull_process export", name);
         if (err_msg) *err_msg = err_no_export;
         wasm_runtime_deinstantiate(inst);
@@ -1551,6 +1593,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
 
     wasm_exec_env_t exec_env = wasm_runtime_create_exec_env(inst, stack_size);
     if (!exec_env) {
+        live_instance_release(cache, inst_bytes);
         log_error("[wasm] failed to create exec env for persistent '%s'", name);
         if (err_msg) *err_msg = err_internal;
         wasm_runtime_deinstantiate(inst);
@@ -1565,6 +1608,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     int arc = chain_attach_locked(mod, inst, &chain, &attach_err);
     pthread_mutex_unlock(&mod->mutex);
     if (arc != 0) {
+        live_instance_release(cache, inst_bytes);
         if (err_msg) *err_msg = attach_err;
         wasm_runtime_destroy_exec_env(exec_env);
         wasm_runtime_deinstantiate(inst);
@@ -1575,6 +1619,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     HlWasmInstance *pi = alloc ? hl_alloc_calloc(alloc, 1, sizeof(*pi))
                                : calloc(1, sizeof(*pi));
     if (!pi) {
+        live_instance_release(cache, inst_bytes);
         if (err_msg) *err_msg = err_internal;
         wasm_runtime_destroy_exec_env(exec_env);
         /* detach the chain attached just above before tearing the instance down */
@@ -2035,6 +2080,10 @@ void hl_cap_wasm_instance_destroy(HlWasmInstance *pi)
     pi->exec_env   = NULL;
     pi->instance   = NULL;
     pi->process_fn = NULL;
+
+    if (pi->cache)
+        live_instance_release(pi->cache,
+                              (uint64_t)pi->heap_size + (uint64_t)pi->stack_size);
 
     log_debug("[wasm] persistent instance '%s' destroyed", pi->name);
 

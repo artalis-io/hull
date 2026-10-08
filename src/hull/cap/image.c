@@ -165,6 +165,43 @@ static int format_channels(HlImageFormat fmt)
     }
 }
 
+/* The codec for @p data: by name, else by sniffing the header. */
+static const HlImageCodec *find_decoder(const void *data, size_t len,
+                                        const char *fmt_name)
+{
+    for (int i = 0; i < g_codec_count; i++) {
+        if (fmt_name) {
+            if (strcmp(g_codecs[i]->name, fmt_name) == 0)
+                return g_codecs[i];
+        } else if (g_codecs[i]->can_decode(data, len)) {
+            return g_codecs[i];
+        }
+    }
+    return NULL;
+}
+
+int hl_image_info(const void *data, size_t len, const char *fmt_name,
+                  uint32_t *w, uint32_t *h)
+{
+    ensure_stb_init();
+    if (!data || len < 4 || !w || !h)
+        return -1;
+    const HlImageCodec *codec = find_decoder(data, len, fmt_name);
+    if (!codec || !codec->info)
+        return -1;
+    return codec->info(data, len, w, h);
+}
+
+uint64_t hl_image_codec_units(uint32_t w, uint32_t h, size_t coded_len)
+{
+    /* The codecs cap pixels at HL_IMAGE_MAX_PIXELS; saturate rather than
+     * rely on it. */
+    uint64_t px = (uint64_t)w * (uint64_t)h;
+    uint64_t units = px > UINT64_MAX / 4 ? UINT64_MAX / 8 : px * 4 / 8;
+    uint64_t coded = (uint64_t)coded_len / 8;
+    return units > UINT64_MAX - coded ? UINT64_MAX : units + coded;
+}
+
 HlImage *hl_image_decode(const void *data, size_t len,
                           const char *fmt_name,
                           const HlImageAlloc *alloc, const char **err_msg)
@@ -181,42 +218,85 @@ HlImage *hl_image_decode(const void *data, size_t len,
     }
 
     /* Find a codec that can decode this data */
-    const HlImageCodec *codec = NULL;
-    for (int i = 0; i < g_codec_count; i++) {
-        if (fmt_name) {
-            if (strcmp(g_codecs[i]->name, fmt_name) == 0) {
-                codec = g_codecs[i];
-                break;
-            }
-        } else if (g_codecs[i]->can_decode(data, len)) {
-            codec = g_codecs[i];
-            break;
-        }
-    }
+    const HlImageCodec *codec = find_decoder(data, len, fmt_name);
     if (!codec) {
         if (err_msg) *err_msg = "unsupported_format";
         return NULL;
     }
 
-    void *pixels = NULL;
-    uint32_t w = 0, h = 0;
     /* Decode as RGBA8 (4 channels) by default */
     int channels = 4;
+
+    /* Reserve the image's pixels in the caller's allocator BEFORE decoding
+     * (audit 10). The codec's own buffers (stb's malloc, bounded per decode
+     * by image_stb.c at ~2x the pixel size) live outside the app's heap
+     * limit, and they were allocated first: an app near its limit still
+     * made stb allocate up to ~512 MB per decode, only to be refused at the
+     * copy. Now a decode whose pixels cannot fit the heap is refused from
+     * the header, and the transient is at most ~2x what the heap granted. */
+    uint32_t iw = 0, ih = 0;
+    size_t expected = 0;
+    void *dst = NULL;
+    if (codec->info) {
+        if (codec->info(data, len, &iw, &ih) != 0) {
+            if (err_msg) *err_msg = "decode_failed";
+            return NULL;
+        }
+        if (image_byte_size(iw, ih, channels, &expected) != 0) {
+            if (err_msg) *err_msg = "decoded_dimensions_overflow";
+            return NULL;
+        }
+        dst = pixels_alloc(alloc, expected);
+        if (!dst) {
+            if (err_msg) *err_msg = "out_of_memory";
+            return NULL;
+        }
+    }
+
+    void *pixels = NULL;
+    uint32_t w = 0, h = 0;
     if (codec->decode(data, len, &pixels, &w, &h, channels, NULL) != 0) {
+        if (dst) pixels_free(alloc, dst, expected);
         if (err_msg) *err_msg = "decode_failed";
         return NULL;
     }
 
-    size_t expected;
+    if (dst) {
+        /* The decode must produce what the header promised: the buffer was
+         * sized from it. */
+        if (w != iw || h != ih) {
+            codec->free_pixels(pixels);
+            pixels_free(alloc, dst, expected);
+            if (err_msg) *err_msg = "decode_failed";
+            return NULL;
+        }
+        HlImage *img = calloc(1, sizeof(*img));
+        if (!img) {
+            codec->free_pixels(pixels);
+            pixels_free(alloc, dst, expected);
+            if (err_msg) *err_msg = "out_of_memory";
+            return NULL;
+        }
+        memcpy(dst, pixels, expected);
+        codec->free_pixels(pixels);
+        img->pixels    = dst;
+        img->width     = w;
+        img->height    = h;
+        img->format    = HL_IMAGE_RGBA8;
+        img->pixel_len = expected;
+        img->owned     = 1;
+        if (alloc) img->pixel_alloc = *alloc;
+        return img;
+    }
+
     if (image_byte_size(w, h, channels, &expected) != 0) {
         codec->free_pixels(pixels);
         if (err_msg) *err_msg = "decoded_dimensions_overflow";
         return NULL;
     }
 
-    /* The codec's buffer (stb's own malloc, bounded per decode by
-     * image_stb.c) lives only until the copy: what the image keeps is in
-     * the caller's allocator, under the app's heap limit. */
+    /* A codec without `info`: the codec's buffer lives only until the copy;
+     * what the image keeps is in the caller's allocator. */
     HlImage *img = hl_image_new(w, h, HL_IMAGE_RGBA8, pixels, expected, alloc);
     codec->free_pixels(pixels);
     if (!img) {

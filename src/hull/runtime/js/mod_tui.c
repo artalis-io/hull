@@ -265,6 +265,10 @@ static JSValue event_to_js(JSContext *ctx, const HlTuiEvent *ev)
         JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "focus"));
         JS_SetPropertyStr(ctx, o, "in",   JS_NewBool(ctx, ev->focus_in));
         break;
+    case HL_TUI_EV_HANGUP:
+        /* the terminal went away (stdin EOF); sticky - audit 10 */
+        JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "hangup"));
+        break;
     default:
         JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "none"));
         break;

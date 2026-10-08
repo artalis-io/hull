@@ -85,6 +85,7 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
     else if (ci_eq(dsn, schlen, "rediss"))  { out->tls = 1; out->verify = 1; }
     else if (ci_eq(dsn, schlen, "valkeys")) { out->tls = 1; out->verify = 1; }
     else FAIL("valkey dsn: scheme must be redis/rediss/valkey/valkeys");
+    const int scheme_tls = out->tls;   /* rediss:// / valkeys:// */
 
     const char *rest = sep + 3;
     size_t restlen = strlen(rest);
@@ -196,6 +197,12 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
                 } else if (ci_eq(val, vlen, "require")) {
                     out->tls = 1; out->verify = 0;
                 } else if (ci_eq(val, vlen, "disable") || ci_eq(val, vlen, "none")) {
+                    /* A TLS scheme keeps TLS, so "disable" there meant TLS
+                     * with no certificate check - a MITM could read the
+                     * HELLO AUTH password (audit 10). Contradictory: refuse
+                     * rather than guess. */
+                    if (scheme_tls)
+                        FAIL("valkey dsn: sslmode=disable contradicts a rediss:// / valkeys:// scheme");
                     out->verify = 0;
                 }
             }

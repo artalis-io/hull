@@ -1730,6 +1730,7 @@ gpu.buffer_copy("source", "dest", {
   ```
 - Sampled textures get paired bindings (texture view + sampler). Storage textures get single binding.
 - Binding convention: uniforms → buffers → sampled textures → storage textures (all `@group(0)`).
+- A named texture's `storage` flag must match how it was created (`gpu.texture(..., { storage = ... })`): a mismatch fails the dispatch / pipeline with `texture_storage_mismatch` (audit 10 - the bind group was sized from the flag and filled from the texture, writing past it).
 
 **Shader loading from files:** `gpu.load(name)` reads `shaders/<name>.wgsl` from disk (dev mode) or VFS (built binaries) and compiles it. Enables shader iteration without modifying app code.
 
