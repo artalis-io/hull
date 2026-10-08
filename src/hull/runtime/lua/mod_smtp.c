@@ -31,38 +31,39 @@
  * to read the length through __len (app code, and an int cast of whatever it
  * returned) and to drop - silently - a non-string entry or one the arena had
  * no room for, so a message went out to fewer recipients than asked. Raises
- * on a bad entry or a full arena. */
-static void lua_get_string_array(lua_State *L, int idx, const char *what,
-                                 const char ***out, int *out_count)
+ * on a bad entry or a full arena (luaL_error does not return; the `return`s
+ * tell the static analyzer so). */
+static int lua_get_string_array(lua_State *L, int idx, const char *what,
+                                const char ***out, int *out_count)
 {
     *out = NULL;
     *out_count = 0;
 
     size_t len = (size_t)lua_rawlen(L, idx);
     if (len == 0)
-        return;
+        return 0;
     if (len > HL_LUA_SMTP_CC_MAX)
-        luaL_error(L, "smtp.send: %s has more than %d entries", what,
+        return luaL_error(L, "smtp.send: %s has more than %d entries", what,
                    HL_LUA_SMTP_CC_MAX);
 
     /* Copied into the scratch arena (reset at the next run). */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->scratch)
-        luaL_error(L, "smtp.send: no scratch space for %s", what);
+        return luaL_error(L, "smtp.send: no scratch space for %s", what);
 
     const char **arr = sh_arena_calloc(lua->scratch, len, sizeof(const char *));
     if (!arr)
-        luaL_error(L, "smtp.send: out of scratch space for %s", what);
+        return luaL_error(L, "smtp.send: out of scratch space for %s", what);
 
     for (size_t i = 1; i <= len; i++) {
         lua_rawgeti(L, idx, (lua_Integer)i);
         if (lua_type(L, -1) != LUA_TSTRING)
-            luaL_error(L, "smtp.send: %s[%d] must be a string", what, (int)i);
+            return luaL_error(L, "smtp.send: %s[%d] must be a string", what, (int)i);
         size_t slen;
         const char *s = lua_tolstring(L, -1, &slen);
         char *copy = sh_arena_alloc(lua->scratch, slen + 1);
         if (!copy)
-            luaL_error(L, "smtp.send: out of scratch space for %s", what);
+            return luaL_error(L, "smtp.send: out of scratch space for %s", what);
         memcpy(copy, s, slen + 1);
         arr[i - 1] = copy;
         lua_pop(L, 1);
@@ -70,6 +71,7 @@ static void lua_get_string_array(lua_State *L, int idx, const char *what,
 
     *out = arr;
     *out_count = (int)len;
+    return 0;
 }
 
 /* Push a { ok = false, error = "..." } failure table (leaves it on the stack). */
