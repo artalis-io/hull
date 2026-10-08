@@ -12,24 +12,64 @@
  * @license AGPL-3.0-or-later
  */
 
+// Control characters (< 0x20, 0x7f) other than the three with a short escape
+// go out as \xHH, so no raw control byte reaches the line. Same output as Lua.
+const CTRL_ESC = { "\n": "\\n", "\r": "\\r", "\t": "\\t" };
+function ctrl(c) {
+    const e = CTRL_ESC[c];
+    if (e !== undefined) return e;
+    const h = c.charCodeAt(0).toString(16);
+    return "\\x" + (h.length < 2 ? "0" + h : h);
+}
+const CTRL_RE = /[\x00-\x1f\x7f]/g;
+
 /**
  * Escape a value for safe logfmt output (log-injection defense): a raw newline
- * could otherwise forge a second log line. Escapes backslash, CR, LF, and
- * double-quote.
+ * could otherwise forge a second log line. Escapes backslash and double-quote,
+ * \n \r \t, and every other character < 0x20 or 0x7f as \xHH.
  * @param {*} v
  * @returns {string}
  */
 function sanitize(v) {
     return String(v)
         .replace(/\\/g, "\\\\")
-        .replace(/\n/g, "\\n")
-        .replace(/\r/g, "\\r")
-        .replace(/"/g, '\\"');
+        .replace(/"/g, '\\"')
+        .replace(CTRL_RE, ctrl);
 }
 
 /**
- * Format one key=value logfmt pair, quoting the value when the RAW value
- * contains a space, `=`, `"`, or a CR/LF.
+ * Escape the control characters of a free-text log message (the part before
+ * the fields), as in a value. Backslash and quote stay as written.
+ * @param {*} v
+ * @returns {string}
+ */
+function message(v) {
+    return String(v).replace(CTRL_RE, ctrl);
+}
+
+// UTF-8 length of one code point (a lone surrogate counts 3, as WTF-8), so a
+// non-ASCII key maps to as many "_" as the Lua side's per-byte replacement.
+function utf8Len(c) {
+    const cp = c.codePointAt(0);
+    return cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+}
+
+/**
+ * Make a logfmt key: every character outside [A-Za-z0-9_.-] becomes "_" (one
+ * per UTF-8 byte, as in Lua; an empty key is "_"), so a key cannot carry a
+ * space, "=", a quote or a newline and split or forge a pair.
+ * @param {*} k
+ * @returns {string}
+ */
+function key(k) {
+    const s = String(k).replace(/[^A-Za-z0-9_.\-]/gu, (c) => "_".repeat(utf8Len(c)));
+    return s === "" ? "_" : s;
+}
+
+/**
+ * Format one key=value logfmt pair: the key through key(), the value through
+ * sanitize(), quoted when the RAW value contains a space, "=", '"' or any
+ * control character.
  * @param {string} k
  * @param {*} v
  * @returns {string}
@@ -37,9 +77,9 @@ function sanitize(v) {
 function pair(k, v) {
     const raw = String(v);
     const s = sanitize(raw);
-    if (/[ ="\n\r]/.test(raw)) return k + '="' + s + '"';
-    return k + "=" + s;
+    if (/[ ="\x00-\x1f\x7f]/.test(raw)) return key(k) + '="' + s + '"';
+    return key(k) + "=" + s;
 }
 
-export const _logfmt = { sanitize, pair };
+export const _logfmt = { sanitize, message, key, pair };
 export default _logfmt;

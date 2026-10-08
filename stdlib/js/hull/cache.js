@@ -108,7 +108,19 @@ function newCache(opts) {
             return e.value;
         }
         const v = fn();
+        // null / undefined is a miss, not a value: returned, not cached (it
+        // read as a hit until the ttl). A Promise (an async fn) is cached so
+        // concurrent fetches share it, but dropped when it rejects or resolves
+        // to null / undefined - a cached rejection failed every later fetch.
+        if (v === null || v === undefined) return v;
         set(key, v, ttl);
+        if (v instanceof Promise) {
+            const drop = () => {
+                const cur = store.get(key);
+                if (cur && cur.value === v) store.delete(key);
+            };
+            v.then((r) => { if (r === null || r === undefined) drop(); }, drop);
+        }
         return v;
     };
 

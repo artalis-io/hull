@@ -182,7 +182,34 @@ function pickVersion(byteLen, ec) {
 
 // ── Encoding ───────────────────────────────────────────────────────
 
-function encodePayload(text, version, ec) {
+// The payload's bytes: UTF-8, as the Lua side (whose strings are bytes) has
+// it. charCodeAt(i) & 0xff dropped the high byte of every non-Latin-1
+// character, so "é" and "ő" scanned as other text. A lone surrogate is
+// U+FFFD, as TextEncoder writes it.
+function utf8Bytes(text) {
+    const out = [];
+    for (let i = 0; i < text.length; i++) {
+        let cp = text.charCodeAt(i);
+        if (cp >= 0xd800 && cp <= 0xdbff && i + 1 < text.length) {
+            const lo = text.charCodeAt(i + 1);
+            if (lo >= 0xdc00 && lo <= 0xdfff) {
+                cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                i++;
+            }
+        }
+        if (cp >= 0xd800 && cp <= 0xdfff) cp = 0xfffd;
+        if (cp < 0x80) out.push(cp);
+        else if (cp < 0x800) out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+        else if (cp < 0x10000)
+            out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+        else
+            out.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f),
+                     0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    }
+    return out;
+}
+
+function encodePayload(bytes, version, ec) {
     const cap = dataCapacity(version, ec);
     const out = new Uint8Array(cap);
     const bitBuf = [];
@@ -191,8 +218,8 @@ function encodePayload(text, version, ec) {
     };
 
     put(0x4, 4);
-    put(text.length, version <= 9 ? 8 : 16);
-    for (let i = 0; i < text.length; i++) put(text.charCodeAt(i) & 0xff, 8);
+    put(bytes.length, version <= 9 ? 8 : 16);
+    for (let i = 0; i < bytes.length; i++) put(bytes[i], 8);
 
     const capBits = cap * 8;
     const term = Math.min(4, capBits - bitBuf.length);
@@ -486,18 +513,37 @@ function placeVersionInfo(g, version, size) {
 
 // ── Public API ─────────────────────────────────────────────────────
 
+// opts.scale / opts.margin: an integer in [lo, hi], or the default when
+// null / undefined. They are interpolated into the SVG markup, so anything
+// else is refused (a string was written into the attributes unescaped).
+const SCALE_MAX = 64, MARGIN_MAX = 64;
+function intOpt(v, dflt, lo, hi, what) {
+    if (v === undefined || v === null) return dflt;
+    if (!Number.isInteger(v) || v < lo || v > hi)
+        throw new Error("qrcode.svg: opts." + what + " must be an integer in " + lo + ".." + hi);
+    return v;
+}
+
 function encode(text, opts) {
+    if (typeof text !== "string") throw new Error("qrcode.encode: text must be a string");
     opts = opts || {};
+    // An explicit mask must be one of the 8 patterns: any other value
+    // produced a matrix with no mask applied and format bits naming a
+    // pattern that does not exist.
+    if (opts.mask !== undefined && opts.mask !== null &&
+        (!Number.isInteger(opts.mask) || opts.mask < 0 || opts.mask > 7))
+        throw new Error("qrcode.encode: opts.mask must be an integer in 0..7");
     const ecName = opts.ecLevel || "M";
-    const ec = EC_LEVELS[ecName];
+    const ec = Object.prototype.hasOwnProperty.call(EC_LEVELS, ecName) ? EC_LEVELS[ecName] : null;
     if (!ec) throw new Error("qrcode.encode: invalid ecLevel '" + ecName + "'");
 
-    const version = pickVersion(text.length, ec);
+    const bytes = utf8Bytes(text);
+    const version = pickVersion(bytes.length, ec);
     if (!version) {
         throw new Error("qrcode.encode: payload too large for any version at EC " + ecName);
     }
 
-    const data = encodePayload(text, version, ec);
+    const data = encodePayload(bytes, version, ec);
     const stream = buildCodewordStream(data, version, ec);
     const size = 17 + 4 * version;
     // Object destructuring also trips the same QuickJS MSan path; use
@@ -534,9 +580,9 @@ function encode(text, opts) {
 
 function svg(text, opts) {
     opts = opts || {};
+    const scale = intOpt(opts.scale, 4, 1, SCALE_MAX, "scale");
+    const margin = intOpt(opts.margin, 4, 0, MARGIN_MAX, "margin");
     const q = encode(text, opts);
-    const scale = opts.scale || 4;
-    const margin = opts.margin || 4;
     const dark = opts.dark || "#000";
     const light = opts.light || "#fff";
     // Both colors interpolate raw into SVG attributes below. Reject

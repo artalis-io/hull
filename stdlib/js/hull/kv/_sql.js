@@ -165,10 +165,13 @@ class SqlStore {
                 const cur = util.toInt(util.b64decode(rows[0].v));
                 const ver = Number(rows[0].version);
                 const nv = cur + by;
+                // Guarded by the row being live and still holding the value
+                // read (see the Lua sibling): an expired row was incremented in
+                // place, and a re-inserted one restarts at version 1.
                 const n = this.conn.exec(
                     "UPDATE _hull_kv SET v = ?, version = version + 1, updated_at = ? " +
-                    "WHERE ns = ? AND k = ? AND version = ?",
-                    [util.b64encode(String(nv)), now, this.ns, khex, ver]);
+                    "WHERE ns = ? AND k = ? AND version = ? AND v = ? AND expires_at > ?",
+                    [util.b64encode(String(nv)), now, this.ns, khex, ver, rows[0].v, now]);
                 if ((n || 0) === 1) return nv;
             }
             // lost the race; retry

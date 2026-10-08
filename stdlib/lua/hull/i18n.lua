@@ -83,6 +83,9 @@ end
 
 -- Parse Accept-Language header into sorted list of {lang, q}.
 -- "en-US,en;q=0.9,hu;q=0.8" -> {{lang="en-US",q=1},{lang="en",q=0.9},{lang="hu",q=0.8}}
+-- A range with q <= 0 ("not acceptable", or an unparseable q) is dropped. The
+-- sort is by q descending, then by position in the header: table.sort is not
+-- stable, so equal-q entries came back in any order (and differently from JS).
 local function parse_accept_language(header)
     if not header or header == "" then return {} end
     local entries = {}
@@ -93,11 +96,15 @@ local function parse_accept_language(header)
             local q = 1.0
             local qval = rest:match(";%s*q%s*=%s*([%d%.]+)")
             if qval then q = tonumber(qval) or 0 end
-            entries[#entries + 1] = {lang = lang, q = q}
+            if q > 0 then
+                entries[#entries + 1] = {lang = lang, q = q, i = #entries}
+            end
         end
     end
-    -- Sort by quality descending (stable: preserve order for equal q)
-    table.sort(entries, function(a, b) return a.q > b.q end)
+    table.sort(entries, function(a, b)
+        if a.q ~= b.q then return a.q > b.q end
+        return a.i < b.i
+    end)
     return entries
 end
 
@@ -210,14 +217,23 @@ function i18n.number(n) return number_for(active, n) end
 -- is. Use it in a handler that yields, as @{i18n.t_in}.
 function i18n.number_in(locale, n) return number_for(locale, n) end
 
+-- The timestamps date() formats: years 0000 through 9999. Outside it the
+-- value is returned as text, like a non-finite one - a timestamp past 2^63
+-- reached %04d as a float with no integer form and raised.
+local DATE_MIN = -62167219200   -- 0000-01-01T00:00:00Z
+local DATE_MAX = 253402300799   -- 9999-12-31T23:59:59Z
+
 local function date_for(loc, timestamp)
-    if type(timestamp) ~= "number" or non_finite(timestamp) then
+    if type(timestamp) ~= "number" or non_finite(timestamp)
+       or timestamp < DATE_MIN or timestamp >= DATE_MAX + 1 then
         return tostring(timestamp)
     end
 
     local fmt = format_of(loc)
     local pattern = fmt and (fmt.datePattern or fmt.date_pattern) or "YYYY-MM-DD"
+    if type(pattern) ~= "string" then pattern = "YYYY-MM-DD" end
 
+    -- Every occurrence of a token is replaced (as the JS side does).
     local dt = epoch_to_utc(timestamp)
     local result = pattern
     result = result:gsub("YYYY", string.format("%04d", dt.year))
@@ -329,11 +345,16 @@ function i18n.detect(header_or_req)
         if base and locales[base] then return base end
     end
     -- Try base language match for all entries (second pass)
-    -- Match "en" to "en-GB" but not "end" or "encyclopedia"
+    -- Match "en" to "en-GB" but not "end" or "encyclopedia". The loaded names
+    -- are walked in sorted order: pairs() order is unspecified, so with both
+    -- "en-GB" and "en-US" loaded the pick varied (and differed from JS).
+    local names = {}
+    for name in pairs(locales) do names[#names + 1] = name end
+    table.sort(names)
     for _, entry in ipairs(entries) do
         local base = entry.lang:match("^([%w]+)")
         if base then
-            for name, _ in pairs(locales) do
+            for _, name in ipairs(names) do
                 if name == base or
                    (name:sub(1, #base) == base and
                     (name:sub(#base + 1, #base + 1) == "-" or

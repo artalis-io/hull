@@ -165,7 +165,7 @@ Register with `app.use(method, pattern, mw)`:
 | `auth-flows` | `hull.web.auth-flows` | `hull:web:auth-flows` | Registration, email-verify, login, password-reset, magic-link, email-change. HMAC-signed single-use tokens, PBKDF2, app-provided storage + templates |
 | `envelope` | `hull.crypto.envelope` | `hull:crypto:envelope` | HMAC-signed JSON-payload stateless tokens (`base64url(payload) "." hex(HMAC)`). Used internally by `hull/web/auth-flows` and `hull/web/middleware/oauth`; available standalone for any app that wants a tamper-detectable signed envelope without DB state |
 | `crypto` | `hull.crypto` | `hull:crypto` | Primitives: `sha256`/`sha512`/`sha1`, `hmac_sha256` (+`_verify`), `hmac_sha1`, `hash_password`/`verify_password` (PBKDF2), `ed25519_*`, `verify` and `sign` (RS256/384/512, PS256, ES256/384 over a PEM key; ECDSA as raw r||s, RSA modulus-length), `rsa_private_pem(n, e, d, p, q)` (JS `rsaPrivatePem`: a PKCS#1 PEM from RSA components, CRT values derived, key checked), `key_from_env(var)` (JS `keyFromEnv`: a 32-byte secretbox key read from an allowlisted environment variable into C-owned memory; the handle seals and opens but never yields the bytes), `x25519`, `secretbox`/`box`, `auth`, `random`, `random_token(n [, "hex"])` (JS `randomToken`: `n` random bytes as unpadded base64url or hex, for ids, nonces and secrets), and `constant_time_eq(a, b)` for comparing secrets (never `==`); Lua also has the SSH set (`gcm_seal`/`gcm_open`, `aes256ctr`, `chacha20(key, nonce12, counter, data)` and `poly1305(key, msg)` (RFC 8439, raw: the caller composes the AEAD), `bcrypt_pbkdf`). **Bytes in, bytes out:** keys, nonces, signatures, tags, digests and ciphertexts are raw bytes of their exact size (a Lua string; a JS `ArrayBuffer` out, any buffer in), never hex; keypairs are `pk, sk` in Lua and `{ publicKey, secretKey }` in JS. For hex or base64, wrap with `hull.encoding` (`encoding.hex.encode(crypto.sha256(s))`). `hash_password`'s stored `pbkdf2:...` string is the one text format. **Bytes vs text:** a Lua string is its bytes; in JS pass bytes as a buffer (`encoding.bytes.toU8(s)`), since a JS string is taken as text and hashed as its UTF-8 |
-| `encoding` | `hull.encoding` | `hull:encoding` | Byte <-> text codecs: `hex`, `base64` (`{ url = true }` for base64url), `base32`, `utf8` (text <-> UTF-8 bytes, strict), and `url` (RFC 3986 percent-encoding: `url.encode(s, { keep = "..." })`, `url.decode(s, { form = true })` reads `+` as a space and leaves a value with a malformed escape as written); strict decoding by default (`{ lenient = true }` skips whitespace). A refused decode is `nil, reason` in Lua (`bad_length`, `invalid_char`, `bad_padding`, `non_canonical`, `invalid_utf8`); in JS `decode` returns `null` and `why(same args)` gives the same reason. JS also has `bytes.toU8` / `bytes.fromBuffer`. See [encoding_consolidation_plan.md](encoding_consolidation_plan.md) |
+| `encoding` | `hull.encoding` | `hull:encoding` | Byte <-> text codecs: `hex`, `base64` (`{ url = true }` for base64url), `base32`, `utf8` (text <-> UTF-8 bytes, strict), and `url` (RFC 3986 percent-encoding: `url.encode(s, { keep = "..." })`, `url.decode(s, { form = true })` reads `+` as a space and leaves a value with a malformed escape, escapes that are not UTF-8, or (JS) a lone surrogate as written - the same in both runtimes, never throwing on a string); strict decoding by default (`{ lenient = true }` skips whitespace). A refused decode is `nil, reason` in Lua (`bad_length`, `invalid_char`, `bad_padding`, `non_canonical`, `invalid_utf8`); in JS `decode` returns `null` and `why(same args)` gives the same reason. JS also has `bytes.toU8` / `bytes.fromBuffer`. See [encoding_consolidation_plan.md](encoding_consolidation_plan.md) |
 | `hkdf` | `hull.crypto.hkdf` | `hull:crypto:hkdf` | HKDF-SHA256 (RFC 5869): `derive(ikm, length, { salt?, info? })`, plus `extract(salt, ikm)` / `expand(prk, info, length)`. Several independent keys from one high-entropy secret, each bound to its `info` label (at most 8160 bytes). Not a password hash (`crypto.hash_password` is). Lua returns a byte string, JS an ArrayBuffer |
 | `otp` | `hull.crypto.otp` | `hull:crypto:otp` | HOTP (RFC 4226): `hotp(key, counter, digits?)` and `step(now, period?)` for TOTP (RFC 6238). The algorithm under `hull/web/middleware/totp` |
 | `sealbox` | `hull.crypto.sealbox` | `hull:crypto:sealbox` | Versioned secretbox sealing under a keyring (`keyring` / `seal` / `open`), with an optional context bound into the sealed frame. Keys may be 32-byte strings or `crypto.key_from_env` handles; `keyring_from_env{ keys = { [1] = "VAR" }, current = 1 }` (JS `keyringFromEnv`) builds a keyring of held keys. `open` returns `value, version` or `nil, reason` in Lua and `[value, null, version]` or `[null, reason]` in JS (reason `unknown_version` or `open_failed`). Backs `hull/kv`'s `encrypt` option (see [kv_cache.md](kv_cache.md#encryption-at-rest)) and TOTP's encrypted secrets |
@@ -188,7 +188,7 @@ Register with `app.use(method, pattern, mw)`:
 | `qrcode` | `hull.qrcode` | `hull:qrcode` | QR Code generator (ISO/IEC 18004), pure Lua/JS |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
 | `kv` | `hull.kv` | `hull:kv` | Portable key/value STORE: `open{backend,namespace}` -> handle (`get/set/delete/exists/incr/cas/scan/clear/cleanup/stats/caps`). Backends: memory / sqlite / postgres (over an existing `hull/db` conn). Durable, no eviction unless asked; binary-safe bytes. See [docs/kv_cache.md](kv_cache.md). Optional `encrypt` keyring seals values at rest |
-| `cache` | `hull.cache` | `hull:cache` | In-process value memoizer (`cache.new`/`get/set/fetch`) PLUS `cache.open{backend,namespace,max_bytes,default_ttl}` -> byte-oriented, LRU-evicting CACHE handle (memory / sqlite). Ephemeral + bounded; distinct from `hull/kv` (see [docs/kv_cache.md](kv_cache.md)) |
+| `cache` | `hull.cache` | `hull:cache` | In-process value memoizer (`cache.new`/`get/set/fetch`; `fetch` does not cache a `nil` / `null` / `undefined` result, and in JS a Promise result is dropped once it rejects or resolves to null) PLUS `cache.open{backend,namespace,max_bytes,default_ttl}` -> byte-oriented, LRU-evicting CACHE handle (memory / sqlite). Ephemeral + bounded; distinct from `hull/kv` (see [docs/kv_cache.md](kv_cache.md)) |
 | `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
 | `health` | `hull.web.middleware.health` | `hull:web:middleware:health` | Health check + readiness endpoints |
 | `etag` | `hull.web.middleware.etag` | `hull:web:middleware:etag` | ETag response helpers with 304 Not Modified |
@@ -719,7 +719,10 @@ verify step between successful first-factor auth and `on_login` when
 - `i18n.t(key, params?)` → translated string. Supports `${variable}` interpolation and dot-path keys.
 - `i18n.t_in(locale, key, params?)` (JS `i18n.tIn`) → the same, in an explicit locale, without touching the active one - safe across a yield.
 - `i18n.number(n)` → formatted number (locale-specific decimal/thousands separators).
-- `i18n.date(timestamp)` → formatted date string.
+- `i18n.date(timestamp)` → formatted date string. Every `YYYY` / `MM` /
+  `DD` / `HH` / `mm` / `ss` in the pattern is replaced (both runtimes). A
+  timestamp outside years 0000-9999 comes back as its plain text, as a NaN
+  does, instead of raising.
 - `i18n.currency(amount, code)` → formatted currency string (symbol + locale rules).
   NaN / infinities / amounts past 2^53 minor units fall back to a plain
   rendering instead of raising.
@@ -727,6 +730,11 @@ verify step between successful first-factor auth and `on_login` when
   `i18n.currency_in(locale, amount, code)` (JS `numberIn` / `dateIn` /
   `currencyIn`) → the same in an explicit locale, safe across a yield.
 - `i18n.detect(accept_language_header)` → best matching locale name or nil.
+  Ranges are tried by `q` (highest first; equal `q` in header order); a
+  range with `q=0` (or an unparseable `q`) is not acceptable and is skipped.
+  The fallback that maps `en` to a loaded `en-GB` / `en_GB` walks the loaded
+  names in sorted order, so the pick is deterministic and the same in both
+  runtimes.
 
 **transaction**. Wraps handlers in SQLite transactions.
 - `transaction.middleware()`. Post-body middleware that sets `req.ctx._txn = true` for downstream use.
@@ -833,12 +841,19 @@ template.clearCache();                           // clear compiled function cach
 
 **csv.parse(text, opts?)**. Parse CSV text (RFC 4180).
 - `opts.headers`. First row is header; returns objects (default: `false`)
-- `opts.separator`. Field delimiter (default: `","`)
+- `opts.separator`. Field delimiter (default: `","`); `opts.quote` the
+  quote character (default `'"'`). Each must be ONE ASCII character, not CR
+  / LF, and they must differ - anything else raises (parse and encode).
+- `opts.max_rows` (`maxRows` in JS, default 100000). Input with more rows
+  raises.
+- A leading UTF-8 byte-order mark is dropped.
 - Returns array of row arrays, or row objects if `headers = true`.
 
 **csv.encode(rows, opts?)**. Encode rows as CSV text.
-- `opts.headers`. Rows are objects; emit header row (default: `false`)
-- `opts.separator`. Field delimiter (default: `","`)
+- `opts.headers`. Rows are objects; emit header row (default: `false`).
+  Lua: the header is the union of the rows' string and number keys, sorted
+  by their text (other keys are skipped); `opts.columns` sets it explicitly.
+- `opts.separator` / `opts.quote`. As for `parse` (one ASCII character each).
 - `opts.sanitize_formulas` (`sanitizeFormulas` in JS, default **`true`**).
   A cell beginning with `= + - @` (or a tab / CR) gets a leading `'`, so a
   spreadsheet opening the export treats it as text, not a formula or DDE
@@ -880,15 +895,18 @@ Python's `qrcode` library on 48 input / EC / mask combinations.
 - `qrcode.encode(text, opts?)` → `{ matrix, size, version, ec_level, mask }`.
   Matrix is 1-indexed; cells are 0 (light) or 1 (dark).
   - `opts.ec_level` (Lua) / `opts.ecLevel` (JS). `"L"|"M"|"Q"|"H"`, default `"M"`.
-  - `opts.mask`. `0..7` to force a specific mask; omitted runs the
-    8-mask score-and-pick selector per spec 8.8.2.
+  - `opts.mask`. An integer `0..7` to force a specific mask (anything else
+    raises); omitted runs the 8-mask score-and-pick selector per spec 8.8.2.
 - `qrcode.svg(text, opts?)` → SVG string.
-  - `opts.scale`. Pixel size per module (default 4).
-  - `opts.margin`. Quiet-zone modules around the QR (default 4).
+  - `opts.scale`. Pixel size per module, an integer 1-64 (default 4).
+  - `opts.margin`. Quiet-zone modules around the QR, an integer 0-64
+    (default 4). Any other scale / margin raises: both are written into
+    the SVG markup.
   - `opts.dark` / `opts.light`. Colors (default `"#000"` / `"#fff"`).
     Pass `light: "none"` for transparent background.
-- Input is treated as bytes (Latin-1 / ASCII). For non-ASCII payloads,
-  encode to UTF-8 bytes at the call site before passing to `encode`.
+- The payload is encoded in byte mode as UTF-8: a Lua string's bytes as
+  they are, a JS string's UTF-8 encoding (a lone surrogate as U+FFFD). Both
+  runtimes produce the same code for the same text. `text` must be a string.
 
 Used by `hull/web/middleware/totp` for enrollment QR rendering;
 also useful for WiFi codes, contact cards, payment links, etc.

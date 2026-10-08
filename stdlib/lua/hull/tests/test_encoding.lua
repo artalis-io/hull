@@ -200,8 +200,22 @@ test("url: a malformed escape leaves the whole value as it is", function()
     assert_eq(url.decode("x+%g1", { form = true }), "x %g1")
 end)
 
-test("url: every byte round trips", function()
-    assert_eq(enc.url.decode(enc.url.encode(ALL)), ALL)
+-- Escapes that do not decode to UTF-8 leave the value as written (audit 10),
+-- as the JS side has it: "%FF" used to come back as the byte 0xFF here.
+test("url: escapes that are not UTF-8 leave the value as it is", function()
+    local url = enc.url
+    assert_eq(url.decode("%FF"), "%FF")
+    assert_eq(url.decode("a%C3"), "a%C3")            -- truncated sequence
+    assert_eq(url.decode("%C0%AF"), "%C0%AF")        -- overlong '/'
+    assert_eq(url.decode("%ED%A0%80"), "%ED%A0%80")  -- a surrogate
+    assert_eq(url.decode("x+%FF", { form = true }), "x %FF")
+    -- every byte encodes, and UTF-8 text reads back
+    assert_eq(#enc.url.encode(ALL) > #ALL, true)
+    local t = "a b/\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80~"
+    assert_eq(url.decode(url.encode(t)), t)
+end)
+
+test("url: non-strings are refused", function()
     assert_raises(function() enc.url.encode(nil) end, "non-string")
     assert_raises(function() enc.url.decode(42) end, "non-string")
 end)

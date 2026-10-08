@@ -4656,6 +4656,23 @@ UTEST(lua_stdlib, email_suite)
     cleanup_lua_caps();
 }
 
+/* Stdlib regressions from audit 10 (logx / _logfmt escaping, cache.fetch
+ * misses, i18n, qrcode, csv): logx needs hull.log, cache hull.time, so the
+ * caps-bearing state. */
+UTEST(lua_stdlib, stdlib_audit10_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit10.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+
+    cleanup_lua_caps();
+}
+
 /* hull.cache / hull.kv memory + SQL stores and rbac names (audit 5 DA-L3..L6):
  * needs time + db, so the caps-bearing state. */
 UTEST(lua_stdlib, kv_cache_suite)

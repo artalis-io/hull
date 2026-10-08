@@ -285,6 +285,11 @@ function email.send(opts)
         email_error("invalid_argument", "invalid to address")
     end
     cc_list(opts.cc)   -- validated up front, for every provider
+    -- Reply-To goes into a header (SMTP) or a provider's JSON like to/from, so
+    -- it is held to the same address rule: no CR/LF, comma or second address.
+    if opts.reply_to ~= nil and not addr_ok(opts.reply_to) then
+        email_error("invalid_argument", "invalid reply_to address")
+    end
 
     local provider = opts.provider or "smtp"
     local fn = providers[provider]

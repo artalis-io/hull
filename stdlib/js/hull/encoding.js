@@ -446,14 +446,17 @@ const url = {
      * `text` with its %XX escapes decoded as UTF-8. opts.form also reads '+'
      * as a space. A '%' that does not begin two hex digits, or escapes that
      * are not UTF-8, make the value malformed, and it comes back as it is
-     * (with '+' already read as a space in form mode). Never throws on a
-     * string: a URL is often not ours to reject.
+     * (with '+' already read as a space in form mode), as in Lua. So does a
+     * text holding a lone surrogate (it has no UTF-8 form; utf8.encode threw
+     * on it). Never throws on a string: a URL is often not ours to reject.
      */
     decode(text, opts) {
         checkString("url.decode", text);
         if (opts && opts.form) text = text.split("+").join(" ");
         if (text.indexOf("%") < 0) return text;
         if (/%(?![0-9A-Fa-f]{2})/.test(text)) return text;
+        if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text))
+            return text;
         const bytes = utf8.encode(text).replace(/%([0-9A-Fa-f]{2})/g,
             (_, h) => String.fromCharCode(parseInt(h, 16)));
         const back = utf8.decode(bytes);

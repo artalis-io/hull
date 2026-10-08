@@ -288,11 +288,13 @@ function M.url.encode(text, opts)
     end))
 end
 
---- `text` with its %XX escapes decoded. opts.form also reads '+' as a space
---- (application/x-www-form-urlencoded). A '%' that does not begin two hex
---- digits makes the whole value malformed, and it comes back as it is (with
---- '+' already read as a space in form mode) rather than half-decoded.
---- Never fails on a string: a URL is often not ours to reject.
+--- `text` with its %XX escapes decoded as UTF-8. opts.form also reads '+' as
+--- a space (application/x-www-form-urlencoded). A '%' that does not begin two
+--- hex digits, or a result that is not well-formed UTF-8, makes the whole
+--- value malformed, and it comes back as it is (with '+' already read as a
+--- space in form mode) rather than half-decoded - as the JS side, whose
+--- strings cannot hold the invalid bytes. Never fails on a string: a URL is
+--- often not ours to reject.
 function M.url.decode(text, opts)
     check_string("url.decode", text)
     if opts and opts.form then text = (text:gsub("+", " ")) end
@@ -300,7 +302,9 @@ function M.url.decode(text, opts)
     for pos in text:gmatch("()%%") do
         if not text:find("^%x%x", pos + 1) then return text end
     end
-    return (text:gsub("%%(%x%x)", function(h) return schar(tonumber(h, 16)) end))
+    local out = text:gsub("%%(%x%x)", function(h) return schar(tonumber(h, 16)) end)
+    if not utf8.len(out) then return text end
+    return out
 end
 
 return M

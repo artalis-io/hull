@@ -5068,6 +5068,22 @@ UTEST(js_stdlib, search_suite)
     cleanup_js_caps();
 }
 
+/* Stdlib regressions from audit 10 (logx / _logfmt escaping, cache.fetch
+ * misses, i18n, qrcode, csv): logx needs hull:log, cache hull:time. */
+UTEST(js_stdlib, stdlib_audit10_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit10.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 /* hull:cache / hull:kv memory + SQL stores, rbac names (audit 5 DA-L3..L6). */
 UTEST(js_stdlib, kv_cache_suite)
 {

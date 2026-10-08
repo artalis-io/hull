@@ -34,17 +34,25 @@ local LEVELS = { "info", "warn", "error", "debug" }
 
 -- Format a fields table as a leading-space logfmt fragment: " k=v k2=v2".
 -- Keys are sorted for deterministic, cross-runtime-identical output. Value
--- escaping + quoting is the shared hull.web._logfmt rule (escapes \ CR LF ",
--- quotes when needed) - the logger middleware uses the same one.
+-- escaping + quoting is the shared hull.web._logfmt rule (keys reduced to
+-- [A-Za-z0-9_.-], values with \ " and control bytes escaped, quoted when
+-- needed) - the logger middleware uses the same one. The message's control
+-- bytes are escaped too (_logfmt.message), so it cannot forge a line either.
 local function fmt(fields)
     if not fields then return "" end
-    local keys = {}
-    for k in pairs(fields) do keys[#keys + 1] = tostring(k) end
+    -- Sorted by the key's string form, the value read through the ORIGINAL
+    -- key (a numeric key's value was looked up as its string and logged nil).
+    local keys, orig = {}, {}
+    for k in pairs(fields) do
+        local sk = tostring(k)
+        if orig[sk] == nil then keys[#keys + 1] = sk end
+        orig[sk] = k
+    end
     table.sort(keys)
     if #keys == 0 then return "" end
     local parts = {}
     for _, k in ipairs(keys) do
-        parts[#parts + 1] = _logfmt.pair(k, fields[k])
+        parts[#parts + 1] = _logfmt.pair(k, fields[orig[k]])
     end
     return " " .. table.concat(parts, " ")
 end
@@ -61,7 +69,7 @@ local function make(fields)
     local self = {}
     for _, lvl in ipairs(LEVELS) do
         self[lvl] = function(msg)
-            log[lvl](tostring(msg == nil and "" or msg) .. fmt(fields))
+            log[lvl](_logfmt.message(msg == nil and "" or msg) .. fmt(fields))
         end
     end
     --- Return a new child logger with `more` merged over the current fields.

@@ -610,9 +610,34 @@ end
 
 -- ── Public API ─────────────────────────────────────────────────────
 
+-- opts.scale / opts.margin: an integer in [lo, hi], or the default when nil.
+-- They are interpolated into the SVG, so anything else is refused (a float
+-- raised in %d; in JS a string was written into the markup unescaped).
+local SCALE_MAX, MARGIN_MAX = 64, 64
+local function int_opt(v, default, lo, hi, what)
+    if v == nil then return default end
+    if math.type(v) == "float" and v == math.floor(v) then v = math.tointeger(v) end
+    if math.type(v) ~= "integer" or v < lo or v > hi then
+        error(string.format("qrcode.svg: opts.%s must be an integer in %d..%d",
+                            what, lo, hi))
+    end
+    return v
+end
+
 --- Encode text into a QR code matrix.
 function M.encode(text, opts)
+    if type(text) ~= "string" then error("qrcode.encode: text must be a string") end
     opts = opts or {}
+    -- An explicit mask must be one of the 8 patterns: any other value
+    -- produced a matrix with no mask applied and format bits naming a
+    -- pattern that does not exist.
+    if opts.mask ~= nil then
+        local m = opts.mask
+        if math.type(m) == "float" and m == math.floor(m) then m = math.tointeger(m) end
+        if math.type(m) ~= "integer" or m < 0 or m > 7 then
+            error("qrcode.encode: opts.mask must be an integer in 0..7")
+        end
+    end
     local ec_name = opts.ec_level or "M"
     local ec = EC_LEVELS[ec_name]
     if not ec then error("qrcode.encode: invalid ec_level '" .. tostring(ec_name) .. "'") end
@@ -631,7 +656,7 @@ function M.encode(text, opts)
     place_version_info(g, version, size)
 
     -- Pick mask. Either honor the explicit choice or run all 8 + score.
-    local chosen = opts.mask
+    local chosen = opts.mask and math.tointeger(opts.mask)
     if chosen == nil then
         local best_pen = math.huge
         for m = 0, 7 do
@@ -664,9 +689,9 @@ end
 --- Encode `text` and serialize as an SVG string.
 function M.svg(text, opts)
     opts = opts or {}
+    local scale = int_opt(opts.scale, 4, 1, SCALE_MAX, "scale")
+    local margin = int_opt(opts.margin, 4, 0, MARGIN_MAX, "margin")
     local q = M.encode(text, opts)
-    local scale = opts.scale or 4
-    local margin = opts.margin or 4
     local dark = opts.dark or "#000"
     local light = opts.light or "#fff"
     -- Both colors are interpolated raw into SVG attributes below.
