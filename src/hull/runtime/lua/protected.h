@@ -174,6 +174,9 @@ static inline int hl_lua_append_lstring(lua_State *L, int tbl, lua_Integer idx,
     return 0;
 }
 
+int hl_lua_budget_tripped(lua_State *L);   /* budget.c */
+int hl_lua_budget_raise(lua_State *L);
+
 /* Raise "<prefix><msg>" with msg COPIED first. luaL_error formats lazily,
  * after luaL_where has allocated - a GC step that can run an app finalizer
  * which closes the connection msg points into (hl_db_errmsg /
@@ -181,6 +184,11 @@ static inline int hl_lua_append_lstring(lua_State *L, int tbl, lua_Integer idx,
 static inline int hl_lua_raise_copy(lua_State *L, const char *prefix,
                                     const char *msg)
 {
+    /* The statement was interrupted because the run is over its instruction
+     * budget (cap/db_budget.h): raise the limit, not "interrupted" as an
+     * ordinary SQL error (audit 9 H4). */
+    if (hl_lua_budget_tripped(L))
+        return hl_lua_budget_raise(L);
     char buf[512];
     snprintf(buf, sizeof buf, "%s%s", prefix ? prefix : "",
              msg ? msg : "(unknown error)");

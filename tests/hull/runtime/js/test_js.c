@@ -1490,6 +1490,33 @@ UTEST(js_cap, db_last_id)
     cleanup_js_caps();
 }
 
+/* One statement is charged to the run's instruction budget (audit 9 H4): a
+ * recursive CTE in one db.query held the event loop for good. The trip is
+ * the uncatchable limit, not a SQL error a catch block could loop on. */
+UTEST(db_audit9, js_a_runaway_query_hits_the_instruction_limit)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    js.max_instructions = 1000000;
+    hl_js_budget_arm(&js);
+
+    const char *code =
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
+        "try { db.query('WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) AS n FROM c'); } catch (e) { globalThis.__caught = 1; }\n"
+        "globalThis.__after = 1;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(1, js.budget_tripped);
+
+    js.max_instructions = 0;
+    hl_js_budget_arm(&js);
+    EXPECT_EQ(0, eval_int("globalThis.__caught === undefined ? 0 : 1"));
+    EXPECT_EQ(0, eval_int("globalThis.__after === undefined ? 0 : 1"));
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, db_parameterized_query)
 {
     init_js_with_caps();

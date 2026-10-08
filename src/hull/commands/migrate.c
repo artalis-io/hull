@@ -55,7 +55,9 @@ static int cmd_run(const char *app_dir, const char *db_path)
     }
     HlDbHandle handle = { .backend = be, .ctx = NULL };
     if (be->open(&handle.ctx, db_path, NULL) != 0) {
-        fprintf(stderr, "hull migrate: cannot open database %s\n", db_path);
+        char shown[256];
+        hl_db_dsn_redact(db_path, shown, sizeof shown);   /* no password (audit 9 L4) */
+        fprintf(stderr, "hull migrate: cannot open database %s\n", shown);
         return 1;
     }
 
@@ -97,7 +99,9 @@ static int cmd_status(const char *app_dir, const char *db_path)
     }
     HlDbHandle handle = { .backend = be, .ctx = NULL };
     if (be->open(&handle.ctx, db_path, NULL) != 0) {
-        fprintf(stderr, "hull migrate: cannot open database %s\n", db_path);
+        char shown[256];
+        hl_db_dsn_redact(db_path, shown, sizeof shown);   /* no password (audit 9 L4) */
+        fprintf(stderr, "hull migrate: cannot open database %s\n", shown);
         return 1;
     }
 

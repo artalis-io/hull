@@ -28,6 +28,7 @@
 #include <strings.h>   /* strncasecmp */
 #include <stdio.h>
 #include <ctype.h>
+#include <errno.h>
 
 typedef struct HlDbMyCtx {
     HlMyConn conn;
@@ -61,6 +62,26 @@ static int my_connect(HlMyConn *conn, const char *dsn)
 static int sql_is_rollback(const char *sql)
 {
     return hl_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK;
+}
+
+/* 1 when @p sql has text MySQL runs or skips differently from the shared
+ * reader (cap/db_sql_kw.h): an executable comment (slash-star-bang, and
+ * MariaDB's slash-star-M-bang), which MySQL runs though the reader skips it, or a
+ * '#' line comment, which the reader does not skip (audit 9 L1). A '#' in a
+ * string literal counts too: misreading such a statement as unrecognised
+ * only refuses a resume, never makes one. */
+static int my_sql_unreadable(const char *sql)
+{
+    return sql && (strstr(sql, "/*!") || strstr(sql, "/*M!") ||
+                   strchr(sql, '#'));
+}
+
+/* hl_sql_txn_kind for MySQL: a statement the reader cannot read reliably is
+ * HL_SQL_TXN_OTHER - no implicit-commit resume after it, so a transaction it
+ * ended is reported lost by the batch. */
+static HlSqlTxnKind my_sql_txn_kind(const char *sql)
+{
+    return my_sql_unreadable(sql) ? HL_SQL_TXN_OTHER : hl_sql_txn_kind(sql);
 }
 
 static void scrub_free(char *s)
@@ -169,7 +190,10 @@ static int mysql_create_index_shim(HlDbMyCtx *s, const char *sql, int *handled)
     int rc = hl_my_conn_query(&s->conn, rw, NULL, NULL, NULL, NULL);
     free(rw);
     if (rc == 0) return 0;
-    if (ci_strstr(s->conn.errmsg, "Duplicate key name") != NULL) {
+    /* By the server's error code, not its message (audit 9 L2): the message
+     * follows lc_messages, and an app-chosen index name can put the words in
+     * another error's text. */
+    if (s->conn.last_err_code == HL_MY_ER_DUP_KEYNAME) {
         /* Already present. The DDL still committed the open transaction
          * before it failed, which the ERR does not say (audit 6 L1). */
         if (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS)
@@ -266,8 +290,16 @@ static void decode_my_value(uint8_t type, const char *text, size_t len,
         char buf[32];
         size_t n = len < sizeof buf - 1 ? len : sizeof buf - 1;
         memcpy(buf, text, n); buf[n] = '\0';
+        errno = 0;
+        long long v = strtoll(buf, NULL, 10);
+        if (errno == ERANGE) {   /* BIGINT UNSIGNED above INT64_MAX: its text */
+            out->type = HL_TYPE_TEXT;
+            out->s = text;
+            out->len = len;
+            return;
+        }
         out->type = HL_TYPE_INT;
-        out->i = (int64_t)strtoll(buf, NULL, 10);
+        out->i = (int64_t)v;
         return;
     }
     case HL_MY_TYPE_FLOAT: case HL_MY_TYPE_DOUBLE: {
@@ -580,6 +612,7 @@ static int my_sql_commits_implicitly(const char *sql)
         "alter", "analyze", "cache", "check", "flush", "grant", "optimize",
         "rename", "repair", "revoke", "truncate",
     };
+    if (my_sql_unreadable(sql)) return 0;   /* refused, never resumed */
     char w[16], w2[16], w3[16];
     const char *p = hl_sql_next_word(sql ? sql : "", w, sizeof w);
     p = hl_sql_next_word(p, w2, sizeof w2);
@@ -630,8 +663,9 @@ static void my_note_failure(HlDbMyCtx *s, const char *sql, int was_in_trans,
          * without what came before (audit 7 L1): refuse until a ROLLBACK, as
          * for a deadlock. A COMMIT / ROLLBACK / savepoint statement ends or
          * keeps the transaction on its own terms. */
-        if (hl_sql_txn_kind(sql) == HL_SQL_TXN_NONE &&
-            !my_sql_commits_implicitly(sql))
+        if (my_sql_unreadable(sql) ||   /* unrecognised: refused (audit 9 L1) */
+            (hl_sql_txn_kind(sql) == HL_SQL_TXN_NONE &&
+             !my_sql_commits_implicitly(sql)))
             s->txn_aborted = 1;
     }
 }
@@ -665,7 +699,7 @@ static void my_resume_after_implicit_commit(HlDbHandle *h, const char *sql,
     if (!was || !h || h->batch_depth != 1 || my_in_trans(h)) return;
     HlDbMyCtx *s = h->ctx;
     if (!s || s->txn_aborted || s->conn.broken) return;
-    HlSqlTxnKind k = hl_sql_txn_kind(sql);
+    HlSqlTxnKind k = my_sql_txn_kind(sql);
     if (k == HL_SQL_TXN_COMMIT || k == HL_SQL_TXN_ROLLBACK || k == HL_SQL_TXN_OTHER)
         return;
     (void)mysql_txn_raw(h, "START TRANSACTION");

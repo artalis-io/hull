@@ -1403,10 +1403,9 @@ static int notify_is_for(const HlPgFrame *f, const char *channel, char *got,
     return !channel || strcasecmp(ch, channel) == 0;
 }
 
-int hl_pg_wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
-                      HlPgNotifyOtherFn on_other, void *ud)
+static int wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
+                       HlPgNotifyOtherFn on_other, void *ud)
 {
-    if (!conn || !conn->transport) return -1;
     int fd = hl_db_transport_fd(conn->transport);
     if (fd < 0) return -1;
     if (timeout_ms < 0) timeout_ms = 0;
@@ -1475,6 +1474,19 @@ int hl_pg_wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
                       return -1; }
         conn->rlen += (size_t)n;
     }
+}
+
+int hl_pg_wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
+                      HlPgNotifyOtherFn on_other, void *ud)
+{
+    if (!conn || !conn->transport) return -1;
+    int rc = wait_notify(conn, channel, timeout_ms, on_other, ud);
+    /* Every failure leaves the reply stream in an unknown state (a frame half
+     * read, a dead socket): the connection refuses further use like after a
+     * failed query read, rather than hand the next query this one's bytes
+     * (audit 9 L5). */
+    if (rc < 0) conn->broken = 1;
+    return rc;
 }
 
 #endif /* HL_PG_NO_TLS: end of the query / notify connection-layer region */

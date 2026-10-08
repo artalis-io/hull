@@ -423,8 +423,12 @@ int hl_my_parse_column_def(const HlMyFrame *f, HlMyColumn *out)
     (void)hl_my_get_u16(&c);                       /* charset */
     (void)hl_my_get_u32(&c);                       /* column length */
     uint8_t type = hl_my_get_u8(&c);
+    uint16_t flags = hl_my_get_u16(&c);
     if (hl_my_cursor_err(&c)) return -1;
-    if (out) { out->name = (const char *)name; out->name_len = nl; out->type = type; }
+    if (out) {
+        out->name = (const char *)name; out->name_len = nl;
+        out->type = type; out->flags = flags;
+    }
     return 0;
 }
 

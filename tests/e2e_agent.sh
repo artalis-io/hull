@@ -167,6 +167,33 @@ OUT=$(cat "$RC_TMP")
 check_contains "db query bad SQL error"    "$OUT" '"error"'
 check_exit     "db query bad SQL exit"     "$EXIT_CODE" "1"
 
+# Read-only means read-only (audit 9 M2): a write, a transaction left open
+# on the app's connection, a file written by VACUUM INTO or read by ATTACH
+# are all refused.
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "INSERT INTO tasks (title) VALUES ('x')" examples/rest_api)
+OUT=$(cat "$RC_TMP")
+check_contains "db query refuses a write"   "$OUT" 'read-only'
+check_exit     "db query write exit"        "$EXIT_CODE" "1"
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "BEGIN" examples/rest_api)
+OUT=$(cat "$RC_TMP")
+check_contains "db query refuses BEGIN"     "$OUT" 'read-only'
+
+AGENT_DB_DIR=$(mktemp -d)
+$HULL migrate -d "$AGENT_DB_DIR/app.db" examples/rest_api >/dev/null 2>&1 || true
+if [ -f "$AGENT_DB_DIR/app.db" ]; then
+    EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "VACUUM INTO '$AGENT_DB_DIR/copy.db'" examples/rest_api -d "$AGENT_DB_DIR/app.db")
+    OUT=$(cat "$RC_TMP")
+    check_contains "db query refuses VACUUM INTO" "$OUT" '"error"'
+    if [ -f "$AGENT_DB_DIR/copy.db" ]; then
+        fail "VACUUM INTO wrote $AGENT_DB_DIR/copy.db"
+    fi
+    EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "ATTACH '$AGENT_DB_DIR/app.db' AS o" examples/rest_api -d "$AGENT_DB_DIR/app.db")
+    OUT=$(cat "$RC_TMP")
+    check_contains "db query refuses ATTACH"    "$OUT" '"error"'
+    check_not_contains "db query ATTACH not run" "$OUT" '"count":0'
+fi
+rm -rf "$AGENT_DB_DIR"
+
 # Missing SQL argument
 EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query)
 OUT=$(cat "$RC_TMP")

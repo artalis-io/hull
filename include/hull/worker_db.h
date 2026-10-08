@@ -133,6 +133,10 @@ typedef struct HlWorkerDbOp {
      * the app closes it, the worker closes the connection (audit 6 L7). */
     int            no_cache;
     uint64_t       dyn_id;
+    /* The submitting VM's instruction limit (0 = none): the op's SQL is
+     * charged to an HlDbOpBudget of its own (cap/db_budget.h), so a runaway
+     * statement does not hold a pool thread for good. */
+    int64_t        max_instructions;
 
     /* WAIT_NOTIFY input: LISTEN channel (owned) + wait bound in ms. */
     char          *channel;

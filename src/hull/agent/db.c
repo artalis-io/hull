@@ -11,6 +11,8 @@
 #include "hull/app_context.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_budget.h"
+#include "hull/cap/db_sql_kw.h"   /* hl_sql_txn_kind */
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap */
 #include "hull/cap/tool.h"
 #include "hull/migrate.h"
@@ -144,6 +146,22 @@ static int db_query_impl(sqlite3 *db, int close_db, const char *sql,
         if (close_db) sqlite3_close(db);
         return ret;
     }
+    /* A read-only query (audit 9 M2). Without a db_path this is the warm
+     * context's own connection, which is not opened read-only at all: an
+     * INSERT / DROP / CREATE TEMP went straight in. A transaction-control
+     * statement is read-only to SQLite, but a BEGIN left the app's connection
+     * inside it. */
+    if (!stmt || !sqlite3_stmt_readonly(stmt) ||
+        hl_sql_txn_kind(sql) != HL_SQL_TXN_NONE) {
+        sqlite3_finalize(stmt);
+        int ret = hl_agent_write_error(out,
+            stmt ? "only read-only statements are allowed"
+                 : "no SQL statement");
+        if (close_db) sqlite3_close(db);
+        return ret;
+    }
+    /* Not an app run: not charged to (or stopped by) a run's budget. */
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
 
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);
@@ -199,6 +217,7 @@ static int db_query_impl(sqlite3 *db, int close_db, const char *sql,
 
     sh_json_write_object_end(&w);
     sqlite3_finalize(stmt);
+    hl_db_budget_restore(budget);
     if (close_db) sqlite3_close(db);
     return 0;
 }

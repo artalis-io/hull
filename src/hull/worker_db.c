@@ -12,6 +12,7 @@
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_dynamic.h"   /* hl_db_dynamic_id_live */
+#include "hull/cap/db_budget.h"     /* db.async ops: a budget of their own */
 #include "hull/shared/async.h"
 #include "hull/shared/thread_affinity.h"
 #include "hull/shared/async_backend.h"
@@ -449,7 +450,13 @@ static void db_work_fn(void *ud)
     HlWorkerDbOp *op = (HlWorkerDbOp *)ud;
     int fresh = 0;
     worker_db_sweep_closed_dynamic();
+    HlDbOpBudget budget = { op->max_instructions, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     HlWorkerDb *wdb = db_work_run(op, &fresh);
+    hl_db_budget_restore(prev);
+    if (budget.tripped && op->error)
+        snprintf(op->error_msg, sizeof(op->error_msg),
+                 "interrupted (instruction limit exceeded)");
     if (op->no_cache && fresh && op->dsn) {
         if (wdb && op->kind == HL_WORK_DB_WAIT_NOTIFY &&
             hl_db_dynamic_id_live(op->dyn_id)) {

@@ -27,6 +27,7 @@
 #include "hull/module_resolver.h"
 #include "hull/utils/path_normalize.h"
 #include "hull/cap/test.h"
+#include "hull/cap/db_budget.h"
 #include "hull/runtime/test.h"
 
 #include <keel/keel.h>
@@ -76,9 +77,38 @@ static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
     return 0;
 }
 
+/* Charge @p units to the run's budget; 1 once it is (stickily) over. Shared
+ * by hl_js_budget_charge (C work a binding does) and the SQL charge below. */
+static int js_budget_add(HlJS *js, uint64_t units)
+{
+    if (!js->budget_tripped) {
+        uint64_t room = (uint64_t)(INT64_MAX - js->instruction_count);
+        js->instruction_count = units > room
+            ? INT64_MAX : js->instruction_count + (int64_t)units;
+        if (js->max_instructions > 0 &&
+            js->instruction_count > js->max_instructions)
+            js->budget_tripped = 1;
+    }
+    return js->budget_tripped;
+}
+
+#ifdef HL_ENABLE_DB
+/* SQL work, charged by the SQLite progress handler (cap/db_budget.h) in the
+ * interrupt handler's units: a statement runs inside one binding call, where
+ * QuickJS never polls. It must not throw from inside SQLite: once over, the
+ * statement is interrupted and the binding throws the trip (audit 9 H4). */
+static int js_db_budget_charge(void *ud, int64_t units)
+{
+    return js_budget_add((HlJS *)ud, units > 0 ? (uint64_t)units : 0);
+}
+#endif
+
 void hl_js_budget_arm(HlJS *js)
 {
     if (!js) return;
+#ifdef HL_ENABLE_DB
+    (void)hl_db_budget_swap(js_db_budget_charge, js);
+#endif
     /* A tripped run can leave its interrupt pending on the context (a
      * resolve call that failed at its first poll): never hand it to the
      * next, unrelated run as if a binding had just thrown it. */
@@ -99,15 +129,7 @@ int hl_js_budget_charge(JSContext *ctx, uint64_t units)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js) return 0;   /* a worker.dispatch VM: no HlJS, its own budget */
-    if (!js->budget_tripped) {
-        uint64_t room = (uint64_t)(INT64_MAX - js->instruction_count);
-        js->instruction_count = units > room
-            ? INT64_MAX : js->instruction_count + (int64_t)units;
-        if (js->max_instructions > 0 &&
-            js->instruction_count > js->max_instructions)
-            js->budget_tripped = 1;
-    }
-    if (js->budget_tripped) {
+    if (js_budget_add(js, units)) {
         hl_js_budget_throw(ctx);
         return -1;
     }
@@ -855,6 +877,9 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     js->max_instructions = 0;
     js->max_heap_bytes = cfg->max_heap_bytes;
     js->max_stack_bytes = cfg->max_stack_bytes;
+#ifdef HL_ENABLE_DB
+    hl_db_note_heap_limit(cfg->max_heap_bytes);   /* SQLITE_LIMIT_LENGTH */
+#endif
 
     /* Create runtime (using default allocator for now;
      * custom KlAllocator routing added when Keel is linked) */
@@ -1302,6 +1327,9 @@ void hl_js_free(HlJS *js)
 {
     if (!js)
         return;
+#ifdef HL_ENABLE_DB
+    hl_db_budget_unbind(js);   /* bound by every arm */
+#endif
 
     /* Cancel and free tracked timers - via async backend vtable. */
     {

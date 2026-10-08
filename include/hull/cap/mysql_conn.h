@@ -110,6 +110,9 @@ typedef struct HlMyConn {
  * rolled ALL of it back (not only the failing statement). */
 #define HL_MY_ER_LOCK_DEADLOCK 1213
 
+/* ER_DUP_KEYNAME: CREATE INDEX of a name the table already has. */
+#define HL_MY_ER_DUP_KEYNAME 1061
+
 /*
  * Connect to dsn->host:port and run the handshake (mysql_native_password +
  * AuthSwitch to native). On success the connection is authenticated and idle
@@ -134,6 +137,7 @@ void hl_my_conn_close(HlMyConn *conn);
 typedef struct HlMyField {
     const char *name;
     uint8_t     type;   /* HL_MY_TYPE_* */
+    uint16_t    flags;  /* HL_MY_FLAG_* */
 } HlMyField;
 
 typedef void (*HlMyDescCb)(void *ctx, const HlMyField *fields, int nfields);

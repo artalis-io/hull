@@ -16,6 +16,7 @@
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
+#include "hull/cap/db_budget.h"   /* the SQL budget binding (audit 9 H4) */
 
 #include "quickjs.h"
 
@@ -1119,6 +1120,10 @@ static void js_task_fire(void *user)
     int           save_pending     = js->async_pending;
     int64_t       save_count       = js->instruction_count;
     int           save_tripped     = js->budget_tripped;
+#ifdef HL_ENABLE_DB
+    /* The arm below rebinds this thread's SQL budget to this run. */
+    HlDbBudgetBinding save_budget  = hl_db_budget_current();
+#endif
 
     /* Nothing of whatever ran last is active (an op made now captures all
      * of it), and the run has a budget of its own. */
@@ -1171,6 +1176,9 @@ static void js_task_fire(void *user)
     js->async_pending          = save_pending;
     js->instruction_count      = save_count;
     js->budget_tripped         = save_tripped;
+#ifdef HL_ENABLE_DB
+    hl_db_budget_restore(save_budget);
+#endif
 }
 
 static JSValue js_task_spawn(JSContext *ctx, JSValueConst this_val,

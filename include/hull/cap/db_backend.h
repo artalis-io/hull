@@ -406,6 +406,15 @@ static inline int hl_db_quote_ident(HlDbHandle *h, const char *name,
 const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err);
 
 /*
+ * Write a loggable form of @p dsn to @p out: "<scheme>://<host>[:port]" for a
+ * DSN with a scheme (user, password, database and every query parameter -
+ * a "?password=" too - dropped), the DSN itself for a scheme-less file path.
+ * For error messages: a network DSN carries the password, often a resolved
+ * "$VAR" secret. Returns snprintf's length.
+ */
+size_t hl_db_dsn_redact(const char *dsn, char *out, size_t outsz);
+
+/*
  * Feature backends: large, composable DB connectors (e.g. DuckDB) that are NOT
  * compiled into the base but linked in at `hull build` time from a signed
  * feature lib. Returns a table of `*count` backends the build composed in;

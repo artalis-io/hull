@@ -17,6 +17,7 @@
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
 #include "hull/worker_db.h"   /* hl_worker_db_end_job */
+#include "hull/cap/db_budget.h"
 
 #include <keel/thread_pool.h>
 #include <keel/async.h>
@@ -92,6 +93,22 @@ static int js_worker_interrupt(JSRuntime *rt, void *opaque)
         wctx->tripped = 1;
     return wctx->tripped;
 }
+
+#ifdef HL_ENABLE_DB
+/* A dispatch's SQL is charged to the dispatch (cap/db_budget.h). */
+static int js_worker_db_charge(void *ud, int64_t units)
+{
+    HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)ud;
+    if (wctx->tripped)
+        return 1;
+    wctx->instructions = units > INT64_MAX - wctx->instructions
+                         ? INT64_MAX : wctx->instructions + units;
+    if (wctx->max_instructions > 0 &&
+        wctx->instructions > wctx->max_instructions)
+        wctx->tripped = 1;
+    return wctx->tripped;
+}
+#endif
 
 static HlJsWorkerCtx *get_js_worker_rt(void)
 {
@@ -369,6 +386,10 @@ static void js_dispatch_work_fn(void *ud)
                  "failed to create worker JS VM");
         return;
     }
+#ifdef HL_ENABLE_DB
+    /* Scoped to the dispatch: the thread's db.async ops are not its. */
+    HlDbBudgetBinding budget = hl_db_budget_swap(js_worker_db_charge, wctx);
+#endif
     js_dispatch_run(wctx, ctx, op);
     /* The runtime outlives the context, and so did a job left in its queue
      * (`Promise.resolve().then(...)` the function did not wait for): it held
@@ -382,6 +403,7 @@ static void js_dispatch_work_fn(void *ud)
     JS_FreeContext(ctx);
     JS_RunGC(wctx->rt);   /* cycles the dispatch left behind */
 #ifdef HL_ENABLE_DB
+    hl_db_budget_restore(budget);
     if (op->with_db &&
         hl_worker_db_end_job(op->error ? NULL : op->error_msg,
                              sizeof(op->error_msg)))

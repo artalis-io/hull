@@ -621,9 +621,13 @@ static int pg_table_columns(HlDbHandle *h, const char *table,
     p.type = HL_TYPE_TEXT;
     p.s = table;
     p.len = strlen(table);
+    /* Scoped to current_schema() (audit 9 L3): a same-named table in another
+     * schema the role can see merged its columns into this one's, so
+     * upsert / insert_if_absent could name a column the table lacks. */
     return pg_query(h,
         "SELECT column_name FROM information_schema.columns "
-        "WHERE table_name = ? ORDER BY ordinal_position",
+        "WHERE table_schema = current_schema() AND table_name = ? "
+        "ORDER BY ordinal_position",
         &p, 1, pg_table_columns_row, &fwd, NULL);
 }
 

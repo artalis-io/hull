@@ -194,6 +194,14 @@ app.get("/txn6", function(req, res)
         async_begin_refused = (not async_ok) and tostring(async_err):find("cannot span", 1, true) ~= nil,
     })
 end)
+-- Audit 9 L3: table_columns reads the current schema only; a same-named
+-- table in another schema does not add its columns.
+app.get("/cols", function(req, res)
+    db.exec("CREATE SCHEMA IF NOT EXISTS e2e_other")
+    db.exec("CREATE TABLE IF NOT EXISTS e2e_other.cols_t (a INT, zzz INT)")
+    db.exec("CREATE TABLE IF NOT EXISTS cols_t (a INT, b INT)")
+    res:json({ cols = table.concat(db.table_columns("cols_t"), ",") })
+end)
 -- bytea arrives in text format as "\x<hex>" and decodes to a blob.
 app.get("/bytea", function(req, res)
     local b = db.query("SELECT decode('00ff41', 'hex') AS b")[1].b
@@ -303,6 +311,17 @@ RESP_T6=$(curl -fsS "http://127.0.0.1:${PORT}/txn6" || echo FAIL)
 echo "txn6 response: $RESP_T6"
 echo "$RESP_T6" | grep -q '"aborted_commits_failed":3'  || { echo "::error a COMMIT spelling of an aborted transaction read as success"; fail=1; }
 echo "$RESP_T6" | grep -q '"async_begin_refused":true'  || { echo "::error BEGIN through db.async was not refused"; fail=1; }
+
+# Audit 9 L4: `hull migrate` names the database it could not open without
+# its password.
+MIG_OUT=$(./build/hull migrate -d "postgres://hull:wr0ngsecret@127.0.0.1:1/x" "$APPDIR" 2>&1 || true)
+echo "migrate open failure: $MIG_OUT"
+echo "$MIG_OUT" | grep -q 'wr0ngsecret'           && { echo "::error hull migrate printed the DSN password"; fail=1; }
+echo "$MIG_OUT" | grep -q 'postgres://127.0.0.1:1' || { echo "::error hull migrate did not name the database"; fail=1; }
+
+RESP_COLS=$(curl -fsS "http://127.0.0.1:${PORT}/cols" || echo FAIL)
+echo "cols response: $RESP_COLS"
+echo "$RESP_COLS" | grep -q '"cols":"a,b"'         || { echo "::error table_columns not scoped to current_schema()"; fail=1; }
 
 RESP_BYTEA=$(curl -fsS "http://127.0.0.1:${PORT}/bytea" || echo FAIL)
 echo "bytea response: $RESP_BYTEA"

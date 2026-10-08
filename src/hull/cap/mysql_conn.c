@@ -787,6 +787,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
         names[i][col.name_len] = '\0';
         fields[i].name = names[i];
         fields[i].type = col.type;
+        fields[i].flags = col.flags;
     }
 
     /* No CLIENT_DEPRECATE_EOF was advertised, so an EOF terminates the column
@@ -856,21 +857,40 @@ static int drain_defs(HlMyConn *conn, int n)
     return 0;
 }
 
-/* Decode one binary-protocol value at the cursor into @p out by column type. */
-static void decode_binary_value(HlMyCursor *rc, uint8_t type, HlMyVal *out)
+/* Decode one binary-protocol value at the cursor into @p out by column type.
+ * An UNSIGNED integer column is zero-extended (audit 9 M3: TINYINT UNSIGNED
+ * 200 read as -56); a BIGINT UNSIGNED above INT64_MAX has no integer form
+ * and is returned as its decimal text, as the text protocol does. */
+static void decode_binary_value(HlMyCursor *rc, uint8_t type, uint16_t flags,
+                                HlMyVal *out)
 {
+    int uns = (flags & HL_MY_FLAG_UNSIGNED) != 0;
     switch (type) {
-    case HL_MY_TYPE_TINY:
-        out->kind = HL_MY_VAL_INT; out->v.i = (int8_t)hl_my_get_u8(rc); return;
-    case HL_MY_TYPE_SHORT:
-        out->kind = HL_MY_VAL_INT; out->v.i = (int16_t)hl_my_get_u16(rc); return;
+    case HL_MY_TYPE_TINY: {
+        uint8_t v = hl_my_get_u8(rc);
+        out->kind = HL_MY_VAL_INT; out->v.i = uns ? (int64_t)v : (int8_t)v; return;
+    }
+    case HL_MY_TYPE_SHORT: {
+        uint16_t v = hl_my_get_u16(rc);
+        out->kind = HL_MY_VAL_INT; out->v.i = uns ? (int64_t)v : (int16_t)v; return;
+    }
     case HL_MY_TYPE_YEAR:
         out->kind = HL_MY_VAL_INT; out->v.i = (uint16_t)hl_my_get_u16(rc); return;
     case HL_MY_TYPE_LONG:
-    case HL_MY_TYPE_INT24:
-        out->kind = HL_MY_VAL_INT; out->v.i = (int32_t)hl_my_get_u32(rc); return;
-    case HL_MY_TYPE_LONGLONG:
-        out->kind = HL_MY_VAL_INT; out->v.i = (int64_t)hl_my_get_u64(rc); return;
+    case HL_MY_TYPE_INT24: {
+        uint32_t v = hl_my_get_u32(rc);
+        out->kind = HL_MY_VAL_INT; out->v.i = uns ? (int64_t)v : (int32_t)v; return;
+    }
+    case HL_MY_TYPE_LONGLONG: {
+        uint64_t v = hl_my_get_u64(rc);
+        if (uns && v > (uint64_t)INT64_MAX) {
+            snprintf(out->tbuf, sizeof out->tbuf, "%llu", (unsigned long long)v);
+            out->kind = HL_MY_VAL_STR;
+            out->v.s.ptr = out->tbuf; out->v.s.len = strlen(out->tbuf);
+            return;
+        }
+        out->kind = HL_MY_VAL_INT; out->v.i = (int64_t)v; return;
+    }
     case HL_MY_TYPE_FLOAT: {
         uint32_t bits = hl_my_get_u32(rc);
         float ff; memcpy(&ff, &bits, sizeof ff);
@@ -1118,6 +1138,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
         names[i][col.name_len] = '\0';
         fields[i].name = names[i];
         fields[i].type = col.type;
+        fields[i].flags = col.flags;
     }
 
     if (conn_next_frame(conn, &f) != 0) goto close_stmt;   /* EOF after col defs */
@@ -1151,7 +1172,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
             if (bitmap[bit >> 3] & (uint8_t)(1u << (bit & 7)))
                 vals[i].kind = HL_MY_VAL_NULL;
             else
-                decode_binary_value(&rc, fields[i].type, &vals[i]);
+                decode_binary_value(&rc, fields[i].type, fields[i].flags, &vals[i]);
         }
         if (hl_my_cursor_err(&rc)) { conn_set_err(conn, "malformed binary row"); goto close_stmt; }
         if (row_cb && !stop && row_cb(cb_ctx, vals, ncols) != 0)

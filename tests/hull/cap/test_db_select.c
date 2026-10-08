@@ -166,4 +166,23 @@ UTEST(db_select, feature_backend_composed)
     ASSERT_TRUE(err);
 }
 
+/* hl_db_dsn_redact keeps scheme + host only: no user, password (even one
+ * containing '@'), database or query parameter reaches a log line (audit 9
+ * L4). A scheme-less file path is printed as is. */
+UTEST(db_select, dsn_redact)
+{
+    char b[128];
+    hl_db_dsn_redact("postgres://hull:s3cret@db.local:5432/app?sslmode=require",
+                     b, sizeof b);
+    ASSERT_STREQ("postgres://db.local:5432", b);
+    hl_db_dsn_redact("mysql://u:p@ss@10.0.0.1/db", b, sizeof b);
+    ASSERT_STREQ("mysql://10.0.0.1", b);
+    hl_db_dsn_redact("postgres://db.local/app?password=s3cret", b, sizeof b);
+    ASSERT_STREQ("postgres://db.local", b);
+    hl_db_dsn_redact("data/app.db", b, sizeof b);
+    ASSERT_STREQ("data/app.db", b);
+    hl_db_dsn_redact(NULL, b, sizeof b);
+    ASSERT_STREQ("", b);
+}
+
 UTEST_MAIN()

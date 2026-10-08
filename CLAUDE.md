@@ -808,7 +808,12 @@ roadmap §2.9.)
   transaction back, and statements on a new connection would each commit alone,
   so calls refuse until a `ROLLBACK` (the batch wrapper's, or the app's own),
   which then succeeds. Covered by the `/reconnect` phase of `e2e_postgres` /
-  `e2e_mysql` (each kills its own session).
+  `e2e_mysql` (each kills its own session). A failed Postgres
+  `hl_pg_wait_notify` (the LISTEN wait) marks the connection broken the same
+  way (audit 9 L5).
+- **`table_columns` on Postgres** reads `information_schema.columns` of
+  `current_schema()` only: a same-named table in another schema the role can
+  see no longer adds its columns (audit 9 L3).
 
 **MySQL/MariaDB specifics** (`HL_ENABLE_MYSQL=1`). One backend serves both
 `mysql://` and `mariadb://` (MariaDB is a MySQL fork on the same wire
@@ -835,7 +840,12 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   (`my_sql_commits_implicitly`) follows MySQL 8's implicit-commit list and
   reads past the first keyword: `CREATE` / `DROP TEMPORARY TABLE` and
   `LOAD DATA` commit nothing, so they are refused, not resumed (audit 8 L2);
-  an unrecognised statement is always refused.
+  an unrecognised statement is always refused. A statement with an
+  executable comment (slash-star-bang, MariaDB's slash-star-M-bang - MySQL
+  runs it, the shared `cap/db_sql_kw.h` reader skips it) or a `#` comment
+  (MySQL skips it, the reader does not) is unrecognised in every MySQL
+  classifier: refused, never resumed, and a transaction it ended is reported
+  lost (audit 9 L1).
 - **Implicit commits:** MySQL commits the open transaction around DDL, and
   before a DDL statement that then fails. An ERR carries no status flags, so
   after a failed statement inside a transaction (and after the `CREATE INDEX`
@@ -860,7 +870,10 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   (`COM_STMT_PREPARE` / `EXECUTE` / `CLOSE`) so values never touch the SQL text
   (injection impossible). Binary rows decode by column type to `HlValue`
   (int / double / borrowed text; `DATE`/`DATETIME`/`TIMESTAMP`/`TIME` are
-  formatted to ISO-8601-ish strings). A Lua/JS params array with trailing nils
+  formatted to ISO-8601-ish strings). An `UNSIGNED` integer column (the
+  column definition's flag) is zero-extended, not sign-extended (audit 9 M3:
+  `TINYINT UNSIGNED` 200 read as -56); a `BIGINT UNSIGNED` above `INT64_MAX`
+  arrives as its decimal text, in both protocols. A Lua/JS params array with trailing nils
   arrives short (Lua's `#` drops the tail), so `COM_STMT_EXECUTE` pads to the
   statement's declared `num_params`, binding the tail NULL, matching
   SQLite/Postgres.
@@ -870,7 +883,8 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   `information_schema.columns` scoped to `DATABASE()`; identifier quoting is
   backtick (`` ` ``). MySQL 8 has no `CREATE INDEX ... IF NOT EXISTS`, so the
   backend transparently rewrites it to a plain `CREATE INDEX` and treats a
-  duplicate-index error as success (the stdlib's idempotent index DDL works
+  duplicate-index error (by its code, `ER_DUP_KEYNAME` 1061, never its
+  message text - audit 9 L2) as success (the stdlib's idempotent index DDL works
   unchanged). Multi-statement migration files run as one `COM_QUERY`
   (`CLIENT_MULTI_STATEMENTS`), draining every result set.
 - **Portable stdlib DDL:** MySQL rejects a `TEXT`/`BLOB` primary key or index
@@ -1525,7 +1539,7 @@ SQL migrations provide versioned schema management for SQLite databases.
 | Auto-run (test) | `test.c` | Runs migrations against `:memory:` database |
 | Embedding | `build.lua` | Embeds `migrations/*.sql` in built binaries |
 
-**Convention:** `migrations/*.sql` files numbered `001_`, `002_`, etc. Each runs in `BEGIN IMMEDIATE` / `COMMIT`. The `_hull_migrations` table tracks applied migrations (name + checksum + timestamp; the checksum column is added to an older table on first use and backfilled). An applied migration whose SQL has changed is NOT re-run - startup logs a loud WARN naming it (put schema changes in a new migration). Opt out with `--no-migrate`. A built binary runs only the migrations embedded in it: the `<app_dir>/migrations` filesystem fallback (and the static-file one) is for development, when the app VFS is empty, so SQL placed beside a built binary never runs.
+**Convention:** `migrations/*.sql` files numbered `001_`, `002_`, etc. Each runs in `BEGIN IMMEDIATE` / `COMMIT`. The `_hull_migrations` table tracks applied migrations (name + checksum + timestamp; the checksum column is added to an older table on first use and backfilled). An applied migration whose SQL has changed is NOT re-run - startup logs a loud WARN naming it (put schema changes in a new migration). Opt out with `--no-migrate`. Migration SQL is app SQL: a file that names a `_hull_*` table (or uses a Postgres `U&"..."` identifier) is refused by the same `hl_cap_db_check_namespace` check `conn.exec` applies, and the run fails (audit 9 M1); Hull's own tracking statements do not go through it. Migrations are not app runs: they are not charged to an instruction budget (`hl_db_budget_swap(NULL, NULL)`). `hull migrate` names a database it cannot open by scheme and host only (`hl_db_dsn_redact`), never with the DSN's password (audit 9 L4). A built binary runs only the migrations embedded in it: the `<app_dir>/migrations` filesystem fallback (and the static-file one) is for development, when the app VFS is empty, so SQL placed beside a built binary never runs.
 
 **Commands:**
 - `hull migrate [app_dir]`. Run pending migrations
@@ -1755,7 +1769,8 @@ tracked follow-up, and would add protection rather than only honesty.
 - **Path traversal blocked:** `hl_cap_fs_validate()` rejects absolute paths, `..` components, symlink escapes via `realpath()` ancestor check. Plus kernel unveil.
 - **Host allowlist enforced:** `hl_cap_http_request()` validates target host against manifest's `hosts` array. Since §2.8 the check delegates to the shared matcher `hl_host_match_any_env` (`src/hull/utils/host_match.c`), so `hosts` entries may be an exact hostname (case-insensitive), `"*"` (any), a `"*.suffix"` subdomain glob, a CIDR (matches only IP-literal hosts, never a DNS name), or a `"$VAR"` / `"${VAR}"` env reference resolved at match time. The same matcher gates `ws.connect` (shares the http config) and `smtp.send` (`hl_smtp_check_host`), and `databases.dynamic.hosts` - one convention across every outbound host allowlist.
 - **Env allowlist enforced:** `hl_cap_env_get()` checks against manifest's `env` array (max 32 entries). A `$VAR` reference elsewhere in the manifest must name a variable in `env` or `secrets` (checked at load by `hl_manifest_check_env_refs`).
-- **SQL cannot reach other files (SQLite):** `hl_cap_db_init` installs an authorizer that refuses `ATTACH` of any real file (and so `VACUUM INTO`, which SQLite runs as an internal ATTACH), `writable_schema` and the `*_store_directory` pragmas, plus `SQLITE_DBCONFIG_DEFENSIVE`.
+- **SQL cannot reach other files (SQLite):** `hl_cap_db_init` installs an authorizer that refuses `ATTACH` of any real file (and so `VACUUM INTO`, which SQLite runs as an internal ATTACH), `writable_schema` and the `*_store_directory` pragmas, plus `SQLITE_DBCONFIG_DEFENSIVE` (`hl_cap_db_guard`, which the read-only `hull agent db query` / MCP `hull_db_query` connection gets too; that query also refuses any statement `sqlite3_stmt_readonly` does not call read-only, and transaction control, since without `-d` it runs on the app's own connection - audit 9 M2).
+- **SQL is charged to the run's budget (SQLite):** `hl_cap_db_guard` installs a progress handler that charges `HL_DB_PROGRESS_OPS` (1000) units per call to the budget bound on the calling thread (`include/hull/cap/db_budget.h`, `cap/db_common.c`) and interrupts the statement once it is exhausted - a recursive CTE in one `conn.query` held the event loop for good (audit 9 H4). Each runtime binds its budget when it arms a run (`hl_lua_budget_arm`, `hl_js_budget_arm`; a worker dispatch for its duration) and unbinds it when the VM goes; a tripped query raises the limit (`hl_lua_raise_copy`, `hl_js_budget_throw`), never a SQL error to catch. A `db.async` op has a budget of its own (`HlDbOpBudget`, the submitting VM's limit). No binding never interrupts: migrations and agent queries swap it out. The same guard caps `SQLITE_LIMIT_LENGTH` at the largest VM heap a runtime reported (`hl_db_note_heap_limit`), so `randomblob` / `zeroblob` cannot build a value of up to 1 GB outside it.
 - **No shell invocation:** Tool mode uses `hl_tool_spawn()` with compiler allowlist. No `system()`/`popen()`. Arguments that make a driver run another program are refused (`-wrapper`, `-specs=`, `--ld-path=`, `-fuse-ld=/path`, plugins, `-Wp,` (its pieces reach cc1 unchecked: `-Wp,-load,x.so`), `@file`, clang `--config*` files, `--gcc-toolchain`, and `-B<dir>` unless the dir is a `$PATH` / `~/.hull/tools` entry holding the lld Hull resolved); a spawn may set only `ZIG_*_CACHE_DIR`, `TMPDIR`/`TMP`/`TEMP` and `SOURCE_DATE_EPOCH`.
 - **Key material zeroed:** `hull_secure_zero()` (volatile memset) scrubs crypto material from stack buffers.
 - **Instruction limits:** Both Lua and JS runtimes enforce per-request instruction limits (default 100M). Lua uses `lua_sethook(LUA_MASKCOUNT)`, JS uses `JS_SetInterruptHandler`. Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var. Lua's budget (`runtime/lua/budget.c`) is per VM and per **uninterrupted run**: every entry (a request, a middleware, a timer, an async resume, `app.main`) arms the whole limit again. A trip is sticky until then: `pcall` / `xpcall` / `coroutine.resume` / `coroutine.wrap` re-raise it, so app code cannot catch the limit and keep looping. Work one Lua instruction does on a large operand counts too (Lua HULL PATCH 0004, docs/lua_patches.md): allocation (1 unit / 64 bytes, `luaL_Buffer` growth included), string compares (the bytes compared) and long-string table keys, hash-chain walks (integer / float keys hash with no seed, so a script could put every key on one chain), `table.insert` / `remove` / `move` / `sort` / `concat` / `unpack` loops, `string.byte` / `rep` / `pack` / `unpack`, `utf8.len` / `offset` / `codepoint`, `next` over emptied slots, vararg and result copies, string-to-number coercion, the collector's work (incremental steps, the emergency collection a failed allocation runs, mode switches), and pattern matching including a plain `find` miss; a coroutine's run is charged to its resumer when it returns or yields, so short coroutines are not free - so the limit bounds a run's wall time, not only its instruction count. Hull's bindings charge their own work: `hull.crypto` digests / ciphers per byte, key derivations (`hash_password`, `verify_password` - whose iteration count comes from the stored string - and `bcrypt_pbkdf`) per round BEFORE they run, `res:header` / `res:json` / `html` / `text` the bytes they copy (response headers are capped at `HL_RES_HEADER_BYTES_MAX`, 64 KiB, since Keel's header buffer is outside the script heap). A `hull.async` task that trips the limit is still finished by the runtime (`hull._spawn`'s failure hook, docs/task_join_design.md), so its waiters wake. QuickJS polls its interrupt handler once per 10000 countdown steps (calls and backward jumps, and regexp backtracking steps), so each poll is charged `HL_JS_INTERRUPT_WEIGHT` (10000, `runtime/js/internal.h`) - counted one per poll, the limit used to be ~10^4 times weaker than its value. The JS budget mirrors Lua's: per run, re-armed by `hl_js_budget_arm` at every entry (dispatch, middleware, timer, ws / SSE / ws-client callback, async and multipart resume, `app.main`, a `hull test` case, a detached `hull:_task` task - which puts back the budget and active state of a run it fires inside, such as a `hull test` case pumping the loop, audit 9 L1; each worker dispatch has its own), and a trip is sticky (`HlJS.budget_tripped`) - QuickJS HULL PATCH 0003 polls again at the very next step, so an async body or promise job that turned the interrupt into a rejection cannot let its caller run on. A binding whose callback was interrupted (SQL UDF, `compute.stream`) re-raises it uncatchable (`hl_js_budget_throw`), `hl_js_run_jobs` discards a tripped run's jobs, and a tripped run whose promise therefore never settles is completed as failed (`HlJsRunOnce.tripped`). Work one JS call does that no poll sees is charged by the binding BEFORE it does it (`hl_js_budget_charge`, which trips and raises the uncatchable interrupt when over): crypto digests / MACs / ciphers / signatures at 1 unit per 8 bytes (as Lua's `crypto_charge`), and PBKDF2 (`hashPassword` / `verifyPassword`, whose count comes from the stored string, up to 10M) at iterations × blocks × 128 bytes - audit 9. Hull's own init code runs before the limit applies.
