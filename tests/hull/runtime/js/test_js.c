@@ -7248,7 +7248,7 @@ JS_WORKER_CASE(a_nested_batch_is_a_savepoint,
 static void a10_worker_db_limited(void)
 {
     a7_worker_db();
-    js.max_instructions = 20000000;
+    js.max_instructions = 2000000;   /* small: three runaway queries must fit the harness wait under MSan */
     hl_js_budget_arm(&js);
 }
 
