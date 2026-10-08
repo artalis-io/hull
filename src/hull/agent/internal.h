@@ -34,6 +34,15 @@ int hl_agent_tcp_probe(int port, int timeout_ms);
  * Returns a sqlite3 handle the caller must close, or NULL on failure.
  */
 struct sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path);
+
+struct sqlite3_stmt;
+/* Prepare @p sql (@p len bytes, -1 = to its NUL) as a READ-ONLY agent query:
+ * a statement SQLite does not call read-only, and transaction control however
+ * it is spelled, are refused (audit 9 M2, audit 10). 0 with *out set, or -1
+ * with *err (a static or sqlite3_errmsg string). Shared by `hull agent db
+ * query` and the named queries of `hull agent sql named`. */
+int hl_agent_prepare_readonly(struct sqlite3 *db, const char *sql, int len,
+                              struct sqlite3_stmt **out, const char **err);
 #endif
 
 /*

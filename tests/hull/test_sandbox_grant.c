@@ -198,4 +198,19 @@ UTEST(sandbox_grant, refuses_escapes)
     EXPECT_EQ(hl_sandbox_resolve_grant("/srv/app", "", out, sizeof out, 0), -1);
 }
 
+/* Audit 10: the app.main runner handed the raw -d DSN to the sandbox, so a
+ * network DSN - password included - was unveiled and logged as a path. Both
+ * entry points map it to the file it names, or NULL. */
+UTEST(sandbox_grant, db_path_is_the_file_never_a_network_dsn)
+{
+    EXPECT_TRUE(hl_sandbox_db_path("postgres://u:s3cret@db/app") == NULL);
+    EXPECT_TRUE(hl_sandbox_db_path("MySQL://u:s3cret@db/app") == NULL);
+    EXPECT_TRUE(hl_sandbox_db_path("mariadb://u:p@db/app") == NULL);
+    EXPECT_TRUE(hl_sandbox_db_path("postgresql://db/app") == NULL);
+    EXPECT_TRUE(hl_sandbox_db_path("sqlite://:memory:") == NULL);
+    EXPECT_TRUE(hl_sandbox_db_path(NULL) == NULL);
+    EXPECT_STREQ("/var/app.db", hl_sandbox_db_path("sqlite:///var/app.db"));
+    EXPECT_STREQ("data.db", hl_sandbox_db_path("data.db"));
+}
+
 UTEST_MAIN();

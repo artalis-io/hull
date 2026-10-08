@@ -79,6 +79,7 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
      * the generic string is all anyone got, for a `:memory:` DSN that cannot
      * be contended. Two distinct steps can fail, and they mean different
      * things, so they are reported separately rather than merged. */
+    hl_cap_db_sqlite_setup();   /* the charged allocator, before any open */
     int rc = sqlite3_open(dsn, &s->db);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "hull: sqlite open failed for '%s': %s (code %d)\n",

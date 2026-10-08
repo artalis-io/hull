@@ -23,6 +23,7 @@
 #include "hull/app_context.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_budget.h"
 #include "hull/entry.h"
 #include "hull/migrate.h"
 #include "hull/vfs.h"
@@ -259,8 +260,8 @@ static int schema_diff_impl(sqlite3 *db, const HlVfs *vfs, ShJsonBuf *out)
     return 0;
 }
 
-int hl_agent_schema_diff_ctx(HlAppContext *ctx, const char *db_path,
-                              ShJsonBuf *out)
+static int schema_diff_ctx(HlAppContext *ctx, const char *db_path,
+                           ShJsonBuf *out)
 {
     const HlVfs *vfs = hl_app_context_app_vfs(ctx);
     if (!vfs) return hl_agent_write_error(out, "no vfs");
@@ -275,8 +276,19 @@ int hl_agent_schema_diff_ctx(HlAppContext *ctx, const char *db_path,
     return schema_diff_impl(hl_app_context_db(ctx), vfs, out);
 }
 
-int hl_agent_schema_diff(const char *app_dir, const char *db_path,
-                         ShJsonBuf *out)
+/* Not an app run: never charged to, or stopped by, a budget a run left
+ * bound on this thread (audit 10; cap/db_budget.h). */
+int hl_agent_schema_diff_ctx(HlAppContext *ctx, const char *db_path,
+                              ShJsonBuf *out)
+{
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+    int rc = schema_diff_ctx(ctx, db_path, out);
+    hl_db_budget_restore(budget);
+    return rc;
+}
+
+static int schema_diff(const char *app_dir, const char *db_path,
+                       ShJsonBuf *out)
 {
     if (!app_dir) app_dir = ".";
     sqlite3 *db = hl_agent_open_app_db(app_dir, db_path);
@@ -288,6 +300,15 @@ int hl_agent_schema_diff(const char *app_dir, const char *db_path,
 
     int rc = schema_diff_impl(db, &vfs, out);
     sqlite3_close(db);
+    return rc;
+}
+
+int hl_agent_schema_diff(const char *app_dir, const char *db_path,
+                         ShJsonBuf *out)
+{
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+    int rc = schema_diff(app_dir, db_path, out);
+    hl_db_budget_restore(budget);
     return rc;
 }
 

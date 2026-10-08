@@ -12,6 +12,7 @@
 #define HL_CAP_DB_BACKEND_H
 
 #include "hull/cap/types.h"
+#include "hull/cap/db_budget.h"   /* hl_db_batch_leave: unbound cleanup */
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -408,7 +409,10 @@ const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err);
 /*
  * Write a loggable form of @p dsn to @p out: "<scheme>://<host>[:port]" for a
  * DSN with a scheme (user, password, database and every query parameter -
- * a "?password=" too - dropped), the DSN itself for a scheme-less file path.
+ * a "?password=" too - dropped), "<scheme>://(redacted)" when an '@' follows
+ * the authority (a password holding an unencoded '/', '?' or '#' cannot be
+ * told from an '@' in the path or query), the DSN itself for a scheme-less
+ * file path.
  * For error messages: a network DSN carries the password, often a resolved
  * "$VAR" secret. Returns snprintf's length.
  */
@@ -517,8 +521,16 @@ static inline int hl_db_batch_leave(HlDbHandle *h, int ok)
     if (!hl_db_batch_savepoints_(h)) return 0;
     char sql[64];
     if (!ok) {
+        /* Cleanup for a fn that failed - perhaps by exhausting the run's
+         * budget, which would refuse these statements' allocations
+         * (cap/db_budget.h): run them unbound (audit 10 H3). */
+        HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
         hl_db_batch_spname_(sql, sizeof sql, "ROLLBACK TO SAVEPOINT", level);
         (void)hl_db_exec(h, sql, NULL, 0);
+        hl_db_batch_spname_(sql, sizeof sql, "RELEASE SAVEPOINT", level);
+        int rc = hl_db_exec(h, sql, NULL, 0) < 0 ? -1 : 0;
+        hl_db_budget_restore(budget);
+        return rc;
     }
     hl_db_batch_spname_(sql, sizeof sql, "RELEASE SAVEPOINT", level);
     return hl_db_exec(h, sql, NULL, 0) < 0 ? -1 : 0;

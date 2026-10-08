@@ -185,4 +185,27 @@ UTEST(db_select, dsn_redact)
     ASSERT_STREQ("", b);
 }
 
+/* Audit 10: a password holding an unencoded '#', '/' or '?' ended the
+ * "authority" inside it, and its first part was printed as the host. When an
+ * '@' follows the authority the DSN is ambiguous, so only the scheme is
+ * printed - never any part of the password. */
+UTEST(db_select, dsn_redact_ambiguous_userinfo)
+{
+    char b[128];
+    static const char *const dsns[] = {
+        "postgres://hull:s3c#ret@db.local/app",
+        "postgres://hull:s3c/ret@db.local/app",
+        "mysql://u:pa?ss@10.0.0.1/db",
+        "postgres://db.local/app?password=x@y",
+    };
+    for (size_t i = 0; i < sizeof dsns / sizeof dsns[0]; i++) {
+        hl_db_dsn_redact(dsns[i], b, sizeof b);
+        EXPECT_TRUE(strcmp(b, "postgres://(redacted)") == 0 ||
+                    strcmp(b, "mysql://(redacted)") == 0);
+        EXPECT_TRUE(strstr(b, "://(redacted)") != NULL);
+    }
+    hl_db_dsn_redact("postgres://h:p@db.local/app#frag", b, sizeof b);
+    ASSERT_STREQ("postgres://db.local", b);
+}
+
 UTEST_MAIN()

@@ -34,6 +34,8 @@ sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
     sqlite3 *db = NULL;
     char default_path[PATH_MAX];
 
+    hl_cap_db_sqlite_setup();   /* the charged allocator, before any open */
+
     if (!db_path) {
         snprintf(default_path, sizeof(default_path), "%s/data.db", app_dir);
         if (access(default_path, F_OK) == 0)

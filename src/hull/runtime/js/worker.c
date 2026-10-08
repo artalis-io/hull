@@ -126,6 +126,15 @@ static int js_worker_db_charge(void *ud, int64_t units)
 }
 #endif
 
+#ifdef HL_ENABLE_DB
+int hl_js_worker_budget_tripped(void)
+{
+    pthread_once(&js_worker_once, js_worker_key_create);
+    HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)pthread_getspecific(js_worker_key);
+    return wctx && wctx->tripped;
+}
+#endif
+
 static HlJsWorkerCtx *get_js_worker_rt(void)
 {
     pthread_once(&js_worker_once, js_worker_key_create);

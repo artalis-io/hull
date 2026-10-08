@@ -116,6 +116,11 @@ typedef struct HlSandboxPolicy {
  */
 int hl_sandbox_dsn_is_network(const char *dsn);
 
+/* The local file a database DSN names, for the sandbox to gate - NULL for an
+ * in-memory or network database (never the DSN itself, which may carry a
+ * password). Points into @p dsn. */
+const char *hl_sandbox_db_path(const char *dsn);
+
 /**
  * True if the manifest declares a connection that may dial a network database
  * or KV backend: a named connection with a network (or env-ref) DSN, or a

@@ -1102,6 +1102,62 @@ UTEST(mysql_backend, executable_and_hash_comments_are_unrecognised)
     EXPECT_EQ((int)HL_SQL_TXN_NONE, (int)my_sql_txn_kind("UPDATE a SET x = 1"));
 }
 
+/* Audit 10: the connection runs multi-statement texts, and the classifiers
+ * read the first statement only - only ONE statement is ever taken for an
+ * implicit commit (and resumed after). */
+UTEST(mysql_backend, only_a_single_statement_commits_implicitly)
+{
+    static const char *const single[] = {
+        "CREATE TABLE t (x INT)", "CREATE TABLE t (x INT);",
+        "CREATE TABLE t (x INT) ; -- done\n", "CREATE TABLE t (x INT); /* c */",
+        "CREATE TABLE t (c TEXT DEFAULT ';')", "CREATE TABLE `a;b` (x INT)",
+        "CREATE TABLE t (c TEXT DEFAULT 'it''s')",
+    };
+    static const char *const not_single[] = {
+        "CREATE TABLE t (x INT); COMMIT", "CREATE TABLE t (x INT);COMMIT;",
+        "SELECT 1; CREATE TABLE t (x INT)",
+        "CREATE TABLE t (c TEXT DEFAULT 'x\\'); COMMIT; -- ')",
+        "CREATE TABLE t (x INT) /* unterminated", "CREATE TABLE t (c TEXT DEFAULT 'x)",
+        "CREATE TABLE t (x INT) --x\n", "CREATE TABLE t (x INT); # c",
+    };
+    for (size_t i = 0; i < sizeof single / sizeof single[0]; i++)
+        EXPECT_EQ_MSG(1, my_sql_commits_implicitly(single[i]), single[i]);
+    for (size_t i = 0; i < sizeof not_single / sizeof not_single[0]; i++)
+        EXPECT_EQ_MSG(0, my_sql_commits_implicitly(not_single[i]), not_single[i]);
+}
+
+/* MySQL block comments do not nest: the first star-slash ends one, so the
+ * reader must not see this COMMIT as commented out (audit 10). */
+UTEST(mysql_backend, block_comments_do_not_nest)
+{
+    EXPECT_EQ((int)HL_SQL_TXN_COMMIT, (int)my_sql_txn_kind("/* /* */ COMMIT"));
+    EXPECT_EQ((int)HL_SQL_TXN_ROLLBACK, (int)my_sql_txn_kind("/* /* */ ROLLBACK"));
+    EXPECT_EQ((int)HL_SQL_TXN_NONE, (int)hl_sql_txn_kind("/* /* */ COMMIT */"));
+    EXPECT_EQ(1, my_sql_commits_implicitly("/* /* */ CREATE TABLE t (x INT)"));
+}
+
+/* "SELECT 1; COMMIT" ended the batch's transaction by its second statement:
+ * no transaction is opened under it (the batch reports its loss). */
+UTEST(mysql_backend, multi_statement_commit_is_not_resumed)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    put_ok_more(&s, 1, 0x0002);                        /* the text */
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* a resume */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+    EXPECT_LE(0, mysql_exec(&h, "CREATE TABLE t (x INT); COMMIT", NULL, 0));
+    EXPECT_FALSE(my_in_trans(&h));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 /* An executable-comment COMMIT ends the batch's transaction: none is opened under
  * it (the batch reports its transaction lost instead). */
 UTEST(mysql_backend, executable_comment_commit_is_not_resumed)

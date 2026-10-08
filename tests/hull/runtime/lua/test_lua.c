@@ -2988,6 +2988,27 @@ UTEST(db_audit9, lua_a_runaway_query_hits_the_instruction_limit)
     cleanup_lua_caps();
 }
 
+/* Audit 10 H3: one SQLite opcode can allocate a lot (randomblob, replace,
+ * a sort) and the progress handler counted it as one instruction - a loop
+ * of such queries ran ~free. Allocations are charged by size. */
+UTEST(db_audit10, lua_sql_allocations_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 2000000);
+    int rc = luaL_dostring(lua_rt.L,
+        "local ok, e = pcall(function() for i = 1, 5000 do "
+        "  db.query('SELECT length(randomblob(200000)) AS n') end end) "
+        "return 'done: ' .. tostring(e)");
+    EXPECT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    EXPECT_NE_MSG(strstr(err ? err : "", "instruction limit"), NULL, err ? err : "");
+    lua_settop(lua_rt.L, 0);
+    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 2000000);
+    EXPECT_EQ(eval_int("db.query('SELECT length(randomblob(1000)) AS n')[1].n"), 1000);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, totp_rekey_batch_helper)
 {
     init_lua_with_caps();

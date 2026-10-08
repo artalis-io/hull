@@ -22,6 +22,15 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* A db call that failed in a dispatch over its budget failed BECAUSE of it
+ * (the statement was interrupted, an allocation refused, cap/db_budget.h):
+ * throw the uncatchable interrupt, as the event loop's bindings do - an
+ * InternalError here could be caught by the dispatch's own try/catch, which
+ * then went on (audit 10). */
+#define WORKER_DB_THROW(ctx, ...)                                   \
+    (hl_js_worker_budget_tripped() ? hl_js_budget_throw(ctx)         \
+                                   : JS_ThrowInternalError((ctx), __VA_ARGS__))
+
 /* ── Param marshalling (JS array → HlValue[]) ───────────────────── */
 
 /* Marshal a JS array at @p arr into a malloc'd HlValue[]. String values
@@ -202,7 +211,7 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
     HlDbHandle *h = hl_worker_db_handle_checked(sql, &err);
     if (!h) {
         JS_FreeCString(ctx, sql);
-        return JS_ThrowInternalError(ctx, "%s", err ? err : "worker db");
+        return WORKER_DB_THROW(ctx, "%s", err ? err : "worker db");
     }
 
     HlValue *params = NULL;
@@ -224,7 +233,7 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
 
     if (rc != 0) {
         JS_FreeValue(ctx, rows);
-        return JS_ThrowInternalError(ctx, "query: %s", hl_db_errmsg(h));
+        return WORKER_DB_THROW(ctx, "query: %s", hl_db_errmsg(h));
     }
     return rows;
 }
@@ -246,7 +255,7 @@ static JSValue worker_js_db_exec(JSContext *ctx, JSValueConst this_val,
     HlDbHandle *h = hl_worker_db_handle_checked(sql, &err);
     if (!h) {
         JS_FreeCString(ctx, sql);
-        return JS_ThrowInternalError(ctx, "%s", err ? err : "worker db");
+        return WORKER_DB_THROW(ctx, "%s", err ? err : "worker db");
     }
 
     HlValue *params = NULL;
@@ -265,7 +274,7 @@ static JSValue worker_js_db_exec(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, sql);
 
     if (rc < 0)
-        return JS_ThrowInternalError(ctx, "exec: %s", hl_db_errmsg(h));
+        return WORKER_DB_THROW(ctx, "exec: %s", hl_db_errmsg(h));
 
     return JS_NewInt32(ctx, rc);
 }
@@ -303,12 +312,18 @@ static JSValue worker_js_db_batch(JSContext *ctx, JSValueConst this_val,
      * c_db M2). h is the thread's default connection, which fn cannot
      * close, so it stays valid across the call. */
     if (hl_db_batch_enter(h) != 0)
-        return JS_ThrowInternalError(ctx, "BEGIN failed: %s", hl_db_errmsg(h));
+        return WORKER_DB_THROW(ctx, "BEGIN failed: %s", hl_db_errmsg(h));
 
     JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
     if (JS_IsException(result)) {
         (void)hl_db_batch_leave(h, 0);
+        /* fn's own error, unless the dispatch is over its budget: then the
+         * interrupt, whatever fn's catch turned it into. */
+        if (hl_js_worker_budget_tripped()) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            return hl_js_budget_throw(ctx);
+        }
         return JS_EXCEPTION;
     }
     int thenable = hl_js_is_thenable(ctx, result);
@@ -324,7 +339,7 @@ static JSValue worker_js_db_batch(JSContext *ctx, JSValueConst this_val,
 
     if (hl_db_batch_leave(h, 1) != 0) {
         JS_FreeValue(ctx, result);
-        return JS_ThrowInternalError(ctx, "COMMIT failed: %s", hl_db_errmsg(h));
+        return WORKER_DB_THROW(ctx, "COMMIT failed: %s", hl_db_errmsg(h));
     }
 
     return result;

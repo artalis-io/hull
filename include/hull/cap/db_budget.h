@@ -29,8 +29,18 @@
 #include <stdint.h>
 
 /* SQLite virtual-machine instructions between progress-handler calls; each
- * call charges this many units (one SQLite instruction ~ one script one). */
-#define HL_DB_PROGRESS_OPS 1000
+ * call charges this many units (one SQLite instruction ~ one script one).
+ * Small, so a tripped statement stops within a few opcodes (audit 10 H3). */
+#define HL_DB_PROGRESS_OPS 100
+
+/* One opcode can do unbounded work off the VM heap - randomblob, replace,
+ * printf, a sorter run, temp b-trees under temp_store=MEMORY - which the
+ * progress handler sees as one instruction. So every allocation SQLite makes
+ * is charged too, one unit per HL_DB_ALLOC_UNIT_BYTES (rounded up), through
+ * the SQLITE_CONFIG_MALLOC wrapper hl_cap_db_sqlite_setup installs; once the
+ * bound budget is exhausted those allocations fail, so the statement stops at
+ * once (audit 10 H3). */
+#define HL_DB_ALLOC_UNIT_BYTES 64
 
 /* Charge @p units to the budget @p ud; non-zero = exhausted (and sticky):
  * interrupt the statement. */

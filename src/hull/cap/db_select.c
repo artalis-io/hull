@@ -220,6 +220,14 @@ size_t hl_db_dsn_redact(const char *dsn, char *out, size_t outsz)
      * follows its last '@' (the password may itself contain '@'). */
     const char *auth = sep + 3;
     size_t alen = strcspn(auth, "/?#");
+    /* An '@' after that point: either the password holds an unencoded '/',
+     * '?' or '#' (so the "authority" above ended inside it and printing it
+     * printed the password's start), or the path / query holds an '@' (a
+     * "?password=a@b" printed what followed). The two cannot be told apart,
+     * so print the scheme alone (audit 10). */
+    if (strchr(auth + alen, '@'))
+        return (size_t)snprintf(out, outsz, "%.*s://(redacted)",
+                                (int)(sep - dsn), dsn);
     const char *host = auth;
     for (size_t i = 0; i < alen; i++)
         if (auth[i] == '@') host = auth + i + 1;

@@ -26,6 +26,7 @@ static HlStmtCache test_cache;
 
 static void setup_db(void)
 {
+    hl_cap_db_sqlite_setup();   /* as every Hull open path does */
     sqlite3_open(":memory:", &test_db);
     hl_cap_db_init(test_db);
     hl_stmt_cache_init(&test_cache, test_db, NULL);
@@ -461,11 +462,110 @@ UTEST(hl_cap_db, value_length_is_capped_at_the_heap_limit)
 UTEST(hl_cap_db, guard_alone_refuses_attach_and_vacuum_into)
 {
     sqlite3 *db = NULL;
+    hl_cap_db_sqlite_setup();
     ASSERT_EQ(SQLITE_OK, sqlite3_open(":memory:", &db));
     ASSERT_EQ(0, hl_cap_db_guard(db));
     EXPECT_NE(SQLITE_OK, sqlite3_exec(db, "ATTACH 'other.db' AS o", NULL, NULL, NULL));
     EXPECT_NE(SQLITE_OK, sqlite3_exec(db, "VACUUM INTO 'copy.db'", NULL, NULL, NULL));
     sqlite3_close(db);
+}
+
+/* ── Audit 10 H3: SQLite's allocations are charged too ───────────────── */
+
+/* randomblob(N) is one opcode however large N is: the progress handler saw
+ * one instruction. Its allocation is charged by size, and once the budget is
+ * gone the allocation fails, so the statement stops at once. */
+UTEST(hl_cap_db, a_large_allocation_is_charged_and_stops_the_statement)
+{
+    setup_db();
+    HlDbOpBudget b = { 5000, 0, 0 };   /* ~320 KB of allocations */
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    int64_t n = 0;
+    int rc = hl_cap_db_query(&test_cache, "SELECT length(randomblob(600000))",
+                             NULL, 0, count_cb, &n, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_NE(0, rc);
+    EXPECT_EQ(1, b.tripped);
+    EXPECT_NE(600000, (int)n);
+    teardown_db();
+}
+
+UTEST(hl_cap_db, allocations_are_charged_by_size)
+{
+    setup_db();
+    HlDbOpBudget b = { 100000000, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    int64_t n = 0;
+    int rc = hl_cap_db_query(&test_cache, "SELECT length(randomblob(640000))",
+                             NULL, 0, count_cb, &n, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(640000, (int)n);
+    EXPECT_GE(b.used, (int64_t)(640000 / HL_DB_ALLOC_UNIT_BYTES));
+    EXPECT_EQ(0, b.tripped);
+    teardown_db();
+}
+
+/* A tripped budget refuses allocations - but not the rollback Hull runs on
+ * the run's behalf (a batch whose fn hit the limit, the stale-txn guard). */
+UTEST(hl_cap_db, rollback_runs_after_the_budget_tripped)
+{
+    setup_db();
+    ASSERT_EQ(0, hl_cap_db_begin(test_db));
+    ASSERT_EQ(0, sqlite3_exec(test_db, "INSERT INTO users (name) VALUES ('a')",
+                              NULL, NULL, NULL));
+    HlDbOpBudget b = { 1, 0, 1 };   /* tripped */
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    EXPECT_NE(SQLITE_OK, sqlite3_exec(test_db, "SELECT length(randomblob(100000))",
+                                      NULL, NULL, NULL));
+    EXPECT_EQ(0, hl_cap_db_rollback(test_db));
+    hl_db_budget_restore(prev);
+    EXPECT_NE(0, sqlite3_get_autocommit(test_db));
+    int64_t n = -1;
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache, "SELECT count(*) FROM users",
+                                 NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(0, (int)n);
+    teardown_db();
+}
+
+/* The pragmas that set how much memory or how many threads SQLite uses are
+ * refused to SQL; reading them is not. */
+UTEST(hl_cap_db, memory_pragmas_cannot_be_set)
+{
+    setup_db();
+    static const char *const refused[] = {
+        "PRAGMA cache_size=-1000000", "PRAGMA main.cache_size = 100000",
+        "PRAGMA hard_heap_limit=1", "PRAGMA soft_heap_limit=0",
+        "PRAGMA threads=4", "PRAGMA temp_store=FILE", "PRAGMA cache_spill=0",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        EXPECT_NE(SQLITE_OK, sqlite3_exec(test_db, refused[i], NULL, NULL, NULL));
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "PRAGMA cache_size", NULL, NULL, NULL));
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "PRAGMA hard_heap_limit", NULL, NULL, NULL));
+    teardown_db();
+}
+
+/* hl_cap_db_refuse_txn_control: the agent query's gate, at prepare time, so a
+ * comment the text reader nests (SQLite does not) cannot hide a BEGIN. */
+UTEST(hl_cap_db, refuse_txn_control_sees_through_comments)
+{
+    setup_db();
+    hl_cap_db_refuse_txn_control(test_db, 1);
+    static const char *const refused[] = {
+        "BEGIN", "/* /* */ BEGIN; -- */", "COMMIT", "ROLLBACK",
+        "SAVEPOINT s", "RELEASE s", "END",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        sqlite3_stmt *st = NULL;
+        EXPECT_NE(SQLITE_OK, sqlite3_prepare_v2(test_db, refused[i], -1, &st, NULL));
+        sqlite3_finalize(st);
+    }
+    /* The rest of the guard still applies, and plain reads work. */
+    EXPECT_NE(SQLITE_OK, sqlite3_exec(test_db, "ATTACH 'x.db' AS x", NULL, NULL, NULL));
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "SELECT 1", NULL, NULL, NULL));
+    hl_cap_db_refuse_txn_control(test_db, 0);
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "BEGIN; COMMIT", NULL, NULL, NULL));
+    teardown_db();
 }
 
 UTEST(hl_cap_db, namespace_check_blocks_hull_tables)
