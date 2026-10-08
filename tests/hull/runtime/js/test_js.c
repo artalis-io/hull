@@ -9319,20 +9319,21 @@ UTEST(js_audit10, gc_observers_and_stray_stdlib_modules_are_absent)
 /* M: public-key operations ran in one call each, charged nothing beyond
  * their message bytes, so a loop of ed25519 / x25519 / box held the event
  * loop. Each charges 2^14 units before the work: a 1M budget allows about
- * 60 of them, not ~300k. */
+ * 60 of them, not ~300k. Counted, not timed: a sanitizer build runs each
+ * operation many times slower, so a wall-clock bound is noise. */
 UTEST(js_audit10, public_key_operations_are_charged)
 {
     static const char *const srcs[] = {
-        "for (;;) crypto.ed25519Keypair();",
+        "for (;;) { globalThis.__a10_n++; crypto.ed25519Keypair(); }",
         "const k = crypto.ed25519Keypair();"
-        " for (;;) crypto.ed25519Sign('m', k.secretKey);",
+        " for (;;) { globalThis.__a10_n++; crypto.ed25519Sign('m', k.secretKey); }",
         "const k = crypto.ed25519Keypair(); const s = crypto.ed25519Sign('m', k.secretKey);"
-        " for (;;) crypto.ed25519Verify('m', s, k.publicKey);",
+        " for (;;) { globalThis.__a10_n++; crypto.ed25519Verify('m', s, k.publicKey); }",
         "const a = crypto.x25519Keypair(), b = crypto.x25519Keypair();"
-        " for (;;) crypto.x25519(a.secretKey, b.publicKey);",
+        " for (;;) { globalThis.__a10_n++; crypto.x25519(a.secretKey, b.publicKey); }",
         "const a = crypto.boxKeypair(), b = crypto.boxKeypair();"
         " const n = new Uint8Array(24);"
-        " for (;;) crypto.box('m', n, b.publicKey, a.secretKey);",
+        " for (;;) { globalThis.__a10_n++; crypto.box('m', n, b.publicKey, a.secretKey); }",
     };
     for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
         init_js();
@@ -9341,13 +9342,15 @@ UTEST(js_audit10, public_key_operations_are_charged)
         hl_js_reset_request(&js);
         char code[512];
         snprintf(code, sizeof code,
-                 "(() => { let n = 0; globalThis.__a10_n = 0;"
+                 "(() => { globalThis.__a10_n = 0;"
                  " try { %s } catch (e) {} return 0; })()", srcs[i]);
-        struct timespec t0;
-        clock_gettime(CLOCK_MONOTONIC, &t0);
         EXPECT_EQ_MSG(eval_int(code), -9999, srcs[i]);
         EXPECT_EQ_MSG(js.budget_tripped, 1, srcs[i]);
-        EXPECT_LT_MSG(a10_ms_since(&t0), 3000L, srcs[i]);
+        /* Read the count back in a fresh run (the trip is sticky). */
+        hl_js_reset_request(&js);
+        int ops = eval_int("globalThis.__a10_n");
+        EXPECT_GT_MSG(ops, 0, srcs[i]);
+        EXPECT_LT_MSG(ops, 1000, srcs[i]);
         cleanup_js();
     }
 }
