@@ -486,19 +486,34 @@ static int host_rp_covers(const char *rp, const char *target)
     return same && (target[l] == '\0' || target[l] == '/');
 }
 
-int hl_host_path_covers_home(const char *path, const char *sub)
+/* Resolve @p path and $HOME/<sub> (sub may be NULL, and need not exist). */
+static int host_rp_and_home(const char *path, const char *sub,
+                            char rp[PATH_MAX], char hr[PATH_MAX])
 {
-    char rp[PATH_MAX], hr[PATH_MAX];
     const char *home = hl_host_home();
     if (!home || host_realpath(path, rp) != 0 || host_realpath(home, hr) != 0)
-        return 0;
+        return -1;
     if (sub && *sub) {
         size_t n = strlen(hr);
-        if (n + 1 + strlen(sub) + 1 > sizeof hr) return 0;
+        if (n + 1 + strlen(sub) + 1 > PATH_MAX) return -1;
         if (strcmp(hr, "/") != 0) hr[n++] = '/';
         memcpy(hr + n, sub, strlen(sub) + 1);
     }
+    return 0;
+}
+
+int hl_host_path_covers_home(const char *path, const char *sub)
+{
+    char rp[PATH_MAX], hr[PATH_MAX];
+    if (host_rp_and_home(path, sub, rp, hr) != 0) return 0;
     return host_rp_covers(rp, hr);
+}
+
+int hl_host_path_under_home(const char *path, const char *sub)
+{
+    char rp[PATH_MAX], hr[PATH_MAX];
+    if (host_rp_and_home(path, sub, rp, hr) != 0) return 0;
+    return host_rp_covers(hr, rp);
 }
 
 int hl_host_path_too_broad(const char *path)

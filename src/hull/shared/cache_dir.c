@@ -144,14 +144,18 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
          * tool sandboxes, so HULL_CACHE_DIR=/ or =$HOME made the filesystem
          * or every file the user owns writable, and =~/.hull the cache and
          * tool-cache keys (audit 9). Refused with the caches off, as for an
-         * untrusted directory. */
+         * untrusted directory. A directory INSIDE ~/.hull is refused too
+         * (audit 10): =~/.hull/blobs/tools or =~/.hull/keys handed the app
+         * the signed tool store or the signing keys. */
         if (hl_host_path_too_broad(abspath) ||
-            hl_host_path_covers_home(abspath, ".hull")) {
+            hl_host_path_covers_home(abspath, ".hull") ||
+            hl_host_path_under_home(abspath, ".hull")) {
             static int warned_broad;
             if (!warned_broad) {
                 warned_broad = 1;
                 log_warn("[cache] HULL_CACHE_DIR %s is the filesystem root, "
-                         "your home directory or above, or ~/.hull or above; "
+                         "your home directory or above, or ~/.hull, inside it "
+                         "or above; "
                          "the bytecode / template / AOT caches are off (set "
                          "it to a directory of its own)", abspath);
             }

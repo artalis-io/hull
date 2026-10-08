@@ -263,6 +263,16 @@ UTEST(tool, validate_reject_wp)
     ASSERT_NE(hl_tool_validate_args(a3), 0);
 }
 
+/* -Xclang=<arg> hands <arg> to cc1 joined: "-Xclang=-load" got past the
+ * separate "-load" check (audit 10). */
+UTEST(tool, validate_reject_xclang_joined)
+{
+    const char *a1[] = { "clang", "-Xclang=-load", "-Xclang=evil.so", NULL };
+    ASSERT_NE(hl_tool_validate_args(a1), 0);
+    const char *a2[] = { "clang", "-Xclang", "-load", NULL };
+    ASSERT_NE(hl_tool_validate_args(a2), 0);
+}
+
 UTEST(tool, validate_reject_response_file)
 {
     const char *argv[] = { "cc", "@commands.txt", NULL };

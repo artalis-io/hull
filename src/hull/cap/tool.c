@@ -479,6 +479,10 @@ int hl_tool_validate_args(const char *const argv[])
          * loaded a plugin past every check above (audit 9). No backend
          * passes preprocessor options this way. */
         if (strncmp(a, "-Wp,", 4) == 0)        return -1;
+        /* -Xclang=<arg>: clang's joined spelling hands <arg> to cc1 as one
+         * piece, so "-Xclang=-load" got past the "-load" check above (audit
+         * 10). The separate form passes each argument through that check. */
+        if (strncmp(a, "-Xclang=", 8) == 0)    return -1;
         if (a[0] == '@')                       return -1; /* response file */
         /* clang configuration files (--config <f>, --config=<f>, and
          * clang 16's --config-system-dir= / --config-user-dir=): the file's
