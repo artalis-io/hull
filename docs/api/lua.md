@@ -214,7 +214,7 @@ A response's headers are capped at 64 KiB in all (`HL_RES_HEADER_BYTES_MAX`, the
 
 #### `res:json(value)`
 
-Send a JSON response. Sets `Content-Type: application/json` unless the response already has a Content-Type (an app's `res:header('Content-Type', ...)` wins).
+Send a JSON response. Sets `Content-Type: application/json` unless the app set a Content-Type (`res:header('Content-Type', ...)` wins); one an earlier `res:json` / `text` / `html` set is replaced, so there is always exactly one.
 
 | Param   | Type  | Description |
 |---------|-------|-------------|
@@ -226,7 +226,7 @@ Send a JSON response. Sets `Content-Type: application/json` unless the response 
 
 #### `res:text(string)` / `res:html(string)`
 
-Send a plain-text / HTML response. Sets the appropriate Content-Type unless the response already has one; calling it again replaces the body and adds no second header.
+Send a plain-text / HTML response. Sets the appropriate Content-Type unless the app set one (an earlier body call's is replaced); calling it again replaces the body and adds no second header. `res:bytes` sets none, and drops the one an earlier body call set.
 
 | Param | Type     | Description |
 |-------|----------|-------------|

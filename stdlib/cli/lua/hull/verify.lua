@@ -12,9 +12,6 @@
 --                               AND the signature must verify against it.
 --                               Defends against tampered hull binaries
 --                               where the embedded key has been swapped.
---                               Note: stricter than verify.js's same-named
---                               flag, which uses the file as an override
---                               (JS can't reach the embedded key).
 --   --binary <path>             The built binary to check against binary_hash
 --                               (default <app_dir>/app[.com]). Required when
 --                               the app embeds AOT native code and was built

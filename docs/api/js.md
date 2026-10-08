@@ -143,11 +143,11 @@ Set response header. Chainable. A response's headers are capped at 64 KiB in all
 
 #### `res.json(value)`
 
-Send JSON response. Sets `Content-Type: application/json` unless the response already has a Content-Type (an app's `res.header('Content-Type', ...)` wins). Terminates the response.
+Send JSON response. Sets `Content-Type: application/json` unless the app set a Content-Type (`res.header('Content-Type', ...)` wins); one an earlier `res.json` / `text` / `html` set is replaced, so there is always exactly one. Terminates the response.
 
 #### `res.text(string)` / `res.html(string)`
 
-Send plain-text / HTML response. Sets the matching Content-Type unless the response already has one. Terminates. `res.json` / `text` / `html` / `bytes` charge the body to the instruction limit before copying it (1 unit per 8 bytes; `bytes` per 64).
+Send plain-text / HTML response. Sets the matching Content-Type unless the app set one (an earlier body call's is replaced). Terminates. `res.bytes` sets none, and drops the one an earlier body call set. `res.json` / `text` / `html` / `bytes` charge the body to the instruction limit before copying it (1 unit per 8 bytes; `bytes` per 64).
 
 #### `res.redirect(url, code?)`
 

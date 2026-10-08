@@ -211,6 +211,7 @@ static void js_ws_client_call(HlJSWsClientUD *ud, JSValueConst fn,
         log_error("[hull:ws:client] %s error: %s", what,
                   msg ? msg : tripped ? "instruction limit exceeded" : "unknown");
         if (msg) JS_FreeCString(ctx, msg);
+        else JS_FreeValue(ctx, JS_GetException(ctx));   /* a throwing toString (audit 10) */
         JS_FreeValue(ctx, exc);
     } else if (js) {
         /* An async callback is a run like any other entry's: its queued

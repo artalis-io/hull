@@ -101,6 +101,59 @@ static inline void hl_res_body_reencode(KlHttpResponse *res)
     }
 }
 
+/* The Content-Type a body call (res.json / html / text) implies, against the
+ * one the response has (audit 10; #712 kept the first Content-Type whoever set
+ * it, so res.html then res.json sent JSON as text/html). @p hull_set is the
+ * response object's note that the Content-Type it carries is the one an
+ * earlier body call added - Hull's default, which this call replaces; any
+ * other is the app's (res.header) and stays. Removes Hull's earlier default
+ * and returns 1 when the caller must add its own (setting *hull_set once it
+ * has); 0 when the app's stays. */
+static inline int hl_res_content_type_prepare(KlHttpResponse *res,
+                                              int *hull_set)
+{
+    if (*hull_set) {
+        hl_res_header_remove(res, "Content-Type");
+        *hull_set = 0;
+    }
+    return !hl_res_header_has(res, "Content-Type");
+}
+
+/* res.bytes sets no Content-Type, and res.header("Content-Type", ...) brings
+ * the app's own: either way a default an earlier body call added no longer
+ * describes the body (res.html then res.bytes(png) went out as text/html). */
+static inline void hl_res_drop_default_content_type(KlHttpResponse *res,
+                                                    int *hull_set)
+{
+    if (*hull_set) {
+        hl_res_header_remove(res, "Content-Type");
+        *hull_set = 0;
+    }
+}
+
+/* Is @p name (length @p len) the Content-Type header name? */
+static inline int hl_res_is_content_type(const char *name, size_t len)
+{
+    return len == 12 && strncasecmp(name, "Content-Type", 12) == 0;
+}
+
+/* Replace whatever a handler started with an error answer (audit 10): its
+ * headers are dropped - a Set-Cookie or Location it had set went out on the
+ * 500, a Content-Encoding described a body that is no longer there, and a
+ * Content-Type it had set was followed by a second one - so the answer
+ * carries exactly one Content-Type. Nothing to undo once the headers were
+ * sent (a stream). */
+static inline void hl_res_error_reset(KlHttpResponse *res, int status,
+                                      const char *body, size_t len)
+{
+    if (!res) return;
+    if (!res->headers_sent)
+        res->hdr_len = 0;
+    kl_http_response_status(res, status);
+    (void)kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(res, body, len);
+}
+
 /* Is there room for one more "Name: value\r\n" under the per-response cap
  * (audit 9 M1)? Keel's header buffer lives outside the script heap, so the
  * heap limit does not bound it: a loop of res.header calls grew it to all of

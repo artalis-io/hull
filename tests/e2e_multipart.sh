@@ -214,7 +214,9 @@ app.post("/upload-stale", function(req, res)
     local first = step()
     local second = step()
     local ok, err = pcall(first.read, first)
+    -- Its metadata is its own, read after the iterator moved on (audit 10).
     res:json({ stale_refused = not ok, error = tostring(err),
+               first_name = first.name, second_name = second.name,
                second = second:read() })
 end, { multipart = { max_part_size = 64 * 1024 * 1024 } })
 
@@ -390,7 +392,9 @@ app.post("/upload-stale", async (req, res) => {
     catch (e) { staleRefused = true; error = String(e && e.message || e); }
     let chunksRefused = false;
     try { first.chunks(); } catch (e) { chunksRefused = true; }
+    // Its metadata is its own, read after the iterator moved on (audit 10).
     res.json({ stale_refused: staleRefused, chunks_refused: chunksRefused,
+               first_name: first.name, second_name: second.name,
                error, second: bufToString(await second.read()) });
 }, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
 
@@ -694,6 +698,9 @@ run_multipart_tests() {
     check_contains "$LABEL stale part: read refused" "$RESP" '"stale_refused":true'
     check_contains "$LABEL stale part: error text"   "$RESP" 'no longer current'
     check_contains "$LABEL stale part: next intact"  "$RESP" '"second":"two"'
+    # audit 10: a kept Part reports its own name, not the current part's
+    check_contains "$LABEL stale part: own name"     "$RESP" '"first_name":"a"'
+    check_contains "$LABEL stale part: next name"    "$RESP" '"second_name":"b"'
     if [ "$LABEL" = "js" ]; then
         check_contains "$LABEL stale part: chunks refused" "$RESP" '"chunks_refused":true'
     fi

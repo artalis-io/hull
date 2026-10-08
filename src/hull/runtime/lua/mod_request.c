@@ -50,6 +50,16 @@
 
 #define HL_MP_ITER_MT   "HlMpIter"
 #define HL_MP_PART_MT   "HlMpPart"
+
+/* A Part userdata's uservalues: the iterator it anchors, and its own
+ * metadata (audit 10). */
+enum {
+    MP_PART_UV_ITER = 1,
+    MP_PART_UV_NAME,
+    MP_PART_UV_FILENAME,
+    MP_PART_UV_CTYPE,
+    MP_PART_UV_COUNT = MP_PART_UV_CTYPE
+};
 #define HL_MP_CHUNKS_MT "HlMpChunks"
 #define HL_MP_OWNER_MT  "HlMpOwner"
 
@@ -540,25 +550,23 @@ static int mp_chunks_continue(lua_State *L, int status, lua_KContext ctx)
  * method names that resolve via the metatable's __index table fallback. */
 static int mp_part_index(lua_State *L)
 {
-    HlMpPart *p = check_part(L, 1);
-    HlMpIter *it = p->iter;
+    (void)check_part(L, 1);
     const char *key = luaL_checkstring(L, 2);
 
+    /* This part's metadata, snapshotted into the userdata's uservalues when
+     * the Part was made (MP_PART_UV_*; audit 10): the iterator's copy is the
+     * CURRENT part's, so a Part kept past its loop step reported the next
+     * part's name / filename / content_type. */
     if (strcmp(key, "name") == 0) {
-        if (it->name) lua_pushlstring(L, it->name, it->name_len);
-        else          lua_pushlstring(L, "", 0);
+        lua_getiuservalue(L, 1, MP_PART_UV_NAME);
         return 1;
     }
     if (strcmp(key, "filename") == 0) {
-        if (it->filename) lua_pushlstring(L, it->filename, it->filename_len);
-        else              lua_pushnil(L);
+        lua_getiuservalue(L, 1, MP_PART_UV_FILENAME);
         return 1;
     }
     if (strcmp(key, "content_type") == 0) {
-        if (it->content_type)
-            lua_pushlstring(L, it->content_type, it->content_type_len);
-        else
-            lua_pushnil(L);
+        lua_getiuservalue(L, 1, MP_PART_UV_CTYPE);
         return 1;
     }
     if (strcmp(key, "read") == 0) {
@@ -601,14 +609,27 @@ static int mp_iter_drive(lua_State *L)
             it->in_part = 1;
             it->gen++;
 
-            HlMpPart *p = (HlMpPart *)lua_newuserdatauv(L, sizeof(*p), 1);
+            HlMpPart *p = (HlMpPart *)lua_newuserdatauv(L, sizeof(*p),
+                                                        MP_PART_UV_COUNT);
             memset(p, 0, sizeof(*p));
             p->iter = it;
             p->gen = it->gen;
             luaL_setmetatable(L, HL_MP_PART_MT);
             /* Anchor iter against GC for the Part's lifetime. */
             lua_pushvalue(L, lua_upvalueindex(1));
-            lua_setiuservalue(L, -2, 1);
+            lua_setiuservalue(L, -2, MP_PART_UV_ITER);
+            /* Its own metadata (audit 10; see mp_part_index). */
+            if (it->name) lua_pushlstring(L, it->name, it->name_len);
+            else          lua_pushlstring(L, "", 0);
+            lua_setiuservalue(L, -2, MP_PART_UV_NAME);
+            if (it->filename) lua_pushlstring(L, it->filename, it->filename_len);
+            else              lua_pushnil(L);
+            lua_setiuservalue(L, -2, MP_PART_UV_FILENAME);
+            if (it->content_type)
+                lua_pushlstring(L, it->content_type, it->content_type_len);
+            else
+                lua_pushnil(L);
+            lua_setiuservalue(L, -2, MP_PART_UV_CTYPE);
             return 1;
         case KL_HTTP_MP_EVT_PART_DATA:
             /* User skipped the previous part's body without iterating

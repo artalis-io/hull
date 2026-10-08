@@ -9116,5 +9116,240 @@ UTEST(js_audit10, nested_test_request_keeps_the_case_budget_and_txn)
     cleanup_js_caps();
 }
 #endif
+/* ── Audit 10 ────────────────────────────────────────────────────────── */
+
+#include "hull/http_feature.h"   /* hl_js_http_error_response */
+
+/* Milliseconds since @p t0. */
+static long a10_ms_since(const struct timespec *t0)
+{
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (long)(t1.tv_sec - t0->tv_sec) * 1000 +
+           (long)(t1.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+/* H2: work a builtin does inside one step - a scan, compare or copy of a
+ * large operand, an allocation - cost one interrupt-poll step, so each of
+ * these held the event loop for minutes to forever under any instruction
+ * limit. QuickJS HULL PATCH 0005 charges it: each trips a 1M budget fast,
+ * and the trip is the usual uncatchable interrupt (the catch never runs). */
+UTEST(js_audit10, builtin_work_is_charged)
+{
+    static const char *const srcs[] = {
+        /* scans over a 16 MB string */
+        "const s = 'a'.repeat(1 << 22); for (;;) s.indexOf('b');",
+        "const s = 'a'.repeat(1 << 22); for (;;) s.lastIndexOf('b');",
+        "const s = 'a'.repeat(1 << 22); for (;;) s.includes('b');",
+        "const s = 'a'.repeat(1 << 22); for (;;) s.split('b');",
+        "const s = 'a'.repeat(1 << 22); for (;;) s.replace('b', 'c');",
+        "const s = ' '.repeat(1 << 22); for (;;) s.trim();",
+        /* one quadratic search: 2^31 compares in a single call */
+        "('a'.repeat(1 << 16)).indexOf('a'.repeat(1 << 15) + 'b');",
+        /* compares of large equal strings, and a large Map key */
+        "const a = 'x'.repeat(1 << 23), b = a.slice(0, -1) + 'x';"
+        " for (;;) a === b;",
+        "const a = 'x'.repeat(1 << 23), b = a.slice(0, -1) + 'y';"
+        " for (;;) a < b;",
+        "const m = new Map(); const k = 'k'.repeat(1 << 23);"
+        " for (;;) m.get(k);",
+        /* typed arrays */
+        "const u = new Uint8Array(1 << 22); for (;;) u.fill(1);",
+        "const u = new Uint8Array(1 << 22); for (;;) u.indexOf(2);",
+        "const u = new Uint8Array(1 << 22); for (;;) u.copyWithin(0, 1);",
+        "const u = new Uint8Array(1 << 22); for (;;) u.reverse();",
+        "const u = new Uint8Array(1 << 22); for (;;) u.set(u);",
+        "const u = new Uint8Array(1 << 20); for (;;) u.sort();",
+        /* arrays: a fast array, and array-likes whose length no heap
+         * bounds (each one call, never ending before) */
+        "const a = new Array(1 << 16).fill(0); for (;;) a.indexOf(1);",
+        "const a = new Array(1 << 16).fill(0); for (;;) a.includes(1);",
+        "Array.prototype.indexOf.call({ length: 2 ** 53 - 1 }, 1);",
+        "Array.prototype.lastIndexOf.call({ length: 2 ** 53 - 1 }, 1);",
+        "Array.prototype.includes.call({ length: 2 ** 53 - 1 }, 1);",
+        "Array.prototype.join.call({ length: 2 ** 32 - 1 });",
+        "new Array(2 ** 32 - 1).forEach(() => {});",
+        "[].concat(new Array(2 ** 32 - 1)).length;",
+        /* JSON, and plain allocation */
+        "const w = ' '.repeat(1 << 22) + '1'; for (;;) JSON.parse(w);",
+        "for (;;) new ArrayBuffer(1 << 20);",
+    };
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        char code[1024];
+        snprintf(code, sizeof code,
+                 "globalThis.__a10 = 0;\n"
+                 "try { %s } catch (e) { globalThis.__a10 = 1; }\n", srcs[i]);
+        hl_js_reset_request(&lim);
+        struct timespec t0;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        EXPECT_TRUE_MSG(a5_eval_throws(&lim, code), srcs[i]);
+        long ms = a10_ms_since(&t0);
+        EXPECT_EQ_MSG(lim.budget_tripped, 1, srcs[i]);
+        EXPECT_LT_MSG(ms, 5000L, srcs[i]);
+        hl_js_reset_request(&lim);
+        JSValue v = JS_Eval(lim.ctx, "globalThis.__a10", 16, "<t>",
+                            JS_EVAL_TYPE_GLOBAL);
+        int32_t caught = -1;
+        JS_ToInt32(lim.ctx, &caught, v);
+        JS_FreeValue(lim.ctx, v);
+        EXPECT_EQ_MSG(caught, 0, srcs[i]);   /* the catch never ran */
+    }
+    /* Ordinary work on ordinary data still fits a normal budget. */
+    hl_js_free(&lim);
+    ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "const s = 'abc,'.repeat(10000);\n"
+        "if (s.split(',').length !== 10001) throw 1;\n"
+        "if (s.indexOf('abc', 400) !== 400) throw 2;\n"
+        "if (JSON.parse(JSON.stringify({ a: [1, 2, 3] })).a[2] !== 3) throw 3;\n"
+        "const a = []; for (let i = 0; i < 100000; i++) a.push({ i });\n"
+        "if (a.indexOf(a[99999]) !== 99999) throw 4;\n"
+        "a.sort((x, y) => y.i - x.i); if (a[0].i !== 99999) throw 5;\n"));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    hl_js_free(&lim);
+}
+
+/* M (#712 regression): res.json / html / text kept the FIRST Content-Type
+ * whoever set it, so res.html then res.json sent the JSON as text/html. Hull's
+ * own default is replaced by the next body call; only an app-set one stays,
+ * and there is always exactly one. */
+UTEST(js_audit10, a_body_call_replaces_hulls_own_content_type)
+{
+    static const struct { const char *src, *want; } cases[] = {
+        { "(req, res) => { res.html('<p>'); res.json({ a: 1 }); return 1; }",
+          "Content-Type: application/json\r\n" },
+        { "(req, res) => { res.json(1); res.text('x'); return 1; }",
+          "Content-Type: text/plain; charset=utf-8\r\n" },
+        { "(req, res) => { res.header('Content-Type', 'text/csv');"
+          " res.text('a'); res.json(1); return 1; }",
+          "Content-Type: text/csv\r\n" },
+        /* the app's header after a body call replaces Hull's default */
+        { "(req, res) => { res.text('a'); res.header('Content-Type', 'image/png');"
+          " res.bytes(new ArrayBuffer(4)); return 1; }",
+          "Content-Type: image/png\r\n" },
+        /* res.bytes drops a default an earlier body call left */
+        { "(req, res) => { res.html('<p>'); res.bytes(new ArrayBuffer(4));"
+          " return 1; }", NULL },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        KlAllocator alloc = kl_allocator_default();
+        KlHttpResponse res;
+        ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+        KlHttpRequest req = {0};
+        EXPECT_EQ(a5_middleware(cases[i].src, &req, &res), 1);
+        EXPECT_EQ_MSG(a9_header_count(&res, "Content-Type"),
+                      cases[i].want ? 1 : 0, cases[i].src);
+        if (cases[i].want)
+            EXPECT_TRUE_MSG(a9_headers_contain(&res, cases[i].want), cases[i].src);
+        free_req_ctx(&req);
+        kl_http_response_free(&res);
+        cleanup_js();
+    }
+}
+
+/* L: the 500 a failed handler gets kept every header it had set - a
+ * Set-Cookie, a Location, its own Content-Type next to the error's - and
+ * res.bytes after a gzipped body kept the gzip's Content-Encoding / Vary. */
+UTEST(js_audit10, error_response_and_bytes_drop_stale_headers)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => { res.header('Set-Cookie', 'sid=1');"
+        " res.header('Location', '/x'); res.html('<p>'); return 1; }",
+        &req, &res), 1);
+    hl_js_http_error_response(&res);
+    EXPECT_EQ(res.status, 500);
+    EXPECT_EQ(a9_header_count(&res, "Set-Cookie"), 0);
+    EXPECT_EQ(a9_header_count(&res, "Location"), 0);
+    EXPECT_EQ(a9_header_count(&res, "Content-Security-Policy"), 0);
+    EXPECT_EQ(a9_header_count(&res, "Content-Type"), 1);
+    EXPECT_TRUE(a9_headers_contain(&res, "Content-Type: text/plain\r\n"));
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+    cleanup_js();
+
+    /* res.bytes after a body Keel gzipped (a fake Content-Encoding / Vary
+     * pair, as http_compress adds). */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlHttpResponse res2;
+    ASSERT_EQ(kl_http_response_init(&res2, &alloc), 0);
+    ASSERT_EQ(kl_http_response_header(&res2, "Content-Encoding", "gzip"), 0);
+    ASSERT_EQ(kl_http_response_header(&res2, "Vary", "Accept-Encoding"), 0);
+    KlHttpRequest req2 = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => { res.bytes(new ArrayBuffer(8)); return 1; }",
+        &req2, &res2), 1);
+    EXPECT_EQ(a9_header_count(&res2, "Content-Encoding"), 0);
+    EXPECT_EQ(a9_header_count(&res2, "Vary"), 0);
+    EXPECT_EQ(res2.body_len, (size_t)8);
+    free_req_ctx(&req2);
+    kl_http_response_free(&res2);
+    cleanup_js();
+}
+
+/* L: WeakRef / FinalizationRegistry are not in the app runtime (a cleanup
+ * callback ran in whatever request a GC happened in), nor in a
+ * worker.dispatch VM; and a hull: name that is not a registry module is not
+ * the app's to import (hull:verify, gone from the embed). */
+UTEST(js_audit10, gc_observers_and_stray_stdlib_modules_are_absent)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int("(typeof WeakRef === 'undefined' &&"
+                       " typeof FinalizationRegistry === 'undefined') ? 1 : 0"), 1);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("./app.js",
+        "import * as v from 'hull:verify';\nglobalThis.__a10_v = 1;\n", &msg), -1);
+    EXPECT_TRUE(msg && strstr(msg, "hull:verify"));
+    free(msg);
+    EXPECT_EQ(eval_int("globalThis.__a10_v === undefined ? 1 : 0"), 1);
+    cleanup_js_caps();
+}
+
+/* M: public-key operations ran in one call each, charged nothing beyond
+ * their message bytes, so a loop of ed25519 / x25519 / box held the event
+ * loop. Each charges 2^14 units before the work: a 1M budget allows about
+ * 60 of them, not ~300k. */
+UTEST(js_audit10, public_key_operations_are_charged)
+{
+    static const char *const srcs[] = {
+        "for (;;) crypto.ed25519Keypair();",
+        "const k = crypto.ed25519Keypair();"
+        " for (;;) crypto.ed25519Sign('m', k.secretKey);",
+        "const k = crypto.ed25519Keypair(); const s = crypto.ed25519Sign('m', k.secretKey);"
+        " for (;;) crypto.ed25519Verify('m', s, k.publicKey);",
+        "const a = crypto.x25519Keypair(), b = crypto.x25519Keypair();"
+        " for (;;) crypto.x25519(a.secretKey, b.publicKey);",
+        "const a = crypto.boxKeypair(), b = crypto.boxKeypair();"
+        " const n = new Uint8Array(24);"
+        " for (;;) crypto.box('m', n, b.publicKey, a.secretKey);",
+    };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        js.max_instructions = 1000000;
+        hl_js_reset_request(&js);
+        char code[512];
+        snprintf(code, sizeof code,
+                 "(() => { let n = 0; globalThis.__a10_n = 0;"
+                 " try { %s } catch (e) {} return 0; })()", srcs[i]);
+        struct timespec t0;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        EXPECT_EQ_MSG(eval_int(code), -9999, srcs[i]);
+        EXPECT_EQ_MSG(js.budget_tripped, 1, srcs[i]);
+        EXPECT_LT_MSG(a10_ms_since(&t0), 3000L, srcs[i]);
+        cleanup_js();
+    }
+}
 
 UTEST_MAIN();

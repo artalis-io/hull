@@ -359,6 +359,11 @@ struct JSRuntime {
 
     JSInterruptHandler *interrupt_handler;
     void *interrupt_opaque;
+    /* HULL PATCH 0005: work charged by builtins and the allocator, in
+       1/64 instruction units, flushed to work_handler in batches */
+    JSWorkHandler *work_handler;
+    void *work_opaque;
+    uint64_t work_pending;
 
     JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
     void *host_promise_rejection_tracker_opaque;
@@ -1777,6 +1782,71 @@ static __maybe_unused void js_malloc_iter(JSMallocContext *s, JSMallocIterFunc *
 
 /* end JS malloc */
 
+/* HULL PATCH 0005: charge work done inside one step. The bytecode
+   interpreter polls the interrupt handler every JS_INTERRUPT_COUNTER_INIT
+   calls / backward jumps, so a builtin that scans, compares or copies a
+   large operand (s.indexOf on a 32 MB string, a typed array fill, an
+   allocation) cost one step. 'bytes' is in 1/64 instruction units: a byte
+   scanned, compared or allocated costs one, an element visited
+   JS_WORK_ELEM. Charges are batched (JS_WORK_BATCH) and handed to the
+   embedder's work handler; when it reports the run over its budget every
+   context polls at its very next step (as HULL PATCH 0003 does after an
+   interrupt), so a trip lands at most one builtin call late. A builtin
+   whose loop is not bounded by the heap (a generic array method on an
+   array-like with a huge length, a quadratic string search) uses
+   js_work_check, which throws the interrupt from inside the loop. No
+   handler: no cost beyond one test. See docs/quickjs_patches.md. */
+#define JS_WORK_ELEM 64
+#define JS_WORK_BATCH (64 * 1024)
+#define JS_WORK_MAX ((uint64_t)1 << 62)
+
+static no_inline BOOL js_work_flush(JSRuntime *rt)
+{
+    uint64_t units = rt->work_pending >> 6;
+    rt->work_pending &= 63;
+    if (rt->work_handler(rt, rt->work_opaque, units)) {
+        struct list_head *el;
+        list_for_each(el, &rt->context_list) {
+            JSContext *c = list_entry(el, JSContext, link);
+            c->interrupt_counter = 1;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* deferred charge: return TRUE if this charge found the run over budget */
+static inline BOOL js_work_add(JSRuntime *rt, uint64_t bytes)
+{
+    if (likely(!rt->work_handler))
+        return FALSE;
+    if (bytes > JS_WORK_MAX)
+        bytes = JS_WORK_MAX;
+    rt->work_pending += bytes;
+    if (unlikely(rt->work_pending >= JS_WORK_BATCH))
+        return js_work_flush(rt);
+    return FALSE;
+}
+
+static void JS_ThrowInterrupted(JSContext *ctx);
+
+/* charge and throw the interrupt at once when over budget: -1 then */
+static inline int js_work_check(JSContext *ctx, uint64_t bytes)
+{
+    if (unlikely(js_work_add(ctx->rt, bytes))) {
+        JS_ThrowInterrupted(ctx);
+        return -1;
+    }
+    return 0;
+}
+
+void JS_SetWorkHandler(JSRuntime *rt, JSWorkHandler *cb, void *opaque)
+{
+    rt->work_handler = cb;
+    rt->work_opaque = opaque;
+    rt->work_pending = 0;
+}
+
 static void js_trigger_gc(JSRuntime *rt, size_t size)
 {
     BOOL force_gc;
@@ -1799,6 +1869,7 @@ static void js_trigger_gc(JSRuntime *rt, size_t size)
 
 void *js_malloc_rt(JSRuntime *rt, size_t size)
 {
+    js_work_add(rt, size); /* HULL PATCH 0005 */
     return __js_malloc(&rt->malloc_ctx, size);
 }
 
@@ -1809,6 +1880,7 @@ void js_free_rt(JSRuntime *rt, void *ptr)
 
 void *js_realloc_rt(JSRuntime *rt, void *ptr, size_t size)
 {
+    js_work_add(rt, size); /* HULL PATCH 0005: a grown block may be copied */
     return __js_realloc(&rt->malloc_ctx, ptr, size);
 }
 
@@ -3197,6 +3269,7 @@ static JSAtom __JS_NewAtom(JSRuntime *rt, JSString *str, int atom_type)
         }
         /* try and locate an already registered atom */
         len = str->len;
+        js_work_add(rt, len); /* HULL PATCH 0005: hashed, maybe compared */
         h = hash_string(str, atom_type);
         h &= JS_ATOM_HASH_MASK;
         h1 = h & (rt->atom_hash_size - 1);
@@ -4609,6 +4682,7 @@ static BOOL js_string_eq(JSContext *ctx,
         return FALSE;
     if (p1 == p2)
         return TRUE;
+    js_work_add(ctx->rt, p1->len); /* HULL PATCH 0005 */
     return js_string_memcmp(p1, 0, p2, 0, p1->len) == 0;
 }
 
@@ -4618,6 +4692,7 @@ static int js_string_compare(JSContext *ctx,
 {
     int res, len;
     len = min_int(p1->len, p2->len);
+    js_work_add(ctx->rt, len); /* HULL PATCH 0005 */
     res = js_string_memcmp(p1, 0, p2, 0, len);
     if (res == 0) {
         if (p1->len == p2->len)
@@ -4801,6 +4876,7 @@ static int js_string_rope_compare(JSContext *ctx, JSValueConst op1,
     while (len != 0) {
         l = min_uint32(p1->len - pos1, p2->len - pos2);
         l = min_uint32(l, len);
+        js_work_add(ctx->rt, l); /* HULL PATCH 0005 */
         res = js_string_memcmp(p1, pos1, p2, pos2, l);
         if (res != 0)
             return res;
@@ -41548,6 +41624,8 @@ static int JS_CopySubArray(JSContext *ctx,
     }
 
     for (i = 0; i < count; ) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto exception;
         if (dir < 0) {
             from = from_pos + count - i - 1;
             to = to_pos + count - i - 1;
@@ -41566,6 +41644,7 @@ static int JS_CopySubArray(JSContext *ctx,
             if (dir < 0) {
                 l = min_int64(l, from + 1);
                 l = min_int64(l, to + 1);
+                js_work_add(ctx->rt, l * JS_WORK_ELEM); /* HULL PATCH 0005 */
                 for(j = 0; j < l; j++) {
                     set_value(ctx, &p->u.array.u.values[to - j],
                               JS_DupValue(ctx, p->u.array.u.values[from - j]));
@@ -41573,6 +41652,7 @@ static int JS_CopySubArray(JSContext *ctx,
             } else {
                 l = min_int64(l, len - from);
                 l = min_int64(l, len - to);
+                js_work_add(ctx->rt, l * JS_WORK_ELEM); /* HULL PATCH 0005 */
                 for(j = 0; j < l; j++) {
                     set_value(ctx, &p->u.array.u.values[to + j],
                               JS_DupValue(ctx, p->u.array.u.values[from + j]));
@@ -41677,6 +41757,8 @@ static JSValue js_array_from(JSContext *ctx, JSValueConst this_val,
         if (JS_IsException(next_method))
             goto exception;
         for (k = 0;; k++) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception_close;
             v = JS_IteratorNext(ctx, enum_obj, next_method, 0, NULL, &done);
             if (JS_IsException(v))
                 goto exception;
@@ -41712,6 +41794,8 @@ static JSValue js_array_from(JSContext *ctx, JSValueConst this_val,
         if (JS_IsException(r))
             goto exception;
         for(k = 0; k < len; k++) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
             v = JS_GetPropertyInt64(ctx, arrayLike, k);
             if (JS_IsException(v))
                 goto exception;
@@ -41932,11 +42016,16 @@ static JSValue js_array_with(JSContext *ctx, JSValueConst this_val,
         for (i++, pval++; i < len; i++, pval++)
             *pval = JS_DupValue(ctx, arrp[i]);
     } else {
-        for (; i < idx; i++, pval++)
+        for (; i < idx; i++, pval++) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
             if (-1 == JS_TryGetPropertyInt64(ctx, obj, i, pval))
                 goto exception;
+        }
         *pval = JS_DupValue(ctx, argv[1]);
         for (i++, pval++; i < len; i++, pval++) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
             if (-1 == JS_TryGetPropertyInt64(ctx, obj, i, pval))
                 goto exception;
         }
@@ -41985,6 +42074,8 @@ static JSValue js_array_concat(JSContext *ctx, JSValueConst this_val,
                 goto exception;
             }
             for (k = 0; k < len; k++, n++) {
+                if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                    goto exception;
                 res = JS_TryGetPropertyInt64(ctx, e, k, &val);
                 if (res < 0)
                     goto exception;
@@ -42093,6 +42184,8 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
     n = 0;
 
     for(k = 0; k < len; k++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto exception;
         if (special & special_TA) {
             val = JS_GetPropertyInt64(ctx, obj, k);
             if (JS_IsException(val))
@@ -42216,6 +42309,8 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
         acc = JS_DupValue(ctx, argv[1]);
     } else {
         for(;;) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
             if (k >= len) {
                 JS_ThrowTypeError(ctx, "empty array");
                 goto exception;
@@ -42237,6 +42332,8 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
         }
     }
     for (; k < len; k++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto exception;
         k1 = (special & special_reduceRight) ? len - k - 1 : k;
         if (special & special_TA) {
             val = JS_GetPropertyInt64(ctx, obj, k1);
@@ -42300,6 +42397,8 @@ static JSValue js_array_fill(JSContext *ctx, JSValueConst this_val,
 
     /* XXX: should special case fast arrays */
     while (start < end) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto exception;
         if (JS_SetPropertyInt64(ctx, obj, start,
                                 JS_DupValue(ctx, argv[0])) < 0)
             goto exception;
@@ -42334,6 +42433,8 @@ static JSValue js_array_includes(JSContext *ctx, JSValueConst this_val,
         }
         if (js_get_fast_array(ctx, obj, &arrp, &count)) {
             for (; n < count; n++) {
+                if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                    goto exception;
                 if (js_strict_eq2(ctx, JS_DupValue(ctx, argv[0]),
                                   JS_DupValue(ctx, arrp[n]),
                                   JS_EQ_SAME_VALUE_ZERO)) {
@@ -42343,6 +42444,8 @@ static JSValue js_array_includes(JSContext *ctx, JSValueConst this_val,
             }
         }
         for (; n < len; n++) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
             val = JS_GetPropertyInt64(ctx, obj, n);
             if (JS_IsException(val))
                 goto exception;
@@ -42383,6 +42486,8 @@ static JSValue js_array_indexOf(JSContext *ctx, JSValueConst this_val,
         }
         if (js_get_fast_array(ctx, obj, &arrp, &count)) {
             for (; n < count; n++) {
+                if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                    goto exception;
                 if (js_strict_eq2(ctx, JS_DupValue(ctx, argv[0]),
                                   JS_DupValue(ctx, arrp[n]), JS_EQ_STRICT)) {
                     res = n;
@@ -42391,7 +42496,10 @@ static JSValue js_array_indexOf(JSContext *ctx, JSValueConst this_val,
             }
         }
         for (; n < len; n++) {
-            int present = JS_TryGetPropertyInt64(ctx, obj, n, &val);
+            int present;
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
+            present = JS_TryGetPropertyInt64(ctx, obj, n, &val);
             if (present < 0)
                 goto exception;
             if (present) {
@@ -42431,6 +42539,8 @@ static JSValue js_array_lastIndexOf(JSContext *ctx, JSValueConst this_val,
         }
         /* XXX: should special case fast arrays */
         for (; n >= 0; n--) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
             present = JS_TryGetPropertyInt64(ctx, obj, n, &val);
             if (present < 0)
                 goto exception;
@@ -42580,6 +42690,8 @@ static JSValue js_array_join(JSContext *ctx, JSValueConst this_val,
     string_buffer_init(ctx, b, 0);
 
     for(i = 0; i < n; i++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto fail;
         if (i > 0) {
             if (c >= 0) {
                 string_buffer_putc8(b, c);
@@ -42629,6 +42741,7 @@ static JSValue js_array_pop(JSContext *ctx, JSValueConst this_val,
             JSObject *p = JS_VALUE_GET_OBJ(obj);
             if (shift) {
                 res = arrp[0];
+                js_work_add(ctx->rt, (uint64_t)count32 * sizeof(*arrp)); /* HULL PATCH 0005 */
                 memmove(arrp, arrp + 1, (count32 - 1) * sizeof(*arrp));
                 p->u.array.count--;
             } else {
@@ -42741,6 +42854,7 @@ static JSValue js_array_reverse(JSContext *ctx, JSValueConst this_val,
     if (js_get_fast_array(ctx, obj, &arrp, &count32) && count32 == len) {
         uint32_t ll, hh;
 
+        js_work_add(ctx->rt, (uint64_t)count32 * JS_WORK_ELEM); /* HULL PATCH 0005 */
         if (count32 > 1) {
             for (ll = 0, hh = count32 - 1; ll < hh; ll++, hh--) {
                 lval = arrp[ll];
@@ -42752,6 +42866,8 @@ static JSValue js_array_reverse(JSContext *ctx, JSValueConst this_val,
     }
 
     for (l = 0, h = len - 1; l < h; l++, h--) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto exception;
         l_present = JS_TryGetPropertyInt64(ctx, obj, l, &lval);
         if (l_present < 0)
             goto exception;
@@ -42825,6 +42941,8 @@ static JSValue js_array_toReversed(JSContext *ctx, JSValueConst this_val,
         } else {
             // Query order is observable; test262 expects descending order.
             for (; i >= 0; i--, pval++) {
+                if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                    goto exception;
                 if (-1 == JS_TryGetPropertyInt64(ctx, obj, i, pval))
                     goto exception;
             }
@@ -42901,12 +43019,16 @@ static JSValue js_array_slice(JSContext *ctx, JSValueConst this_val,
         js_is_fast_array(ctx, arr)) {
         /* XXX: should share code with fast array constructor */
         for (; k < final && k < count32; k++, n++) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
             if (JS_CreateDataPropertyUint32(ctx, arr, n, JS_DupValue(ctx, arrp[k]), JS_PROP_THROW) < 0)
                 goto exception;
         }
     }
     /* Copy the remaining elements if any (handle case of inherited properties) */
     for (; k < final; k++, n++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto exception;
         kPresent = JS_TryGetPropertyInt64(ctx, obj, k, &val);
         if (kPresent < 0)
             goto exception;
@@ -42927,6 +43049,8 @@ static JSValue js_array_slice(JSContext *ctx, JSValueConst this_val,
                 goto exception;
 
             for (k = len; k-- > new_len; ) {
+                if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                    goto exception;
                 if (JS_DeletePropertyInt64(ctx, obj, k, JS_PROP_THROW) < 0)
                     goto exception;
             }
@@ -43005,14 +43129,20 @@ static JSValue js_array_toSpliced(JSContext *ctx, JSValueConst this_val,
         for (i += del; i < len; i++, pval++)
             *pval = JS_DupValue(ctx, arrp[i]);
     } else {
-        for (i = 0; i < start; i++, pval++)
+        for (i = 0; i < start; i++, pval++) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
             if (-1 == JS_TryGetPropertyInt64(ctx, obj, i, pval))
                 goto exception;
+        }
         for (j = 0; j < add; j++, pval++)
             *pval = JS_DupValue(ctx, argv[2 + j]);
-        for (i += del; i < len; i++, pval++)
+        for (i += del; i < len; i++, pval++) {
+            if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                goto exception;
             if (-1 == JS_TryGetPropertyInt64(ctx, obj, i, pval))
                 goto exception;
+        }
     }
 
     assert(pval == last);
@@ -43078,6 +43208,8 @@ static int64_t JS_FlattenIntoArray(JSContext *ctx, JSValueConst target,
     }
 
     for (sourceIndex = 0; sourceIndex < sourceLen; sourceIndex++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            return -1;
         present = JS_TryGetPropertyInt64(ctx, source, sourceIndex, &element);
         if (present < 0)
             return -1;
@@ -43195,6 +43327,9 @@ static int js_array_cmp_generic(const void *a, const void *b, void *opaque) {
     if (psc->exception)
         return 0;
 
+    if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+        goto exception;
+
     if (psc->has_method) {
         /* custom sort function is specified as returning 0 for identical
          * objects: avoid method call overhead.
@@ -43265,6 +43400,8 @@ static JSValue js_array_sort(JSContext *ctx, JSValueConst this_val,
 
     /* XXX: should special case fast arrays */
     for (i = 0; i < len; i++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto exception;
         if (pos >= array_size) {
             size_t new_size, slack;
             ValueSlot *new_array;
@@ -43366,6 +43503,8 @@ static JSValue js_array_toSorted(JSContext *ctx, JSValueConst this_val,
                 *pval = JS_DupValue(ctx, arrp[i]);
         } else {
             for (; i < len; i++, pval++) {
+                if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                    goto exception;
                 if (-1 == JS_TryGetPropertyInt64(ctx, obj, i, pval))
                     goto exception;
             }
@@ -45364,13 +45503,18 @@ static JSValue js_string_concat(JSContext *ctx, JSValueConst this_val,
     return r;
 }
 
-static int string_cmp(JSString *p1, JSString *p2, int x1, int x2, int len)
+/* HULL PATCH 0005: *pn = the number of chars compared, for the charge */
+static int string_cmp(JSString *p1, JSString *p2, int x1, int x2, int len,
+                      int *pn)
 {
     int i, c1, c2;
     for (i = 0; i < len; i++) {
-        if ((c1 = string_get(p1, x1 + i)) != (c2 = string_get(p2, x2 + i)))
+        if ((c1 = string_get(p1, x1 + i)) != (c2 = string_get(p2, x2 + i))) {
+            *pn = i + 1;
             return c1 - c2;
+        }
     }
+    *pn = len;
     return 0;
 }
 
@@ -45394,18 +45538,25 @@ static int string_indexof_char(JSString *p, int c, int from)
     return -1;
 }
 
-static int string_indexof(JSString *p1, JSString *p2, int from)
+/* HULL PATCH 0005: charges the chars it scans and compares; -2 (exception
+   pending) when that puts the run over its budget - the search is
+   quadratic in the worst case */
+static int string_indexof(JSContext *ctx, JSString *p1, JSString *p2, int from)
 {
     /* assuming 0 <= from <= p1->len */
-    int c, i, j, len1 = p1->len, len2 = p2->len;
+    int c, i, j, n, len1 = p1->len, len2 = p2->len;
     if (len2 == 0)
         return from;
     for (i = from, c = string_get(p2, 0); i + len2 <= len1; i = j + 1) {
         j = string_indexof_char(p1, c, i);
+        if (js_work_check(ctx, (j < 0 ? len1 : j) - i + 1))
+            return -2;
         if (j < 0 || j + len2 > len1)
             break;
-        if (!string_cmp(p1, p2, j + 1, 1, len2 - 1))
+        if (!string_cmp(p1, p2, j + 1, 1, len2 - 1, &n))
             return j;
+        if (js_work_check(ctx, n))
+            return -2;
     }
     return -1;
 }
@@ -45454,6 +45605,7 @@ static JSValue js_string_isWellFormed(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(str))
         return JS_EXCEPTION;
     p = JS_VALUE_GET_STRING(str);
+    js_work_add(ctx->rt, p->len); /* HULL PATCH 0005 */
     ret = (js_string_find_invalid_codepoint(p) < 0);
     JS_FreeValue(ctx, str);
     return JS_NewBool(ctx, ret);
@@ -45472,6 +45624,7 @@ static JSValue js_string_toWellFormed(JSContext *ctx, JSValueConst this_val,
 
     p = JS_VALUE_GET_STRING(str);
     /* avoid reallocating the string if it is well-formed */
+    js_work_add(ctx->rt, p->len); /* HULL PATCH 0005 */
     i = js_string_find_invalid_codepoint(p);
     if (i < 0)
         return str;
@@ -45543,10 +45696,13 @@ static JSValue js_string_indexOf(JSContext *ctx, JSValueConst this_val,
     ret = -1;
     if (len >= v_len && inc * (stop - start) >= 0) {
         for (i = start;; i += inc) {
-            if (!string_cmp(p, p1, i, 0, v_len)) {
+            int n;
+            if (!string_cmp(p, p1, i, 0, v_len, &n)) {
                 ret = i;
                 break;
             }
+            if (js_work_check(ctx, n)) /* HULL PATCH 0005 */
+                goto fail;
             if (i == stop)
                 break;
         }
@@ -45609,10 +45765,13 @@ static JSValue js_string_includes(JSContext *ctx, JSValueConst this_val,
     }
     if (start >= 0 && start <= stop) {
         for (i = start;; i++) {
-            if (!string_cmp(p, p1, i, 0, v_len)) {
+            int n;
+            if (!string_cmp(p, p1, i, 0, v_len, &n)) {
                 ret = 1;
                 break;
             }
+            if (js_work_check(ctx, n)) /* HULL PATCH 0005 */
+                goto fail;
             if (i == stop)
                 break;
         }
@@ -45884,6 +46043,8 @@ static JSValue js_string_replace(JSContext *ctx, JSValueConst this_val,
     endOfLastMatch = 0;
     is_first = TRUE;
     for(;;) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto exception;
         if (unlikely(searchp->len == 0)) {
             if (is_first)
                 pos = 0;
@@ -45892,7 +46053,9 @@ static JSValue js_string_replace(JSContext *ctx, JSValueConst this_val,
             else
                 pos = endOfLastMatch + 1;
         } else {
-            pos = string_indexof(sp, searchp, endOfLastMatch);
+            pos = string_indexof(ctx, sp, searchp, endOfLastMatch);
+            if (pos < -1) /* HULL PATCH 0005 */
+                goto exception;
         }
         if (pos < 0) {
             if (is_first) {
@@ -46002,7 +46165,11 @@ static JSValue js_string_split(JSContext *ctx, JSValueConst this_val,
         goto done;
     }
     for (q = p; (q += !r) <= s - r - !r; q = p = e + r) {
-        e = string_indexof(sp, rp, q);
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto exception;
+        e = string_indexof(ctx, sp, rp, q);
+        if (e < -1) /* HULL PATCH 0005 */
+            goto exception;
         if (e < 0)
             break;
         T = js_sub_string(ctx, sp, p, e);
@@ -46250,6 +46417,7 @@ static JSValue js_string_trim(JSContext *ctx, JSValueConst this_val,
     p = JS_VALUE_GET_STRING(str);
     a = 0;
     b = len = p->len;
+    js_work_add(ctx->rt, len); /* HULL PATCH 0005 */
     if (magic & 1) {
         while (a < len && lre_is_space(string_get(p, a)))
             a++;
@@ -49497,6 +49665,7 @@ JSValue JS_ParseJSON3(JSContext *ctx, const char *buf, size_t buf_len,
     JSParseState s1, *s = &s1;
     JSValue val = JS_UNDEFINED;
 
+    js_work_add(ctx->rt, buf_len); /* HULL PATCH 0005: scanned once */
     js_parse_init(ctx, s, buf, buf_len, filename);
     s->ext_json = ((flags & JS_PARSE_JSON_EXT) != 0);
     if (json_next_token(s))
@@ -49959,6 +50128,8 @@ static int js_json_to_str(JSContext *ctx, JSONStringifyContext *jsc,
                 goto exception;
             string_buffer_putc8(jsc->b, '[');
             for(i = 0; i < len; i++) {
+                if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                    goto exception;
                 if (i > 0)
                     string_buffer_putc8(jsc->b, ',');
                 string_buffer_concat_value(jsc->b, sep);
@@ -49996,6 +50167,8 @@ static int js_json_to_str(JSContext *ctx, JSONStringifyContext *jsc,
             string_buffer_putc8(jsc->b, '{');
             has_content = FALSE;
             for(i = 0; i < len; i++) {
+                if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                    goto exception;
                 JS_FreeValue(ctx, prop);
                 prop = JS_GetPropertyInt64(ctx, tab, i);
                 if (JS_IsException(prop))
@@ -51742,7 +51915,7 @@ static uint32_t map_hash_pointer(uintptr_t a, int hash_bits)
 
 /* XXX: better hash ? */
 /* precondition: 1 <= hash_bits <= 32 */
-static uint32_t map_hash_key(JSValueConst key, int hash_bits)
+static uint32_t map_hash_key(JSRuntime *rt, JSValueConst key, int hash_bits)
 {
     uint32_t tag = JS_VALUE_GET_NORM_TAG(key);
     uint32_t h;
@@ -51755,9 +51928,11 @@ static uint32_t map_hash_key(JSValueConst key, int hash_bits)
         h = map_hash32(JS_VALUE_GET_INT(key) ^ JS_TAG_BOOL, hash_bits);
         break;
     case JS_TAG_STRING:
+        js_work_add(rt, JS_VALUE_GET_STRING(key)->len); /* HULL PATCH 0005 */
         h = map_hash32(hash_string(JS_VALUE_GET_STRING(key), 0) ^ JS_TAG_STRING, hash_bits);
         break;
     case JS_TAG_STRING_ROPE:
+        js_work_add(rt, string_rope_get_len(key)); /* HULL PATCH 0005 */
         h = map_hash32(hash_string_rope(key, 0) ^ JS_TAG_STRING, hash_bits);
         break;
     case JS_TAG_OBJECT:
@@ -51804,7 +51979,7 @@ static JSMapRecord *map_find_record(JSContext *ctx, JSMapState *s,
 {
     JSMapRecord *mr;
     uint32_t h;
-    h = map_hash_key(key, s->hash_bits);
+    h = map_hash_key(ctx->rt, key, s->hash_bits);
     for(mr = s->hash_table[h]; mr != NULL; mr = mr->hash_next) {
         if (mr->empty || (s->is_weak && !js_weakref_is_live(mr->key))) {
             /* cannot match */
@@ -51837,7 +52012,7 @@ static void map_hash_resize(JSContext *ctx, JSMapState *s)
         mr = list_entry(el, JSMapRecord, link);
         if (mr->empty || (s->is_weak && !js_weakref_is_live(mr->key))) {
         } else {
-            h = map_hash_key(mr->key, new_hash_bits);
+            h = map_hash_key(ctx->rt, mr->key, new_hash_bits);
             mr->hash_next = new_hash_table[h];
             new_hash_table[h] = mr;
         }
@@ -51864,7 +52039,7 @@ static JSMapRecord *map_add_record(JSContext *ctx, JSMapState *s,
     } else {
         mr->key = JS_DupValue(ctx, key);
     }
-    h = map_hash_key(key, s->hash_bits);
+    h = map_hash_key(ctx->rt, key, s->hash_bits);
     mr->hash_next = s->hash_table[h];
     s->hash_table[h] = mr;
     list_add_tail(&mr->link, &s->records);
@@ -51932,7 +52107,7 @@ static void map_delete_weakrefs(JSRuntime *rt, JSWeakRefHeader *wh)
         if (!js_weakref_is_live(mr->key)) {
 
             /* even if key is not live it can be hashed as a pointer */
-            h = map_hash_key(mr->key, s->hash_bits);
+            h = map_hash_key(rt, mr->key, s->hash_bits);
             pmr = &s->hash_table[h];
             for(;;) {
                 mr1 = *pmr;
@@ -52005,7 +52180,7 @@ static JSValue map_delete_record(JSContext *ctx, JSMapState *s, JSValueConst key
 
     key = map_normalize_key_const(ctx, key);
     
-    h = map_hash_key(key, s->hash_bits);
+    h = map_hash_key(ctx->rt, key, s->hash_bits);
     pmr = &s->hash_table[h];
     for(;;) {
         mr = *pmr;
@@ -57146,6 +57321,7 @@ static JSValue js_array_buffer_slice(JSContext *ctx,
         JS_ThrowTypeErrorDetachedArrayBuffer(ctx);
         goto fail;
     }
+    js_work_add(ctx->rt, new_len); /* HULL PATCH 0005 */
     memcpy(new_abuf->data, abuf->data + start, new_len);
     return new_obj;
  fail:
@@ -57407,6 +57583,7 @@ static JSValue js_typed_array_set_internal(JSContext *ctx,
         /* copying between typed objects */
         if (src_p->class_id == p->class_id) {
             /* same type, use memmove */
+            js_work_add(ctx->rt, (uint64_t)src_len << shift); /* HULL PATCH 0005 */
             memmove(dest_abuf->data + dest_ta->offset + (offset << shift),
                     src_abuf->data + src_ta->offset, src_len << shift);
             goto done;
@@ -57428,6 +57605,8 @@ static JSValue js_typed_array_set_internal(JSContext *ctx,
         }
     }
     for(i = 0; i < src_len; i++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto fail;
         val = JS_GetPropertyUint32(ctx, src_obj, i);
         if (JS_IsException(val))
             goto fail;
@@ -57728,6 +57907,7 @@ static JSValue js_typed_array_copyWithin(JSContext *ctx, JSValueConst this_val,
     count = min_int(count, space);
     if (count > 0) {
         shift = typed_array_size_log2(p->class_id);
+        js_work_add(ctx->rt, (uint64_t)count << shift); /* HULL PATCH 0005 */
         memmove(p->u.array.u.uint8_ptr + (to << shift),
                 p->u.array.u.uint8_ptr + (from << shift),
                 count << shift);
@@ -57800,6 +57980,8 @@ static JSValue js_typed_array_fill(JSContext *ctx, JSValueConst this_val,
     // RAB may have been resized by evil .valueOf method
     final = min_int(final, p->u.array.count);
     shift = typed_array_size_log2(p->class_id);
+    if (k < final) /* HULL PATCH 0005 */
+        js_work_add(ctx->rt, (uint64_t)(final - k) << shift);
     switch(shift) {
     case 0:
         if (k < final) {
@@ -57898,6 +58080,7 @@ static JSValue js_typed_array_indexOf(JSContext *ctx, JSValueConst this_val,
 {
     JSObject *p;
     int len, tag, is_int, is_bigint, k, stop, inc, res = -1;
+    int k0 = -1; /* HULL PATCH 0005: first index scanned */
     int64_t v64;
     double d;
     float f;
@@ -57951,6 +58134,7 @@ static JSValue js_typed_array_indexOf(JSContext *ctx, JSValueConst this_val,
     else
         k = min_int(k, len);
     stop = min_int(stop, len);
+    k0 = k; /* HULL PATCH 0005 */
 
     is_bigint = 0;
     is_int = 0; /* avoid warning */
@@ -58171,6 +58355,11 @@ static JSValue js_typed_array_indexOf(JSContext *ctx, JSValueConst this_val,
     }
 
 done:
+    if (k0 >= 0) { /* HULL PATCH 0005: the elements scanned */
+        int end = res >= 0 ? res : stop;
+        js_work_add(ctx->rt, (uint64_t)(end > k0 ? end - k0 : k0 - end)
+                    << typed_array_size_log2(p->class_id));
+    }
     if (special == special_includes)
         return JS_NewBool(ctx, res >= 0);
     else
@@ -58215,6 +58404,8 @@ static JSValue js_typed_array_join(JSContext *ctx, JSValueConst this_val,
 
     /* XXX: optimize with direct access */
     for(i = 0; i < len; i++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+            goto fail;
         if (i > 0) {
             if (c >= 0) {
                 if (string_buffer_putc8(b, c))
@@ -58270,6 +58461,8 @@ static JSValue js_typed_array_reverse(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     if (len > 0) {
         p = JS_VALUE_GET_OBJ(this_val);
+        /* HULL PATCH 0005 */
+        js_work_add(ctx->rt, (uint64_t)len << typed_array_size_log2(p->class_id));
         switch (typed_array_size_log2(p->class_id)) {
         case 0:
             {
@@ -58394,11 +58587,14 @@ static JSValue js_typed_array_slice(JSContext *ctx, JSValueConst this_val,
         space = max_int(0, p->u.array.count - start);
         count = min_int(count, space);
         if (p1 != NULL && p->class_id == p1->class_id) {
+            js_work_add(ctx->rt, (uint64_t)count << shift); /* HULL PATCH 0005 */
             slice_memcpy(p1->u.array.u.uint8_ptr,
                          p->u.array.u.uint8_ptr + (start << shift),
                          count << shift);
         } else {
             for (n = 0; n < count; n++) {
+                if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 */
+                    goto exception;
                 val = JS_GetPropertyValue(ctx, this_val, JS_NewInt32(ctx, start + n));
                 if (JS_IsException(val))
                     goto exception;
@@ -58697,6 +58893,8 @@ static JSValue js_typed_array_sort(JSContext *ctx, JSValueConst this_val,
             abort();
         }
         elt_size = 1 << typed_array_size_log2(p->class_id);
+        /* HULL PATCH 0005: about n log2 n comparisons, 8 per unit */
+        js_work_add(ctx->rt, (uint64_t)len * (32 - clz32(len)) * 8);
         if (!JS_IsUndefined(tsc.cmp)) {
             uint32_t *array_idx;
             void *array;
