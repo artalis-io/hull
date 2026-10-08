@@ -139,15 +139,15 @@ Set status code. Chainable (returns `res`).
 
 #### `res.header(name, value)`
 
-Set response header. Chainable.
+Set response header. Chainable. A response's headers are capped at 64 KiB in all (`HL_RES_HEADER_BYTES_MAX`, the headers Hull adds included): past it this throws a `RangeError`.
 
 #### `res.json(value)`
 
-Send JSON response. `Content-Type: application/json`. Terminates the response.
+Send JSON response. Sets `Content-Type: application/json` unless the response already has a Content-Type (an app's `res.header('Content-Type', ...)` wins). Terminates the response.
 
 #### `res.text(string)` / `res.html(string)`
 
-Send plain-text / HTML response. Terminates.
+Send plain-text / HTML response. Sets the matching Content-Type unless the response already has one. Terminates. `res.json` / `text` / `html` / `bytes` charge the body to the instruction limit before copying it (1 unit per 8 bytes; `bytes` per 64).
 
 #### `res.redirect(url, code?)`
 

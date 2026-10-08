@@ -379,6 +379,21 @@ app.post("/upload", async (req, res) => {
     res.json({ ok: true, parts });
 }, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
 
+// A Part the iterator has moved past is refused (audit 9, the Lua twin's
+// L5): its read() used to consume the NEXT part's body.
+app.post("/upload-stale", async (req, res) => {
+    const it = req.multipart();
+    const first = (await it.next()).value;
+    const second = (await it.next()).value;
+    let staleRefused = false, error = "";
+    try { await first.read(); }
+    catch (e) { staleRefused = true; error = String(e && e.message || e); }
+    let chunksRefused = false;
+    try { first.chunks(); } catch (e) { chunksRefused = true; }
+    res.json({ stale_refused: staleRefused, chunks_refused: chunksRefused,
+               error, second: bufToString(await second.read()) });
+}, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
+
 app.post("/upload-tiny", async (req, res) => {
     let count = 0;
     for await (const part of req.multipart()) { count++; }
@@ -673,13 +688,14 @@ run_multipart_tests() {
         echo "  SKIP: $LABEL drip-fed field (needs python)"
     fi
 
-    # ── Scenario 18 (Lua): a stale Part is refused (audit 9 L5) ──
-    if [ "$LABEL" = "lua" ]; then
-        RESP=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload-stale" \
-            -F "a=one" -F "b=two")
-        check_contains "$LABEL stale part: read refused" "$RESP" '"stale_refused":true'
-        check_contains "$LABEL stale part: error text"   "$RESP" 'no longer current'
-        check_contains "$LABEL stale part: next intact"  "$RESP" '"second":"two"'
+    # ── Scenario 18: a stale Part is refused (audit 9 L5; JS twin) ──
+    RESP=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload-stale" \
+        -F "a=one" -F "b=two")
+    check_contains "$LABEL stale part: read refused" "$RESP" '"stale_refused":true'
+    check_contains "$LABEL stale part: error text"   "$RESP" 'no longer current'
+    check_contains "$LABEL stale part: next intact"  "$RESP" '"second":"two"'
+    if [ "$LABEL" = "js" ]; then
+        check_contains "$LABEL stale part: chunks refused" "$RESP" '"chunks_refused":true'
     fi
 
     # ── Sanity: post-multipart requests still work (no per-request

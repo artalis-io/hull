@@ -206,13 +206,15 @@ Set a response header.
 | `name`  | `string` | Header name. Case-preserved on the wire. |
 | `value` | `string` | Header value. CRLF/NUL are rejected by Keel. |
 
+A response's headers are capped at 64 KiB in all (`HL_RES_HEADER_BYTES_MAX`, the headers Hull adds included): past it this raises.
+
 **Returns:** `res` (chainable).
 
 ---
 
 #### `res:json(value)`
 
-Send a JSON response. Sets `Content-Type: application/json`.
+Send a JSON response. Sets `Content-Type: application/json` unless the response already has a Content-Type (an app's `res:header('Content-Type', ...)` wins).
 
 | Param   | Type  | Description |
 |---------|-------|-------------|
@@ -224,7 +226,7 @@ Send a JSON response. Sets `Content-Type: application/json`.
 
 #### `res:text(string)` / `res:html(string)`
 
-Send a plain-text / HTML response. Sets the appropriate Content-Type.
+Send a plain-text / HTML response. Sets the appropriate Content-Type unless the response already has one; calling it again replaces the body and adds no second header.
 
 | Param | Type     | Description |
 |-------|----------|-------------|

@@ -72,8 +72,14 @@ int hl_maybe_compress(KlHttpRequest *req, KlHttpResponse *res,
                       const char *data, size_t len)
 {
     if (cfg && len >= HL_COMPRESS_MIN_SIZE && accepts_gzip(req)) {
-        if (kl_http_response_body_compress(res, cfg, data, len) == 0)
-            return 0; /* success - body + Content-Encoding set */
+        if (kl_http_response_body_compress(res, cfg, data, len) == 0) {
+            /* When gzip does not shrink the body, Keel keeps the original
+             * by BORROWING @p data - bytes the caller frees as it returns
+             * (a JS C string, a Lua string the VM may collect), before the
+             * response is sent. Copy it instead (audit 9). */
+            if (len == 0 || res->body != data)
+                return 0; /* success - body + Content-Encoding set */
+        }
     }
 
     /* Fallback: uncompressed */

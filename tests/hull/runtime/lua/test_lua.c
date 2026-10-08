@@ -9015,8 +9015,9 @@ UTEST(lua_audit9, verify_password_charges_its_iterations)
 }
 
 /* M1 / M2: res:header appended to Keel's header buffer, outside the script
- * heap and with no cap - and so did res:text's Content-Type, once per
- * call. Past HL_RES_HEADER_BYTES_MAX both raise. */
+ * heap and with no cap. Past HL_RES_HEADER_BYTES_MAX it raises. res:text
+ * added a Content-Type on every call; it sets one only when the response
+ * has none now (an app's own wins), so a loop of it stacks nothing. */
 UTEST(lua_audit9, response_headers_are_capped)
 {
     init_lua();
@@ -9031,7 +9032,9 @@ UTEST(lua_audit9, response_headers_are_capped)
         "  HDR_OK, HDR_ERR = ok, tostring(err)\n"
         "  return 1 end)\n"
         "app.use('*', '/*', function(req, res)\n"
+        "  res:header('Content-Type', 'application/problem+json')\n"
         "  local ok, err = pcall(function()\n"
+        "    res:json({ a = 1 }) res:html('<p>')\n"
         "    for i = 1, 100000 do res:text('x') end end)\n"
         "  TXT_OK, TXT_ERR = ok, tostring(err)\n"
         "  return 1 end)\n"), LUA_OK);
@@ -9043,6 +9046,11 @@ UTEST(lua_audit9, response_headers_are_capped)
         EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt,
                       first_mw_handler_id(L, stage), &req, &res), 1);
         EXPECT_LE(res.hdr_len, (size_t)HL_RES_HEADER_BYTES_MAX);
+        if (stage == 2) {
+            /* One Content-Type, the app's: nothing else was added. */
+            EXPECT_EQ(res.hdr_len,
+                      strlen("Content-Type: application/problem+json\r\n"));
+        }
         free_lua_req_ctx(&req);
         kl_http_response_free(&res);
     }
@@ -9052,10 +9060,7 @@ UTEST(lua_audit9, response_headers_are_capped)
     EXPECT_NE(strstr(lua_tostring(L, -1) ? lua_tostring(L, -1) : "",
                      "would exceed"), NULL);
     lua_getglobal(L, "TXT_OK");
-    EXPECT_FALSE(lua_toboolean(L, -1));
-    lua_getglobal(L, "TXT_ERR");
-    EXPECT_NE(strstr(lua_tostring(L, -1) ? lua_tostring(L, -1) : "",
-                     "would exceed"), NULL);
+    EXPECT_TRUE(lua_toboolean(L, -1));
     lua_settop(L, 0);
     cleanup_lua();
 }

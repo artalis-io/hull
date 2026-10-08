@@ -8809,4 +8809,133 @@ UTEST(js_audit9, crypto_work_is_charged_to_the_budget)
     cleanup_js();
 }
 
+/* ── Audit 9 follow-up: the JS twins of the Lua response fixes ─────────── */
+
+#include "hull/limits/runtime.h"   /* HL_RES_HEADER_BYTES_MAX */
+#include <strings.h>               /* strncasecmp */
+
+/* How many @p name headers the response carries (case-insensitive). */
+static int a9_header_count(const KlHttpResponse *res, const char *name)
+{
+    int n = 0;
+    size_t nl = strlen(name);
+    const char *p = res->hdr_buf, *end = res->hdr_buf + res->hdr_len;
+    while (p && p < end) {
+        if ((size_t)(end - p) > nl && p[nl] == ':' && strncasecmp(p, name, nl) == 0)
+            n++;
+        const char *eol = memchr(p, '\n', (size_t)(end - p));
+        if (!eol) break;
+        p = eol + 1;
+    }
+    return n;
+}
+
+/* Does the response's header block contain @p needle? */
+static int a9_headers_contain(const KlHttpResponse *res, const char *needle)
+{
+    if (!res->hdr_buf) return 0;
+    char *copy = malloc(res->hdr_len + 1);
+    if (!copy) return 0;
+    memcpy(copy, res->hdr_buf, res->hdr_len);
+    copy[res->hdr_len] = 0;
+    int found = strstr(copy, needle) != NULL;
+    free(copy);
+    return found;
+}
+
+/* M1: res.header appended to Keel's header buffer, outside the script heap
+ * and with no cap. Past HL_RES_HEADER_BYTES_MAX it raises now. */
+UTEST(js_audit9, response_headers_are_capped)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => { const v = 'v'.repeat(100); let n = 0;"
+        " try { for (let i = 0; i < 100000; i++) { res.header('X-A', v); n++; }"
+        "   globalThis.__a9_e = 'none'; }"
+        " catch (e) { globalThis.__a9_e = e.message; }"
+        " globalThis.__a9_n = n; return 1; }", &req, &res), 1);
+    char *e = eval_str("globalThis.__a9_e");
+    EXPECT_TRUE(e && strstr(e, "would exceed") != NULL);
+    free(e);
+    EXPECT_LT(eval_int("globalThis.__a9_n"), 1000);
+    EXPECT_LE(res.hdr_len, (size_t)HL_RES_HEADER_BYTES_MAX);
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+    cleanup_js();
+}
+
+/* res.json / html / text appended a Content-Type on every call - after an
+ * app's own, and once more per repeated call. They set one only when the
+ * response has none now (the app's wins), so a loop of res.text neither
+ * stacks headers nor hits the cap. */
+UTEST(js_audit9, one_content_type_and_the_apps_wins)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => { res.header('Content-Type', 'application/problem+json');"
+        " res.json({ a: 1 }); res.html('<p>'); "
+        " for (let i = 0; i < 10000; i++) res.text('x'); return 1; }",
+        &req, &res), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_EQ(a9_header_count(&res, "Content-Type"), 1);
+    EXPECT_TRUE(a9_headers_contain(&res, "application/problem+json"));
+    EXPECT_EQ(res.body_len, (size_t)1);
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+
+    /* With none set, the helper's own type, once. */
+    KlHttpResponse res2;
+    ASSERT_EQ(kl_http_response_init(&res2, &alloc), 0);
+    KlHttpRequest req2 = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => { res.text('a'); res.text('b'); return 1; }",
+        &req2, &res2), 1);
+    EXPECT_EQ(a9_header_count(&res2, "Content-Type"), 1);
+    EXPECT_TRUE(a9_headers_contain(&res2, "text/plain"));
+    free_req_ctx(&req2);
+    kl_http_response_free(&res2);
+    cleanup_js();
+}
+
+/* M2: res.text / json / html / bytes copy (and may gzip) the body inside one
+ * call, which the interrupt handler never saw: a loop of them over a large
+ * string ran unbounded. The body is charged before the copy now. */
+UTEST(js_audit9, response_bodies_are_charged)
+{
+    static const char *const srcs[] = {
+        "(req, res) => { const s = 'x'.repeat(1 << 20);"
+        " for (let i = 0; i < 1000; i++) res.text(s); return 1; }",
+        "(req, res) => { const s = 'x'.repeat(1 << 20);"
+        " for (let i = 0; i < 1000; i++) res.html(s); return 1; }",
+        "(req, res) => { const s = 'x'.repeat(1 << 20);"
+        " for (let i = 0; i < 1000; i++) res.json(s); return 1; }",
+        "(req, res) => { const b = new ArrayBuffer(1 << 22);"
+        " for (let i = 0; i < 1000; i++) res.bytes(b); return 1; }",
+    };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        js.max_instructions = 1000000;
+        KlAllocator alloc = kl_allocator_default();
+        KlHttpResponse res;
+        ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+        KlHttpRequest req = {0};
+        EXPECT_NE(a5_middleware(srcs[i], &req, &res), 1);
+        EXPECT_EQ_MSG(js.budget_tripped, 1, srcs[i]);
+        free_req_ctx(&req);
+        kl_http_response_free(&res);
+        cleanup_js();
+    }
+}
+
 UTEST_MAIN();
