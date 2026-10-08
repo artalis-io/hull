@@ -33,7 +33,7 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
-EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress,trace_context,concurrency_key,concurrency_limit,concurrency_strict"
+EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress,trace_context,concurrency_key,concurrency_limit,concurrency_strict,claim_started_at"
 
 # ── Phase 1: init + schema; Phase 2: correctness round-trip (both runtimes) ──
 check_runtime() {
@@ -2469,6 +2469,234 @@ echo "== audit 9 (batch claim, lost yield, signal drop, patch frontier, horizon)
 check_audit9 "lua" "lua" "$LUA_AUDIT9"
 echo "== audit 9 (batch claim, lost yield, signal drop, patch frontier, horizon): JS =="
 check_audit9 "js" "js" "$JS_AUDIT9"
+
+# ── audit 10: cron tz on local boundaries, a disabled schedule, batch-mates,
+#    soft-concurrency rank, event limits / grace / async subscribers ─────────
+# CRONTZ: with a fixed offset the day / hour skips land on LOCAL boundaries
+#   (they used UTC ones: "0 9 * * *" at +05:30 never matched 09:00, a +02:00
+#   Monday-midnight and a -03:00 Sunday 01:00 schedule skipped their day).
+#   From 2025-01-01T00:00Z: 09:00+05:30 = +12600; Mon 00:00+02:00 = +424800;
+#   "0 9 * * 1-5" at -05:00 fires Wed Thu Fri Mon Tue; Sun 01:00-03:00 = +360000.
+# STRICT: a cron number is plain digits in both runtimes ("5abc", "0x5", "5.0",
+#   "1,,2" refused); a NaN / out-of-range tz is refused.
+# CRONOFF: a stored spec that no longer parses is disabled, not fired every
+#   minute (nor given a NULL next_run_at): nothing enqueued, one cron_disabled
+#   event, next_run_at parked, last_error set (checked from the DB below).
+# MATE: a batch job that heartbeats past visibility_timeout keeps its unstarted
+#   batch-mate's claim too - the mate (on its last attempt) runs instead of
+#   being dead-lettered "worker lost".
+# RANK: a soft-concurrency peer that heartbeated still counts as ahead (the
+#   rank uses the claim's start, which heartbeats do not move).
+# EVLIM: jobs.events limit is clamped to 1..1000 (-1 was "no limit" on
+#   SQLite); events_grace refuses NaN / infinity.
+check_audit10() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"CRONTZ a=12600 b=424800 c=50400,136800,223200,482400,568800 d=360000"*)
+            pass "$label: cron with a tz offset skips on local day / hour boundaries" ;;
+        *) fail "$label: cron tz local boundaries" "$out" ;;
+    esac
+    case "$out" in
+        *"STRICT bad=0 good=1 tz=0"*)
+            pass "$label: cron fields are plain decimal digits; a bad tz is refused" ;;
+        *) fail "$label: cron field / tz strictness" "$out" ;;
+    esac
+    case "$out" in
+        *"MATE st=done ran=1"*)
+            pass "$label: a heartbeat extends the unstarted batch-mates' claim" ;;
+        *) fail "$label: batch-mate heartbeat" "$out" ;;
+    esac
+    case "$out" in
+        *"RANK a=1 b=0"*)
+            pass "$label: soft-concurrency rank counts a peer that heartbeated" ;;
+        *) fail "$label: soft-concurrency rank" "$out" ;;
+    esac
+    case "$out" in
+        *"EVLIM neg=1 nan=1 inf=1"*)
+            pass "$label: jobs.events limit clamped; events_grace refuses NaN / infinity" ;;
+        *) fail "$label: events limit / grace" "$out" ;;
+    esac
+    if [ "$ext" = "js" ]; then
+        case "$out" in
+            *"ASYNCSUB refused=1 delivered=0 failures=1"*)
+                pass "$label: an async subscriber is refused; a returned Promise is a failure" ;;
+            *) fail "$label: async subscriber" "$out" ;;
+        esac
+    fi
+
+    # CRONOFF: register a schedule, corrupt its stored spec the way an older,
+    # laxer parser would have accepted it, and make it due.
+    printf '%s\n' "$4" > "$T/reg.$ext"
+    printf '%s\n' "$5" > "$T/tick.$ext"
+    "$HULL" "$T/reg.$ext" -d "$T/c.db" >/dev/null 2>&1 || true
+    python3 - "$T/c.db" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("UPDATE _hull_cron SET spec='0x5 * * * *', next_run_at=1 WHERE name='c1'")
+c.commit()
+PY
+    out="$("$HULL" "$T/tick.$ext" -d "$T/c.db" 2>/dev/null)" || true
+    row="$(python3 - "$T/c.db" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+r = c.execute("SELECT next_run_at, last_error IS NOT NULL FROM _hull_cron WHERE name='c1'").fetchone()
+print("%s %s" % (r[0], r[1]) if r else "MISSING")
+PY
+)"
+    case "$out|$row" in
+        *"CRONOFF pending=0 events=1"*"|2147483647 1")
+            pass "$label: a schedule whose spec stopped parsing is disabled, not fired" ;;
+        *) fail "$label: disabled cron schedule" "$out | $row" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_AUDIT10='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ events = true })
+  local b = 1735689600
+  local a = jobs._cron_next("0 9 * * *", b, 19800) - b
+  local bb = jobs._cron_next("0 0 * * 1", b, 7200) - b
+  local chain, t = {}, b
+  for _ = 1, 5 do t = jobs._cron_next("0 9 * * 1-5", t, -18000); chain[#chain + 1] = t - b end
+  local d = jobs._cron_next("0 1 * * 0", b, -10800) - b
+  ctx.stdout:write(("CRONTZ a=%d b=%d c=%s d=%d\n"):format(a, bb, table.concat(chain, ","), d))
+
+  local bad = 0
+  for _, s in ipairs({ "5abc * * * *", "0x5 * * * *", "5.0 * * * *", "1e1 * * * *",
+                       "1,,2 * * * *", ",1 * * * *", "*/5/2 * * * *", "1-2-3 * * * *" }) do
+    if jobs._cron_next(s, b) ~= nil then bad = bad + 1 end
+  end
+  local good = jobs._cron_next("5,10-12 */2 * * 1-5", b) ~= nil and 1 or 0
+  local tzok = 0
+  for _, tz in ipairs({ 0/0, 1/0, 2000, 1.5, "+25:00", "+05:75" }) do
+    if pcall(jobs.cron, "tzx", "0 9 * * *", nil, { tz = tz }) then tzok = tzok + 1 end
+  end
+  ctx.stdout:write(("STRICT bad=%d good=%d tz=%d\n"):format(bad, good, tzok))
+
+  jobs.init({ visibility_timeout = 1 })
+  local mate_ran = 0
+  jobs.handler("m1", function(job)
+    hull.sleep(2100)
+    jobs.heartbeat(job)
+    jobs.reap({ visibility_timeout = 1 })
+  end)
+  jobs.handler("m2", function() mate_ran = mate_ran + 1 end)
+  jobs.enqueue("m1", {}, { queue = "mate", priority = 10 })
+  local m2 = jobs.enqueue("m2", {}, { queue = "mate", max_attempts = 1 })
+  jobs.work({ queue = "mate", batch = 2, reap_interval = 3600 })
+  ctx.stdout:write(("MATE st=%s ran=%d\n"):format(jobs.get(m2).status, mate_ran))
+
+  jobs.enqueue("rb", {}, { queue = "rq_b", concurrency_key = "S", concurrency = 1 })
+  jobs.enqueue("ra", {}, { queue = "rq_a", concurrency_key = "S", concurrency = 1 })
+  local ca = jobs.claim({ queue = "rq_a", batch = 1 })
+  hull.sleep(1100)
+  jobs.heartbeat(ca[1])
+  local cb = jobs.claim({ queue = "rq_b", batch = 1 })
+  ctx.stdout:write(("RANK a=%d b=%d\n"):format(#ca, #cb))
+
+  local neg = #jobs.events({ limit = -1 })
+  local nan = pcall(jobs.init, { events_grace = 0/0 }) and 0 or 1
+  local inf = pcall(jobs.init, { events_grace = 1/0 }) and 0 or 1
+  ctx.stdout:write(("EVLIM neg=%d nan=%d inf=%d\n"):format(neg, nan, inf))
+  return 0
+end)'
+
+LUA_AUDIT10_REG='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function() jobs.init({ events = true }); jobs.cron("c1", "*/5 * * * *"); return 0 end)'
+
+LUA_AUDIT10_TICK='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ events = true })
+  jobs._tick(); jobs._tick()
+  local ev = #jobs.events({ types = { "cron_disabled" } })
+  ctx.stdout:write(("CRONOFF pending=%d events=%d\n"):format(jobs.stats().pending or 0, ev))
+  return 0
+end)'
+
+JS_AUDIT10='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ events: true });
+  const b = 1735689600;
+  const a = jobs._cronNext("0 9 * * *", b, 19800) - b;
+  const bb = jobs._cronNext("0 0 * * 1", b, 7200) - b;
+  const chain = []; let t = b;
+  for (let i = 0; i < 5; i++) { t = jobs._cronNext("0 9 * * 1-5", t, -18000); chain.push(t - b); }
+  const d = jobs._cronNext("0 1 * * 0", b, -10800) - b;
+  ctx.stdout.write(`CRONTZ a=${a} b=${bb} c=${chain.join(",")} d=${d}\n`);
+
+  let bad = 0;
+  for (const s of ["5abc * * * *", "0x5 * * * *", "5.0 * * * *", "1e1 * * * *",
+                   "1,,2 * * * *", ",1 * * * *", "*/5/2 * * * *", "1-2-3 * * * *"]) {
+    if (jobs._cronNext(s, b) !== null) bad++;
+  }
+  const good = jobs._cronNext("5,10-12 */2 * * 1-5", b) !== null ? 1 : 0;
+  let tzok = 0;
+  for (const tz of [NaN, Infinity, 2000, 1.5, "+25:00", "+05:75"]) {
+    try { jobs.cron("tzx", "0 9 * * *", null, { tz }); tzok++; } catch (_e) { /* refused */ }
+  }
+  ctx.stdout.write(`STRICT bad=${bad} good=${good} tz=${tzok}\n`);
+
+  jobs.init({ visibilityTimeout: 1 });
+  let mateRan = 0;
+  jobs.handler("m1", async (job) => {
+    await hull.sleep(2100);
+    jobs.heartbeat(job);
+    jobs.reap({ visibilityTimeout: 1 });
+  });
+  jobs.handler("m2", () => { mateRan++; });
+  jobs.enqueue("m1", {}, { queue: "mate", priority: 10 });
+  const m2 = jobs.enqueue("m2", {}, { queue: "mate", maxAttempts: 1 });
+  await jobs.work({ queue: "mate", batch: 2, reapInterval: 3600 });
+  ctx.stdout.write(`MATE st=${jobs.get(m2).status} ran=${mateRan}\n`);
+
+  jobs.enqueue("rb", {}, { queue: "rq_b", concurrencyKey: "S", concurrency: 1 });
+  jobs.enqueue("ra", {}, { queue: "rq_a", concurrencyKey: "S", concurrency: 1 });
+  const ca = jobs.claim({ queue: "rq_a", batch: 1 });
+  await hull.sleep(1100);
+  jobs.heartbeat(ca[0]);
+  const cb = jobs.claim({ queue: "rq_b", batch: 1 });
+  ctx.stdout.write(`RANK a=${ca.length} b=${cb.length}\n`);
+
+  const neg = jobs.events({ limit: -1 }).length;
+  let nan = 0, inf = 0;
+  try { jobs.init({ eventsGrace: NaN }); } catch (_e) { nan = 1; }
+  try { jobs.init({ eventsGrace: Infinity }); } catch (_e) { inf = 1; }
+  ctx.stdout.write(`EVLIM neg=${neg} nan=${nan} inf=${inf}\n`);
+
+  let refused = 0;
+  try { jobs.subscribe("as", async () => {}); } catch (_e) { refused = 1; }
+  jobs.subscribe("ps", () => Promise.resolve(1), { from: "beginning" });
+  const r = jobs._eventsDrain("ps", { grace: 0 });
+  const failures = jobs._eventsDrain("ps", { grace: 0 }).delivered === 0 ? 1 : 0;
+  ctx.stdout.write(`ASYNCSUB refused=${refused} delivered=${r.delivered} failures=${failures}\n`);
+  return 0;
+});'
+
+JS_AUDIT10_REG='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(() => { jobs.init({ events: true }); jobs.cron("c1", "*/5 * * * *"); return 0; });'
+
+JS_AUDIT10_TICK='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main((ctx) => {
+  jobs.init({ events: true });
+  jobs._tick(); jobs._tick();
+  const ev = jobs.events({ types: ["cron_disabled"] }).length;
+  ctx.stdout.write(`CRONOFF pending=${jobs.stats().pending || 0} events=${ev}\n`);
+  return 0;
+});'
+
+echo "== audit 10 (cron tz, disabled cron, batch-mates, soft rank, event limits): Lua =="
+check_audit10 "lua" "lua" "$LUA_AUDIT10" "$LUA_AUDIT10_REG" "$LUA_AUDIT10_TICK"
+echo "== audit 10 (cron tz, disabled cron, batch-mates, soft rank, event limits): JS =="
+check_audit10 "js" "js" "$JS_AUDIT10" "$JS_AUDIT10_REG" "$JS_AUDIT10_TICK"
 
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="

@@ -125,7 +125,10 @@ function jobs.init(opts)
     if opts.history_retention ~= nil then _cfg.history_retention = opts.history_retention end
     if opts.events ~= nil then _cfg.events = opts.events end
     if opts.events_grace ~= nil then
-        if type(opts.events_grace) ~= "number" or opts.events_grace < 0 then
+        local g = opts.events_grace
+        -- NaN fails every comparison and math.huge would hold every event back
+        -- for good: only a finite, non-negative number is a grace.
+        if type(g) ~= "number" or g ~= g or g < 0 or g == math.huge then
             error("jobs.init: events_grace must be a non-negative number of seconds")
         end
         _cfg.events_grace = opts.events_grace
@@ -158,7 +161,11 @@ function jobs.init(opts)
         -- (1) opts into the counter-backed hard cap; NULL/0 is the soft default.
         .. "concurrency_key    VARCHAR(255),"
         .. "concurrency_limit  INTEGER,"
-        .. "concurrency_strict INTEGER)")
+        .. "concurrency_strict INTEGER,"
+        -- When the current claim began. claimed_at is the claim's lease and
+        -- moves with every jobs.heartbeat; this does not, so the soft
+        -- concurrency rank (conc_apply) orders running peers by claim age.
+        .. "claim_started_at   INTEGER)")
 
     -- Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec([[
@@ -210,7 +217,10 @@ function jobs.init(opts)
         .. "next_run_at  INTEGER      NOT NULL,"
         .. "last_run_at  INTEGER,"
         .. "updated_at   INTEGER      NOT NULL,"
-        .. "tz_offset    INTEGER      NOT NULL DEFAULT 0)")
+        .. "tz_offset    INTEGER      NOT NULL DEFAULT 0,"
+        -- Why a schedule was disabled (its spec stopped parsing or has no
+        -- next occurrence); NULL while it is live. jobs.cron clears it.
+        .. "last_error   TEXT)")
     db.exec([[
         CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)
     ]])
@@ -231,6 +241,8 @@ function jobs.init(opts)
     ensure_column("_hull_jobs", "concurrency_limit", "concurrency_limit INTEGER")
     ensure_column("_hull_jobs", "concurrency_strict", "concurrency_strict INTEGER")
     ensure_column("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0")
+    ensure_column("_hull_jobs", "claim_started_at", "claim_started_at INTEGER")
+    ensure_column("_hull_cron", "last_error", "last_error TEXT")
 
     -- Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     -- `name` (not the reserved word `key`), a window start, and the count.
@@ -853,13 +865,18 @@ local function conc_apply(out, now)
                 -- overshoot.
                 if not conc_reserve(j._conc_key, lim) then drop[j.id] = true end
             else
-                -- Soft: rank = running peers strictly ahead in (claimed_at, id)
-                -- order. This ordering is fleet-wide deterministic, so no two
-                -- workers evict the same slot: each job keeps iff rank < limit.
+                -- Soft: rank = running peers strictly ahead in (claim start,
+                -- id) order. This ordering is fleet-wide deterministic, so no
+                -- two workers evict the same slot: each job keeps iff rank <
+                -- limit. claim_started_at, not claimed_at: a heartbeat moves
+                -- claimed_at past this claim's `now`, and a peer heartbeating
+                -- a long job then stopped counting as ahead (overshoot). A row
+                -- claimed before the column existed falls back to claimed_at.
                 local r = db.query(
                     "SELECT COUNT(*) AS n FROM _hull_jobs "
                     .. "WHERE concurrency_key=? AND status='running' "
-                    .. "AND (claimed_at < ? OR (claimed_at = ? AND id < ?))",
+                    .. "AND (COALESCE(claim_started_at, claimed_at) < ? "
+                    .. "OR (COALESCE(claim_started_at, claimed_at) = ? AND id < ?))",
                     { j._conc_key, now, now, j.id })
                 local rank = (r and r[1] and r[1].n) or 0
                 if rank >= lim then drop[j.id] = true end
@@ -895,11 +912,11 @@ local function claim_one(queue, batch)
         -- Postgres: one atomic statement, skips rows other workers hold.
         rows = db.query(
             "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, "
-            .. "attempts=attempts+1, updated_at=? WHERE id IN ("
+            .. "claim_started_at=?, attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ? " .. lock .. ") "
             .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict",
-            { token, now, now, queue, now, batch })
+            { token, now, now, now, queue, now, batch })
     elseif d.supports_skip_locked then
         -- MySQL: no RETURNING. Lock + mark in one txn, then read back by token.
         db.batch(function()
@@ -908,11 +925,11 @@ local function claim_one(queue, batch)
                 .. "ORDER BY priority DESC, id LIMIT ? " .. lock,
                 { queue, now, batch })
             if #sel == 0 then return end
-            local ph, params = {}, { token, now, now }
+            local ph, params = {}, { token, now, now, now }
             for _, r in ipairs(sel) do ph[#ph + 1] = "?"; params[#params + 1] = r.id end
             db.exec(
                 "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, "
-                .. "attempts=attempts+1, updated_at=? WHERE id IN (" .. table.concat(ph, ",") .. ")",
+                .. "claim_started_at=?, attempts=attempts+1, updated_at=? WHERE id IN (" .. table.concat(ph, ",") .. ")",
                 params)
         end)
         rows = db.query(
@@ -923,11 +940,11 @@ local function claim_one(queue, batch)
         -- are invisible to the next claimant's subquery.
         rows = db.query(
             "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, "
-            .. "attempts=attempts+1, updated_at=? WHERE id IN ("
+            .. "claim_started_at=?, attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ?) "
             .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict",
-            { token, now, now, queue, now, batch })
+            { token, now, now, now, queue, now, batch })
     end
 
     -- Priority-correct order WITHIN the batch: RETURNING (PG/SQLite) and the
@@ -1310,10 +1327,17 @@ end
 
 -- Parse one cron field into a set over [lo,hi]. Supports *, n, a-b, */s, a-b/s,
 -- and comma lists of those. Returns nil on any malformed / out-of-range part.
+-- Every number is plain decimal digits: tonumber also took "0x5", "5.0" and
+-- "1e1" here, and the JS twin's parseInt took "5abc" - each runtime read a
+-- different schedule from one spec. An empty list item ("1,,2") is refused.
 local function parse_field(f, lo, hi)
     local set = {}
+    if f == "" or f:sub(1, 1) == "," or f:sub(-1) == "," or f:find(",,", 1, true) then
+        return nil
+    end
     for part in f:gmatch("[^,]+") do
         local range, step = part:match("^([^/]+)/(%d+)$")
+        if part:find("/", 1, true) and not range then return nil end
         step = step and tonumber(step) or 1
         range = range or part
         local a, b
@@ -1321,7 +1345,11 @@ local function parse_field(f, lo, hi)
             a, b = lo, hi
         else
             local x, y = range:match("^(%d+)%-(%d+)$")
-            if x then a, b = tonumber(x), tonumber(y) else a = tonumber(range); b = a end
+            if x then
+                a, b = tonumber(x), tonumber(y)
+            elseif range:match("^%d+$") then
+                a = tonumber(range); b = a
+            end
         end
         if not a or not b or step < 1 or a < lo or b > hi or a > b then return nil end
         local v = a
@@ -1357,11 +1385,20 @@ end
 -- no daylight-saving transitions.
 local function parse_tz_offset(tz)
     if tz == nil then return 0 end
-    if type(tz) == "number" then return math.floor(tz * 60) end
+    if type(tz) == "number" then
+        -- Whole minutes, at most 18 h either way (NaN fails the range test).
+        if not (tz >= -1080 and tz <= 1080) or tz ~= math.floor(tz) then
+            error("jobs.cron: tz in minutes must be a whole number in [-1080, 1080]")
+        end
+        return math.floor(tz) * 60
+    end
     if type(tz) == "string" then
         if tz == "Z" or tz == "UTC" or tz == "utc" then return 0 end
         local sign, hh, mm = tz:match("^([+-])(%d%d):?(%d%d)$")
         if sign then
+            if tonumber(hh) > 18 or tonumber(mm) > 59 then
+                error("jobs.cron: tz offset '" .. tz .. "' is out of range")
+            end
             local off = tonumber(hh) * 3600 + tonumber(mm) * 60
             return sign == "-" and -off or off
         end
@@ -1372,17 +1409,20 @@ local function parse_tz_offset(tz)
     error("jobs.cron: tz must be a string offset or a number of minutes")
 end
 
--- Next matching instant AT OR AFTER from_ts, as a UTC unix timestamp. `offset`
--- (seconds east of UTC, default 0) shifts only the calendar decode, so the spec
--- matches wall-clock fields in that fixed-offset zone while the returned value
--- stays UTC.
+-- Next matching instant strictly after from_ts, as a UTC unix timestamp.
+-- `offset` (seconds east of UTC, default 0) puts the search in that
+-- fixed-offset zone: it walks LOCAL time (lt = t + offset), so the day and hour
+-- skips land on local midnight and the local top of the hour, and converts back
+-- (t = lt - offset). Skipping on UTC boundaries instead put a +05:30 or -05:00
+-- schedule's day jump at a local 05:30 / 19:00, so the hour or the day it
+-- matched was the wrong one (a "0 9 * * *" at +05:30 skipped 09:00 entirely).
 local function cron_next(c, from_ts, offset)
     offset = offset or 0
-    local t = math.floor(from_ts / 60) * 60 + 60
+    local lt = math.floor(from_ts / 60) * 60 + 60 + offset
     for _ = 1, 200000 do
-        local month, day, hour, minute, dow = decode_ts(t + offset)
+        local month, day, hour, minute, dow = decode_ts(lt)
         if not c.month[month] then
-            t = (math.floor(t / 86400) + 1) * 86400
+            lt = (math.floor(lt / 86400) + 1) * 86400
         else
             local day_ok
             if c.dom_star and c.dow_star then day_ok = true
@@ -1390,18 +1430,22 @@ local function cron_next(c, from_ts, offset)
             elseif c.dow_star then day_ok = c.dom[day]
             else day_ok = c.dom[day] or c.dow[dow] end
             if not day_ok then
-                t = (math.floor(t / 86400) + 1) * 86400
+                lt = (math.floor(lt / 86400) + 1) * 86400
             elseif not c.hour[hour] then
-                t = (math.floor(t / 3600) + 1) * 3600
+                lt = (math.floor(lt / 3600) + 1) * 3600
             elseif not c.min[minute] then
-                t = t + 60
+                lt = lt + 60
             else
-                return t
+                return lt - offset
             end
         end
     end
     return nil
 end
+
+-- A schedule that can no longer fire is parked here (the largest value an
+-- INTEGER column holds on every backend), with the reason in last_error.
+local CRON_DISABLED_AT = 2147483647
 
 -- Fire due schedules: compare-and-set next_run_at (multi-worker-safe on every
 -- backend), then enqueue. Missed ticks (worker down) advance to the next future
@@ -1411,8 +1455,26 @@ local function process_cron(now)
         "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at, tz_offset "
         .. "FROM _hull_cron WHERE next_run_at <= ?", { now })
     for _, c in ipairs(due) do
-        local parsed = parse_cron(c.spec)
-        local nxt = parsed and cron_next(parsed, now, c.tz_offset) or (now + 60)
+        local parsed, perr = parse_cron(c.spec)
+        local nxt = parsed and cron_next(parsed, now, c.tz_offset)
+        if not nxt then
+            -- The spec no longer parses (stored by an older, laxer parser)
+            -- or has no next occurrence. Firing it every minute (the old
+            -- now + 60) or writing a NULL next_run_at are both wrong: disable
+            -- it - parked, not enqueued - and say why. jobs.cron re-enables.
+            local why = "schedule '" .. tostring(c.name) .. "' disabled: "
+                .. (parsed and ("spec '" .. tostring(c.spec) .. "' has no upcoming occurrence")
+                    or ("spec '" .. tostring(c.spec) .. "' is invalid ("
+                        .. tostring(perr or "invalid cron field") .. ")"))
+            local off = db.exec(
+                "UPDATE _hull_cron SET next_run_at=?, last_error=?, updated_at=? "
+                .. "WHERE name=? AND next_run_at=?",
+                { CRON_DISABLED_AT, why, now, c.name, c.next_run_at })
+            if (off or 0) > 0 then
+                emit_durable("cron_disabled", { type = c.type, queue = c.queue }, { error = why })
+            end
+            goto next_schedule
+        end
         local won = db.exec(
             "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? "
             .. "WHERE name=? AND next_run_at=?",
@@ -1426,6 +1488,7 @@ local function process_cron(now)
             jobs.enqueue(c.type, data,
                 { queue = c.queue, priority = c.priority, max_attempts = c.max_attempts })
         end
+        ::next_schedule::
     end
 end
 
@@ -1457,9 +1520,9 @@ function jobs.cron(name, spec, data, opts)
     -- nothing and the second INSERT failed on the key.
     db.upsert("_hull_cron", { "name" },
         { "name", "spec", "type", "payload", "queue", "priority",
-          "max_attempts", "next_run_at", "tz_offset", "updated_at" },
+          "max_attempts", "next_run_at", "tz_offset", "last_error", "updated_at" },
         { name, spec, job_type, payload, queue, priority,
-          opts.max_attempts, nxt, tz_offset, now })
+          opts.max_attempts, nxt, tz_offset, nil, now })
     return jobs
 end
 
@@ -1578,10 +1641,20 @@ function jobs.work(opts)
                     -- Close the deliver-before-park race: a signal delivered in the
                     -- check->park window couldn't re-activate us (we were 'running'),
                     -- so re-check now that we are 'waiting'.
+                    -- The memo row counts too: a run of this job whose claim
+                    -- was lost (it does not know yet) can consume the signal
+                    -- after this run looked, leaving no unconsumed row - only
+                    -- the memo, which a re-run replays. Without it this wait
+                    -- parked for good.
                     if result.signal_name and not job._lost then
                         local sig = db.query("SELECT 1 AS x FROM _hull_workflow_signals "
                             .. "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
                             { job.id, result.signal_name })
+                        if not (sig and #sig > 0) and result.signal_key then
+                            sig = db.query("SELECT 1 AS x FROM _hull_workflow_steps "
+                                .. "WHERE workflow_id=? AND step_key=?",
+                                { job.id, result.signal_key })
+                        end
                         if sig and #sig > 0 then
                             db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
                                 .. "updated_at=? WHERE id=? AND status='waiting'",
@@ -1714,9 +1787,21 @@ function jobs.run_worker(opts)
     -- Shared across loops (single event-loop thread, so no data race).
     local total = 0
     local failed = false          -- a loop raised: the others stop too
+    local tasks = {}              -- the concurrency - 1 sibling loops (hull.async)
+    -- A sibling task that failed without passing through guarded's pcall -
+    -- one that tripped the instruction budget, which pcall re-raises rather
+    -- than catches - is settled failed by hull.async's failure hook, but never
+    -- set `failed`; the other loops kept claiming jobs, and a worker with no
+    -- drain never got to join and raise it. Check the tasks themselves too.
+    local function sibling_failed()
+        for _, t in ipairs(tasks) do
+            if rawget(t, "_failed") then failed = true; return true end
+        end
+        return false
+    end
     local function loop()
         local empty = 0
-        while _running and not failed do
+        while _running and not failed and not sibling_failed() do
             local n = jobs.work(opts)
             total = total + n
             if n == 0 then
@@ -1744,7 +1829,6 @@ function jobs.run_worker(opts)
                 error(err, 0)
             end
         end
-        local tasks = {}
         for i = 1, concurrency - 1 do tasks[i] = hull.async(guarded) end
         local ok, err = pcall(guarded)
         for _, t in ipairs(tasks) do
@@ -2132,7 +2216,8 @@ local function run_wait_signal(workflow_id, n, name, opts, replay_only)
             return nil
         end
     end
-    error({ [YIELD] = true, waiting = true, signal_name = name, deadline = deadline })
+    error({ [YIELD] = true, waiting = true, signal_name = name, signal_key = key,
+            deadline = deadline })
 end
 
 -- Run the compensations of completed steps in reverse order (saga rollback). A
@@ -2342,6 +2427,7 @@ function jobs.workflow(name, fn)
         elseif type(res) == "table" and rawget(res, YIELD) then
             return { [WF_YIELD] = true, wake_at = res.wake_at,
                      waiting = res.waiting, signal_name = res.signal_name,
+                     signal_key = res.signal_key,
                      deadline = res.deadline }
         end
         local max = job.max_attempts or _cfg.max_attempts
@@ -2506,7 +2592,17 @@ function jobs.heartbeat(job)
         "UPDATE _hull_jobs SET claimed_at=?, updated_at=? "
         .. "WHERE id=? AND claim_token=? AND status='running'",
         { now, now, job.id, job.claim_token })
-    return (n or 0) > 0
+    if (n or 0) == 0 then return false end
+    -- The rest of the batch jobs.work claimed with this job shares its token
+    -- and waits, unstarted, for this one to finish. Extend their claim too:
+    -- otherwise a job that heartbeats past visibility_timeout left them
+    -- stale, and the reaper re-pended them - or, on their last attempt,
+    -- dead-lettered them as "worker lost" without their ever having run.
+    db.exec(
+        "UPDATE _hull_jobs SET claimed_at=? "
+        .. "WHERE claim_token=? AND status='running' AND id<>?",
+        { now, job.claim_token, job.id })
+    return true
 end
 
 --- List dead-lettered jobs (status='dead'), newest first. The ops entry point
@@ -2649,7 +2745,12 @@ function jobs.events(opts)
         for _, t in ipairs(opts.types) do ph[#ph + 1] = "?"; params[#params + 1] = t end
         where[#where + 1] = "type IN (" .. table.concat(ph, ",") .. ")"
     end
-    params[#params + 1] = math.min(tonumber(opts.limit) or 100, 1000)
+    -- 1..1000: a negative LIMIT is "no limit" on SQLite, and NaN / a fraction
+    -- is not an integer bind.
+    local limit = tonumber(opts.limit) or 100
+    if limit ~= limit then limit = 100 end
+    limit = math.floor(math.max(1, math.min(limit, 1000)))
+    params[#params + 1] = limit
     local rows = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events "
         .. "WHERE " .. table.concat(where, " AND ") .. " ORDER BY id DESC LIMIT ?", params)

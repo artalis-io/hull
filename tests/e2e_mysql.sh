@@ -632,6 +632,54 @@ if [ "$stot" -eq 2 ] && [ "$suniq" -eq 2 ]; then
 else
     echo "::error jobs strict fleet on MySQL: total=$stot uniq=$suniq (want 2/2)"; exit 1
 fi
+echo "=== jobs: audit 10 (batch-mate heartbeat, soft rank, disabled cron) on MySQL ==="
+jobs_reset_my
+A10DIR=$(mktemp -d)
+cat > "$A10DIR/a10.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ visibility_timeout = 1, events = true })
+  local ran = 0
+  jobs.handler("m1", function(job)
+    hull.sleep(2100); jobs.heartbeat(job); jobs.reap({ visibility_timeout = 1 })
+  end)
+  jobs.handler("m2", function() ran = ran + 1 end)
+  jobs.enqueue("m1", {}, { queue = "mate", priority = 10 })
+  local m2 = jobs.enqueue("m2", {}, { queue = "mate", max_attempts = 1 })
+  jobs.work({ queue = "mate", batch = 2, reap_interval = 3600 })
+  jobs.enqueue("rb", {}, { queue = "rq_b", concurrency_key = "S", concurrency = 1 })
+  jobs.enqueue("ra", {}, { queue = "rq_a", concurrency_key = "S", concurrency = 1 })
+  local ca = jobs.claim({ queue = "rq_a", batch = 1 })
+  hull.sleep(1100); jobs.heartbeat(ca[1])
+  local cb = jobs.claim({ queue = "rq_b", batch = 1 })
+  jobs.uncron("a10c"); jobs.cron("a10c", "*/5 * * * *", nil, { tz = "+05:30" })
+  ctx.stdout:write(("A10 mate=%s ran=%d rank_b=%d\n"):format(jobs.get(m2).status, ran, #cb))
+  return 0
+end)
+LUA
+cat > "$A10DIR/tick.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ events = true })
+  jobs._tick(); jobs._tick()
+  local ev = #jobs.events({ types = { "cron_disabled" } })
+  ctx.stdout:write(("A10CRON events=%d\n"):format(ev))
+  jobs.uncron("a10c")
+  return 0
+end)
+LUA
+a10out=$(./build/hull "$A10DIR/a10.lua" -d "$DSN" 2>/dev/null)
+docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -e \
+  "UPDATE _hull_cron SET spec='0x5 * * * *', next_run_at=1 WHERE name='a10c'" >/dev/null 2>&1 || true
+a10cron=$(./build/hull "$A10DIR/tick.lua" -d "$DSN" 2>/dev/null)
+case "$a10out|$a10cron" in
+    *"A10 mate=done ran=1 rank_b=0"*"A10CRON events=1"*)
+        echo "PASS: jobs heartbeat keeps batch-mates, soft rank survives a heartbeat, a broken cron is disabled (MySQL)"
+        rm -rf "$A10DIR" ;;
+    *)  echo "::error jobs audit 10 on MySQL: $a10out | $a10cron"; exit 1 ;;
+esac
 jobs_reset_my   # clean slate for the following phases
 
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
