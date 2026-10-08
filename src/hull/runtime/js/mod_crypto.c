@@ -26,6 +26,44 @@ static int js_crypto_charge(JSContext *ctx, size_t bytes)
     return hl_js_budget_charge(ctx, (uint64_t)bytes / 8);
 }
 
+/* Public-key operations cost far more than their bytes (audit 10, the twin
+ * of the Lua side's charge): an ed25519 sign / verify / keypair, an x25519
+ * or box (each a scalar multiplication), an ECDSA sign / verify ran in one
+ * call the interrupt handler counted as one step, and a loop of them held
+ * the event loop. Each costs HL_ASYM_OP_UNITS (2^14), charged before the
+ * work. RSA grows with the cube of the modulus: (bits/1024)^3 * 2^14,
+ * bits rounded up to a multiple of 1024 and capped at 16384 - 8 * 2^14 for
+ * a 2048-bit key. */
+#define HL_ASYM_OP_UNITS ((uint64_t)1 << 14)
+
+static uint64_t js_rsa_units(size_t bits)
+{
+    if (bits > 16384) bits = 16384;
+    uint64_t k = bits ? ((uint64_t)bits + 1023) / 1024 : 1;
+    return k * k * k * HL_ASYM_OP_UNITS;
+}
+
+/* The cost of a crypto.sign / crypto.verify under @p alg. The modulus is
+ * not known before mbedTLS parses the key, so it is estimated: for verify
+ * from the signature, which an RSA verify only accepts at the modulus's
+ * length (a different length is refused before any arithmetic); for sign
+ * from the private key PEM, whose DER holds about 4.5 modulus-sized numbers
+ * (n, d, p, q and the CRT values) - so bits ~= PEM length * 4/3, an upper
+ * estimate. */
+static uint64_t js_asym_units(HlCryptoAsymAlg alg, size_t sig_len,
+                              size_t pem_len, int signing)
+{
+    switch (alg) {
+    case HL_CRYPTO_ASYM_RS256:
+    case HL_CRYPTO_ASYM_RS384:
+    case HL_CRYPTO_ASYM_RS512:
+    case HL_CRYPTO_ASYM_PS256:
+        return js_rsa_units(signing ? pem_len / 3 * 4 : sig_len * 8);
+    default:
+        return HL_ASYM_OP_UNITS;
+    }
+}
+
 /* PBKDF2-HMAC-SHA256: each iteration is two SHA-256 compressions (128 bytes
  * of hashing) per 32-byte output block. Charged BEFORE the derivation:
  * verifyPassword takes the count from the stored string (up to
@@ -406,6 +444,8 @@ static JSValue js_crypto_ed25519_keypair(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     uint8_t pk[32], sk[64];
+    if (hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS))   /* audit 10 */
+        return JS_EXCEPTION;
     if (hl_cap_crypto_ed25519_keypair(pk, sk) != 0)
         return JS_ThrowInternalError(ctx, "ed25519 keypair generation failed");
     return js_keypair_object(ctx, pk, sizeof pk, sk, sizeof sk);
@@ -425,7 +465,8 @@ static JSValue js_crypto_ed25519_sign(JSContext *ctx, JSValueConst this_val,
         js_msg_free(ctx, &data);
         return JS_EXCEPTION;
     }
-    if (js_crypto_charge(ctx, data.view.len)) {
+    if (js_crypto_charge(ctx, data.view.len) ||
+        hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS)) {   /* audit 10 */
         js_msg_free(ctx, &data);
         js_msg_free(ctx, &sk);
         return JS_EXCEPTION;
@@ -459,7 +500,8 @@ static JSValue js_crypto_ed25519_verify(JSContext *ctx, JSValueConst this_val,
         js_msg_free(ctx, &sig);
         return JS_EXCEPTION;
     }
-    if (js_crypto_charge(ctx, data.view.len)) {
+    if (js_crypto_charge(ctx, data.view.len) ||
+        hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS)) {   /* audit 10 */
         js_msg_free(ctx, &data);
         js_msg_free(ctx, &sig);
         js_msg_free(ctx, &pk);
@@ -513,7 +555,8 @@ static JSValue js_crypto_sign(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "crypto.sign: data must be a buffer or a string");
     }
 
-    if (js_crypto_charge(ctx, data.view.len)) {
+    if (js_crypto_charge(ctx, data.view.len) ||
+        hl_js_budget_charge(ctx, js_asym_units(alg, 0, pk_len, 1))) {
         JS_FreeCString(ctx, pk);
         js_msg_free(ctx, &data);
         return JS_EXCEPTION;
@@ -561,6 +604,12 @@ static JSValue js_crypto_rsa_private_pem(JSContext *ctx, JSValueConst this_val,
         (const uint8_t *)m[3].view.data, m[3].view.len,
         (const uint8_t *)m[4].view.data, m[4].view.len,
     };
+    /* The key is completed and checked (a private-key operation): charged
+     * by its modulus (audit 10). */
+    if (hl_js_budget_charge(ctx, js_rsa_units(m[0].view.len * 8))) {
+        for (int i = 0; i < 5; i++) js_msg_free(ctx, &m[i]);
+        return JS_EXCEPTION;
+    }
     char pem[HL_CRYPTO_RSA_PEM_MAX];
     size_t pem_len = 0;
     int rc = hl_cap_crypto_rsa_private_pem(&parts, pem, sizeof pem, &pem_len);
@@ -617,7 +666,9 @@ static JSValue js_crypto_verify(JSContext *ctx, JSValueConst this_val,
 
     HlCryptoAsymAlg alg = hl_crypto_asym_alg_from_string(alg_str, alg_len);
     JSValue out;
-    if (js_crypto_charge(ctx, data_view.len)) {
+    if (js_crypto_charge(ctx, data_view.len) ||
+        (alg != HL_CRYPTO_ASYM_NONE &&
+         hl_js_budget_charge(ctx, js_asym_units(alg, sig_view.len, 0, 0)))) {
         out = JS_EXCEPTION;
     } else if (alg == HL_CRYPTO_ASYM_NONE) {
         out = JS_ThrowTypeError(ctx,
@@ -872,7 +923,8 @@ static JSValue js_crypto_box(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
     JSValue ret;
-    if (js_crypto_charge(ctx, msg.view.len)) {
+    if (js_crypto_charge(ctx, msg.view.len) ||
+        hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS)) {   /* audit 10 */
         ret = JS_EXCEPTION;
     } else if (msg.view.len > SIZE_MAX - HL_BOX_MACBYTES) {
         ret = JS_ThrowRangeError(ctx, "crypto.box: message too large");
@@ -918,7 +970,8 @@ static JSValue js_crypto_box_open(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
     JSValue ret = JS_NULL;
-    if (js_crypto_charge(ctx, ct.view.len)) {
+    if (js_crypto_charge(ctx, ct.view.len) ||
+        hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS)) {   /* audit 10 */
         ret = JS_EXCEPTION;
     } else if (ct.view.len >= HL_BOX_MACBYTES) {
         size_t msg_len = ct.view.len - HL_BOX_MACBYTES;
@@ -944,6 +997,8 @@ static JSValue js_crypto_box_keypair(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     uint8_t pk[32], sk[32];
+    if (hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS))   /* audit 10 */
+        return JS_EXCEPTION;
     if (hl_cap_crypto_box_keypair(pk, sk) != 0)
         return JS_ThrowInternalError(ctx, "box keypair generation failed");
     return js_keypair_object(ctx, pk, sizeof pk, sk, sizeof sk);
@@ -955,6 +1010,8 @@ static JSValue js_crypto_x25519_keypair(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     uint8_t pk[32], sk[32];
+    if (hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS))   /* audit 10 */
+        return JS_EXCEPTION;
     if (hl_cap_crypto_x25519_keypair(pk, sk) != 0)
         return JS_ThrowInternalError(ctx, "x25519 keypair generation failed");
     return js_keypair_object(ctx, pk, sizeof pk, sk, sizeof sk);
@@ -974,6 +1031,11 @@ static JSValue js_crypto_x25519(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     if (!js_fixed_arg(ctx, argv[1], &pk, 32, "x25519", "public key")) {
         js_msg_free(ctx, &sk);
+        return JS_EXCEPTION;
+    }
+    if (hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS)) {   /* audit 10 */
+        js_msg_free(ctx, &sk);
+        js_msg_free(ctx, &pk);
         return JS_EXCEPTION;
     }
     uint8_t shared[32];

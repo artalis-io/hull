@@ -51,6 +51,8 @@ typedef struct {
     KlHttpResponse *res;
     KlHttpRequest  *req;    /* its request: the Accept-Encoding it answers */
     HlReqLife      *life;   /* NULL: not tracked (always live) */
+    int             ct_hull; /* the Content-Type is the one a body call added
+                              * (res_headers.h, audit 10) */
 } HlJsResBox;
 
 /* The class id, for the finalizer (which has no context to look it up in). */
@@ -75,7 +77,8 @@ static const JSClassDef hl_response_class = {
  * returns JS_EXCEPTION (which with nothing thrown reached the app as `null`,
  * or as a stale error left pending earlier). */
 static KlHttpResponse *get_response_box(JSContext *ctx, JSValueConst this_val,
-                                        KlHttpRequest **req_out)
+                                        KlHttpRequest **req_out,
+                                        HlJsResBox **box_out)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     HlJsResBox *box = (HlJsResBox *)JS_GetOpaque(this_val,
@@ -89,12 +92,13 @@ static KlHttpResponse *get_response_box(JSContext *ctx, JSValueConst this_val,
         return NULL;
     }
     if (req_out) *req_out = box->req;
+    if (box_out) *box_out = box;
     return box->res;
 }
 
 static KlHttpResponse *get_response(JSContext *ctx, JSValueConst this_val)
 {
-    return get_response_box(ctx, this_val, NULL);
+    return get_response_box(ctx, this_val, NULL, NULL);
 }
 
 /* Room for one more "Name: value\r\n" in the response's headers, charged
@@ -130,16 +134,21 @@ static int res_set_header(JSContext *ctx, KlHttpResponse *res,
     return 0;
 }
 
-/* The Content-Type res.json / html / text set, unless the response already
- * has one: an app's res.header("Content-Type", ...) before res.text wins (as
- * the CSP does), and a second res.text no longer adds a second header - each
- * call used to append one (audit 9). */
+/* The Content-Type res.json / html / text set. An app's
+ * res.header("Content-Type", ...) wins (as the CSP does), and there is only
+ * ever one (audit 9) - but a Content-Type an earlier body call added is
+ * Hull's own and is replaced: res.html then res.json kept text/html for the
+ * JSON (audit 10). */
 static int res_default_content_type(JSContext *ctx, KlHttpResponse *res,
-                                    const char *what, const char *value)
+                                    HlJsResBox *box, const char *what,
+                                    const char *value)
 {
-    if (hl_res_header_has(res, "Content-Type"))
+    if (!hl_res_content_type_prepare(res, &box->ct_hull))
         return 0;
-    return res_set_header(ctx, res, what, "Content-Type", value);
+    if (res_set_header(ctx, res, what, "Content-Type", value))
+        return -1;
+    box->ct_hull = 1;
+    return 0;
 }
 
 /* A body set by res.json / html / text is copied out of the heap and may be
@@ -173,7 +182,8 @@ static JSValue js_res_status(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
-    KlHttpResponse *res = get_response(ctx, this_val);
+    HlJsResBox *box = NULL;
+    KlHttpResponse *res = get_response_box(ctx, this_val, NULL, &box);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 2)
@@ -193,6 +203,10 @@ static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, name);
         return JS_EXCEPTION;
     }
+    /* The app's Content-Type replaces one an earlier body call added
+     * (audit 10): one header, the app's. */
+    if (hl_res_is_content_type(name, name_len))
+        hl_res_drop_default_content_type(res, &box->ct_hull);
 
     /* Rejected for a CR or LF (the header-injection guard). Not named in the
      * log: the name may be the part carrying the CR/LF. */
@@ -211,7 +225,8 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     KlHttpRequest *req = NULL;
-    KlHttpResponse *res = get_response_box(ctx, this_val, &req);
+    HlJsResBox *box = NULL;
+    KlHttpResponse *res = get_response_box(ctx, this_val, &req, &box);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -250,7 +265,7 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
 
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
     if (res_charge_body(ctx, json_len) ||
-        res_default_content_type(ctx, res, "res.json", "application/json")) {
+        res_default_content_type(ctx, res, box, "res.json", "application/json")) {
         JS_FreeCString(ctx, json_str);
         return JS_EXCEPTION;
     }
@@ -274,7 +289,8 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     KlHttpRequest *req = NULL;
-    KlHttpResponse *res = get_response_box(ctx, this_val, &req);
+    HlJsResBox *box = NULL;
+    KlHttpResponse *res = get_response_box(ctx, this_val, &req, &box);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -287,7 +303,7 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;   /* a throwing toString: it was left pending */
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
     if (res_charge_body(ctx, html_len) ||
-        res_default_content_type(ctx, res, "res.html",
+        res_default_content_type(ctx, res, box, "res.html",
                                  "text/html; charset=utf-8")) {
         JS_FreeCString(ctx, html);
         return JS_EXCEPTION;
@@ -318,7 +334,8 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     KlHttpRequest *req = NULL;
-    KlHttpResponse *res = get_response_box(ctx, this_val, &req);
+    HlJsResBox *box = NULL;
+    KlHttpResponse *res = get_response_box(ctx, this_val, &req, &box);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -330,7 +347,7 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
     if (res_charge_body(ctx, text_len) ||
-        res_default_content_type(ctx, res, "res.text",
+        res_default_content_type(ctx, res, box, "res.text",
                                  "text/plain; charset=utf-8")) {
         JS_FreeCString(ctx, text);
         return JS_EXCEPTION;
@@ -356,7 +373,8 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
-    KlHttpResponse *res = get_response(ctx, this_val);
+    HlJsResBox *box = NULL;
+    KlHttpResponse *res = get_response_box(ctx, this_val, NULL, &box);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -374,6 +392,12 @@ static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
         if (needs_free && str) JS_FreeCString(ctx, str);
         return JS_EXCEPTION;
     }
+    /* The headers an earlier res.json / html / text left describe that
+     * body, not these bytes (audit 10): its gzip's Content-Encoding and
+     * Vary, and the Content-Type Hull chose for it. An app-set Content-Type
+     * stays. */
+    hl_res_body_reencode(res);
+    hl_res_drop_default_content_type(res, &box->ct_hull);
     int rc = kl_http_response_body_copy(res, (const char *)view.data, view.len);
     if (needs_free && str) JS_FreeCString(ctx, str);
     if (rc != 0)
@@ -475,6 +499,7 @@ JSValue hl_js_make_response_life(HlJS *js, KlHttpRequest *req,
     box->res = res;
     box->req = req;
     box->life = life;
+    box->ct_hull = 0;
     hl_req_life_retain(life);
     JS_SetOpaque(obj, box);
     return obj;
@@ -490,9 +515,9 @@ JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res)
  * js/async.c so those core objects hold no kl_http_response_* refs. */
 void hl_js_http_error_response(struct KlHttpResponse *res)
 {
-    kl_http_response_status(res, 500);
-    kl_http_response_header(res, "Content-Type", "text/plain");
-    kl_http_response_body_borrow(res, "Internal Server Error", 21);
+    /* Whatever the handler set is dropped: its Set-Cookie / Location, a
+     * second Content-Type (audit 10). */
+    hl_res_error_reset(res, 500, "Internal Server Error", 21);
 }
 
 /* Strong overrides: finalize + send a resumed request's response. Keeps ALL

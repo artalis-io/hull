@@ -276,7 +276,7 @@ corpus` = absent from Hull's application source; deferred. `js.syntax` = malform
 | **object destructuring** decls | **supported** (light) | present but sparse |
 | destructuring **parameters**, default params | **supported** | |
 | automatic semicolon insertion | **supported** | required to parse the corpus at all |
-| optional chaining `?.`, nullish coalescing `??` | **supported** | `verify.js:79`, `template.js:79` |
+| optional chaining `?.`, nullish coalescing `??` | **supported** | `template.js:79` |
 | top-level `await` (module) | **supported** | one fixture uses `await import` |
 | generators / `yield`, async generators | **not-in-corpus → js.unsupported** | none found |
 | private class fields `#x`, static members | **not-in-corpus → js.unsupported** | none found |

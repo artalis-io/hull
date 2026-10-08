@@ -924,6 +924,13 @@ void JS_SetHostPromiseRejectionTracker(JSRuntime *rt, JSHostPromiseRejectionTrac
 /* return != 0 if the JS code needs to be interrupted */
 typedef int JSInterruptHandler(JSRuntime *rt, void *opaque);
 void JS_SetInterruptHandler(JSRuntime *rt, JSInterruptHandler *cb, void *opaque);
+/* HULL PATCH 0005: work done inside one step - a builtin scanning, comparing
+   or copying a large operand, an allocation - reported in instruction
+   units. Return != 0 when the run is over its budget: the next step then
+   polls the interrupt handler (and a builtin looping over an unbounded
+   length throws at once). See Hull's docs/quickjs_patches.md. */
+typedef int JSWorkHandler(JSRuntime *rt, void *opaque, uint64_t units);
+void JS_SetWorkHandler(JSRuntime *rt, JSWorkHandler *cb, void *opaque);
 /* if can_block is TRUE, Atomics.wait() can be used */
 void JS_SetCanBlock(JSRuntime *rt, JS_BOOL can_block);
 /* select which debug info is stripped from the compiled code */

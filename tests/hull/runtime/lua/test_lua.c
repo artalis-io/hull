@@ -9396,5 +9396,127 @@ UTEST(lua_audit10, nested_test_request_keeps_the_case_budget_and_txn)
     cleanup_lua_caps();
 }
 #endif
+/* ── Audit 10: the shared response-header fixes, Lua side ─────────────── */
+
+#include "hull/http_feature.h"   /* hl_lua_http_error_response */
+#include <strings.h>             /* strncasecmp */
+
+/* How many @p name headers the response carries (case-insensitive). */
+static int a10_header_count(const KlHttpResponse *res, const char *name)
+{
+    int n = 0;
+    size_t nl = strlen(name);
+    const char *p = res->hdr_buf, *end = res->hdr_buf + res->hdr_len;
+    while (p && p < end) {
+        if ((size_t)(end - p) > nl && p[nl] == ':' && strncasecmp(p, name, nl) == 0)
+            n++;
+        const char *eol = memchr(p, '\n', (size_t)(end - p));
+        if (!eol) break;
+        p = eol + 1;
+    }
+    return n;
+}
+
+static int a10_headers_contain(const KlHttpResponse *res, const char *needle)
+{
+    if (!res->hdr_buf) return 0;
+    char *copy = malloc(res->hdr_len + 1);
+    if (!copy) return 0;
+    memcpy(copy, res->hdr_buf, res->hdr_len);
+    copy[res->hdr_len] = 0;
+    int found = strstr(copy, needle) != NULL;
+    free(copy);
+    return found;
+}
+
+/* M (#712 regression): res:json / html / text kept the FIRST Content-Type,
+ * whoever set it - res:html then res:json sent the JSON as text/html. Hull's
+ * own default is replaced by the next body call; an app-set one stays; there
+ * is always exactly one. res:bytes drops a default an earlier call left. */
+UTEST(lua_audit10, a_body_call_replaces_hulls_own_content_type)
+{
+    static const struct { const char *body, *want; } cases[] = {
+        { "res:html('<p>') res:json({ a = 1 })",
+          "Content-Type: application/json\r\n" },
+        { "res:json(1) res:text('x')",
+          "Content-Type: text/plain; charset=utf-8\r\n" },
+        { "res:header('Content-Type', 'text/csv') res:text('a') res:json(1)",
+          "Content-Type: text/csv\r\n" },
+        { "res:text('a') res:header('Content-Type', 'image/png') res:bytes('\\0\\1')",
+          "Content-Type: image/png\r\n" },
+        { "res:html('<p>') res:bytes('\\0\\1')", NULL },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        lua_State *L = lua_rt.L;
+        char code[512];
+        snprintf(code, sizeof code,
+            "app.manifest({modules = {'hull/http-server@1'}})\n"
+            "app.use('*', '/*', function(req, res) %s return 1 end)\n",
+            cases[i].body);
+        ASSERT_EQ(luaL_dostring(L, code), LUA_OK);
+        KlAllocator alloc = kl_allocator_default();
+        KlHttpResponse res;
+        ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+        KlHttpRequest req = {0};
+        EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt,
+                      first_mw_handler_id(L, 1), &req, &res), 1);
+        EXPECT_EQ_MSG(a10_header_count(&res, "Content-Type"),
+                      cases[i].want ? 1 : 0, cases[i].body);
+        if (cases[i].want)
+            EXPECT_TRUE_MSG(a10_headers_contain(&res, cases[i].want), cases[i].body);
+        free_lua_req_ctx(&req);
+        kl_http_response_free(&res);
+        lua_settop(L, 0);
+        cleanup_lua();
+    }
+}
+
+/* L: the 500 a failed handler gets kept every header it had set (a
+ * Set-Cookie, a Location, a second Content-Type), and res:bytes after a
+ * gzipped body kept the gzip's Content-Encoding / Vary. */
+UTEST(lua_audit10, error_response_and_bytes_drop_stale_headers)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  res:header('Set-Cookie', 'sid=1') res:header('Location', '/x')\n"
+        "  res:html('<p>') return 1 end)\n"
+        "app.use('*', '/*', function(req, res) res:bytes('12345678') return 1 end)\n"),
+        LUA_OK);
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt,
+                  first_mw_handler_id(L, 1), &req, &res), 1);
+    hl_lua_http_error_response(&res);
+    EXPECT_EQ(res.status, 500);
+    EXPECT_EQ(a10_header_count(&res, "Set-Cookie"), 0);
+    EXPECT_EQ(a10_header_count(&res, "Location"), 0);
+    EXPECT_EQ(a10_header_count(&res, "Content-Type"), 1);
+    EXPECT_TRUE(a10_headers_contain(&res, "Content-Type: text/plain\r\n"));
+    free_lua_req_ctx(&req);
+    kl_http_response_free(&res);
+
+    KlHttpResponse res2;
+    ASSERT_EQ(kl_http_response_init(&res2, &alloc), 0);
+    ASSERT_EQ(kl_http_response_header(&res2, "Content-Encoding", "gzip"), 0);
+    ASSERT_EQ(kl_http_response_header(&res2, "Vary", "Accept-Encoding"), 0);
+    KlHttpRequest req2 = {0};
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt,
+                  first_mw_handler_id(L, 2), &req2, &res2), 1);
+    EXPECT_EQ(a10_header_count(&res2, "Content-Encoding"), 0);
+    EXPECT_EQ(a10_header_count(&res2, "Vary"), 0);
+    EXPECT_EQ(res2.body_len, (size_t)8);
+    free_lua_req_ctx(&req2);
+    kl_http_response_free(&res2);
+    lua_settop(L, 0);
+    cleanup_lua();
+}
 
 UTEST_MAIN();

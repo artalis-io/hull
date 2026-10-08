@@ -212,8 +212,10 @@ to a later part)` (both runtimes; JS throws synchronously, and a
 `chunks()` iterator of such a part throws on its next `next()`). They used
 to read the CURRENT part's body, consuming the bytes the next `read()` was
 meant to get (audit 9). A part that was already read to its end just
-returns empty. Its `name` / `filename` / content type still reflect the
-current part, so read them before moving on.
+returns empty. Its `name` / `filename` / content type are its own: they are
+copied when the part is made, so a part kept past its loop step still reports
+its own metadata (they used to read the iterator's CURRENT part, so a stashed
+part named the next one - audit 10).
 
 In practice this is the natural shape of a `for ... of` loop, so it
 takes effort to misuse. Don't stash the part in an outer-scope

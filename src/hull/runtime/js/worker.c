@@ -66,7 +66,10 @@ static void js_worker_destructor(void *ptr)
 {
     if (!ptr) return;
     HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)ptr;
-    if (wctx->rt) JS_FreeRuntime(wctx->rt);
+    if (wctx->rt) {
+        JS_SetWorkHandler(wctx->rt, NULL, NULL);
+        JS_FreeRuntime(wctx->rt);
+    }
     free(wctx);
 }
 
@@ -94,19 +97,32 @@ static int js_worker_interrupt(JSRuntime *rt, void *opaque)
     return wctx->tripped;
 }
 
-#ifdef HL_ENABLE_DB
-/* A dispatch's SQL is charged to the dispatch (cap/db_budget.h). */
-static int js_worker_db_charge(void *ud, int64_t units)
+/* Charge @p units to the dispatch; 1 once it is (stickily) over. */
+static int js_worker_charge(HlJsWorkerCtx *wctx, uint64_t units)
 {
-    HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)ud;
     if (wctx->tripped)
         return 1;
-    wctx->instructions = units > INT64_MAX - wctx->instructions
-                         ? INT64_MAX : wctx->instructions + units;
+    wctx->instructions = units > (uint64_t)(INT64_MAX - wctx->instructions)
+                         ? INT64_MAX : wctx->instructions + (int64_t)units;
     if (wctx->max_instructions > 0 &&
         wctx->instructions > wctx->max_instructions)
         wctx->tripped = 1;
     return wctx->tripped;
+}
+
+/* Work done inside one step (QuickJS HULL PATCH 0005; runtime.c). */
+static int js_worker_work(JSRuntime *rt, void *opaque, uint64_t units)
+{
+    (void)rt;
+    return js_worker_charge((HlJsWorkerCtx *)opaque, units);
+}
+
+#ifdef HL_ENABLE_DB
+/* A dispatch's SQL is charged to the dispatch (cap/db_budget.h). */
+static int js_worker_db_charge(void *ud, int64_t units)
+{
+    return js_worker_charge((HlJsWorkerCtx *)ud,
+                            units > 0 ? (uint64_t)units : 0);
 }
 #endif
 
@@ -125,6 +141,7 @@ static HlJsWorkerCtx *get_js_worker_rt(void)
         return NULL;
     }
     JS_SetInterruptHandler(wctx->rt, js_worker_interrupt, wctx);
+    JS_SetWorkHandler(wctx->rt, js_worker_work, wctx);
     pthread_setspecific(js_worker_key, wctx);
     return wctx;
 }
@@ -142,7 +159,10 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
     JS_UpdateStackTop(wctx->rt);
     wctx->instructions = 0;
     wctx->tripped = 0;
-    wctx->max_instructions = op->max_instructions;
+    /* Unlimited while the context is set up: its allocations are charged
+     * (QuickJS HULL PATCH 0005), and a small limit tripped in Hull's own
+     * setup. The dispatch's limit applies from the end of it. */
+    wctx->max_instructions = 0;
 
     JSContext *ctx = JS_NewContext(wctx->rt);
     if (!ctx) return NULL;
@@ -155,6 +175,17 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
     JSAtom fn_atom = JS_NewAtom(ctx, "Function");
     JS_DeleteProperty(ctx, global, fn_atom, 0);
     JS_FreeAtom(ctx, fn_atom);
+    /* JS_NewContext adds WeakRef / FinalizationRegistry; the app runtime
+     * never has them (its intrinsics are listed in runtime.c), and a
+     * cleanup callback runs whenever a GC happens to find its target -
+     * inside whatever code is running then (audit 10). */
+    static const char *const gc_observers[] = { "WeakRef",
+                                                "FinalizationRegistry" };
+    for (size_t i = 0; i < sizeof gc_observers / sizeof gc_observers[0]; i++) {
+        JSAtom a = JS_NewAtom(ctx, gc_observers[i]);
+        JS_DeleteProperty(ctx, global, a, 0);
+        JS_FreeAtom(ctx, a);
+    }
     JS_FreeValue(ctx, global);
     if (hl_js_poison_code_constructors(ctx) != 0) {
         log_error("[hull:worker] could not disable the Function constructors");
@@ -172,6 +203,8 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
             }
         }
     }
+    wctx->instructions = 0;
+    wctx->max_instructions = op->max_instructions;
     return ctx;
 }
 

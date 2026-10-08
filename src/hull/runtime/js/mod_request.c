@@ -50,6 +50,7 @@
 #include <keel/http_body_reader_multipart.h>
 #include <keel/http_connection.h>
 #include <keel/http_request.h>
+#include "hull/shared/res_headers.h" /* hl_res_error_reset */
 
 #include "quickjs.h"
 #include "internal.h"   /* HlJsRunLink and the run helpers */
@@ -125,6 +126,11 @@ typedef struct {
      * L5): a Part the iterator has moved past is not the current one, and
      * its read() / chunks() consumed the NEXT part's body. */
     unsigned    gen;
+    /* Its metadata, snapshotted when the Part is made (audit 10): the
+     * getters read the iterator's current part, so a Part kept past the
+     * loop step reported the NEXT part's name / filename / contentType.
+     * Strings (or null for filename / contentType). */
+    JSValue     name, filename, content_type;
 } HlJsMpPart;
 
 /* What read() / chunks() of a Part the iterator has moved past raise (the
@@ -325,7 +331,19 @@ static JSValue make_js_part(JSContext *ctx, HlJsMpIter *it)
     p->iter = hl_mp_iter_ref(it);
     p->spent = 0;
     p->gen = it->gen;
-    JS_SetOpaque(obj, p);
+    p->name = it->name ? JS_NewStringLen(ctx, it->name, it->name_len)
+                       : JS_NewString(ctx, "");
+    p->filename = it->filename
+        ? JS_NewStringLen(ctx, it->filename, it->filename_len) : JS_NULL;
+    p->content_type = it->content_type
+        ? JS_NewStringLen(ctx, it->content_type, it->content_type_len)
+        : JS_NULL;
+    JS_SetOpaque(obj, p);   /* the finalizer frees what was made */
+    if (JS_IsException(p->name) || JS_IsException(p->filename) ||
+        JS_IsException(p->content_type)) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
     return obj;
 }
 
@@ -738,9 +756,8 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         js->active_req = NULL;
         if (conn && !hl_js_conn_held_elsewhere(js, conn)) {
             KlHttpResponse *res = kl_http_conn_response(conn);
-            kl_http_response_status(res, 500);
-            kl_http_response_header(res, "Content-Type", "text/plain");
-            kl_http_response_body_borrow(res, "Internal Server Error", 21);
+            /* the handler's own headers go (audit 10) */
+            hl_res_error_reset(res, 500, "Internal Server Error", 21);
             kl_http_request_send_response(jc->req);
         }
     } else if (!JS_IsUndefined(jc->link.handler_promise)) {
@@ -1208,9 +1225,7 @@ static JSValue js_part_get_name(JSContext *ctx, JSValueConst this_val,
     (void)argc; (void)argv;
     HlJsMpPart *p = JS_GetOpaque2(ctx, this_val, hl_mp_part_class_id);
     if (!p) return JS_EXCEPTION;
-    if (p->iter->name)
-        return JS_NewStringLen(ctx, p->iter->name, p->iter->name_len);
-    return JS_NewString(ctx, "");
+    return JS_DupValue(ctx, p->name);   /* this part's, snapshotted */
 }
 
 static JSValue js_part_get_filename(JSContext *ctx, JSValueConst this_val,
@@ -1219,9 +1234,7 @@ static JSValue js_part_get_filename(JSContext *ctx, JSValueConst this_val,
     (void)argc; (void)argv;
     HlJsMpPart *p = JS_GetOpaque2(ctx, this_val, hl_mp_part_class_id);
     if (!p) return JS_EXCEPTION;
-    if (p->iter->filename)
-        return JS_NewStringLen(ctx, p->iter->filename, p->iter->filename_len);
-    return JS_NULL;
+    return JS_DupValue(ctx, p->filename);
 }
 
 static JSValue js_part_get_content_type(JSContext *ctx, JSValueConst this_val,
@@ -1230,10 +1243,7 @@ static JSValue js_part_get_content_type(JSContext *ctx, JSValueConst this_val,
     (void)argc; (void)argv;
     HlJsMpPart *p = JS_GetOpaque2(ctx, this_val, hl_mp_part_class_id);
     if (!p) return JS_EXCEPTION;
-    if (p->iter->content_type)
-        return JS_NewStringLen(ctx, p->iter->content_type,
-                                 p->iter->content_type_len);
-    return JS_NULL;
+    return JS_DupValue(ctx, p->content_type);
 }
 
 /* ── Finalizers ─────────────────────────────────────────────────────── */
@@ -1250,6 +1260,9 @@ static void js_part_finalizer(JSRuntime *rt, JSValue val)
     (void)rt;
     HlJsMpPart *p = JS_GetOpaque(val, hl_mp_part_class_id);
     if (!p) return;
+    JS_FreeValueRT(rt, p->name);
+    JS_FreeValueRT(rt, p->filename);
+    JS_FreeValueRT(rt, p->content_type);
     HlAllocator *a = p->iter->alloc;
     hl_mp_iter_unref(p->iter);
     hl_alloc_free(a, p, sizeof(*p));

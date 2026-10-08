@@ -92,6 +92,18 @@ static int js_budget_add(HlJS *js, uint64_t units)
     return js->budget_tripped;
 }
 
+/* Work a builtin or the allocator does inside one step (QuickJS HULL PATCH
+ * 0005): a String.prototype.indexOf over a large string, a typed-array
+ * fill, every block allocated (1 unit per 64 bytes, as Lua patch 0004).
+ * Called from inside QuickJS, so it only counts; once over, QuickJS makes
+ * the next step poll hl_js_interrupt_handler, which raises (sticky) - and a
+ * builtin looping over an unbounded length throws from inside its loop. */
+static int hl_js_work_handler(JSRuntime *rt, void *opaque, uint64_t units)
+{
+    (void)rt;
+    return js_budget_add((HlJS *)opaque, units);
+}
+
 #ifdef HL_ENABLE_DB
 /* SQL work, charged by the SQLite progress handler (cap/db_budget.h) in the
  * interrupt handler's units: a statement runs inside one binding call, where
@@ -187,6 +199,48 @@ static char *hl_js_module_normalize(JSContext *ctx,
             JS_ThrowReferenceError(ctx,
                 "module '%s' is internal to the Hull stdlib", name);
             return NULL;
+        }
+        /* A hull: name outside the registry (audit 10; the twin of the Lua
+         * require gate in mod_fs.c): a sub-module of a registered one is
+         * gated by that parent's declaration, and a name that is neither a
+         * registry module nor part of one is not the app's to import - the
+         * loader served any stdlib file the registry does not list
+         * (hull:verify) with no declaration at all. */
+        if (js && strncmp(base_name ? base_name : "", "hull:", 5) != 0 &&
+            !hl_module_registry_find_runtime(name, ':')) {
+            const HlModuleSpec *pspec = NULL;
+            char parent[256];
+            size_t nl = strlen(name);
+            if (nl < sizeof parent) {
+                memcpy(parent, name, nl + 1);
+                char *colon;
+                while (!pspec && (colon = strrchr(parent, ':')) != NULL &&
+                       colon > parent + 4) {
+                    *colon = '\0';
+                    pspec = hl_module_registry_find_runtime(parent, ':');
+                }
+            }
+            if (!pspec) {
+                /* A name the stdlib does not ship is left to the loader's
+                 * "unknown hull module" (with its did-you-mean hint). */
+                if (js->base.platform_vfs &&
+                    hl_vfs_find(js->base.platform_vfs, name)) {
+                    JS_ThrowReferenceError(ctx,
+                        "module '%s' is not a Hull module an app can import "
+                        "(see `hull modules available`)", name);
+                    return NULL;
+                }
+            } else if (js->base.module_set) {
+                if (!hl_module_set_contains_spec(js->base.module_set, pspec)) {
+                    JS_ThrowReferenceError(ctx,
+                        "module '%s' is part of '%s', which is not declared "
+                        "in app.manifest (add \"%s@%d\" to modules)",
+                        name, pspec->name, pspec->name, (int)pspec->api_major);
+                    return NULL;
+                }
+            } else {
+                hl_import_tracker_record(&js->base, pspec->name);
+            }
         }
         return js_strdup(ctx, name);
     }
@@ -920,6 +974,7 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
 
     /* Set interrupt handler for gas metering */
     JS_SetInterruptHandler(js->rt, hl_js_interrupt_handler, js);
+    JS_SetWorkHandler(js->rt, hl_js_work_handler, js);
 
     /* The code-cache seal key, read now - before the kernel sandbox
      * narrows file access (see hl_runtime_cache_seal_prepare). */
@@ -950,6 +1005,11 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     JS_AddIntrinsicMapSet(js->ctx);
     JS_AddIntrinsicTypedArrays(js->ctx);
     JS_AddIntrinsicPromise(js->ctx);
+    /* NOT JS_AddIntrinsicWeakRef: WeakRef / FinalizationRegistry let app
+     * code observe the collector, and a cleanup callback runs whenever a
+     * GC finds its target - inside whatever request, timer or callback is
+     * running then, on that run's budget and connection (audit 10). Nothing
+     * in the stdlib uses them; the worker.dispatch VM deletes them too. */
 
     /* Keep the original Function.prototype.toString for worker.dispatch -
      * before the sandbox removes the Function global, and before app code
@@ -1471,6 +1531,7 @@ void hl_js_free(HlJS *js)
         js->ctx = NULL;
     }
     if (js->rt) {
+        JS_SetWorkHandler(js->rt, NULL, NULL);
         JS_FreeRuntime(js->rt);
         js->rt = NULL;
     }

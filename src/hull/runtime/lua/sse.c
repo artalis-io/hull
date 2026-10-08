@@ -23,6 +23,7 @@
 
 #include <keel/keel.h>
 #include <keel/http_sse.h>
+#include "hull/shared/res_headers.h" /* hl_res_error_reset */
 
 #include <sh_arena.h>
 
@@ -114,9 +115,7 @@ void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
         lua->active_conn = NULL;
         lua->active_req = NULL;
         if (!stream_ud) {
-            kl_http_response_status(res, 500);
-            kl_http_response_header(res, "Content-Type", "text/plain");
-            kl_http_response_body_borrow(res, "SSE init failed", 15);
+            hl_res_error_reset(res, 500, "SSE init failed", 15);   /* audit 10 */
         }
         return;
     }

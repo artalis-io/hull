@@ -154,3 +154,78 @@ error object for the duration of the call (`JS_DupValue` / `JS_FreeValue`).
 
 **Guard:** `fuzz/corpus_js_source/regress_backtrace_oom_uaf`, the fuzzer's
 crashing input, replayed by the per-PR JS-source fuzz job.
+
+## Patch 0005 - charge work done inside one step
+
+**Files:** `vendor/quickjs/quickjs.h` (`JSWorkHandler`, `JS_SetWorkHandler`),
+`vendor/quickjs/quickjs.c` (the `work_*` runtime fields, `js_work_flush` /
+`js_work_add` / `js_work_check`, and their call sites below)
+**Found by:** the tenth runtime audit (H2)
+**Upstream:** Hull-specific; the model is Lua patch 0004
+([lua_patches.md](lua_patches.md)).
+
+The instruction limit counts interrupt polls, one per
+`JS_INTERRUPT_COUNTER_INIT` calls / backward jumps. A builtin that scans,
+compares or copies a large operand does all of that inside one step, so the
+limit did not bound a run's wall time:
+
+```js
+const s = 'a'.repeat(1 << 24);
+for (;;) s.indexOf('b');                              // 16 MB per step
+Array.prototype.indexOf.call({ length: 2 ** 53 - 1 }, 1);   // never returns
+```
+
+The patch adds a work handler next to the interrupt handler
+(`JS_SetWorkHandler(rt, cb, opaque)`). Work is counted in 1/64 instruction
+units ("bytes"): a byte scanned, compared, hashed or allocated costs one, an
+element a generic array method visits `JS_WORK_ELEM` (64, one unit). Charges
+accumulate in the runtime and are handed to the handler in batches of 1024
+units (`JS_WORK_BATCH`); the handler (Hull's `js_budget_add`) adds them to the
+run's count and answers whether the run is over. Two kinds of charge:
+
+- **Deferred** (`js_work_add`): when the handler reports the run over, every
+  context's `interrupt_counter` is set to 1, so the very next call or
+  backward jump polls the interrupt handler, which is sticky in Hull and
+  throws the uncatchable interrupt (as patch 0003 does after an interrupt).
+  No error is raised where the charge is made, so it is safe anywhere -
+  inside the allocator included. Used where the work is bounded by the heap
+  and a trip can wait for the call to finish: every block the allocator
+  hands out or grows (`js_malloc_rt`, `js_realloc_rt`: copies, string
+  building, array growth, JSON output, typed-array allocation); a string
+  equality / ordering (`js_string_eq`, `js_string_compare`,
+  `js_string_rope_compare` - the bytes compared); a string made an atom
+  (`__JS_NewAtom` hashes it whole) or a Map / Set key (`map_hash_key`);
+  `trim`, `isWellFormed` / `toWellFormed`; a typed array's `fill`,
+  `copyWithin`, `set`, `reverse`, `slice` and `sort` (about n log2 n
+  comparisons, 8 per unit), and `indexOf` / `lastIndexOf` / `includes` (the
+  elements it actually scanned); `ArrayBuffer.prototype.slice`;
+  `JSON.parse` (its input, scanned once); a fast array's `shift` (its
+  memmove) and `reverse`.
+- **Checked** (`js_work_check`): charges, and when that finds the run over,
+  throws the interrupt at once (`JS_ThrowInterrupted`) so the builtin
+  returns through its error path. Used in loops no heap bounds: every
+  generic array method's per-index loop (`indexOf`, `lastIndexOf`,
+  `includes`, `fill`, `join` / `toString`, `reverse`, `slice` / `splice`,
+  `concat`, `with`, `toReversed`, `toSpliced`, `toSorted`, `flat` /
+  `flatMap`, `every` / `some` / `forEach` / `map` / `filter` - a sparse
+  array calls no callback - `reduce` / `reduceRight`, `Array.from`, and
+  `JS_CopySubArray`, behind `shift` / `unshift` / `splice` /
+  `copyWithin`), a typed array's generic `join` / `slice` / `set` loops,
+  each `sort` comparison, `JSON.stringify`'s array and object loops, and
+  the string searches (`indexOf` / `lastIndexOf`, `includes` /
+  `startsWith` / `endsWith`, and `string_indexof` behind `split` /
+  `replace` / `replaceAll`), which are quadratic in the worst case
+  (`('a'.repeat(1 << 16)).indexOf('a'.repeat(1 << 15) + 'b')`): each
+  position charges the characters it compared. `string_cmp` reports that
+  count, and `string_indexof` takes the context and returns -2 with the
+  interrupt pending.
+
+The allocator charge is in the core (`js_malloc_rt` / `js_realloc_rt`), not a
+custom `JSMallocFunctions` table, so it can make the next step poll (an
+allocator has no context) and keeps QuickJS's own slab allocator and memory
+accounting. A runtime with no work handler pays one test per charge and
+behaves as upstream (the JS source frontend's tooling session sets none).
+
+**Guard:** `tests/hull/runtime/js/test_js.c`,
+`js_audit10.builtin_work_is_charged` (each case trips a 1M budget within
+seconds; several never return without the patch).

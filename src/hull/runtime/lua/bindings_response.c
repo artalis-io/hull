@@ -51,14 +51,21 @@
 typedef struct {
     KlHttpResponse *res;
     HlReqLife      *life;   /* NULL: not tracked (always live) */
+    int             ct_hull; /* the Content-Type is the one a body call added
+                              * (res_headers.h, audit 10) */
 } HlLuaResUD;
 
-static KlHttpResponse *check_response(lua_State *L, int idx)
+static HlLuaResUD *check_response_ud(lua_State *L, int idx)
 {
     HlLuaResUD *ud = (HlLuaResUD *)luaL_checkudata(L, idx, HL_RESPONSE_MT);
     if (!ud->res || !hl_req_life_live(ud->life))
         luaL_error(L, "res: the request this response belongs to has finished");
-    return ud->res;
+    return ud;
+}
+
+static KlHttpResponse *check_response(lua_State *L, int idx)
+{
+    return check_response_ud(L, idx)->res;
 }
 
 static int lua_res_gc(lua_State *L)
@@ -95,15 +102,18 @@ static void res_set_header(lua_State *L, KlHttpResponse *res,
     (void)kl_http_response_header(res, name, value);
 }
 
-/* The Content-Type res:json / html / text set, unless the response already
- * has one: an app's res:header("Content-Type", ...) before res:text wins (as
- * the CSP below), and a second res:text no longer adds a second header -
- * each call used to append one (audit 9). */
-static void res_default_content_type(lua_State *L, KlHttpResponse *res,
+/* The Content-Type res:json / html / text set. An app's
+ * res:header("Content-Type", ...) wins (as the CSP below), and there is only
+ * ever one (audit 9) - but a Content-Type an earlier body call added is
+ * Hull's own and is replaced: res:html then res:json kept text/html for the
+ * JSON (audit 10). */
+static void res_default_content_type(lua_State *L, HlLuaResUD *ud,
                                      const char *what, const char *value)
 {
-    if (!hl_res_header_has(res, "Content-Type"))
-        res_set_header(L, res, what, "Content-Type", value);
+    if (hl_res_content_type_prepare(ud->res, &ud->ct_hull)) {
+        res_set_header(L, ud->res, what, "Content-Type", value);
+        ud->ct_hull = 1;
+    }
 }
 
 /* A body set by res:json / res:html / res:text is copied out of the heap and
@@ -128,11 +138,16 @@ static int lua_res_status(lua_State *L)
 /* res:header(name, value) */
 static int lua_res_header(lua_State *L)
 {
-    KlHttpResponse *res = check_response(L, 1);
+    HlLuaResUD *ud = check_response_ud(L, 1);
+    KlHttpResponse *res = ud->res;
     size_t name_len, value_len;
     const char *name = luaL_checklstring(L, 2, &name_len);
     const char *value = luaL_checklstring(L, 3, &value_len);
     res_header_room(L, res, "res:header", name_len, value_len);
+    /* The app's Content-Type replaces one an earlier body call added
+     * (audit 10): one header, the app's. */
+    if (hl_res_is_content_type(name, name_len))
+        hl_res_drop_default_content_type(res, &ud->ct_hull);
     /* Rejected for a CR or LF (the header-injection guard). Not named in the
      * log: the name may be the part carrying the CR/LF. */
     if (kl_http_response_header(res, name, value) != 0)
@@ -145,7 +160,8 @@ static int lua_res_header(lua_State *L)
 /* res:json(data, code?) - uses json.encode() from Lua stdlib */
 static int lua_res_json(lua_State *L)
 {
-    KlHttpResponse *res = check_response(L, 1);
+    HlLuaResUD *ud = check_response_ud(L, 1);
+    KlHttpResponse *res = ud->res;
     HlLua *hlua = get_hl_lua_from_L(L);
 
     /* Optional status code */
@@ -172,7 +188,7 @@ static int lua_res_json(lua_State *L)
         lua_pop(L, 2);
         return luaL_error(L, "res:json - json.encode did not return a string");
     }
-    res_default_content_type(L, res, "res:json", "application/json");
+    res_default_content_type(L, ud, "res:json", "application/json");
     res_charge_body(L, json_len);
     hl_res_body_reencode(res);
     if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
@@ -188,11 +204,12 @@ static int lua_res_json(lua_State *L)
 /* res:html(string) */
 static int lua_res_html(lua_State *L)
 {
-    KlHttpResponse *res = check_response(L, 1);
+    HlLuaResUD *ud = check_response_ud(L, 1);
+    KlHttpResponse *res = ud->res;
     HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
-    res_default_content_type(L, res, "res:html",
+    res_default_content_type(L, ud, "res:html",
                              "text/html; charset=utf-8");
     /* Skip the default CSP if middleware already wrote one - two CSP
      * headers cause browsers to enforce the strict intersection
@@ -214,11 +231,12 @@ static int lua_res_html(lua_State *L)
 /* res:text(string) */
 static int lua_res_text(lua_State *L)
 {
-    KlHttpResponse *res = check_response(L, 1);
+    HlLuaResUD *ud = check_response_ud(L, 1);
+    KlHttpResponse *res = ud->res;
     HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
-    res_default_content_type(L, res, "res:text",
+    res_default_content_type(L, ud, "res:text",
                              "text/plain; charset=utf-8");
     res_charge_body(L, len);
     hl_res_body_reencode(res);
@@ -244,10 +262,16 @@ static int lua_res_text(lua_State *L)
  * a true bytes API. */
 static int lua_res_bytes(lua_State *L)
 {
-    KlHttpResponse *res = check_response(L, 1);
+    HlLuaResUD *ud = check_response_ud(L, 1);
+    KlHttpResponse *res = ud->res;
     size_t len;
     const char *bytes = luaL_checklstring(L, 2, &len);
     lua_hlwork(L, 0, len);   /* the copy (audit 9 M2) */
+    /* The headers an earlier res:json / html / text left describe that body,
+     * not these bytes (audit 10): its gzip's Content-Encoding and Vary, and
+     * the Content-Type Hull chose for it. An app-set Content-Type stays. */
+    hl_res_body_reencode(res);
+    hl_res_drop_default_content_type(res, &ud->ct_hull);
     if (kl_http_response_body_copy(res, bytes, len) != 0)
         return luaL_error(L, "res:bytes: out of memory");
     return 0;
@@ -309,6 +333,7 @@ void hl_lua_make_response_life(lua_State *L, KlHttpResponse *res,
     HlLuaResUD *ud = (HlLuaResUD *)lua_newuserdatauv(L, sizeof *ud, 0);
     ud->res = res;
     ud->life = life;
+    ud->ct_hull = 0;
     hl_req_life_retain(life);
     luaL_setmetatable(L, HL_RESPONSE_MT);
 }
@@ -323,9 +348,9 @@ void hl_lua_make_response(lua_State *L, KlHttpResponse *res)
  * lua/async.c so those core objects hold no kl_http_response_* refs. */
 void hl_lua_http_error_response(struct KlHttpResponse *res)
 {
-    kl_http_response_status(res, 500);
-    kl_http_response_header(res, "Content-Type", "text/plain");
-    kl_http_response_body_borrow(res, "Internal Server Error", 21);
+    /* Whatever the handler set is dropped: its Set-Cookie / Location, a
+     * second Content-Type (audit 10). */
+    hl_res_error_reset(res, 500, "Internal Server Error", 21);
 }
 
 /* Strong overrides: finalize + send a resumed request's response. Keeps ALL

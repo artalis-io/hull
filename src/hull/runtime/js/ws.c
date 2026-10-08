@@ -72,6 +72,7 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         const char *msg = JS_ToCString(ctx, exc);
         log_error("[hull:ws] on_open error: %s", msg ? msg : "unknown");
         if (msg) JS_FreeCString(ctx, msg);
+        else JS_FreeValue(ctx, JS_GetException(ctx));   /* a throwing toString (audit 10) */
         JS_FreeValue(ctx, exc);
     } else {
         /* Its code after an `await` of something already settled runs
@@ -147,6 +148,7 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
         const char *msg2 = JS_ToCString(ctx, exc);
         log_error("[hull:ws] on_message error: %s", msg2 ? msg2 : "unknown");
         if (msg2) JS_FreeCString(ctx, msg2);
+        else JS_FreeValue(ctx, JS_GetException(ctx));   /* a throwing toString (audit 10) */
         JS_FreeValue(ctx, exc);
     } else {
         /* Its code after an `await` of something already settled runs
@@ -236,6 +238,7 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
                 const char *msg = JS_ToCString(ctx, exc);
                 log_error("[hull:ws] on_close error: %s", msg ? msg : "unknown");
                 if (msg) JS_FreeCString(ctx, msg);
+                else JS_FreeValue(ctx, JS_GetException(ctx));   /* a throwing toString (audit 10) */
                 JS_FreeValue(ctx, exc);
             } else {
                 /* An async close handler. Its continuations capture the
