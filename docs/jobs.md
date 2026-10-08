@@ -81,7 +81,10 @@ independent claim-loops in one process, so up to N handlers are in flight at
 once - real parallelism for I/O-bound handlers (each loop claims disjoint jobs
 via the atomic claim). It's orthogonal to running K processes; the two multiply
 (K processes x N concurrency). Leave it at 1 for CPU-bound handlers (more
-processes scale those better).
+processes scale those better). A loop that fails - an error out of `jobs.work`,
+or a handler that exhausts the instruction budget - stops the others (each
+finishes the job in hand first), and `run_worker` raises that failure once all
+have exited.
 
 ```lua
 app.main(function() jobs.init(); jobs.run_worker({ concurrency = 8 }) end)
@@ -153,6 +156,8 @@ const recent = jobs.events({ types: ["dead"], since: lastId, limit: 100 });
 
 - **`id`** is a monotonic total order (and the subscription cursor space). Tail
   incrementally by passing the last id you saw as `since`.
+- **`limit`** is clamped to 1..1000 (default 100); a negative or non-numeric
+  one is not "no limit".
 - **`data`** is compact metadata (`error` / `attempt` / `trace`), never the full
   result - join `jobs.result(job_id)` when you need the value.
 - **Off by default** - an app that doesn't opt in pays nothing (no log writes).
@@ -183,6 +188,11 @@ jobs.subscribe("fulfillment", (ev) => { if (ev.type === "completed") webhook.not
   must be idempotent, the same contract as a job handler.
 - **`from`**: `"now"` (default) starts at the current head (skip history);
   `"beginning"` replays the whole retained log.
+- **Handlers are synchronous.** The drain advances the cursor past an event
+  whose handler returned. In JS an `async` handler is refused at
+  `jobs.subscribe`, and a handler that returns a Promise (or any thenable)
+  counts as a **failure** for that event - its outcome is not known when the
+  cursor would move. Start async work from a handler by enqueueing a job.
 - **Ordered per subscription** (by event id); no cross-subscription order promise.
 - **Commit-order horizon (Postgres / MySQL).** An event id is allocated when the
   event is inserted, not when its transaction commits, so two transitions can
@@ -197,7 +207,8 @@ jobs.subscribe("fulfillment", (ev) => { if (ev.type === "completed") webhook.not
   event was written (or worker clocks skewed by more than the grace) can still
   be passed over by the cursor - it remains in the log (`jobs.events`), but the
   subscription does not see it. Raise `events_grace` if transitions can sit in
-  long transactions (a `db.batch` around a slow handler call).
+  long transactions (a `db.batch` around a slow handler call). It must be a
+  finite, non-negative number (NaN and infinity are refused).
 - **Retention is subscription-aware**: `jobs.cleanup` never truncates the log past
   the slowest subscription's cursor, so a lagging consumer keeps its unseen events.
 - **Poison events don't wedge a subscription.** By default a handler that keeps
@@ -248,11 +259,23 @@ jobs.uncron("heartbeat");
   day-of-week` - in **UTC**. Supports `*`, `n`, `a-b`, `*/step`, `a-b/step`, and
   comma lists; `day-of-week` is `0`/`7` = Sunday. When both day-of-month and
   day-of-week are restricted, a match on **either** fires (standard cron).
+  Numbers are plain decimal digits in both runtimes: `5abc`, `0x5`, `5.0` and an
+  empty list item (`1,,2`) are refused.
 - **`opts`**: `type`, `queue`, `priority`, `max_attempts` for the enqueued jobs.
 - **`opts.tz`**: evaluate the spec in a **fixed offset** east of UTC -
   `"+02:00"`, `"-0530"`, or minutes as a number (`120`). IANA zone names
   (`"Europe/Budapest"`) are rejected: a DST-correct named zone needs a tz
-  database Hull can't read inside the sandbox. Default is UTC.
+  database Hull can't read inside the sandbox. Default is UTC. Every field is
+  matched in that zone's wall clock - `"0 9 * * 1-5"` with `tz = "-05:00"`
+  fires at 09:00 local, Monday to Friday local (14:00 UTC). The offset is at
+  most 18 h either way, in whole minutes.
+- **A schedule that can no longer fire is disabled, not fired.** If a stored
+  spec stops parsing (one an older, laxer parser accepted) or has no upcoming
+  occurrence, the worker that finds it due enqueues nothing, parks the schedule
+  (`next_run_at` = 2147483647), records why in `_hull_cron.last_error` and, with
+  `jobs.init({ events = true })`, emits a durable `cron_disabled` event (its
+  `data.error` names the schedule and the spec). Re-register it with
+  `jobs.cron` to enable it again.
 - **Missed ticks** (all workers were down) advance to the next future occurrence
   - fire-once, no backfill storm.
 
@@ -307,7 +330,9 @@ jobs.enqueue("report", data, { concurrencyKey: "tenant-42", concurrency: 2 });
   claim so a held-back job keeps its full retry budget. As soon as a running job
   of that key finishes, a held-back one becomes claimable. Priority and FIFO
   order within the key are preserved (the release is ranked by claim age, so it
-  is deterministic fleet-wide - no two workers evict the same slot).
+  is deterministic fleet-wide - no two workers evict the same slot). Claim age
+  is when the claim began (`claim_started_at`), which a heartbeat does not move:
+  a long job that heartbeats still counts as ahead of a newer claim.
 - **Soft** (the default): correct under normal load, but two workers claiming the
   same key in the same instant can briefly exceed the limit (there is no
   reservation counter). Right for *fairness / politeness* caps (don't let one
@@ -680,7 +705,11 @@ but the visibility timeout makes the last one sharper):
 - **Heartbeat long jobs.** A job that runs longer than `visibility_timeout`
   (default 300s) is presumed orphaned and re-run. A long WASM/GPU handler should
   call `jobs.heartbeat(job)` periodically (at least every `visibility_timeout/2`
-  s) to extend its claim. It returns `false` once the claim has been lost (the
+  s) to extend its claim. The heartbeat also extends the claim of the jobs
+  `jobs.work` claimed in the same batch that have not started yet, so they are
+  not re-pended (or, on their last attempt, dead-lettered as "worker lost")
+  while this one runs. A job that runs past `visibility_timeout` WITHOUT
+  heartbeating loses those batch-mates' claims along with its own. It returns `false` once the claim has been lost (the
   reaper already reclaimed it, or another worker re-claimed it) - the handler's
   signal to stop and let the other runner win, avoiding a double-run:
 

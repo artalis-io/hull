@@ -105,7 +105,10 @@ function init(opts) {
     if (o.historyRetention !== undefined) _cfg.historyRetention = o.historyRetention;
     if (o.events !== undefined) _cfg.events = o.events;
     if (o.eventsGrace !== undefined && o.eventsGrace !== null) {
-        if (typeof o.eventsGrace !== "number" || !(o.eventsGrace >= 0))
+        // Infinity would hold every event back for good (NaN already failed
+        // the >= test): only a finite, non-negative number is a grace.
+        if (typeof o.eventsGrace !== "number" || !Number.isFinite(o.eventsGrace) ||
+            !(o.eventsGrace >= 0))
             throw new Error("jobs.init: eventsGrace must be a non-negative number of seconds");
         _cfg.eventsGrace = o.eventsGrace;
     }
@@ -137,7 +140,11 @@ function init(opts) {
         // (1) opts into the counter-backed hard cap; NULL/0 is the soft default.
         "concurrency_key    VARCHAR(255)," +
         "concurrency_limit  INTEGER," +
-        "concurrency_strict INTEGER)");
+        "concurrency_strict INTEGER," +
+        // When the current claim began. claimed_at is the claim's lease and
+        // moves with every jobs.heartbeat; this does not, so the soft
+        // concurrency rank (concApply) orders running peers by claim age.
+        "claim_started_at   INTEGER)");
 
     // Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec(
@@ -184,7 +191,10 @@ function init(opts) {
         "next_run_at  INTEGER      NOT NULL," +
         "last_run_at  INTEGER," +
         "updated_at   INTEGER      NOT NULL," +
-        "tz_offset    INTEGER      NOT NULL DEFAULT 0)");
+        "tz_offset    INTEGER      NOT NULL DEFAULT 0," +
+        // Why a schedule was disabled (its spec stopped parsing or has no
+        // next occurrence); NULL while it is live. jobs.cron clears it.
+        "last_error   TEXT)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)");
 
     // Additive migrations for DBs created before v1.5: add the column only when
@@ -201,6 +211,8 @@ function init(opts) {
     ensureColumn("_hull_jobs", "concurrency_limit", "concurrency_limit INTEGER");
     ensureColumn("_hull_jobs", "concurrency_strict", "concurrency_strict INTEGER");
     ensureColumn("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("_hull_jobs", "claim_started_at", "claim_started_at INTEGER");
+    ensureColumn("_hull_cron", "last_error", "last_error TEXT");
 
     // Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     // `name` (not the reserved word `key`), a window start, and the count.
@@ -704,13 +716,18 @@ function concApply(out, now) {
                 // Strict: atomic counter reserve; a full key releases the claim.
                 if (!concReserve(j._concKey, lim)) drop.add(j.id);
             } else {
-                // Soft: rank = running peers strictly ahead in (claimed_at, id)
+                // Soft: rank = running peers strictly ahead in (claim start, id)
                 // order. Fleet-wide deterministic, so no two workers evict the
                 // same slot: each job keeps iff its rank is under the limit.
+                // claim_started_at, not claimed_at: a heartbeat moves
+                // claimed_at past this claim's `now`, and a peer heartbeating
+                // a long job then stopped counting as ahead (overshoot). A row
+                // claimed before the column existed falls back to claimed_at.
                 const r = db.query(
                     "SELECT COUNT(*) AS n FROM _hull_jobs " +
                     "WHERE concurrency_key=? AND status='running' " +
-                    "AND (claimed_at < ? OR (claimed_at = ? AND id < ?))",
+                    "AND (COALESCE(claim_started_at, claimed_at) < ? " +
+                    "OR (COALESCE(claim_started_at, claimed_at) = ? AND id < ?))",
                     [j._concKey, now, now, j.id]);
                 const rank = (r[0] && r[0].n) || 0;
                 if (rank >= lim) drop.add(j.id);
@@ -839,11 +856,11 @@ function claimOne(queue, batch) {
     if (d.supportsSkipLocked && d.supportsReturning) {
         rows = db.query(
             "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, " +
-            "attempts=attempts+1, updated_at=? WHERE id IN (" +
+            "claim_started_at=?, attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
             "ORDER BY priority DESC, id LIMIT ? " + lock + ") " +
             "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict",
-            [token, now, now, queue, now, batch]);
+            [token, now, now, now, queue, now, batch]);
     } else if (d.supportsSkipLocked) {
         db.batch(() => {
             const sel = db.query(
@@ -851,11 +868,11 @@ function claimOne(queue, batch) {
                 "ORDER BY priority DESC, id LIMIT ? " + lock,
                 [queue, now, batch]);
             if (sel.length === 0) return;
-            const ph = [], params = [token, now, now];
+            const ph = [], params = [token, now, now, now];
             for (const r of sel) { ph.push("?"); params.push(r.id); }
             db.exec(
                 "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, " +
-                "attempts=attempts+1, updated_at=? WHERE id IN (" + ph.join(",") + ")",
+                "claim_started_at=?, attempts=attempts+1, updated_at=? WHERE id IN (" + ph.join(",") + ")",
                 params);
         });
         rows = db.query(
@@ -864,11 +881,11 @@ function claimOne(queue, batch) {
     } else {
         rows = db.query(
             "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, " +
-            "attempts=attempts+1, updated_at=? WHERE id IN (" +
+            "claim_started_at=?, attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
             "ORDER BY priority DESC, id LIMIT ?) " +
             "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict",
-            [token, now, now, queue, now, batch]);
+            [token, now, now, now, queue, now, batch]);
     }
 
     // Priority-correct order within the batch: RETURNING / the token read-back
@@ -1214,10 +1231,15 @@ function decodeTs(ts) {
 
 // Parse one cron field into a Set over [lo,hi]. Supports *, n, a-b, */s, a-b/s,
 // and comma lists. Returns null on any malformed / out-of-range part.
+// Every number is plain decimal digits: parseInt also took "5abc" and "5.9"
+// here, and the Lua twin's tonumber took "0x5" - each runtime read a different
+// schedule from one spec. An empty list item ("1,,2") is refused.
 function parseField(f, lo, hi) {
     const set = new Set();
     for (const part of f.split(",")) {
+        if (part === "") return null;
         const m = part.match(/^([^/]+)\/(\d+)$/);
+        if (!m && part.includes("/")) return null;
         const step = m ? parseInt(m[2], 10) : 1;
         const range = m ? m[1] : part;
         let a, b;
@@ -1225,7 +1247,7 @@ function parseField(f, lo, hi) {
         else {
             const r = range.match(/^(\d+)-(\d+)$/);
             if (r) { a = parseInt(r[1], 10); b = parseInt(r[2], 10); }
-            else { a = parseInt(range, 10); b = a; }
+            else if (/^\d+$/.test(range)) { a = parseInt(range, 10); b = a; }
         }
         if (!Number.isFinite(a) || !Number.isFinite(b) || step < 1 || a < lo || b > hi || a > b) return null;
         for (let v = a; v <= b; v += step) set.add(v);
@@ -1253,11 +1275,18 @@ function parseCron(spec) {
 // tz database Hull can't read inside the sandbox. Fixed-offset only - no DST.
 function parseTzOffset(tz) {
     if (tz == null) return 0;
-    if (typeof tz === "number") return Math.floor(tz * 60);
+    if (typeof tz === "number") {
+        // Whole minutes, at most 18 h either way (NaN fails the range test).
+        if (!(tz >= -1080 && tz <= 1080) || !Number.isInteger(tz))
+            throw new Error("jobs.cron: tz in minutes must be a whole number in [-1080, 1080]");
+        return tz * 60;
+    }
     if (typeof tz === "string") {
         if (tz === "Z" || tz === "UTC" || tz === "utc") return 0;
         const m = tz.match(/^([+-])(\d\d):?(\d\d)$/);
         if (m) {
+            if (Number(m[2]) > 18 || Number(m[3]) > 59)
+                throw new Error(`jobs.cron: tz offset '${tz}' is out of range`);
             const off = Number(m[2]) * 3600 + Number(m[3]) * 60;
             return m[1] === "-" ? -off : off;
         }
@@ -1267,27 +1296,35 @@ function parseTzOffset(tz) {
     throw new Error("jobs.cron: tz must be a string offset or a number of minutes");
 }
 
-// Next matching instant at or after fromTs, as a UTC unix timestamp. `offset`
-// (seconds east of UTC, default 0) shifts only the calendar decode, so the spec
-// matches wall-clock fields in that fixed-offset zone while the result stays UTC.
+// Next matching instant strictly after fromTs, as a UTC unix timestamp.
+// `offset` (seconds east of UTC, default 0) puts the search in that
+// fixed-offset zone: it walks LOCAL time (lt = t + offset), so the day and hour
+// skips land on local midnight and the local top of the hour, and converts back
+// (t = lt - offset). Skipping on UTC boundaries instead put a +05:30 or -05:00
+// schedule's day jump at a local 05:30 / 19:00, so the hour or the day it
+// matched was the wrong one (a "0 9 * * *" at +05:30 skipped 09:00 entirely).
 function cronNext(c, fromTs, offset) {
     const off = offset || 0;
-    let t = Math.floor(fromTs / 60) * 60 + 60;
+    let lt = Math.floor(fromTs / 60) * 60 + 60 + off;
     for (let i = 0; i < 200000; i++) {
-        const { month, day, hour, minute, dow } = decodeTs(t + off);
-        if (!c.month.has(month)) { t = (Math.floor(t / 86400) + 1) * 86400; continue; }
+        const { month, day, hour, minute, dow } = decodeTs(lt);
+        if (!c.month.has(month)) { lt = (Math.floor(lt / 86400) + 1) * 86400; continue; }
         let dayOk;
         if (c.domStar && c.dowStar) dayOk = true;
         else if (c.domStar) dayOk = c.dow.has(dow);
         else if (c.dowStar) dayOk = c.dom.has(day);
         else dayOk = c.dom.has(day) || c.dow.has(dow);
-        if (!dayOk) { t = (Math.floor(t / 86400) + 1) * 86400; continue; }
-        if (!c.hour.has(hour)) { t = (Math.floor(t / 3600) + 1) * 3600; continue; }
-        if (!c.min.has(minute)) { t += 60; continue; }
-        return t;
+        if (!dayOk) { lt = (Math.floor(lt / 86400) + 1) * 86400; continue; }
+        if (!c.hour.has(hour)) { lt = (Math.floor(lt / 3600) + 1) * 3600; continue; }
+        if (!c.min.has(minute)) { lt += 60; continue; }
+        return lt - off;
     }
     return null;
 }
+
+// A schedule that can no longer fire is parked here (the largest value an
+// INTEGER column holds on every backend), with the reason in last_error.
+const CRON_DISABLED_AT = 2147483647;
 
 // Fire due schedules: compare-and-set next_run_at (multi-worker-safe on every
 // backend), then enqueue. Missed ticks advance to the next future occurrence
@@ -1298,7 +1335,23 @@ function processCron(now) {
         "FROM _hull_cron WHERE next_run_at <= ?", [now]);
     for (const c of due) {
         const parsed = parseCron(c.spec);
-        const nxt = parsed ? cronNext(parsed, now, c.tz_offset) : (now + 60);
+        const nxt = parsed ? cronNext(parsed, now, c.tz_offset) : null;
+        if (nxt === null) {
+            // The spec no longer parses (stored by an older, laxer parser) or
+            // has no next occurrence. Firing it every minute (the old now + 60)
+            // or writing a NULL next_run_at (an unparseable one did here) are
+            // both wrong: disable it - parked, not enqueued - and say why.
+            // jobs.cron re-enables.
+            const why = `schedule '${c.name}' disabled: spec '${c.spec}' ` +
+                (parsed ? "has no upcoming occurrence" : "is invalid (invalid cron field)");
+            const off = db.exec(
+                "UPDATE _hull_cron SET next_run_at=?, last_error=?, updated_at=? " +
+                "WHERE name=? AND next_run_at=?",
+                [CRON_DISABLED_AT, why, now, c.name, c.next_run_at]);
+            if ((off || 0) > 0)
+                emitDurable("cron_disabled", { type: c.type, queue: c.queue }, { error: why });
+            continue;
+        }
         const won = db.exec(
             "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? " +
             "WHERE name=? AND next_run_at=?",
@@ -1346,8 +1399,8 @@ function cron(name, spec, data, opts) {
     // nothing and the second INSERT failed on the key.
     db.upsert("_hull_cron", ["name"],
         ["name", "spec", "type", "payload", "queue", "priority",
-         "max_attempts", "next_run_at", "tz_offset", "updated_at"],
-        [name, spec, jobType, payload, queue, priority, ma, nxt, tzOffset, now]);
+         "max_attempts", "next_run_at", "tz_offset", "last_error", "updated_at"],
+        [name, spec, jobType, payload, queue, priority, ma, nxt, tzOffset, null, now]);
     return jobs;
 }
 
@@ -1451,10 +1504,20 @@ async function work(opts) {
                     // Close the deliver-before-park race: a signal delivered in the
                     // check->park window couldn't re-activate us (we were 'running'),
                     // so re-check now that we are 'waiting'.
+                    // The memo row counts too: a run of this job whose claim
+                    // was lost (it does not know yet) can consume the signal
+                    // after this run looked, leaving no unconsumed row - only
+                    // the memo, which a re-run replays. Without it this wait
+                    // parked for good.
                     if (result.signalName && !job._lost) {
-                        const sig = db.query("SELECT 1 AS x FROM _hull_workflow_signals " +
+                        let sig = db.query("SELECT 1 AS x FROM _hull_workflow_signals " +
                             "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
                             [job.id, result.signalName]);
+                        if (!sig.length && result.signalKey) {
+                            sig = db.query("SELECT 1 AS x FROM _hull_workflow_steps " +
+                                "WHERE workflow_id=? AND step_key=?",
+                                [job.id, result.signalKey]);
+                        }
                         if (sig.length) {
                             db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
                                 "updated_at=? WHERE id=? AND status='waiting'", [now, now, job.id]);
@@ -1521,6 +1584,10 @@ const _subscribers = Object.create(null);
 // Lease duration (seconds) for a subscription drain (a crashed drainer's lease
 // expires after this and another worker resumes from the unadvanced cursor).
 const _EDRAIN_LEASE = 30;
+// Intrinsic prototypes of async (generator) functions, to refuse an async
+// subscriber at jobs.subscribe.
+const ASYNC_FN_PROTO = Object.getPrototypeOf(async function () {});
+const ASYNC_GEN_FN_PROTO = Object.getPrototypeOf(async function* () {});
 
 /**
  * Request the running runWorker loop to stop after the current iteration.
@@ -1618,11 +1685,19 @@ async function runWorker(opts) {
     // wait, first - and the first failure is thrown once all have exited.
     // Promise.all would settle at the first failure with the rest still
     // claiming jobs. Same as the Lua twin.
+    // Each loop's own promise also flags a failure when it settles rejected,
+    // so a rejection that did not pass through the catch still stops the
+    // siblings (same as the Lua twin, which checks its tasks' state).
     const guarded = async () => {
         try { return await loop(); }
         catch (e) { failed = true; throw e; }
     };
-    const settled = await Promise.allSettled(Array.from({ length: concurrency }, guarded));
+    const runs = Array.from({ length: concurrency }, () => {
+        const p = guarded();
+        p.then(undefined, () => { failed = true; });
+        return p;
+    });
+    const settled = await Promise.allSettled(runs);
     const bad = settled.find((s) => s.status === "rejected");
     if (bad) throw bad.reason;
     return settled.reduce((a, s) => a + s.value, 0);
@@ -1991,6 +2066,7 @@ function runWaitSignal(workflowId, n, name, opts, replayOnly) {
     e[YIELD] = true;
     e.waiting = true;
     e.signalName = name;
+    e.signalKey = key;
     e.deadline = deadline;
     throw e;
 }
@@ -2173,7 +2249,8 @@ function workflow(name, fn) {
                 e = new Error("visibility timeout: worker lost after the last attempt (compensated)");
             } else if (e && typeof e === "object" && e[YIELD] === true) {
                 return { [WF_YIELD]: true, wakeAt: e.wakeAt,
-                         waiting: e.waiting, signalName: e.signalName, deadline: e.deadline };
+                         waiting: e.waiting, signalName: e.signalName,
+                         signalKey: e.signalKey, deadline: e.deadline };
             }
             const max = (job.maxAttempts != null) ? job.maxAttempts : _cfg.maxAttempts;
             if ((job.attempts || 0) >= max)
@@ -2340,7 +2417,17 @@ function heartbeat(job) {
         "UPDATE _hull_jobs SET claimed_at=?, updated_at=? " +
         "WHERE id=? AND claim_token=? AND status='running'",
         [now, now, job.id, job.claimToken]);
-    return (n || 0) > 0;
+    if ((n || 0) === 0) return false;
+    // The rest of the batch work() claimed with this job shares its token and
+    // waits, unstarted, for this one to finish. Extend their claim too:
+    // otherwise a job that heartbeats past visibilityTimeout left them stale,
+    // and the reaper re-pended them - or, on their last attempt, dead-lettered
+    // them as "worker lost" without their ever having run.
+    db.exec(
+        "UPDATE _hull_jobs SET claimed_at=? " +
+        "WHERE claim_token=? AND status='running' AND id<>?",
+        [now, job.claimToken, job.id]);
+    return true;
 }
 
 /**
@@ -2481,7 +2568,10 @@ function events(opts) {
         where.push("type IN (" + o.types.map(() => "?").join(",") + ")");
         for (const t of o.types) params.push(t);
     }
-    params.push(Math.min(Number(o.limit) || 100, 1000));
+    // 1..1000: a negative LIMIT is "no limit" on SQLite, and NaN / a fraction
+    // is not an integer bind.
+    const lim = Number(o.limit);
+    params.push(Number.isFinite(lim) ? Math.floor(Math.max(1, Math.min(lim, 1000))) : 100);
     const rows = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events " +
         "WHERE " + where.join(" AND ") + " ORDER BY id DESC LIMIT ?", params);
@@ -2509,6 +2599,14 @@ function subscribe(name, handler, opts) {
         throw new Error("jobs.subscribe: name must be a non-empty string");
     if (typeof handler !== "function")
         throw new Error("jobs.subscribe: handler must be a function");
+    // A drain delivers synchronously and advances the cursor past an event
+    // whose handler returned; an async handler returns at its first await, so
+    // the event counted as delivered while its work (and any failure) was
+    // still pending. Refuse one here; a sync handler that returns a thenable
+    // is treated as a failure at delivery (eventsDrain).
+    const hp = Object.getPrototypeOf(handler);
+    if (hp === ASYNC_FN_PROTO || hp === ASYNC_GEN_FN_PROTO)
+        throw new Error("jobs.subscribe: handler must be synchronous (not an async function)");
     const o = opts || {};
     const typesCsv = (Array.isArray(o.types) && o.types.length) ? o.types.join(",") : null;
     const maxF = (typeof o.maxFailures === "number" && o.maxFailures > 0) ? o.maxFailures : null;
@@ -2603,7 +2701,17 @@ function eventsDrain(name, opts) {
         if (e.data !== undefined && e.data !== null && e.data !== "") {
             try { e.data = json.decode(e.data); } catch (_e) { /* leave raw */ }
         }
-        try { sub.handler(e); lastOk = e.id; delivered += 1; }
+        try {
+            const r = sub.handler(e);
+            if (r !== null && (typeof r === "object" || typeof r === "function") &&
+                typeof r.then === "function") {
+                // Its outcome is not known when the cursor moves: count it as
+                // a failure (and keep the rejection from going unhandled).
+                try { r.then(undefined, () => {}); } catch (_e) { /* ignore */ }
+                throw new Error("subscriber returned a Promise; event handlers must be synchronous");
+            }
+            lastOk = e.id; delivered += 1;
+        }
         catch (err) { poison = e; poisonErr = err; break; }
     }
     // Failure accounting + poison skip. `failures` counts consecutive
