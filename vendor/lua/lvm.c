@@ -719,7 +719,7 @@ void luaV_objlen (lua_State *L, StkId ra, const TValue *rb) {
       Table *h = hvalue(rb);
       tm = fasttm(L, h->metatable, TM_LEN);
       if (tm) break;  /* metamethod? break switch to call it */
-      setivalue(s2v(ra), luaH_getn(h));  /* else primitive len */
+      setivalue(s2v(ra), luaH_getn(L, h));  /* primitive len (HULL PATCH 0004: L) */
       return;
     }
     case LUA_VSHRSTR: {

@@ -463,7 +463,7 @@ LUA_API lua_Unsigned lua_rawlen (lua_State *L, int idx) {
     case LUA_VSHRSTR: return tsvalue(o)->shrlen;
     case LUA_VLNGSTR: return tsvalue(o)->u.lnglen;
     case LUA_VUSERDATA: return uvalue(o)->len;
-    case LUA_VTABLE: return luaH_getn(hvalue(o));
+    case LUA_VTABLE: return luaH_getn(L, hvalue(o));  /* HULL PATCH 0004 */
     default: return 0;
   }
 }
@@ -779,7 +779,7 @@ LUA_API int lua_rawgeti (lua_State *L, int idx, lua_Integer n) {
   Table *t;
   lua_lock(L);
   t = gettable(L, idx);
-  return finishrawget(L, luaH_getint(t, n));
+  return finishrawget(L, luaH_getintL(L, t, n));  /* HULL PATCH 0004 */
 }
 
 
@@ -789,7 +789,7 @@ LUA_API int lua_rawgetp (lua_State *L, int idx, const void *p) {
   lua_lock(L);
   t = gettable(L, idx);
   setpvalue(&k, cast_voidp(p));
-  return finishrawget(L, luaH_get(t, &k));
+  return finishrawget(L, luaH_getL(L, t, &k));  /* HULL PATCH 0004 */
 }
 
 

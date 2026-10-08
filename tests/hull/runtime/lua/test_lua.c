@@ -8921,4 +8921,171 @@ UTEST(lua_tool_vm, app_runtime_drops_a_stray_unveil_context)
     hl_platform_vfs_dispose(pvfs_owned);
 }
 
+/* ── Audit 9: the Lua runtime ─────────────────────────────────────────── */
+
+#include "hull/limits/runtime.h"   /* HL_RES_HEADER_BYTES_MAX */
+
+/* H2: integer keys hash to k % ((sizenode - 1) | 1) with no seed, so keys
+ * k * 8191 in an 8192-node table all share one chain, and every lookup or
+ * insert walked it inside a single instruction. The chain walk is charged
+ * now (HULL PATCH 0004, docs/lua_patches.md). */
+UTEST(lua_audit9, colliding_integer_keys_hit_the_limit)
+{
+    static const char *const setup =
+        "M = 8191 T = {} for k = 1, 5000 do T[k * M] = true end";
+    static const char *const cases[] = {
+        "for i = 1, 1000 do local _ = T[(i % 5000 + 1) * M] end return 1",
+        "for i = 1, 1000 do local _ = rawget(T, (i % 5000 + 1) * M) end return 1",
+        "for i = 1, 1000 do local _ = T[(i % 5000 + 1) * M + 0.0] end return 1",
+        "for i = 1, 1000 do T[(5000 + i) * M] = true end return 1",
+        "for i = 1, 1000 do rawset(T, (5000 + i) * M, true) end return 1",
+        NULL
+    };
+    char err[512];
+    for (int i = 0; cases[i]; i++) {
+        int rc = limited_run_after(setup, cases[i], err, sizeof err);
+        EXPECT_NE_MSG(rc, LUA_OK, cases[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, cases[i]);
+    }
+
+    /* Ordinary integer and float keys stay well under the limit. */
+    EXPECT_EQ(limited_run(
+        "local t = {} for k = 1, 2000 do t[k * 7] = k end "
+        "for k = 1, 2000 do assert(t[k * 7] == k) end "
+        "local f = {} for k = 1, 500 do f[k + 0.5] = k end "
+        "for k = 1, 500 do assert(f[k + 0.5] == k) end "
+        "assert(#{ 1, 2, 3 } == 3) return 1",
+        err, sizeof err), LUA_OK);
+}
+
+/* H3: verify_password runs as many PBKDF2 iterations as the STORED string
+ * names (up to 10M): seconds of work counted as one instruction. It is
+ * charged before the derivation now, so a run over its budget raises at
+ * once, with nothing derived. */
+UTEST(lua_audit9, verify_password_charges_its_iterations)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_rt.max_instructions = 1000000;
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int rc = luaL_dostring(lua_rt.L,
+        "local h = 'pbkdf2:10000000:' .. string.rep('00', 16) .. ':' .. "
+        "          string.rep('00', 32) "
+        "return crypto.verify_password('x', h)");
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    EXPECT_NE(rc, LUA_OK);
+    const char *e = lua_tostring(lua_rt.L, -1);
+    EXPECT_NE(strstr(e ? e : "", "instruction limit"), NULL);
+    EXPECT_LT((double)(t1.tv_sec - t0.tv_sec), 2.0);
+    lua_settop(lua_rt.L, 0);
+
+    /* The default hash still fits a run of the default limit. */
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    EXPECT_EQ(luaL_dostring(lua_rt.L,
+        "local h = crypto.hash_password('pw') "
+        "assert(crypto.verify_password('pw', h)) return 1"), LUA_OK);
+    lua_settop(lua_rt.L, 0);
+    cleanup_lua_caps();
+}
+
+/* M1 / M2: res:header appended to Keel's header buffer, outside the script
+ * heap and with no cap - and so did res:text's Content-Type, once per
+ * call. Past HL_RES_HEADER_BYTES_MAX both raise. */
+UTEST(lua_audit9, response_headers_are_capped)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  local v = string.rep('v', 100)\n"
+        "  local ok, err = pcall(function()\n"
+        "    for i = 1, 100000 do res:header('X-A', v) end end)\n"
+        "  HDR_OK, HDR_ERR = ok, tostring(err)\n"
+        "  return 1 end)\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  local ok, err = pcall(function()\n"
+        "    for i = 1, 100000 do res:text('x') end end)\n"
+        "  TXT_OK, TXT_ERR = ok, tostring(err)\n"
+        "  return 1 end)\n"), LUA_OK);
+    for (int stage = 1; stage <= 2; stage++) {
+        KlAllocator alloc = kl_allocator_default();
+        KlHttpResponse res;
+        ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+        KlHttpRequest req = {0};
+        EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt,
+                      first_mw_handler_id(L, stage), &req, &res), 1);
+        EXPECT_LE(res.hdr_len, (size_t)HL_RES_HEADER_BYTES_MAX);
+        free_lua_req_ctx(&req);
+        kl_http_response_free(&res);
+    }
+    lua_getglobal(L, "HDR_OK");
+    EXPECT_FALSE(lua_toboolean(L, -1));
+    lua_getglobal(L, "HDR_ERR");
+    EXPECT_NE(strstr(lua_tostring(L, -1) ? lua_tostring(L, -1) : "",
+                     "would exceed"), NULL);
+    lua_getglobal(L, "TXT_OK");
+    EXPECT_FALSE(lua_toboolean(L, -1));
+    lua_getglobal(L, "TXT_ERR");
+    EXPECT_NE(strstr(lua_tostring(L, -1) ? lua_tostring(L, -1) : "",
+                     "would exceed"), NULL);
+    lua_settop(L, 0);
+    cleanup_lua();
+}
+
+/* M3: a hull.async task that tripped the budget after its first yield
+ * never marked itself done (pcall re-raises the trip, so the code after it
+ * never ran): its waiters stayed parked for good and hull._running stayed
+ * raised. The runtime now runs the task's failure hook once that run is
+ * over. */
+UTEST(lua_audit9, a_task_that_trips_the_budget_still_finishes)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    lua_rt.max_instructions = 300000;
+
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt,
+        "local t = hull.async(function() hull.sleep(5) while true do end end)\n"
+        "local ok, err = pcall(t.wait, t)\n"
+        "if ok then OUT = 'wait returned'\n"
+        "elseif not tostring(err):find('instruction limit') then\n"
+        "  OUT = 'wrong error: ' .. tostring(err)\n"
+        "elseif not t:done() then OUT = 'not done'\n"
+        "elseif hull._running ~= 0 then OUT = 'running ' .. hull._running\n"
+        "else OUT = 'ok' end\n", &co);
+    ASSERT_EQ(st, LUA_YIELD);
+    ssh_tick_until_done(be, lua_rt.base.async_ctx, co);
+    lua_getglobal(lua_rt.L, "OUT");
+    const char *out = lua_tostring(lua_rt.L, -1);
+    EXPECT_STREQ(out ? out : "(no verdict: the waiter never woke)", "ok");
+    lua_pop(lua_rt.L, 1);
+
+    /* Tripped in its first, synchronous slice: that is the spawner's run,
+     * which fails with it; the hook runs later, from the loop. */
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    ASSERT_EQ(luaL_dostring(lua_rt.L, "T2 = nil"), LUA_OK);
+    st = ssh_co_start(&lua_rt,
+        "T2 = hull.async(function() while true do end end)\n", &co);
+    (void)st;   /* the spawner may or may not get to its next hook */
+    for (int i = 0; i < 5; i++) be->tick(lua_rt.base.async_ctx, 10);
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "return (T2 == nil or T2:done()) and hull._running == 0"), LUA_OK);
+    EXPECT_TRUE(lua_toboolean(lua_rt.L, -1));
+    lua_settop(lua_rt.L, 0);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
 UTEST_MAIN();

@@ -115,10 +115,22 @@ already bound (`timeout_ms` on `connect` and `exec`, `http.fetch`'s timeout).
   another task while one is waiting is refused with `busy`, as today
   (`docs/ssh.md` section 6b). `hull.map` over hosts gives each item its own
   task and so its own connection, which is the natural shape anyway.
-- **Instruction limits apply per task.** A spawned coroutine inherits the
-  instruction-count hook, as timer callbacks do, so each task has its own
-  budget; a runaway task raises "instruction limit exceeded", which surfaces
-  through `wait` / `gather` / `map` like any other error.
+- **Instruction limits apply per run.** The budget is per uninterrupted run
+  (docs/lua_patches.md, runtime/lua/budget.c): a task's first slice runs
+  inside its spawner's run (`_spawn` resumes it at once), and each later
+  resume is a run of its own. A runaway task raises "instruction limit
+  exceeded", which surfaces through `wait` / `gather` / `map` like any other
+  error. The trip is sticky - `pcall` re-raises it - so the task body cannot
+  record it: the runtime does. `hull._spawn(fn, on_fail)` registers a failure
+  hook, and when the task's coroutine dies with an error its own code did not
+  catch, the runtime calls `on_fail(message)` once that run is over, as an
+  entry of its own on the main thread under a freshly armed budget (inline at
+  the end of a resumed run; deferred to a zero-delay timer when the first,
+  synchronous slice died, since that is still the spawner's run). `hull.async`
+  uses it to mark the task failed, uncount it, and wake its waiters. Before
+  (audit 9 M3), a task that tripped after its first yield never finished:
+  its waiters - `task:wait`, `hull.gather` / `hull.map`, `jobs.run_worker` /
+  `jobs.stop` - stayed parked for good.
 - **Where it works.** Anywhere a coroutine can park: `app.main`, request
   handlers, timer callbacks, and inside other tasks (a task may spawn and wait
   on its own tasks).
@@ -150,8 +162,10 @@ The C side gains one primitive, and the rest is Lua built on it.
    helpers, not documented for apps.
 2. **Tasks** (`hull.async`). The spawned body is wrapped: `pcall(fn, ...)`,
    record the results or the error on the task, mark it done, wake its
-   waiters. `task:wait()` parks until done, then returns or re-raises. A count
-   of running tasks feeds the section 5 warning.
+   waiters. An error the wrapper cannot catch (a tripped budget) reaches the
+   same settle through the `on_fail` hook (section 4). `task:wait()` parks
+   until done, then returns or re-raises. A count of running tasks feeds the
+   section 5 warning.
 3. **`gather` and `map`** are Lua over tasks: `map` keeps at most `limit`
    tasks in flight, starting the next as one finishes, and collects by index.
 4. **JS `hull.map`**: plain JS over Promises (a small worker pool pulling

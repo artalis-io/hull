@@ -100,6 +100,23 @@ static const TValue absentkey = {ABSTKEYCONSTANT};
 
 
 /*
+** HULL PATCH 0004 (docs/lua_patches.md): a hash chain walked inside one
+** instruction is charged to the count hook, a unit per node stepped
+** over. Integer and float keys hash deterministically ('hashint' is a
+** plain remainder), so a script can put 100k keys on one chain - keys
+** k * (2^17 - 1) - and every lookup, insert or rehash then walked it
+** inside a single 't[k]'. Chains of up to HL_FREE_CHAIN nodes stay free
+** (the common case costs one compare), and a NULL thread (internal
+** callers: the parser, metamethod caches) charges nothing.
+*/
+#define HL_FREE_CHAIN	8
+
+#define hl_chaincharge(L,steps) \
+  { if ((L) != NULL && (steps) > HL_FREE_CHAIN) \
+      luaE_hlcharge(L, cast_sizet(steps)); }
+
+
+/*
 ** Hash for integers. To allow a good hash, use the remainder operator
 ** ('%'). If integer fits as a non-negative int, compute an int
 ** remainder, which is faster. Otherwise, use an unsigned-integer
@@ -306,14 +323,20 @@ static unsigned int setlimittosize (Table *t) {
 static const TValue *getgeneric (lua_State *L, Table *t, const TValue *key,
                                  int deadok) {
   Node *n = mainpositionTV(t, key);
+  unsigned int steps = 0;  /* HULL PATCH 0004 */
   for (;;) {  /* check whether 'key' is somewhere in the chain */
-    if (equalkey(L, key, n, deadok))
+    if (equalkey(L, key, n, deadok)) {
+      hl_chaincharge(L, steps);  /* HULL PATCH 0004 */
       return gval(n);  /* that's it */
+    }
     else {
       int nx = gnext(n);
-      if (nx == 0)
+      if (nx == 0) {
+        hl_chaincharge(L, steps);  /* HULL PATCH 0004 */
         return &absentkey;  /* not found */
+      }
       n += nx;
+      steps++;  /* HULL PATCH 0004 */
     }
   }
 }
@@ -714,9 +737,13 @@ static void luaH_newkey (lua_State *L, Table *t, const TValue *key,
     lua_assert(!isdummy(t));
     othern = mainpositionfromnode(t, mp);
     if (othern != mp) {  /* is colliding node out of its main position? */
+      unsigned int steps = 0;  /* HULL PATCH 0004 */
       /* yes; move colliding node into free position */
-      while (othern + gnext(othern) != mp)  /* find previous */
+      while (othern + gnext(othern) != mp) {  /* find previous */
         othern += gnext(othern);
+        steps++;  /* HULL PATCH 0004 */
+      }
+      hl_chaincharge(L, steps);  /* HULL PATCH 0004 */
       gnext(othern) = cast_int(f - othern);  /* rechain to point to 'f' */
       *f = *mp;  /* copy colliding node into free pos. (mp->next also goes) */
       if (gnext(mp) != 0) {
@@ -763,7 +790,7 @@ static void luaH_newkey (lua_State *L, Table *t, const TValue *key,
 ** If key is 0 or negative, 'res' will have its higher bit on, so that
 ** if cannot be smaller than alimit.
 */
-const TValue *luaH_getint (Table *t, lua_Integer key) {
+static const TValue *getint (lua_State *L, Table *t, lua_Integer key) {
   lua_Unsigned alimit = t->alimit;
   if (l_castS2U(key) - 1u < alimit)  /* 'key' in [1, t->alimit]? */
     return &t->array[key - 1];
@@ -774,17 +801,34 @@ const TValue *luaH_getint (Table *t, lua_Integer key) {
   }
   else {  /* key is not in the array part; check the hash */
     Node *n = hashint(t, key);
+    unsigned int steps = 0;  /* HULL PATCH 0004 */
     for (;;) {  /* check whether 'key' is somewhere in the chain */
-      if (keyisinteger(n) && keyival(n) == key)
+      if (keyisinteger(n) && keyival(n) == key) {
+        hl_chaincharge(L, steps);  /* HULL PATCH 0004 */
         return gval(n);  /* that's it */
+      }
       else {
         int nx = gnext(n);
         if (nx == 0) break;
         n += nx;
+        steps++;  /* HULL PATCH 0004 */
       }
     }
+    hl_chaincharge(L, steps);  /* HULL PATCH 0004 */
     return &absentkey;
   }
+}
+
+
+const TValue *luaH_getint (Table *t, lua_Integer key) {
+  return getint(NULL, t, key);
+}
+
+
+/* HULL PATCH 0004 (docs/lua_patches.md): 'luaH_getint' charging 'L' for
+** the hash chain it walks; the VM and the API use it */
+const TValue *luaH_getintL (lua_State *L, Table *t, lua_Integer key) {
+  return getint(L, t, key);
 }
 
 
@@ -825,9 +869,20 @@ const TValue *luaH_getstr (Table *t, TString *key) {
 ** VM and the API use it for keys a script chooses.
 */
 const TValue *luaH_getL (lua_State *L, Table *t, const TValue *key) {
-  if (ttislngstring(key))
-    return getgeneric(L, t, key, 0);
-  return luaH_get(t, key);
+  /* HULL PATCH 0004: every key type, so the chain walk is charged too */
+  switch (ttypetag(key)) {
+    case LUA_VSHRSTR: return luaH_getshortstr(t, tsvalue(key));
+    case LUA_VNUMINT: return getint(L, t, ivalue(key));
+    case LUA_VNIL: return &absentkey;
+    case LUA_VNUMFLT: {
+      lua_Integer k;
+      if (luaV_flttointeger(fltvalue(key), &k, F2Ieq)) /* integral index? */
+        return getint(L, t, k);
+      /* else... */
+    }  /* FALLTHROUGH */
+    default:
+      return getgeneric(L, t, key, 0);
+  }
 }
 
 
@@ -877,7 +932,7 @@ void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
 
 
 void luaH_setint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
-  const TValue *p = luaH_getint(t, key);
+  const TValue *p = getint(L, t, key);  /* HULL PATCH 0004 */
   if (isabstkey(p)) {
     TValue k;
     setivalue(&k, key);
@@ -901,7 +956,7 @@ void luaH_setint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
 ** boundary. ('j + 1' cannot be a present integer key because it is
 ** not a valid integer in Lua.)
 */
-static lua_Unsigned hash_search (Table *t, lua_Unsigned j) {
+static lua_Unsigned hash_search (lua_State *L, Table *t, lua_Unsigned j) {
   lua_Unsigned i;
   if (j == 0) j++;  /* the caller ensures 'j + 1' is present */
   do {
@@ -910,16 +965,16 @@ static lua_Unsigned hash_search (Table *t, lua_Unsigned j) {
       j *= 2;
     else {
       j = LUA_MAXINTEGER;
-      if (isempty(luaH_getint(t, j)))  /* t[j] not present? */
+      if (isempty(getint(L, t, j)))  /* t[j] not present? */
         break;  /* 'j' now is an absent index */
       else  /* weird case */
         return j;  /* well, max integer is a boundary... */
     }
-  } while (!isempty(luaH_getint(t, j)));  /* repeat until an absent t[j] */
+  } while (!isempty(getint(L, t, j)));  /* repeat until an absent t[j] */
   /* i < j  &&  t[i] present  &&  t[j] absent */
   while (j - i > 1u) {  /* do a binary search between them */
     lua_Unsigned m = (i + j) / 2;
-    if (isempty(luaH_getint(t, m))) j = m;
+    if (isempty(getint(L, t, m))) j = m;
     else i = m;
   }
   return i;
@@ -969,7 +1024,7 @@ static unsigned int binsearch (const TValue *array, unsigned int i,
 ** (In those cases, the boundary is not inside the array part, and
 ** therefore cannot be used as a new limit.)
 */
-lua_Unsigned luaH_getn (Table *t) {
+lua_Unsigned luaH_getn (lua_State *L, Table *t) {  /* HULL PATCH 0004: L */
   unsigned int limit = t->alimit;
   if (limit > 0 && isempty(&t->array[limit - 1])) {  /* (1)? */
     /* there must be a boundary before 'limit' */
@@ -1010,10 +1065,10 @@ lua_Unsigned luaH_getn (Table *t) {
   /* (3) 'limit' is the last element and either is zero or present in table */
   lua_assert(limit == luaH_realasize(t) &&
              (limit == 0 || !isempty(&t->array[limit - 1])));
-  if (isdummy(t) || isempty(luaH_getint(t, cast(lua_Integer, limit + 1))))
+  if (isdummy(t) || isempty(getint(L, t, cast(lua_Integer, limit + 1))))
     return limit;  /* 'limit + 1' is absent */
   else  /* 'limit + 1' is also present */
-    return hash_search(t, limit);
+    return hash_search(L, t, limit);
 }
 
 

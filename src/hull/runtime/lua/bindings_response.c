@@ -15,6 +15,7 @@
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
 #include "hull/http_feature.h"    /* hl_lua_http_error_response (seam strong) */
 #include "internal.h"             /* get_hl_lua_from_L (shared with bindings.c) */
+#include "hull/limits/runtime.h"  /* HL_RES_HEADER_BYTES_MAX */
 
 #include "lua.h"
 #include "lualib.h"
@@ -96,6 +97,42 @@ static int hl_response_has_header(KlHttpResponse *res, const char *name)
     return 0;
 }
 
+/* Room for one more "Name: value\r\n" in the response's headers, charged
+ * (audit 9 M1). The header buffer is Keel's, outside the script heap, so
+ * neither the heap limit nor the allocation charge saw it grow: a loop of
+ * res:header - or of res:text, which adds a Content-Type each call - grew it
+ * to all of memory. Raises past HL_RES_HEADER_BYTES_MAX. */
+static void res_header_room(lua_State *L, KlHttpResponse *res,
+                            const char *what, size_t name_len,
+                            size_t value_len)
+{
+    lua_hlcharge(L, 0, name_len + value_len);
+    if (name_len > HL_RES_HEADER_BYTES_MAX ||
+        value_len > HL_RES_HEADER_BYTES_MAX ||
+        res->hdr_len + name_len + value_len + 4 > HL_RES_HEADER_BYTES_MAX)
+        luaL_error(L, "%s: the response's headers would exceed %d bytes",
+                   what, (int)HL_RES_HEADER_BYTES_MAX);
+}
+
+/* Add a header Hull itself sets (Content-Type, the default CSP, Location),
+ * under the same cap as res:header. */
+static void res_set_header(lua_State *L, KlHttpResponse *res,
+                           const char *what, const char *name,
+                           const char *value)
+{
+    res_header_room(L, res, what, strlen(name), strlen(value));
+    (void)kl_http_response_header(res, name, value);
+}
+
+/* A body set by res:json / res:html / res:text is copied out of the heap and
+ * may be gzipped, inside one call (audit 9 M2): charged before the work,
+ * a unit per 8 bytes (the rate of a digest; gzip costs more per byte than a
+ * copy, and either may run), so calling them in a loop is not free. */
+static void res_charge_body(lua_State *L, size_t len)
+{
+    lua_hlwork(L, len / 8, 0);
+}
+
 /* res:status(code) */
 static int lua_res_status(lua_State *L)
 {
@@ -110,8 +147,10 @@ static int lua_res_status(lua_State *L)
 static int lua_res_header(lua_State *L)
 {
     KlHttpResponse *res = check_response(L, 1);
-    const char *name = luaL_checkstring(L, 2);
-    const char *value = luaL_checkstring(L, 3);
+    size_t name_len, value_len;
+    const char *name = luaL_checklstring(L, 2, &name_len);
+    const char *value = luaL_checklstring(L, 3, &value_len);
+    res_header_room(L, res, "res:header", name_len, value_len);
     /* Rejected for a CR or LF (the header-injection guard). Not named in the
      * log: the name may be the part carrying the CR/LF. */
     if (kl_http_response_header(res, name, value) != 0)
@@ -151,7 +190,8 @@ static int lua_res_json(lua_State *L)
         lua_pop(L, 2);
         return luaL_error(L, "res:json - json.encode did not return a string");
     }
-    kl_http_response_header(res, "Content-Type", "application/json");
+    res_set_header(L, res, "res:json", "Content-Type", "application/json");
+    res_charge_body(L, json_len);
     if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                           hlua ? hlua->base.compress : NULL,
                           json_str, json_len) != 0)
@@ -169,15 +209,17 @@ static int lua_res_html(lua_State *L)
     HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
-    kl_http_response_header(res, "Content-Type", "text/html; charset=utf-8");
+    res_set_header(L, res, "res:html", "Content-Type",
+                   "text/html; charset=utf-8");
     /* Skip the default CSP if middleware already wrote one - two CSP
      * headers cause browsers to enforce the strict intersection
      * (typically blocking the page's own scripts). The app-supplied
      * one wins. */
     if (hlua && hlua->base.csp_policy &&
         !hl_response_has_header(res, "Content-Security-Policy"))
-        kl_http_response_header(res, "Content-Security-Policy",
-                           hlua->base.csp_policy);
+        res_set_header(L, res, "res:html", "Content-Security-Policy",
+                       hlua->base.csp_policy);
+    res_charge_body(L, len);
     if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                           hlua ? hlua->base.compress : NULL,
                           html, len) != 0)
@@ -192,7 +234,9 @@ static int lua_res_text(lua_State *L)
     HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
-    kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+    res_set_header(L, res, "res:text", "Content-Type",
+                   "text/plain; charset=utf-8");
+    res_charge_body(L, len);
     if (hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                           hlua ? hlua->base.compress : NULL,
                           text, len) != 0)
@@ -218,6 +262,7 @@ static int lua_res_bytes(lua_State *L)
     KlHttpResponse *res = check_response(L, 1);
     size_t len;
     const char *bytes = luaL_checklstring(L, 2, &len);
+    lua_hlwork(L, 0, len);   /* the copy (audit 9 M2) */
     if (kl_http_response_body_copy(res, bytes, len) != 0)
         return luaL_error(L, "res:bytes: out of memory");
     return 0;
@@ -233,7 +278,7 @@ static int lua_res_redirect(lua_State *L)
         code = (int)luaL_checkinteger(L, 3);
 
     kl_http_response_status(res, code);
-    kl_http_response_header(res, "Location", url);
+    res_set_header(L, res, "res:redirect", "Location", url);
     kl_http_response_body_borrow(res, "", 0);
     return 0;
 }

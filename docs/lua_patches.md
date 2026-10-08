@@ -115,10 +115,11 @@ global field, `lua_closethread`), `lapi.c` + `lua.h` (`lua_hlcharge`,
 `lua_hlwork`, `lua_hltakeowed`, `lua_rawequal`, `lua_gettable` /
 `lua_settable` / `lua_rawget`, `lua_stringtonumber`), `ldebug.c`
 (`lua_sethook`), `ldo.c` (`moveresults`, `lua_resume`), `lgc.c`, `lmem.c`,
-`ltable.h` / `ltable.c` (`luaH_getL`, `luaH_next`), `ltm.c`
+`ltable.h` / `ltable.c` (`luaH_getL`, `luaH_getintL`, `luaH_next`, `luaH_getn`), `ltm.c`
 (`luaT_getvarargs`), `lvm.h` / `lvm.c`, `lauxlib.c` (`resizebox`),
 `lstrlib.c`, `ltablib.c`, `lutf8lib.c`, `lbaselib.c`
-**Found by:** round-7 C audit (M1, M2); extended by round-8 (M1-M3, L1)
+**Found by:** round-7 C audit (M1, M2); extended by round-8 (M1-M3, L1) and
+round-9 (H2)
 **Upstream:** Hull-specific.
 
 The count hook counts VM instructions, and some instructions do work
@@ -160,6 +161,23 @@ equivalents:
     the `__index` / `__newindex` chain, `luaH_set`);
   - the empty slots a `next` steps over (`luaH_next`; a table whose
     entries were removed keeps its size, and each `next` scanned all of it);
+  - the hash chain a lookup or insert walks, a unit per node past the
+    first 8 (`HL_FREE_CHAIN`; `getgeneric`, `luaH_getint` through
+    `luaH_getintL` / `luaH_getL`, the previous-node search in
+    `luaH_newkey`, `luaH_getn`'s `hash_search`, which now take `L`). An
+    integer key hashes to `k % ((sizenode - 1) | 1)` and a float key by
+    `frexp`, with no seed, so a script can put every key on one chain:
+    `local m = (1 << 17) - 1; for k = 1, 1e5 do t[k * m] = true end`, and
+    each `t[k * m]` (and each insert, and the rehash that reinserts them
+    all) then walked 1e5 nodes inside one instruction (round-9 H2). Used
+    by `luaV_fastgeti` (`t[i]`, `OP_GETI` / `OP_SETI`), `lua_geti` /
+    `lua_seti` / `lua_rawgeti` / `lua_rawseti` / `lua_rawgetp`,
+    `luaH_setint`, `luaH_set` (and so `reinsert`), `next`, and `#t` /
+    `lua_rawlen`. Short strings keep upstream's per-state seed and are not
+    charged; internal callers with no thread (the parser's constant table)
+    charge nothing. A per-state seed for integer / float keys was the
+    alternative; charging keeps iteration order deterministic and bounds
+    the run whatever the keys;
   - values copied in bulk: results moved by a return (`moveresults`) and
     varargs fetched by `...` (`luaT_getvarargs`), a unit each past the first
     16 (`HL_FREE_COPIES`);
@@ -214,6 +232,11 @@ A VM with no count hook (the tool VM, tests) behaves exactly as upstream.
 **Not covered:** a `lua_getfield` / `lua_setfield` from C with a long C-string
 key (Hull's bindings use short literal names); and Hull's own C bindings
 charge what they allocate, plus, in `hull.crypto`, the bytes a digest / MAC /
-signature reads (`crypto_charge`, one unit per 8 bytes), and `part:read()`
-the bytes it accumulates - a binding that reads a large input and allocates
-little is otherwise charged one instruction.
+signature / cipher / `constant_time_eq` reads (`crypto_charge`, one unit per 8
+bytes) and a key derivation's rounds before it runs (`crypto_charge_kdf`:
+PBKDF2 at two SHA-256 blocks per iteration, so `verify_password` with the 10M
+iterations a stored string may name trips the limit at once; `bcrypt_pbkdf` at
+2^17 units per bcrypt hash - round-9 H3), `res:json` / `html` / `text` the
+body they copy or gzip, `res:header` the bytes it adds (round-9 M1 / M2), and
+`part:read()` the bytes it accumulates - a binding that reads a large input and
+allocates little is otherwise charged one instruction.

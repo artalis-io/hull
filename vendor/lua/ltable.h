@@ -36,6 +36,8 @@
 
 
 LUAI_FUNC const TValue *luaH_getint (Table *t, lua_Integer key);
+LUAI_FUNC const TValue *luaH_getintL (lua_State *L, Table *t,
+                                      lua_Integer key);  /* HULL PATCH 0004 */
 LUAI_FUNC void luaH_setint (lua_State *L, Table *t, lua_Integer key,
                                                     TValue *value);
 LUAI_FUNC const TValue *luaH_getshortstr (Table *t, TString *key);
@@ -53,7 +55,7 @@ LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned int nasize,
 LUAI_FUNC void luaH_resizearray (lua_State *L, Table *t, unsigned int nasize);
 LUAI_FUNC void luaH_free (lua_State *L, Table *t);
 LUAI_FUNC int luaH_next (lua_State *L, Table *t, StkId key);
-LUAI_FUNC lua_Unsigned luaH_getn (Table *t);
+LUAI_FUNC lua_Unsigned luaH_getn (lua_State *L, Table *t);  /* HULL PATCH 0004: L */
 LUAI_FUNC unsigned int luaH_realasize (const Table *t);
 
 

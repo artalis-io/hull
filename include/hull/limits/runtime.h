@@ -26,4 +26,12 @@
 
 #define HL_DEFAULT_INSTRUCTIONS (100 * 1000 * 1000) /* 100M per handler */
 
+/* ── Response headers ──────────────────────────────────────────────── */
+
+/* Total bytes of headers app code may add to one response (res:header /
+ * res.header). They are appended to Keel's header buffer, which lives
+ * outside the script heap, so the heap limit did not bound it: a loop of
+ * res:header calls grew it to all of memory (audit 9 M1). */
+#define HL_RES_HEADER_BYTES_MAX (64 * 1024)
+
 #endif /* HL_LIMITS_RUNTIME_H */

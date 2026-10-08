@@ -157,7 +157,11 @@ void hl_lua_timer_trampoline(void *user_data)
          * The continuation was created by the yielding function and
          * already has timer_ctx wired (via lua->active_timer).
          * When async completes, hl_lua_async_resume will clear
-         * in_flight and reschedule. Nothing to do here. */
+         * in_flight and reschedule. */
+        /* The continuation captured the coroutine; the globals no longer
+         * describe a running handler (audit 9 L6, as dispatch.c). */
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
     } else {
         /* Error - log, reschedule anyway */
         char ebuf[512];
