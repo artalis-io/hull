@@ -1584,10 +1584,10 @@ const _subscribers = Object.create(null);
 // Lease duration (seconds) for a subscription drain (a crashed drainer's lease
 // expires after this and another worker resumes from the unadvanced cursor).
 const _EDRAIN_LEASE = 30;
-// Intrinsic prototypes of async (generator) functions, to refuse an async
-// subscriber at jobs.subscribe.
+// Intrinsic prototype of async functions, to refuse an async subscriber at
+// jobs.subscribe (async generator functions are caught by their toStringTag:
+// Hull's JS source frontend does not parse `async function*`).
 const ASYNC_FN_PROTO = Object.getPrototypeOf(async function () {});
-const ASYNC_GEN_FN_PROTO = Object.getPrototypeOf(async function* () {});
 
 /**
  * Request the running runWorker loop to stop after the current iteration.
@@ -2604,8 +2604,8 @@ function subscribe(name, handler, opts) {
     // the event counted as delivered while its work (and any failure) was
     // still pending. Refuse one here; a sync handler that returns a thenable
     // is treated as a failure at delivery (eventsDrain).
-    const hp = Object.getPrototypeOf(handler);
-    if (hp === ASYNC_FN_PROTO || hp === ASYNC_GEN_FN_PROTO)
+    if (Object.getPrototypeOf(handler) === ASYNC_FN_PROTO ||
+        Object.prototype.toString.call(handler) === "[object AsyncGeneratorFunction]")
         throw new Error("jobs.subscribe: handler must be synchronous (not an async function)");
     const o = opts || {};
     const typesCsv = (Array.isArray(o.types) && o.types.length) ? o.types.join(",") : null;
