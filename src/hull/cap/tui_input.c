@@ -364,9 +364,18 @@ void hl_tui_parser_free(HlTuiParser *p)
     memset(p, 0, sizeof *p);
 }
 
-void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
+/* Free queue slots one byte needs at most: Alt+<control> queues two
+ * events (escape + the control). */
+#define HL_TUI_FEED_SLOTS 2
+
+/* Parse until the bytes run out or the queue cannot take another byte's
+ * events. Returns the bytes consumed. */
+static size_t parse_bytes(HlTuiParser *p, const char *bytes, size_t len)
 {
-    for (size_t i = 0; i < len; i++) {
+    size_t i;
+    for (i = 0; i < len; i++) {
+        if (HL_TUI_EVENT_QUEUE - p->q_count < HL_TUI_FEED_SLOTS)
+            break;
         unsigned char c = (unsigned char)bytes[i];
 
         switch (p->state) {
@@ -424,6 +433,8 @@ void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
             } else if (c == ']') {
                 p->state = HL_TUI_PS_OSC;
                 p->acc_len = 0;
+                p->osc_esc = 0;
+                p->osc_len = 0;
             } else if (c == 0x1B) {
                 /* ESC ESC - emit one ESC, stay in ESC for the next. */
                 emit_key_named(p, HL_TUI_KEY_ESCAPE, 0);
@@ -466,21 +477,29 @@ void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
             /* Consume until BEL or ST (ESC \). We don't process OSC
              * responses asynchronously; the only OSC we care about
              * (background query) is handled synchronously during
-             * acquire. */
-            if (c == 0x07) {
+             * acquire. The ESC of a possible ST is a flag, not a byte in
+             * acc[]: acc[] stops recording once full, and the terminator
+             * of a long OSC string was never recognised - every later
+             * keystroke was swallowed (audit 10). */
+            if (p->osc_esc) {
+                p->osc_esc = 0;
                 p->state = HL_TUI_PS_GROUND;
                 p->acc_len = 0;
-            } else if (c == '\\' && p->acc_len > 0 &&
-                       p->acc[p->acc_len - 1] == 0x1B) {
-                /* ST: the previous byte recorded a pending ESC. */
+                if (c != '\\') {
+                    /* ESC + anything but '\\' ends the OSC and starts a
+                     * new escape sequence with this byte. */
+                    p->state = HL_TUI_PS_ESC;
+                    i--;   /* re-process this byte in ESC */
+                }
+            } else if (c == 0x07) {
                 p->state = HL_TUI_PS_GROUND;
                 p->acc_len = 0;
-            } else if (p->acc_len + 1 < sizeof p->acc) {
-                /* Includes ESC: we record it so the next byte can
-                 * decide whether this is ST (ESC '\\') or random
-                 * payload. acc[] is bounded; long OSC strings drop
-                 * trailing bytes but the terminator still works. */
-                p->acc[p->acc_len++] = (char)c;
+            } else if (c == 0x1B) {
+                p->osc_esc = 1;
+            } else {
+                p->osc_len++;
+                if (p->acc_len < sizeof p->acc)
+                    p->acc[p->acc_len++] = (char)c;
             }
             break;
 
@@ -512,10 +531,43 @@ void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
             break;
         }
     }
+    return i;
+}
+
+/* Parse what the backlog holds, as far as the queue allows. */
+static void run_backlog(HlTuiParser *p)
+{
+    if (!p->backlog_len) return;
+    size_t used = parse_bytes(p, p->backlog, p->backlog_len);
+    if (used) {
+        memmove(p->backlog, p->backlog + used, p->backlog_len - used);
+        p->backlog_len -= used;
+    }
+}
+
+size_t hl_tui_parser_room(const HlTuiParser *p)
+{
+    return sizeof p->backlog - p->backlog_len;
+}
+
+size_t hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
+{
+    run_backlog(p);
+    size_t used = 0;
+    if (!p->backlog_len)            /* keep the input in order */
+        used = parse_bytes(p, bytes, len);
+    size_t rest = len - used;
+    size_t room = hl_tui_parser_room(p);
+    size_t keep = rest < room ? rest : room;
+    memcpy(p->backlog + p->backlog_len, bytes + used, keep);
+    p->backlog_len += keep;
+    return used + keep;
 }
 
 int hl_tui_parser_pop(HlTuiParser *p, HlTuiEvent *out)
 {
+    if (!p->q_count)
+        run_backlog(p);
     if (!p->q_count) {
         out->kind = HL_TUI_EV_NONE;
         out->key = NULL; out->text = NULL;
@@ -548,6 +600,9 @@ int hl_tui_parser_pop(HlTuiParser *p, HlTuiEvent *out)
 
     p->has_published = 1;
     *out = p->published.ev;
+    /* A slot is free again: parse input held back while the queue was
+     * full. */
+    run_backlog(p);
     return 0;
 }
 
@@ -571,6 +626,21 @@ int hl_tui_parser_flush_idle(HlTuiParser *p)
         p->state = HL_TUI_PS_GROUND;
         p->acc_len = 0;
         return 1;
+    }
+    /* A terminal sends an OSC reply in one burst. ESC ']' followed by
+     * silence is the user's Alt+]: commit it as that key, which used to
+     * open an OSC that swallowed every keystroke until a BEL. An OSC that
+     * stalled part-way is abandoned the same way (audit 10). */
+    if (p->state == HL_TUI_PS_OSC) {
+        int alt_bracket = (p->osc_len == 0 && !p->osc_esc);
+        p->state = HL_TUI_PS_GROUND;
+        p->acc_len = 0;
+        p->osc_esc = 0;
+        p->osc_len = 0;
+        if (alt_bracket) {
+            emit_key_cp(p, ']', HL_TUI_MOD_ALT);
+            return 1;
+        }
     }
     return 0;
 }

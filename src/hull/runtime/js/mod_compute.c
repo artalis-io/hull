@@ -1203,6 +1203,12 @@ static JSValue js_compute_instance(JSContext *ctx, JSValueConst this_val,
 
     js_wasm_clamp_opts(&opts, &js->base);
 
+    /* The heap + stack it reserves, charged before (audit 10). */
+    if (hl_js_budget_charge(ctx, hl_wasm_instance_units(&opts)) < 0) {
+        JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
+
     const char *err_msg = NULL;
     HlWasmInstance *pi = hl_cap_wasm_instance_create(
         js->base.wasm_cache, name, &opts,

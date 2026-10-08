@@ -75,6 +75,10 @@ typedef enum {
     HL_TUI_EV_MOUSE  = 3,
     HL_TUI_EV_PASTE  = 4,
     HL_TUI_EV_FOCUS  = 5,
+    /* The input side reached end of file (the terminal went away). Sticky:
+     * every later poll returns it again at once. It used to read as a
+     * timeout, so a poll loop waiting for input spun (audit 10). */
+    HL_TUI_EV_HANGUP = 6,
 } HlTuiEventKind;
 
 #define HL_TUI_MOD_SHIFT  (1u << 0)

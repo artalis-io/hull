@@ -153,6 +153,12 @@ typedef struct HlWasmCache {
      * RO mapping, and any heap-write primitive against the table
      * faults instead of pivoting the host_call dispatcher. */
     struct ShSealArena *native_arena;  /* NULL until init succeeds */
+    /* Live persistent instances and the heap + stack bytes they reserve,
+     * bounded by max_live_instances (0 = HL_WASM_MAX_LIVE_INSTANCES) and
+     * HL_WASM_MAX_LIVE_INSTANCE_BYTES. Guarded by pool_mutex. */
+    int          live_instances;
+    uint64_t     live_instance_bytes;
+    int          max_live_instances;
 } HlWasmCache;
 
 /* ── Call options ──────────────────────────────────────────────────── */
@@ -457,9 +463,23 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
 
 /* ── Persistent instance API ───────────────────────────────────────── */
 
+/* Instruction-budget units the bindings charge before compute.instance()
+ * (audit 10): one per 64 bytes of the app heap + exec-env stack the instance
+ * reserves - the rate Lua charges VM allocation at. One binding call zeroed
+ * up to the heap ceiling. */
+static inline uint64_t hl_wasm_instance_units(const HlWasmCallOpts *o)
+{
+    uint64_t heap  = (o && o->heap_size)  ? o->heap_size  : HL_WASM_DEFAULT_HEAP;
+    uint64_t stack = (o && o->stack_size) ? o->stack_size : HL_WASM_DEFAULT_STACK;
+    return (heap + stack) / 64;
+}
+
 /**
  * Create a persistent WASM instance. Not pooled - exclusively owned by caller.
  * Linear memory is preserved across calls. Caller must destroy when done.
+ * At most HL_WASM_MAX_LIVE_INSTANCES live per cache, reserving at most
+ * HL_WASM_MAX_LIVE_INSTANCE_BYTES of heap + stack between them (the first is
+ * never refused for its size); past either, NULL with "too_many_instances".
  *
  * @param cache    Module cache (must be initialized)
  * @param name     Module name (e.g. "model" -> compute/model.wasm)

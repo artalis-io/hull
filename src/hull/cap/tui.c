@@ -115,6 +115,10 @@ struct HlTuiCtx {
     int paste_on;
     int focus_on;
     int kitty_kbd_on;
+
+    /* The input fd reached EOF (or hung up): reported as a sticky
+     * HL_TUI_EV_HANGUP event once the queue is empty (audit 10). */
+    int hangup;
 };
 
 /* ── Forward decls ──────────────────────────────────────────────── */
@@ -971,11 +975,41 @@ int hl_cap_tui_feed(HlTuiCtx *ctx, const char *bytes, size_t len)
     return 0;
 }
 
+/* The sticky hangup event, once every queued event has been delivered. */
+static int pop_or_hangup(HlTuiCtx *ctx, HlTuiEvent *out)
+{
+    if (hl_tui_parser_pop(&ctx->parser, out) == 0) return 0;
+    if (!ctx->hangup) return 1;
+    memset(out, 0, sizeof *out);
+    out->kind = HL_TUI_EV_HANGUP;
+    return 0;
+}
+
+/* Read what the input fd has, no more than the parser can keep. 1 when
+ * bytes were read or EOF was first seen, 0 when there was nothing to read
+ * (or no room), -1 on error. */
+static int read_input(HlTuiCtx *ctx)
+{
+    char buf[HL_TUI_INPUT_CHUNK];
+    size_t room = hl_tui_parser_room(&ctx->parser);
+    if (room == 0) return 0;   /* stays in the kernel's buffer */
+    size_t want = room < sizeof buf ? room : sizeof buf;
+    ssize_t n = read(ctx->in_fd, buf, want);
+    if (n < 0) return errno == EINTR ? 0 : -1;
+    if (n == 0) {
+        if (ctx->hangup) return 0;
+        ctx->hangup = 1;
+        return 1;
+    }
+    hl_tui_parser_feed(&ctx->parser, buf, (size_t)n);
+    return 1;
+}
+
 int hl_cap_tui_next_event(HlTuiCtx *ctx, HlTuiEvent *out)
 {
     if (!ctx || !out) { errno = EINVAL; return -1; }
     consume_winch(ctx);
-    return hl_tui_parser_pop(&ctx->parser, out);
+    return pop_or_hangup(ctx, out);
 }
 
 int hl_cap_tui_commit_idle(HlTuiCtx *ctx)
@@ -990,16 +1024,15 @@ int hl_cap_tui_drain(HlTuiCtx *ctx)
     /* Non-blocking probe: poll with zero timeout. If no data, return 0
      * - that's the "fd not readable" signal the caller uses to switch
      * to event-loop suspension. */
+    if (ctx->hangup) return 0;
     struct pollfd pfd = { .fd = ctx->in_fd, .events = POLLIN };
     int pr = poll(&pfd, 1, 0);
     if (pr <= 0) return 0;
 
-    char buf[HL_TUI_INPUT_CHUNK];
-    ssize_t n = read(ctx->in_fd, buf, sizeof buf);
-    if (n < 0) { if (errno == EINTR) return 0; return -1; }
-    if (n == 0) return 0;  /* EOF - caller treats as no work */
-    hl_tui_parser_feed(&ctx->parser, buf, (size_t)n);
-    return (int)n;
+    /* EOF counts as work once: the caller's next_event then delivers the
+     * hangup event (it used to read as "no work", so a poll waited out
+     * its whole timeout on a terminal that was gone). */
+    return read_input(ctx);
 }
 
 int hl_cap_tui_parser_pending(HlTuiCtx *ctx)
@@ -1014,9 +1047,9 @@ int hl_cap_tui_poll(HlTuiCtx *ctx, int timeout_ms, HlTuiEvent *out)
     out->kind = HL_TUI_EV_NONE;
     out->key = NULL; out->text = NULL;
 
-    /* Drain any already-decoded events first. */
+    /* Drain any already-decoded events first (then a sticky hangup). */
     consume_winch(ctx);
-    if (hl_tui_parser_pop(&ctx->parser, out) == 0) return 0;
+    if (pop_or_hangup(ctx, out) == 0) return 0;
 
     struct pollfd pfd = { .fd = ctx->in_fd, .events = POLLIN };
     /* `remaining` is the user's wall-clock budget. We poll with the
@@ -1057,14 +1090,11 @@ int hl_cap_tui_poll(HlTuiCtx *ctx, int timeout_ms, HlTuiEvent *out)
             continue;
         }
 
-        /* Readable: drain. */
-        char buf[HL_TUI_INPUT_CHUNK];
-        ssize_t n = read(ctx->in_fd, buf, sizeof buf);
-        if (n < 0) { if (errno == EINTR) continue; return -1; }
-        if (n == 0) return 1;
-        hl_tui_parser_feed(&ctx->parser, buf, (size_t)n);
+        /* Readable (or hung up): drain. EOF delivers the hangup event:
+         * returning a timeout here made a poll loop spin. */
+        if (read_input(ctx) < 0) return -1;
         consume_winch(ctx);
-        if (hl_tui_parser_pop(&ctx->parser, out) == 0) return 0;
+        if (pop_or_hangup(ctx, out) == 0) return 0;
         /* No complete event yet (partial CSI / ESC). Keep polling
          * with a fresh idle slice - flush_idle handles the lone-ESC
          * case below. */

@@ -621,6 +621,19 @@ v2 work: a `tui.re_detect_theme()` that re-runs the query.)
   means a partial CSI sequence in flight at the moment a Lua/JS GC
   event releases the userdata wrapper would survive. But only the
   *cap-layer* state does; events queued for a dead VM are dropped.
+  Audit 10: an OSC ends at BEL or ST however long it is (the ST's ESC is
+  a flag, not a byte in the bounded accumulator), ESC + anything but `\`
+  ends it and starts a new sequence, and `ESC ]` followed by the idle
+  window commits as Alt+`]` instead of swallowing later keystrokes. Input
+  that would overflow the 64-event queue is held back (1 KB backlog,
+  `HL_TUI_INPUT_BACKLOG`) and parsed as events are popped; readers never
+  read more than the backlog can take, so the rest stays in the kernel
+  buffer instead of being dropped.
+- **Hangup.** When stdin reaches EOF (the terminal went away) `poll`
+  returns a sticky `{ kind = "hangup" }` event - every later poll returns
+  it again at once. It used to read as a timeout, so a poll loop spun.
+  `tui.run` exits (returning nil / null) on hangup unless `on_event`
+  returned an exit token for it.
 - **Output buffering.** All `write` calls append to the pending
   shadow buffer (not raw stdout). `flush` emits the diff vs the
   current shadow in one `write(2)`. Atomic redraws, no tearing.

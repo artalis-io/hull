@@ -243,6 +243,10 @@ static void push_event(lua_State *L, const HlTuiEvent *ev)
         lua_pushboolean(L, ev->focus_in ? 1 : 0);
         lua_setfield(L, -2, "in");
         break;
+    case HL_TUI_EV_HANGUP:
+        /* the terminal went away (stdin EOF); sticky - audit 10 */
+        lua_pushstring(L, "hangup");    lua_setfield(L, -2, "kind");
+        break;
     default:
         lua_pushstring(L, "none");      lua_setfield(L, -2, "kind");
         break;

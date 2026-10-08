@@ -445,18 +445,96 @@ UTEST(tui_parser, unknown_csi_dropped)
     hl_tui_parser_free(&p);
 }
 
-UTEST(tui_parser, queue_full_drops_silently)
+/* Audit 10: input past the queue's capacity is kept and parsed as events
+ * are popped - it used to be dropped (a fast paste without bracketed-paste
+ * mode, or key repeat while the app was busy, lost keystrokes). */
+UTEST(tui_parser, queue_full_keeps_remaining_bytes)
 {
     HlTuiParser p; hl_tui_parser_init(&p);
-    /* Feed > queue capacity keys; older ones survive, newer ones drop. */
     char buf[256];
-    memset(buf, 'x', sizeof buf);
-    hl_tui_parser_feed(&p, buf, sizeof buf);
+    for (size_t i = 0; i < sizeof buf; i++)
+        buf[i] = (char)('a' + (i % 26));
+    ASSERT_EQ(hl_tui_parser_feed(&p, buf, sizeof buf), sizeof buf);
+    ASSERT_LE(p.q_count, HL_TUI_EVENT_QUEUE);
+    ASSERT_GT(p.backlog_len, (size_t)0);
     int n = 0;
     HlTuiEvent ev = {0};
-    while (hl_tui_parser_pop(&p, &ev) == 0) n++;
-    ASSERT_LE(n, HL_TUI_EVENT_QUEUE);
-    ASSERT_GT(n, 0);
+    while (hl_tui_parser_pop(&p, &ev) == 0) {
+        ASSERT_EQ(ev.kind, HL_TUI_EV_KEY);
+        ASSERT_EQ(ev.codepoint, (uint32_t)('a' + (n % 26)));   /* in order */
+        n++;
+    }
+    ASSERT_EQ(n, (int)sizeof buf);
+    ASSERT_EQ(p.backlog_len, (size_t)0);
+    hl_tui_parser_free(&p);
+}
+
+/* The backlog is bounded: a feed past it reports what it took, and the
+ * reader is told how much room is left. */
+UTEST(tui_parser, backlog_bounded)
+{
+    HlTuiParser p; hl_tui_parser_init(&p);
+    static char buf[HL_TUI_EVENT_QUEUE + HL_TUI_INPUT_BACKLOG + 100];
+    memset(buf, 'x', sizeof buf);
+    size_t took = hl_tui_parser_feed(&p, buf, sizeof buf);
+    ASSERT_LT(took, sizeof buf);
+    ASSERT_EQ(hl_tui_parser_room(&p), (size_t)0);
+    HlTuiEvent ev = {0};
+    ASSERT_EQ(hl_tui_parser_pop(&p, &ev), 0);
+    hl_tui_parser_free(&p);
+}
+
+/* Audit 10: ST (ESC '\') ends an OSC however long its payload; acc[] stops
+ * recording once full, and the ST of a long reply was never seen. */
+UTEST(tui_parser, osc_long_payload_ends_at_st)
+{
+    HlTuiParser p; hl_tui_parser_init(&p);
+    char buf[300];
+    size_t n = 0;
+    buf[n++] = 0x1b; buf[n++] = ']';
+    for (int i = 0; i < 200; i++) buf[n++] = 'z';
+    buf[n++] = 0x1b; buf[n++] = '\\';
+    buf[n++] = 'q';
+    hl_tui_parser_feed(&p, buf, n);
+    HlTuiEvent ev = {0};
+    ASSERT_EQ(hl_tui_parser_pop(&p, &ev), 0);
+    ASSERT_EQ(ev.kind, HL_TUI_EV_KEY);
+    ASSERT_EQ(ev.codepoint, (uint32_t)'q');
+    ASSERT_EQ(p.state, HL_TUI_PS_GROUND);
+    hl_tui_parser_free(&p);
+}
+
+/* ESC + anything but '\' ends the OSC and starts a new sequence. */
+UTEST(tui_parser, osc_esc_then_other_starts_new_sequence)
+{
+    HlTuiParser p; hl_tui_parser_init(&p);
+    HlTuiEvent ev = {0};
+    ASSERT_EQ(FEED_POP(&p, "\x1b]11;rgb\x1b[A", &ev), 0);
+    ASSERT_EQ(ev.kind, HL_TUI_EV_KEY);
+    ASSERT_STREQ(ev.key, HL_TUI_KEY_UP);
+    hl_tui_parser_free(&p);
+}
+
+/* Alt+] (ESC ']' then quiet) is committed as that key by flush_idle,
+ * instead of opening an OSC that swallowed every later keystroke. */
+UTEST(tui_parser, alt_bracket_commits_via_flush_idle)
+{
+    HlTuiParser p; hl_tui_parser_init(&p);
+    HlTuiEvent ev = {0};
+    hl_tui_parser_feed(&p, "\x1b]", 2);
+    ASSERT_EQ(hl_tui_parser_pop(&p, &ev), 1);
+    ASSERT_EQ(hl_tui_parser_flush_idle(&p), 1);
+    ASSERT_EQ(hl_tui_parser_pop(&p, &ev), 0);
+    ASSERT_EQ(ev.codepoint, (uint32_t)']');
+    ASSERT_TRUE((ev.mods & HL_TUI_MOD_ALT) != 0);
+    ASSERT_EQ(FEED_POP(&p, "a", &ev), 0);
+    ASSERT_EQ(ev.codepoint, (uint32_t)'a');
+
+    /* An OSC that stalled part-way is abandoned (nothing emitted). */
+    hl_tui_parser_feed(&p, "\x1b]11;rg", 7);
+    ASSERT_EQ(hl_tui_parser_flush_idle(&p), 0);
+    ASSERT_EQ(FEED_POP(&p, "b", &ev), 0);
+    ASSERT_EQ(ev.codepoint, (uint32_t)'b');
     hl_tui_parser_free(&p);
 }
 

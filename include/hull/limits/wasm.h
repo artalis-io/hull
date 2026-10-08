@@ -98,6 +98,20 @@
 #ifndef HL_WASM_MAX_CHAIN_ATTACH
 #define HL_WASM_MAX_CHAIN_ATTACH    128
 #endif
+/* Persistent instances (compute.instance) live at once per WASM cache - one
+ * per app process, shared by both runtimes - and the heap + stack bytes they
+ * reserve between them (audit 10). Each holds its linear memory, app heap and
+ * exec-env stack outside the VM's heap limit until closed or collected, so an
+ * app looping over compute.instance() reserved gigabytes the 64 MB VM limit
+ * never saw. The byte budget never refuses the FIRST instance, so a single
+ * instance with a large (manifest-ceiling) heap still works. Past either, a
+ * create fails "too_many_instances". */
+#ifndef HL_WASM_MAX_LIVE_INSTANCES
+#define HL_WASM_MAX_LIVE_INSTANCES  32
+#endif
+#ifndef HL_WASM_MAX_LIVE_INSTANCE_BYTES
+#define HL_WASM_MAX_LIVE_INSTANCE_BYTES ((uint64_t)1024 * 1024 * 1024)  /* 1 GB */
+#endif
 #ifndef HL_WASM_POOL_HEAP_THRESHOLD
 #define HL_WASM_POOL_HEAP_THRESHOLD (4 * 1024 * 1024)   /* 4 MB */
 #endif

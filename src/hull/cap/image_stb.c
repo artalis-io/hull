@@ -50,6 +50,25 @@ static int stb_can_decode_png(const void *header, size_t len)
     return h[0] == 0x89 && h[1] == 'P' && h[2] == 'N' && h[3] == 'G';
 }
 
+/* Header-only size, under the same limits stb_decode applies. */
+static int stb_info(const void *src, size_t src_len,
+                    uint32_t *w, uint32_t *h)
+{
+    if (src_len > (size_t)INT32_MAX)
+        return -1;
+    int iw, ih, channels_in_file;
+    if (!stbi_info_from_memory((const unsigned char *)src, (int)src_len,
+                               &iw, &ih, &channels_in_file))
+        return -1;
+    if (iw <= 0 || ih <= 0 || (uint32_t)iw > HL_IMAGE_MAX_DIM ||
+        (uint32_t)ih > HL_IMAGE_MAX_DIM ||
+        (uint64_t)iw * (uint64_t)ih > HL_IMAGE_MAX_PIXELS)
+        return -1;
+    *w = (uint32_t)iw;
+    *h = (uint32_t)ih;
+    return 0;
+}
+
 static int stb_decode(const void *src, size_t src_len,
                       void **pixels, uint32_t *w, uint32_t *h,
                       int requested_channels, HlAllocator *alloc)
@@ -129,6 +148,7 @@ static void stb_free_pixels(void *pixels)
 static const HlImageCodec stb_png_codec = {
     .name        = "png",
     .can_decode  = stb_can_decode_png,
+    .info        = stb_info,
     .decode      = stb_decode,
     .encode      = stb_encode_png,
     .free_pixels = stb_free_pixels,
@@ -173,6 +193,7 @@ static int stb_encode_jpeg(const void *pixels, uint32_t w, uint32_t h,
 static const HlImageCodec stb_jpeg_codec = {
     .name        = "jpeg",
     .can_decode  = stb_can_decode_jpeg,
+    .info        = stb_info,
     .decode      = stb_decode,
     .encode      = stb_encode_jpeg,
     .free_pixels = stb_free_pixels,
@@ -190,6 +211,7 @@ static int stb_can_decode_bmp(const void *header, size_t len)
 static const HlImageCodec stb_bmp_codec = {
     .name        = "bmp",
     .can_decode  = stb_can_decode_bmp,
+    .info        = stb_info,
     .decode      = stb_decode,
     .encode      = NULL,   /* BMP encoding not supported */
     .free_pixels = stb_free_pixels,

@@ -130,6 +130,7 @@ static void gpu_pin_view(lua_State *L, int anchor, int idx, HlBufferView *bv)
     /* a string: anchored by the caller, immutable */
 }
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -787,10 +788,18 @@ static int l_gpu_texture_read(lua_State *L)
         return 2;
     }
 
+    /* As mod_image.c's push_image: the collector sees only the small
+     * userdata, so the pixels are added as GC debt - a loop dropping read-back
+     * textures otherwise hit the heap limit before a cycle collected them
+     * (audit 10). (push_image is in the image feature archive, which a GPU
+     * app need not compose; hence the copy.) */
+    size_t kb = img->pixel_len >> 10;
     if (hl_lua_push_slot_safe(L, HL_IMAGE_MT, img) != 0) {
         hl_image_free(img);   /* made before its userdata */
         return luaL_error(L, "not enough memory for the image");
     }
+    if (kb > 0)
+        lua_gc(L, LUA_GCSTEP, kb > INT_MAX ? INT_MAX : (int)kb);
     return 1;
 }
 #endif /* HL_ENABLE_IMAGE */

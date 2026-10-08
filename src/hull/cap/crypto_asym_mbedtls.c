@@ -470,10 +470,8 @@ static int mbed_rsa_private_pem(const HlCryptoRsaParts *pp,
     mbedtls_rsa_init(&rsa);
     mbedtls_mpi v[8];                           /* N E D P Q DP DQ QP */
     for (int i = 0; i < 8; i++) mbedtls_mpi_init(&v[i]);
-    /* n + d + five half-size values, plus DER headers. */
-    size_t cap = 5 * pp->n_len + 128;
-    unsigned char *der = (unsigned char *)calloc(1, cap);
-    if (!der) goto done;
+    size_t cap = 0;
+    unsigned char *der = NULL;
 
     if (mbedtls_rsa_import_raw(&rsa, pp->n, pp->n_len, pp->p, pp->p_len,
                                pp->q, pp->q_len, pp->d, pp->d_len,
@@ -483,6 +481,17 @@ static int mbed_rsa_private_pem(const HlCryptoRsaParts *pp,
         || mbedtls_rsa_export(&rsa, &v[0], &v[3], &v[4], &v[2], &v[1]) != 0
         || mbedtls_rsa_export_crt(&rsa, &v[5], &v[6], &v[7]) != 0)
         goto done;
+
+    /* Sized from the values themselves (audit 10): "n + d + five half-size
+     * values" assumed balanced primes and a small e, so a valid key with a
+     * large e or unequal p / q did not fit and was refused. Each INTEGER is
+     * its bytes, a sign byte and at most 1 tag + 5 length bytes; the
+     * version and the SEQUENCE header fit in the slack. */
+    cap = 64;
+    for (int i = 0; i < 8; i++)
+        cap += mbedtls_mpi_size(&v[i]) + 1 + 6;
+    der = (unsigned char *)calloc(1, cap);
+    if (!der) goto done;
 
     /* RSAPrivateKey ::= SEQUENCE { version 0, n, e, d, p, q, dP, dQ, qInv },
      * written backwards as the ASN.1 writer does. */

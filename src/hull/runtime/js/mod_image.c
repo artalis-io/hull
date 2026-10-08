@@ -5,6 +5,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"            /* hl_js_budget_charge */
 #include "hull/cap/image.h"
 #include "hull/cap/fs.h"
 #ifdef HL_ENABLE_WASM
@@ -244,6 +245,18 @@ static JSValue js_image_decode_fn(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "image.decode: arg 1 must be a buffer");
     }
 
+    /* Charge the decode to the budget BEFORE it runs (audit 10): sized from
+     * the header, at the rate hashing is charged. A header no codec reads
+     * fails fast, so only the input is charged. */
+    uint32_t iw = 0, ih = 0;
+    if (hl_image_info(view.data, view.len, fmt_name, &iw, &ih) != 0)
+        iw = ih = 0;
+    if (hl_js_budget_charge(ctx, hl_image_codec_units(iw, ih, view.len)) < 0) {
+        if (needs_free) JS_FreeCString(ctx, str_out);
+        if (fmt_name) JS_FreeCString(ctx, fmt_name);
+        return JS_EXCEPTION;
+    }
+
     const char *err_msg = NULL;
     HlImageAlloc ia;
     hl_js_image_alloc(ctx, &ia);
@@ -287,6 +300,13 @@ static JSValue js_image_encode_fn(JSContext *ctx, JSValueConst this_val,
     if (!img) {
         JS_FreeCString(ctx, fmt_name);
         return JS_ThrowTypeError(ctx, "image.encode: arg 1 must be an Image");
+    }
+
+    /* The encode is one call over every pixel (audit 10). */
+    if (hl_js_budget_charge(ctx, hl_image_codec_units(img->width,
+                                                      img->height, 0)) < 0) {
+        JS_FreeCString(ctx, fmt_name);
+        return JS_EXCEPTION;
     }
 
     void *out = NULL;

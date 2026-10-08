@@ -486,8 +486,9 @@ int hl_cap_crypto_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
 #define HL_CRYPTO_SIGN_MAX 1024
 
 /** Largest PEM @ref hl_cap_crypto_rsa_private_pem writes (an RSA-8192 key
- *  is about 6.3 KiB). */
-#define HL_CRYPTO_RSA_PEM_MAX 8192
+ *  is about 6.3 KiB with balanced primes and a small e; up to ~11.3 KiB with
+ *  a public exponent as long as n and unequal primes - audit 10). */
+#define HL_CRYPTO_RSA_PEM_MAX 12288
 
 /** Sign @p data under @p alg with @p privkey_pem.
  *

@@ -69,6 +69,18 @@ UTEST(valkey_dsn, sslmode_turns_tls_on) {
     { OK("redis://host");                      ASSERT_EQ(d.tls, 0); }
 }
 
+/* Audit 10: sslmode=disable on a TLS scheme kept TLS and dropped the
+ * certificate check; it is refused. */
+UTEST(valkey_dsn, sslmode_disable_on_tls_scheme_refused) {
+    HlValkeyDsn d; char e[128];
+    ASSERT_EQ(-1, hl_valkey_dsn_parse("rediss://host?sslmode=disable", &d, e, sizeof e));
+    ASSERT_TRUE(strstr(e, "sslmode=disable") != NULL);
+    ASSERT_EQ(-1, hl_valkey_dsn_parse("valkeys://host?sslmode=none", &d, e, sizeof e));
+    ASSERT_EQ(-1, hl_valkey_dsn_parse("rediss://u:pw@host?connect_timeout=5&sslmode=DISABLE",
+                                      &d, e, sizeof e));
+    ASSERT_TRUE(strstr(e, "pw") == NULL);   /* no credentials in the error */
+}
+
 UTEST(valkey_dsn, sslmode_and_timeout_opts) {
     { OK("rediss://host?sslmode=require");      ASSERT_EQ(d.verify, 0); }
     { OK("rediss://host?sslmode=verify-full");  ASSERT_EQ(d.verify, 1); }

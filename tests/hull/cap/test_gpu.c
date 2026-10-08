@@ -484,4 +484,48 @@ UTEST(hull_cap_gpu, disabled_placeholder)
 
 #endif /* HL_ENABLE_GPU */
 
+/* ── Bind-group slot accounting (base-resident, no device needed) ──── */
+
+#include "hull/cap/gpu.h"
+
+UTEST(hull_cap_gpu, tex_binding_slots)
+{
+    ASSERT_EQ(1, hl_gpu_tex_binding_slots(1));
+    ASSERT_EQ(2, hl_gpu_tex_binding_slots(0));
+}
+
+/* Audit 10 H1: the entry array is sized from the descriptor's storage flag;
+ * a resolved texture of the other kind must be refused, not written. */
+UTEST(hull_cap_gpu, tex_binding_storage_mismatch_refused)
+{
+    const char *err = NULL;
+    /* desc says storage (1 slot counted), texture is sampled (2 slots) */
+    ASSERT_EQ(-1, hl_gpu_tex_binding_check(1, 0, 0, 1, &err));
+    ASSERT_STREQ("texture_storage_mismatch", err);
+    err = NULL;
+    /* the reverse is refused too (it would leave a slot unwritten) */
+    ASSERT_EQ(-1, hl_gpu_tex_binding_check(0, 1, 0, 2, &err));
+    ASSERT_STREQ("texture_storage_mismatch", err);
+    /* matching kinds pass and report their slot count */
+    ASSERT_EQ(1, hl_gpu_tex_binding_check(1, 1, 0, 1, &err));
+    ASSERT_EQ(2, hl_gpu_tex_binding_check(0, 0, 3, 5, &err));
+    /* any nonzero flag is "storage" */
+    ASSERT_EQ(1, hl_gpu_tex_binding_check(7, 1, 0, 1, &err));
+}
+
+UTEST(hull_cap_gpu, tex_binding_bounds_checked)
+{
+    const char *err = NULL;
+    /* a sampled texture needs 2 slots; only 1 left */
+    ASSERT_EQ(-1, hl_gpu_tex_binding_check(0, 0, 4, 5, &err));
+    ASSERT_STREQ("too_many_bindings", err);
+    err = NULL;
+    ASSERT_EQ(-1, hl_gpu_tex_binding_check(1, 1, 5, 5, &err));
+    ASSERT_STREQ("too_many_bindings", err);
+    ASSERT_EQ(-1, hl_gpu_tex_binding_check(1, 1, -1, 5, &err));
+    ASSERT_EQ(-1, hl_gpu_tex_binding_check(1, 1, 6, 5, &err));
+    /* NULL err is allowed */
+    ASSERT_EQ(-1, hl_gpu_tex_binding_check(1, 0, 0, 2, NULL));
+}
+
 UTEST_MAIN();

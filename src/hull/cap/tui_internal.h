@@ -18,6 +18,9 @@
 #define HL_TUI_PASTE_INITIAL_CAP   4096
 #define HL_TUI_PASTE_MAX           (64 * 1024)
 #define HL_TUI_KEY_NAME_MAX        32
+/* Input bytes held back while the event queue is (nearly) full, parsed as
+ * events are popped. The readers never read more than the room left. */
+#define HL_TUI_INPUT_BACKLOG       1024
 
 /* SGR mouse encoding bit: param flag 0x40 means scroll wheel. */
 #define HL_TUI_MOUSE_FLAG_WHEEL    64
@@ -67,6 +70,17 @@ typedef struct {
     char   acc[64];
     size_t acc_len;
 
+    /* OSC: the previous byte was an ESC (a possible ST, ESC '\'). Kept
+     * apart from acc[], which stops recording once full - the terminator
+     * of a long OSC string was never seen (audit 10). */
+    int    osc_esc;
+    /* OSC: payload bytes seen (any count; acc_len is bounded). */
+    size_t osc_len;
+
+    /* Unparsed input (see HL_TUI_INPUT_BACKLOG). */
+    char   backlog[HL_TUI_INPUT_BACKLOG];
+    size_t backlog_len;
+
     /* In-flight UTF-8 multi-byte sequence (in GROUND). */
     char   utf8[4];
     size_t utf8_len;
@@ -93,13 +107,23 @@ typedef struct {
 
 void hl_tui_parser_init(HlTuiParser *p);
 void hl_tui_parser_free(HlTuiParser *p);
-void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len);
+/* Parse @p bytes. Stops queueing events before the queue overflows: the
+ * rest is kept (up to HL_TUI_INPUT_BACKLOG) and parsed as events are popped,
+ * instead of being dropped (audit 10). Returns the bytes taken - parsed or
+ * kept; fewer than @p len only when the backlog is full. */
+size_t hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len);
+
+/* Bytes the backlog can still take: a reader reads no more than this, so
+ * input it cannot hold stays in the kernel's buffer. */
+size_t hl_tui_parser_room(const HlTuiParser *p);
 int  hl_tui_parser_pop (HlTuiParser *p, HlTuiEvent *out);
 
 /* Commit any in-flight in-progress state as a best-effort event.
  * Called by the cap layer after an idle slice without new bytes -
  * resolves the "lone ESC vs. start of CSI" ambiguity. Today:
  *   - ESC state with no follow-up → emit a bare "escape" key event.
+ *   - OSC state with no payload (ESC ']' then quiet) → Alt+']'; an OSC
+ *     that stalled part-way is abandoned (audit 10).
  * Returns 1 if a new event was queued, 0 otherwise. */
 int  hl_tui_parser_flush_idle(HlTuiParser *p);
 

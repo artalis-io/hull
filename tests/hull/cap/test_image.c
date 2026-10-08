@@ -372,4 +372,83 @@ UTEST(hull_cap_image, decoded_pixels_counted_against_allocator)
     ASSERT_EQ((size_t)0, hl_alloc_used(&a));
 }
 
+/* Audit 10: the pixels are reserved in the caller's allocator from the
+ * header BEFORE the codec decodes (stb's buffers are outside the heap
+ * limit). A recording allocator shows the one request is the reservation. */
+typedef struct {
+    HlAllocator *a;
+    int          calls;
+    size_t       last;
+} RecAlloc;
+
+static void *rec_px_malloc(void *ctx, size_t size)
+{
+    RecAlloc *r = (RecAlloc *)ctx;
+    r->calls++;
+    r->last = size;
+    return hl_alloc_malloc(r->a, size);
+}
+
+static void rec_px_free(void *ctx, void *ptr, size_t size)
+{
+    hl_alloc_free(((RecAlloc *)ctx)->a, ptr, size);
+}
+
+UTEST(hull_cap_image, decode_reserves_pixels_before_decoding)
+{
+    HlAllocator a;
+    hl_alloc_init(&a, (size_t)1 << 20);   /* 1 MB "heap" */
+    RecAlloc r = { &a, 0, 0 };
+    HlImageAlloc ia = { rec_px_malloc, rec_px_free, &r };
+    unsigned char png[sizeof(minimal_png)];
+    const char *err = NULL;
+
+    /* 4000 x 4000 RGBA = 64 MB: refused from the header, before stb ran
+     * (the truncated body would otherwise fail as decode_failed). */
+    png_with_size(png, 4000, 4000);
+    ASSERT_TRUE(hl_image_decode(png, sizeof png, NULL, &ia, &err) == NULL);
+    ASSERT_STREQ("out_of_memory", err);
+    ASSERT_EQ(1, r.calls);
+    ASSERT_EQ((size_t)4000 * 4000 * 4, r.last);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+
+    /* Fits: reserved, the decode then fails on the truncated body, and the
+     * reservation is handed back. */
+    r.calls = 0;
+    err = NULL;
+    png_with_size(png, 100, 100);
+    ASSERT_TRUE(hl_image_decode(png, sizeof png, NULL, &ia, &err) == NULL);
+    ASSERT_STREQ("decode_failed", err);
+    ASSERT_EQ(1, r.calls);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+}
+
+UTEST(hull_cap_image, info_reads_header_only)
+{
+    unsigned char png[sizeof(minimal_png)];
+    uint32_t w = 0, h = 0;
+    png_with_size(png, 640, 480);
+    ASSERT_EQ(0, hl_image_info(png, sizeof png, NULL, &w, &h));
+    ASSERT_EQ((uint32_t)640, w);
+    ASSERT_EQ((uint32_t)480, h);
+    /* over the pixel budget: refused, as decode does */
+    png_with_size(png, 8193, 8193);
+    ASSERT_EQ(-1, hl_image_info(png, sizeof png, NULL, &w, &h));
+    /* not an image */
+    ASSERT_EQ(-1, hl_image_info("nope", 4, NULL, &w, &h));
+    ASSERT_EQ(-1, hl_image_info(NULL, 0, NULL, &w, &h));
+}
+
+UTEST(hull_cap_image, codec_units)
+{
+    /* one unit per 8 bytes of RGBA pixels plus one per 8 encoded bytes */
+    ASSERT_EQ((uint64_t)0, hl_image_codec_units(0, 0, 0));
+    ASSERT_EQ((uint64_t)2, hl_image_codec_units(2, 2, 0));
+    ASSERT_EQ((uint64_t)3, hl_image_codec_units(2, 2, 8));
+    ASSERT_EQ((uint64_t)8192 * 8192 / 2,
+              hl_image_codec_units(8192, 8192, 0));
+    /* saturates */
+    ASSERT_TRUE(hl_image_codec_units(UINT32_MAX, UINT32_MAX, SIZE_MAX) > 0);
+}
+
 UTEST_MAIN();

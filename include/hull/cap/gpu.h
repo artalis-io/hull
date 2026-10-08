@@ -120,6 +120,21 @@ typedef struct HlGpuTextureDesc {
     int            binding;    /* -1 = auto-assign */
 } HlGpuTextureDesc;
 
+/* Bind-group slots a texture takes: storage = 1 (view), sampled = 2 (view +
+ * sampler). A dispatch / pipeline sizes its entry array from the DESCRIPTORS'
+ * storage flags, before any texture is resolved. */
+int hl_gpu_tex_binding_slots(int storage);
+
+/* Check one resolved texture before its bind-group entries are written at
+ * [cursor, cursor + slots): the texture must be the kind (storage / sampled)
+ * its descriptor declared - the count the entry array was sized from - and
+ * its slots must fit below `end`. Returns the slot count, or -1 with *err set
+ * ("texture_storage_mismatch" / "too_many_bindings"). Audit 10 H1: a named
+ * persistent texture created as sampled but passed as `storage = true` (or the
+ * reverse) was counted as 1 slot and written as 2, past the heap array. */
+int hl_gpu_tex_binding_check(int desc_storage, int tex_storage,
+                             int cursor, int end, const char **err);
+
 /* ── Types ─────────────────────────────────────────────────────────── */
 
 typedef struct HlGpuBufferDesc {
