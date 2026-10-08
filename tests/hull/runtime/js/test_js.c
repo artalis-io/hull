@@ -8893,7 +8893,11 @@ UTEST(js_audit9, one_content_type_and_the_apps_wins)
     free_req_ctx(&req);
     kl_http_response_free(&res);
 
-    /* With none set, the helper's own type, once. */
+    /* With none set, the helper's own type, once (a fresh runtime: the
+     * manifest is declared once per app). */
+    cleanup_js();
+    init_js();
+    ASSERT_TRUE(js_initialized);
     KlHttpResponse res2;
     ASSERT_EQ(kl_http_response_init(&res2, &alloc), 0);
     KlHttpRequest req2 = {0};
