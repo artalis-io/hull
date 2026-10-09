@@ -9809,4 +9809,175 @@ UTEST(js_audit11, content_type_and_error_headers_span_middleware)
     cleanup_js();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* ── Audit 11 H1: route / middleware patterns outlive their JS strings ──
+ *
+ * Keel stores the method / pattern pointers it is given without copying.
+ * They were JS_ToCString results freed right after registration: for a
+ * non-ASCII pattern a freed buffer (use-after-free from startup), for an
+ * ASCII one an alias of a string the app could drop by clearing the
+ * __hull_* globals. Wiring now hands Keel Hull-owned copies: after the
+ * globals are deleted and the GC has run, the router's patterns are intact
+ * (under ASan any stale read fails the test) and requests still route. */
+
+static int a11_pattern_is(const char *p, size_t len, const char *want)
+{
+    return p && len == strlen(want) && memcmp(p, want, len) == 0;
+}
+
+static void a11_drop_route_globals(void)
+{
+    const char *drop =
+        "delete globalThis.__hull_route_defs;"
+        "delete globalThis.__hull_middleware;"
+        "delete globalThis.__hull_post_middleware;"
+        "delete globalThis.__hull_ws_defs;"
+        "delete globalThis.__hull_sse_defs;";
+    JSValue v = JS_Eval(js.ctx, drop, strlen(drop), "<a11drop>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    JS_RunGC(js.rt);
+}
+
+UTEST(js_audit11, router_patterns_survive_dropped_defs)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *app =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "globalThis.__a11_pre = 0; globalThis.__a11_post = 0;\n"
+        "app.use('GET', '/caf\xc3\xa9', (req, res) => { globalThis.__a11_pre++; return 0; });\n"
+        "app.usePost('GET', '/caf\xc3\xa9', (req, res) => { globalThis.__a11_post++; return 0; });\n"
+        "app.get('/caf\xc3\xa9', (req, res) => { res.json({ ok: 'caf\xc3\xa9' }); });\n"
+        "app.get('/plain', (req, res) => { res.json({ ok: 1 }); });\n";
+    JSValue v = JS_Eval(js.ctx, app, strlen(app), "<a11app>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    KlHttpRouter router;
+    KlAllocator kalloc = kl_allocator_default();
+    kl_http_router_init(&router, &kalloc);
+    ASSERT_EQ(hl_js_wire_routes(&js, &router), 0);
+    hl_js_test_register(js.ctx, &router, &js);
+
+    /* The app (or anything) drops every def the strings came from. */
+    a11_drop_route_globals();
+
+    ASSERT_EQ(router.count, 2);
+    EXPECT_TRUE(a11_pattern_is(router.routes[0].pattern, router.routes[0].pattern_len,
+                               "/caf\xc3\xa9"));
+    EXPECT_TRUE(a11_pattern_is(router.routes[0].method, router.routes[0].method_len, "GET"));
+    EXPECT_TRUE(a11_pattern_is(router.routes[1].pattern, router.routes[1].pattern_len,
+                               "/plain"));
+    ASSERT_EQ(router.mw_count, 1);
+    EXPECT_TRUE(a11_pattern_is(router.middleware[0].pattern, router.middleware[0].pattern_len,
+                               "/caf\xc3\xa9"));
+    ASSERT_EQ(router.post_mw_count, 1);
+    EXPECT_TRUE(a11_pattern_is(router.post_middleware[0].pattern,
+                               router.post_middleware[0].pattern_len, "/caf\xc3\xa9"));
+
+    const char *cases =
+        "test('non-ASCII route still routes', () => { "
+        "  const r = test.get('/caf\xc3\xa9'); "
+        "  if (r.status !== 200) throw new Error('status ' + r.status); "
+        "  if (globalThis.__a11_pre < 1) throw new Error('middleware did not run'); });\n"
+        "test('ASCII route still routes', () => { "
+        "  if (test.get('/plain').status !== 200) throw new Error('status'); });\n";
+    v = JS_Eval(js.ctx, cases, strlen(cases), "<a11cases>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[2];
+    memset(results, 0, sizeof results);
+    hl_js_test_run(js.ctx, &total, &passed, &failed, NULL, results, 2);
+    EXPECT_EQ(total, 2);
+    EXPECT_TRUE_MSG(results[0].passed, results[0].error);
+    EXPECT_TRUE_MSG(results[1].passed, results[1].error);
+
+    kl_http_router_free(&router);
+    cleanup_js_caps();
+}
+
+UTEST(js_audit11, server_ws_sse_patterns_survive_dropped_defs)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    const char *app =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1', 'hull/web/ws-server@1',"
+        " 'hull/web/sse@1'] });\n"
+        "app.get('/r\xc3\xa9', (req, res) => {});\n"
+        "app.use('*', '/m\xc3\xa9/*', (req, res) => 0);\n"
+        "app.ws('/ws\xc3\xa9', { onMessage: (c, m) => {} });\n"
+        "app.sse('/sse\xc3\xa9', (req, stream) => {});\n";
+    JSValue v = JS_Eval(js.ctx, app, strlen(app), "<a11srv>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    KlHttpServer server;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 1, .alloc = NULL };
+    kl_http_server_init(&server, &cfg);
+    ASSERT_EQ(hl_js_wire_routes_server(&js, &server, NULL), 0);
+
+    a11_drop_route_globals();
+
+    /* route, ws upgrade, sse - in registration order */
+    ASSERT_EQ(server.router.count, 3);
+    EXPECT_TRUE(a11_pattern_is(server.router.routes[0].pattern,
+                               server.router.routes[0].pattern_len, "/r\xc3\xa9"));
+    EXPECT_TRUE(a11_pattern_is(server.router.routes[1].pattern,
+                               server.router.routes[1].pattern_len, "/ws\xc3\xa9"));
+    EXPECT_TRUE(a11_pattern_is(server.router.routes[2].pattern,
+                               server.router.routes[2].pattern_len, "/sse\xc3\xa9"));
+    ASSERT_EQ(server.router.mw_count, 1);
+    EXPECT_TRUE(a11_pattern_is(server.router.middleware[0].pattern,
+                               server.router.middleware[0].pattern_len, "/m\xc3\xa9/*"));
+    EXPECT_TRUE(a11_pattern_is(server.router.middleware[0].method,
+                               server.router.middleware[0].method_len, "*"));
+
+    kl_http_server_free(&server);
+    cleanup_js();
+}
+
+/* Audit 11 L: a pre-body middleware that cannot be registered (here: its
+ * pattern no longer converts to a string) fails the wiring - the app
+ * refuses to start rather than serving without it. */
+UTEST(js_audit11, unregistrable_middleware_fails_wiring)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *app =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.use('*', '/admin/*', (req, res) => 1);\n"
+        "app.get('/admin/x', (req, res) => { res.json({ ok: 1 }); });\n"
+        "globalThis.__hull_middleware[0].pattern = Symbol('unconvertible');\n";
+    JSValue v = JS_Eval(js.ctx, app, strlen(app), "<a11fail>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    KlHttpRouter router;
+    KlAllocator kalloc = kl_allocator_default();
+    kl_http_router_init(&router, &kalloc);
+    EXPECT_EQ(hl_js_wire_routes(&js, &router), -1);
+    EXPECT_EQ(router.mw_count, 0);
+    /* no exception is left pending on the context */
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    kl_http_router_free(&router);
+
+    KlHttpServer server;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 1, .alloc = NULL };
+    kl_http_server_init(&server, &cfg);
+    EXPECT_EQ(hl_js_wire_routes_server(&js, &server, NULL), -1);
+    EXPECT_EQ(server.router.mw_count, 0);
+    kl_http_server_free(&server);
+    cleanup_js_caps();
+}
+#endif
+
 UTEST_MAIN();

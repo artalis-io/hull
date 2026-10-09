@@ -1970,7 +1970,13 @@ static int hl_serve_wire_routes(HlServerState *s)
          * address to kl_http_server_use; the moment this function returned
          * the pointer dangled (Keel later dereferenced into whatever
          * the stack had been reused for). */
-        kl_http_server_use(&s->server, "*", "/*", kl_http_cors_middleware, s->cors_cfg);
+        if (kl_http_server_use(&s->server, "*", "/*", kl_http_cors_middleware,
+                               s->cors_cfg) != 0) {
+            /* A CORS middleware that did not register would leave the
+             * app answering without its policy: refuse to start. */
+            log_error("[hull:c] could not register the CORS middleware; refusing to start");
+            return -1;
+        }
         log_info("[hull:c] CORS enabled (%d origin(s), sealed)",
                  s->manifest.cors_origin_count);
     }
@@ -2001,10 +2007,17 @@ static int hl_serve_wire_routes(HlServerState *s)
             && hl_vfs_has_prefix(platform_vfs, "static/hull/");
         if (has_app_static || has_stdlib_static) {
             HlStaticCtx *sctx = track_route_alloc(sizeof(HlStaticCtx));
+            if (!sctx) {
+                log_error("[hull:c] out of memory registering static file serving");
+                return -1;
+            }
             sctx->vfs = hl_app_context_app_vfs(s->app);
             sctx->stdlib_vfs = has_stdlib_static ? platform_vfs : NULL;
-            kl_http_server_use(&s->server, "GET", "/static/*",
-                          hl_static_middleware, sctx);
+            if (kl_http_server_use(&s->server, "GET", "/static/*",
+                                   hl_static_middleware, sctx) != 0) {
+                log_error("[hull:c] could not register static file serving; refusing to start");
+                return -1;
+            }
         }
     }
 
@@ -2021,7 +2034,10 @@ static int hl_serve_wire_routes(HlServerState *s)
                       "and needs a loopback bind (got -b %s)", b);
             return -1;
         }
-        hl_agent_api_register(&s->server, &s->agent_api_ctx);
+        if (hl_agent_api_register(&s->server, &s->agent_api_ctx) != 0) {
+            log_error("[hull:c] could not register the agent API; refusing to start");
+            return -1;
+        }
     }
     return 0;
 }

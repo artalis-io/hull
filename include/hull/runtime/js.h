@@ -315,11 +315,17 @@ void hl_js_dump_error(HlJS *js);
  * this public header doesn't pull in keel's body_reader_multipart.h
  * (the actual type is `KlHttpMultipartConfig *`); freed alongside the
  * route in hl_js_free.
+ *
+ * method / pattern are Hull-owned copies (freed with the route): Keel's
+ * router keeps the pointers it is given without copying them, so they must
+ * outlive the router, not the JS strings they were read from.
  */
 typedef struct {
     HlJS *js;
     int   handler_id;
     void *multipart_config;  /* (KlHttpMultipartConfig *), NULL = not streaming */
+    char *method;            /* owned copy; Keel stores this pointer */
+    char *pattern;           /* owned copy; Keel stores this pointer */
 } HlJSRoute;
 
 /*

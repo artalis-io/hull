@@ -1412,12 +1412,7 @@ void hl_js_free(HlJS *js)
     /* Free tracked route allocations (and per-route multipart configs
      * stashed by hl_js_wire_routes_server). */
     for (size_t i = 0; i < js->route_count; i++) {
-        HlJSRoute *r = (HlJSRoute *)js->routes[i];
-        if (r && r->multipart_config) {
-            hl_alloc_free(js->base.alloc, r->multipart_config,
-                          sizeof(KlHttpMultipartConfig));
-        }
-        hl_alloc_free(js->base.alloc, r, sizeof(HlJSRoute));
+        hl_js_route_destroy(js, (HlJSRoute *)js->routes[i]);
     }
     if (js->routes) {
         hl_alloc_free(js->base.alloc, js->routes,

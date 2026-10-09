@@ -106,6 +106,7 @@ struct HlJSWsRoute {
 struct HlJSSseRoute {
     HlJS *js;
     int   handler_id;
+    char  path[256];   /* Keel stores the route pattern pointer: Hull owns it */
 };
 
 /* ── Promoted: defined in timers.c, used in routes.c (initial schedule
@@ -133,6 +134,9 @@ void hl_js_sse_handler(struct KlHttpRequest *req, struct KlHttpResponse *res,
  * only routes.c uses them, but keep declarations here so future split
  * files can reuse without re-introducing duplicates. */
 int hl_js_track_route(HlJS *js, void *route);
+/* Free an HlJSRoute and everything it owns (multipart config, method /
+ * pattern copies). NULL-safe. Defined in routes.c. */
+void hl_js_route_destroy(HlJS *js, HlJSRoute *route);
 int hl_js_track_alloc(HlJS *js, void ***arr, size_t *count,
                       size_t *cap, void *ptr);
 

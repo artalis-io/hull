@@ -567,12 +567,7 @@ void hl_lua_free(HlLua *lua)
     /* Free tracked route allocations (and per-route multipart configs
      * stashed by hl_lua_wire_routes_server). */
     for (size_t i = 0; i < lua->route_count; i++) {
-        HlLuaRoute *r = (HlLuaRoute *)lua->routes[i];
-        if (r && r->multipart_config) {
-            hl_alloc_free(lua->base.alloc, r->multipart_config,
-                          sizeof(KlHttpMultipartConfig));
-        }
-        hl_alloc_free(lua->base.alloc, r, sizeof(HlLuaRoute));
+        hl_lua_route_destroy(lua, (HlLuaRoute *)lua->routes[i]);
     }
     if (lua->routes) {
         hl_alloc_free(lua->base.alloc, lua->routes,

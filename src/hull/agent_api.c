@@ -106,7 +106,6 @@ static int agent_api_middleware(KlHttpRequest *req, KlHttpResponse *res, void *u
 
 int hl_agent_api_register(KlHttpServer *server, HlAgentApiCtx *ctx)
 {
-    kl_http_server_use(server, "GET", "/_hull/agent/*",
-                  agent_api_middleware, ctx);
-    return 0;
+    return kl_http_server_use(server, "GET", "/_hull/agent/*",
+                              agent_api_middleware, ctx) != 0 ? -1 : 0;
 }
