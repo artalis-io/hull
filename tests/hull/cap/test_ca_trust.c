@@ -112,6 +112,19 @@ UTEST(ca_trust, no_verify_publishes_nothing)
 
 #endif /* HL_EMBED_CA_BUNDLE */
 
+UTEST(ca_trust, no_verify_still_yields_a_context)
+{
+    /* --no-ca-bundle must hand http.fetch / the SSH tunnel a working context
+     * that verifies nothing. Keel 3.3.0 made client_ctx_create(NULL) return
+     * NULL, so this goes through the insecure constructor; a NULL here would
+     * leave outbound HTTPS with no TLS at all under --no-ca-bundle. */
+    KlAllocator alloc = kl_allocator_default();
+    KlTlsCtx *ctx = hl_ca_trust_resolve(1, NULL, &alloc, NULL);
+    ASSERT_TRUE(ctx != NULL);
+    hl_tls_ctx_destroy(ctx);
+    hl_ca_bundle_reset_active();
+}
+
 UTEST(ca_trust, the_file_bytes_survive_a_second_resolve)
 {
     /* Resolving again (a test harness, a re-wire) frees the previous owned

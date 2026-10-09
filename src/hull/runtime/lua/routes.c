@@ -198,6 +198,7 @@ int hl_lua_wire_routes(HlLua *lua, KlHttpRouter *router)
     lua_pop(L, 1);
 
     /* Wire post-body middleware from __hull_post_middleware */
+    int post_failed = 0;
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_post_middleware");
     if (lua_istable(L, -1)) {
         int post_mw_count = (int)luaL_len(L, -1);
@@ -222,9 +223,16 @@ int hl_lua_wire_routes(HlLua *lua, KlHttpRouter *router)
                     ctx->multipart_config = NULL;
                     if (hl_lua_track_route(lua, ctx) != 0)
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
-                    else
-                        kl_http_router_use_post(router, mw_method, mw_pattern,
-                                           hl_lua_keel_middleware, ctx);
+                    else if (kl_http_router_use_post(router, mw_method, mw_pattern,
+                                                     hl_lua_keel_middleware, ctx) != 0) {
+                        /* Keel 3.3.0 caps post-body middleware per router;
+                         * a dropped one (CSRF, auth) must not fail open. */
+                        log_error("[hull] could not register post-body middleware %s %s (Keel allows "
+                                  "at most %d per router); refusing to start",
+                                  mw_method, mw_pattern,
+                                  KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE);
+                        post_failed = 1;
+                    }
                 }
             }
 
@@ -234,7 +242,7 @@ int hl_lua_wire_routes(HlLua *lua, KlHttpRouter *router)
     }
     lua_pop(L, 1);
 
-    return 0;
+    return post_failed ? -1 : 0;
 }
 
 /* ── Server route wiring (with body reader factory) ────────────────── */
@@ -434,6 +442,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
     lua_pop(L, 1); /* __hull_middleware table */
 
     /* Wire post-body middleware from __hull_post_middleware */
+    int post_failed = 0;
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_post_middleware");
     if (lua_istable(L, -1)) {
         int post_mw_count = (int)luaL_len(L, -1);
@@ -461,9 +470,15 @@ int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
                     ctx->multipart_config = NULL;
                     if (hl_lua_track_route(lua, ctx) != 0) {
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
-                    } else {
-                        kl_http_server_use_post(server, method_str, pattern,
-                                           hl_lua_keel_middleware, ctx);
+                    } else if (kl_http_server_use_post(server, method_str, pattern,
+                                                       hl_lua_keel_middleware, ctx) != 0) {
+                        /* Keel 3.3.0 caps post-body middleware per router;
+                         * a dropped one (CSRF, auth) must not fail open. */
+                        log_error("[hull] could not register post-body middleware %s %s (Keel allows "
+                                  "at most %d per router); refusing to start",
+                                  method_str, pattern,
+                                  KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE);
+                        post_failed = 1;
                     }
                 }
             }
@@ -473,6 +488,8 @@ int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
         }
     }
     lua_pop(L, 1); /* __hull_post_middleware table */
+    if (post_failed)
+        return -1;
 
     /* Wire timers from __hull_timer_defs */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_timer_defs");

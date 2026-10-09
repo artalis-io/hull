@@ -146,7 +146,12 @@ int hl_release_io_get(const char *url,
     KlTlsConfig tls_cfg = {0};
     hl_tls_config_wire(&tls_cfg, tls);
     KlHttpClientConfig cfg = {
-        .timeout_ms        = 30000,
+        /* Keel 3.3.0 made timeout_ms ONE deadline for the whole request
+         * (connect + TLS + send + receive), where it used to bound each
+         * socket wait. 30 s per wait is now 30 s for a ~330 MB tool bundle,
+         * which a slow link cannot meet; 10 minutes covers the largest
+         * asset at about 0.6 MB/s. */
+        .timeout_ms        = 10 * 60 * 1000,
         /* 512 MB: a released binary / feature lib is small, but a multi-file
          * TOOL BUNDLE can be large - the `zig` toolchain is ~330 MB (a 168 MB
          * driver + its cross-libc tree). The download is SHA-256-verified

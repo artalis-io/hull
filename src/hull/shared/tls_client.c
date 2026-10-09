@@ -187,7 +187,7 @@ HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
                           "connections are refused");
         }
     } else {
-        ctx = kl_tls_mbedtls_client_ctx_create(NULL, alloc);
+        ctx = kl_tls_mbedtls_client_ctx_create_insecure(alloc);
     }
     if (!ctx)
         return NULL;
