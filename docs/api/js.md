@@ -85,7 +85,7 @@ route is registered.
 | `fs.read`     | `string[]`                                 | Allowed read paths. |
 | `fs.write`    | `string[]`                                 | Allowed write paths. |
 | `hosts`       | `string[]`                                 | Outbound HTTP / WS host allowlist. |
-| `http`        | `{ timeoutMs }`                            | App-wide outbound HTTP timeout: one deadline for the whole request. Default 30000 ms; per-call `opts.timeoutMs` overrides it; clamped to 10 min for `fetch`, 60 s for sync calls. See [app_api_reference.md](../app_api_reference.md#outbound-http-timeout-hullhttp-client). |
+| `http`        | `{ timeoutMs }`                            | App-wide outbound HTTP timeout: one deadline for the whole request. Default 30000 ms; per-call `opts.timeoutMs` overrides it; clamped to 10 min for `httpClient.async.*`, 60 s for sync calls. See [app_api_reference.md](../app_api_reference.md#outbound-http-timeout-hullhttp-client). |
 | `env`         | `string[]`                                 | Env var allowlist. |
 | `gpu`         | `boolean` or `{ devices: number[] }`       | Enable `gpu` import. Defaults to `false`. |
 | `cors`        | `{ origins, methods, headers, credentials, maxAge }` | Built-in CORS. |

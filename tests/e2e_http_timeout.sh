@@ -7,7 +7,7 @@
 # default, and a per-call `timeout_ms` / `timeoutMs` option overrides it.
 #
 # A local server answers /slow after ~2 s. Each app (Lua and JS) declares a
-# 1000 ms manifest default and asks, for both the async http.fetch and the
+# 1000 ms manifest default and asks, for both the async http.async.get and the
 # sync http.get:
 #   - no option          -> the manifest's 1000 ms applies: fails
 #   - a per-call 1000 ms -> fails
@@ -98,7 +98,7 @@ local function opts(req)
 end
 app.get("/up", function(_req, res) res:text("up") end)
 app.get("/fetch", function(req, res)
-    report(res, pcall(http.fetch, "GET", URL, opts(req)))
+    report(res, pcall(http.async.get, URL, opts(req)))
 end)
 app.get("/sync", function(req, res)
     report(res, pcall(http.get, URL, opts(req)))
@@ -127,7 +127,7 @@ function opts(req) {
 app.get("/up", (_req, res) => res.text("up"));
 app.get("/fetch", async (req, res) => {
     let r;
-    try { r = await http.fetch("GET", URL, opts(req)); } catch (e) { r = null; }
+    try { r = await http.async.get(URL, opts(req)); } catch (e) { r = null; }
     report(res, r);
 });
 app.get("/sync", (req, res) => {

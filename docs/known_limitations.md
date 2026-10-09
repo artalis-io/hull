@@ -25,7 +25,7 @@ All limits are defined in `include/hull/utils/limits.h` and can be overridden at
 | Default port | 3000 | `HL_DEFAULT_PORT` | Convention for development servers |
 | Default max connections | 256 | `HL_DEFAULT_MAX_CONN` | Keel connection pool size |
 | Default read timeout | 30 s | `HL_DEFAULT_READ_TIMEOUT_MS` | Idle connection timeout |
-| Outbound HTTP timeout | 30 s (max 10 min `http.fetch`, 60 s sync) | `HL_HTTP_DEFAULT_TIMEOUT_MS` | One deadline for the whole request; manifest `http.timeout_ms` / per-call `timeout_ms` change it (`hull/limits/http.h`) |
+| Outbound HTTP timeout | 30 s (max 10 min `http.async.*`, 60 s sync) | `HL_HTTP_DEFAULT_TIMEOUT_MS` | One deadline for the whole request; manifest `http.timeout_ms` / per-call `timeout_ms` change it (`hull/limits/http.h`) |
 
 ## Crypto
 
