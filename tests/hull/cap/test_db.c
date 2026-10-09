@@ -988,6 +988,17 @@ static int spill_exec(sqlite3 *db, const char *sql)
 }
 
 #define SPILL_ROWS "60000"   /* x 300 bytes: ~18 MB, past the 8 MiB limit */
+/* A sort SQLite cannot skip: every row comes back, and the key is an
+ * expression no index (big_v, made below) provides. A count over an ordered
+ * subquery would not sort at all - the optimizer drops that ORDER BY. */
+#define SPILL_SORT "SELECT v FROM big ORDER BY substr(v, 2) DESC"
+
+static int rows_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    (void)cols; (void)ncols;
+    (*(int64_t *)ctx)++;
+    return 0;
+}
 
 /* Audit 11: under temp_store=MEMORY the sorter never spilled, so a sort,
  * CREATE INDEX or VACUUM bigger than the process-wide hard heap limit failed
@@ -1028,9 +1039,8 @@ UTEST(hl_cap_db, big_sorts_and_index_builds_spill_under_a_low_heap_limit)
     int64_t n = -1;
     HlStmtCache cache;
     hl_stmt_cache_init(&cache, db, NULL);
-    EXPECT_EQ(0, hl_cap_db_query(&cache,
-        "SELECT count(*) FROM (SELECT v FROM big ORDER BY v DESC)",
-        NULL, 0, count_cb, &n, NULL));
+    n = 0;
+    EXPECT_EQ(0, hl_cap_db_query(&cache, SPILL_SORT, NULL, 0, rows_cb, &n, NULL));
     EXPECT_EQ(60000, (int)n);
     hl_stmt_cache_destroy(&cache);
     EXPECT_EQ(SQLITE_OK, spill_exec(db, "SELECT DISTINCT v FROM big"));
@@ -1042,8 +1052,7 @@ UTEST(hl_cap_db, big_sorts_and_index_builds_spill_under_a_low_heap_limit)
     db = open_spill_db(path, "MEMORY");
     ASSERT_TRUE(db != NULL);
     EXPECT_EQ(SQLITE_OK, spill_exec(db, "SELECT count(*) FROM big"));
-    EXPECT_EQ(SQLITE_NOMEM, sqlite3_exec(db,
-        "SELECT count(*) FROM (SELECT v FROM big ORDER BY v DESC)", NULL, NULL, NULL));
+    EXPECT_EQ(SQLITE_NOMEM, sqlite3_exec(db, SPILL_SORT, NULL, NULL, NULL));
     sqlite3_close(db);
 
     hl_cap_db_set_heap_limit(HL_DB_SQLITE_HARD_HEAP_LIMIT);
