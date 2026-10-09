@@ -31,10 +31,6 @@
 JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife *life);
 JSValue hl_js_make_response_life(HlJS *js, KlHttpRequest *req,
                                  KlHttpResponse *res, HlReqLife *life);
-/* From bindings_response.c: the headers a handler's response started with,
- * kept by its error answer (audit 11). */
-void hl_js_res_handler_begin(KlHttpResponse *res);
-void hl_js_res_middleware_begin(KlHttpResponse *res);
 
 /* Free the request's middleware ctx (req->ctx: the JS value a middleware
  * left on req.ctx, or a test dispatch's JSON). Called wherever the request's
@@ -102,6 +98,11 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     if (!js || !js->ctx || !req || !res)
         return -1;
 
+    /* The headers earlier middleware set (CSP, HSTS, CORS, a request id): a
+     * 500 for this handler keeps them (audit 11). Taken before any error
+     * path below: a snapshot an earlier request on this response left must
+     * never be what this request's 500 restores (audit 12). */
+    hl_js_res_entry_begin(js, res, kl_http_request_conn(req));
 
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_registry_guard_stale_txns(js->base.db_registry);
@@ -152,10 +153,6 @@ int hl_js_dispatch(HlJS *js, int handler_id,
      * made while the connection is active and its life is not suspended the
      * connection unaccounted for (audit 8 H1). */
     js->active_life = life;
-
-    /* The headers earlier middleware set (CSP, HSTS, CORS, a request id):
-     * a 500 for this handler keeps them (audit 11). */
-    hl_js_res_handler_begin(res);
 
     /* Build JS request and response objects */
     JSValue js_req = hl_js_make_request(js->ctx, req, life);
@@ -249,9 +246,9 @@ void hl_js_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data
     HlJSRoute *route = (HlJSRoute *)user_data;
     int rc = hl_js_dispatch(route->js, route->handler_id, req, res);
     if (rc < 0) {
-        hl_js_http_error_response(res);
+        hl_js_http_error_response(route->js, res);
     } else if (rc == 0) {
-        hl_js_res_middleware_begin(res);   /* answered: its kept headers go */
+        hl_js_res_answered(route->js, res);   /* its kept headers go */
     }
     /* rc == 1: handler suspended - don't write response.
      * Keel checks conn->state == KL_HTTP_CONN_SUSPENDED and returns. */
@@ -282,6 +279,12 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
 {
     if (!js || !js->ctx || !req || !res)
         return -1;
+
+    /* The headers the response has now - the ones earlier middleware set -
+     * are what this middleware's 500 keeps (audit 12: the snapshot was
+     * dropped here, so a middleware that failed lost every header the ones
+     * before it had set). Taken before any error path below. */
+    hl_js_res_entry_begin(js, res, kl_http_request_conn(req));
 
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_registry_guard_stale_txns(js->base.db_registry);
@@ -333,10 +336,6 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
      * the async gate), including from the microtasks drained below. Set
      * before `req` is built: app code can run there too (audit 8 H1). */
     js->in_middleware = 1;
-
-    /* A new request may be on this connection slot: whatever an earlier
-     * handler's response left in the kept-headers list is not this one's. */
-    hl_js_res_middleware_begin(res);
 
     /* Build JS request and response objects */
     JSValue js_req = hl_js_make_request(js->ctx, req, life);
@@ -432,8 +431,10 @@ int hl_js_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_da
     int rc = hl_js_dispatch_middleware(ctx->js, ctx->handler_id, req, res);
     if (rc < 0) {
         /* Middleware error - short-circuit with 500 */
-        hl_js_http_error_response(res);
+        hl_js_http_error_response(ctx->js, res);
         return 1; /* short-circuit */
     }
+    if (rc != 0)
+        hl_js_res_answered(ctx->js, res);   /* short-circuit: answered */
     return rc;
 }

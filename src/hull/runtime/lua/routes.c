@@ -341,6 +341,87 @@ static KlHttpBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
  * force-pull this member over the weak http_weakstub.o stub. */
 int hl_lua_http_bridge_anchor = 0;
 
+/* An integer field of the def at @p idx, in [lo, hi]: 0 with *out set, or
+ * -1 (absent, not an integer, out of range). Raw reads: no metamethod. */
+static int lua_wire_int_field(lua_State *L, int idx, const char *key,
+                              lua_Integer lo, lua_Integer hi, lua_Integer *out)
+{
+    lua_pushstring(L, key);
+    lua_rawget(L, idx);
+    int isnum = 0;
+    lua_Integer v = lua_tointegerx(L, -1, &isnum);
+    int ok = lua_type(L, -1) == LUA_TNUMBER && isnum && v >= lo && v <= hi;
+    lua_pop(L, 1);
+    if (!ok) return -1;
+    *out = v;
+    return 0;
+}
+
+/* Arm one timer from the def table at @p idx {type, handler_id, interval_ms |
+ * hour, minute, localtime}. 0, or -1 (nothing armed; the caller logs). */
+static int lua_wire_timer(HlLua *lua, int idx)
+{
+    lua_State *L = lua->L;
+    if (!lua_checkstack(L, 2))
+        return -1;
+    lua_pushliteral(L, "type");
+    lua_rawget(L, idx);
+    const char *type = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+    int daily = type && strcmp(type, "daily") == 0;
+    int every = type && strcmp(type, "every") == 0;
+    lua_pop(L, 1);
+    if (!daily && !every)
+        return -1;
+
+    lua_Integer handler_id = 0, interval_ms = 0, hour = 0, minute = 0;
+    int localtime_flag = 0;
+    if (lua_wire_int_field(L, idx, "handler_id", 0, INT_MAX, &handler_id) != 0)
+        return -1;
+    if (daily) {
+        if (lua_wire_int_field(L, idx, "hour", 0, 23, &hour) != 0 ||
+            lua_wire_int_field(L, idx, "minute", 0, 59, &minute) != 0)
+            return -1;
+        lua_pushliteral(L, "localtime");
+        lua_rawget(L, idx);
+        localtime_flag = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+    } else if (lua_wire_int_field(L, idx, "interval_ms", 100,
+                                  LUA_MAXINTEGER, &interval_ms) != 0) {
+        return -1;   /* below app.every's 100 ms floor */
+    }
+
+    HlLuaTimer *t = hl_alloc_malloc(lua->base.alloc, sizeof(HlLuaTimer));
+    if (!t)
+        return -1;
+    memset(t, 0, sizeof(*t));
+    t->lua = lua;
+    t->handler_id = (int)handler_id;
+    t->daily = daily;
+    t->hour = (int)hour;
+    t->minute = (int)minute;
+    t->localtime = localtime_flag;
+    t->interval_ms = daily ? 0 : (int64_t)interval_ms;   /* daily: recomputed */
+    int64_t delay_ms = daily
+        ? hl_compute_daily_delay_ms(t->hour, t->minute, t->localtime)
+        : (int64_t)interval_ms;
+
+    const HlAsyncBackend *be = hl_async_backend();
+    t->timer_id = (int64_t)be->timer_add(lua->base.async_ctx, (uint64_t)delay_ms,
+                                          hl_lua_timer_trampoline, t);
+    if (t->timer_id == 0) {
+        hl_alloc_free(lua->base.alloc, t, sizeof(HlLuaTimer));
+        return -1;
+    }
+    /* Armed: it must be tracked, or nothing cancels it before hl_lua_free
+     * frees what it points into. */
+    if (hl_lua_track_timer(lua, t) != 0) {
+        be->timer_cancel(lua->base.async_ctx, (uint64_t)t->timer_id);
+        hl_alloc_free(lua->base.alloc, t, sizeof(HlLuaTimer));
+        return -1;
+    }
+    return 0;
+}
+
 int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
                                void *(*alloc_fn)(size_t))
 {
@@ -363,79 +444,27 @@ int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
     if (rc != 0)
         return -1;
 
-    /* Wire timers from __hull_timer_defs */
+    /* Wire timers from __hull_timer_defs (a registry table app code cannot
+     * reach, but checked as app.every / app.daily check it all the same). A
+     * timer that cannot be armed or tracked refuses the wiring, as a route
+     * or middleware does (audit 12: it was skipped, and an armed timer whose
+     * tracking failed was left running untracked). */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_timer_defs");
     if (lua_istable(L, -1)) {
-        int timer_count = (int)luaL_len(L, -1);
-        for (int i = 1; i <= timer_count; i++) {
+        lua_Integer timer_count = (lua_Integer)lua_rawlen(L, -1);
+        for (lua_Integer i = 1; rc == 0 && i <= timer_count; i++) {
             lua_rawgeti(L, -1, i);
-            if (!lua_istable(L, -1)) {
-                lua_pop(L, 1);
-                continue;
-            }
-
-            lua_getfield(L, -1, "type");
-            lua_getfield(L, -2, "handler_id");
-
-            const char *type_str = lua_tostring(L, -2);
-            int handler_id = (int)lua_tointeger(L, -1);
-            lua_pop(L, 2); /* type, handler_id */
-
-            if (!type_str) {
-                lua_pop(L, 1);
-                continue;
-            }
-
-            HlLuaTimer *t = hl_alloc_malloc(lua->base.alloc,
-                                              sizeof(HlLuaTimer));
-            if (!t) {
-                lua_pop(L, 1);
-                continue;
-            }
-
-            memset(t, 0, sizeof(*t));
-            t->lua = lua;
-            t->handler_id = handler_id;
-
-            int64_t delay_ms;
-            if (strcmp(type_str, "daily") == 0) {
-                lua_getfield(L, -1, "hour");
-                lua_getfield(L, -2, "minute");
-                lua_getfield(L, -3, "localtime");
-                t->hour = (int)lua_tointeger(L, -3);
-                t->minute = (int)lua_tointeger(L, -2);
-                t->localtime = lua_toboolean(L, -1);
-                t->daily = 1;
-                lua_pop(L, 3);
-
-                delay_ms = hl_compute_daily_delay_ms(t->hour, t->minute,
-                                                      t->localtime);
-                t->interval_ms = 0; /* recomputed each time */
-            } else {
-                lua_getfield(L, -1, "interval_ms");
-                t->interval_ms = (int64_t)lua_tointeger(L, -1);
-                lua_pop(L, 1);
-                t->daily = 0;
-                delay_ms = t->interval_ms;
-            }
-
-            {
-                const HlAsyncBackend *be = hl_async_backend();
-                t->timer_id = (int64_t)be->timer_add(lua->base.async_ctx,
-                                                      (uint64_t)delay_ms,
-                                                      hl_lua_timer_trampoline, t);
-            }
-            if (t->timer_id == 0) {
-                hl_alloc_free(lua->base.alloc, t, sizeof(HlLuaTimer));
-                lua_pop(L, 1);
-                continue;
-            }
-
-            hl_lua_track_timer(lua, t);
+            if (lua_istable(L, -1))
+                rc = lua_wire_timer(lua, lua_gettop(L));
             lua_pop(L, 1); /* timer def table */
         }
     }
     lua_pop(L, 1); /* __hull_timer_defs table */
+    if (rc != 0) {
+        log_error("[hull] could not wire an app.every / app.daily timer; "
+                  "refusing to start");
+        return -1;
+    }
 
     /* ── Wire WebSocket endpoints from __hull_ws_defs ──────────────── */
     /* Keel stores the upgrade pattern pointer: it is ws_route->path, a

@@ -286,6 +286,9 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
 
     if (interval_ms < 100)
         return JS_ThrowRangeError(ctx, "app.every() minimum interval is 100ms");
+    /* Stored as a JS number, so it must stay exact (the wiring re-checks). */
+    if (interval_ms > ((int64_t)1 << 53))
+        return JS_ThrowRangeError(ctx, "app.every() maximum interval is 2^53 ms");
 
     if (!JS_IsFunction(ctx, argv[1]))
         return JS_ThrowTypeError(ctx, "app.every requires a function handler");

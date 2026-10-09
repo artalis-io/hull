@@ -1440,6 +1440,10 @@ void hl_js_free(HlJS *js)
      * the teardown below is no run. */
     hl_run_watch_disarm(&js->run_watch);
 
+    /* The header snapshots of entries that never answered (audit 12: the
+     * list was file-static and outlived every runtime). */
+    hl_res_base_clear(&js->res_bases);
+
     /* Cancel and free tracked timers - via async backend vtable. */
     {
         const HlAsyncBackend *be = hl_async_backend();

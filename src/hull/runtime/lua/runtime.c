@@ -564,6 +564,10 @@ void hl_lua_free(HlLua *lua)
     hl_db_budget_unbind(&lua->budget);   /* bound by every arm */
 #endif
 
+    /* The header snapshots of entries that never answered (audit 12: the
+     * list was file-static and outlived every runtime). */
+    hl_res_base_clear(&lua->res_bases);
+
     /* Spawned tasks that never got their loop turn. */
     hl_lua_tasks_free(lua);
 

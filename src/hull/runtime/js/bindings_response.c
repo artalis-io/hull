@@ -53,19 +53,17 @@ typedef struct {
     HlReqLife      *life;   /* NULL: not tracked (always live) */
 } HlJsResBox;
 
-/* The header lines each in-flight handler's response started with
- * (res_headers.h, audit 11): its error answer keeps them. Event-loop thread
- * only. */
-static HlResBaseList g_res_bases;
-
-void hl_js_res_handler_begin(KlHttpResponse *res)
+/* The header lines each in-flight script entry's response started with
+ * (res_headers.h, audits 11 / 12): its error answer keeps them. The list is
+ * the runtime's own (HlJS.res_bases), freed with it. Event-loop thread only. */
+void hl_js_res_entry_begin(HlJS *js, KlHttpResponse *res, const void *conn)
 {
-    hl_res_base_begin(&g_res_bases, res);
+    if (js) hl_res_base_begin(&js->res_bases, res, conn);
 }
 
-void hl_js_res_middleware_begin(KlHttpResponse *res)
+void hl_js_res_answered(HlJS *js, KlHttpResponse *res)
 {
-    hl_res_base_forget(&g_res_bases, res);
+    if (js) hl_res_base_forget(&js->res_bases, res);
 }
 
 /* The class id, for the finalizer (which has no context to look it up in). */
@@ -208,6 +206,19 @@ static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
     if (!name || !value) {   /* a conversion threw: report it */
         if (name) JS_FreeCString(ctx, name);
         return JS_EXCEPTION;
+    }
+    /* Keel takes C strings (strlen): a NUL in the name cut it short after
+     * the Content-Type check below had looked at all of it (audit 12). A
+     * name must be a token; a value may not hold a NUL. */
+    if (!hl_res_header_name_valid(name, name_len) ||
+        !hl_res_header_value_valid(value, value_len)) {
+        int bad_name = !hl_res_header_name_valid(name, name_len);
+        JS_FreeCString(ctx, value);
+        JS_FreeCString(ctx, name);
+        return JS_ThrowTypeError(ctx, bad_name
+            ? "res.header: the name is not a valid header name (a token: "
+              "letters, digits and !#$%%&'*+-.^_`|~)"
+            : "res.header: the value contains a NUL");
     }
     /* After the conversions (app code): the cap is checked against the
      * buffer as it is now. */
@@ -523,29 +534,35 @@ JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res)
 /* ── HTTP-feature seam: 500-error response ──────────────────────────── */
 /* Strong override for the JS runtime. Extracted from js/dispatch.c +
  * js/async.c so those core objects hold no kl_http_response_* refs. */
-void hl_js_http_error_response(struct KlHttpResponse *res)
+void hl_js_http_error_response(struct HlJS *js, struct KlHttpResponse *res)
 {
     /* Whatever the handler set is dropped: its Set-Cookie / Location, a
      * second Content-Type (audit 10). The headers earlier middleware set
      * stay (audit 11). */
-    hl_res_base_error_reset(&g_res_bases, res, 500, "Internal Server Error", 21);
+    if (js)
+        hl_res_base_error_reset(&js->res_bases, res, 500,
+                                "Internal Server Error", 21);
+    else
+        hl_res_error_reset(res, 500, "Internal Server Error", 21);
 }
 
 /* Strong overrides: finalize + send a resumed request's response. Keeps ALL
  * kl_http_* refs (incl. kl_http_request_send_response from the heavy
  * http_server_core object) out of the base runtime's js_async.o; see
  * include/hull/http_feature.h. */
-void hl_js_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
+void hl_js_http_resume_send(struct HlJS *js, struct KlHttpConn *conn,
+                            struct KlHttpRequest *req)
 {
     KlHttpResponse *res = kl_http_conn_response(conn);
-    hl_res_base_forget(&g_res_bases, res);   /* answered: its kept headers go */
+    hl_js_res_answered(js, res);   /* answered: its kept headers go */
     if (res && res->body_mode == KL_HTTP_BODY_STREAM)
         kl_http_response_end_stream(res);
     kl_http_request_send_response(req);
 }
 
-void hl_js_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req)
+void hl_js_http_resume_error(struct HlJS *js, struct KlHttpConn *conn,
+                             struct KlHttpRequest *req)
 {
-    hl_js_http_error_response(kl_http_conn_response(conn));
+    hl_js_http_error_response(js, kl_http_conn_response(conn));
     kl_http_request_send_response(req);
 }

@@ -21,6 +21,7 @@
 #include <strings.h>  /* strncasecmp */
 
 #include "hull/limits/runtime.h"  /* HL_RES_HEADER_BYTES_MAX */
+#include "hull/shared/res_base.h"  /* HlResBaseList */
 
 /* Length of the header line at @p p (up to and including its '\n'), and
  * whether it is a @p name header (case-insensitive). */
@@ -234,65 +235,31 @@ static inline void hl_res_error_reset(KlHttpResponse *res, int status,
     hl_res_error_reset_keep(res, status, body, len, NULL, 0);
 }
 
-/* ── The headers a handler started with ──────────────────────────────────
+/* ── The headers a script entry started with ─────────────────────────────
  *
- * A copy of the response's header lines when its handler starts, for
- * hl_res_error_reset_keep. One per in-flight handler, keyed by the response;
- * each runtime keeps its own list (HlResBaseList, a member of its state).
- * An entry is taken by the handler's error answer, replaced when the same
- * response starts another handler, and dropped when a middleware starts on
- * it (a new request on that connection slot) - so one is never applied to a
- * request it was not made for. A handler that answered drops its entry too
- * (hl_res_base_forget). The list is capped: past the cap the oldest
- * goes, and that response's error answer drops every header, as before. */
+ * A copy of the response's header lines when a handler OR a middleware starts
+ * on it, for hl_res_error_reset_keep: the entry's error answer keeps the
+ * headers earlier middleware set and drops the failed entry's own. One per
+ * response, in a list each runtime keeps in its own state (HlJS / HlLua
+ * res_bases, res_base.h; audit 12 - it was one file-static list per runtime
+ * kind, never freed). Every entry replaces the response's snapshot before any
+ * of its error paths can answer (so a snapshot is never applied to a request
+ * it was not made for), and it is dropped when the entry answers, when the
+ * request's connection goes away under a suspended handler (an async
+ * cancel), and when the runtime is freed. The list is capped by count and by
+ * bytes (res_base.h): past the cap the oldest goes, and that response's error
+ * answer drops every header. */
 
-#define HL_RES_BASE_MAX 256
-
-typedef struct HlResBase {
-    const KlHttpResponse *res;
-    char                 *hdrs;   /* malloc'd copy (NULL when hdr_len was 0) */
-    size_t                len;
-    struct HlResBase     *prev, *next;   /* newest first */
-} HlResBase;
-
-typedef struct HlResBaseList {
-    HlResBase *head, *tail;
-    size_t     count;
-} HlResBaseList;
-
-static inline void hl_res_base_unlink(HlResBaseList *l, HlResBase *b)
-{
-    if (b->prev) b->prev->next = b->next; else l->head = b->next;
-    if (b->next) b->next->prev = b->prev; else l->tail = b->prev;
-    l->count--;
-}
-
-static inline HlResBase *hl_res_base_find(HlResBaseList *l,
-                                          const KlHttpResponse *res)
-{
-    for (HlResBase *b = l ? l->head : NULL; b; b = b->next)
-        if (b->res == res) return b;
-    return NULL;
-}
-
-/* Forget the entry for @p res, if any. */
-static inline void hl_res_base_forget(HlResBaseList *l,
-                                      const KlHttpResponse *res)
-{
-    HlResBase *b = hl_res_base_find(l, res);
-    if (!b) return;
-    hl_res_base_unlink(l, b);
-    free(b->hdrs);
-    free(b);
-}
-
-/* @p res's handler starts: remember its header lines. Out of memory: none is
- * kept (the error answer then drops them all). */
-static inline void hl_res_base_begin(HlResBaseList *l, const KlHttpResponse *res)
+/* An entry starts on @p res (a request on @p conn, NULL if unknown): remember
+ * its header lines. Out of memory: none is kept (the error answer then drops
+ * them all). */
+static inline void hl_res_base_begin(HlResBaseList *l, const KlHttpResponse *res,
+                                     const void *conn)
 {
     if (!l || !res) return;
     hl_res_base_forget(l, res);
     if (res->hdr_len == 0 || !res->hdr_buf) return;   /* nothing to keep */
+    if (res->hdr_len > HL_RES_BASE_BYTES_MAX) return;
     HlResBase *b = (HlResBase *)malloc(sizeof *b);
     if (!b) return;
     b->hdrs = (char *)malloc(res->hdr_len);
@@ -300,17 +267,20 @@ static inline void hl_res_base_begin(HlResBaseList *l, const KlHttpResponse *res
     memcpy(b->hdrs, res->hdr_buf, res->hdr_len);
     b->len = res->hdr_len;
     b->res = res;
+    b->conn = conn;
     b->prev = NULL;
     b->next = l->head;
     if (l->head) l->head->prev = b; else l->tail = b;
     l->head = b;
     l->count++;
-    if (l->count > HL_RES_BASE_MAX && l->tail)
-        hl_res_base_forget(l, l->tail->res);
+    l->bytes += b->len;
+    while ((l->count > HL_RES_BASE_MAX || l->bytes > HL_RES_BASE_BYTES_MAX) &&
+           l->tail && l->tail != b)
+        hl_res_base_drop(l, l->tail);
 }
 
-/* The error answer for @p res, keeping its handler-start headers (and
- * dropping the entry). */
+/* The error answer for @p res, keeping its entry-start headers (and dropping
+ * the entry). */
 static inline void hl_res_base_error_reset(HlResBaseList *l, KlHttpResponse *res,
                                            int status, const char *body,
                                            size_t len)
@@ -326,10 +296,43 @@ static inline void hl_res_base_error_reset(HlResBaseList *l, KlHttpResponse *res
     free(b);
 }
 
-/* Free every entry (the runtime is going away). */
-static inline void hl_res_base_clear(HlResBaseList *l)
+/* ── App header names and values ─────────────────────────────────────────
+ *
+ * res.header(name, value) hands Keel C strings, which it measures with
+ * strlen: a name or value with an embedded NUL went out cut at the NUL while
+ * Hull's own checks (is it Content-Type?) had looked at the whole string -
+ * "Content-Type\0x" passed as an ordinary header and was sent as a second
+ * Content-Type (audit 12). A name must be an RFC 9110 token; a value may not
+ * hold a NUL (a CR or LF Keel refuses, as before). */
+
+static inline int hl_res_header_tchar(unsigned char c)
 {
-    while (l && l->head) hl_res_base_forget(l, l->head->res);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9'))
+        return 1;
+    switch (c) {
+    case '!': case '#': case '$': case '%': case '&': case '\'': case '*':
+    case '+': case '-': case '.': case '^': case '_': case '`': case '|':
+    case '~':
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Is @p name (length @p len) a header field name (a non-empty token)? */
+static inline int hl_res_header_name_valid(const char *name, size_t len)
+{
+    if (!name || len == 0) return 0;
+    for (size_t i = 0; i < len; i++)
+        if (!hl_res_header_tchar((unsigned char)name[i])) return 0;
+    return 1;
+}
+
+/* Does @p value (length @p len) hold no NUL? */
+static inline int hl_res_header_value_valid(const char *value, size_t len)
+{
+    return value && memchr(value, '\0', len) == NULL;
 }
 
 /* Is there room for one more "Name: value\r\n" under the per-response cap

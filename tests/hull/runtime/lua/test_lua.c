@@ -10002,7 +10002,7 @@ UTEST(lua_audit10, error_response_and_bytes_drop_stale_headers)
     KlHttpRequest req = {0};
     EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt,
                   first_mw_handler_id(L, 1), &req, &res), 1);
-    hl_lua_http_error_response(&res);
+    hl_lua_http_error_response(&lua_rt, &res);
     EXPECT_EQ(res.status, 500);
     EXPECT_EQ(a10_header_count(&res, "Set-Cookie"), 0);
     EXPECT_EQ(a10_header_count(&res, "Location"), 0);
@@ -10072,7 +10072,7 @@ UTEST(lua_audit11, content_type_and_error_headers_span_middleware)
     EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, first_mw_handler_id(L, 1),
                                          &req2, &res), 0);
     EXPECT_EQ(hl_lua_dispatch(&lua_rt, first_mw_handler_id(L, 4), &req2, &res), -1);
-    hl_lua_http_error_response(&res);
+    hl_lua_http_error_response(&lua_rt, &res);
     EXPECT_EQ(res.status, 500);
     EXPECT_EQ(a10_header_count(&res, "Strict-Transport-Security"), 1);
     EXPECT_EQ(a10_header_count(&res, "Set-Cookie"), 0);
@@ -10242,5 +10242,240 @@ UTEST(lua_run_watchdog, a_runaway_worker_dispatch_is_stopped)
     lua_worker_close(&f);
 }
 
+/* ── Audit 12: runtime lows ──────────────────────────────────────────── */
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* res:header handed Keel C strings it measures with strlen, after Hull's
+ * Content-Type check had looked at the whole Lua string: a name with a NUL
+ * ("Content-Type\0x") went out as a second, unchecked Content-Type. A name
+ * must be a token now and a value may not hold a NUL; both raise. */
+UTEST(lua_audit12, header_name_must_be_a_token_and_nul_is_refused)
+{
+    static const char *const bad[] = {
+        "res:header('Content-Type\\0x', 'text/html')",
+        "res:header('X-A\\0', 'v')",
+        "res:header('Bad Name', 'v')",
+        "res:header('', 'v')",
+        "res:header('X-A:', 'v')",
+        "res:header('X-\\xc3\\xa9', 'v')",
+        "res:header('X-A', 'v\\0w')",
+    };
+    for (size_t i = 0; i <= sizeof bad / sizeof bad[0]; i++) {
+        const char *call = i < sizeof bad / sizeof bad[0] ? bad[i]
+            : "res:header(\"X-Ok_1!#$%&'*+.^`|~\", 'a b')";
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        lua_State *L = lua_rt.L;
+        char code[512];
+        snprintf(code, sizeof code,
+            "app.manifest({modules = {'hull/http-server@1'}})\n"
+            "app.use('*', '/*', function(req, res) res:json(1) %s return 1 end)\n",
+            call);
+        ASSERT_EQ(luaL_dostring(L, code), LUA_OK);
+        KlAllocator alloc = kl_allocator_default();
+        KlHttpResponse res;
+        ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+        KlHttpRequest req = {0};
+        int ok = i == sizeof bad / sizeof bad[0];
+        EXPECT_EQ_MSG(hl_lua_dispatch_middleware(&lua_rt,
+                          first_mw_handler_id(L, 1), &req, &res),
+                      ok ? 1 : -1, call);
+        EXPECT_EQ_MSG(a10_header_count(&res, "Content-Type"), 1, call);
+        if (ok)
+            EXPECT_TRUE(a10_headers_contain(&res, "X-Ok_1!#$%&'*+.^`|~: a b\r\n"));
+        else
+            EXPECT_FALSE_MSG(a10_headers_contain(&res, "X-A"), call);
+        free_lua_req_ctx(&req);
+        kl_http_response_free(&res);
+        lua_settop(L, 0);
+        cleanup_lua();
+    }
+}
+
+/* The kept-headers snapshots: a middleware that raises keeps the headers the
+ * middleware before it set (its 500 dropped them all: the snapshot was only
+ * taken at handler start, and a middleware start forgot it); the list is the
+ * runtime's own and hl_lua_free empties it; and a request whose dispatch
+ * fails before its handler runs never gets an earlier request's snapshot. */
+UTEST(lua_audit12, error_reset_snapshots_are_per_request_and_per_runtime)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  res:header('Strict-Transport-Security', 'max-age=1') return 0 end)\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  res:header('Set-Cookie', 'sid=1') error('mw boom') end)\n"
+        "app.use('*', '/*', function(req, res) return 0 end)\n"),
+        LUA_OK);
+    int mw1 = first_mw_handler_id(L, 1);
+    int mw2 = first_mw_handler_id(L, 2);
+    int mw3 = first_mw_handler_id(L, 3);
+    KlAllocator alloc = kl_allocator_default();
+
+    /* A raising middleware keeps the earlier middleware's header. */
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, mw1, &req, &res), 0);
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, mw2, &req, &res), -1);
+    hl_lua_http_error_response(&lua_rt, &res);
+    EXPECT_EQ(res.status, 500);
+    EXPECT_EQ(a10_header_count(&res, "Strict-Transport-Security"), 1);
+    EXPECT_EQ(a10_header_count(&res, "Set-Cookie"), 0);
+    EXPECT_EQ(lua_rt.res_bases.count, (size_t)0);   /* taken by the 500 */
+    free_lua_req_ctx(&req);
+    kl_http_response_free(&res);
+
+    /* Request A leaves a snapshot; request B on the same response fails
+     * before any handler runs: its 500 must not restore A's header. */
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest ra = {0};
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, mw1, &ra, &res), 0);
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, mw3, &ra, &res), 0);
+    EXPECT_EQ(lua_rt.res_bases.count, (size_t)1);
+    free_lua_req_ctx(&ra);
+    kl_http_response_free(&res);
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest rb = {0};
+    EXPECT_EQ(hl_lua_dispatch(&lua_rt, 99999, &rb, &res), -1);   /* no handler */
+    hl_lua_http_error_response(&lua_rt, &res);
+    EXPECT_EQ(res.status, 500);
+    EXPECT_EQ(a10_header_count(&res, "Strict-Transport-Security"), 0);
+    free_lua_req_ctx(&rb);
+    kl_http_response_free(&res);
+
+    /* A snapshot left behind is the runtime's, and goes with it. */
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest rc = {0};
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, mw1, &rc, &res), 0);
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, mw3, &rc, &res), 0);
+    EXPECT_EQ(lua_rt.res_bases.count, (size_t)1);
+    free_lua_req_ctx(&rc);
+    kl_http_response_free(&res);
+    lua_settop(L, 0);
+    cleanup_lua();
+    EXPECT_EQ(lua_rt.res_bases.count, (size_t)0);
+    EXPECT_EQ(lua_rt.res_bases.bytes, (size_t)0);
+    EXPECT_TRUE(lua_rt.res_bases.head == NULL);
+}
+
+/* Set field @p key of timer def @p idx in the registry's __hull_timer_defs:
+ * an integer (kind 'i'), a float ('f') or a string ('s'). */
+static void a12_set_timer_def(lua_State *L, int idx, const char *key,
+                              char kind, lua_Integer i, double f,
+                              const char *s)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_timer_defs");
+    lua_rawgeti(L, -1, idx);
+    if (kind == 'i') lua_pushinteger(L, i);
+    else if (kind == 'f') lua_pushnumber(L, f);
+    else lua_pushstring(L, s);
+    lua_setfield(L, -2, key);
+    lua_pop(L, 2);
+}
+
+/* Timer wiring checks each def as app.every / app.daily do, and a timer that
+ * cannot be armed or tracked refuses the wiring (it was skipped, and one
+ * armed but not tracked was left running). */
+UTEST(lua_audit12, invalid_timer_defs_fail_the_wiring)
+{
+    static const struct {
+        int idx; const char *key; char kind; lua_Integer i; double f;
+        const char *s;
+    } tamper[] = {
+        { 1, "interval_ms", 'i', 0,  0,     NULL },
+        { 1, "interval_ms", 'i', 99, 0,     NULL },
+        { 1, "interval_ms", 'f', 0,  150.5, NULL },
+        { 1, "interval_ms", 's', 0,  0,     "1000" },
+        { 1, "handler_id",  'i', -1, 0,     NULL },
+        { 1, "type",        's', 0,  0,     "hourly" },
+        { 2, "hour",        'i', 99, 0,     NULL },
+        { 2, "minute",      'i', -1, 0,     NULL },
+        { 2, "minute",      'i', 60, 0,     NULL },
+    };
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    size_t n = sizeof tamper / sizeof tamper[0];
+    for (size_t c = 0; c <= n; c++) {
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+        lua_State *L = lua_rt.L;
+        ASSERT_EQ(luaL_dostring(L,
+            "app.manifest({modules = {'hull/http-server@1', 'hull/timers@1'}})\n"
+            "app.get('/x', function(req, res) end)\n"
+            "app.every(100, function() end)\n"
+            "app.daily('03:30', function() end)\n"), LUA_OK);
+        if (c < n)
+            a12_set_timer_def(L, tamper[c].idx, tamper[c].key, tamper[c].kind,
+                              tamper[c].i, tamper[c].f, tamper[c].s);
+        KlHttpServer server;
+        KlHttpServerConfig cfg = { .port = 0, .max_connections = 1, .alloc = NULL };
+        kl_http_server_init(&server, &cfg);
+        EXPECT_EQ_MSG(hl_lua_wire_routes_server(&lua_rt, &server, NULL),
+                      c < n ? -1 : 0, c < n ? tamper[c].key : "valid");
+        if (c == n)
+            EXPECT_EQ(lua_rt.timer_count, (size_t)2);
+        kl_http_server_free(&server);
+        HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+        lua_settop(L, 0);
+        cleanup_lua();
+        be->tick(actx, 0);
+        be->free(actx);
+    }
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
+/* A failed task's hook (hull._spawn's on_fail) runs as an entry of its own:
+ * it re-arms the budget and clears the active run's state. Run from a loop
+ * pumped inside another run, it left that run with the hook's budget and
+ * SQL budget binding, and its completion hook cleared; they are put back
+ * now, as lua_task_fire does. */
+UTEST(lua_audit12, a_task_failure_hook_restores_the_runs_state)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "HOOKED = 0\n"
+        "hull._spawn(function() error('task boom') end,\n"
+        "            function(msg) HOOKED = HOOKED + 1 end)\n"), LUA_OK);
+
+    /* The state of the run the loop is pumped from. */
+    static int marker;
+    oc_calls = 0;
+    lua_rt.active_on_complete     = count_oc;
+    lua_rt.active_on_complete_ctx = &marker;
+    HlLuaBudget run_budget = { .limit = 12345, .used = 678, .tripped = 0 };
+    lua_rt.budget = run_budget;
+
+    int hooked = 0;
+    for (int i = 0; i < 20 && !hooked; i++) {
+        be->tick(lua_rt.base.async_ctx, 10);
+        lua_getglobal(L, "HOOKED");
+        hooked = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    EXPECT_EQ(hooked, 1);
+    EXPECT_TRUE(lua_rt.active_on_complete == count_oc);
+    EXPECT_TRUE(lua_rt.active_on_complete_ctx == &marker);
+    EXPECT_EQ(lua_rt.budget.limit, (int64_t)12345);
+    EXPECT_EQ(lua_rt.budget.used, (int64_t)678);
+    EXPECT_EQ(lua_rt.budget.tripped, 0);
+    EXPECT_EQ(oc_calls, 0);
+
+    lua_rt.active_on_complete     = NULL;
+    lua_rt.active_on_complete_ctx = NULL;
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
 
 UTEST_MAIN();

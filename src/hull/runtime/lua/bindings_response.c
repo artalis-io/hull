@@ -53,19 +53,17 @@ typedef struct {
     HlReqLife      *life;   /* NULL: not tracked (always live) */
 } HlLuaResUD;
 
-/* The header lines each in-flight handler's response started with
- * (res_headers.h, audit 11): its error answer keeps them. Event-loop thread
- * only. */
-static HlResBaseList g_res_bases;
-
-void hl_lua_res_handler_begin(KlHttpResponse *res)
+/* The header lines each in-flight script entry's response started with
+ * (res_headers.h, audits 11 / 12): its error answer keeps them. The list is
+ * the runtime's own (HlLua.res_bases), freed with it. Event-loop thread only. */
+void hl_lua_res_entry_begin(HlLua *lua, KlHttpResponse *res, const void *conn)
 {
-    hl_res_base_begin(&g_res_bases, res);
+    if (lua) hl_res_base_begin(&lua->res_bases, res, conn);
 }
 
-void hl_lua_res_middleware_begin(KlHttpResponse *res)
+void hl_lua_res_answered(HlLua *lua, KlHttpResponse *res)
 {
-    hl_res_base_forget(&g_res_bases, res);
+    if (lua) hl_res_base_forget(&lua->res_bases, res);
 }
 
 static HlLuaResUD *check_response_ud(lua_State *L, int idx)
@@ -156,6 +154,14 @@ static int lua_res_header(lua_State *L)
     size_t name_len, value_len;
     const char *name = luaL_checklstring(L, 2, &name_len);
     const char *value = luaL_checklstring(L, 3, &value_len);
+    /* Keel takes C strings (strlen): a NUL in the name cut it short after
+     * the Content-Type check below had looked at all of it (audit 12). A
+     * name must be a token; a value may not hold a NUL. */
+    if (!hl_res_header_name_valid(name, name_len))
+        return luaL_error(L, "res:header: the name is not a valid header name "
+                             "(a token: letters, digits and !#$%%&'*+-.^_`|~)");
+    if (!hl_res_header_value_valid(value, value_len))
+        return luaL_error(L, "res:header: the value contains a NUL");
     res_header_room(L, res, "res:header", name_len, value_len);
     /* The app's Content-Type replaces one an earlier body call added
      * (audit 10): one header, the app's. */
@@ -360,29 +366,35 @@ void hl_lua_make_response(lua_State *L, KlHttpResponse *res)
 /* ── HTTP-feature seam: 500-error response ──────────────────────────── */
 /* Strong override for the Lua runtime. Extracted from lua/dispatch.c +
  * lua/async.c so those core objects hold no kl_http_response_* refs. */
-void hl_lua_http_error_response(struct KlHttpResponse *res)
+void hl_lua_http_error_response(struct HlLua *lua, struct KlHttpResponse *res)
 {
     /* Whatever the handler set is dropped: its Set-Cookie / Location, a
      * second Content-Type (audit 10). The headers earlier middleware set
      * stay (audit 11). */
-    hl_res_base_error_reset(&g_res_bases, res, 500, "Internal Server Error", 21);
+    if (lua)
+        hl_res_base_error_reset(&lua->res_bases, res, 500,
+                                "Internal Server Error", 21);
+    else
+        hl_res_error_reset(res, 500, "Internal Server Error", 21);
 }
 
 /* Strong overrides: finalize + send a resumed request's response. Keeps ALL
  * kl_http_* refs (incl. kl_http_request_send_response from the heavy
  * http_server_core object) out of the base runtime's lua_rt_async.o; see
  * include/hull/http_feature.h. */
-void hl_lua_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
+void hl_lua_http_resume_send(struct HlLua *lua, struct KlHttpConn *conn,
+                            struct KlHttpRequest *req)
 {
     KlHttpResponse *res = kl_http_conn_response(conn);
-    hl_res_base_forget(&g_res_bases, res);   /* answered: its kept headers go */
+    hl_lua_res_answered(lua, res);   /* answered: its kept headers go */
     if (res && res->body_mode == KL_HTTP_BODY_STREAM)
         kl_http_response_end_stream(res);
     kl_http_request_send_response(req);
 }
 
-void hl_lua_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req)
+void hl_lua_http_resume_error(struct HlLua *lua, struct KlHttpConn *conn,
+                             struct KlHttpRequest *req)
 {
-    hl_lua_http_error_response(kl_http_conn_response(conn));
+    hl_lua_http_error_response(lua, kl_http_conn_response(conn));
     kl_http_request_send_response(req);
 }

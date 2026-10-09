@@ -17,6 +17,7 @@
 #include "hull/cap/types.h"
 #include "hull/cap/run_watchdog.h"
 #include "hull/reqctx.h"          /* HlReqCtxList */
+#include "hull/shared/res_base.h" /* HlResBaseList */
 
 /* Forward declarations */
 typedef struct JSRuntime JSRuntime;
@@ -219,6 +220,11 @@ typedef struct HlJS {
      * (a Proxy that showed the encoder one policy and the extractor another)
      * before or instead of calling app.manifest(). */
     void           *manifest;
+
+    /* The header lines each in-flight script entry's response started with
+     * (shared/res_base.h): the entry's 500 keeps the ones earlier middleware
+     * set. Per runtime, freed with it (audit 12). Event-loop thread only. */
+    HlResBaseList   res_bases;
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */
@@ -385,6 +391,14 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
  * Returns 0 (continue) or non-zero (short-circuit).
  */
 int hl_js_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
+
+/* A handler or middleware starts on @p res (a request on @p conn): the
+ * headers the response has now - the ones earlier middleware set - are kept
+ * by the entry's 500 (hl_js_http_error_response, audits 11 / 12). Called
+ * before any of the entry's error paths. _answered: the entry answered, the
+ * snapshot goes. (bindings_response.c) */
+void hl_js_res_entry_begin(HlJS *js, KlHttpResponse *res, const void *conn);
+void hl_js_res_answered(HlJS *js, KlHttpResponse *res);
 
 /* ── Worker dispatch ────────────────────────────────────────────────── */
 

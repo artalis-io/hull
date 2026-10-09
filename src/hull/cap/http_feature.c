@@ -29,34 +29,40 @@ __attribute__((weak)) int hl_http_feature_present(void)
     return 0;
 }
 
-__attribute__((weak)) void hl_lua_http_error_response(struct KlHttpResponse *res)
+__attribute__((weak)) void hl_lua_http_error_response(struct HlLua *rt,
+                                                      struct KlHttpResponse *res)
 {
-    (void)res;
+    (void)rt; (void)res;
 }
 
-__attribute__((weak)) void hl_js_http_error_response(struct KlHttpResponse *res)
+__attribute__((weak)) void hl_js_http_error_response(struct HlJS *rt,
+                                                      struct KlHttpResponse *res)
 {
-    (void)res;
+    (void)rt; (void)res;
 }
 
-__attribute__((weak)) void hl_lua_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
+__attribute__((weak)) void hl_lua_http_resume_send(struct HlLua *rt,
+        struct KlHttpConn *conn, struct KlHttpRequest *req)
 {
-    (void)conn; (void)req;
+    (void)rt; (void)conn; (void)req;
 }
 
-__attribute__((weak)) void hl_js_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
+__attribute__((weak)) void hl_js_http_resume_send(struct HlJS *rt,
+        struct KlHttpConn *conn, struct KlHttpRequest *req)
 {
-    (void)conn; (void)req;
+    (void)rt; (void)conn; (void)req;
 }
 
-__attribute__((weak)) void hl_lua_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req)
+__attribute__((weak)) void hl_lua_http_resume_error(struct HlLua *rt,
+        struct KlHttpConn *conn, struct KlHttpRequest *req)
 {
-    (void)conn; (void)req;
+    (void)rt; (void)conn; (void)req;
 }
 
-__attribute__((weak)) void hl_js_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req)
+__attribute__((weak)) void hl_js_http_resume_error(struct HlJS *rt,
+        struct KlHttpConn *conn, struct KlHttpRequest *req)
 {
-    (void)conn; (void)req;
+    (void)rt; (void)conn; (void)req;
 }
 
 __attribute__((weak)) void hl_http_ws_registry_free(void *ws_registry)

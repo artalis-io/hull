@@ -74,6 +74,11 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     if (!lua || !lua->L || !req || !res)
         return -1;
 
+    /* The headers earlier middleware set (CSP, HSTS, CORS, a request id): a
+     * 500 for this handler keeps them (audit 11). Taken before any error
+     * path below: a snapshot an earlier request on this response left must
+     * never be what this request's 500 restores (audit 12). */
+    hl_lua_res_entry_begin(lua, res, kl_http_request_conn(req));
 
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_registry_guard_stale_txns(lua->base.db_registry);
@@ -93,10 +98,6 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         lua->active_req = NULL;
         return -1;
     }
-
-    /* The headers earlier middleware set (CSP, HSTS, CORS, a request id):
-     * a 500 for this handler keeps them (audit 11). */
-    hl_lua_res_handler_begin(res);
 
     /* The coroutine with handler(req, res) on it, built protected. */
     HlReqArgs args = { req, res, life };
@@ -191,9 +192,9 @@ void hl_lua_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     int rc = hl_lua_dispatch(route->lua, route->handler_id, req, res);
     if (rc < 0) {
         /* Error - write 500 response */
-        hl_lua_http_error_response(res);
+        hl_lua_http_error_response(route->lua, res);
     } else if (rc == 0) {
-        hl_lua_res_middleware_begin(res);   /* answered: its kept headers go */
+        hl_lua_res_answered(route->lua, res);   /* its kept headers go */
     }
     /* rc == 1 → handler suspended, conn_process checks SUSPENDED state */
 }
@@ -256,6 +257,12 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     if (!lua || !lua->L || !req || !res)
         return -1;
 
+    /* The headers the response has now - the ones earlier middleware set -
+     * are what this middleware's 500 keeps (audit 12: the snapshot was
+     * dropped here, so a middleware that raised lost every header the ones
+     * before it had set). Taken before any error path below. */
+    hl_lua_res_entry_begin(lua, res, kl_http_request_conn(req));
+
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_registry_guard_stale_txns(lua->base.db_registry);
 
@@ -272,10 +279,6 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
         hl_lua_free_req_ctx(lua, req);   /* answered here: a 500 */
         return -1;
     }
-
-    /* A new request may be on this connection slot: whatever an earlier
-     * handler's response left in the kept-headers list is not this one's. */
-    hl_lua_res_middleware_begin(res);
 
     HlMwRun m = { lua, req, res, life, handler_id, 0, 0 };
     lua_State *L = lua->L;
@@ -331,8 +334,10 @@ int hl_lua_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_d
     int rc = hl_lua_dispatch_middleware(ctx->lua, ctx->handler_id, req, res);
     if (rc < 0) {
         /* Middleware error - short-circuit with 500 */
-        hl_lua_http_error_response(res);
+        hl_lua_http_error_response(ctx->lua, res);
         return 1; /* short-circuit */
     }
+    if (rc != 0)
+        hl_lua_res_answered(ctx->lua, res);   /* short-circuit: answered */
     return rc;
 }
