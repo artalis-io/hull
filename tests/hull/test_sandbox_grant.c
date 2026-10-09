@@ -213,4 +213,20 @@ UTEST(sandbox_grant, db_path_is_the_file_never_a_network_dsn)
     EXPECT_STREQ("data.db", hl_sandbox_db_path("data.db"));
 }
 
+/* Audit 11: only the file schemes yield a path. An unknown or mistyped network
+ * scheme returned the text after "://" - user, password and all. */
+UTEST(sandbox_grant, db_path_only_for_file_schemes)
+{
+    EXPECT_TRUE(hl_sandbox_db_path("pg://u:s3cret@h/app") == NULL);
+    EXPECT_TRUE(hl_sandbox_db_path("postgress://u:s3cret@h/app") == NULL);
+    EXPECT_TRUE(hl_sandbox_db_path("redis://:s3cret@h:6379/0") == NULL);
+    EXPECT_TRUE(hl_sandbox_db_path("valkeys://u:s3cret@h") == NULL);
+    EXPECT_TRUE(hl_sandbox_db_path("duckdb://:memory:") == NULL);
+    EXPECT_STREQ("/srv/a.duckdb", hl_sandbox_db_path("duckdb:///srv/a.duckdb"));
+    EXPECT_STREQ("/srv/a.db", hl_sandbox_db_path("file:///srv/a.db"));
+    EXPECT_STREQ("/srv/a.db", hl_sandbox_db_path("SQLite:///srv/a.db"));
+    /* A "://" that does not follow a scheme is part of a plain path. */
+    EXPECT_STREQ("./x://y.db", hl_sandbox_db_path("./x://y.db"));
+}
+
 UTEST_MAIN();

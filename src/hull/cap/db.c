@@ -14,6 +14,8 @@
 #include "hull/cap/audit.h"
 #include "hull/cap/db_budget.h"
 #include "hull/utils/alloc.h"
+#include "hull/utils/parse_size.h"
+#include "hull/shared/cache_dir.h"   /* hl_hull_sqlite_temp_dir */
 #include <sqlite3.h>
 #include <limits.h>
 #include <pthread.h>
@@ -116,18 +118,39 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
  * a connection hold up to its whole database in memory across runs,
  * temp_store moves temp b-trees out of the charged heap into files, and
  * threads starts helper threads whose allocations no run's budget sees.
- * Reading them stays legal (a2 is NULL then).
+ * default_cache_size is cache_size by another name (audit 11). Reading them
+ * stays legal (a2 is NULL then).
+ *
+ * Two setters defeat what Hull's other guarantees rest on (audit 11):
+ * locking_mode=EXCLUSIVE keeps the connection's lock once taken, so every
+ * other connection to the file - the db.async / worker.dispatch pool's - waits
+ * out busy_timeout and fails; and journal_mode=OFF / MEMORY / DELETE / ...
+ * drops the rollback journal (ROLLBACK, which the stale-transaction guard and
+ * db.batch rely on, stops working; a crash corrupts) or the WAL that
+ * synchronous=NORMAL is safe under. So locking_mode may only be set to NORMAL
+ * and journal_mode only to WAL (SQLite matches a journal_mode value as a
+ * PREFIX of the mode name, so "w" / "wa" mean WAL and "" means DELETE).
  *
  * @p ud non-NULL (hl_cap_db_refuse_txn_control): transaction control is
  * refused too - SQLite reports it here at prepare time, whatever comments or
- * spelling the text uses. */
+ * spelling the text uses - and so is every pragma given an argument, except
+ * the introspection ones whose argument only names what to describe: a flag
+ * pragma (foreign_keys, query_only, defer_foreign_keys, recursive_triggers,
+ * busy_timeout, synchronous, ...) takes effect when it is PREPARED and still
+ * passes sqlite3_stmt_readonly, so a "read-only" agent query changed the warm
+ * app connection (audit 11). */
 static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
                          const char *a3, const char *a4)
 {
     (void)a3; (void)a4;
     static const char *const set_refused[] = {
         "hard_heap_limit", "soft_heap_limit", "cache_size", "cache_spill",
-        "temp_store", "threads",
+        "default_cache_size", "temp_store", "threads",
+    };
+    static const char *const describe_ok[] = {
+        "table_info", "table_xinfo", "table_list", "index_info", "index_xinfo",
+        "index_list", "foreign_key_list", "foreign_key_check",
+        "integrity_check", "quick_check",
     };
     switch (action) {
     case SQLITE_ATTACH:
@@ -140,10 +163,23 @@ static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
             strcasecmp(a1, "temp_store_directory") == 0 ||
             strcasecmp(a1, "data_store_directory") == 0)
             return SQLITE_DENY;
-        if (a2)
-            for (size_t i = 0; i < sizeof set_refused / sizeof set_refused[0]; i++)
-                if (strcasecmp(a1, set_refused[i]) == 0)
-                    return SQLITE_DENY;
+        if (!a2) return SQLITE_OK;
+        for (size_t i = 0; i < sizeof set_refused / sizeof set_refused[0]; i++)
+            if (strcasecmp(a1, set_refused[i]) == 0)
+                return SQLITE_DENY;
+        if (strcasecmp(a1, "locking_mode") == 0 && strcasecmp(a2, "normal") != 0)
+            return SQLITE_DENY;
+        if (strcasecmp(a1, "journal_mode") == 0) {
+            size_t n = strlen(a2);
+            if (n == 0 || n > 3 || strncasecmp(a2, "wal", n) != 0)
+                return SQLITE_DENY;
+        }
+        if (ud) {
+            for (size_t i = 0; i < sizeof describe_ok / sizeof describe_ok[0]; i++)
+                if (strcasecmp(a1, describe_ok[i]) == 0)
+                    return SQLITE_OK;
+            return SQLITE_DENY;
+        }
         return SQLITE_OK;
     case SQLITE_TRANSACTION:
     case SQLITE_SAVEPOINT:
@@ -226,8 +262,43 @@ static void db_sqlite_setup_once(void)
         fprintf(stderr, "hull: WARN sqlite was initialized before Hull could "
                         "install its allocator; SQL allocations are not "
                         "charged to the instruction budget\n");
-    (void)sqlite3_hard_heap_limit64(HL_DB_SQLITE_HARD_HEAP_LIMIT);
-    (void)sqlite3_soft_heap_limit64(HL_DB_SQLITE_SOFT_HEAP_LIMIT);
+    hl_cap_db_set_heap_limit(hl_cap_db_heap_limit_from_env(
+        getenv("HULL_SQLITE_HEAP_LIMIT")));
+    /* temp_store=FILE (hl_cap_db_init) writes temp files here - the directory
+     * the kernel sandbox grants (hl_hull_sqlite_temp_dir). Set once, before
+     * any connection opens; it must be sqlite3_malloc'd memory. Without one,
+     * the connections keep temp_store=MEMORY (hl_cap_db_temp_on_disk). */
+    const char *tmp = hl_hull_sqlite_temp_dir();
+    if (tmp && !sqlite3_temp_directory)
+        sqlite3_temp_directory = sqlite3_mprintf("%s", tmp);
+}
+
+int hl_cap_db_temp_on_disk(void)
+{
+    hl_cap_db_sqlite_setup();
+    return sqlite3_temp_directory != NULL;
+}
+
+long long hl_cap_db_heap_limit_from_env(const char *v)
+{
+    if (!v || !v[0]) return HL_DB_SQLITE_HARD_HEAP_LIMIT;
+    long n = hl_parse_size(v);
+    if (n < 0) {
+        fprintf(stderr, "hull: WARN ignoring HULL_SQLITE_HEAP_LIMIT=%s (want a "
+                        "size such as 512M or 2G, or 0 for no limit)\n", v);
+        return HL_DB_SQLITE_HARD_HEAP_LIMIT;
+    }
+    if (n > 0 && n < HL_DB_SQLITE_MIN_HEAP_LIMIT) n = HL_DB_SQLITE_MIN_HEAP_LIMIT;
+    return (long long)n;
+}
+
+void hl_cap_db_set_heap_limit(long long hard)
+{
+    if (hard < 0) return;
+    long long soft = HL_DB_SQLITE_SOFT_HEAP_LIMIT;
+    if (hard > 0 && soft > hard / 4) soft = hard / 4;
+    (void)sqlite3_hard_heap_limit64(hard);
+    (void)sqlite3_soft_heap_limit64(soft);
 }
 
 void hl_cap_db_sqlite_setup(void)
@@ -250,7 +321,13 @@ int hl_cap_db_init(sqlite3 *db)
      * foreign_keys=ON     - Referential integrity.
      * busy_timeout=5000   - Wait up to 5 seconds on lock contention.
      * cache_size=-16384   - 16 MB page cache (default is 2 MB).
-     * temp_store=MEMORY   - Temp tables/indexes in memory (not temp files).
+     * temp_store=FILE     - Temp tables / indexes, sorter runs and VACUUM's
+     *                       copy spill to files (hl_hull_sqlite_temp_dir) once
+     *                       they outgrow the page cache. Under MEMORY the
+     *                       sorter never spilled, so every big ORDER BY /
+     *                       CREATE INDEX / GROUP BY / VACUUM had to fit in the
+     *                       process-wide hard heap limit, which one request
+     *                       could fill for every connection (audit 11).
      * mmap_size=268435456 - Memory-map up to 256 MB of the DB file for reads.
      * wal_autocheckpoint=1000 - Checkpoint every 1000 pages (~4 MB).
      *                          Default is 1000; explicit for clarity.
@@ -320,12 +397,18 @@ int hl_cap_db_init(sqlite3 *db)
     /* Pure tuning: best-effort everywhere. None of these change behaviour. */
     static const char *tuning[] = {
         "PRAGMA cache_size=-16384",
-        "PRAGMA temp_store=MEMORY",
         "PRAGMA mmap_size=268435456",
         NULL,
     };
     for (const char **p = tuning; *p; p++)
         (void)sqlite3_exec(db, *p, NULL, NULL, NULL);
+    /* Temp files only where Hull has the directory for them - the one it set
+     * as sqlite3_temp_directory and the kernel sandbox grants. Without it
+     * (Windows: SQLite's unix VFS under Cosmopolitan finds no temp path at
+     * all, SQLITE_IOERR_GETTEMPPATH) temp stays in memory, as before. */
+    (void)sqlite3_exec(db, hl_cap_db_temp_on_disk() ? "PRAGMA temp_store=FILE"
+                                                     : "PRAGMA temp_store=MEMORY",
+                       NULL, NULL, NULL);
 
     /* REQUIRED, and last, so the pragmas above are not subject to it: a
      * connection that cannot refuse ATTACH / VACUUM INTO would let SQL write
@@ -667,12 +750,27 @@ int hl_cap_db_rollback(sqlite3 *db)
     return rc == SQLITE_OK ? HL_DB_OK : HL_DB_ERR_EXEC;
 }
 
-void hl_cap_db_guard_stale_txn(sqlite3 *db)
+/* The ROLLBACK is checked, not assumed (audit 11): it can fail - out of
+ * memory under the hard heap limit, say - and a connection left inside the
+ * transaction makes every later entry run in it. A failed one is retried once
+ * after resetting the connection's statements and shedding its cache; the
+ * caller (sqlite_guard_stale_txn) replaces the connection when even that
+ * leaves it in the transaction. */
+int hl_cap_db_guard_stale_txn(sqlite3 *db)
 {
-    if (db && !sqlite3_get_autocommit(db)) {
-        fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
-        (void)hl_cap_db_rollback(db);
-    }
+    if (!db || sqlite3_get_autocommit(db)) return 0;
+    fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
+    (void)hl_cap_db_rollback(db);
+    if (sqlite3_get_autocommit(db)) return 0;
+    for (sqlite3_stmt *st = sqlite3_next_stmt(db, NULL); st;
+         st = sqlite3_next_stmt(db, st))
+        (void)sqlite3_reset(st);
+    (void)sqlite3_db_release_memory(db);
+    (void)hl_cap_db_rollback(db);
+    if (sqlite3_get_autocommit(db)) return 0;
+    fprintf(stderr, "[hull:c] the stale transaction could not be rolled back: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
 }
 
 #endif /* HL_ENABLE_DB */

@@ -253,9 +253,14 @@ int hl_cap_db_rollback(sqlite3 *db);
  * Safe to call unconditionally before each request dispatch - no-op
  * if no transaction is open.
  *
+ * The rollback is verified (sqlite3_get_autocommit); a failed one is retried
+ * once after resetting the connection's statements (audit 11).
+ *
  * @param db  Connection.
+ * @return `0` when the connection is out of any transaction, `-1` when it is
+ *         still inside one (the caller must replace the connection).
  */
-void hl_cap_db_guard_stale_txn(sqlite3 *db);
+int hl_cap_db_guard_stale_txn(sqlite3 *db);
 
 /**
  * @brief Reject SQL referencing the internal `_hull_*` namespace.
@@ -301,13 +306,38 @@ int hl_cap_db_guard(sqlite3 *db);
  */
 void hl_cap_db_sqlite_setup(void);
 
-/** The hard heap limit SQLite as a whole may use (sqlite3_hard_heap_limit64):
- *  past it every SQLite allocation in the process fails (SQLITE_NOMEM), so a
- *  statement that holds a lot of memory at once - a big in-memory sort or temp
- *  b-tree - cannot take the process down. The soft limit makes SQLite shed page
- *  cache before it gets there. */
+/** The default hard heap limit SQLite as a whole may use
+ *  (sqlite3_hard_heap_limit64): past it every SQLite allocation in the process
+ *  fails (SQLITE_NOMEM) instead of the process running out of memory. Sorts,
+ *  temp b-trees and VACUUM spill to temp files (temp_store=FILE), so what a
+ *  connection holds is bounded by its page cache (cache_size, 16 MiB) plus a
+ *  sorter run of the same size - the limit is headroom for many connections,
+ *  not the ceiling on how big a sort or index build may be. The operator sets
+ *  it with HULL_SQLITE_HEAP_LIMIT (a size: 512M, 4G; 0 = no hard limit). The
+ *  soft limit (at most a quarter of the hard one) makes SQLite shed page cache
+ *  before it gets there. */
 #define HL_DB_SQLITE_HARD_HEAP_LIMIT ((long long)1 << 30)   /* 1 GiB */
 #define HL_DB_SQLITE_SOFT_HEAP_LIMIT ((long long)256 << 20) /* 256 MiB */
+/** The smallest hard limit HULL_SQLITE_HEAP_LIMIT may set: a few connections'
+ *  page caches. A smaller non-zero value is raised to it. */
+#define HL_DB_SQLITE_MIN_HEAP_LIMIT  ((long long)64 << 20)  /* 64 MiB */
+
+/** HULL_SQLITE_HEAP_LIMIT's value (NULL / "" = the default) as a hard limit in
+ *  bytes: a size with an optional K / M / G suffix, 0 for no limit, raised to
+ *  HL_DB_SQLITE_MIN_HEAP_LIMIT; an unreadable value warns and gives the
+ *  default. */
+long long hl_cap_db_heap_limit_from_env(const char *value);
+
+/** Set SQLite's process-wide hard heap limit (0 = none; negative = leave it)
+ *  and the soft limit that goes with it (256 MiB, at most a quarter of the
+ *  hard limit). hl_cap_db_sqlite_setup applies HULL_SQLITE_HEAP_LIMIT once. */
+void hl_cap_db_set_heap_limit(long long hard);
+
+/** 1 when Hull's connections keep temp data in files (temp_store=FILE): the
+ *  setup found a private temp dir (hl_hull_sqlite_temp_dir) and pointed
+ *  sqlite3_temp_directory at it. 0 = temp_store=MEMORY (Windows, or no safe
+ *  temp dir), where a big sort is bounded by the hard heap limit. */
+int hl_cap_db_temp_on_disk(void);
 
 /**
  * @brief While @p on, the connection's authorizer also refuses transaction

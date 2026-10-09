@@ -18,6 +18,8 @@
 #include <sqlite3.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>   /* getpid */
+#include "../test_tmpdir.h"
 
 /* ── Test fixtures ──────────────────────────────────────────────────── */
 
@@ -875,6 +877,234 @@ UTEST(hl_cap_db, sql_cannot_open_or_write_other_files)
     EXPECT_EQ(sqlite3_exec(test_db, "DETACH scratch", NULL, NULL, NULL), SQLITE_OK);
     EXPECT_EQ(sqlite3_exec(test_db, "VACUUM", NULL, NULL, NULL), SQLITE_OK);
     teardown_db();
+}
+
+/* ── Audit 11 ─────────────────────────────────────────────────────────── */
+
+/* default_cache_size is cache_size by another name; locking_mode=EXCLUSIVE
+ * starves every other connection to the file; a journal_mode other than WAL
+ * drops the rollback journal or the WAL. Reading each stays legal. */
+UTEST(hl_cap_db, journal_locking_and_default_cache_pragmas_cannot_be_set)
+{
+    setup_db();
+    static const char *const refused[] = {
+        "PRAGMA default_cache_size=100000", "PRAGMA main.default_cache_size = 1",
+        "PRAGMA locking_mode=EXCLUSIVE", "PRAGMA main.locking_mode = 'exclusive'",
+        "PRAGMA journal_mode=OFF", "PRAGMA journal_mode=memory",
+        "PRAGMA journal_mode=DELETE", "PRAGMA journal_mode=truncate",
+        "PRAGMA journal_mode=persist", "PRAGMA journal_mode=o",
+        "PRAGMA journal_mode=''", "PRAGMA journal_mode=walx",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        EXPECT_NE(SQLITE_OK, sqlite3_exec(test_db, refused[i], NULL, NULL, NULL));
+    static const char *const allowed[] = {
+        "PRAGMA default_cache_size", "PRAGMA locking_mode",
+        "PRAGMA locking_mode=NORMAL", "PRAGMA journal_mode",
+        "PRAGMA journal_mode=WAL", "PRAGMA journal_mode=wal",
+    };
+    for (size_t i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
+        EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, allowed[i], NULL, NULL, NULL));
+    teardown_db();
+}
+
+/* The agent's read-only gate: a flag pragma takes effect when it is prepared
+ * and still passes sqlite3_stmt_readonly, so every pragma given an argument
+ * is refused there - except the introspection ones naming what to describe. */
+UTEST(hl_cap_db, agent_gate_refuses_pragma_setters)
+{
+    setup_db();
+    hl_cap_db_refuse_txn_control(test_db, 1);
+    static const char *const refused[] = {
+        "PRAGMA foreign_keys=OFF", "PRAGMA query_only=1",
+        "PRAGMA defer_foreign_keys=ON", "PRAGMA recursive_triggers=1",
+        "PRAGMA ignore_check_constraints=1", "PRAGMA busy_timeout=0",
+        "PRAGMA synchronous=OFF", "PRAGMA locking_mode=NORMAL",
+        "PRAGMA case_sensitive_like=1", "PRAGMA user_version=7",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        sqlite3_stmt *st = NULL;
+        EXPECT_NE(SQLITE_OK, sqlite3_prepare_v2(test_db, refused[i], -1, &st, NULL));
+        sqlite3_finalize(st);
+    }
+    static const char *const allowed[] = {
+        "PRAGMA foreign_keys", "PRAGMA table_info(users)",
+        "PRAGMA index_list('users')", "PRAGMA integrity_check",
+        "SELECT * FROM pragma_table_info('users')",
+    };
+    for (size_t i = 0; i < sizeof allowed / sizeof allowed[0]; i++) {
+        sqlite3_stmt *st = NULL;
+        EXPECT_EQ(SQLITE_OK, sqlite3_prepare_v2(test_db, allowed[i], -1, &st, NULL));
+        sqlite3_finalize(st);
+    }
+    hl_cap_db_refuse_txn_control(test_db, 0);
+    /* foreign_keys is still on: the refused setter never ran. */
+    int64_t fk = -1;
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache, "PRAGMA foreign_keys", NULL, 0,
+                                 count_cb, &fk, NULL));
+    EXPECT_EQ(1, (int)fk);
+    teardown_db();
+}
+
+UTEST(hl_cap_db, heap_limit_from_env)
+{
+    EXPECT_EQ(HL_DB_SQLITE_HARD_HEAP_LIMIT, hl_cap_db_heap_limit_from_env(NULL));
+    EXPECT_EQ(HL_DB_SQLITE_HARD_HEAP_LIMIT, hl_cap_db_heap_limit_from_env(""));
+    EXPECT_EQ(HL_DB_SQLITE_HARD_HEAP_LIMIT, hl_cap_db_heap_limit_from_env("lots"));
+    EXPECT_EQ(0LL, hl_cap_db_heap_limit_from_env("0"));
+    EXPECT_EQ((long long)4 << 30, hl_cap_db_heap_limit_from_env("4G"));
+    EXPECT_EQ((long long)512 << 20, hl_cap_db_heap_limit_from_env("512m"));
+    EXPECT_EQ(HL_DB_SQLITE_MIN_HEAP_LIMIT, hl_cap_db_heap_limit_from_env("1k"));
+}
+
+/* A file database under a low hard heap limit and a small page cache. The
+ * authorizer refuses cache_size / temp_store to SQL, so the test lifts it to
+ * set them and puts the guard back. */
+static sqlite3 *open_spill_db(const char *path, const char *temp_store)
+{
+    sqlite3 *db = NULL;
+    hl_cap_db_sqlite_setup();
+    if (sqlite3_open(path, &db) != SQLITE_OK || hl_cap_db_init(db) != 0) {
+        sqlite3_close(db);
+        return NULL;
+    }
+    char sql[128];
+    sqlite3_set_authorizer(db, NULL, NULL);
+    /* Rollback journal, not WAL: this is about temp files, and a cosmo build
+     * on Windows fails to grow a WAL's shm map (SQLITE_IOERR_SHMMAP). */
+    snprintf(sql, sizeof sql, "PRAGMA journal_mode=DELETE; "
+             "PRAGMA cache_size=-1024; PRAGMA temp_store=%s", temp_store);
+    sqlite3_exec(db, sql, NULL, NULL, NULL);
+    hl_cap_db_guard(db);
+    return db;
+}
+
+static int spill_exec(sqlite3 *db, const char *sql)
+{
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK)
+        fprintf(stderr, "spill: %.40s...: %s (%d)\n", sql, sqlite3_errmsg(db),
+                sqlite3_extended_errcode(db));
+    return rc;
+}
+
+#define SPILL_ROWS "60000"   /* x 300 bytes: ~18 MB, past the 8 MiB limit */
+/* A sort SQLite cannot skip: every row comes back, and the key is an
+ * expression no index (big_v, made below) provides. A count over an ordered
+ * subquery would not sort at all - the optimizer drops that ORDER BY. */
+#define SPILL_SORT "SELECT v FROM big ORDER BY substr(v, 2) DESC"
+
+static int rows_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    (void)cols; (void)ncols;
+    (*(int64_t *)ctx)++;
+    return 0;
+}
+
+/* Audit 11: under temp_store=MEMORY the sorter never spilled, so a sort,
+ * CREATE INDEX or VACUUM bigger than the process-wide hard heap limit failed
+ * (a migration's CREATE INDEX stopped the app starting). With temp_store=FILE
+ * each spills to the temp directory and succeeds under the same limit. */
+UTEST(hl_cap_db, big_sorts_and_index_builds_spill_under_a_low_heap_limit)
+{
+    if (!hl_cap_db_temp_on_disk())
+        UTEST_SKIP("no SQLite temp dir on this host (Windows): temp stays in memory");
+    /* Hull's own connections get temp_store=FILE. */
+    {
+        sqlite3 *probe = NULL;
+        ASSERT_EQ(SQLITE_OK, sqlite3_open(":memory:", &probe));
+        ASSERT_EQ(0, hl_cap_db_init(probe));
+        int64_t ts = -1;
+        HlStmtCache c;
+        hl_stmt_cache_init(&c, probe, NULL);
+        EXPECT_EQ(0, hl_cap_db_query(&c, "PRAGMA temp_store", NULL, 0,
+                                     count_cb, &ts, NULL));
+        EXPECT_EQ(1, (int)ts);   /* FILE */
+        hl_stmt_cache_destroy(&c);
+        sqlite3_close(probe);
+    }
+    char path[HL_TEST_PATH_MAX];
+    ASSERT_EQ(0, hl_test_path(path, sizeof path, "hull_spill_%ld.db", (long)getpid()));
+    remove(path);
+
+    sqlite3 *db = open_spill_db(path, "FILE");
+    ASSERT_TRUE(db != NULL);
+    EXPECT_EQ(SQLITE_OK, spill_exec(db,
+        "CREATE TABLE big(v TEXT);"
+        "BEGIN;"
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < "
+        SPILL_ROWS ") INSERT INTO big SELECT hex(randomblob(150)) FROM n;"
+        "COMMIT;"));
+
+    hl_cap_db_set_heap_limit((long long)8 << 20);
+    int64_t n = -1;
+    HlStmtCache cache;
+    hl_stmt_cache_init(&cache, db, NULL);
+    n = 0;
+    EXPECT_EQ(0, hl_cap_db_query(&cache, SPILL_SORT, NULL, 0, rows_cb, &n, NULL));
+    EXPECT_EQ(60000, (int)n);
+    hl_stmt_cache_destroy(&cache);
+    EXPECT_EQ(SQLITE_OK, spill_exec(db, "SELECT DISTINCT v FROM big"));
+    EXPECT_EQ(SQLITE_OK, spill_exec(db, "CREATE INDEX big_v ON big(v)"));
+    EXPECT_EQ(SQLITE_OK, spill_exec(db, "VACUUM"));
+    sqlite3_close(db);
+
+    /* The same sort with temp in memory runs out of the same limit. */
+    db = open_spill_db(path, "MEMORY");
+    ASSERT_TRUE(db != NULL);
+    EXPECT_EQ(SQLITE_OK, spill_exec(db, "SELECT count(*) FROM big"));
+    EXPECT_EQ(SQLITE_NOMEM, sqlite3_exec(db, SPILL_SORT, NULL, NULL, NULL));
+    sqlite3_close(db);
+
+    hl_cap_db_set_heap_limit(HL_DB_SQLITE_HARD_HEAP_LIMIT);
+    remove(path);
+    char side[HL_TEST_PATH_MAX + 16];
+    snprintf(side, sizeof side, "%s-journal", path); remove(side);
+}
+
+/* Audit 11: the stale-transaction guard checks its ROLLBACK took. Here the
+ * agent gate (which refuses transaction control) stands in for a ROLLBACK
+ * that fails: the guard reports the connection still in the transaction, and
+ * the SQLite backend replaces the connection - which rolls it back. */
+UTEST(hl_cap_db, stale_txn_guard_replaces_a_connection_it_cannot_roll_back)
+{
+    char path[HL_TEST_PATH_MAX];
+    ASSERT_EQ(0, hl_test_path(path, sizeof path, "hull_stale_%ld.db", (long)getpid()));
+    remove(path);
+
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    ASSERT_EQ(0, hl_db_backend_sqlite.open(&h.ctx, path, NULL));
+    ASSERT_EQ(0, hl_db_exec(&h, "CREATE TABLE t(x)", NULL, 0) < 0);
+    ASSERT_EQ(0, hl_db_exec(&h, "BEGIN", NULL, 0) < 0);
+    ASSERT_EQ(0, hl_db_exec(&h, "INSERT INTO t VALUES (1)", NULL, 0) < 0);
+
+    sqlite3 *old = hl_db_sqlite_raw(&h);
+    EXPECT_EQ(0, hl_cap_db_guard_stale_txn(NULL));
+    hl_cap_db_refuse_txn_control(old, 1);
+    EXPECT_EQ(-1, hl_cap_db_guard_stale_txn(old));
+    EXPECT_FALSE(sqlite3_get_autocommit(old));
+
+    hl_db_guard_stale_txn(&h);
+    EXPECT_EQ(0, hl_db_in_txn(&h));
+    EXPECT_TRUE(hl_db_sqlite_raw(&h) != NULL);
+    int64_t n = -1;
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM t", NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(0, (int)n);
+    /* The new connection is guarded and usable. */
+    EXPECT_NE(SQLITE_OK, sqlite3_exec(hl_db_sqlite_raw(&h), "PRAGMA cache_size=1",
+                                      NULL, NULL, NULL));
+    EXPECT_EQ(0, hl_db_exec(&h, "INSERT INTO t VALUES (2)", NULL, 0) < 0);
+
+    /* A plain stale transaction is just rolled back on the same connection. */
+    sqlite3 *now = hl_db_sqlite_raw(&h);
+    ASSERT_EQ(0, hl_db_exec(&h, "BEGIN", NULL, 0) < 0);
+    EXPECT_EQ(0, hl_cap_db_guard_stale_txn(now));
+    EXPECT_TRUE(sqlite3_get_autocommit(now));
+
+    hl_db_backend_sqlite.close(&h);
+    remove(path);
+    char side[HL_TEST_PATH_MAX + 8];
+    snprintf(side, sizeof side, "%s-wal", path); remove(side);
+    snprintf(side, sizeof side, "%s-shm", path); remove(side);
 }
 
 UTEST_MAIN();

@@ -23,6 +23,7 @@
 #include "hull/cap/db_backend.h"   /* hl_db_feature_backends: detect a composed DuckDB feature */
 #endif
 
+#include <ctype.h>     /* isalpha / isalnum (DSN scheme syntax) */
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -654,6 +655,20 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
         }
     }
 
+#ifdef HL_ENABLE_DB
+    /* SQLite temp files (temp_store=FILE: sorter spills, temp b-trees,
+     * VACUUM's copy) go to Hull's private, already-canonical temp dir. */
+    {
+        const char *tmp = hl_hull_sqlite_temp_dir();
+        if (tmp) {
+            PARAM_ADD("SQLITE_TMP", tmp);
+            SBPL_LIT("; SQLite temp files (auto-allowed, not in manifest)\n"
+                     "(allow file-read* file-write*\n"
+                     "    (subpath (param \"SQLITE_TMP\")))\n");
+        }
+    }
+#endif
+
     SBPL_LIT("\n");
 
     /* ── Network ────────────────────────────────────────────── */
@@ -1016,6 +1031,12 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
 
     /* ── Unveil: restrict filesystem visibility ─────────────── */
 
+#ifdef HL_ENABLE_DB
+    /* Made (mkdir) before the first unveil: on OpenBSD that call already
+     * hides everything not yet unveiled. */
+    const char *sqlite_tmp = hl_hull_sqlite_temp_dir();
+#endif
+
     /* App directory: always readable (templates, static assets, source) */
     if (app_dir) {
         if (unveil(app_dir, "r") != 0)
@@ -1104,6 +1125,14 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                          cache_path);
         }
     }
+
+#ifdef HL_ENABLE_DB
+    /* SQLite temp files: temp_store=FILE spills sorts, temp b-trees and
+     * VACUUM's copy here (hl_hull_sqlite_temp_dir, a private 0700 dir that
+     * sqlite3_temp_directory names too). */
+    if (sqlite_tmp && unveil(sqlite_tmp, "rwc") != 0)
+        log_warn("[sandbox] unveil failed for SQLite temp dir: %s", sqlite_tmp);
+#endif
 
     /* DNS resolution: when manifest declares outbound hosts, glibc's
      * getaddrinfo() needs to read these files. The "dns" pledge promise
@@ -1306,6 +1335,12 @@ int hl_sandbox_dsn_is_network(const char *dsn)
  * bare path, ":memory:", or a "file:" URI) is returned unchanged so existing
  * SQLite behavior is untouched. Returns a pointer into @p dsn.
  *
+ * Only the FILE schemes (sqlite://, file://, duckdb://) yield a path; every
+ * other scheme yields NULL - not just the network backends Hull knows. A
+ * mistyped or unknown network DSN ("postgress://u:pw@h", "redis://...")
+ * otherwise came back as "u:pw@h/db", and its password reached unveil and
+ * the sandbox's log lines (audit 11).
+ *
  * Shared by both entry points (serve.c, and the app.main runner in
  * serve_cli.c, which passed the raw -d DSN - a network DSN with its password
  * then reached unveil and the sandbox's log lines; audit 10). */
@@ -1315,14 +1350,21 @@ const char *hl_sandbox_db_path(const char *dsn)
     const char *sep = strstr(dsn, "://");
     if (!sep) return dsn;   /* scheme-less: unchanged existing behavior */
     size_t n = (size_t)(sep - dsn);
-    /* Network backends have no local file to sandbox. */
-    if ((n == 8  && strncasecmp(dsn, "postgres",   8)  == 0) ||
-        (n == 10 && strncasecmp(dsn, "postgresql", 10) == 0) ||
-        (n == 5  && strncasecmp(dsn, "mysql",      5)  == 0) ||
-        (n == 7  && strncasecmp(dsn, "mariadb",    7)  == 0))
+    /* A "://" not preceded by a URI scheme (RFC 3986: a letter, then letters,
+     * digits, '+', '-', '.') is part of a scheme-less path. */
+    int scheme = n > 0 && isalpha((unsigned char)dsn[0]);
+    for (size_t i = 1; scheme && i < n; i++) {
+        unsigned char c = (unsigned char)dsn[i];
+        scheme = isalnum(c) || c == '+' || c == '-' || c == '.';
+    }
+    if (!scheme) return dsn;
+    /* Only file backends have a local file to sandbox. */
+    if (!((n == 6 && strncasecmp(dsn, "sqlite", 6) == 0) ||
+          (n == 4 && strncasecmp(dsn, "file",   4) == 0) ||
+          (n == 6 && strncasecmp(dsn, "duckdb", 6) == 0)))
         return NULL;
-    /* File backends (sqlite:// / duckdb:// / file://): the target follows
-     * "://". An in-memory or empty target needs no file gating. */
+    /* The target follows "://". An in-memory or empty target needs no file
+     * gating. */
     const char *path = sep + 3;
     if (*path == '\0' || strcmp(path, ":memory:") == 0)
         return NULL;

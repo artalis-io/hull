@@ -108,4 +108,20 @@ int hl_hull_cache_disabled(const char *kind);
  */
 int hl_hull_cache_env_name(const char *kind, char *out, size_t out_sz);
 
+/**
+ * @brief The directory Hull's SQLite connections write their temp files in
+ *        (temp_store=FILE: sorter spills, temp b-trees, VACUUM's copy).
+ *
+ * A private `hull-sqlite-<euid>` (mode 0700, owned by this user, not a
+ * symlink) under the first existing absolute directory of SQLITE_TMPDIR,
+ * TMPDIR, /var/tmp, /usr/tmp, /tmp - created on the first call, canonical.
+ * The SQLite setup points sqlite3_temp_directory at it and the kernel sandbox
+ * grants it read/write/create, so the two always agree.
+ *
+ * @return the path, or NULL when none could be made safely (and on Windows,
+ *         where SQLite's unix VFS under Cosmopolitan cannot use a temp
+ *         directory at all): Hull's connections then keep temp_store=MEMORY.
+ */
+const char *hl_hull_sqlite_temp_dir(void);
+
 #endif /* HL_CACHE_DIR_H */
