@@ -28,12 +28,16 @@ typedef struct KlHttpClientResponse KlHttpClientResponse;
  * On success, returns the HlAsyncCtx (with driver set).
  * The caller must set ctx->cont before returning to the event loop.
  *
+ * @p timeout_ms is the per-call whole-request deadline in ms (DNS, connect,
+ * TLS, send, receive, redirects); <= 0 = the app's default (http_cfg->
+ * timeout_ms, else 30 s). Clamped to HL_HTTP_FETCH_MAX_TIMEOUT_MS.
+ *
  * On failure, returns NULL (conn NOT suspended).
  */
 HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
                                   HlNetBackendCtx *net_ctx,
                                   HlAllocator *alloc,
-                                  HlHttpConfig *http_cfg,
+                                  HlHttpConfig *http_cfg, int timeout_ms,
                                   const char *method, const char *url,
                                   const HlHttpHeader *headers, int num_headers,
                                   const char *body, size_t body_len);

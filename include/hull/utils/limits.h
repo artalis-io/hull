@@ -11,6 +11,7 @@
  *                              (transitively pulls in core.h)
  *   hull/limits/wasm.h       - WAMR / compute plugin limits
  *   hull/limits/gpu.h        - wgpu-native GPU compute limits
+ *   hull/limits/http.h       - outbound HTTP client timeout + ceilings
  *
  * This umbrella stays for back-compat: existing consumers that include
  * "hull/limits.h" continue to see every constant.
@@ -25,5 +26,6 @@
 #include "hull/limits/runtime.h"
 #include "hull/limits/wasm.h"
 #include "hull/limits/gpu.h"
+#include "hull/limits/http.h"
 
 #endif /* HL_LIMITS_H */

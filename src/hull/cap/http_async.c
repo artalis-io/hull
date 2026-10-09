@@ -158,7 +158,7 @@ static void on_http_deadline(KlAsyncOp *op, void *user_data)
 HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
                                   HlNetBackendCtx *net_ctx,
                                   HlAllocator *alloc,
-                                  HlHttpConfig *http_cfg,
+                                  HlHttpConfig *http_cfg, int timeout_ms,
                                   const char *method, const char *url,
                                   const HlHttpHeader *headers, int num_headers,
                                   const char *body, size_t body_len)
@@ -181,12 +181,14 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
         return NULL;
     }
 
-    int timeout_ms = http_cfg->timeout_ms > 0 ? http_cfg->timeout_ms
-                                                : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+    /* One deadline for the whole request: the per-call option, else the
+     * manifest's http.timeout_ms, else 30 s; clamped to the fetch ceiling. */
+    timeout_ms = hl_http_timeout_resolve(timeout_ms, http_cfg->timeout_ms,
+                                         HL_HTTP_FETCH_MAX_TIMEOUT_MS);
 
     /* Construct KlHttpClientConfig */
     KlHttpClientConfig kl_cfg = {
-        .timeout_ms        = http_cfg->timeout_ms,
+        .timeout_ms        = timeout_ms,
         .max_response_size = http_cfg->max_response_size,
         .tls               = http_cfg->tls,
         .decompress        = http_cfg->decompress,

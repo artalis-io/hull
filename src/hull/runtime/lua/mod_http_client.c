@@ -12,6 +12,7 @@
 #include <keel/http_server.h>
 
 #include <sh_arena.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,7 +25,35 @@
  * http.put(url, body, opts?)       → { status, body, headers }
  * http.patch(url, body, opts?)     → { status, body, headers }
  * http.delete(url, opts?)          → { status, body, headers }
+ *
+ * opts.timeout_ms: ONE deadline for the whole request (DNS, connect, TLS,
+ * send, receive, redirects). Absent = manifest http.timeout_ms, else 30 s.
+ * Clamped to 60 s for the sync calls (they block the event loop) and to
+ * 10 min for http.fetch / http.async.* (hull/limits/http.h).
  * ════════════════════════════════════════════════════════════════════ */
+
+/* opts.timeout_ms of the opts table at @p idx (if it is one): an integer of
+ * at least 1, returned as is (the cap layer clamps it to the path's ceiling);
+ * absent / nil = 0, the app default. Anything else raises: a mistyped
+ * timeout must not silently become the default. */
+static int lua_http_timeout_opt(lua_State *L, int idx, const char *fn)
+{
+    if (!lua_istable(L, idx))
+        return 0;
+    lua_getfield(L, idx, "timeout_ms");
+    int t = 0;
+    if (!lua_isnil(L, -1)) {
+        int isint = 0;
+        lua_Integer v = lua_type(L, -1) == LUA_TNUMBER
+                        ? lua_tointegerx(L, -1, &isint) : 0;
+        if (!isint || v < 1)
+            return luaL_error(L, "%s: opts.timeout_ms must be a positive "
+                                 "integer (milliseconds)", fn);
+        t = v > INT_MAX ? INT_MAX : (int)v;
+    }
+    lua_pop(L, 1);
+    return t;
+}
 
 /* Parse optional headers table at stack index `idx` into HlHttpHeader array.
  * Returns 0 on success. Caller must free the returned array. */
@@ -156,6 +185,7 @@ static int lua_http_request(lua_State *L)
 
     const char *method = luaL_checkstring(L, 1);
     const char *url = luaL_checkstring(L, 2);
+    int timeout_ms = lua_http_timeout_opt(L, 3, "http.request");
 
     const char *body = NULL;
     size_t body_len = 0;
@@ -187,7 +217,7 @@ static int lua_http_request(lua_State *L)
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
-    int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
+    int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, method, url,
                                     headers, num_headers, body, body_len, &resp);
     if (rc != 0)
         return luaL_error(L, "http request failed: %s",
@@ -205,6 +235,7 @@ static int lua_http_get(lua_State *L)
         return luaL_error(L, "http not configured (no hosts in manifest)");
 
     const char *url = luaL_checkstring(L, 1);
+    int timeout_ms = lua_http_timeout_opt(L, 2, "http.get");
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
 
@@ -222,7 +253,7 @@ static int lua_http_get(lua_State *L)
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
-    int rc = hl_cap_http_request(lua->base.http_cfg, "GET", url,
+    int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
     if (rc != 0)
         return luaL_error(L, "http.get failed: %s", kl_strerror(resp.error));
@@ -243,6 +274,7 @@ static int lua_http_body_method(lua_State *L, const char *method)
     const char *body = NULL;
     if (lua_isstring(L, 2))
         body = lua_tolstring(L, 2, &body_len);
+    int timeout_ms = lua_http_timeout_opt(L, 3, "http.post/put/patch");
 
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
@@ -261,7 +293,7 @@ static int lua_http_body_method(lua_State *L, const char *method)
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
-    int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
+    int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, method, url,
                                     headers, num_headers, body, body_len, &resp);
     if (rc != 0)
         return luaL_error(L, "http.%s failed: %s", method,
@@ -283,6 +315,7 @@ static int lua_http_delete(lua_State *L)
         return luaL_error(L, "http not configured (no hosts in manifest)");
 
     const char *url = luaL_checkstring(L, 1);
+    int timeout_ms = lua_http_timeout_opt(L, 2, "http.delete");
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
 
@@ -300,7 +333,7 @@ static int lua_http_delete(lua_State *L)
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
-    int rc = hl_cap_http_request(lua->base.http_cfg, "DELETE", url,
+    int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
     if (rc != 0)
         return luaL_error(L, "http.delete failed: %s",
@@ -364,6 +397,7 @@ static int lua_http_fetch(lua_State *L)
 
     const char *method = luaL_checkstring(L, 1);
     const char *url = luaL_checkstring(L, 2);
+    int timeout_ms = lua_http_timeout_opt(L, 3, "http.fetch");
 
     const char *body = NULL;
     size_t body_len = 0;
@@ -404,7 +438,8 @@ static int lua_http_fetch(lua_State *L)
      * creates HlAsyncCtx, and suspends the inbound connection */
     HlAsyncCtx *ctx = hl_async_http_start(
         lua->server, lua->active_conn, lua->base.net_ctx, lua->base.alloc,
-        lua->base.http_cfg, method, url, headers, num_headers, body, body_len);
+        lua->base.http_cfg, timeout_ms, method, url, headers, num_headers,
+        body, body_len);
     if (!ctx) {
         cont->destroy(cont);
         return luaL_error(L, "http.fetch: failed to start request");

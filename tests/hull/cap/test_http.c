@@ -125,4 +125,47 @@ UTEST(redirect, an_unparseable_hop_is_refused)
     ASSERT_EQ(-1, hl_http_redirect_allowed(NULL, &cfg));
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ * Whole-request timeout resolution (hull/limits/http.h)
+ * ════════════════════════════════════════════════════════════════════ */
+
+UTEST(timeout, default_is_30s)
+{
+    ASSERT_EQ(30000, HL_HTTP_DEFAULT_TIMEOUT_MS);
+    ASSERT_EQ(30000, hl_http_timeout_resolve(0, 0, HL_HTTP_FETCH_MAX_TIMEOUT_MS));
+    ASSERT_EQ(30000, hl_http_timeout_resolve(0, 0, HL_HTTP_SYNC_MAX_TIMEOUT_MS));
+    /* <= 0 is "not given" at either tier */
+    ASSERT_EQ(30000, hl_http_timeout_resolve(-5, -1, HL_HTTP_FETCH_MAX_TIMEOUT_MS));
+}
+
+UTEST(timeout, manifest_default_applies_without_a_per_call_value)
+{
+    ASSERT_EQ(1500, hl_http_timeout_resolve(0, 1500, HL_HTTP_FETCH_MAX_TIMEOUT_MS));
+    ASSERT_EQ(1500, hl_http_timeout_resolve(0, 1500, HL_HTTP_SYNC_MAX_TIMEOUT_MS));
+}
+
+UTEST(timeout, per_call_overrides_the_manifest_default)
+{
+    ASSERT_EQ(250, hl_http_timeout_resolve(250, 1500, HL_HTTP_FETCH_MAX_TIMEOUT_MS));
+    ASSERT_EQ(5000, hl_http_timeout_resolve(5000, 1500, HL_HTTP_SYNC_MAX_TIMEOUT_MS));
+}
+
+UTEST(timeout, clamped_to_the_path_ceiling)
+{
+    ASSERT_EQ(600000, HL_HTTP_FETCH_MAX_TIMEOUT_MS);
+    ASSERT_EQ(60000, HL_HTTP_SYNC_MAX_TIMEOUT_MS);
+    /* async http.fetch: 10 min */
+    ASSERT_EQ(HL_HTTP_FETCH_MAX_TIMEOUT_MS,
+              hl_http_timeout_resolve(3600000, 0, HL_HTTP_FETCH_MAX_TIMEOUT_MS));
+    ASSERT_EQ(HL_HTTP_FETCH_MAX_TIMEOUT_MS,
+              hl_http_timeout_resolve(0, 2147483647, HL_HTTP_FETCH_MAX_TIMEOUT_MS));
+    /* sync calls: 60 s - per call and the manifest default alike */
+    ASSERT_EQ(HL_HTTP_SYNC_MAX_TIMEOUT_MS,
+              hl_http_timeout_resolve(120000, 0, HL_HTTP_SYNC_MAX_TIMEOUT_MS));
+    ASSERT_EQ(HL_HTTP_SYNC_MAX_TIMEOUT_MS,
+              hl_http_timeout_resolve(0, 300000, HL_HTTP_SYNC_MAX_TIMEOUT_MS));
+    /* under the fetch ceiling: passes through */
+    ASSERT_EQ(300000, hl_http_timeout_resolve(0, 300000, HL_HTTP_FETCH_MAX_TIMEOUT_MS));
+}
+
 UTEST_MAIN()

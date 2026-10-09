@@ -280,6 +280,15 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     }
     JS_FreeValue(ctx, wasm_val);
 
+    /* http: { timeoutMs }: the app-wide outbound HTTP timeout. As for wasm,
+     * a number of at least 1 (capped); anything else is absent. The bindings
+     * clamp it to each path's ceiling (hull/limits/http.h). */
+    JSValue http_val = mjs_own(ctx, manifest, "http");
+    if (mjs_is_obj(ctx, http_val))
+        out->http_timeout_ms = (uint32_t)mjs_wasm_limit(ctx, http_val, "timeoutMs",
+                                                        (int64_t)INT32_MAX);
+    JS_FreeValue(ctx, http_val);
+
     /* gpu: true  OR  gpu: { devices: [0, 1] } */
     JSValue gpu_val = mjs_own(ctx, manifest, "gpu");
     if (mjs_is_obj(ctx, gpu_val)) {

@@ -139,6 +139,14 @@ static int emit_manifest_json(const HlManifest *m, ShJsonBuf *out,
         sh_json_write_object_end(&w);
     }
 
+    /* http (only if set) */
+    if (m->http_timeout_ms) {
+        sh_json_write_key(&w, "http");
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_int(&w, "timeout_ms", m->http_timeout_ms);
+        sh_json_write_object_end(&w);
+    }
+
     /* feature flags */
     if (m->gpu) {
         sh_json_write_key(&w, "gpu");

@@ -1334,6 +1334,9 @@ e2e-db-internal: $(BUILDDIR)/hull
 e2e-http-redirect: $(BUILDDIR)/hull
 	sh tests/e2e_http_redirect.sh
 
+e2e-http-timeout: $(BUILDDIR)/hull
+	sh tests/e2e_http_timeout.sh
+
 e2e-timers: $(BUILDDIR)/hull
 	sh tests/e2e_timers.sh
 

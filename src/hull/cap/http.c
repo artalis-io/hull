@@ -63,7 +63,7 @@ int hl_http_redirect_allowed(const char *next_url, void *data)
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-int hl_cap_http_request(const HlHttpConfig *cfg,
+int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
                         const char *method, const char *url,
                         const HlHttpHeader *headers, int num_headers,
                         const char *body, size_t body_len,
@@ -89,9 +89,12 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
         return -1;
     }
 
-    /* Construct KlHttpClientConfig from HlHttpConfig */
+    /* KlHttpClientConfig from HlHttpConfig. ONE deadline for the whole
+     * request (Keel >= 3.3.0), clamped to the sync ceiling: this call
+     * blocks the event loop until it returns. */
     KlHttpClientConfig kl_cfg = {
-        .timeout_ms        = cfg->timeout_ms,
+        .timeout_ms        = hl_http_timeout_resolve(timeout_ms, cfg->timeout_ms,
+                                                     HL_HTTP_SYNC_MAX_TIMEOUT_MS),
         .max_response_size = cfg->max_response_size,
         .tls               = cfg->tls,
         .decompress        = cfg->decompress,

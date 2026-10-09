@@ -1813,7 +1813,9 @@ static int hl_serve_wire_caps(HlServerState *s)
     if (s->manifest.hosts_count > 0) {
         s->http_cfg_storage.allowed_hosts     = s->policy->hosts;
         s->http_cfg_storage.count             = s->manifest.hosts_count;
-        s->http_cfg_storage.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+        /* The app-wide default (manifest http.timeout_ms); 0 = 30 s. Each
+         * call resolves it against its own option + ceiling. */
+        s->http_cfg_storage.timeout_ms        = (int)s->manifest.http_timeout_ms;
         s->http_cfg_storage.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
         s->http_cfg_storage.tls               = s->client_tls_ctx
                                                 ? &s->client_tls_config : NULL;

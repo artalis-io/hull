@@ -1243,6 +1243,49 @@ end)
 - **Session init at startup:** Call `session.init()` before registering routes. It creates the SQLite table.
 - **Lua vs JS differences:** The Lua and JS APIs are functionally equivalent but differ in naming conventions (snake_case vs camelCase) and some defaults. See the JS stdlib source for JS-specific option names.
 
+### Outbound HTTP timeout (`hull/http-client`)
+
+Every outbound request - the async `http.async.get` / `post` / `put` / `patch` /
+`delete` / `request` (the binding behind `http.fetch`) and the sync
+`http.get` / `post` / `put` / `patch` / `delete` / `request` - runs under **one
+deadline for the whole request**: DNS, connect, TLS handshake, sending the body,
+receiving the response, and every redirect hop all count against it. It is not a
+per-read or idle timeout (Keel's sync client restarted its timer on every read
+before v3.3.0; it no longer does).
+
+| Setting | Lua | JS | Effect |
+|---|---|---|---|
+| Default | - | - | 30 000 ms (`HL_HTTP_DEFAULT_TIMEOUT_MS`) |
+| App-wide (manifest) | `http = { timeout_ms = N }` | `http: { timeoutMs: N }` | Replaces the default for every call |
+| Per call | `opts.timeout_ms = N` | `opts.timeoutMs = N` | Overrides the manifest for that call |
+
+```lua
+app.manifest({ modules = { "hull/http-client@1" }, hosts = { "api.example.com" },
+               http = { timeout_ms = 5000 } })
+local http = require("hull.http-client")
+local r = http.async.get("https://api.example.com/report", { timeout_ms = 120000 })
+```
+```javascript
+app.manifest({ modules: ["hull/http-client@1"], hosts: ["api.example.com"],
+               http: { timeoutMs: 5000 } });
+const r = await httpClient.async.get("https://api.example.com/report", { timeoutMs: 120000 });
+```
+
+- **Ceilings (clamped, not refused):** the effective value - per-call or manifest -
+  is clamped to **600 000 ms (10 min)** for the async `http.async.*` calls
+  (`HL_HTTP_FETCH_MAX_TIMEOUT_MS`) and to **60 000 ms (60 s)** for the sync calls
+  (`HL_HTTP_SYNC_MAX_TIMEOUT_MS`), because a sync call blocks the event loop for its
+  whole duration. Prefer `http.async.*` for anything slow.
+- **Invalid values:** a per-call option that is not a positive number (`0`, a
+  negative, a string, `NaN`, a table; in Lua also a non-integer) raises
+  `opts.timeout_ms must be a positive integer` (Lua) / a `TypeError`
+  `opts.timeoutMs must be a positive number` (JS) before the request starts. `nil` /
+  `undefined` / `null` mean "not given". In the manifest, like the `wasm` limits, a
+  value that is not a number of at least 1 is ignored (the 30 s default applies).
+- **On timeout** the call fails like any other transport error: the sync calls raise
+  / throw `http.get failed: ...`; `http.async.*` resolves to `nil` (Lua) / `undefined`
+  (JS) - the same as a refused connection.
+
 ### Outbound SMTP (`smtp.send`, model-2 async)
 
 `smtp.send(msg)` delivers mail over the Keel-v3 transport. Under an active server
