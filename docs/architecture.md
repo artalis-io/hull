@@ -205,7 +205,7 @@ SQL is always a literal string from app code. Parameters are bound via SQLite's 
 | foreign_keys | ON | Referential integrity |
 | busy_timeout | 5000 | Wait 5s on lock contention |
 | cache_size | -16384 | 16 MB page cache (vs 2 MB default) |
-| temp_store | MEMORY | Temp tables in RAM |
+| temp_store | FILE | Temp tables, sorts and VACUUM spill to a private temp dir past the page cache |
 | mmap_size | 268435456 | Memory-map up to 256 MB for reads |
 | wal_autocheckpoint | 1000 | Checkpoint every ~4 MB of WAL |
 

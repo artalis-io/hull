@@ -13,6 +13,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_budget.h"   /* hl_db_budget_swap / _restore */
 #include "hull/utils/alloc.h"
 
 #include <sqlite3.h>
@@ -30,6 +31,7 @@ typedef struct {
     HlStmtCache  cache;
     HlAllocator *alloc;
     const char  *own_err;   /* an error of ours, not SQLite's (errmsg) */
+    int          owned;     /* 1 = opened here (may be replaced); 0 = wrapped */
 } HlDbSqliteCtx;
 
 static const char REENTERED_MSG[] =
@@ -99,9 +101,51 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
     }
 
     hl_stmt_cache_init(&s->cache, s->db, alloc);
+    s->owned = 1;
 
     *ctx = s;
     return 0;
+}
+
+/* Replace a connection stuck inside a transaction it could not roll back
+ * (audit 11): the stale-transaction guard found it still open after
+ * hl_cap_db_guard_stale_txn's retries, and every later entry would run inside
+ * it. A new connection to the same file is opened first; only then is the old
+ * one closed (closing rolls its transaction back), so a failed open keeps the
+ * old connection rather than leaving none. The ctx stays, so every handle
+ * pointing at it stays valid. A database that lives only in this connection
+ * (":memory:", a temp database) is not replaced - that would drop it whole -
+ * nor is a wrapped connection Hull does not own. Functions registered on the
+ * old connection (db.udf) do not carry over. */
+static void sqlite_replace_conn(HlDbSqliteCtx *s)
+{
+    const char *file = s->owned ? sqlite3_db_filename(s->db, "main") : NULL;
+    if (!file || !file[0]) {
+        fprintf(stderr, "hull: sqlite connection left inside a transaction it "
+                        "could not roll back%s\n",
+                s->owned ? " (an in-memory database is not reopened)" : "");
+        return;
+    }
+    char *path = strdup(file);
+    if (!path) return;
+    sqlite3 *ndb = NULL;
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+    int ok = sqlite3_open(path, &ndb) == SQLITE_OK && hl_cap_db_init(ndb) == 0;
+    if (!ok) {
+        fprintf(stderr, "hull: sqlite could not reopen '%s' to leave a stuck "
+                        "transaction: %s\n", path,
+                ndb ? sqlite3_errmsg(ndb) : "out of memory");
+        if (ndb) sqlite3_close(ndb);
+    } else {
+        hl_stmt_cache_destroy(&s->cache);
+        (void)sqlite3_close_v2(s->db);
+        s->db = ndb;
+        hl_stmt_cache_init(&s->cache, ndb, s->alloc);
+        fprintf(stderr, "hull: sqlite connection to '%s' replaced: its "
+                        "transaction could not be rolled back\n", path);
+    }
+    hl_db_budget_restore(budget);
+    free(path);
 }
 
 static void sqlite_close(HlDbHandle *h)
@@ -189,7 +233,9 @@ static const char *sqlite_errmsg(HlDbHandle *h)
 static void sqlite_guard_stale_txn(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
-    hl_cap_db_guard_stale_txn(s->db);
+    if (!s) return;
+    if (hl_cap_db_guard_stale_txn(s->db) != 0)
+        sqlite_replace_conn(s);
 }
 
 static int sqlite_in_txn(HlDbHandle *h)

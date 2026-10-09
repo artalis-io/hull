@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -272,4 +273,62 @@ int hl_hull_cache_disabled(const char *kind)
         return 0;
     }
     return env_truthy(env_name);
+}
+
+/* ── SQLite temp directory (audit 11) ────────────────────────────────
+ *
+ * Hull's SQLite connections run with temp_store=FILE so a big sort, CREATE
+ * INDEX, GROUP BY / DISTINCT / UNION or VACUUM spills to disk instead of
+ * growing in the process-wide, hard-limited heap. Those temp files must land
+ * in a directory the kernel sandbox grants, so Hull picks it rather than
+ * SQLite: a private "hull-sqlite-<euid>" under the first existing absolute
+ * directory in SQLite's own order (SQLITE_TMPDIR, TMPDIR, /var/tmp, /usr/tmp,
+ * /tmp). It is used only if it is a real directory (not a symlink) owned by
+ * this user with no group / other access, so another account cannot plant or
+ * read the temp files. Resolved once, canonicalised (Seatbelt matches real
+ * paths), and created on the first call - which the sandbox makes before its
+ * first grant. Not on Windows: SQLite's unix VFS under Cosmopolitan finds no
+ * usable temp path there (SQLITE_IOERR_GETTEMPPATH, even with one named), so
+ * the connections keep temp_store=MEMORY (hl_cap_db_temp_on_disk). */
+static char           g_sqlite_tmp[PATH_MAX];
+static int            g_sqlite_tmp_ok;
+static pthread_once_t g_sqlite_tmp_once = PTHREAD_ONCE_INIT;
+
+static void sqlite_tmp_resolve(void)
+{
+    if (hl_host_is_windows()) return;
+    const char *cand[5] = {
+        getenv("SQLITE_TMPDIR"), getenv("TMPDIR"), "/var/tmp", "/usr/tmp", "/tmp",
+    };
+    const char *base = NULL;
+    for (size_t i = 0; i < sizeof cand / sizeof cand[0]; i++) {
+        struct stat st;
+        if (cand[i] && cand[i][0] == '/' && stat(cand[i], &st) == 0 &&
+            S_ISDIR(st.st_mode)) {
+            base = cand[i];
+            break;
+        }
+    }
+    if (!base) return;
+    size_t bl = strlen(base);
+    while (bl > 1 && base[bl - 1] == '/') bl--;
+    if (bl == 1) bl = 0;   /* "/" itself: no doubled slash */
+    char raw[PATH_MAX];
+    int n = snprintf(raw, sizeof raw, "%.*s/hull-sqlite-%lu", (int)bl, base,
+                     (unsigned long)geteuid());
+    if (n < 0 || (size_t)n >= sizeof raw) return;
+    if (mkdir(raw, 0700) != 0 && errno != EEXIST) return;
+    struct stat st;
+    if (lstat(raw, &st) != 0 || S_ISLNK(st.st_mode) || !S_ISDIR(st.st_mode) ||
+        st.st_uid != geteuid())
+        return;
+    if ((st.st_mode & 077) && chmod(raw, 0700) != 0) return;
+    if (!realpath(raw, g_sqlite_tmp)) return;
+    g_sqlite_tmp_ok = 1;
+}
+
+const char *hl_hull_sqlite_temp_dir(void)
+{
+    (void)pthread_once(&g_sqlite_tmp_once, sqlite_tmp_resolve);
+    return g_sqlite_tmp_ok ? g_sqlite_tmp : NULL;
 }

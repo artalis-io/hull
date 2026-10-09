@@ -149,7 +149,7 @@ Hull applies SQLite performance PRAGMAs automatically at startup. These defaults
 | `foreign_keys` | ON | Enforce referential integrity |
 | `busy_timeout` | 5000 | Wait up to 5s on lock contention instead of failing immediately |
 | `cache_size` | -16384 | 16 MB page cache (SQLite default is 2 MB) |
-| `temp_store` | MEMORY | Temp tables and indexes in RAM instead of temp files |
+| `temp_store` | FILE | Temp tables, indexes and sorts spill to temp files once past the page cache |
 | `mmap_size` | 268435456 | Memory-map up to 256 MB of the DB file for faster reads |
 | `wal_autocheckpoint` | 1000 | Auto-checkpoint every ~4 MB of WAL growth |
 

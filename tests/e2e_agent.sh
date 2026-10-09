@@ -182,6 +182,19 @@ check_contains "db query refuses BEGIN"     "$OUT" 'read-only'
 EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "/* /* */ BEGIN; -- */" examples/rest_api)
 OUT=$(cat "$RC_TMP")
 check_contains "db query refuses a BEGIN behind a nested comment" "$OUT" 'read-only'
+# A flag pragma takes effect when it is prepared and still counts as
+# read-only to SQLite, so the gate refuses every pragma given an argument
+# (audit 11); the introspection ones naming a table still run.
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "PRAGMA foreign_keys=OFF" examples/rest_api)
+OUT=$(cat "$RC_TMP")
+check_contains "db query refuses a flag pragma" "$OUT" 'read-only'
+check_exit     "db query flag pragma exit"      "$EXIT_CODE" "1"
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "PRAGMA query_only=1" examples/rest_api)
+OUT=$(cat "$RC_TMP")
+check_contains "db query refuses query_only=1"  "$OUT" 'read-only'
+EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent db query "PRAGMA table_info(tasks)" examples/rest_api)
+OUT=$(cat "$RC_TMP")
+check_contains "db query runs table_info"       "$OUT" '"columns"'
 
 # Named queries are held to the same read-only gate (audit 10): they ran on
 # the app's own writable connection.
