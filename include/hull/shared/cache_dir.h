@@ -112,16 +112,28 @@ int hl_hull_cache_env_name(const char *kind, char *out, size_t out_sz);
  * @brief The directory Hull's SQLite connections write their temp files in
  *        (temp_store=FILE: sorter spills, temp b-trees, VACUUM's copy).
  *
- * A private `hull-sqlite-<euid>` (mode 0700, owned by this user, not a
- * symlink) under the first existing absolute directory of SQLITE_TMPDIR,
- * TMPDIR, /var/tmp, /usr/tmp, /tmp - created on the first call, canonical.
- * The SQLite setup points sqlite3_temp_directory at it and the kernel sandbox
- * grants it read/write/create, so the two always agree.
+ * A fresh per-process `hull-sqlite-<euid>-XXXXXX` (mkdtemp: mode 0700, owned
+ * by this user, checked through an O_NOFOLLOW descriptor) under the first of
+ * SQLITE_TMPDIR, TMPDIR, /var/tmp, /usr/tmp, /tmp where one can be made - an
+ * absolute directory this user may write and search, not world-writable
+ * without the sticky bit. Created on the first call, canonical, removed at
+ * exit. The SQLite setup points sqlite3_temp_directory at it and the kernel
+ * sandbox grants it read/write/create, so the two always agree.
  *
- * @return the path, or NULL when none could be made safely (and on Windows,
- *         where SQLite's unix VFS under Cosmopolitan cannot use a temp
- *         directory at all): Hull's connections then keep temp_store=MEMORY.
+ * @return the path, or NULL when none could be made safely (a WARN says so)
+ *         and on Windows, where SQLite's unix VFS under Cosmopolitan cannot
+ *         use a temp directory at all: Hull's connections then keep
+ *         temp_store=MEMORY.
  */
 const char *hl_hull_sqlite_temp_dir(void);
+
+/**
+ * @brief Make a private SQLite temp directory under the first usable base in
+ *        @p cands (NULL entries skipped), as hl_hull_sqlite_temp_dir does.
+ *        Exposed for tests; the caller removes the directory.
+ * @return the index of the base used, or -1 when none worked.
+ */
+int hl_hull_sqlite_temp_dir_make(const char *const *cands, size_t ncands,
+                                 char *out, size_t out_sz);
 
 #endif /* HL_CACHE_DIR_H */

@@ -486,12 +486,47 @@ static int host_rp_covers(const char *rp, const char *target)
     return same && (target[l] == '\0' || target[l] == '/');
 }
 
-/* Resolve @p path and $HOME/<sub> (sub may be NULL, and need not exist). */
+/* host_realpath for a path that need not exist yet: its nearest existing
+ * ancestor resolved, the rest appended. A '.' or '..' in the part that does
+ * not exist cannot be resolved without it, so that fails. */
+static int host_realpath_loose(const char *path, char *out, int depth)
+{
+    if (host_realpath(path, out) == 0) return 0;
+    if (depth > 64) return -1;
+    char buf[HL_HOST_PATH_MAX];
+    if (!path || hl_host_normalize_path(path, buf, sizeof buf) < 0) return -1;
+    size_t n = strlen(buf);
+    while (n > 1 && buf[n - 1] == '/') buf[--n] = 0;
+    char *slash = strrchr(buf, '/');
+    const char *tail = slash ? slash + 1 : buf;
+    if (!tail[0] || strcmp(tail, ".") == 0 || strcmp(tail, "..") == 0)
+        return -1;
+    char parent[HL_HOST_PATH_MAX];
+    if (!slash)            snprintf(parent, sizeof parent, ".");
+    else if (slash == buf) snprintf(parent, sizeof parent, "/");
+    else                   snprintf(parent, sizeof parent, "%.*s",
+                                    (int)(slash - buf), buf);
+    if (host_realpath_loose(parent, out, depth + 1) != 0) return -1;
+    size_t ol = strlen(out), tl = strlen(tail);
+    if (ol + 1 + tl + 1 > PATH_MAX) return -1;
+    if (strcmp(out, "/") != 0) out[ol++] = '/';
+    memcpy(out + ol, tail, tl + 1);
+    return 0;
+}
+
+/* Resolve @p path (need not exist) and $HOME/<sub> (sub may be NULL, and need
+ * not exist) in two forms: @p hr spelled under the resolved home, and @p hr2
+ * with $HOME/<sub> itself resolved where it exists. With a symlinked ~/.hull
+ * (-> /data/hull) the plain form missed every path through the link:
+ * HULL_CACHE_DIR=~/.hull/keys resolves to /data/hull/keys, which is not under
+ * /home/u/.hull (audit 12). Callers test both forms. */
 static int host_rp_and_home(const char *path, const char *sub,
-                            char rp[PATH_MAX], char hr[PATH_MAX])
+                            char rp[PATH_MAX], char hr[PATH_MAX],
+                            char hr2[PATH_MAX])
 {
     const char *home = hl_host_home();
-    if (!home || host_realpath(path, rp) != 0 || host_realpath(home, hr) != 0)
+    if (!home || host_realpath_loose(path, rp, 0) != 0 ||
+        host_realpath(home, hr) != 0)
         return -1;
     if (sub && *sub) {
         size_t n = strlen(hr);
@@ -499,21 +534,23 @@ static int host_rp_and_home(const char *path, const char *sub,
         if (strcmp(hr, "/") != 0) hr[n++] = '/';
         memcpy(hr + n, sub, strlen(sub) + 1);
     }
+    if (host_realpath_loose(hr, hr2, 0) != 0)
+        memcpy(hr2, hr, strlen(hr) + 1);
     return 0;
 }
 
 int hl_host_path_covers_home(const char *path, const char *sub)
 {
-    char rp[PATH_MAX], hr[PATH_MAX];
-    if (host_rp_and_home(path, sub, rp, hr) != 0) return 0;
-    return host_rp_covers(rp, hr);
+    char rp[PATH_MAX], hr[PATH_MAX], hr2[PATH_MAX];
+    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 0;
+    return host_rp_covers(rp, hr) || host_rp_covers(rp, hr2);
 }
 
 int hl_host_path_under_home(const char *path, const char *sub)
 {
-    char rp[PATH_MAX], hr[PATH_MAX];
-    if (host_rp_and_home(path, sub, rp, hr) != 0) return 0;
-    return host_rp_covers(hr, rp);
+    char rp[PATH_MAX], hr[PATH_MAX], hr2[PATH_MAX];
+    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 0;
+    return host_rp_covers(hr, rp) || host_rp_covers(hr2, rp);
 }
 
 int hl_host_path_too_broad(const char *path)

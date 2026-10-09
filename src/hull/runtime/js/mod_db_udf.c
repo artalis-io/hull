@@ -408,6 +408,16 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
 
+        /* Re-fetched: app code ran since the check above (the opts'
+         * getters / metamethods), and the connection's sqlite3* is not
+         * kept across app code - the stale-transaction guard may have
+         * replaced it, or withheld it (broken) (audit 12). */
+        raw_db = hl_db_sqlite_raw(conn);
+        if (!raw_db) {
+            js_scalar_udf_destroy(udf_ctx);
+            JS_FreeCString(ctx, sql_name);
+            return JS_ThrowInternalError(ctx, "database not available");
+        }
         int rc = sqlite3_create_function_v2(
             raw_db, sql_name, nargs, encoding, udf_ctx,
             js_scalar_udf_func, NULL, NULL,
@@ -457,6 +467,16 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
 
+        /* Re-fetched: app code ran since the check above (the opts'
+         * getters / metamethods), and the connection's sqlite3* is not
+         * kept across app code - the stale-transaction guard may have
+         * replaced it, or withheld it (broken) (audit 12). */
+        raw_db = hl_db_sqlite_raw(conn);
+        if (!raw_db) {
+            js_agg_udf_destroy(udf_ctx);
+            JS_FreeCString(ctx, sql_name);
+            return JS_ThrowInternalError(ctx, "database not available");
+        }
         int rc = sqlite3_create_function_v2(
             raw_db, sql_name, nargs, encoding, udf_ctx,
             NULL, js_agg_step_func, js_agg_finalize_func,

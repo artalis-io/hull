@@ -51,7 +51,6 @@
 
 struct HlAppContext {
 #ifdef HL_ENABLE_DB
-    sqlite3       *db;            /* raw sqlite3* for agent (from the default conn) */
     int            db_open;       /* 1 = db was opened */
     HlDbRegistry  *db_registry;   /* owns all connections, incl. the "default" */
 #endif
@@ -238,8 +237,6 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                 return -1;
             }
             ctx->db_open = 1;
-            /* NULL under a non-SQLite backend; raw-pointer consumers guard it. */
-            ctx->db = hl_db_sqlite_raw(def);
         }
     }
 #endif
@@ -446,13 +443,11 @@ void hl_app_context_free(HlAppContext *ctx)
      * later during the runtime destroy are safe against this ordering: a
      * borrowed conn's finalizer is a no-op (the registry owned the handle), and
      * an owned (db.open) conn's finalizer closes only its own handle, which was
-     * never in the registry. ctx->db aliased the default's raw sqlite3*, so it
-     * dangles after this. */
+     * never in the registry. */
     if (ctx->db_registry) {
         hl_db_registry_destroy(ctx->db_registry);
         ctx->db_registry = NULL;
     }
-    ctx->db = NULL;
     ctx->db_open = 0;
 #endif
 
@@ -489,7 +484,12 @@ void hl_app_context_free(HlAppContext *ctx)
 struct sqlite3 *hl_app_context_db(HlAppContext *ctx)
 {
 #ifdef HL_ENABLE_DB
-    return ctx ? ctx->db : NULL;
+    /* Resolved on every call, never cached: the stale-transaction guard may
+     * replace the default connection's sqlite3* (or withhold it, broken), and
+     * a copy taken at open dangled after that (audit 12). NULL under a
+     * non-SQLite backend; raw-pointer consumers guard it. */
+    return ctx ? hl_db_sqlite_raw(hl_db_registry_default(ctx->db_registry))
+               : NULL;
 #else
     (void)ctx;
     return NULL;

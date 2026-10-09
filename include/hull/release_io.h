@@ -64,7 +64,8 @@ KlTlsCtx *hl_release_io_open_tls(KlAllocator *alloc);
 
 /**
  * HTTPS GET. Allocates the response body via @p alloc. On success,
- * @p out_body is malloc'd and the caller must `kl_free()` it.
+ * @p out_body is allocated (NUL-terminated, @p out_len + 1 bytes) and the
+ * caller frees it with hl_release_io_free().
  *
  * @param timeout_ms  Whole-fetch deadline, redirects included:
  *                    HL_RELEASE_IO_META_TIMEOUT_MS or
@@ -81,10 +82,20 @@ int hl_release_io_get(const char *url,
                       int timeout_ms,
                       const char *user_agent);
 
+/** Free a buffer hl_release_io_get (or a function built on it: the verified
+ *  manifest, its signature, the hull.version body) returned. Keel allocates a
+ *  response body with a trailing NUL, @p len + 1 bytes, and frees it with that
+ *  size; a sized allocator freed with @p len was handed the wrong size
+ *  (audit 12). NULL is a no-op. */
+static inline void hl_release_io_free(KlAllocator *alloc, char *buf, size_t len)
+{
+    if (buf) kl_free(alloc, buf, len + 1);
+}
+
 /**
  * Download `hull.sha256` and (when a release pubkey is embedded) its
  * `.sig`, verify the Ed25519 signature over the manifest, and return the
- * verified manifest buffer. The caller `kl_free()`s *out_manifest.
+ * verified manifest buffer. The caller hl_release_io_free()s *out_manifest.
  *
  * The single trust-chain entry shared by `hull tools install` and
  * `hull platform install`. On a placeholder (all-zero) embedded pubkey the
@@ -92,7 +103,7 @@ int hl_release_io_get(const char *url,
  * `hull update`. Refuses to proceed if a configured pubkey can't verify.
  *
  * When @p out_sig / @p out_sig_len are non-NULL, the raw `hull.sha256.sig`
- * bytes are returned too (caller `kl_free()`s *out_sig); they are set to
+ * bytes are returned too (caller hl_release_io_free()s *out_sig); they are set to
  * NULL/0 on a placeholder pubkey where no signature was fetched. Pass NULL
  * for both to ignore the signature (the common case). This lets
  * `hull platform install` cache the signed manifest for a later offline
@@ -126,7 +137,7 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
  * hl_release_io_fetch_verified_manifest runs this itself.
  *
  * When @p out_version is non-NULL the `hull.version` bytes are handed back
- * (caller kl_free()s; NULL when the release predates the entry), so an
+ * (caller hl_release_io_free()s; NULL when the release predates the entry), so an
  * install can cache them for the offline re-verify
  * (hl_release_io_verify_local_asset_release).
  *

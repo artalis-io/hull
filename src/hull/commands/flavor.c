@@ -128,28 +128,28 @@ static int install_asset(const char *asset, const char *repo, const char *tag,
     char actual[65];
     if (hl_release_io_sha256_hex((const unsigned char *)body, body_len, actual) != 0) {
         fprintf(stderr, "hull platform: SHA-256 computation failed\n");
-        kl_free(alloc, body, body_len);
+        hl_release_io_free(alloc, body, body_len);
         return -1;
     }
     if (!hl_asset_checksum_eq(expected, actual)) {
         fprintf(stderr, "hull platform: SHA-256 MISMATCH for %s\n"
                         "  expected %s\n  actual   %s\n", asset, expected, actual);
-        kl_free(alloc, body, body_len);
+        hl_release_io_free(alloc, body, body_len);
         return -1;
     }
 
     char dest[PATH_MAX];
     if ((size_t)snprintf(dest, sizeof(dest), "%s/%s", cache_dir, asset) >= sizeof(dest)) {
         fprintf(stderr, "hull platform: cache path overflow\n");
-        kl_free(alloc, body, body_len);
+        hl_release_io_free(alloc, body, body_len);
         return -1;
     }
     if (hl_release_io_atomic_write(dest, body, body_len, 0644) != 0) {
         fprintf(stderr, "hull platform: failed to write %s\n", dest);
-        kl_free(alloc, body, body_len);
+        hl_release_io_free(alloc, body, body_len);
         return -1;
     }
-    kl_free(alloc, body, body_len);
+    hl_release_io_free(alloc, body, body_len);
     fprintf(stdout, "hull platform: installed %s (SHA-256 verified)\n", dest);
     return 0;
 }
@@ -236,9 +236,9 @@ static int cmd_install(const char *flavor, const char *repo)
             hl_release_io_atomic_write(p, ver, ver_len, 0644);
     }
 
-    kl_free(&alloc, manifest, manifest_len);
-    if (sig) kl_free(&alloc, sig, sig_len);
-    if (ver) kl_free(&alloc, ver, ver_len);
+    hl_release_io_free(&alloc, manifest, manifest_len);
+    if (sig) hl_release_io_free(&alloc, sig, sig_len);
+    if (ver) hl_release_io_free(&alloc, ver, ver_len);
     kl_tls_mbedtls_ctx_destroy(tls);
 
     if (rc == 0)

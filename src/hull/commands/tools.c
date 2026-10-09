@@ -405,7 +405,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
                                   blobs_root, sizeof(blobs_root)) != 0) {
             fprintf(stderr, "hull tools: cannot resolve tools-store path "
                             "(HOME unset or registry missing)\n");
-            kl_free(alloc, body, body_len);
+            hl_release_io_free(alloc, body, body_len);
             return -1;
         }
     }
@@ -415,7 +415,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
                            /*shard_depth=*/1, 0) != 0) {
         fprintf(stderr, "hull tools: cannot open blob store at %s: %s\n",
                 blobs_root, strerror(errno));
-        kl_free(alloc, body, body_len);
+        hl_release_io_free(alloc, body, body_len);
         return -1;
     }
 
@@ -426,7 +426,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
                 "hull tools: SHA-256 mismatch or write failure for %s "
                 "(expected %s)\n", asset, expected);
         hl_blob_store_close(store);
-        kl_free(alloc, body, body_len);
+        hl_release_io_free(alloc, body, body_len);
         return -1;
     }
     fprintf(stdout, "hull tools: SHA-256 verified, blob stored (%s)\n",
@@ -476,7 +476,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
         }
         if (rc != 0) (void)rm_rf(tmp);
         hl_blob_store_close(store);
-        kl_free(alloc, body, body_len);
+        hl_release_io_free(alloc, body, body_len);
         if (rc != 0) {
             fprintf(stderr, "hull tools: failed to extract %s bundle\n", spec->name);
             return -1;
@@ -486,7 +486,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
         return 0;
     }
 
-    kl_free(alloc, body, body_len);
+    hl_release_io_free(alloc, body, body_len);
 
     /* Compose the on-disk blob path so we can chmod it executable and
      * symlink to it. Routing through hl_blob_store_compose_path keeps
@@ -648,8 +648,8 @@ static int cmd_install(int argc, char **argv, const char *repo)
         }
     }
 
-    kl_free(&alloc, manifest, manifest_len);
-    if (msig) kl_free(&alloc, msig, msig_len);
+    hl_release_io_free(&alloc, manifest, manifest_len);
+    if (msig) hl_release_io_free(&alloc, msig, msig_len);
     kl_tls_mbedtls_ctx_destroy(tls);
     return rc;
 }

@@ -44,6 +44,18 @@
 _Static_assert(SANDBOX_PATH_MAX >= PATH_MAX,
                "SANDBOX_PATH_MAX must be >= PATH_MAX");
 
+#ifdef HL_ENABLE_DB
+/* SQLite's private temp directory (hl_hull_sqlite_temp_dir), granted only when
+ * this binary has a SQLite backend at all - in the base or composed as a
+ * feature (audit 12). An app built without one never opens SQLite, so it
+ * neither makes the directory nor gets a writable path it has no use for. */
+static const char *sb_sqlite_temp_dir(void)
+{
+    if (!hl_db_backend_select("sqlite://", NULL)) return NULL;
+    return hl_hull_sqlite_temp_dir();
+}
+#endif
+
 /* Resolve a manifest fs.read / fs.write path against the app's
  * root directory. The manifest declares paths like "data/" or
  * "uploads/", which the capability layer interprets relative to
@@ -659,7 +671,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     /* SQLite temp files (temp_store=FILE: sorter spills, temp b-trees,
      * VACUUM's copy) go to Hull's private, already-canonical temp dir. */
     {
-        const char *tmp = hl_hull_sqlite_temp_dir();
+        const char *tmp = sb_sqlite_temp_dir();
         if (tmp) {
             PARAM_ADD("SQLITE_TMP", tmp);
             SBPL_LIT("; SQLite temp files (auto-allowed, not in manifest)\n"
@@ -1034,7 +1046,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
 #ifdef HL_ENABLE_DB
     /* Made (mkdir) before the first unveil: on OpenBSD that call already
      * hides everything not yet unveiled. */
-    const char *sqlite_tmp = hl_hull_sqlite_temp_dir();
+    const char *sqlite_tmp = sb_sqlite_temp_dir();
 #endif
 
     /* App directory: always readable (templates, static assets, source) */
