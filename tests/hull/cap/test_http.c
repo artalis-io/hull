@@ -168,4 +168,26 @@ UTEST(timeout, clamped_to_the_path_ceiling)
     ASSERT_EQ(300000, hl_http_timeout_resolve(0, 300000, HL_HTTP_FETCH_MAX_TIMEOUT_MS));
 }
 
+/* The sync path hands Keel only what is left of the deadline before each
+ * redirect hop (audit 11: Keel restarts its timer per hop, so a 60 s ceiling
+ * over 10 hops blocked the loop for ~11 min). */
+UTEST(timeout, chain_remaining_is_what_is_left_of_the_deadline)
+{
+    ASSERT_EQ(1500, hl_http_chain_remaining_ms(10000, 8500));
+    ASSERT_EQ(1, hl_http_chain_remaining_ms(10000, 9999));
+    /* reached or passed: nothing left, the hop is refused */
+    ASSERT_EQ(0, hl_http_chain_remaining_ms(10000, 10000));
+    ASSERT_EQ(0, hl_http_chain_remaining_ms(10000, 20000));
+    /* never wraps past INT32_MAX */
+    ASSERT_EQ(2147483647, hl_http_chain_remaining_ms(UINT64_MAX, 0));
+}
+
+UTEST(timeout, redirect_hops_default_to_five)
+{
+    ASSERT_EQ(5, HL_HTTP_MAX_REDIRECTS);
+    ASSERT_EQ(5, hl_http_max_redirects(0));
+    ASSERT_EQ(5, hl_http_max_redirects(-1));
+    ASSERT_EQ(2, hl_http_max_redirects(2));
+}
+
 UTEST_MAIN()

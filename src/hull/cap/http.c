@@ -12,6 +12,7 @@
 #include "hull/host_match.h"
 
 #include <keel/allocator.h>
+#include <keel/clock.h>
 #include <keel/http_client_pool.h>
 #include <keel/error.h>
 #include <keel/http_redirect.h>
@@ -61,6 +62,45 @@ int hl_http_redirect_allowed(const char *next_url, void *data)
     return 0;
 }
 
+/* ── Whole-chain deadline (sync path) ────────────────────────────── */
+
+/* Keel's sync redirect loop calls kl_http_client_request once per hop with
+ * the SAME config pointer, and each call starts a fresh deadline from its
+ * timeout_ms: a 60 s ceiling over max_redirects hops blocked the event loop
+ * for ~11 minutes. Hull keeps the absolute deadline here, and before every
+ * hop sets the config's timeout to what is left of it (the loop re-reads the
+ * config on each hop), refusing the hop once nothing is left. */
+typedef struct {
+    const HlHttpConfig *cfg;
+    KlHttpClientConfig *kl_cfg;      /* the config Keel re-reads per hop */
+    uint64_t            deadline_ms; /* absolute, monotonic */
+    int                 timed_out;
+} HlHttpSyncChain;
+
+int hl_http_chain_remaining_ms(uint64_t deadline_ms, uint64_t now_ms)
+{
+    if (now_ms >= deadline_ms)
+        return 0;
+    uint64_t left = deadline_ms - now_ms;
+    return left > (uint64_t)INT32_MAX ? INT32_MAX : (int)left;
+}
+
+static int hl_http_sync_redirect_hop(const char *next_url, void *data)
+{
+    HlHttpSyncChain *chain = (HlHttpSyncChain *)data;
+    if (hl_http_redirect_allowed(next_url, (void *)(uintptr_t)chain->cfg) != 0)
+        return -1;
+    int left = hl_http_chain_remaining_ms(chain->deadline_ms,
+                                          kl_monotonic_ms());
+    if (left <= 0) {
+        chain->timed_out = 1;
+        log_warn("[hull:http] request timed out across its redirect chain");
+        return -1;
+    }
+    chain->kl_cfg->timeout_ms = left;
+    return 0;
+}
+
 /* ── Public API ──────────────────────────────────────────────────── */
 
 int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
@@ -90,11 +130,13 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     }
 
     /* KlHttpClientConfig from HlHttpConfig. ONE deadline for the whole
-     * request (Keel >= 3.3.0), clamped to the sync ceiling: this call
-     * blocks the event loop until it returns. */
+     * request, clamped to the sync ceiling: this call blocks the event loop
+     * until it returns. Keel (>= 3.3.0) bounds one hop by timeout_ms; the
+     * redirect hook below keeps the whole chain inside the same deadline. */
+    int timeout = hl_http_timeout_resolve(timeout_ms, cfg->timeout_ms,
+                                          HL_HTTP_SYNC_MAX_TIMEOUT_MS);
     KlHttpClientConfig kl_cfg = {
-        .timeout_ms        = hl_http_timeout_resolve(timeout_ms, cfg->timeout_ms,
-                                                     HL_HTTP_SYNC_MAX_TIMEOUT_MS),
+        .timeout_ms        = timeout,
         .max_response_size = cfg->max_response_size,
         .tls               = cfg->tls,
         .decompress        = cfg->decompress,
@@ -104,10 +146,16 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     KlAllocator alloc = kl_allocator_default();
     int rc;
     if (cfg->follow_redirects) {
+        HlHttpSyncChain chain = {
+            .cfg         = cfg,
+            .kl_cfg      = &kl_cfg,
+            .deadline_ms = kl_monotonic_ms() + (uint64_t)timeout,
+            .timed_out   = 0,
+        };
         KlHttpRedirectConfig redir = {
-            .max_redirects    = cfg->max_redirects,
-            .on_redirect      = hl_http_redirect_allowed,
-            .on_redirect_data = (void *)(uintptr_t)cfg,
+            .max_redirects    = hl_http_max_redirects(cfg->max_redirects),
+            .on_redirect      = hl_http_sync_redirect_hop,
+            .on_redirect_data = &chain,
         };
         if (cfg->pool)
             rc = kl_http_redirect_request_pooled(cfg->pool, &alloc, &kl_cfg, &redir,
@@ -118,6 +166,8 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
             rc = kl_http_redirect_request(&alloc, &kl_cfg, &redir, method, url,
                                       (const KlHttpClientHeader *)headers,
                                       num_headers, body, body_len, resp);
+        if (rc != 0 && chain.timed_out)
+            resp->error = KL_ERR_TIMEOUT;
     } else if (cfg->pool) {
         rc = kl_http_client_request_pooled(cfg->pool, &alloc, &kl_cfg, method, url,
                                        (const KlHttpClientHeader *)headers,

@@ -35,10 +35,19 @@ KlTlsCtx *hl_tls_server_ctx_create(const char *cert_path, const char *key_path,
                                    KlAllocator *alloc);
 
 /**
- * Create a client-side TLS context from a CA bundle path (NULL = no verify), or
- * NULL when TLS is absent (outbound HTTPS / SMTP-TLS then unavailable).
+ * Create a client-side TLS context that verifies against the CA bundle at
+ * @p ca_path, or NULL when TLS is absent (outbound HTTPS / SMTP-TLS then
+ * unavailable). A NULL @p ca_path fails closed (NULL): a context that verifies
+ * nothing is never the fallback of a missing argument.
  */
 KlTlsCtx *hl_tls_client_ctx_create(const char *ca_path, KlAllocator *alloc);
+
+/**
+ * Create a client-side TLS context that verifies NOTHING (no chain, no
+ * hostname) - MITM-able. Only the --no-ca-bundle branch of the CA trust
+ * resolver (ca_trust.c) calls it. NULL when TLS is absent.
+ */
+KlTlsCtx *hl_tls_client_ctx_create_insecure(KlAllocator *alloc);
 
 /** Same, from an in-memory CA bundle (the embedded Mozilla bundle). */
 KlTlsCtx *hl_tls_client_ctx_create_from_buf(const unsigned char *ca_buf,

@@ -31,6 +31,13 @@ KlTlsCtx *hl_tls_client_ctx_create(const char *ca_path, KlAllocator *alloc)
 }
 
 __attribute__((weak))
+KlTlsCtx *hl_tls_client_ctx_create_insecure(KlAllocator *alloc)
+{
+    (void)alloc;
+    return NULL;
+}
+
+__attribute__((weak))
 KlTlsCtx *hl_tls_client_ctx_create_from_buf(const unsigned char *ca_buf,
                                             size_t ca_len, KlAllocator *alloc)
 {

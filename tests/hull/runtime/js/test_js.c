@@ -9278,6 +9278,42 @@ UTEST(js_http_timeout, per_call_option_is_validated)
     js.base.http_cfg = NULL;
     cleanup_js_caps();
 }
+
+/* Audit 11: http.async.post / put / patch read opts.headers and
+ * opts.timeoutMs through getters that run app code, and did not check for an
+ * exception: the pending exception was stored as an opts property and the
+ * request went on. The getter's own error is what the call throws now. */
+UTEST(js_http_timeout, a_throwing_opts_getter_stops_the_async_call)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlHttpConfig cfg = {0};
+    js.base.http_cfg = &cfg;
+    static const char *const calls[] = {
+        "http.async.post('http://x.invalid/', 'b', "
+        "  { get headers() { throw new Error('boom-getter'); } })",
+        "http.async.put('http://x.invalid/', 'b', "
+        "  { get timeoutMs() { throw new Error('boom-getter'); } })",
+        "http.async.patch('http://x.invalid/', 'b', { headers: {}, "
+        "  get timeoutMs() { throw new Error('boom-getter'); } })",
+    };
+    char code[1024];
+    for (size_t i = 0; i < sizeof calls / sizeof calls[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { httpClient as http } from 'hull:http-client';\n"
+                 "let r = 0;\n"
+                 "try { %s; r = 2; } catch (e) {\n"
+                 "  r = e.message === 'boom-getter' ? 1 : 3; }\n"
+                 "globalThis.__hg = r;\n", calls[i]);
+        JSValue v = JS_Eval(js.ctx, code, strlen(code), "<hg>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(v)) hl_js_dump_error(&js);
+        JS_FreeValue(js.ctx, v);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(eval_int("globalThis.__hg|0"), 1, calls[i]);
+    }
+    js.base.http_cfg = NULL;
+    cleanup_js_caps();
+}
 #endif
 
 #ifdef HL_ENABLE_HTTP_SERVER

@@ -12,6 +12,8 @@
 
 #include <keel/http_client.h>
 
+#include <stdint.h>
+
 #include "hull/limits/http.h"
 
 /* Forward declarations for optional modules */
@@ -27,8 +29,9 @@ typedef struct HlHttpConfig {
     const char     **allowed_hosts;    /**< Host allowlist (exact match) */
     int              count;            /**< Number of allowed hosts */
     int              timeout_ms;       /**< App-wide whole-request timeout in ms
-                                            *   (DNS, connect, TLS, send, receive and
-                                            *   every redirect hop), from manifest
+                                            *   (connect, TLS, send, receive and every
+                                            *   redirect hop; a blocking DNS lookup
+                                            *   counts but is not interrupted), from manifest
                                             *   http.timeout_ms; <= 0 = the 30 s
                                             *   default. A per-call option overrides
                                             *   it; both are clamped to the path's
@@ -37,7 +40,7 @@ typedef struct HlHttpConfig {
     KlTlsConfig     *tls;             /**< KlTlsConfig* for HTTPS - NULL = no HTTPS */
     KlHttpClientPool    *pool;             /**< Connection pool (NULL = no pooling) */
     int              follow_redirects; /**< 1 = follow 3xx redirects (default) */
-    int              max_redirects;    /**< Max redirect hops (0 = Keel default 10) */
+    int              max_redirects;    /**< Max redirect hops (0 = HL_HTTP_MAX_REDIRECTS, 5) */
     KlDecompressConfig *decompress;    /**< Response decompression (NULL = disabled) */
 } HlHttpConfig;
 
@@ -46,7 +49,8 @@ typedef struct HlHttpConfig {
  *
  * Checks host allowlist, audits, then delegates to kl_http_client_request().
  * Blocks until the response is received, an error occurs, or the deadline
- * passes: ONE deadline for the whole request (Keel >= 3.3.0).
+ * passes: ONE deadline for the whole request, redirect chain included (each
+ * hop gets only what is left of it; see hull/limits/http.h).
  *
  * @param cfg      HTTP client configuration (host allowlist, timeouts, TLS).
  * @param timeout_ms Per-call whole-request timeout in ms; <= 0 = the app's
@@ -75,6 +79,14 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
  * @p data is the HlHttpConfig. 0 to follow, -1 to refuse (audited).
  */
 int hl_http_redirect_allowed(const char *next_url, void *data);
+
+/**
+ * @brief What is left of an absolute deadline: ms from @p now_ms to
+ * @p deadline_ms, 0 once it has passed, capped at INT32_MAX. The sync path
+ * hands this to Keel as each redirect hop's timeout, so the whole chain stays
+ * inside one deadline.
+ */
+int hl_http_chain_remaining_ms(uint64_t deadline_ms, uint64_t now_ms);
 
 /**
  * @brief Check if a hostname is in the allowlist.

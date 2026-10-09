@@ -98,6 +98,11 @@ typedef struct HlAsyncCtx {
 
     HlAllocator *alloc;
     int          detached;      /* 1 = no connection (timer callback) */
+
+    /* A detached op's own deadline (op.deadline_ms is armed only by
+     * hl_net_op_suspend, i.e. on the attached path): the Keel timer id + 1,
+     * 0 = none. Set and cleared by the op's owner (http_async.c). */
+    int64_t      detached_timer;
 } HlAsyncCtx;
 
 /*

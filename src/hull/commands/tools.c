@@ -364,7 +364,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
     char *body = NULL;
     size_t body_len = 0;
     if (hl_release_io_get(asset_url, &body, &body_len, alloc, tls,
-                          "hull-tools") != 0) {
+                          HL_RELEASE_IO_ASSET_TIMEOUT_MS, "hull-tools") != 0) {
         fprintf(stderr, "hull tools: failed to download %s\n", asset_url);
         return -1;
     }

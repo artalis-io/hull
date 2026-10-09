@@ -15,6 +15,16 @@
 # Under the 30 s default every one of these would succeed, so a failure can
 # only come from the configured deadline.
 #
+# The deadline covers the whole redirect chain (audit 11). /hop/N/D answers
+# after D ms with a redirect to /hop/N-1/D, and /hop/0/D with 200. Keel starts
+# a fresh timer on every hop, so a chain of hops each well inside the timeout
+# used to succeed however long it ran in total:
+#   - /hop/4/700 (5 requests x 700 ms, each under the 1000 ms timeout) fails,
+#     sync, async in a handler (attached), and async from app.main (detached:
+#     no request to suspend, so Hull arms its own deadline timer)
+#   - the same chain with a per-call 10000 ms succeeds (4 hops are allowed)
+#   - at most 5 hops are followed: /hop/5/0 succeeds, /hop/6/0 fails
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -49,9 +59,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/slow":
-            time.sleep(2)
-        body = b"slow-ok"
+        if self.path.startswith("/hop/"):
+            _, _, n, d = self.path.split("/")
+            n, d = int(n), int(d)
+            time.sleep(d / 1000.0)
+            if n > 0:
+                self.send_response(302)
+                self.send_header("Location", "/hop/%d/%d" % (n - 1, d))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = b"chain-ok"
+        else:
+            if self.path == "/slow":
+                time.sleep(2)
+            body = b"slow-ok"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
@@ -76,6 +98,7 @@ done
 [ "$up" = 1 ] || { echo "FAIL: slow server did not start"; cat "$TMPDIR/slow.log"; exit 1; }
 
 SLOW="http://127.0.0.1:$SLOW_PORT/slow"
+BASE="http://127.0.0.1:$SLOW_PORT"
 
 # ── Apps ─────────────────────────────────────────────────────────────
 mkdir -p "$TMPDIR/lua" "$TMPDIR/js"
@@ -87,6 +110,7 @@ app.manifest({
 })
 local http = require("hull.http-client")
 local URL = "$SLOW"
+local BASE = "$BASE"
 
 local function report(res, ok, r)
     if ok and r and r.status == 200 then return res:text("ok=" .. r.body) end
@@ -103,6 +127,29 @@ end)
 app.get("/sync", function(req, res)
     report(res, pcall(http.get, URL, opts(req)))
 end)
+local function chain_url(req) return BASE .. "/hop/" .. req.query.h end
+app.get("/chain", function(req, res)
+    report(res, pcall(http.async.get, chain_url(req), opts(req)))
+end)
+app.get("/chain_sync", function(req, res)
+    report(res, pcall(http.get, chain_url(req), opts(req)))
+end)
+
+-- Detached: app.main runs before the serve loop, with no request.
+local detached = {}
+local function outcome(ok, r)
+    if ok and r and r.status == 200 then return "ok=" .. r.body end
+    return "error"
+end
+app.main(function(_ctx)
+    detached.long = outcome(pcall(http.async.get, BASE .. "/hop/4/700"))
+    detached.short = outcome(pcall(http.async.get, BASE .. "/hop/2/0",
+                                   { timeout_ms = 10000 }))
+    return 0
+end)
+app.get("/detached", function(req, res)
+    res:text(detached[req.query.k] or "unset")
+end)
 EOF
 
 cat > "$TMPDIR/js/app.js" <<EOF
@@ -115,6 +162,7 @@ app.manifest({
     http: { timeoutMs: 1000 },
 });
 const URL = "$SLOW";
+const BASE = "$BASE";
 
 function report(res, r) {
     if (r && r.status === 200) res.text("ok=" + r.body);
@@ -135,6 +183,32 @@ app.get("/sync", (req, res) => {
     try { r = http.get(URL, opts(req)); } catch (e) { r = null; }
     report(res, r);
 });
+const chainUrl = (req) => BASE + "/hop/" + req.query.h;
+app.get("/chain", async (req, res) => {
+    let r;
+    try { r = await http.async.get(chainUrl(req), opts(req)); } catch (e) { r = null; }
+    report(res, r);
+});
+app.get("/chain_sync", (req, res) => {
+    let r;
+    try { r = http.get(chainUrl(req), opts(req)); } catch (e) { r = null; }
+    report(res, r);
+});
+
+// Detached: app.main runs before the serve loop, with no request.
+const detached = {};
+async function outcome(p) {
+    try {
+        const r = await p;
+        return r && r.status === 200 ? "ok=" + r.body : "error";
+    } catch (e) { return "error"; }
+}
+app.main(async (_ctx) => {
+    detached.long = await outcome(http.async.get(BASE + "/hop/4/700"));
+    detached.short = await outcome(http.async.get(BASE + "/hop/2/0", { timeoutMs: 10000 }));
+    return 0;
+});
+app.get("/detached", (req, res) => res.text(detached[req.query.k] || "unset"));
 EOF
 
 run_app() {
@@ -169,6 +243,38 @@ run_app() {
             && pass "$rt $kind: a per-call 5000 ms overrides the manifest and succeeds" \
             || fail "$rt $kind: a per-call 5000 ms overrides the manifest and succeeds" "$out"
     done
+
+    # The deadline bounds the whole redirect chain, not each hop.
+    for kind in chain chain_sync; do
+        out=$(curl -s -m 15 "http://127.0.0.1:$PORT/$kind?h=4/700")
+        [ "$out" = "error" ] \
+            && pass "$rt $kind: 5 x 700 ms hops exceed the 1000 ms deadline" \
+            || fail "$rt $kind: 5 x 700 ms hops exceed the 1000 ms deadline" "$out"
+
+        out=$(curl -s -m 15 "http://127.0.0.1:$PORT/$kind?h=4/700&t=10000")
+        [ "$out" = "ok=chain-ok" ] \
+            && pass "$rt $kind: the same chain fits a 10000 ms deadline" \
+            || fail "$rt $kind: the same chain fits a 10000 ms deadline" "$out"
+
+        out=$(curl -s -m 15 "http://127.0.0.1:$PORT/$kind?h=5/0&t=10000")
+        [ "$out" = "ok=chain-ok" ] \
+            && pass "$rt $kind: 5 redirect hops are followed" \
+            || fail "$rt $kind: 5 redirect hops are followed" "$out"
+
+        out=$(curl -s -m 15 "http://127.0.0.1:$PORT/$kind?h=6/0&t=10000")
+        [ "$out" = "error" ] \
+            && pass "$rt $kind: a 6th redirect hop is refused" \
+            || fail "$rt $kind: a 6th redirect hop is refused" "$out"
+    done
+
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/detached?k=long")
+    [ "$out" = "error" ] \
+        && pass "$rt detached (app.main): the chain is bounded by the deadline" \
+        || fail "$rt detached (app.main): the chain is bounded by the deadline" "$out"
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/detached?k=short")
+    [ "$out" = "ok=chain-ok" ] \
+        && pass "$rt detached (app.main): a chain inside the deadline succeeds" \
+        || fail "$rt detached (app.main): a chain inside the deadline succeeds" "$out"
 
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
