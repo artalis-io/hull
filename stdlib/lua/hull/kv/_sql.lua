@@ -61,7 +61,7 @@ function M.new(conn, namespace, policy)
     policy = policy or {}
     return setmetatable({
         conn = conn, ns = namespace,
-        default_ttl = policy.default_ttl,
+        default_ttl = u.check_ttl(policy.default_ttl, "default_ttl"),
         evict = policy.evict and true or false,
         max_items = u.check_count(policy.max_items, "max_items") or 0,
         caps = {

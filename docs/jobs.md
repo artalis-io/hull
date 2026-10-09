@@ -279,6 +279,11 @@ jobs.uncron("heartbeat");
   `jobs.cron` to enable it again.
 - **Missed ticks** (all workers were down) advance to the next future occurrence
   - fire-once, no backfill storm.
+- **A tick is claimed and enqueued in one transaction** (audit 12). The
+  compare-and-set that advances `next_run_at` commits only with the job it
+  enqueues, so a worker that wins a tick and then fails to enqueue (a dropped
+  connection, a raise) leaves the schedule due for the next tick instead of
+  losing that run.
 
 ## Rate limiting
 
@@ -307,6 +312,11 @@ jobs.limit("reports", { rate: 100, per: 60 });
   jobs the window budget allows and requeues the excess (undoing the claim, so a
   rate-deferred job keeps its full retry budget). Deferred jobs run in the next
   window - throughput is shaped, nothing is dropped.
+- A claimed job that goes back to `pending` without running - a batch-mate a
+  `jobs.heartbeat` releases, or one the per-key concurrency reconcile holds
+  back - gives its slot back to the window it was charged in (audit 12), so its
+  next claim is not charged a second time. Once that window has rolled there is
+  nothing to give back.
 - Costs one extra small DB write per claim **only on limited queues**; unlimited
   queues are unaffected.
 
@@ -349,7 +359,9 @@ jobs.enqueue("report", data, { concurrencyKey: "tenant-42", concurrency: 2 });
   ```
 
   The slot is released whenever the job leaves `running` (done / dead / retry /
-  workflow yield), and the reaper reconciles the counter to the true running count
+  workflow yield, or a batch-mate a heartbeat releases), in the same transaction
+  as that status change (audit 12: released after it, a reconcile in between
+  could be followed by a release of a slot another job held), and the reaper reconciles the counter to the true running count
   every sweep, so a crashed worker can't permanently leak a slot (it self-heals,
   briefly *under*-utilizing until the next reap - the safe direction for a hard
   cap). All jobs of a key should agree on the strict flag. Strict trades one small
@@ -392,8 +404,17 @@ jobs.enqueue("merge", {}, { depends_on = { p1, p2 } })   -- job.deps = { r1, r2 
   cascade-fails too (dead-lettered, transitively down the graph) - you don't run
   `load` if `transform` died. Opt a job out with `on_dep_failure = "run"`
   (`onDepFailure` in JS) to run it regardless (e.g. a cleanup / notify step).
-- Depend on job **ids** returned from `enqueue`; enqueue parents first. Unknown /
-  already-cleaned-up dependency ids are treated as satisfied.
+- **A removed dependency is a failed one.** A dependency that is cancelled
+  (`jobs.cancel`) or purged (`jobs.purge`) before it ends never completes, so
+  its dependents are resolved as if it had dead-lettered, in the same
+  transaction as the removal (audit 12): they cascade-fail (`last_error`
+  `dependency <id> was cancelled` / `was purged`), or run under
+  `on_dep_failure = "run"`. (It used to count as satisfied: the dependent ran
+  without the dependency's work.) The reaper treats a dependency row that has
+  gone missing under a still-blocked dependent the same way.
+- Depend on job **ids** returned from `enqueue`; enqueue parents first. An id
+  that does not exist when the dependent is enqueued (unknown, or already
+  cleaned up after it finished) is treated as satisfied - only at enqueue time.
 
 ## Durable workflows (workflow-as-code)
 
@@ -651,6 +672,8 @@ live as long as the job row (governed by `jobs.cleanup`), so read before purge.
 
 `jobs.cancel` only removes a `pending` job (a delayed/scheduled one that hasn't
 started); a `running` job is mid-flight and is left to finish or dead-letter.
+A cancelled or purged job that other jobs depend on fails them (see
+[Workflows](#workflows-job-dependencies)).
 
 **Metrics & tracing.** `jobs.metrics()` returns a **DB-derived** snapshot for a
 dashboard or a `/metrics` route - `{ queues = { <q> = { pending, running,
@@ -776,7 +799,10 @@ terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... 
 | `reap_interval` | 30 | min seconds between reaper sweeps (a no-op sweep still takes the write lock, so `work` throttles it; `0` = every call) |
 | `backoff(attempt)` | `2^n·10s` cap 1h | retry-delay function |
 
-`jobs.work` / `jobs.run_worker` take `{ queue, batch, visibility_timeout, poll_ms }`;
+`jobs.work` / `jobs.run_worker` take `{ queue, batch, visibility_timeout,
+reap_interval, poll_ms }` and `jobs.reap` takes `{ visibility_timeout }`; a
+per-call `visibility_timeout` / `reap_interval` is validated as `jobs.init`'s is
+(audit 12) - a NaN one re-pended every running job, or switched the reaper off;
 `jobs.run_worker` also accepts `{ concurrency, drain, max_empty_polls }` (N in-flight
 handlers; bounded / batch-drain runs) and `jobs.stop()` for graceful shutdown.
 

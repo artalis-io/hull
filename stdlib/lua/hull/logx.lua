@@ -12,7 +12,9 @@
 --
 -- The message is the line's leading `msg="..."` field, quoted and escaped as
 -- a value (audit 11): written bare, a message carrying ` user=admin` forged a
--- field for any logfmt reader.
+-- field for any logfmt reader. The bare `logx.info(msg)` (no fields) writes
+-- the same `msg="..."` field, and a bound field named `msg` goes out as `_msg`
+-- so it cannot override the message (audit 12).
 --     rl.with({ step = 2 }).warn("slow")  -- children compose
 --
 -- CAVEAT (source tag): `hull.log` tags each line by the CALLER's source, and
@@ -56,7 +58,13 @@ local function fmt(fields)
     if #keys == 0 then return "" end
     local parts = {}
     for _, k in ipairs(keys) do
-        parts[#parts + 1] = _logfmt.pair(k, fields[orig[k]])
+        -- `msg` is the message's key (the line's leading msg="..."), so a
+        -- bound field that reduces to it goes out as `_msg` (audit 12): a
+        -- second msg= pair overrode the message for a reader that keeps the
+        -- last value of a key.
+        local name = k
+        if _logfmt.key(k) == "msg" then name = "_msg" end
+        parts[#parts + 1] = _logfmt.pair(name, fields[orig[k]])
     end
     return " " .. table.concat(parts, " ")
 end
@@ -93,7 +101,14 @@ function logx.with(fields)
     return make(fields or {})
 end
 
--- Bare pass-throughs (no bound fields), so `logx` can stand in for `log`.
-for _, lvl in ipairs(LEVELS) do logx[lvl] = log[lvl] end
+-- Bare levels (no bound fields), so `logx` can stand in for `log`. The
+-- message goes through the same msg="..." quoting as a bound logger's (audit
+-- 12): passed straight to `log`, a bare logx.info carried a raw newline or a
+-- forged ` user=admin` field into the line.
+for _, lvl in ipairs(LEVELS) do
+    logx[lvl] = function(msg)
+        log[lvl](_logfmt.message(msg == nil and "" or msg))
+    end
+end
 
 return logx

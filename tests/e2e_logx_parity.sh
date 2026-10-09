@@ -28,6 +28,10 @@ app.main(function(ctx)
     logx.with({ bs = "a\\b", qt = 'x"y', eq = "k=v" }).info("CCCC")
     -- The message cannot forge a field; NEL / U+2028 / U+2029 are escaped.
     logx.with({ u = "a\u{85}b\u{2028}c\u{2029}" }).info("DDDD user=admin \"x")
+    -- A bare level quotes its message like a bound logger (audit 12).
+    logx.info("EEEE user=admin\nforged")
+    -- A bound `msg` field cannot override the message: it goes out as _msg.
+    logx.with({ msg = "forged", a = 1 }).warn("FFFF")
     return 0
 end)
 LUA
@@ -39,6 +43,8 @@ app.main((ctx) => {
     logx.with({ a: 1 }).with({ c: "d" }).warn("BBBB");
     logx.with({ bs: "a\\b", qt: 'x"y', eq: "k=v" }).info("CCCC");
     logx.with({ u: "a\u0085b\u2028c\u2029" }).info("DDDD user=admin \"x");
+    logx.info("EEEE user=admin\nforged");
+    logx.with({ msg: "forged", a: 1 }).warn("FFFF");
     return 0;
 });
 JS
@@ -47,7 +53,7 @@ JS
 extract() {
     "$HULL" "$1" 2>&1 \
         | sed 's/\x1b\[[0-9;]*m//g' \
-        | grep -oE 'msg="(AAAA|BBBB|CCCC|DDDD).*' \
+        | grep -oE 'msg="(AAAA|BBBB|CCCC|DDDD|EEEE|FFFF).*' \
         | sed 's/[[:space:]]*$//' \
         | tr '\n' '~'
 }
@@ -60,7 +66,9 @@ js_out="$(extract "$WD/l.js")"
 # CCCC: backslash doubled + unquoted; quote escaped + quoted; '=' quoted.
 # DDDD: the message quoted + escaped (its "user=admin" is not a field); the
 #   value's U+0085 / U+2028 / U+2029 as \uXXXX, quoted.
-expect='msg="AAAA" a=1 b="x y" z=true~msg="BBBB" a=1 c=d~msg="CCCC" bs=a\\b eq="k=v" qt="x\"y"~msg="DDDD user=admin \"x" u="a\u0085b\u2028c\u2029"~'
+# EEEE: a bare logx level quotes + escapes its message the same way.
+# FFFF: a bound msg field is renamed _msg (it would override the message).
+expect='msg="AAAA" a=1 b="x y" z=true~msg="BBBB" a=1 c=d~msg="CCCC" bs=a\\b eq="k=v" qt="x\"y"~msg="DDDD user=admin \"x" u="a\u0085b\u2028c\u2029"~msg="EEEE user=admin\nforged"~msg="FFFF" a=1 _msg=forged~'
 
 if [ "$lua_out" = "$expect" ] && [ "$lua_out" = "$js_out" ]; then
     echo "PASS: hull.logx logfmt formatting is byte-identical across Lua and JS"

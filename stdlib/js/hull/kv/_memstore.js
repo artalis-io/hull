@@ -23,7 +23,7 @@ class Store {
         this.bytes = 0;
         this.maxBytes = util.checkCount(policy.maxBytes, "max_bytes") || 0;
         this.maxItems = util.checkCount(policy.maxItems, "max_items") || 0;
-        this.defaultTtl = policy.defaultTtl;
+        this.defaultTtl = util.checkTtl(policy.defaultTtl, "default_ttl");
         this.evict = !!policy.evict;
         this.st = { hits: 0, misses: 0, evictions: 0, expirations: 0 };
         this.caps = {

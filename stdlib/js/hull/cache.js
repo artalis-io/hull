@@ -33,6 +33,17 @@ import kvSql from "hull:kv:_sql";
 import kvValkey from "hull:kv:_valkey";
 
 const DEFAULT_MAX = 1000;
+
+// A ttl is null / undefined (no expiry), or a finite number of seconds >= 0
+// (audit 12): NaN made an entry that never expired (every comparison with it
+// is false), Infinity one that never expired either, and a negative one a
+// write that was already stale - each a silent misconfiguration.
+function checkTtl(ttl, what) {
+    if (ttl === undefined || ttl === null) return ttl;
+    if (typeof ttl !== "number" || !Number.isFinite(ttl) || ttl < 0)
+        throw new TypeError("cache: " + what + " must be a finite number of seconds >= 0");
+    return ttl;
+}
 // Bounds cache.open applies when the caller gives neither maxItems nor
 // maxBytes (the byte bound only on the memory backend).
 const DEFAULT_OPEN_MAX_ITEMS = 10000;
@@ -53,8 +64,16 @@ function newCache(opts) {
     // new key once full, which ratelimit (10k buckets, a new one per client
     // address) paid on every request from a spread of addresses.
     let store = new Map();
-    const max = opts.maxEntries || DEFAULT_MAX;
-    const defaultTtl = opts.defaultTtl;
+    // maxEntries is a positive integer (audit 12): NaN never evicted (size >=
+    // NaN is false), Infinity was no bound, and a negative one kept a single
+    // entry. (0 fell back to the default through `||`; it is refused now.)
+    let max = opts.maxEntries;
+    if (max === undefined || max === null) {
+        max = DEFAULT_MAX;
+    } else if (typeof max !== "number" || !Number.isInteger(max) || max < 1) {
+        throw new TypeError("cache.new: maxEntries must be a positive integer");
+    }
+    const defaultTtl = checkTtl(opts.defaultTtl, "defaultTtl");
 
     const touch = (key, e) => { store.delete(key); store.set(key, e); };
 
@@ -86,6 +105,7 @@ function newCache(opts) {
 
     const set = (key, value, ttl) => {
         if (ttl === undefined) ttl = defaultTtl;
+        else checkTtl(ttl, "ttl");
         let expires = null;
         if (ttl != null) expires = time.nowMs() + ttl * 1000;
         if (store.has(key)) {

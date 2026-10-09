@@ -109,12 +109,15 @@ local _paused_at = 0
 -- anything else that is not a finite number >= 0 raises (audit 11). A string
 -- visibility_timeout stopped the worker at its first reap (arithmetic on a
 -- string), and NaN made every claim stale - the reaper took every running
--- job, every sweep.
-local function duration_opt(name, v)
+-- job, every sweep. The per-call options of jobs.work / jobs.reap /
+-- jobs.run_worker go through it too (audit 12): only init's did, so a NaN
+-- visibility_timeout passed to jobs.work re-pended every running job and a
+-- NaN reap_interval switched the reaper off (now - last >= NaN is false).
+local function duration_opt(name, v, who)
     local n = tonumber(v)
     if type(n) ~= "number" or n ~= n or n < 0 or n == math.huge then
-        error("jobs.init: " .. name .. " must be a finite number of seconds >= 0, got "
-              .. tostring(v))
+        error((who or "jobs.init") .. ": " .. name
+              .. " must be a finite number of seconds >= 0, got " .. tostring(v), 3)
     end
     return n
 end
@@ -428,7 +431,7 @@ end
 -- Apply one dependency's terminal outcome to one edge. Idempotent (safe if the
 -- edge was already resolved by a concurrent completion or the enqueue recheck).
 -- Returns "failed" when it cascade-fails the dependent (so callers recurse).
-local function resolve_edge(dependent_id, dep_id, dep_ok, fail_mode)
+local function resolve_edge(dependent_id, dep_id, dep_ok, fail_mode, why)
     if dep_ok or fail_mode == "run" then
         local n = db.exec(
             "UPDATE _hull_job_deps SET satisfied=1 WHERE dependent_id=? AND dep_id=? AND satisfied=0",
@@ -446,7 +449,7 @@ local function resolve_edge(dependent_id, dep_id, dep_ok, fail_mode)
     -- cascade-fail: this dependency died and the dependent didn't opt to run.
     local n = db.exec(
         "UPDATE _hull_jobs SET status='dead', last_error=?, updated_at=? WHERE id=? AND status='blocked'",
-        { "dependency " .. tostring(dep_id) .. " failed", time.now(), dependent_id })
+        { "dependency " .. tostring(dep_id) .. " " .. (why or "failed"), time.now(), dependent_id })
     if (n or 0) > 0 then
         db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { dependent_id })
         return "failed"
@@ -469,6 +472,26 @@ local function resolve_deps(id, ok)
             end
         end
     end
+end
+
+-- A job removed before it ended (jobs.cancel / jobs.purge) never completes, so
+-- the edges its dependents still wait on are resolved as FAILED, in the
+-- removal's transaction (audit 12): the dependents cascade-fail, or run under
+-- on_dep_failure = "run". The edge used to be left behind, and the reaper's
+-- re-check read the missing row as satisfied - a cancelled dependency let its
+-- dependent run. Only the dependency's UNSATISFIED edges are resolved (a
+-- satisfied one belongs to a dependent that no longer waits on it), and the
+-- removed job's own edges, as a dependent, go with it.
+local function resolve_removed(id, why)
+    local edges = db.query(
+        "SELECT dependent_id, fail_mode FROM _hull_job_deps WHERE dep_id=? AND satisfied=0",
+        { id })
+    for _, e in ipairs(edges or {}) do
+        if resolve_edge(e.dependent_id, id, false, e.fail_mode, why) == "failed" then
+            resolve_deps(e.dependent_id, false)
+        end
+    end
+    db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { id })
 end
 
 -- Gather a dependent's dependency results (in declaration order) for injection
@@ -725,7 +748,7 @@ end
 -- workers share one counter.
 local function rl_reserve(key, want, rate, per)
     local now = time.now()
-    local granted = 0
+    local granted, window = 0, nil
     db.insert_if_absent("_hull_ratelimit", { "name" },
         { "name", "window_start", "n" }, { key, now, 0 })
     db.batch(function()
@@ -735,10 +758,23 @@ local function rl_reserve(key, want, rate, per)
         if now - ws >= per then ws, cnt = now, 0 end
         granted = math.min(want, rate - cnt)
         if granted < 0 then granted = 0 end
+        window = ws
         db.exec("UPDATE _hull_ratelimit SET window_start=?, n=? WHERE name=?",
             { ws, cnt + granted, key })
     end)
-    return granted
+    return granted, window
+end
+
+-- Give back `n` slots a claim reserved in window `ws` of `key` but whose jobs
+-- went back to `pending` without running (audit 12): a batch-mate jobs.heartbeat
+-- releases, or a job the concurrency reconcile holds back. Their next claim
+-- reserves again, so without the refund each was charged twice. Only while the
+-- window is the one the slots came from - once it has rolled the count is a
+-- new window's, and there is nothing to give back.
+local function rl_refund(key, n, ws)
+    if n <= 0 or ws == nil then return end
+    db.exec("UPDATE _hull_ratelimit SET n = CASE WHEN n > ? THEN n - ? ELSE 0 END "
+        .. "WHERE name=? AND window_start=?", { n, n, key, ws })
 end
 
 -- Enforce a queue's rate limit on a just-claimed batch: keep the highest-priority
@@ -748,7 +784,8 @@ end
 local function rl_apply(queue, out)
     local lim = _limits[queue]
     if not lim or #out == 0 then return out end
-    local granted = rl_reserve(queue, #out, lim.rate, lim.per)
+    local granted, ws = rl_reserve(queue, #out, lim.rate, lim.per)
+    for i = 1, math.min(granted, #out) do out[i]._rl_ws = ws end
     if granted >= #out then return out end
     local params = { time.now() }
     local ph = {}
@@ -795,7 +832,10 @@ function jobs.resume(queue) return set_paused(queue, 0) end
 
 --- Delete jobs from a queue (the "clear the backlog" op). Defaults to `pending`
 -- only, leaving in-flight and terminal rows; pass opts.statuses to widen (e.g.
--- { "pending", "running", "done", "dead" }). Returns the number deleted.
+-- { "pending", "running", "done", "dead" }). Returns the number deleted. A
+-- purged job that other jobs still depend on counts as FAILED for them (their
+-- edges are resolved in the same transaction, audit 12): they cascade-fail, or
+-- run under on_dep_failure = "run".
 -- @tparam string queue
 -- @tparam[opt] table opts  { statuses = { "pending" } }
 -- @treturn number
@@ -804,9 +844,18 @@ function jobs.purge(queue, opts)
     local statuses = opts.statuses or { "pending" }
     local ph, params = {}, { queue }
     for _, s in ipairs(statuses) do ph[#ph + 1] = "?"; params[#params + 1] = s end
-    return db.exec(
-        "DELETE FROM _hull_jobs WHERE queue=? AND status IN (" .. table.concat(ph, ",") .. ")",
-        params) or 0
+    local where = "queue=? AND status IN (" .. table.concat(ph, ",") .. ")"
+    local n = 0
+    db.batch(function()
+        -- The rows about to go that carry dependency edges: a dependency some
+        -- dependent still waits on, or a blocked dependent (its own edges).
+        local edged = db.query("SELECT id FROM _hull_jobs WHERE " .. where
+            .. " AND (status='blocked' OR id IN "
+            .. "(SELECT dep_id FROM _hull_job_deps WHERE satisfied=0))", params)
+        n = db.exec("DELETE FROM _hull_jobs WHERE " .. where, params) or 0
+        for _, r in ipairs(edged or {}) do resolve_removed(r.id, "was purged") end
+    end)
+    return n
 end
 
 -- Resolve opts.queue / opts.queues to an ordered list of queues to try. A single
@@ -912,11 +961,21 @@ local function conc_apply(out, now)
     end
     if next(drop) == nil then return out end
     local ph, params = {}, { now }
-    for id in pairs(drop) do ph[#ph + 1] = "?"; params[#params + 1] = id end
-    db.exec(
-        "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, "
-        .. "attempts=attempts-1, updated_at=? WHERE id IN (" .. table.concat(ph, ",") .. ")",
-        params)
+    local refund, ws, queue = 0, nil, nil
+    for _, j in ipairs(out) do
+        if drop[j.id] then
+            ph[#ph + 1] = "?"; params[#params + 1] = j.id
+            if j._rl_ws ~= nil then refund, ws, queue = refund + 1, j._rl_ws, j.queue end
+        end
+    end
+    db.batch(function()
+        db.exec(
+            "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, "
+            .. "attempts=attempts-1, updated_at=? WHERE id IN (" .. table.concat(ph, ",") .. ")",
+            params)
+        -- A held-back job did not run, so its rate-limit slot goes back too.
+        rl_refund(queue, refund, ws)
+    end)
     local kept = {}
     for _, j in ipairs(out) do if not drop[j.id] then kept[#kept + 1] = j end end
     return kept
@@ -1150,11 +1209,23 @@ end
 -- statements into one commit (fewer fsyncs, even when events are off). Returns
 -- the outcome.
 local EVENT_OF = { done = "completed", dead = "dead", retried = "retried" }
+-- A strict-concurrency job's slot is released in the same transaction as the
+-- transition out of `running` (audit 12): released after the commit, a reaper
+-- reconcile in between counted the job as gone, set the counter to the true
+-- count, and the late release then took a slot another job holds - an
+-- overshoot of the hard cap.
+local function release_slot(job)
+    if job._conc_strict == 1 and job._conc_key ~= nil then
+        conc_release(job._conc_key)
+    end
+end
+
 local function finish(job, info, transition)
     local outcome
     db.batch(function()
         outcome = transition()
         if outcome ~= "lost" then
+            release_slot(job)
             emit_durable(EVENT_OF[outcome] or outcome, job, info)
         end
     end)
@@ -1217,7 +1288,10 @@ end
 -- @tparam[opt] table opts  { visibility_timeout = <cfg default> }
 function jobs.reap(opts)
     opts = opts or {}
-    local vt = opts.visibility_timeout or _cfg.visibility_timeout
+    local vt = _cfg.visibility_timeout
+    if opts.visibility_timeout ~= nil then
+        vt = duration_opt("visibility_timeout", opts.visibility_timeout, "jobs.reap")
+    end
     local now = time.now()
     -- The stale cutoff. Timestamps are whole seconds (time.now()), so a claim
     -- stamped C was made somewhere in [C, C+1) and "claimed_at <= now - vt"
@@ -1317,7 +1391,11 @@ function jobs.reap(opts)
     -- blocked. The enqueue re-check and the completion's resolve_deps close
     -- the race only when each sees the other's write: two transactions in
     -- flight at once (READ COMMITTED) each saw the other "not yet", and the
-    -- dependent stayed blocked for good. Applied here as the re-check would.
+    -- dependent stayed blocked for good. Applied here as the re-check would,
+    -- except for a dependency that is gone: it was removed before it ended
+    -- (jobs.cancel / jobs.purge, which now resolve its edges themselves, or a
+    -- removal before audit 12) - a FAILED one. A missing dependency counts as
+    -- satisfied only at enqueue time (an unknown or long-cleaned-up id).
     local stuck = db.query(
         "SELECT d.dependent_id, d.dep_id, d.fail_mode, j.status AS dep_status "
         .. "FROM _hull_job_deps d "
@@ -1327,8 +1405,9 @@ function jobs.reap(opts)
         .. "AND (j.id IS NULL OR j.status IN ('done', 'dead', 'compensated')) "
         .. "LIMIT 500")
     for _, e in ipairs(stuck) do
-        local ok = e.dep_status == nil or e.dep_status == "done"
-        if resolve_edge(e.dependent_id, e.dep_id, ok, e.fail_mode) == "failed" then
+        local ok = e.dep_status == "done"
+        local why = e.dep_status == nil and "was removed" or nil
+        if resolve_edge(e.dependent_id, e.dep_id, ok, e.fail_mode, why) == "failed" then
             resolve_deps(e.dependent_id, false)
         end
     end
@@ -1514,19 +1593,26 @@ local function process_cron(now)
             end
             goto next_schedule
         end
-        local won = db.exec(
-            "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? "
-            .. "WHERE name=? AND next_run_at=?",
-            { nxt, now, now, c.name, c.next_run_at })
-        if (won or 0) > 0 then
-            local data
-            if c.payload and c.payload ~= "" then
-                local ok, d = pcall(json.decode, c.payload)
-                if ok then data = d end
+        -- The compare-and-set and the enqueue commit together (audit 12): a
+        -- worker that won the CAS and then failed to enqueue (a dropped
+        -- connection, a raise) lost that tick for good - the schedule had
+        -- already moved on. Now the CAS rolls back with it and the next tick
+        -- fires it.
+        db.batch(function()
+            local won = db.exec(
+                "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? "
+                .. "WHERE name=? AND next_run_at=?",
+                { nxt, now, now, c.name, c.next_run_at })
+            if (won or 0) > 0 then
+                local data
+                if c.payload and c.payload ~= "" then
+                    local ok, d = pcall(json.decode, c.payload)
+                    if ok then data = d end
+                end
+                jobs.enqueue(c.type, data,
+                    { queue = c.queue, priority = c.priority, max_attempts = c.max_attempts })
             end
-            jobs.enqueue(c.type, data,
-                { queue = c.queue, priority = c.priority, max_attempts = c.max_attempts })
-        end
+        end)
         ::next_schedule::
     end
 end
@@ -1633,7 +1719,13 @@ function jobs.work(opts)
     opts = opts or {}
     -- Throttle the reaper: a no-op sweep still takes the write lock, so under a
     -- fast poller x N workers reaping every tick adds needless contention.
-    local interval = opts.reap_interval or _cfg.reap_interval
+    local interval = _cfg.reap_interval
+    if opts.reap_interval ~= nil then
+        interval = duration_opt("reap_interval", opts.reap_interval, "jobs.work")
+    end
+    if opts.visibility_timeout ~= nil then
+        duration_opt("visibility_timeout", opts.visibility_timeout, "jobs.work")
+    end
     local now = time.now()
     if now - _last_reap >= interval then
         jobs.reap(opts)
@@ -1690,10 +1782,13 @@ function jobs.work(opts)
                     -- (excluded by the claim query). run_at carries the optional
                     -- timeout deadline (0 = none); the reaper wakes a timed-out
                     -- wait, jobs.signal wakes a delivered one.
-                    parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
-                        .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
-                        .. CLAIMED,
-                        { result.deadline or 0, wf_now, job.id, job.claim_token })
+                    db.batch(function()
+                        parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
+                            .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
+                            .. CLAIMED,
+                            { result.deadline or 0, wf_now, job.id, job.claim_token })
+                        if (parked or 0) > 0 then release_slot(job) end
+                    end)
                     if (parked or 0) == 0 then job._lost = true end
                     -- Close the deliver-before-park race: a signal delivered in the
                     -- check->park window couldn't re-activate us (we were 'running'),
@@ -1720,10 +1815,13 @@ function jobs.work(opts)
                     end
                 else
                     -- ctx.sleep: future-dated pending job.
-                    parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
-                        .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
-                        .. CLAIMED,
-                        { result.wake_at or wf_now, wf_now, job.id, job.claim_token })
+                    db.batch(function()
+                        parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
+                            .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
+                            .. CLAIMED,
+                            { result.wake_at or wf_now, wf_now, job.id, job.claim_token })
+                        if (parked or 0) > 0 then release_slot(job) end
+                    end)
                     if (parked or 0) == 0 then job._lost = true end
                 end
             elseif not ok then
@@ -1757,13 +1855,11 @@ function jobs.work(opts)
         if outcome and history_enabled(job.queue) then
             record_attempt(job, started_ms, time.now_ms(), outcome, err_str)
         end
-        -- Release the strict-concurrency slot reserved at claim: any exit from
-        -- 'running' (done / dead / retry / workflow yield) frees it. A yielded
-        -- workflow re-reserves on its next claim.
-        -- Not for a lost claim: the run that owns the job now holds the slot.
-        if job._conc_strict == 1 and job._conc_key ~= nil and not job._lost then
-            conc_release(job._conc_key)
-        end
+        -- The strict-concurrency slot reserved at claim was released with the
+        -- transition out of 'running' (finish / the park above): any exit -
+        -- done / dead / retry / workflow yield - frees it, in the same
+        -- transaction. A yielded workflow re-reserves on its next claim; a lost
+        -- claim releases nothing (the run that owns the job holds the slot).
         ::continue::
     end
     return #batch
@@ -1804,6 +1900,14 @@ end
 -- @treturn number  total jobs processed
 function jobs.run_worker(opts)
     opts = opts or {}
+    -- Validated before the loop starts (audit 12), so a bad value fails the
+    -- call instead of the first jobs.work inside it.
+    if opts.visibility_timeout ~= nil then
+        duration_opt("visibility_timeout", opts.visibility_timeout, "jobs.run_worker")
+    end
+    if opts.reap_interval ~= nil then
+        duration_opt("reap_interval", opts.reap_interval, "jobs.run_worker")
+    end
     local poll_ms = opts.poll_ms or 1000
     -- drain = "exit as soon as the queue is empty" (== max_empty_polls 1).
     local max_empty = opts.max_empty_polls or (opts.drain and 1 or 0)
@@ -2681,15 +2785,23 @@ function jobs.heartbeat(job)
         "SELECT id, concurrency_key, concurrency_strict FROM _hull_jobs "
         .. "WHERE claim_token=? AND status='running' AND id<>?",
         { job.claim_token, job.id })
+    -- Each release is one transaction with its strict slot and its rate-limit
+    -- slot (audit 12): the mate never ran, so the rate window it was charged
+    -- in gets it back (its next claim charges it again), and a slot released
+    -- after the commit could race the reaper's reconcile.
     for _, m in ipairs(mates or {}) do
-        local r = db.exec(
-            "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, "
-            .. "attempts=CASE WHEN attempts > 0 THEN attempts-1 ELSE 0 END, updated_at=? "
-            .. "WHERE id=? AND claim_token=? AND status='running'",
-            { now, m.id, job.claim_token })
-        if (r or 0) > 0 and m.concurrency_strict == 1 and m.concurrency_key ~= nil then
-            conc_release(m.concurrency_key)
-        end
+        db.batch(function()
+            local r = db.exec(
+                "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, "
+                .. "attempts=CASE WHEN attempts > 0 THEN attempts-1 ELSE 0 END, updated_at=? "
+                .. "WHERE id=? AND claim_token=? AND status='running'",
+                { now, m.id, job.claim_token })
+            if (r or 0) == 0 then return end
+            if m.concurrency_strict == 1 and m.concurrency_key ~= nil then
+                conc_release(m.concurrency_key)
+            end
+            rl_refund(job.queue or "default", 1, job._rl_ws)
+        end)
     end
     if mates and #mates > 0 then wake_workers() end
     return true
@@ -2801,22 +2913,22 @@ end
 --- Cancel a not-yet-started job by id: delete it if it is still `pending`
 -- (covers delayed / scheduled jobs). A `running` job is mid-flight and is NOT
 -- cancelled (let it finish or dead-letter). Returns whether a row was removed.
+-- A cancelled job that other jobs depend on counts as FAILED for them, in the
+-- same transaction (audit 12): they cascade-fail, or run under
+-- on_dep_failure = "run". It used to count as satisfied.
 -- @tparam number id
 -- @treturn boolean
 function jobs.cancel(id)
-    if not _cfg.events then
-        return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id }) or 0) > 0
-    end
-    -- events on: capture type/queue for the "cancelled" event, delete + emit in
-    -- one txn (BEGIN IMMEDIATE serializes, so the SELECT->DELETE stays consistent).
+    -- Delete, resolve the dependents' edges and emit "cancelled" in one txn.
     local cancelled = false
     db.batch(function()
         local r = db.query("SELECT type, queue FROM _hull_jobs WHERE id=? AND status='pending'", { id })
-        if r and r[1] then
-            db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id })
-            emit_durable("cancelled", { id = id, type = r[1].type, queue = r[1].queue }, {})
-            cancelled = true
-        end
+        if not (r and r[1]) then return end
+        local n = db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id })
+        if (n or 0) == 0 then return end
+        resolve_removed(id, "was cancelled")
+        emit_durable("cancelled", { id = id, type = r[1].type, queue = r[1].queue }, {})
+        cancelled = true
     end)
     return cancelled
 end
