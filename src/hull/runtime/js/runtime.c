@@ -1380,6 +1380,22 @@ void hl_js_reset_request(HlJS *js)
         sh_arena_reset(js->scratch);
 }
 
+/* Free an HlJSRoute and everything it owns. Lives here, not in
+ * routes.c: routes.c is in the composed HTTP bridge archive, while
+ * the teardown that calls this is in the always-linked runtime. */
+void hl_js_route_destroy(HlJS *js, HlJSRoute *route)
+{
+    if (!route) return;
+    if (route->multipart_config)
+        hl_alloc_free(js->base.alloc, route->multipart_config,
+                      sizeof(KlHttpMultipartConfig));
+    if (route->method)
+        hl_alloc_free(js->base.alloc, route->method, strlen(route->method) + 1);
+    if (route->pattern)
+        hl_alloc_free(js->base.alloc, route->pattern, strlen(route->pattern) + 1);
+    hl_alloc_free(js->base.alloc, route, sizeof(HlJSRoute));
+}
+
 /* Forward declaration for WS client tracking */
 typedef struct HlJSWsClientUD HlJSWsClientUD;
 

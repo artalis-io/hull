@@ -104,19 +104,6 @@ static char *lua_route_strdup(HlLua *lua, const char *s)
     return p;
 }
 
-void hl_lua_route_destroy(HlLua *lua, HlLuaRoute *route)
-{
-    if (!route) return;
-    if (route->multipart_config)
-        hl_alloc_free(lua->base.alloc, route->multipart_config,
-                      sizeof(KlHttpMultipartConfig));
-    if (route->method)
-        hl_alloc_free(lua->base.alloc, route->method, strlen(route->method) + 1);
-    if (route->pattern)
-        hl_alloc_free(lua->base.alloc, route->pattern, strlen(route->pattern) + 1);
-    hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
-}
-
 /* Build a tracked HlLuaRoute from the def table at the top of the stack
  * ({method, pattern, handler_id [, multipart]}). Stack-neutral. On success
  * the route is tracked (hl_lua_free releases it) and owns copies of method +

@@ -236,7 +236,7 @@ void hl_lua_sse_handler(struct KlHttpRequest *req, struct KlHttpResponse *res,
  * here so future split files can reuse without re-introducing dupes. */
 int hl_lua_track_route(HlLua *lua, void *route);
 /* Free an HlLuaRoute and everything it owns (multipart config, method /
- * pattern copies). NULL-safe. Defined in routes.c. */
+ * pattern copies). NULL-safe. Defined in runtime.c (always linked). */
 void hl_lua_route_destroy(HlLua *lua, HlLuaRoute *route);
 int hl_lua_track_alloc(HlLua *lua, void ***arr, size_t *count,
                        size_t *cap, void *ptr);

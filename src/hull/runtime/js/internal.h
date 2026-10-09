@@ -135,7 +135,7 @@ void hl_js_sse_handler(struct KlHttpRequest *req, struct KlHttpResponse *res,
  * files can reuse without re-introducing duplicates. */
 int hl_js_track_route(HlJS *js, void *route);
 /* Free an HlJSRoute and everything it owns (multipart config, method /
- * pattern copies). NULL-safe. Defined in routes.c. */
+ * pattern copies). NULL-safe. Defined in runtime.c (always linked). */
 void hl_js_route_destroy(HlJS *js, HlJSRoute *route);
 int hl_js_track_alloc(HlJS *js, void ***arr, size_t *count,
                       size_t *cap, void *ptr);

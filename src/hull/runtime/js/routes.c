@@ -104,19 +104,6 @@ static char *js_route_strdup(HlJS *js, const char *s)
     return p;
 }
 
-void hl_js_route_destroy(HlJS *js, HlJSRoute *route)
-{
-    if (!route) return;
-    if (route->multipart_config)
-        hl_alloc_free(js->base.alloc, route->multipart_config,
-                      sizeof(KlHttpMultipartConfig));
-    if (route->method)
-        hl_alloc_free(js->base.alloc, route->method, strlen(route->method) + 1);
-    if (route->pattern)
-        hl_alloc_free(js->base.alloc, route->pattern, strlen(route->pattern) + 1);
-    hl_alloc_free(js->base.alloc, route, sizeof(HlJSRoute));
-}
-
 /* Drop a pending exception a failed property read / conversion left. */
 static void js_wire_clear_exception(JSContext *ctx)
 {
