@@ -60,6 +60,7 @@
 #include <unistd.h>
 #include <time.h>
 #include "hull/shared/async_backend.h"
+#include "log.h"                /* log_add_callback (lua_task tests) */
 #include "hull/shared/async.h"      /* HlAsyncCont */
 #include "hull/worker_db.h"   /* hl_deep_copy_params */
 #include "hull/utils/alloc.h"   /* hl_free_const */
@@ -4729,7 +4730,7 @@ UTEST(lua_stdlib, web_audit9_suite)
 
 /* Auth stdlib regressions from audit 10 (the vacated address of an undoable
  * email change is reserved, undo resets / totp_disable, deferred magic-link
- * signup, no deferred work in a transaction, logout origins, idempotency
+ * signup, logout origins, idempotency
  * principal, inbox source): auth-flows needs the db, so the caps state. */
 UTEST(lua_stdlib, auth_audit10_suite)
 {
@@ -5417,6 +5418,78 @@ UTEST(lua_stdlib, audit5_jobs_reaper)
         "  return 0 "
         "end)()");
     EXPECT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
+/* Audit 10 follow-ups (jobs). Each step returns 0, or the number of the first
+ * check that failed.
+ *
+ * A durable-workflow wait inside the app's db.batch is refused: it suspends
+ * by raising its yield sentinel, which unwound the batch and rolled back the
+ * wait's own record, so every resume recorded a new wake time and the
+ * workflow slept forever. Outside the batch the same wait suspends as ever.
+ *
+ * The reaper's cutoff: timestamps are whole seconds, so a claim one second
+ * behind may be only moments old (a heartbeat just before a second
+ * boundary) and is kept; one two seconds behind is at least a second old and
+ * is reaped (vt = 1). */
+UTEST(lua_stdlib, audit10_followup_jobs)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int step = eval_int(
+        "(function() "
+        "  local jobs = require('hull.jobs') "
+        "  local db = require('hull.db').default() "
+        "  jobs.init() "
+        "  if db.in_transaction() then return 1 end "
+        "  local inside "
+        "  db.batch(function() inside = db.in_transaction() end) "
+        "  if inside ~= true then return 2 end "
+        "  local e1, e2 "
+        "  jobs.workflow('a10wf', function(ctx) "
+        "    local ok1, err1 = pcall(db.batch, function() ctx.sleep(60) end) "
+        "    if ok1 then return 'slept in a batch' end "
+        "    e1 = tostring(err1) "
+        "    local ok2, err2 = pcall(db.batch, function() ctx.wait_signal('go') end) "
+        "    if ok2 then return 'waited in a batch' end "
+        "    e2 = tostring(err2) "
+        "    ctx.sleep(60) "
+        "    return 'woke' "
+        "  end) "
+        "  local id = jobs.start('a10wf', {}, { queue = 'a10wf' }) "
+        "  jobs.work({ queue = 'a10wf' }) "
+        "  if not (e1 and e1:find('ctx.sleep cannot wait inside db.batch', 1, true)) then return 3 end "
+        "  if not (e2 and e2:find('ctx.wait_signal cannot wait inside db.batch', 1, true)) then return 4 end "
+        "  local j = jobs.get(id) "
+        "  if not j or j.status ~= 'pending' then return 5 end "
+        "  local ws = jobs.workflow_status(id) "
+        "  if not ws or not tostring(ws.waiting_for):find('sleep:', 1, true) then return 6 end "
+        /* the reaper part: claim one job (vt = 1, last attempt) */
+        "  local rid = jobs.enqueue('a10vt', {}, { queue = 'a10vt', max_attempts = 1 }) "
+        "  if #jobs.claim({ queue = 'a10vt', batch = 1 }) ~= 1 then return 7 end "
+        "  A10_RID = rid "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(step, 0);
+
+    /* One second behind: may be a heartbeat made a moment ago - kept. */
+    ASSERT_EQ(sqlite3_exec(test_db,
+        "UPDATE _hull_jobs SET claimed_at = CAST(strftime('%s','now') AS INTEGER) - 1 "
+        "WHERE queue = 'a10vt'", NULL, NULL, NULL), SQLITE_OK);
+    EXPECT_EQ(eval_int(
+        "(function() local jobs = require('hull.jobs') "
+        "  jobs.reap({ visibility_timeout = 1 }) "
+        "  return jobs.get(A10_RID).status == 'running' and 0 or 1 end)()"), 0);
+
+    /* Two seconds behind: held at least one full second - reaped. */
+    ASSERT_EQ(sqlite3_exec(test_db,
+        "UPDATE _hull_jobs SET claimed_at = CAST(strftime('%s','now') AS INTEGER) - 2 "
+        "WHERE queue = 'a10vt'", NULL, NULL, NULL), SQLITE_OK);
+    EXPECT_EQ(eval_int(
+        "(function() local jobs = require('hull.jobs') "
+        "  jobs.reap({ visibility_timeout = 1 }) "
+        "  return jobs.get(A10_RID).status == 'dead' and 0 or 1 end)()"), 0);
     cleanup_lua_caps();
 }
 
@@ -6918,6 +6991,293 @@ UTEST(lua_async, a_timer_fires_while_a_task_waits)
     cleanup_lua();
     be->tick(actx, 0);
     be->free(actx);
+}
+
+/* ── hull._task - detached tasks (the twin of JS hull:_task) ───────── */
+
+/* The task errors the runtime logged (log.c has no callback removal, so the
+ * collector is registered once and stays). */
+static char g_lua_task_log[4096];
+static void lua_task_log_collect(log_Event *ev)
+{
+    if (!ev->fmt || !strstr(ev->fmt, "spawned task error"))
+        return;
+    size_t n = strlen(g_lua_task_log);
+    if (n + 2 >= sizeof g_lua_task_log) return;
+    vsnprintf(g_lua_task_log + n, sizeof g_lua_task_log - n - 1, ev->fmt, ev->ap);
+    n = strlen(g_lua_task_log);
+    g_lua_task_log[n] = '\n';
+    g_lua_task_log[n + 1] = '\0';
+}
+
+static void lua_task_log_reset(void)
+{
+    static int registered;
+    if (!registered) {
+        log_add_callback(lua_task_log_collect, NULL, LOG_ERROR);
+        registered = 1;
+    }
+    g_lua_task_log[0] = '\0';
+}
+
+/* The task runs after the run that spawned it, on a coroutine of its own (it
+ * can wait), and in order with other tasks. */
+TASK_CASE(task_runs_after_its_spawner,
+    "local T = require('hull._task')\n"
+    "local order = {}\n"
+    "T.spawn(function() order[#order + 1] = 'a'; hull.sleep(5); order[#order + 1] = 'a2' end)\n"
+    "T.spawn(function() order[#order + 1] = 'b' end)\n"
+    "order[#order + 1] = 'spawner'\n"
+    "check(#order == 1, 'a task ran inline: '..table.concat(order, ','))\n"
+    "hull.sleep(40)\n"
+    "check(table.concat(order, ',') == 'spawner,a,b,a2', 'order '..table.concat(order, ','))\n"
+    "check(not pcall(T.spawn, 42), 'a non-function is refused')\n")
+
+/* The task belongs to nothing: it runs with no connection, timer or teardown
+ * hook active even when the loop fires it while those are set (a loop pumped
+ * from inside another run), and puts back what it found. With the spawner's
+ * connection its hull.sleep would have suspended that connection. */
+UTEST(lua_task, runs_detached_and_restores_what_it_clobbers)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    lua_State *L = lua_rt.L;
+
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt,
+        "require('hull._task').spawn(function()\n"
+        "  hull.sleep(5)\n"
+        "  DONE = 1\n"
+        "end)\n", &co);
+    ASSERT_EQ(st, LUA_OK);
+
+    static int dummy_conn, dummy_timer;
+    oc_calls = 0;
+    lua_rt.active_conn            = (KlHttpConn *)(void *)&dummy_conn;
+    lua_rt.active_timer           = &dummy_timer;
+    lua_rt.active_on_complete     = count_oc;
+    lua_rt.active_on_complete_ctx = NULL;
+    lua_rt.budget.used            = 12345;
+    be->tick(lua_rt.base.async_ctx, 0);            /* the task's first turn */
+    EXPECT_TRUE(lua_rt.active_conn == (KlHttpConn *)(void *)&dummy_conn);
+    EXPECT_TRUE(lua_rt.active_timer == &dummy_timer);
+    EXPECT_TRUE(lua_rt.active_on_complete == count_oc);
+    EXPECT_EQ(lua_rt.budget.used, 12345);
+    lua_rt.active_conn        = NULL;
+    lua_rt.active_timer       = NULL;
+    lua_rt.active_on_complete = NULL;
+
+    for (int i = 0; i < 100; i++) {
+        lua_getglobal(L, "DONE");
+        int done = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+        if (done) break;
+        be->tick(lua_rt.base.async_ctx, 5);
+    }
+    lua_getglobal(L, "DONE");
+    EXPECT_EQ(lua_tointeger(L, -1), 1);
+    lua_pop(L, 1);
+    EXPECT_EQ(oc_calls, 0);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
+/* A task's error - thrown at once, or after a wait - is logged, never raised
+ * into the spawner, which has moved on. */
+UTEST(lua_task, errors_are_logged_not_raised)
+{
+    char out[512];
+    lua_task_log_reset();
+    ASSERT_EQ(run_task_script(
+        "local T = require('hull._task')\n"
+        "T.spawn(function() error('first boom', 0) end)\n"
+        "T.spawn(function() hull.sleep(5); error('second boom', 0) end)\n"
+        "T.spawn(function() coroutine.yield() end)\n"
+        "hull.sleep(40)\n",
+        out, sizeof out), 0);
+    EXPECT_STREQ(out, "ok");
+    EXPECT_NE(strstr(g_lua_task_log, "first boom"), NULL);
+    EXPECT_NE(strstr(g_lua_task_log, "coroutine.yield()"), NULL);
+}
+
+/* The task runs under an instruction budget of its own: one that loops
+ * forever is stopped (and logged), and the spawner's run carries on. */
+UTEST(lua_task, has_a_budget_of_its_own)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    lua_task_log_reset();
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    lua_rt.max_instructions = 2000000;
+
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt,
+        "require('hull._task').spawn(function() while true do end end)\n"
+        "hull.sleep(10)\n"
+        "local n = 0\n"
+        "for i = 1, 1000 do n = n + i end\n"
+        "OUT = (n == 500500) and 'ok' or 'bad'\n", &co);
+    ASSERT_EQ(st, LUA_YIELD);
+    ssh_tick_until_done(be, lua_rt.base.async_ctx, co);
+
+    lua_getglobal(lua_rt.L, "OUT");
+    const char *out = lua_tostring(lua_rt.L, -1);
+    EXPECT_STREQ(out ? out : "(no verdict)", "ok");
+    lua_pop(lua_rt.L, 1);
+    EXPECT_NE(strstr(g_lua_task_log, "spawned task error"), NULL);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
+/* A transaction the task leaves open is rolled back when it ends, so the next
+ * entry does not join it; a wait inside the task's own transaction is refused
+ * as anywhere else. */
+UTEST(lua_task, an_open_transaction_is_rolled_back)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE tt (x INTEGER)')\n"
+        "local refused\n"
+        "require('hull._task').spawn(function()\n"
+        "  db.exec('BEGIN')\n"
+        "  db.exec('INSERT INTO tt VALUES (1)')\n"
+        "  local ok, e = pcall(hull.sleep, 5)\n"
+        "  refused = not ok and tostring(e):find('transaction is open', 1, true) ~= nil\n"
+        "end)\n"
+        "hull.sleep(20)\n"
+        "check(refused == true, 'the wait in the task transaction was not refused')\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM tt')[1].n == 0, 'the write survived')\n"
+        "db.exec('BEGIN')\n"     /* not inside a leftover transaction */
+        "db.exec('COMMIT')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
+/* Spawned inside the spawner's transaction, the task runs after it ended:
+ * neither inside it nor rolled back with it. */
+UTEST(lua_task, runs_outside_its_spawners_transaction)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE ts (x INTEGER)')\n"
+        "local T = require('hull._task')\n"
+        "local ok = pcall(db.batch, function()\n"
+        "  T.spawn(function() db.exec('INSERT INTO ts VALUES (2)') end)\n"
+        "  db.exec('INSERT INTO ts VALUES (1)')\n"
+        "  error('roll back', 0)\n"
+        "end)\n"
+        "check(not ok, 'the batch did not fail')\n"
+        "hull.sleep(20)\n"
+        "local r = db.query('SELECT x FROM ts')\n"
+        "check(#r == 1 and r[1].x == 2, 'rows '..#r)\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
+/* Stdlib-only, and it needs a loop; a task that never got its turn is freed
+ * with the VM. */
+UTEST(lua_task, stdlib_only_needs_a_loop_and_is_freed_unrun)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    int rc = luaL_dostring(L, "return require('hull._task')");
+    EXPECT_NE(rc, LUA_OK);
+    if (rc != LUA_OK) {
+        const char *e = lua_tostring(L, -1);
+        EXPECT_NE(e ? strstr(e, "internal to the Hull stdlib") : NULL, NULL);
+    }
+    lua_settop(L, 0);
+    /* App code cannot reach it through the hull global either. */
+    EXPECT_EQ(eval_int("hull._task == nil and 1 or 0"), 1);
+
+    lua_State *co;
+    ASSERT_NE(ssh_co_start(&lua_rt,
+        "require('hull._task').spawn(function() end)\n", &co), LUA_OK);
+    EXPECT_NE(strstr(lua_tostring(co, -1), "requires an active event loop"), NULL);
+    cleanup_lua();
+
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    ASSERT_EQ(ssh_co_start(&lua_rt,
+        "require('hull._task').spawn(function() RAN = 1 end)\n", &co), LUA_OK);
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();          /* never ticked: hl_lua_free releases the task */
+    be->tick(actx, 0);      /* its timer was cancelled: nothing fires */
+    be->free(actx);
+}
+
+/* auth-flows' deferred work leaves the request's transaction (audit 10
+ * follow-up): /register run inside db.batch answers, and its account and
+ * welcome mail come after the response, once the batch has committed. It
+ * used to raise (500) - a Lua task could not leave the transaction. */
+UTEST(lua_task, auth_flows_register_under_a_batch_defers_its_mail)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local json = require('hull.json')\n"
+        "local af = require('hull.web.auth-flows')\n"
+        "local db = require('hull.db').default()\n"
+        "local S = { by_id = {}, by_email = {}, sent = {} }\n"
+        "af._test.reset()\n"
+        "af.init({\n"
+        "  secret = ('s'):rep(32), trust_request_host = true, email_rate_limit = false,\n"
+        "  email_send = function(to) S.sent[#S.sent + 1] = to end,\n"
+        "  templates = {\n"
+        "    welcome = function(c) return { subject = 'w', text = c.verify_url } end,\n"
+        "    magic_link = function(c) return { subject = 'm', text = c.link } end,\n"
+        "    password_reset = function(c) return { subject = 'p', text = c.link } end,\n"
+        "    email_change = function(c) return { subject = 'e', text = c.link } end,\n"
+        "    email_change_notify = function(c) return { subject = 'n', text = c.revoke_url } end,\n"
+        "  },\n"
+        "  user_find_by_email = function(e) return S.by_email[e] end,\n"
+        "  user_get = function(id) return S.by_id[tostring(id)] end,\n"
+        "  user_create = function(e, h)\n"
+        "    local u = { id = 100, email = e, password_hash = h, email_verified = false }\n"
+        "    S.by_id['100'] = u; S.by_email[e] = u\n"
+        "    return 100\n"
+        "  end,\n"
+        "  user_set_password = function(id, h) S.by_id[tostring(id)].password_hash = h end,\n"
+        "  user_set_email = function() end,\n"
+        "  user_set_email_verified = function(id, v) S.by_id[tostring(id)].email_verified = v end,\n"
+        "  on_login = function(_req, res) res:json({ ok = true }) end,\n"
+        "  on_password_reset = function() end,\n"
+        "  email_change_reauth = function() return true end,\n"
+        "})\n"
+        "local res = { code = 200, headers = {} }\n"
+        "function res.status(self, c) self.code = c; return self end\n"
+        "function res.json(self, v) self.body = v; return self end\n"
+        "function res.header(self, k, v) self.headers[k] = v; return self end\n"
+        "local req = { method = 'POST', path = '/auth/register', ctx = {},\n"
+        "  remote_addr = '192.0.2.7',\n"
+        "  headers = { host = 'app.test', ['content-type'] = 'application/json',\n"
+        "              ['sec-fetch-site'] = 'same-origin' },\n"
+        "  body = json.encode({ email = 'txn@x.test', password = 'some-password-1' }) }\n"
+        "local ok, err = pcall(db.batch, function() af._test.handlers.register(req, res) end)\n"
+        "check(ok, 'register under db.batch raised: '..tostring(err))\n"
+        "check(res.code == 200, 'status '..tostring(res.code))\n"
+        "check(#S.sent == 0 and S.by_email['txn@x.test'] == nil, 'ran inside the request')\n"
+        "hull.sleep(30)\n"
+        "check(S.by_email['txn@x.test'] ~= nil, 'no account after the response')\n"
+        "check(#S.sent == 1 and S.sent[1] == 'txn@x.test', 'mail sent '..#S.sent)\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
 }
 
 /* Bytecode is never loaded from app reach: the template bridge, which app

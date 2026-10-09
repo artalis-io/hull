@@ -6,9 +6,10 @@
 -- restore; the undo whose address was taken anyway still makes the password
 -- unusable and pauses changes; the undo removes a second factor through
 -- totp_disable; magic-link auto-signup creates the account after the
--- response; deferred work refuses to run inside a transaction. Plus the
--- logout provenance origins auth-flows registers, the idempotency principal
--- normalization and the inbox source check.
+-- response. Plus the logout provenance origins auth-flows registers, the
+-- idempotency principal normalization and the inbox source check. (Deferred
+-- work under db.batch runs after the transaction, as a hull._task: covered
+-- with a real loop in tests/hull/runtime/lua/test_lua.c, lua_task.*.)
 --
 -- Runs in the caps-bearing state (run_lua_test_in_runtime in
 -- tests/hull/runtime/lua/test_lua.c): auth-flows and session need the db.
@@ -259,26 +260,6 @@ test("undo of a confirmed change removes the second factor via totp_disable", fu
     assert_eq(res.body and res.body.restored, true)
     assert_eq(#S.totp_off, 1, "totp_disable called")
     assert_eq(tostring(S.totp_off[1]), "13")
-end)
-
-test("deferred work refuses to run inside a transaction", function()
-    reset_store(); init()
-    local H_ = hull
-    local saved = H_ and H_.sleep
-    if not (H_ and H_.async and saved) then return end   -- no task support here
-    local ok_set = pcall(function()
-        H_.sleep = function()
-            error("hull.sleep() cannot wait while a transaction is open on "
-                  .. "database connection 'default'")
-        end
-    end)
-    if not ok_set then return end
-    local ok, err = pcall(H.register,
-        mkreq({ email = "txn@x.test", password = "some-password-1" }), mkres())
-    H_.sleep = saved
-    assert_eq(ok, false, "raised")
-    assert_eq(tostring(err):find("transaction", 1, true) ~= nil, true, tostring(err))
-    assert_eq(S.by_email["txn@x.test"], nil, "nothing created inline")
 end)
 
 -- ── logout provenance ──────────────────────────────────────────────

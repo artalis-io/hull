@@ -442,6 +442,13 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   in-memory timer. A worker must be running when it is due. A sleep does not
   consume the retry budget. `workflow_status` reports `waiting_for = "sleep:<ts>"`
   while it waits.
+- **Neither wait may run inside `db.batch`** (or any open transaction on the
+  default connection): the workflow suspends by unwinding to the runner, which
+  rolled the transaction back together with the wait's own record (the wake
+  time), so every resume recorded a new one and the workflow waited forever.
+  `ctx.sleep` / `ctx.wait_signal` (`waitSignal`) raise instead, before writing
+  anything; call them outside the batch. (`conn.in_transaction()` /
+  `conn.inTransaction()` tells whether a connection is inside one.)
 - **`ctx.wait_signal(name, opts?)`** (`waitSignal`) pauses the workflow until
   `jobs.signal(id, name, payload)` (`workflowStatus` shows `waiting_for =
   "signal"`); it returns the delivered payload. The workflow parks in a
@@ -741,7 +748,13 @@ terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... 
   `jobs.init({ backoff = fn })`).
 - **Visibility-timeout reaper.** A job stuck in `running` past
   `visibility_timeout` (default 300s) is presumed orphaned (its worker died) and
-  reset to `pending`. `jobs.work` runs the reaper each call.
+  reset to `pending`. `jobs.work` runs the reaper each call. Timestamps are
+  whole seconds, so a claim (or heartbeat) is reaped once it is MORE than
+  `visibility_timeout` whole seconds old (`claimed_at <= now - vt - 1`): it has
+  then been held for at least `visibility_timeout` real seconds. (The bound used
+  to be `now - vt`, which reaped a claim as little as `vt - 1` seconds old - with
+  `vt = 1`, a heartbeat from the previous second.) `visibility_timeout = 0`
+  reaps every running claim at once.
 - **Atomic claim.** One job is claimed by exactly one worker even under heavy
   concurrency: `SELECT ... FOR UPDATE SKIP LOCKED` on Postgres/MySQL, WAL
   single-writer serialization on SQLite. A `claim_token` nonce disambiguates.

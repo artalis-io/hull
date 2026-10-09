@@ -498,6 +498,20 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, hl_db_last_id(js_call_handle(ctx, this_val)));
 }
 
+/* conn.inTransaction() - whether this connection is inside a transaction (a
+ * db.batch, or a raw BEGIN). False where the backend cannot tell. The
+ * durable-workflow waits (hull:jobs ctx.sleep / ctx.waitSignal) refuse inside
+ * one: they unwind by throwing, which rolled back their own record. */
+static JSValue js_db_in_transaction(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js_call_handle(ctx, this_val))
+        return JS_ThrowInternalError(ctx, "database not available");
+    return JS_NewBool(ctx, hl_db_in_txn(js_call_handle(ctx, this_val)));
+}
+
 /* 1 when @p fn is an async (or async generator) function, 0 when not, -1 on
  * an exception (a Proxy's getPrototypeOf trap). QuickJS exports no class id,
  * so its prototype is compared with the intrinsic ones, taken from a fresh
@@ -1240,6 +1254,9 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
                                        "quoteIdentifier", 1));
     JS_SetPropertyStr(ctx, obj, "waitNotify",
                       JS_NewCFunction(ctx, js_db_wait_notify, "waitNotify", 2));
+    JS_SetPropertyStr(ctx, obj, "inTransaction",
+                      JS_NewCFunction(ctx, js_db_in_transaction,
+                                       "inTransaction", 0));
     /* async targets this connection's database via the worker pool's per-DSN
      * connections; udf registers on this connection's SQLite handle (a udf on
      * a non-SQLite connection errors at call time). Both sub-objects share the
@@ -1354,6 +1371,9 @@ static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h,
                                        "quoteIdentifier", 1));
     JS_SetPropertyStr(ctx, obj, "waitNotify",
                       JS_NewCFunction(ctx, js_db_wait_notify, "waitNotify", 2));
+    JS_SetPropertyStr(ctx, obj, "inTransaction",
+                      JS_NewCFunction(ctx, js_db_in_transaction,
+                                       "inTransaction", 0));
     JS_SetPropertyStr(ctx, obj, "close",
                       JS_NewCFunction(ctx, js_db_owned_close, "close", 0));
 

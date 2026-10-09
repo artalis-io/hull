@@ -51,7 +51,12 @@ its statements after its first `await` each commit on their own, so call only
 synchronous code inside a batch. A transaction an entry leaves open - a request, middleware, SSE
 event, timer or WebSocket callback that returned, raised or parked - is rolled
 back right then, and again before any entry starts or a parked handler
-resumes, so no other code ever runs inside it.
+resumes, so no other code ever runs inside it. `conn.in_transaction()` (JS
+`conn.inTransaction()`) says whether a connection is inside a transaction (a
+`db.batch`, or a raw `BEGIN`); `false` where the backend cannot tell. The
+`hull/jobs` workflow waits (`ctx.sleep`, `ctx.wait_signal`) refuse inside one,
+since they suspend the workflow by unwinding, which rolled their own record
+back with the batch.
 
 **`db.async` runs one statement on a pooled worker connection**, which the next
 `db.async` op on that thread reuses. A transaction cannot span ops there: an op
@@ -467,18 +472,16 @@ verify step between successful first-factor auth and `on_login` when
       inline let response time say whether an account exists. A failing
       `email_send` is logged instead of failing the request - in JS also an
       async one (a rejected Promise from `emailSend`). The deferred work
-      runs as a detached task (Lua `hull._spawn`, JS the stdlib-internal
+      runs as a detached task (the stdlib-internal Lua `hull._task` / JS
       `hull:_task`) that belongs to no request, so it never holds the
       response - also when the handler waited first (`/register` with
       `check_pwned_passwords`, which waits on HIBP).
-      It never runs inside the request's transaction: mount the routes
-      outside `db.batch` / `transaction.run`. In JS the task runs on a loop
-      turn after the handler's transaction has ended; in Lua a task cannot
-      leave an open transaction (every wait is refused there), so such a
-      route now raises (500, the batch rolled back) instead of running the
-      deferred work inline - where it ran inside the transaction, on the
-      response's clock, and an async mail send was refused and dropped
-      (audit 10).
+      It never runs inside the request's transaction: the task fires on a
+      loop turn after the handler - and a `db.batch` / `transaction.run` the
+      app mounted the routes under - has ended, so it is neither part of
+      that transaction nor rolled back with it. (Before the Lua
+      `hull._task`, a Lua route under a transaction answered 500: its task
+      could not wait its way out of the open transaction.)
     - `opts.check_pwned_passwords` (default `false`). Routes
       register + password-reset-confirm through `hull/web/pwned`
       (HIBP k-anonymity). Apps must add `api.pwnedpasswords.com`

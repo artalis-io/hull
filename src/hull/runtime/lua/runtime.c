@@ -543,6 +543,9 @@ void hl_lua_free(HlLua *lua)
     hl_db_budget_unbind(&lua->budget);   /* bound by every arm */
 #endif
 
+    /* Spawned tasks that never got their loop turn. */
+    hl_lua_tasks_free(lua);
+
     /* Cancel and free tracked timers - via async backend vtable. */
     {
         const HlAsyncBackend *be = hl_async_backend();

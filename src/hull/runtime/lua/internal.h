@@ -204,6 +204,12 @@ const char *hl_lua_error_text(HlLua *lua, lua_State *from, int idx,
  * Shared by the `hull` global and hull.tui's `tui.async` alias. */
 int lua_hull_spawn(lua_State *L);
 
+/* hull._task (stdlib-only): spawn(fn) runs fn as a detached entry of its own
+ * on a later loop turn (async.c). hl_lua_tasks_free releases the tasks that
+ * never ran (hl_lua_free). */
+int luaopen_hull_task(lua_State *L);
+void hl_lua_tasks_free(HlLua *lua);
+
 /* ── Promoted: defined in timers.c, used in routes.c (initial schedule
  * during wire_routes_server) and from within timers.c itself. */
 int64_t hl_compute_daily_delay_ms(int hour, int minute, int use_local);

@@ -1192,6 +1192,15 @@ function jobs.reap(opts)
     opts = opts or {}
     local vt = opts.visibility_timeout or _cfg.visibility_timeout
     local now = time.now()
+    -- The stale cutoff. Timestamps are whole seconds (time.now()), so a claim
+    -- stamped C was made somewhere in [C, C+1) and "claimed_at <= now - vt"
+    -- reaped a claim as little as vt - 1 seconds old: with vt = 1, any claim
+    -- (or heartbeat) from the previous second - a handler that had just
+    -- heartbeated lost its claim, and its unstarted batch-mates on their last
+    -- attempt were dead-lettered, whenever a second boundary fell between the
+    -- heartbeat and the reap. One more second makes the age at least vt.
+    -- vt <= 0 still means "every running claim, now" (ops and tests).
+    local cutoff = vt > 0 and (now - vt - 1) or now
     -- Wake durable-workflow signal waits whose timeout (run_at > 0) has passed, so
     -- they re-run and return nil from ctx.wait_signal. run_at = 0 means "no
     -- timeout" (wait forever) and is left alone - only jobs.signal wakes it.
@@ -1207,7 +1216,7 @@ function jobs.reap(opts)
             "SELECT id, type, queue, attempts, max_attempts, claim_token FROM _hull_jobs "
             .. "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts "
             .. "LIMIT 500",
-            { now - vt })
+            { cutoff })
         local progressed = 0
         for _, row in ipairs(exhausted or {}) do
             local outcome
@@ -1216,8 +1225,8 @@ function jobs.reap(opts)
                 -- finished in the meantime keeps its outcome.
                 local guard = "WHERE id=? AND status='running' AND claimed_at <= ? AND claim_token"
                     .. (row.claim_token and "=?" or " IS NULL")
-                local gargs = row.claim_token and { row.id, now - vt, row.claim_token }
-                                              or { row.id, now - vt }
+                local gargs = row.claim_token and { row.id, cutoff, row.claim_token }
+                                              or { row.id, cutoff }
                 -- A workflow's saga compensations are closures its body
                 -- registers as it runs, so only running the handler again can
                 -- run them. The first time its worker is lost on the last
@@ -1267,7 +1276,7 @@ function jobs.reap(opts)
     local reclaimed = db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? "
         .. "WHERE status='running' AND claimed_at <= ? AND attempts < max_attempts",
-        { now, now - vt }) or 0
+        { now, cutoff }) or 0
     -- Reconcile strict-concurrency counters to the true running count. This frees
     -- a slot leaked by a crashed worker (its job was just reclaimed) and returns a
     -- parked workflow's slot - the self-healing backstop for conc_reserve/release.
@@ -2251,6 +2260,22 @@ local function with_comp_failures(err, failed)
     return tostring(err) .. " (compensation failed: " .. table.concat(failed, "; ") .. ")"
 end
 
+-- A durable wait suspends the workflow by raising its yield sentinel up to
+-- the runner. Raised inside the app's db.batch (or any open transaction on
+-- the step store's connection), it unwound the batch: the rollback took the
+-- wait's own record (the "__sleep:N" wake time, the deadline) with it, so the
+-- resumed body recorded a new one and waited again - for good. Refused
+-- instead, before anything is written, as hull.sleep refuses to wait inside
+-- a transaction and JS db.batch refuses an async fn.
+local function refuse_in_txn(what)
+    if db.in_transaction() then
+        error(what .. " cannot wait inside db.batch or an open transaction: "
+              .. "the workflow suspends by unwinding, which rolls the "
+              .. "transaction back with the wait's own record. Call it "
+              .. "outside the batch", 3)
+    end
+end
+
 -- Build the durable ctx handed to a workflow function. `sleep_n` is a per-run
 -- counter captured by ctx.sleep; `comps` collects saga compensations (registered
 -- by every ctx.step call that has one, so on the terminal-failure run the list
@@ -2323,11 +2348,13 @@ local function make_ctx(job, name)
         error(r, 0)
     end
     ctx.sleep = function(seconds)
+        refuse_in_txn("ctx.sleep")
         sleep_n = sleep_n + 1
         return no_park(run_sleep, job.id, sleep_n, seconds)
     end
     local wait_n = 0
     ctx.wait_signal = function(signal_name, opts)
+        refuse_in_txn("ctx.wait_signal")
         wait_n = wait_n + 1
         return no_park(run_wait_signal, job.id, wait_n, signal_name, opts, compensating)
     end

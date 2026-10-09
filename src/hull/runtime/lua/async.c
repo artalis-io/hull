@@ -16,6 +16,9 @@
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_open_txn */
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_budget.h"     /* hl_db_budget_current (hull._task) */
+#endif
 
 #include "lua.h"
 #include "lualib.h"
@@ -818,6 +821,207 @@ int lua_hull_spawn(lua_State *L)
     lua->active_on_complete     = saved_oc;
     lua->active_on_complete_ctx = saved_oc_ctx;
     return 0;
+}
+
+/* ── hull._task: detached tasks (the twin of JS hull:_task) ───────────
+ *
+ * require("hull._task").spawn(fn) runs fn on a loop turn of its own (a
+ * zero-delay backend timer), after the entry that spawned it has finished,
+ * as a run that belongs to nothing: no request, connection, timer or
+ * teardown hook is active, so every op it makes runs detached and a `res`
+ * its closure captured belongs to a request that is over.
+ *
+ * hull._spawn (under hull.async) runs its body at once, inside the
+ * spawner's run: a body that must not run on the request's clock or inside
+ * its transaction had to wait first (hull.sleep), and a wait is refused
+ * while a transaction is open (hl_lua_check_can_wait) - so under db.batch /
+ * transaction middleware there was no way out of the request. A task fires
+ * from the loop, after the request (and its transaction) ended.
+ *
+ * The task is an entry like the others: its own coroutine, so it may wait;
+ * its own instruction budget; a stale transaction rolled back before and
+ * after it. An error is logged, never raised into the spawner, which has
+ * moved on. Pending tasks are released by hl_lua_free.
+ *
+ * Stdlib-only (an underscore module): auth-flows defers its mail with it. */
+
+typedef struct HlLuaTask {
+    struct HlLuaTask *next;
+    struct HlLuaTask *prev;
+    HlLua            *lua;
+    int               fn_ref;
+    uint64_t          timer_id;
+} HlLuaTask;
+
+static void lua_task_unlink(HlLuaTask *t)
+{
+    if (t->prev) t->prev->next = t->next;
+    else         t->lua->tasks = t->next;
+    if (t->next) t->next->prev = t->prev;
+    t->next = t->prev = NULL;
+}
+
+/* The task's coroutine, made under lua_pcall: lua_newthread and luaL_ref
+ * allocate, and a memory error raised from a timer callback has no handler
+ * (Lua would abort the process). */
+typedef struct {
+    int        fn_ref;
+    int        co_ref;
+    lua_State *co;
+} HlLuaTaskPrep;
+
+static int lua_task_prepare_k(lua_State *L)
+{
+    HlLuaTaskPrep *p = (HlLuaTaskPrep *)lua_touserdata(L, 1);
+    lua_State *co = lua_newthread(L);
+    lua_rawgeti(co, LUA_REGISTRYINDEX, p->fn_ref);
+    p->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);   /* pops the thread */
+    p->co = co;
+    return 0;
+}
+
+static void lua_task_fire(void *user)
+{
+    HlLuaTask *t = (HlLuaTask *)user;
+    HlLua *lua = t->lua;
+    lua_State *L = lua->L;
+    HlLuaTaskPrep prep = { t->fn_ref, LUA_NOREF, NULL };
+    lua_task_unlink(t);
+    hl_alloc_free(lua->base.alloc, t, sizeof *t);
+
+    if (!lua_checkstack(L, 3)) {
+        luaL_unref(L, LUA_REGISTRYINDEX, prep.fn_ref);
+        log_error("[hull:lua] spawned task error: out of stack");
+        return;
+    }
+    lua_pushcfunction(L, lua_task_prepare_k);
+    lua_pushlightuserdata(L, &prep);
+    int prc = lua_pcall(L, 1, 0, 0);
+    luaL_unref(L, LUA_REGISTRYINDEX, prep.fn_ref);
+    if (prc != LUA_OK) {
+        lua_pop(L, 1);
+        log_error("[hull:lua] spawned task error: out of memory");
+        return;
+    }
+    lua_State *co = prep.co;
+
+    /* What this clobbers, put back after. From the event loop nothing is
+     * active; a loop pumped from inside another run (an in-process test
+     * harness) fires the task inside that run, whose state and budget must
+     * come back as they were (audit 9 L1, the JS twin). */
+    lua_State      *save_co         = lua->active_co;
+    int             save_thread_ref = lua->active_thread_ref;
+    KlHttpConn     *save_conn       = lua->active_conn;
+    KlHttpRequest  *save_req        = lua->active_req;
+    void           *save_timer      = lua->active_timer;
+    void          (*save_oc)(struct HlLua *, void *) = lua->active_on_complete;
+    void           *save_oc_ctx     = lua->active_on_complete_ctx;
+    HlLuaBudget     save_budget     = lua->budget;
+#ifdef HL_ENABLE_DB
+    /* The arm below rebinds this thread's SQL budget to this run. */
+    HlDbBudgetBinding save_db_budget = hl_db_budget_current();
+#endif
+
+    /* Nothing of whatever ran last is active: an op the task makes captures
+     * all of these, and runs detached. */
+    lua->active_co              = co;
+    lua->active_thread_ref      = prep.co_ref;
+    lua->active_conn            = NULL;
+    lua->active_req             = NULL;
+    lua->active_timer           = NULL;
+    lua->active_on_complete     = NULL;
+    lua->active_on_complete_ctx = NULL;
+
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);   /* audit 6 M1 */
+    HL_LUA_ARM(lua, co);                                       /* its own run */
+    int nres = 0;
+    int st = lua_resume(co, L, 0, &nres);
+    st = hl_lua_resume_status(co, st);   /* a bare yield: an error */
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);   /* audit 6 M1 */
+
+    if (st == LUA_OK) {
+        luaL_unref(L, LUA_REGISTRYINDEX, prep.co_ref);
+    } else if (st == LUA_YIELD) {
+        /* Parked on a Hull op: hl_lua_async_resume owns the ref now. */
+    } else {
+        char ebuf[512];
+        log_error("[hull:lua] spawned task error: %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
+        luaL_unref(L, LUA_REGISTRYINDEX, prep.co_ref);
+    }
+
+    lua->active_co              = save_co;
+    lua->active_thread_ref      = save_thread_ref;
+    lua->active_conn            = save_conn;
+    lua->active_req             = save_req;
+    lua->active_timer           = save_timer;
+    lua->active_on_complete     = save_oc;
+    lua->active_on_complete_ctx = save_oc_ctx;
+    lua->budget                 = save_budget;
+#ifdef HL_ENABLE_DB
+    hl_db_budget_restore(save_db_budget);
+#endif
+}
+
+/* hull._task.spawn(fn) */
+static int lua_task_spawn(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    lua_settop(L, 1);
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (!lua || !lua->base.async_ctx)
+        return luaL_error(L, "hull._task.spawn() requires an active event loop");
+
+    /* The ref first: luaL_ref can raise (out of memory), and nothing is
+     * allocated yet to leak. */
+    lua_pushvalue(L, 1);
+    int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    HlLuaTask *t = hl_alloc_malloc(lua->base.alloc, sizeof *t);
+    if (!t) {
+        luaL_unref(L, LUA_REGISTRYINDEX, fn_ref);
+        return luaL_error(L, "hull._task.spawn(): out of memory");
+    }
+    t->lua      = lua;
+    t->fn_ref   = fn_ref;
+    t->timer_id = 0;
+    t->prev     = NULL;
+    t->next = (HlLuaTask *)lua->tasks;
+    if (t->next) t->next->prev = t;
+    lua->tasks = t;
+    t->timer_id = hl_async_backend()->timer_add(lua->base.async_ctx, 0,
+                                                lua_task_fire, t);
+    if (t->timer_id == 0) {
+        lua_task_unlink(t);
+        luaL_unref(L, LUA_REGISTRYINDEX, t->fn_ref);
+        hl_alloc_free(lua->base.alloc, t, sizeof *t);
+        return luaL_error(L, "hull._task.spawn(): failed to add timer");
+    }
+    return 0;
+}
+
+void hl_lua_tasks_free(HlLua *lua)
+{
+    if (!lua) return;
+    const HlAsyncBackend *be = hl_async_backend();
+    while (lua->tasks) {
+        HlLuaTask *t = (HlLuaTask *)lua->tasks;
+        lua_task_unlink(t);
+        if (lua->base.async_ctx)
+            be->timer_cancel(lua->base.async_ctx, t->timer_id);
+        if (lua->L)
+            luaL_unref(lua->L, LUA_REGISTRYINDEX, t->fn_ref);
+        hl_alloc_free(lua->base.alloc, t, sizeof *t);
+    }
+}
+
+int luaopen_hull_task(lua_State *L)
+{
+    lua_newtable(L);
+    lua_pushcfunction(L, lua_task_spawn);
+    lua_setfield(L, -2, "spawn");
+    return 1;
 }
 
 /* ── Park / wake: the join primitive ─────────────────────────────── */

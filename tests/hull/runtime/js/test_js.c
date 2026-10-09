@@ -5506,6 +5506,83 @@ UTEST(js_stdlib, audit5_jobs_reaper)
     cleanup_js_caps();
 }
 
+/* Audit 10 follow-ups (jobs): the JS twin of lua_stdlib.audit10_followup_jobs.
+ * A durable-workflow wait inside db.batch (a sync fn) is refused instead of
+ * unwinding the batch and its own record; the reaper keeps a claim one whole
+ * second behind and reaps one two seconds behind (vt = 1). */
+UTEST(js_stdlib, audit10_followup_jobs)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { jobs } from 'hull:jobs';\n"
+        "import { db as dbModule } from 'hull:db';\n"
+        "(async () => {\n"
+        "  const db = dbModule.default();\n"
+        "  jobs.init();\n"
+        "  if (db.inTransaction()) return 1;\n"
+        "  let inside;\n"
+        "  db.batch(() => { inside = db.inTransaction(); });\n"
+        "  if (inside !== true) return 2;\n"
+        "  let e1, e2;\n"
+        "  jobs.workflow('a10wf', async (ctx) => {\n"
+        "    try { db.batch(() => { ctx.sleep(60); }); return 'slept in a batch'; }\n"
+        "    catch (e) { e1 = String(e && e.message); }\n"
+        "    try { db.batch(() => { ctx.waitSignal('go'); }); return 'waited in a batch'; }\n"
+        "    catch (e) { e2 = String(e && e.message); }\n"
+        "    ctx.sleep(60);\n"
+        "    return 'woke';\n"
+        "  });\n"
+        "  const id = jobs.start('a10wf', {}, { queue: 'a10wf' });\n"
+        "  await jobs.work({ queue: 'a10wf' });\n"
+        "  if (!(e1 && e1.includes('ctx.sleep cannot wait inside db.batch'))) return 3;\n"
+        "  if (!(e2 && e2.includes('ctx.waitSignal cannot wait inside db.batch'))) return 4;\n"
+        "  const j = jobs.get(id);\n"
+        "  if (!j || j.status !== 'pending') return 5;\n"
+        "  const rid = jobs.enqueue('a10vt', {}, { queue: 'a10vt', maxAttempts: 1 });\n"
+        "  if (jobs.claim({ queue: 'a10vt', batch: 1 }).length !== 1) return 7;\n"
+        "  globalThis.__a10_rid = rid;\n"
+        "  return 0;\n"
+        "})().then((v) => { globalThis.__test_a10 = v; },\n"
+        "          (e) => { console.log(String(e && e.stack || e)); globalThis.__test_a10 = -2; });\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    ASSERT_EQ(eval_int("typeof globalThis.__test_a10 === 'number' ? globalThis.__test_a10 : -1"), 0);
+
+    const char *reap =
+        "import { jobs } from 'hull:jobs';\n"
+        "jobs.reap({ visibilityTimeout: 1 });\n"
+        "globalThis.__a10_st = jobs.get(globalThis.__a10_rid).status;\n";
+
+    /* One second behind: may be a heartbeat made a moment ago - kept. */
+    ASSERT_EQ(sqlite3_exec(test_db,
+        "UPDATE _hull_jobs SET claimed_at = CAST(strftime('%s','now') AS INTEGER) - 1 "
+        "WHERE queue = 'a10vt'", NULL, NULL, NULL), SQLITE_OK);
+    val = JS_Eval(js.ctx, reap, strlen(reap), "<test-reap1>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(eval_int("globalThis.__a10_st === 'running' ? 0 : 1"), 0);
+
+    /* Two seconds behind: held at least one full second - reaped. */
+    ASSERT_EQ(sqlite3_exec(test_db,
+        "UPDATE _hull_jobs SET claimed_at = CAST(strftime('%s','now') AS INTEGER) - 2 "
+        "WHERE queue = 'a10vt'", NULL, NULL, NULL), SQLITE_OK);
+    val = JS_Eval(js.ctx, reap, strlen(reap), "<test-reap2>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(eval_int("globalThis.__a10_st === 'dead' ? 0 : 1"), 0);
+
+    cleanup_js_caps();
+}
+
 /* ── hull:web:middleware:rbac tests ───────────────────────────────────────── */
 
 UTEST(js_stdlib, rbac_init_and_assign)
