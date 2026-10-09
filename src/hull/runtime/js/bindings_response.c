@@ -51,9 +51,22 @@ typedef struct {
     KlHttpResponse *res;
     KlHttpRequest  *req;    /* its request: the Accept-Encoding it answers */
     HlReqLife      *life;   /* NULL: not tracked (always live) */
-    int             ct_hull; /* the Content-Type is the one a body call added
-                              * (res_headers.h, audit 10) */
 } HlJsResBox;
+
+/* The header lines each in-flight handler's response started with
+ * (res_headers.h, audit 11): its error answer keeps them. Event-loop thread
+ * only. */
+static HlResBaseList g_res_bases;
+
+void hl_js_res_handler_begin(KlHttpResponse *res)
+{
+    hl_res_base_begin(&g_res_bases, res);
+}
+
+void hl_js_res_middleware_begin(KlHttpResponse *res)
+{
+    hl_res_base_forget(&g_res_bases, res);
+}
 
 /* The class id, for the finalizer (which has no context to look it up in). */
 static JSClassID g_response_class_id;
@@ -140,14 +153,15 @@ static int res_set_header(JSContext *ctx, KlHttpResponse *res,
  * Hull's own and is replaced: res.html then res.json kept text/html for the
  * JSON (audit 10). */
 static int res_default_content_type(JSContext *ctx, KlHttpResponse *res,
-                                    HlJsResBox *box, const char *what,
+                                    const char *what,
                                     const char *value)
 {
-    if (!hl_res_content_type_prepare(res, &box->ct_hull))
+    /* Read from the response, not this object (audit 11): a middleware's
+     * res.html and the handler's res.json are two objects, one response. */
+    if (!hl_res_content_type_prepare(res))
         return 0;
     if (res_set_header(ctx, res, what, "Content-Type", value))
         return -1;
-    box->ct_hull = 1;
     return 0;
 }
 
@@ -182,8 +196,7 @@ static JSValue js_res_status(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
-    HlJsResBox *box = NULL;
-    KlHttpResponse *res = get_response_box(ctx, this_val, NULL, &box);
+    KlHttpResponse *res = get_response_box(ctx, this_val, NULL, NULL);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 2)
@@ -206,11 +219,13 @@ static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
     /* The app's Content-Type replaces one an earlier body call added
      * (audit 10): one header, the app's. */
     if (hl_res_is_content_type(name, name_len))
-        hl_res_drop_default_content_type(res, &box->ct_hull);
+        hl_res_drop_default_content_type(res);
 
     /* Rejected for a CR or LF (the header-injection guard). Not named in the
-     * log: the name may be the part carrying the CR/LF. */
-    if (kl_http_response_header(res, name, value) != 0)
+     * log: the name may be the part carrying the CR/LF. An app Content-Type
+     * spelled like Hull's default goes out as "content-type" (audit 11). */
+    if (kl_http_response_header(res, hl_res_app_header_name(name, name_len, value),
+                                value) != 0)
         log_warn("[hull] res.header: a header was dropped - its name or value "
                  "contains CR or LF");
 
@@ -225,8 +240,7 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     KlHttpRequest *req = NULL;
-    HlJsResBox *box = NULL;
-    KlHttpResponse *res = get_response_box(ctx, this_val, &req, &box);
+    KlHttpResponse *res = get_response_box(ctx, this_val, &req, NULL);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -265,7 +279,7 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
 
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
     if (res_charge_body(ctx, json_len) ||
-        res_default_content_type(ctx, res, box, "res.json", "application/json")) {
+        res_default_content_type(ctx, res, "res.json", "application/json")) {
         JS_FreeCString(ctx, json_str);
         return JS_EXCEPTION;
     }
@@ -289,8 +303,7 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     KlHttpRequest *req = NULL;
-    HlJsResBox *box = NULL;
-    KlHttpResponse *res = get_response_box(ctx, this_val, &req, &box);
+    KlHttpResponse *res = get_response_box(ctx, this_val, &req, NULL);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -303,7 +316,7 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;   /* a throwing toString: it was left pending */
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
     if (res_charge_body(ctx, html_len) ||
-        res_default_content_type(ctx, res, box, "res.html",
+        res_default_content_type(ctx, res, "res.html",
                                  "text/html; charset=utf-8")) {
         JS_FreeCString(ctx, html);
         return JS_EXCEPTION;
@@ -334,8 +347,7 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     KlHttpRequest *req = NULL;
-    HlJsResBox *box = NULL;
-    KlHttpResponse *res = get_response_box(ctx, this_val, &req, &box);
+    KlHttpResponse *res = get_response_box(ctx, this_val, &req, NULL);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -347,7 +359,7 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
     if (res_charge_body(ctx, text_len) ||
-        res_default_content_type(ctx, res, box, "res.text",
+        res_default_content_type(ctx, res, "res.text",
                                  "text/plain; charset=utf-8")) {
         JS_FreeCString(ctx, text);
         return JS_EXCEPTION;
@@ -373,8 +385,7 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
-    HlJsResBox *box = NULL;
-    KlHttpResponse *res = get_response_box(ctx, this_val, NULL, &box);
+    KlHttpResponse *res = get_response_box(ctx, this_val, NULL, NULL);
     if (!res)
         return JS_EXCEPTION;
     if (argc < 1)
@@ -397,7 +408,7 @@ static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
      * Vary, and the Content-Type Hull chose for it. An app-set Content-Type
      * stays. */
     hl_res_body_reencode(res);
-    hl_res_drop_default_content_type(res, &box->ct_hull);
+    hl_res_drop_default_content_type(res);
     int rc = kl_http_response_body_copy(res, (const char *)view.data, view.len);
     if (needs_free && str) JS_FreeCString(ctx, str);
     if (rc != 0)
@@ -499,7 +510,6 @@ JSValue hl_js_make_response_life(HlJS *js, KlHttpRequest *req,
     box->res = res;
     box->req = req;
     box->life = life;
-    box->ct_hull = 0;
     hl_req_life_retain(life);
     JS_SetOpaque(obj, box);
     return obj;
@@ -516,8 +526,9 @@ JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res)
 void hl_js_http_error_response(struct KlHttpResponse *res)
 {
     /* Whatever the handler set is dropped: its Set-Cookie / Location, a
-     * second Content-Type (audit 10). */
-    hl_res_error_reset(res, 500, "Internal Server Error", 21);
+     * second Content-Type (audit 10). The headers earlier middleware set
+     * stay (audit 11). */
+    hl_res_base_error_reset(&g_res_bases, res, 500, "Internal Server Error", 21);
 }
 
 /* Strong overrides: finalize + send a resumed request's response. Keeps ALL
@@ -527,6 +538,7 @@ void hl_js_http_error_response(struct KlHttpResponse *res)
 void hl_js_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
 {
     KlHttpResponse *res = kl_http_conn_response(conn);
+    hl_res_base_forget(&g_res_bases, res);   /* answered: its kept headers go */
     if (res && res->body_mode == KL_HTTP_BODY_STREAM)
         kl_http_response_end_stream(res);
     kl_http_request_send_response(req);

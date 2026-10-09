@@ -275,6 +275,12 @@ void hl_lua_make_request(lua_State *L, KlHttpRequest *req,
  * Push a Lua userdata representing the HTTP response onto the stack.
  */
 void hl_lua_make_response(lua_State *L, KlHttpResponse *res);
+/* The headers a handler's response started with - the ones earlier
+ * middleware set - are kept by its 500 (hl_lua_http_error_response, audit
+ * 11); a middleware starting on the response, or the handler answering, forgets
+ * the entry. */
+void hl_lua_res_handler_begin(KlHttpResponse *res);
+void hl_lua_res_middleware_begin(KlHttpResponse *res);
 /* As hl_lua_make_response, tied to a request life (shared/req_life.h): once
  * the life ends, every method on the object fails closed. Takes a reference. */
 struct HlReqLife;

@@ -603,7 +603,13 @@ JS uses identical names: `app.use`, `app.usePost`, `app.ws`, `app.sse`,
 - `res:status(code)`. Chainable
 - `res:header(name, value)`. Chainable
 - `res:json(value)`. Sends, `Content-Type: application/json`
-- `res:text(string)`, `res:html(string)`. Same, with content type
+- `res:text(string)`, `res:html(string)`. Same, with content type. A body
+  call's `Content-Type` is Hull's default: a later body call - in the same
+  handler or after a middleware's - replaces it; one the app set with
+  `res:header` stays. There is only ever one.
+- A handler that raises is answered 500 `text/plain`: the headers it set
+  (a `Set-Cookie`, a `Location`) are dropped, the ones earlier middleware
+  set (CSP, HSTS, CORS, a request id) are kept.
 - `res:redirect(url, [code])`. Default 302
 - `res:cookie(name, value, opts)`. Sets `Set-Cookie`
 - `res:file(path)`. Zero-copy sendfile (path is cap-validated)

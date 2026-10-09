@@ -537,7 +537,15 @@ verify step between successful first-factor auth and `on_login` when
       the password unusable, clears the lockout rows, marks the row undone
       (new changes paused) and revokes every session (audit 10), so whoever
       made the change cannot sign straight back in and move the account
-      again.
+      again. Since audit 11 it also removes the second factor
+      (`totp_disable`), and while that row lives (`email_change_ttl`)
+      **self-service recovery of the account is locked**: no password reset
+      or magic link is issued for it (`/password-reset/request`,
+      `/magic-link`, `send_password_reset`, `send_magic_link` stay silent)
+      and one issued earlier is refused - the account's address is still
+      the one the change set, so a reset mailed there handed the account
+      back. The log line names the account; an operator restores it by
+      hand.
     - **While a confirmed change can still be undone, its old address is
       reserved** for the undo (audit 10): `/register` answers its usual
       `{ok:true}` but creates no account (and mails nothing), magic-link
@@ -546,7 +554,14 @@ verify step between successful first-factor auth and `on_login` when
       409 as for an address in use. The address is compared
       case-insensitively. Before, registering the vacated address took it,
       and the undo then had nothing to restore to: the thief kept the
-      account.
+      account. Only an address that was **verified** when the change was
+      confirmed is reserved (audit 11): an unverified one may be anybody's,
+      and holding it let its registrant keep the real owner from
+      registering it (and learn the account had moved). The confirmed row is
+      written before the address is switched, so another instance cannot
+      claim the address in between. **An app that creates accounts or changes
+      addresses itself** checks `authflows.email_reserved(email)`
+      (`emailReserved`) and treats a `true` as an address in use.
     - An email-change confirm whose new address another account has taken
       since the request answers 409 and leaves the link usable.
     - A pending-2FA token (`totp_token`) is bound to the password and
@@ -555,7 +570,11 @@ verify step between successful first-factor auth and `on_login` when
     - `/register` creates the account (`user_create` + `user_get`) after the
       response too, with the welcome mail, so a new address costs no more
       response time than an existing one. A `user_get` that cannot resolve
-      the new id is logged instead of a 500.
+      the new id is logged instead of a 500. The deferred work runs inline
+      only where there is no event loop to defer onto (an in-process test
+      harness); any other failure to defer it is logged and the work dropped
+      (audit 11) - running it inline would answer at the speed the deferral
+      exists to hide.
     - The lockout and pending-email-change rows are keyed by the text form
       of the user id (`hull.web._request.user_id`, as session, totp and rbac
       key theirs): an INTEGER primary key used to reach MySQL as a number,
@@ -787,7 +806,7 @@ verify step between successful first-factor auth and `on_login` when
 - `idempotency.init(opts)`. Creates `_hull_idempotency_keys` table. `opts.ttl` = key lifetime in seconds (default: `86400`).
 - `idempotency.middleware(opts)`. Post-body middleware intercepting POST (configurable via `opts.methods`).
   - `opts.header_name`. Header to read key from (default: `"idempotency-key"`).
-  - `opts.get_principal`. `function(req) -> string|number` for per-user scoping. Whatever it (or the default) returns is stored as text (audit 10): `nil` / `false` / `""` is `"__anon"`, a number its decimal string (a number reached MySQL's VARCHAR column as a number, which compared it numerically), a principal over 255 characters - or one already spelled `sha256:...` - becomes `"sha256:" ..` the hex SHA-256 of itself (it failed the insert, or a lax MySQL truncated it so two principals shared keys), and any other type (a table / object, a Promise) is an error. Default: `"session:" ..` the session's `user_id`, else `"user:" ..` the JWT user's `sub` / `id` / `user_id`, else `"__anon"` (shared by every anonymous caller: mount the middleware after authentication; it logs a warning once when 20 keyed requests in a row were anonymous). Session principals were the bare `user_id` before audit 9, so a session user whose id read `user:5` shared JWT user 5's keys; a key stored for a session user before the upgrade is not replayed after it (it simply expires).
+  - `opts.get_principal`. `function(req) -> string|number` for per-user scoping. Whatever it (or the default) returns is stored as text (audit 10): `nil` / `false` / `""` is `"__anon"`, a number its decimal string (a number reached MySQL's VARCHAR column as a number, which compared it numerically), a principal over 255 characters - or one already spelled `sha256:...` - becomes `"sha256:" ..` the hex SHA-256 of itself (it failed the insert, or a lax MySQL truncated it so two principals shared keys), and any other type (a table / object, a Promise) is an error. Default: `"session:" ..` the session's `user_id`, else `"user:" ..` the JWT user's `sub` / `id` / `user_id`, else `"__anon"` (shared by every anonymous caller: mount the middleware after authentication; it logs a warning once when 20 keyed requests in a row were anonymous). A **custom** `get_principal` that returns `nil` / `false` / `""` (JS: `null` / `undefined` / `false` / `""`) no longer shares `"__anon"` (audit 11): that request skips the idempotency layer - the handler runs, nothing is stored or replayed - and a warning is logged once per middleware. A lookup that failed must not let every caller it could not identify replay each other's responses; return `"__anon"` explicitly to share one scope. Session principals were the bare `user_id` before audit 9, so a session user whose id read `user:5` shared JWT user 5's keys; a key stored for a session user before the upgrade is not replayed after it (it simply expires).
   - Cache hit + same fingerprint → returns cached response (handler skipped).
   - Cache hit + different fingerprint → returns 409 Conflict.
   - Fingerprint: `SHA-256(method + path + body)`.

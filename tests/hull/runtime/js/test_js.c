@@ -9735,6 +9735,77 @@ UTEST(js_audit11, rsa_verify_is_charged_by_the_key)
         "crypto.verify('RS256', 'A'.repeat(2000), 'm', 's'.repeat(1024)) ? 1 : 0"),
         -9999);
     EXPECT_EQ(js.budget_tripped, 1);
+}
+
+/* ── Audit 11: Content-Type and error headers across middleware ────────── */
+
+/* L: whether the Content-Type is Hull's default was a flag on the per-call
+ * `res` object, so a middleware's res.html followed by the handler's res.json
+ * (two objects, one response) kept text/html for the JSON. And the 500 a
+ * failed handler gets dropped the headers earlier middleware set (CSP, HSTS,
+ * CORS, a request id) along with the handler's own. */
+UTEST(js_audit11, content_type_and_error_headers_span_middleware)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.use('*', '/*', (req, res) => {\n"
+        "  res.header('Strict-Transport-Security', 'max-age=1'); res.html('<p>');\n"
+        "  return 0; });\n"
+        "app.use('*', '/*', (req, res) => {\n"
+        "  res.header('Content-Type', 'application/json'); return 0; });\n"
+        "app.get('/json', (req, res) => { res.json({ a: 1 }); });\n"
+        "app.get('/boom', (req, res) => { res.header('Set-Cookie', 'sid=1');\n"
+        "  res.json(1); throw new Error('boom'); });\n"
+        "app.get('/html', (req, res) => { res.html('<p>'); });\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    int mw1 = eval_int("globalThis.__hull_middleware[0].handler_id");
+    int mw2 = eval_int("globalThis.__hull_middleware[1].handler_id");
+    int last = eval_int("globalThis.__hull_routes.length - 1");
+    KlAllocator alloc = kl_allocator_default();
+
+    /* Middleware res.html, handler res.json: one Content-Type, the JSON's. */
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, mw1, &req, &res), 0);
+    EXPECT_EQ(hl_js_dispatch(&js, last - 2, &req, &res), 0);
+    EXPECT_EQ(a9_header_count(&res, "Content-Type"), 1);
+    EXPECT_TRUE(a9_headers_contain(&res, "Content-Type: application/json\r\n"));
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+
+    /* The handler fails: the middleware's HSTS stays, the handler's
+     * Set-Cookie and Content-Type go, one Content-Type (the error's). */
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req2 = {0};
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, mw1, &req2, &res), 0);
+    EXPECT_EQ(hl_js_dispatch(&js, last - 1, &req2, &res), -1);
+    hl_js_http_error_response(&res);
+    EXPECT_EQ(res.status, 500);
+    EXPECT_EQ(a9_header_count(&res, "Strict-Transport-Security"), 1);
+    EXPECT_EQ(a9_header_count(&res, "Set-Cookie"), 0);
+    EXPECT_EQ(a9_header_count(&res, "Content-Type"), 1);
+    EXPECT_TRUE(a9_headers_contain(&res, "Content-Type: text/plain\r\n"));
+    free_req_ctx(&req2);
+    kl_http_response_free(&res);
+
+    /* An app Content-Type spelled like a default is still the app's: the
+     * handler's res.html keeps it. */
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req3 = {0};
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, mw2, &req3, &res), 0);
+    EXPECT_EQ(hl_js_dispatch(&js, last, &req3, &res), 0);
+    EXPECT_EQ(a9_header_count(&res, "Content-Type"), 1);
+    EXPECT_TRUE(a9_headers_contain(&res, "content-type: application/json\r\n"));
+    free_req_ctx(&req3);
+    kl_http_response_free(&res);
     cleanup_js();
 }
 

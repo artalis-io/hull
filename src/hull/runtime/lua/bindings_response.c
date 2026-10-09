@@ -51,9 +51,22 @@
 typedef struct {
     KlHttpResponse *res;
     HlReqLife      *life;   /* NULL: not tracked (always live) */
-    int             ct_hull; /* the Content-Type is the one a body call added
-                              * (res_headers.h, audit 10) */
 } HlLuaResUD;
+
+/* The header lines each in-flight handler's response started with
+ * (res_headers.h, audit 11): its error answer keeps them. Event-loop thread
+ * only. */
+static HlResBaseList g_res_bases;
+
+void hl_lua_res_handler_begin(KlHttpResponse *res)
+{
+    hl_res_base_begin(&g_res_bases, res);
+}
+
+void hl_lua_res_middleware_begin(KlHttpResponse *res)
+{
+    hl_res_base_forget(&g_res_bases, res);
+}
 
 static HlLuaResUD *check_response_ud(lua_State *L, int idx)
 {
@@ -110,10 +123,10 @@ static void res_set_header(lua_State *L, KlHttpResponse *res,
 static void res_default_content_type(lua_State *L, HlLuaResUD *ud,
                                      const char *what, const char *value)
 {
-    if (hl_res_content_type_prepare(ud->res, &ud->ct_hull)) {
+    /* Read from the response, not this object (audit 11): a middleware's
+     * res:html and the handler's res:json are two objects, one response. */
+    if (hl_res_content_type_prepare(ud->res))
         res_set_header(L, ud->res, what, "Content-Type", value);
-        ud->ct_hull = 1;
-    }
 }
 
 /* A body set by res:json / res:html / res:text is copied out of the heap and
@@ -147,10 +160,12 @@ static int lua_res_header(lua_State *L)
     /* The app's Content-Type replaces one an earlier body call added
      * (audit 10): one header, the app's. */
     if (hl_res_is_content_type(name, name_len))
-        hl_res_drop_default_content_type(res, &ud->ct_hull);
+        hl_res_drop_default_content_type(res);
     /* Rejected for a CR or LF (the header-injection guard). Not named in the
-     * log: the name may be the part carrying the CR/LF. */
-    if (kl_http_response_header(res, name, value) != 0)
+     * log: the name may be the part carrying the CR/LF. An app Content-Type
+     * spelled like Hull's default goes out as "content-type" (audit 11). */
+    if (kl_http_response_header(res, hl_res_app_header_name(name, name_len, value),
+                                value) != 0)
         log_warn("[hull] res:header: a header was dropped - its name or value "
                  "contains CR or LF");
     lua_pushvalue(L, 1); /* chainable */
@@ -271,7 +286,7 @@ static int lua_res_bytes(lua_State *L)
      * not these bytes (audit 10): its gzip's Content-Encoding and Vary, and
      * the Content-Type Hull chose for it. An app-set Content-Type stays. */
     hl_res_body_reencode(res);
-    hl_res_drop_default_content_type(res, &ud->ct_hull);
+    hl_res_drop_default_content_type(res);
     if (kl_http_response_body_copy(res, bytes, len) != 0)
         return luaL_error(L, "res:bytes: out of memory");
     return 0;
@@ -333,7 +348,6 @@ void hl_lua_make_response_life(lua_State *L, KlHttpResponse *res,
     HlLuaResUD *ud = (HlLuaResUD *)lua_newuserdatauv(L, sizeof *ud, 0);
     ud->res = res;
     ud->life = life;
-    ud->ct_hull = 0;
     hl_req_life_retain(life);
     luaL_setmetatable(L, HL_RESPONSE_MT);
 }
@@ -349,8 +363,9 @@ void hl_lua_make_response(lua_State *L, KlHttpResponse *res)
 void hl_lua_http_error_response(struct KlHttpResponse *res)
 {
     /* Whatever the handler set is dropped: its Set-Cookie / Location, a
-     * second Content-Type (audit 10). */
-    hl_res_error_reset(res, 500, "Internal Server Error", 21);
+     * second Content-Type (audit 10). The headers earlier middleware set
+     * stay (audit 11). */
+    hl_res_base_error_reset(&g_res_bases, res, 500, "Internal Server Error", 21);
 }
 
 /* Strong overrides: finalize + send a resumed request's response. Keeps ALL
@@ -360,6 +375,7 @@ void hl_lua_http_error_response(struct KlHttpResponse *res)
 void hl_lua_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
 {
     KlHttpResponse *res = kl_http_conn_response(conn);
+    hl_res_base_forget(&g_res_bases, res);   /* answered: its kept headers go */
     if (res && res->body_mode == KL_HTTP_BODY_STREAM)
         kl_http_response_end_stream(res);
     kl_http_request_send_response(req);

@@ -85,6 +85,18 @@ let _rlLock = "";
 let _paused = Object.create(null);
 let _pausedAt = 0;
 
+// A duration option (seconds) as a number: a numeric string is converted,
+// anything else that is not a finite number >= 0 throws (audit 11; see the
+// Lua sibling - NaN made every claim stale, so the reaper took every running
+// job on every sweep).
+function durationOpt(name, v) {
+    const n = (typeof v === "string" && v.trim() !== "") ? Number(v) : v;
+    if (typeof n !== "number" || !Number.isFinite(n) || !(n >= 0))
+        throw new Error("jobs.init: " + name + " must be a finite number of seconds >= 0, got "
+            + String(v));
+    return n;
+}
+
 /**
  * Create the `_hull_jobs` table and its indexes. Idempotent - safe on every
  * boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
@@ -99,8 +111,10 @@ let _pausedAt = 0;
 function init(opts) {
     const o = opts || {};
     if (o.maxAttempts !== undefined) _cfg.maxAttempts = o.maxAttempts;
-    if (o.visibilityTimeout !== undefined) _cfg.visibilityTimeout = o.visibilityTimeout;
-    if (o.reapInterval !== undefined) _cfg.reapInterval = o.reapInterval;
+    if (o.visibilityTimeout !== undefined)
+        _cfg.visibilityTimeout = durationOpt("visibilityTimeout", o.visibilityTimeout);
+    if (o.reapInterval !== undefined)
+        _cfg.reapInterval = durationOpt("reapInterval", o.reapInterval);
     if (o.history !== undefined) _cfg.history = o.history;
     if (o.historyRetention !== undefined) _cfg.historyRetention = o.historyRetention;
     if (o.events !== undefined) _cfg.events = o.events;
@@ -201,9 +215,17 @@ function init(opts) {
     // absent (checked via the portable db.tableColumns, mirroring session.js),
     // rather than catching a duplicate-column error - a caught ALTER would abort
     // a surrounding transaction on Postgres if jobs.init ran inside a db.batch.
+    const hasColumn = (tbl, col) => (db.tableColumns(tbl) || []).includes(col);
     const ensureColumn = (tbl, col, coldef) => {
-        if (!(db.tableColumns(tbl) || []).includes(col))
+        if (hasColumn(tbl, col)) return;
+        // Check-then-ALTER races a peer instance booting at the same moment
+        // (a rolling deploy on Postgres / MySQL): the second ALTER fails on a
+        // duplicate column, which is fine once the column exists (audit 11).
+        try {
             db.exec(`ALTER TABLE ${tbl} ADD COLUMN ${coldef}`);
+        } catch (e) {
+            if (!hasColumn(tbl, col)) throw e;
+        }
     };
     ensureColumn("_hull_jobs", "progress", "progress INTEGER NOT NULL DEFAULT 0");
     ensureColumn("_hull_jobs", "trace_context", "trace_context VARCHAR(255)");
@@ -1294,7 +1316,9 @@ function parseTzOffset(tz) {
         if (tz === "Z" || tz === "UTC" || tz === "utc") return 0;
         const m = tz.match(/^([+-])(\d\d):?(\d\d)$/);
         if (m) {
-            if (Number(m[2]) > 18 || Number(m[3]) > 59)
+            // At most 18:00 either way, as the minutes form (audit 11).
+            if (Number(m[2]) > 18 || Number(m[3]) > 59
+                || Number(m[2]) * 60 + Number(m[3]) > 1080)
                 throw new Error(`jobs.cron: tz offset '${tz}' is out of range`);
             const off = Number(m[2]) * 3600 + Number(m[3]) * 60;
             return m[1] === "-" ? -off : off;
@@ -1444,6 +1468,23 @@ function recordAttempt(job, startedMs, finishedMs, outcome, err) {
          startedMs, finishedMs, finishedMs - startedMs, outcome, err || null, job.trace || null]);
 }
 
+// work()'s refresh before starting each batch job after the first: the job's
+// claim and its still-unstarted mates' are extended to now, so a mate is
+// never reaped for the time the jobs ahead of it took.
+function refreshClaim(job) {
+    const now = time.now();
+    const n = db.exec(
+        "UPDATE _hull_jobs SET claimed_at=?, updated_at=? " +
+        "WHERE id=? AND claim_token=? AND status='running'",
+        [now, now, job.id, job.claimToken]);
+    if ((n || 0) === 0) return false;
+    db.exec(
+        "UPDATE _hull_jobs SET claimed_at=? " +
+        "WHERE claim_token=? AND status='running' AND id<>?",
+        [now, job.claimToken, job.id]);
+    return true;
+}
+
 /**
  * Claim a batch and run each job's handler (awaited, so sync and async handlers
  * both work), applying the outcome. Runs the reaper first. Drive from a timer
@@ -1479,7 +1520,7 @@ async function work(opts) {
         // Refresh the claim before starting each job after the first, and skip
         // one whose claim is already gone - its new owner holds it (and its
         // strict-concurrency slot).
-        if (i > 0 && !heartbeat(job)) { job._lost = true; continue; }
+        if (i > 0 && !refreshClaim(job)) { job._lost = true; continue; }
         job.deps = loadDeps(job.id);   // workflow: dependency results, in order
         const h = _handlers[job.type] || _default;
         const startedMs = time.nowMs();   // attempt timing (used only if history on)
@@ -2447,14 +2488,27 @@ function heartbeat(job) {
         [now, now, job.id, job.claimToken]);
     if ((n || 0) === 0) return false;
     // The rest of the batch work() claimed with this job shares its token and
-    // waits, unstarted, for this one to finish. Extend their claim too:
-    // otherwise a job that heartbeats past visibilityTimeout left them stale,
-    // and the reaper re-pended them - or, on their last attempt, dead-lettered
-    // them as "worker lost" without their ever having run.
-    db.exec(
-        "UPDATE _hull_jobs SET claimed_at=? " +
+    // waits, unstarted, for this one to finish. A job that heartbeats is a
+    // long one, so they go back to `pending` now - attempt increment undone,
+    // a strict-concurrency slot released - for this or another worker to
+    // claim (audit 11; see the Lua sibling). Extending their claim (round 10)
+    // held them unrun for as long as this job kept heartbeating. work() skips
+    // a released mate: its claim is gone.
+    const mates = db.query(
+        "SELECT id, concurrency_key, concurrency_strict FROM _hull_jobs " +
         "WHERE claim_token=? AND status='running' AND id<>?",
-        [now, job.claimToken, job.id]);
+        [job.claimToken, job.id]) || [];
+    for (const m of mates) {
+        const r = db.exec(
+            "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, " +
+            "attempts=CASE WHEN attempts > 0 THEN attempts-1 ELSE 0 END, updated_at=? " +
+            "WHERE id=? AND claim_token=? AND status='running'",
+            [now, m.id, job.claimToken]);
+        if ((r || 0) > 0 && Number(m.concurrency_strict) === 1
+            && m.concurrency_key !== null && m.concurrency_key !== undefined)
+            concRelease(m.concurrency_key);
+    }
+    if (mates.length > 0) wakeWorkers();
     return true;
 }
 

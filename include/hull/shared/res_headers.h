@@ -16,6 +16,7 @@
 #include <keel/http_response.h>
 
 #include <stddef.h>
+#include <stdlib.h>   /* malloc / free (HlResBase) */
 #include <string.h>
 #include <strings.h>  /* strncasecmp */
 
@@ -101,34 +102,78 @@ static inline void hl_res_body_reencode(KlHttpResponse *res)
     }
 }
 
-/* The Content-Type a body call (res.json / html / text) implies, against the
- * one the response has (audit 10; #712 kept the first Content-Type whoever set
- * it, so res.html then res.json sent JSON as text/html). @p hull_set is the
- * response object's note that the Content-Type it carries is the one an
- * earlier body call added - Hull's default, which this call replaces; any
- * other is the app's (res.header) and stays. Removes Hull's earlier default
- * and returns 1 when the caller must add its own (setting *hull_set once it
- * has); 0 when the app's stays. */
-static inline int hl_res_content_type_prepare(KlHttpResponse *res,
-                                              int *hull_set)
+/* ── Hull's default Content-Type ─────────────────────────────────────────
+ *
+ * res.json / html / text add a Content-Type (Hull's default) unless the app
+ * set one with res.header; a later body call replaces Hull's default but
+ * keeps the app's (audit 10). Which of the two the response carries is read
+ * from the response itself (audit 11): it was a flag on the per-call `res`
+ * object, so a middleware's res.html followed by the handler's res.json - two
+ * objects, one response - kept text/html for the JSON.
+ *
+ * Hull's default is the line named exactly "Content-Type" (this casing) whose
+ * value is one of the defaults below. An app's res.header("Content-Type", v)
+ * is written under that name only when v is NOT a default value; when it is,
+ * the app's line goes out as "content-type" (header names are
+ * case-insensitive), so it can never be mistaken for Hull's. */
+
+#define HL_RES_CT_JSON "application/json"
+#define HL_RES_CT_HTML "text/html; charset=utf-8"
+#define HL_RES_CT_TEXT "text/plain; charset=utf-8"
+
+static inline int hl_res_ct_value_is_default(const char *v, size_t n)
 {
-    if (*hull_set) {
-        hl_res_header_remove(res, "Content-Type");
-        *hull_set = 0;
+    static const char *const defaults[] = {
+        HL_RES_CT_JSON, HL_RES_CT_HTML, HL_RES_CT_TEXT,
+    };
+    for (size_t i = 0; i < sizeof defaults / sizeof defaults[0]; i++) {
+        size_t dl = strlen(defaults[i]);
+        if (n == dl && memcmp(v, defaults[i], dl) == 0) return 1;
     }
+    return 0;
+}
+
+/* Does the response carry Hull's default Content-Type (see above)? */
+static inline int hl_res_content_type_is_default(const KlHttpResponse *res)
+{
+    if (!res || !res->hdr_buf) return 0;
+    static const char name[] = "Content-Type";
+    const size_t name_len = sizeof(name) - 1;
+    const char *p   = res->hdr_buf;
+    const char *end = res->hdr_buf + res->hdr_len;
+    while (p < end) {
+        int is_name;
+        size_t line_len = hl_res_header_line(p, end, name, name_len, &is_name);
+        if (is_name) {
+            /* "Content-Type: <value>\r\n", the name in Hull's own casing. */
+            if (memcmp(p, name, name_len) != 0 || line_len < name_len + 4 ||
+                p[name_len + 1] != ' ' || p[line_len - 2] != '\r')
+                return 0;
+            return hl_res_ct_value_is_default(p + name_len + 2,
+                                              line_len - name_len - 4);
+        }
+        p += line_len;
+    }
+    return 0;
+}
+
+/* Called by a body call (res.json / html / text) before it adds its default:
+ * Hull's earlier default is removed. Returns 1 when the caller must add its
+ * own (no Content-Type is left), 0 when the app's stays. */
+static inline int hl_res_content_type_prepare(KlHttpResponse *res)
+{
+    if (hl_res_content_type_is_default(res))
+        hl_res_header_remove(res, "Content-Type");
     return !hl_res_header_has(res, "Content-Type");
 }
 
 /* res.bytes sets no Content-Type, and res.header("Content-Type", ...) brings
  * the app's own: either way a default an earlier body call added no longer
  * describes the body (res.html then res.bytes(png) went out as text/html). */
-static inline void hl_res_drop_default_content_type(KlHttpResponse *res,
-                                                    int *hull_set)
+static inline void hl_res_drop_default_content_type(KlHttpResponse *res)
 {
-    if (*hull_set) {
+    if (hl_res_content_type_is_default(res))
         hl_res_header_remove(res, "Content-Type");
-        *hull_set = 0;
-    }
 }
 
 /* Is @p name (length @p len) the Content-Type header name? */
@@ -137,21 +182,154 @@ static inline int hl_res_is_content_type(const char *name, size_t len)
     return len == 12 && strncasecmp(name, "Content-Type", 12) == 0;
 }
 
+/* The name an app's res.header(@p name, @p value) is written under: @p name,
+ * except a Content-Type whose value is one of Hull's defaults, which goes out
+ * as "content-type" so it is never taken for Hull's own (see above). */
+static inline const char *hl_res_app_header_name(const char *name,
+                                                 size_t name_len,
+                                                 const char *value)
+{
+    if (hl_res_is_content_type(name, name_len) && value &&
+        hl_res_ct_value_is_default(value, strlen(value)))
+        return "content-type";
+    return name;
+}
+
 /* Replace whatever a handler started with an error answer (audit 10): its
  * headers are dropped - a Set-Cookie or Location it had set went out on the
  * 500, a Content-Encoding described a body that is no longer there, and a
  * Content-Type it had set was followed by a second one - so the answer
  * carries exactly one Content-Type. Nothing to undo once the headers were
- * sent (a stream). */
-static inline void hl_res_error_reset(KlHttpResponse *res, int status,
-                                      const char *body, size_t len)
+ * sent (a stream).
+ *
+ * @p keep / @p keep_len: the header lines the response had when the handler
+ * started - the ones earlier middleware set (CSP, HSTS, CORS, a request id) -
+ * which the answer keeps (audit 11: they were dropped with the handler's).
+ * Restored from a copy, not by truncating to a length, since a body call may
+ * have removed lines before that point. Of them, what describes a body
+ * (Content-Type, Content-Encoding and its Vary) still goes. NULL / 0: none. */
+static inline void hl_res_error_reset_keep(KlHttpResponse *res, int status,
+                                           const char *body, size_t len,
+                                           const char *keep, size_t keep_len)
 {
     if (!res) return;
-    if (!res->headers_sent)
+    if (!res->headers_sent) {
         res->hdr_len = 0;
+        if (keep && keep_len > 0 && res->hdr_buf && keep_len <= res->hdr_cap) {
+            memcpy(res->hdr_buf, keep, keep_len);
+            res->hdr_len = keep_len;
+            hl_res_header_remove(res, "Content-Type");
+            hl_res_header_remove(res, "Content-Length");
+            hl_res_body_reencode(res);   /* Content-Encoding + Keel's Vary */
+        }
+    }
     kl_http_response_status(res, status);
     (void)kl_http_response_header(res, "Content-Type", "text/plain");
     kl_http_response_body_borrow(res, body, len);
+}
+
+static inline void hl_res_error_reset(KlHttpResponse *res, int status,
+                                      const char *body, size_t len)
+{
+    hl_res_error_reset_keep(res, status, body, len, NULL, 0);
+}
+
+/* ── The headers a handler started with ──────────────────────────────────
+ *
+ * A copy of the response's header lines when its handler starts, for
+ * hl_res_error_reset_keep. One per in-flight handler, keyed by the response;
+ * each runtime keeps its own list (HlResBaseList, a member of its state).
+ * An entry is taken by the handler's error answer, replaced when the same
+ * response starts another handler, and dropped when a middleware starts on
+ * it (a new request on that connection slot) - so one is never applied to a
+ * request it was not made for. A handler that answered drops its entry too
+ * (hl_res_base_forget). The list is capped: past the cap the oldest
+ * goes, and that response's error answer drops every header, as before. */
+
+#define HL_RES_BASE_MAX 256
+
+typedef struct HlResBase {
+    const KlHttpResponse *res;
+    char                 *hdrs;   /* malloc'd copy (NULL when hdr_len was 0) */
+    size_t                len;
+    struct HlResBase     *prev, *next;   /* newest first */
+} HlResBase;
+
+typedef struct HlResBaseList {
+    HlResBase *head, *tail;
+    size_t     count;
+} HlResBaseList;
+
+static inline void hl_res_base_unlink(HlResBaseList *l, HlResBase *b)
+{
+    if (b->prev) b->prev->next = b->next; else l->head = b->next;
+    if (b->next) b->next->prev = b->prev; else l->tail = b->prev;
+    l->count--;
+}
+
+static inline HlResBase *hl_res_base_find(HlResBaseList *l,
+                                          const KlHttpResponse *res)
+{
+    for (HlResBase *b = l ? l->head : NULL; b; b = b->next)
+        if (b->res == res) return b;
+    return NULL;
+}
+
+/* Forget the entry for @p res, if any. */
+static inline void hl_res_base_forget(HlResBaseList *l,
+                                      const KlHttpResponse *res)
+{
+    HlResBase *b = hl_res_base_find(l, res);
+    if (!b) return;
+    hl_res_base_unlink(l, b);
+    free(b->hdrs);
+    free(b);
+}
+
+/* @p res's handler starts: remember its header lines. Out of memory: none is
+ * kept (the error answer then drops them all). */
+static inline void hl_res_base_begin(HlResBaseList *l, const KlHttpResponse *res)
+{
+    if (!l || !res) return;
+    hl_res_base_forget(l, res);
+    if (res->hdr_len == 0 || !res->hdr_buf) return;   /* nothing to keep */
+    HlResBase *b = (HlResBase *)malloc(sizeof *b);
+    if (!b) return;
+    b->hdrs = (char *)malloc(res->hdr_len);
+    if (!b->hdrs) { free(b); return; }
+    memcpy(b->hdrs, res->hdr_buf, res->hdr_len);
+    b->len = res->hdr_len;
+    b->res = res;
+    b->prev = NULL;
+    b->next = l->head;
+    if (l->head) l->head->prev = b; else l->tail = b;
+    l->head = b;
+    l->count++;
+    if (l->count > HL_RES_BASE_MAX && l->tail)
+        hl_res_base_forget(l, l->tail->res);
+}
+
+/* The error answer for @p res, keeping its handler-start headers (and
+ * dropping the entry). */
+static inline void hl_res_base_error_reset(HlResBaseList *l, KlHttpResponse *res,
+                                           int status, const char *body,
+                                           size_t len)
+{
+    HlResBase *b = hl_res_base_find(l, res);
+    if (!b) {
+        hl_res_error_reset(res, status, body, len);
+        return;
+    }
+    hl_res_base_unlink(l, b);
+    hl_res_error_reset_keep(res, status, body, len, b->hdrs, b->len);
+    free(b->hdrs);
+    free(b);
+}
+
+/* Free every entry (the runtime is going away). */
+static inline void hl_res_base_clear(HlResBaseList *l)
+{
+    while (l && l->head) hl_res_base_forget(l, l->head->res);
 }
 
 /* Is there room for one more "Name: value\r\n" under the per-response cap

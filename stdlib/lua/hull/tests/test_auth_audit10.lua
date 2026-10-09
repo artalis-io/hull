@@ -314,5 +314,61 @@ test("inbox: an integer source is its decimal string; other types refused", func
     assert_eq(pcall(inbox.is_duplicate, "m1", ("s"):rep(256)), false, "over-length")
 end)
 
+-- ── audit 11 ───────────────────────────────────────────────────────
+
+test("audit 11: an address unverified at confirm is not reserved", function()
+    reset_store(); init()
+    add_user(20, "old20@x.test", "first-password-1", false)
+    confirmed_change(20, "old20@x.test", "new20@x.test")
+    assert_eq(af.email_reserved("old20@x.test"), false)
+    H.register(mkreq({ email = "old20@x.test", password = "owner-password-1" }), mkres())
+    assert_eq(type(S.by_email["old20@x.test"]), "table", "the owner can register it")
+end)
+
+test("audit 11: email_reserved reports an address held for an undo", function()
+    reset_store(); init()
+    add_user(21, "old21@x.test", "first-password-1", true)
+    confirmed_change(21, "old21@x.test", "new21@x.test")
+    assert_eq(af.email_reserved("OLD21@x.test"), true)
+    assert_eq(af.email_reserved("other21@x.test"), false)
+end)
+
+test("audit 11: an undo that cannot restore locks recovery and drops the second factor", function()
+    reset_store()
+    init({ totp_disable = function(id) S.totp_off[#S.totp_off + 1] = id end })
+    add_user(22, "old22@x.test", "first-password-1", true)
+    local rtok = confirmed_change(22, "old22@x.test", "new22@x.test")
+    -- A magic link to the address the change set, issued before the undo.
+    H.magic_link(mkreq({ email = "new22@x.test" }), mkres())
+    local mtok = token_in("new22@x.test")
+    assert_eq(type(mtok), "string", "magic link issued")
+    add_user(23, "old22@x.test", "squatter-pw-1", true)
+    local res = mkres()
+    H.email_change_revoke(mkreq({ token = rtok }), res)
+    assert_eq(res.code, 409)
+    assert_eq(#S.totp_off, 1, "totp_disable called")
+    S.sent = {}
+    H.password_reset_request(mkreq({ email = "new22@x.test" }), mkres())
+    H.magic_link(mkreq({ email = "new22@x.test" }), mkres())
+    af.send_password_reset("new22@x.test", "https://app.test")
+    af.send_magic_link("new22@x.test", "https://app.test")
+    assert_eq(sent_to("new22@x.test"), 0, "no reset or magic link while locked")
+    res = mkres()
+    H.magic_link_consume(mkreq({ token = mtok }), res)
+    assert_eq(res.code, 400, "an earlier magic link no longer signs in")
+end)
+
+test("audit 11: idempotency skips a request a custom get_principal cannot place", function()
+    for _, p in ipairs({ false, "" }) do
+        local mw = idem.middleware({ get_principal = function() return p end })
+        local req = { method = "POST", path = "/x", body = "{}",
+                      headers = { ["idempotency-key"] = "k1" } }
+        assert_eq(mw(req, mkres()), 0, "runs without idempotency")
+    end
+    local mw = idem.middleware({ get_principal = function() return nil end })
+    assert_eq(mw({ method = "POST", path = "/x", body = "{}",
+                   headers = { ["idempotency-key"] = "k1" } }, mkres()), 0)
+end)
+
 print(string.format("auth audit 10: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail }

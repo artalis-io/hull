@@ -215,6 +215,10 @@ end
 --   `user_id` (`req.ctx.user`, set by auth.jwt_middleware), else `"__anon"` -
 --   which every anonymous caller shares, so mount it after authentication
 --   (it logs a warning once when 20 keyed requests in a row were all anonymous).
+--   A CUSTOM get_principal that returns nil / false / "" does not share
+--   "__anon" (audit 11): the request skips the idempotency layer - the
+--   handler runs, nothing is stored or replayed - and a warning is logged
+--   once per middleware. Return "__anon" explicitly to share one scope.
 -- @tparam[opt] number opts.ttl  Override module-level TTL for this instance.
 -- @tparam[opt="idempotency-key"] string opts.header_name  Header to read.
 -- @tparam[opt={"POST"}] table opts.methods  Methods to intercept.
@@ -306,6 +310,9 @@ function idempotency.middleware(opts)
         methods[m] = true
     end
 
+    local custom = opts.get_principal ~= nil
+    local custom_warned = false
+
     return function(req, res)
         -- Only intercept configured methods
         if not methods[req.method] then
@@ -326,7 +333,22 @@ function idempotency.middleware(opts)
             return 1
         end
 
-        local principal_id = norm_principal(get_principal(req))
+        local raw_principal = get_principal(req)
+        -- A custom get_principal with no answer (audit 11): sharing "__anon"
+        -- let every caller it could not identify replay or squat each
+        -- other's keys - most likely a lookup that failed, not a choice. The
+        -- request runs without idempotency instead.
+        if custom and (raw_principal == nil or raw_principal == false
+                       or raw_principal == "") then
+            if not custom_warned then
+                custom_warned = true
+                log.warn("idempotency: get_principal returned "
+                    .. tostring(raw_principal) .. "; the request runs without "
+                    .. "idempotency (return \"__anon\" to share one scope)")
+            end
+            return 0
+        end
+        local principal_id = norm_principal(raw_principal)
         local fingerprint = compute_fingerprint(req)
         local endpoint = req.method .. " " .. req.path
         local now = time.now()

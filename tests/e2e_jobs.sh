@@ -2482,9 +2482,14 @@ check_audit9 "js" "js" "$JS_AUDIT9"
 # CRONOFF: a stored spec that no longer parses is disabled, not fired every
 #   minute (nor given a NULL next_run_at): nothing enqueued, one cron_disabled
 #   event, next_run_at parked, last_error set (checked from the DB below).
-# MATE: a batch job that heartbeats past visibility_timeout keeps its unstarted
-#   batch-mate's claim too - the mate (on its last attempt) runs instead of
-#   being dead-lettered "worker lost".
+# MATE: a batch job that heartbeats past visibility_timeout does not leave its
+#   unstarted batch-mate to be dead-lettered "worker lost" (on its last
+#   attempt) - and since audit 11 does not hold it either: the heartbeat
+#   releases the mate back to pending with its attempt undone, and the next
+#   jobs.work runs it.
+# VTOPT (audit 11): jobs.init refuses a non-numeric / NaN / negative
+#   visibility_timeout or reap_interval (a numeric string is converted);
+#   a cron tz past 18:00 ("+18:59") is refused (in STRICT's list).
 # RANK: a soft-concurrency peer that heartbeated still counts as ahead (the
 #   rank uses the claim's start, which heartbeats do not move).
 # EVLIM: jobs.events limit is clamped to 1..1000 (-1 was "no limit" on
@@ -2504,9 +2509,14 @@ check_audit10() {
         *) fail "$label: cron field / tz strictness" "$out" ;;
     esac
     case "$out" in
-        *"MATE st=done ran=1"*)
-            pass "$label: a heartbeat extends the unstarted batch-mates' claim" ;;
+        *"MATE st=pending at=0 ran=0 then=done ran2=1"*)
+            pass "$label: a heartbeat releases the unstarted batch-mates, which run next" ;;
         *) fail "$label: batch-mate heartbeat" "$out" ;;
+    esac
+    case "$out" in
+        *"VTOPT str=1 nan=1 neg=1 rint=1 numstr=0"*)
+            pass "$label: jobs.init validates visibility_timeout / reap_interval" ;;
+        *) fail "$label: jobs.init duration validation" "$out" ;;
     esac
     case "$out" in
         *"RANK a=1 b=0"*)
@@ -2572,7 +2582,7 @@ app.main(function(ctx)
   end
   local good = jobs._cron_next("5,10-12 */2 * * 1-5", b) ~= nil and 1 or 0
   local tzok = 0
-  for _, tz in ipairs({ 0/0, 1/0, 2000, 1.5, "+25:00", "+05:75" }) do
+  for _, tz in ipairs({ 0/0, 1/0, 2000, 1.5, "+25:00", "+05:75", "+18:59", "-1801" }) do
     if pcall(jobs.cron, "tzx", "0 9 * * *", nil, { tz = tz }) then tzok = tzok + 1 end
   end
   ctx.stdout:write(("STRICT bad=%d good=%d tz=%d\n"):format(bad, good, tzok))
@@ -2588,7 +2598,21 @@ app.main(function(ctx)
   jobs.enqueue("m1", {}, { queue = "mate", priority = 10 })
   local m2 = jobs.enqueue("m2", {}, { queue = "mate", max_attempts = 1 })
   jobs.work({ queue = "mate", batch = 2, reap_interval = 3600 })
-  ctx.stdout:write(("MATE st=%s ran=%d\n"):format(jobs.get(m2).status, mate_ran))
+  local mj = jobs.get(m2)
+  local st1, at1, ran1 = mj.status, mj.attempts, mate_ran
+  jobs.work({ queue = "mate", batch = 2, reap_interval = 3600 })
+  ctx.stdout:write(("MATE st=%s at=%d ran=%d then=%s ran2=%d\n"):format(
+    st1, at1, ran1, jobs.get(m2).status, mate_ran))
+
+  local function refused(o) return pcall(jobs.init, o) and 0 or 1 end
+  local vstr = refused({ visibility_timeout = "abc" })
+  local vnan = refused({ visibility_timeout = 0/0 })
+  local vneg = refused({ visibility_timeout = -1 })
+  local rint = refused({ reap_interval = {} })
+  local numstr = refused({ visibility_timeout = "30", reap_interval = "0" })
+  jobs.init({ visibility_timeout = 1, reap_interval = 30 })
+  ctx.stdout:write(("VTOPT str=%d nan=%d neg=%d rint=%d numstr=%d\n"):format(
+    vstr, vnan, vneg, rint, numstr))
 
   jobs.enqueue("rb", {}, { queue = "rq_b", concurrency_key = "S", concurrency = 1 })
   jobs.enqueue("ra", {}, { queue = "rq_a", concurrency_key = "S", concurrency = 1 })
@@ -2638,7 +2662,7 @@ app.main(async (ctx) => {
   }
   const good = jobs._cronNext("5,10-12 */2 * * 1-5", b) !== null ? 1 : 0;
   let tzok = 0;
-  for (const tz of [NaN, Infinity, 2000, 1.5, "+25:00", "+05:75"]) {
+  for (const tz of [NaN, Infinity, 2000, 1.5, "+25:00", "+05:75", "+18:59", "-1801"]) {
     try { jobs.cron("tzx", "0 9 * * *", null, { tz }); tzok++; } catch (_e) { /* refused */ }
   }
   ctx.stdout.write(`STRICT bad=${bad} good=${good} tz=${tzok}\n`);
@@ -2654,7 +2678,19 @@ app.main(async (ctx) => {
   jobs.enqueue("m1", {}, { queue: "mate", priority: 10 });
   const m2 = jobs.enqueue("m2", {}, { queue: "mate", maxAttempts: 1 });
   await jobs.work({ queue: "mate", batch: 2, reapInterval: 3600 });
-  ctx.stdout.write(`MATE st=${jobs.get(m2).status} ran=${mateRan}\n`);
+  const mj = jobs.get(m2);
+  const st1 = mj.status, at1 = mj.attempts, ran1 = mateRan;
+  await jobs.work({ queue: "mate", batch: 2, reapInterval: 3600 });
+  ctx.stdout.write(`MATE st=${st1} at=${at1} ran=${ran1} then=${jobs.get(m2).status} ran2=${mateRan}\n`);
+
+  const initRefused = (o) => { try { jobs.init(o); return 0; } catch (_e) { return 1; } };
+  const vstr = initRefused({ visibilityTimeout: "abc" });
+  const vnan = initRefused({ visibilityTimeout: NaN });
+  const vneg = initRefused({ visibilityTimeout: -1 });
+  const rint = initRefused({ reapInterval: {} });
+  const numstr = initRefused({ visibilityTimeout: "30", reapInterval: "0" });
+  jobs.init({ visibilityTimeout: 1, reapInterval: 30 });
+  ctx.stdout.write(`VTOPT str=${vstr} nan=${vnan} neg=${vneg} rint=${rint} numstr=${numstr}\n`);
 
   jobs.enqueue("rb", {}, { queue: "rq_b", concurrencyKey: "S", concurrency: 1 });
   jobs.enqueue("ra", {}, { queue: "rq_a", concurrencyKey: "S", concurrency: 1 });

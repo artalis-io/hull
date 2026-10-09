@@ -22,6 +22,15 @@ function ctrl(c) {
     return "\\x" + (h.length < 2 ? "0" + h : h);
 }
 const CTRL_RE = /[\x00-\x1f\x7f]/g;
+// The C1 controls (U+0080..U+009F, NEL among them) and U+2028 / U+2029: line
+// breaks to some log viewers and JSON-lines shippers (audit 11). Escaped as
+// \uXXXX, as the Lua side does from their UTF-8 bytes.
+const UBREAK_RE = /[\u0080-\u009f\u2028\u2029]/g;
+const UBREAK_TEST = /[\u0080-\u009f\u2028\u2029]/;
+function ubreak(c) {
+    const h = c.charCodeAt(0).toString(16);
+    return "\\u" + "0000".slice(h.length) + h;
+}
 
 /**
  * Escape a value for safe logfmt output (log-injection defense): a raw newline
@@ -34,17 +43,19 @@ function sanitize(v) {
     return String(v)
         .replace(/\\/g, "\\\\")
         .replace(/"/g, '\\"')
-        .replace(CTRL_RE, ctrl);
+        .replace(CTRL_RE, ctrl)
+        .replace(UBREAK_RE, ubreak);
 }
 
 /**
- * Escape the control characters of a free-text log message (the part before
- * the fields), as in a value. Backslash and quote stay as written.
+ * Format a free-text log message as the line's leading msg="..." field,
+ * always quoted and escaped as a value (audit 11): written bare, a message
+ * carrying " user=admin" forged a field for any logfmt reader.
  * @param {*} v
- * @returns {string}
+ * @returns {string} e.g. msg="handled"
  */
 function message(v) {
-    return String(v).replace(CTRL_RE, ctrl);
+    return 'msg="' + sanitize(v) + '"';
 }
 
 // UTF-8 length of one code point (a lone surrogate counts 3, as WTF-8), so a
@@ -77,7 +88,8 @@ function key(k) {
 function pair(k, v) {
     const raw = String(v);
     const s = sanitize(raw);
-    if (/[ ="\x00-\x1f\x7f]/.test(raw)) return key(k) + '="' + s + '"';
+    if (/[ ="\x00-\x1f\x7f]/.test(raw) || UBREAK_TEST.test(raw))
+        return key(k) + '="' + s + '"';
     return key(k) + "=" + s;
 }
 

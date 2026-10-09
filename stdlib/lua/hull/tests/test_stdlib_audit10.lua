@@ -74,7 +74,28 @@ test("logx: the message's control bytes are escaped", function()
     end)
     log.info = saved
     assert(ok, err)
-    assert_eq(got, "line1\\nforged\\x1bx k=v")
+    -- Audit 11: the message is the leading msg="..." field, quoted and
+    -- escaped as a value, so "k=v" inside it is not a field.
+    assert_eq(got, 'msg="line1\\nforged\\x1bx" k=v')
+end)
+
+test("logx (audit 11): a message cannot forge a field", function()
+    local got
+    local saved = log.info
+    log.info = function(s) got = s end
+    local ok, err = pcall(function()
+        logx.with({ k = "v" }).info('done user=admin "q')
+    end)
+    log.info = saved
+    assert(ok, err)
+    assert_eq(got, 'msg="done user=admin \\"q" k=v')
+end)
+
+test("logx (audit 11): C1 controls and U+2028 / U+2029 are escaped", function()
+    assert_eq(logx.fields({ k = "a\u{85}b" }), ' k="a\\u0085b"')
+    assert_eq(logx.fields({ k = "\u{80}\u{9f}" }), ' k="\\u0080\\u009f"')
+    assert_eq(logx.fields({ k = "a\u{2028}b\u{2029}" }), ' k="a\\u2028b\\u2029"')
+    assert_eq(logx.fields({ k = "\u{a0}" }), " k=\u{a0}", "U+00A0 is not a break")
 end)
 
 -- ── cache.fetch ────────────────────────────────────────────────────
@@ -115,6 +136,18 @@ test("i18n.detect: the prefix fallback is deterministic", function()
     i18n.reset()
     i18n.load("end", { hi = "x" })
     assert_eq(i18n.detect("en"), nil, "en does not match end")
+    i18n.reset()
+end)
+
+test("i18n.detect (audit 11): the base splits on '-' and '_' in both runtimes", function()
+    i18n.reset()
+    i18n.load("zh", { hi = "ni hao" })
+    assert_eq(i18n.detect("zh_TW"), "zh", "zh_TW's base is zh")
+    assert_eq(i18n.detect("zh-TW;q=0.8"), "zh")
+    i18n.reset()
+    i18n.load("zh_TW", { hi = "ni hao" })
+    assert_eq(i18n.detect("zh_TW"), "zh_TW", "an exact zh_TW")
+    assert_eq(i18n.detect("zh-HK"), "zh_TW", "prefix fallback")
     i18n.reset()
 end)
 

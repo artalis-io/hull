@@ -297,5 +297,57 @@ await test("inbox: an integer source is its decimal string; other types refused"
     assertEq(threw(() => inbox.isDuplicate("m1", "s".repeat(256))), true, "over-length");
 });
 
+// ── audit 11 ───────────────────────────────────────────────────────
+
+await test("audit 11: an address unverified at confirm is not reserved", async () => {
+    resetStore(); init();
+    addUser(20, "old20@x.test", "first-password-1", false);
+    await confirmedChange(20, "old20@x.test", "new20@x.test");
+    assertEq(authFlows.emailReserved("old20@x.test"), false);
+    await H.register(mkReq({ email: "old20@x.test", password: "owner-password-1" }), mkRes());
+    assertEq(!!S.byEmail.get("old20@x.test"), true, "the owner can register it");
+});
+
+await test("audit 11: emailReserved reports an address held for an undo", async () => {
+    resetStore(); init();
+    addUser(21, "old21@x.test", "first-password-1", true);
+    await confirmedChange(21, "old21@x.test", "new21@x.test");
+    assertEq(authFlows.emailReserved("OLD21@x.test"), true);
+    assertEq(authFlows.emailReserved("other21@x.test"), false);
+});
+
+await test("audit 11: an undo that cannot restore locks recovery and drops the second factor", async () => {
+    resetStore();
+    init({ totpDisable: (id) => { S.totpOff.push(id); } });
+    addUser(22, "old22@x.test", "first-password-1", true);
+    const rtok = await confirmedChange(22, "old22@x.test", "new22@x.test");
+    H.magicLink(mkReq({ email: "new22@x.test" }), mkRes());
+    const mtok = tokenIn("new22@x.test");
+    assertEq(typeof mtok, "string", "magic link issued");
+    addUser(23, "old22@x.test", "squatter-pw-1", true);
+    let res = mkRes();
+    await H.emailChangeRevoke(mkReq({ token: rtok }), res);
+    assertEq(res.code, 409);
+    assertEq(S.totpOff.length, 1, "totpDisable called");
+    S.sent = [];
+    H.passwordResetRequest(mkReq({ email: "new22@x.test" }), mkRes());
+    H.magicLink(mkReq({ email: "new22@x.test" }), mkRes());
+    authFlows.sendPasswordReset("new22@x.test", "https://app.test");
+    authFlows.sendMagicLink("new22@x.test", "https://app.test");
+    assertEq(sentTo("new22@x.test"), 0, "no reset or magic link while locked");
+    res = mkRes();
+    await H.magicLinkConsume(mkReq({ token: mtok }), res);
+    assertEq(res.code, 400, "an earlier magic link no longer signs in");
+});
+
+await test("audit 11: idempotency skips a request a custom getPrincipal cannot place", () => {
+    for (const p of [null, undefined, false, ""]) {
+        const mw = idempotency.middleware({ getPrincipal: () => p });
+        const req = { method: "POST", path: "/x", body: "{}", ctx: {},
+                      header: (n) => (n === "idempotency-key" ? "k1" : null) };
+        assertEq(mw(req, mkRes()), 0, "runs without idempotency: " + String(p));
+    }
+});
+
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;
