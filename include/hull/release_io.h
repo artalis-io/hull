@@ -54,10 +54,21 @@ int hl_release_io_self_path(char *out, size_t out_sz);
  */
 KlTlsCtx *hl_release_io_open_tls(KlAllocator *alloc);
 
+/* hl_release_io_get timeouts: ONE deadline for the whole fetch, redirect
+ * chain included. Metadata (the GitHub API, hull.sha256, its .sig,
+ * hull.version) is small, so a stalled server fails in seconds, not ten
+ * minutes; an asset (a hull binary, a feature lib, a ~330 MB tool bundle)
+ * gets the long one, enough for the largest at about 0.6 MB/s. */
+#define HL_RELEASE_IO_META_TIMEOUT_MS   (30 * 1000)
+#define HL_RELEASE_IO_ASSET_TIMEOUT_MS  (10 * 60 * 1000)
+
 /**
  * HTTPS GET. Allocates the response body via @p alloc. On success,
  * @p out_body is malloc'd and the caller must `kl_free()` it.
  *
+ * @param timeout_ms  Whole-fetch deadline, redirects included:
+ *                    HL_RELEASE_IO_META_TIMEOUT_MS or
+ *                    HL_RELEASE_IO_ASSET_TIMEOUT_MS (<= 0 = the meta one).
  * @param user_agent  Sent as the User-Agent header; pass a short
  *                    identifier like "hull-update" or "hull-tools".
  * @returns 0 on HTTP 2xx, -1 on transport error or non-2xx response.
@@ -67,6 +78,7 @@ int hl_release_io_get(const char *url,
                       char **out_body, size_t *out_len,
                       KlAllocator *alloc,
                       KlTlsCtx *tls,
+                      int timeout_ms,
                       const char *user_agent);
 
 /**

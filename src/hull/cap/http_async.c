@@ -18,6 +18,7 @@
 #include <keel/http_client_pool.h>
 #include <keel/http_redirect.h>
 #include <keel/http_server.h>
+#include <keel/timer.h>
 #include <keel/url.h>
 
 #include <stdint.h>
@@ -69,6 +70,20 @@ static void free_keel_client(void *driver)
     kl_http_client_free(client);
 }
 
+/* ── Detached deadline ───────────────────────────────────────────── */
+
+/* A detached fetch (a timer, a WebSocket callback, app.main, a JS fetch not
+ * tied to the request) has no hl_net_op_suspend to arm op.deadline_ms, so it
+ * used to rely on Keel's per-hop timeout alone - restarted on every redirect
+ * hop. Its deadline is a Keel timer of its own, armed at start and disarmed
+ * when the request completes first. */
+static void disarm_detached_deadline(HlAsyncCtx *ctx)
+{
+    if (ctx->detached_timer && ctx->server)
+        kl_timer_cancel(&ctx->server->ev, ctx->detached_timer - 1);
+    ctx->detached_timer = 0;
+}
+
 /* ── KlHttpRedirectClient on_done callback ───────────────────────────── */
 
 static void on_redirect_done(KlHttpRedirectClient *rc, void *user_data)
@@ -95,10 +110,12 @@ static void on_redirect_done(KlHttpRedirectClient *rc, void *user_data)
         hl_audit_end(&w);
     }
 
-    if (ctx->detached)
+    if (ctx->detached) {
+        disarm_detached_deadline(ctx);
         hl_async_ctx_resume_detached(ctx);
-    else
+    } else {
         hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+    }
 }
 
 /* ── KlHttpClient on_done callback (no-redirect path) ───────────────── */
@@ -127,10 +144,12 @@ static void on_keel_client_done(KlHttpClient *client, void *user_data)
         hl_audit_end(&w);
     }
 
-    if (ctx->detached)
+    if (ctx->detached) {
+        disarm_detached_deadline(ctx);
         hl_async_ctx_resume_detached(ctx);
-    else
+    } else {
         hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+    }
 }
 
 /* ── Deadline timeout ────────────────────────────────────────────── */
@@ -151,6 +170,16 @@ static void on_http_deadline(KlAsyncOp *op, void *user_data)
         hl_async_ctx_resume_detached(ctx);
     else
         hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+}
+
+/* The detached op's deadline timer: the same failure as the attached
+ * path's on_http_deadline (driver dropped, the continuation resumed with no
+ * response). The timer has fired, so there is nothing left to cancel. */
+static void on_http_detached_deadline(void *user_data)
+{
+    HlAsyncCtx *ctx = user_data;
+    ctx->detached_timer = 0;
+    on_http_deadline(&ctx->op, ctx);
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -218,7 +247,7 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
     /* Start Keel async client - prefer redirect+pooled path */
     if (http_cfg->follow_redirects) {
         KlHttpRedirectConfig redir = {
-            .max_redirects    = http_cfg->max_redirects,
+            .max_redirects    = hl_http_max_redirects(http_cfg->max_redirects),
             .on_redirect      = hl_http_redirect_allowed,   /* every hop */
             .on_redirect_data = http_cfg,
         };
@@ -279,8 +308,22 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
             return NULL;
         }
     } else {
-        /* Detached mode (timer callback): no connection to suspend */
+        /* Detached mode (timer callback, ws callback, app.main): no
+         * connection to suspend, so no backend-armed deadline. Arm one here:
+         * the same whole-request bound, redirect chain included. The caller
+         * sets ctx->cont after this returns; the timer cannot fire before
+         * the event loop next runs. */
         ctx->detached = 1;
+        int64_t tid = kl_timer_add(&server->ev, (uint64_t)timeout_ms,
+                                   on_http_detached_deadline, ctx);
+        if (tid < 0) {
+            if (ctx->free_driver)
+                ctx->free_driver(ctx->driver);
+            ctx->driver = NULL;
+            hl_async_ctx_free(ctx);
+            return NULL;
+        }
+        ctx->detached_timer = tid + 1;
     }
 
     return ctx;

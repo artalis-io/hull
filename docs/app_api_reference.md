@@ -1248,10 +1248,21 @@ end)
 Every outbound request - the async `http.async.get` / `post` / `put` / `patch` /
 `delete` / `request` (the binding behind `http.fetch`) and the sync
 `http.get` / `post` / `put` / `patch` / `delete` / `request` - runs under **one
-deadline for the whole request**: DNS, connect, TLS handshake, sending the body,
+deadline for the whole request**: connect, TLS handshake, sending the body,
 receiving the response, and every redirect hop all count against it. It is not a
-per-read or idle timeout (Keel's sync client restarted its timer on every read
-before v3.3.0; it no longer does).
+per-read, idle or per-hop timeout: a redirect hop gets only what is left of the
+deadline (Keel restarts its own timer per hop; Hull hands the sync client the
+remainder before each hop, and on the async path arms its own deadline - in a
+request handler and in a timer, WebSocket callback or `app.main` alike). At most
+**5** redirect hops are followed (`HL_HTTP_MAX_REDIRECTS`), each checked against
+`manifest.hosts`.
+
+**DNS is not interrupted by the deadline.** Both paths resolve the host with a
+blocking `getaddrinfo` (the async client too: Hull uses the system resolver, which
+the kernel sandbox permits, and that call runs on the event-loop thread). The time a
+lookup takes counts against the deadline, but a stalled resolver blocks the loop
+until the system resolver's own timeout gives up (glibc: `options timeout:N
+attempts:N` in `resolv.conf`).
 
 | Setting | Lua | JS | Effect |
 |---|---|---|---|

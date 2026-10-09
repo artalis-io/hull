@@ -93,7 +93,7 @@ static KlTlsCtx *ladder(int skip_verify, const char *override,
 
     if (skip_verify) {
         LOG_WARN("[hull:c] TLS certificate verification disabled (--no-ca-bundle)");
-        ctx = hl_tls_client_ctx_create(NULL, alloc);
+        ctx = hl_tls_client_ctx_create_insecure(alloc);
         /* Nothing is published: a database DSN that asks for verify-full
          * asked for verification itself, so it keeps the embedded bundle
          * rather than inheriting a development switch meant for the

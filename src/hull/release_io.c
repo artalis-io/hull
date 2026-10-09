@@ -15,6 +15,7 @@
 #include "utils/hex.h"
 
 #include <keel/allocator.h>
+#include <keel/clock.h>
 #include <keel/http_client.h>
 #include <keel/http_redirect.h>
 #include "hull/tls_transport.h"
@@ -136,22 +137,43 @@ KlTlsCtx *hl_release_io_open_tls(KlAllocator *alloc)
 
 /* ── HTTPS GET ───────────────────────────────────────────────────── */
 
+/* Keel's sync redirect loop starts a fresh timeout_ms on every hop; keep the
+ * whole chain inside one deadline by handing each hop what is left of it
+ * (the loop re-reads the config per hop). */
+typedef struct {
+    KlHttpClientConfig *cfg;
+    uint64_t            deadline_ms;
+} ReleaseIoChain;
+
+static int release_io_redirect_hop(const char *next_url, void *data)
+{
+    (void)next_url;
+    ReleaseIoChain *chain = data;
+    uint64_t now = kl_monotonic_ms();
+    if (now >= chain->deadline_ms)
+        return -1;
+    uint64_t left = chain->deadline_ms - now;
+    chain->cfg->timeout_ms = left > (uint64_t)INT_MAX ? INT_MAX : (int)left;
+    return 0;
+}
+
 int hl_release_io_get(const char *url,
                       char **out_body, size_t *out_len,
                       KlAllocator *alloc, KlTlsCtx *tls,
+                      int timeout_ms,
                       const char *user_agent)
 {
     if (!url || !out_body || !out_len || !alloc || !tls) return -1;
+    if (timeout_ms <= 0)
+        timeout_ms = HL_RELEASE_IO_META_TIMEOUT_MS;
 
     KlTlsConfig tls_cfg = {0};
     hl_tls_config_wire(&tls_cfg, tls);
     KlHttpClientConfig cfg = {
-        /* Keel 3.3.0 made timeout_ms ONE deadline for the whole request
-         * (connect + TLS + send + receive), where it used to bound each
-         * socket wait. 30 s per wait is now 30 s for a ~330 MB tool bundle,
-         * which a slow link cannot meet; 10 minutes covers the largest
-         * asset at about 0.6 MB/s. */
-        .timeout_ms        = 10 * 60 * 1000,
+        /* ONE deadline for the whole fetch (Keel >= 3.3.0 per hop, the
+         * redirect hook below across hops): the caller's choice of the
+         * short metadata or the long asset timeout. */
+        .timeout_ms        = timeout_ms,
         /* 512 MB: a released binary / feature lib is small, but a multi-file
          * TOOL BUNDLE can be large - the `zig` toolchain is ~330 MB (a 168 MB
          * driver + its cross-libc tree). The download is SHA-256-verified
@@ -160,7 +182,15 @@ int hl_release_io_get(const char *url,
         .max_response_size = 512 * 1024 * 1024,
         .tls               = &tls_cfg,
     };
-    KlHttpRedirectConfig redir = { .max_redirects = 10 };
+    ReleaseIoChain chain = {
+        .cfg         = &cfg,
+        .deadline_ms = kl_monotonic_ms() + (uint64_t)timeout_ms,
+    };
+    KlHttpRedirectConfig redir = {
+        .max_redirects    = 5,   /* GitHub's asset links take one hop */
+        .on_redirect      = release_io_redirect_hop,
+        .on_redirect_data = &chain,
+    };
     KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
 
@@ -220,7 +250,8 @@ int hl_release_io_check_release_tag(const char *repo, const char *tag,
         snprintf(ver_url, sizeof(ver_url),
                  "https://github.com/%s/releases/download/%s/hull.version",
                  repo, tag);
-        if (hl_release_io_get(ver_url, &ver, &ver_len, alloc, tls, ua) != 0) {
+        if (hl_release_io_get(ver_url, &ver, &ver_len, alloc, tls,
+                              HL_RELEASE_IO_META_TIMEOUT_MS, ua) != 0) {
             ver = NULL;
             ver_len = 0;
         }
@@ -288,7 +319,8 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
 
     char *manifest = NULL;
     size_t manifest_len = 0;
-    if (hl_release_io_get(sha_url, &manifest, &manifest_len, alloc, tls, ua) != 0) {
+    if (hl_release_io_get(sha_url, &manifest, &manifest_len, alloc, tls,
+                          HL_RELEASE_IO_META_TIMEOUT_MS, ua) != 0) {
         fprintf(stderr, "%s: failed to download checksum manifest (%s)\n", ua, sha_url);
         return -1;
     }
@@ -300,7 +332,8 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
 
         char *sig_hex = NULL;
         size_t sig_len = 0;
-        if (hl_release_io_get(sig_url, &sig_hex, &sig_len, alloc, tls, ua) != 0) {
+        if (hl_release_io_get(sig_url, &sig_hex, &sig_len, alloc, tls,
+                              HL_RELEASE_IO_META_TIMEOUT_MS, ua) != 0) {
             fprintf(stderr,
                     "%s: failed to download release signature (hull.sha256.sig); "
                     "refusing to proceed\n", ua);

@@ -25,11 +25,16 @@ KlTlsCtx *hl_tls_server_ctx_create(const char *cert_path, const char *key_path,
 
 KlTlsCtx *hl_tls_client_ctx_create(const char *ca_path, KlAllocator *alloc)
 {
-    /* Keel 3.3.0: kl_tls_mbedtls_client_ctx_create(NULL, ...) returns NULL; a
-     * context that verifies nothing (--no-ca-bundle) has its own constructor. */
+    /* A NULL path fails closed (as Keel's own constructor does since 3.3.0):
+     * a context that verifies nothing is asked for by name, below. */
     if (!ca_path)
-        return kl_tls_mbedtls_client_ctx_create_insecure(alloc);
+        return NULL;
     return kl_tls_mbedtls_client_ctx_create(ca_path, alloc);
+}
+
+KlTlsCtx *hl_tls_client_ctx_create_insecure(KlAllocator *alloc)
+{
+    return kl_tls_mbedtls_client_ctx_create_insecure(alloc);
 }
 
 KlTlsCtx *hl_tls_client_ctx_create_from_buf(const unsigned char *ca_buf,

@@ -160,7 +160,8 @@ static int install_asset(const char *asset, const char *repo, const char *tag,
 
     char *body = NULL;
     size_t body_len = 0;
-    if (hl_release_io_get(url, &body, &body_len, alloc, tls, "hull-feature") != 0) {
+    if (hl_release_io_get(url, &body, &body_len, alloc, tls,
+                          HL_RELEASE_IO_ASSET_TIMEOUT_MS, "hull-feature") != 0) {
         fprintf(stderr, "hull feature: failed to download %s\n", url);
         return -1;
     }

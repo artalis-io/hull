@@ -539,6 +539,8 @@ static JSValue js_http_async_no_body(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     JSValue method_val = JS_NewString(ctx, method);
+    if (JS_IsException(method_val))
+        return JS_EXCEPTION;
     JSValue args[3];
     args[0] = method_val;
     int nargs = 1;
@@ -559,29 +561,49 @@ static JSValue js_http_async_with_body(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "http.async.%s requires (url, body?, opts?)",
                                  method);
 
-    JSValue method_val = JS_NewString(ctx, method);
-
+    /* Every step can throw - an opts getter for headers / timeoutMs runs app
+     * code - and a pending exception must stop the call here: stored as a
+     * property it used to reach js_http_fetch as an opts value, with the
+     * exception still pending (audit 11). */
     JSValue opts = JS_NewObject(ctx);
-    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
-        JS_SetPropertyStr(ctx, opts, "body", JS_DupValue(ctx, argv[1]));
+    if (JS_IsException(opts))
+        return JS_EXCEPTION;
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) &&
+        JS_SetPropertyStr(ctx, opts, "body", JS_DupValue(ctx, argv[1])) < 0)
+        goto fail;
     if (argc >= 3 && JS_IsObject(argv[2])) {
         JSValue hdrs = JS_GetPropertyStr(ctx, argv[2], "headers");
-        if (!JS_IsUndefined(hdrs))
-            JS_SetPropertyStr(ctx, opts, "headers", hdrs);
-        else
+        if (JS_IsException(hdrs))
+            goto fail;
+        if (!JS_IsUndefined(hdrs)) {
+            if (JS_SetPropertyStr(ctx, opts, "headers", hdrs) < 0)
+                goto fail;
+        } else {
             JS_FreeValue(ctx, hdrs);
+        }
         JSValue tmo = JS_GetPropertyStr(ctx, argv[2], "timeoutMs");
-        if (!JS_IsUndefined(tmo))
-            JS_SetPropertyStr(ctx, opts, "timeoutMs", tmo);
-        else
+        if (JS_IsException(tmo))
+            goto fail;
+        if (!JS_IsUndefined(tmo)) {
+            if (JS_SetPropertyStr(ctx, opts, "timeoutMs", tmo) < 0)
+                goto fail;
+        } else {
             JS_FreeValue(ctx, tmo);
+        }
     }
 
+    JSValue method_val = JS_NewString(ctx, method);
+    if (JS_IsException(method_val))
+        goto fail;
     JSValue args[3] = { method_val, argv[0], opts };
     JSValue result = js_http_fetch(ctx, JS_UNDEFINED, 3, args);
     JS_FreeValue(ctx, method_val);
     JS_FreeValue(ctx, opts);
     return result;
+
+fail:
+    JS_FreeValue(ctx, opts);
+    return JS_EXCEPTION;
 }
 
 static JSValue js_http_async_get(JSContext *ctx, JSValueConst this_val,

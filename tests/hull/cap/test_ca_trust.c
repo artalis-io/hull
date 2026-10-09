@@ -12,6 +12,7 @@
 #include "utest.h"
 #include "hull/cacert.h"
 #include "hull/ca_trust.h"
+#include "hull/tls_transport.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -115,14 +116,26 @@ UTEST(ca_trust, no_verify_publishes_nothing)
 UTEST(ca_trust, no_verify_still_yields_a_context)
 {
     /* --no-ca-bundle must hand http.fetch / the SSH tunnel a working context
-     * that verifies nothing. Keel 3.3.0 made client_ctx_create(NULL) return
-     * NULL, so this goes through the insecure constructor; a NULL here would
+     * that verifies nothing, through the explicit insecure constructor (a
+     * NULL CA path fails closed since Keel 3.3.0 and Hull audit 11); a NULL here would
      * leave outbound HTTPS with no TLS at all under --no-ca-bundle. */
     KlAllocator alloc = kl_allocator_default();
     KlTlsCtx *ctx = hl_ca_trust_resolve(1, NULL, &alloc, NULL);
     ASSERT_TRUE(ctx != NULL);
     hl_tls_ctx_destroy(ctx);
     hl_ca_bundle_reset_active();
+}
+
+UTEST(ca_trust, a_null_ca_path_fails_closed)
+{
+    /* hl_tls_client_ctx_create(NULL) used to map to the insecure constructor,
+     * so a caller that lost its CA path got a context verifying nothing. It
+     * now fails; verifying nothing is asked for by name. */
+    KlAllocator alloc = kl_allocator_default();
+    ASSERT_TRUE(hl_tls_client_ctx_create(NULL, &alloc) == NULL);
+    KlTlsCtx *ctx = hl_tls_client_ctx_create_insecure(&alloc);
+    ASSERT_TRUE(ctx != NULL);
+    hl_tls_ctx_destroy(ctx);
 }
 
 UTEST(ca_trust, the_file_bytes_survive_a_second_resolve)

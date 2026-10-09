@@ -103,7 +103,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     char *meta_body = NULL;
     size_t meta_len = 0;
     if (hl_release_io_get(api_url, &meta_body, &meta_len, &alloc, tls,
-                          "hull-update") != 0) {
+                          HL_RELEASE_IO_META_TIMEOUT_MS, "hull-update") != 0) {
         fprintf(stderr, "hull update: failed to fetch release metadata\n");
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
@@ -188,7 +188,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     char *binary = NULL;
     size_t binary_len = 0;
     if (hl_release_io_get(asset_url, &binary, &binary_len, &alloc, tls,
-                          "hull-update") != 0) {
+                          HL_RELEASE_IO_ASSET_TIMEOUT_MS, "hull-update") != 0) {
         fprintf(stderr, "hull update: failed to download %s\n", asset_url);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
@@ -204,7 +204,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     char *manifest = NULL;
     size_t manifest_len = 0;
     if (hl_release_io_get(sha_url, &manifest, &manifest_len, &alloc, tls,
-                          "hull-update") != 0) {
+                          HL_RELEASE_IO_META_TIMEOUT_MS, "hull-update") != 0) {
         fprintf(stderr, "hull update: failed to download checksum manifest\n");
         kl_free(&alloc, binary, binary_len);
         kl_tls_mbedtls_ctx_destroy(tls);
@@ -230,7 +230,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         char *sig_hex = NULL;
         size_t sig_len = 0;
         if (hl_release_io_get(sig_url, &sig_hex, &sig_len, &alloc, tls,
-                              "hull-update") != 0) {
+                              HL_RELEASE_IO_META_TIMEOUT_MS, "hull-update") != 0) {
             fprintf(stderr,
                 "hull update: failed to download release signature (hull.sha256.sig)\n"
                 "             - this release is not signed; refusing to install\n");
