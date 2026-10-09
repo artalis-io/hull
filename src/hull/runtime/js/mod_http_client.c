@@ -14,6 +14,8 @@
 
 #include <keel/http_server.h>
 
+#include <limits.h>
+
 /* Parse JS headers object { name: value } into HlHttpHeader array.
  * Returns count. Caller must free with js_free_http_headers(). */
 static int js_parse_http_headers(JSContext *ctx, JSValueConst obj,
@@ -117,6 +119,34 @@ static JSValue js_push_http_response(JSContext *ctx, const KlHttpClientResponse 
     return obj;
 }
 
+/* opts.timeoutMs of @p opts (if it is an object): ONE deadline for the whole
+ * request (DNS, connect, TLS, send, receive, redirects), a number of at least
+ * 1, returned truncated (the cap layer clamps it to the path's ceiling: 60 s
+ * sync, 10 min for http.fetch). Absent / undefined / null = 0, the app default
+ * (manifest http.timeoutMs, else 30 s). Anything else throws: a mistyped
+ * timeout must not silently become the default. Returns 0 or -1 (thrown). */
+static int js_http_timeout_opt(JSContext *ctx, int argc, JSValueConst *argv,
+                               int idx, const char *fn, int *out)
+{
+    *out = 0;
+    if (argc <= idx || !JS_IsObject(argv[idx]))
+        return 0;
+    JSValue v = JS_GetPropertyStr(ctx, argv[idx], "timeoutMs");
+    if (JS_IsException(v))
+        return -1;
+    if (JS_IsUndefined(v) || JS_IsNull(v))
+        return 0;
+    double d = 0;
+    if (!JS_IsNumber(v) || JS_ToFloat64(ctx, &d, v) < 0 || !(d >= 1)) {
+        JS_FreeValue(ctx, v);
+        JS_ThrowTypeError(ctx, "%s: opts.timeoutMs must be a positive number "
+                               "(milliseconds)", fn);
+        return -1;
+    }
+    *out = d >= (double)INT_MAX ? INT_MAX : (int)d;
+    return 0;
+}
+
 /* http.request(method, url, opts?) */
 static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
@@ -128,6 +158,10 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
 
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "http.request requires (method, url, opts?)");
+
+    int timeout_ms = 0;
+    if (js_http_timeout_opt(ctx, argc, argv, 2, "http.request", &timeout_ms) != 0)
+        return JS_EXCEPTION;
 
     const char *method = JS_ToCString(ctx, argv[0]);
     const char *url = JS_ToCString(ctx, argv[1]);
@@ -158,7 +192,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
-    int rc = hl_cap_http_request(js->base.http_cfg, method, url,
+    int rc = hl_cap_http_request(js->base.http_cfg, timeout_ms, method, url,
                                     headers, num_headers, body, body_len, &resp);
 
     JS_FreeCString(ctx, method);
@@ -188,6 +222,10 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "http.get requires (url, opts?)");
 
+    int timeout_ms = 0;
+    if (js_http_timeout_opt(ctx, argc, argv, 1, "http.get", &timeout_ms) != 0)
+        return JS_EXCEPTION;
+
     const char *url = JS_ToCString(ctx, argv[0]);
     if (!url) return JS_EXCEPTION;
 
@@ -203,7 +241,7 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
-    int rc = hl_cap_http_request(js->base.http_cfg, "GET", url,
+    int rc = hl_cap_http_request(js->base.http_cfg, timeout_ms, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
     JS_FreeCString(ctx, url);
     js_free_http_headers(ctx, headers, num_headers);
@@ -229,6 +267,11 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
         return JS_ThrowTypeError(ctx, "http.%s requires (url, body?, opts?)",
                                   method_name);
 
+    int timeout_ms = 0;
+    if (js_http_timeout_opt(ctx, argc, argv, 2, "http.post/put/patch",
+                            &timeout_ms) != 0)
+        return JS_EXCEPTION;
+
     const char *url = JS_ToCString(ctx, argv[0]);
     if (!url) return JS_EXCEPTION;
 
@@ -249,7 +292,7 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
-    int rc = hl_cap_http_request(js->base.http_cfg, method_name, url,
+    int rc = hl_cap_http_request(js->base.http_cfg, timeout_ms, method_name, url,
                                     headers, num_headers, body, body_len, &resp);
     JS_FreeCString(ctx, url);
     // cppcheck-suppress knownConditionTrueFalse
@@ -289,6 +332,10 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "http.del requires (url, opts?)");
 
+    int timeout_ms = 0;
+    if (js_http_timeout_opt(ctx, argc, argv, 1, "http.delete", &timeout_ms) != 0)
+        return JS_EXCEPTION;
+
     const char *url = JS_ToCString(ctx, argv[0]);
     if (!url) return JS_EXCEPTION;
 
@@ -304,7 +351,7 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
-    int rc = hl_cap_http_request(js->base.http_cfg, "DELETE", url,
+    int rc = hl_cap_http_request(js->base.http_cfg, timeout_ms, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
     JS_FreeCString(ctx, url);
     js_free_http_headers(ctx, headers, num_headers);
@@ -377,6 +424,10 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
 
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "http.fetch requires (method, url, opts?)");
+
+    int timeout_ms = 0;
+    if (js_http_timeout_opt(ctx, argc, argv, 2, "http.fetch", &timeout_ms) != 0)
+        return JS_EXCEPTION;
 
     const char *method = JS_ToCString(ctx, argv[0]);
     const char *url = JS_ToCString(ctx, argv[1]);
@@ -455,7 +506,8 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     /* Start async HTTP */
     HlAsyncCtx *async_ctx = hl_async_http_start(
         js->server, hl_js_cont_suspend_conn(cont), js->base.net_ctx, js->base.alloc,
-        js->base.http_cfg, method, url, headers, num_headers, body, body_len);
+        js->base.http_cfg, timeout_ms, method, url, headers, num_headers,
+        body, body_len);
 
     JS_FreeCString(ctx, method);
     JS_FreeCString(ctx, url);
@@ -518,6 +570,11 @@ static JSValue js_http_async_with_body(JSContext *ctx, JSValueConst this_val,
             JS_SetPropertyStr(ctx, opts, "headers", hdrs);
         else
             JS_FreeValue(ctx, hdrs);
+        JSValue tmo = JS_GetPropertyStr(ctx, argv[2], "timeoutMs");
+        if (!JS_IsUndefined(tmo))
+            JS_SetPropertyStr(ctx, opts, "timeoutMs", tmo);
+        else
+            JS_FreeValue(ctx, tmo);
     }
 
     JSValue args[3] = { method_val, argv[0], opts };

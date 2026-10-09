@@ -12,6 +12,8 @@
 
 #include <keel/http_client.h>
 
+#include "hull/limits/http.h"
+
 /* Forward declarations for optional modules */
 typedef struct KlHttpClientPool KlHttpClientPool;
 
@@ -24,7 +26,13 @@ typedef KlHttpClientHeader HlHttpHeader;
 typedef struct HlHttpConfig {
     const char     **allowed_hosts;    /**< Host allowlist (exact match) */
     int              count;            /**< Number of allowed hosts */
-    int              timeout_ms;       /**< Connect/send/recv timeout (default: 30000) */
+    int              timeout_ms;       /**< App-wide whole-request timeout in ms
+                                            *   (DNS, connect, TLS, send, receive and
+                                            *   every redirect hop), from manifest
+                                            *   http.timeout_ms; <= 0 = the 30 s
+                                            *   default. A per-call option overrides
+                                            *   it; both are clamped to the path's
+                                            *   ceiling (hull/limits/http.h). */
     size_t           max_response_size;/**< Max response body bytes (default: 4 MB) */
     KlTlsConfig     *tls;             /**< KlTlsConfig* for HTTPS - NULL = no HTTPS */
     KlHttpClientPool    *pool;             /**< Connection pool (NULL = no pooling) */
@@ -37,9 +45,13 @@ typedef struct HlHttpConfig {
  * @brief Perform a synchronous HTTP request.
  *
  * Checks host allowlist, audits, then delegates to kl_http_client_request().
- * Blocks until the response is received, an error occurs, or timeout.
+ * Blocks until the response is received, an error occurs, or the deadline
+ * passes: ONE deadline for the whole request (Keel >= 3.3.0).
  *
  * @param cfg      HTTP client configuration (host allowlist, timeouts, TLS).
+ * @param timeout_ms Per-call whole-request timeout in ms; <= 0 = the app's
+ *                 default (cfg->timeout_ms, else 30 s). Clamped to
+ *                 HL_HTTP_SYNC_MAX_TIMEOUT_MS: the call blocks the loop.
  * @param method   HTTP method ("GET", "POST", etc.).
  * @param url      Full URL ("http://host/path" or "https://host/path").
  * @param headers  Request headers (may be NULL).
@@ -49,7 +61,7 @@ typedef struct HlHttpConfig {
  * @param resp     Output: populated on success. Caller must call kl_http_client_response_free().
  * @return 0 on success, -1 on error.
  */
-int hl_cap_http_request(const HlHttpConfig *cfg,
+int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
                         const char *method, const char *url,
                         const HlHttpHeader *headers, int num_headers,
                         const char *body, size_t body_len,

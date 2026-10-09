@@ -105,6 +105,7 @@ route is registered.
 | `fs.read`      | `string[]`                            | Read grants: a directory, an exact file, or a single-`*` component pattern. See [Filesystem grants](#filesystem-grants). |
 | `fs.write`     | `string[]`                            | Write grants (may create missing parents + the target). Same forms as `fs.read`. |
 | `hosts`        | `string[]`                            | Outbound HTTP host allowlist for `http.*` / `ws.connect`. Supports `*.domain.com`. |
+| `http`         | `table{ timeout_ms }`                 | App-wide outbound HTTP timeout: one deadline for the whole request (DNS, connect, TLS, send, receive, redirects). Default 30000 ms; a per-call `opts.timeout_ms` overrides it; clamped to 10 min for `http.fetch`, 60 s for the sync calls. See [docs/app_api_reference.md](../app_api_reference.md#outbound-http-timeout-hullhttp-client). |
 | `env`          | `string[]`                            | Env var names that `env.get` is permitted to read. Max 32 entries. |
 | `gpu`          | `boolean` or `table{ devices = … }`   | Enable `gpu.*` global. `false` (default) hides it. |
 | `cors`         | `table{ origins, methods, … }`        | Built-in CORS config (skips needing `hull.web.middleware.cors`). |

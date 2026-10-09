@@ -1988,6 +1988,33 @@ UTEST(lua_runtime, manifest_not_declared)
     cleanup_lua();
 }
 
+/* http = { timeout_ms = N }: the app-wide outbound HTTP timeout. As for the
+ * wasm limits, an integer of at least 1 counts (capped at INT32_MAX, so it
+ * fits HlHttpConfig.timeout_ms); anything else is absent (0 = 30 s). */
+UTEST(lua_runtime, manifest_http_timeout)
+{
+    static const struct { const char *decl; uint32_t want; } cases[] = {
+        { "app.manifest({ http = { timeout_ms = 1500 } })",       1500 },
+        { "app.manifest({ http = { timeout_ms = 0 } })",          0 },
+        { "app.manifest({ http = { timeout_ms = -1 } })",         0 },
+        { "app.manifest({ http = { timeout_ms = '9' } })",        0 },
+        { "app.manifest({ http = { timeout_ms = 1.5 } })",        0 },
+        { "app.manifest({ http = { timeout_ms = 1 << 40 } })",    (uint32_t)INT32_MAX },
+        { "app.manifest({ http = 5000 })",                        0 },
+        { "app.manifest({ hosts = { 'a.test' } })",               0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        ASSERT_EQ(luaL_dostring(lua_rt.L, cases[i].decl), LUA_OK);
+        HlManifest m;
+        ASSERT_EQ(hl_manifest_extract_lua(lua_rt.L, &m, NULL), 0);
+        EXPECT_EQ_MSG(m.http_timeout_ms, cases[i].want, cases[i].decl);
+        hl_manifest_free(&m);
+        cleanup_lua();
+    }
+}
+
 UTEST(lua_runtime, manifest_basic)
 {
     init_lua();
@@ -9587,6 +9614,7 @@ UTEST(lua_audit9, a_task_that_trips_the_budget_still_finishes)
 /* ── Audit 10: the Lua runtime ────────────────────────────────────────── */
 
 #include "hull/cap/smtp.h"   /* HlSmtpConfig */
+#include "hull/cap/http.h"   /* HlHttpConfig */
 #include "hull/cap/fs.h"     /* HlFsConfig */
 
 /* Run @p code under a budget of @p limit on the caps runtime; the error
@@ -9721,6 +9749,56 @@ UTEST(lua_audit10, smtp_cc_is_copied_whole_or_refused)
     EXPECT_EQ(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
 
     lua_rt.base.smtp_cfg = NULL;
+    cleanup_lua_caps();
+}
+
+/* http.* opts.timeout_ms: a positive integer of milliseconds, or absent.
+ * Anything else raises before the request starts (a mistyped timeout must
+ * not silently become the 30 s default). The clamp itself is the cap
+ * layer's (test_http.c timeout.*). */
+UTEST(lua_http_timeout, per_call_option_is_validated)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    lua_rt.base.http_cfg = &cfg;
+    char err[512];
+    static const char *const bad[] = {
+        "http.get('http://x.invalid/', { timeout_ms = 0 })",
+        "http.get('http://x.invalid/', { timeout_ms = -5 })",
+        "http.get('http://x.invalid/', { timeout_ms = 1.5 })",
+        "http.get('http://x.invalid/', { timeout_ms = '1000' })",
+        "http.post('http://x.invalid/', 'b', { timeout_ms = {} })",
+        "http.delete('http://x.invalid/', { timeout_ms = true })",
+        "http.request('GET', 'http://x.invalid/', { timeout_ms = 0 })",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "local http = require('hull.http-client') %s", bad[i]);
+        EXPECT_NE_MSG(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err),
+                      LUA_OK, bad[i]);
+        EXPECT_NE_MSG(strstr(err, "opts.timeout_ms must be a positive integer"),
+                      NULL, bad[i]);
+    }
+    /* A valid value (any size: the cap clamps it) gets as far as the host
+     * check, which refuses the host. */
+    static const char *const good[] = {
+        "http.get('http://x.invalid/', { timeout_ms = 1000 })",
+        "http.get('http://x.invalid/', { timeout_ms = 1000.0 })",
+        "http.put('http://x.invalid/', 'b', { timeout_ms = 999999999 })",
+        "http.get('http://x.invalid/', {})",
+    };
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "local http = require('hull.http-client') %s", good[i]);
+        EXPECT_NE_MSG(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err),
+                      LUA_OK, good[i]);
+        EXPECT_EQ_MSG(strstr(err, "timeout_ms"), NULL, good[i]);
+        EXPECT_NE_MSG(strstr(err, "failed"), NULL, good[i]);
+    }
+    lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
 }
 #endif

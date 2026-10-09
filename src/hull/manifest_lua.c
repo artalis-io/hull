@@ -217,6 +217,16 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop wasm */
 
+    /* http = { timeout_ms = N }: the app-wide outbound HTTP timeout. As for
+     * wasm, an integer of at least 1 (capped); anything else is absent. The
+     * bindings clamp it to each path's ceiling (hull/limits/http.h). */
+    lua_getfield(L, manifest_idx, "http");
+    if (lua_istable(L, -1))
+        out->http_timeout_ms = (uint32_t)lua_wasm_limit(L, lua_gettop(L),
+                                                        "timeout_ms",
+                                                        (lua_Integer)INT32_MAX);
+    lua_pop(L, 1); /* pop http */
+
     /* gpu = true  OR  gpu = { devices = {0, 1} } */
     lua_getfield(L, manifest_idx, "gpu");
     if (lua_istable(L, -1)) {

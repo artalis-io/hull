@@ -8184,6 +8184,40 @@ UTEST(js_audit7, wasm_limits_are_numbers_only)
     cleanup_js();
 }
 
+/* http: { timeoutMs }: the app-wide outbound HTTP timeout, read like the
+ * wasm limits - a number of at least 1 (capped at INT32_MAX, so it fits
+ * HlHttpConfig.timeout_ms), never through ToPrimitive; anything else is
+ * absent (0 = 30 s). */
+UTEST(js_runtime, manifest_http_timeout)
+{
+    static const struct { const char *decl; uint32_t want; } cases[] = {
+        { "app.manifest({ http: { timeoutMs: 1500 } });",      1500 },
+        { "app.manifest({ http: { timeoutMs: 1500.9 } });",    1500 },
+        { "app.manifest({ http: { timeoutMs: 0 } });",         0 },
+        { "app.manifest({ http: { timeoutMs: -1 } });",        0 },
+        { "app.manifest({ http: { timeoutMs: '9' } });",       0 },
+        { "app.manifest({ http: { timeoutMs: [5] } });",       0 },
+        { "app.manifest({ http: { timeoutMs: 1e15 } });",      (uint32_t)INT32_MAX },
+        { "app.manifest({ http: { timeout_ms: 1500 } });",     0 },
+        { "app.manifest({ hosts: ['a.test'] });",              0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        char src[512];
+        snprintf(src, sizeof src, "import { app } from 'hull:app';\n%s\n",
+                 cases[i].decl);
+        char *msg = NULL;
+        EXPECT_EQ(a5_module_named("<test>", src, &msg), 0);
+        free(msg);
+        HlManifest m;
+        ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+        EXPECT_EQ_MSG(m.http_timeout_ms, cases[i].want, cases[i].decl);
+        hl_manifest_free(&m);
+        cleanup_js();
+    }
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* H2 follow-up: the ctx of a request that passed middleware and was then
  * answered by Keel itself (a 404 / 405) stayed until its connection slot
@@ -9107,6 +9141,7 @@ UTEST(js_audit9, response_bodies_are_charged)
 /* ── Audit 10 (the JS twins of the Lua runtime items) ─────────────────── */
 
 #include "hull/cap/smtp.h"   /* HlSmtpConfig */
+#include "hull/cap/http.h"   /* HlHttpConfig */
 #include "hull/cap/fs.h"     /* HlFsConfig */
 
 /* Run @p code as a module under a budget of @p limit; 1 if the run went
@@ -9180,6 +9215,67 @@ UTEST(js_audit10, smtp_cc_is_copied_whole_or_refused)
     EXPECT_EQ(eval_int(code), 1);
 
     js.base.smtp_cfg = NULL;
+    cleanup_js_caps();
+}
+
+/* httpClient opts.timeoutMs: a positive number of milliseconds, or absent /
+ * undefined / null. Anything else throws before the request starts (a
+ * mistyped timeout must not silently become the 30 s default). The clamp
+ * itself is the cap layer's (test_http.c timeout.*). */
+UTEST(js_http_timeout, per_call_option_is_validated)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    js.base.http_cfg = &cfg;
+    static const char *const bad[] = {
+        "http.get('http://x.invalid/', { timeoutMs: 0 })",
+        "http.get('http://x.invalid/', { timeoutMs: -5 })",
+        "http.get('http://x.invalid/', { timeoutMs: NaN })",
+        "http.get('http://x.invalid/', { timeoutMs: '1000' })",
+        "http.post('http://x.invalid/', 'b', { timeoutMs: {} })",
+        "http.delete('http://x.invalid/', { timeoutMs: true })",
+        "http.request('GET', 'http://x.invalid/', { timeoutMs: 0 })",
+    };
+    static const char *const good[] = {
+        "http.get('http://x.invalid/', { timeoutMs: 1000 })",
+        "http.get('http://x.invalid/', { timeoutMs: 1500.7 })",
+        "http.put('http://x.invalid/', 'b', { timeoutMs: 1e12 })",
+        "http.get('http://x.invalid/', { timeoutMs: undefined })",
+        "http.get('http://x.invalid/', { timeoutMs: null })",
+    };
+    char code[1024];
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { httpClient as http } from 'hull:http-client';\n"
+                 "let r = 0;\n"
+                 "try { %s; r = 2; } catch (e) {\n"
+                 "  r = /opts\\.timeoutMs must be a positive number/.test(e.message)"
+                 " ? 1 : 3; }\n"
+                 "globalThis.__ht = r;\n", bad[i]);
+        JSValue v = JS_Eval(js.ctx, code, strlen(code), "<ht>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(v)) hl_js_dump_error(&js);
+        JS_FreeValue(js.ctx, v);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(eval_int("globalThis.__ht|0"), 1, bad[i]);
+    }
+    /* A valid value (any size: the cap clamps it) gets as far as the host
+     * check, which refuses the host. */
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { httpClient as http } from 'hull:http-client';\n"
+                 "let r = 0;\n"
+                 "try { %s; r = 2; } catch (e) {\n"
+                 "  r = /failed/.test(e.message) && !/timeoutMs/.test(e.message)"
+                 " ? 1 : 3; }\n"
+                 "globalThis.__ht = r;\n", good[i]);
+        JSValue v = JS_Eval(js.ctx, code, strlen(code), "<ht>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(v)) hl_js_dump_error(&js);
+        JS_FreeValue(js.ctx, v);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(eval_int("globalThis.__ht|0"), 1, good[i]);
+    }
+    js.base.http_cfg = NULL;
     cleanup_js_caps();
 }
 #endif

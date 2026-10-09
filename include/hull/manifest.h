@@ -235,6 +235,11 @@ typedef struct HlManifest {
     uint32_t    wasm_max_input;
     uint32_t    wasm_max_output;
 
+    /* Outbound HTTP client (from manifest "http" key): the app-wide
+     * whole-request timeout for http.fetch / http.get / ... in ms.
+     * 0 = not set (HL_HTTP_DEFAULT_TIMEOUT_MS). See hull/limits/http.h. */
+    uint32_t    http_timeout_ms;
+
     /* Capability flags */
     int         gpu;              /* 1 if app declares gpu: true or gpu: {...} */
     int         gpu_devices[HL_GPU_MAX_DEVICES]; /* allowed device indices */

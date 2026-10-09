@@ -693,7 +693,9 @@ int hull_serve(int argc, char **argv)
     if (manifest.hosts_count > 0) {
         http_cfg.allowed_hosts     = policy->hosts;
         http_cfg.count             = policy->hosts_count;
-        http_cfg.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+        /* The app-wide default (manifest http.timeout_ms); 0 = 30 s. Each
+         * call resolves it against its own option + ceiling. */
+        http_cfg.timeout_ms        = (int)manifest.http_timeout_ms;
         http_cfg.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
         http_cfg.follow_redirects  = 1;
         http_cfg.tls               = tls_ctx ? &tls_cfg : NULL;
