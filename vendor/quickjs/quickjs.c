@@ -1797,6 +1797,10 @@ static __maybe_unused void js_malloc_iter(JSMallocContext *s, JSMallocIterFunc *
    js_work_check, which throws the interrupt from inside the loop. No
    handler: no cost beyond one test. See docs/quickjs_patches.md. */
 #define JS_WORK_ELEM 64
+/* audit 11: BigInt arithmetic is quadratic in its limbs; one limb
+   multiply-add costs 1/8 unit, one limb division (toString) 1/2 */
+#define JS_WORK_LIMB 8
+#define JS_WORK_LIMB_DIV 32
 #define JS_WORK_BATCH (64 * 1024)
 #define JS_WORK_MAX ((uint64_t)1 << 62)
 
@@ -4545,6 +4549,11 @@ const char *JS_ToCStringLen2(JSContext *ctx, size_t *plen, JSValueConst val1, BO
 
     str = JS_VALUE_GET_STRING(val);
     len = str->len;
+    /* HULL PATCH 0005 (audit 11): the ASCII path scans the whole string and
+       returns its own buffer - no allocation, so nothing else charged it
+       (`for (;;) +s` on a 16 MB string, every Hull binding converting an
+       app string) */
+    js_work_add(ctx->rt, len);
     if (!str->is_wide_char) {
         const uint8_t *src = str->u.str8;
         int count;
@@ -11967,7 +11976,11 @@ static JSBigInt *js_bigint_mul(JSContext *ctx, const JSBigInt *a,
                                const JSBigInt *b)
 {
     JSBigInt *r;
-    
+
+    /* HULL PATCH 0005 (audit 11): a->len * b->len limb products, charged
+       before the work (a 2^20-bit square is 2^28 of them) */
+    if (js_work_check(ctx, (uint64_t)a->len * b->len * JS_WORK_LIMB))
+        return NULL;
     r = js_bigint_new(ctx, a->len + b->len);
     if (!r)
         return NULL;
@@ -12000,7 +12013,12 @@ static JSBigInt *js_bigint_divrem(JSContext *ctx, const JSBigInt *a,
     na = a->len;
     nb = b->len;
 
-    r = js_bigint_new(ctx, na + 2); 
+    /* HULL PATCH 0005 (audit 11): mp_divnorm does about
+       (na - nb + 1) * nb limb products, charged before the work */
+    if (na >= nb &&
+        js_work_check(ctx, (uint64_t)(na - nb + 1) * nb * JS_WORK_LIMB))
+        return NULL;
+    r = js_bigint_new(ctx, na + 2);
     if (!r)
         return NULL;
     if (a_sign) {
@@ -12273,14 +12291,18 @@ static JSBigInt *js_bigint_pow(JSContext *ctx, const JSBigInt *a, JSBigInt *b)
     memcpy(r->tab, a->tab, a->len * sizeof(a->tab[0]));
     for(i = n_bits - 2; i >= 0; i--) {
         r1 = js_bigint_mul(ctx, r, r);
-        if (!r1)
+        if (!r1) {
+            js_free(ctx, r); /* HULL PATCH 0005: the charge can fail it */
             return NULL;
+        }
         js_free(ctx, r);
         r = r1;
         if ((e >> i) & 1) {
             r1 = js_bigint_mul(ctx, r, a);
-            if (!r1)
+            if (!r1) {
+                js_free(ctx, r); /* HULL PATCH 0005 */
                 return NULL;
+            }
             js_free(ctx, r);
             r = r1;
         }
@@ -12591,6 +12613,13 @@ static JSBigInt *js_bigint_from_string(JSContext *ctx,
     r = js_bigint_new(ctx, n_limbs);
     if (!r)
         return NULL;
+    /* HULL PATCH 0005 (audit 11): a decimal parse multiplies the whole
+       result by 10^k once per limb of digits - n_limbs^2 / 2 products */
+    if (radix == 10 &&
+        js_work_check(ctx, (uint64_t)n_limbs * n_limbs / 2 * JS_WORK_LIMB)) {
+        js_free(ctx, r);
+        return NULL;
+    }
     if (radix == 10) {
         int digits_per_limb = JS_LIMB_DIGITS;
         len = 1;
@@ -12758,6 +12787,13 @@ static JSValue js_bigint_to_string1(JSContext *ctx, JSValueConst val, int radix)
             return js_new_string8_len(ctx, "0", 1);
         }
         is_binary_radix = ((radix & (radix - 1)) == 0);
+        /* HULL PATCH 0005 (audit 11): a non power-of-two radix divides
+           the whole number once per limb of digits - len^2 / 2 limb
+           divisions, charged before the work */
+        if (!is_binary_radix &&
+            js_work_check(ctx, (uint64_t)r->len * r->len / 2 *
+                          JS_WORK_LIMB_DIV))
+            return JS_EXCEPTION;
         is_neg = js_bigint_sign(r);
         if (is_neg) {
             tmp = js_bigint_neg(ctx, r);
@@ -13094,6 +13130,9 @@ static JSValue JS_ToNumberHintFree(JSContext *ctx, JSValue val,
             JS_FreeValue(ctx, val);
             if (!str)
                 return JS_EXCEPTION;
+            /* HULL PATCH 0005 (audit 11): skip_spaces + js_atof scan it
+               again, end to end */
+            js_work_add(ctx->rt, len);
             p = str;
             p += skip_spaces(p);
             if ((p - str) == len) {
@@ -14722,6 +14761,7 @@ static JSValue JS_StringToBigInt(JSContext *ctx, JSValue val)
     JS_FreeValue(ctx, val);
     if (!str)
         return JS_EXCEPTION;
+    js_work_add(ctx->rt, len); /* HULL PATCH 0005 (audit 11): parse scan */
     p = str;
     p += skip_spaces(p);
     if ((p - str) == len) {
@@ -45048,10 +45088,12 @@ static JSValue js_parseInt(JSContext *ctx, JSValueConst this_val,
     const char *str, *p;
     int radix, flags;
     JSValue ret;
+    size_t len;
 
-    str = JS_ToCString(ctx, argv[0]);
+    str = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!str)
         return JS_EXCEPTION;
+    js_work_add(ctx->rt, len); /* HULL PATCH 0005 (audit 11): parse scan */
     if (JS_ToInt32(ctx, &radix, argv[1])) {
         JS_FreeCString(ctx, str);
         return JS_EXCEPTION;
@@ -45073,10 +45115,12 @@ static JSValue js_parseFloat(JSContext *ctx, JSValueConst this_val,
 {
     const char *str, *p;
     JSValue ret;
+    size_t len;
 
-    str = JS_ToCString(ctx, argv[0]);
+    str = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!str)
         return JS_EXCEPTION;
+    js_work_add(ctx->rt, len); /* HULL PATCH 0005 (audit 11): parse scan */
     p = str;
     p += skip_spaces(p);
     ret = js_atof(ctx, p, NULL, 10, 0);
@@ -45538,6 +45582,15 @@ static int string_indexof_char(JSString *p, int c, int from)
     return -1;
 }
 
+/* HULL PATCH 0005 (audit 11): RegExp Symbol.match / matchAll / replace /
+   split and String replaceAll / matchAll test ToString(rx.flags) - an app
+   getter can return any string - for up to four letters, each a full scan.
+   Deferred: the string is on the heap, and the next step polls. */
+static void js_flags_charge(JSContext *ctx, JSString *p)
+{
+    js_work_add(ctx->rt, (uint64_t)p->len * 4);
+}
+
 /* HULL PATCH 0005: charges the chars it scans and compares; -2 (exception
    pending) when that puts the run over its budget - the search is
    quadratic in the worst case */
@@ -45806,6 +45859,7 @@ static int check_regexp_g_flag(JSContext *ctx, JSValueConst regexp)
         flags = JS_ToStringFree(ctx, flags);
         if (JS_IsException(flags))
             return -1;
+        js_flags_charge(ctx, JS_VALUE_GET_STRING(flags)); /* HULL PATCH 0005 */
         ret = string_indexof_char(JS_VALUE_GET_STRING(flags), 'g', 0);
         JS_FreeValue(ctx, flags);
         if (ret < 0) {
@@ -45963,6 +46017,10 @@ static int js_string_GetSubstitution(JSContext *ctx,
             }
         } else if (c == '<' && !JS_IsUndefined(namedCaptures)) {
             k = string_indexof_char(rp, '>', j);
+            /* HULL PATCH 0005 (audit 11): "$<$<$<..." with no '>' scans
+               the rest of the replacement once per "$<" - quadratic */
+            if (js_work_check(ctx, (uint64_t)((k < 0 ? (int)len : k) - j)))
+                goto exception;
             if (k < 0)
                 goto norep;
             name = js_sub_string(ctx, rp, j, k);
@@ -48495,6 +48553,7 @@ static JSValue js_regexp_Symbol_match(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(flags))
         goto exception;
     p = JS_VALUE_GET_STRING(flags);
+    js_flags_charge(ctx, p); /* HULL PATCH 0005 */
 
     global = (-1 != string_indexof_char(p, 'g', 0));
     if (!global) {
@@ -48684,6 +48743,7 @@ static JSValue js_regexp_Symbol_matchAll(JSContext *ctx, JSValueConst this_val,
     it->iterating_regexp = matcher;
     it->iterated_string = S;
     strp = JS_VALUE_GET_STRING(flags);
+    js_flags_charge(ctx, strp); /* HULL PATCH 0005 */
     it->global = string_indexof_char(strp, 'g', 0) >= 0;
     it->unicode = (string_indexof_char(strp, 'u', 0) >= 0 ||
                    string_indexof_char(strp, 'v', 0) >= 0);
@@ -48891,6 +48951,7 @@ static JSValue js_regexp_Symbol_replace(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(flags))
         goto exception;
     p = JS_VALUE_GET_STRING(flags);
+    js_flags_charge(ctx, p); /* HULL PATCH 0005 */
 
     fullUnicode = 0;
     is_global = (-1 != string_indexof_char(p, 'g', 0));
@@ -49121,6 +49182,7 @@ static JSValue js_regexp_Symbol_split(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(flags))
         goto exception;
     strp = JS_VALUE_GET_STRING(flags);
+    js_flags_charge(ctx, strp); /* HULL PATCH 0005 */
     unicodeMatching = (string_indexof_char(strp, 'u', 0) >= 0 ||
                        string_indexof_char(strp, 'v', 0) >= 0);
     if (string_indexof_char(strp, 'y', 0) < 0) {
@@ -57827,6 +57889,8 @@ static JSValue js_typed_array_from(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(r))
         goto exception;
     for(k = 0; k < len; k++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 (audit 11) */
+            goto exception;
         v = JS_GetPropertyInt64(ctx, arr, k);
         if (JS_IsException(v))
             goto exception;
@@ -59903,6 +59967,8 @@ static JSValue js_array_from_iterator(JSContext *ctx, uint32_t *plen,
         goto fail;
     k = 0;
     for(;;) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 (audit 11) */
+            goto fail;
         val = JS_IteratorNext(ctx, iter, next_method, 0, NULL, &done);
         if (JS_IsException(val))
             goto fail;
@@ -59963,6 +60029,8 @@ static JSValue js_typed_array_constructor_obj(JSContext *ctx,
         goto fail;
 
     for(i = 0; i < len; i++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 (audit 11) */
+            goto fail;
         val = JS_GetPropertyUint32(ctx, arr, i);
         if (JS_IsException(val))
             goto fail;

@@ -44,12 +44,23 @@ static uint64_t js_rsa_units(size_t bits)
 }
 
 /* The cost of a crypto.sign / crypto.verify under @p alg. The modulus is
- * not known before mbedTLS parses the key, so it is estimated: for verify
- * from the signature, which an RSA verify only accepts at the modulus's
- * length (a different length is refused before any arithmetic); for sign
+ * not known before mbedTLS parses the key, so it is estimated: for sign
  * from the private key PEM, whose DER holds about 4.5 modulus-sized numbers
  * (n, d, p, q and the CRT values) - so bits ~= PEM length * 4/3, an upper
- * estimate. */
+ * estimate. For verify from the signature, which an RSA verify only accepts
+ * at the modulus's length, bounded by the public key (audit 11: the
+ * signature is the attacker's, so a long one made every verify cost an
+ * RSA-16384's): the PEM's base64 holds at most 3/4 of its length in DER
+ * bytes, the modulus among them, so the key has at most PEM length * 6
+ * bits. A signature longer than HL_CRYPTO_SIGN_MAX (an RSA-8192's, mbedTLS's
+ * ceiling) never verifies and is refused before the charge
+ * (the sig_too_long test in crypto.verify). */
+static int js_asym_is_rsa(HlCryptoAsymAlg alg)
+{
+    return alg == HL_CRYPTO_ASYM_RS256 || alg == HL_CRYPTO_ASYM_RS384 ||
+           alg == HL_CRYPTO_ASYM_RS512 || alg == HL_CRYPTO_ASYM_PS256;
+}
+
 static uint64_t js_asym_units(HlCryptoAsymAlg alg, size_t sig_len,
                               size_t pem_len, int signing)
 {
@@ -58,7 +69,10 @@ static uint64_t js_asym_units(HlCryptoAsymAlg alg, size_t sig_len,
     case HL_CRYPTO_ASYM_RS384:
     case HL_CRYPTO_ASYM_RS512:
     case HL_CRYPTO_ASYM_PS256:
-        return js_rsa_units(signing ? pem_len / 3 * 4 : sig_len * 8);
+        if (signing)
+            return js_rsa_units(pem_len / 3 * 4);
+        return js_rsa_units(sig_len * 8 < pem_len * 6 ? sig_len * 8
+                                                       : pem_len * 6);
     default:
         return HL_ASYM_OP_UNITS;
     }
@@ -666,10 +680,15 @@ static JSValue js_crypto_verify(JSContext *ctx, JSValueConst this_val,
 
     HlCryptoAsymAlg alg = hl_crypto_asym_alg_from_string(alg_str, alg_len);
     JSValue out;
+    /* audit 11: an RSA signature longer than any key mbedTLS takes cannot
+     * verify; false without the charge it would size */
+    int sig_too_long = js_asym_is_rsa(alg) && sig_view.len > HL_CRYPTO_SIGN_MAX;
     if (js_crypto_charge(ctx, data_view.len) ||
-        (alg != HL_CRYPTO_ASYM_NONE &&
-         hl_js_budget_charge(ctx, js_asym_units(alg, sig_view.len, 0, 0)))) {
+        (alg != HL_CRYPTO_ASYM_NONE && !sig_too_long &&
+         hl_js_budget_charge(ctx, js_asym_units(alg, sig_view.len, pk_len, 0)))) {
         out = JS_EXCEPTION;
+    } else if (sig_too_long) {
+        out = JS_FALSE;
     } else if (alg == HL_CRYPTO_ASYM_NONE) {
         out = JS_ThrowTypeError(ctx,
             "crypto.verify: unsupported alg '%.*s' (use one of "
