@@ -220,6 +220,35 @@ run's count and answers whether the run is over. Two kinds of charge:
   count, and `string_indexof` takes the context and returns -2 with the
   interrupt pending.
 
+The eleventh audit added the work the first pass missed:
+
+- **String to number** (deferred): `JS_ToCStringLen2` charges the string's
+  length - its ASCII path scans the whole string and returns the string's own
+  buffer, so no allocation charged it (`for (;;) +s` on a 16 MB string, and
+  every Hull binding converting an app string). `ToNumber` /
+  `JS_StringToBigInt` / `parseInt` / `parseFloat` charge the length again for
+  the `skip_spaces` + `js_atof` parse.
+- **RegExp flags** (deferred): `Symbol.match` / `matchAll` / `replace` /
+  `split` and String `replaceAll` / `matchAll` scan `ToString(rx.flags)` - an
+  app getter can return any string - for up to four letters
+  (`js_flags_charge`: 4 x its length per call). A `"$<"` in a replacement
+  with named groups and no `>` rescanned the rest of the replacement once per
+  `"$<"` (quadratic in one call); `GetSubstitution` charges each scan
+  (checked).
+- **BigInt** (checked, before the work): `js_bigint_mul` charges
+  `a->len * b->len` limb products, `js_bigint_divrem` `(na - nb + 1) * nb`,
+  a decimal parse (`js_bigint_from_string`) `n_limbs^2 / 2` - each at
+  `JS_WORK_LIMB` (8, 1/8 unit per limb multiply-add) - and `toString` in a
+  radix that is not a power of two `len^2 / 2` limb divisions at
+  `JS_WORK_LIMB_DIV` (32, 1/2 unit). A 2^20-bit square (2^28 products) is
+  about 33M units. `js_bigint_pow` (`**`) is a chain of charged
+  multiplications; it now frees its partial result when one fails (an
+  upstream leak the charge made reachable).
+- **Typed-array construction** (checked): `new TA(arrayLike)`
+  (`js_typed_array_constructor_obj`), `TA.from` and `js_array_from_iterator`
+  charge `JS_WORK_ELEM` per element, like `Array.from` -
+  `new Uint8Array({ length: 5e7 })` ran 5e7 property reads in one step.
+
 The allocator charge is in the core (`js_malloc_rt` / `js_realloc_rt`), not a
 custom `JSMallocFunctions` table, so it can make the next step poll (an
 allocator has no context) and keeps QuickJS's own slab allocator and memory
@@ -228,4 +257,6 @@ behaves as upstream (the JS source frontend's tooling session sets none).
 
 **Guard:** `tests/hull/runtime/js/test_js.c`,
 `js_audit10.builtin_work_is_charged` (each case trips a 1M budget within
-seconds; several never return without the patch).
+seconds; several never return without the patch) and
+`js_audit11.builtin_work_is_charged` (each loop trips a 1M budget within
+49 iterations, counted rather than timed).

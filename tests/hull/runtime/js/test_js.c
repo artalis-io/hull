@@ -9616,4 +9616,126 @@ UTEST(js_audit10, public_key_operations_are_charged)
     }
 }
 
+/* ── Audit 11 ────────────────────────────────────────────────────────── */
+
+/* Work QuickJS HULL PATCH 0005 still missed: string-to-number (the
+ * JS_ToCStringLen ASCII path scans and allocates nothing), the app-supplied
+ * RegExp `flags` string, a "$<" replacement rescanned per "$<", quadratic
+ * BigInt arithmetic, and the generic per-index loops of typed-array
+ * construction. Each loop counts its iterations (no wall-clock bound: the
+ * sanitizer jobs are slow) and must trip a 1M budget, uncatchably, within a
+ * handful of them - without the charge each ran hundreds to hundreds of
+ * thousands, or one call ran for seconds. */
+UTEST(js_audit11, builtin_work_is_charged)
+{
+    static const char *const srcs[] = {
+        /* string -> number, over a 4 MB string */
+        "const s = ' '.repeat(1 << 22); for (;;) { __a11++; +s; }",
+        "const s = ' '.repeat(1 << 22); for (;;) { __a11++; Number(s); }",
+        "const s = ' '.repeat(1 << 22); for (;;) { __a11++; parseFloat(s); }",
+        "const s = ' '.repeat(1 << 22); for (;;) { __a11++; parseInt(s); }",
+        "const s = ' '.repeat(1 << 22); for (;;) { __a11++; BigInt(s); }",
+        "const s = '1'.repeat(1 << 22); for (;;) { __a11++; s * 1; }",
+        /* an app `flags` string, scanned per call */
+        "const re = /a/; const f = 'x'.repeat(1 << 22);"
+        " Object.defineProperty(re, 'flags', { get: () => f });"
+        " for (;;) { __a11++; re[Symbol.replace]('a', 'b'); }",
+        "const re = /a/; const f = 'x'.repeat(1 << 22);"
+        " Object.defineProperty(re, 'flags', { get: () => f });"
+        " for (;;) { __a11++; re[Symbol.match]('a'); }",
+        /* "$<" with no '>' rescans the rest of the replacement: quadratic */
+        "for (;;) { __a11++; 'a'.replace(/(?<n>a)/, '$<'.repeat(1 << 16)); }",
+        /* BigInt: quadratic in limbs */
+        "const a = (1n << 500000n) - 1n; for (;;) { __a11++; a * a; }",
+        "const a = (1n << 500000n) - 1n, b = (1n << 250000n) + 1n;"
+        " for (;;) { __a11++; a / b; }",
+        "const a = (1n << 500000n) - 1n, b = (1n << 250000n) + 1n;"
+        " for (;;) { __a11++; a % b; }",
+        "const a = (1n << 200000n) - 1n; for (;;) { __a11++; a.toString(); }",
+        "const a = (1n << 200000n) - 1n; for (;;) { __a11++; String(a); }",
+        "const s = '9'.repeat(200000); for (;;) { __a11++; BigInt(s); }",
+        "for (;;) { __a11++; 3n ** 300000n; }",
+        /* typed-array construction from an array-like */
+        "for (;;) { __a11++; new Uint8Array({ length: 1 << 24 }); }",
+        "for (;;) { __a11++; Uint8Array.from({ length: 1 << 24 }); }",
+    };
+    static const char readback[] =
+        "globalThis.__a11c * 1000000 + globalThis.__a11";
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        char code[1024];
+        snprintf(code, sizeof code,
+                 "globalThis.__a11 = 0; globalThis.__a11c = 0;\n"
+                 "try { %s } catch (e) { globalThis.__a11c = 1; }\n", srcs[i]);
+        hl_js_reset_request(&lim);
+        EXPECT_TRUE_MSG(a5_eval_throws(&lim, code), srcs[i]);
+        EXPECT_EQ_MSG(lim.budget_tripped, 1, srcs[i]);
+        hl_js_reset_request(&lim);
+        JSValue v = JS_Eval(lim.ctx, readback, strlen(readback), "<t>",
+                            JS_EVAL_TYPE_GLOBAL);
+        int32_t r = -1;
+        JS_ToInt32(lim.ctx, &r, v);
+        JS_FreeValue(lim.ctx, v);
+        EXPECT_GT_MSG(r, 0, srcs[i]);    /* it ran, the catch never did, */
+        EXPECT_LT_MSG(r, 50, srcs[i]);   /* and it stopped within 49 */
+    }
+    /* Ordinary work on ordinary data still fits a normal budget. */
+    hl_js_free(&lim);
+    ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "let t = 0;\n"
+        "for (let i = 0; i < 100000; i++) t += +' 12.5 ' + parseInt('42', 10);\n"
+        "if (t !== 5450000) throw 1;\n"
+        "if (BigInt('123456789012345678901234567890') % 7n !== 0n) throw 2;\n"
+        "const p = 2n ** 4096n; if ((p * p / p) !== p) throw 3;\n"
+        "if (p.toString().length !== 1234) throw 4;\n"
+        "if ('a-b-c'.replace(/-/g, '+') !== 'a+b+c') throw 5;\n"
+        "if ('x1y2'.split(/\\d/).length !== 3) throw 6;\n"
+        "if ([...'abab'.matchAll(/a/g)].length !== 2) throw 7;\n"
+        "if (new Uint8Array({ length: 100000 }).length !== 100000) throw 8;\n"
+        "if (Uint8Array.from([1, 2, 3])[2] !== 3) throw 9;\n"
+        "if ('a'.replace(/(?<n>a)/, '[$<n>]') !== '[a]') throw 10;\n"));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    hl_js_free(&lim);
+}
+
+/* L: an RSA verify was charged by the signature's length, which is the
+ * attacker's: a 1024-byte signature cost an RSA-8192's 8^3 * 2^14 units
+ * whatever the key. Bounded by the public key's PEM now (at most 6 bits per
+ * PEM byte), and a signature longer than any key mbedTLS takes is false,
+ * uncharged. The same numbers as the Lua runtime. */
+UTEST(js_audit11, rsa_verify_is_charged_by_the_key)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    /* 100 verifies of a 1024-byte signature against a 300-byte PEM (at most
+     * 1800 bits: 2^3 * 2^14 units each, 13M in all) fit a 100M budget; at
+     * the signature's 8192 bits they were 860M. */
+    js.max_instructions = 100000000;
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int(
+        "(() => { const pem = 'A'.repeat(300), sig = 's'.repeat(1024);"
+        " for (let i = 0; i < 100; i++)"
+        "   if (crypto.verify('RS256', pem, 'm', sig)) return 2;"
+        " return 1; })()"), 1);
+    EXPECT_EQ(js.budget_tripped, 0);
+    /* An oversized signature is false and costs nothing beyond its data. */
+    js.max_instructions = 1000000;
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int(
+        "(() => { const pem = 'A'.repeat(20000), sig = 's'.repeat(4096);"
+        " for (let i = 0; i < 1000; i++)"
+        "   if (crypto.verify('PS256', pem, 'm', sig)) return 2;"
+        " return 1; })()"), 1);
+    EXPECT_EQ(js.budget_tripped, 0);
+    /* A long key with a signature its length is still charged in full. */
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int(
+        "crypto.verify('RS256', 'A'.repeat(2000), 'm', 's'.repeat(1024)) ? 1 : 0"),
+        -9999);
+    EXPECT_EQ(js.budget_tripped, 1);
+    cleanup_js();
+}
+
 UTEST_MAIN();

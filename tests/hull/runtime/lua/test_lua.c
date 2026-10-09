@@ -9673,21 +9673,52 @@ UTEST(lua_audit10, asymmetric_crypto_is_charged)
         1000000, err, sizeof err), LUA_OK);
 
     /* RSA is charged by size before the key is parsed: a 5000-byte PEM is
-     * ~6.7k bits (7^3 * 2^14 units), a 1024-byte signature 8192 bits (8^3 *
-     * 2^14), both over the limit at once (the junk key would otherwise be
-     * refused, or the signature be false). */
+     * ~6.7k bits (7^3 * 2^14 units), a 1024-byte signature against a key
+     * that may be that long 8192 bits (8^3 * 2^14), both over the limit at
+     * once (the junk key would otherwise be refused, or the signature be
+     * false). */
     EXPECT_NE(audit10_run(
         "return crypto.sign('RS256', string.rep('A', 5000), 'm')",
         1000000, err, sizeof err), LUA_OK);
     EXPECT_NE(strstr(err, "instruction limit"), NULL);
     EXPECT_NE(audit10_run(
-        "return crypto.verify('RS256', 'junk', 'm', string.rep('s', 1024))",
+        "return crypto.verify('RS256', string.rep('A', 2000), 'm', string.rep('s', 1024))",
         1000000, err, sizeof err), LUA_OK);
     EXPECT_NE(strstr(err, "instruction limit"), NULL);
     /* An ES256 verify is one scalar multiplication. */
     EXPECT_EQ(audit10_run(
         "return crypto.verify('ES256', 'junk', 'm', string.rep('s', 64))",
         1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+}
+
+/* Audit 11 L: an RSA verify was charged by the signature's length, which is
+ * the attacker's: a 1024-byte signature cost an RSA-8192's 8^3 * 2^14 units
+ * whatever the key. It is bounded by the public key's PEM now (at most
+ * 6 bits per PEM byte), and a signature longer than any key mbedTLS takes is
+ * false, uncharged. The same numbers as the JS runtime. */
+UTEST(lua_audit11, rsa_verify_is_charged_by_the_key)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    /* 100 verifies of a 1024-byte signature against a 300-byte PEM (at most
+     * 1800 bits: 2^3 * 2^14 units each, 13M in all) fit a 100M budget; at
+     * the signature's 8192 bits they were 860M. */
+    EXPECT_EQ(audit10_run(
+        "local pem = string.rep('A', 300) local sig = string.rep('s', 1024) "
+        "for i = 1, 100 do assert(not crypto.verify('RS256', pem, 'm', sig)) end "
+        "return 1", 100000000, err, sizeof err), LUA_OK);
+    /* An oversized signature is false and costs nothing beyond its data. */
+    EXPECT_EQ(audit10_run(
+        "local pem = string.rep('A', 20000) local sig = string.rep('s', 4096) "
+        "for i = 1, 1000 do assert(not crypto.verify('PS256', pem, 'm', sig)) end "
+        "return 1", 1000000, err, sizeof err), LUA_OK);
+    /* A long key with a signature its length is still charged in full. */
+    EXPECT_NE(audit10_run(
+        "return crypto.verify('RS256', string.rep('A', 2000), 'm', string.rep('s', 1024))",
+        1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
     cleanup_lua_caps();
 }
 

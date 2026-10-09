@@ -78,7 +78,8 @@ static void crypto_charge_bcrypt(lua_State *L, lua_Integer rounds,
  * less than one scalar multiplication) and capped at 16384. The key's size
  * is not known before mbedTLS parses it, so it comes from what the caller
  * handed in: for a verify, the signature (an RSA signature is exactly the
- * modulus long, and a shorter one is refused before any exponentiation);
+ * modulus long, and a shorter one is refused before any exponentiation),
+ * bounded by the public key PEM's length (audit 11, see lua_crypto_verify);
  * for a sign, the PEM: a PKCS#1 / PKCS#8 private key carries n, d, p, q and
  * the CRT values, so bits ~= PEM length * 4/3, an upper bound for a real
  * key. The same numbers as the JS runtime (runtime/js/mod_crypto.c). */
@@ -441,11 +442,23 @@ static int lua_crypto_verify(lua_State *L)
             "crypto.hmac_sha256_verify; 'none' is rejected)",
             (int)alg_len, alg_str);
 
-    /* audit 10: an RSA signature is the modulus long (see the top). */
-    if (crypto_alg_is_rsa(alg))
-        crypto_charge_rsa_bits(L, (uint64_t)sig_len * 8u);
-    else
+    /* audit 10: an RSA signature is the modulus long (see the top).
+     * audit 11: the signature is the caller's adversary's, so the size is
+     * bounded by the public key: its PEM's base64 carries at most 3/4 of its
+     * length in DER bytes, the modulus among them - at most pk_len * 6 bits.
+     * A signature longer than HL_CRYPTO_SIGN_MAX (an RSA-8192's, mbedTLS's
+     * ceiling) cannot verify: false, uncharged. Same as the JS runtime. */
+    if (crypto_alg_is_rsa(alg)) {
+        if (sig_len > HL_CRYPTO_SIGN_MAX) {
+            lua_pushboolean(L, 0);
+            return 1;
+        }
+        uint64_t sig_bits = (uint64_t)sig_len * 8u;
+        uint64_t key_bits = (uint64_t)pk_len * 6u;
+        crypto_charge_rsa_bits(L, sig_bits < key_bits ? sig_bits : key_bits);
+    } else {
         crypto_charge_asym(L);
+    }
     int rc = hl_cap_crypto_asym_verify_default(pk, pk_len, alg,
                                          data, data_len, sig, sig_len);
     /* rc == 0 -> verified. rc < 0 -> any failure (bad sig, bad PEM,
