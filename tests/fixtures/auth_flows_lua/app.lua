@@ -40,6 +40,14 @@ local next_id = 0
 local sent_emails = {}
 local slow_templates = false
 
+-- The lookup FOLDS case and accents, as a MySQL utf8mb4_0900_ai_ci column
+-- does (audit 12): a token asked for under a lookalike address must not be
+-- issued, and none is mailed to the address typed.
+local function fold(e)
+    return (e:lower():gsub("\xc3\xa4", "a"):gsub("\xc3\x84", "a")
+                     :gsub("\xc3\xa9", "e"):gsub("\xc3\x89", "e"))
+end
+
 local function user_create(email, pwhash)
     next_id = next_id + 1
     local id = "u" .. tostring(next_id)
@@ -47,7 +55,7 @@ local function user_create(email, pwhash)
         id = id, email = email, password_hash = pwhash,
         email_verified = 0,   -- a raw row: 0 / 1 (audit 6: Lua read 0 as true)
     }
-    users_by_email[email] = u
+    users_by_email[fold(email)] = u
     users_by_id[id] = u
     return id
 end
@@ -96,7 +104,7 @@ authflows.init({
                      text = "link: " .. ctx.link }
         end,
     },
-    user_find_by_email = function(email) return users_by_email[email] end,
+    user_find_by_email = function(email) return users_by_email[fold(email)] end,
     -- user_get keeps the hash out of the model (a common adapter habit):
     -- auth-flows must read it through user_find_by_email (audit 6 M1).
     user_get           = function(id)
@@ -110,9 +118,9 @@ authflows.init({
     end,
     user_set_email = function(id, email)
         local u = users_by_id[id]
-        users_by_email[u.email] = nil
+        users_by_email[fold(u.email)] = nil
         u.email = email
-        users_by_email[email] = u
+        users_by_email[fold(email)] = u
     end,
     user_set_email_verified = function(id, v)
         users_by_id[id].email_verified = v and 1 or 0

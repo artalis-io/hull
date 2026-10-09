@@ -207,7 +207,7 @@ await test("a user setter returning a Promise is refused (M-d)", async () => {
 
 await test("a pending-2FA token dies with the password it was issued against", async () => {
     resetStore();
-    init({ enableTotp: true, userTotpEnrolled: () => true, totpVerify: () => true });
+    init({ enableTotp: true, totpDisable: () => {}, userTotpEnrolled: () => true, totpVerify: () => true });
     const u = addUser(9, "u9@x.test", "first-password-1", true);
     let res = mkRes();
     await H.login(mkReq({ email: "u9@x.test", password: "first-password-1" }), res);

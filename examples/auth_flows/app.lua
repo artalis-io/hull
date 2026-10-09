@@ -202,7 +202,7 @@ end)
 
 -- ── Adding TOTP 2FA on top: ─────────────────────────────────────────
 --
--- auth-flows composes with hull/web/middleware/totp via two
+-- auth-flows composes with hull/web/middleware/totp via three
 -- callbacks. With these set, a successful password login or
 -- magic-link click for an enrolled user yields
 --   { ok: true, pending_2fa: true, totp_token: "..." }
@@ -219,6 +219,9 @@ end)
 --       totp_verify        = function(user, code)
 --           return totp.verify(user.id, code)
 --       end,
+--       -- Required with enable_totp (init raises without it): removes
+--       -- a second factor a pre-registrant or a thief enrolled.
+--       totp_disable       = function(uid) return totp.disable(uid) end,
 --   })
 --
 -- See tests/fixtures/auth_flows_2fa_lua/ for an end-to-end fixture

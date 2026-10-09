@@ -221,7 +221,7 @@ end)
 
 test("a pending-2FA token dies with the password it was issued against", function()
     reset_store()
-    init({ enable_totp = true,
+    init({ enable_totp = true, totp_disable = function() end,
            user_totp_enrolled = function() return true end,
            totp_verify = function() return true end })
     local u = add_user(9, "u9@x.test", "first-password-1", true)

@@ -155,6 +155,7 @@ app.manifest({ modules = {
     "hull/web/middleware/inbox@1", "hull/web/middleware/rbac@1",
     "hull/web/middleware/audit-log@1", "hull/web/middleware/transaction@1",
     "hull/web/auth-health@1", "hull/web/middleware/totp@1",
+    "hull/web/auth-flows@1",
 } })
 local db = require("hull.db").default()
 local session = require("hull.web.middleware.session")
@@ -166,6 +167,7 @@ local transaction = require("hull.web.middleware.transaction")
 local auth_health = require("hull.web.auth-health")
 local search = require("hull.search")
 local totp = require("hull.web.middleware.totp")
+local authflows = require("hull.web.auth-flows")
 session.init()
 totp.init({})
 outbox.init()
@@ -318,6 +320,26 @@ app.get("/txn6", function(req, res)
         async_begin_refused = (not async_ok) and tostring(async_err):find("cannot span", 1, true) ~= nil,
     })
 end)
+-- Audit 12: auth-flows' standard_users lookup is exact. The table keeps the
+-- server's default collation (MySQL 8: utf8mb4_0900_ai_ci), which matches
+-- 'JOSE@x.test' and 'jos\xc3\xa9@x.test' to 'jose@x.test'; a token for the
+-- account was then issued to whoever typed the lookalike.
+app.get("/users_exact", function(req, res)
+    db.exec("DROP TABLE IF EXISTS af_users")
+    db.exec("CREATE TABLE af_users (id VARCHAR(64) PRIMARY KEY, "
+            .. "email VARCHAR(255) NOT NULL UNIQUE, password_hash TEXT, "
+            .. "email_verified INT NOT NULL DEFAULT 0, "
+            .. "created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)")
+    local users = authflows.standard_users({ table = "af_users" })
+    local id = users.create("jose@x.test", "h")
+    local exact = users.find_by_email("jose@x.test")
+    res:json({
+        sql_folds  = #db.query("SELECT id FROM af_users WHERE email = ?", { "JOSE@x.test" }),
+        exact      = (exact ~= nil and exact.id == id),
+        upper_nil  = users.find_by_email("JOSE@x.test") == nil,
+        accent_nil = users.find_by_email("jos\xc3\xa9@x.test") == nil,
+    })
+end)
 app.get("/totp", function(req, res)
     local t = totp._test
     for _ = 1, 5 do t.bump_failed_attempt("totp-user") end
@@ -387,6 +409,13 @@ RESP_TOTP=$(curl -fsS "http://127.0.0.1:${PORT}/totp" || echo FAIL)
 echo "totp response: $RESP_TOTP"
 echo "$RESP_TOTP" | grep -q '"user_locked":true' || { echo "::error totp per-user lockout never engaged"; fail=1; }
 echo "$RESP_TOTP" | grep -q '"ip_locked":true'   || { echo "::error totp per-IP lockout never engaged"; fail=1; }
+
+# auth-flows' standard_users lookup is exact on a folding collation (audit 12).
+RESP_USERS=$(curl -fsS "http://127.0.0.1:${PORT}/users_exact" || echo FAIL)
+echo "users_exact response: $RESP_USERS"
+echo "$RESP_USERS" | grep -q '"exact":true'      || { echo "::error standard_users did not find the exact address"; fail=1; }
+echo "$RESP_USERS" | grep -q '"upper_nil":true'  || { echo "::error standard_users matched a case variant"; fail=1; }
+echo "$RESP_USERS" | grep -q '"accent_nil":true' || { echo "::error standard_users matched an accent variant"; fail=1; }
 
 # backend-agnostic DB stdlib on MySQL: inbox / rbac / audit-log / transaction / insert_if_absent
 RESP_STDLIB2=$(curl -fsS "http://127.0.0.1:${PORT}/stdlib2" || echo FAIL)

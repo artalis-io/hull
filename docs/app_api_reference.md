@@ -399,7 +399,27 @@ verify step between successful first-factor auth and `on_login` when
     password (the verify step is shown, never skipped).
     `email_verified` is a boolean; `0` / `1` from a raw row are read as
     false / true in both runtimes. Anything else (a string `"0"` /
-    `"1"` / `"true"` from a TEXT column) reads as NOT verified in both.
+    `"1"` / `"true"` from a TEXT column) reads as NOT verified in both
+    (and an email-change confirm logs a warning and records the old
+    address's state as unknown: held for the undo, restored unverified).
+    **`user_find_by_email` must compare exactly** (audit 12): return an
+    account only when its stored address is the address asked for. A
+    lookup that folds case or accents - a MySQL `utf8mb4_0900_ai_ci`
+    column matches `josé@x` to `jose@x` and `Alice@x` to `alice@x`, as
+    does a `LOWER()` lookup, a SQLite `NOCASE` or a Postgres `citext`
+    column - answers logins and token requests typed as somebody else's
+    lookalike address. `standard_users` filters its SQL match down to the
+    row whose stored address is the same string as the one asked for, so
+    it is exact whatever the column's collation.
+    **Token mails go to the stored address** (audit 12): a password reset,
+    magic link or verify resend - from the routes or from
+    `send_password_reset` / `send_magic_link` - is mailed to the account's
+    stored `email`, and issued at all only when the typed address is that
+    address (the domain may differ in ASCII case; anything else - another
+    case in the local part, an accent, an IDN spelling - gets the usual
+    `{ok:true}` and no mail). It used to be mailed to the address typed:
+    with a folding lookup, whoever read the lookalike mailbox received a
+    token for the account it was matched to.
   - `opts.on_login(req, res, user)` / `opts.on_logout(req, res)`. App
     issues its own session (cookie, JWT, whatever) here. Module is
     session-agnostic. **Shortcut:** wire
@@ -438,8 +458,11 @@ verify step between successful first-factor auth and `on_login` when
     the request's host and port as sent).
   - `opts.enable_totp` (default `false`). Opt in to TOTP-as-second-
     factor on successful password login OR magic-link click. Requires
-    `opts.user_totp_enrolled(user_id) -> boolean` and
-    `opts.totp_verify(user, code) -> boolean`. Apps typically delegate
+    `opts.user_totp_enrolled(user_id) -> boolean`,
+    `opts.totp_verify(user, code) -> boolean` and (audit 12; init raises
+    without it) `opts.totp_disable(user_id)` (`totpDisable`, typically
+    `totp.disable`), which removes a second factor a pre-registrant or the
+    maker of an undone email change enrolled. Apps typically delegate
     to `hull/web/middleware/totp` from these two callbacks; the
     recovery-code path flows transparently because `totp.verify`
     accepts both 6-digit and recovery codes.
@@ -499,10 +522,23 @@ verify step between successful first-factor auth and `on_login` when
       proof of a recent sign-in, and is the way for passwordless
       accounts.
     - **Email-change notify+revoke** activates implicitly when the
-      app provides a `templates.email_change_notify` template. A
+      app provides a `templates.email_change_notify` template, and then
+      REQUIRES `opts.on_password_reset` (audit 12; init raises without it -
+      the undo revokes the account's sessions through it; pass a no-op
+      function if the app keeps no sessions). A
       revoke link is sent to the OLD address on every email-change
       request, bound to that request (a link from an earlier change
-      does nothing to a later one). Clicking it (and submitting the
+      does nothing to a later one). The notice is the only carrier of the
+      undo link, so it cannot be suppressed (audit 12): it is not subject
+      to the per-recipient `email_rate_limit` (three anonymous magic-link or
+      reset requests for the old address used to fill it, and the notice
+      was dropped silently), it is sent before the confirm mail, and when it
+      cannot be sent - `email_send` throws, returns `false` or (JS) returns a
+      Promise that rejects, which is awaited; the template fails; the account
+      has no address - the change is not started: no pending row is left and
+      the request answers 503 (`{error = "could not notify the current
+      address; email change not started"}`). A failing confirm mail to the
+      new address likewise leaves no pending row. Clicking it (and submitting the
       page it opens, `/email-change/revoke?token=…`) cancels the change
       while it is pending, and **after it was confirmed restores the old
       address** (the row keeps it until the link expires,
@@ -538,32 +574,59 @@ verify step between successful first-factor auth and `on_login` when
       (new changes paused) and revokes every session (audit 10), so whoever
       made the change cannot sign straight back in and move the account
       again. Since audit 11 it also removes the second factor
-      (`totp_disable`), and while that row lives (`email_change_ttl`)
-      **self-service recovery of the account is locked**: no password reset
-      or magic link is issued for it (`/password-reset/request`,
-      `/magic-link`, `send_password_reset`, `send_magic_link` stay silent)
-      and one issued earlier is refused - the account's address is still
-      the one the change set, so a reset mailed there handed the account
-      back. The log line names the account; an operator restores it by
-      hand.
+      (`totp_disable`), and **self-service recovery of the account is
+      locked**: no password reset or magic link is issued for it
+      (`/password-reset/request`, `/magic-link`, `send_password_reset`,
+      `send_magic_link` stay silent), one issued earlier is refused, and
+      email changes are paused - the account's address is still the one the
+      change set, so a reset mailed there handed the account back. Since
+      audit 12 the lock **does not expire** and the cleanup does not reap it
+      (it used to lapse after `email_change_ttl`, handing the account back
+      then): the log line names the account; an operator restores it by
+      hand (its address and password) and then calls
+      `authflows.unlock_recovery(user_id)` (`unlockRecovery`), which returns
+      `true` when it cleared a lock. The undo writes the lock (or the undone
+      mark) **before** it touches the account - a failure part way leaves
+      the lock in place - and runs `on_password_reset` before `totp_disable`
+      (an async `totpDisable` no longer delays the session revocation). A
+      restore that the database refuses (an app lookup that folds less than
+      its unique index) is treated as an address in use: the lock, not a
+      half-done undo.
+      **What the undo cannot protect.** An old address that was not
+      verified when the change was confirmed is not reserved (below), so
+      another account may take it before the undo, which then locks
+      recovery instead of restoring. And a change confirmed by someone who
+      reads both mailboxes cannot be told from the owner's own.
     - **While a confirmed change can still be undone, its old address is
       reserved** for the undo (audit 10): `/register` answers its usual
       `{ok:true}` but creates no account (and mails nothing), magic-link
       auto-signup (and `send_magic_link`) creates none, and another
       account's email change to it - its request or its confirm - answers
       409 as for an address in use. The address is compared
-      case-insensitively. Before, registering the vacated address took it,
+      case-insensitively (a superset of the exact match `user_find_by_email`
+      must make, so every account the undo can find holding the address is
+      one the reservation kept the module's own paths from creating). Before, registering the vacated address took it,
       and the undo then had nothing to restore to: the thief kept the
       account. Only an address that was **verified** when the change was
       confirmed is reserved (audit 11): an unverified one may be anybody's,
       and holding it let its registrant keep the real owner from
-      registering it (and learn the account had moved). The confirmed row is
+      registering it (and learn the account had moved). An address whose
+      verified state could not be read (`email_verified` not a boolean or
+      number) is held (audit 12). The confirmed row is
       written before the address is switched, so another instance cannot
       claim the address in between. **An app that creates accounts or changes
       addresses itself** checks `authflows.email_reserved(email)`
       (`emailReserved`) and treats a `true` as an address in use.
     - An email-change confirm whose new address another account has taken
       since the request answers 409 and leaves the link usable.
+    - The confirm and the revoke change the pending row only while it is
+      still the state they read (audit 12): their writes are keyed on the
+      change's token hash and pending / confirmed state and checked by row
+      count, so a revoke landing on another instance between a confirm's
+      check and its write stops the confirm (400), and a revoke whose
+      pending change was confirmed meanwhile undoes the confirmed change. A
+      confirm whose address switch (`user_set_email`) fails deletes the row
+      rather than putting it back to pending - its link is already consumed.
     - A pending-2FA token (`totp_token`) is bound to the password and
       address the first factor was checked against, as a reset token is: a
       password reset or an undone email change voids it (400).
@@ -673,7 +736,11 @@ verify step between successful first-factor auth and `on_login` when
 - `authflows.send_verify_email(user, url_prefix)`,
   `authflows.send_password_reset(email, url_prefix)`,
   `authflows.send_magic_link(email, url_prefix)`. Standalone helpers
-  for admin/programmatic triggers (resend, etc.).
+  for admin/programmatic triggers (resend, etc.). The last two mail the
+  account's stored address, and only when `email` is it (audit 12).
+- `authflows.email_reserved(email)` (`emailReserved`) - see above.
+- `authflows.unlock_recovery(user_id)` (`unlockRecovery`) - clears the
+  recovery lock of an undo that could not restore (see above).
 - Token format: `base64url(JSON{sub, action, exp, nonce}) "." hmac_hex`.
   Signature framing comes from `hull/crypto/envelope` (shared with
   the OAuth state cookie); auth-flows layers single-use enforcement
@@ -705,6 +772,23 @@ verify step between successful first-factor auth and `on_login` when
   column always stored the id's text; only the comparisons changed).
   Pending-2FA tokens issued before the
   upgrade carry no password binding and are refused: sign in again.
+- **Upgrading (audit 12).** Behaviour changes:
+  - `init` raises for `templates.email_change_notify` without
+    `on_password_reset`, and for `enable_totp = true` without
+    `totp_disable` (pass `totp.disable`).
+  - Token mails go to the stored address and need the typed address to be
+    it; an app whose `user_find_by_email` folds case keeps working for
+    users who type their address as stored (or with the domain in another
+    case), and silently mails nothing otherwise. Make the lookup exact.
+    `standard_users` is exact now: on a case-insensitive column an address
+    typed in another case no longer finds the account (login answers 401).
+  - A recovery lock no longer expires: one written before the upgrade
+    whose `email_change_ttl` had not passed stays until
+    `unlock_recovery`; one already reaped is gone.
+  - An email change whose notice cannot be sent answers 503 and starts
+    nothing (it used to start, and the notice could be lost).
+  - Rows already in `_hull_auth_pending_email_changes` carry over;
+    `old_verified = 2` (unknown) is new and is held like `1`.
 - Email-change flow re-verifies on the NEW address - old email stays
   active until the user clicks the link sent to the new one.
 

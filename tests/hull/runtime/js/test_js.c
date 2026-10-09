@@ -5175,6 +5175,23 @@ UTEST(js_stdlib, auth_audit10_suite)
     cleanup_js_caps();
 }
 
+/* Auth-flows regressions from audit 12 (token mails go to the stored address,
+ * exact standardUsers lookup, unsuppressible email-change notice, persistent
+ * recovery lock, keyed revoke / confirm writes, init requirements). */
+UTEST(js_stdlib, auth_audit12_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_auth_audit12.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, toast_suite)
 {
     init_js_with_caps();
