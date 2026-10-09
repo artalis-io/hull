@@ -1945,6 +1945,7 @@ Key findings to be aware of:
 - Resource cleanup: every `_init` has a corresponding `_free`
 - All SQLite access through `hl_cap_db_*`. Never call sqlite3 directly from bindings
 - All filesystem access through `hl_cap_fs_*`. Never call open/read/write directly from runtimes
+- Keel's router stores the method / pattern pointers (and middleware / ws-upgrade config pointers) it is given **without copying**: everything handed to `kl_http_router_add*` / `_use` / `_use_post` / `kl_http_server_route*` / `_use*` / `_ws_upgrade` must be Hull-owned and outlive the server - never a `JS_ToCString` / `lua_tostring` result (the route contexts `HlJSRoute` / `HlLuaRoute` own copies, ws / sse routes a `path[256]`; audit 11 H1). Every registration failure (allocation, conversion, a Keel refusal) fails the wiring so the app refuses to start; a dropped middleware must never fail open
 - Public Hull functions prefixed with `hl_` (capabilities: `hl_cap_*`, tools: `hl_tool_*`, commands: `hl_cmd_*`)
 - Keel functions prefixed with `kl_` (see vendor/keel/CLAUDE.md)
 

@@ -300,11 +300,16 @@ void hl_lua_make_response_life(lua_State *L, KlHttpResponse *res,
  * this public header doesn't pull in keel's body_reader_multipart.h
  * (the actual type is `KlHttpMultipartConfig *`); freed alongside the
  * route in hl_lua_free.
+ *
+ * method / pattern are Hull-owned copies (freed with the route): Keel's
+ * router keeps the pointers it is given without copying them.
  */
 typedef struct {
     HlLua *lua;
     int    handler_id;
     void  *multipart_config;  /* (KlHttpMultipartConfig *), NULL = not streaming */
+    char  *method;            /* owned copy; Keel stores this pointer */
+    char  *pattern;           /* owned copy; Keel stores this pointer */
 } HlLuaRoute;
 
 /*

@@ -535,6 +535,22 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
     return 0;
 }
 
+/* Free an HlLuaRoute and everything it owns. Lives here, not in
+ * routes.c: routes.c is in the composed HTTP bridge archive, while
+ * the teardown that calls this is in the always-linked runtime. */
+void hl_lua_route_destroy(HlLua *lua, HlLuaRoute *route)
+{
+    if (!route) return;
+    if (route->multipart_config)
+        hl_alloc_free(lua->base.alloc, route->multipart_config,
+                      sizeof(KlHttpMultipartConfig));
+    if (route->method)
+        hl_alloc_free(lua->base.alloc, route->method, strlen(route->method) + 1);
+    if (route->pattern)
+        hl_alloc_free(lua->base.alloc, route->pattern, strlen(route->pattern) + 1);
+    hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
+}
+
 void hl_lua_free(HlLua *lua)
 {
     if (!lua)
@@ -567,12 +583,7 @@ void hl_lua_free(HlLua *lua)
     /* Free tracked route allocations (and per-route multipart configs
      * stashed by hl_lua_wire_routes_server). */
     for (size_t i = 0; i < lua->route_count; i++) {
-        HlLuaRoute *r = (HlLuaRoute *)lua->routes[i];
-        if (r && r->multipart_config) {
-            hl_alloc_free(lua->base.alloc, r->multipart_config,
-                          sizeof(KlHttpMultipartConfig));
-        }
-        hl_alloc_free(lua->base.alloc, r, sizeof(HlLuaRoute));
+        hl_lua_route_destroy(lua, (HlLuaRoute *)lua->routes[i]);
     }
     if (lua->routes) {
         hl_alloc_free(lua->base.alloc, lua->routes,

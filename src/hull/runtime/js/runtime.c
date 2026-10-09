@@ -1380,6 +1380,22 @@ void hl_js_reset_request(HlJS *js)
         sh_arena_reset(js->scratch);
 }
 
+/* Free an HlJSRoute and everything it owns. Lives here, not in
+ * routes.c: routes.c is in the composed HTTP bridge archive, while
+ * the teardown that calls this is in the always-linked runtime. */
+void hl_js_route_destroy(HlJS *js, HlJSRoute *route)
+{
+    if (!route) return;
+    if (route->multipart_config)
+        hl_alloc_free(js->base.alloc, route->multipart_config,
+                      sizeof(KlHttpMultipartConfig));
+    if (route->method)
+        hl_alloc_free(js->base.alloc, route->method, strlen(route->method) + 1);
+    if (route->pattern)
+        hl_alloc_free(js->base.alloc, route->pattern, strlen(route->pattern) + 1);
+    hl_alloc_free(js->base.alloc, route, sizeof(HlJSRoute));
+}
+
 /* Forward declaration for WS client tracking */
 typedef struct HlJSWsClientUD HlJSWsClientUD;
 
@@ -1412,12 +1428,7 @@ void hl_js_free(HlJS *js)
     /* Free tracked route allocations (and per-route multipart configs
      * stashed by hl_js_wire_routes_server). */
     for (size_t i = 0; i < js->route_count; i++) {
-        HlJSRoute *r = (HlJSRoute *)js->routes[i];
-        if (r && r->multipart_config) {
-            hl_alloc_free(js->base.alloc, r->multipart_config,
-                          sizeof(KlHttpMultipartConfig));
-        }
-        hl_alloc_free(js->base.alloc, r, sizeof(HlJSRoute));
+        hl_js_route_destroy(js, (HlJSRoute *)js->routes[i]);
     }
     if (js->routes) {
         hl_alloc_free(js->base.alloc, js->routes,
