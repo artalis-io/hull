@@ -199,6 +199,7 @@ int hl_js_wire_routes(HlJS *js, KlHttpRouter *router)
     JS_FreeValue(ctx, mw_arr);
 
     /* Wire post-body middleware from __hull_post_middleware */
+    int post_failed = 0;
     JSValue post_arr = JS_GetPropertyStr(ctx, global, "__hull_post_middleware");
     if (JS_IsArray(ctx, post_arr)) {
         JSValue post_len = JS_GetPropertyStr(ctx, post_arr, "length");
@@ -226,7 +227,14 @@ int hl_js_wire_routes(HlJS *js, KlHttpRouter *router)
                     r->handler_id = hid;
                     r->multipart_config = NULL;
                     hl_js_track_route(js, r);
-                    kl_http_router_use_post(router, m, p, hl_js_keel_middleware, r);
+                    if (kl_http_router_use_post(router, m, p, hl_js_keel_middleware, r) != 0) {
+                        /* Keel 3.3.0 caps post-body middleware per router;
+                         * a dropped one (CSRF, auth) must not fail open. */
+                        log_error("[hull] could not register post-body middleware %s %s (Keel allows "
+                                  "at most %d per router); refusing to start",
+                                  m, p, KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE);
+                        post_failed = 1;
+                    }
                 }
             }
 
@@ -242,7 +250,7 @@ int hl_js_wire_routes(HlJS *js, KlHttpRouter *router)
 
     JS_FreeValue(ctx, global);
 
-    return 0;
+    return post_failed ? -1 : 0;
 }
 
 /* ── Server route wiring (with body reader factory) ────────────────── */
@@ -449,6 +457,7 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
     JS_FreeValue(ctx, mw);
 
     /* Wire post-body middleware from __hull_post_middleware */
+    int post_failed = 0;
     JSValue post_mw = JS_GetPropertyStr(ctx, global, "__hull_post_middleware");
     if (!JS_IsUndefined(post_mw) && JS_IsArray(ctx, post_mw)) {
         JSValue post_mw_len_val = JS_GetPropertyStr(ctx, post_mw, "length");
@@ -478,8 +487,16 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
                     mw_ctx->handler_id = handler_id;
                     mw_ctx->multipart_config = NULL;
                     hl_js_track_route(js, mw_ctx);
-                    kl_http_server_use_post(server, method_str, pattern,
-                                       hl_js_keel_middleware, mw_ctx);
+                    if (kl_http_server_use_post(server, method_str, pattern,
+                                                hl_js_keel_middleware, mw_ctx) != 0) {
+                        /* Keel 3.3.0 caps post-body middleware per router;
+                         * a dropped one (CSRF, auth) must not fail open. */
+                        log_error("[hull] could not register post-body middleware %s %s (Keel allows "
+                                  "at most %d per router); refusing to start",
+                                  method_str, pattern,
+                                  KL_HTTP_ROUTER_MAX_POST_MIDDLEWARE);
+                        post_failed = 1;
+                    }
                 }
             }
 
@@ -492,6 +509,10 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
         }
     }
     JS_FreeValue(ctx, post_mw);
+    if (post_failed) {
+        JS_FreeValue(ctx, global);
+        return -1;
+    }
 
     /* Wire timers from __hull_timer_defs */
     JSValue timer_defs = JS_GetPropertyStr(ctx, global, "__hull_timer_defs");

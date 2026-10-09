@@ -29,10 +29,10 @@ UTEST(tls_multi_ctx, two_clients_destroyed_lifo)
 {
     KlAllocator a = kl_allocator_default();
 
-    KlTlsCtx *ctx1 = kl_tls_mbedtls_client_ctx_create(NULL, &a);
+    KlTlsCtx *ctx1 = kl_tls_mbedtls_client_ctx_create_insecure(&a);
     ASSERT_TRUE(ctx1 != NULL);
 
-    KlTlsCtx *ctx2 = kl_tls_mbedtls_client_ctx_create(NULL, &a);
+    KlTlsCtx *ctx2 = kl_tls_mbedtls_client_ctx_create_insecure(&a);
     ASSERT_TRUE(ctx2 != NULL);
 
     kl_tls_mbedtls_ctx_destroy(ctx2);
@@ -43,10 +43,10 @@ UTEST(tls_multi_ctx, two_clients_destroyed_fifo)
 {
     KlAllocator a = kl_allocator_default();
 
-    KlTlsCtx *ctx1 = kl_tls_mbedtls_client_ctx_create(NULL, &a);
+    KlTlsCtx *ctx1 = kl_tls_mbedtls_client_ctx_create_insecure(&a);
     ASSERT_TRUE(ctx1 != NULL);
 
-    KlTlsCtx *ctx2 = kl_tls_mbedtls_client_ctx_create(NULL, &a);
+    KlTlsCtx *ctx2 = kl_tls_mbedtls_client_ctx_create_insecure(&a);
     ASSERT_TRUE(ctx2 != NULL);
 
     /* ctx1 was registered first → its node sits deeper in the
@@ -63,11 +63,11 @@ UTEST(tls_multi_ctx, interleaved_create_destroy_create)
     /* Create A, destroy A, create B.  The global hook stays
      * installed forever (kl_mbed_hook_install_once is one-way);
      * B's create must still work - registry add after remove. */
-    KlTlsCtx *ctx_a = kl_tls_mbedtls_client_ctx_create(NULL, &a);
+    KlTlsCtx *ctx_a = kl_tls_mbedtls_client_ctx_create_insecure(&a);
     ASSERT_TRUE(ctx_a != NULL);
     kl_tls_mbedtls_ctx_destroy(ctx_a);
 
-    KlTlsCtx *ctx_b = kl_tls_mbedtls_client_ctx_create(NULL, &a);
+    KlTlsCtx *ctx_b = kl_tls_mbedtls_client_ctx_create_insecure(&a);
     ASSERT_TRUE(ctx_b != NULL);
     kl_tls_mbedtls_ctx_destroy(ctx_b);
 }
@@ -78,7 +78,7 @@ UTEST(tls_multi_ctx, single_client_create_destroy)
      * single-ctx path silently breaks and the multi-ctx tests pass
      * for the wrong reason. */
     KlAllocator a = kl_allocator_default();
-    KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create(NULL, &a);
+    KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create_insecure(&a);
     ASSERT_TRUE(ctx != NULL);
     kl_tls_mbedtls_ctx_destroy(ctx);
 }
