@@ -78,6 +78,8 @@ int hl_lua_register_modules(HlLua *lua)
      * this internally. With no KV backend composed, open() fails closed with a
      * 'hull feature install valkey' hint rather than being absent. */
     register_native_module(L, "hull.kv._native", luaopen_hull_kv_native);
+    /* Detached tasks (underscore: stdlib-only) - auth-flows' deferred mail. */
+    register_native_module(L, "hull._task", luaopen_hull_task);
     /* The C codecs behind hull.encoding (pure computation, no authority). */
     register_native_module(L, "hull.encoding._native", luaopen_hull_encoding_native);
     register_native_module(L, "hull.time",   luaopen_hull_time);

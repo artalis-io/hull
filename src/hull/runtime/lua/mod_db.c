@@ -435,6 +435,19 @@ static int lua_db_last_id(lua_State *L)
     return 1;
 }
 
+/* conn.in_transaction() - whether this connection is inside a transaction
+ * (a db.batch, or a raw BEGIN). False where the backend cannot tell. The
+ * durable-workflow waits (hull.jobs ctx.sleep / ctx.wait_signal) refuse
+ * inside one: they unwind by raising, which rolled back their own record. */
+static int lua_db_in_transaction(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !db_call_handle(L))
+        return luaL_error(L, "database not available");
+    lua_pushboolean(L, hl_db_in_txn(db_call_handle(L)));
+    return 1;
+}
+
 /* db.batch(fn) - execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
 static int lua_db_batch(lua_State *L)
 {
@@ -1027,6 +1040,7 @@ static const luaL_Reg db_conn_methods[] = {
     {"table_columns",    lua_db_table_columns},
     {"quote_identifier", lua_db_quote_identifier},
     {"wait_notify",      lua_db_wait_notify},
+    {"in_transaction",   lua_db_in_transaction},
     {NULL, NULL}
 };
 

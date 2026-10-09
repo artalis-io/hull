@@ -145,6 +145,10 @@ typedef struct HlLua {
      * main has terminated and calls kl_http_server_stop on `server` so the
      * event loop returns. */
     lua_State  *cli_main_co;
+
+    /* hull._task tasks spawned but not yet run (HlLuaTask list, async.c);
+     * released by hl_lua_free. */
+    void       *tasks;
 } HlLua;
 
 /* ── Async push_result callback ─────────────────────────────────────── */

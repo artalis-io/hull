@@ -1104,6 +1104,15 @@ function reap(opts) {
     const o = opts || {};
     const vt = o.visibilityTimeout !== undefined ? o.visibilityTimeout : _cfg.visibilityTimeout;
     const now = time.now();
+    // The stale cutoff. Timestamps are whole seconds (time.now()), so a claim
+    // stamped C was made somewhere in [C, C+1) and "claimed_at <= now - vt"
+    // reaped a claim as little as vt - 1 seconds old: with vt = 1, any claim
+    // (or heartbeat) from the previous second - a handler that had just
+    // heartbeated lost its claim, and its unstarted batch-mates on their last
+    // attempt were dead-lettered, whenever a second boundary fell between the
+    // heartbeat and the reap. One more second makes the age at least vt.
+    // vt <= 0 still means "every running claim, now" (ops and tests).
+    const cutoff = vt > 0 ? now - vt - 1 : now;
     // Wake durable-workflow signal waits whose timeout (run_at > 0) has passed, so
     // they re-run and return null from ctx.waitSignal. run_at = 0 means "no
     // timeout" (wait forever) and is left alone - only jobs.signal wakes it.
@@ -1119,7 +1128,7 @@ function reap(opts) {
             "SELECT id, type, queue, attempts, max_attempts, claim_token FROM _hull_jobs " +
             "WHERE status='running' AND claimed_at <= ? AND attempts >= max_attempts " +
             "LIMIT 500",
-            [now - vt]) || [];
+            [cutoff]) || [];
         let progressed = 0;
         for (const row of exhausted) {
             let outcome = null;
@@ -1129,7 +1138,7 @@ function reap(opts) {
                 const tokened = row.claim_token !== null && row.claim_token !== undefined;
                 const guard = "WHERE id=? AND status='running' AND claimed_at <= ? AND claim_token"
                     + (tokened ? "=?" : " IS NULL");
-                const gargs = tokened ? [row.id, now - vt, row.claim_token] : [row.id, now - vt];
+                const gargs = tokened ? [row.id, cutoff, row.claim_token] : [row.id, cutoff];
                 // A workflow's saga compensations are closures its body
                 // registers as it runs (see the Lua sibling): the first loss on
                 // the last attempt grants ONE more attempt, marked as a
@@ -1171,7 +1180,7 @@ function reap(opts) {
     const reclaimed = db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? " +
         "WHERE status='running' AND claimed_at <= ? AND attempts < max_attempts",
-        [now, now - vt]) || 0;
+        [now, cutoff]) || 0;
     // Reconcile strict-concurrency counters to the true running count. This frees
     // a slot leaked by a crashed worker (its job was just reclaimed) and returns a
     // parked workflow's slot - the self-healing backstop for concReserve/release.
@@ -1957,6 +1966,20 @@ async function runStep(workflowId, stepKey, fn) {
     return res;
 }
 
+// A durable wait suspends the workflow by throwing its yield sentinel up to the
+// runner. Thrown inside the app's db.batch (a sync fn - an async one is
+// refused), it unwound the batch: the rollback took the wait's own record (the
+// "__sleep:N" wake time, the deadline) with it, so the resumed body recorded a
+// new one and waited again - for good. Refused instead, before anything is
+// written (the Lua sibling does the same).
+function refuseInTxn(what) {
+    if (db.inTransaction()) {
+        throw new Error(what + " cannot wait inside db.batch or an open transaction: " +
+            "the workflow suspends by unwinding, which rolls the transaction back " +
+            "with the wait's own record. Call it outside the batch");
+    }
+}
+
 // Durable timer. `n` is the ordinal of this sleep in the workflow body (stable
 // across re-runs). On first encounter it records the wake time and throws the
 // yield sentinel (the runner reschedules the job to run_at = wake_at); on a
@@ -2185,8 +2208,13 @@ function makeCtx(job, name) {
             if (opts && typeof opts.compensate === "function") comps.push({ key: stepKey, fn: opts.compensate });
             return result;
         },
-        sleep: (seconds) => { sleepN += 1; return noPark(() => runSleep(job.id, sleepN, seconds)); },
+        sleep: (seconds) => {
+            refuseInTxn("ctx.sleep");
+            sleepN += 1;
+            return noPark(() => runSleep(job.id, sleepN, seconds));
+        },
         waitSignal: (signalName, opts) => {
+            refuseInTxn("ctx.waitSignal");
             waitN += 1;
             const n = waitN;
             return noPark(() => runWaitSignal(job.id, n, signalName, opts, compensating));

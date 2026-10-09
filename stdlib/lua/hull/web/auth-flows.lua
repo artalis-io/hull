@@ -877,17 +877,13 @@ end
 -- (an in-process test harness); a failure is logged, not raised - the
 -- response is already sent.
 --
--- Never inside the request's transaction (audit 10). A handler the app runs
--- under db.batch (transaction.run) cannot wait: the task's hull.sleep is
--- refused, and the work used to run inline - inside that transaction, on the
--- response's clock, with an async mail send refused too and so silently
--- dropped. A Lua task cannot leave the transaction (every way to yield to the
--- loop is refused while it is open), so that case raises instead, before
--- anything was written: the batch rolls back and the request answers 500.
--- Mount the auth-flows routes outside a transaction. (JS defers through a
--- loop timer and is not affected.)
+-- It runs as a hull._task: a detached entry of its own on a later loop turn,
+-- after the request - and any transaction the app runs it under (db.batch,
+-- transaction.run) - has ended, so the work is neither inside that
+-- transaction nor rolled back with it. (A hull.async task ran at once, inside
+-- the request, and could not wait its way out of an open transaction: such a
+-- route used to answer 500.)
 local function after_response(fn)
-    local H = hull
     local run = function()
         local ok, err = pcall(fn)
         if not ok then
@@ -895,25 +891,8 @@ local function after_response(fn)
                                      .. tostring(err))
         end
     end
-    if H and H.async and H.sleep then
-        local in_txn = false
-        local spawned = pcall(H.async, function()
-            -- Yields to the loop; fails without one, or inside a transaction.
-            local ok, err = pcall(H.sleep, 1)
-            if not ok and tostring(err):find("transaction is open", 1, true) then
-                in_txn = true
-                return
-            end
-            run()
-        end)
-        if in_txn then
-            error("auth-flows: this route ran inside a database transaction "
-                  .. "(db.batch / transaction.run); its deferred work cannot "
-                  .. "leave the transaction - mount the auth-flows routes "
-                  .. "outside it", 2)
-        end
-        if spawned then return end
-    end
+    local task = require("hull._task")
+    if pcall(task.spawn, run) then return end   -- refused only without a loop
     run()
 end
 
