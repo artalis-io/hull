@@ -45,10 +45,7 @@ typedef struct HlWasmBuffer {
     HlAllocator   *alloc;     /* tracked allocator (NULL = raw malloc) */
 
     union {
-        struct {
-            void *alloc;
-            int   untracked;   /* adopted: never counted, so never released */
-        } owned;                                          /* free(alloc) */
+        struct { void *alloc; } owned;                    /* hl_alloc_free(alloc) */
         struct { HlMappedBuffer *mbuf; } mmap;            /* hl_cap_fs_munmap(mbuf) */
         struct {
             void    *instance;      /* wasm_module_inst_t */
@@ -82,9 +79,10 @@ HlWasmBuffer *hl_wasm_buffer_create_mmap(HlMappedBuffer *mbuf,
                                           HlAllocator *alloc);
 
 /**
- * Create a buffer that takes ownership of a malloc'd pointer.
- * Does NOT copy - the buffer will free(data) on destroy.
- * data must have been allocated with malloc/calloc (not HlAllocator).
+ * Create an OWNED buffer from a malloc'd pointer (the GPU readback). The bytes
+ * are COPIED into `alloc` (so they count against the VM heap limit) and, on
+ * success, `data` is free()d. On failure returns NULL and the caller still
+ * owns `data`. data must have been allocated with malloc/calloc.
  */
 HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
                                               HlAllocator *alloc);
@@ -100,6 +98,23 @@ HlWasmBuffer *hl_wasm_buffer_create_wasm(
     uint32_t heap_size, uint32_t stack_size,
     uint32_t chain_gen, int chain_attached,
     HlAllocator *alloc);
+
+/**
+ * Off-VM-heap bytes a live buffer holds, for the runtimes' GC step: an OWNED
+ * buffer's bytes, a WASM buffer's checked-out instance (app heap + exec-env
+ * stack; its linear memory grows past that), 0 for a kernel mapping or a
+ * closed buffer.
+ */
+static inline size_t hl_wasm_buffer_footprint(const HlWasmBuffer *buf)
+{
+    if (!buf || buf->closed) return 0;
+    switch (buf->kind) {
+    case HL_WASM_BUF_OWNED: return buf->len;
+    case HL_WASM_BUF_WASM:
+        return (size_t)buf->u.wasm.heap_size + (size_t)buf->u.wasm.stack_size;
+    default: return 0;
+    }
+}
 
 /**
  * Get data pointer. Returns NULL if buffer is closed.

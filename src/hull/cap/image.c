@@ -228,12 +228,16 @@ HlImage *hl_image_decode(const void *data, size_t len,
     int channels = 4;
 
     /* Reserve the image's pixels in the caller's allocator BEFORE decoding
-     * (audit 10). The codec's own buffers (stb's malloc, bounded per decode
-     * by image_stb.c at ~2x the pixel size) live outside the app's heap
-     * limit, and they were allocated first: an app near its limit still
-     * made stb allocate up to ~512 MB per decode, only to be refused at the
-     * copy. Now a decode whose pixels cannot fit the heap is refused from
-     * the header, and the transient is at most ~2x what the heap granted. */
+     * (audit 10). The codec's own buffers (stb's malloc) live outside the
+     * app's heap limit, and they were allocated first: an app near its
+     * limit still made stb allocate up to ~512 MB per decode, only to be
+     * refused at the copy. Now a decode whose pixels cannot fit the heap is
+     * refused from the header. The transient is bounded by image_stb.c's
+     * cap on the SUM of stb's live blocks (audit 12): three 16-bit raw
+     * images on the 16 px padded grid plus the input and 2 MB - up to ~6x
+     * the RGBA pixels reserved here (24 bytes a pixel against 4), not the
+     * ~2x this comment used to claim (a progressive JPEG held ~3 cap-sized
+     * buffers at once under the old per-block cap). */
     uint32_t iw = 0, ih = 0;
     size_t expected = 0;
     void *dst = NULL;

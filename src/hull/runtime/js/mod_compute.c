@@ -22,6 +22,7 @@
 
 #include <keel/http_server.h>
 #include <stdatomic.h>
+#include <stdint.h>
 
 /* ── WasmBuffer JS class ──────────────────────────────────────────── */
 
@@ -76,6 +77,22 @@ static JSValue js_wasm_buf_get_length(JSContext *ctx, JSValueConst this_val,
 /* Helper: wrap HlWasmBuffer* as JS object. Takes ownership. */
 static JSValue js_push_wasm_buffer(JSContext *ctx, HlWasmBuffer *buf)
 {
+    /* The object QuickJS sees is a few bytes; the bytes - or the pooled
+     * WASM instance (heap + stack + linear memory) a zero-copy buffer keeps
+     * checked out - behind it are not, so a loop dropping
+     * compute.call({buffer: true}) results never pushed QuickJS's own
+     * malloc counter to a collection. Charge them as debt and run a full GC
+     * past HL_JS_OFFHEAP_GC_DEBT (audit 12), before the new object exists. */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js) {
+        size_t fp = hl_wasm_buffer_footprint(buf);
+        js->offheap_gc_debt = js->offheap_gc_debt > SIZE_MAX - fp
+                                  ? SIZE_MAX : js->offheap_gc_debt + fp;
+        if (js->offheap_gc_debt >= HL_JS_OFFHEAP_GC_DEBT) {
+            js->offheap_gc_debt = 0;
+            JS_RunGC(JS_GetRuntime(ctx));
+        }
+    }
     JSValue obj = JS_NewObjectClass(ctx, (int)js_wasm_buf_class_id);
     if (JS_IsException(obj)) {
         HlAllocator *a = buf->alloc;

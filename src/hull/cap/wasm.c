@@ -1400,7 +1400,14 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     /* Create output buffer */
     if (result > 0 && (uint32_t)result <= max_output) {
         int poolable = (heap_size <= HL_WASM_POOL_HEAP_THRESHOLD);
-        if (poolable) {
+        /* A zero-copy buffer keeps the instance - its linear memory, app
+         * heap and exec-env stack, none of it on the VM heap - checked out
+         * until the buffer is closed or collected. It counts as a live
+         * instance (audit 12): past the cache's live count / bytes the output
+         * is copied instead and the instance goes straight back. The
+         * reservation is released in hl_wasm_buffer_destroy. */
+        uint64_t zc_bytes = (uint64_t)heap_size + (uint64_t)stack_size;
+        if (poolable && hl_wasm_live_instance_reserve(cache, zc_bytes) == 0) {
             /* Zero-copy: wrap WASM linear memory, keep instance checked out */
             *output_buf = hl_wasm_buffer_create_wasm(
                 inst, exec_env, process_fn, mod, cache,
@@ -1408,6 +1415,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
                 heap_size, stack_size, chain.gen, chain.attached, alloc);
             if (*output_buf)
                 return HL_WASM_OK; /* instance stays checked out */
+            hl_wasm_live_instance_release(cache, zc_bytes);
             /* RL-1: When hl_wasm_buffer_create_wasm fails, we fall through to the
              * non-poolable path which properly frees wasm_out_ptr and releases
              * the instance via hl_wasm_pool_release below. */
@@ -1463,7 +1471,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
 
 /* Live persistent-instance accounting (audit 10, HL_WASM_MAX_LIVE_*). The
  * byte budget never refuses the first instance. */
-static int live_instance_reserve(HlWasmCache *cache, uint64_t bytes)
+int hl_wasm_live_instance_reserve(HlWasmCache *cache, uint64_t bytes)
 {
     int max = cache->max_live_instances > 0 ? cache->max_live_instances
                                             : HL_WASM_MAX_LIVE_INSTANCES;
@@ -1482,7 +1490,7 @@ static int live_instance_reserve(HlWasmCache *cache, uint64_t bytes)
     return rc;
 }
 
-static void live_instance_release(HlWasmCache *cache, uint64_t bytes)
+void hl_wasm_live_instance_release(HlWasmCache *cache, uint64_t bytes)
 {
     pthread_mutex_lock(&cache->pool_mutex);
     if (cache->live_instances > 0) cache->live_instances--;
@@ -1554,7 +1562,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
      * instantiating (audit 10): handed back on every failure below and when
      * the instance is destroyed. */
     uint64_t inst_bytes = (uint64_t)heap_size + (uint64_t)stack_size;
-    if (live_instance_reserve(cache, inst_bytes) != 0) {
+    if (hl_wasm_live_instance_reserve(cache, inst_bytes) != 0) {
         if (err_msg) *err_msg = "too_many_instances";
         return NULL;
     }
@@ -1565,7 +1573,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     error_buf[0] = '\0';
     HlWasmWatch watch = {0};
     if (hl_wasm_watch_arm(&watch, opts ? opts->timeout_ms : 0, NULL) != 0) {
-        live_instance_release(cache, inst_bytes);
+        hl_wasm_live_instance_release(cache, inst_bytes);
         if (err_msg) *err_msg = "watchdog_unavailable";
         return NULL;
     }
@@ -1574,7 +1582,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         error_buf, sizeof(error_buf));
     hl_wasm_watch_disarm(&watch);
     if (!inst) {
-        live_instance_release(cache, inst_bytes);
+        hl_wasm_live_instance_release(cache, inst_bytes);
         log_error("[wasm] persistent instantiate '%s' failed: %s", name, error_buf);
         if (err_msg)
             *err_msg = wasm_is_timeout_exception(error_buf) ? err_timeout
@@ -1584,7 +1592,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
 
     wasm_function_inst_t process_fn = wasm_runtime_lookup_function(inst, "hull_process");
     if (!process_fn) {
-        live_instance_release(cache, inst_bytes);
+        hl_wasm_live_instance_release(cache, inst_bytes);
         log_error("[wasm] module '%s' missing hull_process export", name);
         if (err_msg) *err_msg = err_no_export;
         wasm_runtime_deinstantiate(inst);
@@ -1593,7 +1601,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
 
     wasm_exec_env_t exec_env = wasm_runtime_create_exec_env(inst, stack_size);
     if (!exec_env) {
-        live_instance_release(cache, inst_bytes);
+        hl_wasm_live_instance_release(cache, inst_bytes);
         log_error("[wasm] failed to create exec env for persistent '%s'", name);
         if (err_msg) *err_msg = err_internal;
         wasm_runtime_deinstantiate(inst);
@@ -1608,7 +1616,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     int arc = chain_attach_locked(mod, inst, &chain, &attach_err);
     pthread_mutex_unlock(&mod->mutex);
     if (arc != 0) {
-        live_instance_release(cache, inst_bytes);
+        hl_wasm_live_instance_release(cache, inst_bytes);
         if (err_msg) *err_msg = attach_err;
         wasm_runtime_destroy_exec_env(exec_env);
         wasm_runtime_deinstantiate(inst);
@@ -1619,7 +1627,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     HlWasmInstance *pi = alloc ? hl_alloc_calloc(alloc, 1, sizeof(*pi))
                                : calloc(1, sizeof(*pi));
     if (!pi) {
-        live_instance_release(cache, inst_bytes);
+        hl_wasm_live_instance_release(cache, inst_bytes);
         if (err_msg) *err_msg = err_internal;
         wasm_runtime_destroy_exec_env(exec_env);
         /* detach the chain attached just above before tearing the instance down */
@@ -2082,7 +2090,7 @@ void hl_cap_wasm_instance_destroy(HlWasmInstance *pi)
     pi->process_fn = NULL;
 
     if (pi->cache)
-        live_instance_release(pi->cache,
+        hl_wasm_live_instance_release(pi->cache,
                               (uint64_t)pi->heap_size + (uint64_t)pi->stack_size);
 
     log_debug("[wasm] persistent instance '%s' destroyed", pi->name);

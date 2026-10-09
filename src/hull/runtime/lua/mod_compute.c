@@ -21,6 +21,7 @@
 
 #include <keel/http_server.h>
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -125,10 +126,18 @@ void lua_push_wasm_buffer(lua_State *L, HlWasmBuffer *buf)
 {
     /* The userdata cannot be made first (callers already hold buf), so it
      * is made without raising: a failure releases buf, then raises. */
+    size_t kb = hl_wasm_buffer_footprint(buf) >> 10;
     if (hl_lua_push_slot_safe(L, HL_WASM_BUF_MT, buf) != 0) {
         hl_wasm_buffer_close(buf);
         luaL_error(L, "not enough memory for the buffer");
     }
+    /* The collector sees only the small userdata, not the bytes - or the
+     * checked-out WASM instance (heap + stack + linear memory) - behind it,
+     * so add them as GC debt, as push_image does for pixels (audit 12): a
+     * loop dropping compute.call{buffer=true} / GPU results otherwise kept
+     * them all alive until a cycle that their own size never triggered. */
+    if (kb > 0)
+        lua_gc(L, LUA_GCSTEP, kb > INT_MAX ? INT_MAX : (int)kb);
 }
 
 /* compute.buffer(string) -> WasmBuffer(OWNED) */

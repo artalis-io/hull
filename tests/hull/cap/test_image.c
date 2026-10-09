@@ -311,6 +311,81 @@ UTEST(hull_cap_image, roundtrip_png)
     hl_image_free(decoded);
 }
 
+/* Audit 12: stb_impl.c caps the SUM of stb_image's live blocks, not each
+ * one. stb itself, driven directly: a cap every block fits under alone but
+ * the decode's blocks together do not is refused; the live count returns to
+ * zero after every decode; a real decode fits the cap image_stb.c sets. */
+extern _Thread_local size_t hl_stb_alloc_cap;
+extern _Thread_local size_t hl_stb_live;
+unsigned char *stbi_load_from_memory(const unsigned char *buffer, int len,
+                                     int *x, int *y, int *channels_in_file,
+                                     int desired_channels);
+void stbi_image_free(void *retval_from_stbi_load);
+
+static int encode_test_png(uint32_t w, uint32_t h, void **out, size_t *len)
+{
+    size_t n = (size_t)w * h * 4u;
+    uint8_t *px = malloc(n);
+    if (!px) return -1;
+    for (size_t i = 0; i < n; i++) px[i] = (uint8_t)((i * 2654435761u) >> 13);
+    HlImage *img = hl_image_new(w, h, HL_IMAGE_RGBA8, px, n, NULL);
+    free(px);
+    if (!img) return -1;
+    int rc = hl_image_encode(img, "png", 0, out, len, NULL, NULL);
+    hl_image_free(img);
+    return rc;
+}
+
+UTEST(hull_cap_image, stb_cap_bounds_the_sum_of_live_blocks)
+{
+    void *enc = NULL;
+    size_t enc_len = 0;
+    ASSERT_EQ(0, encode_test_png(64, 64, &enc, &enc_len));
+
+    /* Uncapped: decodes, and every block is handed back. */
+    size_t before = hl_stb_live;
+    int w = 0, h = 0, ch = 0;
+    hl_stb_alloc_cap = 0;
+    unsigned char *px = stbi_load_from_memory(enc, (int)enc_len, &w, &h, &ch, 4);
+    ASSERT_TRUE(px != NULL);
+    ASSERT_TRUE(hl_stb_live > before);
+    stbi_image_free(px);
+    ASSERT_EQ(before, hl_stb_live);
+
+    /* The largest block of this decode is the inflated raw image,
+     * 64 x (1 + 64 x 4) = 16448 bytes (the output is 16384). A cap above
+     * that holds each block alone - which the old per-block cap allowed -
+     * but the raw and the output are live together, so the sum is refused. */
+    hl_stb_alloc_cap = 24u * 1024u;
+    px = stbi_load_from_memory(enc, (int)enc_len, &w, &h, &ch, 4);
+    hl_stb_alloc_cap = 0;
+    if (px) stbi_image_free(px);
+    ASSERT_TRUE(px == NULL);
+    ASSERT_EQ(before, hl_stb_live);   /* the failed decode freed all it held */
+
+    free(enc);
+}
+
+UTEST(hull_cap_image, stb_total_cap_admits_a_real_decode)
+{
+    /* Through hl_image_decode: image_stb.c sets the total cap from the
+     * header; an ordinary 512x384 RGBA PNG decodes under it and leaves
+     * nothing counted live. */
+    void *enc = NULL;
+    size_t enc_len = 0;
+    ASSERT_EQ(0, encode_test_png(512, 384, &enc, &enc_len));
+    size_t before = hl_stb_live;
+    const char *err = NULL;
+    HlImage *img = hl_image_decode(enc, enc_len, NULL, NULL, &err);
+    ASSERT_TRUE(img != NULL);
+    ASSERT_EQ(512u, img->width);
+    ASSERT_EQ(384u, img->height);
+    ASSERT_EQ(0u, (unsigned)hl_stb_alloc_cap);
+    ASSERT_EQ(before, hl_stb_live);
+    hl_image_free(img);
+    free(enc);
+}
+
 /* Audit 9 M2: owned pixels come from the caller's allocator (the VM's, in
  * the runtimes), so they count against its limit and are handed back on
  * free. They were plain malloc - and decoded ones stb's - outside the app's

@@ -37,24 +37,21 @@ HlWasmBuffer *hl_wasm_buffer_create_owned(const void *src, size_t len,
     return buf;
 }
 
-/* ── ADOPTED (take ownership of malloc'd pointer) ────────────────── */
+/* ── ADOPTED (a malloc'd result moved onto the tracked heap) ──────── */
 
 HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
                                               HlAllocator *alloc)
 {
-    HlWasmBuffer *buf = hl_alloc_calloc(alloc, 1, sizeof(*buf));
+    /* The bytes come from plain malloc (the GPU readback), sized by the app
+     * and never counted against `alloc`. Holding them as-is kept up to the
+     * GPU buffer ceiling per result off the VM heap limit, uncounted, until
+     * the buffer was closed or collected (audit 12). They are copied into the
+     * tracked allocator instead - refused like any allocation when the heap
+     * cannot hold them - and the malloc'd block freed. On failure the caller
+     * keeps `data`. */
+    HlWasmBuffer *buf = hl_wasm_buffer_create_owned(data, len, alloc);
     if (!buf) return NULL;
-
-    buf->kind  = HL_WASM_BUF_OWNED;
-    buf->len   = len;
-    buf->alloc = alloc;
-    buf->data  = data;
-    buf->u.owned.alloc = data; /* free(data) on destroy */
-    /* The bytes came from plain malloc (the GPU readback), not from `alloc`,
-     * so they were never counted against it. Releasing them on destroy
-     * lowered `used` by bytes it never held: every gpu.dispatch returning a
-     * buffer gave the app that much more room past its memory limit. */
-    buf->u.owned.untracked = 1;
+    free(data);
     return buf;
 }
 
@@ -154,10 +151,7 @@ void hl_wasm_buffer_destroy(HlWasmBuffer *buf)
 
     switch (buf->kind) {
     case HL_WASM_BUF_OWNED:
-        if (buf->u.owned.untracked)
-            free(buf->u.owned.alloc);
-        else
-            hl_alloc_free(buf->alloc, buf->u.owned.alloc, buf->len);
+        hl_alloc_free(buf->alloc, buf->u.owned.alloc, buf->len);
         buf->u.owned.alloc = NULL;
         break;
 
@@ -189,6 +183,11 @@ void hl_wasm_buffer_destroy(HlWasmBuffer *buf)
             buf->u.wasm.heap_size,
             buf->u.wasm.stack_size,
             1, chain);
+        /* Hand back the live-instance slot call_buf reserved for the
+         * checkout (audit 12). */
+        hl_wasm_live_instance_release(
+            (HlWasmCache *)buf->u.wasm.cache,
+            (uint64_t)buf->u.wasm.heap_size + (uint64_t)buf->u.wasm.stack_size);
 
         buf->u.wasm.instance = NULL;
         buf->u.wasm.exec_env = NULL;

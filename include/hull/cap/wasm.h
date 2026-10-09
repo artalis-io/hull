@@ -461,6 +461,18 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
                           uint32_t heap_size, uint32_t stack_size,
                           int success, HlWasmChainRef chain);
 
+/*
+ * Live-instance accounting (audit 10 / 12): every instance held outside the
+ * pool - a compute.instance, or a pooled instance a zero-copy WasmBuffer keeps
+ * checked out (HL_WASM_BUF_WASM) - reserves a slot and its heap + stack bytes.
+ * At most max_live_instances (0 = HL_WASM_MAX_LIVE_INSTANCES) and
+ * HL_WASM_MAX_LIVE_INSTANCE_BYTES between them (the byte budget never refuses
+ * the first). reserve returns 0, or -1 past either bound. Thread-safe
+ * (pool_mutex).
+ */
+int  hl_wasm_live_instance_reserve(HlWasmCache *cache, uint64_t bytes);
+void hl_wasm_live_instance_release(HlWasmCache *cache, uint64_t bytes);
+
 /* ── Persistent instance API ───────────────────────────────────────── */
 
 /* Instruction-budget units the bindings charge before compute.instance()
