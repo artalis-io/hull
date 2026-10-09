@@ -616,13 +616,17 @@ app.main(function(ctx)
   jobs.enqueue("m1", {}, { queue = "mate", priority = 10 })
   local m2 = jobs.enqueue("m2", {}, { queue = "mate", max_attempts = 1 })
   jobs.work({ queue = "mate", batch = 2, reap_interval = 3600 })
+  local mj = jobs.get(m2)
+  local mst, mat, mran = mj.status, mj.attempts, ran
+  jobs.work({ queue = "mate", batch = 2, reap_interval = 3600 })
   jobs.enqueue("rb", {}, { queue = "rq_b", concurrency_key = "S", concurrency = 1 })
   jobs.enqueue("ra", {}, { queue = "rq_a", concurrency_key = "S", concurrency = 1 })
   local ca = jobs.claim({ queue = "rq_a", batch = 1 })
   hull.sleep(1100); jobs.heartbeat(ca[1])
   local cb = jobs.claim({ queue = "rq_b", batch = 1 })
   jobs.uncron("a10c"); jobs.cron("a10c", "*/5 * * * *", nil, { tz = "+05:30" })
-  ctx.stdout:write(("A10 mate=%s ran=%d rank_b=%d\n"):format(jobs.get(m2).status, ran, #cb))
+  ctx.stdout:write(("A10 mate=%s at=%d ran=%d then=%s ran2=%d rank_b=%d\n"):format(
+    mst, mat, mran, jobs.get(m2).status, ran, #cb))
   return 0
 end)
 LUA
@@ -643,8 +647,8 @@ docker exec "$CONTAINER" psql -U hull -d hulldb -q -c \
   "UPDATE _hull_cron SET spec='0x5 * * * *', next_run_at=1 WHERE name='a10c'" >/dev/null 2>&1 || true
 a10cron=$(./build/hull "$A10DIR/tick.lua" -d "$DSN" 2>/dev/null)
 case "$a10out|$a10cron" in
-    *"A10 mate=done ran=1 rank_b=0"*"A10CRON events=1"*)
-        echo "PASS: jobs heartbeat keeps batch-mates, soft rank survives a heartbeat, a broken cron is disabled (Postgres)"
+    *"A10 mate=pending at=0 ran=0 then=done ran2=1 rank_b=0"*"A10CRON events=1"*)
+        echo "PASS: jobs heartbeat releases batch-mates (run next), soft rank survives a heartbeat, a broken cron is disabled (Postgres)"
         rm -rf "$A10DIR" ;;
     *)  echo "::error jobs audit 10 on Postgres: $a10out | $a10cron"; exit 1 ;;
 esac

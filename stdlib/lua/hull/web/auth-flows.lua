@@ -362,6 +362,14 @@ local ACTIONS = {
 -- handle_email_change_revoke.
 local UNDONE_MARK = "undone"
 
+-- The token_hash of the row an undo that could NOT restore the old address
+-- leaves behind (it had been taken by another account). Besides pausing new
+-- changes as UNDONE_MARK does, it locks the account's self-service recovery
+-- while it lives (audit 11): the account's address is still the one the
+-- change set - most likely a thief's - so a password reset or a magic link
+-- mailed there would hand the account straight back. See recovery_locked.
+local UNDONE_LOCKED_MARK = "undone_unrestored"
+
 -- Tolerate either `user.id` (canonical) or `user.user_id` (legacy)
 -- on app-supplied user objects. Centralized so the contract is one
 -- line to revisit if we ever want to harden it. JS mirrors this
@@ -892,8 +900,17 @@ local function after_response(fn)
         end
     end
     local task = require("hull._task")
-    if pcall(task.spawn, run) then return end   -- refused only without a loop
-    run()
+    local ok, err = pcall(task.spawn, run)
+    if ok then return end
+    -- Inline ONLY when there is no loop to defer onto (audit 11). Any other
+    -- refusal (out of memory, a failed timer) ran the work inline too, and so
+    -- answered at the speed the deferral exists to hide; it is logged and
+    -- the work dropped instead.
+    if tostring(err):find("requires an active event loop", 1, true) then
+        return run()
+    end
+    require("hull.log").warn("auth-flows: deferred email dropped: "
+                             .. tostring(err))
 end
 
 -- Cheap GC. Called opportunistically from the request path after
@@ -1148,19 +1165,50 @@ end
 -- vacated address first, and the undo then had nothing to restore to - the
 -- thief kept the account. Compared case-insensitively (an app's lookup may
 -- be); @p except_key (a uid_key) skips that account's own row.
+--
+-- Only an address that was VERIFIED when the change was confirmed is held
+-- (old_verified = 1, audit 11): an unverified one may be anybody's - whoever
+-- registered it - and holding it let them block the real owner from
+-- registering it for email_change_ttl, and told them the account had moved.
 local function old_email_reserved(email, except_key)
     if type(email) ~= "string" then return false end
     local rows = db.query(
         "SELECT user_id FROM _hull_auth_pending_email_changes "
         .. "WHERE LOWER(old_email) = LOWER(?) AND confirmed_at IS NOT NULL "
-        .. "AND token_hash <> ? AND expires_at > ?",
-        { email, UNDONE_MARK, time.now() })
+        .. "AND old_verified = 1 AND token_hash <> ? AND token_hash <> ? "
+        .. "AND expires_at > ?",
+        { email, UNDONE_MARK, UNDONE_LOCKED_MARK, time.now() })
     for _, r in ipairs(rows or {}) do
         if except_key == nil or tostring(r.user_id) ~= except_key then
             return true
         end
     end
     return false
+end
+
+-- Is self-service recovery of @p user_id locked (audit 11)? It is while the
+-- row of an undo that could not restore the old address lives (see
+-- UNDONE_LOCKED_MARK): no password reset or magic link is issued or honoured
+-- for the account, since both would go to the address the change set.
+-- Recovery then needs the operator (or waits out email_change_ttl).
+local function recovery_locked(user_id)
+    if user_id == nil then return false end
+    local rows = db.query(
+        "SELECT user_id FROM _hull_auth_pending_email_changes "
+        .. "WHERE user_id = ? AND token_hash = ? AND expires_at > ?",
+        { uid_key(user_id), UNDONE_LOCKED_MARK, time.now() })
+    return rows ~= nil and #rows > 0
+end
+
+-- Disable the account's second factor through the app's totp_disable hook,
+-- when one is configured; a failure is logged.
+local function run_totp_disable(uid)
+    if not _state.totp_disable then return end
+    local ok, terr = pcall(_state.totp_disable, uid)
+    if not ok then
+        require("hull.log").warn("auth-flows: totp_disable failed: "
+                                 .. tostring(terr))
+    end
 end
 
 -- Run the app's on_password_reset (typically session.destroy_all). Logged,
@@ -1650,6 +1698,7 @@ local function handle_magic_link(req, res)
                 end
             end
         end
+        if recovery_locked(user_uid(user)) then return end
         local token = issue_token(user_uid(user),
             ACTIONS.magic_link, _state.magic_link_ttl,
             { eb = email_binding(user) })
@@ -1720,7 +1769,8 @@ local function handle_magic_link_consume(req, res)
     local user = _state.user_get(env.sub)
     -- A magic link is bound to the address it was sent to: after an email
     -- change, one still sitting in the old mailbox no longer signs in.
-    if not user or env.eb ~= email_binding(user) then
+    if not user or env.eb ~= email_binding(user)
+       or recovery_locked(env.sub) then
         return verify_fail(req, res, 400, "magic link failed")
     end
     -- Magic-link clicks count as proof of email ownership. An account that
@@ -1815,6 +1865,7 @@ local function handle_password_reset_request(req, res)
     if not user then return generic_ok(res) end
     local origin = origin_for(req)
     after_response(function()
+        if recovery_locked(user_uid(user)) then return end
         local token = issue_token(user_uid(user),
             ACTIONS.password_reset, _state.reset_ttl, reset_token_extra(user))
         if origin then
@@ -1847,7 +1898,8 @@ local function handle_password_reset_confirm(req, res)
         return res:status(400):json({ error = "reset failed: " .. (err or "?") })
     end
     local user = _state.user_get(env.sub)
-    if not user or not reset_binding_holds(env, user) then
+    if not user or not reset_binding_holds(env, user)
+       or recovery_locked(env.sub) then
         return res:status(400):json({ error = "reset failed" })
     end
     local new_hash = crypto.hash_password(body.password)
@@ -1968,7 +2020,8 @@ local function handle_email_change(req, res)
         .. "WHERE user_id = ? AND expires_at > ? LIMIT 1",
         { key, time.now() })
     if existing and #existing > 0 then
-        if existing[1].token_hash == UNDONE_MARK then
+        if existing[1].token_hash == UNDONE_MARK
+           or existing[1].token_hash == UNDONE_LOCKED_MARK then
             return res:status(409):json({
                 error = "email changes are paused after an undone change; try again later",
             })
@@ -2075,17 +2128,23 @@ local function handle_email_change_revoke(req, res)
             -- rows go, the row is marked undone (new changes paused) and
             -- every session is revoked - so whoever made the change cannot
             -- sign back in with the password they knew and move the account
-            -- again.
+            -- again. Audit 11: the second factor goes too (totp_disable), and
+            -- the row is marked UNDONE_LOCKED_MARK, which refuses password
+            -- resets and magic links for the account while it lives - the
+            -- account's address is still the one the change set, and a reset
+            -- mailed there handed the account back to whoever set it.
             require("hull.log").warn("auth-flows: email change of account "
                 .. tostring(env.sub) .. " cannot be reverted: its previous "
-                .. "address is in use; password reset and sessions revoked")
+                .. "address is in use; password reset, sessions revoked and "
+                .. "self-service recovery locked - restore the account by hand")
             _state.user_set_password(env.sub,
                 crypto.hash_password(crypto.random_token(32)))
             clear_all_failed_logins(env.sub)
+            run_totp_disable(env.sub)
             local now = time.now()
             db.exec("UPDATE _hull_auth_pending_email_changes SET token_hash = ?, "
                     .. "new_email = ?, confirmed_at = ?, expires_at = ? WHERE user_id = ?",
-                    { UNDONE_MARK, tostring(user.email or ""), now,
+                    { UNDONE_LOCKED_MARK, tostring(user.email or ""), now,
                       now + _state.email_change_ttl, key })
             run_on_password_reset(req, res, user)
             emit_event(env.sub, "email_change_revoked", req,
@@ -2119,13 +2178,7 @@ local function handle_email_change_revoke(req, res)
         _state.user_set_password(env.sub,
             crypto.hash_password(crypto.random_token(32)))
         clear_all_failed_logins(env.sub)
-        if _state.totp_disable then
-            local ok, terr = pcall(_state.totp_disable, env.sub)
-            if not ok then
-                require("hull.log").warn("auth-flows: totp_disable failed: "
-                                         .. tostring(terr))
-            end
-        end
+        run_totp_disable(env.sub)
         user.email = old
         user.email_verified = was_verified
         restored = true
@@ -2203,19 +2256,35 @@ local function handle_email_change_confirm(req, res)
     end
     local old_email = user.email
     local old_verified = is_verified(user) and 1 or 0
-    _state.user_set_email(env.sub, env.new_email)
-    _state.user_set_email_verified(env.sub, true)
+    local key = uid_key(env.sub)
     -- With a revoke link out (email_change_notify), the row stays, confirmed
     -- and holding the old address and its verified state, until that link
     -- expires: the old address can still undo the change. Without one there
     -- is nothing to undo it with.
-    if _state.templates.email_change_notify then
+    --
+    -- The confirmed row is written BEFORE the address is switched (audit
+    -- 11): written after, another instance could claim the vacated address
+    -- (register, magic-link signup) between the two, while nothing reserved
+    -- it, and the undo then had nothing to restore. If the switch fails the
+    -- row goes back to pending.
+    local keep = _state.templates.email_change_notify
+    if keep then
         db.exec("UPDATE _hull_auth_pending_email_changes "
                 .. "SET confirmed_at = ?, old_email = ?, old_verified = ? WHERE user_id = ?",
-                { time.now(), old_email, old_verified, uid_key(env.sub) })
-    else
+                { time.now(), old_email, old_verified, key })
+    end
+    local ok, serr = pcall(_state.user_set_email, env.sub, env.new_email)
+    if not ok then
+        if keep then
+            db.exec("UPDATE _hull_auth_pending_email_changes SET confirmed_at = NULL, "
+                    .. "old_email = NULL, old_verified = NULL WHERE user_id = ?", { key })
+        end
+        error(serr, 0)
+    end
+    _state.user_set_email_verified(env.sub, true)
+    if not keep then
         db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-                { uid_key(env.sub) })
+                { key })
     end
     emit_event(env.sub, "email_changed", req,
                { metadata = { old_email = old_email,
@@ -2706,6 +2775,7 @@ function M.send_password_reset(email, reset_url_prefix)
     local user = _state.user_find_by_email(email)
     if not user then return end  -- enumeration-safe; silently no-op
     local user_id = user_uid(user)
+    if recovery_locked(user_id) then return end  -- see recovery_locked
     local token = issue_token(user_id, ACTIONS.password_reset,
                                _state.reset_ttl, reset_token_extra(user))
     local link = (reset_url_prefix or "")
@@ -2734,6 +2804,7 @@ function M.send_magic_link(email, magic_url_prefix)
         if not user then return end
     end
     local user_id = user_uid(user)
+    if recovery_locked(user_id) then return end  -- see recovery_locked
     local token = issue_token(user_id, ACTIONS.magic_link,
                                _state.magic_link_ttl,
                                { eb = email_binding(user) })
@@ -2742,6 +2813,19 @@ function M.send_magic_link(email, magic_url_prefix)
     send_email(email, "magic_link", {
         user = user, link = link, token = token,
     })
+end
+
+--- Is @p email held for the undo of a confirmed email change (audit 11)?
+--- While a change can still be undone, the address it vacated - if it was
+--- verified - is the undo's to restore. The module's own account-creating
+--- paths (register, magic-link auto-signup, email change) refuse it; an app
+--- that creates accounts or changes addresses itself must too:
+---     if auth_flows.email_reserved(email) then -- treat as taken
+function M.email_reserved(email)
+    if not _state._initialized then
+        error("auth-flows: call init() before email_reserved()")
+    end
+    return old_email_reserved(email)
 end
 
 -- ── Test helpers (not public; exposed for unit tests) ──────────────
@@ -2769,6 +2853,8 @@ M._test = {
         email_change         = handle_email_change,
         email_change_confirm = handle_email_change_confirm,
         email_change_revoke  = handle_email_change_revoke,
+        password_reset_request = handle_password_reset_request,
+        magic_link_consume   = handle_magic_link_consume,
     },
     ACTIONS            = ACTIONS,
     email_rate_allow   = function(to) return email_rate_allow(to) end,

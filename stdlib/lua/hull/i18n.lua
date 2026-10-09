@@ -91,7 +91,8 @@ local function parse_accept_language(header)
     local entries = {}
     for part in header:gmatch("[^,]+") do
         part = _text.trim(part)
-        local lang, rest = part:match("^([%w%-]+)(.*)")
+        -- "_" too: "zh_TW" is a common spelling of "zh-TW" (audit 11).
+        local lang, rest = part:match("^([%w%-_]+)(.*)")
         if lang then
             local q = 1.0
             local qval = rest:match(";%s*q%s*=%s*([%d%.]+)")
@@ -341,7 +342,7 @@ function i18n.detect(header_or_req)
         -- Exact match
         if locales[entry.lang] then return entry.lang end
         -- Base language match: "en-US" matches loaded "en"
-        local base = entry.lang:match("^([%w]+)")
+        local base = entry.lang:match("^([^%-_]+)")
         if base and locales[base] then return base end
     end
     -- Try base language match for all entries (second pass)
@@ -352,7 +353,7 @@ function i18n.detect(header_or_req)
     for name in pairs(locales) do names[#names + 1] = name end
     table.sort(names)
     for _, entry in ipairs(entries) do
-        local base = entry.lang:match("^([%w]+)")
+        local base = entry.lang:match("^([^%-_]+)")
         if base then
             for _, name in ipairs(names) do
                 if name == base or

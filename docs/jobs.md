@@ -268,7 +268,8 @@ jobs.uncron("heartbeat");
   database Hull can't read inside the sandbox. Default is UTC. Every field is
   matched in that zone's wall clock - `"0 9 * * 1-5"` with `tz = "-05:00"`
   fires at 09:00 local, Monday to Friday local (14:00 UTC). The offset is at
-  most 18 h either way, in whole minutes.
+  most 18 h either way, in whole minutes - in the string form too
+  (`"+18:59"` is refused, audit 11).
 - **A schedule that can no longer fire is disabled, not fired.** If a stored
   spec stops parsing (one an older, laxer parser accepted) or has no upcoming
   occurrence, the worker that finds it due enqueues nothing, parks the schedule
@@ -704,7 +705,8 @@ but the visibility timeout makes the last one sharper):
   the process cannot crash-loop the fleet forever.
 - **A claimed batch is re-checked job by job.** `jobs.work` claims up to `batch`
   jobs at once but runs them one after another, so before it starts each job
-  after the first it extends that job's claim (a `jobs.heartbeat`). A job whose
+  after the first it extends that job's claim, and the claims of the jobs still
+  waiting behind it (an internal refresh, not `jobs.heartbeat`). A job whose
   claim is already gone - the reaper re-pended it while earlier jobs ran - is
   skipped, not run a second time beside its new owner. Keep
   `batch x (typical handler time)` well under `visibility_timeout` all the same:
@@ -712,11 +714,15 @@ but the visibility timeout makes the last one sharper):
 - **Heartbeat long jobs.** A job that runs longer than `visibility_timeout`
   (default 300s) is presumed orphaned and re-run. A long WASM/GPU handler should
   call `jobs.heartbeat(job)` periodically (at least every `visibility_timeout/2`
-  s) to extend its claim. The heartbeat also extends the claim of the jobs
-  `jobs.work` claimed in the same batch that have not started yet, so they are
-  not re-pended (or, on their last attempt, dead-lettered as "worker lost")
-  while this one runs. A job that runs past `visibility_timeout` WITHOUT
-  heartbeating loses those batch-mates' claims along with its own. It returns `false` once the claim has been lost (the
+  s) to extend its claim. The jobs `jobs.work` claimed in the same batch that
+  have not started yet go back to `pending` on the heartbeat (audit 11) - their
+  attempt increment undone, a strict-concurrency slot released - for this or
+  another worker to claim; `jobs.work` then skips them. A heartbeating job is a
+  long one, and extending their claim instead (round 10) held them, unrun, for
+  as long as it ran. Either way a batch-mate is never re-pended with an attempt
+  counted, nor dead-lettered as "worker lost" on its last attempt, for time it
+  spent waiting. A job that runs past `visibility_timeout` WITHOUT heartbeating
+  loses those batch-mates' claims along with its own. It returns `false` once the claim has been lost (the
   reaper already reclaimed it, or another worker re-claimed it) - the handler's
   signal to stop and let the other runner win, avoiding a double-run:
 
@@ -766,7 +772,7 @@ terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... 
 | option | default | meaning |
 |--------|---------|---------|
 | `max_attempts` | 25 | dead-letter threshold |
-| `visibility_timeout` | 300 | seconds before an orphaned `running` job is reclaimed |
+| `visibility_timeout` | 300 | seconds before an orphaned `running` job is reclaimed (a finite number >= 0; a numeric string is converted, anything else - a non-numeric string, NaN, a negative - raises in `jobs.init`, audit 11) |
 | `reap_interval` | 30 | min seconds between reaper sweeps (a no-op sweep still takes the write lock, so `work` throttles it; `0` = every call) |
 | `backoff(attempt)` | `2^n·10s` cap 1h | retry-delay function |
 

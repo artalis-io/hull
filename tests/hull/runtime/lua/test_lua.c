@@ -10009,4 +10009,73 @@ UTEST(lua_audit10, error_response_and_bytes_drop_stale_headers)
     cleanup_lua();
 }
 
+/* ── Audit 11: Content-Type and error headers across middleware ────────── */
+
+/* L: whether the Content-Type is Hull's default was a flag on the per-call
+ * `res` object, so a middleware's res:html followed by the handler's res:json
+ * (two objects, one response) kept text/html for the JSON. And the 500 a
+ * failed handler gets dropped the headers earlier middleware set (CSP, HSTS,
+ * CORS, a request id) along with the handler's own. */
+UTEST(lua_audit11, content_type_and_error_headers_span_middleware)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  res:header('Strict-Transport-Security', 'max-age=1') res:html('<p>')\n"
+        "  return 0 end)\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  res:header('Content-Type', 'application/json') return 0 end)\n"
+        "app.use('*', '/*', function(req, res) res:json({ a = 1 }) end)\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  res:header('Set-Cookie', 'sid=1') res:json(1) error('boom') end)\n"
+        "app.use('*', '/*', function(req, res) res:html('<p>') end)\n"),
+        LUA_OK);
+    KlAllocator alloc = kl_allocator_default();
+
+    /* Middleware res:html, handler res:json: one Content-Type, the JSON's. */
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, first_mw_handler_id(L, 1),
+                                         &req, &res), 0);
+    EXPECT_EQ(hl_lua_dispatch(&lua_rt, first_mw_handler_id(L, 3), &req, &res), 0);
+    EXPECT_EQ(a10_header_count(&res, "Content-Type"), 1);
+    EXPECT_TRUE(a10_headers_contain(&res, "Content-Type: application/json\r\n"));
+    free_lua_req_ctx(&req);
+    kl_http_response_free(&res);
+
+    /* The handler fails: the middleware's HSTS stays, the handler's
+     * Set-Cookie and Content-Type go, one Content-Type (the error's). */
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req2 = {0};
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, first_mw_handler_id(L, 1),
+                                         &req2, &res), 0);
+    EXPECT_EQ(hl_lua_dispatch(&lua_rt, first_mw_handler_id(L, 4), &req2, &res), -1);
+    hl_lua_http_error_response(&res);
+    EXPECT_EQ(res.status, 500);
+    EXPECT_EQ(a10_header_count(&res, "Strict-Transport-Security"), 1);
+    EXPECT_EQ(a10_header_count(&res, "Set-Cookie"), 0);
+    EXPECT_EQ(a10_header_count(&res, "Content-Type"), 1);
+    EXPECT_TRUE(a10_headers_contain(&res, "Content-Type: text/plain\r\n"));
+    free_lua_req_ctx(&req2);
+    kl_http_response_free(&res);
+
+    /* An app Content-Type spelled like a default is still the app's: the
+     * handler's res:html keeps it. */
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req3 = {0};
+    EXPECT_EQ(hl_lua_dispatch_middleware(&lua_rt, first_mw_handler_id(L, 2),
+                                         &req3, &res), 0);
+    EXPECT_EQ(hl_lua_dispatch(&lua_rt, first_mw_handler_id(L, 5), &req3, &res), 0);
+    EXPECT_EQ(a10_header_count(&res, "Content-Type"), 1);
+    EXPECT_TRUE(a10_headers_contain(&res, "content-type: application/json\r\n"));
+    free_lua_req_ctx(&req3);
+    kl_http_response_free(&res);
+    lua_settop(L, 0);
+    cleanup_lua();
+}
+
 UTEST_MAIN();

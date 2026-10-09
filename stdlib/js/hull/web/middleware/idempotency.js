@@ -182,6 +182,10 @@ function computeFingerprint(req) {
  *   `user_id` (`req.ctx.user`, set by auth.jwtMiddleware), else `"__anon"` -
  *   which every anonymous caller shares, so mount it after authentication (a
  *   warning is logged once when 20 keyed requests in a row were anonymous).
+ *   A CUSTOM getPrincipal that returns null / undefined / false / "" does
+ *   not share "__anon" (audit 11): the request skips the idempotency layer
+ *   (the handler runs, nothing is stored or replayed) and a warning is
+ *   logged once per middleware. Return "__anon" explicitly to share a scope.
  * @param {number}   [opts.ttl]        Override module TTL for this instance.
  * @param {string}   [opts.headerName="idempotency-key"]
  * @param {string[]} [opts.methods=["POST"]]
@@ -266,6 +270,9 @@ function middleware(opts) {
     let requestCount = 0;
     const CLEANUP_INTERVAL = 100;
 
+    const custom = !!o.getPrincipal;
+    let customWarned = false;
+
     return function(req, res) {
         if (!methods[req.method])
             return 0;
@@ -285,7 +292,20 @@ function middleware(opts) {
 
         if (!req.ctx) req.ctx = {};
 
-        const principalId = normPrincipal(getPrincipal(req));
+        const rawPrincipal = getPrincipal(req);
+        // A custom getPrincipal with no answer (audit 11; see the Lua
+        // sibling): the request runs without idempotency, never "__anon".
+        if (custom && (rawPrincipal === undefined || rawPrincipal === null
+                       || rawPrincipal === false || rawPrincipal === "")) {
+            if (!customWarned) {
+                customWarned = true;
+                log.warn("idempotency: getPrincipal returned " + String(rawPrincipal)
+                    + "; the request runs without idempotency "
+                    + "(return \"__anon\" to share one scope)");
+            }
+            return 0;
+        }
+        const principalId = normPrincipal(rawPrincipal);
         const fingerprint = computeFingerprint(req);
         const endpoint = req.method + " " + req.path;
         const now = time.now();

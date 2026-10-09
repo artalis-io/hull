@@ -11,7 +11,11 @@
  *
  *     import { logx } from "hull:logx";
  *     const rl = logx.with({ requestId: id, user: uid });
- *     rl.info("handled");    // -> "handled requestId=... user=..."
+ *     rl.info("handled");    // -> 'msg="handled" requestId=... user=...'
+ *
+ * The message is the line's leading msg="..." field, quoted and escaped as a
+ * value (audit 11): written bare, a message carrying " user=admin" forged a
+ * field for any logfmt reader.
  *     rl.with({ step: 2 }).warn("slow");  // children compose
  *
  * CAVEAT (source tag): hull:log tags each line by the CALLER's source, and the

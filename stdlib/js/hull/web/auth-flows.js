@@ -166,6 +166,12 @@ const ACTIONS = {
 // the undo) it refuses a new change. See handleEmailChangeRevoke.
 const UNDONE_MARK = "undone";
 
+// The token_hash of the row an undo that could NOT restore the old address
+// leaves behind (another account had taken it). Besides pausing new changes,
+// it locks the account's self-service recovery while it lives (audit 11; see
+// recoveryLocked and the Lua sibling).
+const UNDONE_LOCKED_MARK = "undone_unrestored";
+
 import { encoding } from "hull:encoding";
 
 // Signature framing lives in hull:crypto:envelope; this wrapper
@@ -404,14 +410,14 @@ function stripUserSecrets(user) {
 // is already sent.
 //
 // fn runs as a detached task (hull:_task, the twin of the Lua side's
-// hull._spawn): on a loop turn of its own, after the handler's entry, with no
+// hull._task): on a loop turn of its own, after the handler's entry, with no
 // request active - so nothing it does (a template render, an SMTP send)
 // makes the response wait, whether the handler was synchronous or resumed
 // after an await (register with checkPwnedPasswords). A timer armed from the
 // handler itself attached to the request and held the response (audit 8).
 // The task's turn comes after the handler's db.batch, if it ran in one, has
 // committed or rolled back, so its writes are never part of that transaction
-// (audit 10: the Lua twin cannot leave one and refuses instead).
+// (the Lua twin defers the same way, through hull._task).
 function runDeferred(fn) {
     try { fn(); }
     catch (e) { log.warn("auth-flows: deferred email failed: " + String(e && e.message || e)); }
@@ -421,7 +427,16 @@ function afterResponse(fn) {
     try {
         _task.spawn(() => runDeferred(fn));
         return;
-    } catch (_) { /* no event loop: run it inline */ }
+    } catch (e) {
+        // Inline ONLY when there is no loop to defer onto (audit 11): any
+        // other refusal ran the work inline too, answering at the speed the
+        // deferral exists to hide. It is logged and the work dropped.
+        const msg = String(e && e.message || e);
+        if (msg.indexOf("requires an active event loop") < 0) {
+            log.warn("auth-flows: deferred email dropped: " + msg);
+            return;
+        }
+    }
     runDeferred(fn);
 }
 
@@ -647,17 +662,42 @@ function dropPendingEmailChange(uid) {
 // can still be undone (audit 10; see the Lua sibling, old_email_reserved)?
 // Then it is the undo's to restore and counts as taken. exceptKey (a uidKey)
 // skips that account's own row.
+// Only an address VERIFIED when the change was confirmed is held
+// (old_verified = 1, audit 11): an unverified one may be anybody's, and
+// holding it let its registrant block the owner and learn the account moved.
 function oldEmailReserved(email, exceptKey) {
     if (typeof email !== "string") return false;
     const rows = db.query(
         "SELECT user_id FROM _hull_auth_pending_email_changes "
         + "WHERE LOWER(old_email) = LOWER(?) AND confirmed_at IS NOT NULL "
-        + "AND token_hash <> ? AND expires_at > ?",
-        [email, UNDONE_MARK, time.now()]);
+        + "AND old_verified = 1 AND token_hash <> ? AND token_hash <> ? "
+        + "AND expires_at > ?",
+        [email, UNDONE_MARK, UNDONE_LOCKED_MARK, time.now()]);
     for (const r of rows || []) {
         if (exceptKey === undefined || String(r.user_id) !== exceptKey) return true;
     }
     return false;
+}
+
+// Is self-service recovery of uid locked (audit 11)? It is while the row of
+// an undo that could not restore the old address lives: no password reset or
+// magic link is issued or honoured for the account, since both would go to
+// the address the change set. See the Lua sibling, recovery_locked.
+function recoveryLocked(uid) {
+    if (uid === null || uid === undefined) return false;
+    const rows = db.query(
+        "SELECT user_id FROM _hull_auth_pending_email_changes "
+        + "WHERE user_id = ? AND token_hash = ? AND expires_at > ?",
+        [uidKey(uid), UNDONE_LOCKED_MARK, time.now()]);
+    return !!rows && rows.length > 0;
+}
+
+// Disable the account's second factor through the app's totpDisable hook,
+// when one is configured; a failure is logged.
+async function runTotpDisable(uid) {
+    if (!_state.totpDisable) return;
+    try { await _state.totpDisable(uid); }
+    catch (e) { log.warn("auth-flows: totpDisable threw: " + (e && e.message ? e.message : e)); }
 }
 
 // A callback whose answer gates authentication must answer synchronously:
@@ -1327,6 +1367,7 @@ function handleMagicLink(req, res) {
                 if (!user) throw new Error("userCreate returned an id that userGet cannot resolve");
             }
         }
+        if (recoveryLocked(userId(user))) return;
         const token = issueToken(userId(user), ACTIONS.magic_link,
             _state.magicLinkTtl, { eb: emailBinding(user) });
         if (origin) {
@@ -1390,7 +1431,8 @@ function handleMagicLinkConsume(req, res) {
     const user = getUser(result[0].sub);
     // A magic link is bound to the address it was sent to: after an email
     // change, one still sitting in the old mailbox no longer signs in.
-    if (!user || result[0].eb !== emailBinding(user))
+    if (!user || result[0].eb !== emailBinding(user)
+        || recoveryLocked(result[0].sub))
         return verifyFail(req, res, 400, "magic link failed");
     // Magic-link clicks count as proof of email ownership. An unverified
     // account that HAS a password may carry one somebody else chose: the
@@ -1478,6 +1520,7 @@ function handlePasswordResetRequest(req, res) {
     if (!user) return genericOk(res);
     const origin = originFor(req);
     afterResponse(() => {
+        if (recoveryLocked(userId(user))) return;
         const token = issueToken(userId(user), ACTIONS.password_reset,
             _state.resetTtl, resetTokenExtra(user));
         if (origin) {
@@ -1507,7 +1550,8 @@ async function handlePasswordResetConfirm(req, res) {
             error: "reset failed: " + (result[1] || "?") });
     }
     const user = getUser(result[0].sub);
-    if (!user || !resetBindingHolds(result[0], user))
+    if (!user || !resetBindingHolds(result[0], user)
+        || recoveryLocked(result[0].sub))
         return res.status(400).json({ error: "reset failed" });
     const newHash = crypto.hashPassword(body.password);
     if (!isVerified(user)) {
@@ -1594,7 +1638,8 @@ function handleEmailChange(req, res) {
         + "WHERE user_id = ? AND expires_at > ? LIMIT 1",
         [key, time.now()]);
     if (existing && existing.length > 0) {
-        if (existing[0].token_hash === UNDONE_MARK) {
+        if (existing[0].token_hash === UNDONE_MARK
+            || existing[0].token_hash === UNDONE_LOCKED_MARK) {
             return res.status(409).json({
                 error: "email changes are paused after an undone change; try again later",
             });
@@ -1689,16 +1734,20 @@ async function handleEmailChangeRevoke(req, res) {
             // Taken since by another account (an app may create accounts
             // itself): nothing to restore to. The rest of the undo still
             // happens (audit 10; see the Lua sibling): unusable password,
-            // lockout rows cleared, row marked undone, sessions revoked.
+            // lockout rows cleared, sessions revoked. Audit 11: the second
+            // factor goes too, and the row is marked UNDONE_LOCKED_MARK,
+            // refusing password resets and magic links while it lives.
             log.warn("auth-flows: email change of account " + String(env.sub)
                 + " cannot be reverted: its previous address is in use; "
-                + "password reset and sessions revoked");
+                + "password reset, sessions revoked and self-service recovery "
+                + "locked - restore the account by hand");
             setPassword(env.sub, crypto.hashPassword(crypto.randomToken(32)));
             clearAllFailedLogins(env.sub);
+            await runTotpDisable(env.sub);
             const now = time.now();
             db.exec("UPDATE _hull_auth_pending_email_changes SET token_hash = ?, "
                     + "new_email = ?, confirmed_at = ?, expires_at = ? WHERE user_id = ?",
-                    [UNDONE_MARK, String(user.email || ""), now,
+                    [UNDONE_LOCKED_MARK, String(user.email || ""), now,
                      now + _state.emailChangeTtl, key]);
             await runOnPasswordReset(req, res, user);
             emitEvent(env.sub, "email_change_revoked", req,
@@ -1720,10 +1769,7 @@ async function handleEmailChangeRevoke(req, res) {
         setEmailVerified(env.sub, wasVerified);
         setPassword(env.sub, crypto.hashPassword(crypto.randomToken(32)));
         clearAllFailedLogins(env.sub);
-        if (_state.totpDisable) {
-            try { await _state.totpDisable(env.sub); }
-            catch (e) { log.warn("auth-flows: totpDisable threw: " + (e && e.message ? e.message : e)); }
-        }
+        await runTotpDisable(env.sub);
         user.email = old;
         user.email_verified = wasVerified;
         restored = true;
@@ -1797,18 +1843,32 @@ function handleEmailChangeConfirm(req, res) {
     }
     const oldEmail = user.email;
     const oldVerified = isVerified(user) ? 1 : 0;
-    setEmail(env.sub, env.new_email);
-    setEmailVerified(env.sub, true);
+    const key = uidKey(env.sub);
     // With a revoke link out (email_change_notify), the row stays, confirmed
     // and holding the old address, until that link expires: the old address
     // can still undo the change. Without one there is nothing to undo it with.
-    if (_state.templates.email_change_notify) {
+    // The confirmed row is written BEFORE the address is switched (audit 11):
+    // after, another instance could claim the vacated address in between,
+    // while nothing reserved it. If the switch fails the row goes back to
+    // pending.
+    const keep = !!_state.templates.email_change_notify;
+    if (keep) {
         db.exec("UPDATE _hull_auth_pending_email_changes "
                 + "SET confirmed_at = ?, old_email = ?, old_verified = ? WHERE user_id = ?",
-                [time.now(), oldEmail, oldVerified, uidKey(env.sub)]);
-    } else {
-        db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
-                [uidKey(env.sub)]);
+                [time.now(), oldEmail, oldVerified, key]);
+    }
+    try {
+        setEmail(env.sub, env.new_email);
+    } catch (e) {
+        if (keep) {
+            db.exec("UPDATE _hull_auth_pending_email_changes SET confirmed_at = NULL, "
+                    + "old_email = NULL, old_verified = NULL WHERE user_id = ?", [key]);
+        }
+        throw e;
+    }
+    setEmailVerified(env.sub, true);
+    if (!keep) {
+        db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?", [key]);
     }
     emitEvent(env.sub, "email_changed", req,
               { metadata: { old_email: oldEmail, new_email: env.new_email } });
@@ -2224,6 +2284,7 @@ function sendPasswordReset(email, resetUrlPrefix) {
     const user = findByEmail(email);
     if (!user) return;
     const uid = userId(user);
+    if (recoveryLocked(uid)) return;  // see recoveryLocked
     const token = issueToken(uid, ACTIONS.password_reset, _state.resetTtl,
         resetTokenExtra(user));
     const link = (resetUrlPrefix || "") + _state.prefix
@@ -2246,11 +2307,21 @@ function sendMagicLink(email, magicUrlPrefix) {
         if (!user) return;
     }
     const uid = userId(user);
+    if (recoveryLocked(uid)) return;  // see recoveryLocked
     const token = issueToken(uid, ACTIONS.magic_link, _state.magicLinkTtl,
         { eb: emailBinding(user) });
     const link = (magicUrlPrefix || "") + _state.prefix
         + "/magic-link/consume?token=" + token;
     sendEmail(email, "magic_link", { user, link, token });
+}
+
+// Is email held for the undo of a confirmed email change (audit 11)? The
+// module's own account-creating paths refuse such an address; an app that
+// creates accounts or changes addresses itself must too:
+//     if (authFlows.emailReserved(email)) { /* treat as taken */ }
+function emailReserved(email) {
+    if (!_state.initialized) throw new Error("auth-flows: call init() first");
+    return oldEmailReserved(email);
 }
 
 const _test = {
@@ -2276,6 +2347,8 @@ const _test = {
         emailChange: handleEmailChange,
         emailChangeConfirm: handleEmailChangeConfirm,
         emailChangeRevoke: handleEmailChangeRevoke,
+        passwordResetRequest: handlePasswordResetRequest,
+        magicLinkConsume: handleMagicLinkConsume,
     },
     ACTIONS,
     emailRateAllow: (to) => emailRateAllow(to),
@@ -2319,7 +2392,7 @@ const _test = {
 
 const authFlows = {
     init, routes, standardUsers,
-    sendVerifyEmail, sendPasswordReset, sendMagicLink,
+    sendVerifyEmail, sendPasswordReset, sendMagicLink, emailReserved,
     _test,
 };
 export { authFlows };

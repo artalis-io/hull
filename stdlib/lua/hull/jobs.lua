@@ -105,6 +105,20 @@ local _rl_lock = ""
 local _paused = {}
 local _paused_at = 0
 
+-- A duration option (seconds) as a number: a numeric string is converted,
+-- anything else that is not a finite number >= 0 raises (audit 11). A string
+-- visibility_timeout stopped the worker at its first reap (arithmetic on a
+-- string), and NaN made every claim stale - the reaper took every running
+-- job, every sweep.
+local function duration_opt(name, v)
+    local n = tonumber(v)
+    if type(n) ~= "number" or n ~= n or n < 0 or n == math.huge then
+        error("jobs.init: " .. name .. " must be a finite number of seconds >= 0, got "
+              .. tostring(v))
+    end
+    return n
+end
+
 --- Create the `_hull_jobs` table and its indexes. Idempotent - safe to call on
 -- every boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
 -- form, so the same call runs unchanged on SQLite, PostgreSQL, and MySQL.
@@ -118,8 +132,12 @@ local _paused_at = 0
 function jobs.init(opts)
     opts = opts or {}
     if opts.max_attempts ~= nil then _cfg.max_attempts = opts.max_attempts end
-    if opts.visibility_timeout ~= nil then _cfg.visibility_timeout = opts.visibility_timeout end
-    if opts.reap_interval ~= nil then _cfg.reap_interval = opts.reap_interval end
+    if opts.visibility_timeout ~= nil then
+        _cfg.visibility_timeout = duration_opt("visibility_timeout", opts.visibility_timeout)
+    end
+    if opts.reap_interval ~= nil then
+        _cfg.reap_interval = duration_opt("reap_interval", opts.reap_interval)
+    end
     if opts.backoff ~= nil then _cfg.backoff = opts.backoff end
     if opts.history ~= nil then _cfg.history = opts.history end
     if opts.history_retention ~= nil then _cfg.history_retention = opts.history_retention end
@@ -229,11 +247,20 @@ function jobs.init(opts)
     -- absent (checked via the portable db.table_columns, mirroring session.lua),
     -- rather than catching a duplicate-column error - a caught ALTER would abort
     -- a surrounding transaction on Postgres if jobs.init ran inside a db.batch.
-    local function ensure_column(tbl, col, coldef)
+    local function has_column(tbl, col)
         for _, name in ipairs(db.table_columns(tbl) or {}) do
-            if name == col then return end
+            if name == col then return true end
         end
-        db.exec("ALTER TABLE " .. tbl .. " ADD COLUMN " .. coldef)
+        return false
+    end
+    local function ensure_column(tbl, col, coldef)
+        if has_column(tbl, col) then return end
+        -- Check-then-ALTER races a peer instance booting at the same moment
+        -- (a rolling deploy on Postgres / MySQL): both see the column
+        -- missing, and the second ALTER fails on a duplicate column. That
+        -- failure is fine when the column now exists (audit 11).
+        local ok, err = pcall(db.exec, "ALTER TABLE " .. tbl .. " ADD COLUMN " .. coldef)
+        if not ok and not has_column(tbl, col) then error(err, 0) end
     end
     ensure_column("_hull_jobs", "progress", "progress INTEGER NOT NULL DEFAULT 0")
     ensure_column("_hull_jobs", "trace_context", "trace_context VARCHAR(255)")
@@ -1405,7 +1432,10 @@ local function parse_tz_offset(tz)
         if tz == "Z" or tz == "UTC" or tz == "utc" then return 0 end
         local sign, hh, mm = tz:match("^([+-])(%d%d):?(%d%d)$")
         if sign then
-            if tonumber(hh) > 18 or tonumber(mm) > 59 then
+            -- At most 18:00 either way, as the minutes form (audit 11:
+            -- "+18:59" passed the per-field checks).
+            if tonumber(hh) > 18 or tonumber(mm) > 59
+               or tonumber(hh) * 60 + tonumber(mm) > 1080 then
                 error("jobs.cron: tz offset '" .. tz .. "' is out of range")
             end
             local off = tonumber(hh) * 3600 + tonumber(mm) * 60
@@ -1549,6 +1579,24 @@ jobs._cron_next = function(spec, from, offset)
 end
 jobs._tick = function(now) process_cron(now or time.now()) end
 
+-- jobs.work's refresh before starting each batch job after the first: the
+-- job's claim and its still-unstarted mates' are extended to now, so a mate
+-- is never reaped (re-pended, or dead-lettered on its last attempt) for the
+-- time the jobs ahead of it took.
+local function refresh_claim(job)
+    local now = time.now()
+    local n = db.exec(
+        "UPDATE _hull_jobs SET claimed_at=?, updated_at=? "
+        .. "WHERE id=? AND claim_token=? AND status='running'",
+        { now, now, job.id, job.claim_token })
+    if (n or 0) == 0 then return false end
+    db.exec(
+        "UPDATE _hull_jobs SET claimed_at=? "
+        .. "WHERE claim_token=? AND status='running' AND id<>?",
+        { now, job.claim_token, job.id })
+    return true
+end
+
 -- Is attempt-history recording on for this queue? true = all queues; a table
 -- with a `queues` list = only those.
 local function history_enabled(queue)
@@ -1611,7 +1659,7 @@ function jobs.work(opts)
         -- Refresh the claim before starting each job after the first, and skip
         -- one whose claim is already gone - its new owner holds it (and its
         -- strict-concurrency slot).
-        if i > 1 and not jobs.heartbeat(job) then
+        if i > 1 and not refresh_claim(job) then
             job._lost = true
             goto continue
         end
@@ -2621,14 +2669,29 @@ function jobs.heartbeat(job)
         { now, now, job.id, job.claim_token })
     if (n or 0) == 0 then return false end
     -- The rest of the batch jobs.work claimed with this job shares its token
-    -- and waits, unstarted, for this one to finish. Extend their claim too:
-    -- otherwise a job that heartbeats past visibility_timeout left them
-    -- stale, and the reaper re-pended them - or, on their last attempt,
-    -- dead-lettered them as "worker lost" without their ever having run.
-    db.exec(
-        "UPDATE _hull_jobs SET claimed_at=? "
+    -- and waits, unstarted, for this one to finish. A job that heartbeats is
+    -- a long one, so they go back to `pending` now - their attempt increment
+    -- undone, a strict-concurrency slot they hold released - for this or
+    -- another worker to claim (audit 11). Extending their claim instead (round
+    -- 10) held them, unrun, for as long as this job kept heartbeating. Either
+    -- way a mate is never reaped (and on its last attempt dead-lettered "worker
+    -- lost") without having run. jobs.work skips a released mate: its claim
+    -- is gone.
+    local mates = db.query(
+        "SELECT id, concurrency_key, concurrency_strict FROM _hull_jobs "
         .. "WHERE claim_token=? AND status='running' AND id<>?",
-        { now, job.claim_token, job.id })
+        { job.claim_token, job.id })
+    for _, m in ipairs(mates or {}) do
+        local r = db.exec(
+            "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, "
+            .. "attempts=CASE WHEN attempts > 0 THEN attempts-1 ELSE 0 END, updated_at=? "
+            .. "WHERE id=? AND claim_token=? AND status='running'",
+            { now, m.id, job.claim_token })
+        if (r or 0) > 0 and m.concurrency_strict == 1 and m.concurrency_key ~= nil then
+            conc_release(m.concurrency_key)
+        end
+    end
+    if mates and #mates > 0 then wake_workers() end
     return true
 end
 

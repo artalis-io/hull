@@ -60,6 +60,13 @@ await test("logx: control characters in values are escaped and quoted", () => {
     assertEq(logx.fields({ k: "plain" }), " k=plain");
 });
 
+await test("logx (audit 11): C1 controls and U+2028 / U+2029 are escaped", () => {
+    assertEq(logx.fields({ k: "a\u0085b" }), ' k="a\\u0085b"');
+    assertEq(logx.fields({ k: "\u0080\u009f" }), ' k="\\u0080\\u009f"');
+    assertEq(logx.fields({ k: "a\u2028b\u2029" }), ' k="a\\u2028b\\u2029"');
+    assertEq(logx.fields({ k: "\u00a0" }), " k=\u00a0", "U+00A0 is not a break");
+});
+
 // ── cache.fetch ────────────────────────────────────────────────────
 
 await test("cache.fetch: a null / undefined result is not cached", () => {
@@ -118,6 +125,18 @@ await test("i18n.detect: the prefix fallback is deterministic", () => {
     i18n.reset();
     i18n.load("end", { hi: "x" });
     assertEq(i18n.detect("en"), null, "en does not match end");
+    i18n.reset();
+});
+
+await test("i18n.detect (audit 11): the base splits on '-' and '_' in both runtimes", () => {
+    i18n.reset();
+    i18n.load("zh", { hi: "ni hao" });
+    assertEq(i18n.detect("zh_TW"), "zh", "zh_TW's base is zh");
+    assertEq(i18n.detect("zh-TW;q=0.8"), "zh");
+    i18n.reset();
+    i18n.load("zh_TW", { hi: "ni hao" });
+    assertEq(i18n.detect("zh_TW"), "zh_TW", "an exact zh_TW");
+    assertEq(i18n.detect("zh-HK"), "zh_TW", "prefix fallback");
     i18n.reset();
 });
 

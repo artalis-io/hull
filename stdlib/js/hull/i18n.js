@@ -95,7 +95,8 @@ function parseAcceptLanguage(header) {
     const parts = header.split(",");
     for (let i = 0; i < parts.length; i++) {
         const part = parts[i].trim();
-        const match = part.match(/^([a-zA-Z0-9-]+)(.*)/);
+        // "_" too: "zh_TW" is a common spelling of "zh-TW" (audit 11).
+        const match = part.match(/^([a-zA-Z0-9_-]+)(.*)/);
         if (!match) continue;
         const lang = match[1];
         let q = 1.0;
@@ -354,7 +355,8 @@ function detect(headerOrReq) {
         // Exact match
         if (locales[lang]) return lang;
         // Base language match
-        const base = lang.split("-")[0];
+        // The base splits on "-" and "_", as the Lua side's (audit 11).
+        const base = lang.split(/[-_]/)[0];
         if (locales[base]) return base;
     }
     // Second pass: a loaded locale whose base is this base ("en" matches
@@ -364,7 +366,7 @@ function detect(headerOrReq) {
         return a < b ? -1 : a > b ? 1 : 0;
     });
     for (let i = 0; i < entries.length; i++) {
-        const base = entries[i].lang.split("-")[0];
+        const base = entries[i].lang.split(/[-_]/)[0];
         if (base === "") continue;
         for (let j = 0; j < keys.length; j++) {
             const name = keys[j];
