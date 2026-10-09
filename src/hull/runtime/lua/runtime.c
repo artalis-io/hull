@@ -812,6 +812,9 @@ static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
 #ifdef HL_ENABLE_HTTP_SERVER
     HlLua *lua = (HlLua *)rt;
     hl_lua_test_clear(lua->L);
+    /* Loading a test file runs its top level: an entry of its own (budget
+     * and wall-clock deadline), not the tail of the last file's last case. */
+    HL_LUA_ARM(lua, lua->L);
     if (luaL_loadfilex(lua->L, file_path, "t") != LUA_OK ||   /* text only */
         lua_pcall(lua->L, 0, LUA_MULTRET, 0) != LUA_OK) {
         const char *err = lua_tostring(lua->L, -1);

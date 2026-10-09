@@ -1815,6 +1815,9 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
      * trivial test file trips "stack overflow". */
     JS_UpdateStackTop(js->rt);
 
+    /* Loading a test file runs its top level: an entry of its own (budget
+     * and wall-clock deadline), not the tail of the last file's last case. */
+    hl_js_budget_arm(js);
     JSValue result = JS_Eval(js->ctx, src, (size_t)flen, file_path,
                              JS_EVAL_TYPE_MODULE);
     free(src);
