@@ -417,8 +417,9 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
     /* An entry point: the resumed run gets a budget of its own (it used to
      * inherit whatever count the last entry left - and after one trip,
-     * every resume failed at its first poll until the next dispatch). */
-    hl_js_budget_arm(js);
+     * every resume failed at its first poll until the next dispatch). A
+     * resume of app.main's own code keeps main's deadline default. */
+    hl_js_budget_arm_kind(js, jc->cli_main ? HL_RUN_MAIN : HL_RUN_ENTRY);
     js->active_timer = NULL;
     /* A stale transaction is not this run's to join (audit 6 M1). */
     hl_db_registry_guard_stale_txns(js->base.db_registry);
@@ -531,7 +532,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     if (forced)
         state = JS_PROMISE_REJECTED;
     if (js->budget_tripped && !conn && !jc->timer_ctx && !wired && jc->cli_main)
-        hl_js_cli_main_trip(js, "instruction limit exceeded");
+        hl_js_cli_main_trip(js, hl_js_trip_reason(js));
     /* The handler waits again (not a settled one deferred to its holder,
      * below): checked whether or not this resume started a new op - one made
      * before a BEGIN it ran now (`await pa; BEGIN; ...; await pb`) waits
@@ -648,7 +649,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
             js->last_async_cont = NULL;
         }
         const char *shown = msg ? msg : tripped
-            ? "instruction limit exceeded"
+            ? hl_js_trip_reason(js)
             : aborted ? "waited holding a database transaction" : "(unknown)";
         if (conn)
             log_error("[hull:c] async js handler error: %s", shown);
@@ -1088,7 +1089,7 @@ static void js_task_log(HlJS *js, JSValueConst err)
 {
     const char *msg = js->budget_tripped ? NULL : JS_ToCString(js->ctx, err);
     log_error("[hull:js] spawned task error: %s",
-              msg ? msg : js->budget_tripped ? "instruction limit exceeded"
+              msg ? msg : js->budget_tripped ? hl_js_trip_reason(js)
                                              : "(unknown)");
     if (msg) JS_FreeCString(js->ctx, msg);
     /* A toString can throw: leave nothing pending for the next run. */
@@ -1120,6 +1121,10 @@ static void js_task_fire(void *user)
     int           save_pending     = js->async_pending;
     int64_t       save_count       = js->instruction_count;
     int           save_tripped     = js->budget_tripped;
+    int           save_timed_out   = js->budget_timed_out;
+    /* The interrupted run's wall-clock deadline: the arm below sets the
+     * task's own (cap/run_watchdog.h). */
+    uint64_t      save_deadline    = hl_run_watch_save(&js->run_watch);
 #ifdef HL_ENABLE_DB
     /* The arm below rebinds this thread's SQL budget to this run. */
     HlDbBudgetBinding save_budget  = hl_db_budget_current();
@@ -1176,6 +1181,8 @@ static void js_task_fire(void *user)
     js->async_pending          = save_pending;
     js->instruction_count      = save_count;
     js->budget_tripped         = save_tripped;
+    js->budget_timed_out       = save_timed_out;
+    hl_run_watch_restore(&js->run_watch, save_deadline);
 #ifdef HL_ENABLE_DB
     hl_db_budget_restore(save_budget);
 #endif

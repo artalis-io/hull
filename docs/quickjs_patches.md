@@ -260,3 +260,44 @@ behaves as upstream (the JS source frontend's tooling session sets none).
 seconds; several never return without the patch) and
 `js_audit11.builtin_work_is_charged` (each loop trips a 1M budget within
 49 iterations, counted rather than timed).
+
+## Patch 0006 - an embedder stop flag polled at every step
+
+**Files:** `vendor/quickjs/quickjs.c` (`JSRuntime.stop_flag`,
+`JSContext.stop_flag`, `JS_NewContextRaw`, `JS_SetStopFlag`,
+`js_poll_interrupts`), `quickjs.h` (`JS_SetStopFlag`)
+**Found by:** round-12 audit (G2: the run watchdog)
+**Upstream:** Hull-specific.
+
+Audits 9-12 kept finding work one step does that patch 0005 does not charge (a
+property miss walking a deep prototype chain, Proxy `ownKeys` validation, a
+regexp compile rescanning for `\k<name>`, a literal compared char by char, a
+slow-array length shrink, ...). Charging each one never converges, so Hull
+bounds every run by wall-clock time as well (`src/hull/cap/run_watchdog.c`): a
+watchdog thread raises a per-VM stop flag at the run's deadline. The interrupt
+handler only runs when a context's step counter runs out - every
+`JS_INTERRUPT_COUNTER_INIT` (10000) calls / backward jumps - and each of those
+steps may be one of the uncharged operations above.
+
+The patch gives the runtime a pointer to an `int` the embedder owns
+(`JS_SetStopFlag(rt, &flag)`, NULL = none), copied to every context (existing
+ones by the setter, new ones by `JS_NewContextRaw`). `js_poll_interrupts`
+reads it (an atomic relaxed load: another thread writes it) after decrementing
+the counter, and when it is set polls the interrupt handler at this step.
+Hull's handler (`runtime/js/runtime.c`, and the worker VM's in
+`runtime/js/worker.c`) trips the run's budget, which patch 0003 keeps sticky
+and uncatchable. The regexp engine's own poll (`lre_check_timeout`) calls the
+same handler, so a backtracking regexp sees the flag too.
+
+Cost: one load of a pointer kept beside the step counter and, when set, one
+load of the flag, at every call and backward jump. A runtime with no flag (the
+JS source frontend's tooling session) behaves as upstream.
+
+**Limit:** the flag is seen at steps. One builtin call that runs long without
+polling (one huge prototype walk, one regexp compile) runs to completion; the
+watchdog bounds loops of them.
+
+**Guard:** `tests/hull/runtime/js/test_js.c`, `js_run_watchdog.*` (loops of
+round-12 triggers under a 200 ms deadline and no instruction limit are
+stopped; the trip is not caught by try / catch; a worker.dispatch job is
+stopped).

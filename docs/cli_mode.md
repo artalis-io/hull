@@ -100,7 +100,7 @@ only before that first word; under `hull` they may appear anywhere before `--`.
 The flags that weaken the process - `--no-sandbox`, `--allow-degraded-sandbox`,
 `--no-ca-bundle` / `--skip-ca-bundle`, `--ca-bundle`, `--no-verify-platform`,
 `--agent-api`, `--agent` (sidecar files written into the app directory),
-`--max-instructions`, the resource limits (`-m`, `-M`, `-s`,
+`--max-instructions`, `--max-run-ms`, the resource limits (`-m`, `-M`, `-s`,
 `--max-connections`, `--read-timeout`, `--workers`, `--queue-capacity`,
 `--drain-timeout`, `--wasm-gas`, `--wasm-heap`, `--wasm-stack`,
 `--wasm-timeout-ms`, `--wasm-max-input`, `--wasm-max-output`,
@@ -119,7 +119,7 @@ one-letter name takes its value as the next argument (`--hull-d PATH`;
 The reservation covers only the flags the runner actually implements. A built
 app WITHOUT HTTP runs on the `app.main` runner, which takes `--no-sandbox`,
 `--allow-degraded-sandbox`, `--no-ca-bundle` / `--skip-ca-bundle`,
-`--ca-bundle`, `--no-verify-platform`, `--max-instructions`, `-d` and (when
+`--ca-bundle`, `--no-verify-platform`, `--max-instructions`, `--max-run-ms`, `-d` and (when
 WASM is compiled in) the six `--wasm-*` compute ceilings - all reserved as
 above - plus `--verify-sig`, `--no-migrate` and `--audit`. It has no server,
 TLS-listener or body options, so `-s`, `-m`, `-M`, `-b`, `-p`, `-l`,

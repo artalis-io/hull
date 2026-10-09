@@ -155,6 +155,7 @@ Hull ships 30+ subcommands for the full development lifecycle:
 | `hull tools install <name>` / `list` / `uninstall <name>` | Side-load optional companion tools (`wamrc`, the `zig` linker bundle, the `libc-musl-<arch>` static floors, the `cosmocc` bundle) routed through the signed `blob_store` from the same release as the running hull |
 | `hull cache list \| prune \| clear \| verify` | Runtime cache management (Lua/JS bytecode, Lua/JS template, compute AOT, tools store). Per-app isolation via `HULL_CACHE_DIR` |
 | <code>hull &lt;app&gt; --max-instructions N</code> | Set per-request instruction limit (default: 100M) |
+| <code>hull &lt;app&gt; --max-run-ms MS</code> | Wall-clock limit per uninterrupted script run (default: 60000; app.main 600000; 0 = none) |
 | <code>hull &lt;app&gt; --audit</code> | Enable capability audit logging (JSON to stderr) |
 | <code>hull &lt;app&gt; --max-connections N</code> | Max concurrent connections (default: 256) |
 | <code>hull &lt;app&gt; --body-max-size SIZE</code> | Max request body size (default: 1m) |

@@ -76,6 +76,7 @@ Passed to `hull <entry>` or `hull dev`:
 --ca-bundle PATH        custom CA bundle (overrides system + embedded)
 --audit                 enable capability audit logging (JSON to stderr)
 --max-instructions N    per-request instruction limit (default 100m)
+--max-run-ms MS         wall-clock limit per script run (default 60000; app.main 600000; 0 = none)
 --max-connections N     max concurrent connections (default 256)
 --body-max-size SIZE    max request body size (default 1m)
 --read-timeout MS       read timeout in milliseconds (default 30000)

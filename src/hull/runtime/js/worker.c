@@ -57,6 +57,8 @@ typedef struct {
     int64_t    instructions;
     int64_t    max_instructions;   /* 0 = none */
     int        tripped;            /* sticky for the dispatch: see below */
+    int        timed_out;          /* the trip was the job's deadline */
+    HlRunWatch watch;              /* the job's wall-clock deadline */
 } HlJsWorkerCtx;
 
 static pthread_key_t  js_worker_key;
@@ -66,6 +68,7 @@ static void js_worker_destructor(void *ptr)
 {
     if (!ptr) return;
     HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)ptr;
+    hl_run_watch_disarm(&wctx->watch);   /* before free(wctx) */
     if (wctx->rt) {
         JS_SetWorkHandler(wctx->rt, NULL, NULL);
         JS_FreeRuntime(wctx->rt);
@@ -90,6 +93,11 @@ static int js_worker_interrupt(JSRuntime *rt, void *opaque)
     HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)opaque;
     if (wctx->tripped)
         return 1;
+    if (hl_run_watch_stopped(&wctx->watch)) {   /* the job's deadline */
+        wctx->tripped = 1;
+        wctx->timed_out = 1;
+        return 1;
+    }
     wctx->instructions += HL_JS_INTERRUPT_WEIGHT;   /* see internal.h */
     if (wctx->max_instructions > 0 &&
         wctx->instructions > wctx->max_instructions)
@@ -102,6 +110,11 @@ static int js_worker_charge(HlJsWorkerCtx *wctx, uint64_t units)
 {
     if (wctx->tripped)
         return 1;
+    if (hl_run_watch_stopped(&wctx->watch)) {   /* the job's deadline */
+        wctx->tripped = 1;
+        wctx->timed_out = 1;
+        return 1;
+    }
     wctx->instructions = units > (uint64_t)(INT64_MAX - wctx->instructions)
                          ? INT64_MAX : wctx->instructions + (int64_t)units;
     if (wctx->max_instructions > 0 &&
@@ -151,6 +164,8 @@ static HlJsWorkerCtx *get_js_worker_rt(void)
     }
     JS_SetInterruptHandler(wctx->rt, js_worker_interrupt, wctx);
     JS_SetWorkHandler(wctx->rt, js_worker_work, wctx);
+    /* QuickJS HULL PATCH 0006: the job's deadline (cap/run_watchdog.h). */
+    JS_SetStopFlag(wctx->rt, &wctx->watch.stop);
     pthread_setspecific(js_worker_key, wctx);
     return wctx;
 }
@@ -168,6 +183,10 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
     JS_UpdateStackTop(wctx->rt);
     wctx->instructions = 0;
     wctx->tripped = 0;
+    wctx->timed_out = 0;
+    /* The last job's deadline may have passed while the thread was idle:
+     * none over Hull's own setup; the job's is armed at the end. */
+    hl_run_watch_disarm(&wctx->watch);
     /* Unlimited while the context is set up: its allocations are charged
      * (QuickJS HULL PATCH 0005), and a small limit tripped in Hull's own
      * setup. The dispatch's limit applies from the end of it. */
@@ -214,6 +233,8 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
     }
     wctx->instructions = 0;
     wctx->max_instructions = op->max_instructions;
+    /* A job is a run like a request's: the same wall-clock default. */
+    hl_run_watch_arm(&wctx->watch, hl_run_watchdog_limit_ms(HL_RUN_ENTRY));
     return ctx;
 }
 
@@ -433,6 +454,7 @@ static void js_dispatch_work_fn(void *ud)
     HlDbBudgetBinding budget = hl_db_budget_swap(js_worker_db_charge, wctx);
 #endif
     js_dispatch_run(wctx, ctx, op);
+    hl_run_watch_disarm(&wctx->watch);   /* the job's run is over */
     /* The runtime outlives the context, and so did a job left in its queue
      * (`Promise.resolve().then(...)` the function did not wait for): it held
      * the freed context alive through its function's realm, so every such
@@ -461,7 +483,9 @@ static void js_dispatch_fail(HlJsWorkerCtx *wctx, JSContext *ctx,
     op->error = 1;
     if (wctx->tripped) {
         snprintf(op->error_msg, sizeof(op->error_msg),
-                 "dispatch: interrupted (instruction limit exceeded)");
+                 "dispatch: interrupted (%s)",
+                 wctx->timed_out ? HL_RUN_TIME_LIMIT_MSG
+                                 : "instruction limit exceeded");
         return;
     }
     const char *msg = JS_ToCString(ctx, err);

@@ -45,6 +45,7 @@
 #include "hull/cap/policy_seal.h"   /* hl_policy_seal_* - every build seals its policy */
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
+#include "hull/cap/run_watchdog.h"   /* --max-run-ms */
 #include "hull/vfs.h"
 #ifdef HL_ENABLE_WASM
 #include "hull/wasm_config.h"
@@ -199,6 +200,16 @@ static int cli_parse_args(int argc, char **argv,
                 return -2;
             }
             x->instruction_limit = v;
+            continue;
+        }
+        if (strcmp(argv[i], "--max-run-ms") == 0 && i + 1 < argc) {
+            /* The run watchdog's wall-clock deadline (cap/run_watchdog.h). */
+            int64_t ms;
+            if (hl_run_watchdog_parse_ms(argv[++i], &ms) != 0) {
+                fprintf(stderr, "hull: invalid max-run-ms: %s\n", argv[i]);
+                return -2;
+            }
+            hl_run_watchdog_configure(ms);
             continue;
         }
 #ifdef HL_ENABLE_WASM

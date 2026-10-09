@@ -9975,4 +9975,155 @@ UTEST(js_audit11, unregistrable_middleware_fails_wiring)
 }
 #endif
 
+/* ── The run watchdog (cap/run_watchdog.h, audit 12) ──────────────────
+ *
+ * A wall-clock deadline per uninterrupted run, the backstop for work one
+ * QuickJS step does that the instruction budget does not charge. Each case
+ * runs with NO instruction limit, so only the watchdog can stop it, and a
+ * short deadline (200 ms); assertions are on the trip, not on timing (the
+ * sanitizer jobs are slow). */
+#define WD_TEST_MS 200
+
+static void wd_sleep_ms(long ms)
+{
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) != 0) {}
+}
+
+/* Evaluate `code` in a VM with no instruction limit under a fresh deadline.
+ * Returns 1 when the run was stopped by its deadline, 0 when it completed,
+ * -1 on a setup failure or any other outcome; `after` (if non-NULL) gets
+ * the global `after` (1 when code after a caught trip ran). */
+static int wd_js_run(const char *code, int *after)
+{
+    hl_run_watchdog_configure(WD_TEST_MS);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    cfg.max_instructions = 0;
+    HlJS v;
+    memset(&v, 0, sizeof v);
+    if (hl_js_init(&v, &cfg) != 0) {
+        hl_run_watchdog_configure(-1);
+        return -1;
+    }
+    hl_js_budget_arm(&v);
+    JSValue r = JS_Eval(v.ctx, code, strlen(code), "<wd>", JS_EVAL_TYPE_GLOBAL);
+    int out;
+    if (JS_IsException(r)) {
+        JS_FreeValue(v.ctx, JS_GetException(v.ctx));
+        out = v.budget_tripped && v.budget_timed_out ? 1 : -1;
+    } else {
+        out = 0;
+    }
+    JS_FreeValue(v.ctx, r);
+    if (after) {
+        /* Read without running code: the run is still tripped. */
+        JSValue g = JS_GetGlobalObject(v.ctx);
+        JSValue a = JS_GetPropertyStr(v.ctx, g, "after");
+        *after = JS_IsUndefined(a) ? 0 : 1;
+        JS_FreeValue(v.ctx, a);
+        JS_FreeValue(v.ctx, g);
+    }
+    hl_js_free(&v);
+    hl_run_watchdog_configure(-1);
+    return out;
+}
+
+UTEST(js_run_watchdog, loops_over_uncharged_work_are_stopped)
+{
+    static const char *const cases[] = {
+        "for (;;) {}",
+        /* round-12 triggers: a deep prototype-chain miss, Proxy ownKeys
+         * validation, a long-literal regexp */
+        "let o = {}; for (let i = 0; i < 20000; i++) o = Object.create(o);\n"
+        "for (;;) { o.missing; }",
+        "const keys = Array.from({ length: 3000 }, (_, i) => 'k' + i);\n"
+        "const p = new Proxy({}, { ownKeys: () => keys });\n"
+        "for (;;) { try { Reflect.ownKeys(p); } catch (e) {} }",
+        "const re = new RegExp('a'.repeat(5000));\n"
+        "const s = 'a'.repeat(4999) + 'b';\n"
+        "for (;;) re.test(s);",
+        NULL
+    };
+    for (int i = 0; cases[i]; i++)
+        EXPECT_EQ_MSG(wd_js_run(cases[i], NULL), 1, cases[i]);
+}
+
+/* The trip is uncatchable: a try / catch, an async body or a promise job
+ * does not let the run go on. */
+UTEST(js_run_watchdog, the_trip_cannot_be_caught)
+{
+    int after = -1;
+    EXPECT_EQ(wd_js_run("try { for (;;) {} } catch (e) {}\n"
+                        "globalThis.after = 1;", &after), 1);
+    EXPECT_EQ(after, 0);
+    after = -1;
+    EXPECT_EQ(wd_js_run("for (;;) { try { for (;;) {} } catch (e) {} }", &after), 1);
+}
+
+UTEST(js_run_watchdog, a_run_under_its_deadline_is_not_stopped)
+{
+    EXPECT_EQ(wd_js_run("let n = 0; for (let i = 0; i < 100000; i++) n += i;", NULL), 0);
+}
+
+/* A run that waits (a parked handler) is not over its deadline when it is
+ * resumed: each entry re-arms it. Simulated: the deadline passes while the
+ * VM is idle, and the next arm clears it. */
+UTEST(js_run_watchdog, an_idle_vm_is_rearmed_by_the_next_entry)
+{
+    hl_run_watchdog_configure(WD_TEST_MS);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    cfg.max_instructions = 0;
+    HlJS v;
+    memset(&v, 0, sizeof v);
+    ASSERT_EQ(hl_js_init(&v, &cfg), 0);
+    hl_js_budget_arm(&v);
+    wd_sleep_ms(2 * WD_TEST_MS + 100);
+    EXPECT_TRUE(hl_run_watch_stopped(&v.run_watch));
+    hl_js_budget_arm(&v);
+    EXPECT_FALSE(hl_run_watch_stopped(&v.run_watch));
+    JSValue r = JS_Eval(v.ctx, "1 + 1", 5, "<wd>", JS_EVAL_TYPE_GLOBAL);
+    EXPECT_FALSE(JS_IsException(r));
+    JS_FreeValue(v.ctx, r);
+    hl_js_free(&v);
+    hl_run_watchdog_configure(-1);
+}
+
+/* A VM freed while its deadline is pending: the watchdog must never write to
+ * the freed watch (ASan reports it if it does). */
+UTEST(js_run_watchdog, a_vm_freed_while_armed_is_never_touched)
+{
+    hl_run_watchdog_configure(WD_TEST_MS);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    for (int i = 0; i < 4; i++) {
+        HlJS *v = calloc(1, sizeof *v);
+        ASSERT_TRUE(v != NULL);
+        ASSERT_EQ(hl_js_init(v, &cfg), 0);
+        hl_js_budget_arm(v);
+        hl_js_free(v);
+        free(v);
+    }
+    wd_sleep_ms(2 * WD_TEST_MS + 100);
+    hl_run_watchdog_configure(-1);
+}
+
+/* A worker.dispatch job has its own deadline; the dispatching run, parked
+ * meanwhile, is resumed and completes. */
+UTEST(js_run_watchdog, a_runaway_worker_dispatch_is_stopped)
+{
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx *actx;
+    HlAsyncBackendPool *pool;
+    ASSERT_EQ(js_worker_open(&be, &actx, &pool), 0);
+    js.max_instructions = 0;
+    hl_run_watchdog_configure(WD_TEST_MS);
+    char out[512] = "(no verdict)";
+    js_worker_run(be, actx,
+        "  const m = await fails(() => { for (;;) {} });\n"
+        "  check(m.includes('time limit'), m);\n", out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    hl_run_watchdog_configure(-1);
+    js_worker_close(be, actx, pool);
+}
+
+
 UTEST_MAIN();

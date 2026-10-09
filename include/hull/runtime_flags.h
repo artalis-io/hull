@@ -154,6 +154,7 @@ static inline const HlRuntimeFlag *hl_runtime_flags(void)
         { "--agent-api",              HL_RF_SERVE | HL_RF_DOWNGRADE },
         { "--audit",                  HL_RF_SERVE | HL_RF_CLI },
         { "--max-instructions",       HL_RF_SERVE | HL_RF_CLI | HL_RF_DOWNGRADE },
+        { "--max-run-ms",             HL_RF_SERVE | HL_RF_CLI | HL_RF_DOWNGRADE },
         { "--max-connections",        HL_RF_SERVE | HL_RF_DOWNGRADE },
         { "--body-max-size",          HL_RF_SERVE | HL_RF_DOWNGRADE },
         { "--read-timeout",           HL_RF_SERVE | HL_RF_DOWNGRADE },

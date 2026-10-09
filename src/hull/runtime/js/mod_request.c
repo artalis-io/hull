@@ -744,7 +744,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         }
         /* log via stderr to match the standard async-resume path */
         fprintf(stderr, "[hull:c] async js handler error: %s\n",
-                msg ? msg : tripped ? "instruction limit exceeded"
+                msg ? msg : tripped ? hl_js_trip_reason(js)
                           : aborted ? "waited holding a database transaction"
                                     : "(unknown)");
         if (msg) JS_FreeCString(ctx, msg);

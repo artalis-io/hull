@@ -282,6 +282,11 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     hl_db_note_heap_limit(cfg->max_heap_bytes);   /* SQLITE_LIMIT_LENGTH */
 #endif
     lua->max_instructions = cfg->max_instructions;
+    /* The run watchdog (cap/run_watchdog.h): app VMs only - the tool VM
+     * (hull build spawning compilers) has no wall-clock limit. Set before
+     * the budget is installed, which hands the flag to Lua. */
+    lua->budget.watch = &lua->run_watch;
+    lua->run_watch_on = cfg->sandbox ? 1 : 0;
 
     /* Create Lua state with custom allocator */
     lua->L = lua_newstate(hl_lua_alloc, lua);
@@ -643,6 +648,9 @@ void hl_lua_free(HlLua *lua)
      * (fired by sqlite3_close) don't call luaL_unref on a dead state */
     lua->udf_runtime_alive = 0;
 
+    /* No deadline over the close (its finalizers are no run), and the
+     * watchdog must be done with the watch before its storage goes. */
+    hl_run_watch_disarm(&lua->run_watch);
     if (lua->L) {
         lua_close(lua->L);
         lua->L = NULL;
@@ -1152,7 +1160,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     /* First resume: main runs until it returns or yields. Its own run of
      * the instruction budget (budget.c), apart from load time. */
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 9 L1: an entry */
-    HL_LUA_ARM(lua, co);
+    HL_LUA_ARM_KIND(lua, co, HL_RUN_MAIN);   /* app.main's own deadline */
     int nres = 0;
     int status = lua_resume(co, L, 1, &nres);
     status = hl_lua_resume_status(co, status);

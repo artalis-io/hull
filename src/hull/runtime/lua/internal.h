@@ -129,8 +129,12 @@ void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar);
  * arm: at each entry point, on the thread about to run - resets the budget
  * to @p limit (0 = none). tripped: whether the current run went over. */
 void hl_lua_budget_install(lua_State *L, HlLuaBudget *b);
-void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit);
+void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit,
+                       uint32_t run_ms);
 int  hl_lua_budget_tripped(lua_State *L);
+/* The trip's message: "instruction limit exceeded", or
+ * HL_RUN_TIME_LIMIT_MSG when the run's wall-clock deadline passed. */
+const char *hl_lua_trip_reason(const HlLuaBudget *b);
 /* Raise the trip's error. The message is a string made at install, so the
  * raise allocates nothing (budget.c explains why that matters). */
 int  hl_lua_budget_raise(lua_State *L);
@@ -147,10 +151,17 @@ int hl_lua_manifest_json(lua_State *L, char **out, size_t *out_len);
  * copy (an Authorization lost). Every entry point arms the budget, so this
  * is the one place none can miss. No run reads scratch data across a yield
  * (another request's dispatch resets it meanwhile already). */
-#define HL_LUA_ARM(lua, thread) do {                                         \
-        hl_lua_budget_arm((thread), &(lua)->budget, (lua)->max_instructions); \
+/* The run's wall-clock deadline is armed with the budget (cap/run_watchdog.h):
+ * app.main's own runs get the HL_RUN_MAIN default, every other one
+ * HL_RUN_ENTRY. The tool VM has none. */
+#define HL_LUA_RUN_MS(lua, kind)                                              \
+    ((lua)->run_watch_on ? hl_run_watchdog_limit_ms(kind) : 0u)
+#define HL_LUA_ARM_KIND(lua, thread, kind) do {                               \
+        hl_lua_budget_arm((thread), &(lua)->budget, (lua)->max_instructions,  \
+                          HL_LUA_RUN_MS((lua), (kind)));                      \
         if ((lua)->scratch) sh_arena_reset((lua)->scratch);                   \
     } while (0)
+#define HL_LUA_ARM(lua, thread) HL_LUA_ARM_KIND((lua), (thread), HL_RUN_ENTRY)
 
 /* Keep the value at `idx` reachable until the binding returns, by storing it
  * in the anchor table at absolute index `anchor` (a lua_newtable the binding

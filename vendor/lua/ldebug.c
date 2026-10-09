@@ -33,6 +33,13 @@
 
 #define LuaClosure(f)		((f) != NULL && (f)->c.tt == LUA_VLCL)
 
+/* HULL PATCH 0005: an atomic read of the embedder's stop flag */
+#if defined(__GNUC__) || defined(__clang__)
+#define hl_loadstop(p)	__atomic_load_n((p), __ATOMIC_RELAXED)
+#else
+#define hl_loadstop(p)	(*(volatile int *)(p))
+#endif
+
 
 static const char *funcnamefromcall (lua_State *L, CallInfo *ci,
                                                    const char **name);
@@ -929,6 +936,14 @@ int luaG_traceexec (lua_State *L, const Instruction *pc) {
   }
   pc++;  /* reference is always next instruction */
   ci->u.l.savedpc = pc;  /* save 'pc' */
+  /* HULL PATCH 0005 (docs/lua_patches.md): another thread (the embedder's
+     wall-clock watchdog) raised the stop flag - run the count hook at this
+     instruction instead of up to a whole hook period later, where each
+     instruction may do work the count does not see. The flag is written by
+     that thread, so it is read atomically. */
+  if (l_unlikely((mask & LUA_MASKCOUNT) && G(L)->hlstop != NULL &&
+                 hl_loadstop(G(L)->hlstop)))
+    L->hookcount = 1;
   counthook = (mask & LUA_MASKCOUNT) && (--L->hookcount == 0);
   if (counthook)
     resethookcount(L);  /* reset count */
