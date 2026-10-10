@@ -37,6 +37,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
@@ -136,6 +137,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
@@ -334,6 +336,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
@@ -484,6 +487,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
@@ -794,6 +798,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: ./.github/actions/docker-mirror
 
       - name: Assemble + pack the floor in Alpine (musl)
         run: |
@@ -841,6 +846,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true          # keel + wamr are needed to build the platform
+      - uses: ./.github/actions/docker-mirror
 
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION

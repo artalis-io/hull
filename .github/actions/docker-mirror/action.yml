@@ -1,0 +1,32 @@
+name: Docker Hub registry mirror
+description: >
+  Point the runner's Docker daemon at mirror.gcr.io (Google's public cache of
+  Docker Hub images) before any image is pulled. Image references stay
+  unchanged, including digest pins: a mirror serves the same content-addressed
+  manifests, and the daemon falls back to docker.io for an image the mirror
+  does not hold. CI pulled Docker Hub unauthenticated and kept failing on its
+  rate limit (429), auth timeouts and 5xx; the mirror needs no credentials.
+  Linux runners only; a no-op elsewhere and where docker is absent.
+
+runs:
+  using: composite
+  steps:
+    - name: Use the mirror.gcr.io Docker Hub mirror
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "docker not installed; nothing to configure"
+          exit 0
+        fi
+        cfg=/etc/docker/daemon.json
+        cur='{}'
+        if [ -s "$cfg" ]; then cur="$(sudo cat "$cfg")"; fi
+        echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' \
+          | sudo tee "$cfg" >/dev/null
+        sudo systemctl restart docker
+        for _ in $(seq 1 30); do
+          docker info >/dev/null 2>&1 && break
+          sleep 1
+        done
+        docker info --format '{{.RegistryConfig.Mirrors}}'
