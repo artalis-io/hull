@@ -29,13 +29,18 @@ let nextId = 0;
 let sentEmails = [];
 let slowTemplates = false;
 
+// The lookup FOLDS case and accents, as a MySQL utf8mb4_0900_ai_ci column
+// does (audit 12): a token asked for under a lookalike address must not be
+// issued, and none is mailed to the address typed.
+function fold(e) { return e.toLowerCase().replace(/\u00e4/g, "a").replace(/\u00e9/g, "e"); }
+
 function userCreate(email, pwhash) {
     nextId += 1;
     const id = "u" + nextId;
     const u = {
         id, email, password_hash: pwhash, email_verified: false,
     };
-    usersByEmail[email] = u;
+    usersByEmail[fold(email)] = u;
     usersById[id] = u;
     return id;
 }
@@ -65,7 +70,7 @@ authFlows.init({
         password_reset: c => ({ subject: "Reset",   text: "link: " + c.link }),
         email_change:   c => ({ subject: "Confirm email change", text: "link: " + c.link }),
     },
-    userFindByEmail: email => usersByEmail[email],
+    userFindByEmail: email => usersByEmail[fold(email)],
     // userGet keeps the hash out of the model (a common adapter habit):
     // auth-flows must read it through userFindByEmail (audit 6 M1). Its
     // email_verified is a TEXT-column-style "0" when unverified (audit 7:
@@ -78,9 +83,9 @@ authFlows.init({
     userSetPassword: (id, pwhash) => { usersById[id].password_hash = pwhash; },
     userSetEmail:    (id, email) => {
         const u = usersById[id];
-        delete usersByEmail[u.email];
+        delete usersByEmail[fold(u.email)];
         u.email = email;
-        usersByEmail[email] = u;
+        usersByEmail[fold(email)] = u;
     },
     userSetEmailVerified: (id, v) => { usersById[id].email_verified = v; },
     onLogin: (req, res, user) => {

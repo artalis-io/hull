@@ -4774,6 +4774,23 @@ UTEST(lua_stdlib, auth_audit10_suite)
     cleanup_lua_caps();
 }
 
+/* Auth-flows regressions from audit 12 (token mails go to the stored address,
+ * exact standard_users lookup, unsuppressible email-change notice, persistent
+ * recovery lock, keyed revoke / confirm writes, init requirements). */
+UTEST(lua_stdlib, auth_audit12_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_auth_audit12.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, ws_stream_suite)
 {
     long long pass = 0, fail = -1;

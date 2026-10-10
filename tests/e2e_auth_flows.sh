@@ -22,6 +22,10 @@
 #   14. Login with old email → assert fail.
 #   15. Login with new email → assert ok.
 #   16. Replay verify token → assert reject (single-use across flows).
+#   ...
+#   20. Reset / magic-link / verify-resend for a lookalike of an existing
+#       address (the fixture's lookup folds) → assert nothing mailed; a
+#       an ASCII-case variant → mailed to the stored address only.
 #
 # All emails are captured in-process by the fixture's email_send
 # callback and read back via GET /_emails (debug endpoint, fixture-
@@ -441,6 +445,36 @@ run_flow() {
     R=$(curl -sS "$BASE/_init_refuses_unverified_login")
     check_contains "$_label: unverified login without on_password_reset refused" \
         "$R" '"refused":true'
+
+    # 20. Audit 12: the fixture's lookup folds case and accents (as a MySQL
+    #     utf8mb4_0900_ai_ci column does). A reset, magic link or verify
+    #     resend asked for under a lookalike of an existing address issues no
+    #     token at all - neither to the address typed (whoever reads it would
+    #     take the account) nor to the account's own. An ASCII-case variant
+    #     only in case is mailed to the STORED address, never the typed one.
+    curl -sS -X POST "$BASE/_emails/clear" > /dev/null
+    for _addr in 'cärol@example.test' 'carol@exämple.test'; do
+        curl -sS -X POST -H 'Content-Type: application/json' \
+            -d "{\"email\":\"$_addr\"}" "$BASE/auth/password-reset/request" > /dev/null
+        curl -sS -X POST -H 'Content-Type: application/json' \
+            -d "{\"email\":\"$_addr\"}" "$BASE/auth/magic-link" > /dev/null
+    done
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d '{"email":"däve@example.test"}' "$BASE/auth/verify/resend" > /dev/null
+    sleep 1
+    N=$(curl -sS "$BASE/_emails" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+    check_status "$_label: no token mailed for a lookalike address" "$N" "0"
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        -d '{"email":"carol@EXAMPLE.TEST"}' "$BASE/auth/password-reset/request" > /dev/null
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        [ -n "$(last_email_text "$PORT" "$EMAIL_C")" ] && break
+        sleep 0.2
+    done
+    TEXT=$(last_email_text "$PORT" "$EMAIL_C")
+    check_contains "$_label: an ASCII-case variant is mailed to the stored address" \
+        "$TEXT" "/auth/password-reset/confirm?token="
+    TEXT=$(last_email_text "$PORT" "carol@EXAMPLE.TEST")
+    check_status "$_label: ...and never to the address typed" "${TEXT:-none}" "none"
 
     stop_pid "$HULL_PID"; HULL_PID=""
 }
