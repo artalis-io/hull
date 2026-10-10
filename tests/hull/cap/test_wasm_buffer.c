@@ -11,6 +11,7 @@
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/limits/wasm.h"
+#include "hull/utils/alloc.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
 #include <stdlib.h>
@@ -151,6 +152,96 @@ UTEST(hl_wasm_buffer, call_buf_basic)
     hl_wasm_buffer_destroy(out_buf);
     free(out_buf);
     hl_cap_wasm_destroy(&cache);
+}
+
+/* Audit 12: a zero-copy buffer keeps a pooled instance checked out (linear
+ * memory, heap, stack - none on the VM heap), so it counts as a live
+ * instance; past the cache's live cap the output is copied instead and the
+ * instance goes straight back. Closing the buffer hands the slot back. */
+UTEST(hl_wasm_buffer, zero_copy_checkout_counted_falls_back_to_copy)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    cache.max_live_instances = 2;
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *input = "pinned?";
+    size_t input_len = strlen(input);
+    const char *err = NULL;
+    HlWasmBuffer *b[4] = {0};
+
+    ASSERT_EQ(0, hl_cap_wasm_call_buf(&cache, "echo", input, input_len, &b[0],
+                                      NULL, NULL, NULL, &vfs, NULL, NULL, &err));
+    ASSERT_EQ((int)b[0]->kind, (int)HL_WASM_BUF_WASM);
+    ASSERT_EQ(cache.live_instances, 1);
+    uint64_t one = cache.live_instance_bytes;
+    ASSERT_TRUE(one > 0);
+    ASSERT_EQ((uint64_t)hl_wasm_buffer_footprint(b[0]), one);
+
+    ASSERT_EQ(0, hl_cap_wasm_call_buf(&cache, "echo", input, input_len, &b[1],
+                                      NULL, NULL, NULL, &vfs, NULL, NULL, &err));
+    ASSERT_EQ((int)b[1]->kind, (int)HL_WASM_BUF_WASM);
+    ASSERT_EQ(cache.live_instances, 2);
+    ASSERT_EQ(cache.live_instance_bytes, 2 * one);
+
+    /* At the cap: copied, nothing more held. */
+    ASSERT_EQ(0, hl_cap_wasm_call_buf(&cache, "echo", input, input_len, &b[2],
+                                      NULL, NULL, NULL, &vfs, NULL, NULL, &err));
+    ASSERT_EQ((int)b[2]->kind, (int)HL_WASM_BUF_OWNED);
+    ASSERT_EQ(hl_wasm_buffer_len(b[2]), input_len);
+    ASSERT_EQ(memcmp(hl_wasm_buffer_data(b[2]), input, input_len), 0);
+    ASSERT_EQ(cache.live_instances, 2);
+
+    /* A persistent instance shares the same budget. */
+    err = NULL;
+    ASSERT_TRUE(hl_cap_wasm_instance_create(&cache, "echo", NULL, &vfs, NULL,
+                                            NULL, &err) == NULL);
+    ASSERT_STREQ("too_many_instances", err);
+
+    /* Closing a zero-copy buffer hands its slot back. */
+    hl_wasm_buffer_close(b[0]);
+    b[0] = NULL;
+    ASSERT_EQ(cache.live_instances, 1);
+    ASSERT_EQ(cache.live_instance_bytes, one);
+    ASSERT_EQ(0, hl_cap_wasm_call_buf(&cache, "echo", input, input_len, &b[3],
+                                      NULL, NULL, NULL, &vfs, NULL, NULL, &err));
+    ASSERT_EQ((int)b[3]->kind, (int)HL_WASM_BUF_WASM);
+    ASSERT_EQ(cache.live_instances, 2);
+
+    for (int i = 0; i < 4; i++) hl_wasm_buffer_close(b[i]);
+    ASSERT_EQ(cache.live_instances, 0);
+    ASSERT_EQ(cache.live_instance_bytes, (uint64_t)0);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Audit 12: a GPU readback (plain malloc, sized by the app) is copied into
+ * the tracked allocator, so it counts against the VM heap limit and is
+ * refused past it; the malloc'd block is freed only on success. */
+UTEST(hl_wasm_buffer, adopted_bytes_counted_against_allocator)
+{
+    HlAllocator a;
+    hl_alloc_init(&a, 0);
+    char *data = malloc(4096);
+    ASSERT_TRUE(data != NULL);
+    memset(data, 'g', 4096);
+    HlWasmBuffer *buf = hl_wasm_buffer_create_adopted(data, 4096, &a);
+    ASSERT_TRUE(buf != NULL);
+    ASSERT_TRUE(hl_alloc_used(&a) >= 4096 + sizeof(*buf));
+    ASSERT_EQ(hl_wasm_buffer_footprint(buf), (size_t)4096);
+    ASSERT_EQ(((const char *)hl_wasm_buffer_data(buf))[4095], 'g');
+    hl_wasm_buffer_close(buf);
+    ASSERT_EQ(hl_alloc_used(&a), (size_t)0);
+
+    /* Over the limit: refused, and the caller keeps (and frees) the block. */
+    HlAllocator tight;
+    hl_alloc_init(&tight, 1024);
+    data = malloc(4096);
+    ASSERT_TRUE(data != NULL);
+    ASSERT_TRUE(hl_wasm_buffer_create_adopted(data, 4096, &tight) == NULL);
+    ASSERT_EQ(hl_alloc_used(&tight), (size_t)0);
+    free(data);
 }
 
 UTEST(hl_wasm_buffer, call_buf_non_poolable)

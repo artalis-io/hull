@@ -384,6 +384,34 @@ test("compute.buffer from string", function()
     assert(out == "test input", "mismatch: " .. tostring(out))
     buf:close()
 end)
+
+-- Audit 12: a zero-copy buffer keeps a pooled instance checked out, so it
+-- counts against the live-instance cap (32); past it the output is copied.
+test("zero-copy buffers count against the live-instance cap", function()
+    local held = {}
+    for i = 1, 40 do
+        local b, err = compute.call("echo", "x" .. i, { buffer = true })
+        assert(b and not err, "call " .. i .. ": " .. tostring(err))
+        assert(b:bytes() == "x" .. i, "bytes " .. i)
+        held[i] = b
+    end
+    local inst, err = compute.instance("echo")
+    assert(inst == nil and err == "too_many_instances",
+           "expected too_many_instances, got " .. tostring(err))
+    held = nil
+    collectgarbage()
+    local inst2, err2 = compute.instance("echo")
+    assert(inst2, "slots not handed back: " .. tostring(err2))
+    inst2:close()
+end)
+
+test("a loop dropping zero-copy buffers stays bounded", function()
+    for i = 1, 500 do
+        local b, err = compute.call("echo", "loop", { buffer = true })
+        assert(b and not err, "call " .. i .. ": " .. tostring(err))
+        assert(b:bytes() == "loop")
+    end
+end)
 EOF
 
 OUTPUT=$($HULL test "$BUFDIR" 2>&1) || true
@@ -446,6 +474,32 @@ test("compute.buffer from string", () => {
     for (let i = 0; i < bytes.length; i++) result += String.fromCharCode(bytes[i]);
     test.eq(result, "test input");
     buf.close();
+});
+
+// Audit 12: zero-copy buffers count against the live-instance cap (32);
+// past it the output is copied.
+test("zero-copy buffers count against the live-instance cap", () => {
+    let held = [];
+    for (let i = 0; i < 40; i++) {
+        const b = compute.call("echo", "x" + i, { buffer: true });
+        test.eq(b.length, ("x" + i).length);
+        held.push(b);
+    }
+    let threw = null;
+    try { compute.instance("echo").close(); } catch (e) { threw = String(e); }
+    test.ok(threw !== null && threw.indexOf("too_many_instances") >= 0,
+            "expected too_many_instances, got " + threw);
+    for (const b of held) b.close();
+    held = null;
+    const inst = compute.instance("echo");
+    inst.close();
+});
+
+test("a loop dropping zero-copy buffers stays bounded", () => {
+    for (let i = 0; i < 500; i++) {
+        const b = compute.call("echo", "loop", { buffer: true });
+        test.eq(b.length, 4);
+    }
 });
 JSEOF
 

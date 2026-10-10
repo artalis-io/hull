@@ -30,6 +30,9 @@
 #ifndef HL_VALKEY_NO_TLS
 #include "hull/cap/db_transport.h"   /* shared Keel-v3 byte transport (bytes + TLS) */
 #include "hull/shared/tls_client.h"
+#include <keel/clock.h>              /* kl_monotonic_ms: per-command deadline */
+#include <errno.h>
+#include <poll.h>
 #endif
 
 /* Cap the receive buffer so a hostile server can't force unbounded growth. */
@@ -49,6 +52,12 @@
 #define HL_VALKEY_RBUF_INIT 8192u
 /* Error-message buffer size (matches the pg/mysql wire-client convention). */
 #define HL_VALKEY_ERRMSG    256u
+/* Default and floor for connect_timeout (ms). The value also bounds each
+ * command (one deadline for the send and the whole reply) and the TLS
+ * handshake, so 0 - which the transport reads as "no timeout" - is refused,
+ * and a few milliseconds are raised to the floor (audit 12). */
+#define HL_VALKEY_TIMEOUT_DEFAULT_MS 5000
+#define HL_VALKEY_TIMEOUT_MIN_MS     100
 
 void hl_valkey_dsn_scrub(HlValkeyDsn *dsn) {
     if (dsn) memset(dsn->password, 0, sizeof dsn->password);
@@ -75,7 +84,7 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
     memset(out, 0, sizeof *out);
     snprintf(out->port, sizeof out->port, "6379");
     snprintf(out->dbindex, sizeof out->dbindex, "0");
-    out->connect_timeout_ms = 5000;
+    out->connect_timeout_ms = HL_VALKEY_TIMEOUT_DEFAULT_MS;
 
     const char *sep = strstr(dsn, "://");
     if (!sep) FAIL("valkey dsn: missing scheme://");
@@ -183,8 +192,14 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
                      * "10x" as 10. */
                     char *end = NULL;
                     long ms = strtol(tb, &end, 10);
-                    if (end != tb && *end == '\0' && ms >= 0 && ms <= 600000)
-                        out->connect_timeout_ms = (int)ms;
+                    if (end != tb && *end == '\0' && ms >= 0 && ms <= 600000) {
+                        /* 0 left connect, every recv and the TLS handshake
+                         * unbounded (the transport reads <= 0 as "none"). */
+                        if (ms == 0)
+                            FAIL("valkey dsn: connect_timeout must be at least 1 ms (0 would mean no timeout)");
+                        out->connect_timeout_ms = ms < HL_VALKEY_TIMEOUT_MIN_MS
+                                                      ? HL_VALKEY_TIMEOUT_MIN_MS : (int)ms;
+                    }
                 }
             } else if (ci_eq(query, klen, "sslmode")) {
                 /* require / verify-* ask for TLS, so they turn it on: they
@@ -242,6 +257,16 @@ struct HlValkeyConn {
     SHArena *arena;          /* reply aggregate items; reset per reply */
     char     errmsg[HL_VALKEY_ERRMSG];
     int      resp3;
+    /* Bound on one command - the send and the whole reply - in ms (0 =
+     * none), and the absolute monotonic deadline of the one in flight. A
+     * socket timeout alone bounds each recv: a server dripping a byte at a
+     * time held a command forever (audit 12). */
+    int      cmd_timeout_ms;
+    uint64_t deadline_ms;
+    /* Also narrow SO_RCVTIMEO / SO_SNDTIMEO to the time left before each
+     * operation (a TLS read can block inside a record poll() saw start).
+     * Only on sockets this connection opened. */
+    int      own_socket;
     /* The stream is no longer in step with the server: a send or a read
      * failed (a timeout among them) or a reply could not be taken whole, so
      * what the server sends next answers an earlier command, and the next
@@ -276,9 +301,42 @@ static ssize_t io_recv(HlValkeyConn *c, uint8_t *buf, size_t len) {
     return hl_db_transport_recv(c->transport, buf, len);
 }
 
+/* Wait until the socket is ready for `events` or the command's deadline
+ * passes. 0 = go ahead (ready, an error / hangup the next I/O will report, or
+ * no deadline), -1 = timed out. */
+static int wait_io(HlValkeyConn *c, short events) {
+    if (!c->deadline_ms) return 0;
+    if ((events & POLLIN) && hl_db_transport_pending(c->transport) > 0) return 0;
+    int fd = hl_db_transport_fd(c->transport);
+    if (fd < 0) return 0;
+    for (;;) {
+        uint64_t now = kl_monotonic_ms();
+        if (now >= c->deadline_ms) return -1;
+        uint64_t left = c->deadline_ms - now;
+        int ms = left > (uint64_t)INT32_MAX ? INT32_MAX : (int)left;
+        if (c->own_socket) hl_db_transport_set_io_timeout(c->transport, ms);
+        struct pollfd pfd = { .fd = fd, .events = events, .revents = 0 };
+        int pr = poll(&pfd, 1, ms);
+        if (pr > 0) return 0;
+        if (pr == 0) return -1;
+        if (errno != EINTR) return 0;   /* let the I/O report it */
+    }
+}
+
+/* More reply bytes are already waiting (buffered TLS plaintext or a readable
+ * socket), so a re-parse now would only fail again. */
+static int more_waiting(HlValkeyConn *c) {
+    if (hl_db_transport_pending(c->transport) > 0) return 1;
+    int fd = hl_db_transport_fd(c->transport);
+    if (fd < 0) return 0;
+    struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+    return poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN);
+}
+
 static int conn_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
+        if (wait_io(c, POLLOUT) != 0) { c->dead = 1; set_err(c, "write timed out"); return -1; }
         ssize_t n = io_send(c, buf + sent, len - sent);
         if (n <= 0) { c->dead = 1; set_err(c, "socket write failed"); return -1; }
         sent += (size_t)n;
@@ -294,12 +352,22 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
         c->rlen -= c->consumed;
         c->consumed = 0;
     }
+    /* The parser starts from byte 0 each time, so re-parsing after every
+     * recv cost O(reply) per packet - quadratic in a reply that arrives in
+     * small pieces (audit 12). Re-parse once the buffer has grown by half
+     * since the last attempt, or when nothing more is waiting (the reply may
+     * be whole): geometric, so the parses add up to a few times the reply. */
+    size_t parsed_at = 0;
+    int parse = 1;
     for (;;) {
-        sh_arena_reset(c->arena);
-        size_t consumed = 0;
-        HlRespResult r = hl_resp_parse(c->rbuf, c->rlen, &consumed, out, reply_alloc, c);
-        if (r == HL_RESP_OK) { c->consumed = consumed; return 0; }
-        if (r == HL_RESP_PARSE_ERR) { c->dead = 1; set_err(c, "malformed reply from server"); return -1; }
+        if (parse) {
+            sh_arena_reset(c->arena);
+            size_t consumed = 0;
+            HlRespResult r = hl_resp_parse(c->rbuf, c->rlen, &consumed, out, reply_alloc, c);
+            if (r == HL_RESP_OK) { c->consumed = consumed; return 0; }
+            if (r == HL_RESP_PARSE_ERR) { c->dead = 1; set_err(c, "malformed reply from server"); return -1; }
+            parsed_at = c->rlen;
+        }
         if (c->rlen == c->rcap) {                 /* NEED_MORE: grow bounded */
             size_t ncap = c->rcap ? c->rcap * 2 : HL_VALKEY_RBUF_INIT;
             if (ncap > HL_VALKEY_MAX_REPLY) { c->dead = 1; set_err(c, "server reply exceeds limit"); return -1; }
@@ -307,6 +375,7 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
             if (!nb) { c->dead = 1; set_err(c, "out of memory"); return -1; }
             c->rbuf = nb; c->rcap = ncap;
         }
+        if (wait_io(c, POLLIN) != 0) { c->dead = 1; set_err(c, "read timed out"); return -1; }
         ssize_t n = io_recv(c, c->rbuf + c->rlen, c->rcap - c->rlen);
         if (n <= 0) {
             c->dead = 1;
@@ -314,6 +383,7 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
             return -1;
         }
         c->rlen += (size_t)n;
+        parse = (c->rlen - parsed_at >= parsed_at / 2) || !more_waiting(c);
     }
 }
 
@@ -324,8 +394,13 @@ int hl_valkey_command(HlValkeyConn *c, const HlRespWriter *cmd, HlRespValue *out
         return -1;
     }
     if (cmd->err) { set_err(c, "command encode failed"); return -1; }
-    if (conn_send(c, cmd->buf, cmd->len) != 0) return -1;
-    return read_reply(c, out);
+    /* One deadline for the whole command: the send and every byte of the
+     * reply (audit 12). */
+    c->deadline_ms = c->cmd_timeout_ms > 0
+                         ? kl_monotonic_ms() + (uint64_t)c->cmd_timeout_ms : 0;
+    int rc = conn_send(c, cmd->buf, cmd->len) != 0 ? -1 : read_reply(c, out);
+    c->deadline_ms = 0;
+    return rc;
 }
 
 static int reply_is_err(const HlRespValue *v) { return v && v->type == HL_RESP_ERR; }
@@ -432,6 +507,9 @@ int hl_valkey_conn_start(HlValkeyConn **out, int fd, const HlValkeyDsn *dsn,
         if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory");
         return -1;
     }
+    /* The DSN's timeout bounds each command as a deadline (poll), without
+     * touching the caller's socket options. */
+    c->cmd_timeout_ms = dsn->connect_timeout_ms > 0 ? dsn->connect_timeout_ms : 0;
     if (handshake(c, dsn) != 0 || select_db(c, dsn) != 0) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "%s", c->errmsg);
         hl_valkey_conn_close(c);
@@ -443,21 +521,27 @@ int hl_valkey_conn_start(HlValkeyConn **out, int fd, const HlValkeyDsn *dsn,
 
 int hl_valkey_conn_open(HlValkeyConn **out, const HlValkeyDsn *dsn,
                         HlAllocator *alloc, char *errbuf, size_t errlen) {
+    /* Never unbounded: a DSN struct built by hand (not by the parser) with
+     * 0 or a negative timeout left connect, every recv and the TLS handshake
+     * without one (the transport reads <= 0 as "none"; audit 12). */
+    int tmo = dsn->connect_timeout_ms;
+    if (tmo <= 0) tmo = HL_VALKEY_TIMEOUT_DEFAULT_MS;
+    else if (tmo < HL_VALKEY_TIMEOUT_MIN_MS) tmo = HL_VALKEY_TIMEOUT_MIN_MS;
     HlDbTransport *t = hl_db_transport_connect("valkey", alloc, dsn->host, dsn->port,
-                                               dsn->connect_timeout_ms, NULL, NULL, 0);
+                                               tmo, NULL, NULL, 0);
     if (!t) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "connect to %s:%s failed", dsn->host, dsn->port);
         return -1;
     }
     /* Preserve the historic bounded blocking recv/send (D3): connect path only,
      * only when a positive timeout is configured (set_io_timeout no-ops on <= 0). */
-    hl_db_transport_set_io_timeout(t, dsn->connect_timeout_ms);
+    hl_db_transport_set_io_timeout(t, tmo);
 
     /* Implicit TLS (rediss / valkeys): handshake immediately, before any RESP byte,
      * then hand the session to the transport so every subsequent byte tunnels it. */
     if (dsn->tls) {
         HlTlsClient *tls = hl_tls_client_handshake(hl_db_transport_fd(t), dsn->host,
-                                                   dsn->verify, dsn->connect_timeout_ms);
+                                                   dsn->verify, tmo);
         if (!tls || hl_db_transport_attach_tls(t, tls) != 0) {
             if (tls) hl_tls_client_free(tls);   /* attach rejected: we still own it */
             if (errbuf && errlen) snprintf(errbuf, errlen, "TLS handshake to %s failed", dsn->host);
@@ -472,6 +556,8 @@ int hl_valkey_conn_open(HlValkeyConn **out, const HlValkeyDsn *dsn,
         if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory");
         return -1;
     }
+    c->cmd_timeout_ms = tmo;
+    c->own_socket = 1;
     if (handshake(c, dsn) != 0 || select_db(c, dsn) != 0) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "%s", c->errmsg);
         hl_valkey_conn_close(c);

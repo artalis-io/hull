@@ -337,6 +337,11 @@ int hl_js_op_suspend(HlJS *js, struct HlSuspendOp *op);
  * steps: a `while (true) {}` held the event loop for hours). */
 #define HL_JS_INTERRUPT_WEIGHT 10000
 
+/* Off-heap bytes (HlJS.offheap_gc_debt) wrapped in JS objects between forced
+ * full collections (audit 12): WasmBuffer results whose bytes, or whose
+ * checked-out WASM instance, QuickJS's malloc counter never sees. */
+#define HL_JS_OFFHEAP_GC_DEBT ((size_t)32 * 1024 * 1024)
+
 struct HlReqLife;
 void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
                                       struct KlHttpBodyReader *body_reader,

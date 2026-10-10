@@ -88,6 +88,12 @@ typedef struct HlJS {
      * rest of the chain and the handler still run on, so the ops refuse. */
     int             in_middleware;
 
+    /* Off-heap bytes handed to JS objects QuickJS sizes as a few bytes - a
+     * WasmBuffer's tracked copy or checked-out WASM instance - since the
+     * last forced GC. QuickJS has no incremental step to charge them as
+     * debt, so past HL_JS_OFFHEAP_GC_DEBT a full GC runs (audit 12). */
+    size_t          offheap_gc_debt;
+
     /* Module search paths */
     const char     *app_dir;         /* application root directory */
     size_t          app_dir_size;    /* allocation size for tracked free */

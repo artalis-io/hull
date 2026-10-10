@@ -97,6 +97,23 @@ UTEST(valkey_dsn, timeout_must_be_a_number) {
     { OK("redis://host?connect_timeout=");    ASSERT_EQ(d.connect_timeout_ms, dflt); }
 }
 
+/* connect_timeout=0 left connect, every recv and the TLS handshake
+ * unbounded (the transport reads 0 as "no timeout"): refused. A value under
+ * the floor is raised to it (audit 12). */
+UTEST(valkey_dsn, timeout_zero_refused_and_floored) {
+    {
+        HlValkeyDsn d; char e[160];
+        ASSERT_EQ(-1, hl_valkey_dsn_parse("redis://host?connect_timeout=0", &d, e, sizeof e));
+        ASSERT_TRUE(strstr(e, "connect_timeout") != NULL);
+        ASSERT_EQ(-1, hl_valkey_dsn_parse("rediss://u:pw@host?connect_timeout=0", &d, e, sizeof e));
+        ASSERT_TRUE(strstr(e, "pw") == NULL);
+    }
+    { OK("redis://host?connect_timeout=1");   ASSERT_EQ(d.connect_timeout_ms, 100); }
+    { OK("redis://host?connect_timeout=99");  ASSERT_EQ(d.connect_timeout_ms, 100); }
+    { OK("redis://host?connect_timeout=100"); ASSERT_EQ(d.connect_timeout_ms, 100); }
+    { OK("redis://host"); ASSERT_TRUE(d.connect_timeout_ms > 0); }
+}
+
 UTEST(valkey_dsn, ipv6_literal) {
     OK("redis://[2001:db8::1]:6379/1");
     ASSERT_STREQ(d.host, "2001:db8::1");
