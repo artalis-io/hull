@@ -10,6 +10,7 @@
 #include "hull/shared/fs_util.h"
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -140,7 +141,15 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
         if (olen >= sizeof(abspath)) { errno = ENAMETOOLONG; return -1; }
         memcpy(abspath, override, olen);
         abspath[olen] = '\0';
-        if (hl_mkdir_p(abspath, 0700) != 0) return -1;
+        /* The ~/.hull checks run BEFORE the mkdir too (audit 12): it made
+         * =~/.hull/keys/x's directories before refusing them. They resolve a
+         * path that does not exist yet through its nearest existing ancestor,
+         * and match a symlinked ~/.hull through its target. (The root / home
+         * test needs the directory, and those always exist: a mkdir there
+         * makes nothing.) */
+        int pre_refused = hl_host_path_covers_home(abspath, ".hull") ||
+                          hl_host_path_under_home(abspath, ".hull");
+        if (!pre_refused && hl_mkdir_p(abspath, 0700) != 0) return -1;
         /* The cache directory is granted read-write-create to the app and
          * tool sandboxes, so HULL_CACHE_DIR=/ or =$HOME made the filesystem
          * or every file the user owns writable, and =~/.hull the cache and
@@ -148,7 +157,7 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
          * untrusted directory. A directory INSIDE ~/.hull is refused too
          * (audit 10): =~/.hull/blobs/tools or =~/.hull/keys handed the app
          * the signed tool store or the signing keys. */
-        if (hl_host_path_too_broad(abspath) ||
+        if (pre_refused || hl_host_path_too_broad(abspath) ||
             hl_host_path_covers_home(abspath, ".hull") ||
             hl_host_path_under_home(abspath, ".hull")) {
             static int warned_broad;
@@ -275,24 +284,83 @@ int hl_hull_cache_disabled(const char *kind)
     return env_truthy(env_name);
 }
 
-/* ── SQLite temp directory (audit 11) ────────────────────────────────
+/* ── SQLite temp directory (audit 11, audit 12) ──────────────────────
  *
  * Hull's SQLite connections run with temp_store=FILE so a big sort, CREATE
  * INDEX, GROUP BY / DISTINCT / UNION or VACUUM spills to disk instead of
  * growing in the process-wide, hard-limited heap. Those temp files must land
  * in a directory the kernel sandbox grants, so Hull picks it rather than
- * SQLite: a private "hull-sqlite-<euid>" under the first existing absolute
- * directory in SQLite's own order (SQLITE_TMPDIR, TMPDIR, /var/tmp, /usr/tmp,
- * /tmp). It is used only if it is a real directory (not a symlink) owned by
- * this user with no group / other access, so another account cannot plant or
- * read the temp files. Resolved once, canonicalised (Seatbelt matches real
- * paths), and created on the first call - which the sandbox makes before its
- * first grant. Not on Windows: SQLite's unix VFS under Cosmopolitan finds no
- * usable temp path there (SQLITE_IOERR_GETTEMPPATH, even with one named), so
- * the connections keep temp_store=MEMORY (hl_cap_db_temp_on_disk). */
+ * SQLite: a fresh, private directory made with mkdtemp,
+ * "<base>/hull-sqlite-<euid>-XXXXXX", per process. Every candidate base is
+ * tried in SQLite's own order (SQLITE_TMPDIR, TMPDIR, /var/tmp, /usr/tmp,
+ * /tmp) until one works: an absolute directory this user may write and search,
+ * not world-writable without the sticky bit. (Audit 12: the first EXISTING
+ * candidate was taken whether or not it was writable, and a shared, fixed
+ * "hull-sqlite-<euid>" name could be squatted by another account - or was
+ * shared by every app this user runs - and any failure silently fell back to
+ * temp_store=MEMORY.) The directory is checked through a descriptor
+ * (O_DIRECTORY | O_NOFOLLOW, fstat: ours, a directory; fchmod 0700),
+ * canonicalised (Seatbelt matches real paths), and removed at exit. SQLite
+ * unlinks each temp file as it opens it, so the directory stays empty. A
+ * process killed outright leaves an empty directory for the temp cleaner.
+ *
+ * Not on Windows: SQLite's unix VFS under Cosmopolitan finds no usable temp
+ * path there (SQLITE_IOERR_GETTEMPPATH, even with one named), so the
+ * connections keep temp_store=MEMORY (hl_cap_db_temp_on_disk) by design.
+ * Anywhere else, no usable candidate logs a WARN. */
 static char           g_sqlite_tmp[PATH_MAX];
 static int            g_sqlite_tmp_ok;
+static pid_t          g_sqlite_tmp_pid;
 static pthread_once_t g_sqlite_tmp_once = PTHREAD_ONCE_INIT;
+
+static int sqlite_tmp_try(const char *base, char *out, size_t out_sz)
+{
+    if (!base || base[0] != '/') return -1;
+    struct stat bst;
+    if (stat(base, &bst) != 0 || !S_ISDIR(bst.st_mode)) return -1;
+    if (access(base, W_OK | X_OK) != 0) return -1;
+    /* World-writable without the sticky bit: another account could rename
+     * our directory away and put its own in its place. */
+    if ((bst.st_mode & S_IWOTH) && !(bst.st_mode & S_ISVTX)) return -1;
+    size_t bl = strlen(base);
+    while (bl > 1 && base[bl - 1] == '/') bl--;
+    if (bl == 1) bl = 0;   /* "/" itself: no doubled slash */
+    char tmpl[PATH_MAX];
+    int n = snprintf(tmpl, sizeof tmpl, "%.*s/hull-sqlite-%lu-XXXXXX",
+                     (int)bl, base, (unsigned long)geteuid());
+    if (n < 0 || (size_t)n >= sizeof tmpl) return -1;
+    if (!mkdtemp(tmpl)) return -1;
+    int fd = open(tmpl, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat st;
+    int ok = fd >= 0 && fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) &&
+             st.st_uid == geteuid() && fchmod(fd, 0700) == 0;
+    if (fd >= 0) close(fd);
+    char real[PATH_MAX];
+    if (!ok || !realpath(tmpl, real) || strlen(real) >= out_sz) {
+        (void)rmdir(tmpl);
+        return -1;
+    }
+    memcpy(out, real, strlen(real) + 1);
+    return 0;
+}
+
+int hl_hull_sqlite_temp_dir_make(const char *const *cands, size_t ncands,
+                                 char *out, size_t out_sz)
+{
+    if (!cands || !out || out_sz == 0) return -1;
+    for (size_t i = 0; i < ncands; i++)
+        if (sqlite_tmp_try(cands[i], out, out_sz) == 0)
+            return (int)i;
+    return -1;
+}
+
+static void sqlite_tmp_cleanup(void)
+{
+    /* Only the process that made it: a forked child exiting must not remove
+     * its parent's directory. */
+    if (g_sqlite_tmp_ok && getpid() == g_sqlite_tmp_pid)
+        (void)rmdir(g_sqlite_tmp);
+}
 
 static void sqlite_tmp_resolve(void)
 {
@@ -300,31 +368,18 @@ static void sqlite_tmp_resolve(void)
     const char *cand[5] = {
         getenv("SQLITE_TMPDIR"), getenv("TMPDIR"), "/var/tmp", "/usr/tmp", "/tmp",
     };
-    const char *base = NULL;
-    for (size_t i = 0; i < sizeof cand / sizeof cand[0]; i++) {
-        struct stat st;
-        if (cand[i] && cand[i][0] == '/' && stat(cand[i], &st) == 0 &&
-            S_ISDIR(st.st_mode)) {
-            base = cand[i];
-            break;
-        }
-    }
-    if (!base) return;
-    size_t bl = strlen(base);
-    while (bl > 1 && base[bl - 1] == '/') bl--;
-    if (bl == 1) bl = 0;   /* "/" itself: no doubled slash */
-    char raw[PATH_MAX];
-    int n = snprintf(raw, sizeof raw, "%.*s/hull-sqlite-%lu", (int)bl, base,
-                     (unsigned long)geteuid());
-    if (n < 0 || (size_t)n >= sizeof raw) return;
-    if (mkdir(raw, 0700) != 0 && errno != EEXIST) return;
-    struct stat st;
-    if (lstat(raw, &st) != 0 || S_ISLNK(st.st_mode) || !S_ISDIR(st.st_mode) ||
-        st.st_uid != geteuid())
+    if (hl_hull_sqlite_temp_dir_make(cand, 5, g_sqlite_tmp,
+                                     sizeof g_sqlite_tmp) < 0) {
+        log_warn("[db] no usable directory for SQLite temp files (tried "
+                 "SQLITE_TMPDIR, TMPDIR, /var/tmp, /usr/tmp, /tmp: each must be "
+                 "an absolute directory this user can write); temp_store stays "
+                 "MEMORY, so big sorts, index builds and VACUUM are bounded by "
+                 "the SQLite heap limit (HULL_SQLITE_HEAP_LIMIT)");
         return;
-    if ((st.st_mode & 077) && chmod(raw, 0700) != 0) return;
-    if (!realpath(raw, g_sqlite_tmp)) return;
+    }
+    g_sqlite_tmp_pid = getpid();
     g_sqlite_tmp_ok = 1;
+    (void)atexit(sqlite_tmp_cleanup);
 }
 
 const char *hl_hull_sqlite_temp_dir(void)

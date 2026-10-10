@@ -263,7 +263,7 @@ int hl_release_io_check_release_tag(const char *repo, const char *tag,
                 "%s: the signed manifest does not name the release %s\n"
                 "  (hull.version missing or different); refusing to proceed\n",
                 ua, tag);
-        if (ver) kl_free(alloc, ver, ver_len);
+        if (ver) hl_release_io_free(alloc, ver, ver_len);
         return -1;
     }
     if (vrc == 1 && hl_release_io_requires_signed_version(tag)) {
@@ -284,7 +284,7 @@ int hl_release_io_check_release_tag(const char *repo, const char *tag,
         *out_version = ver;
         if (out_version_len) *out_version_len = ver_len;
     } else if (ver) {
-        kl_free(alloc, ver, ver_len);
+        hl_release_io_free(alloc, ver, ver_len);
     }
     return 0;
 }
@@ -337,17 +337,17 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
             fprintf(stderr,
                     "%s: failed to download release signature (hull.sha256.sig); "
                     "refusing to proceed\n", ua);
-            kl_free(alloc, manifest, manifest_len);
+            hl_release_io_free(alloc, manifest, manifest_len);
             return -1;
         }
         int rc = hl_release_verify_manifest_sig(manifest, manifest_len,
                                                 sig_hex, sig_len, NULL);
         if (rc != 0) {
-            kl_free(alloc, sig_hex, sig_len);
+            hl_release_io_free(alloc, sig_hex, sig_len);
             fprintf(stderr,
                     "%s: release signature verification FAILED (manifest does not "
                     "match the embedded release public key)\n", ua);
-            kl_free(alloc, manifest, manifest_len);
+            hl_release_io_free(alloc, manifest, manifest_len);
             return -1;
         }
         fprintf(stdout, "%s: release signature verified\n", ua);
@@ -357,7 +357,7 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
             *out_sig = sig_hex;
             if (out_sig_len) *out_sig_len = sig_len;
         } else {
-            kl_free(alloc, sig_hex, sig_len);
+            hl_release_io_free(alloc, sig_hex, sig_len);
         }
     } else {
         fprintf(stderr,
@@ -373,11 +373,11 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
                                         alloc, tls, ua,
                                         out_version, out_version_len) != 0) {
         if (out_sig && *out_sig) {
-            kl_free(alloc, *out_sig, out_sig_len ? *out_sig_len : 0);
+            hl_release_io_free(alloc, *out_sig, out_sig_len ? *out_sig_len : 0);
             *out_sig = NULL;
             if (out_sig_len) *out_sig_len = 0;
         }
-        kl_free(alloc, manifest, manifest_len);
+        hl_release_io_free(alloc, manifest, manifest_len);
         return -1;
     }
 

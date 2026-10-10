@@ -198,14 +198,19 @@ int hl_host_path_too_broad(const char *path);
 
 /**
  * @brief 1 when @p path is $HOME/<sub> or a directory above it (both
- *        realpath'd where they exist; <sub> need not exist). With @p sub
- *        NULL, the home directory itself. Case-insensitive on Windows.
+ *        realpath'd; a path that does not exist yet resolves through its
+ *        nearest existing ancestor). With @p sub NULL, the home directory
+ *        itself. $HOME/<sub> is tested both as spelled under the resolved
+ *        home and, when it exists, resolved itself (a symlinked ~/.hull).
+ *        Case-insensitive on Windows.
  */
 int hl_host_path_covers_home(const char *path, const char *sub);
 
 /**
- * @brief 1 when @p path is $HOME/<sub> or a directory below it (realpath'd;
- *        <sub> need not exist). Case-insensitive on Windows.
+ * @brief 1 when @p path is $HOME/<sub> or a directory below it (resolved as
+ *        for hl_host_path_covers_home: @p path and <sub> need not exist, and
+ *        a symlinked $HOME/<sub> is matched through its target too).
+ *        Case-insensitive on Windows.
  */
 int hl_host_path_under_home(const char *path, const char *sub);
 

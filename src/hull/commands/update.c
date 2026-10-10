@@ -113,11 +113,11 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     if (hl_release_io_json_str(meta_body, "tag_name",
                                latest_tag, sizeof(latest_tag)) != 0) {
         fprintf(stderr, "hull update: could not parse release metadata\n");
-        kl_free(&alloc, meta_body, meta_len);
+        hl_release_io_free(&alloc, meta_body, meta_len);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
-    kl_free(&alloc, meta_body, meta_len);
+    hl_release_io_free(&alloc, meta_body, meta_len);
     /* The tag names every URL below: "../", "?" or "%" in it would point
      * them elsewhere. Only the shape Hull publishes is used. */
     if (!hl_release_io_tag_valid(latest_tag)) {
@@ -206,7 +206,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     if (hl_release_io_get(sha_url, &manifest, &manifest_len, &alloc, tls,
                           HL_RELEASE_IO_META_TIMEOUT_MS, "hull-update") != 0) {
         fprintf(stderr, "hull update: failed to download checksum manifest\n");
-        kl_free(&alloc, binary, binary_len);
+        hl_release_io_free(&alloc, binary, binary_len);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
@@ -234,21 +234,21 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
             fprintf(stderr,
                 "hull update: failed to download release signature (hull.sha256.sig)\n"
                 "             - this release is not signed; refusing to install\n");
-            kl_free(&alloc, binary, binary_len);
-            kl_free(&alloc, manifest, manifest_len);
+            hl_release_io_free(&alloc, binary, binary_len);
+            hl_release_io_free(&alloc, manifest, manifest_len);
             kl_tls_mbedtls_ctx_destroy(tls);
             return 1;
         }
 
         int sig_rc = hl_release_verify_manifest_sig(manifest, manifest_len,
                                                     sig_hex, sig_len, NULL);
-        kl_free(&alloc, sig_hex, sig_len);
+        hl_release_io_free(&alloc, sig_hex, sig_len);
         if (sig_rc != 0) {
             fprintf(stderr,
                 "hull update: release signature verification FAILED\n"
                 "             - manifest does not match the embedded release public key\n");
-            kl_free(&alloc, binary, binary_len);
-            kl_free(&alloc, manifest, manifest_len);
+            hl_release_io_free(&alloc, binary, binary_len);
+            hl_release_io_free(&alloc, manifest, manifest_len);
             kl_tls_mbedtls_ctx_destroy(tls);
             return 1;
         }
@@ -268,8 +268,8 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     if (hl_release_io_check_release_tag(repo, latest_tag, manifest, manifest_len,
                                         &alloc, tls, "hull-update",
                                         NULL, NULL) != 0) {
-        kl_free(&alloc, binary, binary_len);
-        kl_free(&alloc, manifest, manifest_len);
+        hl_release_io_free(&alloc, binary, binary_len);
+        hl_release_io_free(&alloc, manifest, manifest_len);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
@@ -279,18 +279,18 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
                                     asset_name, expected) != 0) {
         fprintf(stderr, "hull update: no checksum entry for %s in hull.sha256\n",
                 asset_name);
-        kl_free(&alloc, binary, binary_len);
-        kl_free(&alloc, manifest, manifest_len);
+        hl_release_io_free(&alloc, binary, binary_len);
+        hl_release_io_free(&alloc, manifest, manifest_len);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
-    kl_free(&alloc, manifest, manifest_len);
+    hl_release_io_free(&alloc, manifest, manifest_len);
 
     char actual[65];
     if (hl_release_io_sha256_hex((const unsigned char *)binary,
                                  binary_len, actual) != 0) {
         fprintf(stderr, "hull update: SHA-256 computation failed\n");
-        kl_free(&alloc, binary, binary_len);
+        hl_release_io_free(&alloc, binary, binary_len);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
@@ -303,7 +303,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     if (mbedtls_ct_memcmp(expected, actual, 64) != 0) {
         fprintf(stderr, "hull update: SHA-256 mismatch\n");
         fprintf(stderr, "  expected: %s\n  actual:   %s\n", expected, actual);
-        kl_free(&alloc, binary, binary_len);
+        hl_release_io_free(&alloc, binary, binary_len);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
@@ -326,7 +326,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
                 snprintf(self_path, sizeof(self_path), "%s", env->hull_exe);
         } else {
             fprintf(stderr, "hull update: cannot determine own binary path\n");
-            kl_free(&alloc, binary, binary_len);
+            hl_release_io_free(&alloc, binary, binary_len);
             return 1;
         }
     }
@@ -334,10 +334,10 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     /* Self-replace: atomic rename on POSIX; deferred rename-aside swap with
      * rollback on Windows, where a running .exe can't be overwritten in place. */
     if (hl_release_io_self_replace(self_path, binary, binary_len, 0755) != 0) {
-        kl_free(&alloc, binary, binary_len);
+        hl_release_io_free(&alloc, binary, binary_len);
         return 1;
     }
-    kl_free(&alloc, binary, binary_len);
+    hl_release_io_free(&alloc, binary, binary_len);
 
     fprintf(stdout, "hull update: installed %s → %s\n", latest_tag, self_path);
     return 0;

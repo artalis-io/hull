@@ -318,14 +318,19 @@ void hl_cap_db_sqlite_setup(void);
  *  before it gets there. */
 #define HL_DB_SQLITE_HARD_HEAP_LIMIT ((long long)1 << 30)   /* 1 GiB */
 #define HL_DB_SQLITE_SOFT_HEAP_LIMIT ((long long)256 << 20) /* 256 MiB */
+/** The largest busy_timeout app SQL may set (PRAGMA busy_timeout): the
+ *  calling thread sleeps that long on a locked database, uncharged, and on the
+ *  event loop that stalls every request. Hull's own setting. */
+#define HL_DB_MAX_BUSY_TIMEOUT_MS 5000
 /** The smallest hard limit HULL_SQLITE_HEAP_LIMIT may set: a few connections'
  *  page caches. A smaller non-zero value is raised to it. */
 #define HL_DB_SQLITE_MIN_HEAP_LIMIT  ((long long)64 << 20)  /* 64 MiB */
 
 /** HULL_SQLITE_HEAP_LIMIT's value (NULL / "" = the default) as a hard limit in
- *  bytes: a size with an optional K / M / G suffix, 0 for no limit, raised to
- *  HL_DB_SQLITE_MIN_HEAP_LIMIT; an unreadable value warns and gives the
- *  default. */
+ *  bytes: a size with an optional K / M / G suffix and an optional trailing B
+ *  (512M, 512MB), 0 for no limit, raised (with a WARN) to
+ *  HL_DB_SQLITE_MIN_HEAP_LIMIT; an unreadable or out-of-range value warns and
+ *  gives the default. */
 long long hl_cap_db_heap_limit_from_env(const char *value);
 
 /** Set SQLite's process-wide hard heap limit (0 = none; negative = leave it)
@@ -336,7 +341,10 @@ void hl_cap_db_set_heap_limit(long long hard);
 /** 1 when Hull's connections keep temp data in files (temp_store=FILE): the
  *  setup found a private temp dir (hl_hull_sqlite_temp_dir) and pointed
  *  sqlite3_temp_directory at it. 0 = temp_store=MEMORY (Windows, or no safe
- *  temp dir), where a big sort is bounded by the hard heap limit. */
+ *  temp dir - which logs a WARN), where a big sort is bounded by the hard
+ *  heap limit. Temp FILES are not size-capped: a big sort or VACUUM uses disk
+ *  in that directory, bounded only by the filesystem (and each run's
+ *  instruction budget, which the work to write it is charged to). */
 int hl_cap_db_temp_on_disk(void);
 
 /**

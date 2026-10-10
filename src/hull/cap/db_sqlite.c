@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp */
 
 /* ── SQLite context ───────────────────────────────────────────────── */
 
@@ -32,11 +33,29 @@ typedef struct {
     HlAllocator *alloc;
     const char  *own_err;   /* an error of ours, not SQLite's (errmsg) */
     int          owned;     /* 1 = opened here (may be replaced); 0 = wrapped */
+    int          broken;    /* stuck in a transaction it could not leave */
 } HlDbSqliteCtx;
 
 static const char REENTERED_MSG[] =
     "the connection is running a statement (a user-defined function cannot "
     "query its own connection)";
+
+/* The connection is stuck inside a transaction that could neither be rolled
+ * back nor left by reopening (an in-memory database, a failed reopen, a
+ * wrapped connection): running on would put every later statement inside
+ * it, so every call fails until a later stale-transaction check gets it out
+ * (audit 12). */
+static const char BROKEN_MSG[] =
+    "the database connection is stuck inside a transaction that could not be "
+    "rolled back or reopened; it refuses every statement (restart the app)";
+
+/* Refuse a call on a broken connection. 1 = refused. */
+static int sqlite_refuse_broken(HlDbSqliteCtx *s)
+{
+    if (!s->broken) return 0;
+    s->own_err = BROKEN_MSG;
+    return 1;
+}
 
 /* ── Vtable implementations ──────────────────────────────────────── */
 
@@ -50,15 +69,18 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
     /* Strip an explicit "sqlite://" scheme: everything after it is the path
      * or ":memory:". Bare paths, ":memory:", and "file:" URIs pass through
      * unchanged (SQLite opens them directly). e.g. "sqlite:///var/db" ->
-     * "/var/db", "sqlite://:memory:" -> ":memory:". */
-    if (dsn && strncmp(dsn, "sqlite://", 9) == 0)
+     * "/var/db", "sqlite://:memory:" -> ":memory:". The scheme is matched
+     * case-insensitively, as the selector and the sandbox match it: a
+     * "SQLITE:///x" routed here used to open the literal relative name
+     * "SQLITE:///x" (audit 12). */
+    if (dsn && strncasecmp(dsn, "sqlite://", 9) == 0)
         dsn += 9;
     /* "file://<path>" likewise. The DSN selector routes it here and db.open
      * checks the path after the "file://" against manifest.fs, but plain
      * sqlite3_open does not parse URIs: it opened the literal "file://..." -
      * a relative name under the working directory, not the file that was
      * checked. (A single-colon "file:x" stays a literal name, as checked.) */
-    else if (dsn && strncmp(dsn, "file://", 7) == 0)
+    else if (dsn && strncasecmp(dsn, "file://", 7) == 0)
         dsn += 7;
 
     /* An MSYS2 / Git Bash shell hands a native program the MIXED path form
@@ -115,19 +137,29 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
  * old connection rather than leaving none. The ctx stays, so every handle
  * pointing at it stays valid. A database that lives only in this connection
  * (":memory:", a temp database) is not replaced - that would drop it whole -
- * nor is a wrapped connection Hull does not own. Functions registered on the
- * old connection (db.udf) do not carry over. */
+ * nor is a wrapped connection Hull does not own: those are marked broken
+ * instead, and refuse every call (BROKEN_MSG) rather than run inside the stuck
+ * transaction (audit 12). So is a connection whose reopen failed.
+ *
+ * Functions registered on the old connection (db.udf) do NOT carry over: the
+ * new connection has none until the app registers them again, and a query
+ * calling one fails with "no such function". No raw sqlite3* is kept across
+ * app code for that reason (hl_app_context_db and the udf bindings resolve it
+ * on each use). */
 static void sqlite_replace_conn(HlDbSqliteCtx *s)
 {
     const char *file = s->owned ? sqlite3_db_filename(s->db, "main") : NULL;
     if (!file || !file[0]) {
-        fprintf(stderr, "hull: sqlite connection left inside a transaction it "
-                        "could not roll back%s\n",
-                s->owned ? " (an in-memory database is not reopened)" : "");
+        if (!s->broken)
+            fprintf(stderr, "hull: sqlite connection left inside a transaction "
+                            "it could not roll back%s; it refuses every "
+                            "statement from now on\n",
+                    s->owned ? " (an in-memory database is not reopened)" : "");
+        s->broken = 1;
         return;
     }
     char *path = strdup(file);
-    if (!path) return;
+    if (!path) { s->broken = 1; return; }
     sqlite3 *ndb = NULL;
     HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
     int ok = sqlite3_open(path, &ndb) == SQLITE_OK && hl_cap_db_init(ndb) == 0;
@@ -136,10 +168,12 @@ static void sqlite_replace_conn(HlDbSqliteCtx *s)
                         "transaction: %s\n", path,
                 ndb ? sqlite3_errmsg(ndb) : "out of memory");
         if (ndb) sqlite3_close(ndb);
+        s->broken = 1;
     } else {
         hl_stmt_cache_destroy(&s->cache);
         (void)sqlite3_close_v2(s->db);
         s->db = ndb;
+        s->broken = 0;
         hl_stmt_cache_init(&s->cache, ndb, s->alloc);
         fprintf(stderr, "hull: sqlite connection to '%s' replaced: its "
                         "transaction could not be rolled back\n", path);
@@ -165,6 +199,7 @@ static int sqlite_query(HlDbHandle *h, const char *sql,
                         HlAllocator *alloc)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (sqlite_refuse_broken(s)) return -1;
     int rc = hl_cap_db_query(&s->cache, sql, params, nparams,
                              cb, cb_ctx, alloc);
     s->own_err = rc == HL_DB_ERR_REENTERED ? REENTERED_MSG : NULL;
@@ -175,6 +210,7 @@ static int sqlite_exec(HlDbHandle *h, const char *sql,
                        const HlValue *params, int nparams)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (sqlite_refuse_broken(s)) return -1;
     int rc = hl_cap_db_exec(&s->cache, sql, params, nparams);
     s->own_err = rc == HL_DB_ERR_REENTERED ? REENTERED_MSG : NULL;
     return rc;
@@ -186,6 +222,7 @@ static int sqlite_exec(HlDbHandle *h, const char *sql,
 static int sqlite_exec_script(HlDbHandle *h, const char *sql)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (sqlite_refuse_broken(s)) return -1;
     s->own_err = NULL;
     char *err = NULL;
     int rc = sqlite3_exec(s->db, sql, NULL, NULL, &err);
@@ -199,6 +236,7 @@ static int sqlite_exec_script(HlDbHandle *h, const char *sql)
 static int sqlite_begin(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (sqlite_refuse_broken(s)) return -1;
     s->own_err = NULL;
     return hl_cap_db_begin(s->db);
 }
@@ -206,6 +244,7 @@ static int sqlite_begin(HlDbHandle *h)
 static int sqlite_commit(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (sqlite_refuse_broken(s)) return -1;
     s->own_err = NULL;
     return hl_cap_db_commit(s->db);
 }
@@ -213,6 +252,7 @@ static int sqlite_commit(HlDbHandle *h)
 static int sqlite_rollback(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (sqlite_refuse_broken(s)) return -1;
     s->own_err = NULL;
     return hl_cap_db_rollback(s->db);
 }
@@ -234,6 +274,20 @@ static void sqlite_guard_stale_txn(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     if (!s) return;
+    /* Never while one of the connection's statements is stepping (a guard
+     * reached from inside a UDF's callback): resetting statements or closing
+     * the connection would pull it out from under that step (audit 12). */
+    if (s->cache.stepping) return;
+    if (s->broken) {
+        /* Quietly try once more per entry; the reopen was already tried. */
+        (void)hl_cap_db_rollback(s->db);
+        if (sqlite3_get_autocommit(s->db)) {
+            s->broken = 0;
+            fprintf(stderr, "hull: sqlite connection left its stuck "
+                            "transaction; it accepts statements again\n");
+        }
+        return;
+    }
     if (hl_cap_db_guard_stale_txn(s->db) != 0)
         sqlite_replace_conn(s);
 }
@@ -241,7 +295,9 @@ static void sqlite_guard_stale_txn(HlDbHandle *h)
 static int sqlite_in_txn(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
-    return s && s->db && !sqlite3_get_autocommit(s->db);
+    /* A broken connection's stuck transaction is not the app's: it refuses
+     * every statement, so it holds nothing a wait could leave open. */
+    return s && s->db && !s->broken && !sqlite3_get_autocommit(s->db);
 }
 
 /* ── Dialect-aware SQL helpers ───────────────────────────────────────
@@ -298,6 +354,7 @@ static int sqlite_insert_if_absent(HlDbHandle *h, const char *table,
      * "INSERT OR IGNORE" without an explicit conflict target,
      * which SQLite treats as "any constraint violation". */
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (sqlite_refuse_broken(s)) return -1;
     size_t cap = sqlite_estimate_sql_size(table, n_conflict, n_cols, 0);
     char stack_buf[4096];
     char *buf = (cap <= sizeof(stack_buf)) ? stack_buf : malloc(cap);
@@ -332,6 +389,7 @@ static int sqlite_upsert(HlDbHandle *h, const char *table,
     if (!table || n_cols < 1 || !cols || !values
         || n_conflict < 1 || !conflict_cols) return -1;
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (sqlite_refuse_broken(s)) return -1;
     size_t cap = sqlite_estimate_sql_size(table, n_conflict, n_cols, 1);
     char stack_buf[4096];
     char *buf = (cap <= sizeof(stack_buf)) ? stack_buf : malloc(cap);
@@ -413,6 +471,7 @@ static int sqlite_table_columns(HlDbHandle *h, const char *table,
 {
     if (!table || !cb) return -1;
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    if (sqlite_refuse_broken(s)) return -1;
     /* PRAGMA table_info doesn't accept bound parameters in SQLite
      * <3.41; substitute table name directly. The stdlib never
      * passes user input here (table names come from module
@@ -442,7 +501,7 @@ static const char *const sqlite_schemes[] = { "sqlite", "file", NULL };
 static void *sqlite_native_handle(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
-    return s ? s->db : NULL;
+    return s && !s->broken ? s->db : NULL;   /* broken: nothing to run on */
 }
 
 const HlDbBackend hl_db_backend_sqlite = {
@@ -485,7 +544,7 @@ HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h)
 {
     if (!h || h->backend != &hl_db_backend_sqlite) return NULL;
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
-    return s ? &s->cache : NULL;
+    return s && !s->broken ? &s->cache : NULL;
 }
 
 /* ── Wrap an externally-owned sqlite3* ────────────────────────────── */

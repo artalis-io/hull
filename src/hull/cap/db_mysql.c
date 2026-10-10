@@ -76,15 +76,6 @@ static HlSqlTxnKind my_sql_txn_kind(const char *sql)
     return my_sql_unreadable(sql) ? HL_SQL_TXN_OTHER : hl_sql_txn_kind_ex(sql, 0);
 }
 
-/* 1 when @p sql is a ROLLBACK of the whole transaction (comments and
- * ROLLBACK WORK included; not ROLLBACK TO SAVEPOINT). A connection lost inside
- * a transaction lost the transaction with it - the server rolled it back - so
- * a ROLLBACK for it has already happened. */
-static int sql_is_rollback(const char *sql)
-{
-    return my_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK;
-}
-
 /* 1 when @p sql is ONE statement (a trailing ';', whitespace and comments
  * allowed). The connection runs with CLIENT_MULTI_STATEMENTS, and every
  * classifier here reads the first statement only: "CREATE TABLE t (x INT);
@@ -133,6 +124,21 @@ static int my_sql_single_statement(const char *sql)
         p++;
     }
     return 1;
+}
+
+/* 1 when @p sql is a ROLLBACK of the whole transaction (comments and
+ * ROLLBACK WORK included; not ROLLBACK TO SAVEPOINT). A connection lost inside
+ * a transaction lost the transaction with it - the server rolled it back - so
+ * a ROLLBACK for it has already happened, and the backend answers it without
+ * sending anything. So it must be the WHOLE text, read the way MySQL reads it
+ * (my_sql_single_statement): anything after it would be answered "done"
+ * without having run (audit 12). The reader already sends trailing text to
+ * HL_SQL_TXN_OTHER; this also refuses the texts the two read differently (a
+ * "--" MySQL takes for minus signs, which the reader skipped as a comment). */
+static int sql_is_rollback(const char *sql)
+{
+    return my_sql_single_statement(sql) &&
+           my_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK;
 }
 
 static void scrub_free(char *s)

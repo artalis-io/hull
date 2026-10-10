@@ -736,6 +736,15 @@ UTEST(db_backend, sql_txn_kind)
     EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind(""));
     EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind(NULL));
     EXPECT_EQ(HL_SQL_TXN_NONE,     hl_sql_txn_kind("/* unterminated BEGIN"));
+    /* A ROLLBACK the Postgres / MySQL backends answer without sending (the
+     * connection, and its transaction, are gone) must be the whole text:
+     * a statement after it would be reported done without running
+     * (audit 12). */
+    EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind("ROLLBACK; DELETE FROM t"));
+    EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind("ROLLBACK;\n-- x\nINSERT INTO t VALUES (1)"));
+    EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind("ABORT /* c */ ; SELECT 1"));
+    EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind_ex("ROLLBACK; DELETE FROM t", 0));
+    EXPECT_EQ(HL_SQL_TXN_ROLLBACK, hl_sql_txn_kind("ROLLBACK; ; -- done\n"));
 }
 
 UTEST_MAIN();

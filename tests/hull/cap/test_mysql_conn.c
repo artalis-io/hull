@@ -1136,6 +1136,29 @@ UTEST(mysql_backend, block_comments_do_not_nest)
     EXPECT_EQ(1, my_sql_commits_implicitly("/* /* */ CREATE TABLE t (x INT)"));
 }
 
+/* The ROLLBACK a lost / aborted connection answers without sending must be
+ * the whole text, read as MySQL reads it: a statement after it would be
+ * reported done without running (audit 12). */
+UTEST(mysql_backend, rollback_shortcut_is_single_statement_only)
+{
+    EXPECT_EQ(1, sql_is_rollback("ROLLBACK"));
+    EXPECT_EQ(1, sql_is_rollback("rollback work;"));
+    EXPECT_EQ(1, sql_is_rollback("/* c */ ROLLBACK -- done\n"));
+    EXPECT_EQ(0, sql_is_rollback("ROLLBACK; INSERT INTO t VALUES (1)"));
+    EXPECT_EQ(0, sql_is_rollback("ROLLBACK --x; INSERT INTO t VALUES (1)"));
+    EXPECT_EQ(0, sql_is_rollback("ROLLBACK # x"));
+    EXPECT_EQ(0, sql_is_rollback("ROLLBACK TO SAVEPOINT s"));
+
+    /* A deadlock-aborted transaction: only a lone ROLLBACK is answered. */
+    HlDbMyCtx s;
+    memset(&s, 0, sizeof s);
+    s.txn_aborted = 1;
+    EXPECT_EQ(-1, my_ready(&s, "ROLLBACK; INSERT INTO t VALUES (1)", 0));
+    EXPECT_EQ(1, s.txn_aborted);
+    EXPECT_EQ(1, my_ready(&s, "ROLLBACK", 0));
+    EXPECT_EQ(0, s.txn_aborted);
+}
+
 /* "SELECT 1; COMMIT" ended the batch's transaction by its second statement:
  * no transaction is opened under it (the batch reports its loss). */
 UTEST(mysql_backend, multi_statement_commit_is_not_resumed)

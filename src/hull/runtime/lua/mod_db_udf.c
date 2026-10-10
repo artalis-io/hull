@@ -375,6 +375,15 @@ static int lua_db_udf_register(lua_State *L)
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
 
+        /* Re-fetched: app code ran since the check above (the opts'
+         * getters / metamethods), and the connection's sqlite3* is not
+         * kept across app code - the stale-transaction guard may have
+         * replaced it, or withheld it (broken) (audit 12). */
+        raw_db = hl_db_sqlite_raw(conn);
+        if (!raw_db) {
+            lua_scalar_udf_destroy(udf_ctx);
+            return luaL_error(L, "database not available");
+        }
         int rc = sqlite3_create_function_v2(
             raw_db, sql_name, nargs, encoding, udf_ctx,
             lua_scalar_udf_func, NULL, NULL,
@@ -420,6 +429,15 @@ static int lua_db_udf_register(lua_State *L)
         int encoding = SQLITE_UTF8;
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
 
+        /* Re-fetched: app code ran since the check above (the opts'
+         * getters / metamethods), and the connection's sqlite3* is not
+         * kept across app code - the stale-transaction guard may have
+         * replaced it, or withheld it (broken) (audit 12). */
+        raw_db = hl_db_sqlite_raw(conn);
+        if (!raw_db) {
+            lua_agg_udf_destroy(udf_ctx);
+            return luaL_error(L, "database not available");
+        }
         int rc = sqlite3_create_function_v2(
             raw_db, sql_name, nargs, encoding, udf_ctx,
             NULL, lua_agg_step_func, lua_agg_finalize_func,

@@ -799,6 +799,48 @@ UTEST(host, path_under_home_sub)
     EXPECT_EQ(hl_host_path_under_home(e.dir, ".hull"), 0);
     EXPECT_EQ(hl_host_path_under_home("/", ".hull"), 0);
     EXPECT_EQ(hl_host_path_under_home(sub, NULL), 1);
+    /* A path that does not exist yet resolves through its nearest existing
+     * ancestor: HULL_CACHE_DIR=~/.hull/keys/new is refused before anything
+     * is made (audit 12). */
+    char fresh[HL_TEST_PATH_MAX + 48];
+    snprintf(fresh, sizeof fresh, "%s/.hull/keys/new/deeper", e.dir);
+    EXPECT_EQ(hl_host_path_under_home(fresh, ".hull"), 1);
+    snprintf(fresh, sizeof fresh, "%s/proj/new", e.dir);
+    EXPECT_EQ(hl_host_path_under_home(fresh, ".hull"), 0);
+    snprintf(fresh, sizeof fresh, "%s/.hull/keys/../../proj", e.dir);
+    EXPECT_EQ(hl_host_path_under_home(fresh, ".hull"), 0);
+    broad_leave(&e);
+}
+
+/* A symlinked ~/.hull (-> another directory) is matched through its target
+ * too: HULL_CACHE_DIR set to the target's keys directory, or spelled through
+ * the link, resolved outside the plain $HOME/.hull and passed (audit 12). */
+UTEST(host, symlinked_home_sub_is_matched_through_its_target)
+{
+    if (hl_host_is_windows()) { UTEST_SKIP("symlinks"); }
+    BroadEnv e;
+    ASSERT_EQ(broad_enter(&e), 0);
+    char real[HL_TEST_PATH_MAX + 32], rkeys[HL_TEST_PATH_MAX + 48];
+    char dot[HL_TEST_PATH_MAX + 32], lkeys[HL_TEST_PATH_MAX + 48];
+    char fresh[HL_TEST_PATH_MAX + 64];
+    snprintf(real, sizeof real, "%s/proj", e.dir);
+    snprintf(rkeys, sizeof rkeys, "%s/proj/keys", e.dir);
+    snprintf(dot, sizeof dot, "%s/.hull", e.dir);
+    snprintf(lkeys, sizeof lkeys, "%s/.hull/keys", e.dir);
+    snprintf(fresh, sizeof fresh, "%s/proj/keys/new", e.dir);
+    ASSERT_EQ(mkdir(real, 0700), 0);
+    ASSERT_EQ(mkdir(rkeys, 0700), 0);
+    ASSERT_EQ(symlink(real, dot), 0);
+
+    EXPECT_EQ(hl_host_path_under_home(rkeys, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_under_home(lkeys, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_under_home(real, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_under_home(fresh, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_covers_home(real, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_covers_home(rkeys, ".hull"), 0);
+
+    unlink(dot);
+    rmdir(rkeys);
     broad_leave(&e);
 }
 

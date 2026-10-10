@@ -14,9 +14,9 @@
 #include "hull/cap/audit.h"
 #include "hull/cap/db_budget.h"
 #include "hull/utils/alloc.h"
-#include "hull/utils/parse_size.h"
 #include "hull/shared/cache_dir.h"   /* hl_hull_sqlite_temp_dir */
 #include <sqlite3.h>
+#include <errno.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -138,7 +138,42 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
  * pragma (foreign_keys, query_only, defer_foreign_keys, recursive_triggers,
  * busy_timeout, synchronous, ...) takes effect when it is PREPARED and still
  * passes sqlite3_stmt_readonly, so a "read-only" agent query changed the warm
- * app connection (audit 11). */
+ * app connection (audit 11).
+ *
+ * Two more setters are bounded (audit 12): busy_timeout - the event-loop thread
+ * SLEEPS that long on a locked database, uncharged, so a large value stalls
+ * every request - may be set only up to HL_DB_MAX_BUSY_TIMEOUT_MS (Hull's own
+ * 5000); synchronous may not go below NORMAL (OFF drops the syncs WAL's crash
+ * safety rests on). */
+static int db_busy_timeout_ok(const char *v)
+{
+    /* SQLite reads the value as a 32-bit integer; a negative one means 0. */
+    const char *p = v;
+    if (*p == '+' || *p == '-') p++;
+    if (!*p) return 0;
+    for (const char *q = p; *q; q++)
+        if (*q < '0' || *q > '9') return 0;
+    if (v[0] == '-') return 1;
+    while (*p == '0' && p[1]) p++;
+    if (strlen(p) > 9) return 0;
+    return atol(p) <= HL_DB_MAX_BUSY_TIMEOUT_MS;
+}
+
+static int db_synchronous_ok(const char *v)
+{
+    /* Mirror SQLite's getSafetyLevel: a leading digit is read as a number and
+     * the level wraps ((n + 1) & 7, 0 -> OFF), so only 1 / 2 / 3 (NORMAL /
+     * FULL / EXTRA) are safe; "off" / "no" / "false" mean OFF, and any other
+     * word NORMAL - allow only the names that say what they mean. */
+    static const char *const ok[] = {
+        "1", "2", "3", "normal", "full", "extra", "on", "yes", "true",
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++)
+        if (strcasecmp(v, ok[i]) == 0)
+            return 1;
+    return 0;
+}
+
 static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
                          const char *a3, const char *a4)
 {
@@ -174,6 +209,10 @@ static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
             if (n == 0 || n > 3 || strncasecmp(a2, "wal", n) != 0)
                 return SQLITE_DENY;
         }
+        if (strcasecmp(a1, "busy_timeout") == 0 && !db_busy_timeout_ok(a2))
+            return SQLITE_DENY;
+        if (strcasecmp(a1, "synchronous") == 0 && !db_synchronous_ok(a2))
+            return SQLITE_DENY;
         if (ud) {
             for (size_t i = 0; i < sizeof describe_ok / sizeof describe_ok[0]; i++)
                 if (strcasecmp(a1, describe_ok[i]) == 0)
@@ -245,6 +284,10 @@ static pthread_once_t g_sqlite_setup_once = PTHREAD_ONCE_INIT;
 
 static void db_sqlite_setup_once(void)
 {
+    /* Process-wide work, not the first opener's: whichever run happens to
+     * open SQLite first must not pay for (or be refused) the setup's
+     * allocations (audit 12). */
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
     /* sqlite3_config works only before sqlite3_initialize: every Hull open
      * path calls the setup first, so nothing should have initialized SQLite
      * yet. If something did, say so - allocations then go uncharged (the
@@ -271,6 +314,7 @@ static void db_sqlite_setup_once(void)
     const char *tmp = hl_hull_sqlite_temp_dir();
     if (tmp && !sqlite3_temp_directory)
         sqlite3_temp_directory = sqlite3_mprintf("%s", tmp);
+    hl_db_budget_restore(budget);
 }
 
 int hl_cap_db_temp_on_disk(void)
@@ -282,14 +326,40 @@ int hl_cap_db_temp_on_disk(void)
 long long hl_cap_db_heap_limit_from_env(const char *v)
 {
     if (!v || !v[0]) return HL_DB_SQLITE_HARD_HEAP_LIMIT;
-    long n = hl_parse_size(v);
+    /* A decimal count with an optional K / M / G suffix (1024-based) and an
+     * optional trailing B - "512M" and "512MB" alike, as `hull cache prune
+     * --max-size` takes them. strtoll's ERANGE and a suffix that overflows
+     * are refused rather than clamped (audit 12). */
+    long long n = -1;
+    if (v[0] >= '0' && v[0] <= '9') {
+        char *end = NULL;
+        errno = 0;
+        long long x = strtoll(v, &end, 10);
+        long long mul = 1;
+        if (errno == 0 && end && x >= 0) {
+            switch (*end) {
+            case 'k': case 'K': mul = 1LL << 10; end++; break;
+            case 'm': case 'M': mul = 1LL << 20; end++; break;
+            case 'g': case 'G': mul = 1LL << 30; end++; break;
+            default: break;
+            }
+            if (*end == 'b' || *end == 'B') end++;
+            if (*end == '\0' && x <= LLONG_MAX / mul) n = x * mul;
+        }
+    }
     if (n < 0) {
         fprintf(stderr, "hull: WARN ignoring HULL_SQLITE_HEAP_LIMIT=%s (want a "
                         "size such as 512M or 2G, or 0 for no limit)\n", v);
         return HL_DB_SQLITE_HARD_HEAP_LIMIT;
     }
-    if (n > 0 && n < HL_DB_SQLITE_MIN_HEAP_LIMIT) n = HL_DB_SQLITE_MIN_HEAP_LIMIT;
-    return (long long)n;
+    if (n > 0 && n < HL_DB_SQLITE_MIN_HEAP_LIMIT) {
+        fprintf(stderr, "hull: WARN HULL_SQLITE_HEAP_LIMIT=%s is below the "
+                        "%lld MiB floor; using %lld MiB\n", v,
+                HL_DB_SQLITE_MIN_HEAP_LIMIT >> 20,
+                HL_DB_SQLITE_MIN_HEAP_LIMIT >> 20);
+        n = HL_DB_SQLITE_MIN_HEAP_LIMIT;
+    }
+    return n;
 }
 
 void hl_cap_db_set_heap_limit(long long hard)

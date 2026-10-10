@@ -19,6 +19,10 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>   /* getpid */
+#include <limits.h>
+#include <sys/stat.h>
+#include "hull/shared/cache_dir.h"   /* hl_hull_sqlite_temp_dir_make */
+#include "hull/shared/host.h"        /* hl_host_is_windows */
 #include "../test_tmpdir.h"
 
 /* ── Test fixtures ──────────────────────────────────────────────────── */
@@ -954,6 +958,139 @@ UTEST(hl_cap_db, heap_limit_from_env)
     EXPECT_EQ((long long)4 << 30, hl_cap_db_heap_limit_from_env("4G"));
     EXPECT_EQ((long long)512 << 20, hl_cap_db_heap_limit_from_env("512m"));
     EXPECT_EQ(HL_DB_SQLITE_MIN_HEAP_LIMIT, hl_cap_db_heap_limit_from_env("1k"));
+    /* A trailing B, as `hull cache prune --max-size` takes (audit 12). */
+    EXPECT_EQ((long long)512 << 20, hl_cap_db_heap_limit_from_env("512MB"));
+    EXPECT_EQ((long long)2 << 30, hl_cap_db_heap_limit_from_env("2gb"));
+    EXPECT_EQ((long long)128 << 20, hl_cap_db_heap_limit_from_env("134217728B"));
+    /* Out of range: refused (the default), never clamped to LLONG_MAX. */
+    EXPECT_EQ(HL_DB_SQLITE_HARD_HEAP_LIMIT,
+              hl_cap_db_heap_limit_from_env("99999999999999999999"));
+    EXPECT_EQ(HL_DB_SQLITE_HARD_HEAP_LIMIT,
+              hl_cap_db_heap_limit_from_env("9999999999999G"));
+    EXPECT_EQ(HL_DB_SQLITE_HARD_HEAP_LIMIT, hl_cap_db_heap_limit_from_env("-1"));
+    EXPECT_EQ(HL_DB_SQLITE_HARD_HEAP_LIMIT, hl_cap_db_heap_limit_from_env("5MBx"));
+    EXPECT_EQ(HL_DB_SQLITE_HARD_HEAP_LIMIT, hl_cap_db_heap_limit_from_env("B"));
+}
+
+/* SQLite's temp directory: every candidate base is tried until one works - a
+ * missing, relative, non-directory, unwritable or world-writable-without-
+ * sticky base is skipped, not the end of the search - and the directory is a
+ * fresh mkdtemp one, so a name planted beside it (the old fixed
+ * hull-sqlite-<euid>) neither blocks it nor is shared (audit 12). */
+UTEST(hl_cap_db, sqlite_temp_dir_tries_every_candidate)
+{
+    if (hl_host_is_windows()) { UTEST_SKIP("temp_store stays MEMORY on Windows"); }
+    char root[HL_TEST_PATH_MAX];
+    ASSERT_EQ(0, hl_test_path(root, sizeof root, "hull_sqltmp_%ld", (long)getpid()));
+    char file[HL_TEST_PATH_MAX + 16], ro[HL_TEST_PATH_MAX + 16];
+    char ww[HL_TEST_PATH_MAX + 16], good[HL_TEST_PATH_MAX + 16];
+    char squat[HL_TEST_PATH_MAX + 64];
+    snprintf(file, sizeof file, "%s/file", root);
+    snprintf(ro, sizeof ro, "%s/ro", root);
+    snprintf(ww, sizeof ww, "%s/ww", root);
+    snprintf(good, sizeof good, "%s/good", root);
+    snprintf(squat, sizeof squat, "%s/hull-sqlite-%lu", good,
+             (unsigned long)geteuid());
+    ASSERT_EQ(0, mkdir(root, 0700));
+    FILE *f = fopen(file, "w");
+    ASSERT_TRUE(f != NULL);
+    fclose(f);
+    ASSERT_EQ(0, mkdir(ro, 0500));
+    ASSERT_EQ(0, mkdir(ww, 0700));
+    ASSERT_EQ(0, chmod(ww, 0777));          /* world-writable, no sticky bit */
+    ASSERT_EQ(0, mkdir(good, 0700));
+    f = fopen(squat, "w");                   /* the old fixed name, squatted */
+    ASSERT_TRUE(f != NULL);
+    fclose(f);
+
+    const char *cands[] = {
+        NULL, "relative/tmp", "/no/such/hull/dir", file,
+        geteuid() == 0 ? NULL : ro, ww, good,
+    };
+    size_t nc = sizeof cands / sizeof cands[0];
+    char a[PATH_MAX], b[PATH_MAX];
+    EXPECT_EQ((int)nc - 1, hl_hull_sqlite_temp_dir_make(cands, nc, a, sizeof a));
+    EXPECT_EQ((int)nc - 1, hl_hull_sqlite_temp_dir_make(cands, nc, b, sizeof b));
+    EXPECT_STRNE(a, b);                      /* per call / process, not shared */
+    char good_real[PATH_MAX];
+    ASSERT_TRUE(realpath(good, good_real) != NULL);
+    char prefix[PATH_MAX + 32];
+    snprintf(prefix, sizeof prefix, "%s/hull-sqlite-%lu-", good_real,
+             (unsigned long)geteuid());
+    EXPECT_EQ(0, strncmp(a, prefix, strlen(prefix)));
+    struct stat st;
+    ASSERT_EQ(0, lstat(a, &st));
+    EXPECT_TRUE(S_ISDIR(st.st_mode));
+    EXPECT_EQ(0700, (int)(st.st_mode & 0777));
+
+    /* Nothing usable: -1, nothing made. */
+    const char *none[] = { file, ww };
+    char c[PATH_MAX];
+    EXPECT_EQ(-1, hl_hull_sqlite_temp_dir_make(none, 2, c, sizeof c));
+
+    rmdir(a);
+    rmdir(b);
+    remove(squat);
+    rmdir(good);
+    rmdir(ww);
+    rmdir(ro);
+    remove(file);
+    rmdir(root);
+}
+
+/* busy_timeout sleeps the calling thread (the event loop) uncharged, and
+ * synchronous below NORMAL drops the syncs WAL's crash safety rests on: both
+ * are bounded for app SQL (audit 12). SQLite reads synchronous's numeric
+ * value modulo 8 ((n + 1) & 7), so 7 means OFF too. */
+UTEST(hl_cap_db, busy_timeout_and_synchronous_are_bounded)
+{
+    setup_db();
+    static const char *const refused[] = {
+        "PRAGMA busy_timeout=60000", "PRAGMA busy_timeout = 5001",
+        "PRAGMA busy_timeout=2147483647", "PRAGMA busy_timeout=99999999999",
+        "PRAGMA busy_timeout='1e9'",
+        "PRAGMA synchronous=OFF", "PRAGMA synchronous=0",
+        "PRAGMA synchronous=off", "PRAGMA synchronous=no",
+        "PRAGMA synchronous=false", "PRAGMA synchronous=7",
+        "PRAGMA synchronous=4", "PRAGMA main.synchronous = 0",
+        "PRAGMA synchronous=-1",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        EXPECT_NE(SQLITE_OK, sqlite3_exec(test_db, refused[i], NULL, NULL, NULL));
+    static const char *const allowed[] = {
+        "PRAGMA busy_timeout", "PRAGMA busy_timeout=0",
+        "PRAGMA busy_timeout=1000", "PRAGMA busy_timeout=5000",
+        "PRAGMA busy_timeout=-1", "PRAGMA synchronous",
+        "PRAGMA synchronous=NORMAL", "PRAGMA synchronous=FULL",
+        "PRAGMA synchronous=extra", "PRAGMA synchronous=1",
+        "PRAGMA synchronous=2", "PRAGMA synchronous=3",
+    };
+    for (size_t i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
+        EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, allowed[i], NULL, NULL, NULL));
+    teardown_db();
+}
+
+/* The selector and the sandbox match a DSN scheme case-insensitively, so the
+ * backend strips it that way too: "SQLITE://<path>" opens <path>, not a file
+ * literally named "SQLITE:" + ... under the working directory (audit 12). */
+UTEST(hl_cap_db, sqlite_scheme_is_stripped_case_insensitively)
+{
+    char path[HL_TEST_PATH_MAX];
+    ASSERT_EQ(0, hl_test_path(path, sizeof path, "hull_scheme_%ld.db", (long)getpid()));
+    remove(path);
+    char dsn[HL_TEST_PATH_MAX + 16];
+    snprintf(dsn, sizeof dsn, "SQLite://%s", path);
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    ASSERT_EQ(0, hl_db_backend_sqlite.open(&h.ctx, dsn, NULL));
+    EXPECT_EQ(0, hl_db_exec(&h, "CREATE TABLE t(x)", NULL, 0) < 0);
+    hl_db_backend_sqlite.close(&h);
+    FILE *f = fopen(path, "rb");
+    EXPECT_TRUE(f != NULL);
+    if (f) fclose(f);
+    remove(path);
+    char side[HL_TEST_PATH_MAX + 8];
+    snprintf(side, sizeof side, "%s-wal", path); remove(side);
+    snprintf(side, sizeof side, "%s-shm", path); remove(side);
 }
 
 /* A file database under a low hard heap limit and a small page cache. The
@@ -1105,6 +1242,47 @@ UTEST(hl_cap_db, stale_txn_guard_replaces_a_connection_it_cannot_roll_back)
     char side[HL_TEST_PATH_MAX + 8];
     snprintf(side, sizeof side, "%s-wal", path); remove(side);
     snprintf(side, sizeof side, "%s-shm", path); remove(side);
+}
+
+/* An in-memory database cannot be reopened (that would drop it), so a
+ * connection stuck in a transaction it cannot roll back is marked broken:
+ * every call fails with a clear message instead of running inside the stuck
+ * transaction, the raw handle is withheld, and no wait is refused for it. A
+ * later check that finds the transaction gone puts it back (audit 12). */
+UTEST(hl_cap_db, stale_txn_guard_breaks_a_connection_it_cannot_reopen)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    ASSERT_EQ(0, hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL));
+    ASSERT_EQ(0, hl_db_exec(&h, "CREATE TABLE t(x)", NULL, 0) < 0);
+    ASSERT_EQ(0, hl_db_exec(&h, "BEGIN", NULL, 0) < 0);
+    ASSERT_EQ(0, hl_db_exec(&h, "INSERT INTO t VALUES (1)", NULL, 0) < 0);
+
+    sqlite3 *raw = hl_db_sqlite_raw(&h);
+    ASSERT_TRUE(raw != NULL);
+    hl_cap_db_refuse_txn_control(raw, 1);   /* the ROLLBACK cannot run */
+    hl_db_guard_stale_txn(&h);
+
+    EXPECT_TRUE(hl_db_sqlite_raw(&h) == NULL);
+    EXPECT_TRUE(hl_db_sqlite_cache(&h) == NULL);
+    EXPECT_EQ(0, hl_db_in_txn(&h));
+    EXPECT_TRUE(hl_db_exec(&h, "INSERT INTO t VALUES (2)", NULL, 0) < 0);
+    EXPECT_TRUE(strstr(hl_db_errmsg(&h), "stuck inside a transaction") != NULL);
+    int64_t n = -1;
+    EXPECT_NE(0, hl_db_query(&h, "SELECT count(*) FROM t", NULL, 0, count_cb, &n, NULL));
+    EXPECT_NE(0, hl_db_begin(&h));
+    /* Still broken on the next entry while the rollback keeps failing. */
+    hl_db_guard_stale_txn(&h);
+    EXPECT_TRUE(hl_db_sqlite_raw(&h) == NULL);
+
+    /* Once the rollback can run, the next check leaves the transaction and
+     * the connection works again - without the stuck transaction's row. */
+    hl_cap_db_refuse_txn_control(raw, 0);
+    hl_db_guard_stale_txn(&h);
+    EXPECT_TRUE(hl_db_sqlite_raw(&h) == raw);
+    n = -1;
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM t", NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(0, (int)n);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST_MAIN();

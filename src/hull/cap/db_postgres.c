@@ -62,7 +62,12 @@ static int pg_connect(HlPgConn *conn, const char *dsn)
 /* 1 when @p sql is a ROLLBACK (or ABORT) of the whole transaction - comments
  * and ROLLBACK WORK included, ROLLBACK TO SAVEPOINT not. A connection lost
  * inside a transaction lost the transaction with it - the server rolled it
- * back - so a ROLLBACK for it has already happened. */
+ * back - so a ROLLBACK for it has already happened, and pg_ready answers it
+ * without sending anything. It must therefore be the whole text: anything
+ * after it would be answered "done" without having run. hl_sql_txn_kind
+ * guarantees that - text after the statement (past its ';', whitespace and
+ * comments) makes it HL_SQL_TXN_OTHER, so "ROLLBACK; DELETE ..." is refused
+ * like any other statement (audit 12, tested in test_db_backend). */
 static int sql_is_rollback(const char *sql)
 {
     return hl_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK;
