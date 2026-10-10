@@ -253,6 +253,7 @@ enum { HL_JS_HOLD_SEND = 1, HL_JS_HOLD_ERROR = 2 };
 
 typedef struct {
     HlAsyncCont   base;
+    HlJS         *js;
     HlJsRunOnce  *run;      /* ref held; run->hold points at our ctx */
     HlReqLife    *life;     /* ref held */
     KlHttpConn   *conn;
@@ -274,9 +275,9 @@ static void hl_js_hold_resume(HlAsyncCont *self, void *driver)
     hl_js_hold_detach(h);
 #ifdef HL_ENABLE_HTTP_SERVER
     if (h->outcome == HL_JS_HOLD_SEND)
-        hl_js_http_resume_send(h->conn, h->req);
+        hl_js_http_resume_send(h->js, h->conn, h->req);
     else if (h->outcome == HL_JS_HOLD_ERROR)
-        hl_js_http_resume_error(h->conn, h->req);
+        hl_js_http_resume_error(h->js, h->conn, h->req);
 #endif
 }
 
@@ -284,6 +285,9 @@ static void hl_js_hold_cancel(HlAsyncCont *self)
 {
     HlJsHoldCont *h = (HlJsHoldCont *)self;
     hl_js_hold_detach(h);
+    /* The connection is gone: so is the snapshot its 500 would have kept
+     * (audit 12). */
+    hl_res_base_forget_conn(&h->js->res_bases, h->conn);
     hl_req_life_kill(h->life);   /* the connection is gone */
 }
 
@@ -312,7 +316,7 @@ static int hl_js_hold_arm(HlJS *js, KlHttpConn *conn, KlHttpRequest *req,
     h->base.resume  = hl_js_hold_resume;
     h->base.cancel  = hl_js_hold_cancel;
     h->base.destroy = hl_js_hold_destroy;
-    h->conn = conn; h->req = req; h->alloc = js->base.alloc;
+    h->js = js; h->conn = conn; h->req = req; h->alloc = js->base.alloc;
     h->life = life; hl_req_life_retain(life);
     h->run = run;   run->refs++;
     actx->cont = &h->base;
@@ -607,7 +611,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
          * the poll backend). Mirrors the Lua path (runtime/lua/async.c). An
          * op that ran detached sends through the run's hold op instead. */
         if (conn && was_holder && !hl_js_conn_held_elsewhere(js, conn))
-            hl_js_http_resume_send(conn, jc->req);
+            hl_js_http_resume_send(js, conn, jc->req);
 #endif
         if (conn && !was_holder && jc->link.once) {
             release = (HlAsyncCtx *)jc->link.once->hold;
@@ -679,7 +683,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
 #ifdef HL_ENABLE_HTTP_SERVER
         if (conn && was_holder && !hl_js_conn_held_elsewhere(js, conn))
-            hl_js_http_resume_error(conn, jc->req);  /* 500 + send, behind the seam */
+            hl_js_http_resume_error(js, conn, jc->req);  /* 500 + send, behind the seam */
 #endif
         if (conn && !was_holder && jc->link.once) {
             release = (HlAsyncCtx *)jc->link.once->hold;
@@ -734,7 +738,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
                         if (run) run->done = 1;
 #ifdef HL_ENABLE_HTTP_SERVER
                         if (!hl_js_conn_held_elsewhere(js, conn))
-                            hl_js_http_resume_error(conn, jc->req);
+                            hl_js_http_resume_error(js, conn, jc->req);
 #endif
                     }
                 } else {
@@ -799,6 +803,8 @@ static void hl_js_async_cancel(HlAsyncCont *self)
         js->active_conn = NULL;
         js->active_req  = NULL;
     }
+    /* ...and the snapshot its 500 would have kept (audit 12). */
+    hl_res_base_forget_conn(&js->res_bases, jc->conn);
     jc->conn = NULL;
     hl_js_cont_unattach(jc);
     hl_js_cont_unhold(jc);

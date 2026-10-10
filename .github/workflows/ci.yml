@@ -2170,7 +2170,9 @@ jobs:
         run: make CC=cosmocc hardening
 
       - name: Unit tests
-        timeout-minutes: 5
+        # cosmocc builds every test binary twice (x86_64 + aarch64): the step
+        # already ran 3-5 min, so 5 left no headroom.
+        timeout-minutes: 10
         run: make test CC=cosmocc
 
       - name: Sandbox tests (cosmo)

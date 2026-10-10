@@ -9397,6 +9397,7 @@ UTEST(js_audit10, nested_test_request_keeps_the_case_budget_and_txn)
 /* ── Audit 10 ────────────────────────────────────────────────────────── */
 
 #include "hull/http_feature.h"   /* hl_js_http_error_response */
+#include "hull/shared/res_headers.h" /* HlResBaseList, hl_res_base_* */
 
 /* Milliseconds since @p t0. */
 static long a10_ms_since(const struct timespec *t0)
@@ -9544,7 +9545,7 @@ UTEST(js_audit10, error_response_and_bytes_drop_stale_headers)
         "(req, res) => { res.header('Set-Cookie', 'sid=1');"
         " res.header('Location', '/x'); res.html('<p>'); return 1; }",
         &req, &res), 1);
-    hl_js_http_error_response(&res);
+    hl_js_http_error_response(&js, &res);
     EXPECT_EQ(res.status, 500);
     EXPECT_EQ(a9_header_count(&res, "Set-Cookie"), 0);
     EXPECT_EQ(a9_header_count(&res, "Location"), 0);
@@ -9804,7 +9805,7 @@ UTEST(js_audit11, content_type_and_error_headers_span_middleware)
     KlHttpRequest req2 = {0};
     EXPECT_EQ(hl_js_dispatch_middleware(&js, mw1, &req2, &res), 0);
     EXPECT_EQ(hl_js_dispatch(&js, last - 1, &req2, &res), -1);
-    hl_js_http_error_response(&res);
+    hl_js_http_error_response(&js, &res);
     EXPECT_EQ(res.status, 500);
     EXPECT_EQ(a9_header_count(&res, "Strict-Transport-Security"), 1);
     EXPECT_EQ(a9_header_count(&res, "Set-Cookie"), 0);
@@ -10142,5 +10143,266 @@ UTEST(js_run_watchdog, a_runaway_worker_dispatch_is_stopped)
     js_worker_close(be, actx, pool);
 }
 
+/* ── Audit 12: runtime lows ──────────────────────────────────────────── */
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Evaluate an app module (errors dumped). */
+static void a12_eval_app(const char *code)
+{
+    JSValue v = JS_Eval(js.ctx, code, strlen(code), "<a12>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+}
+
+/* res.header handed Keel C strings it measures with strlen, after Hull's
+ * Content-Type check had looked at the whole JS string: a name with a NUL
+ * ("Content-Type\0x") went out as a second, unchecked Content-Type. A name
+ * must be a token now and a value may not hold a NUL; both throw. */
+UTEST(js_audit12, header_name_must_be_a_token_and_nul_is_refused)
+{
+    static const char *const bad[] = {
+        "res.header('Content-Type\\0x', 'text/html')",
+        "res.header('X-A\\0', 'v')",
+        "res.header('Bad Name', 'v')",
+        "res.header('', 'v')",
+        "res.header('X-A:', 'v')",
+        "res.header('X-\\u00e9', 'v')",
+        "res.header('X-A', 'v\\0w')",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        KlAllocator alloc = kl_allocator_default();
+        KlHttpResponse res;
+        ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+        KlHttpRequest req = {0};
+        char src[256];
+        snprintf(src, sizeof src,
+                 "(req, res) => { res.json(1); %s; return 1; }", bad[i]);
+        EXPECT_EQ_MSG(a5_middleware(src, &req, &res), -1, bad[i]);
+        /* only Hull's own Content-Type; nothing the bad call added */
+        EXPECT_EQ_MSG(a9_header_count(&res, "Content-Type"), 1, bad[i]);
+        EXPECT_FALSE_MSG(a9_headers_contain(&res, "X-A"), bad[i]);
+        free_req_ctx(&req);
+        kl_http_response_free(&res);
+        cleanup_js();
+    }
+    /* An ordinary header still goes out. */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(a5_middleware("(req, res) => { res.header(\"X-Ok_1!#$%&'*+.^`|~\","
+                            " 'a b'); return 1; }", &req, &res), 1);
+    EXPECT_TRUE(a9_headers_contain(&res, "X-Ok_1!#$%&'*+.^`|~: a b\r\n"));
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+    cleanup_js();
+}
+
+/* The kept-headers snapshots: a middleware that fails keeps the headers the
+ * middleware before it set (its 500 dropped them all); the list is the
+ * runtime's own and hl_js_free empties it; and a request whose dispatch
+ * fails before its handler runs never gets an earlier request's snapshot
+ * (the snapshot was taken after those early error returns, so the 500
+ * restored whatever an earlier request on that response had left). */
+UTEST(js_audit12, error_reset_snapshots_are_per_request_and_per_runtime)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    a12_eval_app(
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.use('*', '/*', (req, res) => {\n"
+        "  res.header('Strict-Transport-Security', 'max-age=1'); return 0; });\n"
+        "app.use('*', '/*', (req, res) => {\n"
+        "  res.header('Set-Cookie', 'sid=1'); throw new Error('mw boom'); });\n"
+        "app.use('*', '/*', (req, res) => 0);\n");
+    int mw1 = eval_int("globalThis.__hull_middleware[0].handler_id");
+    int mw2 = eval_int("globalThis.__hull_middleware[1].handler_id");
+    int mw3 = eval_int("globalThis.__hull_middleware[2].handler_id");
+    KlAllocator alloc = kl_allocator_default();
+
+    /* A failing middleware keeps the earlier middleware's header. */
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, mw1, &req, &res), 0);
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, mw2, &req, &res), -1);
+    hl_js_http_error_response(&js, &res);
+    EXPECT_EQ(res.status, 500);
+    EXPECT_EQ(a9_header_count(&res, "Strict-Transport-Security"), 1);
+    EXPECT_EQ(a9_header_count(&res, "Set-Cookie"), 0);
+    EXPECT_EQ(js.res_bases.count, (size_t)0);   /* taken by the 500 */
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+
+    /* Request A leaves a snapshot (its connection went away mid-run, say);
+     * request B on the same response fails before any handler runs: its
+     * 500 must not restore A's header. */
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest ra = {0};
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, mw1, &ra, &res), 0);
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, mw3, &ra, &res), 0);
+    EXPECT_EQ(js.res_bases.count, (size_t)1);
+    free_req_ctx(&ra);
+    kl_http_response_free(&res);
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest rb = {0};
+    EXPECT_EQ(hl_js_dispatch(&js, 99999, &rb, &res), -1);   /* no handler */
+    hl_js_http_error_response(&js, &res);
+    EXPECT_EQ(res.status, 500);
+    EXPECT_EQ(a9_header_count(&res, "Strict-Transport-Security"), 0);
+    free_req_ctx(&rb);
+    kl_http_response_free(&res);
+
+    /* A snapshot left behind is the runtime's, and goes with it. */
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest rc = {0};
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, mw1, &rc, &res), 0);
+    EXPECT_EQ(hl_js_dispatch_middleware(&js, mw3, &rc, &res), 0);
+    EXPECT_EQ(js.res_bases.count, (size_t)1);
+    EXPECT_GT(js.res_bases.bytes, (size_t)0);
+    free_req_ctx(&rc);
+    kl_http_response_free(&res);
+    cleanup_js();
+    EXPECT_EQ(js.res_bases.count, (size_t)0);
+    EXPECT_EQ(js.res_bases.bytes, (size_t)0);
+    EXPECT_TRUE(js.res_bases.head == NULL);
+}
+
+/* A connection that goes away under a suspended handler (an async cancel)
+ * takes its snapshot with it; the list is bounded by bytes as well as
+ * entries. */
+UTEST(js_audit12, snapshot_forgotten_by_connection_and_capped_by_bytes)
+{
+    KlAllocator alloc = kl_allocator_default();
+    HlResBaseList l = {0};
+    static KlHttpResponse rs[40];
+    char big[48 * 1024];
+    memset(big, 'v', sizeof big - 1);
+    big[sizeof big - 1] = 0;
+    for (int i = 0; i < 40; i++) {
+        ASSERT_EQ(kl_http_response_init(&rs[i], &alloc), 0);
+        ASSERT_EQ(kl_http_response_header(&rs[i], "X-Big", big), 0);
+        hl_res_base_begin(&l, &rs[i], (const void *)&rs[i]);
+        EXPECT_LE(l.bytes, (size_t)HL_RES_BASE_BYTES_MAX);
+    }
+    EXPECT_LT(l.count, (size_t)40);              /* the oldest went */
+    EXPECT_TRUE(hl_res_base_find(&l, &rs[39]) != NULL);
+    EXPECT_TRUE(hl_res_base_find(&l, &rs[0]) == NULL);
+    size_t before = l.count;
+    hl_res_base_forget_conn(&l, (const void *)&rs[39]);
+    EXPECT_EQ(l.count, before - 1);
+    EXPECT_TRUE(hl_res_base_find(&l, &rs[39]) == NULL);
+    hl_res_base_clear(&l);
+    EXPECT_EQ(l.count, (size_t)0);
+    EXPECT_EQ(l.bytes, (size_t)0);
+    for (int i = 0; i < 40; i++)
+        kl_http_response_free(&rs[i]);
+}
+
+/* __hull_timer_defs / __hull_ws_defs / __hull_sse_defs are app-writable
+ * globals: the wiring took them on trust (a 0 ms repeating timer, a daily
+ * timer at hour 99, a handler id whose conversion threw and was ignored).
+ * Each tampered def now fails the wiring, with no exception left pending. */
+UTEST(js_audit12, tampered_timer_and_ws_defs_fail_the_wiring)
+{
+    static const char *const tamper[] = {
+        "globalThis.__hull_timer_defs[0].interval_ms = 0;",
+        "globalThis.__hull_timer_defs[0].interval_ms = -1;",
+        "globalThis.__hull_timer_defs[0].interval_ms = 99.5;",
+        "globalThis.__hull_timer_defs[0].interval_ms = '1000';",
+        "globalThis.__hull_timer_defs[0].handler_id = -1;",
+        "globalThis.__hull_timer_defs[0].handler_id = 'x';",
+        "globalThis.__hull_timer_defs[0].type = 'hourly';",
+        "Object.defineProperty(globalThis.__hull_timer_defs[0], 'interval_ms',"
+        " { get() { throw new Error('getter'); } });",
+        "globalThis.__hull_timer_defs[1].hour = 99;",
+        "globalThis.__hull_timer_defs[1].minute = 60;",
+        "globalThis.__hull_timer_defs[1].hour = -1;",
+        "globalThis.__hull_timer_defs[1] = { get type() { throw 1; } };",
+        "globalThis.__hull_ws_defs[0].on_message_id = 'x';",
+        "globalThis.__hull_ws_defs[0].on_message_id = -5;",
+        "Object.defineProperty(globalThis.__hull_ws_defs[0], 'on_message_id',"
+        " { get() { throw new Error('getter'); } });",
+        "globalThis.__hull_sse_defs[0].handler_id = { valueOf() { return 0; } };",
+    };
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    for (size_t i = 0; i <= sizeof tamper / sizeof tamper[0]; i++) {
+        const char *t = i < sizeof tamper / sizeof tamper[0] ? tamper[i] : "";
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        HlAsyncBackendCtx *actx = NULL;
+        ASSERT_EQ(be->init(&actx, NULL), 0);
+        js.base.async_ctx = actx;
+        char code[1024];
+        snprintf(code, sizeof code,
+            "import { app } from 'hull:app';\n"
+            "app.manifest({ modules: ['hull/http-server@1', 'hull/timers@1',"
+            " 'hull/web/ws-server@1', 'hull/web/sse@1'] });\n"
+            "app.get('/x', (req, res) => {});\n"
+            "app.every(100, () => {});\n"
+            "app.daily('03:30', () => {});\n"
+            "app.ws('/ws', { onMessage: (c, m) => {} });\n"
+            "app.sse('/sse', (req, stream) => {});\n"
+            "%s\n", t);
+        a12_eval_app(code);
+        KlHttpServer server;
+        KlHttpServerConfig cfg = { .port = 0, .max_connections = 1, .alloc = NULL };
+        kl_http_server_init(&server, &cfg);
+        int want = t[0] ? -1 : 0;   /* the last round is untampered */
+        EXPECT_EQ_MSG(hl_js_wire_routes_server(&js, &server, NULL), want, t);
+        EXPECT_FALSE_MSG(JS_HasException(js.ctx), t);
+        if (!t[0])
+            EXPECT_EQ(js.timer_count, (size_t)2);
+        kl_http_server_free(&server);
+        cleanup_js();
+        be->tick(actx, 0);
+        be->free(actx);
+    }
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+/* http.async.post / put / patch built the opts they hand http.fetch as a
+ * plain object with JS_SetPropertyStr: an Object.prototype setter for body /
+ * headers / timeoutMs swallowed the value, and an Object.prototype getter was
+ * read back as the call's own option. The opts object has no prototype now
+ * and its properties are defined. */
+UTEST(js_audit12, polluted_object_prototype_does_not_reach_fetch_opts)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlHttpConfig cfg = {0};
+    js.base.http_cfg = &cfg;
+    a12_eval_app(
+        "import { httpClient as http } from 'hull:http-client';\n"
+        "globalThis.__hits = 0;\n"
+        "for (const k of ['body', 'headers', 'timeoutMs'])\n"
+        "  Object.defineProperty(Object.prototype, k, { configurable: true,\n"
+        "    get() { globalThis.__hits++; return k === 'timeoutMs' ? -1 : {}; },\n"
+        "    set(v) { globalThis.__hits++; } });\n"
+        "let msgs = [];\n"
+        "for (const f of [() => http.async.post('http://x.invalid/', 'b'),\n"
+        "                 () => http.async.put('http://x.invalid/'),\n"
+        "                 () => http.async.patch('http://x.invalid/', 'b')])\n"
+        "  try { f(); msgs.push('none'); } catch (e) { msgs.push(String(e.message)); }\n"
+        "for (const k of ['body', 'headers', 'timeoutMs'])\n"
+        "  delete Object.prototype[k];\n"
+        "globalThis.__msgs = msgs;\n");
+    /* No inherited accessor ran: not while building opts, nor when fetch
+     * read them back (a timeoutMs of -1 would have been refused). */
+    EXPECT_EQ(eval_int("globalThis.__hits"), 0);
+    /* Each call got as far as fetch's own event-loop check. */
+    EXPECT_EQ(eval_int("globalThis.__msgs.every(m => /event loop/.test(m)) ? 1 : 0"), 1);
+    js.base.http_cfg = NULL;
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_CLIENT */
 
 UTEST_MAIN();

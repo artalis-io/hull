@@ -23,14 +23,16 @@ extern "C" {
 struct KlHttpResponse;
 struct KlHttpRequest;
 struct KlHttpConn;
+struct HlLua;
+struct HlJS;
 
 /* Write a 500 "Internal Server Error" (status + text/plain + body) to the
  * response. Extracted from the core dispatch/async error paths so they hold no
  * Keel-response refs; weak no-op when no HTTP is composed (that path is never
  * reached without a request in flight). Per-runtime so each strong override
  * rides its own runtime's http side. */
-void hl_lua_http_error_response(struct KlHttpResponse *res);
-void hl_js_http_error_response(struct KlHttpResponse *res);
+void hl_lua_http_error_response(struct HlLua *lua, struct KlHttpResponse *res);
+void hl_js_http_error_response(struct HlJS *js, struct KlHttpResponse *res);
 
 /* Finalize + send a resumed request's response. The base runtime's async resume
  * (lua_rt_async.o / js_async.o) is composed for compute apps too, so it must
@@ -45,10 +47,14 @@ void hl_js_http_error_response(struct KlHttpResponse *res);
  * _resume_error writes a 500 then sends. The SENDING transition is required on
  * the poll backend, where kl_async_complete alone does not drive a resumed
  * handler's send. */
-void hl_lua_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req);
-void hl_js_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req);
-void hl_lua_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req);
-void hl_js_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req);
+void hl_lua_http_resume_send(struct HlLua *lua, struct KlHttpConn *conn,
+                             struct KlHttpRequest *req);
+void hl_js_http_resume_send(struct HlJS *js, struct KlHttpConn *conn,
+                            struct KlHttpRequest *req);
+void hl_lua_http_resume_error(struct HlLua *lua, struct KlHttpConn *conn,
+                              struct KlHttpRequest *req);
+void hl_js_http_resume_error(struct HlJS *js, struct KlHttpConn *conn,
+                             struct KlHttpRequest *req);
 
 /* Free the WebSocket registry (runtime teardown). Extracted from the runtime
  * teardown paths so lua/js runtime.o hold no hl_ws_* refs; weak no-op when no

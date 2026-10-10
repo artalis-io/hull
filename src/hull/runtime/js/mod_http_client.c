@@ -564,19 +564,25 @@ static JSValue js_http_async_with_body(JSContext *ctx, JSValueConst this_val,
     /* Every step can throw - an opts getter for headers / timeoutMs runs app
      * code - and a pending exception must stop the call here: stored as a
      * property it used to reach js_http_fetch as an opts value, with the
-     * exception still pending (audit 11). */
-    JSValue opts = JS_NewObject(ctx);
+     * exception still pending (audit 11). Built with no prototype and
+     * defined, not set, properties: on a plain object an Object.prototype
+     * setter for body / headers / timeoutMs swallowed the value, and a
+     * polluted Object.prototype.headers was read back by js_http_fetch as
+     * the call's own (audit 12). */
+    JSValue opts = JS_NewObjectProto(ctx, JS_NULL);
     if (JS_IsException(opts))
         return JS_EXCEPTION;
     if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) &&
-        JS_SetPropertyStr(ctx, opts, "body", JS_DupValue(ctx, argv[1])) < 0)
+        JS_DefinePropertyValueStr(ctx, opts, "body", JS_DupValue(ctx, argv[1]),
+                                  JS_PROP_C_W_E) < 0)
         goto fail;
     if (argc >= 3 && JS_IsObject(argv[2])) {
         JSValue hdrs = JS_GetPropertyStr(ctx, argv[2], "headers");
         if (JS_IsException(hdrs))
             goto fail;
         if (!JS_IsUndefined(hdrs)) {
-            if (JS_SetPropertyStr(ctx, opts, "headers", hdrs) < 0)
+            if (JS_DefinePropertyValueStr(ctx, opts, "headers", hdrs,
+                                          JS_PROP_C_W_E) < 0)
                 goto fail;
         } else {
             JS_FreeValue(ctx, hdrs);
@@ -585,7 +591,8 @@ static JSValue js_http_async_with_body(JSContext *ctx, JSValueConst this_val,
         if (JS_IsException(tmo))
             goto fail;
         if (!JS_IsUndefined(tmo)) {
-            if (JS_SetPropertyStr(ctx, opts, "timeoutMs", tmo) < 0)
+            if (JS_DefinePropertyValueStr(ctx, opts, "timeoutMs", tmo,
+                                          JS_PROP_C_W_E) < 0)
                 goto fail;
         } else {
             JS_FreeValue(ctx, tmo);

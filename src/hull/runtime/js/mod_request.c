@@ -821,6 +821,8 @@ static void mp_js_cont_cancel(HlAsyncCont *self)
         jc->js->active_conn = NULL;
         jc->js->active_req  = NULL;
     }
+    /* ...and the snapshot its 500 would have kept (audit 12). */
+    hl_res_base_forget_conn(&jc->js->res_bases, jc->conn);
     jc->conn = NULL;
     mp_cont_set_parked(jc, 0);
     hl_req_life_kill(jc->life);   /* the connection, and its request, are gone */

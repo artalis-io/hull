@@ -15,6 +15,7 @@
 #include "hull/runtime.h"
 #include "hull/cap/types.h"
 #include "hull/cap/run_watchdog.h"
+#include "hull/shared/res_base.h" /* HlResBaseList */
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
@@ -154,6 +155,11 @@ typedef struct HlLua {
     /* hull._task tasks spawned but not yet run (HlLuaTask list, async.c);
      * released by hl_lua_free. */
     void       *tasks;
+
+    /* The header lines each in-flight script entry's response started with
+     * (shared/res_base.h): the entry's 500 keeps the ones earlier middleware
+     * set. Per runtime, freed with it (audit 12). Event-loop thread only. */
+    HlResBaseList   res_bases;
 } HlLua;
 
 /* ── Async push_result callback ─────────────────────────────────────── */
@@ -280,12 +286,13 @@ void hl_lua_make_request(lua_State *L, KlHttpRequest *req,
  * Push a Lua userdata representing the HTTP response onto the stack.
  */
 void hl_lua_make_response(lua_State *L, KlHttpResponse *res);
-/* The headers a handler's response started with - the ones earlier
- * middleware set - are kept by its 500 (hl_lua_http_error_response, audit
- * 11); a middleware starting on the response, or the handler answering, forgets
- * the entry. */
-void hl_lua_res_handler_begin(KlHttpResponse *res);
-void hl_lua_res_middleware_begin(KlHttpResponse *res);
+/* A handler or middleware starts on @p res (a request on @p conn): the
+ * headers the response has now - the ones earlier middleware set - are kept
+ * by the entry's 500 (hl_lua_http_error_response, audits 11 / 12). Called
+ * before any of the entry's error paths. _answered: the entry answered, the
+ * snapshot goes. */
+void hl_lua_res_entry_begin(HlLua *lua, KlHttpResponse *res, const void *conn);
+void hl_lua_res_answered(HlLua *lua, KlHttpResponse *res);
 /* As hl_lua_make_response, tied to a request life (shared/req_life.h): once
  * the life ends, every method on the object fails closed. Takes a reference. */
 struct HlReqLife;

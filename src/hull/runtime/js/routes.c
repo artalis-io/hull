@@ -285,6 +285,138 @@ static int js_wire_defs(HlJS *js, JSValueConst global, const char *key,
     return rc;
 }
 
+/* ── Timer / ws / sse defs (app-writable globals) ───────────────────────
+ *
+ * __hull_timer_defs, __hull_ws_defs and __hull_sse_defs are globals app code
+ * can rewrite between app.every / app.ws and the wiring, so the wiring takes
+ * nothing on trust (audit 12): each field must be the plain value app.* stored
+ * (a number, a string), in range, and a read that throws - a getter the app
+ * put there - fails the wiring instead of being ignored. */
+
+/* An integral number in [lo, hi] at @p v (a JS value the caller owns).
+ * 0 with *out set; -1 otherwise (any pending exception cleared). */
+static int js_wire_int(JSContext *ctx, JSValueConst v, int64_t lo, int64_t hi,
+                       int64_t *out)
+{
+    double d = 0;
+    if (!JS_IsNumber(v) || JS_ToFloat64(ctx, &d, v) != 0) {
+        js_wire_clear_exception(ctx);
+        return -1;
+    }
+    if (!(d >= (double)lo && d <= (double)hi) || d != (double)(int64_t)d)
+        return -1;
+    *out = (int64_t)d;
+    return 0;
+}
+
+/* Read field @p key of @p def as js_wire_int. -1 also when it is absent or
+ * the read threw. */
+static int js_wire_int_field(JSContext *ctx, JSValueConst def, const char *key,
+                             int64_t lo, int64_t hi, int64_t *out)
+{
+    JSValue v = JS_GetPropertyStr(ctx, def, key);
+    if (JS_IsException(v)) {
+        js_wire_clear_exception(ctx);
+        return -1;
+    }
+    int rc = js_wire_int(ctx, v, lo, hi, out);
+    JS_FreeValue(ctx, v);
+    return rc;
+}
+
+/* A handler id read off a def (@p v, already read; may be an exception):
+ * a non-negative int32. @p optional: undefined leaves *out as it was. */
+static int js_wire_handler_id(JSContext *ctx, JSValueConst v, int optional,
+                              int32_t *out)
+{
+    if (JS_IsException(v)) {
+        js_wire_clear_exception(ctx);
+        return -1;
+    }
+    if (optional && JS_IsUndefined(v))
+        return 0;
+    int64_t id = 0;
+    if (js_wire_int(ctx, v, 0, INT32_MAX, &id) != 0)
+        return -1;
+    *out = (int32_t)id;
+    return 0;
+}
+
+/* Arm one timer from its def {type, handler_id, interval_ms | hour, minute,
+ * localtime}, with app.every / app.daily's own checks. 0, or -1 (nothing
+ * armed; logged by the caller). */
+static int js_wire_timer(HlJS *js, JSValueConst def)
+{
+    JSContext *ctx = js->ctx;
+    JSValue type_val = JS_GetPropertyStr(ctx, def, "type");
+    if (JS_IsException(type_val)) {
+        js_wire_clear_exception(ctx);
+        return -1;
+    }
+    const char *type = JS_IsString(type_val) ? JS_ToCString(ctx, type_val) : NULL;
+    JS_FreeValue(ctx, type_val);
+    if (!type) {
+        js_wire_clear_exception(ctx);
+        return -1;
+    }
+    int daily = strcmp(type, "daily") == 0;
+    int every = strcmp(type, "every") == 0;
+    JS_FreeCString(ctx, type);
+    if (!daily && !every)
+        return -1;
+
+    int64_t handler_id = 0, interval_ms = 0, hour = 0, minute = 0;
+    int localtime_flag = 0;
+    if (js_wire_int_field(ctx, def, "handler_id", 0, INT32_MAX, &handler_id) != 0)
+        return -1;
+    if (daily) {
+        if (js_wire_int_field(ctx, def, "hour", 0, 23, &hour) != 0 ||
+            js_wire_int_field(ctx, def, "minute", 0, 59, &minute) != 0)
+            return -1;
+        JSValue lt = JS_GetPropertyStr(ctx, def, "localtime");
+        if (JS_IsException(lt)) {
+            js_wire_clear_exception(ctx);
+            return -1;
+        }
+        localtime_flag = JS_IsBool(lt) && JS_ToBool(ctx, lt);
+        JS_FreeValue(ctx, lt);
+    } else if (js_wire_int_field(ctx, def, "interval_ms", 100,
+                                 (int64_t)1 << 53, &interval_ms) != 0) {
+        return -1;   /* below app.every's 100 ms floor, or not a number */
+    }
+
+    HlJSTimer *t = hl_alloc_malloc(js->base.alloc, sizeof(HlJSTimer));
+    if (!t)
+        return -1;
+    memset(t, 0, sizeof(*t));
+    t->js = js;
+    t->handler_id = (int)handler_id;
+    t->daily = daily;
+    t->hour = (int)hour;
+    t->minute = (int)minute;
+    t->localtime = localtime_flag;
+    t->interval_ms = daily ? 0 : interval_ms;
+    int64_t delay_ms = daily
+        ? hl_js_compute_daily_delay_ms(t->hour, t->minute, t->localtime)
+        : interval_ms;
+
+    const HlAsyncBackend *be = hl_async_backend();
+    t->timer_id = (int64_t)be->timer_add(js->base.async_ctx, (uint64_t)delay_ms,
+                                          hl_js_timer_trampoline, t);
+    if (t->timer_id == 0) {
+        hl_alloc_free(js->base.alloc, t, sizeof(HlJSTimer));
+        return -1;
+    }
+    /* Armed: it must be tracked, or nothing cancels it before hl_js_free
+     * frees what it points into. */
+    if (hl_js_track_timer(js, t) != 0) {
+        be->timer_cancel(js->base.async_ctx, (uint64_t)t->timer_id);
+        hl_alloc_free(js->base.alloc, t, sizeof(HlJSTimer));
+        return -1;
+    }
+    return 0;
+}
+
 int hl_js_wire_routes(HlJS *js, KlHttpRouter *router)
 {
     JSContext *ctx = js->ctx;
@@ -405,92 +537,43 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
         return -1;
     }
 
-    /* Wire timers from __hull_timer_defs */
+    /* Wire timers from __hull_timer_defs. Those globals are app-writable,
+     * so every def is validated again here (audit 12: a tampered def armed
+     * a 0 ms repeating timer, or a daily one at hour 99) and any failure
+     * refuses the wiring, as for routes and middleware. */
     JSValue timer_defs = JS_GetPropertyStr(ctx, global, "__hull_timer_defs");
-    if (!JS_IsUndefined(timer_defs) && JS_IsArray(ctx, timer_defs)) {
+    if (JS_IsException(timer_defs)) {
+        js_wire_clear_exception(ctx);
+        rc = -1;
+    } else if (JS_IsArray(ctx, timer_defs)) {
         JSValue td_len_val = JS_GetPropertyStr(ctx, timer_defs, "length");
         int32_t td_count = 0;
-        JS_ToInt32(ctx, &td_count, td_len_val);
+        if (JS_ToInt32(ctx, &td_count, td_len_val) != 0) {
+            js_wire_clear_exception(ctx);
+            rc = -1;
+        }
         JS_FreeValue(ctx, td_len_val);
 
-        for (int32_t i = 0; i < td_count; i++) {
+        for (int32_t i = 0; rc == 0 && i < td_count; i++) {
             JSValue def = JS_GetPropertyUint32(ctx, timer_defs, (uint32_t)i);
+            if (JS_IsException(def)) {
+                js_wire_clear_exception(ctx);
+                rc = -1;
+                break;
+            }
             if (JS_IsUndefined(def))
                 continue;
-
-            JSValue type_val = JS_GetPropertyStr(ctx, def, "type");
-            JSValue id_val = JS_GetPropertyStr(ctx, def, "handler_id");
-
-            const char *type_str = JS_ToCString(ctx, type_val);
-            int32_t handler_id = 0;
-            JS_ToInt32(ctx, &handler_id, id_val);
-
-            if (!type_str) {
-                JS_FreeValue(ctx, id_val);
-                JS_FreeValue(ctx, type_val);
-                JS_FreeValue(ctx, def);
-                continue;
-            }
-
-            HlJSTimer *t = hl_alloc_malloc(js->base.alloc,
-                                             sizeof(HlJSTimer));
-            if (!t) {
-                JS_FreeCString(ctx, type_str);
-                JS_FreeValue(ctx, id_val);
-                JS_FreeValue(ctx, type_val);
-                JS_FreeValue(ctx, def);
-                continue;
-            }
-
-            memset(t, 0, sizeof(*t));
-            t->js = js;
-            t->handler_id = handler_id;
-
-            int64_t delay_ms;
-            if (strcmp(type_str, "daily") == 0) {
-                JSValue hour_val = JS_GetPropertyStr(ctx, def, "hour");
-                JSValue min_val = JS_GetPropertyStr(ctx, def, "minute");
-                JSValue lt_val = JS_GetPropertyStr(ctx, def, "localtime");
-                int32_t th = 0, tm = 0;
-                JS_ToInt32(ctx, &th, hour_val);
-                JS_ToInt32(ctx, &tm, min_val);
-                t->hour = th;
-                t->minute = tm;
-                t->localtime = JS_ToBool(ctx, lt_val);
-                JS_FreeValue(ctx, hour_val);
-                JS_FreeValue(ctx, min_val);
-                JS_FreeValue(ctx, lt_val);
-                t->daily = 1;
-                delay_ms = hl_js_compute_daily_delay_ms(t->hour, t->minute,
-                                                         t->localtime);
-                t->interval_ms = 0;
-            } else {
-                JSValue iv_val = JS_GetPropertyStr(ctx, def, "interval_ms");
-                int64_t iv = 0;
-                JS_ToInt64(ctx, &iv, iv_val);
-                JS_FreeValue(ctx, iv_val);
-                t->interval_ms = iv;
-                t->daily = 0;
-                delay_ms = iv;
-            }
-
-            const HlAsyncBackend *be = hl_async_backend();
-            t->timer_id = (int64_t)be->timer_add(js->base.async_ctx,
-                                                  (uint64_t)delay_ms,
-                                                  hl_js_timer_trampoline, t);
-            if (t->timer_id == 0) {
-                hl_alloc_free(js->base.alloc, t, sizeof(HlJSTimer));
-            } else {
-                hl_js_track_timer(js, t);
-            }
-
-            JS_FreeCString(ctx, type_str);
-            JS_FreeValue(ctx, id_val);
-            JS_FreeValue(ctx, type_val);
+            rc = js_wire_timer(js, def);
             JS_FreeValue(ctx, def);
         }
     }
     JS_FreeValue(ctx, timer_defs);
+    if (rc != 0) {
+        log_error("[hull] could not wire an app.every / app.daily timer; "
+                  "refusing to start");
+        JS_FreeValue(ctx, global);
+        return -1;
+    }
 
     /* ── Wire WebSocket endpoints from __hull_ws_defs ──────────────── */
     /* Keel stores the upgrade pattern pointer: it is ws_route->path, a
@@ -533,16 +616,21 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
             JSValue om_val = JS_GetPropertyStr(ctx, wd, "on_message_id");
             JSValue oc_val = JS_GetPropertyStr(ctx, wd, "on_close_id");
 
-            const char *path = JS_ToCString(ctx, path_val);
+            const char *path = JS_IsString(path_val)
+                                   ? JS_ToCString(ctx, path_val) : NULL;
             int32_t on_open_id = -1, on_message_id = -1, on_close_id = -1;
-            if (!JS_IsUndefined(oo_val)) JS_ToInt32(ctx, &on_open_id, oo_val);
-            if (!JS_IsUndefined(om_val)) JS_ToInt32(ctx, &on_message_id, om_val);
-            if (!JS_IsUndefined(oc_val)) JS_ToInt32(ctx, &on_close_id, oc_val);
+            /* Handler ids are read as the integers app.ws stored, or the
+             * def is refused (audit 12: a failed ToInt32 was ignored). */
+            int ids_ok =
+                js_wire_handler_id(ctx, oo_val, 1, &on_open_id) == 0 &&
+                js_wire_handler_id(ctx, om_val, 1, &on_message_id) == 0 &&
+                js_wire_handler_id(ctx, oc_val, 1, &on_close_id) == 0;
 
             HlJSWsRoute *ws_route = NULL;
-            if (!path) {
+            if (!path || !ids_ok) {
                 js_wire_clear_exception(ctx);
                 log_error("[hull] could not read an app.ws definition; refusing to start");
+                if (path) JS_FreeCString(ctx, path);
                 rc = -1;
             } else {
                 ws_route = hl_alloc_malloc(js->base.alloc, sizeof(HlJSWsRoute));
@@ -634,13 +722,15 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
             JSValue path_val = JS_GetPropertyStr(ctx, sd, "path");
             JSValue id_val = JS_GetPropertyStr(ctx, sd, "handler_id");
 
-            const char *path = JS_ToCString(ctx, path_val);
+            const char *path = JS_IsString(path_val)
+                                   ? JS_ToCString(ctx, path_val) : NULL;
             int32_t handler_id = 0;
-            JS_ToInt32(ctx, &handler_id, id_val);
+            int id_ok = js_wire_handler_id(ctx, id_val, 0, &handler_id) == 0;
 
-            if (!path) {
+            if (!path || !id_ok) {
                 js_wire_clear_exception(ctx);
                 log_error("[hull] could not read an app.sse definition; refusing to start");
+                if (path) JS_FreeCString(ctx, path);
                 rc = -1;
             } else {
                 HlJSSseRoute *sse_route = hl_alloc_malloc(js->base.alloc,

@@ -292,7 +292,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
          * handler's send) and on the streaming-async multipart route resumed from
          * the body reader's on_data. */
         if (conn)
-            hl_lua_http_resume_send(conn, lc->req);
+            hl_lua_http_resume_send(lua, conn, lc->req);
 
         /* Timer async completion: clear in_flight and reschedule.
          * Timers only exist in HTTP builds (app.every / app.daily); the
@@ -357,7 +357,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 
 #ifdef HL_ENABLE_HTTP_SERVER
         if (conn)
-            hl_lua_http_resume_error(conn, lc->req);  /* 500 + send, behind the seam */
+            hl_lua_http_resume_error(lua, conn, lc->req);  /* 500 + send, behind the seam */
 #endif
 
         /* Timer error: clear in_flight and reschedule anyway. CLI-only
@@ -406,6 +406,9 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
             lc->co = NULL;
         }
     }
+    /* Its connection is gone: so is the snapshot its 500 would have kept
+     * (audit 12). */
+    hl_res_base_forget_conn(&lua->res_bases, lc->conn);
     lc->conn = NULL;
     /* The handler will never complete, so this is its end too: run the
      * completion hook (end the request's life, tear down a ws conn) rather
@@ -636,17 +639,30 @@ static void task_hook_run(HlLua *lua, const char *msg)
         log_error("[hull:async] a failed task's waiters could not be woken");
         return;
     }
-    /* Nothing of the run that ended is active while the hook runs. */
+    /* Nothing of the run that ended is active while the hook runs, and what
+     * this clobbers - the active run's state, its budget and SQL budget
+     * binding, its completion hook - is put back after, as lua_task_fire
+     * does (audit 12: a hook run from inside a resumed run's error branch
+     * left that run with the hook's budget, and an op the hook made captured
+     * the run's on_complete). */
     lua_State     *saved_co   = lua->active_co;
     int            saved_ref  = lua->active_thread_ref;
     KlHttpConn    *saved_conn = lua->active_conn;
     KlHttpRequest *saved_req  = lua->active_req;
     void          *saved_tmr  = lua->active_timer;
-    lua->active_co         = NULL;
-    lua->active_thread_ref = LUA_NOREF;
-    lua->active_conn       = NULL;
-    lua->active_req        = NULL;
-    lua->active_timer      = NULL;
+    void         (*saved_oc)(struct HlLua *, void *) = lua->active_on_complete;
+    void          *saved_oc_ctx = lua->active_on_complete_ctx;
+    HlLuaBudget    saved_budget = lua->budget;
+#ifdef HL_ENABLE_DB
+    HlDbBudgetBinding saved_db_budget = hl_db_budget_current();
+#endif
+    lua->active_co              = NULL;
+    lua->active_thread_ref      = LUA_NOREF;
+    lua->active_conn            = NULL;
+    lua->active_req             = NULL;
+    lua->active_timer           = NULL;
+    lua->active_on_complete     = NULL;
+    lua->active_on_complete_ctx = NULL;
 
     hl_db_registry_guard_stale_txns(lua->base.db_registry);
     HL_LUA_ARM(lua, L);   /* a run of its own: the task's run is over */
@@ -661,11 +677,17 @@ static void task_hook_run(HlLua *lua, const char *msg)
     }
     hl_db_registry_guard_stale_txns(lua->base.db_registry);
 
-    lua->active_co         = saved_co;
-    lua->active_thread_ref = saved_ref;
-    lua->active_conn       = saved_conn;
-    lua->active_req        = saved_req;
-    lua->active_timer      = saved_tmr;
+    lua->active_co              = saved_co;
+    lua->active_thread_ref      = saved_ref;
+    lua->active_conn            = saved_conn;
+    lua->active_req             = saved_req;
+    lua->active_timer           = saved_tmr;
+    lua->active_on_complete     = saved_oc;
+    lua->active_on_complete_ctx = saved_oc_ctx;
+    lua->budget                 = saved_budget;
+#ifdef HL_ENABLE_DB
+    hl_db_budget_restore(saved_db_budget);
+#endif
 }
 
 /* From the end of a resumed run (hl_lua_async_resume's error branch): the
