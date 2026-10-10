@@ -87,7 +87,19 @@ static inline void hl_res_base_forget_conn(HlResBaseList *l, const void *conn)
 /* Free every entry (the runtime is going away). */
 static inline void hl_res_base_clear(HlResBaseList *l)
 {
-    while (l && l->head) hl_res_base_drop(l, l->head);
+    if (!l) return;
+    /* Walk with a local pointer read before each free (the analyzer cannot
+     * tell the list is acyclic when the loop re-reads l->head). */
+    HlResBase *b = l->head;
+    l->head = l->tail = NULL;
+    l->count = 0;
+    l->bytes = 0;
+    while (b) {
+        HlResBase *next = b->next;
+        free(b->hdrs);
+        free(b);
+        b = next;
+    }
 }
 
 #endif /* HL_SHARED_RES_BASE_H */

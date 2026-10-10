@@ -274,9 +274,15 @@ static inline void hl_res_base_begin(HlResBaseList *l, const KlHttpResponse *res
     l->head = b;
     l->count++;
     l->bytes += b->len;
+    /* Evict oldest first, never the entry just added; the walk reads each
+     * node's prev before freeing it. */
+    HlResBase *t = l->tail;
     while ((l->count > HL_RES_BASE_MAX || l->bytes > HL_RES_BASE_BYTES_MAX) &&
-           l->tail && l->tail != b)
-        hl_res_base_drop(l, l->tail);
+           t && t != b) {
+        HlResBase *older_next = t->prev;
+        hl_res_base_drop(l, t);
+        t = older_next;
+    }
 }
 
 /* The error answer for @p res, keeping its entry-start headers (and dropping
