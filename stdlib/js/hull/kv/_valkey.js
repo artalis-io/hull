@@ -49,8 +49,7 @@ function ttlMs(store, ttl) {
     if (ttl === util.KEEP_TTL) return -1;    // HL_KV_TTL_KEEP (cas only)
     if (ttl === undefined || ttl === null) ttl = store.defaultTtl;
     if (ttl === undefined || ttl === null || ttl === false) return undefined;
-    if (typeof ttl !== "number" || ttl < 0)
-        util.error("invalid_argument", "kv: ttl must be a non-negative number of seconds");
+    util.checkTtl(ttl);
     // Rounded UP, to at least 1 ms: the native layer sets PX only for a
     // positive value, so ttl = 0 (and anything under a millisecond, floored to
     // 0) set the key with NO expiry - where the memory and SQL backends expire
@@ -127,6 +126,7 @@ function newStore(opts, storeNs) {
     if (typeof dsn !== "string" || dsn === "")
         util.error("invalid_argument",
             "kv.open: valkey backend needs dsn = 'valkey://...' (or 'redis://...')");
+    util.checkTtl(opts.defaultTtl, "default_ttl");
     const conn = nativeOpen(dsn);   // throws backend_error on connect failure
     const store = makeStore(conn, storeNs, opts);
     return [store, conn.backendName()];

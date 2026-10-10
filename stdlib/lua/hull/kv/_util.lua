@@ -51,6 +51,20 @@ function M.check_value(v)
     return v
 end
 
+-- Validate a ttl / default_ttl: nil and false pass through; anything else
+-- must be a finite number of seconds >= 0 (audit 12). NaN made a value that
+-- never expired on the memory backend (every comparison with it is false),
+-- math.huge one that overflowed the SQL expiry, and a negative one a write
+-- that was already stale (and was refused by the Valkey backend only).
+function M.check_ttl(ttl, what)
+    if ttl == nil or ttl == false then return ttl end
+    if type(ttl) ~= "number" or ttl ~= ttl or ttl < 0 or ttl == math.huge then
+        M.error("invalid_argument",
+            "kv: " .. (what or "ttl") .. " must be a finite number of seconds >= 0")
+    end
+    return ttl
+end
+
 -- ttl (seconds) -> absolute expiry in epoch ms, or nil for no expiry.
 --   nil      -> use the store default (may itself be nil = no expiry)
 --   number>0 -> that many seconds from now
@@ -59,9 +73,7 @@ end
 function M.expiry_ms(ttl, default_ttl)
     if ttl == nil then ttl = default_ttl end
     if ttl == nil or ttl == false then return nil end
-    if type(ttl) ~= "number" then
-        M.error("invalid_argument", "kv: ttl must be a number of seconds")
-    end
+    M.check_ttl(ttl)
     return time.now_ms() + math.floor(ttl * 1000)
 end
 
@@ -76,7 +88,8 @@ M.KEEP_TTL = setmetatable({}, { __tostring = function() return "kv.KEEP_TTL" end
 -- validating up front gives a stable coded error instead of a format raise.
 function M.check_count(v, what)
     if v == nil then return nil end
-    if type(v) ~= "number" or v ~= math.floor(v) or v < 0 then
+    -- math.huge passed the floor test (floor(inf) == inf): reject it too.
+    if type(v) ~= "number" or v ~= math.floor(v) or v < 0 or v == math.huge then
         M.error("invalid_argument", "kv: " .. what .. " must be a non-negative integer")
     end
     return v

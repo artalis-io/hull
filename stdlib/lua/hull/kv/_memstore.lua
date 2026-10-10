@@ -39,7 +39,7 @@ function M.get(namespace, policy)
         bytes       = 0,
         max_bytes   = u.check_count(policy.max_bytes, "max_bytes") or 0,
         max_items   = u.check_count(policy.max_items, "max_items") or 0,
-        default_ttl = policy.default_ttl,
+        default_ttl = u.check_ttl(policy.default_ttl, "default_ttl"),
         evict       = policy.evict and true or false,
         st          = { hits = 0, misses = 0, evictions = 0, expirations = 0 },
         caps        = {

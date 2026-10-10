@@ -2734,6 +2734,218 @@ check_audit10 "lua" "lua" "$LUA_AUDIT10" "$LUA_AUDIT10_REG" "$LUA_AUDIT10_TICK"
 echo "== audit 10 (cron tz, disabled cron, batch-mates, soft rank, event limits): JS =="
 check_audit10 "js" "js" "$JS_AUDIT10" "$JS_AUDIT10_REG" "$JS_AUDIT10_TICK"
 
+# ── audit 12: per-call duration options, a removed dependency fails its
+#    dependents, atomic cron CAS + enqueue, rate-limit refund for released
+#    batch-mates ─────────────────────────────────────────────────────────────
+# VTCALL: jobs.work / jobs.reap / jobs.run_worker validate their per-call
+#   visibility_timeout / reap_interval as jobs.init does (a NaN one re-pended
+#   every running job, or switched the reaper off); a running job survives.
+# DEPCANCEL: a cancelled pending dependency fails its dependent (it counted as
+#   satisfied), while an on_dep_failure="run" dependent runs.
+# DEPPURGE: a purged dependency fails its dependent the same way.
+# RLREFUND: a batch-mate the heartbeat releases gets its rate-limit slot back,
+#   so its next claim fits in the same window (it was charged twice).
+# REMOVED (second stage): a dependency deleted behind jobs' back is resolved
+#   as failed by the reaper (it read the missing row as satisfied); a cron
+#   whose enqueue raises keeps its next_run_at (the CAS rolls back with it).
+check_audit12() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"VTCALL work=1 workrint=1 reap=1 rw=1 rwrint=1 running=running"*)
+            pass "$label: work / reap / run_worker validate their duration options" ;;
+        *) fail "$label: per-call duration validation" "$out" ;;
+    esac
+    case "$out" in
+        *"DEPCANCEL c=true b=dead r=pending err=1"*)
+            pass "$label: a cancelled dependency fails its dependent; on_dep_failure=run runs" ;;
+        *) fail "$label: cancelled dependency" "$out" ;;
+    esac
+    case "$out" in
+        *"DEPPURGE n=1 q=dead"*)
+            pass "$label: a purged dependency fails its dependent" ;;
+        *) fail "$label: purged dependency" "$out" ;;
+    esac
+    case "$out" in
+        *"RLREFUND first=pending ran=2"*)
+            pass "$label: a heartbeat-released batch-mate's rate-limit slot is refunded" ;;
+        *) fail "$label: rate-limit refund" "$out" ;;
+    esac
+
+    printf '%s\n' "$4" > "$T/reg.$ext"
+    printf '%s\n' "$5" > "$T/tick.$ext"
+    "$HULL" "$T/reg.$ext" -d "$T/c.db" >/dev/null 2>&1 || true
+    python3 - "$T/c.db" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("DELETE FROM _hull_jobs WHERE type='gone'")
+c.execute("UPDATE _hull_cron SET type='', next_run_at=1 WHERE name='c12'")
+c.commit()
+PY
+    out="$("$HULL" "$T/tick.$ext" -d "$T/c.db" 2>/dev/null)" || true
+    row="$(python3 - "$T/c.db" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+r = c.execute("SELECT next_run_at FROM _hull_cron WHERE name='c12'").fetchone()
+print(r[0] if r else "MISSING")
+PY
+)"
+    case "$out" in
+        *"REMOVED st=dead removed=1"*)
+            pass "$label: the reaper fails a dependent whose dependency was removed" ;;
+        *) fail "$label: removed dependency" "$out" ;;
+    esac
+    case "$out|$row" in
+        *"CRONTX raised=1"*"|1")
+            pass "$label: a cron whose enqueue fails keeps its schedule (CAS rolled back)" ;;
+        *) fail "$label: cron CAS + enqueue atomicity" "$out | $row" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_AUDIT12='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local function refused(f, o) return pcall(f, o) and 0 or 1 end
+  local hold = jobs.enqueue("hold", {}, { queue = "vq" })
+  jobs.claim({ queue = "vq", batch = 1 })
+  local w = refused(jobs.work, { queue = "none", visibility_timeout = 0/0, reap_interval = 0 })
+  local wr = refused(jobs.work, { queue = "none", reap_interval = 0/0 })
+  local r = refused(jobs.reap, { visibility_timeout = 0/0 })
+  local rw = refused(jobs.run_worker, { queue = "none", drain = true, visibility_timeout = -1 })
+  local rwr = refused(jobs.run_worker, { queue = "none", drain = true, reap_interval = "x" })
+  ctx.stdout:write(("VTCALL work=%d workrint=%d reap=%d rw=%d rwrint=%d running=%s\n"):format(
+    w, wr, r, rw, rwr, jobs.get(hold).status))
+
+  local a = jobs.enqueue("dca", {}, { queue = "dq", delay = 3600 })
+  local b = jobs.enqueue("dcb", {}, { queue = "dq", depends_on = { a } })
+  local rr = jobs.enqueue("dcr", {}, { queue = "dq", depends_on = { a }, on_dep_failure = "run" })
+  local c = jobs.cancel(a)
+  local bj = jobs.get(b)
+  local err = tostring(bj.last_error):find("cancelled", 1, true) and 1 or 0
+  ctx.stdout:write(("DEPCANCEL c=%s b=%s r=%s err=%d\n"):format(
+    tostring(c), bj.status, jobs.get(rr).status, err))
+
+  local p = jobs.enqueue("dpa", {}, { queue = "pq", delay = 3600 })
+  local q = jobs.enqueue("dpb", {}, { queue = "pq2", depends_on = { p } })
+  local n = jobs.purge("pq")
+  ctx.stdout:write(("DEPPURGE n=%d q=%s\n"):format(n, jobs.get(q).status))
+
+  jobs.limit("rl", { rate = 2, per = 3600 })
+  local ran = 0
+  jobs.handler("rl1", function(job) ran = ran + 1; jobs.heartbeat(job) end)
+  jobs.handler("rl2", function() ran = ran + 1 end)
+  jobs.enqueue("rl1", {}, { queue = "rl", priority = 10 })
+  local m = jobs.enqueue("rl2", {}, { queue = "rl" })
+  jobs.work({ queue = "rl", batch = 2, reap_interval = 3600 })
+  local first = jobs.get(m).status
+  jobs.work({ queue = "rl", batch = 2, reap_interval = 3600 })
+  ctx.stdout:write(("RLREFUND first=%s ran=%d\n"):format(first, ran))
+  return 0
+end)'
+
+LUA_AUDIT12_REG='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function()
+  jobs.init()
+  local g = jobs.enqueue("gone", {}, { delay = 3600 })
+  jobs.enqueue("dep", {}, { depends_on = { g } })
+  jobs.cron("c12", "*/5 * * * *")
+  return 0
+end)'
+
+LUA_AUDIT12_TICK='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local raised = pcall(jobs._tick) and 0 or 1
+  jobs.reap()
+  local d = jobs.dead({ limit = 10 })
+  local st, removed = "none", 0
+  for _, j in ipairs(d) do
+    if j.type == "dep" then
+      st = "dead"
+      if tostring(j.last_error):find("removed", 1, true) then removed = 1 end
+    end
+  end
+  ctx.stdout:write(("REMOVED st=%s removed=%d\n"):format(st, removed))
+  ctx.stdout:write(("CRONTX raised=%d\n"):format(raised))
+  return 0
+end)'
+
+JS_AUDIT12='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  const refused = async (f, o) => { try { await f(o); return 0; } catch (_e) { return 1; } };
+  const hold = jobs.enqueue("hold", {}, { queue: "vq" });
+  jobs.claim({ queue: "vq", batch: 1 });
+  const w = await refused(jobs.work, { queue: "none", visibilityTimeout: NaN, reapInterval: 0 });
+  const wr = await refused(jobs.work, { queue: "none", reapInterval: NaN });
+  const r = await refused(jobs.reap, { visibilityTimeout: NaN });
+  const rw = await refused(jobs.runWorker, { queue: "none", drain: true, visibilityTimeout: -1 });
+  const rwr = await refused(jobs.runWorker, { queue: "none", drain: true, reapInterval: "x" });
+  ctx.stdout.write(`VTCALL work=${w} workrint=${wr} reap=${r} rw=${rw} rwrint=${rwr} running=${jobs.get(hold).status}\n`);
+
+  const a = jobs.enqueue("dca", {}, { queue: "dq", delay: 3600 });
+  const b = jobs.enqueue("dcb", {}, { queue: "dq", dependsOn: [a] });
+  const rr = jobs.enqueue("dcr", {}, { queue: "dq", dependsOn: [a], onDepFailure: "run" });
+  const c = jobs.cancel(a);
+  const bj = jobs.get(b);
+  const err = String(bj.lastError).includes("cancelled") ? 1 : 0;
+  ctx.stdout.write(`DEPCANCEL c=${c} b=${bj.status} r=${jobs.get(rr).status} err=${err}\n`);
+
+  const p = jobs.enqueue("dpa", {}, { queue: "pq", delay: 3600 });
+  const q = jobs.enqueue("dpb", {}, { queue: "pq2", dependsOn: [p] });
+  const n = jobs.purge("pq");
+  ctx.stdout.write(`DEPPURGE n=${n} q=${jobs.get(q).status}\n`);
+
+  jobs.limit("rl", { rate: 2, per: 3600 });
+  let ran = 0;
+  jobs.handler("rl1", (job) => { ran++; jobs.heartbeat(job); });
+  jobs.handler("rl2", () => { ran++; });
+  jobs.enqueue("rl1", {}, { queue: "rl", priority: 10 });
+  const m = jobs.enqueue("rl2", {}, { queue: "rl" });
+  await jobs.work({ queue: "rl", batch: 2, reapInterval: 3600 });
+  const first = jobs.get(m).status;
+  await jobs.work({ queue: "rl", batch: 2, reapInterval: 3600 });
+  ctx.stdout.write(`RLREFUND first=${first} ran=${ran}\n`);
+  return 0;
+});'
+
+JS_AUDIT12_REG='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(() => {
+  jobs.init();
+  const g = jobs.enqueue("gone", {}, { delay: 3600 });
+  jobs.enqueue("dep", {}, { dependsOn: [g] });
+  jobs.cron("c12", "*/5 * * * *");
+  return 0;
+});'
+
+JS_AUDIT12_TICK='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main((ctx) => {
+  jobs.init();
+  let raised = 0;
+  try { jobs._tick(); } catch (_e) { raised = 1; }
+  jobs.reap();
+  let st = "none", removed = 0;
+  for (const j of jobs.dead({ limit: 10 })) {
+    if (j.type === "dep") { st = "dead"; if (String(j.lastError).includes("removed")) removed = 1; }
+  }
+  ctx.stdout.write(`REMOVED st=${st} removed=${removed}\n`);
+  ctx.stdout.write(`CRONTX raised=${raised}\n`);
+  return 0;
+});'
+
+echo "== audit 12 (per-call durations, removed deps, cron txn, rate refund): Lua =="
+check_audit12 "lua" "lua" "$LUA_AUDIT12" "$LUA_AUDIT12_REG" "$LUA_AUDIT12_TICK"
+echo "== audit 12 (per-call durations, removed deps, cron txn, rate refund): JS =="
+check_audit12 "js" "js" "$JS_AUDIT12" "$JS_AUDIT12_REG" "$JS_AUDIT12_TICK"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"

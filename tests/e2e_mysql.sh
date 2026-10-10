@@ -684,6 +684,56 @@ case "$a10out|$a10cron" in
         rm -rf "$A10DIR" ;;
     *)  echo "::error jobs audit 10 on MySQL: $a10out | $a10cron"; exit 1 ;;
 esac
+echo "=== jobs: audit 12 (removed deps fail dependents, rate refund, cron txn) on MySQL ==="
+jobs_reset_my
+A12DIR=$(mktemp -d)
+cat > "$A12DIR/a12.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local a = jobs.enqueue("dca", {}, { queue = "a12d", delay = 3600 })
+  local b = jobs.enqueue("dcb", {}, { queue = "a12d", depends_on = { a } })
+  local r = jobs.enqueue("dcr", {}, { queue = "a12d", depends_on = { a }, on_dep_failure = "run" })
+  jobs.cancel(a)
+  local p = jobs.enqueue("dpa", {}, { queue = "a12p", delay = 3600 })
+  local q = jobs.enqueue("dpb", {}, { queue = "a12q", depends_on = { p } })
+  local n = jobs.purge("a12p")
+  jobs.limit("a12rl", { rate = 2, per = 3600 })
+  local ran = 0
+  jobs.handler("rl1", function(job) ran = ran + 1; jobs.heartbeat(job) end)
+  jobs.handler("rl2", function() ran = ran + 1 end)
+  jobs.enqueue("rl1", {}, { queue = "a12rl", priority = 10 })
+  jobs.enqueue("rl2", {}, { queue = "a12rl" })
+  jobs.work({ queue = "a12rl", batch = 2, reap_interval = 3600 })
+  jobs.work({ queue = "a12rl", batch = 2, reap_interval = 3600 })
+  jobs.uncron("a12c"); jobs.cron("a12c", "*/5 * * * *")
+  ctx.stdout:write(("A12 b=%s r=%s n=%d q=%s ran=%d\n"):format(
+    jobs.get(b).status, jobs.get(r).status, n, jobs.get(q).status, ran))
+  return 0
+end)
+LUA
+cat > "$A12DIR/tick.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local raised = pcall(jobs._tick) and 0 or 1
+  ctx.stdout:write(("A12CRON raised=%d\n"):format(raised))
+  return 0
+end)
+LUA
+a12out=$(./build/hull "$A12DIR/a12.lua" -d "$DSN" 2>/dev/null)
+docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -e "UPDATE _hull_cron SET type='', next_run_at=1 WHERE name='a12c'" >/dev/null 2>&1 || true
+a12cron=$(./build/hull "$A12DIR/tick.lua" -d "$DSN" 2>/dev/null)
+a12next=$(docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -N -B -e "SELECT next_run_at FROM _hull_cron WHERE name='a12c'" 2>/dev/null | tr -d '[:space:]')
+docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -e "DELETE FROM _hull_cron WHERE name='a12c'" >/dev/null 2>&1 || true
+case "$a12out|$a12cron|$a12next" in
+    *"A12 b=dead r=pending n=1 q=dead ran=2"*"A12CRON raised=1"*"|1")
+        echo "PASS: jobs cancelled / purged deps fail dependents, released mates refund the rate window, cron CAS rolls back with a failed enqueue (MySQL)"
+        rm -rf "$A12DIR" ;;
+    *)  echo "::error jobs audit 12 on MySQL: $a12out | $a12cron | next=$a12next"; exit 1 ;;
+esac
 jobs_reset_my   # clean slate for the following phases
 
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2

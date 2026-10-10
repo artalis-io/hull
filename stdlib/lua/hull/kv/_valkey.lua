@@ -56,9 +56,7 @@ local function ttl_ms(self, ttl)
     if ttl == u.KEEP_TTL then return -1 end   -- HL_KV_TTL_KEEP (cas only)
     if ttl == nil then ttl = self.default_ttl end
     if ttl == nil or ttl == false then return nil end
-    if type(ttl) ~= "number" or ttl < 0 then
-        u.error("invalid_argument", "kv: ttl must be a non-negative number of seconds")
-    end
+    u.check_ttl(ttl)
     -- Rounded UP, to at least 1 ms: the native layer sets PX only for a
     -- positive value, so ttl = 0 (and anything under a millisecond, floored to
     -- 0) set the key with NO expiry - where the memory and SQL backends expire
@@ -129,6 +127,7 @@ function M.new(opts, store_ns)
         u.error("invalid_argument",
             "kv.open: valkey backend needs dsn = 'valkey://...' (or 'redis://...')")
     end
+    u.check_ttl(opts.default_ttl, "default_ttl")
     local conn = native.open(dsn)   -- raises backend_error on connect failure
 
     local caps_bits = conn:caps()

@@ -28,6 +28,18 @@ local cache = {}
 
 local DEFAULT_MAX = 1000
 
+-- A ttl is nil (no expiry), or a finite number of seconds >= 0 (audit 12):
+-- NaN made an entry that never expired (every comparison with it is false),
+-- math.huge one that never expired either, and a negative one a write that
+-- was already stale - each a silent misconfiguration.
+local function check_ttl(ttl, what)
+    if ttl == nil then return nil end
+    if type(ttl) ~= "number" or ttl ~= ttl or ttl < 0 or ttl == math.huge then
+        error("cache: " .. what .. " must be a finite number of seconds >= 0", 3)
+    end
+    return ttl
+end
+
 --- Create an isolated cache instance.
 -- @tparam[opt] table opts  `max_entries` (default 1000), `default_ttl`
 --   (seconds; used by set/fetch when no ttl is passed; default no expiry).
@@ -42,8 +54,17 @@ function cache.new(opts)
     local store = {}
     local count = 0
     local head, tail = nil, nil
-    local max = opts.max_entries or DEFAULT_MAX
-    local default_ttl = opts.default_ttl
+    -- max_entries is a positive integer (audit 12): NaN never evicted (count
+    -- >= NaN is false), math.huge was no bound, and 0 or a negative one kept
+    -- a single entry.
+    local max = opts.max_entries
+    if max == nil then
+        max = DEFAULT_MAX
+    elseif math.type(max) == nil or max ~= max or max == math.huge
+        or max < 1 or max ~= math.floor(max) then
+        error("cache.new: max_entries must be a positive integer", 2)
+    end
+    local default_ttl = check_ttl(opts.default_ttl, "default_ttl")
 
     local function unlink(e)
         if e.prev then e.prev.next = e.next else head = e.next end
@@ -103,7 +124,7 @@ function cache.new(opts)
     -- the instance `default_ttl` (no expiry if unset); 0 expires immediately.
     -- @return value
     function self.set(key, value, ttl)
-        if ttl == nil then ttl = default_ttl end
+        if ttl == nil then ttl = default_ttl else check_ttl(ttl, "ttl") end
         local expires = nil
         if ttl ~= nil then expires = time.now_ms() + ttl * 1000 end
         local e = store[key]

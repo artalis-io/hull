@@ -159,6 +159,47 @@ test("sql cache counts keys cas and incr create (audit 6 L4)", function()
     assert_true(n <= 10, "bounded: " .. tostring(n))
 end)
 
+-- ── bounds: NaN / infinity / negative refused (audit 12) ────────────
+
+test("cache.new refuses a bad max_entries / default_ttl / ttl", function()
+    for _, m in ipairs({ 0/0, 1/0, -1, 0, 1.5, "10" }) do
+        assert_true(not pcall(cache.new, { max_entries = m }), "max_entries " .. tostring(m))
+    end
+    for _, t in ipairs({ 0/0, 1/0, -1, "5" }) do
+        assert_true(not pcall(cache.new, { default_ttl = t }), "default_ttl " .. tostring(t))
+    end
+    local c = cache.new({ max_entries = 2, default_ttl = 60 })
+    for _, t in ipairs({ 0/0, 1/0, -5 }) do
+        assert_true(not pcall(c.set, "k", 1, t), "ttl " .. tostring(t))
+    end
+    assert_eq(c.size(), 0, "nothing stored by a refused set")
+    c.set("k", 1, 0); assert_eq(c.get("k"), nil, "ttl 0 expires at once")
+    c.set("k", 2); assert_eq(c.get("k"), 2)
+end)
+
+test("kv / cache.open refuse a bad ttl, default_ttl, max_items, max_bytes", function()
+    local h = kv.open({ backend = "memory", namespace = "t12-ttl" })
+    for _, t in ipairs({ 0/0, 1/0, -1 }) do
+        assert_eq(err_code(function() h:set("k", "v", { ttl = t }) end), "invalid_argument",
+            "ttl " .. tostring(t))
+    end
+    assert_eq(h:get("k"), nil)
+    h:set("k", "v", { ttl = false }); assert_eq(h:get("k"), "v", "false = no expiry")
+    local nbad = 0
+    for _, o in ipairs({ { default_ttl = 0/0 }, { default_ttl = -1 }, { default_ttl = 1/0 },
+                         { max_items = 1/0 }, { max_bytes = 1/0 }, { max_items = 0/0 },
+                         { max_items = -1 } }) do
+        assert_eq(err_code(function()
+            nbad = nbad + 1; o.backend = "memory"; o.namespace = "t12-bad-" .. nbad
+            cache.open(o)
+        end), "invalid_argument")
+    end
+    assert_eq(err_code(function()
+        cache.open({ backend = "sqlite", database = db, namespace = "t12-sql",
+                     default_ttl = 0/0 })
+    end), "invalid_argument")
+end)
+
 -- ── rbac names (DA-L6) ──────────────────────────────────────────────
 
 test("rbac refuses a missing / non-string / over-long name", function()

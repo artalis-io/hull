@@ -52,13 +52,25 @@ function checkValue(v) {
     return v;
 }
 
+// Validate a ttl / defaultTtl: undefined, null and false pass through;
+// anything else must be a finite number of seconds >= 0 (audit 12). NaN made
+// a value that never expired on the memory backend (every comparison with it
+// is false), Infinity one that overflowed the SQL expiry, and a negative one a
+// write that was already stale (and was refused by the Valkey backend only).
+function checkTtl(ttl, what) {
+    if (ttl === undefined || ttl === null || ttl === false) return ttl;
+    if (typeof ttl !== "number" || !Number.isFinite(ttl) || ttl < 0)
+        codedError("invalid_argument",
+            "kv: " + (what || "ttl") + " must be a finite number of seconds >= 0");
+    return ttl;
+}
+
 // ttl (seconds) -> absolute expiry ms, or null for no expiry. undefined/null =
 // use default; false = no expiry overriding a default; number = seconds.
 function expiryMs(ttl, defaultTtl) {
     if (ttl === undefined || ttl === null) ttl = defaultTtl;
     if (ttl === undefined || ttl === null || ttl === false) return null;
-    if (typeof ttl !== "number")
-        codedError("invalid_argument", "kv: ttl must be a number of seconds");
+    checkTtl(ttl);
     return time.nowMs() + Math.floor(ttl * 1000);
 }
 
@@ -106,7 +118,7 @@ function hexdecode(hex) {
 }
 
 const util = {
-    MAX_KEY, NO_EXPIRY, KEEP_TTL, error: codedError, checkKey, checkValue, checkCount,
+    MAX_KEY, NO_EXPIRY, KEEP_TTL, error: codedError, checkKey, checkValue, checkCount, checkTtl,
     expiryMs, nowMs, toInt, b64encode, b64decode, hexencode, hexdecode,
 };
 

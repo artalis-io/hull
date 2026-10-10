@@ -93,6 +93,38 @@ test("sql cache counts keys cas and incr create (audit 6 L4)", () => {
     assertTrue(n <= 10, "bounded: " + n);
 });
 
+// ── bounds: NaN / infinity / negative refused (audit 12) ──────────────
+
+test("cache.new refuses a bad maxEntries / defaultTtl / ttl", () => {
+    for (const m of [NaN, Infinity, -1, 0, 1.5, "10"])
+        assertTrue(threw(() => cache.new({ maxEntries: m })), "maxEntries " + m);
+    for (const t of [NaN, Infinity, -1, "5"])
+        assertTrue(threw(() => cache.new({ defaultTtl: t })), "defaultTtl " + t);
+    const c = cache.new({ maxEntries: 2, defaultTtl: 60 });
+    for (const t of [NaN, Infinity, -5])
+        assertTrue(threw(() => c.set("k", 1, t)), "ttl " + t);
+    assertEq(c.size(), 0, "nothing stored by a refused set");
+    c.set("k", 1, 0); assertEq(c.get("k"), null, "ttl 0 expires at once");
+    c.set("k", 2); assertEq(c.get("k"), 2);
+});
+
+test("kv / cache.open refuse a bad ttl, defaultTtl, maxItems, maxBytes", () => {
+    const h = kv.open({ backend: "memory", namespace: "t12-ttl" });
+    for (const t of [NaN, Infinity, -1])
+        assertEq(code(() => h.set("k", "v", { ttl: t })), "invalid_argument", "ttl " + t);
+    assertEq(h.get("k"), null);
+    h.set("k", "v", { ttl: false }); assertEq(h.get("k"), "v", "false = no expiry");
+    let i = 0;
+    for (const o of [{ defaultTtl: NaN }, { defaultTtl: -1 }, { defaultTtl: Infinity },
+                     { maxItems: Infinity }, { maxBytes: Infinity }, { maxItems: NaN },
+                     { maxItems: -1 }]) {
+        o.backend = "memory"; o.namespace = "t12-bad-" + (i++);
+        assertEq(code(() => cache.open(o)), "invalid_argument", JSON.stringify(o));
+    }
+    assertEq(code(() => cache.open({ backend: "sqlite", database: db, namespace: "t12-sql",
+                                     defaultTtl: NaN })), "invalid_argument");
+});
+
 // ── rbac names (DA-L6 parity) ──────────────────────────────────────────
 
 test("rbac refuses bad names, lookups answer false", () => {

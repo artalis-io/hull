@@ -88,12 +88,15 @@ let _pausedAt = 0;
 // A duration option (seconds) as a number: a numeric string is converted,
 // anything else that is not a finite number >= 0 throws (audit 11; see the
 // Lua sibling - NaN made every claim stale, so the reaper took every running
-// job on every sweep).
-function durationOpt(name, v) {
+// job on every sweep). The per-call options of jobs.work / jobs.reap /
+// jobs.runWorker go through it too (audit 12): only init's did, so a NaN
+// visibilityTimeout passed to work() re-pended every running job and a NaN
+// reapInterval switched the reaper off (now - last >= NaN is false).
+function durationOpt(name, v, who) {
     const n = (typeof v === "string" && v.trim() !== "") ? Number(v) : v;
     if (typeof n !== "number" || !Number.isFinite(n) || !(n >= 0))
-        throw new Error("jobs.init: " + name + " must be a finite number of seconds >= 0, got "
-            + String(v));
+        throw new Error((who || "jobs.init") + ": " + name
+            + " must be a finite number of seconds >= 0, got " + String(v));
     return n;
 }
 
@@ -378,7 +381,7 @@ function init(opts) {
 
 // Apply one dependency's terminal outcome to one edge. Idempotent. Returns
 // "failed" when it cascade-fails the dependent (so callers recurse).
-function resolveEdge(dependentId, depId, depOk, failMode) {
+function resolveEdge(dependentId, depId, depOk, failMode, why) {
     if (depOk || failMode === "run") {
         const n = db.exec(
             "UPDATE _hull_job_deps SET satisfied=1 WHERE dependent_id=? AND dep_id=? AND satisfied=0",
@@ -396,7 +399,7 @@ function resolveEdge(dependentId, depId, depOk, failMode) {
     // cascade-fail: this dependency died and the dependent didn't opt to run.
     const n = db.exec(
         "UPDATE _hull_jobs SET status='dead', last_error=?, updated_at=? WHERE id=? AND status='blocked'",
-        [`dependency ${depId} failed`, time.now(), dependentId]);
+        [`dependency ${depId} ${why || "failed"}`, time.now(), dependentId]);
     if ((n || 0) > 0) {
         db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [dependentId]);
         return "failed";
@@ -419,6 +422,23 @@ function resolveDeps(id, ok) {
             }
         }
     }
+}
+
+// A job removed before it ended (jobs.cancel / jobs.purge) never completes, so
+// the edges its dependents still wait on are resolved as FAILED, in the
+// removal's transaction (audit 12): the dependents cascade-fail, or run under
+// onDepFailure = "run". The edge used to be left behind, and the reaper's
+// re-check read the missing row as satisfied. Only UNSATISFIED edges are
+// resolved, and the removed job's own edges, as a dependent, go with it.
+function resolveRemoved(id, why) {
+    const edges = db.query(
+        "SELECT dependent_id, fail_mode FROM _hull_job_deps WHERE dep_id=? AND satisfied=0",
+        [id]) || [];
+    for (const e of edges) {
+        if (resolveEdge(e.dependent_id, id, false, e.fail_mode, why) === "failed")
+            resolveDeps(e.dependent_id, false);
+    }
+    db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [id]);
 }
 
 // Gather a dependent's dependency results (declaration order) for job.deps.
@@ -478,11 +498,22 @@ function emitDurable(event, job, info) {
 // both couples the event to the state change and collapses markDone's several
 // statements into one commit (fewer fsyncs, even when events are off).
 const EVENT_OF = { done: "completed", dead: "dead", retried: "retried" };
+// A strict-concurrency job's slot is released in the same transaction as the
+// transition out of `running` (audit 12): released after the commit, a reaper
+// reconcile in between set the counter to the true count, and the late
+// release then took a slot another job holds - an overshoot of the hard cap.
+function releaseSlot(job) {
+    if (job._concStrict === 1 && job._concKey !== undefined && job._concKey !== null)
+        concRelease(job._concKey);
+}
 function finish(job, info, transition) {
     let outcome;
     db.batch(() => {
         outcome = transition();
-        if (outcome !== "lost") emitDurable(EVENT_OF[outcome] || outcome, job, info);
+        if (outcome !== "lost") {
+            releaseSlot(job);
+            emitDurable(EVENT_OF[outcome] || outcome, job, info);
+        }
     });
     if (outcome === "lost") { job._lost = true; return undefined; }   // another run owns it now
     emit(EVENT_OF[outcome] || outcome, job, info);
@@ -663,7 +694,7 @@ function limit(queue, opts) {
 // the window if stale. Returns how many were granted (0..want).
 function rlReserve(key, want, rate, per) {
     const now = time.now();
-    let granted = 0;
+    let granted = 0, windowStart = null;
     db.insertIfAbsent("_hull_ratelimit", ["name"],
         ["name", "window_start", "n"], [key, now, 0]);
     db.batch(() => {
@@ -673,10 +704,22 @@ function rlReserve(key, want, rate, per) {
         if (now - ws >= per) { ws = now; cnt = 0; }
         granted = Math.min(want, rate - cnt);
         if (granted < 0) granted = 0;
+        windowStart = ws;
         db.exec("UPDATE _hull_ratelimit SET window_start=?, n=? WHERE name=?",
             [ws, cnt + granted, key]);
     });
-    return granted;
+    return [granted, windowStart];
+}
+
+// Give back `n` slots a claim reserved in window `ws` of `key` but whose jobs
+// went back to `pending` without running (audit 12): a batch-mate heartbeat()
+// releases, or a job the concurrency reconcile holds back. Their next claim
+// reserves again, so without the refund each was charged twice. Only while the
+// window is the one the slots came from (see the Lua sibling).
+function rlRefund(key, n, ws) {
+    if (n <= 0 || ws === null || ws === undefined) return;
+    db.exec("UPDATE _hull_ratelimit SET n = CASE WHEN n > ? THEN n - ? ELSE 0 END " +
+        "WHERE name=? AND window_start=?", [n, n, key, ws]);
 }
 
 // Enforce a queue's rate limit on a just-claimed batch: keep the highest-priority
@@ -684,7 +727,8 @@ function rlReserve(key, want, rate, per) {
 function rlApply(queue, out) {
     const lim = _limits[queue];
     if (!lim || out.length === 0) return out;
-    const granted = rlReserve(queue, out.length, lim.rate, lim.per);
+    const [granted, ws] = rlReserve(queue, out.length, lim.rate, lim.per);
+    for (let i = 0; i < Math.min(granted, out.length); i++) out[i]._rlWs = ws;
     if (granted >= out.length) return out;
     const excess = out.slice(granted);
     const params = [time.now()];
@@ -759,11 +803,20 @@ function concApply(out, now) {
     if (drop.size === 0) return out;
     const params = [now];
     const ph = [];
-    for (const id of drop) { ph.push("?"); params.push(id); }
-    db.exec(
-        "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, " +
-        "attempts=attempts-1, updated_at=? WHERE id IN (" + ph.join(",") + ")",
-        params);
+    let refund = 0, ws = null, rq = null;
+    for (const j of out) {
+        if (!drop.has(j.id)) continue;
+        ph.push("?"); params.push(j.id);
+        if (j._rlWs !== undefined && j._rlWs !== null) { refund++; ws = j._rlWs; rq = j.queue; }
+    }
+    db.batch(() => {
+        db.exec(
+            "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, " +
+            "attempts=attempts-1, updated_at=? WHERE id IN (" + ph.join(",") + ")",
+            params);
+        // A held-back job did not run, so its rate-limit slot goes back too.
+        rlRefund(rq, refund, ws);
+    });
     return out.filter((j) => !drop.has(j.id));
 }
 
@@ -805,7 +858,9 @@ function resume(queue) { return setPaused(queue, 0); }
 /**
  * Delete jobs from a queue (the "clear the backlog" op). Defaults to `pending`
  * only, leaving in-flight and terminal rows; pass opts.statuses to widen.
- * Returns the number deleted.
+ * Returns the number deleted. A purged job that other jobs still depend on
+ * counts as FAILED for them (their edges are resolved in the same
+ * transaction, audit 12): they cascade-fail, or run under onDepFailure = "run".
  * @param {string} queue
  * @param {object} [opts]  { statuses = ["pending"] }
  * @returns {number}
@@ -815,9 +870,18 @@ function purge(queue, opts) {
     const statuses = o.statuses || ["pending"];
     const params = [queue].concat(statuses);
     const ph = statuses.map(() => "?");
-    return db.exec(
-        "DELETE FROM _hull_jobs WHERE queue=? AND status IN (" + ph.join(",") + ")",
-        params) || 0;
+    const where = "queue=? AND status IN (" + ph.join(",") + ")";
+    let n = 0;
+    db.batch(() => {
+        // The rows about to go that carry dependency edges: a dependency some
+        // dependent still waits on, or a blocked dependent (its own edges).
+        const edged = db.query("SELECT id FROM _hull_jobs WHERE " + where +
+            " AND (status='blocked' OR id IN " +
+            "(SELECT dep_id FROM _hull_job_deps WHERE satisfied=0))", params) || [];
+        n = db.exec("DELETE FROM _hull_jobs WHERE " + where, params) || 0;
+        for (const r of edged) resolveRemoved(r.id, "was purged");
+    });
+    return n;
 }
 
 /**
@@ -1124,7 +1188,9 @@ function wfFrontier(id) {
  */
 function reap(opts) {
     const o = opts || {};
-    const vt = o.visibilityTimeout !== undefined ? o.visibilityTimeout : _cfg.visibilityTimeout;
+    const vt = (o.visibilityTimeout !== undefined && o.visibilityTimeout !== null)
+        ? durationOpt("visibilityTimeout", o.visibilityTimeout, "jobs.reap")
+        : _cfg.visibilityTimeout;
     const now = time.now();
     // The stale cutoff. Timestamps are whole seconds (time.now()), so a claim
     // stamped C was made somewhere in [C, C+1) and "claimed_at <= now - vt"
@@ -1216,7 +1282,11 @@ function reap(opts) {
     // blocked: the enqueue re-check and resolveDeps close the race only when
     // each sees the other's write, and two transactions in flight at once
     // (READ COMMITTED) each saw the other "not yet" - the dependent stayed
-    // blocked for good. Applied here as the re-check would.
+    // blocked for good. Applied here as the re-check would, except for a
+    // dependency that is gone: it was removed before it ended (cancel / purge,
+    // which now resolve its edges themselves, or a removal before audit 12) -
+    // a FAILED one. A missing dependency counts as satisfied only at enqueue
+    // time (an unknown or long-cleaned-up id).
     const stuck = db.query(
         "SELECT d.dependent_id, d.dep_id, d.fail_mode, j.status AS dep_status " +
         "FROM _hull_job_deps d " +
@@ -1226,8 +1296,9 @@ function reap(opts) {
         "AND (j.id IS NULL OR j.status IN ('done', 'dead', 'compensated')) " +
         "LIMIT 500");
     for (const e of stuck) {
-        const ok = e.dep_status == null || e.dep_status === "done";
-        if (resolveEdge(e.dependent_id, e.dep_id, ok, e.fail_mode) === "failed") {
+        const ok = e.dep_status === "done";
+        const why = e.dep_status == null ? "was removed" : undefined;
+        if (resolveEdge(e.dependent_id, e.dep_id, ok, e.fail_mode, why) === "failed") {
             resolveDeps(e.dependent_id, false);
         }
     }
@@ -1385,20 +1456,25 @@ function processCron(now) {
                 emitDurable("cron_disabled", { type: c.type, queue: c.queue }, { error: why });
             continue;
         }
-        const won = db.exec(
-            "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? " +
-            "WHERE name=? AND next_run_at=?",
-            [nxt, now, now, c.name, c.next_run_at]);
-        if ((won || 0) > 0) {
-            let data = null;
-            if (c.payload) { try { data = json.decode(c.payload); } catch (_e) { data = null; } }
-            enqueue(c.type, data, {
-                queue: c.queue, priority: c.priority,
-                // NULL (no override) -> undefined so enqueue applies its default,
-                // not a NULL bind into the NOT-NULL max_attempts column.
-                maxAttempts: c.max_attempts === null ? undefined : c.max_attempts,
-            });
-        }
+        // The compare-and-set and the enqueue commit together (audit 12): a
+        // worker that won the CAS and then failed to enqueue lost that tick for
+        // good. Now the CAS rolls back with it and the next tick fires it.
+        db.batch(() => {
+            const won = db.exec(
+                "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? " +
+                "WHERE name=? AND next_run_at=?",
+                [nxt, now, now, c.name, c.next_run_at]);
+            if ((won || 0) > 0) {
+                let data = null;
+                if (c.payload) { try { data = json.decode(c.payload); } catch (_e) { data = null; } }
+                enqueue(c.type, data, {
+                    queue: c.queue, priority: c.priority,
+                    // NULL (no override) -> undefined so enqueue applies its default,
+                    // not a NULL bind into the NOT-NULL max_attempts column.
+                    maxAttempts: c.max_attempts === null ? undefined : c.max_attempts,
+                });
+            }
+        });
     }
 }
 
@@ -1498,7 +1574,11 @@ async function work(opts) {
     const o = opts || {};
     // Throttle the reaper: a no-op sweep still takes the write lock, so under a
     // fast poller x N workers reaping every tick adds needless contention.
-    const interval = o.reapInterval !== undefined ? o.reapInterval : _cfg.reapInterval;
+    const interval = (o.reapInterval !== undefined && o.reapInterval !== null)
+        ? durationOpt("reapInterval", o.reapInterval, "jobs.work")
+        : _cfg.reapInterval;
+    if (o.visibilityTimeout !== undefined && o.visibilityTimeout !== null)
+        durationOpt("visibilityTimeout", o.visibilityTimeout, "jobs.work");
     const now = time.now();
     if (now - _lastReap >= interval) { reap(o); _lastReap = now; }
     // Fire due cron schedules (throttled; cron is minute-grained).
@@ -1547,9 +1627,12 @@ async function work(opts) {
                     // (excluded by the claim query). run_at carries the optional
                     // timeout deadline (0 = none); the reaper wakes a timed-out
                     // wait, jobs.signal wakes a delivered one.
-                    parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, " +
-                        "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
-                        [result.deadline || 0, now, job.id, job.claimToken]);
+                    db.batch(() => {
+                        parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, " +
+                            "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
+                            [result.deadline || 0, now, job.id, job.claimToken]);
+                        if (parked) releaseSlot(job);
+                    });
                     if (!parked) job._lost = true;
                     // Close the deliver-before-park race: a signal delivered in the
                     // check->park window couldn't re-activate us (we were 'running'),
@@ -1575,9 +1658,12 @@ async function work(opts) {
                     }
                 } else {
                     // ctx.sleep: future-dated pending job.
-                    parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
-                        "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
-                        [result.wakeAt || now, now, job.id, job.claimToken]);
+                    db.batch(() => {
+                        parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
+                            "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
+                            [result.wakeAt || now, now, job.id, job.claimToken]);
+                        if (parked) releaseSlot(job);
+                    });
                     if (!parked) job._lost = true;
                 }
             } else if (result === DEAD ||
@@ -1605,14 +1691,10 @@ async function work(opts) {
         if (outcome && historyEnabled(job.queue)) {
             recordAttempt(job, startedMs, time.nowMs(), outcome, errStr);
         }
-        // Release the strict-concurrency slot reserved at claim: any exit from
-        // 'running' (done / dead / retry / workflow yield) frees it. A yielded
-        // workflow re-reserves on its next claim.
-        // Not for a lost claim: the run that owns the job now holds the slot.
-        if (job._concStrict === 1 && job._concKey !== undefined && job._concKey !== null &&
-            !job._lost) {
-            concRelease(job._concKey);
-        }
+        // The strict-concurrency slot reserved at claim was released with the
+        // transition out of 'running' (finish / the park above), in the same
+        // transaction. A yielded workflow re-reserves on its next claim; a lost
+        // claim releases nothing (the run that owns the job holds the slot).
     }
     return batch.length;
 }
@@ -1671,6 +1753,12 @@ function stop() {
  */
 async function runWorker(opts) {
     const o = opts || {};
+    // Validated before the loop starts (audit 12), so a bad value fails the
+    // call instead of the first work() inside it.
+    if (o.visibilityTimeout !== undefined && o.visibilityTimeout !== null)
+        durationOpt("visibilityTimeout", o.visibilityTimeout, "jobs.runWorker");
+    if (o.reapInterval !== undefined && o.reapInterval !== null)
+        durationOpt("reapInterval", o.reapInterval, "jobs.runWorker");
     const pollMs = o.pollMs !== undefined ? o.pollMs : 1000;
     const maxEmpty = o.maxEmptyPolls !== undefined ? o.maxEmptyPolls : (o.drain ? 1 : 0);
     const concurrency = (o.concurrency && o.concurrency > 1) ? o.concurrency : 1;
@@ -2498,15 +2586,23 @@ function heartbeat(job) {
         "SELECT id, concurrency_key, concurrency_strict FROM _hull_jobs " +
         "WHERE claim_token=? AND status='running' AND id<>?",
         [job.claimToken, job.id]) || [];
+    // Each release is one transaction with its strict slot and its rate-limit
+    // slot (audit 12): the mate never ran, so the rate window it was charged in
+    // gets it back (its next claim charges it again), and a slot released
+    // after the commit could race the reaper's reconcile.
     for (const m of mates) {
-        const r = db.exec(
-            "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, " +
-            "attempts=CASE WHEN attempts > 0 THEN attempts-1 ELSE 0 END, updated_at=? " +
-            "WHERE id=? AND claim_token=? AND status='running'",
-            [now, m.id, job.claimToken]);
-        if ((r || 0) > 0 && Number(m.concurrency_strict) === 1
-            && m.concurrency_key !== null && m.concurrency_key !== undefined)
-            concRelease(m.concurrency_key);
+        db.batch(() => {
+            const r = db.exec(
+                "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, " +
+                "attempts=CASE WHEN attempts > 0 THEN attempts-1 ELSE 0 END, updated_at=? " +
+                "WHERE id=? AND claim_token=? AND status='running'",
+                [now, m.id, job.claimToken]);
+            if ((r || 0) === 0) return;
+            if (Number(m.concurrency_strict) === 1
+                && m.concurrency_key !== null && m.concurrency_key !== undefined)
+                concRelease(m.concurrency_key);
+            rlRefund(job.queue || "default", 1, job._rlWs);
+        });
     }
     if (mates.length > 0) wakeWorkers();
     return true;
@@ -2614,23 +2710,23 @@ function retry(id) {
  * Cancel a not-yet-started job by id: delete it if it is still `pending`
  * (covers delayed / scheduled jobs). A `running` job is mid-flight and is NOT
  * cancelled (let it finish or dead-letter). Returns whether a row was removed.
+ * A cancelled job that other jobs depend on counts as FAILED for them, in the
+ * same transaction (audit 12): they cascade-fail, or run under
+ * onDepFailure = "run". It used to count as satisfied.
  * @param {number} id
  * @returns {boolean}
  */
 function cancel(id) {
-    if (!_cfg.events) {
-        return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", [id]) || 0) > 0;
-    }
-    // events on: capture type/queue for the "cancelled" event, delete + emit in
-    // one txn (BEGIN IMMEDIATE serializes, so the SELECT->DELETE stays consistent).
+    // Delete, resolve the dependents' edges and emit "cancelled" in one txn.
     let cancelled = false;
     db.batch(() => {
         const r = db.query("SELECT type, queue FROM _hull_jobs WHERE id=? AND status='pending'", [id]);
-        if (r[0]) {
-            db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", [id]);
-            emitDurable("cancelled", { id, type: r[0].type, queue: r[0].queue }, {});
-            cancelled = true;
-        }
+        if (!r[0]) return;
+        const n = db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", [id]);
+        if ((n || 0) === 0) return;
+        resolveRemoved(id, "was cancelled");
+        emitDurable("cancelled", { id, type: r[0].type, queue: r[0].queue }, {});
+        cancelled = true;
     });
     return cancelled;
 }

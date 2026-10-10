@@ -38,7 +38,7 @@ class SqlStore {
         ensureTable(conn);
         this.conn = conn;
         this.ns = namespace;
-        this.defaultTtl = policy.defaultTtl;
+        this.defaultTtl = util.checkTtl(policy.defaultTtl, "default_ttl");
         this.evict = !!policy.evict;
         this.maxItems = util.checkCount(policy.maxItems, "max_items") || 0;
         this.caps = {
