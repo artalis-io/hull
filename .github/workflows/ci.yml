@@ -128,6 +128,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       # fail fast if feature.c FEATURES[] drifts from the mk/feature.mk
       # feature registry (the single source of truth). Cheap (grep + make vars).
@@ -1506,6 +1507,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
       - name: Build hull
         timeout-minutes: 5
         run: make
@@ -1548,6 +1550,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
       - name: Build twice in the reproducible container and cmp
         uses: ./.github/actions/hull-build-container
         with:
@@ -1579,6 +1582,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
       - name: Build hull in-container as the runner user
         uses: ./.github/actions/hull-build-container
         with:
@@ -1615,6 +1619,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
       # Build inside the snapshot-pinned reproducible container (roadmap 0.3.1).
       # cosmocc is baked into the image, so there is no fetch step. One
       # `make platform-cosmo` per job: the a/b split exists because a second
@@ -1708,6 +1713,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: Install clang
         run: |
@@ -1960,6 +1966,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: PostgreSQL end-to-end
         timeout-minutes: 15
@@ -2009,6 +2016,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: MySQL end-to-end (mysql:8, plaintext + caching_sha2-over-TLS)
         timeout-minutes: 15
@@ -2065,6 +2073,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: build test_valkey_conn + test_valkey_backend under ASan+UBSan (+LSan), Valkey enabled
         run: make DEBUG=1 HL_ENABLE_VALKEY=1 build/test_valkey_conn build/test_valkey_backend
@@ -2092,6 +2101,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: Install redis-server
         run: |
@@ -2246,6 +2256,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
+      - uses: ./.github/actions/docker-mirror
 
       - name: Fetch wgpu-native
         run: make fetch-wgpu
@@ -2849,6 +2860,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: recursive
+      - uses: ./.github/actions/docker-mirror
 
       - name: Build + emit/run E2E under musl (Docker Alpine)
         run: sh tests/e2e_musl.sh
